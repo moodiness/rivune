@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,13 @@ type tokenResponse struct {
 	RefreshTokenExpiresAt time.Time `json:"refreshTokenExpiresAt"`
 	SessionID             string    `json:"sessionId"`
 	DeviceID              string    `json:"deviceId"`
+}
+
+type sessionNotificationResponse struct {
+	ID             string    `json:"id"`
+	Message        string    `json:"message"`
+	SenderUsername string    `json:"senderUsername"`
+	CreatedAt      time.Time `json:"createdAt"`
 }
 
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
@@ -213,6 +221,77 @@ func (a *API) profileSessions(w http.ResponseWriter, r *http.Request, principal 
 			})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"sessions": response})
+	}
+}
+
+func (a *API) sessionNotifications(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	var afterID int64
+	if values, exists := r.URL.Query()["after"]; exists {
+		if len(values) != 1 || values[0] == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "The notification cursor is invalid")
+			return
+		}
+		raw := values[0]
+		for index := range raw {
+			if raw[index] < '0' || raw[index] > '9' {
+				writeError(w, http.StatusBadRequest, "invalid_request", "The notification cursor is invalid")
+				return
+			}
+		}
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "The notification cursor is invalid")
+			return
+		}
+		afterID = parsed
+	}
+	notifications, err := a.auth.SessionNotifications(r.Context(), principal, afterID)
+	switch {
+	case errors.Is(err, auth.ErrInvalidInput):
+		writeError(w, http.StatusBadRequest, "invalid_request", "The notification cursor is invalid")
+	case err != nil:
+		a.internalError(w, "list session notifications", err)
+	default:
+		response := make([]sessionNotificationResponse, len(notifications))
+		for index, notification := range notifications {
+			response[index] = newSessionNotificationResponse(notification)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"notifications": response})
+	}
+}
+
+func (a *API) sendProfileSessionNotification(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !requireJSON(w, r) {
+		return
+	}
+	var request struct {
+		Message string `json:"message"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	notification, err := a.auth.SendProfileSessionNotification(
+		r.Context(), principal, r.PathValue("profileId"), r.PathValue("sessionId"), request.Message,
+	)
+	switch {
+	case errors.Is(err, auth.ErrInvalidInput):
+		writeError(w, http.StatusBadRequest, "invalid_request", "The message must contain between 1 and 500 characters")
+	case errors.Is(err, auth.ErrForbidden):
+		writeError(w, http.StatusForbidden, "profile_session_forbidden", "You cannot message sessions for this profile")
+	case errors.Is(err, auth.ErrSessionNotFound):
+		writeError(w, http.StatusNotFound, "session_not_found", "The active profile session does not exist")
+	case err != nil:
+		a.internalError(w, "send profile session notification", err)
+	default:
+		writeJSON(w, http.StatusCreated, newSessionNotificationResponse(notification))
+	}
+}
+
+func newSessionNotificationResponse(notification auth.SessionNotification) sessionNotificationResponse {
+	return sessionNotificationResponse{
+		ID: strconv.FormatInt(notification.ID, 10), Message: notification.Message,
+		SenderUsername: notification.SenderUsername, CreatedAt: notification.CreatedAt,
 	}
 }
 

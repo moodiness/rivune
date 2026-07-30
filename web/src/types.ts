@@ -36,6 +36,12 @@ export type ProfileSession = {
   profileGrantExpiresAt: string;
   current: boolean;
 };
+export type SessionNotification = {
+  id: string;
+  message: string;
+  senderUsername: string;
+  createdAt: string;
+};
 export type DeviceAuthorization = {
   deviceCode: string;
   userCode: string;

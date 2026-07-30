@@ -21,6 +21,7 @@ import type {
   ResolvedFolder,
   ResourceBatch,
   SettingsLayer,
+  SessionNotification,
   SeasonMetadata,
   SeriesMetadata,
   SettingsValues,
@@ -156,6 +157,8 @@ export const api = {
   uploadProfileAvatar: (id: string, image: File) => request<{ avatar: Profile["avatar"] }>(`/profiles/${id}/avatar`, { method: "PUT", headers: { "Content-Type": image.type }, body: image }),
   profileSessions: (id: string) => request<{ sessions: ProfileSession[] }>(`/profiles/${id}/sessions`),
   revokeProfileSession: (profileId: string, sessionId: string) => request<void>(`/profiles/${profileId}/sessions/${sessionId}`, { method: "DELETE" }),
+  sessionNotifications: (after = "0") => request<{ notifications: SessionNotification[] }>(`/auth/notifications${query({ after })}`),
+  sendProfileSessionNotification: (profileId: string, sessionId: string, message: string) => request<SessionNotification>(`/profiles/${profileId}/sessions/${sessionId}/notifications`, { method: "POST", body: JSON.stringify({ message }) }),
 
   collections: () => request<{ collections: Collection[] }>("/collections"),
   collection: (id: string) => request<Collection>(`/collections/${id}`),

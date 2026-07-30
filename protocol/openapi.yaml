@@ -162,6 +162,31 @@ paths:
                 $ref: "#/components/schemas/SessionList"
         "401":
           $ref: "#/components/responses/Error"
+  /auth/notifications:
+    get:
+      operationId: listSessionNotifications
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: after
+          in: query
+          required: false
+          description: Return notifications with an identifier greater than this non-negative decimal cursor, which must not exceed 9223372036854775807.
+          schema:
+            type: string
+            pattern: "^[0-9]+$"
+            default: "0"
+      responses:
+        "200":
+          description: Pending notifications addressed to the authenticated session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionNotificationList"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
   /auth/sessions/{sessionId}:
     delete:
       operationId: revokeSession
@@ -215,6 +240,40 @@ paths:
       responses:
         "204":
           description: The device session was revoked and can no longer use the profile.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /profiles/{profileId}/sessions/{sessionId}/notifications:
+    post:
+      operationId: sendProfileSessionNotification
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProfileId"
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionNotificationInput"
+      responses:
+        "201":
+          description: Notification queued for the active device session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionNotification"
+        "400":
+          $ref: "#/components/responses/Error"
         "401":
           $ref: "#/components/responses/Error"
         "403":
@@ -2522,6 +2581,42 @@ components:
           format: date-time
         current:
           type: boolean
+    SessionNotificationList:
+      type: object
+      additionalProperties: false
+      required: [notifications]
+      properties:
+        notifications:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionNotification"
+    SessionNotification:
+      type: object
+      additionalProperties: false
+      required: [id, message, senderUsername, createdAt]
+      properties:
+        id:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+          description: Positive decimal identifier encoded as a string to preserve 64-bit precision.
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500
+        senderUsername:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    SessionNotificationInput:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500
     ProfileList:
       type: object
       required: [profiles]

@@ -1,8 +1,10 @@
 import { LoaderCircle, RefreshCw, ServerOff } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useAuth } from "./auth";
+import { api, APIError } from "./api";
 import { Button, RivuneMark } from "./components";
 import { translate as t } from "./i18n";
+import { notifyInfo } from "./notifications";
 import { Shell } from "./Shell";
 import type { View } from "./Shell";
 import { LoginPage, SetupPage } from "./pages/Onboarding";
@@ -15,8 +17,50 @@ const HomePage = lazy(() => import("./pages/Explore").then((module) => ({ defaul
 const SearchPage = lazy(() => import("./pages/Explore").then((module) => ({ default: module.SearchPage })));
 const LibraryPage = lazy(() => import("./pages/Explore").then((module) => ({ default: module.LibraryPage })));
 
+const notificationPollIntervalMilliseconds = 5_000;
+const nonNegativeDecimal = /^[0-9]+$/;
+
+function useSessionNotifications(sessionID: string | undefined, refreshAccount: () => Promise<unknown>) {
+  useEffect(() => {
+    if (!sessionID) return;
+    let active = true;
+    let polling = false;
+    const cursorKey = `rivune.notifications.${sessionID}`;
+    const storedCursor = localStorage.getItem(cursorKey);
+    let cursor = storedCursor !== null && nonNegativeDecimal.test(storedCursor) ? storedCursor : "0";
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const { notifications } = await api.sessionNotifications(cursor);
+        if (!active) return;
+        for (const notification of notifications) {
+          await notifyInfo(notification.message, `Message from ${notification.senderUsername}`);
+          if (!active) return;
+          cursor = notification.id;
+          localStorage.setItem(cursorKey, cursor);
+        }
+      } catch (cause) {
+        if (active && cause instanceof APIError && cause.status === 401) {
+          await refreshAccount();
+          if (!active) return;
+        }
+      } finally {
+        polling = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => { void poll(); }, notificationPollIntervalMilliseconds);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [refreshAccount, sessionID]);
+}
+
 export default function App() {
-  const { booting, discovery, authenticated, activeProfile } = useAuth();
+  const { account, booting, discovery, authenticated, activeProfile, refreshAccount } = useAuth();
+  useSessionNotifications(account?.session.id, refreshAccount);
   const pairingApproval = window.location.pathname === "/pair";
   const [view, setViewState] = useState<View>(() => validViews[window.location.hash.slice(1)] ?? "home");
   const [homeResetKey, setHomeResetKey] = useState(0);

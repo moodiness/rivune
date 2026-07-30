@@ -1,4 +1,4 @@
-import { Activity, Boxes, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Cpu, Database, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Layers3, LoaderCircle, MonitorSmartphone, Pencil, Plus, Radio, RefreshCw, Save, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, X } from "lucide-react";
+import { Activity, Bell, Boxes, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Cpu, Database, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Layers3, LoaderCircle, MonitorSmartphone, Pencil, Plus, Radio, RefreshCw, Save, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, X } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
@@ -15,6 +15,15 @@ const tabs: Array<{ id: AdminTab; label: string; description: string; icon: type
   { id: "activity", label: "Activity", description: "Playback and media", icon: Activity, adminOnly: true },
   { id: "settings", label: "Settings", description: "Playback and display", icon: Settings2 },
 ];
+
+function countCodePoints(value: string) {
+  let count = 0;
+  for (let offset = 0; offset < value.length; count += 1) {
+    const codePoint = value.codePointAt(offset);
+    offset += codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
+  }
+  return count;
+}
 
 export function AdminPage() {
   const { account, activeProfile } = useAuth();
@@ -55,7 +64,15 @@ function ProfilesAdmin() {
   const [profileSessions, setProfileSessions] = useState<ProfileSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [revokingSession, setRevokingSession] = useState<ProfileSession | null>(null);
+  const [messagingSession, setMessagingSession] = useState<ProfileSession | null>(null);
+  const [message, setMessage] = useState("");
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [messageError, setMessageError] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const messageTargetRef = useRef<{ profileId: string; sessionId: string; modalId: number } | null>(null);
+  const pendingMessageRequestRef = useRef<{ profileId: string; sessionId: string; modalId: number } | null>(null);
+  const nextMessageModalIdRef = useRef(0);
+  const messageCharacterCount = countCodePoints(message);
 
   useEffect(() => { void api.avatarPresets().then((response) => setPresets(response.presets)).catch(() => undefined); }, []);
 
@@ -107,6 +124,7 @@ function ProfilesAdmin() {
   }
 
   async function openSessions(profile: Profile) {
+    if (pendingMessageRequestRef.current) return;
     setSessionsProfile(profile);
     setProfileSessions([]);
     setSessionsLoading(true);
@@ -118,6 +136,32 @@ function ProfilesAdmin() {
     } finally {
       setSessionsLoading(false);
     }
+  }
+
+  function closeSessions() {
+    if (pendingMessageRequestRef.current) return;
+    messageTargetRef.current = null;
+    setMessagingSession(null);
+    setSessionsProfile(null);
+  }
+
+  function openSessionMessage(session: ProfileSession) {
+    if (!sessionsProfile || pendingMessageRequestRef.current) return;
+    messageTargetRef.current = {
+      profileId: sessionsProfile.id,
+      sessionId: session.id,
+      modalId: ++nextMessageModalIdRef.current,
+    };
+    setSendingMessage(false);
+    setMessagingSession(session);
+    setMessage("");
+    setMessageError("");
+  }
+
+  function closeSessionMessage() {
+    if (pendingMessageRequestRef.current) return;
+    messageTargetRef.current = null;
+    setMessagingSession(null);
   }
 
   async function revokeSession(session: ProfileSession) {
@@ -132,12 +176,52 @@ function ProfilesAdmin() {
     }
   }
 
+  async function sendSessionMessage(event: FormEvent) {
+    event.preventDefault();
+    if (!sessionsProfile || !messagingSession || !message.trim() || messageCharacterCount > 500 || pendingMessageRequestRef.current) return;
+
+    const target = messageTargetRef.current;
+    if (!target || target.profileId !== sessionsProfile.id || target.sessionId !== messagingSession.id) return;
+
+    const request = { ...target };
+    pendingMessageRequestRef.current = request;
+    const targetSession = messagingSession;
+    const targetMessage = message;
+    setSendingMessage(true);
+    setMessageError("");
+
+    const isCurrentRequest = () => {
+      const currentTarget = messageTargetRef.current;
+      return pendingMessageRequestRef.current === request
+        && currentTarget?.profileId === request.profileId
+        && currentTarget.sessionId === request.sessionId
+        && currentTarget.modalId === request.modalId;
+    };
+
+    try {
+      await api.sendProfileSessionNotification(request.profileId, request.sessionId, targetMessage);
+      if (!isCurrentRequest()) return;
+      notifySuccess(`Your message was sent to ${targetSession.deviceName}.`, "Message sent");
+      messageTargetRef.current = null;
+      setMessagingSession(null);
+      setMessage("");
+    } catch (cause) {
+      if (!isCurrentRequest()) return;
+      setMessageError(notifyError(cause, "The session message could not be sent."));
+    } finally {
+      if (pendingMessageRequestRef.current === request) {
+        pendingMessageRequestRef.current = null;
+        setSendingMessage(false);
+      }
+    }
+  }
+
   return <div className="admin-section">
     <div className="admin-section__header"><div><span>Household</span><h2>Profiles</h2><p>Separate spaces, recommendations, and progress for every viewer.</p></div><Button onClick={() => openEditor("new")}><Plus size={18} /> New profile</Button></div>
     {error && <Notice>{error}</Notice>}
     <div className="profile-admin-grid">{profiles.map((profile) => <article key={profile.id} className="profile-admin-card"><div className="profile-admin-card__visual"><img src={profile.avatar.url} alt="" /><span className={profile.isChild ? "is-child" : ""}>{profile.isChild ? "Kids" : profile.canManage ? "Manager" : "Viewer"}</span></div><div><h3>{profile.name}</h3><p>{profile.hasPin ? "PIN protected" : "No PIN"}</p></div><div className="profile-admin-card__actions"><IconButton label={`Connected sessions for ${profile.name}`} onClick={() => void openSessions(profile)}><MonitorSmartphone size={17} /></IconButton><IconButton label={`Edit ${profile.name}`} onClick={() => openEditor(profile)}><Pencil size={17} /></IconButton>{profile.id !== activeProfile?.id && <IconButton label={`Delete ${profile.name}`} onClick={() => setDeleting(profile)}><Trash2 size={17} /></IconButton>}</div></article>)}</div>
     {editing && <Modal onClose={() => setEditing(null)} className="editor-modal profile-editor"><div className="editor-modal__heading"><span><CircleUserRound size={18} /> {editing === "new" ? "New profile" : "Edit profile"}</span><h2>{editing === "new" ? "Create their space." : `Make ${editing.name} feel at home.`}</h2></div><form onSubmit={submit} className="form-stack">{error && <Notice>{error}</Notice>}<div className="avatar-editor"><button type="button" onClick={() => fileRef.current?.click()}>{image ? <img src={URL.createObjectURL(image)} alt="Selected avatar" /> : <img src={presets.find((preset) => preset.id === presetId)?.url ?? "/api/v1/profile-avatars/aurora"} alt="Selected avatar" />}<span><Upload size={17} /> Upload</span></button><input ref={fileRef} hidden type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => setImage(event.target.files?.[0] ?? null)} /><div>{presets.map((preset) => <button type="button" key={preset.id} className={presetId === preset.id && !image ? "is-active" : ""} aria-label={preset.name} onClick={() => { setPresetId(preset.id); setImage(null); }}><img src={preset.url} alt="" /></button>)}</div></div><div className="form-grid form-grid--two"><label className="field"><span>Name</span><div><CircleUserRound size={18} /><input value={name} onChange={(event) => setName(event.target.value)} required /></div></label><label className="field"><span>PIN (optional)</span><div><Shield size={18} /><input type={showPin ? "text" : "password"} inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value)} placeholder={editing === "new" ? "4–8 digits" : "Leave blank to keep current"} /><IconButton type="button" label={showPin ? "Hide PIN" : "Show PIN"} onClick={() => setShowPin((value) => !value)}>{showPin ? <EyeOff size={17} /> : <Eye size={17} />}</IconButton></div></label><label className="toggle-field"><input type="checkbox" checked={isChild} onChange={(event) => setIsChild(event.target.checked)} /><span><i /><div><strong>Kids profile</strong><small>Safer defaults and filtered content</small></div></span></label></div><div className="modal-actions"><Button type="button" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button><Button type="submit" loading={saving}><Save size={18} /> Save profile</Button></div></form></Modal>}
-    {sessionsProfile && <Modal onClose={() => setSessionsProfile(null)} className="editor-modal profile-sessions-modal">
+    {sessionsProfile && <Modal onClose={closeSessions} className="editor-modal profile-sessions-modal">
       <div className="editor-modal__heading">
         <span><MonitorSmartphone size={18} /> Connected sessions</span>
         <h2>{sessionsProfile.name}</h2>
@@ -155,9 +239,32 @@ function ProfilesAdmin() {
                 <small>{session.platform} · Last active {new Date(session.lastSeenAt).toLocaleString()}</small>
                 <SessionIPAddress session={session} />
               </div>
-              {session.current ? <i>Current device</i> : <Button variant="secondary" onClick={() => setRevokingSession(session)}>Revoke</Button>}
+              <div className="profile-session__actions">
+                {session.current && <i>Current device</i>}
+                <Button variant="secondary" disabled={sendingMessage} onClick={() => openSessionMessage(session)}><Bell size={15} /> Message</Button>
+                {!session.current && <Button variant="secondary" onClick={() => setRevokingSession(session)}>Revoke</Button>}
+              </div>
             </article>,
           )}</div>}
+    </Modal>}
+    {sessionsProfile && messagingSession && <Modal onClose={closeSessionMessage} className="editor-modal session-message-modal">
+      <div className="editor-modal__heading">
+        <span><Bell size={18} /> Session message</span>
+        <h2>{messagingSession.deviceName}</h2>
+        <p>This notification will appear only on this connected device.</p>
+      </div>
+      <form className="form-stack" onSubmit={sendSessionMessage}>
+        {messageError && <Notice>{messageError}</Notice>}
+        <label className="field">
+          <span>Message</span>
+          <textarea autoFocus required disabled={sendingMessage} rows={5} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Write a message for this device…" />
+          <small>{messageCharacterCount}/500 characters</small>
+        </label>
+        <div className="modal-actions modal-actions--sticky">
+          <Button type="button" variant="ghost" disabled={sendingMessage} onClick={closeSessionMessage}>Cancel</Button>
+          <Button type="submit" loading={sendingMessage} disabled={sendingMessage || !message.trim() || messageCharacterCount > 500}><Send size={17} /> Send message</Button>
+        </div>
+      </form>
     </Modal>}
     {sessionsProfile && revokingSession && <ConfirmDialog title={`Revoke ${revokingSession.deviceName}?`} description="This device will be signed out and must authenticate again." confirmLabel="Revoke session" onCancel={() => setRevokingSession(null)} onConfirm={() => void revokeSession(revokingSession)} />}
     {deleting && <ConfirmDialog title={`Delete ${deleting.name}?`} description="Their preferences and watch progress will be permanently removed. This cannot be undone." confirmLabel="Delete profile" onCancel={() => setDeleting(null)} onConfirm={() => void remove(deleting)} />}

@@ -36,6 +36,16 @@ type fakeAuthService struct {
 	revokedProfileID        string
 	revokedProfileSessionID string
 	revokeProfileSessionErr error
+	notifications           []auth.SessionNotification
+	notificationsAfterID    int64
+	notificationsCalls      int
+	notificationsErr        error
+	notifiedProfileID       string
+	notifiedSessionID       string
+	notifiedMessage         string
+	sentNotification        auth.SessionNotification
+	sendNotificationCalls   int
+	sendNotificationErr     error
 	deviceAuthorization     auth.DeviceAuthorization
 	deviceAuthorizationErr  error
 	approvedUserCode        string
@@ -87,6 +97,20 @@ func (f *fakeAuthService) RevokeProfileSession(_ context.Context, _ auth.Princip
 	f.revokedProfileID = profileID
 	f.revokedProfileSessionID = sessionID
 	return f.revokeProfileSessionErr
+}
+
+func (f *fakeAuthService) SessionNotifications(_ context.Context, _ auth.Principal, afterID int64) ([]auth.SessionNotification, error) {
+	f.notificationsCalls++
+	f.notificationsAfterID = afterID
+	return f.notifications, f.notificationsErr
+}
+
+func (f *fakeAuthService) SendProfileSessionNotification(_ context.Context, _ auth.Principal, profileID, sessionID, message string) (auth.SessionNotification, error) {
+	f.sendNotificationCalls++
+	f.notifiedProfileID = profileID
+	f.notifiedSessionID = sessionID
+	f.notifiedMessage = message
+	return f.sentNotification, f.sendNotificationErr
 }
 
 func (f *fakeAuthService) BeginDeviceAuthorization(context.Context, string, string) (auth.DeviceAuthorization, error) {
@@ -273,6 +297,119 @@ func TestRevokeProfileSessionUsesBothPathIdentifiers(t *testing.T) {
 	}
 	if service.revokedProfileID != "profile-id" || service.revokedProfileSessionID != "session-id" {
 		t.Fatalf("unexpected revoked profile session: profile=%q session=%q", service.revokedProfileID, service.revokedProfileSessionID)
+	}
+}
+
+func TestSendProfileSessionNotificationTargetsActiveSession(t *testing.T) {
+	createdAt := time.Now().UTC().Truncate(time.Second)
+	service := &fakeAuthService{
+		principal: auth.Principal{UserID: "manager-id", Username: "alex", SessionID: "current-id"},
+		sentNotification: auth.SessionNotification{
+			ID: 42, Message: "Dinner is ready", SenderUsername: "alex", CreatedAt: createdAt,
+		},
+	}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = service
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/profiles/profile-id/sessions/session-id/notifications", bytes.NewBufferString(`{"message":"Dinner is ready"}`))
+	request.Header.Set("Authorization", "Bearer access-token")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", response.Code, response.Body.String())
+	}
+	if service.notifiedProfileID != "profile-id" || service.notifiedSessionID != "session-id" || service.notifiedMessage != "Dinner is ready" {
+		t.Fatalf("unexpected notification target: profile=%q session=%q message=%q", service.notifiedProfileID, service.notifiedSessionID, service.notifiedMessage)
+	}
+	var body sessionNotificationResponse
+	decodeResponse(t, response, &body)
+	if body.ID != "42" || body.Message != "Dinner is ready" || body.SenderUsername != "alex" || !body.CreatedAt.Equal(createdAt) {
+		t.Fatalf("unexpected notification response: %+v", body)
+	}
+}
+
+func TestSendProfileSessionNotificationRejectsMalformedUTF8(t *testing.T) {
+	service := &fakeAuthService{
+		principal: auth.Principal{UserID: "manager-id", Username: "alex", SessionID: "current-id"},
+	}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = service
+	requestBody := append([]byte(`{"message":"`), 0xff)
+	requestBody = append(requestBody, []byte(`"}`)...)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/profiles/profile-id/sessions/session-id/notifications", bytes.NewReader(requestBody))
+	request.Header.Set("Authorization", "Bearer access-token")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", response.Code, response.Body.String())
+	}
+	if service.sendNotificationCalls != 0 {
+		t.Fatalf("expected malformed UTF-8 to be rejected before send, got %d send calls", service.sendNotificationCalls)
+	}
+}
+
+func TestListSessionNotificationsRoundTripsLosslessDecimalIDs(t *testing.T) {
+	createdAt := time.Now().UTC().Truncate(time.Second)
+	service := &fakeAuthService{
+		principal: auth.Principal{SessionID: "current-id"},
+		notifications: []auth.SessionNotification{{
+			ID: 9007199254740993, Message: "Playback starts soon", SenderUsername: "admin", CreatedAt: createdAt,
+		}},
+	}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = service
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/notifications?after=9007199254740992", nil)
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if service.notificationsAfterID != 9007199254740992 {
+		t.Fatalf("expected cursor 9007199254740992, got %d", service.notificationsAfterID)
+	}
+	var body struct {
+		Notifications []sessionNotificationResponse `json:"notifications"`
+	}
+	decodeResponse(t, response, &body)
+	if len(body.Notifications) != 1 || body.Notifications[0].ID != "9007199254740993" || body.Notifications[0].Message != "Playback starts soon" {
+		t.Fatalf("unexpected notifications response: %+v", body)
+	}
+}
+
+func TestListSessionNotificationsRejectsInvalidCursors(t *testing.T) {
+	for _, query := range []string{
+		"after=",
+		"after=-1",
+		"after=%2B1",
+		"after=1.5",
+		"after=9223372036854775808",
+		"after=1&after=2",
+	} {
+		t.Run(query, func(t *testing.T) {
+			service := &fakeAuthService{principal: auth.Principal{SessionID: "current-id"}}
+			api := testAPI(&fakeInstanceService{})
+			api.auth = service
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/notifications?"+query, nil)
+			request.Header.Set("Authorization", "Bearer access-token")
+			response := httptest.NewRecorder()
+
+			api.Handler().ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("expected status 400, got %d: %s", response.Code, response.Body.String())
+			}
+			if service.notificationsCalls != 0 {
+				t.Fatalf("expected invalid cursor to be rejected before listing, got %d list calls", service.notificationsCalls)
+			}
+		})
 	}
 }
 

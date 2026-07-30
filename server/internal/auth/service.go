@@ -23,10 +23,11 @@ var (
 )
 
 const (
-	accessTokenPrefix    = "rivune_at_"
-	refreshTokenPrefix   = "rivune_rt_"
-	maximumLoginFailures = 5
-	loginLockDuration    = 15 * time.Minute
+	accessTokenPrefix                = "rivune_at_"
+	refreshTokenPrefix               = "rivune_rt_"
+	maximumLoginFailures             = 5
+	loginLockDuration                = 15 * time.Minute
+	maximumSessionNotificationLength = 500
 )
 
 type Service struct {
@@ -90,6 +91,13 @@ type Session struct {
 	LastSeenAt            time.Time
 	ProfileGrantExpiresAt *time.Time
 	Current               bool
+}
+
+type SessionNotification struct {
+	ID             int64
+	Message        string
+	SenderUsername string
+	CreatedAt      time.Time
 }
 
 func NewService(pool *pgxpool.Pool, accessTTL, refreshTTL time.Duration) (*Service, error) {
@@ -424,6 +432,82 @@ func (s *Service) ProfileSessions(ctx context.Context, principal Principal, prof
 		return nil, fmt.Errorf("iterate profile sessions: %w", err)
 	}
 	return sessions, nil
+}
+
+func (s *Service) SendProfileSessionNotification(ctx context.Context, principal Principal, profileID, sessionID, message string) (SessionNotification, error) {
+	profileID = strings.TrimSpace(profileID)
+	sessionID = strings.TrimSpace(sessionID)
+	message = strings.TrimSpace(message)
+	if profileID == "" || sessionID == "" || message == "" || !utf8.ValidString(message) || utf8.RuneCountInString(message) > maximumSessionNotificationLength {
+		return SessionNotification{}, ErrInvalidInput
+	}
+	authorized, err := s.canManageProfile(ctx, principal, profileID)
+	if err != nil {
+		return SessionNotification{}, err
+	}
+	if !authorized {
+		return SessionNotification{}, ErrForbidden
+	}
+	var notification SessionNotification
+	err = s.pool.QueryRow(ctx, `
+		WITH expired AS (
+			DELETE FROM auth_session_notifications
+			WHERE expires_at <= now()
+		)
+		INSERT INTO auth_session_notifications (session_id, sender_user_id, message)
+		SELECT session.id, $3::uuid, $4
+		FROM auth_sessions session
+		WHERE session.id::text = $1
+		  AND session.active_profile_id::text = $2
+		  AND session.profile_grant_expires_at > now()
+		  AND session.revoked_at IS NULL
+		  AND session.refresh_expires_at > now()
+		RETURNING id, message, created_at
+	`, sessionID, profileID, principal.UserID, message).Scan(
+		&notification.ID, &notification.Message, &notification.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SessionNotification{}, ErrSessionNotFound
+	}
+	if err != nil {
+		return SessionNotification{}, fmt.Errorf("send session notification: %w", err)
+	}
+	notification.SenderUsername = principal.Username
+	return notification, nil
+}
+
+func (s *Service) SessionNotifications(ctx context.Context, principal Principal, afterID int64) ([]SessionNotification, error) {
+	if afterID < 0 {
+		return nil, ErrInvalidInput
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT notification.id, notification.message, sender.username, notification.created_at
+		FROM auth_session_notifications notification
+		JOIN users sender ON sender.id = notification.sender_user_id
+		WHERE notification.session_id = $1::uuid
+		  AND notification.id > $2
+		  AND notification.expires_at > now()
+		ORDER BY notification.id
+		LIMIT 100
+	`, principal.SessionID, afterID)
+	if err != nil {
+		return nil, fmt.Errorf("query session notifications: %w", err)
+	}
+	defer rows.Close()
+	notifications := make([]SessionNotification, 0)
+	for rows.Next() {
+		var notification SessionNotification
+		if err := rows.Scan(
+			&notification.ID, &notification.Message, &notification.SenderUsername, &notification.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan session notification: %w", err)
+		}
+		notifications = append(notifications, notification)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate session notifications: %w", err)
+	}
+	return notifications, nil
 }
 
 func (s *Service) RevokeProfileSession(ctx context.Context, principal Principal, profileID, sessionID string) error {

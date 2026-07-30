@@ -12,6 +12,7 @@ function record(value: unknown): Record<string, unknown> | null {
   return Object.fromEntries(Object.entries(value));
 }
 
+
 function mediaFromBatch(batch: ResourceBatch): MediaItem[] {
   const output: MediaItem[] = [];
   for (const result of batch.results) {
@@ -309,7 +310,7 @@ export function HomePage() {
 
   const heroSlide = heroSlides[activeHeroIndex];
   const hero = heroSlide?.item;
-  const heroBackdrop = heroSlide && (heroSlide.folder.heroBackdropUrl || hero.backgroundUrl || heroSlide.collection.backdropImageUrl || hero.posterUrl);
+  const heroBackdrop = heroSlide && (hero.backgroundUrl || heroSlide.folder.heroBackdropUrl || heroSlide.collection.backdropImageUrl || hero.posterUrl);
   const heroPending = collections.some((collection) => collection.heroEnabled && collection.folders.some((folder) => pendingFolderKeys.has(homeFolderKey(collection.id, folder.id ?? ""))));
   const continueMedia = continueItems.map(mediaFromContinue);
 
@@ -324,8 +325,9 @@ export function HomePage() {
   if (openedCollection) return <CollectionBrowser key={openedCollection.id} collection={openedCollection} rows={rows.filter((row) => row.collection.id === openedCollection.id)} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpenedCollection(null)} />;
 
   return <div className="home-page page-enter">
-    {hero && heroSlide ? <section key={heroSlide.key} className="hero hero--featured" style={heroBackdrop ? { backgroundImage: `url(${heroBackdrop})` } : undefined}>
-      <div className="hero__wash" /><div className="hero__content">
+    {hero && heroSlide ? <section key={heroSlide.key} className="hero hero--featured">
+      {heroBackdrop && <div className="hero__backdrop" aria-hidden="true"><img src={heroBackdrop} alt="" /></div>}
+      <div className="hero__content">
         <span className="hero__eyebrow"><WandSparkles size={15} /> Featured · {heroSlide.collection.title}</span>
         {hero.logoUrl ? <img src={hero.logoUrl} alt={hero.title} /> : <h1>{hero.title}</h1>}
         <div className="hero__meta">{hero.releaseInfo && <span>{hero.releaseInfo}</span>}{hero.voteAverage !== undefined && <span><Star size={14} fill="currentColor" /> {hero.voteAverage.toFixed(1)}</span>}<span>{mediaTypeLabel(hero.mediaType)}</span></div>

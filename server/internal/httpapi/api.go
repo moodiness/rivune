@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,7 +34,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/webui"
 )
 
-const protocolVersion = 9
+const protocolVersion = 10
 
 type instanceService interface {
 	Info(context.Context) (instance.Info, error)
@@ -49,6 +51,8 @@ type authService interface {
 	RevokeSession(context.Context, auth.Principal, string) error
 	ProfileSessions(context.Context, auth.Principal, string) ([]auth.Session, error)
 	RevokeProfileSession(context.Context, auth.Principal, string, string) error
+	SessionNotifications(context.Context, auth.Principal, int64) ([]auth.SessionNotification, error)
+	SendProfileSessionNotification(context.Context, auth.Principal, string, string, string) (auth.SessionNotification, error)
 	BeginDeviceAuthorization(context.Context, string, string) (auth.DeviceAuthorization, error)
 	ApproveDeviceAuthorization(context.Context, auth.Principal, string) error
 	ExchangeDeviceAuthorization(context.Context, string) (auth.TokenPair, error)
@@ -236,8 +240,10 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/auth/me", a.requireAuthentication(a.me))
 	mux.Handle("GET /api/v1/auth/sessions", a.requireAuthentication(a.sessions))
 	mux.Handle("DELETE /api/v1/auth/sessions/{sessionId}", a.requireAuthentication(a.revokeSession))
+	mux.Handle("GET /api/v1/auth/notifications", a.requireAuthentication(a.sessionNotifications))
 	mux.Handle("GET /api/v1/profiles/{profileId}/sessions", a.requireAuthentication(a.profileSessions))
 	mux.Handle("DELETE /api/v1/profiles/{profileId}/sessions/{sessionId}", a.requireAuthentication(a.revokeProfileSession))
+	mux.Handle("POST /api/v1/profiles/{profileId}/sessions/{sessionId}/notifications", a.requireAuthentication(a.sendProfileSessionNotification))
 	mux.HandleFunc("GET /api/v1/profile-avatars/{presetId}", a.profileAvatarPresetImage)
 	mux.Handle("GET /api/v1/profile-avatars", a.requireAuthentication(a.listProfileAvatarPresets))
 	mux.Handle("GET /api/v1/profiles", a.requireAuthentication(a.listProfiles))
@@ -441,7 +447,14 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
 
 func decodeJSONLimit(w http.ResponseWriter, r *http.Request, destination any, maximumBytes int64) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maximumBytes)
-	decoder := json.NewDecoder(r.Body)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	if !utf8.Valid(body) {
+		return errors.New("invalid JSON body: malformed UTF-8")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return fmt.Errorf("invalid JSON body: %w", err)
