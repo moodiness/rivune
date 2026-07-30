@@ -1,8 +1,8 @@
-import { AudioLines, Bookmark, Captions, Check, ChevronDown, ExternalLink, Eye, EyeOff, ListVideo, LoaderCircle, Maximize, Pause, Play, RefreshCw, ServerCrash, Star, Volume2, VolumeX, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { AudioLines, Bookmark, Captions, Check, Eye, EyeOff, Gauge, Info, ListVideo, LoaderCircle, Maximize, Pause, PictureInPicture, Play, RefreshCw, RotateCcw, RotateCw, ServerCrash, Settings2, SkipForward, Star, Volume2, VolumeX, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { api, APIError } from "./api";
-import { Button, EmptyState, IconButton, Modal, Notice } from "./components";
+import { Button, IconButton, Modal, Notice } from "./components";
 import { notifyError, notifyErrorMessage, notifySuccess } from "./notifications";
 import type { EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata } from "./types";
 
@@ -513,25 +513,86 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
   </Modal>;
 }
 
+type PlayerPhase = "preparing" | "ready" | "playing" | "paused" | "buffering" | "recovering" | "failed" | "ended";
+type PlayerPanel = "sources" | "audio" | "subtitles" | "speed" | "stats" | null;
+type PlayerPreferences = { volume: number; muted: boolean; rate: number };
+type PlayerStats = { bufferedAhead: number; droppedFrames: number; totalFrames: number; width: number; height: number };
+
+const playerPreferencesKey = "rivune.player.preferences";
+const playbackRates = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
+function loadPlayerPreferences(): PlayerPreferences {
+  try {
+    const stored = JSON.parse(localStorage.getItem(playerPreferencesKey) || "{}") as Partial<PlayerPreferences>;
+    const volume = typeof stored.volume === "number" ? Math.min(1, Math.max(0, stored.volume)) : 1;
+    const rate = typeof stored.rate === "number" && playbackRates.includes(stored.rate) ? stored.rate : 1;
+    return { volume, muted: Boolean(stored.muted), rate };
+  } catch {
+    return { volume: 1, muted: false, rate: 1 };
+  }
+}
+
+function playerModeLabel(mode?: string, toneMapped = false): string {
+  if (mode === "direct") return "Direct play";
+  if (mode === "remux") return "Lossless remux";
+  if (mode === "transcode_audio") return "Audio conversion";
+  if (mode === "transcode") return toneMapped ? "HDR conversion" : "Video conversion";
+  if (mode === "youtube") return "YouTube";
+  if (mode === "external") return "External player";
+  return "Playback";
+}
+
+function playerPhaseLabel(phase: PlayerPhase): string {
+  return {
+    preparing: "Preparing",
+    ready: "Ready",
+    playing: "Playing",
+    paused: "Paused",
+    buffering: "Buffering",
+    recovering: "Recovering",
+    failed: "Failed",
+    ended: "Ended",
+  }[phase];
+}
+
+function playerTrackLabel(track: { codec: string; channels?: number }): string {
+  const channelLabel = track.channels ? track.channels === 2 ? "2.0" : `${track.channels} channels` : "";
+  return `${track.codec.toUpperCase()}${channelLabel ? ` · ${channelLabel}` : ""}`;
+}
+
 export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired, onEnded }: { item: MediaItem; sourceRef: string; startSeconds: number; onClose: () => void; onSourceExpired: () => void; onEnded?: () => void }) {
+  const initialPreferences = useRef(loadPlayerPreferences()).current;
+  const playerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const controlsTimerRef = useRef<number | undefined>(undefined);
+  const clickTimerRef = useRef<number | undefined>(undefined);
+  const lastTouchRef = useRef({ time: 0, x: 0 });
+  const suppressNextClickRef = useRef(false);
   const [streams, setStreams] = useState<PlaybackSource[]>([]);
   const [subtitles, setSubtitles] = useState<PlaybackSubtitle[]>([]);
   const [selected, setSelected] = useState(0);
   const [loading, setLoading] = useState(true);
   const [progressReady, setProgressReady] = useState(false);
+  const [phase, setPhase] = useState<PlayerPhase>("preparing");
   const [error, setError] = useState("");
-  const [controlsOpen, setControlsOpen] = useState(false);
+  const [panel, setPanel] = useState<PlayerPanel>(null);
+  const [controlsVisible, setControlsVisible] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
   const [playbackStart, setPlaybackStart] = useState<number>();
+  const [playbackGeneration, setPlaybackGeneration] = useState(0);
+  const [retryVersion, setRetryVersion] = useState(0);
   const [seekPreview, setSeekPreview] = useState<number | null>(null);
+  const [seekFeedback, setSeekFeedback] = useState<{ seconds: number; id: number }>();
   const [paused, setPaused] = useState(true);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
-  const [muted, setMuted] = useState(false);
-  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(initialPreferences.muted);
+  const [volume, setVolume] = useState(initialPreferences.volume);
+  const [playbackRate, setPlaybackRate] = useState(initialPreferences.rate);
   const [preferredAudioTrack, setPreferredAudioTrack] = useState<number>();
   const [selectedAudioTrack, setSelectedAudioTrack] = useState<number>();
   const [selectedSubtitleID, setSelectedSubtitleID] = useState("none");
+  const [stats, setStats] = useState<PlayerStats>({ bufferedAhead: 0, droppedFrames: 0, totalFrames: 0, width: 0, height: 0 });
   const titleIDRef = useRef(item.titleId);
   const progressVersionRef = useRef(0);
   const resumePositionRef = useRef(startSeconds);
@@ -565,9 +626,13 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     if (!progressReady) return;
     let active = true;
     setLoading(true);
+    setPhase("preparing");
     setError("");
+    setPlaybackBlocked(false);
+    setPanel(null);
     setSelected(0);
     setCurrentTime(0);
+    setVideoDuration(0);
     setPlaybackStart(undefined);
     setSeekPreview(null);
     void api.resolvePlayback({
@@ -583,13 +648,15 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
       const previousSessionID = sessionIDRef.current;
       sessionIDRef.current = session.id;
       if (previousSessionID) void api.stopPlayback(previousSessionID).catch(() => undefined);
-      setStreams(session.sources);
-      setSubtitles(session.subtitles);
+      const resolvedSources = session.sources ?? [];
+      setStreams(resolvedSources);
+      setSubtitles(session.subtitles ?? []);
       setSelectedAudioTrack(session.selectedAudioTrack);
       setSelectedSubtitleID(session.selectedSubtitleId || "none");
-      const compatible = session.sources.filter((source) => source.compatible && Boolean(source.url || source.ytId));
+      const compatible = resolvedSources.filter((source) => source.compatible && Boolean(source.url || source.ytId));
       const selectedIndex = compatible.findIndex((source) => source.id === session.selectedSourceId);
       setSelected(selectedIndex < 0 ? 0 : selectedIndex);
+      setPhase("ready");
     }).catch((cause) => {
       if (!active) return;
       if (cause instanceof APIError && cause.code === "playback_source_expired") {
@@ -597,23 +664,30 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
         return;
       }
       setError(notifyError(cause, "Playback sources are unavailable.", "Playback unavailable"));
+      setPhase("failed");
     }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [item.id, item.titleId, onSourceExpired, preferredAudioTrack, progressReady, sourceRef]);
-  const playable = useMemo(() => streams.filter((stream) => stream.compatible && Boolean(stream.url || stream.ytId)), [streams]);
+  }, [item.id, item.titleId, onSourceExpired, preferredAudioTrack, progressReady, retryVersion, sourceRef]);
+
+  const playable = useMemo(() => streams.filter((candidate) => candidate.compatible && Boolean(candidate.url || candidate.ytId)), [streams]);
   const stream = playable[selected];
-  const playbackDuration = stream?.media?.durationSeconds ?? 0;
+  const inspectedDuration = stream?.media?.durationSeconds ?? 0;
+  const playbackDuration = inspectedDuration > 0 ? inspectedDuration : videoDuration;
   playbackDurationRef.current = playbackDuration;
   streamProtocolRef.current = stream?.protocol ?? "";
   const audioTracks = stream?.media?.audioTracks ?? [];
-  const customTransport = Boolean(stream?.url && stream.mode !== "direct" && playbackDuration > 0);
-  const transportTime = seekPreview ?? currentTime;
   const selectedSubtitle = subtitles.find((subtitle) => subtitle.id === selectedSubtitleID);
+  const transportTime = seekPreview ?? currentTime;
+  const progressPercent = playbackDuration > 0 ? Math.min(100, Math.max(0, transportTime / playbackDuration * 100)) : 0;
+  const remainingSeconds = playbackDuration > 0 ? Math.max(0, playbackDuration - currentTime) : Number.POSITIVE_INFINITY;
+  const showNextEpisode = Boolean(onEnded && remainingSeconds <= 30 && phase !== "ended");
+  const customTransport = Boolean(stream?.url);
+  const toneMapped = Boolean(stream?.media?.hdrFormat && stream.media.hdrFormat !== "sdr" && stream.mode === "transcode");
+  const modeLabel = playerModeLabel(stream?.mode, toneMapped);
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!progressReady) return;
-    if (!video || !stream?.url) return;
+    if (!progressReady || !video || !stream?.url) return;
     const playbackURL = new URL(stream.url, window.location.origin);
     const processed = stream.mode !== "direct";
     const playbackOffset = processed ? Math.max(0, Math.floor(playbackStart ?? resumePositionRef.current)) : 0;
@@ -621,6 +695,7 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     setCurrentTime(playbackOffset);
     setSeekPreview(null);
     setPlaybackBlocked(false);
+    setPhase("preparing");
     pausedAtRef.current = 0;
     if (playbackOffset > 0) playbackURL.searchParams.set("start", String(playbackOffset));
     const sourceURL = processed ? `${playbackURL.pathname}${playbackURL.search}` : stream.url;
@@ -631,17 +706,26 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     let fallbackStarted = false;
     let destroyHLS = () => {};
     const isHLS = stream.protocol === "hls";
-    const usesNativePlayback = !isHLS;
     const startPlayback = () => {
       void video.play().catch((cause: unknown) => {
-        if (disposed || (cause instanceof DOMException && cause.name === "AbortError")) return;
+        if (disposed || cause instanceof DOMException && cause.name === "AbortError") return;
         setPaused(true);
         if (cause instanceof DOMException && cause.name === "NotAllowedError") {
           setPlaybackBlocked(true);
+          setPhase("paused");
           return;
         }
         setError(notifyError(cause, "The browser could not start media playback.", "Playback unavailable"));
+        setPhase("failed");
       });
+    };
+    const failPlayback = (message: string) => {
+      setPaused(true);
+      setError(notifyErrorMessage(message, "Playback unavailable"));
+      setPhase("failed");
+    };
+    const handleMediaError = () => {
+      if (!startProcessedFallback()) failPlayback("The selected media source could not be played.");
     };
     const startProcessedFallback = (): boolean => {
       if (disposed || fallbackStarted || stream.mode === "direct") return false;
@@ -649,23 +733,24 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
       destroyHLS();
       destroyHLS = () => {};
       setError("");
+      setPhase("recovering");
+      video.addEventListener("error", handleMediaError, { once: true });
       video.src = `${fallbackURL.pathname}${fallbackURL.search}`;
       video.load();
       startPlayback();
       return true;
     };
-    const handleMediaError = () => {
-      if (!startProcessedFallback()) {
-        setError(notifyErrorMessage("The selected media source could not be played.", "Playback unavailable"));
-      }
-    };
-    if (usesNativePlayback) video.addEventListener("error", handleMediaError);
 
-    if (processed && !isHLS) {
-      startProcessedFallback();
-    } else if (!isHLS) {
-      video.src = sourceURL;
-      startPlayback();
+    video.volume = volume;
+    video.muted = muted;
+    video.playbackRate = playbackRate;
+    if (!isHLS) {
+      video.addEventListener("error", handleMediaError);
+      if (processed) startProcessedFallback();
+      else {
+        video.src = sourceURL;
+        startPlayback();
+      }
     } else {
       void import("hls.js").then(({ default: Hls }) => {
         if (disposed) return;
@@ -675,7 +760,7 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
             video.src = sourceURL;
             startPlayback();
           } else if (!startProcessedFallback()) {
-            setError(notifyErrorMessage("This browser cannot play the selected HLS stream.", "Playback unavailable"));
+            failPlayback("This browser cannot play the selected HLS stream.");
           }
           return;
         }
@@ -683,33 +768,48 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
           enableWorker: true,
           autoStartLoad: false,
           startPosition: 0,
+          maxBufferLength: 30,
+          backBufferLength: 30,
         });
         destroyHLS = () => hls.destroy();
-        let recoveryAttempts = 0;
+        let mediaRecoveries = 0;
+        let networkRecoveries = 0;
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          setPhase("ready");
           hls.startLoad(0);
           startPlayback();
         });
-        hls.loadSource(sourceURL);
-        hls.attachMedia(video);
+        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          if (!video.paused) setPhase("playing");
+        });
         hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (!data.fatal || disposed) return;
-          if (recoveryAttempts === 0 && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            recoveryAttempts += 1;
+          if (disposed) return;
+          if (!data.fatal) {
+            if (String(data.details).toLowerCase().includes("stall")) setPhase("buffering");
+            return;
+          }
+          setPhase("recovering");
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries < 2) {
+            mediaRecoveries += 1;
             hls.recoverMediaError();
             return;
           }
-          if (recoveryAttempts === 0 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            recoveryAttempts += 1;
-            hls.startLoad();
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < 2) {
+            networkRecoveries += 1;
+            hls.stopLoad();
+            if (String(data.details).toLowerCase().includes("manifest")) hls.loadSource(sourceURL);
+            else hls.startLoad(video.currentTime);
             return;
           }
-          if (!startProcessedFallback()) {
-            setError(notifyErrorMessage("The selected HLS stream stopped responding.", "Playback unavailable"));
-          }
+          if (!startProcessedFallback()) failPlayback("The selected HLS stream stopped responding.");
         });
+        hls.loadSource(sourceURL);
+        hls.attachMedia(video);
       }).catch((cause) => {
-        if (!disposed && !startProcessedFallback()) setError(notifyError(cause, "The HLS player could not be loaded.", "Playback unavailable"));
+        if (!disposed && !startProcessedFallback()) {
+          setError(notifyError(cause, "The HLS player could not be loaded.", "Playback unavailable"));
+          setPhase("failed");
+        }
       });
     }
 
@@ -720,7 +820,20 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
       video.removeAttribute("src");
       video.load();
     };
-  }, [playbackStart, progressReady, stream]);
+  }, [playbackGeneration, progressReady, stream]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.volume = volume;
+    video.muted = muted;
+    video.playbackRate = playbackRate;
+    try {
+      localStorage.setItem(playerPreferencesKey, JSON.stringify({ volume, muted, rate: playbackRate }));
+    } catch {
+      // Playback preferences remain session-local when storage is unavailable.
+    }
+  }, [muted, playbackRate, stream, volume]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -730,14 +843,130 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     });
   }, [selectedSubtitleID, stream, subtitles]);
 
-  useEffect(() => () => stopCurrentSession(), []);
+  useEffect(() => {
+    const appRoot = document.getElementById("root");
+    if (!appRoot) return;
+    const wasInert = appRoot.inert;
+    const previousAriaHidden = appRoot.getAttribute("aria-hidden");
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousRootOverflow = document.documentElement.style.overflow;
+    if (document.activeElement instanceof HTMLElement && appRoot.contains(document.activeElement)) document.activeElement.blur();
+    appRoot.inert = true;
+    appRoot.setAttribute("aria-hidden", "true");
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    return () => {
+      appRoot.inert = wasInert;
+      if (previousAriaHidden === null) appRoot.removeAttribute("aria-hidden");
+      else appRoot.setAttribute("aria-hidden", previousAriaHidden);
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousRootOverflow;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!stream?.url) return;
+    const frame = window.requestAnimationFrame(() => playerRef.current?.querySelector<HTMLElement>(".player__control-primary")?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [stream?.id, stream?.url]);
+
+  useEffect(() => {
+    window.clearTimeout(controlsTimerRef.current);
+    setControlsVisible(true);
+    if (phase === "playing" && panel === null) {
+      controlsTimerRef.current = window.setTimeout(() => setControlsVisible(false), 3200);
+    }
+    return () => window.clearTimeout(controlsTimerRef.current);
+  }, [panel, phase]);
+
+  useEffect(() => {
+    if (phase !== "buffering" && phase !== "recovering") return;
+    const timeout = window.setTimeout(() => {
+      videoRef.current?.pause();
+      setError(notifyErrorMessage("Playback could not recover before the safety timeout.", "Playback recovery timed out"));
+      setPhase("failed");
+    }, 30_000);
+    return () => window.clearTimeout(timeout);
+  }, [phase]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target;
+      const interactive = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement;
+      if (event.key === "Escape" || event.key === "BrowserBack" || event.key === "GoBack") {
+        event.preventDefault();
+        if (panel) setPanel(null);
+        else if (document.fullscreenElement) void document.exitFullscreen();
+        else if (!controlsVisible) revealControls();
+        else closePlayer();
+        return;
+      }
+      if (interactive) return;
+      if (target instanceof HTMLButtonElement && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+        event.preventDefault();
+        movePlayerFocus(event.key);
+        return;
+      }
+      switch (event.key.toLowerCase()) {
+        case " ":
+        case "k":
+        case "mediaplaypause":
+          event.preventDefault();
+          togglePlayback();
+          break;
+        case "arrowleft":
+        case "j":
+        case "mediarewind":
+          event.preventDefault();
+          seekBy(-10);
+          break;
+        case "arrowright":
+        case "l":
+        case "mediafastforward":
+          event.preventDefault();
+          seekBy(10);
+          break;
+        case "arrowup":
+          event.preventDefault();
+          changeVolume(volume + 0.05);
+          break;
+        case "arrowdown":
+          event.preventDefault();
+          changeVolume(volume - 0.05);
+          break;
+        case "m":
+          event.preventDefault();
+          toggleMute();
+          break;
+        case "f":
+          event.preventDefault();
+          toggleFullscreen();
+          break;
+        case "p":
+          event.preventDefault();
+          void togglePictureInPicture();
+          break;
+        case "i":
+          event.preventDefault();
+          togglePanel("stats");
+          break;
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [controlsVisible, panel, paused, phase, playbackDuration, stream, volume]);
+
+  useEffect(() => () => {
+    window.clearTimeout(controlsTimerRef.current);
+    window.clearTimeout(clickTimerRef.current);
+    stopCurrentSession();
+  }, []);
 
   async function persistProgress(completed = false, positionOverride?: number) {
     const video = videoRef.current;
     const titleID = titleIDRef.current;
     if (!video || !titleID || progressRequestRef.current) return;
-    const inspectedDuration = playbackDurationRef.current;
-    const durationSeconds = inspectedDuration > 0 ? inspectedDuration : streamProtocolRef.current !== "hls" ? video.duration : Number.NaN;
+    const durationSeconds = playbackDurationRef.current > 0 ? playbackDurationRef.current : streamProtocolRef.current !== "hls" ? video.duration : Number.NaN;
     if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return;
     const positionSeconds = completed ? Math.floor(durationSeconds) : Math.floor(positionOverride ?? playbackOffsetRef.current + video.currentTime);
     if (!completed && positionSeconds <= 0) return;
@@ -781,23 +1010,61 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
   }
 
   function resumePlayback(video: HTMLVideoElement) {
+    video.volume = volume;
+    video.muted = muted;
+    video.playbackRate = playbackRate;
+    if (Number.isFinite(video.duration)) setVideoDuration(video.duration);
     const position = resumePositionRef.current;
     const duration = playbackDurationRef.current;
     if (playbackOffsetRef.current > 0) return;
-    if (position <= 0 || (duration > 0 && position >= duration - 10)) return;
+    if (position <= 0 || duration > 0 && position >= duration - 10) return;
     video.currentTime = position;
     void persistProgress(false, position);
+  }
+
+  function updatePlayerStats(video: HTMLVideoElement) {
+    const absolutePosition = playbackOffsetRef.current + video.currentTime;
+    let bufferedAhead = 0;
+    for (let index = 0; index < video.buffered.length; index += 1) {
+      const start = playbackOffsetRef.current + video.buffered.start(index);
+      const end = playbackOffsetRef.current + video.buffered.end(index);
+      if (absolutePosition >= start && absolutePosition <= end) bufferedAhead = Math.max(0, end - absolutePosition);
+    }
+    const quality = typeof video.getVideoPlaybackQuality === "function" ? video.getVideoPlaybackQuality() : undefined;
+    setStats({
+      bufferedAhead,
+      droppedFrames: quality?.droppedVideoFrames ?? 0,
+      totalFrames: quality?.totalVideoFrames ?? 0,
+      width: video.videoWidth,
+      height: video.videoHeight,
+    });
   }
 
   function trackPlayback(video: HTMLVideoElement) {
     const position = playbackOffsetRef.current + video.currentTime;
     if (seekPreview === null) setCurrentTime(position);
+    if (panel === "stats") updatePlayerStats(video);
     if (Math.floor(position) - lastSavedPositionRef.current >= 15) void persistProgress(false, position);
+  }
+
+  function revealControls() {
+    window.clearTimeout(controlsTimerRef.current);
+    setControlsVisible(true);
+    if (phase === "playing" && panel === null) {
+      controlsTimerRef.current = window.setTimeout(() => setControlsVisible(false), 3200);
+    }
+  }
+
+  function togglePanel(nextPanel: Exclude<PlayerPanel, null>) {
+    revealControls();
+    setPanel((current) => current === nextPanel ? null : nextPanel);
+    if (nextPanel === "stats" && videoRef.current) updatePlayerStats(videoRef.current);
   }
 
   function togglePlayback() {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || phase === "failed" || phase === "preparing") return;
+    revealControls();
     if (!video.paused) {
       video.pause();
       return;
@@ -808,37 +1075,67 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
       setPaused(true);
       if (cause instanceof DOMException && cause.name === "NotAllowedError") {
         setPlaybackBlocked(true);
+        setPhase("paused");
         return;
       }
       setError(notifyError(cause, "The browser could not start media playback.", "Playback unavailable"));
+      setPhase("failed");
     });
   }
 
   function commitSeek(rawPosition: number) {
-    const target = Math.min(playbackDurationRef.current, Math.max(0, Math.floor(rawPosition)));
+    const duration = playbackDurationRef.current;
+    const target = duration > 0 ? Math.min(duration, Math.max(0, Math.floor(rawPosition))) : Math.max(0, Math.floor(rawPosition));
+    const video = videoRef.current;
     resumePositionRef.current = target;
-    playbackOffsetRef.current = target;
     setSeekPreview(null);
     setCurrentTime(target);
-    setPlaybackStart(target);
+    if (stream?.mode === "direct" && video) {
+      video.currentTime = target;
+      playbackOffsetRef.current = 0;
+    } else {
+      playbackOffsetRef.current = target;
+      setPlaybackStart(target);
+      setPlaybackGeneration((generation) => generation + 1);
+      setPhase("recovering");
+    }
     void persistProgress(false, target);
   }
 
-  function changeVolume(nextVolume: number) {
+  function seekBy(seconds: number) {
     const video = videoRef.current;
-    if (!video) return;
+    const position = video ? playbackOffsetRef.current + video.currentTime : currentTime;
+    commitSeek(position + seconds);
+    setSeekFeedback({ seconds, id: Date.now() });
+    revealControls();
+  }
+
+  function changeVolume(nextVolume: number) {
     const normalized = Math.min(1, Math.max(0, nextVolume));
-    video.volume = normalized;
-    video.muted = normalized === 0;
+    const video = videoRef.current;
+    if (video) {
+      video.volume = normalized;
+      video.muted = normalized === 0;
+    }
     setVolume(normalized);
-    setMuted(video.muted);
+    setMuted(normalized === 0);
+    revealControls();
   }
 
   function toggleMute() {
+    const nextMuted = !muted;
     const video = videoRef.current;
-    if (!video) return;
-    video.muted = !video.muted;
-    setMuted(video.muted);
+    if (video) video.muted = nextMuted;
+    setMuted(nextMuted);
+    revealControls();
+  }
+
+  function changePlaybackRate(rate: number) {
+    const video = videoRef.current;
+    if (video) video.playbackRate = rate;
+    setPlaybackRate(rate);
+    setPanel(null);
+    revealControls();
   }
 
   function toggleFullscreen() {
@@ -846,32 +1143,73 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
       void document.exitFullscreen();
       return;
     }
-    const player = videoRef.current?.closest(".player");
-    if (player instanceof HTMLElement) void player.requestFullscreen();
-  }
-  function handlePlaybackReady(video: HTMLVideoElement) {
-    if (!video.paused) return;
-    setPaused(true);
-    setPlaybackBlocked(true);
+    if (playerRef.current) void playerRef.current.requestFullscreen();
   }
 
+  async function togglePictureInPicture() {
+    const video = videoRef.current;
+    if (!video || !document.pictureInPictureEnabled) return;
+    try {
+      if (document.pictureInPictureElement) await document.exitPictureInPicture();
+      else await video.requestPictureInPicture();
+    } catch (cause) {
+      notifyError(cause, "Picture in Picture could not be opened.", "Picture in Picture unavailable");
+    }
+  }
+
+  function retryPlayback() {
+    const video = videoRef.current;
+    const position = video ? Math.floor(playbackOffsetRef.current + video.currentTime) : Math.floor(currentTime);
+    resumePositionRef.current = position;
+    stopCurrentSession();
+    setError("");
+    setPanel(null);
+    setPhase("preparing");
+    setLoading(true);
+    setRetryVersion((version) => version + 1);
+  }
+
+  function selectSource(index: number) {
+    const video = videoRef.current;
+    const position = video ? Math.floor(playbackOffsetRef.current + video.currentTime) : Math.floor(currentTime);
+    resumePositionRef.current = position;
+    setPlaybackStart(position);
+    setSelected(index);
+    setPanel(null);
+    setPhase("recovering");
+    void persistProgress(false, position);
+  }
+
+  function handlePlaybackReady(video: HTMLVideoElement) {
+    if (video.paused) {
+      setPaused(true);
+      setPhase((current) => current === "failed" ? current : "ready");
+    } else {
+      setPhase("playing");
+    }
+  }
 
   function handlePlaybackStarted(video: HTMLVideoElement) {
     const pausedAt = pausedAtRef.current;
     pausedAtRef.current = 0;
     setPaused(false);
     setPlaybackBlocked(false);
+    setPhase("playing");
     if (stream?.protocol !== "hls" || stream.mode === "direct" || pausedAt === 0 || Date.now() - pausedAt < 30_000) return;
     const position = Math.floor(playbackOffsetRef.current + video.currentTime);
     resumePositionRef.current = position;
     playbackOffsetRef.current = position;
     setPlaybackStart(position);
+    setPlaybackGeneration((generation) => generation + 1);
+    setPhase("recovering");
   }
 
-  function handlePlaybackPaused() {
-    setPlaybackBlocked(true);
+  function handlePlaybackPaused(video: HTMLVideoElement) {
+    if (video.ended) return;
     pausedAtRef.current = Date.now();
     setPaused(true);
+    setPhase((current) => current === "failed" || current === "recovering" ? current : "paused");
+    revealControls();
     void persistProgress();
   }
 
@@ -880,33 +1218,185 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     const duration = playbackDurationRef.current;
     if (duration > 0 && position < duration - 10) {
       setError(notifyErrorMessage("The selected media source ended before the movie or episode was complete.", "Source ended early"));
+      setPhase("failed");
       return;
     }
+    setPhase("ended");
     void persistProgress(true);
     onEnded?.();
   }
 
-  return createPortal(<div className="player" role="dialog" aria-modal="true" aria-label={`Playing ${item.title}`}>
-    <header className="player__header"><div><small>Now playing</small><strong>{item.title}</strong></div><IconButton label="Close player" onClick={closePlayer}><X /></IconButton></header>
-    {loading ? <div className="player__loading"><span className="player__pulse"><Play fill="currentColor" /></span><p>Preparing the selected stream…</p></div> : playable.length === 0 ? <EmptyState icon={<ServerCrash size={42} />} title="No playable source" description={error || "The selected stream is not compatible with this device."} action={<Button variant="secondary" onClick={closePlayer}>Go back</Button>} /> : stream.ytId ? <iframe className="player__video" src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(stream.ytId)}?autoplay=1`} allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen title={item.title} /> :
-      <video key={`${stream.id}:${stream.url}:${playbackStart ?? 0}`} ref={videoRef} className="player__video" controls={!customTransport} playsInline crossOrigin="anonymous" onCanPlay={(event) => handlePlaybackReady(event.currentTarget)} onLoadedMetadata={(event) => resumePlayback(event.currentTarget)} onTimeUpdate={(event) => trackPlayback(event.currentTarget)} onPlay={(event) => handlePlaybackStarted(event.currentTarget)} onPause={handlePlaybackPaused} onEnded={(event) => handlePlaybackEnded(event.currentTarget)}>
-        {selectedSubtitle && <track key={selectedSubtitle.id} src={selectedSubtitle.url} srcLang={selectedSubtitle.language || "und"} label={(selectedSubtitle.language || "Unknown").toUpperCase()} default />}
-      </video>}
-    {playbackBlocked && <button type="button" className="player__start" onClick={togglePlayback}><Play size={30} fill="currentColor" /><span>Play</span></button>}
-    {customTransport && <div className="player__transport">
-      <button type="button" aria-label={paused ? "Play" : "Pause"} onClick={togglePlayback}>{paused ? <Play size={18} fill="currentColor" /> : <Pause size={18} fill="currentColor" />}</button>
-      <span>{formatPlaybackTime(transportTime)}</span>
-      <input className="player__timeline" type="range" aria-label="Playback position" min={0} max={Math.max(1, Math.floor(playbackDuration))} step={1} value={Math.min(playbackDuration, Math.max(0, transportTime))} onChange={(event) => setSeekPreview(Number(event.target.value))} onPointerUp={(event) => commitSeek(Number(event.currentTarget.value))} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commitSeek(Number(event.currentTarget.value)); }} />
-      <span>{formatPlaybackTime(playbackDuration)}</span>
-      <button type="button" aria-label={muted ? "Unmute" : "Mute"} onClick={toggleMute}>{muted ? <VolumeX size={18} /> : <Volume2 size={18} />}</button>
-      <input className="player__volume" type="range" aria-label="Volume" min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(event) => changeVolume(Number(event.target.value))} />
-      <button type="button" aria-label="Fullscreen" onClick={toggleFullscreen}><Maximize size={18} /></button>
+  function playNextEpisode() {
+    if (!onEnded) return;
+    setPhase("ended");
+    void persistProgress(true);
+    stopCurrentSession();
+    onEnded();
+  }
+
+  function handleSurfaceClick(event: ReactMouseEvent<HTMLDivElement>) {
+    if (suppressNextClickRef.current) {
+      suppressNextClickRef.current = false;
+      return;
+    }
+    if (event.detail > 1) return;
+    window.clearTimeout(clickTimerRef.current);
+    clickTimerRef.current = window.setTimeout(togglePlayback, 220);
+  }
+
+  function handleSurfaceDoubleClick(event: ReactMouseEvent<HTMLDivElement>) {
+    window.clearTimeout(clickTimerRef.current);
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position = (event.clientX - bounds.left) / bounds.width;
+    if (position < 0.4) seekBy(-10);
+    else if (position > 0.6) seekBy(10);
+    else toggleFullscreen();
+  }
+
+  function handleSurfacePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType !== "touch") return;
+    const now = Date.now();
+    const previous = lastTouchRef.current;
+    if (now - previous.time < 320 && Math.abs(event.clientX - previous.x) < 100) {
+      suppressNextClickRef.current = true;
+      window.clearTimeout(clickTimerRef.current);
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const position = (event.clientX - bounds.left) / bounds.width;
+      if (position < 0.5) seekBy(-10);
+      else seekBy(10);
+      lastTouchRef.current = { time: 0, x: 0 };
+      return;
+    }
+    lastTouchRef.current = { time: now, x: event.clientX };
+  }
+
+  function movePlayerFocus(key: string) {
+    const root = playerRef.current;
+    if (!root) return;
+    const candidates = Array.from(root.querySelectorAll<HTMLElement>("[data-player-control]"))
+      .filter((candidate) => !candidate.hasAttribute("disabled") && candidate.offsetParent !== null);
+    if (candidates.length === 0) return;
+    const active = document.activeElement instanceof HTMLElement && root.contains(document.activeElement) ? document.activeElement : undefined;
+    if (!active || !candidates.includes(active)) {
+      candidates[0].focus();
+      return;
+    }
+    const origin = active.getBoundingClientRect();
+    const originX = origin.left + origin.width / 2;
+    const originY = origin.top + origin.height / 2;
+    const vertical = key === "ArrowUp" || key === "ArrowDown";
+    const direction = key === "ArrowLeft" || key === "ArrowUp" ? -1 : 1;
+    const next = candidates.map((candidate) => {
+      const bounds = candidate.getBoundingClientRect();
+      const dx = bounds.left + bounds.width / 2 - originX;
+      const dy = bounds.top + bounds.height / 2 - originY;
+      const primary = vertical ? dy : dx;
+      const cross = vertical ? dx : dy;
+      return { candidate, primary, score: Math.abs(primary) + Math.abs(cross) * 2.5 };
+    }).filter(({ primary }) => primary * direction > 4).sort((left, right) => left.score - right.score)[0]?.candidate;
+    next?.focus();
+  }
+
+  const timelineStyle = { "--player-progress": `${progressPercent}%` } as CSSProperties;
+  const panelTitle = panel === "sources" ? "Sources and quality"
+    : panel === "audio" ? "Audio track"
+      : panel === "subtitles" ? "Subtitles"
+        : panel === "speed" ? "Playback speed"
+          : panel === "stats" ? "Playback diagnostics"
+            : "";
+
+  return createPortal(<div ref={playerRef} className={`player player--${phase}${controlsVisible ? " has-controls" : " controls-hidden"}`} role="dialog" aria-modal="true" aria-label={`Playing ${item.title}`} onPointerMove={revealControls} onPointerDown={revealControls} onFocusCapture={revealControls}>
+    <div className="player__surface" onClick={handleSurfaceClick} onDoubleClick={handleSurfaceDoubleClick} onPointerUp={handleSurfacePointerUp}>
+      {stream?.ytId ? <iframe className="player__video" src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(stream.ytId)}?autoplay=1`} allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen title={item.title} /> :
+        stream?.url ? <video key={`${stream.id}:${stream.url}:${playbackStart ?? 0}:${playbackGeneration}`} ref={videoRef} className="player__video" controls={false} playsInline crossOrigin="anonymous"
+          onCanPlay={(event) => handlePlaybackReady(event.currentTarget)}
+          onLoadedMetadata={(event) => resumePlayback(event.currentTarget)}
+          onDurationChange={(event) => { if (Number.isFinite(event.currentTarget.duration)) setVideoDuration(event.currentTarget.duration); }}
+          onTimeUpdate={(event) => trackPlayback(event.currentTarget)}
+          onPlay={(event) => handlePlaybackStarted(event.currentTarget)}
+          onPlaying={(event) => { setPaused(false); setPhase("playing"); updatePlayerStats(event.currentTarget); }}
+          onPause={(event) => handlePlaybackPaused(event.currentTarget)}
+          onWaiting={() => setPhase((current) => current === "paused" ? current : "buffering")}
+          onStalled={() => setPhase((current) => current === "paused" ? current : "buffering")}
+          onEnded={(event) => handlePlaybackEnded(event.currentTarget)}>
+          {selectedSubtitle && <track key={selectedSubtitle.id} src={selectedSubtitle.url} srcLang={selectedSubtitle.language || "und"} label={(selectedSubtitle.language || "Unknown").toUpperCase()} default />}
+        </video> : null}
+    </div>
+
+    <header className={`player__header${controlsVisible ? "" : " is-hidden"}`}>
+      <div><small>{playerPhaseLabel(phase)} · {modeLabel}</small><strong>{item.title}</strong></div>
+      <IconButton label="Close player" onClick={closePlayer} data-player-control><X /></IconButton>
+    </header>
+
+    {(loading || phase === "preparing") && <div className="player__loading" aria-live="polite"><span className="player__pulse"><LoaderCircle className="spin" /></span><strong>Preparing playback</strong><p>The best compatible stream is being prepared…</p></div>}
+    {(phase === "buffering" || phase === "recovering") && <div className="player__buffering" aria-live="polite"><LoaderCircle className="spin" /><span>{phase === "recovering" ? "Recovering playback…" : "Buffering…"}</span></div>}
+    {seekFeedback && <div key={seekFeedback.id} className={`player__seek-feedback ${seekFeedback.seconds < 0 ? "is-backward" : "is-forward"}`}>{seekFeedback.seconds < 0 ? <RotateCcw /> : <RotateCw />}<span>{seekFeedback.seconds > 0 ? "+" : ""}{seekFeedback.seconds}s</span></div>}
+    {playbackBlocked && phase !== "failed" && <button type="button" className="player__start" onClick={togglePlayback} data-player-control><Play size={30} fill="currentColor" /><span>Play</span></button>}
+    {phase === "failed" && <div className="player__failure" role="alert"><ServerCrash size={34} /><strong>Playback unavailable</strong><p>{error || "The selected stream could not be played."}</p><div><Button onClick={retryPlayback}><RefreshCw size={17} /> Retry</Button><Button variant="secondary" onClick={closePlayer}>Go back</Button></div></div>}
+    {!loading && playable.length === 0 && phase !== "failed" && <div className="player__failure"><ServerCrash size={34} /><strong>No playable source</strong><p>{error || "The selected stream is not compatible with this device."}</p><Button variant="secondary" onClick={closePlayer}>Go back</Button></div>}
+    {showNextEpisode && <button type="button" className="player__next" onClick={playNextEpisode} data-player-control><span>Up next</span><strong>Next episode</strong><small>Starts in {Math.ceil(remainingSeconds)}s</small><SkipForward size={20} fill="currentColor" /></button>}
+
+    {customTransport && <div className={`player__chrome${controlsVisible ? "" : " is-hidden"}`}>
+      <div className="player__timeline-row">
+        <span>{formatPlaybackTime(transportTime)}</span>
+        <div className="player__timeline-wrap">
+          {seekPreview !== null && <output style={{ left: `${progressPercent}%` }}>{formatPlaybackTime(seekPreview)}</output>}
+          <input className="player__timeline" style={timelineStyle} type="range" aria-label="Playback position" min={0} max={Math.max(1, Math.floor(playbackDuration))} step={1} value={Math.min(playbackDuration || 1, Math.max(0, transportTime))}
+            onChange={(event) => setSeekPreview(Number(event.target.value))}
+            onPointerUp={(event) => commitSeek(Number(event.currentTarget.value))}
+            onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commitSeek(Number(event.currentTarget.value)); }}
+            data-player-control />
+        </div>
+        <span>{formatPlaybackTime(playbackDuration)}</span>
+      </div>
+      <div className="player__controls">
+        <div className="player__controls-group">
+          <button type="button" className="player__control-primary" aria-label={paused ? "Play" : "Pause"} onClick={togglePlayback} data-player-control>{paused ? <Play size={20} fill="currentColor" /> : <Pause size={20} fill="currentColor" />}</button>
+          <button type="button" aria-label="Back 10 seconds" onClick={() => seekBy(-10)} data-player-control><RotateCcw size={19} /><small>10</small></button>
+          <button type="button" aria-label="Forward 10 seconds" onClick={() => seekBy(10)} data-player-control><RotateCw size={19} /><small>10</small></button>
+          <button type="button" aria-label={muted ? "Unmute" : "Mute"} onClick={toggleMute} data-player-control>{muted ? <VolumeX size={19} /> : <Volume2 size={19} />}</button>
+          <input className="player__volume" type="range" aria-label="Volume" min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(event) => changeVolume(Number(event.target.value))} data-player-control />
+        </div>
+        <div className="player__mode"><span>{modeLabel}</span><small>{stream?.media?.videoTracks[0]?.height ? `${stream.media.videoTracks[0].height}p` : stream?.protocol?.toUpperCase()}</small></div>
+        <div className="player__controls-group player__controls-group--right">
+          {playable.length > 1 && <button type="button" aria-label="Sources and quality" className={panel === "sources" ? "is-active" : ""} onClick={() => togglePanel("sources")} data-player-control><Settings2 size={19} /></button>}
+          {audioTracks.length > 1 && <button type="button" aria-label="Audio track" className={panel === "audio" ? "is-active" : ""} onClick={() => togglePanel("audio")} data-player-control><AudioLines size={19} /></button>}
+          {subtitles.length > 0 && <button type="button" aria-label="Subtitles" className={panel === "subtitles" ? "is-active" : ""} onClick={() => togglePanel("subtitles")} data-player-control><Captions size={19} /></button>}
+          <button type="button" aria-label={`Playback speed ${playbackRate}x`} className={panel === "speed" ? "is-active" : ""} onClick={() => togglePanel("speed")} data-player-control><Gauge size={19} /><small>{playbackRate}×</small></button>
+          <button type="button" aria-label="Playback diagnostics" className={panel === "stats" ? "is-active" : ""} onClick={() => togglePanel("stats")} data-player-control><Info size={19} /></button>
+          {document.pictureInPictureEnabled && <button type="button" aria-label="Picture in Picture" onClick={() => void togglePictureInPicture()} data-player-control><PictureInPicture size={19} /></button>}
+          <button type="button" aria-label="Fullscreen" onClick={toggleFullscreen} data-player-control><Maximize size={19} /></button>
+        </div>
+      </div>
     </div>}
-    {playable.length > 0 && <div className="player__source-picker"><button onClick={() => setControlsOpen((value) => !value)}><span><ExternalLink size={16} /> {stream?.name || stream?.title || `Source ${selected + 1}`}</span><ChevronDown size={18} /></button>{controlsOpen && <div>{playable.map((candidate, index) => <button key={candidate.id} className={selected === index ? "is-active" : ""} onClick={() => { setSelected(index); setControlsOpen(false); }}>{candidate.name || candidate.title || `Source ${index + 1}`}<small>{candidate.protocol.toUpperCase()}{candidate.container ? ` · ${candidate.container.toUpperCase()}` : ""}</small></button>)}</div>}</div>}
-    {(audioTracks.length > 1 || subtitles.length > 0) && <div className="player__track-controls">
-      {audioTracks.length > 1 && <label><AudioLines size={15} /><span>Audio</span><select aria-label="Audio track" value={selectedAudioTrack ?? audioTracks[0]?.index} onChange={(event) => { const track = Number(event.target.value); const video = videoRef.current; if (video) resumePositionRef.current = Math.floor(playbackOffsetRef.current + video.currentTime); setSelectedAudioTrack(track); setPreferredAudioTrack(track); }}>{audioTracks.map((track) => <option key={track.index} value={track.index}>{track.title || track.language?.toUpperCase() || `Track ${track.index + 1}`} · {track.codec.toUpperCase()}</option>)}</select></label>}
-      {subtitles.length > 0 && <label><Captions size={15} /><span>Subtitles</span><select aria-label="Subtitle track" value={selectedSubtitleID} onChange={(event) => setSelectedSubtitleID(event.target.value)}><option value="none">Off</option>{subtitles.map((subtitle) => <option key={subtitle.id} value={subtitle.id}>{(subtitle.language || "Unknown").toUpperCase()}</option>)}</select></label>}
-    </div>}
-    {error && playable.length > 0 && <Notice>{error}</Notice>}
+
+    {panel && <section className="player__panel" aria-label={panelTitle}>
+      <header><div><small>Player settings</small><strong>{panelTitle}</strong></div><button type="button" aria-label="Close settings" onClick={() => setPanel(null)} data-player-control><X size={17} /></button></header>
+      {panel === "sources" && <div className="player__option-list">{playable.map((candidate, index) => {
+        const video = candidate.media?.videoTracks[0];
+        const candidateMode = playerModeLabel(candidate.mode, Boolean(candidate.media?.hdrFormat && candidate.media.hdrFormat !== "sdr" && candidate.mode === "transcode"));
+        return <button key={candidate.id} type="button" className={selected === index ? "is-active" : ""} onClick={() => selectSource(index)} data-player-control><span><strong>{candidate.name || candidate.title || `Source ${index + 1}`}</strong><small>{candidateMode} · {video?.height ? `${video.height}p` : candidate.protocol.toUpperCase()} {video?.codec ? `· ${video.codec.toUpperCase()}` : ""}</small></span>{selected === index && <Check size={17} />}</button>;
+      })}</div>}
+      {panel === "audio" && <div className="player__option-list">{audioTracks.map((track) => <button key={track.index} type="button" className={selectedAudioTrack === track.index ? "is-active" : ""} onClick={() => {
+        const video = videoRef.current;
+        if (video) resumePositionRef.current = Math.floor(playbackOffsetRef.current + video.currentTime);
+        setSelectedAudioTrack(track.index);
+        setPreferredAudioTrack(track.index);
+        setPanel(null);
+        setPhase("recovering");
+      }} data-player-control><span><strong>{track.title || track.language?.toUpperCase() || `Track ${track.index + 1}`}</strong><small>{playerTrackLabel(track)}</small></span>{selectedAudioTrack === track.index && <Check size={17} />}</button>)}</div>}
+      {panel === "subtitles" && <div className="player__option-list"><button type="button" className={selectedSubtitleID === "none" ? "is-active" : ""} onClick={() => { setSelectedSubtitleID("none"); setPanel(null); }} data-player-control><span><strong>Off</strong><small>No subtitles</small></span>{selectedSubtitleID === "none" && <Check size={17} />}</button>{subtitles.map((subtitle) => <button key={subtitle.id} type="button" className={selectedSubtitleID === subtitle.id ? "is-active" : ""} onClick={() => { setSelectedSubtitleID(subtitle.id); setPanel(null); }} data-player-control><span><strong>{(subtitle.language || "Unknown").toUpperCase()}</strong><small>{subtitle.default ? "Default subtitle" : "Subtitle track"}</small></span>{selectedSubtitleID === subtitle.id && <Check size={17} />}</button>)}</div>}
+      {panel === "speed" && <div className="player__speed-grid">{playbackRates.map((rate) => <button key={rate} type="button" className={playbackRate === rate ? "is-active" : ""} onClick={() => changePlaybackRate(rate)} data-player-control>{rate}×</button>)}</div>}
+      {panel === "stats" && <dl className="player__stats">
+        <div><dt>Status</dt><dd>{playerPhaseLabel(phase)}</dd></div>
+        <div><dt>Mode</dt><dd>{modeLabel}</dd></div>
+        <div><dt>Protocol</dt><dd>{stream?.protocol?.toUpperCase() || "—"}{stream?.container ? ` / ${stream.container.toUpperCase()}` : ""}</dd></div>
+        <div><dt>Video</dt><dd>{stats.width && stats.height ? `${stats.width}×${stats.height}` : "—"}{stream?.media?.videoTracks[0]?.codec ? ` · ${stream.media.videoTracks[0].codec.toUpperCase()}` : ""}</dd></div>
+        <div><dt>Audio</dt><dd>{audioTracks.find((track) => track.index === selectedAudioTrack)?.codec.toUpperCase() || audioTracks[0]?.codec.toUpperCase() || "—"}</dd></div>
+        <div><dt>HDR</dt><dd>{stream?.media?.hdrFormat?.toUpperCase() || "SDR"}</dd></div>
+        <div><dt>Buffer</dt><dd>{stats.bufferedAhead.toFixed(1)}s</dd></div>
+        <div><dt>Dropped frames</dt><dd>{stats.droppedFrames} / {stats.totalFrames}</dd></div>
+      </dl>}
+    </section>}
   </div>, document.body);
 }
