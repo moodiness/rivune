@@ -287,8 +287,17 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 func (processor *FFmpegProcessor) VideoEncoder() string {
 	return string(processor.encoder.normalizedKind())
 }
+
 func (processor *FFmpegProcessor) HardwareToneMap() bool {
 	return processor.encoder.hardwareToneMap
+}
+
+func (processor *FFmpegProcessor) ActiveProcesses() int {
+	return len(processor.slots)
+}
+
+func (processor *FFmpegProcessor) ProcessLimit() int {
+	return cap(processor.slots)
 }
 
 func (processor *FFmpegProcessor) acquire(ctx context.Context) error {

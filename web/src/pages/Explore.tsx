@@ -137,6 +137,7 @@ function useMediaPreferences() {
 }
 
 type HomeRow = { collection: Collection; resolved: ResolvedFolder };
+type HeroSlide = { key: string; item: MediaItem; collection: Collection; folder: ResolvedFolder["folder"] };
 const homeFolderConcurrency = 6;
 const homeFolderTimeoutMilliseconds = 10_000;
 
@@ -197,6 +198,7 @@ export function HomePage() {
   const [continueItems, setContinueItems] = useState<EnrichedContinueItem[]>([]);
   const mediaPreferences = useMediaPreferences();
   const [pendingFolderKeys, setPendingFolderKeys] = useState<Set<string>>(new Set());
+  const [activeHeroIndex, setActiveHeroIndex] = useState(0);
 
   useEffect(() => {
     if (!mediaPreferences.ready) return;
@@ -275,9 +277,46 @@ export function HomePage() {
     };
   }, [mediaPreferences.profileID, mediaPreferences.ready]);
 
-  const hero = rows.flatMap((row) => row.resolved.items).find((item) => isAvailable(item, mediaPreferences.hideUnreleased));
-  const heroBackdrop = rows[0]?.collection.backdropImageUrl || rows[0]?.resolved.folder.heroBackdropUrl || hero?.backgroundUrl || hero?.posterUrl;
+  const heroSlides = useMemo(() => {
+    const seen = new Set<string>();
+    const slides: HeroSlide[] = [];
+    for (const row of rows) {
+      if (!row.collection.heroEnabled) continue;
+      for (const item of row.resolved.items) {
+        const key = `${item.mediaType}:${item.id}`;
+        if (seen.has(key) || !isAvailable(item, mediaPreferences.hideUnreleased)) continue;
+        seen.add(key);
+        slides.push({ key, item, collection: row.collection, folder: row.resolved.folder });
+        if (slides.length === 12) return slides;
+      }
+    }
+    return slides;
+  }, [rows, mediaPreferences.hideUnreleased]);
+
+  useEffect(() => {
+    setActiveHeroIndex(0);
+  }, [mediaPreferences.profileID]);
+
+  useEffect(() => {
+    if (heroSlides.length < 2 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const timer = window.setInterval(() => setActiveHeroIndex((current) => (current + 1) % heroSlides.length), 8_000);
+    return () => window.clearInterval(timer);
+  }, [heroSlides.length]);
+
+  useEffect(() => {
+    setActiveHeroIndex((current) => heroSlides.length === 0 ? 0 : current % heroSlides.length);
+  }, [heroSlides.length]);
+
+  const heroSlide = heroSlides[activeHeroIndex];
+  const hero = heroSlide?.item;
+  const heroBackdrop = heroSlide && (heroSlide.folder.heroBackdropUrl || hero.backgroundUrl || heroSlide.collection.backdropImageUrl || hero.posterUrl);
+  const heroPending = collections.some((collection) => collection.heroEnabled && collection.folders.some((folder) => pendingFolderKeys.has(homeFolderKey(collection.id, folder.id ?? ""))));
   const continueMedia = continueItems.map(mediaFromContinue);
+
+  function rotateHero(direction: -1 | 1) {
+    setActiveHeroIndex((current) => (current + direction + heroSlides.length) % heroSlides.length);
+  }
+
 
   if (loading) return <div className="home-page page-enter"><Skeleton className="hero-skeleton" /><div className="content-stack">{[0, 1, 2].map((row) => <div key={row}><Skeleton className="heading-skeleton" /><div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div></div>)}</div></div>;
 
@@ -285,15 +324,20 @@ export function HomePage() {
   if (openedCollection) return <CollectionBrowser key={openedCollection.id} collection={openedCollection} rows={rows.filter((row) => row.collection.id === openedCollection.id)} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpenedCollection(null)} />;
 
   return <div className="home-page page-enter">
-    {hero ? <section className="hero" style={heroBackdrop ? { backgroundImage: `url(${heroBackdrop})` } : undefined}>
+    {hero && heroSlide ? <section key={heroSlide.key} className="hero hero--featured" style={heroBackdrop ? { backgroundImage: `url(${heroBackdrop})` } : undefined}>
       <div className="hero__wash" /><div className="hero__content">
-        <span className="hero__eyebrow"><WandSparkles size={15} /> Featured for you</span>
+        <span className="hero__eyebrow"><WandSparkles size={15} /> Featured · {heroSlide.collection.title}</span>
         {hero.logoUrl ? <img src={hero.logoUrl} alt={hero.title} /> : <h1>{hero.title}</h1>}
         <div className="hero__meta">{hero.releaseInfo && <span>{hero.releaseInfo}</span>}{hero.voteAverage !== undefined && <span><Star size={14} fill="currentColor" /> {hero.voteAverage.toFixed(1)}</span>}<span>{mediaTypeLabel(hero.mediaType)}</span></div>
         <p>{hero.description || "A hand-picked title from your personal collections."}</p>
-        <div><Button onClick={() => setSelected(hero)}><Play size={19} fill="currentColor" /> Play now</Button><Button variant="secondary" onClick={() => setSelected(hero)}>More info <ArrowRight size={18} /></Button></div>
+        <div className="hero__actions"><Button onClick={() => setSelected(hero)}><Play size={19} fill="currentColor" /> Play now</Button><Button variant="secondary" onClick={() => setSelected(hero)}>More info <ArrowRight size={18} /></Button></div>
       </div>
-    </section> : pendingFolderKeys.size > 0 ? <Skeleton className="hero-skeleton" /> : <section className="hero hero--empty"><div className="hero__content"><span className="hero__eyebrow"><Sparkles size={15} /> Your Rivune</span><h1>A blank canvas,<br />ready for your stories.</h1><p>Add an addon and create your first collection to shape this home around you.</p></div></section>}
+      {heroSlides.length > 1 && <div className="hero__navigation" aria-label="Featured titles">
+        <button type="button" onClick={() => rotateHero(-1)} aria-label="Previous featured title"><ArrowLeft size={18} /></button>
+        <span>{heroSlides.map((slide, index) => <button key={slide.key} type="button" className={index === activeHeroIndex ? "is-active" : ""} onClick={() => setActiveHeroIndex(index)} aria-label={`Show ${slide.item.title}`} aria-current={index === activeHeroIndex ? "true" : undefined} />)}</span>
+        <button type="button" onClick={() => rotateHero(1)} aria-label="Next featured title"><ArrowRight size={18} /></button>
+      </div>}
+    </section> : heroPending ? <Skeleton className="hero-skeleton" /> : <section className="hero hero--empty"><div className="hero__content"><span className="hero__eyebrow"><Sparkles size={15} /> Your Rivune</span><h1>A blank canvas,<br />ready for your stories.</h1><p>Enable Hero section on a collection to feature its titles here.</p></div></section>}
     <div className="content-stack">
       {error && <Notice>{error}</Notice>}
       {continueMedia.length > 0 && <section className="continue-section">

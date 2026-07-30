@@ -138,6 +138,9 @@ type playbackService interface {
 	Prepare(context.Context, auth.Principal, playback.PrepareInput) (playback.Preparation, error)
 	Resolve(context.Context, auth.Principal, playback.ResolveInput) (playback.Session, error)
 	Stop(context.Context, auth.Principal, string) error
+	Activity(context.Context, auth.Principal) (playback.Activity, error)
+	StopActivitySession(context.Context, auth.Principal, string) error
+	PurgeActivity(context.Context, auth.Principal) (playback.PurgeResult, error)
 	ProxyAsset(http.ResponseWriter, *http.Request, string, string, string, string, string) error
 }
 
@@ -287,6 +290,9 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("POST /api/v1/playback/prepare", a.requireAuthentication(a.preparePlayback))
 	mux.Handle("POST /api/v1/playback/resolve", a.requireAuthentication(a.resolvePlayback))
 	mux.Handle("DELETE /api/v1/playback/sessions/{sessionId}", a.requireAuthentication(a.stopPlayback))
+	mux.Handle("GET /api/v1/playback/activity", a.requireAuthentication(a.playbackActivity))
+	mux.Handle("DELETE /api/v1/playback/activity/sessions/{sessionId}", a.requireAuthentication(a.stopPlaybackActivitySession))
+	mux.Handle("POST /api/v1/playback/activity/purge", a.requireAuthentication(a.purgePlaybackActivity))
 	mux.HandleFunc("GET /api/v1/playback/sessions/{sessionId}/assets/{assetId}", a.playbackAsset)
 	mux.HandleFunc("HEAD /api/v1/playback/sessions/{sessionId}/assets/{assetId}", a.playbackAsset)
 	mux.Handle("GET /api/v1/library", a.requireAuthentication(a.library))

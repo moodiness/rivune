@@ -1,34 +1,38 @@
-import { Boxes, Check, ChevronDown, ChevronUp, CircleUserRound, Database, Eye, EyeOff, Film, GripVertical, ImagePlus, Layers3, LoaderCircle, MonitorSmartphone, Pencil, Plus, RefreshCw, Save, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, X } from "lucide-react";
+import { Activity, Boxes, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Cpu, Database, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Layers3, LoaderCircle, MonitorSmartphone, Pencil, Plus, Radio, RefreshCw, Save, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, X } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import { AddTile, Button, ConfirmDialog, EmptyState, IconButton, Modal, Notice, SectionHeading, Skeleton } from "../components";
 import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
-import type { AddonManifest, AvatarPreset, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, InstalledAddon, Profile, ProfileSession, SettingsValues } from "../types";
+import type { AddonManifest, AvatarPreset, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, InstalledAddon, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues } from "../types";
 
-type AdminTab = "profiles" | "addons" | "collections" | "settings";
+type AdminTab = "profiles" | "addons" | "collections" | "activity" | "settings";
 
-const tabs: Array<{ id: AdminTab; label: string; description: string; icon: typeof Users }> = [
+const tabs: Array<{ id: AdminTab; label: string; description: string; icon: typeof Users; adminOnly?: boolean }> = [
   { id: "profiles", label: "Profiles", description: "People and access", icon: Users },
   { id: "addons", label: "Addons", description: "Content sources", icon: Boxes },
   { id: "collections", label: "Collections", description: "Curate the home", icon: Layers3 },
+  { id: "activity", label: "Activity", description: "Playback and media", icon: Activity, adminOnly: true },
   { id: "settings", label: "Settings", description: "Playback and display", icon: Settings2 },
 ];
 
 export function AdminPage() {
-  const { activeProfile } = useAuth();
+  const { account, activeProfile } = useAuth();
   const canManage = Boolean(activeProfile?.canManage);
+  const isAdmin = account?.user.role === "admin";
+  const visibleTabs = tabs.filter((item) => !item.adminOnly || isAdmin);
   const [tab, setTab] = useState<AdminTab>(() => canManage ? "profiles" : "settings");
 
   useEffect(() => {
     if (!canManage) setTab("settings");
-  }, [canManage]);
+    else if (tab === "activity" && !isAdmin) setTab("profiles");
+  }, [canManage, isAdmin, tab]);
 
   return <div className="standard-page admin-page page-enter">
     <SectionHeading eyebrow={canManage ? "Control room" : "Your space"} title={canManage ? "Administration." : "Preferences."} description={canManage ? "Shape Rivune for everyone who shares this server." : "Personalize this profile."} />
     <div className={`admin-layout ${canManage ? "" : "admin-layout--preferences"}`}>
-      {canManage && <nav className="admin-tabs">{tabs.map((item) => { const Icon = item.icon; return <button key={item.id} className={tab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}><span><Icon size={20} /></span><div><strong>{item.label}</strong><small>{item.description}</small></div><ChevronDown size={17} /></button>; })}</nav>}
-      <section className="admin-panel">{tab === "profiles" ? <ProfilesAdmin /> : tab === "addons" ? <AddonsAdmin /> : tab === "collections" ? <CollectionsAdmin /> : <SettingsAdmin />}</section>
+      {canManage && <nav className="admin-tabs">{visibleTabs.map((item) => { const Icon = item.icon; return <button key={item.id} className={tab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}><span><Icon size={20} /></span><div><strong>{item.label}</strong><small>{item.description}</small></div><ChevronDown size={17} /></button>; })}</nav>}
+      <section className="admin-panel">{tab === "profiles" ? <ProfilesAdmin /> : tab === "addons" ? <AddonsAdmin /> : tab === "collections" ? <CollectionsAdmin /> : tab === "activity" ? <ActivityAdmin /> : <SettingsAdmin />}</section>
     </div>
   </div>;
 }
@@ -371,7 +375,7 @@ function ProfileAssignmentPicker({ profiles, selected, onChange, legend }: {
 }
 
 const blankFolder = (): CollectionFolder => ({ title: "Featured", tileShape: "poster", sourceView: "merged", focusGifEnabled: false, hideTitle: false, sources: [] });
-const blankCollection = (profileIds: string[] = []): CollectionSaveInput => ({ title: "New collection", pinToTop: false, focusGlowEnabled: true, viewMode: "rows", folderCoverShape: "poster", folders: [blankFolder()], profileIds })
+const blankCollection = (profileIds: string[] = []): CollectionSaveInput => ({ title: "New collection", heroEnabled: false, pinToTop: false, focusGlowEnabled: true, viewMode: "rows", folderCoverShape: "poster", folders: [blankFolder()], profileIds })
 
 function CollectionsAdmin() {
   const { account, activeProfile } = useAuth();
@@ -402,7 +406,7 @@ function CollectionsAdmin() {
   function openEditor(collection: Collection | "new") {
     setEditing(collection);
     if (collection === "new") setDraft(blankCollection(activeProfile ? [activeProfile.id] : []));
-    else setDraft({ title: collection.title, backdropImageUrl: collection.backdropImageUrl, pinToTop: collection.pinToTop, focusGlowEnabled: collection.focusGlowEnabled, viewMode: collection.viewMode, folderCoverShape: collection.folderCoverShape, folders: structuredClone(collection.folders), profileIds: collection.profileIds, expectedVersion: collection.version });
+    else setDraft({ title: collection.title, backdropImageUrl: collection.backdropImageUrl, heroEnabled: collection.heroEnabled, pinToTop: collection.pinToTop, focusGlowEnabled: collection.focusGlowEnabled, viewMode: collection.viewMode, folderCoverShape: collection.folderCoverShape, folders: structuredClone(collection.folders), profileIds: collection.profileIds, expectedVersion: collection.version });
     setError("");
     setDraggedFolderIndex(null);
     setDraggedSource(null);
@@ -566,7 +570,7 @@ function CollectionsAdmin() {
   }
 
   return <div className="admin-section"><><div className="admin-section__header"><div><span>Curation</span><h2>Collections</h2><p>Build the rows and worlds that make every profile's home unique.</p></div><div className="admin-section__actions"><input ref={importInput} type="file" accept="application/json,.json" hidden onChange={(event) => void importCollections(event)} /><Button type="button" variant="secondary" loading={transfer === "export"} disabled={Boolean(transfer)} onClick={() => void exportCollections()}><Save size={18} /> Export JSON</Button><Button type="button" variant="secondary" loading={transfer === "import"} disabled={Boolean(transfer)} onClick={() => importInput.current?.click()}><Upload size={18} /> Import JSON</Button><Button type="button" disabled={Boolean(transfer)} onClick={() => openEditor("new")}><Plus size={18} /> New collection</Button></div></div>{success && <Notice tone="success">{success}</Notice>}</>{error && <Notice>{error}</Notice>}{loading ? <div className="collection-admin-grid"><Skeleton className="collection-skeleton" /><Skeleton className="collection-skeleton" /></div> : collections.length ? <div className="collection-admin-grid">{collections.map((collection, collectionIndex) => <article key={collection.id} className={`collection-admin-card ${draggedCollectionIndex === collectionIndex ? "is-dragging" : ""}`} style={collection.backdropImageUrl ? { backgroundImage: `url(${collection.backdropImageUrl})` } : undefined} draggable={!reordering} onDragStart={(event) => { setDraggedCollectionIndex(collectionIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(collectionIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedCollectionIndex !== null) stageCollectionMove(draggedCollectionIndex, collectionIndex); }} onDragOver={(event) => { if (draggedCollectionIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveCollectionOrder(); }} onDragEnd={() => { if (draggedCollectionIndex !== null) void saveCollectionOrder(); }}><div className="collection-admin-card__shade" /><span>{collection.pinToTop ? <><Sparkles size={14} /> Pinned</> : `Position ${collection.position + 1}`}</span><div><h3>{collection.title}</h3><p>{collection.folders.length} folder{collection.folders.length === 1 ? "" : "s"} · {collection.folders.reduce((total, folder) => total + folder.sources.length, 0)} sources</p><div><><IconButton label={`Move ${collection.title} up`} disabled={reordering || collectionIndex === 0 || collections[collectionIndex - 1]?.pinToTop !== collection.pinToTop} onClick={() => void moveCollection(collectionIndex, collectionIndex - 1)}><ChevronUp size={17} /></IconButton><IconButton label={`Move ${collection.title} down`} disabled={reordering || collectionIndex === collections.length - 1 || collections[collectionIndex + 1]?.pinToTop !== collection.pinToTop} onClick={() => void moveCollection(collectionIndex, collectionIndex + 1)}><ChevronDown size={17} /></IconButton><Button variant="secondary" onClick={() => openEditor(collection)}><Pencil size={17} /> Edit</Button></><IconButton label={`Delete ${collection.title}`} onClick={() => setDeleting(collection)}><Trash2 size={17} /></IconButton></div></div></article>)}</div> : <EmptyState icon={<Layers3 size={44} />} title="No collections yet" description="Create the first curated space for this profile." action={<Button onClick={() => openEditor("new")}><Plus size={18} /> Create collection</Button>} />}
-    {editing && <Modal onClose={() => setEditing(null)} className="editor-modal collection-editor"><form onSubmit={submit}><div className="editor-modal__heading"><span><Layers3 size={18} /> {editing === "new" ? "New collection" : "Collection editor"}</span><h2>Design a world worth entering.</h2><p>Mix addons, TMDB discovery, people, networks, and Trakt lists in any order.</p></div>{error && <Notice>{error}</Notice>}<section className="editor-group"><div className="form-grid form-grid--three"><label className="field"><span>Collection title</span><div><Layers3 size={18} /><input value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} required /></div></label><label className="field"><span>Backdrop URL</span><div><ImagePlus size={18} /><input type="url" value={draft.backdropImageUrl ?? ""} onChange={(event) => setDraft((current) => ({ ...current, backdropImageUrl: event.target.value || undefined }))} placeholder="https://…" /></div></label><label className="field"><span>Folder cover shape</span><div><Boxes size={18} /><select value={draft.folderCoverShape} onChange={(event) => setDraft((current) => ({ ...current, folderCoverShape: event.target.value as CollectionSaveInput["folderCoverShape"] }))}><option value="poster">Poster</option><option value="landscape">Landscape</option><option value="square">Square</option></select></div></label></div><div className="choice-row choice-row--three"><label className="toggle-field"><input type="checkbox" checked={draft.pinToTop} onChange={(event) => setDraft((current) => ({ ...current, pinToTop: event.target.checked }))} /><span><i /><div><strong>Pin to top</strong><small>Always show first</small></div></span></label><label className="toggle-field"><input type="checkbox" checked={draft.focusGlowEnabled} onChange={(event) => setDraft((current) => ({ ...current, focusGlowEnabled: event.target.checked }))} /><span><i /><div><strong>Focus glow</strong><small>Ambient highlight</small></div></span></label><label className="toggle-field"><input type="checkbox" checked={draft.viewMode === "follow_layout"} onChange={(event) => setDraft((current) => ({ ...current, viewMode: event.target.checked ? "follow_layout" : "rows" }))} /><span><i /><div><strong>Display titles directly</strong><small>Otherwise browse by folder</small></div></span></label></div></section>
+    {editing && <Modal onClose={() => setEditing(null)} className="editor-modal collection-editor"><form onSubmit={submit}><div className="editor-modal__heading"><span><Layers3 size={18} /> {editing === "new" ? "New collection" : "Collection editor"}</span><h2>Design a world worth entering.</h2><p>Mix addons, TMDB discovery, people, networks, and Trakt lists in any order.</p></div>{error && <Notice>{error}</Notice>}<section className="editor-group"><div className="form-grid form-grid--three"><label className="field"><span>Collection title</span><div><Layers3 size={18} /><input value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} required /></div></label><label className="field"><span>Backdrop URL</span><div><ImagePlus size={18} /><input type="url" value={draft.backdropImageUrl ?? ""} onChange={(event) => setDraft((current) => ({ ...current, backdropImageUrl: event.target.value || undefined }))} placeholder="https://…" /></div></label><label className="field"><span>Folder cover shape</span><div><Boxes size={18} /><select value={draft.folderCoverShape} onChange={(event) => setDraft((current) => ({ ...current, folderCoverShape: event.target.value as CollectionSaveInput["folderCoverShape"] }))}><option value="poster">Poster</option><option value="landscape">Landscape</option><option value="square">Square</option></select></div></label></div><div className="choice-row choice-row--four"><label className="toggle-field"><input type="checkbox" checked={draft.heroEnabled} onChange={(event) => setDraft((current) => ({ ...current, heroEnabled: event.target.checked }))} /><span><i /><div><strong>Hero section</strong><small>Feature this collection on Home</small></div></span></label><label className="toggle-field"><input type="checkbox" checked={draft.pinToTop} onChange={(event) => setDraft((current) => ({ ...current, pinToTop: event.target.checked }))} /><span><i /><div><strong>Pin to top</strong><small>Always show first</small></div></span></label><label className="toggle-field"><input type="checkbox" checked={draft.focusGlowEnabled} onChange={(event) => setDraft((current) => ({ ...current, focusGlowEnabled: event.target.checked }))} /><span><i /><div><strong>Focus glow</strong><small>Ambient highlight</small></div></span></label><label className="toggle-field"><input type="checkbox" checked={draft.viewMode === "follow_layout"} onChange={(event) => setDraft((current) => ({ ...current, viewMode: event.target.checked ? "follow_layout" : "rows" }))} /><span><i /><div><strong>Display titles directly</strong><small>Otherwise browse by folder</small></div></span></label></div></section>
       <ProfileAssignmentPicker profiles={profiles} selected={draft.profileIds} onChange={(profileIds) => setDraft((current) => ({ ...current, profileIds }))} legend="Available to" />
       <div className="folder-editor-list">{draft.folders.map((folder, folderIndex) => <section className={`folder-editor ${draggedFolderIndex === folderIndex ? "is-dragging" : ""}`} key={folder.id ?? folderIndex} onDragEnter={(event) => { event.preventDefault(); if (draggedFolderIndex !== null && draggedFolderIndex !== folderIndex) { moveFolder(draggedFolderIndex, folderIndex); setDraggedFolderIndex(folderIndex); } }} onDragOver={(event) => { if (draggedFolderIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); setDraggedFolderIndex(null); }}><header><button type="button" className="folder-editor__drag" draggable onDragStart={(event) => { setDraggedFolderIndex(folderIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(folderIndex)); }} onDragEnd={() => setDraggedFolderIndex(null)} aria-label={`Move folder ${folderIndex + 1}`}><GripVertical /><span>Folder {folderIndex + 1}</span></button><div><IconButton type="button" label="Move folder up" disabled={folderIndex === 0} onClick={() => moveFolder(folderIndex, folderIndex - 1)}><ChevronUp size={17} /></IconButton><IconButton type="button" label="Move folder down" disabled={folderIndex === draft.folders.length - 1} onClick={() => moveFolder(folderIndex, folderIndex + 1)}><ChevronDown size={17} /></IconButton>{draft.folders.length > 1 && <IconButton type="button" label="Remove folder" onClick={() => setDraft((current) => ({ ...current, folders: current.folders.filter((_, index) => index !== folderIndex) }))}><Trash2 size={17} /></IconButton>}</div></header><div className="form-grid form-grid--three"><label className="field"><span>Folder title</span><div><Film size={18} /><input value={folder.title} onChange={(event) => updateFolder(folderIndex, { title: event.target.value })} required /></div></label><><label className="field"><span>Tile shape</span><div><select value={folder.tileShape} onChange={(event) => updateFolder(folderIndex, { tileShape: event.target.value as CollectionFolder["tileShape"] })}><option value="poster">Poster</option><option value="landscape">Landscape</option><option value="square">Square</option></select></div></label><label className="field"><span>Multiple sources</span><div><select value={folder.sourceView ?? "merged"} onChange={(event) => updateFolder(folderIndex, { sourceView: event.target.value as CollectionFolder["sourceView"] })}><option value="merged">All together</option><option value="categories">Category tabs</option><option value="folders">Source folders</option></select></div></label></><><label className="field"><span>Cover emoji</span><div><Sparkles size={18} /><input value={folder.coverEmoji ?? ""} onChange={(event) => updateFolder(folderIndex, { coverEmoji: event.target.value })} placeholder="✨" /></div></label><label className="field"><span>Cover image URL</span><div><ImagePlus size={18} /><input type="url" value={folder.coverImageUrl ?? ""} onChange={(event) => updateFolder(folderIndex, { coverImageUrl: event.target.value || undefined })} placeholder="https://…" /></div></label></><label className="toggle-field folder-title-toggle"><input type="checkbox" checked={!folder.hideTitle} onChange={(event) => updateFolder(folderIndex, { hideTitle: !event.target.checked })} /><span><i /><div><strong>Show folder title</strong><small>Display name below cover</small></div></span></label></div><div className="source-list">{folder.sources.map((source, sourceIndex) => <div className={`source-editor-shell ${draggedSource?.folderIndex === folderIndex && draggedSource.sourceIndex === sourceIndex ? "is-dragging" : ""}`} key={source.id ?? sourceIndex} onDragEnter={(event) => { event.preventDefault(); event.stopPropagation(); if (draggedSource?.folderIndex === folderIndex && draggedSource.sourceIndex !== sourceIndex) { moveSource(folderIndex, draggedSource.sourceIndex, sourceIndex); setDraggedSource({ folderIndex, sourceIndex }); } }} onDragOver={(event) => { if (draggedSource?.folderIndex === folderIndex) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); setDraggedSource(null); }}><header className="source-editor-order"><button type="button" className="source-editor__drag" draggable onDragStart={(event) => { event.stopPropagation(); setDraggedSource({ folderIndex, sourceIndex }); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", `${folderIndex}:${sourceIndex}`); }} onDragEnd={() => setDraggedSource(null)} aria-label={`Move source ${sourceIndex + 1}`}><GripVertical size={16} /><span>Source {sourceIndex + 1}</span></button><div><IconButton type="button" label="Move source up" disabled={sourceIndex === 0} onClick={() => moveSource(folderIndex, sourceIndex, sourceIndex - 1)}><ChevronUp size={16} /></IconButton><IconButton type="button" label="Move source down" disabled={sourceIndex === folder.sources.length - 1} onClick={() => moveSource(folderIndex, sourceIndex, sourceIndex + 1)}><ChevronDown size={16} /></IconButton></div></header><SourceEditor source={source} catalogs={catalogs} onChange={(value) => updateSource(folderIndex, sourceIndex, value)} onRemove={() => updateFolder(folderIndex, { sources: folder.sources.filter((_, index) => index !== sourceIndex) })} /></div>)}<div className="source-add"><span>Add a source</span><Button type="button" variant="secondary" onClick={() => addSource(folderIndex, "addon_catalog")} disabled={catalogs.length === 0}><Boxes size={16} /> Addon</Button><Button type="button" variant="secondary" onClick={() => addSource(folderIndex, "tmdb")}><Film size={16} /> TMDB</Button><Button type="button" variant="secondary" onClick={() => addSource(folderIndex, "trakt")}><Database size={16} /> Trakt</Button></div></div></section>)}</div><AddTile label="Add another folder" onClick={() => setDraft((current) => ({ ...current, folders: [...current.folders, blankFolder()] }))} /><div className="modal-actions modal-actions--sticky"><Button type="button" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button><Button type="submit" loading={saving}><Save size={18} /> Save collection</Button></div></form></Modal>}
     {deleting && <ConfirmDialog title={`Delete ${deleting.title}?`} description="This collection and its folder configuration will be permanently removed. This cannot be undone." confirmLabel="Delete collection" onCancel={() => setDeleting(null)} onConfirm={() => void remove(deleting)} />}
@@ -760,6 +764,138 @@ function tmdbLabel(sourceType: NonNullable<CollectionSource["tmdb"]>["sourceType
 
 function numericList(value: string): number[] {
   return value.split(",").map((part) => Number(part.trim())).filter((number) => Number.isInteger(number) && number > 0);
+}
+
+function ActivityAdmin() {
+  const [activity, setActivity] = useState<PlaybackActivity | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [purging, setPurging] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [selectedSession, setSelectedSession] = useState<PlaybackActivitySession | null>(null);
+  const [error, setError] = useState("");
+
+  async function load(silent = false) {
+    if (!silent) setRefreshing(true);
+    try {
+      setActivity(await api.playbackActivity());
+      setError("");
+    } catch (cause) {
+      setError(notifyError(cause, "Playback activity could not be loaded.", "Activity unavailable"));
+    } finally {
+      setLoading(false);
+      if (!silent) setRefreshing(false);
+    }
+  }
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      try {
+        const value = await api.playbackActivity();
+        if (active) {
+          setActivity(value);
+          setError("");
+          setLoading(false);
+        }
+      } catch (cause) {
+        if (active) {
+          setError(notifyError(cause, "Playback activity could not be loaded.", "Activity unavailable"));
+          setLoading(false);
+        }
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(() => { void refresh(); }, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  async function purge() {
+    setPurging(true);
+    try {
+      const result = await api.purgePlaybackActivity();
+      notifySuccess(`${result.sessionsRemoved} inactive sessions and ${result.jobsStopped} orphaned jobs removed.`, "Media cleaned");
+      await load(true);
+    } catch (cause) {
+      setError(notifyError(cause, "Inactive media could not be purged.", "Cleanup failed"));
+    } finally {
+      setPurging(false);
+    }
+  }
+
+  async function stopSession() {
+    if (!selectedSession) return;
+    setStopping(true);
+    try {
+      await api.stopPlaybackActivitySession(selectedSession.id);
+      notifySuccess(`${selectedSession.title} was stopped.`, "Playback stopped");
+      setSelectedSession(null);
+      await load(true);
+    } catch (cause) {
+      setError(notifyError(cause, "The playback session could not be stopped.", "Stop failed"));
+    } finally {
+      setStopping(false);
+    }
+  }
+
+  if (loading) return <Skeleton className="settings-skeleton" />;
+  const summary = activity?.summary;
+  return <div className="admin-section activity-admin">
+    <div className="admin-section__header"><div><span>Live media</span><h2>Playback activity</h2><p>See active sessions, processing pressure, and temporary media usage.</p></div><div className="admin-section__actions"><Button variant="secondary" onClick={() => void load()} loading={refreshing}><RefreshCw size={16} />Refresh</Button><Button variant="secondary" onClick={() => void purge()} loading={purging}><HardDrive size={16} />Purge expired media</Button></div></div>
+    {error && <Notice>{error}</Notice>}
+    <div className="activity-overview">
+      <ActivityMetric icon={<Radio />} label="Sessions" value={String(summary?.activeSessions ?? 0)} detail={`${summary?.activeJobs ?? 0} media jobs`} />
+      <ActivityMetric icon={<Cpu />} label="Processing" value={`${summary?.processingSlots ?? 0} / ${summary?.processingLimit ?? 0}`} detail="FFmpeg slots" />
+      <ActivityMetric icon={<HardDrive />} label="Temporary media" value={formatBytes(summary?.storageBytes ?? 0)} detail={`of ${formatBytes(summary?.storageLimitBytes ?? 0)}`} />
+      <ActivityMetric icon={<Server />} label="Encoder" value={activity?.diagnostics.videoEncoder.toUpperCase() ?? "UNKNOWN"} detail={activity?.diagnostics.hardwareToneMap ? "Hardware tone mapping" : "Software tone mapping"} />
+    </div>
+    <section className="activity-panel">
+      <header><div><span>Now playing</span><h3>Sessions</h3></div><small>{activity?.sessions.length ?? 0} active</small></header>
+      {activity?.sessions.length
+        ? <div className="activity-session-list">{activity.sessions.map((session) => <article className="activity-session" key={session.id}><span className={`activity-session__state ${session.processing ? "is-processing" : ""}`}><Activity size={18} /></span><div><strong>{session.title}</strong><span>{session.profile} · {session.username}</span><small>{session.device} · {session.platform} · {activityModeLabel(session.mode)}</small></div><div className="activity-session__time"><strong>{activityAge(session.lastSeenAt)}</strong><small>started {activityAge(session.createdAt)}</small></div><Button variant="danger" onClick={() => setSelectedSession(session)}><CircleStop size={16} />Stop</Button></article>)}</div>
+        : <EmptyState icon={<Radio />} title="No active playback" description="Sessions appear here as soon as a device starts playing." />}
+    </section>
+    <section className="activity-panel">
+      <header><div><span>Media workers</span><h3>Processing jobs</h3></div><small>{activity?.jobs.length ?? 0} jobs</small></header>
+      {activity?.jobs.length
+        ? <div className="activity-job-list">{activity.jobs.map((job, index) => <article className="activity-job" key={`${job.sessionId ?? "prewarm"}-${job.assetId}-${index}`}><span className={`activity-job__dot is-${job.state}`} /><div><strong>{job.prewarming ? "Preparing selected source" : activityModeLabel(job.mode)}</strong><small>{job.assetId} · last request {activityAge(job.lastSeenAt)}</small></div><span>{job.state}</span></article>)}</div>
+        : <EmptyState icon={<Cpu />} title="No media processing" description="Direct play does not consume an FFmpeg slot." />}
+    </section>
+    {selectedSession && <ConfirmDialog title={`Stop ${selectedSession.title}?`} description={`Playback on ${selectedSession.device} will end immediately and its temporary media will be deleted.`} confirmLabel="Stop playback" loading={stopping} onConfirm={() => void stopSession()} onCancel={() => setSelectedSession(null)} />}
+  </div>;
+}
+
+function ActivityMetric({ icon, label, value, detail }: { icon: React.ReactNode; label: string; value: string; detail: string }) {
+  return <article className="activity-metric"><span>{icon}</span><div><small>{label}</small><strong>{value}</strong><span>{detail}</span></div></article>;
+}
+
+function activityModeLabel(mode: string): string {
+  return { direct: "Direct play", remux: "Remux", transcode_audio: "Audio conversion", transcode: "Video transcode" }[mode] ?? mode;
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let scaled = value;
+  let index = -1;
+  do {
+    scaled /= 1024;
+    index++;
+  } while (scaled >= 1024 && index < units.length - 1);
+  return `${scaled >= 10 ? scaled.toFixed(0) : scaled.toFixed(1)} ${units[index]}`;
+}
+
+function activityAge(value: string): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
 }
 
 function SettingsAdmin() {

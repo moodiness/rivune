@@ -54,6 +54,14 @@ func (*blockingHLSProcessor) ConvertSubtitle(context.Context, storedAsset, io.Wr
 	return nil
 }
 
+func (*blockingHLSProcessor) Probe(context.Context, storedAsset) (MediaInspection, error) {
+	return MediaInspection{}, nil
+}
+
+func (*blockingHLSProcessor) Process(context.Context, storedAsset, io.Writer) error {
+	return nil
+}
+
 func TestHLSJobServesBeforeCompletionAndStopsWithSession(t *testing.T) {
 	processor := &blockingHLSProcessor{ready: make(chan struct{}), stopped: make(chan struct{})}
 	service := &Service{
@@ -111,6 +119,69 @@ func TestHLSJobRejectsExhaustedStorage(t *testing.T) {
 	}
 }
 
+func TestPlaybackServiceStartupClearsSaturatedWorkspace(t *testing.T) {
+	root := t.TempDir()
+	staleDirectory := filepath.Join(root, "rivune-media", "orphaned-session")
+	if err := os.MkdirAll(staleDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleDirectory, "segment.m4s"), []byte("stale media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	processor := &blockingHLSProcessor{ready: make(chan struct{}), stopped: make(chan struct{})}
+	service, err := NewService(nil, nil, processor, MediaOptions{TempDirectory: root, MaxStorageBytes: 1, IdleTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size := directorySize(service.mediaOptions.TempDirectory); size != 0 {
+		t.Fatalf("startup retained %d bytes of orphaned media", size)
+	}
+	if _, err := service.hlsJob("session-1", storedAsset{ID: "stream-1"}, processor, true); err != nil {
+		t.Fatalf("start media job after startup cleanup: %v", err)
+	}
+	select {
+	case <-processor.ready:
+	case <-time.After(time.Second):
+		t.Fatal("media job did not start after startup cleanup")
+	}
+	service.stopHLSSession("session-1")
+}
+
+func TestHLSStorageCapacityRecoversAfterSessionStop(t *testing.T) {
+	service := &Service{
+		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1, IdleTTL: time.Minute},
+		hlsJobs:      make(map[string]*hlsJob),
+	}
+	first := &blockingHLSProcessor{ready: make(chan struct{}), stopped: make(chan struct{})}
+	if _, err := service.hlsJob("session-1", storedAsset{ID: "stream-1"}, first, true); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-first.ready:
+	case <-time.After(time.Second):
+		t.Fatal("first media job did not fill the workspace")
+	}
+	if _, err := service.hlsJob("session-2", storedAsset{ID: "stream-2"}, first, true); !errors.Is(err, ErrMediaStorageLimit) {
+		t.Fatalf("expected saturated workspace, got %v", err)
+	}
+
+	service.stopHLSSession("session-1")
+	if size := directorySize(service.mediaOptions.TempDirectory); size != 0 {
+		t.Fatalf("session cleanup retained %d bytes", size)
+	}
+
+	second := &blockingHLSProcessor{ready: make(chan struct{}), stopped: make(chan struct{})}
+	if _, err := service.hlsJob("session-2", storedAsset{ID: "stream-2"}, second, true); err != nil {
+		t.Fatalf("start media job after reclaiming storage: %v", err)
+	}
+	select {
+	case <-second.ready:
+	case <-time.After(time.Second):
+		t.Fatal("media job did not start after reclaiming storage")
+	}
+	service.stopHLSSession("session-2")
+}
+
 func TestFFmpegProcessorRejectsConcurrentWorkAtCapacity(t *testing.T) {
 	processor := &FFmpegProcessor{slots: make(chan struct{}, 1)}
 	if err := processor.acquire(context.Background()); err != nil {
@@ -120,6 +191,40 @@ func TestFFmpegProcessorRejectsConcurrentWorkAtCapacity(t *testing.T) {
 	if err := processor.acquire(context.Background()); !errors.Is(err, ErrMediaCapacityReached) {
 		t.Fatalf("expected capacity error, got %v", err)
 	}
+}
+func TestPrewarmReplacesPreviousAssetForDevice(t *testing.T) {
+	first := &blockingHLSProcessor{ready: make(chan struct{}), stopped: make(chan struct{})}
+	service := &Service{
+		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1024 * 1024, IdleTTL: time.Minute},
+		hlsJobs:      make(map[string]*hlsJob),
+		processor:    first,
+	}
+	prewarmID := prewarmHLSSession("auth-session", "profile")
+	firstAsset := storedAsset{ID: "stream-1", Kind: processingTranscode, URL: "https://media.example/first.mkv"}
+	if _, err := service.hlsJob(prewarmID, firstAsset, first, true); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-first.ready:
+	case <-time.After(time.Second):
+		t.Fatal("first prewarm did not start")
+	}
+
+	second := &blockingHLSProcessor{ready: make(chan struct{}), stopped: make(chan struct{})}
+	service.processor = second
+	secondAsset := storedAsset{ID: "stream-2", Kind: processingTranscodeAudio, URL: "https://media.example/second.mkv"}
+	if err := service.prewarmHLS(context.Background(), prewarmID, Source{Protocol: "hls", Mode: processingTranscodeAudio}, &secondAsset); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-first.stopped:
+	default:
+		t.Fatal("replaced prewarm continued consuming a processing slot")
+	}
+	if len(service.hlsJobs) != 1 || service.hlsJobs[hlsJobKey(prewarmID, secondAsset)] == nil {
+		t.Fatalf("unexpected prewarm jobs after replacement: %+v", service.hlsJobs)
+	}
+	service.stopHLSSession(prewarmID)
 }
 
 func TestFFmpegConvertsSRTAndASSToWebVTT(t *testing.T) {

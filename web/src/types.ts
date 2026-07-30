@@ -98,6 +98,7 @@ export type CollectionFolder = {
 export type Collection = {
   id: string;
   title: string;
+  heroEnabled: boolean;
   backdropImageUrl?: string;
   pinToTop: boolean;
   focusGlowEnabled: boolean;
@@ -310,6 +311,45 @@ export type PlaybackSession = {
   providerErrors: PlaybackProviderFailure[];
   expiresAt: string;
 };
+export type PlaybackActivitySession = {
+  id: string;
+  titleId?: string;
+  title: string;
+  mediaType: string;
+  mode: "direct" | "remux" | "transcode_audio" | "transcode" | "unknown";
+  username: string;
+  profileId: string;
+  profile: string;
+  device: string;
+  platform: string;
+  processing: boolean;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+};
+export type PlaybackMediaJob = {
+  sessionId?: string;
+  assetId: string;
+  mode: string;
+  state: "processing" | "complete" | "failed";
+  prewarming: boolean;
+  createdAt: string;
+  lastSeenAt: string;
+};
+export type PlaybackActivity = {
+  summary: {
+    activeSessions: number;
+    activeJobs: number;
+    processingSlots: number;
+    processingLimit: number;
+    storageBytes: number;
+    storageLimitBytes: number;
+  };
+  diagnostics: { videoEncoder: string; hardwareToneMap: boolean };
+  sessions: PlaybackActivitySession[];
+  jobs: PlaybackMediaJob[];
+};
+export type PlaybackPurgeResult = { sessionsRemoved: number; jobsStopped: number; storageBytes: number };
 export type PlaybackProgress = { titleId: string; mediaType?: string; positionSeconds: number; durationSeconds: number; completed: boolean; version: number; updatedAt?: string };
 export type LibraryItem = {
   titleId: string;

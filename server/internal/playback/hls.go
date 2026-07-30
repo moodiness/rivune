@@ -40,13 +40,19 @@ type HLSProcessor interface {
 }
 
 type hlsJob struct {
-	directory   string
-	fingerprint string
-	cancel      context.CancelFunc
-	done        chan struct{}
-	timer       *time.Timer
-	mu          sync.RWMutex
-	err         error
+	directory    string
+	fingerprint  string
+	sessionID    string
+	assetID      string
+	mode         string
+	prewarming   bool
+	createdAt    time.Time
+	lastAccessed time.Time
+	cancel       context.CancelFunc
+	done         chan struct{}
+	timer        *time.Timer
+	mu           sync.RWMutex
+	err          error
 }
 
 func normalizeMediaOptions(options MediaOptions) MediaOptions {
@@ -61,6 +67,13 @@ func normalizeMediaOptions(options MediaOptions) MediaOptions {
 		options.IdleTTL = defaultMediaIdleTTL
 	}
 	return options
+}
+
+func (service *Service) currentTime() time.Time {
+	if service.now != nil {
+		return service.now()
+	}
+	return time.Now().UTC()
 }
 
 func (service *Service) proxyConvertedSubtitle(w http.ResponseWriter, r *http.Request, asset storedAsset) error {
@@ -176,8 +189,11 @@ func (service *Service) hlsJob(sessionID string, asset storedAsset, processor HL
 		return nil, fmt.Errorf("%w: create media workspace: %v", ErrMediaProcessingFailed, err)
 	}
 	jobContext, cancel := context.WithCancel(context.Background())
+	now := service.currentTime()
 	job := &hlsJob{
-		directory: directory, fingerprint: hlsAssetFingerprint(asset), cancel: cancel, done: make(chan struct{}),
+		directory: directory, fingerprint: hlsAssetFingerprint(asset), sessionID: sessionID, assetID: asset.ID,
+		mode: asset.Kind, prewarming: strings.HasPrefix(sessionID, "prewarm-"), createdAt: now, lastAccessed: now,
+		cancel: cancel, done: make(chan struct{}),
 	}
 	service.hlsJobs[key] = job
 	service.hlsMu.Unlock()
@@ -188,7 +204,7 @@ func (service *Service) hlsJob(sessionID string, asset storedAsset, processor HL
 	return job, nil
 }
 
-func (service *Service) prewarmHLS(ctx context.Context, sourceRef string, source Source, asset *storedAsset) error {
+func (service *Service) prewarmHLS(ctx context.Context, prewarmSessionID string, source Source, asset *storedAsset) error {
 	if asset == nil || source.Protocol != "hls" || source.Mode == "direct" {
 		return nil
 	}
@@ -196,7 +212,8 @@ func (service *Service) prewarmHLS(ctx context.Context, sourceRef string, source
 	if !ok {
 		return ErrMediaProcessingFailed
 	}
-	job, err := service.hlsJob(prewarmHLSSession(sourceRef), *asset, processor, true)
+	service.stopOtherHLSGenerations(prewarmSessionID+"/", hlsJobKey(prewarmSessionID, *asset))
+	job, err := service.hlsJob(prewarmSessionID, *asset, processor, true)
 	if err != nil {
 		return err
 	}
@@ -207,7 +224,7 @@ func (service *Service) prewarmHLS(ctx context.Context, sourceRef string, source
 	return nil
 }
 
-func (service *Service) startSessionHLS(sourceRef, sessionID string, sources []Source, assets []storedAsset) error {
+func (service *Service) startSessionHLS(prewarmSessionID, sessionID string, sources []Source, assets []storedAsset) error {
 	for _, source := range sources {
 		if !source.Compatible || source.Protocol != "hls" || source.Mode == "direct" {
 			continue
@@ -217,7 +234,7 @@ func (service *Service) startSessionHLS(sourceRef, sessionID string, sources []S
 			return ErrMediaProcessingFailed
 		}
 		asset := assets[assetIndex]
-		if service.adoptHLSJob(prewarmHLSSession(sourceRef), sessionID, asset) {
+		if service.adoptHLSJob(prewarmSessionID, sessionID, asset) {
 			return nil
 		}
 		processor, ok := service.processor.(HLSProcessor)
@@ -239,12 +256,17 @@ func (service *Service) adoptHLSJob(fromSessionID, toSessionID string, asset sto
 	if job == nil || job.fingerprint != hlsAssetFingerprint(asset) || service.hlsJobs[toKey] != nil {
 		return false
 	}
+	job.mu.Lock()
 	if job.timer != nil {
 		job.timer.Stop()
 	}
+	job.sessionID = toSessionID
+	job.prewarming = false
+	job.lastAccessed = service.currentTime()
 	delete(service.hlsJobs, fromKey)
 	service.hlsJobs[toKey] = job
 	job.timer = time.AfterFunc(service.mediaOptions.IdleTTL, func() { service.stopHLSJob(toKey) })
+	job.mu.Unlock()
 	return true
 }
 
@@ -262,8 +284,8 @@ func (service *Service) stopOtherHLSGenerations(prefix, keep string) {
 	}
 }
 
-func prewarmHLSSession(sourceRef string) string {
-	return "prewarm-" + sourceRef
+func prewarmHLSSession(authSessionID, profileID string) string {
+	return "prewarm-" + authSessionID + "-" + profileID
 }
 
 func hlsJobPrefix(sessionID, assetID string) string {
@@ -319,6 +341,9 @@ func (service *Service) monitorHLSStorage(ctx context.Context, job *hlsJob) {
 }
 
 func (service *Service) touchHLSJob(job *hlsJob) {
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	job.lastAccessed = service.currentTime()
 	if job.timer != nil {
 		job.timer.Reset(service.mediaOptions.IdleTTL)
 	}
@@ -334,9 +359,11 @@ func (service *Service) stopHLSJob(key string) {
 	if job == nil {
 		return
 	}
+	job.mu.Lock()
 	if job.timer != nil {
 		job.timer.Stop()
 	}
+	job.mu.Unlock()
 	job.cancel()
 	select {
 	case <-job.done:

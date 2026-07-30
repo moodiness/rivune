@@ -1463,6 +1463,82 @@ paths:
           $ref: "#/components/responses/Error"
         "502":
           $ref: "#/components/responses/Error"
+  /playback/sessions/{sessionId}:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      summary: Stop the caller's playback session
+      operationId: stopPlayback
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Playback session and media processing stopped.
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /playback/activity:
+    get:
+      summary: Inspect active playback and media processing
+      operationId: getPlaybackActivity
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Administrator playback activity and media diagnostics.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackActivity"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /playback/activity/sessions/{sessionId}:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      summary: Stop any playback session as an administrator
+      operationId: stopPlaybackActivitySession
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Playback session and media processing stopped.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /playback/activity/purge:
+    post:
+      summary: Purge inactive playback sessions and orphaned media
+      operationId: purgePlaybackActivity
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Cleanup result and remaining media storage.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackPurgeResult"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
   /playback/sessions/{sessionId}/assets/{assetId}:
     parameters:
       - name: sessionId
@@ -3134,7 +3210,7 @@ components:
     Collection:
       type: object
       additionalProperties: false
-      required: [id, title, pinToTop, focusGlowEnabled, viewMode, folderCoverShape, folders, profileIds, position, version, createdAt, updatedAt]
+      required: [id, title, heroEnabled, pinToTop, focusGlowEnabled, viewMode, folderCoverShape, folders, profileIds, position, version, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -3146,6 +3222,8 @@ components:
         backdropImageUrl:
           type: string
           format: uri
+        heroEnabled:
+          type: boolean
         pinToTop:
           type: boolean
         focusGlowEnabled:
@@ -3180,7 +3258,7 @@ components:
     CollectionSaveInput:
       type: object
       additionalProperties: false
-      required: [title, pinToTop, focusGlowEnabled, viewMode, folderCoverShape, folders]
+      required: [title, heroEnabled, pinToTop, focusGlowEnabled, viewMode, folderCoverShape, folders]
       properties:
         title:
           type: string
@@ -3189,6 +3267,8 @@ components:
         backdropImageUrl:
           type: string
           format: uri
+        heroEnabled:
+          type: boolean
         pinToTop:
           type: boolean
         focusGlowEnabled:
@@ -3248,7 +3328,7 @@ components:
     PortableCollection:
       type: object
       additionalProperties: false
-      required: [title, pinToTop, focusGlowEnabled, viewMode, folderCoverShape, folders]
+      required: [title, heroEnabled, pinToTop, focusGlowEnabled, viewMode, folderCoverShape, folders]
       properties:
         title:
           type: string
@@ -3257,6 +3337,8 @@ components:
         backdropImageUrl:
           type: string
           format: uri
+        heroEnabled:
+          type: boolean
         pinToTop:
           type: boolean
         focusGlowEnabled:
@@ -4021,6 +4103,134 @@ components:
         expiresAt:
           type: string
           format: date-time
+    PlaybackActivity:
+      type: object
+      additionalProperties: false
+      required: [summary, diagnostics, sessions, jobs]
+      properties:
+        summary:
+          $ref: "#/components/schemas/PlaybackActivitySummary"
+        diagnostics:
+          $ref: "#/components/schemas/PlaybackMediaDiagnostics"
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaybackActivitySession"
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaybackMediaJob"
+    PlaybackActivitySummary:
+      type: object
+      additionalProperties: false
+      required: [activeSessions, activeJobs, processingSlots, processingLimit, storageBytes, storageLimitBytes]
+      properties:
+        activeSessions:
+          type: integer
+          minimum: 0
+        activeJobs:
+          type: integer
+          minimum: 0
+        processingSlots:
+          type: integer
+          minimum: 0
+        processingLimit:
+          type: integer
+          minimum: 0
+        storageBytes:
+          type: integer
+          format: int64
+          minimum: 0
+        storageLimitBytes:
+          type: integer
+          format: int64
+          minimum: 1
+    PlaybackMediaDiagnostics:
+      type: object
+      additionalProperties: false
+      required: [videoEncoder, hardwareToneMap]
+      properties:
+        videoEncoder:
+          type: string
+        hardwareToneMap:
+          type: boolean
+    PlaybackActivitySession:
+      type: object
+      additionalProperties: false
+      required: [id, title, mediaType, mode, username, profileId, profile, device, platform, processing, createdAt, lastSeenAt, expiresAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        titleId:
+          type: string
+        title:
+          type: string
+        mediaType:
+          type: string
+        mode:
+          type: string
+          enum: [direct, remux, transcode_audio, transcode, unknown]
+        username:
+          type: string
+        profileId:
+          type: string
+          format: uuid
+        profile:
+          type: string
+        device:
+          type: string
+        platform:
+          type: string
+        processing:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+    PlaybackMediaJob:
+      type: object
+      additionalProperties: false
+      required: [assetId, mode, state, prewarming, createdAt, lastSeenAt]
+      properties:
+        sessionId:
+          type: string
+          format: uuid
+        assetId:
+          type: string
+        mode:
+          type: string
+        state:
+          type: string
+          enum: [processing, complete, failed]
+        prewarming:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+    PlaybackPurgeResult:
+      type: object
+      additionalProperties: false
+      required: [sessionsRemoved, jobsStopped, storageBytes]
+      properties:
+        sessionsRemoved:
+          type: integer
+          minimum: 0
+        jobsStopped:
+          type: integer
+          minimum: 0
+        storageBytes:
+          type: integer
+          format: int64
+          minimum: 0
     PlaybackSource:
       type: object
       additionalProperties: false

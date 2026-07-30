@@ -44,6 +44,18 @@ func (*fakePlaybackService) Stop(context.Context, auth.Principal, string) error 
 	return nil
 }
 
+func (*fakePlaybackService) Activity(context.Context, auth.Principal) (playback.Activity, error) {
+	return playback.Activity{}, nil
+}
+
+func (*fakePlaybackService) StopActivitySession(context.Context, auth.Principal, string) error {
+	return nil
+}
+
+func (*fakePlaybackService) PurgeActivity(context.Context, auth.Principal) (playback.PurgeResult, error) {
+	return playback.PurgeResult{}, nil
+}
+
 func (fake *fakePlaybackService) ProxyAsset(http.ResponseWriter, *http.Request, string, string, string, string, string) error {
 	return fake.proxyErr
 }

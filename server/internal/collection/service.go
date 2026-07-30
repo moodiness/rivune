@@ -46,16 +46,7 @@ func (service *Service) List(ctx context.Context, principal auth.Principal) ([]C
 		return nil, err
 	}
 	rows, err := service.pool.Query(ctx, `
-		SELECT pc.id::text, pc.title, COALESCE(pc.backdrop_image_url, ''), pc.pin_to_top,
-		       pc.focus_glow_enabled, pc.view_mode, pc.folder_cover_shape, pc.folders::text,
-		       ARRAY(
-		           SELECT assignment.profile_id::text
-		           FROM collection_profile_access assignment
-		           JOIN profiles p ON p.id = assignment.profile_id
-		           WHERE assignment.collection_id = pc.id
-		           ORDER BY lower(p.name), p.id
-		       ),
-		       access.position, pc.version, pc.created_at, pc.updated_at
+		SELECT `+sharedCollectionFields+`, access.position`+sharedCollectionTail+`
 		FROM collection_profile_access access
 		JOIN profile_collections pc ON pc.id = access.collection_id
 		WHERE access.profile_id = $1::uuid
@@ -112,16 +103,7 @@ func (service *Service) Get(ctx context.Context, principal auth.Principal, colle
 		return Collection{}, ErrInvalidInput
 	}
 	value, err := scanSharedCollection(service.pool.QueryRow(ctx, `
-		SELECT pc.id::text, pc.title, COALESCE(pc.backdrop_image_url, ''), pc.pin_to_top,
-		       pc.focus_glow_enabled, pc.view_mode, pc.folder_cover_shape, pc.folders::text,
-		       ARRAY(
-		           SELECT assignment.profile_id::text
-		           FROM collection_profile_access assignment
-		           JOIN profiles p ON p.id = assignment.profile_id
-		           WHERE assignment.collection_id = pc.id
-		           ORDER BY lower(p.name), p.id
-		       ),
-		       access.position, pc.version, pc.created_at, pc.updated_at
+		SELECT `+sharedCollectionFields+`, access.position`+sharedCollectionTail+`
 		FROM collection_profile_access access
 		JOIN profile_collections pc ON pc.id = access.collection_id
 		WHERE access.profile_id = $1::uuid AND pc.id = $2::uuid
@@ -299,16 +281,16 @@ func (service *Service) Update(ctx context.Context, principal auth.Principal, co
 	var updatedID string
 	err = tx.QueryRow(ctx, `
 		UPDATE profile_collections pc
-		SET title = $3, backdrop_image_url = NULLIF($4, ''), pin_to_top = $5,
-		    focus_glow_enabled = $6, view_mode = $7, folder_cover_shape = $8,
-		    folders = $9::jsonb, version = version + 1, updated_at = now()
-		WHERE pc.id = $2::uuid AND pc.version = $10
+		SET title = $3, backdrop_image_url = NULLIF($4, ''), hero_enabled = $5, pin_to_top = $6,
+		    focus_glow_enabled = $7, view_mode = $8, folder_cover_shape = $9,
+		    folders = $10::jsonb, version = version + 1, updated_at = now()
+		WHERE pc.id = $2::uuid AND pc.version = $11
 		  AND EXISTS (
 		      SELECT 1 FROM collection_profile_access access
 		      WHERE access.collection_id = pc.id AND access.profile_id = $1::uuid
 		  )
 		RETURNING pc.id::text
-	`, profileID, collectionID, normalized.Title, normalized.BackdropImageURL,
+	`, profileID, collectionID, normalized.Title, normalized.BackdropImageURL, normalized.HeroEnabled,
 		normalized.PinToTop, normalized.FocusGlowEnabled, normalized.ViewMode,
 		normalized.FolderCoverShape, folders, normalized.ExpectedVersion).Scan(&updatedID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -528,6 +510,7 @@ func portableCollection(value Collection, identities map[string]addonIdentity) S
 	return SaveInput{
 		Title:            value.Title,
 		BackdropImageURL: value.BackdropImageURL,
+		HeroEnabled:      value.HeroEnabled,
 		PinToTop:         value.PinToTop,
 		FocusGlowEnabled: value.FocusGlowEnabled,
 		ViewMode:         value.ViewMode,
@@ -571,14 +554,14 @@ func insertCollection(ctx context.Context, tx pgx.Tx, profileID string, normaliz
 	}
 	return scanCollection(tx.QueryRow(ctx, `
 		INSERT INTO profile_collections (
-			profile_id, title, backdrop_image_url, pin_to_top, focus_glow_enabled,
+			profile_id, title, backdrop_image_url, hero_enabled, pin_to_top, focus_glow_enabled,
 			view_mode, folder_cover_shape, folders, position
 		)
-		VALUES ($1::uuid, $2, NULLIF($3, ''), $4, $5, $6, $7, $8::jsonb, $9)
-		RETURNING id::text, title, COALESCE(backdrop_image_url, ''), pin_to_top,
+		VALUES ($1::uuid, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, $9::jsonb, $10)
+		RETURNING id::text, title, COALESCE(backdrop_image_url, ''), hero_enabled, pin_to_top,
 		          focus_glow_enabled, view_mode, folder_cover_shape, folders::text,
 		          position, version, created_at, updated_at
-	`, profileID, normalized.Title, normalized.BackdropImageURL, normalized.PinToTop,
+	`, profileID, normalized.Title, normalized.BackdropImageURL, normalized.HeroEnabled, normalized.PinToTop,
 		normalized.FocusGlowEnabled, normalized.ViewMode, normalized.FolderCoverShape, folders, position))
 }
 
@@ -590,7 +573,7 @@ func scanCollection(scanner rowScanner) (Collection, error) {
 	var value Collection
 	var foldersJSON string
 	if err := scanner.Scan(
-		&value.ID, &value.Title, &value.BackdropImageURL, &value.PinToTop,
+		&value.ID, &value.Title, &value.BackdropImageURL, &value.HeroEnabled, &value.PinToTop,
 		&value.FocusGlowEnabled, &value.ViewMode, &value.FolderCoverShape,
 		&foldersJSON, &value.Position, &value.Version, &value.CreatedAt, &value.UpdatedAt,
 	); err != nil {

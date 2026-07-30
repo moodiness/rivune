@@ -8,6 +8,7 @@ import (
 var (
 	ErrActiveProfileRequired  = errors.New("an active profile is required")
 	ErrInvalidInput           = errors.New("invalid playback request")
+	ErrForbidden              = errors.New("playback administration forbidden")
 	ErrNoPlayableSource       = errors.New("no compatible playback source")
 	ErrSessionNotFound        = errors.New("playback session not found")
 	ErrProviderUnavailable    = errors.New("playback provider unavailable")

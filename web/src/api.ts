@@ -11,6 +11,8 @@ import type {
   InstalledAddon,
   LibraryPage,
   PlaybackCapabilities,
+  PlaybackActivity,
+  PlaybackPurgeResult,
   PlaybackPreparation,
   PlaybackSession,
   PlaybackSourceList,
@@ -199,6 +201,9 @@ export const api = {
   resolvePlayback: (input: { sourceRef: string; titleId?: string; startSeconds?: number; preferredAudioTrack?: number; preferredSubtitleId?: string }) =>
     request<PlaybackSession>("/playback/resolve", { method: "POST", body: JSON.stringify(input) }),
   stopPlayback: (sessionId: string) => request<void>(`/playback/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE", keepalive: true }),
+  playbackActivity: () => request<PlaybackActivity>("/playback/activity"),
+  stopPlaybackActivitySession: (sessionId: string) => request<void>(`/playback/activity/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
+  purgePlaybackActivity: () => request<PlaybackPurgeResult>("/playback/activity/purge", { method: "POST" }),
   seriesDetails: (titleId: string) => request<SeriesMetadata>(`/metadata/series/${encodeURIComponent(titleId)}${query({ language: metadataLanguage })}`),
   seasonDetails: (seasonId: string) => request<SeasonMetadata>(`/metadata/seasons/${encodeURIComponent(seasonId)}${query({ language: metadataLanguage })}`),
 

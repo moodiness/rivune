@@ -45,16 +45,18 @@ func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessi
 	digest := sha256.Sum256([]byte(token))
 	var encodedAssets []byte
 	err := service.pool.QueryRow(r.Context(), `
-		SELECT playback.assets
-		FROM playback_sessions playback
-		JOIN auth_sessions session ON session.id = playback.auth_session_id
+		UPDATE playback_sessions playback
+		SET last_seen_at = now()
+		FROM auth_sessions session
 		WHERE playback.id::text = $1
 		  AND playback.token_hash = $2
 		  AND playback.expires_at > now()
+		  AND session.id = playback.auth_session_id
 		  AND session.revoked_at IS NULL
 		  AND session.refresh_expires_at > now()
 		  AND session.active_profile_id = playback.profile_id
 		  AND session.profile_grant_expires_at > now()
+		RETURNING playback.assets
 	`, sessionID, digest[:]).Scan(&encodedAssets)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrSessionNotFound

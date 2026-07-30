@@ -41,6 +41,7 @@ type Collection struct {
 	ID               string    `json:"id"`
 	Title            string    `json:"title"`
 	BackdropImageURL string    `json:"backdropImageUrl,omitempty"`
+	HeroEnabled      bool      `json:"heroEnabled"`
 	PinToTop         bool      `json:"pinToTop"`
 	FocusGlowEnabled bool      `json:"focusGlowEnabled"`
 	ViewMode         string    `json:"viewMode"`
@@ -126,6 +127,7 @@ type TraktSource struct {
 type SaveInput struct {
 	Title            string   `json:"title"`
 	BackdropImageURL string   `json:"backdropImageUrl,omitempty"`
+	HeroEnabled      bool     `json:"heroEnabled"`
 	PinToTop         bool     `json:"pinToTop"`
 	FocusGlowEnabled bool     `json:"focusGlowEnabled"`
 	ViewMode         string   `json:"viewMode"`

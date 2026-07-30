@@ -175,7 +175,7 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 	}
 	source := sources[0]
 	if assetIndex := storedAssetIndex(assets, source.ID); assetIndex >= 0 {
-		if err := service.prewarmHLS(ctx, reference.ID, source, &assets[assetIndex]); err != nil {
+		if err := service.prewarmHLS(ctx, prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID), source, &assets[assetIndex]); err != nil {
 			return Preparation{}, err
 		}
 	}
@@ -239,7 +239,9 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 	}
 	now := service.now()
 	expiresAt := now.Add(sessionTTL)
-	_, _ = service.pool.Exec(ctx, "DELETE FROM playback_sessions WHERE expires_at <= now()")
+	if _, err := service.cleanupInactiveSessions(ctx); err != nil {
+		return Session{}, err
+	}
 	var sessionID string
 	if err := service.pool.QueryRow(ctx, `
 		INSERT INTO playback_sessions (
@@ -249,7 +251,7 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 	`, principal.SessionID, *principal.ActiveProfileID, titleID, reference.MediaType, reference.ResourceID, tokenHash, assetsJSON, expiresAt).Scan(&sessionID); err != nil {
 		return Session{}, fmt.Errorf("store playback session: %w", err)
 	}
-	if err := service.startSessionHLS(reference.ID, sessionID, sources, assets); err != nil {
+	if err := service.startSessionHLS(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID), sessionID, sources, assets); err != nil {
 		_, _ = service.pool.Exec(ctx, "DELETE FROM playback_sessions WHERE id::text = $1", sessionID)
 		return Session{}, err
 	}
