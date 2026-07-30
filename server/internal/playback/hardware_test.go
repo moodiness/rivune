@@ -77,6 +77,9 @@ func TestTranscodeArgumentsMatchSelectedEncoder(t *testing.T) {
 					t.Fatalf("missing %q in arguments: %v", expected, arguments)
 				}
 			}
+			if !strings.Contains(joined, "-c:a aac -ac 2") {
+				t.Fatalf("transcoded audio was not normalized to browser-compatible stereo: %v", arguments)
+			}
 			for _, excluded := range test.excluded {
 				if strings.Contains(joined, excluded) {
 					t.Fatalf("unexpected %q in arguments: %v", excluded, arguments)

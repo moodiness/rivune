@@ -197,14 +197,14 @@ func (processor *FFmpegProcessor) processHLS(ctx context.Context, asset storedAs
 		return err
 	}
 	if asset.Kind == processingTranscode {
-		arguments = append(arguments, "-force_key_frames", "expr:gte(t,n_forced*0.5)")
+		arguments = append(arguments, "-force_key_frames", "expr:gte(t,n_forced*1)")
 	}
 	hlsFlags := "independent_segments+temp_file"
 	if asset.Kind != processingTranscode {
 		hlsFlags = "split_by_time+temp_file"
 	}
 	arguments = append(arguments,
-		"-f", "hls", "-hls_time", "0.5", "-hls_list_size", "0", "-hls_playlist_type", "event",
+		"-f", "hls", "-hls_time", "1", "-hls_list_size", "0", "-hls_playlist_type", "event",
 		"-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
 		"-hls_segment_filename", filepath.Join(directory, "segment-%06d.m4s"),
 		"-hls_flags", hlsFlags, filepath.Join(directory, "index.m3u8"),
@@ -271,13 +271,13 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 	case processingRemux:
 		arguments = append(arguments, "-c:v", "copy", "-c:a", "copy")
 	case processingTranscodeAudio:
-		arguments = append(arguments, "-c:v", "copy", "-c:a", "aac", "-b:a", "192k")
+		arguments = append(arguments, "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-b:a", "192k")
 	case processingTranscode:
 		if filter := encoder.filter(asset.ToneMap); filter != "" {
 			arguments = append(arguments, "-vf", filter)
 		}
 		arguments = append(arguments, encoder.codecArguments(processor.threads)...)
-		arguments = append(arguments, "-c:a", "aac", "-b:a", "256k")
+		arguments = append(arguments, "-c:a", "aac", "-ac", "2", "-b:a", "256k")
 	default:
 		return nil, fmt.Errorf("%w: unsupported mode %q", ErrMediaProcessingFailed, asset.Kind)
 	}
