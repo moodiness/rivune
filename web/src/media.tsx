@@ -525,7 +525,8 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
   const [currentTime, setCurrentTime] = useState(0);
   const [playbackStart, setPlaybackStart] = useState<number>();
   const [seekPreview, setSeekPreview] = useState<number | null>(null);
-  const [paused, setPaused] = useState(false);
+  const [paused, setPaused] = useState(true);
+  const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
   const [preferredAudioTrack, setPreferredAudioTrack] = useState<number>();
@@ -619,6 +620,8 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     playbackOffsetRef.current = playbackOffset;
     setCurrentTime(playbackOffset);
     setSeekPreview(null);
+    setPlaybackBlocked(false);
+    pausedAtRef.current = 0;
     if (playbackOffset > 0) playbackURL.searchParams.set("start", String(playbackOffset));
     const sourceURL = processed ? `${playbackURL.pathname}${playbackURL.search}` : stream.url;
     const fallbackURL = new URL(playbackURL);
@@ -629,7 +632,17 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     let destroyHLS = () => {};
     const isHLS = stream.protocol === "hls";
     const usesNativePlayback = !isHLS;
-    const startPlayback = () => void video.play().catch(() => undefined);
+    const startPlayback = () => {
+      void video.play().catch((cause: unknown) => {
+        if (disposed || (cause instanceof DOMException && cause.name === "AbortError")) return;
+        setPaused(true);
+        if (cause instanceof DOMException && cause.name === "NotAllowedError") {
+          setPlaybackBlocked(true);
+          return;
+        }
+        setError(notifyError(cause, "The browser could not start media playback.", "Playback unavailable"));
+      });
+    };
     const startProcessedFallback = (): boolean => {
       if (disposed || fallbackStarted || stream.mode === "direct") return false;
       fallbackStarted = true;
@@ -785,8 +798,20 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
   function togglePlayback() {
     const video = videoRef.current;
     if (!video) return;
-    if (video.paused) void video.play().catch(() => undefined);
-    else video.pause();
+    if (!video.paused) {
+      video.pause();
+      return;
+    }
+    setPlaybackBlocked(false);
+    void video.play().catch((cause: unknown) => {
+      if (cause instanceof DOMException && cause.name === "AbortError") return;
+      setPaused(true);
+      if (cause instanceof DOMException && cause.name === "NotAllowedError") {
+        setPlaybackBlocked(true);
+        return;
+      }
+      setError(notifyError(cause, "The browser could not start media playback.", "Playback unavailable"));
+    });
   }
 
   function commitSeek(rawPosition: number) {
@@ -824,11 +849,18 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     const player = videoRef.current?.closest(".player");
     if (player instanceof HTMLElement) void player.requestFullscreen();
   }
+  function handlePlaybackReady(video: HTMLVideoElement) {
+    if (!video.paused) return;
+    setPaused(true);
+    setPlaybackBlocked(true);
+  }
+
 
   function handlePlaybackStarted(video: HTMLVideoElement) {
     const pausedAt = pausedAtRef.current;
     pausedAtRef.current = 0;
     setPaused(false);
+    setPlaybackBlocked(false);
     if (stream?.protocol !== "hls" || stream.mode === "direct" || pausedAt === 0 || Date.now() - pausedAt < 30_000) return;
     const position = Math.floor(playbackOffsetRef.current + video.currentTime);
     resumePositionRef.current = position;
@@ -837,6 +869,7 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
   }
 
   function handlePlaybackPaused() {
+    setPlaybackBlocked(true);
     pausedAtRef.current = Date.now();
     setPaused(true);
     void persistProgress();
@@ -856,9 +889,10 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
   return createPortal(<div className="player" role="dialog" aria-modal="true" aria-label={`Playing ${item.title}`}>
     <header className="player__header"><div><small>Now playing</small><strong>{item.title}</strong></div><IconButton label="Close player" onClick={closePlayer}><X /></IconButton></header>
     {loading ? <div className="player__loading"><span className="player__pulse"><Play fill="currentColor" /></span><p>Preparing the selected stream…</p></div> : playable.length === 0 ? <EmptyState icon={<ServerCrash size={42} />} title="No playable source" description={error || "The selected stream is not compatible with this device."} action={<Button variant="secondary" onClick={closePlayer}>Go back</Button>} /> : stream.ytId ? <iframe className="player__video" src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(stream.ytId)}?autoplay=1`} allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen title={item.title} /> :
-      <video key={`${stream.id}:${stream.url}:${playbackStart ?? 0}`} ref={videoRef} className="player__video" controls={!customTransport} autoPlay playsInline crossOrigin="anonymous" onLoadedMetadata={(event) => resumePlayback(event.currentTarget)} onTimeUpdate={(event) => trackPlayback(event.currentTarget)} onPlay={(event) => handlePlaybackStarted(event.currentTarget)} onPause={handlePlaybackPaused} onEnded={(event) => handlePlaybackEnded(event.currentTarget)}>
+      <video key={`${stream.id}:${stream.url}:${playbackStart ?? 0}`} ref={videoRef} className="player__video" controls={!customTransport} playsInline crossOrigin="anonymous" onCanPlay={(event) => handlePlaybackReady(event.currentTarget)} onLoadedMetadata={(event) => resumePlayback(event.currentTarget)} onTimeUpdate={(event) => trackPlayback(event.currentTarget)} onPlay={(event) => handlePlaybackStarted(event.currentTarget)} onPause={handlePlaybackPaused} onEnded={(event) => handlePlaybackEnded(event.currentTarget)}>
         {selectedSubtitle && <track key={selectedSubtitle.id} src={selectedSubtitle.url} srcLang={selectedSubtitle.language || "und"} label={(selectedSubtitle.language || "Unknown").toUpperCase()} default />}
       </video>}
+    {playbackBlocked && <button type="button" className="player__start" onClick={togglePlayback}><Play size={30} fill="currentColor" /><span>Play</span></button>}
     {customTransport && <div className="player__transport">
       <button type="button" aria-label={paused ? "Play" : "Pause"} onClick={togglePlayback}>{paused ? <Play size={18} fill="currentColor" /> : <Pause size={18} fill="currentColor" />}</button>
       <span>{formatPlaybackTime(transportTime)}</span>
