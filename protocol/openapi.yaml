@@ -1,0 +1,4258 @@
+openapi: 3.1.0
+info:
+  title: Rivune API
+  version: 1.2.0
+  description: Protocol between Rivune clients and a self-hosted Rivune Server.
+servers:
+  - url: /api/v1
+paths:
+  /.well-known/rivune:
+    get:
+      operationId: discoverServer
+      servers:
+        - url: /
+      responses:
+        "200":
+          description: Server identity and compatibility information.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Discovery"
+  /health:
+    get:
+      operationId: getHealth
+      servers:
+        - url: /
+      responses:
+        "200":
+          description: The server and database are healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          description: A required dependency is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /setup/status:
+    get:
+      operationId: getSetupStatus
+      responses:
+        "200":
+          description: Current setup state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [setupRequired]
+                properties:
+                  setupRequired:
+                    type: boolean
+  /setup:
+    post:
+      operationId: initializeServer
+      security:
+        - setupToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetupRequest"
+      responses:
+        "201":
+          description: The instance, administrator, and first profile were created atomically.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetupResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /auth/login:
+    post:
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: A new device session was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /auth/refresh:
+    post:
+      operationId: refreshSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: Both access and refresh tokens were rotated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+  /auth/logout:
+    post:
+      operationId: logout
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: The current session was revoked.
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/me:
+    get:
+      operationId: getCurrentAccount
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The authenticated user and accessible profiles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/sessions:
+    get:
+      operationId: listSessions
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Active sessions belonging to the authenticated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionList"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/sessions/{sessionId}:
+    delete:
+      operationId: revokeSession
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The selected session was revoked.
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /profiles/{profileId}/sessions:
+    get:
+      operationId: listProfileSessions
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProfileId"
+      responses:
+        "200":
+          description: Active devices currently using the managed profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileSessionList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /profiles/{profileId}/sessions/{sessionId}:
+    delete:
+      operationId: revokeProfileSession
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProfileId"
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The device session was revoked and can no longer use the profile.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /profile-avatars:
+    get:
+      operationId: listProfileAvatarPresets
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Original profile avatar presets bundled with Rivune.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileAvatarPresetList"
+        "401":
+          $ref: "#/components/responses/Error"
+  /profile-avatars/{presetId}:
+    parameters:
+      - name: presetId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getProfileAvatarPresetImage
+      security: []
+      responses:
+        "200":
+          description: Immutable SVG image for a bundled profile avatar.
+          content:
+            image/svg+xml:
+              schema:
+                type: string
+                contentMediaType: image/svg+xml
+        "404":
+          description: Unknown avatar preset.
+  /profiles/{profileId}/avatar:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    get:
+      operationId: getCustomProfileAvatar
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Normalized PNG for the profile's custom avatar.
+          content:
+            image/png:
+              schema:
+                type: string
+                contentEncoding: binary
+                contentMediaType: image/png
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: uploadCustomProfileAvatar
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  contentEncoding: binary
+                  description: PNG or JPEG, 64-4096 pixels, at most 2 MiB.
+      responses:
+        "200":
+          description: Profile now using its normalized custom avatar.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Profile"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /profiles/{profileId}/avatar/preset:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    put:
+      operationId: setProfileAvatarPreset
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetProfileAvatarPresetRequest"
+      responses:
+        "200":
+          description: Profile now using the selected bundled avatar.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Profile"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /profiles:
+    get:
+      operationId: listProfiles
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Profiles accessible to the authenticated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileList"
+        "401":
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: createProfile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProfileRequest"
+      responses:
+        "201":
+          description: A profile was created with access granted to the administrator.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Profile"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /profiles/{profileId}:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    patch:
+      operationId: updateProfile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProfileRequest"
+      responses:
+        "200":
+          description: The profile was updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Profile"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteProfile
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: The profile was deleted.
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /profiles/{profileId}/select:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    post:
+      operationId: selectProfile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SelectProfileRequest"
+      responses:
+        "200":
+          description: The profile is active for the current session until the grant expires.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileSelection"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+  /profiles/selection:
+    delete:
+      operationId: clearProfileSelection
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: The active profile was cleared from the current session.
+        "401":
+          $ref: "#/components/responses/Error"
+  /settings:
+    get:
+      operationId: getInstanceSettings
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Instance-level setting overrides.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsLayer"
+        "401":
+          $ref: "#/components/responses/Error"
+    patch:
+      operationId: updateInstanceSettings
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SettingsPatch"
+      responses:
+        "200":
+          description: Instance settings were updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsLayer"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /profiles/{profileId}/settings:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    get:
+      operationId: getProfileSettings
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Profile-level setting overrides.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsLayer"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    patch:
+      operationId: updateProfileSettings
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SettingsPatch"
+      responses:
+        "200":
+          description: Profile settings were updated by a user with access to the profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsLayer"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /profiles/{profileId}/settings/effective:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    get:
+      operationId: getEffectiveSettings
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Server defaults and profile overrides merged for the selected profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EffectiveSettings"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /auth/device-code:
+    post:
+      operationId: beginDeviceAuthorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceAuthorizationRequest"
+      responses:
+        "201":
+          description: A short-lived TV or device authorization was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceAuthorizationResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /auth/device-code/token:
+    post:
+      operationId: exchangeDeviceAuthorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceCodeTokenRequest"
+      responses:
+        "200":
+          description: Authorization completed and a device session was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+  /auth/device-code/approve:
+    post:
+      operationId: approveDeviceAuthorization
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceCodeApprovalRequest"
+      responses:
+        "204":
+          description: The device was approved by the active manager profile for the authenticated account.
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+  /users:
+    get:
+      operationId: listUsers
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: All users on the instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: createUser
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+      responses:
+        "201":
+          description: The user was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /users/{userId}:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+    patch:
+      operationId: updateUser
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: The user was updated. Password or role changes revoke all of their sessions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteUser
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: The user, their sessions, and their devices were deleted.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /users/{userId}/profiles:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+    get:
+      operationId: listUserProfileAccess
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Every profile and the selected user's explicit access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileAccessList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /users/{userId}/profiles/{profileId}:
+    parameters:
+      - $ref: "#/components/parameters/UserId"
+      - $ref: "#/components/parameters/ProfileId"
+    put:
+      operationId: grantUserProfileAccess
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProfileAccessRequest"
+      responses:
+        "200":
+          description: Profile access was granted or updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfileAccess"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: revokeUserProfileAccess
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: The user's explicit profile access was revoked.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /addons:
+    get:
+      operationId: listAddons
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Installed Stremio addon descriptors in profile priority order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddonList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: installAddon
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallAddonInput"
+      responses:
+        "201":
+          description: The configured addon transport was installed for the active profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledAddon"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /addons/order:
+    put:
+      operationId: reorderAddons
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReorderAddonsInput"
+      responses:
+        "200":
+          description: Installed addons in their new priority order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddonList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /addons/{addonId}:
+    parameters:
+      - $ref: "#/components/parameters/AddonId"
+    delete:
+      operationId: removeAddon
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: The addon was removed from the active profile.
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /addons/{addonId}/refresh:
+    parameters:
+      - $ref: "#/components/parameters/AddonId"
+    post:
+      operationId: refreshAddon
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Refreshed addon descriptor with the latest manifest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledAddon"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /addons/{addonId}/profiles:
+    parameters:
+      - $ref: "#/components/parameters/AddonId"
+    put:
+      operationId: assignAddonProfiles
+      description: Replaces the profiles that can use this shared addon installation.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfileAssignmentInput"
+      responses:
+        "200":
+          description: Addon with its updated profile assignments.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledAddon"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /addons/catalogs:
+    get:
+      operationId: listAddonCatalogs
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Catalog and addon-catalog declarations from every installed manifest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddonCatalogDescriptorList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /addons/{addonId}/resource/{resource}/{type}/{id}:
+    parameters:
+      - $ref: "#/components/parameters/AddonId"
+      - $ref: "#/components/parameters/AddonResource"
+      - $ref: "#/components/parameters/AddonContentType"
+      - $ref: "#/components/parameters/AddonResourceId"
+    get:
+      operationId: getAddonResource
+      description: >
+        Calls one installed addon using the Stremio HTTP addon protocol. Every
+        query parameter is forwarded as a Stremio extra value. Resource names,
+        content types, IDs, repeated extras, custom ID prefixes, and response
+        fields are preserved without normalization.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Exact addon payload with transport provenance and cache directives.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddonResourceResult"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /addons/resources/{resource}/{type}/{id}:
+    parameters:
+      - $ref: "#/components/parameters/AddonResource"
+      - $ref: "#/components/parameters/AddonContentType"
+      - $ref: "#/components/parameters/AddonResourceId"
+    get:
+      operationId: getAllAddonResources
+      description: >
+        Calls every installed addon whose short or full manifest resource
+        declaration accepts the exact content type and opaque ID. Every query
+        parameter is forwarded as a Stremio extra value.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Ordered successful payloads and isolated provider failures.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddonResourceBatch"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /addons/search/{type}:
+    parameters:
+      - $ref: "#/components/parameters/AddonContentType"
+    get:
+      operationId: searchAddonCatalogs
+      description: >
+        Calls every catalog of the requested type that declares support for all
+        supplied extras. The search query parameter is required; arbitrary
+        additional and repeated Stremio extras are forwarded unchanged.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: search
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Search catalog responses in installed-addon and manifest order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddonResourceBatch"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /addons/discover:
+    get:
+      operationId: discoverAddons
+      description: >
+        Resolves every declared addon_catalog resource. Returned Stremio addon
+        descriptors remain unmodified and are never installed implicitly.
+        Optional type selects an exact custom content type; all other query
+        parameters are forwarded as extras.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Addon catalog payloads with provenance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddonResourceBatch"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /collections:
+    get:
+      operationId: listCollections
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Ordered collections for the active profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: createCollection
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionSaveInput"
+      responses:
+        "201":
+          description: Collection created for the active profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collection"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /collections/export:
+    get:
+      operationId: exportCollections
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Portable versioned JSON export of every collection for the active profile.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionExportDocument"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /collections/import:
+    post:
+      operationId: importCollections
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionExportDocument"
+      responses:
+        "201":
+          description: Collections were atomically appended to the active profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionImportResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /collections/order:
+    put:
+      operationId: reorderCollections
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionReorderInput"
+      responses:
+        "200":
+          description: Complete collection order was replaced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionList"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /collections/tmdb/lookup:
+    get:
+      operationId: lookupCollectionTMDBSource
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: kind
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [company, collection, person, keyword]
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+        - $ref: "#/components/parameters/Language"
+        - $ref: "#/components/parameters/Page"
+      responses:
+        "200":
+          description: TMDB entities available to the collection editor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionLookupList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /collections/tmdb/genres:
+    get:
+      operationId: listCollectionTMDBGenres
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: mediaType
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [movie, series]
+        - $ref: "#/components/parameters/Language"
+      responses:
+        "200":
+          description: Localized TMDB genres for a collection source.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionGenreList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /collections/{collectionId}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionId"
+    get:
+      operationId: getCollection
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Complete editable collection definition.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collection"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: updateCollection
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionSaveInput"
+      responses:
+        "200":
+          description: Collection atomically replaced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collection"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteCollection
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Collection deleted.
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /collections/{collectionId}/folders/{folderId}/items:
+    parameters:
+      - $ref: "#/components/parameters/CollectionId"
+      - $ref: "#/components/parameters/FolderId"
+    get:
+      operationId: resolveCollectionFolderItems
+      description: Resolves configured addon, TMDB, and Trakt sources concurrently in source order.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/CollectionLimit"
+        - $ref: "#/components/parameters/Language"
+        - $ref: "#/components/parameters/Region"
+      responses:
+        "200":
+          description: Deduplicated folder items with source provenance and isolated failures.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResolvedCollectionFolder"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /titles/resolve:
+    post:
+      summary: Resolve a provider title identity
+      operationId: resolveTitle
+      description: Resolves a provider identifier to a stable server title and refreshes its display snapshot.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TitleResolveInput"
+      responses:
+        "200":
+          description: Stable server title identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TitleReference"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /playback/sources:
+    post:
+      summary: List opaque playback source references for a device
+      operationId: listPlaybackSources
+      description: Fetches installed addon stream resources once and returns display metadata with session-bound opaque references. Provider URLs and private headers remain server-side.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackSourcesInput"
+      responses:
+        "200":
+          description: Selectable source references for the active profile and device capabilities.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackSourceList"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /playback/prepare:
+    post:
+      summary: Prepare one opaque playback source
+      operationId: preparePlayback
+      description: Resolves and caches the media decision for one selected source reference without creating a playback session. Concurrent inspection of the same media is deduplicated.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackPrepareInput"
+      responses:
+        "200":
+          description: Cached playback decision for the selected source.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackPreparation"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "410":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /playback/resolve:
+    post:
+      summary: Create a playback session from an opaque source reference
+      operationId: resolvePlayback
+      description: Reuses the cached preparation for a session-bound source reference and creates a short-lived playback session. It does not refetch stream resources. Provider URLs and private headers remain server-side.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackResolveInput"
+      responses:
+        "201":
+          description: A short-lived playback session for the selected source.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackSession"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "410":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /playback/sessions/{sessionId}/assets/{assetId}:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: assetId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 64
+      - name: target
+        in: query
+        description: Server-generated signed HLS child resource URL. Clients follow this value but must not construct it.
+        schema:
+          type: string
+          format: uri
+      - name: signature
+        in: query
+        description: Server-generated HMAC for target.
+        schema:
+          type: string
+    get:
+      summary: Stream a playback asset
+      operationId: streamPlaybackAsset
+      security:
+        - playbackToken: []
+      responses:
+        "200":
+          description: Proxied media, subtitle, or rewritten HLS playlist.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: Partial media response for a valid Range request.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+    head:
+      summary: Inspect a playback asset
+      operationId: inspectPlaybackAsset
+      security:
+        - playbackToken: []
+      responses:
+        "200":
+          description: Playback asset headers.
+        "206":
+          description: Partial playback asset headers.
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+  /library:
+    get:
+      operationId: listLibrary
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: mediaType
+          in: query
+          schema:
+            type: string
+            enum: [movie, series]
+        - $ref: "#/components/parameters/Page"
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Library entries belonging to the selected profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryPage"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /library/{titleId}:
+    parameters:
+      - $ref: "#/components/parameters/TitleId"
+    put:
+      operationId: addLibraryTitle
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Idempotently added library entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryItem"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: removeLibraryTitle
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Library entry removed or already absent.
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /progress/{titleId}:
+    parameters:
+      - $ref: "#/components/parameters/TitleId"
+    get:
+      operationId: getPlaybackProgress
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current playback progress for the selected profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackProgress"
+        "204":
+          description: The selected profile has not started this title yet.
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: updatePlaybackProgress
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePlaybackProgressRequest"
+      responses:
+        "200":
+          description: Updated playback progress with its new synchronization version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackProgress"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: clearPlaybackProgress
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ExpectedVersion"
+      responses:
+        "204":
+          description: Playback progress removed.
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /titles/{titleId}/watched:
+    parameters:
+      - $ref: "#/components/parameters/TitleId"
+    post:
+      operationId: markTitleWatched
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompletionRequest"
+      responses:
+        "200":
+          description: Title marked as watched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackProgress"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: markTitleUnwatched
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ExpectedVersion"
+      responses:
+        "200":
+          description: Title marked as unwatched and reset to the beginning.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackProgress"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /continue-watching:
+    get:
+      operationId: listContinueWatching
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Resumable titles and suggested next episodes for the selected profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContinueWatchingPage"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    setupToken:
+      type: http
+      scheme: bearer
+      description: One-time bootstrap secret configured by the server administrator.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Short-lived opaque Rivune access token.
+    playbackToken:
+      type: apiKey
+      in: query
+      name: token
+      description: Opaque short-lived token returned only inside playback asset URLs.
+  parameters:
+    ProfileId:
+      name: profileId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TitleId:
+      name: titleId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    SeasonId:
+      name: seasonId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AddonId:
+      name: addonId
+      in: path
+      required: true
+      description: Profile-local installed addon identifier.
+      schema:
+        type: string
+        format: uuid
+    CollectionId:
+      name: collectionId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    FolderId:
+      name: folderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AddonResource:
+      name: resource
+      in: path
+      required: true
+      description: Exact Stremio resource name, including custom resource names.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 256
+    AddonContentType:
+      name: type
+      in: path
+      required: true
+      description: Exact opaque Stremio content type; not restricted to built-in types.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 256
+    AddonResourceId:
+      name: id
+      in: path
+      required: true
+      description: Exact opaque addon catalog, metadata, video, stream, or subtitle identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 8192
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 1
+    CollectionLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 100
+    Language:
+      name: language
+      in: query
+      description: BCP 47 language tag used for localized metadata.
+      schema:
+        type: string
+        pattern: "^[A-Za-z]{2,3}(-[A-Za-z]{2})?$"
+        default: en-US
+    Region:
+      name: region
+      in: query
+      description: Optional ISO 3166-1 alpha-2 region.
+      schema:
+        type: string
+        pattern: "^[A-Za-z]{2}$"
+    ExpectedVersion:
+      name: expectedVersion
+      in: query
+      description: Last synchronization version observed by the client, or zero when no state exists.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+        default: 0
+  responses:
+    Error:
+      description: Structured API error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    InstallAddonInput:
+      type: object
+      additionalProperties: false
+      required: [transportUrl]
+      properties:
+        transportUrl:
+          type: string
+          format: uri
+          description: >
+            Modern Stremio HTTP(S) transport URL. A root URL is normalized to
+            manifest.json and a stremio:// install URL is normalized to HTTPS.
+        profileIds:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          description: Profiles receiving the addon. Defaults to the active profile when omitted.
+          items:
+            type: string
+            format: uuid
+    ProfileAssignmentInput:
+      type: object
+      additionalProperties: false
+      required: [profileIds]
+      properties:
+        profileIds:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+    ReorderAddonsInput:
+      type: object
+      additionalProperties: false
+      required: [addonIds]
+      properties:
+        addonIds:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+    AddonList:
+      type: object
+      additionalProperties: false
+      required: [addons]
+      properties:
+        addons:
+          type: array
+          items:
+            $ref: "#/components/schemas/InstalledAddon"
+    InstalledAddon:
+      type: object
+      additionalProperties: false
+      required: [id, transportUrl, manifest, position, profileIds, installedAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        transportUrl:
+          type: string
+          format: uri
+        manifest:
+          $ref: "#/components/schemas/StremioManifest"
+        position:
+          type: integer
+          minimum: 0
+        profileIds:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+        installedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    StremioManifest:
+      type: object
+      additionalProperties: true
+      required: [id, version, name, types, resources]
+      properties:
+        id:
+          type: string
+        version:
+          type: string
+          description: Semantic version declared by the addon.
+        name:
+          type: string
+        description:
+          type: string
+        contactEmail:
+          type: string
+        logo:
+          type: string
+          format: uri
+        background:
+          type: string
+          format: uri
+        types:
+          type: array
+          description: Arbitrary content types; movie and series are not special-cased.
+          items:
+            type: string
+        resources:
+          type: array
+          minItems: 1
+          items:
+            oneOf:
+              - type: string
+              - $ref: "#/components/schemas/StremioManifestResource"
+        idPrefixes:
+          type: array
+          description: Optional global opaque ID-prefix filters.
+          items:
+            type: string
+        catalogs:
+          type: array
+          items:
+            $ref: "#/components/schemas/StremioManifestCatalog"
+        addonCatalogs:
+          type: array
+          items:
+            $ref: "#/components/schemas/StremioManifestCatalog"
+        config:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        behaviorHints:
+          type: object
+          additionalProperties: true
+          properties:
+            adult:
+              type: boolean
+            p2p:
+              type: boolean
+            configurable:
+              type: boolean
+            configurationRequired:
+              type: boolean
+    StremioManifestResource:
+      type: object
+      additionalProperties: true
+      required: [name]
+      properties:
+        name:
+          type: string
+        types:
+          type: array
+          items:
+            type: string
+        idPrefixes:
+          type: array
+          items:
+            type: string
+    StremioManifestCatalog:
+      type: object
+      additionalProperties: true
+      required: [type, id]
+      properties:
+        type:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        genres:
+          type: array
+          deprecated: true
+          items:
+            type: string
+        extra:
+          type: array
+          items:
+            $ref: "#/components/schemas/StremioExtraProperty"
+        extraRequired:
+          type: array
+          deprecated: true
+          items:
+            type: string
+        extraSupported:
+          type: array
+          deprecated: true
+          items:
+            type: string
+    StremioExtraProperty:
+      type: object
+      additionalProperties: true
+      required: [name]
+      properties:
+        name:
+          type: string
+        isRequired:
+          type: boolean
+          default: false
+        options:
+          type: array
+          items:
+            type: string
+        optionsLimit:
+          type: integer
+          minimum: 0
+          default: 1
+    AddonCatalogDescriptorList:
+      type: object
+      additionalProperties: false
+      required: [catalogs]
+      properties:
+        catalogs:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddonCatalogDescriptor"
+    AddonCatalogDescriptor:
+      type: object
+      additionalProperties: false
+      required: [addonId, manifestId, position, catalog, addonCatalog]
+      properties:
+        addonId:
+          type: string
+          format: uuid
+        manifestId:
+          type: string
+        position:
+          type: integer
+          minimum: 0
+        catalog:
+          $ref: "#/components/schemas/StremioManifestCatalog"
+        addonCatalog:
+          type: boolean
+    AddonCachePolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        maxAgeSeconds:
+          type: integer
+          format: int64
+          minimum: 0
+        staleWhileRevalidateSeconds:
+          type: integer
+          format: int64
+          minimum: 0
+        staleIfErrorSeconds:
+          type: integer
+          format: int64
+          minimum: 0
+    AddonResourceResult:
+      type: object
+      additionalProperties: false
+      required: [addonId, manifestId, transportUrl, resource, type, id, payload, cache]
+      properties:
+        addonId:
+          type: string
+          format: uuid
+        manifestId:
+          type: string
+        transportUrl:
+          type: string
+          format: uri
+        resource:
+          type: string
+        type:
+          type: string
+        id:
+          type: string
+          description: Exact opaque content or video ID sent to the addon.
+        payload:
+          type: object
+          additionalProperties: true
+          description: >
+            Unmodified Stremio response object. This supports metas,
+            metasDetailed, meta, streams, subtitles, addons, embedded streams,
+            unknown forward-compatible fields, and SDK cache fields.
+        cache:
+          $ref: "#/components/schemas/AddonCachePolicy"
+    AddonResourceFailure:
+      type: object
+      additionalProperties: false
+      required: [addonId, manifestId, code, message]
+      properties:
+        addonId:
+          type: string
+          format: uuid
+        manifestId:
+          type: string
+        code:
+          type: string
+        message:
+          type: string
+    AddonResourceBatch:
+      type: object
+      additionalProperties: false
+      required: [results, errors]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddonResourceResult"
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddonResourceFailure"
+    Discovery:
+      type: object
+      required: [name, serverVersion, protocolVersion, apiBaseUrl, setupRequired]
+      properties:
+        name:
+          type: string
+        serverVersion:
+          type: string
+        protocolVersion:
+          type: integer
+          minimum: 1
+        apiBaseUrl:
+          type: string
+        setupRequired:
+          type: boolean
+    Health:
+      type: object
+      required: [status, database, version]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        database:
+          type: string
+          enum: [ok, unavailable]
+        version:
+          type: string
+    SetupRequest:
+      type: object
+      additionalProperties: false
+      required: [instanceName, admin, profileName]
+      properties:
+        instanceName:
+          type: string
+          minLength: 1
+          maxLength: 80
+        admin:
+          type: object
+          additionalProperties: false
+          required: [username, password]
+          properties:
+            username:
+              type: string
+              minLength: 3
+              maxLength: 64
+            password:
+              type: string
+              minLength: 12
+              maxLength: 256
+        profileName:
+          type: string
+          minLength: 1
+          maxLength: 80
+    SetupResponse:
+      type: object
+      required: [instance, admin, profile]
+      properties:
+        instance:
+          $ref: "#/components/schemas/Identifier"
+        admin:
+          $ref: "#/components/schemas/Identifier"
+        profile:
+          $ref: "#/components/schemas/Identifier"
+    Identifier:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          format: uuid
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password, device]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 64
+        password:
+          type: string
+          minLength: 1
+          maxLength: 256
+        device:
+          type: object
+          additionalProperties: false
+          required: [name, platform]
+          properties:
+            id:
+              type: string
+              format: uuid
+              description: Existing device ID previously returned to this user.
+            name:
+              type: string
+              minLength: 1
+              maxLength: 120
+            platform:
+              type: string
+              minLength: 1
+              maxLength: 32
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+    TokenPair:
+      type: object
+      required:
+        - tokenType
+        - accessToken
+        - accessTokenExpiresAt
+        - refreshToken
+        - refreshTokenExpiresAt
+        - sessionId
+        - deviceId
+      properties:
+        tokenType:
+          type: string
+          const: Bearer
+        accessToken:
+          type: string
+          description: Short-lived opaque token. Store it only in platform-secure storage.
+        accessTokenExpiresAt:
+          type: string
+          format: date-time
+        refreshToken:
+          type: string
+          description: Single-use opaque token rotated on every refresh.
+        refreshTokenExpiresAt:
+          type: string
+          format: date-time
+        sessionId:
+          type: string
+          format: uuid
+        deviceId:
+          type: string
+          format: uuid
+    Account:
+      type: object
+      required: [user, session, profiles]
+      properties:
+        user:
+          type: object
+          required: [id, username, role]
+          properties:
+            id:
+              type: string
+              format: uuid
+            username:
+              type: string
+            role:
+              type: string
+              enum: [admin, member]
+        session:
+          type: object
+          required: [id, deviceId, activeProfile]
+          properties:
+            id:
+              type: string
+              format: uuid
+            deviceId:
+              type: string
+              format: uuid
+            activeProfile:
+              anyOf:
+                - $ref: "#/components/schemas/ActiveProfileGrant"
+                - type: "null"
+        profiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProfileAccess"
+    ProfileAccess:
+      type: object
+      required: [id, name, isChild, canManage, avatar]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        isChild:
+          type: boolean
+        canManage:
+          type: boolean
+        avatar:
+          $ref: "#/components/schemas/ProfileAvatar"
+    SessionList:
+      type: object
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Session"
+    Session:
+      type: object
+      required: [id, deviceId, deviceName, platform, ipAddress, createdAt, lastSeenAt, current]
+      properties:
+        id:
+          type: string
+          format: uuid
+        deviceId:
+          type: string
+          format: uuid
+        deviceName:
+          type: string
+        platform:
+          type: string
+        ipAddress:
+          type: [string, "null"]
+          description: Last observed client IP address, or null until the session makes a request after this field becomes available.
+        createdAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+        current:
+          type: boolean
+    ProfileSessionList:
+      type: object
+      additionalProperties: false
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProfileSession"
+    ProfileSession:
+      type: object
+      additionalProperties: false
+      required: [id, userId, username, deviceId, deviceName, platform, ipAddress, createdAt, lastSeenAt, profileGrantExpiresAt, current]
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        username:
+          type: string
+        deviceId:
+          type: string
+          format: uuid
+        deviceName:
+          type: string
+        platform:
+          type: string
+        ipAddress:
+          type: [string, "null"]
+          description: Last observed client IP address, or null until the session makes a request after this field becomes available.
+        createdAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+        profileGrantExpiresAt:
+          type: string
+          format: date-time
+        current:
+          type: boolean
+    ProfileList:
+      type: object
+      required: [profiles]
+      properties:
+        profiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Profile"
+    Profile:
+      type: object
+      required: [id, name, isChild, hasPin, canManage, avatar]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        isChild:
+          type: boolean
+        hasPin:
+          type: boolean
+        canManage:
+          type: boolean
+        avatar:
+          $ref: "#/components/schemas/ProfileAvatar"
+    ProfileAvatar:
+      type: object
+      required: [kind, url]
+      properties:
+        kind:
+          type: string
+          enum: [preset, custom]
+        presetId:
+          type: string
+          description: Present when kind is preset.
+        url:
+          type: string
+          description: Server-relative URL for the current avatar image.
+    ProfileAvatarPresetList:
+      type: object
+      required: [presets]
+      properties:
+        presets:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/ProfileAvatarPreset"
+    ProfileAvatarPreset:
+      type: object
+      required: [id, name, url]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        url:
+          type: string
+    SetProfileAvatarPresetRequest:
+      type: object
+      additionalProperties: false
+      required: [presetId]
+      properties:
+        presetId:
+          type: string
+          minLength: 1
+    CreateProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        isChild:
+          type: boolean
+          default: false
+        pin:
+          type: string
+          pattern: "^[0-9]{4,8}$"
+    UpdateProfileRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        isChild:
+          type: boolean
+        pin:
+          description: A 4-8 digit PIN, or null to remove the current PIN.
+          anyOf:
+            - type: string
+              pattern: "^[0-9]{4,8}$"
+            - type: "null"
+    SelectProfileRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        pin:
+          type: string
+          pattern: "^[0-9]{4,8}$"
+    ActiveProfileGrant:
+      type: object
+      required: [id, expiresAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        expiresAt:
+          type: string
+          format: date-time
+    ProfileSelection:
+      type: object
+      required: [profile, expiresAt]
+      properties:
+        profile:
+          $ref: "#/components/schemas/Profile"
+        expiresAt:
+          type: string
+          format: date-time
+    SettingsPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        theme:
+          anyOf:
+            - type: string
+              enum: [system, light, dark]
+            - type: "null"
+        maximumResolution:
+          anyOf:
+            - type: string
+              enum: [auto, 2160p, 1080p, 720p, 480p]
+            - type: "null"
+        preferDirectPlay:
+          type: [boolean, "null"]
+        hideUnreleased:
+          type: [boolean, "null"]
+        metadataLanguage:
+          anyOf:
+            - $ref: "#/components/schemas/LanguagePreference"
+            - type: "null"
+        metadataRegion:
+          anyOf:
+            - $ref: "#/components/schemas/RegionPreference"
+            - type: "null"
+        audioLanguage:
+          anyOf:
+            - $ref: "#/components/schemas/LanguagePreference"
+            - type: "null"
+        subtitleLanguage:
+          anyOf:
+            - $ref: "#/components/schemas/LanguagePreference"
+            - type: "null"
+    LanguagePreference:
+      type: string
+      description: The value auto or a BCP 47 language tag.
+      pattern: "^(auto|[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*)$"
+    RegionPreference:
+      type: string
+      description: The value auto or an uppercase ISO 3166-1 alpha-2 region code.
+      pattern: "^(auto|[A-Z]{2})$"
+    SettingsValues:
+      type: object
+      additionalProperties: false
+      properties:
+        theme:
+          type: string
+          enum: [system, light, dark]
+        maximumResolution:
+          type: string
+          enum: [auto, 2160p, 1080p, 720p, 480p]
+        preferDirectPlay:
+          type: boolean
+        hideUnreleased:
+          type: boolean
+        metadataLanguage:
+          $ref: "#/components/schemas/LanguagePreference"
+        metadataRegion:
+          $ref: "#/components/schemas/RegionPreference"
+        audioLanguage:
+          $ref: "#/components/schemas/LanguagePreference"
+        subtitleLanguage:
+          $ref: "#/components/schemas/LanguagePreference"
+    SettingsLayer:
+      type: object
+      required: [schemaVersion, settings, updatedAt]
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        settings:
+          $ref: "#/components/schemas/SettingsValues"
+        updatedAt:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    EffectiveSettings:
+      type: object
+      required: [schemaVersion, settings, sources]
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        settings:
+          allOf:
+            - $ref: "#/components/schemas/SettingsValues"
+            - required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, audioLanguage, subtitleLanguage]
+        sources:
+          type: object
+          additionalProperties: false
+          required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, audioLanguage, subtitleLanguage]
+          properties:
+            theme:
+              $ref: "#/components/schemas/SettingSource"
+            maximumResolution:
+              $ref: "#/components/schemas/SettingSource"
+            preferDirectPlay:
+              $ref: "#/components/schemas/SettingSource"
+            hideUnreleased:
+              $ref: "#/components/schemas/SettingSource"
+            metadataLanguage:
+              $ref: "#/components/schemas/SettingSource"
+            metadataRegion:
+              $ref: "#/components/schemas/SettingSource"
+            audioLanguage:
+              $ref: "#/components/schemas/SettingSource"
+            subtitleLanguage:
+              $ref: "#/components/schemas/SettingSource"
+    SettingSource:
+      type: string
+      enum: [default, instance, profile, device]
+    DeviceAuthorizationRequest:
+      type: object
+      additionalProperties: false
+      required: [deviceName, platform]
+      properties:
+        deviceName:
+          type: string
+          minLength: 1
+          maxLength: 120
+        platform:
+          type: string
+          minLength: 1
+          maxLength: 32
+    DeviceAuthorizationResponse:
+      type: object
+      required: [deviceCode, userCode, verificationUri, verificationUriComplete, expiresAt, intervalSeconds]
+      properties:
+        deviceCode:
+          type: string
+          description: High-entropy secret known only to the device.
+        userCode:
+          type: string
+          pattern: "^[A-Z2-9]{4}-[A-Z2-9]{4}$"
+        verificationUri:
+          type: string
+        verificationUriComplete:
+          type: string
+          description: URI suitable for rendering as a QR code.
+        expiresAt:
+          type: string
+          format: date-time
+        intervalSeconds:
+          type: integer
+          minimum: 1
+    DeviceCodeTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [deviceCode]
+      properties:
+        deviceCode:
+          type: string
+    DeviceCodeApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [userCode]
+      properties:
+        userCode:
+          type: string
+    UserList:
+      type: object
+      required: [users]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
+    User:
+      type: object
+      required: [id, username, role, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        role:
+          type: string
+          enum: [admin, member]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CreateUserRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 64
+        password:
+          type: string
+          minLength: 12
+          maxLength: 256
+        role:
+          type: string
+          enum: [admin, member]
+          default: member
+    UpdateUserRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 64
+        password:
+          type: string
+          minLength: 12
+          maxLength: 256
+        role:
+          type: string
+          enum: [admin, member]
+    ProfileAccessList:
+      type: object
+      required: [profiles]
+      properties:
+        profiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserProfileAccess"
+    UserProfileAccess:
+      type: object
+      required: [profileId, profileName, hasAccess, canManage]
+      properties:
+        profileId:
+          type: string
+          format: uuid
+        profileName:
+          type: string
+        hasAccess:
+          type: boolean
+        canManage:
+          type: boolean
+    UpdateProfileAccessRequest:
+      type: object
+      additionalProperties: false
+      required: [canManage]
+      properties:
+        canManage:
+          type: boolean
+    MoviePage:
+      type: object
+      additionalProperties: false
+      required: [items, page, totalPages, totalResults]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Movie"
+        page:
+          type: integer
+          minimum: 1
+        totalPages:
+          type: integer
+          minimum: 0
+        totalResults:
+          type: integer
+          minimum: 0
+    Movie:
+      type: object
+      additionalProperties: false
+      required: [id, mediaType, title, originalTitle, originalLanguage, overview, genres, voteAverage, voteCount, externalIds]
+      properties:
+        id:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+          const: movie
+        title:
+          type: string
+        originalTitle:
+          type: string
+        originalLanguage:
+          type: string
+        overview:
+          type: string
+        releaseDate:
+          type: string
+          format: date
+        posterUrl:
+          type: string
+          format: uri
+        backdropUrl:
+          type: string
+          format: uri
+        tagline:
+          type: string
+        runtimeMinutes:
+          type: integer
+          minimum: 1
+        genres:
+          type: array
+          items:
+            $ref: "#/components/schemas/Genre"
+        voteAverage:
+          type: number
+          minimum: 0
+          maximum: 10
+        voteCount:
+          type: integer
+          minimum: 0
+        externalIds:
+          type: object
+          additionalProperties:
+            type: string
+    Genre:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+    SeriesPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, totalPages, totalResults]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Series"
+        page:
+          type: integer
+          minimum: 1
+        totalPages:
+          type: integer
+          minimum: 0
+        totalResults:
+          type: integer
+          minimum: 0
+    Series:
+      type: object
+      additionalProperties: false
+      required: [id, mediaType, name, originalName, originalLanguage, overview, genres, voteAverage, voteCount, seasons, aliases, episodeOrders, externalIds]
+      properties:
+        id:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+          const: series
+        name:
+          type: string
+        originalName:
+          type: string
+        originalLanguage:
+          type: string
+        overview:
+          type: string
+        firstAirDate:
+          type: string
+          format: date
+        lastAirDate:
+          type: string
+          format: date
+        posterUrl:
+          type: string
+          format: uri
+        backdropUrl:
+          type: string
+          format: uri
+        tagline:
+          type: string
+        status:
+          type: string
+        numberOfSeasons:
+          type: integer
+          minimum: 1
+        numberOfEpisodes:
+          type: integer
+          minimum: 1
+        genres:
+          type: array
+          items:
+            $ref: "#/components/schemas/Genre"
+        voteAverage:
+          type: number
+          minimum: 0
+          maximum: 10
+        voteCount:
+          type: integer
+          minimum: 0
+        seasons:
+          type: array
+          items:
+            $ref: "#/components/schemas/SeasonSummary"
+        aliases:
+          type: array
+          items:
+            $ref: "#/components/schemas/Alias"
+        episodeOrders:
+          type: array
+          items:
+            $ref: "#/components/schemas/EpisodeOrder"
+        externalIds:
+          type: object
+          additionalProperties:
+            type: string
+    Alias:
+      type: object
+      additionalProperties: false
+      required: [language, name]
+      properties:
+        language:
+          type: string
+        name:
+          type: string
+    EpisodeOrder:
+      type: object
+      additionalProperties: false
+      required: [id, name, type, isDefault]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        isDefault:
+          type: boolean
+    SeasonSummary:
+      type: object
+      additionalProperties: false
+      required: [id, mediaType, seriesId, name, overview, seasonNumber, episodeCount, voteAverage, externalIds]
+      properties:
+        id:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+          const: season
+        seriesId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        overview:
+          type: string
+        seasonNumber:
+          type: integer
+          minimum: 0
+        episodeCount:
+          type: integer
+          minimum: 0
+        airDate:
+          type: string
+          format: date
+        posterUrl:
+          type: string
+          format: uri
+        voteAverage:
+          type: number
+          minimum: 0
+          maximum: 10
+        externalIds:
+          type: object
+          additionalProperties:
+            type: string
+    Season:
+      type: object
+      additionalProperties: false
+      required: [id, mediaType, seriesId, name, overview, seasonNumber, voteAverage, episodes, externalIds]
+      properties:
+        id:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+          const: season
+        seriesId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        overview:
+          type: string
+        seasonNumber:
+          type: integer
+          minimum: 0
+        airDate:
+          type: string
+          format: date
+        posterUrl:
+          type: string
+          format: uri
+        voteAverage:
+          type: number
+          minimum: 0
+          maximum: 10
+        episodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Episode"
+        externalIds:
+          type: object
+          additionalProperties:
+            type: string
+    Episode:
+      type: object
+      additionalProperties: false
+      required: [id, mediaType, seasonId, name, overview, seasonNumber, episodeNumber, voteAverage, voteCount, externalIds]
+      properties:
+        id:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+          const: episode
+        seasonId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        overview:
+          type: string
+        seasonNumber:
+          type: integer
+          minimum: 0
+        episodeNumber:
+          type: integer
+          minimum: 0
+        airDate:
+          type: string
+          format: date
+        stillUrl:
+          type: string
+          format: uri
+        runtimeMinutes:
+          type: integer
+          minimum: 1
+        voteAverage:
+          type: number
+          minimum: 0
+          maximum: 10
+        voteCount:
+          type: integer
+          minimum: 0
+        externalIds:
+          type: object
+          additionalProperties:
+            type: string
+    CollectionList:
+      type: object
+      additionalProperties: false
+      required: [collections]
+      properties:
+        collections:
+          type: array
+          items:
+            $ref: "#/components/schemas/Collection"
+    Collection:
+      type: object
+      additionalProperties: false
+      required: [id, title, pinToTop, focusGlowEnabled, viewMode, folderCoverShape, folders, profileIds, position, version, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        backdropImageUrl:
+          type: string
+          format: uri
+        pinToTop:
+          type: boolean
+        focusGlowEnabled:
+          type: boolean
+        viewMode:
+          $ref: "#/components/schemas/CollectionViewMode"
+        folderCoverShape:
+          $ref: "#/components/schemas/CollectionTileShape"
+        folders:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionFolder"
+        profileIds:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+        position:
+          type: integer
+          minimum: 0
+        version:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CollectionSaveInput:
+      type: object
+      additionalProperties: false
+      required: [title, pinToTop, focusGlowEnabled, viewMode, folderCoverShape, folders]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        backdropImageUrl:
+          type: string
+          format: uri
+        pinToTop:
+          type: boolean
+        focusGlowEnabled:
+          type: boolean
+        viewMode:
+          $ref: "#/components/schemas/CollectionViewMode"
+        folderCoverShape:
+          $ref: "#/components/schemas/CollectionTileShape"
+        folders:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/CollectionFolder"
+        profileIds:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          description: Profiles receiving the collection. Defaults to the active profile when omitted on creation and is unchanged when omitted on update.
+          items:
+            type: string
+            format: uuid
+        expectedVersion:
+          type: integer
+          minimum: 0
+    CollectionExportDocument:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, collections]
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        exportedAt:
+          type: string
+          format: date-time
+        collections:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/PortableCollection"
+    CollectionImportResult:
+      type: object
+      additionalProperties: false
+      required: [imported, collections]
+      properties:
+        imported:
+          type: integer
+          minimum: 0
+          maximum: 100
+        collections:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/Collection"
+    PortableCollection:
+      type: object
+      additionalProperties: false
+      required: [title, pinToTop, focusGlowEnabled, viewMode, folderCoverShape, folders]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        backdropImageUrl:
+          type: string
+          format: uri
+        pinToTop:
+          type: boolean
+        focusGlowEnabled:
+          type: boolean
+        viewMode:
+          $ref: "#/components/schemas/CollectionViewMode"
+        folderCoverShape:
+          $ref: "#/components/schemas/CollectionTileShape"
+        folders:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/PortableCollectionFolder"
+    PortableCollectionFolder:
+      type: object
+      additionalProperties: false
+      required: [title, tileShape, sourceView, focusGifEnabled, hideTitle, sources]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        tileShape:
+          $ref: "#/components/schemas/CollectionTileShape"
+        sourceView:
+          type: string
+          enum: [merged, categories, folders]
+        coverImageUrl:
+          type: string
+          format: uri
+        coverEmoji:
+          type: string
+          maxLength: 16
+        titleLogoUrl:
+          type: string
+          format: uri
+        heroBackdropUrl:
+          type: string
+          format: uri
+        heroVideoUrl:
+          type: string
+          format: uri
+        focusGifUrl:
+          type: string
+          format: uri
+        focusGifEnabled:
+          type: boolean
+        hideTitle:
+          type: boolean
+        sources:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/PortableCollectionSource"
+    PortableCollectionSource:
+      type: object
+      additionalProperties: false
+      required: [kind, title]
+      properties:
+        kind:
+          type: string
+          enum: [addon_catalog, tmdb, trakt]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        addonCatalog:
+          $ref: "#/components/schemas/PortableCollectionAddonCatalogSource"
+        tmdb:
+          $ref: "#/components/schemas/CollectionTMDBSource"
+        trakt:
+          $ref: "#/components/schemas/CollectionTraktSource"
+      description: Exactly one configuration object matching kind is required.
+    PortableCollectionAddonCatalogSource:
+      type: object
+      additionalProperties: false
+      required: [type, catalogId]
+      properties:
+        addonId:
+          type: string
+          format: uuid
+          description: Same-server fallback when no portable addon identity is available.
+        manifestId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        type:
+          type: string
+          minLength: 1
+          maxLength: 256
+        catalogId:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        extra:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/CollectionExtraValue"
+      description: Import resolves the installed addon by manifest ID.
+    CollectionReorderInput:
+      type: object
+      additionalProperties: false
+      required: [collectionIds]
+      properties:
+        collectionIds:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+    CollectionViewMode:
+      type: string
+      enum: [tabbed_grid, rows, follow_layout]
+    CollectionTileShape:
+      type: string
+      enum: [poster, landscape, square]
+    CollectionFolder:
+      type: object
+      additionalProperties: false
+      required: [title, tileShape, focusGifEnabled, hideTitle, sources]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        tileShape:
+          type: string
+          enum: [poster, landscape, square]
+        sourceView:
+          type: string
+          enum: [merged, categories, folders]
+        coverImageUrl:
+          type: string
+          format: uri
+        coverEmoji:
+          type: string
+          maxLength: 16
+        titleLogoUrl:
+          type: string
+          format: uri
+        heroBackdropUrl:
+          type: string
+          format: uri
+        heroVideoUrl:
+          type: string
+          format: uri
+        focusGifUrl:
+          type: string
+          format: uri
+        focusGifEnabled:
+          type: boolean
+        hideTitle:
+          type: boolean
+        sources:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/CollectionSource"
+    CollectionSource:
+      type: object
+      additionalProperties: false
+      required: [kind, title]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [addon_catalog, tmdb, trakt]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        addonCatalog:
+          $ref: "#/components/schemas/CollectionAddonCatalogSource"
+        tmdb:
+          $ref: "#/components/schemas/CollectionTMDBSource"
+        trakt:
+          $ref: "#/components/schemas/CollectionTraktSource"
+      description: Exactly one configuration object matching kind is required.
+    CollectionAddonCatalogSource:
+      type: object
+      additionalProperties: false
+      required: [addonId, type, catalogId]
+      properties:
+        addonId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          minLength: 1
+          maxLength: 256
+        catalogId:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        extra:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/CollectionExtraValue"
+    CollectionExtraValue:
+      type: object
+      additionalProperties: false
+      required: [name, value]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        value:
+          type: string
+          maxLength: 4096
+    CollectionTMDBSource:
+      type: object
+      additionalProperties: false
+      required: [sourceType, mediaType, sort, filters]
+      properties:
+        sourceType:
+          type: string
+          enum: [list, company, network, collection, person, director, discover]
+        tmdbId:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Required for list, company, network, collection, person, and director sources.
+        mediaType:
+          type: string
+          enum: [movie, series, both]
+          description: Lists and movie collections are forced to `movie`; networks are forced to `series`; `both` is available for company, person, director, and discover sources.
+        sort:
+          type: string
+          enum: [original, popularity.desc, vote_average.desc, vote_count.desc, release_date.desc, first_air_date.desc]
+        filters:
+          $ref: "#/components/schemas/CollectionTMDBFilters"
+    CollectionTMDBFilters:
+      type: object
+      additionalProperties: false
+      properties:
+        genres:
+          type: array
+          uniqueItems: true
+          items:
+            type: integer
+            format: int64
+            minimum: 1
+        releaseDateFrom:
+          type: string
+          format: date
+        releaseDateTo:
+          type: string
+          format: date
+        voteAverageMin:
+          type: number
+          minimum: 0
+          maximum: 10
+        voteAverageMax:
+          type: number
+          minimum: 0
+          maximum: 10
+        voteCountMin:
+          type: integer
+          minimum: 0
+        originalLanguage:
+          type: string
+          pattern: "^[A-Za-z]{2,3}$"
+        originCountry:
+          type: string
+          pattern: "^[A-Za-z]{2}$"
+        keywords:
+          type: array
+          uniqueItems: true
+          items:
+            type: integer
+            format: int64
+            minimum: 1
+        companies:
+          type: array
+          uniqueItems: true
+          items:
+            type: integer
+            format: int64
+            minimum: 1
+        networks:
+          type: array
+          uniqueItems: true
+          items:
+            type: integer
+            format: int64
+            minimum: 1
+        year:
+          type: integer
+          minimum: 1870
+          maximum: 2200
+        watchRegion:
+          type: string
+          pattern: "^[A-Za-z]{2}$"
+        watchProviders:
+          type: array
+          uniqueItems: true
+          items:
+            type: integer
+            format: int64
+            minimum: 1
+    CollectionTraktSource:
+      type: object
+      additionalProperties: false
+      required: [listId, mediaType, sortBy, sortHow]
+      properties:
+        listId:
+          type: integer
+          format: int64
+          minimum: 1
+        mediaType:
+          type: string
+          enum: [movie, series]
+        sortBy:
+          type: string
+          enum: [rank, added, title, released, runtime, popularity, percentage, votes]
+        sortHow:
+          type: string
+          enum: [asc, desc]
+    ResolvedCollectionFolder:
+      type: object
+      additionalProperties: false
+      required: [collectionId, folder, items, page, hasMore, errors]
+      properties:
+        collectionId:
+          type: string
+          format: uuid
+        folder:
+          $ref: "#/components/schemas/CollectionFolder"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionItem"
+        page:
+          type: integer
+          minimum: 1
+        hasMore:
+          type: boolean
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionSourceFailure"
+    CollectionItem:
+      type: object
+      additionalProperties: false
+      required: [id, mediaType, title, externalIds, sources]
+      properties:
+        id:
+          type: string
+        mediaType:
+          type: string
+        title:
+          type: string
+        posterUrl:
+          type: string
+          format: uri
+        backgroundUrl:
+          type: string
+          format: uri
+        logoUrl:
+          type: string
+          format: uri
+        description:
+          type: string
+        releaseInfo:
+          type: string
+        released:
+          type: string
+        voteAverage:
+          type: number
+        voteCount:
+          type: integer
+        popularity:
+          type: number
+        externalIds:
+          type: object
+          additionalProperties:
+            type: string
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionSourceReference"
+        raw: {}
+    CollectionSourceReference:
+      type: object
+      additionalProperties: false
+      required: [id, kind, title]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [addon_catalog, tmdb, trakt]
+        title:
+          type: string
+        addonId:
+          type: string
+          format: uuid
+    CollectionSourceFailure:
+      type: object
+      additionalProperties: false
+      required: [sourceId, kind, code, message]
+      properties:
+        sourceId:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [addon_catalog, tmdb, trakt]
+        code:
+          type: string
+          enum: [collection_provider_unavailable, collection_addon_not_found, collection_source_unsupported, collection_source_timeout, collection_source_failed]
+        message:
+          type: string
+    CollectionLookupList:
+      type: object
+      additionalProperties: false
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionLookupResult"
+    CollectionLookupResult:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        imageUrl:
+          type: string
+          format: uri
+    CollectionGenreList:
+      type: object
+      additionalProperties: false
+      required: [genres]
+      properties:
+        genres:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionGenre"
+    CollectionGenre:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+    TitleResolveInput:
+      type: object
+      additionalProperties: false
+      required: [mediaType, provider, externalId, resourceId, title]
+      properties:
+        mediaType:
+          type: string
+          enum: [movie, series]
+        provider:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9._-]{0,31}$"
+        externalId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        posterUrl:
+          type: string
+          maxLength: 4096
+        backgroundUrl:
+          type: string
+          maxLength: 4096
+        releaseInfo:
+          type: string
+          maxLength: 120
+    TitleReference:
+      type: object
+      additionalProperties: false
+      required: [titleId, mediaType, provider, externalId, resourceId, title]
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+          enum: [movie, series]
+        provider:
+          type: string
+        externalId:
+          type: string
+        resourceId:
+          type: string
+        title:
+          type: string
+        posterUrl:
+          type: string
+        backgroundUrl:
+          type: string
+        releaseInfo:
+          type: string
+    LibraryItem:
+      type: object
+      additionalProperties: false
+      required: [titleId, mediaType, addedAt, updatedAt]
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+          enum: [movie, series]
+        provider:
+          type: string
+        externalId:
+          type: string
+        resourceId:
+          type: string
+        title:
+          type: string
+        posterUrl:
+          type: string
+        backgroundUrl:
+          type: string
+        releaseInfo:
+          type: string
+        addedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    LibraryPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, totalPages, totalResults]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LibraryItem"
+        page:
+          type: integer
+          minimum: 1
+        totalPages:
+          type: integer
+          minimum: 0
+        totalResults:
+          type: integer
+          minimum: 0
+    PlaybackSourcesInput:
+      type: object
+      additionalProperties: false
+      required: [mediaType, resourceId, capabilities]
+      properties:
+        mediaType:
+          type: string
+          minLength: 1
+          maxLength: 64
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        capabilities:
+          $ref: "#/components/schemas/PlaybackCapabilities"
+    PlaybackResolveInput:
+      type: object
+      additionalProperties: false
+      required: [sourceRef]
+      properties:
+        sourceRef:
+          type: string
+          minLength: 16
+          maxLength: 128
+        titleId:
+          type: string
+          maxLength: 128
+        preferredAudioTrack:
+          type: integer
+          minimum: 0
+          maximum: 10000
+        preferredSubtitleId:
+          type: string
+          maxLength: 128
+    PlaybackSourceList:
+      type: object
+      additionalProperties: false
+      required: [sources, providerErrors]
+      properties:
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaybackSourceOption"
+        providerErrors:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaybackProviderError"
+    PlaybackSourceOption:
+      type: object
+      additionalProperties: false
+      required: [id, sourceRef, addonId, manifestId, streamIndex, name, protocol, expiresAt]
+      properties:
+        id:
+          type: string
+        sourceRef:
+          type: string
+          minLength: 16
+          maxLength: 128
+          description: Opaque, session-bound reference. Provider URLs and private headers are retained only by the server.
+        addonId:
+          type: string
+          format: uuid
+        manifestId:
+          type: string
+        streamIndex:
+          type: integer
+          minimum: 0
+        name:
+          type: string
+        description:
+          type: string
+        filename:
+          type: string
+        protocol:
+          type: string
+        container:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+    PlaybackPrepareInput:
+      type: object
+      additionalProperties: false
+      required: [sourceRef]
+      properties:
+        sourceRef:
+          type: string
+          minLength: 16
+          maxLength: 128
+    PlaybackPreparation:
+      type: object
+      additionalProperties: false
+      required: [sourceRef, mode, protocol, subtitleCount, expiresAt]
+      properties:
+        sourceRef:
+          type: string
+          minLength: 16
+          maxLength: 128
+        mode:
+          type: string
+          enum: [direct, remux, transcode_audio, transcode, youtube, external]
+        protocol:
+          type: string
+        container:
+          type: string
+        media:
+          $ref: "#/components/schemas/PlaybackMediaInspection"
+        subtitleCount:
+          type: integer
+          minimum: 0
+        expiresAt:
+          type: string
+          format: date-time
+    PlaybackCapabilities:
+      type: object
+      additionalProperties: false
+      required: [streamingProtocols, containers]
+      properties:
+        streamingProtocols:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        containers:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        videoCodecs:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        audioCodecs:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        hdrFormats:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        externalPlayers:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+    PlaybackSession:
+      type: object
+      additionalProperties: false
+      required: [id, selectedSourceId, sources, subtitles, providerErrors, expiresAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        selectedSourceId:
+          type: string
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaybackSource"
+        subtitles:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaybackSubtitle"
+        providerErrors:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaybackProviderError"
+        expiresAt:
+          type: string
+          format: date-time
+    PlaybackSource:
+      type: object
+      additionalProperties: false
+      required: [id, addonId, manifestId, mode, protocol, compatible]
+      properties:
+        id:
+          type: string
+        addonId:
+          type: string
+          format: uuid
+        manifestId:
+          type: string
+        name:
+          type: string
+        title:
+          type: string
+        mode:
+          type: string
+          enum: [direct, remux, transcode_audio, transcode, youtube, external]
+        url:
+          type: string
+          description: Same-server playback asset URL containing a short-lived opaque token.
+        ytId:
+          type: string
+        infoHash:
+          type: string
+        fileIndex:
+          type: integer
+          minimum: 0
+        protocol:
+          type: string
+        container:
+          type: string
+        compatible:
+          type: boolean
+        media:
+          $ref: "#/components/schemas/PlaybackMediaInspection"
+    PlaybackMediaInspection:
+      type: object
+      additionalProperties: false
+      required: [videoTracks, audioTracks, subtitleTracks]
+      properties:
+        container:
+          type: string
+        durationSeconds:
+          type: number
+          minimum: 0
+        hdrFormat:
+          type: string
+        videoTracks:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaybackMediaTrack"
+        audioTracks:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaybackMediaTrack"
+        subtitleTracks:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaybackMediaTrack"
+    PlaybackMediaTrack:
+      type: object
+      additionalProperties: false
+      required: [index, type, codec]
+      properties:
+        index:
+          type: integer
+          minimum: 0
+        type:
+          type: string
+          enum: [video, audio, subtitle]
+        codec:
+          type: string
+        profile:
+          type: string
+        language:
+          type: string
+        title:
+          type: string
+        width:
+          type: integer
+          minimum: 1
+        height:
+          type: integer
+          minimum: 1
+        channels:
+          type: integer
+          minimum: 1
+    PlaybackSubtitle:
+      type: object
+      additionalProperties: false
+      required: [id, addonId, manifestId, url]
+      properties:
+        id:
+          type: string
+        addonId:
+          type: string
+          format: uuid
+        manifestId:
+          type: string
+        language:
+          type: string
+        url:
+          type: string
+          description: Same-server playback asset URL containing the playback token.
+    PlaybackProviderError:
+      type: object
+      additionalProperties: false
+      required: [addonId, manifestId, code, message]
+      properties:
+        addonId:
+          type: string
+          format: uuid
+        manifestId:
+          type: string
+        code:
+          type: string
+        message:
+          type: string
+    PlaybackProgress:
+      type: object
+      additionalProperties: false
+      required: [titleId, mediaType, positionSeconds, durationSeconds, completed, version, lastWatchedAt, updatedAt]
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+          enum: [movie, episode]
+        positionSeconds:
+          type: integer
+          minimum: 0
+        durationSeconds:
+          type: integer
+          minimum: 0
+        completed:
+          type: boolean
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        lastWatchedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    UpdatePlaybackProgressRequest:
+      type: object
+      additionalProperties: false
+      required: [positionSeconds, durationSeconds, completed, expectedVersion]
+      properties:
+        positionSeconds:
+          type: integer
+          minimum: 0
+        durationSeconds:
+          type: integer
+          minimum: 0
+        completed:
+          type: boolean
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+    CompletionRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion]
+      properties:
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+    ContinueWatchingItem:
+      type: object
+      additionalProperties: false
+      required: [titleId, mediaType, positionSeconds, durationSeconds, version, reason, lastWatchedAt]
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+          enum: [movie, episode]
+        seriesId:
+          type: string
+          format: uuid
+        seasonId:
+          type: string
+          format: uuid
+        seasonNumber:
+          type: integer
+          minimum: 0
+        episodeNumber:
+          type: integer
+          minimum: 0
+        positionSeconds:
+          type: integer
+          minimum: 0
+        durationSeconds:
+          type: integer
+          minimum: 0
+        version:
+          type: integer
+          format: int64
+          minimum: 0
+        reason:
+          type: string
+          enum: [resume, next_episode]
+        lastWatchedAt:
+          type: string
+          format: date-time
+    ContinueWatchingPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContinueWatchingItem"
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Container version="2">
+  <Name>Rivune</Name>
+  <Repository>ghcr.io/moodiness/rivune:latest</Repository>
+  <Registry>https://github.com/moodiness/rivune/pkgs/container/rivune</Registry>
+  <TemplateURL>https://raw.githubusercontent.com/moodiness/rivune/main/templates/unraid/rivune.xml</TemplateURL>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Shell>sh</Shell>
+  <Support>https://github.com/moodiness/rivune/issues</Support>
+  <Project>https://github.com/moodiness/rivune</Project>
+  <Overview>Rivune is an open-source, self-hosted media frontend and backend. The application contains no predefined catalogue or media service: users connect their own addons and sources.&#xD;
+&#xD;
+REQUIRED: A PostgreSQL server must already exist and be reachable from this container. When using a PostgreSQL container hostname, place both containers on the same custom Docker network in the Unraid template editor.&#xD;
+&#xD;
+AMD/Intel GPU: this template maps /dev/dri/renderD128 and adds Unraid's usual video group GID 18. Verify the actual GID with: stat -c '%g' /dev/dri/renderD128. If it differs, replace --group-add=18 under Advanced View / Extra Parameters.&#xD;
+&#xD;
+The setup token and database password are required secrets. Choose long, independent random values. The transcode directory must be writable by container UID 65532.</Overview>
+  <Category>MediaApp:Video MediaApp:Other</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <Icon>https://raw.githubusercontent.com/moodiness/rivune/main/templates/unraid/rivune-icon.svg</Icon>
+  <ExtraParams>--init --restart unless-stopped --group-add=18</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>PostgreSQL 14 or newer. For AMD/Intel hardware transcoding, /dev/dri/renderD128 must exist on the Unraid host.</Requires>
+
+  <Config Name="Web interface port" Target="8080" Default="8080" Mode="tcp" Description="Host port used by the Rivune web interface." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Public URL" Target="RIVUNE_PUBLIC_URL" Default="" Mode="" Description="Externally reachable base URL, for example https://rivune.example.com. Leave empty for LAN-only setup." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="PostgreSQL host" Target="RIVUNE_DATABASE_HOST" Default="postgres" Mode="" Description="PostgreSQL hostname or IP. Container hostnames require a shared custom Docker network." Type="Variable" Display="always" Required="true" Mask="false">postgres</Config>
+  <Config Name="PostgreSQL port" Target="RIVUNE_DATABASE_PORT" Default="5432" Mode="" Description="PostgreSQL TCP port." Type="Variable" Display="always" Required="true" Mask="false">5432</Config>
+  <Config Name="PostgreSQL database" Target="RIVUNE_DATABASE_NAME" Default="rivune" Mode="" Description="Existing PostgreSQL database name." Type="Variable" Display="always" Required="true" Mask="false">rivune</Config>
+  <Config Name="PostgreSQL user" Target="RIVUNE_DATABASE_USER" Default="rivune" Mode="" Description="PostgreSQL role with ownership rights on the Rivune database." Type="Variable" Display="always" Required="true" Mask="false">rivune</Config>
+  <Config Name="PostgreSQL password" Target="RIVUNE_DATABASE_PASSWORD" Default="" Mode="" Description="Password for the PostgreSQL role. Required." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Initial setup token" Target="RIVUNE_SETUP_TOKEN" Default="" Mode="" Description="One-time secret used to claim the server during initial setup. Use a long random value." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Transcode directory" Target="/transcode" Default="/mnt/cache/appdata/rivune/transcode" Mode="rw" Description="Temporary HLS and transcoding data. Prefer a cache-pool path and ensure UID 65532 can write to it." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/rivune/transcode</Config>
+  <Config Name="AMD/Intel render device" Target="/dev/dri/renderD128" Default="/dev/dri/renderD128" Mode="rw" Description="VAAPI or Intel Quick Sync render node. Remove this entry when no AMD/Intel GPU is available." Type="Device" Display="always" Required="false" Mask="false">/dev/dri/renderD128</Config>
+  <Config Name="Hardware acceleration" Target="RIVUNE_HARDWARE_ACCELERATION" Default="auto" Mode="" Description="Encoder selection: auto, software, vaapi, qsv, or nvenc." Type="Variable" Display="always" Required="true" Mask="false">auto</Config>
+  <Config Name="Video device path" Target="RIVUNE_VIDEO_DEVICE" Default="/dev/dri/renderD128" Mode="" Description="Container path to the VAAPI/Quick Sync render device." Type="Variable" Display="advanced" Required="true" Mask="false">/dev/dri/renderD128</Config>
+  <Config Name="Media temporary directory" Target="RIVUNE_MEDIA_TEMP_DIR" Default="/transcode" Mode="" Description="Internal path corresponding to the Transcode directory mapping." Type="Variable" Display="advanced" Required="true" Mask="false">/transcode</Config>
+  <Config Name="Maximum transcode storage (MB)" Target="RIVUNE_MEDIA_MAX_STORAGE_MB" Default="20480" Mode="" Description="Global upper bound for temporary playback media, from 512 to 102400 MB." Type="Variable" Display="advanced" Required="true" Mask="false">20480</Config>
+  <Config Name="Remux concurrency" Target="RIVUNE_REMUX_CONCURRENCY" Default="2" Mode="" Description="Maximum concurrent FFmpeg media jobs, from 1 to 16." Type="Variable" Display="advanced" Required="true" Mask="false">2</Config>
+  <Config Name="Software transcode threads" Target="RIVUNE_TRANSCODE_THREADS" Default="4" Mode="" Description="CPU threads used by the libx264 software fallback, from 1 to 32." Type="Variable" Display="advanced" Required="true" Mask="false">4</Config>
+  <Config Name="PostgreSQL SSL mode" Target="RIVUNE_DATABASE_SSLMODE" Default="disable" Mode="" Description="PostgreSQL sslmode. Use require or verify-full for a remote secured database." Type="Variable" Display="advanced" Required="true" Mask="false">disable</Config>
+  <Config Name="Trusted reverse proxies" Target="RIVUNE_TRUSTED_PROXIES" Default="" Mode="" Description="Comma-separated proxy IP addresses or CIDR networks allowed to supply forwarding headers." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="TMDB access token" Target="RIVUNE_TMDB_ACCESS_TOKEN" Default="" Mode="" Description="Optional TMDB API read access token." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="TVDB API key" Target="RIVUNE_TVDB_API_KEY" Default="" Mode="" Description="Optional TVDB API key." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="TVDB PIN" Target="RIVUNE_TVDB_PIN" Default="" Mode="" Description="Optional TVDB subscriber PIN. Requires a TVDB API key." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Trakt client ID" Target="RIVUNE_TRAKT_CLIENT_ID" Default="" Mode="" Description="Optional Trakt API client ID for collection synchronization." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Listen address" Target="RIVUNE_LISTEN_ADDRESS" Default=":8080" Mode="" Description="Internal HTTP listen address. Do not change unless the port mapping is updated too." Type="Variable" Display="advanced" Required="true" Mask="false">:8080</Config>
+</Container>

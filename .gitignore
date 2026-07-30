@@ -1,0 +1,34 @@
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Secrets
+secrets/*
+!secrets/.gitignore
+
+# Go
+server/bin/
+server/coverage.out
+server/rivune
+server/rivune.exe
+server/internal/webui/dist/
+
+# Node and TypeScript
+web/node_modules/
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+
+# Accidental Windows null-device outputs
+NUL.*
+**/NUL.*
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local planning
+ROADMAP.md

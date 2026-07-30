@@ -1,0 +1,178 @@
+package playback
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestRewriteLocalPlaylistRewritesInitAndSegments(t *testing.T) {
+	playlist := []byte("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.000,\nsegment-000001.m4s\n")
+
+	rewritten, err := rewriteLocalPlaylist(playlist, func(reference string) string {
+		return "/media/" + reference
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(rewritten)
+	if !strings.Contains(result, `URI="/media/init.mp4"`) || !strings.Contains(result, "/media/segment-000001.m4s") {
+		t.Fatalf("playlist references were not rewritten: %s", result)
+	}
+}
+
+type blockingHLSProcessor struct {
+	ready   chan struct{}
+	stopped chan struct{}
+}
+
+func (processor *blockingHLSProcessor) ProcessHLS(ctx context.Context, _ storedAsset, directory string) error {
+	defer close(processor.stopped)
+	files := map[string]string{
+		"init.mp4":           "fragmented-mp4-init",
+		"segment-000000.m4s": "fragmented-mp4-segment",
+		"index.m3u8":         "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.000,\nsegment-000000.m4s\n",
+	}
+	for name, contents := range files {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(contents), 0o600); err != nil {
+			return err
+		}
+	}
+	close(processor.ready)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (*blockingHLSProcessor) ConvertSubtitle(context.Context, storedAsset, io.Writer) error {
+	return nil
+}
+
+func TestHLSJobServesBeforeCompletionAndStopsWithSession(t *testing.T) {
+	processor := &blockingHLSProcessor{ready: make(chan struct{}), stopped: make(chan struct{})}
+	service := &Service{
+		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1024 * 1024, IdleTTL: time.Minute},
+		hlsJobs:      make(map[string]*hlsJob),
+	}
+	asset := storedAsset{ID: "stream-1", Kind: processingTranscode, URL: "https://media.example/movie.mkv"}
+
+	job, err := service.hlsJob("session-1", asset, processor, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-processor.ready:
+	case <-time.After(time.Second):
+		t.Fatal("processor did not publish its initial HLS files")
+	}
+	select {
+	case <-job.done:
+		t.Fatal("HLS processing completed before the initial playlist was served")
+	default:
+	}
+	if err := waitForMediaFile(context.Background(), job, filepath.Join(job.directory, "index.m3u8")); err != nil {
+		t.Fatalf("initial playlist was unavailable: %v", err)
+	}
+	if err := waitForMediaFile(context.Background(), job, filepath.Join(job.directory, "segment-000000.m4s")); err != nil {
+		t.Fatalf("initial segment was unavailable: %v", err)
+	}
+
+	service.stopHLSSession("session-1")
+	select {
+	case <-processor.stopped:
+	default:
+		t.Fatal("stopping the playback session did not cancel HLS processing")
+	}
+	if _, err := os.Stat(job.directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("HLS workspace still exists after session stop: %v", err)
+	}
+}
+
+func TestHLSJobRejectsExhaustedStorage(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "existing.bin"), []byte("full"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{
+		mediaOptions: MediaOptions{TempDirectory: directory, MaxStorageBytes: 1, IdleTTL: time.Minute},
+		hlsJobs:      make(map[string]*hlsJob),
+	}
+	processor := &blockingHLSProcessor{ready: make(chan struct{}), stopped: make(chan struct{})}
+
+	_, err := service.hlsJob("session-1", storedAsset{ID: "stream-1"}, processor, true)
+	if !errors.Is(err, ErrMediaStorageLimit) {
+		t.Fatalf("expected storage limit error, got %v", err)
+	}
+}
+
+func TestFFmpegProcessorRejectsConcurrentWorkAtCapacity(t *testing.T) {
+	processor := &FFmpegProcessor{slots: make(chan struct{}, 1)}
+	if err := processor.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer processor.release()
+	if err := processor.acquire(context.Background()); !errors.Is(err, ErrMediaCapacityReached) {
+		t.Fatalf("expected capacity error, got %v", err)
+	}
+}
+
+func TestFFmpegConvertsSRTAndASSToWebVTT(t *testing.T) {
+	processor, err := NewFFmpegProcessor("ffmpeg", "ffprobe", 1, 1, FFmpegOptions{HardwareAcceleration: "software"})
+	if err != nil {
+		t.Skipf("FFmpeg is unavailable: %v", err)
+	}
+	tests := []struct {
+		filename string
+		text     string
+	}{
+		{filename: "sample.srt", text: "Bonjour Rivune"},
+		{filename: "sample.ass", text: "Bonjour ASS"},
+	}
+	for _, test := range tests {
+		t.Run(test.filename, func(t *testing.T) {
+			source, err := filepath.Abs(filepath.Join("testdata", test.filename))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			if err := processor.ConvertSubtitle(context.Background(), storedAsset{Kind: assetKindConvertedSubtitle, URL: source}, &output); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(output.String(), "WEBVTT") || !strings.Contains(output.String(), test.text) {
+				t.Fatalf("unexpected WebVTT output: %s", output.String())
+			}
+		})
+	}
+}
+
+func TestPruneHLSSegmentsRetainsBoundedTail(t *testing.T) {
+	directory := t.TempDir()
+	for index := 0; index <= hlsRetainedSegments+5; index++ {
+		name := fmt.Sprintf("segment-%06d.m4s", index)
+		if err := os.WriteFile(filepath.Join(directory, name), []byte("segment"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	current := fmt.Sprintf("segment-%06d.m4s", hlsRetainedSegments+5)
+	pruneHLSSegments(directory, current)
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != hlsRetainedSegments {
+		t.Fatalf("expected %d retained segments, got %d", hlsRetainedSegments, len(entries))
+	}
+	if _, err := os.Stat(filepath.Join(directory, "segment-000005.m4s")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old segment was retained: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(directory, current)); err != nil {
+		t.Fatalf("current segment was pruned: %v", err)
+	}
+}

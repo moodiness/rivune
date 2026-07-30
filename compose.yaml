@@ -1,0 +1,86 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+      args:
+        VERSION: ${RIVUNE_VERSION:-dev}
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RIVUNE_LISTEN_ADDRESS: ":8080"
+      RIVUNE_PUBLIC_URL: ${RIVUNE_PUBLIC_URL:-http://localhost:8080}
+      RIVUNE_TRUSTED_PROXIES: ${RIVUNE_TRUSTED_PROXIES:-}
+      RIVUNE_DATABASE_HOST: postgres
+      RIVUNE_DATABASE_PORT: "5432"
+      RIVUNE_DATABASE_NAME: rivune
+      RIVUNE_DATABASE_USER: rivune
+      RIVUNE_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+      RIVUNE_DATABASE_SSLMODE: disable
+      RIVUNE_SETUP_TOKEN_FILE: /run/secrets/setup_token
+      RIVUNE_ACCESS_TOKEN_TTL: ${RIVUNE_ACCESS_TOKEN_TTL:-15m}
+      RIVUNE_REFRESH_TOKEN_TTL: ${RIVUNE_REFRESH_TOKEN_TTL:-720h}
+      RIVUNE_PROFILE_GRANT_TTL: ${RIVUNE_PROFILE_GRANT_TTL:-12h}
+      RIVUNE_TMDB_ACCESS_TOKEN_FILE: /run/secrets/tmdb_access_token
+      RIVUNE_TVDB_API_KEY_FILE: /run/secrets/tvdb_api_key
+      RIVUNE_TVDB_PIN_FILE: /run/secrets/tvdb_pin
+      RIVUNE_TRAKT_CLIENT_ID_FILE: /run/secrets/trakt_client_id
+      RIVUNE_METADATA_CACHE_TTL: ${RIVUNE_METADATA_CACHE_TTL:-24h}
+      RIVUNE_FFMPEG_PATH: ${RIVUNE_FFMPEG_PATH:-ffmpeg}
+      RIVUNE_FFPROBE_PATH: ${RIVUNE_FFPROBE_PATH:-ffprobe}
+      RIVUNE_REMUX_CONCURRENCY: ${RIVUNE_REMUX_CONCURRENCY:-2}
+      RIVUNE_TRANSCODE_THREADS: ${RIVUNE_TRANSCODE_THREADS:-4}
+      RIVUNE_HARDWARE_ACCELERATION: ${RIVUNE_HARDWARE_ACCELERATION:-auto}
+      RIVUNE_VIDEO_DEVICE: ${RIVUNE_VIDEO_DEVICE:-/dev/dri/renderD128}
+      RIVUNE_MEDIA_TEMP_DIR: /tmp
+      RIVUNE_MEDIA_MAX_STORAGE_MB: ${RIVUNE_MEDIA_MAX_STORAGE_MB:-20480}
+    secrets:
+      - postgres_password
+      - setup_token
+      - tmdb_access_token
+      - tvdb_api_key
+      - tvdb_pin
+      - trakt_client_id
+    ports:
+      - "${RIVUNE_PORT:-8080}:8080"
+    stop_grace_period: 15s
+
+  postgres:
+    image: postgres:18-trixie
+    restart: unless-stopped
+    shm_size: 128mb
+    environment:
+      POSTGRES_DB: rivune
+      POSTGRES_USER: rivune
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rivune -d rivune"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  postgres_data:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  setup_token:
+    file: ./secrets/setup_token.txt
+  tmdb_access_token:
+    file: ./secrets/tmdb_access_token.txt
+  tvdb_api_key:
+    file: ./secrets/tvdb_api_key.txt
+  tvdb_pin:
+    file: ./secrets/tvdb_pin.txt
+  trakt_client_id:
+    file: ./secrets/trakt_client_id.txt
