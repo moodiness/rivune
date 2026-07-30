@@ -28,6 +28,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/rivune /usr/local/bin/rivune
+COPY --chmod=755 server/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 EXPOSE 8080
-USER 65532:65532
-ENTRYPOINT ["/usr/local/bin/rivune"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/usr/local/bin/rivune"]
