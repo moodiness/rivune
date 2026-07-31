@@ -48,6 +48,15 @@ jobs:
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build embedded frontend for Go tests
+        working-directory: web
+        run: npm ci && npm run build
       - name: Run backend tests with PostgreSQL integration coverage
         working-directory: server
         run: go test ./...
@@ -88,7 +97,7 @@ jobs:
         with:
           node-version: 22
       - name: Lint OpenAPI contract with pinned Redocly
-        run: npx --yes @redocly/cli@1.34.5 lint protocol/openapi.yaml --format=github
+        run: npx --yes @redocly/cli@1.34.5 lint protocol/openapi.yaml --format=github-actions
       - name: Resolve the complete OpenAPI contract
         run: npx --yes @redocly/cli@1.34.5 bundle protocol/openapi.yaml --output /tmp/rivune-openapi.yaml
 
