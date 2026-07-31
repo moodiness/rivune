@@ -23,6 +23,7 @@ func (a *API) resolveTitle(w http.ResponseWriter, r *http.Request, principal aut
 		PosterURL     string `json:"posterUrl"`
 		BackgroundURL string `json:"backgroundUrl"`
 		ReleaseInfo   string `json:"releaseInfo"`
+		Released      string `json:"released"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -31,7 +32,7 @@ func (a *API) resolveTitle(w http.ResponseWriter, r *http.Request, principal aut
 	result, err := a.watchstate.ResolveTitle(r.Context(), principal, watchstate.ResolveTitleInput{
 		MediaType: request.MediaType, Provider: request.Provider, ExternalID: request.ExternalID,
 		ResourceID: request.ResourceID, Title: request.Title, PosterURL: request.PosterURL,
-		BackgroundURL: request.BackgroundURL, ReleaseInfo: request.ReleaseInfo,
+		BackgroundURL: request.BackgroundURL, ReleaseInfo: request.ReleaseInfo, Released: request.Released,
 	})
 	if err != nil {
 		a.writeWatchstateError(w, "resolve title", err)

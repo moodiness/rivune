@@ -53,11 +53,7 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, deviceName, plat
 	}
 	now := time.Now().UTC()
 	expiresAt := now.Add(deviceAuthorizationTTL)
-	if _, err := s.pool.Exec(ctx, `
-		DELETE FROM device_authorizations
-		WHERE expires_at < now() - interval '1 hour'
-		   OR consumed_at < now() - interval '1 hour'
-	`); err != nil {
+	if _, err := s.pool.Exec(ctx, cleanupStaleDeviceAuthorizationsSQL); err != nil {
 		return DeviceAuthorization{}, fmt.Errorf("clean device authorizations: %w", err)
 	}
 

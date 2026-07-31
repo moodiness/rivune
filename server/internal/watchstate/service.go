@@ -52,6 +52,7 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 	input.PosterURL = strings.TrimSpace(input.PosterURL)
 	input.BackgroundURL = strings.TrimSpace(input.BackgroundURL)
 	input.ReleaseInfo = strings.TrimSpace(input.ReleaseInfo)
+	input.Released = strings.TrimSpace(input.Released)
 	if input.MediaType != "movie" && input.MediaType != "series" {
 		return TitleReference{}, fmt.Errorf("%w: mediaType must be movie or series", ErrInvalidInput)
 	}
@@ -63,6 +64,15 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 	}
 	if len(input.Title) < 1 || len(input.Title) > 500 || len(input.PosterURL) > 4096 || len(input.BackgroundURL) > 4096 || len(input.ReleaseInfo) > 120 {
 		return TitleReference{}, fmt.Errorf("%w: invalid title snapshot", ErrInvalidInput)
+	}
+	if input.MediaType == "movie" && input.Released != "" {
+		released, err := time.Parse(time.DateOnly, input.Released)
+		if err != nil || released.Year() < 1 || released.Format(time.DateOnly) != input.Released {
+			return TitleReference{}, fmt.Errorf("%w: released must be a YYYY-MM-DD date", ErrInvalidInput)
+		}
+	}
+	if input.MediaType == "series" {
+		input.Released = ""
 	}
 
 	storedExternalID := input.ExternalID
@@ -87,10 +97,15 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 	`, input.Provider, input.MediaType, storedExternalID).Scan(&titleID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.QueryRow(ctx, `
-			INSERT INTO titles (media_type, display_title, poster_url, background_url, release_info, resource_id, resource_provider)
-			VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6, $7)
+			INSERT INTO titles (
+				media_type, display_title, poster_url, background_url, release_info,
+				release_date, resource_id, resource_provider
+			)
+			VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''),
+			        NULLIF($6, '')::date, $7, $8)
 			RETURNING id::text
-		`, input.MediaType, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo, input.ResourceID, input.Provider).Scan(&titleID); err != nil {
+		`, input.MediaType, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo,
+			input.Released, input.ResourceID, input.Provider).Scan(&titleID); err != nil {
 			return TitleReference{}, fmt.Errorf("create resolved title: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
@@ -107,11 +122,13 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 		    poster_url = NULLIF($3, ''),
 		    background_url = NULLIF($4, ''),
 		    release_info = NULLIF($5, ''),
-		    resource_id = $6,
-		    resource_provider = $7,
+		    release_date = COALESCE(NULLIF($6, '')::date, release_date),
+		    resource_id = $7,
+		    resource_provider = $8,
 		    updated_at = now()
 		WHERE id = $1::uuid
-	`, titleID, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo, input.ResourceID, input.Provider); err != nil {
+	`, titleID, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo,
+		input.Released, input.ResourceID, input.Provider); err != nil {
 		return TitleReference{}, fmt.Errorf("update resolved title snapshot: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -508,11 +525,7 @@ func (s *Service) resumeItems(ctx context.Context, profileID string, limit int) 
 	return items, activeSeries, nil
 }
 
-func (s *Service) nextEpisodeItems(ctx context.Context, profileID string, activeSeries map[string]struct{}, limit int) ([]ContinueItem, error) {
-	if limit < 1 {
-		return []ContinueItem{}, nil
-	}
-	rows, err := s.pool.Query(ctx, `
+const nextEpisodeQuery = `
 		WITH latest_completed AS (
 			SELECT DISTINCT ON (series.id)
 			       series.id AS series_id,
@@ -550,6 +563,8 @@ func (s *Service) nextEpisodeItems(ctx context.Context, profileID string, active
 			  AND candidate_season.ordinal > 0
 			  AND (candidate_season.ordinal, candidate_episode.ordinal) >
 			      (latest.season_number, latest.episode_number)
+			  AND (candidate_season.release_date IS NULL OR candidate_season.release_date <= CURRENT_DATE)
+			  AND (candidate_episode.release_date IS NULL OR candidate_episode.release_date <= CURRENT_DATE)
 			  AND NOT EXISTS (
 				SELECT 1
 				FROM profile_progress existing
@@ -564,7 +579,13 @@ func (s *Service) nextEpisodeItems(ctx context.Context, profileID string, active
 		JOIN titles series_title ON series_title.id = latest.series_id
 		ORDER BY latest.last_watched_at DESC, latest.series_id
 		LIMIT $2
-	`, profileID, limit+len(activeSeries))
+	`
+
+func (s *Service) nextEpisodeItems(ctx context.Context, profileID string, activeSeries map[string]struct{}, limit int) ([]ContinueItem, error) {
+	if limit < 1 {
+		return []ContinueItem{}, nil
+	}
+	rows, err := s.pool.Query(ctx, nextEpisodeQuery, profileID, limit+len(activeSeries))
 	if err != nil {
 		return nil, fmt.Errorf("query next episodes: %w", err)
 	}

@@ -114,6 +114,20 @@ func (a *API) seasonDetails(w http.ResponseWriter, r *http.Request, principal au
 	writeJSON(w, http.StatusOK, season)
 }
 
+func (a *API) titleTrailer(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	trailer, err := a.metadata.Trailer(
+		r.Context(),
+		principal,
+		r.PathValue("titleId"),
+		r.URL.Query().Get("language"),
+	)
+	if err != nil {
+		a.writeMetadataError(w, "read title trailer", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, trailer)
+}
+
 func metadataQueryOptions(r *http.Request) (metadata.QueryOptions, error) {
 	page := 0
 	if rawPage := strings.TrimSpace(r.URL.Query().Get("page")); rawPage != "" {

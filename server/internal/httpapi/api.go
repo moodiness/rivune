@@ -11,13 +11,14 @@ import (
 	"mime"
 	"net/http"
 	"strings"
-	"unicode/utf8"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/calendar"
 	"github.com/moodiness/rivune/server/internal/collection"
 	collectiontrakt "github.com/moodiness/rivune/server/internal/collection/trakt"
 
@@ -34,7 +35,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/webui"
 )
 
-const protocolVersion = 10
+const protocolVersion = 14
 
 type instanceService interface {
 	Info(context.Context) (instance.Info, error)
@@ -115,6 +116,10 @@ type collectionService interface {
 	TMDBGenres(context.Context, auth.Principal, string, string) ([]collection.Genre, error)
 }
 
+type calendarService interface {
+	List(context.Context, auth.Principal, string, string, string) (calendar.Result, error)
+}
+
 type metadataService interface {
 	DiscoverMovies(context.Context, auth.Principal, metadata.QueryOptions) (metadata.MoviePage, error)
 	SearchMovies(context.Context, auth.Principal, metadata.SearchOptions) (metadata.MoviePage, error)
@@ -123,6 +128,7 @@ type metadataService interface {
 	SearchSeries(context.Context, auth.Principal, metadata.SearchOptions) (metadata.SeriesPage, error)
 	SeriesDetails(context.Context, auth.Principal, string, string) (metadata.Series, error)
 	SeasonDetails(context.Context, auth.Principal, string, string) (metadata.Season, error)
+	Trailer(context.Context, auth.Principal, string, string) (metadata.Trailer, error)
 }
 
 type watchstateService interface {
@@ -149,20 +155,23 @@ type playbackService interface {
 }
 
 type API struct {
-	config      config.Config
-	addons      addonService
-	pool        *pgxpool.Pool
-	instances   instanceService
-	collections collectionService
-	auth        authService
-	profiles    profileService
-	playback    playbackService
-	settings    settingsService
-	users       userService
-	metadata    metadataService
-	logger      *slog.Logger
-	version     string
-	watchstate  watchstateService
+	config              config.Config
+	addons              addonService
+	calendar            calendarService
+	pool                *pgxpool.Pool
+	instances           instanceService
+	collections         collectionService
+	auth                authService
+	authMaintenance     authMaintenanceService
+	profiles            profileService
+	playback            playbackService
+	playbackMaintenance playbackMaintenanceService
+	settings            settingsService
+	users               userService
+	metadata            metadataService
+	logger              *slog.Logger
+	version             string
+	watchstate          watchstateService
 }
 
 type errorEnvelope struct {
@@ -207,21 +216,25 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	if err != nil {
 		return nil, fmt.Errorf("initialize playback service: %w", err)
 	}
+	metadataService := metadata.NewService(pool, metadataProvider, televisionEnricher, cfg.MetadataCacheTTL, logger)
 	return &API{
-		addons:      addonService,
-		config:      cfg,
-		collections: collection.NewService(pool, addonService, collectionTMDB, collectionTrakt),
-		pool:        pool,
-		instances:   instance.NewService(pool, cfg.SetupToken),
-		auth:        authService,
-		profiles:    profile.NewService(pool, cfg.ProfileGrantTTL),
-		playback:    playbackService,
-		logger:      logger,
-		settings:    settings.NewService(pool),
-		users:       user.NewService(pool),
-		metadata:    metadata.NewService(pool, metadataProvider, televisionEnricher, cfg.MetadataCacheTTL, logger),
-		version:     version,
-		watchstate:  watchstate.NewService(pool),
+		addons:              addonService,
+		config:              cfg,
+		calendar:            calendar.NewService(pool, metadataService, logger),
+		collections:         collection.NewService(pool, addonService, collectionTMDB, collectionTrakt),
+		pool:                pool,
+		instances:           instance.NewService(pool, cfg.SetupToken),
+		auth:                authService,
+		authMaintenance:     authService,
+		profiles:            profile.NewService(pool, cfg.ProfileGrantTTL),
+		playback:            playbackService,
+		playbackMaintenance: playbackService,
+		logger:              logger,
+		settings:            settings.NewService(pool),
+		users:               user.NewService(pool),
+		metadata:            metadataService,
+		version:             version,
+		watchstate:          watchstate.NewService(pool),
 	}, nil
 }
 
@@ -263,6 +276,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/users", a.requireAuthentication(a.listUsers))
 	mux.Handle("GET /api/v1/metadata/series/{titleId}", a.requireAuthentication(a.seriesDetails))
 	mux.Handle("GET /api/v1/metadata/seasons/{seasonId}", a.requireAuthentication(a.seasonDetails))
+	mux.Handle("GET /api/v1/metadata/titles/{titleId}/trailer", a.requireAuthentication(a.titleTrailer))
 	mux.Handle("POST /api/v1/users", a.requireAuthentication(a.createUser))
 	mux.Handle("PATCH /api/v1/users/{userId}", a.requireAuthentication(a.updateUser))
 	mux.Handle("DELETE /api/v1/users/{userId}", a.requireAuthentication(a.deleteUser))
@@ -301,6 +315,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("POST /api/v1/playback/activity/purge", a.requireAuthentication(a.purgePlaybackActivity))
 	mux.HandleFunc("GET /api/v1/playback/sessions/{sessionId}/assets/{assetId}", a.playbackAsset)
 	mux.HandleFunc("HEAD /api/v1/playback/sessions/{sessionId}/assets/{assetId}", a.playbackAsset)
+	mux.Handle("GET /api/v1/calendar", a.requireAuthentication(a.calendarEvents))
 	mux.Handle("GET /api/v1/library", a.requireAuthentication(a.library))
 	mux.Handle("PUT /api/v1/library/{titleId}", a.requireAuthentication(a.addLibrary))
 	mux.Handle("DELETE /api/v1/library/{titleId}", a.requireAuthentication(a.removeLibrary))

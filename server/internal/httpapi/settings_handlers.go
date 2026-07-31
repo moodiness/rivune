@@ -30,15 +30,43 @@ func (value *nullableBool) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type nullableInt struct {
+	Set   bool
+	Value *int
+}
+
+func (value *nullableInt) UnmarshalJSON(data []byte) error {
+	value.Set = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		value.Value = nil
+		return nil
+	}
+	var decoded int
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	value.Value = &decoded
+	return nil
+}
+
 type settingsPatchRequest struct {
-	Theme             nullableString `json:"theme,omitempty"`
-	MaximumResolution nullableString `json:"maximumResolution,omitempty"`
-	PreferDirectPlay  nullableBool   `json:"preferDirectPlay,omitempty"`
-	HideUnreleased    nullableBool   `json:"hideUnreleased,omitempty"`
-	MetadataLanguage  nullableString `json:"metadataLanguage,omitempty"`
-	MetadataRegion    nullableString `json:"metadataRegion,omitempty"`
-	AudioLanguage     nullableString `json:"audioLanguage,omitempty"`
-	SubtitleLanguage  nullableString `json:"subtitleLanguage,omitempty"`
+	Theme                            nullableString `json:"theme,omitempty"`
+	MaximumResolution                nullableString `json:"maximumResolution,omitempty"`
+	PreferDirectPlay                 nullableBool   `json:"preferDirectPlay,omitempty"`
+	HideUnreleased                   nullableBool   `json:"hideUnreleased,omitempty"`
+	MetadataLanguage                 nullableString `json:"metadataLanguage,omitempty"`
+	MetadataRegion                   nullableString `json:"metadataRegion,omitempty"`
+	AudioLanguage                    nullableString `json:"audioLanguage,omitempty"`
+	SubtitleLanguage                 nullableString `json:"subtitleLanguage,omitempty"`
+	AutoplayNextEpisode              nullableBool   `json:"autoplayNextEpisode,omitempty"`
+	CardDensity                      nullableString `json:"cardDensity,omitempty"`
+	AnimationsEnabled                nullableBool   `json:"animationsEnabled,omitempty"`
+	SubtitleSizePercent              nullableInt    `json:"subtitleSizePercent,omitempty"`
+	SubtitleTextColor                nullableString `json:"subtitleTextColor,omitempty"`
+	SubtitleBackgroundOpacityPercent nullableInt    `json:"subtitleBackgroundOpacityPercent,omitempty"`
+	NotificationsEnabled             nullableBool   `json:"notificationsEnabled,omitempty"`
+	NotificationDurationSeconds      nullableInt    `json:"notificationDurationSeconds,omitempty"`
+	NotificationPollIntervalSeconds  nullableInt    `json:"notificationPollIntervalSeconds,omitempty"`
 }
 
 func (a *API) instanceSettings(w http.ResponseWriter, r *http.Request, _ auth.Principal) {
@@ -104,14 +132,23 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		return settings.Patch{}, false
 	}
 	return settings.Patch{
-		Theme:             settings.OptionalString{Set: request.Theme.Set, Value: request.Theme.Value},
-		MaximumResolution: settings.OptionalString{Set: request.MaximumResolution.Set, Value: request.MaximumResolution.Value},
-		PreferDirectPlay:  settings.OptionalBool{Set: request.PreferDirectPlay.Set, Value: request.PreferDirectPlay.Value},
-		HideUnreleased:    settings.OptionalBool{Set: request.HideUnreleased.Set, Value: request.HideUnreleased.Value},
-		MetadataLanguage:  settings.OptionalString{Set: request.MetadataLanguage.Set, Value: request.MetadataLanguage.Value},
-		MetadataRegion:    settings.OptionalString{Set: request.MetadataRegion.Set, Value: request.MetadataRegion.Value},
-		AudioLanguage:     settings.OptionalString{Set: request.AudioLanguage.Set, Value: request.AudioLanguage.Value},
-		SubtitleLanguage:  settings.OptionalString{Set: request.SubtitleLanguage.Set, Value: request.SubtitleLanguage.Value},
+		Theme:                            settings.OptionalString{Set: request.Theme.Set, Value: request.Theme.Value},
+		MaximumResolution:                settings.OptionalString{Set: request.MaximumResolution.Set, Value: request.MaximumResolution.Value},
+		PreferDirectPlay:                 settings.OptionalBool{Set: request.PreferDirectPlay.Set, Value: request.PreferDirectPlay.Value},
+		HideUnreleased:                   settings.OptionalBool{Set: request.HideUnreleased.Set, Value: request.HideUnreleased.Value},
+		MetadataLanguage:                 settings.OptionalString{Set: request.MetadataLanguage.Set, Value: request.MetadataLanguage.Value},
+		MetadataRegion:                   settings.OptionalString{Set: request.MetadataRegion.Set, Value: request.MetadataRegion.Value},
+		AudioLanguage:                    settings.OptionalString{Set: request.AudioLanguage.Set, Value: request.AudioLanguage.Value},
+		SubtitleLanguage:                 settings.OptionalString{Set: request.SubtitleLanguage.Set, Value: request.SubtitleLanguage.Value},
+		AutoplayNextEpisode:              settings.OptionalBool{Set: request.AutoplayNextEpisode.Set, Value: request.AutoplayNextEpisode.Value},
+		CardDensity:                      settings.OptionalString{Set: request.CardDensity.Set, Value: request.CardDensity.Value},
+		AnimationsEnabled:                settings.OptionalBool{Set: request.AnimationsEnabled.Set, Value: request.AnimationsEnabled.Value},
+		SubtitleSizePercent:              settings.OptionalInt{Set: request.SubtitleSizePercent.Set, Value: request.SubtitleSizePercent.Value},
+		SubtitleTextColor:                settings.OptionalString{Set: request.SubtitleTextColor.Set, Value: request.SubtitleTextColor.Value},
+		SubtitleBackgroundOpacityPercent: settings.OptionalInt{Set: request.SubtitleBackgroundOpacityPercent.Set, Value: request.SubtitleBackgroundOpacityPercent.Value},
+		NotificationsEnabled:             settings.OptionalBool{Set: request.NotificationsEnabled.Set, Value: request.NotificationsEnabled.Value},
+		NotificationDurationSeconds:      settings.OptionalInt{Set: request.NotificationDurationSeconds.Set, Value: request.NotificationDurationSeconds.Value},
+		NotificationPollIntervalSeconds:  settings.OptionalInt{Set: request.NotificationPollIntervalSeconds.Set, Value: request.NotificationPollIntervalSeconds.Value},
 	}, true
 }
 

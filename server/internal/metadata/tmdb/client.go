@@ -57,6 +57,20 @@ type seriesListResponse struct {
 	TotalResults int              `json:"total_results"`
 }
 
+type videosResponse struct {
+	Results []videoResponse `json:"results"`
+}
+
+type videoResponse struct {
+	Language    string `json:"iso_639_1"`
+	Key         string `json:"key"`
+	Name        string `json:"name"`
+	Site        string `json:"site"`
+	Type        string `json:"type"`
+	Official    bool   `json:"official"`
+	PublishedAt string `json:"published_at"`
+}
+
 type findResponse struct {
 	MovieResults []movieResponse  `json:"movie_results"`
 	TVResults    []seriesResponse `json:"tv_results"`
@@ -212,6 +226,37 @@ func (c *Client) SearchSeries(ctx context.Context, options metadata.SearchOption
 		return metadata.ProviderSeriesPage{}, err
 	}
 	return normalizeSeriesPage(response), nil
+}
+
+func (c *Client) Trailers(ctx context.Context, mediaType, externalID, language string) ([]metadata.ProviderTrailer, error) {
+	titleID, err := strconv.ParseInt(strings.TrimSpace(externalID), 10, 64)
+	if err != nil || titleID < 1 {
+		return nil, fmt.Errorf("%w: invalid TMDB title ID", metadata.ErrProviderFailure)
+	}
+	var titlePath string
+	switch mediaType {
+	case metadata.MediaTypeMovie:
+		titlePath = "/movie/"
+	case metadata.MediaTypeSeries:
+		titlePath = "/tv/"
+	default:
+		return nil, fmt.Errorf("%w: unsupported TMDB trailer media type", metadata.ErrProviderFailure)
+	}
+	var response videosResponse
+	endpoint := titlePath + strconv.FormatInt(titleID, 10) + "/videos"
+	if err := c.get(ctx, endpoint, url.Values{"language": {language}}, &response); err != nil {
+		return nil, err
+	}
+	trailers := make([]metadata.ProviderTrailer, 0, len(response.Results))
+	for _, video := range response.Results {
+		publishedAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(video.PublishedAt))
+		trailers = append(trailers, metadata.ProviderTrailer{
+			YouTubeID: strings.TrimSpace(video.Key), Name: strings.TrimSpace(video.Name),
+			Language: strings.TrimSpace(video.Language), Site: strings.TrimSpace(video.Site),
+			Type: strings.TrimSpace(video.Type), Official: video.Official, PublishedAt: publishedAt,
+		})
+	}
+	return trailers, nil
 }
 
 func (c *Client) ResolveExternalID(ctx context.Context, mediaType, provider, externalID string) (string, error) {

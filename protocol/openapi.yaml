@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Rivune API
-  version: 1.2.0
+  version: 1.3.0
   description: Protocol between Rivune clients and a self-hosted Rivune Server.
 servers:
   - url: /api/v1
@@ -1398,6 +1398,36 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+  /metadata/titles/{titleId}/trailer:
+    parameters:
+      - $ref: "#/components/parameters/TitleId"
+    get:
+      summary: Get the preferred YouTube trailer for a title
+      operationId: getTitleTrailer
+      description: Returns a localized TMDB trailer when available, otherwise an English trailer. A caption preference only requests captions from YouTube when available and does not assert their availability.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Language"
+      responses:
+        "200":
+          description: Selected movie or series trailer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trailer"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
   /titles/resolve:
     post:
       summary: Resolve a provider title identity
@@ -1661,6 +1691,39 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "502":
+          $ref: "#/components/responses/Error"
+  /calendar:
+    get:
+      operationId: listCalendarEvents
+      description: Refreshes metadata for the active profile's personal library, then lists exact movie release dates and descendant episode air dates.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - $ref: "#/components/parameters/Language"
+      responses:
+        "200":
+          description: Calendar events in deterministic release-date order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarEventList"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
           $ref: "#/components/responses/Error"
   /library:
     get:
@@ -2775,6 +2838,38 @@ components:
           anyOf:
             - $ref: "#/components/schemas/LanguagePreference"
             - type: "null"
+        autoplayNextEpisode:
+          type: [boolean, "null"]
+        cardDensity:
+          anyOf:
+            - type: string
+              enum: [comfortable, compact]
+            - type: "null"
+        animationsEnabled:
+          type: [boolean, "null"]
+        subtitleSizePercent:
+          type: [integer, "null"]
+          minimum: 50
+          maximum: 200
+        subtitleTextColor:
+          anyOf:
+            - type: string
+              pattern: "^#[0-9A-Fa-f]{6}$"
+            - type: "null"
+        subtitleBackgroundOpacityPercent:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 100
+        notificationsEnabled:
+          type: [boolean, "null"]
+        notificationDurationSeconds:
+          type: [integer, "null"]
+          minimum: 2
+          maximum: 30
+        notificationPollIntervalSeconds:
+          type: [integer, "null"]
+          minimum: 5
+          maximum: 300
     LanguagePreference:
       type: string
       description: The value auto or a BCP 47 language tag.
@@ -2805,6 +2900,34 @@ components:
           $ref: "#/components/schemas/LanguagePreference"
         subtitleLanguage:
           $ref: "#/components/schemas/LanguagePreference"
+        autoplayNextEpisode:
+          type: boolean
+        cardDensity:
+          type: string
+          enum: [comfortable, compact]
+        animationsEnabled:
+          type: boolean
+        subtitleSizePercent:
+          type: integer
+          minimum: 50
+          maximum: 200
+        subtitleTextColor:
+          type: string
+          pattern: "^#[0-9A-F]{6}$"
+        subtitleBackgroundOpacityPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        notificationsEnabled:
+          type: boolean
+        notificationDurationSeconds:
+          type: integer
+          minimum: 2
+          maximum: 30
+        notificationPollIntervalSeconds:
+          type: integer
+          minimum: 5
+          maximum: 300
     SettingsLayer:
       type: object
       required: [schemaVersion, settings, updatedAt]
@@ -2829,11 +2952,11 @@ components:
         settings:
           allOf:
             - $ref: "#/components/schemas/SettingsValues"
-            - required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, audioLanguage, subtitleLanguage]
+            - required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, audioLanguage, subtitleLanguage, autoplayNextEpisode, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
         sources:
           type: object
           additionalProperties: false
-          required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, audioLanguage, subtitleLanguage]
+          required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, audioLanguage, subtitleLanguage, autoplayNextEpisode, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
           properties:
             theme:
               $ref: "#/components/schemas/SettingSource"
@@ -2850,6 +2973,24 @@ components:
             audioLanguage:
               $ref: "#/components/schemas/SettingSource"
             subtitleLanguage:
+              $ref: "#/components/schemas/SettingSource"
+            autoplayNextEpisode:
+              $ref: "#/components/schemas/SettingSource"
+            cardDensity:
+              $ref: "#/components/schemas/SettingSource"
+            animationsEnabled:
+              $ref: "#/components/schemas/SettingSource"
+            subtitleSizePercent:
+              $ref: "#/components/schemas/SettingSource"
+            subtitleTextColor:
+              $ref: "#/components/schemas/SettingSource"
+            subtitleBackgroundOpacityPercent:
+              $ref: "#/components/schemas/SettingSource"
+            notificationsEnabled:
+              $ref: "#/components/schemas/SettingSource"
+            notificationDurationSeconds:
+              $ref: "#/components/schemas/SettingSource"
+            notificationPollIntervalSeconds:
               $ref: "#/components/schemas/SettingSource"
     SettingSource:
       type: string
@@ -3007,6 +3148,25 @@ components:
         totalResults:
           type: integer
           minimum: 0
+    Trailer:
+      type: object
+      additionalProperties: false
+      required: [youtubeId, name, language, isFallback]
+      properties:
+        youtubeId:
+          type: string
+          minLength: 1
+        name:
+          type: string
+        language:
+          type: string
+          pattern: "^[a-z]{2,3}(-[A-Z]{2})?$"
+        isFallback:
+          type: boolean
+        captionPreference:
+          type: string
+          description: YouTube caption language preference requested when captions are available; presence does not guarantee captions exist.
+          minLength: 2
     Movie:
       type: object
       additionalProperties: false
@@ -3933,6 +4093,56 @@ components:
         releaseInfo:
           type: string
           maxLength: 120
+        released:
+          type: string
+          format: date
+    CalendarEventList:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/CalendarEvent"
+    CalendarEvent:
+      type: object
+      additionalProperties: false
+      required: [id, titleId, mediaType, title, releaseDate]
+      properties:
+        id:
+          type: string
+        titleId:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+          enum: [movie, episode]
+        title:
+          type: string
+        releaseDate:
+          type: string
+          format: date
+        posterUrl:
+          type: string
+        resourceId:
+          type: string
+        resourceProvider:
+          type: string
+        seriesTitle:
+          type: string
+        seriesId:
+          type: string
+          format: uuid
+        seasonId:
+          type: string
+          format: uuid
+        seasonNumber:
+          type: integer
+          minimum: 0
+        episodeNumber:
+          type: integer
+          minimum: 0
     TitleReference:
       type: object
       additionalProperties: false

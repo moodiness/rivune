@@ -24,6 +24,7 @@ var (
 	ErrSelectionRequired = errors.New("active profile selection required")
 	languageTagPattern   = regexp.MustCompile(`^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$`)
 	regionCodePattern    = regexp.MustCompile(`^[A-Z]{2}$`)
+	subtitleColorPattern = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
 )
 
 type Service struct {
@@ -40,26 +41,49 @@ type OptionalBool struct {
 	Value *bool
 }
 
+type OptionalInt struct {
+	Set   bool
+	Value *int
+}
+
 type Patch struct {
-	Theme             OptionalString
-	MaximumResolution OptionalString
-	PreferDirectPlay  OptionalBool
-	HideUnreleased    OptionalBool
-	MetadataLanguage  OptionalString
-	MetadataRegion    OptionalString
-	AudioLanguage     OptionalString
-	SubtitleLanguage  OptionalString
+	Theme                            OptionalString
+	MaximumResolution                OptionalString
+	PreferDirectPlay                 OptionalBool
+	HideUnreleased                   OptionalBool
+	MetadataLanguage                 OptionalString
+	MetadataRegion                   OptionalString
+	AudioLanguage                    OptionalString
+	SubtitleLanguage                 OptionalString
+	AutoplayNextEpisode              OptionalBool
+	CardDensity                      OptionalString
+	AnimationsEnabled                OptionalBool
+	SubtitleSizePercent              OptionalInt
+	SubtitleTextColor                OptionalString
+	SubtitleBackgroundOpacityPercent OptionalInt
+	NotificationsEnabled             OptionalBool
+	NotificationDurationSeconds      OptionalInt
+	NotificationPollIntervalSeconds  OptionalInt
 }
 
 type Values struct {
-	Theme             *string `json:"theme,omitempty"`
-	MaximumResolution *string `json:"maximumResolution,omitempty"`
-	PreferDirectPlay  *bool   `json:"preferDirectPlay,omitempty"`
-	HideUnreleased    *bool   `json:"hideUnreleased,omitempty"`
-	MetadataLanguage  *string `json:"metadataLanguage,omitempty"`
-	MetadataRegion    *string `json:"metadataRegion,omitempty"`
-	AudioLanguage     *string `json:"audioLanguage,omitempty"`
-	SubtitleLanguage  *string `json:"subtitleLanguage,omitempty"`
+	Theme                            *string `json:"theme,omitempty"`
+	MaximumResolution                *string `json:"maximumResolution,omitempty"`
+	PreferDirectPlay                 *bool   `json:"preferDirectPlay,omitempty"`
+	HideUnreleased                   *bool   `json:"hideUnreleased,omitempty"`
+	MetadataLanguage                 *string `json:"metadataLanguage,omitempty"`
+	MetadataRegion                   *string `json:"metadataRegion,omitempty"`
+	AudioLanguage                    *string `json:"audioLanguage,omitempty"`
+	SubtitleLanguage                 *string `json:"subtitleLanguage,omitempty"`
+	AutoplayNextEpisode              *bool   `json:"autoplayNextEpisode,omitempty"`
+	CardDensity                      *string `json:"cardDensity,omitempty"`
+	AnimationsEnabled                *bool   `json:"animationsEnabled,omitempty"`
+	SubtitleSizePercent              *int    `json:"subtitleSizePercent,omitempty"`
+	SubtitleTextColor                *string `json:"subtitleTextColor,omitempty"`
+	SubtitleBackgroundOpacityPercent *int    `json:"subtitleBackgroundOpacityPercent,omitempty"`
+	NotificationsEnabled             *bool   `json:"notificationsEnabled,omitempty"`
+	NotificationDurationSeconds      *int    `json:"notificationDurationSeconds,omitempty"`
+	NotificationPollIntervalSeconds  *int    `json:"notificationPollIntervalSeconds,omitempty"`
 }
 
 type Layer struct {
@@ -69,14 +93,23 @@ type Layer struct {
 }
 
 type EffectiveValues struct {
-	Theme             string `json:"theme"`
-	MaximumResolution string `json:"maximumResolution"`
-	PreferDirectPlay  bool   `json:"preferDirectPlay"`
-	HideUnreleased    bool   `json:"hideUnreleased"`
-	MetadataLanguage  string `json:"metadataLanguage"`
-	MetadataRegion    string `json:"metadataRegion"`
-	AudioLanguage     string `json:"audioLanguage"`
-	SubtitleLanguage  string `json:"subtitleLanguage"`
+	Theme                            string `json:"theme"`
+	MaximumResolution                string `json:"maximumResolution"`
+	PreferDirectPlay                 bool   `json:"preferDirectPlay"`
+	HideUnreleased                   bool   `json:"hideUnreleased"`
+	MetadataLanguage                 string `json:"metadataLanguage"`
+	MetadataRegion                   string `json:"metadataRegion"`
+	AudioLanguage                    string `json:"audioLanguage"`
+	SubtitleLanguage                 string `json:"subtitleLanguage"`
+	AutoplayNextEpisode              bool   `json:"autoplayNextEpisode"`
+	CardDensity                      string `json:"cardDensity"`
+	AnimationsEnabled                bool   `json:"animationsEnabled"`
+	SubtitleSizePercent              int    `json:"subtitleSizePercent"`
+	SubtitleTextColor                string `json:"subtitleTextColor"`
+	SubtitleBackgroundOpacityPercent int    `json:"subtitleBackgroundOpacityPercent"`
+	NotificationsEnabled             bool   `json:"notificationsEnabled"`
+	NotificationDurationSeconds      int    `json:"notificationDurationSeconds"`
+	NotificationPollIntervalSeconds  int    `json:"notificationPollIntervalSeconds"`
 }
 
 type Effective struct {
@@ -211,19 +244,7 @@ func (s *Service) Effective(ctx context.Context, principal auth.Principal, profi
 		return Effective{}, fmt.Errorf("decode profile settings: %w", err)
 	}
 
-	effective := Effective{
-		SchemaVersion: schemaVersion,
-		Values: EffectiveValues{
-			Theme: "system", MaximumResolution: "auto", PreferDirectPlay: true,
-			HideUnreleased: false, MetadataLanguage: "auto", MetadataRegion: "auto",
-			AudioLanguage: "auto", SubtitleLanguage: "auto",
-		},
-		Sources: map[string]string{
-			"theme": "default", "maximumResolution": "default", "preferDirectPlay": "default",
-			"hideUnreleased": "default", "metadataLanguage": "default", "metadataRegion": "default",
-			"audioLanguage": "default", "subtitleLanguage": "default",
-		},
-	}
+	effective := defaultEffective()
 	applyLayer(&effective, instanceValues, "instance")
 	applyLayer(&effective, profileValues, "profile")
 	return effective, nil
@@ -268,8 +289,32 @@ func queryLayer(ctx context.Context, querier interface {
 	return layer, nil
 }
 
+func defaultEffective() Effective {
+	return Effective{
+		SchemaVersion: schemaVersion,
+		Values: EffectiveValues{
+			Theme: "system", MaximumResolution: "auto", PreferDirectPlay: true,
+			HideUnreleased: false, MetadataLanguage: "auto", MetadataRegion: "auto",
+			AudioLanguage: "auto", SubtitleLanguage: "auto",
+			AutoplayNextEpisode: true, CardDensity: "comfortable", AnimationsEnabled: true,
+			SubtitleSizePercent: 100, SubtitleTextColor: "#FFFFFF", SubtitleBackgroundOpacityPercent: 60,
+			NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 5,
+		},
+		Sources: map[string]string{
+			"theme": "default", "maximumResolution": "default", "preferDirectPlay": "default",
+			"hideUnreleased": "default", "metadataLanguage": "default", "metadataRegion": "default",
+			"audioLanguage": "default", "subtitleLanguage": "default",
+			"autoplayNextEpisode": "default", "cardDensity": "default", "animationsEnabled": "default",
+			"subtitleSizePercent": "default", "subtitleTextColor": "default", "subtitleBackgroundOpacityPercent": "default",
+			"notificationsEnabled": "default", "notificationDurationSeconds": "default", "notificationPollIntervalSeconds": "default",
+		},
+	}
+}
+
 func validatePatch(patch Patch) error {
-	if !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.PreferDirectPlay.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set {
+	if !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.PreferDirectPlay.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set &&
+		!patch.AutoplayNextEpisode.Set && !patch.CardDensity.Set && !patch.AnimationsEnabled.Set && !patch.SubtitleSizePercent.Set && !patch.SubtitleTextColor.Set && !patch.SubtitleBackgroundOpacityPercent.Set &&
+		!patch.NotificationsEnabled.Set && !patch.NotificationDurationSeconds.Set && !patch.NotificationPollIntervalSeconds.Set {
 		return fmt.Errorf("%w: at least one setting must be provided", ErrInvalidInput)
 	}
 	if value := patch.Theme.Value; patch.Theme.Set && value != nil {
@@ -295,6 +340,36 @@ func validatePatch(patch Patch) error {
 	}
 	if value := patch.MetadataRegion.Value; patch.MetadataRegion.Set && value != nil && *value != "auto" && !regionCodePattern.MatchString(*value) {
 		return fmt.Errorf("%w: metadataRegion must be auto or an uppercase ISO 3166-1 alpha-2 code", ErrInvalidInput)
+	}
+	if value := patch.CardDensity.Value; patch.CardDensity.Set && value != nil {
+		switch *value {
+		case "comfortable", "compact":
+		default:
+			return fmt.Errorf("%w: cardDensity must be comfortable or compact", ErrInvalidInput)
+		}
+	}
+	if value := patch.SubtitleTextColor.Value; patch.SubtitleTextColor.Set && value != nil {
+		if !subtitleColorPattern.MatchString(*value) {
+			return fmt.Errorf("%w: subtitleTextColor must be a six-digit hexadecimal color", ErrInvalidInput)
+		}
+	}
+	if err := validateIntRange("subtitleSizePercent", patch.SubtitleSizePercent, 50, 200); err != nil {
+		return err
+	}
+	if err := validateIntRange("subtitleBackgroundOpacityPercent", patch.SubtitleBackgroundOpacityPercent, 0, 100); err != nil {
+		return err
+	}
+	if err := validateIntRange("notificationDurationSeconds", patch.NotificationDurationSeconds, 2, 30); err != nil {
+		return err
+	}
+	if err := validateIntRange("notificationPollIntervalSeconds", patch.NotificationPollIntervalSeconds, 5, 300); err != nil {
+		return err
+	}
+	return nil
+}
+func validateIntRange(name string, value OptionalInt, minimum, maximum int) error {
+	if value.Set && value.Value != nil && (*value.Value < minimum || *value.Value > maximum) {
+		return fmt.Errorf("%w: %s must be between %d and %d", ErrInvalidInput, name, minimum, maximum)
 	}
 	return nil
 }
@@ -323,6 +398,38 @@ func applyPatch(values Values, patch Patch) Values {
 	}
 	if patch.SubtitleLanguage.Set {
 		values.SubtitleLanguage = patch.SubtitleLanguage.Value
+	}
+	if patch.AutoplayNextEpisode.Set {
+		values.AutoplayNextEpisode = patch.AutoplayNextEpisode.Value
+	}
+	if patch.CardDensity.Set {
+		values.CardDensity = patch.CardDensity.Value
+	}
+	if patch.AnimationsEnabled.Set {
+		values.AnimationsEnabled = patch.AnimationsEnabled.Value
+	}
+	if patch.SubtitleSizePercent.Set {
+		values.SubtitleSizePercent = patch.SubtitleSizePercent.Value
+	}
+	if patch.SubtitleTextColor.Set {
+		if patch.SubtitleTextColor.Value == nil {
+			values.SubtitleTextColor = nil
+		} else {
+			normalized := strings.ToUpper(*patch.SubtitleTextColor.Value)
+			values.SubtitleTextColor = &normalized
+		}
+	}
+	if patch.SubtitleBackgroundOpacityPercent.Set {
+		values.SubtitleBackgroundOpacityPercent = patch.SubtitleBackgroundOpacityPercent.Value
+	}
+	if patch.NotificationsEnabled.Set {
+		values.NotificationsEnabled = patch.NotificationsEnabled.Value
+	}
+	if patch.NotificationDurationSeconds.Set {
+		values.NotificationDurationSeconds = patch.NotificationDurationSeconds.Value
+	}
+	if patch.NotificationPollIntervalSeconds.Set {
+		values.NotificationPollIntervalSeconds = patch.NotificationPollIntervalSeconds.Value
 	}
 	return values
 }
@@ -359,5 +466,41 @@ func applyLayer(effective *Effective, values Values, source string) {
 	if values.SubtitleLanguage != nil {
 		effective.Values.SubtitleLanguage = *values.SubtitleLanguage
 		effective.Sources["subtitleLanguage"] = source
+	}
+	if values.AutoplayNextEpisode != nil {
+		effective.Values.AutoplayNextEpisode = *values.AutoplayNextEpisode
+		effective.Sources["autoplayNextEpisode"] = source
+	}
+	if values.CardDensity != nil {
+		effective.Values.CardDensity = *values.CardDensity
+		effective.Sources["cardDensity"] = source
+	}
+	if values.AnimationsEnabled != nil {
+		effective.Values.AnimationsEnabled = *values.AnimationsEnabled
+		effective.Sources["animationsEnabled"] = source
+	}
+	if values.SubtitleSizePercent != nil {
+		effective.Values.SubtitleSizePercent = *values.SubtitleSizePercent
+		effective.Sources["subtitleSizePercent"] = source
+	}
+	if values.SubtitleTextColor != nil {
+		effective.Values.SubtitleTextColor = *values.SubtitleTextColor
+		effective.Sources["subtitleTextColor"] = source
+	}
+	if values.SubtitleBackgroundOpacityPercent != nil {
+		effective.Values.SubtitleBackgroundOpacityPercent = *values.SubtitleBackgroundOpacityPercent
+		effective.Sources["subtitleBackgroundOpacityPercent"] = source
+	}
+	if values.NotificationsEnabled != nil {
+		effective.Values.NotificationsEnabled = *values.NotificationsEnabled
+		effective.Sources["notificationsEnabled"] = source
+	}
+	if values.NotificationDurationSeconds != nil {
+		effective.Values.NotificationDurationSeconds = *values.NotificationDurationSeconds
+		effective.Sources["notificationDurationSeconds"] = source
+	}
+	if values.NotificationPollIntervalSeconds != nil {
+		effective.Values.NotificationPollIntervalSeconds = *values.NotificationPollIntervalSeconds
+		effective.Sources["notificationPollIntervalSeconds"] = source
 	}
 }

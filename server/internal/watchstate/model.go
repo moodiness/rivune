@@ -11,6 +11,7 @@ type ResolveTitleInput struct {
 	PosterURL     string
 	BackgroundURL string
 	ReleaseInfo   string
+	Released      string
 }
 
 type TitleReference struct {

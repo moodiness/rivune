@@ -137,15 +137,26 @@ func (client *Client) resolveTMDBList(ctx context.Context, source collection.TMD
 	if source.TMDBID == nil {
 		return collection.SourcePage{}, collection.ErrInvalidInput
 	}
+	endpoint := "/list/" + strconv.FormatInt(*source.TMDBID, 10)
+	query := url.Values{"language": {language}, "page": {strconv.Itoa(page)}}
 	var response collectionMediaPage
-	if err := client.get(ctx, "/list/"+strconv.FormatInt(*source.TMDBID, 10), url.Values{
-		"language": {language}, "page": {strconv.Itoa(page)},
-	}, &response); err != nil {
+	if err := client.get(ctx, endpoint, query, &response); err != nil {
 		return collection.SourcePage{}, err
 	}
 	values := response.Items
 	if values == nil {
 		values = response.Results
+	}
+	if shouldFallbackCollectionOverviews(language) && collectionMediaNeedsOverview(values) {
+		query.Set("language", englishCollectionLanguage)
+		var english collectionMediaPage
+		if err := client.get(ctx, endpoint, query, &english); err == nil {
+			englishValues := english.Items
+			if englishValues == nil {
+				englishValues = english.Results
+			}
+			mergeCollectionMediaOverviews(values, englishValues, selectableMediaType(source.MediaType))
+		}
 	}
 	items := collectionItems(values, selectableMediaType(source.MediaType))
 	sortCollectionItems(items, source.Sort)
@@ -160,9 +171,18 @@ func (client *Client) resolveTMDBCollection(ctx context.Context, source collecti
 	if source.TMDBID == nil {
 		return collection.SourcePage{}, collection.ErrInvalidInput
 	}
+	endpoint := "/collection/" + strconv.FormatInt(*source.TMDBID, 10)
+	query := url.Values{"language": {language}}
 	var response tmdbCollectionResponse
-	if err := client.get(ctx, "/collection/"+strconv.FormatInt(*source.TMDBID, 10), url.Values{"language": {language}}, &response); err != nil {
+	if err := client.get(ctx, endpoint, query, &response); err != nil {
 		return collection.SourcePage{}, err
+	}
+	if shouldFallbackCollectionOverviews(language) && collectionMediaNeedsOverview(response.Parts) {
+		query.Set("language", englishCollectionLanguage)
+		var english tmdbCollectionResponse
+		if err := client.get(ctx, endpoint, query, &english); err == nil {
+			mergeCollectionMediaOverviews(response.Parts, english.Parts, collection.MediaTypeMovie)
+		}
 	}
 	items := collectionItems(response.Parts, collection.MediaTypeMovie)
 	sortCollectionItems(items, source.Sort)
@@ -177,18 +197,35 @@ func (client *Client) resolveTMDBPerson(ctx context.Context, source collection.T
 	if source.TMDBID == nil {
 		return collection.SourcePage{}, collection.ErrInvalidInput
 	}
+	endpoint := "/person/" + strconv.FormatInt(*source.TMDBID, 10) + "/combined_credits"
+	query := url.Values{"language": {language}}
 	var response personCreditsResponse
-	if err := client.get(ctx, "/person/"+strconv.FormatInt(*source.TMDBID, 10)+"/combined_credits", url.Values{"language": {language}}, &response); err != nil {
+	if err := client.get(ctx, endpoint, query, &response); err != nil {
 		return collection.SourcePage{}, err
 	}
 	values := response.Cast
 	if source.SourceType == "director" {
-		values = values[:0]
-		for _, value := range response.Crew {
+		values = response.Crew
+	}
+	if shouldFallbackCollectionOverviews(language) && collectionMediaNeedsOverview(values) {
+		query.Set("language", englishCollectionLanguage)
+		var english personCreditsResponse
+		if err := client.get(ctx, endpoint, query, &english); err == nil {
+			englishValues := english.Cast
+			if source.SourceType == "director" {
+				englishValues = english.Crew
+			}
+			mergeCollectionMediaOverviews(values, englishValues, selectableMediaType(source.MediaType))
+		}
+	}
+	if source.SourceType == "director" {
+		directed := values[:0]
+		for _, value := range values {
 			if strings.EqualFold(value.Job, "Director") {
-				values = append(values, value)
+				directed = append(directed, value)
 			}
 		}
+		values = directed
 	}
 	items := collectionItems(values, selectableMediaType(source.MediaType))
 	sortCollectionItems(items, source.Sort)
@@ -269,6 +306,10 @@ func (client *Client) resolveTMDBDiscoverMedia(ctx context.Context, source colle
 		query.Set("watch_region", watchRegion)
 		query.Set("with_watch_monetization_types", "flatrate|free|ads|rent|buy")
 	}
+	endpoint := "/discover/movie"
+	if source.MediaType == collection.MediaTypeSeries {
+		endpoint = "/discover/tv"
+	}
 	var response collectionMediaPage
 	if source.MediaType == collection.MediaTypeSeries {
 		query.Set("include_null_first_air_dates", "false")
@@ -285,7 +326,7 @@ func (client *Client) resolveTMDBDiscoverMedia(ctx context.Context, source colle
 		if source.SourceType == "network" && source.TMDBID != nil {
 			query.Set("with_networks", strconv.FormatInt(*source.TMDBID, 10))
 		}
-		if err := client.get(ctx, "/discover/tv", query, &response); err != nil {
+		if err := client.get(ctx, endpoint, query, &response); err != nil {
 			return collection.SourcePage{}, err
 		}
 	} else {
@@ -299,8 +340,15 @@ func (client *Client) resolveTMDBDiscoverMedia(ctx context.Context, source colle
 		if filters.Year != nil {
 			query.Set("year", strconv.Itoa(*filters.Year))
 		}
-		if err := client.get(ctx, "/discover/movie", query, &response); err != nil {
+		if err := client.get(ctx, endpoint, query, &response); err != nil {
 			return collection.SourcePage{}, err
+		}
+	}
+	if shouldFallbackCollectionOverviews(language) && collectionMediaNeedsOverview(response.Results) {
+		query.Set("language", englishCollectionLanguage)
+		var english collectionMediaPage
+		if err := client.get(ctx, endpoint, query, &english); err == nil {
+			mergeCollectionMediaOverviews(response.Results, english.Results, source.MediaType)
 		}
 	}
 	return collection.SourcePage{
@@ -309,23 +357,68 @@ func (client *Client) resolveTMDBDiscoverMedia(ctx context.Context, source colle
 	}, nil
 }
 
+const englishCollectionLanguage = "en-US"
+
+func shouldFallbackCollectionOverviews(language string) bool {
+	base, _, _ := strings.Cut(strings.TrimSpace(language), "-")
+	return !strings.EqualFold(base, "en")
+}
+
+func collectionMediaNeedsOverview(values []collectionMediaResponse) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value.Overview) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeCollectionMediaOverviews(localized, english []collectionMediaResponse, requiredMediaType string) {
+	byIdentity := make(map[string]string, len(english))
+	for _, value := range english {
+		if identity := collectionMediaIdentity(value, requiredMediaType); identity != "" && strings.TrimSpace(value.Overview) != "" {
+			byIdentity[identity] = value.Overview
+		}
+	}
+	for index := range localized {
+		if strings.TrimSpace(localized[index].Overview) != "" {
+			continue
+		}
+		if overview := byIdentity[collectionMediaIdentity(localized[index], requiredMediaType)]; strings.TrimSpace(overview) != "" {
+			localized[index].Overview = overview
+		}
+	}
+}
+
+func collectionMediaIdentity(value collectionMediaResponse, requiredMediaType string) string {
+	if value.ID < 1 {
+		return ""
+	}
+	return collectionMediaType(value, requiredMediaType) + "\x00" + strconv.FormatInt(value.ID, 10)
+}
+
+func collectionMediaType(value collectionMediaResponse, requiredMediaType string) string {
+	mediaType := value.MediaType
+	if mediaType == "tv" {
+		mediaType = collection.MediaTypeSeries
+	}
+	if mediaType == "" {
+		mediaType = requiredMediaType
+		if mediaType == "" {
+			if strings.TrimSpace(value.Title) != "" {
+				mediaType = collection.MediaTypeMovie
+			} else {
+				mediaType = collection.MediaTypeSeries
+			}
+		}
+	}
+	return mediaType
+}
+
 func collectionItems(values []collectionMediaResponse, requiredMediaType string) []collection.Item {
 	items := make([]collection.Item, 0, len(values))
 	for _, value := range values {
-		mediaType := value.MediaType
-		if mediaType == "tv" {
-			mediaType = collection.MediaTypeSeries
-		}
-		if mediaType == "" {
-			mediaType = requiredMediaType
-			if mediaType == "" {
-				if strings.TrimSpace(value.Title) != "" {
-					mediaType = collection.MediaTypeMovie
-				} else {
-					mediaType = collection.MediaTypeSeries
-				}
-			}
-		}
+		mediaType := collectionMediaType(value, requiredMediaType)
 		if requiredMediaType != "" && mediaType != requiredMediaType {
 			continue
 		}

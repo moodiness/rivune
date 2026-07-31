@@ -8,7 +8,7 @@ Rivune is under active development. The web client and backend are usable today;
 
 - Secure first-run setup, device authentication, refresh tokens, and revocable sessions
 - Profiles with PIN protection, management permissions, independent settings, libraries, and watch progress
-- Per-profile Stremio-compatible addons and configurable collections
+- Per-profile media source addons and configurable collections
 - Optional TMDB, TVDB, and Trakt metadata integrations
 - Opaque, session-bound playback source references that keep provider URLs and private headers on the server
 - Direct playback, remuxing, audio conversion, full H.264/AAC transcoding, and HLS delivery

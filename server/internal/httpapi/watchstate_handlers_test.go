@@ -102,7 +102,8 @@ func TestResolveTitlePassesProviderSnapshot(t *testing.T) {
 		"externalId":"tt123",
 		"resourceId":"tt123",
 		"title":"Example",
-		"posterUrl":"https://example.com/poster.jpg"
+		"posterUrl":"https://example.com/poster.jpg",
+		"released":"2026-08-14"
 	}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -112,7 +113,7 @@ func TestResolveTitlePassesProviderSnapshot(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
-	if service.resolveInput.Provider != "imdb" || service.resolveInput.ResourceID != "tt123" || service.resolveInput.Title != "Example" {
+	if service.resolveInput.Provider != "imdb" || service.resolveInput.ResourceID != "tt123" || service.resolveInput.Title != "Example" || service.resolveInput.Released != "2026-08-14" {
 		t.Fatalf("unexpected resolve input: %+v", service.resolveInput)
 	}
 }

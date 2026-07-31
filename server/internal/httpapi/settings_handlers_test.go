@@ -72,6 +72,97 @@ func TestUpdateProfileSettingsPreservesFalseAndNull(t *testing.T) {
 	}
 }
 
+func TestUpdateProfileSettingsDecodesEveryNewField(t *testing.T) {
+	service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
+	api := authenticatedSettingsAPI(service)
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(
+		`{"autoplayNextEpisode":false,"cardDensity":"compact","animationsEnabled":false,"subtitleSizePercent":75,"subtitleTextColor":"#a1b2c3","subtitleBackgroundOpacityPercent":25,"notificationsEnabled":false,"notificationDurationSeconds":7,"notificationPollIntervalSeconds":45}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	patch := service.profilePatch
+	if !patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value == nil || *patch.AutoplayNextEpisode.Value ||
+		!patch.CardDensity.Set || patch.CardDensity.Value == nil || *patch.CardDensity.Value != "compact" ||
+		!patch.AnimationsEnabled.Set || patch.AnimationsEnabled.Value == nil || *patch.AnimationsEnabled.Value ||
+		!patch.SubtitleSizePercent.Set || patch.SubtitleSizePercent.Value == nil || *patch.SubtitleSizePercent.Value != 75 ||
+		!patch.SubtitleTextColor.Set || patch.SubtitleTextColor.Value == nil || *patch.SubtitleTextColor.Value != "#a1b2c3" ||
+		!patch.SubtitleBackgroundOpacityPercent.Set || patch.SubtitleBackgroundOpacityPercent.Value == nil || *patch.SubtitleBackgroundOpacityPercent.Value != 25 ||
+		!patch.NotificationsEnabled.Set || patch.NotificationsEnabled.Value == nil || *patch.NotificationsEnabled.Value ||
+		!patch.NotificationDurationSeconds.Set || patch.NotificationDurationSeconds.Value == nil || *patch.NotificationDurationSeconds.Value != 7 ||
+		!patch.NotificationPollIntervalSeconds.Set || patch.NotificationPollIntervalSeconds.Value == nil || *patch.NotificationPollIntervalSeconds.Value != 45 {
+		t.Fatalf("new settings patch was not decoded exactly: %+v", patch)
+	}
+}
+
+func TestUpdateProfileSettingsDecodesNullForEveryNewField(t *testing.T) {
+	service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
+	api := authenticatedSettingsAPI(service)
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(
+		`{"autoplayNextEpisode":null,"cardDensity":null,"animationsEnabled":null,"subtitleSizePercent":null,"subtitleTextColor":null,"subtitleBackgroundOpacityPercent":null,"notificationsEnabled":null,"notificationDurationSeconds":null,"notificationPollIntervalSeconds":null}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	patch := service.profilePatch
+	if !patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value != nil ||
+		!patch.CardDensity.Set || patch.CardDensity.Value != nil ||
+		!patch.AnimationsEnabled.Set || patch.AnimationsEnabled.Value != nil ||
+		!patch.SubtitleSizePercent.Set || patch.SubtitleSizePercent.Value != nil ||
+		!patch.SubtitleTextColor.Set || patch.SubtitleTextColor.Value != nil ||
+		!patch.SubtitleBackgroundOpacityPercent.Set || patch.SubtitleBackgroundOpacityPercent.Value != nil ||
+		!patch.NotificationsEnabled.Set || patch.NotificationsEnabled.Value != nil ||
+		!patch.NotificationDurationSeconds.Set || patch.NotificationDurationSeconds.Value != nil ||
+		!patch.NotificationPollIntervalSeconds.Set || patch.NotificationPollIntervalSeconds.Value != nil {
+		t.Fatalf("new settings nulls were not preserved: %+v", patch)
+	}
+}
+
+func TestEffectiveSettingsResponseIncludesNewFieldsAndSources(t *testing.T) {
+	effective := settings.Effective{
+		SchemaVersion: 1,
+		Values: settings.EffectiveValues{
+			AutoplayNextEpisode: true, CardDensity: "comfortable", AnimationsEnabled: true,
+			SubtitleSizePercent: 100, SubtitleTextColor: "#FFFFFF", SubtitleBackgroundOpacityPercent: 60,
+			NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 5,
+		},
+		Sources: map[string]string{"autoplayNextEpisode": "default", "subtitleTextColor": "profile"},
+	}
+	api := authenticatedSettingsAPI(&fakeSettingsService{effective: effective})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/profiles/profile-id/settings/effective", nil)
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		SchemaVersion int                      `json:"schemaVersion"`
+		Settings      settings.EffectiveValues `json:"settings"`
+		Sources       map[string]string        `json:"sources"`
+	}
+	decodeResponse(t, response, &body)
+	if body.SchemaVersion != 1 || body.Settings.SubtitleTextColor != "#FFFFFF" ||
+		body.Settings.NotificationPollIntervalSeconds != 5 || body.Sources["autoplayNextEpisode"] != "default" ||
+		body.Sources["subtitleTextColor"] != "profile" {
+		t.Fatalf("effective response omitted new settings data: %+v", body)
+	}
+}
+
 func TestEffectiveSettingsRequireSelectedProfile(t *testing.T) {
 	service := &fakeSettingsService{effectiveErr: settings.ErrSelectionRequired}
 	api := authenticatedSettingsAPI(service)

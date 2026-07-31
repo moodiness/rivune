@@ -23,32 +23,32 @@ func TestResolveCollectionSourceSupportsEditorSourceTypes(t *testing.T) {
 	}{
 		{
 			name: "public list", source: collection.TMDBSource{SourceType: "list", TMDBID: &id, MediaType: collection.MediaTypeMovie, Sort: "original"},
-			wantPath: "/list/42", response: `{"items":[{"id":1,"title":"Listed movie","media_type":"movie"}]}`, wantTitle: "Listed movie",
+			wantPath: "/list/42", response: `{"items":[{"id":1,"title":"Listed movie","media_type":"movie","overview":"Résumé localisé"}]}`, wantTitle: "Listed movie",
 		},
 		{
 			name: "production company", source: collection.TMDBSource{SourceType: "company", TMDBID: &id, MediaType: collection.MediaTypeMovie, Sort: "popularity.desc"},
-			wantPath: "/discover/movie", wantFilter: "with_companies", response: `{"page":1,"total_pages":1,"results":[{"id":2,"title":"Company movie"}]}`, wantTitle: "Company movie",
+			wantPath: "/discover/movie", wantFilter: "with_companies", response: `{"page":1,"total_pages":1,"results":[{"id":2,"title":"Company movie","overview":"Résumé localisé"}]}`, wantTitle: "Company movie",
 		},
 		{
 			name: "network", source: collection.TMDBSource{SourceType: "network", TMDBID: &id, MediaType: collection.MediaTypeSeries, Sort: "popularity.desc"},
-			wantPath: "/discover/tv", wantFilter: "with_networks", response: `{"page":1,"total_pages":1,"results":[{"id":3,"name":"Network series"}]}`, wantTitle: "Network series",
+			wantPath: "/discover/tv", wantFilter: "with_networks", response: `{"page":1,"total_pages":1,"results":[{"id":3,"name":"Network series","overview":"Résumé localisé"}]}`, wantTitle: "Network series",
 		},
 		{
 			name: "movie collection", source: collection.TMDBSource{SourceType: "collection", TMDBID: &id, MediaType: collection.MediaTypeMovie, Sort: "original"},
-			wantPath: "/collection/42", response: `{"poster_path":"/collection-poster.jpg","backdrop_path":"/collection-backdrop.jpg","parts":[{"id":4,"title":"Collection movie"}]}`, wantTitle: "Collection movie",
+			wantPath: "/collection/42", response: `{"poster_path":"/collection-poster.jpg","backdrop_path":"/collection-backdrop.jpg","parts":[{"id":4,"title":"Collection movie","overview":"Résumé localisé"}]}`, wantTitle: "Collection movie",
 			wantCover: "https://image.tmdb.org/t/p/w500/collection-poster.jpg", wantBackdrop: "https://image.tmdb.org/t/p/w1280/collection-backdrop.jpg",
 		},
 		{
 			name: "person credits", source: collection.TMDBSource{SourceType: "person", TMDBID: &id, MediaType: collection.MediaTypeMovie, Sort: "original"},
-			wantPath: "/person/42/combined_credits", response: `{"cast":[{"id":5,"title":"Person movie","media_type":"movie"}]}`, wantTitle: "Person movie",
+			wantPath: "/person/42/combined_credits", response: `{"cast":[{"id":5,"title":"Person movie","media_type":"movie","overview":"Résumé localisé"}]}`, wantTitle: "Person movie",
 		},
 		{
 			name: "director credits", source: collection.TMDBSource{SourceType: "director", TMDBID: &id, MediaType: collection.MediaTypeMovie, Sort: "original"},
-			wantPath: "/person/42/combined_credits", response: `{"crew":[{"id":6,"title":"Directed movie","media_type":"movie","job":"Director"},{"id":7,"title":"Written movie","media_type":"movie","job":"Writer"}]}`, wantTitle: "Directed movie",
+			wantPath: "/person/42/combined_credits", response: `{"crew":[{"id":6,"title":"Directed movie","media_type":"movie","job":"Director","overview":"Résumé localisé"},{"id":7,"title":"Written movie","media_type":"movie","job":"Writer","overview":"Résumé localisé"}]}`, wantTitle: "Directed movie",
 		},
 		{
 			name: "custom discover", source: collection.TMDBSource{SourceType: "discover", MediaType: collection.MediaTypeMovie, Sort: "vote_count.desc", Filters: collection.TMDBFilters{Genres: []int64{18}}},
-			wantPath: "/discover/movie", wantFilter: "with_genres", response: `{"page":1,"total_pages":2,"results":[{"id":8,"title":"Discovered movie"}]}`, wantTitle: "Discovered movie",
+			wantPath: "/discover/movie", wantFilter: "with_genres", response: `{"page":1,"total_pages":2,"results":[{"id":8,"title":"Discovered movie","overview":"Résumé localisé"}]}`, wantTitle: "Discovered movie",
 		},
 	}
 
@@ -213,5 +213,66 @@ func TestResolveBothSupportsMixedTMDBSourceTypes(t *testing.T) {
 				t.Fatalf("resolved media types movie=%t series=%t, want movie=%t series=%t: %+v", gotMovie, gotSeries, test.wantMovie, test.wantSeries, page.Items)
 			}
 		})
+	}
+}
+
+func TestResolveCollectionSourceFillsOnlyBlankLocalizedDescriptions(t *testing.T) {
+	requests := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- struct{}{}
+		if r.URL.Path != "/discover/movie" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		switch r.URL.Query().Get("language") {
+		case "fr-FR":
+			_, _ = w.Write([]byte(`{"page":1,"total_pages":1,"results":[{"id":1,"title":"Film un","overview":"  "},{"id":2,"title":"Film deux","overview":"Résumé français"}]}`))
+		case englishCollectionLanguage:
+			_, _ = w.Write([]byte(`{"page":1,"total_pages":1,"results":[{"id":2,"title":"Movie two","overview":"English two"},{"id":1,"title":"Movie one","overview":"English one"}]}`))
+		default:
+			t.Fatalf("unexpected language %q", r.URL.Query().Get("language"))
+		}
+	}))
+	defer server.Close()
+
+	client := newWithBaseURL("token", server.URL, server.Client())
+	page, err := client.ResolveCollectionSource(context.Background(), collection.TMDBSource{
+		SourceType: "discover", MediaType: collection.MediaTypeMovie, Sort: "original",
+	}, 1, "fr-FR", "FR")
+	if err != nil {
+		t.Fatalf("resolve source: %v", err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("TMDB request count = %d, want 2", len(requests))
+	}
+	if len(page.Items) != 2 || page.Items[0].Title != "Film un" || page.Items[0].Description != "English one" {
+		t.Fatalf("blank localized description was not filled by stable identity: %+v", page.Items)
+	}
+	if page.Items[1].Title != "Film deux" || page.Items[1].Description != "Résumé français" {
+		t.Fatalf("localized item fields were replaced: %+v", page.Items[1])
+	}
+}
+
+func TestResolveCollectionSourceKeepsLocalizedPageWhenEnglishFallbackFails(t *testing.T) {
+	requests := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- struct{}{}
+		if r.URL.Query().Get("language") == englishCollectionLanguage {
+			http.Error(w, "unavailable", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"items":[{"id":1,"title":"Film français","media_type":"movie","overview":""}]}`))
+	}))
+	defer server.Close()
+
+	id := int64(42)
+	client := newWithBaseURL("token", server.URL, server.Client())
+	page, err := client.ResolveCollectionSource(context.Background(), collection.TMDBSource{
+		SourceType: "list", TMDBID: &id, MediaType: collection.MediaTypeMovie, Sort: "original",
+	}, 1, "fr-FR", "FR")
+	if err != nil {
+		t.Fatalf("localized result should remain usable: %v", err)
+	}
+	if len(requests) != 2 || len(page.Items) != 1 || page.Items[0].Title != "Film français" || page.Items[0].Description != "" {
+		t.Fatalf("requests = %d, page = %+v", len(requests), page)
 	}
 }

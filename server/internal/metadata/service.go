@@ -27,15 +27,22 @@ var (
 )
 
 type Service struct {
-	pool     *pgxpool.Pool
-	provider Provider
-	cacheTTL time.Duration
-	enricher TelevisionEnricher
-	logger   *slog.Logger
+	pool            *pgxpool.Pool
+	provider        Provider
+	resolver        ExternalIDResolver
+	trailerProvider TrailerProvider
+	cacheTTL        time.Duration
+	enricher        TelevisionEnricher
+	logger          *slog.Logger
 }
 
 func NewService(pool *pgxpool.Pool, provider Provider, enricher TelevisionEnricher, cacheTTL time.Duration, logger *slog.Logger) *Service {
-	return &Service{pool: pool, provider: provider, enricher: enricher, cacheTTL: cacheTTL, logger: logger}
+	trailerProvider, _ := provider.(TrailerProvider)
+	resolver, _ := provider.(ExternalIDResolver)
+	return &Service{
+		pool: pool, provider: withEnglishOverviewFallback(provider), resolver: resolver, trailerProvider: trailerProvider,
+		enricher: enricher, cacheTTL: cacheTTL, logger: logger,
+	}
 }
 
 func (s *Service) DiscoverMovies(ctx context.Context, principal auth.Principal, options QueryOptions) (MoviePage, error) {
@@ -112,6 +119,9 @@ func (s *Service) MovieDetails(ctx context.Context, principal auth.Principal, ti
 		if err := json.Unmarshal(cachedPayload, &cached); err != nil {
 			return Movie{}, fmt.Errorf("decode cached title metadata: %w", err)
 		}
+		if err := s.persistCachedMovieReleaseDate(ctx, cached); err != nil {
+			return Movie{}, err
+		}
 		return cached, nil
 	}
 	if s.provider == nil {
@@ -131,6 +141,9 @@ func (s *Service) MovieDetails(ctx context.Context, principal auth.Principal, ti
 		return Movie{}, fmt.Errorf("begin movie persistence: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := persistTitleSnapshot(ctx, tx, titleID, provided.Title, provided.PosterURL, provided.BackdropURL, provided.ReleaseDate); err != nil {
+		return Movie{}, err
+	}
 	if err := linkAdditionalIDs(ctx, tx, titleID, MediaTypeMovie, provided.AdditionalIDs); err != nil {
 		return Movie{}, err
 	}
@@ -192,10 +205,8 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 		return Series{}, err
 	}
 	externalID, cachedPayload, err := s.loadTitleMetadata(ctx, titleID, MediaTypeSeries, normalizedLanguage)
-	resolvedExternalID := false
 	if errors.Is(err, ErrNotFound) {
 		externalID, err = s.resolveProviderExternalID(ctx, titleID, MediaTypeSeries)
-		resolvedExternalID = err == nil
 	}
 	if err != nil {
 		return Series{}, err
@@ -204,6 +215,9 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 		var cached Series
 		if err := json.Unmarshal(cachedPayload, &cached); err != nil {
 			return Series{}, fmt.Errorf("decode cached series metadata: %w", err)
+		}
+		if err := s.persistCachedSeriesReleaseDates(ctx, cached); err != nil {
+			return Series{}, err
 		}
 		return cached, nil
 	}
@@ -226,17 +240,31 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 			provided = enriched
 		}
 	}
+	if returnedExternalID := strings.TrimSpace(provided.ExternalID); returnedExternalID != "" && returnedExternalID != externalID {
+		return Series{}, errors.New("metadata provider returned a conflicting external ID")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Series{}, fmt.Errorf("begin series persistence: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if resolvedExternalID {
-		if err := linkAdditionalIDs(ctx, tx, titleID, MediaTypeSeries, map[string]string{providerName: externalID}); err != nil {
-			return Series{}, err
+	canonicalIDs := make(map[string]string, len(provided.AdditionalIDs)+1)
+	for provider, additionalID := range provided.AdditionalIDs {
+		if strings.ToLower(strings.TrimSpace(provider)) == providerName &&
+			strings.TrimSpace(additionalID) != "" &&
+			strings.TrimSpace(additionalID) != externalID {
+			return Series{}, errors.New("metadata provider returned a conflicting external ID")
 		}
+		canonicalIDs[provider] = additionalID
 	}
-	if err := linkAdditionalIDs(ctx, tx, titleID, MediaTypeSeries, provided.AdditionalIDs); err != nil {
+	canonicalIDs[providerName] = externalID
+	if err := consolidateCanonicalTitle(ctx, tx, titleID, MediaTypeSeries, canonicalIDs); err != nil {
+		return Series{}, err
+	}
+	if err := linkAdditionalIDs(ctx, tx, titleID, MediaTypeSeries, canonicalIDs); err != nil {
+		return Series{}, err
+	}
+	if err := persistTitleSnapshot(ctx, tx, titleID, provided.Name, provided.PosterURL, provided.BackdropURL, provided.FirstAirDate); err != nil {
 		return Series{}, err
 	}
 	seasons := make([]SeasonSummary, 0, len(provided.Seasons))
@@ -247,6 +275,9 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 		seasonNumber := season.SeasonNumber
 		seasonID, err := ensureTitle(ctx, tx, season.ExternalID, MediaTypeSeason, &titleID, &seasonNumber)
 		if err != nil {
+			return Series{}, err
+		}
+		if err := persistTitleSnapshot(ctx, tx, seasonID, season.Name, season.PosterURL, "", season.AirDate); err != nil {
 			return Series{}, err
 		}
 		seasons = append(seasons, normalizeSeasonSummary(titleID, seasonID, season))
@@ -318,6 +349,9 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 		if err := json.Unmarshal(cachedPayload, &cached); err != nil {
 			return Season{}, fmt.Errorf("decode cached season metadata: %w", err)
 		}
+		if err := s.persistCachedSeasonReleaseDates(ctx, cached); err != nil {
+			return Season{}, err
+		}
 		return cached, nil
 	}
 	if s.provider == nil {
@@ -347,6 +381,9 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 		return Season{}, fmt.Errorf("begin season persistence: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := persistTitleSnapshot(ctx, tx, seasonID, provided.Name, provided.PosterURL, "", provided.AirDate); err != nil {
+		return Season{}, err
+	}
 	episodes := make([]Episode, 0, len(provided.Episodes))
 	for _, episode := range provided.Episodes {
 		if strings.TrimSpace(episode.ExternalID) == "" || episode.EpisodeNumber < 0 || episode.SeasonNumber != seasonNumber {
@@ -358,6 +395,9 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 			return Season{}, err
 		}
 		if err := linkAdditionalIDs(ctx, tx, episodeID, MediaTypeEpisode, episode.AdditionalIDs); err != nil {
+			return Season{}, err
+		}
+		if err := persistTitleSnapshot(ctx, tx, episodeID, episode.Name, episode.StillURL, "", episode.AirDate); err != nil {
 			return Season{}, err
 		}
 		episodes = append(episodes, normalizeEpisode(seasonID, episodeID, episode))
@@ -389,6 +429,9 @@ func (s *Service) persistMoviePage(ctx context.Context, provided ProviderMoviePa
 		if err != nil {
 			return MoviePage{}, err
 		}
+		if err := persistTitleSnapshot(ctx, tx, titleID, item.Title, item.PosterURL, item.BackdropURL, item.ReleaseDate); err != nil {
+			return MoviePage{}, err
+		}
 		items = append(items, normalizeMovie(titleID, item))
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -416,6 +459,9 @@ func (s *Service) persistSeriesPage(ctx context.Context, provided ProviderSeries
 		}
 		titleID, err := ensureTitle(ctx, tx, item.ExternalID, MediaTypeSeries, nil, nil)
 		if err != nil {
+			return SeriesPage{}, err
+		}
+		if err := persistTitleSnapshot(ctx, tx, titleID, item.Name, item.PosterURL, item.BackdropURL, item.FirstAirDate); err != nil {
 			return SeriesPage{}, err
 		}
 		items = append(items, normalizeSeries(titleID, item))
@@ -458,8 +504,7 @@ func (s *Service) loadTitleMetadata(ctx context.Context, titleID, mediaType, lan
 }
 
 func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaType string) (string, error) {
-	resolver, ok := s.provider.(ExternalIDResolver)
-	if !ok {
+	if s.resolver == nil {
 		return "", ErrNotFound
 	}
 	rows, err := s.pool.Query(ctx, `
@@ -483,7 +528,7 @@ func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaT
 		if err := rows.Scan(&provider, &externalID); err != nil {
 			return "", fmt.Errorf("scan external title identity: %w", err)
 		}
-		resolved, resolveErr := resolver.ResolveExternalID(ctx, mediaType, provider, externalID)
+		resolved, resolveErr := s.resolver.ResolveExternalID(ctx, mediaType, provider, externalID)
 		if resolveErr == nil {
 			return resolved, nil
 		}
@@ -511,6 +556,107 @@ func cacheTitle(ctx context.Context, tx pgx.Tx, titleID, language string, value 
 		    updated_at = now()
 	`, titleID, providerName, language, payload, time.Now().UTC().Add(ttl)); err != nil {
 		return fmt.Errorf("cache title metadata: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) persistCachedMovieReleaseDate(ctx context.Context, movie Movie) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin cached movie release-date persistence: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := persistReleaseDate(ctx, tx, movie.ID, movie.ReleaseDate); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit cached movie release-date persistence: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) persistCachedSeriesReleaseDates(ctx context.Context, series Series) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin cached series release-date persistence: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := persistReleaseDate(ctx, tx, series.ID, series.FirstAirDate); err != nil {
+		return err
+	}
+	for _, season := range series.Seasons {
+		if err := persistReleaseDate(ctx, tx, season.ID, season.AirDate); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit cached series release-date persistence: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) persistCachedSeasonReleaseDates(ctx context.Context, season Season) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin cached season release-date persistence: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := persistReleaseDate(ctx, tx, season.ID, season.AirDate); err != nil {
+		return err
+	}
+	for _, episode := range season.Episodes {
+		if err := persistReleaseDate(ctx, tx, episode.ID, episode.AirDate); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit cached season release-date persistence: %w", err)
+	}
+	return nil
+}
+
+func persistReleaseDate(ctx context.Context, tx pgx.Tx, titleID, releaseDate string) error {
+	releaseDate = strings.TrimSpace(releaseDate)
+	if releaseDate == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.DateOnly, releaseDate)
+	if err != nil || parsed.Year() < 1 || parsed.Format(time.DateOnly) != releaseDate {
+		return errors.New("cached metadata contains an invalid release date")
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE titles
+		SET release_date = $2::date,
+		    updated_at = now()
+		WHERE id = $1::uuid
+		  AND release_date IS DISTINCT FROM $2::date
+	`, titleID, releaseDate); err != nil {
+		return fmt.Errorf("persist cached release date: %w", err)
+	}
+	return nil
+}
+
+func persistTitleSnapshot(ctx context.Context, tx pgx.Tx, titleID, title, posterURL, backgroundURL, releaseDate string) error {
+	title = strings.TrimSpace(title)
+	posterURL = strings.TrimSpace(posterURL)
+	backgroundURL = strings.TrimSpace(backgroundURL)
+	releaseDate = strings.TrimSpace(releaseDate)
+	if releaseDate != "" {
+		parsed, err := time.Parse(time.DateOnly, releaseDate)
+		if err != nil || parsed.Year() < 1 || parsed.Format(time.DateOnly) != releaseDate {
+			return errors.New("metadata provider returned an invalid release date")
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE titles
+		SET display_title = COALESCE(NULLIF($2, ''), display_title),
+		    poster_url = COALESCE(NULLIF($3, ''), poster_url),
+		    background_url = COALESCE(NULLIF($4, ''), background_url),
+		    release_date = COALESCE(NULLIF($5, '')::date, release_date),
+		    updated_at = now()
+		WHERE id = $1::uuid
+	`, titleID, title, posterURL, backgroundURL, releaseDate); err != nil {
+		return fmt.Errorf("persist title snapshot: %w", err)
 	}
 	return nil
 }
@@ -565,12 +711,13 @@ func ensureTitle(ctx context.Context, tx pgx.Tx, externalID, mediaType string, p
 	return titleID, nil
 }
 
-func linkAdditionalIDs(ctx context.Context, tx pgx.Tx, titleID, namespace string, additionalIDs map[string]string) error {
-	type providerIdentity struct {
-		provider   string
-		externalID string
-	}
-	identities := make([]providerIdentity, 0, len(additionalIDs))
+type providerIdentity struct {
+	provider   string
+	externalID string
+}
+
+func normalizeProviderIdentities(additionalIDs map[string]string) ([]providerIdentity, error) {
+	byProvider := make(map[string]string, len(additionalIDs))
 	for rawProvider, rawExternalID := range additionalIDs {
 		provider := strings.ToLower(strings.TrimSpace(rawProvider))
 		externalID := strings.TrimSpace(rawExternalID)
@@ -578,13 +725,324 @@ func linkAdditionalIDs(ctx context.Context, tx pgx.Tx, titleID, namespace string
 			continue
 		}
 		if !externalProviderPattern.MatchString(provider) {
-			return errors.New("metadata provider returned an invalid external ID provider")
+			return nil, errors.New("metadata provider returned an invalid external ID provider")
 		}
+		if existing, ok := byProvider[provider]; ok && existing != externalID {
+			return nil, errors.New("metadata provider returned a conflicting external ID")
+		}
+		byProvider[provider] = externalID
+	}
+	identities := make([]providerIdentity, 0, len(byProvider))
+	for provider, externalID := range byProvider {
 		identities = append(identities, providerIdentity{provider: provider, externalID: externalID})
 	}
 	sort.Slice(identities, func(left, right int) bool {
+		if identities[left].provider == identities[right].provider {
+			return identities[left].externalID < identities[right].externalID
+		}
 		return identities[left].provider < identities[right].provider
 	})
+	return identities, nil
+}
+
+func consolidateCanonicalTitle(ctx context.Context, tx pgx.Tx, destinationID, mediaType string, additionalIDs map[string]string) error {
+	identities, err := normalizeProviderIdentities(additionalIDs)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "canonical-title-consolidation:"+mediaType); err != nil {
+		return fmt.Errorf("lock canonical title consolidation: %w", err)
+	}
+	for _, identity := range identities {
+		lockKey := identity.provider + ":" + mediaType + ":" + identity.externalID
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
+			return fmt.Errorf("lock provider identity for consolidation: %w", err)
+		}
+	}
+
+	sourceSet := make(map[string]struct{})
+	for _, identity := range identities {
+		var destinationExternalID string
+		err := tx.QueryRow(ctx, `
+			SELECT external_id
+			FROM title_external_ids
+			WHERE title_id = $1::uuid AND provider = $2
+		`, destinationID, identity.provider).Scan(&destinationExternalID)
+		if err == nil && destinationExternalID != identity.externalID {
+			return errors.New("metadata provider returned a conflicting external ID")
+		}
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("query canonical provider identity: %w", err)
+		}
+
+		var mappedTitleID string
+		var mappedMediaType string
+		err = tx.QueryRow(ctx, `
+			SELECT external.title_id::text, title.media_type
+			FROM title_external_ids AS external
+			JOIN titles AS title ON title.id = external.title_id
+			WHERE external.provider = $1
+			  AND external.namespace = $2
+			  AND external.external_id = $3
+		`, identity.provider, mediaType, identity.externalID).Scan(&mappedTitleID, &mappedMediaType)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("query mapped canonical title: %w", err)
+		}
+		if mappedMediaType != mediaType {
+			return errors.New("metadata provider returned a conflicting title media type")
+		}
+		if mappedTitleID != destinationID {
+			sourceSet[mappedTitleID] = struct{}{}
+		}
+	}
+
+	titleIDs := make([]string, 0, len(sourceSet)+1)
+	titleIDs = append(titleIDs, destinationID)
+	for sourceID := range sourceSet {
+		titleIDs = append(titleIDs, sourceID)
+	}
+	sort.Strings(titleIDs)
+	for _, titleID := range titleIDs {
+		var storedMediaType string
+		err := tx.QueryRow(ctx, `
+			SELECT media_type
+			FROM titles
+			WHERE id = $1::uuid
+			FOR UPDATE
+		`, titleID).Scan(&storedMediaType)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("lock title for consolidation: %w", err)
+		}
+		if storedMediaType != mediaType {
+			return errors.New("metadata provider returned a conflicting title media type")
+		}
+	}
+
+	sourceIDs := make([]string, 0, len(sourceSet))
+	for sourceID := range sourceSet {
+		sourceIDs = append(sourceIDs, sourceID)
+	}
+	sort.Strings(sourceIDs)
+	for _, sourceID := range sourceIDs {
+		if err := mergeTitleTree(ctx, tx, destinationID, sourceID, mediaType); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func mergeTitleTree(ctx context.Context, tx pgx.Tx, destinationID, sourceID, mediaType string) error {
+	var conflictingProvider string
+	err := tx.QueryRow(ctx, `
+		SELECT source.provider
+		FROM title_external_ids AS source
+		JOIN title_external_ids AS destination
+		  ON destination.title_id = $1::uuid
+		 AND destination.provider = source.provider
+		WHERE source.title_id = $2::uuid
+		  AND (source.namespace, source.external_id) <> (destination.namespace, destination.external_id)
+		LIMIT 1
+	`, destinationID, sourceID).Scan(&conflictingProvider)
+	if err == nil {
+		return errors.New("metadata provider returned a conflicting external ID")
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("query title identity conflicts: %w", err)
+	}
+
+	var invalidNamespace bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM title_external_ids
+			WHERE title_id IN ($1::uuid, $2::uuid)
+			  AND namespace <> $3
+		)
+	`, destinationID, sourceID, mediaType).Scan(&invalidNamespace); err != nil {
+		return fmt.Errorf("validate title identity namespaces: %w", err)
+	}
+	if invalidNamespace {
+		return errors.New("metadata provider returned a conflicting title media type")
+	}
+
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM title_metadata
+		WHERE title_id IN ($1::uuid, $2::uuid)
+	`, destinationID, sourceID); err != nil {
+		return fmt.Errorf("invalidate consolidated title metadata: %w", err)
+	}
+	if err := mergeProfileState(ctx, tx, destinationID, sourceID); err != nil {
+		return err
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT id::text, media_type, ordinal
+		FROM titles
+		WHERE parent_id = $1::uuid
+		ORDER BY media_type, ordinal, id
+	`, sourceID)
+	if err != nil {
+		return fmt.Errorf("query duplicate title children: %w", err)
+	}
+	type child struct {
+		id        string
+		mediaType string
+		ordinal   int
+	}
+	children := make([]child, 0)
+	for rows.Next() {
+		var item child
+		if err := rows.Scan(&item.id, &item.mediaType, &item.ordinal); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan duplicate title child: %w", err)
+		}
+		children = append(children, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate duplicate title children: %w", err)
+	}
+	rows.Close()
+
+	for _, sourceChild := range children {
+		var destinationChildID string
+		err := tx.QueryRow(ctx, `
+			SELECT id::text
+			FROM titles
+			WHERE parent_id = $1::uuid
+			  AND media_type = $2
+			  AND ordinal = $3
+			FOR UPDATE
+		`, destinationID, sourceChild.mediaType, sourceChild.ordinal).Scan(&destinationChildID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if err := invalidateTitleSubtree(ctx, tx, sourceChild.id); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE titles
+				SET parent_id = $1::uuid, updated_at = now()
+				WHERE id = $2::uuid
+			`, destinationID, sourceChild.id); err != nil {
+				return fmt.Errorf("move unique title child: %w", err)
+			}
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("query canonical title child: %w", err)
+		}
+		if err := mergeTitleTree(ctx, tx, destinationChildID, sourceChild.id, sourceChild.mediaType); err != nil {
+			return err
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE titles AS destination
+		SET display_title = COALESCE(destination.display_title, source.display_title),
+		    poster_url = COALESCE(destination.poster_url, source.poster_url),
+		    background_url = COALESCE(destination.background_url, source.background_url),
+		    release_info = COALESCE(destination.release_info, source.release_info),
+		    resource_id = COALESCE(destination.resource_id, source.resource_id),
+		    resource_provider = COALESCE(destination.resource_provider, source.resource_provider),
+		    release_date = COALESCE(destination.release_date, source.release_date),
+		    created_at = LEAST(destination.created_at, source.created_at),
+		    updated_at = GREATEST(destination.updated_at, source.updated_at, now())
+		FROM titles AS source
+		WHERE destination.id = $1::uuid
+		  AND source.id = $2::uuid
+	`, destinationID, sourceID); err != nil {
+		return fmt.Errorf("merge title snapshots: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE title_external_ids
+		SET title_id = $1::uuid
+		WHERE title_id = $2::uuid
+	`, destinationID, sourceID); err != nil {
+		return fmt.Errorf("move title identities: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM titles WHERE id = $1::uuid", sourceID); err != nil {
+		return fmt.Errorf("remove duplicate title: %w", err)
+	}
+	return nil
+}
+
+func mergeProfileState(ctx context.Context, tx pgx.Tx, destinationID, sourceID string) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO profile_library AS destination (profile_id, title_id, added_at, updated_at)
+		SELECT profile_id, $1::uuid, added_at, updated_at
+		FROM profile_library
+		WHERE title_id = $2::uuid
+		ON CONFLICT (profile_id, title_id) DO UPDATE
+		SET added_at = LEAST(destination.added_at, EXCLUDED.added_at),
+		    updated_at = GREATEST(destination.updated_at, EXCLUDED.updated_at)
+	`, destinationID, sourceID); err != nil {
+		return fmt.Errorf("merge profile library state: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM profile_library WHERE title_id = $1::uuid", sourceID); err != nil {
+		return fmt.Errorf("remove duplicate profile library state: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO profile_progress AS destination (
+			profile_id, title_id, position_seconds, duration_seconds, completed,
+			version, last_watched_at, updated_at
+		)
+		SELECT profile_id, $1::uuid, position_seconds, duration_seconds, completed,
+		       version, last_watched_at, updated_at
+		FROM profile_progress
+		WHERE title_id = $2::uuid
+		ON CONFLICT (profile_id, title_id) DO UPDATE
+		SET position_seconds = CASE
+				WHEN (EXCLUDED.last_watched_at, EXCLUDED.updated_at) >
+				     (destination.last_watched_at, destination.updated_at)
+				THEN EXCLUDED.position_seconds ELSE destination.position_seconds END,
+		    duration_seconds = CASE
+				WHEN (EXCLUDED.last_watched_at, EXCLUDED.updated_at) >
+				     (destination.last_watched_at, destination.updated_at)
+				THEN EXCLUDED.duration_seconds ELSE destination.duration_seconds END,
+		    completed = CASE
+				WHEN (EXCLUDED.last_watched_at, EXCLUDED.updated_at) >
+				     (destination.last_watched_at, destination.updated_at)
+				THEN EXCLUDED.completed ELSE destination.completed END,
+		    version = GREATEST(destination.version, EXCLUDED.version) + 1,
+		    last_watched_at = GREATEST(destination.last_watched_at, EXCLUDED.last_watched_at),
+		    updated_at = GREATEST(destination.updated_at, EXCLUDED.updated_at)
+	`, destinationID, sourceID); err != nil {
+		return fmt.Errorf("merge profile progress state: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM profile_progress WHERE title_id = $1::uuid", sourceID); err != nil {
+		return fmt.Errorf("remove duplicate profile progress state: %w", err)
+	}
+	return nil
+}
+
+func invalidateTitleSubtree(ctx context.Context, tx pgx.Tx, titleID string) error {
+	if _, err := tx.Exec(ctx, `
+		WITH RECURSIVE subtree AS (
+			SELECT id FROM titles WHERE id = $1::uuid
+			UNION ALL
+			SELECT child.id
+			FROM titles AS child
+			JOIN subtree AS parent ON parent.id = child.parent_id
+		)
+		DELETE FROM title_metadata AS metadata
+		USING subtree
+		WHERE metadata.title_id = subtree.id
+	`, titleID); err != nil {
+		return fmt.Errorf("invalidate moved title metadata: %w", err)
+	}
+	return nil
+}
+
+func linkAdditionalIDs(ctx context.Context, tx pgx.Tx, titleID, namespace string, additionalIDs map[string]string) error {
+	identities, err := normalizeProviderIdentities(additionalIDs)
+	if err != nil {
+		return err
+	}
 
 	for _, identity := range identities {
 		titleLockKey := "title:" + titleID + ":" + identity.provider + ":" + namespace

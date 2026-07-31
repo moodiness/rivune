@@ -3,6 +3,7 @@ package metadata
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 var (
@@ -74,6 +75,24 @@ type MoviePage struct {
 	Page         int     `json:"page"`
 	TotalPages   int     `json:"totalPages"`
 	TotalResults int     `json:"totalResults"`
+}
+
+type Trailer struct {
+	YouTubeID         string `json:"youtubeId"`
+	Name              string `json:"name"`
+	Language          string `json:"language"`
+	IsFallback        bool   `json:"isFallback"`
+	CaptionPreference string `json:"captionPreference,omitempty"`
+}
+
+type ProviderTrailer struct {
+	YouTubeID   string
+	Name        string
+	Language    string
+	Site        string
+	Type        string
+	Official    bool
+	PublishedAt time.Time
 }
 
 type ProviderMovie struct {
@@ -249,6 +268,10 @@ type Provider interface {
 	SearchSeries(context.Context, SearchOptions) (ProviderSeriesPage, error)
 	SeriesDetails(context.Context, string, string) (ProviderSeries, error)
 	SeasonDetails(context.Context, string, int, string) (ProviderSeason, error)
+}
+
+type TrailerProvider interface {
+	Trailers(context.Context, string, string, string) ([]ProviderTrailer, error)
 }
 
 type ExternalIDResolver interface {

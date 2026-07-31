@@ -51,7 +51,7 @@ func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
 		SetupRequired   bool   `json:"setupRequired"`
 	}
 	decodeResponse(t, response, &body)
-	if body.Name != "Rivune" || body.ProtocolVersion != 10 || body.APIBaseURL != "https://media.example/api/v1" || !body.SetupRequired {
+	if body.Name != "Rivune" || body.ProtocolVersion != 14 || body.APIBaseURL != "https://media.example/api/v1" || !body.SetupRequired {
 		t.Fatalf("unexpected discovery response: %+v", body)
 	}
 }

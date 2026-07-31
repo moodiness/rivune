@@ -60,6 +60,17 @@ func run(logger *slog.Logger) error {
 	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 
+	maintenanceContext, cancelMaintenance := context.WithCancel(shutdownContext)
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		api.RunMaintenance(maintenanceContext)
+	}()
+	defer func() {
+		cancelMaintenance()
+		<-maintenanceDone
+	}()
+
 	serverError := make(chan error, 1)
 	go func() {
 		logger.Info("Rivune server listening", "address", cfg.ListenAddress, "version", version)

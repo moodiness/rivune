@@ -10,7 +10,19 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 )
 
-const playbackSessionIdleTTL = 30 * time.Minute
+const (
+	playbackSessionIdleTTL     = 30 * time.Minute
+	cleanupInactiveSessionsSQL = `
+		DELETE FROM playback_sessions
+		WHERE expires_at <= now() OR last_seen_at <= now() - $1::interval
+		RETURNING id::text
+	`
+	activePlaybackSessionsSQL = `
+		SELECT id::text
+		FROM playback_sessions
+		WHERE expires_at > now() AND last_seen_at > now() - $1::interval
+	`
+)
 
 type Activity struct {
 	Summary     ActivitySummary    `json:"summary"`
@@ -176,15 +188,29 @@ func (service *Service) StopActivitySession(ctx context.Context, principal auth.
 	return nil
 }
 
+// Cleanup removes inactive sessions and cancels HLS work with no active session.
+// It is safe to invoke repeatedly or concurrently.
+func (service *Service) Cleanup(ctx context.Context) error {
+	_, err := service.cleanupActivity(ctx)
+	return err
+}
+
 func (service *Service) PurgeActivity(ctx context.Context, principal auth.Principal) (PurgeResult, error) {
 	if principal.Role != "admin" {
 		return PurgeResult{}, ErrForbidden
 	}
+	return service.cleanupActivity(ctx)
+}
+
+func (service *Service) cleanupActivity(ctx context.Context) (PurgeResult, error) {
 	sessionsRemoved, err := service.cleanupInactiveSessions(ctx)
 	if err != nil {
 		return PurgeResult{}, err
 	}
-	jobsStopped := service.stopOrphanedHLSJobs(ctx)
+	jobsStopped, err := service.stopOrphanedHLSJobs(ctx)
+	if err != nil {
+		return PurgeResult{}, err
+	}
 	return PurgeResult{
 		SessionsRemoved: sessionsRemoved,
 		JobsStopped:     jobsStopped,
@@ -193,11 +219,7 @@ func (service *Service) PurgeActivity(ctx context.Context, principal auth.Princi
 }
 
 func (service *Service) cleanupInactiveSessions(ctx context.Context) (int, error) {
-	rows, err := service.pool.Query(ctx, `
-		DELETE FROM playback_sessions
-		WHERE expires_at <= now() OR last_seen_at <= now() - $1::interval
-		RETURNING id::text
-	`, intervalLiteral(playbackSessionIdleTTL))
+	rows, err := service.pool.Query(ctx, cleanupInactiveSessionsSQL, intervalLiteral(playbackSessionIdleTTL))
 	if err != nil {
 		return 0, fmt.Errorf("clean inactive playback sessions: %w", err)
 	}
@@ -219,18 +241,22 @@ func (service *Service) cleanupInactiveSessions(ctx context.Context) (int, error
 	return len(identifiers), nil
 }
 
-func (service *Service) stopOrphanedHLSJobs(ctx context.Context) int {
-	rows, err := service.pool.Query(ctx, "SELECT id::text FROM playback_sessions WHERE expires_at > now() AND last_seen_at > now() - $1::interval", intervalLiteral(playbackSessionIdleTTL))
+func (service *Service) stopOrphanedHLSJobs(ctx context.Context) (int, error) {
+	rows, err := service.pool.Query(ctx, activePlaybackSessionsSQL, intervalLiteral(playbackSessionIdleTTL))
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("query active playback sessions: %w", err)
 	}
 	defer rows.Close()
 	active := make(map[string]struct{})
 	for rows.Next() {
 		var identifier string
-		if rows.Scan(&identifier) == nil {
-			active[identifier] = struct{}{}
+		if err := rows.Scan(&identifier); err != nil {
+			return 0, fmt.Errorf("scan active playback session: %w", err)
 		}
+		active[identifier] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate active playback sessions: %w", err)
 	}
 	service.hlsMu.Lock()
 	keys := make([]string, 0)
@@ -246,7 +272,7 @@ func (service *Service) stopOrphanedHLSJobs(ctx context.Context) int {
 	for _, key := range keys {
 		service.stopHLSJob(key)
 	}
-	return len(keys)
+	return len(keys), nil
 }
 
 func (service *Service) activityJobs() []MediaActivityJob {

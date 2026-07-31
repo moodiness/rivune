@@ -166,3 +166,35 @@ func TestSeasonDetailsNormalizesEpisodes(t *testing.T) {
 		t.Fatalf("unexpected season: %+v", season)
 	}
 }
+
+func TestTrailersUsesMediaSpecificVideosPathAndLanguage(t *testing.T) {
+	tests := []struct {
+		name       string
+		mediaType  string
+		externalID string
+		wantPath   string
+	}{
+		{name: "movie", mediaType: metadata.MediaTypeMovie, externalID: "550", wantPath: "/movie/550/videos"},
+		{name: "series", mediaType: metadata.MediaTypeSeries, externalID: "1396", wantPath: "/tv/1396/videos"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != test.wantPath || r.URL.Query().Get("language") != "fr-FR" {
+					t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
+				}
+				_, _ = w.Write([]byte(`{"results":[{"iso_639_1":"fr","key":"youtube-id","name":"Bande-annonce","site":"YouTube","type":"Trailer","official":true,"published_at":"2024-03-02T12:30:00.000Z"}]}`))
+			}))
+			defer server.Close()
+
+			client := newWithBaseURL("token", server.URL, server.Client())
+			trailers, err := client.Trailers(context.Background(), test.mediaType, test.externalID, "fr-FR")
+			if err != nil {
+				t.Fatalf("trailers: %v", err)
+			}
+			if len(trailers) != 1 || trailers[0].YouTubeID != "youtube-id" || !trailers[0].Official || trailers[0].PublishedAt.IsZero() {
+				t.Fatalf("unexpected trailers: %+v", trailers)
+			}
+		})
+	}
+}

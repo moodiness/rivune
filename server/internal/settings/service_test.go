@@ -1,7 +1,9 @@
 package settings
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -77,5 +79,147 @@ func TestEffectiveLayerPrecedence(t *testing.T) {
 	}
 	if effective.Values.SubtitleLanguage != "auto" || effective.Sources["subtitleLanguage"] != "default" {
 		t.Fatalf("unexpected default value: %+v", effective)
+	}
+}
+
+func TestValidateNewSettings(t *testing.T) {
+	badDensity := "dense"
+	badColorShort := "#12345"
+	badColorLong := "#1234567"
+	badColorDigits := "#12FG00"
+	tests := []Patch{
+		{CardDensity: OptionalString{Set: true, Value: &badDensity}},
+		{SubtitleTextColor: OptionalString{Set: true, Value: &badColorShort}},
+		{SubtitleTextColor: OptionalString{Set: true, Value: &badColorLong}},
+		{SubtitleTextColor: OptionalString{Set: true, Value: &badColorDigits}},
+		{SubtitleSizePercent: OptionalInt{Set: true, Value: new(49)}},
+		{SubtitleSizePercent: OptionalInt{Set: true, Value: new(201)}},
+		{SubtitleBackgroundOpacityPercent: OptionalInt{Set: true, Value: new(-1)}},
+		{SubtitleBackgroundOpacityPercent: OptionalInt{Set: true, Value: new(101)}},
+		{NotificationDurationSeconds: OptionalInt{Set: true, Value: new(1)}},
+		{NotificationDurationSeconds: OptionalInt{Set: true, Value: new(31)}},
+		{NotificationPollIntervalSeconds: OptionalInt{Set: true, Value: new(4)}},
+		{NotificationPollIntervalSeconds: OptionalInt{Set: true, Value: new(301)}},
+	}
+	for _, patch := range tests {
+		if err := validatePatch(patch); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("expected invalid settings error for %+v, got %v", patch, err)
+		}
+	}
+	for _, patch := range []Patch{
+		{SubtitleSizePercent: OptionalInt{Set: true, Value: new(50)}},
+		{SubtitleSizePercent: OptionalInt{Set: true, Value: new(200)}},
+		{SubtitleBackgroundOpacityPercent: OptionalInt{Set: true, Value: new(0)}},
+		{SubtitleBackgroundOpacityPercent: OptionalInt{Set: true, Value: new(100)}},
+		{NotificationDurationSeconds: OptionalInt{Set: true, Value: new(2)}},
+		{NotificationDurationSeconds: OptionalInt{Set: true, Value: new(30)}},
+		{NotificationPollIntervalSeconds: OptionalInt{Set: true, Value: new(5)}},
+		{NotificationPollIntervalSeconds: OptionalInt{Set: true, Value: new(300)}},
+	} {
+		if err := validatePatch(patch); err != nil {
+			t.Fatalf("boundary setting was rejected for %+v: %v", patch, err)
+		}
+	}
+
+	color := "#a1b2c3"
+	if err := validatePatch(Patch{SubtitleTextColor: OptionalString{Set: true, Value: &color}}); err != nil {
+		t.Fatalf("valid subtitle color was rejected: %v", err)
+	}
+	updated := applyPatch(Values{}, Patch{SubtitleTextColor: OptionalString{Set: true, Value: &color}})
+	if updated.SubtitleTextColor == nil || *updated.SubtitleTextColor != "#A1B2C3" {
+		t.Fatalf("subtitle color was not normalized: %+v", updated.SubtitleTextColor)
+	}
+}
+
+func TestNewSettingsClearEveryOverride(t *testing.T) {
+	enabled := true
+	number := 10
+	text := "value"
+	values := Values{
+		AutoplayNextEpisode: &enabled, CardDensity: &text, AnimationsEnabled: &enabled,
+		SubtitleSizePercent: &number, SubtitleTextColor: &text, SubtitleBackgroundOpacityPercent: &number,
+		NotificationsEnabled: &enabled, NotificationDurationSeconds: &number, NotificationPollIntervalSeconds: &number,
+	}
+	updated := applyPatch(values, Patch{
+		AutoplayNextEpisode: OptionalBool{Set: true}, CardDensity: OptionalString{Set: true},
+		AnimationsEnabled: OptionalBool{Set: true}, SubtitleSizePercent: OptionalInt{Set: true},
+		SubtitleTextColor: OptionalString{Set: true}, SubtitleBackgroundOpacityPercent: OptionalInt{Set: true},
+		NotificationsEnabled: OptionalBool{Set: true}, NotificationDurationSeconds: OptionalInt{Set: true},
+		NotificationPollIntervalSeconds: OptionalInt{Set: true},
+	})
+	if updated != (Values{}) {
+		t.Fatalf("new setting overrides were not all cleared: %+v", updated)
+	}
+}
+
+func TestNewSettingsLayerInheritanceAndPrecedence(t *testing.T) {
+	disabled, enabled := false, true
+	compact, comfortable := "compact", "comfortable"
+	size80, size120 := 80, 120
+	black, accent := "#000000", "#A1B2C3"
+	opacity20, opacity80 := 20, 80
+	duration10, duration20 := 10, 20
+	poll30, poll60 := 30, 60
+	instance := Values{
+		AutoplayNextEpisode: &disabled, CardDensity: &compact, AnimationsEnabled: &disabled,
+		SubtitleSizePercent: &size80, SubtitleTextColor: &black, SubtitleBackgroundOpacityPercent: &opacity20,
+		NotificationsEnabled: &disabled, NotificationDurationSeconds: &duration10, NotificationPollIntervalSeconds: &poll30,
+	}
+	profile := Values{
+		AutoplayNextEpisode: &enabled, CardDensity: &comfortable, AnimationsEnabled: &enabled,
+		SubtitleSizePercent: &size120, SubtitleTextColor: &accent, SubtitleBackgroundOpacityPercent: &opacity80,
+		NotificationsEnabled: &enabled, NotificationDurationSeconds: &duration20, NotificationPollIntervalSeconds: &poll60,
+	}
+	effective := defaultEffective()
+	applyLayer(&effective, instance, "instance")
+	if effective.Values.AutoplayNextEpisode || effective.Values.CardDensity != "compact" || effective.Values.AnimationsEnabled ||
+		effective.Values.SubtitleSizePercent != 80 || effective.Values.SubtitleTextColor != "#000000" || effective.Values.SubtitleBackgroundOpacityPercent != 20 ||
+		effective.Values.NotificationsEnabled || effective.Values.NotificationDurationSeconds != 10 || effective.Values.NotificationPollIntervalSeconds != 30 {
+		t.Fatalf("instance settings were not inherited: %+v", effective.Values)
+	}
+	for _, name := range []string{
+		"autoplayNextEpisode", "cardDensity", "animationsEnabled", "subtitleSizePercent", "subtitleTextColor",
+		"subtitleBackgroundOpacityPercent", "notificationsEnabled", "notificationDurationSeconds", "notificationPollIntervalSeconds",
+	} {
+		if effective.Sources[name] != "instance" {
+			t.Fatalf("%s source = %q, want instance", name, effective.Sources[name])
+		}
+	}
+	applyLayer(&effective, profile, "profile")
+	if !effective.Values.AutoplayNextEpisode || effective.Values.CardDensity != "comfortable" || !effective.Values.AnimationsEnabled ||
+		effective.Values.SubtitleSizePercent != 120 || effective.Values.SubtitleTextColor != "#A1B2C3" || effective.Values.SubtitleBackgroundOpacityPercent != 80 ||
+		!effective.Values.NotificationsEnabled || effective.Values.NotificationDurationSeconds != 20 || effective.Values.NotificationPollIntervalSeconds != 60 {
+		t.Fatalf("profile settings did not take precedence: %+v", effective.Values)
+	}
+	for _, name := range []string{
+		"autoplayNextEpisode", "cardDensity", "animationsEnabled", "subtitleSizePercent", "subtitleTextColor",
+		"subtitleBackgroundOpacityPercent", "notificationsEnabled", "notificationDurationSeconds", "notificationPollIntervalSeconds",
+	} {
+		if effective.Sources[name] != "profile" {
+			t.Fatalf("%s source = %q, want profile", name, effective.Sources[name])
+		}
+	}
+}
+
+func TestLegacySettingsJSONUsesNewDefaults(t *testing.T) {
+	var legacy Values
+	if err := json.Unmarshal([]byte(`{"theme":"dark"}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	effective := defaultEffective()
+	applyLayer(&effective, legacy, "instance")
+	if effective.Values.Theme != "dark" || !effective.Values.AutoplayNextEpisode || effective.Values.CardDensity != "comfortable" ||
+		!effective.Values.AnimationsEnabled || effective.Values.SubtitleSizePercent != 100 || effective.Values.SubtitleTextColor != "#FFFFFF" ||
+		effective.Values.SubtitleBackgroundOpacityPercent != 60 || !effective.Values.NotificationsEnabled ||
+		effective.Values.NotificationDurationSeconds != 5 || effective.Values.NotificationPollIntervalSeconds != 5 {
+		t.Fatalf("legacy settings did not resolve with new defaults: %+v", effective.Values)
+	}
+
+	encoded, err := json.Marshal(Values{SubtitleSizePercent: new(125)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"subtitleSizePercent":125`) {
+		t.Fatalf("new setting used the wrong JSON name: %s", encoded)
 	}
 }
