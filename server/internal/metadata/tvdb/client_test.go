@@ -131,6 +131,69 @@ func TestEnrichSeriesRefreshesRejectedTokenOnce(t *testing.T) {
 	}
 }
 
+func TestSeriesMappingUsesOfficialTVDBSeasonHierarchy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]string{"token": "token"}})
+		case "/series/81797/extended":
+			writeJSON(t, w, map[string]any{
+				"status": "success",
+				"data": map[string]any{
+					"id": 81797,
+					"seasonTypes": []map[string]any{
+						{"id": 1, "name": "Aired Order", "type": "official"},
+						{"id": 2, "name": "DVD Order", "type": "dvd"},
+					},
+					"seasons": []map[string]any{
+						{"id": 1001, "name": "Season 1", "number": 1, "seriesId": 81797, "image": "https://artworks.thetvdb.com/s1.jpg", "type": map[string]any{"id": 1, "type": "official"}},
+						{"id": 1002, "name": "Season 2", "number": 2, "seriesId": 81797, "image": "https://artworks.thetvdb.com/s2.jpg", "type": map[string]any{"id": 1, "type": "official"}},
+						{"id": 2001, "name": "DVD Season", "number": 1, "seriesId": 81797, "type": map[string]any{"id": 2, "type": "dvd"}},
+					},
+				},
+			})
+		case "/series/81797/episodes/official":
+			season := r.URL.Query().Get("season")
+			if r.URL.Query().Get("page") != "0" {
+				t.Fatalf("unexpected page query %q", r.URL.RawQuery)
+			}
+			episodes := []map[string]any{}
+			if season == "1" {
+				episodes = []map[string]any{
+					{"id": 1101, "name": "Episode 1", "aired": "2024-01-07", "seasonNumber": 1, "number": 1},
+					{"id": 1102, "name": "Episode 2", "aired": "2024-01-14", "seasonNumber": 1, "number": 2},
+				}
+			} else if season == "2" {
+				episodes = []map[string]any{
+					{"id": 1201, "name": "Episode 1", "overview": "Second season", "aired": "2025-01-05", "runtime": 24, "seasonNumber": 2, "number": 1},
+				}
+			} else {
+				t.Fatalf("unexpected season query %q", r.URL.RawQuery)
+			}
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{"episodes": episodes}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newWithBaseURL("api-key", "", server.URL, server.Client())
+	seasons, err := client.SeriesSeasons(context.Background(), "81797")
+	if err != nil {
+		t.Fatalf("map series seasons: %v", err)
+	}
+	if len(seasons) != 2 || seasons[0].ExternalID != "1001" || seasons[0].EpisodeCount != 2 || seasons[1].ExternalID != "1002" || seasons[1].EpisodeCount != 1 {
+		t.Fatalf("unexpected official seasons: %+v", seasons)
+	}
+	season, err := client.SeriesSeason(context.Background(), "81797", "1002")
+	if err != nil {
+		t.Fatalf("map second season: %v", err)
+	}
+	if season.SeasonNumber != 2 || len(season.Episodes) != 1 || season.Episodes[0].ExternalID != "1201" || season.Episodes[0].EpisodeNumber != 1 {
+		t.Fatalf("unexpected mapped second season: %+v", season)
+	}
+}
+
 func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")

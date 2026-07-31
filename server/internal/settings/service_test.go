@@ -12,11 +12,13 @@ func TestValidatePatchRejectsUnknownValues(t *testing.T) {
 	invalidResolution := "8k"
 	invalidLanguage := "not_a_language"
 	invalidRegion := "France"
+	invalidMapping := "anidb"
 	tests := []Patch{
 		{Theme: OptionalString{Set: true, Value: &invalidTheme}},
 		{MaximumResolution: OptionalString{Set: true, Value: &invalidResolution}},
 		{AudioLanguage: OptionalString{Set: true, Value: &invalidLanguage}},
 		{MetadataRegion: OptionalString{Set: true, Value: &invalidRegion}},
+		{SeriesMappingProvider: OptionalString{Set: true, Value: &invalidMapping}},
 		{},
 	}
 	for _, patch := range tests {
@@ -57,10 +59,11 @@ func TestEffectiveLayerPrecedence(t *testing.T) {
 	hideUnreleased := true
 	metadataLanguage := "fr-FR"
 	metadataRegion := "FR"
+	tvdbMapping := "tvdb"
 	applyLayer(&effective, Values{Theme: &dark, MaximumResolution: &resolution1080}, "instance")
 	applyLayer(&effective, Values{MaximumResolution: &resolution720, AudioLanguage: &french, PreferDirectPlay: &directPlay}, "profile")
 	applyLayer(&effective, Values{HideUnreleased: &hideUnreleased}, "profile")
-	applyLayer(&effective, Values{MetadataLanguage: &metadataLanguage, MetadataRegion: &metadataRegion}, "profile")
+	applyLayer(&effective, Values{MetadataLanguage: &metadataLanguage, MetadataRegion: &metadataRegion, SeriesMappingProvider: &tvdbMapping}, "profile")
 
 	if effective.Values.Theme != "dark" || effective.Sources["theme"] != "instance" {
 		t.Fatalf("unexpected theme resolution: %+v", effective)
@@ -76,6 +79,9 @@ func TestEffectiveLayerPrecedence(t *testing.T) {
 	}
 	if effective.Values.MetadataLanguage != "fr-FR" || effective.Values.MetadataRegion != "FR" || effective.Sources["metadataLanguage"] != "profile" || effective.Sources["metadataRegion"] != "profile" {
 		t.Fatalf("unexpected metadata locale resolution: %+v", effective)
+	}
+	if effective.Values.SeriesMappingProvider != "tvdb" || effective.Sources["seriesMappingProvider"] != "profile" {
+		t.Fatalf("unexpected series mapping resolution: %+v", effective)
 	}
 	if effective.Values.SubtitleLanguage != "auto" || effective.Sources["subtitleLanguage"] != "default" {
 		t.Fatalf("unexpected default value: %+v", effective)

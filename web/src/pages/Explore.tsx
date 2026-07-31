@@ -87,6 +87,8 @@ function mediaFromContinue(item: EnrichedContinueItem): MediaItem {
       continueReason: item.reason,
       continueSeriesId: item.seriesId,
       continueSeasonId: item.seasonId,
+      continueSeasonNumber: item.seasonNumber,
+      continueEpisodeNumber: item.episodeNumber,
       continueEpisodeId: item.titleId,
       continueCardTitle: seriesTitle,
       continueCardEyebrow: item.seasonNumber !== undefined && item.episodeNumber !== undefined ? `S${item.seasonNumber} E${item.episodeNumber}` : "",
@@ -98,10 +100,10 @@ function mediaFromContinue(item: EnrichedContinueItem): MediaItem {
   };
 }
 
-async function loadContinueItems(): Promise<EnrichedContinueItem[]> {
-  const response = await api.continueWatching().catch(() => ({ items: [] as ContinueItem[] }));
+async function loadContinueItems(signal?: AbortSignal): Promise<EnrichedContinueItem[]> {
+  const response = await api.continueWatching(signal).catch(() => ({ items: [] as ContinueItem[] }));
   const seasonIDs = Array.from(new Set(response.items.flatMap((item) => item.seasonId ? [item.seasonId] : [])));
-  const seasons = new Map((await Promise.all(seasonIDs.map(async (seasonID) => [seasonID, await api.seasonDetails(seasonID).catch(() => undefined)] as const))).filter((entry) => entry[1] !== undefined));
+  const seasons = new Map((await Promise.all(seasonIDs.map(async (seasonID) => [seasonID, await api.seasonDetails(seasonID, signal).catch(() => undefined)] as const))).filter((entry) => entry[1] !== undefined));
   return response.items.map((item) => {
     const episode = item.seasonId ? seasons.get(item.seasonId)?.episodes.find((candidate) => candidate.id === item.titleId) : undefined;
     return episode ? { ...item, episodeTitle: episode.name, episodeOverview: episode.overview, episodeStillUrl: episode.stillUrl, episodeAirDate: episode.airDate } : item;
@@ -131,7 +133,7 @@ function useMediaPreferences() {
     return () => { active = false; };
   }, [activeProfile]);
 
-  return { ...preferences, ready: preferences.profileID === profileID };
+  return { ...preferences, profileID, ready: profileID !== "" && preferences.profileID === profileID };
 }
 
 type HomeRow = { collection: Collection; resolved: ResolvedFolder };
@@ -195,13 +197,23 @@ export function HomePage() {
   const [openedCollection, setOpenedCollection] = useState<Collection | null>(null);
   const [continueItems, setContinueItems] = useState<EnrichedContinueItem[]>([]);
   const mediaPreferences = useMediaPreferences();
+  const { profileRequestSignal } = useAuth();
   const [pendingFolderKeys, setPendingFolderKeys] = useState<Set<string>>(new Set());
   const [activeHeroIndex, setActiveHeroIndex] = useState(0);
+  const homeRequestGeneration = useRef(0);
 
   useEffect(() => {
-    if (!mediaPreferences.ready) return;
+    if (!mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
+    const generation = ++homeRequestGeneration.current;
     const controller = new AbortController();
     let active = true;
+    const isCurrent = () => active && homeRequestGeneration.current === generation;
+    const cancelRequest = () => {
+      active = false;
+      if (homeRequestGeneration.current === generation) homeRequestGeneration.current++;
+      controller.abort();
+    };
+    profileRequestSignal.addEventListener("abort", cancelRequest, { once: true });
     setLoading(true);
     setError("");
     setRows([]);
@@ -209,14 +221,14 @@ export function HomePage() {
     setContinueItems([]);
     setPendingFolderKeys(new Set());
 
-    void loadContinueItems().then((items) => {
-      if (active) setContinueItems(items);
+    void loadContinueItems(controller.signal).then((items) => {
+      if (isCurrent()) setContinueItems(items);
     }).catch(() => undefined);
 
     void (async () => {
       try {
-        const response = await api.collections();
-        if (!active) return;
+        const response = await api.collections(controller.signal);
+        if (!isCurrent()) return;
         setCollections(response.collections);
         const targets = response.collections.flatMap((collection) => collection.folders.map((folder) => ({
           collection,
@@ -231,7 +243,7 @@ export function HomePage() {
         let cursor = 0;
         let succeeded = 0;
         const worker = async () => {
-          while (active && !controller.signal.aborted) {
+          while (isCurrent() && !controller.signal.aborted) {
             const index = cursor++;
             if (index >= targets.length) return;
             const target = targets[index];
@@ -241,7 +253,7 @@ export function HomePage() {
             const timeout = window.setTimeout(abortRequest, homeFolderTimeoutMilliseconds);
             try {
               const resolved = await api.resolveFolder(target.collection.id, target.folderID, 1, requestController.signal);
-              if (!active) return;
+              if (!isCurrent()) return;
               results[index] = { collection: target.collection, resolved };
               succeeded++;
               setRows(results.filter((row): row is HomeRow => row !== undefined));
@@ -250,7 +262,7 @@ export function HomePage() {
             } finally {
               window.clearTimeout(timeout);
               controller.signal.removeEventListener("abort", abortRequest);
-              if (active) {
+              if (isCurrent()) {
                 setPendingFolderKeys((current) => {
                   const next = new Set(current);
                   next.delete(target.key);
@@ -261,19 +273,19 @@ export function HomePage() {
           }
         };
         await Promise.all(Array.from({ length: Math.min(homeFolderConcurrency, targets.length) }, worker));
-        if (active && succeeded === 0) setError(notifyErrorMessage("Your collection sources are currently unavailable.", "Home unavailable"));
+        if (isCurrent() && succeeded === 0) setError(notifyErrorMessage("Your collection sources are currently unavailable.", "Home unavailable"));
       } catch (cause) {
-        if (active) setError(notifyError(cause, "Your home could not be loaded.", "Home unavailable"));
+        if (isCurrent()) setError(notifyError(cause, "Your home could not be loaded.", "Home unavailable"));
       } finally {
-        if (active) setLoading(false);
+        if (isCurrent()) setLoading(false);
       }
     })();
 
     return () => {
-      active = false;
-      controller.abort();
+      profileRequestSignal.removeEventListener("abort", cancelRequest);
+      cancelRequest();
     };
-  }, [mediaPreferences.profileID, mediaPreferences.ready]);
+  }, [mediaPreferences.profileID, mediaPreferences.ready, profileRequestSignal]);
 
   const heroSlides = useMemo(() => {
     const seen = new Set<string>();

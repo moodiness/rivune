@@ -34,6 +34,7 @@ type Service struct {
 	pool       *pgxpool.Pool
 	accessTTL  time.Duration
 	refreshTTL time.Duration
+	timezone   string
 	dummyHash  string
 }
 
@@ -107,12 +108,12 @@ type SessionNotification struct {
 	CreatedAt      time.Time
 }
 
-func NewService(pool *pgxpool.Pool, accessTTL, refreshTTL time.Duration) (*Service, error) {
+func NewService(pool *pgxpool.Pool, accessTTL, refreshTTL time.Duration, timezone string) (*Service, error) {
 	dummyHash, err := password.Hash("rivune-invalid-password-sentinel")
 	if err != nil {
 		return nil, fmt.Errorf("create password timing sentinel: %w", err)
 	}
-	return &Service{pool: pool, accessTTL: accessTTL, refreshTTL: refreshTTL, dummyHash: dummyHash}, nil
+	return &Service{pool: pool, accessTTL: accessTTL, refreshTTL: refreshTTL, timezone: timezone, dummyHash: dummyHash}, nil
 }
 
 func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error) {
@@ -316,6 +317,7 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 	if err != nil {
 		return Principal{}, fmt.Errorf("authenticate access token: %w", err)
 	}
+	access.AccessTimezone = s.timezone
 	activeProfileID := principal.ActiveProfileID
 	if reconcileProfileGrant(&principal, access, time.Now().UTC()) {
 		if _, err := s.pool.Exec(ctx, `
@@ -365,6 +367,7 @@ func (s *Service) Account(ctx context.Context, principal Principal) (Account, er
 		); err != nil {
 			return Account{}, fmt.Errorf("scan account profile: %w", err)
 		}
+		profile.AccessTimezone = s.timezone
 		profile.Accessible = ProfileAccessibleAt(ProfileAccess{
 			Enabled: profile.Enabled, AvailableFrom: profile.AvailableFrom, AvailableUntil: profile.AvailableUntil,
 			AccessStartTime: profile.AccessStartTime, AccessEndTime: profile.AccessEndTime, AccessTimezone: profile.AccessTimezone,

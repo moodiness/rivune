@@ -8,6 +8,7 @@ type AuthState = {
   activeProfile: Profile | null;
   booting: boolean;
   authenticated: boolean;
+  profileRequestSignal: AbortSignal;
   refreshAccount: () => Promise<Account | null>;
   login: (username: string, password: string) => Promise<void>;
   completeDeviceAuthorization: (deviceCode: string) => Promise<void>;
@@ -23,41 +24,61 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
   const [account, setAccount] = useState<Account | null>(null);
   const [booting, setBooting] = useState(true);
-  const [profileConfirmed, setProfileConfirmed] = useState(false);
+  const [confirmedProfileID, setConfirmedProfileID] = useState<string | null>(null);
   const authGeneration = useRef(0);
   const profileSelectionInFlight = useRef(false);
+  const confirmedProfileIDRef = useRef<string | null>(null);
+  const profileRequestController = useRef(new AbortController());
+  const [profileRequestSignal, setProfileRequestSignal] = useState(profileRequestController.current.signal);
+
+  const invalidateProfile = useCallback(() => {
+    confirmedProfileIDRef.current = null;
+    profileRequestController.current.abort();
+    setConfirmedProfileID(null);
+  }, []);
+
+  const confirmProfile = useCallback((profileID: string) => {
+    profileRequestController.current.abort();
+    const controller = new AbortController();
+    confirmedProfileIDRef.current = profileID;
+    profileRequestController.current = controller;
+    setProfileRequestSignal(controller.signal);
+    setConfirmedProfileID(profileID);
+  }, []);
 
   const refreshAccount = useCallback(async () => {
     const generation = authGeneration.current;
     try {
       const next = await api.me();
-      if (authGeneration.current === generation) setAccount(next);
+      if (authGeneration.current === generation) {
+        setAccount(next);
+        if (confirmedProfileIDRef.current !== (next.session.activeProfile?.id ?? null)) invalidateProfile();
+      }
       return next;
     } catch {
       if (authGeneration.current === generation) setAccount(null);
       return null;
     }
-  }, []);
+  }, [invalidateProfile]);
 
   useEffect(() => {
     const requireProfileSelection = () => {
       if (profileSelectionInFlight.current) return;
-      const generation = authGeneration.current;
+      const generation = ++authGeneration.current;
+      invalidateProfile();
       void api.me()
         .then((next) => {
           if (authGeneration.current !== generation) return;
           setAccount(next);
-          if (!next.session.activeProfile) setProfileConfirmed(false);
         })
         .catch(() => {
           if (authGeneration.current !== generation) return;
           setAccount(null);
-          setProfileConfirmed(false);
         });
     };
     window.addEventListener(PROFILE_SELECTION_REQUIRED_EVENT, requireProfileSelection);
     return () => window.removeEventListener(PROFILE_SELECTION_REQUIRED_EVENT, requireProfileSelection);
-  }, [refreshAccount]);
+  }, [invalidateProfile]);
 
   const rediscover = useCallback(async () => {
     const next = await api.discovery();
@@ -73,7 +94,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setDiscovery(discovered);
         if (!discovered.setupRequired && await api.restore()) {
           const current = await api.me();
-          if (active) setAccount(current);
+          if (active) {
+            setAccount(current);
+            if (current.session.activeProfile?.id) confirmProfile(current.session.activeProfile.id);
+            else invalidateProfile();
+          }
         }
       } catch {
         if (active) setAccount(null);
@@ -82,59 +107,61 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     })();
     return () => { active = false; };
-  }, []);
+  }, [confirmProfile, invalidateProfile]);
 
   const login = useCallback(async (username: string, password: string) => {
     const generation = ++authGeneration.current;
+    invalidateProfile();
     await api.login(username, password);
     const next = await api.me();
     if (authGeneration.current !== generation) return;
-    setProfileConfirmed(false);
     setAccount(next);
-  }, []);
+  }, [invalidateProfile]);
 
   const logout = useCallback(async () => {
     const generation = ++authGeneration.current;
+    invalidateProfile();
+    profileSelectionInFlight.current = false;
     await api.logout();
     if (authGeneration.current !== generation) return;
     setAccount(null);
-    setProfileConfirmed(false);
-  }, []);
+  }, [invalidateProfile]);
 
   const selectProfile = useCallback(async (profile: Profile, pin?: string) => {
     const generation = ++authGeneration.current;
+    invalidateProfile();
     profileSelectionInFlight.current = true;
     try {
       await api.selectProfile(profile.id, pin);
       const next = await api.me();
       if (authGeneration.current !== generation) return;
       setAccount(next);
-      setProfileConfirmed(next.session.activeProfile?.id === profile.id);
+      if (next.session.activeProfile?.id === profile.id) confirmProfile(profile.id);
     } finally {
       if (authGeneration.current === generation) profileSelectionInFlight.current = false;
     }
-  }, []);
+  }, [confirmProfile, invalidateProfile]);
 
   const leaveProfile = useCallback(async () => {
     const generation = ++authGeneration.current;
+    invalidateProfile();
     await api.clearProfile();
     const next = await api.me();
     if (authGeneration.current !== generation) return;
-    setProfileConfirmed(false);
     setAccount(next);
-  }, []);
+  }, [invalidateProfile]);
 
   const completeDeviceAuthorization = useCallback(async (deviceCode: string) => {
     const generation = ++authGeneration.current;
+    invalidateProfile();
     await api.exchangeDeviceAuthorization(deviceCode);
     const next = await api.me();
     if (authGeneration.current !== generation) return;
-    setProfileConfirmed(false);
     setAccount(next);
-  }, []);
+  }, [invalidateProfile]);
 
-  const activeProfile = profileConfirmed
-    ? account?.profiles.find((profile) => profile.id === account.session.activeProfile?.id) ?? null
+  const activeProfile = confirmedProfileID !== null && account?.session.activeProfile?.id === confirmedProfileID
+    ? account.profiles.find((profile) => profile.id === confirmedProfileID) ?? null
     : null;
   const value = useMemo<AuthState>(() => ({
     discovery,
@@ -142,6 +169,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     activeProfile,
     booting,
     authenticated: account !== null,
+    profileRequestSignal,
     refreshAccount,
     completeDeviceAuthorization,
     login,
@@ -149,7 +177,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     selectProfile,
     leaveProfile,
     rediscover,
-  }), [account, activeProfile, booting, completeDeviceAuthorization, discovery, leaveProfile, login, logout, rediscover, refreshAccount, selectProfile]);
+  }), [account, activeProfile, booting, completeDeviceAuthorization, discovery, leaveProfile, login, logout, profileRequestSignal, rediscover, refreshAccount, selectProfile]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

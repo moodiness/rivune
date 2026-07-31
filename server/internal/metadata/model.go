@@ -85,6 +85,10 @@ type Trailer struct {
 	CaptionPreference string `json:"captionPreference,omitempty"`
 }
 
+type TrailerList struct {
+	Trailers []Trailer `json:"trailers"`
+}
+
 type ProviderTrailer struct {
 	YouTubeID   string
 	Name        string
@@ -140,6 +144,7 @@ type Series struct {
 	Seasons          []SeasonSummary   `json:"seasons"`
 	Aliases          []Alias           `json:"aliases"`
 	EpisodeOrders    []EpisodeOrder    `json:"episodeOrders"`
+	MappingProvider  string            `json:"mappingProvider"`
 	ExternalIDs      map[string]string `json:"externalIds"`
 }
 
@@ -281,4 +286,9 @@ type ExternalIDResolver interface {
 type TelevisionEnricher interface {
 	EnrichSeries(context.Context, ProviderSeries) (ProviderSeries, error)
 	EnrichSeason(context.Context, string, ProviderSeason) (ProviderSeason, error)
+}
+
+type TelevisionMapper interface {
+	SeriesSeasons(context.Context, string) ([]ProviderSeasonSummary, error)
+	SeriesSeason(context.Context, string, string) (ProviderSeason, error)
 }

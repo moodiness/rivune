@@ -47,7 +47,7 @@ export function AdminPage() {
 }
 
 function ProfilesAdmin() {
-  const { account, activeProfile, refreshAccount } = useAuth();
+  const { account, activeProfile, discovery, refreshAccount } = useAuth();
   const [profiles, setProfiles] = useState<Profile[]>(account?.profiles ?? []);
   const [presets, setPresets] = useState<AvatarPreset[]>([]);
   const [editing, setEditing] = useState<Profile | "new" | null>(null);
@@ -61,7 +61,7 @@ function ProfilesAdmin() {
   const [dailyHours, setDailyHours] = useState(false);
   const [accessStartTime, setAccessStartTime] = useState("08:00");
   const [accessEndTime, setAccessEndTime] = useState("20:00");
-  const [accessTimezone, setAccessTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+  const accessTimezone = discovery?.timezone ?? "UTC";
   const [presetId, setPresetId] = useState("aurora");
   const [image, setImage] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
@@ -95,7 +95,6 @@ function ProfilesAdmin() {
     setDailyHours(profile === "new" ? false : Boolean(profile.accessStartTime && profile.accessEndTime));
     setAccessStartTime(profile === "new" ? "08:00" : profile.accessStartTime ?? "08:00");
     setAccessEndTime(profile === "new" ? "20:00" : profile.accessEndTime ?? "20:00");
-    setAccessTimezone(profile === "new" ? Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" : profile.accessTimezone);
     setPresetId(profile === "new" ? "aurora" : profile.avatar.presetId ?? "aurora");
     setImage(null);
     setError("");
@@ -110,14 +109,12 @@ function ProfilesAdmin() {
     try {
       let profile: Profile;
       if (editing === "new") {
-        const scheduled = Boolean(availableFrom || availableUntil || dailyHours);
         profile = await api.createProfile({
           name, isChild, pin: pin || undefined, enabled,
           availableFrom: availableFrom || undefined,
           availableUntil: availableUntil || undefined,
           accessStartTime: dailyHours ? accessStartTime : undefined,
           accessEndTime: dailyHours ? accessEndTime : undefined,
-          accessTimezone: scheduled ? accessTimezone : undefined,
         });
       } else {
         const accessInput: {
@@ -126,7 +123,6 @@ function ProfilesAdmin() {
           availableUntil?: string | null;
           accessStartTime?: string | null;
           accessEndTime?: string | null;
-          accessTimezone?: string;
         } = {};
         if (enabled !== editing.enabled) accessInput.enabled = enabled;
         if ((availableFrom || null) !== editing.availableFrom) accessInput.availableFrom = availableFrom || null;
@@ -135,7 +131,6 @@ function ProfilesAdmin() {
         const nextEnd = dailyHours ? accessEndTime : null;
         if (nextStart !== editing.accessStartTime) accessInput.accessStartTime = nextStart;
         if (nextEnd !== editing.accessEndTime) accessInput.accessEndTime = nextEnd;
-        if ((availableFrom || availableUntil || dailyHours) && accessTimezone !== editing.accessTimezone) accessInput.accessTimezone = accessTimezone;
         profile = await api.updateProfile(editing.id, { name, isChild, ...(pin ? { pin } : {}), ...accessInput });
       }
       if (image) await api.uploadProfileAvatar(profile.id, image);
@@ -1190,6 +1185,7 @@ function SettingsCard({ title, description, icon, values, defaults = {}, onChang
       <SettingsGroup icon={<Languages />} title="Languages & metadata" description="Keep titles and playback language-aware.">
         <label className="field"><span>Metadata language</span><div><select value={values.metadataLanguage ?? ""} onChange={(event) => change("metadataLanguage", event.target.value || null)}><option value="">{emptyLabel}</option><option value="auto">Automatic · preferred audio or device language</option><option value="fr-FR">Français</option><option value="en-US">English</option><option value="es-ES">Español</option><option value="de-DE">Deutsch</option><option value="it-IT">Italiano</option><option value="pt-BR">Português</option><option value="ja-JP">日本語</option></select></div></label>
         <label className="field"><span>Metadata region</span><div><select value={values.metadataRegion ?? ""} onChange={(event) => change("metadataRegion", event.target.value || null)}><option value="">{emptyLabel}</option><option value="auto">Automatic · device region</option><option value="FR">France</option><option value="BE">Belgium</option><option value="CA">Canada</option><option value="CH">Switzerland</option><option value="US">United States</option><option value="GB">United Kingdom</option><option value="DE">Germany</option><option value="ES">Spain</option><option value="IT">Italy</option><option value="JP">Japan</option></select></div></label>
+        <label className="field"><span>Series episode mapping</span><div><select value={values.seriesMappingProvider ?? ""} onChange={(event) => change("seriesMappingProvider", event.target.value ? event.target.value as "tmdb" | "tvdb" : null)}><option value="">{emptyLabel}</option><option value="tmdb">TMDB · provider seasons</option><option value="tvdb">TVDB · official seasons</option></select></div></label>
         <label className="field"><span>Audio language</span><div><input value={values.audioLanguage ?? ""} onChange={(event) => change("audioLanguage", event.target.value || null)} placeholder="en" /></div></label>
       </SettingsGroup>
 

@@ -12,6 +12,7 @@ services:
         condition: service_healthy
     environment:
       RIVUNE_LISTEN_ADDRESS: ":8080"
+      TZ: ${TZ:-UTC}
       PUID: ${PUID:-65532}
       PGID: ${PGID:-65532}
       RIVUNE_VIDEO_GROUP_ID: ${RIVUNE_VIDEO_GROUP_ID:-}

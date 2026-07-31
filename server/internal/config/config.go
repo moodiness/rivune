@@ -14,6 +14,7 @@ import (
 
 const (
 	defaultListenAddress        = ":8080"
+	defaultTimezone             = "UTC"
 	defaultDatabaseHost         = "localhost"
 	defaultDatabasePort         = 5432
 	defaultDatabaseName         = "rivune"
@@ -33,6 +34,7 @@ type Config struct {
 	ListenAddress        string
 	PublicURL            string
 	DatabaseURL          string
+	Timezone             string
 	SetupToken           string
 	AccessTokenTTL       time.Duration
 	RefreshTokenTTL      time.Duration
@@ -57,6 +59,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		ListenAddress:        envOrDefault("RIVUNE_LISTEN_ADDRESS", defaultListenAddress),
 		PublicURL:            strings.TrimRight(strings.TrimSpace(os.Getenv("RIVUNE_PUBLIC_URL")), "/"),
+		Timezone:             envOrDefault("TZ", defaultTimezone),
 		SetupToken:           strings.TrimSpace(os.Getenv("RIVUNE_SETUP_TOKEN")),
 		TMDBAccessToken:      strings.TrimSpace(os.Getenv("RIVUNE_TMDB_ACCESS_TOKEN")),
 		TVDBAPIKey:           strings.TrimSpace(os.Getenv("RIVUNE_TVDB_API_KEY")),
@@ -73,6 +76,9 @@ func Load() (Config, error) {
 	cfg.DatabaseURL, err = loadDatabaseURL()
 	if err != nil {
 		return Config{}, err
+	}
+	if _, err := time.LoadLocation(cfg.Timezone); err != nil {
+		return Config{}, fmt.Errorf("TZ must be a valid IANA timezone: %w", err)
 	}
 
 	cfg.AccessTokenTTL, err = loadDuration("RIVUNE_ACCESS_TOKEN_TTL", defaultAccessTokenTTL, time.Minute, time.Hour)

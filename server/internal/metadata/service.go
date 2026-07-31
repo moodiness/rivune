@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,7 @@ var (
 	languagePattern         = regexp.MustCompile(`^[A-Za-z]{2,3}(?:-[A-Za-z]{2})?$`)
 	regionPattern           = regexp.MustCompile(`^[A-Za-z]{2}$`)
 	externalProviderPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	mappedSeasonPattern     = regexp.MustCompile(`^tvdb:([0-9a-fA-F-]{36}):([1-9][0-9]*)$`)
 )
 
 type Service struct {
@@ -33,15 +35,17 @@ type Service struct {
 	trailerProvider TrailerProvider
 	cacheTTL        time.Duration
 	enricher        TelevisionEnricher
+	mapper          TelevisionMapper
 	logger          *slog.Logger
 }
 
 func NewService(pool *pgxpool.Pool, provider Provider, enricher TelevisionEnricher, cacheTTL time.Duration, logger *slog.Logger) *Service {
 	trailerProvider, _ := provider.(TrailerProvider)
 	resolver, _ := provider.(ExternalIDResolver)
+	mapper, _ := enricher.(TelevisionMapper)
 	return &Service{
 		pool: pool, provider: withEnglishOverviewFallback(provider), resolver: resolver, trailerProvider: trailerProvider,
-		enricher: enricher, cacheTTL: cacheTTL, logger: logger,
+		enricher: enricher, mapper: mapper, cacheTTL: cacheTTL, logger: logger,
 	}
 }
 
@@ -94,25 +98,12 @@ func (s *Service) MovieDetails(ctx context.Context, principal auth.Principal, ti
 		return Movie{}, err
 	}
 
-	var externalID string
-	var cachedPayload []byte
-	err = s.pool.QueryRow(ctx, `
-		SELECT external.external_id,
-		       CASE WHEN metadata.expires_at > now() THEN metadata.payload ELSE NULL END
-		FROM titles AS title
-		JOIN title_external_ids AS external
-		  ON external.title_id = title.id AND external.provider = $2
-		LEFT JOIN title_metadata AS metadata
-		  ON metadata.title_id = title.id
-		 AND metadata.provider = external.provider
-		 AND metadata.language = $3
-		WHERE title.id::text = $1 AND title.media_type = 'movie'
-	`, strings.TrimSpace(titleID), providerName, normalizedLanguage).Scan(&externalID, &cachedPayload)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Movie{}, ErrNotFound
+	externalID, cachedPayload, err := s.loadTitleMetadata(ctx, titleID, MediaTypeMovie, normalizedLanguage)
+	if errors.Is(err, ErrNotFound) {
+		externalID, err = s.resolveProviderExternalID(ctx, titleID, MediaTypeMovie)
 	}
 	if err != nil {
-		return Movie{}, fmt.Errorf("query title metadata: %w", err)
+		return Movie{}, err
 	}
 	if len(cachedPayload) != 0 {
 		var cached Movie
@@ -135,19 +126,35 @@ func (s *Service) MovieDetails(ctx context.Context, principal auth.Principal, ti
 		}
 		return Movie{}, err
 	}
+	if returnedExternalID := strings.TrimSpace(provided.ExternalID); returnedExternalID != "" && returnedExternalID != externalID {
+		return Movie{}, errors.New("metadata provider returned a conflicting external ID")
+	}
 	movie := normalizeMovie(titleID, provided)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Movie{}, fmt.Errorf("begin movie persistence: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	canonicalIDs := make(map[string]string, len(provided.AdditionalIDs)+1)
+	for provider, additionalID := range provided.AdditionalIDs {
+		if strings.ToLower(strings.TrimSpace(provider)) == providerName &&
+			strings.TrimSpace(additionalID) != "" &&
+			strings.TrimSpace(additionalID) != externalID {
+			return Movie{}, errors.New("metadata provider returned a conflicting external ID")
+		}
+		canonicalIDs[provider] = additionalID
+	}
+	canonicalIDs[providerName] = externalID
+	if err := consolidateCanonicalTitle(ctx, tx, titleID, MediaTypeMovie, canonicalIDs); err != nil {
+		return Movie{}, err
+	}
 	if err := persistTitleSnapshot(ctx, tx, titleID, provided.Title, provided.PosterURL, provided.BackdropURL, provided.ReleaseDate); err != nil {
 		return Movie{}, err
 	}
-	if err := linkAdditionalIDs(ctx, tx, titleID, MediaTypeMovie, provided.AdditionalIDs); err != nil {
+	if err := linkAdditionalIDs(ctx, tx, titleID, MediaTypeMovie, canonicalIDs); err != nil {
 		return Movie{}, err
 	}
-	if err := cacheTitle(ctx, tx, titleID, normalizedLanguage, movie, s.cacheTTL); err != nil {
+	if err := cacheTitle(ctx, tx, titleID, providerName, normalizedLanguage, movie, s.cacheTTL); err != nil {
 		return Movie{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -196,9 +203,16 @@ func (s *Service) SearchSeries(ctx context.Context, principal auth.Principal, op
 	return s.persistSeriesPage(ctx, page)
 }
 
-func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, titleID, language string) (Series, error) {
+func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, titleID, language, mappingProvider string) (Series, error) {
 	if err := requireActiveProfile(principal); err != nil {
 		return Series{}, err
+	}
+	mappingProvider, err := normalizeSeriesMappingProvider(mappingProvider)
+	if err != nil {
+		return Series{}, err
+	}
+	if mappingProvider == "tvdb" {
+		return s.mappedSeriesDetails(ctx, principal, titleID, language)
 	}
 	normalizedLanguage, err := normalizeLanguage(language)
 	if err != nil {
@@ -215,6 +229,9 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 		var cached Series
 		if err := json.Unmarshal(cachedPayload, &cached); err != nil {
 			return Series{}, fmt.Errorf("decode cached series metadata: %w", err)
+		}
+		if cached.MappingProvider == "" {
+			cached.MappingProvider = providerName
 		}
 		if err := s.persistCachedSeriesReleaseDates(ctx, cached); err != nil {
 			return Series{}, err
@@ -284,7 +301,7 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 	}
 	series := normalizeSeries(titleID, provided)
 	series.Seasons = seasons
-	if err := cacheTitle(ctx, tx, titleID, normalizedLanguage, series, s.cacheTTL); err != nil {
+	if err := cacheTitle(ctx, tx, titleID, providerName, normalizedLanguage, series, s.cacheTTL); err != nil {
 		return Series{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -293,9 +310,16 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 	return series, nil
 }
 
-func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, seasonID, language string) (Season, error) {
+func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, seasonID, language, mappingProvider string) (Season, error) {
 	if err := requireActiveProfile(principal); err != nil {
 		return Season{}, err
+	}
+	mappingProvider, err := normalizeSeriesMappingProvider(mappingProvider)
+	if err != nil {
+		return Season{}, err
+	}
+	if mappingProvider == "tvdb" || strings.HasPrefix(strings.TrimSpace(seasonID), "tvdb:") {
+		return s.mappedSeasonDetails(ctx, principal, seasonID, language)
 	}
 	normalizedLanguage, err := normalizeLanguage(language)
 	if err != nil {
@@ -404,13 +428,262 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 	}
 	season := normalizeSeason(seriesID, seasonID, provided)
 	season.Episodes = episodes
-	if err := cacheTitle(ctx, tx, seasonID, normalizedLanguage, season, s.cacheTTL); err != nil {
+	if err := cacheTitle(ctx, tx, seasonID, providerName, normalizedLanguage, season, s.cacheTTL); err != nil {
 		return Season{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Season{}, fmt.Errorf("commit season persistence: %w", err)
 	}
 	return season, nil
+}
+
+func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Principal, titleID, language string) (Series, error) {
+	if s.mapper == nil {
+		return Series{}, ErrProviderUnavailable
+	}
+	base, err := s.SeriesDetails(ctx, principal, titleID, language, providerName)
+	if err != nil {
+		return Series{}, err
+	}
+	normalizedLanguage, err := normalizeLanguage(language)
+	if err != nil {
+		return Series{}, err
+	}
+	cachedPayload, err := s.loadCachedTitleMetadata(ctx, base.ID, MediaTypeSeries, "tvdb", normalizedLanguage)
+	if err != nil {
+		return Series{}, err
+	}
+	if len(cachedPayload) != 0 {
+		var cached Series
+		if err := json.Unmarshal(cachedPayload, &cached); err != nil {
+			return Series{}, fmt.Errorf("decode cached TVDB series mapping: %w", err)
+		}
+		return cached, nil
+	}
+	seriesTVDBID := strings.TrimSpace(base.ExternalIDs["tvdb"])
+	if seriesTVDBID == "" {
+		return Series{}, ErrProviderNotFound
+	}
+	providedSeasons, err := s.mapper.SeriesSeasons(ctx, seriesTVDBID)
+	if err != nil {
+		return Series{}, err
+	}
+	mapped := base
+	mapped.MappingProvider = "tvdb"
+	mapped.EpisodeOrders = []EpisodeOrder{}
+	mapped.Seasons = make([]SeasonSummary, 0, len(providedSeasons))
+	mapped.NumberOfSeasons = 0
+	mapped.NumberOfEpisodes = 0
+	for _, provided := range providedSeasons {
+		if strings.TrimSpace(provided.ExternalID) == "" || provided.SeasonNumber < 0 || provided.EpisodeCount < 0 {
+			return Series{}, fmt.Errorf("%w: TVDB returned an invalid season", ErrProviderFailure)
+		}
+		if provided.SeasonNumber > 0 {
+			mapped.NumberOfSeasons++
+		}
+		mapped.NumberOfEpisodes += provided.EpisodeCount
+		seasonID := mappedSeasonID(base.ID, provided.ExternalID)
+		mapped.Seasons = append(mapped.Seasons, SeasonSummary{
+			ID:           seasonID,
+			MediaType:    MediaTypeSeason,
+			SeriesID:     base.ID,
+			Name:         provided.Name,
+			Overview:     provided.Overview,
+			SeasonNumber: provided.SeasonNumber,
+			EpisodeCount: provided.EpisodeCount,
+			AirDate:      provided.AirDate,
+			PosterURL:    provided.PosterURL,
+			VoteAverage:  provided.VoteAverage,
+			ExternalIDs:  map[string]string{"tvdb": provided.ExternalID},
+		})
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Series{}, fmt.Errorf("begin TVDB series mapping cache: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := cacheTitle(ctx, tx, base.ID, "tvdb", normalizedLanguage, mapped, s.cacheTTL); err != nil {
+		return Series{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Series{}, fmt.Errorf("commit TVDB series mapping cache: %w", err)
+	}
+	return mapped, nil
+}
+
+func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Principal, seasonID, language string) (Season, error) {
+	if s.mapper == nil {
+		return Season{}, ErrProviderUnavailable
+	}
+	matches := mappedSeasonPattern.FindStringSubmatch(strings.TrimSpace(seasonID))
+	if matches == nil {
+		return Season{}, ErrNotFound
+	}
+	seriesID := matches[1]
+	seasonTVDBID := matches[2]
+	base, err := s.SeriesDetails(ctx, principal, seriesID, language, providerName)
+	if err != nil {
+		return Season{}, err
+	}
+	seriesTVDBID := strings.TrimSpace(base.ExternalIDs["tvdb"])
+	if seriesTVDBID == "" {
+		return Season{}, ErrProviderNotFound
+	}
+	provided, err := s.mapper.SeriesSeason(ctx, seriesTVDBID, seasonTVDBID)
+	if err != nil {
+		return Season{}, err
+	}
+	canonicalEpisodes := make([]Episode, 0, base.NumberOfEpisodes)
+	for _, summary := range base.Seasons {
+		season, err := s.SeasonDetails(ctx, principal, summary.ID, language, providerName)
+		if err != nil {
+			return Season{}, err
+		}
+		canonicalEpisodes = append(canonicalEpisodes, season.Episodes...)
+	}
+	episodes, tvdbLinks, err := matchMappedEpisodes(seasonID, provided.Episodes, canonicalEpisodes)
+	if err != nil {
+		return Season{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Season{}, fmt.Errorf("begin TVDB episode mapping persistence: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for episodeID, tvdbID := range tvdbLinks {
+		if err := linkAdditionalIDs(ctx, tx, episodeID, MediaTypeEpisode, map[string]string{"tvdb": tvdbID}); err != nil {
+			return Season{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Season{}, fmt.Errorf("commit TVDB episode mapping persistence: %w", err)
+	}
+	return Season{
+		ID:           seasonID,
+		MediaType:    MediaTypeSeason,
+		SeriesID:     seriesID,
+		Name:         provided.Name,
+		Overview:     provided.Overview,
+		SeasonNumber: provided.SeasonNumber,
+		AirDate:      provided.AirDate,
+		PosterURL:    provided.PosterURL,
+		VoteAverage:  provided.VoteAverage,
+		Episodes:     episodes,
+		ExternalIDs:  map[string]string{"tvdb": provided.ExternalID},
+	}, nil
+}
+
+func matchMappedEpisodes(seasonID string, provided []ProviderEpisode, canonical []Episode) ([]Episode, map[string]string, error) {
+	type candidate struct {
+		episode Episode
+		used    bool
+	}
+	candidates := make([]candidate, 0, len(canonical))
+	for _, episode := range canonical {
+		candidates = append(candidates, candidate{episode: episode})
+	}
+	findUnique := func(predicate func(Episode) bool) int {
+		found := -1
+		for index := range candidates {
+			if candidates[index].used || !predicate(candidates[index].episode) {
+				continue
+			}
+			if found >= 0 {
+				return -1
+			}
+			found = index
+		}
+		return found
+	}
+	result := make([]Episode, 0, len(provided))
+	links := make(map[string]string, len(provided))
+	for _, mapped := range provided {
+		tvdbID := strings.TrimSpace(mapped.ExternalID)
+		if tvdbID == "" {
+			return nil, nil, fmt.Errorf("%w: TVDB returned an episode without an identifier", ErrProviderFailure)
+		}
+		index := findUnique(func(episode Episode) bool { return episode.ExternalIDs["tvdb"] == tvdbID })
+		mappedName := normalizedEpisodeName(mapped.Name)
+		if index < 0 && mapped.AirDate != "" && mappedName != "" {
+			index = findUnique(func(episode Episode) bool {
+				return episode.AirDate == mapped.AirDate && normalizedEpisodeName(episode.Name) == mappedName
+			})
+		}
+		if index < 0 && mapped.AirDate != "" {
+			index = findUnique(func(episode Episode) bool { return episode.AirDate == mapped.AirDate })
+		}
+		if index < 0 && mappedName != "" {
+			index = findUnique(func(episode Episode) bool { return normalizedEpisodeName(episode.Name) == mappedName })
+		}
+		if index < 0 {
+			index = findUnique(func(episode Episode) bool {
+				return episode.SeasonNumber == mapped.SeasonNumber && episode.EpisodeNumber == mapped.EpisodeNumber
+			})
+		}
+		if index < 0 {
+			return nil, nil, fmt.Errorf("%w: TVDB episode %s could not be matched to TMDB", ErrProviderFailure, tvdbID)
+		}
+		candidates[index].used = true
+		canonicalEpisode := candidates[index].episode
+		externalIDs := make(map[string]string, len(canonicalEpisode.ExternalIDs)+1)
+		for provider, externalID := range canonicalEpisode.ExternalIDs {
+			externalIDs[provider] = externalID
+		}
+		externalIDs["tvdb"] = tvdbID
+		name := canonicalEpisode.Name
+		if name == "" {
+			name = mapped.Name
+		}
+		overview := canonicalEpisode.Overview
+		if overview == "" {
+			overview = mapped.Overview
+		}
+		airDate := mapped.AirDate
+		if airDate == "" {
+			airDate = canonicalEpisode.AirDate
+		}
+		stillURL := canonicalEpisode.StillURL
+		if stillURL == "" {
+			stillURL = mapped.StillURL
+		}
+		runtime := canonicalEpisode.RuntimeMinutes
+		if runtime == 0 {
+			runtime = mapped.RuntimeMinutes
+		}
+		result = append(result, Episode{
+			ID:             canonicalEpisode.ID,
+			MediaType:      MediaTypeEpisode,
+			SeasonID:       seasonID,
+			Name:           name,
+			Overview:       overview,
+			SeasonNumber:   mapped.SeasonNumber,
+			EpisodeNumber:  mapped.EpisodeNumber,
+			AirDate:        airDate,
+			StillURL:       stillURL,
+			RuntimeMinutes: runtime,
+			VoteAverage:    canonicalEpisode.VoteAverage,
+			VoteCount:      canonicalEpisode.VoteCount,
+			ExternalIDs:    externalIDs,
+		})
+		links[canonicalEpisode.ID] = tvdbID
+	}
+	sort.Slice(result, func(left, right int) bool {
+		return result[left].EpisodeNumber < result[right].EpisodeNumber
+	})
+	return result, links, nil
+}
+
+func normalizedEpisodeName(value string) string {
+	return strings.Map(func(character rune) rune {
+		if unicode.IsLetter(character) || unicode.IsNumber(character) {
+			return unicode.ToLower(character)
+		}
+		return -1
+	}, strings.TrimSpace(value))
+}
+
+func mappedSeasonID(seriesID, seasonTVDBID string) string {
+	return "tvdb:" + seriesID + ":" + strings.TrimSpace(seasonTVDBID)
 }
 
 func (s *Service) persistMoviePage(ctx context.Context, provided ProviderMoviePage) (MoviePage, error) {
@@ -503,6 +776,26 @@ func (s *Service) loadTitleMetadata(ctx context.Context, titleID, mediaType, lan
 	return externalID, cachedPayload, nil
 }
 
+func (s *Service) loadCachedTitleMetadata(ctx context.Context, titleID, mediaType, metadataProvider, language string) ([]byte, error) {
+	var cachedPayload []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT CASE WHEN metadata.expires_at > now() THEN metadata.payload ELSE NULL END
+		FROM titles AS title
+		LEFT JOIN title_metadata AS metadata
+		  ON metadata.title_id = title.id
+		 AND metadata.provider = $3
+		 AND metadata.language = $4
+		WHERE title.id::text = $1 AND title.media_type = $2
+	`, strings.TrimSpace(titleID), mediaType, metadataProvider, language).Scan(&cachedPayload)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query cached title metadata: %w", err)
+	}
+	return cachedPayload, nil
+}
+
 func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaType string) (string, error) {
 	if s.resolver == nil {
 		return "", ErrNotFound
@@ -542,7 +835,7 @@ func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaT
 	return "", ErrNotFound
 }
 
-func cacheTitle(ctx context.Context, tx pgx.Tx, titleID, language string, value any, ttl time.Duration) error {
+func cacheTitle(ctx context.Context, tx pgx.Tx, titleID, metadataProvider, language string, value any, ttl time.Duration) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encode title metadata: %w", err)
@@ -554,7 +847,7 @@ func cacheTitle(ctx context.Context, tx pgx.Tx, titleID, language string, value 
 		SET payload = EXCLUDED.payload,
 		    expires_at = EXCLUDED.expires_at,
 		    updated_at = now()
-	`, titleID, providerName, language, payload, time.Now().UTC().Add(ttl)); err != nil {
+	`, titleID, metadataProvider, language, payload, time.Now().UTC().Add(ttl)); err != nil {
 		return fmt.Errorf("cache title metadata: %w", err)
 	}
 	return nil
@@ -1166,6 +1459,7 @@ func normalizeSeries(titleID string, provided ProviderSeries) Series {
 		Seasons:          []SeasonSummary{},
 		Aliases:          aliases,
 		EpisodeOrders:    episodeOrders,
+		MappingProvider:  providerName,
 		ExternalIDs:      normalizeExternalIDs(provided.ExternalID, provided.AdditionalIDs),
 	}
 }
@@ -1255,6 +1549,17 @@ func normalizeQueryOptions(options QueryOptions) (QueryOptions, error) {
 		return QueryOptions{}, fmt.Errorf("%w: region must be a two-letter country code", ErrInvalidInput)
 	}
 	return QueryOptions{Page: page, Language: language, Region: region}, nil
+}
+
+func normalizeSeriesMappingProvider(provider string) (string, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return providerName, nil
+	}
+	if provider != providerName && provider != "tvdb" {
+		return "", fmt.Errorf("%w: mappingProvider must be tmdb or tvdb", ErrInvalidInput)
+	}
+	return provider, nil
 }
 
 func normalizeLanguage(language string) (string, error) {

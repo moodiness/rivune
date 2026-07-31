@@ -55,8 +55,8 @@ type libraryTitle struct {
 
 type metadataReader interface {
 	MovieDetails(context.Context, auth.Principal, string, string) (metadata.Movie, error)
-	SeriesDetails(context.Context, auth.Principal, string, string) (metadata.Series, error)
-	SeasonDetails(context.Context, auth.Principal, string, string) (metadata.Season, error)
+	SeriesDetails(context.Context, auth.Principal, string, string, string) (metadata.Series, error)
+	SeasonDetails(context.Context, auth.Principal, string, string, string) (metadata.Season, error)
 }
 
 type postgresRepository struct {
@@ -146,7 +146,7 @@ func (s *Service) refreshTitleMetadata(ctx context.Context, principal auth.Princ
 		_, err := s.metadata.MovieDetails(ctx, principal, title.ID, language)
 		return err
 	case metadata.MediaTypeSeries:
-		series, err := s.metadata.SeriesDetails(ctx, principal, title.ID, language)
+		series, err := s.metadata.SeriesDetails(ctx, principal, title.ID, language, "tmdb")
 		if err != nil {
 			return err
 		}
@@ -154,7 +154,7 @@ func (s *Service) refreshTitleMetadata(ctx context.Context, principal auth.Princ
 			if !seasonMayOverlap(season.AirDate, from, to) {
 				continue
 			}
-			if _, err := s.metadata.SeasonDetails(ctx, principal, season.ID, language); err != nil {
+			if _, err := s.metadata.SeasonDetails(ctx, principal, season.ID, language, "tmdb"); err != nil {
 				return fmt.Errorf("refresh season %d: %w", season.SeasonNumber, err)
 			}
 		}

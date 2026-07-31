@@ -35,7 +35,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/webui"
 )
 
-const protocolVersion = 15
+const protocolVersion = 16
 
 type instanceService interface {
 	Info(context.Context) (instance.Info, error)
@@ -126,9 +126,9 @@ type metadataService interface {
 	MovieDetails(context.Context, auth.Principal, string, string) (metadata.Movie, error)
 	DiscoverSeries(context.Context, auth.Principal, metadata.QueryOptions) (metadata.SeriesPage, error)
 	SearchSeries(context.Context, auth.Principal, metadata.SearchOptions) (metadata.SeriesPage, error)
-	SeriesDetails(context.Context, auth.Principal, string, string) (metadata.Series, error)
-	SeasonDetails(context.Context, auth.Principal, string, string) (metadata.Season, error)
-	Trailer(context.Context, auth.Principal, string, string, *int) (metadata.Trailer, error)
+	SeriesDetails(context.Context, auth.Principal, string, string, string) (metadata.Series, error)
+	SeasonDetails(context.Context, auth.Principal, string, string, string) (metadata.Season, error)
+	Trailers(context.Context, auth.Principal, string, string, string, *int) (metadata.TrailerList, error)
 }
 
 type watchstateService interface {
@@ -184,7 +184,7 @@ type apiError struct {
 }
 
 func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version string) (*API, error) {
-	authService, err := auth.NewService(pool, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
+	authService, err := auth.NewService(pool, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.Timezone)
 	if err != nil {
 		return nil, err
 	}
@@ -223,10 +223,10 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		calendar:            calendar.NewService(pool, metadataService, logger),
 		collections:         collection.NewService(pool, addonService, collectionTMDB, collectionTrakt),
 		pool:                pool,
-		instances:           instance.NewService(pool, cfg.SetupToken),
+		instances:           instance.NewService(pool, cfg.SetupToken, cfg.Timezone),
 		auth:                authService,
 		authMaintenance:     authService,
-		profiles:            profile.NewService(pool, cfg.ProfileGrantTTL),
+		profiles:            profile.NewService(pool, cfg.ProfileGrantTTL, cfg.Timezone),
 		playback:            playbackService,
 		playbackMaintenance: playbackService,
 		logger:              logger,
@@ -277,7 +277,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/metadata/titles/{titleId}", a.requireAuthentication(a.movieDetails))
 	mux.Handle("GET /api/v1/metadata/series/{titleId}", a.requireAuthentication(a.seriesDetails))
 	mux.Handle("GET /api/v1/metadata/seasons/{seasonId}", a.requireAuthentication(a.seasonDetails))
-	mux.Handle("GET /api/v1/metadata/titles/{titleId}/trailer", a.requireAuthentication(a.titleTrailer))
+	mux.Handle("GET /api/v1/metadata/titles/{titleId}/trailers", a.requireAuthentication(a.titleTrailers))
 	mux.Handle("POST /api/v1/users", a.requireAuthentication(a.createUser))
 	mux.Handle("PATCH /api/v1/users/{userId}", a.requireAuthentication(a.updateUser))
 	mux.Handle("DELETE /api/v1/users/{userId}", a.requireAuthentication(a.deleteUser))
@@ -367,6 +367,7 @@ func (a *API) discovery(w http.ResponseWriter, r *http.Request) {
 		"protocolVersion": protocolVersion,
 		"apiBaseUrl":      apiBaseURL,
 		"setupRequired":   info.SetupRequired,
+		"timezone":        a.config.Timezone,
 	})
 }
 

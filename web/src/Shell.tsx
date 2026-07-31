@@ -17,14 +17,17 @@ const navItems: Array<{ id: View; label: string; icon: typeof Home }> = [
 export function Shell({ view, onView, children }: { view: View; onView: (view: View) => void; children: ReactNode }) {
   const { activeProfile, leaveProfile, logout, discovery } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [isNarrow, setIsNarrow] = useState(() => window.matchMedia("(max-width: 820px)").matches);
+  const [isNarrow, setIsNarrow] = useState(() => window.matchMedia("(max-width: 820px) and (orientation: portrait)").matches);
   const [sidebarCompact, setSidebarCompact] = useState(() => localStorage.getItem("rivune.sidebar.compact") === "true");
   const canManage = Boolean(activeProfile?.canManage);
   const settingsLabel = t(canManage ? "nav.administration" : "nav.preferences");
 
   useEffect(() => {
-    const media = window.matchMedia("(max-width: 820px)");
-    const update = () => setIsNarrow(media.matches);
+    const media = window.matchMedia("(max-width: 820px) and (orientation: portrait)");
+    const update = () => {
+      setIsNarrow(media.matches);
+      if (!media.matches) setMenuOpen(false);
+    };
     media.addEventListener("change", update);
     return () => media.removeEventListener("change", update);
   }, []);

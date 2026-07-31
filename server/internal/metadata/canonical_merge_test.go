@@ -13,6 +13,7 @@ import (
 )
 
 type canonicalMergeProvider struct {
+	movie  ProviderMovie
 	series ProviderSeries
 	season ProviderSeason
 }
@@ -23,8 +24,11 @@ func (provider *canonicalMergeProvider) DiscoverMovies(context.Context, QueryOpt
 func (provider *canonicalMergeProvider) SearchMovies(context.Context, SearchOptions) (ProviderMoviePage, error) {
 	return ProviderMoviePage{}, nil
 }
-func (provider *canonicalMergeProvider) MovieDetails(context.Context, string, string) (ProviderMovie, error) {
-	return ProviderMovie{}, nil
+func (provider *canonicalMergeProvider) MovieDetails(_ context.Context, externalID, _ string) (ProviderMovie, error) {
+	if externalID != provider.movie.ExternalID {
+		return ProviderMovie{}, ErrProviderNotFound
+	}
+	return provider.movie, nil
 }
 func (provider *canonicalMergeProvider) DiscoverSeries(context.Context, QueryOptions) (ProviderSeriesPage, error) {
 	return ProviderSeriesPage{}, nil
@@ -45,10 +49,51 @@ func (provider *canonicalMergeProvider) SeasonDetails(_ context.Context, externa
 	return provider.season, nil
 }
 func (provider *canonicalMergeProvider) ResolveExternalID(_ context.Context, mediaType, externalProvider, externalID string) (string, error) {
+	if mediaType == MediaTypeMovie && externalProvider == "imdb" && externalID == "tt0948470" {
+		return provider.movie.ExternalID, nil
+	}
 	if mediaType == MediaTypeSeries && externalProvider == "imdb" && externalID == "tt14688458" {
 		return provider.series.ExternalID, nil
 	}
 	return "", ErrProviderNotFound
+}
+
+func TestMovieDetailsConsolidatesResolvedCanonicalTitle(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title) VALUES
+			($1::uuid, 'movie', 'Requested Spider-Man'), ($2::uuid, 'movie', 'TMDB Spider-Man');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
+			($1::uuid, 'imdb', 'movie', 'tt0948470'), ($2::uuid, 'tmdb', 'movie', '1930');
+		INSERT INTO profile_library (profile_id, title_id, added_at, updated_at) VALUES
+			($3::uuid, $1::uuid, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'),
+			($3::uuid, $2::uuid, '2024-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+	`, pgx.QueryExecModeSimpleProtocol, canonicalDestinationMovieID, canonicalSourceMovieID, canonicalProfileID); err != nil {
+		t.Fatalf("seed canonical movies: %v", err)
+	}
+	provider := &canonicalMergeProvider{movie: ProviderMovie{
+		ExternalID: "1930", Title: "The Amazing Spider-Man", ReleaseDate: "2012-06-23",
+		AdditionalIDs: map[string]string{"imdb": "tt0948470"},
+	}}
+	service := NewService(pool, provider, nil, time.Hour, nil)
+	movie, err := service.MovieDetails(ctx, canonicalMergePrincipal(), canonicalDestinationMovieID, "fr-FR")
+	if err != nil {
+		t.Fatalf("load IMDb-only movie through resolved TMDB identity: %v", err)
+	}
+	if movie.ID != canonicalDestinationMovieID || movie.ExternalIDs["tmdb"] != "1930" || movie.ExternalIDs["imdb"] != "tt0948470" {
+		t.Fatalf("unexpected consolidated movie: %#v", movie)
+	}
+	var titleCount, libraryCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM titles`).Scan(&titleCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM profile_library WHERE profile_id = $1::uuid`, canonicalProfileID).Scan(&libraryCount); err != nil {
+		t.Fatal(err)
+	}
+	if titleCount != 1 || libraryCount != 1 {
+		t.Fatalf("movie identities were not consolidated: titles=%d library=%d", titleCount, libraryCount)
+	}
 }
 
 func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState(t *testing.T) {
@@ -71,14 +116,14 @@ func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState
 	}
 	service := NewService(pool, provider, nil, time.Hour, nil)
 	principal := canonicalMergePrincipal()
-	series, err := service.SeriesDetails(ctx, principal, canonicalDestinationSeriesID, "fr-FR")
+	series, err := service.SeriesDetails(ctx, principal, canonicalDestinationSeriesID, "fr-FR", "tmdb")
 	if err != nil {
 		t.Fatalf("load IMDb-only series through resolved TMDB identity: %v", err)
 	}
 	if series.ID != canonicalDestinationSeriesID || len(series.Seasons) != 1 || series.Seasons[0].ID != canonicalDestinationSeasonID {
 		t.Fatalf("unexpected consolidated series: %#v", series)
 	}
-	season, err := service.SeasonDetails(ctx, principal, canonicalDestinationSeasonID, "fr-FR")
+	season, err := service.SeasonDetails(ctx, principal, canonicalDestinationSeasonID, "fr-FR", "tmdb")
 	if err != nil {
 		t.Fatalf("load episodes from consolidated season: %v", err)
 	}
@@ -161,7 +206,7 @@ func TestSeriesDetailsCanonicalConflictRollsBackAtomically(t *testing.T) {
 	}
 	provider := &canonicalMergeProvider{series: ProviderSeries{ExternalID: "125988", Name: "Provider Silo", Overview: "Conflict fixture", AdditionalIDs: map[string]string{"imdb": "tt14688458"}}}
 	service := NewService(pool, provider, nil, time.Hour, nil)
-	_, err := service.SeriesDetails(ctx, canonicalMergePrincipal(), canonicalDestinationSeriesID, "fr-FR")
+	_, err := service.SeriesDetails(ctx, canonicalMergePrincipal(), canonicalDestinationSeriesID, "fr-FR", "tmdb")
 	if err == nil || err.Error() != "metadata provider returned a conflicting external ID" {
 		t.Fatalf("expected contradictory identity error, got %v", err)
 	}
@@ -192,6 +237,8 @@ func TestSeriesDetailsCanonicalConflictRollsBackAtomically(t *testing.T) {
 }
 
 const (
+	canonicalDestinationMovieID   = "00000000-0000-4000-8000-000000000010"
+	canonicalSourceMovieID        = "00000000-0000-4000-8000-000000000020"
 	canonicalDestinationSeriesID  = "00000000-0000-4000-8000-000000000100"
 	canonicalDestinationSeasonID  = "00000000-0000-4000-8000-000000000110"
 	canonicalDestinationEpisodeID = "00000000-0000-4000-8000-000000000111"

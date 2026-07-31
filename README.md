@@ -88,6 +88,7 @@ Copy [`.env.example`](.env.example) to `.env` and adjust it for the host. Import
 | `RIVUNE_TRAKT_CLIENT_ID` | Optional Trakt API client ID | empty |
 | `RIVUNE_PUBLIC_URL` | Public origin used by the server | `http://localhost:8080` |
 | `RIVUNE_PORT` | Host port mapped to Rivune | `8080` |
+| `TZ` | IANA timezone used by profile access dates and daily hours | `UTC` |
 | `PUID` / `PGID` | Non-root identity used inside the container | `65532` |
 | `RIVUNE_HARDWARE_ACCELERATION` | Video encoder selection: `auto`, a supported encoder, or software | `auto` |
 | `RIVUNE_VIDEO_DEVICE` | Linux render device used for hardware acceleration | `/dev/dri/renderD128` |

@@ -49,9 +49,11 @@ func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
 		ProtocolVersion int    `json:"protocolVersion"`
 		APIBaseURL      string `json:"apiBaseUrl"`
 		SetupRequired   bool   `json:"setupRequired"`
+		Timezone        string `json:"timezone"`
 	}
 	decodeResponse(t, response, &body)
-	if body.Name != "Rivune" || body.ProtocolVersion != 15 || body.APIBaseURL != "https://media.example/api/v1" || !body.SetupRequired {
+	if body.Name != "Rivune" || body.ProtocolVersion != 16 || body.APIBaseURL != "https://media.example/api/v1" ||
+		body.Timezone != "Europe/Paris" || !body.SetupRequired {
 		t.Fatalf("unexpected discovery response: %+v", body)
 	}
 }
@@ -137,7 +139,7 @@ func TestSetupRejectsUnknownFields(t *testing.T) {
 
 func testAPI(service instanceService) *API {
 	return &API{
-		config:    config.Config{PublicURL: "https://media.example"},
+		config:    config.Config{PublicURL: "https://media.example", Timezone: "Europe/Paris"},
 		instances: service,
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		version:   "test",

@@ -57,6 +57,21 @@ func TestValidateAccessAllowsOvernightHours(t *testing.T) {
 	}
 }
 
+func TestAccessScheduleDetectsDateAndHourRestrictions(t *testing.T) {
+	if hasAccessSchedule(Profile{}) {
+		t.Fatal("unrestricted profile was treated as scheduled")
+	}
+	for _, value := range []Profile{
+		{AvailableFrom: new("2026-08-01")},
+		{AvailableUntil: new("2026-08-31")},
+		{AccessStartTime: new("08:00"), AccessEndTime: new("20:00")},
+	} {
+		if !hasAccessSchedule(value) {
+			t.Fatalf("profile restriction was ignored: %+v", value)
+		}
+	}
+}
+
 func TestEnsureUnrestrictedProfilePreventsLockout(t *testing.T) {
 	if err := ensureUnrestrictedProfile(1); err != nil {
 		t.Fatalf("existing unrestricted profile was rejected: %v", err)

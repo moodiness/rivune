@@ -12,6 +12,9 @@ func TestLoadUsesSecureTokenTTLsByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
+	if cfg.Timezone != "UTC" {
+		t.Fatalf("expected UTC default timezone, got %q", cfg.Timezone)
+	}
 	if cfg.AccessTokenTTL != 15*time.Minute {
 		t.Fatalf("expected 15 minute access token TTL, got %s", cfg.AccessTokenTTL)
 	}
@@ -40,6 +43,7 @@ func TestLoadUsesEnvironmentCredentials(t *testing.T) {
 	t.Setenv("RIVUNE_TVDB_API_KEY", "tvdb-key")
 	t.Setenv("RIVUNE_TVDB_PIN", "tvdb-pin")
 	t.Setenv("RIVUNE_TRAKT_CLIENT_ID", "trakt-client")
+	t.Setenv("TZ", "Europe/Paris")
 
 	cfg, err := Load()
 	if err != nil {
@@ -49,8 +53,18 @@ func TestLoadUsesEnvironmentCredentials(t *testing.T) {
 		t.Fatalf("unexpected database URL: %q", cfg.DatabaseURL)
 	}
 	if cfg.SetupToken != "setup-secret" || cfg.TMDBAccessToken != "tmdb-token" ||
-		cfg.TVDBAPIKey != "tvdb-key" || cfg.TVDBPIN != "tvdb-pin" || cfg.TraktClientID != "trakt-client" {
-		t.Fatalf("environment credentials were not loaded: %+v", cfg)
+		cfg.TVDBAPIKey != "tvdb-key" || cfg.TVDBPIN != "tvdb-pin" || cfg.TraktClientID != "trakt-client" ||
+		cfg.Timezone != "Europe/Paris" {
+		t.Fatalf("environment configuration was not loaded: %+v", cfg)
+	}
+}
+
+func TestLoadRejectsInvalidTimezone(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("TZ", "Mars/Olympus_Mons")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid TZ configuration to fail")
 	}
 }
 
@@ -153,6 +167,7 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("RIVUNE_DATABASE_PASSWORD", "")
 	t.Setenv("RIVUNE_SETUP_TOKEN", "setup-secret")
 	t.Setenv("RIVUNE_PUBLIC_URL", "")
+	t.Setenv("TZ", "")
 	t.Setenv("RIVUNE_TRUSTED_PROXIES", "")
 	t.Setenv("RIVUNE_ACCESS_TOKEN_TTL", "")
 	t.Setenv("RIVUNE_REFRESH_TOKEN_TTL", "")

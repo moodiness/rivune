@@ -41,11 +41,11 @@ func (reader *fakeMetadataReader) MovieDetails(context.Context, auth.Principal, 
 	return metadata.Movie{}, nil
 }
 
-func (reader *fakeMetadataReader) SeriesDetails(context.Context, auth.Principal, string, string) (metadata.Series, error) {
+func (reader *fakeMetadataReader) SeriesDetails(context.Context, auth.Principal, string, string, string) (metadata.Series, error) {
 	return reader.series, nil
 }
 
-func (reader *fakeMetadataReader) SeasonDetails(_ context.Context, _ auth.Principal, seasonID, _ string) (metadata.Season, error) {
+func (reader *fakeMetadataReader) SeasonDetails(_ context.Context, _ auth.Principal, seasonID, _, _ string) (metadata.Season, error) {
 	reader.seasonCalls = append(reader.seasonCalls, seasonID)
 	return metadata.Season{}, nil
 }

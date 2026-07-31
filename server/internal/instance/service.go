@@ -27,6 +27,7 @@ const setupLockID int64 = 7_249_863_112
 type Service struct {
 	pool       *pgxpool.Pool
 	setupToken string
+	timezone   string
 }
 
 type Info struct {
@@ -47,8 +48,8 @@ type SetupResult struct {
 	ProfileID  string
 }
 
-func NewService(pool *pgxpool.Pool, setupToken string) *Service {
-	return &Service{pool: pool, setupToken: setupToken}
+func NewService(pool *pgxpool.Pool, setupToken, timezone string) *Service {
+	return &Service{pool: pool, setupToken: setupToken, timezone: timezone}
 }
 
 func (s *Service) Info(ctx context.Context) (Info, error) {
@@ -116,8 +117,9 @@ func (s *Service) Setup(ctx context.Context, token string, input SetupInput) (Se
 		return SetupResult{}, fmt.Errorf("create administrator: %w", err)
 	}
 	if err := tx.QueryRow(ctx,
-		"INSERT INTO profiles (name) VALUES ($1) RETURNING id::text",
+		"INSERT INTO profiles (name, access_timezone) VALUES ($1, $2) RETURNING id::text",
 		input.ProfileName,
+		s.timezone,
 	).Scan(&result.ProfileID); err != nil {
 		return SetupResult{}, fmt.Errorf("create profile: %w", err)
 	}

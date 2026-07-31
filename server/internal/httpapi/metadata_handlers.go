@@ -93,6 +93,7 @@ func (a *API) seriesDetails(w http.ResponseWriter, r *http.Request, principal au
 		principal,
 		r.PathValue("titleId"),
 		r.URL.Query().Get("language"),
+		r.URL.Query().Get("mappingProvider"),
 	)
 	if err != nil {
 		a.writeMetadataError(w, "read series details", err)
@@ -107,6 +108,7 @@ func (a *API) seasonDetails(w http.ResponseWriter, r *http.Request, principal au
 		principal,
 		r.PathValue("seasonId"),
 		r.URL.Query().Get("language"),
+		r.URL.Query().Get("mappingProvider"),
 	)
 	if err != nil {
 		a.writeMetadataError(w, "read season details", err)
@@ -115,28 +117,29 @@ func (a *API) seasonDetails(w http.ResponseWriter, r *http.Request, principal au
 	writeJSON(w, http.StatusOK, season)
 }
 
-func (a *API) titleTrailer(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+func (a *API) titleTrailers(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	var seasonNumber *int
 	if r.URL.Query().Has("seasonNumber") {
 		parsed, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("seasonNumber")))
 		if err != nil || parsed < 0 {
-			a.writeMetadataError(w, "read title trailer", fmt.Errorf("%w: seasonNumber must be an integer greater than or equal to 0", metadata.ErrInvalidInput))
+			a.writeMetadataError(w, "read title trailers", fmt.Errorf("%w: seasonNumber must be an integer greater than or equal to 0", metadata.ErrInvalidInput))
 			return
 		}
 		seasonNumber = &parsed
 	}
-	trailer, err := a.metadata.Trailer(
+	trailers, err := a.metadata.Trailers(
 		r.Context(),
 		principal,
 		r.PathValue("titleId"),
 		r.URL.Query().Get("language"),
+		r.URL.Query().Get("captionLanguage"),
 		seasonNumber,
 	)
 	if err != nil {
-		a.writeMetadataError(w, "read title trailer", err)
+		a.writeMetadataError(w, "read title trailers", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, trailer)
+	writeJSON(w, http.StatusOK, trailers)
 }
 
 func metadataQueryOptions(r *http.Request) (metadata.QueryOptions, error) {

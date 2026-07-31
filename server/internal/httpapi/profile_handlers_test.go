@@ -117,7 +117,7 @@ func TestCreateProfileAcceptsTemporaryAccess(t *testing.T) {
 	api := authenticatedProfileAPI(profiles)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/profiles", bytes.NewBufferString(`{
 		"name":"Guest","enabled":true,"availableFrom":"2026-08-01","availableUntil":"2026-08-31",
-		"accessStartTime":"20:00","accessEndTime":"08:00","accessTimezone":"Europe/Paris"
+		"accessStartTime":"20:00","accessEndTime":"08:00"
 	}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
@@ -132,8 +132,7 @@ func TestCreateProfileAcceptsTemporaryAccess(t *testing.T) {
 	if input.AvailableFrom == nil || *input.AvailableFrom != "2026-08-01" ||
 		input.AvailableUntil == nil || *input.AvailableUntil != "2026-08-31" ||
 		input.AccessStartTime == nil || *input.AccessStartTime != "20:00" ||
-		input.AccessEndTime == nil || *input.AccessEndTime != "08:00" ||
-		input.AccessTimezone == nil || *input.AccessTimezone != "Europe/Paris" {
+		input.AccessEndTime == nil || *input.AccessEndTime != "08:00" {
 		t.Fatalf("unexpected temporary profile input: %+v", input)
 	}
 }
@@ -160,7 +159,7 @@ func TestUpdateProfileDistinguishesClearedRestrictions(t *testing.T) {
 	profiles := &fakeProfileService{updated: profile.Profile{ID: "profile-id", Name: "Kids", Enabled: true, AccessTimezone: "UTC"}}
 	api := authenticatedProfileAPI(profiles)
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id", bytes.NewBufferString(`{
-		"availableFrom":null,"availableUntil":null,"accessStartTime":null,"accessEndTime":null,"accessTimezone":null
+		"availableFrom":null,"availableUntil":null,"accessStartTime":null,"accessEndTime":null
 	}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
@@ -173,8 +172,7 @@ func TestUpdateProfileDistinguishesClearedRestrictions(t *testing.T) {
 	}
 	input := profiles.updateInput
 	if !input.AvailableFromSet || input.AvailableFrom != nil || !input.AvailableUntilSet || input.AvailableUntil != nil ||
-		!input.AccessStartTimeSet || input.AccessStartTime != nil || !input.AccessEndTimeSet || input.AccessEndTime != nil ||
-		!input.AccessTimezoneSet || input.AccessTimezone != nil {
+		!input.AccessStartTimeSet || input.AccessStartTime != nil || !input.AccessEndTimeSet || input.AccessEndTime != nil {
 		t.Fatalf("expected explicit restriction clearing, got %+v", input)
 	}
 }

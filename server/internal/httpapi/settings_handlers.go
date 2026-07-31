@@ -56,6 +56,7 @@ type settingsPatchRequest struct {
 	HideUnreleased                   nullableBool   `json:"hideUnreleased,omitempty"`
 	MetadataLanguage                 nullableString `json:"metadataLanguage,omitempty"`
 	MetadataRegion                   nullableString `json:"metadataRegion,omitempty"`
+	SeriesMappingProvider            nullableString `json:"seriesMappingProvider,omitempty"`
 	AudioLanguage                    nullableString `json:"audioLanguage,omitempty"`
 	SubtitleLanguage                 nullableString `json:"subtitleLanguage,omitempty"`
 	AutoplayNextEpisode              nullableBool   `json:"autoplayNextEpisode,omitempty"`
@@ -138,6 +139,7 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		HideUnreleased:                   settings.OptionalBool{Set: request.HideUnreleased.Set, Value: request.HideUnreleased.Value},
 		MetadataLanguage:                 settings.OptionalString{Set: request.MetadataLanguage.Set, Value: request.MetadataLanguage.Value},
 		MetadataRegion:                   settings.OptionalString{Set: request.MetadataRegion.Set, Value: request.MetadataRegion.Value},
+		SeriesMappingProvider:            settings.OptionalString{Set: request.SeriesMappingProvider.Set, Value: request.SeriesMappingProvider.Value},
 		AudioLanguage:                    settings.OptionalString{Set: request.AudioLanguage.Set, Value: request.AudioLanguage.Value},
 		SubtitleLanguage:                 settings.OptionalString{Set: request.SubtitleLanguage.Set, Value: request.SubtitleLanguage.Value},
 		AutoplayNextEpisode:              settings.OptionalBool{Set: request.AutoplayNextEpisode.Set, Value: request.AutoplayNextEpisode.Value},

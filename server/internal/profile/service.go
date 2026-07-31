@@ -32,8 +32,9 @@ const (
 )
 
 type Service struct {
-	pool     *pgxpool.Pool
-	grantTTL time.Duration
+	pool            *pgxpool.Pool
+	grantTTL        time.Duration
+	defaultTimezone string
 }
 
 type Profile struct {
@@ -67,7 +68,6 @@ type CreateInput struct {
 	AvailableUntil  *string
 	AccessStartTime *string
 	AccessEndTime   *string
-	AccessTimezone  *string
 }
 
 type UpdateInput struct {
@@ -84,12 +84,10 @@ type UpdateInput struct {
 	AccessStartTime    *string
 	AccessEndTimeSet   bool
 	AccessEndTime      *string
-	AccessTimezoneSet  bool
-	AccessTimezone     *string
 }
 
-func NewService(pool *pgxpool.Pool, grantTTL time.Duration) *Service {
-	return &Service{pool: pool, grantTTL: grantTTL}
+func NewService(pool *pgxpool.Pool, grantTTL time.Duration, defaultTimezone string) *Service {
+	return &Service{pool: pool, grantTTL: grantTTL, defaultTimezone: defaultTimezone}
 }
 
 func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Profile, error) {
@@ -123,6 +121,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Profile
 		); err != nil {
 			return nil, fmt.Errorf("scan profile: %w", err)
 		}
+		profile.AccessTimezone = s.defaultTimezone
 		profile.Accessible = profileAccessible(profile, time.Now().UTC())
 		profile.AvatarKind = "preset"
 		if customAvatar {
@@ -152,10 +151,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 	if input.Enabled != nil {
 		enabled = *input.Enabled
 	}
-	timezone := "UTC"
-	if input.AccessTimezone != nil {
-		timezone = strings.TrimSpace(*input.AccessTimezone)
-	}
+	timezone := s.defaultTimezone
 	profile := Profile{
 		Name: input.Name, IsChild: input.IsChild, HasPIN: pinHash != nil, CanManage: false,
 		AvatarKind: "preset", AvatarPreset: defaultAvatarPreset, Enabled: enabled,
@@ -201,9 +197,8 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 }
 
 func (s *Service) Update(ctx context.Context, principal auth.Principal, profileID string, input UpdateInput) (Profile, error) {
-	profileID = strings.TrimSpace(profileID)
 	accessChanged := input.Enabled != nil || input.AvailableFromSet || input.AvailableUntilSet ||
-		input.AccessStartTimeSet || input.AccessEndTimeSet || input.AccessTimezoneSet
+		input.AccessStartTimeSet || input.AccessEndTimeSet
 	selectionInvalidated := accessChanged || input.PINSet
 	if profileID == "" || (!input.PINSet && input.Name == nil && input.IsChild == nil && !accessChanged) {
 		return Profile{}, fmt.Errorf("%w: at least one field must be provided", ErrInvalidInput)
@@ -266,6 +261,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 	if currentAvatarCustom {
 		current.AvatarKind = "custom"
 	}
+	current.AccessTimezone = s.defaultTimezone
 	if input.Name != nil {
 		current.Name = *input.Name
 	}
@@ -289,12 +285,6 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 	}
 	if input.AccessEndTimeSet {
 		current.AccessEndTime = input.AccessEndTime
-	}
-	if input.AccessTimezoneSet {
-		current.AccessTimezone = "UTC"
-		if input.AccessTimezone != nil {
-			current.AccessTimezone = strings.TrimSpace(*input.AccessTimezone)
-		}
 	}
 	if err := validateAccess(current); err != nil {
 		return Profile{}, err
@@ -448,6 +438,7 @@ func (s *Service) Select(ctx context.Context, principal auth.Principal, profileI
 		selected.AvatarKind = "custom"
 	}
 	now := time.Now().UTC()
+	selected.AccessTimezone = s.defaultTimezone
 	selected.Accessible = profileAccessible(selected, now)
 	if !selected.Accessible {
 		return Selection{}, ErrUnavailable
@@ -543,6 +534,11 @@ func (s *Service) ClearSelection(ctx context.Context, principal auth.Principal) 
 		return ErrForbidden
 	}
 	return nil
+}
+
+func hasAccessSchedule(value Profile) bool {
+	return value.AvailableFrom != nil || value.AvailableUntil != nil ||
+		value.AccessStartTime != nil || value.AccessEndTime != nil
 }
 
 func ensureUnrestrictedProfile(count int) error {

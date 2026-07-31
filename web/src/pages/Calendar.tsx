@@ -83,6 +83,8 @@ function mediaFromEvent(event: CalendarEvent): MediaItem {
     raw: {
       continueSeriesId: event.seriesId,
       continueSeasonId: event.seasonId,
+      continueSeasonNumber: event.seasonNumber,
+      continueEpisodeNumber: event.episodeNumber,
       continueEpisodeId: event.titleId,
       openSeriesBrowser: true,
     },

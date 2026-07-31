@@ -79,7 +79,6 @@ func (a *API) createProfile(w http.ResponseWriter, r *http.Request, principal au
 		AvailableUntil  *string `json:"availableUntil,omitempty"`
 		AccessStartTime *string `json:"accessStartTime,omitempty"`
 		AccessEndTime   *string `json:"accessEndTime,omitempty"`
-		AccessTimezone  *string `json:"accessTimezone,omitempty"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -90,7 +89,6 @@ func (a *API) createProfile(w http.ResponseWriter, r *http.Request, principal au
 		Name: request.Name, IsChild: request.IsChild, PIN: request.PIN, Enabled: request.Enabled,
 		AvailableFrom: request.AvailableFrom, AvailableUntil: request.AvailableUntil,
 		AccessStartTime: request.AccessStartTime, AccessEndTime: request.AccessEndTime,
-		AccessTimezone: request.AccessTimezone,
 	})
 	switch {
 	case errors.Is(err, profile.ErrForbidden):
@@ -117,7 +115,6 @@ func (a *API) updateProfile(w http.ResponseWriter, r *http.Request, principal au
 		AvailableUntil  nullableString `json:"availableUntil,omitempty"`
 		AccessStartTime nullableString `json:"accessStartTime,omitempty"`
 		AccessEndTime   nullableString `json:"accessEndTime,omitempty"`
-		AccessTimezone  nullableString `json:"accessTimezone,omitempty"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -131,7 +128,6 @@ func (a *API) updateProfile(w http.ResponseWriter, r *http.Request, principal au
 		AvailableUntilSet: request.AvailableUntil.Set, AvailableUntil: request.AvailableUntil.Value,
 		AccessStartTimeSet: request.AccessStartTime.Set, AccessStartTime: request.AccessStartTime.Value,
 		AccessEndTimeSet: request.AccessEndTime.Set, AccessEndTime: request.AccessEndTime.Value,
-		AccessTimezoneSet: request.AccessTimezone.Set, AccessTimezone: request.AccessTimezone.Value,
 	})
 	switch {
 	case errors.Is(err, profile.ErrNotFound):

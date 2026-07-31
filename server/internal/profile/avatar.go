@@ -279,7 +279,7 @@ func (s *Service) SetAvatarPreset(ctx context.Context, principal auth.Principal,
 		return Profile{}, fmt.Errorf("begin avatar preset update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profile, err := managedAvatarProfile(ctx, tx, principal, profileID)
+	profile, err := managedAvatarProfile(ctx, tx, principal, profileID, s.defaultTimezone)
 	if err != nil {
 		return Profile{}, err
 	}
@@ -307,7 +307,7 @@ func (s *Service) SetAvatarImage(ctx context.Context, principal auth.Principal, 
 		return Profile{}, fmt.Errorf("begin custom avatar update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profile, err := managedAvatarProfile(ctx, tx, principal, profileID)
+	profile, err := managedAvatarProfile(ctx, tx, principal, profileID, s.defaultTimezone)
 	if err != nil {
 		return Profile{}, err
 	}
@@ -349,7 +349,7 @@ func (s *Service) AvatarImage(ctx context.Context, principal auth.Principal, pro
 	return image, nil
 }
 
-func managedAvatarProfile(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID string) (Profile, error) {
+func managedAvatarProfile(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID, timezone string) (Profile, error) {
 	var profile Profile
 	var custom bool
 	err := tx.QueryRow(ctx, `
@@ -377,6 +377,7 @@ func managedAvatarProfile(ctx context.Context, tx pgx.Tx, principal auth.Princip
 	if err != nil {
 		return Profile{}, fmt.Errorf("authorize profile avatar update: %w", err)
 	}
+	profile.AccessTimezone = timezone
 	profile.Accessible = profileAccessible(profile, time.Now().UTC())
 	profile.AvatarKind = "preset"
 	if custom {

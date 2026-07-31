@@ -14,35 +14,38 @@ import (
 )
 
 type fakeMetadataService struct {
-	discoverOptions       metadata.QueryOptions
-	discoverPage          metadata.MoviePage
-	discoverErr           error
-	searchOptions         metadata.SearchOptions
-	searchPage            metadata.MoviePage
-	searchErr             error
-	detailsID             string
-	detailsLanguage       string
-	detailsMovie          metadata.Movie
-	detailsErr            error
-	discoverSeriesOptions metadata.QueryOptions
-	discoverSeriesPage    metadata.SeriesPage
-	discoverSeriesErr     error
-	searchSeriesOptions   metadata.SearchOptions
-	searchSeriesPage      metadata.SeriesPage
-	searchSeriesErr       error
-	seriesDetailsID       string
-	seriesDetailsLanguage string
-	seriesDetailsValue    metadata.Series
-	seriesDetailsErr      error
-	seasonDetailsID       string
-	seasonDetailsLanguage string
-	seasonDetailsValue    metadata.Season
-	seasonDetailsErr      error
-	trailerID             string
-	trailerLanguage       string
-	trailerSeasonNumber   *int
-	trailerValue          metadata.Trailer
-	trailerErr            error
+	discoverOptions         metadata.QueryOptions
+	discoverPage            metadata.MoviePage
+	discoverErr             error
+	searchOptions           metadata.SearchOptions
+	searchPage              metadata.MoviePage
+	searchErr               error
+	detailsID               string
+	detailsLanguage         string
+	detailsMovie            metadata.Movie
+	detailsErr              error
+	discoverSeriesOptions   metadata.QueryOptions
+	discoverSeriesPage      metadata.SeriesPage
+	discoverSeriesErr       error
+	searchSeriesOptions     metadata.SearchOptions
+	searchSeriesPage        metadata.SeriesPage
+	searchSeriesErr         error
+	seriesDetailsID         string
+	seriesDetailsLanguage   string
+	seriesDetailsMapping    string
+	seriesDetailsValue      metadata.Series
+	seriesDetailsErr        error
+	seasonDetailsID         string
+	seasonDetailsLanguage   string
+	seasonDetailsMapping    string
+	seasonDetailsValue      metadata.Season
+	seasonDetailsErr        error
+	trailersID              string
+	trailersLanguage        string
+	trailersCaptionLanguage string
+	trailersSeasonNumber    *int
+	trailersValue           metadata.TrailerList
+	trailersErr             error
 }
 
 func (f *fakeMetadataService) DiscoverMovies(_ context.Context, _ auth.Principal, options metadata.QueryOptions) (metadata.MoviePage, error) {
@@ -71,23 +74,26 @@ func (f *fakeMetadataService) SearchSeries(_ context.Context, _ auth.Principal, 
 	return f.searchSeriesPage, f.searchSeriesErr
 }
 
-func (f *fakeMetadataService) SeriesDetails(_ context.Context, _ auth.Principal, titleID, language string) (metadata.Series, error) {
+func (f *fakeMetadataService) SeriesDetails(_ context.Context, _ auth.Principal, titleID, language, mappingProvider string) (metadata.Series, error) {
 	f.seriesDetailsID = titleID
 	f.seriesDetailsLanguage = language
+	f.seriesDetailsMapping = mappingProvider
 	return f.seriesDetailsValue, f.seriesDetailsErr
 }
 
-func (f *fakeMetadataService) SeasonDetails(_ context.Context, _ auth.Principal, seasonID, language string) (metadata.Season, error) {
+func (f *fakeMetadataService) SeasonDetails(_ context.Context, _ auth.Principal, seasonID, language, mappingProvider string) (metadata.Season, error) {
 	f.seasonDetailsID = seasonID
 	f.seasonDetailsLanguage = language
+	f.seasonDetailsMapping = mappingProvider
 	return f.seasonDetailsValue, f.seasonDetailsErr
 }
 
-func (f *fakeMetadataService) Trailer(_ context.Context, _ auth.Principal, titleID, language string, seasonNumber *int) (metadata.Trailer, error) {
-	f.trailerID = titleID
-	f.trailerLanguage = language
-	f.trailerSeasonNumber = seasonNumber
-	return f.trailerValue, f.trailerErr
+func (f *fakeMetadataService) Trailers(_ context.Context, _ auth.Principal, titleID, language, captionLanguage string, seasonNumber *int) (metadata.TrailerList, error) {
+	f.trailersID = titleID
+	f.trailersLanguage = language
+	f.trailersCaptionLanguage = captionLanguage
+	f.trailersSeasonNumber = seasonNumber
+	return f.trailersValue, f.trailersErr
 }
 
 func TestDiscoverMoviesPassesLocaleAndReturnsNormalizedPage(t *testing.T) {
@@ -162,96 +168,96 @@ func TestSeriesHandlersPassCanonicalIdentifiers(t *testing.T) {
 		t.Fatalf("unexpected series search status=%d options=%+v", searchResponse.Code, service.searchSeriesOptions)
 	}
 
-	seriesRequest := httptest.NewRequest(http.MethodGet, "/api/v1/series/series-id?language=fr-FR", nil)
+	seriesRequest := httptest.NewRequest(http.MethodGet, "/api/v1/series/series-id?language=fr-FR&mappingProvider=tvdb", nil)
 	seriesRequest.SetPathValue("titleId", "series-id")
 	seriesResponse := httptest.NewRecorder()
 	api.seriesDetails(seriesResponse, seriesRequest, auth.Principal{})
-	if seriesResponse.Code != http.StatusOK || service.seriesDetailsID != "series-id" || service.seriesDetailsLanguage != "fr-FR" {
-		t.Fatalf("unexpected series details status=%d id=%q language=%q", seriesResponse.Code, service.seriesDetailsID, service.seriesDetailsLanguage)
+	if seriesResponse.Code != http.StatusOK || service.seriesDetailsID != "series-id" || service.seriesDetailsLanguage != "fr-FR" || service.seriesDetailsMapping != "tvdb" {
+		t.Fatalf("unexpected series details status=%d id=%q language=%q mapping=%q", seriesResponse.Code, service.seriesDetailsID, service.seriesDetailsLanguage, service.seriesDetailsMapping)
 	}
 
-	seasonRequest := httptest.NewRequest(http.MethodGet, "/api/v1/seasons/season-id?language=fr-FR", nil)
+	seasonRequest := httptest.NewRequest(http.MethodGet, "/api/v1/seasons/season-id?language=fr-FR&mappingProvider=tvdb", nil)
 	seasonRequest.SetPathValue("seasonId", "season-id")
 	seasonResponse := httptest.NewRecorder()
 	api.seasonDetails(seasonResponse, seasonRequest, auth.Principal{})
-	if seasonResponse.Code != http.StatusOK || service.seasonDetailsID != "season-id" || service.seasonDetailsLanguage != "fr-FR" {
-		t.Fatalf("unexpected season details status=%d id=%q language=%q", seasonResponse.Code, service.seasonDetailsID, service.seasonDetailsLanguage)
+	if seasonResponse.Code != http.StatusOK || service.seasonDetailsID != "season-id" || service.seasonDetailsLanguage != "fr-FR" || service.seasonDetailsMapping != "tvdb" {
+		t.Fatalf("unexpected season details status=%d id=%q language=%q mapping=%q", seasonResponse.Code, service.seasonDetailsID, service.seasonDetailsLanguage, service.seasonDetailsMapping)
 	}
 }
 
-func TestTitleTrailerPassesStableTitleIDLanguageAndSeason(t *testing.T) {
-	service := &fakeMetadataService{trailerValue: metadata.Trailer{
-		YouTubeID: "video-id", Name: "Official Trailer", Language: "en-US",
-		IsFallback: true, CaptionPreference: "fr",
-	}}
+func TestTitleTrailersPassStableTitleIDLanguageAndSeason(t *testing.T) {
+	service := &fakeMetadataService{trailersValue: metadata.TrailerList{Trailers: []metadata.Trailer{
+		{YouTubeID: "video-id", Name: "Official Trailer", Language: "en-US", IsFallback: true, CaptionPreference: "fr"},
+		{YouTubeID: "video-id-2", Name: "Official Trailer 2", Language: "fr-FR"},
+	}}}
 	api := metadataAPI(service)
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/metadata/titles/title-id/trailer?language=fr-FR&seasonNumber=3", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/metadata/titles/title-id/trailers?language=fr-FR&captionLanguage=fr-FR&seasonNumber=3", nil)
 	request.SetPathValue("titleId", "title-id")
 	response := httptest.NewRecorder()
 
-	api.titleTrailer(response, request, auth.Principal{})
+	api.titleTrailers(response, request, auth.Principal{})
 
-	if response.Code != http.StatusOK || service.trailerID != "title-id" || service.trailerLanguage != "fr-FR" || service.trailerSeasonNumber == nil || *service.trailerSeasonNumber != 3 {
-		t.Fatalf("unexpected trailer response status=%d id=%q language=%q season=%v", response.Code, service.trailerID, service.trailerLanguage, service.trailerSeasonNumber)
+	if response.Code != http.StatusOK || service.trailersID != "title-id" || service.trailersLanguage != "fr-FR" || service.trailersCaptionLanguage != "fr-FR" || service.trailersSeasonNumber == nil || *service.trailersSeasonNumber != 3 {
+		t.Fatalf("unexpected trailers response status=%d id=%q language=%q captions=%q season=%v", response.Code, service.trailersID, service.trailersLanguage, service.trailersCaptionLanguage, service.trailersSeasonNumber)
 	}
-	var body metadata.Trailer
+	var body metadata.TrailerList
 	decodeResponse(t, response, &body)
-	if body.YouTubeID != "video-id" || !body.IsFallback || body.CaptionPreference != "fr" {
-		t.Fatalf("unexpected trailer body: %+v", body)
+	if len(body.Trailers) != 2 || body.Trailers[0].YouTubeID != "video-id" || !body.Trailers[0].IsFallback || body.Trailers[0].CaptionPreference != "fr" {
+		t.Fatalf("unexpected trailers body: %+v", body)
 	}
 }
 
-func TestTitleTrailerOmitsSeasonForTitleRequest(t *testing.T) {
-	service := &fakeMetadataService{trailerValue: metadata.Trailer{YouTubeID: "title-video"}}
+func TestTitleTrailersOmitSeasonForTitleRequest(t *testing.T) {
+	service := &fakeMetadataService{trailersValue: metadata.TrailerList{Trailers: []metadata.Trailer{{YouTubeID: "title-video"}}}}
 	api := metadataAPI(service)
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/metadata/titles/title-id/trailer?language=en-US", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/metadata/titles/title-id/trailers?language=en-US", nil)
 	request.SetPathValue("titleId", "title-id")
 	response := httptest.NewRecorder()
 
-	api.titleTrailer(response, request, auth.Principal{})
+	api.titleTrailers(response, request, auth.Principal{})
 
-	if response.Code != http.StatusOK || service.trailerSeasonNumber != nil {
-		t.Fatalf("unexpected title trailer request status=%d season=%v", response.Code, service.trailerSeasonNumber)
+	if response.Code != http.StatusOK || service.trailersSeasonNumber != nil {
+		t.Fatalf("unexpected title trailers request status=%d season=%v", response.Code, service.trailersSeasonNumber)
 	}
 }
 
-func TestTitleTrailerRejectsMalformedSeasonNumber(t *testing.T) {
+func TestTitleTrailersRejectMalformedSeasonNumber(t *testing.T) {
 	for _, value := range []string{"", "three", "-1"} {
 		t.Run(value, func(t *testing.T) {
 			service := &fakeMetadataService{}
 			api := metadataAPI(service)
-			request := httptest.NewRequest(http.MethodGet, "/api/v1/metadata/titles/title-id/trailer?seasonNumber="+value, nil)
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/metadata/titles/title-id/trailers?seasonNumber="+value, nil)
 			request.SetPathValue("titleId", "title-id")
 			response := httptest.NewRecorder()
 
-			api.titleTrailer(response, request, auth.Principal{})
+			api.titleTrailers(response, request, auth.Principal{})
 
-			if response.Code != http.StatusUnprocessableEntity || service.trailerID != "" {
-				t.Fatalf("expected validation rejection, got status=%d service id=%q body=%s", response.Code, service.trailerID, response.Body.String())
+			if response.Code != http.StatusUnprocessableEntity || service.trailersID != "" {
+				t.Fatalf("expected validation rejection, got status=%d service id=%q body=%s", response.Code, service.trailersID, response.Body.String())
 			}
 		})
 	}
 }
 
-func TestTitleTrailerReturnsNotFound(t *testing.T) {
-	service := &fakeMetadataService{trailerErr: metadata.ErrNotFound}
+func TestTitleTrailersReturnNotFound(t *testing.T) {
+	service := &fakeMetadataService{trailersErr: metadata.ErrNotFound}
 	api := metadataAPI(service)
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/metadata/titles/title-id/trailer", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/metadata/titles/title-id/trailers", nil)
 	request.SetPathValue("titleId", "title-id")
 	response := httptest.NewRecorder()
 
-	api.titleTrailer(response, request, auth.Principal{})
+	api.titleTrailers(response, request, auth.Principal{})
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404, got %d: %s", response.Code, response.Body.String())
 	}
 }
 
-func TestTitleTrailerRouteRequiresAuthentication(t *testing.T) {
+func TestTitleTrailersRouteRequiresAuthentication(t *testing.T) {
 	api := testAPI(&fakeInstanceService{})
 	api.auth = &fakeAuthService{authenticateErr: auth.ErrInvalidToken}
 	api.metadata = &fakeMetadataService{}
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/metadata/titles/11111111-1111-4111-8111-111111111111/trailer", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/metadata/titles/11111111-1111-4111-8111-111111111111/trailers", nil)
 	response := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(response, request)

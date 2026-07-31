@@ -28,7 +28,7 @@ import type {
   SettingsValues,
   TitleReference,
   TokenPair,
-  TrailerMetadata,
+  TrailerList,
 } from "./types";
 
 const API_BASE = "/api/v1";
@@ -37,7 +37,10 @@ const REFRESH_KEY = "rivune.refresh";
 const DEVICE_KEY = "rivune.device";
 let refreshPromise: Promise<boolean> | null = null;
 let metadataLanguage = navigator.language;
+let trailerLanguage = navigator.language;
+let trailerCaptionLanguage = navigator.language;
 let metadataRegion = region();
+let seriesMappingProvider: "tmdb" | "tvdb" = "tmdb";
 export const PROFILE_SELECTION_REQUIRED_EVENT = "rivune:profile-selection-required";
 
 export class APIError extends Error {
@@ -123,7 +126,6 @@ type ProfileAccessInput = {
   availableUntil?: string | null;
   accessStartTime?: string | null;
   accessEndTime?: string | null;
-  accessTimezone?: string | null;
 };
 
 export const api = {
@@ -175,7 +177,7 @@ export const api = {
   sessionNotifications: (after = "0") => request<{ notifications: SessionNotification[] }>(`/auth/notifications${query({ after })}`),
   sendProfileSessionNotification: (profileId: string, sessionId: string, message: string) => request<SessionNotification>(`/profiles/${profileId}/sessions/${sessionId}/notifications`, { method: "POST", body: JSON.stringify({ message }) }),
 
-  collections: () => request<{ collections: Collection[] }>("/collections"),
+  collections: (signal?: AbortSignal) => request<{ collections: Collection[] }>("/collections", { signal }),
   calendar: (from: string, to: string, signal?: AbortSignal) => request<CalendarResponse>(`/calendar${query({ from, to, language: metadataLanguage })}`, { signal }),
   collection: (id: string) => request<Collection>(`/collections/${id}`),
   createCollection: (input: CollectionSaveInput) => request<Collection>("/collections", { method: "POST", body: JSON.stringify(input) }),
@@ -184,10 +186,13 @@ export const api = {
   reorderCollections: (collectionIds: string[]) => request<{ collections: Collection[] }>("/collections/order", { method: "PUT", body: JSON.stringify({ collectionIds }) }),
   exportCollections: () => request<CollectionExportDocument>("/collections/export"),
   importCollections: (document: unknown) => request<CollectionImportResult>("/collections/import", { method: "POST", body: JSON.stringify(document) }),
-  configureMetadataLocale: (language?: string, regionCode?: string, preferredLanguage?: string) => {
-    const automaticLanguage = preferredLanguage && preferredLanguage !== "auto" ? preferredLanguage : navigator.language;
+  configureMetadataLocale: (language?: string, regionCode?: string, preferredAudioLanguage?: string, mappingProvider?: string, preferredSubtitleLanguage?: string) => {
+    const automaticLanguage = preferredAudioLanguage && preferredAudioLanguage !== "auto" ? preferredAudioLanguage : navigator.language;
     metadataLanguage = language && language !== "auto" ? language : automaticLanguage;
     metadataRegion = regionCode && regionCode !== "auto" ? regionCode : region();
+    trailerLanguage = automaticLanguage;
+    trailerCaptionLanguage = preferredSubtitleLanguage && preferredSubtitleLanguage !== "auto" ? preferredSubtitleLanguage : navigator.language;
+    seriesMappingProvider = mappingProvider === "tvdb" ? "tvdb" : "tmdb";
   },
   resolveFolder: (collectionId: string, folderId: string, page = 1, signal?: AbortSignal) => request<ResolvedFolder>(`/collections/${collectionId}/folders/${folderId}/items${query({ page, limit: 100, language: metadataLanguage, region: metadataRegion })}`, { signal }),
   tmdbLookup: (kind: string, search: string) => request<{ results: { id: number; name: string; imageUrl?: string }[] }>(`/collections/tmdb/lookup${query({ kind, query: search, language: metadataLanguage, page: 1 })}`),
@@ -224,13 +229,13 @@ export const api = {
   playbackActivity: () => request<PlaybackActivity>("/playback/activity"),
   stopPlaybackActivitySession: (sessionId: string) => request<void>(`/playback/activity/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
   purgePlaybackActivity: () => request<PlaybackPurgeResult>("/playback/activity/purge", { method: "POST" }),
-  movieDetails: (titleId: string) => request<{ externalIds: Record<string, string> }>(`/metadata/titles/${encodeURIComponent(titleId)}${query({ language: metadataLanguage })}`),
-  seriesDetails: (titleId: string) => request<SeriesMetadata>(`/metadata/series/${encodeURIComponent(titleId)}${query({ language: metadataLanguage })}`),
-  seasonDetails: (seasonId: string) => request<SeasonMetadata>(`/metadata/seasons/${encodeURIComponent(seasonId)}${query({ language: metadataLanguage })}`),
-  trailer: (titleId: string, seasonNumber?: number) => request<TrailerMetadata>(`/metadata/titles/${encodeURIComponent(titleId)}/trailer${query({ language: metadataLanguage, seasonNumber })}`),
+  movieDetails: (titleId: string) => request<{ voteAverage: number; voteCount: number; externalIds: Record<string, string> }>(`/metadata/titles/${encodeURIComponent(titleId)}${query({ language: metadataLanguage })}`),
+  seriesDetails: (titleId: string) => request<SeriesMetadata>(`/metadata/series/${encodeURIComponent(titleId)}${query({ language: metadataLanguage, mappingProvider: seriesMappingProvider })}`),
+  seasonDetails: (seasonId: string, signal?: AbortSignal) => request<SeasonMetadata>(`/metadata/seasons/${encodeURIComponent(seasonId)}${query({ language: metadataLanguage, mappingProvider: seriesMappingProvider })}`, { signal }),
+  trailers: (titleId: string, seasonNumber?: number) => request<TrailerList>(`/metadata/titles/${encodeURIComponent(titleId)}/trailers${query({ language: trailerLanguage, captionLanguage: trailerCaptionLanguage, seasonNumber })}`),
 
   library: (mediaType = "") => request<LibraryPage>(`/library${query({ mediaType, page: 1, pageSize: 100 })}`),
-  continueWatching: () => request<ContinueWatching>("/continue-watching?limit=30"),
+  continueWatching: (signal?: AbortSignal) => request<ContinueWatching>("/continue-watching?limit=30", { signal }),
   progress: (titleId: string) => request<import("./types").PlaybackProgress | undefined>(`/progress/${encodeURIComponent(titleId)}`),
   updateProgress: (titleId: string, input: { positionSeconds: number; durationSeconds: number; completed: boolean; expectedVersion: number }) => request<import("./types").PlaybackProgress>(`/progress/${encodeURIComponent(titleId)}`, { method: "PUT", body: JSON.stringify(input) }),
   setWatched: (titleId: string, watched: boolean, expectedVersion: number) => request<import("./types").PlaybackProgress>(`/titles/${encodeURIComponent(titleId)}/watched${watched ? "" : query({ expectedVersion })}`, { method: watched ? "POST" : "DELETE", body: watched ? JSON.stringify({ expectedVersion }) : undefined }),

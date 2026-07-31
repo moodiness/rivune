@@ -53,6 +53,7 @@ type Patch struct {
 	HideUnreleased                   OptionalBool
 	MetadataLanguage                 OptionalString
 	MetadataRegion                   OptionalString
+	SeriesMappingProvider            OptionalString
 	AudioLanguage                    OptionalString
 	SubtitleLanguage                 OptionalString
 	AutoplayNextEpisode              OptionalBool
@@ -73,6 +74,7 @@ type Values struct {
 	HideUnreleased                   *bool   `json:"hideUnreleased,omitempty"`
 	MetadataLanguage                 *string `json:"metadataLanguage,omitempty"`
 	MetadataRegion                   *string `json:"metadataRegion,omitempty"`
+	SeriesMappingProvider            *string `json:"seriesMappingProvider,omitempty"`
 	AudioLanguage                    *string `json:"audioLanguage,omitempty"`
 	SubtitleLanguage                 *string `json:"subtitleLanguage,omitempty"`
 	AutoplayNextEpisode              *bool   `json:"autoplayNextEpisode,omitempty"`
@@ -99,6 +101,7 @@ type EffectiveValues struct {
 	HideUnreleased                   bool   `json:"hideUnreleased"`
 	MetadataLanguage                 string `json:"metadataLanguage"`
 	MetadataRegion                   string `json:"metadataRegion"`
+	SeriesMappingProvider            string `json:"seriesMappingProvider"`
 	AudioLanguage                    string `json:"audioLanguage"`
 	SubtitleLanguage                 string `json:"subtitleLanguage"`
 	AutoplayNextEpisode              bool   `json:"autoplayNextEpisode"`
@@ -294,7 +297,7 @@ func defaultEffective() Effective {
 		SchemaVersion: schemaVersion,
 		Values: EffectiveValues{
 			Theme: "system", MaximumResolution: "auto", PreferDirectPlay: true,
-			HideUnreleased: false, MetadataLanguage: "auto", MetadataRegion: "auto",
+			HideUnreleased: false, MetadataLanguage: "auto", MetadataRegion: "auto", SeriesMappingProvider: "tmdb",
 			AudioLanguage: "auto", SubtitleLanguage: "auto",
 			AutoplayNextEpisode: true, CardDensity: "comfortable", AnimationsEnabled: true,
 			SubtitleSizePercent: 100, SubtitleTextColor: "#FFFFFF", SubtitleBackgroundOpacityPercent: 60,
@@ -302,7 +305,7 @@ func defaultEffective() Effective {
 		},
 		Sources: map[string]string{
 			"theme": "default", "maximumResolution": "default", "preferDirectPlay": "default",
-			"hideUnreleased": "default", "metadataLanguage": "default", "metadataRegion": "default",
+			"hideUnreleased": "default", "metadataLanguage": "default", "metadataRegion": "default", "seriesMappingProvider": "default",
 			"audioLanguage": "default", "subtitleLanguage": "default",
 			"autoplayNextEpisode": "default", "cardDensity": "default", "animationsEnabled": "default",
 			"subtitleSizePercent": "default", "subtitleTextColor": "default", "subtitleBackgroundOpacityPercent": "default",
@@ -312,7 +315,7 @@ func defaultEffective() Effective {
 }
 
 func validatePatch(patch Patch) error {
-	if !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.PreferDirectPlay.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set &&
+	if !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.PreferDirectPlay.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set &&
 		!patch.AutoplayNextEpisode.Set && !patch.CardDensity.Set && !patch.AnimationsEnabled.Set && !patch.SubtitleSizePercent.Set && !patch.SubtitleTextColor.Set && !patch.SubtitleBackgroundOpacityPercent.Set &&
 		!patch.NotificationsEnabled.Set && !patch.NotificationDurationSeconds.Set && !patch.NotificationPollIntervalSeconds.Set {
 		return fmt.Errorf("%w: at least one setting must be provided", ErrInvalidInput)
@@ -340,6 +343,13 @@ func validatePatch(patch Patch) error {
 	}
 	if value := patch.MetadataRegion.Value; patch.MetadataRegion.Set && value != nil && *value != "auto" && !regionCodePattern.MatchString(*value) {
 		return fmt.Errorf("%w: metadataRegion must be auto or an uppercase ISO 3166-1 alpha-2 code", ErrInvalidInput)
+	}
+	if value := patch.SeriesMappingProvider.Value; patch.SeriesMappingProvider.Set && value != nil {
+		switch *value {
+		case "tmdb", "tvdb":
+		default:
+			return fmt.Errorf("%w: seriesMappingProvider must be tmdb or tvdb", ErrInvalidInput)
+		}
 	}
 	if value := patch.CardDensity.Value; patch.CardDensity.Set && value != nil {
 		switch *value {
@@ -392,6 +402,9 @@ func applyPatch(values Values, patch Patch) Values {
 	}
 	if patch.MetadataRegion.Set {
 		values.MetadataRegion = patch.MetadataRegion.Value
+	}
+	if patch.SeriesMappingProvider.Set {
+		values.SeriesMappingProvider = patch.SeriesMappingProvider.Value
 	}
 	if patch.AudioLanguage.Set {
 		values.AudioLanguage = patch.AudioLanguage.Value
@@ -458,6 +471,10 @@ func applyLayer(effective *Effective, values Values, source string) {
 	if values.MetadataRegion != nil {
 		effective.Values.MetadataRegion = *values.MetadataRegion
 		effective.Sources["metadataRegion"] = source
+	}
+	if values.SeriesMappingProvider != nil {
+		effective.Values.SeriesMappingProvider = *values.SeriesMappingProvider
+		effective.Sources["seriesMappingProvider"] = source
 	}
 	if values.AudioLanguage != nil {
 		effective.Values.AudioLanguage = *values.AudioLanguage

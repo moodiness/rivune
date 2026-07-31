@@ -86,6 +86,8 @@ function useRuntimeSettings(profileID: string | undefined): { settings: RuntimeS
           response.settings.metadataLanguage ?? undefined,
           response.settings.metadataRegion ?? undefined,
           response.settings.audioLanguage ?? undefined,
+          response.settings.seriesMappingProvider ?? undefined,
+          response.settings.subtitleLanguage ?? undefined,
         );
         setLoaded({ profileID, settings: runtimeSettings(response.settings), ready: true });
       }).catch(() => {

@@ -24,7 +24,7 @@ RUN CGO_ENABLED=0 go build \
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg intel-media-va-driver mesa-va-drivers \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg intel-media-va-driver mesa-va-drivers tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/rivune /usr/local/bin/rivune

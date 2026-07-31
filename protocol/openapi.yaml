@@ -1432,17 +1432,84 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
-  /metadata/titles/{titleId}/trailer:
+  /metadata/series/{titleId}:
     parameters:
       - $ref: "#/components/parameters/TitleId"
     get:
-      summary: Get the preferred YouTube trailer for a title
-      operationId: getTitleTrailer
-      description: Returns a localized TMDB trailer when available, otherwise an English trailer. Supplying seasonNumber selects videos for that series season and is invalid for movies. A caption preference only requests captions from YouTube when available and does not assert their availability.
+      summary: Get localized series metadata and its selected episode hierarchy
+      operationId: getSeriesDetails
       security:
         - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/Language"
+        - $ref: "#/components/parameters/SeriesMappingProvider"
+      responses:
+        "200":
+          description: Localized series metadata with either TMDB or official TVDB seasons.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Series"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /metadata/seasons/{seasonId}:
+    parameters:
+      - $ref: "#/components/parameters/SeasonId"
+    get:
+      summary: Get localized episodes for a mapped season
+      operationId: getSeasonDetails
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Language"
+        - $ref: "#/components/parameters/SeriesMappingProvider"
+      responses:
+        "200":
+          description: Season episodes in the selected mapping hierarchy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Season"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /metadata/titles/{titleId}/trailers:
+    parameters:
+      - $ref: "#/components/parameters/TitleId"
+    get:
+      summary: Get curated YouTube trailers for a title
+      operationId: getTitleTrailers
+      description: Returns up to five distinct TMDB trailers ordered by the preferred audio language, trailer type, official status, and publication date. English fallbacks remain available when the preferred audio language differs. Supplying seasonNumber restricts candidates to that series season and is invalid for movies. captionLanguage requests the configured subtitle preference from YouTube when available and does not assert caption availability.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Language"
+        - name: captionLanguage
+          in: query
+          required: false
+          description: Configured subtitle language to request from YouTube when captions are available.
+          schema:
+            type: string
+            pattern: "^[A-Za-z]{2,3}(-[A-Za-z]{2})?$"
         - name: seasonNumber
           in: query
           required: false
@@ -1452,11 +1519,11 @@ paths:
             minimum: 0
       responses:
         "200":
-          description: Selected movie, series, or series-season trailer.
+          description: Curated movie, series, or series-season trailers.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Trailer"
+                $ref: "#/components/schemas/TrailerList"
         "401":
           $ref: "#/components/responses/Error"
         "404":
@@ -2014,9 +2081,10 @@ components:
       name: seasonId
       in: path
       required: true
+      description: Stable TMDB season UUID or an opaque TVDB mapped-season identifier returned by the series endpoint.
       schema:
         type: string
-        format: uuid
+        pattern: "^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|tvdb:[0-9a-fA-F-]{36}:[1-9][0-9]*)$"
     AddonId:
       name: addonId
       in: path
@@ -2090,6 +2158,14 @@ components:
         type: string
         pattern: "^[A-Za-z]{2,3}(-[A-Za-z]{2})?$"
         default: en-US
+    SeriesMappingProvider:
+      name: mappingProvider
+      in: query
+      description: Provider hierarchy used to group series episodes into seasons.
+      schema:
+        type: string
+        enum: [tmdb, tvdb]
+        default: tmdb
     Region:
       name: region
       in: query
@@ -2429,7 +2505,7 @@ components:
             $ref: "#/components/schemas/AddonResourceFailure"
     Discovery:
       type: object
-      required: [name, serverVersion, protocolVersion, apiBaseUrl, setupRequired]
+      required: [name, serverVersion, protocolVersion, apiBaseUrl, setupRequired, timezone]
       properties:
         name:
           type: string
@@ -2442,6 +2518,10 @@ components:
           type: string
         setupRequired:
           type: boolean
+        timezone:
+          type: string
+          description: IANA timezone configured by the server operator.
+
     Health:
       type: object
       required: [status, database, version]
@@ -2763,7 +2843,7 @@ components:
             - type: "null"
         accessTimezone:
           type: string
-          description: IANA timezone used to evaluate date and daily-hour restrictions.
+          description: IANA timezone configured through the server TZ environment variable.
         accessible:
           type: boolean
           description: Current server-evaluated availability. Clients must not treat this as enforcement.
@@ -2847,11 +2927,6 @@ components:
             - type: string
               pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
             - type: "null"
-        accessTimezone:
-          description: IANA timezone, or null/omitted to use UTC.
-          anyOf:
-            - type: string
-            - type: "null"
     UpdateProfileRequest:
       type: object
       additionalProperties: false
@@ -2890,11 +2965,6 @@ components:
           anyOf:
             - type: string
               pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
-            - type: "null"
-        accessTimezone:
-          description: IANA timezone, or null to reset to UTC.
-          anyOf:
-            - type: string
             - type: "null"
     SelectProfileRequest:
       type: object
@@ -2948,6 +3018,11 @@ components:
         metadataRegion:
           anyOf:
             - $ref: "#/components/schemas/RegionPreference"
+            - type: "null"
+        seriesMappingProvider:
+          anyOf:
+            - type: string
+              enum: [tmdb, tvdb]
             - type: "null"
         audioLanguage:
           anyOf:
@@ -3015,6 +3090,9 @@ components:
           $ref: "#/components/schemas/LanguagePreference"
         metadataRegion:
           $ref: "#/components/schemas/RegionPreference"
+        seriesMappingProvider:
+          type: string
+          enum: [tmdb, tvdb]
         audioLanguage:
           $ref: "#/components/schemas/LanguagePreference"
         subtitleLanguage:
@@ -3071,11 +3149,11 @@ components:
         settings:
           allOf:
             - $ref: "#/components/schemas/SettingsValues"
-            - required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, audioLanguage, subtitleLanguage, autoplayNextEpisode, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
+            - required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, autoplayNextEpisode, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
         sources:
           type: object
           additionalProperties: false
-          required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, audioLanguage, subtitleLanguage, autoplayNextEpisode, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
+          required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, autoplayNextEpisode, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
           properties:
             theme:
               $ref: "#/components/schemas/SettingSource"
@@ -3088,6 +3166,8 @@ components:
             metadataLanguage:
               $ref: "#/components/schemas/SettingSource"
             metadataRegion:
+              $ref: "#/components/schemas/SettingSource"
+            seriesMappingProvider:
               $ref: "#/components/schemas/SettingSource"
             audioLanguage:
               $ref: "#/components/schemas/SettingSource"
@@ -3286,6 +3366,18 @@ components:
           type: string
           description: YouTube caption language preference requested when captions are available; presence does not guarantee captions exist.
           minLength: 2
+    TrailerList:
+      type: object
+      additionalProperties: false
+      required: [trailers]
+      properties:
+        trailers:
+          type: array
+          minItems: 1
+          maxItems: 5
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Trailer"
     Movie:
       type: object
       additionalProperties: false
@@ -3364,7 +3456,7 @@ components:
     Series:
       type: object
       additionalProperties: false
-      required: [id, mediaType, name, originalName, originalLanguage, overview, genres, voteAverage, voteCount, seasons, aliases, episodeOrders, externalIds]
+      required: [id, mediaType, name, originalName, originalLanguage, overview, genres, voteAverage, voteCount, seasons, aliases, episodeOrders, mappingProvider, externalIds]
       properties:
         id:
           type: string
@@ -3425,6 +3517,9 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EpisodeOrder"
+        mappingProvider:
+          type: string
+          enum: [tmdb, tvdb]
         externalIds:
           type: object
           additionalProperties:
@@ -3458,7 +3553,7 @@ components:
       properties:
         id:
           type: string
-          format: uuid
+          description: Stable season UUID for TMDB or an opaque mapped-season identifier for TVDB.
         mediaType:
           type: string
           const: season
@@ -3496,7 +3591,7 @@ components:
       properties:
         id:
           type: string
-          format: uuid
+          description: Stable season UUID for TMDB or an opaque mapped-season identifier for TVDB.
         mediaType:
           type: string
           const: season
@@ -3541,7 +3636,7 @@ components:
           const: episode
         seasonId:
           type: string
-          format: uuid
+          description: Stable season UUID for TMDB or an opaque mapped-season identifier for TVDB.
         name:
           type: string
         overview:

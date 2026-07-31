@@ -4,6 +4,7 @@ export type Discovery = {
   protocolVersion: number;
   apiBaseUrl: string;
   setupRequired: boolean;
+  timezone: string;
 };
 
 export type TokenPair = {
@@ -179,6 +180,9 @@ export type TrailerMetadata = {
   isFallback: boolean;
   captionPreference?: string;
 };
+export type TrailerList = {
+  trailers: TrailerMetadata[];
+};
 export type EpisodeMetadata = {
   id: string;
   mediaType: "episode";
@@ -223,8 +227,12 @@ export type SeriesMetadata = {
   status?: string;
   numberOfSeasons?: number;
   numberOfEpisodes?: number;
+  genres: Array<{ id: number; name: string }>;
+  voteAverage: number;
+  voteCount: number;
   seasons: SeasonSummary[];
   episodeOrders: Array<{ id: string; name: string; type: string; isDefault: boolean }>;
+  mappingProvider: "tmdb" | "tvdb";
   externalIds: Record<string, string>;
 };
 export type ResolvedFolder = {
@@ -449,6 +457,7 @@ export type SettingsValues = {
   hideUnreleased?: boolean | null;
   metadataLanguage?: string | null;
   metadataRegion?: string | null;
+  seriesMappingProvider?: "tmdb" | "tvdb" | null;
   audioLanguage?: string | null;
   subtitleLanguage?: string | null;
   autoplayNextEpisode?: boolean | null;
