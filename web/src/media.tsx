@@ -220,19 +220,22 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
   const [titleProgress, setTitleProgress] = useState<PlaybackProgress>();
   const [watchedBusy, setWatchedBusy] = useState("");
   const nextSourceRef = useRef<SourceIdentity | undefined>(undefined);
-  const selectedTrailerSeason = item.mediaType === "series" ? series?.seasons.find((candidate) => candidate.id === seasonID) : undefined;
-  const trailerItemKey = `${item.mediaType}:${item.titleId ?? item.id}:${selectedTrailerSeason ? `season:${selectedTrailerSeason.seasonNumber}` : "title"}`;
+  const continueSeriesID = typeof item.raw?.continueSeriesId === "string" ? item.raw.continueSeriesId : "";
+  const continueSeasonID = typeof item.raw?.continueSeasonId === "string" ? item.raw.continueSeasonId : "";
+  const continueEpisodeID = typeof item.raw?.continueEpisodeId === "string" ? item.raw.continueEpisodeId : "";
+  const continueSeasonNumber = typeof item.raw?.continueSeasonNumber === "number" ? item.raw.continueSeasonNumber : undefined;
+  const continueEpisodeNumber = typeof item.raw?.continueEpisodeNumber === "number" ? item.raw.continueEpisodeNumber : undefined;
+  const trailerSeriesContext = item.mediaType === "series" || (item.mediaType === "episode" && seriesVisible);
+  const trailerTitleID = item.mediaType === "episode" && seriesVisible ? series?.id ?? continueSeriesID : item.titleId ?? item.id;
+  const selectedTrailerSeason = trailerSeriesContext ? series?.seasons.find((candidate) => candidate.id === seasonID) : undefined;
+  const trailersAvailableForContext = item.mediaType === "movie" || item.mediaType === "series" || (item.mediaType === "episode" && seriesVisible && Boolean(series && selectedTrailerSeason));
+  const trailerItemKey = `${trailerSeriesContext ? "series" : item.mediaType}:${trailerTitleID}:${selectedTrailerSeason ? `season:${selectedTrailerSeason.seasonNumber}` : "title"}`;
   trailerItemRef.current = trailerItemKey;
   const activeTrailers = trailerOwnerKey === trailerItemKey ? trailers : [];
   const activeTrailer = trailerOwnerKey === trailerItemKey ? selectedTrailer : undefined;
   const activeTrailerLoading = trailerOwnerKey === trailerItemKey && trailerLoading;
   const streamResourceID = selectedEpisode && series ? episodeResourceID(series, selectedEpisode, item.id) : item.id;
   const playbackMediaType = selectedEpisode || item.mediaType === "episode" ? "episode" : item.mediaType;
-  const continueSeriesID = typeof item.raw?.continueSeriesId === "string" ? item.raw.continueSeriesId : "";
-  const continueSeasonID = typeof item.raw?.continueSeasonId === "string" ? item.raw.continueSeasonId : "";
-  const continueEpisodeID = typeof item.raw?.continueEpisodeId === "string" ? item.raw.continueEpisodeId : "";
-  const continueSeasonNumber = typeof item.raw?.continueSeasonNumber === "number" ? item.raw.continueSeasonNumber : undefined;
-  const continueEpisodeNumber = typeof item.raw?.continueEpisodeNumber === "number" ? item.raw.continueEpisodeNumber : undefined;
   const selectedProgress = selectedEpisode ? episodeProgress[selectedEpisode.id] : titleProgress;
   const preparationStartSeconds = selectedProgress?.completed ? 0 : Math.max(0, Math.floor(selectedProgress?.positionSeconds ?? 0));
   const fromContinue = item.raw?.continueReason === "resume" || item.raw?.continueReason === "next_episode";
@@ -509,7 +512,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
     setTrailerMessage("");
     setTrailerUnavailable(false);
     try {
-      const resolvedTitleID = await resolveMediaTitle(item);
+      const resolvedTitleID = item.mediaType === "episode" && seriesVisible && trailerTitleID ? trailerTitleID : await resolveMediaTitle(item);
       if (!requestIsCurrent()) return;
       setTitleID(resolvedTitleID);
       trailerRequested = true;
@@ -737,7 +740,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
         <Button disabled={!selectedStream || !preparation} loading={preparationLoading} onClick={() => setPlaying(true)}><Play size={19} fill="currentColor" /> {selectedEpisode ? "Play episode" : "Play selected stream"}</Button>
         <Button variant="secondary" loading={saving} onClick={() => void toggleLibrary()}>{saved ? <Check size={19} /> : <Bookmark size={19} />}{saved ? "In your library" : "Add to library"}</Button>
         {item.mediaType === "movie" && !fromContinue && <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>{titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}{titleProgress?.completed ? "Mark unwatched" : "Mark watched"}</Button>}
-        {(item.mediaType === "movie" || item.mediaType === "series") && <Button type="button" variant="secondary" disabled={Boolean(activeTrailer)} loading={activeTrailerLoading} aria-label={activeTrailerLoading ? "Loading trailers" : "Trailers"} aria-busy={activeTrailerLoading} aria-controls="details-trailer" aria-expanded={Boolean(activeTrailer)} onClick={() => void showTrailer()}><Clapperboard size={19} /> Trailers</Button>}
+        {trailersAvailableForContext && <Button type="button" variant="secondary" disabled={Boolean(activeTrailer)} loading={activeTrailerLoading} aria-label={activeTrailerLoading ? "Loading trailers" : "Trailers"} aria-busy={activeTrailerLoading} aria-controls="details-trailer" aria-expanded={Boolean(activeTrailer)} onClick={() => void showTrailer()}><Clapperboard size={19} /> Trailers</Button>}
       </div>
       {activeTrailer && <section id="details-trailer" className="details-trailer" aria-label={`Trailers for ${details.title}`}>
         <header className="details-trailer__header">
