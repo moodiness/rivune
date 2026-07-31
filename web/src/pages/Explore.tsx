@@ -111,25 +111,22 @@ async function loadContinueItems(): Promise<EnrichedContinueItem[]> {
 function useMediaPreferences() {
   const { activeProfile } = useAuth();
   const profileID = activeProfile?.id ?? "";
-  const [preferences, setPreferences] = useState({ profileID: "", hideUnreleased: false });
+  const [preferences, setPreferences] = useState({ profileID: "", hideUnreleased: false, animationsEnabled: true });
 
   useEffect(() => {
     let active = true;
     if (!activeProfile) {
-      api.configureMetadataLocale("auto", "auto");
-      setPreferences({ profileID: "", hideUnreleased: false });
+      setPreferences({ profileID: "", hideUnreleased: false, animationsEnabled: true });
       return () => { active = false; };
     }
     void api.effectiveSettings(activeProfile.id)
       .then((settings) => {
         if (!active) return;
-        api.configureMetadataLocale(settings.settings.metadataLanguage, settings.settings.metadataRegion, settings.settings.audioLanguage);
-        setPreferences({ profileID: activeProfile.id, hideUnreleased: settings.settings.hideUnreleased === true });
+        setPreferences({ profileID: activeProfile.id, hideUnreleased: settings.settings.hideUnreleased === true, animationsEnabled: settings.settings.animationsEnabled !== false });
       })
       .catch(() => {
         if (!active) return;
-        api.configureMetadataLocale("auto", "auto");
-        setPreferences({ profileID: activeProfile.id, hideUnreleased: false });
+        setPreferences({ profileID: activeProfile.id, hideUnreleased: false, animationsEnabled: true });
       });
     return () => { active = false; };
   }, [activeProfile]);
@@ -150,7 +147,7 @@ function HorizontalDragRow({ children, className = "folder-cover-row" }: { child
   const suppressClick = useRef(false);
 
   function finishDrag(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!drag.current.active || drag.current.pointerID !== event.pointerId) return;
+    if (event.pointerType === "touch" || !drag.current.active || drag.current.pointerID !== event.pointerId) return;
     drag.current.active = false;
     event.currentTarget.classList.remove("is-dragging");
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
@@ -163,11 +160,11 @@ function HorizontalDragRow({ children, className = "folder-cover-row" }: { child
   return <div
     className={className}
     onPointerDown={(event) => {
-      if (event.button !== 0) return;
+      if (event.pointerType === "touch" || event.button !== 0) return;
       drag.current = { active: true, moved: false, pointerID: event.pointerId, startX: event.clientX, startScrollLeft: event.currentTarget.scrollLeft };
     }}
     onPointerMove={(event) => {
-      if (!drag.current.active || drag.current.pointerID !== event.pointerId) return;
+      if (event.pointerType === "touch" || !drag.current.active || drag.current.pointerID !== event.pointerId) return;
       const distance = event.clientX - drag.current.startX;
       if (Math.abs(distance) < 5 && !drag.current.moved) return;
       if (!drag.current.moved) event.currentTarget.setPointerCapture(event.pointerId);
@@ -299,10 +296,10 @@ export function HomePage() {
   }, [mediaPreferences.profileID]);
 
   useEffect(() => {
-    if (heroSlides.length < 2 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (!mediaPreferences.animationsEnabled || heroSlides.length < 2 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const timer = window.setInterval(() => setActiveHeroIndex((current) => (current + 1) % heroSlides.length), 8_000);
     return () => window.clearInterval(timer);
-  }, [heroSlides.length]);
+  }, [heroSlides.length, mediaPreferences.animationsEnabled]);
 
   useEffect(() => {
     setActiveHeroIndex((current) => heroSlides.length === 0 ? 0 : current % heroSlides.length);
@@ -651,6 +648,7 @@ export function LibraryPage() {
     posterUrl: item.posterUrl,
     backgroundUrl: item.backgroundUrl,
     releaseInfo: item.releaseInfo,
+    released: item.released,
     externalIds: item.externalId && item.provider ? { [item.provider]: item.externalId } : undefined,
   })) ?? [];
 

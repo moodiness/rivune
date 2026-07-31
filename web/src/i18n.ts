@@ -71,6 +71,7 @@ const en = {
   "nav.home": "Home",
   "nav.search": "Search",
   "nav.library": "Library",
+  "nav.calendar": "Calendar",
   "nav.manage": "Manage",
   "nav.administration": "Administration",
   "nav.preferences": "Preferences",

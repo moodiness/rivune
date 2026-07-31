@@ -1,16 +1,17 @@
-import { Bookmark, Home, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Search, Settings, Sparkles, Users, X } from "lucide-react";
+import { Bookmark, CalendarDays, Home, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Search, Settings, Sparkles, Users, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useAuth } from "./auth";
 import { IconButton, RivuneMark } from "./components";
 import { translate as t } from "./i18n";
 import { notifyError } from "./notifications";
 
-export type View = "home" | "search" | "library" | "admin";
+export type View = "home" | "search" | "library" | "calendar" | "admin";
 
 const navItems: Array<{ id: View; label: string; icon: typeof Home }> = [
   { id: "home", label: t("nav.home"), icon: Home },
   { id: "search", label: t("nav.search"), icon: Search },
   { id: "library", label: t("nav.library"), icon: Bookmark },
+  { id: "calendar", label: t("nav.calendar"), icon: CalendarDays },
 ];
 
 export function Shell({ view, onView, children }: { view: View; onView: (view: View) => void; children: ReactNode }) {

@@ -1,4 +1,4 @@
-import { Activity, Bell, Boxes, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Cpu, Database, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Layers3, LoaderCircle, MonitorSmartphone, Pencil, Plus, Radio, RefreshCw, Save, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, X } from "lucide-react";
+import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Cpu, Database, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Languages, Layers3, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, X } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
@@ -1055,11 +1055,8 @@ function SettingsAdmin() {
       if (savingServer) setInstance((await api.updateInstanceSettings(instance)).settings);
       else {
         setProfile((await api.updateProfileSettings(target, profile)).settings);
-        if (target === activeProfile.id) {
-          const effective = await api.effectiveSettings(activeProfile.id);
-          api.configureMetadataLocale(effective.settings.metadataLanguage, effective.settings.metadataRegion, effective.settings.audioLanguage);
-        }
       }
+      if (savingServer || target === activeProfile.id) window.dispatchEvent(new Event("rivune:settings-changed"));
       notifySuccess(savingServer ? "Server defaults have been updated." : `${profileName} preferences have been updated.`, "Settings saved");
     } catch (cause) {
       setError(notifyError(cause, "Settings could not be saved.", "Settings not saved"));
@@ -1077,18 +1074,78 @@ function SettingsAdmin() {
 }
 
 function SettingsCard({ title, description, icon, values, onChange, onSave, saving, emptyLabel = "Inherit" }: { title: string; description: string; icon: React.ReactNode; values: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; saving: boolean; emptyLabel?: string }) {
+  function change<K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) {
+    onChange({ ...values, [key]: value });
+  }
+
   return <section className="settings-card">
     <header><span>{icon}</span><div><h3>{title}</h3><p>{description}</p></div></header>
-    <div className="settings-grid">
-      <label className="field"><span>Theme</span><div><select value={values.theme ?? ""} onChange={(event) => onChange({ ...values, theme: event.target.value || undefined })}><option value="">{emptyLabel}</option><option value="dark">Dark</option><option value="light">Light</option><option value="system">System</option></select></div></label>
-      <label className="field"><span>Maximum resolution</span><div><select value={values.maximumResolution ?? ""} onChange={(event) => onChange({ ...values, maximumResolution: event.target.value || undefined })}><option value="">{emptyLabel}</option><option value="2160p">4K · 2160p</option><option value="1080p">Full HD · 1080p</option><option value="720p">HD · 720p</option><option value="480p">SD · 480p</option></select></div></label>
-      <label className="field"><span>Metadata language</span><div><select value={values.metadataLanguage ?? ""} onChange={(event) => onChange({ ...values, metadataLanguage: event.target.value || undefined })}><option value="">{emptyLabel}</option><option value="auto">Automatic · preferred audio or device language</option><option value="fr-FR">Français</option><option value="en-US">English</option><option value="es-ES">Español</option><option value="de-DE">Deutsch</option><option value="it-IT">Italiano</option><option value="pt-BR">Português</option><option value="ja-JP">日本語</option></select></div></label>
-      <label className="field"><span>Metadata region</span><div><select value={values.metadataRegion ?? ""} onChange={(event) => onChange({ ...values, metadataRegion: event.target.value || undefined })}><option value="">{emptyLabel}</option><option value="auto">Automatic · device region</option><option value="FR">France</option><option value="BE">Belgium</option><option value="CA">Canada</option><option value="CH">Switzerland</option><option value="US">United States</option><option value="GB">United Kingdom</option><option value="DE">Germany</option><option value="ES">Spain</option><option value="IT">Italy</option><option value="JP">Japan</option></select></div></label>
-      <label className="field"><span>Audio language</span><div><input value={values.audioLanguage ?? ""} onChange={(event) => onChange({ ...values, audioLanguage: event.target.value || undefined })} placeholder="en" /></div></label>
-      <label className="field"><span>Subtitle language</span><div><input value={values.subtitleLanguage ?? ""} onChange={(event) => onChange({ ...values, subtitleLanguage: event.target.value || undefined })} placeholder="en" /></div></label>
-      <label className="toggle-field"><input type="checkbox" checked={values.preferDirectPlay ?? true} onChange={(event) => onChange({ ...values, preferDirectPlay: event.target.checked })} /><span><i /><div><strong>Prefer direct play</strong><small>Avoid transcoding when supported</small></div></span></label>
-      <label className="toggle-field"><input type="checkbox" checked={values.hideUnreleased ?? false} onChange={(event) => onChange({ ...values, hideUnreleased: event.target.checked })} /><span><i /><div><strong>Hide unreleased titles</strong><small>Home only · search still includes upcoming titles</small></div></span></label>
+    <div className="settings-groups">
+      <SettingsGroup icon={<Film />} title="Playback" description="Stream quality and episode flow.">
+        <label className="field"><span>Maximum resolution</span><div><select value={values.maximumResolution ?? ""} onChange={(event) => change("maximumResolution", event.target.value || null)}><option value="">{emptyLabel}</option><option value="2160p">4K · 2160p</option><option value="1080p">Full HD · 1080p</option><option value="720p">HD · 720p</option><option value="480p">SD · 480p</option></select></div></label>
+        <InheritedToggle label="Prefer direct play" description="Avoid transcoding when supported" value={values.preferDirectPlay} defaultValue onChange={(value) => change("preferDirectPlay", value)} emptyLabel={emptyLabel} />
+        <InheritedToggle label="Autoplay next episode" description="Continue a series when an episode finishes" value={values.autoplayNextEpisode} defaultValue onChange={(value) => change("autoplayNextEpisode", value)} emptyLabel={emptyLabel} />
+      </SettingsGroup>
+
+      <SettingsGroup icon={<Palette />} title="Interface" description="Appearance, motion, and content density.">
+        <label className="field"><span>Theme</span><div><select value={values.theme ?? ""} onChange={(event) => change("theme", event.target.value || null)}><option value="">{emptyLabel}</option><option value="dark">Dark</option><option value="light">Light</option><option value="system">System</option></select></div></label>
+        <label className="field"><span>Card density</span><div><select value={values.cardDensity ?? ""} onChange={(event) => change("cardDensity", event.target.value ? event.target.value as "comfortable" | "compact" : null)}><option value="">{emptyLabel}</option><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></div></label>
+        <InheritedToggle label="Interface animations" description="Use transitions and automatic hero rotation" value={values.animationsEnabled} defaultValue onChange={(value) => change("animationsEnabled", value)} emptyLabel={emptyLabel} />
+        <InheritedToggle label="Hide unreleased titles" description="Home only · search still includes upcoming titles" value={values.hideUnreleased} defaultValue={false} onChange={(value) => change("hideUnreleased", value)} emptyLabel={emptyLabel} />
+      </SettingsGroup>
+
+      <SettingsGroup icon={<Languages />} title="Languages & metadata" description="Keep titles and playback language-aware.">
+        <label className="field"><span>Metadata language</span><div><select value={values.metadataLanguage ?? ""} onChange={(event) => change("metadataLanguage", event.target.value || null)}><option value="">{emptyLabel}</option><option value="auto">Automatic · preferred audio or device language</option><option value="fr-FR">Français</option><option value="en-US">English</option><option value="es-ES">Español</option><option value="de-DE">Deutsch</option><option value="it-IT">Italiano</option><option value="pt-BR">Português</option><option value="ja-JP">日本語</option></select></div></label>
+        <label className="field"><span>Metadata region</span><div><select value={values.metadataRegion ?? ""} onChange={(event) => change("metadataRegion", event.target.value || null)}><option value="">{emptyLabel}</option><option value="auto">Automatic · device region</option><option value="FR">France</option><option value="BE">Belgium</option><option value="CA">Canada</option><option value="CH">Switzerland</option><option value="US">United States</option><option value="GB">United Kingdom</option><option value="DE">Germany</option><option value="ES">Spain</option><option value="IT">Italy</option><option value="JP">Japan</option></select></div></label>
+        <label className="field"><span>Audio language</span><div><input value={values.audioLanguage ?? ""} onChange={(event) => change("audioLanguage", event.target.value || null)} placeholder="en" /></div></label>
+      </SettingsGroup>
+
+      <SettingsGroup icon={<Captions />} title="Subtitles" description="Preferred track and readable cue styling.">
+        <label className="field"><span>Subtitle language</span><div><input value={values.subtitleLanguage ?? ""} onChange={(event) => change("subtitleLanguage", event.target.value || null)} placeholder="en" /></div></label>
+        <RangeSetting label="Subtitle size" value={values.subtitleSizePercent} defaultValue={100} min={50} max={200} step={1} suffix="%" emptyLabel={emptyLabel} onChange={(value) => change("subtitleSizePercent", value)} />
+        <ColorSetting value={values.subtitleTextColor} emptyLabel={emptyLabel} onChange={(value) => change("subtitleTextColor", value)} />
+        <RangeSetting label="Background opacity" value={values.subtitleBackgroundOpacityPercent} defaultValue={60} min={0} max={100} step={1} suffix="%" emptyLabel={emptyLabel} onChange={(value) => change("subtitleBackgroundOpacityPercent", value)} />
+      </SettingsGroup>
+
+      <SettingsGroup icon={<Bell />} title="Notifications" description="Session messages and how long they stay visible.">
+        <InheritedToggle label="Session notifications" description="Poll for messages sent to this device" value={values.notificationsEnabled} defaultValue onChange={(value) => change("notificationsEnabled", value)} emptyLabel={emptyLabel} />
+        <RangeSetting label="Display duration" value={values.notificationDurationSeconds} defaultValue={5} min={2} max={30} step={1} suffix=" seconds" emptyLabel={emptyLabel} onChange={(value) => change("notificationDurationSeconds", value)} />
+        <RangeSetting label="Polling interval" value={values.notificationPollIntervalSeconds} defaultValue={5} min={5} max={300} step={1} suffix=" seconds" emptyLabel={emptyLabel} onChange={(value) => change("notificationPollIntervalSeconds", value)} />
+      </SettingsGroup>
     </div>
     <footer><Button loading={saving} onClick={onSave}><Check size={18} /> Save settings</Button></footer>
   </section>;
+}
+
+function SettingsGroup({ icon, title, description, children }: { icon: React.ReactNode; title: string; description: string; children: React.ReactNode }) {
+  return <section className="settings-group">
+    <div className="settings-group__heading"><span>{icon}</span><div><h4>{title}</h4><p>{description}</p></div></div>
+    <div className="settings-group__grid">{children}</div>
+  </section>;
+}
+
+function InheritedToggle({ label, description, value, defaultValue, onChange, emptyLabel }: { label: string; description: string; value: boolean | null | undefined; defaultValue: boolean; onChange: (value: boolean | null) => void; emptyLabel: string }) {
+  const inherited = value === null || value === undefined;
+  return <div className="setting-control setting-control--toggle">
+    <label className="toggle-field"><input type="checkbox" checked={value ?? defaultValue} onChange={(event) => onChange(event.target.checked)} /><span><i /><div><strong>{label}</strong><small>{description}{inherited ? ` · ${emptyLabel}` : ""}</small></div></span></label>
+    {!inherited && <button type="button" className="setting-inherit" onClick={() => onChange(null)}>{emptyLabel}</button>}
+  </div>;
+}
+
+function RangeSetting({ label, value, defaultValue, min, max, step, suffix, emptyLabel, onChange }: { label: string; value: number | null | undefined; defaultValue: number; min: number; max: number; step: number; suffix: string; emptyLabel: string; onChange: (value: number | null) => void }) {
+  const inherited = value === null || value === undefined;
+  const shown = value ?? defaultValue;
+  return <div className="setting-control setting-control--range">
+    <label className="field"><span>{label}</span><div><input type="range" min={min} max={max} step={step} value={shown} onChange={(event) => onChange(Number(event.target.value))} /><output>{shown}{suffix}</output></div><small>{inherited ? emptyLabel : "Custom"}</small></label>
+    {!inherited && <button type="button" className="setting-inherit" onClick={() => onChange(null)}>{emptyLabel}</button>}
+  </div>;
+}
+
+function ColorSetting({ value, emptyLabel, onChange }: { value: string | null | undefined; emptyLabel: string; onChange: (value: string | null) => void }) {
+  const inherited = value === null || value === undefined;
+  const shown = value ?? "#FFFFFF";
+  return <div className="setting-control setting-control--color">
+    <label className="field"><span>Subtitle text color</span><div><input type="color" value={shown} onChange={(event) => onChange(event.target.value.toUpperCase())} /><output>{shown}</output></div><small>{inherited ? emptyLabel : "Custom"}</small></label>
+    {!inherited && <button type="button" className="setting-inherit" onClick={() => onChange(null)}>{emptyLabel}</button>}
+  </div>;
 }

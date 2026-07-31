@@ -11,17 +11,26 @@ type AppNotification = {
   title: string;
   message: string;
   markPresented: () => void;
+  durationMilliseconds: number;
 };
 
 type NotificationListener = (notification: AppNotification) => void;
 
 const listeners = new Set<NotificationListener>();
 let nextNotificationID = 1;
+const defaultNotificationDurationMilliseconds = 5_000;
+let notificationDurationMilliseconds = defaultNotificationDurationMilliseconds;
+
+export function configureNotificationDuration(durationSeconds: number): void {
+  notificationDurationMilliseconds = Number.isFinite(durationSeconds)
+    ? Math.min(30, Math.max(2, durationSeconds)) * 1_000
+    : defaultNotificationDurationMilliseconds;
+}
 
 function publish(tone: NotificationTone, title: string, message: string): Promise<void> {
   let markPresented = () => {};
   const presented = new Promise<void>((resolve) => { markPresented = resolve; });
-  const notification = { id: nextNotificationID++, tone, title, message, markPresented };
+  const notification = { id: nextNotificationID++, tone, title, message, durationMilliseconds: notificationDurationMilliseconds, markPresented };
   for (const listener of listeners) listener(notification);
   return presented;
 }
@@ -68,7 +77,7 @@ export function NotificationViewport() {
       const timeout = window.setTimeout(() => {
         notificationTimeouts.current.delete(notification.id);
         setNotifications((current) => current.filter((item) => item.id !== notification.id));
-      }, 5000);
+      }, notification.durationMilliseconds);
       notificationTimeouts.current.set(notification.id, timeout);
     }
   }, [notifications]);

@@ -1,10 +1,10 @@
-import { AudioLines, Bookmark, Captions, Check, Eye, EyeOff, Gauge, Info, ListVideo, LoaderCircle, Maximize, Pause, PictureInPicture, Play, RefreshCw, RotateCcw, RotateCw, ServerCrash, Settings2, SkipForward, Star, Volume2, VolumeX, X } from "lucide-react";
+import { AudioLines, Bookmark, Captions, Check, Clapperboard, Eye, EyeOff, Gauge, Info, ListVideo, LoaderCircle, Maximize, Minimize, Pause, PictureInPicture, Play, RefreshCw, RotateCcw, RotateCw, ServerCrash, Settings2, SkipForward, Star, Volume2, VolumeX, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { api, APIError } from "./api";
 import { Button, IconButton, Modal, Notice } from "./components";
 import { notifyError, notifyErrorMessage, notifySuccess } from "./notifications";
-import type { EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata } from "./types";
+import type { EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
 
 function record(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -71,6 +71,7 @@ async function resolveMediaTitle(item: MediaItem): Promise<string> {
     posterUrl: item.posterUrl,
     backgroundUrl: item.backgroundUrl,
     releaseInfo: item.releaseInfo,
+    released: item.released,
   });
   return resolved.titleId;
 }
@@ -113,6 +114,7 @@ function episodeItem(series: SeriesMetadata, episode: EpisodeMetadata, fallback:
     backgroundUrl: episode.stillUrl || fallback.backgroundUrl,
     description: episode.overview,
     releaseInfo: episode.airDate,
+    released: episode.airDate,
     externalIds: episode.externalIds,
   };
 }
@@ -130,6 +132,11 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState("");
+  const [trailer, setTrailer] = useState<TrailerMetadata>();
+  const [trailerLoading, setTrailerLoading] = useState(false);
+  const [trailerMessage, setTrailerMessage] = useState("");
+  const [trailerUnavailable, setTrailerUnavailable] = useState(false);
+  const [trailerOwnerKey, setTrailerOwnerKey] = useState("");
   const [metaLoading, setMetaLoading] = useState(true);
   const [availableStreams, setAvailableStreams] = useState<PlaybackSourceOption[]>([]);
   const [selectedStream, setSelectedStream] = useState<PlaybackSourceOption>();
@@ -140,8 +147,8 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
   const [preparationLoading, setPreparationLoading] = useState(false);
   const [preparationError, setPreparationError] = useState("");
   const [series, setSeries] = useState<SeriesMetadata>();
-  const [seriesVisible, setSeriesVisible] = useState(item.mediaType === "series");
-  const [seriesLoading, setSeriesLoading] = useState(item.mediaType === "series");
+  const [seriesVisible, setSeriesVisible] = useState(item.mediaType === "series" || item.raw?.openSeriesBrowser === true);
+  const [seriesLoading, setSeriesLoading] = useState(item.mediaType === "series" || item.raw?.openSeriesBrowser === true);
   const [seriesError, setSeriesError] = useState("");
   const [seasonID, setSeasonID] = useState("");
   const [season, setSeason] = useState<SeasonMetadata>();
@@ -151,9 +158,15 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
   const [episodeProgress, setEpisodeProgress] = useState<Record<string, PlaybackProgress | undefined>>({});
   const autoPlayNextRef = useRef(false);
   const sourceRefreshAttemptRef = useRef("");
+  const trailerRequestRef = useRef(0);
+  const trailerItemRef = useRef("");
   const [titleProgress, setTitleProgress] = useState<PlaybackProgress>();
   const [watchedBusy, setWatchedBusy] = useState("");
   const nextSourceRef = useRef<SourceIdentity | undefined>(undefined);
+  const trailerItemKey = `${item.mediaType}:${item.titleId ?? item.id}`;
+  trailerItemRef.current = trailerItemKey;
+  const activeTrailer = trailerOwnerKey === trailerItemKey ? trailer : undefined;
+  const activeTrailerLoading = trailerOwnerKey === trailerItemKey && trailerLoading;
   const streamResourceID = selectedEpisode && series ? episodeResourceID(series, selectedEpisode, item.id) : item.id;
   const playbackMediaType = selectedEpisode || item.mediaType === "episode" ? "episode" : item.mediaType;
   const continueSeriesID = typeof item.raw?.continueSeriesId === "string" ? item.raw.continueSeriesId : "";
@@ -162,6 +175,17 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
   const selectedProgress = selectedEpisode ? episodeProgress[selectedEpisode.id] : titleProgress;
   const preparationStartSeconds = selectedProgress?.completed ? 0 : Math.max(0, Math.floor(selectedProgress?.positionSeconds ?? 0));
   const fromContinue = item.raw?.continueReason === "resume" || item.raw?.continueReason === "next_episode";
+  const autoplayNextEpisode = document.documentElement.dataset.autoplayNextEpisode !== "false";
+
+  useEffect(() => {
+    trailerRequestRef.current += 1;
+    setTrailer(undefined);
+    setTrailerLoading(false);
+    setTrailerMessage("");
+    setTrailerUnavailable(false);
+    setTrailerOwnerKey("");
+    return () => { trailerRequestRef.current += 1; };
+  }, [item.id, item.mediaType, item.titleId]);
 
   useEffect(() => {
     let active = true;
@@ -172,12 +196,12 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
       if (!active || !meta) return;
       setDetails((current) => ({
         ...current,
-        title: String(meta.name ?? meta.title ?? current.title),
-        description: String(meta.description ?? current.description ?? ""),
-        posterUrl: String(meta.poster ?? current.posterUrl ?? ""),
-        backgroundUrl: String(meta.background ?? meta.backgroundUrl ?? current.backgroundUrl ?? ""),
+        title: item.mediaType === "episode" ? current.title : String(meta.name ?? meta.title ?? current.title),
+        description: item.mediaType === "episode" ? current.description : String(meta.description ?? current.description ?? ""),
+        posterUrl: item.mediaType === "episode" ? current.posterUrl : String(meta.poster ?? current.posterUrl ?? ""),
+        backgroundUrl: String(current.backgroundUrl ?? meta.background ?? meta.backgroundUrl ?? ""),
         logoUrl: String(meta.logo ?? current.logoUrl ?? ""),
-        releaseInfo: String(meta.releaseInfo ?? meta.year ?? current.releaseInfo ?? ""),
+        releaseInfo: item.mediaType === "episode" ? current.releaseInfo : String(meta.releaseInfo ?? meta.year ?? current.releaseInfo ?? ""),
         raw: { ...current.raw, ...meta },
       }));
     }).catch(() => undefined).finally(() => { if (active) setMetaLoading(false); });
@@ -242,22 +266,38 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
     void api.seasonDetails(seasonID).then(async (resolved) => {
       if (!active) return;
       setSeason(resolved);
-      const progressEntries = await Promise.all(resolved.episodes.map(async (episode) => [episode.id, await api.progress(episode.id).catch(() => undefined)] as const));
-      if (!active) return;
-      setEpisodeProgress(Object.fromEntries(progressEntries));
-      if (item.mediaType === "episode" && seasonID === continueSeasonID && continueEpisodeID) {
-        setSelectedEpisode(resolved.episodes.find((episode) => episode.id === continueEpisodeID));
-      }
       if (autoPlayNextRef.current) {
         const first = resolved.episodes.find((episode) => !episodeIsUpcoming(episode));
         if (first) setSelectedEpisode(first);
         else autoPlayNextRef.current = false;
+      } else if (item.mediaType === "episode") {
+        const requested = seasonID === continueSeasonID && continueEpisodeID
+          ? resolved.episodes.find((episode) => episode.id === continueEpisodeID)
+          : undefined;
+        setSelectedEpisode(requested ?? resolved.episodes[0]);
       }
+      const progressEntries = await Promise.all(resolved.episodes.map(async (episode) => [episode.id, await api.progress(episode.id).catch(() => undefined)] as const));
+      if (!active) return;
+      setEpisodeProgress(Object.fromEntries(progressEntries));
     }).catch((cause) => {
       if (active) setSeriesError(notifyError(cause, "Episodes could not be loaded.", "Season unavailable"));
     }).finally(() => { if (active) setSeasonLoading(false); });
     return () => { active = false; };
   }, [seasonID]);
+  useEffect(() => {
+    if (item.mediaType !== "episode" || !selectedEpisode) return;
+    const episodeCode = `S${String(selectedEpisode.seasonNumber).padStart(2, "0")}E${String(selectedEpisode.episodeNumber).padStart(2, "0")}`;
+    setDetails((current) => ({
+      ...current,
+      title: [series?.name, episodeCode, selectedEpisode.name].filter(Boolean).join(" · "),
+      description: selectedEpisode.overview || current.description,
+      posterUrl: selectedEpisode.stillUrl || current.posterUrl,
+      backgroundUrl: selectedEpisode.stillUrl || current.backgroundUrl,
+      releaseInfo: selectedEpisode.airDate || current.releaseInfo,
+      released: selectedEpisode.airDate || current.released,
+      externalIds: selectedEpisode.externalIds,
+    }));
+  }, [item.mediaType, selectedEpisode, series?.name]);
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
@@ -352,6 +392,52 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
     } finally {
       setSaving(false);
     }
+  }
+
+  async function showTrailer() {
+    if (activeTrailer || activeTrailerLoading) return;
+    const requestID = ++trailerRequestRef.current;
+    const requestedItemKey = trailerItemRef.current;
+    const requestIsCurrent = () => trailerRequestRef.current === requestID && trailerItemRef.current === requestedItemKey;
+    let trailerRequested = false;
+    setTrailer(undefined);
+    setTrailerOwnerKey(requestedItemKey);
+    setTrailerLoading(true);
+    setTrailerMessage("");
+    setTrailerUnavailable(false);
+    try {
+      const resolvedTitleID = await resolveMediaTitle(item);
+      if (!requestIsCurrent()) return;
+      setTitleID(resolvedTitleID);
+      trailerRequested = true;
+      const metadata = await api.trailer(resolvedTitleID);
+      if (!requestIsCurrent()) return;
+      setTrailer(metadata);
+    } catch (cause) {
+      if (!requestIsCurrent()) return;
+      if (trailerRequested && cause instanceof APIError && cause.status === 404) {
+        setTrailerUnavailable(true);
+        setTrailerMessage("No trailer is available for this title.");
+      } else {
+        setTrailerMessage(notifyError(cause, "The trailer could not be loaded.", "Trailer unavailable"));
+      }
+    } finally {
+      if (requestIsCurrent()) setTrailerLoading(false);
+    }
+  }
+
+  function dismissTrailer() {
+    trailerRequestRef.current += 1;
+    setTrailer(undefined);
+    setTrailerLoading(false);
+    setTrailerMessage("");
+    setTrailerUnavailable(false);
+    setTrailerOwnerKey("");
+  }
+
+  function closeDetails() {
+    dismissTrailer();
+    onClose();
   }
 
   async function toggleTitleWatched() {
@@ -449,13 +535,26 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
     return typeof value?.name === "string" ? value.name : "";
   }).filter(Boolean).slice(0, 4) : [];
   const backdrop = details.backgroundUrl || details.posterUrl;
+  const trailerURL = activeTrailer ? (() => {
+    const params = new URLSearchParams({ autoplay: "1" });
+    if (activeTrailer.captionPreference) {
+      params.set("cc_lang_pref", activeTrailer.captionPreference);
+      params.set("cc_load_policy", "1");
+    }
+    return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(activeTrailer.youtubeId)}?${params.toString()}`;
+  })() : "";
+  const trailerAvailability = activeTrailer?.isFallback
+    ? activeTrailer.captionPreference?.toLowerCase() === "fr"
+      ? "English trailer · French captions requested when available."
+      : "English trailer."
+    : "";
 
   if (playing && selectedStream) {
-    return <Player item={activePlayerItem} sourceRef={selectedStream.sourceRef} startSeconds={preparationStartSeconds} onClose={() => setPlaying(false)} onSourceExpired={() => { setPlaying(false); setStreamRefreshVersion((version) => version + 1); }} onEnded={selectedEpisode ? handleEpisodeEnded : undefined} />;
+    return <Player item={activePlayerItem} sourceRef={selectedStream.sourceRef} startSeconds={preparationStartSeconds} autoplayNextEpisode={autoplayNextEpisode} onClose={() => setPlaying(false)} onSourceExpired={() => { setPlaying(false); setStreamRefreshVersion((version) => version + 1); }} onEnded={selectedEpisode ? handleEpisodeEnded : undefined} />;
   }
 
   const typeLabel = mediaTypeLabel(details.mediaType);
-  return <Modal onClose={onClose} className="details-modal">
+  return <Modal onClose={closeDetails} className="details-modal">
     <div className="details-hero" style={backdrop ? { backgroundImage: `url(${backdrop})` } : undefined}><div className="details-hero__shade" /></div>
     <div className="details-content">
       {details.logoUrl ? <img className="details-logo" src={details.logoUrl} alt={details.title} /> : <h1>{details.title}</h1>}
@@ -506,7 +605,14 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
         <Button disabled={!selectedStream || !preparation} loading={preparationLoading} onClick={() => setPlaying(true)}><Play size={19} fill="currentColor" /> {selectedEpisode ? "Play episode" : "Play selected stream"}</Button>
         <Button variant="secondary" loading={saving} onClick={() => void toggleLibrary()}>{saved ? <Check size={19} /> : <Bookmark size={19} />}{saved ? "In your library" : "Add to library"}</Button>
         {item.mediaType === "movie" && !fromContinue && <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>{titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}{titleProgress?.completed ? "Mark unwatched" : "Mark watched"}</Button>}
+        {(item.mediaType === "movie" || item.mediaType === "series") && <Button type="button" variant="secondary" disabled={Boolean(activeTrailer)} loading={activeTrailerLoading} aria-label={activeTrailerLoading ? "Loading trailer" : "Trailer"} aria-busy={activeTrailerLoading} aria-controls="details-trailer" aria-expanded={Boolean(activeTrailer)} onClick={() => void showTrailer()}><Clapperboard size={19} /> Trailer</Button>}
       </div>
+      {activeTrailer && <section id="details-trailer" className="details-trailer" aria-label={`Trailer for ${details.title}`}>
+        <header><span><Clapperboard size={17} /><strong>{activeTrailer.name || "Trailer"}</strong></span><IconButton label="Dismiss trailer" onClick={dismissTrailer}><X size={17} /></IconButton></header>
+        <div className="details-trailer__frame"><iframe src={trailerURL} title={`${activeTrailer.name || "Trailer"} — ${details.title}`} allow="autoplay; encrypted-media; picture-in-picture" referrerPolicy="strict-origin-when-cross-origin" allowFullScreen /></div>
+        {trailerAvailability && <p>{trailerAvailability}</p>}
+      </section>}
+      {trailerOwnerKey === trailerItemKey && trailerMessage && <div className="details-trailer-feedback"><Notice tone={trailerUnavailable ? "info" : "error"}>{trailerMessage}</Notice></div>}
       {actionError && <Notice>{actionError}</Notice>}
       {details.sources && details.sources.length > 0 && <div className="details-sources"><span>Available from</span>{details.sources.map((source) => <i key={source.id}>{source.title}</i>)}</div>}
     </div>
@@ -517,6 +623,16 @@ type PlayerPhase = "preparing" | "ready" | "playing" | "paused" | "buffering" | 
 type PlayerPanel = "sources" | "audio" | "subtitles" | "speed" | "stats" | null;
 type PlayerPreferences = { volume: number; muted: boolean; rate: number };
 type PlayerStats = { bufferedAhead: number; droppedFrames: number; totalFrames: number; width: number; height: number };
+type PlayerFullscreenKind = "none" | "standard" | "webkit";
+type WebKitFullscreenVideo = HTMLVideoElement & {
+  webkitDisplayingFullscreen?: boolean;
+  webkitEnterFullscreen?: () => void;
+  webkitExitFullscreen?: () => void;
+};
+type PlayerScreenOrientation = {
+  lock?: (orientation: "landscape") => Promise<void>;
+  unlock?: () => void;
+};
 
 const playerPreferencesKey = "rivune.player.preferences";
 const playbackRates = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -560,7 +676,7 @@ function playerTrackLabel(track: { codec: string; channels?: number }): string {
   return `${track.codec.toUpperCase()}${channelLabel ? ` · ${channelLabel}` : ""}`;
 }
 
-export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired, onEnded }: { item: MediaItem; sourceRef: string; startSeconds: number; onClose: () => void; onSourceExpired: () => void; onEnded?: () => void }) {
+export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onClose, onSourceExpired, onEnded }: { item: MediaItem; sourceRef: string; startSeconds: number; autoplayNextEpisode: boolean; onClose: () => void; onSourceExpired: () => void; onEnded?: () => void }) {
   const initialPreferences = useRef(loadPlayerPreferences()).current;
   const playerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -568,6 +684,9 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
   const clickTimerRef = useRef<number | undefined>(undefined);
   const lastTouchRef = useRef({ time: 0, x: 0 });
   const suppressNextClickRef = useRef(false);
+  const fullscreenKindRef = useRef<PlayerFullscreenKind>("none");
+  const [fullscreenKind, setFullscreenKind] = useState<PlayerFullscreenKind>("none");
+  const [fullscreenSupported, setFullscreenSupported] = useState(() => typeof document.documentElement.requestFullscreen === "function" || "webkitEnterFullscreen" in HTMLVideoElement.prototype);
   const [streams, setStreams] = useState<PlaybackSource[]>([]);
   const [subtitles, setSubtitles] = useState<PlaybackSubtitle[]>([]);
   const [selected, setSelected] = useState(0);
@@ -680,10 +799,57 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
   const transportTime = seekPreview ?? currentTime;
   const progressPercent = playbackDuration > 0 ? Math.min(100, Math.max(0, transportTime / playbackDuration * 100)) : 0;
   const remainingSeconds = playbackDuration > 0 ? Math.max(0, playbackDuration - currentTime) : Number.POSITIVE_INFINITY;
-  const showNextEpisode = Boolean(onEnded && remainingSeconds <= 30 && phase !== "ended");
+  const showNextEpisode = Boolean(onEnded && (phase === "ended" || remainingSeconds <= 30));
   const customTransport = Boolean(stream?.url);
   const toneMapped = Boolean(stream?.media?.hdrFormat && stream.media.hdrFormat !== "sdr" && stream.mode === "transcode");
   const modeLabel = playerModeLabel(stream?.mode, toneMapped);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    const video = videoRef.current as WebKitFullscreenVideo | null;
+    const standardSupported = document.fullscreenEnabled !== false && typeof player?.requestFullscreen === "function" && typeof document.exitFullscreen === "function";
+    const webkitSupported = typeof video?.webkitEnterFullscreen === "function";
+    setFullscreenSupported(standardSupported || webkitSupported);
+
+    function handleStandardFullscreenChange() {
+      const nextKind: PlayerFullscreenKind = document.fullscreenElement === player ? "standard" : video?.webkitDisplayingFullscreen ? "webkit" : "none";
+      fullscreenKindRef.current = nextKind;
+      setFullscreenKind(nextKind);
+      if (nextKind === "none") unlockPlayerOrientation();
+    }
+
+    function handleStandardFullscreenError() {
+      if (document.fullscreenElement === player) return;
+      fullscreenKindRef.current = "none";
+      setFullscreenKind("none");
+      unlockPlayerOrientation();
+    }
+
+    function handleWebKitFullscreenBegin() {
+      fullscreenKindRef.current = "webkit";
+      setFullscreenKind("webkit");
+    }
+
+    function handleWebKitFullscreenEnd() {
+      fullscreenKindRef.current = "none";
+      setFullscreenKind("none");
+      unlockPlayerOrientation();
+    }
+
+    const initialKind: PlayerFullscreenKind = document.fullscreenElement === player ? "standard" : video?.webkitDisplayingFullscreen ? "webkit" : "none";
+    fullscreenKindRef.current = initialKind;
+    setFullscreenKind(initialKind);
+    document.addEventListener("fullscreenchange", handleStandardFullscreenChange);
+    document.addEventListener("fullscreenerror", handleStandardFullscreenError);
+    video?.addEventListener("webkitbeginfullscreen", handleWebKitFullscreenBegin);
+    video?.addEventListener("webkitendfullscreen", handleWebKitFullscreenEnd);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleStandardFullscreenChange);
+      document.removeEventListener("fullscreenerror", handleStandardFullscreenError);
+      video?.removeEventListener("webkitbeginfullscreen", handleWebKitFullscreenBegin);
+      video?.removeEventListener("webkitendfullscreen", handleWebKitFullscreenEnd);
+    };
+  }, [playbackGeneration, stream?.id, stream?.url]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -896,7 +1062,7 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
       if (event.key === "Escape" || event.key === "BrowserBack" || event.key === "GoBack") {
         event.preventDefault();
         if (panel) setPanel(null);
-        else if (document.fullscreenElement) void document.exitFullscreen();
+        else if (fullscreenKind !== "none" || document.fullscreenElement === playerRef.current) void exitPlayerFullscreen();
         else if (!controlsVisible) revealControls();
         else closePlayer();
         return;
@@ -940,7 +1106,7 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
           break;
         case "f":
           event.preventDefault();
-          toggleFullscreen();
+          void toggleFullscreen();
           break;
         case "p":
           event.preventDefault();
@@ -954,11 +1120,13 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [controlsVisible, panel, paused, phase, playbackDuration, stream, volume]);
+  }, [controlsVisible, fullscreenKind, panel, paused, phase, playbackDuration, stream, volume]);
 
   useEffect(() => () => {
     window.clearTimeout(controlsTimerRef.current);
     window.clearTimeout(clickTimerRef.current);
+    void exitPlayerFullscreen(false, false);
+    unlockPlayerOrientation();
     stopCurrentSession();
   }, []);
 
@@ -1005,6 +1173,8 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
 
   function closePlayer() {
     void persistProgress();
+    void exitPlayerFullscreen(false, false);
+    unlockPlayerOrientation();
     stopCurrentSession();
     onClose();
   }
@@ -1138,12 +1308,93 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     revealControls();
   }
 
-  function toggleFullscreen() {
-    if (document.fullscreenElement) {
-      void document.exitFullscreen();
+  function updateFullscreenKind(kind: PlayerFullscreenKind) {
+    fullscreenKindRef.current = kind;
+    setFullscreenKind(kind);
+  }
+
+  function unlockPlayerOrientation() {
+    try {
+      const orientation = (screen as Screen & { orientation?: PlayerScreenOrientation }).orientation;
+      orientation?.unlock?.();
+    } catch {
+      // Orientation cleanup is best effort across browser implementations.
+    }
+  }
+
+  async function exitPlayerFullscreen(reportFailure = true, synchronizeState = true) {
+    const player = playerRef.current;
+    const video = videoRef.current as WebKitFullscreenVideo | null;
+    let exitCompleted = false;
+    try {
+      if (document.fullscreenElement && player?.contains(document.fullscreenElement) && typeof document.exitFullscreen === "function") {
+        await document.exitFullscreen();
+        exitCompleted = true;
+      } else if ((fullscreenKindRef.current === "webkit" || video?.webkitDisplayingFullscreen) && typeof video?.webkitExitFullscreen === "function") {
+        video.webkitExitFullscreen();
+        exitCompleted = true;
+      } else {
+        exitCompleted = true;
+      }
+    } catch (cause) {
+      if (reportFailure) notifyError(cause, "Fullscreen could not be closed.", "Fullscreen unavailable");
+    } finally {
+      if (!synchronizeState) {
+        unlockPlayerOrientation();
+        return;
+      }
+      const standardActive = Boolean(document.fullscreenElement && player?.contains(document.fullscreenElement));
+      const webkitActive = Boolean(video?.webkitDisplayingFullscreen || !exitCompleted && fullscreenKindRef.current === "webkit");
+      if (!standardActive && !webkitActive) {
+        updateFullscreenKind("none");
+        unlockPlayerOrientation();
+      }
+    }
+  }
+
+  async function toggleFullscreen() {
+    const player = playerRef.current;
+    const video = videoRef.current as WebKitFullscreenVideo | null;
+    if (fullscreenKindRef.current !== "none" || document.fullscreenElement === player || video?.webkitDisplayingFullscreen) {
+      await exitPlayerFullscreen();
       return;
     }
-    if (playerRef.current) void playerRef.current.requestFullscreen();
+
+    const standardSupported = document.fullscreenEnabled !== false && typeof player?.requestFullscreen === "function" && typeof document.exitFullscreen === "function";
+    if (standardSupported && player) {
+      try {
+        await player.requestFullscreen();
+        updateFullscreenKind("standard");
+        const orientation = (screen as Screen & { orientation?: PlayerScreenOrientation }).orientation;
+        if (typeof orientation?.lock === "function") {
+          try {
+            await orientation.lock("landscape");
+            if (document.fullscreenElement !== player) unlockPlayerOrientation();
+          } catch {
+            // Fullscreen remains active when orientation locking is unavailable or denied.
+          }
+        }
+        return;
+      } catch (cause) {
+        unlockPlayerOrientation();
+        notifyError(cause, "Fullscreen could not be opened.", "Fullscreen unavailable");
+        return;
+      }
+    }
+
+    if (typeof video?.webkitEnterFullscreen === "function") {
+      try {
+        video.webkitEnterFullscreen();
+        updateFullscreenKind("webkit");
+        return;
+      } catch (cause) {
+        notifyError(cause, "Fullscreen could not be opened.", "Fullscreen unavailable");
+        return;
+      }
+    }
+
+    unlockPlayerOrientation();
+    notifyErrorMessage("This browser does not support fullscreen playback.", "Fullscreen unavailable");
   }
 
   async function togglePictureInPicture() {
@@ -1223,7 +1474,7 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     }
     setPhase("ended");
     void persistProgress(true);
-    onEnded?.();
+    if (autoplayNextEpisode) onEnded?.();
   }
 
   function playNextEpisode() {
@@ -1250,7 +1501,7 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     const position = (event.clientX - bounds.left) / bounds.width;
     if (position < 0.4) seekBy(-10);
     else if (position > 0.6) seekBy(10);
-    else toggleFullscreen();
+    else void toggleFullscreen();
   }
 
   function handleSurfacePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1334,7 +1585,7 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
     {playbackBlocked && phase !== "failed" && <button type="button" className="player__start" onClick={togglePlayback} data-player-control><Play size={30} fill="currentColor" /><span>Play</span></button>}
     {phase === "failed" && <div className="player__failure" role="alert"><ServerCrash size={34} /><strong>Playback unavailable</strong><p>{error || "The selected stream could not be played."}</p><div><Button onClick={retryPlayback}><RefreshCw size={17} /> Retry</Button><Button variant="secondary" onClick={closePlayer}>Go back</Button></div></div>}
     {!loading && playable.length === 0 && phase !== "failed" && <div className="player__failure"><ServerCrash size={34} /><strong>No playable source</strong><p>{error || "The selected stream is not compatible with this device."}</p><Button variant="secondary" onClick={closePlayer}>Go back</Button></div>}
-    {showNextEpisode && <button type="button" className="player__next" onClick={playNextEpisode} data-player-control><span>Up next</span><strong>Next episode</strong><small>Starts in {Math.ceil(remainingSeconds)}s</small><SkipForward size={20} fill="currentColor" /></button>}
+    {showNextEpisode && <button type="button" className="player__next" onClick={playNextEpisode} data-player-control><span>Up next</span><strong>Next episode</strong><small>{autoplayNextEpisode && phase !== "ended" ? `Starts in ${Math.ceil(remainingSeconds)}s` : "Play next episode"}</small><SkipForward size={20} fill="currentColor" /></button>}
 
     {customTransport && <div className={`player__chrome${controlsVisible ? "" : " is-hidden"}`}>
       <div className="player__timeline-row">
@@ -1365,7 +1616,7 @@ export function Player({ item, sourceRef, startSeconds, onClose, onSourceExpired
           <button type="button" aria-label={`Playback speed ${playbackRate}x`} className={panel === "speed" ? "is-active" : ""} onClick={() => togglePanel("speed")} data-player-control><Gauge size={19} /><small>{playbackRate}×</small></button>
           <button type="button" aria-label="Playback diagnostics" className={panel === "stats" ? "is-active" : ""} onClick={() => togglePanel("stats")} data-player-control><Info size={19} /></button>
           {document.pictureInPictureEnabled && <button type="button" aria-label="Picture in Picture" onClick={() => void togglePictureInPicture()} data-player-control><PictureInPicture size={19} /></button>}
-          <button type="button" aria-label="Fullscreen" onClick={toggleFullscreen} data-player-control><Maximize size={19} /></button>
+          {fullscreenSupported && <button type="button" className="player__fullscreen" aria-label={fullscreenKind === "none" ? "Enter fullscreen" : "Exit fullscreen"} onClick={() => void toggleFullscreen()} data-player-control>{fullscreenKind === "none" ? <Maximize size={19} /> : <Minimize size={19} />}</button>}
         </div>
       </div>
     </div>}

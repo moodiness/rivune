@@ -158,6 +158,13 @@ export type MediaItem = {
   sources?: SourceReference[];
   raw?: Record<string, unknown>;
 };
+export type TrailerMetadata = {
+  youtubeId: string;
+  name: string;
+  language: string;
+  isFallback: boolean;
+  captionPreference?: string;
+};
 export type EpisodeMetadata = {
   id: string;
   mediaType: "episode";
@@ -367,10 +374,27 @@ export type LibraryItem = {
   posterUrl?: string;
   backgroundUrl?: string;
   releaseInfo?: string;
+  released?: string;
   addedAt: string;
   updatedAt: string;
 };
 export type LibraryPage = { items: LibraryItem[]; page: number; totalPages: number; totalResults: number };
+export type CalendarEvent = {
+  id: string;
+  titleId: string;
+  mediaType: "movie" | "episode";
+  title: string;
+  releaseDate: string;
+  posterUrl?: string;
+  resourceId?: string;
+  resourceProvider?: string;
+  seriesTitle?: string;
+  seriesId?: string;
+  seasonId?: string;
+  seasonNumber?: number;
+  episodeNumber?: number;
+};
+export type CalendarResponse = { events: CalendarEvent[] };
 export type TitleReference = {
   titleId: string;
   mediaType: string;
@@ -381,6 +405,7 @@ export type TitleReference = {
   posterUrl?: string;
   backgroundUrl?: string;
   releaseInfo?: string;
+  released?: string;
 };
 export type ContinueItem = {
   titleId: string;
@@ -404,14 +429,23 @@ export type ContinueItem = {
 export type ContinueWatching = { items: ContinueItem[] };
 
 export type SettingsValues = {
-  theme?: string;
-  maximumResolution?: string;
-  preferDirectPlay?: boolean;
-  hideUnreleased?: boolean;
-  metadataLanguage?: string;
-  metadataRegion?: string;
-  audioLanguage?: string;
-  subtitleLanguage?: string;
+  theme?: string | null;
+  maximumResolution?: string | null;
+  preferDirectPlay?: boolean | null;
+  hideUnreleased?: boolean | null;
+  metadataLanguage?: string | null;
+  metadataRegion?: string | null;
+  audioLanguage?: string | null;
+  subtitleLanguage?: string | null;
+  autoplayNextEpisode?: boolean | null;
+  cardDensity?: "comfortable" | "compact" | null;
+  animationsEnabled?: boolean | null;
+  subtitleSizePercent?: number | null;
+  subtitleTextColor?: string | null;
+  subtitleBackgroundOpacityPercent?: number | null;
+  notificationsEnabled?: boolean | null;
+  notificationDurationSeconds?: number | null;
+  notificationPollIntervalSeconds?: number | null;
 };
 export type SettingsLayer = { schemaVersion: number; settings: SettingsValues; updatedAt?: string };
 export type AvatarPreset = { id: string; name: string; url: string };

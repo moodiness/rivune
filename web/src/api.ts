@@ -1,6 +1,7 @@
 import type {
   Account,
   AvatarPreset,
+  CalendarResponse,
   Collection,
   CollectionSaveInput,
   CollectionExportDocument,
@@ -27,6 +28,7 @@ import type {
   SettingsValues,
   TitleReference,
   TokenPair,
+  TrailerMetadata,
 } from "./types";
 
 const API_BASE = "/api/v1";
@@ -161,6 +163,7 @@ export const api = {
   sendProfileSessionNotification: (profileId: string, sessionId: string, message: string) => request<SessionNotification>(`/profiles/${profileId}/sessions/${sessionId}/notifications`, { method: "POST", body: JSON.stringify({ message }) }),
 
   collections: () => request<{ collections: Collection[] }>("/collections"),
+  calendar: (from: string, to: string, signal?: AbortSignal) => request<CalendarResponse>(`/calendar${query({ from, to, language: metadataLanguage })}`, { signal }),
   collection: (id: string) => request<Collection>(`/collections/${id}`),
   createCollection: (input: CollectionSaveInput) => request<Collection>("/collections", { method: "POST", body: JSON.stringify(input) }),
   updateCollection: (id: string, input: CollectionSaveInput) => request<Collection>(`/collections/${id}`, { method: "PUT", body: JSON.stringify(input) }),
@@ -196,6 +199,7 @@ export const api = {
     posterUrl?: string;
     backgroundUrl?: string;
     releaseInfo?: string;
+    released?: string;
   }) => request<TitleReference>("/titles/resolve", { method: "POST", body: JSON.stringify(input) }),
   playbackSources: (input: { mediaType: string; resourceId: string; capabilities: PlaybackCapabilities }, signal?: AbortSignal) =>
     request<PlaybackSourceList>("/playback/sources", { method: "POST", body: JSON.stringify(input), signal }),
@@ -209,6 +213,7 @@ export const api = {
   purgePlaybackActivity: () => request<PlaybackPurgeResult>("/playback/activity/purge", { method: "POST" }),
   seriesDetails: (titleId: string) => request<SeriesMetadata>(`/metadata/series/${encodeURIComponent(titleId)}${query({ language: metadataLanguage })}`),
   seasonDetails: (seasonId: string) => request<SeasonMetadata>(`/metadata/seasons/${encodeURIComponent(seasonId)}${query({ language: metadataLanguage })}`),
+  trailer: (titleId: string) => request<TrailerMetadata>(`/metadata/titles/${encodeURIComponent(titleId)}/trailer${query({ language: metadataLanguage })}`),
 
   library: (mediaType = "") => request<LibraryPage>(`/library${query({ mediaType, page: 1, pageSize: 100 })}`),
   continueWatching: () => request<ContinueWatching>("/continue-watching?limit=30"),
