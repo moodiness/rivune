@@ -1,0 +1,354 @@
+package io.rivune.api
+
+import java.util.UUID
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+
+object RivuneProtocol {
+    const val VERSION: Int = 16
+}
+
+object UUIDSerializer : KSerializer<UUID> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("UUID", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: UUID) = encoder.encodeString(value.toString())
+    override fun deserialize(decoder: Decoder): UUID = UUID.fromString(decoder.decodeString())
+}
+
+@Serializable
+data class Discovery(
+    val name: String,
+    val serverVersion: String,
+    val protocolVersion: Int,
+    val apiBaseUrl: String,
+    val setupRequired: Boolean,
+    val timezone: String,
+)
+
+@Serializable
+data class Device(
+    @Serializable(with = UUIDSerializer::class) val id: UUID? = null,
+    val name: String,
+    val platform: String,
+)
+
+@Serializable
+data class LoginRequest(val username: String, val password: String, val device: Device)
+
+@Serializable
+data class TokenPair(
+    val tokenType: String,
+    val accessToken: String,
+    val accessTokenExpiresAt: String,
+    val refreshToken: String,
+    val refreshTokenExpiresAt: String,
+    @Serializable(with = UUIDSerializer::class) val sessionId: UUID,
+    @Serializable(with = UUIDSerializer::class) val deviceId: UUID,
+)
+
+@Serializable
+data class Account(
+    val user: AccountUser,
+    val session: AccountSession,
+    val profiles: List<Profile>,
+)
+
+@Serializable
+data class AccountUser(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val username: String,
+    val role: String,
+)
+
+@Serializable
+data class AccountSession(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    @Serializable(with = UUIDSerializer::class) val deviceId: UUID,
+    val activeProfile: ActiveProfileGrant?,
+)
+
+@Serializable
+data class ActiveProfileGrant(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val expiresAt: String,
+)
+
+@Serializable
+data class ProfileList(val profiles: List<Profile>)
+
+@Serializable
+data class Profile(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val name: String,
+    val isChild: Boolean,
+    val hasPin: Boolean,
+    val canManage: Boolean,
+    val enabled: Boolean,
+    val availableFrom: String?,
+    val availableUntil: String?,
+    val accessStartTime: String?,
+    val accessEndTime: String?,
+    val accessTimezone: String,
+    val accessible: Boolean,
+    val avatar: ProfileAvatar,
+)
+
+@Serializable
+data class ProfileAvatar(val kind: String, val presetId: String? = null, val url: String)
+
+@Serializable
+data class ProfileSelection(val profile: Profile, val expiresAt: String)
+
+@Serializable
+enum class MediaType {
+    @SerialName("movie") MOVIE,
+    @SerialName("series") SERIES,
+    @SerialName("season") SEASON,
+    @SerialName("episode") EPISODE,
+}
+
+@Serializable
+enum class SeriesMappingProvider {
+    @SerialName("tmdb") TMDB,
+    @SerialName("tvdb") TVDB;
+
+    val wireValue: String get() = name.lowercase()
+}
+
+@Serializable
+data class Genre(val id: Int, val name: String)
+
+@Serializable
+data class Movie(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val mediaType: MediaType,
+    val title: String,
+    val originalTitle: String,
+    val originalLanguage: String,
+    val overview: String,
+    val releaseDate: String? = null,
+    val posterUrl: String? = null,
+    val backdropUrl: String? = null,
+    val tagline: String? = null,
+    val runtimeMinutes: Int? = null,
+    val genres: List<Genre>,
+    val voteAverage: Double,
+    val voteCount: Int,
+    val externalIds: Map<String, String>,
+)
+
+@Serializable
+data class Series(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val mediaType: MediaType,
+    val name: String,
+    val originalName: String,
+    val originalLanguage: String,
+    val overview: String,
+    val firstAirDate: String? = null,
+    val lastAirDate: String? = null,
+    val posterUrl: String? = null,
+    val backdropUrl: String? = null,
+    val tagline: String? = null,
+    val status: String? = null,
+    val numberOfSeasons: Int? = null,
+    val numberOfEpisodes: Int? = null,
+    val genres: List<Genre>,
+    val voteAverage: Double,
+    val voteCount: Int,
+    val seasons: List<SeasonSummary>,
+    val aliases: List<SeriesAlias>,
+    val episodeOrders: List<EpisodeOrder>,
+    val mappingProvider: SeriesMappingProvider,
+    val externalIds: Map<String, String>,
+)
+
+@Serializable
+data class SeriesAlias(val language: String, val name: String)
+
+@Serializable
+data class EpisodeOrder(val id: String, val name: String, val type: String, val isDefault: Boolean)
+
+@Serializable
+data class SeasonSummary(
+    val id: String,
+    val mediaType: MediaType,
+    @Serializable(with = UUIDSerializer::class) val seriesId: UUID,
+    val name: String,
+    val overview: String,
+    val seasonNumber: Int,
+    val episodeCount: Int,
+    val airDate: String? = null,
+    val posterUrl: String? = null,
+    val voteAverage: Double,
+    val externalIds: Map<String, String>,
+)
+
+@Serializable
+data class Season(
+    val id: String,
+    val mediaType: MediaType,
+    @Serializable(with = UUIDSerializer::class) val seriesId: UUID,
+    val name: String,
+    val overview: String,
+    val seasonNumber: Int,
+    val airDate: String? = null,
+    val posterUrl: String? = null,
+    val voteAverage: Double,
+    val episodes: List<Episode>,
+    val externalIds: Map<String, String>,
+)
+
+@Serializable
+data class Episode(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val mediaType: MediaType,
+    val seasonId: String,
+    val name: String,
+    val overview: String,
+    val seasonNumber: Int,
+    val episodeNumber: Int,
+    val airDate: String? = null,
+    val stillUrl: String? = null,
+    val runtimeMinutes: Int? = null,
+    val voteAverage: Double,
+    val voteCount: Int,
+    val externalIds: Map<String, String>,
+)
+
+@Serializable
+data class TrailerList(val trailers: List<Trailer>)
+
+@Serializable
+data class Trailer(
+    val youtubeId: String,
+    val name: String,
+    val language: String,
+    val isFallback: Boolean,
+    val captionPreference: String? = null,
+)
+
+@Serializable
+data class PlaybackCapabilities(
+    val streamingProtocols: List<String>,
+    val containers: List<String>,
+    val videoCodecs: List<String>? = null,
+    val audioCodecs: List<String>? = null,
+    val hdrFormats: List<String>? = null,
+    val externalPlayers: List<String>? = null,
+)
+
+@Serializable
+data class PlaybackSourceList(
+    val sources: List<PlaybackSourceOption>,
+    val providerErrors: List<PlaybackProviderError>,
+)
+
+@Serializable
+data class PlaybackSourceOption(
+    val id: String,
+    val sourceRef: String,
+    @Serializable(with = UUIDSerializer::class) val addonId: UUID,
+    val manifestId: String,
+    val streamIndex: Int,
+    val name: String,
+    val description: String? = null,
+    val filename: String? = null,
+    val protocol: String,
+    val container: String? = null,
+    val expiresAt: String,
+)
+
+@Serializable
+enum class PlaybackMode {
+    @SerialName("direct") DIRECT,
+    @SerialName("remux") REMUX,
+    @SerialName("transcode_audio") TRANSCODE_AUDIO,
+    @SerialName("transcode") TRANSCODE,
+    @SerialName("youtube") YOUTUBE,
+    @SerialName("external") EXTERNAL,
+}
+
+@Serializable
+data class PlaybackPreparation(
+    val sourceRef: String,
+    val mode: PlaybackMode,
+    val protocol: String,
+    val container: String? = null,
+    val media: PlaybackMediaInspection? = null,
+    val subtitleCount: Int,
+    val expiresAt: String,
+)
+
+@Serializable
+data class PlaybackSession(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val selectedSourceId: String,
+    val sources: List<PlaybackSource>,
+    val subtitles: List<PlaybackSubtitle>,
+    val providerErrors: List<PlaybackProviderError>,
+    val expiresAt: String,
+)
+
+@Serializable
+data class PlaybackSource(
+    val id: String,
+    @Serializable(with = UUIDSerializer::class) val addonId: UUID,
+    val manifestId: String,
+    val name: String? = null,
+    val title: String? = null,
+    val mode: PlaybackMode,
+    val url: String? = null,
+    val ytId: String? = null,
+    val infoHash: String? = null,
+    val fileIndex: Int? = null,
+    val protocol: String,
+    val container: String? = null,
+    val compatible: Boolean,
+    val media: PlaybackMediaInspection? = null,
+)
+
+@Serializable
+data class PlaybackMediaInspection(
+    val container: String? = null,
+    val durationSeconds: Double? = null,
+    val hdrFormat: String? = null,
+    val videoTracks: List<PlaybackMediaTrack>,
+    val audioTracks: List<PlaybackMediaTrack>,
+    val subtitleTracks: List<PlaybackMediaTrack>,
+)
+
+@Serializable
+data class PlaybackMediaTrack(
+    val index: Int,
+    val type: String,
+    val codec: String,
+    val profile: String? = null,
+    val language: String? = null,
+    val title: String? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val channels: Int? = null,
+)
+
+@Serializable
+data class PlaybackSubtitle(
+    val id: String,
+    @Serializable(with = UUIDSerializer::class) val addonId: UUID,
+    val manifestId: String,
+    val language: String? = null,
+    val url: String,
+)
+
+@Serializable
+data class PlaybackProviderError(
+    @Serializable(with = UUIDSerializer::class) val addonId: UUID,
+    val manifestId: String,
+    val code: String,
+    val message: String,
+)

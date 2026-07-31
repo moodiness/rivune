@@ -205,7 +205,7 @@ export const api = {
   reorderAddons: (addonIds: string[]) => request<{ addons: InstalledAddon[] }>("/addons/order", { method: "PUT", body: JSON.stringify({ addonIds }) }),
   deleteAddon: (id: string) => request<void>(`/addons/${id}`, { method: "DELETE" }),
   addonCatalogs: () => request<{ catalogs: Array<{ addonId: string; manifestId: string; position: number; catalog: { type: string; id: string; name?: string }; addonCatalog: boolean }> }>("/addons/catalogs"),
-  search: (type: string, search: string) => request<ResourceBatch>(`/addons/search/${encodeURIComponent(type)}${query({ search })}`),
+  search: (type: string, search: string) => request<ResourceBatch>(`/addons/catalogs/search/${encodeURIComponent(type)}${query({ search })}`),
   resources: (resource: string, type: string, id: string) => request<ResourceBatch>(`/addons/resources/${encodeURIComponent(resource)}/${encodeURIComponent(type)}/${encodeURIComponent(id)}`),
 
   resolveTitle: (input: {

@@ -191,7 +191,7 @@ func TestAddonResourceRoutePreservesOpaqueIDAndRepeatedExtras(t *testing.T) {
 func TestSearchAndAddonCatalogRoutesForwardArbitraryExtras(t *testing.T) {
 	service := &fakeAddonService{}
 	api := addonAPI(service)
-	search := httptest.NewRequest(http.MethodGet, "/api/v1/addons/search/custom-type?search=hello&genre=A&genre=B&skip=100", nil)
+	search := httptest.NewRequest(http.MethodGet, "/api/v1/addons/catalogs/search/custom-type?search=hello&genre=A&genre=B&skip=100", nil)
 	search.Header.Set("Authorization", "Bearer access")
 	searchResponse := httptest.NewRecorder()
 	api.Handler().ServeHTTP(searchResponse, search)

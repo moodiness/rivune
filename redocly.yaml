@@ -1,0 +1,6 @@
+extends:
+  - recommended
+
+apis:
+  rivune@v16:
+    root: protocol/openapi.yaml

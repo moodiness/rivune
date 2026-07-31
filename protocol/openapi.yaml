@@ -2,13 +2,18 @@ openapi: 3.1.0
 info:
   title: Rivune API
   version: 1.3.0
-  description: Protocol between Rivune clients and a self-hosted Rivune Server.
+  description: Protocol version 16 between Rivune clients and a self-hosted Rivune Server.
+  license:
+    name: Apache License 2.0
+    identifier: Apache-2.0
 servers:
   - url: /api/v1
 paths:
   /.well-known/rivune:
     get:
+      summary: Discover server
       operationId: discoverServer
+      security: []
       servers:
         - url: /
       responses:
@@ -18,9 +23,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Discovery"
+        "400":
+          description: The HTTP request was malformed.
+        default:
+          $ref: "#/components/responses/Error"
   /health:
     get:
+      summary: Get server health
       operationId: getHealth
+      security: []
       servers:
         - url: /
       responses:
@@ -36,9 +47,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
+        "400":
+          description: The HTTP request was malformed.
+        default:
+          $ref: "#/components/responses/Error"
   /setup/status:
     get:
+      summary: Get setup status
       operationId: getSetupStatus
+      security: []
       responses:
         "200":
           description: Current setup state.
@@ -50,8 +67,13 @@ paths:
                 properties:
                   setupRequired:
                     type: boolean
+        "400":
+          description: The HTTP request was malformed.
+        default:
+          $ref: "#/components/responses/Error"
   /setup:
     post:
+      summary: Initialize server
       operationId: initializeServer
       security:
         - setupToken: []
@@ -80,7 +102,9 @@ paths:
           $ref: "#/components/responses/Error"
   /auth/login:
     post:
+      summary: Log in
       operationId: login
+      security: []
       requestBody:
         required: true
         content:
@@ -104,7 +128,9 @@ paths:
           $ref: "#/components/responses/Error"
   /auth/refresh:
     post:
+      summary: Refresh session
       operationId: refreshSession
+      security: []
       requestBody:
         required: true
         content:
@@ -126,6 +152,7 @@ paths:
           $ref: "#/components/responses/Error"
   /auth/logout:
     post:
+      summary: Log out
       operationId: logout
       security:
         - bearerAuth: []
@@ -136,6 +163,7 @@ paths:
           $ref: "#/components/responses/Error"
   /auth/me:
     get:
+      summary: Get current account
       operationId: getCurrentAccount
       security:
         - bearerAuth: []
@@ -150,6 +178,7 @@ paths:
           $ref: "#/components/responses/Error"
   /auth/sessions:
     get:
+      summary: List sessions
       operationId: listSessions
       security:
         - bearerAuth: []
@@ -164,6 +193,7 @@ paths:
           $ref: "#/components/responses/Error"
   /auth/notifications:
     get:
+      summary: List session notifications
       operationId: listSessionNotifications
       security:
         - bearerAuth: []
@@ -189,6 +219,7 @@ paths:
           $ref: "#/components/responses/Error"
   /auth/sessions/{sessionId}:
     delete:
+      summary: Revoke session
       operationId: revokeSession
       security:
         - bearerAuth: []
@@ -208,6 +239,7 @@ paths:
           $ref: "#/components/responses/Error"
   /profiles/{profileId}/sessions:
     get:
+      summary: List profile sessions
       operationId: listProfileSessions
       security:
         - bearerAuth: []
@@ -226,6 +258,7 @@ paths:
           $ref: "#/components/responses/Error"
   /profiles/{profileId}/sessions/{sessionId}:
     delete:
+      summary: Revoke profile session
       operationId: revokeProfileSession
       security:
         - bearerAuth: []
@@ -248,6 +281,7 @@ paths:
           $ref: "#/components/responses/Error"
   /profiles/{profileId}/sessions/{sessionId}/notifications:
     post:
+      summary: Send profile session notification
       operationId: sendProfileSessionNotification
       security:
         - bearerAuth: []
@@ -282,6 +316,7 @@ paths:
           $ref: "#/components/responses/Error"
   /profile-avatars:
     get:
+      summary: List profile avatar presets
       operationId: listProfileAvatarPresets
       security:
         - bearerAuth: []
@@ -302,6 +337,7 @@ paths:
         schema:
           type: string
     get:
+      summary: Get profile avatar preset image
       operationId: getProfileAvatarPresetImage
       security: []
       responses:
@@ -318,6 +354,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ProfileId"
     get:
+      summary: Get custom profile avatar
       operationId: getCustomProfileAvatar
       security:
         - bearerAuth: []
@@ -335,6 +372,7 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
     put:
+      summary: Upload custom profile avatar
       operationId: uploadCustomProfileAvatar
       security:
         - bearerAuth: []
@@ -372,6 +410,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ProfileId"
     put:
+      summary: Set profile avatar preset
       operationId: setProfileAvatarPreset
       security:
         - bearerAuth: []
@@ -400,6 +439,7 @@ paths:
           $ref: "#/components/responses/Error"
   /profiles:
     get:
+      summary: List profiles
       operationId: listProfiles
       security:
         - bearerAuth: []
@@ -413,6 +453,7 @@ paths:
         "401":
           $ref: "#/components/responses/Error"
     post:
+      summary: Create profile
       operationId: createProfile
       security:
         - bearerAuth: []
@@ -443,6 +484,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ProfileId"
     patch:
+      summary: Update profile
       operationId: updateProfile
       security:
         - bearerAuth: []
@@ -472,6 +514,7 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
     delete:
+      summary: Delete profile
       operationId: deleteProfile
       security:
         - bearerAuth: []
@@ -488,6 +531,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ProfileId"
     post:
+      summary: Select profile
       operationId: selectProfile
       security:
         - bearerAuth: []
@@ -518,6 +562,7 @@ paths:
           $ref: "#/components/responses/Error"
   /profiles/selection:
     delete:
+      summary: Clear profile selection
       operationId: clearProfileSelection
       security:
         - bearerAuth: []
@@ -528,6 +573,7 @@ paths:
           $ref: "#/components/responses/Error"
   /settings:
     get:
+      summary: Get instance settings
       operationId: getInstanceSettings
       security:
         - bearerAuth: []
@@ -541,6 +587,7 @@ paths:
         "401":
           $ref: "#/components/responses/Error"
     patch:
+      summary: Update instance settings
       operationId: updateInstanceSettings
       security:
         - bearerAuth: []
@@ -571,6 +618,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ProfileId"
     get:
+      summary: Get profile settings
       operationId: getProfileSettings
       security:
         - bearerAuth: []
@@ -586,6 +634,7 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
     patch:
+      summary: Update profile settings
       operationId: updateProfileSettings
       security:
         - bearerAuth: []
@@ -616,6 +665,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ProfileId"
     get:
+      summary: Get effective settings
       operationId: getEffectiveSettings
       security:
         - bearerAuth: []
@@ -634,7 +684,9 @@ paths:
           $ref: "#/components/responses/Error"
   /auth/device-code:
     post:
+      summary: Begin device authorization
       operationId: beginDeviceAuthorization
+      security: []
       requestBody:
         required: true
         content:
@@ -656,7 +708,9 @@ paths:
           $ref: "#/components/responses/Error"
   /auth/device-code/token:
     post:
+      summary: Exchange device authorization
       operationId: exchangeDeviceAuthorization
+      security: []
       requestBody:
         required: true
         content:
@@ -678,6 +732,7 @@ paths:
           $ref: "#/components/responses/Error"
   /auth/device-code/approve:
     post:
+      summary: Approve device authorization
       operationId: approveDeviceAuthorization
       security:
         - bearerAuth: []
@@ -704,6 +759,7 @@ paths:
           $ref: "#/components/responses/Error"
   /users:
     get:
+      summary: List users
       operationId: listUsers
       security:
         - bearerAuth: []
@@ -719,6 +775,7 @@ paths:
         "403":
           $ref: "#/components/responses/Error"
     post:
+      summary: Create user
       operationId: createUser
       security:
         - bearerAuth: []
@@ -751,6 +808,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/UserId"
     patch:
+      summary: Update user
       operationId: updateUser
       security:
         - bearerAuth: []
@@ -782,6 +840,7 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
     delete:
+      summary: Delete user
       operationId: deleteUser
       security:
         - bearerAuth: []
@@ -800,6 +859,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/UserId"
     get:
+      summary: List user profile access
       operationId: listUserProfileAccess
       security:
         - bearerAuth: []
@@ -821,6 +881,7 @@ paths:
       - $ref: "#/components/parameters/UserId"
       - $ref: "#/components/parameters/ProfileId"
     put:
+      summary: Grant user profile access
       operationId: grantUserProfileAccess
       security:
         - bearerAuth: []
@@ -850,6 +911,7 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
     delete:
+      summary: Revoke user profile access
       operationId: revokeUserProfileAccess
       security:
         - bearerAuth: []
@@ -864,6 +926,7 @@ paths:
           $ref: "#/components/responses/Error"
   /addons:
     get:
+      summary: List addons
       operationId: listAddons
       security:
         - bearerAuth: []
@@ -879,6 +942,7 @@ paths:
         "409":
           $ref: "#/components/responses/Error"
     post:
+      summary: Install addon
       operationId: installAddon
       security:
         - bearerAuth: []
@@ -905,6 +969,7 @@ paths:
           $ref: "#/components/responses/Error"
   /addons/order:
     put:
+      summary: Reorder addons
       operationId: reorderAddons
       security:
         - bearerAuth: []
@@ -931,6 +996,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/AddonId"
     put:
+      summary: Update addon
       operationId: updateAddon
       description: Replaces the configured transport, manifest, and profile assignments while preserving addon identity and profile order.
       security:
@@ -961,6 +1027,7 @@ paths:
         "502":
           $ref: "#/components/responses/Error"
     delete:
+      summary: Remove addon
       operationId: removeAddon
       security:
         - bearerAuth: []
@@ -977,6 +1044,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/AddonId"
     post:
+      summary: Refresh addon
       operationId: refreshAddon
       security:
         - bearerAuth: []
@@ -999,6 +1067,7 @@ paths:
           $ref: "#/components/responses/Error"
   /addons/catalogs:
     get:
+      summary: List addon catalogs
       operationId: listAddonCatalogs
       security:
         - bearerAuth: []
@@ -1020,6 +1089,7 @@ paths:
       - $ref: "#/components/parameters/AddonContentType"
       - $ref: "#/components/parameters/AddonResourceId"
     get:
+      summary: Get addon resource
       operationId: getAddonResource
       description: >
         Calls one installed addon using the Stremio HTTP addon protocol. Every
@@ -1051,6 +1121,7 @@ paths:
       - $ref: "#/components/parameters/AddonContentType"
       - $ref: "#/components/parameters/AddonResourceId"
     get:
+      summary: Get all addon resources
       operationId: getAllAddonResources
       description: >
         Calls every installed addon whose short or full manifest resource
@@ -1071,10 +1142,11 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
-  /addons/search/{type}:
+  /addons/catalogs/search/{type}:
     parameters:
       - $ref: "#/components/parameters/AddonContentType"
     get:
+      summary: Search addon catalogs
       operationId: searchAddonCatalogs
       description: >
         Calls every catalog of the requested type that declares support for all
@@ -1103,6 +1175,7 @@ paths:
           $ref: "#/components/responses/Error"
   /addons/discover:
     get:
+      summary: Discover addons
       operationId: discoverAddons
       description: >
         Resolves every declared addon_catalog resource. Returned Stremio addon
@@ -1131,6 +1204,7 @@ paths:
           $ref: "#/components/responses/Error"
   /collections:
     get:
+      summary: List collections
       operationId: listCollections
       security:
         - bearerAuth: []
@@ -1146,6 +1220,7 @@ paths:
         "409":
           $ref: "#/components/responses/Error"
     post:
+      summary: Create collection
       operationId: createCollection
       security:
         - bearerAuth: []
@@ -1174,6 +1249,7 @@ paths:
           $ref: "#/components/responses/Error"
   /collections/export:
     get:
+      summary: Export collections
       operationId: exportCollections
       security:
         - bearerAuth: []
@@ -1194,6 +1270,7 @@ paths:
           $ref: "#/components/responses/Error"
   /collections/import:
     post:
+      summary: Import collections
       operationId: importCollections
       security:
         - bearerAuth: []
@@ -1222,6 +1299,7 @@ paths:
           $ref: "#/components/responses/Error"
   /collections/order:
     put:
+      summary: Reorder collections
       operationId: reorderCollections
       security:
         - bearerAuth: []
@@ -1250,6 +1328,7 @@ paths:
           $ref: "#/components/responses/Error"
   /collections/tmdb/lookup:
     get:
+      summary: Look up collection TMDB source
       operationId: lookupCollectionTMDBSource
       security:
         - bearerAuth: []
@@ -1286,6 +1365,7 @@ paths:
           $ref: "#/components/responses/Error"
   /collections/tmdb/genres:
     get:
+      summary: List collection TMDB genres
       operationId: listCollectionTMDBGenres
       security:
         - bearerAuth: []
@@ -1316,6 +1396,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/CollectionId"
     get:
+      summary: Get collection
       operationId: getCollection
       security:
         - bearerAuth: []
@@ -1333,6 +1414,7 @@ paths:
         "409":
           $ref: "#/components/responses/Error"
     put:
+      summary: Update collection
       operationId: updateCollection
       security:
         - bearerAuth: []
@@ -1362,6 +1444,7 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
     delete:
+      summary: Delete collection
       operationId: deleteCollection
       security:
         - bearerAuth: []
@@ -1379,6 +1462,7 @@ paths:
       - $ref: "#/components/parameters/CollectionId"
       - $ref: "#/components/parameters/FolderId"
     get:
+      summary: Resolve collection folder items
       operationId: resolveCollectionFolderItems
       description: Resolves configured addon, TMDB, and Trakt sources concurrently in source order.
       security:
@@ -1802,6 +1886,7 @@ paths:
           $ref: "#/components/responses/Error"
   /calendar:
     get:
+      summary: List calendar events
       operationId: listCalendarEvents
       description: Refreshes metadata for the active profile's personal library, then lists exact movie release dates and descendant episode air dates.
       security:
@@ -1835,6 +1920,7 @@ paths:
           $ref: "#/components/responses/Error"
   /library:
     get:
+      summary: List library
       operationId: listLibrary
       security:
         - bearerAuth: []
@@ -1869,6 +1955,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/TitleId"
     put:
+      summary: Add library title
       operationId: addLibraryTitle
       security:
         - bearerAuth: []
@@ -1888,6 +1975,7 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
     delete:
+      summary: Remove library title
       operationId: removeLibraryTitle
       security:
         - bearerAuth: []
@@ -1904,6 +1992,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/TitleId"
     get:
+      summary: Get playback progress
       operationId: getPlaybackProgress
       security:
         - bearerAuth: []
@@ -1925,6 +2014,7 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
     put:
+      summary: Update playback progress
       operationId: updatePlaybackProgress
       security:
         - bearerAuth: []
@@ -1950,6 +2040,7 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
     delete:
+      summary: Clear playback progress
       operationId: clearPlaybackProgress
       security:
         - bearerAuth: []
@@ -1968,6 +2059,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/TitleId"
     post:
+      summary: Mark title watched
       operationId: markTitleWatched
       security:
         - bearerAuth: []
@@ -1993,6 +2085,7 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
     delete:
+      summary: Mark title unwatched
       operationId: markTitleUnwatched
       security:
         - bearerAuth: []
@@ -2015,6 +2108,7 @@ paths:
           $ref: "#/components/responses/Error"
   /continue-watching:
     get:
+      summary: List continue watching
       operationId: listContinueWatching
       security:
         - bearerAuth: []
@@ -2513,7 +2607,7 @@ components:
           type: string
         protocolVersion:
           type: integer
-          minimum: 1
+          const: 16
         apiBaseUrl:
           type: string
         setupRequired:
@@ -3329,24 +3423,6 @@ components:
       properties:
         canManage:
           type: boolean
-    MoviePage:
-      type: object
-      additionalProperties: false
-      required: [items, page, totalPages, totalResults]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: "#/components/schemas/Movie"
-        page:
-          type: integer
-          minimum: 1
-        totalPages:
-          type: integer
-          minimum: 0
-        totalResults:
-          type: integer
-          minimum: 0
     Trailer:
       type: object
       additionalProperties: false
@@ -3435,24 +3511,6 @@ components:
           type: integer
         name:
           type: string
-    SeriesPage:
-      type: object
-      additionalProperties: false
-      required: [items, page, totalPages, totalResults]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: "#/components/schemas/Series"
-        page:
-          type: integer
-          minimum: 1
-        totalPages:
-          type: integer
-          minimum: 0
-        totalResults:
-          type: integer
-          minimum: 0
     Series:
       type: object
       additionalProperties: false

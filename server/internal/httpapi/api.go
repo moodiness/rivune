@@ -293,7 +293,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/addons/catalogs", a.requireAuthentication(a.addonCatalogDescriptors))
 	mux.Handle("GET /api/v1/addons/{addonId}/resource/{resource}/{type}/{id}", a.requireAuthentication(a.fetchAddonResource))
 	mux.Handle("GET /api/v1/addons/resources/{resource}/{type}/{id}", a.requireAuthentication(a.fetchAllAddonResources))
-	mux.Handle("GET /api/v1/addons/search/{type}", a.requireAuthentication(a.searchAddonCatalogs))
+	mux.Handle("GET /api/v1/addons/catalogs/search/{type}", a.requireAuthentication(a.searchAddonCatalogs))
 	mux.Handle("GET /api/v1/addons/discover", a.requireAuthentication(a.discoverAddonCatalogs))
 	mux.Handle("GET /api/v1/collections", a.requireAuthentication(a.listCollections))
 	mux.Handle("POST /api/v1/collections", a.requireAuthentication(a.createCollection))

@@ -86,6 +86,8 @@ const en = {
   "shell.manage": "Manage",
   "shell.preferences": "Preferences",
   "shell.connectedTo": "Connected to",
+  "shell.connectedToVersion": "Connected to · {version}",
+  "shell.serverIdentity": "Connected to {server}, server version {version}",
   "shell.switchProfile": "Switch profile",
   "shell.welcomeBack": "Welcome back, {name}",
   "shell.openMenu": "Open menu",

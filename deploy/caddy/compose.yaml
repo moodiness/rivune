@@ -1,0 +1,80 @@
+services:
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    depends_on:
+      rivune:
+        condition: service_started
+    environment:
+      RIVUNE_HOST: ${RIVUNE_HOST:?Set RIVUNE_HOST to the public DNS name}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+
+  rivune:
+    image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-latest}
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RIVUNE_LISTEN_ADDRESS: ":8080"
+      RIVUNE_PUBLIC_URL: https://${RIVUNE_HOST:?Set RIVUNE_HOST to the public DNS name}
+      RIVUNE_TRUSTED_PROXIES: 172.30.0.0/24
+      RIVUNE_DATABASE_HOST: postgres
+      RIVUNE_DATABASE_PORT: "5432"
+      RIVUNE_DATABASE_NAME: rivune
+      RIVUNE_DATABASE_USER: rivune
+      RIVUNE_DATABASE_PASSWORD: ${RIVUNE_DATABASE_PASSWORD:?Set RIVUNE_DATABASE_PASSWORD}
+      RIVUNE_DATABASE_SSLMODE: disable
+      RIVUNE_SETUP_TOKEN: ${RIVUNE_SETUP_TOKEN:?Set RIVUNE_SETUP_TOKEN}
+      RIVUNE_TMDB_ACCESS_TOKEN: ${RIVUNE_TMDB_ACCESS_TOKEN:-}
+      RIVUNE_TVDB_API_KEY: ${RIVUNE_TVDB_API_KEY:-}
+      RIVUNE_TVDB_PIN: ${RIVUNE_TVDB_PIN:-}
+      RIVUNE_TRAKT_CLIENT_ID: ${RIVUNE_TRAKT_CLIENT_ID:-}
+      TZ: ${TZ:-UTC}
+      PUID: ${PUID:-65532}
+      PGID: ${PGID:-65532}
+    networks:
+      - edge
+      - database
+
+  postgres:
+    image: postgres:18-trixie
+    restart: unless-stopped
+    shm_size: 128mb
+    environment:
+      POSTGRES_DB: rivune
+      POSTGRES_USER: rivune
+      POSTGRES_PASSWORD: ${RIVUNE_DATABASE_PASSWORD:?Set RIVUNE_DATABASE_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rivune -d rivune"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - database
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  database:
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres_data:

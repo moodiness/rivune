@@ -15,6 +15,15 @@ web/node_modules/
 web/*.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts
+web/playwright-report/
+web/test-results/
+
+# Native client build output
+clients/android/.gradle/
+clients/android/**/build/
+clients/apple/.build/
+clients/windows/**/bin/
+clients/windows/**/obj/
 
 # Accidental Windows null-device outputs
 NUL.*

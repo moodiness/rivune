@@ -1,0 +1,17 @@
+{
+	admin off
+}
+
+{$RIVUNE_HOST:localhost} {
+	reverse_proxy rivune:8080 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

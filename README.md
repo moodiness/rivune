@@ -2,7 +2,7 @@
 
 Rivune is a self-hosted media backend and responsive web client. It ships with no catalog, provider, or hosted service: users connect to a server they choose, and that server owns authentication, profiles, collections, playback state, and source resolution.
 
-Rivune is under active development. The web client and backend are usable today; native Apple and Android clients are planned.
+Rivune is under active development. The web client and backend are usable today. Typed protocol-v16 clients for Apple, Android, and Windows are included; their native application interfaces are planned.
 
 ## What works
 
@@ -20,7 +20,7 @@ Rivune is under active development. The web client and backend are usable today;
 ## Architecture
 
 ```text
-Browser / future native clients
+Browser / Apple / Android / Windows clients
               |
            HTTPS API
               |
@@ -99,6 +99,8 @@ Copy [`.env.example`](.env.example) to `.env` and adjust it for the host. Import
 
 For internet-facing installations, terminate HTTPS at a trusted reverse proxy, set `RIVUNE_PUBLIC_URL` to the HTTPS origin, and configure `RIVUNE_TRUSTED_PROXIES`. The `.env` file contains credentials and must never be committed.
 
+Production HTTPS, upgrades, PostgreSQL backup/restore, disaster-recovery verification, and executable migration/proxy checks are documented in [Production operations](docs/operations.md). Maintainers should follow the [Semantic Versioning and release procedure](docs/releasing.md); container publication is gated by the same CI checks used for pull requests.
+
 
 ## Unraid
 
@@ -113,6 +115,7 @@ The Unraid template exposes the PostgreSQL password, initial setup token, TMDB t
 ## Development
 
 Backend requirements: Go 1.26 and PostgreSQL 18. Frontend requirements: Node.js 22 and npm.
+Typed native client requirements are Swift 5.9 or newer for Apple, JDK 17 plus Android SDK 35 for Kotlin/Android, and .NET 10 for Windows. The packages live under [`clients/`](clients/).
 
 Build the web client into the server embed directory:
 

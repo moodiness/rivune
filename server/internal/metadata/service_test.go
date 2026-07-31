@@ -82,11 +82,15 @@ func TestTrailersUsesSeriesIdentityForSeasonAndRejectsMovieSeason(t *testing.T) 
 	)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO titles (id, media_type, display_title)
-		VALUES ($1::uuid, 'series', 'Series'), ($2::uuid, 'movie', 'Movie');
+		VALUES ($1::uuid, 'series', 'Series'), ($2::uuid, 'movie', 'Movie')
+	`, seriesID, movieID); err != nil {
+		t.Fatalf("seed trailer titles: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
 		VALUES ($1::uuid, 'tmdb', 'series', '1396'), ($2::uuid, 'tmdb', 'movie', '550')
 	`, seriesID, movieID); err != nil {
-		t.Fatalf("seed trailer titles: %v", err)
+		t.Fatalf("seed trailer external IDs: %v", err)
 	}
 	provider := &fakeTrailerProvider{responsesByCall: map[string][]ProviderTrailer{
 		"series:1396:en-US:3": {{YouTubeID: "season-video", Name: "Season 3 Trailer", Site: "YouTube", Type: "Trailer"}},

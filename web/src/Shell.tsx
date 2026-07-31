@@ -14,6 +14,13 @@ const navItems: Array<{ id: View; label: string; icon: typeof Home }> = [
   { id: "calendar", label: t("nav.calendar"), icon: CalendarDays },
 ];
 
+function formatServerVersion(version: string | null): string | null {
+  const normalized = version?.trim();
+  if (!normalized) return null;
+  if (/^v/i.test(normalized) || !/^\d/.test(normalized)) return normalized;
+  return `v${normalized}`;
+}
+
 export function Shell({ view, onView, children }: { view: View; onView: (view: View) => void; children: ReactNode }) {
   const { activeProfile, leaveProfile, logout, discovery } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -21,6 +28,11 @@ export function Shell({ view, onView, children }: { view: View; onView: (view: V
   const [sidebarCompact, setSidebarCompact] = useState(() => localStorage.getItem("rivune.sidebar.compact") === "true");
   const canManage = Boolean(activeProfile?.canManage);
   const settingsLabel = t(canManage ? "nav.administration" : "nav.preferences");
+  const serverName = discovery?.name ?? "Rivune";
+  const formattedServerVersion = formatServerVersion(discovery?.serverVersion ?? null);
+  const serverIdentity = formattedServerVersion
+    ? t("shell.serverIdentity", { server: serverName, version: formattedServerVersion })
+    : t("auth.connectedTo", { server: serverName });
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 820px) and (orientation: portrait)");
@@ -74,7 +86,13 @@ export function Shell({ view, onView, children }: { view: View; onView: (view: V
         <><span className="sidebar__label">{t(canManage ? "shell.manage" : "shell.preferences")}</span><button className={view === "admin" ? "is-active" : ""} onClick={() => onView("admin")}><Settings size={20} /><span>{settingsLabel}</span>{view === "admin" && <i />}</button></>
       </nav>
       <div className="sidebar__footer">
-        <div className="server-chip"><span className="status-dot" /><div><small>{t("shell.connectedTo")}</small><strong>{discovery?.name ?? "Rivune"}</strong></div></div>
+        <div className="server-chip" role="group" aria-label={serverIdentity} title={serverIdentity}>
+          <span className="status-dot" aria-hidden="true" />
+          <div aria-hidden="true">
+            <small>{formattedServerVersion ? t("shell.connectedToVersion", { version: formattedServerVersion }) : t("shell.connectedTo")}</small>
+            <strong>{serverName}</strong>
+          </div>
+        </div>
         <button className="sidebar-profile" onClick={switchProfile}><img src={activeProfile?.avatar.url} alt="" /><div><strong>{activeProfile?.name}</strong><small>{t("shell.switchProfile")}</small></div><Users size={17} /></button>
         <button className="sidebar-signout" onClick={() => void logout().catch((cause) => notifyError(cause, "This device could not be signed out.", "Sign out failed"))}><LogOut size={17} /><span>{t("profiles.signOut")}</span></button>
       </div>
