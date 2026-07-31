@@ -32,6 +32,28 @@ func TestLoadUsesSecureTokenTTLsByDefault(t *testing.T) {
 	}
 }
 
+func TestLoadUsesEnvironmentCredentials(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("RIVUNE_DATABASE_URL", "")
+	t.Setenv("RIVUNE_DATABASE_PASSWORD", "database-secret")
+	t.Setenv("RIVUNE_TMDB_ACCESS_TOKEN", "tmdb-token")
+	t.Setenv("RIVUNE_TVDB_API_KEY", "tvdb-key")
+	t.Setenv("RIVUNE_TVDB_PIN", "tvdb-pin")
+	t.Setenv("RIVUNE_TRAKT_CLIENT_ID", "trakt-client")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.DatabaseURL != "postgres://rivune:database-secret@localhost:5432/rivune?sslmode=disable" {
+		t.Fatalf("unexpected database URL: %q", cfg.DatabaseURL)
+	}
+	if cfg.SetupToken != "setup-secret" || cfg.TMDBAccessToken != "tmdb-token" ||
+		cfg.TVDBAPIKey != "tvdb-key" || cfg.TVDBPIN != "tvdb-pin" || cfg.TraktClientID != "trakt-client" {
+		t.Fatalf("environment credentials were not loaded: %+v", cfg)
+	}
+}
+
 func TestLoadRejectsUnsafeTokenTTLs(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -129,22 +151,16 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("RIVUNE_DATABASE_URL", "postgres://rivune:secret@localhost/rivune")
 	t.Setenv("RIVUNE_DATABASE_PASSWORD", "")
-	t.Setenv("RIVUNE_DATABASE_PASSWORD_FILE", "")
 	t.Setenv("RIVUNE_SETUP_TOKEN", "setup-secret")
-	t.Setenv("RIVUNE_SETUP_TOKEN_FILE", "")
 	t.Setenv("RIVUNE_PUBLIC_URL", "")
 	t.Setenv("RIVUNE_TRUSTED_PROXIES", "")
 	t.Setenv("RIVUNE_ACCESS_TOKEN_TTL", "")
 	t.Setenv("RIVUNE_REFRESH_TOKEN_TTL", "")
 	t.Setenv("RIVUNE_PROFILE_GRANT_TTL", "")
 	t.Setenv("RIVUNE_TMDB_ACCESS_TOKEN", "")
-	t.Setenv("RIVUNE_TMDB_ACCESS_TOKEN_FILE", "")
 	t.Setenv("RIVUNE_TVDB_API_KEY", "")
-	t.Setenv("RIVUNE_TVDB_API_KEY_FILE", "")
 	t.Setenv("RIVUNE_TVDB_PIN", "")
-	t.Setenv("RIVUNE_TVDB_PIN_FILE", "")
 	t.Setenv("RIVUNE_TRAKT_CLIENT_ID", "")
-	t.Setenv("RIVUNE_TRAKT_CLIENT_ID_FILE", "")
 	t.Setenv("RIVUNE_METADATA_CACHE_TTL", "")
 	t.Setenv("RIVUNE_FFMPEG_PATH", "")
 	t.Setenv("RIVUNE_FFPROBE_PATH", "")

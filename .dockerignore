@@ -2,7 +2,6 @@
 .gitignore
 .env
 .env.*
-secrets
 server/bin
 server/coverage.out
 clients

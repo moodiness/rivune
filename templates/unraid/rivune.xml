@@ -15,7 +15,7 @@ REQUIRED: A PostgreSQL server must already exist and be reachable from this cont
 &#xD;
 AMD/Intel GPU: this template maps /dev/dri/renderD128 and adds Unraid's usual video group GID 18. Verify the actual GID with: stat -c '%g' /dev/dri/renderD128. If it differs, replace --group-add=18 under Advanced View / Extra Parameters.&#xD;
 &#xD;
-The setup token and database password are required secrets. Choose long, independent random values. Rivune prepares the transcode directory as root, then permanently drops to the configured non-root PUID and PGID.</Overview>
+Database credentials, the initial setup token, and optional provider credentials are configured directly as masked environment variables in this template. Choose long, independent random values. Rivune prepares the transcode directory as root, then permanently drops to the configured non-root PUID and PGID.</Overview>
   <Category>MediaApp:Video MediaApp:Other</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <Icon>https://raw.githubusercontent.com/moodiness/rivune/main/templates/unraid/rivune-icon.svg</Icon>
@@ -32,8 +32,8 @@ The setup token and database password are required secrets. Choose long, indepen
   <Config Name="PostgreSQL port" Target="RIVUNE_DATABASE_PORT" Default="5432" Mode="" Description="PostgreSQL TCP port." Type="Variable" Display="always" Required="true" Mask="false">5432</Config>
   <Config Name="PostgreSQL database" Target="RIVUNE_DATABASE_NAME" Default="rivune" Mode="" Description="Existing PostgreSQL database name." Type="Variable" Display="always" Required="true" Mask="false">rivune</Config>
   <Config Name="PostgreSQL user" Target="RIVUNE_DATABASE_USER" Default="rivune" Mode="" Description="PostgreSQL role with ownership rights on the Rivune database." Type="Variable" Display="always" Required="true" Mask="false">rivune</Config>
-  <Config Name="PostgreSQL password" Target="RIVUNE_DATABASE_PASSWORD" Default="" Mode="" Description="Password for the PostgreSQL role. Required." Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="Initial setup token" Target="RIVUNE_SETUP_TOKEN" Default="" Mode="" Description="One-time secret used to claim the server during initial setup. Use a long random value." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="PostgreSQL password" Target="RIVUNE_DATABASE_PASSWORD" Default="" Mode="" Description="Password supplied to Rivune through its environment. Required." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Initial setup token" Target="RIVUNE_SETUP_TOKEN" Default="" Mode="" Description="One-time value supplied through the environment to claim the server. Use a long random value." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="Container user ID (PUID)" Target="PUID" Default="99" Mode="" Description="Unraid's standard non-root nobody user ID. Rivune assigns the transcode directory to this user before dropping privileges." Type="Variable" Display="always" Required="true" Mask="false">99</Config>
   <Config Name="Container group ID (PGID)" Target="PGID" Default="100" Mode="" Description="Unraid's standard users group ID." Type="Variable" Display="always" Required="true" Mask="false">100</Config>
   <Config Name="Transcode directory" Target="/transcode" Default="/mnt/cache/appdata/rivune/transcode" Mode="rw" Description="Temporary HLS and transcoding data. Prefer a cache-pool path; the container prepares its ownership automatically." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/rivune/transcode</Config>
@@ -47,9 +47,9 @@ The setup token and database password are required secrets. Choose long, indepen
   <Config Name="Software transcode threads" Target="RIVUNE_TRANSCODE_THREADS" Default="4" Mode="" Description="CPU threads used by the libx264 software fallback, from 1 to 32." Type="Variable" Display="advanced" Required="true" Mask="false">4</Config>
   <Config Name="PostgreSQL SSL mode" Target="RIVUNE_DATABASE_SSLMODE" Default="disable" Mode="" Description="PostgreSQL sslmode. Use require or verify-full for a remote secured database." Type="Variable" Display="advanced" Required="true" Mask="false">disable</Config>
   <Config Name="Trusted reverse proxies" Target="RIVUNE_TRUSTED_PROXIES" Default="" Mode="" Description="Comma-separated proxy IP addresses or CIDR networks allowed to supply forwarding headers." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="TMDB access token" Target="RIVUNE_TMDB_ACCESS_TOKEN" Default="" Mode="" Description="Optional TMDB API read access token." Type="Variable" Display="advanced" Required="false" Mask="true"/>
-  <Config Name="TVDB API key" Target="RIVUNE_TVDB_API_KEY" Default="" Mode="" Description="Optional TVDB API key." Type="Variable" Display="advanced" Required="false" Mask="true"/>
-  <Config Name="TVDB PIN" Target="RIVUNE_TVDB_PIN" Default="" Mode="" Description="Optional TVDB subscriber PIN. Requires a TVDB API key." Type="Variable" Display="advanced" Required="false" Mask="true"/>
-  <Config Name="Trakt client ID" Target="RIVUNE_TRAKT_CLIENT_ID" Default="" Mode="" Description="Optional Trakt API client ID for collection synchronization." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="TMDB access token" Target="RIVUNE_TMDB_ACCESS_TOKEN" Default="" Mode="" Description="Optional TMDB API read access token supplied through the environment." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="TVDB API key" Target="RIVUNE_TVDB_API_KEY" Default="" Mode="" Description="Optional TVDB API key supplied through the environment." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="TVDB subscriber PIN" Target="RIVUNE_TVDB_PIN" Default="" Mode="" Description="Optional PIN used only with a TVDB user-supported API key. Leave empty for ordinary project keys." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="Trakt client ID" Target="RIVUNE_TRAKT_CLIENT_ID" Default="" Mode="" Description="Optional Trakt API client ID supplied through the environment." Type="Variable" Display="always" Required="false" Mask="true"/>
   <Config Name="Listen address" Target="RIVUNE_LISTEN_ADDRESS" Default=":8080" Mode="" Description="Internal HTTP listen address. Do not change unless the port mapping is updated too." Type="Variable" Display="advanced" Required="true" Mask="false">:8080</Config>
 </Container>

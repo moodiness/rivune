@@ -30,7 +30,7 @@ const en = {
   "auth.adminPassword": "Administrator password",
   "auth.passwordHint": "Use at least 12 characters and a unique password.",
   "auth.setupToken": "Setup token",
-  "auth.setupTokenHint": "Contents of secrets/setup_token.txt",
+  "auth.setupTokenHint": "Value configured in RIVUNE_SETUP_TOKEN",
   "auth.createSpace": "Create my space",
   "auth.readyTitle": "Your universe is ready.",
   "auth.readyBody": "Choose your profile to get started.",

@@ -57,6 +57,11 @@ func Load() (Config, error) {
 	cfg := Config{
 		ListenAddress:        envOrDefault("RIVUNE_LISTEN_ADDRESS", defaultListenAddress),
 		PublicURL:            strings.TrimRight(strings.TrimSpace(os.Getenv("RIVUNE_PUBLIC_URL")), "/"),
+		SetupToken:           strings.TrimSpace(os.Getenv("RIVUNE_SETUP_TOKEN")),
+		TMDBAccessToken:      strings.TrimSpace(os.Getenv("RIVUNE_TMDB_ACCESS_TOKEN")),
+		TVDBAPIKey:           strings.TrimSpace(os.Getenv("RIVUNE_TVDB_API_KEY")),
+		TVDBPIN:              strings.TrimSpace(os.Getenv("RIVUNE_TVDB_PIN")),
+		TraktClientID:        strings.TrimSpace(os.Getenv("RIVUNE_TRAKT_CLIENT_ID")),
 		FFmpegPath:           envOrDefault("RIVUNE_FFMPEG_PATH", "ffmpeg"),
 		FFprobePath:          envOrDefault("RIVUNE_FFPROBE_PATH", "ffprobe"),
 		MediaTempDir:         strings.TrimSpace(os.Getenv("RIVUNE_MEDIA_TEMP_DIR")),
@@ -66,11 +71,6 @@ func Load() (Config, error) {
 
 	var err error
 	cfg.DatabaseURL, err = loadDatabaseURL()
-	if err != nil {
-		return Config{}, err
-	}
-
-	cfg.SetupToken, err = loadSecret("RIVUNE_SETUP_TOKEN", "RIVUNE_SETUP_TOKEN_FILE")
 	if err != nil {
 		return Config{}, err
 	}
@@ -90,24 +90,8 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.TMDBAccessToken, err = loadSecret("RIVUNE_TMDB_ACCESS_TOKEN", "RIVUNE_TMDB_ACCESS_TOKEN_FILE")
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.TVDBAPIKey, err = loadSecret("RIVUNE_TVDB_API_KEY", "RIVUNE_TVDB_API_KEY_FILE")
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.TVDBPIN, err = loadSecret("RIVUNE_TVDB_PIN", "RIVUNE_TVDB_PIN_FILE")
-	if err != nil {
-		return Config{}, err
-	}
 	if cfg.TVDBPIN != "" && cfg.TVDBAPIKey == "" {
 		return Config{}, errors.New("RIVUNE_TVDB_PIN requires RIVUNE_TVDB_API_KEY")
-	}
-	cfg.TraktClientID, err = loadSecret("RIVUNE_TRAKT_CLIENT_ID", "RIVUNE_TRAKT_CLIENT_ID_FILE")
-	if err != nil {
-		return Config{}, err
 	}
 	cfg.MetadataCacheTTL, err = loadDuration("RIVUNE_METADATA_CACHE_TTL", defaultMetadataCacheTTL, time.Hour, 30*24*time.Hour)
 	if err != nil {
@@ -157,20 +141,18 @@ func loadDatabaseURL() (string, error) {
 		return value, nil
 	}
 
-	password, err := loadSecret("RIVUNE_DATABASE_PASSWORD", "RIVUNE_DATABASE_PASSWORD_FILE")
-	if err != nil {
-		return "", err
-	}
+	password := strings.TrimSpace(os.Getenv("RIVUNE_DATABASE_PASSWORD"))
 	if password == "" {
-		return "", errors.New("set RIVUNE_DATABASE_URL or RIVUNE_DATABASE_PASSWORD(_FILE)")
+		return "", errors.New("set RIVUNE_DATABASE_URL or RIVUNE_DATABASE_PASSWORD")
 	}
 
 	port := defaultDatabasePort
 	if rawPort := strings.TrimSpace(os.Getenv("RIVUNE_DATABASE_PORT")); rawPort != "" {
-		port, err = strconv.Atoi(rawPort)
-		if err != nil || port < 1 || port > 65535 {
+		parsedPort, err := strconv.Atoi(rawPort)
+		if err != nil || parsedPort < 1 || parsedPort > 65535 {
 			return "", fmt.Errorf("invalid RIVUNE_DATABASE_PORT %q", rawPort)
 		}
+		port = parsedPort
 	}
 
 	host := envOrDefault("RIVUNE_DATABASE_HOST", defaultDatabaseHost)
@@ -186,23 +168,6 @@ func loadDatabaseURL() (string, error) {
 		RawQuery: url.Values{"sslmode": []string{sslMode}}.Encode(),
 	}
 	return databaseURL.String(), nil
-}
-
-func loadSecret(valueName, fileName string) (string, error) {
-	value := strings.TrimSpace(os.Getenv(valueName))
-	path := strings.TrimSpace(os.Getenv(fileName))
-	if value != "" && path != "" {
-		return "", fmt.Errorf("set only one of %s or %s", valueName, fileName)
-	}
-	if path == "" {
-		return value, nil
-	}
-
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", fileName, err)
-	}
-	return strings.TrimSpace(string(contents)), nil
 }
 
 func loadDuration(name string, fallback, minimum, maximum time.Duration) (time.Duration, error) {

@@ -38,22 +38,22 @@ Requirements:
 - Docker Engine with Compose
 - OpenSSL, or another secure random-value generator
 
-Clone the repository, then create the required secret files:
+Clone the repository and create the local environment file:
 
 ```sh
 git clone https://github.com/moodiness/rivune.git
 cd rivune
-mkdir -p secrets
-openssl rand -base64 32 > secrets/postgres_password.txt
-openssl rand -base64 32 > secrets/setup_token.txt
-: > secrets/tmdb_access_token.txt
-: > secrets/tvdb_api_key.txt
-: > secrets/tvdb_pin.txt
-: > secrets/trakt_client_id.txt
 cp .env.example .env
 ```
 
-The metadata credentials are optional, but the empty files must exist because Compose mounts them as secrets. Add provider credentials before starting if you want those integrations.
+Generate two independent credentials with `openssl rand -hex 32`, then place them in `.env`:
+
+```dotenv
+RIVUNE_DATABASE_PASSWORD=<generated database password>
+RIVUNE_SETUP_TOKEN=<generated setup token>
+```
+
+TMDB, TVDB, and Trakt credentials are optional and can remain empty in `.env`. `RIVUNE_TVDB_PIN` is only needed with a TVDB user-supported API key; ordinary project keys authenticate without it.
 
 Start Rivune:
 
@@ -61,7 +61,7 @@ Start Rivune:
 docker compose up -d --build
 ```
 
-Open [http://localhost:8080](http://localhost:8080). Complete first-run setup with the value from `secrets/setup_token.txt`, then create the administrator account and first profile.
+Open [http://localhost:8080](http://localhost:8080). Complete first-run setup with the value of `RIVUNE_SETUP_TOKEN` from `.env`, then create the administrator account and first profile.
 
 Check server health:
 
@@ -81,6 +81,11 @@ Copy [`.env.example`](.env.example) to `.env` and adjust it for the host. Import
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
+| `RIVUNE_DATABASE_PASSWORD` | Required password shared by Rivune and the bundled PostgreSQL service | none |
+| `RIVUNE_SETUP_TOKEN` | Required one-time value used to claim a new Rivune instance | none |
+| `RIVUNE_TMDB_ACCESS_TOKEN` | Optional TMDB API read access token | empty |
+| `RIVUNE_TVDB_API_KEY` / `RIVUNE_TVDB_PIN` | Optional TVDB project key and user-supported-key PIN | empty |
+| `RIVUNE_TRAKT_CLIENT_ID` | Optional Trakt API client ID | empty |
 | `RIVUNE_PUBLIC_URL` | Public origin used by the server | `http://localhost:8080` |
 | `RIVUNE_PORT` | Host port mapped to Rivune | `8080` |
 | `PUID` / `PGID` | Non-root identity used inside the container | `65532` |
@@ -91,7 +96,18 @@ Copy [`.env.example`](.env.example) to `.env` and adjust it for the host. Import
 | `RIVUNE_TRANSCODE_THREADS` | FFmpeg threads per transcode | `4` |
 | `RIVUNE_MEDIA_MAX_STORAGE_MB` | Temporary media workspace limit | `20480` |
 
-For internet-facing installations, terminate HTTPS at a trusted reverse proxy, set `RIVUNE_PUBLIC_URL` to the HTTPS origin, and configure `RIVUNE_TRUSTED_PROXIES`. Never commit files from `secrets/`.
+For internet-facing installations, terminate HTTPS at a trusted reverse proxy, set `RIVUNE_PUBLIC_URL` to the HTTPS origin, and configure `RIVUNE_TRUSTED_PROXIES`. The `.env` file contains credentials and must never be committed.
+
+
+## Unraid
+
+Use the template at [`templates/unraid/rivune.xml`](templates/unraid/rivune.xml), or add this template URL to Unraid:
+
+```text
+https://raw.githubusercontent.com/moodiness/rivune/main/templates/unraid/rivune.xml
+```
+
+The Unraid template exposes the PostgreSQL password, initial setup token, TMDB token, TVDB credentials, and Trakt client ID as masked environment variables. No secret files or `/run/secrets` mounts are required. A reachable PostgreSQL server remains required; when it runs in another container, place both containers on the same custom Docker network.
 
 ## Development
 
