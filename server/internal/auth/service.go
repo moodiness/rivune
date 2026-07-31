@@ -65,13 +65,20 @@ type Principal struct {
 }
 
 type Profile struct {
-	ID           string
-	Name         string
-	IsChild      bool
-	HasPIN       bool
-	CanManage    bool
-	AvatarKind   string
-	AvatarPreset string
+	ID              string
+	Name            string
+	IsChild         bool
+	HasPIN          bool
+	CanManage       bool
+	AvatarKind      string
+	AvatarPreset    string
+	Enabled         bool
+	AvailableFrom   *string
+	AvailableUntil  *string
+	AccessStartTime *string
+	AccessEndTime   *string
+	AccessTimezone  string
+	Accessible      bool
 }
 
 type Account struct {
@@ -269,13 +276,21 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 
 	var principal Principal
 	var lastIPAddress string
+	var access ProfileAccess
 	err := s.pool.QueryRow(ctx, `
 		SELECT s.id::text, s.user_id::text, s.device_id::text, u.username, u.role,
-		       CASE WHEN s.profile_grant_expires_at > now() THEN s.active_profile_id::text END,
-		       CASE WHEN s.profile_grant_expires_at > now() THEN s.profile_grant_expires_at END,
-		       COALESCE(host(s.last_ip), '')
+		       s.active_profile_id::text,
+		       s.profile_grant_expires_at,
+		       COALESCE(host(s.last_ip), ''),
+		       COALESCE(p.enabled, false),
+		       p.available_from::text,
+		       p.available_until::text,
+		       to_char(p.access_start_time, 'HH24:MI'),
+		       to_char(p.access_end_time, 'HH24:MI'),
+		       COALESCE(p.access_timezone, 'UTC')
 		FROM auth_sessions s
 		JOIN users u ON u.id = s.user_id
+		LEFT JOIN profiles p ON p.id = s.active_profile_id
 		WHERE s.access_token_hash = $1
 		  AND s.access_expires_at > now()
 		  AND s.revoked_at IS NULL
@@ -288,12 +303,28 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 		&principal.ActiveProfileID,
 		&principal.ProfileGrantExpiresAt,
 		&lastIPAddress,
+		&access.Enabled,
+		&access.AvailableFrom,
+		&access.AvailableUntil,
+		&access.AccessStartTime,
+		&access.AccessEndTime,
+		&access.AccessTimezone,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, ErrInvalidToken
 	}
 	if err != nil {
 		return Principal{}, fmt.Errorf("authenticate access token: %w", err)
+	}
+	activeProfileID := principal.ActiveProfileID
+	if reconcileProfileGrant(&principal, access, time.Now().UTC()) {
+		if _, err := s.pool.Exec(ctx, `
+			UPDATE auth_sessions
+			SET active_profile_id = NULL, profile_grant_expires_at = NULL
+			WHERE id = $1 AND active_profile_id::text = $2
+		`, principal.SessionID, *activeProfileID); err != nil {
+			return Principal{}, fmt.Errorf("clear unavailable profile grant: %w", err)
+		}
 	}
 	if currentIPAddress := clientIPFromContext(ctx); currentIPAddress != "" && currentIPAddress != lastIPAddress {
 		if _, err := s.pool.Exec(ctx, "UPDATE auth_sessions SET last_ip = $2::inet WHERE id = $1", principal.SessionID, currentIPAddress); err != nil {
@@ -308,7 +339,10 @@ func (s *Service) Account(ctx context.Context, principal Principal) (Account, er
 		SELECT p.id::text, p.name, p.is_child, p.pin_hash IS NOT NULL,
 		       COALESCE(upa.can_manage, false) AS can_manage,
 		       p.avatar_preset,
-		       EXISTS (SELECT 1 FROM profile_avatar_images avatar WHERE avatar.profile_id = p.id)
+		       EXISTS (SELECT 1 FROM profile_avatar_images avatar WHERE avatar.profile_id = p.id),
+		       p.enabled, p.available_from::text, p.available_until::text,
+		       to_char(p.access_start_time, 'HH24:MI'), to_char(p.access_end_time, 'HH24:MI'),
+		       p.access_timezone
 		FROM profiles p
 		LEFT JOIN user_profile_access upa
 		  ON upa.profile_id = p.id AND upa.user_id = $1
@@ -326,10 +360,15 @@ func (s *Service) Account(ctx context.Context, principal Principal) (Account, er
 		var customAvatar bool
 		if err := rows.Scan(
 			&profile.ID, &profile.Name, &profile.IsChild, &profile.HasPIN, &profile.CanManage,
-			&profile.AvatarPreset, &customAvatar,
+			&profile.AvatarPreset, &customAvatar, &profile.Enabled, &profile.AvailableFrom,
+			&profile.AvailableUntil, &profile.AccessStartTime, &profile.AccessEndTime, &profile.AccessTimezone,
 		); err != nil {
 			return Account{}, fmt.Errorf("scan account profile: %w", err)
 		}
+		profile.Accessible = ProfileAccessibleAt(ProfileAccess{
+			Enabled: profile.Enabled, AvailableFrom: profile.AvailableFrom, AvailableUntil: profile.AvailableUntil,
+			AccessStartTime: profile.AccessStartTime, AccessEndTime: profile.AccessEndTime, AccessTimezone: profile.AccessTimezone,
+		}, time.Now().UTC())
 		profile.AvatarKind = "preset"
 		if customAvatar {
 			profile.AvatarKind = "custom"

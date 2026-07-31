@@ -2,17 +2,19 @@ package addon
 
 import "fmt"
 
-const addonByIDQuery = `
-	SELECT pa.id::text, pa.transport_url, pa.manifest::text, pa.position,
+const addonForProfileQuery = `
+	SELECT pa.id::text, pa.transport_url, pa.manifest::text, COALESCE(access.position, 0),
 	       ARRAY(
-	           SELECT access.profile_id::text
-	           FROM addon_profile_access access
-	           JOIN profiles p ON p.id = access.profile_id
-	           WHERE access.addon_id = pa.id
+	           SELECT assignment.profile_id::text
+	           FROM addon_profile_access assignment
+	           JOIN profiles p ON p.id = assignment.profile_id
+	           WHERE assignment.addon_id = pa.id
 	           ORDER BY lower(p.name), p.id
 	       ),
 	       pa.installed_at, pa.updated_at
 	FROM profile_addons pa
+	LEFT JOIN addon_profile_access access
+	  ON access.addon_id = pa.id AND access.profile_id = $2::uuid
 	WHERE pa.id = $1::uuid
 `
 

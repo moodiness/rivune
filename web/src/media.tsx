@@ -84,6 +84,12 @@ export function mediaTypeLabel(mediaType: string): string {
   return "Movie";
 }
 
+const DETAIL_ID_PROVIDERS = [
+  { key: "imdb", label: "IMDb" },
+  { key: "tmdb", label: "TMDB" },
+  { key: "tvdb", label: "TVDB" },
+] as const;
+
 function formatPlaybackTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
   const total = Math.floor(seconds);
@@ -163,7 +169,8 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
   const [titleProgress, setTitleProgress] = useState<PlaybackProgress>();
   const [watchedBusy, setWatchedBusy] = useState("");
   const nextSourceRef = useRef<SourceIdentity | undefined>(undefined);
-  const trailerItemKey = `${item.mediaType}:${item.titleId ?? item.id}`;
+  const selectedTrailerSeason = item.mediaType === "series" ? series?.seasons.find((candidate) => candidate.id === seasonID) : undefined;
+  const trailerItemKey = `${item.mediaType}:${item.titleId ?? item.id}:${selectedTrailerSeason ? `season:${selectedTrailerSeason.seasonNumber}` : "title"}`;
   trailerItemRef.current = trailerItemKey;
   const activeTrailer = trailerOwnerKey === trailerItemKey ? trailer : undefined;
   const activeTrailerLoading = trailerOwnerKey === trailerItemKey && trailerLoading;
@@ -185,7 +192,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
     setTrailerUnavailable(false);
     setTrailerOwnerKey("");
     return () => { trailerRequestRef.current += 1; };
-  }, [item.id, item.mediaType, item.titleId]);
+  }, [trailerItemKey]);
 
   useEffect(() => {
     let active = true;
@@ -219,10 +226,14 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
     }
     void (async () => {
       const resolvedTitleID = item.titleId ?? await resolveMediaTitle(item);
-      const progress = await api.progress(resolvedTitleID).catch(() => undefined);
+      const [progress, movie] = await Promise.all([
+        api.progress(resolvedTitleID).catch(() => undefined),
+        item.mediaType === "movie" ? api.movieDetails(resolvedTitleID).catch(() => undefined) : Promise.resolve(undefined),
+      ]);
       if (!active) return;
       setTitleID(resolvedTitleID);
       setTitleProgress(progress);
+      if (movie) setDetails((current) => ({ ...current, externalIds: { ...current.externalIds, ...movie.externalIds } }));
     })().catch(() => undefined);
     return () => { active = false; };
   }, [item.id, item.mediaType, item.titleId]);
@@ -243,6 +254,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
       if (!active) return;
       if (item.mediaType === "series") setTitleID(resolvedTitleID);
       setSeries(resolved);
+      if (item.mediaType === "series") setDetails((current) => ({ ...current, externalIds: { ...current.externalIds, ...resolved.externalIds } }));
       const seasons = [...resolved.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber);
       const initial = seasons.find((candidate) => candidate.id === continueSeasonID)
         ?? seasons.find((candidate) => candidate.seasonNumber > 0)
@@ -398,6 +410,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
     if (activeTrailer || activeTrailerLoading) return;
     const requestID = ++trailerRequestRef.current;
     const requestedItemKey = trailerItemRef.current;
+    const requestedSeasonNumber = selectedTrailerSeason?.seasonNumber;
     const requestIsCurrent = () => trailerRequestRef.current === requestID && trailerItemRef.current === requestedItemKey;
     let trailerRequested = false;
     setTrailer(undefined);
@@ -410,14 +423,14 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
       if (!requestIsCurrent()) return;
       setTitleID(resolvedTitleID);
       trailerRequested = true;
-      const metadata = await api.trailer(resolvedTitleID);
+      const metadata = await api.trailer(resolvedTitleID, requestedSeasonNumber);
       if (!requestIsCurrent()) return;
       setTrailer(metadata);
     } catch (cause) {
       if (!requestIsCurrent()) return;
       if (trailerRequested && cause instanceof APIError && cause.status === 404) {
         setTrailerUnavailable(true);
-        setTrailerMessage("No trailer is available for this title.");
+        setTrailerMessage(requestedSeasonNumber === undefined ? "No trailer is available for this title." : `No trailer is available for ${requestedSeasonNumber === 0 ? "Specials" : `Season ${requestedSeasonNumber}`}.`);
       } else {
         setTrailerMessage(notifyError(cause, "The trailer could not be loaded.", "Trailer unavailable"));
       }
@@ -537,7 +550,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
   const backdrop = details.backgroundUrl || details.posterUrl;
   const trailerURL = activeTrailer ? (() => {
     const params = new URLSearchParams({ autoplay: "1" });
-    if (activeTrailer.captionPreference) {
+    if (activeTrailer.isFallback && activeTrailer.captionPreference) {
       params.set("cc_lang_pref", activeTrailer.captionPreference);
       params.set("cc_load_policy", "1");
     }
@@ -563,6 +576,12 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
         {details.voteAverage !== undefined && <span className="rating"><Star size={14} fill="currentColor" /> {details.voteAverage.toFixed(1)}</span>}
         <span>{typeLabel}</span>
         {genres.map((genre) => <span key={genre}>{genre}</span>)}
+        {(item.mediaType === "movie" || item.mediaType === "series") && <div className="details-provider-badges" role="group" aria-label="External identifiers">
+          {DETAIL_ID_PROVIDERS.map((provider) => {
+            const externalID = details.externalIds?.[provider.key];
+            return externalID ? <span key={provider.key} className={`details-provider-badge details-provider-badge--${provider.key}`} role="img" aria-label={`${provider.label} ID: ${externalID}`} title={`${provider.label} ID: ${externalID}`}>{provider.label}</span> : null;
+          })}
+        </div>}
       </div>
       {metaLoading && !details.description ? <div className="details-loading"><LoaderCircle className="spin" size={18} /> Loading details</div> : <p className="details-description">{details.description || "No synopsis is available for this title."}</p>}
       {fromContinue && (item.mediaType === "movie" || item.mediaType === "episode") && <div className="details-context-actions">

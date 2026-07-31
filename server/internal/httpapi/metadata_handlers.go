@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -115,11 +116,21 @@ func (a *API) seasonDetails(w http.ResponseWriter, r *http.Request, principal au
 }
 
 func (a *API) titleTrailer(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	var seasonNumber *int
+	if r.URL.Query().Has("seasonNumber") {
+		parsed, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("seasonNumber")))
+		if err != nil || parsed < 0 {
+			a.writeMetadataError(w, "read title trailer", fmt.Errorf("%w: seasonNumber must be an integer greater than or equal to 0", metadata.ErrInvalidInput))
+			return
+		}
+		seasonNumber = &parsed
+	}
 	trailer, err := a.metadata.Trailer(
 		r.Context(),
 		principal,
 		r.PathValue("titleId"),
 		r.URL.Query().Get("language"),
+		seasonNumber,
 	)
 	if err != nil {
 		a.writeMetadataError(w, "read title trailer", err)

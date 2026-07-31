@@ -17,7 +17,21 @@ export type TokenPair = {
 };
 
 export type Avatar = { kind: "preset" | "custom"; presetId?: string; url: string };
-export type Profile = { id: string; name: string; isChild: boolean; hasPin?: boolean; canManage: boolean; avatar: Avatar };
+export type Profile = {
+  id: string;
+  name: string;
+  isChild: boolean;
+  hasPin?: boolean;
+  canManage: boolean;
+  enabled: boolean;
+  availableFrom: string | null;
+  availableUntil: string | null;
+  accessStartTime: string | null;
+  accessEndTime: string | null;
+  accessTimezone: string;
+  accessible: boolean;
+  avatar: Avatar;
+};
 export type Account = {
   user: { id: string; username: string; role: string };
   session: { id: string; deviceId: string; activeProfile: { id: string; expiresAt: string } | null };

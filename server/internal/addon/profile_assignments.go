@@ -2,11 +2,13 @@ package addon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/moodiness/rivune/server/internal/auth"
 )
@@ -93,15 +95,15 @@ func addonTransportAssignedToProfiles(ctx context.Context, tx pgx.Tx, transportU
 	return assigned, nil
 }
 
-func applyProfileAssignments(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, addonID string, profileIDs []string) error {
-	var lockedID, transportURL string
+func applyAddonUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, addonID, transportURL string, profileIDs []string, manifest Manifest, rawManifest json.RawMessage) error {
+	var lockedID string
 	if err := tx.QueryRow(ctx, `
-		SELECT id::text, transport_url FROM profile_addons WHERE id = $1::uuid FOR UPDATE
-	`, addonID).Scan(&lockedID, &transportURL); err != nil {
+		SELECT id::text FROM profile_addons WHERE id = $1::uuid FOR UPDATE
+	`, addonID).Scan(&lockedID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
-		return fmt.Errorf("lock addon profile access: %w", err)
+		return fmt.Errorf("lock addon update: %w", err)
 	}
 	var currentProfileIDs []string
 	if err := tx.QueryRow(ctx, `
@@ -119,14 +121,7 @@ func applyProfileAssignments(ctx context.Context, tx pgx.Tx, principal auth.Prin
 	if _, accessible := profileIDSet(currentProfileIDs)[activeProfileID]; !accessible {
 		return ErrNotFound
 	}
-	managedProfileIDs := append([]string(nil), profileIDs...)
-	managed := profileIDSet(managedProfileIDs)
-	for _, profileID := range currentProfileIDs {
-		if _, exists := managed[profileID]; !exists {
-			managedProfileIDs = append(managedProfileIDs, profileID)
-			managed[profileID] = struct{}{}
-		}
-	}
+	managedProfileIDs := mergeProfileIDs(profileIDs, currentProfileIDs)
 	if err := authorizeProfileAssignments(ctx, tx, principal, activeProfileID, managedProfileIDs); err != nil {
 		return err
 	}
@@ -136,6 +131,18 @@ func applyProfileAssignments(ctx context.Context, tx pgx.Tx, principal auth.Prin
 	}
 	if assigned {
 		return ErrAlreadyInstalled
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE profile_addons
+		SET transport_url = $2, manifest = $3::jsonb, manifest_id = $4,
+		    manifest_version = $5, updated_at = now()
+		WHERE id = $1::uuid
+	`, addonID, transportURL, rawManifest, manifest.ID, manifest.Version); err != nil {
+		var databaseError *pgconn.PgError
+		if errors.As(err, &databaseError) && databaseError.Code == "23505" {
+			return ErrAlreadyInstalled
+		}
+		return fmt.Errorf("update addon: %w", err)
 	}
 	return writeProfileAssignments(ctx, tx, addonID, profileIDs)
 }
@@ -148,7 +155,20 @@ func profileIDSet(profileIDs []string) map[string]struct{} {
 	return set
 }
 
-func (service *Service) AssignProfiles(ctx context.Context, principal auth.Principal, addonID string, input ProfileAssignmentInput) (InstalledAddon, error) {
+func mergeProfileIDs(primary, secondary []string) []string {
+	merged := append([]string(nil), primary...)
+	seen := profileIDSet(merged)
+	for _, profileID := range secondary {
+		if _, exists := seen[profileID]; exists {
+			continue
+		}
+		merged = append(merged, profileID)
+		seen[profileID] = struct{}{}
+	}
+	return merged
+}
+
+func (service *Service) Update(ctx context.Context, principal auth.Principal, addonID string, input UpdateAddonInput) (InstalledAddon, error) {
 	activeProfileID, err := activeProfileID(principal)
 	if err != nil {
 		return InstalledAddon{}, err
@@ -156,27 +176,49 @@ func (service *Service) AssignProfiles(ctx context.Context, principal auth.Princ
 	if !validUUID(addonID) {
 		return InstalledAddon{}, ErrInvalidInput
 	}
+	if input.ProfileIDs == nil {
+		return InstalledAddon{}, fmt.Errorf("%w: profileIds is required", ErrInvalidInput)
+	}
 	profileIDs, err := normalizeProfileIDs(input.ProfileIDs, activeProfileID)
+	if err != nil {
+		return InstalledAddon{}, err
+	}
+	transportURL, err := NormalizeTransportURL(input.TransportURL)
+	if err != nil {
+		return InstalledAddon{}, err
+	}
+	current, err := service.addonForProfile(ctx, activeProfileID, addonID)
+	if err != nil {
+		return InstalledAddon{}, err
+	}
+	authorized, err := auth.CanManageProfiles(ctx, service.pool, principal, mergeProfileIDs(profileIDs, current.ProfileIDs))
+	if err != nil {
+		return InstalledAddon{}, err
+	}
+	if !authorized {
+		return InstalledAddon{}, ErrForbidden
+	}
+	manifest, rawManifest, err := service.transport.Manifest(ctx, transportURL)
 	if err != nil {
 		return InstalledAddon{}, err
 	}
 	tx, err := service.pool.Begin(ctx)
 	if err != nil {
-		return InstalledAddon{}, fmt.Errorf("begin addon profile assignment: %w", err)
+		return InstalledAddon{}, fmt.Errorf("begin addon update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := applyProfileAssignments(ctx, tx, principal, activeProfileID, addonID, profileIDs); err != nil {
+	if err := applyAddonUpdate(ctx, tx, principal, activeProfileID, addonID, transportURL, profileIDs, manifest, rawManifest); err != nil {
 		return InstalledAddon{}, err
 	}
-	installed, err := queryAddon(tx.QueryRow(ctx, addonByIDQuery, addonID))
+	installed, err := queryAddon(tx.QueryRow(ctx, addonForProfileQuery, addonID, activeProfileID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return InstalledAddon{}, ErrNotFound
 		}
-		return InstalledAddon{}, err
+		return InstalledAddon{}, fmt.Errorf("query updated addon: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return InstalledAddon{}, fmt.Errorf("commit addon profile assignment: %w", err)
+		return InstalledAddon{}, fmt.Errorf("commit addon update: %w", err)
 	}
 	return installed, nil
 }

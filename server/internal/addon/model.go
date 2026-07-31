@@ -138,8 +138,9 @@ type InstallInput struct {
 	ProfileIDs   []string `json:"profileIds,omitempty"`
 }
 
-type ProfileAssignmentInput struct {
-	ProfileIDs []string `json:"profileIds"`
+type UpdateAddonInput struct {
+	TransportURL string   `json:"transportUrl"`
+	ProfileIDs   []string `json:"profileIds"`
 }
 
 type ReorderInput struct {

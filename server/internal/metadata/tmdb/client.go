@@ -228,22 +228,31 @@ func (c *Client) SearchSeries(ctx context.Context, options metadata.SearchOption
 	return normalizeSeriesPage(response), nil
 }
 
-func (c *Client) Trailers(ctx context.Context, mediaType, externalID, language string) ([]metadata.ProviderTrailer, error) {
+func (c *Client) Trailers(ctx context.Context, mediaType, externalID, language string, seasonNumber *int) ([]metadata.ProviderTrailer, error) {
 	titleID, err := strconv.ParseInt(strings.TrimSpace(externalID), 10, 64)
 	if err != nil || titleID < 1 {
 		return nil, fmt.Errorf("%w: invalid TMDB title ID", metadata.ErrProviderFailure)
 	}
-	var titlePath string
+	var endpoint string
 	switch mediaType {
 	case metadata.MediaTypeMovie:
-		titlePath = "/movie/"
+		if seasonNumber != nil {
+			return nil, fmt.Errorf("%w: seasons are not valid for TMDB movies", metadata.ErrProviderFailure)
+		}
+		endpoint = "/movie/" + strconv.FormatInt(titleID, 10) + "/videos"
 	case metadata.MediaTypeSeries:
-		titlePath = "/tv/"
+		endpoint = "/tv/" + strconv.FormatInt(titleID, 10)
+		if seasonNumber != nil {
+			if *seasonNumber < 0 {
+				return nil, fmt.Errorf("%w: invalid TMDB season number", metadata.ErrProviderFailure)
+			}
+			endpoint += "/season/" + strconv.Itoa(*seasonNumber)
+		}
+		endpoint += "/videos"
 	default:
 		return nil, fmt.Errorf("%w: unsupported TMDB trailer media type", metadata.ErrProviderFailure)
 	}
 	var response videosResponse
-	endpoint := titlePath + strconv.FormatInt(titleID, 10) + "/videos"
 	if err := c.get(ctx, endpoint, url.Values{"language": {language}}, &response); err != nil {
 		return nil, err
 	}

@@ -29,10 +29,10 @@ type fakeAddonService struct {
 	refreshID    string
 	refreshValue addon.InstalledAddon
 	refreshErr   error
-	assignID     string
-	assignInput  addon.ProfileAssignmentInput
-	assignValue  addon.InstalledAddon
-	assignErr    error
+	updateID     string
+	updateInput  addon.UpdateAddonInput
+	updateValue  addon.InstalledAddon
+	updateErr    error
 	catalogs     []addon.CatalogDescriptor
 	catalogsErr  error
 	fetchAddonID string
@@ -72,10 +72,10 @@ func (fake *fakeAddonService) Refresh(_ context.Context, _ auth.Principal, addon
 	fake.refreshID = addonID
 	return fake.refreshValue, fake.refreshErr
 }
-func (fake *fakeAddonService) AssignProfiles(_ context.Context, _ auth.Principal, addonID string, input addon.ProfileAssignmentInput) (addon.InstalledAddon, error) {
-	fake.assignID = addonID
-	fake.assignInput = input
-	return fake.assignValue, fake.assignErr
+func (fake *fakeAddonService) Update(_ context.Context, _ auth.Principal, addonID string, input addon.UpdateAddonInput) (addon.InstalledAddon, error) {
+	fake.updateID = addonID
+	fake.updateInput = input
+	return fake.updateValue, fake.updateErr
 }
 
 func (fake *fakeAddonService) Catalogs(context.Context, auth.Principal) ([]addon.CatalogDescriptor, error) {
@@ -126,12 +126,14 @@ func TestInstallAddonUsesProfileScopedRegistry(t *testing.T) {
 	}
 }
 
-func TestAssignAddonProfilesReplacesProfileSelection(t *testing.T) {
-	service := &fakeAddonService{assignValue: addon.InstalledAddon{
-		ID: "11111111-1111-4111-8111-111111111111", ProfileIDs: []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+func TestUpdateAddonForwardsCompleteInput(t *testing.T) {
+	service := &fakeAddonService{updateValue: addon.InstalledAddon{
+		ID:           "11111111-1111-4111-8111-111111111111",
+		TransportURL: "https://new-addon.example/manifest.json",
+		ProfileIDs:   []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
 	}}
 	api := addonAPI(service)
-	request := httptest.NewRequest(http.MethodPut, "/api/v1/addons/11111111-1111-4111-8111-111111111111/profiles", bytes.NewBufferString(`{"profileIds":["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]}`))
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/addons/11111111-1111-4111-8111-111111111111", bytes.NewBufferString(`{"transportUrl":"https://new-addon.example","profileIds":["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]}`))
 	request.Header.Set("Authorization", "Bearer access")
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -141,10 +143,20 @@ func TestAssignAddonProfilesReplacesProfileSelection(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
-	if service.assignID != "11111111-1111-4111-8111-111111111111" || len(service.assignInput.ProfileIDs) != 1 || service.assignInput.ProfileIDs[0] != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
-		t.Fatalf("unexpected assignment input: id=%q input=%+v", service.assignID, service.assignInput)
+	var body addon.InstalledAddon
+	decodeResponse(t, response, &body)
+	if body.ID != service.updateValue.ID || body.TransportURL != service.updateValue.TransportURL {
+		t.Fatalf("unexpected update response: %+v", body)
 	}
-
+	if service.updateID != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("unexpected addon ID: %q", service.updateID)
+	}
+	if service.updateInput.TransportURL != "https://new-addon.example" {
+		t.Fatalf("unexpected transport URL: %q", service.updateInput.TransportURL)
+	}
+	if len(service.updateInput.ProfileIDs) != 1 || service.updateInput.ProfileIDs[0] != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
+		t.Fatalf("unexpected profile IDs: %+v", service.updateInput.ProfileIDs)
+	}
 }
 
 func TestAddonResourceRoutePreservesOpaqueIDAndRepeatedExtras(t *testing.T) {

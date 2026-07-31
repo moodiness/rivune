@@ -1,5 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { api, clearSession } from "./api";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { api, clearSession, PROFILE_SELECTION_REQUIRED_EVENT } from "./api";
 import type { Account, Discovery, Profile } from "./types";
 
 type AuthState = {
@@ -24,17 +24,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [account, setAccount] = useState<Account | null>(null);
   const [booting, setBooting] = useState(true);
   const [profileConfirmed, setProfileConfirmed] = useState(false);
+  const authGeneration = useRef(0);
+  const profileSelectionInFlight = useRef(false);
 
   const refreshAccount = useCallback(async () => {
+    const generation = authGeneration.current;
     try {
       const next = await api.me();
-      setAccount(next);
+      if (authGeneration.current === generation) setAccount(next);
       return next;
     } catch {
-      setAccount(null);
+      if (authGeneration.current === generation) setAccount(null);
       return null;
     }
   }, []);
+
+  useEffect(() => {
+    const requireProfileSelection = () => {
+      if (profileSelectionInFlight.current) return;
+      const generation = authGeneration.current;
+      void api.me()
+        .then((next) => {
+          if (authGeneration.current !== generation) return;
+          setAccount(next);
+          if (!next.session.activeProfile) setProfileConfirmed(false);
+        })
+        .catch(() => {
+          if (authGeneration.current !== generation) return;
+          setAccount(null);
+          setProfileConfirmed(false);
+        });
+    };
+    window.addEventListener(PROFILE_SELECTION_REQUIRED_EVENT, requireProfileSelection);
+    return () => window.removeEventListener(PROFILE_SELECTION_REQUIRED_EVENT, requireProfileSelection);
+  }, [refreshAccount]);
 
   const rediscover = useCallback(async () => {
     const next = await api.discovery();
@@ -62,33 +85,52 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(async (username: string, password: string) => {
+    const generation = ++authGeneration.current;
     await api.login(username, password);
+    const next = await api.me();
+    if (authGeneration.current !== generation) return;
     setProfileConfirmed(false);
-    setAccount(await api.me());
+    setAccount(next);
   }, []);
 
   const logout = useCallback(async () => {
+    const generation = ++authGeneration.current;
     await api.logout();
+    if (authGeneration.current !== generation) return;
     setAccount(null);
     setProfileConfirmed(false);
   }, []);
 
   const selectProfile = useCallback(async (profile: Profile, pin?: string) => {
-    await api.selectProfile(profile.id, pin);
-    setProfileConfirmed(true);
-    setAccount(await api.me());
+    const generation = ++authGeneration.current;
+    profileSelectionInFlight.current = true;
+    try {
+      await api.selectProfile(profile.id, pin);
+      const next = await api.me();
+      if (authGeneration.current !== generation) return;
+      setAccount(next);
+      setProfileConfirmed(next.session.activeProfile?.id === profile.id);
+    } finally {
+      if (authGeneration.current === generation) profileSelectionInFlight.current = false;
+    }
   }, []);
 
   const leaveProfile = useCallback(async () => {
+    const generation = ++authGeneration.current;
     await api.clearProfile();
+    const next = await api.me();
+    if (authGeneration.current !== generation) return;
     setProfileConfirmed(false);
-    setAccount(await api.me());
+    setAccount(next);
   }, []);
 
   const completeDeviceAuthorization = useCallback(async (deviceCode: string) => {
+    const generation = ++authGeneration.current;
     await api.exchangeDeviceAuthorization(deviceCode);
+    const next = await api.me();
+    if (authGeneration.current !== generation) return;
     setProfileConfirmed(false);
-    setAccount(await api.me());
+    setAccount(next);
   }, []);
 
   const activeProfile = profileConfirmed

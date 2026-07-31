@@ -123,12 +123,19 @@ func (a *API) me(w http.ResponseWriter, r *http.Request, principal auth.Principa
 			avatar.URL = "/api/v1/profile-avatars/" + profile.AvatarPreset
 		}
 		profiles = append(profiles, map[string]any{
-			"id":        profile.ID,
-			"name":      profile.Name,
-			"isChild":   profile.IsChild,
-			"hasPin":    profile.HasPIN,
-			"canManage": profile.CanManage,
-			"avatar":    avatar,
+			"id":              profile.ID,
+			"name":            profile.Name,
+			"isChild":         profile.IsChild,
+			"hasPin":          profile.HasPIN,
+			"canManage":       profile.CanManage,
+			"enabled":         profile.Enabled,
+			"availableFrom":   profile.AvailableFrom,
+			"availableUntil":  profile.AvailableUntil,
+			"accessStartTime": profile.AccessStartTime,
+			"accessEndTime":   profile.AccessEndTime,
+			"accessTimezone":  profile.AccessTimezone,
+			"accessible":      profile.Accessible,
+			"avatar":          avatar,
 		})
 	}
 	var activeProfile any

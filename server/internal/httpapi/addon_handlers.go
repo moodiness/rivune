@@ -69,18 +69,18 @@ func (a *API) refreshAddon(w http.ResponseWriter, r *http.Request, principal aut
 	}
 	writeJSON(w, http.StatusOK, installed)
 }
-func (a *API) assignAddonProfiles(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+func (a *API) updateAddon(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	if !requireJSON(w, r) {
 		return
 	}
-	var input addon.ProfileAssignmentInput
+	var input addon.UpdateAddonInput
 	if err := decodeJSON(w, r, &input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	installed, err := a.addons.AssignProfiles(r.Context(), principal, r.PathValue("addonId"), input)
+	installed, err := a.addons.Update(r.Context(), principal, r.PathValue("addonId"), input)
 	if err != nil {
-		a.writeAddonError(w, "assign addon profiles", err)
+		a.writeAddonError(w, "update addon", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, installed)

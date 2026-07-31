@@ -7,9 +7,9 @@ Rivune is under active development. The web client and backend are usable today;
 ## What works
 
 - Secure first-run setup, device authentication, refresh tokens, and revocable sessions
-- Profiles with PIN protection, management permissions, independent settings, libraries, and watch progress
-- Per-profile media source addons and configurable collections
-- Optional TMDB, TVDB, and Trakt metadata integrations
+- Profiles with PIN protection and throttling, management permissions, disable/date/daily access windows, independent settings, libraries, and watch progress
+- Per-profile media source addons with in-place transport and profile-assignment editing, plus configurable collections
+- Optional TMDB, TVDB, and Trakt metadata integrations, localized season-aware trailers, and visible provider identifiers
 - Opaque, session-bound playback source references that keep provider URLs and private headers on the server
 - Direct playback, remuxing, audio conversion, full H.264/AAC transcoding, and HLS delivery
 - Audio and subtitle selection, external subtitles, seek, playback speed, Picture in Picture, and resume state

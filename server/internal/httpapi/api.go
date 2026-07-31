@@ -35,7 +35,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/webui"
 )
 
-const protocolVersion = 14
+const protocolVersion = 15
 
 type instanceService interface {
 	Info(context.Context) (instance.Info, error)
@@ -95,7 +95,7 @@ type addonService interface {
 	Remove(context.Context, auth.Principal, string) error
 	Reorder(context.Context, auth.Principal, addon.ReorderInput) ([]addon.InstalledAddon, error)
 	Refresh(context.Context, auth.Principal, string) (addon.InstalledAddon, error)
-	AssignProfiles(context.Context, auth.Principal, string, addon.ProfileAssignmentInput) (addon.InstalledAddon, error)
+	Update(context.Context, auth.Principal, string, addon.UpdateAddonInput) (addon.InstalledAddon, error)
 	Catalogs(context.Context, auth.Principal) ([]addon.CatalogDescriptor, error)
 	Fetch(context.Context, auth.Principal, string, addon.ResourcePath) (addon.ResourceResult, error)
 	FetchAll(context.Context, auth.Principal, addon.ResourcePath) (addon.ResourceBatch, error)
@@ -128,7 +128,7 @@ type metadataService interface {
 	SearchSeries(context.Context, auth.Principal, metadata.SearchOptions) (metadata.SeriesPage, error)
 	SeriesDetails(context.Context, auth.Principal, string, string) (metadata.Series, error)
 	SeasonDetails(context.Context, auth.Principal, string, string) (metadata.Season, error)
-	Trailer(context.Context, auth.Principal, string, string) (metadata.Trailer, error)
+	Trailer(context.Context, auth.Principal, string, string, *int) (metadata.Trailer, error)
 }
 
 type watchstateService interface {
@@ -274,6 +274,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PATCH /api/v1/profiles/{profileId}/settings", a.requireAuthentication(a.updateProfileSettings))
 	mux.Handle("GET /api/v1/profiles/{profileId}/settings/effective", a.requireAuthentication(a.effectiveSettings))
 	mux.Handle("GET /api/v1/users", a.requireAuthentication(a.listUsers))
+	mux.Handle("GET /api/v1/metadata/titles/{titleId}", a.requireAuthentication(a.movieDetails))
 	mux.Handle("GET /api/v1/metadata/series/{titleId}", a.requireAuthentication(a.seriesDetails))
 	mux.Handle("GET /api/v1/metadata/seasons/{seasonId}", a.requireAuthentication(a.seasonDetails))
 	mux.Handle("GET /api/v1/metadata/titles/{titleId}/trailer", a.requireAuthentication(a.titleTrailer))
@@ -288,7 +289,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/addons/order", a.requireAuthentication(a.reorderAddons))
 	mux.Handle("DELETE /api/v1/addons/{addonId}", a.requireAuthentication(a.removeAddon))
 	mux.Handle("POST /api/v1/addons/{addonId}/refresh", a.requireAuthentication(a.refreshAddon))
-	mux.Handle("PUT /api/v1/addons/{addonId}/profiles", a.requireAuthentication(a.assignAddonProfiles))
+	mux.Handle("PUT /api/v1/addons/{addonId}", a.requireAuthentication(a.updateAddon))
 	mux.Handle("GET /api/v1/addons/catalogs", a.requireAuthentication(a.addonCatalogDescriptors))
 	mux.Handle("GET /api/v1/addons/{addonId}/resource/{resource}/{type}/{id}", a.requireAuthentication(a.fetchAddonResource))
 	mux.Handle("GET /api/v1/addons/resources/{resource}/{type}/{id}", a.requireAuthentication(a.fetchAllAddonResources))

@@ -81,7 +81,7 @@ func (service *Service) Install(ctx context.Context, principal auth.Principal, i
 	if err := writeProfileAssignments(ctx, tx, addonID, profileIDs); err != nil {
 		return InstalledAddon{}, err
 	}
-	installed, err := queryAddon(tx.QueryRow(ctx, addonByIDQuery, addonID))
+	installed, err := queryAddon(tx.QueryRow(ctx, addonForProfileQuery, addonID, profileID))
 	if err != nil {
 		return InstalledAddon{}, fmt.Errorf("query installed addon: %w", err)
 	}
@@ -396,20 +396,7 @@ func (service *Service) addonForProfile(ctx context.Context, profileID, addonID 
 	if !validUUID(addonID) {
 		return InstalledAddon{}, ErrInvalidInput
 	}
-	installed, err := queryAddon(service.pool.QueryRow(ctx, `
-		SELECT pa.id::text, pa.transport_url, pa.manifest::text, access.position,
-		       ARRAY(
-		           SELECT assignment.profile_id::text
-		           FROM addon_profile_access assignment
-		           JOIN profiles p ON p.id = assignment.profile_id
-		           WHERE assignment.addon_id = pa.id
-		           ORDER BY lower(p.name), p.id
-		       ),
-		       pa.installed_at, pa.updated_at
-		FROM addon_profile_access access
-		JOIN profile_addons pa ON pa.id = access.addon_id
-		WHERE access.profile_id = $1::uuid AND pa.id = $2::uuid
-	`, profileID, addonID))
+	installed, err := queryAddon(service.pool.QueryRow(ctx, addonForProfileQuery, addonID, profileID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return InstalledAddon{}, ErrNotFound
 	}

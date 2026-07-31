@@ -38,6 +38,7 @@ const DEVICE_KEY = "rivune.device";
 let refreshPromise: Promise<boolean> | null = null;
 let metadataLanguage = navigator.language;
 let metadataRegion = region();
+export const PROFILE_SELECTION_REQUIRED_EVENT = "rivune:profile-selection-required";
 
 export class APIError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -98,6 +99,9 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
       code = body.error?.code ?? code;
       message = body.error?.message ?? message;
     } catch { /* response without JSON */ }
+    if (code === "profile_selection_required") {
+      window.dispatchEvent(new Event(PROFILE_SELECTION_REQUIRED_EVENT));
+    }
     throw new APIError(response.status, code, message);
   }
   if (response.status === 204) return undefined as T;
@@ -111,6 +115,15 @@ const query = (values: Record<string, string | number | boolean | undefined>) =>
   });
   const encoded = params.toString();
   return encoded ? `?${encoded}` : "";
+};
+
+type ProfileAccessInput = {
+  enabled?: boolean;
+  availableFrom?: string | null;
+  availableUntil?: string | null;
+  accessStartTime?: string | null;
+  accessEndTime?: string | null;
+  accessTimezone?: string | null;
 };
 
 export const api = {
@@ -152,8 +165,8 @@ export const api = {
   selectProfile: (id: string, pin?: string) => request<{ profile: Profile; expiresAt: string }>(`/profiles/${id}/select`, { method: "POST", body: JSON.stringify(pin ? { pin } : {}) }),
   clearProfile: () => request<void>("/profiles/selection", { method: "DELETE" }),
   avatarPresets: () => request<{ presets: AvatarPreset[] }>("/profile-avatars"),
-  createProfile: (input: { name: string; isChild: boolean; pin?: string }) => request<Profile>("/profiles", { method: "POST", body: JSON.stringify(input) }),
-  updateProfile: (id: string, input: { name?: string; isChild?: boolean; pin?: string | null }) => request<Profile>(`/profiles/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
+  createProfile: (input: { name: string; isChild: boolean; pin?: string } & ProfileAccessInput) => request<Profile>("/profiles", { method: "POST", body: JSON.stringify(input) }),
+  updateProfile: (id: string, input: { name?: string; isChild?: boolean; pin?: string | null } & ProfileAccessInput) => request<Profile>(`/profiles/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
   deleteProfile: (id: string) => request<void>(`/profiles/${id}`, { method: "DELETE" }),
   setProfileAvatar: (id: string, presetId: string) => request<{ avatar: Profile["avatar"] }>(`/profiles/${id}/avatar/preset`, { method: "PUT", body: JSON.stringify({ presetId }) }),
   uploadProfileAvatar: (id: string, image: File) => request<{ avatar: Profile["avatar"] }>(`/profiles/${id}/avatar`, { method: "PUT", headers: { "Content-Type": image.type }, body: image }),
@@ -183,7 +196,7 @@ export const api = {
   addons: () => request<{ addons: InstalledAddon[] }>("/addons"),
   installAddon: (transportUrl: string, profileIds: string[]) => request<InstalledAddon>("/addons", { method: "POST", body: JSON.stringify({ transportUrl, profileIds }) }),
   refreshAddon: (id: string) => request<InstalledAddon>(`/addons/${id}/refresh`, { method: "POST" }),
-  assignAddonProfiles: (id: string, profileIds: string[]) => request<InstalledAddon>(`/addons/${id}/profiles`, { method: "PUT", body: JSON.stringify({ profileIds }) }),
+  updateAddon: (id: string, transportUrl: string, profileIds: string[]) => request<InstalledAddon>(`/addons/${id}`, { method: "PUT", body: JSON.stringify({ transportUrl, profileIds }) }),
   reorderAddons: (addonIds: string[]) => request<{ addons: InstalledAddon[] }>("/addons/order", { method: "PUT", body: JSON.stringify({ addonIds }) }),
   deleteAddon: (id: string) => request<void>(`/addons/${id}`, { method: "DELETE" }),
   addonCatalogs: () => request<{ catalogs: Array<{ addonId: string; manifestId: string; position: number; catalog: { type: string; id: string; name?: string }; addonCatalog: boolean }> }>("/addons/catalogs"),
@@ -211,9 +224,10 @@ export const api = {
   playbackActivity: () => request<PlaybackActivity>("/playback/activity"),
   stopPlaybackActivitySession: (sessionId: string) => request<void>(`/playback/activity/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
   purgePlaybackActivity: () => request<PlaybackPurgeResult>("/playback/activity/purge", { method: "POST" }),
+  movieDetails: (titleId: string) => request<{ externalIds: Record<string, string> }>(`/metadata/titles/${encodeURIComponent(titleId)}${query({ language: metadataLanguage })}`),
   seriesDetails: (titleId: string) => request<SeriesMetadata>(`/metadata/series/${encodeURIComponent(titleId)}${query({ language: metadataLanguage })}`),
   seasonDetails: (seasonId: string) => request<SeasonMetadata>(`/metadata/seasons/${encodeURIComponent(seasonId)}${query({ language: metadataLanguage })}`),
-  trailer: (titleId: string) => request<TrailerMetadata>(`/metadata/titles/${encodeURIComponent(titleId)}/trailer${query({ language: metadataLanguage })}`),
+  trailer: (titleId: string, seasonNumber?: number) => request<TrailerMetadata>(`/metadata/titles/${encodeURIComponent(titleId)}/trailer${query({ language: metadataLanguage, seasonNumber })}`),
 
   library: (mediaType = "") => request<LibraryPage>(`/library${query({ mediaType, page: 1, pageSize: 100 })}`),
   continueWatching: () => request<ContinueWatching>("/continue-watching?limit=30"),

@@ -356,7 +356,10 @@ func managedAvatarProfile(ctx context.Context, tx pgx.Tx, principal auth.Princip
 		SELECT profile.id::text, profile.name, profile.is_child, profile.pin_hash IS NOT NULL,
 		       COALESCE(access.can_manage, false), profile.avatar_preset, EXISTS (
 		           SELECT 1 FROM profile_avatar_images avatar WHERE avatar.profile_id = profile.id
-		       )
+		       ),
+		       profile.enabled, profile.available_from::text, profile.available_until::text,
+		       to_char(profile.access_start_time, 'HH24:MI'), to_char(profile.access_end_time, 'HH24:MI'),
+		       profile.access_timezone
 		FROM profiles profile
 		LEFT JOIN user_profile_access access
 		  ON access.profile_id = profile.id AND access.user_id = $2
@@ -365,6 +368,8 @@ func managedAvatarProfile(ctx context.Context, tx pgx.Tx, principal auth.Princip
 		FOR UPDATE OF profile
 	`, strings.TrimSpace(profileID), principal.UserID, principal.Role).Scan(
 		&profile.ID, &profile.Name, &profile.IsChild, &profile.HasPIN, &profile.CanManage, &profile.AvatarPreset, &custom,
+		&profile.Enabled, &profile.AvailableFrom, &profile.AvailableUntil, &profile.AccessStartTime,
+		&profile.AccessEndTime, &profile.AccessTimezone,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Profile{}, ErrNotFound
@@ -372,6 +377,7 @@ func managedAvatarProfile(ctx context.Context, tx pgx.Tx, principal auth.Princip
 	if err != nil {
 		return Profile{}, fmt.Errorf("authorize profile avatar update: %w", err)
 	}
+	profile.Accessible = profileAccessible(profile, time.Now().UTC())
 	profile.AvatarKind = "preset"
 	if custom {
 		profile.AvatarKind = "custom"

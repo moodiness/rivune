@@ -271,7 +271,7 @@ type Provider interface {
 }
 
 type TrailerProvider interface {
-	Trailers(context.Context, string, string, string) ([]ProviderTrailer, error)
+	Trailers(context.Context, string, string, string, *int) ([]ProviderTrailer, error)
 }
 
 type ExternalIDResolver interface {

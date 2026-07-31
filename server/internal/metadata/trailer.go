@@ -13,13 +13,16 @@ import (
 
 const trailerFallbackLanguage = "en-US"
 
-func (s *Service) Trailer(ctx context.Context, principal auth.Principal, titleID, language string) (Trailer, error) {
+func (s *Service) Trailer(ctx context.Context, principal auth.Principal, titleID, language string, seasonNumber *int) (Trailer, error) {
 	if err := requireActiveProfile(principal); err != nil {
 		return Trailer{}, err
 	}
 	normalizedLanguage, err := normalizeLanguage(language)
 	if err != nil {
 		return Trailer{}, err
+	}
+	if seasonNumber != nil && *seasonNumber < 0 {
+		return Trailer{}, fmt.Errorf("%w: seasonNumber must be at least 0", ErrInvalidInput)
 	}
 
 	var mediaType string
@@ -40,6 +43,9 @@ func (s *Service) Trailer(ctx context.Context, principal auth.Principal, titleID
 	if err != nil {
 		return Trailer{}, fmt.Errorf("query trailer title identity: %w", err)
 	}
+	if seasonNumber != nil && mediaType != MediaTypeSeries {
+		return Trailer{}, fmt.Errorf("%w: seasonNumber is only valid for series", ErrInvalidInput)
+	}
 	if s.trailerProvider == nil {
 		return Trailer{}, ErrProviderUnavailable
 	}
@@ -54,11 +60,11 @@ func (s *Service) Trailer(ctx context.Context, principal auth.Principal, titleID
 			return Trailer{}, err
 		}
 	}
-	return chooseTrailer(ctx, s.trailerProvider, mediaType, resolvedExternalID, normalizedLanguage)
+	return chooseTrailer(ctx, s.trailerProvider, mediaType, resolvedExternalID, normalizedLanguage, seasonNumber)
 }
 
-func chooseTrailer(ctx context.Context, provider TrailerProvider, mediaType, externalID, language string) (Trailer, error) {
-	localized, err := provider.Trailers(ctx, mediaType, externalID, language)
+func chooseTrailer(ctx context.Context, provider TrailerProvider, mediaType, externalID, language string, seasonNumber *int) (Trailer, error) {
+	localized, err := provider.Trailers(ctx, mediaType, externalID, language, seasonNumber)
 	if err != nil && !errors.Is(err, ErrProviderNotFound) {
 		return Trailer{}, err
 	}
@@ -69,7 +75,7 @@ func chooseTrailer(ctx context.Context, provider TrailerProvider, mediaType, ext
 		return Trailer{}, ErrNotFound
 	}
 
-	english, err := provider.Trailers(ctx, mediaType, externalID, trailerFallbackLanguage)
+	english, err := provider.Trailers(ctx, mediaType, externalID, trailerFallbackLanguage, seasonNumber)
 	if err != nil && !errors.Is(err, ErrProviderNotFound) {
 		return Trailer{}, err
 	}

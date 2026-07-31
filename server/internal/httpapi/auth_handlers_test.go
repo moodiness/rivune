@@ -182,7 +182,10 @@ func TestMeReturnsAuthenticatedAccount(t *testing.T) {
 	principal := auth.Principal{SessionID: "session-id", UserID: "user-id", DeviceID: "device-id", Username: "admin", Role: "admin"}
 	service := &fakeAuthService{
 		principal: principal,
-		account:   auth.Account{Principal: principal, Profiles: []auth.Profile{{ID: "profile-id", Name: "Admin", HasPIN: true, CanManage: true}}},
+		account: auth.Account{Principal: principal, Profiles: []auth.Profile{{
+			ID: "profile-id", Name: "Admin", HasPIN: true, CanManage: true, Enabled: true,
+			AvailableUntil: new("2026-08-31"), AccessTimezone: "UTC", Accessible: true,
+		}}},
 	}
 	api := testAPI(&fakeInstanceService{})
 	api.auth = service
@@ -203,13 +206,20 @@ func TestMeReturnsAuthenticatedAccount(t *testing.T) {
 			Username string `json:"username"`
 		} `json:"user"`
 		Profiles []struct {
-			Name      string `json:"name"`
-			CanManage bool   `json:"canManage"`
-			HasPIN    bool   `json:"hasPin"`
+			Name           string  `json:"name"`
+			CanManage      bool    `json:"canManage"`
+			HasPIN         bool    `json:"hasPin"`
+			Enabled        bool    `json:"enabled"`
+			AvailableUntil *string `json:"availableUntil"`
+			AccessTimezone string  `json:"accessTimezone"`
+			Accessible     bool    `json:"accessible"`
 		} `json:"profiles"`
 	}
 	decodeResponse(t, response, &body)
-	if body.User.Username != "admin" || len(body.Profiles) != 1 || body.Profiles[0].Name != "Admin" || !body.Profiles[0].HasPIN || !body.Profiles[0].CanManage {
+	if body.User.Username != "admin" || len(body.Profiles) != 1 || body.Profiles[0].Name != "Admin" ||
+		!body.Profiles[0].HasPIN || !body.Profiles[0].CanManage || !body.Profiles[0].Enabled ||
+		!body.Profiles[0].Accessible || body.Profiles[0].AvailableUntil == nil ||
+		*body.Profiles[0].AvailableUntil != "2026-08-31" || body.Profiles[0].AccessTimezone != "UTC" {
 		t.Fatalf("unexpected account response: %+v", body)
 	}
 }

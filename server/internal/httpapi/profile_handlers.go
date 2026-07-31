@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/moodiness/rivune/server/internal/auth"
@@ -18,12 +19,19 @@ type profileAvatarResponse struct {
 }
 
 type profileResponse struct {
-	ID        string                `json:"id"`
-	Name      string                `json:"name"`
-	IsChild   bool                  `json:"isChild"`
-	HasPIN    bool                  `json:"hasPin"`
-	CanManage bool                  `json:"canManage"`
-	Avatar    profileAvatarResponse `json:"avatar"`
+	ID              string                `json:"id"`
+	Name            string                `json:"name"`
+	IsChild         bool                  `json:"isChild"`
+	HasPIN          bool                  `json:"hasPin"`
+	CanManage       bool                  `json:"canManage"`
+	Enabled         bool                  `json:"enabled"`
+	AvailableFrom   *string               `json:"availableFrom"`
+	AvailableUntil  *string               `json:"availableUntil"`
+	AccessStartTime *string               `json:"accessStartTime"`
+	AccessEndTime   *string               `json:"accessEndTime"`
+	AccessTimezone  string                `json:"accessTimezone"`
+	Accessible      bool                  `json:"accessible"`
+	Avatar          profileAvatarResponse `json:"avatar"`
 }
 
 type nullableString struct {
@@ -63,9 +71,15 @@ func (a *API) createProfile(w http.ResponseWriter, r *http.Request, principal au
 		return
 	}
 	var request struct {
-		Name    string  `json:"name"`
-		IsChild bool    `json:"isChild"`
-		PIN     *string `json:"pin,omitempty"`
+		Name            string  `json:"name"`
+		IsChild         bool    `json:"isChild"`
+		PIN             *string `json:"pin,omitempty"`
+		Enabled         *bool   `json:"enabled,omitempty"`
+		AvailableFrom   *string `json:"availableFrom,omitempty"`
+		AvailableUntil  *string `json:"availableUntil,omitempty"`
+		AccessStartTime *string `json:"accessStartTime,omitempty"`
+		AccessEndTime   *string `json:"accessEndTime,omitempty"`
+		AccessTimezone  *string `json:"accessTimezone,omitempty"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -73,7 +87,10 @@ func (a *API) createProfile(w http.ResponseWriter, r *http.Request, principal au
 	}
 
 	created, err := a.profiles.Create(r.Context(), principal, profile.CreateInput{
-		Name: request.Name, IsChild: request.IsChild, PIN: request.PIN,
+		Name: request.Name, IsChild: request.IsChild, PIN: request.PIN, Enabled: request.Enabled,
+		AvailableFrom: request.AvailableFrom, AvailableUntil: request.AvailableUntil,
+		AccessStartTime: request.AccessStartTime, AccessEndTime: request.AccessEndTime,
+		AccessTimezone: request.AccessTimezone,
 	})
 	switch {
 	case errors.Is(err, profile.ErrForbidden):
@@ -92,9 +109,15 @@ func (a *API) updateProfile(w http.ResponseWriter, r *http.Request, principal au
 		return
 	}
 	var request struct {
-		Name    *string        `json:"name,omitempty"`
-		IsChild *bool          `json:"isChild,omitempty"`
-		PIN     nullableString `json:"pin,omitempty"`
+		Name            *string        `json:"name,omitempty"`
+		IsChild         *bool          `json:"isChild,omitempty"`
+		PIN             nullableString `json:"pin,omitempty"`
+		Enabled         *bool          `json:"enabled,omitempty"`
+		AvailableFrom   nullableString `json:"availableFrom,omitempty"`
+		AvailableUntil  nullableString `json:"availableUntil,omitempty"`
+		AccessStartTime nullableString `json:"accessStartTime,omitempty"`
+		AccessEndTime   nullableString `json:"accessEndTime,omitempty"`
+		AccessTimezone  nullableString `json:"accessTimezone,omitempty"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -103,12 +126,20 @@ func (a *API) updateProfile(w http.ResponseWriter, r *http.Request, principal au
 
 	updated, err := a.profiles.Update(r.Context(), principal, r.PathValue("profileId"), profile.UpdateInput{
 		Name: request.Name, IsChild: request.IsChild, PINSet: request.PIN.Set, PIN: request.PIN.Value,
+		Enabled:          request.Enabled,
+		AvailableFromSet: request.AvailableFrom.Set, AvailableFrom: request.AvailableFrom.Value,
+		AvailableUntilSet: request.AvailableUntil.Set, AvailableUntil: request.AvailableUntil.Value,
+		AccessStartTimeSet: request.AccessStartTime.Set, AccessStartTime: request.AccessStartTime.Value,
+		AccessEndTimeSet: request.AccessEndTime.Set, AccessEndTime: request.AccessEndTime.Value,
+		AccessTimezoneSet: request.AccessTimezone.Set, AccessTimezone: request.AccessTimezone.Value,
 	})
 	switch {
 	case errors.Is(err, profile.ErrNotFound):
 		writeError(w, http.StatusNotFound, "profile_not_found", "The profile does not exist")
 	case errors.Is(err, profile.ErrInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "invalid_profile", profileErrorMessage(err))
+	case errors.Is(err, profile.ErrLastUnrestrictedProfile):
+		writeError(w, http.StatusConflict, "last_unrestricted_profile", "At least one enabled profile without access restrictions must remain")
 	case err != nil:
 		a.internalError(w, "update profile", err)
 	default:
@@ -123,6 +154,8 @@ func (a *API) deleteProfile(w http.ResponseWriter, r *http.Request, principal au
 		writeError(w, http.StatusNotFound, "profile_not_found", "The profile does not exist")
 	case errors.Is(err, profile.ErrLastProfile):
 		writeError(w, http.StatusConflict, "last_profile", "The final profile cannot be deleted")
+	case errors.Is(err, profile.ErrLastUnrestrictedProfile):
+		writeError(w, http.StatusConflict, "last_unrestricted_profile", "At least one enabled profile without access restrictions must remain")
 	case err != nil:
 		a.internalError(w, "delete profile", err)
 	default:
@@ -147,7 +180,12 @@ func (a *API) selectProfile(w http.ResponseWriter, r *http.Request, principal au
 	case errors.Is(err, profile.ErrNotFound):
 		writeError(w, http.StatusNotFound, "profile_not_found", "The profile does not exist")
 	case errors.Is(err, profile.ErrInvalidPIN):
-		writeError(w, http.StatusUnauthorized, "invalid_profile_pin", "A valid profile PIN is required")
+		writeError(w, http.StatusForbidden, "invalid_profile_pin", "A valid profile PIN is required")
+	case errors.Is(err, profile.ErrPINRateLimited):
+		w.Header().Set("Retry-After", strconv.Itoa(profile.PINLockSeconds))
+		writeError(w, http.StatusTooManyRequests, "profile_pin_rate_limited", "Too many invalid profile PIN attempts; try again later")
+	case errors.Is(err, profile.ErrUnavailable):
+		writeError(w, http.StatusForbidden, "profile_unavailable", "This profile is not currently available")
 	case errors.Is(err, profile.ErrForbidden):
 		writeError(w, http.StatusUnauthorized, "invalid_access_token", "A valid access token is required")
 	case err != nil:
@@ -184,7 +222,9 @@ func newProfileResponse(value profile.Profile) profileResponse {
 	}
 	return profileResponse{
 		ID: value.ID, Name: value.Name, IsChild: value.IsChild, HasPIN: value.HasPIN, CanManage: value.CanManage,
-		Avatar: avatar,
+		Enabled: value.Enabled, AvailableFrom: value.AvailableFrom, AvailableUntil: value.AvailableUntil,
+		AccessStartTime: value.AccessStartTime, AccessEndTime: value.AccessEndTime,
+		AccessTimezone: value.AccessTimezone, Accessible: value.Accessible, Avatar: avatar,
 	}
 }
 

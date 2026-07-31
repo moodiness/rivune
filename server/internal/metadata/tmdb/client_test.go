@@ -188,7 +188,7 @@ func TestTrailersUsesMediaSpecificVideosPathAndLanguage(t *testing.T) {
 			defer server.Close()
 
 			client := newWithBaseURL("token", server.URL, server.Client())
-			trailers, err := client.Trailers(context.Background(), test.mediaType, test.externalID, "fr-FR")
+			trailers, err := client.Trailers(context.Background(), test.mediaType, test.externalID, "fr-FR", nil)
 			if err != nil {
 				t.Fatalf("trailers: %v", err)
 			}
@@ -196,5 +196,25 @@ func TestTrailersUsesMediaSpecificVideosPathAndLanguage(t *testing.T) {
 				t.Fatalf("unexpected trailers: %+v", trailers)
 			}
 		})
+	}
+}
+
+func TestTrailersUsesSeriesSeasonVideosPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tv/1396/season/3/videos" || r.URL.Query().Get("language") != "fr-FR" {
+			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"results":[{"key":"season-three","site":"YouTube","type":"Trailer"}]}`))
+	}))
+	defer server.Close()
+
+	client := newWithBaseURL("token", server.URL, server.Client())
+	seasonNumber := 3
+	trailers, err := client.Trailers(context.Background(), metadata.MediaTypeSeries, "1396", "fr-FR", &seasonNumber)
+	if err != nil {
+		t.Fatalf("season trailers: %v", err)
+	}
+	if len(trailers) != 1 || trailers[0].YouTubeID != "season-three" {
+		t.Fatalf("unexpected season trailers: %+v", trailers)
 	}
 }

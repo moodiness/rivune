@@ -463,6 +463,8 @@ paths:
           $ref: "#/components/responses/Error"
         "401":
           $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
         "415":
@@ -506,7 +508,11 @@ paths:
           $ref: "#/components/responses/Error"
         "401":
           $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
         "404":
+          $ref: "#/components/responses/Error"
+        "429":
           $ref: "#/components/responses/Error"
         "415":
           $ref: "#/components/responses/Error"
@@ -924,6 +930,36 @@ paths:
   /addons/{addonId}:
     parameters:
       - $ref: "#/components/parameters/AddonId"
+    put:
+      operationId: updateAddon
+      description: Replaces the configured transport, manifest, and profile assignments while preserving addon identity and profile order.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAddonInput"
+      responses:
+        "200":
+          description: Updated addon descriptor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledAddon"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
     delete:
       operationId: removeAddon
       security:
@@ -960,37 +996,6 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
         "502":
-          $ref: "#/components/responses/Error"
-  /addons/{addonId}/profiles:
-    parameters:
-      - $ref: "#/components/parameters/AddonId"
-    put:
-      operationId: assignAddonProfiles
-      description: Replaces the profiles that can use this shared addon installation.
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ProfileAssignmentInput"
-      responses:
-        "200":
-          description: Addon with its updated profile assignments.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/InstalledAddon"
-        "401":
-          $ref: "#/components/responses/Error"
-        "403":
-          $ref: "#/components/responses/Error"
-        "404":
-          $ref: "#/components/responses/Error"
-        "409":
-          $ref: "#/components/responses/Error"
-        "422":
           $ref: "#/components/responses/Error"
   /addons/catalogs:
     get:
@@ -1398,20 +1403,56 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
-  /metadata/titles/{titleId}/trailer:
+  /metadata/titles/{titleId}:
     parameters:
       - $ref: "#/components/parameters/TitleId"
     get:
-      summary: Get the preferred YouTube trailer for a title
-      operationId: getTitleTrailer
-      description: Returns a localized TMDB trailer when available, otherwise an English trailer. A caption preference only requests captions from YouTube when available and does not assert their availability.
+      summary: Get localized movie metadata
+      operationId: getMovieDetails
       security:
         - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/Language"
       responses:
         "200":
-          description: Selected movie or series trailer.
+          description: Localized movie metadata and canonical external identifiers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Movie"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /metadata/titles/{titleId}/trailer:
+    parameters:
+      - $ref: "#/components/parameters/TitleId"
+    get:
+      summary: Get the preferred YouTube trailer for a title
+      operationId: getTitleTrailer
+      description: Returns a localized TMDB trailer when available, otherwise an English trailer. Supplying seasonNumber selects videos for that series season and is invalid for movies. A caption preference only requests captions from YouTube when available and does not assert their availability.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Language"
+        - name: seasonNumber
+          in: query
+          required: false
+          description: Series season whose trailer should be selected. Omit for title-level movie or series trailers.
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: Selected movie, series, or series-season trailer.
           content:
             application/json:
               schema:
@@ -2093,11 +2134,17 @@ components:
           items:
             type: string
             format: uuid
-    ProfileAssignmentInput:
+    UpdateAddonInput:
       type: object
       additionalProperties: false
-      required: [profileIds]
+      required: [transportUrl, profileIds]
       properties:
+        transportUrl:
+          type: string
+          format: uri
+          description: >
+            Modern Stremio HTTP(S) transport URL. A root URL is normalized to
+            manifest.json and a stremio:// install URL is normalized to HTTPS.
         profileIds:
           type: array
           minItems: 1
@@ -2552,22 +2599,7 @@ components:
         profiles:
           type: array
           items:
-            $ref: "#/components/schemas/ProfileAccess"
-    ProfileAccess:
-      type: object
-      required: [id, name, isChild, canManage, avatar]
-      properties:
-        id:
-          type: string
-          format: uuid
-        name:
-          type: string
-        isChild:
-          type: boolean
-        canManage:
-          type: boolean
-        avatar:
-          $ref: "#/components/schemas/ProfileAvatar"
+            $ref: "#/components/schemas/Profile"
     SessionList:
       type: object
       required: [sessions]
@@ -2690,7 +2722,7 @@ components:
             $ref: "#/components/schemas/Profile"
     Profile:
       type: object
-      required: [id, name, isChild, hasPin, canManage, avatar]
+      required: [id, name, isChild, hasPin, canManage, enabled, availableFrom, availableUntil, accessStartTime, accessEndTime, accessTimezone, accessible, avatar]
       properties:
         id:
           type: string
@@ -2703,6 +2735,38 @@ components:
           type: boolean
         canManage:
           type: boolean
+        enabled:
+          type: boolean
+        availableFrom:
+          description: First available local date, inclusive, or null.
+          anyOf:
+            - type: string
+              format: date
+            - type: "null"
+        availableUntil:
+          description: Last available local date, inclusive, or null.
+          anyOf:
+            - type: string
+              format: date
+            - type: "null"
+        accessStartTime:
+          description: Start-inclusive daily local time, or null when unrestricted.
+          anyOf:
+            - type: string
+              pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+            - type: "null"
+        accessEndTime:
+          description: End-exclusive daily local time; may be earlier than the start for an overnight range.
+          anyOf:
+            - type: string
+              pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+            - type: "null"
+        accessTimezone:
+          type: string
+          description: IANA timezone used to evaluate date and daily-hour restrictions.
+        accessible:
+          type: boolean
+          description: Current server-evaluated availability. Clients must not treat this as enforcement.
         avatar:
           $ref: "#/components/schemas/ProfileAvatar"
     ProfileAvatar:
@@ -2760,6 +2824,34 @@ components:
         pin:
           type: string
           pattern: "^[0-9]{4,8}$"
+        enabled:
+          type: boolean
+          default: true
+        availableFrom:
+          anyOf:
+            - type: string
+              format: date
+            - type: "null"
+        availableUntil:
+          anyOf:
+            - type: string
+              format: date
+            - type: "null"
+        accessStartTime:
+          anyOf:
+            - type: string
+              pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+            - type: "null"
+        accessEndTime:
+          anyOf:
+            - type: string
+              pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+            - type: "null"
+        accessTimezone:
+          description: IANA timezone, or null/omitted to use UTC.
+          anyOf:
+            - type: string
+            - type: "null"
     UpdateProfileRequest:
       type: object
       additionalProperties: false
@@ -2776,6 +2868,33 @@ components:
           anyOf:
             - type: string
               pattern: "^[0-9]{4,8}$"
+            - type: "null"
+        enabled:
+          type: boolean
+        availableFrom:
+          anyOf:
+            - type: string
+              format: date
+            - type: "null"
+        availableUntil:
+          anyOf:
+            - type: string
+              format: date
+            - type: "null"
+        accessStartTime:
+          anyOf:
+            - type: string
+              pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+            - type: "null"
+        accessEndTime:
+          anyOf:
+            - type: string
+              pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+            - type: "null"
+        accessTimezone:
+          description: IANA timezone, or null to reset to UTC.
+          anyOf:
+            - type: string
             - type: "null"
     SelectProfileRequest:
       type: object

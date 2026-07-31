@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -55,9 +56,64 @@ type fakeTrailerProvider struct {
 	calls     []string
 }
 
-func (f *fakeTrailerProvider) Trailers(_ context.Context, mediaType, externalID, language string) ([]ProviderTrailer, error) {
-	f.calls = append(f.calls, mediaType+":"+externalID+":"+language)
+func (f *fakeTrailerProvider) Trailers(_ context.Context, mediaType, externalID, language string, seasonNumber *int) ([]ProviderTrailer, error) {
+	call := mediaType + ":" + externalID + ":" + language
+	if seasonNumber != nil {
+		call += ":" + strconv.Itoa(*seasonNumber)
+	}
+	f.calls = append(f.calls, call)
 	return f.responses[language], f.errors[language]
+}
+
+func TestTrailerUsesSeriesIdentityForSeasonAndRejectsMovieSeason(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	const (
+		seriesID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		movieID  = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title)
+		VALUES ($1::uuid, 'series', 'Series'), ($2::uuid, 'movie', 'Movie');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
+		VALUES ($1::uuid, 'tmdb', 'series', '1396'), ($2::uuid, 'tmdb', 'movie', '550')
+	`, seriesID, movieID); err != nil {
+		t.Fatalf("seed trailer titles: %v", err)
+	}
+	provider := &fakeTrailerProvider{responses: map[string][]ProviderTrailer{
+		"en-US": {{YouTubeID: "video", Site: "YouTube", Type: "Trailer"}},
+	}}
+	service := &Service{pool: pool, trailerProvider: provider}
+	seasonNumber := 3
+	trailer, err := service.Trailer(ctx, canonicalMergePrincipal(), seriesID, "en-US", &seasonNumber)
+	if err != nil || trailer.YouTubeID != "video" {
+		t.Fatalf("season trailer=%+v err=%v", trailer, err)
+	}
+	if len(provider.calls) != 1 || provider.calls[0] != "series:1396:en-US:3" {
+		t.Fatalf("unexpected season provider calls: %+v", provider.calls)
+	}
+
+	_, err = service.Trailer(ctx, canonicalMergePrincipal(), movieID, "en-US", &seasonNumber)
+	if !errors.Is(err, ErrInvalidInput) || len(provider.calls) != 1 {
+		t.Fatalf("movie season must be rejected before provider call, err=%v calls=%+v", err, provider.calls)
+	}
+
+	titleTrailer, err := service.Trailer(ctx, canonicalMergePrincipal(), movieID, "en-US", nil)
+	if err != nil || titleTrailer.YouTubeID != "video" {
+		t.Fatalf("title trailer=%+v err=%v", titleTrailer, err)
+	}
+	if len(provider.calls) != 2 || provider.calls[1] != "movie:550:en-US" {
+		t.Fatalf("unexpected title provider calls: %+v", provider.calls)
+	}
+}
+
+func TestTrailerRejectsNegativeSeasonNumber(t *testing.T) {
+	service := &Service{}
+	seasonNumber := -1
+	_, err := service.Trailer(context.Background(), canonicalMergePrincipal(), "title-id", "en-US", &seasonNumber)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected invalid season input, got %v", err)
+	}
 }
 
 func TestChooseTrailerSelectsLocalizedOfficialTrailerWithoutEnglishRequest(t *testing.T) {
@@ -72,7 +128,7 @@ func TestChooseTrailerSelectsLocalizedOfficialTrailerWithoutEnglishRequest(t *te
 		},
 		"en-US": {{YouTubeID: "english", Site: "YouTube", Type: "Trailer"}},
 	}}
-	trailer, err := chooseTrailer(context.Background(), provider, MediaTypeMovie, "550", "fr-FR")
+	trailer, err := chooseTrailer(context.Background(), provider, MediaTypeMovie, "550", "fr-FR", nil)
 	if err != nil {
 		t.Fatalf("choose localized trailer: %v", err)
 	}
@@ -88,7 +144,7 @@ func TestChooseTrailerUsesTeaserOnlyAsLastResort(t *testing.T) {
 	provider := &fakeTrailerProvider{responses: map[string][]ProviderTrailer{
 		"fr-FR": {{YouTubeID: "teaser", Name: "Teaser", Site: "YouTube", Type: "Teaser"}},
 	}}
-	trailer, err := chooseTrailer(context.Background(), provider, MediaTypeSeries, "1396", "fr-FR")
+	trailer, err := chooseTrailer(context.Background(), provider, MediaTypeSeries, "1396", "fr-FR", nil)
 	if err != nil || trailer.YouTubeID != "teaser" {
 		t.Fatalf("unexpected teaser result trailer=%+v err=%v", trailer, err)
 	}
@@ -99,7 +155,7 @@ func TestChooseTrailerEnglishFallbackRequestsFrenchCaptions(t *testing.T) {
 		"fr-FR": {{YouTubeID: "not-video", Site: "YouTube", Type: "Featurette"}},
 		"en-US": {{YouTubeID: "english", Name: "Official Trailer", Site: "YouTube", Type: "Trailer", Official: true}},
 	}}
-	trailer, err := chooseTrailer(context.Background(), provider, MediaTypeSeries, "1396", "fr-FR")
+	trailer, err := chooseTrailer(context.Background(), provider, MediaTypeSeries, "1396", "fr-FR", nil)
 	if err != nil {
 		t.Fatalf("choose fallback trailer: %v", err)
 	}
@@ -111,11 +167,25 @@ func TestChooseTrailerEnglishFallbackRequestsFrenchCaptions(t *testing.T) {
 	}
 }
 
+func TestChooseTrailerPreservesSeasonAcrossLocalizedAndEnglishRequests(t *testing.T) {
+	provider := &fakeTrailerProvider{responses: map[string][]ProviderTrailer{
+		"en-US": {{YouTubeID: "season-three", Site: "YouTube", Type: "Trailer"}},
+	}}
+	seasonNumber := 3
+	trailer, err := chooseTrailer(context.Background(), provider, MediaTypeSeries, "1396", "fr-FR", &seasonNumber)
+	if err != nil || trailer.YouTubeID != "season-three" {
+		t.Fatalf("unexpected season trailer result trailer=%+v err=%v", trailer, err)
+	}
+	if len(provider.calls) != 2 || provider.calls[0] != "series:1396:fr-FR:3" || provider.calls[1] != "series:1396:en-US:3" {
+		t.Fatalf("unexpected season trailer calls: %+v", provider.calls)
+	}
+}
+
 func TestChooseTrailerNonFrenchFallbackDoesNotRequestCaptions(t *testing.T) {
 	provider := &fakeTrailerProvider{responses: map[string][]ProviderTrailer{
 		"en-US": {{YouTubeID: "english", Site: "YouTube", Type: "Trailer"}},
 	}}
-	trailer, err := chooseTrailer(context.Background(), provider, MediaTypeMovie, "550", "de-DE")
+	trailer, err := chooseTrailer(context.Background(), provider, MediaTypeMovie, "550", "de-DE", nil)
 	if err != nil {
 		t.Fatalf("choose fallback trailer: %v", err)
 	}
@@ -129,7 +199,7 @@ func TestChooseTrailerReturnsNotFoundWhenNoEligibleVideoExists(t *testing.T) {
 		"fr-FR": {{YouTubeID: "clip", Site: "YouTube", Type: "Clip"}},
 		"en-US": {{YouTubeID: "vimeo", Site: "Vimeo", Type: "Trailer"}},
 	}}
-	_, err := chooseTrailer(context.Background(), provider, MediaTypeMovie, "550", "fr-FR")
+	_, err := chooseTrailer(context.Background(), provider, MediaTypeMovie, "550", "fr-FR", nil)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected not found, got %v", err)
 	}
@@ -140,7 +210,7 @@ func TestChooseTrailerPropagatesProviderErrors(t *testing.T) {
 		responses: map[string][]ProviderTrailer{},
 		errors:    map[string]error{"fr-FR": ErrProviderRateLimited},
 	}
-	_, err := chooseTrailer(context.Background(), provider, MediaTypeMovie, "550", "fr-FR")
+	_, err := chooseTrailer(context.Background(), provider, MediaTypeMovie, "550", "fr-FR", nil)
 	if !errors.Is(err, ErrProviderRateLimited) {
 		t.Fatalf("expected provider error, got %v", err)
 	}

@@ -3,6 +3,7 @@ package profile
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/moodiness/rivune/server/internal/password"
 )
@@ -39,5 +40,28 @@ func TestHashPINAllowsNoPIN(t *testing.T) {
 	hash, err := hashPIN(nil)
 	if err != nil || hash != nil {
 		t.Fatalf("expected nil PIN to remain unset, got hash %v and error %v", hash, err)
+	}
+}
+
+func TestProfileAccessibleHonorsDisabledState(t *testing.T) {
+	value := Profile{Enabled: false, AccessTimezone: "UTC"}
+	if profileAccessible(value, time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)) {
+		t.Fatal("disabled profile was accessible")
+	}
+}
+
+func TestValidateAccessAllowsOvernightHours(t *testing.T) {
+	value := Profile{Enabled: true, AccessStartTime: new("20:00"), AccessEndTime: new("08:00"), AccessTimezone: "America/Los_Angeles"}
+	if err := validateAccess(value); err != nil {
+		t.Fatalf("overnight hours were rejected: %v", err)
+	}
+}
+
+func TestEnsureUnrestrictedProfilePreventsLockout(t *testing.T) {
+	if err := ensureUnrestrictedProfile(1); err != nil {
+		t.Fatalf("existing unrestricted profile was rejected: %v", err)
+	}
+	if err := ensureUnrestrictedProfile(0); !errors.Is(err, ErrLastUnrestrictedProfile) {
+		t.Fatalf("expected lockout prevention error, got %v", err)
 	}
 }

@@ -1,20 +1,46 @@
 import { ArrowLeft, ArrowRight, Eye, EyeOff, LockKeyhole, LogOut, ShieldCheck, Sparkles } from "lucide-react";
-import { useState, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useState, type CSSProperties, type FormEvent } from "react";
 import { useAuth } from "../auth";
 import { Button, IconButton, Modal, Notice, RivuneMark } from "../components";
 import { notifyError } from "../notifications";
 import { translate as t } from "../i18n";
 import type { Profile } from "../types";
 
+function unavailableReason(profile: Profile): string | null {
+  if (profile.accessible) return null;
+  if (!profile.enabled) return t("profiles.disabled");
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: profile.accessTimezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date());
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    const localDate = `${values.year}-${values.month}-${values.day}`;
+    if (profile.availableFrom && localDate < profile.availableFrom) return t("profiles.notActiveYet");
+    if (profile.availableUntil && localDate > profile.availableUntil) return t("profiles.expired");
+  } catch {
+    return t("profiles.unavailable");
+  }
+  return profile.accessStartTime ? t("profiles.outsideHours") : t("profiles.unavailable");
+}
+
 export function ProfileGate() {
-  const { account, selectProfile, logout } = useAuth();
+  const { account, selectProfile, logout, refreshAccount } = useAuth();
   const [selected, setSelected] = useState<Profile | null>(null);
   const [pin, setPin] = useState("");
   const [showPin, setShowPin] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    const interval = window.setInterval(() => { void refreshAccount(); }, 30_000);
+    return () => window.clearInterval(interval);
+  }, [refreshAccount]);
+
   async function choose(profile: Profile) {
+    if (!profile.accessible) return;
     if (profile.hasPin) {
       setSelected(profile);
       setPin("");
@@ -56,11 +82,14 @@ export function ProfileGate() {
       <p>{t("profiles.body")}</p>
       {error && !selected && <Notice>{error}</Notice>}
       <div className="profile-grid">
-        {account?.profiles.map((profile, index) => <button key={profile.id} className="profile-card" onClick={() => void choose(profile)} disabled={loading} style={{ "--delay": `${index * 70}ms` } as CSSProperties}>
-          <span className="profile-card__avatar"><span className="profile-card__glow" /><img src={profile.avatar.url} alt="" />{profile.hasPin && <i><LockKeyhole size={14} /></i>}</span>
-          <strong>{profile.name}</strong>
-          <small>{profile.isChild ? t("profiles.child") : profile.canManage ? t("profiles.admin") : t("profiles.standard")}</small>
-        </button>)}
+        {account?.profiles.map((profile, index) => {
+          const unavailable = unavailableReason(profile);
+          return <button key={profile.id} className={`profile-card ${unavailable ? "profile-card--unavailable" : ""}`} onClick={() => void choose(profile)} disabled={loading || !profile.accessible} aria-describedby={unavailable ? `profile-${profile.id}-status` : undefined} style={{ "--delay": `${index * 70}ms` } as CSSProperties}>
+            <span className="profile-card__avatar"><span className="profile-card__glow" /><img src={profile.avatar.url} alt="" />{profile.hasPin && <i><LockKeyhole size={14} /></i>}</span>
+            <strong>{profile.name}</strong>
+            <small id={unavailable ? `profile-${profile.id}-status` : undefined}>{unavailable ?? (profile.isChild ? t("profiles.child") : profile.canManage ? t("profiles.admin") : t("profiles.standard"))}</small>
+          </button>;
+        })}
       </div>
       <div className="profile-gate__secure"><ShieldCheck size={16} /> {t("profiles.privacy")}</div>
     </section>
