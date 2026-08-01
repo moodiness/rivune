@@ -1,10 +1,12 @@
-import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Cpu, Database, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Languages, Layers3, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, X } from "lucide-react";
+import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Cpu, Database, ExternalLink, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Languages, Layers3, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, X } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { api } from "../api";
+import { api, APIError } from "../api";
 import { useAuth } from "../auth";
 import { AddTile, Button, ConfirmDialog, EmptyState, IconButton, Modal, Notice, SectionHeading, Skeleton } from "../components";
+import { translate } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
-import type { AddonManifest, AvatarPreset, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, InstalledAddon, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues } from "../types";
+import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
+import type { AddonManifest, AvatarPreset, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, InstalledAddon, MaintenanceSettings, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
 
 type AdminTab = "profiles" | "addons" | "collections" | "activity" | "settings";
 
@@ -23,6 +25,14 @@ function countCodePoints(value: string) {
     offset += codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
   }
   return count;
+}
+
+function newIdempotencyKey() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export function AdminPage() {
@@ -75,11 +85,17 @@ function ProfilesAdmin() {
   const [message, setMessage] = useState("");
   const [sendingMessage, setSendingMessage] = useState(false);
   const [messageError, setMessageError] = useState("");
+  const [broadcastOpen, setBroadcastOpen] = useState(false);
+  const [broadcastMessage, setBroadcastMessage] = useState("");
+  const [broadcastError, setBroadcastError] = useState("");
+  const [sendingBroadcast, setSendingBroadcast] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const messageTargetRef = useRef<{ profileId: string; sessionId: string; modalId: number } | null>(null);
   const pendingMessageRequestRef = useRef<{ profileId: string; sessionId: string; modalId: number } | null>(null);
   const nextMessageModalIdRef = useRef(0);
+  const broadcastKeyRef = useRef<string | null>(null);
   const messageCharacterCount = countCodePoints(message);
+  const broadcastCharacterCount = countCodePoints(broadcastMessage);
 
   useEffect(() => { void api.avatarPresets().then((response) => setPresets(response.presets)).catch(() => undefined); }, []);
 
@@ -252,8 +268,50 @@ function ProfilesAdmin() {
     }
   }
 
+  function openBroadcast() {
+    broadcastKeyRef.current = newIdempotencyKey();
+    setBroadcastMessage("");
+    setBroadcastError("");
+    setSendingBroadcast(false);
+    setBroadcastOpen(true);
+  }
+
+  function closeBroadcast() {
+    if (sendingBroadcast) return;
+    broadcastKeyRef.current = null;
+    setBroadcastOpen(false);
+  }
+
+  async function sendBroadcast(event: FormEvent) {
+    event.preventDefault();
+    const key = broadcastKeyRef.current;
+    if (!key || sendingBroadcast || !broadcastMessage.trim() || broadcastCharacterCount > 500) return;
+    setSendingBroadcast(true);
+    setBroadcastError("");
+    try {
+      const result = await api.broadcastSessionNotification(key, broadcastMessage);
+      notifySuccess(
+        translate(result.recipientCount === 1 ? "admin.broadcast.sentOne" : "admin.broadcast.sentMany", { count: result.recipientCount }),
+        translate("admin.broadcast.sentTitle"),
+      );
+      broadcastKeyRef.current = null;
+      setBroadcastOpen(false);
+      setBroadcastMessage("");
+    } catch (cause) {
+      setBroadcastError(notifyError(cause, translate("admin.broadcast.error")));
+    } finally {
+      setSendingBroadcast(false);
+    }
+  }
+
   return <div className="admin-section">
-    <div className="admin-section__header"><div><span>Household</span><h2>Profiles</h2><p>Separate spaces, recommendations, and progress for every viewer.</p></div><Button onClick={() => openEditor("new")}><Plus size={18} /> New profile</Button></div>
+    <div className="admin-section__header">
+      <div><span>Household</span><h2>Profiles</h2><p>Separate spaces, recommendations, and progress for every viewer.</p></div>
+      <div className="admin-section__actions">
+        {account?.user.role === "admin" && <Button variant="secondary" onClick={openBroadcast}><Radio size={18} /> {translate("admin.broadcast.open")}</Button>}
+        <Button onClick={() => openEditor("new")}><Plus size={18} /> New profile</Button>
+      </div>
+    </div>
     {error && <Notice>{error}</Notice>}
     <div className="profile-admin-grid">{profiles.map((profile) => <article key={profile.id} className="profile-admin-card"><div className="profile-admin-card__visual"><img src={profile.avatar.url} alt="" /><span className={profile.isChild ? "is-child" : ""}>{profile.isChild ? "Kids" : profile.canManage ? "Manager" : "Viewer"}</span></div><div><h3>{profile.name}</h3><p>{profile.hasPin ? "PIN protected" : "No PIN"}</p></div><div className="profile-admin-card__actions"><IconButton label={`Connected sessions for ${profile.name}`} onClick={() => void openSessions(profile)}><MonitorSmartphone size={17} /></IconButton><IconButton label={`Edit ${profile.name}`} onClick={() => openEditor(profile)}><Pencil size={17} /></IconButton>{profile.id !== activeProfile?.id && <IconButton label={`Delete ${profile.name}`} onClick={() => setDeleting(profile)}><Trash2 size={17} /></IconButton>}</div></article>)}</div>
     {editing && <Modal onClose={() => setEditing(null)} className="editor-modal profile-editor">
@@ -290,6 +348,25 @@ function ProfilesAdmin() {
           </div><p className="profile-access-editor__hint">Start is included and end is excluded. An end before the start creates an overnight window.</p></>}
         </section>
         <div className="modal-actions"><Button type="button" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button><Button type="submit" loading={saving}><Save size={18} /> Save profile</Button></div>
+      </form>
+    </Modal>}
+    {broadcastOpen && <Modal onClose={closeBroadcast} className="editor-modal session-message-modal">
+      <div className="editor-modal__heading">
+        <span><Radio size={18} /> {translate("admin.broadcast.eyebrow")}</span>
+        <h2>{translate("admin.broadcast.title")}</h2>
+        <p>{translate("admin.broadcast.description")}</p>
+      </div>
+      <form className="form-stack" onSubmit={sendBroadcast}>
+        {broadcastError && <Notice>{broadcastError}</Notice>}
+        <label className="field">
+          <span>{translate("admin.broadcast.message")}</span>
+          <textarea autoFocus required disabled={sendingBroadcast} rows={5} value={broadcastMessage} onChange={(event) => setBroadcastMessage(event.target.value)} placeholder={translate("admin.broadcast.placeholder")} />
+          <small>{translate("admin.broadcast.characterCount", { count: broadcastCharacterCount })}</small>
+        </label>
+        <div className="modal-actions modal-actions--sticky">
+          <Button type="button" variant="ghost" disabled={sendingBroadcast} onClick={closeBroadcast}>{translate("common.cancel")}</Button>
+          <Button type="submit" loading={sendingBroadcast} disabled={sendingBroadcast || !broadcastMessage.trim() || broadcastCharacterCount > 500}><Send size={17} /> {translate("admin.broadcast.send")}</Button>
+        </div>
       </form>
     </Modal>}
     {sessionsProfile && <Modal onClose={closeSessions} className="editor-modal profile-sessions-modal">
@@ -1037,7 +1114,7 @@ function ActivityAdmin() {
     <section className="activity-panel">
       <header><div><span>Now playing</span><h3>Sessions</h3></div><small>{activity?.sessions.length ?? 0} active</small></header>
       {activity?.sessions.length
-        ? <div className="activity-session-list">{activity.sessions.map((session) => <article className="activity-session" key={session.id}><span className={`activity-session__state ${session.processing ? "is-processing" : ""}`}><Activity size={18} /></span><div><strong>{session.title}</strong><span>{session.profile} · {session.username}</span><small>{session.device} · {session.platform} · {activityModeLabel(session.mode)}</small></div><div className="activity-session__time"><strong>{activityAge(session.lastSeenAt)}</strong><small>started {activityAge(session.createdAt)}</small></div><Button variant="danger" onClick={() => setSelectedSession(session)}><CircleStop size={16} />Stop</Button></article>)}</div>
+        ? <div className="activity-session-list">{activity.sessions.map((session) => <article className="activity-session" key={session.id}><ActivitySessionArtwork session={session} /><div className="activity-session__copy"><strong>{session.title}</strong><ActivitySessionProviders session={session} /><span>{session.profile} · {session.username}</span><small>{session.device} · {session.platform} · {activityModeLabel(session.mode)}</small></div><div className="activity-session__time"><strong>{activityAge(session.lastSeenAt)}</strong><small>started {activityAge(session.createdAt)}</small></div><Button variant="danger" onClick={() => setSelectedSession(session)}><CircleStop size={16} />Stop</Button></article>)}</div>
         : <EmptyState icon={<Radio />} title="No active playback" description="Sessions appear here as soon as a device starts playing." />}
     </section>
     <section className="activity-panel">
@@ -1048,6 +1125,32 @@ function ActivityAdmin() {
     </section>
     {selectedSession && <ConfirmDialog title={`Stop ${selectedSession.title}?`} description={`Playback on ${selectedSession.device} will end immediately and its temporary media will be deleted.`} confirmLabel="Stop playback" loading={stopping} onConfirm={() => void stopSession()} onCancel={() => setSelectedSession(null)} />}
   </div>;
+}
+
+function ActivitySessionArtwork({ session }: { session: PlaybackActivitySession }) {
+  const [failedURL, setFailedURL] = useState("");
+  const showArtwork = Boolean(session.artworkUrl && failedURL !== session.artworkUrl);
+  return <span className={`activity-session__artwork ${session.processing ? "is-processing" : ""}`}>
+    {showArtwork
+      ? <img src={session.artworkUrl} alt={session.title} loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailedURL(session.artworkUrl ?? "")} />
+      : <Activity size={18} aria-hidden="true" />}
+  </span>;
+}
+
+function ActivitySessionProviders({ session }: { session: PlaybackActivitySession }) {
+  if (!TITLE_ID_PROVIDERS.some((provider) => session.externalIds?.[provider.key])) return null;
+  return <span className="activity-session__providers">
+    {TITLE_ID_PROVIDERS.map((provider) => {
+      const externalID = session.externalIds?.[provider.key];
+      if (!externalID) return null;
+      const href = titleProviderURL(provider.key, externalID, session.externalIdMediaTypes?.[provider.key] ?? session.mediaType);
+      const label = `${provider.label} · ${externalID}`;
+      const contents = <><span>{provider.label}</span>{href && <ExternalLink size={9} aria-hidden="true" />}</>;
+      return href
+        ? <a key={provider.key} className={`activity-session__provider is-${provider.key}`} href={href} target="_blank" rel="noreferrer" aria-label={label} title={label}>{contents}</a>
+        : <span key={provider.key} className={`activity-session__provider is-${provider.key}`} aria-label={label} title={label}>{contents}</span>;
+    })}
+  </span>;
 }
 
 function ActivityMetric({ icon, label, value, detail }: { icon: React.ReactNode; label: string; value: string; detail: string }) {
@@ -1086,7 +1189,9 @@ function SettingsAdmin() {
   const [instance, setInstance] = useState<SettingsValues>({});
   const [profile, setProfile] = useState<SettingsValues>({});
   const [inherited, setInherited] = useState<SettingsValues>({});
+  const [maintenance, setMaintenance] = useState<MaintenanceSettings>({ enabled: false, message: null });
   const [saving, setSaving] = useState(false);
+  const [savingMaintenance, setSavingMaintenance] = useState(false);
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
   const settingsTargetRef = useRef(settingsTarget);
@@ -1109,9 +1214,10 @@ function SettingsAdmin() {
     setError("");
     void (async () => {
       if (target === "server") {
-        const layer = await api.instanceSettings();
+        const [layer, maintenanceSettings] = await Promise.all([api.instanceSettings(), api.maintenanceSettings()]);
         if (!current) return;
         setInstance(layer.settings);
+        setMaintenance(maintenanceSettings);
         setInherited({});
         return;
       }
@@ -1153,12 +1259,178 @@ function SettingsAdmin() {
     }
   }
 
+  async function saveMaintenance() {
+    setSavingMaintenance(true);
+    setError("");
+    try {
+      const updated = await api.updateMaintenanceSettings(maintenance);
+      setMaintenance(updated);
+      notifySuccess(translate("admin.maintenance.saved"), translate("admin.maintenance.savedTitle"));
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.maintenance.error"), translate("admin.maintenance.title")));
+    } finally {
+      setSavingMaintenance(false);
+    }
+  }
+
   if (!loaded) return <Skeleton className="settings-skeleton" />;
-  return <div className="admin-section"><div className="admin-section__header"><div><span>Preferences</span><h2>Settings</h2><p>Choose one scope to configure at a time.</p></div>{canManageProfiles && <label className="field settings-profile-picker"><span>Settings scope</span><div>{serverSelected ? <Server size={18} /> : <CircleUserRound size={18} />}<select value={settingsTarget} disabled={saving} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">Server defaults</option>}{account?.profiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select></div></label>}</div>{error && <Notice>{error}</Notice>}
+  return <div className="admin-section"><div className="admin-section__header"><div><span>Preferences</span><h2>Settings</h2><p>Choose one scope to configure at a time.</p></div>{canManageProfiles && <label className="field settings-profile-picker"><span>Settings scope</span><div>{serverSelected ? <Server size={18} /> : <CircleUserRound size={18} />}<select value={settingsTarget} disabled={saving || savingMaintenance} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">Server defaults</option>}{account?.profiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select></div></label>}</div>{error && <Notice>{error}</Notice>}
     {serverSelected
-      ? <SettingsCard title="Server defaults" description="The baseline inherited by every profile." icon={<Server />} values={instance} onChange={setInstance} onSave={() => void save()} saving={saving} emptyLabel="Rivune default" />
-      : <SettingsCard title={`${targetProfile?.name ?? "Profile"} preferences`} description="Overrides that follow this profile everywhere." icon={<CircleUserRound />} values={profile} defaults={inherited} onChange={setProfile} onSave={() => void save()} saving={saving} />}
+      ? <><MaintenanceCard values={maintenance} onChange={setMaintenance} onSave={() => void saveMaintenance()} saving={savingMaintenance} /><SettingsCard title="Server defaults" description="The baseline inherited by every profile." icon={<Server />} values={instance} onChange={setInstance} onSave={() => void save()} saving={saving} emptyLabel="Rivune default" /></>
+      : <><SettingsCard title={`${targetProfile?.name ?? "Profile"} preferences`} description="Overrides that follow this profile everywhere." icon={<CircleUserRound />} values={profile} defaults={inherited} onChange={setProfile} onSave={() => void save()} saving={saving} /><TrackingSettings profileId={settingsTarget} /></>}
   </div>;
+}
+
+function TrackingSettings({ profileId }: { profileId: string }) {
+  const [providers, setProviders] = useState<TrackingStatus[]>([]);
+  const [authorization, setAuthorization] = useState<TrackingDeviceAuthorization | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+
+  async function load() {
+    const response = await api.trackingStatuses(profileId);
+    setProviders(response.providers);
+  }
+
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    setAuthorization(null);
+    setError("");
+    void api.trackingStatuses(profileId)
+      .then((response) => { if (current) setProviders(response.providers); })
+      .catch((cause) => { if (current) setError(notifyError(cause, translate("settings.trackingLoadError"), translate("settings.trackingTitle"))); })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
+  }, [profileId]);
+
+  useEffect(() => {
+    if (!authorization) return;
+    let cancelled = false;
+    let timer = 0;
+    const poll = async () => {
+      if (cancelled) return;
+      if (Date.now() >= new Date(authorization.expiresAt).getTime()) {
+        setAuthorization(null);
+        setError(translate("settings.trackingCodeExpired"));
+        return;
+      }
+      try {
+        const result = await api.completeTrackingAuthorization(profileId, authorization.provider, authorization.id);
+        if ("pending" in result) {
+          timer = window.setTimeout(() => void poll(), authorization.intervalSeconds * 1000);
+          return;
+        }
+        await load();
+        if (!cancelled) {
+          setAuthorization(null);
+          notifySuccess(translate("settings.trackingConnectedMessage", { provider: providerName(result.provider) }), translate("settings.trackingConnected"));
+        }
+      } catch (cause) {
+        if (cancelled) return;
+        if (cause instanceof APIError && cause.status === 429 && cause.code === "tracking_authorization_slow_down") {
+          timer = window.setTimeout(() => void poll(), authorization.intervalSeconds * 1000);
+          return;
+        }
+        setAuthorization(null);
+        setError(notifyError(cause, translate("settings.trackingConnectError"), translate("settings.trackingTitle")));
+      }
+    };
+    timer = window.setTimeout(() => void poll(), authorization.intervalSeconds * 1000);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [authorization, profileId]);
+
+  async function connect(provider: TrackingProvider) {
+    setBusy(`${provider}:connect`);
+    setError("");
+    try {
+      const next = await api.beginTrackingAuthorization(profileId, provider);
+      setAuthorization(next);
+      window.open(next.verificationUrl, "_blank", "noopener,noreferrer");
+    } catch (cause) {
+      setError(notifyError(cause, translate("settings.trackingConnectError"), translate("settings.trackingTitle")));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function disconnect(provider: TrackingProvider) {
+    setBusy(`${provider}:disconnect`);
+    setError("");
+    try {
+      await api.disconnectTracking(profileId, provider);
+      if (authorization?.provider === provider) setAuthorization(null);
+      await load();
+      notifySuccess(translate("settings.trackingDisconnectedMessage", { provider: providerName(provider) }), translate("settings.trackingDisconnected"));
+    } catch (cause) {
+      setError(notifyError(cause, translate("settings.trackingDisconnectError"), translate("settings.trackingTitle")));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function toggle(status: TrackingStatus, key: "syncWatched" | "syncProgress" | "syncLibrary", value: boolean) {
+    setBusy(`${status.provider}:${key}`);
+    setError("");
+    try {
+      const updated = await api.updateTrackingPreferences(profileId, status.provider, { [key]: value });
+      setProviders((current) => current.map((candidate) => candidate.provider === updated.provider ? updated : candidate));
+    } catch (cause) {
+      setError(notifyError(cause, translate("settings.trackingSaveError"), translate("settings.trackingTitle")));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  if (loading) return <Skeleton className="settings-skeleton" />;
+  return <section className="settings-card tracking-settings">
+    <header><span><RefreshCw /></span><div><h3>{translate("settings.trackingTitle")}</h3><p>{translate("settings.trackingDescription")}</p></div></header>
+    {error && <Notice>{error}</Notice>}
+    {authorization && <Notice><strong>{translate("settings.trackingEnterCode", { provider: providerName(authorization.provider) })}</strong><br /><code>{authorization.userCode}</code><br /><a href={authorization.verificationUrl} target="_blank" rel="noreferrer">{translate("settings.trackingOpenProvider")} <ExternalLink size={14} /></a></Notice>}
+    <div className="settings-groups">{providers.map((status) =>
+      <SettingsGroup key={status.provider} icon={<TrackingProviderIcon provider={status.provider} />} iconClassName={`tracking-provider-tile tracking-provider-tile--${status.provider}`} title={providerName(status.provider)} description={status.configured ? status.connected ? translate("settings.trackingStatusConnected") : translate("settings.trackingStatusDisconnected") : translate("settings.trackingStatusUnavailable")}>
+        {status.connected ? <>
+          <TrackingToggle label={translate("settings.trackingWatched")} description={translate("settings.trackingWatchedDescription")} checked={status.syncWatched} disabled={busy.startsWith(`${status.provider}:`)} onChange={(value) => void toggle(status, "syncWatched", value)} />
+          <TrackingToggle label={translate("settings.trackingProgress")} description={translate("settings.trackingProgressDescription")} checked={status.syncProgress} disabled={busy.startsWith(`${status.provider}:`)} onChange={(value) => void toggle(status, "syncProgress", value)} />
+          <TrackingToggle label={translate("settings.trackingLibrary")} description={translate("settings.trackingLibraryDescription")} checked={status.syncLibrary} disabled={busy.startsWith(`${status.provider}:`)} onChange={(value) => void toggle(status, "syncLibrary", value)} />
+          <div className="setting-control"><small>{status.pendingItems ? translate("settings.trackingPending", { count: status.pendingItems }) : status.lastError ? translate("settings.trackingRetrying") : status.lastSuccessAt ? translate("settings.trackingLastSuccess", { date: new Date(status.lastSuccessAt).toLocaleString() }) : translate("settings.trackingReady")}</small><Button variant="secondary" loading={busy === `${status.provider}:disconnect`} onClick={() => void disconnect(status.provider)}>{translate("settings.trackingDisconnect")}</Button></div>
+        </> : <div className="setting-control"><p>{status.configured ? translate("settings.trackingConnectDescription") : translate("settings.trackingAdminRequired")}</p><Button disabled={!status.configured || Boolean(authorization)} loading={busy === `${status.provider}:connect`} onClick={() => void connect(status.provider)}>{translate("settings.trackingConnect")}</Button></div>}
+      </SettingsGroup>,
+    )}</div>
+  </section>;
+}
+
+function TrackingToggle({ label, description, checked, disabled, onChange }: { label: string; description: string; checked: boolean; disabled: boolean; onChange: (value: boolean) => void }) {
+  return <div className="setting-control setting-control--toggle"><label className="toggle-field"><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} /><span><i /><div><strong>{label}</strong><small>{description}</small></div></span></label></div>;
+}
+
+function providerName(provider: TrackingProvider): string {
+  return provider === "trakt" ? "Trakt" : "Simkl";
+}
+function TrackingProviderIcon({ provider }: { provider: TrackingProvider }) {
+  const path = provider === "trakt"
+    ? "m15.082 15.107-.73-.73 9.578-9.583a4.499 4.499 0 0 0-.115-.575L13.662 14.382l1.08 1.08-.73.73-1.81-1.81L23.422 3.144c-.075-.15-.155-.3-.25-.44L11.508 14.377l2.154 2.155-.73.73-7.193-7.199.73-.73 4.309 4.31L22.546 1.86A5.618 5.618 0 0 0 18.362 0H5.635A5.637 5.637 0 0 0 0 5.634V18.37A5.632 5.632 0 0 0 5.635 24h12.732C21.477 24 24 21.48 24 18.37V6.19l-8.913 8.918zm-4.314-2.155L6.814 8.988l.73-.73 3.954 3.96zm1.075-1.084-3.954-3.96.73-.73 3.959 3.96zm9.853 5.688a4.141 4.141 0 0 1-4.14 4.14H6.438a4.144 4.144 0 0 1-4.139-4.14V6.438A4.141 4.141 0 0 1 6.44 2.3h10.387v1.04H6.438c-1.71 0-3.099 1.39-3.099 3.1V17.55c0 1.71 1.39 3.105 3.1 3.105h11.117c1.71 0 3.1-1.395 3.1-3.105v-1.754h1.04v1.754z"
+    : "M3.84 0A3.832 3.832 0 0 0 0 3.84v16.32A3.832 3.832 0 0 0 3.84 24h16.32A3.832 3.832 0 0 0 24 20.16V3.84A3.832 3.832 0 0 0 20.16 0zm8.567 4.11c2.074 0 3.538.061 4.393.186 1.127.168 1.94.46 2.438.877.672.578 1.009 1.613 1.009 3.104 0 .161-.004.417-.01.768h-4.234c-.014-.358-.039-.607-.074-.746-.098-.41-.42-.64-.966-.692-.484-.043-1.66-.066-3.53-.066-1.85 0-2.946.056-3.289.165-.385.133-.578.474-.578 1.024 0 .528.203.851.61.969.343.095 1.887.187 4.633.275 2.487.073 4.073.165 4.76.275.693.11 1.244.275 1.654.495.41.22.737.532.983.936.37.595.557 1.552.557 2.873 0 1.475-.182 2.557-.546 3.247-.364.683-.96 1.149-1.785 1.398-.812.25-3.05.374-6.71.374-2.226 0-3.832-.062-4.82-.187-1.204-.147-2.068-.434-2.593-.86-.567-.456-.903-1.1-1.008-1.93a10.522 10.522 0 0 1-.085-1.434v-.789H7.44c-.007.74.136 1.216.43 1.428.154.102.33.167.525.203.196.037.54.063 1.03.077a166.2 166.2 0 0 0 2.405.022c1.862-.007 2.94-.018 3.234-.033.553-.044.917-.12 1.092-.23.245-.161.368-.52.368-1.077 0-.38-.078-.648-.231-.802-.211-.212-.712-.325-1.503-.34-.547 0-1.688-.044-3.425-.132-1.794-.088-2.956-.14-3.488-.154-1.387-.044-2.364-.212-2.932-.505-.728-.373-1.205-1.01-1.429-1.91-.126-.498-.189-1.15-.189-1.956 0-1.698.309-2.895.925-3.59.462-.527 1.163-.875 2.102-1.044.848-.146 2.865-.22 6.053-.22z";
+
+  return <svg className="tracking-provider-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d={path} /></svg>;
+}
+
+
+function MaintenanceCard({ values, onChange, onSave, saving }: { values: MaintenanceSettings; onChange: (values: MaintenanceSettings) => void; onSave: () => void; saving: boolean }) {
+  const message = values.message ?? "";
+  return <section className="settings-card maintenance-settings">
+    <header><span><Shield /></span><div><h3>{translate("admin.maintenance.title")}</h3><p>{translate("admin.maintenance.description")}</p></div></header>
+    <div className="settings-groups">
+      <SettingsGroup icon={<Shield />} title={translate("admin.maintenance.title")} description={translate("admin.maintenance.description")}>
+        <div className="setting-control setting-control--toggle">
+          <label className="toggle-field"><input type="checkbox" checked={values.enabled} onChange={(event) => onChange({ ...values, enabled: event.target.checked })} /><span><i /><div><strong>{translate("admin.maintenance.enabled")}</strong><small>{translate("admin.maintenance.enabledDescription")}</small></div></span></label>
+        </div>
+        <label className="field"><span>{translate("admin.maintenance.message")}</span><div><textarea value={message} placeholder={translate("admin.maintenance.placeholder")} onChange={(event) => { if (countCodePoints(event.target.value) <= 500) onChange({ ...values, message: event.target.value || null }); }} /></div><small>{translate("admin.maintenance.characterCount", { count: countCodePoints(message) })}</small></label>
+      </SettingsGroup>
+    </div>
+    <footer><Button loading={saving} onClick={onSave}><Check size={18} /> {translate("admin.maintenance.save")}</Button></footer>
+  </section>;
 }
 
 function SettingsCard({ title, description, icon, values, defaults = {}, onChange, onSave, saving, emptyLabel = "Inherit" }: { title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; saving: boolean; emptyLabel?: string }) {
@@ -1173,6 +1445,9 @@ function SettingsCard({ title, description, icon, values, defaults = {}, onChang
         <label className="field"><span>Maximum resolution</span><div><select value={values.maximumResolution ?? ""} onChange={(event) => change("maximumResolution", event.target.value || null)}><option value="">{emptyLabel}</option><option value="2160p">4K · 2160p</option><option value="1080p">Full HD · 1080p</option><option value="720p">HD · 720p</option><option value="480p">SD · 480p</option></select></div></label>
         <InheritedToggle label="Prefer direct play" description="Avoid transcoding when supported" value={values.preferDirectPlay} defaultValue={defaults.preferDirectPlay ?? true} onChange={(value) => change("preferDirectPlay", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label="Autoplay next episode" description="Continue a series when an episode finishes" value={values.autoplayNextEpisode} defaultValue={defaults.autoplayNextEpisode ?? true} onChange={(value) => change("autoplayNextEpisode", value)} emptyLabel={emptyLabel} />
+        <InheritedToggle label={translate("settings.skipIntro")} description={translate("settings.skipIntroDescription")} value={values.skipIntroEnabled} defaultValue={defaults.skipIntroEnabled ?? true} onChange={(value) => change("skipIntroEnabled", value)} emptyLabel={emptyLabel} />
+        <InheritedToggle label={translate("settings.skipRecap")} description={translate("settings.skipRecapDescription")} value={values.skipRecapEnabled} defaultValue={defaults.skipRecapEnabled ?? true} onChange={(value) => change("skipRecapEnabled", value)} emptyLabel={emptyLabel} />
+        <InheritedToggle label={translate("settings.skipOutro")} description={translate("settings.skipOutroDescription")} value={values.skipOutroEnabled} defaultValue={defaults.skipOutroEnabled ?? true} onChange={(value) => change("skipOutroEnabled", value)} emptyLabel={emptyLabel} />
       </SettingsGroup>
 
       <SettingsGroup icon={<Palette />} title="Interface" description="Appearance, motion, and content density.">
@@ -1191,6 +1466,7 @@ function SettingsCard({ title, description, icon, values, defaults = {}, onChang
 
       <SettingsGroup icon={<Captions />} title="Subtitles" description="Preferred track and readable cue styling.">
         <label className="field"><span>Subtitle language</span><div><input value={values.subtitleLanguage ?? ""} onChange={(event) => change("subtitleLanguage", event.target.value || null)} placeholder="en" /></div></label>
+        <label className="field"><span>{translate("settings.forcedSubtitleLanguage")}</span><div><input list="forced-subtitle-languages" value={values.forcedSubtitleLanguage ?? ""} onChange={(event) => change("forcedSubtitleLanguage", event.target.value || null)} placeholder={emptyLabel} /><datalist id="forced-subtitle-languages"><option value="off">{translate("settings.forcedSubtitleOff")}</option><option value="en">English</option><option value="fr">Français</option><option value="es">Español</option><option value="de">Deutsch</option><option value="it">Italiano</option><option value="pt">Português</option><option value="ja">日本語</option></datalist></div><small>{translate("settings.forcedSubtitleDescription")}</small></label>
         <RangeSetting label="Subtitle size" value={values.subtitleSizePercent} defaultValue={defaults.subtitleSizePercent ?? 100} min={50} max={200} step={1} suffix="%" emptyLabel={emptyLabel} onChange={(value) => change("subtitleSizePercent", value)} />
         <ColorSetting value={values.subtitleTextColor} defaultValue={defaults.subtitleTextColor ?? "#FFFFFF"} emptyLabel={emptyLabel} onChange={(value) => change("subtitleTextColor", value)} />
         <RangeSetting label="Background opacity" value={values.subtitleBackgroundOpacityPercent} defaultValue={defaults.subtitleBackgroundOpacityPercent ?? 60} min={0} max={100} step={1} suffix="%" emptyLabel={emptyLabel} onChange={(value) => change("subtitleBackgroundOpacityPercent", value)} />
@@ -1206,9 +1482,9 @@ function SettingsCard({ title, description, icon, values, defaults = {}, onChang
   </section>;
 }
 
-function SettingsGroup({ icon, title, description, children }: { icon: React.ReactNode; title: string; description: string; children: React.ReactNode }) {
+function SettingsGroup({ icon, iconClassName = "", title, description, children }: { icon: React.ReactNode; iconClassName?: string; title: string; description: string; children: React.ReactNode }) {
   return <section className="settings-group">
-    <div className="settings-group__heading"><span>{icon}</span><div><h4>{title}</h4><p>{description}</p></div></div>
+    <div className="settings-group__heading"><span className={iconClassName}>{icon}</span><div><h4>{title}</h4><p>{description}</p></div></div>
     <div className="settings-group__grid">{children}</div>
   </section>;
 }

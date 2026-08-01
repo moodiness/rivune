@@ -191,6 +191,85 @@ func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState
 	}
 }
 
+func TestSeriesRefreshRepairsPoisonedSeasonOrdinalAndInvalidatesCachedHierarchy(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	const (
+		seriesID  = "00000000-0000-4000-8000-000000000300"
+		seasonID  = "00000000-0000-4000-8000-000000000309"
+		episodeID = "00000000-0000-4000-8000-000000000399"
+	)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title) VALUES
+			($1::uuid, 'series', 'Demain nous appartient');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title) VALUES
+			($2::uuid, 'season', $1::uuid, 2, 'Saison 9');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
+			($1::uuid, 'tmdb', 'series', '72879'),
+			($2::uuid, 'tmdb', 'season', '475463');
+		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at) VALUES
+			($2::uuid, 'tmdb', 'fr-FR',
+			 jsonb_build_object(
+			     'id', $2::text, 'mediaType', 'season', 'seriesId', $1::text, 'name', 'Saison 9', 'seasonNumber', 2,
+			     'episodes', jsonb_build_array(jsonb_build_object(
+			         'id', $3::text, 'mediaType', 'episode', 'seasonId', $2::text, 'name', 'Épisode 2021',
+			         'seasonNumber', 2, 'episodeNumber', 2021
+			     )),
+			     'externalIds', jsonb_build_object('tmdb', '475463')
+			 ),
+			 now() + interval '1 hour')
+	`, pgx.QueryExecModeSimpleProtocol, seriesID, seasonID, episodeID); err != nil {
+		t.Fatalf("seed poisoned season hierarchy: %v", err)
+	}
+	provider := &canonicalMergeProvider{
+		series: ProviderSeries{
+			ExternalID: "72879", Name: "Demain nous appartient",
+			AdditionalIDs: map[string]string{"tvdb": "328775"},
+			Seasons: []ProviderSeasonSummary{{
+				ExternalID: "475463", Name: "Saison 9", SeasonNumber: 9, EpisodeCount: 2,
+			}},
+		},
+		season: ProviderSeason{
+			ExternalID: "475463", Name: "Saison 9", SeasonNumber: 9,
+			Episodes: []ProviderEpisode{
+				{ExternalID: "900001", Name: "Épisode 2021", SeasonNumber: 9, EpisodeNumber: 2021},
+				{ExternalID: "900002", Name: "Épisode 2022", SeasonNumber: 9, EpisodeNumber: 2022},
+			},
+		},
+	}
+	service := NewService(pool, provider, nil, time.Hour, nil)
+	principal := canonicalMergePrincipal()
+	series, err := service.SeriesDetails(ctx, principal, seriesID, "fr-FR", "tmdb")
+	if err != nil {
+		t.Fatalf("refresh series hierarchy: %v", err)
+	}
+	if len(series.Seasons) != 1 || series.Seasons[0].ID != seasonID || series.Seasons[0].SeasonNumber != 9 {
+		t.Fatalf("unexpected refreshed series seasons: %+v", series.Seasons)
+	}
+	season, err := service.SeasonDetails(ctx, principal, seasonID, "fr-FR", "tmdb")
+	if err != nil {
+		t.Fatalf("refresh repaired season: %v", err)
+	}
+	if season.SeasonNumber != 9 || len(season.Episodes) != 2 ||
+		season.Episodes[0].SeasonNumber != 9 || season.Episodes[0].EpisodeNumber != 2021 {
+		t.Fatalf("unexpected repaired season: %+v", season)
+	}
+	var persistedOrdinal, cachedSeasonNumber int
+	if err := pool.QueryRow(ctx, `SELECT ordinal FROM titles WHERE id = $1::uuid`, seasonID).Scan(&persistedOrdinal); err != nil {
+		t.Fatalf("query repaired ordinal: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT (payload ->> 'seasonNumber')::integer
+		FROM title_metadata
+		WHERE title_id = $1::uuid AND provider = 'tmdb' AND language = 'fr-FR'
+	`, seasonID).Scan(&cachedSeasonNumber); err != nil {
+		t.Fatalf("query refreshed season cache: %v", err)
+	}
+	if persistedOrdinal != 9 || cachedSeasonNumber != 9 {
+		t.Fatalf("poisoned hierarchy survived refresh: ordinal=%d cachedSeason=%d", persistedOrdinal, cachedSeasonNumber)
+	}
+}
+
 func TestSeriesDetailsCanonicalConflictRollsBackAtomically(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()

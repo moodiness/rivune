@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/playback"
@@ -26,6 +27,7 @@ func (a *API) playbackSources(w http.ResponseWriter, r *http.Request, principal 
 		input.Capabilities.MaximumHeight = playbackMaximumHeight(effective.Values.MaximumResolution)
 		input.PreferredAudioLanguage = effective.Values.AudioLanguage
 		input.PreferredSubtitleLanguage = effective.Values.SubtitleLanguage
+		input.PreferredForcedSubtitleLanguage = effective.Values.ForcedSubtitleLanguage
 		preferDirectPlay := effective.Values.PreferDirectPlay
 		input.Capabilities.PreferDirectPlay = &preferDirectPlay
 	}
@@ -41,6 +43,39 @@ func (a *API) playbackSources(w http.ResponseWriter, r *http.Request, principal 
 		a.internalError(w, "load playback sources", err)
 	default:
 		writeJSON(w, http.StatusOK, sources)
+	}
+}
+func (a *API) playbackMarkers(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	season, seasonErr := strconv.Atoi(r.URL.Query().Get("season"))
+	episode, episodeErr := strconv.Atoi(r.URL.Query().Get("episode"))
+	if seasonErr != nil || episodeErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_playback_request", "The playback marker request is invalid")
+		return
+	}
+	if principal.ActiveProfileID == nil {
+		writeError(w, http.StatusConflict, "profile_selection_required", "Select a profile before loading playback markers")
+		return
+	}
+	effective, err := a.settings.Effective(r.Context(), principal, *principal.ActiveProfileID)
+	if err != nil {
+		a.internalError(w, "resolve playback marker settings", err)
+		return
+	}
+	markers, err := a.playback.Markers(r.Context(), principal, playback.MarkerInput{
+		IMDBID: r.URL.Query().Get("imdbId"), Season: season, Episode: episode,
+		IncludeIntro: effective.Values.SkipIntroEnabled,
+		IncludeRecap: effective.Values.SkipRecapEnabled,
+		IncludeOutro: effective.Values.SkipOutroEnabled,
+	})
+	switch {
+	case errors.Is(err, playback.ErrActiveProfileRequired):
+		writeError(w, http.StatusConflict, "profile_selection_required", "Select a profile before loading playback markers")
+	case errors.Is(err, playback.ErrInvalidInput):
+		writeError(w, http.StatusUnprocessableEntity, "invalid_playback_request", "The playback marker request is invalid")
+	case err != nil:
+		a.internalError(w, "load playback markers", err)
+	default:
+		writeJSON(w, http.StatusOK, markers)
 	}
 }
 

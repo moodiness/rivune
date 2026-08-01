@@ -86,7 +86,7 @@ func embeddedSubtitles(sources []Source, assets []storedAsset) ([]Subtitle, []st
 			}
 			trackIndex := track.Index
 			id := "embedded-subtitle-" + strconv.Itoa(track.Index)
-			subtitles = append(subtitles, Subtitle{ID: id, AddonID: source.AddonID, ManifestID: source.ManifestID, Language: track.Language})
+			subtitles = append(subtitles, Subtitle{ID: id, AddonID: source.AddonID, ManifestID: source.ManifestID, Language: track.Language, Forced: track.Forced})
 			subtitleAssets = append(subtitleAssets, storedAsset{
 				ID: id, Kind: assetKindEmbeddedSubtitle, URL: sourceAsset.URL, Container: sourceAsset.Container,
 				Headers: sourceAsset.Headers, SubtitleTrackIndex: &trackIndex,
@@ -106,7 +106,8 @@ func webVTTConvertibleSubtitle(codec string) bool {
 	}
 }
 
-func applySubtitlePreference(subtitles []Subtitle, preferredID, preferredLanguage string) error {
+func applySubtitlePreference(subtitles []Subtitle, preferredID, forcedLanguage, preferredLanguage string) error {
+	clearSubtitleDefaults(subtitles)
 	if preferredID != "" && preferredID != "none" {
 		for index := range subtitles {
 			if subtitles[index].ID == preferredID {
@@ -119,6 +120,14 @@ func applySubtitlePreference(subtitles []Subtitle, preferredID, preferredLanguag
 	if preferredID == "none" {
 		return nil
 	}
+	if forcedLanguage != "" && forcedLanguage != "off" {
+		for index := range subtitles {
+			if subtitles[index].Forced && languageMatches(subtitles[index].Language, forcedLanguage) {
+				subtitles[index].Default = true
+				return nil
+			}
+		}
+	}
 	for index := range subtitles {
 		if languageMatches(subtitles[index].Language, preferredLanguage) {
 			subtitles[index].Default = true
@@ -126,6 +135,12 @@ func applySubtitlePreference(subtitles []Subtitle, preferredID, preferredLanguag
 		}
 	}
 	return nil
+}
+
+func clearSubtitleDefaults(subtitles []Subtitle) {
+	for index := range subtitles {
+		subtitles[index].Default = false
+	}
 }
 
 func selectedAudioTrack(sources []Source, assets []storedAsset) *int {

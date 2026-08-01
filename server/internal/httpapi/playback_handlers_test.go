@@ -10,24 +10,34 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/playback"
+	"github.com/moodiness/rivune/server/internal/settings"
 )
 
 type fakePlaybackService struct {
 	sourcesInput playback.SourcesInput
+	markersInput playback.MarkerInput
 	prepareInput playback.PrepareInput
 	resolveInput playback.ResolveInput
 	sources      playback.SourceList
+	markers      playback.MarkerList
 	preparation  playback.Preparation
 	session      playback.Session
+	activity     playback.Activity
 	sourcesErr   error
+	markersErr   error
 	prepareErr   error
 	resolveErr   error
 	proxyErr     error
+	activityErr  error
 }
 
 func (fake *fakePlaybackService) Sources(_ context.Context, _ auth.Principal, input playback.SourcesInput) (playback.SourceList, error) {
 	fake.sourcesInput = input
 	return fake.sources, fake.sourcesErr
+}
+func (fake *fakePlaybackService) Markers(_ context.Context, _ auth.Principal, input playback.MarkerInput) (playback.MarkerList, error) {
+	fake.markersInput = input
+	return fake.markers, fake.markersErr
 }
 
 func (fake *fakePlaybackService) Prepare(_ context.Context, _ auth.Principal, input playback.PrepareInput) (playback.Preparation, error) {
@@ -44,8 +54,8 @@ func (*fakePlaybackService) Stop(context.Context, auth.Principal, string) error 
 	return nil
 }
 
-func (*fakePlaybackService) Activity(context.Context, auth.Principal) (playback.Activity, error) {
-	return playback.Activity{}, nil
+func (fake *fakePlaybackService) Activity(context.Context, auth.Principal) (playback.Activity, error) {
+	return fake.activity, fake.activityErr
 }
 
 func (*fakePlaybackService) StopActivitySession(context.Context, auth.Principal, string) error {
@@ -134,6 +144,46 @@ func TestResolvePlaybackCreatesSessionFromOpaqueReference(t *testing.T) {
 	}
 }
 
+func TestPlaybackActivityIncludesArtworkAndCanonicalProviderIDs(t *testing.T) {
+	now := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
+	service := &fakePlaybackService{activity: playback.Activity{
+		Summary: playback.ActivitySummary{
+			ActiveSessions: 1, ActiveJobs: 0, ProcessingSlots: 0, ProcessingLimit: 2,
+			StorageBytes: 0, StorageLimitBytes: 1 << 30,
+		},
+		Diagnostics: playback.MediaDiagnostics{VideoEncoder: "h264"},
+		Sessions: []playback.ActivitySession{{
+			ID: "11111111-1111-4111-8111-111111111111", TitleID: "episode-1",
+			ArtworkURL: "https://images.example.test/episode-still.jpg",
+			ExternalIDs: playback.ActivityExternalIDs{
+				IMDb: "tt0149460", TMDB: "300131", TVDB: "11704240",
+			},
+			ExternalIDMediaTypes: playback.ActivityExternalIDMediaTypes{IMDb: "series", TMDB: "series", TVDB: "episode"},
+			Title:                "Combat de tétines", MediaType: "episode", Mode: "direct",
+			Username: "admin", ProfileID: "22222222-2222-4222-8222-222222222222",
+			Profile: "Alice", Device: "Living room", Platform: "Web",
+			CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour),
+		}},
+		Jobs: []playback.MediaActivityJob{},
+	}}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin"}}
+	api.playback = service
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/activity", nil)
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"artworkUrl":"https://images.example.test/episode-still.jpg"`) ||
+		!strings.Contains(response.Body.String(), `"externalIds":{"imdb":"tt0149460","tmdb":"300131","tvdb":"11704240"}`) ||
+		!strings.Contains(response.Body.String(), `"externalIdMediaTypes":{"imdb":"series","tmdb":"series","tvdb":"episode"}`) {
+		t.Fatalf("unexpected activity response: status=%d body=%s", response.Code, response.Body.String())
+	}
+	validateContractResponse(t, loadOpenAPIContract(t), "/playback/activity", nil, request, response)
+}
+
 func TestPlaybackAssetReturnsStableMediaErrors(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -164,6 +214,36 @@ func TestPlaybackAssetReturnsStableMediaErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPlaybackMarkersApplyEffectiveSkipSettings(t *testing.T) {
+	profileID := "profile-id"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	service := &fakePlaybackService{markers: playback.MarkerList{Markers: []playback.Marker{{
+		Type: playback.MarkerTypeIntro, StartSeconds: 10, EndSeconds: 70, Confidence: 1, SubmissionCount: 2,
+	}}}}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = &fakeAuthService{principal: auth.Principal{
+		SessionID: "session-id", UserID: "user-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
+	}}
+	api.playback = service
+	api.settings = &fakeSettingsService{effective: settings.Effective{Values: settings.EffectiveValues{
+		SkipIntroEnabled: true, SkipRecapEnabled: false, SkipOutroEnabled: true,
+	}}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/markers?imdbId=tt0903747&season=1&episode=1", nil)
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"type":"intro"`) {
+		t.Fatalf("unexpected marker response: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if service.markersInput.IMDBID != "tt0903747" || service.markersInput.Season != 1 || service.markersInput.Episode != 1 ||
+		!service.markersInput.IncludeIntro || service.markersInput.IncludeRecap || !service.markersInput.IncludeOutro {
+		t.Fatalf("unexpected marker input: %+v", service.markersInput)
+	}
+	validateContractResponse(t, loadOpenAPIContract(t), "/playback/markers", nil, request, response)
 }
 
 func stringsReader(value string) *strings.Reader {

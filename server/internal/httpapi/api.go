@@ -30,6 +30,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/playback"
 	"github.com/moodiness/rivune/server/internal/profile"
 	"github.com/moodiness/rivune/server/internal/settings"
+	"github.com/moodiness/rivune/server/internal/tracking"
 	"github.com/moodiness/rivune/server/internal/user"
 	"github.com/moodiness/rivune/server/internal/watchstate"
 	"github.com/moodiness/rivune/server/internal/webui"
@@ -53,6 +54,8 @@ type authService interface {
 	ProfileSessions(context.Context, auth.Principal, string) ([]auth.Session, error)
 	RevokeProfileSession(context.Context, auth.Principal, string, string) error
 	SessionNotifications(context.Context, auth.Principal, int64) ([]auth.SessionNotification, error)
+	AcknowledgeSessionNotification(context.Context, auth.Principal, int64) error
+	BroadcastSessionNotification(context.Context, auth.Principal, string, string) (auth.NotificationBroadcast, error)
 	SendProfileSessionNotification(context.Context, auth.Principal, string, string, string) (auth.SessionNotification, error)
 	BeginDeviceAuthorization(context.Context, string, string) (auth.DeviceAuthorization, error)
 	ApproveDeviceAuthorization(context.Context, auth.Principal, string) error
@@ -73,6 +76,8 @@ type profileService interface {
 
 type settingsService interface {
 	Instance(context.Context) (settings.Layer, error)
+	Maintenance(context.Context) (settings.Maintenance, error)
+	UpdateMaintenance(context.Context, auth.Principal, settings.Maintenance) (settings.Maintenance, error)
 	UpdateInstance(context.Context, auth.Principal, settings.Patch) (settings.Layer, error)
 	Profile(context.Context, auth.Principal, string) (settings.Layer, error)
 	UpdateProfile(context.Context, auth.Principal, string, settings.Patch) (settings.Layer, error)
@@ -143,8 +148,18 @@ type watchstateService interface {
 	ContinueWatching(context.Context, auth.Principal, int) (watchstate.ContinuePage, error)
 }
 
+type trackingService interface {
+	Statuses(context.Context, auth.Principal, string) ([]tracking.Status, error)
+	BeginDeviceAuthorization(context.Context, auth.Principal, string, string) (tracking.DeviceAuthorization, error)
+	CompleteDeviceAuthorization(context.Context, auth.Principal, string, string, string) (tracking.Status, error)
+	UpdatePreferences(context.Context, auth.Principal, string, string, tracking.PreferencesInput) (tracking.Status, error)
+	Disconnect(context.Context, auth.Principal, string, string) error
+	Run(context.Context)
+}
+
 type playbackService interface {
 	Sources(context.Context, auth.Principal, playback.SourcesInput) (playback.SourceList, error)
+	Markers(context.Context, auth.Principal, playback.MarkerInput) (playback.MarkerList, error)
 	Prepare(context.Context, auth.Principal, playback.PrepareInput) (playback.Preparation, error)
 	Resolve(context.Context, auth.Principal, playback.ResolveInput) (playback.Session, error)
 	Stop(context.Context, auth.Principal, string) error
@@ -172,6 +187,7 @@ type API struct {
 	logger              *slog.Logger
 	version             string
 	watchstate          watchstateService
+	tracking            trackingService
 }
 
 type errorEnvelope struct {
@@ -179,8 +195,9 @@ type errorEnvelope struct {
 }
 
 type apiError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code          string  `json:"code"`
+	Message       string  `json:"message"`
+	PublicMessage *string `json:"publicMessage,omitempty"`
 }
 
 func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version string) (*API, error) {
@@ -216,6 +233,10 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	if err != nil {
 		return nil, fmt.Errorf("initialize playback service: %w", err)
 	}
+	trackingService, err := tracking.NewService(pool, cfg.TrackingEncryptionKey, cfg.TraktClientID, cfg.TraktClientSecret, cfg.SimklClientID, nil, logger)
+	if err != nil {
+		return nil, fmt.Errorf("initialize tracking integrations: %w", err)
+	}
 	metadataService := metadata.NewService(pool, metadataProvider, televisionEnricher, cfg.MetadataCacheTTL, logger)
 	return &API{
 		addons:              addonService,
@@ -234,7 +255,8 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		users:               user.NewService(pool),
 		metadata:            metadataService,
 		version:             version,
-		watchstate:          watchstate.NewService(pool),
+		tracking:            trackingService,
+		watchstate:          watchstate.NewService(pool, trackingService),
 	}, nil
 }
 
@@ -254,6 +276,8 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/auth/sessions", a.requireAuthentication(a.sessions))
 	mux.Handle("DELETE /api/v1/auth/sessions/{sessionId}", a.requireAuthentication(a.revokeSession))
 	mux.Handle("GET /api/v1/auth/notifications", a.requireAuthentication(a.sessionNotifications))
+	mux.Handle("DELETE /api/v1/auth/notifications/{notificationId}", a.requireAuthentication(a.acknowledgeSessionNotification))
+	mux.Handle("POST /api/v1/auth/notifications/broadcast", a.requireAuthentication(a.broadcastSessionNotification))
 	mux.Handle("GET /api/v1/profiles/{profileId}/sessions", a.requireAuthentication(a.profileSessions))
 	mux.Handle("DELETE /api/v1/profiles/{profileId}/sessions/{sessionId}", a.requireAuthentication(a.revokeProfileSession))
 	mux.Handle("POST /api/v1/profiles/{profileId}/sessions/{sessionId}/notifications", a.requireAuthentication(a.sendProfileSessionNotification))
@@ -270,9 +294,16 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/profiles/{profileId}/avatar/preset", a.requireAuthentication(a.setProfileAvatarPreset))
 	mux.Handle("GET /api/v1/settings", a.requireAuthentication(a.instanceSettings))
 	mux.Handle("PATCH /api/v1/settings", a.requireAuthentication(a.updateInstanceSettings))
+	mux.Handle("GET /api/v1/settings/maintenance", a.requireAuthentication(a.maintenanceSettings))
+	mux.Handle("PUT /api/v1/settings/maintenance", a.requireAuthentication(a.updateMaintenanceSettings))
 	mux.Handle("GET /api/v1/profiles/{profileId}/settings", a.requireAuthentication(a.profileSettings))
 	mux.Handle("PATCH /api/v1/profiles/{profileId}/settings", a.requireAuthentication(a.updateProfileSettings))
 	mux.Handle("GET /api/v1/profiles/{profileId}/settings/effective", a.requireAuthentication(a.effectiveSettings))
+	mux.Handle("GET /api/v1/profiles/{profileId}/tracking", a.requireAuthentication(a.trackingStatuses))
+	mux.Handle("POST /api/v1/profiles/{profileId}/tracking/{provider}/device-code", a.requireAuthentication(a.beginTrackingAuthorization))
+	mux.Handle("POST /api/v1/profiles/{profileId}/tracking/{provider}/device-code/{authorizationId}/token", a.requireAuthentication(a.completeTrackingAuthorization))
+	mux.Handle("PATCH /api/v1/profiles/{profileId}/tracking/{provider}", a.requireAuthentication(a.updateTrackingPreferences))
+	mux.Handle("DELETE /api/v1/profiles/{profileId}/tracking/{provider}", a.requireAuthentication(a.disconnectTracking))
 	mux.Handle("GET /api/v1/users", a.requireAuthentication(a.listUsers))
 	mux.Handle("GET /api/v1/metadata/titles/{titleId}", a.requireAuthentication(a.movieDetails))
 	mux.Handle("GET /api/v1/metadata/series/{titleId}", a.requireAuthentication(a.seriesDetails))
@@ -308,6 +339,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/collections/{collectionId}/folders/{folderId}/items", a.requireAuthentication(a.resolveCollectionFolder))
 	mux.Handle("POST /api/v1/titles/resolve", a.requireAuthentication(a.resolveTitle))
 	mux.Handle("POST /api/v1/playback/sources", a.requireAuthentication(a.playbackSources))
+	mux.Handle("GET /api/v1/playback/markers", a.requireAuthentication(a.playbackMarkers))
 	mux.Handle("POST /api/v1/playback/prepare", a.requireAuthentication(a.preparePlayback))
 	mux.Handle("POST /api/v1/playback/resolve", a.requireAuthentication(a.resolvePlayback))
 	mux.Handle("DELETE /api/v1/playback/sessions/{sessionId}", a.requireAuthentication(a.stopPlayback))

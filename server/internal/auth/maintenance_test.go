@@ -19,6 +19,9 @@ func TestAuthenticationCleanupPurgesOnlyExpiredAuxiliaryRecords(t *testing.T) {
 	if got := normalizedSQL(cleanupExpiredNotificationsSQL); got != "DELETE FROM auth_session_notifications WHERE expires_at <= now()" {
 		t.Fatalf("unexpected notification cleanup predicate: %s", got)
 	}
+	if got := normalizedSQL(scrubExpiredNotificationBroadcastsSQL); got != "UPDATE auth_notification_broadcasts SET message = NULL WHERE expires_at <= now() AND message IS NOT NULL" {
+		t.Fatalf("unexpected broadcast scrub predicate: %s", got)
+	}
 	if got := normalizedSQL(cleanupStaleDeviceAuthorizationsSQL); got != "DELETE FROM device_authorizations WHERE expires_at < now() - interval '1 hour' OR consumed_at < now() - interval '1 hour'" {
 		t.Fatalf("unexpected device authorization cleanup predicate: %s", got)
 	}

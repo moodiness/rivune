@@ -74,7 +74,14 @@ export class RivuneHarness {
   readonly requests: CapturedRequest[] = [];
   readonly collectionResponses: string[] = [];
   private activeProfileId: string | null = "alice";
+  private userRole: "admin" | "member" = "admin";
+  private maintenance = { enabled: false, message: null as string | null };
   private readonly collectionDelays = new Map<string, number>();
+
+  setMaintenance(enabled: boolean, message: string | null = null) {
+    this.userRole = "member";
+    this.maintenance = { enabled, message };
+  }
 
   delayCollections(profileId: string, milliseconds: number) {
     this.collectionDelays.set(profileId, milliseconds);
@@ -100,7 +107,7 @@ export class RivuneHarness {
 
   private account() {
     return {
-      user: { id: "user-1", username: "fixture-owner", role: "admin" },
+      user: { id: "user-1", username: "fixture-owner", role: this.userRole },
       session: { id: "session-1", deviceId: "fixture-device", activeProfile: this.activeProfileId ? { id: this.activeProfileId, expiresAt } : null },
       profiles,
     };
@@ -142,6 +149,22 @@ export class RivuneHarness {
       return;
     }
     if (path === "/auth/me") { await json(route, this.account()); return; }
+    if (path === "/settings/maintenance" && request.method() === "GET") { await json(route, this.maintenance); return; }
+    if (path === "/settings/maintenance" && request.method() === "PUT") {
+      this.maintenance = body as { enabled: boolean; message: string | null };
+      await json(route, this.maintenance);
+      return;
+    }
+    if (this.maintenance.enabled) {
+      await json(route, { error: { code: "maintenance_mode", message: "Rivune is temporarily unavailable for maintenance.", ...(this.maintenance.message ? { publicMessage: this.maintenance.message } : {}) } }, 503);
+      return;
+    }
+    if (path === "/profiles" && request.method() === "GET") { await json(route, { profiles }); return; }
+    if (path === "/profile-avatars" && request.method() === "GET") { await json(route, { presets: [] }); return; }
+    if (path === "/settings" && request.method() === "GET") { await json(route, { schemaVersion: 1, settings: {}, updatedAt: createdAt }); return; }
+    if (path === "/settings" && request.method() === "PATCH") { await json(route, { schemaVersion: 1, settings: body, updatedAt: createdAt }); return; }
+    if (/^\/profiles\/[^/]+\/settings$/.test(path) && request.method() === "GET") { await json(route, { schemaVersion: 1, settings: {}, updatedAt: createdAt }); return; }
+    if (/^\/profiles\/[^/]+\/settings$/.test(path) && request.method() === "PATCH") { await json(route, { schemaVersion: 1, settings: body, updatedAt: createdAt }); return; }
     if (path === "/profiles/selection" && request.method() === "DELETE") { this.activeProfileId = null; await route.fulfill({ status: 204 }); return; }
     const profileSelection = path.match(/^\/profiles\/([^/]+)\/select$/);
     if (profileSelection && request.method() === "POST") {
@@ -156,6 +179,11 @@ export class RivuneHarness {
       return;
     }
     if (path === "/auth/notifications") { await json(route, { notifications: [] }); return; }
+    if (path === "/auth/notifications/broadcast" && request.method() === "POST") {
+      const input = body as { idempotencyKey: string; message: string };
+      await json(route, { id: input.idempotencyKey, message: input.message, senderUsername: "fixture-owner", recipientCount: 3, createdAt }, 201);
+      return;
+    }
     if (path === "/collections") {
       const collectionProfile = profileAtRequest ?? "alice";
       const delay = this.collectionDelays.get(collectionProfile) ?? 0;
@@ -194,6 +222,10 @@ export class RivuneHarness {
       const titleId = decodeURIComponent(path.slice("/progress/".length));
       const progress = body as { positionSeconds: number; durationSeconds: number; completed: boolean; expectedVersion: number };
       await json(route, { titleId, ...progress, version: progress.expectedVersion + 1, updatedAt: createdAt });
+      return;
+    }
+    if (path === "/playback/markers" && request.method() === "GET") {
+      await json(route, { markers: [{ type: "intro", startSeconds: 330, endSeconds: 400, confidence: 1, submissionCount: 2 }] });
       return;
     }
     if (path === "/playback/sources" && request.method() === "POST") {

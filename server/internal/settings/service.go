@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,7 +16,10 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 )
 
-const schemaVersion = 1
+const (
+	schemaVersion                 = 1
+	MaintenanceMessageMaximumSize = 500
+)
 
 var (
 	ErrInvalidInput      = errors.New("invalid settings input")
@@ -29,6 +33,10 @@ var (
 
 type Service struct {
 	pool *pgxpool.Pool
+}
+type Maintenance struct {
+	Enabled bool
+	Message *string
 }
 
 type OptionalString struct {
@@ -56,7 +64,11 @@ type Patch struct {
 	SeriesMappingProvider            OptionalString
 	AudioLanguage                    OptionalString
 	SubtitleLanguage                 OptionalString
+	ForcedSubtitleLanguage           OptionalString
 	AutoplayNextEpisode              OptionalBool
+	SkipIntroEnabled                 OptionalBool
+	SkipRecapEnabled                 OptionalBool
+	SkipOutroEnabled                 OptionalBool
 	CardDensity                      OptionalString
 	AnimationsEnabled                OptionalBool
 	SubtitleSizePercent              OptionalInt
@@ -77,7 +89,11 @@ type Values struct {
 	SeriesMappingProvider            *string `json:"seriesMappingProvider,omitempty"`
 	AudioLanguage                    *string `json:"audioLanguage,omitempty"`
 	SubtitleLanguage                 *string `json:"subtitleLanguage,omitempty"`
+	ForcedSubtitleLanguage           *string `json:"forcedSubtitleLanguage,omitempty"`
 	AutoplayNextEpisode              *bool   `json:"autoplayNextEpisode,omitempty"`
+	SkipIntroEnabled                 *bool   `json:"skipIntroEnabled,omitempty"`
+	SkipRecapEnabled                 *bool   `json:"skipRecapEnabled,omitempty"`
+	SkipOutroEnabled                 *bool   `json:"skipOutroEnabled,omitempty"`
 	CardDensity                      *string `json:"cardDensity,omitempty"`
 	AnimationsEnabled                *bool   `json:"animationsEnabled,omitempty"`
 	SubtitleSizePercent              *int    `json:"subtitleSizePercent,omitempty"`
@@ -86,6 +102,8 @@ type Values struct {
 	NotificationsEnabled             *bool   `json:"notificationsEnabled,omitempty"`
 	NotificationDurationSeconds      *int    `json:"notificationDurationSeconds,omitempty"`
 	NotificationPollIntervalSeconds  *int    `json:"notificationPollIntervalSeconds,omitempty"`
+	MaintenanceEnabled               *bool   `json:"maintenanceEnabled,omitempty"`
+	MaintenanceMessage               *string `json:"maintenanceMessage,omitempty"`
 }
 
 type Layer struct {
@@ -104,7 +122,11 @@ type EffectiveValues struct {
 	SeriesMappingProvider            string `json:"seriesMappingProvider"`
 	AudioLanguage                    string `json:"audioLanguage"`
 	SubtitleLanguage                 string `json:"subtitleLanguage"`
+	ForcedSubtitleLanguage           string `json:"forcedSubtitleLanguage"`
 	AutoplayNextEpisode              bool   `json:"autoplayNextEpisode"`
+	SkipIntroEnabled                 bool   `json:"skipIntroEnabled"`
+	SkipRecapEnabled                 bool   `json:"skipRecapEnabled"`
+	SkipOutroEnabled                 bool   `json:"skipOutroEnabled"`
 	CardDensity                      string `json:"cardDensity"`
 	AnimationsEnabled                bool   `json:"animationsEnabled"`
 	SubtitleSizePercent              int    `json:"subtitleSizePercent"`
@@ -127,6 +149,63 @@ func NewService(pool *pgxpool.Pool) *Service {
 
 func (s *Service) Instance(ctx context.Context) (Layer, error) {
 	return queryLayer(ctx, s.pool, "SELECT schema_version, settings, updated_at FROM instance_settings WHERE instance_id = 1")
+}
+func (s *Service) Maintenance(ctx context.Context) (Maintenance, error) {
+	var state Maintenance
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE((settings ->> 'maintenanceEnabled')::boolean, false),
+		       NULLIF(settings ->> 'maintenanceMessage', '')
+		FROM instance_settings
+		WHERE instance_id = 1
+	`).Scan(&state.Enabled, &state.Message); err != nil {
+		return Maintenance{}, fmt.Errorf("query maintenance settings: %w", err)
+	}
+	return state, nil
+}
+
+func (s *Service) UpdateMaintenance(ctx context.Context, principal auth.Principal, state Maintenance) (Maintenance, error) {
+	if principal.Role != "admin" {
+		return Maintenance{}, ErrForbidden
+	}
+	if state.Message != nil {
+		message := strings.TrimSpace(*state.Message)
+		if message == "" {
+			state.Message = nil
+		} else {
+			if utf8.RuneCountInString(message) > MaintenanceMessageMaximumSize {
+				return Maintenance{}, fmt.Errorf("%w: maintenance message must not exceed %d characters", ErrInvalidInput, MaintenanceMessageMaximumSize)
+			}
+			state.Message = &message
+		}
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Maintenance{}, fmt.Errorf("begin maintenance settings update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	current, err := queryLayer(ctx, tx, "SELECT schema_version, settings, updated_at FROM instance_settings WHERE instance_id = 1 FOR UPDATE")
+	if err != nil {
+		return Maintenance{}, err
+	}
+	current.Values.MaintenanceEnabled = &state.Enabled
+	current.Values.MaintenanceMessage = state.Message
+	encoded, err := json.Marshal(current.Values)
+	if err != nil {
+		return Maintenance{}, fmt.Errorf("encode maintenance settings: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE instance_settings
+		SET schema_version = $1, settings = $2, updated_at = now()
+		WHERE instance_id = 1
+	`, schemaVersion, encoded); err != nil {
+		return Maintenance{}, fmt.Errorf("update maintenance settings: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Maintenance{}, fmt.Errorf("commit maintenance settings: %w", err)
+	}
+	return state, nil
 }
 
 func (s *Service) UpdateInstance(ctx context.Context, principal auth.Principal, patch Patch) (Layer, error) {
@@ -298,16 +377,18 @@ func defaultEffective() Effective {
 		Values: EffectiveValues{
 			Theme: "system", MaximumResolution: "auto", PreferDirectPlay: true,
 			HideUnreleased: false, MetadataLanguage: "auto", MetadataRegion: "auto", SeriesMappingProvider: "tmdb",
-			AudioLanguage: "auto", SubtitleLanguage: "auto",
+			AudioLanguage: "auto", SubtitleLanguage: "auto", ForcedSubtitleLanguage: "off",
 			AutoplayNextEpisode: true, CardDensity: "comfortable", AnimationsEnabled: true,
+			SkipIntroEnabled: true, SkipRecapEnabled: true, SkipOutroEnabled: true,
 			SubtitleSizePercent: 100, SubtitleTextColor: "#FFFFFF", SubtitleBackgroundOpacityPercent: 60,
 			NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 5,
 		},
 		Sources: map[string]string{
 			"theme": "default", "maximumResolution": "default", "preferDirectPlay": "default",
 			"hideUnreleased": "default", "metadataLanguage": "default", "metadataRegion": "default", "seriesMappingProvider": "default",
-			"audioLanguage": "default", "subtitleLanguage": "default",
+			"audioLanguage": "default", "subtitleLanguage": "default", "forcedSubtitleLanguage": "default",
 			"autoplayNextEpisode": "default", "cardDensity": "default", "animationsEnabled": "default",
+			"skipIntroEnabled": "default", "skipRecapEnabled": "default", "skipOutroEnabled": "default",
 			"subtitleSizePercent": "default", "subtitleTextColor": "default", "subtitleBackgroundOpacityPercent": "default",
 			"notificationsEnabled": "default", "notificationDurationSeconds": "default", "notificationPollIntervalSeconds": "default",
 		},
@@ -315,8 +396,9 @@ func defaultEffective() Effective {
 }
 
 func validatePatch(patch Patch) error {
-	if !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.PreferDirectPlay.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set &&
-		!patch.AutoplayNextEpisode.Set && !patch.CardDensity.Set && !patch.AnimationsEnabled.Set && !patch.SubtitleSizePercent.Set && !patch.SubtitleTextColor.Set && !patch.SubtitleBackgroundOpacityPercent.Set &&
+	if !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.PreferDirectPlay.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
+		!patch.AutoplayNextEpisode.Set && !patch.SkipIntroEnabled.Set && !patch.SkipRecapEnabled.Set && !patch.SkipOutroEnabled.Set &&
+		!patch.CardDensity.Set && !patch.AnimationsEnabled.Set && !patch.SubtitleSizePercent.Set && !patch.SubtitleTextColor.Set && !patch.SubtitleBackgroundOpacityPercent.Set &&
 		!patch.NotificationsEnabled.Set && !patch.NotificationDurationSeconds.Set && !patch.NotificationPollIntervalSeconds.Set {
 		return fmt.Errorf("%w: at least one setting must be provided", ErrInvalidInput)
 	}
@@ -340,6 +422,9 @@ func validatePatch(patch Patch) error {
 		if value.Set && value.Value != nil && *value.Value != "auto" && !languageTagPattern.MatchString(*value.Value) {
 			return fmt.Errorf("%w: %s must be auto or a BCP 47 language tag", ErrInvalidInput, name)
 		}
+	}
+	if value := patch.ForcedSubtitleLanguage.Value; patch.ForcedSubtitleLanguage.Set && value != nil && *value != "off" && !languageTagPattern.MatchString(*value) {
+		return fmt.Errorf("%w: forcedSubtitleLanguage must be off or a BCP 47 language tag", ErrInvalidInput)
 	}
 	if value := patch.MetadataRegion.Value; patch.MetadataRegion.Set && value != nil && *value != "auto" && !regionCodePattern.MatchString(*value) {
 		return fmt.Errorf("%w: metadataRegion must be auto or an uppercase ISO 3166-1 alpha-2 code", ErrInvalidInput)
@@ -412,8 +497,25 @@ func applyPatch(values Values, patch Patch) Values {
 	if patch.SubtitleLanguage.Set {
 		values.SubtitleLanguage = patch.SubtitleLanguage.Value
 	}
+	if patch.ForcedSubtitleLanguage.Set {
+		if patch.ForcedSubtitleLanguage.Value == nil {
+			values.ForcedSubtitleLanguage = nil
+		} else {
+			normalized := normalizeLanguageTag(*patch.ForcedSubtitleLanguage.Value)
+			values.ForcedSubtitleLanguage = &normalized
+		}
+	}
 	if patch.AutoplayNextEpisode.Set {
 		values.AutoplayNextEpisode = patch.AutoplayNextEpisode.Value
+	}
+	if patch.SkipIntroEnabled.Set {
+		values.SkipIntroEnabled = patch.SkipIntroEnabled.Value
+	}
+	if patch.SkipRecapEnabled.Set {
+		values.SkipRecapEnabled = patch.SkipRecapEnabled.Value
+	}
+	if patch.SkipOutroEnabled.Set {
+		values.SkipOutroEnabled = patch.SkipOutroEnabled.Value
 	}
 	if patch.CardDensity.Set {
 		values.CardDensity = patch.CardDensity.Value
@@ -484,9 +586,25 @@ func applyLayer(effective *Effective, values Values, source string) {
 		effective.Values.SubtitleLanguage = *values.SubtitleLanguage
 		effective.Sources["subtitleLanguage"] = source
 	}
+	if values.ForcedSubtitleLanguage != nil {
+		effective.Values.ForcedSubtitleLanguage = *values.ForcedSubtitleLanguage
+		effective.Sources["forcedSubtitleLanguage"] = source
+	}
 	if values.AutoplayNextEpisode != nil {
 		effective.Values.AutoplayNextEpisode = *values.AutoplayNextEpisode
 		effective.Sources["autoplayNextEpisode"] = source
+	}
+	if values.SkipIntroEnabled != nil {
+		effective.Values.SkipIntroEnabled = *values.SkipIntroEnabled
+		effective.Sources["skipIntroEnabled"] = source
+	}
+	if values.SkipRecapEnabled != nil {
+		effective.Values.SkipRecapEnabled = *values.SkipRecapEnabled
+		effective.Sources["skipRecapEnabled"] = source
+	}
+	if values.SkipOutroEnabled != nil {
+		effective.Values.SkipOutroEnabled = *values.SkipOutroEnabled
+		effective.Sources["skipOutroEnabled"] = source
 	}
 	if values.CardDensity != nil {
 		effective.Values.CardDensity = *values.CardDensity
@@ -520,4 +638,23 @@ func applyLayer(effective *Effective, values Values, source string) {
 		effective.Values.NotificationPollIntervalSeconds = *values.NotificationPollIntervalSeconds
 		effective.Sources["notificationPollIntervalSeconds"] = source
 	}
+}
+
+func normalizeLanguageTag(value string) string {
+	if value == "off" {
+		return value
+	}
+	parts := strings.Split(value, "-")
+	for index := range parts {
+		parts[index] = strings.ToLower(parts[index])
+		if index == 0 {
+			continue
+		}
+		if len(parts[index]) == 4 {
+			parts[index] = strings.ToUpper(parts[index][:1]) + parts[index][1:]
+		} else if len(parts[index]) == 2 {
+			parts[index] = strings.ToUpper(parts[index])
+		}
+	}
+	return strings.Join(parts, "-")
 }

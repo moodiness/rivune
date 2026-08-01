@@ -13,46 +13,55 @@ import (
 )
 
 type fakeAuthService struct {
-	loginInput              auth.LoginInput
-	loginTokens             auth.TokenPair
-	loginErr                error
-	refreshToken            string
-	refreshTokens           auth.TokenPair
-	refreshErr              error
-	authenticateToken       string
-	principal               auth.Principal
-	authenticateErr         error
-	account                 auth.Account
-	accountErr              error
-	logoutPrincipal         auth.Principal
-	logoutErr               error
-	sessions                []auth.Session
-	sessionsErr             error
-	revokedSessionID        string
-	revokeErr               error
-	profileSessions         []auth.Session
-	profileSessionsErr      error
-	profileSessionsID       string
-	revokedProfileID        string
-	revokedProfileSessionID string
-	revokeProfileSessionErr error
-	notifications           []auth.SessionNotification
-	notificationsAfterID    int64
-	notificationsCalls      int
-	notificationsErr        error
-	notifiedProfileID       string
-	notifiedSessionID       string
-	notifiedMessage         string
-	sentNotification        auth.SessionNotification
-	sendNotificationCalls   int
-	sendNotificationErr     error
-	deviceAuthorization     auth.DeviceAuthorization
-	deviceAuthorizationErr  error
-	approvedUserCode        string
-	approvalErr             error
-	exchangedDeviceCode     string
-	exchangeTokens          auth.TokenPair
-	exchangeErr             error
+	loginInput                 auth.LoginInput
+	loginTokens                auth.TokenPair
+	loginErr                   error
+	refreshToken               string
+	refreshTokens              auth.TokenPair
+	refreshErr                 error
+	authenticateToken          string
+	principal                  auth.Principal
+	authenticateErr            error
+	account                    auth.Account
+	accountErr                 error
+	logoutPrincipal            auth.Principal
+	logoutErr                  error
+	sessions                   []auth.Session
+	sessionsErr                error
+	revokedSessionID           string
+	revokeErr                  error
+	profileSessions            []auth.Session
+	profileSessionsErr         error
+	profileSessionsID          string
+	revokedProfileID           string
+	revokedProfileSessionID    string
+	revokeProfileSessionErr    error
+	notifications              []auth.SessionNotification
+	notificationsAfterID       int64
+	notificationsCalls         int
+	notificationsErr           error
+	acknowledgedNotificationID int64
+	acknowledgeCalls           int
+	acknowledgeErr             error
+	broadcastID                string
+	broadcastMessage           string
+	broadcastPrincipal         auth.Principal
+	broadcastResult            auth.NotificationBroadcast
+	broadcastCalls             int
+	broadcastErr               error
+	notifiedProfileID          string
+	notifiedSessionID          string
+	notifiedMessage            string
+	sentNotification           auth.SessionNotification
+	sendNotificationCalls      int
+	sendNotificationErr        error
+	deviceAuthorization        auth.DeviceAuthorization
+	deviceAuthorizationErr     error
+	approvedUserCode           string
+	approvalErr                error
+	exchangedDeviceCode        string
+	exchangeTokens             auth.TokenPair
+	exchangeErr                error
 }
 
 func (f *fakeAuthService) Login(_ context.Context, input auth.LoginInput) (auth.TokenPair, error) {
@@ -103,6 +112,20 @@ func (f *fakeAuthService) SessionNotifications(_ context.Context, _ auth.Princip
 	f.notificationsCalls++
 	f.notificationsAfterID = afterID
 	return f.notifications, f.notificationsErr
+}
+
+func (f *fakeAuthService) AcknowledgeSessionNotification(_ context.Context, _ auth.Principal, notificationID int64) error {
+	f.acknowledgeCalls++
+	f.acknowledgedNotificationID = notificationID
+	return f.acknowledgeErr
+}
+
+func (f *fakeAuthService) BroadcastSessionNotification(_ context.Context, principal auth.Principal, broadcastID, message string) (auth.NotificationBroadcast, error) {
+	f.broadcastCalls++
+	f.broadcastPrincipal = principal
+	f.broadcastID = broadcastID
+	f.broadcastMessage = message
+	return f.broadcastResult, f.broadcastErr
 }
 
 func (f *fakeAuthService) SendProfileSessionNotification(_ context.Context, _ auth.Principal, profileID, sessionID, message string) (auth.SessionNotification, error) {
@@ -391,6 +414,80 @@ func TestListSessionNotificationsRoundTripsLosslessDecimalIDs(t *testing.T) {
 	decodeResponse(t, response, &body)
 	if len(body.Notifications) != 1 || body.Notifications[0].ID != "9007199254740993" || body.Notifications[0].Message != "Playback starts soon" {
 		t.Fatalf("unexpected notifications response: %+v", body)
+	}
+}
+
+func TestBroadcastSessionNotificationReturnsStableAudience(t *testing.T) {
+	createdAt := time.Now().UTC().Truncate(time.Second)
+	const broadcastID = "a2cf8952-1250-4caf-94de-909f58bdc35e"
+	service := &fakeAuthService{
+		principal: auth.Principal{UserID: "admin-id", Username: "alex", Role: "admin", SessionID: "current-id"},
+		broadcastResult: auth.NotificationBroadcast{
+			ID: broadcastID, Message: "<b>Dinner is ready</b>", SenderUsername: "alex", RecipientCount: 3, CreatedAt: createdAt,
+		},
+	}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = service
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/notifications/broadcast", bytes.NewBufferString(
+		`{"idempotencyKey":"`+broadcastID+`","message":"<b>Dinner is ready</b>"}`,
+	))
+	request.Header.Set("Authorization", "Bearer access-token")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", response.Code, response.Body.String())
+	}
+	if service.broadcastCalls != 1 || service.broadcastID != broadcastID || service.broadcastMessage != "<b>Dinner is ready</b>" ||
+		service.broadcastPrincipal.Role != "admin" {
+		t.Fatalf("unexpected broadcast call: id=%q message=%q principal=%+v calls=%d", service.broadcastID, service.broadcastMessage, service.broadcastPrincipal, service.broadcastCalls)
+	}
+	var body notificationBroadcastResponse
+	decodeResponse(t, response, &body)
+	if body.ID != broadcastID || body.Message != "<b>Dinner is ready</b>" || body.SenderUsername != "alex" ||
+		body.RecipientCount != 3 || !body.CreatedAt.Equal(createdAt) {
+		t.Fatalf("unexpected broadcast response: %+v", body)
+	}
+}
+
+func TestBroadcastSessionNotificationRequiresAdmin(t *testing.T) {
+	service := &fakeAuthService{
+		principal:    auth.Principal{UserID: "member-id", Role: "member", SessionID: "current-id"},
+		broadcastErr: auth.ErrForbidden,
+	}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = service
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/notifications/broadcast", bytes.NewBufferString(
+		`{"idempotencyKey":"a2cf8952-1250-4caf-94de-909f58bdc35e","message":"Dinner is ready"}`,
+	))
+	request.Header.Set("Authorization", "Bearer access-token")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAcknowledgeSessionNotificationTargetsAuthenticatedSessionDelivery(t *testing.T) {
+	service := &fakeAuthService{principal: auth.Principal{SessionID: "current-id"}}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = service
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/auth/notifications/42", nil)
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected status 204, got %d: %s", response.Code, response.Body.String())
+	}
+	if service.acknowledgeCalls != 1 || service.acknowledgedNotificationID != 42 {
+		t.Fatalf("unexpected acknowledgement: id=%d calls=%d", service.acknowledgedNotificationID, service.acknowledgeCalls)
 	}
 }
 

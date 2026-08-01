@@ -3,8 +3,10 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type Keyboard
 import { createPortal } from "react-dom";
 import { api, APIError } from "./api";
 import { Button, IconButton, Modal, Notice } from "./components";
+import { translate as t } from "./i18n";
 import { notifyError, notifyErrorMessage, notifySuccess } from "./notifications";
-import type { EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
+import { TITLE_ID_PROVIDERS, titleProviderURL } from "./titleProviders";
+import type { EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
 
 function record(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -116,29 +118,6 @@ export function mediaTypeLabel(mediaType: string): string {
   return "Movie";
 }
 
-const DETAIL_ID_PROVIDERS = [
-  { key: "imdb", label: "IMDb" },
-  { key: "tmdb", label: "TMDB" },
-  { key: "tvdb", label: "TVDB" },
-] as const;
-
-function detailProviderURL(
-  provider: typeof DETAIL_ID_PROVIDERS[number]["key"],
-  externalID: string,
-  mediaType: string,
-  episode?: Pick<EpisodeMetadata, "seasonNumber" | "episodeNumber">,
-): string {
-  const id = encodeURIComponent(externalID);
-  if (provider === "imdb") return `https://www.imdb.com/title/${id}/`;
-  if (provider === "tmdb") {
-    if (mediaType === "episode" && episode) {
-      return `https://www.themoviedb.org/tv/${id}/season/${episode.seasonNumber}/episode/${episode.episodeNumber}`;
-    }
-    return `https://www.themoviedb.org/${mediaType === "movie" ? "movie" : "tv"}/${id}`;
-  }
-  const kind = mediaType === "movie" ? "movie" : mediaType === "episode" ? "episode" : "series";
-  return `https://thetvdb.com/dereferrer/${kind}/${id}`;
-}
 
 function formatPlaybackTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
@@ -165,13 +144,15 @@ function episodeItem(series: SeriesMetadata, episode: EpisodeMetadata, fallback:
     id: episodeResourceID(series, episode, fallback.id),
     titleId: episode.id,
     mediaType: "episode",
+    seasonNumber: episode.seasonNumber,
+    episodeNumber: episode.episodeNumber,
     title: `${series.name} · S${String(episode.seasonNumber).padStart(2, "0")}E${String(episode.episodeNumber).padStart(2, "0")} · ${episode.name}`,
     posterUrl: episode.stillUrl || fallback.posterUrl,
     backgroundUrl: episode.stillUrl || fallback.backgroundUrl,
     description: episode.overview,
     releaseInfo: episode.airDate,
     released: episode.airDate,
-    externalIds: episode.externalIds,
+    externalIds: { ...episode.externalIds, ...(series.externalIds.imdb ? { imdb: series.externalIds.imdb } : {}) },
   };
 }
 
@@ -309,6 +290,9 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
     }
     setSeriesLoading(true);
     setSeriesError("");
+    setSeasonID("");
+    setSeason(undefined);
+    setSelectedEpisode(undefined);
     void (async () => {
       const resolvedTitleID = item.mediaType === "episode" && continueSeriesID
         ? continueSeriesID
@@ -327,31 +311,47 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
       const seasons = [...resolved.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber);
       const requestedSeason = seasons.find((candidate) => candidate.id === continueSeasonID)
         ?? (continueSeasonNumber !== undefined ? seasons.find((candidate) => candidate.seasonNumber === continueSeasonNumber) : undefined);
-      const initial = requestedSeason
+      let initial = requestedSeason
         ?? seasons.find((candidate) => candidate.seasonNumber > 0)
         ?? seasons[0];
-      setSeasonID(initial?.id ?? "");
-      if (resolved.mappingProvider === "tvdb" && continueEpisodeID && !requestedSeason) {
-        for (const candidate of seasons) {
-          let mappedSeason: SeasonMetadata;
-          try {
-            mappedSeason = await api.seasonDetails(candidate.id);
-          } catch {
-            continue;
+      if (resolved.mappingProvider === "tvdb" && continueEpisodeID) {
+        const episodeAirDate = item.released ?? item.releaseInfo;
+        const episodeAirTime = episodeAirDate ? Date.parse(episodeAirDate) : Number.NaN;
+        const candidates = [...seasons].sort((left, right) => {
+          if (!Number.isFinite(episodeAirTime)) return 0;
+          const distance = (airDate?: string) => {
+            const seasonAirTime = airDate ? Date.parse(airDate) : Number.NaN;
+            return Number.isFinite(seasonAirTime) && seasonAirTime <= episodeAirTime
+              ? episodeAirTime - seasonAirTime
+              : Number.POSITIVE_INFINITY;
+          };
+          const leftDistance = distance(left.airDate);
+          const rightDistance = distance(right.airDate);
+          return leftDistance === rightDistance ? 0 : leftDistance < rightDistance ? -1 : 1;
+        });
+        for (const candidate of candidates) {
+          let mappedSeason = seasonCacheRef.current.get(candidate.id);
+          if (!mappedSeason) {
+            try {
+              mappedSeason = await api.seasonDetails(candidate.id);
+            } catch {
+              continue;
+            }
+            if (!active) return;
+            seasonCacheRef.current.set(candidate.id, mappedSeason);
           }
-          if (!active) return;
-          seasonCacheRef.current.set(candidate.id, mappedSeason);
           if (mappedSeason.episodes.some((episode) => episode.id === continueEpisodeID)) {
-            setSeasonID(candidate.id);
+            initial = candidate;
             break;
           }
         }
       }
+      if (active) setSeasonID(initial?.id ?? "");
     })().catch((cause) => {
       if (active) setSeriesError(notifyError(cause, "Seasons and episodes could not be loaded.", "Series unavailable"));
     }).finally(() => { if (active) setSeriesLoading(false); });
     return () => { active = false; };
-  }, [continueEpisodeID, continueSeasonID, continueSeasonNumber, continueSeriesID, item.id, item.mediaType, item.titleId, seriesVisible]);
+  }, [continueEpisodeID, continueSeasonID, continueSeasonNumber, continueSeriesID, item.id, item.mediaType, item.releaseInfo, item.released, item.titleId, seriesVisible]);
 
   useEffect(() => {
     let active = true;
@@ -373,10 +373,11 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
         const requested = continueEpisodeID
           ? resolved.episodes.find((episode) => episode.id === continueEpisodeID)
           : undefined;
-        const requestedByNumber = continueEpisodeNumber !== undefined
+        const exactMappedEpisodeRequired = series?.mappingProvider === "tvdb" && continueEpisodeID !== "";
+        const requestedByNumber = continueEpisodeNumber !== undefined && !exactMappedEpisodeRequired
           ? resolved.episodes.find((episode) => episode.episodeNumber === continueEpisodeNumber)
           : undefined;
-        setSelectedEpisode(requested ?? requestedByNumber ?? resolved.episodes[0]);
+        setSelectedEpisode(requested ?? requestedByNumber ?? (exactMappedEpisodeRequired ? undefined : resolved.episodes[0]));
       }
       const progressEntries = await Promise.all(resolved.episodes.map(async (episode) => [episode.id, await api.progress(episode.id).catch(() => undefined)] as const));
       if (!active) return;
@@ -385,7 +386,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
       if (active) setSeriesError(notifyError(cause, "Episodes could not be loaded.", "Season unavailable"));
     }).finally(() => { if (active) setSeasonLoading(false); });
     return () => { active = false; };
-  }, [continueEpisodeID, continueEpisodeNumber, item.mediaType, seasonID]);
+  }, [continueEpisodeID, continueEpisodeNumber, item.mediaType, seasonID, series?.mappingProvider]);
   useEffect(() => {
     if (item.mediaType !== "episode" || !selectedEpisode) return;
     const episodeCode = `S${String(selectedEpisode.seasonNumber).padStart(2, "0")}E${String(selectedEpisode.episodeNumber).padStart(2, "0")}`;
@@ -687,13 +688,13 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
         {genres.map((genre) => <span key={genre}>{genre}</span>)}
       </div>
       {(item.mediaType === "movie" || item.mediaType === "series" || item.mediaType === "episode") && <div className="details-provider-badges" role="group" aria-label="External title pages">
-        {DETAIL_ID_PROVIDERS.map((provider) => {
+        {TITLE_ID_PROVIDERS.map((provider) => {
           const externalID = item.mediaType === "episode"
             ? provider.key === "tmdb" ? series?.externalIds.tmdb : selectedEpisode?.externalIds[provider.key]
             : details.externalIds?.[provider.key];
           if (!externalID) return null;
           const label = `Open ${provider.label} title page · ID ${externalID}`;
-          return <a key={provider.key} className={`details-provider-badge details-provider-badge--${provider.key}`} href={detailProviderURL(provider.key, externalID, item.mediaType, selectedEpisode)} target="_blank" rel="noreferrer" aria-label={label} title={label}>
+          return <a key={provider.key} className={`details-provider-badge details-provider-badge--${provider.key}`} href={titleProviderURL(provider.key, externalID, provider.key === "tmdb" && item.mediaType === "episode" && !selectedEpisode ? "series" : item.mediaType, selectedEpisode)} target="_blank" rel="noreferrer" aria-label={label} title={label}>
             <span className="details-provider-badge__brand">{provider.label}</span>
             <ExternalLink size={11} aria-hidden="true" />
           </a>;
@@ -830,6 +831,19 @@ function playerTrackLabel(track: { codec: string; channels?: number }): string {
   const channelLabel = track.channels ? track.channels === 2 ? "2.0" : `${track.channels} channels` : "";
   return `${track.codec.toUpperCase()}${channelLabel ? ` · ${channelLabel}` : ""}`;
 }
+function validPlaybackMarker(marker: PlaybackMarker, duration: number): boolean {
+  return (marker.type === "intro" || marker.type === "recap" || marker.type === "outro") &&
+    Number.isFinite(marker.startSeconds) && Number.isFinite(marker.endSeconds) &&
+    marker.startSeconds >= 0 && marker.endSeconds > marker.startSeconds &&
+    (duration <= 0 || marker.endSeconds <= duration);
+}
+
+function skipMarkerLabel(type: PlaybackMarker["type"]): string {
+  if (type === "recap") return t("player.skipRecap");
+  if (type === "outro") return t("player.skipOutro");
+  return t("player.skipIntro");
+}
+
 
 export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onClose, onSourceExpired, onEnded }: { item: MediaItem; sourceRef: string; startSeconds: number; autoplayNextEpisode: boolean; onClose: () => void; onSourceExpired: () => void; onEnded?: () => void }) {
   const initialPreferences = useRef(loadPlayerPreferences()).current;
@@ -844,6 +858,8 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   const [fullscreenSupported, setFullscreenSupported] = useState(() => typeof document.documentElement.requestFullscreen === "function" || "webkitEnterFullscreen" in HTMLVideoElement.prototype);
   const [streams, setStreams] = useState<PlaybackSource[]>([]);
   const [subtitles, setSubtitles] = useState<PlaybackSubtitle[]>([]);
+  const [markers, setMarkers] = useState<PlaybackMarker[]>([]);
+  const [dismissedMarkers, setDismissedMarkers] = useState<Set<PlaybackMarker["type"]>>(() => new Set());
   const [selected, setSelected] = useState(0);
   const [loading, setLoading] = useState(true);
   const [progressReady, setProgressReady] = useState(false);
@@ -895,6 +911,28 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     }).catch(() => undefined).finally(() => { if (active) setProgressReady(true); });
     return () => { active = false; };
   }, [item, startSeconds]);
+
+  useEffect(() => {
+    const imdbID = item.externalIds?.imdb?.trim() ?? "";
+    const season = item.seasonNumber ?? 0;
+    const episode = item.episodeNumber ?? 0;
+    const controller = new AbortController();
+    let active = true;
+    setMarkers([]);
+    setDismissedMarkers(new Set());
+    if (item.mediaType === "episode" && imdbID && Number.isInteger(season) && season > 0 && Number.isInteger(episode) && episode > 0) {
+      void api.playbackMarkers(imdbID, season, episode, controller.signal)
+        .then((response) => {
+          if (!active || !Array.isArray(response.markers)) return;
+          setMarkers(response.markers.filter((marker) => validPlaybackMarker(marker, 0)));
+        })
+        .catch(() => undefined);
+    }
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [item.episodeNumber, item.externalIds?.imdb, item.id, item.mediaType, item.seasonNumber]);
 
   useEffect(() => {
     if (!progressReady) return;
@@ -958,6 +996,20 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   const customTransport = Boolean(stream?.url);
   const toneMapped = Boolean(stream?.media?.hdrFormat && stream.media.hdrFormat !== "sdr" && stream.mode === "transcode");
   const modeLabel = playerModeLabel(stream?.mode, toneMapped);
+  const activeMarker = customTransport && playbackDuration > 0
+    ? markers.find((marker) => validPlaybackMarker(marker, playbackDuration) && !dismissedMarkers.has(marker.type) && currentTime >= marker.startSeconds && currentTime < marker.endSeconds)
+    : undefined;
+
+
+  useEffect(() => {
+    const ended = markers.filter((marker) => currentTime >= marker.endSeconds && !dismissedMarkers.has(marker.type));
+    if (ended.length === 0) return;
+    setDismissedMarkers((current) => {
+      const next = new Set(current);
+      for (const marker of ended) next.add(marker.type);
+      return next;
+    });
+  }, [currentTime, dismissedMarkers, markers]);
 
   useEffect(() => {
     const player = playerRef.current;
@@ -1408,9 +1460,10 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     });
   }
 
-  function commitSeek(rawPosition: number) {
+  function commitSeek(rawPosition: number, preserveFraction = false) {
     const duration = playbackDurationRef.current;
-    const target = duration > 0 ? Math.min(duration, Math.max(0, Math.floor(rawPosition))) : Math.max(0, Math.floor(rawPosition));
+    const normalized = preserveFraction ? rawPosition : Math.floor(rawPosition);
+    const target = duration > 0 ? Math.min(duration, Math.max(0, normalized)) : Math.max(0, normalized);
     const video = videoRef.current;
     resumePositionRef.current = target;
     setSeekPreview(null);
@@ -1432,6 +1485,13 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     const position = video ? playbackOffsetRef.current + video.currentTime : currentTime;
     commitSeek(position + seconds);
     setSeekFeedback({ seconds, id: Date.now() });
+    revealControls();
+  }
+
+  function skipMarker(marker: PlaybackMarker) {
+    if (!validPlaybackMarker(marker, playbackDurationRef.current) || dismissedMarkers.has(marker.type)) return;
+    setDismissedMarkers((current) => new Set(current).add(marker.type));
+    commitSeek(stream?.mode === "direct" ? marker.endSeconds : Math.ceil(marker.endSeconds), stream?.mode === "direct");
     revealControls();
   }
 
@@ -1741,6 +1801,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     {phase === "failed" && <div className="player__failure" role="alert"><ServerCrash size={34} /><strong>Playback unavailable</strong><p>{error || "The selected stream could not be played."}</p><div><Button onClick={retryPlayback}><RefreshCw size={17} /> Retry</Button><Button variant="secondary" onClick={closePlayer}>Go back</Button></div></div>}
     {!loading && playable.length === 0 && phase !== "failed" && <div className="player__failure"><ServerCrash size={34} /><strong>No playable source</strong><p>{error || "The selected stream is not compatible with this device."}</p><Button variant="secondary" onClick={closePlayer}>Go back</Button></div>}
     {showNextEpisode && <button type="button" className="player__next" onClick={playNextEpisode} data-player-control><span>Up next</span><strong>Next episode</strong><small>{autoplayNextEpisode && phase !== "ended" ? `Starts in ${Math.ceil(remainingSeconds)}s` : "Play next episode"}</small><SkipForward size={20} fill="currentColor" /></button>}
+    {activeMarker && <button type="button" className={`player__skip-marker is-${activeMarker.type}`} onClick={() => skipMarker(activeMarker)} data-player-control><SkipForward size={20} /><span>{skipMarkerLabel(activeMarker.type)}</span></button>}
 
     {customTransport && <div className={`player__chrome${controlsVisible ? "" : " is-hidden"}`}>
       <div className="player__timeline-row">

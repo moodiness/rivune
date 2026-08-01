@@ -15,6 +15,9 @@ type fakeSettingsService struct {
 	instance           settings.Layer
 	instanceErr        error
 	instancePatch      settings.Patch
+	maintenance        settings.Maintenance
+	maintenanceErr     error
+	maintenanceUpdate  settings.Maintenance
 	profile            settings.Layer
 	profileErr         error
 	profilePatch       settings.Patch
@@ -25,6 +28,18 @@ type fakeSettingsService struct {
 
 func (f *fakeSettingsService) Instance(context.Context) (settings.Layer, error) {
 	return f.instance, f.instanceErr
+}
+func (f *fakeSettingsService) Maintenance(context.Context) (settings.Maintenance, error) {
+	return f.maintenance, f.maintenanceErr
+}
+
+func (f *fakeSettingsService) UpdateMaintenance(_ context.Context, _ auth.Principal, state settings.Maintenance) (settings.Maintenance, error) {
+	f.maintenanceUpdate = state
+	if f.maintenanceErr != nil {
+		return settings.Maintenance{}, f.maintenanceErr
+	}
+	f.maintenance = state
+	return state, nil
 }
 
 func (f *fakeSettingsService) UpdateInstance(_ context.Context, _ auth.Principal, patch settings.Patch) (settings.Layer, error) {
@@ -51,7 +66,7 @@ func (f *fakeSettingsService) Effective(_ context.Context, _ auth.Principal, id 
 func TestUpdateProfileSettingsPreservesFalseAndNull(t *testing.T) {
 	service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
 	api := authenticatedSettingsAPI(service)
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(`{"preferDirectPlay":false,"hideUnreleased":true,"theme":null}`))
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(`{"preferDirectPlay":false,"hideUnreleased":true,"theme":null,"forcedSubtitleLanguage":"fr-CA"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
 	response := httptest.NewRecorder()
@@ -70,13 +85,16 @@ func TestUpdateProfileSettingsPreservesFalseAndNull(t *testing.T) {
 	if !service.profilePatch.Theme.Set || service.profilePatch.Theme.Value != nil {
 		t.Fatalf("null theme did not clear the override: %+v", service.profilePatch)
 	}
+	if !service.profilePatch.ForcedSubtitleLanguage.Set || service.profilePatch.ForcedSubtitleLanguage.Value == nil || *service.profilePatch.ForcedSubtitleLanguage.Value != "fr-CA" {
+		t.Fatalf("forced subtitle language override was not preserved: %+v", service.profilePatch)
+	}
 }
 
 func TestUpdateProfileSettingsDecodesEveryNewField(t *testing.T) {
 	service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
 	api := authenticatedSettingsAPI(service)
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(
-		`{"autoplayNextEpisode":false,"cardDensity":"compact","animationsEnabled":false,"subtitleSizePercent":75,"subtitleTextColor":"#a1b2c3","subtitleBackgroundOpacityPercent":25,"notificationsEnabled":false,"notificationDurationSeconds":7,"notificationPollIntervalSeconds":45}`,
+		`{"autoplayNextEpisode":false,"skipIntroEnabled":true,"skipRecapEnabled":false,"skipOutroEnabled":true,"cardDensity":"compact","animationsEnabled":false,"subtitleSizePercent":75,"subtitleTextColor":"#a1b2c3","subtitleBackgroundOpacityPercent":25,"notificationsEnabled":false,"notificationDurationSeconds":7,"notificationPollIntervalSeconds":45}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
@@ -89,6 +107,9 @@ func TestUpdateProfileSettingsDecodesEveryNewField(t *testing.T) {
 	}
 	patch := service.profilePatch
 	if !patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value == nil || *patch.AutoplayNextEpisode.Value ||
+		!patch.SkipIntroEnabled.Set || patch.SkipIntroEnabled.Value == nil || !*patch.SkipIntroEnabled.Value ||
+		!patch.SkipRecapEnabled.Set || patch.SkipRecapEnabled.Value == nil || *patch.SkipRecapEnabled.Value ||
+		!patch.SkipOutroEnabled.Set || patch.SkipOutroEnabled.Value == nil || !*patch.SkipOutroEnabled.Value ||
 		!patch.CardDensity.Set || patch.CardDensity.Value == nil || *patch.CardDensity.Value != "compact" ||
 		!patch.AnimationsEnabled.Set || patch.AnimationsEnabled.Value == nil || *patch.AnimationsEnabled.Value ||
 		!patch.SubtitleSizePercent.Set || patch.SubtitleSizePercent.Value == nil || *patch.SubtitleSizePercent.Value != 75 ||
@@ -105,7 +126,7 @@ func TestUpdateProfileSettingsDecodesNullForEveryNewField(t *testing.T) {
 	service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
 	api := authenticatedSettingsAPI(service)
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(
-		`{"autoplayNextEpisode":null,"cardDensity":null,"animationsEnabled":null,"subtitleSizePercent":null,"subtitleTextColor":null,"subtitleBackgroundOpacityPercent":null,"notificationsEnabled":null,"notificationDurationSeconds":null,"notificationPollIntervalSeconds":null}`,
+		`{"autoplayNextEpisode":null,"skipIntroEnabled":null,"skipRecapEnabled":null,"skipOutroEnabled":null,"cardDensity":null,"animationsEnabled":null,"subtitleSizePercent":null,"subtitleTextColor":null,"subtitleBackgroundOpacityPercent":null,"notificationsEnabled":null,"notificationDurationSeconds":null,"notificationPollIntervalSeconds":null}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
@@ -118,6 +139,9 @@ func TestUpdateProfileSettingsDecodesNullForEveryNewField(t *testing.T) {
 	}
 	patch := service.profilePatch
 	if !patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value != nil ||
+		!patch.SkipIntroEnabled.Set || patch.SkipIntroEnabled.Value != nil ||
+		!patch.SkipRecapEnabled.Set || patch.SkipRecapEnabled.Value != nil ||
+		!patch.SkipOutroEnabled.Set || patch.SkipOutroEnabled.Value != nil ||
 		!patch.CardDensity.Set || patch.CardDensity.Value != nil ||
 		!patch.AnimationsEnabled.Set || patch.AnimationsEnabled.Value != nil ||
 		!patch.SubtitleSizePercent.Set || patch.SubtitleSizePercent.Value != nil ||
@@ -136,9 +160,9 @@ func TestEffectiveSettingsResponseIncludesNewFieldsAndSources(t *testing.T) {
 		Values: settings.EffectiveValues{
 			AutoplayNextEpisode: true, CardDensity: "comfortable", AnimationsEnabled: true,
 			SubtitleSizePercent: 100, SubtitleTextColor: "#FFFFFF", SubtitleBackgroundOpacityPercent: 60,
-			NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 5,
+			NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 5, ForcedSubtitleLanguage: "fr-CA",
 		},
-		Sources: map[string]string{"autoplayNextEpisode": "default", "subtitleTextColor": "profile"},
+		Sources: map[string]string{"autoplayNextEpisode": "default", "subtitleTextColor": "profile", "forcedSubtitleLanguage": "instance"},
 	}
 	api := authenticatedSettingsAPI(&fakeSettingsService{effective: effective})
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/profiles/profile-id/settings/effective", nil)
@@ -157,8 +181,9 @@ func TestEffectiveSettingsResponseIncludesNewFieldsAndSources(t *testing.T) {
 	}
 	decodeResponse(t, response, &body)
 	if body.SchemaVersion != 1 || body.Settings.SubtitleTextColor != "#FFFFFF" ||
-		body.Settings.NotificationPollIntervalSeconds != 5 || body.Sources["autoplayNextEpisode"] != "default" ||
-		body.Sources["subtitleTextColor"] != "profile" {
+		body.Settings.NotificationPollIntervalSeconds != 5 || body.Settings.ForcedSubtitleLanguage != "fr-CA" ||
+		body.Sources["autoplayNextEpisode"] != "default" || body.Sources["subtitleTextColor"] != "profile" ||
+		body.Sources["forcedSubtitleLanguage"] != "instance" {
 		t.Fatalf("effective response omitted new settings data: %+v", body)
 	}
 }
@@ -179,6 +204,56 @@ func TestEffectiveSettingsRequireSelectedProfile(t *testing.T) {
 	decodeResponse(t, response, &body)
 	if body.Error.Code != "profile_selection_required" {
 		t.Fatalf("unexpected error code %q", body.Error.Code)
+	}
+}
+
+func TestUpdateMaintenanceSettingsPreservesDisabledAndMessage(t *testing.T) {
+	service := &fakeSettingsService{}
+	api := authenticatedSettingsAPI(service)
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/settings/maintenance", bytes.NewBufferString(`{"enabled":false,"message":"Back shortly"}`))
+	request.Header.Set("Authorization", "Bearer access-token")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if service.maintenanceUpdate.Enabled {
+		t.Fatal("expected disabled maintenance setting")
+	}
+	if service.maintenanceUpdate.Message == nil || *service.maintenanceUpdate.Message != "Back shortly" {
+		t.Fatalf("unexpected maintenance message %#v", service.maintenanceUpdate.Message)
+	}
+}
+
+func TestUpdateMaintenanceSettingsRequiresEnabledBoolean(t *testing.T) {
+	api := authenticatedSettingsAPI(&fakeSettingsService{})
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/settings/maintenance", bytes.NewBufferString(`{"message":"Back shortly"}`))
+	request.Header.Set("Authorization", "Bearer access-token")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected status 422, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestMaintenanceSettingsAreAdminOnly(t *testing.T) {
+	api := testAPI(&fakeInstanceService{})
+	api.auth = &fakeAuthService{principal: auth.Principal{UserID: "user-id", Role: "member", SessionID: "session-id"}}
+	api.settings = &fakeSettingsService{}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/settings/maintenance", nil)
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d: %s", response.Code, response.Body.String())
 	}
 }
 

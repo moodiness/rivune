@@ -57,6 +57,13 @@ export type SessionNotification = {
   senderUsername: string;
   createdAt: string;
 };
+export type NotificationBroadcast = {
+  id: string;
+  message: string;
+  senderUsername: string;
+  recipientCount: number;
+  createdAt: string;
+};
 export type DeviceAuthorization = {
   deviceCode: string;
   userCode: string;
@@ -159,6 +166,8 @@ export type MediaItem = {
   id: string;
   titleId?: string;
   mediaType: string;
+  seasonNumber?: number;
+  episodeNumber?: number;
   title: string;
   posterUrl?: string;
   backgroundUrl?: string;
@@ -297,6 +306,7 @@ export type PlaybackMediaTrack = {
   profile?: string;
   language?: string;
   title?: string;
+  forced?: boolean;
   width?: number;
   height?: number;
   channels?: number;
@@ -335,7 +345,15 @@ export type PlaybackSource = {
   compatible: boolean;
   media?: PlaybackMediaInspection;
 };
-export type PlaybackSubtitle = { id: string; addonId: string; manifestId: string; language?: string; url: string; default?: boolean };
+export type PlaybackSubtitle = { id: string; addonId: string; manifestId: string; language?: string; url: string; forced?: boolean; default?: boolean };
+export type PlaybackMarker = {
+  type: "intro" | "recap" | "outro";
+  startSeconds: number;
+  endSeconds: number;
+  confidence: number;
+  submissionCount: number;
+};
+export type PlaybackMarkerList = { markers: PlaybackMarker[] };
 export type PlaybackSession = {
   id: string;
   selectedSourceId: string;
@@ -349,6 +367,9 @@ export type PlaybackSession = {
 export type PlaybackActivitySession = {
   id: string;
   titleId?: string;
+  artworkUrl?: string;
+  externalIds?: Partial<Record<"imdb" | "tmdb" | "tvdb", string>>;
+  externalIdMediaTypes?: Partial<Record<"imdb" | "tmdb" | "tvdb", "movie" | "series" | "season" | "episode">>;
   title: string;
   mediaType: string;
   mode: "direct" | "remux" | "transcode_audio" | "transcode" | "unknown";
@@ -450,6 +471,29 @@ export type ContinueItem = {
 };
 export type ContinueWatching = { items: ContinueItem[] };
 
+export type TrackingProvider = "trakt" | "simkl";
+export type TrackingStatus = {
+  provider: TrackingProvider;
+  configured: boolean;
+  connected: boolean;
+  syncWatched: boolean;
+  syncProgress: boolean;
+  syncLibrary: boolean;
+  connectedAt?: string;
+  lastSuccessAt?: string;
+  lastError?: string;
+  pendingItems: number;
+};
+export type TrackingDeviceAuthorization = {
+  id: string;
+  provider: TrackingProvider;
+  userCode: string;
+  verificationUrl: string;
+  expiresAt: string;
+  intervalSeconds: number;
+};
+export type TrackingPreferences = Partial<Pick<TrackingStatus, "syncWatched" | "syncProgress" | "syncLibrary">>;
+
 export type SettingsValues = {
   theme?: string | null;
   maximumResolution?: string | null;
@@ -460,7 +504,11 @@ export type SettingsValues = {
   seriesMappingProvider?: "tmdb" | "tvdb" | null;
   audioLanguage?: string | null;
   subtitleLanguage?: string | null;
+  forcedSubtitleLanguage?: string | null;
   autoplayNextEpisode?: boolean | null;
+  skipIntroEnabled?: boolean | null;
+  skipRecapEnabled?: boolean | null;
+  skipOutroEnabled?: boolean | null;
   cardDensity?: "comfortable" | "compact" | null;
   animationsEnabled?: boolean | null;
   subtitleSizePercent?: number | null;
@@ -470,5 +518,6 @@ export type SettingsValues = {
   notificationDurationSeconds?: number | null;
   notificationPollIntervalSeconds?: number | null;
 };
+export type MaintenanceSettings = { enabled: boolean; message: string | null };
 export type SettingsLayer = { schemaVersion: number; settings: SettingsValues; updatedAt?: string };
 export type AvatarPreset = { id: string; name: string; url: string };

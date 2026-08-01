@@ -322,6 +322,14 @@ func (c *Client) SeasonDetails(ctx context.Context, seriesExternalID string, sea
 	if err := c.get(ctx, endpoint, url.Values{"language": {language}}, &response); err != nil {
 		return metadata.ProviderSeason{}, err
 	}
+	if response.SeasonNumber != seasonNumber {
+		return metadata.ProviderSeason{}, fmt.Errorf("%w: TMDB returned season %d for requested season %d", metadata.ErrProviderFailure, response.SeasonNumber, seasonNumber)
+	}
+	for _, episode := range response.Episodes {
+		if episode.SeasonNumber != seasonNumber {
+			return metadata.ProviderSeason{}, fmt.Errorf("%w: TMDB returned an episode from season %d for requested season %d", metadata.ErrProviderFailure, episode.SeasonNumber, seasonNumber)
+		}
+	}
 	return normalizeSeason(response), nil
 }
 

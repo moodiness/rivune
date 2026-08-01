@@ -66,7 +66,7 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 	arguments := []string{"-v", "error", "-analyzeduration", "1000000", "-probesize", "1000000"}
 	arguments = append(arguments, ffmpegInputArguments(asset)...)
 	arguments = append(arguments,
-		"-show_entries", "stream=index,codec_type,codec_name,profile,width,height,channels,color_transfer,codec_tag_string:stream_tags=language,title:stream_disposition=attached_pic:stream_side_data=side_data_type:format=format_name,duration",
+		"-show_entries", "stream=index,codec_type,codec_name,profile,width,height,channels,color_transfer,codec_tag_string:stream_tags=language,title:stream_disposition=attached_pic,forced:stream_side_data=side_data_type:format=format_name,duration",
 		"-of", "json",
 		asset.URL,
 	)
@@ -95,6 +95,7 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 			} `json:"tags"`
 			Disposition struct {
 				AttachedPicture int `json:"attached_pic"`
+				Forced          int `json:"forced"`
 			} `json:"disposition"`
 			SideData []struct {
 				Type string `json:"side_data_type"`
@@ -121,6 +122,7 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 			Codec: normalizedCodec(stream.CodecName), Profile: strings.TrimSpace(stream.Profile),
 			Language: strings.TrimSpace(stream.Tags.Language), Title: strings.TrimSpace(stream.Tags.Title),
 			Width: stream.Width, Height: stream.Height, Channels: stream.Channels,
+			Forced: stream.Disposition.Forced != 0,
 		}
 		switch track.Type {
 		case "video":

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -31,28 +32,31 @@ const (
 )
 
 type Config struct {
-	ListenAddress        string
-	PublicURL            string
-	DatabaseURL          string
-	Timezone             string
-	SetupToken           string
-	AccessTokenTTL       time.Duration
-	RefreshTokenTTL      time.Duration
-	ProfileGrantTTL      time.Duration
-	TMDBAccessToken      string
-	MetadataCacheTTL     time.Duration
-	TVDBAPIKey           string
-	TVDBPIN              string
-	TraktClientID        string
-	TrustedProxies       []netip.Prefix
-	FFmpegPath           string
-	FFprobePath          string
-	RemuxConcurrency     int
-	TranscodeThreads     int
-	HardwareAcceleration string
-	VideoDevice          string
-	MediaTempDir         string
-	MediaStorageBytes    int64
+	ListenAddress         string
+	PublicURL             string
+	DatabaseURL           string
+	Timezone              string
+	SetupToken            string
+	AccessTokenTTL        time.Duration
+	RefreshTokenTTL       time.Duration
+	ProfileGrantTTL       time.Duration
+	TMDBAccessToken       string
+	MetadataCacheTTL      time.Duration
+	TVDBAPIKey            string
+	TVDBPIN               string
+	TraktClientID         string
+	TraktClientSecret     string
+	SimklClientID         string
+	TrackingEncryptionKey []byte
+	TrustedProxies        []netip.Prefix
+	FFmpegPath            string
+	FFprobePath           string
+	RemuxConcurrency      int
+	TranscodeThreads      int
+	HardwareAcceleration  string
+	VideoDevice           string
+	MediaTempDir          string
+	MediaStorageBytes     int64
 }
 
 func Load() (Config, error) {
@@ -65,6 +69,8 @@ func Load() (Config, error) {
 		TVDBAPIKey:           strings.TrimSpace(os.Getenv("RIVUNE_TVDB_API_KEY")),
 		TVDBPIN:              strings.TrimSpace(os.Getenv("RIVUNE_TVDB_PIN")),
 		TraktClientID:        strings.TrimSpace(os.Getenv("RIVUNE_TRAKT_CLIENT_ID")),
+		TraktClientSecret:    strings.TrimSpace(os.Getenv("RIVUNE_TRAKT_CLIENT_SECRET")),
+		SimklClientID:        strings.TrimSpace(os.Getenv("RIVUNE_SIMKL_CLIENT_ID")),
 		FFmpegPath:           envOrDefault("RIVUNE_FFMPEG_PATH", "ffmpeg"),
 		FFprobePath:          envOrDefault("RIVUNE_FFPROBE_PATH", "ffprobe"),
 		MediaTempDir:         strings.TrimSpace(os.Getenv("RIVUNE_MEDIA_TEMP_DIR")),
@@ -98,6 +104,21 @@ func Load() (Config, error) {
 	}
 	if cfg.TVDBPIN != "" && cfg.TVDBAPIKey == "" {
 		return Config{}, errors.New("RIVUNE_TVDB_PIN requires RIVUNE_TVDB_API_KEY")
+	}
+	if cfg.TraktClientSecret != "" && cfg.TraktClientID == "" {
+		return Config{}, errors.New("RIVUNE_TRAKT_CLIENT_SECRET requires RIVUNE_TRAKT_CLIENT_ID")
+	}
+	trackingKey := strings.TrimSpace(os.Getenv("RIVUNE_TRACKING_ENCRYPTION_KEY"))
+	if trackingKey != "" {
+		cfg.TrackingEncryptionKey, err = base64.StdEncoding.DecodeString(trackingKey)
+		if err != nil || len(cfg.TrackingEncryptionKey) != 32 {
+			return Config{}, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY must be base64 encoding of exactly 32 bytes")
+		}
+	} else {
+		cfg.TrackingEncryptionKey = make([]byte, 32)
+		if cfg.TraktClientID != "" && cfg.TraktClientSecret != "" || cfg.SimklClientID != "" {
+			return Config{}, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY is required when account tracking is configured")
+		}
 	}
 	cfg.MetadataCacheTTL, err = loadDuration("RIVUNE_METADATA_CACHE_TTL", defaultMetadataCacheTTL, time.Hour, 30*24*time.Hour)
 	if err != nil {

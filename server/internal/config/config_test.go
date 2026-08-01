@@ -176,6 +176,9 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("RIVUNE_TVDB_API_KEY", "")
 	t.Setenv("RIVUNE_TVDB_PIN", "")
 	t.Setenv("RIVUNE_TRAKT_CLIENT_ID", "")
+	t.Setenv("RIVUNE_TRAKT_CLIENT_SECRET", "")
+	t.Setenv("RIVUNE_SIMKL_CLIENT_ID", "")
+	t.Setenv("RIVUNE_TRACKING_ENCRYPTION_KEY", "")
 	t.Setenv("RIVUNE_METADATA_CACHE_TTL", "")
 	t.Setenv("RIVUNE_FFMPEG_PATH", "")
 	t.Setenv("RIVUNE_FFPROBE_PATH", "")
@@ -183,4 +186,25 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("RIVUNE_TRANSCODE_THREADS", "")
 	t.Setenv("RIVUNE_HARDWARE_ACCELERATION", "")
 	t.Setenv("RIVUNE_VIDEO_DEVICE", "")
+}
+
+func TestLoadAllowsCollectionOnlyTraktClientID(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("RIVUNE_TRAKT_CLIENT_ID", "client-id")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load collection-only Trakt config: %v", err)
+	}
+	if cfg.TraktClientID != "client-id" || cfg.TraktClientSecret != "" {
+		t.Fatalf("unexpected collection-only Trakt config: %+v", cfg)
+	}
+}
+
+func TestLoadRejectsTraktSecretWithoutClientID(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("RIVUNE_TRAKT_CLIENT_SECRET", "client-secret")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected Trakt secret without a client ID to be rejected")
+	}
 }

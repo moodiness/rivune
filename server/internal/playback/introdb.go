@@ -1,0 +1,258 @@
+package playback
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/moodiness/rivune/server/internal/auth"
+)
+
+const (
+	introDBDefaultBaseURL = "https://api.introdb.app"
+	introDBCacheTTL       = 24 * time.Hour
+	introDBMissCacheTTL   = 6 * time.Hour
+	introDBMaxBodyBytes   = 64 << 10
+	introDBMaxMarkerTime  = 24 * time.Hour / time.Second
+)
+
+var introDBIMDBIDPattern = regexp.MustCompile(`^tt[0-9]{7,8}$`)
+
+type MarkerType string
+
+const (
+	MarkerTypeIntro MarkerType = "intro"
+	MarkerTypeRecap MarkerType = "recap"
+	MarkerTypeOutro MarkerType = "outro"
+)
+
+type MarkerInput struct {
+	IMDBID       string
+	Season       int
+	Episode      int
+	IncludeIntro bool
+	IncludeRecap bool
+	IncludeOutro bool
+}
+
+type Marker struct {
+	Type            MarkerType `json:"type"`
+	StartSeconds    float64    `json:"startSeconds"`
+	EndSeconds      float64    `json:"endSeconds"`
+	Confidence      float64    `json:"confidence"`
+	SubmissionCount int        `json:"submissionCount"`
+}
+
+type MarkerList struct {
+	Markers []Marker `json:"markers"`
+}
+
+type introDBSegment struct {
+	StartMS         int64   `json:"start_ms"`
+	EndMS           int64   `json:"end_ms"`
+	StartSeconds    float64 `json:"start_sec"`
+	EndSeconds      float64 `json:"end_sec"`
+	Confidence      float64 `json:"confidence"`
+	SubmissionCount int     `json:"submission_count"`
+}
+
+type introDBResponse struct {
+	IMDBID  string          `json:"imdb_id"`
+	Season  int             `json:"season"`
+	Episode int             `json:"episode"`
+	Intro   *introDBSegment `json:"intro"`
+	Recap   *introDBSegment `json:"recap"`
+	Outro   *introDBSegment `json:"outro"`
+}
+
+func (service *Service) Markers(ctx context.Context, principal auth.Principal, input MarkerInput) (MarkerList, error) {
+	input.IMDBID = strings.TrimSpace(input.IMDBID)
+	if !service.hasActiveProfile(principal) {
+		return MarkerList{}, ErrActiveProfileRequired
+	}
+	if !introDBIMDBIDPattern.MatchString(input.IMDBID) || input.Season < 1 || input.Season > 2_147_483_647 || input.Episode < 1 || input.Episode > 2_147_483_647 {
+		return MarkerList{}, ErrInvalidInput
+	}
+	if !input.IncludeIntro && !input.IncludeRecap && !input.IncludeOutro {
+		return MarkerList{Markers: []Marker{}}, nil
+	}
+
+	markers, found, err := service.cachedIntroDBMarkers(ctx, input)
+	if err != nil {
+		found = false
+	}
+	if !found {
+		markers, found, err = service.fetchIntroDBMarkers(ctx, input)
+		if err != nil {
+			return MarkerList{Markers: []Marker{}}, nil
+		}
+		if err := service.cacheIntroDBMarkers(ctx, input, markers, found); err != nil {
+			// A cache write failure must not turn an optional skip action into a playback failure.
+		}
+	}
+	return MarkerList{Markers: filterMarkers(markers, input)}, nil
+}
+
+func (service *Service) cachedIntroDBMarkers(ctx context.Context, input MarkerInput) ([]Marker, bool, error) {
+	if service.pool == nil {
+		return nil, false, nil
+	}
+	var encoded []byte
+	err := service.pool.QueryRow(ctx, `
+		SELECT segments
+		FROM introdb_segment_cache
+		WHERE imdb_id = $1 AND season_number = $2 AND episode_number = $3 AND expires_at > now()
+	`, input.IMDBID, input.Season, input.Episode).Scan(&encoded)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read IntroDB cache: %w", err)
+	}
+	var markers []Marker
+	if err := json.Unmarshal(encoded, &markers); err != nil {
+		return nil, false, fmt.Errorf("decode IntroDB cache: %w", err)
+	}
+	if markers == nil {
+		markers = []Marker{}
+	}
+	return markers, true, nil
+}
+
+func (service *Service) cacheIntroDBMarkers(ctx context.Context, input MarkerInput, markers []Marker, providerFound bool) error {
+	if service.pool == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(markers)
+	if err != nil {
+		return fmt.Errorf("encode IntroDB cache: %w", err)
+	}
+	ttl := introDBCacheTTL
+	if !providerFound {
+		ttl = introDBMissCacheTTL
+	}
+	_, err = service.pool.Exec(ctx, `
+		WITH purged AS (
+			DELETE FROM introdb_segment_cache WHERE expires_at <= now() RETURNING 1
+		)
+		INSERT INTO introdb_segment_cache (imdb_id, season_number, episode_number, segments, expires_at, updated_at)
+		VALUES ($1, $2, $3, $4::jsonb, now() + make_interval(secs => $5), now())
+		ON CONFLICT (imdb_id, season_number, episode_number) DO UPDATE
+		SET segments = EXCLUDED.segments, expires_at = EXCLUDED.expires_at, updated_at = now()
+	`, input.IMDBID, input.Season, input.Episode, encoded, int(ttl/time.Second))
+	if err != nil {
+		return fmt.Errorf("write IntroDB cache: %w", err)
+	}
+	return nil
+}
+
+func (service *Service) fetchIntroDBMarkers(ctx context.Context, input MarkerInput) ([]Marker, bool, error) {
+	endpoint, err := url.Parse(service.introDBBaseURL + "/segments")
+	if err != nil {
+		return nil, false, fmt.Errorf("build IntroDB URL: %w", err)
+	}
+	query := endpoint.Query()
+	query.Set("imdb_id", input.IMDBID)
+	query.Set("season", strconv.Itoa(input.Season))
+	query.Set("episode", strconv.Itoa(input.Episode))
+	endpoint.RawQuery = query.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("create IntroDB request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", "Rivune/1")
+	response, err := service.introDBClient.Do(request)
+	if err != nil {
+		return nil, false, fmt.Errorf("request IntroDB segments: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return []Marker{}, false, nil
+	}
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+		return nil, false, fmt.Errorf("IntroDB returned status %d", response.StatusCode)
+	}
+	var payload introDBResponse
+	decoder := json.NewDecoder(io.LimitReader(response.Body, introDBMaxBodyBytes+1))
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, false, fmt.Errorf("decode IntroDB segments: %w", err)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, false, errors.New("IntroDB response contains trailing data")
+	}
+	if payload.IMDBID != input.IMDBID || payload.Season != input.Season || payload.Episode != input.Episode {
+		return nil, false, errors.New("IntroDB response identity mismatch")
+	}
+	return normalizeIntroDBMarkers(payload), true, nil
+}
+
+func normalizeIntroDBMarkers(payload introDBResponse) []Marker {
+	candidates := []struct {
+		markerType MarkerType
+		segment    *introDBSegment
+	}{
+		{MarkerTypeIntro, payload.Intro},
+		{MarkerTypeRecap, payload.Recap},
+		{MarkerTypeOutro, payload.Outro},
+	}
+	markers := make([]Marker, 0, len(candidates))
+	for _, candidate := range candidates {
+		segment := candidate.segment
+		if segment == nil || !validIntroDBSegment(*segment) {
+			continue
+		}
+		markers = append(markers, Marker{
+			Type: candidate.markerType, StartSeconds: segment.StartSeconds, EndSeconds: segment.EndSeconds,
+			Confidence: segment.Confidence, SubmissionCount: segment.SubmissionCount,
+		})
+	}
+	sort.Slice(markers, func(left, right int) bool {
+		if markers[left].StartSeconds == markers[right].StartSeconds {
+			return markers[left].EndSeconds < markers[right].EndSeconds
+		}
+		return markers[left].StartSeconds < markers[right].StartSeconds
+	})
+	validated := markers[:0]
+	for _, marker := range markers {
+		if len(validated) > 0 && marker.StartSeconds < validated[len(validated)-1].EndSeconds {
+			continue
+		}
+		validated = append(validated, marker)
+	}
+	return validated
+}
+
+func validIntroDBSegment(segment introDBSegment) bool {
+	if math.IsNaN(segment.StartSeconds) || math.IsInf(segment.StartSeconds, 0) || math.IsNaN(segment.EndSeconds) || math.IsInf(segment.EndSeconds, 0) ||
+		segment.StartSeconds < 0 || segment.EndSeconds <= segment.StartSeconds || segment.EndSeconds > float64(introDBMaxMarkerTime) ||
+		segment.Confidence < 0 || segment.Confidence > 1 || segment.SubmissionCount < 1 {
+		return false
+	}
+	return math.Abs(float64(segment.StartMS)-segment.StartSeconds*1000) <= 1 &&
+		math.Abs(float64(segment.EndMS)-segment.EndSeconds*1000) <= 1
+}
+
+func filterMarkers(markers []Marker, input MarkerInput) []Marker {
+	filtered := make([]Marker, 0, len(markers))
+	for _, marker := range markers {
+		if marker.Type == MarkerTypeIntro && input.IncludeIntro || marker.Type == MarkerTypeRecap && input.IncludeRecap || marker.Type == MarkerTypeOutro && input.IncludeOutro {
+			filtered = append(filtered, marker)
+		}
+	}
+	return filtered
+}

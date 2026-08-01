@@ -67,7 +67,7 @@ func TestEnrichSeriesAuthenticatesWithoutPINAndCachesToken(t *testing.T) {
 	}
 }
 
-func TestEnrichSeasonMatchesOfficialEpisodesByNumber(t *testing.T) {
+func TestEnrichSeasonMatchesOfficialEpisodesByNumberAndAirDate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/login":
@@ -80,6 +80,7 @@ func TestEnrichSeasonMatchesOfficialEpisodesByNumber(t *testing.T) {
 				"status": "success",
 				"data": map[string]any{"episodes": []map[string]any{
 					{"id": 62085, "name": "Pilot", "overview": "TVDB pilot", "aired": "2008-01-20", "image": "https://artworks.thetvdb.com/still.jpg", "runtime": 59, "seasonNumber": 1, "number": 1},
+					{"id": 62086, "name": "Cat's in the Bag...", "aired": "2008-01-27", "seasonNumber": 1, "number": 2},
 					{"id": 999, "name": "Other season", "seasonNumber": 2, "number": 1},
 				}},
 			})
@@ -92,7 +93,10 @@ func TestEnrichSeasonMatchesOfficialEpisodesByNumber(t *testing.T) {
 	client := newWithBaseURL("api-key", "", server.URL, server.Client())
 	season, err := client.EnrichSeason(context.Background(), "81189", metadata.ProviderSeason{
 		SeasonNumber: 1,
-		Episodes:     []metadata.ProviderEpisode{{ExternalID: "tmdb-episode", SeasonNumber: 1, EpisodeNumber: 1}},
+		Episodes: []metadata.ProviderEpisode{
+			{ExternalID: "tmdb-episode-1", SeasonNumber: 1, EpisodeNumber: 1, AirDate: "2008-01-20"},
+			{ExternalID: "tmdb-episode-2", Name: "Different hierarchy", SeasonNumber: 1, EpisodeNumber: 2, AirDate: "2025-09-01"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("enrich season: %v", err)
@@ -100,6 +104,9 @@ func TestEnrichSeasonMatchesOfficialEpisodesByNumber(t *testing.T) {
 	episode := season.Episodes[0]
 	if episode.AdditionalIDs["tvdb"] != "62085" || episode.Name != "Pilot" || episode.RuntimeMinutes != 59 || episode.StillURL == "" {
 		t.Fatalf("unexpected enriched episode: %+v", episode)
+	}
+	if _, exists := season.Episodes[1].AdditionalIDs["tvdb"]; exists || season.Episodes[1].Name != "Different hierarchy" {
+		t.Fatalf("cross-linked episode with a different air date: %+v", season.Episodes[1])
 	}
 }
 

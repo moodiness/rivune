@@ -85,7 +85,10 @@ Copy [`.env.example`](.env.example) to `.env` and adjust it for the host. Import
 | `RIVUNE_SETUP_TOKEN` | Required one-time value used to claim a new Rivune instance | none |
 | `RIVUNE_TMDB_ACCESS_TOKEN` | Optional TMDB API read access token | empty |
 | `RIVUNE_TVDB_API_KEY` / `RIVUNE_TVDB_PIN` | Optional TVDB project key and user-supported-key PIN | empty |
-| `RIVUNE_TRAKT_CLIENT_ID` | Optional Trakt API client ID | empty |
+| `RIVUNE_TRAKT_CLIENT_ID` | Optional Trakt client ID for collection sources and account tracking | empty |
+| `RIVUNE_TRAKT_CLIENT_SECRET` | Trakt client secret required with the client ID for account tracking | empty |
+| `RIVUNE_SIMKL_CLIENT_ID` | Optional Simkl client ID for account tracking | empty |
+| `RIVUNE_TRACKING_ENCRYPTION_KEY` | Base64-encoded 32-byte key required when account tracking is enabled | empty |
 | `RIVUNE_PUBLIC_URL` | Public origin used by the server | `http://localhost:8080` |
 | `RIVUNE_PORT` | Host port mapped to Rivune | `8080` |
 | `TZ` | IANA timezone used by profile access dates and daily hours | `UTC` |
@@ -96,6 +99,8 @@ Copy [`.env.example`](.env.example) to `.env` and adjust it for the host. Import
 | `RIVUNE_REMUX_CONCURRENCY` | Concurrent remux jobs | `2` |
 | `RIVUNE_TRANSCODE_THREADS` | FFmpeg threads per transcode | `4` |
 | `RIVUNE_MEDIA_MAX_STORAGE_MB` | Temporary media workspace limit | `20480` |
+
+The Trakt and Simkl environment variables identify the Rivune server application; they do not connect a global user account. Each Rivune profile links and controls its own Trakt and/or Simkl account from profile settings, and Rivune stores that profile's provider tokens encrypted with `RIVUNE_TRACKING_ENCRYPTION_KEY`.
 
 For internet-facing installations, terminate HTTPS at a trusted reverse proxy, set `RIVUNE_PUBLIC_URL` to the HTTPS origin, and configure `RIVUNE_TRUSTED_PROXIES`. The `.env` file contains credentials and must never be committed.
 

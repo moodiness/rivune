@@ -10,6 +10,8 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 )
 
+const defaultMaintenanceMessage = "Rivune is temporarily unavailable for maintenance."
+
 type tokenResponse struct {
 	TokenType             string    `json:"tokenType"`
 	AccessToken           string    `json:"accessToken"`
@@ -24,6 +26,14 @@ type sessionNotificationResponse struct {
 	ID             string    `json:"id"`
 	Message        string    `json:"message"`
 	SenderUsername string    `json:"senderUsername"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
+type notificationBroadcastResponse struct {
+	ID             string    `json:"id"`
+	Message        string    `json:"message"`
+	SenderUsername string    `json:"senderUsername"`
+	RecipientCount int64     `json:"recipientCount"`
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
@@ -98,10 +108,33 @@ func (a *API) requireAuthentication(next func(http.ResponseWriter, *http.Request
 			writeError(w, http.StatusUnauthorized, "invalid_access_token", "A valid access token is required")
 		case err != nil:
 			a.internalError(w, "authenticate request", err)
+		case principal.Role != "admin" && !maintenanceExemptPath(r.URL.Path) && a.settings != nil:
+			state, err := a.settings.Maintenance(r.Context())
+			if err != nil {
+				a.internalError(w, "read maintenance mode", err)
+				return
+			}
+			if state.Enabled {
+				w.Header().Set("Retry-After", "5")
+				writeJSON(w, http.StatusServiceUnavailable, errorEnvelope{Error: apiError{
+					Code:          "maintenance_mode",
+					Message:       defaultMaintenanceMessage,
+					PublicMessage: state.Message,
+				}})
+				return
+			}
+			next(w, r, principal)
 		default:
 			next(w, r, principal)
 		}
 	})
+}
+
+func maintenanceExemptPath(path string) bool {
+	return path == "/api/v1/auth/me" ||
+		path == "/api/v1/auth/logout" ||
+		path == "/api/v1/auth/sessions" ||
+		strings.HasPrefix(path, "/api/v1/auth/sessions/")
 }
 
 func (a *API) me(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
@@ -264,6 +297,58 @@ func (a *API) sessionNotifications(w http.ResponseWriter, r *http.Request, princ
 			response[index] = newSessionNotificationResponse(notification)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"notifications": response})
+	}
+}
+
+func (a *API) acknowledgeSessionNotification(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	rawID := r.PathValue("notificationId")
+	validID := rawID != ""
+	for index := range rawID {
+		validID = validID && rawID[index] >= '0' && rawID[index] <= '9'
+	}
+	notificationID, err := strconv.ParseInt(rawID, 10, 64)
+	if !validID || err != nil || notificationID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "The notification identifier is invalid")
+		return
+	}
+	err = a.auth.AcknowledgeSessionNotification(r.Context(), principal, notificationID)
+	switch {
+	case errors.Is(err, auth.ErrInvalidInput):
+		writeError(w, http.StatusBadRequest, "invalid_request", "The notification identifier is invalid")
+	case errors.Is(err, auth.ErrNotificationNotFound):
+		writeError(w, http.StatusNotFound, "notification_not_found", "The session notification does not exist")
+	case err != nil:
+		a.internalError(w, "acknowledge session notification", err)
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func (a *API) broadcastSessionNotification(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !requireJSON(w, r) {
+		return
+	}
+	var request struct {
+		IDempotencyKey string `json:"idempotencyKey"`
+		Message        string `json:"message"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	broadcast, err := a.auth.BroadcastSessionNotification(r.Context(), principal, request.IDempotencyKey, request.Message)
+	switch {
+	case errors.Is(err, auth.ErrInvalidInput):
+		writeError(w, http.StatusBadRequest, "invalid_request", "The idempotency key must be a UUID and the message must contain between 1 and 500 characters")
+	case errors.Is(err, auth.ErrForbidden):
+		writeError(w, http.StatusForbidden, "admin_required", "Administrator access is required")
+	case err != nil:
+		a.internalError(w, "broadcast session notification", err)
+	default:
+		writeJSON(w, http.StatusCreated, notificationBroadcastResponse{
+			ID: broadcast.ID, Message: broadcast.Message, SenderUsername: broadcast.SenderUsername,
+			RecipientCount: broadcast.RecipientCount, CreatedAt: broadcast.CreatedAt,
+		})
 	}
 }
 

@@ -75,6 +75,10 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   await page.getByRole("button", { name: "Play episode" }).click();
 
   await expect(page.getByRole("dialog", { name: /Playing Signal Horizon.*S01E01.*First Light/ })).toBeVisible();
+  const markerRequest = await rivune.waitForRequest("/api/v1/playback/markers", "GET");
+  expect(markerRequest.search.get("imdbId")).toBe("tt9000");
+  expect(markerRequest.search.get("season")).toBe("1");
+  expect(markerRequest.search.get("episode")).toBe("1");
   const firstResolve = await rivune.waitForRequest("/api/v1/playback/resolve", "POST");
   expect(firstResolve.body).toMatchObject({ sourceRef: "source-tt9000:1:1", titleId: "episode-1", startSeconds: 321 });
   await expect(page.getByRole("slider", { name: "Playback position" })).toHaveValue("321");
@@ -92,6 +96,15 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   await page.getByRole("button", { name: "Subtitles" }).click();
   await expect(page.getByRole("button", { name: /FR.*Subtitle track/ })).toHaveClass(/is-active/);
   await page.getByRole("button", { name: "Close settings" }).click();
+  await page.locator("video").evaluate((video) => {
+    video.currentTime = 330;
+  });
+  const skipIntro = page.getByRole("button", { name: "Skip intro" });
+  await expect(skipIntro).toBeVisible();
+  await skipIntro.click();
+  await expect(page.getByRole("slider", { name: "Playback position" })).toHaveValue("400");
+  await expect(skipIntro).toHaveCount(0);
+
 
   await page.locator("video").evaluate((video) => {
     video.currentTime = 1800;

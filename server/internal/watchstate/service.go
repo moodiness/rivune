@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/tracking"
 )
 
 var (
@@ -32,12 +33,28 @@ const (
 	maximumPageSize = 100
 )
 
-type Service struct {
-	pool *pgxpool.Pool
+type trackingSink interface {
+	EnqueueTx(context.Context, pgx.Tx, string, string, string, tracking.Event) error
 }
 
-func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool}
+type Service struct {
+	pool     *pgxpool.Pool
+	tracking trackingSink
+}
+
+func NewService(pool *pgxpool.Pool, sinks ...trackingSink) *Service {
+	service := &Service{pool: pool}
+	if len(sinks) > 0 {
+		service.tracking = sinks[0]
+	}
+	return service
+}
+
+func (s *Service) enqueueTrackingTx(ctx context.Context, tx pgx.Tx, profileID, titleID, key string, event tracking.Event) error {
+	if s.tracking == nil {
+		return nil
+	}
+	return s.tracking.EnqueueTx(ctx, tx, profileID, titleID, key, event)
 }
 
 func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput) (TitleReference, error) {
@@ -157,9 +174,13 @@ func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titl
 	if mediaType != "movie" && mediaType != "series" {
 		return LibraryItem{}, fmt.Errorf("%w: library titles must be movies or series", ErrInvalidInput)
 	}
-
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return LibraryItem{}, fmt.Errorf("begin library addition: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	item := LibraryItem{TitleID: titleID, MediaType: mediaType}
-	err = s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO profile_library (profile_id, title_id)
 		VALUES ($1::uuid, $2::uuid)
 		ON CONFLICT (profile_id, title_id) DO UPDATE SET updated_at = now()
@@ -167,6 +188,14 @@ func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titl
 	`, profileID, titleID).Scan(&item.AddedAt, &item.UpdatedAt)
 	if err != nil {
 		return LibraryItem{}, fmt.Errorf("add library title: %w", err)
+	}
+	if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("library:add:%s:%d", titleID, item.UpdatedAt.UnixNano()), tracking.Event{
+		Type: "library", TitleID: titleID, InLibrary: true, OccurredAt: item.UpdatedAt,
+	}); err != nil {
+		return LibraryItem{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return LibraryItem{}, fmt.Errorf("commit library addition: %w", err)
 	}
 	return item, nil
 }
@@ -180,10 +209,22 @@ func (s *Service) RemoveLibrary(ctx context.Context, principal auth.Principal, t
 	if err != nil {
 		return err
 	}
-	if _, err := s.pool.Exec(ctx, `
-		DELETE FROM profile_library WHERE profile_id = $1::uuid AND title_id = $2::uuid
-	`, profileID, titleID); err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin library removal: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `DELETE FROM profile_library WHERE profile_id = $1::uuid AND title_id = $2::uuid`, profileID, titleID); err != nil {
 		return fmt.Errorf("remove library title: %w", err)
+	}
+	occurredAt := time.Now().UTC()
+	if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("library:remove:%s:%d", titleID, occurredAt.UnixNano()), tracking.Event{
+		Type: "library", TitleID: titleID, InLibrary: false, OccurredAt: occurredAt,
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit library removal: %w", err)
 	}
 	return nil
 }
@@ -287,27 +328,25 @@ func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, 
 	if mediaType != "movie" && mediaType != "episode" {
 		return Progress{}, fmt.Errorf("%w: progress titles must be movies or episodes", ErrInvalidInput)
 	}
-
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Progress{}, fmt.Errorf("begin playback progress update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var progress Progress
 	if input.ExpectedVersion == 0 {
-		err = scanProgress(s.pool.QueryRow(ctx, `
-			INSERT INTO profile_progress (
-				profile_id, title_id, position_seconds, duration_seconds, completed
-			)
+		err = scanProgress(tx.QueryRow(ctx, `
+			INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed)
 			VALUES ($1::uuid, $2::uuid, $3, $4, $5)
 			ON CONFLICT (profile_id, title_id) DO NOTHING
 			RETURNING title_id::text, $6::text, position_seconds, duration_seconds,
 			          completed, version, last_watched_at, updated_at
 		`, profileID, titleID, input.PositionSeconds, input.DurationSeconds, input.Completed, mediaType), &progress)
 	} else {
-		err = scanProgress(s.pool.QueryRow(ctx, `
+		err = scanProgress(tx.QueryRow(ctx, `
 			UPDATE profile_progress
-			SET position_seconds = $4,
-			    duration_seconds = $5,
-			    completed = $6,
-			    version = version + 1,
-			    last_watched_at = now(),
-			    updated_at = now()
+			SET position_seconds = $4, duration_seconds = $5, completed = $6,
+			    version = version + 1, last_watched_at = now(), updated_at = now()
 			WHERE profile_id = $1::uuid AND title_id = $2::uuid AND version = $3
 			RETURNING title_id::text, $7::text, position_seconds, duration_seconds,
 			          completed, version, last_watched_at, updated_at
@@ -318,6 +357,16 @@ func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, 
 	}
 	if err != nil {
 		return Progress{}, fmt.Errorf("update playback progress: %w", err)
+	}
+	if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("progress:%s:%d", titleID, progress.Version), tracking.Event{
+		Type: "progress", TitleID: titleID, Completed: progress.Completed,
+		PositionSeconds: progress.PositionSeconds, DurationSeconds: progress.DurationSeconds,
+		Version: progress.Version, OccurredAt: progress.UpdatedAt,
+	}); err != nil {
+		return Progress{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Progress{}, fmt.Errorf("commit playback progress update: %w", err)
 	}
 	return progress, nil
 }
@@ -341,26 +390,25 @@ func (s *Service) SetWatched(ctx context.Context, principal auth.Principal, titl
 	if mediaType != "movie" && mediaType != "episode" {
 		return Progress{}, fmt.Errorf("%w: watched titles must be movies or episodes", ErrInvalidInput)
 	}
-
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Progress{}, fmt.Errorf("begin watched state update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var progress Progress
 	if input.ExpectedVersion == 0 {
-		err = scanProgress(s.pool.QueryRow(ctx, `
-			INSERT INTO profile_progress (
-				profile_id, title_id, position_seconds, duration_seconds, completed
-			)
+		err = scanProgress(tx.QueryRow(ctx, `
+			INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed)
 			VALUES ($1::uuid, $2::uuid, 0, 0, $3)
 			ON CONFLICT (profile_id, title_id) DO NOTHING
 			RETURNING title_id::text, $4::text, position_seconds, duration_seconds,
 			          completed, version, last_watched_at, updated_at
 		`, profileID, titleID, completed, mediaType), &progress)
 	} else {
-		err = scanProgress(s.pool.QueryRow(ctx, `
+		err = scanProgress(tx.QueryRow(ctx, `
 			UPDATE profile_progress
 			SET position_seconds = CASE WHEN $4 THEN duration_seconds ELSE 0 END,
-			    completed = $4,
-			    version = version + 1,
-			    last_watched_at = now(),
-			    updated_at = now()
+			    completed = $4, version = version + 1, last_watched_at = now(), updated_at = now()
 			WHERE profile_id = $1::uuid AND title_id = $2::uuid AND version = $3
 			RETURNING title_id::text, $5::text, position_seconds, duration_seconds,
 			          completed, version, last_watched_at, updated_at
@@ -371,6 +419,15 @@ func (s *Service) SetWatched(ctx context.Context, principal auth.Principal, titl
 	}
 	if err != nil {
 		return Progress{}, fmt.Errorf("set watched state: %w", err)
+	}
+	if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("watched:%s:%d:%t", titleID, progress.Version, completed), tracking.Event{
+		Type: "watched", TitleID: titleID, Completed: completed,
+		Version: progress.Version, OccurredAt: progress.UpdatedAt,
+	}); err != nil {
+		return Progress{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Progress{}, fmt.Errorf("commit watched state update: %w", err)
 	}
 	return progress, nil
 }
@@ -387,26 +444,35 @@ func (s *Service) ClearProgress(ctx context.Context, principal auth.Principal, t
 	if expectedVersion < 0 {
 		return fmt.Errorf("%w: expectedVersion must be zero or greater", ErrInvalidInput)
 	}
-	result, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin playback progress clear: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := tx.Exec(ctx, `
 		DELETE FROM profile_progress
 		WHERE profile_id = $1::uuid AND title_id = $2::uuid AND version = $3
 	`, profileID, titleID, expectedVersion)
 	if err != nil {
 		return fmt.Errorf("clear playback progress: %w", err)
 	}
-	if result.RowsAffected() == 1 {
-		return nil
+	if result.RowsAffected() == 0 {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM profile_progress WHERE profile_id = $1::uuid AND title_id = $2::uuid)`, profileID, titleID).Scan(&exists); err != nil {
+			return fmt.Errorf("query playback progress after clear: %w", err)
+		}
+		if exists || expectedVersion != 0 {
+			return ErrConflict
+		}
 	}
-	var exists bool
-	if err := s.pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM profile_progress WHERE profile_id = $1::uuid AND title_id = $2::uuid
-		)
-	`, profileID, titleID).Scan(&exists); err != nil {
-		return fmt.Errorf("query playback progress after clear: %w", err)
+	occurredAt := time.Now().UTC()
+	if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("progress:clear:%s:%d:%d", titleID, expectedVersion, occurredAt.UnixNano()), tracking.Event{
+		Type: "progress", TitleID: titleID, Cleared: true, Version: expectedVersion, OccurredAt: occurredAt,
+	}); err != nil {
+		return err
 	}
-	if exists || expectedVersion != 0 {
-		return ErrConflict
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit playback progress clear: %w", err)
 	}
 	return nil
 }

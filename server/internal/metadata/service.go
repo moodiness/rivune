@@ -290,7 +290,7 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 			return Series{}, errors.New("metadata provider returned an invalid season")
 		}
 		seasonNumber := season.SeasonNumber
-		seasonID, err := ensureTitle(ctx, tx, season.ExternalID, MediaTypeSeason, &titleID, &seasonNumber)
+		seasonID, err := ensureCanonicalSeasonTitle(ctx, tx, season.ExternalID, &titleID, &seasonNumber)
 		if err != nil {
 			return Series{}, err
 		}
@@ -373,10 +373,12 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 		if err := json.Unmarshal(cachedPayload, &cached); err != nil {
 			return Season{}, fmt.Errorf("decode cached season metadata: %w", err)
 		}
-		if err := s.persistCachedSeasonReleaseDates(ctx, cached); err != nil {
-			return Season{}, err
+		if cachedSeasonMatchesHierarchy(cached, seasonID, seriesID, seasonNumber) {
+			if err := s.persistCachedSeasonSnapshot(ctx, cached); err != nil {
+				return Season{}, err
+			}
+			return cached, nil
 		}
-		return cached, nil
 	}
 	if s.provider == nil {
 		return Season{}, ErrProviderUnavailable
@@ -388,16 +390,18 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 		}
 		return Season{}, err
 	}
+	if err := validateProviderSeasonHierarchy(provided, seasonExternalID, seasonNumber); err != nil {
+		return Season{}, err
+	}
 	if s.enricher != nil && seriesTVDBID != nil {
 		enriched, enrichErr := s.enricher.EnrichSeason(ctx, *seriesTVDBID, provided)
 		if enrichErr != nil {
 			s.logEnrichmentFailure("season", seasonID, enrichErr)
+		} else if hierarchyErr := validateProviderSeasonHierarchy(enriched, seasonExternalID, seasonNumber); hierarchyErr != nil {
+			s.logEnrichmentFailure("season", seasonID, hierarchyErr)
 		} else {
 			provided = enriched
 		}
-	}
-	if provided.ExternalID != seasonExternalID || provided.SeasonNumber != seasonNumber {
-		return Season{}, errors.New("metadata provider returned a mismatched season")
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -551,7 +555,7 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	for episodeID, tvdbID := range tvdbLinks {
-		if err := linkAdditionalIDs(ctx, tx, episodeID, MediaTypeEpisode, map[string]string{"tvdb": tvdbID}); err != nil {
+		if err := replaceTVDBEpisodeID(ctx, tx, episodeID, tvdbID); err != nil {
 			return Season{}, err
 		}
 	}
@@ -621,7 +625,7 @@ func matchMappedEpisodes(seasonID string, provided []ProviderEpisode, canonical 
 			})
 		}
 		if index < 0 {
-			return nil, nil, fmt.Errorf("%w: TVDB episode %s could not be matched to TMDB", ErrProviderFailure, tvdbID)
+			continue
 		}
 		candidates[index].used = true
 		canonicalEpisode := candidates[index].episode
@@ -666,6 +670,9 @@ func matchMappedEpisodes(seasonID string, provided []ProviderEpisode, canonical 
 			ExternalIDs:    externalIDs,
 		})
 		links[canonicalEpisode.ID] = tvdbID
+	}
+	if len(provided) > 0 && len(result) == 0 {
+		return nil, nil, fmt.Errorf("%w: no TVDB episodes could be matched to TMDB", ErrProviderFailure)
 	}
 	sort.Slice(result, func(left, right int) bool {
 		return result[left].EpisodeNumber < result[right].EpisodeNumber
@@ -888,22 +895,69 @@ func (s *Service) persistCachedSeriesReleaseDates(ctx context.Context, series Se
 	return nil
 }
 
-func (s *Service) persistCachedSeasonReleaseDates(ctx context.Context, season Season) error {
+func cachedSeasonMatchesHierarchy(season Season, seasonID, seriesID string, seasonNumber int) bool {
+	if season.ID != seasonID || season.SeriesID != seriesID || season.SeasonNumber != seasonNumber {
+		return false
+	}
+	for _, episode := range season.Episodes {
+		if episode.SeasonID != seasonID || episode.SeasonNumber != seasonNumber {
+			return false
+		}
+	}
+	return true
+}
+
+func validateProviderSeasonHierarchy(season ProviderSeason, externalID string, seasonNumber int) error {
+	if strings.TrimSpace(season.ExternalID) != externalID || season.SeasonNumber != seasonNumber {
+		return fmt.Errorf("%w: metadata provider returned season %d for requested season %d", ErrProviderFailure, season.SeasonNumber, seasonNumber)
+	}
+	for _, episode := range season.Episodes {
+		if strings.TrimSpace(episode.ExternalID) == "" || episode.EpisodeNumber < 0 || episode.SeasonNumber != seasonNumber {
+			return fmt.Errorf("%w: metadata provider returned an invalid episode hierarchy for season %d", ErrProviderFailure, seasonNumber)
+		}
+	}
+	return nil
+}
+
+func (s *Service) persistCachedSeasonSnapshot(ctx context.Context, season Season) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin cached season release-date persistence: %w", err)
+		return fmt.Errorf("begin cached season snapshot persistence: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := persistReleaseDate(ctx, tx, season.ID, season.AirDate); err != nil {
+	persistMissingSnapshot := func(titleID, title, posterURL, releaseDate string) error {
+		var existingTitle, existingPosterURL, existingReleaseDate string
+		err := tx.QueryRow(ctx, `
+			SELECT COALESCE(display_title, ''),
+			       COALESCE(poster_url, ''),
+			       COALESCE(release_date::text, '')
+			FROM titles
+			WHERE id = $1::uuid
+		`, titleID).Scan(&existingTitle, &existingPosterURL, &existingReleaseDate)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("query cached title snapshot: %w", err)
+		}
+		if strings.TrimSpace(existingTitle) != "" {
+			title = ""
+		}
+		if strings.TrimSpace(existingPosterURL) != "" {
+			posterURL = ""
+		}
+		if strings.TrimSpace(existingReleaseDate) != "" {
+			releaseDate = ""
+		}
+		return persistTitleSnapshot(ctx, tx, titleID, title, posterURL, "", releaseDate)
+	}
+	if err := persistMissingSnapshot(season.ID, season.Name, season.PosterURL, season.AirDate); err != nil {
 		return err
 	}
 	for _, episode := range season.Episodes {
-		if err := persistReleaseDate(ctx, tx, episode.ID, episode.AirDate); err != nil {
+		if err := persistMissingSnapshot(episode.ID, episode.Name, episode.StillURL, episode.AirDate); err != nil {
 			return err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit cached season release-date persistence: %w", err)
+		return fmt.Errorf("commit cached season snapshot persistence: %w", err)
 	}
 	return nil
 }
@@ -955,6 +1009,14 @@ func persistTitleSnapshot(ctx context.Context, tx pgx.Tx, titleID, title, poster
 }
 
 func ensureTitle(ctx context.Context, tx pgx.Tx, externalID, mediaType string, parentID *string, ordinal *int) (string, error) {
+	return ensureTitleHierarchy(ctx, tx, externalID, mediaType, parentID, ordinal, false)
+}
+
+func ensureCanonicalSeasonTitle(ctx context.Context, tx pgx.Tx, externalID string, parentID *string, ordinal *int) (string, error) {
+	return ensureTitleHierarchy(ctx, tx, externalID, MediaTypeSeason, parentID, ordinal, true)
+}
+
+func ensureTitleHierarchy(ctx context.Context, tx pgx.Tx, externalID, mediaType string, parentID *string, ordinal *int, repairOrdinal bool) (string, error) {
 	lockKey := providerName + ":" + mediaType + ":" + externalID
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
 		return "", fmt.Errorf("lock external title: %w", err)
@@ -980,8 +1042,34 @@ func ensureTitle(ctx context.Context, tx pgx.Tx, externalID, mediaType string, p
 		if ordinal != nil {
 			expectedOrdinal = *ordinal
 		}
-		if existingParentID != expectedParentID || existingOrdinal != expectedOrdinal {
+		if existingParentID == expectedParentID && existingOrdinal == expectedOrdinal {
+			return titleID, nil
+		}
+		if !repairOrdinal || existingParentID != expectedParentID || ordinal == nil {
 			return "", errors.New("metadata provider returned a conflicting title hierarchy")
+		}
+		commandTag, updateErr := tx.Exec(ctx, `
+			UPDATE titles AS title
+			SET ordinal = $2,
+			    updated_at = now()
+			WHERE title.id = $1::uuid
+			  AND NOT EXISTS (
+			      SELECT 1
+			      FROM titles AS sibling
+			      WHERE sibling.parent_id = title.parent_id
+			        AND sibling.media_type = title.media_type
+			        AND sibling.ordinal = $2
+			        AND sibling.id <> title.id
+			  )
+		`, titleID, expectedOrdinal)
+		if updateErr != nil {
+			return "", fmt.Errorf("repair canonical season hierarchy: %w", updateErr)
+		}
+		if commandTag.RowsAffected() != 1 {
+			return "", errors.New("metadata provider returned a conflicting title hierarchy")
+		}
+		if _, deleteErr := tx.Exec(ctx, `DELETE FROM title_metadata WHERE title_id = $1::uuid`, titleID); deleteErr != nil {
+			return "", fmt.Errorf("invalidate repaired season metadata: %w", deleteErr)
 		}
 		return titleID, nil
 	}
@@ -1327,6 +1415,75 @@ func invalidateTitleSubtree(ctx context.Context, tx pgx.Tx, titleID string) erro
 		WHERE metadata.title_id = subtree.id
 	`, titleID); err != nil {
 		return fmt.Errorf("invalidate moved title metadata: %w", err)
+	}
+	return nil
+}
+
+func replaceTVDBEpisodeID(ctx context.Context, tx pgx.Tx, titleID, externalID string) error {
+	externalID = strings.TrimSpace(externalID)
+	if externalID == "" {
+		return fmt.Errorf("%w: TVDB returned an episode without an identifier", ErrProviderFailure)
+	}
+	titleLockKey := "title:" + titleID + ":tvdb:" + MediaTypeEpisode
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", titleLockKey); err != nil {
+		return fmt.Errorf("lock canonical TVDB episode identity: %w", err)
+	}
+
+	var existingExternalID string
+	err := tx.QueryRow(ctx, `
+		SELECT external_id
+		FROM title_external_ids
+		WHERE title_id = $1::uuid AND provider = 'tvdb' AND namespace = 'episode'
+	`, titleID).Scan(&existingExternalID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("query canonical TVDB episode identity: %w", err)
+	}
+	if existingExternalID == externalID {
+		return nil
+	}
+
+	lockKeys := []string{"tvdb:" + MediaTypeEpisode + ":" + externalID}
+	if existingExternalID != "" {
+		lockKeys = append(lockKeys, "tvdb:"+MediaTypeEpisode+":"+existingExternalID)
+	}
+	sort.Strings(lockKeys)
+	for _, lockKey := range lockKeys {
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
+			return fmt.Errorf("lock TVDB episode identity: %w", err)
+		}
+	}
+
+	var mappedTitleID string
+	err = tx.QueryRow(ctx, `
+		SELECT title_id::text
+		FROM title_external_ids
+		WHERE provider = 'tvdb' AND namespace = 'episode' AND external_id = $1
+	`, externalID).Scan(&mappedTitleID)
+	if err == nil && mappedTitleID != titleID {
+		return errors.New("metadata provider returned a conflicting external ID")
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("query TVDB episode identity: %w", err)
+	}
+	if mappedTitleID == titleID {
+		return nil
+	}
+
+	if existingExternalID != "" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE title_external_ids
+			SET external_id = $2
+			WHERE title_id = $1::uuid AND provider = 'tvdb' AND namespace = 'episode'
+		`, titleID, externalID); err != nil {
+			return fmt.Errorf("replace TVDB episode identity: %w", err)
+		}
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
+		VALUES ($1::uuid, 'tvdb', 'episode', $2)
+	`, titleID, externalID); err != nil {
+		return fmt.Errorf("link TVDB episode identity: %w", err)
 	}
 	return nil
 }

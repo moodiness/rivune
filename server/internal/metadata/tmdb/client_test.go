@@ -167,6 +167,22 @@ func TestSeasonDetailsNormalizesEpisodes(t *testing.T) {
 	}
 }
 
+func TestSeasonDetailsRejectsMismatchedSeasonHierarchy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tv/72879/season/9" || r.URL.Query().Get("language") != "fr-FR" {
+			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"id":475463,"name":"Saison 9","season_number":2,"episodes":[{"id":500001,"name":"Épisode 2021","season_number":2,"episode_number":2021},{"id":500002,"name":"Épisode 2022","season_number":2,"episode_number":2022}]}`))
+	}))
+	defer server.Close()
+
+	client := newWithBaseURL("token", server.URL, server.Client())
+	season, err := client.SeasonDetails(context.Background(), "72879", 9, "fr-FR")
+	if !errors.Is(err, metadata.ErrProviderFailure) {
+		t.Fatalf("expected provider failure for mismatched season, got season=%+v err=%v", season, err)
+	}
+}
+
 func TestTrailersUsesMediaSpecificVideosPathAndLanguage(t *testing.T) {
 	tests := []struct {
 		name       string

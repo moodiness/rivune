@@ -10,10 +10,13 @@ import type {
   Discovery,
   DeviceAuthorization,
   InstalledAddon,
+  NotificationBroadcast,
   LibraryPage,
+  MaintenanceSettings,
   PlaybackCapabilities,
   PlaybackActivity,
   PlaybackPurgeResult,
+  PlaybackMarkerList,
   PlaybackPreparation,
   PlaybackSession,
   PlaybackSourceList,
@@ -29,6 +32,10 @@ import type {
   TitleReference,
   TokenPair,
   TrailerList,
+  TrackingDeviceAuthorization,
+  TrackingPreferences,
+  TrackingProvider,
+  TrackingStatus,
 } from "./types";
 
 const API_BASE = "/api/v1";
@@ -42,6 +49,16 @@ let trailerCaptionLanguage = navigator.language;
 let metadataRegion = region();
 let seriesMappingProvider: "tmdb" | "tvdb" = "tmdb";
 export const PROFILE_SELECTION_REQUIRED_EVENT = "rivune:profile-selection-required";
+export const MAINTENANCE_MODE_EVENT = "rivune:maintenance-mode";
+let currentMaintenanceMessage: string | null = null;
+
+export function maintenanceModeMessage(): string | null {
+  return currentMaintenanceMessage;
+}
+
+export function clearMaintenanceMode(): void {
+  currentMaintenanceMessage = null;
+}
 
 export class APIError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -97,13 +114,19 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
   if (!response.ok) {
     let code = "request_failed";
     let message = `The request failed (${response.status}).`;
+    let publicMessage: string | undefined;
     try {
-      const body = await response.json() as { error?: { code?: string; message?: string } };
+      const body = await response.json() as { error?: { code?: string; message?: string; publicMessage?: unknown } };
       code = body.error?.code ?? code;
       message = body.error?.message ?? message;
+      if (typeof body.error?.publicMessage === "string") publicMessage = body.error.publicMessage;
     } catch { /* response without JSON */ }
     if (code === "profile_selection_required") {
       window.dispatchEvent(new Event(PROFILE_SELECTION_REQUIRED_EVENT));
+    }
+    if (code === "maintenance_mode") {
+      currentMaintenanceMessage = publicMessage ?? "";
+      window.dispatchEvent(new CustomEvent<{ message: string }>(MAINTENANCE_MODE_EVENT, { detail: { message: currentMaintenanceMessage } }));
     }
     throw new APIError(response.status, code, message);
   }
@@ -175,6 +198,8 @@ export const api = {
   profileSessions: (id: string) => request<{ sessions: ProfileSession[] }>(`/profiles/${id}/sessions`),
   revokeProfileSession: (profileId: string, sessionId: string) => request<void>(`/profiles/${profileId}/sessions/${sessionId}`, { method: "DELETE" }),
   sessionNotifications: (after = "0") => request<{ notifications: SessionNotification[] }>(`/auth/notifications${query({ after })}`),
+  acknowledgeSessionNotification: (notificationId: string) => request<void>(`/auth/notifications/${notificationId}`, { method: "DELETE" }),
+  broadcastSessionNotification: (idempotencyKey: string, message: string) => request<NotificationBroadcast>("/auth/notifications/broadcast", { method: "POST", body: JSON.stringify({ idempotencyKey, message }) }),
   sendProfileSessionNotification: (profileId: string, sessionId: string, message: string) => request<SessionNotification>(`/profiles/${profileId}/sessions/${sessionId}/notifications`, { method: "POST", body: JSON.stringify({ message }) }),
 
   collections: (signal?: AbortSignal) => request<{ collections: Collection[] }>("/collections", { signal }),
@@ -221,6 +246,8 @@ export const api = {
   }) => request<TitleReference>("/titles/resolve", { method: "POST", body: JSON.stringify(input) }),
   playbackSources: (input: { mediaType: string; resourceId: string; capabilities: PlaybackCapabilities }, signal?: AbortSignal) =>
     request<PlaybackSourceList>("/playback/sources", { method: "POST", body: JSON.stringify(input), signal }),
+  playbackMarkers: (imdbId: string, season: number, episode: number, signal?: AbortSignal) =>
+    request<PlaybackMarkerList>(`/playback/markers${query({ imdbId, season, episode })}`, { signal }),
   preparePlayback: (input: { sourceRef: string; startSeconds?: number }, signal?: AbortSignal) =>
     request<PlaybackPreparation>("/playback/prepare", { method: "POST", body: JSON.stringify(input), signal }),
   resolvePlayback: (input: { sourceRef: string; titleId?: string; startSeconds?: number; preferredAudioTrack?: number; preferredSubtitleId?: string }) =>
@@ -243,10 +270,21 @@ export const api = {
   removeLibrary: (titleId: string) => request<void>(`/library/${encodeURIComponent(titleId)}`, { method: "DELETE" }),
 
   instanceSettings: () => request<SettingsLayer>("/settings"),
+  maintenanceSettings: () => request<MaintenanceSettings>("/settings/maintenance"),
+  updateMaintenanceSettings: (settings: MaintenanceSettings) => request<MaintenanceSettings>("/settings/maintenance", { method: "PUT", body: JSON.stringify(settings) }),
   profileSettings: (id: string) => request<SettingsLayer>(`/profiles/${id}/settings`),
   effectiveSettings: (id: string) => request<{ schemaVersion: number; settings: SettingsValues; sources: Record<string, string> }>(`/profiles/${id}/settings/effective`),
   updateInstanceSettings: (settings: SettingsValues) => request<SettingsLayer>("/settings", { method: "PATCH", body: JSON.stringify(settings) }),
   updateProfileSettings: (id: string, settings: SettingsValues) => request<SettingsLayer>(`/profiles/${id}/settings`, { method: "PATCH", body: JSON.stringify(settings) }),
+  trackingStatuses: (profileId: string) => request<{ providers: TrackingStatus[] }>(`/profiles/${encodeURIComponent(profileId)}/tracking`),
+  beginTrackingAuthorization: (profileId: string, provider: TrackingProvider) =>
+    request<TrackingDeviceAuthorization>(`/profiles/${encodeURIComponent(profileId)}/tracking/${provider}/device-code`, { method: "POST" }),
+  completeTrackingAuthorization: (profileId: string, provider: TrackingProvider, authorizationId: string) =>
+    request<TrackingStatus | { pending: true }>(`/profiles/${encodeURIComponent(profileId)}/tracking/${provider}/device-code/${encodeURIComponent(authorizationId)}/token`, { method: "POST" }),
+  updateTrackingPreferences: (profileId: string, provider: TrackingProvider, preferences: TrackingPreferences) =>
+    request<TrackingStatus>(`/profiles/${encodeURIComponent(profileId)}/tracking/${provider}`, { method: "PATCH", body: JSON.stringify(preferences) }),
+  disconnectTracking: (profileId: string, provider: TrackingProvider) =>
+    request<void>(`/profiles/${encodeURIComponent(profileId)}/tracking/${provider}`, { method: "DELETE" }),
 };
 
 function browserName() {

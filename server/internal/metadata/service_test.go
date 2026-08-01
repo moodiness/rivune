@@ -50,6 +50,50 @@ func TestRequireActiveProfileRejectsMissingAndExpiredGrants(t *testing.T) {
 	}
 }
 
+func TestSeasonHierarchyValidationRejectsDemainNousAppartientSeasonMismatch(t *testing.T) {
+	mismatched := ProviderSeason{
+		ExternalID:   "475463",
+		Name:         "Saison 9",
+		SeasonNumber: 2,
+		Episodes: []ProviderEpisode{{
+			ExternalID: "500001", Name: "Épisode 2021", SeasonNumber: 2, EpisodeNumber: 2021,
+		}},
+	}
+	if err := validateProviderSeasonHierarchy(mismatched, "475463", 9); !errors.Is(err, ErrProviderFailure) {
+		t.Fatalf("expected provider failure for season 9 response numbered as season 2, got %v", err)
+	}
+	poisonedCache := Season{
+		ID: "season-id", SeriesID: "series-id", SeasonNumber: 2,
+		Episodes: []Episode{{SeasonID: "season-id", SeasonNumber: 2, EpisodeNumber: 2021}},
+	}
+	if cachedSeasonMatchesHierarchy(poisonedCache, "season-id", "series-id", 9) {
+		t.Fatal("poisoned season-2 cache matched canonical season 9")
+	}
+}
+
+func TestSeasonHierarchyValidationPreservesNormalSeason(t *testing.T) {
+	season := ProviderSeason{
+		ExternalID: "475463", Name: "Saison 9", SeasonNumber: 9,
+		Episodes: []ProviderEpisode{
+			{ExternalID: "500001", Name: "Épisode 2021", SeasonNumber: 9, EpisodeNumber: 2021},
+			{ExternalID: "500002", Name: "Épisode 2022", SeasonNumber: 9, EpisodeNumber: 2022},
+		},
+	}
+	if err := validateProviderSeasonHierarchy(season, "475463", 9); err != nil {
+		t.Fatalf("valid season hierarchy rejected: %v", err)
+	}
+	cached := Season{
+		ID: "season-id", SeriesID: "series-id", SeasonNumber: 9,
+		Episodes: []Episode{
+			{SeasonID: "season-id", SeasonNumber: 9, EpisodeNumber: 2021},
+			{SeasonID: "season-id", SeasonNumber: 9, EpisodeNumber: 2022},
+		},
+	}
+	if !cachedSeasonMatchesHierarchy(cached, "season-id", "series-id", 9) {
+		t.Fatal("valid season 9 cache was rejected")
+	}
+}
+
 type fakeTrailerProvider struct {
 	responses       map[string][]ProviderTrailer
 	errors          map[string]error
@@ -314,13 +358,15 @@ func TestChooseTrailersPropagatesProviderErrors(t *testing.T) {
 	}
 }
 
-func TestCachedSeriesMetadataBackfillsCalendarReleaseDates(t *testing.T) {
+func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()
 	const (
-		seriesID  = "11111111-1111-4111-8111-111111111111"
-		seasonID  = "22222222-2222-4222-8222-222222222222"
-		episodeID = "33333333-3333-4333-8333-333333333333"
+		seriesID     = "11111111-1111-4111-8111-111111111111"
+		seasonID     = "22222222-2222-4222-8222-222222222222"
+		episodeID    = "5810d584-af52-4ba3-8cef-17a98bc19f77"
+		seasonPoster = "https://image.tmdb.org/t/p/w500/futurama-season-5.jpg"
+		episodeStill = "https://image.tmdb.org/t/p/w500/asteroique.jpg"
 	)
 	series := Series{
 		ID:           seriesID,
@@ -331,27 +377,30 @@ func TestCachedSeriesMetadataBackfillsCalendarReleaseDates(t *testing.T) {
 			ID:           seasonID,
 			MediaType:    MediaTypeSeason,
 			SeriesID:     seriesID,
-			Name:         "Season 11",
-			SeasonNumber: 11,
+			Name:         "Saison 5",
+			SeasonNumber: 5,
 			EpisodeCount: 1,
-			AirDate:      "2026-08-03",
+			AirDate:      "2002-02-10",
+			PosterURL:    seasonPoster,
 		}},
 	}
 	season := Season{
 		ID:           seasonID,
 		MediaType:    MediaTypeSeason,
 		SeriesID:     seriesID,
-		Name:         "Season 11",
-		SeasonNumber: 11,
-		AirDate:      "2026-08-03",
+		Name:         "Saison 5",
+		SeasonNumber: 5,
+		AirDate:      "2002-02-10",
+		PosterURL:    seasonPoster,
 		Episodes: []Episode{{
 			ID:            episodeID,
 			MediaType:     MediaTypeEpisode,
 			SeasonID:      seasonID,
-			Name:          "Episode 1",
-			SeasonNumber:  11,
-			EpisodeNumber: 1,
-			AirDate:       "2026-08-03",
+			Name:          "Astéroïque",
+			SeasonNumber:  5,
+			EpisodeNumber: 6,
+			AirDate:       "2002-03-17",
+			StillURL:      episodeStill,
 		}},
 	}
 	seriesPayload, err := json.Marshal(series)
@@ -365,8 +414,8 @@ func TestCachedSeriesMetadataBackfillsCalendarReleaseDates(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title) VALUES
 			($1::uuid, 'series', NULL, NULL, 'Futurama'),
-			($2::uuid, 'season', $1::uuid, 11, 'Season 11'),
-			($3::uuid, 'episode', $2::uuid, 1, 'Episode 1')
+			($2::uuid, 'season', $1::uuid, 5, NULL),
+			($3::uuid, 'episode', $2::uuid, 6, '   ')
 	`, seriesID, seasonID, episodeID); err != nil {
 		t.Fatalf("seed cached titles: %v", err)
 	}
@@ -374,7 +423,7 @@ func TestCachedSeriesMetadataBackfillsCalendarReleaseDates(t *testing.T) {
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
 			($1::uuid, 'tmdb', 'series', '615'),
 			($2::uuid, 'tmdb', 'season', '516338'),
-			($3::uuid, 'tmdb', 'episode', 'episode-1')
+			($3::uuid, 'tmdb', 'episode', '5810d584-af52-4ba3-8cef-17a98bc19f77')
 	`, seriesID, seasonID, episodeID); err != nil {
 		t.Fatalf("seed cached external IDs: %v", err)
 	}
@@ -390,25 +439,45 @@ func TestCachedSeriesMetadataBackfillsCalendarReleaseDates(t *testing.T) {
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
 	service := &Service{pool: pool}
-	if _, err := service.SeriesDetails(ctx, principal, seriesID, "fr-FR", "tmdb"); err != nil {
-		t.Fatalf("load cached series details: %v", err)
-	}
 	if _, err := service.SeasonDetails(ctx, principal, seasonID, "fr-FR", "tmdb"); err != nil {
 		t.Fatalf("load cached season details: %v", err)
 	}
+	if _, err := service.SeriesDetails(ctx, principal, seriesID, "fr-FR", "tmdb"); err != nil {
+		t.Fatalf("load cached series details: %v", err)
+	}
 
-	var seriesDate, seasonDate, episodeDate string
+	var seriesDate, seasonTitle, seasonPosterURL, seasonDate, episodeTitle, episodePosterURL, episodeDate string
 	if err := pool.QueryRow(ctx, `
-		SELECT series.release_date::text, season.release_date::text, episode.release_date::text
+		SELECT series.release_date::text,
+		       season.display_title,
+		       season.poster_url,
+		       season.release_date::text,
+		       episode.display_title,
+		       episode.poster_url,
+		       episode.release_date::text
 		FROM titles AS series
 		JOIN titles AS season ON season.parent_id = series.id
 		JOIN titles AS episode ON episode.parent_id = season.id
 		WHERE series.id = $1::uuid
-	`, seriesID).Scan(&seriesDate, &seasonDate, &episodeDate); err != nil {
-		t.Fatalf("query backfilled release dates: %v", err)
+	`, seriesID).Scan(
+		&seriesDate,
+		&seasonTitle,
+		&seasonPosterURL,
+		&seasonDate,
+		&episodeTitle,
+		&episodePosterURL,
+		&episodeDate,
+	); err != nil {
+		t.Fatalf("query backfilled title snapshots: %v", err)
 	}
-	if seriesDate != "1999-03-28" || seasonDate != "2026-08-03" || episodeDate != "2026-08-03" {
+	if seriesDate != "1999-03-28" || seasonDate != "2002-02-10" || episodeDate != "2002-03-17" {
 		t.Fatalf("unexpected backfilled dates: series=%q season=%q episode=%q", seriesDate, seasonDate, episodeDate)
+	}
+	if seasonTitle != "Saison 5" || seasonPosterURL != seasonPoster {
+		t.Fatalf("unexpected cached season snapshot: title=%q poster=%q", seasonTitle, seasonPosterURL)
+	}
+	if episodeTitle != "Astéroïque" || episodePosterURL != episodeStill {
+		t.Fatalf("unexpected cached episode snapshot: title=%q still=%q", episodeTitle, episodePosterURL)
 	}
 }
 
@@ -430,13 +499,71 @@ func TestMatchMappedEpisodesRegroupsCanonicalEpisodesByTVDBAirDate(t *testing.T)
 	}
 }
 
-func TestMatchMappedEpisodesRejectsUnmatchedTVDBEpisode(t *testing.T) {
+func TestMatchMappedEpisodesKeepsMatchedEpisodesWhenTVDBHasUnmatchedTail(t *testing.T) {
+	episodes, links, err := matchMappedEpisodes(
+		"tvdb:series:1002",
+		[]ProviderEpisode{
+			{ExternalID: "1201", Name: "Episode 1", SeasonNumber: 2, EpisodeNumber: 1, AirDate: "2025-01-05"},
+			{ExternalID: "1202", Name: "Episode 2", SeasonNumber: 2, EpisodeNumber: 2, AirDate: "2025-01-12"},
+		},
+		[]Episode{{ID: "tmdb-episode", Name: "Episode 1", SeasonNumber: 1, EpisodeNumber: 13, AirDate: "2025-01-05", ExternalIDs: map[string]string{"tmdb": "513"}}},
+	)
+	if err != nil {
+		t.Fatalf("match partial TVDB hierarchy: %v", err)
+	}
+	if len(episodes) != 1 || episodes[0].ID != "tmdb-episode" || episodes[0].ExternalIDs["tvdb"] != "1201" || links["tmdb-episode"] != "1201" {
+		t.Fatalf("unexpected partial mapping: episodes=%+v links=%+v", episodes, links)
+	}
+}
+
+func TestMatchMappedEpisodesRejectsCompletelyUnmatchedTVDBSeason(t *testing.T) {
 	_, _, err := matchMappedEpisodes(
 		"tvdb:series:1002",
 		[]ProviderEpisode{{ExternalID: "1201", Name: "Unknown", SeasonNumber: 2, EpisodeNumber: 1, AirDate: "2025-01-05"}},
 		[]Episode{{ID: "tmdb-episode", Name: "Different", SeasonNumber: 1, EpisodeNumber: 3, AirDate: "2024-01-21", ExternalIDs: map[string]string{"tmdb": "503"}}},
 	)
 	if !errors.Is(err, ErrProviderFailure) {
-		t.Fatalf("expected provider failure for unmatched episode, got %v", err)
+		t.Fatalf("expected provider failure for completely unmatched season, got %v", err)
+	}
+}
+
+func TestReplaceTVDBEpisodeIDRepairsStaleNumberBasedLink(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	var episodeID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO titles (media_type)
+		VALUES ('episode')
+		RETURNING id::text
+	`).Scan(&episodeID); err != nil {
+		t.Fatalf("create episode: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
+		VALUES ($1::uuid, 'tvdb', 'episode', 'stale-season-number-match')
+	`, episodeID); err != nil {
+		t.Fatalf("seed stale TVDB identity: %v", err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin identity repair: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := replaceTVDBEpisodeID(ctx, tx, episodeID, "official-air-date-match"); err != nil {
+		t.Fatalf("replace TVDB identity: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit TVDB identity repair: %v", err)
+	}
+	var externalID string
+	if err := pool.QueryRow(ctx, `
+		SELECT external_id
+		FROM title_external_ids
+		WHERE title_id = $1::uuid AND provider = 'tvdb' AND namespace = 'episode'
+	`, episodeID).Scan(&externalID); err != nil {
+		t.Fatalf("query repaired TVDB identity: %v", err)
+	}
+	if externalID != "official-air-date-match" {
+		t.Fatalf("unexpected repaired TVDB identity %q", externalID)
 	}
 }

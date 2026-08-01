@@ -59,7 +59,11 @@ type settingsPatchRequest struct {
 	SeriesMappingProvider            nullableString `json:"seriesMappingProvider,omitempty"`
 	AudioLanguage                    nullableString `json:"audioLanguage,omitempty"`
 	SubtitleLanguage                 nullableString `json:"subtitleLanguage,omitempty"`
+	ForcedSubtitleLanguage           nullableString `json:"forcedSubtitleLanguage,omitempty"`
 	AutoplayNextEpisode              nullableBool   `json:"autoplayNextEpisode,omitempty"`
+	SkipIntroEnabled                 nullableBool   `json:"skipIntroEnabled,omitempty"`
+	SkipRecapEnabled                 nullableBool   `json:"skipRecapEnabled,omitempty"`
+	SkipOutroEnabled                 nullableBool   `json:"skipOutroEnabled,omitempty"`
 	CardDensity                      nullableString `json:"cardDensity,omitempty"`
 	AnimationsEnabled                nullableBool   `json:"animationsEnabled,omitempty"`
 	SubtitleSizePercent              nullableInt    `json:"subtitleSizePercent,omitempty"`
@@ -89,6 +93,44 @@ func (a *API) updateInstanceSettings(w http.ResponseWriter, r *http.Request, pri
 		return
 	}
 	writeJSON(w, http.StatusOK, newSettingsLayerResponse(layer))
+}
+func (a *API) maintenanceSettings(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if principal.Role != "admin" {
+		writeError(w, http.StatusForbidden, "settings_forbidden", "This account cannot read maintenance settings")
+		return
+	}
+	state, err := a.settings.Maintenance(r.Context())
+	if err != nil {
+		a.internalError(w, "read maintenance settings", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newMaintenanceSettingsResponse(state))
+}
+
+func (a *API) updateMaintenanceSettings(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !requireJSON(w, r) {
+		return
+	}
+	var request struct {
+		Enabled nullableBool   `json:"enabled"`
+		Message nullableString `json:"message,omitempty"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if !request.Enabled.Set || request.Enabled.Value == nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_settings", "enabled must be a boolean")
+		return
+	}
+	state, err := a.settings.UpdateMaintenance(r.Context(), principal, settings.Maintenance{
+		Enabled: *request.Enabled.Value,
+		Message: request.Message.Value,
+	})
+	if writeSettingsError(a, w, err, "update maintenance settings") {
+		return
+	}
+	writeJSON(w, http.StatusOK, newMaintenanceSettingsResponse(state))
 }
 
 func (a *API) profileSettings(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
@@ -142,7 +184,11 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		SeriesMappingProvider:            settings.OptionalString{Set: request.SeriesMappingProvider.Set, Value: request.SeriesMappingProvider.Value},
 		AudioLanguage:                    settings.OptionalString{Set: request.AudioLanguage.Set, Value: request.AudioLanguage.Value},
 		SubtitleLanguage:                 settings.OptionalString{Set: request.SubtitleLanguage.Set, Value: request.SubtitleLanguage.Value},
+		ForcedSubtitleLanguage:           settings.OptionalString{Set: request.ForcedSubtitleLanguage.Set, Value: request.ForcedSubtitleLanguage.Value},
 		AutoplayNextEpisode:              settings.OptionalBool{Set: request.AutoplayNextEpisode.Set, Value: request.AutoplayNextEpisode.Value},
+		SkipIntroEnabled:                 settings.OptionalBool{Set: request.SkipIntroEnabled.Set, Value: request.SkipIntroEnabled.Value},
+		SkipRecapEnabled:                 settings.OptionalBool{Set: request.SkipRecapEnabled.Set, Value: request.SkipRecapEnabled.Value},
+		SkipOutroEnabled:                 settings.OptionalBool{Set: request.SkipOutroEnabled.Set, Value: request.SkipOutroEnabled.Value},
 		CardDensity:                      settings.OptionalString{Set: request.CardDensity.Set, Value: request.CardDensity.Value},
 		AnimationsEnabled:                settings.OptionalBool{Set: request.AnimationsEnabled.Set, Value: request.AnimationsEnabled.Value},
 		SubtitleSizePercent:              settings.OptionalInt{Set: request.SubtitleSizePercent.Set, Value: request.SubtitleSizePercent.Value},
@@ -173,7 +219,16 @@ func writeSettingsError(a *API, w http.ResponseWriter, err error, operation stri
 	return true
 }
 
+func newMaintenanceSettingsResponse(state settings.Maintenance) map[string]any {
+	return map[string]any{
+		"enabled": state.Enabled,
+		"message": state.Message,
+	}
+}
+
 func newSettingsLayerResponse(layer settings.Layer) map[string]any {
+	layer.Values.MaintenanceEnabled = nil
+	layer.Values.MaintenanceMessage = nil
 	return map[string]any{
 		"schemaVersion": layer.SchemaVersion,
 		"settings":      layer.Values,

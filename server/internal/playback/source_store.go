@@ -15,19 +15,20 @@ const (
 )
 
 type sourceReference struct {
-	ID                        string
-	AuthSessionID             string
-	ProfileID                 string
-	MediaType                 string
-	AddonMediaType            string
-	ResourceID                string
-	Source                    Source
-	Asset                     *storedAsset
-	Capabilities              Capabilities
-	PreferredAudioLanguage    string
-	PreferredSubtitleLanguage string
-	ProviderErrors            []ProviderFailure
-	ExpiresAt                 time.Time
+	ID                              string
+	AuthSessionID                   string
+	ProfileID                       string
+	MediaType                       string
+	AddonMediaType                  string
+	ResourceID                      string
+	Source                          Source
+	Asset                           *storedAsset
+	Capabilities                    Capabilities
+	PreferredAudioLanguage          string
+	PreferredSubtitleLanguage       string
+	PreferredForcedSubtitleLanguage string
+	ProviderErrors                  []ProviderFailure
+	ExpiresAt                       time.Time
 }
 
 type sourceReferenceStore struct {

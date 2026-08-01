@@ -71,6 +71,17 @@ func run(logger *slog.Logger) error {
 		<-maintenanceDone
 	}()
 
+	trackingContext, cancelTracking := context.WithCancel(shutdownContext)
+	trackingDone := make(chan struct{})
+	go func() {
+		defer close(trackingDone)
+		api.RunTracking(trackingContext)
+	}()
+	defer func() {
+		cancelTracking()
+		<-trackingDone
+	}()
+
 	serverError := make(chan error, 1)
 	go func() {
 		logger.Info("Rivune server listening", "address", cfg.ListenAddress, "version", version)

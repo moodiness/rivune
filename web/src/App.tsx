@@ -1,7 +1,7 @@
 import { LoaderCircle, RefreshCw, ServerOff } from "lucide-react";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useAuth } from "./auth";
-import { api, APIError } from "./api";
+import { api, APIError, clearMaintenanceMode, MAINTENANCE_MODE_EVENT, maintenanceModeMessage } from "./api";
 import { Button, RivuneMark } from "./components";
 import { translate as t } from "./i18n";
 import { configureNotificationDuration, notifyInfo } from "./notifications";
@@ -137,10 +137,11 @@ function useSessionNotifications(sessionID: string | undefined, refreshAccount: 
         const { notifications } = await api.sessionNotifications(cursor);
         if (!active) return;
         for (const notification of notifications) {
-          await notifyInfo(notification.message, `Message from ${notification.senderUsername}`);
+          await notifyInfo(notification.message, t("notifications.from", { sender: notification.senderUsername }));
           if (!active) return;
           cursor = notification.id;
           localStorage.setItem(cursorKey, cursor);
+          void api.acknowledgeSessionNotification(notification.id).catch(() => undefined);
         }
       } catch (cause) {
         if (active && cause instanceof APIError && cause.status === 401) {
@@ -167,6 +168,37 @@ export default function App() {
   const pairingApproval = window.location.pathname === "/pair";
   const [view, setViewState] = useState<View>(() => validViews[window.location.hash.slice(1)] ?? "home");
   const [homeResetKey, setHomeResetKey] = useState(0);
+  const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(maintenanceModeMessage);
+  const [checkingMaintenance, setCheckingMaintenance] = useState(false);
+
+  const retryMaintenance = useCallback(async () => {
+    setCheckingMaintenance(true);
+    try {
+      await api.profiles();
+      await refreshAccount();
+      setMaintenanceMessage(null);
+      clearMaintenanceMode();
+    } catch (cause) {
+      if (!(cause instanceof APIError && cause.code === "maintenance_mode")) return;
+    } finally {
+      setCheckingMaintenance(false);
+    }
+  }, [refreshAccount]);
+
+  useEffect(() => {
+    const showMaintenance = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: string }>).detail;
+      setMaintenanceMessage(detail?.message ?? "");
+    };
+    window.addEventListener(MAINTENANCE_MODE_EVENT, showMaintenance);
+    return () => window.removeEventListener(MAINTENANCE_MODE_EVENT, showMaintenance);
+  }, []);
+
+  useEffect(() => {
+    if (maintenanceMessage === null) return;
+    const timer = window.setInterval(() => { void retryMaintenance(); }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [maintenanceMessage, retryMaintenance]);
 
   useEffect(() => {
     applyRuntimeSettings(settings);
@@ -188,6 +220,7 @@ export default function App() {
     window.history.replaceState(null, "", `#${next}`);
   }
 
+  if (maintenanceMessage !== null) return <main className="offline-page maintenance-page"><div className="offline-page__glow" /><RivuneMark /><section><span><ServerOff /></span><h1>{t("app.maintenanceTitle")}</h1><p>{maintenanceMessage || t("app.maintenanceBody")}</p><Button loading={checkingMaintenance} onClick={() => void retryMaintenance()}><RefreshCw size={18} /> {t("app.maintenanceRetry")}</Button></section></main>;
   if (booting) return <div className="boot-screen"><div className="boot-screen__aura" /><RivuneMark /><LoaderCircle className="spin" /><p>{t("app.connecting")}</p></div>;
   if (!discovery) return <main className="offline-page"><div className="offline-page__glow" /><RivuneMark /><section><span><ServerOff /></span><h1>{t("app.offlineTitle")}</h1><p>{t("app.offlineBody")}</p><Button onClick={() => window.location.reload()}><RefreshCw size={18} /> {t("app.reconnect")}</Button></section></main>;
   if (discovery.setupRequired) return <SetupPage />;

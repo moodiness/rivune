@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,17 +11,19 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/password"
 )
 
 var (
-	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrInvalidToken       = errors.New("invalid token")
-	ErrInvalidInput       = errors.New("invalid authentication input")
-	ErrSessionNotFound    = errors.New("session not found")
-	ErrForbidden          = errors.New("authentication operation forbidden")
+	ErrInvalidCredentials   = errors.New("invalid credentials")
+	ErrInvalidToken         = errors.New("invalid token")
+	ErrInvalidInput         = errors.New("invalid authentication input")
+	ErrSessionNotFound      = errors.New("session not found")
+	ErrNotificationNotFound = errors.New("notification not found")
+	ErrForbidden            = errors.New("authentication operation forbidden")
 )
 
 const (
@@ -105,6 +109,14 @@ type SessionNotification struct {
 	ID             int64
 	Message        string
 	SenderUsername string
+	CreatedAt      time.Time
+}
+
+type NotificationBroadcast struct {
+	ID             string
+	Message        string
+	SenderUsername string
+	RecipientCount int64
 	CreatedAt      time.Time
 }
 
@@ -480,7 +492,7 @@ func (s *Service) SendProfileSessionNotification(ctx context.Context, principal 
 	profileID = strings.TrimSpace(profileID)
 	sessionID = strings.TrimSpace(sessionID)
 	message = strings.TrimSpace(message)
-	if profileID == "" || sessionID == "" || message == "" || !utf8.ValidString(message) || utf8.RuneCountInString(message) > maximumSessionNotificationLength {
+	if profileID == "" || sessionID == "" || message == "" || !utf8.ValidString(message) || strings.ContainsRune(message, '\x00') || utf8.RuneCountInString(message) > maximumSessionNotificationLength {
 		return SessionNotification{}, ErrInvalidInput
 	}
 	authorized, err := s.canManageProfile(ctx, principal, profileID)
@@ -518,6 +530,96 @@ func (s *Service) SendProfileSessionNotification(ctx context.Context, principal 
 	return notification, nil
 }
 
+func (s *Service) BroadcastSessionNotification(ctx context.Context, principal Principal, broadcastID, message string) (NotificationBroadcast, error) {
+	if principal.Role != "admin" {
+		return NotificationBroadcast{}, ErrForbidden
+	}
+	broadcastID = strings.TrimSpace(broadcastID)
+	message = strings.TrimSpace(message)
+	var parsedBroadcastID pgtype.UUID
+	if err := parsedBroadcastID.Scan(broadcastID); err != nil || !parsedBroadcastID.Valid ||
+		message == "" || !utf8.ValidString(message) || strings.ContainsRune(message, '\x00') || utf8.RuneCountInString(message) > maximumSessionNotificationLength {
+		return NotificationBroadcast{}, ErrInvalidInput
+	}
+	messageSum := sha256.Sum256([]byte(message))
+	messageFingerprint := hex.EncodeToString(messageSum[:])
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return NotificationBroadcast{}, fmt.Errorf("begin notification broadcast: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", broadcastID); err != nil {
+		return NotificationBroadcast{}, fmt.Errorf("lock notification broadcast: %w", err)
+	}
+
+	var broadcast NotificationBroadcast
+	var expiresAt time.Time
+	err = tx.QueryRow(ctx, `
+		INSERT INTO auth_notification_broadcasts (id, sender_user_id, message, message_fingerprint)
+		VALUES ($1::uuid, $2::uuid, $3, $4)
+		ON CONFLICT (id) DO NOTHING
+		RETURNING id::text, message, created_at, expires_at
+	`, broadcastID, principal.UserID, message, messageFingerprint).Scan(
+		&broadcast.ID, &broadcast.Message, &broadcast.CreatedAt, &expiresAt,
+	)
+	inserted := err == nil
+	if errors.Is(err, pgx.ErrNoRows) {
+		var senderUserID, storedFingerprint string
+		var storedMessage *string
+		err = tx.QueryRow(ctx, `
+			SELECT broadcast.id::text, broadcast.message, broadcast.message_fingerprint, sender.username,
+			       broadcast.recipient_count, broadcast.created_at, broadcast.expires_at, broadcast.sender_user_id::text
+			FROM auth_notification_broadcasts broadcast
+			JOIN users sender ON sender.id = broadcast.sender_user_id
+			WHERE broadcast.id = $1::uuid
+		`, broadcastID).Scan(
+			&broadcast.ID, &storedMessage, &storedFingerprint, &broadcast.SenderUsername, &broadcast.RecipientCount,
+			&broadcast.CreatedAt, &expiresAt, &senderUserID,
+		)
+		if err == nil {
+			if senderUserID != principal.UserID || storedFingerprint != messageFingerprint || (storedMessage != nil && *storedMessage != message) {
+				return NotificationBroadcast{}, ErrInvalidInput
+			}
+			broadcast.Message = message
+		}
+	}
+	if err != nil {
+		return NotificationBroadcast{}, fmt.Errorf("persist notification broadcast: %w", err)
+	}
+
+	if inserted {
+		command, err := tx.Exec(ctx, `
+			INSERT INTO auth_session_notifications (
+				session_id, sender_user_id, message, broadcast_id, created_at, expires_at
+			)
+			SELECT session.id, $2::uuid, $3, $1::uuid, $4, $5
+			FROM auth_sessions session
+			WHERE session.active_profile_id IS NOT NULL
+			  AND session.profile_grant_expires_at > $4
+			  AND session.revoked_at IS NULL
+			  AND session.refresh_expires_at > $4
+			ON CONFLICT (broadcast_id, session_id) WHERE broadcast_id IS NOT NULL DO NOTHING
+		`, broadcastID, principal.UserID, message, broadcast.CreatedAt, expiresAt)
+		if err != nil {
+			return NotificationBroadcast{}, fmt.Errorf("fan out notification broadcast: %w", err)
+		}
+		broadcast.RecipientCount = command.RowsAffected()
+		if _, err := tx.Exec(ctx, `
+			UPDATE auth_notification_broadcasts
+			SET recipient_count = $2
+			WHERE id = $1::uuid
+		`, broadcastID, broadcast.RecipientCount); err != nil {
+			return NotificationBroadcast{}, fmt.Errorf("record notification broadcast audience: %w", err)
+		}
+		broadcast.SenderUsername = principal.Username
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return NotificationBroadcast{}, fmt.Errorf("commit notification broadcast: %w", err)
+	}
+	return broadcast, nil
+}
+
 func (s *Service) SessionNotifications(ctx context.Context, principal Principal, afterID int64) ([]SessionNotification, error) {
 	if afterID < 0 {
 		return nil, ErrInvalidInput
@@ -528,6 +630,7 @@ func (s *Service) SessionNotifications(ctx context.Context, principal Principal,
 		JOIN users sender ON sender.id = notification.sender_user_id
 		WHERE notification.session_id = $1::uuid
 		  AND notification.id > $2
+		  AND notification.acknowledged_at IS NULL
 		  AND notification.expires_at > now()
 		ORDER BY notification.id
 		LIMIT 100
@@ -550,6 +653,26 @@ func (s *Service) SessionNotifications(ctx context.Context, principal Principal,
 		return nil, fmt.Errorf("iterate session notifications: %w", err)
 	}
 	return notifications, nil
+}
+
+func (s *Service) AcknowledgeSessionNotification(ctx context.Context, principal Principal, notificationID int64) error {
+	if notificationID <= 0 {
+		return ErrInvalidInput
+	}
+	command, err := s.pool.Exec(ctx, `
+		UPDATE auth_session_notifications
+		SET acknowledged_at = COALESCE(acknowledged_at, now())
+		WHERE id = $1
+		  AND session_id = $2::uuid
+		  AND expires_at > now()
+	`, notificationID, principal.SessionID)
+	if err != nil {
+		return fmt.Errorf("acknowledge session notification: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		return ErrNotificationNotFound
+	}
+	return nil
 }
 
 func (s *Service) RevokeProfileSession(ctx context.Context, principal Principal, profileID, sessionID string) error {

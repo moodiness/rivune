@@ -48,3 +48,52 @@ test("calendar episode opens the matching series season and episode", async ({ p
   expect(calendarRequest.search.get("to")).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   expect(calendarRequest.search.get("language")).toBe("en-US");
 });
+
+test("calendar TVDB episode opens the mapped season containing its canonical episode ID", async ({ page, rivune: _rivune }) => {
+  const episodeID = "c51c40ea-594f-4ee1-9502-b13144533733";
+  const releaseDate = new Date().toISOString().slice(0, 10);
+  const requestedSeasons: string[] = [];
+  const seasonTwo = {
+    id: "official-season-2", mediaType: "season", seriesId: "series-1", name: "Season 2", overview: "", seasonNumber: 2, episodeCount: 1, airDate: releaseDate, voteAverage: 0, externalIds: { tvdb: "2" },
+    episodes: [
+      { id: "different-official-season-2-episode", mediaType: "episode", seasonId: "official-season-2", name: "Another episode 241", overview: "", seasonNumber: 2, episodeNumber: 241, airDate: releaseDate, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "2241" } },
+    ],
+  };
+  const seasonNine = {
+    id: "official-season-9", mediaType: "season", seriesId: "series-1", name: "Season 9", overview: "", seasonNumber: 9, episodeCount: 1, airDate: "2025-08-25", voteAverage: 0, externalIds: { tvdb: "9" },
+    episodes: [
+      { id: episodeID, mediaType: "episode", seasonId: "official-season-9", name: "Episode 241", overview: "", seasonNumber: 9, episodeNumber: 241, airDate: releaseDate, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "9241" } },
+    ],
+  };
+  const seasonSummaries = [seasonTwo, seasonNine].map(({ episodes: _episodes, ...seasonSummary }) => seasonSummary);
+
+  await page.route("**/api/v1/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname.slice("/api/v1".length);
+    const fulfill = (body: unknown) => route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
+    if (path === "/calendar") {
+      await fulfill({ events: [{ id: "calendar-episode-241", titleId: episodeID, mediaType: "episode", title: "Episode 241", releaseDate, resourceId: "9241", resourceProvider: "tvdb", seriesTitle: "Demain nous appartient", seriesId: "series-1", seasonId: "canonical-season-2", seasonNumber: 2, episodeNumber: 241 }] });
+      return;
+    }
+    if (path === "/metadata/series/series-1") {
+      await fulfill({ id: "series-1", mediaType: "series", name: "Demain nous appartient", originalName: "Demain nous appartient", originalLanguage: "fr", overview: "", firstAirDate: "2017-07-17", numberOfSeasons: 9, numberOfEpisodes: 241, genres: [], voteAverage: 0, voteCount: 0, seasons: seasonSummaries, episodeOrders: [], mappingProvider: "tvdb", externalIds: { tvdb: "331147", tmdb: "72879" } });
+      return;
+    }
+    const seasonMatch = path.match(/^\/metadata\/seasons\/(official-season-[29])$/);
+    if (seasonMatch) {
+      requestedSeasons.push(seasonMatch[1]);
+      await fulfill(seasonMatch[1] === seasonNine.id ? seasonNine : seasonTwo);
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Calendar" }).click();
+  await page.getByRole("button", { name: "Open Episode 241 details" }).click();
+
+  await expect(page.getByRole("tab", { name: /Season 9/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: /Season 2/ })).toHaveAttribute("aria-selected", "false");
+  await expect(page.getByRole("heading", { name: /Demain nous appartient.*S09E241.*Episode 241/ })).toBeVisible();
+  expect(requestedSeasons).toEqual(["official-season-2", "official-season-9"]);
+});

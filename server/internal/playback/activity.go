@@ -45,21 +45,35 @@ type MediaDiagnostics struct {
 	HardwareToneMap bool   `json:"hardwareToneMap"`
 }
 
+type ActivityExternalIDs struct {
+	IMDb string `json:"imdb,omitempty"`
+	TMDB string `json:"tmdb,omitempty"`
+	TVDB string `json:"tvdb,omitempty"`
+}
+type ActivityExternalIDMediaTypes struct {
+	IMDb string `json:"imdb,omitempty"`
+	TMDB string `json:"tmdb,omitempty"`
+	TVDB string `json:"tvdb,omitempty"`
+}
+
 type ActivitySession struct {
-	ID         string    `json:"id"`
-	TitleID    string    `json:"titleId,omitempty"`
-	Title      string    `json:"title"`
-	MediaType  string    `json:"mediaType"`
-	Mode       string    `json:"mode"`
-	Username   string    `json:"username"`
-	ProfileID  string    `json:"profileId"`
-	Profile    string    `json:"profile"`
-	Device     string    `json:"device"`
-	Platform   string    `json:"platform"`
-	Processing bool      `json:"processing"`
-	CreatedAt  time.Time `json:"createdAt"`
-	LastSeenAt time.Time `json:"lastSeenAt"`
-	ExpiresAt  time.Time `json:"expiresAt"`
+	ID                   string                       `json:"id"`
+	TitleID              string                       `json:"titleId,omitempty"`
+	ArtworkURL           string                       `json:"artworkUrl,omitempty"`
+	ExternalIDs          ActivityExternalIDs          `json:"externalIds"`
+	ExternalIDMediaTypes ActivityExternalIDMediaTypes `json:"externalIdMediaTypes,omitempty"`
+	Title                string                       `json:"title"`
+	MediaType            string                       `json:"mediaType"`
+	Mode                 string                       `json:"mode"`
+	Username             string                       `json:"username"`
+	ProfileID            string                       `json:"profileId"`
+	Profile              string                       `json:"profile"`
+	Device               string                       `json:"device"`
+	Platform             string                       `json:"platform"`
+	Processing           bool                         `json:"processing"`
+	CreatedAt            time.Time                    `json:"createdAt"`
+	LastSeenAt           time.Time                    `json:"lastSeenAt"`
+	ExpiresAt            time.Time                    `json:"expiresAt"`
 }
 
 type MediaActivityJob struct {
@@ -85,6 +99,60 @@ type mediaDiagnosticsProvider interface {
 	ProcessLimit() int
 }
 
+func activityArtworkURL(candidates *[6]string) string {
+	for _, candidate := range candidates {
+		if validMediaURL(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func formatActivityTitle(
+	mediaType, storedTitle, parentMediaType, parentTitle, ancestorTitle string,
+	seasonOrdinal, episodeOrdinal *int,
+) string {
+	if mediaType != "episode" {
+		if strings.TrimSpace(storedTitle) != "" {
+			return storedTitle
+		}
+		switch mediaType {
+		case "movie":
+			return "Movie"
+		case "series":
+			return "Series"
+		case "season":
+			return "Season"
+		default:
+			return "Media"
+		}
+	}
+
+	seriesTitle := strings.TrimSpace(ancestorTitle)
+	if parentMediaType == "series" {
+		seriesTitle = strings.TrimSpace(parentTitle)
+	}
+	parts := make([]string, 0, 3)
+	if seriesTitle != "" {
+		parts = append(parts, seriesTitle)
+	}
+	switch {
+	case seasonOrdinal != nil && *seasonOrdinal >= 0 && episodeOrdinal != nil && *episodeOrdinal >= 0:
+		parts = append(parts, fmt.Sprintf("S%02dE%02d", *seasonOrdinal, *episodeOrdinal))
+	case seasonOrdinal != nil && *seasonOrdinal >= 0:
+		parts = append(parts, fmt.Sprintf("S%02d", *seasonOrdinal))
+	case episodeOrdinal != nil && *episodeOrdinal >= 0:
+		parts = append(parts, fmt.Sprintf("E%02d", *episodeOrdinal))
+	}
+	if episodeTitle := strings.TrimSpace(storedTitle); episodeTitle != "" {
+		parts = append(parts, episodeTitle)
+	}
+	if len(parts) == 0 {
+		return "Episode"
+	}
+	return strings.Join(parts, " · ")
+}
+
 func (service *Service) Activity(ctx context.Context, principal auth.Principal) (Activity, error) {
 	if principal.Role != "admin" {
 		return Activity{}, ErrForbidden
@@ -95,6 +163,17 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 
 	rows, err := service.pool.Query(ctx, `
 		SELECT playback.id::text, COALESCE(playback.title_id, ''), COALESCE(title.display_title, ''),
+		       COALESCE(parent.media_type, ''), COALESCE(parent.display_title, ''),
+		       COALESCE(ancestor.display_title, ''), parent.ordinal, title.ordinal,
+		       COALESCE(title.poster_url, ''), COALESCE(title.background_url, ''),
+		       COALESCE(parent.poster_url, ''), COALESCE(parent.background_url, ''),
+		       COALESCE(ancestor.poster_url, ''), COALESCE(ancestor.background_url, ''),
+		       COALESCE(canonical_identities.imdb, identities.imdb, ''),
+		       COALESCE(canonical_identities.tmdb, identities.tmdb, ''),
+		       COALESCE(identities.tvdb, ''),
+		       COALESCE(canonical_identities.imdb_namespace, CASE WHEN identities.imdb IS NOT NULL THEN title.media_type END, ''),
+		       COALESCE(canonical_identities.tmdb_namespace, CASE WHEN identities.tmdb IS NOT NULL THEN title.media_type END, ''),
+		       CASE WHEN identities.tvdb IS NOT NULL THEN title.media_type ELSE '' END,
 		       playback.media_type, playback.assets, users.username, playback.profile_id::text,
 		       profiles.name, devices.name, devices.platform, playback.created_at,
 		       playback.last_seen_at, playback.expires_at
@@ -104,6 +183,35 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 		JOIN devices ON devices.id = sessions.device_id
 		JOIN profiles ON profiles.id = playback.profile_id
 		LEFT JOIN titles title ON title.id::text = playback.title_id
+		LEFT JOIN titles parent ON parent.id = title.parent_id
+		LEFT JOIN titles ancestor ON ancestor.id = parent.parent_id
+		LEFT JOIN LATERAL (
+			SELECT max(external_id) FILTER (WHERE provider = 'imdb') AS imdb,
+			       max(external_id) FILTER (WHERE provider = 'tmdb') AS tmdb,
+			       max(external_id) FILTER (WHERE provider = 'tvdb') AS tvdb
+			FROM title_external_ids
+			WHERE title_id = title.id
+			  AND namespace = title.media_type
+			  AND provider IN ('imdb', 'tmdb', 'tvdb')
+		) identities ON true
+		LEFT JOIN LATERAL (
+			SELECT max(external_id) FILTER (WHERE provider = 'imdb') AS imdb,
+			       max(external_id) FILTER (WHERE provider = 'tmdb') AS tmdb,
+			       max(namespace) FILTER (WHERE provider = 'imdb') AS imdb_namespace,
+			       max(namespace) FILTER (WHERE provider = 'tmdb') AS tmdb_namespace
+			FROM title_external_ids
+			WHERE title_id = CASE
+				WHEN title.media_type IN ('movie', 'series') THEN title.id
+				WHEN parent.media_type IN ('movie', 'series') THEN parent.id
+				WHEN ancestor.media_type IN ('movie', 'series') THEN ancestor.id
+			END
+			  AND provider IN ('imdb', 'tmdb')
+			  AND namespace = CASE
+				WHEN title.media_type IN ('movie', 'series') THEN title.media_type
+				WHEN parent.media_type IN ('movie', 'series') THEN parent.media_type
+				WHEN ancestor.media_type IN ('movie', 'series') THEN ancestor.media_type
+			  END
+		) canonical_identities ON true
 		WHERE playback.expires_at > now()
 		  AND playback.last_seen_at > now() - $1::interval
 		ORDER BY playback.last_seen_at DESC, playback.created_at DESC
@@ -117,20 +225,27 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 	for rows.Next() {
 		var value ActivitySession
 		var assetsJSON []byte
+		var artworkCandidates [6]string
+		var parentMediaType, parentTitle, ancestorTitle string
+		var seasonOrdinal, episodeOrdinal *int
 		if err := rows.Scan(
-			&value.ID, &value.TitleID, &value.Title, &value.MediaType, &assetsJSON,
-			&value.Username, &value.ProfileID, &value.Profile, &value.Device, &value.Platform,
-			&value.CreatedAt, &value.LastSeenAt, &value.ExpiresAt,
+			&value.ID, &value.TitleID, &value.Title,
+			&parentMediaType, &parentTitle, &ancestorTitle, &seasonOrdinal, &episodeOrdinal,
+			&artworkCandidates[0], &artworkCandidates[1], &artworkCandidates[2],
+			&artworkCandidates[3], &artworkCandidates[4], &artworkCandidates[5],
+			&value.ExternalIDs.IMDb, &value.ExternalIDs.TMDB, &value.ExternalIDs.TVDB,
+			&value.ExternalIDMediaTypes.IMDb, &value.ExternalIDMediaTypes.TMDB, &value.ExternalIDMediaTypes.TVDB,
+			&value.MediaType, &assetsJSON, &value.Username, &value.ProfileID, &value.Profile,
+			&value.Device, &value.Platform, &value.CreatedAt, &value.LastSeenAt, &value.ExpiresAt,
 		); err != nil {
 			return Activity{}, fmt.Errorf("scan playback activity: %w", err)
 		}
 		value.Mode = activityMode(assetsJSON)
-		if value.Title == "" {
-			value.Title = value.TitleID
-		}
-		if value.Title == "" {
-			value.Title = value.MediaType
-		}
+		value.ArtworkURL = activityArtworkURL(&artworkCandidates)
+		value.Title = formatActivityTitle(
+			value.MediaType, value.Title, parentMediaType, parentTitle, ancestorTitle,
+			seasonOrdinal, episodeOrdinal,
+		)
 		sessions = append(sessions, value)
 	}
 	if err := rows.Err(); err != nil {

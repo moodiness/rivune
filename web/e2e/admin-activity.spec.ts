@@ -1,0 +1,86 @@
+import { expect, test } from "./fixtures/rivune";
+
+const now = "2026-07-31T12:00:00Z";
+
+const activity = {
+  summary: { activeSessions: 2, activeJobs: 0, processingSlots: 0, processingLimit: 2, storageBytes: 0, storageLimitBytes: 1_073_741_824 },
+  diagnostics: { videoEncoder: "h264", hardwareToneMap: false },
+  sessions: [
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      titleId: "episode-1",
+      artworkUrl: "https://fixtures.rivune.test/activity-artwork.jpg",
+      externalIds: { imdb: "tt0149460", tmdb: "615", tvdb: "11704240" },
+      externalIdMediaTypes: { imdb: "series", tmdb: "series", tvdb: "episode" },
+      title: "Futurama · S05E06 · Astéroïque",
+      mediaType: "episode",
+      mode: "direct",
+      username: "fixture-owner",
+      profileId: "11111111-1111-4111-8111-111111111112",
+      profile: "Alice",
+      device: "Living room",
+      platform: "Web",
+      processing: false,
+      createdAt: now,
+      lastSeenAt: now,
+      expiresAt: "2026-07-31T13:00:00Z",
+    },
+    {
+      id: "22222222-2222-4222-8222-222222222222",
+      title: "Metadata pending",
+      mediaType: "movie",
+      mode: "direct",
+      username: "fixture-owner",
+      profileId: "11111111-1111-4111-8111-111111111112",
+      profile: "Alice",
+      device: "Phone",
+      platform: "Web",
+      processing: false,
+      createdAt: now,
+      lastSeenAt: now,
+      expiresAt: "2026-07-31T13:00:00Z",
+      artworkUrl: "https://fixtures.rivune.test/missing-artwork.jpg",
+      externalIds: {},
+    },
+  ],
+  jobs: [],
+};
+
+test("now-playing sessions render artwork, exact provider badges, and a stable missing-metadata fallback", async ({ page, rivune: _rivune }) => {
+  await page.route("**/api/v1/playback/activity", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(activity) });
+  });
+  await page.route("https://fixtures.rivune.test/activity-artwork.jpg", async (route) => {
+    await route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="120"><rect width="80" height="120" fill="#345"/></svg>' });
+  });
+  await page.route("https://fixtures.rivune.test/missing-artwork.jpg", async (route) => {
+    await route.fulfill({ status: 404, body: "missing" });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Administration" }).click();
+  await page.getByRole("button", { name: /Activity/ }).click();
+
+  const artworkSession = page.locator(".activity-session").filter({ hasText: "Futurama · S05E06 · Astéroïque" });
+  const artwork = artworkSession.getByRole("img", { name: "Futurama · S05E06 · Astéroïque" });
+  await expect(artwork).toBeVisible();
+  await expect(artwork).toHaveAttribute("loading", "lazy");
+  await expect(artworkSession.locator(".activity-session__copy > strong")).toHaveText("Futurama · S05E06 · Astéroïque");
+  await expect(artworkSession.getByLabel("IMDb · tt0149460")).toHaveAttribute("href", "https://www.imdb.com/title/tt0149460/");
+  const tmdb = artworkSession.getByLabel("TMDB · 615");
+  await expect(tmdb).toHaveAttribute("href", "https://www.themoviedb.org/tv/615");
+  await expect(tmdb.locator("svg")).toHaveCount(1);
+  await expect(artworkSession.getByLabel("TVDB · 11704240")).toHaveAttribute("href", "https://thetvdb.com/dereferrer/episode/11704240");
+  await expect(artworkSession.locator(".activity-session__provider")).toHaveCount(3);
+
+  const missingSession = page.locator(".activity-session").filter({ hasText: "Metadata pending" });
+  await expect(missingSession.locator(".activity-session__artwork > svg")).toBeVisible();
+  await expect(missingSession.locator(".activity-session__provider")).toHaveCount(0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(artworkSession).toBeVisible();
+  await expect(artworkSession.locator(".activity-session__providers")).toBeVisible();
+  const bounds = await artworkSession.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(390);
+});

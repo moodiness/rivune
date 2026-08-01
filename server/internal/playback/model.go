@@ -32,11 +32,12 @@ type Capabilities struct {
 }
 
 type SourcesInput struct {
-	MediaType                 string       `json:"mediaType"`
-	ResourceID                string       `json:"resourceId"`
-	Capabilities              Capabilities `json:"capabilities"`
-	PreferredAudioLanguage    string       `json:"-"`
-	PreferredSubtitleLanguage string       `json:"-"`
+	MediaType                       string       `json:"mediaType"`
+	ResourceID                      string       `json:"resourceId"`
+	Capabilities                    Capabilities `json:"capabilities"`
+	PreferredAudioLanguage          string       `json:"-"`
+	PreferredSubtitleLanguage       string       `json:"-"`
+	PreferredForcedSubtitleLanguage string       `json:"-"`
 }
 
 type SourceOption struct {
@@ -74,14 +75,15 @@ type Preparation struct {
 }
 
 type ResolveInput struct {
-	SourceRef                 string       `json:"sourceRef"`
-	TitleID                   string       `json:"titleId,omitempty"`
-	PreferredAudioTrack       *int         `json:"preferredAudioTrack,omitempty"`
-	PreferredSubtitleID       string       `json:"preferredSubtitleId,omitempty"`
-	StartSeconds              float64      `json:"startSeconds,omitempty"`
-	PreferredAudioLanguage    string       `json:"-"`
-	PreferredSubtitleLanguage string       `json:"-"`
-	Capabilities              Capabilities `json:"-"`
+	SourceRef                       string       `json:"sourceRef"`
+	TitleID                         string       `json:"titleId,omitempty"`
+	PreferredAudioTrack             *int         `json:"preferredAudioTrack,omitempty"`
+	PreferredSubtitleID             string       `json:"preferredSubtitleId,omitempty"`
+	StartSeconds                    float64      `json:"startSeconds,omitempty"`
+	PreferredAudioLanguage          string       `json:"-"`
+	PreferredSubtitleLanguage       string       `json:"-"`
+	PreferredForcedSubtitleLanguage string       `json:"-"`
+	Capabilities                    Capabilities `json:"-"`
 }
 
 type MediaTrack struct {
@@ -91,6 +93,7 @@ type MediaTrack struct {
 	Profile  string `json:"profile,omitempty"`
 	Language string `json:"language,omitempty"`
 	Title    string `json:"title,omitempty"`
+	Forced   bool   `json:"forced,omitempty"`
 	Width    int    `json:"width,omitempty"`
 	Height   int    `json:"height,omitempty"`
 	Channels int    `json:"channels,omitempty"`
@@ -132,6 +135,7 @@ type Subtitle struct {
 	ManifestID string `json:"manifestId"`
 	Language   string `json:"language,omitempty"`
 	URL        string `json:"url"`
+	Forced     bool   `json:"forced,omitempty"`
 	Default    bool   `json:"default,omitempty"`
 }
 

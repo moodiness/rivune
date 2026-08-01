@@ -196,6 +196,9 @@ func (c *Client) EnrichSeason(ctx context.Context, seriesTVDBID string, season m
 		if !exists {
 			continue
 		}
+		if tmdbAirDate, tvdbAirDate := strings.TrimSpace(episode.AirDate), strings.TrimSpace(value.Aired); tmdbAirDate != "" && tvdbAirDate != "" && tmdbAirDate != tvdbAirDate {
+			continue
+		}
 		if episode.AdditionalIDs == nil {
 			episode.AdditionalIDs = make(map[string]string, 1)
 		}

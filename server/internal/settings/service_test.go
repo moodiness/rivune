@@ -1,10 +1,13 @@
 package settings
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/moodiness/rivune/server/internal/auth"
 )
 
 func TestValidatePatchRejectsUnknownValues(t *testing.T) {
@@ -17,6 +20,7 @@ func TestValidatePatchRejectsUnknownValues(t *testing.T) {
 		{Theme: OptionalString{Set: true, Value: &invalidTheme}},
 		{MaximumResolution: OptionalString{Set: true, Value: &invalidResolution}},
 		{AudioLanguage: OptionalString{Set: true, Value: &invalidLanguage}},
+		{ForcedSubtitleLanguage: OptionalString{Set: true, Value: &invalidLanguage}},
 		{MetadataRegion: OptionalString{Set: true, Value: &invalidRegion}},
 		{SeriesMappingProvider: OptionalString{Set: true, Value: &invalidMapping}},
 		{},
@@ -34,6 +38,61 @@ func TestApplyPatchCanClearOverride(t *testing.T) {
 	updated := applyPatch(values, Patch{Theme: OptionalString{Set: true, Value: nil}})
 	if updated.Theme != nil {
 		t.Fatalf("expected theme override to be removed, got %q", *updated.Theme)
+	}
+}
+
+func TestForcedSubtitleLanguageNormalizationAndInheritance(t *testing.T) {
+	serverInput := "FR-ca"
+	if err := validatePatch(Patch{ForcedSubtitleLanguage: OptionalString{Set: true, Value: &serverInput}}); err != nil {
+		t.Fatalf("valid forced subtitle language was rejected: %v", err)
+	}
+	serverValues := applyPatch(Values{}, Patch{ForcedSubtitleLanguage: OptionalString{Set: true, Value: &serverInput}})
+	if serverValues.ForcedSubtitleLanguage == nil || *serverValues.ForcedSubtitleLanguage != "fr-CA" {
+		t.Fatalf("forced subtitle language was not normalized: %+v", serverValues)
+	}
+
+	effective := defaultEffective()
+	applyLayer(&effective, serverValues, "instance")
+	applyLayer(&effective, Values{}, "profile")
+	if effective.Values.ForcedSubtitleLanguage != "fr-CA" || effective.Sources["forcedSubtitleLanguage"] != "instance" {
+		t.Fatalf("profile did not inherit server forced subtitle language: %+v", effective)
+	}
+
+	profileInput := "EN-us"
+	profileValues := applyPatch(Values{}, Patch{ForcedSubtitleLanguage: OptionalString{Set: true, Value: &profileInput}})
+	applyLayer(&effective, profileValues, "profile")
+	if effective.Values.ForcedSubtitleLanguage != "en-US" || effective.Sources["forcedSubtitleLanguage"] != "profile" {
+		t.Fatalf("profile forced subtitle override was not applied: %+v", effective)
+	}
+}
+
+func TestSkipMarkerDefaultsAndProfileOverrides(t *testing.T) {
+	effective := defaultEffective()
+	if !effective.Values.SkipIntroEnabled || !effective.Values.SkipRecapEnabled || !effective.Values.SkipOutroEnabled {
+		t.Fatalf("manual skip actions should be enabled by default: %+v", effective.Values)
+	}
+
+	disabled := false
+	instance := applyPatch(Values{}, Patch{
+		SkipIntroEnabled: OptionalBool{Set: true, Value: &disabled},
+		SkipRecapEnabled: OptionalBool{Set: true, Value: &disabled},
+	})
+	applyLayer(&effective, instance, "instance")
+	if effective.Values.SkipIntroEnabled || effective.Values.SkipRecapEnabled || !effective.Values.SkipOutroEnabled {
+		t.Fatalf("server skip defaults were not applied: %+v", effective.Values)
+	}
+
+	enabled := true
+	profile := applyPatch(Values{}, Patch{SkipIntroEnabled: OptionalBool{Set: true, Value: &enabled}})
+	applyLayer(&effective, profile, "profile")
+	if !effective.Values.SkipIntroEnabled || effective.Sources["skipIntroEnabled"] != "profile" ||
+		effective.Values.SkipRecapEnabled || effective.Sources["skipRecapEnabled"] != "instance" {
+		t.Fatalf("profile skip override did not take precedence: %+v", effective)
+	}
+
+	cleared := applyPatch(profile, Patch{SkipIntroEnabled: OptionalBool{Set: true, Value: nil}})
+	if cleared.SkipIntroEnabled != nil {
+		t.Fatalf("nullable skip override was not cleared: %+v", cleared)
 	}
 }
 
@@ -142,12 +201,14 @@ func TestNewSettingsClearEveryOverride(t *testing.T) {
 	number := 10
 	text := "value"
 	values := Values{
-		AutoplayNextEpisode: &enabled, CardDensity: &text, AnimationsEnabled: &enabled,
+		AutoplayNextEpisode: &enabled, SkipIntroEnabled: &enabled, SkipRecapEnabled: &enabled, SkipOutroEnabled: &enabled,
+		CardDensity: &text, AnimationsEnabled: &enabled,
 		SubtitleSizePercent: &number, SubtitleTextColor: &text, SubtitleBackgroundOpacityPercent: &number,
 		NotificationsEnabled: &enabled, NotificationDurationSeconds: &number, NotificationPollIntervalSeconds: &number,
 	}
 	updated := applyPatch(values, Patch{
-		AutoplayNextEpisode: OptionalBool{Set: true}, CardDensity: OptionalString{Set: true},
+		AutoplayNextEpisode: OptionalBool{Set: true}, SkipIntroEnabled: OptionalBool{Set: true},
+		SkipRecapEnabled: OptionalBool{Set: true}, SkipOutroEnabled: OptionalBool{Set: true}, CardDensity: OptionalString{Set: true},
 		AnimationsEnabled: OptionalBool{Set: true}, SubtitleSizePercent: OptionalInt{Set: true},
 		SubtitleTextColor: OptionalString{Set: true}, SubtitleBackgroundOpacityPercent: OptionalInt{Set: true},
 		NotificationsEnabled: OptionalBool{Set: true}, NotificationDurationSeconds: OptionalInt{Set: true},
@@ -214,7 +275,8 @@ func TestLegacySettingsJSONUsesNewDefaults(t *testing.T) {
 	}
 	effective := defaultEffective()
 	applyLayer(&effective, legacy, "instance")
-	if effective.Values.Theme != "dark" || !effective.Values.AutoplayNextEpisode || effective.Values.CardDensity != "comfortable" ||
+	if effective.Values.Theme != "dark" || !effective.Values.AutoplayNextEpisode ||
+		!effective.Values.SkipIntroEnabled || !effective.Values.SkipRecapEnabled || !effective.Values.SkipOutroEnabled || effective.Values.CardDensity != "comfortable" ||
 		!effective.Values.AnimationsEnabled || effective.Values.SubtitleSizePercent != 100 || effective.Values.SubtitleTextColor != "#FFFFFF" ||
 		effective.Values.SubtitleBackgroundOpacityPercent != 60 || !effective.Values.NotificationsEnabled ||
 		effective.Values.NotificationDurationSeconds != 5 || effective.Values.NotificationPollIntervalSeconds != 5 {
@@ -227,5 +289,19 @@ func TestLegacySettingsJSONUsesNewDefaults(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"subtitleSizePercent":125`) {
 		t.Fatalf("new setting used the wrong JSON name: %s", encoded)
+	}
+}
+
+func TestMaintenanceMessageBoundAndAuthorization(t *testing.T) {
+	message := strings.Repeat("é", MaintenanceMessageMaximumSize+1)
+	service := NewService(nil)
+	_, err := service.UpdateMaintenance(context.Background(), auth.Principal{Role: "admin"}, Maintenance{Enabled: true, Message: &message})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected oversized message rejection, got %v", err)
+	}
+
+	_, err = service.UpdateMaintenance(context.Background(), auth.Principal{Role: "member"}, Maintenance{Enabled: true})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected member update rejection, got %v", err)
 	}
 }

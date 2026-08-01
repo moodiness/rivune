@@ -27,17 +27,19 @@ type ResourceFetcher interface {
 }
 
 type Service struct {
-	pool         *pgxpool.Pool
-	addons       ResourceFetcher
-	client       *http.Client
-	processor    MediaProcessor
-	now          func() time.Time
-	mediaOptions MediaOptions
-	references   *sourceReferenceStore
-	probes       *mediaProbeCache
-	preparations *playbackPreparationCache
-	hlsMu        sync.Mutex
-	hlsJobs      map[string]*hlsJob
+	pool           *pgxpool.Pool
+	addons         ResourceFetcher
+	client         *http.Client
+	introDBClient  *http.Client
+	introDBBaseURL string
+	processor      MediaProcessor
+	now            func() time.Time
+	mediaOptions   MediaOptions
+	references     *sourceReferenceStore
+	probes         *mediaProbeCache
+	preparations   *playbackPreparationCache
+	hlsMu          sync.Mutex
+	hlsJobs        map[string]*hlsJob
 }
 
 type rawStream struct {
@@ -56,6 +58,7 @@ type rawSubtitle struct {
 	ID       string `json:"id"`
 	URL      string `json:"url"`
 	Language string `json:"lang"`
+	Forced   bool   `json:"forced"`
 }
 
 type behaviorHints struct {
@@ -85,6 +88,7 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 	now := func() time.Time { return time.Now().UTC() }
 	return &Service{
 		pool: pool, addons: addons, client: &http.Client{Transport: transport}, processor: processor,
+		introDBClient: &http.Client{Transport: transport.Clone(), Timeout: 8 * time.Second}, introDBBaseURL: introDBDefaultBaseURL,
 		now: now, mediaOptions: options, hlsJobs: make(map[string]*hlsJob),
 		references: newSourceReferenceStore(now), probes: newMediaProbeCache(now), preparations: newPlaybackPreparationCache(now),
 	}, nil
@@ -95,6 +99,7 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 	input.ResourceID = strings.TrimSpace(input.ResourceID)
 	input.PreferredAudioLanguage = strings.TrimSpace(input.PreferredAudioLanguage)
 	input.PreferredSubtitleLanguage = strings.TrimSpace(input.PreferredSubtitleLanguage)
+	input.PreferredForcedSubtitleLanguage = strings.TrimSpace(input.PreferredForcedSubtitleLanguage)
 	if !service.hasActiveProfile(principal) {
 		return SourceList{}, ErrActiveProfileRequired
 	}
@@ -130,7 +135,8 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 			MediaType: input.MediaType, AddonMediaType: addonMediaType, ResourceID: input.ResourceID,
 			Source: source, Asset: asset, Capabilities: input.Capabilities,
 			PreferredAudioLanguage: input.PreferredAudioLanguage, PreferredSubtitleLanguage: input.PreferredSubtitleLanguage,
-			ProviderErrors: providerErrors,
+			PreferredForcedSubtitleLanguage: input.PreferredForcedSubtitleLanguage,
+			ProviderErrors:                  providerErrors,
 		})
 		if referenceErr != nil {
 			return SourceList{}, fmt.Errorf("create source reference: %w", referenceErr)
@@ -168,7 +174,8 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 	}
 	preferences := ResolveInput{
 		Capabilities: reference.Capabilities, PreferredAudioLanguage: reference.PreferredAudioLanguage,
-		PreferredSubtitleLanguage: reference.PreferredSubtitleLanguage,
+		PreferredSubtitleLanguage:       reference.PreferredSubtitleLanguage,
+		PreferredForcedSubtitleLanguage: reference.PreferredForcedSubtitleLanguage,
 	}
 	if err := applyPlaybackPreferences(sources, assets, preferences); err != nil {
 		return Preparation{}, err
@@ -212,11 +219,12 @@ func (service *Service) Resolve(ctx context.Context, principal auth.Principal, i
 	input.Capabilities = reference.Capabilities
 	input.PreferredAudioLanguage = reference.PreferredAudioLanguage
 	input.PreferredSubtitleLanguage = reference.PreferredSubtitleLanguage
+	input.PreferredForcedSubtitleLanguage = reference.PreferredForcedSubtitleLanguage
 	if err := applyPlaybackPreferences(sources, streamAssets, input); err != nil {
 		return Session{}, err
 	}
 	subtitles := append([]Subtitle(nil), prepared.subtitles...)
-	if err := applySubtitlePreference(subtitles, input.PreferredSubtitleID, input.PreferredSubtitleLanguage); err != nil {
+	if err := applySubtitlePreference(subtitles, input.PreferredSubtitleID, input.PreferredForcedSubtitleLanguage, input.PreferredSubtitleLanguage); err != nil {
 		return Session{}, err
 	}
 	subtitleAssets := make([]storedAsset, len(prepared.subtitleAssets))
@@ -302,7 +310,7 @@ func validateSourcesInput(input SourcesInput) error {
 	if len(input.MediaType) < 1 || len(input.MediaType) > 64 || len(input.ResourceID) < 1 || len(input.ResourceID) > 2048 {
 		return ErrInvalidInput
 	}
-	if len(input.PreferredAudioLanguage) > 64 || len(input.PreferredSubtitleLanguage) > 64 {
+	if len(input.PreferredAudioLanguage) > 64 || len(input.PreferredSubtitleLanguage) > 64 || len(input.PreferredForcedSubtitleLanguage) > 64 {
 		return ErrInvalidInput
 	}
 	return validateCapabilities(input.Capabilities)
@@ -439,7 +447,7 @@ func normalizeSubtitles(batch addon.ResourceBatch) ([]Subtitle, []storedAsset) {
 			}
 			subtitles = append(subtitles, Subtitle{
 				ID: id, AddonID: result.AddonID, ManifestID: result.ManifestID,
-				Language: strings.TrimSpace(subtitle.Language), URL: subtitle.URL,
+				Language: strings.TrimSpace(subtitle.Language), URL: subtitle.URL, Forced: subtitle.Forced,
 			})
 			assets = append(assets, storedAsset{ID: id, Kind: kind, URL: subtitle.URL})
 		}
