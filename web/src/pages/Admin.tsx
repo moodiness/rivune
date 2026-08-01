@@ -2,7 +2,7 @@ import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleS
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
-import { AddTile, Button, ConfirmDialog, EmptyState, IconButton, Modal, Notice, SectionHeading, Skeleton } from "../components";
+import { AddTile, Button, ConfirmDialog, EmptyState, IconButton, Modal, Notice, Skeleton } from "../components";
 import { translate } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
@@ -48,9 +48,19 @@ export function AdminPage() {
   }, [canManage, isAdmin, tab]);
 
   return <div className="standard-page admin-page page-enter">
-    <SectionHeading eyebrow={canManage ? "Control room" : "Your space"} title={canManage ? "Administration." : "Preferences."} description={canManage ? "Shape Rivune for everyone who shares this server." : "Personalize this profile."} />
+    <header className="admin-page__header">
+      <div className="admin-page__heading">
+        <span>{canManage ? "Server operations" : "Profile workspace"}</span>
+        <h1>{canManage ? "Administration" : "Preferences"}</h1>
+        <p>{canManage ? "Manage access, sources, curation, and live playback from one focused workspace." : "Personalize how Rivune looks and plays for this profile."}</p>
+      </div>
+      <div className="admin-page__context" aria-label="Workspace access">
+        <span><Server size={16} aria-hidden="true" /> {canManage ? "Server workspace" : "Personal workspace"}</span>
+        <span><Shield size={16} aria-hidden="true" /> {isAdmin ? "Administrator access" : canManage ? "Manager access" : "Profile access"}</span>
+      </div>
+    </header>
     <div className={`admin-layout ${canManage ? "" : "admin-layout--preferences"}`}>
-      {canManage && <nav className="admin-tabs">{visibleTabs.map((item) => { const Icon = item.icon; return <button key={item.id} className={tab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}><span><Icon size={20} /></span><div><strong>{item.label}</strong><small>{item.description}</small></div><ChevronDown size={17} /></button>; })}</nav>}
+      {canManage && <nav className="admin-tabs" aria-label="Administration sections">{visibleTabs.map((item) => { const Icon = item.icon; return <button type="button" aria-current={tab === item.id ? "page" : undefined} key={item.id} className={tab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}><span><Icon size={20} aria-hidden="true" /></span><div><strong>{item.label}</strong><small>{item.description}</small></div><ChevronDown size={17} aria-hidden="true" /></button>; })}</nav>}
       <section className="admin-panel">{tab === "profiles" ? <ProfilesAdmin /> : tab === "addons" ? <AddonsAdmin /> : tab === "collections" ? <CollectionsAdmin /> : tab === "activity" ? <ActivityAdmin /> : <SettingsAdmin />}</section>
     </div>
   </div>;
@@ -303,17 +313,36 @@ function ProfilesAdmin() {
       setSendingBroadcast(false);
     }
   }
+  const enabledProfiles = profiles.filter((profile) => profile.enabled).length;
+  const protectedProfiles = profiles.filter((profile) => profile.hasPin).length;
+  const kidsProfiles = profiles.filter((profile) => profile.isChild).length;
 
-  return <div className="admin-section">
+  return <div className="admin-section profiles-admin">
     <div className="admin-section__header">
-      <div><span>Household</span><h2>Profiles</h2><p>Separate spaces, recommendations, and progress for every viewer.</p></div>
+      <div><span>Household access</span><h2>Profiles</h2><p>Give every viewer a distinct space, then manage access and connected devices.</p></div>
       <div className="admin-section__actions">
         {account?.user.role === "admin" && <Button variant="secondary" onClick={openBroadcast}><Radio size={18} /> {translate("admin.broadcast.open")}</Button>}
         <Button onClick={() => openEditor("new")}><Plus size={18} /> New profile</Button>
       </div>
     </div>
+    <section className="admin-summary" aria-label="Profile overview">
+      <article><span><Users size={18} aria-hidden="true" /></span><div><strong>{profiles.length}</strong><small>Total profiles</small></div></article>
+      <article><span><Check size={18} aria-hidden="true" /></span><div><strong>{enabledProfiles}</strong><small>Enabled now</small></div></article>
+      <article><span><Shield size={18} aria-hidden="true" /></span><div><strong>{protectedProfiles}</strong><small>PIN protected</small></div></article>
+      <article><span><Sparkles size={18} aria-hidden="true" /></span><div><strong>{kidsProfiles}</strong><small>Kids spaces</small></div></article>
+    </section>
     {error && <Notice>{error}</Notice>}
-    <div className="profile-admin-grid">{profiles.map((profile) => <article key={profile.id} className="profile-admin-card"><div className="profile-admin-card__visual"><img src={profile.avatar.url} alt="" /><span className={profile.isChild ? "is-child" : ""}>{profile.isChild ? "Kids" : profile.canManage ? "Manager" : "Viewer"}</span></div><div><h3>{profile.name}</h3><p>{profile.hasPin ? "PIN protected" : "No PIN"}</p></div><div className="profile-admin-card__actions"><IconButton label={`Connected sessions for ${profile.name}`} onClick={() => void openSessions(profile)}><MonitorSmartphone size={17} /></IconButton><IconButton label={`Edit ${profile.name}`} onClick={() => openEditor(profile)}><Pencil size={17} /></IconButton>{profile.id !== activeProfile?.id && <IconButton label={`Delete ${profile.name}`} onClick={() => setDeleting(profile)}><Trash2 size={17} /></IconButton>}</div></article>)}</div>
+    {profiles.length ? <div className="profile-admin-grid">{profiles.map((profile) =>
+      <article key={profile.id} className="profile-admin-card">
+        <div className="profile-admin-card__visual"><img src={profile.avatar.url} alt="" /><span className={profile.isChild ? "is-child" : ""}>{profile.isChild ? "Kids" : profile.canManage ? "Manager" : "Viewer"}</span></div>
+        <div className="profile-admin-card__copy"><h3>{profile.name}</h3><p><i className={`admin-status-dot ${profile.enabled ? "" : "is-disabled"}`} /> {profile.enabled ? "Enabled" : "Disabled"} · {profile.hasPin ? "PIN protected" : "No PIN"}</p></div>
+        <div className="profile-admin-card__actions">
+          <Button variant="secondary" onClick={() => void openSessions(profile)}><MonitorSmartphone size={16} /> Devices</Button>
+          <Button variant="ghost" onClick={() => openEditor(profile)}><Pencil size={16} /> Edit</Button>
+          {profile.id !== activeProfile?.id && <Button variant="ghost" className="admin-destructive-action" onClick={() => setDeleting(profile)}><Trash2 size={16} /> Delete</Button>}
+        </div>
+      </article>,
+    )}</div> : <EmptyState icon={<Users size={44} />} title="No profiles yet" description="Create a profile to give someone their own recommendations, progress, and access controls." action={<Button onClick={() => openEditor("new")}><Plus size={18} /> Create profile</Button>} />}
     {editing && <Modal onClose={() => setEditing(null)} className="editor-modal profile-editor">
       <div className="editor-modal__heading">
         <span><CircleUserRound size={18} /> {editing === "new" ? "New profile" : "Edit profile"}</span>
@@ -454,6 +483,7 @@ function AddonsAdmin() {
 
   async function load() {
     setLoading(true);
+    setError("");
     try { setAddons((await api.addons()).addons); } catch (cause) { setError(notifyError(cause, "Addons could not be loaded.", "Addons unavailable")); } finally { setLoading(false); }
   }
   useEffect(() => { void load(); }, []);
@@ -567,11 +597,31 @@ function AddonsAdmin() {
   }
 
   const addonEditSaving = Boolean(editingAddon && working === editingAddon.id);
-  return <div className="admin-section"><div className="admin-section__header"><div><span>Sources</span><h2>Addons</h2><p>Connect compatible providers to unlock catalogs, metadata, and streams.</p></div></div>
-    <form className="install-addon" onSubmit={install}><div><WandSparkles size={21} /><input type="url" value={transportUrl} onChange={(event) => setTransportUrl(event.target.value)} placeholder="https://addon.example/manifest.json" required /></div><Button type="submit" loading={working === "install"}><Plus size={18} /> Install addon</Button></form>
-    <ProfileAssignmentPicker profiles={profiles} selected={installProfileIds} onChange={setInstallProfileIds} legend="Available to" />
+  const assignedProfiles = new Set(addons.flatMap((addon) => addon.profileIds)).size;
+  const contentTypes = new Set(addons.flatMap((addon) => addon.manifest.types)).size;
+  return <div className="admin-section addons-admin">
+    <div className="admin-section__header">
+      <div><span>Content connections</span><h2>Addons</h2><p>Connect compatible providers, control profile access, and set source priority.</p></div>
+    </div>
+    <section className="admin-summary" aria-label="Addon overview">
+      <article><span><Boxes size={18} aria-hidden="true" /></span><div><strong>{loading ? "—" : addons.length}</strong><small>Installed</small></div></article>
+      <article><span><CircleUserRound size={18} aria-hidden="true" /></span><div><strong>{loading ? "—" : assignedProfiles}</strong><small>Profiles reached</small></div></article>
+      <article><span><Film size={18} aria-hidden="true" /></span><div><strong>{loading ? "—" : contentTypes}</strong><small>Content types</small></div></article>
+    </section>
+    <section className="admin-tool-card" aria-labelledby="install-addon-title">
+      <header><div><span>New connection</span><h3 id="install-addon-title">Install from a manifest</h3><p>Use the HTTPS manifest URL supplied by your addon provider.</p></div></header>
+      <form className="install-addon" onSubmit={install}>
+        <label className="field"><span>Manifest URL</span><div><WandSparkles size={19} /><input type="url" value={transportUrl} onChange={(event) => setTransportUrl(event.target.value)} placeholder="https://addon.example/manifest.json" required /></div></label>
+        <Button type="submit" loading={working === "install"}><Plus size={18} /> Install addon</Button>
+      </form>
+      <ProfileAssignmentPicker profiles={profiles} selected={installProfileIds} onChange={setInstallProfileIds} legend="Available to" />
+    </section>
     {error && <Notice>{error}</Notice>}
-    {loading ? <div className="addon-list">{[0, 1].map((value) => <Skeleton key={value} className="addon-skeleton" />)}</div> : addons.length ? <div className="addon-list">{addons.map((addon, addonIndex) => <AddonCard key={addon.id} addon={addon} index={addonIndex} total={addons.length} working={working === addon.id} reordering={reordering} dragging={draggedAddonIndex === addonIndex} onDragStart={(event) => { setDraggedAddonIndex(addonIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(addonIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedAddonIndex !== null) stageAddonMove(draggedAddonIndex, addonIndex); }} onDragOver={(event) => { if (draggedAddonIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveAddonOrder(); }} onDragEnd={() => { if (draggedAddonIndex !== null) void saveAddonOrder(); }} onMove={(toIndex) => void moveAddon(addonIndex, toIndex)} onRefresh={() => void refresh(addon.id)} onEdit={() => openAddonEditor(addon)} onRemove={() => setDeleting(addon)} />)}</div> : <EmptyState icon={<Boxes size={44} />} title="No addons installed" description="Paste a compatible manifest URL above to connect your first source." />}
+    {loading
+      ? <div className="addon-list" aria-label="Loading addons">{[0, 1].map((value) => <Skeleton key={value} className="addon-skeleton" />)}</div>
+      : addons.length
+        ? <div className="addon-list">{addons.map((addon, addonIndex) => <AddonCard key={addon.id} addon={addon} index={addonIndex} total={addons.length} working={working === addon.id} reordering={reordering} dragging={draggedAddonIndex === addonIndex} onDragStart={(event) => { setDraggedAddonIndex(addonIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(addonIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedAddonIndex !== null) stageAddonMove(draggedAddonIndex, addonIndex); }} onDragOver={(event) => { if (draggedAddonIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveAddonOrder(); }} onDragEnd={() => { if (draggedAddonIndex !== null) void saveAddonOrder(); }} onMove={(toIndex) => void moveAddon(addonIndex, toIndex)} onRefresh={() => void refresh(addon.id)} onEdit={() => openAddonEditor(addon)} onRemove={() => setDeleting(addon)} />)}</div>
+        : <EmptyState icon={<Boxes size={44} />} title={error ? "Addons unavailable" : "No addons installed"} description={error ? "Check the server connection, then try loading the addon list again." : "Install a compatible manifest above to connect your first content source."} action={error ? <Button variant="secondary" onClick={() => void load()}><RefreshCw size={17} /> Try again</Button> : undefined} />}
     {editingAddon && <Modal onClose={() => { if (!addonEditSaving) setEditingAddon(null); }} className="editor-modal addon-edit-modal"><form onSubmit={saveAddon}><div className="editor-modal__heading"><span><Pencil size={18} /> Edit addon</span><h2>{editingAddon.manifest.name}</h2><p>Update the transport and profile access together.</p></div>{error && <Notice>{error}</Notice>}<label className="field"><span>Transport URL</span><div><WandSparkles size={18} /><input type="url" value={editTransportUrl} onChange={(event) => setEditTransportUrl(event.target.value)} placeholder="https://addon.example/manifest.json" required /></div></label><ProfileAssignmentPicker profiles={profiles} selected={editProfileIds} onChange={setEditProfileIds} legend="Available to" /><div className="modal-actions"><Button type="button" variant="ghost" disabled={addonEditSaving} onClick={() => setEditingAddon(null)}>Cancel</Button><Button type="submit" loading={addonEditSaving} disabled={editProfileIds.length === 0}><Save size={18} /> Save addon</Button></div></form></Modal>}
     {deleting && <ConfirmDialog title={`Remove ${deleting.manifest.name}?`} description="This provider and its catalogs will no longer be available to this profile." confirmLabel="Remove addon" loading={working === deleting.id} onCancel={() => setDeleting(null)} onConfirm={() => void remove(deleting)} />}
   </div>;
@@ -596,10 +646,15 @@ function AddonCard({ addon, index, total, working, reordering, dragging, onDragS
 }) {
   const manifest: AddonManifest = addon.manifest;
   return <article className={`addon-card ${dragging ? "is-dragging" : ""}`} onDragEnter={onDragEnter} onDragOver={onDragOver} onDrop={onDrop}>
-    <button type="button" className="addon-card__drag" draggable={!reordering && !working} disabled={reordering || working} onDragStart={onDragStart} onDragEnd={onDragEnd} aria-label={`Move ${manifest.name}`}><GripVertical /></button>
+    <button type="button" className="addon-card__drag" draggable={!reordering && !working} disabled={reordering || working} onDragStart={onDragStart} onDragEnd={onDragEnd} aria-label={`Drag to reorder ${manifest.name}`}><GripVertical /></button>
     <div className="addon-card__logo">{manifest.logo ? <img src={manifest.logo} alt="" /> : manifest.name.slice(0, 2).toUpperCase()}</div>
     <div className="addon-card__body"><div><h3>{manifest.name}</h3><span>v{manifest.version}</span>{manifest.behaviorHints?.p2p && <span className="addon-badge addon-badge--warn">P2P</span>}</div><p>{manifest.description || "No description provided."}</p><div>{manifest.types.map((type) => <i key={type}>{type}</i>)}</div></div>
-    <div className="addon-card__actions">{working ? <LoaderCircle className="spin" /> : <><IconButton label={`Move ${manifest.name} up`} disabled={reordering || index === 0} onClick={() => onMove(index - 1)}><ChevronUp size={17} /></IconButton><IconButton label={`Move ${manifest.name} down`} disabled={reordering || index === total - 1} onClick={() => onMove(index + 1)}><ChevronDown size={17} /></IconButton><IconButton label={`Edit ${manifest.name}`} disabled={reordering} onClick={onEdit}><Pencil size={18} /></IconButton><IconButton label={`Refresh ${manifest.name}`} disabled={reordering} onClick={onRefresh}><RefreshCw size={18} /></IconButton><IconButton label={`Remove ${manifest.name}`} disabled={reordering} onClick={onRemove}><Trash2 size={18} /></IconButton></>}</div>
+    <div className="addon-card__controls">
+      {working ? <span className="admin-working" role="status"><LoaderCircle className="spin" size={18} /> Working</span> : <>
+        <div className="addon-card__order" aria-label={`Reorder ${manifest.name}`}><IconButton label={`Move ${manifest.name} up`} disabled={reordering || index === 0} onClick={() => onMove(index - 1)}><ChevronUp size={17} /></IconButton><IconButton label={`Move ${manifest.name} down`} disabled={reordering || index === total - 1} onClick={() => onMove(index + 1)}><ChevronDown size={17} /></IconButton></div>
+        <div className="addon-card__actions"><Button variant="ghost" disabled={reordering} onClick={onEdit}><Pencil size={16} /> Edit</Button><Button variant="ghost" disabled={reordering} onClick={onRefresh}><RefreshCw size={16} /> Refresh</Button><Button variant="ghost" className="admin-destructive-action" disabled={reordering} onClick={onRemove}><Trash2 size={16} /> Remove</Button></div>
+      </>}
+    </div>
   </article>;
 }
 
@@ -658,6 +713,7 @@ function CollectionsAdmin() {
 
   async function load() {
     setLoading(true);
+    setError("");
     try { setCollections((await api.collections()).collections); } catch (cause) { setError(notifyError(cause, "Collections could not be loaded.", "Collections unavailable")); } finally { setLoading(false); }
   }
   useEffect(() => { void load(); void api.addonCatalogs().then((response) => setCatalogs(response.catalogs)).catch(() => undefined); }, []);
@@ -827,8 +883,45 @@ function CollectionsAdmin() {
       setError(notifyError(cause, "The collection could not be deleted."));
     }
   }
+  const totalFolders = collections.reduce((total, collection) => total + collection.folders.length, 0);
+  const totalSources = collections.reduce((total, collection) => total + collection.folders.reduce((count, folder) => count + folder.sources.length, 0), 0);
+  const assignedProfiles = new Set(collections.flatMap((collection) => collection.profileIds)).size;
 
-  return <div className="admin-section"><><div className="admin-section__header"><div><span>Curation</span><h2>Collections</h2><p>Build the rows and worlds that make every profile's home unique.</p></div><div className="admin-section__actions"><input ref={importInput} type="file" accept="application/json,.json" hidden onChange={(event) => void importCollections(event)} /><Button type="button" variant="secondary" loading={transfer === "export"} disabled={Boolean(transfer)} onClick={() => void exportCollections()}><Save size={18} /> Export JSON</Button><Button type="button" variant="secondary" loading={transfer === "import"} disabled={Boolean(transfer)} onClick={() => importInput.current?.click()}><Upload size={18} /> Import JSON</Button><Button type="button" disabled={Boolean(transfer)} onClick={() => openEditor("new")}><Plus size={18} /> New collection</Button></div></div>{success && <Notice tone="success">{success}</Notice>}</>{error && <Notice>{error}</Notice>}{loading ? <div className="collection-admin-grid"><Skeleton className="collection-skeleton" /><Skeleton className="collection-skeleton" /></div> : collections.length ? <div className="collection-admin-grid">{collections.map((collection, collectionIndex) => <article key={collection.id} className={`collection-admin-card ${draggedCollectionIndex === collectionIndex ? "is-dragging" : ""}`} style={collection.backdropImageUrl ? { backgroundImage: `url(${collection.backdropImageUrl})` } : undefined} draggable={!reordering} onDragStart={(event) => { setDraggedCollectionIndex(collectionIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(collectionIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedCollectionIndex !== null) stageCollectionMove(draggedCollectionIndex, collectionIndex); }} onDragOver={(event) => { if (draggedCollectionIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveCollectionOrder(); }} onDragEnd={() => { if (draggedCollectionIndex !== null) void saveCollectionOrder(); }}><div className="collection-admin-card__shade" /><span>{collection.pinToTop ? <><Sparkles size={14} /> Pinned</> : `Position ${collection.position + 1}`}</span><div><h3>{collection.title}</h3><p>{collection.folders.length} folder{collection.folders.length === 1 ? "" : "s"} · {collection.folders.reduce((total, folder) => total + folder.sources.length, 0)} sources</p><div><><IconButton label={`Move ${collection.title} up`} disabled={reordering || collectionIndex === 0 || collections[collectionIndex - 1]?.pinToTop !== collection.pinToTop} onClick={() => void moveCollection(collectionIndex, collectionIndex - 1)}><ChevronUp size={17} /></IconButton><IconButton label={`Move ${collection.title} down`} disabled={reordering || collectionIndex === collections.length - 1 || collections[collectionIndex + 1]?.pinToTop !== collection.pinToTop} onClick={() => void moveCollection(collectionIndex, collectionIndex + 1)}><ChevronDown size={17} /></IconButton><Button variant="secondary" onClick={() => openEditor(collection)}><Pencil size={17} /> Edit</Button></><IconButton label={`Delete ${collection.title}`} onClick={() => setDeleting(collection)}><Trash2 size={17} /></IconButton></div></div></article>)}</div> : <EmptyState icon={<Layers3 size={44} />} title="No collections yet" description="Create the first curated space for this profile." action={<Button onClick={() => openEditor("new")}><Plus size={18} /> Create collection</Button>} />}
+  return <div className="admin-section collections-admin">
+    <div className="admin-section__header">
+      <div><span>Home curation</span><h2>Collections</h2><p>Build ordered, profile-aware spaces from addons, TMDB discovery, and tracking lists.</p></div>
+      <div className="admin-section__actions">
+        <input ref={importInput} type="file" accept="application/json,.json" hidden onChange={(event) => void importCollections(event)} />
+        <Button type="button" variant="secondary" loading={transfer === "export"} disabled={Boolean(transfer)} onClick={() => void exportCollections()}><Save size={18} /> Export JSON</Button>
+        <Button type="button" variant="secondary" loading={transfer === "import"} disabled={Boolean(transfer)} onClick={() => importInput.current?.click()}><Upload size={18} /> Import JSON</Button>
+        <Button type="button" disabled={Boolean(transfer)} onClick={() => openEditor("new")}><Plus size={18} /> New collection</Button>
+      </div>
+    </div>
+    <section className="admin-summary" aria-label="Collection overview">
+      <article><span><Layers3 size={18} aria-hidden="true" /></span><div><strong>{loading ? "—" : collections.length}</strong><small>Collections</small></div></article>
+      <article><span><Boxes size={18} aria-hidden="true" /></span><div><strong>{loading ? "—" : totalFolders}</strong><small>Folders</small></div></article>
+      <article><span><Database size={18} aria-hidden="true" /></span><div><strong>{loading ? "—" : totalSources}</strong><small>Sources</small></div></article>
+      <article><span><CircleUserRound size={18} aria-hidden="true" /></span><div><strong>{loading ? "—" : assignedProfiles}</strong><small>Profiles reached</small></div></article>
+    </section>
+    {success && <Notice tone="success">{success}</Notice>}
+    {error && <Notice>{error}</Notice>}
+    {loading
+      ? <div className="collection-admin-grid" aria-label="Loading collections"><Skeleton className="collection-skeleton" /><Skeleton className="collection-skeleton" /></div>
+      : collections.length
+        ? <div className="collection-admin-grid">{collections.map((collection, collectionIndex) =>
+          <article key={collection.id} className={`collection-admin-card ${draggedCollectionIndex === collectionIndex ? "is-dragging" : ""}`} style={collection.backdropImageUrl ? { backgroundImage: `url(${collection.backdropImageUrl})` } : undefined} draggable={!reordering} onDragStart={(event) => { setDraggedCollectionIndex(collectionIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(collectionIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedCollectionIndex !== null) stageCollectionMove(draggedCollectionIndex, collectionIndex); }} onDragOver={(event) => { if (draggedCollectionIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveCollectionOrder(); }} onDragEnd={() => { if (draggedCollectionIndex !== null) void saveCollectionOrder(); }}>
+            <div className="collection-admin-card__shade" />
+            <span>{collection.pinToTop ? <><Sparkles size={14} /> Pinned</> : `Position ${collection.position + 1}`}</span>
+            <div><h3>{collection.title}</h3><p>{collection.folders.length} folder{collection.folders.length === 1 ? "" : "s"} · {collection.folders.reduce((total, folder) => total + folder.sources.length, 0)} sources</p>
+              <div className="collection-admin-card__actions">
+                <span className="collection-admin-card__order"><IconButton label={`Move ${collection.title} up`} disabled={reordering || collectionIndex === 0 || collections[collectionIndex - 1]?.pinToTop !== collection.pinToTop} onClick={() => void moveCollection(collectionIndex, collectionIndex - 1)}><ChevronUp size={17} /></IconButton><IconButton label={`Move ${collection.title} down`} disabled={reordering || collectionIndex === collections.length - 1 || collections[collectionIndex + 1]?.pinToTop !== collection.pinToTop} onClick={() => void moveCollection(collectionIndex, collectionIndex + 1)}><ChevronDown size={17} /></IconButton></span>
+                <Button variant="secondary" onClick={() => openEditor(collection)}><Pencil size={17} /> Edit</Button>
+                <Button variant="ghost" className="admin-destructive-action" onClick={() => setDeleting(collection)}><Trash2 size={17} /> Delete</Button>
+              </div>
+            </div>
+          </article>,
+        )}</div>
+        : <EmptyState icon={<Layers3 size={44} />} title={error ? "Collections unavailable" : "No collections yet"} description={error ? "Check the server connection, then try loading your collections again." : "Create the first curated space and decide which profiles can see it."} action={error ? <Button variant="secondary" onClick={() => void load()}><RefreshCw size={17} /> Try again</Button> : <Button onClick={() => openEditor("new")}><Plus size={18} /> Create collection</Button>} />}
     {editing && <Modal onClose={() => setEditing(null)} className="editor-modal collection-editor"><form onSubmit={submit}><div className="editor-modal__heading"><span><Layers3 size={18} /> {editing === "new" ? "New collection" : "Collection editor"}</span><h2>Design a world worth entering.</h2><p>Mix addons, TMDB discovery, people, networks, and Trakt lists in any order.</p></div>{error && <Notice>{error}</Notice>}<section className="editor-group"><div className="form-grid form-grid--three"><label className="field"><span>Collection title</span><div><Layers3 size={18} /><input value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} required /></div></label><label className="field"><span>Backdrop URL</span><div><ImagePlus size={18} /><input type="url" value={draft.backdropImageUrl ?? ""} onChange={(event) => setDraft((current) => ({ ...current, backdropImageUrl: event.target.value || undefined }))} placeholder="https://…" /></div></label><label className="field"><span>Folder cover shape</span><div><Boxes size={18} /><select value={draft.folderCoverShape} onChange={(event) => setDraft((current) => ({ ...current, folderCoverShape: event.target.value as CollectionSaveInput["folderCoverShape"] }))}><option value="poster">Poster</option><option value="landscape">Landscape</option><option value="square">Square</option></select></div></label></div><div className="choice-row choice-row--four"><label className="toggle-field"><input type="checkbox" checked={draft.heroEnabled} onChange={(event) => setDraft((current) => ({ ...current, heroEnabled: event.target.checked }))} /><span><i /><div><strong>Hero section</strong><small>Feature this collection on Home</small></div></span></label><label className="toggle-field"><input type="checkbox" checked={draft.pinToTop} onChange={(event) => setDraft((current) => ({ ...current, pinToTop: event.target.checked }))} /><span><i /><div><strong>Pin to top</strong><small>Always show first</small></div></span></label><label className="toggle-field"><input type="checkbox" checked={draft.focusGlowEnabled} onChange={(event) => setDraft((current) => ({ ...current, focusGlowEnabled: event.target.checked }))} /><span><i /><div><strong>Focus glow</strong><small>Ambient highlight</small></div></span></label><label className="toggle-field"><input type="checkbox" checked={draft.viewMode === "follow_layout"} onChange={(event) => setDraft((current) => ({ ...current, viewMode: event.target.checked ? "follow_layout" : "rows" }))} /><span><i /><div><strong>Display titles directly</strong><small>Otherwise browse by folder</small></div></span></label></div></section>
       <ProfileAssignmentPicker profiles={profiles} selected={draft.profileIds} onChange={(profileIds) => setDraft((current) => ({ ...current, profileIds }))} legend="Available to" />
       <div className="folder-editor-list">{draft.folders.map((folder, folderIndex) => <section className={`folder-editor ${draggedFolderIndex === folderIndex ? "is-dragging" : ""}`} key={folder.id ?? folderIndex} onDragEnter={(event) => { event.preventDefault(); if (draggedFolderIndex !== null && draggedFolderIndex !== folderIndex) { moveFolder(draggedFolderIndex, folderIndex); setDraggedFolderIndex(folderIndex); } }} onDragOver={(event) => { if (draggedFolderIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); setDraggedFolderIndex(null); }}><header><button type="button" className="folder-editor__drag" draggable onDragStart={(event) => { setDraggedFolderIndex(folderIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(folderIndex)); }} onDragEnd={() => setDraggedFolderIndex(null)} aria-label={`Move folder ${folderIndex + 1}`}><GripVertical /><span>Folder {folderIndex + 1}</span></button><div><IconButton type="button" label="Move folder up" disabled={folderIndex === 0} onClick={() => moveFolder(folderIndex, folderIndex - 1)}><ChevronUp size={17} /></IconButton><IconButton type="button" label="Move folder down" disabled={folderIndex === draft.folders.length - 1} onClick={() => moveFolder(folderIndex, folderIndex + 1)}><ChevronDown size={17} /></IconButton>{draft.folders.length > 1 && <IconButton type="button" label="Remove folder" onClick={() => setDraft((current) => ({ ...current, folders: current.folders.filter((_, index) => index !== folderIndex) }))}><Trash2 size={17} /></IconButton>}</div></header><div className="form-grid form-grid--three"><label className="field"><span>Folder title</span><div><Film size={18} /><input value={folder.title} onChange={(event) => updateFolder(folderIndex, { title: event.target.value })} required /></div></label><><label className="field"><span>Tile shape</span><div><select value={folder.tileShape} onChange={(event) => updateFolder(folderIndex, { tileShape: event.target.value as CollectionFolder["tileShape"] })}><option value="poster">Poster</option><option value="landscape">Landscape</option><option value="square">Square</option></select></div></label><label className="field"><span>Multiple sources</span><div><select value={folder.sourceView ?? "merged"} onChange={(event) => updateFolder(folderIndex, { sourceView: event.target.value as CollectionFolder["sourceView"] })}><option value="merged">All together</option><option value="categories">Category tabs</option><option value="folders">Source folders</option></select></div></label></><><label className="field"><span>Cover emoji</span><div><Sparkles size={18} /><input value={folder.coverEmoji ?? ""} onChange={(event) => updateFolder(folderIndex, { coverEmoji: event.target.value })} placeholder="✨" /></div></label><label className="field"><span>Cover image URL</span><div><ImagePlus size={18} /><input type="url" value={folder.coverImageUrl ?? ""} onChange={(event) => updateFolder(folderIndex, { coverImageUrl: event.target.value || undefined })} placeholder="https://…" /></div></label></><label className="toggle-field folder-title-toggle"><input type="checkbox" checked={!folder.hideTitle} onChange={(event) => updateFolder(folderIndex, { hideTitle: !event.target.checked })} /><span><i /><div><strong>Show folder title</strong><small>Display name below cover</small></div></span></label></div><div className="source-list">{folder.sources.map((source, sourceIndex) => <div className={`source-editor-shell ${draggedSource?.folderIndex === folderIndex && draggedSource.sourceIndex === sourceIndex ? "is-dragging" : ""}`} key={source.id ?? sourceIndex} onDragEnter={(event) => { event.preventDefault(); event.stopPropagation(); if (draggedSource?.folderIndex === folderIndex && draggedSource.sourceIndex !== sourceIndex) { moveSource(folderIndex, draggedSource.sourceIndex, sourceIndex); setDraggedSource({ folderIndex, sourceIndex }); } }} onDragOver={(event) => { if (draggedSource?.folderIndex === folderIndex) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); setDraggedSource(null); }}><header className="source-editor-order"><button type="button" className="source-editor__drag" draggable onDragStart={(event) => { event.stopPropagation(); setDraggedSource({ folderIndex, sourceIndex }); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", `${folderIndex}:${sourceIndex}`); }} onDragEnd={() => setDraggedSource(null)} aria-label={`Move source ${sourceIndex + 1}`}><GripVertical size={16} /><span>Source {sourceIndex + 1}</span></button><div><IconButton type="button" label="Move source up" disabled={sourceIndex === 0} onClick={() => moveSource(folderIndex, sourceIndex, sourceIndex - 1)}><ChevronUp size={16} /></IconButton><IconButton type="button" label="Move source down" disabled={sourceIndex === folder.sources.length - 1} onClick={() => moveSource(folderIndex, sourceIndex, sourceIndex + 1)}><ChevronDown size={16} /></IconButton></div></header><SourceEditor source={source} catalogs={catalogs} onChange={(value) => updateSource(folderIndex, sourceIndex, value)} onRemove={() => updateFolder(folderIndex, { sources: folder.sources.filter((_, index) => index !== sourceIndex) })} /></div>)}<div className="source-add"><span>Add a source</span><Button type="button" variant="secondary" onClick={() => addSource(folderIndex, "addon_catalog")} disabled={catalogs.length === 0}><Boxes size={16} /> Addon</Button><Button type="button" variant="secondary" onClick={() => addSource(folderIndex, "tmdb")}><Film size={16} /> TMDB</Button><Button type="button" variant="secondary" onClick={() => addSource(folderIndex, "trakt")}><Database size={16} /> Trakt</Button></div></div></section>)}</div><AddTile label="Add another folder" onClick={() => setDraft((current) => ({ ...current, folders: [...current.folders, blankFolder()] }))} /><div className="modal-actions modal-actions--sticky"><Button type="button" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button><Button type="submit" loading={saving}><Save size={18} /> Save collection</Button></div></form></Modal>}
@@ -1100,12 +1193,16 @@ function ActivityAdmin() {
     }
   }
 
-  if (loading) return <Skeleton className="settings-skeleton" />;
+  if (loading) return <div className="admin-section activity-admin">
+    <div className="admin-section__header"><div><span>Live media</span><h2>Playback activity</h2><p>See active sessions, processing pressure, and temporary media usage.</p></div></div>
+    <div className="activity-overview" aria-label="Loading playback overview">{[0, 1, 2, 3].map((value) => <Skeleton key={value} className="activity-metric activity-metric--loading" />)}</div>
+    <div className="admin-loading-state" role="status"><LoaderCircle className="spin" /><strong>Loading playback activity</strong><span>Checking sessions and media workers…</span></div>
+  </div>;
   const summary = activity?.summary;
   return <div className="admin-section activity-admin">
-    <div className="admin-section__header"><div><span>Live media</span><h2>Playback activity</h2><p>See active sessions, processing pressure, and temporary media usage.</p></div><div className="admin-section__actions"><Button variant="secondary" onClick={() => void load()} loading={refreshing}><RefreshCw size={16} />Refresh</Button><Button variant="secondary" onClick={() => void purge()} loading={purging}><HardDrive size={16} />Purge expired media</Button></div></div>
+    <div className="admin-section__header"><div><span>Live media</span><h2>Playback activity</h2><p>See active sessions, processing pressure, and temporary media usage.</p></div><div className="admin-section__actions"><Button variant="secondary" onClick={() => void load()} loading={refreshing}><RefreshCw size={16} /> Refresh</Button><Button variant="secondary" className="admin-maintenance-action" onClick={() => void purge()} loading={purging}><HardDrive size={16} /> Purge expired media</Button></div></div>
     {error && <Notice>{error}</Notice>}
-    <div className="activity-overview">
+    <div className="activity-overview" aria-label="Playback overview" aria-live="polite">
       <ActivityMetric icon={<Radio />} label="Sessions" value={String(summary?.activeSessions ?? 0)} detail={`${summary?.activeJobs ?? 0} media jobs`} />
       <ActivityMetric icon={<Cpu />} label="Processing" value={`${summary?.processingSlots ?? 0} / ${summary?.processingLimit ?? 0}`} detail="FFmpeg slots" />
       <ActivityMetric icon={<HardDrive />} label="Temporary media" value={formatBytes(summary?.storageBytes ?? 0)} detail={`of ${formatBytes(summary?.storageLimitBytes ?? 0)}`} />
@@ -1114,7 +1211,20 @@ function ActivityAdmin() {
     <section className="activity-panel">
       <header><div><span>Now playing</span><h3>Sessions</h3></div><small>{activity?.sessions.length ?? 0} active</small></header>
       {activity?.sessions.length
-        ? <div className="activity-session-list">{activity.sessions.map((session) => <article className="activity-session" key={session.id}><ActivitySessionArtwork session={session} /><div className="activity-session__copy"><strong>{session.title}</strong><ActivitySessionProviders session={session} /><span>{session.profile} · {session.username}</span><small>{session.device} · {session.platform} · {activityModeLabel(session.mode)}</small></div><div className="activity-session__time"><strong>{activityAge(session.lastSeenAt)}</strong><small>started {activityAge(session.createdAt)}</small></div><Button variant="danger" onClick={() => setSelectedSession(session)}><CircleStop size={16} />Stop</Button></article>)}</div>
+        ? <div className="activity-session-list">{activity.sessions.map((session) => <article className="activity-session" key={session.id}>
+          <ActivitySessionArtwork session={session} />
+          <div className="activity-session__copy">
+            <strong>{session.title}</strong>
+            <ActivitySessionProviders session={session} />
+            <span>{session.profile} · {session.username}</span>
+            <small>{session.device} · {session.platform} · {activityModeLabel(session.mode)}</small>
+          </div>
+          <div className="activity-session__time">
+            <strong>{formatActivityProgress(session.positionSeconds, session.durationSeconds)}</strong>
+            <small>{activityAge(session.lastSeenAt)} · started {activityAge(session.createdAt)}</small>
+          </div>
+          <Button variant="danger" onClick={() => setSelectedSession(session)}><CircleStop size={16} />Stop</Button>
+        </article>)}</div>
         : <EmptyState icon={<Radio />} title="No active playback" description="Sessions appear here as soon as a device starts playing." />}
     </section>
     <section className="activity-panel">
@@ -1183,13 +1293,58 @@ function activityAge(value: string): string {
   return `${hours}h ago`;
 }
 
+function formatActivityProgress(positionSeconds: number, durationSeconds: number): string {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return "Duration unavailable";
+  const positionMinutes = Math.max(0, Math.floor(positionSeconds / 60));
+  const durationMinutes = Math.max(1, Math.ceil(durationSeconds / 60));
+  return `${Math.min(positionMinutes, durationMinutes)} min / ${durationMinutes} min`;
+}
+
+const rivuneSettingDefaults = {
+  theme: "system",
+  maximumResolution: "auto",
+  preferDirectPlay: true,
+  hideUnreleased: false,
+  metadataLanguage: "auto",
+  metadataRegion: "auto",
+  seriesMappingProvider: "tmdb",
+  audioLanguage: "auto",
+  subtitleLanguage: "auto",
+  forcedSubtitleLanguage: "off",
+  autoplayNextEpisode: true,
+  skipIntroEnabled: true,
+  skipRecapEnabled: true,
+  skipOutroEnabled: true,
+  cardDensity: "comfortable",
+  animationsEnabled: true,
+  subtitleSizePercent: 100,
+  subtitleTextColor: "#FFFFFF",
+  subtitleBackgroundOpacityPercent: 60,
+  notificationsEnabled: true,
+  notificationDurationSeconds: 5,
+  notificationPollIntervalSeconds: 5,
+} as const;
+
+const settingOptions = {
+  theme: [{ value: "system", label: "Follow this device" }, { value: "dark", label: "Dark" }, { value: "light", label: "Light" }],
+  resolution: [{ value: "auto", label: "Automatic · source quality" }, { value: "2160p", label: "4K · 2160p" }, { value: "1080p", label: "Full HD · 1080p" }, { value: "720p", label: "HD · 720p" }, { value: "480p", label: "SD · 480p" }],
+  density: [{ value: "comfortable", label: "Comfortable" }, { value: "compact", label: "Compact" }],
+  language: [{ value: "auto", label: "Automatic · audio or device language" }, { value: "fr-FR", label: "Français" }, { value: "en-US", label: "English" }, { value: "es-ES", label: "Español" }, { value: "de-DE", label: "Deutsch" }, { value: "it-IT", label: "Italiano" }, { value: "pt-BR", label: "Português" }, { value: "ja-JP", label: "日本語" }],
+  region: [{ value: "auto", label: "Automatic · device region" }, { value: "FR", label: "France" }, { value: "BE", label: "Belgium" }, { value: "CA", label: "Canada" }, { value: "CH", label: "Switzerland" }, { value: "US", label: "United States" }, { value: "GB", label: "United Kingdom" }, { value: "DE", label: "Germany" }, { value: "ES", label: "Spain" }, { value: "IT", label: "Italy" }, { value: "JP", label: "Japan" }],
+  mapping: [{ value: "tmdb", label: "TMDB · provider seasons" }, { value: "tvdb", label: "TVDB · official seasons" }],
+} as const;
+
+
 function SettingsAdmin() {
   const { account, activeProfile } = useAuth();
   const [settingsTarget, setSettingsTarget] = useState(activeProfile?.id ?? "");
   const [instance, setInstance] = useState<SettingsValues>({});
+  const [savedInstance, setSavedInstance] = useState<SettingsValues>({});
   const [profile, setProfile] = useState<SettingsValues>({});
+  const [savedProfile, setSavedProfile] = useState<SettingsValues>({});
   const [inherited, setInherited] = useState<SettingsValues>({});
   const [maintenance, setMaintenance] = useState<MaintenanceSettings>({ enabled: false, message: null });
+  const [savedMaintenance, setSavedMaintenance] = useState<MaintenanceSettings>({ enabled: false, message: null });
   const [saving, setSaving] = useState(false);
   const [savingMaintenance, setSavingMaintenance] = useState(false);
   const [error, setError] = useState("");
@@ -1200,11 +1355,14 @@ function SettingsAdmin() {
   const canManageServer = canManageProfiles && account?.user.role === "admin";
   const serverSelected = settingsTarget === "server";
   const targetProfile = account?.profiles.find((candidate) => candidate.id === settingsTarget) ?? activeProfile;
+  const settingsDirty = serverSelected ? JSON.stringify(instance) !== JSON.stringify(savedInstance) : JSON.stringify(profile) !== JSON.stringify(savedProfile);
+  const maintenanceDirty = maintenance.enabled !== savedMaintenance.enabled || maintenance.message !== savedMaintenance.message;
+  const hasUnsavedChanges = settingsDirty || (serverSelected && maintenanceDirty);
+  const overrideCount = Object.values(serverSelected ? instance : profile).filter((value) => value !== null && value !== undefined).length;
 
   useEffect(() => {
     setSettingsTarget(activeProfile?.id ?? "");
   }, [activeProfile?.id]);
-
 
   useEffect(() => {
     if (!settingsTarget) return;
@@ -1217,13 +1375,16 @@ function SettingsAdmin() {
         const [layer, maintenanceSettings] = await Promise.all([api.instanceSettings(), api.maintenanceSettings()]);
         if (!current) return;
         setInstance(layer.settings);
+        setSavedInstance(layer.settings);
         setMaintenance(maintenanceSettings);
+        setSavedMaintenance(maintenanceSettings);
         setInherited({});
         return;
       }
       const [layer, serverDefaults] = await Promise.all([api.profileSettings(target), api.instanceSettings()]);
       if (!current) return;
       setProfile(layer.settings);
+      setSavedProfile(layer.settings);
       setInherited(serverDefaults.settings);
     })()
       .catch((cause) => {
@@ -1245,10 +1406,16 @@ function SettingsAdmin() {
     try {
       if (savingServer) {
         const updated = await api.updateInstanceSettings(instance);
-        if (settingsTargetRef.current === target) setInstance(updated.settings);
+        if (settingsTargetRef.current === target) {
+          setInstance(updated.settings);
+          setSavedInstance(updated.settings);
+        }
       } else {
         const updated = await api.updateProfileSettings(target, profile);
-        if (settingsTargetRef.current === target) setProfile(updated.settings);
+        if (settingsTargetRef.current === target) {
+          setProfile(updated.settings);
+          setSavedProfile(updated.settings);
+        }
       }
       if (savingServer || target === activeProfile.id) window.dispatchEvent(new Event("rivune:settings-changed"));
       notifySuccess(savingServer ? "Server defaults have been updated." : `${profileName} preferences have been updated.`, "Settings saved");
@@ -1265,6 +1432,7 @@ function SettingsAdmin() {
     try {
       const updated = await api.updateMaintenanceSettings(maintenance);
       setMaintenance(updated);
+      setSavedMaintenance(updated);
       notifySuccess(translate("admin.maintenance.saved"), translate("admin.maintenance.savedTitle"));
     } catch (cause) {
       setError(notifyError(cause, translate("admin.maintenance.error"), translate("admin.maintenance.title")));
@@ -1274,10 +1442,28 @@ function SettingsAdmin() {
   }
 
   if (!loaded) return <Skeleton className="settings-skeleton" />;
-  return <div className="admin-section"><div className="admin-section__header"><div><span>Preferences</span><h2>Settings</h2><p>Choose one scope to configure at a time.</p></div>{canManageProfiles && <label className="field settings-profile-picker"><span>Settings scope</span><div>{serverSelected ? <Server size={18} /> : <CircleUserRound size={18} />}<select value={settingsTarget} disabled={saving || savingMaintenance} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">Server defaults</option>}{account?.profiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select></div></label>}</div>{error && <Notice>{error}</Notice>}
+  const scopeName = serverSelected ? "Server defaults" : `${targetProfile?.name ?? "Profile"} overrides`;
+  return <div className="admin-section preferences-admin">
+    <div className={`settings-scope settings-scope--${serverSelected ? "server" : "profile"}`}>
+      <span className="settings-scope__icon">{serverSelected ? <Server size={22} /> : <CircleUserRound size={22} />}</span>
+      <div className="settings-scope__copy">
+        <small>Editing scope</small>
+        <strong>{scopeName}</strong>
+        <p>{serverSelected ? "These defaults become the starting point for every profile." : "Only this profile changes. Any setting marked “Server default” stays linked to the server."}</p>
+        <span>{overrideCount} {serverSelected ? "server defaults set" : `profile override${overrideCount === 1 ? "" : "s"}`}</span>
+      </div>
+      {canManageProfiles && <label className="field settings-profile-picker"><span>Switch scope</span><div>{serverSelected ? <Server size={18} /> : <CircleUserRound size={18} />}<select value={settingsTarget} disabled={saving || savingMaintenance || hasUnsavedChanges} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">Server defaults</option>}{account?.profiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name} · profile overrides</option>)}</select></div>{hasUnsavedChanges && <small>Save or discard changes before switching scope.</small>}</label>}
+    </div>
+    {error && <Notice>{error}</Notice>}
     {serverSelected
-      ? <><MaintenanceCard values={maintenance} onChange={setMaintenance} onSave={() => void saveMaintenance()} saving={savingMaintenance} /><SettingsCard title="Server defaults" description="The baseline inherited by every profile." icon={<Server />} values={instance} onChange={setInstance} onSave={() => void save()} saving={saving} emptyLabel="Rivune default" /></>
-      : <><SettingsCard title={`${targetProfile?.name ?? "Profile"} preferences`} description="Overrides that follow this profile everywhere." icon={<CircleUserRound />} values={profile} defaults={inherited} onChange={setProfile} onSave={() => void save()} saving={saving} /><TrackingSettings profileId={settingsTarget} /></>}
+      ? <>
+        <SettingsCard title="Server preference defaults" description="The baseline profiles inherit unless they choose an override." icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void save()} onReset={() => setInstance(savedInstance)} saving={saving} dirty={settingsDirty} emptyLabel="Rivune default" />
+        <MaintenanceCard values={maintenance} onChange={setMaintenance} onSave={() => void saveMaintenance()} onReset={() => setMaintenance(savedMaintenance)} saving={savingMaintenance} dirty={maintenanceDirty} />
+      </>
+      : <>
+        <SettingsCard title={`${targetProfile?.name ?? "Profile"} preferences`} description="Overrides follow this profile on every device. Unset controls continue to inherit server defaults." icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void save()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel="Server default" />
+        <TrackingSettings profileId={settingsTarget} />
+      </>}
   </div>;
 }
 
@@ -1285,25 +1471,50 @@ function TrackingSettings({ profileId }: { profileId: string }) {
   const [providers, setProviders] = useState<TrackingStatus[]>([]);
   const [authorization, setAuthorization] = useState<TrackingDeviceAuthorization | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
 
   async function load() {
     const response = await api.trackingStatuses(profileId);
     setProviders(response.providers);
+    setLoadFailed(false);
   }
 
   useEffect(() => {
     let current = true;
     setLoading(true);
+    setLoadFailed(false);
     setAuthorization(null);
     setError("");
     void api.trackingStatuses(profileId)
-      .then((response) => { if (current) setProviders(response.providers); })
-      .catch((cause) => { if (current) setError(notifyError(cause, translate("settings.trackingLoadError"), translate("settings.trackingTitle"))); })
+      .then((response) => {
+        if (!current) return;
+        setProviders(response.providers);
+        setLoadFailed(false);
+      })
+      .catch((cause) => {
+        if (!current) return;
+        setLoadFailed(true);
+        setError(notifyError(cause, translate("settings.trackingLoadError"), translate("settings.trackingTitle")));
+      })
       .finally(() => { if (current) setLoading(false); });
     return () => { current = false; };
   }, [profileId]);
+
+  async function retryLoad() {
+    setLoading(true);
+    setError("");
+    setLoadFailed(false);
+    try {
+      await load();
+    } catch (cause) {
+      setLoadFailed(true);
+      setError(notifyError(cause, translate("settings.trackingLoadError"), translate("settings.trackingTitle")));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     if (!authorization) return;
@@ -1385,24 +1596,33 @@ function TrackingSettings({ profileId }: { profileId: string }) {
 
   if (loading) return <Skeleton className="settings-skeleton" />;
   return <section className="settings-card tracking-settings">
-    <header><span><RefreshCw /></span><div><h3>{translate("settings.trackingTitle")}</h3><p>{translate("settings.trackingDescription")}</p></div></header>
+    <header>
+      <span><RefreshCw /></span>
+      <div><small>Profile connections</small><h3>{translate("settings.trackingTitle")}</h3><p>{translate("settings.trackingDescription")}</p></div>
+      <span className="settings-card__meta"><Check size={14} /> Changes save automatically</span>
+    </header>
     {error && <Notice>{error}</Notice>}
-    {authorization && <Notice><strong>{translate("settings.trackingEnterCode", { provider: providerName(authorization.provider) })}</strong><br /><code>{authorization.userCode}</code><br /><a href={authorization.verificationUrl} target="_blank" rel="noreferrer">{translate("settings.trackingOpenProvider")} <ExternalLink size={14} /></a></Notice>}
-    <div className="settings-groups">{providers.map((status) =>
-      <SettingsGroup key={status.provider} icon={<TrackingProviderIcon provider={status.provider} />} iconClassName={`tracking-provider-tile tracking-provider-tile--${status.provider}`} title={providerName(status.provider)} description={status.configured ? status.connected ? translate("settings.trackingStatusConnected") : translate("settings.trackingStatusDisconnected") : translate("settings.trackingStatusUnavailable")}>
-        {status.connected ? <>
-          <TrackingToggle label={translate("settings.trackingWatched")} description={translate("settings.trackingWatchedDescription")} checked={status.syncWatched} disabled={busy.startsWith(`${status.provider}:`)} onChange={(value) => void toggle(status, "syncWatched", value)} />
-          <TrackingToggle label={translate("settings.trackingProgress")} description={translate("settings.trackingProgressDescription")} checked={status.syncProgress} disabled={busy.startsWith(`${status.provider}:`)} onChange={(value) => void toggle(status, "syncProgress", value)} />
-          <TrackingToggle label={translate("settings.trackingLibrary")} description={translate("settings.trackingLibraryDescription")} checked={status.syncLibrary} disabled={busy.startsWith(`${status.provider}:`)} onChange={(value) => void toggle(status, "syncLibrary", value)} />
-          <div className="setting-control"><small>{status.pendingItems ? translate("settings.trackingPending", { count: status.pendingItems }) : status.lastError ? translate("settings.trackingRetrying") : status.lastSuccessAt ? translate("settings.trackingLastSuccess", { date: new Date(status.lastSuccessAt).toLocaleString() }) : translate("settings.trackingReady")}</small><Button variant="secondary" loading={busy === `${status.provider}:disconnect`} onClick={() => void disconnect(status.provider)}>{translate("settings.trackingDisconnect")}</Button></div>
-        </> : <div className="setting-control"><p>{status.configured ? translate("settings.trackingConnectDescription") : translate("settings.trackingAdminRequired")}</p><Button disabled={!status.configured || Boolean(authorization)} loading={busy === `${status.provider}:connect`} onClick={() => void connect(status.provider)}>{translate("settings.trackingConnect")}</Button></div>}
-      </SettingsGroup>,
-    )}</div>
+    {authorization && <Notice tone="info"><div className="tracking-authorization" aria-live="polite"><strong>{translate("settings.trackingEnterCode", { provider: providerName(authorization.provider) })}</strong><code>{authorization.userCode}</code><a href={authorization.verificationUrl} target="_blank" rel="noreferrer">{translate("settings.trackingOpenProvider")} <ExternalLink size={14} /></a><small><LoaderCircle size={13} className="spin" /> Waiting for authorization</small></div></Notice>}
+    {loadFailed
+      ? <div className="tracking-load-retry"><Button variant="secondary" onClick={() => void retryLoad()}><RefreshCw size={16} /> Retry loading accounts</Button></div>
+      : providers.length > 0
+        ? <div className="settings-groups tracking-provider-grid">{providers.map((status) => {
+          const providerBusy = busy.startsWith(`${status.provider}:`);
+          return <SettingsGroup key={status.provider} icon={<TrackingProviderIcon provider={status.provider} />} iconClassName={`tracking-provider-tile tracking-provider-tile--${status.provider}`} title={providerName(status.provider)} description={status.connected ? "Choose which profile activity to mirror." : status.configured ? translate("settings.trackingConnectDescription") : translate("settings.trackingAdminRequired")} status={status.connected ? translate("settings.trackingStatusConnected") : status.configured ? translate("settings.trackingStatusDisconnected") : translate("settings.trackingStatusUnavailable")} statusTone={status.connected ? "connected" : status.configured ? "disconnected" : "unavailable"}>
+            {status.connected ? <>
+              <TrackingToggle label={translate("settings.trackingWatched")} description={translate("settings.trackingWatchedDescription")} checked={status.syncWatched} disabled={providerBusy} saving={busy === `${status.provider}:syncWatched`} onChange={(value) => void toggle(status, "syncWatched", value)} />
+              <TrackingToggle label={translate("settings.trackingProgress")} description={translate("settings.trackingProgressDescription")} checked={status.syncProgress} disabled={providerBusy} saving={busy === `${status.provider}:syncProgress`} onChange={(value) => void toggle(status, "syncProgress", value)} />
+              <TrackingToggle label={translate("settings.trackingLibrary")} description={translate("settings.trackingLibraryDescription")} checked={status.syncLibrary} disabled={providerBusy} saving={busy === `${status.provider}:syncLibrary`} onChange={(value) => void toggle(status, "syncLibrary", value)} />
+              <div className="tracking-provider-action"><small aria-live="polite">{status.pendingItems ? translate("settings.trackingPending", { count: status.pendingItems }) : status.lastError ? translate("settings.trackingRetrying") : status.lastSuccessAt ? translate("settings.trackingLastSuccess", { date: new Date(status.lastSuccessAt).toLocaleString() }) : translate("settings.trackingReady")}</small><Button variant="secondary" loading={busy === `${status.provider}:disconnect`} disabled={providerBusy} onClick={() => void disconnect(status.provider)}>{translate("settings.trackingDisconnect")}</Button></div>
+            </> : <div className="tracking-provider-action"><small>{status.configured ? "A new browser tab will open for the secure device-code flow." : translate("settings.trackingStatusUnavailable")}</small><Button disabled={!status.configured || Boolean(authorization) || providerBusy} loading={busy === `${status.provider}:connect`} onClick={() => void connect(status.provider)}>{translate("settings.trackingConnect")}</Button></div>}
+          </SettingsGroup>;
+        })}</div>
+        : <div className="tracking-empty"><RefreshCw size={26} /><strong>No tracking providers available</strong><p>Ask the server administrator to configure Trakt or Simkl.</p></div>}
   </section>;
 }
 
-function TrackingToggle({ label, description, checked, disabled, onChange }: { label: string; description: string; checked: boolean; disabled: boolean; onChange: (value: boolean) => void }) {
-  return <div className="setting-control setting-control--toggle"><label className="toggle-field"><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} /><span><i /><div><strong>{label}</strong><small>{description}</small></div></span></label></div>;
+function TrackingToggle({ label, description, checked, disabled, saving, onChange }: { label: string; description: string; checked: boolean; disabled: boolean; saving: boolean; onChange: (value: boolean) => void }) {
+  return <div className="setting-control setting-control--toggle"><label className="toggle-field"><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} /><span><i /><div><strong>{label}</strong><small>{description}</small></div>{saving && <LoaderCircle size={15} className="spin tracking-toggle__saving" />}</span></label></div>;
 }
 
 function providerName(provider: TrackingProvider): string {
@@ -1417,83 +1637,116 @@ function TrackingProviderIcon({ provider }: { provider: TrackingProvider }) {
 }
 
 
-function MaintenanceCard({ values, onChange, onSave, saving }: { values: MaintenanceSettings; onChange: (values: MaintenanceSettings) => void; onSave: () => void; saving: boolean }) {
+function MaintenanceCard({ values, onChange, onSave, onReset, saving, dirty }: { values: MaintenanceSettings; onChange: (values: MaintenanceSettings) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean }) {
   const message = values.message ?? "";
-  return <section className="settings-card maintenance-settings">
-    <header><span><Shield /></span><div><h3>{translate("admin.maintenance.title")}</h3><p>{translate("admin.maintenance.description")}</p></div></header>
-    <div className="settings-groups">
-      <SettingsGroup icon={<Shield />} title={translate("admin.maintenance.title")} description={translate("admin.maintenance.description")}>
-        <div className="setting-control setting-control--toggle">
-          <label className="toggle-field"><input type="checkbox" checked={values.enabled} onChange={(event) => onChange({ ...values, enabled: event.target.checked })} /><span><i /><div><strong>{translate("admin.maintenance.enabled")}</strong><small>{translate("admin.maintenance.enabledDescription")}</small></div></span></label>
-        </div>
-        <label className="field"><span>{translate("admin.maintenance.message")}</span><div><textarea value={message} placeholder={translate("admin.maintenance.placeholder")} onChange={(event) => { if (countCodePoints(event.target.value) <= 500) onChange({ ...values, message: event.target.value || null }); }} /></div><small>{translate("admin.maintenance.characterCount", { count: countCodePoints(message) })}</small></label>
-      </SettingsGroup>
+  return <section className="settings-card settings-card--danger maintenance-settings">
+    <header><span><Shield /></span><div><small>Advanced server control</small><h3>{translate("admin.maintenance.title")}</h3><p>{translate("admin.maintenance.description")}</p></div><span className={`settings-save-state ${dirty ? "is-dirty" : "is-saved"}`} role="status" aria-live="polite">{saving ? <><LoaderCircle size={14} className="spin" /> Saving…</> : dirty ? <><Save size={14} /> Unsaved changes</> : <><Check size={14} /> Saved</>}</span></header>
+    <div className="maintenance-settings__body">
+      <div className="setting-control setting-control--toggle">
+        <label className="toggle-field"><input type="checkbox" checked={values.enabled} onChange={(event) => onChange({ ...values, enabled: event.target.checked })} /><span><i /><div><strong>{translate("admin.maintenance.enabled")}</strong><small>{translate("admin.maintenance.enabledDescription")}</small></div></span></label>
+      </div>
+      <label className="field"><span>{translate("admin.maintenance.message")}</span><div><textarea value={message} placeholder={translate("admin.maintenance.placeholder")} onChange={(event) => { if (countCodePoints(event.target.value) <= 500) onChange({ ...values, message: event.target.value || null }); }} /></div><small>{translate("admin.maintenance.characterCount", { count: countCodePoints(message) })}</small></label>
     </div>
-    <footer><Button loading={saving} onClick={onSave}><Check size={18} /> {translate("admin.maintenance.save")}</Button></footer>
+    <footer><div><strong>{values.enabled ? "Member access will be blocked." : "Rivune remains available to members."}</strong><small>Maintenance changes are saved separately from preference defaults.</small></div><Button variant="secondary" disabled={!dirty || saving} onClick={onReset}>Discard changes</Button><Button loading={saving} disabled={!dirty} onClick={onSave}><Check size={18} /> {translate("admin.maintenance.save")}</Button></footer>
   </section>;
 }
 
-function SettingsCard({ title, description, icon, values, defaults = {}, onChange, onSave, saving, emptyLabel = "Inherit" }: { title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; saving: boolean; emptyLabel?: string }) {
+function SettingsCard({ title, description, icon, values, defaults = {}, onChange, onSave, onReset, saving, dirty, emptyLabel = "Server default" }: { title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean; emptyLabel?: string }) {
+  const effective = {
+    theme: defaults.theme ?? rivuneSettingDefaults.theme,
+    maximumResolution: defaults.maximumResolution ?? rivuneSettingDefaults.maximumResolution,
+    preferDirectPlay: defaults.preferDirectPlay ?? rivuneSettingDefaults.preferDirectPlay,
+    hideUnreleased: defaults.hideUnreleased ?? rivuneSettingDefaults.hideUnreleased,
+    metadataLanguage: defaults.metadataLanguage ?? rivuneSettingDefaults.metadataLanguage,
+    metadataRegion: defaults.metadataRegion ?? rivuneSettingDefaults.metadataRegion,
+    seriesMappingProvider: defaults.seriesMappingProvider ?? rivuneSettingDefaults.seriesMappingProvider,
+    audioLanguage: defaults.audioLanguage ?? rivuneSettingDefaults.audioLanguage,
+    subtitleLanguage: defaults.subtitleLanguage ?? rivuneSettingDefaults.subtitleLanguage,
+    forcedSubtitleLanguage: defaults.forcedSubtitleLanguage ?? rivuneSettingDefaults.forcedSubtitleLanguage,
+    autoplayNextEpisode: defaults.autoplayNextEpisode ?? rivuneSettingDefaults.autoplayNextEpisode,
+    skipIntroEnabled: defaults.skipIntroEnabled ?? rivuneSettingDefaults.skipIntroEnabled,
+    skipRecapEnabled: defaults.skipRecapEnabled ?? rivuneSettingDefaults.skipRecapEnabled,
+    skipOutroEnabled: defaults.skipOutroEnabled ?? rivuneSettingDefaults.skipOutroEnabled,
+    cardDensity: defaults.cardDensity ?? rivuneSettingDefaults.cardDensity,
+    animationsEnabled: defaults.animationsEnabled ?? rivuneSettingDefaults.animationsEnabled,
+    subtitleSizePercent: defaults.subtitleSizePercent ?? rivuneSettingDefaults.subtitleSizePercent,
+    subtitleTextColor: defaults.subtitleTextColor ?? rivuneSettingDefaults.subtitleTextColor,
+    subtitleBackgroundOpacityPercent: defaults.subtitleBackgroundOpacityPercent ?? rivuneSettingDefaults.subtitleBackgroundOpacityPercent,
+    notificationsEnabled: defaults.notificationsEnabled ?? rivuneSettingDefaults.notificationsEnabled,
+    notificationDurationSeconds: defaults.notificationDurationSeconds ?? rivuneSettingDefaults.notificationDurationSeconds,
+    notificationPollIntervalSeconds: defaults.notificationPollIntervalSeconds ?? rivuneSettingDefaults.notificationPollIntervalSeconds,
+  };
   function change<K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) {
     onChange({ ...values, [key]: value });
   }
 
-  return <section className="settings-card">
-    <header><span>{icon}</span><div><h3>{title}</h3><p>{description}</p></div></header>
-    <div className="settings-groups">
-      <SettingsGroup icon={<Film />} title="Playback" description="Stream quality and episode flow.">
-        <label className="field"><span>Maximum resolution</span><div><select value={values.maximumResolution ?? ""} onChange={(event) => change("maximumResolution", event.target.value || null)}><option value="">{emptyLabel}</option><option value="2160p">4K · 2160p</option><option value="1080p">Full HD · 1080p</option><option value="720p">HD · 720p</option><option value="480p">SD · 480p</option></select></div></label>
-        <InheritedToggle label="Prefer direct play" description="Avoid transcoding when supported" value={values.preferDirectPlay} defaultValue={defaults.preferDirectPlay ?? true} onChange={(value) => change("preferDirectPlay", value)} emptyLabel={emptyLabel} />
-        <InheritedToggle label="Autoplay next episode" description="Continue a series when an episode finishes" value={values.autoplayNextEpisode} defaultValue={defaults.autoplayNextEpisode ?? true} onChange={(value) => change("autoplayNextEpisode", value)} emptyLabel={emptyLabel} />
-        <InheritedToggle label={translate("settings.skipIntro")} description={translate("settings.skipIntroDescription")} value={values.skipIntroEnabled} defaultValue={defaults.skipIntroEnabled ?? true} onChange={(value) => change("skipIntroEnabled", value)} emptyLabel={emptyLabel} />
-        <InheritedToggle label={translate("settings.skipRecap")} description={translate("settings.skipRecapDescription")} value={values.skipRecapEnabled} defaultValue={defaults.skipRecapEnabled ?? true} onChange={(value) => change("skipRecapEnabled", value)} emptyLabel={emptyLabel} />
-        <InheritedToggle label={translate("settings.skipOutro")} description={translate("settings.skipOutroDescription")} value={values.skipOutroEnabled} defaultValue={defaults.skipOutroEnabled ?? true} onChange={(value) => change("skipOutroEnabled", value)} emptyLabel={emptyLabel} />
+  return <section className="settings-card preferences-workspace">
+    <header>
+      <span>{icon}</span>
+      <div><small>Preferences</small><h3>{title}</h3><p>{description}</p></div>
+      <div className="settings-card__actions">
+        <span className={`settings-save-state ${dirty ? "is-dirty" : "is-saved"}`} role="status" aria-live="polite">{saving ? <><LoaderCircle size={14} className="spin" /> Saving…</> : dirty ? <><Save size={14} /> Unsaved changes</> : <><Check size={14} /> All changes saved</>}</span>
+        <Button variant="secondary" disabled={!dirty || saving} onClick={onReset}>Discard changes</Button>
+        <Button loading={saving} disabled={!dirty} onClick={onSave}><Check size={18} /> Save preferences</Button>
+      </div>
+    </header>
+    <div className="settings-groups settings-groups--preferences">
+      <SettingsGroup icon={<Palette />} title="Appearance" description="Theme, motion, and content density." className="settings-group--wide">
+        <SelectSetting label="Theme" value={values.theme} defaultValue={effective.theme} options={settingOptions.theme} emptyLabel={emptyLabel} onChange={(value) => change("theme", value)} />
+        <SelectSetting label="Card density" value={values.cardDensity} defaultValue={effective.cardDensity} options={settingOptions.density} emptyLabel={emptyLabel} onChange={(value) => change("cardDensity", value as "comfortable" | "compact" | null)} />
+        <InheritedToggle label="Interface animations" description="Use transitions and automatic hero rotation" value={values.animationsEnabled} defaultValue={effective.animationsEnabled} onChange={(value) => change("animationsEnabled", value)} emptyLabel={emptyLabel} />
+        <InheritedToggle label="Hide unreleased titles" description="Home only · search still includes upcoming titles" value={values.hideUnreleased} defaultValue={effective.hideUnreleased} onChange={(value) => change("hideUnreleased", value)} emptyLabel={emptyLabel} />
       </SettingsGroup>
 
-      <SettingsGroup icon={<Palette />} title="Interface" description="Appearance, motion, and content density.">
-        <label className="field"><span>Theme</span><div><select value={values.theme ?? ""} onChange={(event) => change("theme", event.target.value || null)}><option value="">{emptyLabel}</option><option value="dark">Dark</option><option value="light">Light</option><option value="system">System</option></select></div></label>
-        <label className="field"><span>Card density</span><div><select value={values.cardDensity ?? ""} onChange={(event) => change("cardDensity", event.target.value ? event.target.value as "comfortable" | "compact" : null)}><option value="">{emptyLabel}</option><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></div></label>
-        <InheritedToggle label="Interface animations" description="Use transitions and automatic hero rotation" value={values.animationsEnabled} defaultValue={defaults.animationsEnabled ?? true} onChange={(value) => change("animationsEnabled", value)} emptyLabel={emptyLabel} />
-        <InheritedToggle label="Hide unreleased titles" description="Home only · search still includes upcoming titles" value={values.hideUnreleased} defaultValue={defaults.hideUnreleased ?? false} onChange={(value) => change("hideUnreleased", value)} emptyLabel={emptyLabel} />
+      <SettingsGroup icon={<Film />} title="Playback" description="Delivery quality, episode flow, and skip actions." className="settings-group--wide">
+        <SelectSetting label="Maximum resolution" value={values.maximumResolution} defaultValue={effective.maximumResolution} options={settingOptions.resolution} emptyLabel={emptyLabel} onChange={(value) => change("maximumResolution", value)} />
+        <InheritedToggle label="Prefer direct play" description="Avoid transcoding when the source is supported" value={values.preferDirectPlay} defaultValue={effective.preferDirectPlay} onChange={(value) => change("preferDirectPlay", value)} emptyLabel={emptyLabel} />
+        <InheritedToggle label="Autoplay next episode" description="Continue a series when an episode finishes" value={values.autoplayNextEpisode} defaultValue={effective.autoplayNextEpisode} onChange={(value) => change("autoplayNextEpisode", value)} emptyLabel={emptyLabel} />
+        <InheritedToggle label={translate("settings.skipIntro")} description={translate("settings.skipIntroDescription")} value={values.skipIntroEnabled} defaultValue={effective.skipIntroEnabled} onChange={(value) => change("skipIntroEnabled", value)} emptyLabel={emptyLabel} />
+        <InheritedToggle label={translate("settings.skipRecap")} description={translate("settings.skipRecapDescription")} value={values.skipRecapEnabled} defaultValue={effective.skipRecapEnabled} onChange={(value) => change("skipRecapEnabled", value)} emptyLabel={emptyLabel} />
+        <InheritedToggle label={translate("settings.skipOutro")} description={translate("settings.skipOutroDescription")} value={values.skipOutroEnabled} defaultValue={effective.skipOutroEnabled} onChange={(value) => change("skipOutroEnabled", value)} emptyLabel={emptyLabel} />
       </SettingsGroup>
 
-      <SettingsGroup icon={<Languages />} title="Languages & metadata" description="Keep titles and playback language-aware.">
-        <label className="field"><span>Metadata language</span><div><select value={values.metadataLanguage ?? ""} onChange={(event) => change("metadataLanguage", event.target.value || null)}><option value="">{emptyLabel}</option><option value="auto">Automatic · preferred audio or device language</option><option value="fr-FR">Français</option><option value="en-US">English</option><option value="es-ES">Español</option><option value="de-DE">Deutsch</option><option value="it-IT">Italiano</option><option value="pt-BR">Português</option><option value="ja-JP">日本語</option></select></div></label>
-        <label className="field"><span>Metadata region</span><div><select value={values.metadataRegion ?? ""} onChange={(event) => change("metadataRegion", event.target.value || null)}><option value="">{emptyLabel}</option><option value="auto">Automatic · device region</option><option value="FR">France</option><option value="BE">Belgium</option><option value="CA">Canada</option><option value="CH">Switzerland</option><option value="US">United States</option><option value="GB">United Kingdom</option><option value="DE">Germany</option><option value="ES">Spain</option><option value="IT">Italy</option><option value="JP">Japan</option></select></div></label>
-        <label className="field"><span>Series episode mapping</span><div><select value={values.seriesMappingProvider ?? ""} onChange={(event) => change("seriesMappingProvider", event.target.value ? event.target.value as "tmdb" | "tvdb" : null)}><option value="">{emptyLabel}</option><option value="tmdb">TMDB · provider seasons</option><option value="tvdb">TVDB · official seasons</option></select></div></label>
-        <label className="field"><span>Audio language</span><div><input value={values.audioLanguage ?? ""} onChange={(event) => change("audioLanguage", event.target.value || null)} placeholder="en" /></div></label>
+      <SettingsGroup icon={<Languages />} title="Language & metadata" description="How titles, regions, and episode ordering are resolved.">
+        <SelectSetting label="Metadata language" value={values.metadataLanguage} defaultValue={effective.metadataLanguage} options={settingOptions.language} emptyLabel={emptyLabel} onChange={(value) => change("metadataLanguage", value)} />
+        <SelectSetting label="Metadata region" value={values.metadataRegion} defaultValue={effective.metadataRegion} options={settingOptions.region} emptyLabel={emptyLabel} onChange={(value) => change("metadataRegion", value)} />
+        <SelectSetting label="Series episode mapping" value={values.seriesMappingProvider} defaultValue={effective.seriesMappingProvider} options={settingOptions.mapping} emptyLabel={emptyLabel} onChange={(value) => change("seriesMappingProvider", value as "tmdb" | "tvdb" | null)} />
+        <TextSetting label="Preferred audio language" value={values.audioLanguage} defaultValue={effective.audioLanguage} placeholder="en" emptyLabel={emptyLabel} onChange={(value) => change("audioLanguage", value)} />
       </SettingsGroup>
 
-      <SettingsGroup icon={<Captions />} title="Subtitles" description="Preferred track and readable cue styling.">
-        <label className="field"><span>Subtitle language</span><div><input value={values.subtitleLanguage ?? ""} onChange={(event) => change("subtitleLanguage", event.target.value || null)} placeholder="en" /></div></label>
-        <label className="field"><span>{translate("settings.forcedSubtitleLanguage")}</span><div><input list="forced-subtitle-languages" value={values.forcedSubtitleLanguage ?? ""} onChange={(event) => change("forcedSubtitleLanguage", event.target.value || null)} placeholder={emptyLabel} /><datalist id="forced-subtitle-languages"><option value="off">{translate("settings.forcedSubtitleOff")}</option><option value="en">English</option><option value="fr">Français</option><option value="es">Español</option><option value="de">Deutsch</option><option value="it">Italiano</option><option value="pt">Português</option><option value="ja">日本語</option></datalist></div><small>{translate("settings.forcedSubtitleDescription")}</small></label>
-        <RangeSetting label="Subtitle size" value={values.subtitleSizePercent} defaultValue={defaults.subtitleSizePercent ?? 100} min={50} max={200} step={1} suffix="%" emptyLabel={emptyLabel} onChange={(value) => change("subtitleSizePercent", value)} />
-        <ColorSetting value={values.subtitleTextColor} defaultValue={defaults.subtitleTextColor ?? "#FFFFFF"} emptyLabel={emptyLabel} onChange={(value) => change("subtitleTextColor", value)} />
-        <RangeSetting label="Background opacity" value={values.subtitleBackgroundOpacityPercent} defaultValue={defaults.subtitleBackgroundOpacityPercent ?? 60} min={0} max={100} step={1} suffix="%" emptyLabel={emptyLabel} onChange={(value) => change("subtitleBackgroundOpacityPercent", value)} />
+      <SettingsGroup icon={<Captions />} title="Language & subtitles" description="Preferred tracks and readable cue styling.">
+        <TextSetting label="Preferred subtitle language" value={values.subtitleLanguage} defaultValue={effective.subtitleLanguage} placeholder="en" emptyLabel={emptyLabel} onChange={(value) => change("subtitleLanguage", value)} />
+        <TextSetting label={translate("settings.forcedSubtitleLanguage")} value={values.forcedSubtitleLanguage} defaultValue={effective.forcedSubtitleLanguage} placeholder={emptyLabel} emptyLabel={emptyLabel} list="forced-subtitle-languages" description={translate("settings.forcedSubtitleDescription")} onChange={(value) => change("forcedSubtitleLanguage", value)}>
+          <datalist id="forced-subtitle-languages"><option value="off">{translate("settings.forcedSubtitleOff")}</option><option value="en">English</option><option value="fr">Français</option><option value="es">Español</option><option value="de">Deutsch</option><option value="it">Italiano</option><option value="pt">Português</option><option value="ja">日本語</option></datalist>
+        </TextSetting>
+        <RangeSetting label="Subtitle size" value={values.subtitleSizePercent} defaultValue={effective.subtitleSizePercent} min={50} max={200} step={1} suffix="%" emptyLabel={emptyLabel} onChange={(value) => change("subtitleSizePercent", value)} />
+        <ColorSetting value={values.subtitleTextColor} defaultValue={effective.subtitleTextColor} emptyLabel={emptyLabel} onChange={(value) => change("subtitleTextColor", value)} />
+        <RangeSetting label="Background opacity" value={values.subtitleBackgroundOpacityPercent} defaultValue={effective.subtitleBackgroundOpacityPercent} min={0} max={100} step={1} suffix="%" emptyLabel={emptyLabel} onChange={(value) => change("subtitleBackgroundOpacityPercent", value)} />
       </SettingsGroup>
 
-      <SettingsGroup icon={<Bell />} title="Notifications" description="Session messages and how long they stay visible.">
-        <InheritedToggle label="Session notifications" description="Poll for messages sent to this device" value={values.notificationsEnabled} defaultValue={defaults.notificationsEnabled ?? true} onChange={(value) => change("notificationsEnabled", value)} emptyLabel={emptyLabel} />
-        <RangeSetting label="Display duration" value={values.notificationDurationSeconds} defaultValue={defaults.notificationDurationSeconds ?? 5} min={2} max={30} step={1} suffix=" seconds" emptyLabel={emptyLabel} onChange={(value) => change("notificationDurationSeconds", value)} />
-        <RangeSetting label="Polling interval" value={values.notificationPollIntervalSeconds} defaultValue={defaults.notificationPollIntervalSeconds ?? 5} min={5} max={300} step={1} suffix=" seconds" emptyLabel={emptyLabel} onChange={(value) => change("notificationPollIntervalSeconds", value)} />
+      <SettingsGroup icon={<Bell />} title="Device notifications" description="Session messages and delivery timing." className="settings-group--wide settings-group--advanced" status="Advanced">
+        <InheritedToggle label="Session notifications" description="Poll for messages sent to this device" value={values.notificationsEnabled} defaultValue={effective.notificationsEnabled} onChange={(value) => change("notificationsEnabled", value)} emptyLabel={emptyLabel} />
+        <RangeSetting label="Display duration" value={values.notificationDurationSeconds} defaultValue={effective.notificationDurationSeconds} min={2} max={30} step={1} suffix=" seconds" emptyLabel={emptyLabel} onChange={(value) => change("notificationDurationSeconds", value)} />
+        <RangeSetting label="Polling interval" value={values.notificationPollIntervalSeconds} defaultValue={effective.notificationPollIntervalSeconds} min={5} max={300} step={1} suffix=" seconds" emptyLabel={emptyLabel} onChange={(value) => change("notificationPollIntervalSeconds", value)} />
       </SettingsGroup>
     </div>
-    <footer><Button loading={saving} onClick={onSave}><Check size={18} /> Save settings</Button></footer>
+    <footer><div><strong>{dirty ? "Review and save your changes." : "This scope is up to date."}</strong><small>{emptyLabel === "Server default" ? "Inherited controls update whenever server defaults change." : "Unset controls use Rivune’s built-in defaults."}</small></div></footer>
   </section>;
 }
 
-function SettingsGroup({ icon, iconClassName = "", title, description, children }: { icon: React.ReactNode; iconClassName?: string; title: string; description: string; children: React.ReactNode }) {
-  return <section className="settings-group">
-    <div className="settings-group__heading"><span className={iconClassName}>{icon}</span><div><h4>{title}</h4><p>{description}</p></div></div>
+function SettingsGroup({ icon, iconClassName = "", title, description, status, statusTone = "", className = "", children }: { icon: React.ReactNode; iconClassName?: string; title: string; description: string; status?: string; statusTone?: "connected" | "disconnected" | "unavailable" | ""; className?: string; children: React.ReactNode }) {
+  return <section className={`settings-group ${className}`}>
+    <div className="settings-group__heading"><span className={iconClassName}>{icon}</span><div><div className="settings-group__title"><h4>{title}</h4>{status && <span className={`settings-group__status ${statusTone ? `is-${statusTone}` : ""}`}>{status}</span>}</div><p>{description}</p></div></div>
     <div className="settings-group__grid">{children}</div>
   </section>;
 }
 
 function InheritedToggle({ label, description, value, defaultValue, onChange, emptyLabel }: { label: string; description: string; value: boolean | null | undefined; defaultValue: boolean; onChange: (value: boolean | null) => void; emptyLabel: string }) {
   const inherited = value === null || value === undefined;
+  const shown = value ?? defaultValue;
   return <div className="setting-control setting-control--toggle">
-    <label className="toggle-field"><input type="checkbox" checked={value ?? defaultValue} onChange={(event) => onChange(event.target.checked)} /><span><i /><div><strong>{label}</strong><small>{description}{inherited ? ` · ${emptyLabel}` : ""}</small></div></span></label>
-    {!inherited && <button type="button" className="setting-inherit" onClick={() => onChange(null)}>{emptyLabel}</button>}
+    <label className="toggle-field"><input type="checkbox" checked={shown} onChange={(event) => onChange(event.target.checked)} /><span><i /><div><strong>{label}</strong><small>{description}</small><em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? `${emptyLabel} · ${shown ? "On" : "Off"}` : `Override · ${shown ? "On" : "Off"}`}</em></div></span></label>
+    {!inherited && <button type="button" className="setting-inherit" onClick={() => onChange(null)}>Use {emptyLabel.toLowerCase()}</button>}
   </div>;
 }
 
@@ -1501,8 +1754,8 @@ function RangeSetting({ label, value, defaultValue, min, max, step, suffix, empt
   const inherited = value === null || value === undefined;
   const shown = value ?? defaultValue;
   return <div className="setting-control setting-control--range">
-    <label className="field"><span>{label}</span><div><input type="range" min={min} max={max} step={step} value={shown} onChange={(event) => onChange(Number(event.target.value))} /><output>{shown}{suffix}</output></div><small>{inherited ? emptyLabel : "Custom"}</small></label>
-    {!inherited && <button type="button" className="setting-inherit" onClick={() => onChange(null)}>{emptyLabel}</button>}
+    <label className="field"><span>{label}</span><div><input type="range" min={min} max={max} step={step} value={shown} onChange={(event) => onChange(Number(event.target.value))} /><output>{shown}{suffix}</output></div><small className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? `${emptyLabel} · ${shown}${suffix}` : `Override · ${shown}${suffix}`}</small></label>
+    {!inherited && <button type="button" className="setting-inherit" onClick={() => onChange(null)}>Use {emptyLabel.toLowerCase()}</button>}
   </div>;
 }
 
@@ -1510,7 +1763,26 @@ function ColorSetting({ value, defaultValue, emptyLabel, onChange }: { value: st
   const inherited = value === null || value === undefined;
   const shown = value ?? defaultValue;
   return <div className="setting-control setting-control--color">
-    <label className="field"><span>Subtitle text color</span><div><input type="color" value={shown} onChange={(event) => onChange(event.target.value.toUpperCase())} /><output>{shown}</output></div><small>{inherited ? emptyLabel : "Custom"}</small></label>
-    {!inherited && <button type="button" className="setting-inherit" onClick={() => onChange(null)}>{emptyLabel}</button>}
+    <label className="field"><span>Subtitle text color</span><div><input type="color" value={shown} onChange={(event) => onChange(event.target.value.toUpperCase())} /><output>{shown}</output></div><small className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? `${emptyLabel} · ${shown}` : `Override · ${shown}`}</small></label>
+    {!inherited && <button type="button" className="setting-inherit" onClick={() => onChange(null)}>Use {emptyLabel.toLowerCase()}</button>}
+  </div>;
+}
+
+function SelectSetting({ label, value, defaultValue, options, emptyLabel, onChange }: { label: string; value: string | null | undefined; defaultValue: string; options: ReadonlyArray<{ readonly value: string; readonly label: string }>; emptyLabel: string; onChange: (value: string | null) => void }) {
+  const inherited = value === null || value === undefined;
+  const shown = value ?? defaultValue;
+  const shownLabel = options.find((option) => option.value === shown)?.label ?? shown;
+  return <div className="setting-control">
+    <label className="field"><span>{label}</span><div><select value={value ?? ""} onChange={(event) => onChange(event.target.value || null)}><option value="">Use {emptyLabel.toLowerCase()}</option>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div><small className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? `${emptyLabel} · ${shownLabel}` : `Override · ${shownLabel}`}</small></label>
+    {!inherited && <button type="button" className="setting-inherit" onClick={() => onChange(null)}>Use {emptyLabel.toLowerCase()}</button>}
+  </div>;
+}
+
+function TextSetting({ label, value, defaultValue, placeholder, emptyLabel, list, description, onChange, children }: { label: string; value: string | null | undefined; defaultValue: string; placeholder: string; emptyLabel: string; list?: string; description?: string; onChange: (value: string | null) => void; children?: React.ReactNode }) {
+  const inherited = value === null || value === undefined;
+  const shown = value ?? defaultValue;
+  return <div className="setting-control">
+    <label className="field"><span>{label}</span><div><input list={list} value={value ?? ""} onChange={(event) => onChange(event.target.value || null)} placeholder={inherited ? shown : placeholder} />{children}</div>{description && <small>{description}</small>}<small className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? `${emptyLabel} · ${shown}` : `Override · ${shown}`}</small></label>
+    {!inherited && <button type="button" className="setting-inherit" onClick={() => onChange(null)}>Use {emptyLabel.toLowerCase()}</button>}
   </div>;
 }

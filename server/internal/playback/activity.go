@@ -71,6 +71,8 @@ type ActivitySession struct {
 	Device               string                       `json:"device"`
 	Platform             string                       `json:"platform"`
 	Processing           bool                         `json:"processing"`
+	PositionSeconds      int                          `json:"positionSeconds"`
+	DurationSeconds      int                          `json:"durationSeconds"`
 	CreatedAt            time.Time                    `json:"createdAt"`
 	LastSeenAt           time.Time                    `json:"lastSeenAt"`
 	ExpiresAt            time.Time                    `json:"expiresAt"`
@@ -174,9 +176,11 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 		       COALESCE(canonical_identities.imdb_namespace, CASE WHEN identities.imdb IS NOT NULL THEN title.media_type END, ''),
 		       COALESCE(canonical_identities.tmdb_namespace, CASE WHEN identities.tmdb IS NOT NULL THEN title.media_type END, ''),
 		       CASE WHEN identities.tvdb IS NOT NULL THEN title.media_type ELSE '' END,
-		       playback.media_type, playback.assets, users.username, playback.profile_id::text,
-		       profiles.name, devices.name, devices.platform, playback.created_at,
-		       playback.last_seen_at, playback.expires_at
+		       playback.media_type, playback.assets,
+		       COALESCE(progress.position_seconds, 0),
+		       COALESCE(progress.duration_seconds, floor(NULLIF(playback.assets->0->>'durationSeconds', '')::double precision)::integer, 0),
+		       users.username, playback.profile_id::text, profiles.name, devices.name,
+		       devices.platform, playback.created_at, playback.last_seen_at, playback.expires_at
 		FROM playback_sessions playback
 		JOIN auth_sessions sessions ON sessions.id = playback.auth_session_id
 		JOIN users ON users.id = sessions.user_id
@@ -185,6 +189,9 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 		LEFT JOIN titles title ON title.id::text = playback.title_id
 		LEFT JOIN titles parent ON parent.id = title.parent_id
 		LEFT JOIN titles ancestor ON ancestor.id = parent.parent_id
+		LEFT JOIN profile_progress progress
+		       ON progress.profile_id = playback.profile_id
+		      AND progress.title_id::text = playback.title_id
 		LEFT JOIN LATERAL (
 			SELECT max(external_id) FILTER (WHERE provider = 'imdb') AS imdb,
 			       max(external_id) FILTER (WHERE provider = 'tmdb') AS tmdb,
@@ -235,8 +242,9 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 			&artworkCandidates[3], &artworkCandidates[4], &artworkCandidates[5],
 			&value.ExternalIDs.IMDb, &value.ExternalIDs.TMDB, &value.ExternalIDs.TVDB,
 			&value.ExternalIDMediaTypes.IMDb, &value.ExternalIDMediaTypes.TMDB, &value.ExternalIDMediaTypes.TVDB,
-			&value.MediaType, &assetsJSON, &value.Username, &value.ProfileID, &value.Profile,
-			&value.Device, &value.Platform, &value.CreatedAt, &value.LastSeenAt, &value.ExpiresAt,
+			&value.MediaType, &assetsJSON, &value.PositionSeconds, &value.DurationSeconds,
+			&value.Username, &value.ProfileID, &value.Profile, &value.Device, &value.Platform,
+			&value.CreatedAt, &value.LastSeenAt, &value.ExpiresAt,
 		); err != nil {
 			return Activity{}, fmt.Errorf("scan playback activity: %w", err)
 		}

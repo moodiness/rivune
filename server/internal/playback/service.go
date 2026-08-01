@@ -264,18 +264,7 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 		return Session{}, err
 	}
 	for index := range sources {
-		if sources[index].URL == "" {
-			continue
-		}
-		if sources[index].Protocol == "hls" && (sources[index].Mode == processingRemux || sources[index].Mode == processingTranscodeAudio || sources[index].Mode == processingTranscode) {
-			startSeconds := float64(0)
-			if assetIndex := storedAssetIndex(assets, sources[index].ID); assetIndex >= 0 {
-				startSeconds = assets[assetIndex].StartSeconds
-			}
-			sources[index].URL = hlsAssetURLAt(sessionID, sources[index].ID, token, "index.m3u8", startSeconds)
-		} else {
-			sources[index].URL = assetURL(sessionID, sources[index].ID, token, "", "")
-		}
+		sources[index].URL = sessionSourceURL(sources[index], assets, sessionID, token)
 	}
 	for index := range subtitles {
 		subtitles[index].URL = assetURL(sessionID, subtitles[index].ID, token, "", "")
@@ -285,6 +274,20 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 		SelectedSubtitleID: selectedSubtitle(subtitles), Sources: sources, Subtitles: subtitles,
 		ProviderErrors: providerErrors, ExpiresAt: expiresAt,
 	}, nil
+}
+
+func sessionSourceURL(source Source, assets []storedAsset, sessionID, token string) string {
+	if source.URL == "" || source.Mode == "external" {
+		return source.URL
+	}
+	if source.Protocol == "hls" && (source.Mode == processingRemux || source.Mode == processingTranscodeAudio || source.Mode == processingTranscode) {
+		startSeconds := float64(0)
+		if assetIndex := storedAssetIndex(assets, source.ID); assetIndex >= 0 {
+			startSeconds = assets[assetIndex].StartSeconds
+		}
+		return hlsAssetURLAt(sessionID, source.ID, token, "index.m3u8", startSeconds)
+	}
+	return assetURL(sessionID, source.ID, token, "", "")
 }
 
 func (service *Service) Stop(ctx context.Context, principal auth.Principal, sessionID string) error {
@@ -336,7 +339,7 @@ func validPlaybackStart(seconds float64) bool {
 func validateCapabilities(capabilities Capabilities) error {
 	groups := [][]string{
 		capabilities.StreamingProtocols, capabilities.Containers, capabilities.VideoCodecs,
-		capabilities.AudioCodecs, capabilities.HDRFormats, capabilities.ExternalPlayers,
+		capabilities.AudioCodecs, capabilities.HDRFormats, capabilities.ExternalPlayers, capabilities.ProcessingModes,
 	}
 	for _, values := range groups {
 		if len(values) > 32 {
@@ -348,6 +351,25 @@ func validateCapabilities(capabilities Capabilities) error {
 				return ErrInvalidInput
 			}
 		}
+	}
+	if len(capabilities.MediaProfiles) > 32 {
+		return ErrInvalidInput
+	}
+	for _, profile := range capabilities.MediaProfiles {
+		values := []string{profile.Container, profile.VideoCodec}
+		if profile.AudioCodec != "" {
+			values = append(values, profile.AudioCodec)
+		}
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if len(value) < 1 || len(value) > 64 {
+				return ErrInvalidInput
+			}
+		}
+	}
+	if len(capabilities.ProcessingModes) > 1 ||
+		len(capabilities.ProcessingModes) == 1 && !strings.EqualFold(strings.TrimSpace(capabilities.ProcessingModes[0]), processingRemux) {
+		return ErrInvalidInput
 	}
 	return nil
 }

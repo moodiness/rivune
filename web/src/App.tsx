@@ -1,5 +1,5 @@
 import { LoaderCircle, RefreshCw, ServerOff } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "./auth";
 import { api, APIError, clearMaintenanceMode, MAINTENANCE_MODE_EVENT, maintenanceModeMessage } from "./api";
 import { Button, RivuneMark } from "./components";
@@ -10,7 +10,7 @@ import type { View } from "./Shell";
 import { LoginPage, SetupPage } from "./pages/Onboarding";
 import { ProfileGate } from "./pages/ProfileGate";
 import { DevicePairingPage, PairApprovalPage } from "./pages/Pairing";
-import type { SettingsValues } from "./types";
+import type { MediaItem, SettingsValues } from "./types";
 
 const validViews: Record<string, View> = { home: "home", search: "search", library: "library", calendar: "calendar", admin: "admin" };
 const AdminPage = lazy(() => import("./pages/Admin").then((module) => ({ default: module.AdminPage })));
@@ -18,6 +18,96 @@ const HomePage = lazy(() => import("./pages/Explore").then((module) => ({ defaul
 const SearchPage = lazy(() => import("./pages/Explore").then((module) => ({ default: module.SearchPage })));
 const LibraryPage = lazy(() => import("./pages/Explore").then((module) => ({ default: module.LibraryPage })));
 const CalendarPage = lazy(() => import("./pages/Calendar").then((module) => ({ default: module.CalendarPage })));
+const MediaDetails = lazy(() => import("./media").then((module) => ({ default: module.MediaDetails })));
+
+type MediaRoute = {
+  item: MediaItem;
+  origin: View;
+};
+type MediaRouteContext = { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number };
+
+const mediaRoutePrefix = "media/";
+const mediaRouteFields = ["titleId", "posterUrl", "backgroundUrl", "logoUrl", "releaseInfo", "released"] as const;
+
+function decodeRouteSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return "";
+  }
+}
+
+function appRoute(): { view: View; media: MediaRoute | null } {
+  const hash = window.location.hash.slice(1);
+  const [routePath, query = ""] = hash.split("?", 2);
+  if (!routePath.startsWith(mediaRoutePrefix)) return { view: validViews[routePath] ?? "home", media: null };
+  const segments = routePath.slice(mediaRoutePrefix.length).split("/");
+  if (segments.length < 2) return { view: "home", media: null };
+  const params = new URLSearchParams(query);
+  const origin = validViews[params.get("from") ?? ""] ?? "home";
+  const mediaType = decodeRouteSegment(segments[0]);
+  const id = decodeRouteSegment(segments.slice(1).join("/"));
+  if (!mediaType || !id) return { view: origin, media: null };
+  const storedItem = window.history.state?.rivuneMediaItem as MediaItem | undefined;
+  const title = params.get("title")?.trim() || storedItem?.title || "Untitled";
+  const item: MediaItem = storedItem?.id === id && storedItem.mediaType === mediaType ? { ...storedItem, id, mediaType, title } : { id, mediaType, title };
+  for (const field of mediaRouteFields) {
+    const value = params.get(field);
+    if (value) item[field] = value;
+  }
+  const seasonValue = params.get("season");
+  const episodeValue = params.get("episode");
+  const seasonNumber = seasonValue === null ? undefined : Number(seasonValue);
+  const episodeNumber = episodeValue === null ? undefined : Number(episodeValue);
+  const seriesID = params.get("seriesId") ?? "";
+  const seasonID = params.get("seasonId") ?? "";
+  const episodeID = params.get("episodeId") ?? "";
+  if (seasonNumber !== undefined && Number.isInteger(seasonNumber)) item.seasonNumber = seasonNumber;
+  if (episodeNumber !== undefined && Number.isInteger(episodeNumber)) item.episodeNumber = episodeNumber;
+  for (const [key, value] of params) {
+    if (!key.startsWith("external.") || !value) continue;
+    item.externalIds = { ...item.externalIds, [key.slice("external.".length)]: value };
+  }
+  if (seriesID || seasonID || episodeID || seasonNumber !== undefined || episodeNumber !== undefined) {
+    item.raw = {
+      ...item.raw,
+      openSeriesBrowser: true,
+      continueSeriesId: seriesID || undefined,
+      continueSeasonId: seasonID || undefined,
+      continueSeasonNumber: seasonNumber !== undefined && Number.isInteger(seasonNumber) ? seasonNumber : undefined,
+      continueEpisodeNumber: episodeNumber !== undefined && Number.isInteger(episodeNumber) ? episodeNumber : undefined,
+      continueEpisodeId: episodeID || item.titleId,
+    };
+  }
+  return { view: origin, media: { item, origin } };
+}
+
+function mediaRouteURL(item: MediaItem, origin: View, context?: MediaRouteContext): string {
+  const params = new URLSearchParams({ from: origin, title: item.title });
+  for (const field of mediaRouteFields) {
+    const value = item[field];
+    if (value) params.set(field, value);
+  }
+  for (const [provider, externalID] of Object.entries(item.externalIds ?? {})) {
+    if (externalID) params.set(`external.${provider}`, externalID);
+  }
+  const raw = item.raw ?? {};
+  const seriesID = typeof raw.continueSeriesId === "string" ? raw.continueSeriesId : "";
+  const resolvedSeasonID = context?.seasonID ?? (typeof raw.continueSeasonId === "string" ? raw.continueSeasonId : "");
+  const resolvedEpisodeID = context ? context.episodeID ?? "" : typeof raw.continueEpisodeId === "string" ? raw.continueEpisodeId : "";
+  const seasonNumber = context?.seasonNumber ?? (typeof raw.continueSeasonNumber === "number" ? raw.continueSeasonNumber : item.seasonNumber);
+  const episodeNumber = context ? context.episodeNumber : typeof raw.continueEpisodeNumber === "number" ? raw.continueEpisodeNumber : item.episodeNumber;
+  if (seriesID) params.set("seriesId", seriesID);
+  if (resolvedSeasonID) params.set("seasonId", resolvedSeasonID);
+  if (resolvedEpisodeID) params.set("episodeId", resolvedEpisodeID);
+  if (seasonNumber !== undefined) params.set("season", String(seasonNumber));
+  if (episodeNumber !== undefined) params.set("episode", String(episodeNumber));
+  return `#${mediaRoutePrefix}${encodeURIComponent(item.mediaType)}/${encodeURIComponent(item.id)}?${params.toString()}`;
+}
+
+function restoreScroll(top: number): void {
+  window.requestAnimationFrame(() => window.scrollTo({ top, behavior: "auto" }));
+}
 
 type RuntimeSettings = {
   autoplayNextEpisode: boolean;
@@ -166,10 +256,39 @@ export default function App() {
   const { settings, ready: settingsReady } = useRuntimeSettings(activeProfile?.id);
   useSessionNotifications(account?.session.id, refreshAccount, settings.notificationsEnabled, settings.notificationPollIntervalSeconds);
   const pairingApproval = window.location.pathname === "/pair";
-  const [view, setViewState] = useState<View>(() => validViews[window.location.hash.slice(1)] ?? "home");
+  const [initialRoute] = useState(appRoute);
+  const [view, setViewState] = useState<View>(initialRoute.view);
+  const [mediaRoute, setMediaRoute] = useState<MediaRoute | null>(initialRoute.media);
   const [homeResetKey, setHomeResetKey] = useState(0);
+  const [mediaDataRevisions, setMediaDataRevisions] = useState({ home: 0, library: 0 });
+  const mediaRouteRef = useRef<MediaRoute | null>(initialRoute.media);
+  const invokingElementRef = useRef<HTMLElement | null>(null);
+  const routeSurfaceRef = useRef<HTMLDivElement>(null);
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(maintenanceModeMessage);
   const [checkingMaintenance, setCheckingMaintenance] = useState(false);
+
+  function restoreOriginFocus() {
+    const invokingElement = invokingElementRef.current;
+    window.requestAnimationFrame(() => {
+      if (invokingElement?.isConnected) {
+        invokingElement.focus({ preventScroll: true });
+        return;
+      }
+      const heading = routeSurfaceRef.current?.querySelector<HTMLElement>("h1, h2, h3");
+      if (heading) {
+        const previousTabIndex = heading.getAttribute("tabindex");
+        heading.tabIndex = -1;
+        heading.focus({ preventScroll: true });
+        if (previousTabIndex === null) heading.addEventListener("blur", () => heading.removeAttribute("tabindex"), { once: true });
+        return;
+      }
+      routeSurfaceRef.current?.focus({ preventScroll: true });
+    });
+  }
+  function invalidateMediaOrigin(origin: View) {
+    if (origin !== "home" && origin !== "library") return;
+    setMediaDataRevisions((revisions) => ({ ...revisions, [origin]: revisions[origin] + 1 }));
+  }
 
   const retryMaintenance = useCallback(async () => {
     setCheckingMaintenance(true);
@@ -205,19 +324,74 @@ export default function App() {
   }, [settings]);
 
   useEffect(() => {
-    const onHashChange = () => setViewState(validViews[window.location.hash.slice(1)] ?? "home");
-    window.addEventListener("hashchange", onHashChange);
-    return () => window.removeEventListener("hashchange", onHashChange);
-  }, []);
+    const previousRestoration = window.history.scrollRestoration;
+    window.history.scrollRestoration = "manual";
+    const onRouteChange = () => {
+      const next = appRoute();
+      const previousMediaRoute = mediaRouteRef.current;
+      mediaRouteRef.current = next.media;
+      setViewState(next.view);
+      setMediaRoute(next.media);
+      restoreScroll(next.media ? 0 : typeof window.history.state?.rivuneScrollTop === "number" ? window.history.state.rivuneScrollTop : 0);
+      if (previousMediaRoute !== null && next.media === null) {
+        invalidateMediaOrigin(previousMediaRoute.origin);
+        restoreOriginFocus();
+      }
+    };
+    window.addEventListener("hashchange", onRouteChange);
+    window.addEventListener("popstate", onRouteChange);
+    if (initialRoute.media) restoreScroll(0);
+    return () => {
+      window.history.scrollRestoration = previousRestoration;
+      window.removeEventListener("hashchange", onRouteChange);
+      window.removeEventListener("popstate", onRouteChange);
+    };
+  }, [initialRoute.media]);
 
 
   function setView(next: View) {
-    if (next === "home") {
-      setHomeResetKey((current) => current + 1);
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    }
+    const previousMediaRoute = mediaRouteRef.current;
+    if (next === "home") setHomeResetKey((current) => current + 1);
+    mediaRouteRef.current = null;
     setViewState(next);
-    window.history.replaceState(null, "", `#${next}`);
+    setMediaRoute(null);
+    window.history.replaceState({ rivuneView: next, rivuneScrollTop: 0 }, "", `#${next}`);
+    window.scrollTo({ top: 0, behavior: next === "home" ? "smooth" : "auto" });
+    if (previousMediaRoute !== null) {
+      invokingElementRef.current = null;
+      invalidateMediaOrigin(previousMediaRoute.origin);
+      restoreOriginFocus();
+    }
+  }
+
+  function openMedia(item: MediaItem) {
+    invokingElementRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    window.history.replaceState({ ...window.history.state, rivuneView: view, rivuneScrollTop: window.scrollY }, "", `#${view}`);
+    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item }, "", mediaRouteURL(item, view));
+    const nextRoute = { item, origin: view };
+    mediaRouteRef.current = nextRoute;
+    setMediaRoute(nextRoute);
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }
+
+  function updateMediaRoute(context: MediaRouteContext) {
+    if (!mediaRoute) return;
+    window.history.replaceState(window.history.state, "", mediaRouteURL(mediaRoute.item, mediaRoute.origin, context));
+  }
+
+  function closeMedia() {
+    if (!mediaRoute) return;
+    if (window.history.state?.rivuneMedia) {
+      window.history.back();
+      return;
+    }
+    mediaRouteRef.current = null;
+    setMediaRoute(null);
+    setViewState(mediaRoute.origin);
+    invalidateMediaOrigin(mediaRoute.origin);
+    window.history.replaceState({ rivuneView: mediaRoute.origin, rivuneScrollTop: 0 }, "", `#${mediaRoute.origin}`);
+    restoreScroll(0);
+    restoreOriginFocus();
   }
 
   if (maintenanceMessage !== null) return <main className="offline-page maintenance-page"><div className="offline-page__glow" /><RivuneMark /><section><span><ServerOff /></span><h1>{t("app.maintenanceTitle")}</h1><p>{maintenanceMessage || t("app.maintenanceBody")}</p><Button loading={checkingMaintenance} onClick={() => void retryMaintenance()}><RefreshCw size={18} /> {t("app.maintenanceRetry")}</Button></section></main>;
@@ -229,5 +403,12 @@ export default function App() {
   if (pairingApproval) return <PairApprovalPage />;
   if (!settingsReady) return <Shell view={view} onView={setView}><div className="view-loading"><LoaderCircle className="spin" /><span>Loading profile settings…</span></div></Shell>;
 
-  return <Shell view={view} onView={setView}><Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingSpace")}</span></div>}>{view === "home" ? <HomePage key={homeResetKey} /> : view === "search" ? <SearchPage /> : view === "library" ? <LibraryPage /> : view === "calendar" ? <CalendarPage /> : <AdminPage />}</Suspense></Shell>;
+  return <Shell view={view} onView={setView}>
+    <div ref={routeSurfaceRef} tabIndex={-1} className={mediaRoute ? "route-surface route-surface--hidden" : "route-surface"}>
+      <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingSpace")}</span></div>}>
+        {view === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} /> : view === "search" ? <SearchPage onOpenMedia={openMedia} /> : view === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : view === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
+      </Suspense>
+    </div>
+    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>Loading title…</span></div>}><MediaDetails item={mediaRoute.item} onClose={closeMedia} onNavigateContext={updateMediaRoute} /></Suspense>}
+  </Shell>;
 }

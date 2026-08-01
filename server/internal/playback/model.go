@@ -10,6 +10,7 @@ var (
 	ErrInvalidInput           = errors.New("invalid playback request")
 	ErrForbidden              = errors.New("playback administration forbidden")
 	ErrNoPlayableSource       = errors.New("no compatible playback source")
+	ErrUnsupportedSource      = errors.New("source requires unsupported media conversion")
 	ErrSessionNotFound        = errors.New("playback session not found")
 	ErrProviderUnavailable    = errors.New("playback provider unavailable")
 	ErrSourceReferenceExpired = errors.New("playback source reference is invalid or expired")
@@ -20,15 +21,23 @@ var (
 
 const sessionTTL = 2 * time.Hour
 
+type MediaProfile struct {
+	Container  string `json:"container"`
+	VideoCodec string `json:"videoCodec"`
+	AudioCodec string `json:"audioCodec,omitempty"`
+}
+
 type Capabilities struct {
-	StreamingProtocols []string `json:"streamingProtocols,omitempty"`
-	Containers         []string `json:"containers,omitempty"`
-	VideoCodecs        []string `json:"videoCodecs,omitempty"`
-	AudioCodecs        []string `json:"audioCodecs,omitempty"`
-	HDRFormats         []string `json:"hdrFormats,omitempty"`
-	ExternalPlayers    []string `json:"externalPlayers,omitempty"`
-	MaximumHeight      int      `json:"-"`
-	PreferDirectPlay   *bool    `json:"-"`
+	StreamingProtocols []string       `json:"streamingProtocols,omitempty"`
+	Containers         []string       `json:"containers,omitempty"`
+	VideoCodecs        []string       `json:"videoCodecs,omitempty"`
+	AudioCodecs        []string       `json:"audioCodecs,omitempty"`
+	HDRFormats         []string       `json:"hdrFormats,omitempty"`
+	ExternalPlayers    []string       `json:"externalPlayers,omitempty"`
+	ProcessingModes    []string       `json:"processingModes,omitempty"`
+	MediaProfiles      []MediaProfile `json:"mediaProfiles,omitempty"`
+	MaximumHeight      int            `json:"-"`
+	PreferDirectPlay   *bool          `json:"-"`
 }
 
 type SourcesInput struct {
@@ -166,6 +175,7 @@ type storedAsset struct {
 	ToneMap            bool              `json:"toneMap,omitempty"`
 	AudioTrackIndex    *int              `json:"audioTrackIndex,omitempty"`
 	SubtitleTrackIndex *int              `json:"subtitleTrackIndex,omitempty"`
+	DurationSeconds    float64           `json:"durationSeconds,omitempty"`
 	StartSeconds       float64           `json:"-"`
 	ReadRate           float64           `json:"-"`
 }

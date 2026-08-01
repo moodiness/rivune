@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -72,9 +73,10 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	principal := auth.Principal{SessionID: "auth-session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &profileGrantExpiresAt}
 	fetcher := &preparationResourceFetcher{}
 	processor := &countingProbeProcessor{inspection: MediaInspection{
-		Container:   "matroska",
-		VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1920, Height: 1080}},
-		AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
+		DurationSeconds: 1320,
+		Container:       "matroska",
+		VideoTracks:     []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1920, Height: 1080}},
+		AudioTracks:     []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
 	}}
 	service := &Service{
 		addons: fetcher, processor: processor, now: func() time.Time { return now },
@@ -88,6 +90,7 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 		Capabilities: Capabilities{
 			StreamingProtocols: []string{"http"}, Containers: []string{"mp4"},
 			VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+			ProcessingModes: []string{processingRemux},
 		},
 	})
 	if err != nil {
@@ -121,6 +124,16 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	if prepared.SourceRef != selected.SourceRef || prepared.Mode != processingRemux || processor.calls.Load() != 1 {
 		t.Fatalf("unexpected preparation: preparation=%+v probes=%d", prepared, processor.calls.Load())
 	}
+	service.preparations.mu.Lock()
+	cachedPlayback := service.preparations.entries[selected.SourceRef].playback
+	service.preparations.mu.Unlock()
+	if cachedPlayback.asset == nil {
+		t.Fatal("prepared playback did not retain its stream asset")
+	}
+	cachedDuration := cachedPlayback.asset.DurationSeconds
+	if cachedDuration != 1320 {
+		t.Fatalf("prepared playback asset duration = %v, want 1320", cachedDuration)
+	}
 	processor.mu.Lock()
 	lastURL := processor.lastURL
 	processor.mu.Unlock()
@@ -133,6 +146,37 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	}
 	if processor.calls.Load() != 1 || fetcher.streamCalls.Load() != 1 || fetcher.subtitleCalls.Load() != 1 {
 		t.Fatalf("cached preparation repeated remote work: probes=%d streams=%d subtitles=%d", processor.calls.Load(), fetcher.streamCalls.Load(), fetcher.subtitleCalls.Load())
+	}
+}
+
+func TestBuildPreparedPlaybackRejectsUnsupportedCodecWithoutEncoding(t *testing.T) {
+	fetcher := &preparationResourceFetcher{}
+	processor := &countingProbeProcessor{inspection: MediaInspection{
+		Container:   "matroska",
+		VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "vp9", Width: 1920, Height: 1080}},
+		AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
+	}}
+	service := &Service{
+		addons: fetcher, processor: processor,
+		probes: newMediaProbeCache(time.Now),
+	}
+	playback, err := service.buildPreparedPlayback(context.Background(), auth.Principal{}, sourceReference{
+		AddonMediaType: "movie", ResourceID: "tt1234567",
+		Source: Source{
+			ID: "stream-1", Mode: "direct", URL: "https://media.example/movie.mkv",
+			Protocol: "http", Container: "mkv",
+		},
+		Asset: &storedAsset{ID: "stream-1", Kind: "stream", URL: "https://media.example/movie.mkv"},
+		Capabilities: Capabilities{
+			StreamingProtocols: []string{"http"},
+			Containers:         []string{"mp4"},
+			VideoCodecs:        []string{"h264"},
+			AudioCodecs:        []string{"aac"},
+			ProcessingModes:    []string{processingRemux},
+		},
+	})
+	if !errors.Is(err, ErrUnsupportedSource) || playback.source.Mode != "" || processor.calls.Load() != 1 {
+		t.Fatalf("unsupported source did not fail before encoding: playback=%+v probes=%d err=%v", playback, processor.calls.Load(), err)
 	}
 }
 

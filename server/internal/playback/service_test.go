@@ -104,18 +104,22 @@ func TestTargetSignatureRejectsTampering(t *testing.T) {
 }
 
 type fakeMediaProcessor struct {
-	info   MediaInspection
-	err    error
-	output string
+	info      MediaInspection
+	err       error
+	output    string
+	processed *storedAsset
 }
 
 func (processor fakeMediaProcessor) Probe(context.Context, storedAsset) (MediaInspection, error) {
 	return processor.info, processor.err
 }
 
-func (processor fakeMediaProcessor) Process(_ context.Context, _ storedAsset, destination io.Writer) error {
+func (processor fakeMediaProcessor) Process(_ context.Context, asset storedAsset, destination io.Writer) error {
 	if processor.err != nil {
 		return processor.err
+	}
+	if processor.processed != nil {
+		*processor.processed = asset
 	}
 	_, err := io.WriteString(destination, processor.output)
 	return err
@@ -141,6 +145,8 @@ func TestDecidePlaybackSourceProbesCompatibleHLSDuration(t *testing.T) {
 		processor: fakeMediaProcessor{info: MediaInspection{
 			Container:       "hls",
 			DurationSeconds: 7_200,
+			VideoTracks:     []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1920, Height: 1080}},
+			AudioTracks:     []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
 		}},
 		probes: newMediaProbeCache(time.Now),
 	}
@@ -151,6 +157,36 @@ func TestDecidePlaybackSourceProbesCompatibleHLSDuration(t *testing.T) {
 
 	if sources[0].Media == nil || sources[0].Media.DurationSeconds != 7_200 {
 		t.Fatalf("compatible HLS source duration was not inspected: %+v", sources[0])
+	}
+}
+
+func TestDecidePlaybackSourceRemuxesHLSWithPlayableAlternateAudio(t *testing.T) {
+	sources := []Source{{
+		ID: "stream-1", Mode: "direct", URL: "https://media.example/movie.m3u8",
+		Protocol: "hls", Container: "hls", Compatible: true,
+	}}
+	assets := []storedAsset{{ID: "stream-1", Kind: "stream", URL: sources[0].URL}}
+	service := &Service{
+		processor: fakeMediaProcessor{info: MediaInspection{
+			Container:   "hls",
+			VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264"}},
+			AudioTracks: []MediaTrack{
+				{Index: 1, Type: "audio", Codec: "dts"},
+				{Index: 2, Type: "audio", Codec: "aac"},
+			},
+		}},
+		probes: newMediaProbeCache(time.Now),
+	}
+	service.decidePlaybackSource(context.Background(), sources, assets, Capabilities{
+		StreamingProtocols: []string{"hls"},
+		Containers:         []string{"mp4"},
+		VideoCodecs:        []string{"h264"},
+		AudioCodecs:        []string{"aac"},
+		ProcessingModes:    []string{processingRemux},
+		MediaProfiles:      []MediaProfile{{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac"}},
+	})
+	if !sources[0].Compatible || sources[0].Mode != processingRemux || sources[0].Protocol != "hls" || assets[0].Kind != processingRemux {
+		t.Fatalf("HLS alternate audio was not remuxed losslessly: source=%+v asset=%+v", sources[0], assets[0])
 	}
 }
 
@@ -186,6 +222,7 @@ func TestDecidePlaybackSourceSkipsMislabeledLowResolution(t *testing.T) {
 		Containers:         []string{"mp4"},
 		VideoCodecs:        []string{"h264"},
 		AudioCodecs:        []string{"aac"},
+		ProcessingModes:    []string{processingRemux},
 	}
 
 	service.decidePlaybackSource(context.Background(), sources, assets, capabilities)
@@ -200,12 +237,20 @@ func TestDecidePlaybackSourceSkipsMislabeledLowResolution(t *testing.T) {
 
 func TestDecidePlaybackSourceHonorsMaximumHeight(t *testing.T) {
 	sources := []Source{
-		{ID: "stream-1", Name: "HLS 1080p", Hint: "1080p", Mode: "direct", URL: "https://media.example/full-hd.m3u8", Protocol: "hls", Container: "hls", Compatible: true},
+		{ID: "stream-1", Name: "HLS quality unknown", Mode: "direct", URL: "https://media.example/full-hd.m3u8", Protocol: "hls", Container: "hls", Compatible: true},
 		{ID: "stream-2", Name: "720p", Hint: "720p h264 aac", Mode: "direct", URL: "https://media.example/hd.mp4", Protocol: "http", Container: "mp4", Compatible: true},
 	}
-	assets := []storedAsset{{ID: "stream-2", Kind: "stream", URL: sources[1].URL}}
+	assets := []storedAsset{
+		{ID: "stream-1", Kind: "stream", URL: sources[0].URL},
+		{ID: "stream-2", Kind: "stream", URL: sources[1].URL},
+	}
 	service := &Service{
 		processor: sourceMediaProcessor{
+			sources[0].URL: {
+				Container:   "hls",
+				VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1920, Height: 1080}},
+				AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
+			},
 			sources[1].URL: {
 				Container:   "mp4",
 				VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1280, Height: 720}},
@@ -228,24 +273,21 @@ func TestDecidePlaybackSourceHonorsMaximumHeight(t *testing.T) {
 	}
 }
 
-func TestDecidePlaybackSourceSelectsMinimalProcessingMode(t *testing.T) {
-	capabilities := Capabilities{
-		StreamingProtocols: []string{"http"},
-		Containers:         []string{"mp4"},
-		VideoCodecs:        []string{"h264"},
-		AudioCodecs:        []string{"aac"},
-	}
+func TestDecidePlaybackSourceAllowsOnlyDirectOrAdvertisedRemux(t *testing.T) {
 	tests := []struct {
-		name      string
-		container string
-		video     string
-		audio     string
-		wantMode  string
+		name            string
+		container       string
+		video           string
+		audio           string
+		processingModes []string
+		wantMode        string
+		wantCompatible  bool
 	}{
-		{name: "direct", container: "mp4", video: "h264", audio: "aac", wantMode: "direct"},
-		{name: "remux", container: "mkv", video: "h264", audio: "aac", wantMode: "remux"},
-		{name: "audio only", container: "mkv", video: "h264", audio: "dts", wantMode: "transcode_audio"},
-		{name: "video and audio", container: "mkv", video: "hevc", audio: "dts", wantMode: "transcode"},
+		{name: "direct source stays untouched", container: "mp4", video: "h264", audio: "aac", processingModes: []string{processingRemux}, wantMode: "direct", wantCompatible: true},
+		{name: "container incompatibility remuxes", container: "mkv", video: "h264", audio: "aac", processingModes: []string{processingRemux}, wantMode: processingRemux, wantCompatible: true},
+		{name: "remux must be advertised", container: "mkv", video: "h264", audio: "aac"},
+		{name: "unsupported audio does not encode", container: "mkv", video: "h264", audio: "dts", processingModes: []string{processingRemux}},
+		{name: "unsupported video does not encode", container: "mkv", video: "vp9", audio: "aac", processingModes: []string{processingRemux}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -258,35 +300,94 @@ func TestDecidePlaybackSourceSelectsMinimalProcessingMode(t *testing.T) {
 				SubtitleTracks: []MediaTrack{},
 			}
 			service := &Service{processor: fakeMediaProcessor{info: info}, probes: newMediaProbeCache(time.Now)}
+			legacyPreferDirect := false
+			capabilities := Capabilities{
+				StreamingProtocols: []string{"http"},
+				Containers:         []string{"mp4"},
+				VideoCodecs:        []string{"h264"},
+				AudioCodecs:        []string{"aac"},
+				ProcessingModes:    test.processingModes,
+				PreferDirectPlay:   &legacyPreferDirect,
+			}
 
 			service.decidePlaybackSource(context.Background(), sources, assets, capabilities)
 
-			if !sources[0].Compatible || sources[0].Mode != test.wantMode || sources[0].Media == nil {
+			if sources[0].Compatible != test.wantCompatible || sources[0].Media == nil {
 				t.Fatalf("unexpected decision: source=%+v asset=%+v", sources[0], assets[0])
 			}
-			if test.wantMode == "direct" && assets[0].Kind != "stream" {
-				t.Fatalf("direct play unexpectedly changed asset: %+v", assets[0])
+			if test.wantCompatible && sources[0].Mode != test.wantMode {
+				t.Fatalf("expected mode %q, got source=%+v asset=%+v", test.wantMode, sources[0], assets[0])
 			}
-			if test.wantMode != "direct" && (assets[0].Kind != test.wantMode || sources[0].Container != "mp4") {
-				t.Fatalf("processing mode was not persisted: source=%+v asset=%+v", sources[0], assets[0])
+			if test.wantMode == processingRemux {
+				if assets[0].Kind != processingRemux || sources[0].Container != "mp4" {
+					t.Fatalf("remux decision was not persisted: source=%+v asset=%+v", sources[0], assets[0])
+				}
+			} else if assets[0].Kind != "stream" {
+				t.Fatalf("source unexpectedly requested media encoding: source=%+v asset=%+v", sources[0], assets[0])
 			}
 		})
 	}
 }
 
-func TestBrowserFallbackTranscodesCopiedVideoForPromptFragments(t *testing.T) {
-	for _, kind := range []string{processingRemux, processingTranscodeAudio} {
-		if asset := browserFallbackAsset(storedAsset{Kind: kind}); asset.Kind != processingTranscode {
-			t.Fatalf("fallback %q did not transcode video: %+v", kind, asset)
-		}
+func TestPlaybackModeRemuxesWithPlayableAlternateAudio(t *testing.T) {
+	mode, _ := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, MediaInspection{
+		Container:   "mkv",
+		VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264"}},
+		AudioTracks: []MediaTrack{
+			{Index: 1, Type: "audio", Codec: "dts"},
+			{Index: 2, Type: "audio", Codec: "aac"},
+		},
+	}, Capabilities{
+		StreamingProtocols: []string{"http"},
+		Containers:         []string{"mp4"},
+		VideoCodecs:        []string{"h264"},
+		AudioCodecs:        []string{"aac"},
+		ProcessingModes:    []string{processingRemux},
+		MediaProfiles:      []MediaProfile{{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac"}},
+	})
+	if mode != processingRemux {
+		t.Fatalf("playable alternate audio did not keep the source eligible for remux: %q", mode)
 	}
-	if asset := browserFallbackAsset(storedAsset{Kind: processingTranscode}); asset.Kind != processingTranscode {
-		t.Fatalf("video transcode fallback changed unexpectedly: %+v", asset)
+}
+
+func TestMediaProfilesDoNotCrossContainerCodecPairs(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"http"},
+		Containers:         []string{"mp4", "webm"},
+		VideoCodecs:        []string{"h264", "vp9"},
+		AudioCodecs:        []string{"aac", "opus"},
+		ProcessingModes:    []string{processingRemux},
+		MediaProfiles: []MediaProfile{
+			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac"},
+			{Container: "webm", VideoCodec: "vp9", AudioCodec: "opus"},
+		},
+	}
+	directMode, _ := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "webm"}, MediaInspection{
+		VideoTracks: []MediaTrack{{Codec: "vp9"}},
+		AudioTracks: []MediaTrack{{Codec: "opus"}},
+	}, capabilities)
+	crossedMode, _ := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mp4"}, MediaInspection{
+		VideoTracks: []MediaTrack{{Codec: "h264"}},
+		AudioTracks: []MediaTrack{{Codec: "opus"}},
+	}, capabilities)
+	if directMode != "direct" || crossedMode != "" {
+		t.Fatalf("container/codec profiles were cross-paired: direct=%q crossed=%q", directMode, crossedMode)
+	}
+}
+
+func TestSessionSourceURLPreservesAuthorizedExternalHandoff(t *testing.T) {
+	const externalURL = "https://external.example/watch?token=opaque"
+	if got := sessionSourceURL(Source{ID: "external-1", Mode: "external", URL: externalURL}, nil, "session-id", "session-token"); got != externalURL {
+		t.Fatalf("external player URL was rewritten through the media proxy: %q", got)
+	}
+	if got := sessionSourceURL(Source{ID: "direct-1", Mode: "direct", URL: "https://media.example/movie.mp4"}, nil, "session-id", "session-token"); got == "https://media.example/movie.mp4" || !strings.HasPrefix(got, "/api/v1/playback/sessions/") {
+		t.Fatalf("web media URL was not protected by the session proxy: %q", got)
 	}
 }
 
 func TestProxyProcessedMediaStreamsMP4WithoutCaching(t *testing.T) {
-	service := &Service{processor: fakeMediaProcessor{output: "fragmented-mp4"}}
+	var processed storedAsset
+	service := &Service{processor: fakeMediaProcessor{output: "fragmented-mp4", processed: &processed}}
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest("GET", "/asset", nil)
 
@@ -295,6 +396,9 @@ func TestProxyProcessedMediaStreamsMP4WithoutCaching(t *testing.T) {
 	}
 	if response.Code != 200 || response.Header().Get("Content-Type") != "video/mp4" || response.Header().Get("Cache-Control") != "no-store" || response.Body.String() != "fragmented-mp4" {
 		t.Fatalf("unexpected processed response: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+	if processed.Kind != processingRemux {
+		t.Fatalf("progressive fallback escalated remux into media encoding: %+v", processed)
 	}
 }
 

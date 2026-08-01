@@ -1,8 +1,8 @@
-import { AudioLines, Bookmark, Captions, Check, Clapperboard, ExternalLink, Eye, EyeOff, Gauge, Info, ListVideo, LoaderCircle, Maximize, Minimize, Pause, PictureInPicture, Play, RefreshCw, RotateCcw, RotateCw, ServerCrash, Settings2, SkipForward, Star, Volume2, VolumeX, X } from "lucide-react";
+import { ArrowLeft, AudioLines, Bookmark, Captions, Check, Clapperboard, ExternalLink, Eye, EyeOff, Gauge, Info, ListVideo, LoaderCircle, Maximize, Minimize, Pause, PictureInPicture, Play, RefreshCw, RotateCcw, RotateCw, ServerCrash, Settings2, SkipForward, Star, Volume2, VolumeX, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { api, APIError } from "./api";
-import { Button, IconButton, Modal, Notice } from "./components";
+import { Button, IconButton, Notice } from "./components";
 import { translate as t } from "./i18n";
 import { notifyError, notifyErrorMessage, notifySuccess } from "./notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "./titleProviders";
@@ -45,25 +45,81 @@ function preparationLabel(preparation: PlaybackPreparation): string {
 }
 function webPlaybackCapabilities(): PlaybackCapabilities {
   const video = document.createElement("video");
+  const audio = document.createElement("audio");
   const containers: string[] = [];
   const videoCodecs: string[] = [];
   const audioCodecs: string[] = [];
+  const mediaProfiles: NonNullable<PlaybackCapabilities["mediaProfiles"]> = [];
+  const add = (target: string[], ...values: string[]) => {
+    for (const value of values) if (!target.includes(value)) target.push(value);
+  };
   if (video.canPlayType('video/mp4; codecs="avc1.42E01E"')) {
-    containers.push("mp4", "m4v", "mov");
-    videoCodecs.push("h264");
-    audioCodecs.push("aac");
+    add(containers, "mp4", "m4v", "mov");
+    add(videoCodecs, "h264");
   }
   if (video.canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"') || video.canPlayType('video/mp4; codecs="hev1.1.6.L93.B0"')) {
-    if (!containers.includes("mp4")) containers.push("mp4", "m4v", "mov");
-    videoCodecs.push("h265");
+    add(containers, "mp4", "m4v", "mov");
+    add(videoCodecs, "h265");
+  }
+  if (video.canPlayType('video/mp4; codecs="av01.0.05M.08"')) {
+    add(containers, "mp4", "m4v", "mov");
+    add(videoCodecs, "av1");
+  }
+  if (video.canPlayType('video/webm; codecs="av01.0.05M.08"')) {
+    add(containers, "webm");
+    add(videoCodecs, "av1");
   }
   if (video.canPlayType('video/webm; codecs="vp9"')) {
-    containers.push("webm");
-    videoCodecs.push("vp9");
+    add(containers, "webm");
+    add(videoCodecs, "vp9");
   }
+  if (audio.canPlayType('audio/mp4; codecs="mp4a.40.2"')) add(audioCodecs, "aac");
+  if (audio.canPlayType('audio/webm; codecs="opus"')) add(audioCodecs, "opus");
+  if (audio.canPlayType('audio/webm; codecs="vorbis"')) add(audioCodecs, "vorbis");
+  if (audio.canPlayType("audio/mpeg")) add(audioCodecs, "mp3");
+  if (audio.canPlayType('audio/mp4; codecs="ac-3"')) add(audioCodecs, "ac3");
+  if (audio.canPlayType('audio/mp4; codecs="ec-3"')) add(audioCodecs, "eac3");
+  const addProfile = (container: string, videoCodec: string, codecString: string, audioCodec?: string) => {
+    const mime = container === "webm" ? "video/webm" : "video/mp4";
+    if (!video.canPlayType(`${mime}; codecs="${codecString}"`)) return;
+    if (!mediaProfiles.some((profile) => profile.container === container && profile.videoCodec === videoCodec && profile.audioCodec === audioCodec)) {
+      mediaProfiles.push({ container, videoCodec, ...(audioCodec ? { audioCodec } : {}) });
+    }
+    add(containers, container, ...(container === "mp4" ? ["m4v", "mov"] : []));
+    add(videoCodecs, videoCodec);
+    if (audioCodec) add(audioCodecs, audioCodec);
+  };
+  const profileVideoCandidates = [
+    { container: "mp4", videoCodec: "h264", identifiers: ["avc1.42E01E"] },
+    { container: "mp4", videoCodec: "h265", identifiers: ["hvc1.1.6.L93.B0", "hev1.1.6.L93.B0"] },
+    { container: "mp4", videoCodec: "av1", identifiers: ["av01.0.05M.08"] },
+    { container: "webm", videoCodec: "vp9", identifiers: ["vp9", "vp09.00.10.08"] },
+    { container: "webm", videoCodec: "av1", identifiers: ["av01.0.05M.08"] },
+  ];
+  const profileAudioCandidates = [
+    { container: "mp4", audioCodec: "aac", identifier: "mp4a.40.2" },
+    { container: "mp4", audioCodec: "ac3", identifier: "ac-3" },
+    { container: "mp4", audioCodec: "eac3", identifier: "ec-3" },
+    { container: "mp4", audioCodec: "mp3", identifier: "mp3" },
+    { container: "mp4", audioCodec: "opus", identifier: "opus" },
+    { container: "webm", audioCodec: "opus", identifier: "opus" },
+    { container: "webm", audioCodec: "vorbis", identifier: "vorbis" },
+  ];
+  for (const videoProfile of profileVideoCandidates) {
+    for (const videoIdentifier of videoProfile.identifiers) {
+      addProfile(videoProfile.container, videoProfile.videoCodec, videoIdentifier);
+      for (const audioProfile of profileAudioCandidates) {
+        if (audioProfile.container !== videoProfile.container) continue;
+        addProfile(videoProfile.container, videoProfile.videoCodec, `${videoIdentifier}, ${audioProfile.identifier}`, audioProfile.audioCodec);
+      }
+    }
+  }
+  if (containers.length === 0) containers.push("none");
+  if (videoCodecs.length === 0) videoCodecs.push("none");
+  if (audioCodecs.length === 0) audioCodecs.push("none");
   const streamingProtocols = ["http", "youtube"];
   if (video.canPlayType("application/vnd.apple.mpegurl") || "MediaSource" in window) streamingProtocols.push("hls");
-  return { streamingProtocols, containers, videoCodecs, audioCodecs, hdrFormats: ["sdr"] };
+  return { streamingProtocols, containers, videoCodecs, audioCodecs, hdrFormats: ["sdr"], processingModes: ["remux"], mediaProfiles, externalPlayers: ["system"] };
 }
 
 function titleReleaseDate(value: string | undefined): string | undefined {
@@ -162,7 +218,7 @@ function episodeIsUpcoming(episode: EpisodeMetadata): boolean {
   return Number.isFinite(airDate.getTime()) && airDate.getTime() > Date.now();
 }
 
-export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () => void }) {
+export function MediaDetails({ item, onClose, onNavigateContext }: { item: MediaItem; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void }) {
   const [details, setDetails] = useState(item);
   const [playing, setPlaying] = useState(false);
   const [titleID, setTitleID] = useState(item.titleId);
@@ -176,6 +232,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
   const [trailerUnavailable, setTrailerUnavailable] = useState(false);
   const [trailerOwnerKey, setTrailerOwnerKey] = useState("");
   const [metaLoading, setMetaLoading] = useState(true);
+  const [metaError, setMetaError] = useState("");
   const [availableStreams, setAvailableStreams] = useState<PlaybackSourceOption[]>([]);
   const [selectedStream, setSelectedStream] = useState<PlaybackSourceOption>();
   const [streamsLoading, setStreamsLoading] = useState(true);
@@ -223,6 +280,15 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
   const autoplayNextEpisode = document.documentElement.dataset.autoplayNextEpisode !== "false";
 
   useEffect(() => {
+    if (playing) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose, playing]);
+
+  useEffect(() => {
     trailerRequestRef.current += 1;
     setTrailers([]);
     setSelectedTrailer(undefined);
@@ -235,6 +301,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
 
   useEffect(() => {
     let active = true;
+    setMetaError("");
     void api.resources("meta", item.mediaType === "episode" ? "series" : item.mediaType, item.id).then((batch) => {
       const metas = payloadRecords(batch, "meta");
       const fallback = batch.results.map((result) => record(result.payload.meta)).find((value) => value !== null);
@@ -250,7 +317,9 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
         releaseInfo: item.mediaType === "episode" ? current.releaseInfo : String(meta.releaseInfo ?? meta.year ?? current.releaseInfo ?? ""),
         raw: { ...current.raw, ...meta },
       }));
-    }).catch(() => undefined).finally(() => { if (active) setMetaLoading(false); });
+    }).catch((cause) => {
+      if (active) setMetaError(cause instanceof APIError ? cause.message : "Additional title details could not be loaded.");
+    }).finally(() => { if (active) setMetaLoading(false); });
     if (item.titleId) {
       void api.library().then((library) => { if (active) setSaved(library.items.some((entry) => entry.titleId === item.titleId)); }).catch(() => undefined);
     }
@@ -369,7 +438,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
         const first = resolved.episodes.find((episode) => !episodeIsUpcoming(episode));
         if (first) setSelectedEpisode(first);
         else autoPlayNextRef.current = false;
-      } else if (item.mediaType === "episode") {
+      } else if (item.mediaType === "episode" || continueEpisodeID) {
         const requested = continueEpisodeID
           ? resolved.episodes.find((episode) => episode.id === continueEpisodeID)
           : undefined;
@@ -460,6 +529,11 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
     void api.preparePlayback({ sourceRef: selectedStream.sourceRef, startSeconds: preparationStartSeconds }, controller.signal).then((prepared) => {
       if (!active) return;
       sourceRefreshAttemptRef.current = "";
+      if (prepared.mode === "transcode" || prepared.mode === "transcode_audio") {
+        autoPlayNextRef.current = false;
+        setPreparationError("This source requires media encoding, which Rivune web playback does not start automatically. Choose another source or an external-player option.");
+        return;
+      }
       setPreparation(prepared);
       if (autoPlayNextRef.current) {
         autoPlayNextRef.current = false;
@@ -471,6 +545,10 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
       if (cause instanceof APIError && cause.code === "playback_source_expired" && sourceRefreshAttemptRef.current !== selectedStream.sourceRef) {
         sourceRefreshAttemptRef.current = selectedStream.sourceRef;
         setStreamRefreshVersion((version) => version + 1);
+        return;
+      }
+      if (cause instanceof APIError && cause.code === "playback_source_unsupported") {
+        setPreparationError("This source needs a video or audio conversion that web playback does not allow. Rivune did not start a transcode; choose another source or an external-player option.");
         return;
       }
       setPreparationError(notifyError(cause, "The selected stream could not be prepared.", "Stream unavailable"));
@@ -677,10 +755,13 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
   }
 
   const typeLabel = mediaTypeLabel(details.mediaType);
-  return <Modal onClose={closeDetails} className="details-modal">
+  return <article className={`details-page page-enter${details.mediaType === "episode" ? " details-page--episode" : ""}`} aria-labelledby="media-details-title">
+    <button type="button" className="details-page__back" onClick={closeDetails} autoFocus><ArrowLeft size={18} /> Back to browse</button>
     <div className="details-hero" style={backdrop ? { backgroundImage: `url(${backdrop})` } : undefined}><div className="details-hero__shade" /></div>
-    <div className="details-content">
-      {details.logoUrl ? <img className="details-logo" src={details.logoUrl} alt={details.title} /> : <h1>{details.title}</h1>}
+    <div className="details-body">
+      <aside className="details-artwork" aria-hidden="true">{details.posterUrl ? <img src={details.posterUrl} alt="" /> : <span>{details.title.slice(0, 2).toUpperCase()}</span>}</aside>
+      <div className="details-content">
+      {details.logoUrl ? <><img className="details-logo" src={details.logoUrl} alt="" /><h1 id="media-details-title" className="visually-hidden">{details.title}</h1></> : <h1 id="media-details-title">{details.title}</h1>}
       <div className="details-meta">
         {details.releaseInfo && details.releaseInfo !== typeLabel && <span>{details.releaseInfo}</span>}
         {details.voteAverage !== undefined && <span className="rating"><Star size={14} fill="currentColor" /> {details.voteAverage.toFixed(1)}</span>}
@@ -700,7 +781,8 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
           </a>;
         })}
       </div>}
-      {metaLoading && !details.description ? <div className="details-loading"><LoaderCircle className="spin" size={18} /> Loading details</div> : <p className="details-description">{details.description || "No synopsis is available for this title."}</p>}
+      {metaLoading && !details.description ? <div className="details-loading" role="status"><LoaderCircle className="spin" size={18} /> Loading details</div> : <p className="details-description">{details.description || "No synopsis is available for this title."}</p>}
+      {metaError && <Notice tone="info">{metaError} The available title information is shown below.</Notice>}
       {fromContinue && (item.mediaType === "movie" || item.mediaType === "episode") && <div className="details-context-actions">
         <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>{titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}{titleProgress?.completed ? "Mark unwatched" : "Mark watched"}</Button>
         {item.mediaType === "episode" && <Button variant="secondary" onClick={() => setSeriesVisible((visible) => !visible)}><ListVideo size={19} />{seriesVisible ? "Hide series & season" : "View series & season"}</Button>}
@@ -708,7 +790,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
       {seriesVisible && <section className="series-browser">
         <header><div><ListVideo size={18} /><span>Episodes</span></div></header>
         {seriesLoading ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> Loading seasons…</div> : seriesError && !series ? <Notice>{seriesError}</Notice> : series && <>
-          <div className="season-tabs" role="tablist" aria-label="Seasons">{[...series.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber).map((candidate) => <button key={candidate.id} type="button" role="tab" aria-selected={seasonID === candidate.id} className={seasonID === candidate.id ? "is-active" : ""} onClick={() => { autoPlayNextRef.current = false; setSeasonID(candidate.id); }}>{candidate.seasonNumber === 0 ? "Specials" : `Season ${candidate.seasonNumber}`}<small>{candidate.episodeCount} episodes</small></button>)}</div>
+          <div className="season-tabs" role="tablist" aria-label="Seasons">{[...series.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber).map((candidate) => <button key={candidate.id} type="button" role="tab" aria-selected={seasonID === candidate.id} className={seasonID === candidate.id ? "is-active" : ""} onClick={() => { autoPlayNextRef.current = false; setSeasonID(candidate.id); onNavigateContext?.({ seasonID: candidate.id, seasonNumber: candidate.seasonNumber }); }}>{candidate.seasonNumber === 0 ? "Specials" : `Season ${candidate.seasonNumber}`}<small>{candidate.episodeCount} episodes</small></button>)}</div>
           {seasonLoading ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> Loading episodes…</div> : <>
             <div className="season-watch-state"><span>{watchedEpisodeCount} of {availableSeasonEpisodes.length} watched</span><button type="button" disabled={availableSeasonEpisodes.length === 0 || watchedBusy === seasonID} onClick={() => void toggleSeasonWatched()}>{watchedBusy === seasonID ? <LoaderCircle className="spin" size={15} /> : allSeasonWatched ? <EyeOff size={15} /> : <Eye size={15} />}{allSeasonWatched ? "Mark season unwatched" : "Mark season watched"}</button></div>
             <div className="episode-list">{orderedEpisodes.map((episode) => {
@@ -716,7 +798,7 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
             const upcoming = episodeIsUpcoming(episode);
             const progressPercent = progress && progress.durationSeconds > 0 ? Math.min(100, progress.positionSeconds / progress.durationSeconds * 100) : 0;
             return <div key={episode.id} className={selectedEpisode?.id === episode.id ? "is-selected" : ""}>
-              <button type="button" className="episode-main" disabled={upcoming} onClick={() => { autoPlayNextRef.current = false; setSelectedEpisode(episode); }}>
+              <button type="button" className="episode-main" disabled={upcoming} aria-current={selectedEpisode?.id === episode.id ? "true" : undefined} onClick={() => { autoPlayNextRef.current = false; setSelectedEpisode(episode); onNavigateContext?.({ seasonID, episodeID: episode.id, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber }); }}>
                 <span className="episode-number">{episode.episodeNumber}</span>{episode.stillUrl ? <img src={episode.stillUrl} alt="" loading="lazy" /> : <span className="episode-placeholder"><Play size={18} /></span>}
                 <span className="episode-copy"><strong>{episode.name || `Episode ${episode.episodeNumber}`}</strong><small>{episode.runtimeMinutes ? `${episode.runtimeMinutes} min` : ""}{episode.airDate ? ` · ${episode.airDate}` : ""}{upcoming ? " · Upcoming" : ""}</small><p>{episode.overview || "No synopsis is available."}</p>{progressPercent > 0 && <i><span style={{ width: `${progressPercent}%` }} /></i>}</span>
                 <Play size={16} />
@@ -771,8 +853,9 @@ export function MediaDetails({ item, onClose }: { item: MediaItem; onClose: () =
       {trailerOwnerKey === trailerItemKey && trailerMessage && <div className="details-trailer-feedback"><Notice tone={trailerUnavailable ? "info" : "error"}>{trailerMessage}</Notice></div>}
       {actionError && <Notice>{actionError}</Notice>}
       {details.sources && details.sources.length > 0 && <div className="details-sources"><span>Available from</span>{details.sources.map((source) => <i key={source.id}>{source.title}</i>)}</div>}
+      </div>
     </div>
-  </Modal>;
+  </article>;
 }
 
 type PlayerPhase = "preparing" | "ready" | "playing" | "paused" | "buffering" | "recovering" | "failed" | "ended";
@@ -812,6 +895,13 @@ function playerModeLabel(mode?: string, toneMapped = false): string {
   if (mode === "youtube") return "YouTube";
   if (mode === "external") return "External player";
   return "Playback";
+}
+
+function playerSourceAvailable(source: PlaybackSource): boolean {
+  if (!source.compatible) return false;
+  if (source.mode === "transcode" || source.mode === "transcode_audio") return false;
+  if (source.mode === "external") return Boolean(source.url || source.infoHash);
+  return Boolean(source.url || source.ytId);
 }
 
 function playerPhaseLabel(phase: PlayerPhase): string {
@@ -965,14 +1055,20 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       setSubtitles(session.subtitles ?? []);
       setSelectedAudioTrack(session.selectedAudioTrack);
       setSelectedSubtitleID(session.selectedSubtitleId || "none");
-      const compatible = resolvedSources.filter((source) => source.compatible && Boolean(source.url || source.ytId));
+      const compatible = resolvedSources.filter(playerSourceAvailable);
       const selectedIndex = compatible.findIndex((source) => source.id === session.selectedSourceId);
       setSelected(selectedIndex < 0 ? 0 : selectedIndex);
       setPhase("ready");
     }).catch((cause) => {
       if (!active) return;
+      stopCurrentSession();
       if (cause instanceof APIError && cause.code === "playback_source_expired") {
         onSourceExpired();
+        return;
+      }
+      if (cause instanceof APIError && cause.code === "playback_source_unsupported") {
+        setError("This source requires media conversion that web playback does not allow. Choose another source or use an external player.");
+        setPhase("failed");
         return;
       }
       setError(notifyError(cause, "Playback sources are unavailable.", "Playback unavailable"));
@@ -981,7 +1077,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     return () => { active = false; };
   }, [item.id, item.titleId, onSourceExpired, preferredAudioTrack, progressReady, retryVersion, sourceRef]);
 
-  const playable = useMemo(() => streams.filter((candidate) => candidate.compatible && Boolean(candidate.url || candidate.ytId)), [streams]);
+  const playable = useMemo(() => streams.filter(playerSourceAvailable), [streams]);
   const stream = playable[selected];
   const inspectedDuration = stream?.media?.durationSeconds ?? 0;
   const playbackDuration = inspectedDuration > 0 ? inspectedDuration : videoDuration;
@@ -993,9 +1089,12 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   const progressPercent = playbackDuration > 0 ? Math.min(100, Math.max(0, transportTime / playbackDuration * 100)) : 0;
   const remainingSeconds = playbackDuration > 0 ? Math.max(0, playbackDuration - currentTime) : Number.POSITIVE_INFINITY;
   const showNextEpisode = Boolean(onEnded && (phase === "ended" || remainingSeconds <= 30));
-  const customTransport = Boolean(stream?.url);
+  const customTransport = Boolean(stream?.url && stream.mode !== "external");
   const toneMapped = Boolean(stream?.media?.hdrFormat && stream.media.hdrFormat !== "sdr" && stream.mode === "transcode");
   const modeLabel = playerModeLabel(stream?.mode, toneMapped);
+  const externalPlaybackURL = stream?.mode === "external"
+    ? stream.infoHash ? `magnet:?xt=urn:btih:${encodeURIComponent(stream.infoHash)}` : stream.url ?? ""
+    : "";
   const activeMarker = customTransport && playbackDuration > 0
     ? markers.find((marker) => validPlaybackMarker(marker, playbackDuration) && !dismissedMarkers.has(marker.type) && currentTime >= marker.startSeconds && currentTime < marker.endSeconds)
     : undefined;
@@ -1060,7 +1159,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!progressReady || !video || !stream?.url) return;
+    if (!progressReady || !video || !stream?.url || stream.mode === "external") return;
     const playbackURL = new URL(stream.url, window.location.origin);
     const processed = stream.mode !== "direct";
     const playbackOffset = processed ? Math.max(0, Math.floor(playbackStart ?? resumePositionRef.current)) : 0;
@@ -1238,10 +1337,10 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   }, []);
 
   useEffect(() => {
-    if (!stream?.url) return;
-    const frame = window.requestAnimationFrame(() => playerRef.current?.querySelector<HTMLElement>(".player__control-primary")?.focus());
+    if (!stream?.url && !stream?.infoHash) return;
+    const frame = window.requestAnimationFrame(() => playerRef.current?.querySelector<HTMLElement>(".player__external-action, .player__control-primary")?.focus());
     return () => window.cancelAnimationFrame(frame);
-  }, [stream?.id, stream?.url]);
+  }, [stream?.id, stream?.infoHash, stream?.url]);
 
   useEffect(() => {
     window.clearTimeout(controlsTimerRef.current);
@@ -1275,7 +1374,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         return;
       }
       if (interactive) return;
-      if (target instanceof HTMLButtonElement && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      if (target instanceof HTMLElement && target.hasAttribute("data-player-control") && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
         event.preventDefault();
         movePlayerFocus(event.key);
         return;
@@ -1774,7 +1873,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   return createPortal(<div ref={playerRef} className={`player player--${phase}${controlsVisible ? " has-controls" : " controls-hidden"}`} role="dialog" aria-modal="true" aria-label={`Playing ${item.title}`} onPointerMove={revealControls} onPointerDown={revealControls} onFocusCapture={revealControls}>
     <div className="player__surface" onClick={handleSurfaceClick} onDoubleClick={handleSurfaceDoubleClick} onPointerUp={handleSurfacePointerUp}>
       {stream?.ytId ? <iframe className="player__video" src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(stream.ytId)}?autoplay=1`} allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen title={item.title} /> :
-        stream?.url ? <video key={`${stream.id}:${stream.url}:${playbackStart ?? 0}:${playbackGeneration}`} ref={videoRef} className="player__video" controls={false} playsInline crossOrigin="anonymous"
+        stream?.mode !== "external" && stream?.url ? <video key={`${stream.id}:${stream.url}:${playbackStart ?? 0}:${playbackGeneration}`} ref={videoRef} className="player__video" controls={false} playsInline crossOrigin="anonymous"
           onCanPlay={(event) => handlePlaybackReady(event.currentTarget)}
           onLoadedMetadata={(event) => resumePlayback(event.currentTarget)}
           onDurationChange={(event) => { if (Number.isFinite(event.currentTarget.duration)) setVideoDuration(event.currentTarget.duration); }}
@@ -1800,6 +1899,14 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     {playbackBlocked && phase !== "failed" && <button type="button" className="player__start" onClick={togglePlayback} data-player-control><Play size={30} fill="currentColor" /><span>Play</span></button>}
     {phase === "failed" && <div className="player__failure" role="alert"><ServerCrash size={34} /><strong>Playback unavailable</strong><p>{error || "The selected stream could not be played."}</p><div><Button onClick={retryPlayback}><RefreshCw size={17} /> Retry</Button><Button variant="secondary" onClick={closePlayer}>Go back</Button></div></div>}
     {!loading && playable.length === 0 && phase !== "failed" && <div className="player__failure"><ServerCrash size={34} /><strong>No playable source</strong><p>{error || "The selected stream is not compatible with this device."}</p><Button variant="secondary" onClick={closePlayer}>Go back</Button></div>}
+    {!loading && stream?.mode === "external" && externalPlaybackURL && <div className="player__external">
+      <ExternalLink size={36} />
+      <small>External source</small>
+      <strong>Continue in an external player</strong>
+      <p>This source is not sent through Rivune&apos;s web player. No video conversion will be started.</p>
+      <a className="player__external-action" href={externalPlaybackURL} target={externalPlaybackURL.startsWith("http") ? "_blank" : undefined} rel="noreferrer" data-player-control><ExternalLink size={18} /> Open external player</a>
+      <button type="button" onClick={closePlayer} data-player-control>Choose another source</button>
+    </div>}
     {showNextEpisode && <button type="button" className="player__next" onClick={playNextEpisode} data-player-control><span>Up next</span><strong>Next episode</strong><small>{autoplayNextEpisode && phase !== "ended" ? `Starts in ${Math.ceil(remainingSeconds)}s` : "Play next episode"}</small><SkipForward size={20} fill="currentColor" /></button>}
     {activeMarker && <button type="button" className={`player__skip-marker is-${activeMarker.type}`} onClick={() => skipMarker(activeMarker)} data-player-control><SkipForward size={20} /><span>{skipMarkerLabel(activeMarker.type)}</span></button>}
 

@@ -156,6 +156,8 @@ func cloneCapabilities(capabilities Capabilities) Capabilities {
 	capabilities.AudioCodecs = append([]string(nil), capabilities.AudioCodecs...)
 	capabilities.HDRFormats = append([]string(nil), capabilities.HDRFormats...)
 	capabilities.ExternalPlayers = append([]string(nil), capabilities.ExternalPlayers...)
+	capabilities.ProcessingModes = append([]string(nil), capabilities.ProcessingModes...)
+	capabilities.MediaProfiles = append([]MediaProfile(nil), capabilities.MediaProfiles...)
 	if capabilities.PreferDirectPlay != nil {
 		value := *capabilities.PreferDirectPlay
 		capabilities.PreferDirectPlay = &value

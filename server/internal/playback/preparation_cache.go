@@ -105,7 +105,15 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 		assets = append(assets, cloneStoredAsset(*reference.Asset))
 	}
 	service.decidePlaybackSource(ctx, sources, assets, reference.Capabilities)
+	if sources[0].Media != nil {
+		if assetIndex := storedAssetIndex(assets, sources[0].ID); assetIndex >= 0 {
+			assets[assetIndex].DurationSeconds = sources[0].Media.DurationSeconds
+		}
+	}
 	if !hasCompatibleSource(sources) {
+		if sources[0].Media != nil {
+			return preparedPlayback{}, ErrUnsupportedSource
+		}
 		return preparedPlayback{}, ErrNoPlayableSource
 	}
 

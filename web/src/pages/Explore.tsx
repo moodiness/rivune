@@ -4,8 +4,10 @@ import { api } from "../api";
 import { useAuth } from "../auth";
 import { Button, EmptyState, MediaCard, Notice, SectionHeading, Skeleton } from "../components";
 import { notifyError, notifyErrorMessage } from "../notifications";
-import { MediaDetails, mediaTypeLabel } from "../media";
+import { mediaTypeLabel } from "../media";
 import type { Collection, ContinueItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch } from "../types";
+
+type OpenMedia = (item: MediaItem) => void;
 
 function record(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -187,12 +189,11 @@ function HorizontalDragRow({ children, className = "folder-cover-row" }: { child
 }
 
 
-export function HomePage() {
+export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedia; mediaRevision: number }) {
   const [rows, setRows] = useState<HomeRow[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [selected, setSelected] = useState<MediaItem | null>(null);
   const [opened, setOpened] = useState<HomeRow | null>(null);
   const [openedCollection, setOpenedCollection] = useState<Collection | null>(null);
   const [continueItems, setContinueItems] = useState<EnrichedContinueItem[]>([]);
@@ -201,6 +202,7 @@ export function HomePage() {
   const [pendingFolderKeys, setPendingFolderKeys] = useState<Set<string>>(new Set());
   const [activeHeroIndex, setActiveHeroIndex] = useState(0);
   const homeRequestGeneration = useRef(0);
+  const continueRevisionRef = useRef(0);
 
   useEffect(() => {
     if (!mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
@@ -287,6 +289,16 @@ export function HomePage() {
     };
   }, [mediaPreferences.profileID, mediaPreferences.ready, profileRequestSignal]);
 
+  useEffect(() => {
+    if (mediaRevision === 0 || continueRevisionRef.current === mediaRevision || !mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
+    continueRevisionRef.current = mediaRevision;
+    let active = true;
+    void loadContinueItems(profileRequestSignal).then((items) => {
+      if (active) setContinueItems(items);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [mediaPreferences.profileID, mediaPreferences.ready, mediaRevision, profileRequestSignal]);
+
   const heroSlides = useMemo(() => {
     const seen = new Set<string>();
     const slides: HeroSlide[] = [];
@@ -330,8 +342,8 @@ export function HomePage() {
 
   if (loading) return <div className="home-page page-enter"><Skeleton className="hero-skeleton" /><div className="content-stack">{[0, 1, 2].map((row) => <div key={row}><Skeleton className="heading-skeleton" /><div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div></div>)}</div></div>;
 
-  if (opened) return <FolderBrowser key={`${opened.collection.id}-${opened.resolved.folder.id}`} row={opened} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpened(null)} />;
-  if (openedCollection) return <CollectionBrowser key={openedCollection.id} collection={openedCollection} rows={rows.filter((row) => row.collection.id === openedCollection.id)} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpenedCollection(null)} />;
+  if (opened) return <FolderBrowser key={`${opened.collection.id}-${opened.resolved.folder.id}`} row={opened} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpened(null)} onOpenMedia={onOpenMedia} />;
+  if (openedCollection) return <CollectionBrowser key={openedCollection.id} collection={openedCollection} rows={rows.filter((row) => row.collection.id === openedCollection.id)} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpenedCollection(null)} onOpenMedia={onOpenMedia} />;
 
   return <div className="home-page page-enter">
     {hero && heroSlide ? <section key={heroSlide.key} className="hero hero--featured">
@@ -341,7 +353,7 @@ export function HomePage() {
         {hero.logoUrl ? <img src={hero.logoUrl} alt={hero.title} /> : <h1>{hero.title}</h1>}
         <div className="hero__meta">{hero.releaseInfo && <span>{hero.releaseInfo}</span>}{hero.voteAverage !== undefined && <span><Star size={14} fill="currentColor" /> {hero.voteAverage.toFixed(1)}</span>}<span>{mediaTypeLabel(hero.mediaType)}</span></div>
         <p>{hero.description || "A hand-picked title from your personal collections."}</p>
-        <div className="hero__actions"><Button onClick={() => setSelected(hero)}><Play size={19} fill="currentColor" /> Play now</Button><Button variant="secondary" onClick={() => setSelected(hero)}>More info <ArrowRight size={18} /></Button></div>
+        <div className="hero__actions"><Button onClick={() => onOpenMedia(hero)}><Play size={19} fill="currentColor" /> Play now</Button><Button variant="secondary" onClick={() => onOpenMedia(hero)}>More info <ArrowRight size={18} /></Button></div>
       </div>
       {heroSlides.length > 1 && <div className="hero__navigation" aria-label="Featured titles">
         <button type="button" onClick={() => rotateHero(-1)} aria-label="Previous featured title"><ArrowLeft size={18} /></button>
@@ -363,7 +375,7 @@ export function HomePage() {
           subtitle={typeof item.raw?.continueCardSubtitle === "string" ? item.raw.continueCardSubtitle : item.releaseInfo}
           badge={typeof item.raw?.continueCardBadge === "string" ? item.raw.continueCardBadge : undefined}
           progress={item.raw?.continueReason === "resume" && typeof item.raw.progress === "number" ? item.raw.progress : undefined}
-          onClick={() => setSelected(item)}
+          onClick={() => onOpenMedia(item)}
         />)}</HorizontalDragRow>
       </section>}
       {collections.map((collection) => {
@@ -374,9 +386,9 @@ export function HomePage() {
         const showDirectly = collection.viewMode === "follow_layout";
         const landscapeItems = directItems.length > 0 && directItems.every((item) => item.mediaType === "tv");
         const collectionPending = collection.folders.some((folder) => pendingFolderKeys.has(homeFolderKey(collection.id, folder.id ?? "")));
-        return <section className="folder-collection-section" key={collection.id}>
+        return <section className={`folder-collection-section folder-collection-section--${collection.folderCoverShape}`} key={collection.id}>
           <SectionHeading title={collection.title} action={<button type="button" className="text-button" onClick={() => setOpenedCollection(collection)}>View all <ArrowRight size={16} /></button>} />
-          {showDirectly ? directItems.length > 0 ? <HorizontalDragRow className={landscapeItems ? "media-row media-row--landscape" : "media-row"}>{directItems.map((item) => <MediaCard key={`${item.mediaType}-${item.id}`} shape={item.mediaType === "tv" ? "landscape" : "poster"} title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo} onClick={() => setSelected(item)} />)}</HorizontalDragRow> : collectionPending ? <div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div> : <EmptyState icon={<Clapperboard size={40} />} title="This collection is empty" description="Its configured sources did not return any titles." /> : <HorizontalDragRow className={`folder-cover-row folder-cover-row--${collection.folderCoverShape}`}>{collection.folders.map((folder, index) => {
+          {showDirectly ? directItems.length > 0 ? <HorizontalDragRow className={landscapeItems ? "media-row media-row--landscape" : "media-row"}>{directItems.map((item) => <MediaCard key={`${item.mediaType}-${item.id}`} shape={item.mediaType === "tv" ? "landscape" : "poster"} title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo} onClick={() => onOpenMedia(item)} />)}</HorizontalDragRow> : collectionPending ? <div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div> : <EmptyState icon={<Clapperboard size={40} />} title="This collection is empty" description="Its configured sources did not return any titles." /> : <HorizontalDragRow>{collection.folders.map((folder, index) => {
             const row = collectionRows.find((candidate) => candidate.resolved.folder.id === folder.id);
             const artwork = row?.resolved.folder.coverImageUrl || folder.coverImageUrl || row?.resolved.items.find((item) => isAvailable(item, mediaPreferences.hideUnreleased))?.posterUrl || collection.backdropImageUrl;
             return <button key={folder.id ?? index} className="folder-cover-card" disabled={!row} onClick={() => { if (row) setOpened(row); }} aria-label={`Open ${folder.title}`}>
@@ -388,10 +400,6 @@ export function HomePage() {
       })}
       {collections.length === 0 && <EmptyState icon={<Clapperboard size={46} />} title="Your home is ready to be curated" description="Install an addon, then create a collection from the admin space." />}
     </div>
-    {selected && <MediaDetails item={selected} onClose={() => {
-      setSelected(null);
-      void loadContinueItems().then(setContinueItems).catch(() => undefined);
-    }} />}
   </div>;
 }
 
@@ -404,7 +412,7 @@ type CollectionBrowserRow = {
   hasMore: boolean;
 };
 
-function CollectionBrowser({ collection, rows, hideUnreleased, onBack }: { collection: Collection; rows: HomeRow[]; hideUnreleased: boolean; onBack: () => void }) {
+function CollectionBrowser({ collection, rows, hideUnreleased, onBack, onOpenMedia }: { collection: Collection; rows: HomeRow[]; hideUnreleased: boolean; onBack: () => void; onOpenMedia: OpenMedia }) {
   const [pages, setPages] = useState<CollectionBrowserRow[]>(() => rows.map((row) => ({
     row,
     items: row.resolved.items,
@@ -413,7 +421,6 @@ function CollectionBrowser({ collection, rows, hideUnreleased, onBack }: { colle
   })));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [selected, setSelected] = useState<MediaItem | null>(null);
   const [openedFolderID, setOpenedFolderID] = useState("");
   const showFolders = collection.viewMode !== "follow_layout";
   const cards = useMemo(() => {
@@ -475,7 +482,7 @@ function CollectionBrowser({ collection, rows, hideUnreleased, onBack }: { colle
         hasMore: openedPage.hasMore,
       },
     };
-    return <FolderBrowser key={openedFolderID} row={row} hideUnreleased={hideUnreleased} backLabel={`Back to ${collection.title}`} onBack={() => setOpenedFolderID("")} />;
+    return <FolderBrowser key={openedFolderID} row={row} hideUnreleased={hideUnreleased} backLabel={`Back to ${collection.title}`} onBack={() => setOpenedFolderID("")} onOpenMedia={onOpenMedia} />;
   }
 
   const description = showFolders
@@ -492,19 +499,17 @@ function CollectionBrowser({ collection, rows, hideUnreleased, onBack }: { colle
     return <button key={folder.id ?? index} type="button" className="source-folder-card" disabled={!page} onClick={() => setOpenedFolderID(folder.id ?? "")} aria-label={`Open ${folder.title}`}>
       <span className="source-folder-card__visual">{artwork ? <img src={artwork} alt="" loading="lazy" draggable={false} /> : <span>{folder.coverEmoji || folder.title.slice(0, 2).toUpperCase()}</span>}</span>
       {!folder.hideTitle && <span className="source-folder-card__copy"><strong>{folder.title}</strong><small>{visibleItems.length} title{visibleItems.length === 1 ? "" : "s"}</small></span>}
-    </button>; })}</div> : cards.length > 0 ? <div className="media-grid">{cards.map(({ item, shape }) => <MediaCard key={`${item.mediaType}-${item.id}`} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo} shape={shape} onClick={() => setSelected(item)} />)}</div> : <EmptyState icon={<Clapperboard size={46} />} title="This collection is empty" description={hideUnreleased ? "No released titles are available here." : "Its configured sources did not return any titles."} />}
+    </button>; })}</div> : cards.length > 0 ? <div className="media-grid">{cards.map(({ item, shape }) => <MediaCard key={`${item.mediaType}-${item.id}`} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo} shape={shape} onClick={() => onOpenMedia(item)} />)}</div> : <EmptyState icon={<Clapperboard size={46} />} title="This collection is empty" description={hideUnreleased ? "No released titles are available here." : "Its configured sources did not return any titles."} />}
     {!showFolders && hasMore && <div className="load-more"><Button variant="secondary" loading={loading} onClick={() => void loadMore()}>Load more</Button></div>}
-    {selected && <MediaDetails item={selected} onClose={() => setSelected(null)} />}
   </div>;
 }
 
-function FolderBrowser({ row, hideUnreleased, onBack, backLabel = "Back to home" }: { row: HomeRow; hideUnreleased: boolean; onBack: () => void; backLabel?: string }) {
+function FolderBrowser({ row, hideUnreleased, onBack, onOpenMedia, backLabel = "Back to home" }: { row: HomeRow; hideUnreleased: boolean; onBack: () => void; onOpenMedia: OpenMedia; backLabel?: string }) {
   const [items, setItems] = useState(row.resolved.items);
   const [page, setPage] = useState(row.resolved.page);
   const [hasMore, setHasMore] = useState(row.resolved.hasMore);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [selected, setSelected] = useState<MediaItem | null>(null);
   const sources = useMemo(() => row.resolved.folder.sources.filter((source) => source.id), [row.resolved.folder.sources]);
   const sourceView = sources.length > 1 ? row.resolved.folder.sourceView ?? "merged" : "merged";
   const [activeSourceID, setActiveSourceID] = useState(sourceView === "categories" ? sources[0]?.id ?? "" : "");
@@ -576,18 +581,16 @@ function FolderBrowser({ row, hideUnreleased, onBack, backLabel = "Back to home"
         <span className="source-folder-card__visual">{artwork ? <img src={artwork} alt="" loading="lazy" /> : <span>{source.title.slice(0, 2).toUpperCase()}</span>}</span>
         <span className="source-folder-card__copy"><strong>{source.title}</strong><small>{sourceItems.length} title{sourceItems.length === 1 ? "" : "s"}</small></span>
       </button>;
-    })}</div> : visibleItems.length > 0 ? <div className="media-grid">{visibleItems.map((item) => <MediaCard key={`${item.mediaType}-${item.id}`} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo} shape={row.resolved.folder.tileShape} onClick={() => setSelected(item)} />)}</div> : <EmptyState icon={<Clapperboard size={46} />} title={activeSource ? "This source is empty" : "This folder is empty"} description={hideUnreleased ? "No released titles are available here." : "Its configured sources did not return any titles."} />}
+    })}</div> : visibleItems.length > 0 ? <div className="media-grid">{visibleItems.map((item) => <MediaCard key={`${item.mediaType}-${item.id}`} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo} shape={row.resolved.folder.tileShape} onClick={() => onOpenMedia(item)} />)}</div> : <EmptyState icon={<Clapperboard size={46} />} title={activeSource ? "This source is empty" : "This folder is empty"} description={hideUnreleased ? "No released titles are available here." : "Its configured sources did not return any titles."} />}
     {hasMore && <div className="load-more"><Button variant="secondary" loading={loading} onClick={() => void loadMore()}>Load more</Button></div>}
-    {selected && <MediaDetails item={selected} onClose={() => setSelected(null)} />}
   </div>;
 }
 
-export function SearchPage() {
+export function SearchPage({ onOpenMedia }: { onOpenMedia: OpenMedia }) {
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [selected, setSelected] = useState<MediaItem | null>(null);
   const [filter, setFilter] = useState<"all" | "movie" | "series">("all");
   const mediaPreferences = useMediaPreferences();
 
@@ -625,18 +628,16 @@ export function SearchPage() {
     <div className="search-box"><Search size={23} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Movies, series, anime…" autoFocus />{loading && <LoaderCircle className="spin" />}</div>
     <div className="filter-pills"><button className={filter === "all" ? "is-active" : ""} onClick={() => setFilter("all")}><Compass size={16} /> All</button><button className={filter === "movie" ? "is-active" : ""} onClick={() => setFilter("movie")}><Film size={16} /> Movies</button><button className={filter === "series" ? "is-active" : ""} onClick={() => setFilter("series")}><Tv size={16} /> Series</button></div>
     {error && <Notice>{error}</Notice>}
-    {query.length < 2 ? <div className="search-prompt"><span><Search /></span><h2>What are you in the mood for?</h2><p>Start typing to search all your configured sources.</p></div> : !loading && visible.length === 0 ? <EmptyState icon={<Search size={42} />} title="Nothing found" description="Try another title, or check that your addons expose searchable catalogs." /> : <div className="media-grid">{visible.map((item) => <MediaCard key={`${item.mediaType}-${item.id}`} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo || mediaTypeLabel(item.mediaType)} onClick={() => setSelected(item)} />)}</div>}
-    {selected && <MediaDetails item={selected} onClose={() => setSelected(null)} />}
+    {query.length < 2 ? <div className="search-prompt"><span><Search /></span><h2>What are you in the mood for?</h2><p>Start typing to search all your configured sources.</p></div> : !loading && visible.length === 0 ? <EmptyState icon={<Search size={42} />} title="Nothing found" description="Try another title, or check that your addons expose searchable catalogs." /> : <div className="media-grid">{visible.map((item) => <MediaCard key={`${item.mediaType}-${item.id}`} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo || mediaTypeLabel(item.mediaType)} onClick={() => onOpenMedia(item)} />)}</div>}
   </div>;
 }
 
-export function LibraryPage() {
+export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedia; mediaRevision: number }) {
   const [library, setLibrary] = useState<LibraryPage | null>(null);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"" | "movie" | "series">("");
   const [error, setError] = useState("");
-  const [selected, setSelected] = useState<MediaItem | null>(null);
-  const [reload, setReload] = useState(0);
+  const libraryRevisionRef = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -650,7 +651,22 @@ export function LibraryPage() {
       if (active) setLoading(false);
     });
     return () => { active = false; };
-  }, [filter, reload]);
+  }, [filter]);
+
+  useEffect(() => {
+    if (mediaRevision === 0 || libraryRevisionRef.current === mediaRevision) return;
+    libraryRevisionRef.current = mediaRevision;
+    let active = true;
+    void api.library(filter).then((value) => {
+      if (active) {
+        setLibrary(value);
+        setError("");
+      }
+    }).catch((cause) => {
+      if (active) setError(notifyError(cause, "Your library could not be refreshed.", "Library refresh failed"));
+    });
+    return () => { active = false; };
+  }, [filter, mediaRevision]);
 
   const media = library?.items.map((item): MediaItem => ({
     id: item.resourceId || item.externalId || item.titleId,
@@ -668,7 +684,6 @@ export function LibraryPage() {
     <SectionHeading eyebrow="Saved for later" title="Your library." description="Everything you kept, always close at hand." />
     <div className="filter-pills"><button className={filter === "" ? "is-active" : ""} onClick={() => setFilter("")}><Bookmark size={16} /> All titles</button><button className={filter === "movie" ? "is-active" : ""} onClick={() => setFilter("movie")}><Film size={16} /> Movies</button><button className={filter === "series" ? "is-active" : ""} onClick={() => setFilter("series")}><Tv size={16} /> Series</button></div>
     {error && <Notice>{error}</Notice>}
-    {loading ? <div className="media-grid">{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className="card-skeleton" />)}</div> : media.length > 0 ? <div className="media-grid">{media.map((item) => <MediaCard key={item.titleId} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo || mediaTypeLabel(item.mediaType)} onClick={() => setSelected(item)} />)}</div> : <EmptyState icon={<Bookmark size={46} />} title="Your library is empty" description="Save a movie or series from its details page and it will appear here." />}
-    {selected && <MediaDetails item={selected} onClose={() => { setSelected(null); setReload((value) => value + 1); }} />}
+    {loading ? <div className="media-grid">{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className="card-skeleton" />)}</div> : media.length > 0 ? <div className="media-grid">{media.map((item) => <MediaCard key={item.titleId} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo || mediaTypeLabel(item.mediaType)} onClick={() => onOpenMedia(item)} />)}</div> : <EmptyState icon={<Bookmark size={46} />} title="Your library is empty" description="Save a movie or series from its details page and it will appear here." />}
   </div>;
 }

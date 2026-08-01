@@ -19,7 +19,7 @@ test("member clients replace stale application content and recover after mainten
 test("administrator can update the global maintenance settings", async ({ page, rivune }) => {
   await page.goto("/#admin");
   await page.getByRole("button", { name: /Settings/ }).click();
-  await page.getByLabel("Settings scope").selectOption("server");
+  await page.getByLabel("Switch scope").selectOption("server");
 
   await page.getByLabel("Block member access").check();
   await page.getByLabel("Public message").fill("Back after the upgrade");

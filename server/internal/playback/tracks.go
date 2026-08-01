@@ -28,14 +28,25 @@ func applyPlaybackPreferences(sources []Source, assets []storedAsset, input Reso
 		if track == nil {
 			return nil
 		}
+		primary := primaryTrack(source.Media.AudioTracks)
+		video := primaryTrack(source.Media.VideoTracks)
+		requiresRemux := source.Mode == processingRemux || source.Mode == "direct" && primary != nil && primary.Index != track.Index
+		if requiresRemux && (video == nil || !mp4RemuxableAudio(track.Codec) || !mediaProfileSupported("mp4", video, track, input.Capabilities)) {
+			if explicit || video == nil {
+				return ErrUnsupportedSource
+			}
+			track = compatibleRemuxAudioTrack(*video, source.Media.AudioTracks, input.Capabilities)
+			if track == nil {
+				return ErrUnsupportedSource
+			}
+		}
 		index := track.Index
 		asset.AudioTrackIndex = &index
-		primary := primaryTrack(source.Media.AudioTracks)
 		if source.Mode == "direct" && primary != nil && primary.Index != track.Index {
-			source.Mode = processingRemux
-			if !mp4RemuxableAudio(track.Codec) {
-				source.Mode = processingTranscodeAudio
+			if !requestedProcessingMode(input.Capabilities.ProcessingModes, processingRemux) {
+				return ErrUnsupportedSource
 			}
+			source.Mode = processingRemux
 			if supports(input.Capabilities.StreamingProtocols, "hls") {
 				source.Protocol = "hls"
 				source.Container = "hls"
@@ -43,7 +54,7 @@ func applyPlaybackPreferences(sources []Source, assets []storedAsset, input Reso
 				source.Protocol = "http"
 				source.Container = "mp4"
 			}
-			asset.Kind = source.Mode
+			asset.Kind = processingRemux
 		}
 		return nil
 	}

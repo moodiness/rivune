@@ -215,6 +215,14 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 	`, seriesID, episodeID, seriesIMDb, seriesTMDB, episodeTMDB, episodeTVDB); err != nil {
 		t.Fatalf("seed playback activity external IDs: %v", err)
 	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO profile_progress (
+			profile_id, title_id, position_seconds, duration_seconds
+		)
+		VALUES ($1::uuid, $2::uuid, 605, 1320)
+	`, profileID, episodeID); err != nil {
+		t.Fatalf("seed playback activity progress: %v", err)
+	}
 
 	playbackTokenHash := sha256.Sum256([]byte(playbackSessionID + ":playback"))
 	if _, err := tx.Exec(ctx, `
@@ -224,7 +232,7 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 		)
 		VALUES (
 			$1::uuid, $2::uuid, $3::uuid, $4, 'episode', 'tmdb:episode:1232874',
-			$5, '[{"kind":"stream"}]'::jsonb, now() + interval '1 hour', now()
+			$5, '[{"kind":"stream","durationSeconds":1320}]'::jsonb, now() + interval '1 hour', now()
 		)
 	`, playbackSessionID, authSessionID, profileID, episodeID, playbackTokenHash[:]); err != nil {
 		t.Fatalf("seed playback activity session: %v", err)
@@ -295,6 +303,38 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 	}
 	if session.Mode != "direct" {
 		t.Fatalf("activity mode = %q, want direct", session.Mode)
+	}
+	if session.PositionSeconds != 605 || session.DurationSeconds != 1320 {
+		t.Fatalf(
+			"activity progress = %d/%d, want 605/1320",
+			session.PositionSeconds, session.DurationSeconds,
+		)
+	}
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM profile_progress
+		WHERE profile_id = $1::uuid AND title_id = $2::uuid
+	`, profileID, episodeID); err != nil {
+		t.Fatalf("remove playback progress: %v", err)
+	}
+	activityWithoutProgress, err := service.Activity(ctx, auth.Principal{Role: "admin"})
+	if err != nil {
+		t.Fatalf("reload playback activity without saved progress: %v", err)
+	}
+	var sessionWithoutProgress *ActivitySession
+	for index := range activityWithoutProgress.Sessions {
+		if activityWithoutProgress.Sessions[index].ID == playbackSessionID {
+			sessionWithoutProgress = &activityWithoutProgress.Sessions[index]
+			break
+		}
+	}
+	if sessionWithoutProgress == nil {
+		t.Fatalf("seeded playback session %q was not returned after progress removal", playbackSessionID)
+	}
+	if sessionWithoutProgress.PositionSeconds != 0 || sessionWithoutProgress.DurationSeconds != 1320 {
+		t.Fatalf(
+			"activity session fallback = %d/%d, want 0/1320",
+			sessionWithoutProgress.PositionSeconds, sessionWithoutProgress.DurationSeconds,
+		)
 	}
 	if session.ExternalIDs.IMDb != seriesIMDb || session.ExternalIDMediaTypes.IMDb != "series" {
 		t.Fatalf(

@@ -1,10 +1,53 @@
 import { expect, test } from "./fixtures/rivune";
 
+test("media details use a refresh-safe route with browser and in-page history", async ({ page, rivune }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
+  const invokingCard = page.getByRole("button", { name: "Open Signal Horizon" });
+  const initialContinueRequests = rivune.matching("/api/v1/continue-watching", "GET").length;
+  await invokingCard.click();
+
+  await expect(page.locator(".details-page")).toBeVisible();
+  await expect(page.locator("dialog .details-page")).toHaveCount(0);
+  await expect(page).toHaveURL(/#media\/episode\/[^?]+\?/);
+  await page.goBack();
+  await expect(invokingCard).toBeFocused();
+  await expect.poll(() => rivune.matching("/api/v1/continue-watching", "GET").length).toBeGreaterThan(initialContinueRequests);
+  await page.goForward();
+  await expect(page.locator(".details-page")).toBeVisible();
+  const viewSeriesToggle = page.getByRole("button", { name: "View series & season" });
+  if (await viewSeriesToggle.isVisible()) await viewSeriesToggle.click();
+
+  await page.getByRole("tab", { name: /Season 2/ }).click();
+  await page.getByRole("button", { name: /Moonrise/ }).first().click();
+  await expect(page).toHaveURL(/seasonId=season-2/);
+  await expect(page).toHaveURL(/episodeId=episode-3/);
+  await page.evaluate(() => window.history.replaceState(null, "", window.location.href));
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: /Signal Horizon.*S02E01.*Moonrise/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Season 2/ })).toHaveAttribute("aria-selected", "true");
+  const stateFreeContinueRequests = rivune.matching("/api/v1/continue-watching", "GET").length;
+
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
+  await expect(page).toHaveURL(/#home$/);
+  await expect(page.locator(".route-surface").getByRole("heading").first()).toBeFocused();
+  await expect.poll(() => rivune.matching("/api/v1/continue-watching", "GET").length).toBeGreaterThan(stateFreeContinueRequests);
+  await page.goForward();
+  await expect(page.getByRole("heading", { name: /Signal Horizon.*S02E01.*Moonrise/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "Back to browse" }).click();
+  await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
+  await expect(page.locator(".route-surface").getByRole("heading").first()).toBeFocused();
+});
+
 test("continue-watching episode opens its series and requests trailers for each selected season", async ({ page, rivune }) => {
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await expect(page).toHaveURL(/#media\/episode\//);
   await expect(page.getByRole("heading", { name: /Signal Horizon.*S01E01.*First Light/ })).toBeVisible();
 
   await page.getByRole("button", { name: "View series & season" }).click();
@@ -36,6 +79,7 @@ test("calendar episode opens the matching series season and episode", async ({ p
 
   await expect(page.getByRole("heading", { name: "Release calendar." })).toBeVisible();
   await page.getByRole("button", { name: "Open Moonrise details" }).first().click();
+  await expect(page).toHaveURL(/#media\/episode\//);
 
   await expect(page.getByRole("tab", { name: /Season 2/ })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("heading", { name: /Signal Horizon.*S02E01.*Moonrise/ })).toBeVisible();
@@ -96,4 +140,61 @@ test("calendar TVDB episode opens the mapped season containing its canonical epi
   await expect(page.getByRole("tab", { name: /Season 2/ })).toHaveAttribute("aria-selected", "false");
   await expect(page.getByRole("heading", { name: /Demain nous appartient.*S09E241.*Episode 241/ })).toBeVisible();
   expect(requestedSeasons).toEqual(["official-season-2", "official-season-9"]);
+});
+
+test("home honors a collection's landscape folder cover shape", async ({ page, rivune: _rivune }) => {
+  const folder = {
+    id: "streaming-folder",
+    title: "Streaming",
+    tileShape: "poster",
+    coverImageUrl: "https://fixtures.rivune.test/streaming-landscape.svg",
+    focusGifEnabled: false,
+    hideTitle: false,
+    sources: [],
+  };
+  await page.route("**/api/v1/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname.slice("/api/v1".length);
+    const fulfill = (body: unknown) => route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
+    if (path === "/collections") {
+      await fulfill({ collections: [{
+        id: "streaming-collection",
+        title: "Streaming",
+        heroEnabled: false,
+        pinToTop: false,
+        focusGlowEnabled: false,
+        viewMode: "rows",
+        folderCoverShape: "landscape",
+        folders: [folder],
+        profileIds: ["alice"],
+        position: 0,
+        version: 1,
+        createdAt: "2024-01-01T00:00:00Z",
+        updatedAt: "2024-01-01T00:00:00Z",
+      }] });
+      return;
+    }
+    if (path === "/collections/streaming-collection/folders/streaming-folder/items") {
+      await fulfill({
+        collectionId: "streaming-collection",
+        folder,
+        items: [{ id: "streaming-title", mediaType: "movie", title: "Landscape fixture", posterUrl: "https://fixtures.rivune.test/poster.svg" }],
+        page: 1,
+        hasMore: false,
+        errors: [],
+      });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/");
+  const card = page.getByRole("button", { name: "Open Streaming" });
+  await expect(card).toBeVisible();
+  const visual = card.locator(".folder-cover-card__visual");
+  const size = await visual.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return { width: bounds.width, height: bounds.height };
+  });
+  expect(size.width / size.height).toBeCloseTo(16 / 9, 1);
 });

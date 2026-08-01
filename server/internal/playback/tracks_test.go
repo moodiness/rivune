@@ -5,28 +5,76 @@ import (
 	"testing"
 )
 
-func TestApplyPlaybackPreferencesSelectsLanguageAndMinimalProcessing(t *testing.T) {
+func TestApplyPlaybackPreferencesRemuxesSupportedAlternateAudioWithoutEncoding(t *testing.T) {
 	sources := []Source{{
 		ID: "stream-1", Mode: "direct", Protocol: "http", Container: "mp4", Compatible: true,
-		Media: &MediaInspection{AudioTracks: []MediaTrack{
+		Media: &MediaInspection{VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264"}}, AudioTracks: []MediaTrack{
 			{Index: 1, Type: "audio", Codec: "aac", Language: "en"},
-			{Index: 2, Type: "audio", Codec: "dts", Language: "fr"},
+			{Index: 2, Type: "audio", Codec: "aac", Language: "fr"},
 		}},
 	}}
 	assets := []storedAsset{{ID: "stream-1", Kind: "stream", URL: "https://media.example/movie.mp4"}}
 
 	err := applyPlaybackPreferences(sources, assets, ResolveInput{
 		PreferredAudioLanguage: "fr-FR",
-		Capabilities:           Capabilities{StreamingProtocols: []string{"hls"}},
+		Capabilities: Capabilities{
+			StreamingProtocols: []string{"hls"},
+			AudioCodecs:        []string{"aac"},
+			ProcessingModes:    []string{processingRemux},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if assets[0].AudioTrackIndex == nil || *assets[0].AudioTrackIndex != 2 {
-		t.Fatalf("French audio track was not selected: %+v", assets[0])
+	if assets[0].AudioTrackIndex == nil || *assets[0].AudioTrackIndex != 2 ||
+		sources[0].Mode != processingRemux || sources[0].Protocol != "hls" || assets[0].Kind != processingRemux {
+		t.Fatalf("supported alternate audio was not remuxed: source=%+v asset=%+v", sources[0], assets[0])
 	}
-	if sources[0].Mode != processingTranscodeAudio || sources[0].Protocol != "hls" || assets[0].Kind != processingTranscodeAudio {
-		t.Fatalf("minimal audio processing was not selected: source=%+v asset=%+v", sources[0], assets[0])
+}
+
+func TestApplyPlaybackPreferencesRejectsAudioThatWouldRequireEncoding(t *testing.T) {
+	sources := []Source{{
+		ID: "stream-1", Mode: "direct", Protocol: "http", Container: "mp4", Compatible: true,
+		Media: &MediaInspection{VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264"}}, AudioTracks: []MediaTrack{
+			{Index: 1, Type: "audio", Codec: "aac", Language: "en"},
+			{Index: 2, Type: "audio", Codec: "dts", Language: "fr"},
+		}},
+	}}
+	assets := []storedAsset{{ID: "stream-1", Kind: "stream", URL: "https://media.example/movie.mp4"}}
+	unsupportedTrack := 2
+
+	err := applyPlaybackPreferences(sources, assets, ResolveInput{
+		PreferredAudioTrack: &unsupportedTrack,
+		Capabilities: Capabilities{
+			StreamingProtocols: []string{"hls"},
+			AudioCodecs:        []string{"aac"},
+			ProcessingModes:    []string{processingRemux},
+		},
+	})
+	if !errors.Is(err, ErrUnsupportedSource) || assets[0].Kind != "stream" {
+		t.Fatalf("audio encoding was not rejected: err=%v source=%+v asset=%+v", err, sources[0], assets[0])
+	}
+}
+
+func TestApplyPlaybackPreferencesFallsBackToPlayableAudioForAutomaticLanguage(t *testing.T) {
+	sources := []Source{{
+		ID: "stream-1", Mode: processingRemux, Protocol: "hls", Container: "hls", Compatible: true,
+		Media: &MediaInspection{VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264"}}, AudioTracks: []MediaTrack{
+			{Index: 1, Type: "audio", Codec: "dts", Language: "fr"},
+			{Index: 2, Type: "audio", Codec: "aac", Language: "en"},
+		}},
+	}}
+	assets := []storedAsset{{ID: "stream-1", Kind: processingRemux}}
+	err := applyPlaybackPreferences(sources, assets, ResolveInput{
+		PreferredAudioLanguage: "fr-FR",
+		Capabilities: Capabilities{
+			StreamingProtocols: []string{"hls"},
+			AudioCodecs:        []string{"aac"},
+			ProcessingModes:    []string{processingRemux},
+		},
+	})
+	if err != nil || assets[0].AudioTrackIndex == nil || *assets[0].AudioTrackIndex != 2 {
+		t.Fatalf("automatic language preference did not fall back to playable audio: err=%v source=%+v asset=%+v", err, sources[0], assets[0])
 	}
 }
 

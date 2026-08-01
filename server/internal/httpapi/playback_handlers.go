@@ -96,6 +96,8 @@ func (a *API) preparePlayback(w http.ResponseWriter, r *http.Request, principal 
 		writeError(w, http.StatusUnprocessableEntity, "invalid_playback_request", "The playback preparation request is invalid")
 	case errors.Is(err, playback.ErrSourceReferenceExpired):
 		writeError(w, http.StatusGone, "playback_source_expired", "The selected source expired and must be refreshed")
+	case errors.Is(err, playback.ErrUnsupportedSource):
+		writeError(w, http.StatusUnprocessableEntity, "playback_source_unsupported", "This source needs video or audio conversion that browser playback does not permit; choose another source or an external player")
 	case errors.Is(err, playback.ErrNoPlayableSource):
 		writeError(w, http.StatusNotFound, "playback_source_not_found", "The selected source is not compatible with this device")
 	case errors.Is(err, playback.ErrMediaSourceFailed):
@@ -131,6 +133,8 @@ func (a *API) resolvePlayback(w http.ResponseWriter, r *http.Request, principal 
 		writeError(w, http.StatusUnprocessableEntity, "invalid_playback_request", "The playback request is invalid")
 	case errors.Is(err, playback.ErrSourceReferenceExpired):
 		writeError(w, http.StatusGone, "playback_source_expired", "The selected source expired and must be refreshed")
+	case errors.Is(err, playback.ErrUnsupportedSource):
+		writeError(w, http.StatusUnprocessableEntity, "playback_source_unsupported", "This source needs video or audio conversion that browser playback does not permit; choose another source or an external player")
 	case errors.Is(err, playback.ErrNoPlayableSource):
 		writeError(w, http.StatusNotFound, "playback_source_not_found", "The selected source is not compatible with this device")
 	case errors.Is(err, playback.ErrProviderUnavailable):

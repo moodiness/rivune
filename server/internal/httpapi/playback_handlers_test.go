@@ -81,7 +81,7 @@ func TestPlaybackSourcesReturnsOpaqueReferences(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/sources", stringsReader(`{
 		"mediaType":"movie",
 		"resourceId":"tt1234567",
-		"capabilities":{"streamingProtocols":["http"],"containers":["mp4"]}
+		"capabilities":{"streamingProtocols":["http"],"containers":["mp4"],"processingModes":["remux"],"mediaProfiles":[{"container":"mp4","videoCodec":"h264","audioCodec":"aac"}],"externalPlayers":["system"]}
 	}`))
 	request.Header.Set("Authorization", "Bearer access-token")
 	request.Header.Set("Content-Type", "application/json")
@@ -92,7 +92,11 @@ func TestPlaybackSourcesReturnsOpaqueReferences(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"sourceRef":"opaque-source-reference"`) {
 		t.Fatalf("unexpected sources response: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if service.sourcesInput.ResourceID != "tt1234567" || len(service.sourcesInput.Capabilities.StreamingProtocols) != 1 {
+	if service.sourcesInput.ResourceID != "tt1234567" ||
+		len(service.sourcesInput.Capabilities.StreamingProtocols) != 1 ||
+		len(service.sourcesInput.Capabilities.ProcessingModes) != 1 ||
+		len(service.sourcesInput.Capabilities.MediaProfiles) != 1 ||
+		len(service.sourcesInput.Capabilities.ExternalPlayers) != 1 {
 		t.Fatalf("unexpected sources input: %+v", service.sourcesInput)
 	}
 }
@@ -113,6 +117,25 @@ func TestPreparePlaybackUsesOpaqueReference(t *testing.T) {
 
 	if response.Code != http.StatusOK || service.prepareInput.SourceRef != "opaque-source-reference" || !strings.Contains(response.Body.String(), `"mode":"remux"`) {
 		t.Fatalf("unexpected preparation response: status=%d input=%+v body=%s", response.Code, service.prepareInput, response.Body.String())
+	}
+}
+
+func TestPreparePlaybackReportsUnsupportedSourceWithoutStartingSession(t *testing.T) {
+	service := &fakePlaybackService{prepareErr: playback.ErrUnsupportedSource}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = &fakeAuthService{principal: auth.Principal{SessionID: "session-id", UserID: "user-id"}}
+	api.playback = service
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/prepare", stringsReader(`{"sourceRef":"opaque-source-reference"}`))
+	request.Header.Set("Authorization", "Bearer access-token")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(response.Body.String(), `"code":"playback_source_unsupported"`) ||
+		!strings.Contains(response.Body.String(), "external player") {
+		t.Fatalf("unexpected unsupported source response: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -162,6 +185,7 @@ func TestPlaybackActivityIncludesArtworkAndCanonicalProviderIDs(t *testing.T) {
 			Title:                "Combat de tétines", MediaType: "episode", Mode: "direct",
 			Username: "admin", ProfileID: "22222222-2222-4222-8222-222222222222",
 			Profile: "Alice", Device: "Living room", Platform: "Web",
+			PositionSeconds: 605, DurationSeconds: 1320,
 			CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour),
 		}},
 		Jobs: []playback.MediaActivityJob{},
@@ -178,7 +202,8 @@ func TestPlaybackActivityIncludesArtworkAndCanonicalProviderIDs(t *testing.T) {
 	if response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), `"artworkUrl":"https://images.example.test/episode-still.jpg"`) ||
 		!strings.Contains(response.Body.String(), `"externalIds":{"imdb":"tt0149460","tmdb":"300131","tvdb":"11704240"}`) ||
-		!strings.Contains(response.Body.String(), `"externalIdMediaTypes":{"imdb":"series","tmdb":"series","tvdb":"episode"}`) {
+		!strings.Contains(response.Body.String(), `"externalIdMediaTypes":{"imdb":"series","tmdb":"series","tvdb":"episode"}`) ||
+		!strings.Contains(response.Body.String(), `"positionSeconds":605,"durationSeconds":1320`) {
 		t.Fatalf("unexpected activity response: status=%d body=%s", response.Code, response.Body.String())
 	}
 	validateContractResponse(t, loadOpenAPIContract(t), "/playback/activity", nil, request, response)

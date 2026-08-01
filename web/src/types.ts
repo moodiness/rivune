@@ -275,6 +275,7 @@ export type InstalledAddon = {
 export type ResourceResult = { addonId: string; manifestId: string; transportUrl: string; resource: string; type: string; id: string; payload: Record<string, unknown> };
 export type ResourceBatch = { results: ResourceResult[]; errors: { addonId: string; manifestId: string; code: string; message: string }[] };
 
+export type PlaybackMediaProfile = { container: string; videoCodec: string; audioCodec?: string };
 export type PlaybackCapabilities = {
   streamingProtocols: string[];
   containers: string[];
@@ -282,6 +283,8 @@ export type PlaybackCapabilities = {
   audioCodecs?: string[];
   hdrFormats?: string[];
   externalPlayers?: string[];
+  processingModes?: ("remux")[];
+  mediaProfiles?: PlaybackMediaProfile[];
 };
 export type PlaybackSourceOption = {
   id: string;
@@ -379,6 +382,8 @@ export type PlaybackActivitySession = {
   device: string;
   platform: string;
   processing: boolean;
+  positionSeconds: number;
+  durationSeconds: number;
   createdAt: string;
   lastSeenAt: string;
   expiresAt: string;

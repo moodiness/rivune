@@ -21,6 +21,8 @@ const activity = {
       device: "Living room",
       platform: "Web",
       processing: false,
+      positionSeconds: 605,
+      durationSeconds: 1320,
       createdAt: now,
       lastSeenAt: now,
       expiresAt: "2026-07-31T13:00:00Z",
@@ -36,6 +38,8 @@ const activity = {
       device: "Phone",
       platform: "Web",
       processing: false,
+      positionSeconds: 0,
+      durationSeconds: 0,
       createdAt: now,
       lastSeenAt: now,
       expiresAt: "2026-07-31T13:00:00Z",
@@ -72,6 +76,7 @@ test("now-playing sessions render artwork, exact provider badges, and a stable m
   await expect(tmdb.locator("svg")).toHaveCount(1);
   await expect(artworkSession.getByLabel("TVDB · 11704240")).toHaveAttribute("href", "https://thetvdb.com/dereferrer/episode/11704240");
   await expect(artworkSession.locator(".activity-session__provider")).toHaveCount(3);
+  await expect(artworkSession.locator(".activity-session__time > strong")).toHaveText("10 min / 22 min");
 
   const missingSession = page.locator(".activity-session").filter({ hasText: "Metadata pending" });
   await expect(missingSession.locator(".activity-session__artwork > svg")).toBeVisible();

@@ -344,13 +344,6 @@ func (processor *FFmpegProcessor) run(ctx context.Context, arguments []string, d
 	return nil
 }
 
-func browserFallbackAsset(asset storedAsset) storedAsset {
-	if asset.Kind == processingRemux || asset.Kind == processingTranscodeAudio {
-		asset.Kind = processingTranscode
-	}
-	return asset
-}
-
 func (service *Service) proxyProcessedMedia(w http.ResponseWriter, r *http.Request, asset storedAsset) error {
 	if service.processor == nil {
 		return ErrMediaProcessingFailed
@@ -365,7 +358,7 @@ func (service *Service) proxyProcessedMedia(w http.ResponseWriter, r *http.Reque
 	if err := http.NewResponseController(w).Flush(); err != nil {
 		return fmt.Errorf("%w: flush response: %v", ErrMediaProcessingFailed, err)
 	}
-	return service.processor.Process(r.Context(), browserFallbackAsset(asset), w)
+	return service.processor.Process(r.Context(), asset, w)
 }
 
 func inspectedContainer(formatName, hint string) string {

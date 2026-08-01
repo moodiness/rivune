@@ -2004,7 +2004,7 @@ paths:
     post:
       summary: Create a playback session from an opaque source reference
       operationId: resolvePlayback
-      description: Reuses the cached preparation for a session-bound source reference and creates a short-lived playback session. It does not refetch stream resources. Provider URLs and private headers remain server-side.
+      description: Reuses the cached preparation for a session-bound source reference and creates a short-lived playback session. It does not refetch stream resources. Web media URLs and private headers remain server-side; mode=external returns the authorized provider handoff URL for the selected external player.
       security:
         - bearerAuth: []
       requestBody:
@@ -5148,6 +5148,23 @@ components:
         expiresAt:
           type: string
           format: date-time
+    PlaybackMediaProfile:
+      type: object
+      additionalProperties: false
+      required: [container, videoCodec]
+      properties:
+        container:
+          type: string
+          minLength: 1
+          maxLength: 64
+        videoCodec:
+          type: string
+          minLength: 1
+          maxLength: 64
+        audioCodec:
+          type: string
+          minLength: 1
+          maxLength: 64
     PlaybackCapabilities:
       type: object
       additionalProperties: false
@@ -5201,6 +5218,19 @@ components:
             type: string
             minLength: 1
             maxLength: 64
+        processingModes:
+          type: array
+          maxItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [remux]
+        mediaProfiles:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/PlaybackMediaProfile"
     PlaybackSession:
       type: object
       additionalProperties: false
@@ -5280,7 +5310,7 @@ components:
     PlaybackActivitySession:
       type: object
       additionalProperties: false
-      required: [id, title, mediaType, mode, username, profileId, profile, device, platform, processing, createdAt, lastSeenAt, expiresAt]
+      required: [id, title, mediaType, mode, username, profileId, profile, device, platform, processing, positionSeconds, durationSeconds, createdAt, lastSeenAt, expiresAt]
       properties:
         id:
           type: string
@@ -5315,6 +5345,12 @@ components:
           type: string
         processing:
           type: boolean
+        positionSeconds:
+          type: integer
+          minimum: 0
+        durationSeconds:
+          type: integer
+          minimum: 0
         createdAt:
           type: string
           format: date-time
@@ -5412,7 +5448,7 @@ components:
           enum: [direct, remux, transcode_audio, transcode, youtube, external]
         url:
           type: string
-          description: Same-server playback asset URL containing a short-lived opaque token.
+          description: Same-server playback asset URL containing a short-lived opaque token, except mode=external where this is the authorized provider handoff URL.
         ytId:
           type: string
         infoHash:

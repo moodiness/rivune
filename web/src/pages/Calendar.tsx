@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
 import { Button, EmptyState, IconButton, Notice, SectionHeading } from "../components";
-import { MediaDetails } from "../media";
 import type { CalendarEvent, MediaItem } from "../types";
 
 type Month = { year: number; month: number };
@@ -105,7 +104,7 @@ function CalendarEventCard({ event, onOpen }: { event: CalendarEvent; onOpen: (i
   </button>;
 }
 
-export function CalendarPage() {
+export function CalendarPage({ onOpenMedia }: { onOpenMedia: (item: MediaItem) => void }) {
   const { activeProfile } = useAuth();
   const now = new Date();
   const [month, setMonth] = useState<Month>({ year: now.getFullYear(), month: now.getMonth() });
@@ -113,7 +112,6 @@ export function CalendarPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
-  const [selected, setSelected] = useState<MediaItem | null>(null);
   const requestSequence = useRef(0);
   const profileID = activeProfile?.id ?? "";
   const bounds = useMemo(() => boundsFor(month), [month]);
@@ -188,7 +186,7 @@ export function CalendarPage() {
                 const dayEvents = groupedEvents.get(key) ?? [];
                 return <section className={`calendar-day${key === todayKey ? " is-today" : ""}${dayEvents.length > 0 ? " has-events" : ""}`} aria-label={fullDateFormatter.format(date)} key={key}>
                   <header><time dateTime={key}>{day}</time>{key === todayKey && <span>Today</span>}</header>
-                  <div className="calendar-day__events">{dayEvents.map((event) => <CalendarEventCard event={event} onOpen={setSelected} key={event.id} />)}</div>
+                  <div className="calendar-day__events">{dayEvents.map((event) => <CalendarEventCard event={event} onOpen={onOpenMedia} key={event.id} />)}</div>
                 </section>;
               })}
             </div>
@@ -198,11 +196,10 @@ export function CalendarPage() {
                 if (!parsed) return null;
                 return <section className="calendar-agenda__day" key={date}>
                   <header><time dateTime={date}>{fullDateFormatter.format(parsed)}</time>{date === todayKey && <span>Today</span>}</header>
-                  <div>{items.map((event) => <CalendarEventCard event={event} onOpen={setSelected} key={event.id} />)}</div>
+                  <div>{items.map((event) => <CalendarEventCard event={event} onOpen={onOpenMedia} key={event.id} />)}</div>
                 </section>;
               })}
             </div>
           </>}
-    {selected && <MediaDetails item={selected} onClose={() => setSelected(null)} />}
   </div>;
 }
