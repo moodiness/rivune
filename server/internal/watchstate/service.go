@@ -358,6 +358,9 @@ func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return Progress{}, fmt.Errorf("update playback progress: %w", err)
 	}
+	if err := clearContinueDismissalTx(ctx, tx, profileID, titleID); err != nil {
+		return Progress{}, err
+	}
 	if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("progress:%s:%d", titleID, progress.Version), tracking.Event{
 		Type: "progress", TitleID: titleID, Completed: progress.Completed,
 		PositionSeconds: progress.PositionSeconds, DurationSeconds: progress.DurationSeconds,
@@ -420,6 +423,9 @@ func (s *Service) SetWatched(ctx context.Context, principal auth.Principal, titl
 	if err != nil {
 		return Progress{}, fmt.Errorf("set watched state: %w", err)
 	}
+	if err := clearContinueDismissalTx(ctx, tx, profileID, titleID); err != nil {
+		return Progress{}, err
+	}
 	if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("watched:%s:%d:%t", titleID, progress.Version, completed), tracking.Event{
 		Type: "watched", TitleID: titleID, Completed: completed,
 		Version: progress.Version, OccurredAt: progress.UpdatedAt,
@@ -473,6 +479,64 @@ func (s *Service) ClearProgress(ctx context.Context, principal auth.Principal, t
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit playback progress clear: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) DismissContinue(ctx context.Context, principal auth.Principal, titleID string) error {
+	profileID, err := activeProfileID(principal)
+	if err != nil {
+		return err
+	}
+	titleID, err = normalizeTitleID(titleID)
+	if err != nil {
+		return err
+	}
+	var targetID, mediaType string
+	err = s.pool.QueryRow(ctx, `
+		SELECT COALESCE(CASE WHEN title.media_type = 'episode' THEN series.id END, title.id)::text,
+		       title.media_type
+		FROM titles title
+		LEFT JOIN titles season
+		  ON title.media_type = 'episode' AND season.id = title.parent_id AND season.media_type = 'season'
+		LEFT JOIN titles series
+		  ON season.parent_id = series.id AND series.media_type = 'series'
+		WHERE title.id = $1::uuid
+	`, titleID).Scan(&targetID, &mediaType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("resolve continue watching dismissal target: %w", err)
+	}
+	if mediaType != "movie" && mediaType != "episode" {
+		return fmt.Errorf("%w: continue watching titles must be movies or episodes", ErrInvalidInput)
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO profile_continue_dismissals (profile_id, title_id, dismissed_at)
+		VALUES ($1::uuid, $2::uuid, now())
+		ON CONFLICT (profile_id, title_id) DO UPDATE SET dismissed_at = EXCLUDED.dismissed_at
+	`, profileID, targetID); err != nil {
+		return fmt.Errorf("dismiss continue watching title: %w", err)
+	}
+	return nil
+}
+
+func clearContinueDismissalTx(ctx context.Context, tx pgx.Tx, profileID, titleID string) error {
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM profile_continue_dismissals dismissal
+		WHERE dismissal.profile_id = $1::uuid
+		  AND dismissal.title_id = (
+			  SELECT COALESCE(CASE WHEN title.media_type = 'episode' THEN series.id END, title.id)
+			  FROM titles title
+			  LEFT JOIN titles season
+			    ON title.media_type = 'episode' AND season.id = title.parent_id AND season.media_type = 'season'
+			  LEFT JOIN titles series
+			    ON season.parent_id = series.id AND series.media_type = 'series'
+			  WHERE title.id = $2::uuid
+		  )
+	`, profileID, titleID); err != nil {
+		return fmt.Errorf("restore continue watching title: %w", err)
 	}
 	return nil
 }
@@ -547,6 +611,12 @@ func (s *Service) resumeItems(ctx context.Context, profileID string, limit int) 
 			WHERE progress.profile_id = $1::uuid
 			  AND NOT progress.completed
 			  AND progress.position_seconds > 0
+			  AND NOT EXISTS (
+				  SELECT 1
+				  FROM profile_continue_dismissals dismissal
+				  WHERE dismissal.profile_id = progress.profile_id
+				    AND dismissal.title_id = COALESCE(series.id, title.id)
+			  )
 		)
 		SELECT id::text, media_type, series_id::text, season_id::text,
 		       season_number, episode_number, position_seconds, duration_seconds,
@@ -602,7 +672,15 @@ const nextEpisodeQuery = `
 			JOIN titles episode ON episode.id = progress.title_id AND episode.media_type = 'episode'
 			JOIN titles season ON season.id = episode.parent_id AND season.media_type = 'season'
 			JOIN titles series ON series.id = season.parent_id AND series.media_type = 'series'
-			WHERE progress.profile_id = $1::uuid AND progress.completed AND season.ordinal > 0
+			WHERE progress.profile_id = $1::uuid
+			  AND progress.completed
+			  AND season.ordinal > 0
+			  AND NOT EXISTS (
+				  SELECT 1
+				  FROM profile_continue_dismissals dismissal
+				  WHERE dismissal.profile_id = progress.profile_id
+				    AND dismissal.title_id = series.id
+			  )
 			ORDER BY series.id, progress.last_watched_at DESC, episode.id
 		)
 		SELECT next_episode.id::text,

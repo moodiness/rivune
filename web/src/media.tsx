@@ -281,6 +281,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const [selectedEpisode, setSelectedEpisode] = useState<EpisodeMetadata>();
   const [episodeProgress, setEpisodeProgress] = useState<Record<string, PlaybackProgress | undefined>>({});
   const autoPlayNextRef = useRef(false);
+  const autoStartRef = useRef(item.raw?.startFromBeginning === true);
   const sourceRefreshAttemptRef = useRef("");
   const trailerRequestRef = useRef(0);
   const seasonCacheRef = useRef(new Map<string, SeasonMetadata>());
@@ -306,11 +307,13 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const activeTrailerLoading = trailerOwnerKey === trailerItemKey && trailerLoading;
   const streamResourceID = selectedEpisode && series ? episodeResourceID(series, selectedEpisode, item.id) : item.id;
   const playbackMediaType = selectedEpisode || item.mediaType === "episode" ? "episode" : item.mediaType;
+  const startFromBeginning = item.raw?.startFromBeginning === true;
   const selectedProgress = selectedEpisode ? episodeProgress[selectedEpisode.id] : titleProgress;
-  const preparationStartSeconds = selectedProgress?.completed ? 0 : Math.max(0, Math.floor(selectedProgress?.positionSeconds ?? 0));
+  const preparationStartSeconds = startFromBeginning ? 0 : selectedProgress?.completed ? 0 : Math.max(0, Math.floor(selectedProgress?.positionSeconds ?? 0));
   const fromContinue = item.raw?.continueReason === "resume" || item.raw?.continueReason === "next_episode";
   const autoplayNextEpisode = document.documentElement.dataset.autoplayNextEpisode !== "false";
-  const canSelectStream = item.mediaType !== "series" && !(fromContinue && seriesVisible);
+  const awaitingRestartEpisode = startFromBeginning && item.mediaType === "episode" && Boolean(continueSeriesID) && !selectedEpisode && !seriesError;
+  const canSelectStream = item.mediaType !== "series" && !(fromContinue && seriesVisible) && !awaitingRestartEpisode;
 
   useEffect(() => {
     const expectedEpisodeID = item.titleId ?? continueEpisodeID;
@@ -551,7 +554,11 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
       if (!active) return;
       const options = response.sources;
       setAvailableStreams(options);
-      if (autoPlayNextRef.current) {
+      if (autoStartRef.current) {
+        const next = options[0];
+        if (next) setSelectedStream(next);
+        else autoStartRef.current = false;
+      } else if (autoPlayNextRef.current) {
         const preferred = nextSourceRef.current;
         const next = options.find((option) => preferred &&
           option.addonId === preferred.addonId &&
@@ -586,23 +593,26 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
       if (!active) return;
       sourceRefreshAttemptRef.current = "";
       if (prepared.mode === "transcode" || prepared.mode === "transcode_audio") {
+        autoStartRef.current = false;
         autoPlayNextRef.current = false;
         setPreparationError(t("media.sources.error.encodingRequired"));
         return;
       }
       setPreparation(prepared);
-      if (autoPlayNextRef.current) {
+      if (autoStartRef.current || autoPlayNextRef.current) {
+        autoStartRef.current = false;
         autoPlayNextRef.current = false;
         setPlaying(true);
       }
     }).catch((cause) => {
       if (!active || cause instanceof DOMException && cause.name === "AbortError") return;
-      autoPlayNextRef.current = false;
       if (cause instanceof APIError && cause.code === "playback_source_expired" && sourceRefreshAttemptRef.current !== selectedStream.sourceRef) {
         sourceRefreshAttemptRef.current = selectedStream.sourceRef;
         setStreamRefreshVersion((version) => version + 1);
         return;
       }
+      autoStartRef.current = false;
+      autoPlayNextRef.current = false;
       if (cause instanceof APIError && cause.code === "playback_source_unsupported") {
         setPreparationError(t("media.sources.error.conversionUnsupported"));
         return;

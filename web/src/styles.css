@@ -204,6 +204,25 @@
   .confirm-modal .modal-actions .button { width: 100%; min-height: 43px; }
   .confirm-modal .button--danger { border-color: rgba(255, 133, 139, .48); background: linear-gradient(135deg, #d85e66, #b9434d); box-shadow: 0 10px 25px rgba(185, 67, 77, .22), inset 0 1px rgba(255, 255, 255, .14); }
   .confirm-modal .button--danger:hover:not(:disabled) { background: linear-gradient(135deg, #e46a72, #c44a54); box-shadow: 0 14px 30px rgba(185, 67, 77, .3), inset 0 1px rgba(255, 255, 255, .16); }
+  .action-menu-layer { width: 100vw; max-width: none; height: 100dvh; max-height: none; position: fixed; z-index: 140; inset: 0; margin: 0; padding: 0; overflow: visible; border: 0; color: var(--text); background: transparent; }
+  .action-menu-layer::backdrop { background: rgba(2, 3, 6, .42); backdrop-filter: blur(3px); animation: fade .16s ease-out; }
+  .action-menu { width: min(300px, calc(100vw - 24px)); position: fixed; display: grid; gap: 3px; padding: 8px; overflow: hidden; border: 1px solid rgba(255, 255, 255, .14); border-radius: 17px; background: rgba(20, 21, 27, .98); box-shadow: 0 22px 65px rgba(0, 0, 0, .58), inset 0 1px rgba(255, 255, 255, .035); backdrop-filter: blur(22px) saturate(1.1); animation: action-menu-in .18s var(--ease); }
+  .action-menu__header { min-width: 0; display: grid; gap: 2px; padding: 9px 11px 11px; margin-bottom: 3px; border-bottom: 1px solid rgba(255, 255, 255, .075); }
+  .action-menu__header small { color: var(--accent); font-size: 8px; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
+  .action-menu__header strong { overflow: hidden; color: #f3f1ef; font-size: 13px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+  .action-menu__header span { color: var(--text-muted); font-size: 11px; font-weight: 650; letter-spacing: .035em; }
+  .action-menu > button { width: 100%; min-height: 43px; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 7px; padding: 8px 10px; border-radius: 11px; color: var(--text-soft); background: transparent; text-align: left; transition: color .18s, background .18s; }
+  .action-menu > button svg { justify-self: center; color: var(--text-muted); }
+  .action-menu > button:hover, .action-menu > button:focus-visible { color: #fff; background: rgba(255, 255, 255, .075); outline: none; }
+  .action-menu > button:hover svg, .action-menu > button:focus-visible svg { color: var(--accent); }
+  .action-menu > button:disabled { opacity: .58; cursor: wait; }
+  .action-menu > .action-menu__danger { color: #ff9da2; }
+  .action-menu > .action-menu__danger svg { color: #ff8188; }
+  .action-menu > .action-menu__danger:hover, .action-menu > .action-menu__danger:focus-visible { color: #ffb3b7; background: rgba(240, 95, 105, .11); }
+  .action-menu-layer--touch .action-menu { width: auto; inset: auto 12px max(12px, env(safe-area-inset-bottom)); border-radius: 21px; animation: action-sheet-in .24s var(--ease); }
+  .action-menu-layer--touch .action-menu > button { min-height: 50px; padding-block: 10px; }
+  @keyframes action-menu-in { from { opacity: 0; transform: translateY(-5px) scale(.97); } }
+  @keyframes action-sheet-in { from { opacity: 0; transform: translateY(18px) scale(.985); } }
   @keyframes fade { from { opacity: 0; } }
   @keyframes modal-in { from { opacity: 0; transform: translateY(15px) scale(.98); } }
 

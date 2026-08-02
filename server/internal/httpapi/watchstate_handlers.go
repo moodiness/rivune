@@ -183,6 +183,14 @@ func (a *API) continueWatching(w http.ResponseWriter, r *http.Request, principal
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (a *API) dismissContinue(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if err := a.watchstate.DismissContinue(r.Context(), principal, r.PathValue("titleId")); err != nil {
+		a.writeWatchstateError(w, "dismiss continue watching title", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func completionInput(w http.ResponseWriter, r *http.Request) (watchstate.CompletionInput, bool) {
 	if !requireJSON(w, r) {
 		return watchstate.CompletionInput{}, false

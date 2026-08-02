@@ -284,6 +284,16 @@ func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("create temporary profile progress: %v", err)
 	}
+	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE profile_continue_dismissals (
+			profile_id uuid NOT NULL,
+			title_id uuid NOT NULL,
+			dismissed_at timestamptz NOT NULL,
+			PRIMARY KEY (profile_id, title_id)
+		)
+	`); err != nil {
+		t.Fatalf("create temporary continue dismissals: %v", err)
+	}
 
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO titles (
@@ -343,5 +353,102 @@ func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 		items[1].EpisodeNumber == nil || *items[1].EpisodeNumber != 2 ||
 		items[1].Reason != "next_episode" {
 		t.Fatalf("expected the first deterministic unknown-date candidate, got %#v", items[1])
+	}
+}
+
+func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run the PostgreSQL continue dismissal test")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	defer pool.Close()
+
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE titles (
+			id uuid PRIMARY KEY,
+			media_type text NOT NULL,
+			parent_id uuid,
+			ordinal integer,
+			release_date date,
+			display_title text,
+			poster_url text,
+			background_url text,
+			release_info text,
+			resource_id text,
+			resource_provider text
+		);
+		CREATE TEMPORARY TABLE profile_progress (
+			profile_id uuid NOT NULL,
+			title_id uuid NOT NULL,
+			position_seconds integer NOT NULL,
+			duration_seconds integer NOT NULL,
+			completed boolean NOT NULL DEFAULT false,
+			version bigint NOT NULL DEFAULT 1,
+			last_watched_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (profile_id, title_id)
+		);
+		CREATE TEMPORARY TABLE profile_continue_dismissals (
+			profile_id uuid NOT NULL,
+			title_id uuid NOT NULL,
+			dismissed_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (profile_id, title_id)
+		);
+		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title, resource_id, resource_provider) VALUES
+			('00000000-0000-4000-8000-000000000400', 'series', NULL, NULL, 'Series', 'series', 'tmdb'),
+			('00000000-0000-4000-8000-000000000410', 'season', '00000000-0000-4000-8000-000000000400', 1, 'Season 1', NULL, NULL),
+			('00000000-0000-4000-8000-000000000411', 'episode', '00000000-0000-4000-8000-000000000410', 1, 'Episode 1', NULL, NULL),
+			('00000000-0000-4000-8000-000000000500', 'movie', NULL, NULL, 'Movie', 'movie', 'tmdb');
+		INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds) VALUES
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000411', 200, 1000),
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000500', 300, 1000);
+	`); err != nil {
+		t.Fatalf("seed continue dismissal state: %v", err)
+	}
+
+	profileID := "11111111-1111-4111-8111-111111111111"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+	service := NewService(pool)
+
+	initial, err := service.ContinueWatching(ctx, principal, 10)
+	if err != nil || len(initial.Items) != 2 {
+		t.Fatalf("initial continue items = %#v, error %v", initial.Items, err)
+	}
+	if err := service.DismissContinue(ctx, principal, "00000000-0000-4000-8000-000000000411"); err != nil {
+		t.Fatalf("dismiss episode series: %v", err)
+	}
+	afterEpisode, err := service.ContinueWatching(ctx, principal, 10)
+	if err != nil || len(afterEpisode.Items) != 1 || afterEpisode.Items[0].MediaType != "movie" {
+		t.Fatalf("continue items after episode dismissal = %#v, error %v", afterEpisode.Items, err)
+	}
+	if err := service.DismissContinue(ctx, principal, "00000000-0000-4000-8000-000000000500"); err != nil {
+		t.Fatalf("dismiss movie: %v", err)
+	}
+	afterMovie, err := service.ContinueWatching(ctx, principal, 10)
+	if err != nil || len(afterMovie.Items) != 0 {
+		t.Fatalf("continue items after movie dismissal = %#v, error %v", afterMovie.Items, err)
+	}
+	if _, err := service.UpdateProgress(ctx, principal, "00000000-0000-4000-8000-000000000411", UpdateProgressInput{
+		PositionSeconds: 250, DurationSeconds: 1000, ExpectedVersion: 1,
+	}); err != nil {
+		t.Fatalf("update dismissed episode progress: %v", err)
+	}
+	restored, err := service.ContinueWatching(ctx, principal, 10)
+	if err != nil || len(restored.Items) != 1 || restored.Items[0].TitleID != "00000000-0000-4000-8000-000000000411" {
+		t.Fatalf("restored continue items = %#v, error %v", restored.Items, err)
 	}
 }

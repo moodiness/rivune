@@ -1,7 +1,7 @@
 import { AlertCircle, AlertTriangle, Check, ChevronRight, LoaderCircle, Play, Plus, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { translate as t } from "./i18n";
-import type { ButtonHTMLAttributes, HTMLAttributes, PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import type { ButtonHTMLAttributes, CSSProperties, HTMLAttributes, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
 export function RivuneMark({ compact = false }: { compact?: boolean }) {
   return (
@@ -150,16 +150,126 @@ export function ConfirmDialog({ title, description, confirmLabel = t("common.con
   </Modal>;
 }
 
+export type ActionMenuAnchor = { x: number; y: number; touch: boolean };
+
+export function ActionMenu({ label, eyebrow, title, subtitle, anchor, onClose, children }: { label: string; eyebrow: string; title: string; subtitle?: string; anchor: ActionMenuAnchor; onClose: () => void; children: ReactNode }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const menuRef = useRef<HTMLElement>(null);
+  const [position, setPosition] = useState<CSSProperties>();
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const menu = menuRef.current;
+    if (!dialog || !menu) return;
+    dialog.showModal();
+    if (!anchor.touch) {
+      const bounds = menu.getBoundingClientRect();
+      setPosition({
+        left: Math.max(12, Math.min(anchor.x, window.innerWidth - bounds.width - 12)),
+        top: Math.max(12, Math.min(anchor.y, window.innerHeight - bounds.height - 12)),
+      });
+    }
+    menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+    return () => dialog.close();
+  }, [anchor.touch, anchor.x, anchor.y]);
+
+  return <dialog
+    ref={dialogRef}
+    className={`action-menu-layer${anchor.touch ? " action-menu-layer--touch" : ""}`}
+    onCancel={(event) => { event.preventDefault(); onClose(); }}
+    onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+  >
+    <section
+      ref={menuRef}
+      className="action-menu"
+      role="menu"
+      aria-label={label}
+      style={position}
+      onKeyDown={(event) => {
+        if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+        const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("[role='menuitem']:not(:disabled)"));
+        if (buttons.length === 0) return;
+        event.preventDefault();
+        const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+        const index = event.key === "Home" ? 0
+          : event.key === "End" ? buttons.length - 1
+            : event.key === "ArrowDown" ? (current + 1 + buttons.length) % buttons.length
+              : (current - 1 + buttons.length) % buttons.length;
+        buttons[index]?.focus();
+      }}
+    >
+      <header className="action-menu__header">
+        <small>{eyebrow}</small>
+        <strong>{title}</strong>
+        {subtitle && <span>{subtitle}</span>}
+      </header>
+      {children}
+    </section>
+  </dialog>;
+}
+
 export function Skeleton({ className = "", ...props }: HTMLAttributes<HTMLDivElement>) {
   return <div className={`skeleton ${className}`} {...props} />;
 }
 
-export function MediaCard({ title, image, backdrop, subtitle, badge, shape = "poster", onClick, progress }: { title: string; image?: string; backdrop?: string; subtitle?: string; badge?: string; shape?: "poster" | "landscape" | "square"; onClick: () => void; progress?: number }) {
+export function MediaCard({ title, image, backdrop, subtitle, badge, shape = "poster", onClick, onContextAction, progress }: { title: string; image?: string; backdrop?: string; subtitle?: string; badge?: string; shape?: "poster" | "landscape" | "square"; onClick: () => void; onContextAction?: (anchor: ActionMenuAnchor) => void; progress?: number }) {
   const source = image || backdrop;
   const [failedSource, setFailedSource] = useState<string>();
   const usableSource = source === failedSource ? undefined : source;
+  const longPressTimer = useRef(0);
+  const longPressStart = useRef({ pointerID: 0, x: 0, y: 0 });
+  const suppressClickUntil = useRef(0);
+  const suppressContextUntil = useRef(0);
+
+  function cancelLongPress() {
+    if (longPressTimer.current) window.clearTimeout(longPressTimer.current);
+    longPressTimer.current = 0;
+  }
+
+  useEffect(() => () => cancelLongPress(), []);
   return (
-    <button type="button" className={`media-card media-card--${shape}`} onClick={onClick} aria-label={t("media.open", { title })}>
+    <button
+      type="button"
+      className={`media-card media-card--${shape}`}
+      onClick={(event) => {
+        if (performance.now() < suppressClickUntil.current) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        onClick();
+      }}
+      onContextMenu={onContextAction ? (event) => {
+        event.preventDefault();
+        if (performance.now() < suppressContextUntil.current) return;
+        const bounds = event.currentTarget.getBoundingClientRect();
+        onContextAction({
+          x: event.clientX || bounds.left + bounds.width / 2,
+          y: event.clientY || bounds.top + bounds.height / 2,
+          touch: false,
+        });
+      } : undefined}
+      onPointerDown={onContextAction ? (event) => {
+        if ((event.pointerType !== "touch" && event.pointerType !== "pen") || event.button !== 0) return;
+        cancelLongPress();
+        longPressStart.current = { pointerID: event.pointerId, x: event.clientX, y: event.clientY };
+        longPressTimer.current = window.setTimeout(() => {
+          longPressTimer.current = 0;
+          suppressClickUntil.current = performance.now() + 1_000;
+          suppressContextUntil.current = performance.now() + 1_000;
+          window.navigator.vibrate?.(10);
+          onContextAction({ x: event.clientX, y: event.clientY, touch: true });
+        }, 550);
+      } : undefined}
+      onPointerMove={onContextAction ? (event) => {
+        if (!longPressTimer.current || longPressStart.current.pointerID !== event.pointerId) return;
+        if (Math.hypot(event.clientX - longPressStart.current.x, event.clientY - longPressStart.current.y) > 10) cancelLongPress();
+      } : undefined}
+      onPointerUp={onContextAction ? cancelLongPress : undefined}
+      onPointerCancel={onContextAction ? cancelLongPress : undefined}
+      aria-label={t("media.open", { title })}
+      aria-haspopup={onContextAction ? "menu" : undefined}
+    >
       <span className="media-card__visual">
         {usableSource ? <img src={usableSource} alt="" loading="lazy" draggable={false} onError={() => setFailedSource(usableSource)} /> : <span className="media-card__fallback">{title.slice(0, 2).toUpperCase()}</span>}
         <span className="media-card__veil" />

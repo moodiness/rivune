@@ -2687,6 +2687,26 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+  /continue-watching/{titleId}:
+    parameters:
+      - $ref: "#/components/parameters/TitleId"
+    delete:
+      summary: Remove a title from continue watching
+      description: Dismisses the movie, or the entire series represented by an episode, until new watch activity restores it.
+      operationId: dismissContinueWatchingTitle
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: The title was removed from continue watching.
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
 components:
   securitySchemes:
     setupToken:

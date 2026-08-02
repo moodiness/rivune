@@ -1,12 +1,13 @@
-import { ArrowLeft, ArrowRight, Bookmark, Clapperboard, Compass, Film, LoaderCircle, Play, Search, Sparkles, Star, Tv, WandSparkles, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Bookmark, Clapperboard, Compass, Film, Info, ListVideo, LoaderCircle, Play, RotateCcw, Search, Sparkles, Star, Trash2, Tv, WandSparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
-import { Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Skeleton } from "../components";
+import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Skeleton } from "../components";
 import { translate as t } from "../i18n";
-import { notifyError, notifyErrorMessage } from "../notifications";
+import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
 import { mediaTypeLabel } from "../media";
 import type { Collection, ContinueItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch } from "../types";
+import type { ActionMenuAnchor } from "../components";
 
 type OpenMedia = (item: MediaItem) => void;
 
@@ -161,6 +162,8 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   const [opened, setOpened] = useState<HomeRow | null>(null);
   const [openedCollection, setOpenedCollection] = useState<Collection | null>(null);
   const [continueItems, setContinueItems] = useState<EnrichedContinueItem[]>([]);
+  const [continueAction, setContinueAction] = useState<{ item: MediaItem; anchor: ActionMenuAnchor }>();
+  const [continueActionBusy, setContinueActionBusy] = useState(false);
   const mediaPreferences = useMediaPreferences();
   const { profileRequestSignal } = useAuth();
   const [pendingFolderKeys, setPendingFolderKeys] = useState<Set<string>>(new Set());
@@ -303,6 +306,52 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
     setActiveHeroIndex((current) => (current + direction + heroSlides.length) % heroSlides.length);
   }
 
+  function continueActionTitle(item: MediaItem): string {
+    return typeof item.raw?.continueCardTitle === "string" ? item.raw.continueCardTitle : item.title;
+  }
+
+  function continueActionEpisodeLabel(item: MediaItem): string {
+    const seasonNumber = typeof item.raw?.continueSeasonNumber === "number" ? item.raw.continueSeasonNumber : undefined;
+    const episodeNumber = typeof item.raw?.continueEpisodeNumber === "number" ? item.raw.continueEpisodeNumber : undefined;
+    return seasonNumber !== undefined && episodeNumber !== undefined
+      ? `S${String(seasonNumber).padStart(2, "0")} · E${String(episodeNumber).padStart(2, "0")}`
+      : "";
+  }
+
+  function openContinueDetails(item: MediaItem) {
+    setContinueAction(undefined);
+    onOpenMedia({
+      ...item,
+      raw: { ...item.raw, openSeriesBrowser: item.mediaType === "episode" },
+    });
+  }
+
+  function startContinueFromBeginning(item: MediaItem) {
+    setContinueAction(undefined);
+    onOpenMedia({
+      ...item,
+      raw: { ...item.raw, openSeriesBrowser: false, startFromBeginning: true },
+    });
+  }
+
+  async function removeContinueItem(item: MediaItem) {
+    if (!item.titleId) return;
+    setContinueActionBusy(true);
+    try {
+      await api.dismissContinue(item.titleId);
+      setContinueItems((current) => current.filter((candidate) => candidate.titleId !== item.titleId));
+      setContinueAction(undefined);
+      notifySuccess(
+        t("home.continue.notifications.removedMessage", { title: continueActionTitle(item) }),
+        t("home.continue.notifications.removedTitle"),
+      );
+    } catch (cause) {
+      notifyError(cause, t("home.continue.errors.removeFailed"), t("home.continue.errors.removeFailedTitle"));
+    } finally {
+      setContinueActionBusy(false);
+    }
+  }
+
 
   if (loading) return <div className="home-page page-enter"><Skeleton className="hero-skeleton" /><div className="content-stack">{[0, 1, 2].map((row) => <div key={row}><Skeleton className="heading-skeleton" /><div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div></div>)}</div></div>;
 
@@ -338,6 +387,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
           badge={typeof item.raw?.continueCardBadge === "string" ? item.raw.continueCardBadge : undefined}
           progress={item.raw?.continueReason === "resume" && typeof item.raw.progress === "number" ? item.raw.progress : undefined}
           onClick={() => onOpenMedia(item)}
+          onContextAction={(anchor) => setContinueAction({ item, anchor })}
         />)}</HorizontalDragRow>
       </section>}
       {collections.map((collection) => {
@@ -362,6 +412,27 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
       })}
       {collections.length === 0 && <EmptyState icon={<Clapperboard size={46} />} title={t("home.empty.title")} description={t("home.empty.description")} />}
     </div>
+    {continueAction && <ActionMenu
+      label={t("home.continue.actions.menuLabel", { title: [continueActionTitle(continueAction.item), continueActionEpisodeLabel(continueAction.item)].filter(Boolean).join(" · ") })}
+      eyebrow={t("home.continue.title")}
+      title={continueActionTitle(continueAction.item)}
+      subtitle={continueActionEpisodeLabel(continueAction.item) || undefined}
+      anchor={continueAction.anchor}
+      onClose={() => { if (!continueActionBusy) setContinueAction(undefined); }}
+    >
+      <button type="button" role="menuitem" onClick={() => openContinueDetails(continueAction.item)}>
+        {continueAction.item.mediaType === "episode" ? <ListVideo size={19} /> : <Info size={19} />}
+        <span>{t("home.continue.actions.details")}</span>
+      </button>
+      <button type="button" role="menuitem" onClick={() => startContinueFromBeginning(continueAction.item)}>
+        <RotateCcw size={19} />
+        <span>{t("home.continue.actions.startBeginning")}</span>
+      </button>
+      <button type="button" role="menuitem" className="action-menu__danger" disabled={continueActionBusy} onClick={() => void removeContinueItem(continueAction.item)}>
+        {continueActionBusy ? <LoaderCircle className="spin" size={19} /> : <Trash2 size={19} />}
+        <span>{t("home.continue.actions.remove")}</span>
+      </button>
+    </ActionMenu>}
   </div>;
 }
 

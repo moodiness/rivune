@@ -43,6 +43,8 @@ type fakeWatchstateService struct {
 	continueLimit    int
 	continueValue    watchstate.ContinuePage
 	continueErr      error
+	dismissTitleID   string
+	dismissErr       error
 }
 
 func (f *fakeWatchstateService) ResolveTitle(_ context.Context, _ auth.Principal, input watchstate.ResolveTitleInput) (watchstate.TitleReference, error) {
@@ -88,6 +90,11 @@ func (f *fakeWatchstateService) ClearProgress(_ context.Context, _ auth.Principa
 func (f *fakeWatchstateService) ContinueWatching(_ context.Context, _ auth.Principal, limit int) (watchstate.ContinuePage, error) {
 	f.continueLimit = limit
 	return f.continueValue, f.continueErr
+}
+
+func (f *fakeWatchstateService) DismissContinue(_ context.Context, _ auth.Principal, titleID string) error {
+	f.dismissTitleID = titleID
+	return f.dismissErr
 }
 
 func TestResolveTitlePassesProviderSnapshot(t *testing.T) {
@@ -214,5 +221,19 @@ func watchstateAPI(service watchstateService) *API {
 	return &API{
 		watchstate: service,
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+}
+
+func TestDismissContinuePassesTitle(t *testing.T) {
+	service := &fakeWatchstateService{}
+	api := watchstateAPI(service)
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/continue-watching/title-id", nil)
+	request.SetPathValue("titleId", "title-id")
+	response := httptest.NewRecorder()
+
+	api.dismissContinue(response, request, auth.Principal{})
+
+	if response.Code != http.StatusNoContent || service.dismissTitleID != "title-id" {
+		t.Fatalf("unexpected dismissal status=%d title=%q", response.Code, service.dismissTitleID)
 	}
 }

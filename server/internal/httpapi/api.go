@@ -150,6 +150,7 @@ type watchstateService interface {
 	SetWatched(context.Context, auth.Principal, string, bool, watchstate.CompletionInput) (watchstate.Progress, error)
 	ClearProgress(context.Context, auth.Principal, string, int64) error
 	ContinueWatching(context.Context, auth.Principal, int) (watchstate.ContinuePage, error)
+	DismissContinue(context.Context, auth.Principal, string) error
 }
 
 type trackingService interface {
@@ -399,6 +400,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("POST /api/v1/titles/{titleId}/watched", a.requireAuthentication(a.markWatched))
 	mux.Handle("DELETE /api/v1/titles/{titleId}/watched", a.requireAuthentication(a.markUnwatched))
 	mux.Handle("GET /api/v1/continue-watching", a.requireAuthentication(a.continueWatching))
+	mux.Handle("DELETE /api/v1/continue-watching/{titleId}", a.requireAuthentication(a.dismissContinue))
 	mux.HandleFunc("GET /", webui.Handler)
 	return a.middleware(mux)
 }
