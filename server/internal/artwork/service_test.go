@@ -136,6 +136,15 @@ func TestServeHTTPMissHitHeadAndUpstreamFailure(t *testing.T) {
 	if requests.Load() != 1 {
 		t.Fatalf("cached requests contacted failed upstream %d times", requests.Load())
 	}
+
+	fallbackURL := fixture.URL + "/fallback"
+	fallbackLocalURL := service.LocalURL(context.Background(), fallbackURL)
+	fallback := serveArtwork(service, http.MethodGet, fallbackLocalURL)
+	if fallback.Code != http.StatusTemporaryRedirect ||
+		fallback.Header().Get("Location") != fallbackURL ||
+		fallback.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("fallback response = %d location=%q cache=%q", fallback.Code, fallback.Header().Get("Location"), fallback.Header().Get("Cache-Control"))
+	}
 }
 
 func TestServeHTTPRepairsMissingAndCorruptFile(t *testing.T) {
@@ -173,7 +182,7 @@ func TestServeHTTPRepairsMissingAndCorruptFile(t *testing.T) {
 	}
 }
 
-func TestServeHTTPRejectsWrongTypeAndOversize(t *testing.T) {
+func TestServeHTTPRejectsUnsafeContentAndFallsBackToSource(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	wideImage := testSizedPNG(t, maxImageDimension+1, 1)
 	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -197,8 +206,10 @@ func TestServeHTTPRejectsWrongTypeAndOversize(t *testing.T) {
 	for _, path := range []string{"/wrong", "/oversize", "/dimensions"} {
 		localURL := service.LocalURL(context.Background(), fixture.URL+path)
 		result := serveArtwork(service, http.MethodGet, localURL)
-		if result.Code != http.StatusBadGateway || result.Body.String() != "artwork unavailable\n" {
-			t.Fatalf("%s response = %d %q, want stable 502", path, result.Code, result.Body.String())
+		if result.Code != http.StatusTemporaryRedirect ||
+			result.Header().Get("Location") != fixture.URL+path ||
+			result.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s fallback = %d location=%q cache=%q", path, result.Code, result.Header().Get("Location"), result.Header().Get("Cache-Control"))
 		}
 		key := strings.TrimPrefix(localURL, publicPrefix)
 		if _, err := os.Stat(service.path(key)); !os.IsNotExist(err) {

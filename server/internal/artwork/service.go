@@ -193,9 +193,10 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	if file == nil {
+		sourceURL := record.sourceURL
 		if err := service.fetchCoalesced(request.Context(), record); err != nil {
 			service.logger.WarnContext(request.Context(), "fetch artwork", "key", key, "error", err)
-			http.Error(response, "artwork unavailable", http.StatusBadGateway)
+			redirectToArtworkSource(response, request, sourceURL)
 			return
 		}
 		record, file, found, err = service.load(request.Context(), key)
@@ -204,7 +205,7 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 				err = errors.New("downloaded artwork was not durable")
 			}
 			service.logger.WarnContext(request.Context(), "reopen artwork", "key", key, "error", err)
-			http.Error(response, "artwork unavailable", http.StatusBadGateway)
+			redirectToArtworkSource(response, request, sourceURL)
 			return
 		}
 	}
@@ -226,6 +227,11 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 	`, key); err != nil {
 		service.logger.WarnContext(request.Context(), "touch artwork", "key", key, "error", err)
 	}
+}
+
+func redirectToArtworkSource(response http.ResponseWriter, request *http.Request, sourceURL string) {
+	response.Header().Set("Cache-Control", "no-store")
+	http.Redirect(response, request, sourceURL, http.StatusTemporaryRedirect)
 }
 
 func (service *Service) Prune(ctx context.Context) error {

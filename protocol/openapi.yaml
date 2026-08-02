@@ -2124,7 +2124,7 @@ paths:
     get:
       summary: Read cached artwork
       operationId: readArtwork
-      description: Lazily downloads registered provider artwork into the self-hosted persistent cache and returns immutable same-origin bytes. Upstream URLs and credentials are never exposed.
+      description: Lazily downloads registered provider artwork into the self-hosted persistent cache and returns immutable same-origin bytes. Provider URLs remain server-side unless a cache miss fails, in which case the response redirects to the registered source as a no-store fallback.
       security: []
       responses:
         "200":
@@ -2147,6 +2147,18 @@ paths:
               schema:
                 type: string
                 format: binary
+        "307":
+          description: Cache miss fallback to the registered provider artwork URL.
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+                format: uri
+            Cache-Control:
+              required: true
+              schema:
+                type: string
         "400":
           $ref: "#/components/responses/ArtworkError"
         "404":
@@ -2172,6 +2184,18 @@ paths:
               schema:
                 type: integer
                 format: int64
+        "307":
+          description: Cache miss fallback to the registered provider artwork URL.
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+                format: uri
+            Cache-Control:
+              required: true
+              schema:
+                type: string
         "400":
           $ref: "#/components/responses/ArtworkError"
         "404":
