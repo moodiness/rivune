@@ -238,6 +238,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Zobraziť seriál a sezónu",
   "media.series.guideEyebrow": "Sprievodca seriálom",
   "media.series.episodesTitle": "Epizódy",
+  "media.cast.title": "Obsadenie",
   "media.season.error.episodesLoadFailed": "Epizódy sa nepodarilo načítať.",
   "media.season.error.unavailableTitle": "Sezóna nie je k dispozícii",
   "media.season.specials": "Špeciálne epizódy",

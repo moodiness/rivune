@@ -69,6 +69,13 @@ type Genre struct {
 	Name string `json:"name"`
 }
 
+type CastMember struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Character  string `json:"character,omitempty"`
+	ProfileURL string `json:"profileUrl,omitempty"`
+}
+
 type Movie struct {
 	ID               string            `json:"id"`
 	MediaType        string            `json:"mediaType"`
@@ -83,6 +90,7 @@ type Movie struct {
 	Tagline          string            `json:"tagline,omitempty"`
 	RuntimeMinutes   int               `json:"runtimeMinutes,omitempty"`
 	Genres           []Genre           `json:"genres"`
+	Cast             []CastMember      `json:"cast"`
 	VoteAverage      float64           `json:"voteAverage"`
 	VoteCount        int               `json:"voteCount"`
 	ExternalIDs      map[string]string `json:"externalIds"`
@@ -137,6 +145,7 @@ type ProviderMovie struct {
 	Tagline          string
 	RuntimeMinutes   int
 	Genres           []Genre
+	Cast             []CastMember
 	VoteAverage      float64
 	VoteCount        int
 	AdditionalIDs    map[string]string
@@ -166,6 +175,7 @@ type Series struct {
 	NumberOfSeasons        int               `json:"numberOfSeasons,omitempty"`
 	NumberOfEpisodes       int               `json:"numberOfEpisodes,omitempty"`
 	Genres                 []Genre           `json:"genres"`
+	Cast                   []CastMember      `json:"cast"`
 	VoteAverage            float64           `json:"voteAverage"`
 	VoteCount              int               `json:"voteCount"`
 	Seasons                []SeasonSummary   `json:"seasons"`
@@ -243,6 +253,7 @@ type ProviderSeries struct {
 	NumberOfSeasons  int
 	NumberOfEpisodes int
 	Genres           []Genre
+	Cast             []CastMember
 	VoteAverage      float64
 	VoteCount        int
 	Seasons          []ProviderSeasonSummary

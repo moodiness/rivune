@@ -469,17 +469,14 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
 
   function openContinueDetails(item: MediaItem) {
     setContinueAction(undefined);
-    onOpenMedia({
-      ...item,
-      raw: { ...item.raw, openSeriesBrowser: item.mediaType === "episode" },
-    });
+    onOpenMedia(item);
   }
 
   function startContinueFromBeginning(item: MediaItem) {
     setContinueAction(undefined);
     onOpenMedia({
       ...item,
-      raw: { ...item.raw, openSeriesBrowser: false, startFromBeginning: true },
+      raw: { ...item.raw, startFromBeginning: true },
     });
   }
 

@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Vis serie og sesong",
   "media.series.guideEyebrow": "Serieguide",
   "media.series.episodesTitle": "Episoder",
+  "media.cast.title": "Medvirkende",
   "media.season.error.episodesLoadFailed": "Episodene kunne ikke lastes inn.",
   "media.season.error.unavailableTitle": "Sesongen er utilgjengelig",
   "media.season.specials": "Spesialepisoder",

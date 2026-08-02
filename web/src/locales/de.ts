@@ -238,6 +238,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Serie und Staffel anzeigen",
   "media.series.guideEyebrow": "Serienübersicht",
   "media.series.episodesTitle": "Folgen",
+  "media.cast.title": "Besetzung",
   "media.season.error.episodesLoadFailed": "Folgen konnten nicht geladen werden.",
   "media.season.error.unavailableTitle": "Staffel nicht verfügbar",
   "media.season.specials": "Spezialfolgen",

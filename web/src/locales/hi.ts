@@ -238,6 +238,7 @@ const catalog = {
   "media.series.actions.viewGuide": "सीरीज़ और सीज़न देखें",
   "media.series.guideEyebrow": "सीरीज़ गाइड",
   "media.series.episodesTitle": "एपिसोड",
+  "media.cast.title": "कलाकार",
   "media.season.error.episodesLoadFailed": "एपिसोड लोड नहीं किए जा सके।",
   "media.season.error.unavailableTitle": "सीज़न उपलब्ध नहीं है",
   "media.season.specials": "विशेष एपिसोड",

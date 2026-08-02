@@ -46,10 +46,10 @@ func TestSearchMoviesSendsBearerTokenAndNormalizesResults(t *testing.T) {
 
 func TestMovieDetailsIncludesGenresAndIMDBID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/movie/550" || r.URL.Query().Get("language") != "en-US" {
+		if r.URL.Path != "/movie/550" || r.URL.Query().Get("language") != "en-US" || r.URL.Query().Get("append_to_response") != "credits" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":550,"title":"Fight Club","original_title":"Fight Club","original_language":"en","overview":"Overview","release_date":"1999-10-15","tagline":"Mischief. Mayhem. Soap.","runtime":139,"genres":[{"id":18,"name":"Drama"}],"vote_average":8.4,"vote_count":30000,"imdb_id":"tt0137523"}`))
+		_, _ = w.Write([]byte(`{"id":550,"title":"Fight Club","original_title":"Fight Club","original_language":"en","overview":"Overview","release_date":"1999-10-15","tagline":"Mischief. Mayhem. Soap.","runtime":139,"genres":[{"id":18,"name":"Drama"}],"vote_average":8.4,"vote_count":30000,"imdb_id":"tt0137523","credits":{"cast":[{"id":819,"name":"Edward Norton","character":"The Narrator","profile_path":"/norton.jpg"}]}}`))
 	}))
 	defer server.Close()
 
@@ -58,7 +58,7 @@ func TestMovieDetailsIncludesGenresAndIMDBID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("movie details: %v", err)
 	}
-	if movie.RuntimeMinutes != 139 || len(movie.Genres) != 1 || movie.Genres[0].Name != "Drama" || movie.AdditionalIDs["imdb"] != "tt0137523" {
+	if movie.RuntimeMinutes != 139 || len(movie.Genres) != 1 || movie.Genres[0].Name != "Drama" || movie.AdditionalIDs["imdb"] != "tt0137523" || len(movie.Cast) != 1 || movie.Cast[0].Character != "The Narrator" || movie.Cast[0].ProfileURL != imageBaseURL+"/w185/norton.jpg" {
 		t.Fatalf("unexpected details: %+v", movie)
 	}
 }
@@ -131,10 +131,10 @@ func TestResolveExternalIDFindsSeriesByIMDBID(t *testing.T) {
 
 func TestSeriesDetailsIncludesSeasonsAndExternalIDs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tv/1396" || r.URL.Query().Get("append_to_response") != "external_ids" {
+		if r.URL.Path != "/tv/1396" || r.URL.Query().Get("append_to_response") != "external_ids,aggregate_credits" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":1396,"name":"Breaking Bad","original_name":"Breaking Bad","original_language":"en","overview":"A chemistry teacher.","first_air_date":"2008-01-20","last_air_date":"2013-09-29","number_of_seasons":5,"number_of_episodes":62,"genres":[{"id":18,"name":"Drama"}],"seasons":[{"id":3572,"name":"Season 1","season_number":1,"episode_count":7,"air_date":"2008-01-20","vote_average":8.3}],"external_ids":{"imdb_id":"tt0903747","tvdb_id":81189,"wikidata_id":"Q1079"}}`))
+		_, _ = w.Write([]byte(`{"id":1396,"name":"Breaking Bad","original_name":"Breaking Bad","original_language":"en","overview":"A chemistry teacher.","first_air_date":"2008-01-20","last_air_date":"2013-09-29","number_of_seasons":5,"number_of_episodes":62,"genres":[{"id":18,"name":"Drama"}],"seasons":[{"id":3572,"name":"Season 1","season_number":1,"episode_count":7,"air_date":"2008-01-20","vote_average":8.3}],"external_ids":{"imdb_id":"tt0903747","tvdb_id":81189,"wikidata_id":"Q1079"},"aggregate_credits":{"cast":[{"id":17419,"name":"Bryan Cranston","profile_path":"/cranston.jpg","roles":[{"character":"Walter White"}]}]}}`))
 	}))
 	defer server.Close()
 
@@ -143,7 +143,7 @@ func TestSeriesDetailsIncludesSeasonsAndExternalIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("series details: %v", err)
 	}
-	if series.NumberOfEpisodes != 62 || len(series.Seasons) != 1 || series.Seasons[0].ExternalID != "3572" || series.AdditionalIDs["tvdb"] != "81189" {
+	if series.NumberOfEpisodes != 62 || len(series.Seasons) != 1 || series.Seasons[0].ExternalID != "3572" || series.AdditionalIDs["tvdb"] != "81189" || len(series.Cast) != 1 || series.Cast[0].Character != "Walter White" {
 		t.Fatalf("unexpected series: %+v", series)
 	}
 }

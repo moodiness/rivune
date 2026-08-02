@@ -238,6 +238,7 @@ const catalog = {
   "media.series.actions.viewGuide": "مشاهده سریال و فصل",
   "media.series.guideEyebrow": "راهنمای سریال",
   "media.series.episodesTitle": "قسمت‌ها",
+  "media.cast.title": "بازیگران",
   "media.season.error.episodesLoadFailed": "قسمت‌ها بارگیری نشدند.",
   "media.season.error.unavailableTitle": "فصل در دسترس نیست",
   "media.season.specials": "قسمت‌های ویژه",

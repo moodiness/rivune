@@ -238,6 +238,7 @@ const catalog = {
   "media.series.actions.viewGuide": "عرض المسلسل والموسم",
   "media.series.guideEyebrow": "دليل المسلسل",
   "media.series.episodesTitle": "الحلقات",
+  "media.cast.title": "طاقم التمثيل",
   "media.season.error.episodesLoadFailed": "تعذّر تحميل الحلقات.",
   "media.season.error.unavailableTitle": "الموسم غير متاح",
   "media.season.specials": "الحلقات الخاصة",

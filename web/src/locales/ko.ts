@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "시리즈 및 시즌 보기",
   "media.series.guideEyebrow": "시리즈 가이드",
   "media.series.episodesTitle": "에피소드",
+  "media.cast.title": "출연진",
   "media.season.error.episodesLoadFailed": "에피소드를 불러오지 못했습니다.",
   "media.season.error.unavailableTitle": "시즌 이용 불가",
   "media.season.specials": "스페셜",

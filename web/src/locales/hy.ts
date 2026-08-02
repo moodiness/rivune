@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Դիտել սերիալն ու եթերաշրջանը",
   "media.series.guideEyebrow": "Սերիալի ուղեցույց",
   "media.series.episodesTitle": "Սերիաներ",
+  "media.cast.title": "Դերասանական կազմ",
   "media.season.error.episodesLoadFailed": "Չհաջողվեց բեռնել սերիաները։",
   "media.season.error.unavailableTitle": "Եթերաշրջանն անհասանելի է",
   "media.season.specials": "Հատուկ թողարկումներ",

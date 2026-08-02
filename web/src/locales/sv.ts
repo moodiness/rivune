@@ -238,6 +238,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Visa serie och säsong",
   "media.series.guideEyebrow": "Serieguide",
   "media.series.episodesTitle": "Avsnitt",
+  "media.cast.title": "Medverkande",
   "media.season.error.episodesLoadFailed": "Avsnitten kunde inte läsas in.",
   "media.season.error.unavailableTitle": "Säsongen är inte tillgänglig",
   "media.season.specials": "Specialavsnitt",

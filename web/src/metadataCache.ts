@@ -16,6 +16,7 @@ type MetadataSnapshot = {
   voteCount?: number;
   externalIds?: Record<string, string>;
   genres?: unknown[];
+  cast?: unknown[];
 };
 
 type CacheEntry = {
@@ -123,7 +124,13 @@ export function cachedMediaItem(item: MediaItem, locale: string): MediaItem {
       if (typeof externalID === "string" && externalID.trim()) result.externalIds[provider] = externalID;
     }
   }
-  if (Array.isArray(cached.genres)) result.raw = { ...item.raw, genres: cached.genres };
+  if (Array.isArray(cached.genres) || Array.isArray(cached.cast)) {
+    result.raw = {
+      ...item.raw,
+      ...(Array.isArray(cached.genres) ? { genres: cached.genres } : {}),
+      ...(Array.isArray(cached.cast) ? { cast: cached.cast } : {}),
+    };
+  }
   return result;
 }
 
@@ -137,6 +144,7 @@ function snapshot(details: MediaItem): MetadataSnapshot {
   if (typeof details.voteCount === "number" && Number.isFinite(details.voteCount)) value.voteCount = details.voteCount;
   if (details.externalIds && Object.keys(details.externalIds).length > 0) value.externalIds = { ...details.externalIds };
   if (Array.isArray(details.raw?.genres)) value.genres = details.raw.genres;
+  if (Array.isArray(details.raw?.cast)) value.cast = details.raw.cast;
   return value;
 }
 

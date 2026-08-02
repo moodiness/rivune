@@ -238,6 +238,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Zobrazit seriál a řadu",
   "media.series.guideEyebrow": "Průvodce seriálem",
   "media.series.episodesTitle": "Epizody",
+  "media.cast.title": "Obsazení",
   "media.season.error.episodesLoadFailed": "Epizody se nepodařilo načíst.",
   "media.season.error.unavailableTitle": "Řada není k dispozici",
   "media.season.specials": "Speciály",

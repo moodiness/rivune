@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Tingnan ang serye at season",
   "media.series.guideEyebrow": "Gabay sa serye",
   "media.series.episodesTitle": "Mga Episode",
+  "media.cast.title": "Mga artista",
   "media.season.error.episodesLoadFailed": "Hindi ma-load ang mga episode.",
   "media.season.error.unavailableTitle": "Hindi available ang season",
   "media.season.specials": "Mga Espesyal",

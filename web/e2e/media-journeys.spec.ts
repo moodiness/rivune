@@ -44,8 +44,11 @@ test("media details use a refresh-safe route with browser and in-page history", 
   await expect.poll(() => rivune.matching("/api/v1/continue-watching", "GET").length).toBeGreaterThan(initialContinueRequests);
   await page.goForward();
   await expect(page.locator(".details-page")).toBeVisible();
-  const viewSeriesToggle = page.getByRole("button", { name: "View series & season" });
-  if (await viewSeriesToggle.isVisible()) await viewSeriesToggle.click();
+  const returnToEpisodes = page.getByRole("button", { name: /Back.*Episodes/ });
+  await expect(returnToEpisodes).toBeVisible();
+  await expect(page.locator(".series-browser")).toHaveCount(0);
+  await returnToEpisodes.click();
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1$/);
 
   await page.getByRole("tab", { name: /^Season 2\b/ }).click();
   await page.getByRole("button", { name: /Moonrise/ }).first().click();
@@ -56,7 +59,7 @@ test("media details use a refresh-safe route with browser and in-page history", 
   await expect(page.getByRole("heading", { name: "Moonrise" })).toBeVisible();
   await expect(page.locator(".details-description")).toHaveText("The team reunites on a distant moon.");
   await expect(page.getByRole("region", { name: "Playback sources" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".series-browser")).toHaveCount(0);
   const stateFreeContinueRequests = rivune.matching("/api/v1/continue-watching", "GET").length;
 
   await page.goBack();
@@ -72,14 +75,13 @@ test("media details use a refresh-safe route with browser and in-page history", 
   await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "true");
   await page.goForward();
   await expect(page.getByRole("heading", { name: "Moonrise" })).toBeVisible();
-
   await page.getByRole("button", { name: "Back to browse" }).click();
   await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
   await expect(page.locator(".route-surface").getByRole("heading").first()).toBeFocused();
 });
 
 test("series episodes open dedicated detail pages that own playback sources", async ({ page, rivune }) => {
-  await page.goto("/#media/series/series-1?from=home&title=Signal%20Horizon&titleId=series-1");
+  await page.goto("/media/series/tt9000/season/1");
 
   const seriesHeading = page.getByRole("heading", { name: "Signal Horizon" });
   await expect(seriesHeading).toBeAttached();
@@ -94,7 +96,7 @@ test("series episodes open dedicated detail pages that own playback sources", as
   await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1\/episode\/1$/);
   await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
   await expect(page.getByText("The crew follows a mysterious signal.")).toBeVisible();
-  await expect(page.getByText("Season 1 · Episode 1")).toBeVisible();
+  await expect(page.locator(".details-meta").getByText("Season 1 · Episode 1")).toBeVisible();
   await expect(page.getByRole("region", { name: "Playback sources" })).toBeVisible();
   const sourceRequest = await rivune.waitForRequest("/api/v1/playback/sources", "POST");
   expect(sourceRequest.body).toMatchObject({ mediaType: "episode", resourceId: "tt9000:1:1" });
@@ -104,15 +106,96 @@ test("series episodes open dedicated detail pages that own playback sources", as
   await expect(page.getByRole("region", { name: "Playback sources" })).toHaveCount(0);
 });
 
-test("continue-watching episode opens its series and requests trailers for each selected season", async ({ page, rivune }) => {
+test("episode details float beside a responsive contextual stream panel", async ({ page, rivune: _rivune }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+
+  const artwork = page.locator(".details-artwork");
+  const primary = page.locator(".details-primary");
+  const overview = page.locator(".details-overview");
+  const contextPanel = page.getByRole("region", { name: "Playback sources" });
+  const cast = page.getByRole("region", { name: "Cast" });
+  await expect(artwork).toBeVisible();
+  await expect(artwork.locator("img")).toHaveAttribute("src", "https://fixtures.rivune.test/series.svg");
+  await expect(page.locator(".series-browser")).toHaveCount(0);
+  await expect(page.locator(".details-utility-grid")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Back.*Episodes/ })).toBeVisible();
+  await expect(contextPanel.getByRole("radio", { name: /Fixture 1080p/ })).toBeVisible();
+  await expect(cast).toBeVisible();
+  await expect(cast.getByText("Avery Stone")).toBeVisible();
+  await expect(cast.getByText("Commander Ilya Voss")).toBeVisible();
+  const desktopArtwork = await artwork.boundingBox();
+  const desktopPrimary = await primary.boundingBox();
+  const desktopPanel = await contextPanel.boundingBox();
+  expect(desktopArtwork).not.toBeNull();
+  expect(desktopPrimary).not.toBeNull();
+  expect(desktopPanel).not.toBeNull();
+  expect(desktopArtwork!.width / desktopArtwork!.height).toBeCloseTo(2 / 3, 1);
+  expect(desktopArtwork!.width).toBeGreaterThanOrEqual(200);
+  expect(desktopPanel!.x - (desktopPrimary!.x + desktopPrimary!.width)).toBeGreaterThanOrEqual(55);
+  const desktopOverview = await overview.boundingBox();
+  expect(desktopOverview).not.toBeNull();
+  expect(desktopOverview!.width).toBeGreaterThanOrEqual(370);
+  const desktopCast = await cast.boundingBox();
+  expect(desktopCast).not.toBeNull();
+  expect(desktopCast!.y).toBeGreaterThan(desktopArtwork!.y + desktopArtwork!.height);
+  const desktopPage = await page.evaluate(() => ({ scrollHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight }));
+  expect(desktopPage.scrollHeight).toBeLessThanOrEqual(desktopPage.viewportHeight + 1);
+
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  const wideLayout = await page.locator(".details-hero__inner").boundingBox();
+  const wideArtwork = await artwork.boundingBox();
+  const widePrimary = await primary.boundingBox();
+  const wideOverview = await overview.boundingBox();
+  const widePanel = await contextPanel.boundingBox();
+  expect(wideLayout).not.toBeNull();
+  expect(wideArtwork).not.toBeNull();
+  expect(widePrimary).not.toBeNull();
+  expect(wideOverview).not.toBeNull();
+  expect(widePanel).not.toBeNull();
+  expect(wideLayout!.width).toBeGreaterThan(1500);
+  expect(wideArtwork!.width).toBeGreaterThanOrEqual(220);
+  expect(wideOverview!.width).toBeGreaterThanOrEqual(600);
+  expect(widePanel!.x - (widePrimary!.x + widePrimary!.width)).toBeGreaterThanOrEqual(75);
+  const widePage = await page.evaluate(() => ({ scrollHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight }));
+  expect(widePage.scrollHeight).toBeLessThanOrEqual(widePage.viewportHeight + 1);
+  await expect(cast).toBeVisible();
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const compactDesktopPrimary = await primary.boundingBox();
+  const compactDesktopPanel = await contextPanel.boundingBox();
+  expect(compactDesktopPrimary).not.toBeNull();
+  expect(compactDesktopPanel).not.toBeNull();
+  expect(compactDesktopPanel!.x).toBeGreaterThan(compactDesktopPrimary!.x + compactDesktopPrimary!.width - 1);
+  const compactDesktopPage = await page.evaluate(() => ({ scrollHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight }));
+  expect(compactDesktopPage.scrollHeight).toBeLessThanOrEqual(compactDesktopPage.viewportHeight + 1);
+  await expect(cast).toBeHidden();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(artwork).toBeVisible();
+  const mobileArtwork = await artwork.boundingBox();
+  const mobilePrimary = await primary.boundingBox();
+  const mobilePanel = await contextPanel.boundingBox();
+  expect(mobileArtwork).not.toBeNull();
+  expect(mobilePrimary).not.toBeNull();
+  expect(mobilePanel).not.toBeNull();
+  expect(mobileArtwork!.width / mobileArtwork!.height).toBeCloseTo(2 / 3, 1);
+  expect(mobilePanel!.y).toBeGreaterThanOrEqual(mobilePrimary!.y + mobilePrimary!.height - 1);
+});
+
+test("continue-watching episode returns to its dedicated season panel", async ({ page, rivune }) => {
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
   await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1\/episode\/1$/);
-  await expect(page.getByRole("heading", { name: /Signal Horizon.*S01E01.*First Light/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  await expect(page.locator(".series-browser")).toHaveCount(0);
 
-  await page.getByRole("button", { name: "View series & season" }).click();
+  await page.getByRole("button", { name: /Back.*Episodes/ }).click();
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1$/);
   await expect(page.getByRole("region", { name: "Playback sources" })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: /^Season 1\b/ })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("button", { name: /First Light/ }).first()).toBeVisible();
@@ -158,13 +241,11 @@ test("resolved artwork remains visible while revisiting metadata is revalidated"
   } finally {
     releaseRequest.resolve();
   }
-  await expect(page.getByRole("heading", { name: /Signal Horizon.*S01E01.*First Light/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
 });
 
 test("series guide switches to a selected TVDB episode order", async ({ page, rivune }) => {
-  await page.goto("/");
-  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await page.getByRole("button", { name: "View series & season" }).click();
+  await page.goto("/media/series/tt9000/season/1");
 
   const order = page.getByRole("combobox", { name: "Episode order" });
   await expect(order).toBeVisible();
@@ -190,9 +271,7 @@ test("series guide switches to a selected TVDB episode order", async ({ page, ri
 
 test("season selector supports horizontal mouse dragging without changing the active season", async ({ page, rivune: _rivune }) => {
   await page.setViewportSize({ width: 1024, height: 768 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await page.getByRole("button", { name: "View series & season" }).click();
+  await page.goto("/media/series/tt9000/season/1");
 
   const seasons = page.locator(".season-tabs");
   const activeSeason = page.getByRole("tab", { name: /^Season 1\b/ });
@@ -219,9 +298,7 @@ test("season selector supports horizontal mouse dragging without changing the ac
 test("long seasons use a one-column bounded episode scroller", async ({ page, rivune }) => {
   rivune.setSeason("season-1", longSeason(200));
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await page.getByRole("button", { name: "View series & season" }).click();
+  await page.goto("/media/series/tt9000/season/1");
 
   const list = page.locator(".episode-list");
   const rows = list.locator(":scope > div");
@@ -229,26 +306,29 @@ test("long seasons use a one-column bounded episode scroller", async ({ page, ri
   const externalPages = page.getByRole("group", { name: "External title pages" });
   await expect(externalPages).toBeVisible();
   await expect(externalPages.getByRole("link")).toHaveCount(3);
-  await expect(externalPages.getByRole("link", { name: /Open IMDb title page/ })).toHaveAttribute("href", "https://www.imdb.com/title/tt900001/");
-  await expect(externalPages.getByRole("link", { name: /Open TMDB title page/ })).toHaveAttribute("href", "https://www.themoviedb.org/tv/9000/season/1/episode/1");
+  await expect(externalPages.getByRole("link", { name: /Open IMDb title page/ })).toHaveAttribute("href", "https://www.imdb.com/title/tt9000/");
+  await expect(externalPages.getByRole("link", { name: /Open TMDB title page/ })).toHaveAttribute("href", "https://www.themoviedb.org/tv/9000");
   await expect(externalPages.getByRole("link", { name: /Open TVDB title page/ })).toHaveAttribute("href", "https://thetvdb.com/dereferrer/series/9900");
   await list.scrollIntoViewIfNeeded();
   const metrics = await list.evaluate((element) => {
-    const listRect = element.getBoundingClientRect();
     const rowRects = Array.from(element.children, (row) => row.getBoundingClientRect());
-    const fullyVisibleRows = rowRects.filter((row) => row.top >= listRect.top && row.bottom <= listRect.bottom).length;
+    const rowGap = Number.parseFloat(getComputedStyle(element).rowGap) || 0;
+    const firstRowHeight = rowRects[0]?.height ?? 0;
+    const visibleRowCapacity = firstRowHeight > 0 ? Math.floor((element.clientHeight + rowGap) / (firstRowHeight + rowGap)) : 0;
     return {
       clientHeight: element.clientHeight,
       scrollHeight: element.scrollHeight,
-      fullyVisibleRows,
+      visibleRowCapacity,
       firstRowX: rowRects[0]?.x,
       secondRowX: rowRects[1]?.x,
     };
   });
   expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+  const pageMetrics = await page.evaluate(() => ({ scrollHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight }));
+  expect(pageMetrics.scrollHeight).toBeLessThanOrEqual(pageMetrics.viewportHeight + 1);
   expect(metrics.clientHeight).toBeLessThanOrEqual(744);
-  expect(metrics.fullyVisibleRows).toBeGreaterThanOrEqual(5);
-  expect(metrics.fullyVisibleRows).toBeLessThanOrEqual(6);
+  expect(metrics.visibleRowCapacity).toBeGreaterThanOrEqual(5);
+  expect(metrics.visibleRowCapacity).toBeLessThanOrEqual(6);
   expect(Math.abs(metrics.firstRowX! - metrics.secondRowX!)).toBeLessThan(1);
 
   await list.evaluate((element) => { element.scrollTop = element.scrollHeight; });
@@ -269,9 +349,10 @@ test("calendar episode opens the matching series season and episode", async ({ p
   await page.getByRole("button", { name: "Open Moonrise details" }).first().click();
   await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/2\/episode\/1$/);
 
-  await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("heading", { name: /Signal Horizon.*S02E01.*Moonrise/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Moonrise/ }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Moonrise" })).toBeVisible();
+  await expect(page.locator(".details-meta").getByText("Season 2 · Episode 1")).toBeVisible();
+  await expect(page.locator(".series-browser")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Back.*Episodes/ })).toBeVisible();
   await rivune.waitForRequest("/api/v1/metadata/seasons/season-2", "GET");
   await expect.poll(() => rivune.matching("/api/v1/playback/sources", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ mediaType: "episode", resourceId: "tt9000:2:1" }));
 
@@ -324,10 +405,16 @@ test("calendar TVDB episode opens the mapped season containing its canonical epi
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Calendar" }).click();
   await page.getByRole("button", { name: "Open Episode 241 details" }).click();
 
+  await expect(page.getByRole("heading", { name: "Episode 241" })).toBeVisible();
+  await expect(page.locator(".details-meta").getByText("Season 9 · Episode 241")).toBeVisible();
+  await expect(page.locator(".series-browser")).toHaveCount(0);
+  expect(requestedSeasons).toEqual(["official-season-2", "official-season-9"]);
+
+  await page.getByRole("button", { name: /Back.*Episodes/ }).click();
+  await expect(page).toHaveURL(/\/media\/series\/tvdb:331147\/season\/9$/);
   await expect(page.getByRole("tab", { name: /Season 9/ })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "false");
-  await expect(page.getByRole("heading", { name: /Demain nous appartient.*S09E241.*Episode 241/ })).toBeVisible();
-  expect(requestedSeasons).toEqual(["official-season-2", "official-season-9"]);
+  expect(requestedSeasons).toEqual(["official-season-2", "official-season-9", "official-season-9"]);
 });
 
 test("home honors a collection's landscape folder cover shape", async ({ page, rivune: _rivune }) => {

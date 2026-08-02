@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "查看剧集和季信息",
   "media.series.guideEyebrow": "剧集指南",
   "media.series.episodesTitle": "剧集",
+  "media.cast.title": "演员阵容",
   "media.season.error.episodesLoadFailed": "无法加载剧集。",
   "media.season.error.unavailableTitle": "本季不可用",
   "media.season.specials": "特别篇",

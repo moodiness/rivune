@@ -7,7 +7,7 @@ import { translate as t } from "./i18n";
 import { cachedMediaItem, cacheMediaItem } from "./metadataCache";
 import { notifyError, notifyErrorMessage, notifySuccess } from "./notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "./titleProviders";
-import type { EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
+import type { CastMember, EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
 
 type ExternalTitleLink = {
   externalID: string;
@@ -19,6 +19,32 @@ type ExternalTitleLink = {
 function record(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return Object.fromEntries(Object.entries(value));
+}
+
+function visibleCast(value: unknown): CastMember[] {
+  if (!Array.isArray(value)) return [];
+  const members: CastMember[] = [];
+  const seen = new Set<string>();
+  for (const candidate of value) {
+    const person = record(candidate);
+    if (!person) continue;
+    const id = typeof person.id === "string" ? person.id.trim() : "";
+    const name = typeof person.name === "string" ? person.name.trim() : "";
+    if (!id || !name || seen.has(id)) continue;
+    members.push({
+      id,
+      name,
+      ...(typeof person.character === "string" && person.character.trim() ? { character: person.character.trim() } : {}),
+      ...(typeof person.profileUrl === "string" && person.profileUrl.trim() ? { profileUrl: person.profileUrl.trim() } : {}),
+    });
+    seen.add(id);
+    if (members.length === 5) break;
+  }
+  return members;
+}
+
+function castInitials(name: string): string {
+  return name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
 }
 
 function trailerLanguageBadge(trailer: TrailerMetadata): string {
@@ -235,7 +261,40 @@ function episodeItem(series: SeriesMetadata, episode: EpisodeMetadata, fallback:
       continueSeasonNumber: episode.seasonNumber,
       continueEpisodeNumber: episode.episodeNumber,
       continueEpisodeId: episode.id,
-      openSeriesBrowser: false,
+    },
+  };
+}
+
+function seriesItem(series: SeriesMetadata, fallback: MediaItem, episode: EpisodeMetadata | undefined): MediaItem {
+  const canonicalSeriesResourceID = series.externalIds.imdb
+    || (series.mappingProvider === "tvdb" && series.externalIds.tvdb ? `tvdb:${series.externalIds.tvdb}` : "")
+    || (series.externalIds.tmdb ? `tmdb:${series.externalIds.tmdb}` : "")
+    || (series.externalIds.tvdb ? `tvdb:${series.externalIds.tvdb}` : "")
+    || series.id;
+  const routeSeriesResourceID = typeof fallback.raw?.routeSeriesResourceId === "string"
+    ? fallback.raw.routeSeriesResourceId
+    : canonicalSeriesResourceID;
+  return {
+    id: routeSeriesResourceID,
+    titleId: series.id,
+    mediaType: "series",
+    title: series.name,
+    posterUrl: series.posterUrl,
+    backgroundUrl: series.backdropUrl,
+    logoUrl: series.logoUrl,
+    description: series.overview,
+    releaseInfo: series.firstAirDate,
+    released: series.firstAirDate,
+    externalIds: series.externalIds,
+    raw: {
+      ...fallback.raw,
+      routeSeriesResourceId: routeSeriesResourceID,
+      continueSeriesId: series.id,
+      continueSeasonId: episode?.seasonId ?? fallback.raw?.continueSeasonId,
+      continueSeasonNumber: episode?.seasonNumber ?? fallback.raw?.continueSeasonNumber,
+      continueEpisodeNumber: undefined,
+      continueEpisodeId: undefined,
+      startFromBeginning: undefined,
     },
   };
 }
@@ -245,8 +304,7 @@ function episodeIsUpcoming(episode: EpisodeMetadata): boolean {
   const airDate = new Date(`${episode.airDate}T23:59:59Z`);
   return Number.isFinite(airDate.getTime()) && airDate.getTime() > Date.now();
 }
-
-export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }: { item: MediaItem; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenEpisode?: (item: MediaItem) => void }) {
+export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, onOpenSeason }: { item: MediaItem; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenMedia?: (item: MediaItem) => void; onOpenSeason?: (item: MediaItem) => void }) {
   const metadataLocale = api.metadataLocale();
   const [details, setDetails] = useState(() => cachedMediaItem(item, metadataLocale));
   const [playing, setPlaying] = useState(false);
@@ -271,8 +329,8 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const [preparationLoading, setPreparationLoading] = useState(false);
   const [preparationError, setPreparationError] = useState("");
   const [series, setSeries] = useState<SeriesMetadata>();
-  const [seriesVisible, setSeriesVisible] = useState(item.mediaType === "series" || item.raw?.openSeriesBrowser === true);
-  const [seriesLoading, setSeriesLoading] = useState(item.mediaType === "series" || item.raw?.openSeriesBrowser === true);
+  const seriesContextEnabled = item.mediaType === "series" || item.mediaType === "episode";
+  const [seriesLoading, setSeriesLoading] = useState(seriesContextEnabled);
   const [seriesError, setSeriesError] = useState("");
   const [episodeOrderLoading, setEpisodeOrderLoading] = useState(false);
   const [episodeOrderError, setEpisodeOrderError] = useState("");
@@ -300,10 +358,11 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const continueEpisodeID = typeof item.raw?.continueEpisodeId === "string" ? item.raw.continueEpisodeId : "";
   const continueSeasonNumber = typeof item.raw?.continueSeasonNumber === "number" ? item.raw.continueSeasonNumber : undefined;
   const continueEpisodeNumber = typeof item.raw?.continueEpisodeNumber === "number" ? item.raw.continueEpisodeNumber : undefined;
-  const trailerSeriesContext = item.mediaType === "series" || (item.mediaType === "episode" && seriesVisible);
-  const trailerTitleID = item.mediaType === "episode" && seriesVisible ? series?.id ?? continueSeriesID : item.titleId ?? item.id;
+  const libraryTitleID = item.mediaType === "episode" ? series?.id || continueSeriesID || undefined : titleID ?? item.titleId;
+  const trailerSeriesContext = item.mediaType === "series" || (item.mediaType === "episode" && seriesContextEnabled);
+  const trailerTitleID = item.mediaType === "episode" && seriesContextEnabled ? series?.id ?? continueSeriesID : item.titleId ?? item.id;
   const selectedTrailerSeason = trailerSeriesContext ? series?.seasons.find((candidate) => candidate.id === seasonID) : undefined;
-  const trailersAvailableForContext = item.mediaType === "movie" || item.mediaType === "series" || (item.mediaType === "episode" && seriesVisible && Boolean(series && selectedTrailerSeason));
+  const trailersAvailableForContext = item.mediaType === "movie" || item.mediaType === "series" || (item.mediaType === "episode" && seriesContextEnabled && Boolean(series && selectedTrailerSeason));
   const trailerItemKey = `${trailerSeriesContext ? "series" : item.mediaType}:${trailerTitleID}:${selectedTrailerSeason ? `season:${selectedTrailerSeason.seasonNumber}` : "title"}`;
   trailerItemRef.current = trailerItemKey;
   const activeTrailers = trailerOwnerKey === trailerItemKey ? trailers : [];
@@ -319,16 +378,13 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const fromContinue = item.raw?.continueReason === "resume" || item.raw?.continueReason === "next_episode";
   const autoplayNextEpisode = document.documentElement.dataset.autoplayNextEpisode !== "false";
   const awaitingRestartEpisode = startFromBeginning && item.mediaType === "episode" && Boolean(continueSeriesID) && !selectedEpisode && !seriesError;
-  const canSelectStream = item.mediaType !== "series" && !(fromContinue && seriesVisible) && !awaitingRestartEpisode;
+  const canSelectStream = item.mediaType !== "series" && !awaitingRestartEpisode;
 
   useEffect(() => {
     if (!trailerStageVisible || !trailerRevealPendingRef.current) return;
     trailerRevealPendingRef.current = false;
     const frame = window.requestAnimationFrame(() => {
-      trailerStageRef.current?.scrollIntoView({
-        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-        block: "start",
-      });
+      trailerStageRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [trailerStageVisible]);
@@ -380,11 +436,20 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
     }).catch((cause) => {
       if (active) setMetaError(cause instanceof APIError ? cause.message : t("media.details.error.additionalDetailsLoadFailed"));
     }).finally(() => { if (active) setMetaLoading(false); });
-    if (item.titleId) {
-      void api.library().then((library) => { if (active) setSaved(library.items.some((entry) => entry.titleId === item.titleId)); }).catch(() => undefined);
-    }
     return () => { active = false; };
   }, [item.id, item.mediaType, item.titleId]);
+
+  useEffect(() => {
+    let active = true;
+    if (!libraryTitleID) {
+      setSaved(false);
+      return;
+    }
+    void api.library().then((library) => {
+      if (active) setSaved(library.items.some((entry) => entry.titleId === libraryTitleID));
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [libraryTitleID]);
 
   useEffect(() => {
     let active = true;
@@ -421,7 +486,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
 
   useEffect(() => {
     let active = true;
-    if (!seriesVisible && !(item.mediaType === "episode" && continueSeriesID)) {
+    if (!seriesContextEnabled && !(item.mediaType === "episode" && continueSeriesID)) {
       setSeriesLoading(false);
       return;
     }
@@ -499,7 +564,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
       if (active) setSeriesError(notifyError(cause, t("media.series.error.loadFailed"), t("media.series.error.unavailableTitle")));
     }).finally(() => { if (active) setSeriesLoading(false); });
     return () => { active = false; };
-  }, [continueEpisodeID, continueSeasonID, continueSeasonNumber, continueSeriesID, item.id, item.mediaType, item.releaseInfo, item.released, item.titleId, routeSeriesResourceID, seriesVisible]);
+  }, [continueEpisodeID, continueSeasonID, continueSeasonNumber, continueSeriesID, item.id, item.mediaType, item.releaseInfo, item.released, item.titleId, routeSeriesResourceID, seriesContextEnabled]);
 
   useEffect(() => {
     let active = true;
@@ -646,17 +711,18 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   }, [preparationStartSeconds, selectedStream]);
 
   async function toggleLibrary() {
+    if (item.mediaType === "episode" && !libraryTitleID) return;
     setSaving(true);
     setActionError("");
     const removing = saved;
     try {
-      const resolvedTitleID = titleID ?? await resolveMediaTitle(details);
-      if (!titleID) setTitleID(resolvedTitleID);
+      const resolvedTitleID = libraryTitleID ?? await resolveMediaTitle(details);
+      if (item.mediaType !== "episode" && !titleID) setTitleID(resolvedTitleID);
       if (saved) await api.removeLibrary(resolvedTitleID);
       else await api.addLibrary(resolvedTitleID);
       setSaved(!removing);
       notifySuccess(
-        t(removing ? "library.notice.removed" : "library.notice.added", { title: details.title }),
+        t(removing ? "library.notice.removed" : "library.notice.added", { title: item.mediaType === "episode" ? series?.name ?? details.title : details.title }),
         t(removing ? "library.notice.removedTitle" : "library.notice.addedTitle"),
       );
     } catch (cause) {
@@ -681,7 +747,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
     setTrailerMessage("");
     setTrailerUnavailable(false);
     try {
-      const resolvedTitleID = item.mediaType === "episode" && seriesVisible && trailerTitleID ? trailerTitleID : await resolveMediaTitle(item);
+      const resolvedTitleID = item.mediaType === "episode" && seriesContextEnabled && trailerTitleID ? trailerTitleID : await resolveMediaTitle(item);
       if (!requestIsCurrent()) return;
       setTitleID(resolvedTitleID);
       trailerRequested = true;
@@ -871,7 +937,9 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
     const value = record(genre);
     return typeof value?.name === "string" ? value.name : "";
   }).filter(Boolean).slice(0, 4) : [];
+  const cast = visibleCast(details.raw?.cast);
   const backdrop = details.backgroundUrl || details.posterUrl;
+  const heroArtwork = details.posterUrl || selectedEpisode?.stillUrl || details.backgroundUrl;
   const trailerURL = activeTrailer ? (() => {
     const params = new URLSearchParams({ autoplay: "1" });
     if (activeTrailer.captionPreference) {
@@ -896,6 +964,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const episodeTitle = selectedEpisode?.name || details.title || t("media.episode.fallbackTitle", { number: item.episodeNumber ?? "" });
   const episodeSeasonNumber = selectedEpisode?.seasonNumber ?? item.seasonNumber;
   const episodeNumber = selectedEpisode?.episodeNumber ?? item.episodeNumber;
+  const episodeRuntimeMinutes = selectedEpisode?.runtimeMinutes;
   const externalTitleLinks: ExternalTitleLink[] = (item.mediaType === "movie" || item.mediaType === "series" || item.mediaType === "episode")
     ? TITLE_ID_PROVIDERS.flatMap<ExternalTitleLink>((provider) => {
       if (item.mediaType === "episode" || selectedEpisode) {
@@ -914,90 +983,252 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
     : [];
 
   return (
-    <article className="details-page page-enter" aria-labelledby="media-details-title">
+    <article className="details-page details-page--immersive page-enter" aria-labelledby="media-details-title">
       <button type="button" className="details-page__back" onClick={closeDetails} autoFocus>
         <ArrowLeft size={18} />
         <span>{t("media.details.backToBrowse")}</span>
       </button>
 
-      <section className="details-hero" style={backdrop ? { backgroundImage: `url(${backdrop})` } : undefined}>
+      <section className={`details-hero${item.mediaType === "episode" ? " details-hero--episode" : ""}`} style={backdrop ? { backgroundImage: `url(${backdrop})` } : undefined}>
         <div className="details-hero__shade" aria-hidden="true" />
         <div className="details-hero__glow" aria-hidden="true" />
         <div className="details-hero__inner">
-          <aside className="details-artwork" aria-hidden="true">
-            {details.posterUrl ? <img src={details.posterUrl} alt="" /> : <span>{details.title.slice(0, 2).toUpperCase()}</span>}
-          </aside>
+          <div className="details-left">
+          <div className="details-primary">
+            <aside className="details-artwork" aria-hidden="true">
+              {heroArtwork ? <img src={heroArtwork} alt="" loading="eager" fetchPriority="high" /> : <span>{details.title.slice(0, 2).toUpperCase()}</span>}
+              {item.mediaType === "episode" && episodeSeasonNumber !== undefined && episodeNumber !== undefined && <small className="details-artwork__episode-code">S{String(episodeSeasonNumber).padStart(2, "0")} · E{String(episodeNumber).padStart(2, "0")}</small>}
+            </aside>
 
-          <div className="details-overview">
-            {item.mediaType === "episode"
-              ? <>
-                {episodeSeriesName && <span className="details-series-name">{episodeSeriesName}</span>}
-                <h1 id="media-details-title" aria-label={details.title}>{episodeTitle}</h1>
-              </>
-              : details.logoUrl
-                ? <><img className="details-logo" src={details.logoUrl} alt="" /><h1 id="media-details-title" className="visually-hidden">{details.title}</h1></>
-                : <h1 id="media-details-title">{details.title}</h1>}
+            <div className="details-overview">
+              {item.mediaType === "episode"
+                ? <>
+                  {episodeSeriesName && <span className="details-series-name">{episodeSeriesName}</span>}
+                  <h1 id="media-details-title">{episodeTitle}</h1>
+                </>
+                : details.logoUrl
+                  ? <><img className="details-logo" src={details.logoUrl} alt="" /><h1 id="media-details-title" className="visually-hidden">{details.title}</h1></>
+                  : <h1 id="media-details-title">{details.title}</h1>}
 
-            <div className="details-meta">
-              {episodeSeasonNumber !== undefined && episodeNumber !== undefined && <span>{t("media.episode.seasonEpisode", { season: episodeSeasonNumber, episode: episodeNumber })}</span>}
-              {details.releaseInfo && details.releaseInfo !== typeLabel && <span>{details.releaseInfo}</span>}
-              {details.voteAverage !== undefined && <span className="rating"><Star size={14} fill="currentColor" /> {details.voteAverage.toFixed(1)}</span>}
-              <span>{typeLabel}</span>
-              {genres.map((genre) => <span key={genre}>{genre}</span>)}
-            </div>
+              <div className="details-meta">
+                {episodeSeasonNumber !== undefined && episodeNumber !== undefined && <span>{t("media.episode.seasonEpisode", { season: episodeSeasonNumber, episode: episodeNumber })}</span>}
+                {details.releaseInfo && details.releaseInfo !== typeLabel && <span>{details.releaseInfo}</span>}
+                {episodeRuntimeMinutes !== undefined && <span>{t("common.time.minutesShort", { minutes: episodeRuntimeMinutes })}</span>}
+                {details.voteAverage !== undefined && <span className="rating"><Star size={14} fill="currentColor" /> {details.voteAverage.toFixed(1)}</span>}
+                <span>{typeLabel}</span>
+                {genres.map((genre) => <span key={genre}>{genre}</span>)}
+              </div>
 
-            {(externalTitleLinks.length > 0 || Boolean(details.sources?.length)) && <div className="details-title-links">
-              {externalTitleLinks.length > 0 && <div className="details-provider-badges" role="group" aria-label={t("media.details.externalPagesLabel")}>
-                {externalTitleLinks.map(({ externalID, provider, mediaType, episode }) => {
-                  const label = t("media.details.openExternalPage", { provider: provider.label, id: externalID });
-                  return <a key={provider.key} className={`details-provider-badge details-provider-badge--${provider.key}`} href={titleProviderURL(provider.key, externalID, mediaType, episode)} target="_blank" rel="noreferrer" aria-label={label} title={label}>
-                    <span className="details-provider-badge__brand">{provider.label}</span>
-                    <ExternalLink size={11} aria-hidden="true" />
-                  </a>;
-                })}
+              {(externalTitleLinks.length > 0 || Boolean(details.sources?.length)) && <div className="details-title-links">
+                {externalTitleLinks.length > 0 && <div className="details-provider-badges" role="group" aria-label={t("media.details.externalPagesLabel")}>
+                  {externalTitleLinks.map(({ externalID, provider, mediaType, episode }) => {
+                    const label = t("media.details.openExternalPage", { provider: provider.label, id: externalID });
+                    return <a key={provider.key} className={`details-provider-badge details-provider-badge--${provider.key}`} href={titleProviderURL(provider.key, externalID, mediaType, episode)} target="_blank" rel="noreferrer" aria-label={label} title={label}>
+                      <span className="details-provider-badge__brand">{provider.label}</span>
+                      <ExternalLink size={11} aria-hidden="true" />
+                    </a>;
+                  })}
+                </div>}
+                {details.sources && details.sources.length > 0 && <div className="details-sources"><span>{t("media.details.availableFrom")}</span><div>{details.sources.map((source) => <i key={source.id}>{source.title}</i>)}</div></div>}
               </div>}
-              {details.sources && details.sources.length > 0 && <div className="details-sources"><span>{t("media.details.availableFrom")}</span><div>{details.sources.map((source) => <i key={source.id}>{source.title}</i>)}</div></div>}
-            </div>}
 
-            {metaLoading && !details.description
-              ? <div className="details-loading" role="status"><LoaderCircle className="spin" size={18} /> {t("media.details.loading")}</div>
-              : <p className="details-description">{details.description || t("media.details.noSynopsis")}</p>}
-            {metaError && <Notice tone="info">{metaError} {t("media.details.partialInformationShown")}</Notice>}
+              {metaLoading && !details.description
+                ? <div className="details-loading" role="status"><LoaderCircle className="spin" size={18} /> {t("media.details.loading")}</div>
+                : <p className="details-description">{details.description || t("media.details.noSynopsis")}</p>}
+              {metaError && <Notice tone="info">{metaError} {t("media.details.partialInformationShown")}</Notice>}
 
-            <div className="details-actions">
-              {canSelectStream && <Button className="details-actions__play" disabled={!selectedStream || !preparation} loading={preparationLoading} onClick={() => setPlaying(true)}>
-                <Play size={19} fill="currentColor" />
-                {t(item.mediaType === "episode" ? "media.details.playEpisode" : "media.details.playSelectedStream")}
-              </Button>}
-              <Button variant="secondary" loading={saving} onClick={() => void toggleLibrary()}>
-                {saved ? <Check size={19} /> : <Bookmark size={19} />}
-                {t(saved ? "library.actions.inLibrary" : "library.actions.add")}
-              </Button>
-              {item.mediaType === "movie" && !fromContinue && <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
-                {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
-                {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
-              </Button>}
-              {trailersAvailableForContext && <Button type="button" variant="secondary" disabled={Boolean(activeTrailer)} loading={activeTrailerLoading} aria-label={t(activeTrailerLoading ? "media.trailers.loading" : "media.trailers.title")} aria-busy={activeTrailerLoading} aria-controls="details-trailer" aria-expanded={Boolean(activeTrailer)} onClick={() => void showTrailer()}>
-                <Clapperboard size={19} />
-                {t("media.trailers.title")}
-              </Button>}
+              <div className="details-actions">
+                {canSelectStream && <Button className="details-actions__play" disabled={!selectedStream || !preparation} loading={preparationLoading} onClick={() => setPlaying(true)}>
+                  <Play size={19} fill="currentColor" />
+                  {t(item.mediaType === "episode" ? "media.details.playEpisode" : "media.details.playSelectedStream")}
+                </Button>}
+                <Button variant="secondary" loading={saving} disabled={item.mediaType === "episode" && !libraryTitleID} onClick={() => void toggleLibrary()}>
+                  {saved ? <Check size={19} /> : <Bookmark size={19} />}
+                  {t(saved ? "library.actions.inLibrary" : "library.actions.add")}
+                </Button>
+                {item.mediaType === "movie" && !fromContinue && <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
+                  {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
+                  {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
+                </Button>}
+                {trailersAvailableForContext && <Button type="button" variant="secondary" disabled={Boolean(activeTrailer)} loading={activeTrailerLoading} aria-label={t(activeTrailerLoading ? "media.trailers.loading" : "media.trailers.title")} aria-busy={activeTrailerLoading} aria-controls="details-trailer" aria-expanded={Boolean(activeTrailer)} onClick={() => void showTrailer()}>
+                  <Clapperboard size={19} />
+                  {t("media.trailers.title")}
+                </Button>}
+              </div>
+
+              {fromContinue && (item.mediaType === "movie" || item.mediaType === "episode") && <div className="details-context-actions">
+                <Button variant="ghost" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
+                  {titleProgress?.completed ? <EyeOff size={18} /> : <Eye size={18} />}
+                  {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
+                </Button>
+                {item.mediaType === "episode" && seriesLoading && <span className="details-context-loading" role="status"><LoaderCircle className="spin" size={15} /> {t("media.season.loading")}</span>}
+              </div>}
+              {actionError && <Notice>{actionError}</Notice>}
             </div>
-
-            {fromContinue && (item.mediaType === "movie" || item.mediaType === "episode") && <div className="details-context-actions">
-              <Button variant="ghost" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
-                {titleProgress?.completed ? <EyeOff size={18} /> : <Eye size={18} />}
-                {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
-              </Button>
-              {item.mediaType === "episode" && <Button variant="ghost" onClick={() => setSeriesVisible((visible) => !visible)}>
-                <ListVideo size={18} />
-                {t(seriesVisible ? "media.series.actions.hideGuide" : "media.series.actions.viewGuide")}
-              </Button>}
-            </div>}
           </div>
-        </div>
-      </section>
+            {cast.length > 0 && <section className="details-cast" aria-labelledby="details-cast-title">
+              <h2 id="details-cast-title">{t("media.cast.title")}</h2>
+              <div className="details-cast__list">
+                {cast.map((member) => <article className="details-cast-member" key={member.id}>
+                  <span className="details-cast-member__portrait">
+                    {member.profileUrl ? <img src={member.profileUrl} alt="" loading="lazy" /> : <span>{castInitials(member.name)}</span>}
+                  </span>
+                  <span className="details-cast-member__copy">
+                    <strong>{member.name}</strong>
+                    {member.character && <small>{member.character}</small>}
+                  </span>
+                </article>)}
+              </div>
+            </section>}
+          </div>
 
-      <div className="details-content">
+          <aside className="details-context-panel" role="region" aria-label={item.mediaType === "series" ? t("media.series.episodesTitle") : t("media.sources.sectionLabel")}>
+            {item.mediaType === "series"
+              ? <div className="series-browser">
+                <header className="details-context-panel__header">
+                  <span className="details-section-heading__icon"><ListVideo size={20} /></span>
+                  <div>
+                    <span>{t("media.series.guideEyebrow")}</span>
+                    <h2 id="details-episodes-title">{t("media.series.episodesTitle")}</h2>
+                  </div>
+                  {series && series.episodeOrders.length > 0 && <label className="series-order">
+                    <span>{t("media.episodeOrder.label")}</span>
+                    <span className="series-order__field">
+                      <select aria-label={t("media.episodeOrder.accessibleLabel")} value={series.selectedEpisodeOrderId ?? ""} disabled={episodeOrderLoading} onChange={(event) => void changeEpisodeOrder(event.target.value)}>
+                        <option value="">{t("media.episodeOrder.profileDefault")}</option>
+                        {series.episodeOrders.map((order) => <option key={order.id} value={order.id}>{episodeOrderLabel(order)}</option>)}
+                      </select>
+                      {episodeOrderLoading && <LoaderCircle className="spin" size={15} aria-hidden="true" />}
+                    </span>
+                  </label>}
+                </header>
+                {episodeOrderError && <Notice>{episodeOrderError}</Notice>}
+
+                {seriesLoading
+                  ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> {t("media.season.loading")}</div>
+                  : seriesError && !series
+                    ? <Notice>{seriesError}</Notice>
+                    : series && <>
+                      <HorizontalDragRow className="season-tabs" role="tablist" aria-label={t("media.season.tabsLabel")}>
+                        {[...series.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber).map((candidate) => (
+                          <button key={candidate.id} type="button" role="tab" aria-selected={seasonID === candidate.id} className={seasonID === candidate.id ? "is-active" : ""} onClick={() => {
+                            autoPlayNextRef.current = false;
+                            setSeasonID(candidate.id);
+                            onNavigateContext?.({ seasonID: candidate.id, seasonNumber: candidate.seasonNumber });
+                          }}>
+                            <span>{candidate.seasonNumber === 0 ? t("media.season.specials") : t("media.season.number", { number: candidate.seasonNumber })}</span>
+                            <small>{t(candidate.episodeCount === 1 ? "media.episode.count.one" : "media.episode.count.many", { count: candidate.episodeCount })}</small>
+                          </button>
+                        ))}
+                      </HorizontalDragRow>
+
+                      {seasonLoading
+                        ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> {t("media.episode.loading")}</div>
+                        : <>
+                          <div className="season-watch-state">
+                            <span>{t("media.season.watchedCount", { watched: watchedEpisodeCount, total: availableSeasonEpisodes.length })}</span>
+                            <button type="button" disabled={availableSeasonEpisodes.length === 0 || watchedBusy === seasonID} onClick={() => void toggleSeasonWatched()}>
+                              {watchedBusy === seasonID ? <LoaderCircle className="spin" size={15} /> : allSeasonWatched ? <EyeOff size={15} /> : <Eye size={15} />}
+                              {t(allSeasonWatched ? "media.season.watch.actions.markUnwatched" : "media.season.watch.actions.markWatched")}
+                            </button>
+                          </div>
+
+                          <div ref={episodeListRef} className="episode-list">
+                            {orderedEpisodes.map((episode) => {
+                              const progress = episodeProgress[episode.id];
+                              const upcoming = episodeIsUpcoming(episode);
+                              const progressPercent = progress && progress.durationSeconds > 0 ? Math.min(100, progress.positionSeconds / progress.durationSeconds * 100) : 0;
+                              return <div ref={selectedEpisode?.id === episode.id ? selectedEpisodeRowRef : undefined} key={episode.id} className={selectedEpisode?.id === episode.id ? "is-selected" : ""}>
+                                <button type="button" className="episode-main" disabled={upcoming} aria-current={selectedEpisode?.id === episode.id ? "true" : undefined} onClick={() => {
+                                  autoPlayNextRef.current = false;
+                                  onOpenMedia?.(episodeItem(series, episode, details));
+                                }}>
+                                  <span className="episode-number">{String(episode.episodeNumber).padStart(2, "0")}</span>
+                                  <span className="episode-visual">
+                                    {episode.stillUrl ? <img src={episode.stillUrl} alt="" loading="lazy" /> : <span className="episode-placeholder"><Play size={20} /></span>}
+                                    {progressPercent > 0 && <i className="episode-progress"><span style={{ width: `${progressPercent}%` }} /></i>}
+                                  </span>
+                                  <span className="episode-copy">
+                                    <strong>{episode.name || t("media.episode.fallbackTitle", { number: episode.episodeNumber })}</strong>
+                                    <small>{episode.runtimeMinutes ? t("common.time.minutesShort", { minutes: episode.runtimeMinutes }) : ""}{episode.airDate ? ` · ${episode.airDate}` : ""}{upcoming ? ` · ${t("media.episode.upcoming")}` : ""}</small>
+                                    <p>{episode.overview || t("media.episode.noSynopsis")}</p>
+                                  </span>
+                                  <span className="episode-play" aria-hidden="true"><Play size={16} fill="currentColor" /></span>
+                                </button>
+                                <button type="button" className={progress?.completed ? "episode-watched is-watched" : "episode-watched"} aria-label={t(progress?.completed ? "media.watch.actions.markNamedUnwatched" : "media.watch.actions.markNamedWatched", { title: episode.name || t("media.episode.fallbackTitle", { number: episode.episodeNumber }) })} title={t(progress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")} disabled={upcoming || watchedBusy === episode.id || watchedBusy === seasonID} onClick={() => void toggleEpisodeWatched(episode)}>
+                                  {watchedBusy === episode.id ? <LoaderCircle className="spin" size={17} /> : progress?.completed ? <Check size={17} /> : <Eye size={17} />}
+                                </button>
+                              </div>;
+                            })}
+                          </div>
+                        </>}
+                    </>}
+              </div>
+              : <section className="details-stream-selector" aria-labelledby="details-streams-title">
+                <header className="details-context-panel__header details-context-panel__header--streams">
+                  <div>
+                    <span>{episodeSeasonNumber !== undefined && episodeNumber !== undefined ? t("media.episode.seasonEpisode", { season: episodeSeasonNumber, episode: episodeNumber }) : t("media.sources.sectionLabel")}</span>
+                    <strong id="details-streams-title">{item.mediaType === "episode" ? episodeTitle : details.title}</strong>
+                  </div>
+                  {item.mediaType === "episode" && series && onOpenSeason && <button type="button" className="details-context-panel__back" onClick={() => onOpenSeason(seriesItem(series, details, selectedEpisode))}>
+                    <ArrowLeft size={15} />
+                    <span>{t("common.back")} · {t("media.series.episodesTitle")}</span>
+                  </button>}
+                </header>
+
+                <div className="details-stream-toolbar">
+                  <span>{streamsLoading ? t("common.status.loading") : t(availableStreams.length === 1 ? "media.sources.availableCount.one" : "media.sources.availableCount.many", { count: availableStreams.length })}</span>
+                  <IconButton label={t("media.sources.refresh")} disabled={streamsLoading} onClick={() => {
+                    autoPlayNextRef.current = false;
+                    setStreamRefreshVersion((version) => version + 1);
+                  }}>
+                    <RefreshCw size={17} className={streamsLoading ? "spin" : ""} />
+                  </IconButton>
+                </div>
+
+                <div className="details-context-panel__scroll">
+                  {streamsLoading
+                    ? <div className="details-stream-skeletons" role="status" aria-label={t("media.sources.loading")}>
+                      <span /><span /><span />
+                      <i className="visually-hidden">{t("media.sources.loading")}</i>
+                    </div>
+                    : streamsError && availableStreams.length === 0
+                      ? <div className="details-stream-feedback">
+                        <Notice>{streamsError}</Notice>
+                        <Button variant="ghost" onClick={() => setStreamRefreshVersion((version) => version + 1)}><RefreshCw size={16} /> {t("common.actions.retry")}</Button>
+                      </div>
+                      : availableStreams.length > 0
+                        ? <div className="details-stream-list" role="radiogroup" aria-label={t("media.sources.availableLabel")}>
+                          {availableStreams.map((option) => (
+                            <button key={option.sourceRef} type="button" role="radio" aria-checked={selectedStream?.sourceRef === option.sourceRef} className={selectedStream?.sourceRef === option.sourceRef ? "is-selected" : ""} onClick={() => {
+                              autoPlayNextRef.current = false;
+                              setSelectedStream(option);
+                            }}>
+                              <span>
+                                <strong>{option.name}</strong>
+                                {option.description && <small>{option.description}</small>}
+                                {!option.description && option.filename && <small>{option.filename}</small>}
+                                <small className="details-stream-list__technical">{[option.protocol, option.container].filter(Boolean).map((value) => value!.toUpperCase()).join(" · ")}</small>
+                              </span>
+                              {selectedStream?.sourceRef === option.sourceRef && <span className="details-stream-list__state">
+                                {preparationLoading
+                                  ? <LoaderCircle className="spin" size={17} />
+                                  : preparation
+                                    ? <><Check size={17} /><small>{preparationLabel(preparation)}</small></>
+                                    : preparationError
+                                      ? <small>{t("common.status.unavailable")}</small>
+                                      : <small>{t("common.status.selected")}</small>}
+                              </span>}
+                            </button>
+                          ))}
+                        </div>
+                        : <Notice>{t("media.sources.empty")}</Notice>}
+                  {preparationError && <Notice>{preparationError}</Notice>}
+                </div>
+              </section>}
+          </aside>
+        </div>
+
         {trailerStageVisible && <div ref={trailerStageRef} className="details-trailer-stage">
           {activeTrailer && <section id="details-trailer" className="details-trailer" aria-label={t("media.trailers.forTitle", { title: details.title })}>
             <header className="details-trailer__header">
@@ -1026,132 +1257,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
           </section>}
           {activeTrailerMessage && <div className="details-trailer-feedback"><Notice tone={trailerUnavailable ? "info" : "error"}>{activeTrailerMessage}</Notice></div>}
         </div>}
-        {seriesVisible && <section className="series-browser" aria-labelledby="details-episodes-title">
-          <header className="details-section-heading">
-            <span className="details-section-heading__icon"><ListVideo size={20} /></span>
-            <div>
-              <span>{t("media.series.guideEyebrow")}</span>
-              <h2 id="details-episodes-title">{t("media.series.episodesTitle")}</h2>
-            </div>
-            {series && series.episodeOrders.length > 0 && <label className="series-order">
-              <span>{t("media.episodeOrder.label")}</span>
-              <span className="series-order__field">
-                <select aria-label={t("media.episodeOrder.accessibleLabel")} value={series.selectedEpisodeOrderId ?? ""} disabled={episodeOrderLoading} onChange={(event) => void changeEpisodeOrder(event.target.value)}>
-                  <option value="">{t("media.episodeOrder.profileDefault")}</option>
-                  {series.episodeOrders.map((order) => <option key={order.id} value={order.id}>{episodeOrderLabel(order)}</option>)}
-                </select>
-                {episodeOrderLoading && <LoaderCircle className="spin" size={15} aria-hidden="true" />}
-              </span>
-            </label>}
-          </header>
-          {episodeOrderError && <Notice>{episodeOrderError}</Notice>}
-
-          {seriesLoading
-            ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> {t("media.season.loading")}</div>
-            : seriesError && !series
-              ? <Notice>{seriesError}</Notice>
-              : series && <>
-                <HorizontalDragRow className="season-tabs" role="tablist" aria-label={t("media.season.tabsLabel")}>
-                  {[...series.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber).map((candidate) => (
-                    <button key={candidate.id} type="button" role="tab" aria-selected={seasonID === candidate.id} className={seasonID === candidate.id ? "is-active" : ""} onClick={() => {
-                      autoPlayNextRef.current = false;
-                      setSeasonID(candidate.id);
-                      onNavigateContext?.({ seasonID: candidate.id, seasonNumber: candidate.seasonNumber });
-                    }}>
-                      <span>{candidate.seasonNumber === 0 ? t("media.season.specials") : t("media.season.number", { number: candidate.seasonNumber })}</span>
-                      <small>{t(candidate.episodeCount === 1 ? "media.episode.count.one" : "media.episode.count.many", { count: candidate.episodeCount })}</small>
-                    </button>
-                  ))}
-                </HorizontalDragRow>
-
-                {seasonLoading
-                  ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> {t("media.episode.loading")}</div>
-                  : <>
-                    <div className="season-watch-state">
-                      <span>{t("media.season.watchedCount", { watched: watchedEpisodeCount, total: availableSeasonEpisodes.length })}</span>
-                      <button type="button" disabled={availableSeasonEpisodes.length === 0 || watchedBusy === seasonID} onClick={() => void toggleSeasonWatched()}>
-                        {watchedBusy === seasonID ? <LoaderCircle className="spin" size={15} /> : allSeasonWatched ? <EyeOff size={15} /> : <Eye size={15} />}
-                        {t(allSeasonWatched ? "media.season.watch.actions.markUnwatched" : "media.season.watch.actions.markWatched")}
-                      </button>
-                    </div>
-
-                    <div ref={episodeListRef} className="episode-list">
-                      {orderedEpisodes.map((episode) => {
-                        const progress = episodeProgress[episode.id];
-                        const upcoming = episodeIsUpcoming(episode);
-                        const progressPercent = progress && progress.durationSeconds > 0 ? Math.min(100, progress.positionSeconds / progress.durationSeconds * 100) : 0;
-                        return <div ref={selectedEpisode?.id === episode.id ? selectedEpisodeRowRef : undefined} key={episode.id} className={selectedEpisode?.id === episode.id ? "is-selected" : ""}>
-                          <button type="button" className="episode-main" disabled={upcoming} aria-current={selectedEpisode?.id === episode.id ? "true" : undefined} onClick={() => {
-                            autoPlayNextRef.current = false;
-                            onOpenEpisode?.(episodeItem(series, episode, details));
-                          }}>
-                            <span className="episode-number">{String(episode.episodeNumber).padStart(2, "0")}</span>
-                            <span className="episode-visual">
-                              {episode.stillUrl ? <img src={episode.stillUrl} alt="" loading="lazy" /> : <span className="episode-placeholder"><Play size={20} /></span>}
-                              {progressPercent > 0 && <i className="episode-progress"><span style={{ width: `${progressPercent}%` }} /></i>}
-                            </span>
-                            <span className="episode-copy">
-                              <strong>{episode.name || t("media.episode.fallbackTitle", { number: episode.episodeNumber })}</strong>
-                              <small>{episode.runtimeMinutes ? t("common.time.minutesShort", { minutes: episode.runtimeMinutes }) : ""}{episode.airDate ? ` · ${episode.airDate}` : ""}{upcoming ? ` · ${t("media.episode.upcoming")}` : ""}</small>
-                              <p>{episode.overview || t("media.episode.noSynopsis")}</p>
-                            </span>
-                            <span className="episode-play" aria-hidden="true"><Play size={16} fill="currentColor" /></span>
-                          </button>
-                          <button type="button" className={progress?.completed ? "episode-watched is-watched" : "episode-watched"} aria-label={t(progress?.completed ? "media.watch.actions.markNamedUnwatched" : "media.watch.actions.markNamedWatched", { title: episode.name || t("media.episode.fallbackTitle", { number: episode.episodeNumber }) })} title={t(progress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")} disabled={upcoming || watchedBusy === episode.id || watchedBusy === seasonID} onClick={() => void toggleEpisodeWatched(episode)}>
-                            {watchedBusy === episode.id ? <LoaderCircle className="spin" size={17} /> : progress?.completed ? <Check size={17} /> : <Eye size={17} />}
-                          </button>
-                        </div>;
-                      })}
-                    </div>
-                  </>}
-              </>}
-        </section>}
-
-        {canSelectStream && <section className="details-utility-grid" aria-label={t("media.sources.sectionLabel")}>
-          <div className="details-panel details-stream-selector">
-            <div className="details-stream-toolbar">
-              <span>{streamsLoading ? t("common.status.loading") : t(availableStreams.length === 1 ? "media.sources.availableCount.one" : "media.sources.availableCount.many", { count: availableStreams.length })}</span>
-              <IconButton label={t("media.sources.refresh")} disabled={streamsLoading} onClick={() => {
-                autoPlayNextRef.current = false;
-                setStreamRefreshVersion((version) => version + 1);
-              }}>
-                <RefreshCw size={17} className={streamsLoading ? "spin" : ""} />
-              </IconButton>
-            </div>
-            {streamsLoading
-              ? <div className="details-stream-selector__loading"><LoaderCircle className="spin" size={18} /> {t("media.sources.loading")}</div>
-              : availableStreams.length > 0
-                ? <div className="details-stream-list" role="radiogroup" aria-label={t("media.sources.availableLabel")}>
-                  {availableStreams.map((option) => (
-                    <button key={option.sourceRef} type="button" role="radio" aria-checked={selectedStream?.sourceRef === option.sourceRef} className={selectedStream?.sourceRef === option.sourceRef ? "is-selected" : ""} onClick={() => {
-                      autoPlayNextRef.current = false;
-                      setSelectedStream(option);
-                    }}>
-                      <span>
-                        <strong>{option.name}</strong>
-                        {option.description && <small>{option.description}</small>}
-                        {!option.description && option.filename && <small>{option.filename}</small>}
-                      </span>
-                      {selectedStream?.sourceRef === option.sourceRef && <span className="details-stream-list__state">
-                        {preparationLoading
-                          ? <LoaderCircle className="spin" size={17} />
-                          : preparation
-                            ? <><Check size={17} /><small>{preparationLabel(preparation)}</small></>
-                            : preparationError
-                              ? <small>{t("common.status.unavailable")}</small>
-                              : <small>{t("common.status.selected")}</small>}
-                      </span>}
-                    </button>
-                  ))}
-                </div>
-                : <Notice>{streamsError || t("media.sources.empty")}</Notice>}
-            {preparationError && <Notice>{preparationError}</Notice>}
-          </div>
-
-        </section>}
-
-        {actionError && <Notice>{actionError}</Notice>}
-      </div>
+      </section>
     </article>
   );
 }

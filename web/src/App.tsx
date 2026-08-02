@@ -91,7 +91,6 @@ function cleanMediaRoute(): MediaRoute | null {
     if (episodeNumber !== undefined) item.episodeNumber = episodeNumber;
     item.raw = {
       ...item.raw,
-      openSeriesBrowser: stored ? item.raw?.openSeriesBrowser === true : true,
       routeSeriesResourceId: seriesResourceID,
       continueSeasonNumber: seasonNumber,
       continueEpisodeNumber: episodeNumber,
@@ -146,7 +145,6 @@ function legacyMediaRoute(routePath: string, query: string): MediaRoute | null {
   if (seriesID || seasonID || episodeID || seasonNumber !== undefined || episodeNumber !== undefined) {
     item.raw = {
       ...item.raw,
-      openSeriesBrowser: mediaType === "series" || item.raw?.openSeriesBrowser === true,
       continueSeriesId: seriesID || undefined,
       continueSeasonId: seasonID || undefined,
       continueSeasonNumber: seasonNumber !== undefined && Number.isInteger(seasonNumber) ? seasonNumber : undefined,
@@ -475,13 +473,39 @@ export default function App() {
 
   function updateMediaRoute(context: MediaRouteContext) {
     if (!mediaRoute) return;
-    window.history.replaceState(window.history.state, "", mediaRouteURL(mediaRoute.item, mediaRoute.origin, context));
+    const storedItem: MediaItem = {
+      ...mediaRoute.item,
+      seasonNumber: context.seasonNumber,
+      episodeNumber: context.episodeNumber,
+      raw: {
+        ...mediaRoute.item.raw,
+        continueSeasonId: context.seasonID,
+        continueSeasonNumber: context.seasonNumber,
+        continueEpisodeId: context.episodeID,
+        continueEpisodeNumber: context.episodeNumber,
+      },
+    };
+    window.history.replaceState({ ...window.history.state, rivuneMediaItem: storedItem }, "", mediaRouteURL(storedItem, mediaRoute.origin, context));
   }
 
-  function openEpisode(item: MediaItem) {
+  function openNestedMedia(item: MediaItem) {
     if (!mediaRoute) return;
     const nextRoute = { item, origin: mediaRoute.origin };
-    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item, rivuneOrigin: mediaRoute.origin }, "", mediaRouteURL(item, mediaRoute.origin));
+    const fromSeriesSeason = mediaRoute.item.mediaType === "series" && item.mediaType === "episode";
+    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item, rivuneOrigin: mediaRoute.origin, rivuneParentSeason: fromSeriesSeason }, "", mediaRouteURL(item, mediaRoute.origin));
+    mediaRouteRef.current = nextRoute;
+    setMediaRoute(nextRoute);
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }
+
+  function returnToSeason(item: MediaItem) {
+    if (!mediaRoute) return;
+    if (window.history.state?.rivuneParentSeason === true) {
+      window.history.back();
+      return;
+    }
+    const nextRoute = { item, origin: mediaRoute.origin };
+    window.history.replaceState({ ...window.history.state, rivuneMedia: true, rivuneMediaItem: item, rivuneOrigin: mediaRoute.origin, rivuneParentSeason: false }, "", mediaRouteURL(item, mediaRoute.origin));
     mediaRouteRef.current = nextRoute;
     setMediaRoute(nextRoute);
     window.scrollTo({ top: 0, behavior: "auto" });
@@ -521,6 +545,6 @@ export default function App() {
         {view === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} /> : view === "search" ? <SearchPage onOpenMedia={openMedia} /> : view === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : view === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
       </Suspense>
     </div>
-    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaRoute.item.mediaType}:${mediaRoute.item.id}:${mediaRoute.item.titleId ?? ""}`} item={mediaRoute.item} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenEpisode={openEpisode} /></Suspense>}
+    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaRoute.item.mediaType}:${mediaRoute.item.id}:${mediaRoute.item.titleId ?? ""}`} item={mediaRoute.item} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} /></Suspense>}
   </Shell>;
 }

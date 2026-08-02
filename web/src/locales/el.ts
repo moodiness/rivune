@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Προβολή σειράς και σεζόν",
   "media.series.guideEyebrow": "Οδηγός σειράς",
   "media.series.episodesTitle": "Επεισόδια",
+  "media.cast.title": "Διανομή",
   "media.season.error.episodesLoadFailed": "Δεν ήταν δυνατή η φόρτωση των επεισοδίων.",
   "media.season.error.unavailableTitle": "Η σεζόν δεν είναι διαθέσιμη",
   "media.season.specials": "Ειδικά επεισόδια",

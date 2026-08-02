@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "檢視影集與季度",
   "media.series.guideEyebrow": "影集導覽",
   "media.series.episodesTitle": "集數",
+  "media.cast.title": "演員陣容",
   "media.season.error.episodesLoadFailed": "無法載入集數。",
   "media.season.error.unavailableTitle": "季度無法使用",
   "media.season.specials": "特別篇",

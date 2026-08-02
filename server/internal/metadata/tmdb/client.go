@@ -34,20 +34,21 @@ type listResponse struct {
 }
 
 type movieResponse struct {
-	ID               int64   `json:"id"`
-	Title            string  `json:"title"`
-	OriginalTitle    string  `json:"original_title"`
-	OriginalLanguage string  `json:"original_language"`
-	Overview         string  `json:"overview"`
-	ReleaseDate      string  `json:"release_date"`
-	PosterPath       string  `json:"poster_path"`
-	BackdropPath     string  `json:"backdrop_path"`
-	Tagline          string  `json:"tagline"`
-	Runtime          int     `json:"runtime"`
-	Genres           []genre `json:"genres"`
-	VoteAverage      float64 `json:"vote_average"`
-	VoteCount        int     `json:"vote_count"`
-	IMDBID           string  `json:"imdb_id"`
+	ID               int64           `json:"id"`
+	Title            string          `json:"title"`
+	OriginalTitle    string          `json:"original_title"`
+	OriginalLanguage string          `json:"original_language"`
+	Overview         string          `json:"overview"`
+	ReleaseDate      string          `json:"release_date"`
+	PosterPath       string          `json:"poster_path"`
+	BackdropPath     string          `json:"backdrop_path"`
+	Tagline          string          `json:"tagline"`
+	Runtime          int             `json:"runtime"`
+	Genres           []genre         `json:"genres"`
+	VoteAverage      float64         `json:"vote_average"`
+	VoteCount        int             `json:"vote_count"`
+	IMDBID           string          `json:"imdb_id"`
+	Credits          creditsResponse `json:"credits"`
 }
 
 type seriesListResponse struct {
@@ -95,6 +96,23 @@ type seriesResponse struct {
 	VoteCount        int              `json:"vote_count"`
 	Seasons          []seasonResponse `json:"seasons"`
 	ExternalIDs      externalIDs      `json:"external_ids"`
+	AggregateCredits creditsResponse  `json:"aggregate_credits"`
+}
+
+type creditsResponse struct {
+	Cast []castMemberResponse `json:"cast"`
+}
+
+type castMemberResponse struct {
+	ID          int64              `json:"id"`
+	Name        string             `json:"name"`
+	Character   string             `json:"character"`
+	ProfilePath string             `json:"profile_path"`
+	Roles       []castRoleResponse `json:"roles"`
+}
+
+type castRoleResponse struct {
+	Character string `json:"character"`
 }
 
 type seasonResponse struct {
@@ -193,7 +211,7 @@ func (c *Client) MovieDetails(ctx context.Context, externalID, language string) 
 		return metadata.ProviderMovie{}, fmt.Errorf("%w: invalid TMDB movie ID", metadata.ErrProviderFailure)
 	}
 	var response movieResponse
-	if err := c.get(ctx, "/movie/"+strconv.FormatInt(movieID, 10), url.Values{"language": {language}}, &response); err != nil {
+	if err := c.get(ctx, "/movie/"+strconv.FormatInt(movieID, 10), url.Values{"append_to_response": {"credits"}, "language": {language}}, &response); err != nil {
 		return metadata.ProviderMovie{}, err
 	}
 	return normalizeMovie(response), nil
@@ -305,7 +323,7 @@ func (c *Client) SeriesDetails(ctx context.Context, externalID, language string)
 		return metadata.ProviderSeries{}, fmt.Errorf("%w: invalid TMDB series ID", metadata.ErrProviderFailure)
 	}
 	var response seriesResponse
-	query := url.Values{"append_to_response": {"external_ids"}, "language": {language}}
+	query := url.Values{"append_to_response": {"external_ids,aggregate_credits"}, "language": {language}}
 	if err := c.get(ctx, "/tv/"+strconv.FormatInt(seriesID, 10), query, &response); err != nil {
 		return metadata.ProviderSeries{}, err
 	}
@@ -408,6 +426,7 @@ func normalizeMovie(movie movieResponse) metadata.ProviderMovie {
 		Tagline:          movie.Tagline,
 		RuntimeMinutes:   movie.Runtime,
 		Genres:           genres,
+		Cast:             normalizeCast(movie.Credits.Cast),
 		VoteAverage:      movie.VoteAverage,
 		VoteCount:        movie.VoteCount,
 		AdditionalIDs:    additionalIDs,
@@ -467,11 +486,46 @@ func normalizeSeries(series seriesResponse) metadata.ProviderSeries {
 		NumberOfSeasons:  series.NumberOfSeasons,
 		NumberOfEpisodes: series.NumberOfEpisodes,
 		Genres:           genres,
+		Cast:             normalizeCast(series.AggregateCredits.Cast),
 		VoteAverage:      series.VoteAverage,
 		VoteCount:        series.VoteCount,
 		Seasons:          seasons,
 		AdditionalIDs:    additionalIDs,
 	}
+}
+
+func normalizeCast(cast []castMemberResponse) []metadata.CastMember {
+	const maximumCastMembers = 12
+	members := make([]metadata.CastMember, 0, min(len(cast), maximumCastMembers))
+	seen := make(map[int64]struct{}, min(len(cast), maximumCastMembers))
+	for _, person := range cast {
+		name := strings.TrimSpace(person.Name)
+		if person.ID < 1 || name == "" {
+			continue
+		}
+		if _, duplicate := seen[person.ID]; duplicate {
+			continue
+		}
+		character := strings.TrimSpace(person.Character)
+		if character == "" {
+			for _, role := range person.Roles {
+				if character = strings.TrimSpace(role.Character); character != "" {
+					break
+				}
+			}
+		}
+		members = append(members, metadata.CastMember{
+			ID:         strconv.FormatInt(person.ID, 10),
+			Name:       name,
+			Character:  character,
+			ProfileURL: imageURL("w185", person.ProfilePath),
+		})
+		seen[person.ID] = struct{}{}
+		if len(members) == maximumCastMembers {
+			break
+		}
+	}
+	return members
 }
 
 func normalizeSeasonSummary(season seasonResponse) metadata.ProviderSeasonSummary {

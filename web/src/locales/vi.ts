@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Xem phim bộ & mùa",
   "media.series.guideEyebrow": "Hướng dẫn phim bộ",
   "media.series.episodesTitle": "Các tập",
+  "media.cast.title": "Diễn viên",
   "media.season.error.episodesLoadFailed": "Không thể tải các tập phim.",
   "media.season.error.unavailableTitle": "Mùa không khả dụng",
   "media.season.specials": "Tập đặc biệt",

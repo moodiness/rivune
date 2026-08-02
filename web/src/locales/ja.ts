@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "シリーズとシーズンを表示する",
   "media.series.guideEyebrow": "シリーズガイド",
   "media.series.episodesTitle": "エピソード",
+  "media.cast.title": "キャスト",
   "media.season.error.episodesLoadFailed": "エピソードを読み込めませんでした。",
   "media.season.error.unavailableTitle": "シーズンを利用できません",
   "media.season.specials": "スペシャル",

@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Dizi ve sezonu görüntüle",
   "media.series.guideEyebrow": "Dizi rehberi",
   "media.series.episodesTitle": "Bölümler",
+  "media.cast.title": "Oyuncular",
   "media.season.error.episodesLoadFailed": "Bölümler yüklenemedi.",
   "media.season.error.unavailableTitle": "Sezon kullanılamıyor",
   "media.season.specials": "Özel bölümler",

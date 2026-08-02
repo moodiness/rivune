@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Lihat siri & musim",
   "media.series.guideEyebrow": "Panduan siri",
   "media.series.episodesTitle": "Episod",
+  "media.cast.title": "Pelakon",
   "media.season.error.episodesLoadFailed": "Episod tidak dapat dimuatkan.",
   "media.season.error.unavailableTitle": "Musim tidak tersedia",
   "media.season.specials": "Episod khas",

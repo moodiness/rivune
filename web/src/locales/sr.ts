@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Prikaži seriju i sezonu",
   "media.series.guideEyebrow": "Vodič kroz seriju",
   "media.series.episodesTitle": "Epizode",
+  "media.cast.title": "Glumačka postava",
   "media.season.error.episodesLoadFailed": "Epizode nije moguće učitati.",
   "media.season.error.unavailableTitle": "Sezona nije dostupna",
   "media.season.specials": "Specijalne epizode",

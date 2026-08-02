@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Ver la guía de la serie y la temporada",
   "media.series.guideEyebrow": "Guía de la serie",
   "media.series.episodesTitle": "Episodios",
+  "media.cast.title": "Reparto",
   "media.season.error.episodesLoadFailed": "No se pudieron cargar los episodios.",
   "media.season.error.unavailableTitle": "Temporada no disponible",
   "media.season.specials": "Especiales",

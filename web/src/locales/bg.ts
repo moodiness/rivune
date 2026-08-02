@@ -238,6 +238,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Покажи сериала и сезона",
   "media.series.guideEyebrow": "Справочник за сериала",
   "media.series.episodesTitle": "Епизоди",
+  "media.cast.title": "Актьорски състав",
   "media.season.error.episodesLoadFailed": "Епизодите не можаха да бъдат заредени.",
   "media.season.error.unavailableTitle": "Сезонът не е наличен",
   "media.season.specials": "Специални епизоди",

@@ -82,7 +82,6 @@ function mediaFromEvent(event: CalendarEvent): MediaItem {
       continueSeasonNumber: event.seasonNumber,
       continueEpisodeNumber: event.episodeNumber,
       continueEpisodeId: event.titleId,
-      openSeriesBrowser: true,
     },
   };
 }

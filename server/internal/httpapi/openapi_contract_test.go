@@ -88,7 +88,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			detailsMovie: metadata.Movie{
 				ID: contractTitleID, MediaType: metadata.MediaTypeMovie, Title: "Contract Movie",
 				OriginalTitle: "Contract Movie", OriginalLanguage: "en", Overview: "A deterministic contract fixture.",
-				Genres: []metadata.Genre{{ID: 18, Name: "Drama"}}, VoteAverage: 7.5, VoteCount: 10,
+				Genres: []metadata.Genre{{ID: 18, Name: "Drama"}}, Cast: []metadata.CastMember{{ID: "819", Name: "Contract Actor", Character: "Narrator", ProfileURL: "https://image.example/actor.jpg"}}, VoteAverage: 7.5, VoteCount: 10,
 				PosterURL: "https://fanart.example/movie-poster.jpg", BackdropURL: "https://fanart.example/movie-background.jpg",
 				LogoURL:     "https://fanart.example/movie-logo.png",
 				ExternalIDs: map[string]string{"tmdb": "550"},
@@ -96,7 +96,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			seriesDetailsValue: metadata.Series{
 				ID: contractTitleID, MediaType: metadata.MediaTypeSeries, Name: "Contract Series",
 				OriginalName: "Contract Series", OriginalLanguage: "en", Overview: "Mapped series fixture.",
-				Genres: []metadata.Genre{}, VoteAverage: 8, VoteCount: 20, Seasons: []metadata.SeasonSummary{},
+				Genres: []metadata.Genre{}, Cast: []metadata.CastMember{}, VoteAverage: 8, VoteCount: 20, Seasons: []metadata.SeasonSummary{},
 				PosterURL: "https://fanart.example/series-poster.jpg", BackdropURL: "https://fanart.example/series-background.jpg",
 				LogoURL: "https://fanart.example/series-logo.png",
 				Aliases: []metadata.Alias{}, EpisodeOrders: []metadata.EpisodeOrder{}, MappingProvider: "tvdb",

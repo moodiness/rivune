@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "ดูซีรีส์และซีซัน",
   "media.series.guideEyebrow": "คู่มือซีรีส์",
   "media.series.episodesTitle": "ตอน",
+  "media.cast.title": "นักแสดง",
   "media.season.error.episodesLoadFailed": "ไม่สามารถโหลดตอนต่าง ๆ ได้",
   "media.season.error.unavailableTitle": "ซีซันไม่พร้อมใช้งาน",
   "media.season.specials": "ตอนพิเศษ",

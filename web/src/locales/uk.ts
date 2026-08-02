@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Переглянути серіал і сезон",
   "media.series.guideEyebrow": "Путівник серіалом",
   "media.series.episodesTitle": "Епізоди",
+  "media.cast.title": "У ролях",
   "media.season.error.episodesLoadFailed": "Не вдалося завантажити епізоди.",
   "media.season.error.unavailableTitle": "Сезон недоступний",
   "media.season.specials": "Спецвипуски",

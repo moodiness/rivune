@@ -4443,7 +4443,7 @@ components:
     Movie:
       type: object
       additionalProperties: false
-      required: [id, mediaType, title, originalTitle, originalLanguage, overview, genres, voteAverage, voteCount, externalIds]
+      required: [id, mediaType, title, originalTitle, originalLanguage, overview, genres, cast, voteAverage, voteCount, externalIds]
       properties:
         id:
           type: string
@@ -4480,6 +4480,11 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Genre"
+        cast:
+          type: array
+          maxItems: 12
+          items:
+            $ref: "#/components/schemas/CastMember"
         voteAverage:
           type: number
           minimum: 0
@@ -4500,10 +4505,26 @@ components:
           type: integer
         name:
           type: string
+    CastMember:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          pattern: "^[1-9][0-9]{0,18}$"
+        name:
+          type: string
+          minLength: 1
+        character:
+          type: string
+        profileUrl:
+          type: string
+          format: uri-reference
     Series:
       type: object
       additionalProperties: false
-      required: [id, mediaType, name, originalName, originalLanguage, overview, genres, voteAverage, voteCount, seasons, aliases, episodeOrders, mappingProvider, externalIds]
+      required: [id, mediaType, name, originalName, originalLanguage, overview, genres, cast, voteAverage, voteCount, seasons, aliases, episodeOrders, mappingProvider, externalIds]
       properties:
         id:
           type: string
@@ -4548,6 +4569,11 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Genre"
+        cast:
+          type: array
+          maxItems: 12
+          items:
+            $ref: "#/components/schemas/CastMember"
         voteAverage:
           type: number
           minimum: 0

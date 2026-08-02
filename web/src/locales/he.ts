@@ -238,6 +238,7 @@ const catalog = {
   "media.series.actions.viewGuide": "הצגת הסדרה והעונה",
   "media.series.guideEyebrow": "מדריך הסדרה",
   "media.series.episodesTitle": "פרקים",
+  "media.cast.title": "צוות שחקנים",
   "media.season.error.episodesLoadFailed": "לא ניתן לטעון את הפרקים.",
   "media.season.error.unavailableTitle": "העונה אינה זמינה",
   "media.season.specials": "פרקים מיוחדים",

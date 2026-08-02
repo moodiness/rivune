@@ -238,6 +238,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Serie en seizoen bekijken",
   "media.series.guideEyebrow": "Serieoverzicht",
   "media.series.episodesTitle": "Afleveringen",
+  "media.cast.title": "Cast",
   "media.season.error.episodesLoadFailed": "Afleveringen konden niet worden geladen.",
   "media.season.error.unavailableTitle": "Seizoen niet beschikbaar",
   "media.season.specials": "Specials",

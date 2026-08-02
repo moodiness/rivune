@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Lihat serial & musim",
   "media.series.guideEyebrow": "Panduan serial",
   "media.series.episodesTitle": "Episode",
+  "media.cast.title": "Pemeran",
   "media.season.error.episodesLoadFailed": "Episode tidak dapat dimuat.",
   "media.season.error.unavailableTitle": "Musim tidak tersedia",
   "media.season.specials": "Spesial",

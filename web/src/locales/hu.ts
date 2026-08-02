@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Sorozat és évad megtekintése",
   "media.series.guideEyebrow": "Sorozatkalauz",
   "media.series.episodesTitle": "Epizódok",
+  "media.cast.title": "Szereplők",
   "media.season.error.episodesLoadFailed": "Az epizódokat nem sikerült betölteni.",
   "media.season.error.unavailableTitle": "Az évad nem érhető el",
   "media.season.specials": "Különkiadások",

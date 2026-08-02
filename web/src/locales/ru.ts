@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Показать обзор сериала и сезона",
   "media.series.guideEyebrow": "Обзор сериала",
   "media.series.episodesTitle": "Серии",
+  "media.cast.title": "В ролях",
   "media.season.error.episodesLoadFailed": "Не удалось загрузить серии.",
   "media.season.error.unavailableTitle": "Сезон недоступен",
   "media.season.specials": "Спецвыпуски",

@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Wyświetl serial i sezon",
   "media.series.guideEyebrow": "Przewodnik po serialu",
   "media.series.episodesTitle": "Odcinki",
+  "media.cast.title": "Obsada",
   "media.season.error.episodesLoadFailed": "Nie udało się wczytać odcinków.",
   "media.season.error.unavailableTitle": "Sezon jest niedostępny",
   "media.season.specials": "Odcinki specjalne",

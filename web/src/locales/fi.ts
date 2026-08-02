@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Näytä sarja ja kausi",
   "media.series.guideEyebrow": "Sarjaopas",
   "media.series.episodesTitle": "Jaksot",
+  "media.cast.title": "Näyttelijät",
   "media.season.error.episodesLoadFailed": "Jaksoja ei voitu ladata.",
   "media.season.error.unavailableTitle": "Kausi ei ole käytettävissä",
   "media.season.specials": "Erikoisjaksot",

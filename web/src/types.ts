@@ -227,6 +227,8 @@ export type SeasonSummary = {
   externalIds: Record<string, string>;
 };
 export type SeasonMetadata = SeasonSummary & { episodes: EpisodeMetadata[] };
+export type CastMember = { id: string; name: string; character?: string; profileUrl?: string };
+
 export type MovieMetadata = {
   id: string;
   mediaType: "movie";
@@ -241,6 +243,7 @@ export type MovieMetadata = {
   tagline?: string;
   runtimeMinutes?: number;
   genres: Array<{ id: number; name: string }>;
+  cast: CastMember[];
   voteAverage: number;
   voteCount: number;
   externalIds: Record<string, string>;
@@ -262,6 +265,7 @@ export type SeriesMetadata = {
   numberOfSeasons?: number;
   numberOfEpisodes?: number;
   genres: Array<{ id: number; name: string }>;
+  cast: CastMember[];
   voteAverage: number;
   voteCount: number;
   seasons: SeasonSummary[];

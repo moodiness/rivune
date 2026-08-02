@@ -115,10 +115,12 @@ func (s *Service) movieDetails(ctx context.Context, titleID, language string) (M
 		if err := json.Unmarshal(cachedPayload, &cached); err != nil {
 			return Movie{}, fmt.Errorf("decode cached title metadata: %w", err)
 		}
-		if err := s.persistCachedMovieSnapshot(ctx, cached); err != nil {
-			return Movie{}, err
+		if cached.Cast != nil {
+			if err := s.persistCachedMovieSnapshot(ctx, cached); err != nil {
+				return Movie{}, err
+			}
+			return cached, nil
 		}
-		return cached, nil
 	}
 	if s.provider == nil {
 		return Movie{}, ErrProviderUnavailable
@@ -258,14 +260,16 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 		if err := json.Unmarshal(cachedPayload, &cached); err != nil {
 			return Series{}, fmt.Errorf("decode cached series metadata: %w", err)
 		}
-		if cached.MappingProvider == "" {
-			cached.MappingProvider = providerName
+		if cached.Cast != nil {
+			if cached.MappingProvider == "" {
+				cached.MappingProvider = providerName
+			}
+			cached.EpisodeOrders = normalizeEpisodeOrders(cached.EpisodeOrders)
+			if err := s.persistCachedSeriesSnapshots(ctx, cached); err != nil {
+				return Series{}, err
+			}
+			return cached, nil
 		}
-		cached.EpisodeOrders = normalizeEpisodeOrders(cached.EpisodeOrders)
-		if err := s.persistCachedSeriesSnapshots(ctx, cached); err != nil {
-			return Series{}, err
-		}
-		return cached, nil
 	}
 	if s.provider == nil {
 		return Series{}, ErrProviderUnavailable
@@ -1772,6 +1776,10 @@ func normalizeMovie(titleID string, provided ProviderMovie) Movie {
 	if genres == nil {
 		genres = []Genre{}
 	}
+	cast := provided.Cast
+	if cast == nil {
+		cast = []CastMember{}
+	}
 	return Movie{
 		ID:               titleID,
 		MediaType:        MediaTypeMovie,
@@ -1786,6 +1794,7 @@ func normalizeMovie(titleID string, provided ProviderMovie) Movie {
 		Tagline:          provided.Tagline,
 		RuntimeMinutes:   provided.RuntimeMinutes,
 		Genres:           genres,
+		Cast:             cast,
 		VoteAverage:      provided.VoteAverage,
 		VoteCount:        provided.VoteCount,
 		ExternalIDs:      externalIDs,
@@ -1796,6 +1805,10 @@ func normalizeSeries(titleID string, provided ProviderSeries) Series {
 	genres := provided.Genres
 	if genres == nil {
 		genres = []Genre{}
+	}
+	cast := provided.Cast
+	if cast == nil {
+		cast = []CastMember{}
 	}
 	aliases := provided.Aliases
 	if aliases == nil {
@@ -1819,6 +1832,7 @@ func normalizeSeries(titleID string, provided ProviderSeries) Series {
 		NumberOfSeasons:  provided.NumberOfSeasons,
 		NumberOfEpisodes: provided.NumberOfEpisodes,
 		Genres:           genres,
+		Cast:             cast,
 		VoteAverage:      provided.VoteAverage,
 		VoteCount:        provided.VoteCount,
 		Seasons:          []SeasonSummary{},

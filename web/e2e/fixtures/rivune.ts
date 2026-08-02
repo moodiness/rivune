@@ -42,15 +42,15 @@ const profiles: Profile[] = [
 const seasonOne = {
   id: "season-1", mediaType: "season", seriesId: "series-1", name: "Season 1", overview: "The first voyage.", seasonNumber: 1, episodeCount: 2, airDate: "2024-01-01", posterUrl: "https://fixtures.rivune.test/season-1.svg", voteAverage: 8.2, externalIds: { tmdb: "101" },
   episodes: [
-    { id: "episode-1", mediaType: "episode", seasonId: "season-1", name: "First Light", overview: "The crew follows a mysterious signal.", seasonNumber: 1, episodeNumber: 1, airDate: "2024-01-03", runtimeMinutes: 30, voteAverage: 8.1, voteCount: 100, externalIds: { imdb: "tt900001" } },
-    { id: "episode-2", mediaType: "episode", seasonId: "season-1", name: "Second Orbit", overview: "A new course changes everything.", seasonNumber: 1, episodeNumber: 2, airDate: "2024-01-10", runtimeMinutes: 31, voteAverage: 8.3, voteCount: 95, externalIds: { imdb: "tt900002" } },
+    { id: "episode-1", mediaType: "episode", seasonId: "season-1", name: "First Light", overview: "The crew follows a mysterious signal.", seasonNumber: 1, episodeNumber: 1, airDate: "2024-01-03", stillUrl: "https://fixtures.rivune.test/episode-1.svg", runtimeMinutes: 30, voteAverage: 8.1, voteCount: 100, externalIds: { imdb: "tt900001" } },
+    { id: "episode-2", mediaType: "episode", seasonId: "season-1", name: "Second Orbit", overview: "A new course changes everything.", seasonNumber: 1, episodeNumber: 2, airDate: "2024-01-10", stillUrl: "https://fixtures.rivune.test/episode-2.svg", runtimeMinutes: 31, voteAverage: 8.3, voteCount: 95, externalIds: { imdb: "tt900002" } },
   ],
 };
 
 const seasonTwo = {
   id: "season-2", mediaType: "season", seriesId: "series-1", name: "Season 2", overview: "The second voyage.", seasonNumber: 2, episodeCount: 1, airDate: "2024-06-01", posterUrl: "https://fixtures.rivune.test/season-2.svg", voteAverage: 8.6, externalIds: { tmdb: "102" },
   episodes: [
-    { id: "episode-3", mediaType: "episode", seasonId: "season-2", name: "Moonrise", overview: "The team reunites on a distant moon.", seasonNumber: 2, episodeNumber: 1, airDate: "2024-06-01", runtimeMinutes: 34, voteAverage: 8.7, voteCount: 88, externalIds: { imdb: "tt900003" } },
+    { id: "episode-3", mediaType: "episode", seasonId: "season-2", name: "Moonrise", overview: "The team reunites on a distant moon.", seasonNumber: 2, episodeNumber: 1, airDate: "2024-06-01", stillUrl: "https://fixtures.rivune.test/episode-3.svg", runtimeMinutes: 34, voteAverage: 8.7, voteCount: 88, externalIds: { imdb: "tt900003" } },
   ],
 };
 
@@ -106,6 +106,13 @@ const series = {
   genres: [{ id: 1, name: "Science Fiction" }],
   voteAverage: 8.5,
   voteCount: 500,
+  cast: [
+    { id: "101", name: "Avery Stone", character: "Commander Ilya Voss", profileUrl: "https://fixtures.rivune.test/cast-1.svg" },
+    { id: "102", name: "Mina Park", character: "Dr. Sera Vale", profileUrl: "https://fixtures.rivune.test/cast-2.svg" },
+    { id: "103", name: "Omar Reed", character: "Elias Ward", profileUrl: "https://fixtures.rivune.test/cast-3.svg" },
+    { id: "104", name: "Lucia Chen", character: "Captain Nia Sol", profileUrl: "https://fixtures.rivune.test/cast-4.svg" },
+    { id: "105", name: "Noah Bennett", character: "Theo Quinn", profileUrl: "https://fixtures.rivune.test/cast-5.svg" },
+  ],
   seasons: [seasonSummary(seasonOne), seasonSummary(seasonTwo), ...extraSeasonSummaries],
   episodeOrders,
   mappingProvider: "tmdb",

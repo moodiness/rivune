@@ -170,6 +170,7 @@ const catalog = {
   "media.series.actions.viewGuide": "Vezi serialul și sezonul",
   "media.series.guideEyebrow": "Ghidul serialului",
   "media.series.episodesTitle": "Episoade",
+  "media.cast.title": "Distribuție",
   "media.season.error.episodesLoadFailed": "Episoadele nu au putut fi încărcate.",
   "media.season.error.unavailableTitle": "Sezon indisponibil",
   "media.season.specials": "Episoade speciale",
