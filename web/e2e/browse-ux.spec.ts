@@ -46,3 +46,33 @@ test("library titles can be searched, sorted, and filtered", async ({ page, rivu
   const request = await rivune.waitForRequest("/api/v1/library", "GET");
   expect(request.search.get("mediaType")).toBe("series");
 });
+
+test("horizontal media rows keep partial scroll positions between cards", async ({ page, rivune: _rivune }) => {
+  await page.route("**/api/v1/continue-watching*", async (route) => {
+    const items = Array.from({ length: 8 }, (_, index) => ({
+      titleId: `movie-${index}`,
+      mediaType: "movie",
+      positionSeconds: 120,
+      durationSeconds: 1200,
+      version: 1,
+      reason: "resume",
+      title: `Movie ${index + 1}`,
+      resourceId: `movie-${index}`,
+      resourceProvider: "tmdb",
+      lastWatchedAt: "2024-01-01T00:00:00Z",
+    }));
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ items }) });
+  });
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.goto("/");
+
+  const row = page.locator(".media-row--continue");
+  const cards = row.locator(".media-card");
+  await expect(cards).toHaveCount(8);
+  const stride = await cards.evaluateAll((elements) => elements[1].getBoundingClientRect().left - elements[0].getBoundingClientRect().left);
+  const partialPosition = stride * 0.5;
+  await row.evaluate((element, left) => { element.scrollLeft = left; }, partialPosition);
+  await page.waitForTimeout(300);
+
+  await expect.poll(() => row.evaluate((element) => element.scrollLeft)).toBeCloseTo(partialPosition, 0);
+});
