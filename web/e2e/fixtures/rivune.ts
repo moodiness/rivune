@@ -457,7 +457,11 @@ export class RivuneHarness {
       await json(route, { events: [{ id: "calendar-episode-3", titleId: "episode-3", mediaType: "episode", title: "Moonrise", releaseDate: today, resourceId: "tt9000:2:1", resourceProvider: "imdb", seriesTitle: "Signal Horizon", seriesId: "series-1", seasonId: "season-2", seasonNumber: 2, episodeNumber: 1 }] });
       return;
     }
-    if (path === "/titles/resolve" && request.method() === "POST") { await json(route, { titleId: "resolved-title", ...(body as object) }); return; }
+    if (path === "/titles/resolve" && request.method() === "POST") {
+      const input = body as { externalId?: string };
+      await json(route, { ...(body as object), titleId: input.externalId === "tt9000" ? "series-1" : "resolved-title" });
+      return;
+    }
     await json(route, { error: { code: "fixture_route_missing", message: `No E2E fixture for ${request.method()} ${path}` } }, 501);
   }
 }

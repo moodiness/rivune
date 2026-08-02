@@ -38,7 +38,7 @@ test("media details use a refresh-safe route with browser and in-page history", 
 
   await expect(page.locator(".details-page")).toBeVisible();
   await expect(page.locator("dialog .details-page")).toHaveCount(0);
-  await expect(page).toHaveURL(/#media\/episode\/[^?]+\?/);
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1\/episode\/1$/);
   await page.goBack();
   await expect(invokingCard).toBeFocused();
   await expect.poll(() => rivune.matching("/api/v1/continue-watching", "GET").length).toBeGreaterThan(initialContinueRequests);
@@ -49,26 +49,27 @@ test("media details use a refresh-safe route with browser and in-page history", 
 
   await page.getByRole("tab", { name: /^Season 2\b/ }).click();
   await page.getByRole("button", { name: /Moonrise/ }).first().click();
-  await expect(page).toHaveURL(/seasonId=season-2/);
-  await expect(page).toHaveURL(/episodeId=episode-3/);
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/2\/episode\/1$/);
   await page.evaluate(() => window.history.replaceState(null, "", window.location.href));
 
   await page.reload();
   await expect(page.getByRole("heading", { name: "Moonrise" })).toBeVisible();
-  await expect(page.getByText("The team reunites on a distant moon.")).toBeVisible();
+  await expect(page.locator(".details-description")).toHaveText("The team reunites on a distant moon.");
   await expect(page.getByRole("region", { name: "Playback sources" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "true");
   const stateFreeContinueRequests = rivune.matching("/api/v1/continue-watching", "GET").length;
 
   await page.goBack();
-  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Signal Horizon" })).toBeAttached();
+  await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "true");
   await page.goBack();
   await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
   await expect(page).toHaveURL(/#home$/);
   await expect(page.locator(".route-surface").getByRole("heading").first()).toBeFocused();
   await expect.poll(() => rivune.matching("/api/v1/continue-watching", "GET").length).toBeGreaterThan(stateFreeContinueRequests);
   await page.goForward();
-  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Signal Horizon" })).toBeAttached();
+  await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "true");
   await page.goForward();
   await expect(page.getByRole("heading", { name: "Moonrise" })).toBeVisible();
 
@@ -90,7 +91,7 @@ test("series episodes open dedicated detail pages that own playback sources", as
 
   await page.getByRole("button", { name: /First Light/ }).first().click();
 
-  await expect(page).toHaveURL(/#media\/episode\/tt9000%3A1%3A1\?/);
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1\/episode\/1$/);
   await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
   await expect(page.getByText("The crew follows a mysterious signal.")).toBeVisible();
   await expect(page.getByText("Season 1 · Episode 1")).toBeVisible();
@@ -108,7 +109,7 @@ test("continue-watching episode opens its series and requests trailers for each 
 
   await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await expect(page).toHaveURL(/#media\/episode\//);
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1\/episode\/1$/);
   await expect(page.getByRole("heading", { name: /Signal Horizon.*S01E01.*First Light/ })).toBeVisible();
 
   await page.getByRole("button", { name: "View series & season" }).click();
@@ -266,7 +267,7 @@ test("calendar episode opens the matching series season and episode", async ({ p
 
   await expect(page.getByRole("heading", { name: "Release calendar." })).toBeVisible();
   await page.getByRole("button", { name: "Open Moonrise details" }).first().click();
-  await expect(page).toHaveURL(/#media\/episode\//);
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/2\/episode\/1$/);
 
   await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("heading", { name: /Signal Horizon.*S02E01.*Moonrise/ })).toBeVisible();
