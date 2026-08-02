@@ -198,8 +198,7 @@ test("unsupported browser sources stop at preparation with an actionable choice"
   expect(rivune.matching("/api/v1/playback/resolve", "POST")).toHaveLength(0);
 });
 
-test("multiline stream metadata stays inside its source button", async ({ page, rivune }) => {
-  void rivune;
+test("multiline stream metadata stays inside its source card and row actions play the exact stream", async ({ page, rivune }) => {
   await page.route("**/api/v1/playback/sources", async (route) => {
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
     await route.fulfill({
@@ -236,4 +235,14 @@ test("multiline stream metadata stays inside its source button", async ({ page, 
     return contentRect.top >= rowRect.top && contentRect.bottom <= rowRect.bottom;
   }));
   expect(contained).toBe(true);
+  const streamCards = page.locator(".details-stream-list > div");
+  await expect(streamCards).toHaveCount(7);
+  await expect(streamCards.locator(".episode-play")).toHaveCount(0);
+  const targetCard = streamCards.nth(4);
+  await targetCard.getByRole("radio").click();
+  await expect(streamCards.locator(".episode-play")).toHaveCount(1);
+  await expect(targetCard.getByRole("button", { name: /Play episode/ })).toBeEnabled();
+  await targetCard.getByRole("button", { name: /Play episode/ }).click();
+  await expect.poll(() => rivune.matching("/api/v1/playback/prepare", "POST").map((request) => (request.body as { sourceRef?: string }).sourceRef)).toContain("multiline-source-4");
+  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").map((request) => (request.body as { sourceRef?: string }).sourceRef)).toContain("multiline-source-4");
 });

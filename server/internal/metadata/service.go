@@ -599,6 +599,7 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 			if err := json.Unmarshal(cachedPayload, &cached); err != nil {
 				return Series{}, fmt.Errorf("decode cached TVDB series mapping: %w", err)
 			}
+			cached.Cast = base.Cast
 			cached.EpisodeOrders = normalizeEpisodeOrders(cached.EpisodeOrders)
 			if cached.SelectedEpisodeOrderID == "" {
 				cached.SelectedEpisodeOrderID = defaultEpisodeOrderID(cached.EpisodeOrders)

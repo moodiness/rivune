@@ -685,6 +685,66 @@ func TestReplaceTVDBEpisodeIDRepairsStaleNumberBasedLink(t *testing.T) {
 	}
 }
 
+type cacheOnlyTelevisionMapper struct{}
+
+func (cacheOnlyTelevisionMapper) SeriesSeasons(context.Context, string, string) ([]ProviderSeasonSummary, error) {
+	return nil, errors.New("unexpected mapper call")
+}
+
+func (cacheOnlyTelevisionMapper) SeriesSeason(context.Context, string, string) (ProviderSeason, error) {
+	return ProviderSeason{}, errors.New("unexpected mapper call")
+}
+
+func TestCachedTVDBSeriesMappingUsesCanonicalCast(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	const seriesID = "7e9bac21-adce-4b01-b11a-f6db8dea61e4"
+	base := Series{
+		ID: seriesID, MediaType: MediaTypeSeries, Name: "Solo Leveling", OriginalName: "俺だけレベルアップな件",
+		OriginalLanguage: "ja", Overview: "An anime fixture.", Genres: []Genre{},
+		Cast:    []CastMember{{ID: "123", Name: "Taito Ban", Character: "Sung Jinwoo"}},
+		Seasons: []SeasonSummary{}, Aliases: []Alias{},
+		EpisodeOrders:   []EpisodeOrder{{ID: "1", Name: "Aired Order", Type: "official", IsDefault: true}},
+		MappingProvider: providerName,
+		ExternalIDs:     map[string]string{"tmdb": "127532", "tvdb": "389597", "imdb": "tt21209876"},
+	}
+	mapped := base
+	mapped.Cast = []CastMember{}
+	mapped.MappingProvider = "tvdb"
+	mapped.SelectedEpisodeOrderID = "1"
+	basePayload, err := json.Marshal(base)
+	if err != nil {
+		t.Fatalf("encode canonical series: %v", err)
+	}
+	mappedPayload, err := json.Marshal(mapped)
+	if err != nil {
+		t.Fatalf("encode mapped series: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title)
+		VALUES ($1::uuid, 'series', 'Solo Leveling');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
+			($1::uuid, 'tmdb', 'series', '127532'),
+			($1::uuid, 'tvdb', 'series', '389597'),
+			($1::uuid, 'imdb', 'series', 'tt21209876');
+		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at) VALUES
+			($1::uuid, 'tmdb', 'fr-FR', $2::jsonb, now() + interval '1 hour'),
+			($1::uuid, 'tvdb', 'fr-FR', $3::jsonb, now() + interval '1 hour')
+	`, pgx.QueryExecModeSimpleProtocol, seriesID, basePayload, mappedPayload); err != nil {
+		t.Fatalf("seed mapped series cache: %v", err)
+	}
+	profileID := "44444444-4444-4444-8444-444444444444"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	service := &Service{pool: pool, mapper: cacheOnlyTelevisionMapper{}}
+	resolved, err := service.SeriesDetails(ctx, auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb"})
+	if err != nil {
+		t.Fatalf("load cached TVDB mapping: %v", err)
+	}
+	if len(resolved.Cast) != 1 || resolved.Cast[0].Name != "Taito Ban" {
+		t.Fatalf("mapped series lost canonical cast: %+v", resolved.Cast)
+	}
+}
+
 func TestSeriesDetailsValidatesEpisodeOrderSelection(t *testing.T) {
 	profileID := "profile-id"
 	expiresAt := time.Now().UTC().Add(time.Hour)

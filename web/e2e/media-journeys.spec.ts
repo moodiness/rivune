@@ -122,7 +122,15 @@ test("episode details float beside a responsive contextual stream panel", async 
   await expect(page.locator(".series-browser")).toHaveCount(0);
   await expect(page.locator(".details-utility-grid")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Back.*Episodes/ })).toBeVisible();
-  await expect(contextPanel.getByRole("radio", { name: /Fixture 1080p/ })).toBeVisible();
+  const fixtureSource = contextPanel.getByRole("radio", { name: /Fixture 1080p/ });
+  await expect(fixtureSource).toBeVisible();
+  const sourceRows = contextPanel.locator(".details-stream-list > div");
+  await expect(sourceRows).toHaveCount(1);
+  await expect(sourceRows.locator(".episode-play")).toHaveCount(0);
+  await fixtureSource.click();
+  await expect(sourceRows.first().getByRole("button", { name: "Play episode" })).toBeEnabled();
+  await expect(page.locator(".details-actions .episode-play")).toHaveCount(0);
+  await expect(page.locator(".details-sources")).toHaveCount(0);
   await expect(cast).toBeVisible();
   await expect(cast.getByText("Avery Stone")).toBeVisible();
   await expect(cast.getByText("Commander Ilya Voss")).toBeVisible();
@@ -171,7 +179,7 @@ test("episode details float beside a responsive contextual stream panel", async 
   expect(compactDesktopPanel!.x).toBeGreaterThan(compactDesktopPrimary!.x + compactDesktopPrimary!.width - 1);
   const compactDesktopPage = await page.evaluate(() => ({ scrollHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight }));
   expect(compactDesktopPage.scrollHeight).toBeLessThanOrEqual(compactDesktopPage.viewportHeight + 1);
-  await expect(cast).toBeHidden();
+  await expect(cast).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(artwork).toBeVisible();
@@ -183,6 +191,75 @@ test("episode details float beside a responsive contextual stream panel", async 
   expect(mobilePanel).not.toBeNull();
   expect(mobileArtwork!.width / mobileArtwork!.height).toBeCloseTo(2 / 3, 1);
   expect(mobilePanel!.y).toBeGreaterThanOrEqual(mobilePrimary!.y + mobilePrimary!.height - 1);
+  await expect(cast).toBeVisible();
+  const mobileCastOverflow = await cast.locator(".details-cast__list").evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(mobileCastOverflow.scrollWidth).toBeGreaterThan(mobileCastOverflow.clientWidth);
+  const mobilePageWidth = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(mobilePageWidth.scrollWidth).toBeLessThanOrEqual(mobilePageWidth.clientWidth);
+});
+
+test("direct anime route exposes canonical cast in a focus-safe drawer", async ({ page, rivune: _rivune }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/media/series/tt21209876");
+
+  await expect(page.getByRole("heading", { name: "Solo Leveling" })).toBeVisible();
+  const cast = page.getByRole("region", { name: "Cast" });
+  await expect(cast).toBeVisible();
+  await expect(cast.locator(".details-cast-member")).toHaveCount(6);
+  await expect(cast.getByText("Taito Ban")).toBeVisible();
+  await expect(cast.getByText("Sung Jinwoo")).toBeVisible();
+  const castOverflow = await cast.locator(".details-cast__list").evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(castOverflow.scrollWidth).toBeGreaterThan(castOverflow.clientWidth);
+  const castGeometry = await cast.locator(".details-cast-member").evaluateAll((members) => members.map((member) => {
+    const bounds = member.getBoundingClientRect();
+    return { x: bounds.x, width: bounds.width };
+  }));
+  const memberWidths = castGeometry.map(({ width }) => Math.round(width));
+  const memberGaps = castGeometry.slice(1).map(({ x }, index) => Math.round(x - castGeometry[index].x - castGeometry[index].width));
+  expect(Math.max(...memberWidths) - Math.min(...memberWidths)).toBeLessThanOrEqual(1);
+  expect(Math.max(...memberGaps) - Math.min(...memberGaps)).toBeLessThanOrEqual(1);
+
+  const viewAll = cast.getByRole("button", { name: "View all" });
+  await viewAll.click();
+  const drawer = page.getByRole("dialog", { name: "Cast" });
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator(".details-cast-member")).toHaveCount(8);
+  const closeDrawer = drawer.getByRole("button", { name: "Close" });
+  await expect(closeDrawer).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(closeDrawer).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(closeDrawer).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(drawer).toHaveCount(0);
+  await expect(viewAll).toBeFocused();
+});
+
+test("movie details retain cast and one playback action per source", async ({ page, rivune: _rivune }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/media/movie/tt0137523");
+
+  await expect(page.getByRole("heading", { name: "Fight Club" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Cast" }).getByText("Edward Norton")).toBeVisible();
+  const sources = page.getByRole("region", { name: "Playback sources" });
+  const sourceRows = sources.locator(".details-stream-list > div");
+  await expect(sourceRows).toHaveCount(1);
+  const movieSource = sourceRows.getByRole("radio", { name: /Fixture 1080p/ });
+  await expect(movieSource).toBeVisible();
+  await expect(sourceRows.locator(".episode-play")).toHaveCount(0);
+  await movieSource.click();
+  await expect(sourceRows.getByRole("button", { name: /Play selected stream.*Fixture 1080p/ })).toBeEnabled();
+  await expect(page.locator(".details-actions .episode-play")).toHaveCount(0);
+  await expect(page.locator(".details-sources")).toHaveCount(0);
 });
 
 test("continue-watching episode returns to its dedicated season panel", async ({ page, rivune }) => {
@@ -204,6 +281,13 @@ test("continue-watching episode returns to its dedicated season panel", async ({
   const trailerRegion = page.getByRole("region", { name: /Trailers for/ });
   await expect(trailerRegion).toBeVisible();
   await expect(trailerRegion.locator("iframe")).toHaveAttribute("title", /Season One Trailer/);
+  const trailerStage = page.locator(".details-trailer-stage");
+  const stageBounds = await trailerStage.boundingBox();
+  const trailerBounds = await trailerRegion.boundingBox();
+  expect(stageBounds).not.toBeNull();
+  expect(trailerBounds).not.toBeNull();
+  expect(stageBounds!.width).toBeCloseTo(trailerBounds!.width, 0);
+  expect(stageBounds!.height).toBeCloseTo(trailerBounds!.height, 0);
   const seasonOneRequest = await rivune.waitForRequest("/api/v1/metadata/titles/series-1/trailers", "GET");
   expect(seasonOneRequest.search.get("seasonNumber")).toBe("1");
   expect(seasonOneRequest.search.get("language")).toBe("en");

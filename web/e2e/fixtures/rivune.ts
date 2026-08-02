@@ -112,11 +112,62 @@ const series = {
     { id: "103", name: "Omar Reed", character: "Elias Ward", profileUrl: "https://fixtures.rivune.test/cast-3.svg" },
     { id: "104", name: "Lucia Chen", character: "Captain Nia Sol", profileUrl: "https://fixtures.rivune.test/cast-4.svg" },
     { id: "105", name: "Noah Bennett", character: "Theo Quinn", profileUrl: "https://fixtures.rivune.test/cast-5.svg" },
+    { id: "106", name: "Priya Shah", character: "Engineer Mara Keene", profileUrl: "https://fixtures.rivune.test/cast-1.svg" },
+    { id: "107", name: "Jon Bell", character: "Admiral Corin", profileUrl: "https://fixtures.rivune.test/cast-2.svg" },
+    { id: "108", name: "Élodie Martin", character: "Mira Sato", profileUrl: "https://fixtures.rivune.test/cast-3.svg" },
+    { id: "109", name: "Sam Okafor", character: "Dr. Ren Cole", profileUrl: "https://fixtures.rivune.test/cast-4.svg" },
   ],
   seasons: [seasonSummary(seasonOne), seasonSummary(seasonTwo), ...extraSeasonSummaries],
   episodeOrders,
   mappingProvider: "tmdb",
   externalIds: { imdb: "tt9000", tmdb: "9000", tvdb: "9900" },
+};
+
+const animeSeries = {
+  ...series,
+  id: "series-anime",
+  name: "Solo Leveling",
+  originalName: "俺だけレベルアップな件",
+  originalLanguage: "ja",
+  overview: "Humanity's weakest hunter discovers a system that lets him level up.",
+  firstAirDate: "2024-01-07",
+  tagline: "Only he levels up.",
+  numberOfSeasons: 2,
+  numberOfEpisodes: 25,
+  genres: [{ id: 16, name: "Animation" }, { id: 10759, name: "Action & Adventure" }],
+  cast: [
+    { id: "201", name: "Taito Ban", character: "Sung Jinwoo", profileUrl: "https://fixtures.rivune.test/cast-1.svg" },
+    { id: "202", name: "Reina Ueda", character: "Cha Hae-In", profileUrl: "https://fixtures.rivune.test/cast-2.svg" },
+    { id: "203", name: "Genta Nakamura", character: "Yoo Jinho", profileUrl: "https://fixtures.rivune.test/cast-3.svg" },
+    { id: "204", name: "Daisuke Hirakawa", character: "Choi Jong-In", profileUrl: "https://fixtures.rivune.test/cast-4.svg" },
+    { id: "205", name: "Hiroki Touchi", character: "Baek Yoonho", profileUrl: "https://fixtures.rivune.test/cast-5.svg" },
+    { id: "206", name: "Haruna Mikawa", character: "Sung Jinah", profileUrl: "https://fixtures.rivune.test/cast-1.svg" },
+    { id: "207", name: "Makoto Furukawa", character: "Woo Jinchul", profileUrl: "https://fixtures.rivune.test/cast-2.svg" },
+    { id: "208", name: "Banjou Ginga", character: "Go Gunhee", profileUrl: "https://fixtures.rivune.test/cast-3.svg" },
+  ],
+  externalIds: { imdb: "tt21209876", tmdb: "127532", tvdb: "389597" },
+};
+
+const movie = {
+  id: "movie-1",
+  mediaType: "movie",
+  title: "Fight Club",
+  originalTitle: "Fight Club",
+  originalLanguage: "en",
+  overview: "An insomniac and a soap maker form an underground club.",
+  releaseDate: "1999-10-15",
+  posterUrl: "https://fixtures.rivune.test/poster.svg",
+  backdropUrl: "https://fixtures.rivune.test/backdrop.svg",
+  runtimeMinutes: 139,
+  genres: [{ id: 18, name: "Drama" }],
+  voteAverage: 8.4,
+  voteCount: 30000,
+  cast: [
+    { id: "301", name: "Edward Norton", character: "The Narrator", profileUrl: "https://fixtures.rivune.test/cast-1.svg" },
+    { id: "302", name: "Brad Pitt", character: "Tyler Durden", profileUrl: "https://fixtures.rivune.test/cast-2.svg" },
+    { id: "303", name: "Helena Bonham Carter", character: "Marla Singer", profileUrl: "https://fixtures.rivune.test/cast-3.svg" },
+  ],
+  externalIds: { imdb: "tt0137523", tmdb: "550" },
 };
 
 function json(route: Route, body: unknown, status = 200) {
@@ -441,6 +492,8 @@ export class RivuneHarness {
       await json(route, series);
       return;
     }
+    if (path === "/metadata/series/series-anime") { await json(route, animeSeries); return; }
+    if (path === "/metadata/titles/movie-1") { await json(route, movie); return; }
     if (path.startsWith("/addons/resources/meta/")) { await json(route, { results: [], errors: [] }); return; }
     if (path === "/library") {
       const mediaType = url.searchParams.get("mediaType");
@@ -493,7 +546,14 @@ export class RivuneHarness {
     }
     if (path === "/titles/resolve" && request.method() === "POST") {
       const input = body as { externalId?: string };
-      await json(route, { ...(body as object), titleId: input.externalId === "tt9000" ? "series-1" : "resolved-title" });
+      const titleId = input.externalId === "tt9000"
+        ? "series-1"
+        : input.externalId === "tt21209876"
+          ? "series-anime"
+          : input.externalId === "tt0137523"
+            ? "movie-1"
+            : "resolved-title";
+      await json(route, { ...(body as object), titleId });
       return;
     }
     await json(route, { error: { code: "fixture_route_missing", message: `No E2E fixture for ${request.method()} ${path}` } }, 501);

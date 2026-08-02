@@ -21,7 +21,7 @@ function record(value: unknown): Record<string, unknown> | null {
   return Object.fromEntries(Object.entries(value));
 }
 
-function visibleCast(value: unknown): CastMember[] {
+function castMembers(value: unknown): CastMember[] {
   if (!Array.isArray(value)) return [];
   const members: CastMember[] = [];
   const seen = new Set<string>();
@@ -38,13 +38,25 @@ function visibleCast(value: unknown): CastMember[] {
       ...(typeof person.profileUrl === "string" && person.profileUrl.trim() ? { profileUrl: person.profileUrl.trim() } : {}),
     });
     seen.add(id);
-    if (members.length === 5) break;
+    if (members.length === 12) break;
   }
   return members;
 }
 
 function castInitials(name: string): string {
   return name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+}
+
+function CastMemberCard({ member }: { member: CastMember }) {
+  return <article className="details-cast-member">
+    <span className="details-cast-member__portrait">
+      {member.profileUrl ? <img src={member.profileUrl} alt="" loading="lazy" /> : <span>{castInitials(member.name)}</span>}
+    </span>
+    <span className="details-cast-member__copy">
+      <strong>{member.name}</strong>
+      {member.character && <small>{member.character}</small>}
+    </span>
+  </article>;
 }
 
 function trailerLanguageBadge(trailer: TrailerMetadata): string {
@@ -342,6 +354,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
   const autoPlayNextRef = useRef(false);
   const autoStartRef = useRef(item.raw?.startFromBeginning === true);
   const sourceRefreshAttemptRef = useRef("");
+  const playRequestedSourceRef = useRef("");
   const trailerRequestRef = useRef(0);
   const seasonCacheRef = useRef(new Map<string, SeasonMetadata>());
   const trailerItemRef = useRef("");
@@ -349,6 +362,9 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
   const trailerRevealPendingRef = useRef(false);
   const episodeListRef = useRef<HTMLDivElement>(null);
   const selectedEpisodeRowRef = useRef<HTMLDivElement>(null);
+  const castDrawerTriggerRef = useRef<HTMLButtonElement>(null);
+  const castDrawerCloseRef = useRef<HTMLButtonElement>(null);
+  const [castDrawerOpen, setCastDrawerOpen] = useState(false);
   const [titleProgress, setTitleProgress] = useState<PlaybackProgress>();
   const [watchedBusy, setWatchedBusy] = useState("");
   const nextSourceRef = useRef<SourceIdentity | undefined>(undefined);
@@ -629,6 +645,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     setStreamsLoading(true);
     setStreamsError("");
     setSelectedStream(undefined);
+    playRequestedSourceRef.current = "";
     setPreparation(undefined);
     setPreparationError("");
     void api.playbackSources({
@@ -681,12 +698,15 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
         autoStartRef.current = false;
         autoPlayNextRef.current = false;
         setPreparationError(t("media.sources.error.encodingRequired"));
+        if (playRequestedSourceRef.current === selectedStream.sourceRef) playRequestedSourceRef.current = "";
         return;
       }
       setPreparation(prepared);
-      if (autoStartRef.current || autoPlayNextRef.current) {
+      const playRequested = playRequestedSourceRef.current === selectedStream.sourceRef;
+      if (autoStartRef.current || autoPlayNextRef.current || playRequested) {
         autoStartRef.current = false;
         autoPlayNextRef.current = false;
+        playRequestedSourceRef.current = "";
         setPlaying(true);
       }
     }).catch((cause) => {
@@ -698,6 +718,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
       }
       autoStartRef.current = false;
       autoPlayNextRef.current = false;
+      if (playRequestedSourceRef.current === selectedStream.sourceRef) playRequestedSourceRef.current = "";
       if (cause instanceof APIError && cause.code === "playback_source_unsupported") {
         setPreparationError(t("media.sources.error.conversionUnsupported"));
         return;
@@ -789,6 +810,23 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     setTrailerOwnerKey("");
   }
 
+  function selectPlaybackStream(option: PlaybackSourceOption) {
+    autoPlayNextRef.current = false;
+    playRequestedSourceRef.current = "";
+    setSelectedStream(option);
+  }
+
+  function playPlaybackStream(option: PlaybackSourceOption) {
+    autoPlayNextRef.current = false;
+    if (selectedStream?.sourceRef === option.sourceRef && preparation) {
+      playRequestedSourceRef.current = "";
+      setPlaying(true);
+      return;
+    }
+    playRequestedSourceRef.current = option.sourceRef;
+    setSelectedStream(option);
+  }
+
   function handleTrailerOptionKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
     if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
@@ -801,6 +839,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
 
   function closeDetails() {
     dismissTrailer();
+    setCastDrawerOpen(false);
     onClose();
   }
 
@@ -937,7 +976,43 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     const value = record(genre);
     return typeof value?.name === "string" ? value.name : "";
   }).filter(Boolean).slice(0, 4) : [];
-  const cast = visibleCast(details.raw?.cast);
+  const cast = castMembers(details.raw?.cast);
+  const previewCast = cast.slice(0, 6);
+  useEffect(() => {
+    if (!castDrawerOpen) return;
+    const trigger = castDrawerTriggerRef.current;
+    const previousBodyOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setCastDrawerOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      event.stopPropagation();
+      const drawer = castDrawerCloseRef.current?.closest<HTMLElement>(".cast-drawer");
+      const focusable = drawer ? Array.from(drawer.querySelectorAll<HTMLElement>("button:not(:disabled), [href], [tabindex]:not([tabindex='-1'])")) : [];
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown, true);
+    castDrawerCloseRef.current?.focus();
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      window.removeEventListener("keydown", handleKeyDown, true);
+      trigger?.focus();
+    };
+  }, [castDrawerOpen]);
   const backdrop = details.backgroundUrl || details.posterUrl;
   const heroArtwork = details.posterUrl || selectedEpisode?.stillUrl || details.backgroundUrl;
   const trailerURL = activeTrailer ? (() => {
@@ -1019,8 +1094,8 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
                 {genres.map((genre) => <span key={genre}>{genre}</span>)}
               </div>
 
-              {(externalTitleLinks.length > 0 || Boolean(details.sources?.length)) && <div className="details-title-links">
-                {externalTitleLinks.length > 0 && <div className="details-provider-badges" role="group" aria-label={t("media.details.externalPagesLabel")}>
+              {externalTitleLinks.length > 0 && <div className="details-title-links">
+                <div className="details-provider-badges" role="group" aria-label={t("media.details.externalPagesLabel")}>
                   {externalTitleLinks.map(({ externalID, provider, mediaType, episode }) => {
                     const label = t("media.details.openExternalPage", { provider: provider.label, id: externalID });
                     return <a key={provider.key} className={`details-provider-badge details-provider-badge--${provider.key}`} href={titleProviderURL(provider.key, externalID, mediaType, episode)} target="_blank" rel="noreferrer" aria-label={label} title={label}>
@@ -1028,8 +1103,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
                       <ExternalLink size={11} aria-hidden="true" />
                     </a>;
                   })}
-                </div>}
-                {details.sources && details.sources.length > 0 && <div className="details-sources"><span>{t("media.details.availableFrom")}</span><div>{details.sources.map((source) => <i key={source.id}>{source.title}</i>)}</div></div>}
+                </div>
               </div>}
 
               {metaLoading && !details.description
@@ -1038,10 +1112,6 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
               {metaError && <Notice tone="info">{metaError} {t("media.details.partialInformationShown")}</Notice>}
 
               <div className="details-actions">
-                {canSelectStream && <Button className="details-actions__play" disabled={!selectedStream || !preparation} loading={preparationLoading} onClick={() => setPlaying(true)}>
-                  <Play size={19} fill="currentColor" />
-                  {t(item.mediaType === "episode" ? "media.details.playEpisode" : "media.details.playSelectedStream")}
-                </Button>}
                 <Button variant="secondary" loading={saving} disabled={item.mediaType === "episode" && !libraryTitleID} onClick={() => void toggleLibrary()}>
                   {saved ? <Check size={19} /> : <Bookmark size={19} />}
                   {t(saved ? "library.actions.inLibrary" : "library.actions.add")}
@@ -1067,17 +1137,12 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
             </div>
           </div>
             {cast.length > 0 && <section className="details-cast" aria-labelledby="details-cast-title">
-              <h2 id="details-cast-title">{t("media.cast.title")}</h2>
+              <header className="details-cast__header">
+                <h2 id="details-cast-title">{t("media.cast.title")}</h2>
+                {cast.length > previewCast.length && <button ref={castDrawerTriggerRef} type="button" aria-haspopup="dialog" aria-expanded={castDrawerOpen} onClick={() => setCastDrawerOpen(true)}>{t("common.actions.viewAll")}</button>}
+              </header>
               <div className="details-cast__list">
-                {cast.map((member) => <article className="details-cast-member" key={member.id}>
-                  <span className="details-cast-member__portrait">
-                    {member.profileUrl ? <img src={member.profileUrl} alt="" loading="lazy" /> : <span>{castInitials(member.name)}</span>}
-                  </span>
-                  <span className="details-cast-member__copy">
-                    <strong>{member.name}</strong>
-                    {member.character && <small>{member.character}</small>}
-                  </span>
-                </article>)}
+                {previewCast.map((member) => <CastMemberCard member={member} key={member.id} />)}
               </div>
             </section>}
           </div>
@@ -1199,28 +1264,32 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
                       </div>
                       : availableStreams.length > 0
                         ? <div className="details-stream-list" role="radiogroup" aria-label={t("media.sources.availableLabel")}>
-                          {availableStreams.map((option) => (
-                            <button key={option.sourceRef} type="button" role="radio" aria-checked={selectedStream?.sourceRef === option.sourceRef} className={selectedStream?.sourceRef === option.sourceRef ? "is-selected" : ""} onClick={() => {
-                              autoPlayNextRef.current = false;
-                              setSelectedStream(option);
-                            }}>
-                              <span>
-                                <strong>{option.name}</strong>
-                                {option.description && <small>{option.description}</small>}
-                                {!option.description && option.filename && <small>{option.filename}</small>}
-                                <small className="details-stream-list__technical">{[option.protocol, option.container].filter(Boolean).map((value) => value!.toUpperCase()).join(" · ")}</small>
-                              </span>
-                              {selectedStream?.sourceRef === option.sourceRef && <span className="details-stream-list__state">
-                                {preparationLoading
-                                  ? <LoaderCircle className="spin" size={17} />
-                                  : preparation
-                                    ? <><Check size={17} /><small>{preparationLabel(preparation)}</small></>
-                                    : preparationError
-                                      ? <small>{t("common.status.unavailable")}</small>
-                                      : <small>{t("common.status.selected")}</small>}
-                              </span>}
-                            </button>
-                          ))}
+                          {availableStreams.map((option) => {
+                            const selected = selectedStream?.sourceRef === option.sourceRef;
+                            const playDisabled = preparationLoading || Boolean(preparationError);
+                            return <div key={option.sourceRef} className={selected ? "is-selected" : ""}>
+                              <button type="button" className="details-stream-list__option" role="radio" aria-checked={selected} onClick={() => selectPlaybackStream(option)}>
+                                <span>
+                                  <strong>{option.name}</strong>
+                                  {option.description && <small>{option.description}</small>}
+                                  {!option.description && option.filename && <small>{option.filename}</small>}
+                                  <small className="details-stream-list__technical">{[option.protocol, option.container].filter(Boolean).map((value) => value!.toUpperCase()).join(" · ")}</small>
+                                </span>
+                                {selected && <span className="details-stream-list__state">
+                                  {preparationLoading
+                                    ? <LoaderCircle className="spin" size={17} />
+                                    : preparation
+                                      ? <><Check size={17} /><small>{preparationLabel(preparation)}</small></>
+                                      : preparationError
+                                        ? <small>{t("common.status.unavailable")}</small>
+                                        : <small>{t("common.status.selected")}</small>}
+                                </span>}
+                              </button>
+                              {selected && <button type="button" className="episode-play" aria-label={`${item.mediaType === "episode" ? t("media.details.playEpisode") : t("media.details.playSelectedStream")}: ${option.name}`} disabled={playDisabled} onClick={() => playPlaybackStream(option)}>
+                                {preparationLoading ? <LoaderCircle className="spin" size={16} /> : <Play size={16} fill="currentColor" />}
+                              </button>}
+                            </div>;
+                          })}
                         </div>
                         : <Notice>{t("media.sources.empty")}</Notice>}
                   {preparationError && <Notice>{preparationError}</Notice>}
@@ -1258,6 +1327,22 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
           {activeTrailerMessage && <div className="details-trailer-feedback"><Notice tone={trailerUnavailable ? "info" : "error"}>{activeTrailerMessage}</Notice></div>}
         </div>}
       </section>
+      {castDrawerOpen && createPortal(<div className="cast-drawer-backdrop" onPointerDown={(event) => {
+        if (event.currentTarget === event.target) setCastDrawerOpen(false);
+      }}>
+        <section className="cast-drawer" role="dialog" aria-modal="true" aria-labelledby="cast-drawer-title">
+          <header>
+            <span>
+              <small>{details.title}</small>
+              <h2 id="cast-drawer-title">{t("media.cast.title")}</h2>
+            </span>
+            <button ref={castDrawerCloseRef} type="button" className="cast-drawer__close" aria-label={t("common.close")} onClick={() => setCastDrawerOpen(false)}><X size={19} /></button>
+          </header>
+          <div className="cast-drawer__list">
+            {cast.map((member) => <CastMemberCard member={member} key={member.id} />)}
+          </div>
+        </section>
+      </div>, document.body)}
     </article>
   );
 }
