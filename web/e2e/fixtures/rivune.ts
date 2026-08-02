@@ -137,6 +137,42 @@ export class RivuneHarness {
   private readonly collectionDelays = new Map<string, number>();
   private readonly seasonOverrides = new Map<string, unknown>();
   private libraryItems: Array<Record<string, unknown>> = [];
+  private operations = {
+    metadataCache: {
+      entries: 48,
+      freshEntries: 41,
+      expiredEntries: 7,
+      rootTitles: 32,
+      missingTitles: 12,
+      artworkSnapshots: 29,
+    },
+    metadataRefresh: {
+      task: "metadata-refresh" as const,
+      enabled: false,
+      intervalHours: 24,
+      language: "en",
+      batchSize: 25,
+      nextRunAt: null as string | null,
+      lastStartedAt: null as string | null,
+      lastCompletedAt: null as string | null,
+      lastStatus: null as "succeeded" | "partial" | "failed" | null,
+      lastResult: null as { candidates: number; refreshed: number; failed: number } | null,
+    },
+    housekeepingIntervalMinutes: 15,
+  };
+  private playbackActivity = {
+    summary: {
+      activeSessions: 2,
+      activeJobs: 1,
+      processingSlots: 1,
+      processingLimit: 3,
+      storageBytes: 12_582_912,
+      storageLimitBytes: 1_073_741_824,
+    },
+    diagnostics: { videoEncoder: "h264", hardwareToneMap: false },
+    sessions: [],
+    jobs: [],
+  };
 
   setMaintenance(enabled: boolean, message: string | null = null) {
     if (enabled) this.activeProfileId = "bob";
@@ -234,6 +270,47 @@ export class RivuneHarness {
     if (path === "/settings/maintenance" && request.method() === "PUT") {
       this.maintenance = body as { enabled: boolean; message: string | null };
       await json(route, this.maintenance);
+      return;
+    }
+    if (path === "/operations" && request.method() === "GET") {
+      await json(route, this.operations);
+      return;
+    }
+    if (path === "/operations/schedules/metadata-refresh" && request.method() === "PUT") {
+      const input = body as { enabled: boolean; intervalHours: number; language: string; batchSize: number };
+      this.operations.metadataRefresh = {
+        ...this.operations.metadataRefresh,
+        ...input,
+        nextRunAt: input.enabled ? "2026-08-03T00:00:00Z" : null,
+      };
+      await json(route, this.operations.metadataRefresh);
+      return;
+    }
+    const operationAction = path.match(/^\/operations\/actions\/(fetch-missing-metadata|run-housekeeping|clear-metadata-cache|clear-stream-cache)$/);
+    if (operationAction && request.method() === "POST") {
+      const action = operationAction[1];
+      let result: Record<string, unknown> = {};
+      if (action === "fetch-missing-metadata") {
+        result = { metadata: { candidates: 12, refreshed: 9, failed: 3 } };
+      } else if (action === "clear-metadata-cache") {
+        result = { metadataCache: { entriesDeleted: this.operations.metadataCache.entries } };
+        this.operations.metadataCache = { ...this.operations.metadataCache, entries: 0, freshEntries: 0, expiredEntries: 0 };
+      } else if (action === "clear-stream-cache") {
+        const { activeSessions: sessionsRemoved, activeJobs: jobsStopped, storageBytes } = this.playbackActivity.summary;
+        result = { playback: { sessionsRemoved, jobsStopped, storageBytes } };
+        this.playbackActivity.summary = {
+          ...this.playbackActivity.summary,
+          activeSessions: 0,
+          activeJobs: 0,
+          processingSlots: 0,
+          storageBytes: 0,
+        };
+      }
+      await json(route, { action, startedAt: createdAt, completedAt: createdAt, status: "succeeded", result });
+      return;
+    }
+    if (path === "/playback/activity" && request.method() === "GET") {
+      await json(route, this.playbackActivity);
       return;
     }
     if (path === "/profiles" && request.method() === "GET") { await json(route, { profiles }); return; }

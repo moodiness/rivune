@@ -13,6 +13,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/instance"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/operations"
 	"github.com/moodiness/rivune/server/internal/playback"
 	"github.com/moodiness/rivune/server/internal/profile"
 	"github.com/pb33f/libopenapi"
@@ -166,6 +167,72 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		resolve.Header.Set("Content-Type", "application/json")
 		resolveResponse := serveContractRequest(t, api, resolve, http.StatusCreated)
 		validateContractResponse(t, document, "/playback/resolve", nil, resolve, resolveResponse)
+	})
+
+	t.Run("operations", func(t *testing.T) {
+		nextRun := time.Date(2026, time.August, 3, 2, 0, 0, 0, time.UTC)
+		lastStarted := nextRun.Add(-24 * time.Hour)
+		lastCompleted := lastStarted.Add(72 * time.Second)
+		lastStatus := "partial"
+		started := time.Date(2026, time.August, 2, 14, 30, 0, 0, time.UTC)
+		completed := started.Add(42 * time.Second)
+		service := &fakeOperationsService{
+			overview: operations.OperationsOverview{
+				MetadataCache: operations.MetadataCacheStatus{
+					Entries: 1842, FreshEntries: 1730, ExpiredEntries: 112,
+					RootTitles: 920, MissingTitles: 23, ArtworkSnapshots: 917,
+				},
+				MetadataRefresh: operations.MetadataRefreshSchedule{
+					Task: "metadata-refresh", Enabled: true, IntervalHours: 24, Language: "en-US", BatchSize: 50,
+					NextRunAt: &nextRun, LastStartedAt: &lastStarted, LastCompletedAt: &lastCompleted,
+					LastStatus: &lastStatus, LastResult: &operations.MetadataRefreshResult{Candidates: 50, Refreshed: 48, Failed: 2},
+				},
+				HousekeepingIntervalMinutes: 5,
+			},
+			schedule: operations.MetadataRefreshSchedule{
+				Task: "metadata-refresh", Enabled: true, IntervalHours: 168, Language: "fr-FR", BatchSize: 25, NextRunAt: &nextRun,
+			},
+		}
+		api := authenticatedOperationsAPI(service)
+
+		overview := authenticatedContractRequest(http.MethodGet, "/api/v1/operations", nil)
+		overviewResponse := serveContractRequest(t, api, overview, http.StatusOK)
+		validateContractResponse(t, document, "/operations", nil, overview, overviewResponse)
+
+		schedule := authenticatedContractRequest(http.MethodPut, "/api/v1/operations/schedules/metadata-refresh", bytes.NewBufferString(`{"enabled":true,"intervalHours":168,"language":"fr-FR","batchSize":25}`))
+		schedule.Header.Set("Content-Type", "application/json")
+		scheduleResponse := serveContractRequest(t, api, schedule, http.StatusOK)
+		validateContractResponse(t, document, "/operations/schedules/metadata-refresh", nil, schedule, scheduleResponse)
+
+		actionFixtures := []struct {
+			name   string
+			action operations.OperationAction
+			status string
+			result operations.OperationResult
+		}{
+			{
+				name: "metadata refresh", action: operations.ActionFetchMissingMetadata, status: "partial",
+				result: operations.OperationResult{Metadata: &operations.MetadataRefreshResult{Candidates: 50, Refreshed: 48, Failed: 2}},
+			},
+			{
+				name: "metadata cache", action: operations.ActionClearMetadataCache, status: "succeeded",
+				result: operations.OperationResult{MetadataCache: &operations.MetadataCacheClearResult{EntriesDeleted: 1842}},
+			},
+			{
+				name: "playback cache", action: operations.ActionClearStreamCache, status: "succeeded",
+				result: operations.OperationResult{Playback: &playback.PurgeResult{SessionsRemoved: 11, JobsStopped: 4, StorageBytes: 0}},
+			},
+		}
+		for _, fixture := range actionFixtures {
+			t.Run(fixture.name, func(t *testing.T) {
+				service.run = operations.OperationRun{
+					Action: fixture.action, StartedAt: started, CompletedAt: completed, Status: fixture.status, Result: fixture.result,
+				}
+				action := authenticatedContractRequest(http.MethodPost, "/api/v1/operations/actions/"+string(fixture.action), nil)
+				actionResponse := serveContractRequest(t, api, action, http.StatusOK)
+				validateContractResponse(t, document, "/operations/actions/{action}", map[string]string{"action": string(fixture.action)}, action, actionResponse)
+			})
+		}
 	})
 }
 

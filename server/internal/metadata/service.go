@@ -95,11 +95,14 @@ func (s *Service) MovieDetails(ctx context.Context, principal auth.Principal, ti
 	if err := requireActiveProfile(principal); err != nil {
 		return Movie{}, err
 	}
+	return s.movieDetails(ctx, titleID, language)
+}
+
+func (s *Service) movieDetails(ctx context.Context, titleID, language string) (Movie, error) {
 	normalizedLanguage, err := normalizeLanguage(language)
 	if err != nil {
 		return Movie{}, err
 	}
-
 	externalID, cachedPayload, err := s.loadTitleMetadata(ctx, titleID, MediaTypeMovie, normalizedLanguage)
 	if errors.Is(err, ErrNotFound) {
 		externalID, err = s.resolveProviderExternalID(ctx, titleID, MediaTypeMovie)
@@ -235,6 +238,10 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 		options.EpisodeOrderID = episodeOrderID
 		return s.mappedSeriesDetails(ctx, principal, titleID, options)
 	}
+	return s.seriesDetails(ctx, titleID, options)
+}
+
+func (s *Service) seriesDetails(ctx context.Context, titleID string, options SeriesDetailsOptions) (Series, error) {
 	normalizedLanguage, err := normalizeLanguage(options.Language)
 	if err != nil {
 		return Series{}, err
@@ -340,6 +347,85 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 		return Series{}, fmt.Errorf("commit series persistence: %w", err)
 	}
 	return series, nil
+}
+
+// RefreshMissing refreshes a bounded set of root titles whose localized
+// metadata is absent or expired. Each title is persisted through the same
+// canonical detail pipeline used by interactive requests.
+func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOptions) (RefreshResult, error) {
+	language, err := normalizeLanguage(options.Language)
+	if err != nil {
+		return RefreshResult{}, err
+	}
+	if options.BatchSize < 1 || options.BatchSize > 100 {
+		return RefreshResult{}, fmt.Errorf("%w: batch size must be between 1 and 100", ErrInvalidInput)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT title.id::text, title.media_type
+		FROM titles AS title
+		LEFT JOIN title_metadata AS cached
+		  ON cached.title_id = title.id
+		 AND cached.provider = $1
+		 AND cached.language = $2
+		WHERE title.parent_id IS NULL
+		  AND title.media_type IN ('movie', 'series')
+		  AND EXISTS (
+		      SELECT 1
+		      FROM title_external_ids AS identity
+		      WHERE identity.title_id = title.id
+		        AND identity.namespace = title.media_type
+		  )
+		  AND (cached.title_id IS NULL OR cached.expires_at <= now())
+		ORDER BY cached.expires_at NULLS FIRST, title.id
+		LIMIT $3
+	`, providerName, language, options.BatchSize)
+	if err != nil {
+		return RefreshResult{}, fmt.Errorf("query metadata refresh candidates: %w", err)
+	}
+	type candidate struct {
+		titleID   string
+		mediaType string
+	}
+	candidates := make([]candidate, 0, options.BatchSize)
+	for rows.Next() {
+		var value candidate
+		if err := rows.Scan(&value.titleID, &value.mediaType); err != nil {
+			rows.Close()
+			return RefreshResult{}, fmt.Errorf("scan metadata refresh candidate: %w", err)
+		}
+		candidates = append(candidates, value)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return RefreshResult{}, fmt.Errorf("iterate metadata refresh candidates: %w", err)
+	}
+	rows.Close()
+
+	result := RefreshResult{Candidates: len(candidates)}
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			result.Failed += len(candidates) - result.Refreshed - result.Failed
+			return result, err
+		}
+		var refreshErr error
+		switch candidate.mediaType {
+		case MediaTypeMovie:
+			_, refreshErr = s.movieDetails(ctx, candidate.titleID, language)
+		case MediaTypeSeries:
+			_, refreshErr = s.seriesDetails(ctx, candidate.titleID, SeriesDetailsOptions{Language: language})
+		default:
+			refreshErr = fmt.Errorf("unsupported refresh media type %q", candidate.mediaType)
+		}
+		if refreshErr != nil {
+			result.Failed++
+			if s.logger != nil {
+				s.logger.Warn("metadata refresh candidate failed", "titleId", candidate.titleID, "mediaType", candidate.mediaType, "error", refreshErr)
+			}
+			continue
+		}
+		result.Refreshed++
+	}
+	return result, nil
 }
 
 func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, seasonID, language, mappingProvider string) (Season, error) {

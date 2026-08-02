@@ -29,6 +29,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/metadata/fanart"
 	"github.com/moodiness/rivune/server/internal/metadata/tmdb"
 	"github.com/moodiness/rivune/server/internal/metadata/tvdb"
+	"github.com/moodiness/rivune/server/internal/operations"
 	"github.com/moodiness/rivune/server/internal/playback"
 	"github.com/moodiness/rivune/server/internal/profile"
 	"github.com/moodiness/rivune/server/internal/settings"
@@ -171,6 +172,13 @@ type playbackService interface {
 	ProxyAsset(http.ResponseWriter, *http.Request, string, string, string, string, string) error
 }
 
+type operationsService interface {
+	Overview(context.Context, auth.Principal) (operations.OperationsOverview, error)
+	UpdateMetadataRefreshSchedule(context.Context, auth.Principal, operations.MetadataRefreshScheduleInput) (operations.MetadataRefreshSchedule, error)
+	RunAction(context.Context, auth.Principal, operations.OperationAction) (operations.OperationRun, error)
+	RunScheduled(context.Context) error
+}
+
 type API struct {
 	config              config.Config
 	addons              addonService
@@ -183,6 +191,7 @@ type API struct {
 	profiles            profileService
 	playback            playbackService
 	playbackMaintenance playbackMaintenanceService
+	operations          operationsService
 	settings            settingsService
 	users               userService
 	metadata            metadataService
@@ -248,6 +257,9 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		return nil, fmt.Errorf("initialize tracking integrations: %w", err)
 	}
 	metadataService := metadata.NewService(pool, metadataProvider, televisionEnricher, artworkEnricher, cfg.MetadataCacheTTL, logger)
+	operationsService := operations.NewService(
+		pool, metadataService, authService, playbackService, maintenanceInterval, logger,
+	)
 	return &API{
 		addons:              addonService,
 		config:              cfg,
@@ -264,6 +276,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		settings:            settings.NewService(pool),
 		users:               user.NewService(pool),
 		metadata:            metadataService,
+		operations:          operationsService,
 		version:             version,
 		tracking:            trackingService,
 		watchstate:          watchstate.NewService(pool, trackingService),
@@ -306,6 +319,9 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PATCH /api/v1/settings", a.requireAuthentication(a.updateInstanceSettings))
 	mux.Handle("GET /api/v1/settings/maintenance", a.requireAuthentication(a.maintenanceSettings))
 	mux.Handle("PUT /api/v1/settings/maintenance", a.requireAuthentication(a.updateMaintenanceSettings))
+	mux.Handle("GET /api/v1/operations", a.requireAuthentication(a.operationsOverview))
+	mux.Handle("PUT /api/v1/operations/schedules/metadata-refresh", a.requireAuthentication(a.updateMetadataRefreshSchedule))
+	mux.Handle("POST /api/v1/operations/actions/{action}", a.requireAuthentication(a.runOperationAction))
 	mux.Handle("GET /api/v1/profiles/{profileId}/settings", a.requireAuthentication(a.profileSettings))
 	mux.Handle("PATCH /api/v1/profiles/{profileId}/settings", a.requireAuthentication(a.updateProfileSettings))
 	mux.Handle("GET /api/v1/profiles/{profileId}/settings/effective", a.requireAuthentication(a.effectiveSettings))

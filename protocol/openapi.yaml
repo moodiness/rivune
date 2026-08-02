@@ -717,6 +717,179 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+  /operations:
+    get:
+      summary: Get the administrator Operations overview
+      description: Returns metadata-cache metrics, the durable metadata-refresh schedule, and the normal housekeeping cadence. This administrator-only status request does not mutate profiles, libraries, watch progress, title identities, canonical title snapshots, or cached metadata.
+      operationId: getOperations
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current Operations status and schedule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationsOverview"
+              example:
+                metadataCache:
+                  entries: 1842
+                  freshEntries: 1730
+                  expiredEntries: 112
+                  rootTitles: 920
+                  missingTitles: 23
+                  artworkSnapshots: 917
+                metadataRefresh:
+                  task: metadata-refresh
+                  enabled: true
+                  intervalHours: 24
+                  language: en-US
+                  batchSize: 50
+                  nextRunAt: "2026-08-03T02:00:00Z"
+                  lastStartedAt: "2026-08-02T02:00:00Z"
+                  lastCompletedAt: "2026-08-02T02:01:12Z"
+                  lastStatus: partial
+                  lastResult:
+                    candidates: 50
+                    refreshed: 48
+                    failed: 2
+                housekeepingIntervalMinutes: 5
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+  /operations/schedules/metadata-refresh:
+    put:
+      summary: Replace the metadata-refresh schedule
+      description: Persists the administrator-controlled schedule used by the existing five-minute maintenance runner. Enabled runs are claimed durably so only one server instance performs a due refresh, and manual and scheduled metadata refreshes do not overlap within a process.
+      operationId: updateMetadataRefreshSchedule
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MetadataRefreshScheduleInput"
+            example:
+              enabled: true
+              intervalHours: 24
+              language: en-US
+              batchSize: 50
+      responses:
+        "200":
+          description: The persisted metadata-refresh schedule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetadataRefreshSchedule"
+              example:
+                task: metadata-refresh
+                enabled: true
+                intervalHours: 24
+                language: en-US
+                batchSize: 50
+                nextRunAt: "2026-08-03T02:00:00Z"
+                lastStartedAt: null
+                lastCompletedAt: null
+                lastStatus: null
+                lastResult: null
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+  /operations/actions/{action}:
+    parameters:
+      - name: action
+        in: path
+        required: true
+        description: Fixed maintenance action to run synchronously.
+        schema:
+          $ref: "#/components/schemas/OperationAction"
+    post:
+      summary: Run a fixed maintenance action
+      description: |
+        Runs one administrator-only action synchronously:
+
+        - `fetch-missing-metadata` refreshes at most the saved schedule batch size in its saved language through the canonical TMDB-to-TVDB/Fanart persistence pipeline. Existing localized payloads survive provider failures.
+        - `run-housekeeping` invokes the normal stale authentication and playback cleanup.
+        - `clear-metadata-cache` deletes only localized payload rows from `title_metadata`. It preserves profiles, libraries, watch progress, stable title identities, canonical title snapshots, and artwork snapshots.
+        - `clear-stream-cache` deletes every `playback_sessions` row, stops all HLS and prewarm jobs, clears in-memory source-reference, probe, and preparation entries, and recreates the media temporary workspace. It preserves profiles, libraries, watch progress, title identities, and canonical title snapshots.
+      operationId: runOperationAction
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Completed maintenance action and its action-specific result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationRun"
+              examples:
+                fetchMissingMetadata:
+                  summary: A bounded refresh with provider failures
+                  value:
+                    action: fetch-missing-metadata
+                    startedAt: "2026-08-02T14:30:00Z"
+                    completedAt: "2026-08-02T14:30:42Z"
+                    status: partial
+                    result:
+                      metadata:
+                        candidates: 50
+                        refreshed: 48
+                        failed: 2
+                runHousekeeping:
+                  summary: Normal stale authentication and playback cleanup
+                  value:
+                    action: run-housekeeping
+                    startedAt: "2026-08-02T14:35:00Z"
+                    completedAt: "2026-08-02T14:35:03Z"
+                    status: succeeded
+                    result:
+                      playback:
+                        sessionsRemoved: 2
+                        jobsStopped: 1
+                        storageBytes: 1048576
+                clearMetadataCache:
+                  summary: Localized metadata payload rows cleared
+                  value:
+                    action: clear-metadata-cache
+                    startedAt: "2026-08-02T14:40:00Z"
+                    completedAt: "2026-08-02T14:40:01Z"
+                    status: succeeded
+                    result:
+                      metadataCache:
+                        entriesDeleted: 1842
+                clearStreamCache:
+                  summary: Playback state, media jobs, and temporary media cleared
+                  value:
+                    action: clear-stream-cache
+                    startedAt: "2026-08-02T14:45:00Z"
+                    completedAt: "2026-08-02T14:45:04Z"
+                    status: succeeded
+                    result:
+                      playback:
+                        sessionsRemoved: 4
+                        jobsStopped: 2
+                        storageBytes: 0
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
   /profiles/{profileId}/settings:
     parameters:
       - $ref: "#/components/parameters/ProfileId"
@@ -3479,6 +3652,162 @@ components:
           description: Optional public message shown to clients while maintenance mode is enabled.
           type: [string, "null"]
           maxLength: 500
+    OperationAction:
+      description: Administrator maintenance action exposed by the Operations API.
+      type: string
+      enum: [fetch-missing-metadata, run-housekeeping, clear-metadata-cache, clear-stream-cache]
+    MetadataRefreshResult:
+      type: object
+      additionalProperties: false
+      required: [candidates, refreshed, failed]
+      properties:
+        candidates:
+          description: Titles selected for this bounded refresh attempt.
+          type: integer
+          minimum: 0
+        refreshed:
+          description: Selected titles whose localized metadata was refreshed successfully.
+          type: integer
+          minimum: 0
+        failed:
+          description: Selected titles that retained stale data because refresh failed.
+          type: integer
+          minimum: 0
+    MetadataRefreshScheduleInput:
+      type: object
+      additionalProperties: false
+      required: [enabled, intervalHours, language, batchSize]
+      properties:
+        enabled:
+          type: boolean
+        intervalHours:
+          description: Fixed interval between durably claimed metadata-refresh runs.
+          type: integer
+          enum: [6, 12, 24, 168]
+        language:
+          description: BCP 47 language tag used for localized metadata.
+          type: string
+        batchSize:
+          description: Maximum number of missing or expired localized title payloads refreshed by one run.
+          type: integer
+          minimum: 1
+          maximum: 100
+    MetadataRefreshSchedule:
+      type: object
+      additionalProperties: false
+      required: [task, enabled, intervalHours, language, batchSize, nextRunAt, lastStartedAt, lastCompletedAt, lastStatus, lastResult]
+      properties:
+        task:
+          type: string
+          const: metadata-refresh
+        enabled:
+          type: boolean
+        intervalHours:
+          type: integer
+          enum: [6, 12, 24, 168]
+        language:
+          type: string
+        batchSize:
+          type: integer
+          minimum: 1
+          maximum: 100
+        nextRunAt:
+          description: Next eligible durable claim time, or null when scheduling is disabled.
+          type: [string, "null"]
+          format: date-time
+        lastStartedAt:
+          description: Most recent claimed run start, or null before the first run.
+          type: [string, "null"]
+          format: date-time
+        lastCompletedAt:
+          description: Most recent completed run time, or null before the first completed run.
+          type: [string, "null"]
+          format: date-time
+        lastStatus:
+          description: Outcome of the most recent completed run, or null before the first completed run.
+          type: [string, "null"]
+          enum: [succeeded, partial, failed, null]
+        lastResult:
+          description: Counts from the most recent completed run, or null before the first completed run.
+          anyOf:
+            - $ref: "#/components/schemas/MetadataRefreshResult"
+            - type: "null"
+    MetadataCacheStatus:
+      type: object
+      additionalProperties: false
+      required: [entries, freshEntries, expiredEntries, rootTitles, missingTitles, artworkSnapshots]
+      properties:
+        entries:
+          description: Localized payload rows currently stored in `title_metadata`.
+          type: integer
+          minimum: 0
+        freshEntries:
+          description: Localized payload rows whose freshness window has not expired.
+          type: integer
+          minimum: 0
+        expiredEntries:
+          description: Localized payload rows whose freshness window has expired.
+          type: integer
+          minimum: 0
+        rootTitles:
+          description: Eligible top-level movie and series root titles considered for metadata refresh.
+          type: integer
+          minimum: 0
+        missingTitles:
+          description: Eligible root titles without a fresh localized metadata payload in the scheduled language, including absent and expired rows.
+          type: integer
+          minimum: 0
+        artworkSnapshots:
+          description: Root title snapshots with at least one nonblank canonical artwork reference; these snapshots are stored independently from localized payload rows.
+          type: integer
+          minimum: 0
+    OperationsOverview:
+      type: object
+      additionalProperties: false
+      required: [metadataCache, metadataRefresh, housekeepingIntervalMinutes]
+      properties:
+        metadataCache:
+          $ref: "#/components/schemas/MetadataCacheStatus"
+        metadataRefresh:
+          $ref: "#/components/schemas/MetadataRefreshSchedule"
+        housekeepingIntervalMinutes:
+          description: Cadence of the existing maintenance runner that checks housekeeping and due metadata refreshes.
+          type: integer
+          minimum: 1
+    OperationRun:
+      type: object
+      additionalProperties: false
+      required: [action, startedAt, completedAt, status, result]
+      properties:
+        action:
+          $ref: "#/components/schemas/OperationAction"
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [succeeded, partial, failed]
+        result:
+          description: Action-specific counts. Metadata refreshes set `metadata`; metadata-cache clears set `metadataCache`; housekeeping and stream-cache clears set `playback`.
+          type: object
+          additionalProperties: false
+          properties:
+            metadata:
+              $ref: "#/components/schemas/MetadataRefreshResult"
+            metadataCache:
+              type: object
+              additionalProperties: false
+              required: [entriesDeleted]
+              properties:
+                entriesDeleted:
+                  description: Localized `title_metadata` payload rows deleted.
+                  type: integer
+                  minimum: 0
+            playback:
+              $ref: "#/components/schemas/PlaybackPurgeResult"
     MaintenanceModeError:
       type: object
       additionalProperties: false

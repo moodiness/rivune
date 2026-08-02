@@ -1,4 +1,4 @@
-import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Cpu, Database, ExternalLink, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Languages, Layers3, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, X } from "lucide-react";
+import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Clock3, Cpu, Database, ExternalLink, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Languages, Layers3, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, Wrench, X } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
@@ -6,15 +6,16 @@ import { AddTile, Button, ConfirmDialog, EmptyState, IconButton, Modal, Notice, 
 import { interfaceLanguages, translate, type TranslationKey } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
-import type { AddonManifest, AvatarPreset, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, InstalledAddon, InterfaceLanguage, MaintenanceSettings, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
+import type { AddonManifest, AvatarPreset, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, InstalledAddon, InterfaceLanguage, MaintenanceSettings, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
 
-type AdminTab = "profiles" | "addons" | "collections" | "activity" | "settings";
+type AdminTab = "profiles" | "addons" | "collections" | "activity" | "operations" | "settings";
 
 const tabs: Array<{ id: AdminTab; labelKey: TranslationKey; descriptionKey: TranslationKey; icon: typeof Users; adminOnly?: boolean }> = [
   { id: "profiles", labelKey: "admin.tabs.profiles.label", descriptionKey: "admin.tabs.profiles.description", icon: Users },
   { id: "addons", labelKey: "admin.tabs.addons.label", descriptionKey: "admin.tabs.addons.description", icon: Boxes },
   { id: "collections", labelKey: "admin.tabs.collections.label", descriptionKey: "admin.tabs.collections.description", icon: Layers3 },
   { id: "activity", labelKey: "admin.tabs.activity.label", descriptionKey: "admin.tabs.activity.description", icon: Activity, adminOnly: true },
+  { id: "operations", labelKey: "admin.tabs.operations.label", descriptionKey: "admin.tabs.operations.description", icon: Wrench, adminOnly: true },
   { id: "settings", labelKey: "admin.tabs.settings.label", descriptionKey: "admin.tabs.settings.description", icon: Settings2 },
 ];
 
@@ -41,10 +42,11 @@ export function AdminPage() {
   const isAdmin = account?.user.role === "admin";
   const visibleTabs = tabs.filter((item) => !item.adminOnly || isAdmin);
   const [tab, setTab] = useState<AdminTab>(() => canManage ? "profiles" : "settings");
+  const selectedTab = !canManage ? "settings" : visibleTabs.some((item) => item.id === tab) ? tab : "profiles";
 
   useEffect(() => {
     if (!canManage) setTab("settings");
-    else if (tab === "activity" && !isAdmin) setTab("profiles");
+    else if (!tabs.some((item) => item.id === tab && (!item.adminOnly || isAdmin))) setTab("profiles");
   }, [canManage, isAdmin, tab]);
 
   return <div className="standard-page admin-page page-enter">
@@ -60,8 +62,8 @@ export function AdminPage() {
       </div>
     </header>
     <div className={`admin-layout ${canManage ? "" : "admin-layout--preferences"}`}>
-      {canManage && <nav className="admin-tabs" aria-label={translate("admin.tabs.navigationLabel")}>{visibleTabs.map((item) => { const Icon = item.icon; return <button type="button" aria-current={tab === item.id ? "page" : undefined} key={item.id} className={tab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}><span><Icon size={20} aria-hidden="true" /></span><div><strong>{translate(item.labelKey)}</strong><small>{translate(item.descriptionKey)}</small></div><ChevronDown size={17} aria-hidden="true" /></button>; })}</nav>}
-      <section className="admin-panel">{tab === "profiles" ? <ProfilesAdmin /> : tab === "addons" ? <AddonsAdmin /> : tab === "collections" ? <CollectionsAdmin /> : tab === "activity" ? <ActivityAdmin /> : <SettingsAdmin />}</section>
+      {canManage && <nav className="admin-tabs" aria-label={translate("admin.tabs.navigationLabel")}>{visibleTabs.map((item) => { const Icon = item.icon; return <button type="button" aria-current={selectedTab === item.id ? "page" : undefined} key={item.id} className={selectedTab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}><span><Icon size={20} aria-hidden="true" /></span><div><strong>{translate(item.labelKey)}</strong><small>{translate(item.descriptionKey)}</small></div><ChevronDown size={17} aria-hidden="true" /></button>; })}</nav>}
+      <section className="admin-panel">{selectedTab === "profiles" ? <ProfilesAdmin /> : selectedTab === "addons" ? <AddonsAdmin /> : selectedTab === "collections" ? <CollectionsAdmin /> : selectedTab === "activity" ? <ActivityAdmin /> : selectedTab === "operations" ? <OperationsAdmin /> : <SettingsAdmin />}</section>
     </div>
   </div>;
 }
@@ -1278,11 +1280,267 @@ function numericList(value: string): number[] {
   return value.split(",").map((part) => Number(part.trim())).filter((number) => Number.isInteger(number) && number > 0);
 }
 
+const metadataRefreshIntervals: MetadataRefreshScheduleInput["intervalHours"][] = [6, 12, 24, 168];
+
+const operationActionCards: Array<{
+  action: OperationAction;
+  icon: typeof Database;
+  destructive: boolean;
+  titleKey: TranslationKey;
+  descriptionKey: TranslationKey;
+  scopeKey: TranslationKey;
+}> = [
+  { action: "fetch-missing-metadata", icon: Sparkles, destructive: false, titleKey: "admin.operations.actions.metadata.title", descriptionKey: "admin.operations.actions.metadata.description", scopeKey: "admin.operations.actions.metadata.scope" },
+  { action: "run-housekeeping", icon: Wrench, destructive: false, titleKey: "admin.operations.actions.housekeeping.title", descriptionKey: "admin.operations.actions.housekeeping.description", scopeKey: "admin.operations.actions.housekeeping.scope" },
+  { action: "clear-metadata-cache", icon: Database, destructive: true, titleKey: "admin.operations.actions.clearMetadata.title", descriptionKey: "admin.operations.actions.clearMetadata.description", scopeKey: "admin.operations.actions.clearMetadata.scope" },
+  { action: "clear-stream-cache", icon: HardDrive, destructive: true, titleKey: "admin.operations.actions.clearStream.title", descriptionKey: "admin.operations.actions.clearStream.description", scopeKey: "admin.operations.actions.clearStream.scope" },
+];
+
+function metadataRefreshInput(schedule: OperationsOverview["metadataRefresh"]): MetadataRefreshScheduleInput {
+  return {
+    enabled: schedule.enabled,
+    intervalHours: metadataRefreshIntervals.includes(schedule.intervalHours as MetadataRefreshScheduleInput["intervalHours"])
+      ? schedule.intervalHours as MetadataRefreshScheduleInput["intervalHours"]
+      : 24,
+    language: schedule.language,
+    batchSize: schedule.batchSize,
+  };
+}
+function OperationsAdmin() {
+  const [overview, setOverview] = useState<OperationsOverview | null>(null);
+  const [activity, setActivity] = useState<PlaybackActivity | null>(null);
+  const [streamAvailable, setStreamAvailable] = useState(false);
+  const [schedule, setSchedule] = useState<MetadataRefreshScheduleInput>({ enabled: false, intervalHours: 24, language: "en", batchSize: 25 });
+  const [savedSchedule, setSavedSchedule] = useState<MetadataRefreshScheduleInput>({ enabled: false, intervalHours: 24, language: "en", batchSize: 25 });
+  const [maintenance, setMaintenance] = useState<MaintenanceSettings>({ enabled: false, message: null });
+  const [savedMaintenance, setSavedMaintenance] = useState<MaintenanceSettings>({ enabled: false, message: null });
+  const [lastRuns, setLastRuns] = useState<Partial<Record<OperationAction, OperationRun>>>({});
+  const [confirmAction, setConfirmAction] = useState<OperationAction | null>(null);
+  const [runningAction, setRunningAction] = useState<OperationAction | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [savingMaintenance, setSavingMaintenance] = useState(false);
+  const [error, setError] = useState("");
+  const scheduleDirty = JSON.stringify(schedule) !== JSON.stringify(savedSchedule);
+  const maintenanceDirty = maintenance.enabled !== savedMaintenance.enabled || maintenance.message !== savedMaintenance.message;
+  const scheduleValid = schedule.language.trim().length > 0 && Number.isInteger(schedule.batchSize) && schedule.batchSize >= 1 && schedule.batchSize <= 100;
+
+  async function load(silent = false) {
+    if (!silent) setRefreshing(true);
+    try {
+      const playbackRequest = api.playbackActivity().then((value) => ({ value })).catch(() => ({ value: null }));
+      const [nextOverview, nextMaintenance, playback] = await Promise.all([api.operations(), api.maintenanceSettings(), playbackRequest]);
+      const nextSchedule = metadataRefreshInput(nextOverview.metadataRefresh);
+      setOverview(nextOverview);
+      setActivity(playback.value);
+      setStreamAvailable(playback.value !== null);
+      setSchedule(nextSchedule);
+      setSavedSchedule(nextSchedule);
+      setMaintenance(nextMaintenance);
+      setSavedMaintenance(nextMaintenance);
+      setError("");
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.operations.errors.load"), translate("admin.operations.errors.loadTitle")));
+    } finally {
+      setLoading(false);
+      if (!silent) setRefreshing(false);
+    }
+  }
+
+  useEffect(() => {
+    void load(true);
+    let active = true;
+    const interval = window.setInterval(() => {
+      void api.playbackActivity().then((value) => {
+        if (active) {
+          setActivity(value);
+          setStreamAvailable(true);
+        }
+      }).catch(() => {
+        if (active) setStreamAvailable(false);
+      });
+    }, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  async function saveSchedule() {
+    if (!scheduleDirty || !scheduleValid) return;
+    setSavingSchedule(true);
+    setError("");
+    try {
+      const input = { ...schedule, language: schedule.language.trim() };
+      const updated = await api.updateMetadataRefreshSchedule(input);
+      const nextSchedule = metadataRefreshInput(updated);
+      setSchedule(nextSchedule);
+      setSavedSchedule(nextSchedule);
+      setOverview((current) => current ? { ...current, metadataRefresh: updated } : current);
+      notifySuccess(translate("admin.operations.schedule.savedMessage"), translate("admin.operations.schedule.savedTitle"));
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.operations.errors.saveSchedule"), translate("admin.operations.errors.saveScheduleTitle")));
+    } finally {
+      setSavingSchedule(false);
+    }
+  }
+
+  async function saveMaintenance() {
+    setSavingMaintenance(true);
+    setError("");
+    try {
+      const updated = await api.updateMaintenanceSettings(maintenance);
+      setMaintenance(updated);
+      setSavedMaintenance(updated);
+      notifySuccess(translate("admin.maintenance.saved"), translate("admin.maintenance.savedTitle"));
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.maintenance.error"), translate("admin.maintenance.title")));
+    } finally {
+      setSavingMaintenance(false);
+    }
+  }
+
+  function operationResultMessage(run: OperationRun): string {
+    if (run.result.metadata) return translate("admin.operations.notifications.metadataResult", { candidates: run.result.metadata.candidates, refreshed: run.result.metadata.refreshed, failed: run.result.metadata.failed });
+    if (run.result.metadataCache) return translate("admin.operations.notifications.metadataCacheResult", { entriesDeleted: run.result.metadataCache.entriesDeleted });
+    if (run.result.playback) return translate("admin.operations.notifications.playbackResult", { sessionsRemoved: run.result.playback.sessionsRemoved, jobsStopped: run.result.playback.jobsStopped, storageBytes: run.result.playback.storageBytes });
+    return translate("admin.operations.notifications.completed");
+  }
+
+  async function runAction(action: OperationAction) {
+    setRunningAction(action);
+    setError("");
+    try {
+      const run = await api.runOperation(action);
+      setLastRuns((current) => ({ ...current, [action]: run }));
+      const title = translate(run.status === "failed" ? "admin.operations.notifications.failedTitle" : run.status === "partial" ? "admin.operations.notifications.partialTitle" : "admin.operations.notifications.succeededTitle");
+      if (run.status === "failed") notifyErrorMessage(operationResultMessage(run), title);
+      else notifySuccess(operationResultMessage(run), title);
+      const [nextOverview, nextActivity] = await Promise.all([
+        api.operations().catch(() => null),
+        api.playbackActivity().catch(() => null),
+      ]);
+      if (nextOverview) {
+        setOverview(nextOverview);
+        const nextSchedule = metadataRefreshInput(nextOverview.metadataRefresh);
+        setSchedule(nextSchedule);
+        setSavedSchedule(nextSchedule);
+      }
+      if (nextActivity) {
+        setActivity(nextActivity);
+        setStreamAvailable(true);
+      }
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.operations.errors.runAction"), translate("admin.operations.errors.runActionTitle")));
+    } finally {
+      setRunningAction(null);
+    }
+  }
+
+  async function runConfirmedAction() {
+    if (!confirmAction) return;
+    await runAction(confirmAction);
+    setConfirmAction(null);
+  }
+
+  if (loading) return <div className="admin-section operations-admin">
+    <div className="admin-section__header"><div><span>{translate("admin.operations.eyebrow")}</span><h2>{translate("admin.operations.title")}</h2><p>{translate("admin.operations.description")}</p></div></div>
+    <div className="admin-loading-state" role="status"><LoaderCircle className="spin" /><strong>{translate("admin.operations.loadingTitle")}</strong><span>{translate("admin.operations.loadingDescription")}</span></div>
+  </div>;
+
+  if (!overview) return <div className="admin-section operations-admin">
+    <div className="admin-section__header"><div><span>{translate("admin.operations.eyebrow")}</span><h2>{translate("admin.operations.title")}</h2><p>{translate("admin.operations.description")}</p></div><Button variant="secondary" onClick={() => void load()} loading={refreshing}><RefreshCw size={16} /> {translate("common.actions.tryAgain")}</Button></div>
+    {error && <Notice>{error}</Notice>}
+  </div>;
+
+  const cache = overview.metadataCache;
+  const refresh = overview.metadataRefresh;
+  const stream = activity?.summary;
+  return <div className="admin-section operations-admin">
+    <div className="admin-section__header"><div><span>{translate("admin.operations.eyebrow")}</span><h2>{translate("admin.operations.title")}</h2><p>{translate("admin.operations.description")}</p></div><div className="admin-section__actions"><Button variant="secondary" onClick={() => void load()} loading={refreshing} disabled={scheduleDirty || maintenanceDirty || Boolean(runningAction) || savingSchedule || savingMaintenance}><RefreshCw size={16} /> {translate("common.actions.refresh")}</Button></div></div>
+    {error && <Notice>{error}</Notice>}
+
+    <section className="operations-panel" aria-labelledby="operations-metadata-title">
+      <header><div><span>{translate("admin.operations.metadata.eyebrow")}</span><h3 id="operations-metadata-title">{translate("admin.operations.metadata.title")}</h3><p>{translate("admin.operations.metadata.description")}</p></div><small>{translate("admin.operations.metadata.housekeepingInterval", { count: overview.housekeepingIntervalMinutes })}</small></header>
+      <div className="operations-metrics" aria-label={translate("admin.operations.metadata.metricsLabel")}>
+        <OperationMetric icon={<Database />} value={cache.entries} label={translate("admin.operations.metadata.entries")} />
+        <OperationMetric icon={<Check />} value={cache.freshEntries} label={translate("admin.operations.metadata.fresh")} tone="success" />
+        <OperationMetric icon={<Clock3 />} value={cache.expiredEntries} label={translate("admin.operations.metadata.expired")} tone="warning" />
+        <OperationMetric icon={<Film />} value={cache.rootTitles} label={translate("admin.operations.metadata.rootTitles")} />
+        <OperationMetric icon={<RefreshCw />} value={cache.missingTitles} label={translate("admin.operations.metadata.missingTitles")} tone="warning" />
+        <OperationMetric icon={<ImagePlus />} value={cache.artworkSnapshots} label={translate("admin.operations.metadata.artworkSnapshots")} />
+      </div>
+    </section>
+
+    <section className="operations-panel operations-schedule" aria-labelledby="operations-schedule-title">
+      <header><div><span>{translate("admin.operations.schedule.eyebrow")}</span><h3 id="operations-schedule-title">{translate("admin.operations.schedule.title")}</h3><p>{translate("admin.operations.schedule.description")}</p></div><span className={`settings-save-state ${scheduleDirty ? "is-dirty" : "is-saved"}`} role="status" aria-live="polite">{savingSchedule ? <><LoaderCircle size={14} className="spin" /> {translate("common.status.saving")}</> : scheduleDirty ? <><Save size={14} /> {translate("common.status.unsavedChanges")}</> : <><Check size={14} /> {translate("common.status.saved")}</>}</span></header>
+      <div className="operations-schedule__form">
+        <div className="setting-control setting-control--toggle">
+          <label className="toggle-field"><input type="checkbox" checked={schedule.enabled} disabled={savingSchedule || Boolean(runningAction)} onChange={(event) => setSchedule((current) => ({ ...current, enabled: event.target.checked }))} /><span><i /><div><strong>{translate("admin.operations.schedule.enabled")}</strong><small>{translate("admin.operations.schedule.enabledDescription")}</small></div></span></label>
+        </div>
+        <label className="field"><span>{translate("admin.operations.schedule.interval")}</span><div><select value={schedule.intervalHours} disabled={savingSchedule || Boolean(runningAction)} onChange={(event) => setSchedule((current) => ({ ...current, intervalHours: Number(event.target.value) as MetadataRefreshScheduleInput["intervalHours"] }))}>{metadataRefreshIntervals.map((hours) => <option key={hours} value={hours}>{translate(hours === 6 ? "admin.operations.schedule.interval6" : hours === 12 ? "admin.operations.schedule.interval12" : hours === 24 ? "admin.operations.schedule.interval24" : "admin.operations.schedule.interval168")}</option>)}</select></div></label>
+        <label className="field"><span>{translate("admin.operations.schedule.language")}</span><div><Languages size={17} aria-hidden="true" /><input value={schedule.language} disabled={savingSchedule || Boolean(runningAction)} maxLength={35} autoComplete="off" spellCheck={false} placeholder="en" aria-invalid={schedule.language.trim().length === 0} aria-describedby="operations-language-help" onChange={(event) => setSchedule((current) => ({ ...current, language: event.target.value }))} /></div><small id="operations-language-help">{translate("admin.operations.schedule.languageHelp")}</small></label>
+        <label className="field"><span>{translate("admin.operations.schedule.batchSize")}</span><div><input type="number" value={schedule.batchSize} min={1} max={100} step={1} disabled={savingSchedule || Boolean(runningAction)} aria-invalid={!Number.isInteger(schedule.batchSize) || schedule.batchSize < 1 || schedule.batchSize > 100} aria-describedby="operations-batch-help" onChange={(event) => setSchedule((current) => ({ ...current, batchSize: Number(event.target.value) }))} /></div><small id="operations-batch-help">{translate("admin.operations.schedule.batchSizeHelp")}</small></label>
+      </div>
+      <div className="operations-schedule__state" aria-label={translate("admin.operations.schedule.stateLabel")}>
+        <OperationState label={translate("admin.operations.schedule.nextRun")} value={refresh.nextRunAt ? formatOperationsDate(refresh.nextRunAt) : translate(refresh.enabled ? "admin.operations.schedule.pending" : "admin.operations.schedule.disabled")} />
+        <OperationState label={translate("admin.operations.schedule.lastStarted")} value={refresh.lastStartedAt ? formatOperationsDate(refresh.lastStartedAt) : translate("admin.operations.never")} />
+        <OperationState label={translate("admin.operations.schedule.lastCompleted")} value={refresh.lastCompletedAt ? formatOperationsDate(refresh.lastCompletedAt) : translate("admin.operations.never")} />
+        <OperationState label={translate("admin.operations.schedule.lastStatus")} value={translate(refresh.lastStatus ? `admin.operations.status.${refresh.lastStatus}` as TranslationKey : "admin.operations.never")} tone={refresh.lastStatus ?? ""} />
+      </div>
+      {refresh.lastResult && <p className="operations-result" role="status">{translate("admin.operations.schedule.lastResult", { candidates: refresh.lastResult.candidates, refreshed: refresh.lastResult.refreshed, failed: refresh.lastResult.failed })}</p>}
+      <footer><div><strong>{translate(schedule.enabled ? "admin.operations.schedule.enabledSummary" : "admin.operations.schedule.disabledSummary")}</strong><small>{translate("admin.operations.schedule.durableDescription")}</small></div><Button variant="secondary" disabled={!scheduleDirty || savingSchedule} onClick={() => setSchedule(savedSchedule)}>{translate("common.actions.discardChanges")}</Button><Button loading={savingSchedule} disabled={!scheduleDirty || !scheduleValid || Boolean(runningAction)} onClick={() => void saveSchedule()}><Save size={17} /> {translate("admin.operations.schedule.save")}</Button></footer>
+    </section>
+
+    <section className="operations-panel" aria-labelledby="operations-stream-title">
+      <header><div><span>{translate("admin.operations.stream.eyebrow")}</span><h3 id="operations-stream-title">{translate("admin.operations.stream.title")}</h3><p>{translate("admin.operations.stream.description")}</p></div><small>{translate(streamAvailable ? "admin.operations.stream.live" : "admin.operations.stream.unavailable")}</small></header>
+      <div className="operations-metrics operations-metrics--stream" aria-label={translate("admin.operations.stream.metricsLabel")} aria-live="polite">
+        <OperationMetric icon={<Radio />} value={stream?.activeSessions ?? 0} label={translate("admin.operations.stream.sessions")} tone="success" />
+        <OperationMetric icon={<Cpu />} value={stream?.activeJobs ?? 0} label={translate("admin.operations.stream.jobs")} />
+        <OperationMetric icon={<HardDrive />} value={formatBytes(stream?.storageBytes ?? 0)} label={translate("admin.operations.stream.storage")} />
+        <OperationMetric icon={<Server />} value={`${stream?.processingSlots ?? 0} / ${stream?.processingLimit ?? 0}`} label={translate("admin.operations.stream.processing")} />
+      </div>
+    </section>
+
+    <section className="operations-actions" aria-labelledby="operations-actions-title">
+      <header><span>{translate("admin.operations.actions.eyebrow")}</span><h3 id="operations-actions-title">{translate("admin.operations.actions.title")}</h3><p>{translate("admin.operations.actions.description")}</p></header>
+      <div className="operations-action-grid">{operationActionCards.map((card) => {
+        const Icon = card.icon;
+        const lastRun = lastRuns[card.action];
+        return <article className={`operation-action-card ${card.destructive ? "is-destructive" : ""}`} key={card.action}>
+          <header><span><Icon aria-hidden="true" /></span><div><h4>{translate(card.titleKey)}</h4><p>{translate(card.descriptionKey)}</p></div></header>
+          <div className="operation-action-card__scope"><Shield size={15} aria-hidden="true" /><span>{translate(card.scopeKey)}</span></div>
+          {lastRun && <small className={`operation-action-card__result is-${lastRun.status}`} role="status">{translate(`admin.operations.status.${lastRun.status}` as TranslationKey)} · {formatOperationsDate(lastRun.completedAt)}</small>}
+          <Button variant={card.destructive ? "danger" : "secondary"} aria-label={translate("admin.operations.actions.runNamed", { action: translate(card.titleKey) })} loading={runningAction === card.action} disabled={Boolean(runningAction) || savingSchedule || savingMaintenance || (card.action === "fetch-missing-metadata" && scheduleDirty)} onClick={() => card.destructive ? setConfirmAction(card.action) : void runAction(card.action)}>{card.destructive ? <Trash2 size={16} /> : <RefreshCw size={16} />} {translate(runningAction === card.action ? "admin.operations.actions.running" : "admin.operations.actions.run")}</Button>
+        </article>;
+      })}</div>
+    </section>
+
+    <MaintenanceCard values={maintenance} onChange={setMaintenance} onSave={() => void saveMaintenance()} onReset={() => setMaintenance(savedMaintenance)} saving={savingMaintenance} dirty={maintenanceDirty} />
+
+    {confirmAction && <ConfirmDialog title={translate(confirmAction === "clear-metadata-cache" ? "admin.operations.confirm.metadataTitle" : "admin.operations.confirm.streamTitle")} description={translate(confirmAction === "clear-metadata-cache" ? "admin.operations.confirm.metadataDescription" : "admin.operations.confirm.streamDescription")} confirmLabel={translate(confirmAction === "clear-metadata-cache" ? "admin.operations.confirm.metadataConfirm" : "admin.operations.confirm.streamConfirm")} loading={runningAction === confirmAction} onConfirm={() => void runConfirmedAction()} onCancel={() => setConfirmAction(null)} />}
+  </div>;
+}
+
+function OperationMetric({ icon, value, label, tone = "" }: { icon: React.ReactNode; value: string | number; label: string; tone?: "success" | "warning" | "" }) {
+  return <article className={`operation-metric ${tone ? `is-${tone}` : ""}`}><span aria-hidden="true">{icon}</span><div><strong>{value}</strong><small>{label}</small></div></article>;
+}
+
+function OperationState({ label, value, tone = "" }: { label: string; value: string; tone?: "succeeded" | "partial" | "failed" | "" }) {
+  return <div className={`operation-state ${tone ? `is-${tone}` : ""}`}><small>{label}</small><strong>{value}</strong></div>;
+}
+
+function formatOperationsDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
 function ActivityAdmin() {
   const [activity, setActivity] = useState<PlaybackActivity | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [purging, setPurging] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [selectedSession, setSelectedSession] = useState<PlaybackActivitySession | null>(null);
   const [error, setError] = useState("");
@@ -1325,21 +1583,6 @@ function ActivityAdmin() {
     };
   }, []);
 
-  async function purge() {
-    setPurging(true);
-    try {
-      const result = await api.purgePlaybackActivity();
-      const messageKey = result.sessionsRemoved === 1
-        ? result.jobsStopped === 1 ? "admin.activity.notifications.purgedMessageOneSessionOneJob" : "admin.activity.notifications.purgedMessageOneSession"
-        : result.jobsStopped === 1 ? "admin.activity.notifications.purgedMessageOneJob" : "admin.activity.notifications.purgedMessage";
-      notifySuccess(translate(messageKey, { sessionsRemoved: result.sessionsRemoved, jobsStopped: result.jobsStopped }), translate("admin.activity.notifications.purgedTitle"));
-      await load(true);
-    } catch (cause) {
-      setError(notifyError(cause, translate("admin.activity.errors.purge"), translate("admin.activity.errors.purgeTitle")));
-    } finally {
-      setPurging(false);
-    }
-  }
 
   async function stopSession() {
     if (!selectedSession) return;
@@ -1363,7 +1606,7 @@ function ActivityAdmin() {
   </div>;
   const summary = activity?.summary;
   return <div className="admin-section activity-admin">
-    <div className="admin-section__header"><div><span>{translate("admin.activity.eyebrow")}</span><h2>{translate("admin.activity.title")}</h2><p>{translate("admin.activity.description")}</p></div><div className="admin-section__actions"><Button variant="secondary" onClick={() => void load()} loading={refreshing}><RefreshCw size={16} /> {translate("common.actions.refresh")}</Button><Button variant="secondary" className="admin-maintenance-action" onClick={() => void purge()} loading={purging}><HardDrive size={16} /> {translate("admin.activity.actions.purge")}</Button></div></div>
+    <div className="admin-section__header"><div><span>{translate("admin.activity.eyebrow")}</span><h2>{translate("admin.activity.title")}</h2><p>{translate("admin.activity.description")}</p></div><div className="admin-section__actions"><Button variant="secondary" onClick={() => void load()} loading={refreshing}><RefreshCw size={16} /> {translate("common.actions.refresh")}</Button></div></div>
     {error && <Notice>{error}</Notice>}
     <div className="activity-overview" aria-label={translate("admin.activity.overview.label")} aria-live="polite">
       <ActivityMetric icon={<Radio />} label={translate("admin.activity.overview.sessions")} value={String(summary?.activeSessions ?? 0)} detail={translate((summary?.activeJobs ?? 0) === 1 ? "admin.activity.overview.mediaJobsOne" : "admin.activity.overview.mediaJobsMany", { count: summary?.activeJobs ?? 0 })} />
@@ -1519,10 +1762,7 @@ function SettingsAdmin() {
   const [profile, setProfile] = useState<SettingsValues>({});
   const [savedProfile, setSavedProfile] = useState<SettingsValues>({});
   const [inherited, setInherited] = useState<SettingsValues>({});
-  const [maintenance, setMaintenance] = useState<MaintenanceSettings>({ enabled: false, message: null });
-  const [savedMaintenance, setSavedMaintenance] = useState<MaintenanceSettings>({ enabled: false, message: null });
   const [saving, setSaving] = useState(false);
-  const [savingMaintenance, setSavingMaintenance] = useState(false);
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
   const settingsTargetRef = useRef(settingsTarget);
@@ -1532,8 +1772,7 @@ function SettingsAdmin() {
   const serverSelected = settingsTarget === "server";
   const targetProfile = account?.profiles.find((candidate) => candidate.id === settingsTarget) ?? activeProfile;
   const settingsDirty = serverSelected ? JSON.stringify(instance) !== JSON.stringify(savedInstance) : JSON.stringify(profile) !== JSON.stringify(savedProfile);
-  const maintenanceDirty = maintenance.enabled !== savedMaintenance.enabled || maintenance.message !== savedMaintenance.message;
-  const hasUnsavedChanges = settingsDirty || (serverSelected && maintenanceDirty);
+  const hasUnsavedChanges = settingsDirty;
   const overrideCount = Object.values(serverSelected ? instance : profile).filter((value) => value !== null && value !== undefined).length;
 
   useEffect(() => {
@@ -1548,12 +1787,10 @@ function SettingsAdmin() {
     setError("");
     void (async () => {
       if (target === "server") {
-        const [layer, maintenanceSettings] = await Promise.all([api.instanceSettings(), api.maintenanceSettings()]);
+        const layer = await api.instanceSettings();
         if (!current) return;
         setInstance(layer.settings);
         setSavedInstance(layer.settings);
-        setMaintenance(maintenanceSettings);
-        setSavedMaintenance(maintenanceSettings);
         setInherited({});
         return;
       }
@@ -1603,20 +1840,6 @@ function SettingsAdmin() {
     }
   }
 
-  async function saveMaintenance() {
-    setSavingMaintenance(true);
-    setError("");
-    try {
-      const updated = await api.updateMaintenanceSettings(maintenance);
-      setMaintenance(updated);
-      setSavedMaintenance(updated);
-      notifySuccess(translate("admin.maintenance.saved"), translate("admin.maintenance.savedTitle"));
-    } catch (cause) {
-      setError(notifyError(cause, translate("admin.maintenance.error"), translate("admin.maintenance.title")));
-    } finally {
-      setSavingMaintenance(false);
-    }
-  }
 
   if (!loaded) return <Skeleton className="settings-skeleton" />;
   const profileName = targetProfile?.name ?? translate("settings.scope.profileFallback");
@@ -1632,14 +1855,11 @@ function SettingsAdmin() {
           ? translate("settings.scope.serverDefaultCount", { count: overrideCount })
           : translate(overrideCount === 1 ? "settings.scope.profileOverrideCountOne" : "settings.scope.profileOverrideCountMany", { count: overrideCount })}</span>
       </div>
-      {canManageProfiles && <label className="field settings-profile-picker"><span>{translate("settings.scope.switch")}</span><div>{serverSelected ? <Server size={18} /> : <CircleUserRound size={18} />}<select value={settingsTarget} disabled={saving || savingMaintenance || hasUnsavedChanges} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">{translate("settings.scope.serverDefaults")}</option>}{account?.profiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{translate("settings.scope.profileOption", { profileName: candidate.name })}</option>)}</select></div>{hasUnsavedChanges && <small>{translate("settings.scope.unsavedSwitchHint")}</small>}</label>}
+      {canManageProfiles && <label className="field settings-profile-picker"><span>{translate("settings.scope.switch")}</span><div>{serverSelected ? <Server size={18} /> : <CircleUserRound size={18} />}<select value={settingsTarget} disabled={saving || hasUnsavedChanges} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">{translate("settings.scope.serverDefaults")}</option>}{account?.profiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{translate("settings.scope.profileOption", { profileName: candidate.name })}</option>)}</select></div>{hasUnsavedChanges && <small>{translate("settings.scope.unsavedSwitchHint")}</small>}</label>}
     </div>
     {error && <Notice>{error}</Notice>}
     {serverSelected
-      ? <>
-        <SettingsCard title={translate("settings.server.title")} description={translate("settings.server.description")} icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void save()} onReset={() => setInstance(savedInstance)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.rivune")} />
-        <MaintenanceCard values={maintenance} onChange={setMaintenance} onSave={() => void saveMaintenance()} onReset={() => setMaintenance(savedMaintenance)} saving={savingMaintenance} dirty={maintenanceDirty} />
-      </>
+      ? <SettingsCard title={translate("settings.server.title")} description={translate("settings.server.description")} icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void save()} onReset={() => setInstance(savedInstance)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.rivune")} />
       : <>
         <SettingsCard title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void save()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />
         <TrackingSettings profileId={settingsTarget} />
@@ -1823,9 +2043,9 @@ function MaintenanceCard({ values, onChange, onSave, onReset, saving, dirty }: {
     <header><span><Shield /></span><div><small>{translate("admin.maintenance.eyebrow")}</small><h3>{translate("admin.maintenance.title")}</h3><p>{translate("admin.maintenance.description")}</p></div><span className={`settings-save-state ${dirty ? "is-dirty" : "is-saved"}`} role="status" aria-live="polite">{saving ? <><LoaderCircle size={14} className="spin" /> {translate("common.status.saving")}</> : dirty ? <><Save size={14} /> {translate("common.status.unsavedChanges")}</> : <><Check size={14} /> {translate("common.status.saved")}</>}</span></header>
     <div className="maintenance-settings__body">
       <div className="setting-control setting-control--toggle">
-        <label className="toggle-field"><input type="checkbox" checked={values.enabled} onChange={(event) => onChange({ ...values, enabled: event.target.checked })} /><span><i /><div><strong>{translate("admin.maintenance.enabled")}</strong><small>{translate("admin.maintenance.enabledDescription")}</small></div></span></label>
+        <label className="toggle-field"><input type="checkbox" checked={values.enabled} disabled={saving} onChange={(event) => onChange({ ...values, enabled: event.target.checked })} /><span><i /><div><strong>{translate("admin.maintenance.enabled")}</strong><small>{translate("admin.maintenance.enabledDescription")}</small></div></span></label>
       </div>
-      <label className="field"><span>{translate("admin.maintenance.message")}</span><div><textarea value={message} placeholder={translate("admin.maintenance.placeholder")} onChange={(event) => { if (countCodePoints(event.target.value) <= 500) onChange({ ...values, message: event.target.value || null }); }} /></div><small>{translate("admin.maintenance.characterCount", { count: countCodePoints(message) })}</small></label>
+      <label className="field"><span>{translate("admin.maintenance.message")}</span><div><textarea value={message} disabled={saving} placeholder={translate("admin.maintenance.placeholder")} onChange={(event) => { if (countCodePoints(event.target.value) <= 500) onChange({ ...values, message: event.target.value || null }); }} /></div><small>{translate("admin.maintenance.characterCount", { count: countCodePoints(message) })}</small></label>
     </div>
     <footer><div><strong>{translate(values.enabled ? "admin.maintenance.accessBlocked" : "admin.maintenance.accessAvailable")}</strong><small>{translate("admin.maintenance.separateSaveDescription")}</small></div><Button variant="secondary" disabled={!dirty || saving} onClick={onReset}>{translate("common.actions.discardChanges")}</Button><Button loading={saving} disabled={!dirty} onClick={onSave}><Check size={18} /> {translate("admin.maintenance.save")}</Button></footer>
   </section>;

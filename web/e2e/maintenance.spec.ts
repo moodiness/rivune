@@ -31,9 +31,8 @@ test("maintenance profile gate shows its default message when none is configured
 
 test("administrator can update the global maintenance settings", async ({ page, rivune }) => {
   await page.goto("/#admin");
-  await page.getByRole("button", { name: /Settings/ }).click();
-  await expect(page.locator(".preferences-workspace > footer")).toHaveCount(0);
-  await page.getByLabel("Switch scope").selectOption("server");
+  await page.getByRole("button", { name: /Operations/ }).click();
+  await expect(page.getByRole("heading", { name: "Operations" })).toBeVisible();
 
   await page.getByLabel("Block member access").check();
   await page.getByLabel("Public message").fill("Back after the upgrade");

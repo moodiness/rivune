@@ -27,16 +27,24 @@ type mediaProbeCall struct {
 }
 
 type mediaProbeCache struct {
-	mu       sync.Mutex
-	entries  map[string]mediaProbeCacheEntry
-	inFlight map[string]*mediaProbeCall
-	now      func() time.Time
+	mu         sync.Mutex
+	entries    map[string]mediaProbeCacheEntry
+	inFlight   map[string]*mediaProbeCall
+	generation uint64
+	now        func() time.Time
 }
 
 func newMediaProbeCache(now func() time.Time) *mediaProbeCache {
 	return &mediaProbeCache{
 		entries: make(map[string]mediaProbeCacheEntry), inFlight: make(map[string]*mediaProbeCall), now: now,
 	}
+}
+
+func (cache *mediaProbeCache) clear() {
+	cache.mu.Lock()
+	cache.generation++
+	clear(cache.entries)
+	cache.mu.Unlock()
 }
 
 func (service *Service) probeMedia(ctx context.Context, asset storedAsset) (MediaInspection, error) {
@@ -62,6 +70,7 @@ func (service *Service) probeMedia(ctx context.Context, asset storedAsset) (Medi
 		}
 	}
 	call := &mediaProbeCall{done: make(chan struct{})}
+	generation := cache.generation
 	cache.inFlight[key] = call
 	cache.mu.Unlock()
 
@@ -72,7 +81,7 @@ func (service *Service) probeMedia(ctx context.Context, asset storedAsset) (Medi
 		cache.mu.Lock()
 		call.inspection = cloneMediaInspection(inspection)
 		call.err = err
-		if err == nil {
+		if err == nil && cache.generation == generation {
 			cache.removeExpiredLocked()
 			for len(cache.entries) >= maximumMediaProbeCache {
 				cache.removeEarliestLocked()

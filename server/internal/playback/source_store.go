@@ -41,6 +41,12 @@ func newSourceReferenceStore(now func() time.Time) *sourceReferenceStore {
 	return &sourceReferenceStore{entries: make(map[string]sourceReference), now: now}
 }
 
+func (store *sourceReferenceStore) clear() {
+	store.mu.Lock()
+	clear(store.entries)
+	store.mu.Unlock()
+}
+
 func (store *sourceReferenceStore) put(reference sourceReference) (sourceReference, error) {
 	identifier, err := newOpaqueReference()
 	if err != nil {

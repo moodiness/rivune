@@ -123,6 +123,9 @@ func maintenanceExemptRequest(r *http.Request) bool {
 	if path == "/api/v1/auth/logout" || path == "/api/v1/auth/me" || path == "/api/v1/profiles/selection" {
 		return true
 	}
+	if path == "/api/v1/operations" || strings.HasPrefix(path, "/api/v1/operations/") {
+		return true
+	}
 	if r.Method == http.MethodGet && (path == "/api/v1/profiles" || strings.HasSuffix(path, "/avatar") && strings.HasPrefix(path, "/api/v1/profiles/")) {
 		return true
 	}

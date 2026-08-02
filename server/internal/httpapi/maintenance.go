@@ -16,16 +16,20 @@ type playbackMaintenanceService interface {
 	Cleanup(context.Context) error
 }
 
-// RunMaintenance performs an immediate cleanup and then repeats until ctx is canceled.
-func (a *API) RunMaintenance(ctx context.Context) {
-	runMaintenance(ctx, a.logger, a.authMaintenance, a.playbackMaintenance, maintenanceInterval)
+type operationsMaintenanceService interface {
+	RunScheduled(context.Context) error
 }
 
-func runMaintenance(ctx context.Context, logger *slog.Logger, authService authMaintenanceService, playbackService playbackMaintenanceService, interval time.Duration) {
+// RunMaintenance performs an immediate cleanup and then repeats until ctx is canceled.
+func (a *API) RunMaintenance(ctx context.Context) {
+	runMaintenance(ctx, a.logger, a.authMaintenance, a.playbackMaintenance, maintenanceInterval, a.operations)
+}
+
+func runMaintenance(ctx context.Context, logger *slog.Logger, authService authMaintenanceService, playbackService playbackMaintenanceService, interval time.Duration, operationsServices ...operationsMaintenanceService) {
 	if ctx.Err() != nil {
 		return
 	}
-	runMaintenancePass(ctx, logger, authService, playbackService)
+	runMaintenancePass(ctx, logger, authService, playbackService, operationsServices...)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -34,12 +38,12 @@ func runMaintenance(ctx context.Context, logger *slog.Logger, authService authMa
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			runMaintenancePass(ctx, logger, authService, playbackService)
+			runMaintenancePass(ctx, logger, authService, playbackService, operationsServices...)
 		}
 	}
 }
 
-func runMaintenancePass(ctx context.Context, logger *slog.Logger, authService authMaintenanceService, playbackService playbackMaintenanceService) {
+func runMaintenancePass(ctx context.Context, logger *slog.Logger, authService authMaintenanceService, playbackService playbackMaintenanceService, operationsServices ...operationsMaintenanceService) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -54,6 +58,17 @@ func runMaintenancePass(ctx context.Context, logger *slog.Logger, authService au
 	if playbackService != nil {
 		if err := playbackService.Cleanup(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("scheduled playback cleanup failed", "error", err)
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	for _, operationsService := range operationsServices {
+		if operationsService == nil {
+			continue
+		}
+		if err := operationsService.RunScheduled(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("scheduled metadata refresh failed", "error", err)
 		}
 	}
 }

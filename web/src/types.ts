@@ -437,6 +437,50 @@ export type PlaybackActivity = {
   jobs: PlaybackMediaJob[];
 };
 export type PlaybackPurgeResult = { sessionsRemoved: number; jobsStopped: number; storageBytes: number };
+export type OperationAction = "fetch-missing-metadata" | "run-housekeeping" | "clear-metadata-cache" | "clear-stream-cache";
+export type MetadataRefreshResult = { candidates: number; refreshed: number; failed: number };
+export type MetadataRefreshScheduleInput = {
+  enabled: boolean;
+  intervalHours: 6 | 12 | 24 | 168;
+  language: string;
+  batchSize: number;
+};
+export type MetadataRefreshSchedule = {
+  task: "metadata-refresh";
+  enabled: boolean;
+  intervalHours: number;
+  language: string;
+  batchSize: number;
+  nextRunAt: string | null;
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
+  lastStatus: "succeeded" | "partial" | "failed" | null;
+  lastResult: MetadataRefreshResult | null;
+};
+export type MetadataCacheStatus = {
+  entries: number;
+  freshEntries: number;
+  expiredEntries: number;
+  rootTitles: number;
+  missingTitles: number;
+  artworkSnapshots: number;
+};
+export type OperationsOverview = {
+  metadataCache: MetadataCacheStatus;
+  metadataRefresh: MetadataRefreshSchedule;
+  housekeepingIntervalMinutes: number;
+};
+export type OperationRun = {
+  action: OperationAction;
+  startedAt: string;
+  completedAt: string;
+  status: "succeeded" | "partial" | "failed";
+  result: {
+    metadata?: MetadataRefreshResult;
+    metadataCache?: { entriesDeleted: number };
+    playback?: PlaybackPurgeResult;
+  };
+};
 export type PlaybackProgress = { titleId: string; mediaType?: string; positionSeconds: number; durationSeconds: number; completed: boolean; version: number; updatedAt?: string };
 export type LibraryItem = {
   titleId: string;

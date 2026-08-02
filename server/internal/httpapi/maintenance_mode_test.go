@@ -30,6 +30,7 @@ func TestMaintenanceModeEnforcementBoundaries(t *testing.T) {
 		{name: "logout remains available", role: "member", path: "/api/v1/auth/logout", enabled: true, wantCode: http.StatusNoContent},
 		{name: "manager profile application request remains available", role: "member", activeProfileCanManage: true, path: "/api/v1/collections", enabled: true, wantCode: http.StatusNoContent},
 		{name: "viewer profile stays blocked for administrator account", role: "admin", path: "/api/v1/collections", enabled: true, wantCode: http.StatusServiceUnavailable, wantError: "maintenance_mode"},
+		{name: "operations remain available for administrator account with viewer profile", role: "admin", path: "/api/v1/operations", enabled: true, wantCode: http.StatusNoContent},
 		{name: "viewer profile recovers after disable", role: "member", path: "/api/v1/collections", enabled: false, wantCode: http.StatusNoContent},
 	}
 	for _, test := range tests {

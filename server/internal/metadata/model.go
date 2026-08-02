@@ -36,6 +36,17 @@ type SeriesDetailsOptions struct {
 	EpisodeOrderID  string
 }
 
+type RefreshMissingOptions struct {
+	Language  string
+	BatchSize int
+}
+
+type RefreshResult struct {
+	Candidates int `json:"candidates"`
+	Refreshed  int `json:"refreshed"`
+	Failed     int `json:"failed"`
+}
+
 type SearchOptions struct {
 	QueryOptions
 	Query string

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -318,11 +319,54 @@ func (service *Service) Cleanup(ctx context.Context) error {
 	return err
 }
 
+// RunHousekeeping performs the normal stale playback cleanup and returns its
+// aggregate result for the trusted operations service.
+func (service *Service) RunHousekeeping(ctx context.Context) (PurgeResult, error) {
+	return service.cleanupActivity(ctx)
+}
+
 func (service *Service) PurgeActivity(ctx context.Context, principal auth.Principal) (PurgeResult, error) {
 	if principal.Role != "admin" {
 		return PurgeResult{}, ErrForbidden
 	}
 	return service.cleanupActivity(ctx)
+}
+
+// ResetCache removes every persisted playback session, stops all processing
+// jobs, clears ephemeral playback decisions, and recreates the media workspace.
+// Authorization is enforced by the operations service that exposes this
+// trusted maintenance primitive.
+func (service *Service) ResetCache(ctx context.Context) (PurgeResult, error) {
+	command, err := service.pool.Exec(ctx, "DELETE FROM playback_sessions")
+	if err != nil {
+		return PurgeResult{}, fmt.Errorf("delete playback sessions: %w", err)
+	}
+	result := PurgeResult{SessionsRemoved: int(command.RowsAffected())}
+	result.JobsStopped = service.stopAllHLSJobs()
+	service.references.clear()
+	service.probes.clear()
+	service.preparations.clear()
+	if err := os.RemoveAll(service.mediaOptions.TempDirectory); err != nil {
+		return result, fmt.Errorf("clear media workspace: %w", err)
+	}
+	if err := os.MkdirAll(service.mediaOptions.TempDirectory, 0o700); err != nil {
+		return result, fmt.Errorf("recreate media workspace: %w", err)
+	}
+	result.StorageBytes = directorySize(service.mediaOptions.TempDirectory)
+	return result, nil
+}
+
+func (service *Service) stopAllHLSJobs() int {
+	service.hlsMu.Lock()
+	keys := make([]string, 0, len(service.hlsJobs))
+	for key := range service.hlsJobs {
+		keys = append(keys, key)
+	}
+	service.hlsMu.Unlock()
+	for _, key := range keys {
+		service.stopHLSJob(key)
+	}
+	return len(keys)
 }
 
 func (service *Service) cleanupActivity(ctx context.Context) (PurgeResult, error) {

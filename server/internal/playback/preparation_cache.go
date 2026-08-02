@@ -31,16 +31,24 @@ type playbackPreparationCall struct {
 }
 
 type playbackPreparationCache struct {
-	mu       sync.Mutex
-	entries  map[string]playbackPreparationEntry
-	inFlight map[string]*playbackPreparationCall
-	now      func() time.Time
+	mu         sync.Mutex
+	entries    map[string]playbackPreparationEntry
+	inFlight   map[string]*playbackPreparationCall
+	generation uint64
+	now        func() time.Time
 }
 
 func newPlaybackPreparationCache(now func() time.Time) *playbackPreparationCache {
 	return &playbackPreparationCache{
 		entries: make(map[string]playbackPreparationEntry), inFlight: make(map[string]*playbackPreparationCall), now: now,
 	}
+}
+
+func (cache *playbackPreparationCache) clear() {
+	cache.mu.Lock()
+	cache.generation++
+	clear(cache.entries)
+	cache.mu.Unlock()
 }
 
 func (service *Service) preparedPlayback(ctx context.Context, principal auth.Principal, reference sourceReference) (preparedPlayback, error) {
@@ -62,6 +70,7 @@ func (service *Service) preparedPlayback(ctx context.Context, principal auth.Pri
 		}
 	}
 	call := &playbackPreparationCall{done: make(chan struct{})}
+	generation := cache.generation
 	cache.inFlight[reference.ID] = call
 	cache.mu.Unlock()
 
@@ -72,7 +81,7 @@ func (service *Service) preparedPlayback(ctx context.Context, principal auth.Pri
 		cache.mu.Lock()
 		call.playback = clonePreparedPlayback(playback)
 		call.err = err
-		if err == nil {
+		if err == nil && cache.generation == generation {
 			cache.entries[reference.ID] = playbackPreparationEntry{playback: clonePreparedPlayback(playback), expiresAt: reference.ExpiresAt}
 		}
 		delete(cache.inFlight, reference.ID)
