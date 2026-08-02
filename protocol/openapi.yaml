@@ -3,7 +3,7 @@ info:
   title: Rivune API
   version: 1.3.0
   description: >
-    Protocol version 16 between Rivune clients and a self-hosted Rivune Server.
+    Protocol version 17 between Rivune clients and a self-hosted Rivune Server.
     While global maintenance mode is enabled, authenticated non-admin application
     operations return the reusable 503 MaintenanceMode response. Authentication,
     session recovery, health, discovery, and administrator operations remain available.
@@ -1773,9 +1773,10 @@ paths:
       parameters:
         - $ref: "#/components/parameters/Language"
         - $ref: "#/components/parameters/SeriesMappingProvider"
+        - $ref: "#/components/parameters/EpisodeOrder"
       responses:
         "200":
-          description: Localized series metadata with either TMDB or official TVDB seasons.
+          description: Localized series metadata with the selected TMDB or TVDB episode order hierarchy.
           content:
             application/json:
               schema:
@@ -2557,6 +2558,13 @@ components:
         type: string
         enum: [tmdb, tvdb]
         default: tmdb
+    EpisodeOrder:
+      name: episodeOrder
+      in: query
+      description: Optional TVDB season type ID selected from the series episodeOrders list. Requires mappingProvider=tvdb.
+      schema:
+        type: string
+        pattern: "^[1-9][0-9]{0,18}$"
     Region:
       name: region
       in: query
@@ -2922,7 +2930,7 @@ components:
             $ref: "#/components/schemas/AddonResourceFailure"
     Discovery:
       type: object
-      required: [name, serverVersion, protocolVersion, apiBaseUrl, setupRequired, timezone]
+      required: [name, serverVersion, protocolVersion, apiBaseUrl, setupRequired, timezone, interfaceLanguage]
       properties:
         name:
           type: string
@@ -2930,7 +2938,7 @@ components:
           type: string
         protocolVersion:
           type: integer
-          const: 16
+          const: 17
         apiBaseUrl:
           type: string
         setupRequired:
@@ -2938,6 +2946,8 @@ components:
         timezone:
           type: string
           description: IANA timezone configured by the server operator.
+        interfaceLanguage:
+          $ref: "#/components/schemas/InterfaceLanguage"
 
     Health:
       type: object
@@ -3065,7 +3075,7 @@ components:
           format: uuid
     Account:
       type: object
-      required: [user, session, profiles]
+      required: [user, session, profiles, maintenance]
       properties:
         user:
           type: object
@@ -3097,6 +3107,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Profile"
+        maintenance:
+          $ref: "#/components/schemas/MaintenanceSettings"
     SessionList:
       type: object
       required: [sessions]
@@ -3493,6 +3505,10 @@ components:
       additionalProperties: false
       minProperties: 1
       properties:
+        interfaceLanguage:
+          anyOf:
+            - $ref: "#/components/schemas/InterfaceLanguage"
+            - type: "null"
         theme:
           anyOf:
             - type: string
@@ -3573,6 +3589,10 @@ components:
           type: [integer, "null"]
           minimum: 5
           maximum: 300
+    InterfaceLanguage:
+      type: string
+      description: Language used by the Rivune interface.
+      enum: [en, fr, es, it, de, ru, pt-PT, pt-BR, ar, ja, ko, zh-CN, pl, hy, es-MX, es-AR, es-CL, es-CO, es-PE, fr-CA, zh-TW, nl, sv, da, fi, nb, tr, uk, cs, sk, ro, el, he, hi, id, vi, th, hu, bg, hr, sr, ms, ca, fa, fil]
     LanguagePreference:
       type: string
       description: The value auto or a BCP 47 language tag.
@@ -3589,6 +3609,8 @@ components:
       type: object
       additionalProperties: false
       properties:
+        interfaceLanguage:
+          $ref: "#/components/schemas/InterfaceLanguage"
         theme:
           type: string
           enum: [system, light, dark]
@@ -3750,12 +3772,14 @@ components:
         settings:
           allOf:
             - $ref: "#/components/schemas/SettingsValues"
-            - required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
+            - required: [interfaceLanguage, theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
         sources:
           type: object
           additionalProperties: false
-          required: [theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
+          required: [interfaceLanguage, theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
           properties:
+            interfaceLanguage:
+              $ref: "#/components/schemas/SettingSource"
             theme:
               $ref: "#/components/schemas/SettingSource"
             maximumResolution:
@@ -3997,6 +4021,9 @@ components:
         backdropUrl:
           type: string
           format: uri
+        logoUrl:
+          type: string
+          format: uri
         tagline:
           type: string
         runtimeMinutes:
@@ -4057,6 +4084,9 @@ components:
         backdropUrl:
           type: string
           format: uri
+        logoUrl:
+          type: string
+          format: uri
         tagline:
           type: string
         status:
@@ -4090,6 +4120,9 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EpisodeOrder"
+        selectedEpisodeOrderId:
+          type: string
+          pattern: "^[1-9][0-9]{0,18}$"
         mappingProvider:
           type: string
           enum: [tmdb, tvdb]
@@ -4444,7 +4477,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [addon_catalog, tmdb, trakt]
+          enum: [addon_catalog, tmdb, trakt, mdblist]
         title:
           type: string
           minLength: 1
@@ -4455,6 +4488,8 @@ components:
           $ref: "#/components/schemas/CollectionTMDBSource"
         trakt:
           $ref: "#/components/schemas/CollectionTraktSource"
+        mdblist:
+          $ref: "#/components/schemas/CollectionMDBListSource"
       description: Exactly one configuration object matching kind is required.
     PortableCollectionAddonCatalogSource:
       type: object
@@ -4557,7 +4592,7 @@ components:
           format: uuid
         kind:
           type: string
-          enum: [addon_catalog, tmdb, trakt]
+          enum: [addon_catalog, tmdb, trakt, mdblist]
         title:
           type: string
           minLength: 1
@@ -4568,6 +4603,8 @@ components:
           $ref: "#/components/schemas/CollectionTMDBSource"
         trakt:
           $ref: "#/components/schemas/CollectionTraktSource"
+        mdblist:
+          $ref: "#/components/schemas/CollectionMDBListSource"
       description: Exactly one configuration object matching kind is required.
     CollectionAddonCatalogSource:
       type: object
@@ -4711,6 +4748,24 @@ components:
         sortHow:
           type: string
           enum: [asc, desc]
+    CollectionMDBListSource:
+      type: object
+      additionalProperties: false
+      required: [listId, mediaType, sort, order]
+      properties:
+        listId:
+          type: integer
+          format: int64
+          minimum: 1
+        mediaType:
+          type: string
+          enum: [movie, series]
+        sort:
+          type: string
+          enum: [added, budget, imdbpopular, imdbrating, imdbvotes, last_air_date, letterrating, lettervotes, metacritic, myanimelist, random, rank, released, releasedigital, revenue, rogerebert, rtaudience, rtomatoes, runtime, score, score_average, sort_title, title, tmdbpopular, usort]
+        order:
+          type: string
+          enum: [asc, desc]
     ResolvedCollectionFolder:
       type: object
       additionalProperties: false
@@ -4785,7 +4840,7 @@ components:
           format: uuid
         kind:
           type: string
-          enum: [addon_catalog, tmdb, trakt]
+          enum: [addon_catalog, tmdb, trakt, mdblist]
         title:
           type: string
         addonId:
@@ -4801,7 +4856,7 @@ components:
           format: uuid
         kind:
           type: string
-          enum: [addon_catalog, tmdb, trakt]
+          enum: [addon_catalog, tmdb, trakt, mdblist]
         code:
           type: string
           enum: [collection_provider_unavailable, collection_addon_not_found, collection_source_unsupported, collection_source_timeout, collection_source_failed]

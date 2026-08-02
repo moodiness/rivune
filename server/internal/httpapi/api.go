@@ -20,11 +20,13 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/calendar"
 	"github.com/moodiness/rivune/server/internal/collection"
+	collectionmdblist "github.com/moodiness/rivune/server/internal/collection/mdblist"
 	collectiontrakt "github.com/moodiness/rivune/server/internal/collection/trakt"
 
 	"github.com/moodiness/rivune/server/internal/config"
 	"github.com/moodiness/rivune/server/internal/instance"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/metadata/fanart"
 	"github.com/moodiness/rivune/server/internal/metadata/tmdb"
 	"github.com/moodiness/rivune/server/internal/metadata/tvdb"
 	"github.com/moodiness/rivune/server/internal/playback"
@@ -36,7 +38,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/webui"
 )
 
-const protocolVersion = 16
+const protocolVersion = 17
 
 type instanceService interface {
 	Info(context.Context) (instance.Info, error)
@@ -67,7 +69,7 @@ type profileService interface {
 	Create(context.Context, auth.Principal, profile.CreateInput) (profile.Profile, error)
 	Update(context.Context, auth.Principal, string, profile.UpdateInput) (profile.Profile, error)
 	Delete(context.Context, auth.Principal, string) error
-	Select(context.Context, auth.Principal, string, *string) (profile.Selection, error)
+	Select(context.Context, auth.Principal, string, *string, bool) (profile.Selection, error)
 	ClearSelection(context.Context, auth.Principal) error
 	SetAvatarPreset(context.Context, auth.Principal, string, string) (profile.Profile, error)
 	SetAvatarImage(context.Context, auth.Principal, string, []byte) (profile.Profile, error)
@@ -131,7 +133,7 @@ type metadataService interface {
 	MovieDetails(context.Context, auth.Principal, string, string) (metadata.Movie, error)
 	DiscoverSeries(context.Context, auth.Principal, metadata.QueryOptions) (metadata.SeriesPage, error)
 	SearchSeries(context.Context, auth.Principal, metadata.SearchOptions) (metadata.SeriesPage, error)
-	SeriesDetails(context.Context, auth.Principal, string, string, string) (metadata.Series, error)
+	SeriesDetails(context.Context, auth.Principal, string, metadata.SeriesDetailsOptions) (metadata.Series, error)
 	SeasonDetails(context.Context, auth.Principal, string, string, string) (metadata.Season, error)
 	Trailers(context.Context, auth.Principal, string, string, string, *int) (metadata.TrailerList, error)
 }
@@ -216,10 +218,18 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	if cfg.TVDBAPIKey != "" {
 		televisionEnricher = tvdb.New(cfg.TVDBAPIKey, cfg.TVDBPIN, nil)
 	}
+	var artworkEnricher metadata.ArtworkEnricher
+	if cfg.FanartAPIKey != "" {
+		artworkEnricher = fanart.New(cfg.FanartAPIKey, cfg.FanartClientKey, nil)
+	}
 	addonService := addon.NewService(pool, nil)
 	var collectionTrakt collection.TraktProvider
 	if cfg.TraktClientID != "" {
 		collectionTrakt = collectiontrakt.New(cfg.TraktClientID, nil)
+	}
+	var collectionMDBList collection.MDBListProvider
+	if cfg.MDBListAPIKey != "" {
+		collectionMDBList = collectionmdblist.New(cfg.MDBListAPIKey, nil)
 	}
 	mediaProcessor, err := playback.NewFFmpegProcessor(cfg.FFmpegPath, cfg.FFprobePath, cfg.RemuxConcurrency, cfg.TranscodeThreads, playback.FFmpegOptions{
 		HardwareAcceleration: cfg.HardwareAcceleration,
@@ -237,12 +247,12 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	if err != nil {
 		return nil, fmt.Errorf("initialize tracking integrations: %w", err)
 	}
-	metadataService := metadata.NewService(pool, metadataProvider, televisionEnricher, cfg.MetadataCacheTTL, logger)
+	metadataService := metadata.NewService(pool, metadataProvider, televisionEnricher, artworkEnricher, cfg.MetadataCacheTTL, logger)
 	return &API{
 		addons:              addonService,
 		config:              cfg,
 		calendar:            calendar.NewService(pool, metadataService, logger),
-		collections:         collection.NewService(pool, addonService, collectionTMDB, collectionTrakt),
+		collections:         collection.NewService(pool, addonService, collectionTMDB, collectionTrakt, collectionMDBList),
 		pool:                pool,
 		instances:           instance.NewService(pool, cfg.SetupToken, cfg.Timezone),
 		auth:                authService,
@@ -388,18 +398,30 @@ func (a *API) discovery(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "read instance discovery state", err)
 		return
 	}
+	interfaceLanguage := settings.DefaultInterfaceLanguage
+	if !info.SetupRequired {
+		instanceSettings, err := a.settings.Instance(r.Context())
+		if err != nil {
+			a.internalError(w, "read instance discovery settings", err)
+			return
+		}
+		if instanceSettings.Values.InterfaceLanguage != nil {
+			interfaceLanguage = *instanceSettings.Values.InterfaceLanguage
+		}
+	}
 
 	apiBaseURL := "/api/v1"
 	if a.config.PublicURL != "" {
 		apiBaseURL = a.config.PublicURL + apiBaseURL
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":            info.Name,
-		"serverVersion":   a.version,
-		"protocolVersion": protocolVersion,
-		"apiBaseUrl":      apiBaseURL,
-		"setupRequired":   info.SetupRequired,
-		"timezone":        a.config.Timezone,
+		"name":              info.Name,
+		"serverVersion":     a.version,
+		"protocolVersion":   protocolVersion,
+		"apiBaseUrl":        apiBaseURL,
+		"setupRequired":     info.SetupRequired,
+		"timezone":          a.config.Timezone,
+		"interfaceLanguage": interfaceLanguage,
 	})
 }
 

@@ -11,7 +11,7 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 
 object RivuneProtocol {
-    const val VERSION: Int = 16
+    const val VERSION: Int = 17
 }
 
 object UUIDSerializer : KSerializer<UUID> {
@@ -28,6 +28,7 @@ data class Discovery(
     val apiBaseUrl: String,
     val setupRequired: Boolean,
     val timezone: String,
+    val interfaceLanguage: String,
 )
 
 @Serializable
@@ -134,6 +135,7 @@ data class Movie(
     val releaseDate: String? = null,
     val posterUrl: String? = null,
     val backdropUrl: String? = null,
+    val logoUrl: String? = null,
     val tagline: String? = null,
     val runtimeMinutes: Int? = null,
     val genres: List<Genre>,
@@ -154,6 +156,7 @@ data class Series(
     val lastAirDate: String? = null,
     val posterUrl: String? = null,
     val backdropUrl: String? = null,
+    val logoUrl: String? = null,
     val tagline: String? = null,
     val status: String? = null,
     val numberOfSeasons: Int? = null,

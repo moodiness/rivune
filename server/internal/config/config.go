@@ -41,6 +41,9 @@ type Config struct {
 	RefreshTokenTTL       time.Duration
 	ProfileGrantTTL       time.Duration
 	TMDBAccessToken       string
+	FanartAPIKey          string
+	FanartClientKey       string
+	MDBListAPIKey         string
 	MetadataCacheTTL      time.Duration
 	TVDBAPIKey            string
 	TVDBPIN               string
@@ -66,6 +69,9 @@ func Load() (Config, error) {
 		Timezone:             envOrDefault("TZ", defaultTimezone),
 		SetupToken:           strings.TrimSpace(os.Getenv("RIVUNE_SETUP_TOKEN")),
 		TMDBAccessToken:      strings.TrimSpace(os.Getenv("RIVUNE_TMDB_ACCESS_TOKEN")),
+		FanartAPIKey:         strings.TrimSpace(os.Getenv("RIVUNE_FANART_API_KEY")),
+		FanartClientKey:      strings.TrimSpace(os.Getenv("RIVUNE_FANART_CLIENT_KEY")),
+		MDBListAPIKey:        strings.TrimSpace(os.Getenv("RIVUNE_MDBLIST_API_KEY")),
 		TVDBAPIKey:           strings.TrimSpace(os.Getenv("RIVUNE_TVDB_API_KEY")),
 		TVDBPIN:              strings.TrimSpace(os.Getenv("RIVUNE_TVDB_PIN")),
 		TraktClientID:        strings.TrimSpace(os.Getenv("RIVUNE_TRAKT_CLIENT_ID")),
@@ -104,6 +110,9 @@ func Load() (Config, error) {
 	}
 	if cfg.TVDBPIN != "" && cfg.TVDBAPIKey == "" {
 		return Config{}, errors.New("RIVUNE_TVDB_PIN requires RIVUNE_TVDB_API_KEY")
+	}
+	if cfg.FanartClientKey != "" && cfg.FanartAPIKey == "" {
+		return Config{}, errors.New("RIVUNE_FANART_CLIENT_KEY requires RIVUNE_FANART_API_KEY")
 	}
 	if cfg.TraktClientSecret != "" && cfg.TraktClientID == "" {
 		return Config{}, errors.New("RIVUNE_TRAKT_CLIENT_SECRET requires RIVUNE_TRAKT_CLIENT_ID")

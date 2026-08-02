@@ -2,11 +2,18 @@ import { ArrowLeft, AudioLines, Bookmark, Captions, Check, Clapperboard, Externa
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { api, APIError } from "./api";
-import { Button, IconButton, Notice } from "./components";
+import { Button, HorizontalDragRow, IconButton, Notice } from "./components";
 import { translate as t } from "./i18n";
 import { notifyError, notifyErrorMessage, notifySuccess } from "./notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "./titleProviders";
 import type { EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
+
+type ExternalTitleLink = {
+  externalID: string;
+  provider: (typeof TITLE_ID_PROVIDERS)[number];
+  mediaType: string;
+  episode: EpisodeMetadata | undefined;
+};
 
 function record(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -15,9 +22,18 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function trailerLanguageBadge(trailer: TrailerMetadata): string {
   const language = trailer.language.trim().replaceAll("_", "-").toLowerCase();
-  if (language === "fr" || language.startsWith("fr-")) return "Français";
-  if (language === "en" || language.startsWith("en-")) return "English";
+  if (language === "fr" || language.startsWith("fr-")) return t("language.name.fr");
+  if (language === "en" || language.startsWith("en-")) return t("language.name.en");
   return language.toUpperCase();
+}
+
+function episodeOrderLabel(order: SeriesMetadata["episodeOrders"][number]): string {
+  switch (order.type.trim().toLowerCase()) {
+    case "official": return t("media.episodeOrder.aired");
+    case "dvd": return t("media.episodeOrder.dvd");
+    case "absolute": return t("media.episodeOrder.absolute");
+    default: return order.name;
+  }
 }
 
 function payloadRecords(batch: ResourceBatch, key: string): Record<string, unknown>[] {
@@ -32,12 +48,12 @@ function payloadRecords(batch: ResourceBatch, key: string): Record<string, unkno
 type SourceIdentity = Pick<PlaybackSourceOption, "addonId" | "manifestId" | "streamIndex">;
 
 function preparationLabel(preparation: PlaybackPreparation): string {
-  const mode = preparation.mode === "direct" ? "Direct play"
-    : preparation.mode === "remux" ? "Lossless remux"
-      : preparation.mode === "transcode_audio" ? "Audio conversion"
-        : preparation.mode === "transcode" ? "Video conversion"
+  const mode = preparation.mode === "direct" ? t("player.mode.direct")
+    : preparation.mode === "remux" ? t("player.mode.remux")
+      : preparation.mode === "transcode_audio" ? t("player.mode.audioConversion")
+        : preparation.mode === "transcode" ? t("player.mode.videoConversion")
           : preparation.mode === "youtube" ? "YouTube"
-            : "External player";
+            : t("player.mode.external");
   const video = preparation.media?.videoTracks[0];
   const resolution = video?.height ? `${video.height}p` : "";
   const codec = video?.codec ? video.codec.toUpperCase() : "";
@@ -168,10 +184,10 @@ async function resolveMediaTitle(item: MediaItem): Promise<string> {
 
 
 export function mediaTypeLabel(mediaType: string): string {
-  if (mediaType === "tv") return "Live TV";
-  if (mediaType === "series") return "Series";
-  if (mediaType === "episode") return "Episode";
-  return "Movie";
+  if (mediaType === "tv") return t("media.type.liveTv");
+  if (mediaType === "series") return t("media.type.series");
+  if (mediaType === "episode") return t("media.type.episode");
+  return t("media.type.movie");
 }
 
 
@@ -202,13 +218,23 @@ function episodeItem(series: SeriesMetadata, episode: EpisodeMetadata, fallback:
     mediaType: "episode",
     seasonNumber: episode.seasonNumber,
     episodeNumber: episode.episodeNumber,
-    title: `${series.name} · S${String(episode.seasonNumber).padStart(2, "0")}E${String(episode.episodeNumber).padStart(2, "0")} · ${episode.name}`,
+    title: episode.name || t("media.episode.fallbackTitle", { number: episode.episodeNumber }),
     posterUrl: episode.stillUrl || fallback.posterUrl,
     backgroundUrl: episode.stillUrl || fallback.backgroundUrl,
     description: episode.overview,
     releaseInfo: episode.airDate,
     released: episode.airDate,
     externalIds: { ...episode.externalIds, ...(series.externalIds.imdb ? { imdb: series.externalIds.imdb } : {}) },
+    raw: {
+      ...fallback.raw,
+      episodeSeriesName: series.name,
+      continueSeriesId: series.id,
+      continueSeasonId: episode.seasonId,
+      continueSeasonNumber: episode.seasonNumber,
+      continueEpisodeNumber: episode.episodeNumber,
+      continueEpisodeId: episode.id,
+      openSeriesBrowser: false,
+    },
   };
 }
 
@@ -218,7 +244,7 @@ function episodeIsUpcoming(episode: EpisodeMetadata): boolean {
   return Number.isFinite(airDate.getTime()) && airDate.getTime() > Date.now();
 }
 
-export function MediaDetails({ item, onClose, onNavigateContext }: { item: MediaItem; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void }) {
+export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }: { item: MediaItem; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenEpisode?: (item: MediaItem) => void }) {
   const [details, setDetails] = useState(item);
   const [playing, setPlaying] = useState(false);
   const [titleID, setTitleID] = useState(item.titleId);
@@ -245,6 +271,8 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
   const [seriesVisible, setSeriesVisible] = useState(item.mediaType === "series" || item.raw?.openSeriesBrowser === true);
   const [seriesLoading, setSeriesLoading] = useState(item.mediaType === "series" || item.raw?.openSeriesBrowser === true);
   const [seriesError, setSeriesError] = useState("");
+  const [episodeOrderLoading, setEpisodeOrderLoading] = useState(false);
+  const [episodeOrderError, setEpisodeOrderError] = useState("");
   const [seasonID, setSeasonID] = useState("");
   const [season, setSeason] = useState<SeasonMetadata>();
   const [seasonLoading, setSeasonLoading] = useState(false);
@@ -255,6 +283,8 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
   const trailerRequestRef = useRef(0);
   const seasonCacheRef = useRef(new Map<string, SeasonMetadata>());
   const trailerItemRef = useRef("");
+  const episodeListRef = useRef<HTMLDivElement>(null);
+  const selectedEpisodeRowRef = useRef<HTMLDivElement>(null);
   const [titleProgress, setTitleProgress] = useState<PlaybackProgress>();
   const [watchedBusy, setWatchedBusy] = useState("");
   const nextSourceRef = useRef<SourceIdentity | undefined>(undefined);
@@ -318,7 +348,7 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
         raw: { ...current.raw, ...meta },
       }));
     }).catch((cause) => {
-      if (active) setMetaError(cause instanceof APIError ? cause.message : "Additional title details could not be loaded.");
+      if (active) setMetaError(cause instanceof APIError ? cause.message : t("media.details.error.additionalDetailsLoadFailed"));
     }).finally(() => { if (active) setMetaLoading(false); });
     if (item.titleId) {
       void api.library().then((library) => { if (active) setSaved(library.items.some((entry) => entry.titleId === item.titleId)); }).catch(() => undefined);
@@ -344,6 +374,9 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
       if (movie) setDetails((current) => ({
         ...current,
         voteAverage: movie.voteAverage,
+        posterUrl: movie.posterUrl || current.posterUrl,
+        backgroundUrl: current.backgroundUrl || movie.backdropUrl,
+        logoUrl: current.logoUrl || movie.logoUrl,
         voteCount: movie.voteCount,
         externalIds: { ...current.externalIds, ...movie.externalIds },
       }));
@@ -353,12 +386,13 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
 
   useEffect(() => {
     let active = true;
-    if (!seriesVisible) {
+    if (!seriesVisible && !(item.mediaType === "episode" && continueSeriesID)) {
       setSeriesLoading(false);
       return;
     }
     setSeriesLoading(true);
     setSeriesError("");
+    setEpisodeOrderError("");
     setSeasonID("");
     setSeason(undefined);
     setSelectedEpisode(undefined);
@@ -374,6 +408,9 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
       if (item.mediaType === "series" || item.mediaType === "episode") setDetails((current) => ({
         ...current,
         voteAverage: resolved.voteAverage,
+        posterUrl: resolved.posterUrl || current.posterUrl,
+        backgroundUrl: current.backgroundUrl || resolved.backdropUrl,
+        logoUrl: current.logoUrl || resolved.logoUrl,
         voteCount: resolved.voteCount,
         externalIds: { ...resolved.externalIds, ...current.externalIds },
       }));
@@ -402,7 +439,7 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
           let mappedSeason = seasonCacheRef.current.get(candidate.id);
           if (!mappedSeason) {
             try {
-              mappedSeason = await api.seasonDetails(candidate.id);
+              mappedSeason = await api.seasonDetails(candidate.id, undefined, resolved.mappingProvider);
             } catch {
               continue;
             }
@@ -417,7 +454,7 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
       }
       if (active) setSeasonID(initial?.id ?? "");
     })().catch((cause) => {
-      if (active) setSeriesError(notifyError(cause, "Seasons and episodes could not be loaded.", "Series unavailable"));
+      if (active) setSeriesError(notifyError(cause, t("media.series.error.loadFailed"), t("media.series.error.unavailableTitle")));
     }).finally(() => { if (active) setSeriesLoading(false); });
     return () => { active = false; };
   }, [continueEpisodeID, continueSeasonID, continueSeasonNumber, continueSeriesID, item.id, item.mediaType, item.releaseInfo, item.released, item.titleId, seriesVisible]);
@@ -431,7 +468,7 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
     setSeasonLoading(true);
     setSelectedEpisode(undefined);
     setEpisodeProgress({});
-    void (seasonCacheRef.current.has(seasonID) ? Promise.resolve(seasonCacheRef.current.get(seasonID)!) : api.seasonDetails(seasonID)).then(async (resolved) => {
+    void (seasonCacheRef.current.has(seasonID) ? Promise.resolve(seasonCacheRef.current.get(seasonID)!) : api.seasonDetails(seasonID, undefined, series?.mappingProvider)).then(async (resolved) => {
       if (!active) return;
       setSeason(resolved);
       if (autoPlayNextRef.current) {
@@ -452,7 +489,7 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
       if (!active) return;
       setEpisodeProgress(Object.fromEntries(progressEntries));
     }).catch((cause) => {
-      if (active) setSeriesError(notifyError(cause, "Episodes could not be loaded.", "Season unavailable"));
+      if (active) setSeriesError(notifyError(cause, t("media.season.error.episodesLoadFailed"), t("media.season.error.unavailableTitle")));
     }).finally(() => { if (active) setSeasonLoading(false); });
     return () => { active = false; };
   }, [continueEpisodeID, continueEpisodeNumber, item.mediaType, seasonID, series?.mappingProvider]);
@@ -463,7 +500,6 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
       ...current,
       title: [series?.name, episodeCode, selectedEpisode.name].filter(Boolean).join(" · "),
       description: selectedEpisode.overview || current.description,
-      posterUrl: selectedEpisode.stillUrl || current.posterUrl,
       backgroundUrl: selectedEpisode.stillUrl || current.backgroundUrl,
       releaseInfo: selectedEpisode.airDate || current.releaseInfo,
       released: selectedEpisode.airDate || current.released,
@@ -475,7 +511,7 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
-    if (item.mediaType === "series" && !selectedEpisode) {
+    if (item.mediaType === "series") {
       setAvailableStreams([]);
       setSelectedStream(undefined);
       setStreamsError("");
@@ -508,7 +544,7 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
     }).catch((cause) => {
       if (!active || cause instanceof DOMException && cause.name === "AbortError") return;
       autoPlayNextRef.current = false;
-      setStreamsError(notifyError(cause, "Streams could not be loaded.", "Streams unavailable"));
+      setStreamsError(notifyError(cause, t("media.sources.error.loadFailed"), t("media.sources.error.unavailableTitle")));
     }).finally(() => { if (active) setStreamsLoading(false); });
     return () => {
       active = false;
@@ -531,7 +567,7 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
       sourceRefreshAttemptRef.current = "";
       if (prepared.mode === "transcode" || prepared.mode === "transcode_audio") {
         autoPlayNextRef.current = false;
-        setPreparationError("This source requires media encoding, which Rivune web playback does not start automatically. Choose another source or an external-player option.");
+        setPreparationError(t("media.sources.error.encodingRequired"));
         return;
       }
       setPreparation(prepared);
@@ -548,10 +584,10 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
         return;
       }
       if (cause instanceof APIError && cause.code === "playback_source_unsupported") {
-        setPreparationError("This source needs a video or audio conversion that web playback does not allow. Rivune did not start a transcode; choose another source or an external-player option.");
+        setPreparationError(t("media.sources.error.conversionUnsupported"));
         return;
       }
-      setPreparationError(notifyError(cause, "The selected stream could not be prepared.", "Stream unavailable"));
+      setPreparationError(notifyError(cause, t("media.sources.error.prepareFailed"), t("media.sources.error.streamUnavailableTitle")));
     }).finally(() => { if (active) setPreparationLoading(false); });
     return () => {
       active = false;
@@ -569,9 +605,12 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
       if (saved) await api.removeLibrary(resolvedTitleID);
       else await api.addLibrary(resolvedTitleID);
       setSaved(!removing);
-      notifySuccess(removing ? `${details.title} has been removed from your library.` : `${details.title} has been added to your library.`, removing ? "Removed from library" : "Added to library");
+      notifySuccess(
+        t(removing ? "library.notice.removed" : "library.notice.added", { title: details.title }),
+        t(removing ? "library.notice.removedTitle" : "library.notice.addedTitle"),
+      );
     } catch (cause) {
-      setActionError(notifyError(cause, "Your library could not be updated.", "Library not updated"));
+      setActionError(notifyError(cause, t("library.error.updateFailed"), t("library.error.notUpdatedTitle")));
     } finally {
       setSaving(false);
     }
@@ -600,7 +639,9 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
       const nextTrailers = Array.isArray(metadata.trailers) ? metadata.trailers : [];
       if (nextTrailers.length === 0) {
         setTrailerUnavailable(true);
-        setTrailerMessage(requestedSeasonNumber === undefined ? "No trailer is available for this title." : `No trailer is available for ${requestedSeasonNumber === 0 ? "Specials" : `Season ${requestedSeasonNumber}`}.`);
+        setTrailerMessage(requestedSeasonNumber === undefined
+          ? t("media.trailers.noneForTitle")
+          : t("media.trailers.noneForSeason", { season: requestedSeasonNumber === 0 ? t("media.season.specials") : t("media.season.number", { number: requestedSeasonNumber }) }));
         return;
       }
       setTrailers(nextTrailers);
@@ -609,9 +650,11 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
       if (!requestIsCurrent()) return;
       if (trailerRequested && cause instanceof APIError && cause.status === 404) {
         setTrailerUnavailable(true);
-        setTrailerMessage(requestedSeasonNumber === undefined ? "No trailer is available for this title." : `No trailer is available for ${requestedSeasonNumber === 0 ? "Specials" : `Season ${requestedSeasonNumber}`}.`);
+        setTrailerMessage(requestedSeasonNumber === undefined
+          ? t("media.trailers.noneForTitle")
+          : t("media.trailers.noneForSeason", { season: requestedSeasonNumber === 0 ? t("media.season.specials") : t("media.season.number", { number: requestedSeasonNumber }) }));
       } else {
-        setTrailerMessage(notifyError(cause, "The trailer could not be loaded.", "Trailer unavailable"));
+        setTrailerMessage(notifyError(cause, t("media.trailers.error.loadFailed"), t("media.trailers.error.unavailableTitle")));
       }
     } finally {
       if (requestIsCurrent()) setTrailerLoading(false);
@@ -653,9 +696,12 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
       setTitleID(resolvedTitleID);
       setTitleProgress(progress);
       if (item.mediaType === "episode") setEpisodeProgress((values) => ({ ...values, [resolvedTitleID]: progress }));
-      notifySuccess(watched ? `${details.title} is marked as watched.` : `${details.title} is marked as unwatched.`, watched ? "Marked as watched" : "Marked as unwatched");
+      notifySuccess(
+        t(watched ? "media.watch.markedWatched" : "media.watch.markedUnwatched", { title: details.title }),
+        t(watched ? "media.watch.markedWatchedTitle" : "media.watch.markedUnwatchedTitle"),
+      );
     } catch (cause) {
-      setActionError(notifyError(cause, "The watched state could not be updated.", "Watch state not updated"));
+      setActionError(notifyError(cause, t("media.watch.error.updateFailed"), t("media.watch.error.notUpdatedTitle")));
     } finally {
       setWatchedBusy("");
     }
@@ -670,9 +716,34 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
       const progress = await api.setWatched(episode.id, watched, current?.version ?? 0);
       setEpisodeProgress((values) => ({ ...values, [episode.id]: progress }));
     } catch (cause) {
-      setActionError(notifyError(cause, "The episode watch state could not be updated.", "Watch state not updated"));
+      setActionError(notifyError(cause, t("media.watch.error.episodeUpdateFailed"), t("media.watch.error.notUpdatedTitle")));
     } finally {
       setWatchedBusy("");
+    }
+  }
+
+  async function changeEpisodeOrder(episodeOrderID: string) {
+    if (!series || episodeOrderLoading || episodeOrderID === (series.selectedEpisodeOrderId ?? "")) return;
+    setEpisodeOrderLoading(true);
+    setEpisodeOrderError("");
+    try {
+      const resolved = await api.seriesDetails(series.id, episodeOrderID
+        ? { mappingProvider: "tvdb", episodeOrderId: episodeOrderID }
+        : undefined);
+      const seasons = [...resolved.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber);
+      const initial = seasons.find((candidate) => candidate.seasonNumber > 0) ?? seasons[0];
+      autoPlayNextRef.current = false;
+      seasonCacheRef.current.clear();
+      setSeries(resolved);
+      setSeason(undefined);
+      setSeasonID(initial?.id ?? "");
+      setSelectedEpisode(undefined);
+      setEpisodeProgress({});
+      if (initial) onNavigateContext?.({ seasonID: initial.id, seasonNumber: initial.seasonNumber });
+    } catch (cause) {
+      setEpisodeOrderError(notifyError(cause, t("media.episodeOrder.error.loadFailed"), t("media.episodeOrder.error.unavailableTitle")));
+    } finally {
+      setEpisodeOrderLoading(false);
     }
   }
 
@@ -686,11 +757,14 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
     try {
       const results = await Promise.all(changed.map(async (episode) => [episode.id, await api.setWatched(episode.id, watched, episodeProgress[episode.id]?.version ?? 0)] as const));
       setEpisodeProgress((values) => ({ ...values, ...Object.fromEntries(results) }));
-      notifySuccess(watched ? "Every available episode in this season is marked as watched." : "Every episode in this season is marked as unwatched.", watched ? "Season watched" : "Season unwatched");
+      notifySuccess(
+        t(watched ? "media.season.watch.allMarkedWatched" : "media.season.watch.allMarkedUnwatched"),
+        t(watched ? "media.season.watch.watchedTitle" : "media.season.watch.unwatchedTitle"),
+      );
     } catch (cause) {
       const refreshed = await Promise.all(episodes.map(async (episode) => [episode.id, await api.progress(episode.id).catch(() => undefined)] as const));
       setEpisodeProgress(Object.fromEntries(refreshed));
-      setActionError(notifyError(cause, "Some episode watch states could not be updated.", "Season not fully updated"));
+      setActionError(notifyError(cause, t("media.season.watch.error.partialUpdate"), t("media.season.watch.error.partialUpdateTitle")));
     } finally {
       setWatchedBusy("");
     }
@@ -726,6 +800,15 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
     () => [...(season?.episodes ?? [])].sort((left, right) => left.seasonNumber - right.seasonNumber || left.episodeNumber - right.episodeNumber),
     [season],
   );
+  useEffect(() => {
+    const list = episodeListRef.current;
+    const row = selectedEpisodeRowRef.current;
+    if (!list || !row) return;
+    const listRect = list.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    if (rowRect.top < listRect.top) list.scrollTop -= listRect.top - rowRect.top;
+    else if (rowRect.bottom > listRect.bottom) list.scrollTop += rowRect.bottom - listRect.bottom;
+  }, [orderedEpisodes, selectedEpisode?.id]);
   const availableSeasonEpisodes = orderedEpisodes.filter((episode) => !episodeIsUpcoming(episode));
   const watchedEpisodeCount = availableSeasonEpisodes.filter((episode) => episodeProgress[episode.id]?.completed).length;
   const allSeasonWatched = availableSeasonEpisodes.length > 0 && watchedEpisodeCount === availableSeasonEpisodes.length;
@@ -747,115 +830,278 @@ export function MediaDetails({ item, onClose, onNavigateContext }: { item: Media
   })() : "";
   const activeTrailerBadge = activeTrailer ? trailerLanguageBadge(activeTrailer) : "";
   const trailerAvailability = activeTrailer?.captionPreference
-    ? "Preferred subtitles requested when available"
-    : activeTrailer?.isFallback ? "Fallback language" : "Preferred language";
+    ? t("media.trailers.preferredSubtitlesRequested")
+    : activeTrailer?.isFallback ? t("media.trailers.fallbackLanguage") : t("media.trailers.preferredLanguage");
 
   if (playing && selectedStream) {
     return <Player item={activePlayerItem} sourceRef={selectedStream.sourceRef} startSeconds={preparationStartSeconds} autoplayNextEpisode={autoplayNextEpisode} onClose={() => setPlaying(false)} onSourceExpired={() => { setPlaying(false); setStreamRefreshVersion((version) => version + 1); }} onEnded={selectedEpisode ? handleEpisodeEnded : undefined} />;
   }
 
   const typeLabel = mediaTypeLabel(details.mediaType);
-  return <article className={`details-page page-enter${details.mediaType === "episode" ? " details-page--episode" : ""}`} aria-labelledby="media-details-title">
-    <button type="button" className="details-page__back" onClick={closeDetails} autoFocus><ArrowLeft size={18} /> Back to browse</button>
-    <div className="details-hero" style={backdrop ? { backgroundImage: `url(${backdrop})` } : undefined}><div className="details-hero__shade" /></div>
-    <div className="details-body">
-      <aside className="details-artwork" aria-hidden="true">{details.posterUrl ? <img src={details.posterUrl} alt="" /> : <span>{details.title.slice(0, 2).toUpperCase()}</span>}</aside>
-      <div className="details-content">
-      {details.logoUrl ? <><img className="details-logo" src={details.logoUrl} alt="" /><h1 id="media-details-title" className="visually-hidden">{details.title}</h1></> : <h1 id="media-details-title">{details.title}</h1>}
-      <div className="details-meta">
-        {details.releaseInfo && details.releaseInfo !== typeLabel && <span>{details.releaseInfo}</span>}
-        {details.voteAverage !== undefined && <span className="rating"><Star size={14} fill="currentColor" /> {details.voteAverage.toFixed(1)}</span>}
-        <span>{typeLabel}</span>
-        {genres.map((genre) => <span key={genre}>{genre}</span>)}
-      </div>
-      {(item.mediaType === "movie" || item.mediaType === "series" || item.mediaType === "episode") && <div className="details-provider-badges" role="group" aria-label="External title pages">
-        {TITLE_ID_PROVIDERS.map((provider) => {
-          const externalID = item.mediaType === "episode"
-            ? provider.key === "tmdb" ? series?.externalIds.tmdb : selectedEpisode?.externalIds[provider.key]
-            : details.externalIds?.[provider.key];
-          if (!externalID) return null;
-          const label = `Open ${provider.label} title page · ID ${externalID}`;
-          return <a key={provider.key} className={`details-provider-badge details-provider-badge--${provider.key}`} href={titleProviderURL(provider.key, externalID, provider.key === "tmdb" && item.mediaType === "episode" && !selectedEpisode ? "series" : item.mediaType, selectedEpisode)} target="_blank" rel="noreferrer" aria-label={label} title={label}>
-            <span className="details-provider-badge__brand">{provider.label}</span>
-            <ExternalLink size={11} aria-hidden="true" />
-          </a>;
-        })}
-      </div>}
-      {metaLoading && !details.description ? <div className="details-loading" role="status"><LoaderCircle className="spin" size={18} /> Loading details</div> : <p className="details-description">{details.description || "No synopsis is available for this title."}</p>}
-      {metaError && <Notice tone="info">{metaError} The available title information is shown below.</Notice>}
-      {fromContinue && (item.mediaType === "movie" || item.mediaType === "episode") && <div className="details-context-actions">
-        <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>{titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}{titleProgress?.completed ? "Mark unwatched" : "Mark watched"}</Button>
-        {item.mediaType === "episode" && <Button variant="secondary" onClick={() => setSeriesVisible((visible) => !visible)}><ListVideo size={19} />{seriesVisible ? "Hide series & season" : "View series & season"}</Button>}
-      </div>}
-      {seriesVisible && <section className="series-browser">
-        <header><div><ListVideo size={18} /><span>Episodes</span></div></header>
-        {seriesLoading ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> Loading seasons…</div> : seriesError && !series ? <Notice>{seriesError}</Notice> : series && <>
-          <div className="season-tabs" role="tablist" aria-label="Seasons">{[...series.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber).map((candidate) => <button key={candidate.id} type="button" role="tab" aria-selected={seasonID === candidate.id} className={seasonID === candidate.id ? "is-active" : ""} onClick={() => { autoPlayNextRef.current = false; setSeasonID(candidate.id); onNavigateContext?.({ seasonID: candidate.id, seasonNumber: candidate.seasonNumber }); }}>{candidate.seasonNumber === 0 ? "Specials" : `Season ${candidate.seasonNumber}`}<small>{candidate.episodeCount} episodes</small></button>)}</div>
-          {seasonLoading ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> Loading episodes…</div> : <>
-            <div className="season-watch-state"><span>{watchedEpisodeCount} of {availableSeasonEpisodes.length} watched</span><button type="button" disabled={availableSeasonEpisodes.length === 0 || watchedBusy === seasonID} onClick={() => void toggleSeasonWatched()}>{watchedBusy === seasonID ? <LoaderCircle className="spin" size={15} /> : allSeasonWatched ? <EyeOff size={15} /> : <Eye size={15} />}{allSeasonWatched ? "Mark season unwatched" : "Mark season watched"}</button></div>
-            <div className="episode-list">{orderedEpisodes.map((episode) => {
-            const progress = episodeProgress[episode.id];
-            const upcoming = episodeIsUpcoming(episode);
-            const progressPercent = progress && progress.durationSeconds > 0 ? Math.min(100, progress.positionSeconds / progress.durationSeconds * 100) : 0;
-            return <div key={episode.id} className={selectedEpisode?.id === episode.id ? "is-selected" : ""}>
-              <button type="button" className="episode-main" disabled={upcoming} aria-current={selectedEpisode?.id === episode.id ? "true" : undefined} onClick={() => { autoPlayNextRef.current = false; setSelectedEpisode(episode); onNavigateContext?.({ seasonID, episodeID: episode.id, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber }); }}>
-                <span className="episode-number">{episode.episodeNumber}</span>{episode.stillUrl ? <img src={episode.stillUrl} alt="" loading="lazy" /> : <span className="episode-placeholder"><Play size={18} /></span>}
-                <span className="episode-copy"><strong>{episode.name || `Episode ${episode.episodeNumber}`}</strong><small>{episode.runtimeMinutes ? `${episode.runtimeMinutes} min` : ""}{episode.airDate ? ` · ${episode.airDate}` : ""}{upcoming ? " · Upcoming" : ""}</small><p>{episode.overview || "No synopsis is available."}</p>{progressPercent > 0 && <i><span style={{ width: `${progressPercent}%` }} /></i>}</span>
-                <Play size={16} />
-              </button>
-              <button type="button" className={progress?.completed ? "episode-watched is-watched" : "episode-watched"} aria-label={progress?.completed ? `Mark ${episode.name} unwatched` : `Mark ${episode.name} watched`} title={progress?.completed ? "Mark unwatched" : "Mark watched"} disabled={upcoming || watchedBusy === episode.id || watchedBusy === seasonID} onClick={() => void toggleEpisodeWatched(episode)}>{watchedBusy === episode.id ? <LoaderCircle className="spin" size={17} /> : progress?.completed ? <Check size={17} /> : <Eye size={17} />}</button>
-            </div>;
-          })}</div></>}
-        </>}
-      </section>}
-      {(item.mediaType !== "series" || selectedEpisode) && <div className="details-stream-selector">
-        <div className="details-stream-selector__header"><strong>Choose a stream</strong><div><span>{streamsLoading ? "Loading…" : `${availableStreams.length} available`}</span><IconButton label="Refresh streams" disabled={streamsLoading} onClick={() => { autoPlayNextRef.current = false; setStreamRefreshVersion((version) => version + 1); }}><RefreshCw className={streamsLoading ? "spin" : undefined} size={16} /></IconButton></div></div>
-        {streamsLoading ? <div className="details-stream-selector__loading"><LoaderCircle className="spin" size={18} /> Loading streams</div> :
-          availableStreams.length > 0 ? <div className="details-stream-list" role="radiogroup" aria-label="Available streams">{availableStreams.map((option) =>
-            <button key={option.sourceRef} type="button" role="radio" aria-checked={selectedStream?.sourceRef === option.sourceRef} className={selectedStream?.sourceRef === option.sourceRef ? "is-selected" : ""} onClick={() => { autoPlayNextRef.current = false; setSelectedStream(option); }}>
-              <span><strong>{option.name}</strong>{option.description && <small>{option.description}</small>}{!option.description && option.filename && <small>{option.filename}</small>}</span>
-              {selectedStream?.sourceRef === option.sourceRef && <span className="details-stream-list__state">{preparationLoading ? <LoaderCircle className="spin" size={17} /> : preparation ? <><Check size={17} /><small>{preparationLabel(preparation)}</small></> : preparationError ? <small>Unavailable</small> : <small>Selected</small>}</span>}
-            </button>)}</div> :
-          <Notice>{streamsError || "No stream is available for this title."}</Notice>}
-        {preparationError && <Notice>{preparationError}</Notice>}
-      </div>}
-      <div className="details-actions">
-        <Button disabled={!selectedStream || !preparation} loading={preparationLoading} onClick={() => setPlaying(true)}><Play size={19} fill="currentColor" /> {selectedEpisode ? "Play episode" : "Play selected stream"}</Button>
-        <Button variant="secondary" loading={saving} onClick={() => void toggleLibrary()}>{saved ? <Check size={19} /> : <Bookmark size={19} />}{saved ? "In your library" : "Add to library"}</Button>
-        {item.mediaType === "movie" && !fromContinue && <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>{titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}{titleProgress?.completed ? "Mark unwatched" : "Mark watched"}</Button>}
-        {trailersAvailableForContext && <Button type="button" variant="secondary" disabled={Boolean(activeTrailer)} loading={activeTrailerLoading} aria-label={activeTrailerLoading ? "Loading trailers" : "Trailers"} aria-busy={activeTrailerLoading} aria-controls="details-trailer" aria-expanded={Boolean(activeTrailer)} onClick={() => void showTrailer()}><Clapperboard size={19} /> Trailers</Button>}
-      </div>
-      {activeTrailer && <section id="details-trailer" className="details-trailer" aria-label={`Trailers for ${details.title}`}>
-        <header className="details-trailer__header">
-          <span className="details-trailer__heading"><Clapperboard size={17} /><span><strong>Trailers</strong><small>{activeTrailers.length > 1 ? "Choose a version" : "Now playing"}</small></span></span>
-          <IconButton label="Dismiss trailer" onClick={dismissTrailer}><X size={17} /></IconButton>
-        </header>
-        <div className="details-trailer__frame"><iframe key={`${activeTrailer.youtubeId}:${activeTrailer.captionPreference ?? ""}`} src={trailerURL} title={`${activeTrailer.name || "Trailer"} — ${details.title}`} allow="autoplay; encrypted-media; picture-in-picture" referrerPolicy="strict-origin-when-cross-origin" allowFullScreen /></div>
-        <div className="details-trailer__active">
-          <span className={activeTrailer.isFallback ? "details-trailer__badge" : "details-trailer__badge is-preferred"}>{activeTrailerBadge}</span>
-          <span><strong title={activeTrailer.name || "Trailer"}>{activeTrailer.name || "Trailer"}</strong><small>{trailerAvailability}</small></span>
-        </div>
-        {activeTrailers.length > 1 && <div className="details-trailer__chooser">
-          <div className="details-trailer__chooser-heading"><strong>Choose a trailer</strong><span>{activeTrailers.length} results</span></div>
-          <div className="details-trailer__options" role="radiogroup" aria-label={`Available trailers for ${details.title}`}>
-            {activeTrailers.map((option, index) => {
-              const selected = option.youtubeId === activeTrailer.youtubeId;
-              const badge = trailerLanguageBadge(option);
-              return <button key={option.youtubeId} type="button" role="radio" aria-checked={selected} tabIndex={selected ? 0 : -1} aria-label={`${option.name || "Trailer"}, ${badge}${option.isFallback ? "" : ", preferred language"}`} className={`${selected ? "is-selected " : ""}${option.isFallback ? "" : "is-preferred"}`.trim()} onClick={() => setSelectedTrailer(option)} onKeyDown={(event) => handleTrailerOptionKeyDown(event, index)}>
-                <span className="details-trailer__radio" aria-hidden="true" />
-                <strong title={option.name || "Trailer"}>{option.name || "Trailer"}</strong>
-                <span className="details-trailer__badge">{badge}</span>
-              </button>;
-            })}
+  const episodeSeriesName = item.mediaType === "episode"
+    ? series?.name ?? (typeof item.raw?.episodeSeriesName === "string" ? item.raw.episodeSeriesName : "")
+    : "";
+  const episodeTitle = selectedEpisode?.name || details.title || t("media.episode.fallbackTitle", { number: item.episodeNumber ?? "" });
+  const episodeSeasonNumber = selectedEpisode?.seasonNumber ?? item.seasonNumber;
+  const episodeNumber = selectedEpisode?.episodeNumber ?? item.episodeNumber;
+  const externalTitleLinks: ExternalTitleLink[] = (item.mediaType === "movie" || item.mediaType === "series" || item.mediaType === "episode")
+    ? TITLE_ID_PROVIDERS.flatMap<ExternalTitleLink>((provider) => {
+      if (item.mediaType === "episode" || selectedEpisode) {
+        if (provider.key === "tmdb") {
+          const externalID = (series?.externalIds.tmdb ?? details.externalIds?.tmdb)?.trim();
+          return externalID ? [{ externalID, provider, mediaType: selectedEpisode ? "episode" : "series", episode: selectedEpisode }] : [];
+        }
+        const episodeExternalID = (selectedEpisode?.externalIds[provider.key] ?? (item.mediaType === "episode" ? item.externalIds?.[provider.key] : undefined))?.trim();
+        const seriesExternalID = (series?.externalIds[provider.key] ?? details.externalIds?.[provider.key])?.trim();
+        const externalID = episodeExternalID || seriesExternalID;
+        return externalID ? [{ externalID, provider, mediaType: episodeExternalID ? "episode" : "series", episode: undefined }] : [];
+      }
+      const externalID = details.externalIds?.[provider.key]?.trim();
+      return externalID ? [{ externalID, provider, mediaType: item.mediaType, episode: undefined }] : [];
+    })
+    : [];
+  const canSelectStream = item.mediaType !== "series";
+
+  return (
+    <article className="details-page page-enter" aria-labelledby="media-details-title">
+      <button type="button" className="details-page__back" onClick={closeDetails} autoFocus>
+        <ArrowLeft size={18} />
+        <span>{t("media.details.backToBrowse")}</span>
+      </button>
+
+      <section className="details-hero" style={backdrop ? { backgroundImage: `url(${backdrop})` } : undefined}>
+        <div className="details-hero__shade" aria-hidden="true" />
+        <div className="details-hero__glow" aria-hidden="true" />
+        <div className="details-hero__inner">
+          <aside className="details-artwork" aria-hidden="true">
+            {details.posterUrl ? <img src={details.posterUrl} alt="" /> : <span>{details.title.slice(0, 2).toUpperCase()}</span>}
+          </aside>
+
+          <div className="details-overview">
+            {item.mediaType === "episode"
+              ? <>
+                {episodeSeriesName && <span className="details-series-name">{episodeSeriesName}</span>}
+                <h1 id="media-details-title" aria-label={details.title}>{episodeTitle}</h1>
+              </>
+              : details.logoUrl
+                ? <><img className="details-logo" src={details.logoUrl} alt="" /><h1 id="media-details-title" className="visually-hidden">{details.title}</h1></>
+                : <h1 id="media-details-title">{details.title}</h1>}
+
+            <div className="details-meta">
+              {episodeSeasonNumber !== undefined && episodeNumber !== undefined && <span>{t("media.episode.seasonEpisode", { season: episodeSeasonNumber, episode: episodeNumber })}</span>}
+              {details.releaseInfo && details.releaseInfo !== typeLabel && <span>{details.releaseInfo}</span>}
+              {details.voteAverage !== undefined && <span className="rating"><Star size={14} fill="currentColor" /> {details.voteAverage.toFixed(1)}</span>}
+              <span>{typeLabel}</span>
+              {genres.map((genre) => <span key={genre}>{genre}</span>)}
+            </div>
+
+            {(externalTitleLinks.length > 0 || Boolean(details.sources?.length)) && <div className="details-title-links">
+              {externalTitleLinks.length > 0 && <div className="details-provider-badges" role="group" aria-label={t("media.details.externalPagesLabel")}>
+                {externalTitleLinks.map(({ externalID, provider, mediaType, episode }) => {
+                  const label = t("media.details.openExternalPage", { provider: provider.label, id: externalID });
+                  return <a key={provider.key} className={`details-provider-badge details-provider-badge--${provider.key}`} href={titleProviderURL(provider.key, externalID, mediaType, episode)} target="_blank" rel="noreferrer" aria-label={label} title={label}>
+                    <span className="details-provider-badge__brand">{provider.label}</span>
+                    <ExternalLink size={11} aria-hidden="true" />
+                  </a>;
+                })}
+              </div>}
+              {details.sources && details.sources.length > 0 && <div className="details-sources"><span>{t("media.details.availableFrom")}</span><div>{details.sources.map((source) => <i key={source.id}>{source.title}</i>)}</div></div>}
+            </div>}
+
+            {metaLoading && !details.description
+              ? <div className="details-loading" role="status"><LoaderCircle className="spin" size={18} /> {t("media.details.loading")}</div>
+              : <p className="details-description">{details.description || t("media.details.noSynopsis")}</p>}
+            {metaError && <Notice tone="info">{metaError} {t("media.details.partialInformationShown")}</Notice>}
+
+            <div className="details-actions">
+              {canSelectStream && <Button className="details-actions__play" disabled={!selectedStream || !preparation} loading={preparationLoading} onClick={() => setPlaying(true)}>
+                <Play size={19} fill="currentColor" />
+                {t(item.mediaType === "episode" ? "media.details.playEpisode" : "media.details.playSelectedStream")}
+              </Button>}
+              <Button variant="secondary" loading={saving} onClick={() => void toggleLibrary()}>
+                {saved ? <Check size={19} /> : <Bookmark size={19} />}
+                {t(saved ? "library.actions.inLibrary" : "library.actions.add")}
+              </Button>
+              {item.mediaType === "movie" && !fromContinue && <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
+                {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
+                {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
+              </Button>}
+              {trailersAvailableForContext && <Button type="button" variant="secondary" disabled={Boolean(activeTrailer)} loading={activeTrailerLoading} aria-label={t(activeTrailerLoading ? "media.trailers.loading" : "media.trailers.title")} aria-busy={activeTrailerLoading} aria-controls="details-trailer" aria-expanded={Boolean(activeTrailer)} onClick={() => void showTrailer()}>
+                <Clapperboard size={19} />
+                {t("media.trailers.title")}
+              </Button>}
+            </div>
+
+            {fromContinue && (item.mediaType === "movie" || item.mediaType === "episode") && <div className="details-context-actions">
+              <Button variant="ghost" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
+                {titleProgress?.completed ? <EyeOff size={18} /> : <Eye size={18} />}
+                {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
+              </Button>
+              {item.mediaType === "episode" && <Button variant="ghost" onClick={() => setSeriesVisible((visible) => !visible)}>
+                <ListVideo size={18} />
+                {t(seriesVisible ? "media.series.actions.hideGuide" : "media.series.actions.viewGuide")}
+              </Button>}
+            </div>}
           </div>
-        </div>}
-      </section>}
-      {trailerOwnerKey === trailerItemKey && trailerMessage && <div className="details-trailer-feedback"><Notice tone={trailerUnavailable ? "info" : "error"}>{trailerMessage}</Notice></div>}
-      {actionError && <Notice>{actionError}</Notice>}
-      {details.sources && details.sources.length > 0 && <div className="details-sources"><span>Available from</span>{details.sources.map((source) => <i key={source.id}>{source.title}</i>)}</div>}
+        </div>
+      </section>
+
+      <div className="details-content">
+        {seriesVisible && <section className="series-browser" aria-labelledby="details-episodes-title">
+          <header className="details-section-heading">
+            <span className="details-section-heading__icon"><ListVideo size={20} /></span>
+            <div>
+              <span>{t("media.series.guideEyebrow")}</span>
+              <h2 id="details-episodes-title">{t("media.series.episodesTitle")}</h2>
+            </div>
+            {series && series.episodeOrders.length > 0 && <label className="series-order">
+              <span>{t("media.episodeOrder.label")}</span>
+              <span className="series-order__field">
+                <select aria-label={t("media.episodeOrder.accessibleLabel")} value={series.selectedEpisodeOrderId ?? ""} disabled={episodeOrderLoading} onChange={(event) => void changeEpisodeOrder(event.target.value)}>
+                  <option value="">{t("media.episodeOrder.profileDefault")}</option>
+                  {series.episodeOrders.map((order) => <option key={order.id} value={order.id}>{episodeOrderLabel(order)}</option>)}
+                </select>
+                {episodeOrderLoading && <LoaderCircle className="spin" size={15} aria-hidden="true" />}
+              </span>
+            </label>}
+          </header>
+          {episodeOrderError && <Notice>{episodeOrderError}</Notice>}
+
+          {seriesLoading
+            ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> {t("media.season.loading")}</div>
+            : seriesError && !series
+              ? <Notice>{seriesError}</Notice>
+              : series && <>
+                <HorizontalDragRow className="season-tabs" role="tablist" aria-label={t("media.season.tabsLabel")}>
+                  {[...series.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber).map((candidate) => (
+                    <button key={candidate.id} type="button" role="tab" aria-selected={seasonID === candidate.id} className={seasonID === candidate.id ? "is-active" : ""} onClick={() => {
+                      autoPlayNextRef.current = false;
+                      setSeasonID(candidate.id);
+                      onNavigateContext?.({ seasonID: candidate.id, seasonNumber: candidate.seasonNumber });
+                    }}>
+                      <span>{candidate.seasonNumber === 0 ? t("media.season.specials") : t("media.season.number", { number: candidate.seasonNumber })}</span>
+                      <small>{t(candidate.episodeCount === 1 ? "media.episode.count.one" : "media.episode.count.many", { count: candidate.episodeCount })}</small>
+                    </button>
+                  ))}
+                </HorizontalDragRow>
+
+                {seasonLoading
+                  ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> {t("media.episode.loading")}</div>
+                  : <>
+                    <div className="season-watch-state">
+                      <span>{t("media.season.watchedCount", { watched: watchedEpisodeCount, total: availableSeasonEpisodes.length })}</span>
+                      <button type="button" disabled={availableSeasonEpisodes.length === 0 || watchedBusy === seasonID} onClick={() => void toggleSeasonWatched()}>
+                        {watchedBusy === seasonID ? <LoaderCircle className="spin" size={15} /> : allSeasonWatched ? <EyeOff size={15} /> : <Eye size={15} />}
+                        {t(allSeasonWatched ? "media.season.watch.actions.markUnwatched" : "media.season.watch.actions.markWatched")}
+                      </button>
+                    </div>
+
+                    <div ref={episodeListRef} className="episode-list">
+                      {orderedEpisodes.map((episode) => {
+                        const progress = episodeProgress[episode.id];
+                        const upcoming = episodeIsUpcoming(episode);
+                        const progressPercent = progress && progress.durationSeconds > 0 ? Math.min(100, progress.positionSeconds / progress.durationSeconds * 100) : 0;
+                        return <div ref={selectedEpisode?.id === episode.id ? selectedEpisodeRowRef : undefined} key={episode.id} className={selectedEpisode?.id === episode.id ? "is-selected" : ""}>
+                          <button type="button" className="episode-main" disabled={upcoming} aria-current={selectedEpisode?.id === episode.id ? "true" : undefined} onClick={() => {
+                            autoPlayNextRef.current = false;
+                            onOpenEpisode?.(episodeItem(series, episode, details));
+                          }}>
+                            <span className="episode-number">{String(episode.episodeNumber).padStart(2, "0")}</span>
+                            <span className="episode-visual">
+                              {episode.stillUrl ? <img src={episode.stillUrl} alt="" loading="lazy" /> : <span className="episode-placeholder"><Play size={20} /></span>}
+                              {progressPercent > 0 && <i className="episode-progress"><span style={{ width: `${progressPercent}%` }} /></i>}
+                            </span>
+                            <span className="episode-copy">
+                              <strong>{episode.name || t("media.episode.fallbackTitle", { number: episode.episodeNumber })}</strong>
+                              <small>{episode.runtimeMinutes ? t("common.time.minutesShort", { minutes: episode.runtimeMinutes }) : ""}{episode.airDate ? ` · ${episode.airDate}` : ""}{upcoming ? ` · ${t("media.episode.upcoming")}` : ""}</small>
+                              <p>{episode.overview || t("media.episode.noSynopsis")}</p>
+                            </span>
+                            <span className="episode-play" aria-hidden="true"><Play size={16} fill="currentColor" /></span>
+                          </button>
+                          <button type="button" className={progress?.completed ? "episode-watched is-watched" : "episode-watched"} aria-label={t(progress?.completed ? "media.watch.actions.markNamedUnwatched" : "media.watch.actions.markNamedWatched", { title: episode.name || t("media.episode.fallbackTitle", { number: episode.episodeNumber }) })} title={t(progress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")} disabled={upcoming || watchedBusy === episode.id || watchedBusy === seasonID} onClick={() => void toggleEpisodeWatched(episode)}>
+                            {watchedBusy === episode.id ? <LoaderCircle className="spin" size={17} /> : progress?.completed ? <Check size={17} /> : <Eye size={17} />}
+                          </button>
+                        </div>;
+                      })}
+                    </div>
+                  </>}
+              </>}
+        </section>}
+
+        {canSelectStream && <section className="details-utility-grid" aria-label={t("media.sources.sectionLabel")}>
+          <div className="details-panel details-stream-selector">
+            <div className="details-stream-toolbar">
+              <span>{streamsLoading ? t("common.status.loading") : t(availableStreams.length === 1 ? "media.sources.availableCount.one" : "media.sources.availableCount.many", { count: availableStreams.length })}</span>
+              <IconButton label={t("media.sources.refresh")} disabled={streamsLoading} onClick={() => {
+                autoPlayNextRef.current = false;
+                setStreamRefreshVersion((version) => version + 1);
+              }}>
+                <RefreshCw size={17} className={streamsLoading ? "spin" : ""} />
+              </IconButton>
+            </div>
+            {streamsLoading
+              ? <div className="details-stream-selector__loading"><LoaderCircle className="spin" size={18} /> {t("media.sources.loading")}</div>
+              : availableStreams.length > 0
+                ? <div className="details-stream-list" role="radiogroup" aria-label={t("media.sources.availableLabel")}>
+                  {availableStreams.map((option) => (
+                    <button key={option.sourceRef} type="button" role="radio" aria-checked={selectedStream?.sourceRef === option.sourceRef} className={selectedStream?.sourceRef === option.sourceRef ? "is-selected" : ""} onClick={() => {
+                      autoPlayNextRef.current = false;
+                      setSelectedStream(option);
+                    }}>
+                      <span>
+                        <strong>{option.name}</strong>
+                        {option.description && <small>{option.description}</small>}
+                        {!option.description && option.filename && <small>{option.filename}</small>}
+                      </span>
+                      {selectedStream?.sourceRef === option.sourceRef && <span className="details-stream-list__state">
+                        {preparationLoading
+                          ? <LoaderCircle className="spin" size={17} />
+                          : preparation
+                            ? <><Check size={17} /><small>{preparationLabel(preparation)}</small></>
+                            : preparationError
+                              ? <small>{t("common.status.unavailable")}</small>
+                              : <small>{t("common.status.selected")}</small>}
+                      </span>}
+                    </button>
+                  ))}
+                </div>
+                : <Notice>{streamsError || t("media.sources.empty")}</Notice>}
+            {preparationError && <Notice>{preparationError}</Notice>}
+          </div>
+
+        </section>}
+
+        {activeTrailer && <section id="details-trailer" className="details-trailer" aria-label={t("media.trailers.forTitle", { title: details.title })}>
+          <header className="details-trailer__header">
+            <span className="details-trailer__heading"><Clapperboard size={17} /><span><strong>{t("media.trailers.title")}</strong><small>{t(activeTrailers.length > 1 ? "media.trailers.chooseVersion" : "media.trailers.nowPlaying")}</small></span></span>
+            <IconButton label={t("media.trailers.dismiss")} onClick={dismissTrailer}><X size={17} /></IconButton>
+          </header>
+          <div className="details-trailer__frame"><iframe key={`${activeTrailer.youtubeId}:${activeTrailer.captionPreference ?? ""}`} src={trailerURL} title={t("media.trailers.frameTitle", { trailer: activeTrailer.name || t("media.trailers.fallbackName"), title: details.title })} allow="autoplay; encrypted-media; picture-in-picture" referrerPolicy="strict-origin-when-cross-origin" allowFullScreen /></div>
+          <div className="details-trailer__active">
+            <span className={activeTrailer.isFallback ? "details-trailer__badge" : "details-trailer__badge is-preferred"}>{activeTrailerBadge}</span>
+            <span><strong title={activeTrailer.name || t("media.trailers.fallbackName")}>{activeTrailer.name || t("media.trailers.fallbackName")}</strong><small>{trailerAvailability}</small></span>
+          </div>
+          {activeTrailers.length > 1 && <div className="details-trailer__chooser">
+            <div className="details-trailer__chooser-heading"><strong>{t("media.trailers.choose")}</strong><span>{t(activeTrailers.length === 1 ? "common.results.count.one" : "common.results.count.many", { count: activeTrailers.length })}</span></div>
+            <div className="details-trailer__options" role="radiogroup" aria-label={t("media.trailers.availableForTitle", { title: details.title })}>
+              {activeTrailers.map((option, index) => {
+                const selected = option.youtubeId === activeTrailer.youtubeId;
+                const badge = trailerLanguageBadge(option);
+                return <button key={option.youtubeId} type="button" role="radio" aria-checked={selected} tabIndex={selected ? 0 : -1} aria-label={t("media.trailers.optionLabel", { name: option.name || t("media.trailers.fallbackName"), language: badge, preferredSuffix: option.isFallback ? "" : `, ${t("media.trailers.preferredLanguage")}` })} className={`${selected ? "is-selected " : ""}${option.isFallback ? "" : "is-preferred"}`.trim()} onClick={() => setSelectedTrailer(option)} onKeyDown={(event) => handleTrailerOptionKeyDown(event, index)}>
+                  <span className="details-trailer__radio" aria-hidden="true" />
+                  <strong title={option.name || t("media.trailers.fallbackName")}>{option.name || t("media.trailers.fallbackName")}</strong>
+                  <span className="details-trailer__badge">{badge}</span>
+                </button>;
+              })}
+            </div>
+          </div>}
+        </section>}
+
+        {trailerOwnerKey === trailerItemKey && trailerMessage && <div className="details-trailer-feedback"><Notice tone={trailerUnavailable ? "info" : "error"}>{trailerMessage}</Notice></div>}
+        {actionError && <Notice>{actionError}</Notice>}
       </div>
-    </div>
-  </article>;
+    </article>
+  );
 }
 
 type PlayerPhase = "preparing" | "ready" | "playing" | "paused" | "buffering" | "recovering" | "failed" | "ended";
@@ -888,13 +1134,13 @@ function loadPlayerPreferences(): PlayerPreferences {
 }
 
 function playerModeLabel(mode?: string, toneMapped = false): string {
-  if (mode === "direct") return "Direct play";
-  if (mode === "remux") return "Lossless remux";
-  if (mode === "transcode_audio") return "Audio conversion";
-  if (mode === "transcode") return toneMapped ? "HDR conversion" : "Video conversion";
+  if (mode === "direct") return t("player.mode.direct");
+  if (mode === "remux") return t("player.mode.remux");
+  if (mode === "transcode_audio") return t("player.mode.audioConversion");
+  if (mode === "transcode") return t(toneMapped ? "player.mode.hdrConversion" : "player.mode.videoConversion");
   if (mode === "youtube") return "YouTube";
-  if (mode === "external") return "External player";
-  return "Playback";
+  if (mode === "external") return t("player.mode.external");
+  return t("player.mode.playback");
 }
 
 function playerSourceAvailable(source: PlaybackSource): boolean {
@@ -905,20 +1151,18 @@ function playerSourceAvailable(source: PlaybackSource): boolean {
 }
 
 function playerPhaseLabel(phase: PlayerPhase): string {
-  return {
-    preparing: "Preparing",
-    ready: "Ready",
-    playing: "Playing",
-    paused: "Paused",
-    buffering: "Buffering",
-    recovering: "Recovering",
-    failed: "Failed",
-    ended: "Ended",
-  }[phase];
+  if (phase === "preparing") return t("player.phase.preparing");
+  if (phase === "ready") return t("player.phase.ready");
+  if (phase === "playing") return t("player.phase.playing");
+  if (phase === "paused") return t("player.phase.paused");
+  if (phase === "buffering") return t("player.phase.buffering");
+  if (phase === "recovering") return t("player.phase.recovering");
+  if (phase === "failed") return t("player.phase.failed");
+  return t("player.phase.ended");
 }
 
 function playerTrackLabel(track: { codec: string; channels?: number }): string {
-  const channelLabel = track.channels ? track.channels === 2 ? "2.0" : `${track.channels} channels` : "";
+  const channelLabel = track.channels ? track.channels === 2 ? "2.0" : t(track.channels === 1 ? "player.audio.channelCount.one" : "player.audio.channelCount.many", { count: track.channels }) : "";
   return `${track.codec.toUpperCase()}${channelLabel ? ` · ${channelLabel}` : ""}`;
 }
 function validPlaybackMarker(marker: PlaybackMarker, duration: number): boolean {
@@ -1067,11 +1311,11 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         return;
       }
       if (cause instanceof APIError && cause.code === "playback_source_unsupported") {
-        setError("This source requires media conversion that web playback does not allow. Choose another source or use an external player.");
+        setError(t("player.error.conversionUnsupported"));
         setPhase("failed");
         return;
       }
-      setError(notifyError(cause, "Playback sources are unavailable.", "Playback unavailable"));
+      setError(notifyError(cause, t("player.error.sourcesUnavailable"), t("player.error.unavailableTitle")));
       setPhase("failed");
     }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
@@ -1187,17 +1431,17 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
           setPhase("paused");
           return;
         }
-        setError(notifyError(cause, "The browser could not start media playback.", "Playback unavailable"));
+        setError(notifyError(cause, t("player.error.browserStartFailed"), t("player.error.unavailableTitle")));
         setPhase("failed");
       });
     };
     const failPlayback = (message: string) => {
       setPaused(true);
-      setError(notifyErrorMessage(message, "Playback unavailable"));
+      setError(notifyErrorMessage(message, t("player.error.unavailableTitle")));
       setPhase("failed");
     };
     const handleMediaError = () => {
-      if (!startProcessedFallback()) failPlayback("The selected media source could not be played.");
+      if (!startProcessedFallback()) failPlayback(t("player.error.sourcePlayFailed"));
     };
     const startProcessedFallback = (): boolean => {
       if (disposed || fallbackStarted || stream.mode === "direct") return false;
@@ -1232,7 +1476,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
             video.src = sourceURL;
             startPlayback();
           } else if (!startProcessedFallback()) {
-            failPlayback("This browser cannot play the selected HLS stream.");
+            failPlayback(t("player.error.hlsUnsupported"));
           }
           return;
         }
@@ -1273,13 +1517,13 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
             else hls.startLoad(video.currentTime);
             return;
           }
-          if (!startProcessedFallback()) failPlayback("The selected HLS stream stopped responding.");
+          if (!startProcessedFallback()) failPlayback(t("player.error.hlsStopped"));
         });
         hls.loadSource(sourceURL);
         hls.attachMedia(video);
       }).catch((cause) => {
         if (!disposed && !startProcessedFallback()) {
-          setError(notifyError(cause, "The HLS player could not be loaded.", "Playback unavailable"));
+          setError(notifyError(cause, t("player.error.hlsPlayerLoadFailed"), t("player.error.unavailableTitle")));
           setPhase("failed");
         }
       });
@@ -1355,7 +1599,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     if (phase !== "buffering" && phase !== "recovering") return;
     const timeout = window.setTimeout(() => {
       videoRef.current?.pause();
-      setError(notifyErrorMessage("Playback could not recover before the safety timeout.", "Playback recovery timed out"));
+      setError(notifyErrorMessage(t("player.error.recoveryTimeout"), t("player.error.recoveryTimeoutTitle")));
       setPhase("failed");
     }, 30_000);
     return () => window.clearTimeout(timeout);
@@ -1460,10 +1704,10 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
           const current = await api.progress(titleID);
           progressVersionRef.current = current?.version ?? 0;
         } catch (refreshCause) {
-          notifyError(refreshCause, "Watch progress could not be synchronized.", "Progress not saved");
+          notifyError(refreshCause, t("player.progress.syncFailed"), t("player.progress.notSavedTitle"));
         }
       } else {
-        notifyError(cause, "Watch progress could not be saved.", "Progress not saved");
+        notifyError(cause, t("player.progress.saveFailed"), t("player.progress.notSavedTitle"));
       }
     } finally {
       progressRequestRef.current = false;
@@ -1554,7 +1798,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         setPhase("paused");
         return;
       }
-      setError(notifyError(cause, "The browser could not start media playback.", "Playback unavailable"));
+      setError(notifyError(cause, t("player.error.browserStartFailed"), t("player.error.unavailableTitle")));
       setPhase("failed");
     });
   }
@@ -1651,7 +1895,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         exitCompleted = true;
       }
     } catch (cause) {
-      if (reportFailure) notifyError(cause, "Fullscreen could not be closed.", "Fullscreen unavailable");
+      if (reportFailure) notifyError(cause, t("player.fullscreen.closeFailed"), t("player.fullscreen.unavailableTitle"));
     } finally {
       if (!synchronizeState) {
         unlockPlayerOrientation();
@@ -1691,7 +1935,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         return;
       } catch (cause) {
         unlockPlayerOrientation();
-        notifyError(cause, "Fullscreen could not be opened.", "Fullscreen unavailable");
+        notifyError(cause, t("player.fullscreen.openFailed"), t("player.fullscreen.unavailableTitle"));
         return;
       }
     }
@@ -1702,13 +1946,13 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         updateFullscreenKind("webkit");
         return;
       } catch (cause) {
-        notifyError(cause, "Fullscreen could not be opened.", "Fullscreen unavailable");
+        notifyError(cause, t("player.fullscreen.openFailed"), t("player.fullscreen.unavailableTitle"));
         return;
       }
     }
 
     unlockPlayerOrientation();
-    notifyErrorMessage("This browser does not support fullscreen playback.", "Fullscreen unavailable");
+    notifyErrorMessage(t("player.fullscreen.unsupported"), t("player.fullscreen.unavailableTitle"));
   }
 
   async function togglePictureInPicture() {
@@ -1718,7 +1962,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       if (document.pictureInPictureElement) await document.exitPictureInPicture();
       else await video.requestPictureInPicture();
     } catch (cause) {
-      notifyError(cause, "Picture in Picture could not be opened.", "Picture in Picture unavailable");
+      notifyError(cause, t("player.pictureInPicture.openFailed"), t("player.pictureInPicture.unavailableTitle"));
     }
   }
 
@@ -1782,7 +2026,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     const position = playbackOffsetRef.current + video.currentTime;
     const duration = playbackDurationRef.current;
     if (duration > 0 && position < duration - 10) {
-      setError(notifyErrorMessage("The selected media source ended before the movie or episode was complete.", "Source ended early"));
+      setError(notifyErrorMessage(t("player.error.sourceEndedEarly"), t("player.error.sourceEndedEarlyTitle")));
       setPhase("failed");
       return;
     }
@@ -1863,14 +2107,14 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   }
 
   const timelineStyle = { "--player-progress": `${progressPercent}%` } as CSSProperties;
-  const panelTitle = panel === "sources" ? "Sources and quality"
-    : panel === "audio" ? "Audio track"
-      : panel === "subtitles" ? "Subtitles"
-        : panel === "speed" ? "Playback speed"
-          : panel === "stats" ? "Playback diagnostics"
+  const panelTitle = panel === "sources" ? t("player.panel.sources")
+    : panel === "audio" ? t("player.panel.audio")
+      : panel === "subtitles" ? t("player.panel.subtitles")
+        : panel === "speed" ? t("player.panel.speed")
+          : panel === "stats" ? t("player.panel.diagnostics")
             : "";
 
-  return createPortal(<div ref={playerRef} className={`player player--${phase}${controlsVisible ? " has-controls" : " controls-hidden"}`} role="dialog" aria-modal="true" aria-label={`Playing ${item.title}`} onPointerMove={revealControls} onPointerDown={revealControls} onFocusCapture={revealControls}>
+  return createPortal(<div ref={playerRef} className={`player player--${phase}${controlsVisible ? " has-controls" : " controls-hidden"}`} role="dialog" aria-modal="true" aria-label={t("player.playingTitle", { title: item.title })} onPointerMove={revealControls} onPointerDown={revealControls} onFocusCapture={revealControls}>
     <div className="player__surface" onClick={handleSurfaceClick} onDoubleClick={handleSurfaceDoubleClick} onPointerUp={handleSurfacePointerUp}>
       {stream?.ytId ? <iframe className="player__video" src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(stream.ytId)}?autoplay=1`} allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen title={item.title} /> :
         stream?.mode !== "external" && stream?.url ? <video key={`${stream.id}:${stream.url}:${playbackStart ?? 0}:${playbackGeneration}`} ref={videoRef} className="player__video" controls={false} playsInline crossOrigin="anonymous"
@@ -1884,30 +2128,30 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
           onWaiting={() => setPhase((current) => current === "paused" ? current : "buffering")}
           onStalled={() => setPhase((current) => current === "paused" ? current : "buffering")}
           onEnded={(event) => handlePlaybackEnded(event.currentTarget)}>
-          {selectedSubtitle && <track key={selectedSubtitle.id} src={selectedSubtitle.url} srcLang={selectedSubtitle.language || "und"} label={(selectedSubtitle.language || "Unknown").toUpperCase()} default />}
+          {selectedSubtitle && <track key={selectedSubtitle.id} src={selectedSubtitle.url} srcLang={selectedSubtitle.language || "und"} label={(selectedSubtitle.language || t("common.fallback.unknown")).toUpperCase()} default />}
         </video> : null}
     </div>
 
     <header className={`player__header${controlsVisible ? "" : " is-hidden"}`}>
       <div><small>{playerPhaseLabel(phase)} · {modeLabel}</small><strong>{item.title}</strong></div>
-      <IconButton label="Close player" onClick={closePlayer} data-player-control><X /></IconButton>
+      <IconButton label={t("player.actions.close")} onClick={closePlayer} data-player-control><X /></IconButton>
     </header>
 
-    {(loading || phase === "preparing") && <div className="player__loading" aria-live="polite"><span className="player__pulse"><LoaderCircle className="spin" /></span><strong>Preparing playback</strong><p>The best compatible stream is being prepared…</p></div>}
-    {(phase === "buffering" || phase === "recovering") && <div className="player__buffering" aria-live="polite"><LoaderCircle className="spin" /><span>{phase === "recovering" ? "Recovering playback…" : "Buffering…"}</span></div>}
-    {seekFeedback && <div key={seekFeedback.id} className={`player__seek-feedback ${seekFeedback.seconds < 0 ? "is-backward" : "is-forward"}`}>{seekFeedback.seconds < 0 ? <RotateCcw /> : <RotateCw />}<span>{seekFeedback.seconds > 0 ? "+" : ""}{seekFeedback.seconds}s</span></div>}
-    {playbackBlocked && phase !== "failed" && <button type="button" className="player__start" onClick={togglePlayback} data-player-control><Play size={30} fill="currentColor" /><span>Play</span></button>}
-    {phase === "failed" && <div className="player__failure" role="alert"><ServerCrash size={34} /><strong>Playback unavailable</strong><p>{error || "The selected stream could not be played."}</p><div><Button onClick={retryPlayback}><RefreshCw size={17} /> Retry</Button><Button variant="secondary" onClick={closePlayer}>Go back</Button></div></div>}
-    {!loading && playable.length === 0 && phase !== "failed" && <div className="player__failure"><ServerCrash size={34} /><strong>No playable source</strong><p>{error || "The selected stream is not compatible with this device."}</p><Button variant="secondary" onClick={closePlayer}>Go back</Button></div>}
+    {(loading || phase === "preparing") && <div className="player__loading" aria-live="polite"><span className="player__pulse"><LoaderCircle className="spin" /></span><strong>{t("player.loading.title")}</strong><p>{t("player.loading.description")}</p></div>}
+    {(phase === "buffering" || phase === "recovering") && <div className="player__buffering" aria-live="polite"><LoaderCircle className="spin" /><span>{t(phase === "recovering" ? "player.status.recovering" : "player.status.buffering")}</span></div>}
+    {seekFeedback && <div key={seekFeedback.id} className={`player__seek-feedback ${seekFeedback.seconds < 0 ? "is-backward" : "is-forward"}`}>{seekFeedback.seconds < 0 ? <RotateCcw /> : <RotateCw />}<span>{t("player.seek.feedbackSeconds", { sign: seekFeedback.seconds > 0 ? "+" : "", seconds: seekFeedback.seconds })}</span></div>}
+    {playbackBlocked && phase !== "failed" && <button type="button" className="player__start" onClick={togglePlayback} data-player-control><Play size={30} fill="currentColor" /><span>{t("player.actions.play")}</span></button>}
+    {phase === "failed" && <div className="player__failure" role="alert"><ServerCrash size={34} /><strong>{t("player.error.unavailableTitle")}</strong><p>{error || t("player.error.streamPlayFailed")}</p><div><Button onClick={retryPlayback}><RefreshCw size={17} /> {t("common.actions.retry")}</Button><Button variant="secondary" onClick={closePlayer}>{t("common.actions.goBack")}</Button></div></div>}
+    {!loading && playable.length === 0 && phase !== "failed" && <div className="player__failure"><ServerCrash size={34} /><strong>{t("player.empty.title")}</strong><p>{error || t("player.empty.description")}</p><Button variant="secondary" onClick={closePlayer}>{t("common.actions.goBack")}</Button></div>}
     {!loading && stream?.mode === "external" && externalPlaybackURL && <div className="player__external">
       <ExternalLink size={36} />
-      <small>External source</small>
-      <strong>Continue in an external player</strong>
-      <p>This source is not sent through Rivune&apos;s web player. No video conversion will be started.</p>
-      <a className="player__external-action" href={externalPlaybackURL} target={externalPlaybackURL.startsWith("http") ? "_blank" : undefined} rel="noreferrer" data-player-control><ExternalLink size={18} /> Open external player</a>
-      <button type="button" onClick={closePlayer} data-player-control>Choose another source</button>
+      <small>{t("player.external.eyebrow")}</small>
+      <strong>{t("player.external.title")}</strong>
+      <p>{t("player.external.description")}</p>
+      <a className="player__external-action" href={externalPlaybackURL} target={externalPlaybackURL.startsWith("http") ? "_blank" : undefined} rel="noreferrer" data-player-control><ExternalLink size={18} /> {t("player.external.open")}</a>
+      <button type="button" onClick={closePlayer} data-player-control>{t("player.external.chooseAnother")}</button>
     </div>}
-    {showNextEpisode && <button type="button" className="player__next" onClick={playNextEpisode} data-player-control><span>Up next</span><strong>Next episode</strong><small>{autoplayNextEpisode && phase !== "ended" ? `Starts in ${Math.ceil(remainingSeconds)}s` : "Play next episode"}</small><SkipForward size={20} fill="currentColor" /></button>}
+    {showNextEpisode && <button type="button" className="player__next" onClick={playNextEpisode} data-player-control><span>{t("player.next.eyebrow")}</span><strong>{t("player.next.title")}</strong><small>{autoplayNextEpisode && phase !== "ended" ? t("player.next.startsIn", { seconds: Math.ceil(remainingSeconds) }) : t("player.next.play")}</small><SkipForward size={20} fill="currentColor" /></button>}
     {activeMarker && <button type="button" className={`player__skip-marker is-${activeMarker.type}`} onClick={() => skipMarker(activeMarker)} data-player-control><SkipForward size={20} /><span>{skipMarkerLabel(activeMarker.type)}</span></button>}
 
     {customTransport && <div className={`player__chrome${controlsVisible ? "" : " is-hidden"}`}>
@@ -1915,7 +2159,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         <span>{formatPlaybackTime(transportTime)}</span>
         <div className="player__timeline-wrap">
           {seekPreview !== null && <output style={{ left: `${progressPercent}%` }}>{formatPlaybackTime(seekPreview)}</output>}
-          <input className="player__timeline" style={timelineStyle} type="range" aria-label="Playback position" min={0} max={Math.max(1, Math.floor(playbackDuration))} step={1} value={Math.min(playbackDuration || 1, Math.max(0, transportTime))}
+          <input className="player__timeline" style={timelineStyle} type="range" aria-label={t("player.timeline.positionLabel")} min={0} max={Math.max(1, Math.floor(playbackDuration))} step={1} value={Math.min(playbackDuration || 1, Math.max(0, transportTime))}
             onChange={(event) => setSeekPreview(Number(event.target.value))}
             onPointerUp={(event) => commitSeek(Number(event.currentTarget.value))}
             onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commitSeek(Number(event.currentTarget.value)); }}
@@ -1925,31 +2169,31 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       </div>
       <div className="player__controls">
         <div className="player__controls-group">
-          <button type="button" className="player__control-primary" aria-label={paused ? "Play" : "Pause"} onClick={togglePlayback} data-player-control>{paused ? <Play size={20} fill="currentColor" /> : <Pause size={20} fill="currentColor" />}</button>
-          <button type="button" aria-label="Back 10 seconds" onClick={() => seekBy(-10)} data-player-control><RotateCcw size={19} /><small>10</small></button>
-          <button type="button" aria-label="Forward 10 seconds" onClick={() => seekBy(10)} data-player-control><RotateCw size={19} /><small>10</small></button>
-          <button type="button" aria-label={muted ? "Unmute" : "Mute"} onClick={toggleMute} data-player-control>{muted ? <VolumeX size={19} /> : <Volume2 size={19} />}</button>
-          <input className="player__volume" type="range" aria-label="Volume" min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(event) => changeVolume(Number(event.target.value))} data-player-control />
+          <button type="button" className="player__control-primary" aria-label={t(paused ? "player.actions.play" : "player.actions.pause")} onClick={togglePlayback} data-player-control>{paused ? <Play size={20} fill="currentColor" /> : <Pause size={20} fill="currentColor" />}</button>
+          <button type="button" aria-label={t("player.seek.back10")} onClick={() => seekBy(-10)} data-player-control><RotateCcw size={19} /><small>10</small></button>
+          <button type="button" aria-label={t("player.seek.forward10")} onClick={() => seekBy(10)} data-player-control><RotateCw size={19} /><small>10</small></button>
+          <button type="button" aria-label={t(muted ? "player.volume.unmute" : "player.volume.mute")} onClick={toggleMute} data-player-control>{muted ? <VolumeX size={19} /> : <Volume2 size={19} />}</button>
+          <input className="player__volume" type="range" aria-label={t("player.volume.label")} min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(event) => changeVolume(Number(event.target.value))} data-player-control />
         </div>
         <div className="player__mode"><span>{modeLabel}</span><small>{stream?.media?.videoTracks[0]?.height ? `${stream.media.videoTracks[0].height}p` : stream?.protocol?.toUpperCase()}</small></div>
         <div className="player__controls-group player__controls-group--right">
-          {playable.length > 1 && <button type="button" aria-label="Sources and quality" className={panel === "sources" ? "is-active" : ""} onClick={() => togglePanel("sources")} data-player-control><Settings2 size={19} /></button>}
-          {audioTracks.length > 1 && <button type="button" aria-label="Audio track" className={panel === "audio" ? "is-active" : ""} onClick={() => togglePanel("audio")} data-player-control><AudioLines size={19} /></button>}
-          {subtitles.length > 0 && <button type="button" aria-label="Subtitles" className={panel === "subtitles" ? "is-active" : ""} onClick={() => togglePanel("subtitles")} data-player-control><Captions size={19} /></button>}
-          <button type="button" aria-label={`Playback speed ${playbackRate}x`} className={panel === "speed" ? "is-active" : ""} onClick={() => togglePanel("speed")} data-player-control><Gauge size={19} /><small>{playbackRate}×</small></button>
-          <button type="button" aria-label="Playback diagnostics" className={panel === "stats" ? "is-active" : ""} onClick={() => togglePanel("stats")} data-player-control><Info size={19} /></button>
-          {document.pictureInPictureEnabled && <button type="button" aria-label="Picture in Picture" onClick={() => void togglePictureInPicture()} data-player-control><PictureInPicture size={19} /></button>}
-          {fullscreenSupported && <button type="button" className="player__fullscreen" aria-label={fullscreenKind === "none" ? "Enter fullscreen" : "Exit fullscreen"} onClick={() => void toggleFullscreen()} data-player-control>{fullscreenKind === "none" ? <Maximize size={19} /> : <Minimize size={19} />}</button>}
+          {playable.length > 1 && <button type="button" aria-label={t("player.panel.sources")} className={panel === "sources" ? "is-active" : ""} onClick={() => togglePanel("sources")} data-player-control><Settings2 size={19} /></button>}
+          {audioTracks.length > 1 && <button type="button" aria-label={t("player.panel.audio")} className={panel === "audio" ? "is-active" : ""} onClick={() => togglePanel("audio")} data-player-control><AudioLines size={19} /></button>}
+          {subtitles.length > 0 && <button type="button" aria-label={t("player.panel.subtitles")} className={panel === "subtitles" ? "is-active" : ""} onClick={() => togglePanel("subtitles")} data-player-control><Captions size={19} /></button>}
+          <button type="button" aria-label={t("player.speed.currentLabel", { rate: playbackRate })} className={panel === "speed" ? "is-active" : ""} onClick={() => togglePanel("speed")} data-player-control><Gauge size={19} /><small>{playbackRate}×</small></button>
+          <button type="button" aria-label={t("player.panel.diagnostics")} className={panel === "stats" ? "is-active" : ""} onClick={() => togglePanel("stats")} data-player-control><Info size={19} /></button>
+          {document.pictureInPictureEnabled && <button type="button" aria-label={t("player.pictureInPicture.label")} onClick={() => void togglePictureInPicture()} data-player-control><PictureInPicture size={19} /></button>}
+          {fullscreenSupported && <button type="button" className="player__fullscreen" aria-label={t(fullscreenKind === "none" ? "player.fullscreen.enter" : "player.fullscreen.exit")} onClick={() => void toggleFullscreen()} data-player-control>{fullscreenKind === "none" ? <Maximize size={19} /> : <Minimize size={19} />}</button>}
         </div>
       </div>
     </div>}
 
     {panel && <section className="player__panel" aria-label={panelTitle}>
-      <header><div><small>Player settings</small><strong>{panelTitle}</strong></div><button type="button" aria-label="Close settings" onClick={() => setPanel(null)} data-player-control><X size={17} /></button></header>
+      <header><div><small>{t("player.settings.eyebrow")}</small><strong>{panelTitle}</strong></div><button type="button" aria-label={t("player.settings.close")} onClick={() => setPanel(null)} data-player-control><X size={17} /></button></header>
       {panel === "sources" && <div className="player__option-list">{playable.map((candidate, index) => {
         const video = candidate.media?.videoTracks[0];
         const candidateMode = playerModeLabel(candidate.mode, Boolean(candidate.media?.hdrFormat && candidate.media.hdrFormat !== "sdr" && candidate.mode === "transcode"));
-        return <button key={candidate.id} type="button" className={selected === index ? "is-active" : ""} onClick={() => selectSource(index)} data-player-control><span><strong>{candidate.name || candidate.title || `Source ${index + 1}`}</strong><small>{candidateMode} · {video?.height ? `${video.height}p` : candidate.protocol.toUpperCase()} {video?.codec ? `· ${video.codec.toUpperCase()}` : ""}</small></span>{selected === index && <Check size={17} />}</button>;
+        return <button key={candidate.id} type="button" className={selected === index ? "is-active" : ""} onClick={() => selectSource(index)} data-player-control><span><strong>{candidate.name || candidate.title || t("player.sources.fallbackName", { number: index + 1 })}</strong><small>{candidateMode} · {video?.height ? `${video.height}p` : candidate.protocol.toUpperCase()} {video?.codec ? `· ${video.codec.toUpperCase()}` : ""}</small></span>{selected === index && <Check size={17} />}</button>;
       })}</div>}
       {panel === "audio" && <div className="player__option-list">{audioTracks.map((track) => <button key={track.index} type="button" className={selectedAudioTrack === track.index ? "is-active" : ""} onClick={() => {
         const video = videoRef.current;
@@ -1958,18 +2202,18 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         setPreferredAudioTrack(track.index);
         setPanel(null);
         setPhase("recovering");
-      }} data-player-control><span><strong>{track.title || track.language?.toUpperCase() || `Track ${track.index + 1}`}</strong><small>{playerTrackLabel(track)}</small></span>{selectedAudioTrack === track.index && <Check size={17} />}</button>)}</div>}
-      {panel === "subtitles" && <div className="player__option-list"><button type="button" className={selectedSubtitleID === "none" ? "is-active" : ""} onClick={() => { setSelectedSubtitleID("none"); setPanel(null); }} data-player-control><span><strong>Off</strong><small>No subtitles</small></span>{selectedSubtitleID === "none" && <Check size={17} />}</button>{subtitles.map((subtitle) => <button key={subtitle.id} type="button" className={selectedSubtitleID === subtitle.id ? "is-active" : ""} onClick={() => { setSelectedSubtitleID(subtitle.id); setPanel(null); }} data-player-control><span><strong>{(subtitle.language || "Unknown").toUpperCase()}</strong><small>{subtitle.default ? "Default subtitle" : "Subtitle track"}</small></span>{selectedSubtitleID === subtitle.id && <Check size={17} />}</button>)}</div>}
+      }} data-player-control><span><strong>{track.title || track.language?.toUpperCase() || t("player.audio.fallbackTrack", { number: track.index + 1 })}</strong><small>{playerTrackLabel(track)}</small></span>{selectedAudioTrack === track.index && <Check size={17} />}</button>)}</div>}
+      {panel === "subtitles" && <div className="player__option-list"><button type="button" className={selectedSubtitleID === "none" ? "is-active" : ""} onClick={() => { setSelectedSubtitleID("none"); setPanel(null); }} data-player-control><span><strong>{t("player.subtitles.off")}</strong><small>{t("player.subtitles.none")}</small></span>{selectedSubtitleID === "none" && <Check size={17} />}</button>{subtitles.map((subtitle) => <button key={subtitle.id} type="button" className={selectedSubtitleID === subtitle.id ? "is-active" : ""} onClick={() => { setSelectedSubtitleID(subtitle.id); setPanel(null); }} data-player-control><span><strong>{(subtitle.language || t("common.fallback.unknown")).toUpperCase()}</strong><small>{t(subtitle.default ? "player.subtitles.defaultTrack" : "player.subtitles.track")}</small></span>{selectedSubtitleID === subtitle.id && <Check size={17} />}</button>)}</div>}
       {panel === "speed" && <div className="player__speed-grid">{playbackRates.map((rate) => <button key={rate} type="button" className={playbackRate === rate ? "is-active" : ""} onClick={() => changePlaybackRate(rate)} data-player-control>{rate}×</button>)}</div>}
       {panel === "stats" && <dl className="player__stats">
-        <div><dt>Status</dt><dd>{playerPhaseLabel(phase)}</dd></div>
-        <div><dt>Mode</dt><dd>{modeLabel}</dd></div>
-        <div><dt>Protocol</dt><dd>{stream?.protocol?.toUpperCase() || "—"}{stream?.container ? ` / ${stream.container.toUpperCase()}` : ""}</dd></div>
-        <div><dt>Video</dt><dd>{stats.width && stats.height ? `${stats.width}×${stats.height}` : "—"}{stream?.media?.videoTracks[0]?.codec ? ` · ${stream.media.videoTracks[0].codec.toUpperCase()}` : ""}</dd></div>
-        <div><dt>Audio</dt><dd>{audioTracks.find((track) => track.index === selectedAudioTrack)?.codec.toUpperCase() || audioTracks[0]?.codec.toUpperCase() || "—"}</dd></div>
-        <div><dt>HDR</dt><dd>{stream?.media?.hdrFormat?.toUpperCase() || "SDR"}</dd></div>
-        <div><dt>Buffer</dt><dd>{stats.bufferedAhead.toFixed(1)}s</dd></div>
-        <div><dt>Dropped frames</dt><dd>{stats.droppedFrames} / {stats.totalFrames}</dd></div>
+        <div><dt>{t("player.diagnostics.status")}</dt><dd>{playerPhaseLabel(phase)}</dd></div>
+        <div><dt>{t("player.diagnostics.mode")}</dt><dd>{modeLabel}</dd></div>
+        <div><dt>{t("player.diagnostics.protocol")}</dt><dd>{stream?.protocol?.toUpperCase() || "—"}{stream?.container ? ` / ${stream.container.toUpperCase()}` : ""}</dd></div>
+        <div><dt>{t("player.diagnostics.video")}</dt><dd>{stats.width && stats.height ? `${stats.width}×${stats.height}` : "—"}{stream?.media?.videoTracks[0]?.codec ? ` · ${stream.media.videoTracks[0].codec.toUpperCase()}` : ""}</dd></div>
+        <div><dt>{t("player.diagnostics.audio")}</dt><dd>{audioTracks.find((track) => track.index === selectedAudioTrack)?.codec.toUpperCase() || audioTracks[0]?.codec.toUpperCase() || "—"}</dd></div>
+        <div><dt>{t("player.diagnostics.hdr")}</dt><dd>{stream?.media?.hdrFormat?.toUpperCase() || "SDR"}</dd></div>
+        <div><dt>{t("player.diagnostics.buffer")}</dt><dd>{stats.bufferedAhead.toFixed(1)}s</dd></div>
+        <div><dt>{t("player.diagnostics.droppedFrames")}</dt><dd>{stats.droppedFrames} / {stats.totalFrames}</dd></div>
       </dl>}
     </section>}
   </div>, document.body);

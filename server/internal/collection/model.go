@@ -30,6 +30,7 @@ const (
 	SourceKindAddonCatalog = "addon_catalog"
 	SourceKindTMDB         = "tmdb"
 	SourceKindTrakt        = "trakt"
+	SourceKindMDBList      = "mdblist"
 
 	MediaTypeMovie  = "movie"
 	MediaTypeSeries = "series"
@@ -77,6 +78,7 @@ type Source struct {
 	AddonCatalog *AddonCatalogSource `json:"addonCatalog,omitempty"`
 	TMDB         *TMDBSource         `json:"tmdb,omitempty"`
 	Trakt        *TraktSource        `json:"trakt,omitempty"`
+	MDBList      *MDBListSource      `json:"mdblist,omitempty"`
 }
 
 type AddonCatalogSource struct {
@@ -122,6 +124,13 @@ type TraktSource struct {
 	MediaType string `json:"mediaType"`
 	SortBy    string `json:"sortBy"`
 	SortHow   string `json:"sortHow"`
+}
+
+type MDBListSource struct {
+	ListID    int64  `json:"listId"`
+	MediaType string `json:"mediaType"`
+	Sort      string `json:"sort"`
+	Order     string `json:"order"`
 }
 
 type SaveInput struct {

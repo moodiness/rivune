@@ -30,6 +30,12 @@ type QueryOptions struct {
 	Region   string
 }
 
+type SeriesDetailsOptions struct {
+	Language        string
+	MappingProvider string
+	EpisodeOrderID  string
+}
+
 type SearchOptions struct {
 	QueryOptions
 	Query string
@@ -62,6 +68,7 @@ type Movie struct {
 	ReleaseDate      string            `json:"releaseDate,omitempty"`
 	PosterURL        string            `json:"posterUrl,omitempty"`
 	BackdropURL      string            `json:"backdropUrl,omitempty"`
+	LogoURL          string            `json:"logoUrl,omitempty"`
 	Tagline          string            `json:"tagline,omitempty"`
 	RuntimeMinutes   int               `json:"runtimeMinutes,omitempty"`
 	Genres           []Genre           `json:"genres"`
@@ -108,6 +115,7 @@ type ProviderMovie struct {
 	ReleaseDate      string
 	PosterURL        string
 	BackdropURL      string
+	LogoURL          string
 	Tagline          string
 	RuntimeMinutes   int
 	Genres           []Genre
@@ -124,28 +132,30 @@ type ProviderMoviePage struct {
 }
 
 type Series struct {
-	ID               string            `json:"id"`
-	MediaType        string            `json:"mediaType"`
-	Name             string            `json:"name"`
-	OriginalName     string            `json:"originalName"`
-	OriginalLanguage string            `json:"originalLanguage"`
-	Overview         string            `json:"overview"`
-	FirstAirDate     string            `json:"firstAirDate,omitempty"`
-	LastAirDate      string            `json:"lastAirDate,omitempty"`
-	PosterURL        string            `json:"posterUrl,omitempty"`
-	BackdropURL      string            `json:"backdropUrl,omitempty"`
-	Tagline          string            `json:"tagline,omitempty"`
-	Status           string            `json:"status,omitempty"`
-	NumberOfSeasons  int               `json:"numberOfSeasons,omitempty"`
-	NumberOfEpisodes int               `json:"numberOfEpisodes,omitempty"`
-	Genres           []Genre           `json:"genres"`
-	VoteAverage      float64           `json:"voteAverage"`
-	VoteCount        int               `json:"voteCount"`
-	Seasons          []SeasonSummary   `json:"seasons"`
-	Aliases          []Alias           `json:"aliases"`
-	EpisodeOrders    []EpisodeOrder    `json:"episodeOrders"`
-	MappingProvider  string            `json:"mappingProvider"`
-	ExternalIDs      map[string]string `json:"externalIds"`
+	ID                     string            `json:"id"`
+	MediaType              string            `json:"mediaType"`
+	Name                   string            `json:"name"`
+	OriginalName           string            `json:"originalName"`
+	OriginalLanguage       string            `json:"originalLanguage"`
+	Overview               string            `json:"overview"`
+	FirstAirDate           string            `json:"firstAirDate,omitempty"`
+	LastAirDate            string            `json:"lastAirDate,omitempty"`
+	PosterURL              string            `json:"posterUrl,omitempty"`
+	BackdropURL            string            `json:"backdropUrl,omitempty"`
+	LogoURL                string            `json:"logoUrl,omitempty"`
+	Tagline                string            `json:"tagline,omitempty"`
+	Status                 string            `json:"status,omitempty"`
+	NumberOfSeasons        int               `json:"numberOfSeasons,omitempty"`
+	NumberOfEpisodes       int               `json:"numberOfEpisodes,omitempty"`
+	Genres                 []Genre           `json:"genres"`
+	VoteAverage            float64           `json:"voteAverage"`
+	VoteCount              int               `json:"voteCount"`
+	Seasons                []SeasonSummary   `json:"seasons"`
+	Aliases                []Alias           `json:"aliases"`
+	EpisodeOrders          []EpisodeOrder    `json:"episodeOrders"`
+	SelectedEpisodeOrderID string            `json:"selectedEpisodeOrderId,omitempty"`
+	MappingProvider        string            `json:"mappingProvider"`
+	ExternalIDs            map[string]string `json:"externalIds"`
 }
 
 type SeriesPage struct {
@@ -209,6 +219,7 @@ type ProviderSeries struct {
 	LastAirDate      string
 	PosterURL        string
 	BackdropURL      string
+	LogoURL          string
 	Tagline          string
 	Status           string
 	NumberOfSeasons  int
@@ -288,7 +299,13 @@ type TelevisionEnricher interface {
 	EnrichSeason(context.Context, string, ProviderSeason) (ProviderSeason, error)
 }
 
+type ArtworkEnricher interface {
+	EnrichMovie(context.Context, ProviderMovie, string) (ProviderMovie, error)
+	EnrichSeries(context.Context, ProviderSeries, string) (ProviderSeries, error)
+	EnrichSeason(context.Context, string, ProviderSeason, string) (ProviderSeason, error)
+}
+
 type TelevisionMapper interface {
-	SeriesSeasons(context.Context, string) ([]ProviderSeasonSummary, error)
+	SeriesSeasons(context.Context, string, string) ([]ProviderSeasonSummary, error)
 	SeriesSeason(context.Context, string, string) (ProviderSeason, error)
 }

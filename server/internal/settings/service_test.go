@@ -40,6 +40,60 @@ func TestApplyPatchCanClearOverride(t *testing.T) {
 		t.Fatalf("expected theme override to be removed, got %q", *updated.Theme)
 	}
 }
+func TestInterfaceLanguageValidationAndLayering(t *testing.T) {
+	for _, language := range []string{
+		"en", "fr", "es", "it", "de", "ru", "pt-PT", "pt-BR", "ar", "ja", "ko", "zh-CN", "pl", "hy",
+		"es-MX", "es-AR", "es-CL", "es-CO", "es-PE", "fr-CA", "zh-TW", "nl", "sv", "da", "fi", "nb",
+		"tr", "uk", "cs", "sk", "ro", "el", "he", "hi", "id", "vi", "th", "hu", "bg", "hr", "sr", "ms",
+		"ca", "fa", "fil",
+	} {
+		language := language
+		if err := validatePatch(Patch{InterfaceLanguage: OptionalString{Set: true, Value: &language}}); err != nil {
+			t.Fatalf("supported interface language %q was rejected: %v", language, err)
+		}
+	}
+	for _, language := range []string{"EN", "pt", "pt-br", "zh-HK", "fr-FR", "auto", ""} {
+		language := language
+		if err := validatePatch(Patch{InterfaceLanguage: OptionalString{Set: true, Value: &language}}); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("unsupported interface language %q was accepted: %v", language, err)
+		}
+	}
+
+	effective := defaultEffective()
+	if effective.Values.InterfaceLanguage != "en" || effective.Sources["interfaceLanguage"] != "default" {
+		t.Fatalf("unexpected built-in interface language: %+v", effective)
+	}
+
+	arabic := "ar"
+	instance := applyPatch(Values{}, Patch{InterfaceLanguage: OptionalString{Set: true, Value: &arabic}})
+	applyLayer(&effective, instance, "instance")
+	applyLayer(&effective, Values{}, "profile")
+	if effective.Values.InterfaceLanguage != "ar" || effective.Sources["interfaceLanguage"] != "instance" {
+		t.Fatalf("profile did not inherit instance interface language: %+v", effective)
+	}
+
+	armenian := "hy"
+	profile := applyPatch(Values{}, Patch{InterfaceLanguage: OptionalString{Set: true, Value: &armenian}})
+	applyLayer(&effective, profile, "profile")
+	if effective.Values.InterfaceLanguage != "hy" || effective.Sources["interfaceLanguage"] != "profile" {
+		t.Fatalf("profile interface language override was not applied: %+v", effective)
+	}
+
+	profile = applyPatch(profile, Patch{InterfaceLanguage: OptionalString{Set: true, Value: nil}})
+	effective = defaultEffective()
+	applyLayer(&effective, instance, "instance")
+	applyLayer(&effective, profile, "profile")
+	if effective.Values.InterfaceLanguage != "ar" || effective.Sources["interfaceLanguage"] != "instance" {
+		t.Fatalf("cleared profile interface language did not inherit instance: %+v", effective)
+	}
+
+	instance = applyPatch(instance, Patch{InterfaceLanguage: OptionalString{Set: true, Value: nil}})
+	effective = defaultEffective()
+	applyLayer(&effective, instance, "instance")
+	if effective.Values.InterfaceLanguage != "en" || effective.Sources["interfaceLanguage"] != "default" {
+		t.Fatalf("cleared instance interface language did not use built-in default: %+v", effective)
+	}
+}
 
 func TestForcedSubtitleLanguageNormalizationAndInheritance(t *testing.T) {
 	serverInput := "FR-ca"
@@ -100,12 +154,14 @@ func TestEffectiveLayerPrecedence(t *testing.T) {
 	effective := Effective{
 		SchemaVersion: schemaVersion,
 		Values: EffectiveValues{
-			Theme: "system", MaximumResolution: "auto", PreferDirectPlay: true,
+			InterfaceLanguage: "en",
+			Theme:             "system", MaximumResolution: "auto", PreferDirectPlay: true,
 			HideUnreleased: false, MetadataLanguage: "auto", MetadataRegion: "auto",
 			AudioLanguage: "auto", SubtitleLanguage: "auto",
 		},
 		Sources: map[string]string{
-			"theme": "default", "maximumResolution": "default", "preferDirectPlay": "default",
+			"interfaceLanguage": "default",
+			"theme":             "default", "maximumResolution": "default", "preferDirectPlay": "default",
 			"hideUnreleased": "default", "metadataLanguage": "default", "metadataRegion": "default",
 			"audioLanguage": "default", "subtitleLanguage": "default",
 		},
@@ -201,12 +257,14 @@ func TestNewSettingsClearEveryOverride(t *testing.T) {
 	number := 10
 	text := "value"
 	values := Values{
+		InterfaceLanguage:   &text,
 		AutoplayNextEpisode: &enabled, SkipIntroEnabled: &enabled, SkipRecapEnabled: &enabled, SkipOutroEnabled: &enabled,
 		CardDensity: &text, AnimationsEnabled: &enabled,
 		SubtitleSizePercent: &number, SubtitleTextColor: &text, SubtitleBackgroundOpacityPercent: &number,
 		NotificationsEnabled: &enabled, NotificationDurationSeconds: &number, NotificationPollIntervalSeconds: &number,
 	}
 	updated := applyPatch(values, Patch{
+		InterfaceLanguage:   OptionalString{Set: true},
 		AutoplayNextEpisode: OptionalBool{Set: true}, SkipIntroEnabled: OptionalBool{Set: true},
 		SkipRecapEnabled: OptionalBool{Set: true}, SkipOutroEnabled: OptionalBool{Set: true}, CardDensity: OptionalString{Set: true},
 		AnimationsEnabled: OptionalBool{Set: true}, SubtitleSizePercent: OptionalInt{Set: true},
@@ -275,7 +333,7 @@ func TestLegacySettingsJSONUsesNewDefaults(t *testing.T) {
 	}
 	effective := defaultEffective()
 	applyLayer(&effective, legacy, "instance")
-	if effective.Values.Theme != "dark" || !effective.Values.AutoplayNextEpisode ||
+	if effective.Values.InterfaceLanguage != "en" || effective.Values.Theme != "dark" || !effective.Values.AutoplayNextEpisode ||
 		!effective.Values.SkipIntroEnabled || !effective.Values.SkipRecapEnabled || !effective.Values.SkipOutroEnabled || effective.Values.CardDensity != "comfortable" ||
 		!effective.Values.AnimationsEnabled || effective.Values.SubtitleSizePercent != 100 || effective.Values.SubtitleTextColor != "#FFFFFF" ||
 		effective.Values.SubtitleBackgroundOpacityPercent != 60 || !effective.Values.NotificationsEnabled ||

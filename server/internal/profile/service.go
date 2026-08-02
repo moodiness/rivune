@@ -24,6 +24,7 @@ var (
 	ErrInvalidPIN              = errors.New("invalid profile PIN")
 	ErrPINRateLimited          = errors.New("too many invalid profile PIN attempts")
 	ErrUnavailable             = errors.New("profile unavailable")
+	ErrManagementRequired      = errors.New("profile management permission required")
 )
 
 const (
@@ -397,7 +398,7 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, profileI
 	return nil
 }
 
-func (s *Service) Select(ctx context.Context, principal auth.Principal, profileID string, providedPIN *string) (Selection, error) {
+func (s *Service) Select(ctx context.Context, principal auth.Principal, profileID string, providedPIN *string, requireManagement bool) (Selection, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Selection{}, fmt.Errorf("begin profile selection: %w", err)
@@ -440,6 +441,9 @@ func (s *Service) Select(ctx context.Context, principal auth.Principal, profileI
 	now := time.Now().UTC()
 	selected.AccessTimezone = s.defaultTimezone
 	selected.Accessible = profileAccessible(selected, now)
+	if requireManagement && !selected.CanManage {
+		return Selection{}, ErrManagementRequired
+	}
 	if !selected.Accessible {
 		return Selection{}, ErrUnavailable
 	}

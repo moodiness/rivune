@@ -3,14 +3,14 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { useAuth } from "./auth";
 import { api, APIError, clearMaintenanceMode, MAINTENANCE_MODE_EVENT, maintenanceModeMessage } from "./api";
 import { Button, RivuneMark } from "./components";
-import { translate as t } from "./i18n";
+import { setLocale, translate as t } from "./i18n";
 import { configureNotificationDuration, notifyInfo } from "./notifications";
 import { Shell } from "./Shell";
 import type { View } from "./Shell";
 import { LoginPage, SetupPage } from "./pages/Onboarding";
 import { ProfileGate } from "./pages/ProfileGate";
 import { DevicePairingPage, PairApprovalPage } from "./pages/Pairing";
-import type { MediaItem, SettingsValues } from "./types";
+import type { InterfaceLanguage, MediaItem, SettingsValues } from "./types";
 
 const validViews: Record<string, View> = { home: "home", search: "search", library: "library", calendar: "calendar", admin: "admin" };
 const AdminPage = lazy(() => import("./pages/Admin").then((module) => ({ default: module.AdminPage })));
@@ -49,7 +49,7 @@ function appRoute(): { view: View; media: MediaRoute | null } {
   const id = decodeRouteSegment(segments.slice(1).join("/"));
   if (!mediaType || !id) return { view: origin, media: null };
   const storedItem = window.history.state?.rivuneMediaItem as MediaItem | undefined;
-  const title = params.get("title")?.trim() || storedItem?.title || "Untitled";
+  const title = params.get("title")?.trim() || storedItem?.title || t("media.untitled");
   const item: MediaItem = storedItem?.id === id && storedItem.mediaType === mediaType ? { ...storedItem, id, mediaType, title } : { id, mediaType, title };
   for (const field of mediaRouteFields) {
     const value = params.get(field);
@@ -71,7 +71,7 @@ function appRoute(): { view: View; media: MediaRoute | null } {
   if (seriesID || seasonID || episodeID || seasonNumber !== undefined || episodeNumber !== undefined) {
     item.raw = {
       ...item.raw,
-      openSeriesBrowser: true,
+      openSeriesBrowser: mediaType === "series" || item.raw?.openSeriesBrowser === true,
       continueSeriesId: seriesID || undefined,
       continueSeasonId: seasonID || undefined,
       continueSeasonNumber: seasonNumber !== undefined && Number.isInteger(seasonNumber) ? seasonNumber : undefined,
@@ -110,6 +110,7 @@ function restoreScroll(top: number): void {
 }
 
 type RuntimeSettings = {
+  interfaceLanguage: InterfaceLanguage;
   autoplayNextEpisode: boolean;
   cardDensity: "comfortable" | "compact";
   animationsEnabled: boolean;
@@ -121,6 +122,7 @@ type RuntimeSettings = {
   notificationPollIntervalSeconds: number;
 };
 const defaultRuntimeSettings: RuntimeSettings = {
+  interfaceLanguage: "en",
   autoplayNextEpisode: true,
   cardDensity: "comfortable",
   animationsEnabled: true,
@@ -138,6 +140,7 @@ function boundedSetting(value: number | null | undefined, fallback: number, mini
 
 function runtimeSettings(values: SettingsValues): RuntimeSettings {
   return {
+    interfaceLanguage: values.interfaceLanguage ?? defaultRuntimeSettings.interfaceLanguage,
     autoplayNextEpisode: typeof values.autoplayNextEpisode === "boolean" ? values.autoplayNextEpisode : defaultRuntimeSettings.autoplayNextEpisode,
     cardDensity: values.cardDensity === "compact" ? "compact" : "comfortable",
     animationsEnabled: typeof values.animationsEnabled === "boolean" ? values.animationsEnabled : defaultRuntimeSettings.animationsEnabled,
@@ -150,28 +153,30 @@ function runtimeSettings(values: SettingsValues): RuntimeSettings {
   };
 }
 
-function useRuntimeSettings(profileID: string | undefined): { settings: RuntimeSettings; ready: boolean } {
+function useRuntimeSettings(profileID: string | undefined, serverLanguage: InterfaceLanguage = "en"): { settings: RuntimeSettings; ready: boolean } {
+  const serverDefaults = { ...defaultRuntimeSettings, interfaceLanguage: serverLanguage };
   const [loaded, setLoaded] = useState<{ profileID: string; settings: RuntimeSettings; ready: boolean }>({
     profileID: "",
-    settings: defaultRuntimeSettings,
+    settings: serverDefaults,
     ready: true,
   });
 
   useEffect(() => {
     if (!profileID) {
       api.configureMetadataLocale("auto", "auto");
-      setLoaded({ profileID: "", settings: defaultRuntimeSettings, ready: true });
+      setLocale(serverLanguage);
+      setLoaded({ profileID: "", settings: serverDefaults, ready: true });
       return;
     }
     let active = true;
+    let requestGeneration = 0;
     const load = () => {
-      setLoaded((current) => ({
-        profileID,
-        settings: current.profileID === profileID ? current.settings : defaultRuntimeSettings,
-        ready: false,
-      }));
+      const generation = ++requestGeneration;
+      setLoaded((current) => current.profileID === profileID
+        ? current
+        : { profileID, settings: serverDefaults, ready: false });
       void api.effectiveSettings(profileID).then((response) => {
-        if (!active) return;
+        if (!active || generation !== requestGeneration) return;
         api.configureMetadataLocale(
           response.settings.metadataLanguage ?? undefined,
           response.settings.metadataRegion ?? undefined,
@@ -179,11 +184,14 @@ function useRuntimeSettings(profileID: string | undefined): { settings: RuntimeS
           response.settings.seriesMappingProvider ?? undefined,
           response.settings.subtitleLanguage ?? undefined,
         );
-        setLoaded({ profileID, settings: runtimeSettings(response.settings), ready: true });
+        const next = runtimeSettings(response.settings);
+        setLocale(next.interfaceLanguage);
+        setLoaded({ profileID, settings: next, ready: true });
       }).catch(() => {
-        if (!active) return;
+        if (!active || generation !== requestGeneration) return;
         api.configureMetadataLocale("auto", "auto");
-        setLoaded({ profileID, settings: defaultRuntimeSettings, ready: true });
+        setLocale(serverLanguage);
+        setLoaded({ profileID, settings: serverDefaults, ready: true });
       });
     };
     load();
@@ -192,11 +200,11 @@ function useRuntimeSettings(profileID: string | undefined): { settings: RuntimeS
       active = false;
       window.removeEventListener("rivune:settings-changed", load);
     };
-  }, [profileID]);
+  }, [profileID, serverLanguage]);
 
-  return loaded.profileID === profileID
+  return loaded.profileID === (profileID ?? "")
     ? { settings: loaded.settings, ready: loaded.ready }
-    : { settings: defaultRuntimeSettings, ready: false };
+    : { settings: serverDefaults, ready: false };
 }
 
 function applyRuntimeSettings(settings: RuntimeSettings): void {
@@ -253,7 +261,7 @@ function useSessionNotifications(sessionID: string | undefined, refreshAccount: 
 
 export default function App() {
   const { account, booting, discovery, authenticated, activeProfile, refreshAccount } = useAuth();
-  const { settings, ready: settingsReady } = useRuntimeSettings(activeProfile?.id);
+  const { settings, ready: settingsReady } = useRuntimeSettings(activeProfile?.id, discovery?.interfaceLanguage);
   useSessionNotifications(account?.session.id, refreshAccount, settings.notificationsEnabled, settings.notificationPollIntervalSeconds);
   const pairingApproval = window.location.pathname === "/pair";
   const [initialRoute] = useState(appRoute);
@@ -293,12 +301,14 @@ export default function App() {
   const retryMaintenance = useCallback(async () => {
     setCheckingMaintenance(true);
     try {
-      await api.profiles();
-      await refreshAccount();
+      const next = await refreshAccount({ restoreActiveProfile: true });
+      if (!next) return;
+      if (next.maintenance.enabled) {
+        setMaintenanceMessage(next.maintenance.message ?? "");
+        return;
+      }
       setMaintenanceMessage(null);
       clearMaintenanceMode();
-    } catch (cause) {
-      if (!(cause instanceof APIError && cause.code === "maintenance_mode")) return;
     } finally {
       setCheckingMaintenance(false);
     }
@@ -379,6 +389,15 @@ export default function App() {
     window.history.replaceState(window.history.state, "", mediaRouteURL(mediaRoute.item, mediaRoute.origin, context));
   }
 
+  function openEpisode(item: MediaItem) {
+    if (!mediaRoute) return;
+    const nextRoute = { item, origin: mediaRoute.origin };
+    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item }, "", mediaRouteURL(item, mediaRoute.origin));
+    mediaRouteRef.current = nextRoute;
+    setMediaRoute(nextRoute);
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }
+
   function closeMedia() {
     if (!mediaRoute) return;
     if (window.history.state?.rivuneMedia) {
@@ -394,14 +413,18 @@ export default function App() {
     restoreOriginFocus();
   }
 
-  if (maintenanceMessage !== null) return <main className="offline-page maintenance-page"><div className="offline-page__glow" /><RivuneMark /><section><span><ServerOff /></span><h1>{t("app.maintenanceTitle")}</h1><p>{maintenanceMessage || t("app.maintenanceBody")}</p><Button loading={checkingMaintenance} onClick={() => void retryMaintenance()}><RefreshCw size={18} /> {t("app.maintenanceRetry")}</Button></section></main>;
+  const profileMaintenanceMessage = account?.maintenance.enabled
+    ? account.maintenance.message ?? ""
+    : maintenanceMessage;
+
+  if (maintenanceMessage !== null && !authenticated) return <main className="offline-page maintenance-page"><div className="offline-page__glow" /><RivuneMark /><section><span><ServerOff /></span><h1>{t("app.maintenanceTitle")}</h1><p>{maintenanceMessage || t("app.maintenanceBody")}</p><Button loading={checkingMaintenance} onClick={() => void retryMaintenance()}><RefreshCw size={18} /> {t("app.maintenanceRetry")}</Button></section></main>;
   if (booting) return <div className="boot-screen"><div className="boot-screen__aura" /><RivuneMark /><LoaderCircle className="spin" /><p>{t("app.connecting")}</p></div>;
   if (!discovery) return <main className="offline-page"><div className="offline-page__glow" /><RivuneMark /><section><span><ServerOff /></span><h1>{t("app.offlineTitle")}</h1><p>{t("app.offlineBody")}</p><Button onClick={() => window.location.reload()}><RefreshCw size={18} /> {t("app.reconnect")}</Button></section></main>;
   if (discovery.setupRequired) return <SetupPage />;
   if (!authenticated) return pairingApproval ? <LoginPage /> : <DevicePairingPage />;
-  if (!activeProfile) return <ProfileGate />;
+  if (!activeProfile || profileMaintenanceMessage !== null && !activeProfile.canManage) return <ProfileGate maintenanceMessage={profileMaintenanceMessage} />;
   if (pairingApproval) return <PairApprovalPage />;
-  if (!settingsReady) return <Shell view={view} onView={setView}><div className="view-loading"><LoaderCircle className="spin" /><span>Loading profile settings…</span></div></Shell>;
+  if (!settingsReady) return <Shell view={view} onView={setView}><div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingProfileSettings")}</span></div></Shell>;
 
   return <Shell view={view} onView={setView}>
     <div ref={routeSurfaceRef} tabIndex={-1} className={mediaRoute ? "route-surface route-surface--hidden" : "route-surface"}>
@@ -409,6 +432,6 @@ export default function App() {
         {view === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} /> : view === "search" ? <SearchPage onOpenMedia={openMedia} /> : view === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : view === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
       </Suspense>
     </div>
-    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>Loading title…</span></div>}><MediaDetails item={mediaRoute.item} onClose={closeMedia} onNavigateContext={updateMediaRoute} /></Suspense>}
+    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaRoute.item.mediaType}:${mediaRoute.item.id}:${mediaRoute.item.titleId ?? ""}`} item={mediaRoute.item} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenEpisode={openEpisode} /></Suspense>}
   </Shell>;
 }

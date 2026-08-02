@@ -26,6 +26,7 @@ var (
 	regionPattern           = regexp.MustCompile(`^[A-Za-z]{2}$`)
 	externalProviderPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	mappedSeasonPattern     = regexp.MustCompile(`^tvdb:([0-9a-fA-F-]{36}):([1-9][0-9]*)$`)
+	episodeOrderPattern     = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 )
 
 type Service struct {
@@ -36,16 +37,17 @@ type Service struct {
 	cacheTTL        time.Duration
 	enricher        TelevisionEnricher
 	mapper          TelevisionMapper
+	artwork         ArtworkEnricher
 	logger          *slog.Logger
 }
 
-func NewService(pool *pgxpool.Pool, provider Provider, enricher TelevisionEnricher, cacheTTL time.Duration, logger *slog.Logger) *Service {
+func NewService(pool *pgxpool.Pool, provider Provider, enricher TelevisionEnricher, artwork ArtworkEnricher, cacheTTL time.Duration, logger *slog.Logger) *Service {
 	trailerProvider, _ := provider.(TrailerProvider)
 	resolver, _ := provider.(ExternalIDResolver)
 	mapper, _ := enricher.(TelevisionMapper)
 	return &Service{
 		pool: pool, provider: withEnglishOverviewFallback(provider), resolver: resolver, trailerProvider: trailerProvider,
-		enricher: enricher, mapper: mapper, cacheTTL: cacheTTL, logger: logger,
+		enricher: enricher, mapper: mapper, artwork: artwork, cacheTTL: cacheTTL, logger: logger,
 	}
 }
 
@@ -126,6 +128,16 @@ func (s *Service) MovieDetails(ctx context.Context, principal auth.Principal, ti
 		}
 		return Movie{}, err
 	}
+	if s.artwork != nil {
+		enriched, enrichErr := s.artwork.EnrichMovie(ctx, provided, normalizedLanguage)
+		if enrichErr != nil {
+			if !errors.Is(enrichErr, ErrProviderNotFound) {
+				s.logEnrichmentFailure("fanart", "movie", titleID, enrichErr)
+			}
+		} else {
+			provided = enriched
+		}
+	}
 	if returnedExternalID := strings.TrimSpace(provided.ExternalID); returnedExternalID != "" && returnedExternalID != externalID {
 		return Movie{}, errors.New("metadata provider returned a conflicting external ID")
 	}
@@ -203,18 +215,27 @@ func (s *Service) SearchSeries(ctx context.Context, principal auth.Principal, op
 	return s.persistSeriesPage(ctx, page)
 }
 
-func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, titleID, language, mappingProvider string) (Series, error) {
+func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, titleID string, options SeriesDetailsOptions) (Series, error) {
 	if err := requireActiveProfile(principal); err != nil {
 		return Series{}, err
 	}
-	mappingProvider, err := normalizeSeriesMappingProvider(mappingProvider)
+	mappingProvider, err := normalizeSeriesMappingProvider(options.MappingProvider)
 	if err != nil {
 		return Series{}, err
 	}
-	if mappingProvider == "tvdb" {
-		return s.mappedSeriesDetails(ctx, principal, titleID, language)
+	episodeOrderID, err := normalizeEpisodeOrderID(options.EpisodeOrderID)
+	if err != nil {
+		return Series{}, err
 	}
-	normalizedLanguage, err := normalizeLanguage(language)
+	if episodeOrderID != "" && mappingProvider != "tvdb" {
+		return Series{}, fmt.Errorf("%w: episodeOrder requires mappingProvider=tvdb", ErrInvalidInput)
+	}
+	if mappingProvider == "tvdb" {
+		options.MappingProvider = mappingProvider
+		options.EpisodeOrderID = episodeOrderID
+		return s.mappedSeriesDetails(ctx, principal, titleID, options)
+	}
+	normalizedLanguage, err := normalizeLanguage(options.Language)
 	if err != nil {
 		return Series{}, err
 	}
@@ -233,6 +254,7 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 		if cached.MappingProvider == "" {
 			cached.MappingProvider = providerName
 		}
+		cached.EpisodeOrders = normalizeEpisodeOrders(cached.EpisodeOrders)
 		if err := s.persistCachedSeriesReleaseDates(ctx, cached); err != nil {
 			return Series{}, err
 		}
@@ -252,7 +274,17 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 	if s.enricher != nil {
 		enriched, enrichErr := s.enricher.EnrichSeries(ctx, provided)
 		if enrichErr != nil {
-			s.logEnrichmentFailure("series", titleID, enrichErr)
+			s.logEnrichmentFailure("tvdb", "series", titleID, enrichErr)
+		} else {
+			provided = enriched
+		}
+	}
+	if s.artwork != nil {
+		enriched, enrichErr := s.artwork.EnrichSeries(ctx, provided, normalizedLanguage)
+		if enrichErr != nil {
+			if !errors.Is(enrichErr, ErrProviderNotFound) {
+				s.logEnrichmentFailure("fanart", "series", titleID, enrichErr)
+			}
 		} else {
 			provided = enriched
 		}
@@ -396,9 +428,19 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 	if s.enricher != nil && seriesTVDBID != nil {
 		enriched, enrichErr := s.enricher.EnrichSeason(ctx, *seriesTVDBID, provided)
 		if enrichErr != nil {
-			s.logEnrichmentFailure("season", seasonID, enrichErr)
+			s.logEnrichmentFailure("tvdb", "season", seasonID, enrichErr)
 		} else if hierarchyErr := validateProviderSeasonHierarchy(enriched, seasonExternalID, seasonNumber); hierarchyErr != nil {
-			s.logEnrichmentFailure("season", seasonID, hierarchyErr)
+			s.logEnrichmentFailure("tvdb", "season", seasonID, hierarchyErr)
+		} else {
+			provided = enriched
+		}
+	}
+	if s.artwork != nil && seriesTVDBID != nil {
+		enriched, enrichErr := s.artwork.EnrichSeason(ctx, *seriesTVDBID, provided, normalizedLanguage)
+		if enrichErr != nil {
+			if !errors.Is(enrichErr, ErrProviderNotFound) {
+				s.logEnrichmentFailure("fanart", "season", seasonID, enrichErr)
+			}
 		} else {
 			provided = enriched
 		}
@@ -441,40 +483,68 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 	return season, nil
 }
 
-func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Principal, titleID, language string) (Series, error) {
+func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Principal, titleID string, options SeriesDetailsOptions) (Series, error) {
 	if s.mapper == nil {
 		return Series{}, ErrProviderUnavailable
 	}
-	base, err := s.SeriesDetails(ctx, principal, titleID, language, providerName)
+	base, err := s.SeriesDetails(ctx, principal, titleID, SeriesDetailsOptions{
+		Language:        options.Language,
+		MappingProvider: providerName,
+	})
 	if err != nil {
 		return Series{}, err
 	}
-	normalizedLanguage, err := normalizeLanguage(language)
+	normalizedLanguage, err := normalizeLanguage(options.Language)
 	if err != nil {
 		return Series{}, err
 	}
-	cachedPayload, err := s.loadCachedTitleMetadata(ctx, base.ID, MediaTypeSeries, "tvdb", normalizedLanguage)
-	if err != nil {
-		return Series{}, err
-	}
-	if len(cachedPayload) != 0 {
-		var cached Series
-		if err := json.Unmarshal(cachedPayload, &cached); err != nil {
-			return Series{}, fmt.Errorf("decode cached TVDB series mapping: %w", err)
+	if options.EpisodeOrderID == "" {
+		cachedPayload, err := s.loadCachedTitleMetadata(ctx, base.ID, MediaTypeSeries, "tvdb", normalizedLanguage)
+		if err != nil {
+			return Series{}, err
 		}
-		return cached, nil
+		if len(cachedPayload) != 0 {
+			var cached Series
+			if err := json.Unmarshal(cachedPayload, &cached); err != nil {
+				return Series{}, fmt.Errorf("decode cached TVDB series mapping: %w", err)
+			}
+			cached.EpisodeOrders = normalizeEpisodeOrders(cached.EpisodeOrders)
+			if cached.SelectedEpisodeOrderID == "" {
+				cached.SelectedEpisodeOrderID = defaultEpisodeOrderID(cached.EpisodeOrders)
+			}
+			if len(base.EpisodeOrders) == 0 || len(cached.EpisodeOrders) > 0 {
+				return cached, nil
+			}
+		}
 	}
 	seriesTVDBID := strings.TrimSpace(base.ExternalIDs["tvdb"])
 	if seriesTVDBID == "" {
 		return Series{}, ErrProviderNotFound
 	}
-	providedSeasons, err := s.mapper.SeriesSeasons(ctx, seriesTVDBID)
+	providedSeasons, err := s.mapper.SeriesSeasons(ctx, seriesTVDBID, options.EpisodeOrderID)
 	if err != nil {
 		return Series{}, err
 	}
+	if s.artwork != nil {
+		enriched, enrichErr := s.artwork.EnrichSeries(ctx, ProviderSeries{
+			AdditionalIDs: map[string]string{"tvdb": seriesTVDBID},
+			Seasons:       providedSeasons,
+		}, normalizedLanguage)
+		if enrichErr != nil {
+			if !errors.Is(enrichErr, ErrProviderNotFound) {
+				s.logEnrichmentFailure("fanart", "series", titleID, enrichErr)
+			}
+		} else {
+			providedSeasons = enriched.Seasons
+		}
+	}
 	mapped := base
 	mapped.MappingProvider = "tvdb"
-	mapped.EpisodeOrders = []EpisodeOrder{}
+	mapped.EpisodeOrders = normalizeEpisodeOrders(base.EpisodeOrders)
+	mapped.SelectedEpisodeOrderID = options.EpisodeOrderID
+	if mapped.SelectedEpisodeOrderID == "" {
+		mapped.SelectedEpisodeOrderID = defaultEpisodeOrderID(mapped.EpisodeOrders)
+	}
 	mapped.Seasons = make([]SeasonSummary, 0, len(providedSeasons))
 	mapped.NumberOfSeasons = 0
 	mapped.NumberOfEpisodes = 0
@@ -501,16 +571,18 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 			ExternalIDs:  map[string]string{"tvdb": provided.ExternalID},
 		})
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Series{}, fmt.Errorf("begin TVDB series mapping cache: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := cacheTitle(ctx, tx, base.ID, "tvdb", normalizedLanguage, mapped, s.cacheTTL); err != nil {
-		return Series{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Series{}, fmt.Errorf("commit TVDB series mapping cache: %w", err)
+	if options.EpisodeOrderID == "" {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return Series{}, fmt.Errorf("begin TVDB series mapping cache: %w", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if err := cacheTitle(ctx, tx, base.ID, "tvdb", normalizedLanguage, mapped, s.cacheTTL); err != nil {
+			return Series{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return Series{}, fmt.Errorf("commit TVDB series mapping cache: %w", err)
+		}
 	}
 	return mapped, nil
 }
@@ -519,13 +591,17 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 	if s.mapper == nil {
 		return Season{}, ErrProviderUnavailable
 	}
+	normalizedLanguage, err := normalizeLanguage(language)
+	if err != nil {
+		return Season{}, err
+	}
 	matches := mappedSeasonPattern.FindStringSubmatch(strings.TrimSpace(seasonID))
 	if matches == nil {
 		return Season{}, ErrNotFound
 	}
 	seriesID := matches[1]
 	seasonTVDBID := matches[2]
-	base, err := s.SeriesDetails(ctx, principal, seriesID, language, providerName)
+	base, err := s.SeriesDetails(ctx, principal, seriesID, SeriesDetailsOptions{Language: language, MappingProvider: providerName})
 	if err != nil {
 		return Season{}, err
 	}
@@ -536,6 +612,16 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 	provided, err := s.mapper.SeriesSeason(ctx, seriesTVDBID, seasonTVDBID)
 	if err != nil {
 		return Season{}, err
+	}
+	if s.artwork != nil {
+		enriched, enrichErr := s.artwork.EnrichSeason(ctx, seriesTVDBID, provided, normalizedLanguage)
+		if enrichErr != nil {
+			if !errors.Is(enrichErr, ErrProviderNotFound) {
+				s.logEnrichmentFailure("fanart", "season", seasonID, enrichErr)
+			}
+		} else {
+			provided = enriched
+		}
 	}
 	canonicalEpisodes := make([]Episode, 0, base.NumberOfEpisodes)
 	for _, summary := range base.Seasons {
@@ -1545,9 +1631,9 @@ func linkAdditionalIDs(ctx context.Context, tx pgx.Tx, titleID, namespace string
 	return nil
 }
 
-func (s *Service) logEnrichmentFailure(mediaType, titleID string, err error) {
+func (s *Service) logEnrichmentFailure(provider, mediaType, titleID string, err error) {
 	if s.logger != nil {
-		s.logger.Warn("optional metadata enrichment failed", "provider", "tvdb", "mediaType", mediaType, "titleId", titleID, "error", err)
+		s.logger.Warn("optional metadata enrichment failed", "provider", provider, "mediaType", mediaType, "titleId", titleID, "error", err)
 	}
 }
 
@@ -1573,6 +1659,7 @@ func normalizeMovie(titleID string, provided ProviderMovie) Movie {
 		ReleaseDate:      provided.ReleaseDate,
 		PosterURL:        provided.PosterURL,
 		BackdropURL:      provided.BackdropURL,
+		LogoURL:          provided.LogoURL,
 		Tagline:          provided.Tagline,
 		RuntimeMinutes:   provided.RuntimeMinutes,
 		Genres:           genres,
@@ -1591,10 +1678,7 @@ func normalizeSeries(titleID string, provided ProviderSeries) Series {
 	if aliases == nil {
 		aliases = []Alias{}
 	}
-	episodeOrders := provided.EpisodeOrders
-	if episodeOrders == nil {
-		episodeOrders = []EpisodeOrder{}
-	}
+	episodeOrders := normalizeEpisodeOrders(provided.EpisodeOrders)
 	return Series{
 		ID:               titleID,
 		MediaType:        MediaTypeSeries,
@@ -1606,6 +1690,7 @@ func normalizeSeries(titleID string, provided ProviderSeries) Series {
 		LastAirDate:      provided.LastAirDate,
 		PosterURL:        provided.PosterURL,
 		BackdropURL:      provided.BackdropURL,
+		LogoURL:          provided.LogoURL,
 		Tagline:          provided.Tagline,
 		Status:           provided.Status,
 		NumberOfSeasons:  provided.NumberOfSeasons,
@@ -1717,6 +1802,59 @@ func normalizeSeriesMappingProvider(provider string) (string, error) {
 		return "", fmt.Errorf("%w: mappingProvider must be tmdb or tvdb", ErrInvalidInput)
 	}
 	return provider, nil
+}
+
+func normalizeEpisodeOrderID(orderID string) (string, error) {
+	orderID = strings.TrimSpace(orderID)
+	if orderID != "" && !episodeOrderPattern.MatchString(orderID) {
+		return "", fmt.Errorf("%w: episodeOrder must be a positive TVDB season type ID", ErrInvalidInput)
+	}
+	return orderID, nil
+}
+
+func normalizeEpisodeOrders(orders []EpisodeOrder) []EpisodeOrder {
+	result := make([]EpisodeOrder, 0, len(orders))
+	seen := make(map[string]struct{}, len(orders))
+	for _, order := range orders {
+		order.ID = strings.TrimSpace(order.ID)
+		if !episodeOrderPattern.MatchString(order.ID) {
+			continue
+		}
+		if _, exists := seen[order.ID]; exists {
+			continue
+		}
+		seen[order.ID] = struct{}{}
+		order.Type = strings.ToLower(strings.TrimSpace(order.Type))
+		order.Name = strings.TrimSpace(order.Name)
+		switch order.Type {
+		case "official":
+			order.Name = "Aired Order"
+		case "dvd":
+			order.Name = "DVD Order"
+		case "absolute":
+			order.Name = "Absolute Order"
+		}
+		if order.Name == "" {
+			continue
+		}
+		result = append(result, order)
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		if len(result[left].ID) != len(result[right].ID) {
+			return len(result[left].ID) < len(result[right].ID)
+		}
+		return result[left].ID < result[right].ID
+	})
+	return result
+}
+
+func defaultEpisodeOrderID(orders []EpisodeOrder) string {
+	for _, order := range orders {
+		if order.IsDefault {
+			return order.ID
+		}
+	}
+	return ""
 }
 
 func normalizeLanguage(language string) (string, error) {

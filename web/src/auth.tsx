@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, clearSession, PROFILE_SELECTION_REQUIRED_EVENT } from "./api";
-import type { Account, Discovery, Profile } from "./types";
+import { setLocale } from "./i18n";
+import type { Account, Discovery, InterfaceLanguage, Profile } from "./types";
 
 type AuthState = {
   discovery: Discovery | null;
@@ -9,13 +10,14 @@ type AuthState = {
   booting: boolean;
   authenticated: boolean;
   profileRequestSignal: AbortSignal;
-  refreshAccount: () => Promise<Account | null>;
+  refreshAccount: (options?: { restoreActiveProfile?: boolean }) => Promise<Account | null>;
   login: (username: string, password: string) => Promise<void>;
   completeDeviceAuthorization: (deviceCode: string) => Promise<void>;
   logout: () => Promise<void>;
   selectProfile: (profile: Profile, pin?: string) => Promise<void>;
   leaveProfile: () => Promise<void>;
   rediscover: () => Promise<void>;
+  updateServerInterfaceLanguage: (language: InterfaceLanguage) => void;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -46,20 +48,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setConfirmedProfileID(profileID);
   }, []);
 
-  const refreshAccount = useCallback(async () => {
+  const refreshAccount = useCallback(async (options?: { restoreActiveProfile?: boolean }) => {
     const generation = authGeneration.current;
     try {
       const next = await api.me();
       if (authGeneration.current === generation) {
         setAccount(next);
-        if (confirmedProfileIDRef.current !== (next.session.activeProfile?.id ?? null)) invalidateProfile();
+        const activeProfileID = next.session.activeProfile?.id ?? null;
+        if (options?.restoreActiveProfile && activeProfileID !== null) confirmProfile(activeProfileID);
+        else if (confirmedProfileIDRef.current !== activeProfileID) invalidateProfile();
       }
       return next;
     } catch {
       if (authGeneration.current === generation) setAccount(null);
       return null;
     }
-  }, [invalidateProfile]);
+  }, [confirmProfile, invalidateProfile]);
 
   useEffect(() => {
     const requireProfileSelection = () => {
@@ -82,7 +86,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const rediscover = useCallback(async () => {
     const next = await api.discovery();
+    setLocale(next.interfaceLanguage);
     setDiscovery(next);
+  }, []);
+
+  const updateServerInterfaceLanguage = useCallback((interfaceLanguage: InterfaceLanguage) => {
+    setDiscovery((current) => current === null ? null : { ...current, interfaceLanguage });
   }, []);
 
   useEffect(() => {
@@ -91,6 +100,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const discovered = await api.discovery();
         if (!active) return;
+        setLocale(discovered.interfaceLanguage);
         setDiscovery(discovered);
         if (!discovered.setupRequired && await api.restore()) {
           const current = await api.me();
@@ -177,7 +187,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     selectProfile,
     leaveProfile,
     rediscover,
-  }), [account, activeProfile, booting, completeDeviceAuthorization, discovery, leaveProfile, login, logout, profileRequestSignal, rediscover, refreshAccount, selectProfile]);
+    updateServerInterfaceLanguage,
+  }), [account, activeProfile, booting, completeDeviceAuthorization, discovery, leaveProfile, login, logout, profileRequestSignal, rediscover, refreshAccount, selectProfile, updateServerInterfaceLanguage]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

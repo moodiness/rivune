@@ -183,6 +183,9 @@ func playbackMaximumHeight(value string) int {
 }
 
 func (a *API) playbackAsset(w http.ResponseWriter, r *http.Request) {
+	if a.rejectMaintenanceRequest(w, r) {
+		return
+	}
 	err := a.playback.ProxyAsset(
 		w, r, r.PathValue("sessionId"), r.PathValue("assetId"),
 		r.URL.Query().Get("token"), r.URL.Query().Get("target"), r.URL.Query().Get("signature"),

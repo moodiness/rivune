@@ -28,6 +28,7 @@ type fakePlaybackService struct {
 	prepareErr   error
 	resolveErr   error
 	proxyErr     error
+	proxyCalls   int
 	activityErr  error
 }
 
@@ -67,6 +68,7 @@ func (*fakePlaybackService) PurgeActivity(context.Context, auth.Principal) (play
 }
 
 func (fake *fakePlaybackService) ProxyAsset(http.ResponseWriter, *http.Request, string, string, string, string, string) error {
+	fake.proxyCalls++
 	return fake.proxyErr
 }
 

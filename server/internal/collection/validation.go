@@ -133,7 +133,7 @@ func normalizeSource(source *Source) error {
 	}
 	switch source.Kind {
 	case SourceKindAddonCatalog:
-		if source.AddonCatalog == nil || source.TMDB != nil || source.Trakt != nil {
+		if source.AddonCatalog == nil || source.TMDB != nil || source.Trakt != nil || source.MDBList != nil {
 			return errorsText("addon_catalog source must contain only addonCatalog settings")
 		}
 		settings := source.AddonCatalog
@@ -160,15 +160,20 @@ func normalizeSource(source *Source) error {
 			seen[settings.Extra[index].Name] = struct{}{}
 		}
 	case SourceKindTMDB:
-		if source.TMDB == nil || source.AddonCatalog != nil || source.Trakt != nil {
+		if source.TMDB == nil || source.AddonCatalog != nil || source.Trakt != nil || source.MDBList != nil {
 			return errorsText("tmdb source must contain only TMDB settings")
 		}
 		return normalizeTMDB(source.TMDB)
 	case SourceKindTrakt:
-		if source.Trakt == nil || source.AddonCatalog != nil || source.TMDB != nil {
+		if source.Trakt == nil || source.AddonCatalog != nil || source.TMDB != nil || source.MDBList != nil {
 			return errorsText("trakt source must contain only Trakt settings")
 		}
 		return normalizeTrakt(source.Trakt)
+	case SourceKindMDBList:
+		if source.MDBList == nil || source.AddonCatalog != nil || source.TMDB != nil || source.Trakt != nil {
+			return errorsText("mdblist source must contain only MDBList settings")
+		}
+		return normalizeMDBList(source.MDBList)
 	default:
 		return errorsText("unsupported source kind")
 	}
@@ -270,6 +275,36 @@ func normalizeTrakt(source *TraktSource) error {
 	allowedSort := map[string]bool{"rank": true, "added": true, "title": true, "released": true, "runtime": true, "popularity": true, "percentage": true, "votes": true}
 	if !allowedSort[source.SortBy] || source.SortHow != "asc" && source.SortHow != "desc" {
 		return errorsText("unsupported Trakt sort")
+	}
+	return nil
+}
+
+func normalizeMDBList(source *MDBListSource) error {
+	source.MediaType = strings.ToLower(strings.TrimSpace(source.MediaType))
+	source.Sort = strings.ToLower(strings.TrimSpace(source.Sort))
+	source.Order = strings.ToLower(strings.TrimSpace(source.Order))
+	if source.MediaType == "" {
+		source.MediaType = MediaTypeMovie
+	}
+	if source.Sort == "" {
+		source.Sort = "rank"
+	}
+	if source.Order == "" {
+		source.Order = "asc"
+	}
+	if source.ListID < 1 || source.MediaType != MediaTypeMovie && source.MediaType != MediaTypeSeries {
+		return errorsText("MDBList list ID and media type are invalid")
+	}
+	switch source.Sort {
+	case "added", "budget", "imdbpopular", "imdbrating", "imdbvotes", "last_air_date",
+		"letterrating", "lettervotes", "metacritic", "myanimelist", "random", "rank",
+		"released", "releasedigital", "revenue", "rogerebert", "rtaudience", "rtomatoes",
+		"runtime", "score", "score_average", "sort_title", "title", "tmdbpopular", "usort":
+	default:
+		return errorsText("unsupported MDBList sort")
+	}
+	if source.Order != "asc" && source.Order != "desc" {
+		return errorsText("unsupported MDBList sort order")
 	}
 	return nil
 }

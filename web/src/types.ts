@@ -1,3 +1,5 @@
+export type InterfaceLanguage = "en" | "fr" | "fr-CA" | "es" | "es-MX" | "es-AR" | "es-CL" | "es-CO" | "es-PE" | "it" | "de" | "ru" | "pt-PT" | "pt-BR" | "ar" | "ja" | "ko" | "zh-CN" | "zh-TW" | "pl" | "hy" | "nl" | "sv" | "da" | "fi" | "nb" | "tr" | "uk" | "cs" | "sk" | "ro" | "el" | "he" | "hi" | "id" | "vi" | "th" | "hu" | "bg" | "hr" | "sr" | "ms" | "ca" | "fa" | "fil";
+
 export type Discovery = {
   name: string;
   serverVersion: string;
@@ -5,6 +7,7 @@ export type Discovery = {
   apiBaseUrl: string;
   setupRequired: boolean;
   timezone: string;
+  interfaceLanguage: InterfaceLanguage;
 };
 
 export type TokenPair = {
@@ -37,6 +40,7 @@ export type Account = {
   user: { id: string; username: string; role: string };
   session: { id: string; deviceId: string; activeProfile: { id: string; expiresAt: string } | null };
   profiles: Profile[];
+  maintenance: { enabled: boolean; message: string | null };
 };
 export type ProfileSession = {
   id: string;
@@ -100,13 +104,15 @@ export type TMDBSource = {
   filters: TMDBFilters;
 };
 export type TraktSource = { listId: number; mediaType: "movie" | "series"; sortBy: string; sortHow: "asc" | "desc" };
+export type MDBListSource = { listId: number; mediaType: "movie" | "series"; sort: string; order: "asc" | "desc" };
 export type CollectionSource = {
   id?: string;
-  kind: "addon_catalog" | "tmdb" | "trakt";
+  kind: "addon_catalog" | "tmdb" | "trakt" | "mdblist";
   title: string;
   addonCatalog?: AddonCatalogSource;
   tmdb?: TMDBSource;
   trakt?: TraktSource;
+  mdblist?: MDBListSource;
 };
 export type CollectionFolder = {
   id?: string;
@@ -232,6 +238,7 @@ export type SeriesMetadata = {
   lastAirDate?: string;
   posterUrl?: string;
   backdropUrl?: string;
+  logoUrl?: string;
   tagline?: string;
   status?: string;
   numberOfSeasons?: number;
@@ -241,6 +248,7 @@ export type SeriesMetadata = {
   voteCount: number;
   seasons: SeasonSummary[];
   episodeOrders: Array<{ id: string; name: string; type: string; isDefault: boolean }>;
+  selectedEpisodeOrderId?: string;
   mappingProvider: "tmdb" | "tvdb";
   externalIds: Record<string, string>;
 };
@@ -500,6 +508,7 @@ export type TrackingDeviceAuthorization = {
 export type TrackingPreferences = Partial<Pick<TrackingStatus, "syncWatched" | "syncProgress" | "syncLibrary">>;
 
 export type SettingsValues = {
+  interfaceLanguage?: InterfaceLanguage | null;
   theme?: string | null;
   maximumResolution?: string | null;
   preferDirectPlay?: boolean | null;

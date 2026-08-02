@@ -9,33 +9,35 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/profile"
+	"github.com/moodiness/rivune/server/internal/settings"
 )
 
 type fakeProfileService struct {
-	profiles          []profile.Profile
-	listErr           error
-	createInput       profile.CreateInput
-	created           profile.Profile
-	createErr         error
-	updatedID         string
-	updateInput       profile.UpdateInput
-	updated           profile.Profile
-	updateErr         error
-	deletedID         string
-	deleteErr         error
-	selectedID        string
-	selectedPIN       *string
-	selection         profile.Selection
-	selectionErr      error
-	clearSelectionErr error
-	avatarPresetID    string
-	avatarPresetValue profile.Profile
-	avatarPresetErr   error
-	avatarImageData   []byte
-	avatarImageValue  profile.Profile
-	avatarImageErr    error
-	avatarValue       profile.AvatarImage
-	avatarErr         error
+	profiles                   []profile.Profile
+	listErr                    error
+	createInput                profile.CreateInput
+	created                    profile.Profile
+	createErr                  error
+	updatedID                  string
+	updateInput                profile.UpdateInput
+	updated                    profile.Profile
+	updateErr                  error
+	deletedID                  string
+	deleteErr                  error
+	selectedID                 string
+	selectedPIN                *string
+	selectionRequireManagement bool
+	selection                  profile.Selection
+	selectionErr               error
+	clearSelectionErr          error
+	avatarPresetID             string
+	avatarPresetValue          profile.Profile
+	avatarPresetErr            error
+	avatarImageData            []byte
+	avatarImageValue           profile.Profile
+	avatarImageErr             error
+	avatarValue                profile.AvatarImage
+	avatarErr                  error
 }
 
 func (f *fakeProfileService) List(context.Context, auth.Principal) ([]profile.Profile, error) {
@@ -58,9 +60,10 @@ func (f *fakeProfileService) Delete(_ context.Context, _ auth.Principal, id stri
 	return f.deleteErr
 }
 
-func (f *fakeProfileService) Select(_ context.Context, _ auth.Principal, id string, pin *string) (profile.Selection, error) {
+func (f *fakeProfileService) Select(_ context.Context, _ auth.Principal, id string, pin *string, requireManagement bool) (profile.Selection, error) {
 	f.selectedID = id
 	f.selectedPIN = pin
+	f.selectionRequireManagement = requireManagement
 	return f.selection, f.selectionErr
 }
 
@@ -230,6 +233,31 @@ func TestSelectProfileMapsUnavailable(t *testing.T) {
 	decodeResponse(t, response, &body)
 	if body.Error.Code != "profile_unavailable" {
 		t.Fatalf("unexpected error code %q", body.Error.Code)
+	}
+}
+
+func TestMaintenanceRejectsViewerProfileSelection(t *testing.T) {
+	message := "Upgrading the library"
+	profiles := &fakeProfileService{selectionErr: profile.ErrManagementRequired}
+	api := authenticatedProfileAPI(profiles)
+	api.settings = &fakeSettingsService{maintenance: settings.Maintenance{Enabled: true, Message: &message}}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/profiles/profile-id/select", bytes.NewBufferString(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503, got %d: %s", response.Code, response.Body.String())
+	}
+	if !profiles.selectionRequireManagement {
+		t.Fatal("maintenance selection did not require profile management permission")
+	}
+	var body errorEnvelope
+	decodeResponse(t, response, &body)
+	if body.Error.Code != "maintenance_mode" || body.Error.PublicMessage == nil || *body.Error.PublicMessage != message {
+		t.Fatalf("unexpected maintenance response %#v", body.Error)
 	}
 }
 

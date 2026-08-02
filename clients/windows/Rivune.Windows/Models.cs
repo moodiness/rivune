@@ -4,7 +4,7 @@ namespace Rivune.Windows;
 
 public static class RivuneProtocol
 {
-    public const int Version = 16;
+    public const int Version = 17;
 }
 
 public sealed record Discovery
@@ -15,6 +15,7 @@ public sealed record Discovery
     public required string ApiBaseUrl { get; init; }
     public required bool SetupRequired { get; init; }
     public required string Timezone { get; init; }
+    public required string InterfaceLanguage { get; init; }
 }
 
 public sealed record Device
@@ -136,6 +137,7 @@ public sealed record Movie
     public string? ReleaseDate { get; init; }
     public string? PosterUrl { get; init; }
     public string? BackdropUrl { get; init; }
+    public string? LogoUrl { get; init; }
     public string? Tagline { get; init; }
     public int? RuntimeMinutes { get; init; }
     public required IReadOnlyList<Genre> Genres { get; init; }
@@ -156,6 +158,7 @@ public sealed record Series
     public string? LastAirDate { get; init; }
     public string? PosterUrl { get; init; }
     public string? BackdropUrl { get; init; }
+    public string? LogoUrl { get; init; }
     public string? Tagline { get; init; }
     public string? Status { get; init; }
     public int? NumberOfSeasons { get; init; }

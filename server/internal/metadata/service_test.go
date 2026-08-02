@@ -442,7 +442,7 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 	if _, err := service.SeasonDetails(ctx, principal, seasonID, "fr-FR", "tmdb"); err != nil {
 		t.Fatalf("load cached season details: %v", err)
 	}
-	if _, err := service.SeriesDetails(ctx, principal, seriesID, "fr-FR", "tmdb"); err != nil {
+	if _, err := service.SeriesDetails(ctx, principal, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tmdb"}); err != nil {
 		t.Fatalf("load cached series details: %v", err)
 	}
 
@@ -565,5 +565,50 @@ func TestReplaceTVDBEpisodeIDRepairsStaleNumberBasedLink(t *testing.T) {
 	}
 	if externalID != "official-air-date-match" {
 		t.Fatalf("unexpected repaired TVDB identity %q", externalID)
+	}
+}
+
+func TestSeriesDetailsValidatesEpisodeOrderSelection(t *testing.T) {
+	profileID := "profile-id"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+	service := &Service{}
+
+	_, err := service.SeriesDetails(context.Background(), principal, "series-id", SeriesDetailsOptions{
+		MappingProvider: "tmdb",
+		EpisodeOrderID:  "2",
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected TMDB episode order rejection, got %v", err)
+	}
+
+	_, err = service.SeriesDetails(context.Background(), principal, "series-id", SeriesDetailsOptions{
+		MappingProvider: "tvdb",
+		EpisodeOrderID:  "not-an-id",
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected invalid TVDB episode order rejection, got %v", err)
+	}
+}
+
+func TestNormalizeEpisodeOrdersUsesCanonicalTVDBLabels(t *testing.T) {
+	orders := normalizeEpisodeOrders([]EpisodeOrder{
+		{ID: "7", Name: "Streaming Order", Type: "alttwo"},
+		{ID: "1", Name: "Official", Type: "official", IsDefault: true},
+		{ID: "4", Name: "Story Order", Type: "alternate"},
+		{ID: "3", Name: "Absolute", Type: "absolute"},
+		{ID: "2", Name: "Disc", Type: "dvd"},
+	})
+	wantNames := []string{"Aired Order", "DVD Order", "Absolute Order", "Story Order", "Streaming Order"}
+	if len(orders) != len(wantNames) {
+		t.Fatalf("unexpected normalized orders: %+v", orders)
+	}
+	for index, wantName := range wantNames {
+		if orders[index].Name != wantName {
+			t.Fatalf("unexpected order %d: got %+v want name %q", index, orders[index], wantName)
+		}
+	}
+	if defaultEpisodeOrderID(orders) != "1" {
+		t.Fatalf("unexpected default order: %+v", orders)
 	}
 }

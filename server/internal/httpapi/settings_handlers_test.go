@@ -66,7 +66,7 @@ func (f *fakeSettingsService) Effective(_ context.Context, _ auth.Principal, id 
 func TestUpdateProfileSettingsPreservesFalseAndNull(t *testing.T) {
 	service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
 	api := authenticatedSettingsAPI(service)
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(`{"preferDirectPlay":false,"hideUnreleased":true,"theme":null,"forcedSubtitleLanguage":"fr-CA"}`))
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(`{"interfaceLanguage":"ar","preferDirectPlay":false,"hideUnreleased":true,"theme":null,"forcedSubtitleLanguage":"fr-CA"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
 	response := httptest.NewRecorder()
@@ -75,6 +75,9 @@ func TestUpdateProfileSettingsPreservesFalseAndNull(t *testing.T) {
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if !service.profilePatch.InterfaceLanguage.Set || service.profilePatch.InterfaceLanguage.Value == nil || *service.profilePatch.InterfaceLanguage.Value != "ar" {
+		t.Fatalf("interface language override was not preserved: %+v", service.profilePatch)
 	}
 	if service.requestedProfileID != "profile-id" || !service.profilePatch.PreferDirectPlay.Set || service.profilePatch.PreferDirectPlay.Value == nil || *service.profilePatch.PreferDirectPlay.Value {
 		t.Fatalf("false boolean override was not preserved: %+v", service.profilePatch)
@@ -126,7 +129,7 @@ func TestUpdateProfileSettingsDecodesNullForEveryNewField(t *testing.T) {
 	service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
 	api := authenticatedSettingsAPI(service)
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(
-		`{"autoplayNextEpisode":null,"skipIntroEnabled":null,"skipRecapEnabled":null,"skipOutroEnabled":null,"cardDensity":null,"animationsEnabled":null,"subtitleSizePercent":null,"subtitleTextColor":null,"subtitleBackgroundOpacityPercent":null,"notificationsEnabled":null,"notificationDurationSeconds":null,"notificationPollIntervalSeconds":null}`,
+		`{"interfaceLanguage":null,"autoplayNextEpisode":null,"skipIntroEnabled":null,"skipRecapEnabled":null,"skipOutroEnabled":null,"cardDensity":null,"animationsEnabled":null,"subtitleSizePercent":null,"subtitleTextColor":null,"subtitleBackgroundOpacityPercent":null,"notificationsEnabled":null,"notificationDurationSeconds":null,"notificationPollIntervalSeconds":null}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
@@ -138,6 +141,9 @@ func TestUpdateProfileSettingsDecodesNullForEveryNewField(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
 	patch := service.profilePatch
+	if !patch.InterfaceLanguage.Set || patch.InterfaceLanguage.Value != nil {
+		t.Fatalf("interface language null was not preserved: %+v", patch)
+	}
 	if !patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value != nil ||
 		!patch.SkipIntroEnabled.Set || patch.SkipIntroEnabled.Value != nil ||
 		!patch.SkipRecapEnabled.Set || patch.SkipRecapEnabled.Value != nil ||
@@ -153,16 +159,41 @@ func TestUpdateProfileSettingsDecodesNullForEveryNewField(t *testing.T) {
 		t.Fatalf("new settings nulls were not preserved: %+v", patch)
 	}
 }
+func TestInstanceSettingsResponseIncludesInterfaceLanguage(t *testing.T) {
+	spanish := "es"
+	service := &fakeSettingsService{instance: settings.Layer{
+		SchemaVersion: 1,
+		Values:        settings.Values{InterfaceLanguage: &spanish},
+	}}
+	api := authenticatedSettingsAPI(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Settings settings.Values `json:"settings"`
+	}
+	decodeResponse(t, response, &body)
+	if body.Settings.InterfaceLanguage == nil || *body.Settings.InterfaceLanguage != "es" {
+		t.Fatalf("instance settings omitted interface language: %+v", body)
+	}
+}
 
 func TestEffectiveSettingsResponseIncludesNewFieldsAndSources(t *testing.T) {
 	effective := settings.Effective{
 		SchemaVersion: 1,
 		Values: settings.EffectiveValues{
+			InterfaceLanguage:   "pt-BR",
 			AutoplayNextEpisode: true, CardDensity: "comfortable", AnimationsEnabled: true,
 			SubtitleSizePercent: 100, SubtitleTextColor: "#FFFFFF", SubtitleBackgroundOpacityPercent: 60,
 			NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 5, ForcedSubtitleLanguage: "fr-CA",
 		},
-		Sources: map[string]string{"autoplayNextEpisode": "default", "subtitleTextColor": "profile", "forcedSubtitleLanguage": "instance"},
+		Sources: map[string]string{"interfaceLanguage": "profile", "autoplayNextEpisode": "default", "subtitleTextColor": "profile", "forcedSubtitleLanguage": "instance"},
 	}
 	api := authenticatedSettingsAPI(&fakeSettingsService{effective: effective})
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/profiles/profile-id/settings/effective", nil)
@@ -180,10 +211,10 @@ func TestEffectiveSettingsResponseIncludesNewFieldsAndSources(t *testing.T) {
 		Sources       map[string]string        `json:"sources"`
 	}
 	decodeResponse(t, response, &body)
-	if body.SchemaVersion != 1 || body.Settings.SubtitleTextColor != "#FFFFFF" ||
+	if body.SchemaVersion != 1 || body.Settings.InterfaceLanguage != "pt-BR" || body.Settings.SubtitleTextColor != "#FFFFFF" ||
 		body.Settings.NotificationPollIntervalSeconds != 5 || body.Settings.ForcedSubtitleLanguage != "fr-CA" ||
-		body.Sources["autoplayNextEpisode"] != "default" || body.Sources["subtitleTextColor"] != "profile" ||
-		body.Sources["forcedSubtitleLanguage"] != "instance" {
+		body.Sources["interfaceLanguage"] != "profile" || body.Sources["autoplayNextEpisode"] != "default" ||
+		body.Sources["subtitleTextColor"] != "profile" || body.Sources["forcedSubtitleLanguage"] != "instance" {
 		t.Fatalf("effective response omitted new settings data: %+v", body)
 	}
 }

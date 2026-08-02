@@ -82,7 +82,7 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   expect(preparation.body).toMatchObject({ sourceRef: "source-tt9000:1:1", startSeconds: 321 });
   await page.getByRole("button", { name: "Play episode" }).click();
 
-  await expect(page.getByRole("dialog", { name: /Playing Signal Horizon.*S01E01.*First Light/ })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Playing First Light" })).toBeVisible();
   const markerRequest = await rivune.waitForRequest("/api/v1/playback/markers", "GET");
   expect(markerRequest.search.get("imdbId")).toBe("tt9000");
   expect(markerRequest.search.get("season")).toBe("1");
@@ -120,7 +120,7 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
     video.dispatchEvent(new Event("ended"));
   });
 
-  await expect(page.getByRole("dialog", { name: /Playing Signal Horizon.*S01E02.*Second Orbit/ })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Playing Second Orbit" })).toBeVisible();
   await expect.poll(() => rivune.matching("/api/v1/playback/sources", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ mediaType: "episode", resourceId: "tt9000:1:2" }));
   await expect.poll(() => rivune.matching("/api/v1/playback/prepare", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ sourceRef: "source-tt9000:1:2", startSeconds: 0 }));
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ sourceRef: "source-tt9000:1:2", titleId: "episode-2", startSeconds: 0 }));
@@ -199,4 +199,45 @@ test("unsupported browser sources stop at preparation with an actionable choice"
   await expect(page.getByText(/Rivune did not start a transcode/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Play episode" })).toBeDisabled();
   expect(rivune.matching("/api/v1/playback/resolve", "POST")).toHaveLength(0);
+});
+
+test("multiline stream metadata stays inside its source button", async ({ page, rivune }) => {
+  void rivune;
+  await page.route("**/api/v1/playback/sources", async (route) => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        sources: Array.from({ length: 7 }, (_, index) => ({
+          id: `multiline-${index}`,
+          sourceRef: `multiline-source-${index}`,
+          addonId: "fixture-addon",
+          manifestId: "fixture-manifest",
+          streamIndex: index,
+          name: `📺 [AD ⚡] Lumio 2160p ${index + 1}`,
+          description: "📁 Avatar Aang The Last Airbender (2026)\n🖥 WEB-DL 🎞 HEVC 💊 SUPPLY\n🌈 HDR10+ · DV 🎧 DD+ 🔊 5.1\n📦 17.8 GB",
+          protocol: "http",
+          container: "mkv",
+          expiresAt,
+        })),
+        providerErrors: [],
+      }),
+    });
+  });
+
+  await page.setViewportSize({ width: 1217, height: 680 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await page.getByRole("button", { name: "View series & season" }).click();
+
+  const sourceRows = page.getByRole("radio");
+  await expect(sourceRows).toHaveCount(7);
+  const contained = await sourceRows.evaluateAll((rows) => rows.every((row) => {
+    const content = row.firstElementChild;
+    if (!content) return false;
+    const rowRect = row.getBoundingClientRect();
+    const contentRect = content.getBoundingClientRect();
+    return contentRect.top >= rowRect.top && contentRect.bottom <= rowRect.bottom;
+  }));
+  expect(contained).toBe(true);
 });

@@ -58,6 +58,30 @@ func (provider *canonicalMergeProvider) ResolveExternalID(_ context.Context, med
 	return "", ErrProviderNotFound
 }
 
+type canonicalArtworkEnricher struct {
+	movieCalls int
+	movieError error
+}
+
+func (enricher *canonicalArtworkEnricher) EnrichMovie(_ context.Context, movie ProviderMovie, _ string) (ProviderMovie, error) {
+	enricher.movieCalls++
+	if enricher.movieError != nil {
+		return movie, enricher.movieError
+	}
+	movie.PosterURL = "https://fanart.example/movie-poster.jpg"
+	movie.BackdropURL = "https://fanart.example/movie-background.jpg"
+	movie.LogoURL = "https://fanart.example/movie-logo.png"
+	return movie, nil
+}
+
+func (enricher *canonicalArtworkEnricher) EnrichSeries(_ context.Context, series ProviderSeries, _ string) (ProviderSeries, error) {
+	return series, nil
+}
+
+func (enricher *canonicalArtworkEnricher) EnrichSeason(_ context.Context, _ string, season ProviderSeason, _ string) (ProviderSeason, error) {
+	return season, nil
+}
+
 func TestMovieDetailsConsolidatesResolvedCanonicalTitle(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()
@@ -76,13 +100,16 @@ func TestMovieDetailsConsolidatesResolvedCanonicalTitle(t *testing.T) {
 		ExternalID: "1930", Title: "The Amazing Spider-Man", ReleaseDate: "2012-06-23",
 		AdditionalIDs: map[string]string{"imdb": "tt0948470"},
 	}}
-	service := NewService(pool, provider, nil, time.Hour, nil)
+	artwork := &canonicalArtworkEnricher{}
+	service := NewService(pool, provider, nil, artwork, time.Hour, nil)
 	movie, err := service.MovieDetails(ctx, canonicalMergePrincipal(), canonicalDestinationMovieID, "fr-FR")
 	if err != nil {
 		t.Fatalf("load IMDb-only movie through resolved TMDB identity: %v", err)
 	}
-	if movie.ID != canonicalDestinationMovieID || movie.ExternalIDs["tmdb"] != "1930" || movie.ExternalIDs["imdb"] != "tt0948470" {
-		t.Fatalf("unexpected consolidated movie: %#v", movie)
+	if movie.ID != canonicalDestinationMovieID || movie.ExternalIDs["tmdb"] != "1930" || movie.ExternalIDs["imdb"] != "tt0948470" ||
+		movie.PosterURL != "https://fanart.example/movie-poster.jpg" || movie.BackdropURL != "https://fanart.example/movie-background.jpg" ||
+		movie.LogoURL != "https://fanart.example/movie-logo.png" || artwork.movieCalls != 1 {
+		t.Fatalf("unexpected consolidated movie: %#v (artwork calls=%d)", movie, artwork.movieCalls)
 	}
 	var titleCount, libraryCount int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM titles`).Scan(&titleCount); err != nil {
@@ -93,6 +120,32 @@ func TestMovieDetailsConsolidatesResolvedCanonicalTitle(t *testing.T) {
 	}
 	if titleCount != 1 || libraryCount != 1 {
 		t.Fatalf("movie identities were not consolidated: titles=%d library=%d", titleCount, libraryCount)
+	}
+}
+
+func TestMovieDetailsFallsBackWhenFanartFails(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title) VALUES ($1::uuid, 'movie', 'Fallback Movie');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
+		VALUES ($1::uuid, 'tmdb', 'movie', '1930');
+	`, pgx.QueryExecModeSimpleProtocol, canonicalDestinationMovieID); err != nil {
+		t.Fatalf("seed fallback movie: %v", err)
+	}
+	provider := &canonicalMergeProvider{movie: ProviderMovie{
+		ExternalID: "1930", Title: "Fallback Movie",
+		PosterURL: "https://image.tmdb.org/fallback-poster.jpg",
+	}}
+	artwork := &canonicalArtworkEnricher{movieError: ErrProviderRateLimited}
+	service := NewService(pool, provider, nil, artwork, time.Hour, nil)
+	movie, err := service.MovieDetails(ctx, canonicalMergePrincipal(), canonicalDestinationMovieID, "fr-FR")
+	if err != nil {
+		t.Fatalf("movie details should survive Fanart failure: %v", err)
+	}
+	if artwork.movieCalls != 1 ||
+		movie.PosterURL != "https://image.tmdb.org/fallback-poster.jpg" || movie.LogoURL != "" {
+		t.Fatalf("unexpected Fanart fallback: movie=%+v calls=%d", movie, artwork.movieCalls)
 	}
 }
 
@@ -114,9 +167,9 @@ func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState
 			},
 		},
 	}
-	service := NewService(pool, provider, nil, time.Hour, nil)
+	service := NewService(pool, provider, nil, nil, time.Hour, nil)
 	principal := canonicalMergePrincipal()
-	series, err := service.SeriesDetails(ctx, principal, canonicalDestinationSeriesID, "fr-FR", "tmdb")
+	series, err := service.SeriesDetails(ctx, principal, canonicalDestinationSeriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tmdb"})
 	if err != nil {
 		t.Fatalf("load IMDb-only series through resolved TMDB identity: %v", err)
 	}
@@ -237,9 +290,9 @@ func TestSeriesRefreshRepairsPoisonedSeasonOrdinalAndInvalidatesCachedHierarchy(
 			},
 		},
 	}
-	service := NewService(pool, provider, nil, time.Hour, nil)
+	service := NewService(pool, provider, nil, nil, time.Hour, nil)
 	principal := canonicalMergePrincipal()
-	series, err := service.SeriesDetails(ctx, principal, seriesID, "fr-FR", "tmdb")
+	series, err := service.SeriesDetails(ctx, principal, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tmdb"})
 	if err != nil {
 		t.Fatalf("refresh series hierarchy: %v", err)
 	}
@@ -284,8 +337,8 @@ func TestSeriesDetailsCanonicalConflictRollsBackAtomically(t *testing.T) {
 		t.Fatalf("seed conflicting canonical titles: %v", err)
 	}
 	provider := &canonicalMergeProvider{series: ProviderSeries{ExternalID: "125988", Name: "Provider Silo", Overview: "Conflict fixture", AdditionalIDs: map[string]string{"imdb": "tt14688458"}}}
-	service := NewService(pool, provider, nil, time.Hour, nil)
-	_, err := service.SeriesDetails(ctx, canonicalMergePrincipal(), canonicalDestinationSeriesID, "fr-FR", "tmdb")
+	service := NewService(pool, provider, nil, nil, time.Hour, nil)
+	_, err := service.SeriesDetails(ctx, canonicalMergePrincipal(), canonicalDestinationSeriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tmdb"})
 	if err == nil || err.Error() != "metadata provider returned a conflicting external ID" {
 		t.Fatalf("expected contradictory identity error, got %v", err)
 	}

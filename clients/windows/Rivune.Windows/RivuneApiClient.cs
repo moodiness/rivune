@@ -14,6 +14,17 @@ public sealed class RivuneApiClient : IDisposable
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip,
     };
 
+    private sealed record DiscoveryEnvelope
+    {
+        public required string Name { get; init; }
+        public required string ServerVersion { get; init; }
+        public required int ProtocolVersion { get; init; }
+        public required string ApiBaseUrl { get; init; }
+        public required bool SetupRequired { get; init; }
+        public required string Timezone { get; init; }
+        public string? InterfaceLanguage { get; init; }
+    }
+
     private readonly Uri _serverUrl;
     private readonly HttpClient _httpClient;
     private readonly ICredentialStore _credentialStore;
@@ -297,7 +308,7 @@ public sealed class RivuneApiClient : IDisposable
             }
 
             var discoveryUrl = new Uri(_serverUrl, "/.well-known/rivune");
-            var discovery = await SendJsonResponseAsync<Discovery>(
+            var response = await SendJsonResponseAsync<DiscoveryEnvelope>(
                 HttpMethod.Get,
                 discoveryUrl,
                 body: null,
@@ -305,13 +316,29 @@ public sealed class RivuneApiClient : IDisposable
                 retryAfterRefresh: false,
                 cancellationToken).ConfigureAwait(false);
 
-            if (discovery.ProtocolVersion != RivuneProtocol.Version)
+            if (response.ProtocolVersion != RivuneProtocol.Version)
             {
                 _apiBaseUrl = null;
                 _discovery = null;
-                throw new IncompatibleProtocolException(RivuneProtocol.Version, discovery.ProtocolVersion);
+                throw new IncompatibleProtocolException(RivuneProtocol.Version, response.ProtocolVersion);
+            }
+            if (response.InterfaceLanguage is null)
+            {
+                _apiBaseUrl = null;
+                _discovery = null;
+                throw new InvalidResponseException();
             }
 
+            var discovery = new Discovery
+            {
+                Name = response.Name,
+                ServerVersion = response.ServerVersion,
+                ProtocolVersion = response.ProtocolVersion,
+                ApiBaseUrl = response.ApiBaseUrl,
+                SetupRequired = response.SetupRequired,
+                Timezone = response.Timezone,
+                InterfaceLanguage = response.InterfaceLanguage,
+            };
             if (!Uri.TryCreate(_serverUrl, discovery.ApiBaseUrl, out var apiBaseUrl) || !IsHttpUrl(apiBaseUrl))
             {
                 _apiBaseUrl = null;

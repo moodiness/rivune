@@ -86,6 +86,16 @@ type episodesEnvelope struct {
 	} `json:"data"`
 }
 
+type seasonExtendedEnvelope struct {
+	Status string               `json:"status"`
+	Data   seasonExtendedRecord `json:"data"`
+}
+
+type seasonExtendedRecord struct {
+	seasonRecord
+	Episodes []episodeRecord `json:"episodes"`
+}
+
 type episodeRecord struct {
 	ID            int64  `json:"id"`
 	Name          string `json:"name"`
@@ -149,10 +159,7 @@ func (c *Client) EnrichSeries(ctx context.Context, series metadata.ProviderSerie
 		if value.ID < 1 {
 			continue
 		}
-		name := strings.TrimSpace(value.AlternateName)
-		if name == "" {
-			name = strings.TrimSpace(value.Name)
-		}
+		name := episodeOrderName(value)
 		orders = append(orders, metadata.EpisodeOrder{
 			ID:        strconv.FormatInt(value.ID, 10),
 			Name:      name,
@@ -179,7 +186,7 @@ func (c *Client) EnrichSeason(ctx context.Context, seriesTVDBID string, season m
 	if err != nil {
 		return season, err
 	}
-	episodes, err := c.episodes(ctx, parsedID, season.SeasonNumber)
+	episodes, err := c.episodes(ctx, parsedID, "official", season.SeasonNumber)
 	if err != nil {
 		return season, err
 	}
@@ -222,7 +229,7 @@ func (c *Client) EnrichSeason(ctx context.Context, seriesTVDBID string, season m
 	return season, nil
 }
 
-func (c *Client) SeriesSeasons(ctx context.Context, seriesTVDBID string) ([]metadata.ProviderSeasonSummary, error) {
+func (c *Client) SeriesSeasons(ctx context.Context, seriesTVDBID, episodeOrderID string) ([]metadata.ProviderSeasonSummary, error) {
 	parsedID, err := parsePositiveID(seriesTVDBID)
 	if err != nil {
 		return nil, err
@@ -231,10 +238,14 @@ func (c *Client) SeriesSeasons(ctx context.Context, seriesTVDBID string) ([]meta
 	if err != nil {
 		return nil, err
 	}
-	seasons := officialSeasons(series)
+	selectedType, err := selectSeasonType(series, episodeOrderID)
+	if err != nil {
+		return nil, err
+	}
+	seasons := seasonsForType(series, selectedType)
 	result := make([]metadata.ProviderSeasonSummary, 0, len(seasons))
 	for _, season := range seasons {
-		episodes, err := c.episodes(ctx, parsedID, season.Number)
+		episodes, err := c.seasonEpisodes(ctx, season)
 		if err != nil {
 			return nil, err
 		}
@@ -247,14 +258,7 @@ func (c *Client) SeriesSeasons(ctx context.Context, seriesTVDBID string) ([]meta
 				airDate = episode.Aired
 			}
 		}
-		name := strings.TrimSpace(season.Name)
-		if name == "" {
-			if season.Number == 0 {
-				name = "Specials"
-			} else {
-				name = "Season " + strconv.Itoa(season.Number)
-			}
-		}
+		name := seasonName(season)
 		result = append(result, metadata.ProviderSeasonSummary{
 			ExternalID:   strconv.FormatInt(season.ID, 10),
 			Name:         name,
@@ -281,8 +285,8 @@ func (c *Client) SeriesSeason(ctx context.Context, seriesTVDBID, seasonTVDBID st
 		return metadata.ProviderSeason{}, err
 	}
 	var selected seasonRecord
-	for _, season := range officialSeasons(series) {
-		if season.ID == parsedSeasonID {
+	for _, season := range series.Seasons {
+		if season.ID == parsedSeasonID && season.Number >= 0 && season.SeriesID == series.ID {
 			selected = season
 			break
 		}
@@ -290,7 +294,7 @@ func (c *Client) SeriesSeason(ctx context.Context, seriesTVDBID, seasonTVDBID st
 	if selected.ID == 0 {
 		return metadata.ProviderSeason{}, metadata.ErrProviderNotFound
 	}
-	records, err := c.episodes(ctx, parsedSeriesID, selected.Number)
+	records, err := c.seasonEpisodes(ctx, selected)
 	if err != nil {
 		return metadata.ProviderSeason{}, err
 	}
@@ -318,17 +322,9 @@ func (c *Client) SeriesSeason(ctx context.Context, seriesTVDBID, seasonTVDBID st
 			RuntimeMinutes: runtime,
 		})
 	}
-	name := strings.TrimSpace(selected.Name)
-	if name == "" {
-		if selected.Number == 0 {
-			name = "Specials"
-		} else {
-			name = "Season " + strconv.Itoa(selected.Number)
-		}
-	}
 	return metadata.ProviderSeason{
 		ExternalID:   strconv.FormatInt(selected.ID, 10),
-		Name:         name,
+		Name:         seasonName(selected),
 		SeasonNumber: selected.Number,
 		AirDate:      airDate,
 		PosterURL:    httpsURL(selected.Image),
@@ -344,37 +340,70 @@ func (c *Client) seriesExtended(ctx context.Context, seriesID int64) (seriesExte
 	return response.Data, nil
 }
 
-func (c *Client) episodes(ctx context.Context, seriesID int64, seasonNumber int) ([]episodeRecord, error) {
+func (c *Client) episodes(ctx context.Context, seriesID int64, seasonTypeName string, seasonNumber int) ([]episodeRecord, error) {
 	query := url.Values{
 		"page":   {"0"},
 		"season": {strconv.Itoa(seasonNumber)},
 	}
 	var response episodesEnvelope
-	endpoint := "/series/" + strconv.FormatInt(seriesID, 10) + "/episodes/official"
+	endpoint := "/series/" + strconv.FormatInt(seriesID, 10) + "/episodes/" + url.PathEscape(strings.ToLower(strings.TrimSpace(seasonTypeName)))
 	if err := c.get(ctx, endpoint, query, &response); err != nil {
 		return nil, err
 	}
 	return response.Data.Episodes, nil
 }
 
-func officialSeasons(series seriesExtendedRecord) []seasonRecord {
-	officialTypeID := int64(0)
+func (c *Client) seasonEpisodes(ctx context.Context, expected seasonRecord) ([]episodeRecord, error) {
+	var response seasonExtendedEnvelope
+	endpoint := "/seasons/" + strconv.FormatInt(expected.ID, 10) + "/extended"
+	if err := c.get(ctx, endpoint, nil, &response); err != nil {
+		return nil, err
+	}
+	provided := response.Data
+	if provided.ID != expected.ID ||
+		provided.SeriesID != expected.SeriesID ||
+		provided.Number != expected.Number ||
+		(expected.Type.ID > 0 && provided.Type.ID != expected.Type.ID) {
+		return nil, fmt.Errorf("%w: TVDB returned a conflicting season hierarchy", metadata.ErrProviderFailure)
+	}
+	return provided.Episodes, nil
+}
+
+func selectSeasonType(series seriesExtendedRecord, episodeOrderID string) (seasonType, error) {
+	selectedID := series.DefaultSeasonType
+	if strings.TrimSpace(episodeOrderID) != "" {
+		parsedID, err := parsePositiveID(episodeOrderID)
+		if err != nil {
+			return seasonType{}, err
+		}
+		selectedID = parsedID
+	}
 	for _, value := range series.SeasonTypes {
-		if strings.EqualFold(strings.TrimSpace(value.Type), "official") {
-			officialTypeID = value.ID
-			break
+		if value.ID == selectedID && strings.TrimSpace(value.Type) != "" {
+			return value, nil
 		}
 	}
+	if strings.TrimSpace(episodeOrderID) == "" {
+		for _, value := range series.SeasonTypes {
+			if strings.EqualFold(strings.TrimSpace(value.Type), "official") {
+				return value, nil
+			}
+		}
+	}
+	return seasonType{}, metadata.ErrProviderNotFound
+}
+
+func seasonsForType(series seriesExtendedRecord, selectedType seasonType) []seasonRecord {
 	seasons := make([]seasonRecord, 0, len(series.Seasons))
 	for _, season := range series.Seasons {
 		if season.ID < 1 || season.Number < 0 || season.SeriesID != series.ID {
 			continue
 		}
-		if officialTypeID > 0 {
-			if season.Type.ID != officialTypeID {
+		if selectedType.ID > 0 {
+			if season.Type.ID != selectedType.ID {
 				continue
 			}
-		} else if !strings.EqualFold(strings.TrimSpace(season.Type.Type), "official") {
+		} else if !strings.EqualFold(strings.TrimSpace(season.Type.Type), strings.TrimSpace(selectedType.Type)) {
 			continue
 		}
 		seasons = append(seasons, season)
@@ -386,6 +415,34 @@ func officialSeasons(series seriesExtendedRecord) []seasonRecord {
 		return seasons[left].ID < seasons[right].ID
 	})
 	return seasons
+}
+
+func seasonName(season seasonRecord) string {
+	name := strings.TrimSpace(season.Name)
+	if name != "" {
+		return name
+	}
+	if season.Number == 0 {
+		return "Specials"
+	}
+	return "Season " + strconv.Itoa(season.Number)
+}
+
+func episodeOrderName(value seasonType) string {
+	orderType := strings.ToLower(strings.TrimSpace(value.Type))
+	name := strings.TrimSpace(value.Name)
+	switch orderType {
+	case "official":
+		return "Aired Order"
+	case "dvd":
+		return "DVD Order"
+	case "absolute":
+		return "Absolute Order"
+	}
+	if alternateName := strings.TrimSpace(value.AlternateName); alternateName != "" {
+		return alternateName
+	}
+	return name
 }
 
 func httpsURL(value string) string {

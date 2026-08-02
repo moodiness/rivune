@@ -55,7 +55,7 @@ type libraryTitle struct {
 
 type metadataReader interface {
 	MovieDetails(context.Context, auth.Principal, string, string) (metadata.Movie, error)
-	SeriesDetails(context.Context, auth.Principal, string, string, string) (metadata.Series, error)
+	SeriesDetails(context.Context, auth.Principal, string, metadata.SeriesDetailsOptions) (metadata.Series, error)
 	SeasonDetails(context.Context, auth.Principal, string, string, string) (metadata.Season, error)
 }
 
@@ -146,7 +146,7 @@ func (s *Service) refreshTitleMetadata(ctx context.Context, principal auth.Princ
 		_, err := s.metadata.MovieDetails(ctx, principal, title.ID, language)
 		return err
 	case metadata.MediaTypeSeries:
-		series, err := s.metadata.SeriesDetails(ctx, principal, title.ID, language, "tmdb")
+		series, err := s.metadata.SeriesDetails(ctx, principal, title.ID, metadata.SeriesDetailsOptions{Language: language, MappingProvider: "tmdb"})
 		if err != nil {
 			return err
 		}

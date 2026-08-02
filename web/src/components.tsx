@@ -1,7 +1,7 @@
 import { AlertCircle, AlertTriangle, Check, ChevronRight, LoaderCircle, Play, Plus, X } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { translate as t } from "./i18n";
-import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, HTMLAttributes, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
 export function RivuneMark({ compact = false }: { compact?: boolean }) {
   return (
@@ -24,12 +24,56 @@ export function IconButton({ label, children, className = "", ...props }: Button
   return <button className={`icon-button ${className}`} aria-label={label} title={label} {...props}>{children}</button>;
 }
 
+export function HorizontalDragRow({ children, className = "folder-cover-row", ...props }: HTMLAttributes<HTMLDivElement>) {
+  const drag = useRef({ active: false, moved: false, pointerID: 0, startX: 0, startScrollLeft: 0 });
+  const suppressClick = useRef(false);
+
+  function finishDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType === "touch" || !drag.current.active || drag.current.pointerID !== event.pointerId) return;
+    drag.current.active = false;
+    event.currentTarget.classList.remove("is-dragging");
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (drag.current.moved) {
+      suppressClick.current = true;
+      window.setTimeout(() => { suppressClick.current = false; }, 0);
+    }
+  }
+
+  return <div
+    {...props}
+    className={className}
+    onPointerDown={(event) => {
+      if (event.pointerType === "touch" || event.button !== 0) return;
+      drag.current = { active: true, moved: false, pointerID: event.pointerId, startX: event.clientX, startScrollLeft: event.currentTarget.scrollLeft };
+    }}
+    onPointerMove={(event) => {
+      if (event.pointerType === "touch" || !drag.current.active || drag.current.pointerID !== event.pointerId) return;
+      const distance = event.clientX - drag.current.startX;
+      if (Math.abs(distance) < 5 && !drag.current.moved) return;
+      if (!drag.current.moved) event.currentTarget.setPointerCapture(event.pointerId);
+      drag.current.moved = true;
+      event.preventDefault();
+      event.currentTarget.classList.add("is-dragging");
+      event.currentTarget.scrollLeft = drag.current.startScrollLeft - distance;
+    }}
+    onPointerUp={finishDrag}
+    onPointerCancel={finishDrag}
+    onClickCapture={(event) => {
+      if (!suppressClick.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+      suppressClick.current = false;
+    }}
+  >{children}</div>;
+}
+
 export function EmptyState({ icon, title, description, action }: { icon?: ReactNode; title: string; description: string; action?: ReactNode }) {
   return <div className="empty-state">{icon}<h3>{title}</h3><p>{description}</p>{action}</div>;
 }
 
-export function Notice({ tone = "error", children }: { tone?: "error" | "success" | "info"; children: ReactNode }) {
-  return <div className={`notice notice--${tone}`}>{tone === "error" ? <AlertCircle size={18} /> : <Check size={18} />}{children}</div>;
+export function Notice({ tone = "error", children }: { tone?: "error" | "success" | "info" | "warning"; children: ReactNode }) {
+  const icon = tone === "success" ? <Check size={18} /> : tone === "warning" ? <AlertTriangle size={18} /> : <AlertCircle size={18} />;
+  return <div className={`notice notice--${tone}`}>{icon}{children}</div>;
 }
 
 export function Modal({ children, onClose, className = "" }: { children: ReactNode; onClose: () => void; className?: string }) {
@@ -53,11 +97,11 @@ export function Modal({ children, onClose, className = "" }: { children: ReactNo
   );
 }
 
-export function ConfirmDialog({ title, description, confirmLabel = "Confirm", loading = false, onConfirm, onCancel }: { title: string; description: string; confirmLabel?: string; loading?: boolean; onConfirm: () => void; onCancel: () => void }) {
+export function ConfirmDialog({ title, description, confirmLabel = t("common.confirm"), loading = false, onConfirm, onCancel }: { title: string; description: string; confirmLabel?: string; loading?: boolean; onConfirm: () => void; onCancel: () => void }) {
   return <Modal onClose={loading ? () => undefined : onCancel} className="confirm-modal">
     <span className="confirm-modal__icon"><AlertTriangle size={21} /></span>
     <div className="confirm-modal__copy"><h2>{title}</h2><p>{description}</p></div>
-    <div className="modal-actions"><Button type="button" variant="secondary" disabled={loading} onClick={onCancel}>Cancel</Button><Button type="button" variant="danger" loading={loading} onClick={onConfirm}>{confirmLabel}</Button></div>
+    <div className="modal-actions"><Button type="button" variant="secondary" disabled={loading} onClick={onCancel}>{t("common.cancel")}</Button><Button type="button" variant="danger" loading={loading} onClick={onConfirm}>{confirmLabel}</Button></div>
   </Modal>;
 }
 
@@ -67,10 +111,12 @@ export function Skeleton({ className = "", ...props }: HTMLAttributes<HTMLDivEle
 
 export function MediaCard({ title, image, backdrop, subtitle, eyebrow, badge, overlay = false, shape = "poster", onClick, progress }: { title: string; image?: string; backdrop?: string; subtitle?: string; eyebrow?: string; badge?: string; overlay?: boolean; shape?: "poster" | "landscape" | "square"; onClick: () => void; progress?: number }) {
   const source = image || backdrop;
+  const [failedSource, setFailedSource] = useState<string>();
+  const usableSource = source === failedSource ? undefined : source;
   return (
-    <button className={`media-card media-card--${shape}${overlay ? " media-card--overlay" : ""}`} onClick={onClick} aria-label={t("media.open", { title })}>
+    <button type="button" className={`media-card media-card--${shape}${overlay ? " media-card--overlay" : ""}`} onClick={onClick} aria-label={t("media.open", { title })}>
       <span className="media-card__visual">
-        {source ? <img src={source} alt="" loading="lazy" draggable={false} /> : <span className="media-card__fallback">{title.slice(0, 2).toUpperCase()}</span>}
+        {usableSource ? <img src={usableSource} alt="" loading="lazy" draggable={false} onError={() => setFailedSource(usableSource)} /> : <span className="media-card__fallback">{title.slice(0, 2).toUpperCase()}</span>}
         <span className="media-card__veil" />
         {badge && <span className="media-card__badge">{badge}</span>}
         {overlay && <span className="media-card__overlay-copy">{eyebrow && <small>{eyebrow}</small>}<strong>{title}</strong>{subtitle && <span>{subtitle}</span>}</span>}

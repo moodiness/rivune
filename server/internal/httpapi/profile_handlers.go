@@ -171,7 +171,11 @@ func (a *API) selectProfile(w http.ResponseWriter, r *http.Request, principal au
 		return
 	}
 
-	selection, err := a.profiles.Select(r.Context(), principal, r.PathValue("profileId"), request.PIN)
+	maintenanceEnabled, maintenanceMessage, ok := a.maintenanceStatus(w, r)
+	if !ok {
+		return
+	}
+	selection, err := a.profiles.Select(r.Context(), principal, r.PathValue("profileId"), request.PIN, maintenanceEnabled)
 	switch {
 	case errors.Is(err, profile.ErrNotFound):
 		writeError(w, http.StatusNotFound, "profile_not_found", "The profile does not exist")
@@ -180,6 +184,8 @@ func (a *API) selectProfile(w http.ResponseWriter, r *http.Request, principal au
 	case errors.Is(err, profile.ErrPINRateLimited):
 		w.Header().Set("Retry-After", strconv.Itoa(profile.PINLockSeconds))
 		writeError(w, http.StatusTooManyRequests, "profile_pin_rate_limited", "Too many invalid profile PIN attempts; try again later")
+	case errors.Is(err, profile.ErrManagementRequired):
+		writeMaintenanceMode(w, maintenanceMessage)
 	case errors.Is(err, profile.ErrUnavailable):
 		writeError(w, http.StatusForbidden, "profile_unavailable", "This profile is not currently available")
 	case errors.Is(err, profile.ErrForbidden):

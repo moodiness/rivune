@@ -147,6 +147,41 @@ func TestNormalizeAndValidateRejectsMismatchedSourceConfiguration(t *testing.T) 
 	}
 }
 
+func TestNormalizeAndValidateMDBListSource(t *testing.T) {
+	input := SaveInput{
+		Title: "MDBList collection",
+		Folders: []Folder{{
+			Title: "Featured",
+			Sources: []Source{{
+				Kind: SourceKindMDBList, Title: "My list",
+				MDBList: &MDBListSource{ListID: 42},
+			}},
+		}},
+	}
+
+	normalized, err := normalizeAndValidate(input, false)
+	if err != nil {
+		t.Fatalf("normalize MDBList source: %v", err)
+	}
+	source := normalized.Folders[0].Sources[0]
+	if source.Kind != SourceKindMDBList || source.MDBList == nil ||
+		source.MDBList.MediaType != MediaTypeMovie || source.MDBList.Sort != "rank" || source.MDBList.Order != "asc" {
+		t.Fatalf("unexpected normalized MDBList source: %+v", source)
+	}
+
+	for _, invalidSource := range []MDBListSource{
+		{ListID: 0, MediaType: MediaTypeMovie, Sort: "rank", Order: "asc"},
+		{ListID: 42, MediaType: MediaTypeBoth, Sort: "rank", Order: "asc"},
+		{ListID: 42, MediaType: MediaTypeMovie, Sort: "unsupported", Order: "asc"},
+		{ListID: 42, MediaType: MediaTypeMovie, Sort: "rank", Order: "sideways"},
+	} {
+		input.Folders[0].Sources[0].MDBList = &invalidSource
+		if _, err := normalizeAndValidate(input, false); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("expected invalid MDBList source %+v to fail, got %v", invalidSource, err)
+		}
+	}
+}
+
 func TestMergeItemsUsesFirstSourcePrecedenceAndPreservesProvenance(t *testing.T) {
 	first := Item{
 		ID: "movie:42", MediaType: MediaTypeMovie, Title: "First title", PosterURL: "https://first.example/poster.jpg",

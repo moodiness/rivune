@@ -38,7 +38,13 @@ func TestEnrichSeriesAuthenticatesWithoutPINAndCachesToken(t *testing.T) {
 					"id": 81189, "name": "Breaking Bad", "overview": "TVDB overview", "image": "https://artworks.thetvdb.com/poster.jpg",
 					"defaultSeasonType": 1,
 					"aliases":           []map[string]any{{"language": "eng", "name": "Breaking Bad"}, {"language": "eng", "name": "Breaking Bad"}, {"language": "spa", "name": "Breaking Bad: Química"}},
-					"seasonTypes":       []map[string]any{{"id": 1, "name": "Aired Order", "alternateName": "Official", "type": "official"}, {"id": 2, "name": "DVD Order", "type": "dvd"}},
+					"seasonTypes": []map[string]any{
+						{"id": 1, "name": "Aired Order", "alternateName": "Official", "type": "official"},
+						{"id": 2, "name": "DVD Order", "type": "dvd"},
+						{"id": 3, "name": "Absolute Order", "type": "absolute"},
+						{"id": 4, "name": "Alternate Order", "alternateName": "Story Order", "type": "alternate"},
+						{"id": 7, "name": "Alternate Order 2", "alternateName": "Streaming Order", "type": "alttwo"},
+					},
 				},
 			})
 		default:
@@ -62,8 +68,14 @@ func TestEnrichSeriesAuthenticatesWithoutPINAndCachesToken(t *testing.T) {
 	if first.Name != "Breaking Bad" || first.Overview != "TVDB overview" || first.PosterURL == "" {
 		t.Fatalf("unexpected enriched series: %+v", first)
 	}
-	if len(first.Aliases) != 2 || len(first.EpisodeOrders) != 2 || !first.EpisodeOrders[0].IsDefault || first.EpisodeOrders[0].Name != "Official" {
+	if len(first.Aliases) != 2 || len(first.EpisodeOrders) != 5 || !first.EpisodeOrders[0].IsDefault {
 		t.Fatalf("unexpected TVDB provider metadata: aliases=%+v orders=%+v", first.Aliases, first.EpisodeOrders)
+	}
+	wantOrderNames := []string{"Aired Order", "DVD Order", "Absolute Order", "Story Order", "Streaming Order"}
+	for index, wantName := range wantOrderNames {
+		if first.EpisodeOrders[index].Name != wantName {
+			t.Fatalf("unexpected order %d: got %+v want name %q", index, first.EpisodeOrders[index], wantName)
+		}
 	}
 }
 
@@ -138,7 +150,7 @@ func TestEnrichSeriesRefreshesRejectedTokenOnce(t *testing.T) {
 	}
 }
 
-func TestSeriesMappingUsesOfficialTVDBSeasonHierarchy(t *testing.T) {
+func TestSeriesMappingUsesSelectedTVDBSeasonHierarchy(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/login":
@@ -151,33 +163,56 @@ func TestSeriesMappingUsesOfficialTVDBSeasonHierarchy(t *testing.T) {
 					"seasonTypes": []map[string]any{
 						{"id": 1, "name": "Aired Order", "type": "official"},
 						{"id": 2, "name": "DVD Order", "type": "dvd"},
+						{"id": 3, "name": "Absolute Order", "type": "absolute"},
+						{"id": 7, "name": "Alternate Order 2", "alternateName": "Streaming Order", "type": "alttwo"},
 					},
 					"seasons": []map[string]any{
 						{"id": 1001, "name": "Season 1", "number": 1, "seriesId": 81797, "image": "https://artworks.thetvdb.com/s1.jpg", "type": map[string]any{"id": 1, "type": "official"}},
 						{"id": 1002, "name": "Season 2", "number": 2, "seriesId": 81797, "image": "https://artworks.thetvdb.com/s2.jpg", "type": map[string]any{"id": 1, "type": "official"}},
 						{"id": 2001, "name": "DVD Season", "number": 1, "seriesId": 81797, "type": map[string]any{"id": 2, "type": "dvd"}},
+						{"id": 3001, "name": "Absolute Season", "number": 1, "seriesId": 81797, "type": map[string]any{"id": 3, "type": "absolute"}},
+						{"id": 7001, "name": "Streaming Season", "number": 1, "seriesId": 81797, "type": map[string]any{"id": 7, "type": "alttwo"}},
 					},
 				},
 			})
-		case "/series/81797/episodes/official":
-			season := r.URL.Query().Get("season")
-			if r.URL.Query().Get("page") != "0" {
-				t.Fatalf("unexpected page query %q", r.URL.RawQuery)
-			}
-			episodes := []map[string]any{}
-			if season == "1" {
-				episodes = []map[string]any{
+		case "/seasons/1001/extended":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"id": 1001, "seriesId": 81797, "number": 1, "type": map[string]any{"id": 1, "type": "official"},
+				"episodes": []map[string]any{
 					{"id": 1101, "name": "Episode 1", "aired": "2024-01-07", "seasonNumber": 1, "number": 1},
 					{"id": 1102, "name": "Episode 2", "aired": "2024-01-14", "seasonNumber": 1, "number": 2},
-				}
-			} else if season == "2" {
-				episodes = []map[string]any{
+				},
+			}})
+		case "/seasons/1002/extended":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"id": 1002, "seriesId": 81797, "number": 2, "type": map[string]any{"id": 1, "type": "official"},
+				"episodes": []map[string]any{
 					{"id": 1201, "name": "Episode 1", "overview": "Second season", "aired": "2025-01-05", "runtime": 24, "seasonNumber": 2, "number": 1},
-				}
-			} else {
-				t.Fatalf("unexpected season query %q", r.URL.RawQuery)
+				},
+			}})
+		case "/seasons/2001/extended":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"id": 2001, "seriesId": 81797, "number": 1, "type": map[string]any{"id": 2, "type": "dvd"},
+				"episodes": []map[string]any{
+					{"id": 2101, "name": "DVD Episode", "aired": "2024-01-07", "seasonNumber": 1, "number": 1},
+				},
+			}})
+		case "/seasons/3001/extended":
+			episodes := make([]map[string]any, 501)
+			for index := range episodes {
+				episodes[index] = map[string]any{"id": 3101 + index, "name": "Absolute Episode", "seasonNumber": 1, "number": index + 1}
 			}
-			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{"episodes": episodes}})
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"id": 3001, "seriesId": 81797, "number": 1, "type": map[string]any{"id": 3, "type": "absolute"}, "episodes": episodes,
+			}})
+		case "/seasons/7001/extended":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"id": 7001, "seriesId": 81797, "number": 1, "type": map[string]any{"id": 7, "type": "alttwo"},
+				"episodes": []map[string]any{
+					{"id": 7101, "name": "Streaming Episode 1", "seasonNumber": 1, "number": 1},
+					{"id": 7102, "name": "Streaming Episode 2", "seasonNumber": 1, "number": 2},
+				},
+			}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -185,12 +220,33 @@ func TestSeriesMappingUsesOfficialTVDBSeasonHierarchy(t *testing.T) {
 	defer server.Close()
 
 	client := newWithBaseURL("api-key", "", server.URL, server.Client())
-	seasons, err := client.SeriesSeasons(context.Background(), "81797")
+	seasons, err := client.SeriesSeasons(context.Background(), "81797", "")
 	if err != nil {
 		t.Fatalf("map series seasons: %v", err)
 	}
 	if len(seasons) != 2 || seasons[0].ExternalID != "1001" || seasons[0].EpisodeCount != 2 || seasons[1].ExternalID != "1002" || seasons[1].EpisodeCount != 1 {
 		t.Fatalf("unexpected official seasons: %+v", seasons)
+	}
+	dvdSeasons, err := client.SeriesSeasons(context.Background(), "81797", "2")
+	if err != nil {
+		t.Fatalf("map DVD series seasons: %v", err)
+	}
+	if len(dvdSeasons) != 1 || dvdSeasons[0].ExternalID != "2001" || dvdSeasons[0].EpisodeCount != 1 {
+		t.Fatalf("unexpected DVD seasons: %+v", dvdSeasons)
+	}
+	absoluteSeasons, err := client.SeriesSeasons(context.Background(), "81797", "3")
+	if err != nil {
+		t.Fatalf("map absolute series seasons: %v", err)
+	}
+	if len(absoluteSeasons) != 1 || absoluteSeasons[0].ExternalID != "3001" || absoluteSeasons[0].EpisodeCount != 501 {
+		t.Fatalf("unexpected absolute seasons: %+v", absoluteSeasons)
+	}
+	streamingSeasons, err := client.SeriesSeasons(context.Background(), "81797", "7")
+	if err != nil {
+		t.Fatalf("map streaming series seasons: %v", err)
+	}
+	if len(streamingSeasons) != 1 || streamingSeasons[0].ExternalID != "7001" || streamingSeasons[0].EpisodeCount != 2 {
+		t.Fatalf("unexpected streaming seasons: %+v", streamingSeasons)
 	}
 	season, err := client.SeriesSeason(context.Background(), "81797", "1002")
 	if err != nil {
@@ -198,6 +254,20 @@ func TestSeriesMappingUsesOfficialTVDBSeasonHierarchy(t *testing.T) {
 	}
 	if season.SeasonNumber != 2 || len(season.Episodes) != 1 || season.Episodes[0].ExternalID != "1201" || season.Episodes[0].EpisodeNumber != 1 {
 		t.Fatalf("unexpected mapped second season: %+v", season)
+	}
+	dvdSeason, err := client.SeriesSeason(context.Background(), "81797", "2001")
+	if err != nil {
+		t.Fatalf("map DVD season: %v", err)
+	}
+	if dvdSeason.SeasonNumber != 1 || len(dvdSeason.Episodes) != 1 || dvdSeason.Episodes[0].ExternalID != "2101" {
+		t.Fatalf("unexpected mapped DVD season: %+v", dvdSeason)
+	}
+	streamingSeason, err := client.SeriesSeason(context.Background(), "81797", "7001")
+	if err != nil {
+		t.Fatalf("map streaming season: %v", err)
+	}
+	if streamingSeason.SeasonNumber != 1 || len(streamingSeason.Episodes) != 2 || streamingSeason.Episodes[1].ExternalID != "7102" {
+		t.Fatalf("unexpected mapped streaming season: %+v", streamingSeason)
 	}
 }
 

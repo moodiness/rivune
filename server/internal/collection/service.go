@@ -29,15 +29,20 @@ type TraktProvider interface {
 	ResolveCollectionSource(context.Context, TraktSource, int) (SourcePage, error)
 }
 
-type Service struct {
-	pool  *pgxpool.Pool
-	addon AddonProvider
-	tmdb  TMDBProvider
-	trakt TraktProvider
+type MDBListProvider interface {
+	ResolveCollectionSource(context.Context, MDBListSource, int) (SourcePage, error)
 }
 
-func NewService(pool *pgxpool.Pool, addonProvider AddonProvider, tmdbProvider TMDBProvider, traktProvider TraktProvider) *Service {
-	return &Service{pool: pool, addon: addonProvider, tmdb: tmdbProvider, trakt: traktProvider}
+type Service struct {
+	pool    *pgxpool.Pool
+	addon   AddonProvider
+	tmdb    TMDBProvider
+	trakt   TraktProvider
+	mdblist MDBListProvider
+}
+
+func NewService(pool *pgxpool.Pool, addonProvider AddonProvider, tmdbProvider TMDBProvider, traktProvider TraktProvider, mdblistProvider MDBListProvider) *Service {
+	return &Service{pool: pool, addon: addonProvider, tmdb: tmdbProvider, trakt: traktProvider, mdblist: mdblistProvider}
 }
 
 func (service *Service) List(ctx context.Context, principal auth.Principal) ([]Collection, error) {

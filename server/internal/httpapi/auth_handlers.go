@@ -106,35 +106,60 @@ func (a *API) requireAuthentication(next func(http.ResponseWriter, *http.Request
 		case errors.Is(err, auth.ErrInvalidToken):
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeError(w, http.StatusUnauthorized, "invalid_access_token", "A valid access token is required")
+			return
 		case err != nil:
 			a.internalError(w, "authenticate request", err)
-		case principal.Role != "admin" && !maintenanceExemptPath(r.URL.Path) && a.settings != nil:
-			state, err := a.settings.Maintenance(r.Context())
-			if err != nil {
-				a.internalError(w, "read maintenance mode", err)
-				return
-			}
-			if state.Enabled {
-				w.Header().Set("Retry-After", "5")
-				writeJSON(w, http.StatusServiceUnavailable, errorEnvelope{Error: apiError{
-					Code:          "maintenance_mode",
-					Message:       defaultMaintenanceMessage,
-					PublicMessage: state.Message,
-				}})
-				return
-			}
-			next(w, r, principal)
-		default:
-			next(w, r, principal)
+			return
 		}
+		if !principal.ActiveProfileCanManage && !maintenanceExemptRequest(r) && a.rejectMaintenanceRequest(w, r) {
+			return
+		}
+		next(w, r, principal)
 	})
 }
 
-func maintenanceExemptPath(path string) bool {
-	return path == "/api/v1/auth/me" ||
-		path == "/api/v1/auth/logout" ||
-		path == "/api/v1/auth/sessions" ||
-		strings.HasPrefix(path, "/api/v1/auth/sessions/")
+func maintenanceExemptRequest(r *http.Request) bool {
+	path := r.URL.Path
+	if path == "/api/v1/auth/logout" || path == "/api/v1/auth/me" || path == "/api/v1/profiles/selection" {
+		return true
+	}
+	if r.Method == http.MethodGet && (path == "/api/v1/profiles" || strings.HasSuffix(path, "/avatar") && strings.HasPrefix(path, "/api/v1/profiles/")) {
+		return true
+	}
+	return r.Method == http.MethodPost && strings.HasPrefix(path, "/api/v1/profiles/") && strings.HasSuffix(path, "/select")
+}
+
+func (a *API) maintenanceStatus(w http.ResponseWriter, r *http.Request) (bool, *string, bool) {
+	if a.settings == nil {
+		return false, nil, true
+	}
+	state, err := a.settings.Maintenance(r.Context())
+	if err != nil {
+		a.internalError(w, "read maintenance mode", err)
+		return false, nil, false
+	}
+	return state.Enabled, state.Message, true
+}
+
+func writeMaintenanceMode(w http.ResponseWriter, message *string) {
+	w.Header().Set("Retry-After", "5")
+	writeJSON(w, http.StatusServiceUnavailable, errorEnvelope{Error: apiError{
+		Code:          "maintenance_mode",
+		Message:       defaultMaintenanceMessage,
+		PublicMessage: message,
+	}})
+}
+
+func (a *API) rejectMaintenanceRequest(w http.ResponseWriter, r *http.Request) bool {
+	enabled, message, ok := a.maintenanceStatus(w, r)
+	if !ok {
+		return true
+	}
+	if !enabled {
+		return false
+	}
+	writeMaintenanceMode(w, message)
+	return true
 }
 
 func (a *API) me(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
@@ -142,6 +167,16 @@ func (a *API) me(w http.ResponseWriter, r *http.Request, principal auth.Principa
 	if err != nil {
 		a.internalError(w, "read authenticated account", err)
 		return
+	}
+
+	maintenance := map[string]any{"enabled": false, "message": nil}
+	if a.settings != nil {
+		state, err := a.settings.Maintenance(r.Context())
+		if err != nil {
+			a.internalError(w, "read maintenance mode", err)
+			return
+		}
+		maintenance = newMaintenanceSettingsResponse(state)
 	}
 
 	profiles := make([]map[string]any, 0, len(account.Profiles))
@@ -189,7 +224,8 @@ func (a *API) me(w http.ResponseWriter, r *http.Request, principal auth.Principa
 			"deviceId":      account.Principal.DeviceID,
 			"activeProfile": activeProfile,
 		},
-		"profiles": profiles,
+		"profiles":    profiles,
+		"maintenance": maintenance,
 	})
 }
 

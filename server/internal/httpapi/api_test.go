@@ -12,6 +12,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/config"
 	"github.com/moodiness/rivune/server/internal/instance"
+	"github.com/moodiness/rivune/server/internal/settings"
 )
 
 type fakeInstanceService struct {
@@ -45,16 +46,59 @@ func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", response.Code)
 	}
 	var body struct {
-		Name            string `json:"name"`
-		ProtocolVersion int    `json:"protocolVersion"`
-		APIBaseURL      string `json:"apiBaseUrl"`
-		SetupRequired   bool   `json:"setupRequired"`
-		Timezone        string `json:"timezone"`
+		Name              string `json:"name"`
+		ProtocolVersion   int    `json:"protocolVersion"`
+		APIBaseURL        string `json:"apiBaseUrl"`
+		SetupRequired     bool   `json:"setupRequired"`
+		Timezone          string `json:"timezone"`
+		InterfaceLanguage string `json:"interfaceLanguage"`
 	}
 	decodeResponse(t, response, &body)
-	if body.Name != "Rivune" || body.ProtocolVersion != 16 || body.APIBaseURL != "https://media.example/api/v1" ||
-		body.Timezone != "Europe/Paris" || !body.SetupRequired {
+	if body.Name != "Rivune" || body.ProtocolVersion != 17 || body.APIBaseURL != "https://media.example/api/v1" ||
+		body.Timezone != "Europe/Paris" || body.InterfaceLanguage != "en" || !body.SetupRequired {
 		t.Fatalf("unexpected discovery response: %+v", body)
+	}
+}
+func TestDiscoveryUsesInstanceInterfaceLanguage(t *testing.T) {
+	arabic := "ar"
+	api := testAPI(&fakeInstanceService{info: instance.Info{Name: "Rivune"}})
+	api.settings = &fakeSettingsService{instance: settings.Layer{
+		SchemaVersion: 1,
+		Values:        settings.Values{InterfaceLanguage: &arabic},
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/.well-known/rivune", nil)
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		InterfaceLanguage string `json:"interfaceLanguage"`
+	}
+	decodeResponse(t, response, &body)
+	if body.InterfaceLanguage != "ar" {
+		t.Fatalf("interface language = %q, want ar", body.InterfaceLanguage)
+	}
+}
+
+func TestDiscoveryUsesBuiltInInterfaceLanguageWhenInstanceSettingIsClear(t *testing.T) {
+	api := testAPI(&fakeInstanceService{info: instance.Info{Name: "Rivune"}})
+	request := httptest.NewRequest(http.MethodGet, "/.well-known/rivune", nil)
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		InterfaceLanguage string `json:"interfaceLanguage"`
+	}
+	decodeResponse(t, response, &body)
+	if body.InterfaceLanguage != "en" {
+		t.Fatalf("interface language = %q, want en", body.InterfaceLanguage)
 	}
 }
 
@@ -141,6 +185,7 @@ func testAPI(service instanceService) *API {
 	return &API{
 		config:    config.Config{PublicURL: "https://media.example", Timezone: "Europe/Paris"},
 		instances: service,
+		settings:  &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}},
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		version:   "test",
 	}

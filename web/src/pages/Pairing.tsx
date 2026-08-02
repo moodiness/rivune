@@ -4,6 +4,7 @@ import { api, APIError } from "../api";
 import { useAuth } from "../auth";
 import { Button, Notice, RivuneMark } from "../components";
 import { notifyError, notifyErrorMessage } from "../notifications";
+import { translate as t } from "../i18n";
 import type { DeviceAuthorization } from "../types";
 import { AuthBackdrop, LoginPage } from "./Onboarding";
 
@@ -20,7 +21,7 @@ export function DevicePairingPage() {
     try {
       setAuthorization(await api.beginDeviceAuthorization());
     } catch (cause) {
-      setError(notifyError(cause, "This device could not start pairing.", "Pairing failed"));
+      setError(notifyError(cause, t("pairing.startFailure"), t("pairing.failureTitle")));
     } finally {
       setLoading(false);
     }
@@ -47,10 +48,10 @@ export function DevicePairingPage() {
         }
         if (cause instanceof APIError && cause.code === "expired_device_code") {
           setAuthorization(null);
-          setError(notifyErrorMessage("This pairing code expired. Generate a new one to continue.", "Pairing code expired"));
+          setError(notifyErrorMessage(t("pairing.codeExpiredBody"), t("pairing.codeExpiredTitle")));
           return;
         }
-        setError(notifyError(cause, "This device could not finish pairing.", "Pairing failed"));
+        setError(notifyError(cause, t("pairing.finishFailure"), t("pairing.failureTitle")));
       }
     };
     timer = window.setTimeout(poll, authorization.intervalSeconds * 1000);
@@ -67,26 +68,26 @@ export function DevicePairingPage() {
   return <main className="auth-page"><AuthBackdrop /><div className="auth-shell auth-shell--login">
     <RivuneMark />
     <section className="auth-card auth-card--login pairing-card page-enter">
-      <div className="auth-card__server"><span className="status-dot" /> Connected to {discovery?.name ?? "Rivune"}</div>
+      <div className="auth-card__server"><span className="status-dot" /> {t("auth.connectedTo", { server: discovery?.name ?? "Rivune" })}</div>
       <div className="pairing-card__icon"><Smartphone /></div>
       <div className="auth-card__header">
-        <span>New device</span>
-        <h1>Connect to your Rivune home.</h1>
-        <p>No family username or password is needed. Ask a manager to approve this device once.</p>
+        <span>{t("pairing.deviceEyebrow")}</span>
+        <h1>{t("pairing.deviceTitle")}</h1>
+        <p>{t("pairing.deviceBody")}</p>
       </div>
       {error && <Notice>{error}</Notice>}
-      {loading ? <div className="pairing-card__loading"><LoaderCircle className="spin" /><span>Creating a secure pairing code…</span></div>
+      {loading ? <div className="pairing-card__loading"><LoaderCircle className="spin" /><span>{t("pairing.creatingCode")}</span></div>
         : authorization ? <div className="pairing-card__code">
-          <span>Pairing code</span>
+          <span>{t("pairing.codeLabel")}</span>
           <strong>{authorization.userCode}</strong>
-          <p>On a device already connected to Rivune, open:</p>
+          <p>{t("pairing.openApprovalPage")}</p>
           <code>{pairingURL}</code>
-          <small>The manager selects a manager profile, confirms this code, and this screen opens the profile picker automatically.</small>
+          <small>{t("pairing.deviceInstructions")}</small>
         </div>
-          : <Button onClick={() => void begin()}><RefreshCw size={18} /> Generate a new code</Button>}
-      <button type="button" className="text-button pairing-card__owner" onClick={() => setOwnerSignIn(true)}><KeyRound size={16} /> Owner sign in</button>
+          : <Button onClick={() => void begin()}><RefreshCw size={18} /> {t("pairing.generateCode")}</Button>}
+      <button type="button" className="text-button pairing-card__owner" onClick={() => setOwnerSignIn(true)}><KeyRound size={16} /> {t("pairing.ownerSignIn")}</button>
     </section>
-    <footer className="auth-footer"><ShieldCheck size={14} /> One approval per device · Revocable at any time</footer>
+    <footer className="auth-footer"><ShieldCheck size={14} /> {t("pairing.deviceFooter")}</footer>
   </div></main>;
 }
 
@@ -105,7 +106,7 @@ export function PairApprovalPage() {
       await api.approveDeviceAuthorization(userCode);
       setApproved(true);
     } catch (cause) {
-      setError(notifyError(cause, "This device could not be approved.", "Approval failed"));
+      setError(notifyError(cause, t("pairing.approvalFailure"), t("pairing.approvalFailureTitle")));
     } finally {
       setLoading(false);
     }
@@ -119,22 +120,22 @@ export function PairApprovalPage() {
     <section className="auth-card auth-card--login pairing-card pairing-card--approval page-enter">
       {approved ? <>
         <div className="pairing-card__icon pairing-card__icon--success"><CheckCircle2 /></div>
-        <div className="auth-card__header"><span>Device approved</span><h1>They can choose a profile now.</h1><p>The new device received its own revocable session. No administrator credentials were shared.</p></div>
-        <Button onClick={() => window.location.assign("/")}>Return to Rivune <ArrowRight size={18} /></Button>
+        <div className="auth-card__header"><span>{t("pairing.approvedEyebrow")}</span><h1>{t("pairing.approvedTitle")}</h1><p>{t("pairing.approvedBody")}</p></div>
+        <Button onClick={() => window.location.assign("/")}>{t("pairing.returnToRivune")} <ArrowRight size={18} /></Button>
       </> : !activeProfile?.canManage ? <>
         <div className="pairing-card__icon"><ShieldCheck /></div>
-        <div className="auth-card__header"><span>Manager required</span><h1>Switch to a manager profile.</h1><p>Only a profile allowed to manage this Rivune home can approve a new device.</p></div>
-        <Button onClick={() => void leaveProfile().catch((cause) => setError(notifyError(cause, "The profile chooser could not be opened.")))}>Choose another profile</Button>
+        <div className="auth-card__header"><span>{t("pairing.managerRequiredEyebrow")}</span><h1>{t("pairing.managerRequiredTitle")}</h1><p>{t("pairing.managerRequiredBody")}</p></div>
+        <Button onClick={() => void leaveProfile().catch((cause) => setError(notifyError(cause, t("profiles.chooserFailure"))))}>{t("pairing.chooseAnotherProfile")}</Button>
       </> : <>
         <div className="pairing-card__icon"><Smartphone /></div>
-        <div className="auth-card__header"><span>Device pairing</span><h1>Approve a family device.</h1><p>Compare the code shown on the new device before approving it.</p></div>
+        <div className="auth-card__header"><span>{t("pairing.approvalEyebrow")}</span><h1>{t("pairing.approvalTitle")}</h1><p>{t("pairing.approvalBody")}</p></div>
         <form className="form-stack" onSubmit={submit}>
           {error && <Notice>{error}</Notice>}
-          <label className="field"><span>Pairing code</span><div><KeyRound size={18} /><input value={formattedCode} onChange={(event) => setUserCode(event.target.value)} autoComplete="one-time-code" inputMode="text" placeholder="ABCD-EFGH" minLength={9} maxLength={9} autoFocus required /></div></label>
-          <Button type="submit" loading={loading}>Approve device <ArrowRight size={18} /></Button>
+          <label className="field"><span>{t("pairing.codeLabel")}</span><div><KeyRound size={18} /><input value={formattedCode} onChange={(event) => setUserCode(event.target.value)} autoComplete="one-time-code" inputMode="text" placeholder={t("pairing.codePlaceholder")} minLength={9} maxLength={9} autoFocus required /></div></label>
+          <Button type="submit" loading={loading}>{t("pairing.approveDevice")} <ArrowRight size={18} /></Button>
         </form>
       </>}
     </section>
-    <footer className="auth-footer">Approving as {activeProfile?.name ?? "manager"}</footer>
+    <footer className="auth-footer">{t("pairing.approvingAs", { name: activeProfile?.name ?? t("pairing.managerFallback") })}</footer>
   </div></main>;
 }

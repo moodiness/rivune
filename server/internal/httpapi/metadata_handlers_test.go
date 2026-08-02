@@ -33,6 +33,7 @@ type fakeMetadataService struct {
 	seriesDetailsID         string
 	seriesDetailsLanguage   string
 	seriesDetailsMapping    string
+	seriesDetailsOrder      string
 	seriesDetailsValue      metadata.Series
 	seriesDetailsErr        error
 	seasonDetailsID         string
@@ -74,10 +75,11 @@ func (f *fakeMetadataService) SearchSeries(_ context.Context, _ auth.Principal, 
 	return f.searchSeriesPage, f.searchSeriesErr
 }
 
-func (f *fakeMetadataService) SeriesDetails(_ context.Context, _ auth.Principal, titleID, language, mappingProvider string) (metadata.Series, error) {
+func (f *fakeMetadataService) SeriesDetails(_ context.Context, _ auth.Principal, titleID string, options metadata.SeriesDetailsOptions) (metadata.Series, error) {
 	f.seriesDetailsID = titleID
-	f.seriesDetailsLanguage = language
-	f.seriesDetailsMapping = mappingProvider
+	f.seriesDetailsLanguage = options.Language
+	f.seriesDetailsMapping = options.MappingProvider
+	f.seriesDetailsOrder = options.EpisodeOrderID
 	return f.seriesDetailsValue, f.seriesDetailsErr
 }
 
@@ -168,12 +170,12 @@ func TestSeriesHandlersPassCanonicalIdentifiers(t *testing.T) {
 		t.Fatalf("unexpected series search status=%d options=%+v", searchResponse.Code, service.searchSeriesOptions)
 	}
 
-	seriesRequest := httptest.NewRequest(http.MethodGet, "/api/v1/series/series-id?language=fr-FR&mappingProvider=tvdb", nil)
+	seriesRequest := httptest.NewRequest(http.MethodGet, "/api/v1/series/series-id?language=fr-FR&mappingProvider=tvdb&episodeOrder=4", nil)
 	seriesRequest.SetPathValue("titleId", "series-id")
 	seriesResponse := httptest.NewRecorder()
 	api.seriesDetails(seriesResponse, seriesRequest, auth.Principal{})
-	if seriesResponse.Code != http.StatusOK || service.seriesDetailsID != "series-id" || service.seriesDetailsLanguage != "fr-FR" || service.seriesDetailsMapping != "tvdb" {
-		t.Fatalf("unexpected series details status=%d id=%q language=%q mapping=%q", seriesResponse.Code, service.seriesDetailsID, service.seriesDetailsLanguage, service.seriesDetailsMapping)
+	if seriesResponse.Code != http.StatusOK || service.seriesDetailsID != "series-id" || service.seriesDetailsLanguage != "fr-FR" || service.seriesDetailsMapping != "tvdb" || service.seriesDetailsOrder != "4" {
+		t.Fatalf("unexpected series details status=%d id=%q language=%q mapping=%q order=%q", seriesResponse.Code, service.seriesDetailsID, service.seriesDetailsLanguage, service.seriesDetailsMapping, service.seriesDetailsOrder)
 	}
 
 	seasonRequest := httptest.NewRequest(http.MethodGet, "/api/v1/seasons/season-id?language=fr-FR&mappingProvider=tvdb", nil)

@@ -40,6 +40,9 @@ func TestLoadUsesEnvironmentCredentials(t *testing.T) {
 	t.Setenv("RIVUNE_DATABASE_URL", "")
 	t.Setenv("RIVUNE_DATABASE_PASSWORD", "database-secret")
 	t.Setenv("RIVUNE_TMDB_ACCESS_TOKEN", "tmdb-token")
+	t.Setenv("RIVUNE_FANART_API_KEY", "fanart-project")
+	t.Setenv("RIVUNE_FANART_CLIENT_KEY", "fanart-personal")
+	t.Setenv("RIVUNE_MDBLIST_API_KEY", "mdblist-key")
 	t.Setenv("RIVUNE_TVDB_API_KEY", "tvdb-key")
 	t.Setenv("RIVUNE_TVDB_PIN", "tvdb-pin")
 	t.Setenv("RIVUNE_TRAKT_CLIENT_ID", "trakt-client")
@@ -53,8 +56,8 @@ func TestLoadUsesEnvironmentCredentials(t *testing.T) {
 		t.Fatalf("unexpected database URL: %q", cfg.DatabaseURL)
 	}
 	if cfg.SetupToken != "setup-secret" || cfg.TMDBAccessToken != "tmdb-token" ||
-		cfg.TVDBAPIKey != "tvdb-key" || cfg.TVDBPIN != "tvdb-pin" || cfg.TraktClientID != "trakt-client" ||
-		cfg.Timezone != "Europe/Paris" {
+		cfg.FanartAPIKey != "fanart-project" || cfg.FanartClientKey != "fanart-personal" || cfg.MDBListAPIKey != "mdblist-key" ||
+		cfg.TVDBAPIKey != "tvdb-key" || cfg.TVDBPIN != "tvdb-pin" || cfg.TraktClientID != "trakt-client" || cfg.Timezone != "Europe/Paris" {
 		t.Fatalf("environment configuration was not loaded: %+v", cfg)
 	}
 }
@@ -137,6 +140,15 @@ func TestLoadRejectsTVDBPINWithoutAPIKey(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsFanartClientKeyWithoutAPIKey(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("RIVUNE_FANART_CLIENT_KEY", "personal-key")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected a Fanart client key without an API key to fail")
+	}
+}
+
 func TestLoadParsesTrustedProxyAddressesAndNetworks(t *testing.T) {
 	setRequiredEnvironment(t)
 	t.Setenv("RIVUNE_TRUSTED_PROXIES", "127.0.0.1, 10.0.0.0/8")
@@ -173,6 +185,9 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("RIVUNE_REFRESH_TOKEN_TTL", "")
 	t.Setenv("RIVUNE_PROFILE_GRANT_TTL", "")
 	t.Setenv("RIVUNE_TMDB_ACCESS_TOKEN", "")
+	t.Setenv("RIVUNE_FANART_API_KEY", "")
+	t.Setenv("RIVUNE_FANART_CLIENT_KEY", "")
+	t.Setenv("RIVUNE_MDBLIST_API_KEY", "")
 	t.Setenv("RIVUNE_TVDB_API_KEY", "")
 	t.Setenv("RIVUNE_TVDB_PIN", "")
 	t.Setenv("RIVUNE_TRAKT_CLIENT_ID", "")

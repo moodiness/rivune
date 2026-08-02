@@ -2,14 +2,14 @@
 
 Rivune is a self-hosted media backend and responsive web client. It ships with no catalog, provider, or hosted service: users connect to a server they choose, and that server owns authentication, profiles, collections, playback state, and source resolution.
 
-Rivune is under active development. The web client and backend are usable today. Typed protocol-v16 clients for Apple, Android, and Windows are included; their native application interfaces are planned.
+Rivune is under active development. The web client and backend are usable today. Typed protocol-v17 clients for Apple, Android, and Windows are included; their native application interfaces are planned.
 
 ## What works
 
 - Secure first-run setup, device authentication, refresh tokens, and revocable sessions
 - Profiles with PIN protection and throttling, management permissions, disable/date/daily access windows, independent settings, libraries, and watch progress
 - Per-profile media source addons with in-place transport and profile-assignment editing, plus configurable collections
-- Optional TMDB, TVDB, and Trakt metadata integrations, localized season-aware trailers, and visible provider identifiers
+- Optional TMDB, TVDB, Fanart.tv, and Trakt metadata integrations, localized season-aware trailers, rich artwork, and visible provider identifiers
 - Opaque, session-bound playback source references that keep provider URLs and private headers on the server
 - Direct playback, remuxing, audio conversion, full H.264/AAC transcoding, and HLS delivery
 - Audio and subtitle selection, external subtitles, seek, playback speed, Picture in Picture, and resume state
@@ -53,7 +53,7 @@ RIVUNE_DATABASE_PASSWORD=<generated database password>
 RIVUNE_SETUP_TOKEN=<generated setup token>
 ```
 
-TMDB, TVDB, and Trakt credentials are optional and can remain empty in `.env`. `RIVUNE_TVDB_PIN` is only needed with a TVDB user-supported API key; ordinary project keys authenticate without it.
+TMDB, TVDB, Fanart.tv, and Trakt credentials are optional and can remain empty in `.env`. `RIVUNE_TVDB_PIN` is only needed with a TVDB user-supported API key; ordinary project keys authenticate without it. Fanart.tv requires a project API key; its personal client key is optional.
 
 Start Rivune:
 
@@ -85,6 +85,7 @@ Copy [`.env.example`](.env.example) to `.env` and adjust it for the host. Import
 | `RIVUNE_SETUP_TOKEN` | Required one-time value used to claim a new Rivune instance | none |
 | `RIVUNE_TMDB_ACCESS_TOKEN` | Optional TMDB API read access token | empty |
 | `RIVUNE_TVDB_API_KEY` / `RIVUNE_TVDB_PIN` | Optional TVDB project key and user-supported-key PIN | empty |
+| `RIVUNE_FANART_API_KEY` / `RIVUNE_FANART_CLIENT_KEY` | Optional Fanart.tv project key and personal client key for posters, backdrops, logos, and season artwork | empty |
 | `RIVUNE_TRAKT_CLIENT_ID` | Optional Trakt client ID for collection sources and account tracking | empty |
 | `RIVUNE_TRAKT_CLIENT_SECRET` | Trakt client secret required with the client ID for account tracking | empty |
 | `RIVUNE_SIMKL_CLIENT_ID` | Optional Simkl client ID for account tracking | empty |

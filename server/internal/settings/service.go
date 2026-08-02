@@ -18,6 +18,7 @@ import (
 
 const (
 	schemaVersion                 = 1
+	DefaultInterfaceLanguage      = "en"
 	MaintenanceMessageMaximumSize = 500
 )
 
@@ -55,6 +56,7 @@ type OptionalInt struct {
 }
 
 type Patch struct {
+	InterfaceLanguage                OptionalString
 	Theme                            OptionalString
 	MaximumResolution                OptionalString
 	PreferDirectPlay                 OptionalBool
@@ -80,6 +82,7 @@ type Patch struct {
 }
 
 type Values struct {
+	InterfaceLanguage                *string `json:"interfaceLanguage,omitempty"`
 	Theme                            *string `json:"theme,omitempty"`
 	MaximumResolution                *string `json:"maximumResolution,omitempty"`
 	PreferDirectPlay                 *bool   `json:"preferDirectPlay,omitempty"`
@@ -113,6 +116,7 @@ type Layer struct {
 }
 
 type EffectiveValues struct {
+	InterfaceLanguage                string `json:"interfaceLanguage"`
 	Theme                            string `json:"theme"`
 	MaximumResolution                string `json:"maximumResolution"`
 	PreferDirectPlay                 bool   `json:"preferDirectPlay"`
@@ -375,7 +379,8 @@ func defaultEffective() Effective {
 	return Effective{
 		SchemaVersion: schemaVersion,
 		Values: EffectiveValues{
-			Theme: "system", MaximumResolution: "auto", PreferDirectPlay: true,
+			InterfaceLanguage: DefaultInterfaceLanguage,
+			Theme:             "system", MaximumResolution: "auto", PreferDirectPlay: true,
 			HideUnreleased: false, MetadataLanguage: "auto", MetadataRegion: "auto", SeriesMappingProvider: "tmdb",
 			AudioLanguage: "auto", SubtitleLanguage: "auto", ForcedSubtitleLanguage: "off",
 			AutoplayNextEpisode: true, CardDensity: "comfortable", AnimationsEnabled: true,
@@ -384,7 +389,8 @@ func defaultEffective() Effective {
 			NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 5,
 		},
 		Sources: map[string]string{
-			"theme": "default", "maximumResolution": "default", "preferDirectPlay": "default",
+			"interfaceLanguage": "default",
+			"theme":             "default", "maximumResolution": "default", "preferDirectPlay": "default",
 			"hideUnreleased": "default", "metadataLanguage": "default", "metadataRegion": "default", "seriesMappingProvider": "default",
 			"audioLanguage": "default", "subtitleLanguage": "default", "forcedSubtitleLanguage": "default",
 			"autoplayNextEpisode": "default", "cardDensity": "default", "animationsEnabled": "default",
@@ -396,11 +402,14 @@ func defaultEffective() Effective {
 }
 
 func validatePatch(patch Patch) error {
-	if !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.PreferDirectPlay.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
+	if !patch.InterfaceLanguage.Set && !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.PreferDirectPlay.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
 		!patch.AutoplayNextEpisode.Set && !patch.SkipIntroEnabled.Set && !patch.SkipRecapEnabled.Set && !patch.SkipOutroEnabled.Set &&
 		!patch.CardDensity.Set && !patch.AnimationsEnabled.Set && !patch.SubtitleSizePercent.Set && !patch.SubtitleTextColor.Set && !patch.SubtitleBackgroundOpacityPercent.Set &&
 		!patch.NotificationsEnabled.Set && !patch.NotificationDurationSeconds.Set && !patch.NotificationPollIntervalSeconds.Set {
 		return fmt.Errorf("%w: at least one setting must be provided", ErrInvalidInput)
+	}
+	if value := patch.InterfaceLanguage.Value; patch.InterfaceLanguage.Set && value != nil && !isSupportedInterfaceLanguage(*value) {
+		return fmt.Errorf("%w: interfaceLanguage is not supported", ErrInvalidInput)
 	}
 	if value := patch.Theme.Value; patch.Theme.Set && value != nil {
 		switch *value {
@@ -470,6 +479,9 @@ func validateIntRange(name string, value OptionalInt, minimum, maximum int) erro
 }
 
 func applyPatch(values Values, patch Patch) Values {
+	if patch.InterfaceLanguage.Set {
+		values.InterfaceLanguage = patch.InterfaceLanguage.Value
+	}
 	if patch.Theme.Set {
 		values.Theme = patch.Theme.Value
 	}
@@ -550,6 +562,10 @@ func applyPatch(values Values, patch Patch) Values {
 }
 
 func applyLayer(effective *Effective, values Values, source string) {
+	if values.InterfaceLanguage != nil {
+		effective.Values.InterfaceLanguage = *values.InterfaceLanguage
+		effective.Sources["interfaceLanguage"] = source
+	}
 	if values.Theme != nil {
 		effective.Values.Theme = *values.Theme
 		effective.Sources["theme"] = source
@@ -637,6 +653,17 @@ func applyLayer(effective *Effective, values Values, source string) {
 	if values.NotificationPollIntervalSeconds != nil {
 		effective.Values.NotificationPollIntervalSeconds = *values.NotificationPollIntervalSeconds
 		effective.Sources["notificationPollIntervalSeconds"] = source
+	}
+}
+func isSupportedInterfaceLanguage(value string) bool {
+	switch value {
+	case "en", "fr", "es", "it", "de", "ru", "pt-PT", "pt-BR", "ar", "ja", "ko", "zh-CN", "pl", "hy",
+		"es-MX", "es-AR", "es-CL", "es-CO", "es-PE", "fr-CA", "zh-TW", "nl", "sv", "da", "fi", "nb",
+		"tr", "uk", "cs", "sk", "ro", "el", "he", "hi", "id", "vi", "th", "hu", "bg", "hr", "sr", "ms",
+		"ca", "fa", "fil":
+		return true
+	default:
+		return false
 	}
 }
 

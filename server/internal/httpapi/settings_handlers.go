@@ -50,6 +50,7 @@ func (value *nullableInt) UnmarshalJSON(data []byte) error {
 }
 
 type settingsPatchRequest struct {
+	InterfaceLanguage                nullableString `json:"interfaceLanguage,omitempty"`
 	Theme                            nullableString `json:"theme,omitempty"`
 	MaximumResolution                nullableString `json:"maximumResolution,omitempty"`
 	PreferDirectPlay                 nullableBool   `json:"preferDirectPlay,omitempty"`
@@ -175,6 +176,7 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		return settings.Patch{}, false
 	}
 	return settings.Patch{
+		InterfaceLanguage:                settings.OptionalString{Set: request.InterfaceLanguage.Set, Value: request.InterfaceLanguage.Value},
 		Theme:                            settings.OptionalString{Set: request.Theme.Set, Value: request.Theme.Value},
 		MaximumResolution:                settings.OptionalString{Set: request.MaximumResolution.Set, Value: request.MaximumResolution.Value},
 		PreferDirectPlay:                 settings.OptionalBool{Set: request.PreferDirectPlay.Set, Value: request.PreferDirectPlay.Value},

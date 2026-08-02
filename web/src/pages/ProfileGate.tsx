@@ -6,7 +6,8 @@ import { notifyError } from "../notifications";
 import { translate as t } from "../i18n";
 import type { Profile } from "../types";
 
-function unavailableReason(profile: Profile): string | null {
+function unavailableReason(profile: Profile, maintenanceActive: boolean): string | null {
+  if (maintenanceActive && !profile.canManage) return t("profiles.maintenanceBlocked");
   if (profile.accessible) return null;
   if (!profile.enabled) return t("profiles.disabled");
   try {
@@ -26,7 +27,7 @@ function unavailableReason(profile: Profile): string | null {
   return profile.accessStartTime ? t("profiles.outsideHours") : t("profiles.unavailable");
 }
 
-export function ProfileGate() {
+export function ProfileGate({ maintenanceMessage = null }: { maintenanceMessage?: string | null }) {
   const { account, selectProfile, logout, refreshAccount } = useAuth();
   const [selected, setSelected] = useState<Profile | null>(null);
   const [pin, setPin] = useState("");
@@ -40,6 +41,7 @@ export function ProfileGate() {
   }, [refreshAccount]);
 
   async function choose(profile: Profile) {
+    if (maintenanceMessage !== null && !profile.canManage) return;
     if (!profile.accessible) return;
     if (profile.hasPin) {
       setSelected(profile);
@@ -53,7 +55,7 @@ export function ProfileGate() {
     try {
       await selectProfile(profile);
     } catch (cause) {
-      setError(notifyError(cause, t("profiles.openFailure"), "Profile unavailable"));
+      setError(notifyError(cause, t("profiles.openFailure"), t("profiles.unavailableTitle")));
     } finally {
       setLoading(false);
     }
@@ -67,7 +69,7 @@ export function ProfileGate() {
     try {
       await selectProfile(selected, pin);
     } catch (cause) {
-      setError(notifyError(cause, t("profiles.openFailure"), "Profile unavailable"));
+      setError(notifyError(cause, t("profiles.openFailure"), t("profiles.unavailableTitle")));
     } finally {
       setLoading(false);
     }
@@ -75,16 +77,17 @@ export function ProfileGate() {
 
   return <main className="profile-gate">
     <div className="profile-gate__atmosphere" aria-hidden="true"><i /><i /><i /></div>
-      <header><RivuneMark /><button onClick={() => void logout().catch((cause) => notifyError(cause, "This device could not be signed out.", "Sign out failed"))} className="text-button"><LogOut size={17} /> {t("profiles.signOut")}</button></header>
+      <header><RivuneMark /><button onClick={() => void logout().catch((cause) => notifyError(cause, t("profiles.signOutFailure"), t("profiles.signOutFailureTitle")))} className="text-button"><LogOut size={17} /> {t("profiles.signOut")}</button></header>
     <section className="profile-gate__content page-enter">
       <span className="eyebrow"><Sparkles size={15} /> {t("profiles.eyebrow")}</span>
       <h1>{t("profiles.title")}</h1>
       <p>{t("profiles.body")}</p>
+      {maintenanceMessage !== null && <Notice tone="warning"><span><strong>{t("profiles.maintenanceTitle")}</strong><br />{maintenanceMessage || t("profiles.maintenanceBody")}</span></Notice>}
       {error && !selected && <Notice>{error}</Notice>}
       <div className="profile-grid">
         {account?.profiles.map((profile, index) => {
-          const unavailable = unavailableReason(profile);
-          return <button key={profile.id} className={`profile-card ${unavailable ? "profile-card--unavailable" : ""}`} onClick={() => void choose(profile)} disabled={loading || !profile.accessible} aria-describedby={unavailable ? `profile-${profile.id}-status` : undefined} style={{ "--delay": `${index * 70}ms` } as CSSProperties}>
+          const unavailable = unavailableReason(profile, maintenanceMessage !== null);
+          return <button key={profile.id} className={`profile-card ${unavailable ? "profile-card--unavailable" : ""}`} onClick={() => void choose(profile)} disabled={loading || unavailable !== null} aria-describedby={unavailable ? `profile-${profile.id}-status` : undefined} style={{ "--delay": `${index * 70}ms` } as CSSProperties}>
             <span className="profile-card__avatar"><span className="profile-card__glow" /><img src={profile.avatar.url} alt="" />{profile.hasPin && <i><LockKeyhole size={14} /></i>}</span>
             <strong>{profile.name}</strong>
             <small id={unavailable ? `profile-${profile.id}-status` : undefined}>{unavailable ?? (profile.isChild ? t("profiles.child") : profile.canManage ? t("profiles.admin") : t("profiles.standard"))}</small>

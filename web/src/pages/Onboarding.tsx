@@ -14,8 +14,8 @@ export function SetupPage() {
   const { discovery, rediscover, login } = useAuth();
   const [step, setStep] = useState<"welcome" | "form" | "done">("welcome");
   const [setupToken, setSetupToken] = useState("");
-  const [instanceName, setInstanceName] = useState(discovery?.name === "Rivune" ? "Rivune Home" : discovery?.name ?? "Rivune Home");
-  const [profileName, setProfileName] = useState("Main");
+  const [instanceName, setInstanceName] = useState(() => discovery?.name === "Rivune" ? t("auth.defaultInstanceName") : discovery?.name ?? t("auth.defaultInstanceName"));
+  const [profileName, setProfileName] = useState(() => t("auth.defaultProfileName"));
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -31,7 +31,7 @@ export function SetupPage() {
       await rediscover();
       setStep("done");
     } catch (cause) {
-      setError(notifyError(cause, t("auth.setupFailure"), "Setup failed"));
+      setError(notifyError(cause, t("auth.setupFailure"), t("auth.setupFailureTitle")));
     } finally {
       setLoading(false);
     }
@@ -78,7 +78,7 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
     try {
       await login(username, password);
     } catch (cause) {
-      setError(notifyError(cause, t("auth.loginFailure"), "Sign in failed"));
+      setError(notifyError(cause, t("auth.loginFailure"), t("auth.loginFailureTitle")));
     } finally {
       setLoading(false);
     }
@@ -88,12 +88,12 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
     <RivuneMark />
     <section className="auth-card auth-card--login page-enter">
       <div className="auth-card__server"><span className="status-dot" /> {t("auth.connectedTo", { server: discovery?.name ?? "Rivune" })}</div>
-      <div className="auth-card__header"><span>Owner access</span><h1>Manage your<br />Rivune home.</h1><p>Administrator credentials are only needed for recovery or approving the first device.</p></div>
+      <div className="auth-card__header"><span>{t("auth.ownerAccess")}</span><h1>{t("auth.ownerTitle")}</h1><p>{t("auth.ownerBody")}</p></div>
       <form onSubmit={submit} className="form-stack">
         {error && <Notice>{error}</Notice>}
         <label className="field"><span>{t("auth.username")}</span><div><UserRound size={18} /><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" autoFocus required /></div></label>
         <label className="field"><span>{t("auth.password")}</span><div><LockKeyhole size={18} /><input type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /><button type="button" className="field__action" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? t("auth.hidePassword") : t("auth.showPassword")}>{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></div></label>
-        {onBack && <Button type="button" variant="ghost" onClick={onBack}>Back to device pairing</Button>}
+        {onBack && <Button type="button" variant="ghost" onClick={onBack}>{t("pairing.backToPairing")}</Button>}
         <Button type="submit" loading={loading}>{t("auth.signIn")} <ArrowRight size={18} /></Button>
       </form>
     </section>

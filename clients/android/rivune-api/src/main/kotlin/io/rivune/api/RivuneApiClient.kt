@@ -30,6 +30,17 @@ sealed class RivuneApiException(message: String, cause: Throwable? = null) : Exc
 private data class ErrorEnvelope(val error: ServerError)
 
 @Serializable
+private data class DiscoveryEnvelope(
+    val name: String,
+    val serverVersion: String,
+    val protocolVersion: Int,
+    val apiBaseUrl: String,
+    val setupRequired: Boolean,
+    val timezone: String,
+    val interfaceLanguage: String? = null,
+)
+
+@Serializable
 data class ServerError(val code: String, val message: String)
 
 @Serializable
@@ -80,10 +91,12 @@ class RivuneApiClient(
 
     suspend fun discover(): Discovery {
         val url = serverUrl.resolve("/.well-known/rivune") ?: throw RivuneApiException.InvalidServerUrl(serverUrl.toString())
-        val discovery: Discovery = execute(url, method = "GET", body = null, authenticated = false, retryAfterRefresh = false)
-        if (discovery.protocolVersion != RivuneProtocol.VERSION) {
-            throw RivuneApiException.IncompatibleProtocol(RivuneProtocol.VERSION, discovery.protocolVersion)
+        val response: DiscoveryEnvelope = execute(url, method = "GET", body = null, authenticated = false, retryAfterRefresh = false)
+        if (response.protocolVersion != RivuneProtocol.VERSION) {
+            throw RivuneApiException.IncompatibleProtocol(RivuneProtocol.VERSION, response.protocolVersion)
         }
+        val interfaceLanguage = response.interfaceLanguage ?: throw RivuneApiException.InvalidResponse()
+        val discovery = Discovery(response.name, response.serverVersion, response.protocolVersion, response.apiBaseUrl, response.setupRequired, response.timezone, interfaceLanguage)
         val resolved = serverUrl.resolve(discovery.apiBaseUrl)?.takeIf { it.scheme == "https" || it.scheme == "http" }
             ?: throw RivuneApiException.InvalidServerUrl(discovery.apiBaseUrl)
         apiBaseUrl = resolved

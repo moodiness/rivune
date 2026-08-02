@@ -1,3 +1,4 @@
+import { translate as t } from "./i18n";
 import type {
   Account,
   AvatarPreset,
@@ -113,7 +114,7 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
   }
   if (!response.ok) {
     let code = "request_failed";
-    let message = `The request failed (${response.status}).`;
+    let message = t("api.error.requestFailed", { status: response.status });
     let publicMessage: string | undefined;
     try {
       const body = await response.json() as { error?: { code?: string; message?: string; publicMessage?: unknown } };
@@ -256,9 +257,9 @@ export const api = {
   playbackActivity: () => request<PlaybackActivity>("/playback/activity"),
   stopPlaybackActivitySession: (sessionId: string) => request<void>(`/playback/activity/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
   purgePlaybackActivity: () => request<PlaybackPurgeResult>("/playback/activity/purge", { method: "POST" }),
-  movieDetails: (titleId: string) => request<{ voteAverage: number; voteCount: number; externalIds: Record<string, string> }>(`/metadata/titles/${encodeURIComponent(titleId)}${query({ language: metadataLanguage })}`),
-  seriesDetails: (titleId: string) => request<SeriesMetadata>(`/metadata/series/${encodeURIComponent(titleId)}${query({ language: metadataLanguage, mappingProvider: seriesMappingProvider })}`),
-  seasonDetails: (seasonId: string, signal?: AbortSignal) => request<SeasonMetadata>(`/metadata/seasons/${encodeURIComponent(seasonId)}${query({ language: metadataLanguage, mappingProvider: seriesMappingProvider })}`, { signal }),
+  movieDetails: (titleId: string) => request<{ posterUrl?: string; backdropUrl?: string; logoUrl?: string; voteAverage: number; voteCount: number; externalIds: Record<string, string> }>(`/metadata/titles/${encodeURIComponent(titleId)}${query({ language: metadataLanguage })}`),
+  seriesDetails: (titleId: string, options?: { mappingProvider?: "tmdb" | "tvdb"; episodeOrderId?: string }) => request<SeriesMetadata>(`/metadata/series/${encodeURIComponent(titleId)}${query({ language: metadataLanguage, mappingProvider: options?.mappingProvider ?? seriesMappingProvider, episodeOrder: options?.episodeOrderId })}`),
+  seasonDetails: (seasonId: string, signal?: AbortSignal, mappingProvider = seriesMappingProvider) => request<SeasonMetadata>(`/metadata/seasons/${encodeURIComponent(seasonId)}${query({ language: metadataLanguage, mappingProvider })}`, { signal }),
   trailers: (titleId: string, seasonNumber?: number) => request<TrailerList>(`/metadata/titles/${encodeURIComponent(titleId)}/trailers${query({ language: trailerLanguage, captionLanguage: trailerCaptionLanguage, seasonNumber })}`),
 
   library: (mediaType = "") => request<LibraryPage>(`/library${query({ mediaType, page: 1, pageSize: 100 })}`),

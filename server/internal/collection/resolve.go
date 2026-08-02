@@ -163,6 +163,11 @@ func (service *Service) resolveSource(ctx context.Context, principal auth.Princi
 			return SourcePage{}, ErrProviderUnavailable
 		}
 		return service.trakt.ResolveCollectionSource(ctx, *source.Trakt, page)
+	case SourceKindMDBList:
+		if service.mdblist == nil {
+			return SourcePage{}, ErrProviderUnavailable
+		}
+		return service.mdblist.ResolveCollectionSource(ctx, *source.MDBList, page)
 	default:
 		return SourcePage{}, ErrInvalidInput
 	}
@@ -301,7 +306,7 @@ func mergeItem(target *Item, candidate Item) {
 
 func itemKey(item Item) string {
 	mediaType := strings.ToLower(strings.TrimSpace(item.MediaType))
-	for _, provider := range []string{"tmdb", "imdb", "tvdb", "kitsu", "trakt"} {
+	for _, provider := range []string{"tmdb", "imdb", "tvdb", "kitsu", "trakt", "mdblist"} {
 		if value := strings.TrimSpace(item.ExternalIDs[provider]); value != "" {
 			return mediaType + ":" + provider + ":" + strings.ToLower(value)
 		}

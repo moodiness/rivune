@@ -92,8 +92,11 @@ func (a *API) seriesDetails(w http.ResponseWriter, r *http.Request, principal au
 		r.Context(),
 		principal,
 		r.PathValue("titleId"),
-		r.URL.Query().Get("language"),
-		r.URL.Query().Get("mappingProvider"),
+		metadata.SeriesDetailsOptions{
+			Language:        r.URL.Query().Get("language"),
+			MappingProvider: r.URL.Query().Get("mappingProvider"),
+			EpisodeOrderID:  r.URL.Query().Get("episodeOrder"),
+		},
 	)
 	if err != nil {
 		a.writeMetadataError(w, "read series details", err)

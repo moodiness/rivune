@@ -28,6 +28,12 @@ const expiresAt = "2099-01-01T00:00:00Z";
 const createdAt = "2024-01-01T00:00:00Z";
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="100%" height="100%" fill="#241f35"/></svg>`;
 
+function wait(milliseconds: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, milliseconds);
+  return promise;
+}
+
 const profiles: Profile[] = [
   { id: "alice", name: "Alice", isChild: false, canManage: true, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "alice", url: "https://fixtures.rivune.test/alice.svg" } },
   { id: "bob", name: "Bob", isChild: false, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "bob", url: "https://fixtures.rivune.test/bob.svg" } },
@@ -48,13 +54,62 @@ const seasonTwo = {
   ],
 };
 
-const seasonSummary = (season: typeof seasonOne) => {
+const dvdSeason = {
+  id: "dvd-season-1", mediaType: "season", seriesId: "series-1", name: "DVD Season 1", overview: "The disc order.", seasonNumber: 1, episodeCount: 3, airDate: "2024-01-01", posterUrl: "https://fixtures.rivune.test/dvd-season-1.svg", voteAverage: 8.4, externalIds: { tvdb: "2001" },
+  episodes: [
+    { id: "dvd-episode-1", mediaType: "episode", seasonId: "dvd-season-1", name: "Disc Opening", overview: "The DVD order begins.", seasonNumber: 1, episodeNumber: 1, airDate: "2024-01-03", runtimeMinutes: 30, voteAverage: 8.1, voteCount: 100, externalIds: { tvdb: "2101" } },
+    { id: "dvd-episode-2", mediaType: "episode", seasonId: "dvd-season-1", name: "Disc Middle", overview: "The DVD order continues.", seasonNumber: 1, episodeNumber: 2, airDate: "2024-01-10", runtimeMinutes: 31, voteAverage: 8.3, voteCount: 95, externalIds: { tvdb: "2102" } },
+    { id: "dvd-episode-3", mediaType: "episode", seasonId: "dvd-season-1", name: "Disc Finale", overview: "The DVD order concludes.", seasonNumber: 1, episodeNumber: 3, airDate: "2024-01-17", runtimeMinutes: 32, voteAverage: 8.4, voteCount: 90, externalIds: { tvdb: "2103" } },
+  ],
+};
+
+const seasonSummary = <T extends { episodes: unknown[] }>(season: T) => {
   const { episodes: _episodes, ...summary } = season;
   return summary;
 };
 
+const extraSeasonSummaries = Array.from({ length: 10 }, (_, index) => {
+  const seasonNumber = index + 3;
+  return {
+    ...seasonSummary(seasonTwo),
+    id: `season-${seasonNumber}`,
+    name: `Season ${seasonNumber}`,
+    seasonNumber,
+    posterUrl: `https://fixtures.rivune.test/season-${seasonNumber}.svg`,
+    externalIds: { tmdb: String(100 + seasonNumber) },
+  };
+});
+
+const episodeOrders = [
+  { id: "1", name: "Aired Order", type: "official", isDefault: true },
+  { id: "2", name: "DVD Order", type: "dvd", isDefault: false },
+  { id: "3", name: "Absolute Order", type: "absolute", isDefault: false },
+  { id: "4", name: "Story Order", type: "alternate", isDefault: false },
+  { id: "7", name: "Streaming Order", type: "alttwo", isDefault: false },
+];
+
 const series = {
-  id: "series-1", mediaType: "series", name: "Signal Horizon", originalName: "Signal Horizon", originalLanguage: "en", overview: "Explorers cross the edge of known space.", firstAirDate: "2024-01-03", posterUrl: "https://fixtures.rivune.test/series.svg", backdropUrl: "https://fixtures.rivune.test/backdrop.svg", tagline: "Beyond the map.", status: "Returning Series", numberOfSeasons: 2, numberOfEpisodes: 3, genres: [{ id: 1, name: "Science Fiction" }], voteAverage: 8.5, voteCount: 500, seasons: [seasonSummary(seasonOne), seasonSummary(seasonTwo)], episodeOrders: [], mappingProvider: "tmdb", externalIds: { imdb: "tt9000", tmdb: "9000" },
+  id: "series-1",
+  mediaType: "series",
+  name: "Signal Horizon",
+  originalName: "Signal Horizon",
+  originalLanguage: "en",
+  overview: "Explorers cross the edge of known space.",
+  firstAirDate: "2024-01-03",
+  posterUrl: "https://fixtures.rivune.test/series.svg",
+  backdropUrl: "https://fixtures.rivune.test/backdrop.svg",
+  logoUrl: "https://fixtures.rivune.test/series-logo.svg",
+  tagline: "Beyond the map.",
+  status: "Returning Series",
+  numberOfSeasons: 12,
+  numberOfEpisodes: 13,
+  genres: [{ id: 1, name: "Science Fiction" }],
+  voteAverage: 8.5,
+  voteCount: 500,
+  seasons: [seasonSummary(seasonOne), seasonSummary(seasonTwo), ...extraSeasonSummaries],
+  episodeOrders,
+  mappingProvider: "tmdb",
+  externalIds: { imdb: "tt9000", tmdb: "9000", tvdb: "9900" },
 };
 
 function json(route: Route, body: unknown, status = 200) {
@@ -76,15 +131,32 @@ export class RivuneHarness {
   private activeProfileId: string | null = "alice";
   private userRole: "admin" | "member" = "admin";
   private maintenance = { enabled: false, message: null as string | null };
+  private instanceSettings: Record<string, unknown> = {};
+  private readonly profileSettings = new Map<string, Record<string, unknown>>();
+  private readonly effectiveSettingsDelays: number[] = [];
   private readonly collectionDelays = new Map<string, number>();
+  private readonly seasonOverrides = new Map<string, unknown>();
+  private libraryItems: Array<Record<string, unknown>> = [];
 
   setMaintenance(enabled: boolean, message: string | null = null) {
-    this.userRole = "member";
+    if (enabled) this.activeProfileId = "bob";
     this.maintenance = { enabled, message };
   }
 
   delayCollections(profileId: string, milliseconds: number) {
     this.collectionDelays.set(profileId, milliseconds);
+  }
+
+  delayNextEffectiveSettings(milliseconds: number) {
+    this.effectiveSettingsDelays.push(milliseconds);
+  }
+
+  setSeason(id: string, season: unknown) {
+    this.seasonOverrides.set(id, season);
+  }
+
+  setLibraryItems(items: Array<Record<string, unknown>>) {
+    this.libraryItems = items;
   }
 
   matching(pathname: string, method?: string) {
@@ -110,6 +182,7 @@ export class RivuneHarness {
       user: { id: "user-1", username: "fixture-owner", role: this.userRole },
       session: { id: "session-1", deviceId: "fixture-device", activeProfile: this.activeProfileId ? { id: this.activeProfileId, expiresAt } : null },
       profiles,
+      maintenance: this.maintenance,
     };
   }
 
@@ -140,10 +213,18 @@ export class RivuneHarness {
     this.requests.push({ method: request.method(), pathname: url.pathname, search: new URLSearchParams(url.search), body, profileId: profileAtRequest });
 
     if (url.pathname === "/.well-known/rivune") {
-      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 16, apiBaseUrl: "/api/v1", setupRequired: false, timezone: "UTC" });
+      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 17, apiBaseUrl: "/api/v1", setupRequired: false, timezone: "UTC", interfaceLanguage: typeof this.instanceSettings.interfaceLanguage === "string" ? this.instanceSettings.interfaceLanguage : "en" });
       return;
     }
     const path = url.pathname.slice("/api/v1".length);
+    const maintenanceSelection = path.match(/^\/profiles\/([^/]+)\/select$/);
+    const maintenanceExempt = path === "/auth/refresh" || path === "/auth/me" || path === "/auth/logout" ||
+      path === "/profiles" || path === "/profiles/selection" || maintenanceSelection !== null;
+    const activeProfile = profiles.find((profile) => profile.id === this.activeProfileId);
+    if (this.maintenance.enabled && !activeProfile?.canManage && !maintenanceExempt) {
+      await json(route, { error: { code: "maintenance_mode", message: "Rivune is temporarily unavailable for maintenance.", ...(this.maintenance.message ? { publicMessage: this.maintenance.message } : {}) } }, 503);
+      return;
+    }
     if (path === "/auth/refresh" && request.method() === "POST") {
       await json(route, { tokenType: "Bearer", accessToken: "fixture-access", accessTokenExpiresAt: expiresAt, refreshToken: "fixture-refresh", refreshTokenExpiresAt: expiresAt, sessionId: "session-1", deviceId: "fixture-device" });
       return;
@@ -155,27 +236,46 @@ export class RivuneHarness {
       await json(route, this.maintenance);
       return;
     }
-    if (this.maintenance.enabled) {
-      await json(route, { error: { code: "maintenance_mode", message: "Rivune is temporarily unavailable for maintenance.", ...(this.maintenance.message ? { publicMessage: this.maintenance.message } : {}) } }, 503);
-      return;
-    }
     if (path === "/profiles" && request.method() === "GET") { await json(route, { profiles }); return; }
     if (path === "/profile-avatars" && request.method() === "GET") { await json(route, { presets: [] }); return; }
-    if (path === "/settings" && request.method() === "GET") { await json(route, { schemaVersion: 1, settings: {}, updatedAt: createdAt }); return; }
-    if (path === "/settings" && request.method() === "PATCH") { await json(route, { schemaVersion: 1, settings: body, updatedAt: createdAt }); return; }
-    if (/^\/profiles\/[^/]+\/settings$/.test(path) && request.method() === "GET") { await json(route, { schemaVersion: 1, settings: {}, updatedAt: createdAt }); return; }
-    if (/^\/profiles\/[^/]+\/settings$/.test(path) && request.method() === "PATCH") { await json(route, { schemaVersion: 1, settings: body, updatedAt: createdAt }); return; }
+    if (path === "/settings" && request.method() === "GET") { await json(route, { schemaVersion: 1, settings: this.instanceSettings, updatedAt: createdAt }); return; }
+    if (path === "/settings" && request.method() === "PATCH") {
+      this.instanceSettings = { ...this.instanceSettings, ...(body as Record<string, unknown>) };
+      await json(route, { schemaVersion: 1, settings: this.instanceSettings, updatedAt: createdAt });
+      return;
+    }
+    const profileSettings = path.match(/^\/profiles\/([^/]+)\/settings$/);
+    if (profileSettings && request.method() === "GET") { await json(route, { schemaVersion: 1, settings: this.profileSettings.get(profileSettings[1]) ?? {}, updatedAt: createdAt }); return; }
+    if (profileSettings && request.method() === "PATCH") {
+      const next = { ...(this.profileSettings.get(profileSettings[1]) ?? {}), ...(body as Record<string, unknown>) };
+      this.profileSettings.set(profileSettings[1], next);
+      await json(route, { schemaVersion: 1, settings: next, updatedAt: createdAt });
+      return;
+    }
     if (path === "/profiles/selection" && request.method() === "DELETE") { this.activeProfileId = null; await route.fulfill({ status: 204 }); return; }
     const profileSelection = path.match(/^\/profiles\/([^/]+)\/select$/);
     if (profileSelection && request.method() === "POST") {
       const selected = profiles.find((profile) => profile.id === profileSelection[1]);
       if (!selected) { await json(route, { error: { code: "not_found", message: "Profile not found" } }, 404); return; }
+      if (this.maintenance.enabled && !selected.canManage) {
+        await json(route, { error: { code: "maintenance_mode", message: "Rivune is temporarily unavailable for maintenance.", ...(this.maintenance.message ? { publicMessage: this.maintenance.message } : {}) } }, 503);
+        return;
+      }
       this.activeProfileId = selected.id;
       await json(route, { profile: selected, expiresAt });
       return;
     }
-    if (/^\/profiles\/[^/]+\/settings\/effective$/.test(path)) {
-      await json(route, { schemaVersion: 1, settings: { autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled: false, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: {} });
+    const effectiveSettings = path.match(/^\/profiles\/([^/]+)\/settings\/effective$/);
+    if (effectiveSettings) {
+      const profileValues = this.profileSettings.get(effectiveSettings[1]) ?? {};
+      const profileLanguage = profileValues.interfaceLanguage;
+      const instanceLanguage = this.instanceSettings.interfaceLanguage;
+      const interfaceLanguage = typeof profileLanguage === "string"
+        ? profileLanguage
+        : typeof instanceLanguage === "string" ? instanceLanguage : "en";
+      const responseDelay = this.effectiveSettingsDelays.shift() ?? 0;
+      if (responseDelay > 0) await wait(responseDelay);
+      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled: false, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default" } });
       return;
     }
     if (path === "/auth/notifications") { await json(route, { notifications: [] }); return; }
@@ -187,7 +287,7 @@ export class RivuneHarness {
     if (path === "/collections") {
       const collectionProfile = profileAtRequest ?? "alice";
       const delay = this.collectionDelays.get(collectionProfile) ?? 0;
-      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (delay > 0) await wait(delay);
       await json(route, { collections: [collection(collectionProfile)] });
       this.collectionResponses.push(collectionProfile);
       return;
@@ -206,12 +306,37 @@ export class RivuneHarness {
       await json(route, { items });
       return;
     }
+    const seasonOverride = path.match(/^\/metadata\/seasons\/([^/]+)$/);
+    if (seasonOverride && this.seasonOverrides.has(seasonOverride[1])) {
+      await json(route, this.seasonOverrides.get(seasonOverride[1]));
+      return;
+    }
     if (path === "/metadata/seasons/season-1") { await json(route, seasonOne); return; }
     if (path === "/metadata/seasons/season-2") { await json(route, seasonTwo); return; }
+    if (path === "/metadata/seasons/dvd-season-1") { await json(route, dvdSeason); return; }
     if (path === "/metadata/seasons/bob-season") { await json(route, { ...seasonOne, id: "bob-season", seriesId: "bob-series", episodes: [] }); return; }
-    if (path === "/metadata/series/series-1") { await json(route, series); return; }
+    if (path === "/metadata/series/series-1") {
+      if (url.searchParams.get("episodeOrder") === "2") {
+        await json(route, {
+          ...series,
+          numberOfSeasons: 1,
+          numberOfEpisodes: 3,
+          seasons: [seasonSummary(dvdSeason)],
+          selectedEpisodeOrderId: "2",
+          mappingProvider: "tvdb",
+        });
+        return;
+      }
+      await json(route, series);
+      return;
+    }
     if (path.startsWith("/addons/resources/meta/")) { await json(route, { results: [], errors: [] }); return; }
-    if (path === "/library") { await json(route, { items: [], page: 1, totalPages: 0, totalResults: 0 }); return; }
+    if (path === "/library") {
+      const mediaType = url.searchParams.get("mediaType");
+      const items = mediaType ? this.libraryItems.filter((item) => item.mediaType === mediaType) : this.libraryItems;
+      await json(route, { items, page: 1, totalPages: items.length > 0 ? 1 : 0, totalResults: items.length });
+      return;
+    }
     if (path.startsWith("/progress/") && request.method() === "GET") {
       const titleId = decodeURIComponent(path.slice("/progress/".length));
       const positionSeconds = titleId === "episode-1" ? 321 : 0;

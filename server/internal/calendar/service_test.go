@@ -41,7 +41,7 @@ func (reader *fakeMetadataReader) MovieDetails(context.Context, auth.Principal, 
 	return metadata.Movie{}, nil
 }
 
-func (reader *fakeMetadataReader) SeriesDetails(context.Context, auth.Principal, string, string, string) (metadata.Series, error) {
+func (reader *fakeMetadataReader) SeriesDetails(context.Context, auth.Principal, string, metadata.SeriesDetailsOptions) (metadata.Series, error) {
 	return reader.series, nil
 }
 

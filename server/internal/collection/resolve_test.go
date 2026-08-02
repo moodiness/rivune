@@ -23,6 +23,17 @@ func (artworkTMDBProvider) CollectionGenres(context.Context, string, string) ([]
 	return nil, nil
 }
 
+type stubMDBListProvider struct {
+	source MDBListSource
+	page   int
+}
+
+func (provider *stubMDBListProvider) ResolveCollectionSource(_ context.Context, source MDBListSource, page int) (SourcePage, error) {
+	provider.source = source
+	provider.page = page
+	return SourcePage{Items: []Item{{ID: "tmdb:42", MediaType: MediaTypeMovie, Title: "Movie"}}}, nil
+}
+
 func TestResolveHydratesFolderArtworkWithoutOverridingConfiguration(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -46,7 +57,7 @@ func TestResolveHydratesFolderArtworkWithoutOverridingConfiguration(t *testing.T
 		CoverImageURL:   "https://image.tmdb.org/collection-poster.jpg",
 		HeroBackdropURL: "https://image.tmdb.org/collection-backdrop.jpg",
 	}}
-	service := NewService(nil, nil, provider, nil)
+	service := NewService(nil, nil, provider, nil, nil)
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -60,6 +71,22 @@ func TestResolveHydratesFolderArtworkWithoutOverridingConfiguration(t *testing.T
 				t.Fatalf("folder artwork = (%q, %q), want (%q, %q)", resolved.Folder.CoverImageURL, resolved.Folder.HeroBackdropURL, test.wantCover, test.wantBackdrop)
 			}
 		})
+	}
+}
+
+func TestResolveUsesMDBListProvider(t *testing.T) {
+	provider := &stubMDBListProvider{}
+	service := NewService(nil, nil, nil, nil, provider)
+	settings := MDBListSource{ListID: 12, MediaType: MediaTypeMovie, Sort: "rank", Order: "asc"}
+	folder := Folder{Sources: []Source{{ID: "source-id", Kind: SourceKindMDBList, Title: "MDBList", MDBList: &settings}}}
+
+	resolved, err := service.resolve(context.Background(), auth.Principal{}, "collection-id", folder, 3, 100, "en-US", "US")
+	if err != nil {
+		t.Fatalf("resolve MDBList folder: %v", err)
+	}
+	if provider.source != settings || provider.page != 3 || len(resolved.Items) != 1 ||
+		len(resolved.Items[0].Sources) != 1 || resolved.Items[0].Sources[0].Kind != SourceKindMDBList {
+		t.Fatalf("unexpected MDBList resolution: provider=%+v resolved=%+v", provider, resolved)
 	}
 }
 

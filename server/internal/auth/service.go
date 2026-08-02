@@ -60,13 +60,14 @@ type TokenPair struct {
 }
 
 type Principal struct {
-	SessionID             string
-	UserID                string
-	DeviceID              string
-	Username              string
-	Role                  string
-	ActiveProfileID       *string
-	ProfileGrantExpiresAt *time.Time
+	SessionID              string
+	UserID                 string
+	DeviceID               string
+	Username               string
+	Role                   string
+	ActiveProfileID        *string
+	ProfileGrantExpiresAt  *time.Time
+	ActiveProfileCanManage bool
 }
 
 type Profile struct {
@@ -294,6 +295,7 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 		SELECT s.id::text, s.user_id::text, s.device_id::text, u.username, u.role,
 		       s.active_profile_id::text,
 		       s.profile_grant_expires_at,
+		       COALESCE(upa.can_manage, false),
 		       COALESCE(host(s.last_ip), ''),
 		       COALESCE(p.enabled, false),
 		       p.available_from::text,
@@ -304,6 +306,8 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 		FROM auth_sessions s
 		JOIN users u ON u.id = s.user_id
 		LEFT JOIN profiles p ON p.id = s.active_profile_id
+		LEFT JOIN user_profile_access upa
+		  ON upa.user_id = s.user_id AND upa.profile_id = s.active_profile_id
 		WHERE s.access_token_hash = $1
 		  AND s.access_expires_at > now()
 		  AND s.revoked_at IS NULL
@@ -315,6 +319,7 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 		&principal.Role,
 		&principal.ActiveProfileID,
 		&principal.ProfileGrantExpiresAt,
+		&principal.ActiveProfileCanManage,
 		&lastIPAddress,
 		&access.Enabled,
 		&access.AvailableFrom,

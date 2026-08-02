@@ -32,6 +32,16 @@ private struct ErrorEnvelope: Codable {
     let error: ServerError
 }
 
+private struct DiscoveryEnvelope: Decodable {
+    let name: String
+    let serverVersion: String
+    let protocolVersion: Int
+    let apiBaseUrl: String
+    let setupRequired: Bool
+    let timezone: String
+    let interfaceLanguage: String?
+}
+
 public enum RivuneAPIError: Error, LocalizedError, Sendable {
     case incompatibleProtocol(expected: Int, actual: Int)
     case invalidServerURL(String)
@@ -104,10 +114,14 @@ public actor RivuneAPIClient {
         guard let url = URL(string: "/.well-known/rivune", relativeTo: serverURL)?.absoluteURL else {
             throw RivuneAPIError.invalidServerURL(serverURL.absoluteString)
         }
-        let discovery: Discovery = try await perform(url: url, method: "GET", body: Optional<Data>.none, authenticated: false, retryAfterRefresh: false)
-        guard discovery.protocolVersion == RivuneProtocol.version else {
-            throw RivuneAPIError.incompatibleProtocol(expected: RivuneProtocol.version, actual: discovery.protocolVersion)
+        let response: DiscoveryEnvelope = try await perform(url: url, method: "GET", body: Optional<Data>.none, authenticated: false, retryAfterRefresh: false)
+        guard response.protocolVersion == RivuneProtocol.version else {
+            throw RivuneAPIError.incompatibleProtocol(expected: RivuneProtocol.version, actual: response.protocolVersion)
         }
+        guard let interfaceLanguage = response.interfaceLanguage else {
+            throw RivuneAPIError.invalidResponse
+        }
+        let discovery = Discovery(name: response.name, serverVersion: response.serverVersion, protocolVersion: response.protocolVersion, apiBaseUrl: response.apiBaseUrl, setupRequired: response.setupRequired, timezone: response.timezone, interfaceLanguage: interfaceLanguage)
         guard let resolved = URL(string: discovery.apiBaseUrl, relativeTo: serverURL)?.absoluteURL,
               let scheme = resolved.scheme, scheme == "https" || scheme == "http" else {
             throw RivuneAPIError.invalidServerURL(discovery.apiBaseUrl)

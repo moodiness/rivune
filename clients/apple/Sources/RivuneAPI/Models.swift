@@ -1,7 +1,7 @@
 import Foundation
 
 public enum RivuneProtocol {
-    public static let version = 16
+    public static let version = 17
 }
 
 public struct Discovery: Codable, Sendable, Equatable {
@@ -11,6 +11,7 @@ public struct Discovery: Codable, Sendable, Equatable {
     public let apiBaseUrl: String
     public let setupRequired: Bool
     public let timezone: String
+    public let interfaceLanguage: String
 }
 
 public struct Device: Codable, Sendable, Equatable {
@@ -128,6 +129,7 @@ public struct Movie: Codable, Sendable, Equatable, Identifiable {
     public let releaseDate: String?
     public let posterUrl: String?
     public let backdropUrl: String?
+    public let logoUrl: String?
     public let tagline: String?
     public let runtimeMinutes: Int?
     public let genres: [Genre]
@@ -147,6 +149,7 @@ public struct Series: Codable, Sendable, Equatable, Identifiable {
     public let lastAirDate: String?
     public let posterUrl: String?
     public let backdropUrl: String?
+    public let logoUrl: String?
     public let tagline: String?
     public let status: String?
     public let numberOfSeasons: Int?
