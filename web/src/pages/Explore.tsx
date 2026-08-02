@@ -153,6 +153,7 @@ type OpenedHomeCollection = { collection: Collection; refresh: Promise<HomeRow[]
 type HeroSlide = { key: string; item: MediaItem; collection: Collection; folder: ResolvedFolder["folder"] };
 const homeFolderConcurrency = 6;
 const homeFolderTimeoutMilliseconds = 10_000;
+const homeCacheWriteIntervalMilliseconds = 500;
 
 
 
@@ -173,6 +174,8 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   const homeRequestGeneration = useRef(0);
   const continueRevisionRef = useRef(0);
   const folderRefreshes = useRef(new Map<string, Promise<HomeRow | undefined>>());
+  const warmedFolderCovers = useRef(new Set<string>());
+  const folderCoverWarmups = useRef(new Map<string, HTMLImageElement>());
 
   useEffect(() => {
     if (!mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
@@ -183,6 +186,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
     const generation = ++homeRequestGeneration.current;
     const controller = new AbortController();
     let active = true;
+    let cacheWriteTimer: number | undefined;
     const isCurrent = () => active && homeRequestGeneration.current === generation;
     const cancelRequest = () => {
       active = false;
@@ -226,6 +230,24 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
           const resolved = cacheMatches ? cachedHome?.folders[target.key] : undefined;
           return resolved ? { collection: target.collection, resolved } : undefined;
         });
+        let lastCacheWriteAt = 0;
+        const persistResolvedRows = () => {
+          cacheWriteTimer = undefined;
+          if (!isCurrent()) return;
+          const resolvedRows = results.filter((row): row is HomeRow => row !== undefined);
+          if (resolvedRows.length === 0) return;
+          writeHomeCache(profileID, cacheScope, response.collections, resolvedRows);
+          lastCacheWriteAt = Date.now();
+        };
+        const scheduleCacheWrite = () => {
+          if (cacheWriteTimer !== undefined) return;
+          const delay = Math.max(0, lastCacheWriteAt + homeCacheWriteIntervalMilliseconds - Date.now());
+          if (delay === 0) {
+            persistResolvedRows();
+            return;
+          }
+          cacheWriteTimer = window.setTimeout(persistResolvedRows, delay);
+        };
         const pending = targets.flatMap((target, index) => results[index] ? [] : [{ target, index }]);
         setCollections(response.collections);
         setRows(results.filter((row): row is HomeRow => row !== undefined));
@@ -252,6 +274,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
               if (!isCurrent()) return;
               results[index] = { collection: target.collection, resolved };
               setRows(results.filter((row): row is HomeRow => row !== undefined));
+              scheduleCacheWrite();
             } catch {
               // A missing folder must not prevent independent rows from rendering.
             } finally {
@@ -269,6 +292,10 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
         };
         await Promise.all(Array.from({ length: Math.min(homeFolderConcurrency, pending.length) }, worker));
         if (!isCurrent()) return;
+        if (cacheWriteTimer !== undefined) {
+          window.clearTimeout(cacheWriteTimer);
+          cacheWriteTimer = undefined;
+        }
         const resolvedRows = results.filter((row): row is HomeRow => row !== undefined);
         if (resolvedRows.length === 0) {
           setError(notifyErrorMessage(t("home.error.sourcesUnavailable"), t("home.error.unavailableTitle")));
@@ -283,6 +310,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
     })();
 
     return () => {
+      if (cacheWriteTimer !== undefined) window.clearTimeout(cacheWriteTimer);
       profileRequestSignal.removeEventListener("abort", cancelRequest);
       cancelRequest();
     };
@@ -302,6 +330,35 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
     }).catch(() => undefined);
     return () => { active = false; };
   }, [mediaPreferences.profileID, mediaPreferences.ready, mediaRevision, profileRequestSignal]);
+
+  useEffect(() => {
+    for (const row of rows) {
+      const artwork = row.resolved.folder.coverImageUrl
+        || row.resolved.items.find((item) => isAvailable(item, mediaPreferences.hideUnreleased))?.posterUrl;
+      if (!artwork?.startsWith("/api/v1/artwork/") || warmedFolderCovers.current.has(artwork)) continue;
+      warmedFolderCovers.current.add(artwork);
+      const image = new Image();
+      image.decoding = "async";
+      image.fetchPriority = "low";
+      image.onload = () => { folderCoverWarmups.current.delete(artwork); };
+      image.onerror = () => {
+        folderCoverWarmups.current.delete(artwork);
+        warmedFolderCovers.current.delete(artwork);
+      };
+      folderCoverWarmups.current.set(artwork, image);
+      image.src = artwork;
+    }
+  }, [rows, mediaPreferences.hideUnreleased]);
+
+  useEffect(() => () => {
+    for (const [artwork, image] of folderCoverWarmups.current) {
+      warmedFolderCovers.current.delete(artwork);
+      image.onload = null;
+      image.onerror = null;
+      image.removeAttribute("src");
+    }
+    folderCoverWarmups.current.clear();
+  }, []);
 
   const heroSlides = useMemo(() => {
     const seen = new Set<string>();

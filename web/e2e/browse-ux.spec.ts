@@ -95,3 +95,38 @@ test("Home restores cached rows before revalidation and refreshes opened collect
   await expect.poll(() => rivune.matching(folderPath, "GET").length).toBe(2);
   await expect(page.getByText("Alice Exclusive", { exact: true })).toBeVisible();
 });
+
+test("Home checkpoints resolved folders while slower rows are still loading", async ({ page, rivune }) => {
+  rivune.setCollectionFolders("alice", [
+    { id: "alice-fast", title: "Fast" },
+    { id: "alice-slow", title: "Slow" },
+  ]);
+  rivune.delayFolder("alice-slow", 1_500);
+  const fastPath = "/api/v1/collections/alice-collection/folders/alice-fast/items";
+  const slowPath = "/api/v1/collections/alice-collection/folders/alice-slow/items";
+
+  await page.goto("/");
+  await expect(page.getByText("Fast Exclusive", { exact: true })).toBeVisible();
+  expect(rivune.matching(fastPath, "GET")).toHaveLength(1);
+  expect(rivune.matching(slowPath, "GET")).toHaveLength(1);
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByText("Fast Exclusive", { exact: true })).toBeVisible({ timeout: 800 });
+  expect(rivune.matching(fastPath, "GET")).toHaveLength(1);
+  await expect.poll(() => rivune.matching(slowPath, "GET").length).toBe(2);
+});
+
+test("Home eagerly warms every resolved folder cover", async ({ page, rivune }) => {
+  const folders = Array.from({ length: 30 }, (_, index) => ({
+    id: `eager-${index + 1}`,
+    title: `Eager ${index + 1}`,
+  }));
+  rivune.setCollectionFolders("alice", folders);
+
+  await page.goto("/");
+  await expect(page.getByText("Eager 1 Exclusive", { exact: true })).toBeVisible();
+  await expect.poll(
+    () => rivune.matching("/api/v1/artwork/alice-eager-30-exclusive", "GET").length,
+    { timeout: 10_000 },
+  ).toBe(1);
+});

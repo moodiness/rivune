@@ -135,6 +135,8 @@ export class RivuneHarness {
   private readonly profileSettings = new Map<string, Record<string, unknown>>();
   private readonly effectiveSettingsDelays: number[] = [];
   private readonly collectionDelays = new Map<string, number>();
+  private readonly collectionFolders = new Map<string, Array<{ id: string; title: string }>>();
+  private readonly folderDelays = new Map<string, number>();
   private readonly seasonOverrides = new Map<string, unknown>();
   private libraryItems: Array<Record<string, unknown>> = [];
   private operations = {
@@ -181,6 +183,23 @@ export class RivuneHarness {
 
   delayCollections(profileId: string, milliseconds: number) {
     this.collectionDelays.set(profileId, milliseconds);
+  }
+
+  setCollectionFolders(profileId: string, folders: Array<{ id: string; title: string }>) {
+    this.collectionFolders.set(profileId, folders.map((folder) => ({ ...folder })));
+  }
+
+  delayFolder(folderId: string, milliseconds: number) {
+    this.folderDelays.set(folderId, milliseconds);
+  }
+
+  private collectionFor(profileId: string) {
+    const value = collection(profileId);
+    const configured = this.collectionFolders.get(profileId);
+    if (configured) {
+      value.folders = configured.map((folder) => ({ ...value.folders[0], ...folder }));
+    }
+    return value;
   }
 
   delayNextEffectiveSettings(milliseconds: number) {
@@ -365,15 +384,23 @@ export class RivuneHarness {
       const collectionProfile = profileAtRequest ?? "alice";
       const delay = this.collectionDelays.get(collectionProfile) ?? 0;
       if (delay > 0) await wait(delay);
-      await json(route, { collections: [collection(collectionProfile)] });
+      await json(route, { collections: [this.collectionFor(collectionProfile)] });
       this.collectionResponses.push(collectionProfile);
       return;
     }
     const folderItems = path.match(/^\/collections\/([^/]+)\/folders\/([^/]+)\/items$/);
     if (folderItems) {
       const collectionProfile = folderItems[1].split("-")[0];
-      const title = collectionProfile === "bob" ? "Bob Exclusive" : "Alice Exclusive";
-      await json(route, { collectionId: folderItems[1], folder: collection(collectionProfile).folders[0], items: [{ id: `${collectionProfile}-exclusive`, mediaType: "movie", title, posterUrl: `https://fixtures.rivune.test/${collectionProfile}-exclusive.svg`, description: `${title} fixture` }], page: 1, hasMore: false, errors: [] });
+      const folderID = folderItems[2];
+      const responseDelay = this.folderDelays.get(folderID) ?? 0;
+      if (responseDelay > 0) await wait(responseDelay);
+      const resolvedCollection = this.collectionFor(collectionProfile);
+      const folder = resolvedCollection.folders.find((candidate) => candidate.id === folderID) ?? resolvedCollection.folders[0];
+      const configured = this.collectionFolders.has(collectionProfile);
+      const title = configured ? `${folder.title} Exclusive` : collectionProfile === "bob" ? "Bob Exclusive" : "Alice Exclusive";
+      const itemID = configured ? `${collectionProfile}-${folderID}-exclusive` : `${collectionProfile}-exclusive`;
+      const posterURL = configured ? `/api/v1/artwork/${itemID}` : `https://fixtures.rivune.test/${itemID}.svg`;
+      await json(route, { collectionId: folderItems[1], folder, items: [{ id: itemID, mediaType: "movie", title, posterUrl: posterURL, description: `${title} fixture` }], page: 1, hasMore: false, errors: [] });
       return;
     }
     if (path === "/continue-watching") {
