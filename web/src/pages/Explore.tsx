@@ -72,6 +72,9 @@ function mediaFromContinue(item: EnrichedContinueItem): MediaItem {
   const episodeLabel = item.seasonNumber !== undefined && item.episodeNumber !== undefined
     ? `S${String(item.seasonNumber).padStart(2, "0")}E${String(item.episodeNumber).padStart(2, "0")}`
     : "";
+  const episodeCardLabel = item.seasonNumber !== undefined && item.episodeNumber !== undefined
+    ? `S${String(item.seasonNumber).padStart(2, "0")} · E${String(item.episodeNumber).padStart(2, "0")}`
+    : "";
   const progress = item.durationSeconds > 0 ? Math.min(100, Math.round(item.positionSeconds / item.durationSeconds * 100)) : 0;
   const seriesTitle = item.title || t("media.type.series");
   return {
@@ -96,8 +99,7 @@ function mediaFromContinue(item: EnrichedContinueItem): MediaItem {
       continueEpisodeNumber: item.episodeNumber,
       continueEpisodeId: item.titleId,
       continueCardTitle: seriesTitle,
-      continueCardEyebrow: item.seasonNumber !== undefined && item.episodeNumber !== undefined ? `S${item.seasonNumber} E${item.episodeNumber}` : "",
-      continueCardSubtitle: item.episodeTitle || item.releaseInfo || (item.reason === "resume" ? t("home.continue.percentWatched", { progress }) : ""),
+      continueCardSubtitle: [episodeCardLabel, item.episodeTitle].filter(Boolean).join(" · ") || item.releaseInfo || "",
       continueCardBadge: item.reason === "resume"
         ? remainingLabel(item)
         : item.episodeNumber === 1 && (item.seasonNumber ?? 0) > 1 ? t("home.continue.newSeason") : t("home.continue.nextUp"),
@@ -330,9 +332,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
         <HorizontalDragRow className="media-row media-row--landscape media-row--continue">{continueMedia.map((item) => <MediaCard
           key={`${String(item.raw?.continueReason)}-${item.titleId}`}
           shape="landscape"
-          overlay
           title={typeof item.raw?.continueCardTitle === "string" ? item.raw.continueCardTitle : item.title}
-          eyebrow={typeof item.raw?.continueCardEyebrow === "string" ? item.raw.continueCardEyebrow : undefined}
           image={item.backgroundUrl || item.posterUrl}
           subtitle={typeof item.raw?.continueCardSubtitle === "string" ? item.raw.continueCardSubtitle : item.releaseInfo}
           badge={typeof item.raw?.continueCardBadge === "string" ? item.raw.continueCardBadge : undefined}
@@ -417,16 +417,17 @@ function CollectionBrowser({ collection, rows, hideUnreleased, onBack, onOpenMed
       const next = loaded.get(folderID);
       if (!next) return page;
       const seen = new Set(page.items.map((item) => `${item.mediaType}:${item.id}`));
+      const additions = next.items.filter((item) => {
+        const key = `${item.mediaType}:${item.id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
       return {
         ...page,
-        items: [...page.items, ...next.items.filter((item) => {
-          const key = `${item.mediaType}:${item.id}`;
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        })],
+        items: [...page.items, ...additions],
         page: next.page,
-        hasMore: next.hasMore,
+        hasMore: next.hasMore && additions.length > 0,
       };
     }));
     if (failed) setError(notifyErrorMessage(t("home.browser.someTitlesLoadFailed"), t("common.error.loadingFailedTitle")));
@@ -503,18 +504,16 @@ function FolderBrowser({ row, hideUnreleased, onBack, onOpenMedia, backLabel }: 
     setError("");
     try {
       const next = await api.resolveFolder(row.collection.id, folderID, page + 1);
-      setItems((current) => {
-        const seen = new Set(current.map((item) => `${item.mediaType}:${item.id}`));
-        const additions = next.items.filter((item) => {
-          const key = `${item.mediaType}:${item.id}`;
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-        return [...current, ...additions];
+      const seen = new Set(items.map((item) => `${item.mediaType}:${item.id}`));
+      const additions = next.items.filter((item) => {
+        const key = `${item.mediaType}:${item.id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
       });
+      setItems((current) => [...current, ...additions]);
       setPage(next.page);
-      setHasMore(next.hasMore);
+      setHasMore(next.hasMore && additions.length > 0);
     } catch (cause) {
       setError(notifyError(cause, t("home.browser.moreTitlesLoadFailed"), t("common.error.loadingFailedTitle")));
     } finally {

@@ -16,6 +16,8 @@ import (
 
 var resolutionLanguagePattern = regexp.MustCompile(`^[A-Za-z]{2,3}(?:-[A-Za-z]{2})?$`)
 
+const addonCatalogPageSize = 20
+
 func (service *Service) ResolveFolder(ctx context.Context, principal auth.Principal, collectionID, folderID string, page, limit int, language, region string) (ResolvedFolder, error) {
 	value, err := service.Get(ctx, principal, collectionID)
 	if err != nil {
@@ -147,8 +149,23 @@ func (service *Service) resolveSource(ctx context.Context, principal auth.Princi
 		for _, value := range settings.Extra {
 			extra = append(extra, addon.ExtraValue{Name: value.Name, Value: value.Value})
 		}
-		if page > 1 && !hasExtra(extra, "skip") {
-			extra = append(extra, addon.ExtraValue{Name: "skip", Value: strconv.Itoa((page - 1) * 100)})
+		if page > 1 {
+			skip := (page - 1) * addonCatalogPageSize
+			found := false
+			for index := range extra {
+				if extra[index].Name != "skip" {
+					continue
+				}
+				if base, parseErr := strconv.Atoi(extra[index].Value); parseErr == nil && base > 0 {
+					skip += base
+				}
+				extra[index].Value = strconv.Itoa(skip)
+				found = true
+				break
+			}
+			if !found {
+				extra = append(extra, addon.ExtraValue{Name: "skip", Value: strconv.Itoa(skip)})
+			}
 		}
 		result, err := service.addon.Fetch(ctx, principal, settings.AddonID, addon.ResourcePath{
 			Resource: "catalog", Type: settings.Type, ID: settings.CatalogID, Extra: extra,
@@ -191,7 +208,7 @@ func parseAddonCatalog(payload json.RawMessage, page int) (SourcePage, error) {
 			items = append(items, item)
 		}
 	}
-	return SourcePage{Items: items, Page: page, HasMore: len(envelope.Metas) >= 100}, nil
+	return SourcePage{Items: items, Page: page, HasMore: len(items) > 0}, nil
 }
 
 func parseAddonItem(raw json.RawMessage) (Item, bool) {
@@ -344,15 +361,6 @@ func normalizeResolutionOptions(language, region string) (string, string, error)
 		return "", "", ErrInvalidInput
 	}
 	return language, region, nil
-}
-
-func hasExtra(values []addon.ExtraValue, name string) bool {
-	for _, value := range values {
-		if value.Name == name {
-			return true
-		}
-	}
-	return false
 }
 
 func sourceErrorCode(err error) string {

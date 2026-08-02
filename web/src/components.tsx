@@ -154,21 +154,20 @@ export function Skeleton({ className = "", ...props }: HTMLAttributes<HTMLDivEle
   return <div className={`skeleton ${className}`} {...props} />;
 }
 
-export function MediaCard({ title, image, backdrop, subtitle, eyebrow, badge, overlay = false, shape = "poster", onClick, progress }: { title: string; image?: string; backdrop?: string; subtitle?: string; eyebrow?: string; badge?: string; overlay?: boolean; shape?: "poster" | "landscape" | "square"; onClick: () => void; progress?: number }) {
+export function MediaCard({ title, image, backdrop, subtitle, badge, shape = "poster", onClick, progress }: { title: string; image?: string; backdrop?: string; subtitle?: string; badge?: string; shape?: "poster" | "landscape" | "square"; onClick: () => void; progress?: number }) {
   const source = image || backdrop;
   const [failedSource, setFailedSource] = useState<string>();
   const usableSource = source === failedSource ? undefined : source;
   return (
-    <button type="button" className={`media-card media-card--${shape}${overlay ? " media-card--overlay" : ""}`} onClick={onClick} aria-label={t("media.open", { title })}>
+    <button type="button" className={`media-card media-card--${shape}`} onClick={onClick} aria-label={t("media.open", { title })}>
       <span className="media-card__visual">
         {usableSource ? <img src={usableSource} alt="" loading="lazy" draggable={false} onError={() => setFailedSource(usableSource)} /> : <span className="media-card__fallback">{title.slice(0, 2).toUpperCase()}</span>}
         <span className="media-card__veil" />
         {badge && <span className="media-card__badge">{badge}</span>}
-        {overlay && <span className="media-card__overlay-copy">{eyebrow && <small>{eyebrow}</small>}<strong>{title}</strong>{subtitle && <span>{subtitle}</span>}</span>}
         <span className="media-card__play"><Play size={20} fill="currentColor" /></span>
         {progress !== undefined && <span className="media-card__progress"><i style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} /></span>}
       </span>
-      {!overlay && <span className="media-card__copy"><strong>{title}</strong>{subtitle && <small>{subtitle}</small>}</span>}
+      <span className="media-card__copy"><strong>{title}</strong>{subtitle && <small>{subtitle}</small>}</span>
     </button>
   );
 }

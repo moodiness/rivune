@@ -2,8 +2,10 @@ package collection
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
+	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
 )
 
@@ -32,6 +34,64 @@ func (provider *stubMDBListProvider) ResolveCollectionSource(_ context.Context, 
 	provider.source = source
 	provider.page = page
 	return SourcePage{Items: []Item{{ID: "tmdb:42", MediaType: MediaTypeMovie, Title: "Movie"}}}, nil
+}
+
+type paginatedAddonProvider struct {
+	paths []addon.ResourcePath
+}
+
+func (provider *paginatedAddonProvider) Fetch(_ context.Context, _ auth.Principal, _ string, path addon.ResourcePath) (addon.ResourceResult, error) {
+	provider.paths = append(provider.paths, path)
+	skip := ""
+	for _, extra := range path.Extra {
+		if extra.Name == "skip" {
+			skip = extra.Value
+			break
+		}
+	}
+	count := map[string]int{"": 20, "20": 2, "40": 0}[skip]
+	metas := make([]map[string]string, count)
+	for index := range metas {
+		metas[index] = map[string]string{"id": skip + "-item", "type": "movie", "name": "Movie"}
+	}
+	payload, err := json.Marshal(map[string]any{"metas": metas})
+	if err != nil {
+		return addon.ResourceResult{}, err
+	}
+	return addon.ResourceResult{Payload: payload}, nil
+}
+
+func TestResolveAddonCatalogPaginatesShortResponses(t *testing.T) {
+	provider := &paginatedAddonProvider{}
+	service := NewService(nil, provider, nil, nil, nil)
+	source := Source{
+		Kind: SourceKindAddonCatalog,
+		AddonCatalog: &AddonCatalogSource{
+			AddonID: "addon-id", Type: MediaTypeMovie, CatalogID: "popular",
+		},
+	}
+	wantCounts := []int{20, 2, 0}
+	wantMore := []bool{true, true, false}
+	for pageNumber := 1; pageNumber <= 3; pageNumber++ {
+		page, err := service.resolveSource(context.Background(), auth.Principal{}, source, pageNumber, "fr-FR", "FR")
+		if err != nil {
+			t.Fatalf("resolve addon page %d: %v", pageNumber, err)
+		}
+		if len(page.Items) != wantCounts[pageNumber-1] || page.HasMore != wantMore[pageNumber-1] {
+			t.Fatalf("page %d = %d items, hasMore=%t", pageNumber, len(page.Items), page.HasMore)
+		}
+	}
+	for index, want := range []string{"", "20", "40"} {
+		got := ""
+		for _, extra := range provider.paths[index].Extra {
+			if extra.Name == "skip" {
+				got = extra.Value
+			}
+		}
+		if got != want {
+			t.Fatalf("page %d skip = %q, want %q", index+1, got, want)
+		}
+	}
 }
 
 func TestResolveHydratesFolderArtworkWithoutOverridingConfiguration(t *testing.T) {

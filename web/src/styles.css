@@ -247,15 +247,7 @@
   .media-card__progress { height: 3px; position: absolute; inset: auto 8px 8px; overflow: hidden; border-radius: 3px; background: rgba(255, 255, 255, .25); }
   .media-card__progress i { height: 100%; display: block; border-radius: inherit; background: var(--accent); }
   .media-row--continue { grid-auto-columns: var(--media-row-continue-size); }
-  .media-card--overlay { gap: 0; }
-  .media-card--overlay .media-card__veil { opacity: 1; background: linear-gradient(0deg, rgba(4, 5, 8, .92) 0%, rgba(4, 5, 8, .5) 38%, transparent 72%); }
-  .media-card--overlay .media-card__play { display: none; }
   .media-card__badge { position: absolute; z-index: 2; top: 10px; right: 10px; padding: 5px 7px; border-radius: 6px; color: #fff; background: rgba(8, 9, 12, .8); box-shadow: 0 4px 14px rgba(0, 0, 0, .25); font-size: 9px; font-weight: 750; letter-spacing: .01em; text-transform: none; backdrop-filter: blur(8px); }
-  .media-card__overlay-copy { min-width: 0; position: absolute; z-index: 2; inset: auto 14px 17px; display: grid; gap: 2px; color: #fff; text-shadow: 0 2px 8px rgba(0, 0, 0, .7); }
-  .media-card__overlay-copy small { font-size: 9px; font-weight: 750; letter-spacing: .03em; text-transform: uppercase; }
-  .media-card__overlay-copy strong { overflow: hidden; font-size: 14px; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
-  .media-card__overlay-copy span { overflow: hidden; color: rgba(255, 255, 255, .72); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-  .media-card--overlay .media-card__progress { z-index: 3; inset-inline: 14px; bottom: 9px; background: rgba(255, 255, 255, .34); }
 
   .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--media-grid-card-min), 1fr)); gap: var(--media-grid-row-gap) var(--media-grid-column-gap); }
   .add-tile { width: 100%; min-height: 62px; display: flex; align-items: center; gap: 12px; padding: 14px 18px; border: 1px dashed rgba(255, 255, 255, .17); border-radius: 15px; color: var(--text-soft); background: rgba(255, 255, 255, .025); }
