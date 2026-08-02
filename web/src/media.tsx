@@ -167,8 +167,9 @@ function titleReleaseDate(value: string | undefined): string | undefined {
 async function resolveMediaTitle(item: MediaItem): Promise<string> {
   if (item.titleId) return item.titleId;
   const preferred = ["tmdb", "imdb", "tvdb", "trakt"].find((provider) => item.externalIds?.[provider]);
-  const provider = preferred ?? (/^tt\d+$/i.test(item.id) ? "imdb" : "addon");
-  const externalId = preferred ? item.externalIds?.[preferred] ?? item.id : item.id;
+  const namespaced = item.id.match(/^([a-z0-9._-]+):(.+)$/i);
+  const provider = preferred ?? (namespaced ? namespaced[1].toLowerCase() : /^tt\d+$/i.test(item.id) ? "imdb" : "addon");
+  const externalId = preferred ? item.externalIds?.[preferred] ?? item.id : namespaced?.[2] ?? item.id;
   const resolved = await api.resolveTitle({
     mediaType: item.mediaType,
     provider,
@@ -294,6 +295,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const [watchedBusy, setWatchedBusy] = useState("");
   const nextSourceRef = useRef<SourceIdentity | undefined>(undefined);
   const continueSeriesID = typeof item.raw?.continueSeriesId === "string" ? item.raw.continueSeriesId : "";
+  const routeSeriesResourceID = typeof item.raw?.routeSeriesResourceId === "string" ? item.raw.routeSeriesResourceId : "";
   const continueSeasonID = typeof item.raw?.continueSeasonId === "string" ? item.raw.continueSeasonId : "";
   const continueEpisodeID = typeof item.raw?.continueEpisodeId === "string" ? item.raw.continueEpisodeId : "";
   const continueSeasonNumber = typeof item.raw?.continueSeasonNumber === "number" ? item.raw.continueSeasonNumber : undefined;
@@ -432,7 +434,9 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
     void (async () => {
       const resolvedTitleID = item.mediaType === "episode" && continueSeriesID
         ? continueSeriesID
-        : await resolveMediaTitle(item);
+        : item.mediaType === "episode" && routeSeriesResourceID
+          ? await resolveMediaTitle({ ...item, id: routeSeriesResourceID, titleId: undefined, mediaType: "series", externalIds: undefined })
+          : await resolveMediaTitle(item);
       const resolved = await api.seriesDetails(resolvedTitleID);
       if (!active) return;
       if (item.mediaType === "series") setTitleID(resolvedTitleID);
@@ -495,7 +499,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
       if (active) setSeriesError(notifyError(cause, t("media.series.error.loadFailed"), t("media.series.error.unavailableTitle")));
     }).finally(() => { if (active) setSeriesLoading(false); });
     return () => { active = false; };
-  }, [continueEpisodeID, continueSeasonID, continueSeasonNumber, continueSeriesID, item.id, item.mediaType, item.releaseInfo, item.released, item.titleId, seriesVisible]);
+  }, [continueEpisodeID, continueSeasonID, continueSeasonNumber, continueSeriesID, item.id, item.mediaType, item.releaseInfo, item.released, item.titleId, routeSeriesResourceID, seriesVisible]);
 
   useEffect(() => {
     let active = true;

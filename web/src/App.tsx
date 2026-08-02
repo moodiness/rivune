@@ -26,8 +26,11 @@ type MediaRoute = {
 };
 type MediaRouteContext = { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number };
 
+type AppRoute = { view: View; media: MediaRoute | null; canonicalURL?: string };
+
 const mediaRoutePrefix = "media/";
 const mediaRouteFields = ["titleId", "posterUrl", "backgroundUrl", "logoUrl", "releaseInfo", "released"] as const;
+const uuidRoutePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function decodeRouteSegment(value: string): string {
   try {
@@ -37,20 +40,92 @@ function decodeRouteSegment(value: string): string {
   }
 }
 
-function appRoute(): { view: View; media: MediaRoute | null } {
-  const hash = window.location.hash.slice(1);
-  const [routePath, query = ""] = hash.split("?", 2);
-  if (!routePath.startsWith(mediaRoutePrefix)) return { view: validViews[routePath] ?? "home", media: null };
+function viewURL(view: View): string {
+  return `/#${view}`;
+}
+
+function storedRouteItem(mediaType: string): MediaItem | undefined {
+  const stored = window.history.state?.rivuneMediaItem as MediaItem | undefined;
+  return stored?.mediaType === mediaType ? stored : undefined;
+}
+function encodeRouteID(value: string): string {
+  return encodeURIComponent(value).replaceAll("%3A", ":");
+}
+
+function seriesRouteID(item: MediaItem): string {
+  const configured = item.raw?.routeSeriesResourceId;
+  if (typeof configured === "string" && configured.trim()) return configured.trim();
+  if (item.mediaType === "series") return item.id;
+  const episodeResource = item.id.match(/^(.*):\d+:\d+$/);
+  return episodeResource?.[1] || item.id;
+}
+
+
+function cleanMediaRoute(): MediaRoute | null {
+  const segments = window.location.pathname.split("/").filter(Boolean).map(decodeRouteSegment);
+  if (segments[0] !== "media" || segments.length < 3) return null;
+  const origin = validViews[window.history.state?.rivuneOrigin ?? ""] ?? "home";
+
+  if (segments[1] === "series" && segments[3] === "season") {
+    const seriesResourceID = segments[2] ?? "";
+    const seasonNumber = Number(segments[4]);
+    const hasEpisode = segments.length === 7 && segments[5] === "episode";
+    const episodeNumber = hasEpisode ? Number(segments[6]) : undefined;
+    if (
+      !seriesResourceID ||
+      (segments.length !== 5 && !hasEpisode) ||
+      !Number.isInteger(seasonNumber) ||
+      (hasEpisode && !Number.isInteger(episodeNumber))
+    ) return null;
+    const mediaType = hasEpisode ? "episode" : "series";
+    const stored = storedRouteItem(mediaType);
+    const item: MediaItem = stored
+      ? { ...stored }
+      : {
+        id: hasEpisode ? `${seriesResourceID}:${seasonNumber}:${episodeNumber}` : seriesResourceID,
+        titleId: mediaType === "series" && uuidRoutePattern.test(seriesResourceID) ? seriesResourceID : undefined,
+        mediaType,
+        title: t("media.untitled"),
+      };
+    item.seasonNumber = seasonNumber;
+    if (episodeNumber !== undefined) item.episodeNumber = episodeNumber;
+    item.raw = {
+      ...item.raw,
+      openSeriesBrowser: stored ? item.raw?.openSeriesBrowser === true : true,
+      routeSeriesResourceId: seriesResourceID,
+      continueSeasonNumber: seasonNumber,
+      continueEpisodeNumber: episodeNumber,
+    };
+    return { item, origin };
+  }
+
+  if (segments.length !== 3) return null;
+  const mediaType = segments[1] ?? "";
+  const id = segments[2] ?? "";
+  if (!mediaType || !id) return null;
+  const stored = storedRouteItem(mediaType);
+  const item: MediaItem = stored
+    ? { ...stored }
+    : {
+      id,
+      titleId: uuidRoutePattern.test(id) ? id : undefined,
+      mediaType,
+      title: t("media.untitled"),
+    };
+  return { item, origin };
+}
+
+function legacyMediaRoute(routePath: string, query: string): MediaRoute | null {
   const segments = routePath.slice(mediaRoutePrefix.length).split("/");
-  if (segments.length < 2) return { view: "home", media: null };
+  if (segments.length < 2) return null;
   const params = new URLSearchParams(query);
   const origin = validViews[params.get("from") ?? ""] ?? "home";
   const mediaType = decodeRouteSegment(segments[0]);
   const id = decodeRouteSegment(segments.slice(1).join("/"));
-  if (!mediaType || !id) return { view: origin, media: null };
-  const storedItem = window.history.state?.rivuneMediaItem as MediaItem | undefined;
-  const title = params.get("title")?.trim() || storedItem?.title || t("media.untitled");
-  const item: MediaItem = storedItem?.id === id && storedItem.mediaType === mediaType ? { ...storedItem, id, mediaType, title } : { id, mediaType, title };
+  if (!mediaType || !id) return null;
+  const stored = storedRouteItem(mediaType);
+  const title = params.get("title")?.trim() || stored?.title || t("media.untitled");
+  const item: MediaItem = stored?.id === id ? { ...stored, id, mediaType, title } : { id, mediaType, title };
   for (const field of mediaRouteFields) {
     const value = params.get(field);
     if (value) item[field] = value;
@@ -79,30 +154,38 @@ function appRoute(): { view: View; media: MediaRoute | null } {
       continueEpisodeId: episodeID || item.titleId,
     };
   }
-  return { view: origin, media: { item, origin } };
+  return { item, origin };
 }
 
-function mediaRouteURL(item: MediaItem, origin: View, context?: MediaRouteContext): string {
-  const params = new URLSearchParams({ from: origin, title: item.title });
-  for (const field of mediaRouteFields) {
-    const value = item[field];
-    if (value) params.set(field, value);
-  }
-  for (const [provider, externalID] of Object.entries(item.externalIds ?? {})) {
-    if (externalID) params.set(`external.${provider}`, externalID);
-  }
+function appRoute(): AppRoute {
+  const cleanMedia = cleanMediaRoute();
+  if (cleanMedia) return { view: cleanMedia.origin, media: cleanMedia };
+  const hash = window.location.hash.slice(1);
+  const [routePath, query = ""] = hash.split("?", 2);
+  if (!routePath.startsWith(mediaRoutePrefix)) return { view: validViews[routePath] ?? "home", media: null };
+  const legacyMedia = legacyMediaRoute(routePath, query);
+  if (!legacyMedia) return { view: "home", media: null };
+  return {
+    view: legacyMedia.origin,
+    media: legacyMedia,
+    canonicalURL: mediaRouteURL(legacyMedia.item, legacyMedia.origin),
+  };
+}
+
+function mediaRouteURL(item: MediaItem, _origin: View, context?: MediaRouteContext): string {
   const raw = item.raw ?? {};
-  const seriesID = typeof raw.continueSeriesId === "string" ? raw.continueSeriesId : "";
-  const resolvedSeasonID = context?.seasonID ?? (typeof raw.continueSeasonId === "string" ? raw.continueSeasonId : "");
-  const resolvedEpisodeID = context ? context.episodeID ?? "" : typeof raw.continueEpisodeId === "string" ? raw.continueEpisodeId : "";
   const seasonNumber = context?.seasonNumber ?? (typeof raw.continueSeasonNumber === "number" ? raw.continueSeasonNumber : item.seasonNumber);
   const episodeNumber = context ? context.episodeNumber : typeof raw.continueEpisodeNumber === "number" ? raw.continueEpisodeNumber : item.episodeNumber;
-  if (seriesID) params.set("seriesId", seriesID);
-  if (resolvedSeasonID) params.set("seasonId", resolvedSeasonID);
-  if (resolvedEpisodeID) params.set("episodeId", resolvedEpisodeID);
-  if (seasonNumber !== undefined) params.set("season", String(seasonNumber));
-  if (episodeNumber !== undefined) params.set("episode", String(episodeNumber));
-  return `#${mediaRoutePrefix}${encodeURIComponent(item.mediaType)}/${encodeURIComponent(item.id)}?${params.toString()}`;
+  if (item.mediaType === "series" || item.mediaType === "episode") {
+    const seriesResourceID = seriesRouteID(item);
+    let path = `/media/series/${encodeRouteID(seriesResourceID)}`;
+    if (seasonNumber !== undefined && Number.isInteger(seasonNumber)) {
+      path += `/season/${seasonNumber}`;
+      if (episodeNumber !== undefined && Number.isInteger(episodeNumber)) path += `/episode/${episodeNumber}`;
+    }
+    return path;
+  }
+  return `/media/${encodeURIComponent(item.mediaType)}/${encodeRouteID(item.id)}`;
 }
 
 function restoreScroll(top: number): void {
@@ -336,8 +419,14 @@ export default function App() {
   useEffect(() => {
     const previousRestoration = window.history.scrollRestoration;
     window.history.scrollRestoration = "manual";
+    if (initialRoute.canonicalURL) {
+      window.history.replaceState({ ...window.history.state, rivuneOrigin: initialRoute.view }, "", initialRoute.canonicalURL);
+    }
     const onRouteChange = () => {
       const next = appRoute();
+      if (next.canonicalURL) {
+        window.history.replaceState({ ...window.history.state, rivuneOrigin: next.view }, "", next.canonicalURL);
+      }
       const previousMediaRoute = mediaRouteRef.current;
       mediaRouteRef.current = next.media;
       setViewState(next.view);
@@ -356,7 +445,7 @@ export default function App() {
       window.removeEventListener("hashchange", onRouteChange);
       window.removeEventListener("popstate", onRouteChange);
     };
-  }, [initialRoute.media]);
+  }, [initialRoute.canonicalURL, initialRoute.media, initialRoute.view]);
 
 
   function setView(next: View) {
@@ -365,7 +454,7 @@ export default function App() {
     mediaRouteRef.current = null;
     setViewState(next);
     setMediaRoute(null);
-    window.history.replaceState({ rivuneView: next, rivuneScrollTop: 0 }, "", `#${next}`);
+    window.history.replaceState({ rivuneView: next, rivuneScrollTop: 0 }, "", viewURL(next));
     window.scrollTo({ top: 0, behavior: next === "home" ? "smooth" : "auto" });
     if (previousMediaRoute !== null) {
       invokingElementRef.current = null;
@@ -376,8 +465,8 @@ export default function App() {
 
   function openMedia(item: MediaItem) {
     invokingElementRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    window.history.replaceState({ ...window.history.state, rivuneView: view, rivuneScrollTop: window.scrollY }, "", `#${view}`);
-    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item }, "", mediaRouteURL(item, view));
+    window.history.replaceState({ ...window.history.state, rivuneView: view, rivuneScrollTop: window.scrollY }, "", viewURL(view));
+    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item, rivuneOrigin: view }, "", mediaRouteURL(item, view));
     const nextRoute = { item, origin: view };
     mediaRouteRef.current = nextRoute;
     setMediaRoute(nextRoute);
@@ -392,7 +481,7 @@ export default function App() {
   function openEpisode(item: MediaItem) {
     if (!mediaRoute) return;
     const nextRoute = { item, origin: mediaRoute.origin };
-    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item }, "", mediaRouteURL(item, mediaRoute.origin));
+    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item, rivuneOrigin: mediaRoute.origin }, "", mediaRouteURL(item, mediaRoute.origin));
     mediaRouteRef.current = nextRoute;
     setMediaRoute(nextRoute);
     window.scrollTo({ top: 0, behavior: "auto" });
@@ -408,7 +497,7 @@ export default function App() {
     setMediaRoute(null);
     setViewState(mediaRoute.origin);
     invalidateMediaOrigin(mediaRoute.origin);
-    window.history.replaceState({ rivuneView: mediaRoute.origin, rivuneScrollTop: 0 }, "", `#${mediaRoute.origin}`);
+    window.history.replaceState({ rivuneView: mediaRoute.origin, rivuneScrollTop: 0 }, "", viewURL(mediaRoute.origin));
     restoreScroll(0);
     restoreOriginFocus();
   }
