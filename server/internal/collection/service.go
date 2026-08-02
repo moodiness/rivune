@@ -43,6 +43,7 @@ type ArtworkMetadataProvider interface {
 }
 
 type FanartEnricher interface {
+	EnrichCollection(context.Context, metadata.ProviderCollection, string) (metadata.ProviderCollection, error)
 	EnrichMovie(context.Context, metadata.ProviderMovie, string) (metadata.ProviderMovie, error)
 	EnrichSeries(context.Context, metadata.ProviderSeries, string) (metadata.ProviderSeries, error)
 }

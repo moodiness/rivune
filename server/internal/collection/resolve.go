@@ -73,6 +73,7 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, c
 	}
 	coverConfigured := folder.CoverImageURL != ""
 	heroBackdropConfigured := folder.HeroBackdropURL != ""
+	titleLogoConfigured := folder.TitleLogoURL != ""
 	outcomes := make([]sourceOutcome, len(folder.Sources))
 	semaphore := make(chan struct{}, 8)
 	var wait sync.WaitGroup
@@ -128,8 +129,17 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, c
 		items = items[:limit]
 		hasMore = true
 	}
-	resolvedFanart := service.enrichFanartItems(ctx, items, language)
-	if !coverConfigured {
+	resolvedFanart, resolvedCollectionFanart := service.enrichFanartArtwork(ctx, folder.Sources, items, language)
+	if !coverConfigured && resolvedCollectionFanart.poster != "" {
+		folder.CoverImageURL = resolvedCollectionFanart.poster
+	}
+	if !heroBackdropConfigured && resolvedCollectionFanart.background != "" {
+		folder.HeroBackdropURL = resolvedCollectionFanart.background
+	}
+	if !titleLogoConfigured && resolvedCollectionFanart.logo != "" {
+		folder.TitleLogoURL = resolvedCollectionFanart.logo
+	}
+	if !coverConfigured && resolvedCollectionFanart.poster == "" {
 		for _, value := range resolvedFanart {
 			if value.poster != "" {
 				folder.CoverImageURL = value.poster
@@ -137,7 +147,7 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, c
 			}
 		}
 	}
-	if !heroBackdropConfigured {
+	if !heroBackdropConfigured && resolvedCollectionFanart.background == "" {
 		for _, value := range resolvedFanart {
 			if value.background != "" {
 				folder.HeroBackdropURL = value.background
@@ -355,14 +365,38 @@ func (value fanartArtwork) available() bool {
 	return value.poster != "" || value.background != "" || value.logo != ""
 }
 
-func (service *Service) enrichFanartItems(ctx context.Context, items []Item, language string) []fanartArtwork {
-	if service.fanart == nil || len(items) == 0 {
-		return nil
+func (service *Service) enrichFanartArtwork(ctx context.Context, sources []Source, items []Item, language string) ([]fanartArtwork, fanartArtwork) {
+	collectionIDs := fanartCollectionTMDBIDs(sources)
+	if service.fanart == nil || len(items) == 0 && len(collectionIDs) == 0 {
+		return nil, fanartArtwork{}
 	}
-	artwork := make([]fanartArtwork, len(items))
-	enrichmentErrors := make([]error, len(items))
+	itemArtwork := make([]fanartArtwork, len(items))
+	itemErrors := make([]error, len(items))
+	collectionArtwork := make([]fanartArtwork, len(collectionIDs))
+	collectionErrors := make([]error, len(collectionIDs))
 	semaphore := make(chan struct{}, 8)
 	var wait sync.WaitGroup
+	for index, tmdbID := range collectionIDs {
+		index, tmdbID := index, tmdbID
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				collectionErrors[index] = ctx.Err()
+				return
+			}
+			value, err := service.fanart.EnrichCollection(ctx, metadata.ProviderCollection{ExternalID: tmdbID}, language)
+			collectionErrors[index] = err
+			collectionArtwork[index] = fanartArtwork{
+				poster:     value.PosterURL,
+				background: value.BackdropURL,
+				logo:       value.LogoURL,
+			}
+		}()
+	}
 	for index := range items {
 		index := index
 		wait.Add(1)
@@ -372,18 +406,18 @@ func (service *Service) enrichFanartItems(ctx context.Context, items []Item, lan
 			case semaphore <- struct{}{}:
 				defer func() { <-semaphore }()
 			case <-ctx.Done():
-				enrichmentErrors[index] = ctx.Err()
+				itemErrors[index] = ctx.Err()
 				return
 			}
-			artwork[index], enrichmentErrors[index] = service.fanartArtwork(ctx, items[index], language)
+			itemArtwork[index], itemErrors[index] = service.fanartArtwork(ctx, items[index], language)
 		}()
 	}
 	wait.Wait()
-	for index, value := range artwork {
-		if enrichmentErrors[index] != nil {
+	for index, value := range itemArtwork {
+		if itemErrors[index] != nil {
 			if service.logger != nil {
-				service.logger.DebugContext(ctx, "Fanart collection artwork unavailable",
-					"mediaType", items[index].MediaType, "itemID", items[index].ID, "error", enrichmentErrors[index])
+				service.logger.DebugContext(ctx, "Fanart item artwork unavailable",
+					"mediaType", items[index].MediaType, "itemID", items[index].ID, "error", itemErrors[index])
 			}
 			continue
 		}
@@ -401,7 +435,38 @@ func (service *Service) enrichFanartItems(ctx context.Context, items []Item, lan
 		}
 		items[index].FanartResolved = true
 	}
-	return artwork
+	for index, value := range collectionArtwork {
+		if collectionErrors[index] != nil {
+			if service.logger != nil {
+				service.logger.DebugContext(ctx, "Fanart movie collection artwork unavailable",
+					"tmdbID", collectionIDs[index], "error", collectionErrors[index])
+			}
+			continue
+		}
+		if value.available() {
+			return itemArtwork, value
+		}
+	}
+	return itemArtwork, fanartArtwork{}
+}
+
+func fanartCollectionTMDBIDs(sources []Source) []string {
+	ids := make([]string, 0, len(sources))
+	seen := make(map[int64]struct{}, len(sources))
+	for _, source := range sources {
+		if !strings.EqualFold(strings.TrimSpace(source.Kind), "tmdb") || source.TMDB == nil ||
+			!strings.EqualFold(strings.TrimSpace(source.TMDB.SourceType), "collection") ||
+			source.TMDB.TMDBID == nil || *source.TMDB.TMDBID <= 0 {
+			continue
+		}
+		id := *source.TMDB.TMDBID
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, strconv.FormatInt(id, 10))
+	}
+	return ids
 }
 
 func (service *Service) fanartArtwork(ctx context.Context, item Item, language string) (fanartArtwork, error) {

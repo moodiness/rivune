@@ -1,6 +1,6 @@
 import type { Collection, ContinueItem, ResolvedFolder } from "./types";
 
-const homeStoragePrefix = "rivune.home-cache.v1";
+const homeStoragePrefix = "rivune.home-cache.v2";
 const continueStoragePrefix = "rivune.home-continue-cache.v1";
 const freshAgeMilliseconds = 5 * 60 * 1000;
 const maximumAgeMilliseconds = 24 * 60 * 60 * 1000;

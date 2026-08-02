@@ -38,9 +38,20 @@ func (provider artworkTMDBProvider) SeriesDetails(context.Context, string, strin
 }
 
 type recordingFanartEnricher struct {
-	mu     sync.Mutex
-	movies []string
-	series []string
+	mu          sync.Mutex
+	collections []string
+	movies      []string
+	series      []string
+}
+
+func (enricher *recordingFanartEnricher) EnrichCollection(_ context.Context, collection metadata.ProviderCollection, _ string) (metadata.ProviderCollection, error) {
+	enricher.mu.Lock()
+	enricher.collections = append(enricher.collections, collection.ExternalID)
+	enricher.mu.Unlock()
+	collection.PosterURL = "https://assets.fanart.tv/collection-" + collection.ExternalID + "-poster.jpg"
+	collection.BackdropURL = "https://assets.fanart.tv/collection-" + collection.ExternalID + "-background.jpg"
+	collection.LogoURL = "https://assets.fanart.tv/collection-" + collection.ExternalID + "-logo.png"
+	return collection, nil
 }
 
 func (enricher *recordingFanartEnricher) EnrichMovie(_ context.Context, movie metadata.ProviderMovie, _ string) (metadata.ProviderMovie, error) {
@@ -244,6 +255,55 @@ func TestResolveFetchesFanartForItemsAndAutomaticFolderArtwork(t *testing.T) {
 				t.Fatalf("unexpected Fanart requests: movies=%v series=%v", enricher.movies, enricher.series)
 			}
 		})
+	}
+}
+
+func TestResolveUsesTMDBCollectionFanartBeforeMovieArtwork(t *testing.T) {
+	collectionTMDBID := int64(87096)
+	provider := artworkTMDBProvider{
+		page: SourcePage{
+			CoverImageURL:   "https://image.tmdb.org/collection-poster.jpg",
+			HeroBackdropURL: "https://image.tmdb.org/collection-background.jpg",
+			Items: []Item{{
+				ID:          "tmdb:19995",
+				MediaType:   MediaTypeMovie,
+				Title:       "Avatar",
+				ExternalIDs: map[string]string{"tmdb": "19995"},
+			}},
+		},
+	}
+	enricher := &recordingFanartEnricher{}
+	service := NewService(nil, nil, provider, nil, nil)
+	service.SetFanartEnricher(provider, provider, enricher, nil)
+	folder := Folder{
+		Title: "Avatar",
+		Sources: []Source{{
+			Kind:  SourceKindTMDB,
+			Title: "Avatar collection",
+			TMDB: &TMDBSource{
+				SourceType: "collection",
+				TMDBID:     &collectionTMDBID,
+				MediaType:  MediaTypeMovie,
+			},
+		}},
+	}
+
+	resolved, err := service.resolve(context.Background(), auth.Principal{}, "collection-id", folder, 1, 100, "fr-FR", "FR")
+	if err != nil {
+		t.Fatalf("resolve Avatar collection folder: %v", err)
+	}
+	if resolved.Folder.CoverImageURL != "https://assets.fanart.tv/collection-87096-poster.jpg" ||
+		resolved.Folder.HeroBackdropURL != "https://assets.fanart.tv/collection-87096-background.jpg" ||
+		resolved.Folder.TitleLogoURL != "https://assets.fanart.tv/collection-87096-logo.png" {
+		t.Fatalf("folder did not use collection-level Fanart: %+v", resolved.Folder)
+	}
+	if len(resolved.Items) != 1 ||
+		resolved.Items[0].PosterURL != "https://assets.fanart.tv/movie-19995-poster.jpg" {
+		t.Fatalf("collection item did not retain its own Fanart artwork: %+v", resolved.Items)
+	}
+	if len(enricher.collections) != 1 || enricher.collections[0] != "87096" ||
+		len(enricher.movies) != 1 || enricher.movies[0] != "19995" {
+		t.Fatalf("unexpected Fanart identities: collections=%v movies=%v", enricher.collections, enricher.movies)
 	}
 }
 

@@ -49,6 +49,34 @@ func TestEnrichMovieAuthenticatesAndSelectsHighestQualityArtwork(t *testing.T) {
 	}
 }
 
+func TestEnrichCollectionUsesTMDBCollectionIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/movies/87096" {
+			t.Fatalf("unexpected collection path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"movieposter":[{"url":"https://images.example/avatar-collection-poster.jpg","lang":"00","likes":"8"}],
+			"moviebackground":[{"url":"https://images.example/avatar-collection-background.jpg","lang":"00","likes":"12"}],
+			"hdmovielogo":[{"url":"https://images.example/avatar-collection-logo.png","lang":"fr","likes":"7"}]
+		}`))
+	}))
+	defer server.Close()
+
+	client := newWithBaseURL("project-key", "", server.URL, server.Client())
+	enriched, err := client.EnrichCollection(context.Background(), metadata.ProviderCollection{
+		ExternalID: "87096",
+	}, "fr-FR")
+	if err != nil {
+		t.Fatalf("enrich collection: %v", err)
+	}
+	if enriched.PosterURL != "https://images.example/avatar-collection-poster.jpg" ||
+		enriched.BackdropURL != "https://images.example/avatar-collection-background.jpg" ||
+		enriched.LogoURL != "https://images.example/avatar-collection-logo.png" {
+		t.Fatalf("unexpected enriched collection: %+v", enriched)
+	}
+}
+
 func TestBestImagePrioritizesQualityBeforeLocalization(t *testing.T) {
 	selected := bestImage("fr-FR", []image{
 		{URL: "https://images.example/french.jpg", Lang: "fr", Likes: "5", Width: "1000", Height: "1426"},

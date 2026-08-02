@@ -117,6 +117,13 @@ type ProviderTrailer struct {
 	PublishedAt time.Time
 }
 
+type ProviderCollection struct {
+	ExternalID  string
+	PosterURL   string
+	BackdropURL string
+	LogoURL     string
+}
+
 type ProviderMovie struct {
 	ExternalID       string
 	Title            string
@@ -311,6 +318,7 @@ type TelevisionEnricher interface {
 }
 
 type ArtworkEnricher interface {
+	EnrichCollection(context.Context, ProviderCollection, string) (ProviderCollection, error)
 	EnrichMovie(context.Context, ProviderMovie, string) (ProviderMovie, error)
 	EnrichSeries(context.Context, ProviderSeries, string) (ProviderSeries, error)
 	EnrichSeason(context.Context, string, ProviderSeason, string) (ProviderSeason, error)

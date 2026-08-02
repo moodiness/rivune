@@ -63,6 +63,10 @@ type canonicalArtworkEnricher struct {
 	movieError error
 }
 
+func (enricher *canonicalArtworkEnricher) EnrichCollection(_ context.Context, collection ProviderCollection, _ string) (ProviderCollection, error) {
+	return collection, nil
+}
+
 func (enricher *canonicalArtworkEnricher) EnrichMovie(_ context.Context, movie ProviderMovie, _ string) (ProviderMovie, error) {
 	enricher.movieCalls++
 	if enricher.movieError != nil {

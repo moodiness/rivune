@@ -82,24 +82,57 @@ func (c *Client) EnrichMovie(ctx context.Context, movie metadata.ProviderMovie, 
 	if tmdbID == "" {
 		return movie, nil
 	}
-	if !isPositiveID(tmdbID) {
-		return movie, fmt.Errorf("%w: invalid TMDB identifier for Fanart", metadata.ErrProviderFailure)
-	}
-
-	var response movieResponse
-	if err := c.get(ctx, "/movies/"+tmdbID, &response); err != nil {
+	artwork, err := c.movieArtwork(ctx, tmdbID, language)
+	if err != nil {
 		return movie, err
 	}
-	if selected := bestImage(language, response.MoviePosters); selected != "" {
-		movie.PosterURL = selected
+	if artwork.PosterURL != "" {
+		movie.PosterURL = artwork.PosterURL
 	}
-	if selected := bestImage(language, response.MovieBackgrounds); selected != "" {
-		movie.BackdropURL = selected
+	if artwork.BackdropURL != "" {
+		movie.BackdropURL = artwork.BackdropURL
 	}
-	if selected := bestLocalizedImage(language, response.HDMovieLogos, response.MovieLogos); selected != "" {
-		movie.LogoURL = selected
+	if artwork.LogoURL != "" {
+		movie.LogoURL = artwork.LogoURL
 	}
 	return movie, nil
+}
+
+func (c *Client) EnrichCollection(ctx context.Context, collection metadata.ProviderCollection, language string) (metadata.ProviderCollection, error) {
+	tmdbID := strings.TrimSpace(collection.ExternalID)
+	if tmdbID == "" {
+		return collection, nil
+	}
+	artwork, err := c.movieArtwork(ctx, tmdbID, language)
+	if err != nil {
+		return collection, err
+	}
+	if artwork.PosterURL != "" {
+		collection.PosterURL = artwork.PosterURL
+	}
+	if artwork.BackdropURL != "" {
+		collection.BackdropURL = artwork.BackdropURL
+	}
+	if artwork.LogoURL != "" {
+		collection.LogoURL = artwork.LogoURL
+	}
+	return collection, nil
+}
+
+func (c *Client) movieArtwork(ctx context.Context, tmdbID, language string) (metadata.ProviderCollection, error) {
+	if !isPositiveID(tmdbID) {
+		return metadata.ProviderCollection{}, fmt.Errorf("%w: invalid TMDB identifier for Fanart", metadata.ErrProviderFailure)
+	}
+	var response movieResponse
+	if err := c.get(ctx, "/movies/"+tmdbID, &response); err != nil {
+		return metadata.ProviderCollection{}, err
+	}
+	return metadata.ProviderCollection{
+		ExternalID:  tmdbID,
+		PosterURL:   bestImage(language, response.MoviePosters),
+		BackdropURL: bestImage(language, response.MovieBackgrounds),
+		LogoURL:     bestLocalizedImage(language, response.HDMovieLogos, response.MovieLogos),
+	}, nil
 }
 
 func (c *Client) EnrichSeries(ctx context.Context, series metadata.ProviderSeries, language string) (metadata.ProviderSeries, error) {
