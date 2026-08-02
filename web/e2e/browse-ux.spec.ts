@@ -77,13 +77,18 @@ test("horizontal media rows keep partial scroll positions between cards", async 
   await expect.poll(() => row.evaluate((element) => element.scrollLeft)).toBeCloseTo(partialPosition, 0);
 });
 
-test("Home restores cached rows before revalidation and refreshes opened collections on demand", async ({ page, rivune }) => {
+test("Home restores persistent rows before revalidation and refreshes opened collections on demand", async ({ page, rivune }) => {
   const folderPath = "/api/v1/collections/alice-collection/folders/alice-folder/items";
   await page.goto("/");
   await expect(page.getByText("Alice Exclusive", { exact: true })).toBeVisible();
   expect(rivune.matching(folderPath, "GET")).toHaveLength(1);
   expect(rivune.matching("/api/v1/metadata/seasons/season-1", "GET")).toHaveLength(1);
 
+  await page.evaluate(() => {
+    for (const key of Object.keys(sessionStorage)) {
+      if (key.startsWith("rivune.home-cache.")) sessionStorage.removeItem(key);
+    }
+  });
   rivune.delayCollections("alice", 1_000);
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByText("Alice Exclusive", { exact: true })).toBeVisible({ timeout: 800 });
@@ -130,3 +135,4 @@ test("Home eagerly warms every resolved folder cover", async ({ page, rivune }) 
     { timeout: 10_000 },
   ).toBe(1);
 });
+

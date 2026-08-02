@@ -4,8 +4,8 @@ const homeStoragePrefix = "rivune.home-cache.v2";
 const continueStoragePrefix = "rivune.home-continue-cache.v1";
 const freshAgeMilliseconds = 5 * 60 * 1000;
 const maximumAgeMilliseconds = 24 * 60 * 60 * 1000;
-const maximumSerializedHomeLength = 4_000_000;
-const maximumCachedItemsPerFolder = 16;
+const maximumSerializedHomeLength = 2_000_000;
+const maximumCachedItemsPerFolder = 5;
 
 export type CachedContinueItem = ContinueItem & {
   episodeTitle?: string;
@@ -79,9 +79,9 @@ export function homeCollectionSignature(collections: Collection[]): string {
   return stableJSON(collections);
 }
 
-export function readHomeCache(profileID: string, scope: string): HomeCacheSnapshot | undefined {
+function parseHomeCache(serialized: string | null): HomeCacheSnapshot | undefined {
   try {
-    const parsed = record(JSON.parse(sessionStorage.getItem(cacheKey(homeStoragePrefix, profileID, scope)) ?? "null"));
+    const parsed = record(JSON.parse(serialized ?? "null"));
     if (parsed?.version !== 1 || typeof parsed.updatedAt !== "number" || !Number.isFinite(parsed.updatedAt)) return undefined;
     if (Date.now() - parsed.updatedAt > maximumAgeMilliseconds || typeof parsed.signature !== "string" || !Array.isArray(parsed.collections) || !parsed.collections.every(validCollection)) return undefined;
     const rawFolders = record(parsed.folders);
@@ -93,6 +93,31 @@ export function readHomeCache(profileID: string, scope: string): HomeCacheSnapsh
       signature: parsed.signature,
       updatedAt: parsed.updatedAt,
     };
+  } catch {
+    return undefined;
+  }
+}
+
+export function readHomeCache(profileID: string, scope: string): HomeCacheSnapshot | undefined {
+  const key = cacheKey(homeStoragePrefix, profileID, scope);
+  try {
+    const persisted = parseHomeCache(localStorage.getItem(key));
+    if (persisted) return persisted;
+    localStorage.removeItem(key);
+  } catch {
+    // Fall back to the tab cache when persistent storage is unavailable.
+  }
+  try {
+    const serialized = sessionStorage.getItem(key);
+    const cached = parseHomeCache(serialized);
+    if (!cached) return undefined;
+    try {
+      localStorage.setItem(key, serialized!);
+      sessionStorage.removeItem(key);
+    } catch {
+      // The valid tab cache remains usable when migration cannot persist.
+    }
+    return cached;
   } catch {
     return undefined;
   }
@@ -117,16 +142,22 @@ export function writeHomeCache(profileID: string, scope: string, collections: Co
     signature: homeCollectionSignature(collections),
     updatedAt,
   };
+  let serialized = JSON.stringify(document);
+  const folderIDs = Object.keys(document.folders);
+  while (serialized.length > maximumSerializedHomeLength && folderIDs.length > 0) {
+    delete document.folders[folderIDs.pop()!];
+    serialized = JSON.stringify(document);
+  }
+  const key = cacheKey(homeStoragePrefix, profileID, scope);
   try {
-    let serialized = JSON.stringify(document);
-    const folderIDs = Object.keys(document.folders);
-    while (serialized.length > maximumSerializedHomeLength && folderIDs.length > 0) {
-      delete document.folders[folderIDs.pop()!];
-      serialized = JSON.stringify(document);
-    }
-    sessionStorage.setItem(cacheKey(homeStoragePrefix, profileID, scope), serialized);
+    localStorage.setItem(key, serialized);
+    sessionStorage.removeItem(key);
   } catch {
-    // A disabled or full session store must not block Home.
+    try {
+      sessionStorage.setItem(key, serialized);
+    } catch {
+      // A disabled or full browser store must not block Home.
+    }
   }
 }
 
