@@ -401,6 +401,7 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 		FirstAirDate: "1999-03-28",
 		PosterURL:    seriesPoster,
 		BackdropURL:  seriesBackdrop,
+		Cast:         []CastMember{},
 		Seasons: []SeasonSummary{{
 			ID:           seasonID,
 			MediaType:    MediaTypeSeason,
@@ -535,6 +536,7 @@ func TestCachedMovieMetadataRestoresCanonicalSnapshot(t *testing.T) {
 		BackdropURL:   canonicalArt,
 		ExternalIDs:   map[string]string{"tmdb": "123"},
 		Genres:        []Genre{},
+		Cast:          []CastMember{},
 		VoteAverage:   8.1,
 		VoteCount:     500,
 		OriginalTitle: "Canonical Movie",
@@ -730,7 +732,7 @@ func TestCachedTVDBSeriesMappingUsesCanonicalCast(t *testing.T) {
 		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at) VALUES
 			($1::uuid, 'tmdb', 'fr-FR', $2::jsonb, now() + interval '1 hour'),
 			($1::uuid, 'tvdb', 'fr-FR', $3::jsonb, now() + interval '1 hour')
-	`, pgx.QueryExecModeSimpleProtocol, seriesID, basePayload, mappedPayload); err != nil {
+	`, pgx.QueryExecModeSimpleProtocol, seriesID, string(basePayload), string(mappedPayload)); err != nil {
 		t.Fatalf("seed mapped series cache: %v", err)
 	}
 	profileID := "44444444-4444-4444-8444-444444444444"

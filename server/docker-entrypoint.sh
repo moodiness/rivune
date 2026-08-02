@@ -35,11 +35,9 @@ if [ -n "$media_directory" ]; then
   chown "$puid:$pgid" "$media_directory"
 fi
 
-artwork_directory="${RIVUNE_ARTWORK_CACHE_DIR:-}"
-if [ -n "$artwork_directory" ]; then
-  mkdir -p "$artwork_directory"
-  chown "$puid:$pgid" "$artwork_directory"
-fi
+artwork_directory="${RIVUNE_ARTWORK_CACHE_DIR:-/var/lib/rivune/artwork}"
+mkdir -p "$artwork_directory"
+chown "$puid:$pgid" "$artwork_directory"
 
 if [ -n "$video_gid" ]; then
   exec setpriv --reuid="$puid" --regid="$pgid" --groups="$video_gid" --no-new-privs -- "$@"
