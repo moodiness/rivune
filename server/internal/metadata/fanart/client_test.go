@@ -54,9 +54,27 @@ func TestBestImagePrioritizesQualityBeforeLocalization(t *testing.T) {
 		{URL: "https://images.example/french.jpg", Lang: "fr", Likes: "5", Width: "1000", Height: "1426"},
 		{URL: "https://images.example/neutral.jpg", Lang: "00", Likes: "17", Width: "1000", Height: "1426"},
 		{URL: "https://images.example/english.jpg", Lang: "en", Likes: "27", Width: "1000", Height: "1426"},
+		{URL: "https://images.example/russian.jpg", Lang: "ru", Likes: "999", Width: "1000", Height: "1426"},
 	})
 	if selected != "https://images.example/english.jpg" {
 		t.Fatalf("selected lower-rated localized artwork %q", selected)
+	}
+
+	selected = bestImage("ru-RU", []image{
+		{URL: "https://images.example/russian.jpg", Lang: "ru", Likes: "4", Width: "1000", Height: "1426"},
+		{URL: "https://images.example/neutral.jpg", Lang: "00", Likes: "3", Width: "1000", Height: "1426"},
+	})
+	if selected != "https://images.example/russian.jpg" {
+		t.Fatalf("rejected requested-language artwork %q", selected)
+	}
+
+	selected = bestImage("fr-FR", []image{
+		{URL: "https://images.example/english.jpg", Lang: "en", Likes: "2", Width: "1000", Height: "1426"},
+		{URL: "https://images.example/neutral.jpg", Lang: "00", Likes: "3", Width: "1000", Height: "1426"},
+		{URL: "https://images.example/russian.jpg", Lang: "ru", Likes: "4", Width: "1000", Height: "1426"},
+	})
+	if selected != "https://images.example/english.jpg" {
+		t.Fatalf("did not fall back to English artwork %q", selected)
 	}
 
 	selected = bestImage("fr-FR",
@@ -76,6 +94,14 @@ func TestBestLocalizedImagePrioritizesLanguageWithinQualityTier(t *testing.T) {
 	})
 	if selected != "https://images.example/french.png" {
 		t.Fatalf("selected non-localized title artwork %q", selected)
+	}
+
+	selected = bestLocalizedImage("fr-FR", []image{
+		{URL: "https://images.example/english.png", Lang: "en", Likes: "1", Width: "800", Height: "310"},
+		{URL: "https://images.example/neutral.png", Lang: "00", Likes: "99", Width: "800", Height: "310"},
+	})
+	if selected != "https://images.example/english.png" {
+		t.Fatalf("did not fall back to English title artwork %q", selected)
 	}
 
 	selected = bestLocalizedImage("fr-FR",

@@ -245,12 +245,16 @@ func imageCandidate(artwork image, preferredLanguage string, tier int) (candidat
 	if candidateURL == "" {
 		return candidate{}, false
 	}
+	languageRank := artworkLanguageRank(artwork.Lang, preferredLanguage)
+	if languageRank == 0 {
+		return candidate{}, false
+	}
 	likes, _ := strconv.Atoi(strings.TrimSpace(artwork.Likes))
 	width, _ := strconv.ParseInt(strings.TrimSpace(artwork.Width), 10, 32)
 	height, _ := strconv.ParseInt(strings.TrimSpace(artwork.Height), 10, 32)
 	return candidate{
 		url:          candidateURL,
-		languageRank: artworkLanguageRank(artwork.Lang, preferredLanguage),
+		languageRank: languageRank,
 		tier:         tier,
 		likes:        likes,
 		pixels:       width * height,
@@ -260,6 +264,11 @@ func imageCandidate(artwork image, preferredLanguage string, tier int) (candidat
 func betterCandidate(left, right candidate) bool {
 	if left.tier != right.tier {
 		return left.tier > right.tier
+	}
+	leftHasTextLanguage := left.languageRank >= 3
+	rightHasTextLanguage := right.languageRank >= 3
+	if leftHasTextLanguage != rightHasTextLanguage {
+		return leftHasTextLanguage
 	}
 	if left.likes != right.likes {
 		return left.likes > right.likes
@@ -288,12 +297,12 @@ func artworkLanguageRank(language, preferred string) int {
 	switch {
 	case preferred != "" && language == preferred:
 		return 4
-	case language == "" || language == "00":
-		return 3
 	case language == "en":
+		return 3
+	case language == "" || language == "00":
 		return 2
 	default:
-		return 1
+		return 0
 	}
 }
 
