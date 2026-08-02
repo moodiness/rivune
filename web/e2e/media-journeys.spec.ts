@@ -112,6 +112,7 @@ test("continue-watching episode opens its series and requests trailers for each 
   await expect(page.getByRole("heading", { name: /Signal Horizon.*S01E01.*First Light/ })).toBeVisible();
 
   await page.getByRole("button", { name: "View series & season" }).click();
+  await expect(page.getByRole("region", { name: "Playback sources" })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: /^Season 1\b/ })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("button", { name: /First Light/ }).first()).toBeVisible();
 
@@ -175,12 +176,15 @@ test("season selector supports horizontal mouse dragging without changing the ac
   const bounds = await seasons.boundingBox();
   if (!bounds) throw new Error("Missing season selector bounds");
 
-  await page.mouse.move(bounds.x + bounds.width - 60, bounds.y + bounds.height / 2);
+  const dragStartX = bounds.x + Math.min(bounds.width - 60, 720);
+  await page.mouse.move(dragStartX, bounds.y + bounds.height / 2);
   await page.mouse.down();
-  await page.mouse.move(bounds.x + 80, bounds.y + bounds.height / 2, { steps: 12 });
+  await page.mouse.move(dragStartX - 180, bounds.y + bounds.height / 2, { steps: 4 });
   await page.mouse.up();
 
-  await expect.poll(() => seasons.evaluate((element) => element.scrollLeft)).toBeGreaterThan(100);
+  const releasedScrollLeft = await seasons.evaluate((element) => element.scrollLeft);
+  expect(releasedScrollLeft).toBeGreaterThan(100);
+  await expect.poll(() => seasons.evaluate((element) => element.scrollLeft)).toBeGreaterThan(releasedScrollLeft + 20);
   await expect(activeSeason).toHaveAttribute("aria-selected", "true");
   await page.getByRole("tab", { name: /^Season 2\b/ }).click();
   await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "true");

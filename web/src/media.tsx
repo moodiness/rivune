@@ -308,6 +308,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const preparationStartSeconds = selectedProgress?.completed ? 0 : Math.max(0, Math.floor(selectedProgress?.positionSeconds ?? 0));
   const fromContinue = item.raw?.continueReason === "resume" || item.raw?.continueReason === "next_episode";
   const autoplayNextEpisode = document.documentElement.dataset.autoplayNextEpisode !== "false";
+  const canSelectStream = item.mediaType !== "series" && !(fromContinue && seriesVisible);
 
   useEffect(() => {
     if (playing) return;
@@ -511,7 +512,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
-    if (item.mediaType === "series") {
+    if (!canSelectStream) {
       setAvailableStreams([]);
       setSelectedStream(undefined);
       setStreamsError("");
@@ -550,7 +551,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
       active = false;
       controller.abort();
     };
-  }, [item.mediaType, playbackMediaType, selectedEpisode, streamRefreshVersion, streamResourceID]);
+  }, [canSelectStream, playbackMediaType, selectedEpisode, streamRefreshVersion, streamResourceID]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -860,7 +861,6 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
       return externalID ? [{ externalID, provider, mediaType: item.mediaType, episode: undefined }] : [];
     })
     : [];
-  const canSelectStream = item.mediaType !== "series";
 
   return (
     <article className="details-page page-enter" aria-labelledby="media-details-title">

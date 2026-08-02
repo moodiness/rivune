@@ -25,10 +25,35 @@ export function IconButton({ label, children, className = "", ...props }: Button
 }
 
 export function HorizontalDragRow({ children, className = "folder-cover-row", ...props }: HTMLAttributes<HTMLDivElement>) {
-  const drag = useRef({ active: false, moved: false, pointerID: 0, startX: 0, startScrollLeft: 0 });
+  const drag = useRef({ active: false, moved: false, pointerID: 0, startX: 0, startScrollLeft: 0, lastX: 0, lastTime: 0, velocity: 0 });
   const suppressClick = useRef(false);
+  const momentumFrame = useRef(0);
 
-  function finishDrag(event: ReactPointerEvent<HTMLDivElement>) {
+  function stopMomentum() {
+    if (momentumFrame.current) cancelAnimationFrame(momentumFrame.current);
+    momentumFrame.current = 0;
+  }
+
+  function continueMomentum(element: HTMLDivElement, initialVelocity: number) {
+    stopMomentum();
+    let velocity = Math.max(-2.5, Math.min(2.5, initialVelocity));
+    let previousTime = performance.now();
+    const advance = (time: number) => {
+      const elapsed = Math.min(32, time - previousTime);
+      previousTime = time;
+      const previousScrollLeft = element.scrollLeft;
+      element.scrollLeft += velocity * elapsed;
+      velocity *= Math.pow(0.94, elapsed / (1000 / 60));
+      if (Math.abs(velocity) < 0.02 || element.scrollLeft === previousScrollLeft) {
+        momentumFrame.current = 0;
+        return;
+      }
+      momentumFrame.current = requestAnimationFrame(advance);
+    };
+    if (Math.abs(velocity) >= 0.02) momentumFrame.current = requestAnimationFrame(advance);
+  }
+
+  function finishDrag(event: ReactPointerEvent<HTMLDivElement>, withMomentum: boolean) {
     if (event.pointerType === "touch" || !drag.current.active || drag.current.pointerID !== event.pointerId) return;
     drag.current.active = false;
     event.currentTarget.classList.remove("is-dragging");
@@ -36,28 +61,48 @@ export function HorizontalDragRow({ children, className = "folder-cover-row", ..
     if (drag.current.moved) {
       suppressClick.current = true;
       window.setTimeout(() => { suppressClick.current = false; }, 0);
+      if (withMomentum) continueMomentum(event.currentTarget, drag.current.velocity);
     }
   }
+
+  useEffect(() => () => stopMomentum(), []);
 
   return <div
     {...props}
     className={className}
     onPointerDown={(event) => {
       if (event.pointerType === "touch" || event.button !== 0) return;
-      drag.current = { active: true, moved: false, pointerID: event.pointerId, startX: event.clientX, startScrollLeft: event.currentTarget.scrollLeft };
+      stopMomentum();
+      drag.current = {
+        active: true,
+        moved: false,
+        pointerID: event.pointerId,
+        startX: event.clientX,
+        startScrollLeft: event.currentTarget.scrollLeft,
+        lastX: event.clientX,
+        lastTime: event.timeStamp,
+        velocity: 0,
+      };
     }}
     onPointerMove={(event) => {
       if (event.pointerType === "touch" || !drag.current.active || drag.current.pointerID !== event.pointerId) return;
       const distance = event.clientX - drag.current.startX;
       if (Math.abs(distance) < 5 && !drag.current.moved) return;
       if (!drag.current.moved) event.currentTarget.setPointerCapture(event.pointerId);
+      const elapsed = Math.max(1, event.timeStamp - drag.current.lastTime);
+      const instantaneousVelocity = Math.max(-2.5, Math.min(2.5, -(event.clientX - drag.current.lastX) / elapsed));
+      drag.current.velocity = drag.current.moved
+        ? drag.current.velocity * 0.6 + instantaneousVelocity * 0.4
+        : instantaneousVelocity;
+      drag.current.lastX = event.clientX;
+      drag.current.lastTime = event.timeStamp;
       drag.current.moved = true;
       event.preventDefault();
       event.currentTarget.classList.add("is-dragging");
       event.currentTarget.scrollLeft = drag.current.startScrollLeft - distance;
     }}
-    onPointerUp={finishDrag}
-    onPointerCancel={finishDrag}
+    onPointerUp={(event) => finishDrag(event, true)}
+    onPointerCancel={(event) => finishDrag(event, false)}
     onClickCapture={(event) => {
       if (!suppressClick.current) return;
       event.preventDefault();

@@ -63,7 +63,6 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   await installDeterministicMedia(page);
   await page.goto("/");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await page.getByRole("button", { name: "View series & season" }).click();
 
   const stream = page.getByRole("radio", { name: /Fixture 1080p/ });
   await expect(stream).toBeVisible();
@@ -166,7 +165,6 @@ test("external-only sources are disclosed without starting web media", async ({ 
 
   await page.goto("/");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await page.getByRole("button", { name: "View series & season" }).click();
   await page.getByRole("radio", { name: /External 4K source/ }).click();
   await page.getByRole("button", { name: "Play episode" }).click();
 
@@ -193,7 +191,6 @@ test("unsupported browser sources stop at preparation with an actionable choice"
 
   await page.goto("/");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await page.getByRole("button", { name: "View series & season" }).click();
   await page.getByRole("radio", { name: /Fixture 1080p/ }).click();
 
   await expect(page.getByText(/Rivune did not start a transcode/)).toBeVisible();
@@ -228,7 +225,6 @@ test("multiline stream metadata stays inside its source button", async ({ page, 
   await page.setViewportSize({ width: 1217, height: 680 });
   await page.goto("/");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await page.getByRole("button", { name: "View series & season" }).click();
 
   const sourceRows = page.getByRole("radio");
   await expect(sourceRows).toHaveCount(7);
