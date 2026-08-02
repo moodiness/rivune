@@ -11,7 +11,7 @@ Every release tag must be an annotated `vMAJOR.MINOR.PATCH` Semantic Version. Do
 
 ## Before tagging
 
-1. Confirm the target commit is on `main` and the **CI and release** workflow is green for that exact commit.
+1. Confirm the target commit is on `main` and all relevant backend, frontend, protocol, native-client, migration, and container checks pass locally.
 2. Review user-visible and operational changes, including required environment changes and migration behavior.
 3. For protocol changes, confirm the protocol version and [`protocol/openapi.yaml`](../protocol/openapi.yaml) describe the shipped behavior and supported native clients have been updated.
 4. For database changes, run the disposable clean-install and immediately-previous-version upgrade checks documented in [Production operations](operations.md#migration-and-proxy-validation).
@@ -26,7 +26,7 @@ git tag -a v1.5.0 -m "Rivune v1.5.0"
 git push origin v1.5.0
 ```
 
-The tag push runs the same gating workflow as pull requests: backend tests against PostgreSQL, frontend clean install/build/E2E, pinned OpenAPI lint and complete contract resolution, clean and upgrade migration validation, HTTPS/forwarded-header smoke, and container builds for both release architectures. There is no manual publication path: the publish job depends on every gate and only runs for a pushed `v*` tag.
+The tag push runs the complete release gate: backend tests against PostgreSQL, frontend clean install/build/E2E, pinned OpenAPI lint and complete contract resolution, clean and upgrade migration validation, HTTPS/forwarded-header smoke, native client builds, and container builds for both release architectures. There is no branch, pull-request, or manual publication path: the publish job depends on every gate and only runs for a pushed `v*` tag.
 
 ## Published artifacts
 
