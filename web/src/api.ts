@@ -226,6 +226,7 @@ export const api = {
     seriesMappingProvider = mappingProvider === "tvdb" ? "tvdb" : "tmdb";
   },
   metadataLocale: () => metadataLanguage,
+  metadataScope: () => `${metadataLanguage}|${metadataRegion}`,
   resolveFolder: (collectionId: string, folderId: string, page = 1, signal?: AbortSignal) => request<ResolvedFolder>(`/collections/${collectionId}/folders/${folderId}/items${query({ page, limit: 100, language: metadataLanguage, region: metadataRegion })}`, { signal }),
   tmdbLookup: (kind: string, search: string) => request<{ results: { id: number; name: string; imageUrl?: string }[] }>(`/collections/tmdb/lookup${query({ kind, query: search, language: metadataLanguage, page: 1 })}`),
   tmdbGenres: (mediaType: string) => request<{ genres: { id: number; name: string }[] }>(`/collections/tmdb/genres${query({ mediaType, language: metadataLanguage })}`),

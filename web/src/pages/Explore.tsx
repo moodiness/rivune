@@ -4,9 +4,10 @@ import { api } from "../api";
 import { useAuth } from "../auth";
 import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Skeleton } from "../components";
 import { translate as t } from "../i18n";
+import { homeCollectionSignature, homeFolderCacheKey, readContinueCache, readHomeCache, writeContinueCache, writeHomeCache, writeHomeFolderCache, type CachedContinueItem } from "../homeCache";
 import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
 import { mediaTypeLabel } from "../media";
-import type { Collection, ContinueItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch } from "../types";
+import type { Collection, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch } from "../types";
 import type { ActionMenuAnchor } from "../components";
 
 type OpenMedia = (item: MediaItem) => void;
@@ -52,12 +53,7 @@ function isAvailable(item: MediaItem, hideUnreleased: boolean): boolean {
   return Number.isNaN(releasedAt) || releasedAt <= Date.now();
 }
 
-type EnrichedContinueItem = ContinueItem & {
-  episodeTitle?: string;
-  episodeOverview?: string;
-  episodeStillUrl?: string;
-  episodeAirDate?: string;
-};
+type EnrichedContinueItem = CachedContinueItem;
 
 function remainingLabel(item: EnrichedContinueItem): string {
   const remainingSeconds = Math.max(0, item.durationSeconds - item.positionSeconds);
@@ -108,11 +104,18 @@ function mediaFromContinue(item: EnrichedContinueItem): MediaItem {
   };
 }
 
-async function loadContinueItems(signal?: AbortSignal): Promise<EnrichedContinueItem[]> {
-  const response = await api.continueWatching(signal).catch(() => ({ items: [] as ContinueItem[] }));
-  const seasonIDs = Array.from(new Set(response.items.flatMap((item) => item.seasonId ? [item.seasonId] : [])));
+async function loadContinueItems(signal?: AbortSignal, cachedItems: EnrichedContinueItem[] = []): Promise<EnrichedContinueItem[]> {
+  const response = await api.continueWatching(signal);
+  const cachedByTitleID = new Map(cachedItems.map((item) => [item.titleId, item]));
+  const reusable = response.items.map((item) => {
+    const cached = cachedByTitleID.get(item.titleId);
+    return cached && cached.seasonId === item.seasonId && cached.seasonNumber === item.seasonNumber && cached.episodeNumber === item.episodeNumber ? cached : undefined;
+  });
+  const seasonIDs = Array.from(new Set(response.items.flatMap((item, index) => !reusable[index] && item.seasonId ? [item.seasonId] : [])));
   const seasons = new Map((await Promise.all(seasonIDs.map(async (seasonID) => [seasonID, await api.seasonDetails(seasonID, signal).catch(() => undefined)] as const))).filter((entry) => entry[1] !== undefined));
-  return response.items.map((item) => {
+  return response.items.map((item, index) => {
+    const cached = reusable[index];
+    if (cached) return { ...item, episodeTitle: cached.episodeTitle, episodeOverview: cached.episodeOverview, episodeStillUrl: cached.episodeStillUrl, episodeAirDate: cached.episodeAirDate };
     const episode = item.seasonId ? seasons.get(item.seasonId)?.episodes.find((candidate) => candidate.id === item.titleId) : undefined;
     return episode ? { ...item, episodeTitle: episode.name, episodeOverview: episode.overview, episodeStillUrl: episode.stillUrl, episodeAirDate: episode.airDate } : item;
   });
@@ -145,13 +148,12 @@ function useMediaPreferences() {
 }
 
 type HomeRow = { collection: Collection; resolved: ResolvedFolder };
+type OpenedHomeFolder = { row: HomeRow; refresh: Promise<HomeRow | undefined> };
+type OpenedHomeCollection = { collection: Collection; refresh: Promise<HomeRow[]> };
 type HeroSlide = { key: string; item: MediaItem; collection: Collection; folder: ResolvedFolder["folder"] };
 const homeFolderConcurrency = 6;
 const homeFolderTimeoutMilliseconds = 10_000;
 
-function homeFolderKey(collectionID: string, folderID: string): string {
-  return `${collectionID}:${folderID}`;
-}
 
 
 export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedia; mediaRevision: number }) {
@@ -159,8 +161,8 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [opened, setOpened] = useState<HomeRow | null>(null);
-  const [openedCollection, setOpenedCollection] = useState<Collection | null>(null);
+  const [opened, setOpened] = useState<OpenedHomeFolder | null>(null);
+  const [openedCollection, setOpenedCollection] = useState<OpenedHomeCollection | null>(null);
   const [continueItems, setContinueItems] = useState<EnrichedContinueItem[]>([]);
   const [continueAction, setContinueAction] = useState<{ item: MediaItem; anchor: ActionMenuAnchor }>();
   const [continueActionBusy, setContinueActionBusy] = useState(false);
@@ -170,9 +172,14 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   const [activeHeroIndex, setActiveHeroIndex] = useState(0);
   const homeRequestGeneration = useRef(0);
   const continueRevisionRef = useRef(0);
+  const folderRefreshes = useRef(new Map<string, Promise<HomeRow | undefined>>());
 
   useEffect(() => {
     if (!mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
+    const profileID = mediaPreferences.profileID;
+    const cacheScope = api.metadataScope();
+    const cachedHome = readHomeCache(profileID, cacheScope);
+    const cachedContinue = readContinueCache(profileID, cacheScope);
     const generation = ++homeRequestGeneration.current;
     const controller = new AbortController();
     let active = true;
@@ -183,39 +190,59 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
       controller.abort();
     };
     profileRequestSignal.addEventListener("abort", cancelRequest, { once: true });
-    setLoading(true);
     setError("");
-    setRows([]);
-    setCollections([]);
-    setContinueItems([]);
+    setContinueItems(cachedContinue?.items ?? []);
     setPendingFolderKeys(new Set());
+    if (cachedHome) {
+      setCollections(cachedHome.collections);
+      setRows(cachedHome.collections.flatMap((collection) => collection.folders.flatMap((folder) => {
+        const resolved = cachedHome.folders[homeFolderCacheKey(collection.id, folder.id ?? "")];
+        return resolved ? [{ collection, resolved }] : [];
+      })));
+      setLoading(false);
+    } else {
+      setCollections([]);
+      setRows([]);
+      setLoading(true);
+    }
 
-    void loadContinueItems(controller.signal).then((items) => {
-      if (isCurrent()) setContinueItems(items);
+    void loadContinueItems(controller.signal, cachedContinue?.fresh ? cachedContinue.items : []).then((items) => {
+      if (!isCurrent()) return;
+      setContinueItems(items);
+      writeContinueCache(profileID, cacheScope, items);
     }).catch(() => undefined);
 
     void (async () => {
       try {
         const response = await api.collections(controller.signal);
         if (!isCurrent()) return;
-        setCollections(response.collections);
+        const cacheMatches = cachedHome?.signature === homeCollectionSignature(response.collections);
         const targets = response.collections.flatMap((collection) => collection.folders.map((folder) => ({
           collection,
           folderID: folder.id ?? "",
-          key: homeFolderKey(collection.id, folder.id ?? ""),
+          key: homeFolderCacheKey(collection.id, folder.id ?? ""),
         })));
-        setPendingFolderKeys(new Set(targets.map((target) => target.key)));
+        const results: Array<HomeRow | undefined> = targets.map((target) => {
+          const resolved = cacheMatches ? cachedHome?.folders[target.key] : undefined;
+          return resolved ? { collection: target.collection, resolved } : undefined;
+        });
+        const pending = targets.flatMap((target, index) => results[index] ? [] : [{ target, index }]);
+        setCollections(response.collections);
+        setRows(results.filter((row): row is HomeRow => row !== undefined));
+        setPendingFolderKeys(new Set(pending.map(({ target }) => target.key)));
         setLoading(false);
-        if (targets.length === 0) return;
+        if (targets.length === 0) {
+          writeHomeCache(profileID, cacheScope, response.collections, []);
+          return;
+        }
+        if (pending.length === 0) return;
 
-        const results: Array<HomeRow | undefined> = new Array(targets.length);
         let cursor = 0;
-        let succeeded = 0;
         const worker = async () => {
           while (isCurrent() && !controller.signal.aborted) {
-            const index = cursor++;
-            if (index >= targets.length) return;
-            const target = targets[index];
+            const pendingIndex = cursor++;
+            if (pendingIndex >= pending.length) return;
+            const { target, index } = pending[pendingIndex];
             const requestController = new AbortController();
             const abortRequest = () => requestController.abort();
             controller.signal.addEventListener("abort", abortRequest, { once: true });
@@ -224,7 +251,6 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
               const resolved = await api.resolveFolder(target.collection.id, target.folderID, 1, requestController.signal);
               if (!isCurrent()) return;
               results[index] = { collection: target.collection, resolved };
-              succeeded++;
               setRows(results.filter((row): row is HomeRow => row !== undefined));
             } catch {
               // A missing folder must not prevent independent rows from rendering.
@@ -241,8 +267,14 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
             }
           }
         };
-        await Promise.all(Array.from({ length: Math.min(homeFolderConcurrency, targets.length) }, worker));
-        if (isCurrent() && succeeded === 0) setError(notifyErrorMessage(t("home.error.sourcesUnavailable"), t("home.error.unavailableTitle")));
+        await Promise.all(Array.from({ length: Math.min(homeFolderConcurrency, pending.length) }, worker));
+        if (!isCurrent()) return;
+        const resolvedRows = results.filter((row): row is HomeRow => row !== undefined);
+        if (resolvedRows.length === 0) {
+          setError(notifyErrorMessage(t("home.error.sourcesUnavailable"), t("home.error.unavailableTitle")));
+          return;
+        }
+        writeHomeCache(profileID, cacheScope, response.collections, resolvedRows);
       } catch (cause) {
         if (isCurrent()) setError(notifyError(cause, t("home.error.loadFailed"), t("home.error.unavailableTitle")));
       } finally {
@@ -259,9 +291,14 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   useEffect(() => {
     if (mediaRevision === 0 || continueRevisionRef.current === mediaRevision || !mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
     continueRevisionRef.current = mediaRevision;
+    const profileID = mediaPreferences.profileID;
+    const cacheScope = api.metadataScope();
+    const cached = readContinueCache(profileID, cacheScope);
     let active = true;
-    void loadContinueItems(profileRequestSignal).then((items) => {
-      if (active) setContinueItems(items);
+    void loadContinueItems(profileRequestSignal, cached?.fresh ? cached.items : []).then((items) => {
+      if (!active) return;
+      setContinueItems(items);
+      writeContinueCache(profileID, cacheScope, items);
     }).catch(() => undefined);
     return () => { active = false; };
   }, [mediaPreferences.profileID, mediaPreferences.ready, mediaRevision, profileRequestSignal]);
@@ -299,8 +336,63 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   const heroSlide = heroSlides[activeHeroIndex];
   const hero = heroSlide?.item;
   const heroBackdrop = heroSlide && (hero.backgroundUrl || heroSlide.folder.heroBackdropUrl || heroSlide.collection.backdropImageUrl || hero.posterUrl);
-  const heroPending = collections.some((collection) => collection.heroEnabled && collection.folders.some((folder) => pendingFolderKeys.has(homeFolderKey(collection.id, folder.id ?? ""))));
+  const heroPending = collections.some((collection) => collection.heroEnabled && collection.folders.some((folder) => pendingFolderKeys.has(homeFolderCacheKey(collection.id, folder.id ?? ""))));
   const continueMedia = continueItems.map(mediaFromContinue);
+
+  function refreshHomeRow(collection: Collection, folderID: string, persist = true): Promise<HomeRow | undefined> {
+    if (!folderID || !mediaPreferences.profileID || profileRequestSignal.aborted) return Promise.resolve(undefined);
+    const key = homeFolderCacheKey(collection.id, folderID);
+    const inFlight = folderRefreshes.current.get(key);
+    if (inFlight) return inFlight;
+    const request = api.resolveFolder(collection.id, folderID, 1, profileRequestSignal)
+      .then((resolved) => {
+        if (profileRequestSignal.aborted) return undefined;
+        const row = { collection, resolved };
+        setRows((current) => {
+          const index = current.findIndex((candidate) => homeFolderCacheKey(candidate.collection.id, candidate.resolved.folder.id ?? "") === key);
+          if (index < 0) return [...current, row];
+          const next = [...current];
+          next[index] = row;
+          return next;
+        });
+        if (persist) writeHomeFolderCache(mediaPreferences.profileID, api.metadataScope(), collections, resolved);
+        return row;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (folderRefreshes.current.get(key) === request) folderRefreshes.current.delete(key);
+      });
+    folderRefreshes.current.set(key, request);
+    return request;
+  }
+
+  async function refreshCollectionRows(collection: Collection): Promise<HomeRow[]> {
+    const currentRows = new Map(rows.filter((row) => row.collection.id === collection.id).map((row) => [row.resolved.folder.id ?? "", row]));
+    const refreshed: Array<HomeRow | undefined> = new Array(collection.folders.length);
+    let cursor = 0;
+    const worker = async () => {
+      while (!profileRequestSignal.aborted) {
+        const index = cursor++;
+        if (index >= collection.folders.length) return;
+        const folderID = collection.folders[index].id ?? "";
+        refreshed[index] = await refreshHomeRow(collection, folderID, false) ?? currentRows.get(folderID);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(homeFolderConcurrency, collection.folders.length) }, worker));
+    const resolvedRows = refreshed.filter((row): row is HomeRow => row !== undefined);
+    if (!profileRequestSignal.aborted) {
+      writeHomeCache(mediaPreferences.profileID, api.metadataScope(), collections, [...rows.filter((row) => row.collection.id !== collection.id), ...resolvedRows]);
+    }
+    return resolvedRows;
+  }
+
+  function openHomeFolder(row: HomeRow) {
+    setOpened({ row, refresh: refreshHomeRow(row.collection, row.resolved.folder.id ?? "") });
+  }
+
+  function openHomeCollection(collection: Collection) {
+    setOpenedCollection({ collection, refresh: refreshCollectionRows(collection) });
+  }
 
   function rotateHero(direction: -1 | 1) {
     setActiveHeroIndex((current) => (current + direction + heroSlides.length) % heroSlides.length);
@@ -339,7 +431,9 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
     setContinueActionBusy(true);
     try {
       await api.dismissContinue(item.titleId);
-      setContinueItems((current) => current.filter((candidate) => candidate.titleId !== item.titleId));
+      const remaining = continueItems.filter((candidate) => candidate.titleId !== item.titleId);
+      setContinueItems(remaining);
+      writeContinueCache(mediaPreferences.profileID, api.metadataScope(), remaining);
       setContinueAction(undefined);
       notifySuccess(
         t("home.continue.notifications.removedMessage", { title: continueActionTitle(item) }),
@@ -355,8 +449,8 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
 
   if (loading) return <div className="home-page page-enter"><Skeleton className="hero-skeleton" /><div className="content-stack">{[0, 1, 2].map((row) => <div key={row}><Skeleton className="heading-skeleton" /><div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div></div>)}</div></div>;
 
-  if (opened) return <FolderBrowser key={`${opened.collection.id}-${opened.resolved.folder.id}`} row={opened} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpened(null)} onOpenMedia={onOpenMedia} />;
-  if (openedCollection) return <CollectionBrowser key={openedCollection.id} collection={openedCollection} rows={rows.filter((row) => row.collection.id === openedCollection.id)} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpenedCollection(null)} onOpenMedia={onOpenMedia} />;
+  if (opened) return <FolderBrowser key={`${opened.row.collection.id}-${opened.row.resolved.folder.id}`} row={opened.row} refresh={opened.refresh} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpened(null)} onOpenMedia={onOpenMedia} />;
+  if (openedCollection) return <CollectionBrowser key={openedCollection.collection.id} collection={openedCollection.collection} rows={rows.filter((row) => row.collection.id === openedCollection.collection.id)} refresh={openedCollection.refresh} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpenedCollection(null)} onOpenMedia={onOpenMedia} />;
 
   return <div className="home-page page-enter">
     {hero && heroSlide ? <section key={heroSlide.key} className="hero hero--featured">
@@ -397,13 +491,13 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
           .map((item) => [`${item.mediaType}:${item.id}`, item])).values());
         const showDirectly = collection.viewMode === "follow_layout";
         const landscapeItems = directItems.length > 0 && directItems.every((item) => item.mediaType === "tv");
-        const collectionPending = collection.folders.some((folder) => pendingFolderKeys.has(homeFolderKey(collection.id, folder.id ?? "")));
+        const collectionPending = collection.folders.some((folder) => pendingFolderKeys.has(homeFolderCacheKey(collection.id, folder.id ?? "")));
         return <section className={`folder-collection-section folder-collection-section--${collection.folderCoverShape}`} key={collection.id}>
-          <SectionHeading title={collection.title} action={<button type="button" className="text-button" onClick={() => setOpenedCollection(collection)}>{t("common.actions.viewAll")} <ArrowRight size={16} /></button>} />
+          <SectionHeading title={collection.title} action={<button type="button" className="text-button" onClick={() => openHomeCollection(collection)}>{t("common.actions.viewAll")} <ArrowRight size={16} /></button>} />
           {showDirectly ? directItems.length > 0 ? <HorizontalDragRow className={landscapeItems ? "media-row media-row--landscape" : "media-row"}>{directItems.map((item) => <MediaCard key={`${item.mediaType}-${item.id}`} shape={item.mediaType === "tv" ? "landscape" : "poster"} title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo} onClick={() => onOpenMedia(item)} />)}</HorizontalDragRow> : collectionPending ? <div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div> : <EmptyState icon={<Clapperboard size={40} />} title={t("home.collection.emptyTitle")} description={t("home.collection.emptySourcesDescription")} /> : <HorizontalDragRow>{collection.folders.map((folder, index) => {
             const row = collectionRows.find((candidate) => candidate.resolved.folder.id === folder.id);
             const artwork = row?.resolved.folder.coverImageUrl || folder.coverImageUrl || row?.resolved.items.find((item) => isAvailable(item, mediaPreferences.hideUnreleased))?.posterUrl || collection.backdropImageUrl;
-            return <button key={folder.id ?? index} className="folder-cover-card" disabled={!row} onClick={() => { if (row) setOpened(row); }} aria-label={t("home.folder.openNamed", { name: folder.title })}>
+            return <button key={folder.id ?? index} className="folder-cover-card" disabled={!row} onClick={() => { if (row) openHomeFolder(row); }} aria-label={t("home.folder.openNamed", { name: folder.title })}>
               <span className="folder-cover-card__visual">{artwork ? <img src={artwork} alt="" loading="lazy" draggable={false} /> : <span className="folder-cover-card__fallback">{folder.coverEmoji || folder.title.slice(0, 2).toUpperCase()}</span>}</span>
               {!folder.hideTitle && <span className="folder-cover-card__copy"><strong>{folder.title}</strong></span>}
             </button>;
@@ -445,7 +539,7 @@ type CollectionBrowserRow = {
   hasMore: boolean;
 };
 
-function CollectionBrowser({ collection, rows, hideUnreleased, onBack, onOpenMedia }: { collection: Collection; rows: HomeRow[]; hideUnreleased: boolean; onBack: () => void; onOpenMedia: OpenMedia }) {
+function CollectionBrowser({ collection, rows, refresh, hideUnreleased, onBack, onOpenMedia }: { collection: Collection; rows: HomeRow[]; refresh: Promise<HomeRow[]>; hideUnreleased: boolean; onBack: () => void; onOpenMedia: OpenMedia }) {
   const [pages, setPages] = useState<CollectionBrowserRow[]>(() => rows.map((row) => ({
     row,
     items: row.resolved.items,
@@ -455,6 +549,20 @@ function CollectionBrowser({ collection, rows, hideUnreleased, onBack, onOpenMed
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [openedFolderID, setOpenedFolderID] = useState("");
+  const loadedMoreRef = useRef(false);
+  useEffect(() => {
+    let active = true;
+    void refresh.then((refreshed) => {
+      if (!active || loadedMoreRef.current || refreshed.length === 0) return;
+      setPages(refreshed.map((row) => ({
+        row,
+        items: row.resolved.items,
+        page: row.resolved.page,
+        hasMore: row.resolved.hasMore,
+      })));
+    });
+    return () => { active = false; };
+  }, [refresh]);
   const showFolders = collection.viewMode !== "follow_layout";
   const cards = useMemo(() => {
     const seen = new Set<string>();
@@ -483,6 +591,7 @@ function CollectionBrowser({ collection, rows, hideUnreleased, onBack, onOpenMed
       if (outcome.status === "fulfilled") loaded.set(outcome.value.folderID, outcome.value.resolved);
       else failed = true;
     }
+    if (loaded.size > 0) loadedMoreRef.current = true;
     setPages((current) => current.map((page) => {
       const folderID = page.row.resolved.folder.id ?? "";
       const next = loaded.get(folderID);
@@ -538,7 +647,7 @@ function CollectionBrowser({ collection, rows, hideUnreleased, onBack, onOpenMed
   </div>;
 }
 
-function FolderBrowser({ row, hideUnreleased, onBack, onOpenMedia, backLabel }: { row: HomeRow; hideUnreleased: boolean; onBack: () => void; onOpenMedia: OpenMedia; backLabel?: string }) {
+function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, backLabel }: { row: HomeRow; refresh?: Promise<HomeRow | undefined>; hideUnreleased: boolean; onBack: () => void; onOpenMedia: OpenMedia; backLabel?: string }) {
   const [items, setItems] = useState(row.resolved.items);
   const [page, setPage] = useState(row.resolved.page);
   const [hasMore, setHasMore] = useState(row.resolved.hasMore);
@@ -548,6 +657,24 @@ function FolderBrowser({ row, hideUnreleased, onBack, onOpenMedia, backLabel }: 
   const sourceView = sources.length > 1 ? row.resolved.folder.sourceView ?? "merged" : "merged";
   const [activeSourceID, setActiveSourceID] = useState(sourceView === "categories" ? sources[0]?.id ?? "" : "");
   const [mediaFilter, setMediaFilter] = useState<"all" | "movie" | "series">("all");
+  const loadedMoreRef = useRef(false);
+  useEffect(() => {
+    if (loadedMoreRef.current) return;
+    setItems(row.resolved.items);
+    setPage(row.resolved.page);
+    setHasMore(row.resolved.hasMore);
+  }, [row]);
+
+  useEffect(() => {
+    let active = true;
+    void refresh?.then((updated) => {
+      if (!active || !updated || loadedMoreRef.current) return;
+      setItems(updated.resolved.items);
+      setPage(updated.resolved.page);
+      setHasMore(updated.resolved.hasMore);
+    });
+    return () => { active = false; };
+  }, [refresh]);
   const availableItems = useMemo(() => items.filter((item) => isAvailable(item, hideUnreleased)), [hideUnreleased, items]);
   const itemsBySource = useMemo(() => {
     const grouped = new Map(sources.map((source) => [source.id ?? "", [] as MediaItem[]]));
@@ -582,6 +709,7 @@ function FolderBrowser({ row, hideUnreleased, onBack, onOpenMedia, backLabel }: 
         seen.add(key);
         return true;
       });
+      loadedMoreRef.current = true;
       setItems((current) => [...current, ...additions]);
       setPage(next.page);
       setHasMore(next.hasMore && additions.length > 0);

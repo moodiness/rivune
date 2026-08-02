@@ -76,3 +76,22 @@ test("horizontal media rows keep partial scroll positions between cards", async 
 
   await expect.poll(() => row.evaluate((element) => element.scrollLeft)).toBeCloseTo(partialPosition, 0);
 });
+
+test("Home restores cached rows before revalidation and refreshes opened collections on demand", async ({ page, rivune }) => {
+  const folderPath = "/api/v1/collections/alice-collection/folders/alice-folder/items";
+  await page.goto("/");
+  await expect(page.getByText("Alice Exclusive", { exact: true })).toBeVisible();
+  expect(rivune.matching(folderPath, "GET")).toHaveLength(1);
+  expect(rivune.matching("/api/v1/metadata/seasons/season-1", "GET")).toHaveLength(1);
+
+  rivune.delayCollections("alice", 1_000);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByText("Alice Exclusive", { exact: true })).toBeVisible({ timeout: 800 });
+  await expect.poll(() => rivune.matching("/api/v1/collections", "GET").length).toBe(2);
+  expect(rivune.matching(folderPath, "GET")).toHaveLength(1);
+  expect(rivune.matching("/api/v1/metadata/seasons/season-1", "GET")).toHaveLength(1);
+
+  await page.getByRole("button", { name: "View all" }).click();
+  await expect.poll(() => rivune.matching(folderPath, "GET").length).toBe(2);
+  await expect(page.getByText("Alice Exclusive", { exact: true })).toBeVisible();
+});
