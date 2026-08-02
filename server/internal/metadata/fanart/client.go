@@ -96,7 +96,7 @@ func (c *Client) EnrichMovie(ctx context.Context, movie metadata.ProviderMovie, 
 	if selected := bestImage(language, response.MovieBackgrounds); selected != "" {
 		movie.BackdropURL = selected
 	}
-	if selected := bestImage(language, response.HDMovieLogos, response.MovieLogos); selected != "" {
+	if selected := bestLocalizedImage(language, response.HDMovieLogos, response.MovieLogos); selected != "" {
 		movie.LogoURL = selected
 	}
 	return movie, nil
@@ -121,7 +121,7 @@ func (c *Client) EnrichSeries(ctx context.Context, series metadata.ProviderSerie
 	if selected := bestImage(language, response.ShowBackgrounds); selected != "" {
 		series.BackdropURL = selected
 	}
-	if selected := bestImage(language, response.HDTVLogos, response.ClearLogos); selected != "" {
+	if selected := bestLocalizedImage(language, response.HDTVLogos, response.ClearLogos); selected != "" {
 		series.LogoURL = selected
 	}
 	for index := range series.Seasons {
@@ -198,6 +198,14 @@ func (c *Client) get(ctx context.Context, endpoint string, destination any) erro
 }
 
 func bestImage(language string, groups ...[]image) string {
+	return selectBestImage(language, betterCandidate, groups...)
+}
+
+func bestLocalizedImage(language string, groups ...[]image) string {
+	return selectBestImage(language, betterLocalizedCandidate, groups...)
+}
+
+func selectBestImage(language string, better func(candidate, candidate) bool, groups ...[]image) string {
 	preferredLanguage := primaryLanguage(language)
 	best := candidate{}
 	found := false
@@ -205,7 +213,7 @@ func bestImage(language string, groups ...[]image) string {
 		tier := len(groups) - groupIndex
 		for _, artwork := range images {
 			current, usable := imageCandidate(artwork, preferredLanguage, tier)
-			if usable && (!found || betterCandidate(current, best)) {
+			if usable && (!found || better(current, best)) {
 				best = current
 				found = true
 			}
@@ -258,6 +266,19 @@ func betterCandidate(left, right candidate) bool {
 	}
 	if left.languageRank != right.languageRank {
 		return left.languageRank > right.languageRank
+	}
+	return left.pixels > right.pixels
+}
+
+func betterLocalizedCandidate(left, right candidate) bool {
+	if left.tier != right.tier {
+		return left.tier > right.tier
+	}
+	if left.languageRank != right.languageRank {
+		return left.languageRank > right.languageRank
+	}
+	if left.likes != right.likes {
+		return left.likes > right.likes
 	}
 	return left.pixels > right.pixels
 }

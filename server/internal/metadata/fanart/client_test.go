@@ -25,7 +25,10 @@ func TestEnrichMovieAuthenticatesAndSelectsHighestQualityArtwork(t *testing.T) {
 				{"url":"https://images.example/poster-neutral.jpg","lang":"00","likes":"8","width":"1000","height":"1500"}
 			],
 			"moviebackground":[{"url":"https://images.example/background.jpg","lang":"00","likes":"12","width":"1920","height":"1080"}],
-			"hdmovielogo":[{"url":"https://images.example/logo-en.png","lang":"en","likes":"100","width":"800","height":"310"}],
+			"hdmovielogo":[
+				{"url":"https://images.example/logo-en.png","lang":"en","likes":"100","width":"800","height":"310"},
+				{"url":"https://images.example/logo-fr.png","lang":"fr","likes":"1","width":"800","height":"310"}
+			],
 			"movielogo":[{"url":"https://images.example/logo-fr.png","lang":"fr","likes":"1","width":"400","height":"155"}]
 		}`))
 	}))
@@ -41,7 +44,7 @@ func TestEnrichMovieAuthenticatesAndSelectsHighestQualityArtwork(t *testing.T) {
 	}
 	if enriched.PosterURL != "https://images.example/poster-neutral.jpg" ||
 		enriched.BackdropURL != "https://images.example/background.jpg" ||
-		enriched.LogoURL != "https://images.example/logo-en.png" {
+		enriched.LogoURL != "https://images.example/logo-fr.png" {
 		t.Fatalf("unexpected enriched movie: %+v", enriched)
 	}
 }
@@ -62,6 +65,25 @@ func TestBestImagePrioritizesQualityBeforeLocalization(t *testing.T) {
 	)
 	if selected != "https://images.example/hd.png" {
 		t.Fatalf("selected lower-tier localized artwork %q", selected)
+	}
+}
+
+func TestBestLocalizedImagePrioritizesLanguageWithinQualityTier(t *testing.T) {
+	selected := bestLocalizedImage("fr-FR", []image{
+		{URL: "https://images.example/french.png", Lang: "fr", Likes: "5", Width: "800", Height: "310"},
+		{URL: "https://images.example/neutral.png", Lang: "00", Likes: "17", Width: "800", Height: "310"},
+		{URL: "https://images.example/english.png", Lang: "en", Likes: "27", Width: "800", Height: "310"},
+	})
+	if selected != "https://images.example/french.png" {
+		t.Fatalf("selected non-localized title artwork %q", selected)
+	}
+
+	selected = bestLocalizedImage("fr-FR",
+		[]image{{URL: "https://images.example/hd.png", Lang: "en", Likes: "1", Width: "800", Height: "310"}},
+		[]image{{URL: "https://images.example/legacy.png", Lang: "fr", Likes: "99", Width: "400", Height: "155"}},
+	)
+	if selected != "https://images.example/hd.png" {
+		t.Fatalf("selected lower-tier localized title artwork %q", selected)
 	}
 }
 
