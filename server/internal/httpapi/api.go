@@ -232,7 +232,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	}
 	var artworkEnricher metadata.ArtworkEnricher
 	if cfg.FanartAPIKey != "" {
-		artworkEnricher = fanart.New(cfg.FanartAPIKey, cfg.FanartClientKey, nil)
+		artworkEnricher = fanart.NewCached(cfg.FanartAPIKey, cfg.FanartClientKey, nil, pool, cfg.MetadataCacheTTL, logger)
 	}
 	artworkService, err := artworkcache.New(pool, artworkcache.Options{
 		Directory: cfg.ArtworkCacheDir,

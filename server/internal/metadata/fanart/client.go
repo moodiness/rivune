@@ -3,27 +3,53 @@ package fanart
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
-	defaultBaseURL = "https://webservice.fanart.tv/v3.2"
-	maxBodyBytes   = 8 * 1024 * 1024
+	defaultBaseURL           = "https://webservice.fanart.tv/v3.2"
+	maxBodyBytes             = 8 * 1024 * 1024
+	maxMemoryArtworkEntries  = 20_000
+	movieArtworkResourceType = "movie"
+	tvArtworkResourceType    = "tv"
 )
 
+type artworkCacheKey struct {
+	resourceType string
+	externalID   string
+	language     string
+}
+
+type cachedArtwork struct {
+	snapshot  artworkSnapshot
+	available bool
+	expiresAt time.Time
+}
+
 type Client struct {
-	baseURL    string
-	apiKey     string
-	clientKey  string
-	httpClient *http.Client
+	baseURL          string
+	apiKey           string
+	clientKey        string
+	httpClient       *http.Client
+	responseCache    artworkResponseCache
+	responseCacheTTL time.Duration
+	logger           *slog.Logger
+	cacheMu          sync.Mutex
+	cachedArtwork    map[artworkCacheKey]cachedArtwork
+	responseFlights  singleflight.Group
 }
 
 type image struct {
@@ -60,6 +86,14 @@ type candidate struct {
 
 func New(apiKey, clientKey string, httpClient *http.Client) *Client {
 	return newWithBaseURL(apiKey, clientKey, defaultBaseURL, httpClient)
+}
+
+func NewCached(apiKey, clientKey string, httpClient *http.Client, pool *pgxpool.Pool, cacheTTL time.Duration, logger *slog.Logger) *Client {
+	client := New(apiKey, clientKey, httpClient)
+	if pool != nil && cacheTTL > 0 {
+		client.enableResponseCache(&postgresArtworkResponseCache{pool: pool}, cacheTTL, logger)
+	}
+	return client
 }
 
 func newWithBaseURL(apiKey, clientKey, baseURL string, httpClient *http.Client) *Client {
@@ -123,15 +157,29 @@ func (c *Client) movieArtwork(ctx context.Context, tmdbID, language string) (met
 	if !isPositiveID(tmdbID) {
 		return metadata.ProviderCollection{}, fmt.Errorf("%w: invalid TMDB identifier for Fanart", metadata.ErrProviderFailure)
 	}
-	var response movieResponse
-	if err := c.get(ctx, "/movies/"+tmdbID, &response); err != nil {
+	artwork, err := c.resolveArtwork(ctx, artworkCacheKey{
+		resourceType: movieArtworkResourceType,
+		externalID:   tmdbID,
+		language:     normalizedArtworkLanguage(language),
+	}, func() (artworkSnapshot, error) {
+		var response movieResponse
+		if err := c.get(ctx, "/movies/"+tmdbID, &response); err != nil {
+			return artworkSnapshot{}, err
+		}
+		return artworkSnapshot{
+			PosterURL:   bestImage(language, response.MoviePosters),
+			BackdropURL: bestImage(language, response.MovieBackgrounds),
+			LogoURL:     bestLocalizedImage(language, response.HDMovieLogos, response.MovieLogos),
+		}, nil
+	})
+	if err != nil {
 		return metadata.ProviderCollection{}, err
 	}
 	return metadata.ProviderCollection{
 		ExternalID:  tmdbID,
-		PosterURL:   bestImage(language, response.MoviePosters),
-		BackdropURL: bestImage(language, response.MovieBackgrounds),
-		LogoURL:     bestLocalizedImage(language, response.HDMovieLogos, response.MovieLogos),
+		PosterURL:   artwork.PosterURL,
+		BackdropURL: artwork.BackdropURL,
+		LogoURL:     artwork.LogoURL,
 	}, nil
 }
 
@@ -144,21 +192,21 @@ func (c *Client) EnrichSeries(ctx context.Context, series metadata.ProviderSerie
 		return series, fmt.Errorf("%w: invalid TVDB identifier for Fanart", metadata.ErrProviderFailure)
 	}
 
-	response, err := c.series(ctx, tvdbID)
+	artwork, err := c.seriesArtwork(ctx, tvdbID, language)
 	if err != nil {
 		return series, err
 	}
-	if selected := bestImage(language, response.TVPosters); selected != "" {
-		series.PosterURL = selected
+	if artwork.PosterURL != "" {
+		series.PosterURL = artwork.PosterURL
 	}
-	if selected := bestImage(language, response.ShowBackgrounds); selected != "" {
-		series.BackdropURL = selected
+	if artwork.BackdropURL != "" {
+		series.BackdropURL = artwork.BackdropURL
 	}
-	if selected := bestLocalizedImage(language, response.HDTVLogos, response.ClearLogos); selected != "" {
-		series.LogoURL = selected
+	if artwork.LogoURL != "" {
+		series.LogoURL = artwork.LogoURL
 	}
 	for index := range series.Seasons {
-		if selected := bestSeasonImage(language, series.Seasons[index].SeasonNumber, response.SeasonPosters); selected != "" {
+		if selected := artwork.SeasonPosters[series.Seasons[index].SeasonNumber]; selected != "" {
 			series.Seasons[index].PosterURL = selected
 		}
 	}
@@ -173,22 +221,159 @@ func (c *Client) EnrichSeason(ctx context.Context, tvdbID string, season metadat
 	if !isPositiveID(tvdbID) {
 		return season, fmt.Errorf("%w: invalid TVDB identifier for Fanart", metadata.ErrProviderFailure)
 	}
-	response, err := c.series(ctx, tvdbID)
+	artwork, err := c.seriesArtwork(ctx, tvdbID, language)
 	if err != nil {
 		return season, err
 	}
-	if selected := bestSeasonImage(language, season.SeasonNumber, response.SeasonPosters); selected != "" {
+	if selected := artwork.SeasonPosters[season.SeasonNumber]; selected != "" {
 		season.PosterURL = selected
 	}
 	return season, nil
 }
 
-func (c *Client) series(ctx context.Context, tvdbID string) (seriesResponse, error) {
-	var response seriesResponse
-	if err := c.get(ctx, "/tv/"+tvdbID, &response); err != nil {
-		return seriesResponse{}, err
+func (c *Client) seriesArtwork(ctx context.Context, tvdbID, language string) (artworkSnapshot, error) {
+	return c.resolveArtwork(ctx, artworkCacheKey{
+		resourceType: tvArtworkResourceType,
+		externalID:   tvdbID,
+		language:     normalizedArtworkLanguage(language),
+	}, func() (artworkSnapshot, error) {
+		var response seriesResponse
+		if err := c.get(ctx, "/tv/"+tvdbID, &response); err != nil {
+			return artworkSnapshot{}, err
+		}
+		seasonNumbers := make(map[int]struct{})
+		for _, image := range response.SeasonPosters {
+			seasonNumber, err := strconv.Atoi(strings.TrimSpace(image.Season))
+			if err == nil && seasonNumber >= 0 {
+				seasonNumbers[seasonNumber] = struct{}{}
+			}
+		}
+		seasonPosters := make(map[int]string, len(seasonNumbers))
+		for seasonNumber := range seasonNumbers {
+			if selected := bestSeasonImage(language, seasonNumber, response.SeasonPosters); selected != "" {
+				seasonPosters[seasonNumber] = selected
+			}
+		}
+		return artworkSnapshot{
+			PosterURL:     bestImage(language, response.TVPosters),
+			BackdropURL:   bestImage(language, response.ShowBackgrounds),
+			LogoURL:       bestLocalizedImage(language, response.HDTVLogos, response.ClearLogos),
+			SeasonPosters: seasonPosters,
+		}, nil
+	})
+}
+
+func (c *Client) enableResponseCache(cache artworkResponseCache, cacheTTL time.Duration, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
 	}
-	return response, nil
+	c.responseCache = cache
+	c.responseCacheTTL = cacheTTL
+	c.logger = logger
+	c.cachedArtwork = make(map[artworkCacheKey]cachedArtwork)
+}
+
+func (c *Client) resolveArtwork(
+	ctx context.Context,
+	key artworkCacheKey,
+	load func() (artworkSnapshot, error),
+) (artworkSnapshot, error) {
+	if c.responseCache == nil || c.responseCacheTTL <= 0 {
+		return load()
+	}
+	if cached, ok := c.loadRememberedArtwork(key); ok {
+		return cached.snapshot, cachedArtworkError(cached.available)
+	}
+
+	value, err, _ := c.responseFlights.Do(key.resourceType+":"+key.externalID+":"+key.language, func() (any, error) {
+		if cached, ok := c.loadRememberedArtwork(key); ok {
+			return cached.snapshot, cachedArtworkError(cached.available)
+		}
+		snapshot, available, expiresAt, ok, cacheErr := c.responseCache.load(ctx, key)
+		if cacheErr != nil {
+			return artworkSnapshot{}, fmt.Errorf("%w: load Fanart response cache: %v", metadata.ErrProviderFailure, cacheErr)
+		}
+		if ok {
+			c.rememberArtwork(key, cachedArtwork{snapshot: snapshot, available: available, expiresAt: expiresAt})
+			return snapshot, cachedArtworkError(available)
+		}
+
+		snapshot, loadErr := load()
+		if loadErr != nil && !errors.Is(loadErr, metadata.ErrProviderNotFound) {
+			return artworkSnapshot{}, loadErr
+		}
+		available = loadErr == nil
+		expiresAt = time.Now().Add(c.responseCacheTTL)
+		c.rememberArtwork(key, cachedArtwork{snapshot: snapshot, available: available, expiresAt: expiresAt})
+		if cacheErr := c.responseCache.store(ctx, key, snapshot, available, expiresAt); cacheErr != nil {
+			c.logger.Warn("failed to store Fanart response cache",
+				"resourceType", key.resourceType,
+				"externalID", key.externalID,
+				"language", key.language,
+				"error", cacheErr,
+			)
+		}
+		return snapshot, loadErr
+	})
+	snapshot, ok := value.(artworkSnapshot)
+	if !ok {
+		return artworkSnapshot{}, fmt.Errorf("%w: invalid shared Fanart response", metadata.ErrProviderFailure)
+	}
+	return snapshot, err
+}
+
+func (c *Client) loadRememberedArtwork(key artworkCacheKey) (cachedArtwork, bool) {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	cached, ok := c.cachedArtwork[key]
+	if !ok {
+		return cachedArtwork{}, false
+	}
+	if !cached.expiresAt.After(time.Now()) {
+		delete(c.cachedArtwork, key)
+		return cachedArtwork{}, false
+	}
+	return cached, true
+}
+
+func (c *Client) rememberArtwork(key artworkCacheKey, cached cachedArtwork) {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	if _, exists := c.cachedArtwork[key]; !exists && len(c.cachedArtwork) >= maxMemoryArtworkEntries {
+		now := time.Now()
+		for cachedKey, cachedValue := range c.cachedArtwork {
+			if !cachedValue.expiresAt.After(now) {
+				delete(c.cachedArtwork, cachedKey)
+			}
+		}
+		if len(c.cachedArtwork) >= maxMemoryArtworkEntries {
+			for cachedKey := range c.cachedArtwork {
+				delete(c.cachedArtwork, cachedKey)
+				break
+			}
+		}
+	}
+	c.cachedArtwork[key] = cached
+}
+
+func cachedArtworkError(available bool) error {
+	if !available {
+		return metadata.ErrProviderNotFound
+	}
+	return nil
+}
+
+func normalizedArtworkLanguage(language string) string {
+	language = primaryLanguage(language)
+	if language == "" {
+		return "00"
+	}
+	for _, character := range language {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return "00"
+		}
+	}
+	return language
 }
 
 func (c *Client) get(ctx context.Context, endpoint string, destination any) error {
