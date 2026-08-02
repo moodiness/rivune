@@ -1517,7 +1517,7 @@ paths:
         - bearerAuth: []
       responses:
         "200":
-          description: Exact addon payload with transport provenance and cache directives.
+          description: Addon payload with transport provenance, cache directives, and server-owned artwork presentation.
           content:
             application/json:
               schema:
@@ -2112,6 +2112,72 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+  /artwork/{cacheKey}:
+    parameters:
+      - name: cacheKey
+        in: path
+        required: true
+        description: Deterministic SHA-256 key for a server-registered upstream artwork URL.
+        schema:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+    get:
+      summary: Read cached artwork
+      operationId: readArtwork
+      description: Lazily downloads registered provider artwork into the self-hosted persistent cache and returns immutable same-origin bytes. Upstream URLs and credentials are never exposed.
+      security: []
+      responses:
+        "200":
+          description: Cached JPEG, PNG, or WebP artwork.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: Public immutable browser cache policy.
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/ArtworkError"
+        "404":
+          $ref: "#/components/responses/ArtworkError"
+        "502":
+          $ref: "#/components/responses/ArtworkError"
+    head:
+      summary: Inspect cached artwork
+      operationId: inspectArtwork
+      description: Resolves a registered artwork cache entry and returns the same headers as GET without a response body.
+      security: []
+      responses:
+        "200":
+          description: Cached artwork headers.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            Content-Type:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: integer
+                format: int64
+        "400":
+          $ref: "#/components/responses/ArtworkError"
+        "404":
+          $ref: "#/components/responses/ArtworkError"
+        "502":
+          $ref: "#/components/responses/ArtworkError"
   /playback/sources:
     post:
       summary: List opaque playback source references for a device
@@ -2761,6 +2827,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
+    ArtworkError:
+      description: Stable plain-text artwork lookup or upstream failure.
+      content:
+        text/plain:
+          schema:
+            type: string
     MaintenanceMode:
       description: Global maintenance mode is enabled for non-administrator application requests.
       headers:
@@ -2894,10 +2966,10 @@ components:
           type: string
         logo:
           type: string
-          format: uri
+          format: uri-reference
         background:
           type: string
-          format: uri
+          format: uri-reference
         types:
           type: array
           description: Arbitrary content types; movie and series are not special-cased.
@@ -3069,9 +3141,11 @@ components:
           type: object
           additionalProperties: true
           description: >
-            Unmodified Stremio response object. This supports metas,
-            metasDetailed, meta, streams, subtitles, addons, embedded streams,
-            unknown forward-compatible fields, and SDK cache fields.
+            Forward-compatible Stremio response object. Unknown fields, SDK cache
+            fields, streams, subtitles, addons, and embedded streams are preserved.
+            For catalog and metadata payloads, Rivune may replace only artwork URL
+            fields with canonical provider choices exposed through same-origin
+            /api/v1/artwork cache URLs.
         cache:
           $ref: "#/components/schemas/AddonCachePolicy"
     AddonResourceFailure:
@@ -4346,13 +4420,13 @@ components:
           format: date
         posterUrl:
           type: string
-          format: uri
+          format: uri-reference
         backdropUrl:
           type: string
-          format: uri
+          format: uri-reference
         logoUrl:
           type: string
-          format: uri
+          format: uri-reference
         tagline:
           type: string
         runtimeMinutes:
@@ -4409,13 +4483,13 @@ components:
           format: date
         posterUrl:
           type: string
-          format: uri
+          format: uri-reference
         backdropUrl:
           type: string
-          format: uri
+          format: uri-reference
         logoUrl:
           type: string
-          format: uri
+          format: uri-reference
         tagline:
           type: string
         status:
@@ -4510,7 +4584,7 @@ components:
           format: date
         posterUrl:
           type: string
-          format: uri
+          format: uri-reference
         voteAverage:
           type: number
           minimum: 0
@@ -4545,7 +4619,7 @@ components:
           format: date
         posterUrl:
           type: string
-          format: uri
+          format: uri-reference
         voteAverage:
           type: number
           minimum: 0
@@ -4587,7 +4661,7 @@ components:
           format: date
         stillUrl:
           type: string
-          format: uri
+          format: uri-reference
         runtimeMinutes:
           type: integer
           minimum: 1
@@ -4625,7 +4699,7 @@ components:
           maxLength: 120
         backdropImageUrl:
           type: string
-          format: uri
+          format: uri-reference
         heroEnabled:
           type: boolean
         pinToTop:
@@ -4670,7 +4744,7 @@ components:
           maxLength: 120
         backdropImageUrl:
           type: string
-          format: uri
+          format: uri-reference
         heroEnabled:
           type: boolean
         pinToTop:
@@ -4885,16 +4959,16 @@ components:
           enum: [merged, categories, folders]
         coverImageUrl:
           type: string
-          format: uri
+          format: uri-reference
         coverEmoji:
           type: string
           maxLength: 16
         titleLogoUrl:
           type: string
-          format: uri
+          format: uri-reference
         heroBackdropUrl:
           type: string
-          format: uri
+          format: uri-reference
         heroVideoUrl:
           type: string
           format: uri
@@ -5131,13 +5205,13 @@ components:
           type: string
         posterUrl:
           type: string
-          format: uri
+          format: uri-reference
         backgroundUrl:
           type: string
-          format: uri
+          format: uri-reference
         logoUrl:
           type: string
-          format: uri
+          format: uri-reference
         description:
           type: string
         releaseInfo:
@@ -5212,7 +5286,7 @@ components:
           type: string
         imageUrl:
           type: string
-          format: uri
+          format: uri-reference
     CollectionGenreList:
       type: object
       additionalProperties: false
@@ -5703,7 +5777,7 @@ components:
           type: string
         artworkUrl:
           type: string
-          format: uri
+          format: uri-reference
           maxLength: 4096
         externalIds:
           $ref: "#/components/schemas/PlaybackActivityExternalIDs"

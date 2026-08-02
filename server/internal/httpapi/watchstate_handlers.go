@@ -38,6 +38,9 @@ func (a *API) resolveTitle(w http.ResponseWriter, r *http.Request, principal aut
 		a.writeWatchstateError(w, "resolve title", err)
 		return
 	}
+	if a.artwork != nil {
+		a.artwork.LocalizeTitleReference(r.Context(), &result)
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -57,6 +60,9 @@ func (a *API) library(w http.ResponseWriter, r *http.Request, principal auth.Pri
 		a.writeWatchstateError(w, "list library", err)
 		return
 	}
+	if a.artwork != nil {
+		a.artwork.LocalizeLibraryPage(r.Context(), &result)
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -65,6 +71,9 @@ func (a *API) addLibrary(w http.ResponseWriter, r *http.Request, principal auth.
 	if err != nil {
 		a.writeWatchstateError(w, "add library title", err)
 		return
+	}
+	if a.artwork != nil {
+		a.artwork.LocalizeLibraryItem(r.Context(), &item)
 	}
 	writeJSON(w, http.StatusOK, item)
 }
@@ -167,6 +176,9 @@ func (a *API) continueWatching(w http.ResponseWriter, r *http.Request, principal
 	if err != nil {
 		a.writeWatchstateError(w, "list continue watching", err)
 		return
+	}
+	if a.artwork != nil {
+		a.artwork.LocalizeContinuePage(r.Context(), &result)
 	}
 	writeJSON(w, http.StatusOK, result)
 }

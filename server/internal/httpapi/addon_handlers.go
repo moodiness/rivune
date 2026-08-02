@@ -16,6 +16,9 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request, principal auth.
 		a.writeAddonError(w, "list addons", err)
 		return
 	}
+	if a.artwork != nil {
+		a.artwork.PresentInstalledAddons(r.Context(), addons)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"addons": addons})
 }
 
@@ -32,6 +35,11 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request, principal aut
 	if err != nil {
 		a.writeAddonError(w, "install addon", err)
 		return
+	}
+	if a.artwork != nil {
+		values := []addon.InstalledAddon{installed}
+		a.artwork.PresentInstalledAddons(r.Context(), values)
+		installed = values[0]
 	}
 	writeJSON(w, http.StatusCreated, installed)
 }
@@ -58,6 +66,9 @@ func (a *API) reorderAddons(w http.ResponseWriter, r *http.Request, principal au
 		a.writeAddonError(w, "reorder addons", err)
 		return
 	}
+	if a.artwork != nil {
+		a.artwork.PresentInstalledAddons(r.Context(), addons)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"addons": addons})
 }
 
@@ -66,6 +77,11 @@ func (a *API) refreshAddon(w http.ResponseWriter, r *http.Request, principal aut
 	if err != nil {
 		a.writeAddonError(w, "refresh addon", err)
 		return
+	}
+	if a.artwork != nil {
+		values := []addon.InstalledAddon{installed}
+		a.artwork.PresentInstalledAddons(r.Context(), values)
+		installed = values[0]
 	}
 	writeJSON(w, http.StatusOK, installed)
 }
@@ -82,6 +98,11 @@ func (a *API) updateAddon(w http.ResponseWriter, r *http.Request, principal auth
 	if err != nil {
 		a.writeAddonError(w, "update addon", err)
 		return
+	}
+	if a.artwork != nil {
+		values := []addon.InstalledAddon{installed}
+		a.artwork.PresentInstalledAddons(r.Context(), values)
+		installed = values[0]
 	}
 	writeJSON(w, http.StatusOK, installed)
 }
@@ -106,6 +127,11 @@ func (a *API) fetchAddonResource(w http.ResponseWriter, r *http.Request, princip
 		a.writeAddonError(w, "fetch addon resource", err)
 		return
 	}
+	if a.artwork != nil {
+		values := []addon.ResourceResult{result}
+		a.artwork.PresentAddonResources(r.Context(), values)
+		result = values[0]
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -119,6 +145,9 @@ func (a *API) fetchAllAddonResources(w http.ResponseWriter, r *http.Request, pri
 	if err != nil {
 		a.writeAddonError(w, "fetch addon resources", err)
 		return
+	}
+	if a.artwork != nil {
+		a.artwork.PresentAddonResources(r.Context(), batch.Results)
 	}
 	writeJSON(w, http.StatusOK, batch)
 }
@@ -138,6 +167,9 @@ func (a *API) searchAddonCatalogs(w http.ResponseWriter, r *http.Request, princi
 		a.writeAddonError(w, "search addon catalogs", err)
 		return
 	}
+	if a.artwork != nil {
+		a.artwork.PresentAddonResources(r.Context(), batch.Results)
+	}
 	writeJSON(w, http.StatusOK, batch)
 }
 
@@ -151,6 +183,9 @@ func (a *API) discoverAddonCatalogs(w http.ResponseWriter, r *http.Request, prin
 	if err != nil {
 		a.writeAddonError(w, "discover addon catalogs", err)
 		return
+	}
+	if a.artwork != nil {
+		a.artwork.PresentAddonResources(r.Context(), batch.Results)
 	}
 	writeJSON(w, http.StatusOK, batch)
 }

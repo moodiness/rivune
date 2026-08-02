@@ -33,6 +33,9 @@ func TestLoadUsesSecureTokenTTLsByDefault(t *testing.T) {
 	if cfg.HardwareAcceleration != "auto" || cfg.VideoDevice != "/dev/dri/renderD128" {
 		t.Fatalf("unexpected hardware defaults: acceleration=%q device=%q", cfg.HardwareAcceleration, cfg.VideoDevice)
 	}
+	if cfg.ArtworkCacheDir != "/var/lib/rivune/artwork" || cfg.ArtworkStorageBytes != 20480*1024*1024 {
+		t.Fatalf("unexpected artwork cache defaults: directory=%q bytes=%d", cfg.ArtworkCacheDir, cfg.ArtworkStorageBytes)
+	}
 }
 
 func TestLoadUsesEnvironmentCredentials(t *testing.T) {
@@ -110,6 +113,15 @@ func TestLoadRejectsUnsafeRemuxConcurrency(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("expected invalid remux concurrency to fail")
+	}
+}
+
+func TestLoadRejectsUnsafeArtworkStorageLimit(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("RIVUNE_ARTWORK_MAX_STORAGE_MB", "255")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid artwork storage limit to fail")
 	}
 }
 

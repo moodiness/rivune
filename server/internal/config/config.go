@@ -27,6 +27,7 @@ const (
 	defaultRemuxConcurrency     = 2
 	defaultTranscodeThreads     = 4
 	defaultMediaStorageMB       = 20480
+	defaultArtworkStorageMB     = 20480
 	defaultHardwareAcceleration = "auto"
 	defaultVideoDevice          = "/dev/dri/renderD128"
 )
@@ -59,7 +60,9 @@ type Config struct {
 	HardwareAcceleration  string
 	VideoDevice           string
 	MediaTempDir          string
+	ArtworkCacheDir       string
 	MediaStorageBytes     int64
+	ArtworkStorageBytes   int64
 }
 
 func Load() (Config, error) {
@@ -80,6 +83,7 @@ func Load() (Config, error) {
 		FFmpegPath:           envOrDefault("RIVUNE_FFMPEG_PATH", "ffmpeg"),
 		FFprobePath:          envOrDefault("RIVUNE_FFPROBE_PATH", "ffprobe"),
 		MediaTempDir:         strings.TrimSpace(os.Getenv("RIVUNE_MEDIA_TEMP_DIR")),
+		ArtworkCacheDir:      envOrDefault("RIVUNE_ARTWORK_CACHE_DIR", "/var/lib/rivune/artwork"),
 		HardwareAcceleration: strings.ToLower(envOrDefault("RIVUNE_HARDWARE_ACCELERATION", defaultHardwareAcceleration)),
 		VideoDevice:          envOrDefault("RIVUNE_VIDEO_DEVICE", defaultVideoDevice),
 	}
@@ -154,6 +158,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.MediaStorageBytes = int64(mediaStorageMB) * 1024 * 1024
+	artworkStorageMB, err := loadInteger("RIVUNE_ARTWORK_MAX_STORAGE_MB", defaultArtworkStorageMB, 256, 102400)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ArtworkStorageBytes = int64(artworkStorageMB) * 1024 * 1024
 	cfg.TrustedProxies, err = loadTrustedProxies(os.Getenv("RIVUNE_TRUSTED_PROXIES"))
 	if err != nil {
 		return Config{}, err

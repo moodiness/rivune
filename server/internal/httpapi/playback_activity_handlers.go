@@ -16,6 +16,9 @@ func (a *API) playbackActivity(w http.ResponseWriter, r *http.Request, principal
 	case err != nil:
 		a.internalError(w, "load playback activity", err)
 	default:
+		if a.artwork != nil {
+			a.artwork.LocalizePlaybackActivity(r.Context(), &activity)
+		}
 		writeJSON(w, http.StatusOK, activity)
 	}
 }

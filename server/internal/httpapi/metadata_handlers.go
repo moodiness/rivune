@@ -22,6 +22,9 @@ func (a *API) discoverMovies(w http.ResponseWriter, r *http.Request, principal a
 		a.writeMetadataError(w, "discover movies", err)
 		return
 	}
+	if a.artwork != nil {
+		a.artwork.LocalizeMoviePage(r.Context(), &page)
+	}
 	writeJSON(w, http.StatusOK, page)
 }
 
@@ -39,6 +42,9 @@ func (a *API) searchMovies(w http.ResponseWriter, r *http.Request, principal aut
 		a.writeMetadataError(w, "search movies", err)
 		return
 	}
+	if a.artwork != nil {
+		a.artwork.LocalizeMoviePage(r.Context(), &page)
+	}
 	writeJSON(w, http.StatusOK, page)
 }
 
@@ -53,6 +59,9 @@ func (a *API) movieDetails(w http.ResponseWriter, r *http.Request, principal aut
 		a.writeMetadataError(w, "read movie details", err)
 		return
 	}
+	if a.artwork != nil {
+		a.artwork.LocalizeMovie(r.Context(), &movie)
+	}
 	writeJSON(w, http.StatusOK, movie)
 }
 
@@ -66,6 +75,9 @@ func (a *API) discoverSeries(w http.ResponseWriter, r *http.Request, principal a
 	if err != nil {
 		a.writeMetadataError(w, "discover series", err)
 		return
+	}
+	if a.artwork != nil {
+		a.artwork.LocalizeSeriesPage(r.Context(), &page)
 	}
 	writeJSON(w, http.StatusOK, page)
 }
@@ -83,6 +95,9 @@ func (a *API) searchSeries(w http.ResponseWriter, r *http.Request, principal aut
 	if err != nil {
 		a.writeMetadataError(w, "search series", err)
 		return
+	}
+	if a.artwork != nil {
+		a.artwork.LocalizeSeriesPage(r.Context(), &page)
 	}
 	writeJSON(w, http.StatusOK, page)
 }
@@ -102,6 +117,9 @@ func (a *API) seriesDetails(w http.ResponseWriter, r *http.Request, principal au
 		a.writeMetadataError(w, "read series details", err)
 		return
 	}
+	if a.artwork != nil {
+		a.artwork.LocalizeSeries(r.Context(), &series)
+	}
 	writeJSON(w, http.StatusOK, series)
 }
 
@@ -116,6 +134,9 @@ func (a *API) seasonDetails(w http.ResponseWriter, r *http.Request, principal au
 	if err != nil {
 		a.writeMetadataError(w, "read season details", err)
 		return
+	}
+	if a.artwork != nil {
+		a.artwork.LocalizeSeason(r.Context(), &season)
 	}
 	writeJSON(w, http.StatusOK, season)
 }

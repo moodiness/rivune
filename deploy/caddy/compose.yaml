@@ -37,15 +37,21 @@ services:
       RIVUNE_DATABASE_SSLMODE: disable
       RIVUNE_SETUP_TOKEN: ${RIVUNE_SETUP_TOKEN:?Set RIVUNE_SETUP_TOKEN}
       RIVUNE_TMDB_ACCESS_TOKEN: ${RIVUNE_TMDB_ACCESS_TOKEN:-}
+      RIVUNE_FANART_API_KEY: ${RIVUNE_FANART_API_KEY:-}
+      RIVUNE_FANART_CLIENT_KEY: ${RIVUNE_FANART_CLIENT_KEY:-}
       RIVUNE_TVDB_API_KEY: ${RIVUNE_TVDB_API_KEY:-}
       RIVUNE_TVDB_PIN: ${RIVUNE_TVDB_PIN:-}
       RIVUNE_TRAKT_CLIENT_ID: ${RIVUNE_TRAKT_CLIENT_ID:-}
       RIVUNE_TRAKT_CLIENT_SECRET: ${RIVUNE_TRAKT_CLIENT_SECRET:-}
       RIVUNE_SIMKL_CLIENT_ID: ${RIVUNE_SIMKL_CLIENT_ID:-}
       RIVUNE_TRACKING_ENCRYPTION_KEY: ${RIVUNE_TRACKING_ENCRYPTION_KEY:-}
+      RIVUNE_ARTWORK_CACHE_DIR: /var/lib/rivune/artwork
+      RIVUNE_ARTWORK_MAX_STORAGE_MB: ${RIVUNE_ARTWORK_MAX_STORAGE_MB:-20480}
       TZ: ${TZ:-UTC}
       PUID: ${PUID:-65532}
       PGID: ${PGID:-65532}
+    volumes:
+      - artwork_cache:/var/lib/rivune/artwork
     networks:
       - edge
       - database
@@ -81,3 +87,4 @@ volumes:
   caddy_data:
   caddy_config:
   postgres_data:
+  artwork_cache:

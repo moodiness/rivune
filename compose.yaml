@@ -47,8 +47,12 @@ services:
       RIVUNE_VIDEO_DEVICE: ${RIVUNE_VIDEO_DEVICE:-/dev/dri/renderD128}
       RIVUNE_MEDIA_TEMP_DIR: ${RIVUNE_MEDIA_TEMP_DIR:-/tmp}
       RIVUNE_MEDIA_MAX_STORAGE_MB: ${RIVUNE_MEDIA_MAX_STORAGE_MB:-20480}
+      RIVUNE_ARTWORK_CACHE_DIR: /var/lib/rivune/artwork
+      RIVUNE_ARTWORK_MAX_STORAGE_MB: ${RIVUNE_ARTWORK_MAX_STORAGE_MB:-20480}
     ports:
       - "${RIVUNE_PORT:-8080}:8080"
+    volumes:
+      - artwork_cache:/var/lib/rivune/artwork
     stop_grace_period: 15s
 
   postgres:
@@ -71,3 +75,4 @@ services:
 
 volumes:
   postgres_data:
+  artwork_cache:

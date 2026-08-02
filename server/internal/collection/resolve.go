@@ -126,10 +126,14 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, c
 	if items == nil {
 		items = []Item{}
 	}
-	return ResolvedFolder{
+	resolved := ResolvedFolder{
 		CollectionID: collectionID, Folder: folder, Items: items, Page: page,
 		HasMore: hasMore, Errors: errorsList,
-	}, nil
+	}
+	if service.artwork != nil {
+		service.artwork.PresentResolvedFolder(ctx, &resolved)
+	}
+	return resolved, nil
 }
 
 func (service *Service) resolveSource(ctx context.Context, principal auth.Principal, source Source, page int, language, region string) (SourcePage, error) {

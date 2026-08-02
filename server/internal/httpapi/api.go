@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/addon"
+	artworkcache "github.com/moodiness/rivune/server/internal/artwork"
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/calendar"
 	"github.com/moodiness/rivune/server/internal/collection"
@@ -182,6 +183,7 @@ type operationsService interface {
 type API struct {
 	config              config.Config
 	addons              addonService
+	artwork             *artworkcache.Service
 	calendar            calendarService
 	pool                *pgxpool.Pool
 	instances           instanceService
@@ -231,6 +233,14 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	if cfg.FanartAPIKey != "" {
 		artworkEnricher = fanart.New(cfg.FanartAPIKey, cfg.FanartClientKey, nil)
 	}
+	artworkService, err := artworkcache.New(pool, artworkcache.Options{
+		Directory: cfg.ArtworkCacheDir,
+		MaxBytes:  cfg.ArtworkStorageBytes,
+		Logger:    logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initialize artwork cache: %w", err)
+	}
 	addonService := addon.NewService(pool, nil)
 	var collectionTrakt collection.TraktProvider
 	if cfg.TraktClientID != "" {
@@ -260,11 +270,14 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	operationsService := operations.NewService(
 		pool, metadataService, authService, playbackService, maintenanceInterval, logger,
 	)
+	collectionService := collection.NewService(pool, addonService, collectionTMDB, collectionTrakt, collectionMDBList)
+	collectionService.SetArtworkPresenter(artworkService)
 	return &API{
+		artwork:             artworkService,
 		addons:              addonService,
 		config:              cfg,
 		calendar:            calendar.NewService(pool, metadataService, logger),
-		collections:         collection.NewService(pool, addonService, collectionTMDB, collectionTrakt, collectionMDBList),
+		collections:         collectionService,
 		pool:                pool,
 		instances:           instance.NewService(pool, cfg.SetupToken, cfg.Timezone),
 		auth:                authService,
@@ -322,6 +335,8 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/operations", a.requireAuthentication(a.operationsOverview))
 	mux.Handle("PUT /api/v1/operations/schedules/metadata-refresh", a.requireAuthentication(a.updateMetadataRefreshSchedule))
 	mux.Handle("POST /api/v1/operations/actions/{action}", a.requireAuthentication(a.runOperationAction))
+	mux.HandleFunc("GET /api/v1/artwork/{key}", a.artworkAsset)
+	mux.HandleFunc("HEAD /api/v1/artwork/{key}", a.artworkAsset)
 	mux.Handle("GET /api/v1/profiles/{profileId}/settings", a.requireAuthentication(a.profileSettings))
 	mux.Handle("PATCH /api/v1/profiles/{profileId}/settings", a.requireAuthentication(a.updateProfileSettings))
 	mux.Handle("GET /api/v1/profiles/{profileId}/settings/effective", a.requireAuthentication(a.effectiveSettings))

@@ -22,5 +22,8 @@ func (a *API) calendarEvents(w http.ResponseWriter, r *http.Request, principal a
 		}
 		return
 	}
+	if a.artwork != nil {
+		a.artwork.LocalizeCalendar(r.Context(), &result)
+	}
 	writeJSON(w, http.StatusOK, result)
 }

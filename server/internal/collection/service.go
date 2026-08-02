@@ -33,16 +33,25 @@ type MDBListProvider interface {
 	ResolveCollectionSource(context.Context, MDBListSource, int) (SourcePage, error)
 }
 
+type ArtworkPresenter interface {
+	PresentResolvedFolder(context.Context, *ResolvedFolder)
+}
+
 type Service struct {
 	pool    *pgxpool.Pool
 	addon   AddonProvider
 	tmdb    TMDBProvider
 	trakt   TraktProvider
 	mdblist MDBListProvider
+	artwork ArtworkPresenter
 }
 
 func NewService(pool *pgxpool.Pool, addonProvider AddonProvider, tmdbProvider TMDBProvider, traktProvider TraktProvider, mdblistProvider MDBListProvider) *Service {
 	return &Service{pool: pool, addon: addonProvider, tmdb: tmdbProvider, trakt: traktProvider, mdblist: mdblistProvider}
+}
+
+func (service *Service) SetArtworkPresenter(presenter ArtworkPresenter) {
+	service.artwork = presenter
 }
 
 func (service *Service) List(ctx context.Context, principal auth.Principal) ([]Collection, error) {
