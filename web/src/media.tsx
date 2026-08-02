@@ -286,6 +286,8 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const trailerRequestRef = useRef(0);
   const seasonCacheRef = useRef(new Map<string, SeasonMetadata>());
   const trailerItemRef = useRef("");
+  const trailerStageRef = useRef<HTMLDivElement>(null);
+  const trailerRevealPendingRef = useRef(false);
   const episodeListRef = useRef<HTMLDivElement>(null);
   const selectedEpisodeRowRef = useRef<HTMLDivElement>(null);
   const [titleProgress, setTitleProgress] = useState<PlaybackProgress>();
@@ -305,6 +307,8 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const activeTrailers = trailerOwnerKey === trailerItemKey ? trailers : [];
   const activeTrailer = trailerOwnerKey === trailerItemKey ? selectedTrailer : undefined;
   const activeTrailerLoading = trailerOwnerKey === trailerItemKey && trailerLoading;
+  const activeTrailerMessage = trailerOwnerKey === trailerItemKey ? trailerMessage : "";
+  const trailerStageVisible = Boolean(activeTrailer || activeTrailerMessage);
   const streamResourceID = selectedEpisode && series ? episodeResourceID(series, selectedEpisode, item.id) : item.id;
   const playbackMediaType = selectedEpisode || item.mediaType === "episode" ? "episode" : item.mediaType;
   const startFromBeginning = item.raw?.startFromBeginning === true;
@@ -314,6 +318,18 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const autoplayNextEpisode = document.documentElement.dataset.autoplayNextEpisode !== "false";
   const awaitingRestartEpisode = startFromBeginning && item.mediaType === "episode" && Boolean(continueSeriesID) && !selectedEpisode && !seriesError;
   const canSelectStream = item.mediaType !== "series" && !(fromContinue && seriesVisible) && !awaitingRestartEpisode;
+
+  useEffect(() => {
+    if (!trailerStageVisible || !trailerRevealPendingRef.current) return;
+    trailerRevealPendingRef.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      trailerStageRef.current?.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "start",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [trailerStageVisible]);
 
   useEffect(() => {
     const expectedEpisodeID = item.titleId ?? continueEpisodeID;
@@ -648,6 +664,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
 
   async function showTrailer() {
     if (activeTrailers.length > 0 || activeTrailerLoading) return;
+    trailerRevealPendingRef.current = true;
     const requestID = ++trailerRequestRef.current;
     const requestedItemKey = trailerItemRef.current;
     const requestedSeasonNumber = selectedTrailerSeason?.seasonNumber;
@@ -693,6 +710,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
 
   function dismissTrailer() {
     trailerRequestRef.current += 1;
+    trailerRevealPendingRef.current = false;
     setTrailers([]);
     setSelectedTrailer(undefined);
     setTrailerLoading(false);
@@ -976,6 +994,34 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
       </section>
 
       <div className="details-content">
+        {trailerStageVisible && <div ref={trailerStageRef} className="details-trailer-stage">
+          {activeTrailer && <section id="details-trailer" className="details-trailer" aria-label={t("media.trailers.forTitle", { title: details.title })}>
+            <header className="details-trailer__header">
+              <span className="details-trailer__heading"><Clapperboard size={17} /><span><strong>{t("media.trailers.title")}</strong><small>{t(activeTrailers.length > 1 ? "media.trailers.chooseVersion" : "media.trailers.nowPlaying")}</small></span></span>
+              <IconButton label={t("media.trailers.dismiss")} onClick={dismissTrailer}><X size={17} /></IconButton>
+            </header>
+            <div className="details-trailer__frame"><iframe key={`${activeTrailer.youtubeId}:${activeTrailer.captionPreference ?? ""}`} src={trailerURL} title={t("media.trailers.frameTitle", { trailer: activeTrailer.name || t("media.trailers.fallbackName"), title: details.title })} allow="autoplay; encrypted-media; picture-in-picture" referrerPolicy="strict-origin-when-cross-origin" allowFullScreen /></div>
+            <div className="details-trailer__active">
+              <span className={activeTrailer.isFallback ? "details-trailer__badge" : "details-trailer__badge is-preferred"}>{activeTrailerBadge}</span>
+              <span><strong title={activeTrailer.name || t("media.trailers.fallbackName")}>{activeTrailer.name || t("media.trailers.fallbackName")}</strong><small>{trailerAvailability}</small></span>
+            </div>
+            {activeTrailers.length > 1 && <div className="details-trailer__chooser">
+              <div className="details-trailer__chooser-heading"><strong>{t("media.trailers.choose")}</strong><span>{t(activeTrailers.length === 1 ? "common.results.count.one" : "common.results.count.many", { count: activeTrailers.length })}</span></div>
+              <div className="details-trailer__options" role="radiogroup" aria-label={t("media.trailers.availableForTitle", { title: details.title })}>
+                {activeTrailers.map((option, index) => {
+                  const selected = option.youtubeId === activeTrailer.youtubeId;
+                  const badge = trailerLanguageBadge(option);
+                  return <button key={option.youtubeId} type="button" role="radio" aria-checked={selected} tabIndex={selected ? 0 : -1} aria-label={t("media.trailers.optionLabel", { name: option.name || t("media.trailers.fallbackName"), language: badge, preferredSuffix: option.isFallback ? "" : `, ${t("media.trailers.preferredLanguage")}` })} className={`${selected ? "is-selected " : ""}${option.isFallback ? "" : "is-preferred"}`.trim()} onClick={() => setSelectedTrailer(option)} onKeyDown={(event) => handleTrailerOptionKeyDown(event, index)}>
+                    <span className="details-trailer__radio" aria-hidden="true" />
+                    <strong title={option.name || t("media.trailers.fallbackName")}>{option.name || t("media.trailers.fallbackName")}</strong>
+                    <span className="details-trailer__badge">{badge}</span>
+                  </button>;
+                })}
+              </div>
+            </div>}
+          </section>}
+          {activeTrailerMessage && <div className="details-trailer-feedback"><Notice tone={trailerUnavailable ? "info" : "error"}>{activeTrailerMessage}</Notice></div>}
+        </div>}
         {seriesVisible && <section className="series-browser" aria-labelledby="details-episodes-title">
           <header className="details-section-heading">
             <span className="details-section-heading__icon"><ListVideo size={20} /></span>
@@ -1100,33 +1146,6 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
 
         </section>}
 
-        {activeTrailer && <section id="details-trailer" className="details-trailer" aria-label={t("media.trailers.forTitle", { title: details.title })}>
-          <header className="details-trailer__header">
-            <span className="details-trailer__heading"><Clapperboard size={17} /><span><strong>{t("media.trailers.title")}</strong><small>{t(activeTrailers.length > 1 ? "media.trailers.chooseVersion" : "media.trailers.nowPlaying")}</small></span></span>
-            <IconButton label={t("media.trailers.dismiss")} onClick={dismissTrailer}><X size={17} /></IconButton>
-          </header>
-          <div className="details-trailer__frame"><iframe key={`${activeTrailer.youtubeId}:${activeTrailer.captionPreference ?? ""}`} src={trailerURL} title={t("media.trailers.frameTitle", { trailer: activeTrailer.name || t("media.trailers.fallbackName"), title: details.title })} allow="autoplay; encrypted-media; picture-in-picture" referrerPolicy="strict-origin-when-cross-origin" allowFullScreen /></div>
-          <div className="details-trailer__active">
-            <span className={activeTrailer.isFallback ? "details-trailer__badge" : "details-trailer__badge is-preferred"}>{activeTrailerBadge}</span>
-            <span><strong title={activeTrailer.name || t("media.trailers.fallbackName")}>{activeTrailer.name || t("media.trailers.fallbackName")}</strong><small>{trailerAvailability}</small></span>
-          </div>
-          {activeTrailers.length > 1 && <div className="details-trailer__chooser">
-            <div className="details-trailer__chooser-heading"><strong>{t("media.trailers.choose")}</strong><span>{t(activeTrailers.length === 1 ? "common.results.count.one" : "common.results.count.many", { count: activeTrailers.length })}</span></div>
-            <div className="details-trailer__options" role="radiogroup" aria-label={t("media.trailers.availableForTitle", { title: details.title })}>
-              {activeTrailers.map((option, index) => {
-                const selected = option.youtubeId === activeTrailer.youtubeId;
-                const badge = trailerLanguageBadge(option);
-                return <button key={option.youtubeId} type="button" role="radio" aria-checked={selected} tabIndex={selected ? 0 : -1} aria-label={t("media.trailers.optionLabel", { name: option.name || t("media.trailers.fallbackName"), language: badge, preferredSuffix: option.isFallback ? "" : `, ${t("media.trailers.preferredLanguage")}` })} className={`${selected ? "is-selected " : ""}${option.isFallback ? "" : "is-preferred"}`.trim()} onClick={() => setSelectedTrailer(option)} onKeyDown={(event) => handleTrailerOptionKeyDown(event, index)}>
-                  <span className="details-trailer__radio" aria-hidden="true" />
-                  <strong title={option.name || t("media.trailers.fallbackName")}>{option.name || t("media.trailers.fallbackName")}</strong>
-                  <span className="details-trailer__badge">{badge}</span>
-                </button>;
-              })}
-            </div>
-          </div>}
-        </section>}
-
-        {trailerOwnerKey === trailerItemKey && trailerMessage && <div className="details-trailer-feedback"><Notice tone={trailerUnavailable ? "info" : "error"}>{trailerMessage}</Notice></div>}
         {actionError && <Notice>{actionError}</Notice>}
       </div>
     </article>
