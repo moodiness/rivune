@@ -52,6 +52,28 @@ func TestRequireActiveProfileRejectsMissingAndExpiredGrants(t *testing.T) {
 	}
 }
 
+func TestRefreshMissingSkipsTitlesWithoutResolvableTMDBIdentity(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	const titleID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO titles (id, media_type, display_title)
+		VALUES ($1::uuid, 'movie', 'Addon-only title');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
+		VALUES ($1::uuid, 'addon', 'movie', 'demo:flower')
+	`, pgx.QueryExecModeSimpleProtocol, titleID); err != nil {
+		t.Fatalf("seed addon-only title: %v", err)
+	}
+
+	service := &Service{pool: pool}
+	result, err := service.RefreshMissing(context.Background(), RefreshMissingOptions{Language: "fr-FR", BatchSize: 1})
+	if err != nil {
+		t.Fatalf("refresh missing metadata: %v", err)
+	}
+	if result != (RefreshResult{}) {
+		t.Fatalf("addon-only title became an unrefreshable candidate: %+v", result)
+	}
+}
+
 func TestSeasonHierarchyValidationRejectsDemainNousAppartientSeasonMismatch(t *testing.T) {
 	mismatched := ProviderSeason{
 		ExternalID:   "475463",

@@ -374,6 +374,7 @@ func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOpti
 		      FROM title_external_ids AS identity
 		      WHERE identity.title_id = title.id
 		        AND identity.namespace = title.media_type
+		        AND identity.provider IN ($1, 'imdb', 'tvdb')
 		  )
 		  AND (cached.title_id IS NULL OR cached.expires_at <= now())
 		ORDER BY cached.expires_at NULLS FIRST, title.id
