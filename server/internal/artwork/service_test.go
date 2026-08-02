@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -98,6 +99,93 @@ func TestLocalURLsPreservesOrderDuplicatesAndFallbacks(t *testing.T) {
 	failed := service.LocalURLs(canceled, []string{fixture.URL + "/failed-one", fixture.URL + "/failed-two"})
 	if failed[0] != fixture.URL+"/failed-one" || failed[1] != fixture.URL+"/failed-two" {
 		t.Fatalf("failed registration did not preserve inputs: %#v", failed)
+	}
+}
+func TestRunWarmupCachesLocalizedArtworkBeforeBrowserRequest(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	imageBytes := testPNG(t, color.NRGBA{R: 38, G: 85, B: 119, A: 255})
+	var requests atomic.Int32
+	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		response.Header().Set("Content-Type", "image/png")
+		_, _ = response.Write(imageBytes)
+	}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.RunWarmup(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	localURL := service.LocalURL(context.Background(), fixture.URL+"/warm-poster.png")
+	key := strings.TrimPrefix(localURL, publicPrefix)
+	waitForArtworkCondition(t, func() bool {
+		var byteSize *int64
+		if err := pool.QueryRow(context.Background(), `SELECT byte_size FROM artwork_cache WHERE key = $1`, key).Scan(&byteSize); err != nil {
+			return false
+		}
+		return byteSize != nil && *byteSize == int64(len(imageBytes))
+	})
+	if requests.Load() != 1 {
+		t.Fatalf("warmup made %d upstream requests, want 1", requests.Load())
+	}
+
+	response := serveArtwork(service, http.MethodGet, localURL)
+	assertArtworkResponse(t, response, imageBytes, true)
+	if requests.Load() != 1 {
+		t.Fatalf("browser request redownloaded warmed artwork: requests=%d", requests.Load())
+	}
+}
+
+func TestRunWarmupBoundsConcurrentDownloads(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	imageBytes := testPNG(t, color.NRGBA{R: 85, G: 119, B: 153, A: 255})
+	var requests atomic.Int32
+	var active atomic.Int32
+	var maximum atomic.Int32
+	release := make(chan struct{})
+	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		current := active.Add(1)
+		for {
+			observed := maximum.Load()
+			if current <= observed || maximum.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		<-release
+		active.Add(-1)
+		response.Header().Set("Content-Type", "image/png")
+		_, _ = response.Write(imageBytes)
+	}))
+	t.Cleanup(fixture.Close)
+	service := newArtworkTestService(t, pool, fixture.Client(), 16<<20)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.RunWarmup(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		close(release)
+		<-done
+	})
+
+	upstream := make([]string, warmupConcurrency*2)
+	for index := range upstream {
+		upstream[index] = fixture.URL + "/bounded-" + stringInt(index) + ".png"
+	}
+	service.LocalURLs(context.Background(), upstream)
+	waitForArtworkCondition(t, func() bool { return requests.Load() >= warmupConcurrency })
+	if got := maximum.Load(); got != warmupConcurrency {
+		t.Fatalf("maximum concurrent warmups = %d, want %d", got, warmupConcurrency)
 	}
 }
 
@@ -280,6 +368,18 @@ func TestServeHTTPStableBadKeyAndMissingResponses(t *testing.T) {
 	if missing.Code != http.StatusNotFound || missing.Body.String() != "artwork not found\n" {
 		t.Fatalf("missing response = %d %q", missing.Code, missing.Body.String())
 	}
+}
+
+func waitForArtworkCondition(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for artwork condition")
 }
 
 func openArtworkTestPool(t *testing.T) *pgxpool.Pool {

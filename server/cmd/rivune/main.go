@@ -59,6 +59,16 @@ func run(logger *slog.Logger) error {
 
 	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
+	artworkContext, cancelArtwork := context.WithCancel(shutdownContext)
+	artworkDone := make(chan struct{})
+	go func() {
+		defer close(artworkDone)
+		api.RunArtworkWarmup(artworkContext)
+	}()
+	defer func() {
+		cancelArtwork()
+		<-artworkDone
+	}()
 
 	maintenanceContext, cancelMaintenance := context.WithCancel(shutdownContext)
 	maintenanceDone := make(chan struct{})

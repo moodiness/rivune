@@ -24,11 +24,13 @@ import (
 )
 
 const (
-	maxObjectBytes    int64 = 12 << 20
-	maxImageDimension       = 16384
-	maxImagePixels    int64 = 40_000_000
-	publicPrefix            = "/api/v1/artwork/"
-	pruneLockID       int64 = 0x617274776f726b
+	maxObjectBytes      int64 = 12 << 20
+	maxImageDimension         = 16384
+	maxImagePixels      int64 = 40_000_000
+	publicPrefix              = "/api/v1/artwork/"
+	pruneLockID         int64 = 0x617274776f726b
+	warmupConcurrency         = 6
+	warmupQueueCapacity       = 32_768
 )
 
 var errObjectExceedsCache = errors.New("artwork object exceeds cache capacity")
@@ -50,6 +52,10 @@ type Service struct {
 
 	flightsMu sync.Mutex
 	flights   map[string]*flight
+
+	warmupMu     sync.Mutex
+	warmupQueue  chan string
+	queuedWarmup map[string]struct{}
 }
 
 type flight struct {
@@ -94,7 +100,9 @@ func New(pool *pgxpool.Pool, options Options) (*Service, error) {
 	service := &Service{
 		pool: pool, directory: absoluteDirectory, maxBytes: options.MaxBytes,
 		httpClient: client, logger: logger, allowLocal: allowLocal,
-		flights: make(map[string]*flight),
+		flights:      make(map[string]*flight),
+		warmupQueue:  make(chan string, warmupQueueCapacity),
+		queuedWarmup: make(map[string]struct{}),
 	}
 	if err := service.Prune(context.Background()); err != nil {
 		return nil, fmt.Errorf("prune artwork cache during initialization: %w", err)
@@ -141,19 +149,24 @@ func (service *Service) LocalURLs(ctx context.Context, upstream []string) []stri
 		SELECT input.key, input.source_url
 		FROM unnest($1::text[], $2::text[]) AS input(key, source_url)
 		ON CONFLICT (key) DO UPDATE SET source_url = artwork_cache.source_url
-		RETURNING key, source_url
+		RETURNING key, source_url, byte_size
 	`, keys, urls)
 	if err != nil {
 		return localized
 	}
 	defer rows.Close()
 	registered := make(map[string]string, len(keys))
+	pendingKeys := make([]string, 0, len(keys))
 	for rows.Next() {
 		var key, sourceURL string
-		if err := rows.Scan(&key, &sourceURL); err != nil {
+		var byteSize *int64
+		if err := rows.Scan(&key, &sourceURL, &byteSize); err != nil {
 			return append([]string(nil), upstream...)
 		}
 		registered[key] = sourceURL
+		if byteSize == nil {
+			pendingKeys = append(pendingKeys, key)
+		}
 	}
 	if rows.Err() != nil {
 		return append([]string(nil), upstream...)
@@ -167,7 +180,71 @@ func (service *Service) LocalURLs(ctx context.Context, upstream []string) []stri
 			localized[position] = publicPrefix + key
 		}
 	}
+	service.enqueueWarmups(pendingKeys)
 	return localized
+}
+
+func (service *Service) RunWarmup(ctx context.Context) {
+	var wait sync.WaitGroup
+	wait.Add(warmupConcurrency)
+	for range warmupConcurrency {
+		go func() {
+			defer wait.Done()
+			service.runWarmupWorker(ctx)
+		}()
+	}
+	<-ctx.Done()
+	wait.Wait()
+}
+
+func (service *Service) runWarmupWorker(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case key := <-service.warmupQueue:
+			service.warmArtwork(ctx, key)
+			service.completeWarmup(key)
+		}
+	}
+}
+
+func (service *Service) warmArtwork(ctx context.Context, key string) {
+	record, found, err := service.lookup(ctx, key)
+	if err == nil && found {
+		err = service.fetchCoalesced(ctx, record)
+	}
+	if err != nil && ctx.Err() == nil {
+		service.logger.WarnContext(ctx, "warm artwork", "key", key, "error", err)
+	}
+}
+
+func (service *Service) enqueueWarmups(keys []string) {
+	for _, key := range keys {
+		if !validKey(key) {
+			continue
+		}
+		service.warmupMu.Lock()
+		if _, exists := service.queuedWarmup[key]; exists {
+			service.warmupMu.Unlock()
+			continue
+		}
+		select {
+		case service.warmupQueue <- key:
+			service.queuedWarmup[key] = struct{}{}
+		default:
+		}
+		service.warmupMu.Unlock()
+	}
+}
+
+func (service *Service) completeWarmup(key string) {
+	service.warmupMu.Lock()
+	delete(service.queuedWarmup, key)
+	service.warmupMu.Unlock()
 }
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
