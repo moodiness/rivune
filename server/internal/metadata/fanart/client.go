@@ -250,14 +250,14 @@ func imageCandidate(artwork image, preferredLanguage string, tier int) (candidat
 }
 
 func betterCandidate(left, right candidate) bool {
-	if left.languageRank != right.languageRank {
-		return left.languageRank > right.languageRank
-	}
 	if left.tier != right.tier {
 		return left.tier > right.tier
 	}
 	if left.likes != right.likes {
 		return left.likes > right.likes
+	}
+	if left.languageRank != right.languageRank {
+		return left.languageRank > right.languageRank
 	}
 	return left.pixels > right.pixels
 }

@@ -10,7 +10,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/metadata"
 )
 
-func TestEnrichMovieAuthenticatesAndSelectsLocalizedArtwork(t *testing.T) {
+func TestEnrichMovieAuthenticatesAndSelectsHighestQualityArtwork(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/movies/550" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
@@ -41,8 +41,27 @@ func TestEnrichMovieAuthenticatesAndSelectsLocalizedArtwork(t *testing.T) {
 	}
 	if enriched.PosterURL != "https://images.example/poster-neutral.jpg" ||
 		enriched.BackdropURL != "https://images.example/background.jpg" ||
-		enriched.LogoURL != "https://images.example/logo-fr.png" {
+		enriched.LogoURL != "https://images.example/logo-en.png" {
 		t.Fatalf("unexpected enriched movie: %+v", enriched)
+	}
+}
+
+func TestBestImagePrioritizesQualityBeforeLocalization(t *testing.T) {
+	selected := bestImage("fr-FR", []image{
+		{URL: "https://images.example/french.jpg", Lang: "fr", Likes: "5", Width: "1000", Height: "1426"},
+		{URL: "https://images.example/neutral.jpg", Lang: "00", Likes: "17", Width: "1000", Height: "1426"},
+		{URL: "https://images.example/english.jpg", Lang: "en", Likes: "27", Width: "1000", Height: "1426"},
+	})
+	if selected != "https://images.example/english.jpg" {
+		t.Fatalf("selected lower-rated localized artwork %q", selected)
+	}
+
+	selected = bestImage("fr-FR",
+		[]image{{URL: "https://images.example/hd.png", Lang: "en", Likes: "1", Width: "800", Height: "310"}},
+		[]image{{URL: "https://images.example/legacy.png", Lang: "fr", Likes: "99", Width: "400", Height: "155"}},
+	)
+	if selected != "https://images.example/hd.png" {
+		t.Fatalf("selected lower-tier localized artwork %q", selected)
 	}
 }
 
@@ -81,7 +100,7 @@ func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonPosters(t *testing.T) {
 		enriched.LogoURL != "https://images.example/show-logo.png" {
 		t.Fatalf("unexpected series artwork: %+v", enriched)
 	}
-	if enriched.Seasons[0].PosterURL != "https://images.example/season-1-fr.jpg" ||
+	if enriched.Seasons[0].PosterURL != "https://images.example/season-1-en.jpg" ||
 		enriched.Seasons[1].PosterURL != "https://images.example/season-2.jpg" {
 		t.Fatalf("unexpected season artwork: %+v", enriched.Seasons)
 	}
