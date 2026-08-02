@@ -366,8 +366,11 @@ func (value fanartArtwork) available() bool {
 }
 
 func (service *Service) enrichFanartArtwork(ctx context.Context, sources []Source, items []Item, language string) ([]fanartArtwork, fanartArtwork) {
+	if service.fanart == nil || liveTVOnlySources(sources) {
+		return nil, fanartArtwork{}
+	}
 	collectionIDs := fanartCollectionTMDBIDs(sources)
-	if service.fanart == nil || len(items) == 0 && len(collectionIDs) == 0 {
+	if len(items) == 0 && len(collectionIDs) == 0 {
 		return nil, fanartArtwork{}
 	}
 	itemArtwork := make([]fanartArtwork, len(items))
@@ -448,6 +451,19 @@ func (service *Service) enrichFanartArtwork(ctx context.Context, sources []Sourc
 		}
 	}
 	return itemArtwork, fanartArtwork{}
+}
+
+func liveTVOnlySources(sources []Source) bool {
+	if len(sources) == 0 {
+		return false
+	}
+	for _, source := range sources {
+		if source.Kind != SourceKindAddonCatalog || source.AddonCatalog == nil ||
+			normalizeMediaType(source.AddonCatalog.Type) != MediaTypeTV {
+			return false
+		}
+	}
+	return true
 }
 
 func fanartCollectionTMDBIDs(sources []Source) []string {

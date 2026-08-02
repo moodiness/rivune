@@ -375,6 +375,39 @@ func TestResolveTriesEveryTMDBCollectionForFolderFanart(t *testing.T) {
 	}
 }
 
+func TestEnrichFanartArtworkSkipsLiveTVOnlySources(t *testing.T) {
+	enricher := &recordingFanartEnricher{}
+	service := NewService(nil, nil, nil, nil, nil)
+	service.SetFanartEnricher(nil, nil, enricher, nil)
+	sources := []Source{{
+		Kind: SourceKindAddonCatalog,
+		AddonCatalog: &AddonCatalogSource{
+			Type:      MediaTypeTV,
+			AddonID:   "addon-id",
+			CatalogID: "live",
+		},
+	}}
+	items := []Item{{
+		ID:          "tmdb:550",
+		MediaType:   MediaTypeMovie,
+		Title:       "Live channel",
+		PosterURL:   "https://addon.example/channel.png",
+		ExternalIDs: map[string]string{"tmdb": "550"},
+	}}
+
+	artwork, folderArtwork := service.enrichFanartArtwork(context.Background(), sources, items, "fr-FR")
+
+	if artwork != nil || folderArtwork.available() {
+		t.Fatalf("live TV folder unexpectedly resolved Fanart: items=%+v folder=%+v", artwork, folderArtwork)
+	}
+	if len(enricher.movies) != 0 || len(enricher.series) != 0 || len(enricher.collections) != 0 {
+		t.Fatalf("live TV folder called Fanart: movies=%v series=%v collections=%v", enricher.movies, enricher.series, enricher.collections)
+	}
+	if items[0].PosterURL != "https://addon.example/channel.png" || items[0].FanartResolved {
+		t.Fatalf("live TV addon artwork was replaced: %+v", items[0])
+	}
+}
+
 func TestResolveUsesMDBListProvider(t *testing.T) {
 	provider := &stubMDBListProvider{}
 	service := NewService(nil, nil, nil, nil, provider)
