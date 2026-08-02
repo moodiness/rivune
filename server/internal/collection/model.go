@@ -171,21 +171,22 @@ type SourceReference struct {
 }
 
 type Item struct {
-	ID            string            `json:"id"`
-	MediaType     string            `json:"mediaType"`
-	Title         string            `json:"title"`
-	PosterURL     string            `json:"posterUrl,omitempty"`
-	BackgroundURL string            `json:"backgroundUrl,omitempty"`
-	LogoURL       string            `json:"logoUrl,omitempty"`
-	Description   string            `json:"description,omitempty"`
-	ReleaseInfo   string            `json:"releaseInfo,omitempty"`
-	Released      string            `json:"released,omitempty"`
-	VoteAverage   *float64          `json:"voteAverage,omitempty"`
-	VoteCount     *int              `json:"voteCount,omitempty"`
-	Popularity    *float64          `json:"popularity,omitempty"`
-	ExternalIDs   map[string]string `json:"externalIds"`
-	Sources       []SourceReference `json:"sources"`
-	Raw           json.RawMessage   `json:"raw,omitempty"`
+	ID             string            `json:"id"`
+	MediaType      string            `json:"mediaType"`
+	Title          string            `json:"title"`
+	PosterURL      string            `json:"posterUrl,omitempty"`
+	BackgroundURL  string            `json:"backgroundUrl,omitempty"`
+	LogoURL        string            `json:"logoUrl,omitempty"`
+	Description    string            `json:"description,omitempty"`
+	ReleaseInfo    string            `json:"releaseInfo,omitempty"`
+	Released       string            `json:"released,omitempty"`
+	VoteAverage    *float64          `json:"voteAverage,omitempty"`
+	VoteCount      *int              `json:"voteCount,omitempty"`
+	Popularity     *float64          `json:"popularity,omitempty"`
+	ExternalIDs    map[string]string `json:"externalIds"`
+	Sources        []SourceReference `json:"sources"`
+	Raw            json.RawMessage   `json:"raw,omitempty"`
+	FanartResolved bool              `json:"-"`
 }
 
 type SourcePage struct {

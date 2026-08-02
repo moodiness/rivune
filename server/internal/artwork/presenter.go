@@ -200,17 +200,28 @@ func (service *Service) PresentResolvedFolder(ctx context.Context, resolved *col
 	candidates := make([]artworkCandidate, len(resolved.Items))
 	for index := range resolved.Items {
 		item := &resolved.Items[index]
+		if item.FanartResolved {
+			continue
+		}
 		candidates[index] = artworkCandidate{
 			ordinal: index, mediaType: normalizedMediaType(item.MediaType),
 			identities: identitiesForItem(item.ID, item.ExternalIDs),
 		}
 	}
 	canonical := service.canonicalArtwork(ctx, candidates)
-	for index, value := range canonical {
-		if index < 0 || index >= len(resolved.Items) {
+	if canonical == nil {
+		canonical = make(map[int]canonicalArtwork)
+	}
+	for index := range resolved.Items {
+		item := &resolved.Items[index]
+		if item.FanartResolved {
+			canonical[index] = canonicalArtwork{poster: item.PosterURL, background: item.BackgroundURL, logo: item.LogoURL}
 			continue
 		}
-		item := &resolved.Items[index]
+		value, exists := canonical[index]
+		if !exists {
+			continue
+		}
 		if value.poster != "" {
 			item.PosterURL = value.poster
 		}

@@ -272,6 +272,8 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		pool, metadataService, authService, playbackService, maintenanceInterval, logger,
 	)
 	collectionService := collection.NewService(pool, addonService, collectionTMDB, collectionTrakt, collectionMDBList)
+	externalIDResolver, _ := metadataProvider.(metadata.ExternalIDResolver)
+	collectionService.SetFanartEnricher(metadataProvider, externalIDResolver, artworkEnricher, logger)
 	collectionService.SetArtworkPresenter(artworkService)
 	return &API{
 		artwork:             artworkService,

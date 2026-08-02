@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/metadata"
 )
 
 type AddonProvider interface {
@@ -36,14 +38,26 @@ type MDBListProvider interface {
 type ArtworkPresenter interface {
 	PresentResolvedFolder(context.Context, *ResolvedFolder)
 }
+type ArtworkMetadataProvider interface {
+	SeriesDetails(context.Context, string, string) (metadata.ProviderSeries, error)
+}
+
+type FanartEnricher interface {
+	EnrichMovie(context.Context, metadata.ProviderMovie, string) (metadata.ProviderMovie, error)
+	EnrichSeries(context.Context, metadata.ProviderSeries, string) (metadata.ProviderSeries, error)
+}
 
 type Service struct {
-	pool    *pgxpool.Pool
-	addon   AddonProvider
-	tmdb    TMDBProvider
-	trakt   TraktProvider
-	mdblist MDBListProvider
-	artwork ArtworkPresenter
+	pool             *pgxpool.Pool
+	addon            AddonProvider
+	tmdb             TMDBProvider
+	trakt            TraktProvider
+	mdblist          MDBListProvider
+	artwork          ArtworkPresenter
+	artworkMetadata  ArtworkMetadataProvider
+	externalResolver metadata.ExternalIDResolver
+	fanart           FanartEnricher
+	logger           *slog.Logger
 }
 
 func NewService(pool *pgxpool.Pool, addonProvider AddonProvider, tmdbProvider TMDBProvider, traktProvider TraktProvider, mdblistProvider MDBListProvider) *Service {
@@ -52,6 +66,16 @@ func NewService(pool *pgxpool.Pool, addonProvider AddonProvider, tmdbProvider TM
 
 func (service *Service) SetArtworkPresenter(presenter ArtworkPresenter) {
 	service.artwork = presenter
+}
+
+func (service *Service) SetFanartEnricher(provider ArtworkMetadataProvider, resolver metadata.ExternalIDResolver, enricher FanartEnricher, logger *slog.Logger) {
+	service.artworkMetadata = provider
+	service.externalResolver = resolver
+	service.fanart = enricher
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service.logger = logger
 }
 
 func (service *Service) List(ctx context.Context, principal auth.Principal) ([]Collection, error) {

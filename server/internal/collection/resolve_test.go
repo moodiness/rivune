@@ -3,14 +3,18 @@ package collection
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/metadata"
 )
 
 type artworkTMDBProvider struct {
-	page SourcePage
+	page     SourcePage
+	resolved map[string]string
+	series   metadata.ProviderSeries
 }
 
 func (provider artworkTMDBProvider) ResolveCollectionSource(context.Context, TMDBSource, int, string, string) (SourcePage, error) {
@@ -23,6 +27,40 @@ func (artworkTMDBProvider) LookupCollectionSource(context.Context, string, strin
 
 func (artworkTMDBProvider) CollectionGenres(context.Context, string, string) ([]Genre, error) {
 	return nil, nil
+}
+
+func (provider artworkTMDBProvider) ResolveExternalID(_ context.Context, _ string, source, externalID string) (string, error) {
+	return provider.resolved[source+":"+externalID], nil
+}
+
+func (provider artworkTMDBProvider) SeriesDetails(context.Context, string, string) (metadata.ProviderSeries, error) {
+	return provider.series, nil
+}
+
+type recordingFanartEnricher struct {
+	mu     sync.Mutex
+	movies []string
+	series []string
+}
+
+func (enricher *recordingFanartEnricher) EnrichMovie(_ context.Context, movie metadata.ProviderMovie, _ string) (metadata.ProviderMovie, error) {
+	enricher.mu.Lock()
+	enricher.movies = append(enricher.movies, movie.AdditionalIDs["tmdb"])
+	enricher.mu.Unlock()
+	movie.PosterURL = "https://assets.fanart.tv/movie-" + movie.AdditionalIDs["tmdb"] + "-poster.jpg"
+	movie.BackdropURL = "https://assets.fanart.tv/movie-" + movie.AdditionalIDs["tmdb"] + "-background.jpg"
+	movie.LogoURL = "https://assets.fanart.tv/movie-" + movie.AdditionalIDs["tmdb"] + "-logo.png"
+	return movie, nil
+}
+
+func (enricher *recordingFanartEnricher) EnrichSeries(_ context.Context, series metadata.ProviderSeries, _ string) (metadata.ProviderSeries, error) {
+	enricher.mu.Lock()
+	enricher.series = append(enricher.series, series.AdditionalIDs["tvdb"])
+	enricher.mu.Unlock()
+	series.PosterURL = "https://assets.fanart.tv/series-" + series.AdditionalIDs["tvdb"] + "-poster.jpg"
+	series.BackdropURL = "https://assets.fanart.tv/series-" + series.AdditionalIDs["tvdb"] + "-background.jpg"
+	series.LogoURL = "https://assets.fanart.tv/series-" + series.AdditionalIDs["tvdb"] + "-logo.png"
+	return series, nil
 }
 
 type stubMDBListProvider struct {
@@ -129,6 +167,81 @@ func TestResolveHydratesFolderArtworkWithoutOverridingConfiguration(t *testing.T
 			}
 			if resolved.Folder.CoverImageURL != test.wantCover || resolved.Folder.HeroBackdropURL != test.wantBackdrop {
 				t.Fatalf("folder artwork = (%q, %q), want (%q, %q)", resolved.Folder.CoverImageURL, resolved.Folder.HeroBackdropURL, test.wantCover, test.wantBackdrop)
+			}
+		})
+	}
+}
+
+func TestResolveFetchesFanartForItemsAndAutomaticFolderArtwork(t *testing.T) {
+	tests := []struct {
+		name         string
+		folder       Folder
+		wantCover    string
+		wantBackdrop string
+	}{
+		{
+			name:         "automatic folder artwork uses Fanart",
+			folder:       Folder{Title: "Fanart collection"},
+			wantCover:    "https://assets.fanart.tv/movie-550-poster.jpg",
+			wantBackdrop: "https://assets.fanart.tv/movie-550-background.jpg",
+		},
+		{
+			name: "configured folder artwork wins",
+			folder: Folder{
+				Title: "Configured collection", CoverImageURL: "https://example.com/custom-cover.jpg",
+				HeroBackdropURL: "https://example.com/custom-background.jpg",
+			},
+			wantCover:    "https://example.com/custom-cover.jpg",
+			wantBackdrop: "https://example.com/custom-background.jpg",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := artworkTMDBProvider{
+				page: SourcePage{
+					CoverImageURL:   "https://image.tmdb.org/source-cover.jpg",
+					HeroBackdropURL: "https://image.tmdb.org/source-background.jpg",
+					Items: []Item{
+						{
+							ID: "tt0137523", MediaType: MediaTypeMovie, Title: "Fight Club",
+							PosterURL: "https://image.tmdb.org/movie-poster.jpg", ExternalIDs: map[string]string{"imdb": "tt0137523"},
+						},
+						{
+							ID: "tmdb:1396", MediaType: MediaTypeSeries, Title: "Breaking Bad",
+							PosterURL: "https://image.tmdb.org/series-poster.jpg", ExternalIDs: map[string]string{"tmdb": "1396"},
+						},
+					},
+				},
+				resolved: map[string]string{"imdb:tt0137523": "550"},
+				series:   metadata.ProviderSeries{AdditionalIDs: map[string]string{"tvdb": "81189"}},
+			}
+			enricher := &recordingFanartEnricher{}
+			service := NewService(nil, nil, provider, nil, nil)
+			service.SetFanartEnricher(provider, provider, enricher, nil)
+			source := TMDBSource{SourceType: "collection", MediaType: MediaTypeBoth}
+			test.folder.Sources = []Source{{Kind: SourceKindTMDB, Title: "Mixed collection", TMDB: &source}}
+
+			resolved, err := service.resolve(context.Background(), auth.Principal{}, "collection-id", test.folder, 1, 100, "fr-FR", "FR")
+			if err != nil {
+				t.Fatalf("resolve folder: %v", err)
+			}
+			if resolved.Folder.CoverImageURL != test.wantCover || resolved.Folder.HeroBackdropURL != test.wantBackdrop {
+				t.Fatalf("folder artwork = (%q, %q), want (%q, %q)",
+					resolved.Folder.CoverImageURL, resolved.Folder.HeroBackdropURL, test.wantCover, test.wantBackdrop)
+			}
+			if len(resolved.Items) != 2 ||
+				resolved.Items[0].PosterURL != "https://assets.fanart.tv/movie-550-poster.jpg" ||
+				resolved.Items[0].BackgroundURL != "https://assets.fanart.tv/movie-550-background.jpg" ||
+				resolved.Items[0].LogoURL != "https://assets.fanart.tv/movie-550-logo.png" ||
+				resolved.Items[1].PosterURL != "https://assets.fanart.tv/series-81189-poster.jpg" ||
+				resolved.Items[1].BackgroundURL != "https://assets.fanart.tv/series-81189-background.jpg" ||
+				resolved.Items[1].LogoURL != "https://assets.fanart.tv/series-81189-logo.png" ||
+				!resolved.Items[0].FanartResolved || !resolved.Items[1].FanartResolved {
+				t.Fatalf("items did not use direct Fanart artwork: %+v", resolved.Items)
+			}
+			if len(enricher.movies) != 1 || enricher.movies[0] != "550" || len(enricher.series) != 1 || enricher.series[0] != "81189" {
+				t.Fatalf("unexpected Fanart requests: movies=%v series=%v", enricher.movies, enricher.series)
 			}
 		})
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/metadata"
 )
 
 var resolutionLanguagePattern = regexp.MustCompile(`^[A-Za-z]{2,3}(?:-[A-Za-z]{2})?$`)
@@ -70,6 +71,8 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, c
 	if err != nil || page < 1 || page > 1000 || limit < 1 || limit > 200 {
 		return ResolvedFolder{}, ErrInvalidInput
 	}
+	coverConfigured := folder.CoverImageURL != ""
+	heroBackdropConfigured := folder.HeroBackdropURL != ""
 	outcomes := make([]sourceOutcome, len(folder.Sources))
 	semaphore := make(chan struct{}, 8)
 	var wait sync.WaitGroup
@@ -124,6 +127,23 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, c
 	if len(items) > limit {
 		items = items[:limit]
 		hasMore = true
+	}
+	resolvedFanart := service.enrichFanartItems(ctx, items, language)
+	if !coverConfigured {
+		for _, value := range resolvedFanart {
+			if value.poster != "" {
+				folder.CoverImageURL = value.poster
+				break
+			}
+		}
+	}
+	if !heroBackdropConfigured {
+		for _, value := range resolvedFanart {
+			if value.background != "" {
+				folder.HeroBackdropURL = value.background
+				break
+			}
+		}
 	}
 	if items == nil {
 		items = []Item{}
@@ -323,6 +343,131 @@ func mergeItem(target *Item, candidate Item) {
 	if target.Popularity == nil {
 		target.Popularity = candidate.Popularity
 	}
+}
+
+type fanartArtwork struct {
+	poster     string
+	background string
+	logo       string
+}
+
+func (value fanartArtwork) available() bool {
+	return value.poster != "" || value.background != "" || value.logo != ""
+}
+
+func (service *Service) enrichFanartItems(ctx context.Context, items []Item, language string) []fanartArtwork {
+	if service.fanart == nil || len(items) == 0 {
+		return nil
+	}
+	artwork := make([]fanartArtwork, len(items))
+	enrichmentErrors := make([]error, len(items))
+	semaphore := make(chan struct{}, 8)
+	var wait sync.WaitGroup
+	for index := range items {
+		index := index
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				enrichmentErrors[index] = ctx.Err()
+				return
+			}
+			artwork[index], enrichmentErrors[index] = service.fanartArtwork(ctx, items[index], language)
+		}()
+	}
+	wait.Wait()
+	for index, value := range artwork {
+		if enrichmentErrors[index] != nil {
+			if service.logger != nil {
+				service.logger.DebugContext(ctx, "Fanart collection artwork unavailable",
+					"mediaType", items[index].MediaType, "itemID", items[index].ID, "error", enrichmentErrors[index])
+			}
+			continue
+		}
+		if !value.available() {
+			continue
+		}
+		if value.poster != "" {
+			items[index].PosterURL = value.poster
+		}
+		if value.background != "" {
+			items[index].BackgroundURL = value.background
+		}
+		if value.logo != "" {
+			items[index].LogoURL = value.logo
+		}
+		items[index].FanartResolved = true
+	}
+	return artwork
+}
+
+func (service *Service) fanartArtwork(ctx context.Context, item Item, language string) (fanartArtwork, error) {
+	switch normalizeMediaType(item.MediaType) {
+	case MediaTypeMovie:
+		tmdbID, err := service.resolveTMDBArtworkID(ctx, item)
+		if err != nil || tmdbID == "" {
+			return fanartArtwork{}, err
+		}
+		enriched, err := service.fanart.EnrichMovie(ctx, metadata.ProviderMovie{
+			ExternalID:    tmdbID,
+			AdditionalIDs: map[string]string{"tmdb": tmdbID},
+		}, language)
+		if err != nil {
+			return fanartArtwork{}, err
+		}
+		return fanartArtwork{poster: enriched.PosterURL, background: enriched.BackdropURL, logo: enriched.LogoURL}, nil
+	case MediaTypeSeries:
+		tvdbID := strings.TrimSpace(item.ExternalIDs["tvdb"])
+		if tvdbID == "" {
+			tmdbID, err := service.resolveTMDBArtworkID(ctx, item)
+			if err != nil || tmdbID == "" || service.artworkMetadata == nil {
+				return fanartArtwork{}, err
+			}
+			series, detailsErr := service.artworkMetadata.SeriesDetails(ctx, tmdbID, language)
+			if detailsErr != nil {
+				return fanartArtwork{}, detailsErr
+			}
+			tvdbID = strings.TrimSpace(series.AdditionalIDs["tvdb"])
+		}
+		if tvdbID == "" {
+			return fanartArtwork{}, nil
+		}
+		enriched, err := service.fanart.EnrichSeries(ctx, metadata.ProviderSeries{
+			AdditionalIDs: map[string]string{"tvdb": tvdbID},
+		}, language)
+		if err != nil {
+			return fanartArtwork{}, err
+		}
+		return fanartArtwork{poster: enriched.PosterURL, background: enriched.BackdropURL, logo: enriched.LogoURL}, nil
+	default:
+		return fanartArtwork{}, nil
+	}
+}
+
+func (service *Service) resolveTMDBArtworkID(ctx context.Context, item Item) (string, error) {
+	if tmdbID := strings.TrimSpace(item.ExternalIDs["tmdb"]); tmdbID != "" {
+		return tmdbID, nil
+	}
+	if service.externalResolver == nil {
+		return "", nil
+	}
+	for _, provider := range []string{"imdb", "tvdb"} {
+		externalID := strings.TrimSpace(item.ExternalIDs[provider])
+		if externalID == "" {
+			continue
+		}
+		tmdbID, err := service.externalResolver.ResolveExternalID(ctx, normalizeMediaType(item.MediaType), provider, externalID)
+		if err != nil {
+			return "", err
+		}
+		if tmdbID = strings.TrimSpace(tmdbID); tmdbID != "" {
+			return tmdbID, nil
+		}
+	}
+	return "", nil
 }
 
 func itemKey(item Item) string {
