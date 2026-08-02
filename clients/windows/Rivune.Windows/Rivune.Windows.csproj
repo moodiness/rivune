@@ -9,7 +9,7 @@
     <AssemblyName>Rivune.Windows</AssemblyName>
     <RootNamespace>Rivune.Windows</RootNamespace>
     <PackageId>Rivune.Windows</PackageId>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <Authors>Rivune contributors</Authors>
     <Description>Typed protocol-v17 Rivune API client for native Windows applications.</Description>
     <PackageTags>rivune;windows;winui;api-client</PackageTags>
