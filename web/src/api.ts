@@ -14,6 +14,7 @@ import type {
   NotificationBroadcast,
   LibraryPage,
   MaintenanceSettings,
+  MovieMetadata,
   PlaybackCapabilities,
   PlaybackActivity,
   PlaybackPurgeResult,
@@ -220,6 +221,7 @@ export const api = {
     trailerCaptionLanguage = preferredSubtitleLanguage && preferredSubtitleLanguage !== "auto" ? preferredSubtitleLanguage : navigator.language;
     seriesMappingProvider = mappingProvider === "tvdb" ? "tvdb" : "tmdb";
   },
+  metadataLocale: () => metadataLanguage,
   resolveFolder: (collectionId: string, folderId: string, page = 1, signal?: AbortSignal) => request<ResolvedFolder>(`/collections/${collectionId}/folders/${folderId}/items${query({ page, limit: 100, language: metadataLanguage, region: metadataRegion })}`, { signal }),
   tmdbLookup: (kind: string, search: string) => request<{ results: { id: number; name: string; imageUrl?: string }[] }>(`/collections/tmdb/lookup${query({ kind, query: search, language: metadataLanguage, page: 1 })}`),
   tmdbGenres: (mediaType: string) => request<{ genres: { id: number; name: string }[] }>(`/collections/tmdb/genres${query({ mediaType, language: metadataLanguage })}`),
@@ -257,7 +259,7 @@ export const api = {
   playbackActivity: () => request<PlaybackActivity>("/playback/activity"),
   stopPlaybackActivitySession: (sessionId: string) => request<void>(`/playback/activity/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
   purgePlaybackActivity: () => request<PlaybackPurgeResult>("/playback/activity/purge", { method: "POST" }),
-  movieDetails: (titleId: string) => request<{ posterUrl?: string; backdropUrl?: string; logoUrl?: string; voteAverage: number; voteCount: number; externalIds: Record<string, string> }>(`/metadata/titles/${encodeURIComponent(titleId)}${query({ language: metadataLanguage })}`),
+  movieDetails: (titleId: string) => request<MovieMetadata>(`/metadata/titles/${encodeURIComponent(titleId)}${query({ language: metadataLanguage })}`),
   seriesDetails: (titleId: string, options?: { mappingProvider?: "tmdb" | "tvdb"; episodeOrderId?: string }) => request<SeriesMetadata>(`/metadata/series/${encodeURIComponent(titleId)}${query({ language: metadataLanguage, mappingProvider: options?.mappingProvider ?? seriesMappingProvider, episodeOrder: options?.episodeOrderId })}`),
   seasonDetails: (seasonId: string, signal?: AbortSignal, mappingProvider = seriesMappingProvider) => request<SeasonMetadata>(`/metadata/seasons/${encodeURIComponent(seasonId)}${query({ language: metadataLanguage, mappingProvider })}`, { signal }),
   trailers: (titleId: string, seasonNumber?: number) => request<TrailerList>(`/metadata/titles/${encodeURIComponent(titleId)}/trailers${query({ language: trailerLanguage, captionLanguage: trailerCaptionLanguage, seasonNumber })}`),

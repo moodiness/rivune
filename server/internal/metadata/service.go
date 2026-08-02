@@ -112,7 +112,7 @@ func (s *Service) MovieDetails(ctx context.Context, principal auth.Principal, ti
 		if err := json.Unmarshal(cachedPayload, &cached); err != nil {
 			return Movie{}, fmt.Errorf("decode cached title metadata: %w", err)
 		}
-		if err := s.persistCachedMovieReleaseDate(ctx, cached); err != nil {
+		if err := s.persistCachedMovieSnapshot(ctx, cached); err != nil {
 			return Movie{}, err
 		}
 		return cached, nil
@@ -255,7 +255,7 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 			cached.MappingProvider = providerName
 		}
 		cached.EpisodeOrders = normalizeEpisodeOrders(cached.EpisodeOrders)
-		if err := s.persistCachedSeriesReleaseDates(ctx, cached); err != nil {
+		if err := s.persistCachedSeriesSnapshots(ctx, cached); err != nil {
 			return Series{}, err
 		}
 		return cached, nil
@@ -795,7 +795,7 @@ func (s *Service) persistMoviePage(ctx context.Context, provided ProviderMoviePa
 		if err != nil {
 			return MoviePage{}, err
 		}
-		if err := persistTitleSnapshot(ctx, tx, titleID, item.Title, item.PosterURL, item.BackdropURL, item.ReleaseDate); err != nil {
+		if err := persistMissingTitleSnapshot(ctx, tx, titleID, item.Title, item.PosterURL, item.BackdropURL, item.ReleaseDate); err != nil {
 			return MoviePage{}, err
 		}
 		items = append(items, normalizeMovie(titleID, item))
@@ -827,7 +827,7 @@ func (s *Service) persistSeriesPage(ctx context.Context, provided ProviderSeries
 		if err != nil {
 			return SeriesPage{}, err
 		}
-		if err := persistTitleSnapshot(ctx, tx, titleID, item.Name, item.PosterURL, item.BackdropURL, item.FirstAirDate); err != nil {
+		if err := persistMissingTitleSnapshot(ctx, tx, titleID, item.Name, item.PosterURL, item.BackdropURL, item.FirstAirDate); err != nil {
 			return SeriesPage{}, err
 		}
 		items = append(items, normalizeSeries(titleID, item))
@@ -946,37 +946,37 @@ func cacheTitle(ctx context.Context, tx pgx.Tx, titleID, metadataProvider, langu
 	return nil
 }
 
-func (s *Service) persistCachedMovieReleaseDate(ctx context.Context, movie Movie) error {
+func (s *Service) persistCachedMovieSnapshot(ctx context.Context, movie Movie) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin cached movie release-date persistence: %w", err)
+		return fmt.Errorf("begin cached movie snapshot persistence: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := persistReleaseDate(ctx, tx, movie.ID, movie.ReleaseDate); err != nil {
+	if err := persistTitleSnapshot(ctx, tx, movie.ID, movie.Title, movie.PosterURL, movie.BackdropURL, movie.ReleaseDate); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit cached movie release-date persistence: %w", err)
+		return fmt.Errorf("commit cached movie snapshot persistence: %w", err)
 	}
 	return nil
 }
 
-func (s *Service) persistCachedSeriesReleaseDates(ctx context.Context, series Series) error {
+func (s *Service) persistCachedSeriesSnapshots(ctx context.Context, series Series) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin cached series release-date persistence: %w", err)
+		return fmt.Errorf("begin cached series snapshot persistence: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := persistReleaseDate(ctx, tx, series.ID, series.FirstAirDate); err != nil {
+	if err := persistTitleSnapshot(ctx, tx, series.ID, series.Name, series.PosterURL, series.BackdropURL, series.FirstAirDate); err != nil {
 		return err
 	}
 	for _, season := range series.Seasons {
-		if err := persistReleaseDate(ctx, tx, season.ID, season.AirDate); err != nil {
+		if err := persistTitleSnapshot(ctx, tx, season.ID, season.Name, season.PosterURL, "", season.AirDate); err != nil {
 			return err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit cached series release-date persistence: %w", err)
+		return fmt.Errorf("commit cached series snapshot persistence: %w", err)
 	}
 	return nil
 }
@@ -1088,6 +1088,12 @@ func persistTitleSnapshot(ctx context.Context, tx pgx.Tx, titleID, title, poster
 		    release_date = COALESCE(NULLIF($5, '')::date, release_date),
 		    updated_at = now()
 		WHERE id = $1::uuid
+		  AND (
+			display_title IS DISTINCT FROM COALESCE(NULLIF($2, ''), display_title)
+			OR poster_url IS DISTINCT FROM COALESCE(NULLIF($3, ''), poster_url)
+			OR background_url IS DISTINCT FROM COALESCE(NULLIF($4, ''), background_url)
+			OR release_date IS DISTINCT FROM COALESCE(NULLIF($5, '')::date, release_date)
+		  )
 	`, titleID, title, posterURL, backgroundURL, releaseDate); err != nil {
 		return fmt.Errorf("persist title snapshot: %w", err)
 	}
@@ -1098,6 +1104,36 @@ func ensureTitle(ctx context.Context, tx pgx.Tx, externalID, mediaType string, p
 	return ensureTitleHierarchy(ctx, tx, externalID, mediaType, parentID, ordinal, false)
 }
 
+func persistMissingTitleSnapshot(ctx context.Context, tx pgx.Tx, titleID, title, posterURL, backgroundURL, releaseDate string) error {
+	title = strings.TrimSpace(title)
+	posterURL = strings.TrimSpace(posterURL)
+	backgroundURL = strings.TrimSpace(backgroundURL)
+	releaseDate = strings.TrimSpace(releaseDate)
+	if releaseDate != "" {
+		parsed, err := time.Parse(time.DateOnly, releaseDate)
+		if err != nil || parsed.Year() < 1 || parsed.Format(time.DateOnly) != releaseDate {
+			return errors.New("metadata provider returned an invalid release date")
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE titles
+		SET display_title = COALESCE(display_title, NULLIF($2, '')),
+		    poster_url = COALESCE(poster_url, NULLIF($3, '')),
+		    background_url = COALESCE(background_url, NULLIF($4, '')),
+		    release_date = COALESCE(release_date, NULLIF($5, '')::date),
+		    updated_at = now()
+		WHERE id = $1::uuid
+		  AND (
+			(display_title IS NULL AND NULLIF($2, '') IS NOT NULL)
+			OR (poster_url IS NULL AND NULLIF($3, '') IS NOT NULL)
+			OR (background_url IS NULL AND NULLIF($4, '') IS NOT NULL)
+			OR (release_date IS NULL AND NULLIF($5, '') IS NOT NULL)
+		  )
+	`, titleID, title, posterURL, backgroundURL, releaseDate); err != nil {
+		return fmt.Errorf("persist missing title snapshot: %w", err)
+	}
+	return nil
+}
 func ensureCanonicalSeasonTitle(ctx context.Context, tx pgx.Tx, externalID string, parentID *string, ordinal *int) (string, error) {
 	return ensureTitleHierarchy(ctx, tx, externalID, MediaTypeSeason, parentID, ordinal, true)
 }

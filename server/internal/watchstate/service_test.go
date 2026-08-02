@@ -116,6 +116,97 @@ func TestResolveTitleRejectsNonISOReleaseDate(t *testing.T) {
 	}
 }
 
+func TestResolveTitlePreservesCanonicalMetadataSnapshot(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run the PostgreSQL title resolution test")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	defer pool.Close()
+
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE titles (
+			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			media_type text NOT NULL,
+			display_title text,
+			poster_url text,
+			background_url text,
+			release_info text,
+			release_date date,
+			resource_id text,
+			resource_provider text,
+			updated_at timestamptz NOT NULL DEFAULT now()
+		);
+		CREATE TEMPORARY TABLE title_external_ids (
+			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			provider text NOT NULL,
+			namespace text NOT NULL,
+			external_id text NOT NULL,
+			PRIMARY KEY (provider, namespace, external_id)
+		);
+		INSERT INTO titles (
+			id, media_type, display_title, poster_url, background_url, release_info, release_date, resource_id, resource_provider
+		) VALUES (
+			'22222222-2222-4222-8222-222222222222', 'movie', 'Canonical Movie',
+			'https://assets.fanart.tv/poster.jpg', 'https://assets.fanart.tv/background.jpg', '2025', '2025-04-18', '123', 'tmdb'
+		);
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
+		VALUES ('22222222-2222-4222-8222-222222222222', 'tmdb', 'movie', '123')
+	`); err != nil {
+		t.Fatalf("seed canonical title snapshot: %v", err)
+	}
+
+	profileID := "11111111-1111-4111-8111-111111111111"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	if _, err := NewService(pool).ResolveTitle(ctx, auth.Principal{
+		ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
+	}, ResolveTitleInput{
+		MediaType:     "movie",
+		Provider:      "tmdb",
+		ExternalID:    "123",
+		ResourceID:    "addon-resource",
+		Title:         "Shallow Addon Movie",
+		PosterURL:     "https://image.tmdb.org/shallow-poster.jpg",
+		BackgroundURL: "https://image.tmdb.org/shallow-background.jpg",
+		ReleaseInfo:   "2024",
+		Released:      "2024-01-01",
+	}); err != nil {
+		t.Fatalf("resolve existing title: %v", err)
+	}
+
+	var title, posterURL, backgroundURL, releaseInfo, releaseDate, resourceID string
+	if err := pool.QueryRow(ctx, `
+		SELECT display_title, poster_url, background_url, release_info, release_date::text, resource_id
+		FROM titles
+		WHERE id = '22222222-2222-4222-8222-222222222222'
+	`).Scan(&title, &posterURL, &backgroundURL, &releaseInfo, &releaseDate, &resourceID); err != nil {
+		t.Fatalf("query resolved title snapshot: %v", err)
+	}
+	if title != "Canonical Movie" ||
+		posterURL != "https://assets.fanart.tv/poster.jpg" ||
+		backgroundURL != "https://assets.fanart.tv/background.jpg" ||
+		releaseInfo != "2025" ||
+		releaseDate != "2025-04-18" {
+		t.Fatalf("shallow title resolution replaced canonical metadata: title=%q poster=%q background=%q releaseInfo=%q releaseDate=%q",
+			title, posterURL, backgroundURL, releaseInfo, releaseDate)
+	}
+	if resourceID != "addon-resource" {
+		t.Fatalf("resource identity was not refreshed: %q", resourceID)
+	}
+}
+
 func TestNextEpisodeQuerySkipsKnownFutureSeasonAfterCompletedSeason(t *testing.T) {
 	query := strings.Join(strings.Fields(nextEpisodeQuery), " ")
 

@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { api, APIError } from "./api";
 import { Button, HorizontalDragRow, IconButton, Notice } from "./components";
 import { translate as t } from "./i18n";
+import { cachedMediaItem, cacheMediaItem } from "./metadataCache";
 import { notifyError, notifyErrorMessage, notifySuccess } from "./notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "./titleProviders";
 import type { EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
@@ -245,7 +246,8 @@ function episodeIsUpcoming(episode: EpisodeMetadata): boolean {
 }
 
 export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }: { item: MediaItem; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenEpisode?: (item: MediaItem) => void }) {
-  const [details, setDetails] = useState(item);
+  const metadataLocale = api.metadataLocale();
+  const [details, setDetails] = useState(() => cachedMediaItem(item, metadataLocale));
   const [playing, setPlaying] = useState(false);
   const [titleID, setTitleID] = useState(item.titleId);
   const [saved, setSaved] = useState(false);
@@ -311,6 +313,12 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
   const canSelectStream = item.mediaType !== "series" && !(fromContinue && seriesVisible);
 
   useEffect(() => {
+    const expectedEpisodeID = item.titleId ?? continueEpisodeID;
+    if (item.mediaType === "episode" && selectedEpisode && expectedEpisodeID && selectedEpisode.id !== expectedEpisodeID) return;
+    cacheMediaItem(item, details, metadataLocale, titleID);
+  }, [continueEpisodeID, details, item, metadataLocale, selectedEpisode, titleID]);
+
+  useEffect(() => {
     if (playing) return;
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -340,12 +348,12 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
       if (!active || !meta) return;
       setDetails((current) => ({
         ...current,
-        title: item.mediaType === "episode" ? current.title : String(meta.name ?? meta.title ?? current.title),
-        description: item.mediaType === "episode" ? current.description : String(meta.description ?? current.description ?? ""),
-        posterUrl: item.mediaType === "episode" ? current.posterUrl : String(meta.poster ?? current.posterUrl ?? ""),
-        backgroundUrl: String(current.backgroundUrl ?? meta.background ?? meta.backgroundUrl ?? ""),
-        logoUrl: String(meta.logo ?? current.logoUrl ?? ""),
-        releaseInfo: item.mediaType === "episode" ? current.releaseInfo : String(meta.releaseInfo ?? meta.year ?? current.releaseInfo ?? ""),
+        title: item.mediaType === "episode" ? current.title : current.title || String(meta.name ?? meta.title ?? ""),
+        description: item.mediaType === "episode" ? current.description : current.description || String(meta.description ?? ""),
+        posterUrl: item.mediaType === "episode" ? current.posterUrl : current.posterUrl || String(meta.poster ?? ""),
+        backgroundUrl: current.backgroundUrl || String(meta.background ?? meta.backgroundUrl ?? ""),
+        logoUrl: current.logoUrl || String(meta.logo ?? ""),
+        releaseInfo: item.mediaType === "episode" ? current.releaseInfo : current.releaseInfo || String(meta.releaseInfo ?? meta.year ?? ""),
         raw: { ...current.raw, ...meta },
       }));
     }).catch((cause) => {
@@ -374,12 +382,17 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
       setTitleProgress(progress);
       if (movie) setDetails((current) => ({
         ...current,
+        title: movie.title || current.title,
+        description: movie.overview || current.description,
         voteAverage: movie.voteAverage,
         posterUrl: movie.posterUrl || current.posterUrl,
-        backgroundUrl: current.backgroundUrl || movie.backdropUrl,
-        logoUrl: current.logoUrl || movie.logoUrl,
+        backgroundUrl: movie.backdropUrl || current.backgroundUrl,
+        logoUrl: movie.logoUrl || current.logoUrl,
+        releaseInfo: movie.releaseDate || current.releaseInfo,
+        released: movie.releaseDate || current.released,
         voteCount: movie.voteCount,
         externalIds: { ...current.externalIds, ...movie.externalIds },
+        raw: { ...current.raw, ...movie },
       }));
     })().catch(() => undefined);
     return () => { active = false; };
@@ -408,12 +421,17 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
       seasonCacheRef.current.clear();
       if (item.mediaType === "series" || item.mediaType === "episode") setDetails((current) => ({
         ...current,
+        title: item.mediaType === "series" ? resolved.name || current.title : current.title,
+        description: item.mediaType === "series" ? resolved.overview || current.description : current.description,
         voteAverage: resolved.voteAverage,
         posterUrl: resolved.posterUrl || current.posterUrl,
-        backgroundUrl: current.backgroundUrl || resolved.backdropUrl,
-        logoUrl: current.logoUrl || resolved.logoUrl,
+        backgroundUrl: item.mediaType === "series" ? resolved.backdropUrl || current.backgroundUrl : current.backgroundUrl || resolved.backdropUrl,
+        logoUrl: resolved.logoUrl || current.logoUrl,
+        releaseInfo: item.mediaType === "series" ? resolved.firstAirDate || current.releaseInfo : current.releaseInfo,
+        released: item.mediaType === "series" ? resolved.firstAirDate || current.released : current.released,
         voteCount: resolved.voteCount,
         externalIds: { ...resolved.externalIds, ...current.externalIds },
+        raw: { ...current.raw, ...resolved },
       }));
       const seasons = [...resolved.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber);
       const requestedSeason = seasons.find((candidate) => candidate.id === continueSeasonID)
@@ -484,7 +502,8 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenEpisode }
         const requestedByNumber = continueEpisodeNumber !== undefined && !exactMappedEpisodeRequired
           ? resolved.episodes.find((episode) => episode.episodeNumber === continueEpisodeNumber)
           : undefined;
-        setSelectedEpisode(requested ?? requestedByNumber ?? (exactMappedEpisodeRequired ? undefined : resolved.episodes[0]));
+        const fallbackEpisode = item.mediaType === "episode" || exactMappedEpisodeRequired ? undefined : resolved.episodes[0];
+        setSelectedEpisode(requested ?? requestedByNumber ?? fallbackEpisode);
       }
       const progressEntries = await Promise.all(resolved.episodes.map(async (episode) => [episode.id, await api.progress(episode.id).catch(() => undefined)] as const));
       if (!active) return;

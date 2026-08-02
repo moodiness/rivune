@@ -135,11 +135,11 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 		return TitleReference{}, fmt.Errorf("find resolved title: %w", err)
 	} else if _, err := tx.Exec(ctx, `
 		UPDATE titles
-		SET display_title = $2,
-		    poster_url = NULLIF($3, ''),
-		    background_url = NULLIF($4, ''),
-		    release_info = NULLIF($5, ''),
-		    release_date = COALESCE(NULLIF($6, '')::date, release_date),
+		SET display_title = COALESCE(display_title, $2),
+		    poster_url = COALESCE(poster_url, NULLIF($3, '')),
+		    background_url = COALESCE(background_url, NULLIF($4, '')),
+		    release_info = COALESCE(release_info, NULLIF($5, '')),
+		    release_date = COALESCE(release_date, NULLIF($6, '')::date),
 		    resource_id = $7,
 		    resource_provider = $8,
 		    updated_at = now()

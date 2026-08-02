@@ -227,6 +227,24 @@ export type SeasonSummary = {
   externalIds: Record<string, string>;
 };
 export type SeasonMetadata = SeasonSummary & { episodes: EpisodeMetadata[] };
+export type MovieMetadata = {
+  id: string;
+  mediaType: "movie";
+  title: string;
+  originalTitle: string;
+  originalLanguage: string;
+  overview: string;
+  releaseDate?: string;
+  posterUrl?: string;
+  backdropUrl?: string;
+  logoUrl?: string;
+  tagline?: string;
+  runtimeMinutes?: number;
+  genres: Array<{ id: number; name: string }>;
+  voteAverage: number;
+  voteCount: number;
+  externalIds: Record<string, string>;
+};
 export type SeriesMetadata = {
   id: string;
   mediaType: "series";

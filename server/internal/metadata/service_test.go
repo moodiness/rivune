@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/moodiness/rivune/server/internal/auth"
 )
 
@@ -362,17 +364,21 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()
 	const (
-		seriesID     = "11111111-1111-4111-8111-111111111111"
-		seasonID     = "22222222-2222-4222-8222-222222222222"
-		episodeID    = "5810d584-af52-4ba3-8cef-17a98bc19f77"
-		seasonPoster = "https://image.tmdb.org/t/p/w500/futurama-season-5.jpg"
-		episodeStill = "https://image.tmdb.org/t/p/w500/asteroique.jpg"
+		seriesID       = "11111111-1111-4111-8111-111111111111"
+		seasonID       = "22222222-2222-4222-8222-222222222222"
+		episodeID      = "5810d584-af52-4ba3-8cef-17a98bc19f77"
+		seriesPoster   = "https://assets.fanart.tv/futurama-poster.jpg"
+		seriesBackdrop = "https://assets.fanart.tv/futurama-background.jpg"
+		seasonPoster   = "https://image.tmdb.org/t/p/w500/futurama-season-5.jpg"
+		episodeStill   = "https://image.tmdb.org/t/p/w500/asteroique.jpg"
 	)
 	series := Series{
 		ID:           seriesID,
 		MediaType:    MediaTypeSeries,
 		Name:         "Futurama",
 		FirstAirDate: "1999-03-28",
+		PosterURL:    seriesPoster,
+		BackdropURL:  seriesBackdrop,
 		Seasons: []SeasonSummary{{
 			ID:           seasonID,
 			MediaType:    MediaTypeSeason,
@@ -412,10 +418,10 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 		t.Fatalf("encode cached season: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title) VALUES
-			($1::uuid, 'series', NULL, NULL, 'Futurama'),
-			($2::uuid, 'season', $1::uuid, 5, NULL),
-			($3::uuid, 'episode', $2::uuid, 6, '   ')
+		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title, poster_url, background_url) VALUES
+			($1::uuid, 'series', NULL, NULL, 'Stale Futurama', 'https://image.tmdb.org/stale-poster.jpg', 'https://image.tmdb.org/stale-background.jpg'),
+			($2::uuid, 'season', $1::uuid, 5, NULL, NULL, NULL),
+			($3::uuid, 'episode', $2::uuid, 6, '   ', NULL, NULL)
 	`, seriesID, seasonID, episodeID); err != nil {
 		t.Fatalf("seed cached titles: %v", err)
 	}
@@ -446,9 +452,12 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 		t.Fatalf("load cached series details: %v", err)
 	}
 
-	var seriesDate, seasonTitle, seasonPosterURL, seasonDate, episodeTitle, episodePosterURL, episodeDate string
+	var seriesTitle, seriesPosterURL, seriesBackgroundURL, seriesDate, seasonTitle, seasonPosterURL, seasonDate, episodeTitle, episodePosterURL, episodeDate string
 	if err := pool.QueryRow(ctx, `
-		SELECT series.release_date::text,
+		SELECT series.display_title,
+		       series.poster_url,
+		       series.background_url,
+		       series.release_date::text,
 		       season.display_title,
 		       season.poster_url,
 		       season.release_date::text,
@@ -460,6 +469,9 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 		JOIN titles AS episode ON episode.parent_id = season.id
 		WHERE series.id = $1::uuid
 	`, seriesID).Scan(
+		&seriesTitle,
+		&seriesPosterURL,
+		&seriesBackgroundURL,
 		&seriesDate,
 		&seasonTitle,
 		&seasonPosterURL,
@@ -473,11 +485,94 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 	if seriesDate != "1999-03-28" || seasonDate != "2002-02-10" || episodeDate != "2002-03-17" {
 		t.Fatalf("unexpected backfilled dates: series=%q season=%q episode=%q", seriesDate, seasonDate, episodeDate)
 	}
+	if seriesTitle != "Futurama" || seriesPosterURL != seriesPoster || seriesBackgroundURL != seriesBackdrop {
+		t.Fatalf("unexpected cached series snapshot: title=%q poster=%q background=%q", seriesTitle, seriesPosterURL, seriesBackgroundURL)
+	}
 	if seasonTitle != "Saison 5" || seasonPosterURL != seasonPoster {
 		t.Fatalf("unexpected cached season snapshot: title=%q poster=%q", seasonTitle, seasonPosterURL)
 	}
 	if episodeTitle != "Astéroïque" || episodePosterURL != episodeStill {
 		t.Fatalf("unexpected cached episode snapshot: title=%q still=%q", episodeTitle, episodePosterURL)
+	}
+}
+
+func TestCachedMovieMetadataRestoresCanonicalSnapshot(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	const (
+		movieID         = "33333333-3333-4333-8333-333333333333"
+		canonicalPoster = "https://assets.fanart.tv/movie-poster.jpg"
+		canonicalArt    = "https://assets.fanart.tv/movie-background.jpg"
+	)
+	movie := Movie{
+		ID:            movieID,
+		MediaType:     MediaTypeMovie,
+		Title:         "Canonical Movie",
+		ReleaseDate:   "2025-04-18",
+		PosterURL:     canonicalPoster,
+		BackdropURL:   canonicalArt,
+		ExternalIDs:   map[string]string{"tmdb": "123"},
+		Genres:        []Genre{},
+		VoteAverage:   8.1,
+		VoteCount:     500,
+		OriginalTitle: "Canonical Movie",
+	}
+	payload, err := json.Marshal(movie)
+	if err != nil {
+		t.Fatalf("encode cached movie: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title, poster_url, background_url)
+		VALUES ($1::uuid, 'movie', 'Stale Movie', 'https://image.tmdb.org/stale-poster.jpg', 'https://image.tmdb.org/stale-background.jpg');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
+		VALUES ($1::uuid, 'tmdb', 'movie', '123');
+		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at)
+		VALUES ($1::uuid, 'tmdb', 'fr-FR', $2::jsonb, now() + interval '1 hour')
+	`, pgx.QueryExecModeSimpleProtocol, movieID, string(payload)); err != nil {
+		t.Fatalf("seed cached movie: %v", err)
+	}
+
+	profileID := "44444444-4444-4444-8444-444444444444"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+	service := &Service{pool: pool}
+	if _, err := service.MovieDetails(ctx, principal, movieID, "fr-FR"); err != nil {
+		t.Fatalf("load cached movie details: %v", err)
+	}
+
+	var title, posterURL, backgroundURL, releaseDate string
+	if err := pool.QueryRow(ctx, `
+		SELECT display_title, poster_url, background_url, release_date::text
+		FROM titles
+		WHERE id = $1::uuid
+	`, movieID).Scan(&title, &posterURL, &backgroundURL, &releaseDate); err != nil {
+		t.Fatalf("query restored movie snapshot: %v", err)
+	}
+	if title != movie.Title || posterURL != canonicalPoster || backgroundURL != canonicalArt || releaseDate != movie.ReleaseDate {
+		t.Fatalf("unexpected cached movie snapshot: title=%q poster=%q background=%q release=%q", title, posterURL, backgroundURL, releaseDate)
+	}
+
+	if _, err := service.persistMoviePage(ctx, ProviderMoviePage{
+		Items: []ProviderMovie{{
+			ExternalID:  "123",
+			Title:       "Shallow Search Result",
+			PosterURL:   "https://image.tmdb.org/search-poster.jpg",
+			BackdropURL: "https://image.tmdb.org/search-background.jpg",
+			ReleaseDate: "2025-04-18",
+		}},
+		Page: 1, TotalPages: 1, TotalResults: 1,
+	}); err != nil {
+		t.Fatalf("persist shallow movie page: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT display_title, poster_url, background_url, release_date::text
+		FROM titles
+		WHERE id = $1::uuid
+	`, movieID).Scan(&title, &posterURL, &backgroundURL, &releaseDate); err != nil {
+		t.Fatalf("query movie snapshot after shallow search: %v", err)
+	}
+	if title != movie.Title || posterURL != canonicalPoster || backgroundURL != canonicalArt || releaseDate != movie.ReleaseDate {
+		t.Fatalf("shallow search replaced canonical movie snapshot: title=%q poster=%q background=%q release=%q", title, posterURL, backgroundURL, releaseDate)
 	}
 }
 

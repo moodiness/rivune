@@ -135,6 +135,31 @@ test("continue-watching episode opens its series and requests trailers for each 
   await expect.poll(() => rivune.matching("/api/v1/metadata/titles/series-1/trailers", "GET").map((request) => request.search.get("seasonNumber"))).toEqual(["1", "2"]);
 });
 
+test("resolved artwork remains visible while revisiting metadata is revalidated", async ({ page, rivune: _rivune }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/series.svg");
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
+
+  const requestStarted = Promise.withResolvers<void>();
+  const releaseRequest = Promise.withResolvers<void>();
+  await page.route("**/api/v1/metadata/series/series-1*", async (route) => {
+    requestStarted.resolve();
+    await releaseRequest.promise;
+    await route.fallback();
+  });
+
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await requestStarted.promise;
+  try {
+    await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/series.svg", { timeout: 500 });
+  } finally {
+    releaseRequest.resolve();
+  }
+  await expect(page.getByRole("heading", { name: /Signal Horizon.*S01E01.*First Light/ })).toBeVisible();
+});
+
 test("series guide switches to a selected TVDB episode order", async ({ page, rivune }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
