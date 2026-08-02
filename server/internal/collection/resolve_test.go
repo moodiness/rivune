@@ -38,16 +38,21 @@ func (provider artworkTMDBProvider) SeriesDetails(context.Context, string, strin
 }
 
 type recordingFanartEnricher struct {
-	mu          sync.Mutex
-	collections []string
-	movies      []string
-	series      []string
+	mu                sync.Mutex
+	collectionArtwork map[string]metadata.ProviderCollection
+	collections       []string
+	movies            []string
+	series            []string
 }
 
 func (enricher *recordingFanartEnricher) EnrichCollection(_ context.Context, collection metadata.ProviderCollection, _ string) (metadata.ProviderCollection, error) {
 	enricher.mu.Lock()
 	enricher.collections = append(enricher.collections, collection.ExternalID)
 	enricher.mu.Unlock()
+	if artwork, configured := enricher.collectionArtwork[collection.ExternalID]; configured {
+		artwork.ExternalID = collection.ExternalID
+		return artwork, nil
+	}
 	collection.PosterURL = "https://assets.fanart.tv/collection-" + collection.ExternalID + "-poster.jpg"
 	collection.BackdropURL = "https://assets.fanart.tv/collection-" + collection.ExternalID + "-background.jpg"
 	collection.LogoURL = "https://assets.fanart.tv/collection-" + collection.ExternalID + "-logo.png"
@@ -304,6 +309,69 @@ func TestResolveUsesTMDBCollectionFanartBeforeMovieArtwork(t *testing.T) {
 	if len(enricher.collections) != 1 || enricher.collections[0] != "87096" ||
 		len(enricher.movies) != 1 || enricher.movies[0] != "19995" {
 		t.Fatalf("unexpected Fanart identities: collections=%v movies=%v", enricher.collections, enricher.movies)
+	}
+}
+
+func TestResolveTriesEveryTMDBCollectionForFolderFanart(t *testing.T) {
+	firstCollectionID := int64(948485)
+	secondCollectionID := int64(263)
+	provider := artworkTMDBProvider{
+		page: SourcePage{
+			CoverImageURL:   "https://image.tmdb.org/movie-poster.jpg",
+			HeroBackdropURL: "https://image.tmdb.org/movie-background.jpg",
+		},
+	}
+	enricher := &recordingFanartEnricher{
+		collectionArtwork: map[string]metadata.ProviderCollection{
+			"948485": {},
+			"263": {
+				PosterURL:   "https://assets.fanart.tv/dark-knight-collection-poster.jpg",
+				BackdropURL: "https://assets.fanart.tv/dark-knight-collection-background.jpg",
+				LogoURL:     "https://assets.fanart.tv/dark-knight-collection-logo.png",
+			},
+		},
+	}
+	service := NewService(nil, nil, provider, nil, nil)
+	service.SetFanartEnricher(provider, provider, enricher, nil)
+	folder := Folder{
+		Title: "Batman",
+		Sources: []Source{
+			{
+				Kind:  SourceKindTMDB,
+				Title: "The Batman",
+				TMDB: &TMDBSource{
+					SourceType: "collection",
+					TMDBID:     &firstCollectionID,
+					MediaType:  MediaTypeMovie,
+				},
+			},
+			{
+				Kind:  SourceKindTMDB,
+				Title: "The Dark Knight",
+				TMDB: &TMDBSource{
+					SourceType: "collection",
+					TMDBID:     &secondCollectionID,
+					MediaType:  MediaTypeMovie,
+				},
+			},
+		},
+	}
+
+	resolved, err := service.resolve(context.Background(), auth.Principal{}, "collection-id", folder, 1, 100, "fr-FR", "FR")
+	if err != nil {
+		t.Fatalf("resolve multi-collection folder: %v", err)
+	}
+	if resolved.Folder.CoverImageURL != "https://assets.fanart.tv/dark-knight-collection-poster.jpg" ||
+		resolved.Folder.HeroBackdropURL != "https://assets.fanart.tv/dark-knight-collection-background.jpg" ||
+		resolved.Folder.TitleLogoURL != "https://assets.fanart.tv/dark-knight-collection-logo.png" {
+		t.Fatalf("folder did not use the next collection with Fanart: %+v", resolved.Folder)
+	}
+	requested := make(map[string]bool, len(enricher.collections))
+	for _, id := range enricher.collections {
+		requested[id] = true
+	}
+	if len(requested) != 2 || !requested["948485"] || !requested["263"] {
+		t.Fatalf("did not try every configured TMDB collection: %v", enricher.collections)
 	}
 }
 
