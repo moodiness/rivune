@@ -46,32 +46,32 @@ const demoProfiles: Profile[] = [
 ];
 
 const seasonZero = {
-  id: "season-specials", mediaType: "season", seriesId: "series-1", name: "Specials", overview: "Behind the voyage.", seasonNumber: 0, episodeCount: 4, airDate: "2023-05-05", posterUrl: "https://fixtures.rivune.test/season-specials.svg", voteAverage: 0, externalIds: { tvdb: "1928275" },
+  id: "season-specials", mediaType: "season", seriesId: "series-1", name: "Specials", overview: "Behind the voyage.", seasonNumber: 0, episodeCount: 4, airDate: "2023-05-05", backdropUrl: "https://fixtures.rivune.test/season-specials-backdrop.svg", voteAverage: 0, externalIds: { tvdb: "1928275" },
   episodes: [
-    { id: "special-1", mediaType: "episode", seasonId: "season-specials", name: "Building a World", overview: "The world behind the voyage.", seasonNumber: 0, episodeNumber: 1, airDate: "2023-06-30", stillUrl: "https://fixtures.rivune.test/special-1.svg", runtimeMinutes: 10, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "9873798" } },
-    { id: "special-2", mediaType: "episode", seasonId: "season-specials", name: "Questions of the Silo", overview: "Questions from the audience.", seasonNumber: 0, episodeNumber: 2, airDate: "2023-05-05", stillUrl: "https://fixtures.rivune.test/special-2.svg", runtimeMinutes: 8, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "9873799" } },
-    { id: "special-3", mediaType: "episode", seasonId: "season-specials", name: "Season 1 Recap", overview: "A recap of season one.", seasonNumber: 0, episodeNumber: 3, airDate: "2024-11-11", stillUrl: "https://fixtures.rivune.test/special-3.svg", runtimeMinutes: 5, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "10798335" } },
-    { id: "special-4", mediaType: "episode", seasonId: "season-specials", name: "The Rebellion in Season 2", overview: "Inside the second season.", seasonNumber: 0, episodeNumber: 4, airDate: "2024-11-15", stillUrl: "https://fixtures.rivune.test/special-4.svg", runtimeMinutes: 7, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "10806950" } },
+    { id: "special-1", mediaType: "episode", seasonId: "season-specials", name: "Building a World", overview: "The world behind the voyage.", seasonNumber: 0, episodeNumber: 1, airDate: "2023-06-30", stillUrl: "https://fixtures.rivune.test/special-1-still.svg", runtimeMinutes: 10, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "9873798" } },
+    { id: "special-2", mediaType: "episode", seasonId: "season-specials", name: "Questions of the Silo", overview: "Questions from the audience.", seasonNumber: 0, episodeNumber: 2, airDate: "2023-05-05", stillUrl: "https://fixtures.rivune.test/special-2-still.svg", runtimeMinutes: 8, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "9873799" } },
+    { id: "special-3", mediaType: "episode", seasonId: "season-specials", name: "Season 1 Recap", overview: "A recap of season one.", seasonNumber: 0, episodeNumber: 3, airDate: "2024-11-11", stillUrl: "https://fixtures.rivune.test/special-3-still.svg", runtimeMinutes: 5, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "10798335" } },
+    { id: "special-4", mediaType: "episode", seasonId: "season-specials", name: "The Rebellion in Season 2", overview: "Inside the second season.", seasonNumber: 0, episodeNumber: 4, airDate: "2024-11-15", runtimeMinutes: 7, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "10806950" } },
   ],
 };
 
 const seasonOne = {
-  id: "season-1", mediaType: "season", seriesId: "series-1", name: "Season 1", overview: "The first voyage.", seasonNumber: 1, episodeCount: 2, airDate: "2024-01-01", posterUrl: "https://fixtures.rivune.test/season-1.svg", voteAverage: 8.2, externalIds: { tmdb: "101" },
+  id: "season-1", mediaType: "season", seriesId: "series-1", name: "Season 1", overview: "The first voyage.", seasonNumber: 1, episodeCount: 2, airDate: "2024-01-01", posterUrl: "https://fixtures.rivune.test/season-1-poster.svg", backdropUrl: "https://fixtures.rivune.test/season-1-backdrop.svg", voteAverage: 8.2, externalIds: { tmdb: "101" },
   episodes: [
-    { id: "episode-1", mediaType: "episode", seasonId: "season-1", name: "First Light", overview: "The crew follows a mysterious signal.", seasonNumber: 1, episodeNumber: 1, airDate: "2024-01-03", stillUrl: "https://fixtures.rivune.test/episode-1.svg", runtimeMinutes: 30, voteAverage: 8.1, voteCount: 100, externalIds: { imdb: "tt900001" } },
-    { id: "episode-2", mediaType: "episode", seasonId: "season-1", name: "Second Orbit", overview: "A new course changes everything.", seasonNumber: 1, episodeNumber: 2, airDate: "2024-01-10", stillUrl: "https://fixtures.rivune.test/episode-2.svg", runtimeMinutes: 31, voteAverage: 8.3, voteCount: 95, externalIds: { imdb: "tt900002" } },
+    { id: "episode-1", mediaType: "episode", seasonId: "season-1", name: "First Light", overview: "The crew follows a mysterious signal.", seasonNumber: 1, episodeNumber: 1, airDate: "2024-01-03", stillUrl: "https://fixtures.rivune.test/episode-1-still.svg", backdropUrl: "https://fixtures.rivune.test/episode-1-backdrop.svg", runtimeMinutes: 30, voteAverage: 8.1, voteCount: 100, externalIds: { imdb: "tt900001" } },
+    { id: "episode-2", mediaType: "episode", seasonId: "season-1", name: "Second Orbit", overview: "A new course changes everything.", seasonNumber: 1, episodeNumber: 2, airDate: "2024-01-10", stillUrl: "https://fixtures.rivune.test/episode-2-still.svg", backdropUrl: "https://fixtures.rivune.test/episode-2-backdrop.svg", runtimeMinutes: 31, voteAverage: 8.3, voteCount: 95, externalIds: { imdb: "tt900002" } },
   ],
 };
 
 const seasonTwo = {
-  id: "season-2", mediaType: "season", seriesId: "series-1", name: "Season 2", overview: "The second voyage.", seasonNumber: 2, episodeCount: 1, airDate: "2024-06-01", posterUrl: "https://fixtures.rivune.test/season-2.svg", voteAverage: 8.6, externalIds: { tmdb: "102" },
+  id: "season-2", mediaType: "season", seriesId: "series-1", name: "Season 2", overview: "The second voyage.", seasonNumber: 2, episodeCount: 1, airDate: "2024-06-01", posterUrl: "https://fixtures.rivune.test/season-2-poster.svg", voteAverage: 8.6, externalIds: { tmdb: "102" },
   episodes: [
-    { id: "episode-3", mediaType: "episode", seasonId: "season-2", name: "Moonrise", overview: "The team reunites on a distant moon.", seasonNumber: 2, episodeNumber: 1, airDate: "2024-06-01", stillUrl: "https://fixtures.rivune.test/episode-3.svg", runtimeMinutes: 34, voteAverage: 8.7, voteCount: 88, externalIds: { imdb: "tt900003" } },
+    { id: "episode-3", mediaType: "episode", seasonId: "season-2", name: "Moonrise", overview: "The team reunites on a distant moon.", seasonNumber: 2, episodeNumber: 1, airDate: "2024-06-01", stillUrl: "https://fixtures.rivune.test/episode-3-still.svg", backdropUrl: "https://fixtures.rivune.test/episode-3-backdrop.svg", runtimeMinutes: 34, voteAverage: 8.7, voteCount: 88, externalIds: { imdb: "tt900003" } },
   ],
 };
 
 const dvdSeason = {
-  id: "dvd-season-1", mediaType: "season", seriesId: "series-1", name: "DVD Season 1", overview: "The disc order.", seasonNumber: 1, episodeCount: 3, airDate: "2024-01-01", posterUrl: "https://fixtures.rivune.test/dvd-season-1.svg", voteAverage: 8.4, externalIds: { tvdb: "2001" },
+  id: "dvd-season-1", mediaType: "season", seriesId: "series-1", name: "DVD Season 1", overview: "The disc order.", seasonNumber: 1, episodeCount: 3, airDate: "2024-01-01", posterUrl: "https://fixtures.rivune.test/dvd-season-1-poster.svg", backdropUrl: "https://fixtures.rivune.test/dvd-season-1-backdrop.svg", voteAverage: 8.4, externalIds: { tvdb: "2001" },
   episodes: [
     { id: "dvd-episode-1", mediaType: "episode", seasonId: "dvd-season-1", name: "Disc Opening", overview: "The DVD order begins.", seasonNumber: 1, episodeNumber: 1, airDate: "2024-01-03", runtimeMinutes: 30, voteAverage: 8.1, voteCount: 100, externalIds: { tvdb: "2101" } },
     { id: "dvd-episode-2", mediaType: "episode", seasonId: "dvd-season-1", name: "Disc Middle", overview: "The DVD order continues.", seasonNumber: 1, episodeNumber: 2, airDate: "2024-01-10", runtimeMinutes: 31, voteAverage: 8.3, voteCount: 95, externalIds: { tvdb: "2102" } },
@@ -92,7 +92,7 @@ const extraSeasonSummaries = Array.from({ length: 10 }, (_, index) => {
     name: `Season ${seasonNumber}`,
     seasonNumber,
     episodeCount: seasonNumber === 4 ? 0 : 1,
-    posterUrl: `https://fixtures.rivune.test/season-${seasonNumber}.svg`,
+    posterUrl: `https://fixtures.rivune.test/season-${seasonNumber}-poster.svg`,
     externalIds: { tmdb: String(100 + seasonNumber) },
   };
 });
@@ -113,8 +113,8 @@ const series = {
   originalLanguage: "en",
   overview: "Explorers cross the edge of known space.",
   firstAirDate: "2024-01-03",
-  posterUrl: "https://fixtures.rivune.test/series.svg",
-  backdropUrl: "https://fixtures.rivune.test/backdrop.svg",
+  posterUrl: "https://fixtures.rivune.test/series-poster.svg",
+  backdropUrl: "https://fixtures.rivune.test/series-backdrop.svg",
   logoUrl: "https://fixtures.rivune.test/series-logo.svg",
   tagline: "Beyond the map.",
   status: "Returning Series",

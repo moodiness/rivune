@@ -25,14 +25,14 @@ func freshState(now time.Time) sessionState {
 func freshProfileState(now time.Time, kids bool) *profileState {
 	library := map[string]bool{SignalMovieID: true, OrbitSeriesID: true, WorldNewsID: true}
 	progress := map[string]progressState{
-		SignalMovieID: {PositionSeconds: 842, DurationSeconds: 1440, Version: 3, UpdatedAt: now.Add(-18 * time.Minute)},
+		SignalMovieID:   {PositionSeconds: 842, DurationSeconds: 1440, Version: 3, UpdatedAt: now.Add(-18 * time.Minute)},
 		OrbitEpisodeOne: {PositionSeconds: 1920, DurationSeconds: 1920, Completed: true, Version: 2, UpdatedAt: now.Add(-26 * time.Hour)},
 		OrbitEpisodeTwo: {PositionSeconds: 611, DurationSeconds: 1860, Version: 4, UpdatedAt: now.Add(-3 * time.Hour)},
 	}
 	if kids {
 		library = map[string]bool{OpenSkiesID: true, OrbitSeriesID: true, CultureLiveID: true}
 		progress = map[string]progressState{
-			OpenSkiesID: {PositionSeconds: 244, DurationSeconds: 1320, Version: 1, UpdatedAt: now.Add(-45 * time.Minute)},
+			OpenSkiesID:     {PositionSeconds: 244, DurationSeconds: 1320, Version: 1, UpdatedAt: now.Add(-45 * time.Minute)},
 			OrbitEpisodeOne: {PositionSeconds: 1920, DurationSeconds: 1920, Completed: true, Version: 1, UpdatedAt: now.Add(-48 * time.Hour)},
 		}
 	}
@@ -75,7 +75,9 @@ func asset(name string) string {
 
 func findMedia(id string) (mediaSeed, bool) {
 	for _, item := range mediaCatalog() {
-		if item.TitleID == id || item.ResourceID == id { return item, true }
+		if item.TitleID == id || item.ResourceID == id {
+			return item, true
+		}
 	}
 	return mediaSeed{}, false
 }
@@ -85,7 +87,7 @@ func mediaItem(item mediaSeed) map[string]any {
 		"id": item.ResourceID, "titleId": item.TitleID, "mediaType": item.MediaType, "title": item.Title,
 		"description": item.Description, "releaseInfo": item.ReleaseInfo, "posterUrl": item.Poster,
 		"backgroundUrl": item.Backdrop, "resourceId": item.ResourceID, "sourceName": item.SourceName,
-		"sources": []map[string]any{{"id": "demo-addon", "kind": "addon_catalog", "title": item.SourceName, "addonId": "demo-addon"}},
+		"sources":     []map[string]any{{"id": "demo-addon", "kind": "addon_catalog", "title": item.SourceName, "addonId": "demo-addon"}},
 		"externalIds": map[string]string{"demo": item.ResourceID},
 	}
 	if item.MediaType == "tv" {
@@ -127,33 +129,38 @@ func addonMeta(item mediaSeed) map[string]any {
 
 func movieMetadata(id string) (map[string]any, bool) {
 	item, ok := findMedia(id)
-	if !ok || item.MediaType != "movie" { return nil, false }
+	if !ok || item.MediaType != "movie" {
+		return nil, false
+	}
 	return map[string]any{
 		"id": item.TitleID, "mediaType": "movie", "title": item.Title, "originalTitle": item.Title,
 		"originalLanguage": item.Language, "overview": item.Description, "releaseDate": "2026-03-14",
 		"posterUrl": item.Poster, "backdropUrl": item.Backdrop, "logoUrl": asset("logo-demo.svg"),
 		"tagline": "Synthetic demonstration content", "runtimeMinutes": 24,
-		"genres": []map[string]any{{"id": 878, "name": item.Category}},
-		"cast": []map[string]any{{"id": "demo-cast-1", "name": "Mara Vale", "character": "Aster"}, {"id": "demo-cast-2", "name": "Jon Bell", "character": "Rowan"}},
+		"genres":      []map[string]any{{"id": 878, "name": item.Category}},
+		"cast":        []map[string]any{{"id": "demo-cast-1", "name": "Mara Vale", "character": "Aster"}, {"id": "demo-cast-2", "name": "Jon Bell", "character": "Rowan"}},
 		"voteAverage": 8.1, "voteCount": 428, "externalIds": map[string]string{"demo": item.ResourceID},
 	}, true
 }
 
 func seriesMetadata(id string) (map[string]any, bool) {
-	if id != OrbitSeriesID && id != "demo-orbit-station" { return nil, false }
+	if id != OrbitSeriesID && id != "demo-orbit-station" {
+		return nil, false
+	}
 	seasonOne, _ := seasonMetadata(OrbitSeasonOneID)
 	seasonTwo, _ := seasonMetadata(OrbitSeasonTwoID)
-	delete(seasonOne, "episodes"); delete(seasonTwo, "episodes")
+	delete(seasonOne, "episodes")
+	delete(seasonTwo, "episodes")
 	return map[string]any{
 		"id": OrbitSeriesID, "mediaType": "series", "name": "Orbit Station", "originalName": "Orbit Station",
 		"originalLanguage": "en", "overview": "The rotating crew of an orbital laboratory uncovers a message hidden in its telemetry.",
 		"firstAirDate": "2025-02-11", "lastAirDate": "2026-04-22", "posterUrl": asset("poster-orbit.svg"),
 		"backdropUrl": asset("backdrop-space.svg"), "logoUrl": asset("logo-demo.svg"), "tagline": "Every orbit leaves a trace.",
 		"status": "Returning Series", "numberOfSeasons": 2, "numberOfEpisodes": 4,
-		"genres": []map[string]any{{"id": 878, "name": "Science Fiction"}, {"id": 18, "name": "Drama"}},
-		"cast": []map[string]any{{"id": "demo-cast-3", "name": "Avery Stone", "character": "Commander Ilya Voss"}, {"id": "demo-cast-4", "name": "Mina Park", "character": "Dr. Sera Vale"}},
+		"genres":      []map[string]any{{"id": 878, "name": "Science Fiction"}, {"id": 18, "name": "Drama"}},
+		"cast":        []map[string]any{{"id": "demo-cast-3", "name": "Avery Stone", "character": "Commander Ilya Voss"}, {"id": "demo-cast-4", "name": "Mina Park", "character": "Dr. Sera Vale"}},
 		"voteAverage": 8.6, "voteCount": 812, "seasons": []map[string]any{seasonOne, seasonTwo},
-		"episodeOrders": []map[string]any{{"id": "demo-aired", "name": "Aired Order", "type": "official", "isDefault": true}},
+		"episodeOrders":          []map[string]any{{"id": "demo-aired", "name": "Aired Order", "type": "official", "isDefault": true}},
 		"selectedEpisodeOrderId": "demo-aired", "mappingProvider": "tmdb", "externalIds": map[string]string{"demo": "demo-orbit-station"},
 	}, true
 }
@@ -169,7 +176,8 @@ func seasonMetadata(id string) (map[string]any, bool) {
 	case OrbitSeasonTwoID, "demo-orbit-station-season-2":
 		seasonID, name, overview, airDate, poster, number = OrbitSeasonTwoID, "Season 2", "A second crew follows the message beyond the station.", "2026-04-15", asset("poster-orbit-s2.svg"), 2
 		episodes = []map[string]any{episode(OrbitEpisodeThree, seasonID, "Shadow Transit", "The station passes through a region missing from every chart.", 2, 1), episode(OrbitEpisodeFour, seasonID, "Home Vector", "The crew chooses what the signal should become.", 2, 2)}
-	default: return nil, false
+	default:
+		return nil, false
 	}
 	return map[string]any{
 		"id": seasonID, "mediaType": "season", "seriesId": OrbitSeriesID, "name": name, "overview": overview,
@@ -181,7 +189,7 @@ func seasonMetadata(id string) (map[string]any, bool) {
 func episode(id, seasonID, name, overview string, season, number int) map[string]any {
 	return map[string]any{
 		"id": id, "mediaType": "episode", "seasonId": seasonID, "name": name, "overview": overview,
-		"seasonNumber": season, "episodeNumber": number, "airDate": "2026-04-15", "stillUrl": asset("backdrop-space.svg"),
+		"seasonNumber": season, "episodeNumber": number, "airDate": "2026-04-15", "stillUrl": asset("backdrop-space.svg"), "backdropUrl": asset("backdrop-space.svg"),
 		"runtimeMinutes": 31, "voteAverage": 8.4, "voteCount": 176, "externalIds": map[string]string{"demo": "demo-orbit-episode"},
 	}
 }

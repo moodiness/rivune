@@ -214,6 +214,7 @@ data class SeasonSummary(
     val episodeCount: Int,
     val airDate: String? = null,
     val posterUrl: String? = null,
+    val backdropUrl: String? = null,
     val voteAverage: Double,
     val externalIds: Map<String, String>,
 )
@@ -228,6 +229,7 @@ data class Season(
     val seasonNumber: Int,
     val airDate: String? = null,
     val posterUrl: String? = null,
+    val backdropUrl: String? = null,
     val voteAverage: Double,
     val episodes: List<Episode>,
     val externalIds: Map<String, String>,
@@ -244,6 +246,7 @@ data class Episode(
     val episodeNumber: Int,
     val airDate: String? = null,
     val stillUrl: String? = null,
+    val backdropUrl: String? = null,
     val runtimeMinutes: Int? = null,
     val voteAverage: Double,
     val voteCount: Int,

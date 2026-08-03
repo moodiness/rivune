@@ -303,13 +303,13 @@ func (service *Service) LocalizeSeries(ctx context.Context, value *metadata.Seri
 	if value == nil {
 		return
 	}
-	values := make([]*string, 0, len(value.Cast)+len(value.Seasons)+3)
+	values := make([]*string, 0, len(value.Cast)+len(value.Seasons)*2+3)
 	values = append(values, &value.PosterURL, &value.BackdropURL, &value.LogoURL)
 	for index := range value.Cast {
 		values = append(values, &value.Cast[index].ProfileURL)
 	}
 	for index := range value.Seasons {
-		values = append(values, &value.Seasons[index].PosterURL)
+		values = append(values, &value.Seasons[index].PosterURL, &value.Seasons[index].BackdropURL)
 	}
 	service.localizeStrings(ctx, values...)
 }
@@ -320,7 +320,7 @@ func (service *Service) LocalizeSeriesPage(ctx context.Context, value *metadata.
 	}
 	artworkCount := len(value.Items) * 3
 	for index := range value.Items {
-		artworkCount += len(value.Items[index].Cast) + len(value.Items[index].Seasons)
+		artworkCount += len(value.Items[index].Cast) + len(value.Items[index].Seasons)*2
 	}
 	values := make([]*string, 0, artworkCount)
 	for index := range value.Items {
@@ -330,7 +330,7 @@ func (service *Service) LocalizeSeriesPage(ctx context.Context, value *metadata.
 			values = append(values, &item.Cast[castIndex].ProfileURL)
 		}
 		for seasonIndex := range item.Seasons {
-			values = append(values, &item.Seasons[seasonIndex].PosterURL)
+			values = append(values, &item.Seasons[seasonIndex].PosterURL, &item.Seasons[seasonIndex].BackdropURL)
 		}
 	}
 	service.localizeStrings(ctx, values...)
@@ -340,10 +340,10 @@ func (service *Service) LocalizeSeason(ctx context.Context, value *metadata.Seas
 	if value == nil {
 		return
 	}
-	values := make([]*string, 0, len(value.Episodes)+1)
-	values = append(values, &value.PosterURL)
+	values := make([]*string, 0, len(value.Episodes)*2+2)
+	values = append(values, &value.PosterURL, &value.BackdropURL)
 	for index := range value.Episodes {
-		values = append(values, &value.Episodes[index].StillURL)
+		values = append(values, &value.Episodes[index].StillURL, &value.Episodes[index].BackdropURL)
 	}
 	service.localizeStrings(ctx, values...)
 }

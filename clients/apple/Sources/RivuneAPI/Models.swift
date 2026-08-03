@@ -250,6 +250,7 @@ public struct SeasonSummary: Codable, Sendable, Equatable, Identifiable {
     public let episodeCount: Int
     public let airDate: String?
     public let posterUrl: String?
+    public let backdropUrl: String?
     public let voteAverage: Double
     public let externalIds: [String: String]
 }
@@ -263,6 +264,7 @@ public struct Season: Codable, Sendable, Equatable, Identifiable {
     public let seasonNumber: Int
     public let airDate: String?
     public let posterUrl: String?
+    public let backdropUrl: String?
     public let voteAverage: Double
     public let episodes: [Episode]
     public let externalIds: [String: String]
@@ -278,6 +280,7 @@ public struct Episode: Codable, Sendable, Equatable, Identifiable {
     public let episodeNumber: Int
     public let airDate: String?
     public let stillUrl: String?
+    public let backdropUrl: String?
     public let runtimeMinutes: Int?
     public let voteAverage: Double
     public let voteCount: Int

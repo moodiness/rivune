@@ -12,10 +12,11 @@ import (
 )
 
 type artworkSnapshot struct {
-	PosterURL     string         `json:"posterUrl,omitempty"`
-	BackdropURL   string         `json:"backdropUrl,omitempty"`
-	LogoURL       string         `json:"logoUrl,omitempty"`
-	SeasonPosters map[int]string `json:"seasonPosters,omitempty"`
+	PosterURL       string         `json:"posterUrl,omitempty"`
+	BackdropURL     string         `json:"backdropUrl,omitempty"`
+	LogoURL         string         `json:"logoUrl,omitempty"`
+	SeasonPosters   map[int]string `json:"seasonPosters,omitempty"`
+	SeasonBackdrops map[int]string `json:"seasonBackdrops,omitempty"`
 }
 
 type artworkResponseCache interface {

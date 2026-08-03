@@ -161,7 +161,8 @@ func TestSeriesArtworkCacheIsSharedWithSeasonFolders(t *testing.T) {
 			"tvposter":[{"url":"https://images.example/show.jpg","lang":"00"}],
 			"showbackground":[{"url":"https://images.example/background.jpg","lang":"00"}],
 			"hdtvlogo":[{"url":"https://images.example/logo.png","lang":"fr"}],
-			"seasonposter":[{"url":"https://images.example/season-2.jpg","lang":"fr","season":"2"}]
+			"seasonposter":[{"url":"https://images.example/season-2.jpg","lang":"fr","season":"2"}],
+			"seasonthumb":[{"url":"https://images.example/season-2-background.jpg","lang":"00","season":"2"}]
 		}`))
 	}))
 	defer server.Close()
@@ -181,7 +182,9 @@ func TestSeriesArtworkCacheIsSharedWithSeasonFolders(t *testing.T) {
 	if requests.Load() != 1 {
 		t.Fatalf("series and season folders made %d Fanart requests, want 1", requests.Load())
 	}
-	if series.PosterURL == "" || series.BackdropURL == "" || series.LogoURL == "" || season.PosterURL != "https://images.example/season-2.jpg" {
+	if series.PosterURL == "" || series.BackdropURL == "" || series.LogoURL == "" ||
+		season.PosterURL != "https://images.example/season-2.jpg" ||
+		season.BackdropURL != "https://images.example/season-2-background.jpg" {
 		t.Fatalf("incomplete cached series artwork: series=%+v season=%+v", series, season)
 	}
 }

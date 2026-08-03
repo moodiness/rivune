@@ -224,6 +224,7 @@ public sealed record SeasonSummary
     public required int EpisodeCount { get; init; }
     public string? AirDate { get; init; }
     public string? PosterUrl { get; init; }
+    public string? BackdropUrl { get; init; }
     public required double VoteAverage { get; init; }
     public required IReadOnlyDictionary<string, string> ExternalIds { get; init; }
 }
@@ -238,6 +239,7 @@ public sealed record Season
     public required int SeasonNumber { get; init; }
     public string? AirDate { get; init; }
     public string? PosterUrl { get; init; }
+    public string? BackdropUrl { get; init; }
     public required double VoteAverage { get; init; }
     public required IReadOnlyList<Episode> Episodes { get; init; }
     public required IReadOnlyDictionary<string, string> ExternalIds { get; init; }
@@ -254,6 +256,7 @@ public sealed record Episode
     public required int EpisodeNumber { get; init; }
     public string? AirDate { get; init; }
     public string? StillUrl { get; init; }
+    public string? BackdropUrl { get; init; }
     public int? RuntimeMinutes { get; init; }
     public required double VoteAverage { get; init; }
     public required int VoteCount { get; init; }

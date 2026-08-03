@@ -27,6 +27,58 @@ func TestNormalizeQueryOptionsDefaultsAndCanonicalizes(t *testing.T) {
 	}
 }
 
+func TestSeasonArtworkNormalizationAndSerializationRemainIndependent(t *testing.T) {
+	summary := normalizeSeasonSummary("series-id", "season-id", ProviderSeasonSummary{
+		ExternalID: "3572", PosterURL: "https://images.example/poster.jpg", BackdropURL: "https://images.example/backdrop.jpg",
+	})
+	season := normalizeSeason("series-id", "season-id", ProviderSeason{
+		ExternalID: "3572", PosterURL: "https://images.example/poster.jpg", BackdropURL: "https://images.example/backdrop.jpg",
+	})
+	for name, value := range map[string]any{"summary": summary, "season": season} {
+		payload, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("encode %s: %v", name, err)
+		}
+		if !bytes.Contains(payload, []byte(`"posterUrl":"https://images.example/poster.jpg"`)) ||
+			!bytes.Contains(payload, []byte(`"backdropUrl":"https://images.example/backdrop.jpg"`)) {
+			t.Fatalf("%s artwork was not serialized independently: %s", name, payload)
+		}
+	}
+	withoutBackdrop := map[string]any{
+		"summary": normalizeSeasonSummary("series-id", "season-id", ProviderSeasonSummary{
+			ExternalID: "3572", PosterURL: "https://images.example/poster.jpg",
+		}),
+		"season": normalizeSeason("series-id", "season-id", ProviderSeason{
+			ExternalID: "3572", PosterURL: "https://images.example/poster.jpg",
+		}),
+	}
+	for name, value := range withoutBackdrop {
+		payload, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("encode %s without backdrop: %v", name, err)
+		}
+		if bytes.Contains(payload, []byte(`"backdropUrl"`)) {
+			t.Fatalf("absent %s backdrop must remain omitted: %s", name, payload)
+		}
+	}
+}
+
+func TestEpisodeArtworkNormalizationAndSerializationRemainIndependent(t *testing.T) {
+	episode := normalizeEpisode("season-id", "episode-id", ProviderEpisode{
+		ExternalID:  "62085",
+		StillURL:    "https://images.example/still.jpg",
+		BackdropURL: "https://images.example/backdrop.jpg",
+	})
+	payload, err := json.Marshal(episode)
+	if err != nil {
+		t.Fatalf("encode episode: %v", err)
+	}
+	if !bytes.Contains(payload, []byte(`"stillUrl":"https://images.example/still.jpg"`)) ||
+		!bytes.Contains(payload, []byte(`"backdropUrl":"https://images.example/backdrop.jpg"`)) {
+		t.Fatalf("episode artwork was not serialized independently: %s", payload)
+	}
+}
+
 func TestNormalizeQueryOptionsRejectsUnsafeValues(t *testing.T) {
 	tests := []QueryOptions{
 		{Page: -1},

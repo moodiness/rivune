@@ -339,7 +339,7 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 		if err != nil {
 			return Series{}, err
 		}
-		if err := persistTitleSnapshot(ctx, tx, seasonID, season.Name, season.PosterURL, "", season.AirDate); err != nil {
+		if err := persistTitleSnapshot(ctx, tx, seasonID, season.Name, season.PosterURL, season.BackdropURL, season.AirDate); err != nil {
 			return Series{}, err
 		}
 		seasons = append(seasons, normalizeSeasonSummary(titleID, seasonID, season))
@@ -544,7 +544,7 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 		return Season{}, fmt.Errorf("begin season persistence: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := persistTitleSnapshot(ctx, tx, seasonID, provided.Name, provided.PosterURL, "", provided.AirDate); err != nil {
+	if err := persistTitleSnapshot(ctx, tx, seasonID, provided.Name, provided.PosterURL, provided.BackdropURL, provided.AirDate); err != nil {
 		return Season{}, err
 	}
 	episodes := make([]Episode, 0, len(provided.Episodes))
@@ -560,7 +560,7 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 		if err := linkAdditionalIDs(ctx, tx, episodeID, MediaTypeEpisode, episode.AdditionalIDs); err != nil {
 			return Season{}, err
 		}
-		if err := persistTitleSnapshot(ctx, tx, episodeID, episode.Name, episode.StillURL, "", episode.AirDate); err != nil {
+		if err := persistTitleSnapshot(ctx, tx, episodeID, episode.Name, episode.StillURL, episode.BackdropURL, episode.AirDate); err != nil {
 			return Season{}, err
 		}
 		episodes = append(episodes, normalizeEpisode(seasonID, episodeID, episode))
@@ -673,6 +673,7 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 			EpisodeCount: provided.EpisodeCount,
 			AirDate:      provided.AirDate,
 			PosterURL:    provided.PosterURL,
+			BackdropURL:  provided.BackdropURL,
 			VoteAverage:  provided.VoteAverage,
 			ExternalIDs:  map[string]string{"tvdb": provided.ExternalID},
 		})
@@ -802,7 +803,7 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 		if persistErr != nil {
 			return Season{}, persistErr
 		}
-		if persistErr := persistTitleSnapshot(ctx, tx, persistedSeasonID, provided.Name, provided.PosterURL, "", provided.AirDate); persistErr != nil {
+		if persistErr := persistTitleSnapshot(ctx, tx, persistedSeasonID, provided.Name, provided.PosterURL, provided.BackdropURL, provided.AirDate); persistErr != nil {
 			return Season{}, persistErr
 		}
 		for _, mapped := range provided.Episodes {
@@ -830,7 +831,7 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 			if persistErr := linkAdditionalIDs(ctx, tx, episodeID, MediaTypeEpisode, mapped.AdditionalIDs); persistErr != nil {
 				return Season{}, persistErr
 			}
-			if persistErr := persistTitleSnapshot(ctx, tx, episodeID, mapped.Name, mapped.StillURL, "", mapped.AirDate); persistErr != nil {
+			if persistErr := persistTitleSnapshot(ctx, tx, episodeID, mapped.Name, mapped.StillURL, mapped.BackdropURL, mapped.AirDate); persistErr != nil {
 				return Season{}, persistErr
 			}
 			externalIDs := make(map[string]string, len(mapped.AdditionalIDs)+1)
@@ -848,6 +849,7 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 				EpisodeNumber:  mapped.EpisodeNumber,
 				AirDate:        mapped.AirDate,
 				StillURL:       mapped.StillURL,
+				BackdropURL:    mapped.BackdropURL,
 				RuntimeMinutes: mapped.RuntimeMinutes,
 				VoteAverage:    mapped.VoteAverage,
 				VoteCount:      mapped.VoteCount,
@@ -870,6 +872,7 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 		SeasonNumber: provided.SeasonNumber,
 		AirDate:      provided.AirDate,
 		PosterURL:    provided.PosterURL,
+		BackdropURL:  provided.BackdropURL,
 		VoteAverage:  provided.VoteAverage,
 		Episodes:     episodes,
 		ExternalIDs:  map[string]string{"tvdb": provided.ExternalID},
@@ -949,6 +952,10 @@ func matchMappedEpisodes(seasonID string, provided []ProviderEpisode, canonical 
 		if stillURL == "" {
 			stillURL = mapped.StillURL
 		}
+		backdropURL := canonicalEpisode.BackdropURL
+		if backdropURL == "" {
+			backdropURL = mapped.BackdropURL
+		}
 		runtime := canonicalEpisode.RuntimeMinutes
 		if runtime == 0 {
 			runtime = mapped.RuntimeMinutes
@@ -963,6 +970,7 @@ func matchMappedEpisodes(seasonID string, provided []ProviderEpisode, canonical 
 			EpisodeNumber:  mapped.EpisodeNumber,
 			AirDate:        airDate,
 			StillURL:       stillURL,
+			BackdropURL:    backdropURL,
 			RuntimeMinutes: runtime,
 			VoteAverage:    canonicalEpisode.VoteAverage,
 			VoteCount:      canonicalEpisode.VoteCount,
@@ -1184,7 +1192,7 @@ func (s *Service) persistCachedSeriesSnapshots(ctx context.Context, series Serie
 		return err
 	}
 	for _, season := range series.Seasons {
-		if err := persistTitleSnapshot(ctx, tx, season.ID, season.Name, season.PosterURL, "", season.AirDate); err != nil {
+		if err := persistTitleSnapshot(ctx, tx, season.ID, season.Name, season.PosterURL, season.BackdropURL, season.AirDate); err != nil {
 			return err
 		}
 	}
@@ -1224,15 +1232,16 @@ func (s *Service) persistCachedSeasonSnapshot(ctx context.Context, season Season
 		return fmt.Errorf("begin cached season snapshot persistence: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	persistMissingSnapshot := func(titleID, title, posterURL, releaseDate string) error {
-		var existingTitle, existingPosterURL, existingReleaseDate string
+	persistMissingSnapshot := func(titleID, title, posterURL, backgroundURL, releaseDate string) error {
+		var existingTitle, existingPosterURL, existingBackgroundURL, existingReleaseDate string
 		err := tx.QueryRow(ctx, `
 			SELECT COALESCE(display_title, ''),
 			       COALESCE(poster_url, ''),
+			       COALESCE(background_url, ''),
 			       COALESCE(release_date::text, '')
 			FROM titles
 			WHERE id = $1::uuid
-		`, titleID).Scan(&existingTitle, &existingPosterURL, &existingReleaseDate)
+		`, titleID).Scan(&existingTitle, &existingPosterURL, &existingBackgroundURL, &existingReleaseDate)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("query cached title snapshot: %w", err)
 		}
@@ -1242,16 +1251,19 @@ func (s *Service) persistCachedSeasonSnapshot(ctx context.Context, season Season
 		if strings.TrimSpace(existingPosterURL) != "" {
 			posterURL = ""
 		}
+		if strings.TrimSpace(existingBackgroundURL) != "" {
+			backgroundURL = ""
+		}
 		if strings.TrimSpace(existingReleaseDate) != "" {
 			releaseDate = ""
 		}
-		return persistTitleSnapshot(ctx, tx, titleID, title, posterURL, "", releaseDate)
+		return persistTitleSnapshot(ctx, tx, titleID, title, posterURL, backgroundURL, releaseDate)
 	}
-	if err := persistMissingSnapshot(season.ID, season.Name, season.PosterURL, season.AirDate); err != nil {
+	if err := persistMissingSnapshot(season.ID, season.Name, season.PosterURL, season.BackdropURL, season.AirDate); err != nil {
 		return err
 	}
 	for _, episode := range season.Episodes {
-		if err := persistMissingSnapshot(episode.ID, episode.Name, episode.StillURL, episode.AirDate); err != nil {
+		if err := persistMissingSnapshot(episode.ID, episode.Name, episode.StillURL, episode.BackdropURL, episode.AirDate); err != nil {
 			return err
 		}
 	}
@@ -2021,6 +2033,7 @@ func normalizeSeasonSummary(seriesID, seasonID string, provided ProviderSeasonSu
 		EpisodeCount: provided.EpisodeCount,
 		AirDate:      provided.AirDate,
 		PosterURL:    provided.PosterURL,
+		BackdropURL:  provided.BackdropURL,
 		VoteAverage:  provided.VoteAverage,
 		ExternalIDs:  normalizeExternalIDs(provided.ExternalID, nil),
 	}
@@ -2036,6 +2049,7 @@ func normalizeSeason(seriesID, seasonID string, provided ProviderSeason) Season 
 		SeasonNumber: provided.SeasonNumber,
 		AirDate:      provided.AirDate,
 		PosterURL:    provided.PosterURL,
+		BackdropURL:  provided.BackdropURL,
 		VoteAverage:  provided.VoteAverage,
 		Episodes:     []Episode{},
 		ExternalIDs:  normalizeExternalIDs(provided.ExternalID, nil),
@@ -2053,6 +2067,7 @@ func normalizeEpisode(seasonID, episodeID string, provided ProviderEpisode) Epis
 		EpisodeNumber:  provided.EpisodeNumber,
 		AirDate:        provided.AirDate,
 		StillURL:       provided.StillURL,
+		BackdropURL:    provided.BackdropURL,
 		RuntimeMinutes: provided.RuntimeMinutes,
 		VoteAverage:    provided.VoteAverage,
 		VoteCount:      provided.VoteCount,

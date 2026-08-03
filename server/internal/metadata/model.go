@@ -203,6 +203,7 @@ type SeasonSummary struct {
 	EpisodeCount int               `json:"episodeCount"`
 	AirDate      string            `json:"airDate,omitempty"`
 	PosterURL    string            `json:"posterUrl,omitempty"`
+	BackdropURL  string            `json:"backdropUrl,omitempty"`
 	VoteAverage  float64           `json:"voteAverage"`
 	ExternalIDs  map[string]string `json:"externalIds"`
 }
@@ -216,6 +217,7 @@ type Season struct {
 	SeasonNumber int               `json:"seasonNumber"`
 	AirDate      string            `json:"airDate,omitempty"`
 	PosterURL    string            `json:"posterUrl,omitempty"`
+	BackdropURL  string            `json:"backdropUrl,omitempty"`
 	VoteAverage  float64           `json:"voteAverage"`
 	Episodes     []Episode         `json:"episodes"`
 	ExternalIDs  map[string]string `json:"externalIds"`
@@ -231,6 +233,7 @@ type Episode struct {
 	EpisodeNumber  int               `json:"episodeNumber"`
 	AirDate        string            `json:"airDate,omitempty"`
 	StillURL       string            `json:"stillUrl,omitempty"`
+	BackdropURL    string            `json:"backdropUrl,omitempty"`
 	RuntimeMinutes int               `json:"runtimeMinutes,omitempty"`
 	VoteAverage    float64           `json:"voteAverage"`
 	VoteCount      int               `json:"voteCount"`
@@ -277,6 +280,7 @@ type ProviderSeasonSummary struct {
 	EpisodeCount int
 	AirDate      string
 	PosterURL    string
+	BackdropURL  string
 	VoteAverage  float64
 }
 
@@ -287,6 +291,7 @@ type ProviderSeason struct {
 	SeasonNumber int
 	AirDate      string
 	PosterURL    string
+	BackdropURL  string
 	VoteAverage  float64
 	Episodes     []ProviderEpisode
 }
@@ -299,6 +304,7 @@ type ProviderEpisode struct {
 	EpisodeNumber  int
 	AirDate        string
 	StillURL       string
+	BackdropURL    string
 	RuntimeMinutes int
 	VoteAverage    float64
 	VoteCount      int

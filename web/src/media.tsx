@@ -244,7 +244,7 @@ function episodeItem(series: SeriesMetadata, episode: EpisodeMetadata, fallback:
     episodeNumber: episode.episodeNumber,
     title: episode.name || t("media.episode.fallbackTitle", { number: episode.episodeNumber }),
     posterUrl: episode.stillUrl || fallback.posterUrl,
-    backgroundUrl: episode.stillUrl || fallback.backgroundUrl,
+    backgroundUrl: episode.backdropUrl || episode.stillUrl || fallback.backgroundUrl,
     description: episode.overview,
     releaseInfo: episode.airDate,
     released: episode.airDate,
@@ -607,6 +607,10 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     void (seasonCacheRef.current.has(seasonID) ? Promise.resolve(seasonCacheRef.current.get(seasonID)!) : api.seasonDetails(seasonID, undefined, series?.mappingProvider)).then(async (resolved) => {
       if (!active) return;
       setSeason(resolved);
+      const resolvedPoster = resolved.posterUrl
+        || series?.seasons.find((candidate) => candidate.id === seasonID)?.posterUrl
+        || series?.posterUrl;
+      if (resolvedPoster) setDetails((current) => current.posterUrl === resolvedPoster ? current : { ...current, posterUrl: resolvedPoster });
       if (autoPlayNextRef.current) {
         const first = resolved.episodes.find((episode) => !episodeIsUpcoming(episode));
         if (first) setSelectedEpisode(first);
@@ -637,7 +641,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
       ...current,
       title: [series?.name, episodeCode, selectedEpisode.name].filter(Boolean).join(" · "),
       description: selectedEpisode.overview || current.description,
-      backgroundUrl: selectedEpisode.stillUrl || current.backgroundUrl,
+      backgroundUrl: selectedEpisode.backdropUrl || selectedEpisode.stillUrl || current.backgroundUrl,
       releaseInfo: selectedEpisode.airDate || current.releaseInfo,
       released: selectedEpisode.airDate || current.released,
       voteAverage: selectedEpisode.voteAverage,
@@ -1050,9 +1054,27 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
       trigger?.focus();
     };
   }, [castDrawerOpen]);
-  const backdrop = details.backgroundUrl || details.posterUrl;
-  const heroArtwork = item.mediaType === "episode"
-    ? selectedEpisode?.stillUrl || details.backgroundUrl || details.posterUrl
+  const selectedSeasonSummary = series?.seasons.find((candidate) => candidate.id === seasonID);
+  const loadedSelectedSeason = season && (
+    season.id === seasonID
+    || selectedSeasonSummary?.seasonNumber === season.seasonNumber
+  ) ? season : undefined;
+  const selectedSeasonPoster = loadedSelectedSeason?.posterUrl || selectedSeasonSummary?.posterUrl;
+  const selectedSeasonBackdrop = loadedSelectedSeason?.backdropUrl || selectedSeasonSummary?.backdropUrl;
+  const selectedSeasonEpisode = selectedEpisode && (
+    selectedEpisode.seasonId === loadedSelectedSeason?.id
+    || selectedEpisode.seasonId === seasonID
+  ) ? selectedEpisode : undefined;
+  const cachedSeriesContextPoster = item.mediaType === "series" || details.posterUrl !== item.posterUrl
+    ? details.posterUrl
+    : undefined;
+  const seriesContextPoster = selectedSeasonPoster || series?.posterUrl || (!series ? cachedSeriesContextPoster : undefined);
+  const seriesContextBackdrop = selectedSeasonEpisode?.backdropUrl || selectedSeasonEpisode?.stillUrl || selectedSeasonBackdrop || series?.backdropUrl;
+  const backdrop = seriesContextEnabled
+    ? seriesContextBackdrop
+    : details.backgroundUrl || details.posterUrl;
+  const heroArtwork = seriesContextEnabled
+    ? seriesContextPoster
     : details.posterUrl || details.backgroundUrl;
   const trailerBackdropSources = [...new Set([
     item.mediaType === "movie" ? details.backgroundUrl : series?.backdropUrl,

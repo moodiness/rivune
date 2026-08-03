@@ -226,6 +226,7 @@ export type EpisodeMetadata = {
   episodeNumber: number;
   airDate?: string;
   stillUrl?: string;
+  backdropUrl?: string;
   runtimeMinutes?: number;
   voteAverage: number;
   voteCount: number;
@@ -241,6 +242,7 @@ export type SeasonSummary = {
   episodeCount: number;
   airDate?: string;
   posterUrl?: string;
+  backdropUrl?: string;
   voteAverage: number;
   externalIds: Record<string, string>;
 };

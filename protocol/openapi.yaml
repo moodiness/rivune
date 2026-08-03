@@ -5014,6 +5014,9 @@ components:
         posterUrl:
           type: string
           format: uri-reference
+        backdropUrl:
+          type: string
+          format: uri-reference
         voteAverage:
           type: number
           minimum: 0
@@ -5047,6 +5050,9 @@ components:
           type: string
           format: date
         posterUrl:
+          type: string
+          format: uri-reference
+        backdropUrl:
           type: string
           format: uri-reference
         voteAverage:
@@ -5089,6 +5095,9 @@ components:
           type: string
           format: date
         stillUrl:
+          type: string
+          format: uri-reference
+        backdropUrl:
           type: string
           format: uri-reference
         runtimeMinutes:

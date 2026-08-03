@@ -141,7 +141,7 @@ func TestBestLocalizedImagePrioritizesLanguageWithinQualityTier(t *testing.T) {
 	}
 }
 
-func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonPosters(t *testing.T) {
+func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonArtwork(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/tv/81189" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
@@ -154,6 +154,9 @@ func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonPosters(t *testing.T) {
 				{"url":"https://images.example/season-1-en.jpg","lang":"en","likes":"20","season":"1"},
 				{"url":"https://images.example/season-1-fr.jpg","lang":"fr","likes":"1","season":"1"},
 				{"url":"https://images.example/season-2.jpg","lang":"00","likes":"3","season":"2"}
+			],
+			"seasonthumb":[
+				{"url":"https://images.example/season-1-background.jpg","lang":"00","likes":"5","season":"1"}
 			]
 		}`))
 	}))
@@ -177,17 +180,24 @@ func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonPosters(t *testing.T) {
 		t.Fatalf("unexpected series artwork: %+v", enriched)
 	}
 	if enriched.Seasons[0].PosterURL != "https://images.example/season-1-en.jpg" ||
-		enriched.Seasons[1].PosterURL != "https://images.example/season-2.jpg" {
+		enriched.Seasons[0].BackdropURL != "https://images.example/season-1-background.jpg" ||
+		enriched.Seasons[1].PosterURL != "https://images.example/season-2.jpg" ||
+		enriched.Seasons[1].BackdropURL != "" {
 		t.Fatalf("unexpected season artwork: %+v", enriched.Seasons)
 	}
 }
 
 func TestEnrichSeasonSelectsOnlyRequestedSeason(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"seasonposter":[
-			{"url":"https://images.example/season-1.jpg","lang":"00","season":"1"},
-			{"url":"https://images.example/season-2.jpg","lang":"00","season":"2"}
-		]}`))
+		_, _ = w.Write([]byte(`{
+			"seasonposter":[
+				{"url":"https://images.example/season-1.jpg","lang":"00","season":"1"},
+				{"url":"https://images.example/season-2.jpg","lang":"00","season":"2"}
+			],
+			"seasonthumb":[
+				{"url":"https://images.example/season-2-background.jpg","lang":"00","season":"2"}
+			]
+		}`))
 	}))
 	defer server.Close()
 
@@ -196,8 +206,9 @@ func TestEnrichSeasonSelectsOnlyRequestedSeason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enrich season: %v", err)
 	}
-	if enriched.PosterURL != "https://images.example/season-2.jpg" {
-		t.Fatalf("unexpected season poster %q", enriched.PosterURL)
+	if enriched.PosterURL != "https://images.example/season-2.jpg" ||
+		enriched.BackdropURL != "https://images.example/season-2-background.jpg" {
+		t.Fatalf("unexpected season artwork: %+v", enriched)
 	}
 }
 

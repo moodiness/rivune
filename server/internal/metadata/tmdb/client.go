@@ -20,7 +20,6 @@ const (
 	posterImageSize   = "w780"
 	backdropImageSize = "original"
 	profileImageSize  = "w185"
-	stillImageSize    = "w780"
 	maxBodyBytes      = 2 * 1024 * 1024
 )
 
@@ -127,6 +126,7 @@ type seasonResponse struct {
 	EpisodeCount int               `json:"episode_count"`
 	AirDate      string            `json:"air_date"`
 	PosterPath   string            `json:"poster_path"`
+	BackdropPath string            `json:"backdrop_path"`
 	VoteAverage  float64           `json:"vote_average"`
 	Episodes     []episodeResponse `json:"episodes"`
 }
@@ -541,6 +541,7 @@ func normalizeSeasonSummary(season seasonResponse) metadata.ProviderSeasonSummar
 		EpisodeCount: season.EpisodeCount,
 		AirDate:      season.AirDate,
 		PosterURL:    imageURL(posterImageSize, season.PosterPath),
+		BackdropURL:  imageURL(backdropImageSize, season.BackdropPath),
 		VoteAverage:  season.VoteAverage,
 	}
 }
@@ -558,7 +559,8 @@ func normalizeSeason(season seasonResponse) metadata.ProviderSeason {
 			SeasonNumber:   episode.SeasonNumber,
 			EpisodeNumber:  episode.EpisodeNumber,
 			AirDate:        episode.AirDate,
-			StillURL:       imageURL(stillImageSize, episode.StillPath),
+			StillURL:       imageURL(backdropImageSize, episode.StillPath),
+			BackdropURL:    imageURL(backdropImageSize, episode.StillPath),
 			RuntimeMinutes: episode.Runtime,
 			VoteAverage:    episode.VoteAverage,
 			VoteCount:      episode.VoteCount,
@@ -571,6 +573,7 @@ func normalizeSeason(season seasonResponse) metadata.ProviderSeason {
 		SeasonNumber: season.SeasonNumber,
 		AirDate:      season.AirDate,
 		PosterURL:    imageURL(posterImageSize, season.PosterPath),
+		BackdropURL:  imageURL(backdropImageSize, season.BackdropPath),
 		VoteAverage:  season.VoteAverage,
 		Episodes:     episodes,
 	}

@@ -208,6 +208,10 @@ func TestLocalizeMetadataIncludesCastProfilesAndNestedSeriesArtwork(t *testing.T
 	moviePageProfile := fixture.URL + "/movie-page-cast.png"
 	seriesPageProfile := fixture.URL + "/series-page-cast.png"
 	seriesPageSeasonPoster := fixture.URL + "/series-page-season.png"
+	seriesSeasonBackdrop := fixture.URL + "/series-season-backdrop.png"
+	seriesPageSeasonBackdrop := fixture.URL + "/series-page-season-backdrop.png"
+	seasonBackdrop := fixture.URL + "/season-backdrop.png"
+	episodeBackdrop := fixture.URL + "/episode-backdrop.png"
 	movie := metadata.Movie{
 		PosterURL: fixture.URL + "/movie-poster.png",
 		Cast:      []metadata.CastMember{{ID: "1", Name: "Movie Actor", ProfileURL: movieProfile}},
@@ -215,26 +219,37 @@ func TestLocalizeMetadataIncludesCastProfilesAndNestedSeriesArtwork(t *testing.T
 	series := metadata.Series{
 		BackdropURL: fixture.URL + "/series-backdrop.png",
 		Cast:        []metadata.CastMember{{ID: "2", Name: "Series Actor", ProfileURL: seriesProfile}},
+		Seasons:     []metadata.SeasonSummary{{SeasonNumber: 1, BackdropURL: seriesSeasonBackdrop}},
 	}
 	moviePage := metadata.MoviePage{Items: []metadata.Movie{{
 		Cast: []metadata.CastMember{{ID: "3", Name: "Movie Page Actor", ProfileURL: moviePageProfile}},
 	}}}
 	seriesPage := metadata.SeriesPage{Items: []metadata.Series{{
 		Cast:    []metadata.CastMember{{ID: "4", Name: "Series Page Actor", ProfileURL: seriesPageProfile}},
-		Seasons: []metadata.SeasonSummary{{SeasonNumber: 1, PosterURL: seriesPageSeasonPoster}},
+		Seasons: []metadata.SeasonSummary{{SeasonNumber: 1, PosterURL: seriesPageSeasonPoster, BackdropURL: seriesPageSeasonBackdrop}},
 	}}}
+	season := metadata.Season{
+		SeasonNumber: 1,
+		BackdropURL:  seasonBackdrop,
+		Episodes:     []metadata.Episode{{BackdropURL: episodeBackdrop}},
+	}
 
 	service.LocalizeMovie(context.Background(), &movie)
 	service.LocalizeSeries(context.Background(), &series)
 	service.LocalizeMoviePage(context.Background(), &moviePage)
 	service.LocalizeSeriesPage(context.Background(), &seriesPage)
+	service.LocalizeSeason(context.Background(), &season)
 
 	for label, value := range map[string]string{
-		"movie profile":       movie.Cast[0].ProfileURL,
-		"series profile":      series.Cast[0].ProfileURL,
-		"movie page profile":  moviePage.Items[0].Cast[0].ProfileURL,
-		"series page profile": seriesPage.Items[0].Cast[0].ProfileURL,
-		"series page season":  seriesPage.Items[0].Seasons[0].PosterURL,
+		"movie profile":               movie.Cast[0].ProfileURL,
+		"series profile":              series.Cast[0].ProfileURL,
+		"movie page profile":          moviePage.Items[0].Cast[0].ProfileURL,
+		"series page profile":         seriesPage.Items[0].Cast[0].ProfileURL,
+		"series page season":          seriesPage.Items[0].Seasons[0].PosterURL,
+		"series season backdrop":      series.Seasons[0].BackdropURL,
+		"series page season backdrop": seriesPage.Items[0].Seasons[0].BackdropURL,
+		"season backdrop":             season.BackdropURL,
+		"episode backdrop":            season.Episodes[0].BackdropURL,
 	} {
 		if !strings.HasPrefix(value, publicPrefix) {
 			t.Fatalf("%s was not localized through %q: %q", label, publicPrefix, value)
@@ -244,11 +259,15 @@ func TestLocalizeMetadataIncludesCastProfilesAndNestedSeriesArtwork(t *testing.T
 		}
 	}
 	for upstream, localized := range map[string]string{
-		movieProfile:           movie.Cast[0].ProfileURL,
-		seriesProfile:          series.Cast[0].ProfileURL,
-		moviePageProfile:       moviePage.Items[0].Cast[0].ProfileURL,
-		seriesPageProfile:      seriesPage.Items[0].Cast[0].ProfileURL,
-		seriesPageSeasonPoster: seriesPage.Items[0].Seasons[0].PosterURL,
+		movieProfile:             movie.Cast[0].ProfileURL,
+		seriesProfile:            series.Cast[0].ProfileURL,
+		moviePageProfile:         moviePage.Items[0].Cast[0].ProfileURL,
+		seriesPageProfile:        seriesPage.Items[0].Cast[0].ProfileURL,
+		seriesPageSeasonPoster:   seriesPage.Items[0].Seasons[0].PosterURL,
+		seriesSeasonBackdrop:     series.Seasons[0].BackdropURL,
+		seriesPageSeasonBackdrop: seriesPage.Items[0].Seasons[0].BackdropURL,
+		seasonBackdrop:           season.BackdropURL,
+		episodeBackdrop:          season.Episodes[0].BackdropURL,
 	} {
 		normalized, err := normalizeURL(upstream, false)
 		if err != nil {

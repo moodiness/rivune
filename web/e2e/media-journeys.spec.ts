@@ -137,6 +137,65 @@ test("series episodes open dedicated detail pages that own playback sources", as
   await expect(page.getByRole("region", { name: "Playback sources" })).toHaveCount(0);
 });
 
+test("series artwork keeps season posters separate from episode backgrounds", async ({ page, rivune: _rivune }) => {
+  const artwork = page.locator(".details-artwork img");
+  const hero = page.locator(".details-hero");
+
+  await page.goto("/media/series/tt9000/season/1");
+  const firstEpisode = page.getByRole("button", { name: /First Light/ }).first();
+  await expect(firstEpisode).toBeVisible();
+  await expect(firstEpisode.locator("img")).toHaveAttribute("src", "https://fixtures.rivune.test/episode-1-still.svg");
+  await expect(artwork).toHaveAttribute("src", "https://fixtures.rivune.test/season-1-poster.svg");
+  await expect(hero).toHaveCSS("background-image", 'url("https://fixtures.rivune.test/season-1-backdrop.svg")');
+
+  await firstEpisode.click();
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  await expect(artwork).toHaveAttribute("src", "https://fixtures.rivune.test/season-1-poster.svg");
+  await expect(hero).toHaveCSS("background-image", 'url("https://fixtures.rivune.test/episode-1-backdrop.svg")');
+
+  await page.getByRole("button", { name: /Back.*Episodes/ }).click();
+  await page.getByRole("button", { name: /Second Orbit/ }).first().click();
+  await expect(page.getByRole("heading", { name: "Second Orbit" })).toBeVisible();
+  await expect(artwork).toHaveAttribute("src", "https://fixtures.rivune.test/season-1-poster.svg");
+  await expect(hero).toHaveCSS("background-image", 'url("https://fixtures.rivune.test/episode-2-backdrop.svg")');
+
+  await page.getByRole("button", { name: /Back.*Episodes/ }).click();
+  await page.getByRole("tab", { name: /^Season 2\b/ }).click();
+  await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "true");
+  await expect(artwork).toHaveAttribute("src", "https://fixtures.rivune.test/season-2-poster.svg");
+  await expect(hero).toHaveCSS("background-image", 'url("https://fixtures.rivune.test/series-backdrop.svg")');
+});
+
+test("a direct episode route and reload retain its season poster and episode background", async ({ page, rivune: _rivune }) => {
+  const artwork = page.locator(".details-artwork img");
+  const hero = page.locator(".details-hero");
+
+  await page.goto("/media/series/tt9000/season/1/episode/2");
+  await expect(page.getByRole("heading", { name: "Second Orbit" })).toBeVisible();
+  await expect(artwork).toHaveAttribute("src", "https://fixtures.rivune.test/season-1-poster.svg");
+  await expect(hero).toHaveCSS("background-image", 'url("https://fixtures.rivune.test/episode-2-backdrop.svg")');
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Second Orbit" })).toBeVisible();
+  await expect(artwork).toHaveAttribute("src", "https://fixtures.rivune.test/season-1-poster.svg");
+  await expect(hero).toHaveCSS("background-image", 'url("https://fixtures.rivune.test/episode-2-backdrop.svg")');
+});
+
+test("series artwork falls back by role when season or episode artwork is absent", async ({ page, rivune: _rivune }) => {
+  const artwork = page.locator(".details-artwork img");
+  const hero = page.locator(".details-hero");
+
+  await page.goto("/media/series/tt9000/season/0");
+  await expect(page.getByRole("button", { name: /Building a World/ }).first()).toBeVisible();
+  await expect(artwork).toHaveAttribute("src", "https://fixtures.rivune.test/series-poster.svg");
+  await expect(hero).toHaveCSS("background-image", 'url("https://fixtures.rivune.test/season-specials-backdrop.svg")');
+
+  await page.getByRole("button", { name: /The Rebellion in Season 2/ }).first().click();
+  await expect(page.getByRole("heading", { name: "The Rebellion in Season 2" })).toBeVisible();
+  await expect(artwork).toHaveAttribute("src", "https://fixtures.rivune.test/series-poster.svg");
+  await expect(hero).toHaveCSS("background-image", 'url("https://fixtures.rivune.test/season-specials-backdrop.svg")');
+});
+
 test("series guide omits seasons whose episode count is zero", async ({ page, rivune: _rivune }) => {
   await page.goto("/media/series/tt9000/season/1");
 
@@ -161,7 +220,7 @@ test("episode details float beside a responsive contextual stream panel", async 
   const contextPanel = page.getByRole("region", { name: "Playback sources" });
   const cast = page.getByRole("region", { name: "Cast" });
   await expect(artwork).toBeVisible();
-  await expect(artwork.locator("img")).toHaveAttribute("src", "https://fixtures.rivune.test/episode-1.svg");
+  await expect(artwork.locator("img")).toHaveAttribute("src", "https://fixtures.rivune.test/season-1-poster.svg");
   await expect(page.locator(".series-browser")).toHaveCount(0);
   await expect(page.locator(".details-utility-grid")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Back.*Episodes/ })).toBeVisible();
@@ -474,7 +533,7 @@ test("an unavailable trailer warns once without rendering an empty stage", async
 test("resolved artwork remains visible while revisiting metadata is revalidated", async ({ page, rivune: _rivune }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/episode-1.svg");
+  await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/season-1-poster.svg");
   await page.goBack();
   await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
 
@@ -489,7 +548,7 @@ test("resolved artwork remains visible while revisiting metadata is revalidated"
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
   await requestStarted.promise;
   try {
-    await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/episode-1.svg", { timeout: 500 });
+    await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/season-1-poster.svg", { timeout: 500 });
   } finally {
     releaseRequest.resolve();
   }

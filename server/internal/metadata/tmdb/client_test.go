@@ -134,7 +134,7 @@ func TestSeriesDetailsNormalizesArtworkSeasonsCastAndIDs(t *testing.T) {
 		if r.URL.Path != "/tv/1396" || r.URL.Query().Get("append_to_response") != "external_ids,credits" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":1396,"name":"Breaking Bad","original_name":"Breaking Bad","original_language":"en","overview":"A chemistry teacher.","first_air_date":"2008-01-20","last_air_date":"2013-09-29","poster_path":"/breaking-bad-poster.jpg","backdrop_path":"/breaking-bad-backdrop.jpg","number_of_seasons":5,"number_of_episodes":62,"genres":[{"id":18,"name":"Drama"}],"seasons":[{"id":3572,"name":"Season 1","season_number":1,"episode_count":7,"air_date":"2008-01-20","poster_path":"/season-one-poster.jpg","vote_average":8.3}],"external_ids":{"imdb_id":"tt0903747","tvdb_id":81189,"wikidata_id":"Q1079"},"credits":{"cast":[{"id":17419,"name":"Bryan Cranston","profile_path":"/cranston.jpg","character":"Walter White"}]}}`))
+		_, _ = w.Write([]byte(`{"id":1396,"name":"Breaking Bad","original_name":"Breaking Bad","original_language":"en","overview":"A chemistry teacher.","first_air_date":"2008-01-20","last_air_date":"2013-09-29","poster_path":"/breaking-bad-poster.jpg","backdrop_path":"/breaking-bad-backdrop.jpg","number_of_seasons":5,"number_of_episodes":62,"genres":[{"id":18,"name":"Drama"}],"seasons":[{"id":3572,"name":"Season 1","season_number":1,"episode_count":7,"air_date":"2008-01-20","poster_path":"/season-one-poster.jpg","backdrop_path":"/season-one-backdrop.jpg","vote_average":8.3}],"external_ids":{"imdb_id":"tt0903747","tvdb_id":81189,"wikidata_id":"Q1079"},"credits":{"cast":[{"id":17419,"name":"Bryan Cranston","profile_path":"/cranston.jpg","character":"Walter White"}]}}`))
 	}))
 	defer server.Close()
 
@@ -143,17 +143,17 @@ func TestSeriesDetailsNormalizesArtworkSeasonsCastAndIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("series details: %v", err)
 	}
-	if series.NumberOfEpisodes != 62 || series.PosterURL != imageBaseURL+"/w780/breaking-bad-poster.jpg" || series.BackdropURL != imageBaseURL+"/original/breaking-bad-backdrop.jpg" || len(series.Seasons) != 1 || series.Seasons[0].ExternalID != "3572" || series.Seasons[0].PosterURL != imageBaseURL+"/w780/season-one-poster.jpg" || series.AdditionalIDs["tvdb"] != "81189" || len(series.Cast) != 1 || series.Cast[0].Character != "Walter White" || series.Cast[0].ProfileURL != imageBaseURL+"/w185/cranston.jpg" {
+	if series.NumberOfEpisodes != 62 || series.PosterURL != imageBaseURL+"/w780/breaking-bad-poster.jpg" || series.BackdropURL != imageBaseURL+"/original/breaking-bad-backdrop.jpg" || len(series.Seasons) != 1 || series.Seasons[0].ExternalID != "3572" || series.Seasons[0].PosterURL != imageBaseURL+"/w780/season-one-poster.jpg" || series.Seasons[0].BackdropURL != imageBaseURL+"/original/season-one-backdrop.jpg" || series.AdditionalIDs["tvdb"] != "81189" || len(series.Cast) != 1 || series.Cast[0].Character != "Walter White" || series.Cast[0].ProfileURL != imageBaseURL+"/w185/cranston.jpg" {
 		t.Fatalf("unexpected series: %+v", series)
 	}
 }
 
-func TestSeasonDetailsNormalizesPosterAndEpisodeStills(t *testing.T) {
+func TestSeasonDetailsNormalizesOriginalEpisodeArtwork(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/tv/1396/season/1" || r.URL.Query().Get("language") != "en-US" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":3572,"name":"Season 1","season_number":1,"air_date":"2008-01-20","poster_path":"/season-one-poster.jpg","episodes":[{"id":62085,"name":"Pilot","overview":"Walter receives a diagnosis.","season_number":1,"episode_number":1,"air_date":"2008-01-20","still_path":"/still.jpg","runtime":59,"vote_average":8.2,"vote_count":4000}]}`))
+		_, _ = w.Write([]byte(`{"id":3572,"name":"Season 1","season_number":1,"air_date":"2008-01-20","poster_path":"/season-one-poster.jpg","backdrop_path":"/season-one-backdrop.jpg","episodes":[{"id":62085,"name":"Pilot","overview":"Walter receives a diagnosis.","season_number":1,"episode_number":1,"air_date":"2008-01-20","still_path":"/still.jpg","runtime":59,"vote_average":8.2,"vote_count":4000}]}`))
 	}))
 	defer server.Close()
 
@@ -162,7 +162,7 @@ func TestSeasonDetailsNormalizesPosterAndEpisodeStills(t *testing.T) {
 	if err != nil {
 		t.Fatalf("season details: %v", err)
 	}
-	if season.ExternalID != "3572" || season.PosterURL != imageBaseURL+"/w780/season-one-poster.jpg" || len(season.Episodes) != 1 || season.Episodes[0].ExternalID != "62085" || season.Episodes[0].StillURL != imageBaseURL+"/w780/still.jpg" {
+	if season.ExternalID != "3572" || season.PosterURL != imageBaseURL+"/w780/season-one-poster.jpg" || season.BackdropURL != imageBaseURL+"/original/season-one-backdrop.jpg" || len(season.Episodes) != 1 || season.Episodes[0].ExternalID != "62085" || season.Episodes[0].StillURL != imageBaseURL+"/original/still.jpg" || season.Episodes[0].BackdropURL != imageBaseURL+"/original/still.jpg" {
 		t.Fatalf("unexpected season: %+v", season)
 	}
 }
