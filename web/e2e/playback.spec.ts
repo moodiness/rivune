@@ -379,6 +379,11 @@ test("multiline stream metadata stays inside its source card and row actions pla
       }),
     });
   });
+  const preparationGate = Promise.withResolvers<void>();
+  await page.route("**/api/v1/playback/prepare", async (route) => {
+    await preparationGate.promise;
+    await route.fallback();
+  });
 
   await page.setViewportSize({ width: 1217, height: 680 });
   await page.goto("/");
@@ -400,8 +405,14 @@ test("multiline stream metadata stays inside its source card and row actions pla
   const targetCard = streamCards.nth(4);
   await targetCard.getByRole("radio").click();
   await expect(streamCards.locator(".episode-play")).toHaveCount(1);
-  await expect(targetCard.getByRole("button", { name: /Play episode/ })).toBeEnabled();
-  await targetCard.getByRole("button", { name: /Play episode/ }).click();
+  const playAction = targetCard.getByRole("button", { name: /Play episode/ });
+  await expect(playAction).toBeDisabled();
+  await expect(targetCard.locator(".details-stream-list__state .spin")).toHaveCount(1);
+  await expect(playAction.locator(".spin")).toHaveCount(0);
+  await expect(playAction.locator(".lucide-play")).toBeVisible();
+  preparationGate.resolve();
+  await expect(playAction).toBeEnabled();
+  await playAction.click();
   await expect.poll(() => rivune.matching("/api/v1/playback/prepare", "POST").map((request) => (request.body as { sourceRef?: string }).sourceRef)).toContain("multiline-source-4");
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").map((request) => (request.body as { sourceRef?: string }).sourceRef)).toContain("multiline-source-4");
 });

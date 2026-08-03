@@ -1347,7 +1347,7 @@ export function MediaDetails({ item, maximumCastMembers, onClose, onNavigateCont
                                 </span>}
                               </button>
                               {selected && <button type="button" className="episode-play" aria-label={`${item.mediaType === "episode" ? t("media.details.playEpisode") : t("media.details.playSelectedStream")}: ${option.name}`} disabled={playDisabled} onClick={() => playPlaybackStream(option)}>
-                                {preparationLoading ? <LoaderCircle className="spin" size={16} /> : <Play size={16} fill="currentColor" />}
+                                <Play size={16} fill="currentColor" />
                               </button>}
                             </div>;
                           })}
