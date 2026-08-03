@@ -11,9 +11,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/settings"
 )
 
 type fakeMetadataService struct {
@@ -149,6 +151,76 @@ func TestMovieDetailsPassesStableTitleID(t *testing.T) {
 
 	if response.Code != http.StatusOK || service.detailsID != "title-id" || service.detailsLanguage != "en-US" {
 		t.Fatalf("unexpected details status=%d id=%q language=%q", response.Code, service.detailsID, service.detailsLanguage)
+	}
+}
+
+func TestMovieAndSeriesDetailsTruncateCastToActiveProfileLimit(t *testing.T) {
+	profileID := "profile-id"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	cast := []metadata.CastMember{
+		{ID: "1", Name: "First"},
+		{ID: "2", Name: "Second"},
+		{ID: "3", Name: "Third"},
+	}
+	service := &fakeMetadataService{
+		detailsMovie:       metadata.Movie{ID: "movie-id", MediaType: metadata.MediaTypeMovie, Title: "Movie", Genres: []metadata.Genre{}, Cast: cast, ExternalIDs: map[string]string{}},
+		seriesDetailsValue: metadata.Series{ID: "series-id", MediaType: metadata.MediaTypeSeries, Name: "Series", Genres: []metadata.Genre{}, Cast: cast, Seasons: []metadata.SeasonSummary{}, Aliases: []metadata.Alias{}, EpisodeOrders: []metadata.EpisodeOrder{}, ExternalIDs: map[string]string{}},
+	}
+	api := metadataAPI(service)
+	api.settings = &fakeSettingsService{effective: settings.Effective{Values: settings.EffectiveValues{MaximumCastMembers: 2}}}
+	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+
+	movieRequest := httptest.NewRequest(http.MethodGet, "/api/v1/titles/movie-id", nil)
+	movieRequest.SetPathValue("titleId", "movie-id")
+	movieResponse := httptest.NewRecorder()
+	api.movieDetails(movieResponse, movieRequest, principal)
+	if movieResponse.Code != http.StatusOK {
+		t.Fatalf("movie details status = %d: %s", movieResponse.Code, movieResponse.Body.String())
+	}
+	var movie metadata.Movie
+	decodeResponse(t, movieResponse, &movie)
+	if len(movie.Cast) != 2 || movie.Cast[0].Name != "First" || movie.Cast[1].Name != "Second" {
+		t.Fatalf("movie cast was not truncated in provider order: %+v", movie.Cast)
+	}
+
+	seriesRequest := httptest.NewRequest(http.MethodGet, "/api/v1/series/series-id", nil)
+	seriesRequest.SetPathValue("titleId", "series-id")
+	seriesResponse := httptest.NewRecorder()
+	api.seriesDetails(seriesResponse, seriesRequest, principal)
+	if seriesResponse.Code != http.StatusOK {
+		t.Fatalf("series details status = %d: %s", seriesResponse.Code, seriesResponse.Body.String())
+	}
+	var series metadata.Series
+	decodeResponse(t, seriesResponse, &series)
+	if len(series.Cast) != 2 || series.Cast[0].Name != "First" || series.Cast[1].Name != "Second" {
+		t.Fatalf("series cast was not truncated in provider order: %+v", series.Cast)
+	}
+	if api.settings.(*fakeSettingsService).requestedProfileID != profileID {
+		t.Fatalf("effective settings resolved for %q, want %q", api.settings.(*fakeSettingsService).requestedProfileID, profileID)
+	}
+}
+
+func TestMovieDetailsWithoutActiveProfileUsesServerCastLimit(t *testing.T) {
+	serverLimit := 1
+	service := &fakeMetadataService{detailsMovie: metadata.Movie{
+		ID: "movie-id", MediaType: metadata.MediaTypeMovie, Title: "Movie", Genres: []metadata.Genre{},
+		Cast: []metadata.CastMember{{ID: "1", Name: "First"}, {ID: "2", Name: "Second"}}, ExternalIDs: map[string]string{},
+	}}
+	api := metadataAPI(service)
+	api.settings = &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1, Values: settings.Values{MaximumCastMembers: &serverLimit}}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/titles/movie-id", nil)
+	request.SetPathValue("titleId", "movie-id")
+	response := httptest.NewRecorder()
+
+	api.movieDetails(response, request, auth.Principal{})
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("movie details status = %d: %s", response.Code, response.Body.String())
+	}
+	var movie metadata.Movie
+	decodeResponse(t, response, &movie)
+	if len(movie.Cast) != serverLimit || movie.Cast[0].Name != "First" {
+		t.Fatalf("server cast limit was not used without an active profile: %+v", movie.Cast)
 	}
 }
 
@@ -378,6 +450,7 @@ func TestMetadataProviderErrorsLogWrappedCauseWithoutLeakingIt(t *testing.T) {
 func metadataAPI(service metadataService) *API {
 	return &API{
 		metadata: service,
+		settings: &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}},
 		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }

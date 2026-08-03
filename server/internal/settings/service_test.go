@@ -40,6 +40,95 @@ func TestApplyPatchCanClearOverride(t *testing.T) {
 		t.Fatalf("expected theme override to be removed, got %q", *updated.Theme)
 	}
 }
+
+func TestMaximumCastMembersDefaultsValidationPersistenceAndInheritance(t *testing.T) {
+	effective := defaultEffective()
+	if effective.Values.MaximumCastMembers != DefaultMaximumCastMembers || effective.Sources["maximumCastMembers"] != "default" {
+		t.Fatalf("maximum cast default = %d from %q, want %d from default", effective.Values.MaximumCastMembers, effective.Sources["maximumCastMembers"], DefaultMaximumCastMembers)
+	}
+
+	for _, invalid := range []int{MinimumMaximumCastMembers - 1, MaximumMaximumCastMembers + 1} {
+		patch := Patch{MaximumCastMembers: OptionalInt{Set: true, Value: &invalid}}
+		if err := validatePatch(patch); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("maximumCastMembers %d validation error = %v, want invalid input", invalid, err)
+		}
+	}
+	for _, valid := range []int{MinimumMaximumCastMembers, MaximumMaximumCastMembers} {
+		patch := Patch{MaximumCastMembers: OptionalInt{Set: true, Value: &valid}}
+		if err := validatePatch(patch); err != nil {
+			t.Fatalf("maximumCastMembers %d was rejected: %v", valid, err)
+		}
+	}
+
+	serverLimit := 60
+	serverValues := applyPatch(Values{}, Patch{MaximumCastMembers: OptionalInt{Set: true, Value: &serverLimit}})
+	encodedServer, err := json.Marshal(serverValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistedServer Values
+	if err := json.Unmarshal(encodedServer, &persistedServer); err != nil {
+		t.Fatal(err)
+	}
+	if persistedServer.MaximumCastMembers == nil || *persistedServer.MaximumCastMembers != serverLimit {
+		t.Fatalf("server maximumCastMembers did not survive JSON persistence: %s", encodedServer)
+	}
+
+	profileLimit := 15
+	profileValues := applyPatch(Values{}, Patch{MaximumCastMembers: OptionalInt{Set: true, Value: &profileLimit}})
+	encodedProfile, err := json.Marshal(profileValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistedProfile Values
+	if err := json.Unmarshal(encodedProfile, &persistedProfile); err != nil {
+		t.Fatal(err)
+	}
+	if persistedProfile.MaximumCastMembers == nil || *persistedProfile.MaximumCastMembers != profileLimit {
+		t.Fatalf("profile maximumCastMembers did not survive JSON persistence: %s", encodedProfile)
+	}
+
+	inherited := applyPatch(persistedProfile, Patch{MaximumCastMembers: OptionalInt{Set: true}})
+	if inherited.MaximumCastMembers != nil {
+		t.Fatalf("null profile maximumCastMembers did not restore inheritance: %+v", inherited)
+	}
+	effective = defaultEffective()
+	applyLayer(&effective, persistedServer, "instance")
+	applyLayer(&effective, inherited, "profile")
+	applyMaximumCastMembersPolicy(&effective, persistedServer, inherited)
+	if effective.Values.MaximumCastMembers != serverLimit || effective.Sources["maximumCastMembers"] != "instance" {
+		t.Fatalf("inherited maximumCastMembers = %d from %q, want %d from instance", effective.Values.MaximumCastMembers, effective.Sources["maximumCastMembers"], serverLimit)
+	}
+}
+
+func TestProfileMaximumCastMembersRejectsServerOverflowAndCapsStaleOverride(t *testing.T) {
+	aboveDefault := DefaultMaximumCastMembers + 1
+	if err := validateProfileMaximumCastMembers(Patch{MaximumCastMembers: OptionalInt{Set: true, Value: &aboveDefault}}, Values{}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("profile value above default server limit error = %v, want invalid input", err)
+	}
+
+	serverLimit := 40
+	aboveServer := serverLimit + 1
+	instance := Values{MaximumCastMembers: &serverLimit}
+	if err := validateProfileMaximumCastMembers(Patch{MaximumCastMembers: OptionalInt{Set: true, Value: &aboveServer}}, instance); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("profile value above configured server limit error = %v, want invalid input", err)
+	}
+	if err := validateProfileMaximumCastMembers(Patch{MaximumCastMembers: OptionalInt{Set: true, Value: &serverLimit}}, instance); err != nil {
+		t.Fatalf("profile value equal to server limit was rejected: %v", err)
+	}
+
+	loweredServerLimit := 10
+	staleProfileLimit := 50
+	loweredInstance := Values{MaximumCastMembers: &loweredServerLimit}
+	staleProfile := Values{MaximumCastMembers: &staleProfileLimit}
+	effective := defaultEffective()
+	applyLayer(&effective, loweredInstance, "instance")
+	applyLayer(&effective, staleProfile, "profile")
+	applyMaximumCastMembersPolicy(&effective, loweredInstance, staleProfile)
+	if effective.Values.MaximumCastMembers != loweredServerLimit || effective.Sources["maximumCastMembers"] != "instance" {
+		t.Fatalf("stale profile override was not bounded after server decrease: %+v", effective)
+	}
+}
 func TestInterfaceLanguageValidationAndLayering(t *testing.T) {
 	for _, language := range []string{
 		"en", "fr", "es", "it", "de", "ru", "pt-PT", "pt-BR", "ar", "ja", "ko", "zh-CN", "pl", "hy",
@@ -258,6 +347,7 @@ func TestNewSettingsClearEveryOverride(t *testing.T) {
 	text := "value"
 	values := Values{
 		InterfaceLanguage:   &text,
+		MaximumCastMembers:  &number,
 		AutoplayNextEpisode: &enabled, SkipIntroEnabled: &enabled, SkipRecapEnabled: &enabled, SkipOutroEnabled: &enabled,
 		CardDensity: &text, AnimationsEnabled: &enabled,
 		SubtitleSizePercent: &number, SubtitleTextColor: &text, SubtitleBackgroundOpacityPercent: &number,
@@ -265,6 +355,7 @@ func TestNewSettingsClearEveryOverride(t *testing.T) {
 	}
 	updated := applyPatch(values, Patch{
 		InterfaceLanguage:   OptionalString{Set: true},
+		MaximumCastMembers:  OptionalInt{Set: true},
 		AutoplayNextEpisode: OptionalBool{Set: true}, SkipIntroEnabled: OptionalBool{Set: true},
 		SkipRecapEnabled: OptionalBool{Set: true}, SkipOutroEnabled: OptionalBool{Set: true}, CardDensity: OptionalString{Set: true},
 		AnimationsEnabled: OptionalBool{Set: true}, SubtitleSizePercent: OptionalInt{Set: true},
@@ -333,7 +424,7 @@ func TestLegacySettingsJSONUsesNewDefaults(t *testing.T) {
 	}
 	effective := defaultEffective()
 	applyLayer(&effective, legacy, "instance")
-	if effective.Values.InterfaceLanguage != "en" || effective.Values.Theme != "dark" || !effective.Values.AutoplayNextEpisode ||
+	if effective.Values.InterfaceLanguage != "en" || effective.Values.Theme != "dark" || effective.Values.MaximumCastMembers != DefaultMaximumCastMembers || !effective.Values.AutoplayNextEpisode ||
 		!effective.Values.SkipIntroEnabled || !effective.Values.SkipRecapEnabled || !effective.Values.SkipOutroEnabled || effective.Values.CardDensity != "comfortable" ||
 		!effective.Values.AnimationsEnabled || effective.Values.SubtitleSizePercent != 100 || effective.Values.SubtitleTextColor != "#FFFFFF" ||
 		effective.Values.SubtitleBackgroundOpacityPercent != 60 || !effective.Values.NotificationsEnabled ||

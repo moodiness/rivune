@@ -1763,6 +1763,7 @@ const rivuneSettingDefaults = {
   interfaceLanguage: "en",
   theme: "system",
   maximumResolution: "auto",
+  maximumCastMembers: 20,
   preferDirectPlay: true,
   allowTranscoding: true,
   transcoding: "inherit",
@@ -2151,6 +2152,7 @@ function SettingsCard({ serverScope = false, title, description, icon, values, d
     interfaceLanguage: defaults.interfaceLanguage ?? rivuneSettingDefaults.interfaceLanguage,
     theme: defaults.theme ?? rivuneSettingDefaults.theme,
     maximumResolution: defaults.maximumResolution ?? rivuneSettingDefaults.maximumResolution,
+    maximumCastMembers: defaults.maximumCastMembers ?? rivuneSettingDefaults.maximumCastMembers,
     allowTranscoding: defaults.allowTranscoding ?? rivuneSettingDefaults.allowTranscoding,
     transcoding: defaults.transcoding ?? rivuneSettingDefaults.transcoding,
     preferDirectPlay: defaults.preferDirectPlay ?? rivuneSettingDefaults.preferDirectPlay,
@@ -2212,6 +2214,7 @@ function SettingsCard({ serverScope = false, title, description, icon, values, d
             </div>
           </div>}
         <SelectSetting label={translate("settings.fields.maximumResolution")} value={values.maximumResolution} defaultValue={effective.maximumResolution} options={settingOptions.resolution} emptyLabel={emptyLabel} onChange={(value) => change("maximumResolution", value)} />
+        <MaximumCastMembersSetting serverScope={serverScope} value={values.maximumCastMembers} serverValue={effective.maximumCastMembers} saving={saving} onChange={(value) => change("maximumCastMembers", value)} />
         <InheritedToggle label={translate("settings.fields.preferDirectPlay")} description={translate("settings.fields.preferDirectPlayDescription")} value={values.preferDirectPlay} defaultValue={effective.preferDirectPlay} onChange={(value) => change("preferDirectPlay", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label={translate("settings.fields.autoplayNextEpisode")} description={translate("settings.fields.autoplayNextEpisodeDescription")} value={values.autoplayNextEpisode} defaultValue={effective.autoplayNextEpisode} onChange={(value) => change("autoplayNextEpisode", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label={translate("settings.skipIntro")} description={translate("settings.skipIntroDescription")} value={values.skipIntroEnabled} defaultValue={effective.skipIntroEnabled} onChange={(value) => change("skipIntroEnabled", value)} emptyLabel={emptyLabel} />
@@ -2260,6 +2263,39 @@ function InheritedToggle({ label, description, value, defaultValue, onChange, em
     <label className="toggle-field"><input type="checkbox" checked={shown} onChange={(event) => onChange(event.target.checked)} /><span><i /><div><strong>{label}</strong><small>{description}</small><em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? translate("settings.value.inheritedBoolean", { source: emptyLabel, value: translate(shown ? "common.status.on" : "common.status.off") }) : translate("settings.value.overrideBoolean", { value: translate(shown ? "common.status.on" : "common.status.off") })}</em></div></span></label>
   </div>;
 }
+function MaximumCastMembersSetting({ serverScope, value, serverValue, saving, onChange }: { serverScope: boolean; value: number | null | undefined; serverValue: number; saving: boolean; onChange: (value: number | null) => void }) {
+  const inherited = !serverScope && (value === null || value === undefined);
+  const maximum = serverScope ? 100 : boundedInteger(serverValue, 20, 1, 100);
+  const shown = inherited ? maximum : boundedInteger(value, serverScope ? 20 : maximum, 1, maximum);
+  const input = <input
+    aria-label={translate("settings.fields.maximumCastMembers")}
+    name="maximumCastMembers"
+    type="number"
+    min={1}
+    max={maximum}
+    step={1}
+    required
+    disabled={saving || inherited}
+    value={shown}
+    onChange={(event) => {
+      const next = event.currentTarget.valueAsNumber;
+      if (Number.isInteger(next) && next >= 1 && next <= maximum) onChange(next);
+    }}
+  />;
+  return <div className="setting-control setting-control--number">
+    <label className="field">
+      <span>{translate("settings.fields.maximumCastMembers")}</span>
+      {!serverScope && <div><select name="maximumCastMembersMode" aria-label={translate("settings.fields.maximumCastMembersMode")} disabled={saving} value={inherited ? "inherit" : "custom"} onChange={(event) => onChange(event.target.value === "inherit" ? null : maximum)}><option value="inherit">{translate("settings.options.transcodingInherit")}</option><option value="custom">{translate("settings.options.customValue")}</option></select></div>}
+      <div>{input}</div>
+      {!serverScope && <small className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? translate("settings.value.inheritedNumber", { source: translate("settings.defaults.server"), value: maximum, suffix: "" }) : translate("settings.value.overrideNumber", { value: shown, suffix: "" })}</small>}
+    </label>
+  </div>;
+}
+
+function boundedInteger(value: number | null | undefined, fallback: number, minimum: number, maximum: number): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum ? value : fallback;
+}
+
 
 function RangeSetting({ label, value, defaultValue, min, max, step, suffix, emptyLabel, onChange }: { label: string; value: number | null | undefined; defaultValue: number; min: number; max: number; step: number; suffix: string; emptyLabel: string; onChange: (value: number | null) => void }) {
   const inherited = value === null || value === undefined;

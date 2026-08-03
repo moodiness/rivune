@@ -209,7 +209,7 @@ export class RivuneHarness {
   private demoAvailable = false;
   private demoSessionActive = false;
   private maintenance: { enabled: boolean; message: string | null } = { enabled: false, message: null };
-  private instanceSettings: Record<string, unknown> = { allowTranscoding: true };
+  private instanceSettings: Record<string, unknown> = { allowTranscoding: true, maximumCastMembers: 20 };
   private readonly profileSettings = new Map<string, Record<string, unknown>>([
     ["alice", { transcoding: "inherit" }],
     ["bob", { transcoding: "inherit" }],
@@ -577,12 +577,14 @@ export class RivuneHarness {
       const instanceAllowsTranscoding = this.instanceSettings.allowTranscoding !== false;
       const transcoding = profileValues.transcoding === "enabled" || profileValues.transcoding === "disabled" ? profileValues.transcoding : "inherit";
       const allowTranscoding = instanceAllowsTranscoding && transcoding !== "disabled";
+      const instanceMaximumCastMembers = typeof this.instanceSettings.maximumCastMembers === "number" ? Math.min(100, Math.max(1, this.instanceSettings.maximumCastMembers)) : 20;
+      const maximumCastMembers = typeof profileValues.maximumCastMembers === "number" ? Math.min(instanceMaximumCastMembers, Math.max(1, profileValues.maximumCastMembers)) : instanceMaximumCastMembers;
       const interfaceLanguage = typeof profileLanguage === "string"
         ? profileLanguage
         : typeof instanceLanguage === "string" ? instanceLanguage : "en";
       const responseDelay = this.effectiveSettingsDelays.shift() ?? 0;
       if (responseDelay > 0) await wait(responseDelay);
-      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, allowTranscoding, transcoding, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled: false, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default", allowTranscoding: instanceAllowsTranscoding ? transcoding === "disabled" ? "profile" : "instance" : "instance", transcoding: "profile" } });
+      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, allowTranscoding, transcoding, maximumCastMembers, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled: false, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default", allowTranscoding: instanceAllowsTranscoding ? transcoding === "disabled" ? "profile" : "instance" : "instance", transcoding: "profile", maximumCastMembers: typeof profileValues.maximumCastMembers === "number" ? "profile" : "instance" } });
       return;
     }
     if (path === "/auth/notifications") { await json(route, { notifications: [] }); return; }

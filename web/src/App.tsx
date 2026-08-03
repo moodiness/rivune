@@ -222,6 +222,7 @@ type RuntimeSettings = {
   autoplayNextEpisode: boolean;
   cardDensity: "comfortable" | "compact";
   animationsEnabled: boolean;
+  maximumCastMembers: number;
   subtitleSizePercent: number;
   subtitleTextColor: string;
   subtitleBackgroundOpacityPercent: number;
@@ -234,6 +235,7 @@ const defaultRuntimeSettings: RuntimeSettings = {
   autoplayNextEpisode: true,
   cardDensity: "comfortable",
   animationsEnabled: true,
+  maximumCastMembers: 20,
   subtitleSizePercent: 100,
   subtitleTextColor: "#FFFFFF",
   subtitleBackgroundOpacityPercent: 60,
@@ -252,6 +254,7 @@ function runtimeSettings(values: SettingsValues): RuntimeSettings {
     autoplayNextEpisode: typeof values.autoplayNextEpisode === "boolean" ? values.autoplayNextEpisode : defaultRuntimeSettings.autoplayNextEpisode,
     cardDensity: values.cardDensity === "compact" ? "compact" : "comfortable",
     animationsEnabled: typeof values.animationsEnabled === "boolean" ? values.animationsEnabled : defaultRuntimeSettings.animationsEnabled,
+    maximumCastMembers: boundedSetting(values.maximumCastMembers, defaultRuntimeSettings.maximumCastMembers, 1, 100),
     subtitleSizePercent: boundedSetting(values.subtitleSizePercent, defaultRuntimeSettings.subtitleSizePercent, 50, 200),
     subtitleTextColor: typeof values.subtitleTextColor === "string" && /^#[0-9A-Fa-f]{6}$/.test(values.subtitleTextColor) ? values.subtitleTextColor.toUpperCase() : defaultRuntimeSettings.subtitleTextColor,
     subtitleBackgroundOpacityPercent: boundedSetting(values.subtitleBackgroundOpacityPercent, defaultRuntimeSettings.subtitleBackgroundOpacityPercent, 0, 100),
@@ -599,6 +602,6 @@ export default function App() {
         {visibleView === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} /> : visibleView === "search" ? <SearchPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.search} onLibraryMutation={invalidateLibrarySurfaces} /> : visibleView === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : visibleView === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
       </Suspense>
     </div>
-    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaIdentity(mediaRoute.item)}:${mediaRoute.item.titleId ?? ""}`} item={mediaRoute.item} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} onLibraryMutation={invalidateLibrarySurfaces} /></Suspense>}
+    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaIdentity(mediaRoute.item)}:${mediaRoute.item.titleId ?? ""}`} item={mediaRoute.item} maximumCastMembers={settings.maximumCastMembers} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} onLibraryMutation={invalidateLibrarySurfaces} /></Suspense>}
   </Shell>;
 }

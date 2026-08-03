@@ -97,7 +97,7 @@ func TestUpdateProfileSettingsDecodesEveryNewField(t *testing.T) {
 	service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
 	api := authenticatedSettingsAPI(service)
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(
-		`{"autoplayNextEpisode":false,"skipIntroEnabled":true,"skipRecapEnabled":false,"skipOutroEnabled":true,"cardDensity":"compact","animationsEnabled":false,"subtitleSizePercent":75,"subtitleTextColor":"#a1b2c3","subtitleBackgroundOpacityPercent":25,"notificationsEnabled":false,"notificationDurationSeconds":7,"notificationPollIntervalSeconds":45}`,
+		`{"maximumCastMembers":35,"autoplayNextEpisode":false,"skipIntroEnabled":true,"skipRecapEnabled":false,"skipOutroEnabled":true,"cardDensity":"compact","animationsEnabled":false,"subtitleSizePercent":75,"subtitleTextColor":"#a1b2c3","subtitleBackgroundOpacityPercent":25,"notificationsEnabled":false,"notificationDurationSeconds":7,"notificationPollIntervalSeconds":45}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
@@ -109,7 +109,8 @@ func TestUpdateProfileSettingsDecodesEveryNewField(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
 	patch := service.profilePatch
-	if !patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value == nil || *patch.AutoplayNextEpisode.Value ||
+	if !patch.MaximumCastMembers.Set || patch.MaximumCastMembers.Value == nil || *patch.MaximumCastMembers.Value != 35 ||
+		!patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value == nil || *patch.AutoplayNextEpisode.Value ||
 		!patch.SkipIntroEnabled.Set || patch.SkipIntroEnabled.Value == nil || !*patch.SkipIntroEnabled.Value ||
 		!patch.SkipRecapEnabled.Set || patch.SkipRecapEnabled.Value == nil || *patch.SkipRecapEnabled.Value ||
 		!patch.SkipOutroEnabled.Set || patch.SkipOutroEnabled.Value == nil || !*patch.SkipOutroEnabled.Value ||
@@ -129,7 +130,7 @@ func TestUpdateProfileSettingsDecodesNullForEveryNewField(t *testing.T) {
 	service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
 	api := authenticatedSettingsAPI(service)
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(
-		`{"interfaceLanguage":null,"autoplayNextEpisode":null,"skipIntroEnabled":null,"skipRecapEnabled":null,"skipOutroEnabled":null,"cardDensity":null,"animationsEnabled":null,"subtitleSizePercent":null,"subtitleTextColor":null,"subtitleBackgroundOpacityPercent":null,"notificationsEnabled":null,"notificationDurationSeconds":null,"notificationPollIntervalSeconds":null}`,
+		`{"interfaceLanguage":null,"maximumCastMembers":null,"autoplayNextEpisode":null,"skipIntroEnabled":null,"skipRecapEnabled":null,"skipOutroEnabled":null,"cardDensity":null,"animationsEnabled":null,"subtitleSizePercent":null,"subtitleTextColor":null,"subtitleBackgroundOpacityPercent":null,"notificationsEnabled":null,"notificationDurationSeconds":null,"notificationPollIntervalSeconds":null}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
@@ -144,7 +145,8 @@ func TestUpdateProfileSettingsDecodesNullForEveryNewField(t *testing.T) {
 	if !patch.InterfaceLanguage.Set || patch.InterfaceLanguage.Value != nil {
 		t.Fatalf("interface language null was not preserved: %+v", patch)
 	}
-	if !patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value != nil ||
+	if !patch.MaximumCastMembers.Set || patch.MaximumCastMembers.Value != nil ||
+		!patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value != nil ||
 		!patch.SkipIntroEnabled.Set || patch.SkipIntroEnabled.Value != nil ||
 		!patch.SkipRecapEnabled.Set || patch.SkipRecapEnabled.Value != nil ||
 		!patch.SkipOutroEnabled.Set || patch.SkipOutroEnabled.Value != nil ||
@@ -189,11 +191,12 @@ func TestEffectiveSettingsResponseIncludesNewFieldsAndSources(t *testing.T) {
 		SchemaVersion: 1,
 		Values: settings.EffectiveValues{
 			InterfaceLanguage:   "pt-BR",
+			MaximumCastMembers:  20,
 			AutoplayNextEpisode: true, CardDensity: "comfortable", AnimationsEnabled: true,
 			SubtitleSizePercent: 100, SubtitleTextColor: "#FFFFFF", SubtitleBackgroundOpacityPercent: 60,
 			NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 5, ForcedSubtitleLanguage: "fr-CA",
 		},
-		Sources: map[string]string{"interfaceLanguage": "profile", "autoplayNextEpisode": "default", "subtitleTextColor": "profile", "forcedSubtitleLanguage": "instance"},
+		Sources: map[string]string{"interfaceLanguage": "profile", "maximumCastMembers": "instance", "autoplayNextEpisode": "default", "subtitleTextColor": "profile", "forcedSubtitleLanguage": "instance"},
 	}
 	api := authenticatedSettingsAPI(&fakeSettingsService{effective: effective})
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/profiles/profile-id/settings/effective", nil)
@@ -211,9 +214,9 @@ func TestEffectiveSettingsResponseIncludesNewFieldsAndSources(t *testing.T) {
 		Sources       map[string]string        `json:"sources"`
 	}
 	decodeResponse(t, response, &body)
-	if body.SchemaVersion != 1 || body.Settings.InterfaceLanguage != "pt-BR" || body.Settings.SubtitleTextColor != "#FFFFFF" ||
+	if body.SchemaVersion != 1 || body.Settings.InterfaceLanguage != "pt-BR" || body.Settings.MaximumCastMembers != 20 || body.Settings.SubtitleTextColor != "#FFFFFF" ||
 		body.Settings.NotificationPollIntervalSeconds != 5 || body.Settings.ForcedSubtitleLanguage != "fr-CA" ||
-		body.Sources["interfaceLanguage"] != "profile" || body.Sources["autoplayNextEpisode"] != "default" ||
+		body.Sources["interfaceLanguage"] != "profile" || body.Sources["maximumCastMembers"] != "instance" || body.Sources["autoplayNextEpisode"] != "default" ||
 		body.Sources["subtitleTextColor"] != "profile" || body.Sources["forcedSubtitleLanguage"] != "instance" {
 		t.Fatalf("effective response omitted new settings data: %+v", body)
 	}

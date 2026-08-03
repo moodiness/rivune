@@ -3,12 +3,34 @@ package tmdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/moodiness/rivune/server/internal/metadata"
 )
+
+func TestNormalizeCastRetainsUpToOneHundredUniqueMembers(t *testing.T) {
+	cast := make([]castMemberResponse, 0, 104)
+	cast = append(cast,
+		castMemberResponse{ID: 0, Name: "Invalid"},
+		castMemberResponse{ID: 1, Name: "First"},
+		castMemberResponse{ID: 1, Name: "Duplicate"},
+	)
+	for id := int64(2); id <= 102; id++ {
+		cast = append(cast, castMemberResponse{ID: id, Name: fmt.Sprintf("Person %d", id)})
+	}
+
+	members := normalizeCast(cast)
+
+	if len(members) != 100 {
+		t.Fatalf("normalized cast length = %d, want 100", len(members))
+	}
+	if members[0].ID != "1" || members[0].Name != "First" || members[99].ID != "100" {
+		t.Fatalf("normalized cast did not preserve the first 100 unique valid members: first=%+v last=%+v", members[0], members[99])
+	}
+}
 
 func TestSearchMoviesSendsBearerTokenAndNormalizesResults(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

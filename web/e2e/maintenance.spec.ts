@@ -147,6 +147,52 @@ test("server transcoding disable confirms active sessions and the global veto wi
   const profileRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
   expect(profileRequest.body).toMatchObject({ transcoding: "enabled" });
 });
+test("cast member limits persist in server and profile scopes", async ({ page, rivune }) => {
+  await page.goto("/#admin");
+  await page.getByRole("button", { name: /Settings/ }).click();
+  const scope = page.locator(".settings-profile-picker select");
+  const savePreferences = page.getByRole("button", { name: "Save preferences" });
+  const mode = page.getByRole("combobox", { name: "Cast member limit mode" });
+  const limit = page.getByRole("spinbutton", { name: "Maximum cast members" });
+
+  await expect(mode).toHaveValue("inherit");
+  await expect(mode.locator("option")).toHaveText(["Inherit server setting", "Custom value"]);
+  await expect(limit).toBeDisabled();
+  await expect(limit).toHaveValue("20");
+  await expect(limit).toHaveAttribute("max", "20");
+
+  await scope.selectOption("server");
+  await expect(mode).toHaveCount(0);
+  await expect(limit).toBeEnabled();
+  await expect(limit).toHaveValue("20");
+  await expect(limit).toHaveAttribute("min", "1");
+  await expect(limit).toHaveAttribute("max", "100");
+  await limit.fill("12");
+  await savePreferences.click();
+  const serverRequest = await rivune.waitForRequest("/api/v1/settings", "PATCH");
+  expect(serverRequest.body).toMatchObject({ maximumCastMembers: 12 });
+
+  await scope.selectOption("alice");
+  await expect(mode).toHaveValue("inherit");
+  await expect(limit).toBeDisabled();
+  await expect(limit).toHaveValue("12");
+  await expect(limit).toHaveAttribute("max", "12");
+  await mode.selectOption("custom");
+  await expect(limit).toBeEnabled();
+  await limit.fill("13");
+  await expect(limit).toHaveValue("12");
+  await limit.fill("8");
+  await savePreferences.click();
+  const customRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
+  expect(customRequest.body).toMatchObject({ maximumCastMembers: 8 });
+
+  await mode.selectOption("inherit");
+  await expect(limit).toBeDisabled();
+  await savePreferences.click();
+  await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings", "PATCH").length).toBe(2);
+  expect(rivune.matching("/api/v1/profiles/alice/settings", "PATCH").at(-1)?.body).toMatchObject({ maximumCastMembers: null });
+});
+
 
 test("the selected interface language localizes Home copy", async ({ page, rivune }) => {
   await page.goto("/#admin");

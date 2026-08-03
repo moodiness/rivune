@@ -87,15 +87,20 @@ class TranscodingModelsTest {
 
     @Test
     fun missingNewSettingsUseTolerantDefaults() {
-        val values = json.decodeFromString<TranscodingSettingsValues>("{\"futureSetting\":true}")
+        val values = json.decodeFromString<SettingsValues>("{\"futureSetting\":true}")
         assertNull(values.allowTranscoding)
+        assertNull(values.transcoding)
+        assertNull(values.maximumCastMembers)
 
-        val effective = json.decodeFromString<EffectiveSettings>("""{"schemaVersion":1,"settings":{"allowTranscoding":false,"transcoding":"enabled","futureSetting":true},"sources":{"allowTranscoding":"instance","transcoding":"profile","theme":"default"}}""")
+        val inherited = json.decodeFromString<SettingsValues>("""{"maximumCastMembers":null}""")
+        assertNull(inherited.maximumCastMembers)
+
+        val effective = json.decodeFromString<EffectiveSettings>("""{"schemaVersion":1,"settings":{"allowTranscoding":false,"transcoding":"enabled","maximumCastMembers":20,"futureSetting":true},"sources":{"allowTranscoding":"instance","transcoding":"profile","maximumCastMembers":"instance","theme":"default"}}""")
         assertEquals(false, effective.settings.allowTranscoding)
         assertEquals("enabled", effective.settings.transcoding)
+        assertEquals(20, effective.settings.maximumCastMembers)
         assertEquals("instance", effective.sources.allowTranscoding)
-        assertNull(values.transcoding)
-
+        assertEquals("instance", effective.sources.maximumCastMembers)
         val error = json.decodeFromString<ServerError>("""{"code":"future_error_code","message":"future","futureField":true}""")
         assertEquals("future_error_code", error.code)
     }

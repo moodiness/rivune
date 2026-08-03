@@ -95,16 +95,22 @@ public sealed class TranscodingModelsTests
     [Fact]
     public void MissingNewSettingsAndUnknownErrorCodesAreTolerated()
     {
-        var values = JsonSerializer.Deserialize<TranscodingSettingsValues>("{\"futureSetting\":true}", JsonOptions)!;
+        var values = JsonSerializer.Deserialize<SettingsValues>("{\"futureSetting\":true}", JsonOptions)!;
         Assert.Null(values.AllowTranscoding);
         Assert.Null(values.Transcoding);
+        Assert.Null(values.MaximumCastMembers);
+
+        var inherited = JsonSerializer.Deserialize<SettingsValues>("{\"maximumCastMembers\":null}", JsonOptions)!;
+        Assert.Null(inherited.MaximumCastMembers);
 
         var effective = JsonSerializer.Deserialize<EffectiveSettings>(
-            """{"schemaVersion":1,"settings":{"allowTranscoding":false,"transcoding":"enabled","futureSetting":true},"sources":{"allowTranscoding":"instance","transcoding":"profile","theme":"default"}}""",
+            """{"schemaVersion":1,"settings":{"allowTranscoding":false,"transcoding":"enabled","maximumCastMembers":20,"futureSetting":true},"sources":{"allowTranscoding":"instance","transcoding":"profile","maximumCastMembers":"instance","theme":"default"}}""",
             JsonOptions)!;
         Assert.Equal(false, effective.Settings.AllowTranscoding);
         Assert.Equal("enabled", effective.Settings.Transcoding);
+        Assert.Equal(20, effective.Settings.MaximumCastMembers);
         Assert.Equal("instance", effective.Sources.AllowTranscoding);
+        Assert.Equal("instance", effective.Sources.MaximumCastMembers);
 
         var error = JsonSerializer.Deserialize<ServerError>("{\"code\":\"future_error_code\",\"message\":\"future\",\"futureField\":true}", JsonOptions)!;
         Assert.Equal("future_error_code", error.Code);

@@ -144,25 +144,27 @@ public struct ProfileTranscodingPatch: Encodable, Sendable, Equatable {
     }
 }
 
-public struct TranscodingSettingsValues: Codable, Sendable, Equatable {
+public struct SettingsValues: Codable, Sendable, Equatable {
     public let allowTranscoding: Bool?
     public let transcoding: String?
+    public let maximumCastMembers: Int?
 }
 
 public struct SettingsLayer: Codable, Sendable, Equatable {
     public let schemaVersion: Int
-    public let settings: TranscodingSettingsValues
+    public let settings: SettingsValues
     public let updatedAt: String?
 }
 
 public struct EffectiveSettingsSources: Codable, Sendable, Equatable {
     public let allowTranscoding: String?
     public let transcoding: String?
+    public let maximumCastMembers: String?
 }
 
 public struct EffectiveSettings: Codable, Sendable, Equatable {
     public let schemaVersion: Int
-    public let settings: TranscodingSettingsValues
+    public let settings: SettingsValues
     public let sources: EffectiveSettingsSources
 }
 

@@ -499,7 +499,7 @@ func normalizeSeries(series seriesResponse) metadata.ProviderSeries {
 }
 
 func normalizeCast(cast []castMemberResponse) []metadata.CastMember {
-	const maximumCastMembers = 12
+	const maximumCastMembers = 100
 	members := make([]metadata.CastMember, 0, min(len(cast), maximumCastMembers))
 	seen := make(map[int64]struct{}, min(len(cast), maximumCastMembers))
 	for _, person := range cast {

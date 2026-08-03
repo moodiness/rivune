@@ -98,16 +98,17 @@ public sealed record ProfileSelection
     public required string ExpiresAt { get; init; }
 }
 
-public sealed record TranscodingSettingsValues
+public sealed record SettingsValues
 {
     public bool? AllowTranscoding { get; init; }
     public string? Transcoding { get; init; }
+    public int? MaximumCastMembers { get; init; }
 }
 
 public sealed record SettingsLayer
 {
     public required int SchemaVersion { get; init; }
-    public required TranscodingSettingsValues Settings { get; init; }
+    public required SettingsValues Settings { get; init; }
     public string? UpdatedAt { get; init; }
 }
 
@@ -115,12 +116,13 @@ public sealed record EffectiveSettingsSources
 {
     public string? AllowTranscoding { get; init; }
     public string? Transcoding { get; init; }
+    public string? MaximumCastMembers { get; init; }
 }
 
 public sealed record EffectiveSettings
 {
     public required int SchemaVersion { get; init; }
-    public required TranscodingSettingsValues Settings { get; init; }
+    public required SettingsValues Settings { get; init; }
     public required EffectiveSettingsSources Sources { get; init; }
 }
 

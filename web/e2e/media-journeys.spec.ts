@@ -262,6 +262,17 @@ test("episode details float beside a responsive contextual stream panel", async 
   await expect(cast).toBeVisible();
   await expect(cast.getByText("Avery Stone")).toBeVisible();
   await expect(cast.getByText("Commander Ilya Voss")).toBeVisible();
+  const detailsActions = page.locator(".details-actions");
+  const trailerAction = detailsActions.getByRole("button", { name: "Trailers" });
+  const watchedAction = detailsActions.getByRole("button", { name: /Mark (?:un)?watched/ });
+  await expect(watchedAction).toHaveClass(/button--ghost/);
+  await expect(page.locator(".details-context-actions .button--ghost")).toHaveCount(0);
+  const trailerActionBounds = await trailerAction.boundingBox();
+  const watchedActionBounds = await watchedAction.boundingBox();
+  expect(trailerActionBounds).not.toBeNull();
+  expect(watchedActionBounds).not.toBeNull();
+  expect(watchedActionBounds!.x).toBeGreaterThan(trailerActionBounds!.x + trailerActionBounds!.width);
+  expect(watchedActionBounds!.y).toBeCloseTo(trailerActionBounds!.y, 0);
   const desktopArtwork = await artwork.boundingBox();
   const desktopPrimary = await primary.boundingBox();
   const desktopPanel = await contextPanel.boundingBox();
@@ -327,6 +338,20 @@ test("episode details float beside a responsive contextual stream panel", async 
     scrollWidth: element.scrollWidth,
   }));
   expect(mobileCastOverflow.scrollWidth).toBeGreaterThan(mobileCastOverflow.clientWidth);
+  const mobileCarousel = cast.locator(".details-cast__list");
+  const mobileCastBounds = await mobileCarousel.boundingBox();
+  expect(mobileCastBounds).not.toBeNull();
+  const touchSession = await page.context().newCDPSession(page);
+  await touchSession.send("Input.synthesizeScrollGesture", {
+    x: Math.round(mobileCastBounds!.x + mobileCastBounds!.width * .75),
+    y: Math.round(mobileCastBounds!.y + mobileCastBounds!.height / 2),
+    xDistance: -Math.round(mobileCastBounds!.width * .5),
+    yDistance: 0,
+    gestureSourceType: "touch",
+    speed: 800,
+  });
+  await expect.poll(() => mobileCarousel.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  await touchSession.detach();
   const mobilePageWidth = await page.evaluate(() => ({
     clientWidth: document.documentElement.clientWidth,
     scrollWidth: document.documentElement.scrollWidth,
@@ -334,17 +359,20 @@ test("episode details float beside a responsive contextual stream panel", async 
   expect(mobilePageWidth.scrollWidth).toBeLessThanOrEqual(mobilePageWidth.clientWidth);
 });
 
-test("direct anime route exposes canonical cast in a focus-safe drawer", async ({ page, rivune: _rivune }) => {
+test("direct anime route exposes canonical cast in one draggable keyboard carousel", async ({ page, rivune: _rivune }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto("/media/series/tt21209876");
 
   await expect(page.getByRole("heading", { name: "Solo Leveling" })).toBeVisible();
   const cast = page.getByRole("region", { name: "Cast" });
+  const carousel = cast.locator(".details-cast__list");
   await expect(cast).toBeVisible();
-  await expect(cast.locator(".details-cast-member")).toHaveCount(6);
+  await expect(cast.locator(".details-cast-member")).toHaveCount(8);
   await expect(cast.getByText("Taito Ban")).toBeVisible();
   await expect(cast.getByText("Sung Jinwoo")).toBeVisible();
-  const castOverflow = await cast.locator(".details-cast__list").evaluate((element) => ({
+  await expect(page.getByRole("button", { name: "View all" })).toHaveCount(0);
+  await expect(page.locator(".cast-drawer, .cast-drawer-backdrop")).toHaveCount(0);
+  const castOverflow = await carousel.evaluate((element) => ({
     clientWidth: element.clientWidth,
     scrollWidth: element.scrollWidth,
   }));
@@ -358,20 +386,62 @@ test("direct anime route exposes canonical cast in a focus-safe drawer", async (
   expect(Math.max(...memberWidths) - Math.min(...memberWidths)).toBeLessThanOrEqual(1);
   expect(Math.max(...memberGaps) - Math.min(...memberGaps)).toBeLessThanOrEqual(1);
 
-  const viewAll = cast.getByRole("button", { name: "View all" });
-  await viewAll.click();
-  const drawer = page.getByRole("dialog", { name: "Cast" });
-  await expect(drawer).toBeVisible();
-  await expect(drawer.locator(".details-cast-member")).toHaveCount(8);
-  const closeDrawer = drawer.getByRole("button", { name: "Close" });
-  await expect(closeDrawer).toBeFocused();
-  await page.keyboard.press("Tab");
-  await expect(closeDrawer).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(closeDrawer).toBeFocused();
-  await page.keyboard.press("Escape");
-  await expect(drawer).toHaveCount(0);
-  await expect(viewAll).toBeFocused();
+  await carousel.focus();
+  await expect(carousel).toBeFocused();
+  const startScrollTolerance = await carousel.evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingLeft) + 1);
+  await page.keyboard.press("End");
+  await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  await page.keyboard.press("Home");
+  await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeLessThanOrEqual(startScrollTolerance);
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  await page.keyboard.press("Home");
+  await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeLessThanOrEqual(startScrollTolerance);
+
+  const bounds = await carousel.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move(bounds!.x + bounds!.width * .8, bounds!.y + bounds!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bounds!.x + bounds!.width * .2, bounds!.y + bounds!.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  const pageWidth = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(pageWidth.scrollWidth).toBeLessThanOrEqual(pageWidth.clientWidth);
+});
+
+test("cast rendering stops at the effective profile limit", async ({ page, rivune: _rivune }) => {
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  await page.evaluate(async () => {
+    const response = await fetch("/api/v1/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ maximumCastMembers: 5 }),
+    });
+    if (!response.ok) throw new Error(`Unable to configure cast fixture: ${response.status}`);
+  });
+  await page.goto("/media/series/tt21209876");
+
+  const cast = page.getByRole("region", { name: "Cast" });
+  await expect(cast.locator(".details-cast-member")).toHaveCount(5);
+  await expect(cast.getByText("Hiroki Touchi")).toBeVisible();
+  await expect(cast.getByText("Haruna Mikawa")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "View all" })).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "Cast" })).toHaveCount(0);
+  const castBounds = await cast.boundingBox();
+  const carouselBounds = await cast.locator(".details-cast__list").boundingBox();
+  expect(castBounds).not.toBeNull();
+  expect(carouselBounds).not.toBeNull();
+  expect(carouselBounds!.width).toBeLessThan(castBounds!.width);
+  const emptyRightSideIsDraggable = await page.evaluate(({ x, y }) => Boolean(
+    document.elementFromPoint(x, y)?.closest(".details-cast__list"),
+  ), {
+    x: Math.round((carouselBounds!.x + carouselBounds!.width + castBounds!.x + castBounds!.width) / 2),
+    y: Math.round(carouselBounds!.y + carouselBounds!.height / 2),
+  });
+  expect(emptyRightSideIsDraggable).toBe(false);
 });
 
 test("movie details retain cast and one playback action per source", async ({ page, rivune: _rivune }) => {
@@ -390,6 +460,11 @@ test("movie details retain cast and one playback action per source", async ({ pa
   await expect(sourceRows.getByRole("button", { name: /Play selected stream.*Fixture 1080p/ })).toBeEnabled();
   await expect(page.locator(".details-actions .episode-play")).toHaveCount(0);
   await expect(page.locator(".details-sources")).toHaveCount(0);
+  const pageWidth = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(pageWidth.scrollWidth).toBeLessThanOrEqual(pageWidth.clientWidth);
 });
 
 test("continue-watching episode returns to its dedicated season panel", async ({ page, rivune }) => {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/settings"
 )
 
 func (a *API) discoverMovies(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
@@ -49,6 +50,11 @@ func (a *API) searchMovies(w http.ResponseWriter, r *http.Request, principal aut
 }
 
 func (a *API) movieDetails(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	maximumCastMembers, err := a.maximumCastMembers(r, principal)
+	if err != nil {
+		a.internalError(w, "resolve movie cast settings", err)
+		return
+	}
 	movie, err := a.metadata.MovieDetails(
 		r.Context(),
 		principal,
@@ -58,6 +64,9 @@ func (a *API) movieDetails(w http.ResponseWriter, r *http.Request, principal aut
 	if err != nil {
 		a.writeMetadataError(w, "read movie details", err)
 		return
+	}
+	if len(movie.Cast) > maximumCastMembers {
+		movie.Cast = movie.Cast[:maximumCastMembers]
 	}
 	if a.artwork != nil {
 		a.artwork.LocalizeMovie(r.Context(), &movie)
@@ -103,6 +112,11 @@ func (a *API) searchSeries(w http.ResponseWriter, r *http.Request, principal aut
 }
 
 func (a *API) seriesDetails(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	maximumCastMembers, err := a.maximumCastMembers(r, principal)
+	if err != nil {
+		a.internalError(w, "resolve series cast settings", err)
+		return
+	}
 	series, err := a.metadata.SeriesDetails(
 		r.Context(),
 		principal,
@@ -117,10 +131,31 @@ func (a *API) seriesDetails(w http.ResponseWriter, r *http.Request, principal au
 		a.writeMetadataError(w, "read series details", err)
 		return
 	}
+	if len(series.Cast) > maximumCastMembers {
+		series.Cast = series.Cast[:maximumCastMembers]
+	}
 	if a.artwork != nil {
 		a.artwork.LocalizeSeries(r.Context(), &series)
 	}
 	writeJSON(w, http.StatusOK, series)
+}
+
+func (a *API) maximumCastMembers(r *http.Request, principal auth.Principal) (int, error) {
+	if principal.ActiveProfileID != nil && principal.ProfileGrantExpiresAt != nil {
+		effective, err := a.settings.Effective(r.Context(), principal, *principal.ActiveProfileID)
+		if err != nil {
+			return 0, err
+		}
+		return effective.Values.MaximumCastMembers, nil
+	}
+	instance, err := a.settings.Instance(r.Context())
+	if err != nil {
+		return 0, err
+	}
+	if instance.Values.MaximumCastMembers != nil {
+		return *instance.Values.MaximumCastMembers, nil
+	}
+	return settings.DefaultMaximumCastMembers, nil
 }
 
 func (a *API) seasonDetails(w http.ResponseWriter, r *http.Request, principal auth.Principal) {

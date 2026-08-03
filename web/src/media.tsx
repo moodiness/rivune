@@ -22,8 +22,8 @@ function record(value: unknown): Record<string, unknown> | null {
   return Object.fromEntries(Object.entries(value));
 }
 
-function castMembers(value: unknown): CastMember[] {
-  if (!Array.isArray(value)) return [];
+function castMembers(value: unknown, maximumCastMembers: number): CastMember[] {
+  if (!Array.isArray(value) || maximumCastMembers <= 0) return [];
   const members: CastMember[] = [];
   const seen = new Set<string>();
   for (const candidate of value) {
@@ -39,7 +39,7 @@ function castMembers(value: unknown): CastMember[] {
       ...(typeof person.profileUrl === "string" && person.profileUrl.trim() ? { profileUrl: person.profileUrl.trim() } : {}),
     });
     seen.add(id);
-    if (members.length === 12) break;
+    if (members.length >= maximumCastMembers) break;
   }
   return members;
 }
@@ -58,6 +58,20 @@ function CastMemberCard({ member }: { member: CastMember }) {
       {member.character && <small>{member.character}</small>}
     </span>
   </article>;
+}
+
+function handleCastCarouselKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const carousel = event.currentTarget;
+  if (event.key === "Home" || event.key === "End") {
+    carousel.scrollTo({ left: event.key === "Home" ? 0 : carousel.scrollWidth, behavior: "smooth" });
+    return;
+  }
+  const firstMember = carousel.querySelector<HTMLElement>(".details-cast-member");
+  const gap = Number.parseFloat(getComputedStyle(carousel).columnGap) || 0;
+  const distance = (firstMember?.offsetWidth ?? carousel.clientWidth) + gap;
+  carousel.scrollBy({ left: event.key === "ArrowRight" ? distance : -distance, behavior: "smooth" });
 }
 
 function trailerLanguageBadge(trailer: TrailerMetadata): string {
@@ -305,7 +319,7 @@ function withoutEmptySeasons(series: SeriesMetadata): SeriesMetadata {
   return seasons.length === series.seasons.length ? series : { ...series, seasons };
 }
 
-export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, onOpenSeason, onLibraryMutation }: { item: MediaItem; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenMedia?: (item: MediaItem) => void; onOpenSeason?: (item: MediaItem) => void; onLibraryMutation?: () => void }) {
+export function MediaDetails({ item, maximumCastMembers, onClose, onNavigateContext, onOpenMedia, onOpenSeason, onLibraryMutation }: { item: MediaItem; maximumCastMembers: number; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenMedia?: (item: MediaItem) => void; onOpenSeason?: (item: MediaItem) => void; onLibraryMutation?: () => void }) {
   const metadataLocale = api.metadataLocale();
   const [details, setDetails] = useState(() => cachedMediaItem(item, metadataLocale));
   const [playing, setPlaying] = useState(false);
@@ -354,9 +368,6 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
   const trailerRevealPendingRef = useRef(false);
   const episodeListRef = useRef<HTMLDivElement>(null);
   const selectedEpisodeRowRef = useRef<HTMLDivElement>(null);
-  const castDrawerTriggerRef = useRef<HTMLButtonElement>(null);
-  const castDrawerCloseRef = useRef<HTMLButtonElement>(null);
-  const [castDrawerOpen, setCastDrawerOpen] = useState(false);
   const [titleProgress, setTitleProgress] = useState<PlaybackProgress>();
   const [watchedBusy, setWatchedBusy] = useState("");
   const nextSourceRef = useRef<SourceIdentity | undefined>(undefined);
@@ -880,7 +891,6 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
 
   function closeDetails() {
     dismissTrailer();
-    setCastDrawerOpen(false);
     onClose();
   }
 
@@ -1017,43 +1027,12 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     const value = record(genre);
     return typeof value?.name === "string" ? value.name : "";
   }).filter(Boolean).slice(0, 4) : [];
-  const cast = castMembers(details.raw?.cast);
-  const previewCast = cast.slice(0, 6);
-  useEffect(() => {
-    if (!castDrawerOpen) return;
-    const trigger = castDrawerTriggerRef.current;
-    const previousBodyOverflow = document.body.style.overflow;
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        setCastDrawerOpen(false);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      event.stopPropagation();
-      const drawer = castDrawerCloseRef.current?.closest<HTMLElement>(".cast-drawer");
-      const focusable = drawer ? Array.from(drawer.querySelectorAll<HTMLElement>("button:not(:disabled), [href], [tabindex]:not([tabindex='-1'])")) : [];
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.body.style.overflow = "hidden";
-    window.addEventListener("keydown", handleKeyDown, true);
-    castDrawerCloseRef.current?.focus();
-    return () => {
-      document.body.style.overflow = previousBodyOverflow;
-      window.removeEventListener("keydown", handleKeyDown, true);
-      trigger?.focus();
-    };
-  }, [castDrawerOpen]);
+  const castSource = item.mediaType === "episode"
+    ? series?.cast
+    : item.mediaType === "series"
+      ? series?.cast ?? details.raw?.cast
+      : details.raw?.cast;
+  const cast = castMembers(castSource, maximumCastMembers);
   const selectedSeasonSummary = series?.seasons.find((candidate) => candidate.id === seasonID);
   const loadedSelectedSeason = season && (
     season.id === seasonID
@@ -1197,22 +1176,18 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
                   <Play size={19} fill="currentColor" />
                   {t("common.play")} · {t("media.type.liveTv")}
                 </Button>}
-                {item.mediaType === "movie" && !fromContinue && <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
-                  {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
-                  {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
-                </Button>}
                 {trailersAvailableForContext && <Button type="button" variant="secondary" disabled={Boolean(activeTrailer) || activeTrailerUnavailable} loading={activeTrailerLoading} aria-label={t(activeTrailerLoading ? "media.trailers.loading" : "media.trailers.title")} aria-busy={activeTrailerLoading} aria-controls={activeTrailer ? "details-trailer" : undefined} aria-expanded={Boolean(activeTrailer)} onClick={() => void showTrailer()}>
                   <Clapperboard size={19} />
                   {t("media.trailers.title")}
                 </Button>}
+                {(item.mediaType === "movie" || (item.mediaType === "episode" && fromContinue)) && <Button variant={fromContinue ? "ghost" : "secondary"} loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
+                  {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
+                  {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
+                </Button>}
               </div>
 
-              {fromContinue && (item.mediaType === "movie" || item.mediaType === "episode") && <div className="details-context-actions">
-                <Button variant="ghost" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
-                  {titleProgress?.completed ? <EyeOff size={18} /> : <Eye size={18} />}
-                  {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
-                </Button>
-                {item.mediaType === "episode" && seriesLoading && <span className="details-context-loading" role="status"><LoaderCircle className="spin" size={15} /> {t("media.season.loading")}</span>}
+              {fromContinue && item.mediaType === "episode" && seriesLoading && <div className="details-context-actions">
+                <span className="details-context-loading" role="status"><LoaderCircle className="spin" size={15} /> {t("media.season.loading")}</span>
               </div>}
               {actionError && <Notice>{actionError}</Notice>}
             </div>
@@ -1220,11 +1195,10 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
             {cast.length > 0 && <section className="details-cast" aria-labelledby="details-cast-title">
               <header className="details-cast__header">
                 <h2 id="details-cast-title">{t("media.cast.title")}</h2>
-                {cast.length > previewCast.length && <button ref={castDrawerTriggerRef} type="button" aria-haspopup="dialog" aria-expanded={castDrawerOpen} onClick={() => setCastDrawerOpen(true)}>{t("common.actions.viewAll")}</button>}
               </header>
-              <div className="details-cast__list">
-                {previewCast.map((member) => <CastMemberCard member={member} key={member.id} />)}
-              </div>
+              <HorizontalDragRow className="details-cast__list" role="group" aria-labelledby="details-cast-title" tabIndex={0} onKeyDown={handleCastCarouselKeyDown}>
+                {cast.map((member) => <CastMemberCard member={member} key={member.id} />)}
+              </HorizontalDragRow>
             </section>}
           </div>
 
@@ -1415,22 +1389,6 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
           {activeTrailerMessage && <div className="details-trailer-feedback"><Notice>{activeTrailerMessage}</Notice></div>}
         </div>}
       </section>
-      {castDrawerOpen && createPortal(<div className="cast-drawer-backdrop" onPointerDown={(event) => {
-        if (event.currentTarget === event.target) setCastDrawerOpen(false);
-      }}>
-        <section className="cast-drawer" role="dialog" aria-modal="true" aria-labelledby="cast-drawer-title">
-          <header>
-            <span>
-              <small>{details.title}</small>
-              <h2 id="cast-drawer-title">{t("media.cast.title")}</h2>
-            </span>
-            <button ref={castDrawerCloseRef} type="button" className="cast-drawer__close" aria-label={t("common.close")} onClick={() => setCastDrawerOpen(false)}><X size={19} /></button>
-          </header>
-          <div className="cast-drawer__list">
-            {cast.map((member) => <CastMemberCard member={member} key={member.id} />)}
-          </div>
-        </section>
-      </div>, document.body)}
     </article>
   );
 }

@@ -646,6 +646,7 @@ export type SettingsValues = {
   interfaceLanguage?: InterfaceLanguage | null;
   theme?: string | null;
   maximumResolution?: string | null;
+  maximumCastMembers?: number | null;
   allowTranscoding?: boolean | null;
   transcoding?: "inherit" | "enabled" | "disabled" | null;
   preferDirectPlay?: boolean | null;

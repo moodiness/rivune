@@ -106,15 +106,16 @@ data class ProfileAvatar(val kind: String, val presetId: String? = null, val url
 data class ProfileSelection(val profile: Profile, val expiresAt: String)
 
 @Serializable
-data class TranscodingSettingsValues(
+data class SettingsValues(
     val allowTranscoding: Boolean? = null,
     val transcoding: String? = null,
+    val maximumCastMembers: Int? = null,
 )
 
 @Serializable
 data class SettingsLayer(
     val schemaVersion: Int,
-    val settings: TranscodingSettingsValues,
+    val settings: SettingsValues,
     val updatedAt: String? = null,
 )
 
@@ -122,12 +123,13 @@ data class SettingsLayer(
 data class EffectiveSettingsSources(
     val allowTranscoding: String? = null,
     val transcoding: String? = null,
+    val maximumCastMembers: String? = null,
 )
 
 @Serializable
 data class EffectiveSettings(
     val schemaVersion: Int,
-    val settings: TranscodingSettingsValues,
+    val settings: SettingsValues,
     val sources: EffectiveSettingsSources,
 )
 

@@ -242,7 +242,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			effective: settings.Effective{
 				SchemaVersion: 1,
 				Values: settings.EffectiveValues{
-					InterfaceLanguage: "en", Theme: "system", MaximumResolution: "1080p",
+					InterfaceLanguage: "en", Theme: "system", MaximumResolution: "1080p", MaximumCastMembers: settings.DefaultMaximumCastMembers,
 					AllowTranscoding: false, Transcoding: settings.TranscodingModeEnabled, PreferDirectPlay: true,
 					HideUnreleased: false, MetadataLanguage: "auto", MetadataRegion: "auto",
 					SeriesMappingProvider: "tmdb", AudioLanguage: "auto", SubtitleLanguage: "auto",
@@ -253,7 +253,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 					NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 30,
 				},
 				Sources: map[string]string{
-					"interfaceLanguage": "default", "theme": "default", "maximumResolution": "instance",
+					"interfaceLanguage": "default", "theme": "default", "maximumResolution": "instance", "maximumCastMembers": "default",
 					"allowTranscoding": "instance", "transcoding": "profile", "preferDirectPlay": "default",
 					"hideUnreleased": "default", "metadataLanguage": "default", "metadataRegion": "default",
 					"seriesMappingProvider": "default", "audioLanguage": "default", "subtitleLanguage": "default",

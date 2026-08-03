@@ -83,17 +83,23 @@ final class TranscodingModelsTests: XCTestCase {
     }
 
     func testSettingsDefaultsAndExplicitNullPatchesAreTolerant() throws {
-        let values = try JSONDecoder().decode(TranscodingSettingsValues.self, from: Data("{\"futureSetting\":true}".utf8))
+        let values = try JSONDecoder().decode(SettingsValues.self, from: Data("{\"futureSetting\":true}".utf8))
         XCTAssertNil(values.allowTranscoding)
         XCTAssertNil(values.transcoding)
+        XCTAssertNil(values.maximumCastMembers)
+
+        let inherited = try JSONDecoder().decode(SettingsValues.self, from: Data("{\"maximumCastMembers\":null}".utf8))
+        XCTAssertNil(inherited.maximumCastMembers)
 
         let effective = try JSONDecoder().decode(
             EffectiveSettings.self,
-            from: Data(#"{"schemaVersion":1,"settings":{"allowTranscoding":false,"transcoding":"enabled","futureSetting":true},"sources":{"allowTranscoding":"instance","transcoding":"profile","theme":"default"}}"#.utf8)
+            from: Data(#"{"schemaVersion":1,"settings":{"allowTranscoding":false,"transcoding":"enabled","maximumCastMembers":20,"futureSetting":true},"sources":{"allowTranscoding":"instance","transcoding":"profile","maximumCastMembers":"instance","theme":"default"}}"#.utf8)
         )
         XCTAssertEqual(effective.settings.allowTranscoding, false)
         XCTAssertEqual(effective.settings.transcoding, "enabled")
+        XCTAssertEqual(effective.settings.maximumCastMembers, 20)
         XCTAssertEqual(effective.sources.allowTranscoding, "instance")
+        XCTAssertEqual(effective.sources.maximumCastMembers, "instance")
 
         let instance = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(InstanceTranscodingPatch(allowTranscoding: nil))) as? [String: Any])
         XCTAssertTrue(instance["allowTranscoding"] is NSNull)

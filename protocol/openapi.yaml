@@ -4305,6 +4305,11 @@ components:
             - type: string
               enum: [auto, 2160p, 1080p, 720p, 480p]
             - type: "null"
+        maximumCastMembers:
+          description: Maximum cast members exposed to clients. The instance value defaults to 20; a profile value overrides it, while null clears the current layer so a profile inherits the instance value. The effective value is bounded by the instance value.
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 100
         allowTranscoding:
           description: Instance-wide transcoding authorization. Null clears the instance override and restores the default true value.
           type: [boolean, "null"]
@@ -4412,6 +4417,11 @@ components:
         maximumResolution:
           type: string
           enum: [auto, 2160p, 1080p, 720p, 480p]
+        maximumCastMembers:
+          description: Maximum cast members stored by this settings layer. Null represents no layer override; profiles then inherit the instance value, whose server default is 20.
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 100
         allowTranscoding:
           description: Instance authorization in a settings layer, or the final effective authorization after applying the absolute global veto.
           type: boolean
@@ -4574,17 +4584,19 @@ components:
         settings:
           allOf:
             - $ref: "#/components/schemas/SettingsValues"
-            - required: [interfaceLanguage, theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
+            - required: [interfaceLanguage, theme, maximumResolution, maximumCastMembers, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
         sources:
           type: object
           additionalProperties: false
-          required: [interfaceLanguage, theme, maximumResolution, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
+          required: [interfaceLanguage, theme, maximumResolution, maximumCastMembers, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
           properties:
             interfaceLanguage:
               $ref: "#/components/schemas/SettingSource"
             theme:
               $ref: "#/components/schemas/SettingSource"
             maximumResolution:
+              $ref: "#/components/schemas/SettingSource"
+            maximumCastMembers:
               $ref: "#/components/schemas/SettingSource"
             allowTranscoding:
               $ref: "#/components/schemas/SettingSource"
@@ -4841,7 +4853,7 @@ components:
             $ref: "#/components/schemas/Genre"
         cast:
           type: array
-          maxItems: 12
+          maxItems: 100
           items:
             $ref: "#/components/schemas/CastMember"
         voteAverage:
@@ -4930,7 +4942,7 @@ components:
             $ref: "#/components/schemas/Genre"
         cast:
           type: array
-          maxItems: 12
+          maxItems: 100
           items:
             $ref: "#/components/schemas/CastMember"
         voteAverage:
