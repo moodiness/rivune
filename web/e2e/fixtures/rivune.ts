@@ -39,6 +39,16 @@ const profiles: Profile[] = [
   { id: "bob", name: "Bob", isChild: false, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "bob", url: "https://fixtures.rivune.test/bob.svg" } },
 ];
 
+const seasonZero = {
+  id: "season-specials", mediaType: "season", seriesId: "series-1", name: "Specials", overview: "Behind the voyage.", seasonNumber: 0, episodeCount: 4, airDate: "2023-05-05", posterUrl: "https://fixtures.rivune.test/season-specials.svg", voteAverage: 0, externalIds: { tvdb: "1928275" },
+  episodes: [
+    { id: "special-1", mediaType: "episode", seasonId: "season-specials", name: "Building a World", overview: "The world behind the voyage.", seasonNumber: 0, episodeNumber: 1, airDate: "2023-06-30", stillUrl: "https://fixtures.rivune.test/special-1.svg", runtimeMinutes: 10, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "9873798" } },
+    { id: "special-2", mediaType: "episode", seasonId: "season-specials", name: "Questions of the Silo", overview: "Questions from the audience.", seasonNumber: 0, episodeNumber: 2, airDate: "2023-05-05", stillUrl: "https://fixtures.rivune.test/special-2.svg", runtimeMinutes: 8, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "9873799" } },
+    { id: "special-3", mediaType: "episode", seasonId: "season-specials", name: "Season 1 Recap", overview: "A recap of season one.", seasonNumber: 0, episodeNumber: 3, airDate: "2024-11-11", stillUrl: "https://fixtures.rivune.test/special-3.svg", runtimeMinutes: 5, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "10798335" } },
+    { id: "special-4", mediaType: "episode", seasonId: "season-specials", name: "The Rebellion in Season 2", overview: "Inside the second season.", seasonNumber: 0, episodeNumber: 4, airDate: "2024-11-15", stillUrl: "https://fixtures.rivune.test/special-4.svg", runtimeMinutes: 7, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "10806950" } },
+  ],
+};
+
 const seasonOne = {
   id: "season-1", mediaType: "season", seriesId: "series-1", name: "Season 1", overview: "The first voyage.", seasonNumber: 1, episodeCount: 2, airDate: "2024-01-01", posterUrl: "https://fixtures.rivune.test/season-1.svg", voteAverage: 8.2, externalIds: { tmdb: "101" },
   episodes: [
@@ -75,6 +85,7 @@ const extraSeasonSummaries = Array.from({ length: 10 }, (_, index) => {
     id: `season-${seasonNumber}`,
     name: `Season ${seasonNumber}`,
     seasonNumber,
+    episodeCount: seasonNumber === 4 ? 0 : 1,
     posterUrl: `https://fixtures.rivune.test/season-${seasonNumber}.svg`,
     externalIds: { tmdb: String(100 + seasonNumber) },
   };
@@ -117,7 +128,7 @@ const series = {
     { id: "108", name: "Élodie Martin", character: "Mira Sato", profileUrl: "https://fixtures.rivune.test/cast-3.svg" },
     { id: "109", name: "Sam Okafor", character: "Dr. Ren Cole", profileUrl: "https://fixtures.rivune.test/cast-4.svg" },
   ],
-  seasons: [seasonSummary(seasonOne), seasonSummary(seasonTwo), ...extraSeasonSummaries],
+  seasons: [seasonSummary(seasonZero), seasonSummary(seasonOne), seasonSummary(seasonTwo), ...extraSeasonSummaries],
   episodeOrders,
   mappingProvider: "tmdb",
   externalIds: { imdb: "tt9000", tmdb: "9000", tvdb: "9900" },
@@ -473,6 +484,7 @@ export class RivuneHarness {
       await json(route, this.seasonOverrides.get(seasonOverride[1]));
       return;
     }
+    if (path === "/metadata/seasons/season-specials") { await json(route, seasonZero); return; }
     if (path === "/metadata/seasons/season-1") { await json(route, seasonOne); return; }
     if (path === "/metadata/seasons/season-2") { await json(route, seasonTwo); return; }
     if (path === "/metadata/seasons/dvd-season-1") { await json(route, dvdSeason); return; }
@@ -534,9 +546,12 @@ export class RivuneHarness {
     if (/^\/playback\/sessions\//.test(path) && request.method() === "DELETE") { await route.fulfill({ status: 204 }); return; }
     const trailers = path.match(/^\/metadata\/titles\/([^/]+)\/trailers$/);
     if (trailers) {
+      const titleID = decodeURIComponent(trailers[1]);
       const seasonNumber = url.searchParams.get("seasonNumber");
-      const label = seasonNumber === "2" ? "Season Two Trailer" : "Season One Trailer";
-      await json(route, { trailers: [{ youtubeId: seasonNumber === "2" ? "season-two" : "season-one", name: label, language: "en", isFallback: false, captionPreference: "en" }] });
+      const movieTrailer = titleID === "movie-1";
+      const label = movieTrailer ? "Fight Club Trailer" : seasonNumber === "2" ? "Season Two Trailer" : "Season One Trailer";
+      const youtubeId = movieTrailer ? "fight-club" : seasonNumber === "2" ? "season-two" : "season-one";
+      await json(route, { trailers: [{ youtubeId, name: label, language: "en", isFallback: false, captionPreference: "en" }] });
       return;
     }
     if (path === "/calendar") {

@@ -272,16 +272,29 @@ func (service *Service) LocalizeMovie(ctx context.Context, value *metadata.Movie
 	if value == nil {
 		return
 	}
-	service.localizeStrings(ctx, &value.PosterURL, &value.BackdropURL, &value.LogoURL)
+	values := make([]*string, 0, len(value.Cast)+3)
+	values = append(values, &value.PosterURL, &value.BackdropURL, &value.LogoURL)
+	for index := range value.Cast {
+		values = append(values, &value.Cast[index].ProfileURL)
+	}
+	service.localizeStrings(ctx, values...)
 }
 
 func (service *Service) LocalizeMoviePage(ctx context.Context, value *metadata.MoviePage) {
 	if value == nil {
 		return
 	}
-	values := make([]*string, 0, len(value.Items)*3)
+	artworkCount := len(value.Items) * 3
 	for index := range value.Items {
-		values = append(values, &value.Items[index].PosterURL, &value.Items[index].BackdropURL, &value.Items[index].LogoURL)
+		artworkCount += len(value.Items[index].Cast)
+	}
+	values := make([]*string, 0, artworkCount)
+	for index := range value.Items {
+		item := &value.Items[index]
+		values = append(values, &item.PosterURL, &item.BackdropURL, &item.LogoURL)
+		for castIndex := range item.Cast {
+			values = append(values, &item.Cast[castIndex].ProfileURL)
+		}
 	}
 	service.localizeStrings(ctx, values...)
 }
@@ -290,8 +303,11 @@ func (service *Service) LocalizeSeries(ctx context.Context, value *metadata.Seri
 	if value == nil {
 		return
 	}
-	values := make([]*string, 0, len(value.Seasons)+3)
+	values := make([]*string, 0, len(value.Cast)+len(value.Seasons)+3)
 	values = append(values, &value.PosterURL, &value.BackdropURL, &value.LogoURL)
+	for index := range value.Cast {
+		values = append(values, &value.Cast[index].ProfileURL)
+	}
 	for index := range value.Seasons {
 		values = append(values, &value.Seasons[index].PosterURL)
 	}
@@ -302,9 +318,20 @@ func (service *Service) LocalizeSeriesPage(ctx context.Context, value *metadata.
 	if value == nil {
 		return
 	}
-	values := make([]*string, 0, len(value.Items)*3)
+	artworkCount := len(value.Items) * 3
 	for index := range value.Items {
-		values = append(values, &value.Items[index].PosterURL, &value.Items[index].BackdropURL, &value.Items[index].LogoURL)
+		artworkCount += len(value.Items[index].Cast) + len(value.Items[index].Seasons)
+	}
+	values := make([]*string, 0, artworkCount)
+	for index := range value.Items {
+		item := &value.Items[index]
+		values = append(values, &item.PosterURL, &item.BackdropURL, &item.LogoURL)
+		for castIndex := range item.Cast {
+			values = append(values, &item.Cast[castIndex].ProfileURL)
+		}
+		for seasonIndex := range item.Seasons {
+			values = append(values, &item.Seasons[seasonIndex].PosterURL)
+		}
 	}
 	service.localizeStrings(ctx, values...)
 }

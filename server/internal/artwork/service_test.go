@@ -233,6 +233,29 @@ func TestServeHTTPMissHitHeadAndUpstreamFailure(t *testing.T) {
 		fallback.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("fallback response = %d location=%q cache=%q", fallback.Code, fallback.Header().Get("Location"), fallback.Header().Get("Cache-Control"))
 	}
+
+	fallbackKey := strings.TrimPrefix(fallbackLocalURL, publicPrefix)
+	var byteSize *int64
+	if err := pool.QueryRow(context.Background(), `SELECT byte_size FROM artwork_cache WHERE key = $1`, fallbackKey).Scan(&byteSize); err != nil {
+		t.Fatalf("query failed artwork registration: %v", err)
+	}
+	if byteSize != nil {
+		t.Fatalf("failed artwork was persisted with byte size %d", *byteSize)
+	}
+	if _, err := os.Stat(service.path(fallbackKey)); !os.IsNotExist(err) {
+		t.Fatalf("failed artwork cache file exists or could not be checked: %v", err)
+	}
+
+	requestsAfterFailure := requests.Load()
+	retry := serveArtwork(service, http.MethodGet, fallbackLocalURL)
+	if retry.Code != http.StatusTemporaryRedirect ||
+		retry.Header().Get("Location") != fallbackURL ||
+		retry.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("retry fallback response = %d location=%q cache=%q", retry.Code, retry.Header().Get("Location"), retry.Header().Get("Cache-Control"))
+	}
+	if requests.Load() != requestsAfterFailure+1 {
+		t.Fatalf("failed artwork retry made %d new upstream requests, want 1", requests.Load()-requestsAfterFailure)
+	}
 }
 
 func TestServeHTTPRepairsMissingAndCorruptFile(t *testing.T) {

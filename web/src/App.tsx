@@ -79,6 +79,9 @@ function cleanMediaRoute(): MediaRoute | null {
     ) return null;
     const mediaType = hasEpisode ? "episode" : "series";
     const stored = storedRouteItem(mediaType);
+    const storedSeasonNumber = typeof stored?.raw?.continueSeasonNumber === "number" ? stored.raw.continueSeasonNumber : stored?.seasonNumber;
+    const storedEpisodeNumber = typeof stored?.raw?.continueEpisodeNumber === "number" ? stored.raw.continueEpisodeNumber : stored?.episodeNumber;
+    const storedContextMatchesPath = storedSeasonNumber === seasonNumber && storedEpisodeNumber === episodeNumber;
     const item: MediaItem = stored
       ? { ...stored }
       : {
@@ -92,7 +95,9 @@ function cleanMediaRoute(): MediaRoute | null {
     item.raw = {
       ...item.raw,
       routeSeriesResourceId: seriesResourceID,
+      continueSeasonId: storedContextMatchesPath ? item.raw?.continueSeasonId : undefined,
       continueSeasonNumber: seasonNumber,
+      continueEpisodeId: storedContextMatchesPath ? item.raw?.continueEpisodeId : undefined,
       continueEpisodeNumber: episodeNumber,
     };
     return { item, origin };

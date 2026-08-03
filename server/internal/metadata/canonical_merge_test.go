@@ -248,6 +248,62 @@ func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState
 	}
 }
 
+func TestSeasonZeroPersistsCanonicalHierarchy(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	const seriesID = "00000000-0000-4000-8000-000000000100"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title)
+		VALUES ($1::uuid, 'series', 'Breaking Bad');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
+		VALUES ($1::uuid, 'tmdb', 'series', '1396')
+	`, pgx.QueryExecModeSimpleProtocol, seriesID); err != nil {
+		t.Fatalf("seed series: %v", err)
+	}
+	provider := &canonicalMergeProvider{
+		series: ProviderSeries{
+			ExternalID: "1396",
+			Name:       "Breaking Bad",
+			Seasons: []ProviderSeasonSummary{{
+				ExternalID: "3627", Name: "Specials", SeasonNumber: 0, EpisodeCount: 1,
+			}},
+		},
+		season: ProviderSeason{
+			ExternalID: "3627", Name: "Specials", SeasonNumber: 0,
+			Episodes: []ProviderEpisode{{
+				ExternalID: "62084", Name: "No Half Measures", SeasonNumber: 0, EpisodeNumber: 1,
+			}},
+		},
+	}
+	service := NewService(pool, provider, nil, nil, time.Hour, nil)
+	series, err := service.SeriesDetails(ctx, canonicalMergePrincipal(), seriesID, SeriesDetailsOptions{Language: "en-US"})
+	if err != nil {
+		t.Fatalf("load series specials: %v", err)
+	}
+	if len(series.Seasons) != 1 || series.Seasons[0].SeasonNumber != 0 {
+		t.Fatalf("season zero was not preserved in series payload: %+v", series.Seasons)
+	}
+	specials, err := service.SeasonDetails(ctx, canonicalMergePrincipal(), series.Seasons[0].ID, "en-US", providerName)
+	if err != nil {
+		t.Fatalf("load canonical specials: %v", err)
+	}
+	if specials.SeasonNumber != 0 || len(specials.Episodes) != 1 || specials.Episodes[0].SeasonNumber != 0 {
+		t.Fatalf("season zero was not preserved in season payload: %+v", specials)
+	}
+	var seasonOrdinal, cachedSeasonNumber int
+	if err := pool.QueryRow(ctx, `
+		SELECT season.ordinal, (metadata.payload->>'seasonNumber')::integer
+		FROM titles AS season
+		JOIN title_metadata AS metadata ON metadata.title_id = season.id
+		WHERE season.id = $1::uuid AND metadata.provider = 'tmdb' AND metadata.language = 'en-US'
+	`, specials.ID).Scan(&seasonOrdinal, &cachedSeasonNumber); err != nil {
+		t.Fatalf("query persisted specials hierarchy: %v", err)
+	}
+	if seasonOrdinal != 0 || cachedSeasonNumber != 0 {
+		t.Fatalf("persisted specials hierarchy changed zero: ordinal=%d payload=%d", seasonOrdinal, cachedSeasonNumber)
+	}
+}
+
 func TestSeriesRefreshRepairsPoisonedSeasonOrdinalAndInvalidatesCachedHierarchy(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()

@@ -1,12 +1,15 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/moodiness/rivune/server/internal/auth"
@@ -187,6 +190,31 @@ func TestSeriesHandlersPassCanonicalIdentifiers(t *testing.T) {
 	}
 }
 
+func TestSeasonDetailsPreservesSpecialsNumberZeroInResponse(t *testing.T) {
+	const seasonID = "tvdb:00000000-0000-4000-8000-000000000600:1000"
+	service := &fakeMetadataService{seasonDetailsValue: metadata.Season{
+		ID: seasonID, MediaType: metadata.MediaTypeSeason,
+		SeriesID: "00000000-0000-4000-8000-000000000600",
+		Name:     "Specials", SeasonNumber: 0, Episodes: []metadata.Episode{},
+		ExternalIDs: map[string]string{"tvdb": "1000"},
+	}}
+	api := metadataAPI(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/seasons/"+seasonID+"?mappingProvider=tvdb", nil)
+	request.SetPathValue("seasonId", seasonID)
+	response := httptest.NewRecorder()
+
+	api.seasonDetails(response, request, auth.Principal{})
+
+	if response.Code != http.StatusOK || service.seasonDetailsID != seasonID || service.seasonDetailsMapping != "tvdb" {
+		t.Fatalf("unexpected specials route status=%d id=%q mapping=%q", response.Code, service.seasonDetailsID, service.seasonDetailsMapping)
+	}
+	var body metadata.Season
+	decodeResponse(t, response, &body)
+	if body.SeasonNumber != 0 || body.Name != "Specials" || body.Episodes == nil || len(body.Episodes) != 0 {
+		t.Fatalf("specials route changed numeric season zero: %+v", body)
+	}
+}
+
 func TestTitleTrailersPassStableTitleIDLanguageAndSeason(t *testing.T) {
 	service := &fakeMetadataService{trailersValue: metadata.TrailerList{Trailers: []metadata.Trailer{
 		{YouTubeID: "video-id", Name: "Official Trailer", Language: "en-US", IsFallback: true, CaptionPreference: "fr"},
@@ -280,8 +308,10 @@ func TestMetadataErrorsHaveStableHTTPContracts(t *testing.T) {
 		{name: "provider unconfigured", err: metadata.ErrProviderUnavailable, status: http.StatusServiceUnavailable, code: "metadata_provider_unavailable"},
 		{name: "provider unauthorized", err: metadata.ErrProviderUnauthorized, status: http.StatusServiceUnavailable, code: "metadata_provider_unavailable"},
 		{name: "provider failure", err: metadata.ErrProviderFailure, status: http.StatusBadGateway, code: "metadata_provider_error"},
+		{name: "provider rate limited", err: metadata.ErrProviderRateLimited, status: http.StatusServiceUnavailable, code: "metadata_provider_rate_limited"},
 		{name: "title absent", err: metadata.ErrNotFound, status: http.StatusNotFound, code: "title_not_found"},
 	}
+
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			service := &fakeMetadataService{discoverErr: errors.Join(errors.New("wrapped"), test.err)}
@@ -296,6 +326,50 @@ func TestMetadataErrorsHaveStableHTTPContracts(t *testing.T) {
 			decodeResponse(t, response, &body)
 			if body.Error.Code != test.code {
 				t.Fatalf("expected code %q, got %q", test.code, body.Error.Code)
+			}
+		})
+	}
+}
+
+func TestMetadataProviderErrorsLogWrappedCauseWithoutLeakingIt(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{name: "unavailable", err: metadata.ErrProviderUnavailable, status: http.StatusServiceUnavailable, code: "metadata_provider_unavailable"},
+		{name: "unauthorized", err: metadata.ErrProviderUnauthorized, status: http.StatusServiceUnavailable, code: "metadata_provider_unavailable"},
+		{name: "rate limited", err: metadata.ErrProviderRateLimited, status: http.StatusServiceUnavailable, code: "metadata_provider_rate_limited"},
+		{name: "failure", err: metadata.ErrProviderFailure, status: http.StatusBadGateway, code: "metadata_provider_error"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			wrapped := fmt.Errorf("TMDB technical cause for %s: %w", test.name, test.err)
+			service := &fakeMetadataService{discoverErr: wrapped}
+			api := &API{
+				metadata: service,
+				logger:   slog.New(slog.NewTextHandler(&logs, nil)),
+			}
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/catalog/movies", nil)
+			response := httptest.NewRecorder()
+
+			api.discoverMovies(response, request, auth.Principal{})
+
+			if response.Code != test.status {
+				t.Fatalf("expected status %d, got %d: %s", test.status, response.Code, response.Body.String())
+			}
+			var body errorEnvelope
+			decodeResponse(t, response, &body)
+			if body.Error.Code != test.code || strings.Contains(body.Error.Message, "technical cause") {
+				t.Fatalf("provider details leaked to client: %+v", body)
+			}
+			output := logs.String()
+			if !strings.Contains(output, "metadata provider request failed") ||
+				!strings.Contains(output, "operation=\"discover movies\"") ||
+				!strings.Contains(output, "TMDB technical cause for "+test.name) {
+				t.Fatalf("technical provider cause missing from structured log: %q", output)
 			}
 		})
 	}

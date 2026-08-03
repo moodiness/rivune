@@ -1,14 +1,18 @@
 package metadata
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
 )
@@ -646,6 +650,236 @@ func TestMatchMappedEpisodesRejectsCompletelyUnmatchedTVDBSeason(t *testing.T) {
 	}
 }
 
+type specialsMapper struct {
+	season       ProviderSeason
+	seriesTVDBID string
+	seasonTVDBID string
+}
+
+func (mapper *specialsMapper) SeriesSeasons(context.Context, string, string) ([]ProviderSeasonSummary, error) {
+	return nil, errors.New("unexpected series seasons call")
+}
+
+func (mapper *specialsMapper) SeriesSeason(_ context.Context, seriesTVDBID, seasonTVDBID string) (ProviderSeason, error) {
+	mapper.seriesTVDBID = seriesTVDBID
+	mapper.seasonTVDBID = seasonTVDBID
+	return mapper.season, nil
+}
+
+func TestMappedSpecialsIgnoreUnrelatedCanonicalSeasonFailure(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	seriesID, specialsID, episodeID, missingSeasonID := seedMappedSpecialsCache(t, pool, true)
+	mapper := &specialsMapper{season: ProviderSeason{
+		ExternalID: "1000", Name: "Specials", SeasonNumber: 0,
+		Episodes: []ProviderEpisode{{
+			ExternalID: "10001", Name: "Behind the Scenes", SeasonNumber: 0, EpisodeNumber: 1, AirDate: "2024-01-01",
+		}},
+	}}
+	var logs bytes.Buffer
+	service := &Service{
+		pool: pool, mapper: mapper, cacheTTL: time.Hour,
+		logger: slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+
+	season, err := service.SeasonDetails(
+		context.Background(),
+		canonicalMergePrincipal(),
+		mappedSeasonID(seriesID, "1000"),
+		"en-US",
+		"tvdb",
+	)
+	if err != nil {
+		t.Fatalf("load mapped specials: %v", err)
+	}
+	if mapper.seriesTVDBID != "81189" || mapper.seasonTVDBID != "1000" {
+		t.Fatalf("unexpected mapped route: series=%q season=%q", mapper.seriesTVDBID, mapper.seasonTVDBID)
+	}
+	if season.SeasonNumber != 0 || season.ID != mappedSeasonID(seriesID, "1000") || len(season.Episodes) != 1 ||
+		season.Episodes[0].ID != episodeID || season.Episodes[0].SeasonID != season.ID ||
+		season.Episodes[0].SeasonNumber != 0 || season.Episodes[0].ExternalIDs["tvdb"] != "10001" {
+		t.Fatalf("unexpected mapped specials payload: %+v", season)
+	}
+	if !strings.Contains(logs.String(), "canonical season unavailable while assembling TVDB season") ||
+		!strings.Contains(logs.String(), missingSeasonID) ||
+		!strings.Contains(logs.String(), ErrProviderUnavailable.Error()) {
+		t.Fatalf("unrelated canonical provider failure was not logged: %q", logs.String())
+	}
+	var ordinal int
+	if err := pool.QueryRow(context.Background(), `SELECT ordinal FROM titles WHERE id = $1::uuid`, specialsID).Scan(&ordinal); err != nil {
+		t.Fatalf("query specials ordinal: %v", err)
+	}
+	if ordinal != 0 {
+		t.Fatalf("specials ordinal changed to %d", ordinal)
+	}
+}
+
+func TestMappedSpecialsPersistTVDBOnlyEpisodesWithoutTMDBSeason(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	seriesID, _, _, _ := seedMappedSpecialsCache(t, pool, false)
+	mapper := &specialsMapper{season: ProviderSeason{
+		ExternalID: "1928275", Name: "Specials", SeasonNumber: 0,
+		Episodes: []ProviderEpisode{
+			{ExternalID: "9873798", Name: "Building a World", SeasonNumber: 0, EpisodeNumber: 1, AirDate: "2023-06-30"},
+			{ExternalID: "9873799", Name: "Questions of the Silo", SeasonNumber: 0, EpisodeNumber: 2, AirDate: "2023-05-05"},
+			{ExternalID: "10798335", Name: "Season 1 Recap", SeasonNumber: 0, EpisodeNumber: 3, AirDate: "2024-11-11"},
+			{ExternalID: "10806950", Name: "The Rebellion in Season 2", SeasonNumber: 0, EpisodeNumber: 4, AirDate: "2024-11-15"},
+		},
+	}}
+	service := &Service{pool: pool, mapper: mapper, cacheTTL: time.Hour}
+	mappedID := mappedSeasonID(seriesID, mapper.season.ExternalID)
+
+	first, err := service.SeasonDetails(context.Background(), canonicalMergePrincipal(), mappedID, "en-US", "tvdb")
+	if err != nil {
+		t.Fatalf("load TVDB-only specials: %v", err)
+	}
+	if first.SeasonNumber != 0 || first.ID != mappedID || len(first.Episodes) != 4 {
+		t.Fatalf("unexpected TVDB-only specials payload: %+v", first)
+	}
+	firstIDs := make([]string, len(first.Episodes))
+	for index, episode := range first.Episodes {
+		firstIDs[index] = episode.ID
+		if episode.ID == "" || episode.SeasonID != mappedID || episode.SeasonNumber != 0 ||
+			episode.EpisodeNumber != index+1 || episode.ExternalIDs["tvdb"] != mapper.season.Episodes[index].ExternalID {
+			t.Fatalf("unexpected persisted special episode %d: %+v", index, episode)
+		}
+	}
+
+	second, err := service.SeasonDetails(context.Background(), canonicalMergePrincipal(), mappedID, "en-US", "tvdb")
+	if err != nil {
+		t.Fatalf("reload TVDB-only specials: %v", err)
+	}
+	if len(second.Episodes) != len(firstIDs) {
+		t.Fatalf("reloaded specials changed episode count: %+v", second)
+	}
+	for index, episode := range second.Episodes {
+		if episode.ID != firstIDs[index] {
+			t.Fatalf("special episode identity was not stable: first=%q second=%q", firstIDs[index], episode.ID)
+		}
+	}
+
+	var persistedEpisodes int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*)
+		FROM titles AS season
+		JOIN title_external_ids AS season_identity
+		  ON season_identity.title_id = season.id
+		 AND season_identity.provider = 'tvdb'
+		 AND season_identity.namespace = 'season'
+		 AND season_identity.external_id = '1928275'
+		JOIN titles AS episode
+		  ON episode.parent_id = season.id
+		 AND episode.media_type = 'episode'
+		JOIN title_external_ids AS episode_identity
+		  ON episode_identity.title_id = episode.id
+		 AND episode_identity.provider = 'tvdb'
+		 AND episode_identity.namespace = 'episode'
+		WHERE season.parent_id = $1::uuid
+		  AND season.media_type = 'season'
+		  AND season.ordinal = 0
+	`, seriesID).Scan(&persistedEpisodes); err != nil {
+		t.Fatalf("query persisted TVDB-only specials: %v", err)
+	}
+	if persistedEpisodes != 4 {
+		t.Fatalf("persisted %d TVDB-only special episodes, want 4", persistedEpisodes)
+	}
+}
+
+func TestMappedEmptySpecialsReturnValidEmptySeason(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	seriesID, _, _, _ := seedMappedSpecialsCache(t, pool, false)
+	mapper := &specialsMapper{season: ProviderSeason{
+		ExternalID: "1000", Name: "Specials", SeasonNumber: 0, Episodes: []ProviderEpisode{},
+	}}
+	service := &Service{pool: pool, mapper: mapper, cacheTTL: time.Hour}
+
+	season, err := service.SeasonDetails(
+		context.Background(),
+		canonicalMergePrincipal(),
+		mappedSeasonID(seriesID, "1000"),
+		"en-US",
+		"tvdb",
+	)
+	if err != nil {
+		t.Fatalf("load empty mapped specials: %v", err)
+	}
+	if season.SeasonNumber != 0 || season.Name != "Specials" || season.Episodes == nil || len(season.Episodes) != 0 {
+		t.Fatalf("empty specials did not remain a valid season: %+v", season)
+	}
+}
+
+func seedMappedSpecialsCache(t *testing.T, pool *pgxpool.Pool, includeCanonicalSpecials bool) (string, string, string, string) {
+	t.Helper()
+	const (
+		seriesID        = "00000000-0000-4000-8000-000000000600"
+		specialsID      = "00000000-0000-4000-8000-000000000601"
+		episodeID       = "00000000-0000-4000-8000-000000000602"
+		missingSeasonID = "00000000-0000-4000-8000-000000000699"
+	)
+	base := Series{
+		ID: seriesID, MediaType: MediaTypeSeries, Name: "Breaking Bad",
+		Cast: []CastMember{}, Seasons: []SeasonSummary{{
+			ID: missingSeasonID, MediaType: MediaTypeSeason, SeriesID: seriesID,
+			Name: "Season 1", SeasonNumber: 1,
+		}},
+		ExternalIDs: map[string]string{"tmdb": "1396", "tvdb": "81189"},
+	}
+	var specials Season
+	if includeCanonicalSpecials {
+		base.Seasons = append([]SeasonSummary{{
+			ID: specialsID, MediaType: MediaTypeSeason, SeriesID: seriesID,
+			Name: "Specials", SeasonNumber: 0, EpisodeCount: 1,
+		}}, base.Seasons...)
+		specials = Season{
+			ID: specialsID, MediaType: MediaTypeSeason, SeriesID: seriesID,
+			Name: "Specials", SeasonNumber: 0,
+			Episodes: []Episode{{
+				ID: episodeID, MediaType: MediaTypeEpisode, SeasonID: specialsID,
+				Name: "Behind the Scenes", SeasonNumber: 0, EpisodeNumber: 1, AirDate: "2024-01-01",
+				ExternalIDs: map[string]string{"tmdb": "62084"},
+			}},
+			ExternalIDs: map[string]string{"tmdb": "3627"},
+		}
+	}
+	basePayload, err := json.Marshal(base)
+	if err != nil {
+		t.Fatalf("encode canonical series cache: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title)
+		VALUES ($1::uuid, 'series', 'Breaking Bad');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title)
+		VALUES ($3::uuid, 'season', $1::uuid, 1, 'Season 1');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
+			($1::uuid, 'tmdb', 'series', '1396'),
+			($1::uuid, 'tvdb', 'series', '81189'),
+			($3::uuid, 'tmdb', 'season', '4000');
+		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at)
+		VALUES ($1::uuid, 'tmdb', 'en-US', $2::jsonb, now() + interval '1 hour')
+	`, pgx.QueryExecModeSimpleProtocol, seriesID, string(basePayload), missingSeasonID); err != nil {
+		t.Fatalf("seed canonical series cache: %v", err)
+	}
+	if includeCanonicalSpecials {
+		specialsPayload, err := json.Marshal(specials)
+		if err != nil {
+			t.Fatalf("encode canonical specials cache: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO titles (id, media_type, parent_id, ordinal, display_title) VALUES
+				($2::uuid, 'season', $1::uuid, 0, 'Specials'),
+				($3::uuid, 'episode', $2::uuid, 1, 'Behind the Scenes');
+			INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
+				($2::uuid, 'tmdb', 'season', '3627'),
+				($3::uuid, 'tmdb', 'episode', '62084');
+			INSERT INTO title_metadata (title_id, provider, language, payload, expires_at)
+			VALUES ($2::uuid, 'tmdb', 'en-US', $4::jsonb, now() + interval '1 hour')
+		`, pgx.QueryExecModeSimpleProtocol, seriesID, specialsID, episodeID, string(specialsPayload)); err != nil {
+			t.Fatalf("seed canonical specials cache: %v", err)
+		}
+	}
+	return seriesID, specialsID, episodeID, missingSeasonID
+}
+
 func TestReplaceTVDBEpisodeIDRepairsStaleNumberBasedLink(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()
@@ -695,6 +929,107 @@ func (cacheOnlyTelevisionMapper) SeriesSeasons(context.Context, string, string) 
 
 func (cacheOnlyTelevisionMapper) SeriesSeason(context.Context, string, string) (ProviderSeason, error) {
 	return ProviderSeason{}, errors.New("unexpected mapper call")
+}
+
+type failingTelevisionMapper struct {
+	err   error
+	calls int
+}
+
+func (mapper *failingTelevisionMapper) SeriesSeasons(context.Context, string, string) ([]ProviderSeasonSummary, error) {
+	mapper.calls++
+	return nil, mapper.err
+}
+
+func (mapper *failingTelevisionMapper) SeriesSeason(context.Context, string, string) (ProviderSeason, error) {
+	return ProviderSeason{}, mapper.err
+}
+
+func TestDefaultTVDBMappingFallsBackToTMDBWhenTVDBIsUnavailable(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	const seriesID = "de9bac21-adce-4b01-b11a-f6db8dea61e4"
+	base := Series{
+		ID: seriesID, MediaType: MediaTypeSeries, Name: "New York Unité Spéciale",
+		Cast: []CastMember{}, Seasons: []SeasonSummary{}, Aliases: []Alias{}, EpisodeOrders: []EpisodeOrder{},
+		MappingProvider: providerName,
+		ExternalIDs:     map[string]string{"tmdb": "2734", "tvdb": "75692", "imdb": "tt0203259"},
+	}
+	basePayload, err := json.Marshal(base)
+	if err != nil {
+		t.Fatalf("encode canonical series: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title)
+		VALUES ($1::uuid, 'series', 'New York Unité Spéciale');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
+			($1::uuid, 'tmdb', 'series', '2734'),
+			($1::uuid, 'tvdb', 'series', '75692'),
+			($1::uuid, 'imdb', 'series', 'tt0203259');
+		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at)
+		VALUES ($1::uuid, 'tmdb', 'fr-FR', $2::jsonb, now() + interval '1 hour')
+	`, pgx.QueryExecModeSimpleProtocol, seriesID, string(basePayload)); err != nil {
+		t.Fatalf("seed canonical series cache: %v", err)
+	}
+	profileID := "44444444-4444-4444-8444-444444444444"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+
+	withoutTVDB, err := (&Service{pool: pool}).SeriesDetails(ctx, principal, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb"})
+	if err != nil {
+		t.Fatalf("fallback without TVDB configuration: %v", err)
+	}
+	if withoutTVDB.MappingProvider != providerName || withoutTVDB.Name != base.Name {
+		t.Fatalf("unexpected fallback without TVDB: %+v", withoutTVDB)
+	}
+
+	mapper := &failingTelevisionMapper{err: ErrProviderUnauthorized}
+	withExpiredTVDB, err := (&Service{pool: pool, mapper: mapper}).SeriesDetails(ctx, principal, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb"})
+	if err != nil {
+		t.Fatalf("fallback with expired TVDB credentials: %v", err)
+	}
+	if withExpiredTVDB.MappingProvider != providerName || mapper.calls != 1 {
+		t.Fatalf("unexpected fallback with expired TVDB: series=%+v calls=%d", withExpiredTVDB, mapper.calls)
+	}
+}
+
+func TestExplicitTVDBEpisodeOrderDoesNotFallBackToTMDB(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	const seriesID = "ee9bac21-adce-4b01-b11a-f6db8dea61e4"
+	base := Series{
+		ID: seriesID, MediaType: MediaTypeSeries, Name: "Series",
+		Cast: []CastMember{}, Seasons: []SeasonSummary{}, Aliases: []Alias{}, EpisodeOrders: []EpisodeOrder{},
+		MappingProvider: providerName,
+		ExternalIDs:     map[string]string{"tmdb": "2734", "tvdb": "75692"},
+	}
+	basePayload, err := json.Marshal(base)
+	if err != nil {
+		t.Fatalf("encode canonical series: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title)
+		VALUES ($1::uuid, 'series', 'Series');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
+			($1::uuid, 'tmdb', 'series', '2734'),
+			($1::uuid, 'tvdb', 'series', '75692');
+		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at)
+		VALUES ($1::uuid, 'tmdb', 'fr-FR', $2::jsonb, now() + interval '1 hour')
+	`, pgx.QueryExecModeSimpleProtocol, seriesID, string(basePayload)); err != nil {
+		t.Fatalf("seed canonical series cache: %v", err)
+	}
+	profileID := "44444444-4444-4444-8444-444444444444"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	mapper := &failingTelevisionMapper{err: ErrProviderUnauthorized}
+	_, err = (&Service{pool: pool, mapper: mapper}).SeriesDetails(
+		ctx,
+		auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt},
+		seriesID,
+		SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb", EpisodeOrderID: "2"},
+	)
+	if !errors.Is(err, ErrProviderUnauthorized) || mapper.calls != 1 {
+		t.Fatalf("explicit TVDB order must preserve provider error, err=%v calls=%d", err, mapper.calls)
+	}
 }
 
 func TestCachedTVDBSeriesMappingUsesCanonicalCast(t *testing.T) {

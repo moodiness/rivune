@@ -80,6 +80,37 @@ test("media details use a refresh-safe route with browser and in-page history", 
   await expect(page.locator(".route-surface").getByRole("heading").first()).toBeFocused();
 });
 
+test("season route overrides stale history state for numeric season zero", async ({ page, rivune }) => {
+  await page.goto("/media/series/tt9000/season/1");
+  await expect(page.getByRole("button", { name: /First Light/ }).first()).toBeVisible();
+  const seasonOneRequests = rivune.matching("/api/v1/metadata/seasons/season-1", "GET").length;
+
+  await page.evaluate(() => {
+    window.history.replaceState({
+      rivuneMedia: true,
+      rivuneOrigin: "home",
+      rivuneMediaItem: {
+        id: "tt9000",
+        mediaType: "series",
+        title: "Signal Horizon",
+        seasonNumber: 1,
+        raw: {
+          routeSeriesResourceId: "tt9000",
+          continueSeasonId: "season-1",
+          continueSeasonNumber: 1,
+        },
+      },
+    }, "", "/media/series/tt9000/season/0");
+  });
+  await page.reload();
+
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/0$/);
+  await expect(page.getByRole("tab", { name: /^Specials\b/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("button", { name: /Building a World/ }).first()).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/metadata/seasons/season-specials", "GET").length).toBeGreaterThan(0);
+  expect(rivune.matching("/api/v1/metadata/seasons/season-1", "GET")).toHaveLength(seasonOneRequests);
+});
+
 test("series episodes open dedicated detail pages that own playback sources", async ({ page, rivune }) => {
   await page.goto("/media/series/tt9000/season/1");
 
@@ -106,11 +137,23 @@ test("series episodes open dedicated detail pages that own playback sources", as
   await expect(page.getByRole("region", { name: "Playback sources" })).toHaveCount(0);
 });
 
+test("series guide omits seasons whose episode count is zero", async ({ page, rivune: _rivune }) => {
+  await page.goto("/media/series/tt9000/season/1");
+
+  await expect(page.getByRole("tab", { name: /^Specials\b/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /^Season 3\b/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /^Season 4\b/ })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: /^Season 5\b/ })).toBeVisible();
+});
+
 test("episode details float beside a responsive contextual stream panel", async ({ page, rivune: _rivune }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto("/");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
   await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  const detailsPage = page.locator(".details-page");
+  await expect.poll(async () => (await detailsPage.boundingBox())?.y ?? -1).toBe(0);
+  await expect.poll(async () => (await detailsPage.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(1000);
 
   const artwork = page.locator(".details-artwork");
   const primary = page.locator(".details-primary");
@@ -118,7 +161,7 @@ test("episode details float beside a responsive contextual stream panel", async 
   const contextPanel = page.getByRole("region", { name: "Playback sources" });
   const cast = page.getByRole("region", { name: "Cast" });
   await expect(artwork).toBeVisible();
-  await expect(artwork.locator("img")).toHaveAttribute("src", "https://fixtures.rivune.test/series.svg");
+  await expect(artwork.locator("img")).toHaveAttribute("src", "https://fixtures.rivune.test/episode-1.svg");
   await expect(page.locator(".series-browser")).toHaveCount(0);
   await expect(page.locator(".details-utility-grid")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Back.*Episodes/ })).toBeVisible();
@@ -182,6 +225,8 @@ test("episode details float beside a responsive contextual stream panel", async 
   await expect(cast).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(async () => (await detailsPage.boundingBox())?.y ?? -1).toBe(0);
+  await expect.poll(async () => (await detailsPage.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(844);
   await expect(artwork).toBeVisible();
   const mobileArtwork = await artwork.boundingBox();
   const mobilePrimary = await primary.boundingBox();
@@ -286,8 +331,9 @@ test("continue-watching episode returns to its dedicated season panel", async ({
   const trailerBounds = await trailerRegion.boundingBox();
   expect(stageBounds).not.toBeNull();
   expect(trailerBounds).not.toBeNull();
-  expect(stageBounds!.width).toBeCloseTo(trailerBounds!.width, 0);
-  expect(stageBounds!.height).toBeCloseTo(trailerBounds!.height, 0);
+  expect(stageBounds!.width).toBeCloseTo(1280, 0);
+  expect(stageBounds!.height).toBeCloseTo(720, 0);
+  expect(trailerBounds!.width).toBeLessThan(stageBounds!.width);
   const seasonOneRequest = await rivune.waitForRequest("/api/v1/metadata/titles/series-1/trailers", "GET");
   expect(seasonOneRequest.search.get("seasonNumber")).toBe("1");
   expect(seasonOneRequest.search.get("language")).toBe("en");
@@ -303,10 +349,132 @@ test("continue-watching episode returns to its dedicated season panel", async ({
   await expect.poll(() => rivune.matching("/api/v1/metadata/titles/series-1/trailers", "GET").map((request) => request.search.get("seasonNumber"))).toEqual(["1", "2"]);
 });
 
+test("trailers remain available for movie, series, season, and episode title contexts", async ({ page, rivune }) => {
+  await page.goto("/media/movie/tt0137523");
+  await page.getByRole("button", { name: "Trailers" }).click();
+  await expect(page.getByRole("region", { name: /Trailers for/ }).locator("iframe")).toHaveAttribute("title", /Fight Club Trailer/);
+  const movieRequest = await rivune.waitForRequest("/api/v1/metadata/titles/movie-1/trailers", "GET");
+  expect(movieRequest.search.get("seasonNumber")).toBeNull();
+
+  await page.getByRole("button", { name: "Dismiss trailer" }).click();
+  await page.goto("/media/series/tt9000/season/1");
+  await expect(page.getByRole("tab", { name: /^Season 1\b/ })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("button", { name: "Trailers" }).click();
+  await expect(page.getByRole("region", { name: /Trailers for/ }).locator("iframe")).toHaveAttribute("title", /Season One Trailer/);
+  const seriesRequest = await rivune.waitForRequest("/api/v1/metadata/titles/series-1/trailers", "GET");
+  expect(seriesRequest.search.get("seasonNumber")).toBe("1");
+
+  await page.getByRole("button", { name: "Dismiss trailer" }).click();
+  await page.goto("/media/series/tt9000/season/1/episode/1");
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  await page.getByRole("button", { name: "Trailers" }).click();
+  await expect(page.getByRole("region", { name: /Trailers for/ }).locator("iframe")).toHaveAttribute("title", /Season One Trailer/);
+  const episodeRequest = rivune.matching("/api/v1/metadata/titles/series-1/trailers", "GET").at(-1);
+  expect(episodeRequest?.search.get("seasonNumber")).toBe("1");
+});
+
+test("trailer overlay keeps cinematic fallbacks and clips its card and embedded frame", async ({ page, rivune: _rivune }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/media/movie/tt0137523");
+  await page.getByRole("button", { name: "Trailers" }).click();
+
+  const stage = page.locator(".details-trailer-stage");
+  const backdrop = stage.locator(".details-trailer-stage__backdrop");
+  const frame = stage.locator(".details-trailer__frame");
+  await expect(backdrop).toHaveCSS("background-image", /backdrop\.svg.*poster\.svg/);
+  await expect(backdrop).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(frame.locator("iframe")).toHaveAttribute("src", /[?&]vq=highres(?:&|$)/);
+  await expect(backdrop).toHaveCSS("filter", "blur(18px)");
+  expect(await stage.evaluate((element) => getComputedStyle(element, "::before").backdropFilter)).toBe("none");
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+    { width: 1920, height: 1080 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect(frame).toBeVisible();
+    const clipping = await frame.evaluate((element) => {
+      const iframe = element.querySelector("iframe");
+      if (!iframe) throw new Error("Trailer iframe is missing");
+      const frameStyle = getComputedStyle(element);
+      const iframeStyle = getComputedStyle(iframe);
+      const frameBounds = element.getBoundingClientRect();
+      const iframeBounds = iframe.getBoundingClientRect();
+      return {
+        frameOverflow: frameStyle.overflow,
+        frameRadius: Number.parseFloat(frameStyle.borderTopLeftRadius),
+        frameClip: frameStyle.clipPath,
+        iframeRadius: Number.parseFloat(iframeStyle.borderTopLeftRadius),
+        iframeClip: iframeStyle.clipPath,
+        inset: Math.max(
+          Math.abs(frameBounds.left - iframeBounds.left),
+          Math.abs(frameBounds.top - iframeBounds.top),
+          Math.abs(frameBounds.right - iframeBounds.right),
+          Math.abs(frameBounds.bottom - iframeBounds.bottom),
+        ),
+      };
+    });
+    expect(clipping.frameOverflow).toBe("hidden");
+    expect(clipping.frameRadius).toBeGreaterThan(0);
+    expect(clipping.frameClip).not.toBe("none");
+    expect(clipping.iframeRadius).toBeGreaterThan(0);
+    expect(clipping.iframeClip).not.toBe("none");
+    expect(clipping.inset).toBeLessThanOrEqual(1);
+    const stageBounds = await stage.boundingBox();
+    expect(stageBounds?.width).toBeCloseTo(viewport.width, 0);
+    expect(stageBounds?.height).toBeCloseTo(viewport.height, 0);
+    const backdropBounds = await backdrop.boundingBox();
+    expect(backdropBounds).not.toBeNull();
+    expect(backdropBounds!.x).toBeLessThan(0);
+    expect(backdropBounds!.y).toBeLessThan(0);
+    expect(backdropBounds!.x + backdropBounds!.width).toBeGreaterThan(viewport.width);
+    expect(backdropBounds!.y + backdropBounds!.height).toBeGreaterThan(viewport.height);
+  }
+});
+
+test("trailer overlay uses a solid fallback when title artwork is absent", async ({ page, rivune: _rivune }) => {
+  await page.route(/\/api\/v1\/metadata\/titles\/movie-1(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ id: "movie-1", mediaType: "movie", title: "Fight Club", overview: "No artwork fixture", externalIds: { imdb: "tt0137523" } }),
+  }));
+  await page.goto("/media/movie/tt0137523");
+  await page.getByRole("button", { name: "Trailers" }).click();
+
+  const backdrop = page.locator(".details-trailer-stage__backdrop");
+  await expect(backdrop).toHaveCSS("background-image", "none");
+  await expect(backdrop).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+});
+
+test("an unavailable trailer warns once without rendering an empty stage", async ({ page, rivune: _rivune }) => {
+  await page.route(/\/api\/v1\/metadata\/titles\/movie-1\/trailers(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ trailers: [] }),
+  }));
+  await page.goto("/media/movie/tt0137523");
+  const trailerButton = page.getByRole("button", { name: "Trailers" });
+  await trailerButton.click();
+
+  await expect(page.locator(".details-trailer-stage")).toHaveCount(0);
+  await expect(page.locator(".details-trailer")).toHaveCount(0);
+  const warning = page.locator(".app-notification--warning");
+  await expect(warning).toHaveCount(1);
+  await expect(warning).toHaveAttribute("role", "status");
+  await expect(warning).toContainText("Trailer unavailable");
+  await expect(warning).toContainText("No trailer is available for this title.");
+  await expect(warning.locator("svg").first()).toHaveClass(/lucide-triangle-alert/);
+  await expect(trailerButton).toBeDisabled();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(warning).toHaveCount(1);
+  await expect(page.locator(".details-trailer-stage")).toHaveCount(0);
+});
+
 test("resolved artwork remains visible while revisiting metadata is revalidated", async ({ page, rivune: _rivune }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/series.svg");
+  await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/episode-1.svg");
   await page.goBack();
   await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
 
@@ -321,7 +489,7 @@ test("resolved artwork remains visible while revisiting metadata is revalidated"
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
   await requestStarted.promise;
   try {
-    await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/series.svg", { timeout: 500 });
+    await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/episode-1.svg", { timeout: 500 });
   } finally {
     releaseRequest.resolve();
   }

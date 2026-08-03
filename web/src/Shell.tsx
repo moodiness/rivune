@@ -1,7 +1,7 @@
-import { Bookmark, CalendarDays, Home, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Search, Settings, Sparkles, Users, X } from "lucide-react";
+import { Bookmark, CalendarDays, Home, LogOut, PanelLeftClose, PanelLeftOpen, Search, Settings, Users } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useAuth } from "./auth";
-import { IconButton, RivuneMark } from "./components";
+import { RivuneMark } from "./components";
 import { translate as t } from "./i18n";
 import { notifyError } from "./notifications";
 
@@ -23,8 +23,6 @@ function formatServerVersion(version: string | null): string | null {
 
 export function Shell({ view, onView, children }: { view: View; onView: (view: View) => void; children: ReactNode }) {
   const { activeProfile, leaveProfile, logout, discovery } = useAuth();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [isNarrow, setIsNarrow] = useState(() => window.matchMedia("(max-width: 820px) and (orientation: portrait)").matches);
   const [sidebarCompact, setSidebarCompact] = useState(() => localStorage.getItem("rivune.sidebar.compact") === "true");
   const canManage = Boolean(activeProfile?.canManage);
   const settingsLabel = t(canManage ? "nav.administration" : "nav.preferences");
@@ -35,33 +33,8 @@ export function Shell({ view, onView, children }: { view: View; onView: (view: V
     : t("auth.connectedTo", { server: serverName });
 
   useEffect(() => {
-    const media = window.matchMedia("(max-width: 820px) and (orientation: portrait)");
-    const update = () => {
-      setIsNarrow(media.matches);
-      if (!media.matches) setMenuOpen(false);
-    };
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, []);
-
-  useEffect(() => {
-    setMenuOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, [view]);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const previousOverflow = document.body.style.overflow;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
-    };
-    document.body.style.overflow = "hidden";
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [menuOpen]);
 
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
@@ -79,7 +52,6 @@ export function Shell({ view, onView, children }: { view: View; onView: (view: V
   }, [onView, view]);
 
   function toggleSidebar() {
-    if (isNarrow) return;
     setSidebarCompact((current) => {
       const next = !current;
       localStorage.setItem("rivune.sidebar.compact", String(next));
@@ -93,8 +65,8 @@ export function Shell({ view, onView, children }: { view: View; onView: (view: V
   }
 
   return <div className={`app-shell ${sidebarCompact ? "is-sidebar-compact" : ""}`}>
-    <aside id="main-sidebar" className={`sidebar ${menuOpen ? "is-open" : ""}`} aria-hidden={isNarrow && !menuOpen} inert={isNarrow && !menuOpen}>
-      <div className="sidebar__top"><button type="button" className="sidebar__brand-toggle" onClick={toggleSidebar} aria-label={t(sidebarCompact ? "shell.expandSidebar" : "shell.collapseSidebar")} title={t(sidebarCompact ? "shell.expandSidebar" : "shell.collapseSidebar")}><RivuneMark compact={sidebarCompact && !isNarrow} /><span className="sidebar__collapse-icon">{sidebarCompact ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}</span></button><IconButton label={t("shell.closeMenu")} className="sidebar__close" onClick={() => setMenuOpen(false)}><X /></IconButton></div>
+    <aside id="main-sidebar" className="sidebar">
+      <div className="sidebar__top"><button type="button" className="sidebar__brand-toggle" onClick={toggleSidebar} aria-label={t(sidebarCompact ? "shell.expandSidebar" : "shell.collapseSidebar")} title={t(sidebarCompact ? "shell.expandSidebar" : "shell.collapseSidebar")}><RivuneMark compact={sidebarCompact} /><span className="sidebar__collapse-icon">{sidebarCompact ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}</span></button></div>
       <nav aria-label={t("nav.main")}>
         <span className="sidebar__label">{t("nav.browse")}</span>
         {navItems.map((item) => { const Icon = item.icon; const active = view === item.id; return <button key={item.id} type="button" className={active ? "is-active" : ""} aria-current={active ? "page" : undefined} onClick={() => onView(item.id)}><Icon size={20} /><span>{t(item.labelKey)}</span>{active && <i />}</button>; })}
@@ -112,13 +84,7 @@ export function Shell({ view, onView, children }: { view: View; onView: (view: V
         <button className="sidebar-signout" onClick={() => void logout().catch((cause) => notifyError(cause, t("profiles.signOutFailure"), t("profiles.signOutFailureTitle")))}><LogOut size={17} /><span>{t("profiles.signOut")}</span></button>
       </div>
     </aside>
-    {menuOpen && <button className="sidebar-scrim" onClick={() => setMenuOpen(false)} aria-label={t("shell.closeMenu")} />}
     <main className="app-main">
-      <header className="topbar">
-        <IconButton label={t("shell.openMenu")} className="topbar__menu" onClick={() => setMenuOpen(true)} aria-expanded={menuOpen} aria-controls="main-sidebar"><Menu /></IconButton>
-        <div className="topbar__greeting"><Sparkles size={15} /><span>{t("shell.welcomeBack", { name: activeProfile?.name ?? "" })}</span></div>
-        <div className="topbar__actions"><button type="button" className="topbar__search" aria-label={t("nav.search")} title={t("nav.search")} aria-keyshortcuts="/ Control+K Meta+K" onClick={() => onView("search")}><Search size={18} /><span>{t("nav.search")}</span><kbd>/</kbd></button><button type="button" className="topbar__profile" aria-label={t("shell.switchProfile")} onClick={switchProfile}><img src={activeProfile?.avatar.url} alt="" /></button></div>
-      </header>
       <div className="view-stage">{children}</div>
     </main>
     <nav className="mobile-nav" aria-label={t("nav.mobile")}>{navItems.map((item) => { const Icon = item.icon; const active = view === item.id; return <button key={item.id} type="button" className={active ? "is-active" : ""} aria-current={active ? "page" : undefined} onClick={() => onView(item.id)}><Icon size={20} /><span>{t(item.labelKey)}</span></button>; })}<button type="button" className={view === "admin" ? "is-active" : ""} aria-current={view === "admin" ? "page" : undefined} onClick={() => onView("admin")}><Settings size={20} /><span>{t(canManage ? "nav.manage" : "nav.preferences")}</span></button></nav>

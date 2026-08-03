@@ -271,6 +271,54 @@ func TestSeriesMappingUsesSelectedTVDBSeasonHierarchy(t *testing.T) {
 	}
 }
 
+func TestSeriesMappingPreservesSpecialsSeasonZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]string{"token": "token"}})
+		case "/series/81797/extended":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"id":                81797,
+				"defaultSeasonType": 1,
+				"seasonTypes":       []map[string]any{{"id": 1, "name": "Aired Order", "type": "official"}},
+				"seasons": []map[string]any{{
+					"id": 1000, "number": 0, "seriesId": 81797,
+					"type": map[string]any{"id": 1, "type": "official"},
+				}},
+			}})
+		case "/seasons/1000/extended":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"id": 1000, "seriesId": 81797, "number": 0,
+				"type": map[string]any{"id": 1, "type": "official"},
+				"episodes": []map[string]any{{
+					"id": 10001, "name": "Behind the Scenes", "aired": "2024-01-01",
+					"seasonNumber": 0, "number": 1,
+				}},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newWithBaseURL("api-key", "", server.URL, server.Client())
+	seasons, err := client.SeriesSeasons(context.Background(), "81797", "")
+	if err != nil {
+		t.Fatalf("map specials summary: %v", err)
+	}
+	if len(seasons) != 1 || seasons[0].SeasonNumber != 0 || seasons[0].Name != "Specials" || seasons[0].EpisodeCount != 1 {
+		t.Fatalf("unexpected specials summary: %+v", seasons)
+	}
+	season, err := client.SeriesSeason(context.Background(), "81797", "1000")
+	if err != nil {
+		t.Fatalf("map specials season: %v", err)
+	}
+	if season.SeasonNumber != 0 || season.Name != "Specials" || len(season.Episodes) != 1 ||
+		season.Episodes[0].SeasonNumber != 0 || season.Episodes[0].ExternalID != "10001" {
+		t.Fatalf("unexpected specials season: %+v", season)
+	}
+}
+
 func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")

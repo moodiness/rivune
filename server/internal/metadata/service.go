@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -27,6 +28,7 @@ var (
 	externalProviderPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	mappedSeasonPattern     = regexp.MustCompile(`^tvdb:([0-9a-fA-F-]{36}):([1-9][0-9]*)$`)
 	episodeOrderPattern     = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
+	errNoMappedEpisodes     = errors.New("no TVDB episodes could be matched to TMDB")
 )
 
 type Service struct {
@@ -575,15 +577,19 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 }
 
 func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Principal, titleID string, options SeriesDetailsOptions) (Series, error) {
-	if s.mapper == nil {
-		return Series{}, ErrProviderUnavailable
-	}
 	base, err := s.SeriesDetails(ctx, principal, titleID, SeriesDetailsOptions{
 		Language:        options.Language,
 		MappingProvider: providerName,
 	})
 	if err != nil {
 		return Series{}, err
+	}
+	if s.mapper == nil {
+		if options.EpisodeOrderID == "" {
+			s.logTVDBMappingFallback(base.ID, ErrProviderUnavailable)
+			return base, nil
+		}
+		return Series{}, ErrProviderUnavailable
 	}
 	normalizedLanguage, err := normalizeLanguage(options.Language)
 	if err != nil {
@@ -611,10 +617,18 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 	}
 	seriesTVDBID := strings.TrimSpace(base.ExternalIDs["tvdb"])
 	if seriesTVDBID == "" {
+		if options.EpisodeOrderID == "" {
+			s.logTVDBMappingFallback(base.ID, ErrProviderNotFound)
+			return base, nil
+		}
 		return Series{}, ErrProviderNotFound
 	}
 	providedSeasons, err := s.mapper.SeriesSeasons(ctx, seriesTVDBID, options.EpisodeOrderID)
 	if err != nil {
+		if options.EpisodeOrderID == "" && isProviderMappingUnavailable(err) {
+			s.logTVDBMappingFallback(base.ID, err)
+			return base, nil
+		}
 		return Series{}, err
 	}
 	if s.artwork != nil {
@@ -679,6 +693,20 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 	return mapped, nil
 }
 
+func isProviderMappingUnavailable(err error) bool {
+	return errors.Is(err, ErrProviderUnavailable) ||
+		errors.Is(err, ErrProviderUnauthorized) ||
+		errors.Is(err, ErrProviderNotFound) ||
+		errors.Is(err, ErrProviderRateLimited) ||
+		errors.Is(err, ErrProviderFailure)
+}
+
+func (s *Service) logTVDBMappingFallback(titleID string, err error) {
+	if s.logger != nil {
+		s.logger.Warn("TVDB mapping unavailable; using canonical TMDB mapping", "titleId", titleID, "error", err)
+	}
+}
+
 func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Principal, seasonID, language string) (Season, error) {
 	if s.mapper == nil {
 		return Season{}, ErrProviderUnavailable
@@ -717,15 +745,33 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 	}
 	canonicalEpisodes := make([]Episode, 0, base.NumberOfEpisodes)
 	for _, summary := range base.Seasons {
-		season, err := s.SeasonDetails(ctx, principal, summary.ID, language, providerName)
-		if err != nil {
-			return Season{}, err
+		season, loadErr := s.SeasonDetails(ctx, principal, summary.ID, language, providerName)
+		if loadErr != nil {
+			if ctx.Err() != nil {
+				return Season{}, ctx.Err()
+			}
+			if s.logger != nil {
+				s.logger.Warn(
+					"canonical season unavailable while assembling TVDB season",
+					"seriesId", seriesID,
+					"selectedSeasonId", seasonID,
+					"selectedSeasonNumber", provided.SeasonNumber,
+					"canonicalSeasonId", summary.ID,
+					"canonicalSeasonNumber", summary.SeasonNumber,
+					"error", loadErr,
+				)
+			}
+			continue
 		}
 		canonicalEpisodes = append(canonicalEpisodes, season.Episodes...)
 	}
 	episodes, tvdbLinks, err := matchMappedEpisodes(seasonID, provided.Episodes, canonicalEpisodes)
 	if err != nil {
-		return Season{}, err
+		if provided.SeasonNumber != 0 || !errors.Is(err, errNoMappedEpisodes) {
+			return Season{}, err
+		}
+		episodes = make([]Episode, 0, len(provided.Episodes))
+		tvdbLinks = make(map[string]string)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -737,6 +783,81 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 			return Season{}, err
 		}
 	}
+	if provided.SeasonNumber == 0 && len(episodes) < len(provided.Episodes) {
+		matchedTVDBIDs := make(map[string]struct{}, len(tvdbLinks))
+		for _, tvdbID := range tvdbLinks {
+			matchedTVDBIDs[tvdbID] = struct{}{}
+		}
+		seasonOrdinal := provided.SeasonNumber
+		persistedSeasonID, persistErr := ensureProviderTitleHierarchy(
+			ctx,
+			tx,
+			"tvdb",
+			provided.ExternalID,
+			MediaTypeSeason,
+			&seriesID,
+			&seasonOrdinal,
+			false,
+		)
+		if persistErr != nil {
+			return Season{}, persistErr
+		}
+		if persistErr := persistTitleSnapshot(ctx, tx, persistedSeasonID, provided.Name, provided.PosterURL, "", provided.AirDate); persistErr != nil {
+			return Season{}, persistErr
+		}
+		for _, mapped := range provided.Episodes {
+			tvdbID := strings.TrimSpace(mapped.ExternalID)
+			if _, matched := matchedTVDBIDs[tvdbID]; matched {
+				continue
+			}
+			if tvdbID == "" || mapped.SeasonNumber != provided.SeasonNumber || mapped.EpisodeNumber < 0 {
+				return Season{}, fmt.Errorf("%w: TVDB returned an invalid special episode", ErrProviderFailure)
+			}
+			episodeOrdinal := mapped.EpisodeNumber
+			episodeID, persistErr := ensureProviderTitleHierarchy(
+				ctx,
+				tx,
+				"tvdb",
+				tvdbID,
+				MediaTypeEpisode,
+				&persistedSeasonID,
+				&episodeOrdinal,
+				false,
+			)
+			if persistErr != nil {
+				return Season{}, persistErr
+			}
+			if persistErr := linkAdditionalIDs(ctx, tx, episodeID, MediaTypeEpisode, mapped.AdditionalIDs); persistErr != nil {
+				return Season{}, persistErr
+			}
+			if persistErr := persistTitleSnapshot(ctx, tx, episodeID, mapped.Name, mapped.StillURL, "", mapped.AirDate); persistErr != nil {
+				return Season{}, persistErr
+			}
+			externalIDs := make(map[string]string, len(mapped.AdditionalIDs)+1)
+			for provider, externalID := range mapped.AdditionalIDs {
+				externalIDs[provider] = externalID
+			}
+			externalIDs["tvdb"] = tvdbID
+			episodes = append(episodes, Episode{
+				ID:             episodeID,
+				MediaType:      MediaTypeEpisode,
+				SeasonID:       seasonID,
+				Name:           mapped.Name,
+				Overview:       mapped.Overview,
+				SeasonNumber:   mapped.SeasonNumber,
+				EpisodeNumber:  mapped.EpisodeNumber,
+				AirDate:        mapped.AirDate,
+				StillURL:       mapped.StillURL,
+				RuntimeMinutes: mapped.RuntimeMinutes,
+				VoteAverage:    mapped.VoteAverage,
+				VoteCount:      mapped.VoteCount,
+				ExternalIDs:    externalIDs,
+			})
+		}
+	}
+	sort.Slice(episodes, func(left, right int) bool {
+		return episodes[left].EpisodeNumber < episodes[right].EpisodeNumber
+	})
 	if err := tx.Commit(ctx); err != nil {
 		return Season{}, fmt.Errorf("commit TVDB episode mapping persistence: %w", err)
 	}
@@ -850,7 +971,7 @@ func matchMappedEpisodes(seasonID string, provided []ProviderEpisode, canonical 
 		links[canonicalEpisode.ID] = tvdbID
 	}
 	if len(provided) > 0 && len(result) == 0 {
-		return nil, nil, fmt.Errorf("%w: no TVDB episodes could be matched to TMDB", ErrProviderFailure)
+		return nil, nil, fmt.Errorf("%w: %w", ErrProviderFailure, errNoMappedEpisodes)
 	}
 	sort.Slice(result, func(left, right int) bool {
 		return result[left].EpisodeNumber < result[right].EpisodeNumber
@@ -1231,9 +1352,19 @@ func ensureCanonicalSeasonTitle(ctx context.Context, tx pgx.Tx, externalID strin
 }
 
 func ensureTitleHierarchy(ctx context.Context, tx pgx.Tx, externalID, mediaType string, parentID *string, ordinal *int, repairOrdinal bool) (string, error) {
-	lockKey := providerName + ":" + mediaType + ":" + externalID
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
-		return "", fmt.Errorf("lock external title: %w", err)
+	return ensureProviderTitleHierarchy(ctx, tx, providerName, externalID, mediaType, parentID, ordinal, repairOrdinal)
+}
+
+func ensureProviderTitleHierarchy(ctx context.Context, tx pgx.Tx, provider, externalID, mediaType string, parentID *string, ordinal *int, repairOrdinal bool) (string, error) {
+	lockKeys := []string{provider + ":" + mediaType + ":" + externalID}
+	if parentID != nil && ordinal != nil {
+		lockKeys = append(lockKeys, "hierarchy:"+*parentID+":"+mediaType+":"+strconv.Itoa(*ordinal))
+	}
+	sort.Strings(lockKeys)
+	for _, lockKey := range lockKeys {
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
+			return "", fmt.Errorf("lock external title: %w", err)
+		}
 	}
 
 	var titleID string
@@ -1246,7 +1377,7 @@ func ensureTitleHierarchy(ctx context.Context, tx pgx.Tx, externalID, mediaType 
 		FROM title_external_ids AS external
 		JOIN titles AS title ON title.id = external.title_id
 		WHERE external.provider = $1 AND external.namespace = $2 AND external.external_id = $3
-	`, providerName, mediaType, externalID).Scan(&titleID, &existingParentID, &existingOrdinal)
+	`, provider, mediaType, externalID).Scan(&titleID, &existingParentID, &existingOrdinal)
 	if err == nil {
 		expectedParentID := ""
 		if parentID != nil {
@@ -1290,6 +1421,41 @@ func ensureTitleHierarchy(ctx context.Context, tx pgx.Tx, externalID, mediaType 
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("query external title: %w", err)
 	}
+	if parentID != nil && ordinal != nil {
+		err = tx.QueryRow(ctx, `
+			SELECT id::text
+			FROM titles
+			WHERE parent_id = $1::uuid AND media_type = $2 AND ordinal = $3
+		`, *parentID, mediaType, *ordinal).Scan(&titleID)
+		if err == nil {
+			var existingExternalID string
+			identityErr := tx.QueryRow(ctx, `
+				SELECT external_id
+				FROM title_external_ids
+				WHERE title_id = $1::uuid AND provider = $2
+			`, titleID, provider).Scan(&existingExternalID)
+			if identityErr == nil {
+				if existingExternalID != externalID {
+					return "", errors.New("metadata provider returned a conflicting external ID")
+				}
+				return titleID, nil
+			}
+			if !errors.Is(identityErr, pgx.ErrNoRows) {
+				return "", fmt.Errorf("query hierarchical title identity: %w", identityErr)
+			}
+			if _, identityErr = tx.Exec(ctx, `
+				INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
+				VALUES ($1::uuid, $2, $3, $4)
+			`, titleID, provider, mediaType, externalID); identityErr != nil {
+				return "", fmt.Errorf("link hierarchical title identity: %w", identityErr)
+			}
+			return titleID, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("query hierarchical title: %w", err)
+		}
+	}
+
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO titles (media_type, parent_id, ordinal)
 		VALUES ($1, $2::uuid, $3)
@@ -1300,7 +1466,7 @@ func ensureTitleHierarchy(ctx context.Context, tx pgx.Tx, externalID, mediaType 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
 		VALUES ($1::uuid, $2, $3, $4)
-	`, titleID, providerName, mediaType, externalID); err != nil {
+	`, titleID, provider, mediaType, externalID); err != nil {
 		return "", fmt.Errorf("link external title: %w", err)
 	}
 	return titleID, nil

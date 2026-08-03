@@ -10,6 +10,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/collection"
+	"github.com/moodiness/rivune/server/internal/metadata"
 )
 
 func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *testing.T) {
@@ -193,5 +194,68 @@ func TestPresentResponseBoundaryArtworkUsesSameOriginReferences(t *testing.T) {
 	service.RestoreCollectionSaveInput(context.Background(), &input)
 	if input.BackdropImageURL != collectionBackground || input.Folders[0].CoverImageURL != cover {
 		t.Fatalf("collection artwork sources were not restored before persistence: %#v", input)
+	}
+}
+
+func TestLocalizeMetadataIncludesCastProfilesAndNestedSeriesArtwork(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+
+	movieProfile := fixture.URL + "/movie-cast.png"
+	seriesProfile := fixture.URL + "/series-cast.png"
+	moviePageProfile := fixture.URL + "/movie-page-cast.png"
+	seriesPageProfile := fixture.URL + "/series-page-cast.png"
+	seriesPageSeasonPoster := fixture.URL + "/series-page-season.png"
+	movie := metadata.Movie{
+		PosterURL: fixture.URL + "/movie-poster.png",
+		Cast:      []metadata.CastMember{{ID: "1", Name: "Movie Actor", ProfileURL: movieProfile}},
+	}
+	series := metadata.Series{
+		BackdropURL: fixture.URL + "/series-backdrop.png",
+		Cast:        []metadata.CastMember{{ID: "2", Name: "Series Actor", ProfileURL: seriesProfile}},
+	}
+	moviePage := metadata.MoviePage{Items: []metadata.Movie{{
+		Cast: []metadata.CastMember{{ID: "3", Name: "Movie Page Actor", ProfileURL: moviePageProfile}},
+	}}}
+	seriesPage := metadata.SeriesPage{Items: []metadata.Series{{
+		Cast:    []metadata.CastMember{{ID: "4", Name: "Series Page Actor", ProfileURL: seriesPageProfile}},
+		Seasons: []metadata.SeasonSummary{{SeasonNumber: 1, PosterURL: seriesPageSeasonPoster}},
+	}}}
+
+	service.LocalizeMovie(context.Background(), &movie)
+	service.LocalizeSeries(context.Background(), &series)
+	service.LocalizeMoviePage(context.Background(), &moviePage)
+	service.LocalizeSeriesPage(context.Background(), &seriesPage)
+
+	for label, value := range map[string]string{
+		"movie profile":       movie.Cast[0].ProfileURL,
+		"series profile":      series.Cast[0].ProfileURL,
+		"movie page profile":  moviePage.Items[0].Cast[0].ProfileURL,
+		"series page profile": seriesPage.Items[0].Cast[0].ProfileURL,
+		"series page season":  seriesPage.Items[0].Seasons[0].PosterURL,
+	} {
+		if !strings.HasPrefix(value, publicPrefix) {
+			t.Fatalf("%s was not localized through %q: %q", label, publicPrefix, value)
+		}
+		if strings.Contains(value, fixture.URL) {
+			t.Fatalf("%s leaked upstream URL %q", label, value)
+		}
+	}
+	for upstream, localized := range map[string]string{
+		movieProfile:           movie.Cast[0].ProfileURL,
+		seriesProfile:          series.Cast[0].ProfileURL,
+		moviePageProfile:       moviePage.Items[0].Cast[0].ProfileURL,
+		seriesPageProfile:      seriesPage.Items[0].Cast[0].ProfileURL,
+		seriesPageSeasonPoster: seriesPage.Items[0].Seasons[0].PosterURL,
+	} {
+		normalized, err := normalizeURL(upstream, false)
+		if err != nil {
+			t.Fatalf("normalize artwork URL: %v", err)
+		}
+		if want := publicPrefix + artworkKey(normalized); localized != want {
+			t.Fatalf("localized artwork = %q, want %q", localized, want)
+		}
 	}
 }

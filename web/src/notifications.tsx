@@ -1,10 +1,10 @@
-import { AlertCircle, Bell, Check, X } from "lucide-react";
+import { AlertCircle, AlertTriangle, Bell, Check, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { APIError } from "./api";
 import { translate as t } from "./i18n";
 
-type NotificationTone = "error" | "info" | "success";
+type NotificationTone = "error" | "info" | "success" | "warning";
 
 type AppNotification = {
   id: number;
@@ -42,6 +42,10 @@ export function notifySuccess(message: string, title = t("notifications.savedTit
 
 export function notifyInfo(message: string, title = t("notifications.messageTitle")): Promise<void> {
   return publish("info", title, message);
+}
+
+export function notifyWarning(message: string, title = t("notifications.messageTitle")): void {
+  void publish("warning", title, message);
 }
 
 export function notifyError(cause: unknown, fallback: string, title = t("notifications.errorTitle")): string {
@@ -87,7 +91,7 @@ export function NotificationViewport() {
   return createPortal(
     <div className="notification-viewport" aria-live="polite" aria-atomic="false">
       {notifications.slice(0, 4).map((notification) => <div key={notification.id} className={`app-notification app-notification--${notification.tone}`} role={notification.tone === "error" ? "alert" : "status"}>
-        <span>{notification.tone === "error" ? <AlertCircle size={19} /> : notification.tone === "info" ? <Bell size={19} /> : <Check size={19} />}</span>
+        <span>{notification.tone === "error" ? <AlertCircle size={19} /> : notification.tone === "warning" ? <AlertTriangle size={19} /> : notification.tone === "info" ? <Bell size={19} /> : <Check size={19} />}</span>
         <div><strong>{notification.title}</strong><small>{notification.message}</small></div>
         <button type="button" aria-label={t("notifications.dismiss")} onClick={() => {
           const timeout = notificationTimeouts.current.get(notification.id);

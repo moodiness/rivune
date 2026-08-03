@@ -191,13 +191,20 @@ func (a *API) writeMetadataError(w http.ResponseWriter, operation string, err er
 	case errors.Is(err, metadata.ErrNotFound), errors.Is(err, metadata.ErrProviderNotFound):
 		writeError(w, http.StatusNotFound, "title_not_found", "The title does not exist")
 	case errors.Is(err, metadata.ErrProviderUnavailable), errors.Is(err, metadata.ErrProviderUnauthorized):
+		a.logMetadataProviderError(operation, err)
 		writeError(w, http.StatusServiceUnavailable, "metadata_provider_unavailable", "The server administrator must configure valid TMDB credentials")
 	case errors.Is(err, metadata.ErrProviderRateLimited):
+		a.logMetadataProviderError(operation, err)
 		w.Header().Set("Retry-After", "30")
 		writeError(w, http.StatusServiceUnavailable, "metadata_provider_rate_limited", "The metadata provider rate limit was reached")
 	case errors.Is(err, metadata.ErrProviderFailure):
+		a.logMetadataProviderError(operation, err)
 		writeError(w, http.StatusBadGateway, "metadata_provider_error", "The metadata provider request failed")
 	default:
 		a.internalError(w, operation, err)
 	}
+}
+
+func (a *API) logMetadataProviderError(operation string, err error) {
+	a.logger.Error("metadata provider request failed", "operation", operation, "error", err)
 }

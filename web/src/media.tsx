@@ -5,7 +5,7 @@ import { api, APIError } from "./api";
 import { Button, HorizontalDragRow, IconButton, Notice } from "./components";
 import { translate as t } from "./i18n";
 import { cachedMediaItem, cacheMediaItem } from "./metadataCache";
-import { notifyError, notifyErrorMessage, notifySuccess } from "./notifications";
+import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "./notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "./titleProviders";
 import type { CastMember, EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
 
@@ -316,6 +316,11 @@ function episodeIsUpcoming(episode: EpisodeMetadata): boolean {
   const airDate = new Date(`${episode.airDate}T23:59:59Z`);
   return Number.isFinite(airDate.getTime()) && airDate.getTime() > Date.now();
 }
+function withoutEmptySeasons(series: SeriesMetadata): SeriesMetadata {
+  const seasons = series.seasons.filter((season) => season.episodeCount > 0);
+  return seasons.length === series.seasons.length ? series : { ...series, seasons };
+}
+
 export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, onOpenSeason }: { item: MediaItem; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenMedia?: (item: MediaItem) => void; onOpenSeason?: (item: MediaItem) => void }) {
   const metadataLocale = api.metadataLocale();
   const [details, setDetails] = useState(() => cachedMediaItem(item, metadataLocale));
@@ -358,6 +363,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
   const trailerRequestRef = useRef(0);
   const seasonCacheRef = useRef(new Map<string, SeasonMetadata>());
   const trailerItemRef = useRef("");
+  const trailerWarningKeyRef = useRef("");
   const trailerStageRef = useRef<HTMLDivElement>(null);
   const trailerRevealPendingRef = useRef(false);
   const episodeListRef = useRef<HTMLDivElement>(null);
@@ -375,16 +381,21 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
   const continueSeasonNumber = typeof item.raw?.continueSeasonNumber === "number" ? item.raw.continueSeasonNumber : undefined;
   const continueEpisodeNumber = typeof item.raw?.continueEpisodeNumber === "number" ? item.raw.continueEpisodeNumber : undefined;
   const libraryTitleID = item.mediaType === "episode" ? series?.id || continueSeriesID || undefined : titleID ?? item.titleId;
-  const trailerSeriesContext = item.mediaType === "series" || (item.mediaType === "episode" && seriesContextEnabled);
-  const trailerTitleID = item.mediaType === "episode" && seriesContextEnabled ? series?.id ?? continueSeriesID : item.titleId ?? item.id;
+  const trailerSeriesContext = item.mediaType === "series" || item.mediaType === "episode";
+  const trailerTitleID = item.mediaType === "episode"
+    ? series?.id ?? continueSeriesID
+    : titleID ?? item.titleId;
   const selectedTrailerSeason = trailerSeriesContext ? series?.seasons.find((candidate) => candidate.id === seasonID) : undefined;
-  const trailersAvailableForContext = item.mediaType === "movie" || item.mediaType === "series" || (item.mediaType === "episode" && seriesContextEnabled && Boolean(series && selectedTrailerSeason));
-  const trailerItemKey = `${trailerSeriesContext ? "series" : item.mediaType}:${trailerTitleID}:${selectedTrailerSeason ? `season:${selectedTrailerSeason.seasonNumber}` : "title"}`;
+  const trailersAvailableForContext = item.mediaType === "movie"
+    || item.mediaType === "series"
+    || item.mediaType === "episode" && Boolean(trailerTitleID && selectedTrailerSeason);
+  const trailerItemKey = `${trailerSeriesContext ? "series" : item.mediaType}:${item.id}:${selectedTrailerSeason ? `season:${selectedTrailerSeason.seasonNumber}` : "title"}`;
   trailerItemRef.current = trailerItemKey;
   const activeTrailers = trailerOwnerKey === trailerItemKey ? trailers : [];
   const activeTrailer = trailerOwnerKey === trailerItemKey ? selectedTrailer : undefined;
   const activeTrailerLoading = trailerOwnerKey === trailerItemKey && trailerLoading;
   const activeTrailerMessage = trailerOwnerKey === trailerItemKey ? trailerMessage : "";
+  const activeTrailerUnavailable = trailerOwnerKey === trailerItemKey && trailerUnavailable;
   const trailerStageVisible = Boolean(activeTrailer || activeTrailerMessage);
   const streamResourceID = selectedEpisode && series ? episodeResourceID(series, selectedEpisode, item.id) : item.id;
   const playbackMediaType = selectedEpisode || item.mediaType === "episode" ? "episode" : item.mediaType;
@@ -518,7 +529,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
         : item.mediaType === "episode" && routeSeriesResourceID
           ? await resolveMediaTitle({ ...item, id: routeSeriesResourceID, titleId: undefined, mediaType: "series", externalIds: undefined })
           : await resolveMediaTitle(item);
-      const resolved = await api.seriesDetails(resolvedTitleID);
+      const resolved = withoutEmptySeasons(await api.seriesDetails(resolvedTitleID));
       if (!active) return;
       if (item.mediaType === "series") setTitleID(resolvedTitleID);
       setSeries(resolved);
@@ -754,13 +765,24 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
   }
 
   async function showTrailer() {
-    if (activeTrailers.length > 0 || activeTrailerLoading) return;
+    if (activeTrailers.length > 0 || activeTrailerLoading || activeTrailerUnavailable) return;
     trailerRevealPendingRef.current = true;
     const requestID = ++trailerRequestRef.current;
     const requestedItemKey = trailerItemRef.current;
     const requestedSeasonNumber = selectedTrailerSeason?.seasonNumber;
     const requestIsCurrent = () => trailerRequestRef.current === requestID && trailerItemRef.current === requestedItemKey;
     let trailerRequested = false;
+    const warnUnavailable = () => {
+      const message = requestedSeasonNumber === undefined
+        ? t("media.trailers.noneForTitle")
+        : t("media.trailers.noneForSeason", { season: requestedSeasonNumber === 0 ? t("media.season.specials") : t("media.season.number", { number: requestedSeasonNumber }) });
+      trailerRevealPendingRef.current = false;
+      setTrailerUnavailable(true);
+      setTrailerMessage("");
+      if (trailerWarningKeyRef.current === requestedItemKey) return;
+      trailerWarningKeyRef.current = requestedItemKey;
+      notifyWarning(message, t("media.trailers.error.unavailableTitle"));
+    };
     setTrailers([]);
     setSelectedTrailer(undefined);
     setTrailerOwnerKey(requestedItemKey);
@@ -768,18 +790,15 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     setTrailerMessage("");
     setTrailerUnavailable(false);
     try {
-      const resolvedTitleID = item.mediaType === "episode" && seriesContextEnabled && trailerTitleID ? trailerTitleID : await resolveMediaTitle(item);
+      const resolvedTitleID = trailerTitleID || await resolveMediaTitle(item);
       if (!requestIsCurrent()) return;
-      setTitleID(resolvedTitleID);
+      if (item.mediaType !== "episode") setTitleID(resolvedTitleID);
       trailerRequested = true;
       const metadata = await api.trailers(resolvedTitleID, requestedSeasonNumber);
       if (!requestIsCurrent()) return;
       const nextTrailers = Array.isArray(metadata.trailers) ? metadata.trailers : [];
       if (nextTrailers.length === 0) {
-        setTrailerUnavailable(true);
-        setTrailerMessage(requestedSeasonNumber === undefined
-          ? t("media.trailers.noneForTitle")
-          : t("media.trailers.noneForSeason", { season: requestedSeasonNumber === 0 ? t("media.season.specials") : t("media.season.number", { number: requestedSeasonNumber }) }));
+        warnUnavailable();
         return;
       }
       setTrailers(nextTrailers);
@@ -787,10 +806,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     } catch (cause) {
       if (!requestIsCurrent()) return;
       if (trailerRequested && cause instanceof APIError && cause.status === 404) {
-        setTrailerUnavailable(true);
-        setTrailerMessage(requestedSeasonNumber === undefined
-          ? t("media.trailers.noneForTitle")
-          : t("media.trailers.noneForSeason", { season: requestedSeasonNumber === 0 ? t("media.season.specials") : t("media.season.number", { number: requestedSeasonNumber }) }));
+        warnUnavailable();
       } else {
         setTrailerMessage(notifyError(cause, t("media.trailers.error.loadFailed"), t("media.trailers.error.unavailableTitle")));
       }
@@ -884,9 +900,9 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     setEpisodeOrderLoading(true);
     setEpisodeOrderError("");
     try {
-      const resolved = await api.seriesDetails(series.id, episodeOrderID
+      const resolved = withoutEmptySeasons(await api.seriesDetails(series.id, episodeOrderID
         ? { mappingProvider: "tvdb", episodeOrderId: episodeOrderID }
-        : undefined);
+        : undefined));
       const seasons = [...resolved.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber);
       const initial = seasons.find((candidate) => candidate.seasonNumber > 0) ?? seasons[0];
       autoPlayNextRef.current = false;
@@ -1014,9 +1030,19 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     };
   }, [castDrawerOpen]);
   const backdrop = details.backgroundUrl || details.posterUrl;
-  const heroArtwork = details.posterUrl || selectedEpisode?.stillUrl || details.backgroundUrl;
+  const heroArtwork = item.mediaType === "episode"
+    ? selectedEpisode?.stillUrl || details.backgroundUrl || details.posterUrl
+    : details.posterUrl || details.backgroundUrl;
+  const trailerBackdropSources = [...new Set([
+    item.mediaType === "movie" ? details.backgroundUrl : series?.backdropUrl,
+    details.backgroundUrl,
+    details.posterUrl,
+  ].filter((source): source is string => Boolean(source)))];
+  const trailerBackdropStyle: CSSProperties | undefined = trailerBackdropSources.length > 0
+    ? { backgroundImage: trailerBackdropSources.map((source) => `url(${JSON.stringify(source)})`).join(", ") }
+    : undefined;
   const trailerURL = activeTrailer ? (() => {
-    const params = new URLSearchParams({ autoplay: "1" });
+    const params = new URLSearchParams({ autoplay: "1", vq: "highres" });
     if (activeTrailer.captionPreference) {
       params.set("cc_lang_pref", activeTrailer.captionPreference);
       params.set("cc_load_policy", "1");
@@ -1120,7 +1146,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
                   {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
                   {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
                 </Button>}
-                {trailersAvailableForContext && <Button type="button" variant="secondary" disabled={Boolean(activeTrailer)} loading={activeTrailerLoading} aria-label={t(activeTrailerLoading ? "media.trailers.loading" : "media.trailers.title")} aria-busy={activeTrailerLoading} aria-controls="details-trailer" aria-expanded={Boolean(activeTrailer)} onClick={() => void showTrailer()}>
+                {trailersAvailableForContext && <Button type="button" variant="secondary" disabled={Boolean(activeTrailer) || activeTrailerUnavailable} loading={activeTrailerLoading} aria-label={t(activeTrailerLoading ? "media.trailers.loading" : "media.trailers.title")} aria-busy={activeTrailerLoading} aria-controls={activeTrailer ? "details-trailer" : undefined} aria-expanded={Boolean(activeTrailer)} onClick={() => void showTrailer()}>
                   <Clapperboard size={19} />
                   {t("media.trailers.title")}
                 </Button>}
@@ -1299,6 +1325,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
         </div>
 
         {trailerStageVisible && <div ref={trailerStageRef} className="details-trailer-stage">
+          <div className="details-trailer-stage__backdrop" style={trailerBackdropStyle} aria-hidden="true" />
           {activeTrailer && <section id="details-trailer" className="details-trailer" aria-label={t("media.trailers.forTitle", { title: details.title })}>
             <header className="details-trailer__header">
               <span className="details-trailer__heading"><Clapperboard size={17} /><span><strong>{t("media.trailers.title")}</strong><small>{t(activeTrailers.length > 1 ? "media.trailers.chooseVersion" : "media.trailers.nowPlaying")}</small></span></span>
@@ -1324,7 +1351,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
               </div>
             </div>}
           </section>}
-          {activeTrailerMessage && <div className="details-trailer-feedback"><Notice tone={trailerUnavailable ? "info" : "error"}>{activeTrailerMessage}</Notice></div>}
+          {activeTrailerMessage && <div className="details-trailer-feedback"><Notice>{activeTrailerMessage}</Notice></div>}
         </div>}
       </section>
       {castDrawerOpen && createPortal(<div className="cast-drawer-backdrop" onPointerDown={(event) => {

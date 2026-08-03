@@ -15,9 +15,13 @@ import (
 )
 
 const (
-	defaultBaseURL = "https://api.themoviedb.org/3"
-	imageBaseURL   = "https://image.tmdb.org/t/p"
-	maxBodyBytes   = 2 * 1024 * 1024
+	defaultBaseURL    = "https://api.themoviedb.org/3"
+	imageBaseURL      = "https://image.tmdb.org/t/p"
+	posterImageSize   = "w780"
+	backdropImageSize = "original"
+	profileImageSize  = "w185"
+	stillImageSize    = "w780"
+	maxBodyBytes      = 2 * 1024 * 1024
 )
 
 type Client struct {
@@ -96,7 +100,7 @@ type seriesResponse struct {
 	VoteCount        int              `json:"vote_count"`
 	Seasons          []seasonResponse `json:"seasons"`
 	ExternalIDs      externalIDs      `json:"external_ids"`
-	AggregateCredits creditsResponse  `json:"aggregate_credits"`
+	Credits          creditsResponse  `json:"credits"`
 }
 
 type creditsResponse struct {
@@ -323,7 +327,7 @@ func (c *Client) SeriesDetails(ctx context.Context, externalID, language string)
 		return metadata.ProviderSeries{}, fmt.Errorf("%w: invalid TMDB series ID", metadata.ErrProviderFailure)
 	}
 	var response seriesResponse
-	query := url.Values{"append_to_response": {"external_ids,aggregate_credits"}, "language": {language}}
+	query := url.Values{"append_to_response": {"external_ids,credits"}, "language": {language}}
 	if err := c.get(ctx, "/tv/"+strconv.FormatInt(seriesID, 10), query, &response); err != nil {
 		return metadata.ProviderSeries{}, err
 	}
@@ -421,8 +425,8 @@ func normalizeMovie(movie movieResponse) metadata.ProviderMovie {
 		OriginalLanguage: movie.OriginalLanguage,
 		Overview:         movie.Overview,
 		ReleaseDate:      movie.ReleaseDate,
-		PosterURL:        imageURL("w500", movie.PosterPath),
-		BackdropURL:      imageURL("w1280", movie.BackdropPath),
+		PosterURL:        imageURL(posterImageSize, movie.PosterPath),
+		BackdropURL:      imageURL(backdropImageSize, movie.BackdropPath),
 		Tagline:          movie.Tagline,
 		RuntimeMinutes:   movie.Runtime,
 		Genres:           genres,
@@ -479,14 +483,14 @@ func normalizeSeries(series seriesResponse) metadata.ProviderSeries {
 		Overview:         series.Overview,
 		FirstAirDate:     series.FirstAirDate,
 		LastAirDate:      series.LastAirDate,
-		PosterURL:        imageURL("w500", series.PosterPath),
-		BackdropURL:      imageURL("w1280", series.BackdropPath),
+		PosterURL:        imageURL(posterImageSize, series.PosterPath),
+		BackdropURL:      imageURL(backdropImageSize, series.BackdropPath),
 		Tagline:          series.Tagline,
 		Status:           series.Status,
 		NumberOfSeasons:  series.NumberOfSeasons,
 		NumberOfEpisodes: series.NumberOfEpisodes,
 		Genres:           genres,
-		Cast:             normalizeCast(series.AggregateCredits.Cast),
+		Cast:             normalizeCast(series.Credits.Cast),
 		VoteAverage:      series.VoteAverage,
 		VoteCount:        series.VoteCount,
 		Seasons:          seasons,
@@ -518,7 +522,7 @@ func normalizeCast(cast []castMemberResponse) []metadata.CastMember {
 			ID:         strconv.FormatInt(person.ID, 10),
 			Name:       name,
 			Character:  character,
-			ProfileURL: imageURL("w185", person.ProfilePath),
+			ProfileURL: imageURL(profileImageSize, person.ProfilePath),
 		})
 		seen[person.ID] = struct{}{}
 		if len(members) == maximumCastMembers {
@@ -536,7 +540,7 @@ func normalizeSeasonSummary(season seasonResponse) metadata.ProviderSeasonSummar
 		SeasonNumber: season.SeasonNumber,
 		EpisodeCount: season.EpisodeCount,
 		AirDate:      season.AirDate,
-		PosterURL:    imageURL("w500", season.PosterPath),
+		PosterURL:    imageURL(posterImageSize, season.PosterPath),
 		VoteAverage:  season.VoteAverage,
 	}
 }
@@ -554,7 +558,7 @@ func normalizeSeason(season seasonResponse) metadata.ProviderSeason {
 			SeasonNumber:   episode.SeasonNumber,
 			EpisodeNumber:  episode.EpisodeNumber,
 			AirDate:        episode.AirDate,
-			StillURL:       imageURL("w780", episode.StillPath),
+			StillURL:       imageURL(stillImageSize, episode.StillPath),
 			RuntimeMinutes: episode.Runtime,
 			VoteAverage:    episode.VoteAverage,
 			VoteCount:      episode.VoteCount,
@@ -566,7 +570,7 @@ func normalizeSeason(season seasonResponse) metadata.ProviderSeason {
 		Overview:     season.Overview,
 		SeasonNumber: season.SeasonNumber,
 		AirDate:      season.AirDate,
-		PosterURL:    imageURL("w500", season.PosterPath),
+		PosterURL:    imageURL(posterImageSize, season.PosterPath),
 		VoteAverage:  season.VoteAverage,
 		Episodes:     episodes,
 	}

@@ -10,7 +10,6 @@ test("rapid profile switching never paints a late response from the prior profil
   await expect(page.getByRole("heading", { name: "Who's watching?" })).toBeVisible();
   await page.getByRole("button", { name: "Bob Profile" }).click();
 
-  await expect(page.getByText("Welcome back, Bob")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Bob's Fresh Picks" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Bob Queue" })).toBeVisible();
 
@@ -24,9 +23,10 @@ test("portrait uses bottom navigation while landscape tablet uses the sidebar", 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
   await rivune.waitForRequest("/api/v1/collections", "GET");
-  await page.getByRole("button", { name: "Open menu" }).click();
-  await expect(page.getByRole("group", { name: "Connected to Rivune E2E, server version v1.2.3" })).toBeVisible();
-  await page.locator(".sidebar__close").click();
+  await expect(page.locator(".topbar")).toHaveCount(0);
+  const viewStage = page.locator(".app-main > .view-stage");
+  await expect(viewStage).toHaveCount(1);
+  await expect.poll(async () => (await viewStage.boundingBox())?.y ?? -1).toBe(0);
 
   const mobileNavigation = page.locator(".mobile-nav");
   await expect(mobileNavigation).toBeVisible();
@@ -42,6 +42,7 @@ test("portrait uses bottom navigation while landscape tablet uses the sidebar", 
   const mainNavigation = page.locator("#main-sidebar nav");
   await expect(mainNavigation).toBeVisible();
   await expect(mobileNavigation).toBeHidden();
+  await expect.poll(async () => (await viewStage.boundingBox())?.y ?? -1).toBe(0);
   await expect(page.getByRole("button", { name: "Compact sidebar" })).toBeVisible();
   await page.getByRole("button", { name: "Compact sidebar" }).click();
   await expect(page.getByRole("button", { name: "Expand sidebar" })).toBeVisible();

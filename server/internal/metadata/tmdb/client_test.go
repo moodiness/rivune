@@ -39,17 +39,17 @@ func TestSearchMoviesSendsBearerTokenAndNormalizesResults(t *testing.T) {
 		t.Fatalf("unexpected page: %+v", page)
 	}
 	movie := page.Items[0]
-	if movie.ExternalID != "78" || movie.PosterURL != "https://image.tmdb.org/t/p/w500/poster.jpg" || movie.BackdropURL != "https://image.tmdb.org/t/p/w1280/backdrop.jpg" {
+	if movie.ExternalID != "78" || movie.PosterURL != imageBaseURL+"/w780/poster.jpg" || movie.BackdropURL != imageBaseURL+"/original/backdrop.jpg" {
 		t.Fatalf("unexpected normalized movie: %+v", movie)
 	}
 }
 
-func TestMovieDetailsIncludesGenresAndIMDBID(t *testing.T) {
+func TestMovieDetailsNormalizesArtworkCastAndIDs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/movie/550" || r.URL.Query().Get("language") != "en-US" || r.URL.Query().Get("append_to_response") != "credits" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":550,"title":"Fight Club","original_title":"Fight Club","original_language":"en","overview":"Overview","release_date":"1999-10-15","tagline":"Mischief. Mayhem. Soap.","runtime":139,"genres":[{"id":18,"name":"Drama"}],"vote_average":8.4,"vote_count":30000,"imdb_id":"tt0137523","credits":{"cast":[{"id":819,"name":"Edward Norton","character":"The Narrator","profile_path":"/norton.jpg"}]}}`))
+		_, _ = w.Write([]byte(`{"id":550,"title":"Fight Club","original_title":"Fight Club","original_language":"en","overview":"Overview","release_date":"1999-10-15","poster_path":"/fight-club-poster.jpg","backdrop_path":"/fight-club-backdrop.jpg","tagline":"Mischief. Mayhem. Soap.","runtime":139,"genres":[{"id":18,"name":"Drama"}],"vote_average":8.4,"vote_count":30000,"imdb_id":"tt0137523","credits":{"cast":[{"id":819,"name":"Edward Norton","character":"The Narrator","profile_path":"/norton.jpg"}]}}`))
 	}))
 	defer server.Close()
 
@@ -58,7 +58,7 @@ func TestMovieDetailsIncludesGenresAndIMDBID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("movie details: %v", err)
 	}
-	if movie.RuntimeMinutes != 139 || len(movie.Genres) != 1 || movie.Genres[0].Name != "Drama" || movie.AdditionalIDs["imdb"] != "tt0137523" || len(movie.Cast) != 1 || movie.Cast[0].Character != "The Narrator" || movie.Cast[0].ProfileURL != imageBaseURL+"/w185/norton.jpg" {
+	if movie.RuntimeMinutes != 139 || len(movie.Genres) != 1 || movie.Genres[0].Name != "Drama" || movie.AdditionalIDs["imdb"] != "tt0137523" || movie.PosterURL != imageBaseURL+"/w780/fight-club-poster.jpg" || movie.BackdropURL != imageBaseURL+"/original/fight-club-backdrop.jpg" || len(movie.Cast) != 1 || movie.Cast[0].Character != "The Narrator" || movie.Cast[0].ProfileURL != imageBaseURL+"/w185/norton.jpg" {
 		t.Fatalf("unexpected details: %+v", movie)
 	}
 }
@@ -105,7 +105,7 @@ func TestSearchSeriesNormalizesTelevisionResults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("search series: %v", err)
 	}
-	if len(page.Items) != 1 || page.Items[0].ExternalID != "1396" || page.Items[0].Name != "Breaking Bad" {
+	if len(page.Items) != 1 || page.Items[0].ExternalID != "1396" || page.Items[0].Name != "Breaking Bad" || page.Items[0].PosterURL != imageBaseURL+"/w780/poster.jpg" || page.Items[0].BackdropURL != imageBaseURL+"/original/backdrop.jpg" {
 		t.Fatalf("unexpected series page: %+v", page)
 	}
 }
@@ -129,12 +129,12 @@ func TestResolveExternalIDFindsSeriesByIMDBID(t *testing.T) {
 	}
 }
 
-func TestSeriesDetailsIncludesSeasonsAndExternalIDs(t *testing.T) {
+func TestSeriesDetailsNormalizesArtworkSeasonsCastAndIDs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tv/1396" || r.URL.Query().Get("append_to_response") != "external_ids,aggregate_credits" {
+		if r.URL.Path != "/tv/1396" || r.URL.Query().Get("append_to_response") != "external_ids,credits" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":1396,"name":"Breaking Bad","original_name":"Breaking Bad","original_language":"en","overview":"A chemistry teacher.","first_air_date":"2008-01-20","last_air_date":"2013-09-29","number_of_seasons":5,"number_of_episodes":62,"genres":[{"id":18,"name":"Drama"}],"seasons":[{"id":3572,"name":"Season 1","season_number":1,"episode_count":7,"air_date":"2008-01-20","vote_average":8.3}],"external_ids":{"imdb_id":"tt0903747","tvdb_id":81189,"wikidata_id":"Q1079"},"aggregate_credits":{"cast":[{"id":17419,"name":"Bryan Cranston","profile_path":"/cranston.jpg","roles":[{"character":"Walter White"}]}]}}`))
+		_, _ = w.Write([]byte(`{"id":1396,"name":"Breaking Bad","original_name":"Breaking Bad","original_language":"en","overview":"A chemistry teacher.","first_air_date":"2008-01-20","last_air_date":"2013-09-29","poster_path":"/breaking-bad-poster.jpg","backdrop_path":"/breaking-bad-backdrop.jpg","number_of_seasons":5,"number_of_episodes":62,"genres":[{"id":18,"name":"Drama"}],"seasons":[{"id":3572,"name":"Season 1","season_number":1,"episode_count":7,"air_date":"2008-01-20","poster_path":"/season-one-poster.jpg","vote_average":8.3}],"external_ids":{"imdb_id":"tt0903747","tvdb_id":81189,"wikidata_id":"Q1079"},"credits":{"cast":[{"id":17419,"name":"Bryan Cranston","profile_path":"/cranston.jpg","character":"Walter White"}]}}`))
 	}))
 	defer server.Close()
 
@@ -143,17 +143,17 @@ func TestSeriesDetailsIncludesSeasonsAndExternalIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("series details: %v", err)
 	}
-	if series.NumberOfEpisodes != 62 || len(series.Seasons) != 1 || series.Seasons[0].ExternalID != "3572" || series.AdditionalIDs["tvdb"] != "81189" || len(series.Cast) != 1 || series.Cast[0].Character != "Walter White" {
+	if series.NumberOfEpisodes != 62 || series.PosterURL != imageBaseURL+"/w780/breaking-bad-poster.jpg" || series.BackdropURL != imageBaseURL+"/original/breaking-bad-backdrop.jpg" || len(series.Seasons) != 1 || series.Seasons[0].ExternalID != "3572" || series.Seasons[0].PosterURL != imageBaseURL+"/w780/season-one-poster.jpg" || series.AdditionalIDs["tvdb"] != "81189" || len(series.Cast) != 1 || series.Cast[0].Character != "Walter White" || series.Cast[0].ProfileURL != imageBaseURL+"/w185/cranston.jpg" {
 		t.Fatalf("unexpected series: %+v", series)
 	}
 }
 
-func TestSeasonDetailsNormalizesEpisodes(t *testing.T) {
+func TestSeasonDetailsNormalizesPosterAndEpisodeStills(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/tv/1396/season/1" || r.URL.Query().Get("language") != "en-US" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":3572,"name":"Season 1","season_number":1,"air_date":"2008-01-20","episodes":[{"id":62085,"name":"Pilot","overview":"Walter receives a diagnosis.","season_number":1,"episode_number":1,"air_date":"2008-01-20","still_path":"/still.jpg","runtime":59,"vote_average":8.2,"vote_count":4000}]}`))
+		_, _ = w.Write([]byte(`{"id":3572,"name":"Season 1","season_number":1,"air_date":"2008-01-20","poster_path":"/season-one-poster.jpg","episodes":[{"id":62085,"name":"Pilot","overview":"Walter receives a diagnosis.","season_number":1,"episode_number":1,"air_date":"2008-01-20","still_path":"/still.jpg","runtime":59,"vote_average":8.2,"vote_count":4000}]}`))
 	}))
 	defer server.Close()
 
@@ -162,8 +162,27 @@ func TestSeasonDetailsNormalizesEpisodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("season details: %v", err)
 	}
-	if season.ExternalID != "3572" || len(season.Episodes) != 1 || season.Episodes[0].ExternalID != "62085" || season.Episodes[0].StillURL != "https://image.tmdb.org/t/p/w780/still.jpg" {
+	if season.ExternalID != "3572" || season.PosterURL != imageBaseURL+"/w780/season-one-poster.jpg" || len(season.Episodes) != 1 || season.Episodes[0].ExternalID != "62085" || season.Episodes[0].StillURL != imageBaseURL+"/w780/still.jpg" {
 		t.Fatalf("unexpected season: %+v", season)
+	}
+}
+
+func TestSeasonDetailsPreservesSpecialSeasonZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tv/1396/season/0" || r.URL.Query().Get("language") != "en-US" {
+			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"id":3571,"name":"Specials","season_number":0,"episodes":[{"id":62084,"name":"Behind the Scenes","season_number":0,"episode_number":1}]}`))
+	}))
+	defer server.Close()
+
+	client := newWithBaseURL("token", server.URL, server.Client())
+	season, err := client.SeasonDetails(context.Background(), "1396", 0, "en-US")
+	if err != nil {
+		t.Fatalf("season zero details: %v", err)
+	}
+	if season.SeasonNumber != 0 || len(season.Episodes) != 1 || season.Episodes[0].SeasonNumber != 0 {
+		t.Fatalf("season zero hierarchy was not preserved: %+v", season)
 	}
 }
 
