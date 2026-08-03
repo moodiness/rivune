@@ -496,7 +496,7 @@ export type PlaybackActivity = {
 };
 export type PlaybackPurgeResult = { sessionsRemoved: number; jobsStopped: number; storageBytes: number };
 export type OperationAction = "fetch-missing-metadata" | "run-housekeeping" | "clear-metadata-cache" | "clear-stream-cache";
-export type MetadataRefreshResult = { candidates: number; refreshed: number; failed: number };
+export type MetadataRefreshResult = { candidates: number; refreshed: number; failed: number; failedTitles?: string[] };
 export type MetadataRefreshScheduleInput = {
   enabled: boolean;
   intervalHours: 6 | 12 | 24 | 168;

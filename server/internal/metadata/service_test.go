@@ -125,12 +125,12 @@ func TestRefreshMissingSkipsTitlesWithoutResolvableTMDBIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refresh missing metadata: %v", err)
 	}
-	if result != (RefreshResult{}) {
+	if result.Candidates != 0 || result.Refreshed != 0 || result.Failed != 0 || len(result.FailedTitles) != 0 {
 		t.Fatalf("addon-only title became an unrefreshable candidate: %+v", result)
 	}
 }
 
-func TestSeasonHierarchyValidationRejectsDemainNousAppartientSeasonMismatch(t *testing.T) {
+func TestSeasonHierarchyValidationRejectsMismatchedSeason(t *testing.T) {
 	mismatched := ProviderSeason{
 		ExternalID:   "475463",
 		Name:         "Saison 9",

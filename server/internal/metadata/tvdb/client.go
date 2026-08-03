@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -579,26 +580,45 @@ func (c *Client) token(ctx context.Context, force bool) (string, error) {
 }
 
 func (c *Client) do(request *http.Request, destination any) (int, error) {
+	resource := request.URL.RequestURI()
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return 0, fmt.Errorf("%w: %v", metadata.ErrProviderFailure, err)
+		return 0, metadata.NewProviderError(metadata.ErrProviderFailure, err, 0, resource)
 	}
 	defer response.Body.Close()
 	switch response.StatusCode {
 	case http.StatusOK:
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return response.StatusCode, metadata.ErrProviderUnauthorized
+		return response.StatusCode, metadata.NewProviderError(metadata.ErrProviderUnauthorized, fmt.Errorf("TVDB returned HTTP %d", response.StatusCode), response.StatusCode, resource)
 	case http.StatusNotFound:
-		return response.StatusCode, metadata.ErrProviderNotFound
+		return response.StatusCode, metadata.NewProviderError(metadata.ErrProviderNotFound, fmt.Errorf("TVDB returned HTTP %d", response.StatusCode), response.StatusCode, resource)
 	case http.StatusTooManyRequests:
-		return response.StatusCode, metadata.ErrProviderRateLimited
+		return response.StatusCode, metadata.NewProviderError(metadata.ErrProviderRateLimited, fmt.Errorf("TVDB returned HTTP %d", response.StatusCode), response.StatusCode, resource)
 	default:
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return response.StatusCode, fmt.Errorf("%w: TVDB returned HTTP %d", metadata.ErrProviderFailure, response.StatusCode)
+		return response.StatusCode, metadata.NewProviderError(
+			metadata.ErrProviderFailure,
+			fmt.Errorf("TVDB returned HTTP %d", response.StatusCode),
+			response.StatusCode,
+			resource,
+		)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, maxBodyBytes))
 	if err := decoder.Decode(destination); err != nil {
-		return response.StatusCode, fmt.Errorf("%w: decode TVDB response: %v", metadata.ErrProviderFailure, err)
+		return response.StatusCode, metadata.NewProviderError(
+			metadata.ErrProviderFailure,
+			fmt.Errorf("decode TVDB response: %w", err),
+			response.StatusCode,
+			resource,
+		)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return response.StatusCode, metadata.NewProviderError(
+			metadata.ErrProviderFailure,
+			errors.New("decode TVDB response: trailing content"),
+			response.StatusCode,
+			resource,
+		)
 	}
 	return response.StatusCode, nil
 }

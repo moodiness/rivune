@@ -4130,6 +4130,14 @@ components:
           description: Selected titles that retained stale data because refresh failed.
           type: integer
           minimum: 0
+        failedTitles:
+          description: Bounded, de-duplicated human-readable titles that could not be refreshed. Technical provider details are never included.
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            minLength: 1
+            maxLength: 120
     MetadataRefreshScheduleInput:
       type: object
       additionalProperties: false

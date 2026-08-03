@@ -3,6 +3,8 @@ package metadata
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"time"
 )
 
@@ -16,6 +18,57 @@ var (
 	ErrProviderRateLimited  = errors.New("metadata provider rate limited")
 	ErrProviderFailure      = errors.New("metadata provider request failed")
 )
+
+type ProviderError struct {
+	Kind        error
+	Cause       error
+	StatusCode  int
+	Resource    string
+	IsTemporary bool
+}
+
+func (err *ProviderError) Error() string {
+	if err.Cause == nil {
+		return err.Kind.Error()
+	}
+	return fmt.Sprintf("%s: %v", err.Kind, err.Cause)
+}
+
+func (err *ProviderError) Unwrap() []error {
+	if err.Cause == nil {
+		return []error{err.Kind}
+	}
+	return []error{err.Kind, err.Cause}
+}
+
+func NewProviderError(kind, cause error, statusCode int, resource string) error {
+	return &ProviderError{
+		Kind:        kind,
+		Cause:       cause,
+		StatusCode:  statusCode,
+		Resource:    resource,
+		IsTemporary: temporaryProviderFailure(cause, statusCode),
+	}
+}
+
+func ProviderErrorDetails(err error) (statusCode int, temporary bool, resource string) {
+	var providerErr *ProviderError
+	if errors.As(err, &providerErr) {
+		return providerErr.StatusCode, providerErr.IsTemporary, providerErr.Resource
+	}
+	return 0, temporaryProviderFailure(err, 0), ""
+}
+
+func temporaryProviderFailure(err error, statusCode int) bool {
+	if statusCode == 429 || (statusCode >= 500 && statusCode <= 599) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError)
+}
 
 const (
 	MediaTypeMovie   = "movie"
@@ -42,9 +95,10 @@ type RefreshMissingOptions struct {
 }
 
 type RefreshResult struct {
-	Candidates int `json:"candidates"`
-	Refreshed  int `json:"refreshed"`
-	Failed     int `json:"failed"`
+	Candidates   int      `json:"candidates"`
+	Refreshed    int      `json:"refreshed"`
+	Failed       int      `json:"failed"`
+	FailedTitles []string `json:"failedTitles,omitempty"`
 }
 
 type SearchOptions struct {

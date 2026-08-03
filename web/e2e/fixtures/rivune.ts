@@ -25,6 +25,13 @@ type Profile = {
   avatar: { kind: "preset"; presetId: string; url: string };
 };
 
+type MetadataOperationResponse = {
+  status: "succeeded" | "partial" | "failed";
+  metadata: { candidates: number; refreshed: number; failed: number; failedTitles?: string[] };
+  delayMilliseconds?: number;
+  technicalPayload?: Record<string, unknown>;
+};
+
 const expiresAt = "2099-01-01T00:00:00Z";
 const createdAt = "2024-01-01T00:00:00Z";
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="100%" height="100%" fill="#241f35"/></svg>`;
@@ -247,6 +254,7 @@ export class RivuneHarness {
     },
     housekeepingIntervalMinutes: 15,
   };
+  private readonly metadataOperationResponses: MetadataOperationResponse[] = [];
   private playbackActivity = {
     summary: {
       activeSessions: 2,
@@ -330,6 +338,10 @@ export class RivuneHarness {
   }
   setSearchResponse(type: string, skip: number, body: unknown, options: { status?: number; delay?: number } = {}) {
     this.searchResponses.set(`${type}:${skip}`, { body, status: options.status ?? 200, delay: options.delay ?? 0 });
+  }
+
+  queueMetadataOperationResponses(...responses: MetadataOperationResponse[]) {
+    this.metadataOperationResponses.push(...responses);
   }
 
   matching(pathname: string, method?: string) {
@@ -516,9 +528,19 @@ export class RivuneHarness {
     const operationAction = path.match(/^\/operations\/actions\/(fetch-missing-metadata|run-housekeeping|clear-metadata-cache|clear-stream-cache)$/);
     if (operationAction && request.method() === "POST") {
       const action = operationAction[1];
+      let status: "succeeded" | "partial" | "failed" = "succeeded";
       let result: Record<string, unknown> = {};
       if (action === "fetch-missing-metadata") {
-        result = { metadata: { candidates: 12, refreshed: 9, failed: 3 } };
+        const response = this.metadataOperationResponses.shift() ?? {
+          status: "succeeded" as const,
+          metadata: { candidates: 12, refreshed: 12, failed: 0 },
+        };
+        status = response.status;
+        if (response.delayMilliseconds) await wait(response.delayMilliseconds);
+        result = {
+          metadata: response.metadata,
+          ...(response.technicalPayload ? { technicalPayload: response.technicalPayload } : {}),
+        };
       } else if (action === "clear-metadata-cache") {
         result = { metadataCache: { entriesDeleted: this.operations.metadataCache.entries } };
         this.operations.metadataCache = { ...this.operations.metadataCache, entries: 0, freshEntries: 0, expiredEntries: 0 };
@@ -533,7 +555,7 @@ export class RivuneHarness {
           storageBytes: 0,
         };
       }
-      await json(route, { action, startedAt: createdAt, completedAt: createdAt, status: "succeeded", result });
+      await json(route, { action, startedAt: createdAt, completedAt: createdAt, status, result });
       return;
     }
     if (path === "/playback/activity" && request.method() === "GET") {

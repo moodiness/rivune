@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -107,8 +108,8 @@ func TestManualMetadataRefreshPersistsStatusAndResult(t *testing.T) {
 		status     string
 	}{
 		{name: "succeeded", result: metadata.RefreshResult{Candidates: 3, Refreshed: 3}, status: "succeeded"},
-		{name: "partial", result: metadata.RefreshResult{Candidates: 3, Refreshed: 2, Failed: 1}, status: "partial"},
-		{name: "all candidates failed", result: metadata.RefreshResult{Candidates: 3, Failed: 3}, status: "failed"},
+		{name: "partial", result: metadata.RefreshResult{Candidates: 3, Refreshed: 2, Failed: 1, FailedTitles: []string{"Unavailable Movie"}}, status: "partial"},
+		{name: "all candidates failed", result: metadata.RefreshResult{Candidates: 3, Failed: 3, FailedTitles: []string{"Unavailable Movie", "Unavailable Series"}}, status: "failed"},
 		{name: "provider error", result: metadata.RefreshResult{Candidates: 3, Refreshed: 1}, refreshErr: providerFailure, status: "failed"},
 	}
 
@@ -122,7 +123,7 @@ func TestManualMetadataRefreshPersistsStatusAndResult(t *testing.T) {
 			if err != nil {
 				t.Fatalf("run manual metadata refresh: %v", err)
 			}
-			if run.Status != test.status || run.Result.Metadata == nil || *run.Result.Metadata != test.result {
+			if run.Status != test.status || run.Result.Metadata == nil || !reflect.DeepEqual(*run.Result.Metadata, test.result) {
 				t.Fatalf("unexpected manual refresh run: %+v", run)
 			}
 			if run.StartedAt != fixedNow || run.CompletedAt != fixedNow {
@@ -140,7 +141,7 @@ func TestManualMetadataRefreshPersistsStatusAndResult(t *testing.T) {
 			if schedule.LastStartedAt == nil || !schedule.LastStartedAt.Equal(fixedNow) || schedule.LastCompletedAt == nil || !schedule.LastCompletedAt.Equal(fixedNow) {
 				t.Fatalf("manual refresh timestamps were not persisted: %+v", schedule)
 			}
-			if schedule.LastStatus == nil || *schedule.LastStatus != test.status || schedule.LastResult == nil || *schedule.LastResult != test.result {
+			if schedule.LastStatus == nil || *schedule.LastStatus != test.status || schedule.LastResult == nil || !reflect.DeepEqual(*schedule.LastResult, test.result) {
 				t.Fatalf("manual refresh outcome was not persisted: %+v", schedule)
 			}
 		})
@@ -239,6 +240,41 @@ func TestClearMetadataCachePreservesTitlesIdentitiesAndArtworkSnapshots(t *testi
 	}
 	if displayTitle != "Snapshot Movie" || posterURL != "https://images.test/poster.jpg" || backgroundURL != "https://images.test/background.jpg" {
 		t.Fatalf("title snapshot changed: title=%q poster=%q background=%q", displayTitle, posterURL, backgroundURL)
+	}
+}
+
+func TestMetadataCacheStatusCountsOnlyProviderCompatibleRoots(t *testing.T) {
+	pool := newOperationsPostgresPool(t, metadataCacheTestDDL)
+	ctx := context.Background()
+	const (
+		tmdbID = "00000000-0000-4000-8000-000000000911"
+		imdbID = "00000000-0000-4000-8000-000000000912"
+		tvdbID = "00000000-0000-4000-8000-000000000913"
+	)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title) VALUES
+			($1::uuid, 'movie', 'TMDB Movie'),
+			($2::uuid, 'series', 'IMDb Series'),
+			($3::uuid, 'series', 'TVDB-only Series')
+	`, tmdbID, imdbID, tvdbID); err != nil {
+		t.Fatalf("seed metadata cache titles: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
+			($1::uuid, 'tmdb', 'movie', '911'),
+			($2::uuid, 'imdb', 'series', 'tt0000912'),
+			($3::uuid, 'tvdb', 'series', '913')
+	`, tmdbID, imdbID, tvdbID); err != nil {
+		t.Fatalf("seed metadata cache identities: %v", err)
+	}
+
+	service := newTestService(pool, &fakeMetadataRefresher{}, &fakeMaintenanceCleaner{}, &fakePlaybackMaintenance{})
+	status, err := service.metadataCacheStatus(ctx, "en-US")
+	if err != nil {
+		t.Fatalf("load metadata cache status: %v", err)
+	}
+	if status.RootTitles != 2 || status.MissingTitles != 2 {
+		t.Fatalf("provider-incompatible title affected cache status: %+v", status)
 	}
 }
 

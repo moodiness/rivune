@@ -33,7 +33,8 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   await page.getByRole("button", { name: "Run Fetch missing metadata" }).click();
   const fetchRequest = await rivune.waitForRequest("/api/v1/operations/actions/fetch-missing-metadata", "POST");
   expect(fetchRequest.body).toBeUndefined();
-  await expect(page.getByText("9 of 12 candidates refreshed; 3 failed.")).toBeVisible();
+  const metadataCard = page.locator(".operation-action-card").filter({ has: page.getByRole("heading", { name: "Fetch missing metadata" }) });
+  await expect(metadataCard.getByText("12 of 12 candidates refreshed; 0 failed.")).toBeVisible();
 
   const clearMetadataPath = "/api/v1/operations/actions/clear-metadata-cache";
   await page.getByRole("button", { name: "Run Clear metadata cache" }).click();
@@ -57,4 +58,64 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   await expect(page.getByRole("heading", { name: "Maintenance mode" })).toHaveCount(0);
   await expect(page.getByLabel("Block member access")).toHaveCount(0);
   await expect(page.getByLabel("Public message")).toHaveCount(0);
+});
+
+test("metadata refresh keeps successful work and warns with safe failed titles", async ({ page, rivune }) => {
+  rivune.queueMetadataOperationResponses({
+    status: "partial",
+    metadata: { candidates: 100, refreshed: 99, failed: 1, failedTitles: ["L'expresso (bein sport)"] },
+  });
+
+  await page.goto("/#admin");
+  await page.getByRole("button", { name: /Operations/ }).click();
+  await page.getByRole("button", { name: "Run Fetch missing metadata" }).click();
+
+  const metadataCard = page.locator(".operation-action-card").filter({ has: page.getByRole("heading", { name: "Fetch missing metadata" }) });
+  const outcome = metadataCard.locator(".notice--warning");
+  await expect(outcome).toContainText("99 of 100 candidates refreshed; 1 failed.");
+  await expect(outcome).toContainText("Not refreshed: L'expresso (bein sport).");
+  await expect(outcome).toContainText("Existing metadata was kept");
+  await expect(page.locator(".app-notification--warning")).toContainText("Operation partially completed");
+  await expect(page.getByRole("heading", { name: "Metadata health" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Run Fetch missing metadata" })).toBeEnabled();
+});
+
+test("total metadata failure offers one retry and recovers without exposing diagnostics", async ({ page, rivune }) => {
+  const technicalText = {
+    providerUrl: "https://api.themoviedb.org/3/tv/86311",
+    providerId: "tmdb:86311",
+    responseBody: "{\"status_message\":\"Invalid provider identifier\"}",
+    stackTrace: "metadata/provider.go:42",
+  };
+  rivune.queueMetadataOperationResponses(
+    {
+      status: "failed",
+      metadata: { candidates: 100, refreshed: 0, failed: 100, failedTitles: ["L'expresso (bein sport)"] },
+      technicalPayload: technicalText,
+    },
+    {
+      status: "succeeded",
+      metadata: { candidates: 100, refreshed: 100, failed: 0 },
+      delayMilliseconds: 500,
+    },
+  );
+
+  await page.goto("/#admin");
+  await page.getByRole("button", { name: /Operations/ }).click();
+  await page.getByRole("button", { name: "Run Fetch missing metadata" }).click();
+
+  const metadataCard = page.locator(".operation-action-card").filter({ has: page.getByRole("heading", { name: "Fetch missing metadata" }) });
+  const failedOutcome = metadataCard.locator(".notice--error");
+  await expect(failedOutcome).toContainText("0 of 100 candidates refreshed; 100 failed.");
+  await expect(failedOutcome).toContainText("No metadata was refreshed. Existing metadata was kept.");
+  await expect(failedOutcome).toContainText("Not refreshed: L'expresso (bein sport).");
+  for (const value of Object.values(technicalText)) await expect(page.getByText(value, { exact: false })).toHaveCount(0);
+
+  const retry = page.getByRole("button", { name: "Retry metadata refresh" });
+  await retry.click();
+  await expect(retry).toBeDisabled();
+  await expect.poll(() => rivune.matching("/api/v1/operations/actions/fetch-missing-metadata", "POST").length).toBe(2);
+  await expect(metadataCard.locator(".notice--success")).toContainText("100 of 100 candidates refreshed; 0 failed.");
+  await expect(page.getByRole("button", { name: "Retry metadata refresh" })).toHaveCount(0);
+  for (const value of Object.values(technicalText)) await expect(page.getByText(value, { exact: false })).toHaveCount(0);
 });

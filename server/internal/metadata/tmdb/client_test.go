@@ -87,13 +87,14 @@ func TestMovieDetailsNormalizesArtworkCastAndIDs(t *testing.T) {
 
 func TestProviderStatusErrorsAreTyped(t *testing.T) {
 	tests := []struct {
-		status int
-		want   error
+		status        int
+		want          error
+		wantTemporary bool
 	}{
 		{status: http.StatusUnauthorized, want: metadata.ErrProviderUnauthorized},
 		{status: http.StatusNotFound, want: metadata.ErrProviderNotFound},
-		{status: http.StatusTooManyRequests, want: metadata.ErrProviderRateLimited},
-		{status: http.StatusInternalServerError, want: metadata.ErrProviderFailure},
+		{status: http.StatusTooManyRequests, want: metadata.ErrProviderRateLimited, wantTemporary: true},
+		{status: http.StatusInternalServerError, want: metadata.ErrProviderFailure, wantTemporary: true},
 	}
 	for _, test := range tests {
 		t.Run(http.StatusText(test.status), func(t *testing.T) {
@@ -105,6 +106,10 @@ func TestProviderStatusErrorsAreTyped(t *testing.T) {
 			_, err := client.DiscoverMovies(context.Background(), metadata.QueryOptions{Page: 1, Language: "en-US"})
 			if !errors.Is(err, test.want) {
 				t.Fatalf("expected %v, got %v", test.want, err)
+			}
+			status, temporary, resource := metadata.ProviderErrorDetails(err)
+			if status != test.status || temporary != test.wantTemporary || resource != "/discover/movie?include_adult=false&include_video=false&language=en-US&page=1&sort_by=popularity.desc" {
+				t.Fatalf("unexpected provider error details: status=%d temporary=%t resource=%q", status, temporary, resource)
 			}
 		})
 	}
@@ -148,6 +153,23 @@ func TestResolveExternalIDFindsSeriesByIMDBID(t *testing.T) {
 	}
 	if resolved != "1396" {
 		t.Fatalf("unexpected resolved ID %q", resolved)
+	}
+}
+
+func TestResolveExternalIDClassifiesEmptySuccessfulLookupAsPermanentNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"movie_results":[],"tv_results":[]}`))
+	}))
+	defer server.Close()
+
+	client := newWithBaseURL("token", server.URL, server.Client())
+	_, err := client.ResolveExternalID(context.Background(), metadata.MediaTypeSeries, "imdb", "tt0000000")
+	if !errors.Is(err, metadata.ErrProviderNotFound) {
+		t.Fatalf("expected provider not found, got %v", err)
+	}
+	status, temporary, resource := metadata.ProviderErrorDetails(err)
+	if status != http.StatusOK || temporary || resource != "/find/tt0000000?external_source=imdb_id" {
+		t.Fatalf("unexpected empty lookup classification: status=%d temporary=%t resource=%q", status, temporary, resource)
 	}
 }
 

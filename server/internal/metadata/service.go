@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -131,7 +132,7 @@ func (s *Service) movieDetails(ctx context.Context, titleID, language string) (M
 	provided, err := s.provider.MovieDetails(ctx, externalID, normalizedLanguage)
 	if err != nil {
 		if errors.Is(err, ErrProviderNotFound) {
-			return Movie{}, ErrNotFound
+			return Movie{}, fmt.Errorf("%w: %w", ErrNotFound, err)
 		}
 		return Movie{}, err
 	}
@@ -144,6 +145,9 @@ func (s *Service) movieDetails(ctx context.Context, titleID, language string) (M
 		} else {
 			provided = enriched
 		}
+	}
+	if strings.TrimSpace(provided.ExternalID) == "" || strings.TrimSpace(provided.Title) == "" {
+		return Movie{}, fmt.Errorf("%w: metadata provider returned an invalid movie payload", ErrProviderFailure)
 	}
 	if returnedExternalID := strings.TrimSpace(provided.ExternalID); returnedExternalID != "" && returnedExternalID != externalID {
 		return Movie{}, errors.New("metadata provider returned a conflicting external ID")
@@ -279,7 +283,7 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 	provided, err := s.provider.SeriesDetails(ctx, externalID, normalizedLanguage)
 	if err != nil {
 		if errors.Is(err, ErrProviderNotFound) {
-			return Series{}, ErrNotFound
+			return Series{}, fmt.Errorf("%w: %w", ErrNotFound, err)
 		}
 		return Series{}, err
 	}
@@ -301,6 +305,9 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 		} else {
 			provided = enriched
 		}
+	}
+	if strings.TrimSpace(provided.ExternalID) == "" || strings.TrimSpace(provided.Name) == "" {
+		return Series{}, fmt.Errorf("%w: metadata provider returned an invalid series payload", ErrProviderFailure)
 	}
 	if returnedExternalID := strings.TrimSpace(provided.ExternalID); returnedExternalID != "" && returnedExternalID != externalID {
 		return Series{}, errors.New("metadata provider returned a conflicting external ID")
@@ -355,9 +362,9 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 	return series, nil
 }
 
-// RefreshMissing refreshes a bounded set of root titles whose localized
-// metadata is absent or expired. Each title is persisted through the same
-// canonical detail pipeline used by interactive requests.
+// RefreshMissing refreshes a bounded set of titles whose canonical localized
+// metadata is absent or expired. Child titles use their canonical season
+// detail pipeline so episode and hierarchy snapshots remain consistent.
 func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOptions) (RefreshResult, error) {
 	language, err := normalizeLanguage(options.Language)
 	if err != nil {
@@ -367,20 +374,68 @@ func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOpti
 		return RefreshResult{}, fmt.Errorf("%w: batch size must be between 1 and 100", ErrInvalidInput)
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT title.id::text, title.media_type
+		SELECT title.id::text,
+		       btrim(title.display_title),
+		       title.media_type,
+		       identity.provider,
+		       identity.external_id,
+		       refresh_title.id::text,
+		       COALESCE(series_identity.external_id, ''),
+		       COALESCE(refresh_title.ordinal, -1)
 		FROM titles AS title
+		JOIN LATERAL (
+		    SELECT external.provider, external.external_id
+		    FROM title_external_ids AS external
+		    WHERE external.title_id = title.id
+		      AND external.namespace = title.media_type
+		      AND (
+		          (
+		              external.provider = $1
+		              AND external.external_id ~ '^[1-9][0-9]*$'
+		              AND char_length(external.external_id) <= 18
+		          )
+		          OR (
+		              title.media_type IN ('movie', 'series')
+		              AND external.provider = 'imdb'
+		              AND external.external_id ~ '^tt[0-9]+$'
+		              AND char_length(external.external_id) <= 18
+		          )
+		      )
+		    ORDER BY CASE external.provider WHEN $1 THEN 0 ELSE 1 END
+		    LIMIT 1
+		) AS identity ON true
+		JOIN titles AS refresh_title
+		  ON refresh_title.id = CASE
+		      WHEN title.media_type = 'episode' THEN title.parent_id
+		      ELSE title.id
+		  END
+		LEFT JOIN titles AS series
+		  ON series.id = refresh_title.parent_id
+		 AND series.media_type = 'series'
+		LEFT JOIN title_external_ids AS series_identity
+		  ON series_identity.title_id = series.id
+		 AND series_identity.provider = $1
+		 AND series_identity.namespace = 'series'
+		 AND series_identity.external_id ~ '^[1-9][0-9]*$'
+		 AND char_length(series_identity.external_id) <= 18
+		LEFT JOIN title_external_ids AS refresh_identity
+		  ON refresh_identity.title_id = refresh_title.id
+		 AND refresh_identity.provider = $1
+		 AND refresh_identity.namespace = refresh_title.media_type
+		 AND refresh_identity.external_id ~ '^[1-9][0-9]*$'
+		 AND char_length(refresh_identity.external_id) <= 18
 		LEFT JOIN title_metadata AS cached
-		  ON cached.title_id = title.id
+		  ON cached.title_id = refresh_title.id
 		 AND cached.provider = $1
 		 AND cached.language = $2
-		WHERE title.parent_id IS NULL
-		  AND title.media_type IN ('movie', 'series')
-		  AND EXISTS (
-		      SELECT 1
-		      FROM title_external_ids AS identity
-		      WHERE identity.title_id = title.id
-		        AND identity.namespace = title.media_type
-		        AND identity.provider IN ($1, 'imdb', 'tvdb')
+		WHERE title.media_type IN ('movie', 'series', 'season', 'episode')
+		  AND (
+		      title.media_type IN ('movie', 'series')
+		      OR (
+		          refresh_title.media_type = 'season'
+		          AND refresh_identity.external_id IS NOT NULL
+		          AND series_identity.external_id IS NOT NULL
+		      )
 		  )
 		  AND (cached.title_id IS NULL OR cached.expires_at <= now())
 		ORDER BY cached.expires_at NULLS FIRST, title.id
@@ -389,17 +444,23 @@ func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOpti
 	if err != nil {
 		return RefreshResult{}, fmt.Errorf("query metadata refresh candidates: %w", err)
 	}
-	type candidate struct {
-		titleID   string
-		mediaType string
-	}
-	candidates := make([]candidate, 0, options.BatchSize)
+	candidates := make([]metadataRefreshCandidate, 0, options.BatchSize)
 	for rows.Next() {
-		var value candidate
-		if err := rows.Scan(&value.titleID, &value.mediaType); err != nil {
+		var value metadataRefreshCandidate
+		if err := rows.Scan(
+			&value.titleID,
+			&value.title,
+			&value.mediaType,
+			&value.identityProvider,
+			&value.externalID,
+			&value.refreshTitleID,
+			&value.seriesExternalID,
+			&value.seasonNumber,
+		); err != nil {
 			rows.Close()
 			return RefreshResult{}, fmt.Errorf("scan metadata refresh candidate: %w", err)
 		}
+		value.requestedResource = value.resource(language)
 		candidates = append(candidates, value)
 	}
 	if err := rows.Err(); err != nil {
@@ -409,30 +470,163 @@ func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOpti
 	rows.Close()
 
 	result := RefreshResult{Candidates: len(candidates)}
-	for _, candidate := range candidates {
+	failedTitleSet := make(map[string]struct{})
+	refreshOutcomes := make(map[string]metadataRefreshOutcome)
+	for index, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
-			result.Failed += len(candidates) - result.Refreshed - result.Failed
+			result.Failed += len(candidates) - index
+			for _, remaining := range candidates[index:] {
+				appendFailedTitle(&result, failedTitleSet, remaining.title)
+			}
 			return result, err
 		}
+		refreshKey := candidate.titleID
+		if candidate.mediaType == MediaTypeSeason || candidate.mediaType == MediaTypeEpisode {
+			refreshKey = candidate.refreshTitleID
+		}
+		outcome, exists := refreshOutcomes[refreshKey]
+		if !exists {
+			outcome.err, outcome.attempts = s.refreshMissingCandidate(ctx, candidate, language)
+			refreshOutcomes[refreshKey] = outcome
+		}
+		refreshErr, attempts := outcome.err, outcome.attempts
+		if refreshErr == nil {
+			result.Refreshed++
+			continue
+		}
+		if ctx.Err() != nil {
+			result.Failed += len(candidates) - index
+			for _, remaining := range candidates[index:] {
+				appendFailedTitle(&result, failedTitleSet, remaining.title)
+			}
+			return result, ctx.Err()
+		}
+		result.Failed++
+		appendFailedTitle(&result, failedTitleSet, candidate.title)
+		s.logMetadataRefreshFailure(candidate, refreshErr, attempts)
+	}
+	return result, nil
+}
+
+type metadataRefreshCandidate struct {
+	titleID           string
+	title             string
+	mediaType         string
+	identityProvider  string
+	externalID        string
+	refreshTitleID    string
+	seriesExternalID  string
+	seasonNumber      int
+	requestedResource string
+}
+
+type metadataRefreshOutcome struct {
+	err      error
+	attempts int
+}
+
+func (candidate metadataRefreshCandidate) resource(language string) string {
+	var endpoint string
+	query := url.Values{"language": {language}}
+	if candidate.identityProvider == "imdb" {
+		endpoint = "/find/" + candidate.externalID
+		query = url.Values{"external_source": {"imdb_id"}}
+	} else {
+		switch candidate.mediaType {
+		case MediaTypeMovie:
+			endpoint = "/movie/" + candidate.externalID
+			query.Set("append_to_response", "credits")
+		case MediaTypeSeries:
+			endpoint = "/tv/" + candidate.externalID
+			query.Set("append_to_response", "external_ids,credits")
+		case MediaTypeSeason, MediaTypeEpisode:
+			endpoint = "/tv/" + candidate.seriesExternalID + "/season/" + strconv.Itoa(candidate.seasonNumber)
+		default:
+			return candidate.mediaType
+		}
+	}
+	if encoded := query.Encode(); encoded != "" {
+		return endpoint + "?" + encoded
+	}
+	return endpoint
+}
+
+func (s *Service) refreshMissingCandidate(ctx context.Context, candidate metadataRefreshCandidate, language string) (error, int) {
+	for attempt := 1; attempt <= 2; attempt++ {
 		var refreshErr error
 		switch candidate.mediaType {
 		case MediaTypeMovie:
 			_, refreshErr = s.movieDetails(ctx, candidate.titleID, language)
 		case MediaTypeSeries:
 			_, refreshErr = s.seriesDetails(ctx, candidate.titleID, SeriesDetailsOptions{Language: language})
+		case MediaTypeSeason, MediaTypeEpisode:
+			_, refreshErr = s.seasonDetails(ctx, candidate.refreshTitleID, language)
 		default:
-			refreshErr = fmt.Errorf("unsupported refresh media type %q", candidate.mediaType)
+			refreshErr = fmt.Errorf("%w: unsupported refresh media type %q", ErrInvalidInput, candidate.mediaType)
 		}
-		if refreshErr != nil {
-			result.Failed++
-			if s.logger != nil {
-				s.logger.Warn("metadata refresh candidate failed", "titleId", candidate.titleID, "mediaType", candidate.mediaType, "error", refreshErr)
-			}
-			continue
+		if refreshErr == nil {
+			return nil, attempt
 		}
-		result.Refreshed++
+		_, temporary, _ := ProviderErrorDetails(refreshErr)
+		if attempt == 2 || !temporary || ctx.Err() != nil {
+			return refreshErr, attempt
+		}
+		s.logMetadataRefreshError("metadata refresh candidate retrying", candidate, refreshErr, attempt)
 	}
-	return result, nil
+	panic("unreachable metadata refresh retry")
+}
+
+func (s *Service) logMetadataRefreshFailure(candidate metadataRefreshCandidate, refreshErr error, attempts int) {
+	s.logMetadataRefreshError("metadata refresh candidate failed", candidate, refreshErr, attempts)
+}
+
+func (s *Service) logMetadataRefreshError(message string, candidate metadataRefreshCandidate, refreshErr error, attempts int) {
+	if s.logger == nil {
+		return
+	}
+	statusCode, temporary, resource := ProviderErrorDetails(refreshErr)
+	if resource == "" {
+		resource = candidate.requestedResource
+	}
+	attributes := []any{
+		"titleId", candidate.titleID,
+		"title", candidate.title,
+		"mediaType", candidate.mediaType,
+		"provider", providerName,
+		"requestedResource", resource,
+		"error", refreshErr,
+		"temporary", temporary,
+		"attempts", attempts,
+	}
+	if statusCode > 0 {
+		attributes = append(attributes, "httpStatus", statusCode)
+	}
+	s.logger.Warn(message, attributes...)
+}
+
+const (
+	maximumFailedTitles     = 10
+	maximumFailedTitleRunes = 120
+)
+
+func appendFailedTitle(result *RefreshResult, seen map[string]struct{}, title string) {
+	if len(result.FailedTitles) >= maximumFailedTitles {
+		return
+	}
+	title = strings.Join(strings.Fields(strings.ToValidUTF8(title, "")), " ")
+	if title == "" {
+		return
+	}
+	runes := []rune(title)
+	if len(runes) > maximumFailedTitleRunes {
+		title = string(runes[:maximumFailedTitleRunes-3]) + "..."
+	}
+	key := strings.ToLower(title)
+	if _, exists := seen[key]; exists {
+		return
+	}
+	seen[key] = struct{}{}
+	result.FailedTitles = append(result.FailedTitles, title)
 }
 
 func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, seasonID, language, mappingProvider string) (Season, error) {
@@ -446,6 +640,10 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 	if mappingProvider == "tvdb" || strings.HasPrefix(strings.TrimSpace(seasonID), "tvdb:") {
 		return s.mappedSeasonDetails(ctx, principal, seasonID, language)
 	}
+	return s.seasonDetails(ctx, seasonID, language)
+}
+
+func (s *Service) seasonDetails(ctx context.Context, seasonID, language string) (Season, error) {
 	normalizedLanguage, err := normalizeLanguage(language)
 	if err != nil {
 		return Season{}, err
@@ -511,7 +709,7 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 	provided, err := s.provider.SeasonDetails(ctx, seriesExternalID, seasonNumber, normalizedLanguage)
 	if err != nil {
 		if errors.Is(err, ErrProviderNotFound) {
-			return Season{}, ErrNotFound
+			return Season{}, fmt.Errorf("%w: %w", ErrNotFound, err)
 		}
 		return Season{}, err
 	}
@@ -555,10 +753,15 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 		episodeNumber := episode.EpisodeNumber
 		episodeID, err := ensureTitle(ctx, tx, episode.ExternalID, MediaTypeEpisode, &seasonID, &episodeNumber)
 		if err != nil {
-			return Season{}, err
+			return Season{}, fmt.Errorf("resolve episode %d canonical identity: %w", episodeNumber, err)
+		}
+		if tvdbID := strings.TrimSpace(episode.AdditionalIDs["tvdb"]); tvdbID != "" {
+			if err := replaceTVDBEpisodeID(ctx, tx, episodeID, tvdbID); err != nil {
+				return Season{}, fmt.Errorf("repair episode %d TVDB identity: %w", episodeNumber, err)
+			}
 		}
 		if err := linkAdditionalIDs(ctx, tx, episodeID, MediaTypeEpisode, episode.AdditionalIDs); err != nil {
-			return Season{}, err
+			return Season{}, fmt.Errorf("link episode %d provider identities: %w", episodeNumber, err)
 		}
 		if err := persistTitleSnapshot(ctx, tx, episodeID, episode.Name, episode.StillURL, episode.BackdropURL, episode.AirDate); err != nil {
 			return Season{}, err
@@ -1129,6 +1332,7 @@ func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaT
 		return "", fmt.Errorf("query external title identities: %w", err)
 	}
 	defer rows.Close()
+	var lastNotFound error
 	for rows.Next() {
 		var provider string
 		var externalID string
@@ -1142,9 +1346,13 @@ func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaT
 		if !errors.Is(resolveErr, ErrProviderNotFound) {
 			return "", resolveErr
 		}
+		lastNotFound = resolveErr
 	}
 	if err := rows.Err(); err != nil {
 		return "", fmt.Errorf("iterate external title identities: %w", err)
+	}
+	if lastNotFound != nil {
+		return "", fmt.Errorf("%w: resolve provider identity: %w", ErrNotFound, lastNotFound)
 	}
 	return "", ErrNotFound
 }

@@ -3,6 +3,7 @@ package tmdb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -305,7 +306,8 @@ func (c *Client) ResolveExternalID(ctx context.Context, mediaType, provider, ext
 		return "", metadata.ErrProviderNotFound
 	}
 	var response findResponse
-	if err := c.get(ctx, "/find/"+url.PathEscape(externalID), url.Values{"external_source": {externalSource}}, &response); err != nil {
+	endpoint := "/find/" + url.PathEscape(externalID)
+	if err := c.get(ctx, endpoint, url.Values{"external_source": {externalSource}}, &response); err != nil {
 		return "", err
 	}
 	switch mediaType {
@@ -318,7 +320,13 @@ func (c *Client) ResolveExternalID(ctx context.Context, mediaType, provider, ext
 			return strconv.FormatInt(response.TVResults[0].ID, 10), nil
 		}
 	}
-	return "", metadata.ErrProviderNotFound
+	resource := endpoint + "?external_source=" + url.QueryEscape(externalSource)
+	return "", metadata.NewProviderError(
+		metadata.ErrProviderNotFound,
+		fmt.Errorf("TMDB external-ID lookup returned no matching %s", mediaType),
+		http.StatusOK,
+		resource,
+	)
 }
 
 func (c *Client) SeriesDetails(ctx context.Context, externalID, language string) (metadata.ProviderSeries, error) {
@@ -358,37 +366,46 @@ func (c *Client) SeasonDetails(ctx context.Context, seriesExternalID string, sea
 func (c *Client) get(ctx context.Context, endpoint string, query url.Values, destination any) error {
 	requestURL, err := url.Parse(c.baseURL + endpoint)
 	if err != nil {
-		return fmt.Errorf("%w: construct TMDB URL: %v", metadata.ErrProviderFailure, err)
+		return metadata.NewProviderError(metadata.ErrProviderFailure, fmt.Errorf("construct TMDB URL: %w", err), 0, endpoint)
 	}
 	requestURL.RawQuery = query.Encode()
+	resource := requestURL.RequestURI()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
 	if err != nil {
-		return fmt.Errorf("%w: construct TMDB request: %v", metadata.ErrProviderFailure, err)
+		return metadata.NewProviderError(metadata.ErrProviderFailure, fmt.Errorf("construct TMDB request: %w", err), 0, resource)
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Authorization", "Bearer "+c.accessToken)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("%w: %v", metadata.ErrProviderFailure, err)
+		return metadata.NewProviderError(metadata.ErrProviderFailure, err, 0, resource)
 	}
 	defer response.Body.Close()
 
 	switch response.StatusCode {
 	case http.StatusOK:
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return metadata.ErrProviderUnauthorized
+		return metadata.NewProviderError(metadata.ErrProviderUnauthorized, fmt.Errorf("TMDB returned HTTP %d", response.StatusCode), response.StatusCode, resource)
 	case http.StatusNotFound:
-		return metadata.ErrProviderNotFound
+		return metadata.NewProviderError(metadata.ErrProviderNotFound, fmt.Errorf("TMDB returned HTTP %d", response.StatusCode), response.StatusCode, resource)
 	case http.StatusTooManyRequests:
-		return metadata.ErrProviderRateLimited
+		return metadata.NewProviderError(metadata.ErrProviderRateLimited, fmt.Errorf("TMDB returned HTTP %d", response.StatusCode), response.StatusCode, resource)
 	default:
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("%w: TMDB returned HTTP %d", metadata.ErrProviderFailure, response.StatusCode)
+		return metadata.NewProviderError(
+			metadata.ErrProviderFailure,
+			fmt.Errorf("TMDB returned HTTP %d", response.StatusCode),
+			response.StatusCode,
+			resource,
+		)
 	}
 
 	decoder := json.NewDecoder(io.LimitReader(response.Body, maxBodyBytes))
 	if err := decoder.Decode(destination); err != nil {
-		return fmt.Errorf("%w: decode TMDB response: %v", metadata.ErrProviderFailure, err)
+		return metadata.NewProviderError(metadata.ErrProviderFailure, fmt.Errorf("decode TMDB response: %w", err), response.StatusCode, resource)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return metadata.NewProviderError(metadata.ErrProviderFailure, errors.New("decode TMDB response: trailing content"), response.StatusCode, resource)
 	}
 	return nil
 }

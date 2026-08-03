@@ -1306,6 +1306,20 @@ function metadataRefreshInput(schedule: OperationsOverview["metadataRefresh"]): 
     batchSize: schedule.batchSize,
   };
 }
+
+function failedMetadataTitles(result: OperationRun["result"]["metadata"]): string[] {
+  if (!result || !("failedTitles" in result) || !Array.isArray(result.failedTitles)) return [];
+  return result.failedTitles.filter((title): title is string => typeof title === "string" && title.trim().length > 0);
+}
+
+function metadataFailedTitlesMessage(result: NonNullable<OperationRun["result"]["metadata"]>): string {
+  const failedTitles = failedMetadataTitles(result);
+  return failedTitles.length > 0 ? ` ${translate("admin.operations.notifications.metadataFailedTitles", { titles: failedTitles.join(", ") })}` : "";
+}
+
+function metadataResultMessage(result: NonNullable<OperationRun["result"]["metadata"]>): string {
+  return `${translate("admin.operations.notifications.metadataResult", { candidates: result.candidates, refreshed: result.refreshed, failed: result.failed })}${metadataFailedTitlesMessage(result)}`;
+}
 function OperationsAdmin() {
   const [overview, setOverview] = useState<OperationsOverview | null>(null);
   const [activity, setActivity] = useState<PlaybackActivity | null>(null);
@@ -1317,6 +1331,8 @@ function OperationsAdmin() {
   const [lastRuns, setLastRuns] = useState<Partial<Record<OperationAction, OperationRun>>>({});
   const [confirmAction, setConfirmAction] = useState<OperationAction | null>(null);
   const [runningAction, setRunningAction] = useState<OperationAction | null>(null);
+  const runningActionRef = useRef<OperationAction | null>(null);
+  const [metadataRequestFailed, setMetadataRequestFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [savingSchedule, setSavingSchedule] = useState(false);
@@ -1402,20 +1418,24 @@ function OperationsAdmin() {
   }
 
   function operationResultMessage(run: OperationRun): string {
-    if (run.result.metadata) return translate("admin.operations.notifications.metadataResult", { candidates: run.result.metadata.candidates, refreshed: run.result.metadata.refreshed, failed: run.result.metadata.failed });
+    if (run.result.metadata) return metadataResultMessage(run.result.metadata);
     if (run.result.metadataCache) return translate("admin.operations.notifications.metadataCacheResult", { entriesDeleted: run.result.metadataCache.entriesDeleted });
     if (run.result.playback) return translate("admin.operations.notifications.playbackResult", { sessionsRemoved: run.result.playback.sessionsRemoved, jobsStopped: run.result.playback.jobsStopped, storageBytes: run.result.playback.storageBytes });
     return translate("admin.operations.notifications.completed");
   }
 
   async function runAction(action: OperationAction) {
+    if (runningActionRef.current) return;
+    runningActionRef.current = action;
     setRunningAction(action);
     setError("");
+    if (action === "fetch-missing-metadata") setMetadataRequestFailed(false);
     try {
       const run = await api.runOperation(action);
       setLastRuns((current) => ({ ...current, [action]: run }));
       const title = translate(run.status === "failed" ? "admin.operations.notifications.failedTitle" : run.status === "partial" ? "admin.operations.notifications.partialTitle" : "admin.operations.notifications.succeededTitle");
       if (run.status === "failed") notifyErrorMessage(operationResultMessage(run), title);
+      else if (run.status === "partial") notifyWarning(operationResultMessage(run), title);
       else notifySuccess(operationResultMessage(run), title);
       const [nextOverview, nextActivity] = await Promise.all([
         api.operations().catch(() => null),
@@ -1432,8 +1452,14 @@ function OperationsAdmin() {
         setStreamAvailable(true);
       }
     } catch (cause) {
-      setError(notifyError(cause, translate("admin.operations.errors.runAction"), translate("admin.operations.errors.runActionTitle")));
+      if (action === "fetch-missing-metadata") {
+        setMetadataRequestFailed(true);
+        notifyErrorMessage(translate("admin.operations.notifications.metadataFailedMessage"), translate("admin.operations.notifications.failedTitle"));
+      } else {
+        setError(notifyError(cause, translate("admin.operations.errors.runAction"), translate("admin.operations.errors.runActionTitle")));
+      }
     } finally {
+      runningActionRef.current = null;
       setRunningAction(null);
     }
   }
@@ -1489,7 +1515,7 @@ function OperationsAdmin() {
         <OperationState label={translate("admin.operations.schedule.lastCompleted")} value={refresh.lastCompletedAt ? formatOperationsDate(refresh.lastCompletedAt) : translate("admin.operations.never")} />
         <OperationState label={translate("admin.operations.schedule.lastStatus")} value={translate(refresh.lastStatus ? `admin.operations.status.${refresh.lastStatus}` as TranslationKey : "admin.operations.never")} tone={refresh.lastStatus ?? ""} />
       </div>
-      {refresh.lastResult && <p className="operations-result" role="status">{translate("admin.operations.schedule.lastResult", { candidates: refresh.lastResult.candidates, refreshed: refresh.lastResult.refreshed, failed: refresh.lastResult.failed })}</p>}
+      {refresh.lastResult && <p className="operations-result" role="status">{translate("admin.operations.schedule.lastResult", { candidates: refresh.lastResult.candidates, refreshed: refresh.lastResult.refreshed, failed: refresh.lastResult.failed })}{metadataFailedTitlesMessage(refresh.lastResult)}</p>}
       <footer><div><strong>{translate(schedule.enabled ? "admin.operations.schedule.enabledSummary" : "admin.operations.schedule.disabledSummary")}</strong><small>{translate("admin.operations.schedule.durableDescription")}</small></div><Button variant="secondary" disabled={!scheduleDirty || savingSchedule} onClick={() => setSchedule(savedSchedule)}>{translate("common.actions.discardChanges")}</Button><Button loading={savingSchedule} disabled={!scheduleDirty || !scheduleValid || Boolean(runningAction)} onClick={() => void saveSchedule()}><Save size={17} /> {translate("admin.operations.schedule.save")}</Button></footer>
     </section>
 
@@ -1511,7 +1537,10 @@ function OperationsAdmin() {
         return <article className={`operation-action-card ${card.destructive ? "is-destructive" : ""}`} key={card.action}>
           <header><span><Icon aria-hidden="true" /></span><div><h4>{translate(card.titleKey)}</h4><p>{translate(card.descriptionKey)}</p></div></header>
           <div className="operation-action-card__scope"><Shield size={15} aria-hidden="true" /><span>{translate(card.scopeKey)}</span></div>
-          {lastRun && <small className={`operation-action-card__result is-${lastRun.status}`} role="status">{translate(`admin.operations.status.${lastRun.status}` as TranslationKey)} · {formatOperationsDate(lastRun.completedAt)}</small>}
+          {lastRun && !(card.action === "fetch-missing-metadata" && metadataRequestFailed) && (card.action === "fetch-missing-metadata" && lastRun.result.metadata
+            ? <Notice tone={lastRun.status === "failed" ? "error" : lastRun.status === "partial" ? "warning" : "success"}><span role="status" aria-live="polite"><strong>{metadataResultMessage(lastRun.result.metadata)}</strong>{lastRun.status === "failed" ? ` ${translate("admin.operations.notifications.metadataFailedMessage")}` : lastRun.status === "partial" ? ` ${translate("admin.operations.notifications.metadataPartialMessage")}` : ""}</span>{lastRun.status === "failed" && <Button variant="secondary" aria-label={translate("admin.operations.actions.metadata.retry")} loading={runningAction === card.action} disabled={Boolean(runningAction)} onClick={() => void runAction(card.action)}><RefreshCw size={16} /> {translate("admin.operations.actions.metadata.retry")}</Button>}</Notice>
+            : <small className={`operation-action-card__result is-${lastRun.status}`} role="status">{translate(`admin.operations.status.${lastRun.status}` as TranslationKey)} · {formatOperationsDate(lastRun.completedAt)}</small>)}
+          {card.action === "fetch-missing-metadata" && metadataRequestFailed && <Notice><span role="alert">{translate("admin.operations.notifications.metadataFailedMessage")}</span><Button variant="secondary" aria-label={translate("admin.operations.actions.metadata.retry")} loading={runningAction === card.action} disabled={Boolean(runningAction)} onClick={() => void runAction(card.action)}><RefreshCw size={16} /> {translate("admin.operations.actions.metadata.retry")}</Button></Notice>}
           <Button variant={card.destructive ? "danger" : "secondary"} aria-label={translate("admin.operations.actions.runNamed", { action: translate(card.titleKey) })} loading={runningAction === card.action} disabled={Boolean(runningAction) || savingSchedule || savingMaintenance || (card.action === "fetch-missing-metadata" && scheduleDirty)} onClick={() => card.destructive ? setConfirmAction(card.action) : void runAction(card.action)}>{card.destructive ? <Trash2 size={16} /> : <RefreshCw size={16} />} {translate(runningAction === card.action ? "admin.operations.actions.running" : "admin.operations.actions.run")}</Button>
         </article>;
       })}</div>

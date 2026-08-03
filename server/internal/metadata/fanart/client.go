@@ -399,11 +399,11 @@ func normalizedArtworkLanguage(language string) string {
 func (c *Client) get(ctx context.Context, endpoint string, destination any) error {
 	requestURL, err := url.Parse(c.baseURL + endpoint)
 	if err != nil {
-		return fmt.Errorf("%w: construct Fanart URL: %v", metadata.ErrProviderFailure, err)
+		return metadata.NewProviderError(metadata.ErrProviderFailure, fmt.Errorf("construct Fanart URL: %w", err), 0, endpoint)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
 	if err != nil {
-		return fmt.Errorf("%w: construct Fanart request: %v", metadata.ErrProviderFailure, err)
+		return metadata.NewProviderError(metadata.ErrProviderFailure, fmt.Errorf("construct Fanart request: %w", err), 0, endpoint)
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("api-key", c.apiKey)
@@ -412,25 +412,33 @@ func (c *Client) get(ctx context.Context, endpoint string, destination any) erro
 	}
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("%w: %v", metadata.ErrProviderFailure, err)
+		return metadata.NewProviderError(metadata.ErrProviderFailure, err, 0, endpoint)
 	}
 	defer response.Body.Close()
 
 	switch response.StatusCode {
 	case http.StatusOK:
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return metadata.ErrProviderUnauthorized
+		return metadata.NewProviderError(metadata.ErrProviderUnauthorized, fmt.Errorf("Fanart returned HTTP %d", response.StatusCode), response.StatusCode, endpoint)
 	case http.StatusNotFound:
-		return metadata.ErrProviderNotFound
+		return metadata.NewProviderError(metadata.ErrProviderNotFound, fmt.Errorf("Fanart returned HTTP %d", response.StatusCode), response.StatusCode, endpoint)
 	case http.StatusTooManyRequests:
-		return metadata.ErrProviderRateLimited
+		return metadata.NewProviderError(metadata.ErrProviderRateLimited, fmt.Errorf("Fanart returned HTTP %d", response.StatusCode), response.StatusCode, endpoint)
 	default:
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("%w: Fanart returned HTTP %d", metadata.ErrProviderFailure, response.StatusCode)
+		return metadata.NewProviderError(
+			metadata.ErrProviderFailure,
+			fmt.Errorf("Fanart returned HTTP %d", response.StatusCode),
+			response.StatusCode,
+			endpoint,
+		)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, maxBodyBytes))
 	if err := decoder.Decode(destination); err != nil {
-		return fmt.Errorf("%w: decode Fanart response: %v", metadata.ErrProviderFailure, err)
+		return metadata.NewProviderError(metadata.ErrProviderFailure, fmt.Errorf("decode Fanart response: %w", err), response.StatusCode, endpoint)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return metadata.NewProviderError(metadata.ErrProviderFailure, errors.New("decode Fanart response: trailing content"), response.StatusCode, endpoint)
 	}
 	return nil
 }

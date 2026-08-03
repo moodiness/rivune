@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -87,7 +88,7 @@ func TestOperationsOverviewReturnsAdministratorStatus(t *testing.T) {
 	if body.MetadataCache != service.overview.MetadataCache || body.HousekeepingIntervalMinutes != 5 {
 		t.Fatalf("unexpected overview response %#v", body)
 	}
-	if body.MetadataRefresh.LastResult == nil || *body.MetadataRefresh.LastResult != *service.overview.MetadataRefresh.LastResult {
+	if body.MetadataRefresh.LastResult == nil || !reflect.DeepEqual(*body.MetadataRefresh.LastResult, *service.overview.MetadataRefresh.LastResult) {
 		t.Fatalf("unexpected refresh result %#v", body.MetadataRefresh.LastResult)
 	}
 	if body.MetadataRefresh.NextRunAt == nil || !body.MetadataRefresh.NextRunAt.Equal(nextRun) {
@@ -326,7 +327,7 @@ func assertOperationResult(t *testing.T, got, want operations.OperationResult) {
 	t.Helper()
 	switch {
 	case want.Metadata != nil:
-		if got.Metadata == nil || *got.Metadata != *want.Metadata || got.MetadataCache != nil || got.Playback != nil {
+		if got.Metadata == nil || !reflect.DeepEqual(*got.Metadata, *want.Metadata) || got.MetadataCache != nil || got.Playback != nil {
 			t.Fatalf("unexpected metadata result %#v", got)
 		}
 	case want.MetadataCache != nil:

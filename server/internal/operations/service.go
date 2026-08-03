@@ -289,6 +289,18 @@ func (service *Service) metadataCacheStatus(ctx context.Context, language string
 			      FROM title_external_ids AS identity
 			      WHERE identity.title_id = title.id
 			        AND identity.namespace = title.media_type
+			        AND (
+			            (
+			                identity.provider = 'tmdb'
+			                AND identity.external_id ~ '^[1-9][0-9]*$'
+			                AND char_length(identity.external_id) <= 18
+			            )
+			            OR (
+			                identity.provider = 'imdb'
+			                AND identity.external_id ~ '^tt[0-9]+$'
+			                AND char_length(identity.external_id) <= 18
+			            )
+			        )
 			  )
 		)
 		SELECT
