@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Folder ini kosong",
   "home.source.emptyTitle": "Sumber ini kosong",
   "search.error.sourcesUnavailable": "Sumber pencarian tidak tersedia.",
+  "search.warning.sourcesUnavailable": "Beberapa sumber untuk sementara tidak tersedia.",
   "search.error.unavailableTitle": "Pencarian tidak tersedia",
   "search.eyebrow": "Jelajahi semesta Anda",
   "search.title": "Cari apa saja.",

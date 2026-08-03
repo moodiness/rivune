@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "התיקייה הזו ריקה",
   "home.source.emptyTitle": "המקור הזה ריק",
   "search.error.sourcesUnavailable": "מקורות החיפוש אינם זמינים.",
+  "search.warning.sourcesUnavailable": "חלק מהמקורות אינם זמינים זמנית.",
   "search.error.unavailableTitle": "החיפוש אינו זמין",
   "search.eyebrow": "גלו את היקום שלכם",
   "search.title": "חפשו הכול.",

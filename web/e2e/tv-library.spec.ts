@@ -24,16 +24,20 @@ const result = (addonId: string, catalogId: string, metas: unknown[]) => ({
   payload: { metas },
 });
 
-test("TV search debounces, stays source-scoped, preserves homonyms, reports partial errors, and paginates", async ({ page, rivune }) => {
+test("TV search keeps partial results, warns without inline diagnostics, and retries a failed pagination offset", async ({ page, rivune }) => {
   const firstPage = Array.from({ length: 24 }, (_, index) => channel(`station-${index + 1}`, index === 0 ? "World News" : `Station ${index + 1}`));
   rivune.setSearchResponse("tv", 0, {
     results: [
       result("addon-a", "catalog-a", firstPage),
       result("addon-b", "catalog-b", [channel("world-news", "World News"), channel("world-news", "World News")]),
     ],
-    errors: [{ addonId: "addon-c", manifestId: "addon-c-manifest", code: "upstream_timeout", message: "Timed out" }],
+    errors: [{ addonId: "broken-addon", manifestId: "private-manifest", code: "upstream_timeout", message: "Private network timeout" }],
   });
-  rivune.setSearchResponse("tv", 24, { results: [result("addon-a", "catalog-a", [channel("station-25", "Station 25")])], errors: [] });
+  rivune.setSearchResponse("tv", 24, {
+    error: { code: "bad_gateway", message: "Private upstream socket failed" },
+    addonId: "pagination-addon",
+    manifestId: "pagination-manifest",
+  }, { status: 502 });
 
   await page.goto("/#search");
   await page.getByRole("button", { name: "Live TV", exact: true }).click();
@@ -44,21 +48,62 @@ test("TV search debounces, stays source-scoped, preserves homonyms, reports part
 
   await expect(page.getByRole("button", { name: "Open World News" })).toHaveCount(2);
   await expect(page.locator(".tv-media-tile")).toHaveCount(25);
-  await expect(page.getByText("Some titles could not be loaded.")).toBeVisible();
+  await expect(page.getByText("Some sources are temporarily unavailable.", { exact: true })).toBeVisible();
+  await expect(page.locator(".search-page .notice")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Private network timeout", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("broken-addon", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("private-manifest", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("addon-a", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("addon-a-manifest", { exact: true })).toHaveCount(0);
+  await page.locator(".app-notification").getByRole("button", { name: "Dismiss notification" }).click();
   const initialRequests = rivune.matching("/api/v1/addons/catalogs/search/tv", "GET");
   expect(initialRequests).toHaveLength(1);
   expect(initialRequests[0].search.get("search")).toBe("news");
   expect(initialRequests[0].search.get("skip")).toBe("0");
   expect(initialRequests[0].search.get("limit")).toBe("24");
   expect(rivune.requests.filter((request) => request.pathname.includes("/addons/catalogs/search/movie") || request.pathname.includes("/addons/catalogs/search/series"))).toHaveLength(0);
-  await page.getByRole("button", { name: "Retry", exact: true }).click();
-  await expect.poll(() => rivune.matching("/api/v1/addons/catalogs/search/tv", "GET").length).toBe(2);
-
 
   await page.getByRole("button", { name: "Load more" }).click();
+  await expect.poll(() => rivune.matching("/api/v1/addons/catalogs/search/tv", "GET").length).toBe(2);
+  await expect(page.locator(".tv-media-tile")).toHaveCount(25);
+  await expect(page.getByRole("button", { name: "Load more" })).toBeVisible();
+  await expect(page.getByText("Some sources are temporarily unavailable.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Private upstream socket failed", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("pagination-addon", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("pagination-manifest", { exact: true })).toHaveCount(0);
+
+  rivune.setSearchResponse("tv", 24, { results: [result("addon-a", "catalog-a", [channel("station-25", "Station 25")])], errors: [] });
+  await page.getByRole("button", { name: "Load more" }).click();
   await expect(page.getByRole("button", { name: "Open Station 25" })).toBeVisible();
-  const nextRequest = rivune.matching("/api/v1/addons/catalogs/search/tv", "GET").at(-1)!;
-  expect(nextRequest.search.get("skip")).toBe("24");
+  const searchRequests = rivune.matching("/api/v1/addons/catalogs/search/tv", "GET");
+  expect(searchRequests).toHaveLength(3);
+  expect(searchRequests[1].search.get("skip")).toBe("24");
+  expect(searchRequests[2].search.get("skip")).toBe("24");
+});
+
+test("TV search shows a generic retry state when every source fails", async ({ page, rivune }) => {
+  rivune.setSearchResponse("tv", 0, {
+    results: [],
+    errors: [{ addonId: "private-addon", manifestId: "private-manifest", code: "addon_unavailable", message: "Connection refused at private host" }],
+  });
+
+  await page.goto("/#search");
+  await page.getByRole("button", { name: "Live TV", exact: true }).click();
+  await page.locator(".search-page .search-box input").fill("outage");
+
+  await expect(page.locator(".search-page .notice")).toContainText("Search sources are unavailable.");
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+  await expect(page.locator(".search-page .media-card")).toHaveCount(0);
+  await expect(page.getByText("Some sources are temporarily unavailable.", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Connection refused at private host", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("private-addon", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("private-manifest", { exact: true })).toHaveCount(0);
+
+  rivune.setSearchResponse("tv", 0, { results: [result("recovered-addon", "recovered-catalog", [channel("recovered", "Recovered News")])], errors: [] });
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open Recovered News" })).toBeVisible();
+  await expect(page.locator(".search-page .notice")).toHaveCount(0);
 });
 
 test("TV library actions update immediately, refresh every surface, keep a stable route, and fetch streams only after play", async ({ page, rivune }) => {

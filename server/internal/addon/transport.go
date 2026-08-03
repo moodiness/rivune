@@ -3,6 +3,7 @@ package addon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,39 @@ const (
 	maximumManifestBytes = 2 << 20
 	maximumResourceBytes = 16 << 20
 )
+
+type providerUnavailableError struct {
+	operation string
+	cause     error
+	temporary bool
+}
+
+func (err *providerUnavailableError) Error() string {
+	return fmt.Sprintf("%s: %s: %v", ErrProviderUnavailable, err.operation, err.cause)
+}
+
+func (err *providerUnavailableError) Unwrap() error {
+	return err.cause
+}
+
+func (err *providerUnavailableError) Is(target error) bool {
+	return target == ErrProviderUnavailable
+}
+
+func (err *providerUnavailableError) Temporary() bool {
+	return err.temporary
+}
+
+func unavailable(operation string, cause error, temporary bool) error {
+	return &providerUnavailableError{operation: operation, cause: cause, temporary: temporary}
+}
+
+func isTemporaryProviderError(err error) bool {
+	var temporary interface {
+		Temporary() bool
+	}
+	return errors.As(err, &temporary) && temporary.Temporary()
+}
 
 type Transport interface {
 	Manifest(context.Context, string) (Manifest, json.RawMessage, error)
@@ -71,8 +105,14 @@ func (transport *HTTPTransport) Resource(ctx context.Context, transportURL strin
 	if err != nil {
 		return nil, CachePolicy{}, err
 	}
-	if !json.Valid(payload) || firstJSONToken(payload) != '{' {
-		return nil, CachePolicy{}, ErrInvalidResponse
+	if !json.Valid(payload) {
+		return nil, CachePolicy{}, fmt.Errorf("%w: response contains invalid JSON", ErrInvalidResponse)
+	}
+	if firstJSONToken(payload) != '{' {
+		return nil, CachePolicy{}, fmt.Errorf("%w: response must be a JSON object", ErrInvalidResponse)
+	}
+	if err := validateResourceResponse(path.Resource, payload); err != nil {
+		return nil, CachePolicy{}, err
 	}
 	cache = mergeBodyCache(payload, cache)
 	return json.RawMessage(payload), cache, nil
@@ -81,28 +121,58 @@ func (transport *HTTPTransport) Resource(ctx context.Context, transportURL strin
 func (transport *HTTPTransport) get(ctx context.Context, target string, maximumBytes int64) ([]byte, CachePolicy, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return nil, CachePolicy{}, fmt.Errorf("%w: construct request", ErrProviderUnavailable)
+		return nil, CachePolicy{}, unavailable("construct request", err, false)
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "Rivune/1 StremioAddonClient")
 	response, err := transport.client.Do(request)
 	if err != nil {
-		return nil, CachePolicy{}, fmt.Errorf("%w: request failed", ErrProviderUnavailable)
+		return nil, CachePolicy{}, unavailable("request failed", err, true)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 32<<10))
-		return nil, CachePolicy{}, fmt.Errorf("%w: HTTP %d", ErrProviderUnavailable, response.StatusCode)
+		temporary := response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError && response.StatusCode <= 599
+		return nil, CachePolicy{}, unavailable("request failed", errorsText(fmt.Sprintf("HTTP %d", response.StatusCode)), temporary)
 	}
 	limited := io.LimitReader(response.Body, maximumBytes+1)
 	payload, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, CachePolicy{}, fmt.Errorf("%w: read response", ErrProviderUnavailable)
+		return nil, CachePolicy{}, unavailable("read response", err, true)
 	}
 	if int64(len(payload)) > maximumBytes {
 		return nil, CachePolicy{}, fmt.Errorf("%w: response exceeds %d bytes", ErrInvalidResponse, maximumBytes)
 	}
 	return payload, parseCacheControl(response.Header.Get("Cache-Control")), nil
+}
+
+func validateResourceResponse(resource string, payload []byte) error {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &object); err != nil {
+		return fmt.Errorf("%w: decode %s response: %v", ErrInvalidResponse, resource, err)
+	}
+	field := ""
+	token := byte('[')
+	kind := "array"
+	switch resource {
+	case "catalog", "addon_catalog":
+		field = "metas"
+	case "stream":
+		field = "streams"
+	case "subtitles":
+		field = "subtitles"
+	case "meta":
+		field = "meta"
+		token = '{'
+		kind = "object"
+	default:
+		return nil
+	}
+	value, ok := object[field]
+	if !ok || firstJSONToken(value) != token {
+		return fmt.Errorf("%w: %s response requires %q %s", ErrInvalidResponse, resource, field, kind)
+	}
+	return nil
 }
 
 func buildResourceURL(transportURL string, path ResourcePath) (string, error) {

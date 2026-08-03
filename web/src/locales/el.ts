@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Αυτός ο φάκελος είναι κενός",
   "home.source.emptyTitle": "Αυτή η πηγή είναι κενή",
   "search.error.sourcesUnavailable": "Οι πηγές αναζήτησης δεν είναι διαθέσιμες.",
+  "search.warning.sourcesUnavailable": "Ορισμένες πηγές δεν είναι διαθέσιμες προσωρινά.",
   "search.error.unavailableTitle": "Η αναζήτηση δεν είναι διαθέσιμη",
   "search.eyebrow": "Εξερευνήστε το σύμπαν σας",
   "search.title": "Αναζητήστε τα πάντα.",

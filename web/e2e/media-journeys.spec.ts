@@ -265,7 +265,7 @@ test("episode details float beside a responsive contextual stream panel", async 
   const detailsActions = page.locator(".details-actions");
   const trailerAction = detailsActions.getByRole("button", { name: "Trailers" });
   const watchedAction = detailsActions.getByRole("button", { name: /Mark (?:un)?watched/ });
-  await expect(watchedAction).toHaveClass(/button--ghost/);
+  await expect(watchedAction).toHaveClass(/button--secondary/);
   await expect(page.locator(".details-context-actions .button--ghost")).toHaveCount(0);
   const trailerActionBounds = await trailerAction.boundingBox();
   const watchedActionBounds = await watchedAction.boundingBox();
@@ -450,6 +450,7 @@ test("movie details retain cast and one playback action per source", async ({ pa
 
   await expect(page.getByRole("heading", { name: "Fight Club" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Cast" }).getByText("Edward Norton")).toBeVisible();
+  await expect(page.locator(".details-actions").getByRole("button", { name: /Mark (?:un)?watched/ })).toHaveClass(/button--secondary/);
   const sources = page.getByRole("region", { name: "Playback sources" });
   const sourceRows = sources.locator(".details-stream-list > div");
   await expect(sourceRows).toHaveCount(1);

@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "این پوشه خالی است",
   "home.source.emptyTitle": "این منبع خالی است",
   "search.error.sourcesUnavailable": "منابع جست‌وجو در دسترس نیستند.",
+  "search.warning.sourcesUnavailable": "برخی منابع موقتاً در دسترس نیستند.",
   "search.error.unavailableTitle": "جست‌وجو در دسترس نیست",
   "search.eyebrow": "جهان خود را کاوش کنید",
   "search.title": "همه‌چیز را جست‌وجو کنید.",

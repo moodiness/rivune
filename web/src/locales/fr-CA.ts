@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Ce dossier est vide",
   "home.source.emptyTitle": "Cette source est vide",
   "search.error.sourcesUnavailable": "Les sources de recherche sont indisponibles.",
+  "search.warning.sourcesUnavailable": "Certaines sources sont temporairement indisponibles.",
   "search.error.unavailableTitle": "Recherche indisponible",
   "search.eyebrow": "Explorez votre univers",
   "search.title": "Recherchez tout.",

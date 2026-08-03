@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Bu klasör boş",
   "home.source.emptyTitle": "Bu kaynak boş",
   "search.error.sourcesUnavailable": "Arama kaynaklarına erişilemiyor.",
+  "search.warning.sourcesUnavailable": "Bazı kaynaklar geçici olarak kullanılamıyor.",
   "search.error.unavailableTitle": "Arama kullanılamıyor",
   "search.eyebrow": "Evreninizi keşfedin",
   "search.title": "Her şeyi arayın.",

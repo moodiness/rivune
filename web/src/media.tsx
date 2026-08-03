@@ -1180,7 +1180,7 @@ export function MediaDetails({ item, maximumCastMembers, onClose, onNavigateCont
                   <Clapperboard size={19} />
                   {t("media.trailers.title")}
                 </Button>}
-                {(item.mediaType === "movie" || (item.mediaType === "episode" && fromContinue)) && <Button variant={fromContinue ? "ghost" : "secondary"} loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
+                {(item.mediaType === "movie" || (item.mediaType === "episode" && fromContinue)) && <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
                   {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
                   {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
                 </Button>}

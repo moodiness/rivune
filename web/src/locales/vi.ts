@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Thư mục này trống",
   "home.source.emptyTitle": "Nguồn này trống",
   "search.error.sourcesUnavailable": "Các nguồn tìm kiếm hiện không khả dụng.",
+  "search.warning.sourcesUnavailable": "Một số nguồn tạm thời không khả dụng.",
   "search.error.unavailableTitle": "Tính năng tìm kiếm không khả dụng",
   "search.eyebrow": "Khám phá vũ trụ của bạn",
   "search.title": "Tìm kiếm mọi thứ.",

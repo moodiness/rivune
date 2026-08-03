@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "このフォルダーは空です",
   "home.source.emptyTitle": "このソースは空です",
   "search.error.sourcesUnavailable": "検索ソースを利用できません。",
+  "search.warning.sourcesUnavailable": "一部のソースは一時的に利用できません。",
   "search.error.unavailableTitle": "検索を利用できません",
   "search.eyebrow": "あなたの世界を探索",
   "search.title": "すべてを検索。",

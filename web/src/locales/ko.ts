@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "이 폴더는 비어 있습니다",
   "home.source.emptyTitle": "이 소스는 비어 있습니다",
   "search.error.sourcesUnavailable": "검색 소스를 사용할 수 없습니다.",
+  "search.warning.sourcesUnavailable": "일부 소스를 일시적으로 사용할 수 없습니다.",
   "search.error.unavailableTitle": "검색 사용 불가",
   "search.eyebrow": "나만의 세계 탐색",
   "search.title": "모든 콘텐츠를 검색하세요.",

@@ -246,7 +246,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	if err != nil {
 		return nil, fmt.Errorf("initialize artwork cache: %w", err)
 	}
-	addonService := addon.NewService(pool, nil)
+	addonService := addon.NewService(pool, nil, logger)
 	var collectionTrakt collection.TraktProvider
 	if cfg.TraktClientID != "" {
 		collectionTrakt = collectiontrakt.New(cfg.TraktClientID, nil)

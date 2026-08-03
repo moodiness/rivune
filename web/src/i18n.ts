@@ -1191,6 +1191,7 @@ const en = {
   "home.folder.emptyTitle": "This folder is empty",
   "home.source.emptyTitle": "This source is empty",
   "search.error.sourcesUnavailable": "Search sources are unavailable.",
+  "search.warning.sourcesUnavailable": "Some sources are temporarily unavailable.",
   "search.error.unavailableTitle": "Search unavailable",
   "search.eyebrow": "Explore your universe",
   "search.title": "Search everything.",

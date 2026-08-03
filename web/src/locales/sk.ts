@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Tento priečinok je prázdny",
   "home.source.emptyTitle": "Tento zdroj je prázdny",
   "search.error.sourcesUnavailable": "Zdroje vyhľadávania nie sú k dispozícii.",
+  "search.warning.sourcesUnavailable": "Niektoré zdroje sú dočasne nedostupné.",
   "search.error.unavailableTitle": "Vyhľadávanie nie je k dispozícii",
   "search.eyebrow": "Preskúmajte svoj vesmír",
   "search.title": "Prehľadajte všetko.",

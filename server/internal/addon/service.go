@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,15 +19,27 @@ import (
 )
 
 type Service struct {
-	pool      *pgxpool.Pool
-	transport Transport
+	pool           *pgxpool.Pool
+	transport      Transport
+	logger         *slog.Logger
+	requestTimeout time.Duration
+	retryDelay     time.Duration
 }
 
-func NewService(pool *pgxpool.Pool, transport Transport) *Service {
+func NewService(pool *pgxpool.Pool, transport Transport, logger *slog.Logger) *Service {
 	if transport == nil {
 		transport = NewHTTPTransport(nil)
 	}
-	return &Service{pool: pool, transport: transport}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{
+		pool:           pool,
+		transport:      transport,
+		logger:         logger,
+		requestTimeout: 10 * time.Second,
+		retryDelay:     100 * time.Millisecond,
+	}
 }
 
 func (service *Service) Install(ctx context.Context, principal auth.Principal, input InstallInput) (InstalledAddon, error) {
@@ -341,9 +354,6 @@ func planCatalogSearch(addons []InstalledAddon, contentType string, input Catalo
 	seen := make(map[string]struct{})
 	for _, installed := range addons {
 		manifest := installed.parsedManifest
-		if contentType == "tv" && !manifest.SupportsTV() {
-			continue
-		}
 		for _, catalog := range manifest.Catalogs {
 			if catalog.Type != contentType || !catalog.SupportsSearch() {
 				continue
@@ -419,7 +429,9 @@ func (service *Service) execute(ctx context.Context, requests []plannedRequest) 
 				outcomes[index] = resourceOutcome{request: request, err: ctx.Err()}
 				return
 			}
-			payload, cache, err := service.transport.Resource(ctx, request.addon.TransportURL, request.path)
+			requestCtx, cancel := context.WithTimeout(ctx, service.effectiveRequestTimeout())
+			defer cancel()
+			payload, cache, err := service.executeRequest(requestCtx, request)
 			outcomes[index] = resourceOutcome{request: request, payload: payload, cache: cache, err: err}
 		}()
 	}
@@ -427,6 +439,15 @@ func (service *Service) execute(ctx context.Context, requests []plannedRequest) 
 	batch := ResourceBatch{Results: make([]ResourceResult, 0, len(outcomes)), Errors: make([]ResourceFailure, 0)}
 	for _, outcome := range outcomes {
 		if outcome.err != nil {
+			service.effectiveLogger().WarnContext(ctx, "addon resource request failed",
+				"addonId", outcome.request.addon.ID,
+				"manifestId", outcome.request.addon.parsedManifest.ID,
+				"transportUrl", outcome.request.addon.TransportURL,
+				"resource", outcome.request.path.Resource,
+				"type", outcome.request.path.Type,
+				"resourceId", outcome.request.path.ID,
+				"error", outcome.err,
+			)
 			batch.Errors = append(batch.Errors, ResourceFailure{
 				AddonID:    outcome.request.addon.ID,
 				ManifestID: outcome.request.addon.parsedManifest.ID,
@@ -438,6 +459,42 @@ func (service *Service) execute(ctx context.Context, requests []plannedRequest) 
 		batch.Results = append(batch.Results, resultFor(outcome.request.addon, outcome.request.path, outcome.payload, outcome.cache))
 	}
 	return batch
+}
+
+func (service *Service) executeRequest(ctx context.Context, request plannedRequest) (json.RawMessage, CachePolicy, error) {
+	payload, cache, err := service.transport.Resource(ctx, request.addon.TransportURL, request.path)
+	if err == nil || ctx.Err() != nil || !isTemporaryProviderError(err) {
+		return payload, cache, err
+	}
+	timer := time.NewTimer(service.effectiveRetryDelay())
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return nil, CachePolicy{}, ctx.Err()
+	}
+	return service.transport.Resource(ctx, request.addon.TransportURL, request.path)
+}
+
+func (service *Service) effectiveRequestTimeout() time.Duration {
+	if service.requestTimeout > 0 {
+		return service.requestTimeout
+	}
+	return 10 * time.Second
+}
+
+func (service *Service) effectiveRetryDelay() time.Duration {
+	if service.retryDelay > 0 {
+		return service.retryDelay
+	}
+	return 100 * time.Millisecond
+}
+
+func (service *Service) effectiveLogger() *slog.Logger {
+	if service.logger != nil {
+		return service.logger
+	}
+	return slog.Default()
 }
 
 func (service *Service) listForProfile(ctx context.Context, profileID string) ([]InstalledAddon, error) {

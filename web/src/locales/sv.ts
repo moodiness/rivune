@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Den här mappen är tom",
   "home.source.emptyTitle": "Den här källan är tom",
   "search.error.sourcesUnavailable": "Sökkällorna är inte tillgängliga.",
+  "search.warning.sourcesUnavailable": "Vissa källor är tillfälligt otillgängliga.",
   "search.error.unavailableTitle": "Sökfunktionen är inte tillgänglig",
   "search.eyebrow": "Utforska ditt universum",
   "search.title": "Sök i allt.",

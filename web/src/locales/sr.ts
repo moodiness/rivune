@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Ova fascikla je prazna",
   "home.source.emptyTitle": "Ovaj izvor je prazan",
   "search.error.sourcesUnavailable": "Izvori za pretragu nisu dostupni.",
+  "search.warning.sourcesUnavailable": "Neki izvori su privremeno nedostupni.",
   "search.error.unavailableTitle": "Pretraga nije dostupna",
   "search.eyebrow": "Istražite svoj svet",
   "search.title": "Pretražite sve.",

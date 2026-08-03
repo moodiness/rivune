@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Aquesta carpeta és buida",
   "home.source.emptyTitle": "Aquesta font és buida",
   "search.error.sourcesUnavailable": "Les fonts de cerca no estan disponibles.",
+  "search.warning.sourcesUnavailable": "Algunes fonts no estan disponibles temporalment.",
   "search.error.unavailableTitle": "La cerca no està disponible",
   "search.eyebrow": "Explora el teu univers",
   "search.title": "Cerca-ho tot.",

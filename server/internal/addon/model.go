@@ -294,18 +294,6 @@ func (manifest Manifest) Validate() error {
 	return nil
 }
 
-func (manifest Manifest) SupportsTV() bool {
-	if !contains(manifest.Types, "tv") {
-		return false
-	}
-	for _, catalog := range manifest.Catalogs {
-		if catalog.Type == "tv" {
-			return true
-		}
-	}
-	return false
-}
-
 func (catalog ManifestCatalog) SupportsSearch() bool {
 	return catalog.DeclaresExtra("search")
 }
@@ -315,12 +303,15 @@ func (catalog ManifestCatalog) DeclaresExtra(name string) bool {
 }
 
 func (manifest Manifest) Supports(path ResourcePath) bool {
-	if path.Resource == "catalog" {
-		catalog, ok := findCatalog(manifest.Catalogs, path.Type, path.ID)
-		return ok && catalog.SupportsExtra(path.Extra)
-	}
-	if path.Resource == "addon_catalog" {
-		catalog, ok := findCatalog(manifest.AddonCatalogs, path.Type, path.ID)
+	if path.Resource == "catalog" || path.Resource == "addon_catalog" {
+		if !contains(manifest.Types, path.Type) || !manifest.supportsResourceType(path.Resource, path.Type) {
+			return false
+		}
+		catalogs := manifest.Catalogs
+		if path.Resource == "addon_catalog" {
+			catalogs = manifest.AddonCatalogs
+		}
+		catalog, ok := findCatalog(catalogs, path.Type, path.ID)
 		return ok && catalog.SupportsExtra(path.Extra)
 	}
 	for _, resource := range manifest.Resources {
@@ -334,15 +325,35 @@ func (manifest Manifest) Supports(path ResourcePath) bool {
 			prefixes = manifest.IDPrefixes
 		} else {
 			if resource.Types == nil {
-				return false
+				continue
 			}
 			types = *resource.Types
 			prefixes = resource.IDPrefixes
 		}
 		if !contains(types, path.Type) {
-			return false
+			continue
 		}
-		return prefixes == nil || len(*prefixes) == 0 || hasAnyPrefix(path.ID, *prefixes)
+		if prefixes == nil || len(*prefixes) == 0 || hasAnyPrefix(path.ID, *prefixes) {
+			return true
+		}
+	}
+	return false
+}
+
+func (manifest Manifest) supportsResourceType(name string, contentType string) bool {
+	for _, resource := range manifest.Resources {
+		if resource.Name != name {
+			continue
+		}
+		if resource.Short {
+			if contains(manifest.Types, contentType) {
+				return true
+			}
+			continue
+		}
+		if resource.Types != nil && contains(*resource.Types, contentType) {
+			return true
+		}
 	}
 	return false
 }

@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Ez a mappa üres",
   "home.source.emptyTitle": "Ez a forrás üres",
   "search.error.sourcesUnavailable": "A keresési források nem érhetők el.",
+  "search.warning.sourcesUnavailable": "Egyes források átmenetileg nem érhetők el.",
   "search.error.unavailableTitle": "A keresés nem érhető el",
   "search.eyebrow": "Fedezze fel saját univerzumát",
   "search.title": "Keresés mindenben.",

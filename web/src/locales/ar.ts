@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "هذا المجلد فارغ",
   "home.source.emptyTitle": "هذا المصدر فارغ",
   "search.error.sourcesUnavailable": "مصادر البحث غير متاحة.",
+  "search.warning.sourcesUnavailable": "بعض المصادر غير متاحة مؤقتًا.",
   "search.error.unavailableTitle": "البحث غير متاح",
   "search.eyebrow": "استكشف عالمك",
   "search.title": "ابحث في كل شيء.",

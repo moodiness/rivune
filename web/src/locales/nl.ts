@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Deze map is leeg",
   "home.source.emptyTitle": "Deze bron is leeg",
   "search.error.sourcesUnavailable": "De zoekbronnen zijn niet beschikbaar.",
+  "search.warning.sourcesUnavailable": "Sommige bronnen zijn tijdelijk niet beschikbaar.",
   "search.error.unavailableTitle": "Zoeken niet beschikbaar",
   "search.eyebrow": "Verken uw universum",
   "search.title": "Doorzoek alles.",

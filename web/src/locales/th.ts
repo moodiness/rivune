@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "โฟลเดอร์นี้ว่างเปล่า",
   "home.source.emptyTitle": "แหล่งที่มานี้ว่างเปล่า",
   "search.error.sourcesUnavailable": "แหล่งที่มาสำหรับการค้นหาไม่พร้อมใช้งาน",
+  "search.warning.sourcesUnavailable": "แหล่งที่มาบางแห่งไม่พร้อมใช้งานชั่วคราว",
   "search.error.unavailableTitle": "การค้นหาไม่พร้อมใช้งาน",
   "search.eyebrow": "สำรวจจักรวาลของคุณ",
   "search.title": "ค้นหาทุกอย่าง",

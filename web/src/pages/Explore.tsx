@@ -6,7 +6,7 @@ import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, S
 import { translate as t } from "../i18n";
 import { mediaFromLibraryItem, mediaIdentity, resolveMediaTitle } from "../mediaIdentity";
 import { homeCollectionSignature, homeFolderCacheKey, readContinueCache, readHomeCache, writeContinueCache, writeHomeCache, writeHomeFolderCache, type CachedContinueItem } from "../homeCache";
-import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
+import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
 import { mediaTypeLabel } from "../media";
 import type { Collection, CurrentProgram, LibraryItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch } from "../types";
 import type { ActionMenuAnchor } from "../components";
@@ -58,7 +58,7 @@ function mediaFromBatch(batch: ResourceBatch): MediaItem[] {
       const resourceId = stringValue(meta, "resourceId") || meta.id;
       const sourceAddonId = stringValue(meta, "sourceAddonId") || result.addonId;
       const sourceCatalogId = stringValue(meta, "sourceCatalogId", "catalogId") || result.id;
-      const sourceName = stringValue(meta, "sourceName", "source") || result.manifestId;
+      const sourceName = stringValue(meta, "sourceName", "source");
       const program = currentProgram(meta.currentProgram);
       const logo = stringValue(meta, "logo", "logoUrl");
       const poster = stringValue(meta, "poster", "posterUrl");
@@ -76,7 +76,7 @@ function mediaFromBatch(batch: ResourceBatch): MediaItem[] {
         released: stringValue(meta, "released"),
         voteAverage: typeof meta.imdbRating === "number" ? meta.imdbRating : undefined,
         externalIds: {},
-        sources: [{ id: result.addonId, kind: "addon_catalog", title: sourceName, addonId: result.addonId }],
+        sources: [{ id: result.addonId, kind: "addon_catalog", title: sourceName || "", addonId: result.addonId }],
         sourceAddonId: mediaType === "tv" ? sourceAddonId : undefined,
         sourceCatalogId: mediaType === "tv" ? sourceCatalogId : undefined,
         sourceName: mediaType === "tv" ? sourceName : undefined,
@@ -94,6 +94,42 @@ function mediaFromBatch(batch: ResourceBatch): MediaItem[] {
 
 function mediaPageIsFull(batch: ResourceBatch, limit: number): boolean {
   return batch.results.some((result) => Array.isArray(result.payload.metas) && result.payload.metas.length >= limit);
+}
+
+function summarizeSearchOutcomes(outcomes: PromiseSettledResult<ResourceBatch>[], limit: number) {
+  const resourceBatches: ResourceBatch[] = [];
+  let httpFailureCount = 0;
+  for (const outcome of outcomes) {
+    if (outcome.status === "fulfilled") resourceBatches.push(outcome.value);
+    else httpFailureCount += 1;
+  }
+  let internalFailureCount = 0;
+  let successfulResourceResultCount = 0;
+  const items: MediaItem[] = [];
+  for (const batch of resourceBatches) {
+    internalFailureCount += batch.errors.length;
+    successfulResourceResultCount += batch.results.length;
+    items.push(...mediaFromBatch(batch));
+  }
+  return {
+    resourceBatches,
+    httpFailureCount,
+    internalFailureCount,
+    successfulResourceResultCount,
+    items,
+    hasFullPage: resourceBatches.some((batch) => mediaPageIsFull(batch, limit)),
+  };
+}
+
+function mergeUniqueMedia(current: MediaItem[], incoming: MediaItem[]): MediaItem[] {
+  const seen = new Set(current.map(mediaIdentity));
+  const additions = incoming.filter((item) => {
+    const key = mediaIdentity(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return additions.length > 0 ? [...current, ...additions] : current;
 }
 
 function tvSubtitle(item: MediaItem): string {
@@ -919,22 +955,19 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
       setError("");
       void Promise.allSettled(searchTypes.map((type) => api.search(type, normalizedQuery, 0, pageSize, controller.signal))).then((outcomes) => {
         if (!active) return;
-        const fulfilled = outcomes.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
-        const values = fulfilled.flatMap(mediaFromBatch);
-        const seen = new Set<string>();
-        setItems(values.filter((item) => {
-          const key = mediaIdentity(item);
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        }));
+        const summary = summarizeSearchOutcomes(outcomes, pageSize);
+        const hasFailures = summary.httpFailureCount + summary.internalFailureCount > 0;
+        const hasSuccessfulResource = summary.successfulResourceResultCount > 0;
+        setItems(hasFailures && !hasSuccessfulResource ? [] : mergeUniqueMedia([], summary.items));
         setNextSkip(pageSize);
-        setHasMore(fulfilled.some((batch) => mediaPageIsFull(batch, pageSize)));
-        const failed = outcomes.filter((outcome) => outcome.status === "rejected").length + fulfilled.reduce((count, batch) => count + batch.errors.length, 0);
-        if (failed > 0) {
-          setError(outcomes.every((outcome) => outcome.status === "rejected")
-            ? notifyErrorMessage(t("search.error.sourcesUnavailable"), t("search.error.unavailableTitle"))
-            : t("home.browser.someTitlesLoadFailed"));
+        setHasMore(hasSuccessfulResource && summary.hasFullPage);
+        if (!hasFailures) {
+          setError("");
+        } else if (hasSuccessfulResource) {
+          setError("");
+          notifyWarning(t("search.warning.sourcesUnavailable"));
+        } else {
+          setError(t("search.error.sourcesUnavailable"));
         }
       }).finally(() => { if (active) setLoading(false); });
     }, 350);
@@ -952,25 +985,19 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
     const controller = new AbortController();
     paginationControllerRef.current = controller;
     setLoadingMore(true);
-    setError("");
     try {
       const outcomes = await Promise.allSettled(searchTypes.map((type) => api.search(type, normalizedQuery, nextSkip, pageSize, controller.signal)));
       if (controller.signal.aborted) return;
-      const fulfilled = outcomes.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
-      const incoming = fulfilled.flatMap(mediaFromBatch);
-      setItems((current) => {
-        const seen = new Set(current.map(mediaIdentity));
-        return [...current, ...incoming.filter((item) => {
-          const key = mediaIdentity(item);
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        })];
-      });
-      setNextSkip((current) => current + pageSize);
-      setHasMore(fulfilled.some((batch) => mediaPageIsFull(batch, pageSize)));
-      const failed = outcomes.filter((outcome) => outcome.status === "rejected").length + fulfilled.reduce((count, batch) => count + batch.errors.length, 0);
-      if (failed > 0) setError(fulfilled.length === 0 ? t("search.error.sourcesUnavailable") : t("home.browser.moreTitlesLoadFailed"));
+      const summary = summarizeSearchOutcomes(outcomes, pageSize);
+      const hasFailures = summary.httpFailureCount + summary.internalFailureCount > 0;
+      if (summary.successfulResourceResultCount > 0) {
+        setItems((current) => mergeUniqueMedia(current, summary.items));
+        setNextSkip((current) => current + pageSize);
+        setHasMore(summary.hasFullPage);
+      } else if (!hasFailures) {
+        setHasMore(false);
+      }
+      if (hasFailures) notifyWarning(t("search.warning.sourcesUnavailable"));
     } finally {
       if (!controller.signal.aborted) setLoadingMore(false);
     }
@@ -1041,7 +1068,9 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
       ? <div className="search-prompt"><span><Search /></span><h2>{t("search.prompt.title")}</h2><p>{t("search.prompt.description")}</p></div>
       : loading && items.length === 0
         ? <div className="media-grid" aria-busy="true">{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className={filter === "tv" ? "card-skeleton card-skeleton--landscape" : "card-skeleton"} />)}</div>
-        : items.length === 0
+        : error && items.length === 0
+          ? null
+          : items.length === 0
           ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} />
           : <div className="media-grid media-grid--adaptive">{items.map((item) => {
             const identity = mediaIdentity(item);

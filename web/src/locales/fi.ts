@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Tämä kansio on tyhjä",
   "home.source.emptyTitle": "Tämä lähde on tyhjä",
   "search.error.sourcesUnavailable": "Hakulähteet eivät ole käytettävissä.",
+  "search.warning.sourcesUnavailable": "Jotkin lähteet eivät ole tilapäisesti käytettävissä.",
   "search.error.unavailableTitle": "Haku ei ole käytettävissä",
   "search.eyebrow": "Tutki universumiasi",
   "search.title": "Hae kaikesta.",

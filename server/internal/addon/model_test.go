@@ -10,14 +10,22 @@ import (
 	"testing"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
 func TestManifestSupportsOpaqueTypesIDsAndCatalogExtras(t *testing.T) {
 	raw := []byte(`{
 		"id":"org.example.complete",
 		"version":"1.2.3-beta.1+build.7",
 		"name":"Complete",
-		"types":["movie","anime-special"],
+		"types":["movie","anime-special","all"],
 		"idPrefixes":["tt","global:"],
 		"resources":[
+			"catalog",
+			"addon_catalog",
 			"meta",
 			{"name":"stream","types":["anime-special"],"idPrefixes":["kitsu:","addon/custom:"]},
 			{"name":"subtitles","types":["anime-special"],"idPrefixes":[]},
@@ -68,6 +76,70 @@ func TestManifestSupportsOpaqueTypesIDsAndCatalogExtras(t *testing.T) {
 		})
 	}
 }
+func TestManifestCatalogSupportRequiresDeclaredTypeAndResourceCapability(t *testing.T) {
+	movieTypes := []string{"movie"}
+	seriesTypes := []string{"series"}
+	catalog := ManifestCatalog{Type: "movie", ID: "search"}
+	path := ResourcePath{Resource: "catalog", Type: "movie", ID: "search"}
+	tests := []struct {
+		name     string
+		manifest Manifest
+		want     bool
+	}{
+		{
+			name: "short catalog resource",
+			manifest: Manifest{
+				Types:     movieTypes,
+				Resources: []ManifestResource{{Name: "catalog", Short: true}},
+				Catalogs:  []ManifestCatalog{catalog},
+			},
+			want: true,
+		},
+		{
+			name: "catalog type absent from manifest",
+			manifest: Manifest{
+				Types:     seriesTypes,
+				Resources: []ManifestResource{{Name: "catalog", Short: true}},
+				Catalogs:  []ManifestCatalog{catalog},
+			},
+		},
+		{
+			name: "catalog resource absent",
+			manifest: Manifest{
+				Types:     movieTypes,
+				Resources: []ManifestResource{{Name: "meta", Short: true}},
+				Catalogs:  []ManifestCatalog{catalog},
+			},
+		},
+		{
+			name: "full catalog resource excludes type",
+			manifest: Manifest{
+				Types:     movieTypes,
+				Resources: []ManifestResource{{Name: "catalog", Types: &seriesTypes}},
+				Catalogs:  []ManifestCatalog{catalog},
+			},
+		},
+		{
+			name: "matching catalog capability may follow another type",
+			manifest: Manifest{
+				Types: movieTypes,
+				Resources: []ManifestResource{
+					{Name: "catalog", Types: &seriesTypes},
+					{Name: "catalog", Types: &movieTypes},
+				},
+				Catalogs: []ManifestCatalog{catalog},
+			},
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.manifest.Supports(path); got != test.want {
+				t.Fatalf("Supports() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
 
 func TestManifestAppliesRequiredCatalogDefaults(t *testing.T) {
 	manifest, _, err := ParseManifest([]byte(`{
@@ -99,40 +171,6 @@ func TestManifestAppliesRequiredCatalogDefaults(t *testing.T) {
 	})
 	if len(explicit.Extra) != 1 || explicit.Extra[0].Value != "Drama" {
 		t.Fatalf("explicit extra was overwritten: %#v", explicit.Extra)
-	}
-}
-
-func TestManifestTVSupportRequiresDeclaredTypeAndCatalog(t *testing.T) {
-	tests := []struct {
-		name     string
-		types    []string
-		catalogs []ManifestCatalog
-		want     bool
-	}{
-		{
-			name:     "type and catalog",
-			types:    []string{"movie", "tv"},
-			catalogs: []ManifestCatalog{{Type: "tv", ID: "live"}},
-			want:     true,
-		},
-		{
-			name:     "catalog without manifest type",
-			types:    []string{"movie"},
-			catalogs: []ManifestCatalog{{Type: "tv", ID: "live"}},
-		},
-		{
-			name:     "manifest type without catalog",
-			types:    []string{"tv"},
-			catalogs: []ManifestCatalog{{Type: "movie", ID: "popular"}},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			manifest := Manifest{Types: test.types, Catalogs: test.catalogs}
-			if got := manifest.SupportsTV(); got != test.want {
-				t.Fatalf("SupportsTV() = %v, want %v", got, test.want)
-			}
-		})
 	}
 }
 
@@ -223,16 +261,26 @@ func TestHTTPTransportEncodesOpaqueResourceAndPreservesPayload(t *testing.T) {
 	}
 }
 
-func TestHTTPTransportRejectsInvalidResponsesAndProviderErrors(t *testing.T) {
+func TestHTTPTransportRejectsInvalidResponsesAndClassifiesProviderErrors(t *testing.T) {
 	tests := []struct {
-		name   string
-		status int
-		body   string
-		want   error
+		name           string
+		resource       string
+		status         int
+		body           string
+		want           error
+		checkTemporary bool
+		wantTemporary  bool
 	}{
-		{name: "non object JSON", status: http.StatusOK, body: `[]`, want: ErrInvalidResponse},
-		{name: "invalid JSON", status: http.StatusOK, body: `{`, want: ErrInvalidResponse},
-		{name: "provider status", status: http.StatusBadGateway, body: `{}`, want: ErrProviderUnavailable},
+		{name: "non object JSON", resource: "meta", status: http.StatusOK, body: `[]`, want: ErrInvalidResponse},
+		{name: "invalid JSON", resource: "meta", status: http.StatusOK, body: `{`, want: ErrInvalidResponse},
+		{name: "missing meta", resource: "meta", status: http.StatusOK, body: `{}`, want: ErrInvalidResponse},
+		{name: "null meta", resource: "meta", status: http.StatusOK, body: `{"meta":null}`, want: ErrInvalidResponse},
+		{name: "catalog metas must be array", resource: "catalog", status: http.StatusOK, body: `{"metas":{}}`, want: ErrInvalidResponse},
+		{name: "stream requires streams", resource: "stream", status: http.StatusOK, body: `{}`, want: ErrInvalidResponse},
+		{name: "subtitles requires subtitles", resource: "subtitles", status: http.StatusOK, body: `{}`, want: ErrInvalidResponse},
+		{name: "rate limit is temporary", resource: "meta", status: http.StatusTooManyRequests, body: `{}`, want: ErrProviderUnavailable, checkTemporary: true, wantTemporary: true},
+		{name: "server failure is temporary", resource: "meta", status: http.StatusBadGateway, body: `{}`, want: ErrProviderUnavailable, checkTemporary: true, wantTemporary: true},
+		{name: "client failure is permanent", resource: "meta", status: http.StatusNotFound, body: `{}`, want: ErrProviderUnavailable, checkTemporary: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -242,11 +290,39 @@ func TestHTTPTransportRejectsInvalidResponsesAndProviderErrors(t *testing.T) {
 			}))
 			defer server.Close()
 			transport := NewHTTPTransport(server.Client())
-			_, _, err := transport.Resource(context.Background(), server.URL+"/manifest.json", ResourcePath{Resource: "meta", Type: "custom", ID: "id"})
+			_, _, err := transport.Resource(context.Background(), server.URL+"/manifest.json", ResourcePath{Resource: test.resource, Type: "custom", ID: "id"})
 			if !errors.Is(err, test.want) {
 				t.Fatalf("expected %v, got %v", test.want, err)
 			}
+			if test.checkTemporary {
+				if got := isTemporaryProviderError(err); got != test.wantTemporary {
+					t.Fatalf("temporary = %v, want %v", got, test.wantTemporary)
+				}
+			}
 		})
+	}
+}
+
+func TestHTTPTransportPreservesNetworkCause(t *testing.T) {
+	networkCause := errors.New("dial tcp: connection refused")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, networkCause
+	})}
+	transport := NewHTTPTransport(client)
+
+	_, _, err := transport.Resource(context.Background(), "https://addon.example/manifest.json", ResourcePath{
+		Resource: "meta",
+		Type:     "movie",
+		ID:       "tt123",
+	})
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("expected provider unavailable, got %v", err)
+	}
+	if !errors.Is(err, networkCause) {
+		t.Fatalf("network cause was not preserved: %v", err)
+	}
+	if !isTemporaryProviderError(err) {
+		t.Fatalf("network error is not classified temporary: %v", err)
 	}
 }
 

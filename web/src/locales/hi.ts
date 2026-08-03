@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "यह फ़ोल्डर खाली है",
   "home.source.emptyTitle": "यह स्रोत खाली है",
   "search.error.sourcesUnavailable": "खोज के स्रोत उपलब्ध नहीं हैं।",
+  "search.warning.sourcesUnavailable": "कुछ स्रोत अस्थायी रूप से उपलब्ध नहीं हैं।",
   "search.error.unavailableTitle": "खोज उपलब्ध नहीं है",
   "search.eyebrow": "अपनी दुनिया खोजें",
   "search.title": "सब कुछ खोजें।",

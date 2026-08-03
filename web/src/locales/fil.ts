@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Walang laman ang folder na ito",
   "home.source.emptyTitle": "Walang laman ang source na ito",
   "search.error.sourcesUnavailable": "Hindi available ang mga source para sa paghahanap.",
+  "search.warning.sourcesUnavailable": "Pansamantalang hindi magagamit ang ilang pinagmulan.",
   "search.error.unavailableTitle": "Hindi available ang paghahanap",
   "search.eyebrow": "Tuklasin ang mundo mo",
   "search.title": "Hanapin ang lahat.",

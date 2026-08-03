@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Dieser Ordner ist leer",
   "home.source.emptyTitle": "Diese Quelle ist leer",
   "search.error.sourcesUnavailable": "Die Suchquellen sind nicht verfügbar.",
+  "search.warning.sourcesUnavailable": "Einige Quellen sind vorübergehend nicht verfügbar.",
   "search.error.unavailableTitle": "Suche nicht verfügbar",
   "search.eyebrow": "Erkunde dein Universum",
   "search.title": "Durchsuche alles.",

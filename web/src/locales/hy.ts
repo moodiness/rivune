@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Այս պանակը դատարկ է",
   "home.source.emptyTitle": "Այս աղբյուրը դատարկ է",
   "search.error.sourcesUnavailable": "Որոնման աղբյուրները հասանելի չեն։",
+  "search.warning.sourcesUnavailable": "Որոշ աղբյուրներ ժամանակավորապես հասանելի չեն։",
   "search.error.unavailableTitle": "Որոնումը հասանելի չէ",
   "search.eyebrow": "Բացահայտեք ձեր տիեզերքը",
   "search.title": "Որոնեք ամեն ինչ։",

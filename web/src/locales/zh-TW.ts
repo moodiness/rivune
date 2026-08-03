@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "此資料夾是空的",
   "home.source.emptyTitle": "此來源是空的",
   "search.error.sourcesUnavailable": "搜尋來源無法使用。",
+  "search.warning.sourcesUnavailable": "部分來源暫時無法使用。",
   "search.error.unavailableTitle": "搜尋無法使用",
   "search.eyebrow": "探索您的專屬宇宙",
   "search.title": "搜尋所有內容。",

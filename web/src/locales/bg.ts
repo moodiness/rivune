@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Тази папка е празна",
   "home.source.emptyTitle": "Този източник е празен",
   "search.error.sourcesUnavailable": "Източниците за търсене не са достъпни.",
+  "search.warning.sourcesUnavailable": "Някои източници временно не са достъпни.",
   "search.error.unavailableTitle": "Търсенето не е достъпно",
   "search.eyebrow": "Разгледайте своята вселена",
   "search.title": "Търсете навсякъде.",

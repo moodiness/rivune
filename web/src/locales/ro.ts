@@ -1147,6 +1147,7 @@ const catalog = {
   "home.folder.emptyTitle": "Acest folder este gol",
   "home.source.emptyTitle": "Această sursă este goală",
   "search.error.sourcesUnavailable": "Sursele de căutare nu sunt disponibile.",
+  "search.warning.sourcesUnavailable": "Unele surse sunt temporar indisponibile.",
   "search.error.unavailableTitle": "Căutarea nu este disponibilă",
   "search.eyebrow": "Explorează-ți universul",
   "search.title": "Caută orice.",
