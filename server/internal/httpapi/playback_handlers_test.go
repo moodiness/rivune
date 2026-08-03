@@ -82,6 +82,7 @@ func TestPlaybackSourcesReturnsOpaqueReferences(t *testing.T) {
 	api.playback = service
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/sources", stringsReader(`{
 		"mediaType":"movie",
+		"addonId":"11111111-1111-4111-8111-111111111111",
 		"resourceId":"tt1234567",
 		"capabilities":{"streamingProtocols":["http"],"containers":["mp4"],"processingModes":["remux"],"mediaProfiles":[{"container":"mp4","videoCodec":"h264","audioCodec":"aac"}],"externalPlayers":["system"]}
 	}`))
@@ -94,7 +95,8 @@ func TestPlaybackSourcesReturnsOpaqueReferences(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"sourceRef":"opaque-source-reference"`) {
 		t.Fatalf("unexpected sources response: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if service.sourcesInput.ResourceID != "tt1234567" ||
+	if service.sourcesInput.AddonID != "11111111-1111-4111-8111-111111111111" ||
+		service.sourcesInput.ResourceID != "tt1234567" ||
 		len(service.sourcesInput.Capabilities.StreamingProtocols) != 1 ||
 		len(service.sourcesInput.Capabilities.ProcessingModes) != 1 ||
 		len(service.sourcesInput.Capabilities.MediaProfiles) != 1 ||

@@ -168,6 +168,13 @@ export type CollectionExportDocument = {
 export type CollectionImportResult = { imported: number; collections: Collection[] };
 
 export type SourceReference = { id: string; kind: string; title: string; addonId?: string };
+export type CurrentProgram = string | {
+  title?: string;
+  name?: string;
+  description?: string;
+  start?: string;
+  end?: string;
+};
 export type MediaItem = {
   id: string;
   titleId?: string;
@@ -186,6 +193,15 @@ export type MediaItem = {
   popularity?: number;
   externalIds?: Record<string, string>;
   sources?: SourceReference[];
+  sourceAddonId?: string;
+  sourceCatalogId?: string;
+  sourceName?: string;
+  resourceId?: string;
+  country?: string;
+  language?: string;
+  category?: string;
+  available?: boolean;
+  currentProgram?: CurrentProgram;
   raw?: Record<string, unknown>;
 };
 export type TrailerMetadata = {
@@ -302,7 +318,7 @@ export type InstalledAddon = {
   installedAt: string;
   updatedAt: string;
 };
-export type ResourceResult = { addonId: string; manifestId: string; transportUrl: string; resource: string; type: string; id: string; payload: Record<string, unknown> };
+export type ResourceResult = { addonId: string; manifestId: string; transportUrl: string; resource: string; type: string; id: string; extra?: CollectionExtra[]; payload: Record<string, unknown> };
 export type ResourceBatch = { results: ResourceResult[]; errors: { addonId: string; manifestId: string; code: string; message: string }[] };
 
 export type PlaybackMediaProfile = { container: string; videoCodec: string; audioCodec?: string };
@@ -497,6 +513,14 @@ export type LibraryItem = {
   backgroundUrl?: string;
   releaseInfo?: string;
   released?: string;
+  sourceAddonId?: string;
+  sourceCatalogId?: string;
+  sourceName?: string;
+  country?: string;
+  language?: string;
+  category?: string;
+  available?: boolean;
+  currentProgram?: CurrentProgram;
   addedAt: string;
   updatedAt: string;
 };
@@ -528,6 +552,13 @@ export type TitleReference = {
   backgroundUrl?: string;
   releaseInfo?: string;
   released?: string;
+  sourceAddonId?: string;
+  sourceCatalogId?: string;
+  sourceName?: string;
+  country?: string;
+  language?: string;
+  category?: string;
+  available?: boolean;
 };
 export type ContinueItem = {
   titleId: string;

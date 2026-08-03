@@ -1566,9 +1566,13 @@ paths:
       summary: Search addon catalogs
       operationId: searchAddonCatalogs
       description: >
-        Calls every catalog of the requested type that declares support for all
-        supplied extras. The search query parameter is required; arbitrary
-        additional and repeated Stremio extras are forwarded unchanged.
+        Calls every searchable catalog of the requested type in installed-addon
+        and manifest order. Search is always sent. Skip and limit are adapted to
+        each catalog and sent only when declared; a positive skip excludes
+        catalogs that do not declare pagination. Other repeated Stremio extras
+        are preserved, catalog defaults are applied, and provider failures remain
+        isolated in the response batch. TV searches additionally require both
+        `tv` in the manifest types and at least one TV catalog declaration.
       security:
         - bearerAuth: []
       parameters:
@@ -1577,6 +1581,21 @@ paths:
           required: true
           schema:
             type: string
+        - name: skip
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Per-catalog offset. Positive values exclude catalogs that do not declare the skip extra.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 24
+          description: Requested page size, sent only to catalogs that declare the limit extra.
       responses:
         "200":
           description: Search catalog responses in installed-addon and manifest order.
@@ -2088,7 +2107,7 @@ paths:
     post:
       summary: Resolve a provider title identity
       operationId: resolveTitle
-      description: Resolves a provider identifier to a stable server title and refreshes its display snapshot.
+      description: Resolves a provider identifier to a stable server title and refreshes its display snapshot. TV identities are derived server-side from sourceAddonId and resourceId after verifying that the selected profile can access the addon; stream URLs are not accepted.
       security:
         - bearerAuth: []
       requestBody:
@@ -2206,7 +2225,7 @@ paths:
     post:
       summary: List opaque playback source references for a device
       operationId: listPlaybackSources
-      description: Fetches installed addon stream resources once and returns display metadata with session-bound opaque references. Provider URLs and private headers remain server-side.
+      description: Fetches the requested addon's stream resource when addonId is present, otherwise fans out to installed addons, and returns display metadata with session-bound opaque references. Provider URLs and private headers remain server-side.
       security:
         - bearerAuth: []
       requestBody:
@@ -2476,6 +2495,7 @@ paths:
     get:
       summary: List library
       operationId: listLibrary
+      description: Returns entries for the selected profile. TV entries remain listed when their addon disappears and expose available=false until removed.
       security:
         - bearerAuth: []
       parameters:
@@ -2483,7 +2503,7 @@ paths:
           in: query
           schema:
             type: string
-            enum: [movie, series]
+            enum: [movie, series, tv]
         - $ref: "#/components/parameters/Page"
         - name: pageSize
           in: query
@@ -3111,6 +3131,9 @@ components:
         isRequired:
           type: boolean
           default: false
+        default:
+          type: string
+          description: Default extra value applied when the caller omits this property.
         options:
           type: array
           items:
@@ -3192,6 +3215,20 @@ components:
             /api/v1/artwork cache URLs.
         cache:
           $ref: "#/components/schemas/AddonCachePolicy"
+        extra:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddonExtraValue"
+          description: Exact ordered extras sent for this resource request after catalog-specific adaptation and defaults.
+    AddonExtraValue:
+      type: object
+      additionalProperties: false
+      required: [name, value]
+      properties:
+        name:
+          type: string
+        value:
+          type: string
     AddonResourceFailure:
       type: object
       additionalProperties: false
@@ -5319,6 +5356,10 @@ components:
         addonId:
           type: string
           format: uuid
+        manifestId:
+          type: string
+        catalogId:
+          type: string
     CollectionSourceFailure:
       type: object
       additionalProperties: false
@@ -5379,11 +5420,23 @@ components:
     TitleResolveInput:
       type: object
       additionalProperties: false
-      required: [mediaType, provider, externalId, resourceId, title]
+      required: [mediaType, provider, resourceId, title]
+      allOf:
+        - if:
+            properties:
+              mediaType:
+                const: tv
+          then:
+            required: [sourceAddonId]
+            properties:
+              provider:
+                const: addon
+          else:
+            required: [externalId]
       properties:
         mediaType:
           type: string
-          enum: [movie, series]
+          enum: [movie, series, tv]
         provider:
           type: string
           pattern: "^[a-z0-9][a-z0-9._-]{0,31}$"
@@ -5411,6 +5464,29 @@ components:
         released:
           type: string
           format: date
+        sourceAddonId:
+          type: string
+          format: uuid
+        sourceCatalogId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        sourceName:
+          type: string
+          minLength: 1
+          maxLength: 500
+        country:
+          type: string
+          minLength: 1
+          maxLength: 128
+        language:
+          type: string
+          minLength: 1
+          maxLength: 128
+        category:
+          type: string
+          minLength: 1
+          maxLength: 256
     CalendarEventList:
       type: object
       additionalProperties: false
@@ -5468,7 +5544,7 @@ components:
           format: uuid
         mediaType:
           type: string
-          enum: [movie, series]
+          enum: [movie, series, tv]
         provider:
           type: string
         externalId:
@@ -5483,17 +5559,30 @@ components:
           type: string
         releaseInfo:
           type: string
+        sourceAddonId:
+          type: string
+          format: uuid
+        sourceCatalogId:
+          type: string
+        sourceName:
+          type: string
+        country:
+          type: string
+        language:
+          type: string
+        category:
+          type: string
     LibraryItem:
       type: object
       additionalProperties: false
-      required: [titleId, mediaType, addedAt, updatedAt]
+      required: [titleId, mediaType, available, addedAt, updatedAt]
       properties:
         titleId:
           type: string
           format: uuid
         mediaType:
           type: string
-          enum: [movie, series]
+          enum: [movie, series, tv]
         provider:
           type: string
         externalId:
@@ -5508,6 +5597,22 @@ components:
           type: string
         releaseInfo:
           type: string
+        sourceAddonId:
+          type: string
+          format: uuid
+        sourceCatalogId:
+          type: string
+        sourceName:
+          type: string
+        country:
+          type: string
+        language:
+          type: string
+        category:
+          type: string
+        available:
+          type: boolean
+          description: For TV channels, false when the source addon is no longer accessible to the selected profile.
         addedAt:
           type: string
           format: date-time
@@ -5572,6 +5677,9 @@ components:
           type: string
           minLength: 1
           maxLength: 64
+        addonId:
+          type: string
+          format: uuid
         resourceId:
           type: string
           minLength: 1

@@ -434,6 +434,68 @@ func TestMergeItemsKeepsMovieAndSeriesWithSameTMDBID(t *testing.T) {
 	}
 }
 
+type staticAddonProvider struct {
+	result addon.ResourceResult
+}
+
+func (provider staticAddonProvider) Fetch(context.Context, auth.Principal, string, addon.ResourcePath) (addon.ResourceResult, error) {
+	return provider.result, nil
+}
+
+func TestResolveProjectsAddonCatalogIdentity(t *testing.T) {
+	service := NewService(nil, staticAddonProvider{result: addon.ResourceResult{
+		Payload: []byte(`{"metas":[{"id":"channel-1","type":"tv","name":"News"}]}`),
+	}}, nil, nil, nil)
+	folder := Folder{Sources: []Source{{
+		ID: "source-id", Kind: SourceKindAddonCatalog, Title: "Live",
+		AddonCatalog: &AddonCatalogSource{
+			AddonID: "addon-id", ManifestID: "org.example.live", Type: MediaTypeTV, CatalogID: "news",
+		},
+	}}}
+
+	resolved, err := service.resolve(context.Background(), auth.Principal{}, "collection-id", folder, 1, 100, "en-US", "US")
+	if err != nil {
+		t.Fatalf("resolve addon catalog identity: %v", err)
+	}
+	if len(resolved.Items) != 1 || len(resolved.Items[0].Sources) != 1 {
+		t.Fatalf("unexpected resolved items: %+v", resolved.Items)
+	}
+	reference := resolved.Items[0].Sources[0]
+	if reference.AddonID != "addon-id" || reference.ManifestID != "org.example.live" || reference.CatalogID != "news" {
+		t.Fatalf("addon catalog identity was not projected: %+v", reference)
+	}
+}
+
+func TestMergeItemsScopesLiveTVIdentityToAddonAndResource(t *testing.T) {
+	items := mergeItems([]Item{
+		{
+			ID: "channel-1", MediaType: MediaTypeTV, Title: "News",
+			ExternalIDs: map[string]string{"tvdb": "same-metadata"},
+			Sources:     []SourceReference{{AddonID: "addon-a", CatalogID: "news"}},
+		},
+		{
+			ID: "channel-1", MediaType: MediaTypeTV, Title: "News",
+			ExternalIDs: map[string]string{"tvdb": "same-metadata"},
+			Sources:     []SourceReference{{AddonID: "addon-a", CatalogID: "all"}},
+		},
+		{
+			ID: "channel-1", MediaType: MediaTypeTV, Title: "News",
+			ExternalIDs: map[string]string{"tvdb": "same-metadata"},
+			Sources:     []SourceReference{{AddonID: "addon-b", CatalogID: "news"}},
+		},
+	})
+
+	if len(items) != 2 {
+		t.Fatalf("unexpected live TV merge result: %+v", items)
+	}
+	if len(items[0].Sources) != 2 || items[0].Sources[0].AddonID != "addon-a" || items[0].Sources[1].CatalogID != "all" {
+		t.Fatalf("same addon channel was not deduplicated across catalogs: %+v", items[0])
+	}
+	if len(items[1].Sources) != 1 || items[1].Sources[0].AddonID != "addon-b" {
+		t.Fatalf("distinct addon channel was merged: %+v", items[1])
+	}
+}
+
 func TestNormalizeMediaTypePreservesLiveTV(t *testing.T) {
 	if got := normalizeMediaType("tv"); got != MediaTypeTV {
 		t.Fatalf("live TV type normalized to %q", got)

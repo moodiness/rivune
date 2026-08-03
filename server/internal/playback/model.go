@@ -42,6 +42,7 @@ type Capabilities struct {
 
 type SourcesInput struct {
 	MediaType                       string       `json:"mediaType"`
+	AddonID                         string       `json:"addonId,omitempty"`
 	ResourceID                      string       `json:"resourceId"`
 	Capabilities                    Capabilities `json:"capabilities"`
 	PreferredAudioLanguage          string       `json:"-"`

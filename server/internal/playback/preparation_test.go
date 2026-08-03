@@ -20,6 +20,14 @@ type preparationResourceFetcher struct {
 	subtitleCalls atomic.Int32
 }
 
+func (fetcher *preparationResourceFetcher) Fetch(ctx context.Context, principal auth.Principal, _ string, resource addon.ResourcePath) (addon.ResourceResult, error) {
+	batch, err := fetcher.FetchAll(ctx, principal, resource)
+	if err != nil || len(batch.Results) == 0 {
+		return addon.ResourceResult{}, err
+	}
+	return batch.Results[0], nil
+}
+
 func (fetcher *preparationResourceFetcher) FetchAll(_ context.Context, _ auth.Principal, resource addon.ResourcePath) (addon.ResourceBatch, error) {
 	switch resource.Resource {
 	case "stream":

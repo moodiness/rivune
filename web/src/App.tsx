@@ -4,6 +4,7 @@ import { useAuth } from "./auth";
 import { api, APIError, clearMaintenanceMode, MAINTENANCE_MODE_EVENT, maintenanceModeMessage } from "./api";
 import { Button, RivuneMark } from "./components";
 import { setLocale, translate as t } from "./i18n";
+import { mediaIdentity, mediaResourceID } from "./mediaIdentity";
 import { configureNotificationDuration, notifyInfo } from "./notifications";
 import { Shell } from "./Shell";
 import type { View } from "./Shell";
@@ -102,6 +103,24 @@ function cleanMediaRoute(): MediaRoute | null {
     };
     return { item, origin };
   }
+  if (segments[1] === "tv" && segments.length === 4) {
+    const sourceAddonId = segments[2] ?? "";
+    const resourceId = segments[3] ?? "";
+    if (!sourceAddonId || !resourceId) return null;
+    const stored = storedRouteItem("tv");
+    const storedMatches = stored?.sourceAddonId === sourceAddonId && mediaResourceID(stored) === resourceId;
+    const item: MediaItem = storedMatches
+      ? { ...stored }
+      : {
+        id: resourceId,
+        resourceId,
+        sourceAddonId,
+        mediaType: "tv",
+        title: t("media.untitled"),
+      };
+    return { item, origin };
+  }
+
 
   if (segments.length !== 3) return null;
   const mediaType = segments[1] ?? "";
@@ -187,6 +206,9 @@ function mediaRouteURL(item: MediaItem, _origin: View, context?: MediaRouteConte
       if (episodeNumber !== undefined && Number.isInteger(episodeNumber)) path += `/episode/${episodeNumber}`;
     }
     return path;
+  }
+  if (item.mediaType === "tv" && item.sourceAddonId) {
+    return `/media/tv/${encodeRouteID(item.sourceAddonId)}/${encodeRouteID(mediaResourceID(item))}`;
   }
   return `/media/${encodeURIComponent(item.mediaType)}/${encodeRouteID(item.id)}`;
 }
@@ -354,7 +376,7 @@ export default function App() {
   const [view, setViewState] = useState<View>(initialRoute.view);
   const [mediaRoute, setMediaRoute] = useState<MediaRoute | null>(initialRoute.media);
   const [homeResetKey, setHomeResetKey] = useState(0);
-  const [mediaDataRevisions, setMediaDataRevisions] = useState({ home: 0, library: 0 });
+  const [mediaDataRevisions, setMediaDataRevisions] = useState({ home: 0, search: 0, library: 0 });
   const mediaRouteRef = useRef<MediaRoute | null>(initialRoute.media);
   const invokingElementRef = useRef<HTMLElement | null>(null);
   const routeSurfaceRef = useRef<HTMLDivElement>(null);
@@ -382,6 +404,13 @@ export default function App() {
   function invalidateMediaOrigin(origin: View) {
     if (origin !== "home" && origin !== "library") return;
     setMediaDataRevisions((revisions) => ({ ...revisions, [origin]: revisions[origin] + 1 }));
+  }
+  function invalidateLibrarySurfaces() {
+    setMediaDataRevisions((revisions) => ({
+      home: revisions.home + 1,
+      search: revisions.search + 1,
+      library: revisions.library + 1,
+    }));
   }
 
   const retryMaintenance = useCallback(async () => {
@@ -547,9 +576,9 @@ export default function App() {
   return <Shell view={view} onView={setView}>
     <div ref={routeSurfaceRef} tabIndex={-1} className={mediaRoute ? "route-surface route-surface--hidden" : "route-surface"}>
       <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingSpace")}</span></div>}>
-        {view === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} /> : view === "search" ? <SearchPage onOpenMedia={openMedia} /> : view === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : view === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
+        {view === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} /> : view === "search" ? <SearchPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.search} onLibraryMutation={invalidateLibrarySurfaces} /> : view === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : view === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
       </Suspense>
     </div>
-    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaRoute.item.mediaType}:${mediaRoute.item.id}:${mediaRoute.item.titleId ?? ""}`} item={mediaRoute.item} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} /></Suspense>}
+    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaIdentity(mediaRoute.item)}:${mediaRoute.item.titleId ?? ""}`} item={mediaRoute.item} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} onLibraryMutation={invalidateLibrarySurfaces} /></Suspense>}
   </Shell>;
 }

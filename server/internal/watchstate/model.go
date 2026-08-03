@@ -3,41 +3,60 @@ package watchstate
 import "time"
 
 type ResolveTitleInput struct {
-	MediaType     string
-	Provider      string
-	ExternalID    string
-	ResourceID    string
-	Title         string
-	PosterURL     string
-	BackgroundURL string
-	ReleaseInfo   string
-	Released      string
+	MediaType       string
+	Provider        string
+	ExternalID      string
+	ResourceID      string
+	Title           string
+	PosterURL       string
+	BackgroundURL   string
+	ReleaseInfo     string
+	Released        string
+	SourceAddonID   string
+	SourceCatalogID string
+	SourceName      string
+	Country         string
+	Language        string
+	Category        string
 }
 
 type TitleReference struct {
-	TitleID       string `json:"titleId"`
-	MediaType     string `json:"mediaType"`
-	Provider      string `json:"provider"`
-	ExternalID    string `json:"externalId"`
-	ResourceID    string `json:"resourceId"`
-	Title         string `json:"title"`
-	PosterURL     string `json:"posterUrl,omitempty"`
-	BackgroundURL string `json:"backgroundUrl,omitempty"`
-	ReleaseInfo   string `json:"releaseInfo,omitempty"`
+	TitleID         string `json:"titleId"`
+	MediaType       string `json:"mediaType"`
+	Provider        string `json:"provider"`
+	ExternalID      string `json:"externalId"`
+	ResourceID      string `json:"resourceId"`
+	Title           string `json:"title"`
+	PosterURL       string `json:"posterUrl,omitempty"`
+	BackgroundURL   string `json:"backgroundUrl,omitempty"`
+	ReleaseInfo     string `json:"releaseInfo,omitempty"`
+	SourceAddonID   string `json:"sourceAddonId,omitempty"`
+	SourceCatalogID string `json:"sourceCatalogId,omitempty"`
+	SourceName      string `json:"sourceName,omitempty"`
+	Country         string `json:"country,omitempty"`
+	Language        string `json:"language,omitempty"`
+	Category        string `json:"category,omitempty"`
 }
 
 type LibraryItem struct {
-	TitleID       string    `json:"titleId"`
-	MediaType     string    `json:"mediaType"`
-	Provider      string    `json:"provider,omitempty"`
-	ExternalID    string    `json:"externalId,omitempty"`
-	ResourceID    string    `json:"resourceId,omitempty"`
-	Title         string    `json:"title,omitempty"`
-	PosterURL     string    `json:"posterUrl,omitempty"`
-	BackgroundURL string    `json:"backgroundUrl,omitempty"`
-	ReleaseInfo   string    `json:"releaseInfo,omitempty"`
-	AddedAt       time.Time `json:"addedAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	TitleID         string    `json:"titleId"`
+	MediaType       string    `json:"mediaType"`
+	Provider        string    `json:"provider,omitempty"`
+	ExternalID      string    `json:"externalId,omitempty"`
+	ResourceID      string    `json:"resourceId,omitempty"`
+	Title           string    `json:"title,omitempty"`
+	PosterURL       string    `json:"posterUrl,omitempty"`
+	BackgroundURL   string    `json:"backgroundUrl,omitempty"`
+	ReleaseInfo     string    `json:"releaseInfo,omitempty"`
+	SourceAddonID   string    `json:"sourceAddonId,omitempty"`
+	SourceCatalogID string    `json:"sourceCatalogId,omitempty"`
+	SourceName      string    `json:"sourceName,omitempty"`
+	Country         string    `json:"country,omitempty"`
+	Language        string    `json:"language,omitempty"`
+	Category        string    `json:"category,omitempty"`
+	Available       bool      `json:"available"`
+	AddedAt         time.Time `json:"addedAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
 type LibraryPage struct {

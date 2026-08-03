@@ -73,12 +73,14 @@ function identityKeys(item: MediaItem, locale: string, titleID?: string): string
   const itemTitleID = normalized(item.titleId);
   if (canonicalTitleID) identities.push(`title:${canonicalTitleID}`);
   if (itemTitleID) identities.push(`title:${itemTitleID}`);
-  const resourceID = normalized(item.id);
+  const resourceID = normalized(item.resourceId || item.id);
   const resourceIdentities: string[] = [];
   if (resourceID) {
+    const tvSourceIdentity = item.mediaType === "tv" ? normalized(item.sourceAddonId) : "";
+    if (tvSourceIdentity) resourceIdentities.push(`resource:${tvSourceIdentity}:${resourceID}`);
     for (const source of item.sources ?? []) {
       const sourceIdentity = normalized(source.addonId || source.id);
-      if (sourceIdentity) resourceIdentities.push(`resource:${sourceIdentity}:${resourceID}`);
+      if (sourceIdentity && !resourceIdentities.includes(`resource:${sourceIdentity}:${resourceID}`)) resourceIdentities.push(`resource:${sourceIdentity}:${resourceID}`);
     }
     if (resourceIdentities.length === 0) resourceIdentities.push(`resource:${resourceID}`);
   }

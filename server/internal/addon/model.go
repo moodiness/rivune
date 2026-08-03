@@ -115,6 +115,13 @@ type ExtraValue struct {
 	Value string `json:"value"`
 }
 
+type CatalogSearchInput struct {
+	Search string
+	Skip   int
+	Limit  int
+	Extra  []ExtraValue
+}
+
 type ResourcePath struct {
 	Resource string       `json:"resource"`
 	Type     string       `json:"type"`
@@ -162,6 +169,7 @@ type ResourceResult struct {
 	ID           string          `json:"id"`
 	Payload      json.RawMessage `json:"payload"`
 	Cache        CachePolicy     `json:"cache"`
+	Extra        []ExtraValue    `json:"extra,omitempty"`
 }
 
 type ResourceFailure struct {
@@ -284,6 +292,26 @@ func (manifest Manifest) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (manifest Manifest) SupportsTV() bool {
+	if !contains(manifest.Types, "tv") {
+		return false
+	}
+	for _, catalog := range manifest.Catalogs {
+		if catalog.Type == "tv" {
+			return true
+		}
+	}
+	return false
+}
+
+func (catalog ManifestCatalog) SupportsSearch() bool {
+	return catalog.DeclaresExtra("search")
+}
+
+func (catalog ManifestCatalog) DeclaresExtra(name string) bool {
+	return hasExtra(catalog.extraProps(), name)
 }
 
 func (manifest Manifest) Supports(path ResourcePath) bool {

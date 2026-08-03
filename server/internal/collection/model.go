@@ -164,10 +164,12 @@ type ImportResult struct {
 }
 
 type SourceReference struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	Title   string `json:"title"`
-	AddonID string `json:"addonId,omitempty"`
+	ID         string `json:"id"`
+	Kind       string `json:"kind"`
+	Title      string `json:"title"`
+	AddonID    string `json:"addonId,omitempty"`
+	ManifestID string `json:"manifestId,omitempty"`
+	CatalogID  string `json:"catalogId,omitempty"`
 }
 
 type Item struct {

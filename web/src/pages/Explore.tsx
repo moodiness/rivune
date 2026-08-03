@@ -1,13 +1,14 @@
-import { ArrowLeft, ArrowRight, Bookmark, Clapperboard, Compass, Film, Info, ListVideo, LoaderCircle, Play, RotateCcw, Search, Sparkles, Star, Trash2, Tv, WandSparkles, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Bookmark, Check, Clapperboard, Compass, Film, Info, ListVideo, LoaderCircle, Play, Radio, RefreshCw, RotateCcw, Search, Sparkles, Star, Trash2, Tv, WandSparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Skeleton } from "../components";
 import { translate as t } from "../i18n";
+import { mediaFromLibraryItem, mediaIdentity, resolveMediaTitle } from "../mediaIdentity";
 import { homeCollectionSignature, homeFolderCacheKey, readContinueCache, readHomeCache, writeContinueCache, writeHomeCache, writeHomeFolderCache, type CachedContinueItem } from "../homeCache";
 import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
 import { mediaTypeLabel } from "../media";
-import type { Collection, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch } from "../types";
+import type { Collection, CurrentProgram, LibraryItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch } from "../types";
 import type { ActionMenuAnchor } from "../components";
 
 type OpenMedia = (item: MediaItem) => void;
@@ -17,6 +18,32 @@ function record(value: unknown): Record<string, unknown> | null {
   return Object.fromEntries(Object.entries(value));
 }
 
+function stringValue(value: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return undefined;
+}
+
+function currentProgram(value: unknown): CurrentProgram | undefined {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  const program = record(value);
+  if (!program) return undefined;
+  const normalized = {
+    title: stringValue(program, "title"),
+    name: stringValue(program, "name"),
+    description: stringValue(program, "description", "overview"),
+    start: stringValue(program, "start", "startsAt"),
+    end: stringValue(program, "end", "endsAt"),
+  };
+  return Object.values(normalized).some(Boolean) ? normalized : undefined;
+}
+
+function currentProgramTitle(value: CurrentProgram | undefined): string | undefined {
+  if (typeof value === "string") return value;
+  return value?.title || value?.name;
+}
 
 function mediaFromBatch(batch: ResourceBatch): MediaItem[] {
   const output: MediaItem[] = [];
@@ -26,25 +53,57 @@ function mediaFromBatch(batch: ResourceBatch): MediaItem[] {
     for (const candidate of metas) {
       const meta = record(candidate);
       if (!meta || typeof meta.id !== "string") continue;
-      const title = typeof meta.name === "string" ? meta.name : typeof meta.title === "string" ? meta.title : t("media.untitled");
+      const mediaType = stringValue(meta, "type") || result.type;
+      const title = stringValue(meta, "name", "title") || t("media.untitled");
+      const resourceId = stringValue(meta, "resourceId") || meta.id;
+      const sourceAddonId = stringValue(meta, "sourceAddonId") || result.addonId;
+      const sourceCatalogId = stringValue(meta, "sourceCatalogId", "catalogId") || result.id;
+      const sourceName = stringValue(meta, "sourceName", "source") || result.manifestId;
+      const program = currentProgram(meta.currentProgram);
+      const logo = stringValue(meta, "logo", "logoUrl");
+      const poster = stringValue(meta, "poster", "posterUrl");
+      const background = stringValue(meta, "background", "backgroundUrl", "backdrop");
       output.push({
-        id: meta.id,
-        mediaType: typeof meta.type === "string" ? meta.type : result.type,
+        id: resourceId,
+        resourceId,
+        mediaType,
         title,
-        posterUrl: typeof meta.poster === "string" ? meta.poster : undefined,
-        backgroundUrl: typeof meta.background === "string" ? meta.background : undefined,
-        logoUrl: typeof meta.logo === "string" ? meta.logo : undefined,
-        description: typeof meta.description === "string" ? meta.description : undefined,
-        releaseInfo: typeof meta.releaseInfo === "string" ? meta.releaseInfo : undefined,
-        released: typeof meta.released === "string" ? meta.released : undefined,
+        posterUrl: mediaType === "tv" ? logo || poster || background : poster,
+        backgroundUrl: mediaType === "tv" ? background || poster || logo : background,
+        logoUrl: logo,
+        description: stringValue(meta, "description", "overview"),
+        releaseInfo: stringValue(meta, "releaseInfo"),
+        released: stringValue(meta, "released"),
         voteAverage: typeof meta.imdbRating === "number" ? meta.imdbRating : undefined,
         externalIds: {},
-        sources: [{ id: result.addonId, kind: "addon_catalog", title: result.manifestId, addonId: result.addonId }],
+        sources: [{ id: result.addonId, kind: "addon_catalog", title: sourceName, addonId: result.addonId }],
+        sourceAddonId: mediaType === "tv" ? sourceAddonId : undefined,
+        sourceCatalogId: mediaType === "tv" ? sourceCatalogId : undefined,
+        sourceName: mediaType === "tv" ? sourceName : undefined,
+        country: mediaType === "tv" ? stringValue(meta, "country", "countryCode") : undefined,
+        language: mediaType === "tv" ? stringValue(meta, "language", "lang") : undefined,
+        category: mediaType === "tv" ? stringValue(meta, "category", "genre") : undefined,
+        available: mediaType === "tv" ? meta.available !== false : undefined,
+        currentProgram: mediaType === "tv" ? program : undefined,
         raw: meta,
       });
     }
   }
   return output;
+}
+
+function mediaPageIsFull(batch: ResourceBatch, limit: number): boolean {
+  return batch.results.some((result) => Array.isArray(result.payload.metas) && result.payload.metas.length >= limit);
+}
+
+function tvSubtitle(item: MediaItem): string {
+  return currentProgramTitle(item.currentProgram)
+    || [item.category, item.language, item.country, item.sourceName].filter(Boolean).join(" · ")
+    || mediaTypeLabel(item.mediaType);
+}
+
+function tvMetadata(item: MediaItem): string {
+  return [item.category, item.language, item.country, item.sourceName].filter(Boolean).join(" · ");
 }
 
 function isAvailable(item: MediaItem, hideUnreleased: boolean): boolean {
@@ -165,6 +224,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   const [opened, setOpened] = useState<OpenedHomeFolder | null>(null);
   const [openedCollection, setOpenedCollection] = useState<OpenedHomeCollection | null>(null);
   const [continueItems, setContinueItems] = useState<EnrichedContinueItem[]>([]);
+  const [tvLibraryItems, setTvLibraryItems] = useState<MediaItem[]>([]);
   const [continueAction, setContinueAction] = useState<{ item: MediaItem; anchor: ActionMenuAnchor }>();
   const [continueActionBusy, setContinueActionBusy] = useState(false);
   const mediaPreferences = useMediaPreferences();
@@ -315,6 +375,16 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
       cancelRequest();
     };
   }, [mediaPreferences.profileID, mediaPreferences.ready, profileRequestSignal]);
+  useEffect(() => {
+    if (!mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
+    let active = true;
+    void api.library("tv").then((library) => {
+      if (active) setTvLibraryItems(library.items.map((entry) => mediaFromLibraryItem(entry, t("media.untitled"))));
+    }).catch(() => {
+      if (active && mediaRevision === 0) setTvLibraryItems([]);
+    });
+    return () => { active = false; };
+  }, [mediaPreferences.profileID, mediaPreferences.ready, mediaRevision, profileRequestSignal]);
 
   useEffect(() => {
     if (mediaRevision === 0 || continueRevisionRef.current === mediaRevision || !mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
@@ -366,7 +436,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
     for (const row of rows) {
       if (!row.collection.heroEnabled) continue;
       for (const item of row.resolved.items) {
-        const key = `${item.mediaType}:${item.id}`;
+        const key = mediaIdentity(item);
         if (seen.has(key) || !isAvailable(item, mediaPreferences.hideUnreleased)) continue;
         seen.add(key);
         slides.push({ key, item, collection: row.collection, folder: row.resolved.folder });
@@ -538,17 +608,30 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
           onContextAction={(anchor) => setContinueAction({ item, anchor })}
         />)}</HorizontalDragRow>
       </section>}
+      {tvLibraryItems.length > 0 && <section className="tv-library-section">
+        <SectionHeading title={`IPTV — ${t("library.actions.inLibrary")}`} />
+        <HorizontalDragRow className="media-row media-row--landscape">{tvLibraryItems.map((item) => <MediaCard
+          key={mediaIdentity(item)}
+          shape="landscape"
+          title={item.title}
+          image={item.backgroundUrl || item.posterUrl || item.logoUrl}
+          accessibleLabel={item.sourceName ? `${t("media.open", { title: item.title })} · ${item.sourceName}` : undefined}
+          subtitle={item.available === false ? t("common.status.unavailable") : tvSubtitle(item)}
+          badge={mediaTypeLabel("tv")}
+          onClick={() => onOpenMedia(item)}
+        />)}</HorizontalDragRow>
+      </section>}
       {collections.map((collection) => {
         const collectionRows = rows.filter((candidate) => candidate.collection.id === collection.id);
         const directItems = Array.from(new Map(collectionRows.flatMap((row) => row.resolved.items)
           .filter((item) => isAvailable(item, mediaPreferences.hideUnreleased))
-          .map((item) => [`${item.mediaType}:${item.id}`, item])).values());
+          .map((item) => [mediaIdentity(item), item])).values());
         const showDirectly = collection.viewMode === "follow_layout";
         const landscapeItems = directItems.length > 0 && directItems.every((item) => item.mediaType === "tv");
         const collectionPending = collection.folders.some((folder) => pendingFolderKeys.has(homeFolderCacheKey(collection.id, folder.id ?? "")));
         return <section className={`folder-collection-section folder-collection-section--${collection.folderCoverShape}`} key={collection.id}>
           <SectionHeading title={collection.title} action={<button type="button" className="text-button" onClick={() => openHomeCollection(collection)}>{t("common.actions.viewAll")} <ArrowRight size={16} /></button>} />
-          {showDirectly ? directItems.length > 0 ? <HorizontalDragRow className={landscapeItems ? "media-row media-row--landscape" : "media-row"}>{directItems.map((item) => <MediaCard key={`${item.mediaType}-${item.id}`} shape={item.mediaType === "tv" ? "landscape" : "poster"} title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo} onClick={() => onOpenMedia(item)} />)}</HorizontalDragRow> : collectionPending ? <div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div> : <EmptyState icon={<Clapperboard size={40} />} title={t("home.collection.emptyTitle")} description={t("home.collection.emptySourcesDescription")} /> : <HorizontalDragRow>{collection.folders.map((folder, index) => {
+          {showDirectly ? directItems.length > 0 ? <HorizontalDragRow className={landscapeItems ? "media-row media-row--landscape" : "media-row"}>{directItems.map((item) => <MediaCard key={mediaIdentity(item)} shape={item.mediaType === "tv" ? "landscape" : "poster"} title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? tvSubtitle(item) : item.releaseInfo} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} onClick={() => onOpenMedia(item)} />)}</HorizontalDragRow> : collectionPending ? <div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div> : <EmptyState icon={<Clapperboard size={40} />} title={t("home.collection.emptyTitle")} description={t("home.collection.emptySourcesDescription")} /> : <HorizontalDragRow className={`folder-cover-row folder-cover-row--${collection.folderCoverShape}`}>{collection.folders.map((folder, index) => {
             const row = collectionRows.find((candidate) => candidate.resolved.folder.id === folder.id);
             const artwork = row?.resolved.folder.coverImageUrl || folder.coverImageUrl || row?.resolved.items.find((item) => isAvailable(item, mediaPreferences.hideUnreleased))?.posterUrl || collection.backdropImageUrl;
             return <button key={folder.id ?? index} className="folder-cover-card" disabled={!row} onClick={() => { if (row) openHomeFolder(row); }} aria-label={t("home.folder.openNamed", { name: folder.title })}>
@@ -558,7 +641,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
           })}</HorizontalDragRow>}
         </section>;
       })}
-      {collections.length === 0 && <EmptyState icon={<Clapperboard size={46} />} title={t("home.empty.title")} description={t("home.empty.description")} />}
+      {collections.length === 0 && tvLibraryItems.length === 0 && <EmptyState icon={<Clapperboard size={46} />} title={t("home.empty.title")} description={t("home.empty.description")} />}
     </div>
     {continueAction && <ActionMenu
       label={t("home.continue.actions.menuLabel", { title: [continueActionTitle(continueAction.item), continueActionEpisodeLabel(continueAction.item)].filter(Boolean).join(" · ") })}
@@ -622,7 +705,7 @@ function CollectionBrowser({ collection, rows, refresh, hideUnreleased, onBack, 
     const seen = new Set<string>();
     return pages.flatMap((page) => page.items.flatMap((item) => {
       if (!isAvailable(item, hideUnreleased)) return [];
-      const key = `${item.mediaType}:${item.id}`;
+      const key = mediaIdentity(item);
       if (seen.has(key)) return [];
       seen.add(key);
       return [{ item, shape: page.row.resolved.folder.tileShape }];
@@ -650,9 +733,9 @@ function CollectionBrowser({ collection, rows, refresh, hideUnreleased, onBack, 
       const folderID = page.row.resolved.folder.id ?? "";
       const next = loaded.get(folderID);
       if (!next) return page;
-      const seen = new Set(page.items.map((item) => `${item.mediaType}:${item.id}`));
+      const seen = new Set(page.items.map(mediaIdentity));
       const additions = next.items.filter((item) => {
-        const key = `${item.mediaType}:${item.id}`;
+        const key = mediaIdentity(item);
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -696,7 +779,7 @@ function CollectionBrowser({ collection, rows, refresh, hideUnreleased, onBack, 
     return <button key={folder.id ?? index} type="button" className="source-folder-card" disabled={!page} onClick={() => setOpenedFolderID(folder.id ?? "")} aria-label={t("home.folder.openNamed", { name: folder.title })}>
       <span className="source-folder-card__visual">{artwork ? <img src={artwork} alt="" loading="lazy" draggable={false} /> : <span>{folder.coverEmoji || folder.title.slice(0, 2).toUpperCase()}</span>}</span>
       {!folder.hideTitle && <span className="source-folder-card__copy"><strong>{folder.title}</strong><small>{t(visibleItems.length === 1 ? "home.collection.titleCount.one" : "home.collection.titleCount.many", { count: visibleItems.length })}</small></span>}
-    </button>; })}</div> : cards.length > 0 ? <div className="media-grid">{cards.map(({ item, shape }) => <MediaCard key={`${item.mediaType}-${item.id}`} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo} shape={shape} onClick={() => onOpenMedia(item)} />)}</div> : <EmptyState icon={<Clapperboard size={46} />} title={t("home.collection.emptyTitle")} description={hideUnreleased ? t("home.browser.noReleasedTitles") : t("home.collection.emptySourcesDescription")} />}
+    </button>; })}</div> : cards.length > 0 ? <div className="media-grid media-grid--adaptive">{cards.map(({ item, shape }) => <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={mediaIdentity(item)}><MediaCard title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? tvSubtitle(item) : item.releaseInfo} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} shape={item.mediaType === "tv" ? "landscape" : shape} onClick={() => onOpenMedia(item)} /></div>)}</div> : <EmptyState icon={<Clapperboard size={46} />} title={t("home.collection.emptyTitle")} description={hideUnreleased ? t("home.browser.noReleasedTitles") : t("home.collection.emptySourcesDescription")} />}
     {!showFolders && hasMore && <div className="load-more"><Button variant="secondary" loading={loading} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
   </div>;
 }
@@ -756,9 +839,9 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
     setError("");
     try {
       const next = await api.resolveFolder(row.collection.id, folderID, page + 1);
-      const seen = new Set(items.map((item) => `${item.mediaType}:${item.id}`));
+      const seen = new Set(items.map(mediaIdentity));
       const additions = next.items.filter((item) => {
-        const key = `${item.mediaType}:${item.id}`;
+        const key = mediaIdentity(item);
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -797,20 +880,29 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
         <span className="source-folder-card__visual">{artwork ? <img src={artwork} alt="" loading="lazy" /> : <span>{source.title.slice(0, 2).toUpperCase()}</span>}</span>
         <span className="source-folder-card__copy"><strong>{source.title}</strong><small>{t(sourceItems.length === 1 ? "home.collection.titleCount.one" : "home.collection.titleCount.many", { count: sourceItems.length })}</small></span>
       </button>;
-    })}</div> : visibleItems.length > 0 ? <div className="media-grid">{visibleItems.map((item) => <MediaCard key={`${item.mediaType}-${item.id}`} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo} shape={row.resolved.folder.tileShape} onClick={() => onOpenMedia(item)} />)}</div> : <EmptyState icon={<Clapperboard size={46} />} title={t(activeSource ? "home.source.emptyTitle" : "home.folder.emptyTitle")} description={hideUnreleased ? t("home.browser.noReleasedTitles") : t("home.collection.emptySourcesDescription")} />}
+    })}</div> : visibleItems.length > 0 ? <div className="media-grid media-grid--adaptive">{visibleItems.map((item) => <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={mediaIdentity(item)}><MediaCard title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? tvSubtitle(item) : item.releaseInfo} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} shape={item.mediaType === "tv" ? "landscape" : row.resolved.folder.tileShape} onClick={() => onOpenMedia(item)} /></div>)}</div> : <EmptyState icon={<Clapperboard size={46} />} title={t(activeSource ? "home.source.emptyTitle" : "home.folder.emptyTitle")} description={hideUnreleased ? t("home.browser.noReleasedTitles") : t("home.collection.emptySourcesDescription")} />}
     {hasMore && <div className="load-more"><Button variant="secondary" loading={loading} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
   </div>;
 }
 
-export function SearchPage({ onOpenMedia }: { onOpenMedia: OpenMedia }) {
+export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { onOpenMedia: OpenMedia; mediaRevision: number; onLibraryMutation: () => void }) {
+  const pageSize = 24;
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<MediaItem[]>([]);
+  const [tvLibrary, setTvLibrary] = useState<LibraryItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
-  const [filter, setFilter] = useState<"all" | "movie" | "series">("all");
+  const [filter, setFilter] = useState<"all" | "movie" | "series" | "tv">("all");
+  const [hasMore, setHasMore] = useState(false);
+  const [nextSkip, setNextSkip] = useState(pageSize);
+  const [retryVersion, setRetryVersion] = useState(0);
+  const [savingIdentity, setSavingIdentity] = useState("");
   const mediaPreferences = useMediaPreferences();
   const loadedProfileRef = useRef("");
+  const paginationControllerRef = useRef<AbortController | null>(null);
   const normalizedQuery = query.trim();
+  const searchTypes = filter === "all" ? ["movie", "series", "tv"] : [filter];
 
   useEffect(() => {
     if (!mediaPreferences.ready || !mediaPreferences.profileID || loadedProfileRef.current === mediaPreferences.profileID) return;
@@ -820,34 +912,132 @@ export function SearchPage({ onOpenMedia }: { onOpenMedia: OpenMedia }) {
   }, [mediaPreferences.profileID, mediaPreferences.ready]);
 
   useEffect(() => {
+    if (!mediaPreferences.ready || !mediaPreferences.profileID) return;
+    let active = true;
+    void api.library("tv").then((library) => {
+      if (active) setTvLibrary(library.items);
+    }).catch(() => {
+      if (active) setTvLibrary([]);
+    });
+    return () => { active = false; };
+  }, [mediaPreferences.profileID, mediaPreferences.ready, mediaRevision]);
+
+  useEffect(() => {
+    paginationControllerRef.current?.abort();
     if (!mediaPreferences.ready) return;
     if (normalizedQuery.length < 2) {
       setItems([]);
       setError("");
       setLoading(false);
+      setHasMore(false);
       return;
     }
+    const controller = new AbortController();
     let active = true;
     const timer = window.setTimeout(() => {
       setLoading(true);
       setError("");
-      void Promise.allSettled([api.search("movie", normalizedQuery), api.search("series", normalizedQuery)]).then((outcomes) => {
+      void Promise.allSettled(searchTypes.map((type) => api.search(type, normalizedQuery, 0, pageSize, controller.signal))).then((outcomes) => {
         if (!active) return;
-        const values = outcomes.flatMap((outcome) => outcome.status === "fulfilled" ? mediaFromBatch(outcome.value) : []);
+        const fulfilled = outcomes.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
+        const values = fulfilled.flatMap(mediaFromBatch);
         const seen = new Set<string>();
         setItems(values.filter((item) => {
-          const key = `${item.mediaType}:${item.id}`;
+          const key = mediaIdentity(item);
           if (seen.has(key)) return false;
           seen.add(key);
           return true;
         }));
-        if (outcomes.every((outcome) => outcome.status === "rejected")) setError(notifyErrorMessage(t("search.error.sourcesUnavailable"), t("search.error.unavailableTitle")));
+        setNextSkip(pageSize);
+        setHasMore(fulfilled.some((batch) => mediaPageIsFull(batch, pageSize)));
+        const failed = outcomes.filter((outcome) => outcome.status === "rejected").length + fulfilled.reduce((count, batch) => count + batch.errors.length, 0);
+        if (failed > 0) {
+          setError(outcomes.every((outcome) => outcome.status === "rejected")
+            ? notifyErrorMessage(t("search.error.sourcesUnavailable"), t("search.error.unavailableTitle"))
+            : t("home.browser.someTitlesLoadFailed"));
+        }
       }).finally(() => { if (active) setLoading(false); });
     }, 350);
-    return () => { active = false; window.clearTimeout(timer); };
-  }, [mediaPreferences.profileID, mediaPreferences.ready, normalizedQuery]);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [filter, mediaPreferences.profileID, mediaPreferences.ready, normalizedQuery, retryVersion]);
 
-  const visible = useMemo(() => filter === "all" ? items : items.filter((item) => item.mediaType === filter), [filter, items]);
+  useEffect(() => () => paginationControllerRef.current?.abort(), []);
+
+  async function loadMore() {
+    paginationControllerRef.current?.abort();
+    const controller = new AbortController();
+    paginationControllerRef.current = controller;
+    setLoadingMore(true);
+    setError("");
+    try {
+      const outcomes = await Promise.allSettled(searchTypes.map((type) => api.search(type, normalizedQuery, nextSkip, pageSize, controller.signal)));
+      if (controller.signal.aborted) return;
+      const fulfilled = outcomes.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
+      const incoming = fulfilled.flatMap(mediaFromBatch);
+      setItems((current) => {
+        const seen = new Set(current.map(mediaIdentity));
+        return [...current, ...incoming.filter((item) => {
+          const key = mediaIdentity(item);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })];
+      });
+      setNextSkip((current) => current + pageSize);
+      setHasMore(fulfilled.some((batch) => mediaPageIsFull(batch, pageSize)));
+      const failed = outcomes.filter((outcome) => outcome.status === "rejected").length + fulfilled.reduce((count, batch) => count + batch.errors.length, 0);
+      if (failed > 0) setError(fulfilled.length === 0 ? t("search.error.sourcesUnavailable") : t("home.browser.moreTitlesLoadFailed"));
+    } finally {
+      if (!controller.signal.aborted) setLoadingMore(false);
+    }
+  }
+
+  async function toggleTvLibrary(item: MediaItem) {
+    const identity = mediaIdentity(item);
+    const savedEntry = tvLibrary.find((entry) => mediaIdentity(mediaFromLibraryItem(entry, t("media.untitled"))) === identity);
+    setSavingIdentity(identity);
+    try {
+      const titleID = savedEntry?.titleId ?? await resolveMediaTitle(item);
+      if (savedEntry) {
+        await api.removeLibrary(titleID);
+        setTvLibrary((current) => current.filter((entry) => entry.titleId !== titleID));
+      } else {
+        await api.addLibrary(titleID);
+        const timestamp = new Date().toISOString();
+        setTvLibrary((current) => [...current, {
+          titleId: titleID,
+          mediaType: "tv",
+          resourceId: item.resourceId || item.id,
+          title: item.title,
+          posterUrl: item.posterUrl,
+          backgroundUrl: item.backgroundUrl,
+          sourceAddonId: item.sourceAddonId,
+          sourceCatalogId: item.sourceCatalogId,
+          sourceName: item.sourceName,
+          country: item.country,
+          language: item.language,
+          category: item.category,
+          available: item.available,
+          currentProgram: item.currentProgram,
+          addedAt: timestamp,
+          updatedAt: timestamp,
+        }]);
+      }
+      notifySuccess(
+        t(savedEntry ? "library.notice.removed" : "library.notice.added", { title: item.title }),
+        t(savedEntry ? "library.notice.removedTitle" : "library.notice.addedTitle"),
+      );
+      onLibraryMutation();
+    } catch (cause) {
+      setError(notifyError(cause, t("library.error.updateFailed"), t("library.error.notUpdatedTitle")));
+    } finally {
+      setSavingIdentity("");
+    }
+  }
 
   function updateQuery(value: string) {
     setQuery(value);
@@ -858,18 +1048,51 @@ export function SearchPage({ onOpenMedia }: { onOpenMedia: OpenMedia }) {
     <SectionHeading eyebrow={t("search.eyebrow")} title={t("search.title")} description={t("search.description")} />
     <div className="search-box"><Search size={23} /><input type="search" value={query} onChange={(event) => updateQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && query) { event.preventDefault(); updateQuery(""); } }} aria-label={t("nav.search")} aria-keyshortcuts="Escape" placeholder={t("search.placeholder")} autoFocus />{query && <button type="button" className="search-box__clear" aria-label={t("common.close")} title={t("common.close")} onClick={() => updateQuery("")}><X size={17} /></button>}{loading && <LoaderCircle className="spin" />}</div>
     <div className="browse-toolbar">
-      <div className="filter-pills"><button type="button" className={filter === "all" ? "is-active" : ""} aria-pressed={filter === "all"} onClick={() => setFilter("all")}><Compass size={16} /> {t("media.filter.all")}</button><button type="button" className={filter === "movie" ? "is-active" : ""} aria-pressed={filter === "movie"} onClick={() => setFilter("movie")}><Film size={16} /> {t("media.filter.movies")}</button><button type="button" className={filter === "series" ? "is-active" : ""} aria-pressed={filter === "series"} onClick={() => setFilter("series")}><Tv size={16} /> {t("media.filter.series")}</button></div>
-      {normalizedQuery.length >= 2 && !loading && <span className="browse-toolbar__count" role="status">{t(visible.length === 1 ? "common.results.count.one" : "common.results.count.many", { count: visible.length })}</span>}
+      <div className="filter-pills" role="group" aria-label={t("media.filter.groupLabel")}>
+        <button type="button" className={filter === "all" ? "is-active" : ""} aria-pressed={filter === "all"} onClick={() => setFilter("all")}><Compass size={16} /> {t("media.filter.all")}</button>
+        <button type="button" className={filter === "movie" ? "is-active" : ""} aria-pressed={filter === "movie"} onClick={() => setFilter("movie")}><Film size={16} /> {t("media.filter.movies")}</button>
+        <button type="button" className={filter === "series" ? "is-active" : ""} aria-pressed={filter === "series"} onClick={() => setFilter("series")}><Tv size={16} /> {t("media.filter.series")}</button>
+        <button type="button" className={filter === "tv" ? "is-active" : ""} aria-pressed={filter === "tv"} onClick={() => setFilter("tv")}><Radio size={16} /> {t("media.type.liveTv")}</button>
+      </div>
+      {normalizedQuery.length >= 2 && !loading && <span className="browse-toolbar__count" role="status">{t(items.length === 1 ? "common.results.count.one" : "common.results.count.many", { count: items.length })}</span>}
     </div>
-    {error && <Notice>{error}</Notice>}
-    {normalizedQuery.length < 2 ? <div className="search-prompt"><span><Search /></span><h2>{t("search.prompt.title")}</h2><p>{t("search.prompt.description")}</p></div> : !loading && visible.length === 0 ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} /> : <div className="media-grid">{visible.map((item) => <MediaCard key={`${item.mediaType}-${item.id}`} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo || mediaTypeLabel(item.mediaType)} onClick={() => onOpenMedia(item)} />)}</div>}
+    {error && <Notice><span>{error}</span><Button variant="ghost" onClick={() => setRetryVersion((version) => version + 1)}><RefreshCw size={16} /> {t("common.actions.retry")}</Button></Notice>}
+    {normalizedQuery.length < 2
+      ? <div className="search-prompt"><span><Search /></span><h2>{t("search.prompt.title")}</h2><p>{t("search.prompt.description")}</p></div>
+      : loading && items.length === 0
+        ? <div className="media-grid" aria-busy="true">{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className={filter === "tv" ? "card-skeleton card-skeleton--landscape" : "card-skeleton"} />)}</div>
+        : items.length === 0
+          ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} />
+          : <div className="media-grid media-grid--adaptive">{items.map((item) => {
+            const identity = mediaIdentity(item);
+            const saved = item.mediaType === "tv" && tvLibrary.some((entry) => mediaIdentity(mediaFromLibraryItem(entry, t("media.untitled"))) === identity);
+            const metadata = item.mediaType === "tv" ? tvMetadata(item) : "";
+            return <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={identity}>
+              <MediaCard
+                shape={item.mediaType === "tv" ? "landscape" : "poster"}
+                title={item.title}
+                image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl || item.logoUrl : item.posterUrl}
+                backdrop={item.backgroundUrl}
+                subtitle={item.mediaType === "tv" ? tvSubtitle(item) : item.releaseInfo || mediaTypeLabel(item.mediaType)}
+                accessibleLabel={item.sourceName ? `${t("media.open", { title: item.title })} · ${item.sourceName}` : undefined}
+                badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined}
+                onClick={() => onOpenMedia(item)}
+              />
+              {metadata && <small className="tv-media-tile__meta">{metadata}</small>}
+              {item.mediaType === "tv" && <Button className="tv-media-tile__library" variant={saved ? "secondary" : "ghost"} loading={savingIdentity === identity} aria-label={`${t(saved ? "library.actions.inLibrary" : "library.actions.add")}: ${item.title}`} onClick={() => void toggleTvLibrary(item)}>
+                {saved ? <Check size={16} /> : <Bookmark size={16} />}
+                {t(saved ? "library.actions.inLibrary" : "library.actions.add")}
+              </Button>}
+            </div>;
+          })}</div>}
+    {hasMore && items.length > 0 && <div className="load-more"><Button variant="secondary" loading={loadingMore} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
   </div>;
 }
 
 export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedia; mediaRevision: number }) {
   const [library, setLibrary] = useState<LibraryPage | null>(null);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<"" | "movie" | "series">("");
+  const [filter, setFilter] = useState<"" | "movie" | "series" | "tv">("");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"added" | "title" | "released">("added");
   const [error, setError] = useState("");
@@ -906,7 +1129,7 @@ export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenM
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredItems = useMemo(() => {
-    const items = [...(library?.items ?? [])].filter((item) => !normalizedQuery || `${item.title ?? ""} ${item.releaseInfo ?? ""}`.toLocaleLowerCase().includes(normalizedQuery));
+    const items = [...(library?.items ?? [])].filter((item) => !normalizedQuery || `${item.title ?? ""} ${item.releaseInfo ?? ""} ${item.sourceName ?? ""} ${item.country ?? ""} ${item.language ?? ""} ${item.category ?? ""}`.toLocaleLowerCase().includes(normalizedQuery));
     items.sort((left, right) => {
       if (sort === "title") return (left.title ?? "").localeCompare(right.title ?? "");
       const leftDate = Date.parse(sort === "released" ? left.released ?? "" : left.addedAt);
@@ -915,17 +1138,7 @@ export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenM
     });
     return items;
   }, [library?.items, normalizedQuery, sort]);
-  const media = filteredItems.map((item): MediaItem => ({
-    id: item.resourceId || item.externalId || item.titleId,
-    titleId: item.titleId,
-    mediaType: item.mediaType,
-    title: item.title || t("media.untitled"),
-    posterUrl: item.posterUrl,
-    backgroundUrl: item.backgroundUrl,
-    releaseInfo: item.releaseInfo,
-    released: item.released,
-    externalIds: item.externalId && item.provider ? { [item.provider]: item.externalId } : undefined,
-  }));
+  const media = filteredItems.map((item) => mediaFromLibraryItem(item, t("media.untitled")));
 
   return <div className="standard-page library-page page-enter">
     <SectionHeading eyebrow={t("library.eyebrow")} title={t("library.title")} description={t("library.description")} />
@@ -934,10 +1147,16 @@ export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenM
       <label className="library-sort"><span>{t("admin.collections.sources.sortBy")}</span><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="added">{t("admin.collections.sort.added")}</option><option value="title">{t("admin.collections.sort.title")}</option><option value="released">{t("admin.collections.sort.released")}</option></select></label>
     </div>
     <div className="browse-toolbar">
-      <div className="filter-pills"><button type="button" className={filter === "" ? "is-active" : ""} aria-pressed={filter === ""} onClick={() => setFilter("")}><Bookmark size={16} /> {t("media.filter.allTitles")}</button><button type="button" className={filter === "movie" ? "is-active" : ""} aria-pressed={filter === "movie"} onClick={() => setFilter("movie")}><Film size={16} /> {t("media.filter.movies")}</button><button type="button" className={filter === "series" ? "is-active" : ""} aria-pressed={filter === "series"} onClick={() => setFilter("series")}><Tv size={16} /> {t("media.filter.series")}</button></div>
+      <div className="filter-pills" role="group" aria-label={t("media.filter.groupLabel")}><button type="button" className={filter === "" ? "is-active" : ""} aria-pressed={filter === ""} onClick={() => setFilter("")}><Bookmark size={16} /> {t("media.filter.allTitles")}</button><button type="button" className={filter === "movie" ? "is-active" : ""} aria-pressed={filter === "movie"} onClick={() => setFilter("movie")}><Film size={16} /> {t("media.filter.movies")}</button><button type="button" className={filter === "series" ? "is-active" : ""} aria-pressed={filter === "series"} onClick={() => setFilter("series")}><Tv size={16} /> {t("media.filter.series")}</button><button type="button" className={filter === "tv" ? "is-active" : ""} aria-pressed={filter === "tv"} onClick={() => setFilter("tv")}><Radio size={16} /> {t("media.type.liveTv")}</button></div>
       {!loading && <span className="browse-toolbar__count" role="status">{t(media.length === 1 ? "common.results.count.one" : "common.results.count.many", { count: media.length })}</span>}
     </div>
     {error && <Notice>{error}</Notice>}
-    {loading ? <div className="media-grid">{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className="card-skeleton" />)}</div> : media.length > 0 ? <div className="media-grid">{media.map((item) => <MediaCard key={item.titleId} title={item.title} image={item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.releaseInfo || mediaTypeLabel(item.mediaType)} onClick={() => onOpenMedia(item)} />)}</div> : query ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} /> : <EmptyState icon={<Bookmark size={46} />} title={t("library.empty.title")} description={t("library.empty.description")} />}
+    {loading ? <div className="media-grid">{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className={filter === "tv" ? "card-skeleton card-skeleton--landscape" : "card-skeleton"} />)}</div> : media.length > 0 ? <div className="media-grid media-grid--adaptive">{media.map((item) => {
+      const metadata = item.mediaType === "tv" ? tvMetadata(item) : "";
+      return <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={item.titleId || mediaIdentity(item)}>
+        <MediaCard shape={item.mediaType === "tv" ? "landscape" : "poster"} title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl || item.logoUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? item.available === false ? t("common.status.unavailable") : tvSubtitle(item) : item.releaseInfo || mediaTypeLabel(item.mediaType)} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} onClick={() => onOpenMedia(item)} />
+        {metadata && <small className="tv-media-tile__meta">{metadata}</small>}
+      </div>;
+    })}</div> : query ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} /> : <EmptyState icon={<Bookmark size={46} />} title={t("library.empty.title")} description={t("library.empty.description")} />}
   </div>;
 }

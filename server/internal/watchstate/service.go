@@ -58,7 +58,8 @@ func (s *Service) enqueueTrackingTx(ctx context.Context, tx pgx.Tx, profileID, t
 }
 
 func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput) (TitleReference, error) {
-	if _, err := activeProfileID(principal); err != nil {
+	profileID, err := activeProfileID(principal)
+	if err != nil {
 		return TitleReference{}, err
 	}
 	input.MediaType = strings.ToLower(strings.TrimSpace(input.MediaType))
@@ -70,26 +71,68 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 	input.BackgroundURL = strings.TrimSpace(input.BackgroundURL)
 	input.ReleaseInfo = strings.TrimSpace(input.ReleaseInfo)
 	input.Released = strings.TrimSpace(input.Released)
-	if input.MediaType != "movie" && input.MediaType != "series" {
-		return TitleReference{}, fmt.Errorf("%w: mediaType must be movie or series", ErrInvalidInput)
+	input.SourceAddonID = strings.ToLower(strings.TrimSpace(input.SourceAddonID))
+	input.SourceCatalogID = strings.TrimSpace(input.SourceCatalogID)
+	input.SourceName = strings.TrimSpace(input.SourceName)
+	input.Country = strings.TrimSpace(input.Country)
+	input.Language = strings.TrimSpace(input.Language)
+	input.Category = strings.TrimSpace(input.Category)
+	if input.MediaType != "movie" && input.MediaType != "series" && input.MediaType != "tv" {
+		return TitleReference{}, fmt.Errorf("%w: mediaType must be movie, series, or tv", ErrInvalidInput)
 	}
 	if !providerPattern.MatchString(input.Provider) {
 		return TitleReference{}, fmt.Errorf("%w: invalid provider", ErrInvalidInput)
 	}
-	if len(input.ExternalID) < 1 || len(input.ExternalID) > 512 || len(input.ResourceID) < 1 || len(input.ResourceID) > 512 {
-		return TitleReference{}, fmt.Errorf("%w: invalid external or resource identifier", ErrInvalidInput)
+	if len(input.ResourceID) < 1 || len(input.ResourceID) > 512 {
+		return TitleReference{}, fmt.Errorf("%w: invalid resource identifier", ErrInvalidInput)
 	}
 	if len(input.Title) < 1 || len(input.Title) > 500 || len(input.PosterURL) > 4096 || len(input.BackgroundURL) > 4096 || len(input.ReleaseInfo) > 120 {
 		return TitleReference{}, fmt.Errorf("%w: invalid title snapshot", ErrInvalidInput)
 	}
-	if input.MediaType == "movie" && input.Released != "" {
-		released, err := time.Parse(time.DateOnly, input.Released)
-		if err != nil || released.Year() < 1 || released.Format(time.DateOnly) != input.Released {
-			return TitleReference{}, fmt.Errorf("%w: released must be a YYYY-MM-DD date", ErrInvalidInput)
+	if input.MediaType == "tv" {
+		if input.Provider != "addon" {
+			return TitleReference{}, fmt.Errorf("%w: TV provider must be addon", ErrInvalidInput)
 		}
-	}
-	if input.MediaType == "series" {
+		if !uuidPattern.MatchString(input.SourceAddonID) {
+			return TitleReference{}, fmt.Errorf("%w: sourceAddonId must be a UUID", ErrInvalidInput)
+		}
+		if len(input.SourceCatalogID) > 512 || len(input.SourceName) > 500 || len(input.Country) > 128 || len(input.Language) > 128 || len(input.Category) > 256 {
+			return TitleReference{}, fmt.Errorf("%w: invalid TV source snapshot", ErrInvalidInput)
+		}
+		var accessible bool
+		if err := s.pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM addon_profile_access
+				WHERE addon_id = $1::uuid AND profile_id = $2::uuid
+			)
+		`, input.SourceAddonID, profileID).Scan(&accessible); err != nil {
+			return TitleReference{}, fmt.Errorf("check TV addon access: %w", err)
+		}
+		if !accessible {
+			return TitleReference{}, ErrNotFound
+		}
+		input.ExternalID = tvExternalID(input.SourceAddonID, input.ResourceID)
 		input.Released = ""
+	} else {
+		if len(input.ExternalID) < 1 || len(input.ExternalID) > 512 {
+			return TitleReference{}, fmt.Errorf("%w: invalid external identifier", ErrInvalidInput)
+		}
+		input.SourceAddonID = ""
+		input.SourceCatalogID = ""
+		input.SourceName = ""
+		input.Country = ""
+		input.Language = ""
+		input.Category = ""
+		if input.MediaType == "movie" && input.Released != "" {
+			released, err := time.Parse(time.DateOnly, input.Released)
+			if err != nil || released.Year() < 1 || released.Format(time.DateOnly) != input.Released {
+				return TitleReference{}, fmt.Errorf("%w: released must be a YYYY-MM-DD date", ErrInvalidInput)
+			}
+		}
+		if input.MediaType == "series" {
+			input.Released = ""
+		}
 	}
 
 	storedExternalID := input.ExternalID
@@ -116,13 +159,17 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO titles (
 				media_type, display_title, poster_url, background_url, release_info,
-				release_date, resource_id, resource_provider
+				release_date, resource_id, resource_provider, source_addon_id,
+				source_catalog_id, source_name, country, language, category
 			)
 			VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''),
-			        NULLIF($6, '')::date, $7, $8)
+			        NULLIF($6, '')::date, $7, $8, NULLIF($9, '')::uuid,
+			        NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''),
+			        NULLIF($13, ''), NULLIF($14, ''))
 			RETURNING id::text
 		`, input.MediaType, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo,
-			input.Released, input.ResourceID, input.Provider).Scan(&titleID); err != nil {
+			input.Released, input.ResourceID, input.Provider, input.SourceAddonID,
+			input.SourceCatalogID, input.SourceName, input.Country, input.Language, input.Category).Scan(&titleID); err != nil {
 			return TitleReference{}, fmt.Errorf("create resolved title: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
@@ -142,10 +189,17 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 		    release_date = COALESCE(release_date, NULLIF($6, '')::date),
 		    resource_id = $7,
 		    resource_provider = $8,
+		    source_addon_id = NULLIF($9, '')::uuid,
+		    source_catalog_id = NULLIF($10, ''),
+		    source_name = NULLIF($11, ''),
+		    country = NULLIF($12, ''),
+		    language = NULLIF($13, ''),
+		    category = NULLIF($14, ''),
 		    updated_at = now()
 		WHERE id = $1::uuid
 	`, titleID, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo,
-		input.Released, input.ResourceID, input.Provider); err != nil {
+		input.Released, input.ResourceID, input.Provider, input.SourceAddonID,
+		input.SourceCatalogID, input.SourceName, input.Country, input.Language, input.Category); err != nil {
 		return TitleReference{}, fmt.Errorf("update resolved title snapshot: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -155,6 +209,8 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 		TitleID: titleID, MediaType: input.MediaType, Provider: input.Provider,
 		ExternalID: input.ExternalID, ResourceID: input.ResourceID, Title: input.Title,
 		PosterURL: input.PosterURL, BackgroundURL: input.BackgroundURL, ReleaseInfo: input.ReleaseInfo,
+		SourceAddonID: input.SourceAddonID, SourceCatalogID: input.SourceCatalogID,
+		SourceName: input.SourceName, Country: input.Country, Language: input.Language, Category: input.Category,
 	}, nil
 }
 
@@ -167,32 +223,81 @@ func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titl
 	if err != nil {
 		return LibraryItem{}, err
 	}
-	mediaType, err := s.titleMediaType(ctx, titleID)
-	if err != nil {
-		return LibraryItem{}, err
+	var mediaType string
+	var accessible bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT title.media_type,
+		       title.media_type <> 'tv' OR EXISTS (
+		           SELECT 1
+		           FROM addon_profile_access access
+		           WHERE access.addon_id = title.source_addon_id
+		             AND access.profile_id = $2::uuid
+		       )
+		FROM titles title
+		WHERE title.id = $1::uuid
+	`, titleID, profileID).Scan(&mediaType, &accessible); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return LibraryItem{}, ErrNotFound
+		}
+		return LibraryItem{}, fmt.Errorf("query library title: %w", err)
 	}
-	if mediaType != "movie" && mediaType != "series" {
-		return LibraryItem{}, fmt.Errorf("%w: library titles must be movies or series", ErrInvalidInput)
+	if mediaType != "movie" && mediaType != "series" && mediaType != "tv" {
+		return LibraryItem{}, fmt.Errorf("%w: library titles must be movies, series, or TV channels", ErrInvalidInput)
+	}
+	if !accessible {
+		return LibraryItem{}, ErrNotFound
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return LibraryItem{}, fmt.Errorf("begin library addition: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	item := LibraryItem{TitleID: titleID, MediaType: mediaType}
+	var item LibraryItem
 	err = tx.QueryRow(ctx, `
-		INSERT INTO profile_library (profile_id, title_id)
-		VALUES ($1::uuid, $2::uuid)
-		ON CONFLICT (profile_id, title_id) DO UPDATE SET updated_at = now()
-		RETURNING added_at, updated_at
-	`, profileID, titleID).Scan(&item.AddedAt, &item.UpdatedAt)
+		WITH library AS (
+			INSERT INTO profile_library (profile_id, title_id)
+			VALUES ($1::uuid, $2::uuid)
+			ON CONFLICT (profile_id, title_id) DO UPDATE SET updated_at = now()
+			RETURNING added_at, updated_at
+		)
+		SELECT title.id::text, title.media_type,
+		       COALESCE(title.resource_provider, ''), COALESCE(identity.external_id, ''),
+		       COALESCE(title.resource_id, ''), COALESCE(title.display_title, ''),
+		       COALESCE(title.poster_url, ''), COALESCE(title.background_url, ''),
+		       COALESCE(title.release_info, ''), COALESCE(title.source_addon_id::text, ''),
+		       COALESCE(title.source_catalog_id, ''), COALESCE(title.source_name, ''),
+		       COALESCE(title.country, ''), COALESCE(title.language, ''),
+		       COALESCE(title.category, ''),
+		       title.media_type <> 'tv' OR EXISTS (
+		           SELECT 1
+		           FROM addon_profile_access access
+		           WHERE access.addon_id = title.source_addon_id
+		             AND access.profile_id = $1::uuid
+		       ),
+		       library.added_at, library.updated_at
+		FROM titles title
+		CROSS JOIN library
+		LEFT JOIN title_external_ids identity
+		  ON identity.title_id = title.id
+		 AND identity.provider = title.resource_provider
+		 AND identity.namespace = title.media_type
+		WHERE title.id = $2::uuid
+	`, profileID, titleID).Scan(
+		&item.TitleID, &item.MediaType, &item.Provider, &item.ExternalID,
+		&item.ResourceID, &item.Title, &item.PosterURL, &item.BackgroundURL,
+		&item.ReleaseInfo, &item.SourceAddonID, &item.SourceCatalogID, &item.SourceName,
+		&item.Country, &item.Language, &item.Category, &item.Available,
+		&item.AddedAt, &item.UpdatedAt,
+	)
 	if err != nil {
 		return LibraryItem{}, fmt.Errorf("add library title: %w", err)
 	}
-	if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("library:add:%s:%d", titleID, item.UpdatedAt.UnixNano()), tracking.Event{
-		Type: "library", TitleID: titleID, InLibrary: true, OccurredAt: item.UpdatedAt,
-	}); err != nil {
-		return LibraryItem{}, err
+	if mediaType != "tv" {
+		if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("library:add:%s:%d", titleID, item.UpdatedAt.UnixNano()), tracking.Event{
+			Type: "library", TitleID: titleID, InLibrary: true, OccurredAt: item.UpdatedAt,
+		}); err != nil {
+			return LibraryItem{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return LibraryItem{}, fmt.Errorf("commit library addition: %w", err)
@@ -209,6 +314,10 @@ func (s *Service) RemoveLibrary(ctx context.Context, principal auth.Principal, t
 	if err != nil {
 		return err
 	}
+	mediaType, err := s.titleMediaType(ctx, titleID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin library removal: %w", err)
@@ -217,11 +326,13 @@ func (s *Service) RemoveLibrary(ctx context.Context, principal auth.Principal, t
 	if _, err := tx.Exec(ctx, `DELETE FROM profile_library WHERE profile_id = $1::uuid AND title_id = $2::uuid`, profileID, titleID); err != nil {
 		return fmt.Errorf("remove library title: %w", err)
 	}
-	occurredAt := time.Now().UTC()
-	if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("library:remove:%s:%d", titleID, occurredAt.UnixNano()), tracking.Event{
-		Type: "library", TitleID: titleID, InLibrary: false, OccurredAt: occurredAt,
-	}); err != nil {
-		return err
+	if mediaType != "tv" {
+		occurredAt := time.Now().UTC()
+		if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("library:remove:%s:%d", titleID, occurredAt.UnixNano()), tracking.Event{
+			Type: "library", TitleID: titleID, InLibrary: false, OccurredAt: occurredAt,
+		}); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit library removal: %w", err)
@@ -253,7 +364,17 @@ func (s *Service) Library(ctx context.Context, principal auth.Principal, mediaTy
 		       COALESCE(title.resource_provider, ''), COALESCE(identity.external_id, ''),
 		       COALESCE(title.resource_id, ''), COALESCE(title.display_title, ''),
 		       COALESCE(title.poster_url, ''), COALESCE(title.background_url, ''),
-		       COALESCE(title.release_info, ''), library.added_at, library.updated_at
+		       COALESCE(title.release_info, ''), COALESCE(title.source_addon_id::text, ''),
+		       COALESCE(title.source_catalog_id, ''), COALESCE(title.source_name, ''),
+		       COALESCE(title.country, ''), COALESCE(title.language, ''),
+		       COALESCE(title.category, ''),
+		       title.media_type <> 'tv' OR EXISTS (
+		           SELECT 1
+		           FROM addon_profile_access access
+		           WHERE access.addon_id = title.source_addon_id
+		             AND access.profile_id = library.profile_id
+		       ),
+		       library.added_at, library.updated_at
 		FROM profile_library library
 		JOIN titles title ON title.id = library.title_id
 		LEFT JOIN title_external_ids identity
@@ -274,7 +395,9 @@ func (s *Service) Library(ctx context.Context, principal auth.Principal, mediaTy
 		if err := rows.Scan(
 			&item.TitleID, &item.MediaType, &item.Provider, &item.ExternalID,
 			&item.ResourceID, &item.Title, &item.PosterURL, &item.BackgroundURL,
-			&item.ReleaseInfo, &item.AddedAt, &item.UpdatedAt,
+			&item.ReleaseInfo, &item.SourceAddonID, &item.SourceCatalogID, &item.SourceName,
+			&item.Country, &item.Language, &item.Category, &item.Available,
+			&item.AddedAt, &item.UpdatedAt,
 		); err != nil {
 			return LibraryPage{}, fmt.Errorf("scan library title: %w", err)
 		}
@@ -799,6 +922,10 @@ func activeProfileID(principal auth.Principal) (string, error) {
 	return *principal.ActiveProfileID, nil
 }
 
+func tvExternalID(sourceAddonID, resourceID string) string {
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(sourceAddonID+"\x00"+resourceID)))
+}
+
 func normalizeTitleID(titleID string) (string, error) {
 	titleID = strings.TrimSpace(titleID)
 	if !uuidPattern.MatchString(titleID) {
@@ -809,8 +936,8 @@ func normalizeTitleID(titleID string) (string, error) {
 
 func normalizeLibraryQuery(mediaType string, page, pageSize int) (string, int, int, error) {
 	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
-	if mediaType != "" && mediaType != "movie" && mediaType != "series" {
-		return "", 0, 0, fmt.Errorf("%w: mediaType must be movie or series", ErrInvalidInput)
+	if mediaType != "" && mediaType != "movie" && mediaType != "series" && mediaType != "tv" {
+		return "", 0, 0, fmt.Errorf("%w: mediaType must be movie, series, or tv", ErrInvalidInput)
 	}
 	if page == 0 {
 		page = 1

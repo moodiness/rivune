@@ -125,15 +125,71 @@ func TestResolveTitlePassesProviderSnapshot(t *testing.T) {
 	}
 }
 
+func TestResolveTitlePassesTVSourceIdentityWithoutStreamURL(t *testing.T) {
+	service := &fakeWatchstateService{resolveValue: watchstate.TitleReference{
+		TitleID: "550e8400-e29b-41d4-a716-446655440000", MediaType: "tv", Provider: "addon",
+		ExternalID: "computed", ResourceID: "channel-1", Title: "News",
+	}}
+	api := watchstateAPI(service)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/titles/resolve", strings.NewReader(`{
+		"mediaType":"tv",
+		"provider":"addon",
+		"resourceId":"channel-1",
+		"title":"News",
+		"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"sourceCatalogId":"live",
+		"sourceName":"Provider",
+		"country":"US",
+		"language":"en",
+		"category":"News"
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.resolveTitle(response, request, auth.Principal{})
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	input := service.resolveInput
+	if input.SourceAddonID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" ||
+		input.SourceCatalogID != "live" || input.SourceName != "Provider" ||
+		input.ResourceID != "channel-1" || input.Country != "US" ||
+		input.Language != "en" || input.Category != "News" {
+		t.Fatalf("unexpected TV resolve input: %+v", input)
+	}
+}
+
+func TestResolveTitleRejectsTVStreamURLField(t *testing.T) {
+	service := &fakeWatchstateService{}
+	api := watchstateAPI(service)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/titles/resolve", strings.NewReader(`{
+		"mediaType":"tv",
+		"provider":"addon",
+		"resourceId":"channel-1",
+		"title":"News",
+		"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"streamUrl":"https://stream.invalid/live.m3u8"
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.resolveTitle(response, request, auth.Principal{})
+
+	if response.Code != http.StatusBadRequest || service.resolveInput.MediaType != "" {
+		t.Fatalf("expected unknown stream URL field rejection, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestLibraryHandlerPassesFilters(t *testing.T) {
 	service := &fakeWatchstateService{libraryValue: watchstate.LibraryPage{Items: []watchstate.LibraryItem{}, Page: 2}}
 	api := watchstateAPI(service)
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/library?mediaType=series&page=2&pageSize=40", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/library?mediaType=tv&page=2&pageSize=40", nil)
 	response := httptest.NewRecorder()
 
 	api.library(response, request, auth.Principal{})
 
-	if response.Code != http.StatusOK || service.libraryMediaType != "series" || service.libraryPage != 2 || service.libraryPageSize != 40 {
+	if response.Code != http.StatusOK || service.libraryMediaType != "tv" || service.libraryPage != 2 || service.libraryPageSize != 40 {
 		t.Fatalf("unexpected library request status=%d mediaType=%q page=%d pageSize=%d", response.Code, service.libraryMediaType, service.libraryPage, service.libraryPageSize)
 	}
 }

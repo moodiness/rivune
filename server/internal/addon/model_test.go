@@ -102,6 +102,66 @@ func TestManifestAppliesRequiredCatalogDefaults(t *testing.T) {
 	}
 }
 
+func TestManifestTVSupportRequiresDeclaredTypeAndCatalog(t *testing.T) {
+	tests := []struct {
+		name     string
+		types    []string
+		catalogs []ManifestCatalog
+		want     bool
+	}{
+		{
+			name:     "type and catalog",
+			types:    []string{"movie", "tv"},
+			catalogs: []ManifestCatalog{{Type: "tv", ID: "live"}},
+			want:     true,
+		},
+		{
+			name:     "catalog without manifest type",
+			types:    []string{"movie"},
+			catalogs: []ManifestCatalog{{Type: "tv", ID: "live"}},
+		},
+		{
+			name:     "manifest type without catalog",
+			types:    []string{"tv"},
+			catalogs: []ManifestCatalog{{Type: "movie", ID: "popular"}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := Manifest{Types: test.types, Catalogs: test.catalogs}
+			if got := manifest.SupportsTV(); got != test.want {
+				t.Fatalf("SupportsTV() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCatalogSearchSupportNormalizesModernAndLegacyExtras(t *testing.T) {
+	tests := []struct {
+		name    string
+		catalog ManifestCatalog
+		want    bool
+	}{
+		{name: "modern", catalog: ManifestCatalog{Extra: []ExtraProp{{Name: "search"}}}, want: true},
+		{name: "legacy", catalog: ManifestCatalog{ExtraSupported: []string{"search"}}, want: true},
+		{name: "not searchable", catalog: ManifestCatalog{Extra: []ExtraProp{{Name: "skip"}}}},
+		{
+			name: "modern form takes precedence",
+			catalog: ManifestCatalog{
+				Extra:          []ExtraProp{},
+				ExtraSupported: []string{"search"},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.catalog.SupportsSearch(); got != test.want {
+				t.Fatalf("SupportsSearch() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeTransportURL(t *testing.T) {
 	tests := []struct {
 		input string

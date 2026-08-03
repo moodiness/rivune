@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { api, APIError } from "./api";
 import { Button, HorizontalDragRow, IconButton, Notice } from "./components";
 import { translate as t } from "./i18n";
+import { mediaFromLibraryItem, mediaIdentity, mediaResourceID, resolveMediaTitle } from "./mediaIdentity";
 import { cachedMediaItem, cacheMediaItem } from "./metadataCache";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "./notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "./titleProviders";
@@ -177,50 +178,6 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
   return { streamingProtocols, containers, videoCodecs, audioCodecs, hdrFormats: ["sdr"], processingModes: ["remux"], mediaProfiles, externalPlayers: ["system"] };
 }
 
-function titleReleaseDate(value: string | undefined): string | undefined {
-  const normalized = value?.trim();
-  if (!normalized) return undefined;
-  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:(Z)|([+-])(\d{2}):(\d{2}))?)?$/);
-  if (!match) return undefined;
-  const [, yearValue, monthValue, dayValue, hourValue, minuteValue, secondValue, utcValue, offsetSign, offsetHourValue, offsetMinuteValue] = match;
-  const year = Number(yearValue);
-  const month = Number(monthValue);
-  const day = Number(dayValue);
-  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-  const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  if (year < 1 || month < 1 || month > 12 || day < 1 || day > monthDays[month - 1]) return undefined;
-  if (hourValue === undefined) return normalized;
-  const hour = Number(hourValue);
-  const minute = Number(minuteValue);
-  const second = secondValue === undefined ? 0 : Number(secondValue);
-  if (hour > 23 || minute > 59 || second > 59) return undefined;
-  if (!utcValue && offsetSign) {
-    const offsetHour = Number(offsetHourValue);
-    const offsetMinute = Number(offsetMinuteValue);
-    if (offsetHour > 14 || offsetMinute > 59 || offsetHour === 14 && offsetMinute !== 0) return undefined;
-  }
-  return `${yearValue}-${monthValue}-${dayValue}`;
-}
-
-async function resolveMediaTitle(item: MediaItem): Promise<string> {
-  if (item.titleId) return item.titleId;
-  const preferred = ["tmdb", "imdb", "tvdb", "trakt"].find((provider) => item.externalIds?.[provider]);
-  const namespaced = item.id.match(/^([a-z0-9._-]+):(.+)$/i);
-  const provider = preferred ?? (namespaced ? namespaced[1].toLowerCase() : /^tt\d+$/i.test(item.id) ? "imdb" : "addon");
-  const externalId = preferred ? item.externalIds?.[preferred] ?? item.id : namespaced?.[2] ?? item.id;
-  const resolved = await api.resolveTitle({
-    mediaType: item.mediaType,
-    provider,
-    externalId,
-    resourceId: item.id,
-    title: item.title,
-    posterUrl: item.posterUrl,
-    backgroundUrl: item.backgroundUrl,
-    releaseInfo: item.releaseInfo,
-    released: titleReleaseDate(item.released),
-  });
-  return resolved.titleId;
-}
 
 
 export function mediaTypeLabel(mediaType: string): string {
@@ -321,7 +278,7 @@ function withoutEmptySeasons(series: SeriesMetadata): SeriesMetadata {
   return seasons.length === series.seasons.length ? series : { ...series, seasons };
 }
 
-export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, onOpenSeason }: { item: MediaItem; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenMedia?: (item: MediaItem) => void; onOpenSeason?: (item: MediaItem) => void }) {
+export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, onOpenSeason, onLibraryMutation }: { item: MediaItem; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenMedia?: (item: MediaItem) => void; onOpenSeason?: (item: MediaItem) => void; onLibraryMutation?: () => void }) {
   const metadataLocale = api.metadataLocale();
   const [details, setDetails] = useState(() => cachedMediaItem(item, metadataLocale));
   const [playing, setPlaying] = useState(false);
@@ -339,9 +296,10 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
   const [metaError, setMetaError] = useState("");
   const [availableStreams, setAvailableStreams] = useState<PlaybackSourceOption[]>([]);
   const [selectedStream, setSelectedStream] = useState<PlaybackSourceOption>();
-  const [streamsLoading, setStreamsLoading] = useState(true);
+  const [streamsLoading, setStreamsLoading] = useState(item.mediaType !== "tv");
   const [streamsError, setStreamsError] = useState("");
   const [streamRefreshVersion, setStreamRefreshVersion] = useState(0);
+  const [streamsRequested, setStreamsRequested] = useState(item.mediaType !== "tv");
   const [preparation, setPreparation] = useState<PlaybackPreparation>();
   const [preparationLoading, setPreparationLoading] = useState(false);
   const [preparationError, setPreparationError] = useState("");
@@ -360,6 +318,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
   const autoStartRef = useRef(item.raw?.startFromBeginning === true);
   const sourceRefreshAttemptRef = useRef("");
   const playRequestedSourceRef = useRef("");
+  const tvPlaybackPendingRef = useRef(false);
   const trailerRequestRef = useRef(0);
   const seasonCacheRef = useRef(new Map<string, SeasonMetadata>());
   const trailerItemRef = useRef("");
@@ -397,7 +356,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
   const activeTrailerMessage = trailerOwnerKey === trailerItemKey ? trailerMessage : "";
   const activeTrailerUnavailable = trailerOwnerKey === trailerItemKey && trailerUnavailable;
   const trailerStageVisible = Boolean(activeTrailer || activeTrailerMessage);
-  const streamResourceID = selectedEpisode && series ? episodeResourceID(series, selectedEpisode, item.id) : item.id;
+  const streamResourceID = selectedEpisode && series ? episodeResourceID(series, selectedEpisode, item.id) : mediaResourceID(item);
   const playbackMediaType = selectedEpisode || item.mediaType === "episode" ? "episode" : item.mediaType;
   const startFromBeginning = item.raw?.startFromBeginning === true;
   const selectedProgress = selectedEpisode ? episodeProgress[selectedEpisode.id] : titleProgress;
@@ -468,15 +427,31 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
 
   useEffect(() => {
     let active = true;
-    if (!libraryTitleID) {
+    if (item.mediaType !== "tv" && !libraryTitleID) {
       setSaved(false);
       return;
     }
-    void api.library().then((library) => {
-      if (active) setSaved(library.items.some((entry) => entry.titleId === libraryTitleID));
+    void api.library(item.mediaType === "tv" ? "tv" : "").then((library) => {
+      if (!active) return;
+      if (item.mediaType !== "tv") {
+        setSaved(library.items.some((entry) => entry.titleId === libraryTitleID));
+        return;
+      }
+      const identity = mediaIdentity(item);
+      const entry = library.items.find((candidate) => mediaIdentity(mediaFromLibraryItem(candidate, t("media.untitled"))) === identity);
+      setSaved(Boolean(entry));
+      if (!entry) return;
+      setTitleID(entry.titleId);
+      const libraryItem = mediaFromLibraryItem(entry, t("media.untitled"));
+      setDetails((current) => ({
+        ...current,
+        ...libraryItem,
+        title: current.title === t("media.untitled") ? libraryItem.title : current.title,
+        raw: current.raw,
+      }));
     }).catch(() => undefined);
     return () => { active = false; };
-  }, [libraryTitleID]);
+  }, [item, libraryTitleID]);
 
   useEffect(() => {
     let active = true;
@@ -646,7 +621,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
-    if (!canSelectStream) {
+    if (!canSelectStream || item.mediaType === "tv" && (!streamsRequested || item.available === false)) {
       setAvailableStreams([]);
       setSelectedStream(undefined);
       setStreamsError("");
@@ -662,12 +637,20 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     void api.playbackSources({
       mediaType: playbackMediaType,
       resourceId: streamResourceID,
+      addonId: item.mediaType === "tv" ? item.sourceAddonId : undefined,
       capabilities: webPlaybackCapabilities(),
     }, controller.signal).then((response) => {
       if (!active) return;
       const options = response.sources;
       setAvailableStreams(options);
-      if (autoStartRef.current) {
+      if (item.mediaType === "tv" && tvPlaybackPendingRef.current) {
+        tvPlaybackPendingRef.current = false;
+        const next = options[0];
+        if (next) {
+          playRequestedSourceRef.current = next.sourceRef;
+          setSelectedStream(next);
+        }
+      } else if (autoStartRef.current) {
         const next = options[0];
         if (next) setSelectedStream(next);
         else autoStartRef.current = false;
@@ -684,13 +667,14 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     }).catch((cause) => {
       if (!active || cause instanceof DOMException && cause.name === "AbortError") return;
       autoPlayNextRef.current = false;
+      tvPlaybackPendingRef.current = false;
       setStreamsError(notifyError(cause, t("media.sources.error.loadFailed"), t("media.sources.error.unavailableTitle")));
     }).finally(() => { if (active) setStreamsLoading(false); });
     return () => {
       active = false;
       controller.abort();
     };
-  }, [canSelectStream, playbackMediaType, selectedEpisode, streamRefreshVersion, streamResourceID]);
+  }, [canSelectStream, item.available, item.mediaType, item.sourceAddonId, playbackMediaType, selectedEpisode, streamRefreshVersion, streamResourceID, streamsRequested]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -757,6 +741,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
         t(removing ? "library.notice.removed" : "library.notice.added", { title: item.mediaType === "episode" ? series?.name ?? details.title : details.title }),
         t(removing ? "library.notice.removedTitle" : "library.notice.addedTitle"),
       );
+      onLibraryMutation?.();
     } catch (cause) {
       setActionError(notifyError(cause, t("library.error.updateFailed"), t("library.error.notUpdatedTitle")));
     } finally {
@@ -841,6 +826,17 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     }
     playRequestedSourceRef.current = option.sourceRef;
     setSelectedStream(option);
+  }
+  function watchLive() {
+    if (item.mediaType !== "tv" || item.available === false || streamsLoading) return;
+    const first = availableStreams[0];
+    if (first) {
+      playPlaybackStream(first);
+      return;
+    }
+    tvPlaybackPendingRef.current = true;
+    setStreamsRequested(true);
+    if (streamsRequested) setStreamRefreshVersion((version) => version + 1);
   }
 
   function handleTrailerOptionKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
@@ -1059,6 +1055,9 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
   }
 
   const typeLabel = mediaTypeLabel(details.mediaType);
+  const liveProgramTitle = typeof details.currentProgram === "string"
+    ? details.currentProgram
+    : details.currentProgram?.title || details.currentProgram?.name;
   const episodeSeriesName = item.mediaType === "episode"
     ? series?.name ?? (typeof item.raw?.episodeSeriesName === "string" ? item.raw.episodeSeriesName : "")
     : "";
@@ -1116,7 +1115,12 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
                 {details.releaseInfo && details.releaseInfo !== typeLabel && <span>{details.releaseInfo}</span>}
                 {episodeRuntimeMinutes !== undefined && <span>{t("common.time.minutesShort", { minutes: episodeRuntimeMinutes })}</span>}
                 {details.voteAverage !== undefined && <span className="rating"><Star size={14} fill="currentColor" /> {details.voteAverage.toFixed(1)}</span>}
-                <span>{typeLabel}</span>
+                <span className={item.mediaType === "tv" ? "details-meta__live" : undefined}>{typeLabel}</span>
+                {item.mediaType === "tv" && details.sourceName && <span>{details.sourceName}</span>}
+                {item.mediaType === "tv" && details.country && <span>{details.country}</span>}
+                {item.mediaType === "tv" && details.language && <span>{details.language}</span>}
+                {item.mediaType === "tv" && details.category && <span>{details.category}</span>}
+                {item.mediaType === "tv" && liveProgramTitle && <span>{liveProgramTitle}</span>}
                 {genres.map((genre) => <span key={genre}>{genre}</span>)}
               </div>
 
@@ -1142,6 +1146,10 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
                   {saved ? <Check size={19} /> : <Bookmark size={19} />}
                   {t(saved ? "library.actions.inLibrary" : "library.actions.add")}
                 </Button>
+                {item.mediaType === "tv" && <Button loading={streamsLoading} disabled={details.available === false} onClick={watchLive}>
+                  <Play size={19} fill="currentColor" />
+                  {t("common.play")} · {t("media.type.liveTv")}
+                </Button>}
                 {item.mediaType === "movie" && !fromContinue && <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
                   {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
                   {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
@@ -1267,7 +1275,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
                   </button>}
                 </header>
 
-                <div className="details-stream-toolbar">
+                {(item.mediaType !== "tv" || streamsRequested) && <div className="details-stream-toolbar">
                   <span>{streamsLoading ? t("common.status.loading") : t(availableStreams.length === 1 ? "media.sources.availableCount.one" : "media.sources.availableCount.many", { count: availableStreams.length })}</span>
                   <IconButton label={t("media.sources.refresh")} disabled={streamsLoading} onClick={() => {
                     autoPlayNextRef.current = false;
@@ -1275,19 +1283,25 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
                   }}>
                     <RefreshCw size={17} className={streamsLoading ? "spin" : ""} />
                   </IconButton>
-                </div>
+                </div>}
 
                 <div className="details-context-panel__scroll">
-                  {streamsLoading
-                    ? <div className="details-stream-skeletons" role="status" aria-label={t("media.sources.loading")}>
-                      <span /><span /><span />
-                      <i className="visually-hidden">{t("media.sources.loading")}</i>
-                    </div>
-                    : streamsError && availableStreams.length === 0
+                  {item.mediaType === "tv" && details.available === false
+                    ? <div className="details-stream-feedback"><Notice tone="warning">{t("common.status.unavailable")}</Notice></div>
+                    : item.mediaType === "tv" && !streamsRequested
                       ? <div className="details-stream-feedback">
-                        <Notice>{streamsError}</Notice>
-                        <Button variant="ghost" onClick={() => setStreamRefreshVersion((version) => version + 1)}><RefreshCw size={16} /> {t("common.actions.retry")}</Button>
+                        <Button onClick={watchLive}><Play size={18} fill="currentColor" /> {t("common.play")} · {t("media.type.liveTv")}</Button>
                       </div>
+                      : streamsLoading
+                        ? <div className="details-stream-skeletons" role="status" aria-label={t("media.sources.loading")}>
+                          <span /><span /><span />
+                          <i className="visually-hidden">{t("media.sources.loading")}</i>
+                        </div>
+                        : streamsError && availableStreams.length === 0
+                          ? <div className="details-stream-feedback">
+                            <Notice>{streamsError}</Notice>
+                            <Button variant="ghost" onClick={item.mediaType === "tv" ? watchLive : () => setStreamRefreshVersion((version) => version + 1)}><RefreshCw size={16} /> {t("common.actions.retry")}</Button>
+                          </div>
                       : availableStreams.length > 0
                         ? <div className="details-stream-list" role="radiogroup" aria-label={t("media.sources.availableLabel")}>
                           {availableStreams.map((option) => {

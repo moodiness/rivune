@@ -108,6 +108,7 @@ type addonService interface {
 	Catalogs(context.Context, auth.Principal) ([]addon.CatalogDescriptor, error)
 	Fetch(context.Context, auth.Principal, string, addon.ResourcePath) (addon.ResourceResult, error)
 	FetchAll(context.Context, auth.Principal, addon.ResourcePath) (addon.ResourceBatch, error)
+	SearchCatalogs(context.Context, auth.Principal, string, addon.CatalogSearchInput) (addon.ResourceBatch, error)
 	FetchCatalogs(context.Context, auth.Principal, string, []addon.ExtraValue, bool) (addon.ResourceBatch, error)
 }
 

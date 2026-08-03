@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/addon"
+	"github.com/moodiness/rivune/server/internal/auth"
 )
 
 func TestNormalizeStreamsRanksCompatibleSourcesAndKeepsHeadersPrivate(t *testing.T) {
@@ -61,6 +62,94 @@ func TestNormalizeStreamsTreatsProxiedWebReadyContainerAsCompatible(t *testing.T
 
 	if len(sources) != 1 || !sources[0].Compatible {
 		t.Fatalf("expected server-proxied MP4 to be compatible: %+v", sources)
+	}
+}
+
+type recordingResourceFetcher struct {
+	fetchAddonID  string
+	fetchPath     addon.ResourcePath
+	fetchCalls    int
+	fetchAllPath  addon.ResourcePath
+	fetchAllCalls int
+}
+
+func (fetcher *recordingResourceFetcher) Fetch(_ context.Context, _ auth.Principal, addonID string, path addon.ResourcePath) (addon.ResourceResult, error) {
+	fetcher.fetchAddonID = addonID
+	fetcher.fetchPath = path
+	fetcher.fetchCalls++
+	return addon.ResourceResult{
+		AddonID: addonID, ManifestID: "org.example.live",
+		Payload: []byte(`{"streams":[{"name":"Live","url":"https://media.example/live.m3u8"}]}`),
+	}, nil
+}
+
+func (fetcher *recordingResourceFetcher) FetchAll(_ context.Context, _ auth.Principal, path addon.ResourcePath) (addon.ResourceBatch, error) {
+	fetcher.fetchAllPath = path
+	fetcher.fetchAllCalls++
+	return addon.ResourceBatch{Results: []addon.ResourceResult{{
+		AddonID: "fanout-addon", ManifestID: "org.example.streams",
+		Payload: []byte(`{"streams":[{"name":"Movie","url":"https://media.example/movie.mp4"}]}`),
+	}}}, nil
+}
+
+func TestSourcesTargetsRequestedProfileAddon(t *testing.T) {
+	profileID := "profile-id"
+	current := time.Now()
+	grantExpiresAt := current.Add(time.Hour)
+	fetcher := &recordingResourceFetcher{}
+	service := &Service{
+		addons:     fetcher,
+		now:        func() time.Time { return current },
+		references: newSourceReferenceStore(time.Now),
+	}
+	list, err := service.Sources(context.Background(), auth.Principal{
+		SessionID: "session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
+	}, SourcesInput{
+		MediaType: "tv", AddonID: "requested-addon", ResourceID: "channel-1",
+		Capabilities: Capabilities{StreamingProtocols: []string{"hls"}, Containers: []string{"mpegts"}},
+	})
+	if err != nil {
+		t.Fatalf("targeted sources: %v", err)
+	}
+	if fetcher.fetchCalls != 1 || fetcher.fetchAllCalls != 0 || fetcher.fetchAddonID != "requested-addon" {
+		t.Fatalf("unexpected fetch calls: targeted=%d all=%d addon=%q", fetcher.fetchCalls, fetcher.fetchAllCalls, fetcher.fetchAddonID)
+	}
+	if fetcher.fetchPath.Resource != "stream" || fetcher.fetchPath.Type != "tv" || fetcher.fetchPath.ID != "channel-1" || len(fetcher.fetchPath.Extra) != 0 {
+		t.Fatalf("unexpected targeted resource: %+v", fetcher.fetchPath)
+	}
+	if len(list.Sources) != 1 || list.Sources[0].AddonID != "requested-addon" || list.Sources[0].SourceRef == "" {
+		t.Fatalf("unexpected targeted source list: %+v", list)
+	}
+}
+
+func TestSourcesWithoutAddonKeepsFanout(t *testing.T) {
+	for _, mediaType := range []string{"movie", "series"} {
+		t.Run(mediaType, func(t *testing.T) {
+			profileID := "profile-id"
+			current := time.Now()
+			grantExpiresAt := current.Add(time.Hour)
+			fetcher := &recordingResourceFetcher{}
+			service := &Service{
+				addons:     fetcher,
+				now:        func() time.Time { return current },
+				references: newSourceReferenceStore(time.Now),
+			}
+			_, err := service.Sources(context.Background(), auth.Principal{
+				SessionID: "session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
+			}, SourcesInput{
+				MediaType: mediaType, ResourceID: "resource-1",
+				Capabilities: Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}},
+			})
+			if err != nil {
+				t.Fatalf("fan-out sources: %v", err)
+			}
+			if fetcher.fetchCalls != 0 || fetcher.fetchAllCalls != 1 {
+				t.Fatalf("unexpected fetch calls: targeted=%d all=%d", fetcher.fetchCalls, fetcher.fetchAllCalls)
+			}
+			if fetcher.fetchAllPath.Resource != "stream" || fetcher.fetchAllPath.Type != mediaType || fetcher.fetchAllPath.ID != "resource-1" || len(fetcher.fetchAllPath.Extra) != 0 {
+				t.Fatalf("unexpected fan-out resource: %+v", fetcher.fetchAllPath)
+			}
+		})
 	}
 }
 

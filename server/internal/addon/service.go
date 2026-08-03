@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -321,6 +322,87 @@ func (service *Service) FetchCatalogs(ctx context.Context, principal auth.Princi
 	return service.execute(ctx, requests), nil
 }
 
+func (service *Service) SearchCatalogs(ctx context.Context, principal auth.Principal, contentType string, input CatalogSearchInput) (ResourceBatch, error) {
+	if input.Skip < 0 {
+		return ResourceBatch{}, fmt.Errorf("%w: skip must be greater than or equal to 0", ErrInvalidInput)
+	}
+	if input.Limit < 1 || input.Limit > 100 {
+		return ResourceBatch{}, fmt.Errorf("%w: limit must be between 1 and 100", ErrInvalidInput)
+	}
+	addons, err := service.List(ctx, principal)
+	if err != nil {
+		return ResourceBatch{}, err
+	}
+	return service.execute(ctx, planCatalogSearch(addons, contentType, input)), nil
+}
+
+func planCatalogSearch(addons []InstalledAddon, contentType string, input CatalogSearchInput) []plannedRequest {
+	requests := make([]plannedRequest, 0)
+	seen := make(map[string]struct{})
+	for _, installed := range addons {
+		manifest := installed.parsedManifest
+		if contentType == "tv" && !manifest.SupportsTV() {
+			continue
+		}
+		for _, catalog := range manifest.Catalogs {
+			if catalog.Type != contentType || !catalog.SupportsSearch() {
+				continue
+			}
+			if input.Skip > 0 && !catalog.DeclaresExtra("skip") {
+				continue
+			}
+			extra := make([]ExtraValue, 1, 1+len(input.Extra)+2)
+			extra[0] = ExtraValue{Name: "search", Value: input.Search}
+			for _, value := range input.Extra {
+				if value.Name != "search" && value.Name != "skip" && value.Name != "limit" {
+					extra = append(extra, value)
+				}
+			}
+			if catalog.DeclaresExtra("skip") {
+				extra = append(extra, ExtraValue{Name: "skip", Value: strconv.Itoa(input.Skip)})
+			}
+			if input.Limit > 0 && catalog.DeclaresExtra("limit") {
+				extra = append(extra, ExtraValue{Name: "limit", Value: strconv.Itoa(input.Limit)})
+			}
+			path := manifest.ApplyCatalogDefaults(ResourcePath{
+				Resource: "catalog",
+				Type:     catalog.Type,
+				ID:       catalog.ID,
+				Extra:    extra,
+			})
+			if !manifest.Supports(path) {
+				continue
+			}
+			request := plannedRequest{addon: installed, path: path}
+			key := plannedRequestKey(request)
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			requests = append(requests, request)
+		}
+	}
+	return requests
+}
+
+func plannedRequestKey(request plannedRequest) string {
+	var key strings.Builder
+	appendKeyPart := func(value string) {
+		key.WriteString(strconv.Itoa(len(value)))
+		key.WriteByte(':')
+		key.WriteString(value)
+	}
+	appendKeyPart(request.addon.TransportURL)
+	appendKeyPart(request.path.Resource)
+	appendKeyPart(request.path.Type)
+	appendKeyPart(request.path.ID)
+	for _, extra := range request.path.Extra {
+		appendKeyPart(extra.Name)
+		appendKeyPart(extra.Value)
+	}
+	return key.String()
+}
+
 func (service *Service) execute(ctx context.Context, requests []plannedRequest) ResourceBatch {
 	outcomes := make([]resourceOutcome, len(requests))
 	semaphore := make(chan struct{}, 8)
@@ -423,7 +505,7 @@ func lockProfile(ctx context.Context, tx pgx.Tx, profileID string) error {
 func resultFor(installed InstalledAddon, path ResourcePath, payload json.RawMessage, cache CachePolicy) ResourceResult {
 	return ResourceResult{
 		AddonID: installed.ID, ManifestID: installed.parsedManifest.ID, TransportURL: installed.TransportURL,
-		Resource: path.Resource, Type: path.Type, ID: path.ID, Payload: payload, Cache: cache,
+		Resource: path.Resource, Type: path.Type, ID: path.ID, Payload: payload, Cache: cache, Extra: path.Extra,
 	}
 }
 

@@ -15,15 +15,21 @@ func (a *API) resolveTitle(w http.ResponseWriter, r *http.Request, principal aut
 		return
 	}
 	var request struct {
-		MediaType     string `json:"mediaType"`
-		Provider      string `json:"provider"`
-		ExternalID    string `json:"externalId"`
-		ResourceID    string `json:"resourceId"`
-		Title         string `json:"title"`
-		PosterURL     string `json:"posterUrl"`
-		BackgroundURL string `json:"backgroundUrl"`
-		ReleaseInfo   string `json:"releaseInfo"`
-		Released      string `json:"released"`
+		MediaType       string `json:"mediaType"`
+		Provider        string `json:"provider"`
+		ExternalID      string `json:"externalId"`
+		ResourceID      string `json:"resourceId"`
+		Title           string `json:"title"`
+		PosterURL       string `json:"posterUrl"`
+		BackgroundURL   string `json:"backgroundUrl"`
+		ReleaseInfo     string `json:"releaseInfo"`
+		Released        string `json:"released"`
+		SourceAddonID   string `json:"sourceAddonId"`
+		SourceCatalogID string `json:"sourceCatalogId"`
+		SourceName      string `json:"sourceName"`
+		Country         string `json:"country"`
+		Language        string `json:"language"`
+		Category        string `json:"category"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -33,6 +39,8 @@ func (a *API) resolveTitle(w http.ResponseWriter, r *http.Request, principal aut
 		MediaType: request.MediaType, Provider: request.Provider, ExternalID: request.ExternalID,
 		ResourceID: request.ResourceID, Title: request.Title, PosterURL: request.PosterURL,
 		BackgroundURL: request.BackgroundURL, ReleaseInfo: request.ReleaseInfo, Released: request.Released,
+		SourceAddonID: request.SourceAddonID, SourceCatalogID: request.SourceCatalogID,
+		SourceName: request.SourceName, Country: request.Country, Language: request.Language, Category: request.Category,
 	})
 	if err != nil {
 		a.writeWatchstateError(w, "resolve title", err)

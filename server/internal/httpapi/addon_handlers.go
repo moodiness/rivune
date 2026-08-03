@@ -153,16 +153,35 @@ func (a *API) fetchAllAddonResources(w http.ResponseWriter, r *http.Request, pri
 }
 
 func (a *API) searchAddonCatalogs(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
-	extra, err := parseAddonExtras(r.URL.RawQuery, nil)
+	query := r.URL.Query()
+	if !query.Has("search") {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_request", "search is required")
+		return
+	}
+	skip, err := integerQuery(r, "skip")
+	if err != nil || skip < 0 {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_request", "skip must be an integer greater than or equal to 0")
+		return
+	}
+	limit := 24
+	if query.Has("limit") {
+		limit, err = integerQuery(r, "limit")
+		if err != nil || limit < 1 || limit > 100 {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_addon_request", "limit must be an integer between 1 and 100")
+			return
+		}
+	}
+	extra, err := parseAddonExtras(r.URL.RawQuery, map[string]bool{"search": true, "skip": true, "limit": true})
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_request", err.Error())
 		return
 	}
-	if !hasAddonExtra(extra, "search") {
-		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_request", "search is required")
-		return
-	}
-	batch, err := a.addons.FetchCatalogs(r.Context(), principal, r.PathValue("type"), extra, false)
+	batch, err := a.addons.SearchCatalogs(r.Context(), principal, r.PathValue("type"), addon.CatalogSearchInput{
+		Search: query.Get("search"),
+		Skip:   skip,
+		Limit:  limit,
+		Extra:  extra,
+	})
 	if err != nil {
 		a.writeAddonError(w, "search addon catalogs", err)
 		return
@@ -230,15 +249,6 @@ func parseAddonExtras(rawQuery string, reserved map[string]bool) ([]addon.ExtraV
 		extra = append(extra, addon.ExtraValue{Name: name, Value: value})
 	}
 	return extra, nil
-}
-
-func hasAddonExtra(extra []addon.ExtraValue, name string) bool {
-	for _, value := range extra {
-		if value.Name == name {
-			return true
-		}
-	}
-	return false
 }
 
 func (a *API) writeAddonError(w http.ResponseWriter, operation string, err error) {

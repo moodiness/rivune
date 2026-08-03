@@ -238,7 +238,7 @@ export const api = {
   reorderAddons: (addonIds: string[]) => request<{ addons: InstalledAddon[] }>("/addons/order", { method: "PUT", body: JSON.stringify({ addonIds }) }),
   deleteAddon: (id: string) => request<void>(`/addons/${id}`, { method: "DELETE" }),
   addonCatalogs: () => request<{ catalogs: Array<{ addonId: string; manifestId: string; position: number; catalog: { type: string; id: string; name?: string }; addonCatalog: boolean }> }>("/addons/catalogs"),
-  search: (type: string, search: string) => request<ResourceBatch>(`/addons/catalogs/search/${encodeURIComponent(type)}${query({ search })}`),
+  search: (type: string, search: string, skip: number, limit: number, signal?: AbortSignal) => request<ResourceBatch>(`/addons/catalogs/search/${encodeURIComponent(type)}${query({ search, skip, limit })}`, { signal }),
   resources: (resource: string, type: string, id: string) => request<ResourceBatch>(`/addons/resources/${encodeURIComponent(resource)}/${encodeURIComponent(type)}/${encodeURIComponent(id)}`),
 
   resolveTitle: (input: {
@@ -251,8 +251,14 @@ export const api = {
     backgroundUrl?: string;
     releaseInfo?: string;
     released?: string;
+    sourceAddonId?: string;
+    sourceCatalogId?: string;
+    sourceName?: string;
+    country?: string;
+    language?: string;
+    category?: string;
   }) => request<TitleReference>("/titles/resolve", { method: "POST", body: JSON.stringify(input) }),
-  playbackSources: (input: { mediaType: string; resourceId: string; capabilities: PlaybackCapabilities }, signal?: AbortSignal) =>
+  playbackSources: (input: { mediaType: string; resourceId: string; addonId?: string; capabilities: PlaybackCapabilities }, signal?: AbortSignal) =>
     request<PlaybackSourceList>("/playback/sources", { method: "POST", body: JSON.stringify(input), signal }),
   playbackMarkers: (imdbId: string, season: number, episode: number, signal?: AbortSignal) =>
     request<PlaybackMarkerList>(`/playback/markers${query({ imdbId, season, episode })}`, { signal }),

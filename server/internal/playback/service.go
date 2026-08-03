@@ -23,6 +23,7 @@ import (
 )
 
 type ResourceFetcher interface {
+	Fetch(context.Context, auth.Principal, string, addon.ResourcePath) (addon.ResourceResult, error)
 	FetchAll(context.Context, auth.Principal, addon.ResourcePath) (addon.ResourceBatch, error)
 }
 
@@ -96,6 +97,7 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 
 func (service *Service) Sources(ctx context.Context, principal auth.Principal, input SourcesInput) (SourceList, error) {
 	input.MediaType = strings.TrimSpace(input.MediaType)
+	input.AddonID = strings.TrimSpace(input.AddonID)
 	input.ResourceID = strings.TrimSpace(input.ResourceID)
 	input.PreferredAudioLanguage = strings.TrimSpace(input.PreferredAudioLanguage)
 	input.PreferredSubtitleLanguage = strings.TrimSpace(input.PreferredSubtitleLanguage)
@@ -110,7 +112,18 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 	if addonMediaType == "episode" {
 		addonMediaType = "series"
 	}
-	batch, err := service.addons.FetchAll(ctx, principal, addon.ResourcePath{Resource: "stream", Type: addonMediaType, ID: input.ResourceID})
+	resourcePath := addon.ResourcePath{Resource: "stream", Type: addonMediaType, ID: input.ResourceID}
+	var batch addon.ResourceBatch
+	var err error
+	if input.AddonID != "" {
+		var result addon.ResourceResult
+		result, err = service.addons.Fetch(ctx, principal, input.AddonID, resourcePath)
+		if err == nil {
+			batch.Results = []addon.ResourceResult{result}
+		}
+	} else {
+		batch, err = service.addons.FetchAll(ctx, principal, resourcePath)
+	}
 	if err != nil {
 		return SourceList{}, fmt.Errorf("%w: %v", ErrProviderUnavailable, err)
 	}
@@ -310,7 +323,7 @@ func (service *Service) Stop(ctx context.Context, principal auth.Principal, sess
 }
 
 func validateSourcesInput(input SourcesInput) error {
-	if len(input.MediaType) < 1 || len(input.MediaType) > 64 || len(input.ResourceID) < 1 || len(input.ResourceID) > 2048 {
+	if len(input.MediaType) < 1 || len(input.MediaType) > 64 || len(input.ResourceID) < 1 || len(input.ResourceID) > 2048 || len(input.AddonID) > 128 {
 		return ErrInvalidInput
 	}
 	if len(input.PreferredAudioLanguage) > 64 || len(input.PreferredSubtitleLanguage) > 64 || len(input.PreferredForcedSubtitleLanguage) > 64 {

@@ -212,7 +212,7 @@ export function Skeleton({ className = "", ...props }: HTMLAttributes<HTMLDivEle
   return <div className={`skeleton ${className}`} {...props} />;
 }
 
-export function MediaCard({ title, image, backdrop, subtitle, badge, shape = "poster", onClick, onContextAction, progress }: { title: string; image?: string; backdrop?: string; subtitle?: string; badge?: string; shape?: "poster" | "landscape" | "square"; onClick: () => void; onContextAction?: (anchor: ActionMenuAnchor) => void; progress?: number }) {
+export function MediaCard({ title, image, backdrop, subtitle, badge, shape = "poster", accessibleLabel, onClick, onContextAction, progress }: { title: string; image?: string; backdrop?: string; subtitle?: string; badge?: string; shape?: "poster" | "landscape" | "square"; accessibleLabel?: string; onClick: () => void; onContextAction?: (anchor: ActionMenuAnchor) => void; progress?: number }) {
   const source = image || backdrop;
   const [failedSource, setFailedSource] = useState<string>();
   const usableSource = source === failedSource ? undefined : source;
@@ -267,7 +267,7 @@ export function MediaCard({ title, image, backdrop, subtitle, badge, shape = "po
       } : undefined}
       onPointerUp={onContextAction ? cancelLongPress : undefined}
       onPointerCancel={onContextAction ? cancelLongPress : undefined}
-      aria-label={t("media.open", { title })}
+      aria-label={accessibleLabel || t("media.open", { title })}
       aria-haspopup={onContextAction ? "menu" : undefined}
     >
       <span className="media-card__visual">

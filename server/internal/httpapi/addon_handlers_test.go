@@ -47,6 +47,10 @@ type fakeAddonService struct {
 	addonCatalog bool
 	catalogValue addon.ResourceBatch
 	catalogErr   error
+	searchType   string
+	searchInput  addon.CatalogSearchInput
+	searchValue  addon.ResourceBatch
+	searchErr    error
 }
 
 func (fake *fakeAddonService) Install(_ context.Context, _ auth.Principal, input addon.InstallInput) (addon.InstalledAddon, error) {
@@ -91,6 +95,12 @@ func (fake *fakeAddonService) Fetch(_ context.Context, _ auth.Principal, addonID
 func (fake *fakeAddonService) FetchAll(_ context.Context, _ auth.Principal, path addon.ResourcePath) (addon.ResourceBatch, error) {
 	fake.allPath = path
 	return fake.allValue, fake.allErr
+}
+
+func (fake *fakeAddonService) SearchCatalogs(_ context.Context, _ auth.Principal, contentType string, input addon.CatalogSearchInput) (addon.ResourceBatch, error) {
+	fake.searchType = contentType
+	fake.searchInput = input
+	return fake.searchValue, fake.searchErr
 }
 
 func (fake *fakeAddonService) FetchCatalogs(_ context.Context, _ auth.Principal, contentType string, extra []addon.ExtraValue, addonCatalog bool) (addon.ResourceBatch, error) {
@@ -188,15 +198,27 @@ func TestAddonResourceRoutePreservesOpaqueIDAndRepeatedExtras(t *testing.T) {
 	}
 }
 
-func TestSearchAndAddonCatalogRoutesForwardArbitraryExtras(t *testing.T) {
+func TestSearchAndAddonCatalogRoutesForwardTheirParameters(t *testing.T) {
 	service := &fakeAddonService{}
 	api := addonAPI(service)
-	search := httptest.NewRequest(http.MethodGet, "/api/v1/addons/catalogs/search/custom-type?search=hello&genre=A&genre=B&skip=100", nil)
+	search := httptest.NewRequest(http.MethodGet, "/api/v1/addons/catalogs/search/custom-type?search=hello&genre=A&genre=B&skip=100&limit=24", nil)
 	search.Header.Set("Authorization", "Bearer access")
 	searchResponse := httptest.NewRecorder()
 	api.Handler().ServeHTTP(searchResponse, search)
-	if searchResponse.Code != http.StatusOK || service.catalogType != "custom-type" || service.addonCatalog || len(service.catalogExtra) != 4 {
-		t.Fatalf("unexpected search request: status=%d type=%q addonCatalog=%v extra=%+v", searchResponse.Code, service.catalogType, service.addonCatalog, service.catalogExtra)
+	if searchResponse.Code != http.StatusOK || service.searchType != "custom-type" {
+		t.Fatalf("unexpected search request: status=%d type=%q input=%+v", searchResponse.Code, service.searchType, service.searchInput)
+	}
+	if service.searchInput.Search != "hello" || service.searchInput.Skip != 100 || service.searchInput.Limit != 24 {
+		t.Fatalf("unexpected search pagination: %+v", service.searchInput)
+	}
+	wantExtra := []addon.ExtraValue{{Name: "genre", Value: "A"}, {Name: "genre", Value: "B"}}
+	if len(service.searchInput.Extra) != len(wantExtra) {
+		t.Fatalf("unexpected search extras: %+v", service.searchInput.Extra)
+	}
+	for index := range wantExtra {
+		if service.searchInput.Extra[index] != wantExtra[index] {
+			t.Fatalf("search extra %d = %+v, want %+v", index, service.searchInput.Extra[index], wantExtra[index])
+		}
 	}
 
 	discover := httptest.NewRequest(http.MethodGet, "/api/v1/addons/discover?type=all&skip=100", nil)
@@ -205,6 +227,29 @@ func TestSearchAndAddonCatalogRoutesForwardArbitraryExtras(t *testing.T) {
 	api.Handler().ServeHTTP(discoverResponse, discover)
 	if discoverResponse.Code != http.StatusOK || service.catalogType != "all" || !service.addonCatalog || len(service.catalogExtra) != 1 || service.catalogExtra[0].Name != "skip" {
 		t.Fatalf("unexpected addon catalog request: status=%d type=%q addonCatalog=%v extra=%+v", discoverResponse.Code, service.catalogType, service.addonCatalog, service.catalogExtra)
+	}
+}
+
+func TestSearchAddonCatalogsValidatesPagination(t *testing.T) {
+	for _, path := range []string{
+		"/api/v1/addons/catalogs/search/tv?skip=0&limit=24",
+		"/api/v1/addons/catalogs/search/tv?search=x&skip=-1&limit=24",
+		"/api/v1/addons/catalogs/search/tv?search=x&skip=next&limit=24",
+		"/api/v1/addons/catalogs/search/tv?search=x&skip=0&limit=0",
+		"/api/v1/addons/catalogs/search/tv?search=x&skip=0&limit=101",
+	} {
+		service := &fakeAddonService{}
+		api := addonAPI(service)
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer access")
+		response := httptest.NewRecorder()
+		api.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("%s: expected status 422, got %d: %s", path, response.Code, response.Body.String())
+		}
+		if service.searchType != "" {
+			t.Fatalf("%s: invalid pagination reached service", path)
+		}
 	}
 }
 

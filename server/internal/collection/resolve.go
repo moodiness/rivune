@@ -115,6 +115,8 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, c
 		reference := SourceReference{ID: outcome.source.ID, Kind: outcome.source.Kind, Title: outcome.source.Title}
 		if outcome.source.AddonCatalog != nil {
 			reference.AddonID = outcome.source.AddonCatalog.AddonID
+			reference.ManifestID = outcome.source.AddonCatalog.ManifestID
+			reference.CatalogID = outcome.source.AddonCatalog.CatalogID
 		}
 		for _, item := range outcome.page.Items {
 			item.Sources = []SourceReference{reference}
@@ -553,6 +555,26 @@ func (service *Service) resolveTMDBArtworkID(ctx context.Context, item Item) (st
 
 func itemKey(item Item) string {
 	mediaType := strings.ToLower(strings.TrimSpace(item.MediaType))
+	if mediaType == MediaTypeTV {
+		addonID := ""
+		manifestID := ""
+		for _, source := range item.Sources {
+			if value := strings.TrimSpace(source.AddonID); value != "" {
+				addonID = strings.ToLower(value)
+				break
+			}
+			if manifestID == "" {
+				manifestID = strings.ToLower(strings.TrimSpace(source.ManifestID))
+			}
+		}
+		if addonID != "" {
+			return mediaType + ":addon:" + addonID + ":resource:" + strings.ToLower(strings.TrimSpace(item.ID))
+		}
+		if manifestID != "" {
+			return mediaType + ":manifest:" + manifestID + ":resource:" + strings.ToLower(strings.TrimSpace(item.ID))
+		}
+		return mediaType + ":resource:" + strings.ToLower(strings.TrimSpace(item.ID))
+	}
 	for _, provider := range []string{"tmdb", "imdb", "tvdb", "kitsu", "trakt", "mdblist"} {
 		if value := strings.TrimSpace(item.ExternalIDs[provider]); value != "" {
 			return mediaType + ":" + provider + ":" + strings.ToLower(value)

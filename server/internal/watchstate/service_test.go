@@ -8,9 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/tracking"
 )
 
 func TestActiveProfileIDRequiresUnexpiredSelection(t *testing.T) {
@@ -50,6 +52,10 @@ func TestNormalizeLibraryQuery(t *testing.T) {
 	}
 	if mediaType != "series" || page != 1 || pageSize != 20 {
 		t.Fatalf("unexpected normalized query: %q %d %d", mediaType, page, pageSize)
+	}
+	mediaType, page, pageSize, err = normalizeLibraryQuery(" TV ", 1, 40)
+	if err != nil || mediaType != "tv" || page != 1 || pageSize != 40 {
+		t.Fatalf("unexpected normalized TV query: %q %d %d error %v", mediaType, page, pageSize, err)
 	}
 	for _, test := range []struct {
 		mediaType string
@@ -116,6 +122,22 @@ func TestResolveTitleRejectsNonISOReleaseDate(t *testing.T) {
 	}
 }
 
+func TestResolveTitleRequiresAddonScopedTVIdentity(t *testing.T) {
+	profileID := "11111111-1111-4111-8111-111111111111"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+	service := NewService(nil)
+
+	for _, input := range []ResolveTitleInput{
+		{MediaType: "tv", Provider: "tmdb", ResourceID: "channel", Title: "Channel", SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+		{MediaType: "tv", Provider: "addon", ResourceID: "channel", Title: "Channel", SourceAddonID: "not-a-uuid"},
+	} {
+		if _, err := service.ResolveTitle(context.Background(), principal, input); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("expected invalid TV source identity rejection for %+v, got %v", input, err)
+		}
+	}
+}
+
 func TestResolveTitlePreservesCanonicalMetadataSnapshot(t *testing.T) {
 	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -147,6 +169,12 @@ func TestResolveTitlePreservesCanonicalMetadataSnapshot(t *testing.T) {
 			release_date date,
 			resource_id text,
 			resource_provider text,
+			source_addon_id uuid,
+			source_catalog_id text,
+			source_name text,
+			country text,
+			language text,
+			category text,
 			updated_at timestamptz NOT NULL DEFAULT now()
 		);
 		CREATE TEMPORARY TABLE title_external_ids (
@@ -204,6 +232,179 @@ func TestResolveTitlePreservesCanonicalMetadataSnapshot(t *testing.T) {
 	}
 	if resourceID != "addon-resource" {
 		t.Fatalf("resource identity was not refreshed: %q", resourceID)
+	}
+}
+
+type recordingTrackingSink struct {
+	calls int
+}
+
+func (sink *recordingTrackingSink) EnqueueTx(context.Context, pgx.Tx, string, string, string, tracking.Event) error {
+	sink.calls++
+	return nil
+}
+
+func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run the PostgreSQL TV library test")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	defer pool.Close()
+
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE titles (
+			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			media_type text NOT NULL,
+			display_title text,
+			poster_url text,
+			background_url text,
+			release_info text,
+			release_date date,
+			resource_id text,
+			resource_provider text,
+			source_addon_id uuid,
+			source_catalog_id text,
+			source_name text,
+			country text,
+			language text,
+			category text,
+			updated_at timestamptz NOT NULL DEFAULT now()
+		);
+		CREATE TEMPORARY TABLE title_external_ids (
+			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			provider text NOT NULL,
+			namespace text NOT NULL,
+			external_id text NOT NULL,
+			PRIMARY KEY (provider, namespace, external_id)
+		);
+		CREATE TEMPORARY TABLE addon_profile_access (
+			addon_id uuid NOT NULL,
+			profile_id uuid NOT NULL,
+			PRIMARY KEY (addon_id, profile_id)
+		);
+		CREATE TEMPORARY TABLE profile_library (
+			profile_id uuid NOT NULL,
+			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			added_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (profile_id, title_id)
+		);
+		INSERT INTO addon_profile_access (addon_id, profile_id) VALUES
+			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '11111111-1111-4111-8111-111111111111'),
+			('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '22222222-2222-4222-8222-222222222222');
+	`); err != nil {
+		t.Fatalf("create TV library fixtures: %v", err)
+	}
+
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	profileOneID := "11111111-1111-4111-8111-111111111111"
+	profileTwoID := "22222222-2222-4222-8222-222222222222"
+	profileOne := auth.Principal{ActiveProfileID: &profileOneID, ProfileGrantExpiresAt: &expiresAt}
+	profileTwo := auth.Principal{ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt}
+	trackingSink := &recordingTrackingSink{}
+	service := NewService(pool, trackingSink)
+
+	first, err := service.ResolveTitle(ctx, profileOne, ResolveTitleInput{
+		MediaType: "tv", Provider: "addon", ExternalID: "https://stream.invalid/live.m3u8",
+		ResourceID: "news", Title: "News", SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		SourceCatalogID: "live", SourceName: "Provider One", Country: "US", Language: "en", Category: "News",
+	})
+	if err != nil {
+		t.Fatalf("resolve first TV channel: %v", err)
+	}
+	sameChannel, err := service.ResolveTitle(ctx, profileOne, ResolveTitleInput{
+		MediaType: "tv", Provider: "addon", ResourceID: "news", Title: "News",
+		SourceAddonID:   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		SourceCatalogID: "regional", SourceName: "Provider One", Country: "US", Language: "en", Category: "News",
+	})
+	if err != nil {
+		t.Fatalf("resolve same TV channel from another catalog: %v", err)
+	}
+	if sameChannel.TitleID != first.TitleID || sameChannel.ExternalID != first.ExternalID {
+		t.Fatalf("source catalog context changed durable TV identity: first=%+v same=%+v", first, sameChannel)
+	}
+	second, err := service.ResolveTitle(ctx, profileTwo, ResolveTitleInput{
+		MediaType: "tv", Provider: "addon", ResourceID: "news", Title: "News",
+		SourceAddonID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", SourceCatalogID: "live",
+		SourceName: "Provider Two", Country: "US", Language: "en", Category: "News",
+	})
+	if err != nil {
+		t.Fatalf("resolve homonymous TV channel: %v", err)
+	}
+	if first.TitleID == second.TitleID || first.ExternalID == second.ExternalID {
+		t.Fatalf("homonymous channels from distinct addons collided: first=%+v second=%+v", first, second)
+	}
+	if first.ExternalID == "https://stream.invalid/live.m3u8" {
+		t.Fatal("TV resolution persisted the caller-provided stream URL as identity")
+	}
+	if _, err := service.ResolveTitle(ctx, profileTwo, ResolveTitleInput{
+		MediaType: "tv", Provider: "addon", ResourceID: "news", Title: "News",
+		SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected inaccessible profile addon to be hidden, got %v", err)
+	}
+
+	if _, err := service.AddLibrary(ctx, profileOne, first.TitleID); err != nil {
+		t.Fatalf("add first profile TV library entry: %v", err)
+	}
+	if _, err := service.AddLibrary(ctx, profileTwo, second.TitleID); err != nil {
+		t.Fatalf("add second profile TV library entry: %v", err)
+	}
+	firstPage, err := service.Library(ctx, profileOne, "tv", 1, 20)
+	if err != nil {
+		t.Fatalf("list first profile TV library: %v", err)
+	}
+	secondPage, err := service.Library(ctx, profileTwo, "tv", 1, 20)
+	if err != nil {
+		t.Fatalf("list second profile TV library: %v", err)
+	}
+	if firstPage.TotalResults != 1 || len(firstPage.Items) != 1 || firstPage.Items[0].TitleID != first.TitleID || !firstPage.Items[0].Available {
+		t.Fatalf("unexpected first profile TV library: %+v", firstPage)
+	}
+	if secondPage.TotalResults != 1 || len(secondPage.Items) != 1 || secondPage.Items[0].TitleID != second.TitleID {
+		t.Fatalf("unexpected second profile TV library: %+v", secondPage)
+	}
+	if firstPage.Items[0].SourceAddonID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" ||
+		firstPage.Items[0].SourceCatalogID != "regional" || firstPage.Items[0].SourceName != "Provider One" {
+		t.Fatalf("TV source snapshots were not returned: %+v", firstPage.Items[0])
+	}
+
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM addon_profile_access
+		WHERE addon_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+		  AND profile_id = '11111111-1111-4111-8111-111111111111'
+	`); err != nil {
+		t.Fatalf("remove first profile addon access: %v", err)
+	}
+	unavailablePage, err := service.Library(ctx, profileOne, "tv", 1, 20)
+	if err != nil {
+		t.Fatalf("list unavailable TV library entry: %v", err)
+	}
+	if unavailablePage.TotalResults != 1 || len(unavailablePage.Items) != 1 || unavailablePage.Items[0].Available {
+		t.Fatalf("unavailable TV entry was removed or reported available: %+v", unavailablePage)
+	}
+	if err := service.RemoveLibrary(ctx, profileOne, first.TitleID); err != nil {
+		t.Fatalf("remove unavailable TV library entry: %v", err)
+	}
+	emptyPage, err := service.Library(ctx, profileOne, "tv", 1, 20)
+	if err != nil || emptyPage.TotalResults != 0 || len(emptyPage.Items) != 0 {
+		t.Fatalf("removed TV entry remained in profile library: page=%+v err=%v", emptyPage, err)
+	}
+	if trackingSink.calls != 0 {
+		t.Fatalf("TV library mutations were sent to tracking integrations %d times", trackingSink.calls)
 	}
 }
 

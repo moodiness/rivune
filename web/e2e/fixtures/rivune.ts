@@ -208,6 +208,8 @@ export class RivuneHarness {
   private readonly folderDelays = new Map<string, number>();
   private readonly seasonOverrides = new Map<string, unknown>();
   private libraryItems: Array<Record<string, unknown>> = [];
+  private readonly searchResponses = new Map<string, { body: unknown; status: number; delay: number }>();
+  private readonly resolvedTitles = new Map<string, Record<string, unknown>>();
   private operations = {
     metadataCache: {
       entries: 48,
@@ -281,6 +283,9 @@ export class RivuneHarness {
 
   setLibraryItems(items: Array<Record<string, unknown>>) {
     this.libraryItems = items;
+  }
+  setSearchResponse(type: string, skip: number, body: unknown, options: { status?: number; delay?: number } = {}) {
+    this.searchResponses.set(`${type}:${skip}`, { body, status: options.status ?? 200, delay: options.delay ?? 0 });
   }
 
   matching(pathname: string, method?: string) {
@@ -506,11 +511,36 @@ export class RivuneHarness {
     }
     if (path === "/metadata/series/series-anime") { await json(route, animeSeries); return; }
     if (path === "/metadata/titles/movie-1") { await json(route, movie); return; }
+    const catalogSearch = path.match(/^\/addons\/catalogs\/search\/([^/]+)$/);
+    if (catalogSearch && request.method() === "GET") {
+      const type = decodeURIComponent(catalogSearch[1]);
+      const skip = Number(url.searchParams.get("skip") ?? "0");
+      const configured = this.searchResponses.get(`${type}:${skip}`);
+      if (configured?.delay) await wait(configured.delay);
+      await json(route, configured?.body ?? { results: [], errors: [] }, configured?.status ?? 200);
+      return;
+    }
     if (path.startsWith("/addons/resources/meta/")) { await json(route, { results: [], errors: [] }); return; }
     if (path === "/library") {
       const mediaType = url.searchParams.get("mediaType");
       const items = mediaType ? this.libraryItems.filter((item) => item.mediaType === mediaType) : this.libraryItems;
       await json(route, { items, page: 1, totalPages: items.length > 0 ? 1 : 0, totalResults: items.length });
+      return;
+    }
+    const libraryMutation = path.match(/^\/library\/([^/]+)$/);
+    if (libraryMutation && request.method() === "PUT") {
+      const titleId = decodeURIComponent(libraryMutation[1]);
+      if (!this.libraryItems.some((item) => item.titleId === titleId)) {
+        const resolved = this.resolvedTitles.get(titleId) ?? { titleId, mediaType: "movie", resourceId: titleId, title: titleId };
+        this.libraryItems.push({ ...resolved, addedAt: createdAt, updatedAt: createdAt, available: resolved.available ?? true });
+      }
+      await json(route, { titleId });
+      return;
+    }
+    if (libraryMutation && request.method() === "DELETE") {
+      const titleId = decodeURIComponent(libraryMutation[1]);
+      this.libraryItems = this.libraryItems.filter((item) => item.titleId !== titleId);
+      await route.fulfill({ status: 204 });
       return;
     }
     if (path.startsWith("/progress/") && request.method() === "GET") {
@@ -560,15 +590,19 @@ export class RivuneHarness {
       return;
     }
     if (path === "/titles/resolve" && request.method() === "POST") {
-      const input = body as { externalId?: string };
-      const titleId = input.externalId === "tt9000"
-        ? "series-1"
-        : input.externalId === "tt21209876"
-          ? "series-anime"
-          : input.externalId === "tt0137523"
-            ? "movie-1"
-            : "resolved-title";
-      await json(route, { ...(body as object), titleId });
+      const input = body as { externalId?: string; mediaType?: string; sourceAddonId?: string; resourceId?: string };
+      const titleId = input.mediaType === "tv"
+        ? `tv-${input.sourceAddonId ?? "addon"}-${input.resourceId ?? input.externalId ?? "channel"}`
+        : input.externalId === "tt9000"
+          ? "series-1"
+          : input.externalId === "tt21209876"
+            ? "series-anime"
+            : input.externalId === "tt0137523"
+              ? "movie-1"
+              : "resolved-title";
+      const resolved = { ...(body as object), titleId };
+      this.resolvedTitles.set(titleId, resolved as Record<string, unknown>);
+      await json(route, resolved);
       return;
     }
     await json(route, { error: { code: "fixture_route_missing", message: `No E2E fixture for ${request.method()} ${path}` } }, 501);
