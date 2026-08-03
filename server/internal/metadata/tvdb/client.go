@@ -71,12 +71,13 @@ type seasonType struct {
 }
 
 type seasonRecord struct {
-	ID       int64      `json:"id"`
-	Name     string     `json:"name"`
-	Image    string     `json:"image"`
-	Number   int        `json:"number"`
-	SeriesID int64      `json:"seriesId"`
-	Type     seasonType `json:"type"`
+	ID        int64      `json:"id"`
+	Name      string     `json:"name"`
+	Image     string     `json:"image"`
+	ImageType int64      `json:"imageType"`
+	Number    int        `json:"number"`
+	SeriesID  int64      `json:"seriesId"`
+	Type      seasonType `json:"type"`
 }
 
 type episodesEnvelope struct {
@@ -93,7 +94,17 @@ type seasonExtendedEnvelope struct {
 
 type seasonExtendedRecord struct {
 	seasonRecord
+	Artwork  []artworkRecord `json:"artwork"`
 	Episodes []episodeRecord `json:"episodes"`
+}
+
+type artworkRecord struct {
+	ID     int64   `json:"id"`
+	Image  string  `json:"image"`
+	Type   int64   `json:"type"`
+	Width  int64   `json:"width"`
+	Height int64   `json:"height"`
+	Score  float64 `json:"score"`
 }
 
 type episodeRecord struct {
@@ -245,12 +256,12 @@ func (c *Client) SeriesSeasons(ctx context.Context, seriesTVDBID, episodeOrderID
 	seasons := seasonsForType(series, selectedType)
 	result := make([]metadata.ProviderSeasonSummary, 0, len(seasons))
 	for _, season := range seasons {
-		episodes, err := c.seasonEpisodes(ctx, season)
+		detailed, err := c.seasonDetails(ctx, season)
 		if err != nil {
 			return nil, err
 		}
 		airDate := ""
-		for _, episode := range episodes {
+		for _, episode := range detailed.Episodes {
 			if episode.SeasonNumber != season.Number || episode.Aired == "" {
 				continue
 			}
@@ -263,9 +274,9 @@ func (c *Client) SeriesSeasons(ctx context.Context, seriesTVDBID, episodeOrderID
 			ExternalID:   strconv.FormatInt(season.ID, 10),
 			Name:         name,
 			SeasonNumber: season.Number,
-			EpisodeCount: len(episodes),
+			EpisodeCount: len(detailed.Episodes),
 			AirDate:      airDate,
-			PosterURL:    httpsURL(season.Image),
+			PosterURL:    seasonPosterURL(detailed),
 		})
 	}
 	return result, nil
@@ -294,10 +305,11 @@ func (c *Client) SeriesSeason(ctx context.Context, seriesTVDBID, seasonTVDBID st
 	if selected.ID == 0 {
 		return metadata.ProviderSeason{}, metadata.ErrProviderNotFound
 	}
-	records, err := c.seasonEpisodes(ctx, selected)
+	detailed, err := c.seasonDetails(ctx, selected)
 	if err != nil {
 		return metadata.ProviderSeason{}, err
 	}
+	records := detailed.Episodes
 	episodes := make([]metadata.ProviderEpisode, 0, len(records))
 	airDate := ""
 	for _, episode := range records {
@@ -327,7 +339,7 @@ func (c *Client) SeriesSeason(ctx context.Context, seriesTVDBID, seasonTVDBID st
 		Name:         seasonName(selected),
 		SeasonNumber: selected.Number,
 		AirDate:      airDate,
-		PosterURL:    httpsURL(selected.Image),
+		PosterURL:    seasonPosterURL(detailed),
 		Episodes:     episodes,
 	}, nil
 }
@@ -353,20 +365,67 @@ func (c *Client) episodes(ctx context.Context, seriesID int64, seasonTypeName st
 	return response.Data.Episodes, nil
 }
 
-func (c *Client) seasonEpisodes(ctx context.Context, expected seasonRecord) ([]episodeRecord, error) {
+func (c *Client) seasonDetails(ctx context.Context, expected seasonRecord) (seasonExtendedRecord, error) {
 	var response seasonExtendedEnvelope
 	endpoint := "/seasons/" + strconv.FormatInt(expected.ID, 10) + "/extended"
 	if err := c.get(ctx, endpoint, nil, &response); err != nil {
-		return nil, err
+		return seasonExtendedRecord{}, err
 	}
 	provided := response.Data
 	if provided.ID != expected.ID ||
 		provided.SeriesID != expected.SeriesID ||
 		provided.Number != expected.Number ||
 		(expected.Type.ID > 0 && provided.Type.ID != expected.Type.ID) {
-		return nil, fmt.Errorf("%w: TVDB returned a conflicting season hierarchy", metadata.ErrProviderFailure)
+		return seasonExtendedRecord{}, fmt.Errorf("%w: TVDB returned a conflicting season hierarchy", metadata.ErrProviderFailure)
 	}
-	return provided.Episodes, nil
+	if strings.TrimSpace(provided.Image) == "" {
+		provided.Image = expected.Image
+	}
+	if provided.ImageType == 0 {
+		provided.ImageType = expected.ImageType
+	}
+	return provided, nil
+}
+
+func seasonPosterURL(season seasonExtendedRecord) string {
+	var selected *artworkRecord
+	baseURL := httpsURL(season.Image)
+	if len(season.Artwork) == 0 {
+		return baseURL
+	}
+	for index := range season.Artwork {
+		candidate := &season.Artwork[index]
+		candidateURL := httpsURL(candidate.Image)
+		if candidateURL == "" || candidate.Width < 1 || candidate.Height < 1 ||
+			float64(candidate.Height)/float64(candidate.Width) < 1.25 {
+			continue
+		}
+		if baseURL != "" && candidateURL == baseURL {
+			return candidateURL
+		}
+		if selected == nil || betterSeasonPoster(season.ImageType, candidate, selected) {
+			selected = candidate
+		}
+	}
+	if selected == nil {
+		return ""
+	}
+	return httpsURL(selected.Image)
+}
+
+func betterSeasonPoster(imageType int64, candidate, selected *artworkRecord) bool {
+	candidateMatchesType := imageType > 0 && candidate.Type == imageType
+	selectedMatchesType := imageType > 0 && selected.Type == imageType
+	if candidateMatchesType != selectedMatchesType {
+		return candidateMatchesType
+	}
+	if candidate.Score != selected.Score {
+		return candidate.Score > selected.Score
+	}
+	if candidate.Width != selected.Width {
+		return candidate.Width > selected.Width
+	}
+	return candidate.Height > selected.Height
 }
 
 func selectSeasonType(series seriesExtendedRecord, episodeOrderID string) (seasonType, error) {

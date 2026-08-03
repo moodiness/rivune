@@ -319,6 +319,30 @@ func TestSeriesMappingPreservesSpecialsSeasonZero(t *testing.T) {
 	}
 }
 
+func TestSeasonPosterRejectsMislabeledLandscapeArtwork(t *testing.T) {
+	const (
+		bannerURL = "https://artworks.thetvdb.com/banners/v4/season/2121416/banners/68ce9cbc63f0d.jpg"
+		posterURL = "https://artworks.thetvdb.com/banners/v4/season/2121416/posters/694fb9f886147.jpg"
+	)
+	season := seasonExtendedRecord{
+		seasonRecord: seasonRecord{Image: bannerURL, ImageType: 7},
+		Artwork: []artworkRecord{
+			{ID: 64477755, Image: bannerURL, Type: 6, Width: 758, Height: 140, Score: 100},
+			{ID: 64582983, Image: posterURL, Type: 7, Width: 680, Height: 1000, Score: 10},
+			{ID: 1, Image: "https://artworks.thetvdb.com/other-portrait.jpg", Type: 8, Width: 1000, Height: 1500, Score: 100},
+		},
+	}
+
+	if got := seasonPosterURL(season); got != posterURL {
+		t.Fatalf("season poster = %q, want %q", got, posterURL)
+	}
+
+	season.Artwork = season.Artwork[:1]
+	if got := seasonPosterURL(season); got != "" {
+		t.Fatalf("landscape-only season poster = %q, want no poster", got)
+	}
+}
+
 func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
