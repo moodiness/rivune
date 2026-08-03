@@ -78,7 +78,10 @@ test("TV library actions update immediately, refresh every surface, keep a stabl
   await expect(saved).toBeVisible();
 
   await page.getByRole("button", { name: "Home", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "IPTV — In your library" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "IPTV — In your library" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open France Info" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Library", exact: true }).click();
+  await page.getByRole("button", { name: "Live TV", exact: true }).click();
   await page.getByRole("button", { name: "Open France Info" }).click();
   await expect(page).toHaveURL(/\/media\/tv\/iptv-addon\/france-info$/);
   await page.reload();
@@ -102,6 +105,7 @@ test("Library exposes TV filtering and unavailable channels remain removable", a
   await expect(page.locator(".library-page .media-card")).toHaveCount(3);
   await page.getByRole("button", { name: "Live TV", exact: true }).click();
   await expect(page.getByRole("button", { name: "Open Offline Channel" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Offline Channel" })).toHaveClass(/media-card--poster/);
   await expect(page.getByText("Unavailable", { exact: true })).toBeVisible();
   const libraryRequest = rivune.matching("/api/v1/library", "GET").at(-1)!;
   expect(libraryRequest.search.get("mediaType")).toBe("tv");
@@ -115,7 +119,7 @@ test("Library exposes TV filtering and unavailable channels remain removable", a
   await expect(page.getByRole("button", { name: "Open Offline Channel" })).toHaveCount(0);
 });
 
-test("Home hides an empty IPTV row and all-search still returns movies and series", async ({ page, rivune }) => {
+test("Home omits Library TV rows and all-search still returns movies and series", async ({ page, rivune }) => {
   rivune.setSearchResponse("movie", 0, { results: [result("movie-addon", "movie-search", [{ id: "movie-result", type: "movie", name: "Search Movie" }])], errors: [] });
   rivune.setSearchResponse("series", 0, { results: [result("series-addon", "series-search", [{ id: "series-result", type: "series", name: "Search Series" }])], errors: [] });
   rivune.setSearchResponse("tv", 0, { results: [], errors: [] });

@@ -106,6 +106,10 @@ function tvMetadata(item: MediaItem): string {
   return [item.category, item.language, item.country, item.sourceName].filter(Boolean).join(" · ");
 }
 
+function tvTileSubtitle(item: MediaItem): string {
+  return currentProgramTitle(item.currentProgram) || mediaTypeLabel("tv");
+}
+
 function isAvailable(item: MediaItem, hideUnreleased: boolean): boolean {
   if (!hideUnreleased || !item.released) return true;
   const releasedAt = Date.parse(item.released);
@@ -224,7 +228,6 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   const [opened, setOpened] = useState<OpenedHomeFolder | null>(null);
   const [openedCollection, setOpenedCollection] = useState<OpenedHomeCollection | null>(null);
   const [continueItems, setContinueItems] = useState<EnrichedContinueItem[]>([]);
-  const [tvLibraryItems, setTvLibraryItems] = useState<MediaItem[]>([]);
   const [continueAction, setContinueAction] = useState<{ item: MediaItem; anchor: ActionMenuAnchor }>();
   const [continueActionBusy, setContinueActionBusy] = useState(false);
   const mediaPreferences = useMediaPreferences();
@@ -375,16 +378,6 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
       cancelRequest();
     };
   }, [mediaPreferences.profileID, mediaPreferences.ready, profileRequestSignal]);
-  useEffect(() => {
-    if (!mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
-    let active = true;
-    void api.library("tv").then((library) => {
-      if (active) setTvLibraryItems(library.items.map((entry) => mediaFromLibraryItem(entry, t("media.untitled"))));
-    }).catch(() => {
-      if (active && mediaRevision === 0) setTvLibraryItems([]);
-    });
-    return () => { active = false; };
-  }, [mediaPreferences.profileID, mediaPreferences.ready, mediaRevision, profileRequestSignal]);
 
   useEffect(() => {
     if (mediaRevision === 0 || continueRevisionRef.current === mediaRevision || !mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
@@ -608,19 +601,6 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
           onContextAction={(anchor) => setContinueAction({ item, anchor })}
         />)}</HorizontalDragRow>
       </section>}
-      {tvLibraryItems.length > 0 && <section className="tv-library-section">
-        <SectionHeading title={`IPTV — ${t("library.actions.inLibrary")}`} />
-        <HorizontalDragRow className="media-row media-row--landscape">{tvLibraryItems.map((item) => <MediaCard
-          key={mediaIdentity(item)}
-          shape="landscape"
-          title={item.title}
-          image={item.backgroundUrl || item.posterUrl || item.logoUrl}
-          accessibleLabel={item.sourceName ? `${t("media.open", { title: item.title })} · ${item.sourceName}` : undefined}
-          subtitle={item.available === false ? t("common.status.unavailable") : tvSubtitle(item)}
-          badge={mediaTypeLabel("tv")}
-          onClick={() => onOpenMedia(item)}
-        />)}</HorizontalDragRow>
-      </section>}
       {collections.map((collection) => {
         const collectionRows = rows.filter((candidate) => candidate.collection.id === collection.id);
         const directItems = Array.from(new Map(collectionRows.flatMap((row) => row.resolved.items)
@@ -641,7 +621,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
           })}</HorizontalDragRow>}
         </section>;
       })}
-      {collections.length === 0 && tvLibraryItems.length === 0 && <EmptyState icon={<Clapperboard size={46} />} title={t("home.empty.title")} description={t("home.empty.description")} />}
+      {collections.length === 0 && <EmptyState icon={<Clapperboard size={46} />} title={t("home.empty.title")} description={t("home.empty.description")} />}
     </div>
     {continueAction && <ActionMenu
       label={t("home.continue.actions.menuLabel", { title: [continueActionTitle(continueAction.item), continueActionEpisodeLabel(continueAction.item)].filter(Boolean).join(" · ") })}
@@ -1073,7 +1053,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
                 title={item.title}
                 image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl || item.logoUrl : item.posterUrl}
                 backdrop={item.backgroundUrl}
-                subtitle={item.mediaType === "tv" ? tvSubtitle(item) : item.releaseInfo || mediaTypeLabel(item.mediaType)}
+                subtitle={item.mediaType === "tv" ? tvTileSubtitle(item) : item.releaseInfo || mediaTypeLabel(item.mediaType)}
                 accessibleLabel={item.sourceName ? `${t("media.open", { title: item.title })} · ${item.sourceName}` : undefined}
                 badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined}
                 onClick={() => onOpenMedia(item)}
@@ -1151,10 +1131,10 @@ export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenM
       {!loading && <span className="browse-toolbar__count" role="status">{t(media.length === 1 ? "common.results.count.one" : "common.results.count.many", { count: media.length })}</span>}
     </div>
     {error && <Notice>{error}</Notice>}
-    {loading ? <div className="media-grid">{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className={filter === "tv" ? "card-skeleton card-skeleton--landscape" : "card-skeleton"} />)}</div> : media.length > 0 ? <div className="media-grid media-grid--adaptive">{media.map((item) => {
+    {loading ? <div className="media-grid">{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className="card-skeleton" />)}</div> : media.length > 0 ? <div className="media-grid media-grid--adaptive">{media.map((item) => {
       const metadata = item.mediaType === "tv" ? tvMetadata(item) : "";
-      return <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={item.titleId || mediaIdentity(item)}>
-        <MediaCard shape={item.mediaType === "tv" ? "landscape" : "poster"} title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl || item.logoUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? item.available === false ? t("common.status.unavailable") : tvSubtitle(item) : item.releaseInfo || mediaTypeLabel(item.mediaType)} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} onClick={() => onOpenMedia(item)} />
+      return <div className="media-tile" key={item.titleId || mediaIdentity(item)}>
+        <MediaCard shape="poster" title={item.title} image={item.mediaType === "tv" ? item.posterUrl || item.logoUrl || item.backgroundUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? item.available === false ? t("common.status.unavailable") : tvTileSubtitle(item) : item.releaseInfo || mediaTypeLabel(item.mediaType)} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} onClick={() => onOpenMedia(item)} />
         {metadata && <small className="tv-media-tile__meta">{metadata}</small>}
       </div>;
     })}</div> : query ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} /> : <EmptyState icon={<Bookmark size={46} />} title={t("library.empty.title")} description={t("library.empty.description")} />}
