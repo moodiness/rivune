@@ -1285,7 +1285,7 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
                               const upcoming = episodeIsUpcoming(episode);
                               const progressPercent = progress && progress.durationSeconds > 0 ? Math.min(100, progress.positionSeconds / progress.durationSeconds * 100) : 0;
                               return <div ref={selectedEpisode?.id === episode.id ? selectedEpisodeRowRef : undefined} key={episode.id} className={selectedEpisode?.id === episode.id ? "is-selected" : ""}>
-                                <button type="button" className="episode-main" disabled={upcoming} aria-current={selectedEpisode?.id === episode.id ? "true" : undefined} onClick={() => {
+                                <button type="button" className={upcoming ? "episode-main is-upcoming" : "episode-main"} aria-current={selectedEpisode?.id === episode.id ? "true" : undefined} onClick={() => {
                                   autoPlayNextRef.current = false;
                                   onOpenMedia?.(episodeItem(series, episode, details));
                                 }}>

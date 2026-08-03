@@ -137,6 +137,32 @@ test("series episodes open dedicated detail pages that own playback sources", as
   await expect(page.getByRole("region", { name: "Playback sources" })).toHaveCount(0);
 });
 
+test("upcoming episodes stay dimmed but can open available playback sources", async ({ page, rivune }) => {
+  const futureSeason = longSeason(1);
+  futureSeason.episodes[0] = {
+    ...futureSeason.episodes[0],
+    name: "Early Signal",
+    overview: "A stream arrived before the official air date.",
+    airDate: "2099-01-01",
+  };
+  rivune.setSeason("season-1", futureSeason);
+
+  await page.goto("/media/series/tt9000/season/1");
+  const upcomingEpisode = page.locator("button.episode-main").filter({ hasText: "Early Signal" });
+  await expect(upcomingEpisode).toContainText("Upcoming");
+  await expect(upcomingEpisode).toBeEnabled();
+  await expect(upcomingEpisode).toHaveClass(/is-upcoming/);
+  await expect(upcomingEpisode).toHaveCSS("opacity", "0.5");
+
+  await upcomingEpisode.click();
+
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1\/episode\/1$/);
+  await expect(page.getByRole("heading", { name: "Early Signal" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Playback sources" })).toBeVisible();
+  const sourceRequest = await rivune.waitForRequest("/api/v1/playback/sources", "POST");
+  expect(sourceRequest.body).toMatchObject({ mediaType: "episode", resourceId: "tt9000:1:1" });
+});
+
 test("series artwork keeps season posters separate from episode backgrounds", async ({ page, rivune: _rivune }) => {
   const artwork = page.locator(".details-artwork img");
   const hero = page.locator(".details-hero");

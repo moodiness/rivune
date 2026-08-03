@@ -613,7 +613,7 @@
   .episode-list > div:hover { border-color: rgba(255, 255, 255, .18); background: linear-gradient(145deg, rgba(255, 255, 255, .07), rgba(255, 255, 255, .027)); transform: translateY(-2px); box-shadow: 0 17px 38px rgba(0, 0, 0, .2); }
   .episode-list > div.is-selected { border-color: rgba(242, 154, 120, .6); background: linear-gradient(145deg, rgba(242, 154, 120, .14), rgba(242, 154, 120, .045)); box-shadow: 0 18px 44px rgba(0, 0, 0, .24), inset 3px 0 var(--accent); }
   .episode-main { min-width: 0; display: grid; grid-template-columns: 27px 168px minmax(0, 1fr) 34px; align-items: center; gap: 13px; padding: 11px; color: var(--text); text-align: left; background: transparent; }
-  .episode-main:disabled { opacity: .5; cursor: not-allowed; }
+  .episode-main.is-upcoming { opacity: .5; }
   .episode-number { color: #8c8988; text-align: center; font-size: 10px; font-weight: 720; font-variant-numeric: tabular-nums; letter-spacing: .08em; }
   .episode-visual { width: 168px; aspect-ratio: 16 / 9; position: relative; display: block; overflow: hidden; border-radius: 11px; background: rgba(255, 255, 255, .04); }
   .episode-visual img, .episode-placeholder { width: 100%; height: 100%; display: grid; place-items: center; object-fit: cover; }
