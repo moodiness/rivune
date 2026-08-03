@@ -34,6 +34,3 @@ NUL.*
 .vscode/
 .DS_Store
 Thumbs.db
-
-# Local planning
-ROADMAP.md
