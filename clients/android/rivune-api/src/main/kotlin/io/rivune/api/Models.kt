@@ -106,6 +106,32 @@ data class ProfileAvatar(val kind: String, val presetId: String? = null, val url
 data class ProfileSelection(val profile: Profile, val expiresAt: String)
 
 @Serializable
+data class TranscodingSettingsValues(
+    val allowTranscoding: Boolean? = null,
+    val transcoding: String? = null,
+)
+
+@Serializable
+data class SettingsLayer(
+    val schemaVersion: Int,
+    val settings: TranscodingSettingsValues,
+    val updatedAt: String? = null,
+)
+
+@Serializable
+data class EffectiveSettingsSources(
+    val allowTranscoding: String? = null,
+    val transcoding: String? = null,
+)
+
+@Serializable
+data class EffectiveSettings(
+    val schemaVersion: Int,
+    val settings: TranscodingSettingsValues,
+    val sources: EffectiveSettingsSources,
+)
+
+@Serializable
 enum class MediaType {
     @SerialName("movie") MOVIE,
     @SerialName("series") SERIES,
@@ -237,6 +263,13 @@ data class Trailer(
 )
 
 @Serializable
+data class PlaybackMediaProfile(
+    val container: String,
+    val videoCodec: String,
+    val audioCodec: String? = null,
+)
+
+@Serializable
 data class PlaybackCapabilities(
     val streamingProtocols: List<String>,
     val containers: List<String>,
@@ -244,6 +277,12 @@ data class PlaybackCapabilities(
     val audioCodecs: List<String>? = null,
     val hdrFormats: List<String>? = null,
     val externalPlayers: List<String>? = null,
+    val processingModes: List<String>? = null,
+    val maximumHeight: Int? = null,
+    val maximumVideoBitrateKbps: Int? = null,
+    val maximumAudioChannels: Int? = null,
+    val subtitleModes: List<String>? = null,
+    val mediaProfiles: List<PlaybackMediaProfile>? = null,
 )
 
 @Serializable
@@ -286,12 +325,15 @@ data class PlaybackPreparation(
     val media: PlaybackMediaInspection? = null,
     val subtitleCount: Int,
     val expiresAt: String,
+    val decision: PlaybackDecision? = null,
 )
 
 @Serializable
 data class PlaybackSession(
     @Serializable(with = UUIDSerializer::class) val id: UUID,
     val selectedSourceId: String,
+    val selectedAudioTrack: Int? = null,
+    val selectedSubtitleId: String? = null,
     val sources: List<PlaybackSource>,
     val subtitles: List<PlaybackSubtitle>,
     val providerErrors: List<PlaybackProviderError>,
@@ -314,6 +356,7 @@ data class PlaybackSource(
     val container: String? = null,
     val compatible: Boolean,
     val media: PlaybackMediaInspection? = null,
+    val decision: PlaybackDecision? = null,
 )
 
 @Serializable
@@ -327,12 +370,44 @@ data class PlaybackMediaInspection(
 )
 
 @Serializable
+data class PlaybackDecision(
+    val reason: String,
+    val videoAction: String,
+    val audioAction: String,
+    val subtitleAction: String,
+    val toneMapping: Boolean,
+    val source: PlaybackDecisionSource? = null,
+    val target: PlaybackDecisionTarget? = null,
+)
+
+@Serializable
+data class PlaybackDecisionSource(
+    val container: String? = null,
+    val videoCodec: String? = null,
+    val audioCodec: String? = null,
+    val height: Int? = null,
+    val videoBitrateKbps: Int? = null,
+    val hdrFormat: String? = null,
+)
+
+@Serializable
+data class PlaybackDecisionTarget(
+    val protocol: String? = null,
+    val container: String? = null,
+    val videoCodec: String? = null,
+    val audioCodec: String? = null,
+    val height: Int? = null,
+    val videoBitrateKbps: Int? = null,
+)
+
+@Serializable
 data class PlaybackMediaTrack(
     val index: Int,
     val type: String,
     val codec: String,
     val profile: String? = null,
     val language: String? = null,
+    val forced: Boolean? = null,
     val title: String? = null,
     val width: Int? = null,
     val height: Int? = null,
@@ -345,7 +420,10 @@ data class PlaybackSubtitle(
     @Serializable(with = UUIDSerializer::class) val addonId: UUID,
     val manifestId: String,
     val language: String? = null,
-    val url: String,
+    val forced: Boolean? = null,
+    val default: Boolean? = null,
+    val delivery: String? = null,
+    val url: String? = null,
 )
 
 @Serializable
@@ -354,4 +432,65 @@ data class PlaybackProviderError(
     val manifestId: String,
     val code: String,
     val message: String,
+)
+
+@Serializable
+data class PlaybackActivity(
+    val summary: PlaybackActivitySummary,
+    val diagnostics: PlaybackMediaDiagnostics,
+    val sessions: List<PlaybackActivitySession>,
+    val jobs: List<PlaybackMediaJob>,
+)
+
+@Serializable
+data class PlaybackActivitySummary(
+    val activeSessions: Int,
+    val activeJobs: Int,
+    val processingSlots: Int,
+    val processingLimit: Int,
+    val storageBytes: Long,
+    val storageLimitBytes: Long,
+)
+
+@Serializable
+data class PlaybackMediaDiagnostics(
+    val videoEncoder: String,
+    val hardwareToneMap: Boolean,
+)
+
+@Serializable
+data class PlaybackActivitySession(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val titleId: String? = null,
+    val artworkUrl: String? = null,
+    val externalIds: Map<String, String>? = null,
+    val externalIdMediaTypes: Map<String, String>? = null,
+    val title: String,
+    val mediaType: String,
+    val mode: String,
+    val decision: PlaybackDecision? = null,
+    val username: String,
+    @Serializable(with = UUIDSerializer::class) val profileId: UUID,
+    val profile: String,
+    val device: String,
+    val platform: String,
+    val processing: Boolean,
+    val positionSeconds: Int,
+    val durationSeconds: Int,
+    val createdAt: String,
+    val lastSeenAt: String,
+    val expiresAt: String,
+)
+
+@Serializable
+data class PlaybackMediaJob(
+    @Serializable(with = UUIDSerializer::class) val sessionId: UUID? = null,
+    val assetId: String,
+    val mode: String,
+    val state: String,
+    val prewarming: Boolean,
+    val progressPercent: Double? = null,
+    val speed: Double? = null,
+    val createdAt: String,
+    val lastSeenAt: String,
 )

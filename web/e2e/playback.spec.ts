@@ -70,7 +70,11 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   const sourceRequest = await rivune.waitForRequest("/api/v1/playback/sources", "POST");
   expect(sourceRequest.body).toMatchObject({
     capabilities: {
-      processingModes: ["remux"],
+      processingModes: ["remux", "transcode_audio", "transcode"],
+      subtitleModes: ["external", "burn"],
+      maximumHeight: expect.any(Number),
+      maximumVideoBitrateKbps: expect.any(Number),
+      maximumAudioChannels: 2,
       mediaProfiles: expect.any(Array),
       externalPlayers: ["system"],
     },
@@ -88,6 +92,7 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   expect(markerRequest.search.get("episode")).toBe("1");
   const firstResolve = await rivune.waitForRequest("/api/v1/playback/resolve", "POST");
   expect(firstResolve.body).toMatchObject({ sourceRef: "source-tt9000:1:1", titleId: "episode-1", startSeconds: 321 });
+  expect(firstResolve.body).not.toHaveProperty("preferredSubtitleId");
   await expect(page.getByRole("slider", { name: "Playback position" })).toHaveValue("321");
 
   await page.getByRole("button", { name: "Audio track" }).click();
@@ -97,12 +102,65 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   await expect(page.getByRole("button", { name: /French.*AAC.*2\.0/ })).toHaveClass(/is-active/);
   await page.getByRole("button", { name: "Close settings" }).click();
 
+  const resolvesBeforeSubtitleChanges = rivune.matching("/api/v1/playback/resolve", "POST").length;
+  const activeSessionBeforeBurn = `session-${resolvesBeforeSubtitleChanges}`;
   await page.getByRole("button", { name: "Subtitles" }).click();
   await page.getByRole("button", { name: /FR.*Subtitle track/ }).click();
   await expect(page.locator("video track[srclang='fr']")).toHaveAttribute("src", "https://fixtures.rivune.test/subtitles-fr.vtt");
+  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges);
+
   await page.getByRole("button", { name: "Subtitles" }).click();
-  await expect(page.getByRole("button", { name: /FR.*Subtitle track/ })).toHaveClass(/is-active/);
+  await page.getByRole("button", { name: /ES.*Subtitle track/ }).click();
+  await expect(page.locator("video track")).toHaveCount(0);
+  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges);
+
+  await page.getByRole("button", { name: "Subtitles" }).click();
+  await page.getByRole("button", { name: /FR.*Subtitle track/ }).click();
+  await expect(page.locator("video track[srclang='fr']")).toHaveAttribute("src", "https://fixtures.rivune.test/subtitles-fr.vtt");
+  await page.locator("video").evaluate((video) => {
+    video.currentTime = 345;
+  });
+
+  rivune.delayNextPlaybackStop(500);
+  await page.getByRole("button", { name: "Subtitles" }).click();
+  await page.getByRole("button", { name: /JA.*Subtitle track/ }).click();
+  await expect.poll(() => rivune.matching(`/api/v1/playback/sessions/${activeSessionBeforeBurn}`, "DELETE").length).toBe(1);
+  expect(rivune.matching("/api/v1/playback/resolve", "POST")).toHaveLength(resolvesBeforeSubtitleChanges);
+  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges + 1);
+  const burnResolve = rivune.matching("/api/v1/playback/resolve", "POST").at(-1)!;
+  expect(burnResolve.body).toMatchObject({
+    titleId: "episode-1",
+    startSeconds: 345,
+    preferredSubtitleId: "sub-burn",
+  });
+  const burnRelease = rivune.matching(`/api/v1/playback/sessions/${activeSessionBeforeBurn}`, "DELETE")[0];
+  expect(rivune.requests.indexOf(burnRelease)).toBeLessThan(rivune.requests.indexOf(burnResolve));
+  await expect.poll(() => rivune.requests.some((request) => request.pathname.endsWith("/assets/master.m3u8") && request.search.get("file") === "master.m3u8")).toBe(true);
+  const burnedSession = `session-${resolvesBeforeSubtitleChanges + 1}`;
+  expect(rivune.matching(`/api/v1/playback/sessions/${burnedSession}`, "DELETE")).toHaveLength(0);
+  await page.getByRole("button", { name: "Subtitles" }).click();
+  await expect(page.getByRole("button", { name: /JA.*Subtitle track/ })).toHaveClass(/is-active/);
+  rivune.delayNextPlaybackStop(500);
+  await page.getByRole("button", { name: "Off" }).click();
+  await expect.poll(() => rivune.matching(`/api/v1/playback/sessions/${burnedSession}`, "DELETE").length).toBe(1);
+  expect(rivune.matching("/api/v1/playback/resolve", "POST")).toHaveLength(resolvesBeforeSubtitleChanges + 1);
+  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges + 2);
+  const offResolve = rivune.matching("/api/v1/playback/resolve", "POST").at(-1)!;
+  expect(offResolve.body).toMatchObject({
+    titleId: "episode-1",
+    startSeconds: 345,
+    preferredSubtitleId: "none",
+  });
+  const burnReleaseForOff = rivune.matching(`/api/v1/playback/sessions/${burnedSession}`, "DELETE")[0];
+  expect(rivune.requests.indexOf(burnReleaseForOff)).toBeLessThan(rivune.requests.indexOf(offResolve));
+  const replacementSession = `session-${resolvesBeforeSubtitleChanges + 2}`;
+  expect(rivune.matching(`/api/v1/playback/sessions/${replacementSession}`, "DELETE")).toHaveLength(0);
+  await page.getByRole("button", { name: "Subtitles" }).click();
+  await expect(page.getByRole("button", { name: "Off" })).toHaveClass(/is-active/);
   await page.getByRole("button", { name: "Close settings" }).click();
+  expect(rivune.matching(`/api/v1/playback/sessions/${activeSessionBeforeBurn}`, "DELETE")).toHaveLength(1);
+  expect(rivune.matching(`/api/v1/playback/sessions/${burnedSession}`, "DELETE")).toHaveLength(1);
+  expect(rivune.requests.filter((request) => request.pathname.includes("/playback/sessions/") && request.search.get("fallback") === "1")).toHaveLength(0);
   await page.locator("video").evaluate((video) => {
     video.currentTime = 330;
   });
@@ -124,6 +182,107 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   await expect.poll(() => rivune.matching("/api/v1/playback/prepare", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ sourceRef: "source-tt9000:1:2", startSeconds: 0 }));
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ sourceRef: "source-tt9000:1:2", titleId: "episode-2", startSeconds: 0 }));
 });
+
+test("server transcodes remain in the existing web video and HLS source pipeline", async ({ page, rivune: _rivune }) => {
+  await installDeterministicMedia(page);
+  let announcedCapabilities: unknown;
+  const playbackAssetRequests: string[] = [];
+  await page.route("**/api/v1/playback/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "GET" && path.includes("/playback/sessions/transcoded-session/assets/")) {
+      const url = new URL(request.url());
+      playbackAssetRequests.push(url.toString());
+      if (url.searchParams.get("file")?.endsWith(".m3u8")) {
+        await route.fulfill({
+          contentType: "application/vnd.apple.mpegurl",
+          body: "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\nsegment.m4s\n#EXT-X-ENDLIST\n",
+        });
+      } else {
+        await route.fulfill({ contentType: "video/mp4", body: "" });
+      }
+      return;
+    }
+    if (request.method() === "POST" && path.endsWith("/playback/sources")) {
+      const input: unknown = request.postDataJSON();
+      if (input && typeof input === "object" && "capabilities" in input) announcedCapabilities = input.capabilities;
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ sources: [{ id: "audio-option", sourceRef: "audio-transcode-source", addonId: "fixture-addon", manifestId: "fixture-manifest", streamIndex: 0, name: "Server audio conversion", protocol: "http", container: "mkv", expiresAt: "2099-01-01T00:00:00Z" }], providerErrors: [] }) });
+      return;
+    }
+    if (request.method() === "POST" && path.endsWith("/playback/prepare")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ sourceRef: "audio-transcode-source", mode: "transcode_audio", protocol: "hls", container: "mp4", media: { container: "mkv", durationSeconds: 1800, hdrFormat: "sdr", videoTracks: [{ index: 0, type: "video", codec: "h264", width: 1920, height: 1080 }], audioTracks: [{ index: 1, type: "audio", codec: "dts", channels: 6 }], subtitleTracks: [] }, subtitleCount: 0, expiresAt: "2099-01-01T00:00:00Z" }) });
+      return;
+    }
+    if (request.method() === "POST" && path.endsWith("/playback/resolve")) {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "transcoded-session",
+          selectedSourceId: "transcoded-source",
+          selectedAudioTrack: 1,
+          sources: [
+            { id: "transcoded-source", addonId: "fixture-addon", manifestId: "fixture-manifest", name: "Server audio conversion", mode: "transcode_audio", url: "/api/v1/playback/sessions/transcoded-session/assets/master.m3u8?file=audio/master.m3u8", protocol: "hls", container: "mp4", compatible: true, media: { container: "mp4", durationSeconds: 1800, hdrFormat: "sdr", videoTracks: [{ index: 0, type: "video", codec: "h264", width: 1920, height: 1080 }], audioTracks: [{ index: 1, type: "audio", codec: "aac", channels: 6 }], subtitleTracks: [] } },
+            { id: "video-transcoded-source", addonId: "fixture-addon", manifestId: "fixture-manifest", name: "Server video conversion", mode: "transcode", url: "/api/v1/playback/sessions/transcoded-session/assets/master.m3u8?file=video/master.m3u8", protocol: "hls", container: "mp4", compatible: true, media: { container: "mp4", durationSeconds: 1800, hdrFormat: "sdr", videoTracks: [{ index: 0, type: "video", codec: "h264", width: 1280, height: 720 }], audioTracks: [{ index: 1, type: "audio", codec: "aac", channels: 2 }], subtitleTracks: [] } },
+          ],
+          subtitles: [],
+          providerErrors: [],
+          expiresAt: "2099-01-01T00:00:00Z",
+        }),
+      });
+      return;
+    }
+    if (path.endsWith("/playback/markers")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ markers: [] }) });
+      return;
+    }
+    await route.fulfill({ status: 204 });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await page.getByRole("radio", { name: /Server audio conversion/ }).click();
+  await expect(page.getByRole("button", { name: "Play episode" })).toBeEnabled();
+  await page.getByRole("button", { name: "Play episode" }).click();
+
+  await expect(page.getByRole("dialog", { name: "Playing First Light" })).toBeVisible();
+  await expect(page.getByText("Audio conversion", { exact: true }).first()).toBeVisible();
+  await expect.poll(() => playbackAssetRequests.some((value) => new URL(value).searchParams.get("file") === "audio/master.m3u8")).toBe(true);
+  await page.getByRole("button", { name: "Sources and quality" }).click();
+  const videoTranscode = page.getByRole("button", { name: /Server video conversion.*Video conversion/ });
+  await expect(videoTranscode).toBeVisible();
+  await videoTranscode.click();
+  await expect(page.getByText("Video conversion", { exact: true }).first()).toBeVisible();
+  await expect.poll(() => playbackAssetRequests.some((value) => new URL(value).searchParams.get("file") === "video/master.m3u8")).toBe(true);
+  expect(playbackAssetRequests.some((value) => new URL(value).searchParams.get("fallback") === "1")).toBe(false);
+  expect(announcedCapabilities).toMatchObject({
+    processingModes: ["remux", "transcode_audio", "transcode"],
+    subtitleModes: ["external", "burn"],
+    maximumHeight: expect.any(Number),
+    maximumVideoBitrateKbps: expect.any(Number),
+    maximumAudioChannels: 2,
+  });
+});
+
+for (const scenario of [
+  { code: "playback_transcoding_disabled", message: "This media requires server transcoding, but transcoding is disabled by the server or profile setting." },
+  { code: "playback_client_capability_missing", message: "This media requires a playback mode that this client did not declare. Try another source or player." },
+]) {
+  test(`player explains ${scenario.code}`, async ({ page, rivune: _rivune }) => {
+    await page.route("**/api/v1/playback/resolve", (route) => route.fulfill({
+      status: 422,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: scenario.code, message: "backend detail must not leak" } }),
+    }));
+    await page.goto("/");
+    await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+    await page.getByRole("radio", { name: /Fixture 1080p/ }).click();
+    await page.getByRole("button", { name: "Play episode" }).click();
+
+    await expect(page.getByRole("dialog", { name: "Playing First Light" })).toBeVisible();
+    await expect(page.getByText(scenario.message)).toBeVisible();
+    await expect(page.getByText("backend detail must not leak")).toHaveCount(0);
+  });
+}
 
 test("external-only sources are disclosed without starting web media", async ({ page, rivune }) => {
   await page.route("**/api/v1/playback/**", async (route) => {

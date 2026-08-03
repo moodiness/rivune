@@ -174,8 +174,35 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
   if (videoCodecs.length === 0) videoCodecs.push("none");
   if (audioCodecs.length === 0) audioCodecs.push("none");
   const streamingProtocols = ["http", "youtube"];
+  const displayHeight = Math.floor(Math.min(window.screen.width, window.screen.height) * window.devicePixelRatio / 2) * 2;
+  const maximumHeight = Math.max(144, Math.min(4320, displayHeight));
+  const displayBitrateKbps = maximumHeight >= 2160 ? 25_000 : maximumHeight >= 1440 ? 16_000 : maximumHeight >= 1080 ? 12_000 : maximumHeight >= 720 ? 6_000 : 3_000;
+  const connection = (navigator as Navigator & { connection?: { downlink?: number } }).connection;
+  const networkBitrateKbps = connection?.downlink && connection.downlink > 0 ? Math.floor(connection.downlink * 800) : displayBitrateKbps;
+  const maximumVideoBitrateKbps = Math.max(64, Math.min(displayBitrateKbps, networkBitrateKbps));
+  const hdrFormats = ["sdr"];
+  if (window.matchMedia?.("(dynamic-range: high)").matches && videoCodecs.some((codec) => codec === "h265" || codec === "vp9" || codec === "av1")) {
+    hdrFormats.push("hdr10", "hlg");
+  }
+  if (window.matchMedia?.("(dynamic-range: high)").matches &&
+    (video.canPlayType('video/mp4; codecs="dvh1.05.06"') || video.canPlayType('video/mp4; codecs="dvhe.05.06"'))) {
+    hdrFormats.push("dolbyvision");
+  }
   if (video.canPlayType("application/vnd.apple.mpegurl") || "MediaSource" in window) streamingProtocols.push("hls");
-  return { streamingProtocols, containers, videoCodecs, audioCodecs, hdrFormats: ["sdr"], processingModes: ["remux"], mediaProfiles, externalPlayers: ["system"] };
+  return {
+    streamingProtocols,
+    containers,
+    videoCodecs,
+    audioCodecs,
+    hdrFormats,
+    processingModes: ["remux", "transcode_audio", "transcode"],
+    subtitleModes: ["external", "burn"],
+    maximumHeight,
+    maximumVideoBitrateKbps,
+    maximumAudioChannels: 2,
+    mediaProfiles,
+    externalPlayers: ["system"],
+  };
 }
 
 
@@ -689,13 +716,6 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
     void api.preparePlayback({ sourceRef: selectedStream.sourceRef, startSeconds: preparationStartSeconds }, controller.signal).then((prepared) => {
       if (!active) return;
       sourceRefreshAttemptRef.current = "";
-      if (prepared.mode === "transcode" || prepared.mode === "transcode_audio") {
-        autoStartRef.current = false;
-        autoPlayNextRef.current = false;
-        setPreparationError(t("media.sources.error.encodingRequired"));
-        if (playRequestedSourceRef.current === selectedStream.sourceRef) playRequestedSourceRef.current = "";
-        return;
-      }
       setPreparation(prepared);
       const playRequested = playRequestedSourceRef.current === selectedStream.sourceRef;
       if (autoStartRef.current || autoPlayNextRef.current || playRequested) {
@@ -716,6 +736,11 @@ export function MediaDetails({ item, onClose, onNavigateContext, onOpenMedia, on
       if (playRequestedSourceRef.current === selectedStream.sourceRef) playRequestedSourceRef.current = "";
       if (cause instanceof APIError && cause.code === "playback_source_unsupported") {
         setPreparationError(t("media.sources.error.conversionUnsupported"));
+        return;
+      }
+      const policyMessage = playbackPolicyErrorMessage(cause);
+      if (policyMessage) {
+        setPreparationError(policyMessage);
         return;
       }
       setPreparationError(notifyError(cause, t("media.sources.error.prepareFailed"), t("media.sources.error.streamUnavailableTitle")));
@@ -1426,10 +1451,16 @@ function playerModeLabel(mode?: string, toneMapped = false): string {
   if (mode === "external") return t("player.mode.external");
   return t("player.mode.playback");
 }
+function playbackPolicyErrorMessage(cause: unknown): string | undefined {
+  if (!(cause instanceof APIError) || cause.status !== 422) return undefined;
+  if (cause.code === "playback_transcoding_disabled") return t("player.error.transcodingDisabled");
+  if (cause.code === "playback_client_capability_missing") return t("player.error.clientCapabilityMissing");
+  return undefined;
+}
+
 
 function playerSourceAvailable(source: PlaybackSource): boolean {
   if (!source.compatible) return false;
-  if (source.mode === "transcode" || source.mode === "transcode_audio") return false;
   if (source.mode === "external") return Boolean(source.url || source.infoHash);
   return Boolean(source.url || source.ytId);
 }
@@ -1489,6 +1520,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   const [videoDuration, setVideoDuration] = useState(0);
   const [playbackStart, setPlaybackStart] = useState<number>();
   const [playbackGeneration, setPlaybackGeneration] = useState(0);
+  const [subtitleResolveGeneration, setSubtitleResolveGeneration] = useState(0);
   const [retryVersion, setRetryVersion] = useState(0);
   const [seekPreview, setSeekPreview] = useState<number | null>(null);
   const [seekFeedback, setSeekFeedback] = useState<{ seconds: number; id: number }>();
@@ -1511,6 +1543,8 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   const streamProtocolRef = useRef("");
   const playbackOffsetRef = useRef(0);
   const pausedAtRef = useRef(0);
+  const subtitlePreferenceRef = useRef<string | undefined>(undefined);
+  const subtitleHandoffRef = useRef(false);
 
   useEffect(() => {
     setProgressReady(false);
@@ -1556,7 +1590,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     if (!progressReady) return;
     let active = true;
     setLoading(true);
-    setPhase("preparing");
+    setPhase(subtitleHandoffRef.current || sessionIDRef.current ? "recovering" : "preparing");
     setError("");
     setPlaybackBlocked(false);
     setPanel(null);
@@ -1570,6 +1604,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       startSeconds: Math.max(0, Math.floor(resumePositionRef.current)),
       titleId: item.titleId,
       preferredAudioTrack,
+      preferredSubtitleId: subtitlePreferenceRef.current,
     }).then((session) => {
       if (!active) {
         void api.stopPlayback(session.id).catch(() => undefined);
@@ -1582,7 +1617,9 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       setStreams(resolvedSources);
       setSubtitles(session.subtitles ?? []);
       setSelectedAudioTrack(session.selectedAudioTrack);
-      setSelectedSubtitleID(session.selectedSubtitleId || "none");
+      const resolvedSubtitleID = session.selectedSubtitleId || "none";
+      subtitlePreferenceRef.current = resolvedSubtitleID;
+      setSelectedSubtitleID(resolvedSubtitleID);
       const compatible = resolvedSources.filter(playerSourceAvailable);
       const selectedIndex = compatible.findIndex((source) => source.id === session.selectedSourceId);
       setSelected(selectedIndex < 0 ? 0 : selectedIndex);
@@ -1599,11 +1636,21 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         setPhase("failed");
         return;
       }
+      const policyMessage = playbackPolicyErrorMessage(cause);
+      if (policyMessage) {
+        setError(policyMessage);
+        setPhase("failed");
+        return;
+      }
       setError(notifyError(cause, t("player.error.sourcesUnavailable"), t("player.error.unavailableTitle")));
       setPhase("failed");
-    }).finally(() => { if (active) setLoading(false); });
+    }).finally(() => {
+      if (!active) return;
+      subtitleHandoffRef.current = false;
+      setLoading(false);
+    });
     return () => { active = false; };
-  }, [item.id, item.titleId, onSourceExpired, preferredAudioTrack, progressReady, retryVersion, sourceRef]);
+  }, [item.id, item.titleId, onSourceExpired, preferredAudioTrack, progressReady, retryVersion, sourceRef, subtitleResolveGeneration]);
 
   const playable = useMemo(() => streams.filter(playerSourceAvailable), [streams]);
   const stream = playable[selected];
@@ -1613,6 +1660,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   streamProtocolRef.current = stream?.protocol ?? "";
   const audioTracks = stream?.media?.audioTracks ?? [];
   const selectedSubtitle = subtitles.find((subtitle) => subtitle.id === selectedSubtitleID);
+  const selectedExternalSubtitleURL = selectedSubtitle?.delivery === "external" ? selectedSubtitle.url?.trim() ?? "" : "";
   const transportTime = seekPreview ?? currentTime;
   const progressPercent = playbackDuration > 0 ? Math.min(100, Math.max(0, transportTime / playbackDuration * 100)) : 0;
   const remainingSeconds = playbackDuration > 0 ? Math.max(0, playbackDuration - currentTime) : Number.POSITIVE_INFINITY;
@@ -1699,11 +1747,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     pausedAtRef.current = 0;
     if (playbackOffset > 0) playbackURL.searchParams.set("start", String(playbackOffset));
     const sourceURL = processed ? `${playbackURL.pathname}${playbackURL.search}` : stream.url;
-    const fallbackURL = new URL(playbackURL);
-    fallbackURL.searchParams.delete("file");
-    fallbackURL.searchParams.set("fallback", "1");
     let disposed = false;
-    let fallbackStarted = false;
     let destroyHLS = () => {};
     const isHLS = stream.protocol === "hls";
     const startPlayback = () => {
@@ -1725,29 +1769,17 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       setPhase("failed");
     };
     const handleMediaError = () => {
-      if (!startProcessedFallback()) failPlayback(t("player.error.sourcePlayFailed"));
-    };
-    const startProcessedFallback = (): boolean => {
-      if (disposed || fallbackStarted || stream.mode === "direct") return false;
-      fallbackStarted = true;
-      destroyHLS();
-      destroyHLS = () => {};
-      setError("");
-      setPhase("recovering");
-      video.addEventListener("error", handleMediaError, { once: true });
-      video.src = `${fallbackURL.pathname}${fallbackURL.search}`;
-      video.load();
-      startPlayback();
-      return true;
+      failPlayback(t("player.error.sourcePlayFailed"));
     };
 
     video.volume = volume;
     video.muted = muted;
     video.playbackRate = playbackRate;
     if (!isHLS) {
-      video.addEventListener("error", handleMediaError);
-      if (processed) startProcessedFallback();
-      else {
+      if (processed) {
+        failPlayback(t("player.error.hlsUnsupported"));
+      } else {
+        video.addEventListener("error", handleMediaError);
         video.src = sourceURL;
         startPlayback();
       }
@@ -1759,7 +1791,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
             video.addEventListener("error", handleMediaError);
             video.src = sourceURL;
             startPlayback();
-          } else if (!startProcessedFallback()) {
+          } else {
             failPlayback(t("player.error.hlsUnsupported"));
           }
           return;
@@ -1801,12 +1833,12 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
             else hls.startLoad(video.currentTime);
             return;
           }
-          if (!startProcessedFallback()) failPlayback(t("player.error.hlsStopped"));
+          failPlayback(t("player.error.hlsStopped"));
         });
         hls.loadSource(sourceURL);
         hls.attachMedia(video);
       }).catch((cause) => {
-        if (!disposed && !startProcessedFallback()) {
+        if (!disposed) {
           setError(notifyError(cause, t("player.error.hlsPlayerLoadFailed"), t("player.error.unavailableTitle")));
           setPhase("failed");
         }
@@ -1998,11 +2030,14 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     }
   }
 
-  function stopCurrentSession() {
+  function releaseCurrentSession(): Promise<void> {
     const sessionID = sessionIDRef.current;
-    if (!sessionID) return;
     sessionIDRef.current = "";
-    void api.stopPlayback(sessionID).catch(() => undefined);
+    return sessionID ? api.stopPlayback(sessionID) : Promise.resolve();
+  }
+
+  function stopCurrentSession() {
+    void releaseCurrentSession().catch(() => undefined);
   }
 
   function closePlayer() {
@@ -2273,6 +2308,37 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     void persistProgress(false, position);
   }
 
+  function selectSubtitle(subtitleID: string) {
+    if (subtitleHandoffRef.current || subtitleID === selectedSubtitleID) {
+      setPanel(null);
+      return;
+    }
+    const nextSubtitle = subtitles.find((subtitle) => subtitle.id === subtitleID);
+    const changesBurnDelivery = selectedSubtitle?.delivery === "burn" || nextSubtitle?.delivery === "burn";
+    subtitlePreferenceRef.current = subtitleID;
+    setPanel(null);
+    if (!changesBurnDelivery) {
+      setSelectedSubtitleID(subtitleID);
+      return;
+    }
+    const video = videoRef.current;
+    const position = Math.floor(video ? playbackOffsetRef.current + video.currentTime : currentTime);
+    resumePositionRef.current = position;
+    setPlaybackStart(position);
+    subtitleHandoffRef.current = true;
+    setLoading(true);
+    setError("");
+    setPhase("recovering");
+    void releaseCurrentSession().then(() => {
+      setSubtitleResolveGeneration((generation) => generation + 1);
+    }).catch((cause) => {
+      subtitleHandoffRef.current = false;
+      setLoading(false);
+      setError(notifyError(cause, t("admin.activity.errors.stop"), t("admin.activity.errors.stopTitle")));
+      setPhase("failed");
+    });
+  }
+
   function handlePlaybackReady(video: HTMLVideoElement) {
     if (video.paused) {
       setPaused(true);
@@ -2412,7 +2478,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
           onWaiting={() => setPhase((current) => current === "paused" ? current : "buffering")}
           onStalled={() => setPhase((current) => current === "paused" ? current : "buffering")}
           onEnded={(event) => handlePlaybackEnded(event.currentTarget)}>
-          {selectedSubtitle && <track key={selectedSubtitle.id} src={selectedSubtitle.url} srcLang={selectedSubtitle.language || "und"} label={(selectedSubtitle.language || t("common.fallback.unknown")).toUpperCase()} default />}
+          {selectedSubtitle && selectedExternalSubtitleURL && <track key={selectedSubtitle.id} src={selectedExternalSubtitleURL} srcLang={selectedSubtitle.language || "und"} label={(selectedSubtitle.language || t("common.fallback.unknown")).toUpperCase()} default />}
         </video> : null}
     </div>
 
@@ -2487,7 +2553,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         setPanel(null);
         setPhase("recovering");
       }} data-player-control><span><strong>{track.title || track.language?.toUpperCase() || t("player.audio.fallbackTrack", { number: track.index + 1 })}</strong><small>{playerTrackLabel(track)}</small></span>{selectedAudioTrack === track.index && <Check size={17} />}</button>)}</div>}
-      {panel === "subtitles" && <div className="player__option-list"><button type="button" className={selectedSubtitleID === "none" ? "is-active" : ""} onClick={() => { setSelectedSubtitleID("none"); setPanel(null); }} data-player-control><span><strong>{t("player.subtitles.off")}</strong><small>{t("player.subtitles.none")}</small></span>{selectedSubtitleID === "none" && <Check size={17} />}</button>{subtitles.map((subtitle) => <button key={subtitle.id} type="button" className={selectedSubtitleID === subtitle.id ? "is-active" : ""} onClick={() => { setSelectedSubtitleID(subtitle.id); setPanel(null); }} data-player-control><span><strong>{(subtitle.language || t("common.fallback.unknown")).toUpperCase()}</strong><small>{t(subtitle.default ? "player.subtitles.defaultTrack" : "player.subtitles.track")}</small></span>{selectedSubtitleID === subtitle.id && <Check size={17} />}</button>)}</div>}
+      {panel === "subtitles" && <div className="player__option-list"><button type="button" className={selectedSubtitleID === "none" ? "is-active" : ""} onClick={() => selectSubtitle("none")} data-player-control><span><strong>{t("player.subtitles.off")}</strong><small>{t("player.subtitles.none")}</small></span>{selectedSubtitleID === "none" && <Check size={17} />}</button>{subtitles.map((subtitle) => <button key={subtitle.id} type="button" className={selectedSubtitleID === subtitle.id ? "is-active" : ""} onClick={() => selectSubtitle(subtitle.id)} data-player-control><span><strong>{(subtitle.language || t("common.fallback.unknown")).toUpperCase()}</strong><small>{t(subtitle.default ? "player.subtitles.defaultTrack" : "player.subtitles.track")}</small></span>{selectedSubtitleID === subtitle.id && <Check size={17} />}</button>)}</div>}
       {panel === "speed" && <div className="player__speed-grid">{playbackRates.map((rate) => <button key={rate} type="button" className={playbackRate === rate ? "is-active" : ""} onClick={() => changePlaybackRate(rate)} data-player-control>{rate}×</button>)}</div>}
       {panel === "stats" && <dl className="player__stats">
         <div><dt>{t("player.diagnostics.status")}</dt><dd>{playerPhaseLabel(phase)}</dd></div>

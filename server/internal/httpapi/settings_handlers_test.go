@@ -288,6 +288,169 @@ func TestMaintenanceSettingsAreAdminOnly(t *testing.T) {
 	}
 }
 
+func TestUpdateInstanceSettingsDecodesTranscodingBooleanAndNull(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		body      string
+		wantValue *bool
+	}{
+		{name: "false", body: `{"allowTranscoding":false}`, wantValue: new(bool)},
+		{name: "true", body: `{"allowTranscoding":true}`, wantValue: func() *bool { value := true; return &value }()},
+		{name: "null", body: `{"allowTranscoding":null}`, wantValue: nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}}
+			api := authenticatedSettingsAPI(service)
+			request := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer access-token")
+			response := httptest.NewRecorder()
+
+			api.Handler().ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+			}
+			if !service.instancePatch.AllowTranscoding.Set {
+				t.Fatalf("allowTranscoding was not decoded: %+v", service.instancePatch)
+			}
+			if test.wantValue == nil {
+				if service.instancePatch.AllowTranscoding.Value != nil {
+					t.Fatalf("null allowTranscoding was not preserved: %+v", service.instancePatch)
+				}
+			} else if service.instancePatch.AllowTranscoding.Value == nil || *service.instancePatch.AllowTranscoding.Value != *test.wantValue {
+				t.Fatalf("allowTranscoding value was not preserved: %+v", service.instancePatch)
+			}
+		})
+	}
+}
+
+func TestUpdateProfileSettingsDecodesTranscodingModesAndNull(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		body      string
+		wantValue *string
+	}{
+		{name: "inherit", body: `{"transcoding":"inherit"}`, wantValue: func() *string { value := "inherit"; return &value }()},
+		{name: "enabled", body: `{"transcoding":"enabled"}`, wantValue: func() *string { value := "enabled"; return &value }()},
+		{name: "disabled", body: `{"transcoding":"disabled"}`, wantValue: func() *string { value := "disabled"; return &value }()},
+		{name: "null", body: `{"transcoding":null}`, wantValue: nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
+			api := authenticatedSettingsAPI(service)
+			request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer access-token")
+			response := httptest.NewRecorder()
+
+			api.Handler().ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+			}
+			if !service.profilePatch.Transcoding.Set {
+				t.Fatalf("transcoding was not decoded: %+v", service.profilePatch)
+			}
+			if test.wantValue == nil {
+				if service.profilePatch.Transcoding.Value != nil {
+					t.Fatalf("null transcoding was not preserved: %+v", service.profilePatch)
+				}
+			} else if service.profilePatch.Transcoding.Value == nil || *service.profilePatch.Transcoding.Value != *test.wantValue {
+				t.Fatalf("transcoding value was not preserved: %+v", service.profilePatch)
+			}
+		})
+	}
+}
+
+func TestSettingsTranscodingScopeAndPermissionErrorsUseExistingHTTPContract(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		path       string
+		body       string
+		service    *fakeSettingsService
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "profile field at instance scope",
+			path:       "/api/v1/settings",
+			body:       `{"transcoding":"enabled"}`,
+			service:    &fakeSettingsService{instanceErr: settings.ErrInvalidInput},
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   "invalid_settings",
+		},
+		{
+			name:       "instance field at profile scope",
+			path:       "/api/v1/profiles/profile-id/settings",
+			body:       `{"allowTranscoding":true}`,
+			service:    &fakeSettingsService{profileErr: settings.ErrInvalidInput},
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   "invalid_settings",
+		},
+		{
+			name:       "instance permission remains admin only",
+			path:       "/api/v1/settings",
+			body:       `{"allowTranscoding":true}`,
+			service:    &fakeSettingsService{instanceErr: settings.ErrForbidden},
+			wantStatus: http.StatusForbidden,
+			wantCode:   "settings_forbidden",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			api := authenticatedSettingsAPI(test.service)
+			request := httptest.NewRequest(http.MethodPatch, test.path, bytes.NewBufferString(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer access-token")
+			response := httptest.NewRecorder()
+
+			api.Handler().ServeHTTP(response, request)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", response.Code, test.wantStatus, response.Body.String())
+			}
+			var body errorEnvelope
+			decodeResponse(t, response, &body)
+			if body.Error.Code != test.wantCode {
+				t.Fatalf("error code = %q, want %q", body.Error.Code, test.wantCode)
+			}
+		})
+	}
+}
+
+func TestEffectiveSettingsResponseIncludesTranscodingPolicyAndSources(t *testing.T) {
+	effective := settings.Effective{
+		SchemaVersion: 1,
+		Values: settings.EffectiveValues{
+			AllowTranscoding: false,
+			Transcoding:      settings.TranscodingModeEnabled,
+		},
+		Sources: map[string]string{
+			"allowTranscoding": "instance",
+			"transcoding":      "profile",
+		},
+	}
+	api := authenticatedSettingsAPI(&fakeSettingsService{effective: effective})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/profiles/profile-id/settings/effective", nil)
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Settings settings.EffectiveValues `json:"settings"`
+		Sources  map[string]string        `json:"sources"`
+	}
+	decodeResponse(t, response, &body)
+	if body.Settings.AllowTranscoding || body.Settings.Transcoding != settings.TranscodingModeEnabled ||
+		body.Sources["allowTranscoding"] != "instance" || body.Sources["transcoding"] != "profile" {
+		t.Fatalf("effective transcoding policy omitted or altered: %+v", body)
+	}
+}
+
 func authenticatedSettingsAPI(service settingsService) *API {
 	api := testAPI(&fakeInstanceService{})
 	api.auth = &fakeAuthService{principal: auth.Principal{UserID: "user-id", DeviceID: "device-id", Role: "admin", SessionID: "session-id"}}

@@ -58,6 +58,7 @@
     --space-6: 32px;
     --space-7: 40px;
     --space-8: 48px;
+    --font-size-xs: 9px;
     --shadow-sm: 0 8px 26px rgba(0, 0, 0, .22);
     --shadow-lg: 0 30px 90px rgba(0, 0, 0, .52);
     --radius-sm: 12px;
@@ -1079,6 +1080,13 @@
   .setting-value-state.is-inherited { color: var(--blue); }
   .setting-value-state.is-override { color: var(--accent); }
   .toggle-field .setting-value-state { margin-top: 3px; }
+  .settings-transcoding-control, .setting-control--transcoding { grid-column: 1 / -1; }
+  .setting-control--transcoding { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: var(--space-3); }
+  .settings-transcoding-state { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-content: center; align-items: center; gap: var(--space-2); padding: var(--space-3); border: 1px solid; border-radius: var(--radius-sm); }
+  .settings-transcoding-state svg { width: var(--space-4); height: var(--space-4); }
+  .settings-transcoding-state p { margin: 0; color: inherit; }
+  .settings-transcoding-state.is-enabled { color: var(--success); border-color: color-mix(in srgb, var(--success) 26%, var(--line)); background: var(--surface-success); }
+  .settings-transcoding-state.is-blocked { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 30%, var(--line)); background: var(--surface-warning); }
   .setting-control--range .field > div { gap: var(--space-3); }
   .setting-control--range output, .setting-control--color output { min-width: 58px; color: var(--text-soft); font-size: 10px; font-variant-numeric: tabular-nums; text-align: right; }
   .setting-control--range input[type="range"] { accent-color: var(--accent); }
@@ -1130,6 +1138,12 @@
   .activity-session__copy { min-width: 0; display: grid; gap: 3px; }
   .activity-session__copy > strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
   .activity-session__copy > span:not(.activity-session__providers), .activity-session__copy > small { overflow: hidden; color: var(--text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+  .activity-session__decision { min-width: 0; display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-2); margin: var(--space-1) 0 0; padding-top: var(--space-2); border-top: 1px solid var(--line); color: var(--text-muted); font-size: var(--font-size-xs); }
+  .activity-session__decision > div { min-width: 0; display: inline-flex; align-items: center; gap: var(--space-1); }
+  .activity-session__decision dt, .activity-session__decision dd { margin: 0; }
+  .activity-session__decision dd { padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); color: var(--text-soft); background: var(--surface-interactive); font-weight: 700; }
+  .activity-session__decision-reason { flex-basis: 100%; color: var(--accent); font-weight: 700; }
+  .activity-session__decision-reason dd { padding: 0; color: inherit; background: transparent; }
   .activity-session__providers { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
   .activity-session__provider { --provider-color: var(--accent); --provider-tint: rgba(242, 154, 120, .1); min-height: 20px; display: inline-flex; align-items: center; gap: 4px; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--provider-color); background: var(--provider-tint); font-size: 8px; font-weight: 820; line-height: 1; letter-spacing: .04em; text-decoration: none; }
   a.activity-session__provider:hover { border-color: var(--provider-color); }
@@ -1148,7 +1162,7 @@
   .activity-job > div { min-width: 0; display: grid; gap: 2px; }
   .activity-job strong { font-size: 10px; }
   .activity-job small { overflow: hidden; color: var(--text-muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
-  .activity-job > span:last-child { padding: 4px 7px; border-radius: 7px; color: var(--text-muted); background: rgba(255, 255, 255, .045); font-size: 8px; text-transform: capitalize; }
+  .activity-progress-status { display: inline-flex; justify-self: end; padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); color: var(--text-soft); background: var(--surface-interactive); font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; font-weight: 700; line-height: 1; white-space: nowrap; }
 
   .operations-admin { gap: var(--space-5); }
   .operations-panel { min-width: 0; display: grid; gap: var(--space-4); overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-subtle); }

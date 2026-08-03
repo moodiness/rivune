@@ -4,7 +4,7 @@ import { api, APIError } from "../api";
 import { useAuth } from "../auth";
 import { AddTile, Button, ConfirmDialog, EmptyState, IconButton, Modal, Notice, Skeleton } from "../components";
 import { interfaceLanguages, translate, type TranslationKey } from "../i18n";
-import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
+import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
 import type { AddonManifest, AvatarPreset, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, InstalledAddon, InterfaceLanguage, MaintenanceSettings, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
 
@@ -1605,6 +1605,10 @@ function ActivityAdmin() {
     <div className="admin-loading-state" role="status"><LoaderCircle className="spin" /><strong>{translate("admin.activity.loadingTitle")}</strong><span>{translate("admin.activity.loadingDescription")}</span></div>
   </div>;
   const summary = activity?.summary;
+  const jobsBySession = new Map<string, PlaybackActivity["jobs"][number]>();
+  for (const job of activity?.jobs ?? []) {
+    if (!job.prewarming && job.sessionId) jobsBySession.set(job.sessionId, job);
+  }
   return <div className="admin-section activity-admin">
     <div className="admin-section__header"><div><span>{translate("admin.activity.eyebrow")}</span><h2>{translate("admin.activity.title")}</h2><p>{translate("admin.activity.description")}</p></div><div className="admin-section__actions"><Button variant="secondary" onClick={() => void load()} loading={refreshing}><RefreshCw size={16} /> {translate("common.actions.refresh")}</Button></div></div>
     {error && <Notice>{error}</Notice>}
@@ -1624,9 +1628,11 @@ function ActivityAdmin() {
             <ActivitySessionProviders session={session} />
             <span>{session.profile} · {session.username}</span>
             <small>{session.device} · {session.platform} · {activityModeLabel(session.mode)}</small>
+            {session.decision && <ActivitySessionDecision decision={session.decision} />}
           </div>
           <div className="activity-session__time">
             <strong>{formatActivityProgress(session.positionSeconds, session.durationSeconds)}</strong>
+            <ActivityJobProgress job={jobsBySession.get(session.id)} />
             <small>{activityAge(session.lastSeenAt)} · {translate("admin.activity.sessions.started", { age: activityAge(session.createdAt) })}</small>
           </div>
           <Button variant="danger" onClick={() => setSelectedSession(session)}><CircleStop size={16} />{translate("common.actions.stop")}</Button>
@@ -1636,7 +1642,7 @@ function ActivityAdmin() {
     <section className="activity-panel">
       <header><div><span>{translate("admin.activity.jobs.eyebrow")}</span><h3>{translate("admin.activity.jobs.title")}</h3></div><small>{translate((activity?.jobs.length ?? 0) === 1 ? "admin.activity.jobs.countOne" : "admin.activity.jobs.countMany", { count: activity?.jobs.length ?? 0 })}</small></header>
       {activity?.jobs.length
-        ? <div className="activity-job-list">{activity.jobs.map((job, index) => <article className="activity-job" key={`${job.sessionId ?? "prewarm"}-${job.assetId}-${index}`}><span className={`activity-job__dot is-${job.state}`} /><div><strong>{job.prewarming ? translate("admin.activity.jobs.preparingSource") : activityModeLabel(job.mode)}</strong><small>{job.assetId} · {translate("admin.activity.jobs.lastRequest", { age: activityAge(job.lastSeenAt) })}</small></div><span>{job.state}</span></article>)}</div>
+        ? <div className="activity-job-list">{activity.jobs.map((job, index) => <article className="activity-job" key={`${job.sessionId ?? "prewarm"}-${job.assetId}-${index}`}><span className={`activity-job__dot is-${job.state}`} /><div><strong>{job.prewarming ? translate("admin.activity.jobs.preparingSource") : activityModeLabel(job.mode)}</strong><small>{job.assetId} · {translate("admin.activity.jobs.lastRequest", { age: activityAge(job.lastSeenAt) })}</small></div><ActivityJobProgress job={job} /></article>)}</div>
         : <EmptyState icon={<Cpu />} title={translate("admin.activity.jobs.emptyTitle")} description={translate("admin.activity.jobs.emptyDescription")} />}
     </section>
     {selectedSession && <ConfirmDialog title={translate("admin.activity.stop.title", { title: selectedSession.title })} description={translate("admin.activity.stop.description", { device: selectedSession.device })} confirmLabel={translate("admin.activity.stop.confirm")} loading={stopping} onConfirm={() => void stopSession()} onCancel={() => setSelectedSession(null)} />}
@@ -1672,6 +1678,47 @@ function ActivitySessionProviders({ session }: { session: PlaybackActivitySessio
 function ActivityMetric({ icon, label, value, detail }: { icon: React.ReactNode; label: string; value: string; detail: string }) {
   return <article className="activity-metric"><span>{icon}</span><div><small>{label}</small><strong>{value}</strong><span>{detail}</span></div></article>;
 }
+function ActivityJobProgress({ job }: { job?: PlaybackActivity["jobs"][number] }) {
+  const progressPercent = job?.progressPercent;
+  const speed = job?.speed;
+  if (typeof progressPercent !== "number" || !Number.isFinite(progressPercent) || progressPercent < 0
+    || typeof speed !== "number" || !Number.isFinite(speed) || speed < 0) return null;
+  return <span className="activity-progress-status" role="status">{Math.round(progressPercent)}% · {speed.toFixed(2)}×</span>;
+}
+
+function ActivitySessionDecision({ decision }: { decision: NonNullable<PlaybackActivitySession["decision"]> }) {
+  const reasonKeys = {
+    direct_supported: "admin.activity.reasons.directSupported",
+    remux_required: "admin.activity.reasons.remuxRequired",
+    audio_transcode_required: "admin.activity.reasons.audioTranscodeRequired",
+    video_transcode_required: "admin.activity.reasons.videoTranscodeRequired",
+    subtitle_burn_required: "admin.activity.reasons.subtitleBurnRequired",
+  } as const;
+  const actionKeys = {
+    copy: "admin.activity.actions.copy",
+    transcode: "admin.activity.actions.transcode",
+    external: "admin.activity.actions.external",
+    burn: "admin.activity.actions.burn",
+    none: "admin.activity.actions.none",
+  } as const;
+  const sourceVideo = decision.source?.videoCodec?.toUpperCase();
+  const targetVideo = decision.target?.videoCodec?.toUpperCase() ?? (decision.videoAction === "copy" ? sourceVideo : undefined);
+  const sourceAudio = decision.source?.audioCodec?.toUpperCase();
+  const targetAudio = decision.target?.audioCodec?.toUpperCase() ?? (decision.audioAction === "copy" ? sourceAudio : undefined);
+  const sourceHeight = decision.source?.height;
+  const targetHeight = decision.target?.height ?? (decision.videoAction === "copy" ? sourceHeight : undefined);
+  const reasonKey = reasonKeys[decision.reason];
+  return <dl className="activity-session__decision">
+    {reasonKey && <div className="activity-session__decision-reason"><dt className="visually-hidden">{translate("player.panel.diagnostics")}</dt><dd>{translate(reasonKey)}</dd></div>}
+    <div><dt>{sourceVideo && targetVideo ? translate("admin.activity.details.video", { source: sourceVideo, target: targetVideo }) : translate("player.diagnostics.video")}</dt><dd>{translate(actionKeys[decision.videoAction])}</dd></div>
+    <div><dt>{sourceAudio && targetAudio ? translate("admin.activity.details.audio", { source: sourceAudio, target: targetAudio }) : translate("player.diagnostics.audio")}</dt><dd>{translate(actionKeys[decision.audioAction])}</dd></div>
+    {sourceHeight && targetHeight && <div><dt>{translate("admin.activity.details.resolution", { source: `${sourceHeight}p`, target: `${targetHeight}p` })}</dt></div>}
+    {decision.target?.videoBitrateKbps && <div><dt>{translate("admin.activity.details.bitrate", { bitrate: decision.target.videoBitrateKbps.toLocaleString() })}</dt></div>}
+    <div><dt>{translate("player.panel.subtitles")}</dt><dd>{translate(actionKeys[decision.subtitleAction])}</dd></div>
+    {decision.toneMapping && <div><dt>{translate("admin.activity.details.toneMapping")}</dt></div>}
+  </dl>;
+}
+
 
 function activityModeLabel(mode: string): string {
   const key = {
@@ -1717,6 +1764,8 @@ const rivuneSettingDefaults = {
   theme: "system",
   maximumResolution: "auto",
   preferDirectPlay: true,
+  allowTranscoding: true,
+  transcoding: "inherit",
   hideUnreleased: false,
   metadataLanguage: "auto",
   metadataRegion: "auto",
@@ -1748,10 +1797,12 @@ const settingOptions = {
   theme: [{ value: "system", labelKey: "settings.theme.system" }, { value: "dark", labelKey: "settings.theme.dark" }, { value: "light", labelKey: "settings.theme.light" }],
   resolution: [{ value: "auto", labelKey: "settings.resolution.auto" }, { value: "2160p", labelKey: "settings.resolution.2160p" }, { value: "1080p", labelKey: "settings.resolution.1080p" }, { value: "720p", labelKey: "settings.resolution.720p" }, { value: "480p", labelKey: "settings.resolution.480p" }],
   density: [{ value: "comfortable", labelKey: "settings.density.comfortable" }, { value: "compact", labelKey: "settings.density.compact" }],
+  transcoding: [{ value: "inherit", labelKey: "settings.options.transcodingInherit" }, { value: "enabled", labelKey: "settings.options.transcodingEnabled" }, { value: "disabled", labelKey: "settings.options.transcodingDisabled" }],
   language: [{ value: "auto", labelKey: "settings.language.auto" }, { value: "fr-FR", label: "Français" }, { value: "en-US", labelKey: "languages.english" }, { value: "es-ES", label: "Español" }, { value: "de-DE", label: "Deutsch" }, { value: "it-IT", label: "Italiano" }, { value: "pt-BR", label: "Português" }, { value: "ja-JP", label: "日本語" }],
   region: [{ value: "auto", labelKey: "settings.region.auto" }, { value: "FR", labelKey: "regions.france" }, { value: "BE", labelKey: "regions.belgium" }, { value: "CA", labelKey: "regions.canada" }, { value: "CH", labelKey: "regions.switzerland" }, { value: "US", labelKey: "regions.unitedStates" }, { value: "GB", labelKey: "regions.unitedKingdom" }, { value: "DE", labelKey: "regions.germany" }, { value: "ES", labelKey: "regions.spain" }, { value: "IT", labelKey: "regions.italy" }, { value: "JP", labelKey: "regions.japan" }],
   mapping: [{ value: "tmdb", labelKey: "settings.seriesMapping.tmdb" }, { value: "tvdb", labelKey: "settings.seriesMapping.tvdb" }],
 } as const satisfies Record<string, ReadonlyArray<SettingOption>>;
+
 
 
 function SettingsAdmin() {
@@ -1763,6 +1814,8 @@ function SettingsAdmin() {
   const [savedProfile, setSavedProfile] = useState<SettingsValues>({});
   const [inherited, setInherited] = useState<SettingsValues>({});
   const [saving, setSaving] = useState(false);
+  const [checkingTranscodingDisable, setCheckingTranscodingDisable] = useState(false);
+  const [transcodingDisableCount, setTranscodingDisableCount] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
   const settingsTargetRef = useRef(settingsTarget);
@@ -1773,7 +1826,7 @@ function SettingsAdmin() {
   const targetProfile = account?.profiles.find((candidate) => candidate.id === settingsTarget) ?? activeProfile;
   const settingsDirty = serverSelected ? JSON.stringify(instance) !== JSON.stringify(savedInstance) : JSON.stringify(profile) !== JSON.stringify(savedProfile);
   const hasUnsavedChanges = settingsDirty;
-  const overrideCount = Object.values(serverSelected ? instance : profile).filter((value) => value !== null && value !== undefined).length;
+  const overrideCount = Object.entries(serverSelected ? instance : profile).filter(([key, value]) => value !== null && value !== undefined && !(key === "transcoding" && value === "inherit")).length;
 
   useEffect(() => {
     setSettingsTarget(activeProfile?.id ?? "");
@@ -1809,7 +1862,27 @@ function SettingsAdmin() {
     return () => { current = false; };
   }, [settingsTarget]);
 
-  async function save() {
+  async function requestSave() {
+    const disablesServerTranscoding = serverSelected &&
+      (savedInstance.allowTranscoding ?? rivuneSettingDefaults.allowTranscoding) &&
+      !(instance.allowTranscoding ?? rivuneSettingDefaults.allowTranscoding);
+    if (!disablesServerTranscoding) {
+      await save();
+      return;
+    }
+    setCheckingTranscodingDisable(true);
+    setError("");
+    try {
+      const activity = await api.playbackActivity();
+      setTranscodingDisableCount(activity.sessions.filter((session) => session.mode === "transcode_audio" || session.mode === "transcode").length);
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.activity.errors.load"), translate("admin.activity.errors.unavailableTitle")));
+    } finally {
+      setCheckingTranscodingDisable(false);
+    }
+  }
+
+  async function save(confirmedTranscodingSessions?: number) {
     if (!activeProfile || !settingsTarget) return;
     const target = settingsTarget;
     const savingServer = target === "server";
@@ -1817,6 +1890,7 @@ function SettingsAdmin() {
     setSaving(true);
     setError("");
     try {
+      let remainingTranscodingSessions = 0;
       if (savingServer) {
         const updated = await api.updateInstanceSettings(instance);
         if (settingsTargetRef.current === target) {
@@ -1824,6 +1898,13 @@ function SettingsAdmin() {
           setSavedInstance(updated.settings);
         }
         updateServerInterfaceLanguage(updated.settings.interfaceLanguage ?? "en");
+        if (confirmedTranscodingSessions !== undefined) {
+          const activity = await api.playbackActivity().catch(() => null);
+          remainingTranscodingSessions = activity
+            ? activity.sessions.filter((session) => session.mode === "transcode_audio" || session.mode === "transcode").length
+            : confirmedTranscodingSessions;
+          setTranscodingDisableCount(null);
+        }
       } else {
         const updated = await api.updateProfileSettings(target, profile);
         if (settingsTargetRef.current === target) {
@@ -1833,6 +1914,12 @@ function SettingsAdmin() {
       }
       if (!savingServer && target === activeProfile.id) window.dispatchEvent(new Event("rivune:settings-changed"));
       notifySuccess(savingServer ? translate("settings.notifications.serverSavedMessage") : translate("settings.notifications.profileSavedMessage", { profileName }), translate("settings.notifications.savedTitle"));
+      if (remainingTranscodingSessions > 0) {
+        notifyWarning(
+          translate(remainingTranscodingSessions === 1 ? "settings.transcoding.activeSessionsOne" : "settings.transcoding.activeSessionsMany", { count: remainingTranscodingSessions }),
+          translate("settings.notifications.savedTitle"),
+        );
+      }
     } catch (cause) {
       setError(notifyError(cause, translate("settings.errors.save"), translate("settings.errors.saveTitle")));
     } finally {
@@ -1855,15 +1942,23 @@ function SettingsAdmin() {
           ? translate("settings.scope.serverDefaultCount", { count: overrideCount })
           : translate(overrideCount === 1 ? "settings.scope.profileOverrideCountOne" : "settings.scope.profileOverrideCountMany", { count: overrideCount })}</span>
       </div>
-      {canManageProfiles && <label className="field settings-profile-picker"><span>{translate("settings.scope.switch")}</span><div>{serverSelected ? <Server size={18} /> : <CircleUserRound size={18} />}<select value={settingsTarget} disabled={saving || hasUnsavedChanges} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">{translate("settings.scope.serverDefaults")}</option>}{account?.profiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{translate("settings.scope.profileOption", { profileName: candidate.name })}</option>)}</select></div>{hasUnsavedChanges && <small>{translate("settings.scope.unsavedSwitchHint")}</small>}</label>}
+      {canManageProfiles && <label className="field settings-profile-picker"><span>{translate("settings.scope.switch")}</span><div>{serverSelected ? <Server size={18} /> : <CircleUserRound size={18} />}<select value={settingsTarget} disabled={saving || checkingTranscodingDisable || hasUnsavedChanges} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">{translate("settings.scope.serverDefaults")}</option>}{account?.profiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{translate("settings.scope.profileOption", { profileName: candidate.name })}</option>)}</select></div>{hasUnsavedChanges && <small>{translate("settings.scope.unsavedSwitchHint")}</small>}</label>}
     </div>
     {error && <Notice>{error}</Notice>}
     {serverSelected
-      ? <SettingsCard title={translate("settings.server.title")} description={translate("settings.server.description")} icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void save()} onReset={() => setInstance(savedInstance)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.rivune")} />
+      ? <SettingsCard serverScope title={translate("settings.server.title")} description={translate("settings.server.description")} icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void requestSave()} onReset={() => setInstance(savedInstance)} saving={saving || checkingTranscodingDisable} dirty={settingsDirty} emptyLabel={translate("settings.defaults.rivune")} />
       : <>
-        <SettingsCard title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void save()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />
+        <SettingsCard title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void requestSave()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />
         <TrackingSettings profileId={settingsTarget} />
       </>}
+    {transcodingDisableCount !== null && <ConfirmDialog
+      title={translate("settings.transcoding.disableConfirmTitle")}
+      description={translate(transcodingDisableCount === 1 ? "settings.transcoding.disableConfirmDescriptionOne" : "settings.transcoding.disableConfirmDescriptionMany", { count: transcodingDisableCount })}
+      confirmLabel={translate("settings.transcoding.disableConfirm")}
+      loading={saving}
+      onConfirm={() => void save(transcodingDisableCount)}
+      onCancel={() => setTranscodingDisableCount(null)}
+    />}
   </div>;
 }
 
@@ -2051,11 +2146,13 @@ function MaintenanceCard({ values, onChange, onSave, onReset, saving, dirty }: {
   </section>;
 }
 
-function SettingsCard({ title, description, icon, values, defaults = {}, onChange, onSave, onReset, saving, dirty, emptyLabel = translate("settings.defaults.server") }: { title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean; emptyLabel?: string }) {
+function SettingsCard({ serverScope = false, title, description, icon, values, defaults = {}, onChange, onSave, onReset, saving, dirty, emptyLabel = translate("settings.defaults.server") }: { serverScope?: boolean; title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean; emptyLabel?: string }) {
   const effective = {
     interfaceLanguage: defaults.interfaceLanguage ?? rivuneSettingDefaults.interfaceLanguage,
     theme: defaults.theme ?? rivuneSettingDefaults.theme,
     maximumResolution: defaults.maximumResolution ?? rivuneSettingDefaults.maximumResolution,
+    allowTranscoding: defaults.allowTranscoding ?? rivuneSettingDefaults.allowTranscoding,
+    transcoding: defaults.transcoding ?? rivuneSettingDefaults.transcoding,
     preferDirectPlay: defaults.preferDirectPlay ?? rivuneSettingDefaults.preferDirectPlay,
     hideUnreleased: defaults.hideUnreleased ?? rivuneSettingDefaults.hideUnreleased,
     metadataLanguage: defaults.metadataLanguage ?? rivuneSettingDefaults.metadataLanguage,
@@ -2077,6 +2174,9 @@ function SettingsCard({ title, description, icon, values, defaults = {}, onChang
     notificationDurationSeconds: defaults.notificationDurationSeconds ?? rivuneSettingDefaults.notificationDurationSeconds,
     notificationPollIntervalSeconds: defaults.notificationPollIntervalSeconds ?? rivuneSettingDefaults.notificationPollIntervalSeconds,
   };
+  const serverAllowsTranscoding = serverScope ? values.allowTranscoding ?? effective.allowTranscoding : effective.allowTranscoding;
+  const profileTranscoding = values.transcoding ?? rivuneSettingDefaults.transcoding;
+  const effectiveTranscoding = serverAllowsTranscoding && profileTranscoding !== "disabled";
   function change<K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) {
     onChange({ ...values, [key]: value });
   }
@@ -2100,6 +2200,17 @@ function SettingsCard({ title, description, icon, values, defaults = {}, onChang
       </SettingsGroup>
 
       <SettingsGroup icon={<Film />} title={translate("settings.groups.playback.title")} description={translate("settings.groups.playback.description")} className="settings-group--wide">
+        {serverScope
+          ? <div className="setting-control setting-control--toggle settings-transcoding-control">
+            <label className="toggle-field"><input type="checkbox" checked={serverAllowsTranscoding} disabled={saving} aria-describedby="allow-transcoding-description" onChange={(event) => change("allowTranscoding", event.target.checked)} /><span><i /><div><strong>{translate("settings.fields.allowTranscoding")}</strong><small id="allow-transcoding-description">{translate("settings.fields.allowTranscodingDescription")}</small></div></span></label>
+          </div>
+          : <div className="setting-control setting-control--transcoding">
+            <label className="field"><span>{translate("settings.fields.transcoding")}</span><div><select value={profileTranscoding} disabled={saving} aria-describedby="profile-transcoding-description" onChange={(event) => change("transcoding", event.target.value as "inherit" | "enabled" | "disabled")}>{settingOptions.transcoding.map((option) => <option key={option.value} value={option.value}>{translate(option.labelKey)}</option>)}</select></div><small id="profile-transcoding-description">{translate("settings.fields.transcodingDescription")}</small></label>
+            <div className={`settings-transcoding-state ${effectiveTranscoding ? "is-enabled" : "is-blocked"}`} role="status" aria-live="polite">
+              {effectiveTranscoding ? <Check aria-hidden="true" /> : <Shield aria-hidden="true" />}
+              <p>{translate(!serverAllowsTranscoding ? "settings.transcoding.blockedByServer" : effectiveTranscoding ? "settings.transcoding.effectiveEnabled" : "settings.transcoding.effectiveDisabled")}</p>
+            </div>
+          </div>}
         <SelectSetting label={translate("settings.fields.maximumResolution")} value={values.maximumResolution} defaultValue={effective.maximumResolution} options={settingOptions.resolution} emptyLabel={emptyLabel} onChange={(value) => change("maximumResolution", value)} />
         <InheritedToggle label={translate("settings.fields.preferDirectPlay")} description={translate("settings.fields.preferDirectPlayDescription")} value={values.preferDirectPlay} defaultValue={effective.preferDirectPlay} onChange={(value) => change("preferDirectPlay", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label={translate("settings.fields.autoplayNextEpisode")} description={translate("settings.fields.autoplayNextEpisodeDescription")} value={values.autoplayNextEpisode} defaultValue={effective.autoplayNextEpisode} onChange={(value) => change("autoplayNextEpisode", value)} emptyLabel={emptyLabel} />

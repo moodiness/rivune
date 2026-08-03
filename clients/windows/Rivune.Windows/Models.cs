@@ -98,6 +98,32 @@ public sealed record ProfileSelection
     public required string ExpiresAt { get; init; }
 }
 
+public sealed record TranscodingSettingsValues
+{
+    public bool? AllowTranscoding { get; init; }
+    public string? Transcoding { get; init; }
+}
+
+public sealed record SettingsLayer
+{
+    public required int SchemaVersion { get; init; }
+    public required TranscodingSettingsValues Settings { get; init; }
+    public string? UpdatedAt { get; init; }
+}
+
+public sealed record EffectiveSettingsSources
+{
+    public string? AllowTranscoding { get; init; }
+    public string? Transcoding { get; init; }
+}
+
+public sealed record EffectiveSettings
+{
+    public required int SchemaVersion { get; init; }
+    public required TranscodingSettingsValues Settings { get; init; }
+    public required EffectiveSettingsSources Sources { get; init; }
+}
+
 [JsonConverter(typeof(JsonStringEnumConverter<MediaType>))]
 public enum MediaType
 {
@@ -248,6 +274,13 @@ public sealed record Trailer
     public string? CaptionPreference { get; init; }
 }
 
+public sealed record PlaybackMediaProfile
+{
+    public required string Container { get; init; }
+    public required string VideoCodec { get; init; }
+    public string? AudioCodec { get; init; }
+}
+
 public sealed record PlaybackCapabilities
 {
     public required IReadOnlyList<string> StreamingProtocols { get; init; }
@@ -256,6 +289,12 @@ public sealed record PlaybackCapabilities
     public IReadOnlyList<string>? AudioCodecs { get; init; }
     public IReadOnlyList<string>? HdrFormats { get; init; }
     public IReadOnlyList<string>? ExternalPlayers { get; init; }
+    public IReadOnlyList<string>? ProcessingModes { get; init; }
+    public int? MaximumHeight { get; init; }
+    public int? MaximumVideoBitrateKbps { get; init; }
+    public int? MaximumAudioChannels { get; init; }
+    public IReadOnlyList<string>? SubtitleModes { get; init; }
+    public IReadOnlyList<PlaybackMediaProfile>? MediaProfiles { get; init; }
 }
 
 public sealed record PlaybackSourceList
@@ -305,12 +344,15 @@ public sealed record PlaybackPreparation
     public PlaybackMediaInspection? Media { get; init; }
     public required int SubtitleCount { get; init; }
     public required string ExpiresAt { get; init; }
+    public PlaybackDecision? Decision { get; init; }
 }
 
 public sealed record PlaybackSession
 {
     public required Guid Id { get; init; }
     public required string SelectedSourceId { get; init; }
+    public int? SelectedAudioTrack { get; init; }
+    public string? SelectedSubtitleId { get; init; }
     public required IReadOnlyList<PlaybackSource> Sources { get; init; }
     public required IReadOnlyList<PlaybackSubtitle> Subtitles { get; init; }
     public required IReadOnlyList<PlaybackProviderError> ProviderErrors { get; init; }
@@ -333,6 +375,7 @@ public sealed record PlaybackSource
     public string? Container { get; init; }
     public required bool Compatible { get; init; }
     public PlaybackMediaInspection? Media { get; init; }
+    public PlaybackDecision? Decision { get; init; }
 }
 
 public sealed record PlaybackMediaInspection
@@ -345,6 +388,37 @@ public sealed record PlaybackMediaInspection
     public required IReadOnlyList<PlaybackMediaTrack> SubtitleTracks { get; init; }
 }
 
+public sealed record PlaybackDecision
+{
+    public required string Reason { get; init; }
+    public required string VideoAction { get; init; }
+    public required string AudioAction { get; init; }
+    public required string SubtitleAction { get; init; }
+    public required bool ToneMapping { get; init; }
+    public PlaybackDecisionSource? Source { get; init; }
+    public PlaybackDecisionTarget? Target { get; init; }
+}
+
+public sealed record PlaybackDecisionSource
+{
+    public string? Container { get; init; }
+    public string? VideoCodec { get; init; }
+    public string? AudioCodec { get; init; }
+    public int? Height { get; init; }
+    public int? VideoBitrateKbps { get; init; }
+    public string? HdrFormat { get; init; }
+}
+
+public sealed record PlaybackDecisionTarget
+{
+    public string? Protocol { get; init; }
+    public string? Container { get; init; }
+    public string? VideoCodec { get; init; }
+    public string? AudioCodec { get; init; }
+    public int? Height { get; init; }
+    public int? VideoBitrateKbps { get; init; }
+}
+
 public sealed record PlaybackMediaTrack
 {
     public required int Index { get; init; }
@@ -352,6 +426,7 @@ public sealed record PlaybackMediaTrack
     public required string Codec { get; init; }
     public string? Profile { get; init; }
     public string? Language { get; init; }
+    public bool? Forced { get; init; }
     public string? Title { get; init; }
     public int? Width { get; init; }
     public int? Height { get; init; }
@@ -364,7 +439,10 @@ public sealed record PlaybackSubtitle
     public required Guid AddonId { get; init; }
     public required string ManifestId { get; init; }
     public string? Language { get; init; }
-    public required string Url { get; init; }
+    public bool? Forced { get; init; }
+    public bool? Default { get; init; }
+    public string? Delivery { get; init; }
+    public string? Url { get; init; }
 }
 
 public sealed record PlaybackProviderError
@@ -373,6 +451,67 @@ public sealed record PlaybackProviderError
     public required string ManifestId { get; init; }
     public required string Code { get; init; }
     public required string Message { get; init; }
+}
+
+public sealed record PlaybackActivity
+{
+    public required PlaybackActivitySummary Summary { get; init; }
+    public required PlaybackMediaDiagnostics Diagnostics { get; init; }
+    public required IReadOnlyList<PlaybackActivitySession> Sessions { get; init; }
+    public required IReadOnlyList<PlaybackMediaJob> Jobs { get; init; }
+}
+
+public sealed record PlaybackActivitySummary
+{
+    public required int ActiveSessions { get; init; }
+    public required int ActiveJobs { get; init; }
+    public required int ProcessingSlots { get; init; }
+    public required int ProcessingLimit { get; init; }
+    public required long StorageBytes { get; init; }
+    public required long StorageLimitBytes { get; init; }
+}
+
+public sealed record PlaybackMediaDiagnostics
+{
+    public required string VideoEncoder { get; init; }
+    public required bool HardwareToneMap { get; init; }
+}
+
+public sealed record PlaybackActivitySession
+{
+    public required Guid Id { get; init; }
+    public string? TitleId { get; init; }
+    public string? ArtworkUrl { get; init; }
+    public IReadOnlyDictionary<string, string>? ExternalIds { get; init; }
+    public IReadOnlyDictionary<string, string>? ExternalIdMediaTypes { get; init; }
+    public required string Title { get; init; }
+    public required string MediaType { get; init; }
+    public required string Mode { get; init; }
+    public PlaybackDecision? Decision { get; init; }
+    public required string Username { get; init; }
+    public required Guid ProfileId { get; init; }
+    public required string Profile { get; init; }
+    public required string Device { get; init; }
+    public required string Platform { get; init; }
+    public required bool Processing { get; init; }
+    public required int PositionSeconds { get; init; }
+    public required int DurationSeconds { get; init; }
+    public required string CreatedAt { get; init; }
+    public required string LastSeenAt { get; init; }
+    public required string ExpiresAt { get; init; }
+}
+
+public sealed record PlaybackMediaJob
+{
+    public Guid? SessionId { get; init; }
+    public required string AssetId { get; init; }
+    public required string Mode { get; init; }
+    public required string State { get; init; }
+    public required bool Prewarming { get; init; }
+    public double? ProgressPercent { get; init; }
+    public double? Speed { get; init; }
+    public required string CreatedAt { get; init; }
+    public required string LastSeenAt { get; init; }
 }
 
 public sealed record ServerError

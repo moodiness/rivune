@@ -13,5 +13,6 @@ let package = Package(
     ],
     targets: [
         .target(name: "RivuneAPI"),
+        .testTarget(name: "RivuneAPITests", dependencies: ["RivuneAPI"]),
     ]
 )

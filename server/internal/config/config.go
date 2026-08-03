@@ -14,55 +14,57 @@ import (
 )
 
 const (
-	defaultListenAddress        = ":8080"
-	defaultTimezone             = "UTC"
-	defaultDatabaseHost         = "localhost"
-	defaultDatabasePort         = 5432
-	defaultDatabaseName         = "rivune"
-	defaultDatabaseUser         = "rivune"
-	defaultAccessTokenTTL       = 15 * time.Minute
-	defaultRefreshTokenTTL      = 30 * 24 * time.Hour
-	defaultProfileGrantTTL      = 12 * time.Hour
-	defaultMetadataCacheTTL     = 24 * time.Hour
-	defaultRemuxConcurrency     = 2
-	defaultTranscodeThreads     = 4
-	defaultMediaStorageMB       = 20480
-	defaultArtworkStorageMB     = 20480
-	defaultHardwareAcceleration = "auto"
-	defaultVideoDevice          = "/dev/dri/renderD128"
+	defaultListenAddress           = ":8080"
+	defaultTimezone                = "UTC"
+	defaultDatabaseHost            = "localhost"
+	defaultDatabasePort            = 5432
+	defaultDatabaseName            = "rivune"
+	defaultDatabaseUser            = "rivune"
+	defaultAccessTokenTTL          = 15 * time.Minute
+	defaultRefreshTokenTTL         = 30 * 24 * time.Hour
+	defaultProfileGrantTTL         = 12 * time.Hour
+	defaultMetadataCacheTTL        = 24 * time.Hour
+	defaultRemuxConcurrency        = 2
+	defaultTranscodeThreads        = 4
+	defaultTranscodeMaxBitrateKbps = 12000
+	defaultMediaStorageMB          = 20480
+	defaultArtworkStorageMB        = 20480
+	defaultHardwareAcceleration    = "auto"
+	defaultVideoDevice             = "/dev/dri/renderD128"
 )
 
 type Config struct {
-	ListenAddress         string
-	PublicURL             string
-	DatabaseURL           string
-	Timezone              string
-	SetupToken            string
-	AccessTokenTTL        time.Duration
-	RefreshTokenTTL       time.Duration
-	ProfileGrantTTL       time.Duration
-	TMDBAccessToken       string
-	FanartAPIKey          string
-	FanartClientKey       string
-	MDBListAPIKey         string
-	MetadataCacheTTL      time.Duration
-	TVDBAPIKey            string
-	TVDBPIN               string
-	TraktClientID         string
-	TraktClientSecret     string
-	SimklClientID         string
-	TrackingEncryptionKey []byte
-	TrustedProxies        []netip.Prefix
-	FFmpegPath            string
-	FFprobePath           string
-	RemuxConcurrency      int
-	TranscodeThreads      int
-	HardwareAcceleration  string
-	VideoDevice           string
-	MediaTempDir          string
-	ArtworkCacheDir       string
-	MediaStorageBytes     int64
-	ArtworkStorageBytes   int64
+	ListenAddress           string
+	PublicURL               string
+	DatabaseURL             string
+	Timezone                string
+	SetupToken              string
+	AccessTokenTTL          time.Duration
+	RefreshTokenTTL         time.Duration
+	ProfileGrantTTL         time.Duration
+	TMDBAccessToken         string
+	FanartAPIKey            string
+	FanartClientKey         string
+	MDBListAPIKey           string
+	MetadataCacheTTL        time.Duration
+	TVDBAPIKey              string
+	TVDBPIN                 string
+	TraktClientID           string
+	TraktClientSecret       string
+	SimklClientID           string
+	TrackingEncryptionKey   []byte
+	TrustedProxies          []netip.Prefix
+	FFmpegPath              string
+	FFprobePath             string
+	RemuxConcurrency        int
+	TranscodeThreads        int
+	TranscodeMaxBitrateKbps int
+	HardwareAcceleration    string
+	VideoDevice             string
+	MediaTempDir            string
+	ArtworkCacheDir         string
+	MediaStorageBytes       int64
+	ArtworkStorageBytes     int64
 }
 
 func Load() (Config, error) {
@@ -142,6 +144,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.TranscodeThreads, err = loadInteger("RIVUNE_TRANSCODE_THREADS", defaultTranscodeThreads, 1, 32)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TranscodeMaxBitrateKbps, err = loadInteger("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", defaultTranscodeMaxBitrateKbps, 64, 200000)
 	if err != nil {
 		return Config{}, err
 	}

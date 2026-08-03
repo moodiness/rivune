@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +22,6 @@ var ErrMediaProcessingFailed = errors.New("media processing failed")
 
 type MediaProcessor interface {
 	Probe(context.Context, storedAsset) (MediaInspection, error)
-	Process(context.Context, storedAsset, io.Writer) error
 }
 
 type FFmpegProcessor struct {
@@ -66,7 +64,7 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 	arguments := []string{"-v", "error", "-analyzeduration", "1000000", "-probesize", "1000000"}
 	arguments = append(arguments, ffmpegInputArguments(asset)...)
 	arguments = append(arguments,
-		"-show_entries", "stream=index,codec_type,codec_name,profile,width,height,channels,color_transfer,codec_tag_string:stream_tags=language,title:stream_disposition=attached_pic,forced:stream_side_data=side_data_type:format=format_name,duration",
+		"-show_entries", "stream=index,codec_type,codec_name,profile,width,height,channels,bit_rate,color_transfer,codec_tag_string:stream_tags=language,title:stream_disposition=attached_pic,forced:stream_side_data=side_data_type:format=format_name,duration,bit_rate",
 		"-of", "json",
 		asset.URL,
 	)
@@ -87,6 +85,7 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 			Width          int    `json:"width"`
 			Height         int    `json:"height"`
 			Channels       int    `json:"channels"`
+			BitRate        string `json:"bit_rate"`
 			ColorTransfer  string `json:"color_transfer"`
 			CodecTagString string `json:"codec_tag_string"`
 			Tags           struct {
@@ -104,6 +103,7 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 		Format struct {
 			Name     string `json:"format_name"`
 			Duration string `json:"duration"`
+			BitRate  string `json:"bit_rate"`
 		} `json:"format"`
 	}
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
@@ -117,11 +117,12 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 	}
 	inspection.DurationSeconds, _ = strconv.ParseFloat(result.Format.Duration, 64)
 	for _, stream := range result.Streams {
+		bitRate, _ := strconv.ParseInt(stream.BitRate, 10, 64)
 		track := MediaTrack{
 			Index: stream.Index, Type: strings.ToLower(stream.CodecType),
 			Codec: normalizedCodec(stream.CodecName), Profile: strings.TrimSpace(stream.Profile),
 			Language: strings.TrimSpace(stream.Tags.Language), Title: strings.TrimSpace(stream.Tags.Title),
-			Width: stream.Width, Height: stream.Height, Channels: stream.Channels,
+			Width: stream.Width, Height: stream.Height, Channels: stream.Channels, BitrateKbps: int(bitRate / 1000),
 			Forced: stream.Disposition.Forced != 0,
 		}
 		switch track.Type {
@@ -139,39 +140,14 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 			inspection.SubtitleTracks = append(inspection.SubtitleTracks, track)
 		}
 	}
+	if len(inspection.VideoTracks) > 0 && inspection.VideoTracks[0].BitrateKbps == 0 {
+		bitRate, _ := strconv.ParseInt(result.Format.BitRate, 10, 64)
+		inspection.VideoTracks[0].BitrateKbps = int(bitRate / 1000)
+	}
 	if len(inspection.VideoTracks) == 0 {
 		return MediaInspection{}, errors.New("FFprobe returned no video stream")
 	}
 	return inspection, nil
-}
-
-func (processor *FFmpegProcessor) Process(ctx context.Context, asset storedAsset, destination io.Writer) error {
-	if err := processor.acquire(ctx); err != nil {
-		return err
-	}
-	defer processor.release()
-	arguments, err := processor.progressiveArguments(asset)
-	if err != nil {
-		return err
-	}
-	return processor.run(ctx, arguments, destination)
-}
-
-func (processor *FFmpegProcessor) progressiveArguments(asset storedAsset) ([]string, error) {
-	arguments, err := processor.processingArguments(asset)
-	if err != nil {
-		return nil, err
-	}
-	if asset.Kind == processingTranscode {
-		arguments = append(arguments, "-force_key_frames", "expr:gte(t,n_forced*1)")
-	}
-	arguments = append(arguments,
-		"-movflags", "frag_keyframe+empty_moov+default_base_moof",
-		"-frag_duration", "1000000",
-		"-flush_packets", "1",
-		"-f", "mp4", "pipe:1",
-	)
-	return arguments, nil
 }
 
 func (processor *FFmpegProcessor) ProcessHLS(ctx context.Context, asset storedAsset, directory string) error {
@@ -208,10 +184,10 @@ func (processor *FFmpegProcessor) processHLS(ctx context.Context, asset storedAs
 	arguments = append(arguments,
 		"-f", "hls", "-hls_time", "1", "-hls_list_size", "0", "-hls_playlist_type", "event",
 		"-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
-		"-hls_segment_filename", filepath.Join(directory, "segment-%06d.m4s"),
-		"-hls_flags", hlsFlags, filepath.Join(directory, "index.m3u8"),
+		"-hls_segment_filename", "segment-%06d.m4s",
+		"-hls_flags", hlsFlags, "index.m3u8",
 	)
-	return processor.run(ctx, arguments, nil)
+	return processor.runInDirectory(ctx, arguments, nil, directory)
 }
 
 func hlsOutputStarted(directory string) bool {
@@ -262,7 +238,24 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 	if asset.StartSeconds > 0 {
 		arguments = append(arguments, "-ss", strconv.FormatFloat(asset.StartSeconds, 'f', -1, 64))
 	}
-	arguments = append(arguments, "-i", asset.URL, "-map", "0:v:0", "-map")
+	arguments = append(arguments, "-i", asset.URL)
+	if asset.Kind == processingTranscode && asset.SubtitleTrackIndex != nil {
+		filter := processingVideoFilter(asset, encoder)
+		complexFilter := fmt.Sprintf("[0:v:0][0:%d]overlay", *asset.SubtitleTrackIndex)
+		if filter != "" {
+			complexFilter += "," + filter
+		}
+		complexFilter += "[vout]"
+		arguments = append(arguments, "-filter_complex", complexFilter, "-map", "[vout]")
+	} else {
+		arguments = append(arguments, "-map", "0:v:0")
+		if asset.Kind == processingTranscode {
+			if filter := processingVideoFilter(asset, encoder); filter != "" {
+				arguments = append(arguments, "-vf", filter)
+			}
+		}
+	}
+	arguments = append(arguments, "-map")
 	if asset.AudioTrackIndex != nil {
 		arguments = append(arguments, fmt.Sprintf("0:%d?", *asset.AudioTrackIndex))
 	} else {
@@ -273,17 +266,37 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 	case processingRemux:
 		arguments = append(arguments, "-c:v", "copy", "-c:a", "copy")
 	case processingTranscodeAudio:
-		arguments = append(arguments, "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-b:a", "192k")
+		arguments = append(arguments, "-c:v", "copy", "-c:a", "aac", "-ac", strconv.Itoa(outputAudioChannels(asset)), "-b:a", "192k")
 	case processingTranscode:
-		if filter := encoder.filter(asset.ToneMap); filter != "" {
-			arguments = append(arguments, "-vf", filter)
-		}
 		arguments = append(arguments, encoder.codecArguments(processor.threads)...)
-		arguments = append(arguments, "-c:a", "aac", "-ac", "2", "-b:a", "256k")
+		if asset.VideoBitrateKbps > 0 {
+			bitrate := strconv.Itoa(asset.VideoBitrateKbps) + "k"
+			arguments = append(arguments, "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", strconv.Itoa(asset.VideoBitrateKbps*2)+"k")
+		}
+		arguments = append(arguments, "-c:a", "aac", "-ac", strconv.Itoa(outputAudioChannels(asset)), "-b:a", "256k")
 	default:
 		return nil, fmt.Errorf("%w: unsupported mode %q", ErrMediaProcessingFailed, asset.Kind)
 	}
 	return arguments, nil
+}
+
+func processingVideoFilter(asset storedAsset, encoder videoEncoder) string {
+	filters := make([]string, 0, 3)
+	if asset.TargetHeight > 0 && asset.Decision != nil && asset.Decision.Source != nil &&
+		asset.Decision.Source.Height > asset.TargetHeight {
+		filters = append(filters, "scale=-2:"+strconv.Itoa(asset.TargetHeight))
+	}
+	if filter := encoder.filter(asset.ToneMap); filter != "" {
+		filters = append(filters, filter)
+	}
+	return strings.Join(filters, ",")
+}
+
+func outputAudioChannels(asset storedAsset) int {
+	if asset.MaximumAudioChannels == 1 {
+		return 1
+	}
+	return 2
 }
 
 func (processor *FFmpegProcessor) VideoEncoder() string {
@@ -326,7 +339,12 @@ func releaseSlot(slots chan struct{}) {
 }
 
 func (processor *FFmpegProcessor) run(ctx context.Context, arguments []string, destination io.Writer) error {
+	return processor.runInDirectory(ctx, arguments, destination, "")
+}
+
+func (processor *FFmpegProcessor) runInDirectory(ctx context.Context, arguments []string, destination io.Writer, directory string) error {
 	command := exec.CommandContext(ctx, processor.ffmpegPath, arguments...)
+	command.Dir = directory
 	var diagnostic bytes.Buffer
 	command.Stdout = destination
 	command.Stderr = &diagnostic
@@ -342,23 +360,6 @@ func (processor *FFmpegProcessor) run(ctx context.Context, arguments []string, d
 		return fmt.Errorf("%w: %v: %s", ErrMediaProcessingFailed, err, message)
 	}
 	return nil
-}
-
-func (service *Service) proxyProcessedMedia(w http.ResponseWriter, r *http.Request, asset storedAsset) error {
-	if service.processor == nil {
-		return ErrMediaProcessingFailed
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusOK)
-	if r.Method == http.MethodHead {
-		return nil
-	}
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		return fmt.Errorf("%w: flush response: %v", ErrMediaProcessingFailed, err)
-	}
-	return service.processor.Process(r.Context(), asset, w)
 }
 
 func inspectedContainer(formatName, hint string) string {

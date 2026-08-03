@@ -33,6 +33,9 @@ func TestLoadUsesSecureTokenTTLsByDefault(t *testing.T) {
 	if cfg.HardwareAcceleration != "auto" || cfg.VideoDevice != "/dev/dri/renderD128" {
 		t.Fatalf("unexpected hardware defaults: acceleration=%q device=%q", cfg.HardwareAcceleration, cfg.VideoDevice)
 	}
+	if cfg.TranscodeMaxBitrateKbps != 12000 {
+		t.Fatalf("unexpected transcoding bitrate default: %d", cfg.TranscodeMaxBitrateKbps)
+	}
 	if cfg.ArtworkCacheDir != "/var/lib/rivune/artwork" || cfg.ArtworkStorageBytes != 20480*1024*1024 {
 		t.Fatalf("unexpected artwork cache defaults: directory=%q bytes=%d", cfg.ArtworkCacheDir, cfg.ArtworkStorageBytes)
 	}
@@ -113,6 +116,14 @@ func TestLoadRejectsUnsafeRemuxConcurrency(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("expected invalid remux concurrency to fail")
+	}
+}
+func TestLoadRejectsUnsafeTranscodeBitrate(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", "63")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid transcoding bitrate to fail")
 	}
 }
 
@@ -211,6 +222,7 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("RIVUNE_FFPROBE_PATH", "")
 	t.Setenv("RIVUNE_REMUX_CONCURRENCY", "")
 	t.Setenv("RIVUNE_TRANSCODE_THREADS", "")
+	t.Setenv("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", "")
 	t.Setenv("RIVUNE_HARDWARE_ACCELERATION", "")
 	t.Setenv("RIVUNE_VIDEO_DEVICE", "")
 }

@@ -851,6 +851,7 @@ paths:
           $ref: "#/components/responses/Error"
     patch:
       summary: Update instance settings
+      description: Instance-wide `allowTranscoding` is accepted only here; profile `transcoding` choices belong to the profile settings route.
       operationId: updateInstanceSettings
       security:
         - bearerAuth: []
@@ -1116,6 +1117,7 @@ paths:
           $ref: "#/components/responses/Error"
     patch:
       summary: Update profile settings
+      description: Profile `transcoding` (`inherit`, `enabled`, or `disabled`) is accepted only here; the instance-wide `allowTranscoding` switch belongs to `/settings`.
       operationId: updateProfileSettings
       security:
         - bearerAuth: []
@@ -2487,6 +2489,12 @@ paths:
         "410":
           $ref: "#/components/responses/Error"
         "422":
+          $ref: "#/components/responses/PlaybackUnprocessable"
+        "502":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/PlaybackCapacity"
+        "507":
           $ref: "#/components/responses/Error"
   /playback/resolve:
     post:
@@ -2519,8 +2527,12 @@ paths:
         "410":
           $ref: "#/components/responses/Error"
         "422":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/PlaybackUnprocessable"
         "502":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/PlaybackCapacity"
+        "507":
           $ref: "#/components/responses/Error"
   /playback/sessions/{sessionId}:
     parameters:
@@ -2646,6 +2658,8 @@ paths:
                 format: binary
         "404":
           $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/PlaybackUnprocessable"
         "502":
           $ref: "#/components/responses/Error"
     head:
@@ -2660,6 +2674,8 @@ paths:
           description: Partial playback asset headers.
         "404":
           $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/PlaybackUnprocessable"
         "502":
           $ref: "#/components/responses/Error"
   /calendar:
@@ -3101,6 +3117,27 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
+    PlaybackUnprocessable:
+      description: Playback input is invalid, transcoding is disabled, or a required client processing capability was not announced.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PlaybackUnprocessableError"
+    PlaybackCapacity:
+      description: Every server media-processing slot is occupied, or global maintenance mode blocks the playback request.
+      headers:
+        Retry-After:
+          required: true
+          description: Suggested delay in seconds before retrying playback preparation or resolution.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - $ref: "#/components/schemas/PlaybackCapacityError"
+              - $ref: "#/components/schemas/MaintenanceModeError"
     DemoForbidden:
       description: A demonstration session attempted a route outside its exact method-and-path allowlist.
       content:
@@ -4268,6 +4305,15 @@ components:
             - type: string
               enum: [auto, 2160p, 1080p, 720p, 480p]
             - type: "null"
+        allowTranscoding:
+          description: Instance-wide transcoding authorization. Null clears the instance override and restores the default true value.
+          type: [boolean, "null"]
+        transcoding:
+          description: Profile transcoding choice. Null clears the profile override and restores inherit.
+          anyOf:
+            - type: string
+              enum: [inherit, enabled, disabled]
+            - type: "null"
         preferDirectPlay:
           type: [boolean, "null"]
         hideUnreleased:
@@ -4366,6 +4412,13 @@ components:
         maximumResolution:
           type: string
           enum: [auto, 2160p, 1080p, 720p, 480p]
+        allowTranscoding:
+          description: Instance authorization in a settings layer, or the final effective authorization after applying the absolute global veto.
+          type: boolean
+        transcoding:
+          description: Profile choice retained in effective settings so clients can explain inheritance and blocking.
+          type: string
+          enum: [inherit, enabled, disabled]
         preferDirectPlay:
           type: boolean
         hideUnreleased:
@@ -4532,6 +4585,10 @@ components:
             theme:
               $ref: "#/components/schemas/SettingSource"
             maximumResolution:
+              $ref: "#/components/schemas/SettingSource"
+            allowTranscoding:
+              $ref: "#/components/schemas/SettingSource"
+            transcoding:
               $ref: "#/components/schemas/SettingSource"
             preferDirectPlay:
               $ref: "#/components/schemas/SettingSource"
@@ -5970,6 +6027,11 @@ components:
         preferredSubtitleId:
           type: string
           maxLength: 128
+        startSeconds:
+          description: Whole-second playback offset applied to processed media.
+          type: integer
+          minimum: 0
+          maximum: 604800
     PlaybackSourceList:
       type: object
       additionalProperties: false
@@ -6025,6 +6087,11 @@ components:
           type: string
           minLength: 16
           maxLength: 128
+        startSeconds:
+          description: Whole-second playback offset applied to processed media.
+          type: integer
+          minimum: 0
+          maximum: 604800
     PlaybackPreparation:
       type: object
       additionalProperties: false
@@ -6039,6 +6106,8 @@ components:
           enum: [direct, remux, transcode_audio, transcode, youtube, external]
         protocol:
           type: string
+        decision:
+          $ref: "#/components/schemas/PlaybackDecision"
         container:
           type: string
         media:
@@ -6049,6 +6118,67 @@ components:
         expiresAt:
           type: string
           format: date-time
+    PlaybackDecision:
+      type: object
+      additionalProperties: false
+      required: [reason, videoAction, audioAction, subtitleAction, toneMapping]
+      properties:
+        reason:
+          type: string
+          enum: [direct_supported, remux_required, audio_transcode_required, video_transcode_required, subtitle_burn_required]
+        videoAction:
+          type: string
+          enum: [copy, transcode]
+        audioAction:
+          type: string
+          enum: [copy, transcode]
+        subtitleAction:
+          type: string
+          enum: [none, external, copy, burn]
+        toneMapping:
+          type: boolean
+        source:
+          $ref: "#/components/schemas/PlaybackDecisionSource"
+        target:
+          $ref: "#/components/schemas/PlaybackDecisionTarget"
+    PlaybackDecisionSource:
+      type: object
+      additionalProperties: false
+      properties:
+        container:
+          type: string
+        videoCodec:
+          type: string
+        audioCodec:
+          type: string
+        height:
+          type: integer
+          minimum: 1
+        videoBitrateKbps:
+          type: integer
+          minimum: 1
+        hdrFormat:
+          type: string
+    PlaybackDecisionTarget:
+      type: object
+      additionalProperties: false
+      properties:
+        protocol:
+          type: string
+        container:
+          type: string
+        videoCodec:
+          type: string
+        audioCodec:
+          type: string
+        height:
+          type: integer
+          minimum: 1
+          maximum: 4320
+        videoBitrateKbps:
+          type: integer
+          minimum: 64
+          maximum: 200000
     PlaybackMediaProfile:
       type: object
       additionalProperties: false
@@ -6120,12 +6250,32 @@ components:
             minLength: 1
             maxLength: 64
         processingModes:
+          description: Server-output processing modes the client can consume. Their presence never means the client performs encoding.
           type: array
-          maxItems: 1
+          maxItems: 3
           uniqueItems: true
           items:
             type: string
-            enum: [remux]
+            enum: [remux, transcode_audio, transcode]
+        maximumHeight:
+          type: integer
+          minimum: 144
+          maximum: 4320
+        maximumVideoBitrateKbps:
+          type: integer
+          minimum: 64
+          maximum: 200000
+        maximumAudioChannels:
+          type: integer
+          minimum: 1
+          maximum: 32
+        subtitleModes:
+          type: array
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [external, burn]
         mediaProfiles:
           type: array
           maxItems: 32
@@ -6140,6 +6290,13 @@ components:
         id:
           type: string
           format: uuid
+        selectedAudioTrack:
+          type: integer
+          minimum: 0
+          maximum: 10000
+        selectedSubtitleId:
+          type: string
+          maxLength: 128
         selectedSourceId:
           type: string
         sources:
@@ -6233,6 +6390,8 @@ components:
         mode:
           type: string
           enum: [direct, remux, transcode_audio, transcode, unknown]
+        decision:
+          $ref: "#/components/schemas/PlaybackDecision"
         username:
           type: string
         profileId:
@@ -6307,6 +6466,15 @@ components:
           enum: [processing, complete, failed]
         prewarming:
           type: boolean
+        progressPercent:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+        speed:
+          type: number
+          format: double
+          minimum: 0
         createdAt:
           type: string
           format: date-time
@@ -6347,6 +6515,8 @@ components:
         mode:
           type: string
           enum: [direct, remux, transcode_audio, transcode, youtube, external]
+        decision:
+          $ref: "#/components/schemas/PlaybackDecision"
         url:
           type: string
           description: Same-server playback asset URL containing a short-lived opaque token, except mode=external where this is the authorized provider handoff URL.
@@ -6422,7 +6592,7 @@ components:
     PlaybackSubtitle:
       type: object
       additionalProperties: false
-      required: [id, addonId, manifestId, url]
+      required: [id, addonId, manifestId]
       properties:
         id:
           type: string
@@ -6435,9 +6605,14 @@ components:
           type: string
         forced:
           type: boolean
+        default:
+          type: boolean
+        delivery:
+          type: string
+          enum: [external, burn]
         url:
           type: string
-          description: Same-server playback asset URL containing the playback token.
+          description: Same-server playback asset URL containing the playback token. Omitted when delivery=burn because the selected subtitle is embedded in the video output.
     PlaybackProviderError:
       type: object
       additionalProperties: false
@@ -6571,6 +6746,36 @@ components:
             message:
               type: string
               const: A valid demo session is required
+    PlaybackUnprocessableError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [invalid_playback_request, playback_source_unsupported, playback_transcoding_disabled, playback_client_capability_missing]
+            message:
+              type: string
+    PlaybackCapacityError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              const: playback_capacity_reached
+            message:
+              type: string
     ErrorEnvelope:
       type: object
       required: [error]

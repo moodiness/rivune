@@ -222,6 +222,7 @@ func TestPlaybackAssetReturnsStableMediaErrors(t *testing.T) {
 		retryAfter string
 	}{
 		{name: "source", err: playback.ErrMediaSourceFailed, status: http.StatusBadGateway, code: "playback_source_failed"},
+		{name: "capability", err: playback.ErrClientCapabilityMissing, status: http.StatusUnprocessableEntity, code: "playback_client_capability_missing"},
 		{name: "capacity", err: playback.ErrMediaCapacityReached, status: http.StatusServiceUnavailable, code: "playback_capacity_reached", retryAfter: "10"},
 		{name: "storage", err: playback.ErrMediaStorageLimit, status: http.StatusInsufficientStorage, code: "playback_storage_limit"},
 		{name: "processing", err: playback.ErrMediaProcessingFailed, status: http.StatusBadGateway, code: "playback_processing_failed"},
@@ -273,6 +274,55 @@ func TestPlaybackMarkersApplyEffectiveSkipSettings(t *testing.T) {
 		t.Fatalf("unexpected marker input: %+v", service.markersInput)
 	}
 	validateContractResponse(t, loadOpenAPIContract(t), "/playback/markers", nil, request, response)
+}
+
+func TestPlaybackPrepareAndResolveReturnSpecificTranscodingErrors(t *testing.T) {
+	profileID := "profile-id"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	tests := []struct {
+		name string
+		path string
+		err  error
+		code string
+	}{
+		{name: "prepare disabled", path: "/api/v1/playback/prepare", err: playback.ErrTranscodingDisabled, code: "playback_transcoding_disabled"},
+		{name: "prepare capability", path: "/api/v1/playback/prepare", err: playback.ErrClientCapabilityMissing, code: "playback_client_capability_missing"},
+		{name: "resolve disabled", path: "/api/v1/playback/resolve", err: playback.ErrTranscodingDisabled, code: "playback_transcoding_disabled"},
+		{name: "resolve capability", path: "/api/v1/playback/resolve", err: playback.ErrClientCapabilityMissing, code: "playback_client_capability_missing"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakePlaybackService{}
+			if strings.Contains(test.path, "/prepare") {
+				service.prepareErr = test.err
+			} else {
+				service.resolveErr = test.err
+			}
+			api := testAPI(&fakeInstanceService{})
+			api.auth = &fakeAuthService{principal: auth.Principal{
+				SessionID: "session-id", UserID: "user-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
+			}}
+			api.playback = service
+			api.settings = &fakeSettingsService{effective: settings.Effective{Values: settings.EffectiveValues{
+				AllowTranscoding: false, MaximumResolution: "720p",
+			}}}
+			request := httptest.NewRequest(http.MethodPost, test.path, stringsReader(`{"sourceRef":"opaque-source-reference"}`))
+			request.Header.Set("Authorization", "Bearer access-token")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			api.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("unexpected transcoding error: status=%d body=%s", response.Code, response.Body.String())
+			}
+			if strings.Contains(test.path, "/prepare") {
+				if service.prepareInput.AllowTranscoding || service.prepareInput.MaximumHeight != 720 {
+					t.Fatalf("prepare did not receive fresh effective policy: %+v", service.prepareInput)
+				}
+			} else if service.resolveInput.AllowTranscoding || service.resolveInput.MaximumHeight != 720 {
+				t.Fatalf("resolve did not receive fresh effective policy: %+v", service.resolveInput)
+			}
+		})
+	}
 }
 
 func stringsReader(value string) *strings.Reader {

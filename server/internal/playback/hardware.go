@@ -189,9 +189,9 @@ func (encoder videoEncoder) filter(toneMap bool) string {
 func (encoder videoEncoder) codecArguments(threads int) []string {
 	switch encoder.normalizedKind() {
 	case videoEncoderVAAPI:
-		return []string{"-c:v", "h264_vaapi", "-profile:v", "high", "-rc_mode", "CQP", "-qp", "18"}
+		return []string{"-c:v", "h264_vaapi", "-profile:v", "high"}
 	case videoEncoderQSV:
-		return []string{"-c:v", "h264_qsv", "-profile:v", "high", "-preset", "veryfast", "-global_quality", "18", "-look_ahead", "0"}
+		return []string{"-c:v", "h264_qsv", "-profile:v", "high", "-preset", "veryfast", "-look_ahead", "0"}
 	case videoEncoderNVENC:
 		return []string{"-c:v", "h264_nvenc", "-profile:v", "high", "-preset", "p4", "-tune", "ll", "-rc", "vbr", "-cq", "18", "-b:v", "0", "-spatial_aq", "1", "-zerolatency", "1"}
 	default:

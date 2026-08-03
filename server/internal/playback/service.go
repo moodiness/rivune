@@ -135,9 +135,6 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 	options := make([]SourceOption, 0, len(sources))
 	for index := range sources {
 		source := sources[index]
-		if input.Capabilities.MaximumHeight > 0 && sourceResolutionHint(source) > input.Capabilities.MaximumHeight {
-			continue
-		}
 		var asset *storedAsset
 		if assetIndex := storedAssetIndex(assets, source.ID); assetIndex >= 0 {
 			value := cloneStoredAsset(assets[assetIndex])
@@ -175,8 +172,14 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 	if err != nil {
 		return Preparation{}, err
 	}
-	prepared, err := service.preparedPlayback(ctx, principal, reference)
+	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
+	prepared, err := service.preparedPlayback(ctx, principal, reference, playbackPolicy{
+		allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight,
+	})
 	if err != nil {
+		if err == ErrTranscodingDisabled {
+			service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+		}
 		return Preparation{}, err
 	}
 	sources := []Source{cloneSource(prepared.source)}
@@ -185,12 +188,17 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 		assets = append(assets, cloneStoredAsset(*prepared.asset))
 		assets[len(assets)-1].StartSeconds = input.StartSeconds
 	}
+	capabilities := service.playbackCapabilities(reference.Capabilities, maximumHeight)
 	preferences := ResolveInput{
-		Capabilities: reference.Capabilities, PreferredAudioLanguage: reference.PreferredAudioLanguage,
+		Capabilities: capabilities, AllowTranscoding: input.AllowTranscoding, MaximumHeight: input.MaximumHeight,
+		PreferredAudioLanguage:          reference.PreferredAudioLanguage,
 		PreferredSubtitleLanguage:       reference.PreferredSubtitleLanguage,
 		PreferredForcedSubtitleLanguage: reference.PreferredForcedSubtitleLanguage,
 	}
 	if err := applyPlaybackPreferences(sources, assets, preferences); err != nil {
+		if err == ErrTranscodingDisabled {
+			service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+		}
 		return Preparation{}, err
 	}
 	source := sources[0]
@@ -201,7 +209,8 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 	}
 	return Preparation{
 		SourceRef: reference.ID, Mode: source.Mode, Protocol: source.Protocol, Container: source.Container,
-		Media: source.Media, SubtitleCount: len(prepared.subtitles), ExpiresAt: reference.ExpiresAt,
+		Media: source.Media, Decision: clonePlaybackDecision(source.Decision),
+		SubtitleCount: len(prepared.subtitles), ExpiresAt: reference.ExpiresAt,
 	}, nil
 }
 
@@ -219,8 +228,14 @@ func (service *Service) Resolve(ctx context.Context, principal auth.Principal, i
 	if err != nil {
 		return Session{}, err
 	}
-	prepared, err := service.preparedPlayback(ctx, principal, reference)
+	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
+	prepared, err := service.preparedPlayback(ctx, principal, reference, playbackPolicy{
+		allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight,
+	})
 	if err != nil {
+		if err == ErrTranscodingDisabled {
+			service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+		}
 		return Session{}, err
 	}
 	sources := []Source{cloneSource(prepared.source)}
@@ -229,11 +244,14 @@ func (service *Service) Resolve(ctx context.Context, principal auth.Principal, i
 		streamAssets = append(streamAssets, cloneStoredAsset(*prepared.asset))
 		streamAssets[len(streamAssets)-1].StartSeconds = input.StartSeconds
 	}
-	input.Capabilities = reference.Capabilities
+	input.Capabilities = service.playbackCapabilities(reference.Capabilities, maximumHeight)
 	input.PreferredAudioLanguage = reference.PreferredAudioLanguage
 	input.PreferredSubtitleLanguage = reference.PreferredSubtitleLanguage
 	input.PreferredForcedSubtitleLanguage = reference.PreferredForcedSubtitleLanguage
 	if err := applyPlaybackPreferences(sources, streamAssets, input); err != nil {
+		if err == ErrTranscodingDisabled {
+			service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+		}
 		return Session{}, err
 	}
 	subtitles := append([]Subtitle(nil), prepared.subtitles...)
@@ -244,6 +262,12 @@ func (service *Service) Resolve(ctx context.Context, principal auth.Principal, i
 	for index := range prepared.subtitleAssets {
 		subtitleAssets[index] = cloneStoredAsset(prepared.subtitleAssets[index])
 		subtitleAssets[index].StartSeconds = input.StartSeconds
+	}
+	if err := applySubtitleDecision(sources, streamAssets, subtitles, subtitleAssets, input.Capabilities, input.AllowTranscoding); err != nil {
+		if err == ErrTranscodingDisabled {
+			service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+		}
+		return Session{}, err
 	}
 	assets := append(streamAssets, subtitleAssets...)
 	return service.createSession(ctx, principal, reference, input.TitleID, sources, subtitles, assets, prepared.providerErrors)
@@ -272,7 +296,7 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 	`, principal.SessionID, *principal.ActiveProfileID, titleID, reference.MediaType, reference.ResourceID, tokenHash, assetsJSON, expiresAt).Scan(&sessionID); err != nil {
 		return Session{}, fmt.Errorf("store playback session: %w", err)
 	}
-	if err := service.startSessionHLS(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID), sessionID, sources, assets); err != nil {
+	if err := service.startSessionHLS(ctx, prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID), sessionID, sources, assets); err != nil {
 		_, _ = service.pool.Exec(ctx, "DELETE FROM playback_sessions WHERE id::text = $1", sessionID)
 		return Session{}, err
 	}
@@ -280,7 +304,9 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 		sources[index].URL = sessionSourceURL(sources[index], assets, sessionID, token)
 	}
 	for index := range subtitles {
-		subtitles[index].URL = assetURL(sessionID, subtitles[index].ID, token, "", "")
+		if subtitles[index].Delivery != "burn" {
+			subtitles[index].URL = assetURL(sessionID, subtitles[index].ID, token, "", "")
+		}
 	}
 	return Session{
 		ID: sessionID, SelectedSourceID: firstCompatibleSource(sources), SelectedAudioTrack: selectedAudioTrack(sources, assets),
@@ -352,7 +378,8 @@ func validPlaybackStart(seconds float64) bool {
 func validateCapabilities(capabilities Capabilities) error {
 	groups := [][]string{
 		capabilities.StreamingProtocols, capabilities.Containers, capabilities.VideoCodecs,
-		capabilities.AudioCodecs, capabilities.HDRFormats, capabilities.ExternalPlayers, capabilities.ProcessingModes,
+		capabilities.AudioCodecs, capabilities.HDRFormats, capabilities.ExternalPlayers,
+		capabilities.ProcessingModes, capabilities.SubtitleModes,
 	}
 	for _, values := range groups {
 		if len(values) > 32 {
@@ -380,15 +407,68 @@ func validateCapabilities(capabilities Capabilities) error {
 			}
 		}
 	}
-	if len(capabilities.ProcessingModes) > 1 ||
-		len(capabilities.ProcessingModes) == 1 && !strings.EqualFold(strings.TrimSpace(capabilities.ProcessingModes[0]), processingRemux) {
+	if !validUniqueModes(capabilities.ProcessingModes, []string{processingRemux, processingTranscodeAudio, processingTranscode}, 3) ||
+		!validUniqueModes(capabilities.SubtitleModes, []string{"external", "burn"}, 2) {
+		return ErrInvalidInput
+	}
+	if capabilities.MaximumVideoBitrateKbps != 0 &&
+		(capabilities.MaximumVideoBitrateKbps < 64 || capabilities.MaximumVideoBitrateKbps > 200000) {
+		return ErrInvalidInput
+	}
+	if capabilities.MaximumAudioChannels != 0 &&
+		(capabilities.MaximumAudioChannels < 1 || capabilities.MaximumAudioChannels > 32) {
+		return ErrInvalidInput
+	}
+	if capabilities.MaximumHeight != 0 &&
+		(capabilities.MaximumHeight < 144 || capabilities.MaximumHeight > 4320) {
 		return ErrInvalidInput
 	}
 	return nil
 }
 
+func validUniqueModes(values, allowed []string, maximum int) bool {
+	if len(values) > maximum {
+		return false
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		if _, exists := seen[value]; exists {
+			return false
+		}
+		seen[value] = struct{}{}
+		valid := false
+		for _, candidate := range allowed {
+			if value == candidate {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return false
+		}
+	}
+	return true
+}
+
 func (service *Service) hasActiveProfile(principal auth.Principal) bool {
 	return principal.ActiveProfileID != nil && principal.ProfileGrantExpiresAt != nil && principal.ProfileGrantExpiresAt.After(service.now())
+}
+
+func effectivePlaybackMaximumHeight(clientMaximum, settingsMaximum int) int {
+	if clientMaximum <= 0 {
+		return settingsMaximum
+	}
+	if settingsMaximum <= 0 || clientMaximum < settingsMaximum {
+		return clientMaximum
+	}
+	return settingsMaximum
+}
+func (service *Service) playbackCapabilities(client Capabilities, maximumHeight int) Capabilities {
+	capabilities := cloneCapabilities(client)
+	capabilities.MaximumHeight = maximumHeight
+	capabilities.TranscodeVideoBitrateKbps = service.mediaOptions.TranscodeVideoBitrateKbps
+	return capabilities
 }
 
 func sourceDisplayName(source Source) string {
@@ -482,7 +562,8 @@ func normalizeSubtitles(batch addon.ResourceBatch) ([]Subtitle, []storedAsset) {
 			}
 			subtitles = append(subtitles, Subtitle{
 				ID: id, AddonID: result.AddonID, ManifestID: result.ManifestID,
-				Language: strings.TrimSpace(subtitle.Language), URL: subtitle.URL, Forced: subtitle.Forced,
+				Language: strings.TrimSpace(subtitle.Language), URL: subtitle.URL,
+				Delivery: "external", Forced: subtitle.Forced,
 			})
 			assets = append(assets, storedAsset{ID: id, Kind: kind, URL: subtitle.URL})
 		}
@@ -574,7 +655,7 @@ func containerFor(rawURL string) string {
 
 func supports(values []string, candidate string) bool {
 	if len(values) == 0 {
-		return true
+		return false
 	}
 	for _, value := range values {
 		if strings.EqualFold(strings.TrimSpace(value), candidate) {

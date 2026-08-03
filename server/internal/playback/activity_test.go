@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -34,6 +35,118 @@ func TestActivityModeUsesActualProcessingContract(t *testing.T) {
 				t.Fatalf("activity mode = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestActivityJobsReportPlaylistProgressAndSpeed(t *testing.T) {
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	directory := t.TempDir()
+	playlist := "#EXTM3U\n#EXTINF:4,\nsegment-000000.m4s\n#EXTINF:6,\nsegment-000001.m4s\n"
+	if err := os.WriteFile(filepath.Join(directory, "index.m3u8"), []byte(playlist), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{
+		now: func() time.Time { return now },
+		hlsJobs: map[string]*hlsJob{
+			"job": {
+				directory: directory, sessionID: "session-1", assetID: "asset-1", mode: processingTranscode,
+				sourceDurationSeconds: 30, startOffsetSeconds: 10, createdAt: now.Add(-5 * time.Second), lastAccessed: now,
+			},
+		},
+	}
+
+	jobs := service.activityJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("activity jobs = %d, want 1", len(jobs))
+	}
+	if jobs[0].ProgressPercent == nil || *jobs[0].ProgressPercent != 50 {
+		t.Fatalf("progress percent = %v, want 50", jobs[0].ProgressPercent)
+	}
+	if jobs[0].Speed == nil || *jobs[0].Speed != 2 {
+		t.Fatalf("speed = %v, want 2", jobs[0].Speed)
+	}
+}
+
+func TestActivityJobsOmitUnknownProgressAndCapKnownProgress(t *testing.T) {
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	unknownDirectory := t.TempDir()
+	missingDirectory := t.TempDir()
+	complete := make(chan struct{})
+	close(complete)
+	cappedDirectory := t.TempDir()
+	playlist := []byte("#EXTM3U\n#EXTINF:10,\nsegment-000000.m4s\n")
+	for _, directory := range []string{unknownDirectory, cappedDirectory} {
+		if err := os.WriteFile(filepath.Join(directory, "index.m3u8"), playlist, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := &Service{
+		now: func() time.Time { return now },
+		hlsJobs: map[string]*hlsJob{
+			"unknown": {
+				directory: unknownDirectory, assetID: "unknown", createdAt: now.Add(-10 * time.Second),
+			},
+			"missing": {
+				directory: missingDirectory, assetID: "missing", sourceDurationSeconds: 5,
+				createdAt: now.Add(-10 * time.Second),
+			},
+			"capped": {
+				directory: cappedDirectory, assetID: "capped", sourceDurationSeconds: 5, done: complete,
+				createdAt: now.Add(-10 * time.Second),
+			},
+		},
+	}
+
+	jobs := service.activityJobs()
+	if len(jobs) != 3 {
+		t.Fatalf("activity jobs = %d, want 3", len(jobs))
+	}
+	byAssetID := make(map[string]MediaActivityJob, len(jobs))
+	for _, job := range jobs {
+		byAssetID[job.AssetID] = job
+	}
+	if byAssetID["unknown"].ProgressPercent != nil {
+		t.Fatalf("unknown-duration progress = %v, want nil", byAssetID["unknown"].ProgressPercent)
+	}
+	if byAssetID["unknown"].Speed == nil || *byAssetID["unknown"].Speed != 1 {
+		t.Fatalf("unknown-duration speed = %v, want 1", byAssetID["unknown"].Speed)
+	}
+	if byAssetID["capped"].ProgressPercent == nil || *byAssetID["capped"].ProgressPercent != 100 {
+		t.Fatalf("capped progress = %v, want 100", byAssetID["capped"].ProgressPercent)
+	}
+	if byAssetID["capped"].State != "complete" {
+		t.Fatalf("capped job state = %q, want complete", byAssetID["capped"].State)
+	}
+	if byAssetID["missing"].ProgressPercent != nil || byAssetID["missing"].Speed != nil {
+		t.Fatalf(
+			"missing-playlist metrics = %v/%v, want nil/nil",
+			byAssetID["missing"].ProgressPercent, byAssetID["missing"].Speed,
+		)
+	}
+	encoded, err := json.Marshal(byAssetID["unknown"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var properties map[string]any
+	if err := json.Unmarshal(encoded, &properties); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := properties["progressPercent"]; exists {
+		t.Fatalf("unknown-duration JSON unexpectedly includes progressPercent: %s", encoded)
+	}
+	encoded, err = json.Marshal(byAssetID["missing"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	properties = nil
+	if err := json.Unmarshal(encoded, &properties); err != nil {
+		t.Fatal(err)
+	}
+	if _, progressExists := properties["progressPercent"]; progressExists {
+		t.Fatalf("missing-playlist JSON unexpectedly includes progressPercent: %s", encoded)
+	}
+	if _, speedExists := properties["speed"]; speedExists {
+		t.Fatalf("missing-playlist JSON unexpectedly includes speed: %s", encoded)
 	}
 }
 
@@ -361,5 +474,26 @@ func TestFFmpegDiagnosticsReportSlotPressure(t *testing.T) {
 	processor.slots <- struct{}{}
 	if processor.ActiveProcesses() != 1 || processor.ProcessLimit() != 2 {
 		t.Fatalf("unexpected processor diagnostics: active=%d limit=%d", processor.ActiveProcesses(), processor.ProcessLimit())
+	}
+}
+
+func TestActivityDetailsExposePersistedPlaybackDecision(t *testing.T) {
+	encoded, err := json.Marshal([]storedAsset{{
+		ID: "stream-1", Kind: processingTranscode,
+		Decision: &PlaybackDecision{
+			Reason: decisionVideoTranscodeRequired, VideoAction: "transcode", AudioAction: "transcode",
+			SubtitleAction: "none", ToneMapping: true,
+			Source: &PlaybackDecisionSource{Container: "mkv", VideoCodec: "h265", Height: 2160},
+			Target: &PlaybackDecisionTarget{Protocol: "hls", Container: "hls", VideoCodec: "h264", Height: 1080, VideoBitrateKbps: 8000},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode, decision := activityPlaybackDetails(encoded)
+	if mode != processingTranscode || decision == nil || decision.Reason != decisionVideoTranscodeRequired ||
+		decision.Source == nil || decision.Source.VideoCodec != "h265" ||
+		decision.Target == nil || decision.Target.VideoBitrateKbps != 8000 || !decision.ToneMapping {
+		t.Fatalf("activity details lost persisted decision: mode=%q decision=%+v", mode, decision)
 	}
 }

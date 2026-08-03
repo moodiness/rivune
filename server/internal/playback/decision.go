@@ -12,6 +12,14 @@ const (
 	processingTranscode      = "transcode"
 )
 
+const (
+	decisionDirectSupported        = "direct_supported"
+	decisionRemuxRequired          = "remux_required"
+	decisionAudioTranscodeRequired = "audio_transcode_required"
+	decisionVideoTranscodeRequired = "video_transcode_required"
+	decisionSubtitleBurnRequired   = "subtitle_burn_required"
+)
+
 type sourceCandidate struct {
 	sourceIndex    int
 	assetIndex     int
@@ -35,66 +43,40 @@ func sourceResolutionHint(source Source) int {
 	}
 }
 
-func (service *Service) decidePlaybackSource(ctx context.Context, sources []Source, assets []storedAsset, capabilities Capabilities) {
+func (service *Service) decidePlaybackSource(ctx context.Context, sources []Source, assets []storedAsset, capabilities Capabilities, policy ...bool) error {
+	allowTranscoding := len(policy) == 0 || policy[0]
 	if service.processor == nil {
-		return
-	}
-	for index := range sources {
-		source := &sources[index]
-		if !source.Compatible || (source.Mode != "youtube" && source.Protocol != "hls") {
-			continue
-		}
-		if capabilities.MaximumHeight > 0 && sourceResolutionHint(*source) > capabilities.MaximumHeight {
-			source.Compatible = false
-			continue
-		}
-		if source.Mode == "youtube" {
-			return
-		}
-		if assetIndex := storedAssetIndex(assets, source.ID); assetIndex >= 0 {
-			if inspection, err := service.probeMedia(ctx, assets[assetIndex]); err == nil {
-				source.Media = &inspection
-				if inspection.Container != "" {
-					source.Container = inspection.Container
+		for index := range sources {
+			if sources[index].Compatible {
+				sources[index].Decision = directDecision(MediaInspection{})
+				if assetIndex := storedAssetIndex(assets, sources[index].ID); assetIndex >= 0 {
+					assets[assetIndex].Decision = clonePlaybackDecision(sources[index].Decision)
 				}
-				video := primaryTrack(inspection.VideoTracks)
-				if capabilities.MaximumHeight > 0 && video != nil && video.Height > capabilities.MaximumHeight {
-					source.Compatible = false
-					continue
-				}
-				if !directMediaSupported(inspection, capabilities) {
-					if remuxSupported(inspection, capabilities) {
-						applyPlaybackDecision(sources, assets, sourceCandidate{sourceIndex: index, assetIndex: assetIndex}, inspection, processingRemux, false, capabilities)
-						return
-					}
-					source.Compatible = false
-					continue
-				}
+				return nil
 			}
 		}
-		return
+		return nil
 	}
 
-	candidates := make([]sourceCandidate, 0)
+	candidates := make([]sourceCandidate, 0, len(sources))
 	for sourceIndex := range sources {
 		source := &sources[sourceIndex]
-		if source.Mode != "direct" || source.URL == "" || source.Protocol != "http" {
+		if source.Mode == "youtube" || source.Mode == "external" {
+			if source.Compatible {
+				return nil
+			}
+			continue
+		}
+		if source.Mode != "direct" || source.URL == "" {
 			continue
 		}
 		assetIndex := storedAssetIndex(assets, source.ID)
 		if assetIndex < 0 {
 			continue
 		}
-		resolutionHint := sourceResolutionHint(*source)
-		if capabilities.MaximumHeight > 0 && resolutionHint > capabilities.MaximumHeight {
-			source.Compatible = false
-			continue
-		}
 		candidates = append(candidates, sourceCandidate{
-			sourceIndex:    sourceIndex,
-			assetIndex:     assetIndex,
-			directHint:     source.Compatible,
-			resolutionHint: resolutionHint,
+			sourceIndex: sourceIndex, assetIndex: assetIndex, directHint: source.Compatible,
+			resolutionHint: sourceResolutionHint(*source),
 		})
 		source.Compatible = false
 	}
@@ -105,106 +87,281 @@ func (service *Service) decidePlaybackSource(ctx context.Context, sources []Sour
 		if candidates[left].directHint != candidates[right].directHint {
 			return candidates[left].directHint
 		}
-		leftHint := sources[candidates[left].sourceIndex].Hint
-		rightHint := sources[candidates[right].sourceIndex].Hint
-		return remuxHintRank(leftHint) < remuxHintRank(rightHint)
+		return remuxHintRank(sources[candidates[left].sourceIndex].Hint) < remuxHintRank(sources[candidates[right].sourceIndex].Hint)
 	})
 
-	fallbackIndex := -1
+	conversionDenied := false
+	capabilityMissing := false
 	fallbackHeight := 0
+	var fallbackCandidate sourceCandidate
 	var fallbackInspection MediaInspection
 	var fallbackMode string
-	var fallbackToneMap bool
-	for index, candidate := range candidates {
+	var fallbackDecision *PlaybackDecision
+	for _, candidate := range candidates {
 		inspection, err := service.probeMedia(ctx, assets[candidate.assetIndex])
 		if err != nil {
 			continue
 		}
 		source := &sources[candidate.sourceIndex]
+		source.Media = &inspection
 		if inspection.Container != "" {
 			source.Container = inspection.Container
 		}
-		source.Media = &inspection
-		mode, toneMap := playbackMode(*source, inspection, capabilities)
-		if mode == "" {
-			continue
-		}
+		mode, decision := playbackMode(*source, inspection, capabilities)
 		video := primaryTrack(inspection.VideoTracks)
-		if video == nil {
+		if mode != "" && candidate.resolutionHint > 0 && video != nil && video.Height < candidate.resolutionHint*9/10 {
+			if mode == processingTranscodeAudio || mode == processingTranscode {
+				if !allowTranscoding {
+					conversionDenied = true
+					continue
+				}
+			}
+			if video.Height > fallbackHeight {
+				fallbackHeight = video.Height
+				fallbackCandidate = candidate
+				fallbackInspection = inspection
+				fallbackMode = mode
+				fallbackDecision = decision
+			}
 			continue
 		}
-		if capabilities.MaximumHeight > 0 && video.Height > capabilities.MaximumHeight {
-			continue
-		}
-		if candidate.resolutionHint == 0 || video.Height >= candidate.resolutionHint*9/10 {
-			applyPlaybackDecision(sources, assets, candidate, inspection, mode, toneMap, capabilities)
-			return
-		}
-		if video.Height > fallbackHeight {
-			fallbackIndex = index
-			fallbackHeight = video.Height
-			fallbackInspection = inspection
-			fallbackMode = mode
-			fallbackToneMap = toneMap
+		switch mode {
+		case "direct", processingRemux:
+			applyPlaybackDecision(sources, assets, candidate, inspection, mode, decision, capabilities)
+			return nil
+		case processingTranscodeAudio, processingTranscode:
+			if !allowTranscoding {
+				conversionDenied = true
+				continue
+			}
+			applyPlaybackDecision(sources, assets, candidate, inspection, mode, decision, capabilities)
+			return nil
+		default:
+			if !allowTranscoding && transcodingRequired(inspection, capabilities) {
+				conversionDenied = true
+			} else {
+				capabilityMissing = true
+			}
 		}
 	}
-	if fallbackIndex >= 0 {
-		applyPlaybackDecision(sources, assets, candidates[fallbackIndex], fallbackInspection, fallbackMode, fallbackToneMap, capabilities)
+	if fallbackHeight > 0 {
+		applyPlaybackDecision(sources, assets, fallbackCandidate, fallbackInspection, fallbackMode, fallbackDecision, capabilities)
+		return nil
+	}
+	if conversionDenied {
+		return ErrTranscodingDisabled
+	}
+	if capabilityMissing {
+		return ErrClientCapabilityMissing
+	}
+	return nil
+}
+
+func directDecision(inspection MediaInspection) *PlaybackDecision {
+	return &PlaybackDecision{
+		Reason: decisionDirectSupported, VideoAction: "copy", AudioAction: "copy", SubtitleAction: "none",
+		Source: decisionSource(inspection),
 	}
 }
 
-func applyPlaybackDecision(sources []Source, assets []storedAsset, candidate sourceCandidate, inspection MediaInspection, mode string, toneMap bool, capabilities Capabilities) {
+func decisionSource(inspection MediaInspection) *PlaybackDecisionSource {
+	video := primaryTrack(inspection.VideoTracks)
+	audio := primaryTrack(inspection.AudioTracks)
+	if video == nil && audio == nil && inspection.Container == "" {
+		return nil
+	}
+	source := &PlaybackDecisionSource{Container: inspection.Container, HDRFormat: inspection.HDRFormat}
+	if video != nil {
+		source.VideoCodec = normalizedCodec(video.Codec)
+		source.Height = video.Height
+		source.VideoBitrateKbps = video.BitrateKbps
+	}
+	if audio != nil {
+		source.AudioCodec = normalizedCodec(audio.Codec)
+	}
+	return source
+}
+
+func applyPlaybackDecision(sources []Source, assets []storedAsset, candidate sourceCandidate, inspection MediaInspection, mode string, decision *PlaybackDecision, capabilities Capabilities) {
 	source := &sources[candidate.sourceIndex]
 	source.Media = &inspection
 	source.Mode = mode
 	source.Compatible = true
+	source.Decision = clonePlaybackDecision(decision)
+	asset := &assets[candidate.assetIndex]
+	asset.Decision = clonePlaybackDecision(decision)
 	if mode == "direct" {
 		return
 	}
-	if supports(capabilities.StreamingProtocols, "hls") {
-		source.Protocol = "hls"
-		source.Container = "hls"
-	} else {
-		source.Protocol = "http"
-		source.Container = "mp4"
+	protocol, container := processingOutput()
+	source.Protocol = protocol
+	source.Container = container
+	asset.Kind = mode
+	if decision != nil {
+		asset.ToneMap = decision.ToneMapping
+		if decision.Target != nil {
+			asset.TargetHeight = decision.Target.Height
+			asset.VideoBitrateKbps = decision.Target.VideoBitrateKbps
+		}
 	}
-	assets[candidate.assetIndex].Kind = mode
-	assets[candidate.assetIndex].ToneMap = toneMap
+	asset.MaximumAudioChannels = capabilities.MaximumAudioChannels
 }
 
-func playbackMode(source Source, inspection MediaInspection, capabilities Capabilities) (string, bool) {
+func playbackMode(source Source, inspection MediaInspection, capabilities Capabilities) (string, *PlaybackDecision) {
 	video := primaryTrack(inspection.VideoTracks)
 	if video == nil {
-		return "", false
+		return "", nil
 	}
 	audio := primaryTrack(inspection.AudioTracks)
-	hdrSupported := inspection.HDRFormat == "" || supports(capabilities.HDRFormats, inspection.HDRFormat)
-	protocolSupported := supports(capabilities.StreamingProtocols, source.Protocol)
-	if protocolSupported && hdrSupported && mediaProfileSupported(source.Container, video, audio, capabilities) {
-		return "direct", false
+	if directPlaybackSupported(source, inspection, video, audio, capabilities) {
+		return "direct", directDecision(inspection)
 	}
 	if remuxSupported(inspection, capabilities) {
-		return processingRemux, false
+		return processingRemux, processingDecision(decisionRemuxRequired, "copy", "copy", inspection, capabilities, false)
 	}
-	return "", false
+	if audioTranscodeSupported(inspection, capabilities) {
+		return processingTranscodeAudio, processingDecision(decisionAudioTranscodeRequired, "copy", "transcode", inspection, capabilities, false)
+	}
+	if fullTranscodeSupported(capabilities) {
+		toneMap := !clientSupportsHDR(inspection.HDRFormat, capabilities)
+		return processingTranscode, processingDecision(decisionVideoTranscodeRequired, "transcode", "transcode", inspection, capabilities, toneMap)
+	}
+	return "", nil
+}
+
+func directPlaybackSupported(source Source, inspection MediaInspection, video, audio *MediaTrack, capabilities Capabilities) bool {
+	container := source.Container
+	if inspection.Container != "" {
+		container = inspection.Container
+	}
+	return supports(capabilities.StreamingProtocols, source.Protocol) &&
+		mediaProfileSupported(container, video, audio, capabilities) &&
+		videoWithinClientLimits(video, inspection.HDRFormat, capabilities) && audioWithinClientLimits(audio, capabilities)
+}
+
+func transcodingRequired(inspection MediaInspection, capabilities Capabilities) bool {
+	copyCapabilities := cloneCapabilities(capabilities)
+	if !requestedProcessingMode(copyCapabilities.ProcessingModes, processingRemux) {
+		copyCapabilities.ProcessingModes = append(copyCapabilities.ProcessingModes, processingRemux)
+	}
+	return !remuxSupported(inspection, copyCapabilities)
 }
 
 func remuxSupported(inspection MediaInspection, capabilities Capabilities) bool {
-	if !requestedProcessingMode(capabilities.ProcessingModes, processingRemux) {
-		return false
-	}
-	canHLS := supports(capabilities.StreamingProtocols, "hls")
-	canProgressiveMP4 := supports(capabilities.StreamingProtocols, "http") && supportsContainer(capabilities.Containers, "mp4")
-	if !canHLS && !canProgressiveMP4 {
+	if !requestedProcessingMode(capabilities.ProcessingModes, processingRemux) || !processingOutputSupported(capabilities) {
 		return false
 	}
 	video := primaryTrack(inspection.VideoTracks)
-	if video == nil || !mp4RemuxableVideo(video.Codec) ||
-		inspection.HDRFormat != "" && !supports(capabilities.HDRFormats, inspection.HDRFormat) {
+	if video == nil || !mp4RemuxableVideo(video.Codec) || !videoWithinClientLimits(video, inspection.HDRFormat, capabilities) {
 		return false
 	}
-	return len(inspection.AudioTracks) == 0 && mediaProfileSupported("mp4", video, nil, capabilities) ||
-		compatibleRemuxAudioTrack(*video, inspection.AudioTracks, capabilities) != nil
+	if len(inspection.AudioTracks) == 0 {
+		return mediaProfileSupported("mp4", video, nil, capabilities)
+	}
+	return compatibleRemuxAudioTrack(*video, inspection.AudioTracks, capabilities) != nil
+}
+
+func audioTranscodeSupported(inspection MediaInspection, capabilities Capabilities) bool {
+	if !requestedProcessingMode(capabilities.ProcessingModes, processingTranscodeAudio) || !processingOutputSupported(capabilities) {
+		return false
+	}
+	video := primaryTrack(inspection.VideoTracks)
+	if video == nil || !mp4RemuxableVideo(video.Codec) || !videoWithinClientLimits(video, inspection.HDRFormat, capabilities) {
+		return false
+	}
+	targetAudio := &MediaTrack{Codec: "aac", Channels: targetAudioChannels(capabilities)}
+	return mediaProfileSupported("mp4", video, targetAudio, capabilities)
+}
+
+func fullTranscodeSupported(capabilities Capabilities) bool {
+	if !requestedProcessingMode(capabilities.ProcessingModes, processingTranscode) || !processingOutputSupported(capabilities) {
+		return false
+	}
+	video := &MediaTrack{Codec: "h264"}
+	audio := &MediaTrack{Codec: "aac", Channels: targetAudioChannels(capabilities)}
+	return mediaProfileSupported("mp4", video, audio, capabilities)
+}
+
+func processingDecision(reason, videoAction, audioAction string, inspection MediaInspection, capabilities Capabilities, toneMap bool) *PlaybackDecision {
+	protocol, container := processingOutput()
+	target := &PlaybackDecisionTarget{Protocol: protocol, Container: container}
+	video := primaryTrack(inspection.VideoTracks)
+	audio := primaryTrack(inspection.AudioTracks)
+	if videoAction == "copy" && video != nil {
+		target.VideoCodec = normalizedCodec(video.Codec)
+		target.Height = video.Height
+		target.VideoBitrateKbps = video.BitrateKbps
+	} else {
+		target.VideoCodec = "h264"
+		if video != nil {
+			target.Height = video.Height
+		}
+		if capabilities.MaximumHeight > 0 && (target.Height == 0 || target.Height > capabilities.MaximumHeight) {
+			target.Height = capabilities.MaximumHeight
+		}
+		target.VideoBitrateKbps = transcodeVideoBitrateKbps(capabilities)
+	}
+	if audioAction == "copy" && audio != nil {
+		target.AudioCodec = normalizedCodec(audio.Codec)
+	} else if audio != nil {
+		target.AudioCodec = "aac"
+	}
+	return &PlaybackDecision{
+		Reason: reason, VideoAction: videoAction, AudioAction: audioAction,
+		SubtitleAction: "none", ToneMapping: toneMap, Source: decisionSource(inspection), Target: target,
+	}
+}
+func transcodeVideoBitrateKbps(capabilities Capabilities) int {
+	serverMaximum := capabilities.TranscodeVideoBitrateKbps
+	clientMaximum := capabilities.MaximumVideoBitrateKbps
+	if clientMaximum > 0 && (serverMaximum <= 0 || clientMaximum < serverMaximum) {
+		return clientMaximum
+	}
+	return serverMaximum
+}
+
+func processingOutputSupported(capabilities Capabilities) bool {
+	return supports(capabilities.StreamingProtocols, "hls")
+}
+
+func processingOutput() (string, string) {
+	return "hls", "hls"
+}
+
+func videoWithinClientLimits(video *MediaTrack, hdrFormat string, capabilities Capabilities) bool {
+	if video == nil || !supportsCodec(capabilities.VideoCodecs, video.Codec) {
+		return false
+	}
+	if capabilities.MaximumHeight > 0 && (video.Height <= 0 || video.Height > capabilities.MaximumHeight) {
+		return false
+	}
+	if capabilities.MaximumVideoBitrateKbps > 0 &&
+		(video.BitrateKbps <= 0 || video.BitrateKbps > capabilities.MaximumVideoBitrateKbps) {
+		return false
+	}
+	return clientSupportsHDR(hdrFormat, capabilities)
+}
+
+func clientSupportsHDR(format string, capabilities Capabilities) bool {
+	return format == "" || len(capabilities.HDRFormats) > 0 && supports(capabilities.HDRFormats, format)
+}
+
+func audioWithinClientLimits(audio *MediaTrack, capabilities Capabilities) bool {
+	if audio == nil {
+		return true
+	}
+	if !supportsCodec(capabilities.AudioCodecs, audio.Codec) {
+		return false
+	}
+	return capabilities.MaximumAudioChannels == 0 ||
+		audio.Channels > 0 && audio.Channels <= capabilities.MaximumAudioChannels
+}
+
+func targetAudioChannels(capabilities Capabilities) int {
+	if capabilities.MaximumAudioChannels > 0 && capabilities.MaximumAudioChannels < 2 {
+		return capabilities.MaximumAudioChannels
+	}
+	return 2
 }
 
 func requestedProcessingMode(values []string, mode string) bool {
@@ -218,17 +375,17 @@ func requestedProcessingMode(values []string, mode string) bool {
 
 func directMediaSupported(inspection MediaInspection, capabilities Capabilities) bool {
 	video := primaryTrack(inspection.VideoTracks)
-	if video == nil {
-		return false
-	}
-	audio := primaryTrack(inspection.AudioTracks)
-	return mediaProfileSupported("mp4", video, audio, capabilities) &&
-		(inspection.HDRFormat == "" || supports(capabilities.HDRFormats, inspection.HDRFormat))
+	return video != nil && mediaProfileSupported(inspection.Container, video, primaryTrack(inspection.AudioTracks), capabilities) &&
+		videoWithinClientLimits(video, inspection.HDRFormat, capabilities) && audioWithinClientLimits(primaryTrack(inspection.AudioTracks), capabilities)
 }
 
 func mediaProfileSupported(container string, video, audio *MediaTrack, capabilities Capabilities) bool {
+	container = strings.ToLower(strings.TrimSpace(container))
+	if container == "" {
+		return false
+	}
 	if len(capabilities.MediaProfiles) == 0 {
-		return (container == "" || supportsContainer(capabilities.Containers, container)) &&
+		return supportsContainer(capabilities.Containers, container) &&
 			video != nil && supportsCodec(capabilities.VideoCodecs, video.Codec) &&
 			(audio == nil || supportsCodec(capabilities.AudioCodecs, audio.Codec))
 	}
@@ -257,7 +414,8 @@ func mediaProfileContainerMatches(profile, candidate string) bool {
 
 func compatibleRemuxAudioTrack(video MediaTrack, tracks []MediaTrack, capabilities Capabilities) *MediaTrack {
 	for index := range tracks {
-		if mp4RemuxableAudio(tracks[index].Codec) && mediaProfileSupported("mp4", &video, &tracks[index], capabilities) {
+		if mp4RemuxableAudio(tracks[index].Codec) && audioWithinClientLimits(&tracks[index], capabilities) &&
+			mediaProfileSupported("mp4", &video, &tracks[index], capabilities) {
 			return &tracks[index]
 		}
 	}

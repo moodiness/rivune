@@ -263,7 +263,11 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		return nil, fmt.Errorf("initialize media processor: %w", err)
 	}
 	logger.Info("media processor initialized", "videoEncoder", mediaProcessor.VideoEncoder(), "hardwareToneMap", mediaProcessor.HardwareToneMap())
-	playbackService, err := playback.NewService(pool, addonService, mediaProcessor, playback.MediaOptions{TempDirectory: cfg.MediaTempDir, MaxStorageBytes: cfg.MediaStorageBytes})
+	playbackService, err := playback.NewService(pool, addonService, mediaProcessor, playback.MediaOptions{
+		TempDirectory:             cfg.MediaTempDir,
+		MaxStorageBytes:           cfg.MediaStorageBytes,
+		TranscodeVideoBitrateKbps: cfg.TranscodeMaxBitrateKbps,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize playback service: %w", err)
 	}

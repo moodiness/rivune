@@ -363,3 +363,121 @@ func TestMaintenanceMessageBoundAndAuthorization(t *testing.T) {
 		t.Fatalf("expected member update rejection, got %v", err)
 	}
 }
+
+func TestTranscodingPolicyDefaultsAndMatrix(t *testing.T) {
+	if TranscodingModeInherit != "inherit" || TranscodingModeEnabled != "enabled" || TranscodingModeDisabled != "disabled" {
+		t.Fatalf("unexpected transcoding mode wire values")
+	}
+
+	tests := []struct {
+		name            string
+		instanceAllowed bool
+		mode            TranscodingMode
+		wantAllowed     bool
+		wantSource      string
+	}{
+		{name: "allowed inherit", instanceAllowed: true, mode: TranscodingModeInherit, wantAllowed: true, wantSource: "instance"},
+		{name: "allowed enabled", instanceAllowed: true, mode: TranscodingModeEnabled, wantAllowed: true, wantSource: "instance"},
+		{name: "allowed disabled", instanceAllowed: true, mode: TranscodingModeDisabled, wantAllowed: false, wantSource: "profile"},
+		{name: "global veto inherit", instanceAllowed: false, mode: TranscodingModeInherit, wantAllowed: false, wantSource: "instance"},
+		{name: "global veto enabled", instanceAllowed: false, mode: TranscodingModeEnabled, wantAllowed: false, wantSource: "instance"},
+		{name: "global veto disabled", instanceAllowed: false, mode: TranscodingModeDisabled, wantAllowed: false, wantSource: "instance"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			instanceAllowed := test.instanceAllowed
+			mode := test.mode
+			effective := defaultEffective()
+			applyTranscodingPolicy(&effective, Values{AllowTranscoding: &instanceAllowed}, Values{Transcoding: &mode})
+			if effective.Values.AllowTranscoding != test.wantAllowed || effective.Values.Transcoding != test.mode {
+				t.Fatalf("effective policy = allow %t mode %q, want allow %t mode %q", effective.Values.AllowTranscoding, effective.Values.Transcoding, test.wantAllowed, test.mode)
+			}
+			if effective.Sources["allowTranscoding"] != test.wantSource || effective.Sources["transcoding"] != "profile" {
+				t.Fatalf("unexpected policy sources: %+v", effective.Sources)
+			}
+			if got := CanProfileTranscode(test.instanceAllowed, string(test.mode)); got != test.wantAllowed {
+				t.Fatalf("CanProfileTranscode(%t, %q) = %t, want %t", test.instanceAllowed, test.mode, got, test.wantAllowed)
+			}
+		})
+	}
+
+	effective := defaultEffective()
+	applyTranscodingPolicy(&effective, Values{}, Values{})
+	if !effective.Values.AllowTranscoding || effective.Values.Transcoding != TranscodingModeInherit ||
+		effective.Sources["allowTranscoding"] != "default" || effective.Sources["transcoding"] != "default" {
+		t.Fatalf("unexpected legacy/default policy: %+v", effective)
+	}
+	if CanProfileTranscode(true, "unexpected") {
+		t.Fatal("unknown profile mode must not authorize transcoding")
+	}
+}
+
+func TestTranscodingPatchScopeValidationAndNullInheritance(t *testing.T) {
+	enabled, disabled := true, false
+	inherit, profileEnabled, profileDisabled := "inherit", "enabled", "disabled"
+
+	for _, allowed := range []*bool{&enabled, &disabled, nil} {
+		if err := validateInstancePatch(Patch{AllowTranscoding: OptionalBool{Set: true, Value: allowed}}); err != nil {
+			t.Fatalf("valid instance allowTranscoding patch rejected: %v", err)
+		}
+	}
+	for _, mode := range []*string{&inherit, &profileEnabled, &profileDisabled, nil} {
+		if err := validateProfilePatch(Patch{Transcoding: OptionalString{Set: true, Value: mode}}); err != nil {
+			t.Fatalf("valid profile transcoding patch rejected: %v", err)
+		}
+	}
+
+	if err := validateInstancePatch(Patch{Transcoding: OptionalString{Set: true, Value: &profileEnabled}}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("instance accepted profile-only transcoding: %v", err)
+	}
+	if err := validateProfilePatch(Patch{AllowTranscoding: OptionalBool{Set: true, Value: &enabled}}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("profile accepted instance-only allowTranscoding: %v", err)
+	}
+	invalid := "force"
+	if err := validateProfilePatch(Patch{Transcoding: OptionalString{Set: true, Value: &invalid}}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("profile accepted invalid transcoding mode: %v", err)
+	}
+
+	mode := TranscodingModeDisabled
+	values := Values{AllowTranscoding: &disabled, Transcoding: &mode}
+	values = applyPatch(values, Patch{
+		AllowTranscoding: OptionalBool{Set: true, Value: nil},
+		Transcoding:      OptionalString{Set: true, Value: nil},
+	})
+	if values.AllowTranscoding != nil || values.Transcoding != nil {
+		t.Fatalf("null patches did not restore inheritance/defaults: %+v", values)
+	}
+}
+
+func TestTranscodingSettingsJSONPersistence(t *testing.T) {
+	allowed := false
+	mode := TranscodingModeEnabled
+	encoded, err := json.Marshal(Values{AllowTranscoding: &allowed, Transcoding: &mode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `{"allowTranscoding":false,"transcoding":"enabled"}` {
+		t.Fatalf("unexpected persisted transcoding JSON: %s", encoded)
+	}
+
+	var decoded Values
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.AllowTranscoding == nil || *decoded.AllowTranscoding || decoded.Transcoding == nil || *decoded.Transcoding != TranscodingModeEnabled {
+		t.Fatalf("transcoding JSON did not round trip: %+v", decoded)
+	}
+	if defaultEffective().SchemaVersion != 1 {
+		t.Fatalf("transcoding settings must not change schemaVersion")
+	}
+}
+
+func TestInstanceTranscodingUpdateKeepsAdminPermission(t *testing.T) {
+	allowed := true
+	_, err := NewService(nil).UpdateInstance(context.Background(), auth.Principal{Role: "member"}, Patch{
+		AllowTranscoding: OptionalBool{Set: true, Value: &allowed},
+	})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("member instance transcoding update error = %v, want forbidden", err)
+	}
+}

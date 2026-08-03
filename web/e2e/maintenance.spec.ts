@@ -98,6 +98,56 @@ test("interface language inherits server defaults and supports profile RTL overr
   await expect(page.locator("html")).toHaveAttribute("lang", "fr");
 });
 
+test("server transcoding disable confirms active sessions and the global veto wins over profile policy", async ({ page, rivune }) => {
+  const activity = {
+    summary: { activeSessions: 2, activeJobs: 1, processingSlots: 1, processingLimit: 3, storageBytes: 0, storageLimitBytes: 1_073_741_824 },
+    diagnostics: { videoEncoder: "h264", hardwareToneMap: false },
+    sessions: [
+      { id: "transcoded", title: "Converted feature", mediaType: "movie", mode: "transcode_audio", username: "fixture-owner", profileId: "alice", profile: "Alice", device: "Web", platform: "Browser", processing: true, positionSeconds: 60, durationSeconds: 600, createdAt: "2026-07-31T12:00:00Z", lastSeenAt: "2026-07-31T12:00:00Z", expiresAt: "2026-07-31T13:00:00Z" },
+      { id: "direct", title: "Direct feature", mediaType: "movie", mode: "direct", username: "fixture-owner", profileId: "alice", profile: "Alice", device: "TV", platform: "Browser", processing: false, positionSeconds: 30, durationSeconds: 600, createdAt: "2026-07-31T12:00:00Z", lastSeenAt: "2026-07-31T12:00:00Z", expiresAt: "2026-07-31T13:00:00Z" },
+    ],
+    jobs: [],
+  };
+  await page.route("**/api/v1/playback/activity", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify(activity) }));
+  await page.goto("/#admin");
+  await page.getByRole("button", { name: /Settings/ }).click();
+  const scope = page.locator(".settings-profile-picker select");
+  const inheritedPolicy = page.locator(".setting-control--transcoding select");
+  await expect(inheritedPolicy).toHaveValue("inherit");
+  await expect(page.getByText("Transcoding is available as a last resort for this profile.")).toBeVisible();
+  await scope.selectOption("server");
+
+  const allowTranscoding = page.getByRole("checkbox", { name: /Allow transcoding/ });
+  await expect(allowTranscoding).toBeChecked();
+  await allowTranscoding.uncheck();
+  const savePreferences = page.getByRole("button", { name: "Save preferences" });
+  await savePreferences.click();
+
+  const confirm = page.getByRole("dialog");
+  await expect(confirm.getByRole("heading", { name: "Disable server transcoding?" })).toBeVisible();
+  await expect(confirm.getByText("1 transcoded session is active. It will continue, but no new transcoding will start.")).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/settings", "PATCH").length).toBe(0);
+  await page.keyboard.press("Escape");
+  await expect(confirm).toHaveCount(0);
+
+  await savePreferences.click();
+  await page.getByRole("button", { name: "Disable transcoding" }).click();
+  const serverRequest = await rivune.waitForRequest("/api/v1/settings", "PATCH");
+  expect(serverRequest.body).toMatchObject({ allowTranscoding: false });
+  await expect(page.getByText("1 transcoded session is still active. Stop it from Playback activity if needed.")).toBeVisible();
+  expect(rivune.requests.filter((request) => request.method === "DELETE" && request.pathname.startsWith("/api/v1/playback/sessions/"))).toHaveLength(0);
+
+  await scope.selectOption("alice");
+  const profilePolicy = page.locator(".setting-control--transcoding select");
+  await expect(profilePolicy).toHaveValue("inherit");
+  await expect(profilePolicy.locator("option")).toHaveText(["Inherit server setting", "Enabled", "Disabled"]);
+  await profilePolicy.selectOption("enabled");
+  await expect(page.getByText("The server setting takes priority, so this profile cannot enable transcoding.")).toBeVisible();
+  await page.getByRole("button", { name: "Save preferences" }).click();
+  const profileRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
+  expect(profileRequest.body).toMatchObject({ transcoding: "enabled" });
+});
+
 test("the selected interface language localizes Home copy", async ({ page, rivune }) => {
   await page.goto("/#admin");
   await page.getByRole("button", { name: /Settings/ }).click();

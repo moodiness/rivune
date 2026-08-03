@@ -11,6 +11,9 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -57,7 +60,10 @@ private data class PlaybackSourcesRequest(
 )
 
 @Serializable
-private data class PlaybackPrepareRequest(val sourceRef: String)
+private data class PlaybackPrepareRequest(
+    val sourceRef: String,
+    val startSeconds: Int? = null,
+)
 
 @Serializable
 private data class PlaybackResolveRequest(
@@ -65,6 +71,7 @@ private data class PlaybackResolveRequest(
     val titleId: String? = null,
     val preferredAudioTrack: Int? = null,
     val preferredSubtitleId: String? = null,
+    val startSeconds: Int? = null,
 )
 
 class RivuneApiClient(
@@ -145,6 +152,33 @@ class RivuneApiClient(
 
     suspend fun clearProfileSelection() = requestUnit("profiles/selection", "DELETE", authenticated = true)
 
+    suspend fun instanceSettings(): SettingsLayer = request("settings", authenticated = true)
+
+    suspend fun updateInstanceSettings(allowTranscoding: Boolean?): SettingsLayer = request(
+        path = "settings",
+        method = "PATCH",
+        body = buildJsonObject {
+            if (allowTranscoding == null) put("allowTranscoding", JsonNull) else put("allowTranscoding", allowTranscoding)
+        }.toString(),
+        authenticated = true,
+    )
+
+    suspend fun profileSettings(id: UUID): SettingsLayer = request("profiles/$id/settings", authenticated = true)
+
+    suspend fun updateProfileSettings(id: UUID, transcoding: String?): SettingsLayer = request(
+        path = "profiles/$id/settings",
+        method = "PATCH",
+        body = buildJsonObject {
+            if (transcoding == null) put("transcoding", JsonNull) else put("transcoding", transcoding)
+        }.toString(),
+        authenticated = true,
+    )
+
+    suspend fun effectiveProfileSettings(id: UUID): EffectiveSettings = request(
+        "profiles/$id/settings/effective",
+        authenticated = true,
+    )
+
     suspend fun movie(id: UUID, language: String? = null): Movie = request(
         path = "metadata/titles/$id",
         query = mapOf("language" to language),
@@ -180,10 +214,10 @@ class RivuneApiClient(
         authenticated = true,
     )
 
-    suspend fun preparePlayback(sourceRef: String): PlaybackPreparation = request(
+    suspend fun preparePlayback(sourceRef: String, startSeconds: Int? = null): PlaybackPreparation = request(
         path = "playback/prepare",
         method = "POST",
-        body = json.encodeToString(PlaybackPrepareRequest(sourceRef)),
+        body = json.encodeToString(PlaybackPrepareRequest(sourceRef, startSeconds)),
         authenticated = true,
     )
 
@@ -192,14 +226,17 @@ class RivuneApiClient(
         titleId: String? = null,
         preferredAudioTrack: Int? = null,
         preferredSubtitleId: String? = null,
+        startSeconds: Int? = null,
     ): PlaybackSession = request(
         path = "playback/resolve",
         method = "POST",
-        body = json.encodeToString(PlaybackResolveRequest(sourceRef, titleId, preferredAudioTrack, preferredSubtitleId)),
+        body = json.encodeToString(PlaybackResolveRequest(sourceRef, titleId, preferredAudioTrack, preferredSubtitleId, startSeconds)),
         authenticated = true,
     )
 
     suspend fun stopPlayback(sessionId: UUID) = requestUnit("playback/sessions/$sessionId", "DELETE", authenticated = true)
+
+    suspend fun playbackActivity(): PlaybackActivity = request("playback/activity", authenticated = true)
 
     private suspend inline fun <reified Response> request(
         path: String,

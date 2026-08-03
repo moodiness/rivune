@@ -28,6 +28,45 @@ func TestRewriteLocalPlaylistRewritesInitAndSegments(t *testing.T) {
 	}
 }
 
+func TestHLSPlaylistEncodedSecondsSumsValidDurations(t *testing.T) {
+	directory := t.TempDir()
+	playlist := "#EXTM3U\n#EXTINF:4.25,First\nsegment-000000.m4s\n#EXTINF:5.75,\nsegment-000001.m4s\n"
+	if err := os.WriteFile(filepath.Join(directory, "index.m3u8"), []byte(playlist), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	seconds, ok := hlsPlaylistEncodedSeconds(directory)
+	if !ok || seconds != 10 {
+		t.Fatalf("encoded duration = %v, %t, want 10, true", seconds, ok)
+	}
+}
+
+func TestHLSPlaylistEncodedSecondsIgnoresMalformedAndNonFiniteDurations(t *testing.T) {
+	directory := t.TempDir()
+	playlist := "#EXTM3U\n#EXTINF:invalid,\n#EXTINF:NaN,\n#EXTINF:+Inf,\n#EXTINF:-4,\n#EXTINF:0,\n#EXTINF:9\n#EXTINF:2.5,\nsegment-000000.m4s\n"
+	if err := os.WriteFile(filepath.Join(directory, "index.m3u8"), []byte(playlist), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	seconds, ok := hlsPlaylistEncodedSeconds(directory)
+	if !ok || seconds != 2.5 {
+		t.Fatalf("encoded duration = %v, %t, want 2.5, true", seconds, ok)
+	}
+}
+
+func TestHLSPlaylistEncodedSecondsToleratesMissingAndPartialPlaylists(t *testing.T) {
+	directory := t.TempDir()
+	if seconds, ok := hlsPlaylistEncodedSeconds(directory); ok || seconds != 0 {
+		t.Fatalf("missing playlist duration = %v, %t, want 0, false", seconds, ok)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "index.m3u8"), []byte("#EXTM3U\n#EXTINF:"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if seconds, ok := hlsPlaylistEncodedSeconds(directory); !ok || seconds != 0 {
+		t.Fatalf("partial playlist duration = %v, %t, want 0, true", seconds, ok)
+	}
+}
+
 type blockingHLSProcessor struct {
 	ready   chan struct{}
 	stopped chan struct{}
@@ -58,8 +97,40 @@ func (*blockingHLSProcessor) Probe(context.Context, storedAsset) (MediaInspectio
 	return MediaInspection{}, nil
 }
 
-func (*blockingHLSProcessor) Process(context.Context, storedAsset, io.Writer) error {
+type failingHLSProcessor struct {
+	err error
+}
+
+func (processor *failingHLSProcessor) ProcessHLS(context.Context, storedAsset, string) error {
+	return processor.err
+}
+
+func (*failingHLSProcessor) ConvertSubtitle(context.Context, storedAsset, io.Writer) error {
 	return nil
+}
+
+func (*failingHLSProcessor) Probe(context.Context, storedAsset) (MediaInspection, error) {
+	return MediaInspection{}, nil
+}
+
+func TestStartSessionHLSWaitsForInitialPlaylistFailure(t *testing.T) {
+	processErr := errors.New("processing slot unavailable")
+	processor := &failingHLSProcessor{err: processErr}
+	service := &Service{
+		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1024 * 1024, IdleTTL: time.Minute},
+		hlsJobs:      make(map[string]*hlsJob),
+		processor:    processor,
+	}
+	asset := storedAsset{ID: "stream-1", Kind: processingTranscode, URL: "https://media.example/movie.mkv"}
+	source := Source{ID: asset.ID, Compatible: true, Protocol: "hls", Mode: processingTranscode}
+
+	err := service.startSessionHLS(context.Background(), "", "session-1", []Source{source}, []storedAsset{asset})
+	if !errors.Is(err, processErr) {
+		t.Fatalf("start session error = %v, want %v", err, processErr)
+	}
+	if len(service.hlsJobs) != 0 {
+		t.Fatalf("failed session retained HLS jobs: %+v", service.hlsJobs)
+	}
 }
 
 func TestHLSJobServesBeforeCompletionAndStopsWithSession(t *testing.T) {
@@ -68,11 +139,20 @@ func TestHLSJobServesBeforeCompletionAndStopsWithSession(t *testing.T) {
 		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1024 * 1024, IdleTTL: time.Minute},
 		hlsJobs:      make(map[string]*hlsJob),
 	}
-	asset := storedAsset{ID: "stream-1", Kind: processingTranscode, URL: "https://media.example/movie.mkv"}
+	asset := storedAsset{
+		ID: "stream-1", Kind: processingTranscode, URL: "https://media.example/movie.mkv",
+		DurationSeconds: 3600, StartSeconds: 120,
+	}
 
 	job, err := service.hlsJob("session-1", asset, processor, true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if job.sourceDurationSeconds != asset.DurationSeconds || job.startOffsetSeconds != asset.StartSeconds {
+		t.Fatalf(
+			"job duration/start = %v/%v, want %v/%v",
+			job.sourceDurationSeconds, job.startOffsetSeconds, asset.DurationSeconds, asset.StartSeconds,
+		)
 	}
 	select {
 	case <-processor.ready:

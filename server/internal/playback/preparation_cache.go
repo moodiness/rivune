@@ -2,6 +2,7 @@ package playback
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"time"
 
@@ -17,6 +18,11 @@ type preparedPlayback struct {
 	subtitles      []Subtitle
 	subtitleAssets []storedAsset
 	providerErrors []ProviderFailure
+}
+
+type playbackPolicy struct {
+	allowTranscoding bool
+	maximumHeight    int
 }
 
 type playbackPreparationEntry struct {
@@ -51,16 +57,25 @@ func (cache *playbackPreparationCache) clear() {
 	cache.mu.Unlock()
 }
 
-func (service *Service) preparedPlayback(ctx context.Context, principal auth.Principal, reference sourceReference) (preparedPlayback, error) {
+func playbackPreparationCacheKey(referenceID string, policy playbackPolicy) string {
+	return referenceID + "|" + strconv.FormatBool(policy.allowTranscoding) + "|" + strconv.Itoa(policy.maximumHeight)
+}
+
+func (service *Service) preparedPlayback(ctx context.Context, principal auth.Principal, reference sourceReference, policies ...playbackPolicy) (preparedPlayback, error) {
+	policy := playbackPolicy{allowTranscoding: true, maximumHeight: reference.Capabilities.MaximumHeight}
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+	cacheKey := playbackPreparationCacheKey(reference.ID, policy)
 	cache := service.preparations
 	cache.mu.Lock()
 	cache.removeExpiredLocked()
-	if entry, exists := cache.entries[reference.ID]; exists {
+	if entry, exists := cache.entries[cacheKey]; exists {
 		playback := clonePreparedPlayback(entry.playback)
 		cache.mu.Unlock()
 		return playback, nil
 	}
-	if call, exists := cache.inFlight[reference.ID]; exists {
+	if call, exists := cache.inFlight[cacheKey]; exists {
 		cache.mu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -71,20 +86,20 @@ func (service *Service) preparedPlayback(ctx context.Context, principal auth.Pri
 	}
 	call := &playbackPreparationCall{done: make(chan struct{})}
 	generation := cache.generation
-	cache.inFlight[reference.ID] = call
+	cache.inFlight[cacheKey] = call
 	cache.mu.Unlock()
 
 	go func() {
 		preparationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), playbackPreparationTimeout)
 		defer cancel()
-		playback, err := service.buildPreparedPlayback(preparationContext, principal, reference)
+		playback, err := service.buildPreparedPlayback(preparationContext, principal, reference, policy)
 		cache.mu.Lock()
 		call.playback = clonePreparedPlayback(playback)
 		call.err = err
 		if err == nil && cache.generation == generation {
-			cache.entries[reference.ID] = playbackPreparationEntry{playback: clonePreparedPlayback(playback), expiresAt: reference.ExpiresAt}
+			cache.entries[cacheKey] = playbackPreparationEntry{playback: clonePreparedPlayback(playback), expiresAt: reference.ExpiresAt}
 		}
-		delete(cache.inFlight, reference.ID)
+		delete(cache.inFlight, cacheKey)
 		close(call.done)
 		cache.mu.Unlock()
 	}()
@@ -97,7 +112,7 @@ func (service *Service) preparedPlayback(ctx context.Context, principal auth.Pri
 	}
 }
 
-func (service *Service) buildPreparedPlayback(ctx context.Context, principal auth.Principal, reference sourceReference) (preparedPlayback, error) {
+func (service *Service) buildPreparedPlayback(ctx context.Context, principal auth.Principal, reference sourceReference, policies ...playbackPolicy) (preparedPlayback, error) {
 	type subtitleResult struct {
 		batch addon.ResourceBatch
 		err   error
@@ -108,12 +123,19 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 		subtitlesChannel <- subtitleResult{batch: batch, err: err}
 	}()
 
+	policy := playbackPolicy{allowTranscoding: true, maximumHeight: reference.Capabilities.MaximumHeight}
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+	capabilities := service.playbackCapabilities(reference.Capabilities, policy.maximumHeight)
 	sources := []Source{cloneSource(reference.Source)}
 	assets := make([]storedAsset, 0, 1)
 	if reference.Asset != nil {
 		assets = append(assets, cloneStoredAsset(*reference.Asset))
 	}
-	service.decidePlaybackSource(ctx, sources, assets, reference.Capabilities)
+	if err := service.decidePlaybackSource(ctx, sources, assets, capabilities, policy.allowTranscoding); err != nil {
+		return preparedPlayback{}, err
+	}
 	if sources[0].Media != nil {
 		if assetIndex := storedAssetIndex(assets, sources[0].ID); assetIndex >= 0 {
 			assets[assetIndex].DurationSeconds = sources[0].Media.DurationSeconds
@@ -130,11 +152,12 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 	subtitles := make([]Subtitle, 0)
 	subtitleAssets := make([]storedAsset, 0)
 	providerErrors := append([]ProviderFailure(nil), reference.ProviderErrors...)
-	if subtitleResources.err == nil {
+	if subtitleResources.err == nil &&
+		(len(capabilities.SubtitleModes) == 0 || requestedProcessingMode(capabilities.SubtitleModes, "external")) {
 		subtitles, subtitleAssets = normalizeSubtitles(subtitleResources.batch)
 		providerErrors = append(providerErrors, providerFailures(subtitleResources.batch.Errors)...)
 	}
-	embedded, embeddedAssets := embeddedSubtitles(sources, assets)
+	embedded, embeddedAssets := embeddedSubtitles(sources, assets, capabilities)
 	subtitles = append(subtitles, embedded...)
 	subtitleAssets = append(subtitleAssets, embeddedAssets...)
 

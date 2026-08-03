@@ -209,9 +209,13 @@ export class RivuneHarness {
   private demoAvailable = false;
   private demoSessionActive = false;
   private maintenance: { enabled: boolean; message: string | null } = { enabled: false, message: null };
-  private instanceSettings: Record<string, unknown> = {};
-  private readonly profileSettings = new Map<string, Record<string, unknown>>();
+  private instanceSettings: Record<string, unknown> = { allowTranscoding: true };
+  private readonly profileSettings = new Map<string, Record<string, unknown>>([
+    ["alice", { transcoding: "inherit" }],
+    ["bob", { transcoding: "inherit" }],
+  ]);
   private readonly effectiveSettingsDelays: number[] = [];
+  private readonly playbackStopDelays: number[] = [];
   private readonly collectionDelays = new Map<string, number>();
   private readonly collectionFolders = new Map<string, Array<{ id: string; title: string }>>();
   private readonly folderDelays = new Map<string, number>();
@@ -312,6 +316,10 @@ export class RivuneHarness {
   delayNextEffectiveSettings(milliseconds: number) {
     this.effectiveSettingsDelays.push(milliseconds);
   }
+  delayNextPlaybackStop(milliseconds: number) {
+    this.playbackStopDelays.push(milliseconds);
+  }
+
 
   setSeason(id: string, season: unknown) {
     this.seasonOverrides.set(id, season);
@@ -566,12 +574,15 @@ export class RivuneHarness {
       const profileValues = this.profileSettings.get(effectiveSettings[1]) ?? {};
       const profileLanguage = profileValues.interfaceLanguage;
       const instanceLanguage = this.instanceSettings.interfaceLanguage;
+      const instanceAllowsTranscoding = this.instanceSettings.allowTranscoding !== false;
+      const transcoding = profileValues.transcoding === "enabled" || profileValues.transcoding === "disabled" ? profileValues.transcoding : "inherit";
+      const allowTranscoding = instanceAllowsTranscoding && transcoding !== "disabled";
       const interfaceLanguage = typeof profileLanguage === "string"
         ? profileLanguage
         : typeof instanceLanguage === "string" ? instanceLanguage : "en";
       const responseDelay = this.effectiveSettingsDelays.shift() ?? 0;
       if (responseDelay > 0) await wait(responseDelay);
-      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled: false, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default" } });
+      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, allowTranscoding, transcoding, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled: false, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default", allowTranscoding: instanceAllowsTranscoding ? transcoding === "disabled" ? "profile" : "instance" : "instance", transcoding: "profile" } });
       return;
     }
     if (path === "/auth/notifications") { await json(route, { notifications: [] }); return; }
@@ -698,11 +709,52 @@ export class RivuneHarness {
       return;
     }
     if (path === "/playback/resolve" && request.method() === "POST") {
-      const input = body as { sourceRef: string; titleId?: string; preferredAudioTrack?: number };
-      await json(route, { id: `session-${this.matching("/api/v1/playback/resolve", "POST").length}`, selectedSourceId: "resolved-source", selectedAudioTrack: input.preferredAudioTrack ?? 0, sources: [{ id: "resolved-source", addonId: "fixture-addon", manifestId: "fixture-manifest", name: "Fixture 1080p", mode: "direct", url: "https://fixtures.rivune.test/video.mp4", protocol: "http", container: "mp4", compatible: true, media: { container: "mp4", durationSeconds: 1800, hdrFormat: "sdr", videoTracks: [{ index: 0, type: "video", codec: "h264", width: 1920, height: 1080 }], audioTracks: [{ index: 0, type: "audio", codec: "aac", language: "en", title: "English", channels: 2 }, { index: 2, type: "audio", codec: "aac", language: "fr", title: "French", channels: 2 }], subtitleTracks: [] } }], subtitles: [{ id: "sub-en", addonId: "fixture-addon", manifestId: "fixture-manifest", language: "en", url: "https://fixtures.rivune.test/subtitles-en.vtt", default: false }, { id: "sub-fr", addonId: "fixture-addon", manifestId: "fixture-manifest", language: "fr", url: "https://fixtures.rivune.test/subtitles-fr.vtt", default: false }], providerErrors: [], expiresAt });
+      const input = body as { sourceRef: string; titleId?: string; preferredAudioTrack?: number; preferredSubtitleId?: string };
+      const sessionID = `session-${this.matching("/api/v1/playback/resolve", "POST").length}`;
+      const selectedSubtitleID = input.preferredSubtitleId ?? "none";
+      const burnsSubtitles = selectedSubtitleID === "sub-burn";
+      const source = {
+        id: "resolved-source",
+        addonId: "fixture-addon",
+        manifestId: "fixture-manifest",
+        name: burnsSubtitles ? "Fixture 1080p with burned subtitles" : "Fixture 1080p",
+        mode: burnsSubtitles ? "transcode" : "direct",
+        url: burnsSubtitles ? `/api/v1/playback/sessions/${sessionID}/assets/master.m3u8?file=master.m3u8` : "https://fixtures.rivune.test/video.mp4",
+        protocol: burnsSubtitles ? "hls" : "http",
+        container: "mp4",
+        compatible: true,
+        media: { container: "mp4", durationSeconds: 1800, hdrFormat: "sdr", videoTracks: [{ index: 0, type: "video", codec: "h264", width: 1920, height: 1080 }], audioTracks: [{ index: 0, type: "audio", codec: "aac", language: "en", title: "English", channels: 2 }, { index: 2, type: "audio", codec: "aac", language: "fr", title: "French", channels: 2 }], subtitleTracks: [] },
+      };
+      await json(route, {
+        id: sessionID,
+        selectedSourceId: source.id,
+        selectedAudioTrack: input.preferredAudioTrack ?? 0,
+        selectedSubtitleId: selectedSubtitleID,
+        sources: [source],
+        subtitles: [
+          { id: "sub-en", addonId: "fixture-addon", manifestId: "fixture-manifest", language: "en", delivery: "external", url: "https://fixtures.rivune.test/subtitles-en.vtt", default: false },
+          { id: "sub-fr", addonId: "fixture-addon", manifestId: "fixture-manifest", language: "fr", delivery: "external", url: "https://fixtures.rivune.test/subtitles-fr.vtt", default: false },
+          { id: "sub-es-empty", addonId: "fixture-addon", manifestId: "fixture-manifest", language: "es", delivery: "external", url: "", default: false },
+          { id: "sub-burn", addonId: "fixture-addon", manifestId: "fixture-manifest", language: "ja", delivery: "burn", default: false },
+        ],
+        providerErrors: [],
+        expiresAt,
+      });
       return;
     }
-    if (/^\/playback\/sessions\//.test(path) && request.method() === "DELETE") { await route.fulfill({ status: 204 }); return; }
+    if (/^\/playback\/sessions\/[^/]+\/assets\/master\.m3u8$/.test(path) && request.method() === "GET") {
+      await route.fulfill({
+        contentType: "application/vnd.apple.mpegurl",
+        body: "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-ENDLIST\n",
+      });
+      return;
+    }
+    if (/^\/playback\/sessions\//.test(path) && request.method() === "DELETE") {
+      const responseDelay = this.playbackStopDelays.shift() ?? 0;
+      if (responseDelay > 0) await wait(responseDelay);
+      await route.fulfill({ status: 204 });
+      return;
+    }
     const trailers = path.match(/^\/metadata\/titles\/([^/]+)\/trailers$/);
     if (trailers) {
       const titleID = decodeURIComponent(trailers[1]);

@@ -19,6 +19,8 @@ func TestApplyPlaybackPreferencesRemuxesSupportedAlternateAudioWithoutEncoding(t
 		PreferredAudioLanguage: "fr-FR",
 		Capabilities: Capabilities{
 			StreamingProtocols: []string{"hls"},
+			Containers:         []string{"mp4"},
+			VideoCodecs:        []string{"h264"},
 			AudioCodecs:        []string{"aac"},
 			ProcessingModes:    []string{processingRemux},
 		},
@@ -32,7 +34,32 @@ func TestApplyPlaybackPreferencesRemuxesSupportedAlternateAudioWithoutEncoding(t
 	}
 }
 
-func TestApplyPlaybackPreferencesRejectsAudioThatWouldRequireEncoding(t *testing.T) {
+func TestApplyPlaybackPreferencesRejectsHTTPOnlyAlternateAudioRemux(t *testing.T) {
+	sources := []Source{{
+		ID: "stream-1", Mode: "direct", Protocol: "http", Container: "mp4", Compatible: true,
+		Media: &MediaInspection{VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264"}}, AudioTracks: []MediaTrack{
+			{Index: 1, Type: "audio", Codec: "aac", Language: "en"},
+			{Index: 2, Type: "audio", Codec: "aac", Language: "fr"},
+		}},
+	}}
+	assets := []storedAsset{{ID: "stream-1", Kind: "stream", URL: "https://media.example/movie.mp4"}}
+
+	err := applyPlaybackPreferences(sources, assets, ResolveInput{
+		PreferredAudioLanguage: "fr-FR",
+		Capabilities: Capabilities{
+			StreamingProtocols: []string{"http"},
+			Containers:         []string{"mp4"},
+			VideoCodecs:        []string{"h264"},
+			AudioCodecs:        []string{"aac"},
+			ProcessingModes:    []string{processingRemux},
+		},
+	})
+	if !errors.Is(err, ErrClientCapabilityMissing) || sources[0].Mode != "direct" || assets[0].Kind != "stream" {
+		t.Fatalf("HTTP-only alternate audio remux was not rejected: err=%v source=%+v asset=%+v", err, sources[0], assets[0])
+	}
+}
+
+func TestApplyPlaybackPreferencesReportsMissingAudioConversionMode(t *testing.T) {
 	sources := []Source{{
 		ID: "stream-1", Mode: "direct", Protocol: "http", Container: "mp4", Compatible: true,
 		Media: &MediaInspection{VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264"}}, AudioTracks: []MediaTrack{
@@ -45,14 +72,17 @@ func TestApplyPlaybackPreferencesRejectsAudioThatWouldRequireEncoding(t *testing
 
 	err := applyPlaybackPreferences(sources, assets, ResolveInput{
 		PreferredAudioTrack: &unsupportedTrack,
+		AllowTranscoding:    true,
 		Capabilities: Capabilities{
 			StreamingProtocols: []string{"hls"},
+			Containers:         []string{"mp4"},
+			VideoCodecs:        []string{"h264"},
 			AudioCodecs:        []string{"aac"},
 			ProcessingModes:    []string{processingRemux},
 		},
 	})
-	if !errors.Is(err, ErrUnsupportedSource) || assets[0].Kind != "stream" {
-		t.Fatalf("audio encoding was not rejected: err=%v source=%+v asset=%+v", err, sources[0], assets[0])
+	if !errors.Is(err, ErrClientCapabilityMissing) || assets[0].Kind != "stream" {
+		t.Fatalf("missing audio conversion mode was not reported: err=%v source=%+v asset=%+v", err, sources[0], assets[0])
 	}
 }
 
@@ -69,6 +99,8 @@ func TestApplyPlaybackPreferencesFallsBackToPlayableAudioForAutomaticLanguage(t 
 		PreferredAudioLanguage: "fr-FR",
 		Capabilities: Capabilities{
 			StreamingProtocols: []string{"hls"},
+			Containers:         []string{"mp4"},
+			VideoCodecs:        []string{"h264"},
 			AudioCodecs:        []string{"aac"},
 			ProcessingModes:    []string{processingRemux},
 		},
@@ -163,4 +195,52 @@ func TestEmbeddedAndTextSubtitlesBecomePlayableAssets(t *testing.T) {
 	if subtitleAssets[0].Kind != assetKindEmbeddedSubtitle || subtitleAssets[0].Headers["Authorization"] != "secret" {
 		t.Fatalf("embedded subtitle source was not preserved: %+v", subtitleAssets[0])
 	}
+}
+
+func TestBitmapSubtitleBurnRequiresAnnouncementAndPolicy(t *testing.T) {
+	inspection := &MediaInspection{
+		Container:      "mkv",
+		VideoTracks:    []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Height: 1080}},
+		AudioTracks:    []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
+		SubtitleTracks: []MediaTrack{{Index: 5, Type: "subtitle", Codec: "hdmv_pgs_subtitle", Language: "en"}},
+	}
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingTranscode}, SubtitleModes: []string{"burn"},
+	}
+	newState := func() ([]Source, []storedAsset, []Subtitle, []storedAsset) {
+		sources := []Source{{
+			ID: "stream-1", Mode: "direct", Protocol: "http", Container: "mkv", Compatible: true,
+			Media: cloneMediaInspectionPointer(inspection), Decision: directDecision(*inspection),
+		}}
+		assets := []storedAsset{{ID: "stream-1", Kind: "stream", URL: "https://media.example/movie.mkv"}}
+		subtitles, subtitleAssets := embeddedSubtitles(sources, assets, capabilities)
+		if len(subtitles) != 1 || subtitles[0].Delivery != "burn" {
+			t.Fatalf("burn-only client received non-burn subtitles: %+v", subtitles)
+		}
+		subtitles[0].Default = true
+		return sources, assets, subtitles, subtitleAssets
+	}
+	sources, assets, subtitles, subtitleAssets := newState()
+	if err := applySubtitleDecision(sources, assets, subtitles, subtitleAssets, capabilities, false); !errors.Is(err, ErrTranscodingDisabled) {
+		t.Fatalf("disabled burn error=%v", err)
+	}
+	if assets[0].Kind != "stream" || assets[0].SubtitleTrackIndex != nil {
+		t.Fatalf("disabled burn mutated stream asset: %+v", assets[0])
+	}
+	sources, assets, subtitles, subtitleAssets = newState()
+	if err := applySubtitleDecision(sources, assets, subtitles, subtitleAssets, capabilities, true); err != nil {
+		t.Fatalf("allowed burn failed: %v", err)
+	}
+	if sources[0].Mode != processingTranscode || assets[0].Kind != processingTranscode ||
+		assets[0].SubtitleTrackIndex == nil || *assets[0].SubtitleTrackIndex != 5 ||
+		sources[0].Decision == nil || sources[0].Decision.Reason != decisionSubtitleBurnRequired {
+		t.Fatalf("burn decision was not persisted: source=%+v asset=%+v", sources[0], assets[0])
+	}
+}
+
+func cloneMediaInspectionPointer(value *MediaInspection) *MediaInspection {
+	cloned := cloneMediaInspection(*value)
+	return &cloned
 }

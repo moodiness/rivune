@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="Rivune.Windows/Rivune.Windows.csproj" />
+  <Project Path="Rivune.Windows.Tests/Rivune.Windows.Tests.csproj" />
 </Solution>

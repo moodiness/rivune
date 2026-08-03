@@ -48,13 +48,13 @@ func TestTranscodeArgumentsMatchSelectedEncoder(t *testing.T) {
 			name:     "AMD VAAPI",
 			encoder:  videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"},
 			expected: []string{"-init_hw_device vaapi=hw:/dev/dri/renderD128", "-vf format=nv12,hwupload", "-c:v h264_vaapi"},
-			excluded: []string{"libx264"},
+			excluded: []string{"libx264", "-rc_mode", "-qp"},
 		},
 		{
 			name:     "Intel Quick Sync",
 			encoder:  videoEncoder{kind: videoEncoderQSV, device: "/dev/dri/renderD128"},
 			expected: []string{"-init_hw_device qsv=hw@va", "hwupload=extra_hw_frames=64", "-c:v h264_qsv"},
-			excluded: []string{"libx264"},
+			excluded: []string{"libx264", "-global_quality"},
 		},
 		{
 			name:     "NVIDIA NVENC",
@@ -67,7 +67,9 @@ func TestTranscodeArgumentsMatchSelectedEncoder(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			processor := &FFmpegProcessor{threads: 6, encoder: test.encoder}
-			arguments, err := processor.processingArguments(storedAsset{Kind: processingTranscode, URL: "https://media.example/movie.mkv"})
+			arguments, err := processor.processingArguments(storedAsset{
+				Kind: processingTranscode, URL: "https://media.example/movie.mkv", VideoBitrateKbps: 4500,
+			})
 			if err != nil {
 				t.Fatalf("build processing arguments: %v", err)
 			}
@@ -76,6 +78,9 @@ func TestTranscodeArgumentsMatchSelectedEncoder(t *testing.T) {
 				if !strings.Contains(joined, expected) {
 					t.Fatalf("missing %q in arguments: %v", expected, arguments)
 				}
+			}
+			if !strings.Contains(joined, "-b:v 4500k -maxrate 4500k -bufsize 9000k") {
+				t.Fatalf("selected encoder did not honor the absolute bitrate ceiling: %v", arguments)
 			}
 			if !strings.Contains(joined, "-c:a aac -ac 2") {
 				t.Fatalf("transcoded audio was not normalized to browser-compatible stereo: %v", arguments)

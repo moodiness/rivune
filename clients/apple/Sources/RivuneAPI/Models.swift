@@ -102,6 +102,70 @@ public struct ProfileSelection: Codable, Sendable, Equatable {
     public let expiresAt: String
 }
 
+public struct InstanceTranscodingPatch: Encodable, Sendable, Equatable {
+    public let allowTranscoding: Bool?
+
+    public init(allowTranscoding: Bool?) {
+        self.allowTranscoding = allowTranscoding
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        if let allowTranscoding {
+            try values.encode(allowTranscoding, forKey: .allowTranscoding)
+        } else {
+            try values.encodeNil(forKey: .allowTranscoding)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case allowTranscoding
+    }
+}
+
+public struct ProfileTranscodingPatch: Encodable, Sendable, Equatable {
+    public let transcoding: String?
+
+    public init(transcoding: String?) {
+        self.transcoding = transcoding
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        if let transcoding {
+            try values.encode(transcoding, forKey: .transcoding)
+        } else {
+            try values.encodeNil(forKey: .transcoding)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case transcoding
+    }
+}
+
+public struct TranscodingSettingsValues: Codable, Sendable, Equatable {
+    public let allowTranscoding: Bool?
+    public let transcoding: String?
+}
+
+public struct SettingsLayer: Codable, Sendable, Equatable {
+    public let schemaVersion: Int
+    public let settings: TranscodingSettingsValues
+    public let updatedAt: String?
+}
+
+public struct EffectiveSettingsSources: Codable, Sendable, Equatable {
+    public let allowTranscoding: String?
+    public let transcoding: String?
+}
+
+public struct EffectiveSettings: Codable, Sendable, Equatable {
+    public let schemaVersion: Int
+    public let settings: TranscodingSettingsValues
+    public let sources: EffectiveSettingsSources
+}
+
 public enum MediaType: String, Codable, Sendable {
     case movie
     case series
@@ -233,6 +297,18 @@ public struct Trailer: Codable, Sendable, Equatable, Identifiable {
     public let captionPreference: String?
 }
 
+public struct PlaybackMediaProfile: Codable, Sendable, Equatable {
+    public let container: String
+    public let videoCodec: String
+    public let audioCodec: String?
+
+    public init(container: String, videoCodec: String, audioCodec: String? = nil) {
+        self.container = container
+        self.videoCodec = videoCodec
+        self.audioCodec = audioCodec
+    }
+}
+
 public struct PlaybackCapabilities: Codable, Sendable, Equatable {
     public let streamingProtocols: [String]
     public let containers: [String]
@@ -240,14 +316,39 @@ public struct PlaybackCapabilities: Codable, Sendable, Equatable {
     public let audioCodecs: [String]?
     public let hdrFormats: [String]?
     public let externalPlayers: [String]?
+    public let processingModes: [String]?
+    public let maximumHeight: Int?
+    public let maximumVideoBitrateKbps: Int?
+    public let maximumAudioChannels: Int?
+    public let subtitleModes: [String]?
+    public let mediaProfiles: [PlaybackMediaProfile]?
 
-    public init(streamingProtocols: [String], containers: [String], videoCodecs: [String]? = nil, audioCodecs: [String]? = nil, hdrFormats: [String]? = nil, externalPlayers: [String]? = nil) {
+    public init(
+        streamingProtocols: [String],
+        containers: [String],
+        videoCodecs: [String]? = nil,
+        audioCodecs: [String]? = nil,
+        hdrFormats: [String]? = nil,
+        externalPlayers: [String]? = nil,
+        processingModes: [String]? = nil,
+        maximumHeight: Int? = nil,
+        maximumVideoBitrateKbps: Int? = nil,
+        maximumAudioChannels: Int? = nil,
+        subtitleModes: [String]? = nil,
+        mediaProfiles: [PlaybackMediaProfile]? = nil
+    ) {
         self.streamingProtocols = streamingProtocols
         self.containers = containers
         self.videoCodecs = videoCodecs
         self.audioCodecs = audioCodecs
         self.hdrFormats = hdrFormats
         self.externalPlayers = externalPlayers
+        self.processingModes = processingModes
+        self.maximumHeight = maximumHeight
+        self.maximumVideoBitrateKbps = maximumVideoBitrateKbps
+        self.maximumAudioChannels = maximumAudioChannels
+        self.subtitleModes = subtitleModes
+        self.mediaProfiles = mediaProfiles
     }
 }
 
@@ -287,11 +388,14 @@ public struct PlaybackPreparation: Codable, Sendable, Equatable {
     public let media: PlaybackMediaInspection?
     public let subtitleCount: Int
     public let expiresAt: String
+    public let decision: PlaybackDecision?
 }
 
 public struct PlaybackSession: Codable, Sendable, Equatable, Identifiable {
     public let id: UUID
     public let selectedSourceId: String
+    public let selectedAudioTrack: Int?
+    public let selectedSubtitleId: String?
     public let sources: [PlaybackSource]
     public let subtitles: [PlaybackSubtitle]
     public let providerErrors: [PlaybackProviderError]
@@ -313,6 +417,7 @@ public struct PlaybackSource: Codable, Sendable, Equatable, Identifiable {
     public let container: String?
     public let compatible: Bool
     public let media: PlaybackMediaInspection?
+    public let decision: PlaybackDecision?
 }
 
 public struct PlaybackMediaInspection: Codable, Sendable, Equatable {
@@ -324,6 +429,34 @@ public struct PlaybackMediaInspection: Codable, Sendable, Equatable {
     public let subtitleTracks: [PlaybackMediaTrack]
 }
 
+public struct PlaybackDecision: Codable, Sendable, Equatable {
+    public let reason: String
+    public let videoAction: String
+    public let audioAction: String
+    public let subtitleAction: String
+    public let toneMapping: Bool
+    public let source: PlaybackDecisionSource?
+    public let target: PlaybackDecisionTarget?
+}
+
+public struct PlaybackDecisionSource: Codable, Sendable, Equatable {
+    public let container: String?
+    public let videoCodec: String?
+    public let audioCodec: String?
+    public let height: Int?
+    public let videoBitrateKbps: Int?
+    public let hdrFormat: String?
+}
+
+public struct PlaybackDecisionTarget: Codable, Sendable, Equatable {
+    public let `protocol`: String?
+    public let container: String?
+    public let videoCodec: String?
+    public let audioCodec: String?
+    public let height: Int?
+    public let videoBitrateKbps: Int?
+}
+
 public struct PlaybackMediaTrack: Codable, Sendable, Equatable {
     public let index: Int
     public let type: String
@@ -331,6 +464,7 @@ public struct PlaybackMediaTrack: Codable, Sendable, Equatable {
     public let profile: String?
     public let language: String?
     public let title: String?
+    public let forced: Bool?
     public let width: Int?
     public let height: Int?
     public let channels: Int?
@@ -341,7 +475,10 @@ public struct PlaybackSubtitle: Codable, Sendable, Equatable, Identifiable {
     public let addonId: UUID
     public let manifestId: String
     public let language: String?
-    public let url: String
+    public let forced: Bool?
+    public let `default`: Bool?
+    public let delivery: String?
+    public let url: String?
 }
 
 public struct PlaybackProviderError: Codable, Sendable, Equatable {
@@ -349,4 +486,60 @@ public struct PlaybackProviderError: Codable, Sendable, Equatable {
     public let manifestId: String
     public let code: String
     public let message: String
+}
+
+public struct PlaybackActivity: Codable, Sendable, Equatable {
+    public let summary: PlaybackActivitySummary
+    public let diagnostics: PlaybackMediaDiagnostics
+    public let sessions: [PlaybackActivitySession]
+    public let jobs: [PlaybackMediaJob]
+}
+
+public struct PlaybackActivitySummary: Codable, Sendable, Equatable {
+    public let activeSessions: Int
+    public let activeJobs: Int
+    public let processingSlots: Int
+    public let processingLimit: Int
+    public let storageBytes: Int64
+    public let storageLimitBytes: Int64
+}
+
+public struct PlaybackMediaDiagnostics: Codable, Sendable, Equatable {
+    public let videoEncoder: String
+    public let hardwareToneMap: Bool
+}
+
+public struct PlaybackActivitySession: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let titleId: String?
+    public let artworkUrl: String?
+    public let externalIds: [String: String]?
+    public let externalIdMediaTypes: [String: String]?
+    public let title: String
+    public let mediaType: String
+    public let mode: String
+    public let decision: PlaybackDecision?
+    public let username: String
+    public let profileId: UUID
+    public let profile: String
+    public let device: String
+    public let platform: String
+    public let processing: Bool
+    public let positionSeconds: Int
+    public let durationSeconds: Int
+    public let createdAt: String
+    public let lastSeenAt: String
+    public let expiresAt: String
+}
+
+public struct PlaybackMediaJob: Codable, Sendable, Equatable {
+    public let sessionId: UUID?
+    public let assetId: String
+    public let mode: String
+    public let state: String
+    public let prewarming: Bool
+    public let progressPercent: Double?
+    public let speed: Double?
+    public let createdAt: String
+    public let lastSeenAt: String
 }

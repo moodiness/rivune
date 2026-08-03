@@ -324,6 +324,31 @@ export type ResourceResult = { addonId: string; manifestId: string; transportUrl
 export type ResourceBatch = { results: ResourceResult[]; errors: { addonId: string; manifestId: string; code: string; message: string }[] };
 
 export type PlaybackMediaProfile = { container: string; videoCodec: string; audioCodec?: string };
+export type PlaybackProcessingMode = "remux" | "transcode_audio" | "transcode";
+export type PlaybackSubtitleMode = "external" | "burn";
+export type PlaybackDecision = {
+  reason: "direct_supported" | "remux_required" | "audio_transcode_required" | "video_transcode_required" | "subtitle_burn_required";
+  videoAction: "copy" | "transcode";
+  audioAction: "copy" | "transcode";
+  subtitleAction: "none" | "external" | "copy" | "burn";
+  toneMapping: boolean;
+  source?: {
+    container?: string;
+    videoCodec?: string;
+    audioCodec?: string;
+    height?: number;
+    videoBitrateKbps?: number;
+    hdrFormat?: string;
+  };
+  target?: {
+    protocol?: string;
+    container?: string;
+    videoCodec?: string;
+    audioCodec?: string;
+    height?: number;
+    videoBitrateKbps?: number;
+  };
+};
 export type PlaybackCapabilities = {
   streamingProtocols: string[];
   containers: string[];
@@ -331,7 +356,11 @@ export type PlaybackCapabilities = {
   audioCodecs?: string[];
   hdrFormats?: string[];
   externalPlayers?: string[];
-  processingModes?: ("remux")[];
+  processingModes?: PlaybackProcessingMode[];
+  maximumVideoBitrateKbps?: number;
+  maximumHeight?: number;
+  maximumAudioChannels?: number;
+  subtitleModes?: PlaybackSubtitleMode[];
   mediaProfiles?: PlaybackMediaProfile[];
 };
 export type PlaybackSourceOption = {
@@ -376,6 +405,7 @@ export type PlaybackPreparation = {
   protocol: string;
   container?: string;
   media?: PlaybackMediaInspection;
+  decision?: PlaybackDecision;
   subtitleCount: number;
   expiresAt: string;
 };
@@ -395,8 +425,9 @@ export type PlaybackSource = {
   container?: string;
   compatible: boolean;
   media?: PlaybackMediaInspection;
+  decision?: PlaybackDecision;
 };
-export type PlaybackSubtitle = { id: string; addonId: string; manifestId: string; language?: string; url: string; forced?: boolean; default?: boolean };
+export type PlaybackSubtitle = { id: string; addonId: string; manifestId: string; language?: string; delivery?: "external" | "burn"; url?: string; forced?: boolean; default?: boolean };
 export type PlaybackMarker = {
   type: "intro" | "recap" | "outro";
   startSeconds: number;
@@ -434,6 +465,7 @@ export type PlaybackActivitySession = {
   durationSeconds: number;
   createdAt: string;
   lastSeenAt: string;
+  decision?: PlaybackDecision;
   expiresAt: string;
 };
 export type PlaybackMediaJob = {
@@ -444,6 +476,8 @@ export type PlaybackMediaJob = {
   prewarming: boolean;
   createdAt: string;
   lastSeenAt: string;
+  progressPercent?: number;
+  speed?: number;
 };
 export type PlaybackActivity = {
   summary: {
@@ -610,6 +644,8 @@ export type SettingsValues = {
   interfaceLanguage?: InterfaceLanguage | null;
   theme?: string | null;
   maximumResolution?: string | null;
+  allowTranscoding?: boolean | null;
+  transcoding?: "inherit" | "enabled" | "disabled" | null;
   preferDirectPlay?: boolean | null;
   hideUnreleased?: boolean | null;
   metadataLanguage?: string | null;

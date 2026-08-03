@@ -54,6 +54,8 @@ type settingsPatchRequest struct {
 	Theme                            nullableString `json:"theme,omitempty"`
 	MaximumResolution                nullableString `json:"maximumResolution,omitempty"`
 	PreferDirectPlay                 nullableBool   `json:"preferDirectPlay,omitempty"`
+	AllowTranscoding                 nullableBool   `json:"allowTranscoding,omitempty"`
+	Transcoding                      nullableString `json:"transcoding,omitempty"`
 	HideUnreleased                   nullableBool   `json:"hideUnreleased,omitempty"`
 	MetadataLanguage                 nullableString `json:"metadataLanguage,omitempty"`
 	MetadataRegion                   nullableString `json:"metadataRegion,omitempty"`
@@ -180,6 +182,8 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		Theme:                            settings.OptionalString{Set: request.Theme.Set, Value: request.Theme.Value},
 		MaximumResolution:                settings.OptionalString{Set: request.MaximumResolution.Set, Value: request.MaximumResolution.Value},
 		PreferDirectPlay:                 settings.OptionalBool{Set: request.PreferDirectPlay.Set, Value: request.PreferDirectPlay.Value},
+		AllowTranscoding:                 settings.OptionalBool{Set: request.AllowTranscoding.Set, Value: request.AllowTranscoding.Value},
+		Transcoding:                      settings.OptionalString{Set: request.Transcoding.Set, Value: request.Transcoding.Value},
 		HideUnreleased:                   settings.OptionalBool{Set: request.HideUnreleased.Set, Value: request.HideUnreleased.Value},
 		MetadataLanguage:                 settings.OptionalString{Set: request.MetadataLanguage.Set, Value: request.MetadataLanguage.Value},
 		MetadataRegion:                   settings.OptionalString{Set: request.MetadataRegion.Set, Value: request.MetadataRegion.Value},

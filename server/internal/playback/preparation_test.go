@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,10 +69,6 @@ func (processor *countingProbeProcessor) Probe(ctx context.Context, asset stored
 	return processor.inspection, nil
 }
 
-func (*countingProbeProcessor) Process(context.Context, storedAsset, io.Writer) error {
-	return nil
-}
-
 func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testing.T) {
 	now := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
 	profileID := "profile-id"
@@ -82,7 +77,7 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	fetcher := &preparationResourceFetcher{}
 	processor := &countingProbeProcessor{inspection: MediaInspection{
 		DurationSeconds: 1320,
-		Container:       "matroska",
+		Container:       "mp4",
 		VideoTracks:     []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1920, Height: 1080}},
 		AudioTracks:     []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
 	}}
@@ -129,11 +124,11 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.SourceRef != selected.SourceRef || prepared.Mode != processingRemux || processor.calls.Load() != 1 {
+	if prepared.SourceRef != selected.SourceRef || prepared.Mode != "direct" || processor.calls.Load() != 1 {
 		t.Fatalf("unexpected preparation: preparation=%+v probes=%d", prepared, processor.calls.Load())
 	}
 	service.preparations.mu.Lock()
-	cachedPlayback := service.preparations.entries[selected.SourceRef].playback
+	cachedPlayback := service.preparations.entries[playbackPreparationCacheKey(selected.SourceRef, playbackPolicy{})].playback
 	service.preparations.mu.Unlock()
 	if cachedPlayback.asset == nil {
 		t.Fatal("prepared playback did not retain its stream asset")
@@ -157,7 +152,7 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	}
 }
 
-func TestBuildPreparedPlaybackRejectsUnsupportedCodecWithoutEncoding(t *testing.T) {
+func TestBuildPreparedPlaybackReportsMissingConversionCapabilityWithoutEncoding(t *testing.T) {
 	fetcher := &preparationResourceFetcher{}
 	processor := &countingProbeProcessor{inspection: MediaInspection{
 		Container:   "matroska",
@@ -183,8 +178,8 @@ func TestBuildPreparedPlaybackRejectsUnsupportedCodecWithoutEncoding(t *testing.
 			ProcessingModes:    []string{processingRemux},
 		},
 	})
-	if !errors.Is(err, ErrUnsupportedSource) || playback.source.Mode != "" || processor.calls.Load() != 1 {
-		t.Fatalf("unsupported source did not fail before encoding: playback=%+v probes=%d err=%v", playback, processor.calls.Load(), err)
+	if !errors.Is(err, ErrClientCapabilityMissing) || playback.source.Mode != "" || processor.calls.Load() != 1 {
+		t.Fatalf("missing client mode did not fail before encoding: playback=%+v probes=%d err=%v", playback, processor.calls.Load(), err)
 	}
 }
 
@@ -275,5 +270,31 @@ func TestPreparedPlaybackClonePreservesAndIsolatesSubtitleAssets(t *testing.T) {
 	*cloned.subtitleAssets[0].SubtitleTrackIndex = 8
 	if original.subtitleAssets[0].Headers["Authorization"] != "Bearer secret" || *original.subtitleAssets[0].SubtitleTrackIndex != 7 {
 		t.Fatalf("subtitle asset clone shares mutable state: %+v", original.subtitleAssets[0])
+	}
+}
+
+func TestPreparationCacheIdentityIncludesEffectiveTranscodingPolicy(t *testing.T) {
+	allowed := playbackPreparationCacheKey("source-reference", playbackPolicy{allowTranscoding: true, maximumHeight: 1080})
+	disabled := playbackPreparationCacheKey("source-reference", playbackPolicy{allowTranscoding: false, maximumHeight: 1080})
+	lowerResolution := playbackPreparationCacheKey("source-reference", playbackPolicy{allowTranscoding: true, maximumHeight: 720})
+	if allowed == disabled || allowed == lowerResolution || disabled == lowerResolution {
+		t.Fatalf("policy-sensitive cache identities collided: allowed=%q disabled=%q lower=%q", allowed, disabled, lowerResolution)
+	}
+}
+
+func TestCloneCapabilitiesIsolatesAdditiveModeSlices(t *testing.T) {
+	original := Capabilities{
+		ProcessingModes:         []string{processingRemux, processingTranscode},
+		SubtitleModes:           []string{"external", "burn"},
+		MaximumVideoBitrateKbps: 8000, MaximumAudioChannels: 2, MaximumHeight: 1080, TranscodeVideoBitrateKbps: 12000,
+	}
+	cloned := cloneCapabilities(original)
+	cloned.ProcessingModes[0] = processingTranscodeAudio
+	cloned.SubtitleModes[0] = "burn"
+	if original.ProcessingModes[0] != processingRemux || original.SubtitleModes[0] != "external" {
+		t.Fatalf("capability clone shares additive slices: original=%+v clone=%+v", original, cloned)
+	}
+	if cloned.MaximumVideoBitrateKbps != 8000 || cloned.MaximumAudioChannels != 2 || cloned.MaximumHeight != 1080 || cloned.TranscodeVideoBitrateKbps != 12000 {
+		t.Fatalf("capability clone lost additive limits: %+v", cloned)
 	}
 }

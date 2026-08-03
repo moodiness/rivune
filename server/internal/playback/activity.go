@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -66,6 +67,7 @@ type ActivitySession struct {
 	Title                string                       `json:"title"`
 	MediaType            string                       `json:"mediaType"`
 	Mode                 string                       `json:"mode"`
+	Decision             *PlaybackDecision            `json:"decision,omitempty"`
 	Username             string                       `json:"username"`
 	ProfileID            string                       `json:"profileId"`
 	Profile              string                       `json:"profile"`
@@ -80,13 +82,15 @@ type ActivitySession struct {
 }
 
 type MediaActivityJob struct {
-	SessionID  string    `json:"sessionId,omitempty"`
-	AssetID    string    `json:"assetId"`
-	Mode       string    `json:"mode"`
-	State      string    `json:"state"`
-	Prewarming bool      `json:"prewarming"`
-	CreatedAt  time.Time `json:"createdAt"`
-	LastSeenAt time.Time `json:"lastSeenAt"`
+	SessionID       string    `json:"sessionId,omitempty"`
+	AssetID         string    `json:"assetId"`
+	Mode            string    `json:"mode"`
+	State           string    `json:"state"`
+	Prewarming      bool      `json:"prewarming"`
+	ProgressPercent *float64  `json:"progressPercent,omitempty"`
+	Speed           *float64  `json:"speed,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+	LastSeenAt      time.Time `json:"lastSeenAt"`
 }
 
 type PurgeResult struct {
@@ -249,7 +253,7 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 		); err != nil {
 			return Activity{}, fmt.Errorf("scan playback activity: %w", err)
 		}
-		value.Mode = activityMode(assetsJSON)
+		value.Mode, value.Decision = activityPlaybackDetails(assetsJSON)
 		value.ArtworkURL = activityArtworkURL(&artworkCandidates)
 		value.Title = formatActivityTitle(
 			value.MediaType, value.Title, parentMediaType, parentTitle, ancestorTitle,
@@ -450,6 +454,7 @@ func (service *Service) activityJobs() []MediaActivityJob {
 	}
 	service.hlsMu.Unlock()
 
+	now := service.currentTime()
 	result := make([]MediaActivityJob, 0, len(jobs))
 	for _, job := range jobs {
 		job.mu.RLock()
@@ -463,31 +468,59 @@ func (service *Service) activityJobs() []MediaActivityJob {
 			default:
 			}
 		}
-		result = append(result, MediaActivityJob{
+		activityJob := MediaActivityJob{
 			SessionID: job.sessionID, AssetID: job.assetID, Mode: job.mode, State: state,
 			Prewarming: job.prewarming, CreatedAt: job.createdAt, LastSeenAt: job.lastAccessed,
-		})
+		}
+		directory := job.directory
+		durationSeconds := job.sourceDurationSeconds
+		startSeconds := job.startOffsetSeconds
 		job.mu.RUnlock()
+
+		if encodedSeconds, ok := hlsPlaylistEncodedSeconds(directory); ok {
+			remainingSeconds := math.Max(durationSeconds-startSeconds, 0)
+			if remainingSeconds > 0 && !math.IsInf(remainingSeconds, 0) {
+				progressPercent := math.Min(100, encodedSeconds/remainingSeconds*100)
+				if !math.IsNaN(progressPercent) && !math.IsInf(progressPercent, 0) {
+					activityJob.ProgressPercent = &progressPercent
+				}
+			}
+			if encodedSeconds > 0 {
+				elapsedSeconds := math.Max(now.Sub(activityJob.CreatedAt).Seconds(), 0)
+				if elapsedSeconds > 0 {
+					speed := encodedSeconds / elapsedSeconds
+					if !math.IsNaN(speed) && !math.IsInf(speed, 0) {
+						activityJob.Speed = &speed
+					}
+				}
+			}
+		}
+		result = append(result, activityJob)
 	}
 	return result
 }
 
 func activityMode(encodedAssets []byte) string {
+	mode, _ := activityPlaybackDetails(encodedAssets)
+	return mode
+}
+
+func activityPlaybackDetails(encodedAssets []byte) (string, *PlaybackDecision) {
 	var assets []storedAsset
 	if json.Unmarshal(encodedAssets, &assets) != nil {
-		return "unknown"
+		return "unknown", nil
 	}
 	for _, asset := range assets {
 		switch asset.Kind {
 		case processingRemux, processingTranscodeAudio, processingTranscode:
-			return asset.Kind
-		case assetKindEmbeddedSubtitle, assetKindConvertedSubtitle:
+			return asset.Kind, clonePlaybackDecision(asset.Decision)
+		case assetKindEmbeddedSubtitle, assetKindConvertedSubtitle, assetKindBitmapSubtitle:
 			continue
 		default:
-			return "direct"
+			return "direct", clonePlaybackDecision(asset.Decision)
 		}
 	}
-	return "unknown"
+	return "unknown", nil
 }
 
 func intervalLiteral(duration time.Duration) string {

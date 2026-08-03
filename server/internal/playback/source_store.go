@@ -126,6 +126,9 @@ func cloneSource(source Source) Source {
 		inspection := cloneMediaInspection(*source.Media)
 		source.Media = &inspection
 	}
+	if source.Decision != nil {
+		source.Decision = clonePlaybackDecision(source.Decision)
+	}
 	return source
 }
 
@@ -145,6 +148,9 @@ func cloneStoredAsset(asset storedAsset) storedAsset {
 		index := *asset.SubtitleTrackIndex
 		asset.SubtitleTrackIndex = &index
 	}
+	if asset.Decision != nil {
+		asset.Decision = clonePlaybackDecision(asset.Decision)
+	}
 	return asset
 }
 
@@ -163,10 +169,28 @@ func cloneCapabilities(capabilities Capabilities) Capabilities {
 	capabilities.HDRFormats = append([]string(nil), capabilities.HDRFormats...)
 	capabilities.ExternalPlayers = append([]string(nil), capabilities.ExternalPlayers...)
 	capabilities.ProcessingModes = append([]string(nil), capabilities.ProcessingModes...)
+	capabilities.SubtitleModes = append([]string(nil), capabilities.SubtitleModes...)
 	capabilities.MediaProfiles = append([]MediaProfile(nil), capabilities.MediaProfiles...)
 	if capabilities.PreferDirectPlay != nil {
 		value := *capabilities.PreferDirectPlay
 		capabilities.PreferDirectPlay = &value
 	}
 	return capabilities
+}
+
+func clonePlaybackDecision(decision *PlaybackDecision) *PlaybackDecision {
+	if decision == nil {
+		return nil
+	}
+	cloned := *decision
+	if decision.Source != nil {
+		source := *decision.Source
+		cloned.Source = &source
+	}
+	if decision.Target != nil {
+		target := *decision.Target
+		cloned.Target = &target
+	}
+	return &cloned
+
 }

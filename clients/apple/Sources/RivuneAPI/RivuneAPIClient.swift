@@ -72,12 +72,16 @@ private struct PlaybackSourcesRequest: Encodable {
     let resourceId: String
     let capabilities: PlaybackCapabilities
 }
-private struct PlaybackPrepareRequest: Encodable { let sourceRef: String }
+private struct PlaybackPrepareRequest: Encodable {
+    let sourceRef: String
+    let startSeconds: Int?
+}
 private struct PlaybackResolveRequest: Encodable {
     let sourceRef: String
     let titleId: String?
     let preferredAudioTrack: Int?
     let preferredSubtitleId: String?
+    let startSeconds: Int?
 }
 
 public actor RivuneAPIClient {
@@ -177,6 +181,26 @@ public actor RivuneAPIClient {
         _ = try await requestData("profiles/selection", method: "DELETE", body: Optional<Data>.none, authenticated: true)
     }
 
+    public func instanceSettings() async throws -> SettingsLayer {
+        try await request("settings", authenticated: true)
+    }
+
+    public func updateInstanceSettings(_ patch: InstanceTranscodingPatch) async throws -> SettingsLayer {
+        try await request("settings", method: "PATCH", body: patch, authenticated: true)
+    }
+
+    public func profileSettings(id: UUID) async throws -> SettingsLayer {
+        try await request("profiles/\(id.uuidString.lowercased())/settings", authenticated: true)
+    }
+
+    public func updateProfileSettings(id: UUID, patch: ProfileTranscodingPatch) async throws -> SettingsLayer {
+        try await request("profiles/\(id.uuidString.lowercased())/settings", method: "PATCH", body: patch, authenticated: true)
+    }
+
+    public func effectiveProfileSettings(id: UUID) async throws -> EffectiveSettings {
+        try await request("profiles/\(id.uuidString.lowercased())/settings/effective", authenticated: true)
+    }
+
     public func movie(id: UUID, language: String? = nil) async throws -> Movie {
         try await request("metadata/titles/\(id.uuidString.lowercased())", query: queryItems(("language", language)), authenticated: true)
     }
@@ -201,21 +225,37 @@ public actor RivuneAPIClient {
         try await request("playback/sources", method: "POST", body: PlaybackSourcesRequest(mediaType: mediaType, resourceId: resourceId, capabilities: capabilities), authenticated: true)
     }
 
-    public func preparePlayback(sourceRef: String) async throws -> PlaybackPreparation {
-        try await request("playback/prepare", method: "POST", body: PlaybackPrepareRequest(sourceRef: sourceRef), authenticated: true)
+    public func preparePlayback(sourceRef: String, startSeconds: Int? = nil) async throws -> PlaybackPreparation {
+        try await request("playback/prepare", method: "POST", body: PlaybackPrepareRequest(sourceRef: sourceRef, startSeconds: startSeconds), authenticated: true)
     }
 
-    public func resolvePlayback(sourceRef: String, titleId: String? = nil, preferredAudioTrack: Int? = nil, preferredSubtitleId: String? = nil) async throws -> PlaybackSession {
+    public func resolvePlayback(
+        sourceRef: String,
+        titleId: String? = nil,
+        preferredAudioTrack: Int? = nil,
+        preferredSubtitleId: String? = nil,
+        startSeconds: Int? = nil
+    ) async throws -> PlaybackSession {
         try await request(
             "playback/resolve",
             method: "POST",
-            body: PlaybackResolveRequest(sourceRef: sourceRef, titleId: titleId, preferredAudioTrack: preferredAudioTrack, preferredSubtitleId: preferredSubtitleId),
+            body: PlaybackResolveRequest(
+                sourceRef: sourceRef,
+                titleId: titleId,
+                preferredAudioTrack: preferredAudioTrack,
+                preferredSubtitleId: preferredSubtitleId,
+                startSeconds: startSeconds
+            ),
             authenticated: true
         )
     }
 
     public func stopPlayback(sessionId: UUID) async throws {
         _ = try await requestData("playback/sessions/\(sessionId.uuidString.lowercased())", method: "DELETE", body: Optional<Data>.none, authenticated: true)
+    }
+
+    public func playbackActivity() async throws -> PlaybackActivity {
+        try await request("playback/activity", authenticated: true)
     }
 
     private func request<Response: Decodable>(_ path: String, method: String = "GET", query: [URLQueryItem] = [], authenticated: Bool) async throws -> Response {

@@ -20,6 +20,10 @@ const (
 	schemaVersion                 = 1
 	DefaultInterfaceLanguage      = "en"
 	MaintenanceMessageMaximumSize = 500
+
+	TranscodingModeInherit  TranscodingMode = "inherit"
+	TranscodingModeEnabled  TranscodingMode = "enabled"
+	TranscodingModeDisabled TranscodingMode = "disabled"
 )
 
 var (
@@ -39,6 +43,8 @@ type Maintenance struct {
 	Enabled bool
 	Message *string
 }
+
+type TranscodingMode string
 
 type OptionalString struct {
 	Set   bool
@@ -60,6 +66,8 @@ type Patch struct {
 	Theme                            OptionalString
 	MaximumResolution                OptionalString
 	PreferDirectPlay                 OptionalBool
+	AllowTranscoding                 OptionalBool
+	Transcoding                      OptionalString
 	HideUnreleased                   OptionalBool
 	MetadataLanguage                 OptionalString
 	MetadataRegion                   OptionalString
@@ -82,31 +90,33 @@ type Patch struct {
 }
 
 type Values struct {
-	InterfaceLanguage                *string `json:"interfaceLanguage,omitempty"`
-	Theme                            *string `json:"theme,omitempty"`
-	MaximumResolution                *string `json:"maximumResolution,omitempty"`
-	PreferDirectPlay                 *bool   `json:"preferDirectPlay,omitempty"`
-	HideUnreleased                   *bool   `json:"hideUnreleased,omitempty"`
-	MetadataLanguage                 *string `json:"metadataLanguage,omitempty"`
-	MetadataRegion                   *string `json:"metadataRegion,omitempty"`
-	SeriesMappingProvider            *string `json:"seriesMappingProvider,omitempty"`
-	AudioLanguage                    *string `json:"audioLanguage,omitempty"`
-	SubtitleLanguage                 *string `json:"subtitleLanguage,omitempty"`
-	ForcedSubtitleLanguage           *string `json:"forcedSubtitleLanguage,omitempty"`
-	AutoplayNextEpisode              *bool   `json:"autoplayNextEpisode,omitempty"`
-	SkipIntroEnabled                 *bool   `json:"skipIntroEnabled,omitempty"`
-	SkipRecapEnabled                 *bool   `json:"skipRecapEnabled,omitempty"`
-	SkipOutroEnabled                 *bool   `json:"skipOutroEnabled,omitempty"`
-	CardDensity                      *string `json:"cardDensity,omitempty"`
-	AnimationsEnabled                *bool   `json:"animationsEnabled,omitempty"`
-	SubtitleSizePercent              *int    `json:"subtitleSizePercent,omitempty"`
-	SubtitleTextColor                *string `json:"subtitleTextColor,omitempty"`
-	SubtitleBackgroundOpacityPercent *int    `json:"subtitleBackgroundOpacityPercent,omitempty"`
-	NotificationsEnabled             *bool   `json:"notificationsEnabled,omitempty"`
-	NotificationDurationSeconds      *int    `json:"notificationDurationSeconds,omitempty"`
-	NotificationPollIntervalSeconds  *int    `json:"notificationPollIntervalSeconds,omitempty"`
-	MaintenanceEnabled               *bool   `json:"maintenanceEnabled,omitempty"`
-	MaintenanceMessage               *string `json:"maintenanceMessage,omitempty"`
+	InterfaceLanguage                *string          `json:"interfaceLanguage,omitempty"`
+	Theme                            *string          `json:"theme,omitempty"`
+	MaximumResolution                *string          `json:"maximumResolution,omitempty"`
+	PreferDirectPlay                 *bool            `json:"preferDirectPlay,omitempty"`
+	AllowTranscoding                 *bool            `json:"allowTranscoding,omitempty"`
+	Transcoding                      *TranscodingMode `json:"transcoding,omitempty"`
+	HideUnreleased                   *bool            `json:"hideUnreleased,omitempty"`
+	MetadataLanguage                 *string          `json:"metadataLanguage,omitempty"`
+	MetadataRegion                   *string          `json:"metadataRegion,omitempty"`
+	SeriesMappingProvider            *string          `json:"seriesMappingProvider,omitempty"`
+	AudioLanguage                    *string          `json:"audioLanguage,omitempty"`
+	SubtitleLanguage                 *string          `json:"subtitleLanguage,omitempty"`
+	ForcedSubtitleLanguage           *string          `json:"forcedSubtitleLanguage,omitempty"`
+	AutoplayNextEpisode              *bool            `json:"autoplayNextEpisode,omitempty"`
+	SkipIntroEnabled                 *bool            `json:"skipIntroEnabled,omitempty"`
+	SkipRecapEnabled                 *bool            `json:"skipRecapEnabled,omitempty"`
+	SkipOutroEnabled                 *bool            `json:"skipOutroEnabled,omitempty"`
+	CardDensity                      *string          `json:"cardDensity,omitempty"`
+	AnimationsEnabled                *bool            `json:"animationsEnabled,omitempty"`
+	SubtitleSizePercent              *int             `json:"subtitleSizePercent,omitempty"`
+	SubtitleTextColor                *string          `json:"subtitleTextColor,omitempty"`
+	SubtitleBackgroundOpacityPercent *int             `json:"subtitleBackgroundOpacityPercent,omitempty"`
+	NotificationsEnabled             *bool            `json:"notificationsEnabled,omitempty"`
+	NotificationDurationSeconds      *int             `json:"notificationDurationSeconds,omitempty"`
+	NotificationPollIntervalSeconds  *int             `json:"notificationPollIntervalSeconds,omitempty"`
+	MaintenanceEnabled               *bool            `json:"maintenanceEnabled,omitempty"`
+	MaintenanceMessage               *string          `json:"maintenanceMessage,omitempty"`
 }
 
 type Layer struct {
@@ -116,29 +126,31 @@ type Layer struct {
 }
 
 type EffectiveValues struct {
-	InterfaceLanguage                string `json:"interfaceLanguage"`
-	Theme                            string `json:"theme"`
-	MaximumResolution                string `json:"maximumResolution"`
-	PreferDirectPlay                 bool   `json:"preferDirectPlay"`
-	HideUnreleased                   bool   `json:"hideUnreleased"`
-	MetadataLanguage                 string `json:"metadataLanguage"`
-	MetadataRegion                   string `json:"metadataRegion"`
-	SeriesMappingProvider            string `json:"seriesMappingProvider"`
-	AudioLanguage                    string `json:"audioLanguage"`
-	SubtitleLanguage                 string `json:"subtitleLanguage"`
-	ForcedSubtitleLanguage           string `json:"forcedSubtitleLanguage"`
-	AutoplayNextEpisode              bool   `json:"autoplayNextEpisode"`
-	SkipIntroEnabled                 bool   `json:"skipIntroEnabled"`
-	SkipRecapEnabled                 bool   `json:"skipRecapEnabled"`
-	SkipOutroEnabled                 bool   `json:"skipOutroEnabled"`
-	CardDensity                      string `json:"cardDensity"`
-	AnimationsEnabled                bool   `json:"animationsEnabled"`
-	SubtitleSizePercent              int    `json:"subtitleSizePercent"`
-	SubtitleTextColor                string `json:"subtitleTextColor"`
-	SubtitleBackgroundOpacityPercent int    `json:"subtitleBackgroundOpacityPercent"`
-	NotificationsEnabled             bool   `json:"notificationsEnabled"`
-	NotificationDurationSeconds      int    `json:"notificationDurationSeconds"`
-	NotificationPollIntervalSeconds  int    `json:"notificationPollIntervalSeconds"`
+	InterfaceLanguage                string          `json:"interfaceLanguage"`
+	Theme                            string          `json:"theme"`
+	MaximumResolution                string          `json:"maximumResolution"`
+	PreferDirectPlay                 bool            `json:"preferDirectPlay"`
+	AllowTranscoding                 bool            `json:"allowTranscoding"`
+	Transcoding                      TranscodingMode `json:"transcoding"`
+	HideUnreleased                   bool            `json:"hideUnreleased"`
+	MetadataLanguage                 string          `json:"metadataLanguage"`
+	MetadataRegion                   string          `json:"metadataRegion"`
+	SeriesMappingProvider            string          `json:"seriesMappingProvider"`
+	AudioLanguage                    string          `json:"audioLanguage"`
+	SubtitleLanguage                 string          `json:"subtitleLanguage"`
+	ForcedSubtitleLanguage           string          `json:"forcedSubtitleLanguage"`
+	AutoplayNextEpisode              bool            `json:"autoplayNextEpisode"`
+	SkipIntroEnabled                 bool            `json:"skipIntroEnabled"`
+	SkipRecapEnabled                 bool            `json:"skipRecapEnabled"`
+	SkipOutroEnabled                 bool            `json:"skipOutroEnabled"`
+	CardDensity                      string          `json:"cardDensity"`
+	AnimationsEnabled                bool            `json:"animationsEnabled"`
+	SubtitleSizePercent              int             `json:"subtitleSizePercent"`
+	SubtitleTextColor                string          `json:"subtitleTextColor"`
+	SubtitleBackgroundOpacityPercent int             `json:"subtitleBackgroundOpacityPercent"`
+	NotificationsEnabled             bool            `json:"notificationsEnabled"`
+	NotificationDurationSeconds      int             `json:"notificationDurationSeconds"`
+	NotificationPollIntervalSeconds  int             `json:"notificationPollIntervalSeconds"`
 }
 
 type Effective struct {
@@ -216,7 +228,7 @@ func (s *Service) UpdateInstance(ctx context.Context, principal auth.Principal, 
 	if principal.Role != "admin" {
 		return Layer{}, ErrForbidden
 	}
-	if err := validatePatch(patch); err != nil {
+	if err := validateInstancePatch(patch); err != nil {
 		return Layer{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -254,7 +266,7 @@ func (s *Service) Profile(ctx context.Context, principal auth.Principal, profile
 }
 
 func (s *Service) UpdateProfile(ctx context.Context, principal auth.Principal, profileID string, patch Patch) (Layer, error) {
-	if err := validatePatch(patch); err != nil {
+	if err := validateProfilePatch(patch); err != nil {
 		return Layer{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -333,6 +345,7 @@ func (s *Service) Effective(ctx context.Context, principal auth.Principal, profi
 	effective := defaultEffective()
 	applyLayer(&effective, instanceValues, "instance")
 	applyLayer(&effective, profileValues, "profile")
+	applyTranscodingPolicy(&effective, instanceValues, profileValues)
 	return effective, nil
 }
 
@@ -381,7 +394,9 @@ func defaultEffective() Effective {
 		Values: EffectiveValues{
 			InterfaceLanguage: DefaultInterfaceLanguage,
 			Theme:             "system", MaximumResolution: "auto", PreferDirectPlay: true,
-			HideUnreleased: false, MetadataLanguage: "auto", MetadataRegion: "auto", SeriesMappingProvider: "tmdb",
+			AllowTranscoding: true,
+			Transcoding:      TranscodingModeInherit,
+			HideUnreleased:   false, MetadataLanguage: "auto", MetadataRegion: "auto", SeriesMappingProvider: "tmdb",
 			AudioLanguage: "auto", SubtitleLanguage: "auto", ForcedSubtitleLanguage: "off",
 			AutoplayNextEpisode: true, CardDensity: "comfortable", AnimationsEnabled: true,
 			SkipIntroEnabled: true, SkipRecapEnabled: true, SkipOutroEnabled: true,
@@ -390,7 +405,8 @@ func defaultEffective() Effective {
 		},
 		Sources: map[string]string{
 			"interfaceLanguage": "default",
-			"theme":             "default", "maximumResolution": "default", "preferDirectPlay": "default",
+			"allowTranscoding":  "default", "transcoding": "default",
+			"theme": "default", "maximumResolution": "default", "preferDirectPlay": "default",
 			"hideUnreleased": "default", "metadataLanguage": "default", "metadataRegion": "default", "seriesMappingProvider": "default",
 			"audioLanguage": "default", "subtitleLanguage": "default", "forcedSubtitleLanguage": "default",
 			"autoplayNextEpisode": "default", "cardDensity": "default", "animationsEnabled": "default",
@@ -402,7 +418,7 @@ func defaultEffective() Effective {
 }
 
 func validatePatch(patch Patch) error {
-	if !patch.InterfaceLanguage.Set && !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.PreferDirectPlay.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
+	if !patch.InterfaceLanguage.Set && !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.PreferDirectPlay.Set && !patch.AllowTranscoding.Set && !patch.Transcoding.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
 		!patch.AutoplayNextEpisode.Set && !patch.SkipIntroEnabled.Set && !patch.SkipRecapEnabled.Set && !patch.SkipOutroEnabled.Set &&
 		!patch.CardDensity.Set && !patch.AnimationsEnabled.Set && !patch.SubtitleSizePercent.Set && !patch.SubtitleTextColor.Set && !patch.SubtitleBackgroundOpacityPercent.Set &&
 		!patch.NotificationsEnabled.Set && !patch.NotificationDurationSeconds.Set && !patch.NotificationPollIntervalSeconds.Set {
@@ -423,6 +439,13 @@ func validatePatch(patch Patch) error {
 		case "auto", "2160p", "1080p", "720p", "480p":
 		default:
 			return fmt.Errorf("%w: maximumResolution is invalid", ErrInvalidInput)
+		}
+	}
+	if value := patch.Transcoding.Value; patch.Transcoding.Set && value != nil {
+		switch TranscodingMode(*value) {
+		case TranscodingModeInherit, TranscodingModeEnabled, TranscodingModeDisabled:
+		default:
+			return fmt.Errorf("%w: transcoding must be inherit, enabled, or disabled", ErrInvalidInput)
 		}
 	}
 	for name, value := range map[string]OptionalString{
@@ -471,6 +494,26 @@ func validatePatch(patch Patch) error {
 	}
 	return nil
 }
+func validateInstancePatch(patch Patch) error {
+	if err := validatePatch(patch); err != nil {
+		return err
+	}
+	if patch.Transcoding.Set {
+		return fmt.Errorf("%w: transcoding is only valid for profile settings", ErrInvalidInput)
+	}
+	return nil
+}
+
+func validateProfilePatch(patch Patch) error {
+	if err := validatePatch(patch); err != nil {
+		return err
+	}
+	if patch.AllowTranscoding.Set {
+		return fmt.Errorf("%w: allowTranscoding is only valid for instance settings", ErrInvalidInput)
+	}
+	return nil
+}
+
 func validateIntRange(name string, value OptionalInt, minimum, maximum int) error {
 	if value.Set && value.Value != nil && (*value.Value < minimum || *value.Value > maximum) {
 		return fmt.Errorf("%w: %s must be between %d and %d", ErrInvalidInput, name, minimum, maximum)
@@ -487,6 +530,17 @@ func applyPatch(values Values, patch Patch) Values {
 	}
 	if patch.MaximumResolution.Set {
 		values.MaximumResolution = patch.MaximumResolution.Value
+	}
+	if patch.AllowTranscoding.Set {
+		values.AllowTranscoding = patch.AllowTranscoding.Value
+	}
+	if patch.Transcoding.Set {
+		if patch.Transcoding.Value == nil {
+			values.Transcoding = nil
+		} else {
+			mode := TranscodingMode(*patch.Transcoding.Value)
+			values.Transcoding = &mode
+		}
 	}
 	if patch.PreferDirectPlay.Set {
 		values.PreferDirectPlay = patch.PreferDirectPlay.Value
@@ -655,6 +709,39 @@ func applyLayer(effective *Effective, values Values, source string) {
 		effective.Sources["notificationPollIntervalSeconds"] = source
 	}
 }
+func CanProfileTranscode(instanceAllowed bool, profileMode string) bool {
+	if !instanceAllowed {
+		return false
+	}
+	switch TranscodingMode(profileMode) {
+	case TranscodingModeInherit, TranscodingModeEnabled:
+		return true
+	case TranscodingModeDisabled:
+		return false
+	default:
+		return false
+	}
+}
+
+func applyTranscodingPolicy(effective *Effective, instance, profile Values) {
+	instanceAllowed := effective.Values.AllowTranscoding
+	if instance.AllowTranscoding != nil {
+		instanceAllowed = *instance.AllowTranscoding
+		effective.Sources["allowTranscoding"] = "instance"
+	}
+
+	mode := TranscodingModeInherit
+	if profile.Transcoding != nil {
+		mode = *profile.Transcoding
+		effective.Sources["transcoding"] = "profile"
+	}
+	effective.Values.Transcoding = mode
+	effective.Values.AllowTranscoding = CanProfileTranscode(instanceAllowed, string(mode))
+	if instanceAllowed && mode == TranscodingModeDisabled {
+		effective.Sources["allowTranscoding"] = "profile"
+	}
+}
+
 func isSupportedInterfaceLanguage(value string) bool {
 	switch value {
 	case "en", "fr", "es", "it", "de", "ru", "pt-PT", "pt-BR", "ar", "ja", "ko", "zh-CN", "pl", "hy",

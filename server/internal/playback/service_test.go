@@ -2,7 +2,8 @@ package playback
 
 import (
 	"context"
-	"io"
+	"errors"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -193,35 +194,18 @@ func TestTargetSignatureRejectsTampering(t *testing.T) {
 }
 
 type fakeMediaProcessor struct {
-	info      MediaInspection
-	err       error
-	output    string
-	processed *storedAsset
+	info MediaInspection
+	err  error
 }
 
 func (processor fakeMediaProcessor) Probe(context.Context, storedAsset) (MediaInspection, error) {
 	return processor.info, processor.err
 }
 
-func (processor fakeMediaProcessor) Process(_ context.Context, asset storedAsset, destination io.Writer) error {
-	if processor.err != nil {
-		return processor.err
-	}
-	if processor.processed != nil {
-		*processor.processed = asset
-	}
-	_, err := io.WriteString(destination, processor.output)
-	return err
-}
-
 type sourceMediaProcessor map[string]MediaInspection
 
 func (processor sourceMediaProcessor) Probe(_ context.Context, asset storedAsset) (MediaInspection, error) {
 	return processor[asset.URL], nil
-}
-
-func (sourceMediaProcessor) Process(context.Context, storedAsset, io.Writer) error {
-	return nil
 }
 
 func TestDecidePlaybackSourceProbesCompatibleHLSDuration(t *testing.T) {
@@ -307,7 +291,7 @@ func TestDecidePlaybackSourceSkipsMislabeledLowResolution(t *testing.T) {
 		probes: newMediaProbeCache(time.Now),
 	}
 	capabilities := Capabilities{
-		StreamingProtocols: []string{"http"},
+		StreamingProtocols: []string{"http", "hls"},
 		Containers:         []string{"mp4"},
 		VideoCodecs:        []string{"h264"},
 		AudioCodecs:        []string{"aac"},
@@ -391,7 +375,7 @@ func TestDecidePlaybackSourceAllowsOnlyDirectOrAdvertisedRemux(t *testing.T) {
 			service := &Service{processor: fakeMediaProcessor{info: info}, probes: newMediaProbeCache(time.Now)}
 			legacyPreferDirect := false
 			capabilities := Capabilities{
-				StreamingProtocols: []string{"http"},
+				StreamingProtocols: []string{"http", "hls"},
 				Containers:         []string{"mp4"},
 				VideoCodecs:        []string{"h264"},
 				AudioCodecs:        []string{"aac"},
@@ -408,8 +392,8 @@ func TestDecidePlaybackSourceAllowsOnlyDirectOrAdvertisedRemux(t *testing.T) {
 				t.Fatalf("expected mode %q, got source=%+v asset=%+v", test.wantMode, sources[0], assets[0])
 			}
 			if test.wantMode == processingRemux {
-				if assets[0].Kind != processingRemux || sources[0].Container != "mp4" {
-					t.Fatalf("remux decision was not persisted: source=%+v asset=%+v", sources[0], assets[0])
+				if assets[0].Kind != processingRemux || sources[0].Protocol != "hls" || sources[0].Container != "hls" {
+					t.Fatalf("remux decision was not persisted as HLS: source=%+v asset=%+v", sources[0], assets[0])
 				}
 			} else if assets[0].Kind != "stream" {
 				t.Fatalf("source unexpectedly requested media encoding: source=%+v asset=%+v", sources[0], assets[0])
@@ -427,7 +411,7 @@ func TestPlaybackModeRemuxesWithPlayableAlternateAudio(t *testing.T) {
 			{Index: 2, Type: "audio", Codec: "aac"},
 		},
 	}, Capabilities{
-		StreamingProtocols: []string{"http"},
+		StreamingProtocols: []string{"http", "hls"},
 		Containers:         []string{"mp4"},
 		VideoCodecs:        []string{"h264"},
 		AudioCodecs:        []string{"aac"},
@@ -474,20 +458,45 @@ func TestSessionSourceURLPreservesAuthorizedExternalHandoff(t *testing.T) {
 	}
 }
 
-func TestProxyProcessedMediaStreamsMP4WithoutCaching(t *testing.T) {
-	var processed storedAsset
-	service := &Service{processor: fakeMediaProcessor{output: "fragmented-mp4", processed: &processed}}
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest("GET", "/asset", nil)
+type commitTrackingResponseWriter struct {
+	header http.Header
+	status int
+	writes int
+}
 
-	if err := service.proxyProcessedMedia(response, request, storedAsset{Kind: "remux", URL: "https://media.example/movie.mkv"}); err != nil {
-		t.Fatal(err)
+func (writer *commitTrackingResponseWriter) Header() http.Header {
+	if writer.header == nil {
+		writer.header = make(http.Header)
 	}
-	if response.Code != 200 || response.Header().Get("Content-Type") != "video/mp4" || response.Header().Get("Cache-Control") != "no-store" || response.Body.String() != "fragmented-mp4" {
-		t.Fatalf("unexpected processed response: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	return writer.header
+}
+
+func (writer *commitTrackingResponseWriter) WriteHeader(status int) {
+	writer.status = status
+}
+
+func (writer *commitTrackingResponseWriter) Write(body []byte) (int, error) {
+	writer.writes++
+	if writer.status == 0 {
+		writer.status = http.StatusOK
 	}
-	if processed.Kind != processingRemux {
-		t.Fatalf("progressive fallback escalated remux into media encoding: %+v", processed)
+	return len(body), nil
+}
+
+func TestProcessingAssetWithoutHLSFileFailsBeforeStartingFFmpeg(t *testing.T) {
+	processor := &FFmpegProcessor{slots: make(chan struct{}, 1)}
+	service := &Service{processor: processor}
+	response := &commitTrackingResponseWriter{}
+	request := httptest.NewRequest(http.MethodGet, "/asset?fallback=1&start=invalid", nil)
+
+	err := service.proxyProcessingAsset(response, request, "session-id", "token", "", "", storedAsset{
+		ID: "stream-1", Kind: processingTranscode, URL: "https://media.example/movie.mkv",
+	})
+	if !errors.Is(err, ErrClientCapabilityMissing) {
+		t.Fatalf("missing HLS file returned %v", err)
+	}
+	if response.status != 0 || response.writes != 0 || len(processor.slots) != 0 {
+		t.Fatalf("request started processing or committed a response: status=%d writes=%d active=%d", response.status, response.writes, len(processor.slots))
 	}
 }
 
@@ -533,33 +542,6 @@ func TestProcessingArgumentsSeekBeforeOpeningInput(t *testing.T) {
 	}
 }
 
-func TestProgressiveArgumentsFlushOneSecondFragments(t *testing.T) {
-	processor := &FFmpegProcessor{threads: 4}
-	arguments, err := processor.progressiveArguments(storedAsset{
-		Kind: processingTranscode, URL: "https://media.example/movie.mkv",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	joined := strings.Join(arguments, " ")
-	if !strings.Contains(joined, "-force_key_frames expr:gte(t,n_forced*1)") {
-		t.Fatalf("progressive transcode does not force frequent keyframes: %v", arguments)
-	}
-	if !strings.Contains(joined, "-frag_duration 1000000 -flush_packets 1 -f mp4 pipe:1") {
-		t.Fatalf("progressive output does not flush one-second fragments: %v", arguments)
-	}
-
-	arguments, err = processor.progressiveArguments(storedAsset{
-		Kind: processingRemux, URL: "https://media.example/movie.mkv",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(strings.Join(arguments, " "), "-force_key_frames") {
-		t.Fatalf("remux unexpectedly attempts to create keyframes: %v", arguments)
-	}
-}
-
 func TestFFmpegHeadersRejectsInjectedLines(t *testing.T) {
 	headers := ffmpegHeaders(map[string]string{
 		"Authorization": "Bearer safe",
@@ -587,5 +569,217 @@ func TestInspectedContainerUsesSourceHintForMatroskaFamily(t *testing.T) {
 	}
 	if got := inspectedContainer("matroska,webm", "webm"); got != "webm" {
 		t.Fatalf("expected WebM hint to win, got %q", got)
+	}
+}
+
+func TestPlaybackDecisionOrdersDirectPlayHLSDirectStreamAndTranscodes(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingRemux, processingTranscodeAudio, processingTranscode},
+	}
+	tests := []struct {
+		name       string
+		container  string
+		videoCodec string
+		audioCodec string
+		want       string
+	}{
+		{name: "direct", container: "mp4", videoCodec: "h264", audioCodec: "aac", want: "direct"},
+		{name: "HLS Direct Stream", container: "mkv", videoCodec: "h264", audioCodec: "aac", want: processingRemux},
+		{name: "audio", container: "mkv", videoCodec: "h264", audioCodec: "dts", want: processingTranscodeAudio},
+		{name: "full", container: "mkv", videoCodec: "vp9", audioCodec: "dts", want: processingTranscode},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: test.container}, MediaInspection{
+				Container:   test.container,
+				VideoTracks: []MediaTrack{{Codec: test.videoCodec, Height: 1080}},
+				AudioTracks: []MediaTrack{{Codec: test.audioCodec, Channels: 6}},
+			}, capabilities)
+			if mode != test.want || decision == nil {
+				t.Fatalf("mode=%q decision=%+v, want %q", mode, decision, test.want)
+			}
+			if mode != "direct" && (decision.Target == nil || decision.Target.Protocol != "hls" || decision.Target.Container != "hls") {
+				t.Fatalf("processed mode did not select HLS/fMP4: mode=%q decision=%+v", mode, decision)
+			}
+		})
+	}
+}
+
+func TestPlaybackModeRejectsHTTPOnlyProcessingOutput(t *testing.T) {
+	mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, MediaInspection{
+		Container:   "mkv",
+		VideoTracks: []MediaTrack{{Codec: "vp9", Height: 1080}},
+		AudioTracks: []MediaTrack{{Codec: "dts", Channels: 6}},
+	}, Capabilities{
+		StreamingProtocols: []string{"http"},
+		Containers:         []string{"mp4"},
+		VideoCodecs:        []string{"h264"},
+		AudioCodecs:        []string{"aac"},
+		ProcessingModes:    []string{processingRemux, processingTranscodeAudio, processingTranscode},
+	})
+	if mode != "" || decision != nil {
+		t.Fatalf("HTTP-only client received a processing decision: mode=%q decision=%+v", mode, decision)
+	}
+}
+
+func TestDecidePlaybackSourceDistinguishesPolicyAndCapabilityFailures(t *testing.T) {
+	inspection := MediaInspection{
+		Container:   "mkv",
+		VideoTracks: []MediaTrack{{Codec: "vp9", Height: 1080}},
+		AudioTracks: []MediaTrack{{Codec: "dts", Channels: 6}},
+	}
+	newInput := func() ([]Source, []storedAsset) {
+		return []Source{{ID: "stream-1", Mode: "direct", URL: "https://media.example/movie.mkv", Protocol: "http", Container: "mkv"}},
+			[]storedAsset{{ID: "stream-1", Kind: "stream", URL: "https://media.example/movie.mkv"}}
+	}
+	service := &Service{processor: fakeMediaProcessor{info: inspection}, probes: newMediaProbeCache(time.Now)}
+	sources, assets := newInput()
+	err := service.decidePlaybackSource(context.Background(), sources, assets, Capabilities{
+		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingTranscode},
+	}, false)
+	if !errors.Is(err, ErrTranscodingDisabled) || assets[0].Kind != "stream" {
+		t.Fatalf("disabled policy started processing: err=%v asset=%+v", err, assets[0])
+	}
+	sources, assets = newInput()
+	err = service.decidePlaybackSource(context.Background(), sources, assets, Capabilities{
+		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+	}, true)
+	if !errors.Is(err, ErrClientCapabilityMissing) || assets[0].Kind != "stream" {
+		t.Fatalf("missing mode was not reported conservatively: err=%v asset=%+v", err, assets[0])
+	}
+	sources, assets = newInput()
+	err = service.decidePlaybackSource(context.Background(), sources, assets, Capabilities{
+		StreamingProtocols: []string{"http"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingTranscode},
+	}, true)
+	if !errors.Is(err, ErrClientCapabilityMissing) || assets[0].Kind != "stream" {
+		t.Fatalf("HTTP-only processing capability was not rejected before encoding: err=%v asset=%+v", err, assets[0])
+	}
+}
+
+func TestFullTranscodeDecisionAppliesResolutionHDRAndBitrateLimits(t *testing.T) {
+	mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mp4"}, MediaInspection{
+		Container: "mp4", HDRFormat: "hdr10",
+		VideoTracks: []MediaTrack{{Codec: "h264", Height: 2160, BitrateKbps: 24000}},
+		AudioTracks: []MediaTrack{{Codec: "aac", Channels: 6}},
+	}, Capabilities{
+		StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingTranscode},
+		MaximumHeight:   1080, MaximumVideoBitrateKbps: 8000, MaximumAudioChannels: 2, TranscodeVideoBitrateKbps: 12000,
+	})
+	if mode != processingTranscode || decision == nil || !decision.ToneMapping || decision.Target == nil ||
+		decision.Target.Height != 1080 || decision.Target.VideoBitrateKbps != 8000 {
+		t.Fatalf("limits were not applied to full transcode: mode=%q decision=%+v", mode, decision)
+	}
+	mode, decision = playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, MediaInspection{
+		Container:   "mkv",
+		VideoTracks: []MediaTrack{{Codec: "vp9", Height: 1080, BitrateKbps: 24000}},
+		AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+	}, Capabilities{
+		StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes:           []string{processingTranscode},
+		TranscodeVideoBitrateKbps: 12000,
+	})
+	if mode != processingTranscode || decision == nil || decision.Target == nil || decision.Target.VideoBitrateKbps != 12000 {
+		t.Fatalf("server bitrate limit was not applied to full transcode: mode=%q decision=%+v", mode, decision)
+	}
+}
+func TestPlaybackCapabilitiesDoNotTreatMissingFormatsAsWildcards(t *testing.T) {
+	inspection := MediaInspection{
+		Container:   "mp4",
+		VideoTracks: []MediaTrack{{Codec: "h264", Height: 1080}},
+		AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+	}
+	if directMediaSupported(inspection, Capabilities{}) {
+		t.Fatal("missing client capabilities were treated as support for every format")
+	}
+	if mediaProfileSupported("", &inspection.VideoTracks[0], &inspection.AudioTracks[0], Capabilities{
+		Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+	}) {
+		t.Fatal("an unknown container was accepted for direct playback")
+	}
+}
+
+func TestValidateCapabilitiesAcceptsBoundedAdditiveProcessingLimits(t *testing.T) {
+	valid := Capabilities{
+		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"},
+		ProcessingModes:         []string{processingRemux, processingTranscodeAudio, processingTranscode},
+		SubtitleModes:           []string{"external", "burn"},
+		MaximumVideoBitrateKbps: 12000, MaximumAudioChannels: 6, MaximumHeight: 2160,
+	}
+	if err := validateCapabilities(valid); err != nil {
+		t.Fatalf("valid capabilities rejected: %v", err)
+	}
+	valid.ProcessingModes = []string{processingRemux, processingRemux}
+	if !errors.Is(validateCapabilities(valid), ErrInvalidInput) {
+		t.Fatal("duplicate processing mode accepted")
+	}
+	valid.ProcessingModes = []string{processingTranscode}
+	valid.MaximumVideoBitrateKbps = 200001
+	if !errors.Is(validateCapabilities(valid), ErrInvalidInput) {
+		t.Fatal("unbounded video bitrate accepted")
+	}
+}
+
+func TestEffectivePlaybackMaximumHeightUsesStrictestLimit(t *testing.T) {
+	tests := []struct {
+		client   int
+		settings int
+		want     int
+	}{
+		{client: 2160, settings: 1080, want: 1080},
+		{client: 720, settings: 1080, want: 720},
+		{client: 720, settings: 0, want: 720},
+		{client: 0, settings: 1080, want: 1080},
+	}
+	for _, test := range tests {
+		if got := effectivePlaybackMaximumHeight(test.client, test.settings); got != test.want {
+			t.Fatalf("effective height min(%d,%d)=%d, want %d", test.client, test.settings, got, test.want)
+		}
+	}
+}
+
+func TestTranscodeArgumentsApplyScaleBitrateChannelsAndBitmapBurnSafely(t *testing.T) {
+	subtitleIndex := 7
+	processor := &FFmpegProcessor{threads: 4, encoder: videoEncoder{kind: videoEncoderSoftware}}
+	arguments, err := processor.processingArguments(storedAsset{
+		Kind: processingTranscode, URL: "https://media.example/movie.mkv",
+		SubtitleTrackIndex: &subtitleIndex, TargetHeight: 720, VideoBitrateKbps: 4500, MaximumAudioChannels: 1,
+		Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{Height: 2160}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(arguments, " ")
+	for _, expected := range []string{
+		"-filter_complex [0:v:0][0:7]overlay,scale=-2:720[vout]",
+		"-map [vout]", "-b:v 4500k", "-maxrate 4500k", "-bufsize 9000k", "-ac 1",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("arguments missing %q: %v", expected, arguments)
+		}
+	}
+	if strings.Contains(joined, "sh -c") || strings.Contains(joined, "bash -c") {
+		t.Fatalf("subtitle burn escaped the argument-array runner: %v", arguments)
+	}
+}
+
+func TestRemuxArgumentsAlwaysCopyVideo(t *testing.T) {
+	processor := &FFmpegProcessor{threads: 4}
+	arguments, err := processor.processingArguments(storedAsset{Kind: processingRemux, URL: "https://media.example/movie.mkv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(arguments, " ")
+	if !strings.Contains(joined, "-c:v copy") || strings.Contains(joined, "libx264") || strings.Contains(joined, "h264_") {
+		t.Fatalf("remux unexpectedly re-encodes video: %v", arguments)
 	}
 }

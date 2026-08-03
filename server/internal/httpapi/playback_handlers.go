@@ -24,7 +24,6 @@ func (a *API) playbackSources(w http.ResponseWriter, r *http.Request, principal 
 			a.internalError(w, "resolve playback source settings", err)
 			return
 		}
-		input.Capabilities.MaximumHeight = playbackMaximumHeight(effective.Values.MaximumResolution)
 		input.PreferredAudioLanguage = effective.Values.AudioLanguage
 		input.PreferredSubtitleLanguage = effective.Values.SubtitleLanguage
 		input.PreferredForcedSubtitleLanguage = effective.Values.ForcedSubtitleLanguage
@@ -88,6 +87,15 @@ func (a *API) preparePlayback(w http.ResponseWriter, r *http.Request, principal 
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if principal.ActiveProfileID != nil {
+		effective, err := a.settings.Effective(r.Context(), principal, *principal.ActiveProfileID)
+		if err != nil {
+			a.internalError(w, "resolve playback preparation settings", err)
+			return
+		}
+		input.AllowTranscoding = effective.Values.AllowTranscoding
+		input.MaximumHeight = playbackMaximumHeight(effective.Values.MaximumResolution)
+	}
 	preparation, err := a.playback.Prepare(r.Context(), principal, input)
 	switch {
 	case errors.Is(err, playback.ErrActiveProfileRequired):
@@ -96,6 +104,10 @@ func (a *API) preparePlayback(w http.ResponseWriter, r *http.Request, principal 
 		writeError(w, http.StatusUnprocessableEntity, "invalid_playback_request", "The playback preparation request is invalid")
 	case errors.Is(err, playback.ErrSourceReferenceExpired):
 		writeError(w, http.StatusGone, "playback_source_expired", "The selected source expired and must be refreshed")
+	case errors.Is(err, playback.ErrTranscodingDisabled):
+		writeError(w, http.StatusUnprocessableEntity, "playback_transcoding_disabled", "This source requires server transcoding, but transcoding is disabled for this profile")
+	case errors.Is(err, playback.ErrClientCapabilityMissing):
+		writeError(w, http.StatusUnprocessableEntity, "playback_client_capability_missing", "This source requires a server output mode that this client did not announce")
 	case errors.Is(err, playback.ErrUnsupportedSource):
 		writeError(w, http.StatusUnprocessableEntity, "playback_source_unsupported", "This source needs video or audio conversion that browser playback does not permit; choose another source or an external player")
 	case errors.Is(err, playback.ErrNoPlayableSource):
@@ -125,6 +137,15 @@ func (a *API) resolvePlayback(w http.ResponseWriter, r *http.Request, principal 
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if principal.ActiveProfileID != nil {
+		effective, err := a.settings.Effective(r.Context(), principal, *principal.ActiveProfileID)
+		if err != nil {
+			a.internalError(w, "resolve playback session settings", err)
+			return
+		}
+		input.AllowTranscoding = effective.Values.AllowTranscoding
+		input.MaximumHeight = playbackMaximumHeight(effective.Values.MaximumResolution)
+	}
 	session, err := a.playback.Resolve(r.Context(), principal, input)
 	switch {
 	case errors.Is(err, playback.ErrActiveProfileRequired):
@@ -133,6 +154,10 @@ func (a *API) resolvePlayback(w http.ResponseWriter, r *http.Request, principal 
 		writeError(w, http.StatusUnprocessableEntity, "invalid_playback_request", "The playback request is invalid")
 	case errors.Is(err, playback.ErrSourceReferenceExpired):
 		writeError(w, http.StatusGone, "playback_source_expired", "The selected source expired and must be refreshed")
+	case errors.Is(err, playback.ErrTranscodingDisabled):
+		writeError(w, http.StatusUnprocessableEntity, "playback_transcoding_disabled", "This source requires server transcoding, but transcoding is disabled for this profile")
+	case errors.Is(err, playback.ErrClientCapabilityMissing):
+		writeError(w, http.StatusUnprocessableEntity, "playback_client_capability_missing", "This source requires a server output mode that this client did not announce")
 	case errors.Is(err, playback.ErrUnsupportedSource):
 		writeError(w, http.StatusUnprocessableEntity, "playback_source_unsupported", "This source needs video or audio conversion that browser playback does not permit; choose another source or an external player")
 	case errors.Is(err, playback.ErrNoPlayableSource):
@@ -193,6 +218,8 @@ func (a *API) playbackAsset(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, playback.ErrSessionNotFound):
 		writeError(w, http.StatusNotFound, "playback_session_not_found", "The playback session is invalid or expired")
+	case errors.Is(err, playback.ErrClientCapabilityMissing):
+		writeError(w, http.StatusUnprocessableEntity, "playback_client_capability_missing", "This source requires a server output mode that this client did not announce")
 	case errors.Is(err, playback.ErrMediaSourceFailed):
 		writeError(w, http.StatusBadGateway, "playback_source_failed", "The selected media source stopped responding")
 	case errors.Is(err, playback.ErrMediaCapacityReached):

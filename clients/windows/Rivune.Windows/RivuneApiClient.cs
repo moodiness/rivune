@@ -161,6 +161,54 @@ public sealed class RivuneApiClient : IDisposable
     public Task ClearProfileSelectionAsync(CancellationToken cancellationToken = default) =>
         RequestEmptyAsync(HttpMethod.Delete, ["profiles", "selection"], true, cancellationToken);
 
+    public Task<SettingsLayer> GetInstanceSettingsAsync(CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<SettingsLayer>(HttpMethod.Get, ["settings"], null, null, true, cancellationToken);
+
+    public Task<SettingsLayer> UpdateInstanceSettingsAsync(
+        bool? allowTranscoding,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<SettingsLayer>(
+            HttpMethod.Patch,
+            ["settings"],
+            null,
+            new InstanceTranscodingPatch(allowTranscoding),
+            true,
+            cancellationToken);
+
+    public Task<SettingsLayer> GetProfileSettingsAsync(
+        Guid profileId,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<SettingsLayer>(
+            HttpMethod.Get,
+            ["profiles", profileId.ToString("D"), "settings"],
+            null,
+            null,
+            true,
+            cancellationToken);
+
+    public Task<SettingsLayer> UpdateProfileSettingsAsync(
+        Guid profileId,
+        string? transcoding,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<SettingsLayer>(
+            HttpMethod.Patch,
+            ["profiles", profileId.ToString("D"), "settings"],
+            null,
+            new ProfileTranscodingPatch(transcoding),
+            true,
+            cancellationToken);
+
+    public Task<EffectiveSettings> GetEffectiveProfileSettingsAsync(
+        Guid profileId,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<EffectiveSettings>(
+            HttpMethod.Get,
+            ["profiles", profileId.ToString("D"), "settings", "effective"],
+            null,
+            null,
+            true,
+            cancellationToken);
+
     public Task<Movie> GetMovieAsync(
         Guid id,
         string? language = null,
@@ -243,6 +291,7 @@ public sealed class RivuneApiClient : IDisposable
 
     public Task<PlaybackPreparation> PreparePlaybackAsync(
         string sourceRef,
+        int? startSeconds = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(sourceRef);
@@ -250,7 +299,7 @@ public sealed class RivuneApiClient : IDisposable
             HttpMethod.Post,
             ["playback", "prepare"],
             null,
-            new PlaybackPrepareRequest(sourceRef),
+            new PlaybackPrepareRequest(sourceRef, startSeconds),
             true,
             cancellationToken);
     }
@@ -260,6 +309,7 @@ public sealed class RivuneApiClient : IDisposable
         string? titleId = null,
         int? preferredAudioTrack = null,
         string? preferredSubtitleId = null,
+        int? startSeconds = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(sourceRef);
@@ -267,7 +317,7 @@ public sealed class RivuneApiClient : IDisposable
             HttpMethod.Post,
             ["playback", "resolve"],
             null,
-            new PlaybackResolveRequest(sourceRef, titleId, preferredAudioTrack, preferredSubtitleId),
+            new PlaybackResolveRequest(sourceRef, titleId, preferredAudioTrack, preferredSubtitleId, startSeconds),
             true,
             cancellationToken);
     }
@@ -276,6 +326,15 @@ public sealed class RivuneApiClient : IDisposable
         RequestEmptyAsync(
             HttpMethod.Delete,
             ["playback", "sessions", sessionId.ToString("D")],
+            true,
+            cancellationToken);
+
+    public Task<PlaybackActivity> GetPlaybackActivityAsync(CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackActivity>(
+            HttpMethod.Get,
+            ["playback", "activity"],
+            null,
+            null,
             true,
             cancellationToken);
 
@@ -713,15 +772,20 @@ public sealed class RivuneApiClient : IDisposable
     private sealed record LoginRequest(string Username, string Password, Device Device);
     private sealed record RefreshRequest(string RefreshToken);
     private sealed record SelectProfileRequest(string? Pin);
+    private sealed record InstanceTranscodingPatch(
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] bool? AllowTranscoding);
+    private sealed record ProfileTranscodingPatch(
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? Transcoding);
     private sealed record PlaybackSourcesRequest(
         string MediaType,
         string ResourceId,
         PlaybackCapabilities Capabilities);
-    private sealed record PlaybackPrepareRequest(string SourceRef);
+    private sealed record PlaybackPrepareRequest(string SourceRef, int? StartSeconds);
     private sealed record PlaybackResolveRequest(
         string SourceRef,
         string? TitleId,
         int? PreferredAudioTrack,
-        string? PreferredSubtitleId);
+        string? PreferredSubtitleId,
+        int? StartSeconds);
     private sealed record ErrorEnvelope(ServerError Error);
 }

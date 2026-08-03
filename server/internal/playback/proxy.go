@@ -80,26 +80,14 @@ func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessi
 	}
 	switch asset.Kind {
 	case processingRemux, processingTranscodeAudio, processingTranscode:
-		startSeconds, err := processedMediaStart(r.URL.Query().Get("start"))
-		if err != nil {
-			return err
-		}
-		asset.StartSeconds = startSeconds
-		if target != "" || signature != "" {
-			return ErrSessionNotFound
-		}
-		if r.URL.Query().Get("file") != "" {
-			return service.serveHLS(w, r, sessionID, token, *asset)
-		}
-		if r.URL.Query().Get("fallback") == "1" {
-			service.stopOtherHLSGenerations(hlsJobPrefix(sessionID, asset.ID), "")
-		}
-		return service.proxyProcessedMedia(w, r, *asset)
+		return service.proxyProcessingAsset(w, r, sessionID, token, target, signature, *asset)
 	case assetKindEmbeddedSubtitle, assetKindConvertedSubtitle:
 		if target != "" || signature != "" || r.URL.Query().Get("file") != "" {
 			return ErrSessionNotFound
 		}
 		return service.proxyConvertedSubtitle(w, r, *asset)
+	case assetKindBitmapSubtitle:
+		return ErrSessionNotFound
 	}
 
 	upstreamURL := asset.URL
@@ -148,6 +136,21 @@ func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessi
 	}
 	_, _ = io.Copy(w, response.Body)
 	return nil
+}
+
+func (service *Service) proxyProcessingAsset(w http.ResponseWriter, r *http.Request, sessionID, token, target, signature string, asset storedAsset) error {
+	if target != "" || signature != "" {
+		return ErrSessionNotFound
+	}
+	if r.URL.Query().Get("file") == "" {
+		return ErrClientCapabilityMissing
+	}
+	startSeconds, err := processedMediaStart(r.URL.Query().Get("start"))
+	if err != nil {
+		return err
+	}
+	asset.StartSeconds = startSeconds
+	return service.serveHLS(w, r, sessionID, token, asset)
 }
 
 func (service *Service) fetchAsset(ctx context.Context, incoming *http.Request, asset storedAsset, upstreamURL string) (*http.Response, error) {

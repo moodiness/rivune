@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"net/url"
@@ -20,18 +21,20 @@ import (
 )
 
 const (
-	defaultMediaStorageBytes = int64(20 * 1024 * 1024 * 1024)
-	defaultMediaIdleTTL      = 2 * time.Minute
-	hlsReadyTimeout          = 45 * time.Second
-	hlsRetainedSegments      = 120
+	defaultMediaStorageBytes         = int64(20 * 1024 * 1024 * 1024)
+	defaultMediaIdleTTL              = 2 * time.Minute
+	defaultTranscodeVideoBitrateKbps = 12000
+	hlsReadyTimeout                  = 45 * time.Second
+	hlsRetainedSegments              = 120
 )
 
 var localMediaName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 type MediaOptions struct {
-	TempDirectory   string
-	MaxStorageBytes int64
-	IdleTTL         time.Duration
+	TempDirectory             string
+	MaxStorageBytes           int64
+	IdleTTL                   time.Duration
+	TranscodeVideoBitrateKbps int
 }
 
 type HLSProcessor interface {
@@ -40,19 +43,21 @@ type HLSProcessor interface {
 }
 
 type hlsJob struct {
-	directory    string
-	fingerprint  string
-	sessionID    string
-	assetID      string
-	mode         string
-	prewarming   bool
-	createdAt    time.Time
-	lastAccessed time.Time
-	cancel       context.CancelFunc
-	done         chan struct{}
-	timer        *time.Timer
-	mu           sync.RWMutex
-	err          error
+	directory             string
+	fingerprint           string
+	sessionID             string
+	assetID               string
+	mode                  string
+	prewarming            bool
+	sourceDurationSeconds float64
+	startOffsetSeconds    float64
+	createdAt             time.Time
+	lastAccessed          time.Time
+	cancel                context.CancelFunc
+	done                  chan struct{}
+	timer                 *time.Timer
+	mu                    sync.RWMutex
+	err                   error
 }
 
 func normalizeMediaOptions(options MediaOptions) MediaOptions {
@@ -62,6 +67,9 @@ func normalizeMediaOptions(options MediaOptions) MediaOptions {
 	options.TempDirectory = filepath.Join(options.TempDirectory, "rivune-media")
 	if options.MaxStorageBytes <= 0 {
 		options.MaxStorageBytes = defaultMediaStorageBytes
+	}
+	if options.TranscodeVideoBitrateKbps <= 0 {
+		options.TranscodeVideoBitrateKbps = defaultTranscodeVideoBitrateKbps
 	}
 	if options.IdleTTL <= 0 {
 		options.IdleTTL = defaultMediaIdleTTL
@@ -192,8 +200,8 @@ func (service *Service) hlsJob(sessionID string, asset storedAsset, processor HL
 	now := service.currentTime()
 	job := &hlsJob{
 		directory: directory, fingerprint: hlsAssetFingerprint(asset), sessionID: sessionID, assetID: asset.ID,
-		mode: asset.Kind, prewarming: strings.HasPrefix(sessionID, "prewarm-"), createdAt: now, lastAccessed: now,
-		cancel: cancel, done: make(chan struct{}),
+		mode: asset.Kind, prewarming: strings.HasPrefix(sessionID, "prewarm-"), sourceDurationSeconds: asset.DurationSeconds,
+		startOffsetSeconds: asset.StartSeconds, createdAt: now, lastAccessed: now, cancel: cancel, done: make(chan struct{}),
 	}
 	service.hlsJobs[key] = job
 	service.hlsMu.Unlock()
@@ -202,6 +210,42 @@ func (service *Service) hlsJob(sessionID string, asset storedAsset, processor HL
 	go service.runHLSJob(jobContext, job, asset, processor)
 	go service.monitorHLSStorage(jobContext, job)
 	return job, nil
+}
+
+func hlsPlaylistEncodedSeconds(directory string) (float64, bool) {
+	file, err := os.Open(filepath.Join(directory, "index.m3u8"))
+	if err != nil {
+		return 0, false
+	}
+	defer file.Close()
+
+	const prefix = "#EXTINF:"
+	var total float64
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if !bytes.HasPrefix(line, []byte(prefix)) {
+			continue
+		}
+		value := line[len(prefix):]
+		comma := bytes.IndexByte(value, ',')
+		if comma < 0 {
+			continue
+		}
+		value = value[:comma]
+		seconds, err := strconv.ParseFloat(string(bytes.TrimSpace(value)), 64)
+		if err != nil || seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+			continue
+		}
+		total += seconds
+		if math.IsInf(total, 0) {
+			return 0, false
+		}
+	}
+	if scanner.Err() != nil {
+		return 0, false
+	}
+	return total, true
 }
 
 func (service *Service) prewarmHLS(ctx context.Context, prewarmSessionID string, source Source, asset *storedAsset) error {
@@ -218,13 +262,14 @@ func (service *Service) prewarmHLS(ctx context.Context, prewarmSessionID string,
 		return err
 	}
 	if err := waitForMediaFile(ctx, job, filepath.Join(job.directory, "index.m3u8")); err != nil {
+		service.stopHLSJob(hlsJobKey(prewarmSessionID, *asset))
 		return err
 	}
 	service.touchHLSJob(job)
 	return nil
 }
 
-func (service *Service) startSessionHLS(prewarmSessionID, sessionID string, sources []Source, assets []storedAsset) error {
+func (service *Service) startSessionHLS(ctx context.Context, prewarmSessionID, sessionID string, sources []Source, assets []storedAsset) error {
 	for _, source := range sources {
 		if !source.Compatible || source.Protocol != "hls" || source.Mode == "direct" {
 			continue
@@ -241,8 +286,16 @@ func (service *Service) startSessionHLS(prewarmSessionID, sessionID string, sour
 		if !ok {
 			return ErrMediaProcessingFailed
 		}
-		_, err := service.hlsJob(sessionID, asset, processor, true)
-		return err
+		job, err := service.hlsJob(sessionID, asset, processor, true)
+		if err != nil {
+			return err
+		}
+		if err := waitForMediaFile(ctx, job, filepath.Join(job.directory, "index.m3u8")); err != nil {
+			service.stopHLSJob(hlsJobKey(sessionID, asset))
+			return err
+		}
+		service.touchHLSJob(job)
+		return nil
 	}
 	return nil
 }
@@ -305,7 +358,15 @@ func hlsAssetFingerprint(asset storedAsset) string {
 	if asset.AudioTrackIndex != nil {
 		audioTrack = *asset.AudioTrackIndex
 	}
-	return fmt.Sprintf("%s|%s|%t|%d|%s", mediaProbeKey(asset), asset.Kind, asset.ToneMap, audioTrack, hlsStartKey(asset.StartSeconds))
+	subtitleTrack := -1
+	if asset.SubtitleTrackIndex != nil {
+		subtitleTrack = *asset.SubtitleTrackIndex
+	}
+	return fmt.Sprintf(
+		"%s|%s|%t|%d|%d|%d|%d|%d|%s",
+		mediaProbeKey(asset), asset.Kind, asset.ToneMap, audioTrack, subtitleTrack,
+		asset.TargetHeight, asset.VideoBitrateKbps, asset.MaximumAudioChannels, hlsStartKey(asset.StartSeconds),
+	)
 }
 
 func (service *Service) runHLSJob(ctx context.Context, job *hlsJob, asset storedAsset, processor HLSProcessor) {
