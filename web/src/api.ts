@@ -1,4 +1,6 @@
 import { translate as t } from "./i18n";
+import { clearMediaCaches } from "./homeCache";
+import { clearMetadataCache } from "./metadataCache";
 import type {
   Account,
   AvatarPreset,
@@ -56,14 +58,50 @@ let metadataRegion = region();
 let seriesMappingProvider: "tmdb" | "tvdb" = "tmdb";
 export const PROFILE_SELECTION_REQUIRED_EVENT = "rivune:profile-selection-required";
 export const MAINTENANCE_MODE_EVENT = "rivune:maintenance-mode";
+export const DEMO_UNAVAILABLE_EVENT = "rivune:demo-unavailable";
+export const DEMO_HINT_KEY = "rivune.demo";
 let currentMaintenanceMessage: string | null = null;
-
+let demoUnavailableDispatched = false;
 export function maintenanceModeMessage(): string | null {
   return currentMaintenanceMessage;
 }
 
 export function clearMaintenanceMode(): void {
   currentMaintenanceMessage = null;
+}
+
+export function hasDemoHint(): boolean {
+  try {
+    return localStorage.getItem(DEMO_HINT_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function clearDemoClientState(): void {
+  clearSession();
+  clearMediaCaches();
+  clearMetadataCache();
+  currentMaintenanceMessage = null;
+  try {
+    localStorage.removeItem(DEMO_HINT_KEY);
+  } catch {
+    // The backend cookie remains the only authority when storage is unavailable.
+  }
+}
+
+export function prepareDemoAttempt(): void {
+  demoUnavailableDispatched = false;
+  clearDemoClientState();
+}
+
+export function rememberDemoSession(): void {
+  demoUnavailableDispatched = false;
+  try {
+    localStorage.setItem(DEMO_HINT_KEY, "1");
+  } catch {
+    // The non-secret hint is optional; the cookie remains authoritative.
+  }
 }
 
 export class APIError extends Error {
@@ -110,9 +148,9 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
     headers.set("Content-Type", "application/json");
   }
   const token = sessionStorage.getItem(ACCESS_KEY) ?? localStorage.getItem(ACCESS_KEY);
-  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (token && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
   const requestURL = path.startsWith("/.well-known") || path === "/health" ? path : `${API_BASE}${path}`;
-  const response = await fetch(requestURL, { ...init, headers });
+  const response = await fetch(requestURL, { ...init, headers, credentials: "same-origin" });
   if (response.status === 401 && retry && localStorage.getItem(REFRESH_KEY)) {
     refreshPromise ??= refreshSession().finally(() => { refreshPromise = null; });
     if (await refreshPromise) return request<T>(path, init, false);
@@ -133,6 +171,13 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
     if (code === "maintenance_mode") {
       currentMaintenanceMessage = publicMessage ?? "";
       window.dispatchEvent(new CustomEvent<{ message: string }>(MAINTENANCE_MODE_EVENT, { detail: { message: currentMaintenanceMessage } }));
+    }
+    if (code === "demo_unavailable") {
+      clearDemoClientState();
+      if (!demoUnavailableDispatched) {
+        demoUnavailableDispatched = true;
+        window.dispatchEvent(new Event(DEMO_UNAVAILABLE_EVENT));
+      }
     }
     throw new APIError(response.status, code, message);
   }
@@ -159,10 +204,17 @@ type ProfileAccessInput = {
 
 export const api = {
   discovery: () => request<Discovery>("/.well-known/rivune", {}, false),
-  setup: (input: { instanceName: string; admin: { username: string; password: string }; profileName: string }, token: string) =>
-    request<{ instance: { id: string }; admin: { id: string }; profile: { id: string } }>("/setup", {
+  setup: async (input: { instanceName: string; admin: { username: string; password: string }; profileName: string }, token: string) => {
+    const result = await request<{ instance: { id: string }; admin: { id: string }; profile: { id: string } }>("/setup", {
       method: "POST", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(input),
-    }, false),
+    }, false);
+    clearDemoClientState();
+    return result;
+  },
+  startDemo: () => request<{ account: Account }>("/demo/sessions", { method: "POST" }, false),
+  demoSession: () => request<{ account: Account }>("/demo/session", {}, false),
+  resetDemo: () => request<{ account: Account }>("/demo/session/reset", { method: "POST" }, false),
+  exitDemo: () => request<void>("/demo/session", { method: "DELETE" }, false),
   login: async (username: string, password: string) => {
     const tokens = await request<TokenPair>("/auth/login", {
       method: "POST",

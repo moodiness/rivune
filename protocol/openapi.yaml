@@ -71,6 +71,12 @@ paths:
                 properties:
                   setupRequired:
                     type: boolean
+                  setupCompleted:
+                    type: boolean
+                    description: Whether server setup has completed. Always emitted by current servers but optional for protocol v17 compatibility.
+                  demoAvailable:
+                    type: boolean
+                    description: Whether a pre-setup demonstration session may be started. Always emitted by current servers but optional for protocol v17 compatibility.
         "400":
           description: The HTTP request was malformed.
         default:
@@ -96,6 +102,8 @@ paths:
                 $ref: "#/components/schemas/SetupResponse"
         "401":
           $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/DemoForbidden"
         "409":
           $ref: "#/components/responses/Error"
         "415":
@@ -103,6 +111,203 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
         "503":
+          $ref: "#/components/responses/Error"
+  /demo/sessions:
+    post:
+      summary: Start a pre-setup demonstration session
+      description: Available only while server setup is incomplete. The session secret is returned solely in the HttpOnly rivune_demo cookie.
+      operationId: createDemoSession
+      security: []
+      responses:
+        "201":
+          description: A fresh isolated demonstration session with Alex selected as the active profile.
+          headers:
+            Set-Cookie:
+              description: Opaque 8-hour demonstration session cookie with HttpOnly, SameSite=Strict, and Path=/api/v1; Secure for direct or forwarded HTTPS requests.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DemoSessionResponse"
+        "403":
+          $ref: "#/components/responses/DemoOriginRejected"
+        "410":
+          $ref: "#/components/responses/DemoUnavailable"
+        default:
+          $ref: "#/components/responses/Error"
+  /demo/session:
+    get:
+      summary: Resume a demonstration session
+      operationId: getDemoSession
+      security:
+        - demoCookie: []
+      responses:
+        "200":
+          description: The current demonstration account and session state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DemoSessionResponse"
+        "401":
+          $ref: "#/components/responses/DemoSessionInvalid"
+        "410":
+          $ref: "#/components/responses/DemoUnavailable"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      summary: Exit a demonstration session
+      operationId: deleteDemoSession
+      security:
+        - demoCookie: []
+      responses:
+        "204":
+          description: The demonstration session was invalidated and its cookie expired.
+          headers:
+            Set-Cookie:
+              description: Expired rivune_demo cookie scoped to /api/v1.
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/DemoSessionInvalid"
+        "403":
+          $ref: "#/components/responses/DemoOriginRejected"
+        "410":
+          $ref: "#/components/responses/DemoUnavailable"
+        default:
+          $ref: "#/components/responses/Error"
+  /demo/session/reset:
+    post:
+      summary: Reset a demonstration session
+      description: Replaces only the calling session's in-memory state with the seed dataset and selects Alex.
+      operationId: resetDemoSession
+      security:
+        - demoCookie: []
+      responses:
+        "200":
+          description: The reset demonstration account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DemoSessionResponse"
+        "401":
+          $ref: "#/components/responses/DemoSessionInvalid"
+        "403":
+          $ref: "#/components/responses/DemoOriginRejected"
+        "410":
+          $ref: "#/components/responses/DemoUnavailable"
+        default:
+          $ref: "#/components/responses/Error"
+  /demo/assets/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        description: Name of an embedded synthetic asset belonging to the demonstration dataset.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      - name: Range
+        in: header
+        required: false
+        description: Optional single byte range for an embedded MP4 asset.
+        schema:
+          type: string
+          pattern: "^bytes=([0-9]+-[0-9]*|-[0-9]+)$"
+    get:
+      summary: Stream a demonstration asset
+      operationId: streamDemoAsset
+      security:
+        - demoCookie: []
+      responses:
+        "200":
+          description: A complete embedded synthetic video, subtitle, or artwork asset.
+          headers:
+            Accept-Ranges:
+              description: Range unit supported by video assets.
+              schema:
+                type: string
+                const: bytes
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+            text/vtt:
+              schema:
+                type: string
+            image/svg+xml:
+              schema:
+                type: string
+                contentMediaType: image/svg+xml
+        "206":
+          description: A byte range from an embedded synthetic MP4 asset.
+          headers:
+            Accept-Ranges:
+              description: Range unit supported by the asset.
+              required: true
+              schema:
+                type: string
+                const: bytes
+            Content-Range:
+              description: Inclusive byte range and complete asset size.
+              required: true
+              schema:
+                type: string
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/DemoSessionInvalid"
+        "404":
+          $ref: "#/components/responses/Error"
+        "410":
+          $ref: "#/components/responses/DemoUnavailable"
+        "416":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    head:
+      summary: Inspect a demonstration asset
+      operationId: inspectDemoAsset
+      security:
+        - demoCookie: []
+      responses:
+        "200":
+          description: Headers for a complete embedded synthetic asset.
+          headers:
+            Accept-Ranges:
+              description: Range unit supported by video assets.
+              schema:
+                type: string
+                const: bytes
+        "206":
+          description: Headers for a byte range from an embedded synthetic MP4 asset.
+          headers:
+            Accept-Ranges:
+              description: Range unit supported by the asset.
+              required: true
+              schema:
+                type: string
+                const: bytes
+            Content-Range:
+              description: Inclusive byte range and complete asset size.
+              required: true
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/DemoSessionInvalid"
+        "404":
+          $ref: "#/components/responses/Error"
+        "410":
+          $ref: "#/components/responses/DemoUnavailable"
+        "416":
+          $ref: "#/components/responses/Error"
+        default:
           $ref: "#/components/responses/Error"
   /auth/login:
     post:
@@ -2738,6 +2943,11 @@ components:
       scheme: bearer
       bearerFormat: opaque
       description: Short-lived opaque Rivune access token.
+    demoCookie:
+      type: apiKey
+      in: cookie
+      name: rivune_demo
+      description: Opaque pre-setup demonstration cookie issued with HttpOnly, SameSite=Strict, and Path=/api/v1; Secure for direct or forwarded HTTPS requests.
     playbackToken:
       type: apiKey
       in: query
@@ -2891,6 +3101,35 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
+    DemoForbidden:
+      description: A demonstration session attempted a route outside its exact method-and-path allowlist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/DemoForbiddenError"
+    DemoSessionInvalid:
+      description: The demonstration cookie is absent, invalid, or expired.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/DemoSessionInvalidError"
+    DemoOriginRejected:
+      description: A state-changing demonstration request failed its same-origin check.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    DemoUnavailable:
+      description: Server setup has completed, so demonstration mode and all demonstration sessions are unavailable.
+      headers:
+        Set-Cookie:
+          description: Expired rivune_demo cookie scoped to /api/v1.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/DemoUnavailableError"
     ArtworkError:
       description: Stable plain-text artwork lookup or upstream failure.
       content:
@@ -3271,6 +3510,12 @@ components:
           type: string
         setupRequired:
           type: boolean
+        setupCompleted:
+          type: boolean
+          description: Whether server setup has completed. Always emitted by current servers but optional for protocol v17 compatibility.
+        demoAvailable:
+          type: boolean
+          description: Whether a pre-setup demonstration session may be started. Always emitted by current servers but optional for protocol v17 compatibility.
         timezone:
           type: string
           description: IANA timezone configured by the server operator.
@@ -3401,6 +3646,26 @@ components:
         deviceId:
           type: string
           format: uuid
+    DemoSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [account]
+      properties:
+        account:
+          $ref: "#/components/schemas/DemoAccount"
+    DemoAccount:
+      allOf:
+        - $ref: "#/components/schemas/Account"
+        - type: object
+          required: [user]
+          properties:
+            user:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  const: demo
     Account:
       type: object
       required: [user, session, profiles, maintenance]
@@ -3416,7 +3681,7 @@ components:
               type: string
             role:
               type: string
-              enum: [admin, member]
+              enum: [admin, member, demo]
         session:
           type: object
           required: [id, deviceId, activeProfile]
@@ -6290,6 +6555,22 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ContinueWatchingItem"
+    DemoSessionInvalidError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              const: demo_session_invalid
+            message:
+              type: string
+              const: A valid demo session is required
     ErrorEnvelope:
       type: object
       required: [error]
@@ -6302,3 +6583,35 @@ components:
               type: string
             message:
               type: string
+    DemoForbiddenError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              const: demo_forbidden
+            message:
+              type: string
+              const: Demo sessions cannot access this endpoint
+    DemoUnavailableError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              const: demo_unavailable
+            message:
+              type: string
+              const: The server setup has been completed. Demo mode is no longer available.

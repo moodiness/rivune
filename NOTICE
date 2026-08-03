@@ -7,3 +7,37 @@ This product uses the TVDB API but is not endorsed or certified by TVDB.
 
 This product includes FFmpeg as packaged by Debian. The packaged build is distributed
 under the GNU General Public License version 2 or later. See https://ffmpeg.org/legal.html.
+
+Synthetic demo media assets
+---------------------------
+Titles and files:
+  Rivune synthetic demo playback, 720p
+    server/internal/demo/assets/demo-720p.mp4
+  Rivune synthetic demo playback, 360p
+    server/internal/demo/assets/demo-360p.mp4
+  Rivune synthetic demo subtitles, English
+    server/internal/demo/assets/demo.en.vtt
+  Rivune synthetic demo subtitles, French
+    server/internal/demo/assets/demo.fr.vtt
+  Rivune synthetic demo artwork
+    server/internal/demo/assets/artwork.svg
+Source:
+  The MP4 files were generated exclusively from FFmpeg lavfi testsrc2 and sine
+  primitives by scripts/generate-demo-assets.sh using FFmpeg 8.1.2. The VTT
+  subtitles are authored in that same reproducible script. The SVG artwork was
+  authored directly by Rivune contributors from vector primitives.
+Author and copyright: Copyright 2026 Rivune contributors
+License: Apache License 2.0 (the repository LICENSE file).
+License obligations: Redistributions must provide a copy of the Apache
+  License 2.0, retain applicable copyright, patent, attribution, and NOTICE
+  notices, and identify modified files as required by Section 4 of the license.
+Creation and license verification date: 2026-08-03
+Reproduction recipe for MP4 and VTT files: scripts/generate-demo-assets.sh
+SHA-256:
+  ec7cbf6fae17c35b166df5b651ce5ebf37138c52d54372cd886773173c5274ec  demo-720p.mp4
+  e99c55a611c28bc0c8b2e1bc061cbd0b86a4180cbc3f42155bf3fc73fcf96c45  demo-360p.mp4
+  213f23304649d6a91f5312e1981aaf6633269ed674e49991c7e7f0bc725f6407  demo.en.vtt
+  bcb1b8b9f6b012397eb9091f655f1a129dd1becedfc2182d5100b849751f8951  demo.fr.vtt
+  42a2e34b6439b84d267b6bf8bfad83ce52c17051d4e2860f8f1925f31045ff7f  artwork.svg
+No third-party audiovisual, musical, photographic, font, logo, speech,
+image, or other creative material is incorporated in these assets.

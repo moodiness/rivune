@@ -1,6 +1,15 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, clearSession, PROFILE_SELECTION_REQUIRED_EVENT } from "./api";
-import { setLocale } from "./i18n";
+import {
+  api,
+  clearDemoClientState,
+  clearSession,
+  DEMO_UNAVAILABLE_EVENT,
+  hasDemoHint,
+  prepareDemoAttempt,
+  PROFILE_SELECTION_REQUIRED_EVENT,
+  rememberDemoSession,
+} from "./api";
+import { setLocale, translate as t } from "./i18n";
 import type { Account, Discovery, InterfaceLanguage, Profile } from "./types";
 
 type AuthState = {
@@ -8,6 +17,9 @@ type AuthState = {
   account: Account | null;
   activeProfile: Profile | null;
   booting: boolean;
+  mode: "real" | "demo";
+  demoRevision: number;
+  terminalMessage: string | null;
   authenticated: boolean;
   profileRequestSignal: AbortSignal;
   refreshAccount: (options?: { restoreActiveProfile?: boolean }) => Promise<Account | null>;
@@ -16,6 +28,9 @@ type AuthState = {
   logout: () => Promise<void>;
   selectProfile: (profile: Profile, pin?: string) => Promise<void>;
   leaveProfile: () => Promise<void>;
+  enterDemo: () => Promise<void>;
+  resetDemo: () => Promise<void>;
+  exitDemo: () => Promise<void>;
   rediscover: () => Promise<void>;
   updateServerInterfaceLanguage: (language: InterfaceLanguage) => void;
 };
@@ -26,6 +41,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
   const [account, setAccount] = useState<Account | null>(null);
   const [booting, setBooting] = useState(true);
+  const [mode, setMode] = useState<"real" | "demo">("real");
+  const [demoRevision, setDemoRevision] = useState(0);
+  const [terminalMessage, setTerminalMessage] = useState<string | null>(null);
   const [confirmedProfileID, setConfirmedProfileID] = useState<string | null>(null);
   const authGeneration = useRef(0);
   const profileSelectionInFlight = useRef(false);
@@ -47,6 +65,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfileRequestSignal(controller.signal);
     setConfirmedProfileID(profileID);
   }, []);
+
+  const applyDemoAccount = useCallback((next: Account) => {
+    if (next.user.role !== "demo") throw new Error("The demo endpoint returned a non-demo account.");
+    setMode("demo");
+    setTerminalMessage(null);
+    setAccount(next);
+    const activeProfileID = next.session.activeProfile?.id ?? null;
+    if (activeProfileID && confirmedProfileIDRef.current !== activeProfileID) confirmProfile(activeProfileID);
+    else if (!activeProfileID) invalidateProfile();
+  }, [confirmProfile, invalidateProfile]);
 
   const refreshAccount = useCallback(async (options?: { restoreActiveProfile?: boolean }) => {
     const generation = authGeneration.current;
@@ -94,6 +122,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setDiscovery((current) => current === null ? null : { ...current, interfaceLanguage });
   }, []);
 
+
+  useEffect(() => {
+    const endDemo = () => {
+      ++authGeneration.current;
+      invalidateProfile();
+      setMode("real");
+      setAccount(null);
+      setTerminalMessage(t("demo.unavailable"));
+      setDemoRevision((current) => current + 1);
+      window.history.replaceState({}, "", "/");
+      void rediscover().catch(() => setDiscovery(null));
+    };
+    window.addEventListener(DEMO_UNAVAILABLE_EVENT, endDemo);
+    return () => window.removeEventListener(DEMO_UNAVAILABLE_EVENT, endDemo);
+  }, [invalidateProfile, rediscover]);
+
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -102,9 +146,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!active) return;
         setLocale(discovered.interfaceLanguage);
         setDiscovery(discovered);
+
+        const directDemo = window.location.pathname === "/demo";
+        if (directDemo) {
+          prepareDemoAttempt();
+          try {
+            const response = await api.startDemo();
+            if (!active) return;
+            applyDemoAccount(response.account);
+            rememberDemoSession();
+          } finally {
+            if (active && window.location.pathname === "/demo") {
+              window.history.replaceState(window.history.state, "", `/${window.location.search}${window.location.hash}`);
+            }
+          }
+          return;
+        }
+
+        if (hasDemoHint()) {
+          clearSession();
+          try {
+            const response = await api.demoSession();
+            if (!active) return;
+            applyDemoAccount(response.account);
+            rememberDemoSession();
+            return;
+          } catch {
+            clearDemoClientState();
+            if (!active) return;
+          }
+        }
+
         if (!discovered.setupRequired && await api.restore()) {
           const current = await api.me();
           if (active) {
+            setMode("real");
             setAccount(current);
             if (current.session.activeProfile?.id) confirmProfile(current.session.activeProfile.id);
             else invalidateProfile();
@@ -117,7 +193,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     })();
     return () => { active = false; };
-  }, [confirmProfile, invalidateProfile]);
+  }, [applyDemoAccount, confirmProfile, invalidateProfile]);
 
   const login = useCallback(async (username: string, password: string) => {
     const generation = ++authGeneration.current;
@@ -125,8 +201,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await api.login(username, password);
     const next = await api.me();
     if (authGeneration.current !== generation) return;
+    setMode("real");
+    setTerminalMessage(null);
     setAccount(next);
   }, [invalidateProfile]);
+
+  const enterDemo = useCallback(async () => {
+    const generation = ++authGeneration.current;
+    invalidateProfile();
+    prepareDemoAttempt();
+    const response = await api.startDemo();
+    if (authGeneration.current !== generation) return;
+    applyDemoAccount(response.account);
+    rememberDemoSession();
+    setDemoRevision((current) => current + 1);
+  }, [applyDemoAccount, invalidateProfile]);
+
+  const resetDemo = useCallback(async () => {
+    const generation = ++authGeneration.current;
+    const previousProfileID = confirmedProfileIDRef.current;
+    profileRequestController.current.abort();
+    let response: { account: Account };
+    try {
+      response = await api.resetDemo();
+    } catch (cause) {
+      if (previousProfileID && authGeneration.current === generation) confirmProfile(previousProfileID);
+      throw cause;
+    }
+    if (authGeneration.current !== generation) return;
+    clearDemoClientState();
+    if (previousProfileID && response.account.session.activeProfile?.id === previousProfileID) confirmProfile(previousProfileID);
+    applyDemoAccount(response.account);
+    rememberDemoSession();
+    setDemoRevision((current) => current + 1);
+  }, [applyDemoAccount, confirmProfile]);
+
+  const exitDemo = useCallback(async () => {
+    const generation = ++authGeneration.current;
+    await api.exitDemo();
+    if (authGeneration.current !== generation) return;
+    clearDemoClientState();
+    invalidateProfile();
+    setMode("real");
+    setAccount(null);
+    setTerminalMessage(null);
+    setDemoRevision((current) => current + 1);
+    window.history.replaceState({}, "", "/");
+    await rediscover();
+  }, [invalidateProfile, rediscover]);
 
   const logout = useCallback(async () => {
     const generation = ++authGeneration.current;
@@ -167,8 +289,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await api.exchangeDeviceAuthorization(deviceCode);
     const next = await api.me();
     if (authGeneration.current !== generation) return;
+    setMode("real");
+    setTerminalMessage(null);
     setAccount(next);
   }, [invalidateProfile]);
+
+  useEffect(() => {
+    if (mode !== "demo") return;
+    const poll = () => {
+      const generation = authGeneration.current;
+      void api.demoSession()
+        .then((response) => {
+          if (authGeneration.current === generation) applyDemoAccount(response.account);
+        })
+        .catch(() => undefined);
+    };
+    const timer = window.setInterval(poll, 5_000);
+    return () => window.clearInterval(timer);
+  }, [applyDemoAccount, mode]);
 
   const activeProfile = confirmedProfileID !== null && account?.session.activeProfile?.id === confirmedProfileID
     ? account.profiles.find((profile) => profile.id === confirmedProfileID) ?? null
@@ -178,6 +316,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     account,
     activeProfile,
     booting,
+    mode,
+    demoRevision,
+    terminalMessage,
     authenticated: account !== null,
     profileRequestSignal,
     refreshAccount,
@@ -186,9 +327,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     logout,
     selectProfile,
     leaveProfile,
+    enterDemo,
+    resetDemo,
+    exitDemo,
     rediscover,
     updateServerInterfaceLanguage,
-  }), [account, activeProfile, booting, completeDeviceAuthorization, discovery, leaveProfile, login, logout, profileRequestSignal, rediscover, refreshAccount, selectProfile, updateServerInterfaceLanguage]);
+  }), [account, activeProfile, booting, completeDeviceAuthorization, demoRevision, discovery, enterDemo, exitDemo, leaveProfile, login, logout, mode, profileRequestSignal, rediscover, refreshAccount, resetDemo, selectProfile, terminalMessage, updateServerInterfaceLanguage]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

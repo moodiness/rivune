@@ -182,3 +182,12 @@ export function cacheMediaItem(item: MediaItem, details: MediaItem, locale: stri
   for (const key of keys) document.aliases[key] = target;
   persist(document);
 }
+
+export function clearMetadataCache(): void {
+  loadedDocument = undefined;
+  try {
+    localStorage.removeItem(storageKey);
+  } catch {
+    // The next cache read still starts from a fresh in-memory document.
+  }
+}

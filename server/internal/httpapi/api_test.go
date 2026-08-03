@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/moodiness/rivune/server/internal/config"
+	"github.com/moodiness/rivune/server/internal/demo"
 	"github.com/moodiness/rivune/server/internal/instance"
 	"github.com/moodiness/rivune/server/internal/settings"
 )
@@ -32,6 +33,16 @@ func (f *fakeInstanceService) Setup(_ context.Context, token string, input insta
 	f.setupToken = token
 	f.setupInput = input
 	return f.setupResult, f.setupErr
+}
+
+func (f *fakeInstanceService) AcquireSetupPending(context.Context) (func(), error) {
+	if f.infoErr != nil {
+		return nil, f.infoErr
+	}
+	if !f.info.SetupRequired {
+		return nil, instance.ErrAlreadyConfigured
+	}
+	return func() {}, nil
 }
 
 func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
@@ -181,14 +192,84 @@ func TestSetupRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestSuccessfulSetupPurgesInProcessDemoSessions(t *testing.T) {
+	service := &fakeInstanceService{
+		info: instance.Info{Name: "Rivune", SetupRequired: true},
+		setupResult: instance.SetupResult{InstanceID: "instance", UserID: "user", ProfileID: "profile"},
+	}
+	api := testAPI(service)
+	handler := api.Handler()
+	cookie := startDemoSession(t, handler)
+
+	setup := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"instanceName":"Rivune","admin":{"username":"admin","password":"correct-horse-battery-staple"},"profileName":"Admin"}`))
+	setup.Header.Set("Content-Type", "application/json")
+	setupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(setupResponse, setup)
+	if setupResponse.Code != http.StatusCreated {
+		t.Fatalf("setup status = %d: %s", setupResponse.Code, setupResponse.Body.String())
+	}
+
+	resume := httptest.NewRequest(http.MethodGet, "/api/v1/demo/session", nil)
+	resume.AddCookie(cookie)
+	resumeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(resumeResponse, resume)
+	if resumeResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("purged demo status = %d: %s", resumeResponse.Code, resumeResponse.Body.String())
+	}
+}
+
+func TestFailedSetupKeepsDemoSession(t *testing.T) {
+	service := &fakeInstanceService{
+		info:     instance.Info{Name: "Rivune", SetupRequired: true},
+		setupErr: instance.ErrInvalidSetupToken,
+	}
+	api := testAPI(service)
+	handler := api.Handler()
+	cookie := startDemoSession(t, handler)
+
+	setup := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"instanceName":"Rivune","admin":{"username":"admin","password":"correct-horse-battery-staple"},"profileName":"Admin"}`))
+	setup.Header.Set("Content-Type", "application/json")
+	setupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(setupResponse, setup)
+	if setupResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("failed setup status = %d: %s", setupResponse.Code, setupResponse.Body.String())
+	}
+
+	resume := httptest.NewRequest(http.MethodGet, "/api/v1/demo/session", nil)
+	resume.AddCookie(cookie)
+	resumeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(resumeResponse, resume)
+	if resumeResponse.Code != http.StatusOK {
+		t.Fatalf("demo after failed setup = %d: %s", resumeResponse.Code, resumeResponse.Body.String())
+	}
+}
+
+func startDemoSession(t *testing.T, handler http.Handler) *http.Cookie {
+	t.Helper()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/demo/sessions", nil))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("start demo = %d: %s", response.Code, response.Body.String())
+	}
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == demo.CookieName {
+			return cookie
+		}
+	}
+	t.Fatal("demo cookie missing")
+	return nil
+}
+
 func testAPI(service instanceService) *API {
-	return &API{
+	api := &API{
 		config:    config.Config{PublicURL: "https://media.example", Timezone: "Europe/Paris"},
 		instances: service,
 		settings:  &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}},
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		version:   "test",
 	}
+	api.demo = demo.New(service, demo.Options{})
+	return api
 }
 
 func decodeResponse(t *testing.T, response *httptest.ResponseRecorder, destination any) {

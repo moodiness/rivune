@@ -6,6 +6,8 @@ export type Discovery = {
   protocolVersion: number;
   apiBaseUrl: string;
   setupRequired: boolean;
+  setupCompleted?: boolean;
+  demoAvailable?: boolean;
   timezone: string;
   interfaceLanguage: InterfaceLanguage;
 };
@@ -37,7 +39,7 @@ export type Profile = {
   avatar: Avatar;
 };
 export type Account = {
-  user: { id: string; username: string; role: string };
+  user: { id: string; username: string; role: "admin" | "user" | "member" | "demo" };
   session: { id: string; deviceId: string; activeProfile: { id: string; expiresAt: string } | null };
   profiles: Profile[];
   maintenance: { enabled: boolean; message: string | null };

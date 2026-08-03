@@ -7,6 +7,7 @@ export type CapturedRequest = {
   search: URLSearchParams;
   body: unknown;
   profileId: string | null;
+  authorization: string | null;
 };
 
 type Profile = {
@@ -37,6 +38,11 @@ function wait(milliseconds: number): Promise<void> {
 const profiles: Profile[] = [
   { id: "alice", name: "Alice", isChild: false, canManage: true, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "alice", url: "https://fixtures.rivune.test/alice.svg" } },
   { id: "bob", name: "Bob", isChild: false, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "bob", url: "https://fixtures.rivune.test/bob.svg" } },
+];
+
+const demoProfiles: Profile[] = [
+  { id: "demo-00000000-0000-4000-8000-000000000001", name: "Alex", isChild: false, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "demo-alex", url: "/api/v1/demo/assets/alex.svg" } },
+  { id: "demo-00000000-0000-4000-8000-000000000002", name: "Kids", isChild: true, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "demo-kids", url: "/api/v1/demo/assets/kids.svg" } },
 ];
 
 const seasonZero = {
@@ -198,8 +204,11 @@ export class RivuneHarness {
   readonly requests: CapturedRequest[] = [];
   readonly collectionResponses: string[] = [];
   private activeProfileId: string | null = "alice";
-  private userRole: "admin" | "member" = "admin";
-  private maintenance = { enabled: false, message: null as string | null };
+  private userRole: "admin" | "member" | "demo" = "admin";
+  private setupRequired = false;
+  private demoAvailable = false;
+  private demoSessionActive = false;
+  private maintenance: { enabled: boolean; message: string | null } = { enabled: false, message: null };
   private instanceSettings: Record<string, unknown> = {};
   private readonly profileSettings = new Map<string, Record<string, unknown>>();
   private readonly effectiveSettingsDelays: number[] = [];
@@ -208,6 +217,7 @@ export class RivuneHarness {
   private readonly folderDelays = new Map<string, number>();
   private readonly seasonOverrides = new Map<string, unknown>();
   private libraryItems: Array<Record<string, unknown>> = [];
+  private readonly demoProgress = new Map<string, { positionSeconds: number; durationSeconds: number; completed: boolean; version: number }>();
   private readonly searchResponses = new Map<string, { body: unknown; status: number; delay: number }>();
   private readonly resolvedTitles = new Map<string, Record<string, unknown>>();
   private operations = {
@@ -247,6 +257,32 @@ export class RivuneHarness {
     jobs: [],
   };
 
+
+  async configurePreSetup(page: Page) {
+    this.setupRequired = true;
+    this.demoAvailable = true;
+    this.demoSessionActive = false;
+    this.userRole = "demo";
+    this.activeProfileId = demoProfiles[0].id;
+    this.libraryItems = [];
+    this.demoProgress.clear();
+    this.demoProgress.set("episode-1", { positionSeconds: 321, durationSeconds: 1800, completed: false, version: 4 });
+    await page.evaluate(() => {
+      localStorage.removeItem("rivune.access");
+      localStorage.removeItem("rivune.refresh");
+      localStorage.removeItem("rivune.demo");
+      sessionStorage.removeItem("rivune.access");
+    });
+  }
+
+  completeSetup() {
+    this.setupRequired = false;
+    this.demoAvailable = false;
+  }
+
+  private currentProfiles() {
+    return this.userRole === "demo" ? demoProfiles : profiles;
+  }
   setMaintenance(enabled: boolean, message: string | null = null) {
     if (enabled) this.activeProfileId = "bob";
     this.maintenance = { enabled, message };
@@ -307,10 +343,11 @@ export class RivuneHarness {
   }
 
   private account() {
+    const currentProfiles = this.currentProfiles();
     return {
-      user: { id: "user-1", username: "fixture-owner", role: this.userRole },
-      session: { id: "session-1", deviceId: "fixture-device", activeProfile: this.activeProfileId ? { id: this.activeProfileId, expiresAt } : null },
-      profiles,
+      user: { id: this.userRole === "demo" ? "demo-user" : "user-1", username: this.userRole === "demo" ? "demo" : "fixture-owner", role: this.userRole },
+      session: { id: this.userRole === "demo" ? "demo-session" : "session-1", deviceId: this.userRole === "demo" ? "demo-browser" : "fixture-device", activeProfile: this.activeProfileId ? { id: this.activeProfileId, expiresAt } : null },
+      profiles: currentProfiles,
       maintenance: this.maintenance,
     };
   }
@@ -339,17 +376,106 @@ export class RivuneHarness {
     let body: unknown;
     try { body = request.postData() ? request.postDataJSON() : undefined; } catch { body = request.postData(); }
     const profileAtRequest = this.activeProfileId;
-    this.requests.push({ method: request.method(), pathname: url.pathname, search: new URLSearchParams(url.search), body, profileId: profileAtRequest });
+    this.requests.push({ method: request.method(), pathname: url.pathname, search: new URLSearchParams(url.search), body, profileId: profileAtRequest, authorization: request.headers().authorization ?? null });
 
     if (url.pathname === "/.well-known/rivune") {
-      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 17, apiBaseUrl: "/api/v1", setupRequired: false, timezone: "UTC", interfaceLanguage: typeof this.instanceSettings.interfaceLanguage === "string" ? this.instanceSettings.interfaceLanguage : "en" });
+      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 17, apiBaseUrl: "/api/v1", setupRequired: this.setupRequired, setupCompleted: !this.setupRequired, demoAvailable: this.setupRequired && this.demoAvailable, timezone: "UTC", interfaceLanguage: typeof this.instanceSettings.interfaceLanguage === "string" ? this.instanceSettings.interfaceLanguage : "en" });
       return;
     }
     const path = url.pathname.slice("/api/v1".length);
+    if (path === "/demo/sessions" && request.method() === "POST") {
+      if (!this.setupRequired || !this.demoAvailable) {
+        await json(route, { error: { code: "demo_unavailable", message: "The server setup has been completed. Demo mode is no longer available." } }, 410);
+        return;
+      }
+      this.demoSessionActive = true;
+      this.userRole = "demo";
+      this.activeProfileId = demoProfiles[0].id;
+      this.libraryItems = [];
+      this.demoProgress.clear();
+      this.demoProgress.set("episode-1", { positionSeconds: 321, durationSeconds: 1800, completed: false, version: 4 });
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        headers: { "set-cookie": "rivune_demo=fixture-demo-cookie; HttpOnly; SameSite=Strict; Path=/api/v1" },
+        body: JSON.stringify({ account: this.account() }),
+      });
+      return;
+    }
+    if (path === "/demo/session" && request.method() === "GET") {
+      if (!this.setupRequired) {
+        this.demoSessionActive = false;
+        await json(route, { error: { code: "demo_unavailable", message: "The server setup has been completed. Demo mode is no longer available." } }, 410);
+        return;
+      }
+      if (!this.demoSessionActive) {
+        await json(route, { error: { code: "demo_session_not_found", message: "Demo session not found." } }, 401);
+        return;
+      }
+      await json(route, { account: this.account() });
+      return;
+    }
+    if (path === "/demo/session/reset" && request.method() === "POST") {
+      if (!this.setupRequired) {
+        this.demoSessionActive = false;
+        await json(route, { error: { code: "demo_unavailable", message: "The server setup has been completed. Demo mode is no longer available." } }, 410);
+        return;
+      }
+      if (!this.demoSessionActive) {
+        await json(route, { error: { code: "demo_session_not_found", message: "Demo session not found." } }, 401);
+        return;
+      }
+      this.activeProfileId = demoProfiles[0].id;
+      this.libraryItems = [];
+      this.demoProgress.clear();
+      this.demoProgress.set("episode-1", { positionSeconds: 321, durationSeconds: 1800, completed: false, version: 4 });
+      await json(route, { account: this.account() });
+      return;
+    }
+    if (path === "/demo/session" && request.method() === "DELETE") {
+      this.demoSessionActive = false;
+      await route.fulfill({ status: 204, headers: { "set-cookie": "rivune_demo=; Max-Age=0; Path=/api/v1" } });
+      return;
+    }
+    if (path.startsWith("/demo/assets/")) {
+      if (!this.demoSessionActive || !this.setupRequired) {
+        await json(route, { error: { code: this.setupRequired ? "demo_session_not_found" : "demo_unavailable", message: "Demo asset unavailable." } }, this.setupRequired ? 401 : 410);
+        return;
+      }
+      await route.fulfill({ status: 200, contentType: "image/svg+xml", body: svg });
+      return;
+    }
+    if (this.demoSessionActive && (
+      path === "/settings" ||
+      path.startsWith("/operations") ||
+      path === "/auth/logout" ||
+      path === "/setup" ||
+      /^\/profiles\/[^/]+\/settings$/.test(path)
+    )) {
+      await json(route, { error: { code: "demo_forbidden", message: "Demo sessions cannot access this endpoint" } }, 403);
+      return;
+    }
+    if (path === "/setup" && request.method() === "POST") {
+      if (!this.setupRequired) {
+        await json(route, { error: { code: "already_configured", message: "Server setup is already complete." } }, 409);
+        return;
+      }
+      this.setupRequired = false;
+      this.demoAvailable = false;
+      this.demoSessionActive = false;
+      this.userRole = "admin";
+      this.activeProfileId = "alice";
+      await json(route, { instance: { id: "instance-1" }, admin: { id: "user-1" }, profile: { id: "alice" } }, 201);
+      return;
+    }
+    if (path === "/auth/login" && request.method() === "POST") {
+      await json(route, { tokenType: "Bearer", accessToken: "fixture-access", accessTokenExpiresAt: expiresAt, refreshToken: "fixture-refresh", refreshTokenExpiresAt: expiresAt, sessionId: "session-1", deviceId: "fixture-device" });
+      return;
+    }
     const maintenanceSelection = path.match(/^\/profiles\/([^/]+)\/select$/);
     const maintenanceExempt = path === "/auth/refresh" || path === "/auth/me" || path === "/auth/logout" ||
       path === "/profiles" || path === "/profiles/selection" || maintenanceSelection !== null;
-    const activeProfile = profiles.find((profile) => profile.id === this.activeProfileId);
+    const activeProfile = this.currentProfiles().find((profile) => profile.id === this.activeProfileId);
     if (this.maintenance.enabled && !activeProfile?.canManage && !maintenanceExempt) {
       await json(route, { error: { code: "maintenance_mode", message: "Rivune is temporarily unavailable for maintenance.", ...(this.maintenance.message ? { publicMessage: this.maintenance.message } : {}) } }, 503);
       return;
@@ -406,7 +532,7 @@ export class RivuneHarness {
       await json(route, this.playbackActivity);
       return;
     }
-    if (path === "/profiles" && request.method() === "GET") { await json(route, { profiles }); return; }
+    if (path === "/profiles" && request.method() === "GET") { await json(route, { profiles: this.currentProfiles() }); return; }
     if (path === "/profile-avatars" && request.method() === "GET") { await json(route, { presets: [] }); return; }
     if (path === "/settings" && request.method() === "GET") { await json(route, { schemaVersion: 1, settings: this.instanceSettings, updatedAt: createdAt }); return; }
     if (path === "/settings" && request.method() === "PATCH") {
@@ -425,7 +551,7 @@ export class RivuneHarness {
     if (path === "/profiles/selection" && request.method() === "DELETE") { this.activeProfileId = null; await route.fulfill({ status: 204 }); return; }
     const profileSelection = path.match(/^\/profiles\/([^/]+)\/select$/);
     if (profileSelection && request.method() === "POST") {
-      const selected = profiles.find((profile) => profile.id === profileSelection[1]);
+      const selected = this.currentProfiles().find((profile) => profile.id === profileSelection[1]);
       if (!selected) { await json(route, { error: { code: "not_found", message: "Profile not found" } }, 404); return; }
       if (this.maintenance.enabled && !selected.canManage) {
         await json(route, { error: { code: "maintenance_mode", message: "Rivune is temporarily unavailable for maintenance.", ...(this.maintenance.message ? { publicMessage: this.maintenance.message } : {}) } }, 503);
@@ -545,14 +671,17 @@ export class RivuneHarness {
     }
     if (path.startsWith("/progress/") && request.method() === "GET") {
       const titleId = decodeURIComponent(path.slice("/progress/".length));
-      const positionSeconds = titleId === "episode-1" ? 321 : 0;
-      await json(route, { titleId, positionSeconds, durationSeconds: 1800, completed: false, version: titleId === "episode-1" ? 4 : 0, updatedAt: createdAt });
+      const saved = this.userRole === "demo" ? this.demoProgress.get(titleId) : undefined;
+      const progress = saved ?? { positionSeconds: titleId === "episode-1" ? 321 : 0, durationSeconds: 1800, completed: false, version: titleId === "episode-1" ? 4 : 0 };
+      await json(route, { titleId, ...progress, updatedAt: createdAt });
       return;
     }
     if (path.startsWith("/progress/") && request.method() === "PUT") {
       const titleId = decodeURIComponent(path.slice("/progress/".length));
-      const progress = body as { positionSeconds: number; durationSeconds: number; completed: boolean; expectedVersion: number };
-      await json(route, { titleId, ...progress, version: progress.expectedVersion + 1, updatedAt: createdAt });
+      const input = body as { positionSeconds: number; durationSeconds: number; completed: boolean; expectedVersion: number };
+      const progress = { positionSeconds: input.positionSeconds, durationSeconds: input.durationSeconds, completed: input.completed, version: input.expectedVersion + 1 };
+      if (this.userRole === "demo") this.demoProgress.set(titleId, progress);
+      await json(route, { titleId, ...progress, updatedAt: createdAt });
       return;
     }
     if (path === "/playback/markers" && request.method() === "GET") {

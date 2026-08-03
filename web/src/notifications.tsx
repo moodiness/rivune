@@ -49,6 +49,7 @@ export function notifyWarning(message: string, title = t("notifications.messageT
 }
 
 export function notifyError(cause: unknown, fallback: string, title = t("notifications.errorTitle")): string {
+  if (cause instanceof APIError && cause.code === "demo_unavailable") return t("demo.unavailable");
   const message = cause instanceof APIError ? cause.message : cause instanceof Error && cause.message ? cause.message : fallback;
   void publish("error", title, message);
   return message;

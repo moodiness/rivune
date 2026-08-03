@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -62,6 +64,45 @@ func (s *Service) Info(ctx context.Context) (Info, error) {
 		return Info{}, fmt.Errorf("query instance: %w", err)
 	}
 	return Info{Name: name, SetupRequired: false}, nil
+}
+
+// AcquireSetupPending holds a process-independent shared admission lock while a
+// pre-setup handler is running. Setup takes the matching exclusive transaction
+// lock, so a committed setup can never overlap an admitted demo response.
+func (s *Service) AcquireSetupPending(ctx context.Context) (func(), error) {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire setup admission connection: %w", err)
+	}
+	unlock := func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var released bool
+		if err := conn.QueryRow(releaseCtx, "SELECT pg_advisory_unlock_shared($1)", setupLockID).Scan(&released); err != nil || !released {
+			raw := conn.Hijack()
+			_ = raw.Close(context.Background())
+			return
+		}
+		conn.Release()
+	}
+
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock_shared($1)", setupLockID); err != nil {
+		raw := conn.Hijack()
+		_ = raw.Close(context.Background())
+		return nil, fmt.Errorf("lock setup admission: %w", err)
+	}
+	var configured bool
+	if err := conn.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM instances WHERE id = 1)").Scan(&configured); err != nil {
+		unlock()
+		return nil, fmt.Errorf("check setup admission state: %w", err)
+	}
+	if configured {
+		unlock()
+		return nil, ErrAlreadyConfigured
+	}
+
+	var once sync.Once
+	return func() { once.Do(unlock) }, nil
 }
 
 func (s *Service) Setup(ctx context.Context, token string, input SetupInput) (SetupResult, error) {

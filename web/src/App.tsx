@@ -368,9 +368,9 @@ function useSessionNotifications(sessionID: string | undefined, refreshAccount: 
 }
 
 export default function App() {
-  const { account, booting, discovery, authenticated, activeProfile, refreshAccount } = useAuth();
+  const { account, booting, demoRevision, discovery, authenticated, activeProfile, mode, refreshAccount, terminalMessage } = useAuth();
   const { settings, ready: settingsReady } = useRuntimeSettings(activeProfile?.id, discovery?.interfaceLanguage);
-  useSessionNotifications(account?.session.id, refreshAccount, settings.notificationsEnabled, settings.notificationPollIntervalSeconds);
+  useSessionNotifications(account?.session.id, refreshAccount, mode !== "demo" && settings.notificationsEnabled, settings.notificationPollIntervalSeconds);
   const pairingApproval = window.location.pathname === "/pair";
   const [initialRoute] = useState(appRoute);
   const [view, setViewState] = useState<View>(initialRoute.view);
@@ -382,6 +382,7 @@ export default function App() {
   const routeSurfaceRef = useRef<HTMLDivElement>(null);
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(maintenanceModeMessage);
   const [checkingMaintenance, setCheckingMaintenance] = useState(false);
+  const lastDemoRevision = useRef(demoRevision);
 
   function restoreOriginFocus() {
     const invokingElement = invokingElementRef.current;
@@ -443,6 +444,22 @@ export default function App() {
     const timer = window.setInterval(() => { void retryMaintenance(); }, 5_000);
     return () => window.clearInterval(timer);
   }, [maintenanceMessage, retryMaintenance]);
+
+  useEffect(() => {
+    if (lastDemoRevision.current === demoRevision) return;
+    lastDemoRevision.current = demoRevision;
+    mediaRouteRef.current = null;
+    setMediaRoute(null);
+    setViewState("home");
+    setHomeResetKey((current) => current + 1);
+    setMediaDataRevisions((revisions) => ({
+      home: revisions.home + 1,
+      search: revisions.search + 1,
+      library: revisions.library + 1,
+    }));
+    window.history.replaceState({ rivuneView: "home", rivuneScrollTop: 0 }, "", viewURL("home"));
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }, [demoRevision]);
 
   useEffect(() => {
     applyRuntimeSettings(settings);
@@ -563,20 +580,23 @@ export default function App() {
   const profileMaintenanceMessage = account?.maintenance.enabled
     ? account.maintenance.message ?? ""
     : maintenanceMessage;
+  const validatedDemo = mode === "demo" && account?.user.role === "demo";
+  const visibleView: View = validatedDemo && view === "admin" ? "home" : view;
 
-  if (maintenanceMessage !== null && !authenticated) return <main className="offline-page maintenance-page"><div className="offline-page__glow" /><RivuneMark /><section><span><ServerOff /></span><h1>{t("app.maintenanceTitle")}</h1><p>{maintenanceMessage || t("app.maintenanceBody")}</p><Button loading={checkingMaintenance} onClick={() => void retryMaintenance()}><RefreshCw size={18} /> {t("app.maintenanceRetry")}</Button></section></main>;
   if (booting) return <div className="boot-screen"><div className="boot-screen__aura" /><RivuneMark /><LoaderCircle className="spin" /><p>{t("app.connecting")}</p></div>;
+  if (terminalMessage) return <LoginPage message={terminalMessage} />;
+  if (maintenanceMessage !== null && !authenticated) return <main className="offline-page maintenance-page"><div className="offline-page__glow" /><RivuneMark /><section><span><ServerOff /></span><h1>{t("app.maintenanceTitle")}</h1><p>{maintenanceMessage || t("app.maintenanceBody")}</p><Button loading={checkingMaintenance} onClick={() => void retryMaintenance()}><RefreshCw size={18} /> {t("app.maintenanceRetry")}</Button></section></main>;
   if (!discovery) return <main className="offline-page"><div className="offline-page__glow" /><RivuneMark /><section><span><ServerOff /></span><h1>{t("app.offlineTitle")}</h1><p>{t("app.offlineBody")}</p><Button onClick={() => window.location.reload()}><RefreshCw size={18} /> {t("app.reconnect")}</Button></section></main>;
-  if (discovery.setupRequired) return <SetupPage />;
+  if (discovery.setupRequired && !validatedDemo) return <SetupPage />;
   if (!authenticated) return pairingApproval ? <LoginPage /> : <DevicePairingPage />;
   if (!activeProfile || profileMaintenanceMessage !== null && !activeProfile.canManage) return <ProfileGate maintenanceMessage={profileMaintenanceMessage} />;
   if (pairingApproval) return <PairApprovalPage />;
-  if (!settingsReady) return <Shell view={view} onView={setView}><div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingProfileSettings")}</span></div></Shell>;
+  if (!settingsReady) return <Shell view={visibleView} onView={setView}><div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingProfileSettings")}</span></div></Shell>;
 
-  return <Shell view={view} onView={setView}>
+  return <Shell view={visibleView} onView={setView}>
     <div ref={routeSurfaceRef} tabIndex={-1} className={mediaRoute ? "route-surface route-surface--hidden" : "route-surface"}>
       <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingSpace")}</span></div>}>
-        {view === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} /> : view === "search" ? <SearchPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.search} onLibraryMutation={invalidateLibrarySurfaces} /> : view === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : view === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
+        {visibleView === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} /> : visibleView === "search" ? <SearchPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.search} onLibraryMutation={invalidateLibrarySurfaces} /> : visibleView === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : visibleView === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
       </Suspense>
     </div>
     {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaIdentity(mediaRoute.item)}:${mediaRoute.item.titleId ?? ""}`} item={mediaRoute.item} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} onLibraryMutation={invalidateLibrarySurfaces} /></Suspense>}

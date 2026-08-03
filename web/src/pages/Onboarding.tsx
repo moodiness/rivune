@@ -1,6 +1,6 @@
 import { ArrowRight, Eye, EyeOff, KeyRound, LockKeyhole, Server, Sparkles, UserRound } from "lucide-react";
 import { useState, type FormEvent } from "react";
-import { api } from "../api";
+import { api, APIError } from "../api";
 import { useAuth } from "../auth";
 import { Button, Notice, RivuneMark } from "../components";
 import { notifyError } from "../notifications";
@@ -11,7 +11,7 @@ export function AuthBackdrop() {
 }
 
 export function SetupPage() {
-  const { discovery, rediscover, login } = useAuth();
+  const { discovery, enterDemo, rediscover, login } = useAuth();
   const [step, setStep] = useState<"welcome" | "form" | "done">("welcome");
   const [setupToken, setSetupToken] = useState("");
   const [instanceName, setInstanceName] = useState(() => discovery?.name === "Rivune" ? t("auth.defaultInstanceName") : discovery?.name ?? t("auth.defaultInstanceName"));
@@ -20,6 +20,7 @@ export function SetupPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [demoLoading, setDemoLoading] = useState(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -37,13 +38,31 @@ export function SetupPage() {
     }
   }
 
+  async function tryDemo() {
+    setDemoLoading(true);
+    setError("");
+    try {
+      await enterDemo();
+    } catch (cause) {
+      if (!(cause instanceof APIError && cause.code === "demo_unavailable")) {
+        setError(notifyError(cause, t("demo.startFailure")));
+      }
+    } finally {
+      setDemoLoading(false);
+    }
+  }
+
   return <main className="auth-page"><AuthBackdrop /><div className="auth-shell">
     <RivuneMark />
     {step === "welcome" ? <section className="welcome-card page-enter">
       <span className="welcome-card__badge"><Sparkles size={15} /> {t("auth.welcomeBadge")}</span>
       <h1>{t("auth.welcomeTitleLead")}<br /><em>{t("auth.welcomeTitleAccent")}</em></h1>
       <p>{t("auth.welcomeBody")}</p>
-      <Button onClick={() => setStep("form")}>{t("auth.configure")} <ArrowRight size={18} /></Button>
+      {error && <Notice>{error}</Notice>}
+      <div className="welcome-card__actions">
+        <Button onClick={() => setStep("form")}>{t("demo.setup")} <ArrowRight size={18} /></Button>
+        {discovery?.demoAvailable === true && <Button variant="secondary" loading={demoLoading} onClick={() => void tryDemo()}>{t("demo.try")} <Sparkles size={18} /></Button>}
+      </div>
       <div className="welcome-card__trust"><span><LockKeyhole size={16} /> {t("auth.selfHosted")}</span><span><Server size={16} /> {t("auth.noCloud")}</span></div>
     </section> : step === "form" ? <section className="auth-card page-enter">
       <div className="auth-card__header"><span>{t("auth.setupEyebrow")}</span><h1>{t("auth.setupTitle")}</h1><p>{t("auth.setupBody")}</p></div>
@@ -63,7 +82,7 @@ export function SetupPage() {
   </div></main>;
 }
 
-export function LoginPage({ onBack }: { onBack?: () => void }) {
+export function LoginPage({ onBack, message }: { onBack?: () => void; message?: string }) {
   const { discovery, login } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -89,6 +108,7 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
     <section className="auth-card auth-card--login page-enter">
       <div className="auth-card__server"><span className="status-dot" /> {t("auth.connectedTo", { server: discovery?.name ?? "Rivune" })}</div>
       <div className="auth-card__header"><span>{t("auth.ownerAccess")}</span><h1>{t("auth.ownerTitle")}</h1><p>{t("auth.ownerBody")}</p></div>
+      {message && <Notice>{message}</Notice>}
       <form onSubmit={submit} className="form-stack">
         {error && <Notice>{error}</Notice>}
         <label className="field"><span>{t("auth.username")}</span><div><UserRound size={18} /><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" autoFocus required /></div></label>

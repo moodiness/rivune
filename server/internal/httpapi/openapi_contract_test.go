@@ -43,7 +43,101 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		api := testAPI(&fakeInstanceService{info: instanceInfoForContract()})
 		request := httptest.NewRequest(http.MethodGet, "/.well-known/rivune", nil)
 		response := serveContractRequest(t, api, request, http.StatusOK)
+		var state struct {
+			SetupRequired  bool  `json:"setupRequired"`
+			SetupCompleted *bool `json:"setupCompleted"`
+			DemoAvailable  *bool `json:"demoAvailable"`
+		}
+		decodeResponse(t, response, &state)
+		if state.SetupRequired || state.SetupCompleted == nil || !*state.SetupCompleted || state.DemoAvailable == nil || *state.DemoAvailable {
+			t.Fatalf("unexpected configured discovery lifecycle state: %+v", state)
+		}
 		validateContractResponse(t, document, "/.well-known/rivune", nil, request, response)
+	})
+
+	t.Run("setup status", func(t *testing.T) {
+		api := testAPI(&fakeInstanceService{info: instance.Info{Name: "Rivune Contract", SetupRequired: true}})
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/setup/status", nil)
+		response := serveContractRequest(t, api, request, http.StatusOK)
+		var state struct {
+			SetupRequired  bool  `json:"setupRequired"`
+			SetupCompleted *bool `json:"setupCompleted"`
+			DemoAvailable  *bool `json:"demoAvailable"`
+		}
+		decodeResponse(t, response, &state)
+		if !state.SetupRequired || state.SetupCompleted == nil || *state.SetupCompleted || state.DemoAvailable == nil || !*state.DemoAvailable {
+			t.Fatalf("unexpected pre-setup status lifecycle state: %+v", state)
+		}
+		validateContractResponse(t, document, "/setup/status", nil, request, response)
+	})
+
+	t.Run("demo lifecycle", func(t *testing.T) {
+		instanceService := &fakeInstanceService{info: instance.Info{Name: "Rivune Contract", SetupRequired: true}}
+		api := testAPI(instanceService)
+
+		missingSession := httptest.NewRequest(http.MethodGet, "/api/v1/demo/session", nil)
+		missingSessionResponse := serveContractRequest(t, api, missingSession, http.StatusUnauthorized)
+		validateContractResponse(t, document, "/demo/session", nil, missingSession, missingSessionResponse)
+
+		create := httptest.NewRequest(http.MethodPost, "/api/v1/demo/sessions", nil)
+		createResponse := serveContractRequest(t, api, create, http.StatusCreated)
+		validateContractResponse(t, document, "/demo/sessions", nil, create, createResponse)
+
+		var demoCookie *http.Cookie
+		for _, cookie := range createResponse.Result().Cookies() {
+			if cookie.Name == "rivune_demo" {
+				demoCookie = cookie
+				break
+			}
+		}
+		if demoCookie == nil {
+			t.Fatal("demo session response did not set the rivune_demo cookie")
+		}
+
+		forbiddenSetup := httptest.NewRequest(http.MethodPost, "/api/v1/setup", nil)
+		forbiddenSetup.AddCookie(demoCookie)
+		forbiddenSetupResponse := serveContractRequest(t, api, forbiddenSetup, http.StatusForbidden)
+		validateContractResponse(t, document, "/setup", nil, forbiddenSetup, forbiddenSetupResponse)
+
+		resume := httptest.NewRequest(http.MethodGet, "/api/v1/demo/session", nil)
+		resume.AddCookie(demoCookie)
+		resumeResponse := serveContractRequest(t, api, resume, http.StatusOK)
+		validateContractResponse(t, document, "/demo/session", nil, resume, resumeResponse)
+
+		reset := httptest.NewRequest(http.MethodPost, "/api/v1/demo/session/reset", nil)
+		reset.AddCookie(demoCookie)
+		resetResponse := serveContractRequest(t, api, reset, http.StatusOK)
+		validateContractResponse(t, document, "/demo/session/reset", nil, reset, resetResponse)
+
+		rangeRequest := httptest.NewRequest(http.MethodGet, "/api/v1/demo/assets/demo-720p.mp4", nil)
+		rangeRequest.AddCookie(demoCookie)
+		rangeRequest.Header.Set("Range", "bytes=0-15")
+		rangeResponse := serveContractRequest(t, api, rangeRequest, http.StatusPartialContent)
+		validateContractResponse(t, document, "/demo/assets/{name}", map[string]string{"name": "demo-720p.mp4"}, rangeRequest, rangeResponse)
+
+		exit := httptest.NewRequest(http.MethodDelete, "/api/v1/demo/session", nil)
+		exit.AddCookie(demoCookie)
+		exitResponse := serveContractRequest(t, api, exit, http.StatusNoContent)
+		validateContractResponse(t, document, "/demo/session", nil, exit, exitResponse)
+
+		recreate := httptest.NewRequest(http.MethodPost, "/api/v1/demo/sessions", nil)
+		recreateResponse := serveContractRequest(t, api, recreate, http.StatusCreated)
+		var staleCookie *http.Cookie
+		for _, cookie := range recreateResponse.Result().Cookies() {
+			if cookie.Name == "rivune_demo" {
+				staleCookie = cookie
+				break
+			}
+		}
+		if staleCookie == nil {
+			t.Fatal("second demo session response did not set the rivune_demo cookie")
+		}
+
+		instanceService.info = instance.Info{Name: "Rivune Contract", SetupRequired: false}
+		unavailable := httptest.NewRequest(http.MethodGet, "/api/v1/demo/session", nil)
+		unavailable.AddCookie(staleCookie)
+		unavailableResponse := serveContractRequest(t, api, unavailable, http.StatusGone)
+		validateContractResponse(t, document, "/demo/session", nil, unavailable, unavailableResponse)
 	})
 
 	t.Run("authentication and profiles", func(t *testing.T) {

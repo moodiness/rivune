@@ -25,6 +25,7 @@ import (
 	collectiontrakt "github.com/moodiness/rivune/server/internal/collection/trakt"
 
 	"github.com/moodiness/rivune/server/internal/config"
+	"github.com/moodiness/rivune/server/internal/demo"
 	"github.com/moodiness/rivune/server/internal/instance"
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/metadata/fanart"
@@ -45,6 +46,7 @@ const protocolVersion = 17
 type instanceService interface {
 	Info(context.Context) (instance.Info, error)
 	Setup(context.Context, string, instance.SetupInput) (instance.SetupResult, error)
+	AcquireSetupPending(context.Context) (func(), error)
 }
 
 type authService interface {
@@ -189,6 +191,7 @@ type API struct {
 	calendar            calendarService
 	pool                *pgxpool.Pool
 	instances           instanceService
+	demo                *demo.Service
 	collections         collectionService
 	auth                authService
 	authMaintenance     authMaintenanceService
@@ -276,6 +279,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	externalIDResolver, _ := metadataProvider.(metadata.ExternalIDResolver)
 	collectionService.SetFanartEnricher(metadataProvider, externalIDResolver, artworkEnricher, logger)
 	collectionService.SetArtworkPresenter(artworkService)
+	instanceManager := instance.NewService(pool, cfg.SetupToken, cfg.Timezone)
 	return &API{
 		artwork:             artworkService,
 		addons:              addonService,
@@ -283,7 +287,8 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		calendar:            calendar.NewService(pool, metadataService, logger),
 		collections:         collectionService,
 		pool:                pool,
-		instances:           instance.NewService(pool, cfg.SetupToken, cfg.Timezone),
+		instances:           instanceManager,
+		demo:                demo.New(instanceManager, demo.Options{}),
 		auth:                authService,
 		authMaintenance:     authService,
 		profiles:            profile.NewService(pool, cfg.ProfileGrantTTL, cfg.Timezone),
@@ -405,7 +410,11 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/continue-watching", a.requireAuthentication(a.continueWatching))
 	mux.Handle("DELETE /api/v1/continue-watching/{titleId}", a.requireAuthentication(a.dismissContinue))
 	mux.HandleFunc("GET /", webui.Handler)
-	return a.middleware(mux)
+	handler := http.Handler(mux)
+	if a.demo != nil {
+		handler = a.demo.Handler(handler)
+	}
+	return a.middleware(handler)
 }
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
@@ -456,6 +465,8 @@ func (a *API) discovery(w http.ResponseWriter, r *http.Request) {
 		"protocolVersion":   protocolVersion,
 		"apiBaseUrl":        apiBaseURL,
 		"setupRequired":     info.SetupRequired,
+		"setupCompleted":    !info.SetupRequired,
+		"demoAvailable":     info.SetupRequired,
 		"timezone":          a.config.Timezone,
 		"interfaceLanguage": interfaceLanguage,
 	})
@@ -467,7 +478,11 @@ func (a *API) setupStatus(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "read setup state", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"setupRequired": info.SetupRequired})
+	writeJSON(w, http.StatusOK, map[string]bool{
+		"setupRequired":  info.SetupRequired,
+		"setupCompleted": !info.SetupRequired,
+		"demoAvailable":  info.SetupRequired,
+	})
 }
 
 func (a *API) setup(w http.ResponseWriter, r *http.Request) {
@@ -506,6 +521,9 @@ func (a *API) setup(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		a.internalError(w, "initialize instance", err)
 	default:
+		if a.demo != nil {
+			a.demo.Disable()
+		}
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"instance": map[string]string{"id": result.InstanceID},
 			"admin":    map[string]string{"id": result.UserID},

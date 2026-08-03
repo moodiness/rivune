@@ -23,6 +23,8 @@ export type HomeCacheSnapshot = {
 
 type StoredHomeCache = HomeCacheSnapshot & { version: 1 };
 type StoredContinueCache = { version: 1; updatedAt: number; items: CachedContinueItem[] };
+const demoHomeCaches = new Map<string, StoredHomeCache>();
+const demoContinueCaches = new Map<string, StoredContinueCache>();
 
 function cacheKey(prefix: string, profileID: string, scope: string): string {
   return `${prefix}.${encodeURIComponent(profileID)}.${encodeURIComponent(scope)}`;
@@ -100,6 +102,14 @@ function parseHomeCache(serialized: string | null): HomeCacheSnapshot | undefine
 
 export function readHomeCache(profileID: string, scope: string): HomeCacheSnapshot | undefined {
   const key = cacheKey(homeStoragePrefix, profileID, scope);
+  if (profileID.startsWith("demo-")) {
+    const cached = demoHomeCaches.get(key);
+    if (!cached || Date.now() - cached.updatedAt > maximumAgeMilliseconds) {
+      demoHomeCaches.delete(key);
+      return undefined;
+    }
+    return cached;
+  }
   try {
     const persisted = parseHomeCache(localStorage.getItem(key));
     if (persisted) return persisted;
@@ -142,6 +152,10 @@ export function writeHomeCache(profileID: string, scope: string, collections: Co
     signature: homeCollectionSignature(collections),
     updatedAt,
   };
+  if (profileID.startsWith("demo-")) {
+    demoHomeCaches.set(cacheKey(homeStoragePrefix, profileID, scope), document);
+    return;
+  }
   let serialized = JSON.stringify(document);
   const folderIDs = Object.keys(document.folders);
   while (serialized.length > maximumSerializedHomeLength && folderIDs.length > 0) {
@@ -170,6 +184,11 @@ export function writeHomeFolderCache(profileID: string, scope: string, collectio
 }
 
 export function readContinueCache(profileID: string, scope: string): { items: CachedContinueItem[]; fresh: boolean } | undefined {
+  if (profileID.startsWith("demo-")) {
+    const cached = demoContinueCaches.get(cacheKey(continueStoragePrefix, profileID, scope));
+    if (!cached || Date.now() - cached.updatedAt > maximumAgeMilliseconds) return undefined;
+    return { items: cached.items, fresh: Date.now() - cached.updatedAt <= freshAgeMilliseconds };
+  }
   try {
     const parsed = record(JSON.parse(sessionStorage.getItem(cacheKey(continueStoragePrefix, profileID, scope)) ?? "null"));
     if (parsed?.version !== 1 || typeof parsed.updatedAt !== "number" || !Number.isFinite(parsed.updatedAt) || !Array.isArray(parsed.items) || !parsed.items.every(validContinueItem)) return undefined;
@@ -182,9 +201,38 @@ export function readContinueCache(profileID: string, scope: string): { items: Ca
 
 export function writeContinueCache(profileID: string, scope: string, items: CachedContinueItem[]) {
   const document: StoredContinueCache = { version: 1, updatedAt: Date.now(), items };
+  if (profileID.startsWith("demo-")) {
+    demoContinueCaches.set(cacheKey(continueStoragePrefix, profileID, scope), document);
+    return;
+  }
   try {
     sessionStorage.setItem(cacheKey(continueStoragePrefix, profileID, scope), JSON.stringify(document));
   } catch {
     // A disabled or full session store must not block Continue Watching.
   }
+}
+
+const transientMediaPrefixes = [
+  homeStoragePrefix,
+  continueStoragePrefix,
+  "rivune.search.",
+  "rivune.notifications.",
+  "rivune.metadata-cache.",
+] as const;
+
+function clearMatchingStorage(storage: Storage): void {
+  try {
+    const keys = Array.from({ length: storage.length }, (_, index) => storage.key(index))
+      .filter((key): key is string => key !== null && transientMediaPrefixes.some((prefix) => key.startsWith(prefix)));
+    keys.forEach((key) => storage.removeItem(key));
+  } catch {
+    // Storage isolation must still proceed when a browser blocks a storage area.
+  }
+}
+
+export function clearMediaCaches(): void {
+  clearMatchingStorage(localStorage);
+  demoHomeCaches.clear();
+  demoContinueCaches.clear();
+  clearMatchingStorage(sessionStorage);
 }
