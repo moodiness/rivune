@@ -402,17 +402,24 @@ func TestNewSettingsLayerInheritanceAndPrecedence(t *testing.T) {
 		}
 	}
 	applyLayer(&effective, profile, "profile")
+	applyNotificationPolicy(&effective, instance)
 	if !effective.Values.AutoplayNextEpisode || effective.Values.CardDensity != "comfortable" || !effective.Values.AnimationsEnabled ||
-		effective.Values.SubtitleSizePercent != 120 || effective.Values.SubtitleTextColor != "#A1B2C3" || effective.Values.SubtitleBackgroundOpacityPercent != 80 ||
-		!effective.Values.NotificationsEnabled || effective.Values.NotificationDurationSeconds != 20 || effective.Values.NotificationPollIntervalSeconds != 60 {
+		effective.Values.SubtitleSizePercent != 120 || effective.Values.SubtitleTextColor != "#A1B2C3" || effective.Values.SubtitleBackgroundOpacityPercent != 80 {
 		t.Fatalf("profile settings did not take precedence: %+v", effective.Values)
 	}
 	for _, name := range []string{
-		"autoplayNextEpisode", "cardDensity", "animationsEnabled", "subtitleSizePercent", "subtitleTextColor",
-		"subtitleBackgroundOpacityPercent", "notificationsEnabled", "notificationDurationSeconds", "notificationPollIntervalSeconds",
+		"autoplayNextEpisode", "cardDensity", "animationsEnabled", "subtitleSizePercent", "subtitleTextColor", "subtitleBackgroundOpacityPercent",
 	} {
 		if effective.Sources[name] != "profile" {
 			t.Fatalf("%s source = %q, want profile", name, effective.Sources[name])
+		}
+	}
+	if effective.Values.NotificationsEnabled || effective.Values.NotificationDurationSeconds != 10 || effective.Values.NotificationPollIntervalSeconds != 30 {
+		t.Fatalf("profile notification overrides changed server values: %+v", effective.Values)
+	}
+	for _, name := range []string{"notificationsEnabled", "notificationDurationSeconds", "notificationPollIntervalSeconds"} {
+		if effective.Sources[name] != "instance" {
+			t.Fatalf("%s source = %q, want instance", name, effective.Sources[name])
 		}
 	}
 }
@@ -570,5 +577,26 @@ func TestInstanceTranscodingUpdateKeepsAdminPermission(t *testing.T) {
 	})
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("member instance transcoding update error = %v, want forbidden", err)
+	}
+}
+
+func TestProfileNotificationUpdatesAreRejected(t *testing.T) {
+	enabled := true
+	duration := 10
+	interval := 30
+	patches := map[string]Patch{
+		"enabled":  {NotificationsEnabled: OptionalBool{Set: true, Value: &enabled}},
+		"duration": {NotificationDurationSeconds: OptionalInt{Set: true, Value: &duration}},
+		"interval": {NotificationPollIntervalSeconds: OptionalInt{Set: true, Value: &interval}},
+	}
+	for _, role := range []string{"admin", "member"} {
+		for name, patch := range patches {
+			t.Run(role+"/"+name, func(t *testing.T) {
+				_, err := NewService(nil).UpdateProfile(context.Background(), auth.Principal{Role: role}, "profile-id", patch)
+				if !errors.Is(err, ErrInvalidInput) {
+					t.Fatalf("%s profile notification update error = %v, want invalid input", role, err)
+				}
+			})
+		}
 	}
 }

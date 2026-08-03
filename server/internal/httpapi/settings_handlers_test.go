@@ -93,10 +93,10 @@ func TestUpdateProfileSettingsPreservesFalseAndNull(t *testing.T) {
 	}
 }
 
-func TestUpdateProfileSettingsDecodesEveryNewField(t *testing.T) {
-	service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
+func TestUpdateInstanceSettingsDecodesEveryNewField(t *testing.T) {
+	service := &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}}
 	api := authenticatedSettingsAPI(service)
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(
 		`{"maximumCastMembers":35,"autoplayNextEpisode":false,"skipIntroEnabled":true,"skipRecapEnabled":false,"skipOutroEnabled":true,"cardDensity":"compact","animationsEnabled":false,"subtitleSizePercent":75,"subtitleTextColor":"#a1b2c3","subtitleBackgroundOpacityPercent":25,"notificationsEnabled":false,"notificationDurationSeconds":7,"notificationPollIntervalSeconds":45}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
@@ -108,7 +108,7 @@ func TestUpdateProfileSettingsDecodesEveryNewField(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
-	patch := service.profilePatch
+	patch := service.instancePatch
 	if !patch.MaximumCastMembers.Set || patch.MaximumCastMembers.Value == nil || *patch.MaximumCastMembers.Value != 35 ||
 		!patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value == nil || *patch.AutoplayNextEpisode.Value ||
 		!patch.SkipIntroEnabled.Set || patch.SkipIntroEnabled.Value == nil || !*patch.SkipIntroEnabled.Value ||
@@ -126,10 +126,10 @@ func TestUpdateProfileSettingsDecodesEveryNewField(t *testing.T) {
 	}
 }
 
-func TestUpdateProfileSettingsDecodesNullForEveryNewField(t *testing.T) {
-	service := &fakeSettingsService{profile: settings.Layer{SchemaVersion: 1}}
+func TestUpdateInstanceSettingsDecodesNullForEveryNewField(t *testing.T) {
+	service := &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}}
 	api := authenticatedSettingsAPI(service)
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(
 		`{"interfaceLanguage":null,"maximumCastMembers":null,"autoplayNextEpisode":null,"skipIntroEnabled":null,"skipRecapEnabled":null,"skipOutroEnabled":null,"cardDensity":null,"animationsEnabled":null,"subtitleSizePercent":null,"subtitleTextColor":null,"subtitleBackgroundOpacityPercent":null,"notificationsEnabled":null,"notificationDurationSeconds":null,"notificationPollIntervalSeconds":null}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
@@ -141,7 +141,7 @@ func TestUpdateProfileSettingsDecodesNullForEveryNewField(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
-	patch := service.profilePatch
+	patch := service.instancePatch
 	if !patch.InterfaceLanguage.Set || patch.InterfaceLanguage.Value != nil {
 		t.Fatalf("interface language null was not preserved: %+v", patch)
 	}
@@ -398,6 +398,14 @@ func TestSettingsTranscodingScopeAndPermissionErrorsUseExistingHTTPContract(t *t
 			service:    &fakeSettingsService{instanceErr: settings.ErrForbidden},
 			wantStatus: http.StatusForbidden,
 			wantCode:   "settings_forbidden",
+		},
+		{
+			name:       "notification fields are invalid at profile scope",
+			path:       "/api/v1/profiles/profile-id/settings",
+			body:       `{"notificationsEnabled":false}`,
+			service:    &fakeSettingsService{profileErr: settings.ErrInvalidInput},
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   "invalid_settings",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

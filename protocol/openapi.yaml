@@ -851,7 +851,7 @@ paths:
           $ref: "#/components/responses/Error"
     patch:
       summary: Update instance settings
-      description: Instance-wide `allowTranscoding` is accepted only here; profile `transcoding` choices belong to the profile settings route.
+      description: Instance-wide `allowTranscoding` and notification settings are accepted only here; profile `transcoding` choices belong to the profile settings route. Every profile inherits notification behavior from this layer.
       operationId: updateInstanceSettings
       security:
         - bearerAuth: []
@@ -1117,7 +1117,7 @@ paths:
           $ref: "#/components/responses/Error"
     patch:
       summary: Update profile settings
-      description: Profile `transcoding` (`inherit`, `enabled`, or `disabled`) is accepted only here; the instance-wide `allowTranscoding` switch belongs to `/settings`.
+      description: Profile `transcoding` (`inherit`, `enabled`, or `disabled`) is accepted only here; the instance-wide `allowTranscoding` switch belongs to `/settings`. Notification settings are instance-only and are rejected here.
       operationId: updateProfileSettings
       security:
         - bearerAuth: []
@@ -4388,12 +4388,15 @@ components:
           minimum: 0
           maximum: 100
         notificationsEnabled:
+          description: Administrator-controlled, instance-wide notification delivery switch. Every profile uses the server value.
           type: [boolean, "null"]
         notificationDurationSeconds:
+          description: Administrator-controlled, instance-wide on-screen notification duration. Every profile uses the server value.
           type: [integer, "null"]
           minimum: 2
           maximum: 30
         notificationPollIntervalSeconds:
+          description: Administrator-controlled, instance-wide notification polling interval. Every profile uses the server value.
           type: [integer, "null"]
           minimum: 5
           maximum: 300
@@ -4645,10 +4648,13 @@ components:
             subtitleBackgroundOpacityPercent:
               $ref: "#/components/schemas/SettingSource"
             notificationsEnabled:
+              description: Always `default` or `instance`; profiles cannot override notification settings.
               $ref: "#/components/schemas/SettingSource"
             notificationDurationSeconds:
+              description: Always `default` or `instance`; profiles cannot override notification settings.
               $ref: "#/components/schemas/SettingSource"
             notificationPollIntervalSeconds:
+              description: Always `default` or `instance`; profiles cannot override notification settings.
               $ref: "#/components/schemas/SettingSource"
     SettingSource:
       type: string

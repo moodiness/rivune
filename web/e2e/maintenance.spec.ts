@@ -60,6 +60,9 @@ test("interface language inherits server defaults and supports profile RTL overr
 
   const serverRequest = await rivune.waitForRequest("/api/v1/settings", "PATCH");
   expect(serverRequest.body).toMatchObject({ interfaceLanguage: "fr" });
+  expect(serverRequest.body).not.toHaveProperty("notificationsEnabled");
+  expect(serverRequest.body).not.toHaveProperty("notificationDurationSeconds");
+  expect(serverRequest.body).not.toHaveProperty("notificationPollIntervalSeconds");
   await expect(page.locator("html")).toHaveAttribute("lang", "fr");
   await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
   await expect(page.getByRole("navigation", { name: "Navigation principale" }).getByRole("button", { name: "Accueil" })).toBeVisible();
@@ -221,6 +224,7 @@ test("viewer preferences use the full desktop workspace", async ({ page, rivune:
   await expect(layout.locator(".admin-tabs")).toHaveCount(0);
   await expect(preferences).toBeVisible();
   await expect.poll(async () => (await preferences.boundingBox())?.width ?? 0).toBeGreaterThan(1100);
+  await expect(preferences.getByRole("heading", { name: "Device notifications" })).toHaveCount(0);
 });
 
 test("tracking authorization survives provider slow-down and completes polling", async ({ page, rivune: _rivune }) => {

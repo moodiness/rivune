@@ -1529,6 +1529,7 @@ function OperationsAdmin() {
       </div>
     </section>
 
+
     <section className="operations-actions" aria-labelledby="operations-actions-title">
       <header><span>{translate("admin.operations.actions.eyebrow")}</span><h3 id="operations-actions-title">{translate("admin.operations.actions.title")}</h3><p>{translate("admin.operations.actions.description")}</p></header>
       <div className="operations-action-grid">{operationActionCards.map((card) => {
@@ -1545,6 +1546,7 @@ function OperationsAdmin() {
         </article>;
       })}</div>
     </section>
+    <DeviceNotificationsOperationsCard />
 
     <MaintenanceCard values={maintenance} onChange={setMaintenance} onSave={() => void saveMaintenance()} onReset={() => setMaintenance(savedMaintenance)} saving={savingMaintenance} dirty={maintenanceDirty} />
 
@@ -1817,6 +1819,101 @@ const rivuneSettingDefaults = {
   notificationPollIntervalSeconds: 5,
 } as const;
 
+type DeviceNotificationValues = Pick<SettingsValues, "notificationsEnabled" | "notificationDurationSeconds" | "notificationPollIntervalSeconds">;
+
+function deviceNotificationValues(values: SettingsValues): DeviceNotificationValues {
+  return {
+    notificationsEnabled: values.notificationsEnabled,
+    notificationDurationSeconds: values.notificationDurationSeconds,
+    notificationPollIntervalSeconds: values.notificationPollIntervalSeconds,
+  };
+}
+
+function isDeviceNotificationSetting(key: string): boolean {
+  return key === "notificationsEnabled" || key === "notificationDurationSeconds" || key === "notificationPollIntervalSeconds";
+}
+
+function preferenceValues(values: SettingsValues): SettingsValues {
+  const preferences = { ...values };
+  delete preferences.notificationsEnabled;
+  delete preferences.notificationDurationSeconds;
+  delete preferences.notificationPollIntervalSeconds;
+  return preferences;
+}
+
+function DeviceNotificationsOperationsCard() {
+  const [values, setValues] = useState<DeviceNotificationValues>(() => deviceNotificationValues({}));
+  const [saved, setSaved] = useState<DeviceNotificationValues>(() => deviceNotificationValues({}));
+  const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const dirty = JSON.stringify(values) !== JSON.stringify(saved);
+  const defaults = {
+    notificationsEnabled: rivuneSettingDefaults.notificationsEnabled,
+    notificationDurationSeconds: rivuneSettingDefaults.notificationDurationSeconds,
+    notificationPollIntervalSeconds: rivuneSettingDefaults.notificationPollIntervalSeconds,
+  };
+
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    setLoaded(false);
+    setError("");
+    void api.instanceSettings()
+      .then((layer) => {
+        if (!current) return;
+        const next = deviceNotificationValues(layer.settings);
+        setValues(next);
+        setSaved(next);
+        setLoaded(true);
+      })
+      .catch((cause) => {
+        if (current) setError(notifyError(cause, translate("settings.errors.load"), translate("settings.errors.unavailableTitle")));
+      })
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+    return () => { current = false; };
+  }, []);
+
+  function change<K extends keyof DeviceNotificationValues>(key: K, value: DeviceNotificationValues[K]) {
+    setValues((current) => ({ ...current, [key]: value }));
+  }
+
+  async function save() {
+    if (!dirty) return;
+    setSaving(true);
+    setError("");
+    try {
+      const updated = await api.updateInstanceSettings(values);
+      const next = deviceNotificationValues(updated.settings);
+      setValues(next);
+      setSaved(next);
+      window.dispatchEvent(new Event("rivune:settings-changed"));
+      notifySuccess(translate("settings.notifications.serverSavedMessage"), translate("settings.notifications.savedTitle"));
+    } catch (cause) {
+      setError(notifyError(cause, translate("settings.errors.save"), translate("settings.errors.saveTitle")));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <section className="operations-panel operations-notifications" aria-labelledby="operations-notifications-title">
+    <header>
+      <div><span>{translate("common.labels.advanced")}</span><h3 id="operations-notifications-title">{translate("settings.groups.deviceNotifications.title")}</h3><p>{translate("settings.groups.deviceNotifications.description")}</p></div>
+    </header>
+    {error && <Notice>{error}</Notice>}
+    {loading && <Skeleton className="settings-skeleton" />}
+    {loaded && <>
+      <div className="operations-notifications__form">
+        <DeviceNotificationFields values={values} defaults={defaults} emptyLabel={translate("settings.defaults.rivune")} onChange={change} />
+      </div>
+      <footer><div><strong>{translate("settings.scope.serverDefaults")}</strong><small>{translate("settings.scope.serverDescription")}</small></div><Button variant="secondary" disabled={!dirty || saving} onClick={() => setValues(saved)}>{translate("common.actions.discardChanges")}</Button><Button loading={saving} disabled={!dirty} onClick={() => void save()}><Check size={18} /> {translate("settings.actions.savePreferences")}</Button></footer>
+    </>}
+  </section>;
+}
+
 type SettingOption = { readonly value: string } & (
   | { readonly label: string }
   | { readonly labelKey: TranslationKey }
@@ -1856,7 +1953,7 @@ function SettingsAdmin() {
   const targetProfile = account?.profiles.find((candidate) => candidate.id === settingsTarget) ?? activeProfile;
   const settingsDirty = serverSelected ? JSON.stringify(instance) !== JSON.stringify(savedInstance) : JSON.stringify(profile) !== JSON.stringify(savedProfile);
   const hasUnsavedChanges = settingsDirty;
-  const overrideCount = Object.entries(serverSelected ? instance : profile).filter(([key, value]) => value !== null && value !== undefined && !(key === "transcoding" && value === "inherit")).length;
+  const overrideCount = Object.entries(serverSelected ? instance : profile).filter(([key, value]) => !isDeviceNotificationSetting(key) && value !== null && value !== undefined && !(key === "transcoding" && value === "inherit")).length;
 
   useEffect(() => {
     setSettingsTarget(activeProfile?.id ?? "");
@@ -1922,7 +2019,7 @@ function SettingsAdmin() {
     try {
       let remainingTranscodingSessions = 0;
       if (savingServer) {
-        const updated = await api.updateInstanceSettings(instance);
+        const updated = await api.updateInstanceSettings(preferenceValues(instance));
         if (settingsTargetRef.current === target) {
           setInstance(updated.settings);
           setSavedInstance(updated.settings);
@@ -1936,7 +2033,7 @@ function SettingsAdmin() {
           setTranscodingDisableCount(null);
         }
       } else {
-        const updated = await api.updateProfileSettings(target, profile);
+        const updated = await api.updateProfileSettings(target, preferenceValues(profile));
         if (settingsTargetRef.current === target) {
           setProfile(updated.settings);
           setSavedProfile(updated.settings);
@@ -2171,8 +2268,8 @@ function MaintenanceCard({ values, onChange, onSave, onReset, saving, dirty }: {
         <label className="toggle-field"><input type="checkbox" checked={values.enabled} disabled={saving} onChange={(event) => onChange({ ...values, enabled: event.target.checked })} /><span><i /><div><strong>{translate("admin.maintenance.enabled")}</strong><small>{translate("admin.maintenance.enabledDescription")}</small></div></span></label>
       </div>
       <label className="field"><span>{translate("admin.maintenance.message")}</span><div><textarea value={message} disabled={saving} placeholder={translate("admin.maintenance.placeholder")} onChange={(event) => { if (countCodePoints(event.target.value) <= 500) onChange({ ...values, message: event.target.value || null }); }} /></div><small>{translate("admin.maintenance.characterCount", { count: countCodePoints(message) })}</small></label>
+      <div className="maintenance-settings__actions"><Button variant="secondary" disabled={!dirty || saving} onClick={onReset}>{translate("common.actions.discardChanges")}</Button><Button loading={saving} disabled={!dirty} onClick={onSave}><Check size={18} /> {translate("admin.maintenance.save")}</Button></div>
     </div>
-    <footer><div><strong>{translate(values.enabled ? "admin.maintenance.accessBlocked" : "admin.maintenance.accessAvailable")}</strong><small>{translate("admin.maintenance.separateSaveDescription")}</small></div><Button variant="secondary" disabled={!dirty || saving} onClick={onReset}>{translate("common.actions.discardChanges")}</Button><Button loading={saving} disabled={!dirty} onClick={onSave}><Check size={18} /> {translate("admin.maintenance.save")}</Button></footer>
   </section>;
 }
 
@@ -2201,9 +2298,6 @@ function SettingsCard({ serverScope = false, title, description, icon, values, d
     subtitleSizePercent: defaults.subtitleSizePercent ?? rivuneSettingDefaults.subtitleSizePercent,
     subtitleTextColor: defaults.subtitleTextColor ?? rivuneSettingDefaults.subtitleTextColor,
     subtitleBackgroundOpacityPercent: defaults.subtitleBackgroundOpacityPercent ?? rivuneSettingDefaults.subtitleBackgroundOpacityPercent,
-    notificationsEnabled: defaults.notificationsEnabled ?? rivuneSettingDefaults.notificationsEnabled,
-    notificationDurationSeconds: defaults.notificationDurationSeconds ?? rivuneSettingDefaults.notificationDurationSeconds,
-    notificationPollIntervalSeconds: defaults.notificationPollIntervalSeconds ?? rivuneSettingDefaults.notificationPollIntervalSeconds,
   };
   const serverAllowsTranscoding = serverScope ? values.allowTranscoding ?? effective.allowTranscoding : effective.allowTranscoding;
   const profileTranscoding = values.transcoding ?? rivuneSettingDefaults.transcoding;
@@ -2269,13 +2363,16 @@ function SettingsCard({ serverScope = false, title, description, icon, values, d
         <RangeSetting label={translate("settings.fields.subtitleBackgroundOpacity")} value={values.subtitleBackgroundOpacityPercent} defaultValue={effective.subtitleBackgroundOpacityPercent} min={0} max={100} step={1} suffix="%" emptyLabel={emptyLabel} onChange={(value) => change("subtitleBackgroundOpacityPercent", value)} />
       </SettingsGroup>
 
-      <SettingsGroup icon={<Bell />} title={translate("settings.groups.deviceNotifications.title")} description={translate("settings.groups.deviceNotifications.description")} className="settings-group--wide settings-group--advanced" status={translate("common.labels.advanced")}>
-        <InheritedToggle label={translate("settings.fields.sessionNotifications")} description={translate("settings.fields.sessionNotificationsDescription")} value={values.notificationsEnabled} defaultValue={effective.notificationsEnabled} onChange={(value) => change("notificationsEnabled", value)} emptyLabel={emptyLabel} />
-        <RangeSetting label={translate("settings.fields.notificationDuration")} value={values.notificationDurationSeconds} defaultValue={effective.notificationDurationSeconds} min={2} max={30} step={1} suffix={translate("settings.units.secondsSuffix")} emptyLabel={emptyLabel} onChange={(value) => change("notificationDurationSeconds", value)} />
-        <RangeSetting label={translate("settings.fields.notificationPollingInterval")} value={values.notificationPollIntervalSeconds} defaultValue={effective.notificationPollIntervalSeconds} min={5} max={300} step={1} suffix={translate("settings.units.secondsSuffix")} emptyLabel={emptyLabel} onChange={(value) => change("notificationPollIntervalSeconds", value)} />
-      </SettingsGroup>
     </div>
   </section>;
+}
+
+function DeviceNotificationFields({ values, defaults, emptyLabel, onChange }: { values: DeviceNotificationValues; defaults: { notificationsEnabled: boolean; notificationDurationSeconds: number; notificationPollIntervalSeconds: number }; emptyLabel: string; onChange: <K extends keyof DeviceNotificationValues>(key: K, value: DeviceNotificationValues[K]) => void }) {
+  return <>
+    <InheritedToggle label={translate("settings.fields.sessionNotifications")} description={translate("settings.fields.sessionNotificationsDescription")} value={values.notificationsEnabled} defaultValue={defaults.notificationsEnabled} onChange={(value) => onChange("notificationsEnabled", value)} emptyLabel={emptyLabel} />
+    <RangeSetting label={translate("settings.fields.notificationDuration")} value={values.notificationDurationSeconds} defaultValue={defaults.notificationDurationSeconds} min={2} max={30} step={1} suffix={translate("settings.units.secondsSuffix")} emptyLabel={emptyLabel} onChange={(value) => onChange("notificationDurationSeconds", value)} />
+    <RangeSetting label={translate("settings.fields.notificationPollingInterval")} value={values.notificationPollIntervalSeconds} defaultValue={defaults.notificationPollIntervalSeconds} min={5} max={300} step={1} suffix={translate("settings.units.secondsSuffix")} emptyLabel={emptyLabel} onChange={(value) => onChange("notificationPollIntervalSeconds", value)} />
+  </>;
 }
 
 function SettingsGroup({ icon, iconClassName = "", title, description, status, statusTone = "", className = "", children }: { icon: React.ReactNode; iconClassName?: string; title: string; description: string; status?: string; statusTone?: "connected" | "disconnected" | "unavailable" | ""; className?: string; children: React.ReactNode }) {

@@ -601,12 +601,16 @@ export class RivuneHarness {
       const allowTranscoding = instanceAllowsTranscoding && transcoding !== "disabled";
       const instanceMaximumCastMembers = typeof this.instanceSettings.maximumCastMembers === "number" ? Math.min(100, Math.max(1, this.instanceSettings.maximumCastMembers)) : 20;
       const maximumCastMembers = typeof profileValues.maximumCastMembers === "number" ? Math.min(instanceMaximumCastMembers, Math.max(1, profileValues.maximumCastMembers)) : instanceMaximumCastMembers;
+      const notificationsEnabled = typeof this.instanceSettings.notificationsEnabled === "boolean" ? this.instanceSettings.notificationsEnabled : true;
+      const notificationDurationSeconds = typeof this.instanceSettings.notificationDurationSeconds === "number" ? this.instanceSettings.notificationDurationSeconds : 5;
+      const notificationPollIntervalSeconds = typeof this.instanceSettings.notificationPollIntervalSeconds === "number" ? this.instanceSettings.notificationPollIntervalSeconds : 5;
+      const notificationSource = (key: string) => key in this.instanceSettings ? "instance" : "default";
       const interfaceLanguage = typeof profileLanguage === "string"
         ? profileLanguage
         : typeof instanceLanguage === "string" ? instanceLanguage : "en";
       const responseDelay = this.effectiveSettingsDelays.shift() ?? 0;
       if (responseDelay > 0) await wait(responseDelay);
-      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, allowTranscoding, transcoding, maximumCastMembers, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled: false, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default", allowTranscoding: instanceAllowsTranscoding ? transcoding === "disabled" ? "profile" : "instance" : "instance", transcoding: "profile", maximumCastMembers: typeof profileValues.maximumCastMembers === "number" ? "profile" : "instance" } });
+      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, allowTranscoding, transcoding, maximumCastMembers, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default", allowTranscoding: instanceAllowsTranscoding ? transcoding === "disabled" ? "profile" : "instance" : "instance", transcoding: "profile", maximumCastMembers: typeof profileValues.maximumCastMembers === "number" ? "profile" : "instance", notificationsEnabled: notificationSource("notificationsEnabled"), notificationDurationSeconds: notificationSource("notificationDurationSeconds"), notificationPollIntervalSeconds: notificationSource("notificationPollIntervalSeconds") } });
       return;
     }
     if (path === "/auth/notifications") { await json(route, { notifications: [] }); return; }

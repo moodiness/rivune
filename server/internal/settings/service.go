@@ -17,12 +17,15 @@ import (
 )
 
 const (
-	schemaVersion                 = 1
-	DefaultInterfaceLanguage      = "en"
-	DefaultMaximumCastMembers     = 20
-	MinimumMaximumCastMembers     = 1
-	MaximumMaximumCastMembers     = 100
-	MaintenanceMessageMaximumSize = 500
+	schemaVersion                          = 1
+	DefaultInterfaceLanguage               = "en"
+	DefaultMaximumCastMembers              = 20
+	MinimumMaximumCastMembers              = 1
+	MaximumMaximumCastMembers              = 100
+	MaintenanceMessageMaximumSize          = 500
+	DefaultNotificationsEnabled            = true
+	DefaultNotificationDurationSeconds     = 5
+	DefaultNotificationPollIntervalSeconds = 5
 
 	TranscodingModeInherit  TranscodingMode = "inherit"
 	TranscodingModeEnabled  TranscodingMode = "enabled"
@@ -360,6 +363,7 @@ func (s *Service) Effective(ctx context.Context, principal auth.Principal, profi
 	applyLayer(&effective, profileValues, "profile")
 	applyTranscodingPolicy(&effective, instanceValues, profileValues)
 	applyMaximumCastMembersPolicy(&effective, instanceValues, profileValues)
+	applyNotificationPolicy(&effective, instanceValues)
 	return effective, nil
 }
 
@@ -415,7 +419,7 @@ func defaultEffective() Effective {
 			AutoplayNextEpisode: true, CardDensity: "comfortable", AnimationsEnabled: true,
 			SkipIntroEnabled: true, SkipRecapEnabled: true, SkipOutroEnabled: true,
 			SubtitleSizePercent: 100, SubtitleTextColor: "#FFFFFF", SubtitleBackgroundOpacityPercent: 60,
-			NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 5,
+			NotificationsEnabled: DefaultNotificationsEnabled, NotificationDurationSeconds: DefaultNotificationDurationSeconds, NotificationPollIntervalSeconds: DefaultNotificationPollIntervalSeconds,
 		},
 		Sources: map[string]string{
 			"interfaceLanguage": "default",
@@ -528,7 +532,31 @@ func validateProfilePatch(patch Patch) error {
 	if patch.AllowTranscoding.Set {
 		return fmt.Errorf("%w: allowTranscoding is only valid for instance settings", ErrInvalidInput)
 	}
+	if patch.NotificationsEnabled.Set || patch.NotificationDurationSeconds.Set || patch.NotificationPollIntervalSeconds.Set {
+		return fmt.Errorf("%w: notification settings are only valid for instance settings", ErrInvalidInput)
+	}
 	return nil
+}
+
+func applyNotificationPolicy(effective *Effective, instance Values) {
+	effective.Values.NotificationsEnabled = DefaultNotificationsEnabled
+	effective.Values.NotificationDurationSeconds = DefaultNotificationDurationSeconds
+	effective.Values.NotificationPollIntervalSeconds = DefaultNotificationPollIntervalSeconds
+	effective.Sources["notificationsEnabled"] = "default"
+	effective.Sources["notificationDurationSeconds"] = "default"
+	effective.Sources["notificationPollIntervalSeconds"] = "default"
+	if instance.NotificationsEnabled != nil {
+		effective.Values.NotificationsEnabled = *instance.NotificationsEnabled
+		effective.Sources["notificationsEnabled"] = "instance"
+	}
+	if instance.NotificationDurationSeconds != nil {
+		effective.Values.NotificationDurationSeconds = *instance.NotificationDurationSeconds
+		effective.Sources["notificationDurationSeconds"] = "instance"
+	}
+	if instance.NotificationPollIntervalSeconds != nil {
+		effective.Values.NotificationPollIntervalSeconds = *instance.NotificationPollIntervalSeconds
+		effective.Sources["notificationPollIntervalSeconds"] = "instance"
+	}
 }
 
 func validateProfileMaximumCastMembers(patch Patch, instance Values) error {

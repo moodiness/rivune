@@ -12,6 +12,20 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   await expect(streamMetrics.locator(".operation-metric").filter({ hasText: "Active sessions" })).toContainText("2");
   await expect(streamMetrics.locator(".operation-metric").filter({ hasText: "Temporary media" })).toContainText("12 MB");
 
+  const notifications = page.getByRole("region", { name: "Device notifications" });
+  await expect(notifications).toBeVisible();
+  await expect(notifications.getByRole("combobox", { name: "Switch scope" })).toHaveCount(0);
+  await expect(notifications.locator("xpath=following-sibling::*[1]")).toHaveClass(/maintenance-settings/);
+  const maintenance = page.locator(".maintenance-settings");
+  await expect(maintenance.locator(".maintenance-settings__body").getByRole("button", { name: "Discard changes" })).toBeVisible();
+  await expect(maintenance.locator(".maintenance-settings__body").getByRole("button", { name: "Save maintenance settings" })).toBeVisible();
+  await expect(maintenance.locator(":scope > footer")).toHaveCount(0);
+  await notifications.getByLabel("Session notifications").uncheck();
+  await notifications.getByRole("button", { name: "Save preferences" }).click();
+  const notificationRequest = await rivune.waitForRequest("/api/v1/settings", "PATCH");
+  expect(notificationRequest.body).toEqual({ notificationsEnabled: false });
+  expect(rivune.requests.filter((request) => request.method === "PATCH" && /^\/api\/v1\/profiles\/[^/]+\/settings$/.test(request.pathname))).toHaveLength(0);
+
   await page.getByLabel("Run scheduled refreshes").check();
   await page.getByLabel("Refresh interval").selectOption("12");
   await page.getByLabel("Metadata language").fill("fr-CA");
@@ -58,6 +72,7 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   await expect(page.getByRole("heading", { name: "Maintenance mode" })).toHaveCount(0);
   await expect(page.getByLabel("Block member access")).toHaveCount(0);
   await expect(page.getByLabel("Public message")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Device notifications" })).toHaveCount(0);
 });
 
 test("metadata refresh keeps successful work and warns with safe failed titles", async ({ page, rivune }) => {
