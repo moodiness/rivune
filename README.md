@@ -18,6 +18,7 @@
 </p>
 
 <p align="center">
+  <a href="#whats-new-in-v050">v0.5.0</a> ·
   <a href="#features">Features</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#quick-start-with-docker-compose">Quick start</a> ·
@@ -33,18 +34,27 @@
   Rivune is under active development. The web client and backend are usable today. Typed protocol-v18 clients for Apple, Android, and Windows are included; their native application interfaces are planned.
 </p>
 
+## What's new in v0.5.0
+
+- **Category-scoped access:** organize profiles and devices into access categories with independent management boundaries, availability rules, a single default category, profile descriptions, and an expanded preset-avatar catalog
+- **Capability-aware playback:** negotiate direct play, remuxing, audio conversion, or H.264/AAC transcoding from client capabilities while keeping playback diagnostics and provider details server-side
+- **TV and IPTV integration:** discover IPTV catalogs through search and library, with a streamlined channel layout for television interfaces
+- **Stronger media presentation:** prefer season-aware and original episode artwork, reject unsuitable landscape season posters, expose configurable cast carousels, and keep upcoming episodes actionable
+- **More resilient operations:** isolate addon failures, recover from missing metadata during refresh, prevent duplicate stream loading, enforce server-owned notification policy, and provide a secure pre-setup reviewer demo
+
 ## Features
 
 - **Self-hosted by design:** no predefined catalog, hosted account, or mandatory third-party service
-- **Secure access:** first-run claiming, device authentication, rotating refresh tokens, and revocable sessions
-- **Independent profiles:** PIN protection and throttling, management permissions, availability windows, settings, libraries, and watch progress
-- **Flexible discovery:** profile-scoped addons and curated collections backed by addon catalogs, TMDB, Trakt, or MDBList
-- **Rich metadata:** optional TMDB, TVDB, and Fanart.tv enrichment, localized season-aware trailers, title logos, and visible provider identifiers
+- **Secure access:** first-run claiming, device authentication, rotating refresh tokens, revocable sessions, and category-scoped authorization
+- **Independent profiles:** descriptions, preset or custom avatars, PIN protection and throttling, management permissions, availability windows, inherited settings, libraries, and watch progress
+- **Access categories:** place profiles and devices behind explicit administrative boundaries, promote one default category, and move assignments without leaking cross-category access
+- **Flexible discovery:** profile-scoped addons, IPTV catalogs, and curated collections backed by addon catalogs, TMDB, Trakt, or MDBList
+- **Rich metadata:** optional TMDB, TVDB, and Fanart.tv enrichment, localized season-aware trailers, title logos, original episode artwork, and visible provider identifiers
 - **Account tracking:** optional per-profile Trakt and Simkl connections with encrypted provider tokens
 - **Private playback resolution:** opaque, session-bound source references keep provider URLs and headers on the server
-- **Adaptive playback:** direct play, remuxing, audio conversion, H.264/AAC transcoding, and HLS delivery
+- **Adaptive playback:** capability-aware direct play, remuxing, audio conversion, H.264/AAC transcoding, and HLS delivery
 - **Complete controls:** audio and subtitle selection, external subtitles, seek, speed, Picture in Picture, and resume state
-- **Responsive administration:** home curation, search, library, calendar, multilingual settings, maintenance controls, notifications, and live playback activity
+- **Responsive administration:** category, profile, and device management; home curation; search; library; calendar; multilingual settings; maintenance controls; notifications; and live playback activity
 - **Operational foundation:** PostgreSQL migrations, bounded media processing, automatic cleanup, diagnostics, and AMD64/ARM64 containers
 - **Typed public contract:** OpenAPI at [`protocol/openapi.yaml`](protocol/openapi.yaml) and protocol compatibility rules in [`protocol/COMPATIBILITY.md`](protocol/COMPATIBILITY.md)
 
