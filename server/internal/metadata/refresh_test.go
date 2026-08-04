@@ -201,26 +201,30 @@ func TestRefreshMissingExhaustiveContinuesUntilNewSeasonPayloadsAreCached(t *tes
 	ctx := context.Background()
 	const seriesID = "21000000-0000-4000-8000-000000000010"
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO titles (id, media_type, display_title)
-		VALUES ($1::uuid, 'series', 'Series snapshot');
+		WITH inserted_title AS (
+			INSERT INTO titles (id, media_type, display_title)
+			VALUES ($1::uuid, 'series', 'Series snapshot')
+			RETURNING id
+		)
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
-		VALUES ($1::uuid, 'tmdb', 'series', '70')
+		SELECT id, 'tmdb', 'series', '70'
+		FROM inserted_title
 	`, seriesID); err != nil {
 		t.Fatalf("seed exhaustive refresh series: %v", err)
 	}
 	provider := &refreshTestProvider{
 		series: map[string]ProviderSeries{
 			"70": {
-				ExternalID: "70", Name: "Canonical Series", Cast: []CastMember{}, AdditionalIDs: map[string]string{},
+				ExternalID: "70", Name: "Canonical Series", Overview: "Series overview", Cast: []CastMember{}, AdditionalIDs: map[string]string{},
 				Seasons: []ProviderSeasonSummary{
-					{ExternalID: "71", Name: "Season One", SeasonNumber: 1},
-					{ExternalID: "72", Name: "Season Two", SeasonNumber: 2},
+					{ExternalID: "71", Name: "Season One", Overview: "Season one summary", SeasonNumber: 1},
+					{ExternalID: "72", Name: "Season Two", Overview: "Season two summary", SeasonNumber: 2},
 				},
 			},
 		},
 		seasons: map[string]ProviderSeason{
-			"season:70:1": {ExternalID: "71", Name: "Season One", SeasonNumber: 1, Episodes: []ProviderEpisode{}},
-			"season:70:2": {ExternalID: "72", Name: "Season Two", SeasonNumber: 2, Episodes: []ProviderEpisode{}},
+			"season:70:1": {ExternalID: "71", Name: "Season One", Overview: "Season one overview", SeasonNumber: 1, Episodes: []ProviderEpisode{}},
+			"season:70:2": {ExternalID: "72", Name: "Season Two", Overview: "Season two overview", SeasonNumber: 2, Episodes: []ProviderEpisode{}},
 		},
 	}
 	service := NewService(pool, provider, nil, nil, time.Hour, nil)
