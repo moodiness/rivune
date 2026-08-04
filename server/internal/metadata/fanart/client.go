@@ -74,7 +74,6 @@ type seriesResponse struct {
 	HDTVLogos       []image `json:"hdtvlogo"`
 	ClearLogos      []image `json:"clearlogo"`
 	SeasonPosters   []image `json:"seasonposter"`
-	SeasonThumbs    []image `json:"seasonthumb"`
 }
 
 type candidate struct {
@@ -210,9 +209,6 @@ func (c *Client) EnrichSeries(ctx context.Context, series metadata.ProviderSerie
 		if selected := artwork.SeasonPosters[series.Seasons[index].SeasonNumber]; selected != "" {
 			series.Seasons[index].PosterURL = selected
 		}
-		if selected := artwork.SeasonBackdrops[series.Seasons[index].SeasonNumber]; selected != "" {
-			series.Seasons[index].BackdropURL = selected
-		}
 	}
 	return series, nil
 }
@@ -231,9 +227,6 @@ func (c *Client) EnrichSeason(ctx context.Context, tvdbID string, season metadat
 	}
 	if selected := artwork.SeasonPosters[season.SeasonNumber]; selected != "" {
 		season.PosterURL = selected
-	}
-	if selected := artwork.SeasonBackdrops[season.SeasonNumber]; selected != "" {
-		season.BackdropURL = selected
 	}
 	return season, nil
 }
@@ -255,30 +248,17 @@ func (c *Client) seriesArtwork(ctx context.Context, tvdbID, language string) (ar
 				seasonNumbers[seasonNumber] = struct{}{}
 			}
 		}
-		for _, image := range response.SeasonThumbs {
-			seasonNumber, err := strconv.Atoi(strings.TrimSpace(image.Season))
-			if err == nil && seasonNumber >= 0 {
-				seasonNumbers[seasonNumber] = struct{}{}
-			}
-		}
 		seasonPosters := make(map[int]string, len(seasonNumbers))
 		for seasonNumber := range seasonNumbers {
 			if selected := bestSeasonImage(language, seasonNumber, response.SeasonPosters); selected != "" {
 				seasonPosters[seasonNumber] = selected
 			}
 		}
-		seasonBackdrops := make(map[int]string, len(seasonNumbers))
-		for seasonNumber := range seasonNumbers {
-			if selected := bestSeasonImage(language, seasonNumber, response.SeasonThumbs); selected != "" {
-				seasonBackdrops[seasonNumber] = selected
-			}
-		}
 		return artworkSnapshot{
-			PosterURL:       bestImage(language, response.TVPosters),
-			BackdropURL:     bestImage(language, response.ShowBackgrounds),
-			LogoURL:         bestLocalizedImage(language, response.HDTVLogos, response.ClearLogos),
-			SeasonPosters:   seasonPosters,
-			SeasonBackdrops: seasonBackdrops,
+			PosterURL:     bestImage(language, response.TVPosters),
+			BackdropURL:   bestImage(language, response.ShowBackgrounds),
+			LogoURL:       bestLocalizedImage(language, response.HDTVLogos, response.ClearLogos),
+			SeasonPosters: seasonPosters,
 		}, nil
 	})
 }

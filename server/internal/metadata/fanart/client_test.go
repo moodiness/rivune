@@ -167,7 +167,7 @@ func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonArtwork(t *testing.T) {
 		ExternalID:    "1396",
 		AdditionalIDs: map[string]string{"tvdb": "81189"},
 		Seasons: []metadata.ProviderSeasonSummary{
-			{ExternalID: "3572", SeasonNumber: 1, PosterURL: "https://image.tmdb.org/season-1.jpg"},
+			{ExternalID: "3572", SeasonNumber: 1, PosterURL: "https://image.tmdb.org/season-1.jpg", BackdropURL: "https://image.tmdb.org/season-1-background.jpg"},
 			{ExternalID: "3573", SeasonNumber: 2},
 		},
 	}, "fr-FR")
@@ -180,7 +180,7 @@ func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonArtwork(t *testing.T) {
 		t.Fatalf("unexpected series artwork: %+v", enriched)
 	}
 	if enriched.Seasons[0].PosterURL != "https://images.example/season-1-en.jpg" ||
-		enriched.Seasons[0].BackdropURL != "https://images.example/season-1-background.jpg" ||
+		enriched.Seasons[0].BackdropURL != "https://image.tmdb.org/season-1-background.jpg" ||
 		enriched.Seasons[1].PosterURL != "https://images.example/season-2.jpg" ||
 		enriched.Seasons[1].BackdropURL != "" {
 		t.Fatalf("unexpected season artwork: %+v", enriched.Seasons)
@@ -202,12 +202,12 @@ func TestEnrichSeasonSelectsOnlyRequestedSeason(t *testing.T) {
 	defer server.Close()
 
 	client := newWithBaseURL("project-key", "", server.URL, server.Client())
-	enriched, err := client.EnrichSeason(context.Background(), "81189", metadata.ProviderSeason{SeasonNumber: 2}, "en-US")
+	enriched, err := client.EnrichSeason(context.Background(), "81189", metadata.ProviderSeason{SeasonNumber: 2, BackdropURL: "https://image.tmdb.org/season-2-background.jpg"}, "en-US")
 	if err != nil {
 		t.Fatalf("enrich season: %v", err)
 	}
 	if enriched.PosterURL != "https://images.example/season-2.jpg" ||
-		enriched.BackdropURL != "https://images.example/season-2-background.jpg" {
+		enriched.BackdropURL != "https://image.tmdb.org/season-2-background.jpg" {
 		t.Fatalf("unexpected season artwork: %+v", enriched)
 	}
 }

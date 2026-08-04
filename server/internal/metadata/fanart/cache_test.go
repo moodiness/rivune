@@ -175,7 +175,7 @@ func TestSeriesArtworkCacheIsSharedWithSeasonFolders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enrich series: %v", err)
 	}
-	season, err := client.EnrichSeason(context.Background(), "81189", metadata.ProviderSeason{SeasonNumber: 2}, "fr-FR")
+	season, err := client.EnrichSeason(context.Background(), "81189", metadata.ProviderSeason{SeasonNumber: 2, BackdropURL: "https://image.tmdb.org/season-2-background.jpg"}, "fr-FR")
 	if err != nil {
 		t.Fatalf("enrich season from cached series response: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestSeriesArtworkCacheIsSharedWithSeasonFolders(t *testing.T) {
 	}
 	if series.PosterURL == "" || series.BackdropURL == "" || series.LogoURL == "" ||
 		season.PosterURL != "https://images.example/season-2.jpg" ||
-		season.BackdropURL != "https://images.example/season-2-background.jpg" {
+		season.BackdropURL != "https://image.tmdb.org/season-2-background.jpg" {
 		t.Fatalf("incomplete cached series artwork: series=%+v season=%+v", series, season)
 	}
 }
