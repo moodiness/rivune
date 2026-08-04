@@ -204,6 +204,14 @@ func (a *API) updateDevice(w http.ResponseWriter, r *http.Request, principal aut
 	}
 	writeJSON(w, http.StatusOK, newDeviceResponse(updated))
 }
+func (a *API) deleteDevice(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	err := a.categories.DeleteDevice(r.Context(), categoryActor(principal), r.PathValue("deviceId"))
+	if writeCategoryError(a, w, err, "delete device") {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (a *API) moveDevicesToCategory(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	if !requireJSON(w, r) {
 		return

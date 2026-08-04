@@ -48,6 +48,39 @@ func (s *Service) ListDevices(ctx context.Context, principal Actor, categoryID *
 	return result, nil
 }
 
+func (s *Service) DeleteDevice(ctx context.Context, principal Actor, deviceID string) error {
+	if !principal.GlobalAdministrator {
+		return ErrForbidden
+	}
+	if !validUUID(deviceID) {
+		return invalid("deviceId must be a valid device identifier")
+	}
+	deviceID = canonicalUUID(deviceID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin device deletion: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var categoryID string
+	err = tx.QueryRow(ctx, `SELECT category_id::text FROM devices WHERE id = $1::uuid FOR UPDATE`, deviceID).Scan(&categoryID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("query device for deletion: %w", err)
+	}
+	if err := audit(ctx, tx, principal.UserID, "device.deleted", "device", deviceID, &categoryID, nil, `{}`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM devices WHERE id = $1::uuid`, deviceID); err != nil {
+		return fmt.Errorf("delete device: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit device deletion: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) UpdateDevice(ctx context.Context, principal Actor, deviceID string, input DeviceUpdateInput) (Device, error) {
 	if !principal.GlobalAdministrator {
 		return Device{}, ErrForbidden

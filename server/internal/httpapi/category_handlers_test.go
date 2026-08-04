@@ -13,13 +13,15 @@ import (
 )
 
 type fakeCategoryService struct {
-	categories  []category.Category
-	devices     []category.Device
-	createErr   error
-	deleteErr   error
-	moveErr     error
-	updateInput category.UpdateInput
-	updateCalls int
+	categories        []category.Category
+	devices           []category.Device
+	createErr         error
+	deleteErr         error
+	moveErr           error
+	deleteDeviceErr   error
+	deleteDeviceCalls int
+	updateInput       category.UpdateInput
+	updateCalls       int
 }
 
 func (service *fakeCategoryService) List(context.Context, category.Actor) ([]category.Category, error) {
@@ -50,6 +52,10 @@ func (service *fakeCategoryService) ListDevices(context.Context, category.Actor,
 }
 func (*fakeCategoryService) UpdateDevice(context.Context, category.Actor, string, category.DeviceUpdateInput) (category.Device, error) {
 	return category.Device{}, nil
+}
+func (service *fakeCategoryService) DeleteDevice(context.Context, category.Actor, string) error {
+	service.deleteDeviceCalls++
+	return service.deleteDeviceErr
 }
 func (*fakeCategoryService) MoveDevice(context.Context, category.Actor, string, string) error {
 	return nil
@@ -129,6 +135,36 @@ func TestDeleteDefaultCategoryReturnsImmutableConflict(t *testing.T) {
 	api.deleteCategory(response, request, globalAdminPrincipal())
 	if response.Code != 409 || !strings.Contains(response.Body.String(), `"code":"default_category_immutable"`) {
 		t.Fatalf("unexpected default deletion response %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestDeleteDeviceReturnsNoContentAndMapsPublicErrors(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		err       error
+		wantCode  int
+		wantError string
+	}{
+		{name: "deleted", wantCode: 204},
+		{name: "forbidden", err: category.ErrForbidden, wantCode: 403, wantError: `"code":"global_admin_required"`},
+		{name: "missing", err: category.ErrNotFound, wantCode: 404, wantError: `"code":"category_resource_not_found"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeCategoryService{deleteDeviceErr: test.err}
+			api := &API{categories: service}
+			request := httptest.NewRequest("DELETE", "/api/v1/devices/01234567-89ab-cdef-0123-456789abcdef", nil)
+			request.SetPathValue("deviceId", "01234567-89ab-cdef-0123-456789abcdef")
+			response := httptest.NewRecorder()
+
+			api.deleteDevice(response, request, globalAdminPrincipal())
+
+			if response.Code != test.wantCode || service.deleteDeviceCalls != 1 {
+				t.Fatalf("unexpected device deletion result: status=%d calls=%d body=%s", response.Code, service.deleteDeviceCalls, response.Body.String())
+			}
+			if test.wantError != "" && !strings.Contains(response.Body.String(), test.wantError) {
+				t.Fatalf("device deletion response missing %s: %s", test.wantError, response.Body.String())
+			}
+		})
 	}
 }
 

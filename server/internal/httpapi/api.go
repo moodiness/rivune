@@ -91,6 +91,7 @@ type categoryService interface {
 	MoveProfiles(context.Context, category.Actor, []string, string) error
 	ListDevices(context.Context, category.Actor, *string) ([]category.Device, error)
 	UpdateDevice(context.Context, category.Actor, string, category.DeviceUpdateInput) (category.Device, error)
+	DeleteDevice(context.Context, category.Actor, string) error
 	MoveDevice(context.Context, category.Actor, string, string) error
 	MoveDevices(context.Context, category.Actor, []string, string) error
 }
@@ -356,6 +357,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/categories/{categoryId}", a.requireAuthentication(a.deleteCategory))
 	mux.Handle("GET /api/v1/devices", a.requireAuthentication(a.listDevices))
 	mux.Handle("PATCH /api/v1/devices/{deviceId}", a.requireAuthentication(a.updateDevice))
+	mux.Handle("DELETE /api/v1/devices/{deviceId}", a.requireAuthentication(a.deleteDevice))
 	mux.Handle("POST /api/v1/profiles/category-moves", a.requireAuthentication(a.moveProfilesToCategory))
 	mux.Handle("POST /api/v1/devices/category-moves", a.requireAuthentication(a.moveDevicesToCategory))
 	mux.Handle("GET /api/v1/profiles", a.requireAuthentication(a.listProfiles))

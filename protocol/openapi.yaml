@@ -670,6 +670,28 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+    delete:
+      summary: Delete approved device
+      description: >
+        Permanently deletes an approved device and cascades deletion to all of its sessions.
+        The deletion and its device.deleted audit event are committed atomically.
+        Requires a global administrator session.
+      operationId: deleteDevice
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: The device and all of its sessions were deleted.
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
   /profiles/category-moves:
     post:
       summary: Move profiles to an access category
