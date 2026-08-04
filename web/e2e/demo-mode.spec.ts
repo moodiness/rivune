@@ -85,8 +85,8 @@ test("demo entry sends no setup secret or bearer token and exposes content, prof
     sessionAccess: sessionStorage.getItem("rivune.access"),
     hint: localStorage.getItem("rivune.demo"),
   }))).toEqual({ access: null, refresh: null, sessionAccess: null, hint: "1" });
-  await expect(page.getByRole("button", { name: "Administration", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Preferences", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: /^(Administration|Preferences|Manage)$/ })).toHaveCount(0);
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
   await rivune.waitForRequest("/api/v1/progress/episode-1", "GET");
   await page.getByRole("button", { name: "Back to browse" }).click();
@@ -171,4 +171,48 @@ test("demo polling reacts to completed setup, purges caches, and routes to login
   await expect(page.getByText("The server setup has been completed. Demo mode is no longer available.", { exact: true })).toBeVisible({ timeout: 7_000 });
   await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
   expect(await page.evaluate(() => ({ hint: localStorage.getItem("rivune.demo"), cache: localStorage.getItem("rivune.home-cache.v2.demo") }))).toEqual({ hint: null, cache: null });
+});
+
+test("unpaired devices render a local accessible QR and preserve the server approval URI", async ({ page, rivune }) => {
+  await rivune.configureUnpaired(page);
+  rivune.setDeviceAuthorization({
+    verificationUri: "https://pairing.rivune.test/approve",
+    verificationUriComplete: "/pair?code=BCDF-GHJK",
+  });
+  await page.goto("/");
+  await rivune.waitForRequest("/api/v1/auth/device-code", "POST");
+
+  await expect(page.getByText("BCDF-GHJK", { exact: true })).toBeVisible();
+  await expect(page.getByRole("img", { name: "Pairing code" })).toBeVisible();
+  const approvalLink = page.getByRole("link", { name: "https://pairing.rivune.test/approve" });
+  await expect(approvalLink).toHaveAttribute("href", "https://pairing.rivune.test/approve");
+  await expect(page.locator(".pairing-card__code time")).toContainText("Code expires");
+});
+
+test("a terminal pairing expiry clears the stale code and retry resolves a relative server URI", async ({ page, rivune }) => {
+  await rivune.configureUnpaired(page);
+  rivune.setDeviceAuthorization({ intervalSeconds: 0.01 });
+  rivune.setDeviceAuthorizationFailure("expired_device_code");
+  await page.goto("/");
+
+  const alert = page.locator(".pairing-card > [role=alert]");
+  await expect(alert).toContainText("This pairing code expired");
+  await expect(page.getByText("BCDF-GHJK", { exact: true })).toHaveCount(0);
+  const retry = page.getByRole("button", { name: "Generate a new code" });
+  await expect(retry).toBeEnabled();
+  expect(rivune.matching("/api/v1/auth/device-code", "POST")).toHaveLength(1);
+
+  rivune.setDeviceAuthorizationFailure(null);
+  rivune.setDeviceAuthorization({
+    userCode: "JKLM-NPQR",
+    verificationUri: "/approve-device",
+    verificationUriComplete: "/approve-device?code=JKLM-NPQR",
+    intervalSeconds: 60,
+  });
+  await retry.click();
+
+  await expect(page.getByText("JKLM-NPQR", { exact: true })).toBeVisible();
+  const origin = await page.evaluate(() => window.location.origin);
+  await expect(page.getByRole("link", { name: `${origin}/approve-device` })).toHaveAttribute("href", `${origin}/approve-device`);
+  expect(rivune.matching("/api/v1/auth/device-code", "POST")).toHaveLength(2);
 });

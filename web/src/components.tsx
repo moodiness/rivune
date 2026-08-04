@@ -1,7 +1,7 @@
 import { AlertCircle, AlertTriangle, Check, ChevronRight, LoaderCircle, Play, Plus, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { translate as t } from "./i18n";
-import type { ButtonHTMLAttributes, CSSProperties, HTMLAttributes, PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import type { ButtonHTMLAttributes, CSSProperties, HTMLAttributes, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
 export function RivuneMark({ compact = false }: { compact?: boolean }) {
   return (
@@ -24,8 +24,81 @@ export function IconButton({ label, children, className = "", ...props }: Button
   return <button className={`icon-button ${className}`} aria-label={label} title={label} {...props}>{children}</button>;
 }
 
-export function HorizontalDragRow({ children, className = "folder-cover-row", ...props }: HTMLAttributes<HTMLDivElement>) {
-  const drag = useRef({ active: false, moved: false, pointerID: 0, startX: 0, startScrollLeft: 0, lastX: 0, lastTime: 0, velocity: 0 });
+const focusableSelector = [
+  "button:not(:disabled)",
+  "a[href]",
+  "input:not(:disabled)",
+  "select:not(:disabled)",
+  "textarea:not(:disabled)",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
+
+function focusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(focusableSelector))
+    .filter((element) => element.getClientRects().length > 0 && element.getAttribute("aria-disabled") !== "true");
+}
+
+export function allowsMotion(): boolean {
+  if (typeof document !== "undefined" && document.documentElement.dataset.animationsEnabled === "false") return false;
+  return typeof window === "undefined" || !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+export function focusFirstElement(container: HTMLElement | null): HTMLElement | null {
+  const target = container ? focusableElements(container)[0] ?? null : null;
+  target?.focus({ preventScroll: true });
+  target?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: allowsMotion() ? "smooth" : "auto" });
+  return target;
+}
+
+export function handleDirectionalFocus<T extends HTMLElement>(
+  event: ReactKeyboardEvent<T>,
+  { orientation, wrap = false }: { orientation: "horizontal" | "vertical"; wrap?: boolean },
+): boolean {
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+  const horizontal = orientation === "horizontal";
+  const acceptedKeys = horizontal
+    ? ["ArrowLeft", "ArrowRight", "Home", "End"]
+    : ["ArrowUp", "ArrowDown", "Home", "End"];
+  if (!acceptedKeys.includes(event.key)) return false;
+
+  const container = event.currentTarget;
+  const items = focusableElements(container);
+  if (items.length === 0) return false;
+  const eventTarget = event.target instanceof Element ? event.target : null;
+  const current = eventTarget?.closest<HTMLElement>(focusableSelector) ?? null;
+  const currentIndex = current ? items.indexOf(current) : -1;
+  const rtl = horizontal && getComputedStyle(container).direction === "rtl";
+  const previousKey = horizontal ? (rtl ? "ArrowRight" : "ArrowLeft") : "ArrowUp";
+  let nextIndex: number;
+
+  if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = items.length - 1;
+  else {
+    const delta = event.key === previousKey ? -1 : 1;
+    nextIndex = currentIndex < 0 ? (delta > 0 ? 0 : items.length - 1) : currentIndex + delta;
+    if (wrap) nextIndex = (nextIndex + items.length) % items.length;
+    else nextIndex = Math.max(0, Math.min(items.length - 1, nextIndex));
+  }
+
+  event.preventDefault();
+  const next = items[nextIndex];
+  next.focus({ preventScroll: true });
+  next.scrollIntoView({ block: "nearest", inline: "nearest", behavior: allowsMotion() ? "smooth" : "auto" });
+  return true;
+}
+
+export function HorizontalDragRow({
+  children,
+  className = "folder-cover-row",
+  onClickCapture,
+  onKeyDown,
+  onPointerCancel,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  ...props
+}: HTMLAttributes<HTMLDivElement>) {
+  const drag = useRef({ active: false, moved: false, pointerID: 0, startX: 0, startTime: 0, startScrollLeft: 0, lastX: 0, lastTime: 0, velocity: 0 });
   const suppressClick = useRef(false);
   const momentumFrame = useRef(0);
 
@@ -36,9 +109,14 @@ export function HorizontalDragRow({ children, className = "folder-cover-row", ..
 
   function continueMomentum(element: HTMLDivElement, initialVelocity: number) {
     stopMomentum();
+    if (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     let velocity = Math.max(-2.5, Math.min(2.5, initialVelocity));
     let previousTime = performance.now();
     const advance = (time: number) => {
+      if (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        momentumFrame.current = 0;
+        return;
+      }
       const elapsed = Math.min(32, time - previousTime);
       previousTime = time;
       const previousScrollLeft = element.scrollLeft;
@@ -54,14 +132,21 @@ export function HorizontalDragRow({ children, className = "folder-cover-row", ..
   }
 
   function finishDrag(event: ReactPointerEvent<HTMLDivElement>, withMomentum: boolean) {
-    if (event.pointerType === "touch" || !drag.current.active || drag.current.pointerID !== event.pointerId) return;
+    if (!drag.current.active || drag.current.pointerID !== event.pointerId) return;
     drag.current.active = false;
     event.currentTarget.classList.remove("is-dragging");
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     if (drag.current.moved) {
       suppressClick.current = true;
       window.setTimeout(() => { suppressClick.current = false; }, 0);
-      if (withMomentum) continueMomentum(event.currentTarget, drag.current.velocity);
+      if (withMomentum) {
+        const elapsed = Math.max(1, event.timeStamp - drag.current.startTime);
+        const averageVelocity = -(event.clientX - drag.current.startX) / elapsed;
+        const releaseVelocity = Math.abs(drag.current.velocity) >= 0.02
+          ? drag.current.velocity * 0.75 + averageVelocity * 0.25
+          : averageVelocity;
+        continueMomentum(event.currentTarget, releaseVelocity);
+      }
     }
   }
 
@@ -70,14 +155,21 @@ export function HorizontalDragRow({ children, className = "folder-cover-row", ..
   return <div
     {...props}
     className={className}
+    data-directional-row=""
+    onKeyDown={(event) => {
+      onKeyDown?.(event);
+      if (!event.defaultPrevented) handleDirectionalFocus(event, { orientation: "horizontal" });
+    }}
     onPointerDown={(event) => {
-      if (event.pointerType === "touch" || event.button !== 0) return;
+      onPointerDown?.(event);
+      if (event.defaultPrevented || !event.isPrimary || event.button !== 0) return;
       stopMomentum();
       drag.current = {
         active: true,
         moved: false,
         pointerID: event.pointerId,
         startX: event.clientX,
+        startTime: event.timeStamp,
         startScrollLeft: event.currentTarget.scrollLeft,
         lastX: event.clientX,
         lastTime: event.timeStamp,
@@ -85,14 +177,16 @@ export function HorizontalDragRow({ children, className = "folder-cover-row", ..
       };
     }}
     onPointerMove={(event) => {
-      if (event.pointerType === "touch" || !drag.current.active || drag.current.pointerID !== event.pointerId) return;
+      onPointerMove?.(event);
+      if (event.defaultPrevented || !drag.current.active || drag.current.pointerID !== event.pointerId) return;
       const distance = event.clientX - drag.current.startX;
       if (Math.abs(distance) < 5 && !drag.current.moved) return;
       if (!drag.current.moved) event.currentTarget.setPointerCapture(event.pointerId);
       const elapsed = Math.max(1, event.timeStamp - drag.current.lastTime);
+      const averageVelocity = -(event.clientX - drag.current.startX) / Math.max(1, event.timeStamp - drag.current.startTime);
       const instantaneousVelocity = Math.max(-2.5, Math.min(2.5, -(event.clientX - drag.current.lastX) / elapsed));
       drag.current.velocity = drag.current.moved
-        ? drag.current.velocity * 0.6 + instantaneousVelocity * 0.4
+        ? drag.current.velocity * 0.55 + instantaneousVelocity * 0.3 + averageVelocity * 0.15
         : instantaneousVelocity;
       drag.current.lastX = event.clientX;
       drag.current.lastTime = event.timeStamp;
@@ -101,9 +195,16 @@ export function HorizontalDragRow({ children, className = "folder-cover-row", ..
       event.currentTarget.classList.add("is-dragging");
       event.currentTarget.scrollLeft = drag.current.startScrollLeft - distance;
     }}
-    onPointerUp={(event) => finishDrag(event, true)}
-    onPointerCancel={(event) => finishDrag(event, false)}
+    onPointerUp={(event) => {
+      onPointerUp?.(event);
+      finishDrag(event, !event.defaultPrevented);
+    }}
+    onPointerCancel={(event) => {
+      onPointerCancel?.(event);
+      finishDrag(event, false);
+    }}
     onClickCapture={(event) => {
+      onClickCapture?.(event);
       if (!suppressClick.current) return;
       event.preventDefault();
       event.stopPropagation();
@@ -118,7 +219,7 @@ export function EmptyState({ icon, title, description, action }: { icon?: ReactN
 
 export function Notice({ tone = "error", children }: { tone?: "error" | "success" | "info" | "warning"; children: ReactNode }) {
   const icon = tone === "success" ? <Check size={18} /> : tone === "warning" ? <AlertTriangle size={18} /> : <AlertCircle size={18} />;
-  return <div className={`notice notice--${tone}`}>{icon}{children}</div>;
+  return <div className={`notice notice--${tone}`} role={tone === "error" ? "alert" : "status"} aria-live="polite" aria-atomic="true">{icon}{children}</div>;
 }
 
 export function Modal({ children, onClose, className = "" }: { children: ReactNode; onClose: () => void; className?: string }) {
@@ -128,7 +229,7 @@ export function Modal({ children, onClose, className = "" }: { children: ReactNo
     const dialog = dialogRef.current;
     if (!dialog) return;
     dialog.showModal();
-    dialog.querySelector<HTMLElement>("[autofocus]")?.focus();
+    (dialog.querySelector<HTMLElement>("[autofocus]") ?? dialog.querySelector<HTMLElement>("input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [contenteditable=true]"))?.focus();
     return () => dialog.close();
   }, []);
 

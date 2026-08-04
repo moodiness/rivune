@@ -2,16 +2,76 @@ import { ArrowLeft, ArrowRight, Bookmark, Check, Clapperboard, Compass, Film, In
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
-import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Skeleton } from "../components";
+import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Skeleton, handleDirectionalFocus } from "../components";
 import { translate as t } from "../i18n";
 import { mediaFromLibraryItem, mediaIdentity, resolveMediaTitle } from "../mediaIdentity";
 import { homeCollectionSignature, homeFolderCacheKey, readContinueCache, readHomeCache, writeContinueCache, writeHomeCache, writeHomeFolderCache, type CachedContinueItem } from "../homeCache";
-import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
+import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
 import { mediaTypeLabel } from "../media";
 import type { Collection, CurrentProgram, LibraryItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch } from "../types";
 import type { ActionMenuAnchor } from "../components";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 type OpenMedia = (item: MediaItem) => void;
+type LoadedLibrary = {
+  pages: Record<number, LibraryItem[]>;
+  page: number;
+  totalPages: number;
+  totalResults: number;
+};
+const initialLibraryRequests = new Map<string, Promise<LibraryPage>>();
+
+function loadInitialLibraryPage(profileID: string, filter: "" | "movie" | "series" | "tv", pageSize: number): Promise<LibraryPage> {
+  const key = `${profileID}:${api.metadataScope()}:${filter}:${pageSize}`;
+  const pending = initialLibraryRequests.get(key);
+  if (pending) return pending;
+
+  const request = api.library(filter, 1, pageSize);
+  initialLibraryRequests.set(key, request);
+  const clear = () => {
+    if (initialLibraryRequests.get(key) === request) initialLibraryRequests.delete(key);
+  };
+  void request.then(clear, clear);
+  return request;
+}
+
+function libraryItems(library: LoadedLibrary | null): LibraryItem[] {
+  const seen = new Set<string>();
+  return Object.entries(library?.pages ?? {})
+    .sort(([left], [right]) => Number(left) - Number(right))
+    .flatMap(([, items]) => items.filter((item) => {
+      if (seen.has(item.titleId)) return false;
+      seen.add(item.titleId);
+      return true;
+    }));
+}
+
+function handleBrowseGridKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+  const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(".media-card:not(:disabled), .source-folder-card:not(:disabled)"));
+  const current = (event.target as HTMLElement).closest<HTMLElement>(".media-card, .source-folder-card");
+  if (!current || !controls.includes(current)) return;
+  const currentBounds = current.getBoundingClientRect();
+  const currentX = currentBounds.left + currentBounds.width / 2;
+  const currentY = currentBounds.top + currentBounds.height / 2;
+  const horizontal = event.key === "ArrowLeft" || event.key === "ArrowRight";
+  const direction = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+  const candidates = controls.flatMap((control) => {
+    if (control === current) return [];
+    const bounds = control.getBoundingClientRect();
+    const deltaX = bounds.left + bounds.width / 2 - currentX;
+    const deltaY = bounds.top + bounds.height / 2 - currentY;
+    const primary = horizontal ? deltaX : deltaY;
+    if (Math.sign(primary) !== direction) return [];
+    const cross = horizontal ? deltaY : deltaX;
+    return [{ control, score: Math.abs(primary) + Math.abs(cross) * 4 }];
+  });
+  const next = candidates.sort((left, right) => left.score - right.score)[0]?.control;
+  if (!next) return;
+  event.preventDefault();
+  next.focus();
+  next.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
 
 function record(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -261,6 +321,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [partialWarning, setPartialWarning] = useState("");
   const [opened, setOpened] = useState<OpenedHomeFolder | null>(null);
   const [openedCollection, setOpenedCollection] = useState<OpenedHomeCollection | null>(null);
   const [continueItems, setContinueItems] = useState<EnrichedContinueItem[]>([]);
@@ -294,14 +355,17 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
     };
     profileRequestSignal.addEventListener("abort", cancelRequest, { once: true });
     setError("");
+    setPartialWarning("");
     setContinueItems(cachedContinue?.items ?? []);
     setPendingFolderKeys(new Set());
     if (cachedHome) {
-      setCollections(cachedHome.collections);
-      setRows(cachedHome.collections.flatMap((collection) => collection.folders.flatMap((folder) => {
+      const cachedRows = cachedHome.collections.flatMap((collection) => collection.folders.flatMap((folder) => {
         const resolved = cachedHome.folders[homeFolderCacheKey(collection.id, folder.id ?? "")];
         return resolved ? [{ collection, resolved }] : [];
-      })));
+      }));
+      setCollections(cachedHome.collections);
+      setRows(cachedRows);
+      setPartialWarning(cachedRows.some((row) => row.resolved.errors.length > 0) ? t("home.browser.someTitlesLoadFailed") : "");
       setLoading(false);
     } else {
       setCollections([]);
@@ -329,6 +393,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
           const resolved = cacheMatches ? cachedHome?.folders[target.key] : undefined;
           return resolved ? { collection: target.collection, resolved } : undefined;
         });
+        let hasFolderFailure = results.some((row) => (row?.resolved.errors.length ?? 0) > 0);
         let lastCacheWriteAt = 0;
         const persistResolvedRows = () => {
           cacheWriteTimer = undefined;
@@ -350,6 +415,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
         const pending = targets.flatMap((target, index) => results[index] ? [] : [{ target, index }]);
         setCollections(response.collections);
         setRows(results.filter((row): row is HomeRow => row !== undefined));
+        setPartialWarning(hasFolderFailure ? t("home.browser.someTitlesLoadFailed") : "");
         setPendingFolderKeys(new Set(pending.map(({ target }) => target.key)));
         setLoading(false);
         if (targets.length === 0) {
@@ -372,9 +438,15 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
               const resolved = await api.resolveFolder(target.collection.id, target.folderID, 1, requestController.signal);
               if (!isCurrent()) return;
               results[index] = { collection: target.collection, resolved };
+              if (resolved.errors.length > 0) {
+                hasFolderFailure = true;
+                setPartialWarning(t("home.browser.someTitlesLoadFailed"));
+              }
               setRows(results.filter((row): row is HomeRow => row !== undefined));
               scheduleCacheWrite();
             } catch {
+              hasFolderFailure = true;
+              setPartialWarning(t("home.browser.someTitlesLoadFailed"));
               // A missing folder must not prevent independent rows from rendering.
             } finally {
               window.clearTimeout(timeout);
@@ -396,8 +468,10 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
           cacheWriteTimer = undefined;
         }
         const resolvedRows = results.filter((row): row is HomeRow => row !== undefined);
+        setPartialWarning(hasFolderFailure ? t("home.browser.someTitlesLoadFailed") : "");
         if (resolvedRows.length === 0) {
           setError(notifyErrorMessage(t("home.error.sourcesUnavailable"), t("home.error.unavailableTitle")));
+          setPartialWarning("");
           return;
         }
         writeHomeCache(profileID, cacheScope, response.collections, resolvedRows);
@@ -600,22 +674,22 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   }
 
 
-  if (loading) return <div className="home-page page-enter"><Skeleton className="hero-skeleton" /><div className="content-stack">{[0, 1, 2].map((row) => <div key={row}><Skeleton className="heading-skeleton" /><div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div></div>)}</div></div>;
+  if (loading) return <div className="home-page page-enter" aria-busy="true"><Skeleton className="hero-skeleton" /><div className="content-stack">{[0, 1, 2].map((row) => <div key={row}><Skeleton className="heading-skeleton" /><div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div></div>)}</div></div>;
 
   if (opened) return <FolderBrowser key={`${opened.row.collection.id}-${opened.row.resolved.folder.id}`} row={opened.row} refresh={opened.refresh} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpened(null)} onOpenMedia={onOpenMedia} />;
   if (openedCollection) return <CollectionBrowser key={openedCollection.collection.id} collection={openedCollection.collection} rows={rows.filter((row) => row.collection.id === openedCollection.collection.id)} refresh={openedCollection.refresh} hideUnreleased={mediaPreferences.hideUnreleased} onBack={() => setOpenedCollection(null)} onOpenMedia={onOpenMedia} />;
 
   return <div className="home-page page-enter">
     {hero && heroSlide ? <section key={heroSlide.key} className="hero hero--featured">
-      {heroBackdrop && <div className="hero__backdrop" aria-hidden="true"><img src={heroBackdrop} alt="" /></div>}
+      {heroBackdrop && <div className="hero__backdrop" aria-hidden="true"><img src={heroBackdrop} alt="" loading="eager" fetchPriority="high" decoding="async" /></div>}
       <div className="hero__content">
         <span className="hero__eyebrow"><WandSparkles size={15} /> {t("home.hero.featuredCollection", { collection: heroSlide.collection.title })}</span>
-        {hero.logoUrl ? <img src={hero.logoUrl} alt={hero.title} /> : <h1>{hero.title}</h1>}
+        {hero.logoUrl ? <img src={hero.logoUrl} alt={hero.title} loading="eager" fetchPriority="high" decoding="async" /> : <h1>{hero.title}</h1>}
         <div className="hero__meta">{hero.releaseInfo && <span>{hero.releaseInfo}</span>}{hero.voteAverage !== undefined && <span><Star size={14} fill="currentColor" /> {hero.voteAverage.toFixed(1)}</span>}<span>{mediaTypeLabel(hero.mediaType)}</span></div>
         <p>{hero.description || t("home.hero.descriptionFallback")}</p>
         <div className="hero__actions"><Button onClick={() => onOpenMedia(hero)}><Play size={19} fill="currentColor" /> {t("home.hero.playNow")}</Button><Button variant="secondary" onClick={() => onOpenMedia(hero)}>{t("home.hero.moreInfo")} <ArrowRight size={18} /></Button></div>
       </div>
-      {heroSlides.length > 1 && <div className="hero__navigation" aria-label={t("home.hero.carouselLabel")}>
+      {heroSlides.length > 1 && <div className="hero__navigation" aria-label={t("home.hero.carouselLabel")} onKeyDown={(event) => { handleDirectionalFocus(event, { orientation: "horizontal" }); }}>
         <button type="button" onClick={() => rotateHero(-1)} aria-label={t("home.hero.previousTitle")}><ArrowLeft size={18} /></button>
         <span>{heroSlides.map((slide, index) => <button key={slide.key} type="button" className={index === activeHeroIndex ? "is-active" : ""} onClick={() => setActiveHeroIndex(index)} aria-label={t("home.hero.showTitle", { title: slide.item.title })} aria-current={index === activeHeroIndex ? "true" : undefined} />)}</span>
         <button type="button" onClick={() => rotateHero(1)} aria-label={t("home.hero.nextTitle")}><ArrowRight size={18} /></button>
@@ -623,6 +697,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
     </section> : heroPending ? <Skeleton className="hero-skeleton" /> : <section className="hero hero--empty"><div className="hero__content"><span className="hero__eyebrow"><Sparkles size={15} /> {t("home.emptyHero.eyebrow")}</span><h1>{t("home.emptyHero.title").split("\n").map((line, index) => <span key={line}>{index > 0 && <br />}{line}</span>)}</h1><p>{t("home.emptyHero.description")}</p></div></section>}
     <div className="content-stack">
       {error && <Notice>{error}</Notice>}
+      {partialWarning && <Notice tone="warning">{partialWarning}</Notice>}
       {continueMedia.length > 0 && <section className="continue-section">
         <SectionHeading title={t("home.continue.title")} />
         <HorizontalDragRow className="media-row media-row--landscape media-row--continue">{continueMedia.map((item) => <MediaCard
@@ -701,6 +776,7 @@ function CollectionBrowser({ collection, rows, refresh, hideUnreleased, onBack, 
   })));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [partialWarning, setPartialWarning] = useState(() => rows.some((row) => row.resolved.errors.length > 0) ? t("home.browser.someTitlesLoadFailed") : "");
   const [openedFolderID, setOpenedFolderID] = useState("");
   const loadedMoreRef = useRef(false);
   useEffect(() => {
@@ -713,6 +789,7 @@ function CollectionBrowser({ collection, rows, refresh, hideUnreleased, onBack, 
         page: row.resolved.page,
         hasMore: row.resolved.hasMore,
       })));
+      setPartialWarning(refreshed.some((row) => row.resolved.errors.length > 0) ? t("home.browser.someTitlesLoadFailed") : "");
     });
     return () => { active = false; };
   }, [refresh]);
@@ -741,8 +818,10 @@ function CollectionBrowser({ collection, rows, refresh, hideUnreleased, onBack, 
     const loaded = new Map<string, ResolvedFolder>();
     let failed = false;
     for (const outcome of outcomes) {
-      if (outcome.status === "fulfilled") loaded.set(outcome.value.folderID, outcome.value.resolved);
-      else failed = true;
+      if (outcome.status === "fulfilled") {
+        loaded.set(outcome.value.folderID, outcome.value.resolved);
+        if (outcome.value.resolved.errors.length > 0) failed = true;
+      } else failed = true;
     }
     if (loaded.size > 0) loadedMoreRef.current = true;
     setPages((current) => current.map((page) => {
@@ -788,15 +867,16 @@ function CollectionBrowser({ collection, rows, refresh, hideUnreleased, onBack, 
     <button type="button" className="text-button folder-page__back" onClick={onBack}><ArrowLeft size={17} /> {t("common.actions.backToHome")}</button>
     <SectionHeading eyebrow={t("home.collection.eyebrow")} title={collection.title} description={description} />
     {error && <Notice>{error}</Notice>}
-    {showFolders ? <div className={`source-folder-grid source-folder-grid--${collection.folderCoverShape}`}>{collection.folders.map((folder, index) => { const page = pages.find((candidate) => candidate.row.resolved.folder.id === folder.id);
+    {partialWarning && <Notice tone="warning">{partialWarning}</Notice>}
+    {showFolders ? <div className={`source-folder-grid source-folder-grid--${collection.folderCoverShape}`} onKeyDown={handleBrowseGridKeyDown}>{collection.folders.map((folder, index) => { const page = pages.find((candidate) => candidate.row.resolved.folder.id === folder.id);
     const resolvedFolder = page?.row.resolved.folder ?? folder;
     const visibleItems = page?.items.filter((item) => isAvailable(item, hideUnreleased)) ?? [];
     const artwork = resolvedFolder.coverImageUrl || visibleItems[0]?.posterUrl || visibleItems[0]?.backgroundUrl || collection.backdropImageUrl;
     return <button key={folder.id ?? index} type="button" className="source-folder-card" disabled={!page} onClick={() => setOpenedFolderID(folder.id ?? "")} aria-label={t("home.folder.openNamed", { name: folder.title })}>
       <span className="source-folder-card__visual">{artwork ? <img src={artwork} alt="" loading="lazy" draggable={false} /> : <span>{folder.coverEmoji || folder.title.slice(0, 2).toUpperCase()}</span>}</span>
       {!folder.hideTitle && <span className="source-folder-card__copy"><strong>{folder.title}</strong><small>{t(visibleItems.length === 1 ? "home.collection.titleCount.one" : "home.collection.titleCount.many", { count: visibleItems.length })}</small></span>}
-    </button>; })}</div> : cards.length > 0 ? <div className="media-grid media-grid--adaptive">{cards.map(({ item, shape }) => <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={mediaIdentity(item)}><MediaCard title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? tvSubtitle(item) : item.releaseInfo} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} shape={item.mediaType === "tv" ? "landscape" : shape} onClick={() => onOpenMedia(item)} /></div>)}</div> : <EmptyState icon={<Clapperboard size={46} />} title={t("home.collection.emptyTitle")} description={hideUnreleased ? t("home.browser.noReleasedTitles") : t("home.collection.emptySourcesDescription")} />}
-    {!showFolders && hasMore && <div className="load-more"><Button variant="secondary" loading={loading} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
+    </button>; })}</div> : cards.length > 0 ? <div className="media-grid media-grid--adaptive" onKeyDown={handleBrowseGridKeyDown}>{cards.map(({ item, shape }) => <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={mediaIdentity(item)}><MediaCard title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? tvSubtitle(item) : item.releaseInfo} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} shape={item.mediaType === "tv" ? "landscape" : shape} onClick={() => onOpenMedia(item)} /></div>)}</div> : <EmptyState icon={<Clapperboard size={46} />} title={t("home.collection.emptyTitle")} description={hideUnreleased ? t("home.browser.noReleasedTitles") : t("home.collection.emptySourcesDescription")} />}
+    {!showFolders && hasMore && <div className="load-more"><Button variant="secondary" loading={loading} aria-label={t("common.actions.loadMore")} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
   </div>;
 }
 
@@ -807,6 +887,7 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
   const [sourcePosterUrls, setSourcePosterUrls] = useState(row.resolved.sourcePosterUrls ?? {});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [partialWarning, setPartialWarning] = useState(row.resolved.errors.length > 0 ? t("home.browser.someTitlesLoadFailed") : "");
   const sources = useMemo(() => row.resolved.folder.sources.filter((source) => source.id), [row.resolved.folder.sources]);
   const sourceView = sources.length > 1 ? row.resolved.folder.sourceView ?? "merged" : "merged";
   const [activeSourceID, setActiveSourceID] = useState(sourceView === "categories" ? sources[0]?.id ?? "" : "");
@@ -818,6 +899,7 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
     setPage(row.resolved.page);
     setHasMore(row.resolved.hasMore);
     setSourcePosterUrls(row.resolved.sourcePosterUrls ?? {});
+    setPartialWarning(row.resolved.errors.length > 0 ? t("home.browser.someTitlesLoadFailed") : "");
   }, [row]);
 
   useEffect(() => {
@@ -825,6 +907,7 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
     void refresh?.then((updated) => {
       if (!active || !updated) return;
       setSourcePosterUrls(updated.resolved.sourcePosterUrls ?? {});
+      setPartialWarning(updated.resolved.errors.length > 0 ? t("home.browser.someTitlesLoadFailed") : "");
       if (loadedMoreRef.current) return;
       setItems(updated.resolved.items);
       setPage(updated.resolved.page);
@@ -870,6 +953,7 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
       setItems((current) => [...current, ...additions]);
       setPage(next.page);
       setHasMore(next.hasMore && additions.length > 0);
+      if (next.errors.length > 0) setPartialWarning(t("home.browser.someTitlesLoadFailed"));
     } catch (cause) {
       setError(notifyError(cause, t("home.browser.moreTitlesLoadFailed"), t("common.error.loadingFailedTitle")));
     } finally {
@@ -889,19 +973,20 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
     <button type="button" className="text-button folder-page__back" onClick={() => { if (activeSource && sourceView === "folders") setActiveSourceID(""); else onBack(); }}><ArrowLeft size={17} /> {activeSource && sourceView === "folders" ? t("common.actions.backToNamed", { name: row.resolved.folder.title }) : backLabel ?? t("common.actions.backToHome")}</button>
     <SectionHeading eyebrow={activeSource ? `${row.collection.title} · ${row.resolved.folder.title}` : row.collection.title} title={pageTitle} description={pageDescription} />
     {(sourceView === "categories" || showMediaFilters) && <div className="folder-filter-stack">
-      {sourceView === "categories" && <div className="source-category-tabs" role="tablist" aria-label={t("home.folder.sourceCategoriesLabel")}>{sources.map((source) => <button key={source.id} type="button" role="tab" aria-selected={activeSourceID === source.id} className={activeSourceID === source.id ? "is-active" : ""} onClick={() => setActiveSourceID(source.id ?? "")}>{source.title}</button>)}</div>}
-      {showMediaFilters && <div className="filter-pills folder-media-filters" role="group" aria-label={t("media.filter.groupLabel")}>{([["all", "media.filter.allTitles"], ["movie", "media.filter.movies"], ["series", "media.filter.series"]] as const).map(([value, labelKey]) => <button key={value} type="button" className={mediaFilter === value ? "is-active" : ""} onClick={() => setMediaFilter(value)}>{t(labelKey)}</button>)}</div>}
+      {sourceView === "categories" && <div className="source-category-tabs" role="tablist" aria-label={t("home.folder.sourceCategoriesLabel")} onKeyDown={(event) => { if (handleDirectionalFocus(event, { orientation: "horizontal" })) (document.activeElement as HTMLButtonElement | null)?.click(); }}>{sources.map((source) => <button key={source.id} type="button" role="tab" tabIndex={activeSourceID === source.id ? 0 : -1} aria-selected={activeSourceID === source.id} aria-controls="folder-browser-results" className={activeSourceID === source.id ? "is-active" : ""} onClick={() => setActiveSourceID(source.id ?? "")}>{source.title}</button>)}</div>}
+      {showMediaFilters && <div className="filter-pills folder-media-filters" role="group" aria-label={t("media.filter.groupLabel")} onKeyDown={(event) => { handleDirectionalFocus(event, { orientation: "horizontal" }); }}>{([["all", "media.filter.allTitles"], ["movie", "media.filter.movies"], ["series", "media.filter.series"]] as const).map(([value, labelKey]) => <button key={value} type="button" aria-pressed={mediaFilter === value} className={mediaFilter === value ? "is-active" : ""} onClick={() => setMediaFilter(value)}>{t(labelKey)}</button>)}</div>}
     </div>}
     {error && <Notice>{error}</Notice>}
-    {browsingSourceFolders ? <div className="source-folder-grid">{sources.map((source) => {
+    {partialWarning && <Notice tone="warning">{partialWarning}</Notice>}
+    {browsingSourceFolders ? <div id="folder-browser-results" className="source-folder-grid" onKeyDown={handleBrowseGridKeyDown}>{sources.map((source) => {
       const sourceItems = itemsBySource.get(source.id ?? "") ?? [];
       const artwork = sourcePosterUrls[source.id ?? ""] || sourceItems[0]?.posterUrl || sourceItems[0]?.backgroundUrl;
       return <button key={source.id} type="button" className="source-folder-card" onClick={() => setActiveSourceID(source.id ?? "")} aria-label={t("home.folder.openNamed", { name: source.title })}>
         <span className="source-folder-card__visual">{artwork ? <img src={artwork} alt="" loading="lazy" /> : <span>{source.title.slice(0, 2).toUpperCase()}</span>}</span>
         <span className="source-folder-card__copy"><strong>{source.title}</strong><small>{t(sourceItems.length === 1 ? "home.collection.titleCount.one" : "home.collection.titleCount.many", { count: sourceItems.length })}</small></span>
       </button>;
-    })}</div> : visibleItems.length > 0 ? <div className="media-grid media-grid--adaptive">{visibleItems.map((item) => <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={mediaIdentity(item)}><MediaCard title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? tvSubtitle(item) : item.releaseInfo} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} shape={item.mediaType === "tv" ? "landscape" : row.resolved.folder.tileShape} onClick={() => onOpenMedia(item)} /></div>)}</div> : <EmptyState icon={<Clapperboard size={46} />} title={t(activeSource ? "home.source.emptyTitle" : "home.folder.emptyTitle")} description={hideUnreleased ? t("home.browser.noReleasedTitles") : t("home.collection.emptySourcesDescription")} />}
-    {hasMore && <div className="load-more"><Button variant="secondary" loading={loading} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
+    })}</div> : visibleItems.length > 0 ? <div id="folder-browser-results" className="media-grid media-grid--adaptive" role={sourceView === "categories" ? "tabpanel" : undefined} onKeyDown={handleBrowseGridKeyDown}>{visibleItems.map((item) => <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={mediaIdentity(item)}><MediaCard title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? tvSubtitle(item) : item.releaseInfo} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} shape={item.mediaType === "tv" ? "landscape" : row.resolved.folder.tileShape} onClick={() => onOpenMedia(item)} /></div>)}</div> : <div id="folder-browser-results" role={sourceView === "categories" ? "tabpanel" : undefined}><EmptyState icon={<Clapperboard size={46} />} title={t(activeSource ? "home.source.emptyTitle" : "home.folder.emptyTitle")} description={hideUnreleased ? t("home.browser.noReleasedTitles") : t("home.collection.emptySourcesDescription")} /></div>}
+    {hasMore && <div className="load-more"><Button variant="secondary" loading={loading} aria-label={t("common.actions.loadMore")} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
   </div>;
 }
 
@@ -913,14 +998,17 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
+  const [warning, setWarning] = useState("");
   const [filter, setFilter] = useState<"all" | "movie" | "series" | "tv">("all");
   const [hasMore, setHasMore] = useState(false);
   const [nextSkip, setNextSkip] = useState(pageSize);
   const [retryVersion, setRetryVersion] = useState(0);
   const [savingIdentity, setSavingIdentity] = useState("");
+  const [tvLibraryReady, setTvLibraryReady] = useState(false);
   const mediaPreferences = useMediaPreferences();
   const loadedProfileRef = useRef("");
   const paginationControllerRef = useRef<AbortController | null>(null);
+  const searchRequestGenerationRef = useRef(0);
   const normalizedQuery = query.trim();
   const searchTypes = filter === "all" ? ["movie", "series", "tv"] : [filter];
 
@@ -934,31 +1022,49 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
   useEffect(() => {
     if (!mediaPreferences.ready || !mediaPreferences.profileID) return;
     let active = true;
-    void api.library("tv").then((library) => {
-      if (active) setTvLibrary(library.items);
-    }).catch(() => {
-      if (active) setTvLibrary([]);
+    setTvLibraryReady(false);
+    void (async () => {
+      const firstPage = await api.library("tv");
+      const items = [...firstPage.items];
+      for (let page = firstPage.page + 1; page <= firstPage.totalPages; page++) {
+        items.push(...(await api.library("tv", page)).items);
+      }
+      if (active) {
+        setTvLibrary(items);
+        setTvLibraryReady(true);
+      }
+    })().catch(() => {
+      if (active) {
+        setTvLibrary([]);
+        setTvLibraryReady(false);
+      }
     });
     return () => { active = false; };
   }, [mediaPreferences.profileID, mediaPreferences.ready, mediaRevision]);
 
   useEffect(() => {
+    const generation = ++searchRequestGenerationRef.current;
     paginationControllerRef.current?.abort();
+    setLoadingMore(false);
     if (!mediaPreferences.ready) return;
     if (normalizedQuery.length < 2) {
       setItems([]);
       setError("");
+      setWarning("");
       setLoading(false);
       setHasMore(false);
       return;
     }
+    setItems([]);
+    setError("");
+    setWarning("");
+    setHasMore(false);
+    setLoading(true);
     const controller = new AbortController();
     let active = true;
     const timer = window.setTimeout(() => {
-      setLoading(true);
-      setError("");
       void Promise.allSettled(searchTypes.map((type) => api.search(type, normalizedQuery, 0, pageSize, controller.signal))).then((outcomes) => {
-        if (!active) return;
+        if (!active || searchRequestGenerationRef.current !== generation) return;
         const summary = summarizeSearchOutcomes(outcomes, pageSize);
         const hasFailures = summary.httpFailureCount + summary.internalFailureCount > 0;
         const hasSuccessfulResource = summary.successfulResourceResultCount > 0;
@@ -967,13 +1073,17 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
         setHasMore(hasSuccessfulResource && summary.hasFullPage);
         if (!hasFailures) {
           setError("");
+          setWarning("");
         } else if (hasSuccessfulResource) {
           setError("");
-          notifyWarning(t("search.warning.sourcesUnavailable"));
+          setWarning(t("search.warning.sourcesUnavailable"));
         } else {
           setError(t("search.error.sourcesUnavailable"));
+          setWarning("");
         }
-      }).finally(() => { if (active) setLoading(false); });
+      }).finally(() => {
+        if (active && searchRequestGenerationRef.current === generation) setLoading(false);
+      });
     }, 350);
     return () => {
       active = false;
@@ -1001,7 +1111,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
       } else if (!hasFailures) {
         setHasMore(false);
       }
-      if (hasFailures) notifyWarning(t("search.warning.sourcesUnavailable"));
+      setWarning(hasFailures ? t("search.warning.sourcesUnavailable") : "");
     } finally {
       if (!controller.signal.aborted) setLoadingMore(false);
     }
@@ -1051,32 +1161,52 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
   }
 
   function updateQuery(value: string) {
+    searchRequestGenerationRef.current++;
+    paginationControllerRef.current?.abort();
     setQuery(value);
+    setItems([]);
+    setError("");
+    setWarning("");
+    setHasMore(false);
+    setLoading(value.trim().length >= 2);
+    setLoadingMore(false);
     if (mediaPreferences.profileID) sessionStorage.setItem(`rivune.search.${mediaPreferences.profileID}`, value);
+  }
+
+  function selectSearchFilter(value: typeof filter) {
+    if (value === filter) return;
+    searchRequestGenerationRef.current++;
+    paginationControllerRef.current?.abort();
+    setFilter(value);
+    setItems([]);
+    setError("");
+    setWarning("");
+    setHasMore(false);
+    setLoading(normalizedQuery.length >= 2);
+    setLoadingMore(false);
   }
 
   return <div className="standard-page search-page page-enter">
     <SectionHeading eyebrow={t("search.eyebrow")} title={t("search.title")} description={t("search.description")} />
     <div className="search-box"><Search size={23} /><input type="search" value={query} onChange={(event) => updateQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && query) { event.preventDefault(); updateQuery(""); } }} aria-label={t("nav.search")} aria-keyshortcuts="Escape" placeholder={t("search.placeholder")} autoFocus />{query && <button type="button" className="search-box__clear" aria-label={t("common.close")} title={t("common.close")} onClick={() => updateQuery("")}><X size={17} /></button>}{loading && <LoaderCircle className="spin" />}</div>
     <div className="browse-toolbar">
-      <div className="filter-pills" role="group" aria-label={t("media.filter.groupLabel")}>
-        <button type="button" className={filter === "all" ? "is-active" : ""} aria-pressed={filter === "all"} onClick={() => setFilter("all")}><Compass size={16} /> {t("media.filter.all")}</button>
-        <button type="button" className={filter === "movie" ? "is-active" : ""} aria-pressed={filter === "movie"} onClick={() => setFilter("movie")}><Film size={16} /> {t("media.filter.movies")}</button>
-        <button type="button" className={filter === "series" ? "is-active" : ""} aria-pressed={filter === "series"} onClick={() => setFilter("series")}><Tv size={16} /> {t("media.filter.series")}</button>
-        <button type="button" className={filter === "tv" ? "is-active" : ""} aria-pressed={filter === "tv"} onClick={() => setFilter("tv")}><Radio size={16} /> {t("media.type.liveTv")}</button>
+      <div className="filter-pills" role="group" aria-label={t("media.filter.groupLabel")} onKeyDown={(event) => { handleDirectionalFocus(event, { orientation: "horizontal" }); }}>
+        <button type="button" className={filter === "all" ? "is-active" : ""} aria-pressed={filter === "all"} onClick={() => selectSearchFilter("all")}><Compass size={16} /> {t("media.filter.all")}</button>
+        <button type="button" className={filter === "movie" ? "is-active" : ""} aria-pressed={filter === "movie"} onClick={() => selectSearchFilter("movie")}><Film size={16} /> {t("media.filter.movies")}</button>
+        <button type="button" className={filter === "series" ? "is-active" : ""} aria-pressed={filter === "series"} onClick={() => selectSearchFilter("series")}><Tv size={16} /> {t("media.filter.series")}</button>
+        <button type="button" className={filter === "tv" ? "is-active" : ""} aria-pressed={filter === "tv"} onClick={() => selectSearchFilter("tv")}><Radio size={16} /> {t("media.type.liveTv")}</button>
       </div>
       {normalizedQuery.length >= 2 && !loading && <span className="browse-toolbar__count" role="status">{t(items.length === 1 ? "common.results.count.one" : "common.results.count.many", { count: items.length })}</span>}
     </div>
     {error && <Notice><span>{error}</span><Button variant="ghost" onClick={() => setRetryVersion((version) => version + 1)}><RefreshCw size={16} /> {t("common.actions.retry")}</Button></Notice>}
+    {warning && <Notice tone="warning">{warning}</Notice>}
     {normalizedQuery.length < 2
       ? <div className="search-prompt"><span><Search /></span><h2>{t("search.prompt.title")}</h2><p>{t("search.prompt.description")}</p></div>
-      : loading && items.length === 0
-        ? <div className="media-grid" aria-busy="true">{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className={filter === "tv" ? "card-skeleton card-skeleton--landscape" : "card-skeleton"} />)}</div>
-        : error && items.length === 0
-          ? null
-          : items.length === 0
+      : (loading || error) && items.length === 0
+        ? <div className={`media-grid media-grid--adaptive browse-skeleton-grid${error ? " browse-skeleton-grid--replacement" : ""}`} aria-busy={loading || undefined} aria-hidden={error ? true : undefined}>{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className={filter === "tv" ? "card-skeleton card-skeleton--landscape" : "card-skeleton"} />)}</div>
+        : items.length === 0
           ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} />
-          : <div className="media-grid media-grid--adaptive">{items.map((item) => {
+          : <div className="media-grid media-grid--adaptive" onKeyDown={handleBrowseGridKeyDown}>{items.map((item) => {
             const identity = mediaIdentity(item);
             const saved = item.mediaType === "tv" && tvLibrary.some((entry) => mediaIdentity(mediaFromLibraryItem(entry, t("media.untitled"))) === identity);
             const metadata = item.mediaType === "tv" ? tvMetadata(item) : "";
@@ -1092,57 +1222,139 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
                 onClick={() => onOpenMedia(item)}
               />
               {metadata && <small className="tv-media-tile__meta">{metadata}</small>}
-              {item.mediaType === "tv" && <Button className="tv-media-tile__library" variant={saved ? "secondary" : "ghost"} loading={savingIdentity === identity} aria-label={`${t(saved ? "library.actions.inLibrary" : "library.actions.add")}: ${item.title}`} onClick={() => void toggleTvLibrary(item)}>
+              {item.mediaType === "tv" && <Button className="tv-media-tile__library" variant={saved ? "secondary" : "ghost"} loading={savingIdentity === identity} disabled={!tvLibraryReady} aria-label={`${t(saved ? "library.actions.inLibrary" : "library.actions.add")}: ${item.title}`} onClick={() => void toggleTvLibrary(item)}>
                 {saved ? <Check size={16} /> : <Bookmark size={16} />}
                 {t(saved ? "library.actions.inLibrary" : "library.actions.add")}
               </Button>}
             </div>;
           })}</div>}
-    {hasMore && items.length > 0 && <div className="load-more"><Button variant="secondary" loading={loadingMore} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
+    {hasMore && items.length > 0 && <div className="load-more"><Button variant="secondary" loading={loadingMore} aria-label={t("common.actions.loadMore")} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
   </div>;
 }
 
 export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedia; mediaRevision: number }) {
-  const [library, setLibrary] = useState<LibraryPage | null>(null);
+  const pageSize = 100;
+  const { activeProfile } = useAuth();
+  const profileID = activeProfile?.id ?? "";
+  const [library, setLibrary] = useState<LoadedLibrary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [filter, setFilter] = useState<"" | "movie" | "series" | "tv">("");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"added" | "title" | "released">("added");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{ message: string; retry: "initial" | "more" | "refresh" } | null>(null);
+  const [retryVersion, setRetryVersion] = useState(0);
   const libraryRevisionRef = useRef(0);
+  const libraryRequestGeneration = useRef(0);
 
   useEffect(() => {
+    const generation = ++libraryRequestGeneration.current;
     let active = true;
+    setLibrary(null);
     setLoading(true);
-    setError("");
-    void api.library(filter).then((value) => {
-      if (active) setLibrary(value);
-    }).catch((cause) => {
-      if (active) setError(notifyError(cause, t("library.error.loadFailed"), t("library.error.unavailableTitle")));
+    setLoadingMore(false);
+    setError(null);
+    if (!profileID) return () => { active = false; };
+    void loadInitialLibraryPage(profileID, filter, pageSize).then((value) => {
+      if (!active || libraryRequestGeneration.current !== generation) return;
+      setLibrary({
+        pages: { [value.page]: value.items },
+        page: value.page,
+        totalPages: value.totalPages,
+        totalResults: value.totalResults,
+      });
+    }).catch(() => {
+      if (active && libraryRequestGeneration.current === generation) {
+        setError({ message: t("library.error.loadFailed"), retry: "initial" });
+      }
     }).finally(() => {
-      if (active) setLoading(false);
+      if (active && libraryRequestGeneration.current === generation) setLoading(false);
     });
     return () => { active = false; };
-  }, [filter]);
+  }, [filter, profileID, retryVersion]);
 
   useEffect(() => {
-    if (mediaRevision === 0 || libraryRevisionRef.current === mediaRevision) return;
+    if (mediaRevision === 0 || libraryRevisionRef.current === mediaRevision || !library) return;
     libraryRevisionRef.current = mediaRevision;
-    let active = true;
-    void api.library(filter).then((value) => {
-      if (active) {
-        setLibrary(value);
-        setError("");
+    void refreshLoadedPages();
+  }, [mediaRevision]);
+
+  async function refreshLoadedPages() {
+    if (!library) return;
+    const generation = ++libraryRequestGeneration.current;
+    setLoadingMore(false);
+    const successful: LibraryPage[] = [];
+    let failureCount = 0;
+    for (let page = 1; page <= Math.max(1, library.page); page++) {
+      try {
+        successful.push(await api.library(filter, page, pageSize));
+      } catch {
+        failureCount++;
       }
-    }).catch((cause) => {
-      if (active) setError(notifyError(cause, t("library.error.refreshFailed"), t("library.error.refreshFailedTitle")));
+      if (libraryRequestGeneration.current !== generation) return;
+    }
+    setLibrary((current) => {
+      if (!current) return current;
+      const pages = { ...current.pages };
+      for (const value of successful) pages[value.page] = value.items;
+      const metadata = successful.find((value) => value.page === 1) ?? successful[0];
+      const totalPages = metadata?.totalPages ?? current.totalPages;
+      for (const key of Object.keys(pages)) {
+        if (Number(key) > totalPages) delete pages[Number(key)];
+      }
+      return {
+        pages,
+        page: Math.min(current.page, Math.max(1, totalPages)),
+        totalPages,
+        totalResults: metadata?.totalResults ?? current.totalResults,
+      };
     });
-    return () => { active = false; };
-  }, [filter, mediaRevision]);
+    setError(failureCount === 0 ? null : { message: t("library.error.refreshFailed"), retry: "refresh" });
+  }
+
+  async function loadMore() {
+    if (!library || loadingMore || library.page >= library.totalPages) return;
+    const generation = libraryRequestGeneration.current;
+    const nextPage = library.page + 1;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const value = await api.library(filter, nextPage, pageSize);
+      if (libraryRequestGeneration.current !== generation) return;
+      setLibrary((current) => current ? {
+        pages: { ...current.pages, [value.page]: value.items },
+        page: value.page,
+        totalPages: value.totalPages,
+        totalResults: value.totalResults,
+      } : current);
+    } catch {
+      if (libraryRequestGeneration.current === generation) {
+        setError({ message: t("library.error.loadFailed"), retry: "more" });
+      }
+    } finally {
+      if (libraryRequestGeneration.current === generation) setLoadingMore(false);
+    }
+  }
+
+  function selectLibraryFilter(value: typeof filter) {
+    if (value === filter) return;
+    libraryRequestGeneration.current++;
+    setLibrary(null);
+    setLoading(true);
+    setLoadingMore(false);
+    setError(null);
+    setFilter(value);
+  }
+
+  function retryLibraryRequest() {
+    if (error?.retry === "more") void loadMore();
+    else if (error?.retry === "refresh") void refreshLoadedPages();
+    else setRetryVersion((version) => version + 1);
+  }
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredItems = useMemo(() => {
-    const items = [...(library?.items ?? [])].filter((item) => !normalizedQuery || `${item.title ?? ""} ${item.releaseInfo ?? ""} ${item.sourceName ?? ""} ${item.country ?? ""} ${item.language ?? ""} ${item.category ?? ""}`.toLocaleLowerCase().includes(normalizedQuery));
+    const items = libraryItems(library).filter((item) => !normalizedQuery || `${item.title ?? ""} ${item.releaseInfo ?? ""} ${item.sourceName ?? ""} ${item.country ?? ""} ${item.language ?? ""} ${item.category ?? ""}`.toLocaleLowerCase().includes(normalizedQuery));
     items.sort((left, right) => {
       if (sort === "title") return (left.title ?? "").localeCompare(right.title ?? "");
       const leftDate = Date.parse(sort === "released" ? left.released ?? "" : left.addedAt);
@@ -1150,8 +1362,9 @@ export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenM
       return (Number.isNaN(rightDate) ? 0 : rightDate) - (Number.isNaN(leftDate) ? 0 : leftDate);
     });
     return items;
-  }, [library?.items, normalizedQuery, sort]);
+  }, [library, normalizedQuery, sort]);
   const media = filteredItems.map((item) => mediaFromLibraryItem(item, t("media.untitled")));
+  const hasMore = Boolean(library && library.page < library.totalPages);
 
   return <div className="standard-page library-page page-enter">
     <SectionHeading eyebrow={t("library.eyebrow")} title={t("library.title")} description={t("library.description")} />
@@ -1160,16 +1373,28 @@ export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenM
       <label className="library-sort"><span>{t("admin.collections.sources.sortBy")}</span><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="added">{t("admin.collections.sort.added")}</option><option value="title">{t("admin.collections.sort.title")}</option><option value="released">{t("admin.collections.sort.released")}</option></select></label>
     </div>
     <div className="browse-toolbar">
-      <div className="filter-pills" role="group" aria-label={t("media.filter.groupLabel")}><button type="button" className={filter === "" ? "is-active" : ""} aria-pressed={filter === ""} onClick={() => setFilter("")}><Bookmark size={16} /> {t("media.filter.allTitles")}</button><button type="button" className={filter === "movie" ? "is-active" : ""} aria-pressed={filter === "movie"} onClick={() => setFilter("movie")}><Film size={16} /> {t("media.filter.movies")}</button><button type="button" className={filter === "series" ? "is-active" : ""} aria-pressed={filter === "series"} onClick={() => setFilter("series")}><Tv size={16} /> {t("media.filter.series")}</button><button type="button" className={filter === "tv" ? "is-active" : ""} aria-pressed={filter === "tv"} onClick={() => setFilter("tv")}><Radio size={16} /> {t("media.type.liveTv")}</button></div>
+      <div className="filter-pills" role="group" aria-label={t("media.filter.groupLabel")} onKeyDown={(event) => { handleDirectionalFocus(event, { orientation: "horizontal" }); }}>
+        <button type="button" className={filter === "" ? "is-active" : ""} aria-pressed={filter === ""} onClick={() => selectLibraryFilter("")}><Bookmark size={16} /> {t("media.filter.allTitles")}</button>
+        <button type="button" className={filter === "movie" ? "is-active" : ""} aria-pressed={filter === "movie"} onClick={() => selectLibraryFilter("movie")}><Film size={16} /> {t("media.filter.movies")}</button>
+        <button type="button" className={filter === "series" ? "is-active" : ""} aria-pressed={filter === "series"} onClick={() => selectLibraryFilter("series")}><Tv size={16} /> {t("media.filter.series")}</button>
+        <button type="button" className={filter === "tv" ? "is-active" : ""} aria-pressed={filter === "tv"} onClick={() => selectLibraryFilter("tv")}><Radio size={16} /> {t("media.type.liveTv")}</button>
+      </div>
       {!loading && <span className="browse-toolbar__count" role="status">{t(media.length === 1 ? "common.results.count.one" : "common.results.count.many", { count: media.length })}</span>}
     </div>
-    {error && <Notice>{error}</Notice>}
-    {loading ? <div className="media-grid">{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className="card-skeleton" />)}</div> : media.length > 0 ? <div className="media-grid media-grid--adaptive">{media.map((item) => {
-      const metadata = item.mediaType === "tv" ? tvMetadata(item) : "";
-      return <div className="media-tile" key={item.titleId || mediaIdentity(item)}>
-        <MediaCard shape="poster" title={item.title} image={item.mediaType === "tv" ? item.posterUrl || item.logoUrl || item.backgroundUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? item.available === false ? t("common.status.unavailable") : tvTileSubtitle(item) : item.releaseInfo || mediaTypeLabel(item.mediaType)} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} onClick={() => onOpenMedia(item)} />
-        {metadata && <small className="tv-media-tile__meta">{metadata}</small>}
-      </div>;
-    })}</div> : query ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} /> : <EmptyState icon={<Bookmark size={46} />} title={t("library.empty.title")} description={t("library.empty.description")} />}
+    {error && <Notice><span>{error.message}</span><Button variant="ghost" onClick={retryLibraryRequest}><RefreshCw size={16} /> {t("common.actions.retry")}</Button></Notice>}
+    {loading
+      ? <div className="media-grid media-grid--adaptive browse-skeleton-grid" aria-busy="true">{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className="card-skeleton" />)}</div>
+      : media.length > 0
+        ? <div className="media-grid media-grid--adaptive" aria-busy={loadingMore || undefined} onKeyDown={handleBrowseGridKeyDown}>{media.map((item) => {
+          const metadata = item.mediaType === "tv" ? tvMetadata(item) : "";
+          return <div className="media-tile" key={item.titleId || mediaIdentity(item)}>
+            <MediaCard shape="poster" title={item.title} image={item.mediaType === "tv" ? item.posterUrl || item.logoUrl || item.backgroundUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? item.available === false ? t("common.status.unavailable") : tvTileSubtitle(item) : item.releaseInfo || mediaTypeLabel(item.mediaType)} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} onClick={() => onOpenMedia(item)} />
+            {metadata && <small className="tv-media-tile__meta">{metadata}</small>}
+          </div>;
+        })}</div>
+        : query
+          ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} />
+          : <EmptyState icon={<Bookmark size={46} />} title={t("library.empty.title")} description={t("library.empty.description")} />}
+    {hasMore && !error && <div className="load-more"><Button variant="secondary" loading={loadingMore} aria-label={t("common.actions.loadMore")} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
   </div>;
 }

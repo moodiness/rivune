@@ -153,6 +153,52 @@ test("series episodes open dedicated detail pages that own playback sources", as
   await expect(page.getByRole("region", { name: "Playback sources" })).toHaveCount(0);
 });
 
+test("an episode opened from its season toggles its resolved watched state once per action", async ({ page, rivune }) => {
+  await page.route("**/api/v1/titles/episode-1/watched*", async (route) => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setTimeout(resolve, 100);
+    await promise;
+    await route.fallback();
+  });
+  await page.goto("/media/series/tt9000/season/1");
+
+  const aggregateActions = page.locator(".details-actions");
+  await expect(aggregateActions.getByRole("button", { name: "Mark watched", exact: true })).toHaveCount(0);
+  const progressResponse = page.waitForResponse((response) => response.url().endsWith("/api/v1/progress/episode-1") && response.request().method() === "GET");
+  await page.getByRole("button", { name: /First Light/ }).first().click();
+  await progressResponse;
+
+  const detailsActions = page.locator(".details-actions");
+  const watchedButton = detailsActions.locator("button").last();
+  await expect(watchedButton).toHaveText("Mark watched");
+  await expect(watchedButton.locator("svg.lucide-eye")).toHaveCount(1);
+  const watchedPath = "/api/v1/titles/episode-1/watched";
+  expect(rivune.matching(watchedPath)).toHaveLength(0);
+
+  await watchedButton.click();
+  await expect(watchedButton).toBeDisabled();
+  await expect(watchedButton.locator("svg.spin")).toHaveCount(1);
+  await expect(watchedButton).toHaveText("Mark unwatched");
+  await expect(watchedButton.locator("svg.lucide-eye-off")).toHaveCount(1);
+  await expect(page.locator(".app-notification--success")).toContainText("First Light is marked as watched.");
+  await expect.poll(() => rivune.matching(watchedPath, "POST").length).toBe(1);
+  const markWatched = rivune.matching(watchedPath, "POST")[0]!;
+  expect(markWatched.body).toEqual({ expectedVersion: 4 });
+  expect(markWatched.search.toString()).toBe("");
+
+  await watchedButton.click();
+  await expect(watchedButton).toBeDisabled();
+  await expect(watchedButton.locator("svg.spin")).toHaveCount(1);
+  await expect(watchedButton).toHaveText("Mark watched");
+  await expect(watchedButton.locator("svg.lucide-eye")).toHaveCount(1);
+  await expect(page.locator(".app-notification--success").filter({ hasText: "First Light is marked as unwatched." })).toHaveCount(1);
+  await expect.poll(() => rivune.matching(watchedPath, "DELETE").length).toBe(1);
+  const markUnwatched = rivune.matching(watchedPath, "DELETE")[0]!;
+  expect(markUnwatched.body).toBeUndefined();
+  expect(markUnwatched.search.get("expectedVersion")).toBe("5");
+  expect(rivune.matching(watchedPath)).toHaveLength(2);
+});
+
 test("upcoming episodes stay dimmed but can open available playback sources", async ({ page, rivune }) => {
   const futureSeason = longSeason(1);
   futureSeason.episodes[0] = {
@@ -793,6 +839,195 @@ test("calendar episode opens the matching series season and episode", async ({ p
   expect(calendarRequest.search.get("from")).toMatch(/^\d{4}-\d{2}-01$/);
   expect(calendarRequest.search.get("to")).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   expect(calendarRequest.search.get("language")).toBe("en-US");
+});
+
+test("calendar mobile agenda stays compact, ordered, accessible, and keyboard navigable", async ({ page, rivune: _rivune }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route("**/api/v1/calendar**", async (route) => {
+    const from = new URL(route.request().url()).searchParams.get("from")!;
+    const prefix = from.slice(0, 8);
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        events: [
+          { id: "later", titleId: "later", mediaType: "movie", title: "Later", releaseDate: `${prefix}12` },
+          { id: "zulu", titleId: "zulu", mediaType: "movie", title: "Zulu", releaseDate: `${prefix}02` },
+          { id: "alpha", titleId: "alpha", mediaType: "movie", title: "Alpha", releaseDate: `${prefix}02` },
+        ],
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Mobile navigation" }).getByRole("button", { name: "Calendar" }).click();
+
+  const agenda = page.locator(".calendar-agenda");
+  await expect(agenda).toBeVisible();
+  expect(await agenda.locator(".calendar-agenda__day time").evaluateAll((times) => times.map((time) => time.getAttribute("datetime")))).toEqual([
+    expect.stringMatching(/-02$/),
+    expect.stringMatching(/-12$/),
+  ]);
+  const cards = agenda.locator(".calendar-event");
+  await expect(cards).toHaveCount(3);
+  await expect(cards.locator(".calendar-event__copy > strong")).toHaveText(["Alpha", "Zulu", "Later"]);
+  await expect(cards.first()).toHaveAttribute("title", /Alpha.*Movie/);
+  await expect(cards.first()).toBeVisible();
+  await expect(cards.last()).toBeVisible();
+
+  const mobileMetrics = await page.evaluate(() => {
+    const agenda = document.querySelector<HTMLElement>(".calendar-agenda")!;
+    const cardElements = Array.from(agenda.querySelectorAll<HTMLElement>(".calendar-event"));
+    const cardRects = cardElements.map((card) => card.getBoundingClientRect());
+    const titles = Array.from(agenda.querySelectorAll<HTMLElement>(".calendar-event__copy > strong"));
+    return {
+      agendaHeight: agenda.getBoundingClientRect().height,
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      cardsStayInsideViewport: cardRects.every((rect) => rect.left >= 0 && rect.right <= window.innerWidth),
+      cardsMeetTouchTarget: cardRects.every((rect) => rect.height >= 48),
+      titlesFit: titles.every((title) => title.scrollWidth <= title.clientWidth && title.scrollHeight <= title.clientHeight),
+    };
+  });
+  expect(mobileMetrics.scrollWidth).toBeLessThanOrEqual(mobileMetrics.clientWidth);
+  expect(mobileMetrics.cardsStayInsideViewport).toBe(true);
+  expect(mobileMetrics.cardsMeetTouchTarget).toBe(true);
+  expect(mobileMetrics.titlesFit).toBe(true);
+  expect(mobileMetrics.agendaHeight).toBeLessThan(300);
+
+  await cards.first().focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(cards.nth(1)).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(cards.last()).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(cards.first()).toBeFocused();
+});
+
+test("calendar desktop grid is calm and readable while preserving month, day, RTL, and toolbar keyboard contracts", async ({ page, rivune: _rivune }) => {
+  const requestedMonths: string[] = [];
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.route("**/api/v1/calendar**", async (route) => {
+    const from = new URL(route.request().url()).searchParams.get("from")!;
+    const initialFrom = requestedMonths[0] ?? from;
+    requestedMonths.push(from);
+    const prefix = from.slice(0, 8);
+    const events = from === initialFrom ? [
+      { id: "feature", titleId: "feature", mediaType: "movie", title: "A Calm and Unexpectedly Long Release Title", releaseDate: `${prefix}02`, posterUrl: "https://fixtures.rivune.test/poster.svg" },
+      { id: "second", titleId: "second", mediaType: "movie", title: "Second Feature", releaseDate: `${prefix}02`, posterUrl: "https://fixtures.rivune.test/season-1-poster.svg" },
+      { id: "third", titleId: "third", mediaType: "movie", title: "Behind the Release", releaseDate: `${prefix}02`, posterUrl: "https://fixtures.rivune.test/season-2-poster.svg" },
+      { id: "fourth", titleId: "fourth", mediaType: "movie", title: "Fourth Item", releaseDate: `${prefix}02`, posterUrl: "https://fixtures.rivune.test/series-poster.svg" },
+      { id: "episode", titleId: "episode", mediaType: "episode", title: "The Arrival", releaseDate: `${prefix}12`, seriesTitle: "Harbor Stories", seriesId: "harbor", seasonNumber: 2, episodeNumber: 4 },
+    ] : [];
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ events }) });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Calendar" }).click();
+
+  const grid = page.locator(".calendar-grid");
+  const days = grid.locator(".calendar-day[data-calendar-day]");
+  const monthHeading = page.locator(".calendar-toolbar h3");
+  await expect(grid).toBeVisible();
+  await expect(days).toHaveCount(new Date(Number(requestedMonths[0].slice(0, 4)), Number(requestedMonths[0].slice(5, 7)), 0).getDate());
+  await expect(page.locator(".calendar-weekdays span").first()).toHaveText("Sun");
+  await expect(grid.locator(".calendar-event")).toHaveCount(5);
+  await expect(grid.locator(".calendar-event__copy > strong").first()).toHaveText("A Calm and Unexpectedly Long Release Title");
+  await expect(grid.locator(".calendar-event").first()).toHaveAttribute("title", /A Calm and Unexpectedly Long Release Title.*Movie/);
+  const firstPosterImage = grid.locator(".calendar-event__poster img").first();
+  await expect(firstPosterImage).toBeVisible();
+  await expect.poll(() => firstPosterImage.evaluate((image) => image.naturalWidth)).toBeGreaterThan(0);
+  await expect(grid.locator(".calendar-event__kind").first()).toBeVisible();
+  await expect(grid.locator(".calendar-event__copy small").first()).toBeVisible();
+  await expect(page.locator(".calendar-empty--grid")).toHaveCount(0);
+
+  const desktopMetrics = await page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>(".calendar-grid")!;
+    const surface = document.querySelector<HTMLElement>(".calendar-surface")!;
+    const eventCards = Array.from(grid.querySelectorAll<HTMLElement>(".calendar-event"));
+    const firstPoster = eventCards[0].querySelector<HTMLElement>(".calendar-event__poster")!;
+    const crowdedEvents = grid.querySelector<HTMLElement>('.calendar-day[data-calendar-day="2"] .calendar-day__events')!;
+    const crowdedCards = Array.from(crowdedEvents.querySelectorAll<HTMLElement>(".calendar-event"));
+    const gridRect = grid.getBoundingClientRect();
+    const crowdedRect = crowdedEvents.getBoundingClientRect();
+    return {
+      gridHeight: gridRect.height,
+      gridWidth: gridRect.width,
+      surfaceHeight: surface.getBoundingClientRect().height,
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      eventHeight: eventCards[0].getBoundingClientRect().height,
+      posterWidth: firstPoster.getBoundingClientRect().width,
+      visibleCrowdedEvents: crowdedCards.filter((card) => {
+        const rect = card.getBoundingClientRect();
+        return rect.top >= crowdedRect.top && rect.bottom <= crowdedRect.bottom + 3;
+      }).length,
+      crowdedDayScrollable: crowdedEvents.scrollHeight > crowdedEvents.clientHeight,
+      crowdedOverflowY: getComputedStyle(crowdedEvents).overflowY,
+      fourthEventRequiresScroll: crowdedCards[3].getBoundingClientRect().bottom > crowdedRect.bottom + 1,
+      eventsStayInsideGrid: eventCards.every((card) => {
+        const rect = card.getBoundingClientRect();
+        return rect.left >= gridRect.left && rect.right <= gridRect.right;
+      }),
+    };
+  });
+  expect(desktopMetrics.gridHeight).toBeGreaterThanOrEqual(600);
+  expect(desktopMetrics.gridHeight).toBeLessThanOrEqual(720);
+  expect(desktopMetrics.gridWidth).toBeGreaterThan(900);
+  expect(desktopMetrics.surfaceHeight).toBeLessThan(850);
+  expect(desktopMetrics.eventHeight).toBeGreaterThanOrEqual(48);
+  expect(desktopMetrics.posterWidth).toBeGreaterThanOrEqual(32);
+  expect(desktopMetrics.visibleCrowdedEvents).toBe(3);
+  expect(desktopMetrics.crowdedDayScrollable).toBe(true);
+  expect(desktopMetrics.crowdedOverflowY).toBe("auto");
+  expect(desktopMetrics.fourthEventRequiresScroll).toBe(true);
+  expect(desktopMetrics.eventsStayInsideGrid).toBe(true);
+  expect(desktopMetrics.scrollWidth).toBeLessThanOrEqual(desktopMetrics.clientWidth);
+  const crowdedDayEvents = grid.locator('.calendar-day[data-calendar-day="2"] .calendar-day__events');
+  await crowdedDayEvents.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  expect(await crowdedDayEvents.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await crowdedDayEvents.evaluate((element) => { element.scrollTop = 0; });
+
+  await days.first().focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(days.nth(1)).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(days.first()).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(days.nth(7)).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+  await expect(days.first()).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(days.last()).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(days.first()).toBeFocused();
+
+  await page.evaluate(() => { document.documentElement.dir = "rtl"; });
+  await days.first().focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(days.nth(1)).toBeFocused();
+  await page.evaluate(() => { document.documentElement.dir = "ltr"; });
+
+  const initialMonthLabel = await monthHeading.textContent();
+  await days.first().focus();
+  await page.keyboard.press("PageDown");
+  await expect(monthHeading).not.toHaveText(initialMonthLabel ?? "");
+  await expect(days.first()).toBeFocused();
+  await page.keyboard.press("PageUp");
+  await expect(monthHeading).toHaveText(initialMonthLabel ?? "");
+  await expect(days.first()).toBeFocused();
+
+  const nextMonth = page.getByRole("button", { name: "Next month" });
+  await nextMonth.focus();
+  await nextMonth.click();
+  await expect(monthHeading).not.toHaveText(initialMonthLabel ?? "");
+  await expect(page.locator(".calendar-empty--grid")).toBeVisible();
+  await expect(nextMonth).toBeFocused();
+  expect(requestedMonths.some((requestedMonth) => requestedMonth !== requestedMonths[0])).toBe(true);
+
+  const today = page.getByRole("button", { name: "Today" });
+  await today.click();
+  await expect(monthHeading).toHaveText(initialMonthLabel ?? "");
+  await expect(today).toBeFocused();
 });
 
 test("calendar TVDB episode opens the mapped season containing its canonical episode ID", async ({ page, rivune: _rivune }) => {

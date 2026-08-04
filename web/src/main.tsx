@@ -6,7 +6,7 @@ import { setLocale } from "./i18n";
 import { NotificationViewport } from "./notifications";
 import "./styles.css";
 
-setLocale();
+await setLocale();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -49,14 +49,13 @@ test("TV search keeps partial results, warns without inline diagnostics, and ret
   await expect(page.getByRole("button", { name: "Open World News" })).toHaveCount(2);
   await expect(page.locator(".tv-media-tile")).toHaveCount(25);
   await expect(page.getByText("Some sources are temporarily unavailable.", { exact: true })).toBeVisible();
-  await expect(page.locator(".search-page .notice")).toHaveCount(0);
+  await expect(page.locator(".search-page .notice--warning")).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
   await expect(page.getByText("Private network timeout", { exact: true })).toHaveCount(0);
   await expect(page.getByText("broken-addon", { exact: true })).toHaveCount(0);
   await expect(page.getByText("private-manifest", { exact: true })).toHaveCount(0);
   await expect(page.getByText("addon-a", { exact: true })).toHaveCount(0);
   await expect(page.getByText("addon-a-manifest", { exact: true })).toHaveCount(0);
-  await page.locator(".app-notification").getByRole("button", { name: "Dismiss notification" }).click();
   const initialRequests = rivune.matching("/api/v1/addons/catalogs/search/tv", "GET");
   expect(initialRequests).toHaveLength(1);
   expect(initialRequests[0].search.get("search")).toBe("news");
@@ -177,4 +176,30 @@ test("Home omits Library TV rows and all-search still returns movies and series"
   await expect(page.getByRole("button", { name: "Open Search Series" })).toBeVisible();
   expect(rivune.matching("/api/v1/addons/catalogs/search/movie", "GET")).toHaveLength(1);
   expect(rivune.matching("/api/v1/addons/catalogs/search/series", "GET")).toHaveLength(1);
+});
+
+test("Search clears results from the previous filter when the replacement filter fails", async ({ page, rivune }) => {
+  rivune.setSearchResponse("movie", 0, {
+    results: [{
+      ...result("movie-addon", "movie-search", [{ id: "previous-result", type: "movie", name: "Previous Search Result" }]),
+      type: "movie",
+    }],
+    errors: [],
+  });
+  rivune.setSearchResponse("tv", 0, {
+    error: { code: "bad_gateway", message: "Private TV search host" },
+    addonId: "private-tv-addon",
+  }, { status: 502, delay: 150 });
+
+  await page.goto("/#search");
+  await page.getByRole("button", { name: "Movies", exact: true }).click();
+  await page.locator(".search-page .search-box input").fill("previous");
+  await expect(page.getByRole("button", { name: "Open Previous Search Result" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Live TV", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open Previous Search Result" })).toHaveCount(0);
+  await expect(page.locator(".search-page .browse-skeleton-grid")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+  await expect(page.getByText("Private TV search host", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("private-tv-addon", { exact: true })).toHaveCount(0);
 });

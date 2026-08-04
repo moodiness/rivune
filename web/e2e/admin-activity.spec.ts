@@ -3,7 +3,7 @@ import { expect, test } from "./fixtures/rivune";
 const now = "2026-07-31T12:00:00Z";
 
 const activity = {
-  summary: { activeSessions: 2, activeJobs: 2, processingSlots: 1, processingLimit: 2, storageBytes: 0, storageLimitBytes: 1_073_741_824 },
+  summary: { activeSessions: 3, activeJobs: 2, processingSlots: 1, processingLimit: 2, storageBytes: 0, storageLimitBytes: 1_073_741_824 },
   diagnostics: { videoEncoder: "h264", hardwareToneMap: false },
   sessions: [
     {
@@ -55,6 +55,24 @@ const activity = {
       artworkUrl: "https://fixtures.rivune.test/missing-artwork.jpg",
       externalIds: {},
     },
+    {
+      id: "33333333-3333-4333-8333-333333333333",
+      title: "Long feature",
+      mediaType: "movie",
+      mode: "direct",
+      username: "fixture-owner",
+      profileId: "11111111-1111-4111-8111-111111111112",
+      profile: "Alice",
+      device: "Bedroom",
+      platform: "Web",
+      processing: false,
+      positionSeconds: 605,
+      durationSeconds: 10_140,
+      createdAt: now,
+      lastSeenAt: now,
+      expiresAt: "2026-07-31T15:00:00Z",
+      externalIds: {},
+    },
   ],
   jobs: [
     {
@@ -93,7 +111,7 @@ test("now-playing sessions render artwork, provider badges, transcoding progress
   });
 
   await page.goto("/");
-  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Administration" }).click();
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: /Activity/ }).click();
 
   const artworkSession = page.locator(".activity-session").filter({ hasText: "Futurama · S05E06 · Astéroïque" });
@@ -107,8 +125,13 @@ test("now-playing sessions render artwork, provider badges, transcoding progress
   await expect(tmdb.locator("svg")).toHaveCount(1);
   await expect(artworkSession.getByLabel("TVDB · 11704240")).toHaveAttribute("href", "https://thetvdb.com/dereferrer/episode/11704240");
   await expect(artworkSession.locator(".activity-session__provider")).toHaveCount(3);
-  await expect(artworkSession.locator(".activity-session__time > strong")).toHaveText("10 min / 22 min");
-  await expect(artworkSession.getByRole("status")).toHaveText("42% · 1.04×");
+  const sessionProgress = artworkSession.locator(".activity-session__progress");
+  await expect(sessionProgress).toContainText("10m 5s / 22m");
+  await expect(sessionProgress).toContainText("46%");
+  const playbackProgress = artworkSession.getByRole("progressbar", { name: "10m 5s / 22m" });
+  await expect(playbackProgress).toBeVisible();
+  expect(await playbackProgress.evaluate((progress: HTMLProgressElement) => progress.value / progress.max)).toBeCloseTo(605 / 1320, 4);
+  await expect(artworkSession.locator(".activity-progress-status")).toHaveText("42% · 1.04×");
   await expect(artworkSession.getByText("Video conversion required")).toBeVisible();
   await expect(artworkSession.getByText("Video H265 → H264")).toBeVisible();
   await expect(artworkSession.getByText("Audio DTS → AAC")).toBeVisible();
@@ -118,10 +141,23 @@ test("now-playing sessions render artwork, provider badges, transcoding progress
   await expect(artworkSession.getByText("Tone mapping")).toBeVisible();
   await expect(artworkSession.getByText("Transcode", { exact: true })).toHaveCount(2);
 
+  const longSession = page.locator(".activity-session").filter({ hasText: "Long feature" });
+  await expect(longSession.getByRole("progressbar", { name: "10m 5s / 2h 49m" })).toBeVisible();
+  const desktopArtworkBounds = await artworkSession.locator(".activity-session__artwork").boundingBox();
+  const desktopSessionBounds = await artworkSession.boundingBox();
+  expect(desktopArtworkBounds).not.toBeNull();
+  expect(desktopSessionBounds).not.toBeNull();
+  expect(desktopArtworkBounds?.width ?? 0).toBeGreaterThanOrEqual(96);
+  expect((desktopArtworkBounds?.height ?? 0) / (desktopArtworkBounds?.width ?? 1)).toBeCloseTo(1.5, 1);
+  expect((desktopArtworkBounds?.y ?? Number.POSITIVE_INFINITY) - (desktopSessionBounds?.y ?? 0)).toBeLessThanOrEqual(20);
+  expect((desktopArtworkBounds?.x ?? 0) + (desktopArtworkBounds?.width ?? Number.POSITIVE_INFINITY)).toBeLessThanOrEqual((desktopSessionBounds?.x ?? 0) + (desktopSessionBounds?.width ?? 0) + 1);
+  expect((desktopArtworkBounds?.y ?? 0) + (desktopArtworkBounds?.height ?? Number.POSITIVE_INFINITY)).toBeLessThanOrEqual((desktopSessionBounds?.y ?? 0) + (desktopSessionBounds?.height ?? 0) + 1);
+  expect(await artworkSession.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   const missingSession = page.locator(".activity-session").filter({ hasText: "Metadata pending" });
   await expect(missingSession.locator(".activity-session__artwork > svg")).toBeVisible();
   await expect(missingSession.locator(".activity-session__provider")).toHaveCount(0);
-  await expect(missingSession.getByRole("status")).toHaveCount(0);
+  await expect(missingSession.locator(".activity-session__progress")).toHaveText("Duration unavailable");
+  await expect(missingSession.getByRole("progressbar")).toHaveCount(0);
 
   const transcodingJob = page.locator(".activity-job").filter({ hasText: "episode-1-source" });
   await expect(transcodingJob.getByRole("status")).toHaveText("42% · 1.04×");
@@ -131,7 +167,49 @@ test("now-playing sessions render artwork, provider badges, transcoding progress
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(artworkSession).toBeVisible();
   await expect(artworkSession.locator(".activity-session__providers")).toBeVisible();
+  const mobileArtworkBounds = await artworkSession.locator(".activity-session__artwork").boundingBox();
+  expect(mobileArtworkBounds).not.toBeNull();
+  expect(mobileArtworkBounds?.width ?? 0).toBeGreaterThanOrEqual(72);
+  expect(mobileArtworkBounds?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(88);
   const bounds = await artworkSession.boundingBox();
   expect(bounds).not.toBeNull();
+  expect((mobileArtworkBounds?.y ?? Number.POSITIVE_INFINITY) - (bounds?.y ?? 0)).toBeLessThanOrEqual(20);
+  expect((mobileArtworkBounds?.x ?? 0) + (mobileArtworkBounds?.width ?? Number.POSITIVE_INFINITY)).toBeLessThanOrEqual((bounds?.x ?? 0) + (bounds?.width ?? 0) + 1);
+  expect((mobileArtworkBounds?.y ?? 0) + (mobileArtworkBounds?.height ?? Number.POSITIVE_INFINITY)).toBeLessThanOrEqual((bounds?.y ?? 0) + (bounds?.height ?? 0) + 1);
   expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(390);
+  expect(await artworkSession.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+});
+
+test("stopping a playback session keeps confirmation semantics and returns focus to activity controls", async ({ page, rivune: _rivune }) => {
+  let deletedSessionID = "";
+  let currentActivity = { ...activity, summary: { ...activity.summary }, sessions: [...activity.sessions], jobs: [...activity.jobs] };
+  await page.route("**/api/v1/playback/activity**", async (route) => {
+    const request = route.request();
+    const sessionMatch = new URL(request.url()).pathname.match(/\/playback\/activity\/sessions\/([^/]+)$/);
+    if (request.method() === "DELETE" && sessionMatch) {
+      deletedSessionID = decodeURIComponent(sessionMatch[1]);
+      currentActivity = {
+        ...currentActivity,
+        summary: { ...currentActivity.summary, activeSessions: currentActivity.summary.activeSessions - 1 },
+        sessions: currentActivity.sessions.filter((session) => session.id !== deletedSessionID),
+      };
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(currentActivity) });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: /Activity/ }).click();
+
+  const session = page.locator(".activity-session").filter({ hasText: "Futurama · S05E06 · Astéroïque" });
+  await session.getByRole("button", { name: "Stop" }).click();
+  await expect(page.getByRole("heading", { name: /Stop Futurama/ })).toBeVisible();
+  await page.getByRole("button", { name: "Stop playback" }).click();
+
+  await expect.poll(() => deletedSessionID).toBe("11111111-1111-4111-8111-111111111111");
+  await expect(session).toHaveCount(0);
+  const remainingStop = page.locator(".activity-session").filter({ hasText: "Metadata pending" }).getByRole("button", { name: "Stop" });
+  await expect(remainingStop).toBeFocused();
 });

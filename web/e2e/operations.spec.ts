@@ -46,17 +46,41 @@ test("administrator monitors operations and runs fixed maintenance controls", as
 
   const metadataCard = page.locator(".operation-action-card").filter({ has: page.getByRole("heading", { name: "Fetch missing metadata" }) });
   await expect(metadataCard).toContainText("Refresh all missing metadata in the saved language. Work continues in batches until every payload is attempted.");
+  const actionCards = page.locator(".operation-action-card");
+  const initialGeometry = await actionCards.evaluateAll((cards) => cards.map((card) => {
+    const cardRect = card.getBoundingClientRect();
+    const actionRect = card.querySelector(":scope > .button")!.getBoundingClientRect();
+    return { cardHeight: cardRect.height, actionHeight: actionRect.height, actionBottom: actionRect.bottom };
+  }));
+  expect(initialGeometry).toHaveLength(4);
+  expect(initialGeometry[0]!.cardHeight).toBe(initialGeometry[1]!.cardHeight);
+  expect(initialGeometry[2]!.cardHeight).toBe(initialGeometry[3]!.cardHeight);
+  expect(new Set(initialGeometry.map((geometry) => geometry.actionHeight)).size).toBe(1);
+  expect(initialGeometry[0]!.actionBottom).toBe(initialGeometry[1]!.actionBottom);
+  expect(initialGeometry[2]!.actionBottom).toBe(initialGeometry[3]!.actionBottom);
   await page.getByRole("button", { name: "Run Fetch missing metadata" }).click();
   const fetchRequest = await rivune.waitForRequest("/api/v1/operations/actions/fetch-missing-metadata", "POST");
   expect(fetchRequest.body).toBeUndefined();
-  await expect(page.locator(".app-notification--success").filter({ hasText: "12 of 12 candidates refreshed; 0 failed." })).toBeVisible();
+  const metadataSuccess = page.locator(".app-notification--success").filter({ hasText: "12 of 12 candidates refreshed; 0 failed." });
+  await expect(metadataSuccess).toHaveCount(1);
+  await expect(metadataSuccess).toBeVisible();
   await expect(metadataCard.locator(".notice--success")).toHaveCount(0);
+  const completedGeometry = await metadataCard.evaluate((card) => {
+    const cardRect = card.getBoundingClientRect();
+    const actionRect = card.querySelector(":scope > .button")!.getBoundingClientRect();
+    return { cardHeight: cardRect.height, actionHeight: actionRect.height };
+  });
+  expect(completedGeometry).toEqual({
+    cardHeight: initialGeometry[0]!.cardHeight,
+    actionHeight: initialGeometry[0]!.actionHeight,
+  });
 
   await page.getByRole("button", { name: "Run Run housekeeping" }).click();
   const housekeepingRequest = await rivune.waitForRequest("/api/v1/operations/actions/run-housekeeping", "POST");
   expect(housekeepingRequest.body).toBeUndefined();
   const housekeepingCard = page.locator(".operation-action-card").filter({ has: page.getByRole("heading", { name: "Run housekeeping" }) });
-  await expect(page.locator(".app-notification--success").filter({ hasText: "The maintenance action completed." })).toBeVisible();
+  const housekeepingSuccess = page.locator(".app-notification--success").filter({ hasText: "The maintenance action completed." });
+  await expect(housekeepingSuccess).toHaveCount(1);
   await expect(housekeepingCard.locator(".operation-action-card__result.is-succeeded")).toHaveCount(0);
   const clearMetadataPath = "/api/v1/operations/actions/clear-metadata-cache";
   await page.getByRole("button", { name: "Run Clear metadata cache" }).click();
@@ -76,7 +100,7 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   expect(clearStreamRequest.body).toBeUndefined();
   await expect(page.getByText("2 sessions removed, 1 jobs stopped, and 12582912 bytes cleared.")).toBeVisible();
 
-  await page.getByRole("button", { name: /Settings/ }).click();
+  await page.locator('[data-admin-tab="settings"]').click();
   await expect(page.getByRole("heading", { name: "Maintenance mode" })).toHaveCount(0);
   await expect(page.getByLabel("Block member access")).toHaveCount(0);
   await expect(page.getByLabel("Public message")).toHaveCount(0);

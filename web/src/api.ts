@@ -255,6 +255,7 @@ export const api = {
   reorderCategories: async (categoryIds: string[]) => (await request<{ categories: AccessCategory[] }>("/categories/order", { method: "PUT", body: JSON.stringify({ categoryIds }) })).categories,
   devices: async (categoryId?: string) => (await request<{ devices: ManagedDevice[] }>(`/devices${query({ categoryId })}`)).devices,
   updateDevice: (id: string, input: DeviceUpdateInput) => request<ManagedDevice>(`/devices/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
+  deleteDevice: (id: string) => request<void>(`/devices/${id}`, { method: "DELETE" }),
   moveProfilesToCategory: (profileIds: string[], categoryId: string) => request<void>("/profiles/category-moves", { method: "POST", body: JSON.stringify({ profileIds, categoryId }) }),
   moveDevicesToCategory: (deviceIds: string[], categoryId: string) => request<void>("/devices/category-moves", { method: "POST", body: JSON.stringify({ deviceIds, categoryId }) }),
   profiles: () => request<{ profiles: Profile[] }>("/profiles"),
@@ -344,7 +345,7 @@ export const api = {
   seasonDetails: (seasonId: string, signal?: AbortSignal, mappingProvider = seriesMappingProvider) => request<SeasonMetadata>(`/metadata/seasons/${encodeURIComponent(seasonId)}${query({ language: metadataLanguage, mappingProvider })}`, { signal }),
   trailers: (titleId: string, seasonNumber?: number) => request<TrailerList>(`/metadata/titles/${encodeURIComponent(titleId)}/trailers${query({ language: trailerLanguage, captionLanguage: trailerCaptionLanguage, seasonNumber })}`),
 
-  library: (mediaType = "") => request<LibraryPage>(`/library${query({ mediaType, page: 1, pageSize: 100 })}`),
+  library: (mediaType = "", page = 1, pageSize = 100) => request<LibraryPage>(`/library${query({ mediaType, page, pageSize })}`),
   continueWatching: (signal?: AbortSignal) => request<ContinueWatching>("/continue-watching?limit=30", { signal }),
   dismissContinue: (titleId: string) => request<void>(`/continue-watching/${encodeURIComponent(titleId)}`, { method: "DELETE" }),
   progress: (titleId: string) => request<import("./types").PlaybackProgress | undefined>(`/progress/${encodeURIComponent(titleId)}`),

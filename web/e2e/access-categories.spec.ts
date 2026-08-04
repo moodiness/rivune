@@ -1,9 +1,9 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { CATEGORY_IDS, DEVICE_IDS, expect, test } from "./fixtures/rivune";
 
 async function openAdministration(page: Page, tab?: "Categories" | "Profiles" | "Devices") {
   await page.goto("/");
-  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Administration", exact: true }).click();
+  await page.locator("#main-sidebar nav:visible, .mobile-nav:visible").getByRole("button", { name: "Settings", exact: true }).click();
   if (tab && tab !== "Profiles") {
     await page.getByRole("navigation", { name: "Administration sections" }).getByRole("button", { name: new RegExp(`^${tab}\\b`) }).click();
   }
@@ -21,6 +21,21 @@ function deviceCard(page: Page, name: string) {
   return page.locator(".device-admin-card").filter({ has: page.getByRole("heading", { name, exact: true }) });
 }
 
+async function expectTextareaSurface(textarea: Locator) {
+  await expect(textarea).toBeVisible();
+  const surface = await textarea.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      bordered: style.borderTopStyle === "solid" && Number.parseFloat(style.borderTopWidth) > 0,
+      padded: Number.parseFloat(style.paddingBlockStart) > 0 && Number.parseFloat(style.paddingInlineStart) > 0,
+      rounded: Number.parseFloat(style.borderTopLeftRadius) > 0,
+      surfaced: style.backgroundColor !== "rgba(0, 0, 0, 0)",
+      resize: style.resize,
+    };
+  });
+  expect(surface).toEqual({ bordered: true, padded: true, rounded: true, surfaced: true, resize: "vertical" });
+}
+
 test("global administrators can create a category with the complete server request", async ({ page, rivune }) => {
   await openAdministration(page, "Categories");
   await page.getByRole("button", { name: "New category" }).click();
@@ -28,6 +43,7 @@ test("global administrators can create a category with the complete server reque
   const dialog = page.locator("dialog");
   await dialog.getByLabel("Name", { exact: true }).fill("Studio");
   await expect(dialog.getByLabel("Color", { exact: true })).toHaveAttribute("type", "color");
+  await expectTextareaSurface(dialog.getByLabel("Description"));
   await dialog.getByLabel("Description").fill("Editing workstations");
   await dialog.getByLabel("Color").fill("#123ABC");
   await dialog.getByLabel("Icon name").fill("monitor");
@@ -52,7 +68,10 @@ test("a category save closes and reports success before a failed account refresh
 
   await expect(dialog).toHaveCount(0, { timeout: 750 });
   await expect(categoryCard(page, "Studio")).toBeVisible();
-  await expect(page.locator(".categories-admin [role=status]")).toContainText("Studio");
+  const success = page.locator(".app-notification--success").filter({ hasText: "Studio" });
+  await expect(success).toHaveCount(1);
+  await expect(success).toBeVisible();
+  await expect(page.locator(".categories-admin .notice--success")).toHaveCount(0);
   await expect.poll(() => rivune.accountRefreshCompletions).toEqual([503]);
   expect(rivune.matching("/api/v1/categories", "POST")).toHaveLength(1);
 });
@@ -110,7 +129,8 @@ test("category reorder sends and renders the complete authoritative order", asyn
   const request = await rivune.waitForRequest("/api/v1/categories/order", "PUT");
   expect(request.body).toEqual({ categoryIds: [CATEGORY_IDS.household, CATEGORY_IDS.guest, CATEGORY_IDS.kids] });
   await expect(page.locator(".category-card h3")).toHaveText(["Household", "Guest", "Kids"]);
-  await expect(page.locator(".categories-admin [role=status]")).toContainText("Category order was saved.");
+  await expect(page.locator(".app-notification--success").filter({ hasText: "Category order was saved." })).toHaveCount(1);
+  await expect(page.locator(".categories-admin .notice--success")).toHaveCount(0);
 });
 
 test("All categories, profile and device filters, counts, and badges reflect server state", async ({ page, rivune }) => {
@@ -147,6 +167,41 @@ test("All categories, profile and device filters, counts, and badges reflect ser
   await expect(deviceCard(page, "Living room TV").getByLabel("Category: Household")).toBeVisible();
 });
 
+test("device deletion requires confirmation, sends one DELETE, and removes the row and selection", async ({ page, rivune }) => {
+  await openAdministration(page, "Devices");
+  const card = deviceCard(page, "Living room TV");
+  await card.getByLabel("Select Living room TV").check();
+  await expect(page.locator(".bulk-move-bar")).toContainText("1 devices selected");
+
+  await card.getByRole("button", { name: "Delete" }).click();
+  expect(rivune.matching(`/api/v1/devices/${DEVICE_IDS.livingRoom}`, "DELETE")).toHaveLength(0);
+  const confirmation = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Delete Living room TV?" }) });
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", { name: "Delete device" }).click();
+
+  await expect.poll(() => rivune.matching(`/api/v1/devices/${DEVICE_IDS.livingRoom}`, "DELETE").length).toBe(1);
+  await expect(card).toHaveCount(0);
+  await expect(page.locator(".bulk-move-bar")).toHaveCount(0);
+  await expect(page.getByText("Living room TV was deleted.", { exact: true })).toBeVisible();
+});
+
+test("a failed device deletion remains recoverable without implicitly removing the device", async ({ page, rivune }) => {
+  rivune.failNextDeviceDeletion(DEVICE_IDS.tablet);
+  await openAdministration(page, "Devices");
+  const card = deviceCard(page, "Kids tablet");
+  await card.getByRole("button", { name: "Delete" }).click();
+  const confirmation = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Delete Kids tablet?" }) });
+  await confirmation.getByRole("button", { name: "Delete device" }).click();
+
+  await expect(page.locator(".devices-admin > .notice")).toContainText("The device could not be deleted");
+  await expect(confirmation).toBeVisible();
+  await expect(card).toHaveCount(1);
+  await confirmation.getByRole("button", { name: "Delete device" }).click();
+
+  await expect.poll(() => rivune.matching(`/api/v1/devices/${DEVICE_IDS.tablet}`, "DELETE").length).toBe(2);
+  await expect(card).toHaveCount(0);
+});
+
 test("late device filter success and error responses cannot replace the latest filter state", async ({ page, rivune }) => {
   rivune.setDeviceResponse(CATEGORY_IDS.kids, { delay: 600 });
   rivune.setDeviceResponse(CATEGORY_IDS.guest, { status: 503, delay: 300 });
@@ -179,6 +234,7 @@ test("profile creation requires and submits the chosen category", async ({ page,
   await expect(category).toHaveAttribute("required", "");
   await category.selectOption(CATEGORY_IDS.kids);
   await dialog.getByLabel("Name").fill("Jordan");
+  await expectTextareaSurface(dialog.getByLabel("Description"));
   await dialog.getByLabel("Description").fill("Weekend guest profile");
   await dialog.getByRole("button", { name: "Save profile" }).click();
 
@@ -227,7 +283,11 @@ test("device name and note edits and a single category move use separate exact r
   await deviceCard(page, "Kids tablet").getByRole("button", { name: "Edit" }).click();
 
   const editDialog = page.locator("dialog");
+  const categoryBadge = editDialog.locator(".category-badge");
+  await expect(categoryBadge).toBeVisible();
+  expect((await categoryBadge.boundingBox())?.width ?? Number.POSITIVE_INFINITY).toBeLessThan(160);
   await editDialog.getByLabel("Device name").fill("  Travel tablet  ");
+  await expectTextareaSurface(editDialog.getByLabel("Internal note"));
   await editDialog.getByLabel("Internal note").fill("  Road trips  ");
   await editDialog.getByRole("button", { name: "Save device" }).click();
   const edit = await rivune.waitForRequest(`/api/v1/devices/${DEVICE_IDS.tablet}`, "PATCH");
@@ -335,6 +395,39 @@ test("category and device tabs are absent from a category-scoped administration 
   expect(rivune.matching("/api/v1/categories", "GET")).toHaveLength(0);
 });
 
+test("unauthorized admin deep links are replaced by the visible tab", async ({ page, rivune }) => {
+  rivune.configureCategoryScope(CATEGORY_IDS.household);
+  await page.goto("/#admin?tab=devices");
+
+  const rail = page.getByRole("navigation", { name: "Administration sections" });
+  await expect(rail.getByRole("button", { name: /^Profiles\b/ })).toHaveAttribute("aria-current", "page");
+  await expect(page).toHaveURL(/\/#admin\?tab=profiles$/);
+  await expect(page).not.toHaveURL(/devices/);
+  await expect(page.locator(".profile-admin-card")).toHaveCount(1);
+});
+
+test("mobile admin rail keeps all destinations keyboard reachable without group controls", async ({ page, rivune: _rivune }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openAdministration(page, "Profiles");
+
+  const rail = page.getByRole("navigation", { name: "Administration sections" });
+  await expect(rail.locator("[data-admin-tab]")).toHaveCount(8);
+  await expect(rail.locator(".admin-tabs__label")).toHaveCount(4);
+  expect(await rail.locator(".admin-tabs__label").evaluateAll((labels) => labels.every((label) => getComputedStyle(label).display === "none"))).toBe(true);
+
+  const profiles = rail.locator('[data-admin-tab="profiles"]');
+  const devices = rail.locator('[data-admin-tab="devices"]');
+  const settings = rail.locator('[data-admin-tab="settings"]');
+  await profiles.focus();
+  await profiles.press("ArrowRight");
+  await expect(devices).toBeFocused();
+  await devices.press("End");
+  await expect(settings).toBeFocused();
+  await settings.press("Enter");
+  await expect(settings).toHaveAttribute("aria-current", "page");
+  await expect(page).toHaveURL(/\/#admin\?tab=settings&section=appearance$/);
+});
+
 test("global pairing requires a category and submits normalized optional metadata", async ({ page, rivune }) => {
   rivune.configureGlobalAdmin("bob", CATEGORY_IDS.kids);
   await page.goto("/pair?code=bcdfghjk");
@@ -354,7 +447,7 @@ test("global pairing requires a category and submits normalized optional metadat
 test("category-scoped pairing is fixed to its server category on mobile RTL", async ({ page, rivune }) => {
   rivune.configureCategoryScope(CATEGORY_IDS.household);
   rivune.setInterfaceLanguage("ar");
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize({ width: 360, height: 800 });
   await page.goto("/pair?code=bcdfghjk");
 
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
@@ -363,6 +456,11 @@ test("category-scoped pairing is fixed to its server category on mobile RTL", as
   expect(rivune.matching("/api/v1/categories", "GET")).toHaveLength(0);
   await expect(category.locator("select")).toHaveCount(0);
   const form = page.locator(".pairing-card form");
+  const formBounds = await page.locator(".pairing-card").boundingBox();
+  expect(formBounds).not.toBeNull();
+  expect(formBounds?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect((formBounds?.x ?? 0) + (formBounds?.width ?? 0)).toBeLessThanOrEqual(360);
+  expect(await page.locator(".auth-page").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await form.locator('input[maxlength="120"]').fill("  Hall display  ");
   await form.locator("textarea").fill("  Shared space  ");
   await form.locator('button[type="submit"]').click();
@@ -371,5 +469,5 @@ test("category-scoped pairing is fixed to its server category on mobile RTL", as
   expect(request.body).toEqual({ userCode: "BCDF-GHJK", categoryId: CATEGORY_IDS.household, deviceName: "Hall display", internalNote: "Shared space" });
   const bounds = await page.locator(".pairing-card").boundingBox();
   expect(bounds).not.toBeNull();
-  expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(390);
+  expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(360);
 });

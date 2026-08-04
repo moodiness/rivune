@@ -171,3 +171,133 @@ test("Home eagerly warms every resolved folder cover", async ({ page, rivune }) 
   ).toBe(1);
 });
 
+test("Library keeps loaded pages, retries the failed page, and never exposes private diagnostics", async ({ page, rivune: _rivune }) => {
+  const items = Array.from({ length: 125 }, (_, index) => ({
+    titleId: `library-${index + 1}`,
+    mediaType: "movie",
+    title: `Library title ${index + 1}`,
+    addedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+    updatedAt: "2026-01-01T00:00:00Z",
+  }));
+  const requestedPages: number[] = [];
+  let secondPageAttempts = 0;
+  await page.route("**/api/v1/library*", async (route) => {
+    const url = new URL(route.request().url());
+    const mediaType = url.searchParams.get("mediaType") ?? "";
+    const requestedPage = Number(url.searchParams.get("page") ?? "1");
+    if (!mediaType) requestedPages.push(requestedPage);
+    if (mediaType) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [], page: requestedPage, totalPages: 0, totalResults: 0 }) });
+      return;
+    }
+    if (!mediaType && requestedPage === 2 && secondPageAttempts++ === 0) {
+      await route.fulfill({
+        status: 502,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { message: "Private library shard unavailable" }, shard: "internal-library-7" }),
+      });
+      return;
+    }
+    const start = (requestedPage - 1) * 100;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ items: items.slice(start, start + 100), page: requestedPage, totalPages: 2, totalResults: items.length }),
+    });
+  });
+
+  await page.goto("/#library");
+  const cards = page.locator(".library-page .media-card");
+  await expect(cards).toHaveCount(100);
+  await page.getByRole("button", { name: "Load more", exact: true }).click();
+
+  await expect(cards).toHaveCount(100);
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+  await expect(page.getByText("Private library shard unavailable", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("internal-library-7", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(cards).toHaveCount(125);
+  await expect(page.getByRole("button", { name: "Open Library title 125" })).toBeVisible();
+  expect(requestedPages).toEqual([1, 2, 2]);
+});
+
+test("Library clears the previous filter immediately when the replacement request fails", async ({ page, rivune: _rivune }) => {
+  await page.route("**/api/v1/library*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("mediaType") === "series") {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { message: "Private series database address" } }),
+      });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [{ titleId: "previous-movie", mediaType: "movie", title: "Previous movie", addedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" }],
+        page: 1,
+        totalPages: 1,
+        totalResults: 1,
+      }),
+    });
+  });
+
+  await page.goto("/#library");
+  await expect(page.getByRole("button", { name: "Open Previous movie" })).toBeVisible();
+  await page.getByRole("button", { name: "Series", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open Previous movie" })).toHaveCount(0);
+  await expect(page.locator(".library-page .browse-skeleton-grid")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+  await expect(page.getByText("Private series database address", { exact: true })).toHaveCount(0);
+});
+
+test("browse filters and media grids support directional TV focus", async ({ page, rivune }) => {
+  rivune.setLibraryItems(Array.from({ length: 4 }, (_, index) => ({
+    titleId: `focus-${index + 1}`,
+    mediaType: "movie",
+    title: `Focus title ${index + 1}`,
+    addedAt: `2026-01-0${index + 1}T00:00:00Z`,
+    updatedAt: "2026-01-01T00:00:00Z",
+  })));
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  await page.goto("/#library");
+  const allTitles = page.getByRole("button", { name: "All titles", exact: true });
+  await allTitles.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("button", { name: "Movies", exact: true })).toBeFocused();
+  await page.keyboard.press("Enter");
+
+  const cards = page.locator(".library-page .media-card");
+  await expect(cards).toHaveCount(4);
+  await cards.first().focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(cards.nth(1)).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(cards.nth(3)).toBeFocused();
+});
+
+test("Home keeps successful folder results beside a safe partial-error warning", async ({ page, rivune: _rivune }) => {
+  await page.route("**/api/v1/collections/alice-collection/folders/alice-folder/items*", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        collectionId: "alice-collection",
+        folder: { id: "alice-folder", title: "Alice picks", sources: [], tileShape: "poster", sourceView: "merged" },
+        items: [{ id: "partial-home", mediaType: "movie", title: "Partial Home Title" }],
+        page: 1,
+        hasMore: false,
+        errors: [{ sourceId: "private-source", kind: "addon", code: "timeout", message: "Private upstream hostname" }],
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Open Partial Home Title" })).toBeVisible();
+  await expect(page.locator(".home-page .notice--warning")).toContainText("Some titles could not be loaded.");
+  await expect(page.getByText("Private upstream hostname", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("private-source", { exact: true })).toHaveCount(0);
+});
+

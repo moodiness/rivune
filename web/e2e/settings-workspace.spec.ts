@@ -5,6 +5,14 @@ import { CATEGORY_IDS, expect, test } from "./fixtures/rivune";
 const profileSections = ["appearance", "playback", "language", "subtitles", "connections"];
 const serverSections = ["appearance", "playback", "transcoding", "language", "subtitles"];
 
+const profileSectionCopy = [
+  { id: "appearance", title: "Appearance", description: "Theme, motion, and content density." },
+  { id: "playback", title: "Playback", description: "Delivery quality, episode flow, and skip actions." },
+  { id: "language", title: "Language & metadata", description: "How titles, regions, and episode ordering are resolved." },
+  { id: "subtitles", title: "Language & subtitles", description: "Preferred tracks and readable cue styling." },
+  { id: "connections", title: "Tracking accounts", description: "Mirror this profile's activity while Rivune remains the source of truth." },
+] as const;
+
 async function openSettings(page: Page, section?: string) {
   const sectionQuery = section ? `&section=${section}` : "";
   await page.goto(`/#admin?tab=settings${sectionQuery}`);
@@ -33,6 +41,39 @@ test("settings categories keep one panel active and preserve deep links", async 
   await expect(content.locator("#settings-section-playback")).toBeVisible();
   await expect(content.locator("#settings-section-subtitles")).toHaveCount(0);
   await expect(page).toHaveURL(/\/#admin\?tab=settings&section=playback$/);
+
+  await page.getByRole("navigation", { name: "Administration sections" }).getByRole("button", { name: /^Operations\b/ }).click();
+  await expect(page).toHaveURL(/\/#admin\?tab=operations$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/#admin\?tab=settings&section=playback$/);
+  await expect(navigation.locator('[data-settings-section="playback"]')).toHaveAttribute("aria-current", "page");
+});
+
+test("desktop category rail shows complete wrapped titles and descriptions without horizontal overflow", async ({ page, rivune: _rivune }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSettings(page);
+
+  const navigation = page.locator(".settings-navigation");
+  await expect.poll(() => sectionIds(page)).toEqual(profileSections);
+  await expect.poll(() => navigation.evaluate((element) => getComputedStyle(element).overflowY)).toBe("auto");
+  expect(await navigation.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+
+  for (const copy of profileSectionCopy) {
+    const item = navigation.locator(`[data-settings-section="${copy.id}"]`);
+    const title = item.locator(".settings-navigation__item-title");
+    const description = item.locator(".settings-navigation__item-description");
+    await expect(item).toHaveAccessibleName(copy.title);
+    await expect(item).toHaveAccessibleDescription(copy.description);
+    await expect(title).toHaveText(copy.title);
+    await expect(description).toHaveText(copy.description);
+    await expect(title).toHaveCSS("white-space", "normal");
+    await expect(description).toHaveCSS("white-space", "normal");
+    await expect(title).toHaveCSS("text-overflow", "clip");
+    await expect(description).toHaveCSS("text-overflow", "clip");
+    expect(await item.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await title.evaluate((element) => element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.clientHeight)).toBe(true);
+    expect(await description.evaluate((element) => element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.clientHeight)).toBe(true);
+  }
 });
 
 test("settings search opens the single matching category", async ({ page, rivune: _rivune }) => {
@@ -72,10 +113,15 @@ test("scope switching exposes only the categories valid for that target", async 
   await expect(page.locator('[data-settings-section="connections"]')).toHaveCount(0);
   await expect(page.locator('[data-settings-section="appearance"]')).toHaveAttribute("aria-current", "page");
   await expect(page.locator("#settings-section-appearance")).toBeVisible();
+  await expect(page.locator(".settings-scope--server")).toContainText("Server defaults");
+  await expect(page).toHaveURL(/\/#admin\?tab=settings&section=appearance$/);
 
   await scope.selectOption("alice");
   await expect.poll(() => sectionIds(page)).toEqual(profileSections);
   await expect(page.locator('[data-settings-section="transcoding"]')).toHaveCount(0);
+  await expect(page.locator('[data-settings-section="connections"]')).toHaveAttribute("aria-current", "page");
+  await expect(page.locator("#settings-section-connections")).toBeVisible();
+  await expect(page).toHaveURL(/\/#admin\?tab=settings&section=connections$/);
 });
 
 test("dirty preferences can be discarded or saved from the persistent action bar", async ({ page, rivune }) => {
@@ -90,9 +136,11 @@ test("dirty preferences can be discarded or saved from the persistent action bar
 
   await animations.uncheck();
   await expect(saveBar.getByRole("status")).toContainText("Unsaved changes");
+  await expect(saveBar).toHaveCount(1);
   await expect(discard).toBeEnabled();
   await expect(save).toBeEnabled();
   await expect(page.locator(".settings-profile-picker select")).toBeDisabled();
+  await expect(page.locator(".settings-profile-picker")).toHaveClass(/is-locked/);
 
   await discard.click();
   await expect(animations).toBeChecked();
@@ -104,6 +152,8 @@ test("dirty preferences can be discarded or saved from the persistent action bar
   const request = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
   expect(request.body).toMatchObject({ animationsEnabled: false });
   await expect(saveBar).toHaveCount(0);
+  await expect(page.locator(".app-notification--success").filter({ hasText: "Alice" })).toHaveCount(1);
+  await expect(page.locator(".settings-content .notice--success")).toHaveCount(0);
   await expect(page.locator(".settings-profile-picker select")).toBeEnabled();
 });
 
@@ -126,7 +176,7 @@ test("viewer cannot change transcoding and unrelated saves omit its policy", asy
   rivune.setProfileCategory("bob", CATEGORY_IDS.household);
   rivune.configureGlobalAdmin("bob");
   await page.goto("/");
-  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Preferences", exact: true }).click();
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
   await page.locator('[data-settings-section="playback"]').click();
 
   await expect(page.getByLabel("Transcoding")).toHaveCount(0);
@@ -195,7 +245,23 @@ test("mobile settings contain horizontal category overflow without widening the 
   expect(contentBounds!.y).toBeGreaterThanOrEqual(navigationBounds!.y + navigationBounds!.height);
   expect(workspaceBounds!.x + workspaceBounds!.width).toBeLessThanOrEqual(390);
   expect(await navigationList.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+  const appearance = navigation.locator('[data-settings-section="appearance"]');
+  const playback = navigation.locator('[data-settings-section="playback"]');
+  await appearance.focus();
+  await appearance.press("ArrowRight");
+  await expect(playback).toBeFocused();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const mobileCategoryMetrics = await navigation.locator("[data-settings-section]").evaluateAll((items) => items.map((item) => {
+    const title = item.querySelector<HTMLElement>(".settings-navigation__item-title");
+    return {
+      height: item.getBoundingClientRect().height,
+      titleFits: Boolean(title && title.scrollWidth <= title.clientWidth && title.scrollHeight <= title.clientHeight),
+    };
+  }));
+  expect(mobileCategoryMetrics.every(({ height, titleFits }) => height <= 64 && titleFits)).toBe(true);
+  await expect(navigation.locator('[data-settings-section="language"]')).toHaveAccessibleName("Language & metadata");
+  await expect(navigation.locator('[data-settings-section="subtitles"]')).toHaveAccessibleName("Language & subtitles");
+  await expect(navigation.locator('[data-settings-section="connections"]')).toHaveAccessibleName("Tracking accounts");
 
   await page.getByRole("checkbox", { name: "Interface animations" }).uncheck();
   const saveBarBounds = await page.locator(".settings-save-bar").boundingBox();

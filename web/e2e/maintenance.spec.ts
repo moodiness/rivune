@@ -47,7 +47,7 @@ test("administrator can update the global maintenance settings", async ({ page, 
 
 test("interface language inherits server defaults and supports profile RTL overrides", async ({ page, rivune }) => {
   await page.goto("/#admin");
-  await page.getByRole("button", { name: /Settings/ }).click();
+  await page.locator('[data-admin-tab="settings"]').click();
   const scope = page.locator(".settings-profile-picker select");
   const savePreferences = page.locator(".settings-save-bar").getByRole("button").last();
   await scope.selectOption("server");
@@ -72,6 +72,7 @@ test("interface language inherits server defaults and supports profile RTL overr
   await expect(language).toBeVisible();
 
   await scope.selectOption("alice");
+  await page.locator('[data-settings-section="language"]').click();
   await expect(language).toHaveValue("");
   const effectiveRequestCount = rivune.matching("/api/v1/profiles/alice/settings/effective", "GET").length;
   rivune.delayNextEffectiveSettings(250);
@@ -120,7 +121,7 @@ test("server transcoding disable confirms active sessions and the global veto wi
   };
   await page.route("**/api/v1/playback/activity", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify(activity) }));
   await page.goto("/#admin");
-  await page.getByRole("button", { name: /Settings/ }).click();
+  await page.locator('[data-admin-tab="settings"]').click();
   await page.locator('[data-settings-section="playback"]').click();
   const scope = page.locator(".settings-profile-picker select");
   const inheritedPolicy = page.locator(".setting-control--transcoding select");
@@ -162,7 +163,7 @@ test("server transcoding disable confirms active sessions and the global veto wi
 });
 test("cast member limits persist in server and profile scopes", async ({ page, rivune }) => {
   await page.goto("/#admin");
-  await page.getByRole("button", { name: /Settings/ }).click();
+  await page.locator('[data-admin-tab="settings"]').click();
   await page.locator('[data-settings-section="playback"]').click();
   const scope = page.locator(".settings-profile-picker select");
   const savePreferences = page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" });
@@ -176,6 +177,7 @@ test("cast member limits persist in server and profile scopes", async ({ page, r
   await expect(limit).toHaveAttribute("max", "20");
 
   await scope.selectOption("server");
+  await page.locator('[data-settings-section="playback"]').click();
   await expect(mode).toHaveCount(0);
   await expect(limit).toBeEnabled();
   await expect(limit).toHaveValue("20");
@@ -187,6 +189,7 @@ test("cast member limits persist in server and profile scopes", async ({ page, r
   expect(serverRequest.body).toMatchObject({ maximumCastMembers: 12 });
 
   await scope.selectOption("alice");
+  await page.locator('[data-settings-section="playback"]').click();
   await expect(mode).toHaveValue("inherit");
   await expect(limit).toBeDisabled();
   await expect(limit).toHaveValue("12");
@@ -210,7 +213,7 @@ test("cast member limits persist in server and profile scopes", async ({ page, r
 
 test("the selected interface language localizes Home copy", async ({ page, rivune }) => {
   await page.goto("/#admin");
-  await page.getByRole("button", { name: /Settings/ }).click();
+  await page.locator('[data-admin-tab="settings"]').click();
   await page.locator(".settings-profile-picker select").selectOption("server");
   await page.locator('[data-settings-section="language"]').click();
 
@@ -224,11 +227,11 @@ test("the selected interface language localizes Home copy", async ({ page, rivun
   await expect(page.getByText("Continue Watching", { exact: true })).toHaveCount(0);
 });
 
-test("viewer preferences use the full desktop workspace", async ({ page, rivune }) => {
+test("viewer settings use the full desktop workspace", async ({ page, rivune }) => {
   rivune.configureCategoryScope(CATEGORY_IDS.kids);
   await page.setViewportSize({ width: 1568, height: 899 });
   await page.goto("/");
-  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Preferences" }).click();
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
 
   const workspace = page.locator(".settings-workspace");
   const navigation = workspace.locator(".settings-navigation");
@@ -242,27 +245,33 @@ test("viewer preferences use the full desktop workspace", async ({ page, rivune 
   await expect(content.getByRole("heading", { name: "Device notifications" })).toHaveCount(0);
 });
 
-test("a global administrator session exposes server administration only through its manager profile", async ({ page, rivune }) => {
+test("a global administrator exposes server administration through the shared Settings destination only for its manager profile", async ({ page, rivune }) => {
   rivune.setProfileCategory("bob", CATEGORY_IDS.household);
   await page.goto("/");
 
   const mainNavigation = page.getByRole("navigation", { name: "Main navigation" });
-  await expect(mainNavigation.getByRole("button", { name: "Administration", exact: true })).toBeVisible();
-  await mainNavigation.getByRole("button", { name: "Administration", exact: true }).click();
+  await expect(mainNavigation.getByRole("button", { name: "Settings", exact: true })).toHaveCount(1);
+  await expect(mainNavigation.getByRole("button", { name: /^(Administration|Preferences|Manage)$/ })).toHaveCount(0);
+  await mainNavigation.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page.getByRole("navigation", { name: "Administration sections" }).getByRole("button", { name: /^Categories\b/ })).toBeVisible();
 
   await page.getByRole("button", { name: "Switch profile" }).first().click();
   await page.getByRole("button", { name: "Bob Profile" }).click();
   await expect(page.getByRole("heading", { name: "Bob's Fresh Picks" })).toBeVisible();
-  await expect(mainNavigation.getByRole("button", { name: "Preferences", exact: true })).toBeVisible();
-  await expect(mainNavigation.getByRole("button", { name: "Administration", exact: true })).toHaveCount(0);
-  await mainNavigation.getByRole("button", { name: "Preferences", exact: true }).click();
+  await expect(mainNavigation.getByRole("button", { name: "Settings", exact: true })).toHaveCount(1);
+  await expect(mainNavigation.getByRole("button", { name: /^(Administration|Preferences|Manage)$/ })).toHaveCount(0);
+  await mainNavigation.getByRole("button", { name: "Settings", exact: true }).click();
 
   await expect(page.locator(".admin-layout--preferences .admin-tabs")).toHaveCount(0);
   await expect(page.getByText("Profile access", { exact: true })).toBeVisible();
   await expect(page.locator(".settings-profile-picker")).toHaveCount(0);
   await expect(page.getByText("Server defaults", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Bob preferences" })).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileNavigation = page.getByRole("navigation", { name: "Mobile navigation" });
+  await expect(mobileNavigation.getByRole("button", { name: "Settings", exact: true })).toHaveCount(1);
+  await expect(mobileNavigation.getByRole("button", { name: /^(Administration|Preferences|Manage)$/ })).toHaveCount(0);
 });
 
 test("tracking authorization survives provider slow-down and completes polling", async ({ page, rivune: _rivune }) => {
@@ -321,7 +330,7 @@ test("tracking authorization survives provider slow-down and completes polling",
   });
 
   await page.goto("/#admin");
-  await page.getByRole("button", { name: /Settings/ }).click();
+  await page.locator('[data-admin-tab="settings"]').click();
   await page.locator('[data-settings-section="connections"]').click();
   await page.getByRole("button", { name: "Connect account" }).click();
 

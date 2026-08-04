@@ -919,11 +919,12 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   }
 
   async function toggleTitleWatched() {
-    const resolvedTitleID = titleID ?? item.titleId ?? await resolveMediaTitle(details);
-    const watched = !titleProgress?.completed;
-    setWatchedBusy(resolvedTitleID);
+    if (watchedBusy) return;
+    setWatchedBusy(titleID ?? item.titleId ?? "resolving");
     setActionError("");
     try {
+      const resolvedTitleID = titleID ?? item.titleId ?? await resolveMediaTitle(details);
+      const watched = !titleProgress?.completed;
       const progress = await api.setWatched(resolvedTitleID, watched, titleProgress?.version ?? 0);
       setTitleID(resolvedTitleID);
       setTitleProgress(progress);
@@ -1204,7 +1205,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                   <Clapperboard size={19} />
                   {t("media.trailers.title")}
                 </Button>}
-                {(item.mediaType === "movie" || (item.mediaType === "episode" && fromContinue)) && <Button variant="secondary" loading={watchedBusy === titleID} onClick={() => void toggleTitleWatched()}>
+                {(item.mediaType === "movie" || item.mediaType === "episode") && <Button type="button" variant="secondary" loading={Boolean(watchedBusy)} aria-busy={Boolean(watchedBusy)} aria-label={t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")} onClick={() => void toggleTitleWatched()}>
                   {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
                   {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
                 </Button>}
@@ -1370,7 +1371,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                                         : <small>{t("common.status.selected")}</small>}
                                 </span>}
                               </button>
-                              {selected && <button type="button" className="episode-play" aria-label={`${item.mediaType === "episode" ? t("media.details.playEpisode") : t("media.details.playSelectedStream")}: ${option.name}`} disabled={playDisabled} onClick={() => playPlaybackStream(option)}>
+                              {selected && <button type="button" className="episode-play" data-media-action="play-selected-stream" aria-label={`${item.mediaType === "episode" ? t("media.details.playEpisode") : t("media.details.playSelectedStream")}: ${option.name}`} disabled={playDisabled} onClick={() => playPlaybackStream(option)}>
                                 <Play size={16} fill="currentColor" />
                               </button>}
                             </div>;
@@ -1502,6 +1503,9 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   const initialPreferences = useRef(loadPlayerPreferences()).current;
   const playerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  const panelTriggerRef = useRef<HTMLElement | null>(null);
+  const previousPanelRef = useRef<PlayerPanel>(null);
   const controlsTimerRef = useRef<number | undefined>(undefined);
   const clickTimerRef = useRef<number | undefined>(undefined);
   const lastTouchRef = useRef({ time: 0, x: 0 });
@@ -1891,7 +1895,9 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     appRoot.setAttribute("aria-hidden", "true");
     document.body.style.overflow = "hidden";
     document.documentElement.style.overflow = "hidden";
+    const focusFrame = window.requestAnimationFrame(() => playerRef.current?.focus());
     return () => {
+      window.cancelAnimationFrame(focusFrame);
       appRoot.inert = wasInert;
       if (previousAriaHidden === null) appRoot.removeAttribute("aria-hidden");
       else appRoot.setAttribute("aria-hidden", previousAriaHidden);
@@ -1905,6 +1911,28 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     const frame = window.requestAnimationFrame(() => playerRef.current?.querySelector<HTMLElement>(".player__external-action, .player__control-primary")?.focus());
     return () => window.cancelAnimationFrame(frame);
   }, [stream?.id, stream?.infoHash, stream?.url]);
+
+  useEffect(() => {
+    const previousPanel = previousPanelRef.current;
+    previousPanelRef.current = panel;
+    const frame = window.requestAnimationFrame(() => {
+      if (panel) {
+        const panelElement = panelRef.current;
+        const selectedOption = panelElement?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]');
+        const firstControl = panelElement?.querySelector<HTMLElement>("[data-player-control]");
+        (selectedOption ?? firstControl)?.focus();
+        return;
+      }
+      if (previousPanel && panelTriggerRef.current?.isConnected) panelTriggerRef.current.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [panel]);
+
+  useEffect(() => {
+    if (phase !== "failed") return;
+    const frame = window.requestAnimationFrame(() => playerRef.current?.querySelector<HTMLElement>(".player__failure [data-player-control]")?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [phase]);
 
   useEffect(() => {
     window.clearTimeout(controlsTimerRef.current);
@@ -1931,14 +1959,14 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       const interactive = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement;
       if (event.key === "Escape" || event.key === "BrowserBack" || event.key === "GoBack") {
         event.preventDefault();
-        if (panel) setPanel(null);
+        if (panel) closePanel();
         else if (fullscreenKind !== "none" || document.fullscreenElement === playerRef.current) void exitPlayerFullscreen();
         else if (!controlsVisible) revealControls();
         else closePlayer();
         return;
       }
       if (interactive) return;
-      if (target instanceof HTMLElement && target.hasAttribute("data-player-control") && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      if (target instanceof HTMLElement && target.hasAttribute("data-player-control") && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
         event.preventDefault();
         movePlayerFocus(event.key);
         return;
@@ -2098,9 +2126,19 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     }
   }
 
+  function closePanel() {
+    setPanel(null);
+  }
+
   function togglePanel(nextPanel: Exclude<PlayerPanel, null>) {
     revealControls();
-    setPanel((current) => current === nextPanel ? null : nextPanel);
+    if (panel === nextPanel) {
+      closePanel();
+      return;
+    }
+    const active = document.activeElement;
+    panelTriggerRef.current = active instanceof HTMLElement && playerRef.current?.contains(active) ? active : null;
+    setPanel(nextPanel);
     if (nextPanel === "stats" && videoRef.current) updatePlayerStats(videoRef.current);
   }
 
@@ -2185,7 +2223,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     const video = videoRef.current;
     if (video) video.playbackRate = rate;
     setPlaybackRate(rate);
-    setPanel(null);
+    closePanel();
     revealControls();
   }
 
@@ -2307,20 +2345,20 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     resumePositionRef.current = position;
     setPlaybackStart(position);
     setSelected(index);
-    setPanel(null);
+    closePanel();
     setPhase("recovering");
     void persistProgress(false, position);
   }
 
   function selectSubtitle(subtitleID: string) {
     if (subtitleHandoffRef.current || subtitleID === selectedSubtitleID) {
-      setPanel(null);
+      closePanel();
       return;
     }
     const nextSubtitle = subtitles.find((subtitle) => subtitle.id === subtitleID);
     const changesBurnDelivery = selectedSubtitle?.delivery === "burn" || nextSubtitle?.delivery === "burn";
     subtitlePreferenceRef.current = subtitleID;
-    setPanel(null);
+    closePanel();
     if (!changesBurnDelivery) {
       setSelectedSubtitleID(subtitleID);
       return;
@@ -2444,6 +2482,31 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       candidates[0].focus();
       return;
     }
+
+    const optionGroup = active.closest<HTMLElement>('[role="radiogroup"]');
+    if (optionGroup) {
+      const options = Array.from(optionGroup.querySelectorAll<HTMLElement>('[role="radio"]'))
+        .filter((option) => !option.hasAttribute("disabled") && option.offsetParent !== null);
+      const index = options.indexOf(active);
+      if (index >= 0 && options.length > 0) {
+        if (key === "Home" || key === "End") {
+          options[key === "Home" ? 0 : options.length - 1]?.focus();
+          return;
+        }
+        const grid = optionGroup.dataset.playerLayout === "grid";
+        const columnCount = grid ? Number(optionGroup.dataset.playerColumns) || 1 : 1;
+        const delta = grid
+          ? key === "ArrowLeft" ? -1 : key === "ArrowRight" ? 1 : key === "ArrowUp" ? -columnCount : columnCount
+          : key === "ArrowLeft" || key === "ArrowUp" ? -1 : 1;
+        options[Math.min(options.length - 1, Math.max(0, index + delta))]?.focus();
+        return;
+      }
+    }
+
+    if (key === "Home" || key === "End") {
+      candidates[key === "Home" ? 0 : candidates.length - 1]?.focus();
+      return;
+    }
     const origin = active.getBoundingClientRect();
     const originX = origin.left + origin.width / 2;
     const originY = origin.top + origin.height / 2;
@@ -2468,7 +2531,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
           : panel === "stats" ? t("player.panel.diagnostics")
             : "";
 
-  return createPortal(<div ref={playerRef} className={`player player--${phase}${controlsVisible ? " has-controls" : " controls-hidden"}`} role="dialog" aria-modal="true" aria-label={t("player.playingTitle", { title: item.title })} onPointerMove={revealControls} onPointerDown={revealControls} onFocusCapture={revealControls}>
+  return createPortal(<div ref={playerRef} className={`player player--${phase}${controlsVisible ? " has-controls" : " controls-hidden"}`} role="dialog" aria-modal="true" aria-label={t("player.playingTitle", { title: item.title })} aria-busy={loading || phase === "preparing" || phase === "buffering" || phase === "recovering"} data-player-state={phase} data-controls-visible={controlsVisible} tabIndex={-1} onPointerMove={revealControls} onPointerDown={revealControls} onFocusCapture={revealControls}>
     <div className="player__surface" onClick={handleSurfaceClick} onDoubleClick={handleSurfaceDoubleClick} onPointerUp={handleSurfacePointerUp}>
       {stream?.ytId ? <iframe className="player__video" src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(stream.ytId)}?autoplay=1`} allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen title={item.title} /> :
         stream?.mode !== "external" && stream?.url ? <video key={`${stream.id}:${stream.url}:${playbackStart ?? 0}:${playbackGeneration}`} ref={videoRef} className="player__video" controls={false} playsInline crossOrigin="anonymous"
@@ -2488,15 +2551,15 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
 
     <header className={`player__header${controlsVisible ? "" : " is-hidden"}`}>
       <div><small>{playerPhaseLabel(phase)} · {modeLabel}</small><strong>{item.title}</strong></div>
-      <IconButton label={t("player.actions.close")} onClick={closePlayer} data-player-control><X /></IconButton>
+      <IconButton label={t("player.actions.close")} onClick={closePlayer} data-player-action="close" data-player-control><X /></IconButton>
     </header>
 
-    {(loading || phase === "preparing") && <div className="player__loading" aria-live="polite"><span className="player__pulse"><LoaderCircle className="spin" /></span><strong>{t("player.loading.title")}</strong><p>{t("player.loading.description")}</p></div>}
-    {(phase === "buffering" || phase === "recovering") && <div className="player__buffering" aria-live="polite"><LoaderCircle className="spin" /><span>{t(phase === "recovering" ? "player.status.recovering" : "player.status.buffering")}</span></div>}
+    {(loading || phase === "preparing") && <div className="player__loading" role="status" aria-live="polite" aria-busy="true"><span className="player__pulse"><LoaderCircle className="spin" /></span><strong>{t("player.loading.title")}</strong><p>{t("player.loading.description")}</p></div>}
+    {(phase === "buffering" || phase === "recovering") && <div className="player__buffering" role="status" aria-live="polite" aria-busy="true"><LoaderCircle className="spin" /><span>{t(phase === "recovering" ? "player.status.recovering" : "player.status.buffering")}</span></div>}
     {seekFeedback && <div key={seekFeedback.id} className={`player__seek-feedback ${seekFeedback.seconds < 0 ? "is-backward" : "is-forward"}`}>{seekFeedback.seconds < 0 ? <RotateCcw /> : <RotateCw />}<span>{t("player.seek.feedbackSeconds", { sign: seekFeedback.seconds > 0 ? "+" : "", seconds: seekFeedback.seconds })}</span></div>}
     {playbackBlocked && phase !== "failed" && <button type="button" className="player__start" onClick={togglePlayback} data-player-control><Play size={30} fill="currentColor" /><span>{t("player.actions.play")}</span></button>}
-    {phase === "failed" && <div className="player__failure" role="alert"><ServerCrash size={34} /><strong>{t("player.error.unavailableTitle")}</strong><p>{error || t("player.error.streamPlayFailed")}</p><div><Button onClick={retryPlayback}><RefreshCw size={17} /> {t("common.actions.retry")}</Button><Button variant="secondary" onClick={closePlayer}>{t("common.actions.goBack")}</Button></div></div>}
-    {!loading && playable.length === 0 && phase !== "failed" && <div className="player__failure"><ServerCrash size={34} /><strong>{t("player.empty.title")}</strong><p>{error || t("player.empty.description")}</p><Button variant="secondary" onClick={closePlayer}>{t("common.actions.goBack")}</Button></div>}
+    {phase === "failed" && <div className="player__failure" role="alert"><ServerCrash size={34} /><strong>{t("player.error.unavailableTitle")}</strong><p>{error || t("player.error.streamPlayFailed")}</p><div><Button onClick={retryPlayback} data-player-control><RefreshCw size={17} /> {t("common.actions.retry")}</Button><Button variant="secondary" onClick={closePlayer} data-player-control>{t("common.actions.goBack")}</Button></div></div>}
+    {!loading && playable.length === 0 && phase !== "failed" && <div className="player__failure" role="alert"><ServerCrash size={34} /><strong>{t("player.empty.title")}</strong><p>{error || t("player.empty.description")}</p><Button variant="secondary" onClick={closePlayer} data-player-control>{t("common.actions.goBack")}</Button></div>}
     {!loading && stream?.mode === "external" && externalPlaybackURL && <div className="player__external">
       <ExternalLink size={36} />
       <small>{t("player.external.eyebrow")}</small>
@@ -2523,42 +2586,45 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       </div>
       <div className="player__controls">
         <div className="player__controls-group">
-          <button type="button" className="player__control-primary" aria-label={t(paused ? "player.actions.play" : "player.actions.pause")} onClick={togglePlayback} data-player-control>{paused ? <Play size={20} fill="currentColor" /> : <Pause size={20} fill="currentColor" />}</button>
-          <button type="button" aria-label={t("player.seek.back10")} onClick={() => seekBy(-10)} data-player-control><RotateCcw size={19} /><small>10</small></button>
-          <button type="button" aria-label={t("player.seek.forward10")} onClick={() => seekBy(10)} data-player-control><RotateCw size={19} /><small>10</small></button>
-          <button type="button" aria-label={t(muted ? "player.volume.unmute" : "player.volume.mute")} onClick={toggleMute} data-player-control>{muted ? <VolumeX size={19} /> : <Volume2 size={19} />}</button>
-          <input className="player__volume" type="range" aria-label={t("player.volume.label")} min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(event) => changeVolume(Number(event.target.value))} data-player-control />
+          <button type="button" className="player__control-primary" aria-label={t(paused ? "player.actions.play" : "player.actions.pause")} aria-pressed={!paused} onClick={togglePlayback} data-player-action="playback" data-player-control>{paused ? <Play size={20} fill="currentColor" /> : <Pause size={20} fill="currentColor" />}</button>
+          <button type="button" aria-label={t("player.seek.back10")} onClick={() => seekBy(-10)} data-player-action="seek-backward" data-player-control><RotateCcw size={19} /><small>10</small></button>
+          <button type="button" aria-label={t("player.seek.forward10")} onClick={() => seekBy(10)} data-player-action="seek-forward" data-player-control><RotateCw size={19} /><small>10</small></button>
+          <button type="button" aria-label={t(muted ? "player.volume.unmute" : "player.volume.mute")} aria-pressed={muted} onClick={toggleMute} data-player-action="mute" data-player-control>{muted ? <VolumeX size={19} /> : <Volume2 size={19} />}</button>
+          <input className="player__volume" type="range" aria-label={t("player.volume.label")} min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(event) => changeVolume(Number(event.target.value))} data-player-action="volume" data-player-control />
         </div>
         <div className="player__mode"><span>{modeLabel}</span><small>{stream?.media?.videoTracks[0]?.height ? `${stream.media.videoTracks[0].height}p` : stream?.protocol?.toUpperCase()}</small></div>
         <div className="player__controls-group player__controls-group--right">
-          {playable.length > 1 && <button type="button" aria-label={t("player.panel.sources")} className={panel === "sources" ? "is-active" : ""} onClick={() => togglePanel("sources")} data-player-control><Settings2 size={19} /></button>}
-          {audioTracks.length > 1 && <button type="button" aria-label={t("player.panel.audio")} className={panel === "audio" ? "is-active" : ""} onClick={() => togglePanel("audio")} data-player-control><AudioLines size={19} /></button>}
-          {subtitles.length > 0 && <button type="button" aria-label={t("player.panel.subtitles")} className={panel === "subtitles" ? "is-active" : ""} onClick={() => togglePanel("subtitles")} data-player-control><Captions size={19} /></button>}
-          <button type="button" aria-label={t("player.speed.currentLabel", { rate: playbackRate })} className={panel === "speed" ? "is-active" : ""} onClick={() => togglePanel("speed")} data-player-control><Gauge size={19} /><small>{playbackRate}×</small></button>
-          <button type="button" aria-label={t("player.panel.diagnostics")} className={panel === "stats" ? "is-active" : ""} onClick={() => togglePanel("stats")} data-player-control><Info size={19} /></button>
-          {document.pictureInPictureEnabled && <button type="button" aria-label={t("player.pictureInPicture.label")} onClick={() => void togglePictureInPicture()} data-player-control><PictureInPicture size={19} /></button>}
-          {fullscreenSupported && <button type="button" className="player__fullscreen" aria-label={t(fullscreenKind === "none" ? "player.fullscreen.enter" : "player.fullscreen.exit")} onClick={() => void toggleFullscreen()} data-player-control>{fullscreenKind === "none" ? <Maximize size={19} /> : <Minimize size={19} />}</button>}
+          {playable.length > 1 && <button type="button" aria-label={t("player.panel.sources")} aria-controls="player-panel-sources" aria-expanded={panel === "sources"} aria-haspopup="dialog" className={panel === "sources" ? "is-active" : ""} onClick={() => togglePanel("sources")} data-player-action="sources" data-player-control><Settings2 size={19} /></button>}
+          {audioTracks.length > 1 && <button type="button" aria-label={t("player.panel.audio")} aria-controls="player-panel-audio" aria-expanded={panel === "audio"} aria-haspopup="dialog" className={panel === "audio" ? "is-active" : ""} onClick={() => togglePanel("audio")} data-player-action="audio" data-player-control><AudioLines size={19} /></button>}
+          {subtitles.length > 0 && <button type="button" aria-label={t("player.panel.subtitles")} aria-controls="player-panel-subtitles" aria-expanded={panel === "subtitles"} aria-haspopup="dialog" className={panel === "subtitles" ? "is-active" : ""} onClick={() => togglePanel("subtitles")} data-player-action="subtitles" data-player-control><Captions size={19} /></button>}
+          <button type="button" aria-label={t("player.speed.currentLabel", { rate: playbackRate })} aria-controls="player-panel-speed" aria-expanded={panel === "speed"} aria-haspopup="dialog" className={panel === "speed" ? "is-active" : ""} onClick={() => togglePanel("speed")} data-player-action="speed" data-player-control><Gauge size={19} /><small>{playbackRate}×</small></button>
+          <button type="button" aria-label={t("player.panel.diagnostics")} aria-controls="player-panel-stats" aria-expanded={panel === "stats"} aria-haspopup="dialog" className={panel === "stats" ? "is-active" : ""} onClick={() => togglePanel("stats")} data-player-action="diagnostics" data-player-control><Info size={19} /></button>
+          {document.pictureInPictureEnabled && <button type="button" aria-label={t("player.pictureInPicture.label")} onClick={() => void togglePictureInPicture()} data-player-action="picture-in-picture" data-player-control><PictureInPicture size={19} /></button>}
+          {fullscreenSupported && <button type="button" className="player__fullscreen" aria-label={t(fullscreenKind === "none" ? "player.fullscreen.enter" : "player.fullscreen.exit")} aria-pressed={fullscreenKind !== "none"} onClick={() => void toggleFullscreen()} data-player-action="fullscreen" data-player-control>{fullscreenKind === "none" ? <Maximize size={19} /> : <Minimize size={19} />}</button>}
         </div>
       </div>
     </div>}
 
-    {panel && <section className="player__panel" aria-label={panelTitle}>
-      <header><div><small>{t("player.settings.eyebrow")}</small><strong>{panelTitle}</strong></div><button type="button" aria-label={t("player.settings.close")} onClick={() => setPanel(null)} data-player-control><X size={17} /></button></header>
-      {panel === "sources" && <div className="player__option-list">{playable.map((candidate, index) => {
+    {panel && <section ref={panelRef} id={`player-panel-${panel}`} className="player__panel" role="dialog" aria-label={panelTitle}>
+      <header><div><small>{t("player.settings.eyebrow")}</small><strong>{panelTitle}</strong></div><button type="button" aria-label={t("player.settings.close")} onClick={closePanel} data-player-action="close-panel" data-player-control><X size={17} /></button></header>
+      {panel === "sources" && <div className="player__option-list" role="radiogroup" aria-label={panelTitle} data-player-layout="vertical">{playable.map((candidate, index) => {
         const video = candidate.media?.videoTracks[0];
         const candidateMode = playerModeLabel(candidate.mode, Boolean(candidate.media?.hdrFormat && candidate.media.hdrFormat !== "sdr" && candidate.mode === "transcode"));
-        return <button key={candidate.id} type="button" className={selected === index ? "is-active" : ""} onClick={() => selectSource(index)} data-player-control><span><strong>{candidate.name || candidate.title || t("player.sources.fallbackName", { number: index + 1 })}</strong><small>{candidateMode} · {video?.height ? `${video.height}p` : candidate.protocol.toUpperCase()} {video?.codec ? `· ${video.codec.toUpperCase()}` : ""}</small></span>{selected === index && <Check size={17} />}</button>;
+        return <button key={candidate.id} type="button" role="radio" aria-checked={selected === index} className={selected === index ? "is-active" : ""} onClick={() => selectSource(index)} data-player-control><span><strong>{candidate.name || candidate.title || t("player.sources.fallbackName", { number: index + 1 })}</strong><small>{candidateMode} · {video?.height ? `${video.height}p` : candidate.protocol.toUpperCase()} {video?.codec ? `· ${video.codec.toUpperCase()}` : ""}</small></span>{selected === index && <Check size={17} />}</button>;
       })}</div>}
-      {panel === "audio" && <div className="player__option-list">{audioTracks.map((track) => <button key={track.index} type="button" className={selectedAudioTrack === track.index ? "is-active" : ""} onClick={() => {
+      {panel === "audio" && <div className="player__option-list" role="radiogroup" aria-label={panelTitle} data-player-layout="vertical">{audioTracks.map((track) => <button key={track.index} type="button" role="radio" aria-checked={selectedAudioTrack === track.index} className={selectedAudioTrack === track.index ? "is-active" : ""} onClick={() => {
         const video = videoRef.current;
         if (video) resumePositionRef.current = Math.floor(playbackOffsetRef.current + video.currentTime);
         setSelectedAudioTrack(track.index);
         setPreferredAudioTrack(track.index);
-        setPanel(null);
+        closePanel();
         setPhase("recovering");
       }} data-player-control><span><strong>{track.title || track.language?.toUpperCase() || t("player.audio.fallbackTrack", { number: track.index + 1 })}</strong><small>{playerTrackLabel(track)}</small></span>{selectedAudioTrack === track.index && <Check size={17} />}</button>)}</div>}
-      {panel === "subtitles" && <div className="player__option-list"><button type="button" className={selectedSubtitleID === "none" ? "is-active" : ""} onClick={() => selectSubtitle("none")} data-player-control><span><strong>{t("player.subtitles.off")}</strong><small>{t("player.subtitles.none")}</small></span>{selectedSubtitleID === "none" && <Check size={17} />}</button>{subtitles.map((subtitle) => <button key={subtitle.id} type="button" className={selectedSubtitleID === subtitle.id ? "is-active" : ""} onClick={() => selectSubtitle(subtitle.id)} data-player-control><span><strong>{(subtitle.language || t("common.fallback.unknown")).toUpperCase()}</strong><small>{t(subtitle.default ? "player.subtitles.defaultTrack" : "player.subtitles.track")}</small></span>{selectedSubtitleID === subtitle.id && <Check size={17} />}</button>)}</div>}
-      {panel === "speed" && <div className="player__speed-grid">{playbackRates.map((rate) => <button key={rate} type="button" className={playbackRate === rate ? "is-active" : ""} onClick={() => changePlaybackRate(rate)} data-player-control>{rate}×</button>)}</div>}
+      {panel === "subtitles" && <div className="player__option-list" role="radiogroup" aria-label={panelTitle} data-player-layout="vertical">
+        <button type="button" role="radio" aria-checked={selectedSubtitleID === "none"} className={selectedSubtitleID === "none" ? "is-active" : ""} onClick={() => selectSubtitle("none")} data-player-control><span><strong>{t("player.subtitles.off")}</strong><small>{t("player.subtitles.none")}</small></span>{selectedSubtitleID === "none" && <Check size={17} />}</button>
+        {subtitles.map((subtitle) => <button key={subtitle.id} type="button" role="radio" aria-checked={selectedSubtitleID === subtitle.id} className={selectedSubtitleID === subtitle.id ? "is-active" : ""} onClick={() => selectSubtitle(subtitle.id)} data-player-control><span><strong>{(subtitle.language || t("common.fallback.unknown")).toUpperCase()}</strong><small>{t(subtitle.default ? "player.subtitles.defaultTrack" : "player.subtitles.track")}</small></span>{selectedSubtitleID === subtitle.id && <Check size={17} />}</button>)}
+      </div>}
+      {panel === "speed" && <div className="player__speed-grid" role="radiogroup" aria-label={panelTitle} data-player-layout="grid" data-player-columns="3">{playbackRates.map((rate) => <button key={rate} type="button" role="radio" aria-checked={playbackRate === rate} className={playbackRate === rate ? "is-active" : ""} onClick={() => changePlaybackRate(rate)} data-player-control>{rate}×</button>)}</div>}
       {panel === "stats" && <dl className="player__stats">
         <div><dt>{t("player.diagnostics.status")}</dt><dd>{playerPhaseLabel(phase)}</dd></div>
         <div><dt>{t("player.diagnostics.mode")}</dt><dd>{modeLabel}</dd></div>

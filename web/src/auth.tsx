@@ -32,7 +32,7 @@ type AuthState = {
   resetDemo: () => Promise<void>;
   exitDemo: () => Promise<void>;
   rediscover: () => Promise<void>;
-  updateServerInterfaceLanguage: (language: InterfaceLanguage) => void;
+  updateServerInterfaceLanguage: (language: InterfaceLanguage) => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -114,11 +114,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const rediscover = useCallback(async () => {
     const next = await api.discovery();
-    setLocale(next.interfaceLanguage);
+    await setLocale(next.interfaceLanguage);
     setDiscovery(next);
   }, []);
 
-  const updateServerInterfaceLanguage = useCallback((interfaceLanguage: InterfaceLanguage) => {
+  const updateServerInterfaceLanguage = useCallback(async (interfaceLanguage: InterfaceLanguage) => {
+    const loadedLocale = await setLocale(interfaceLanguage);
+    if (loadedLocale !== interfaceLanguage) return;
     setDiscovery((current) => current === null ? null : { ...current, interfaceLanguage });
   }, []);
 
@@ -144,7 +146,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const discovered = await api.discovery();
         if (!active) return;
-        setLocale(discovered.interfaceLanguage);
+        await setLocale(discovered.interfaceLanguage);
+        if (!active) return;
         setDiscovery(discovered);
 
         const directDemo = window.location.pathname === "/demo";

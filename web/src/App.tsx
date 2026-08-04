@@ -281,37 +281,45 @@ function useRuntimeSettings(profileID: string | undefined, serverLanguage: Inter
   });
 
   useEffect(() => {
-    if (!profileID) {
-      api.configureMetadataLocale("auto", "auto");
-      setLocale(serverLanguage);
-      setLoaded({ profileID: "", settings: serverDefaults, ready: true });
-      return;
-    }
     let active = true;
     let requestGeneration = 0;
     const load = () => {
       const generation = ++requestGeneration;
+      if (!profileID) {
+        api.configureMetadataLocale("auto", "auto");
+        void setLocale(serverLanguage).then(() => {
+          if (active && generation === requestGeneration) {
+            setLoaded({ profileID: "", settings: serverDefaults, ready: true });
+          }
+        });
+        return;
+      }
       setLoaded((current) => current.profileID === profileID
         ? current
         : { profileID, settings: serverDefaults, ready: false });
-      void api.effectiveSettings(profileID).then((response) => {
-        if (!active || generation !== requestGeneration) return;
-        api.configureMetadataLocale(
-          response.settings.metadataLanguage ?? undefined,
-          response.settings.metadataRegion ?? undefined,
-          response.settings.audioLanguage ?? undefined,
-          response.settings.seriesMappingProvider ?? undefined,
-          response.settings.subtitleLanguage ?? undefined,
-        );
-        const next = runtimeSettings(response.settings);
-        setLocale(next.interfaceLanguage);
-        setLoaded({ profileID, settings: next, ready: true });
-      }).catch(() => {
-        if (!active || generation !== requestGeneration) return;
-        api.configureMetadataLocale("auto", "auto");
-        setLocale(serverLanguage);
-        setLoaded({ profileID, settings: serverDefaults, ready: true });
-      });
+      void (async () => {
+        try {
+          const response = await api.effectiveSettings(profileID);
+          if (!active || generation !== requestGeneration) return;
+          api.configureMetadataLocale(
+            response.settings.metadataLanguage ?? undefined,
+            response.settings.metadataRegion ?? undefined,
+            response.settings.audioLanguage ?? undefined,
+            response.settings.seriesMappingProvider ?? undefined,
+            response.settings.subtitleLanguage ?? undefined,
+          );
+          const next = runtimeSettings(response.settings);
+          await setLocale(next.interfaceLanguage);
+          if (!active || generation !== requestGeneration) return;
+          setLoaded({ profileID, settings: next, ready: true });
+        } catch {
+          if (!active || generation !== requestGeneration) return;
+          api.configureMetadataLocale("auto", "auto");
+          await setLocale(serverLanguage);
+          if (!active || generation !== requestGeneration) return;
+          setLoaded({ profileID, settings: serverDefaults, ready: true });
+        }
+      })();
     };
     load();
     window.addEventListener("rivune:settings-changed", load);

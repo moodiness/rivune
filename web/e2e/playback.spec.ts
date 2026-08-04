@@ -95,27 +95,39 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   expect(firstResolve.body).not.toHaveProperty("preferredSubtitleId");
   await expect(page.getByRole("slider", { name: "Playback position" })).toHaveValue("321");
 
-  await page.getByRole("button", { name: "Audio track" }).click();
-  await page.getByRole("button", { name: /French.*AAC.*2\.0/ }).click();
+  const audioTrigger = page.getByRole("button", { name: "Audio track" });
+  await audioTrigger.click();
+  await expect(audioTrigger).toHaveAttribute("aria-expanded", "true");
+  const englishAudio = page.getByRole("radio", { name: /English.*AAC.*2\.0/ });
+  const frenchAudio = page.getByRole("radio", { name: /French.*AAC.*2\.0/ });
+  await expect(englishAudio).toBeFocused();
+  await expect(englishAudio).toHaveAttribute("aria-checked", "true");
+  await englishAudio.press("ArrowDown");
+  await expect(frenchAudio).toBeFocused();
+  await frenchAudio.press("Enter");
+  await expect(audioTrigger).toBeFocused();
+  await expect(audioTrigger).toHaveAttribute("aria-expanded", "false");
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ titleId: "episode-1", startSeconds: 321, preferredAudioTrack: 2 }));
-  await page.getByRole("button", { name: "Audio track" }).click();
-  await expect(page.getByRole("button", { name: /French.*AAC.*2\.0/ })).toHaveClass(/is-active/);
-  await page.getByRole("button", { name: "Close settings" }).click();
+  await audioTrigger.click();
+  await expect(frenchAudio).toHaveAttribute("aria-checked", "true");
+  await frenchAudio.press("Escape");
+  await expect(audioTrigger).toBeFocused();
+  await expect(audioTrigger).toHaveAttribute("aria-expanded", "false");
 
   const resolvesBeforeSubtitleChanges = rivune.matching("/api/v1/playback/resolve", "POST").length;
   const activeSessionBeforeBurn = `session-${resolvesBeforeSubtitleChanges}`;
   await page.getByRole("button", { name: "Subtitles" }).click();
-  await page.getByRole("button", { name: /FR.*Subtitle track/ }).click();
+  await page.getByRole("radio", { name: /FR.*Subtitle track/ }).click();
   await expect(page.locator("video track[srclang='fr']")).toHaveAttribute("src", "https://fixtures.rivune.test/subtitles-fr.vtt");
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges);
 
   await page.getByRole("button", { name: "Subtitles" }).click();
-  await page.getByRole("button", { name: /ES.*Subtitle track/ }).click();
+  await page.getByRole("radio", { name: /ES.*Subtitle track/ }).click();
   await expect(page.locator("video track")).toHaveCount(0);
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges);
 
   await page.getByRole("button", { name: "Subtitles" }).click();
-  await page.getByRole("button", { name: /FR.*Subtitle track/ }).click();
+  await page.getByRole("radio", { name: /FR.*Subtitle track/ }).click();
   await expect(page.locator("video track[srclang='fr']")).toHaveAttribute("src", "https://fixtures.rivune.test/subtitles-fr.vtt");
   await page.locator("video").evaluate((video) => {
     video.currentTime = 345;
@@ -123,7 +135,7 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
 
   rivune.delayNextPlaybackStop(500);
   await page.getByRole("button", { name: "Subtitles" }).click();
-  await page.getByRole("button", { name: /JA.*Subtitle track/ }).click();
+  await page.getByRole("radio", { name: /JA.*Subtitle track/ }).click();
   await expect.poll(() => rivune.matching(`/api/v1/playback/sessions/${activeSessionBeforeBurn}`, "DELETE").length).toBe(1);
   expect(rivune.matching("/api/v1/playback/resolve", "POST")).toHaveLength(resolvesBeforeSubtitleChanges);
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges + 1);
@@ -139,9 +151,9 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   const burnedSession = `session-${resolvesBeforeSubtitleChanges + 1}`;
   expect(rivune.matching(`/api/v1/playback/sessions/${burnedSession}`, "DELETE")).toHaveLength(0);
   await page.getByRole("button", { name: "Subtitles" }).click();
-  await expect(page.getByRole("button", { name: /JA.*Subtitle track/ })).toHaveClass(/is-active/);
+  await expect(page.getByRole("radio", { name: /JA.*Subtitle track/ })).toHaveAttribute("aria-checked", "true");
   rivune.delayNextPlaybackStop(500);
-  await page.getByRole("button", { name: "Off" }).click();
+  await page.getByRole("radio", { name: "Off" }).click();
   await expect.poll(() => rivune.matching(`/api/v1/playback/sessions/${burnedSession}`, "DELETE").length).toBe(1);
   expect(rivune.matching("/api/v1/playback/resolve", "POST")).toHaveLength(resolvesBeforeSubtitleChanges + 1);
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges + 2);
@@ -156,8 +168,19 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   const replacementSession = `session-${resolvesBeforeSubtitleChanges + 2}`;
   expect(rivune.matching(`/api/v1/playback/sessions/${replacementSession}`, "DELETE")).toHaveLength(0);
   await page.getByRole("button", { name: "Subtitles" }).click();
-  await expect(page.getByRole("button", { name: "Off" })).toHaveClass(/is-active/);
+  await expect(page.getByRole("radio", { name: "Off" })).toHaveAttribute("aria-checked", "true");
   await page.getByRole("button", { name: "Close settings" }).click();
+  const speedTrigger = page.locator('[data-player-action="speed"]');
+  await speedTrigger.click();
+  const normalSpeed = page.getByRole("radio", { name: "1×", exact: true });
+  const fasterSpeed = page.getByRole("radio", { name: "1.25×", exact: true });
+  await expect(normalSpeed).toBeFocused();
+  await expect(normalSpeed).toHaveAttribute("aria-checked", "true");
+  await normalSpeed.press("ArrowRight");
+  await expect(fasterSpeed).toBeFocused();
+  await fasterSpeed.press("Enter");
+  await expect(speedTrigger).toBeFocused();
+  await expect(page.locator("video")).toHaveJSProperty("playbackRate", 1.25);
   expect(rivune.matching(`/api/v1/playback/sessions/${activeSessionBeforeBurn}`, "DELETE")).toHaveLength(1);
   expect(rivune.matching(`/api/v1/playback/sessions/${burnedSession}`, "DELETE")).toHaveLength(1);
   expect(rivune.requests.filter((request) => request.pathname.includes("/playback/sessions/") && request.search.get("fallback") === "1")).toHaveLength(0);
@@ -181,6 +204,28 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   await expect.poll(() => rivune.matching("/api/v1/playback/sources", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ mediaType: "episode", resourceId: "tt9000:1:2" }));
   await expect.poll(() => rivune.matching("/api/v1/playback/prepare", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ sourceRef: "source-tt9000:1:2", startSeconds: 0 }));
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ sourceRef: "source-tt9000:1:2", titleId: "episode-2", startSeconds: 0 }));
+});
+
+test("localized compact player controls do not depend on English accessible labels", async ({ page, rivune }) => {
+  await installDeterministicMedia(page);
+  rivune.setInterfaceLanguage("fr");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Signal Horizon/ }).first().click();
+  await page.getByRole("radio", { name: /Fixture 1080p/ }).click();
+  const playSelectedStream = page.locator('[data-media-action="play-selected-stream"]');
+  await expect(playSelectedStream).toBeVisible();
+  await playSelectedStream.click();
+
+  await expect(page.getByRole("dialog", { name: "Lecture de First Light" })).toBeVisible();
+  const diagnostics = page.locator('[data-player-action="diagnostics"]');
+  const speed = page.locator('[data-player-action="speed"]');
+  await expect(diagnostics).toHaveAttribute("aria-label", "Diagnostic de lecture");
+  await expect(speed).toHaveAttribute("aria-label", "Vitesse de lecture 1x");
+  await expect(diagnostics).toBeHidden();
+  await expect(speed).toBeHidden();
+  await expect(page.locator('[data-player-action="playback"]')).toBeVisible();
+  await expect(page.locator('[data-player-action="close"]')).toBeVisible();
 });
 
 test("server transcodes remain in the existing web video and HLS source pipeline", async ({ page, rivune: _rivune }) => {
@@ -247,10 +292,16 @@ test("server transcodes remain in the existing web video and HLS source pipeline
   await expect(page.getByRole("dialog", { name: "Playing First Light" })).toBeVisible();
   await expect(page.getByText("Audio conversion", { exact: true }).first()).toBeVisible();
   await expect.poll(() => playbackAssetRequests.some((value) => new URL(value).searchParams.get("file") === "audio/master.m3u8")).toBe(true);
-  await page.getByRole("button", { name: "Sources and quality" }).click();
-  const videoTranscode = page.getByRole("button", { name: /Server video conversion.*Video conversion/ });
-  await expect(videoTranscode).toBeVisible();
-  await videoTranscode.click();
+  const sourceTrigger = page.getByRole("button", { name: "Sources and quality" });
+  await sourceTrigger.click();
+  const audioTranscode = page.getByRole("radio", { name: /Server audio conversion.*Audio conversion/ });
+  const videoTranscode = page.getByRole("radio", { name: /Server video conversion.*Video conversion/ });
+  await expect(audioTranscode).toBeFocused();
+  await expect(audioTranscode).toHaveAttribute("aria-checked", "true");
+  await audioTranscode.press("ArrowDown");
+  await expect(videoTranscode).toBeFocused();
+  await videoTranscode.press("Enter");
+  await expect(sourceTrigger).toBeFocused();
   await expect(page.getByText("Video conversion", { exact: true }).first()).toBeVisible();
   await expect.poll(() => playbackAssetRequests.some((value) => new URL(value).searchParams.get("file") === "video/master.m3u8")).toBe(true);
   expect(playbackAssetRequests.some((value) => new URL(value).searchParams.get("fallback") === "1")).toBe(false);
@@ -278,8 +329,12 @@ for (const scenario of [
     await page.getByRole("radio", { name: /Fixture 1080p/ }).click();
     await page.getByRole("button", { name: "Play episode" }).click();
 
-    await expect(page.getByRole("dialog", { name: "Playing First Light" })).toBeVisible();
-    await expect(page.getByText(scenario.message)).toBeVisible();
+    const player = page.getByRole("dialog", { name: "Playing First Light" });
+    await expect(player).toBeVisible();
+    await expect(player).toHaveAttribute("data-player-state", "failed");
+    await expect(player).toHaveAttribute("aria-busy", "false");
+    await expect(page.getByRole("alert")).toContainText(scenario.message);
+    await expect(page.getByRole("button", { name: "Retry" })).toBeFocused();
     await expect(page.getByText("backend detail must not leak")).toHaveCount(0);
   });
 }

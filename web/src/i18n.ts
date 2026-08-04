@@ -1,47 +1,3 @@
-import ar from "./locales/ar";
-import bg from "./locales/bg";
-import ca from "./locales/ca";
-import cs from "./locales/cs";
-import da from "./locales/da";
-import de from "./locales/de";
-import el from "./locales/el";
-import es from "./locales/es";
-import esAR from "./locales/es-AR";
-import esCL from "./locales/es-CL";
-import esCO from "./locales/es-CO";
-import esMX from "./locales/es-MX";
-import esPE from "./locales/es-PE";
-import fa from "./locales/fa";
-import fi from "./locales/fi";
-import fil from "./locales/fil";
-import fr from "./locales/fr";
-import frCA from "./locales/fr-CA";
-import he from "./locales/he";
-import hi from "./locales/hi";
-import hr from "./locales/hr";
-import hu from "./locales/hu";
-import hy from "./locales/hy";
-import id from "./locales/id";
-import it from "./locales/it";
-import ja from "./locales/ja";
-import ko from "./locales/ko";
-import ms from "./locales/ms";
-import nb from "./locales/nb";
-import nl from "./locales/nl";
-import pl from "./locales/pl";
-import ptBR from "./locales/pt-BR";
-import ptPT from "./locales/pt-PT";
-import ro from "./locales/ro";
-import ru from "./locales/ru";
-import sk from "./locales/sk";
-import sr from "./locales/sr";
-import sv from "./locales/sv";
-import th from "./locales/th";
-import tr from "./locales/tr";
-import uk from "./locales/uk";
-import vi from "./locales/vi";
-import zhCN from "./locales/zh-CN";
-import zhTW from "./locales/zh-TW";
 import type { InterfaceLanguage } from "./types";
 
 const en = {
@@ -159,14 +115,8 @@ const en = {
   "nav.search": "Search",
   "nav.library": "Library",
   "nav.calendar": "Calendar",
-  "nav.manage": "Manage",
-  "nav.administration": "Administration",
-  "nav.preferences": "Preferences",
   "nav.main": "Main navigation",
   "nav.mobile": "Mobile navigation",
-  "nav.browse": "Browse",
-  "shell.manage": "Manage",
-  "shell.preferences": "Preferences",
   "shell.connectedTo": "Connected to",
   "shell.connectedToVersion": "Connected to · {version}",
   "shell.serverIdentity": "Connected to {server}, server version {version}",
@@ -384,6 +334,7 @@ const en = {
   "pairing.failureTitle": "Pairing failed",
   "pairing.codeExpiredBody": "This pairing code expired. Generate a new one to continue.",
   "pairing.codeExpiredTitle": "Pairing code expired",
+  "pairing.codeExpiresAt": "Code expires {time}.",
   "pairing.finishFailure": "This device could not finish pairing.",
   "pairing.deviceEyebrow": "New device",
   "pairing.deviceTitle": "Connect this device to Rivune.",
@@ -468,6 +419,10 @@ const en = {
   "admin.tabs.settings.label": "Settings",
   "admin.tabs.settings.description": "Playback and display",
   "admin.tabs.navigationLabel": "Administration sections",
+  "admin.tabs.groups.access": "Access",
+  "admin.tabs.groups.catalog": "Catalog",
+  "admin.tabs.groups.supervision": "Supervision",
+  "admin.tabs.groups.preferences": "Preferences",
   "admin.categories.tab.label": "Categories",
   "admin.categories.tab.description": "Access boundaries",
   "admin.devices.tab.label": "Devices",
@@ -565,6 +520,11 @@ const en = {
   "admin.devices.move.successOne": "{name} was moved.",
   "admin.devices.move.successMany": "{count} devices were moved.",
   "admin.devices.move.error": "The devices could not be moved.",
+  "admin.devices.delete.title": "Delete {name}?",
+  "admin.devices.delete.description": "This permanently deletes the approved device and all of its active sessions.",
+  "admin.devices.delete.confirm": "Delete device",
+  "admin.devices.delete.success": "{name} was deleted.",
+  "admin.devices.delete.error": "The device could not be deleted. Try again.",
   "admin.devices.errors.load": "Devices could not be loaded.",
   "admin.workspace.accessGlobal": "Global administrator",
   "admin.header.eyebrowServer": "Server operations",
@@ -1331,56 +1291,56 @@ const en = {
 export type TranslationKey = keyof typeof en;
 export type TranslationCatalog = Record<TranslationKey, string>;
 type Replacements = Record<string, string | number>;
+type LocaleModule = { default: TranslationCatalog };
 
-const catalogs = {
-  en,
-  fr,
-  "fr-CA": frCA,
-  es,
-  "es-MX": esMX,
-  "es-AR": esAR,
-  "es-CL": esCL,
-  "es-CO": esCO,
-  "es-PE": esPE,
-  it,
-  de,
-  ru,
-  "pt-PT": ptPT,
-  "pt-BR": ptBR,
-  ar,
-  ja,
-  ko,
-  "zh-CN": zhCN,
-  "zh-TW": zhTW,
-  pl,
-  hy,
-  nl,
-  sv,
-  da,
-  fi,
-  nb,
-  tr,
-  uk,
-  cs,
-  sk,
-  ro,
-  el,
-  he,
-  hi,
-  id,
-  vi,
-  th,
-  hu,
-  bg,
-  hr,
-  sr,
-  ms,
-  ca,
-  fa,
-  fil,
-} satisfies Record<InterfaceLanguage, TranslationCatalog>;
+export type Locale = InterfaceLanguage;
 
-export type Locale = keyof typeof catalogs;
+const catalogLoaders = {
+  ar: () => import("./locales/ar"),
+  bg: () => import("./locales/bg"),
+  ca: () => import("./locales/ca"),
+  cs: () => import("./locales/cs"),
+  da: () => import("./locales/da"),
+  de: () => import("./locales/de"),
+  el: () => import("./locales/el"),
+  es: () => import("./locales/es"),
+  "es-AR": () => import("./locales/es-AR"),
+  "es-CL": () => import("./locales/es-CL"),
+  "es-CO": () => import("./locales/es-CO"),
+  "es-MX": () => import("./locales/es-MX"),
+  "es-PE": () => import("./locales/es-PE"),
+  fa: () => import("./locales/fa"),
+  fi: () => import("./locales/fi"),
+  fil: () => import("./locales/fil"),
+  fr: () => import("./locales/fr"),
+  "fr-CA": () => import("./locales/fr-CA"),
+  he: () => import("./locales/he"),
+  hi: () => import("./locales/hi"),
+  hr: () => import("./locales/hr"),
+  hu: () => import("./locales/hu"),
+  hy: () => import("./locales/hy"),
+  id: () => import("./locales/id"),
+  it: () => import("./locales/it"),
+  ja: () => import("./locales/ja"),
+  ko: () => import("./locales/ko"),
+  ms: () => import("./locales/ms"),
+  nb: () => import("./locales/nb"),
+  nl: () => import("./locales/nl"),
+  pl: () => import("./locales/pl"),
+  "pt-BR": () => import("./locales/pt-BR"),
+  "pt-PT": () => import("./locales/pt-PT"),
+  ro: () => import("./locales/ro"),
+  ru: () => import("./locales/ru"),
+  sk: () => import("./locales/sk"),
+  sr: () => import("./locales/sr"),
+  sv: () => import("./locales/sv"),
+  th: () => import("./locales/th"),
+  tr: () => import("./locales/tr"),
+  uk: () => import("./locales/uk"),
+  vi: () => import("./locales/vi"),
+  "zh-CN": () => import("./locales/zh-CN"),
+  "zh-TW": () => import("./locales/zh-TW"),
+} satisfies Record<Exclude<Locale, "en">, () => Promise<LocaleModule>>;
 export const interfaceLanguages = [
   { value: "en", label: "English" },
   { value: "fr", label: "Français" },
@@ -1429,15 +1389,21 @@ export const interfaceLanguages = [
   { value: "fil", label: "Filipino" },
 ] as const satisfies ReadonlyArray<{ value: Locale; label: string }>;
 
+const supportedLocales = interfaceLanguages.map(({ value }) => value);
+const loadedCatalogs = new Map<Locale, TranslationCatalog>([["en", en]]);
+const pendingCatalogs = new Map<Locale, Promise<TranslationCatalog>>();
+let activeCatalog: TranslationCatalog = en;
+let localeRequest = 0;
+
 function supportedLocale(candidate: string): Locale | undefined {
   const normalized = candidate.trim().toLowerCase();
-  const exact = (Object.keys(catalogs) as Locale[]).find((value) => value.toLowerCase() === normalized);
+  const exact = supportedLocales.find((value) => value.toLowerCase() === normalized);
   if (normalized === "zh-hant" || normalized.startsWith("zh-hant-") || normalized === "zh-hk" || normalized.startsWith("zh-hk-") || normalized === "zh-mo" || normalized.startsWith("zh-mo-")) return "zh-TW";
   if (exact) return exact;
   const language = normalized.split("-")[0];
   if (language === "pt") return "pt-PT";
   if (language === "zh") return "zh-CN";
-  return (Object.keys(catalogs) as Locale[]).find((value) => value.toLowerCase() === language);
+  return supportedLocales.find((value) => value.toLowerCase() === language);
 }
 
 function resolveLocale(candidates: readonly string[] = typeof navigator === "undefined" ? [] : navigator.languages): Locale {
@@ -1448,7 +1414,27 @@ function resolveLocale(candidates: readonly string[] = typeof navigator === "und
   return "en";
 }
 
-export let locale = resolveLocale();
+function loadCatalog(target: Locale): Promise<TranslationCatalog> {
+  const loaded = loadedCatalogs.get(target);
+  if (loaded) return Promise.resolve(loaded);
+  if (target === "en") return Promise.resolve(en);
+  const pending = pendingCatalogs.get(target);
+  if (pending) return pending;
+  const promise = catalogLoaders[target]()
+    .then((module) => {
+      loadedCatalogs.set(target, module.default);
+      pendingCatalogs.delete(target);
+      return module.default;
+    })
+    .catch((cause: unknown) => {
+      pendingCatalogs.delete(target);
+      throw cause;
+    });
+  pendingCatalogs.set(target, promise);
+  return promise;
+}
+
+export let locale: Locale = "en";
 
 function applyDocumentLocale(): void {
   if (typeof document === "undefined") return;
@@ -1456,14 +1442,26 @@ function applyDocumentLocale(): void {
   document.documentElement.dir = locale === "ar" || locale === "he" || locale === "fa" ? "rtl" : "ltr";
 }
 
-export function setLocale(candidate?: string | null): Locale {
-  locale = candidate ? supportedLocale(candidate) ?? "en" : resolveLocale();
+export async function setLocale(candidate?: string | null): Promise<Locale> {
+  const requested = candidate ? supportedLocale(candidate) ?? "en" : resolveLocale();
+  const request = ++localeRequest;
+  let nextLocale = requested;
+  let nextCatalog: TranslationCatalog;
+  try {
+    nextCatalog = await loadCatalog(requested);
+  } catch {
+    nextLocale = "en";
+    nextCatalog = en;
+  }
+  if (request !== localeRequest) return locale;
+  locale = nextLocale;
+  activeCatalog = nextCatalog;
   applyDocumentLocale();
   return locale;
 }
 
 export function translate(key: TranslationKey, replacements?: Replacements): string {
-  let value = catalogs[locale][key] ?? en[key];
+  let value = activeCatalog[key] ?? en[key];
   if (!replacements) return value;
   for (const [name, replacement] of Object.entries(replacements)) {
     value = value.replaceAll(`{${name}}`, String(replacement));

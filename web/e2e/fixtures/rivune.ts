@@ -55,6 +55,15 @@ type Profile = {
   accessible: boolean;
   avatar: { kind: "preset"; presetId: string; url: string };
 };
+type DeviceAuthorizationFixture = {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete: string;
+  expiresAt: string;
+  intervalSeconds: number;
+};
+
 
 type ManagedDevice = {
   id: string;
@@ -304,6 +313,15 @@ export class RivuneHarness {
   private nextProfileSequence = 3;
   private nextDeviceSequence = 3;
   private readonly approvedDeviceCodes = new Map<string, { categoryId: string; deviceName?: string; internalNote?: string }>();
+  private deviceAuthorization: DeviceAuthorizationFixture = {
+    deviceCode: "fixture-device-code",
+    userCode: "BCDF-GHJK",
+    verificationUri: "/pair",
+    verificationUriComplete: "/pair?code=BCDF-GHJK",
+    expiresAt,
+    intervalSeconds: 60,
+  };
+  private deviceAuthorizationFailure: { code: string; status: number } | null = null;
   private maintenance: { enabled: boolean; message: string | null } = { enabled: false, message: null };
   private instanceSettings: Record<string, unknown> = { allowTranscoding: true, maximumCastMembers: 20 };
   private readonly profileSettings = new Map<string, Record<string, unknown>>([
@@ -322,6 +340,7 @@ export class RivuneHarness {
   private readonly demoProgress = new Map<string, { positionSeconds: number; durationSeconds: number; completed: boolean; version: number }>();
   private readonly searchResponses = new Map<string, { body: unknown; status: number; delay: number }>();
   private readonly deviceResponses = new Map<string, { status: number; delay: number }>();
+  private readonly deviceDeletionFailures = new Map<string, number>();
   private readonly accountRefreshResponses: Array<{ status: number; delay: number }> = [];
   private readonly profileRefreshAfterSelection = new Map<string, string>();
   private readonly hiddenCategoryCounts = new Set<string>();
@@ -383,6 +402,16 @@ export class RivuneHarness {
       sessionStorage.removeItem("rivune.access");
     });
   }
+  async configureUnpaired(page: Page) {
+    this.setupRequired = false;
+    this.demoAvailable = false;
+    await page.evaluate(() => {
+      localStorage.removeItem("rivune.access");
+      localStorage.removeItem("rivune.refresh");
+      sessionStorage.removeItem("rivune.access");
+    });
+  }
+
 
   completeSetup() {
     this.setupRequired = false;
@@ -419,6 +448,37 @@ export class RivuneHarness {
     if (index < 0) throw new Error(`Unknown fixture profile ${profileId}`);
     this.profiles[index] = { ...this.profiles[index]!, categoryId, category: categoryRef(category) };
   }
+  setProfileAvailability(profileId: string, availability: Partial<Pick<Profile, "enabled" | "accessible" | "availableFrom" | "availableUntil" | "accessStartTime" | "accessEndTime">>) {
+    const index = this.profiles.findIndex((candidate) => candidate.id === profileId);
+    if (index < 0) throw new Error(`Unknown fixture profile ${profileId}`);
+    this.profiles[index] = { ...this.profiles[index]!, ...availability };
+  }
+
+  seedProfiles(count: number, categoryId = CATEGORY_IDS.household) {
+    const category = this.categoryReference(categoryId);
+    if (!category) throw new Error(`Unknown fixture category ${categoryId}`);
+    for (let index = 0; index < count; index += 1) {
+      const sequence = this.profiles.length + 1;
+      this.profiles.push({
+        ...profileFixtures[1]!,
+        id: `seed-profile-${sequence}`,
+        name: `Viewer ${sequence}`,
+        categoryId,
+        category,
+        accessible: true,
+        avatar: { ...profileFixtures[1]!.avatar },
+      });
+    }
+  }
+
+  setDeviceAuthorization(authorization: Partial<DeviceAuthorizationFixture>) {
+    this.deviceAuthorization = { ...this.deviceAuthorization, ...authorization };
+  }
+
+  setDeviceAuthorizationFailure(code: string | null, status = 400) {
+    this.deviceAuthorizationFailure = code ? { code, status } : null;
+  }
+
 
   setInterfaceLanguage(language: string) {
     this.instanceSettings = { ...this.instanceSettings, interfaceLanguage: language };
@@ -457,6 +517,10 @@ export class RivuneHarness {
   }
   setDeviceResponse(categoryId: string | undefined, options: { status?: number; delay?: number } = {}) {
     this.deviceResponses.set(categoryId ?? "all", { status: options.status ?? 200, delay: options.delay ?? 0 });
+  }
+
+  failNextDeviceDeletion(deviceId: string, status = 503) {
+    this.deviceDeletionFailures.set(deviceId, status);
   }
 
   failNextAccountRefresh(delay = 0) {
@@ -710,11 +774,15 @@ export class RivuneHarness {
       return;
     }
     if (path === "/auth/device-code" && request.method() === "POST") {
-      await json(route, { deviceCode: "fixture-device-code", userCode: "BCDF-GHJK", verificationUri: "/pair", verificationUriComplete: "/pair?code=BCDF-GHJK", expiresAt, intervalSeconds: 60 });
+      await json(route, this.deviceAuthorization);
       return;
     }
     if (path === "/auth/device-code/token" && request.method() === "POST") {
-      const approval = this.approvedDeviceCodes.get("BCDF-GHJK");
+      if (this.deviceAuthorizationFailure) {
+        await json(route, { error: { code: this.deviceAuthorizationFailure.code, message: "Device authorization failed" } }, this.deviceAuthorizationFailure.status);
+        return;
+      }
+      const approval = this.approvedDeviceCodes.get(this.deviceAuthorization.userCode);
       if (!approval) {
         await json(route, { error: { code: "authorization_pending", message: "Authorization is pending" } }, 428);
         return;
@@ -912,6 +980,20 @@ export class RivuneHarness {
       return;
     }
     const deviceResource = path.match(/^\/devices\/([^/]+)$/);
+    if (deviceResource && request.method() === "DELETE") {
+      if (this.authorizationScope !== "global_admin") { await json(route, { error: { code: "forbidden", message: "Global administration is required" } }, 403); return; }
+      const failureStatus = this.deviceDeletionFailures.get(deviceResource[1]!);
+      if (failureStatus !== undefined) {
+        this.deviceDeletionFailures.delete(deviceResource[1]!);
+        await json(route, { error: { code: "device_delete_failed", message: "The device could not be deleted" } }, failureStatus);
+        return;
+      }
+      const index = this.devices.findIndex((device) => device.id === deviceResource[1]);
+      if (index < 0) { await json(route, { error: { code: "not_found", message: "Device not found" } }, 404); return; }
+      this.devices.splice(index, 1);
+      await route.fulfill({ status: 204 });
+      return;
+    }
     if (deviceResource && request.method() === "PATCH") {
       if (this.authorizationScope !== "global_admin") { await json(route, { error: { code: "forbidden", message: "Global administration is required" } }, 403); return; }
       const index = this.devices.findIndex((device) => device.id === deviceResource[1]);
@@ -1142,6 +1224,24 @@ export class RivuneHarness {
       const titleId = decodeURIComponent(libraryMutation[1]);
       this.libraryItems = this.libraryItems.filter((item) => item.titleId !== titleId);
       await route.fulfill({ status: 204 });
+      return;
+    }
+    const watchedMutation = path.match(/^\/titles\/([^/]+)\/watched$/);
+    if (watchedMutation && (request.method() === "POST" || request.method() === "DELETE")) {
+      const titleId = decodeURIComponent(watchedMutation[1]);
+      const watched = request.method() === "POST";
+      const expectedVersion = watched
+        ? Number((body as { expectedVersion?: number } | undefined)?.expectedVersion ?? 0)
+        : Number(url.searchParams.get("expectedVersion") ?? 0);
+      await json(route, {
+        titleId,
+        mediaType: titleId.startsWith("episode-") ? "episode" : "movie",
+        positionSeconds: watched ? 1800 : 0,
+        durationSeconds: 1800,
+        completed: watched,
+        version: expectedVersion + 1,
+        updatedAt: createdAt,
+      });
       return;
     }
     if (path.startsWith("/progress/") && request.method() === "GET") {

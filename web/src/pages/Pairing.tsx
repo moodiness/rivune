@@ -1,12 +1,20 @@
+import { QRCodeSVG } from "qrcode.react";
 import { ArrowRight, CheckCircle2, FolderKey, KeyRound, LoaderCircle, NotebookPen, RefreshCw, ShieldCheck, Smartphone, Tag } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
 import { Button, Notice, RivuneMark } from "../components";
 import { notifyError, notifyErrorMessage } from "../notifications";
-import { translate as t } from "../i18n";
+import { locale, translate as t } from "../i18n";
 import type { AccessCategory, DeviceAuthorization } from "../types";
 import { AuthBackdrop, LoginPage } from "./Onboarding";
+
+function formatPairingExpiration(expiresAt: string): string | null {
+  const expiration = new Date(expiresAt);
+  if (Number.isNaN(expiration.getTime())) return null;
+  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(expiration);
+}
+
 
 export function DevicePairingPage() {
   const { discovery, completeDeviceAuthorization } = useAuth();
@@ -14,40 +22,76 @@ export function DevicePairingPage() {
   const [ownerSignIn, setOwnerSignIn] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const mountedRef = useRef(false);
+  const beginGenerationRef = useRef(0);
 
   const begin = useCallback(async () => {
+    const generation = ++beginGenerationRef.current;
     setLoading(true);
+    setAuthorization(null);
     setError("");
     try {
-      setAuthorization(await api.beginDeviceAuthorization());
+      const nextAuthorization = await api.beginDeviceAuthorization();
+      if (!mountedRef.current || beginGenerationRef.current !== generation) return;
+      setAuthorization(nextAuthorization);
     } catch (cause) {
+      if (!mountedRef.current || beginGenerationRef.current !== generation) return;
       setError(notifyError(cause, t("pairing.startFailure"), t("pairing.failureTitle")));
     } finally {
-      setLoading(false);
+      if (mountedRef.current && beginGenerationRef.current === generation) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { void begin(); }, [begin]);
+  useEffect(() => {
+    mountedRef.current = true;
+    const timer = window.setTimeout(() => { void begin(); }, 0);
+    return () => {
+      mountedRef.current = false;
+      beginGenerationRef.current += 1;
+      window.clearTimeout(timer);
+    };
+  }, [begin]);
 
   useEffect(() => {
     if (!authorization) return;
     let cancelled = false;
     let timer: number | undefined;
+    let expirationTimer: number | undefined;
+    let pollIntervalSeconds = authorization.intervalSeconds;
+    const expire = () => {
+      if (cancelled) return;
+      setAuthorization(null);
+      setError(notifyErrorMessage(t("pairing.codeExpiredBody"), t("pairing.codeExpiredTitle")));
+    };
+    const expiresAt = new Date(authorization.expiresAt).getTime();
+    const remaining = expiresAt - Date.now();
+    if (Number.isFinite(expiresAt)) {
+      if (remaining <= 0) {
+        expire();
+        return;
+      }
+      if (remaining <= 2_147_483_647) expirationTimer = window.setTimeout(expire, remaining);
+    }
     const poll = async () => {
+      if (Number.isFinite(expiresAt) && Date.now() >= expiresAt) {
+        expire();
+        return;
+      }
       try {
         await completeDeviceAuthorization(authorization.deviceCode);
       } catch (cause) {
         if (cancelled) return;
         if (cause instanceof APIError && cause.code === "authorization_pending") {
-          timer = window.setTimeout(poll, authorization.intervalSeconds * 1000);
+          timer = window.setTimeout(poll, pollIntervalSeconds * 1000);
           return;
         }
         if (cause instanceof APIError && cause.code === "slow_down") {
-          timer = window.setTimeout(poll, (authorization.intervalSeconds + 5) * 1000);
+          pollIntervalSeconds += 5;
+          timer = window.setTimeout(poll, pollIntervalSeconds * 1000);
           return;
         }
+        setAuthorization(null);
         if (cause instanceof APIError && cause.code === "expired_device_code") {
-          setAuthorization(null);
           setError(notifyErrorMessage(t("pairing.codeExpiredBody"), t("pairing.codeExpiredTitle")));
           return;
         }
@@ -58,10 +102,13 @@ export function DevicePairingPage() {
     return () => {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
+      if (expirationTimer !== undefined) window.clearTimeout(expirationTimer);
     };
   }, [authorization, completeDeviceAuthorization]);
 
-  const pairingURL = new URL("/pair", window.location.origin).toString();
+  const verificationURL = authorization ? new URL(authorization.verificationUri, window.location.origin).toString() : null;
+  const verificationCompleteURL = authorization ? new URL(authorization.verificationUriComplete, window.location.origin).toString() : null;
+  const expiration = authorization ? formatPairingExpiration(authorization.expiresAt) : null;
 
   if (ownerSignIn) return <LoginPage onBack={() => setOwnerSignIn(false)} />;
 
@@ -76,12 +123,16 @@ export function DevicePairingPage() {
         <p>{t("pairing.deviceBody")}</p>
       </div>
       {error && <Notice>{error}</Notice>}
-      {loading ? <div className="pairing-card__loading"><LoaderCircle className="spin" /><span>{t("pairing.creatingCode")}</span></div>
-        : authorization ? <div className="pairing-card__code">
+      {loading ? <div className="pairing-card__loading" role="status"><LoaderCircle className="spin" /><span>{t("pairing.creatingCode")}</span></div>
+        : authorization && verificationURL && verificationCompleteURL ? <div className="pairing-card__code">
           <span>{t("pairing.codeLabel")}</span>
-          <strong>{authorization.userCode}</strong>
+          <strong dir="ltr">{authorization.userCode}</strong>
+          <div className="pairing-card__qr">
+            <QRCodeSVG value={verificationCompleteURL} level="M" marginSize={4} title={t("pairing.codeLabel")} role="img" aria-label={t("pairing.codeLabel")} />
+          </div>
           <p>{t("pairing.openApprovalPage")}</p>
-          <code>{pairingURL}</code>
+          <a href={verificationURL} dir="ltr">{verificationURL}</a>
+          {expiration && <time dateTime={authorization.expiresAt}>{t("pairing.codeExpiresAt", { time: expiration })}</time>}
           <small>{t("pairing.deviceInstructions")}</small>
         </div>
           : <Button onClick={() => void begin()}><RefreshCw size={18} /> {t("pairing.generateCode")}</Button>}
@@ -199,14 +250,14 @@ export function PairApprovalPage() {
       </> : !(isGlobalAdmin || activeProfile?.canManage) ? <>
         <div className="pairing-card__icon"><ShieldCheck /></div>
         <div className="auth-card__header"><span>{t("pairing.managerRequiredEyebrow")}</span><h1>{t("pairing.managerRequiredTitle")}</h1><p>{t("pairing.managerRequiredBody")}</p></div>
-        {error && <div role="alert"><Notice>{error}</Notice></div>}
+        {error && <Notice>{error}</Notice>}
         <Button onClick={() => void leaveProfile().catch((cause) => setError(notifyError(cause, t("profiles.chooserFailure"))))}>{t("pairing.chooseAnotherProfile")}</Button>
       </> : <>
         <div className="pairing-card__icon"><Smartphone /></div>
         <div className="auth-card__header"><span>{t("pairing.approvalEyebrow")}</span><h1>{t("pairing.approvalCategoryTitle")}</h1><p>{t("pairing.approvalBody")}</p></div>
         <form className="form-stack" onSubmit={submit}>
-          {error && <div role="alert"><Notice>{error}</Notice></div>}
-          <label className="field"><span>{t("pairing.codeLabel")}</span><div><KeyRound size={18} /><input value={formattedCode} onChange={(event) => setUserCode(event.target.value)} autoComplete="one-time-code" inputMode="text" placeholder={t("pairing.codePlaceholder")} minLength={9} maxLength={9} pattern="[A-Z2-9]{4}-[A-Z2-9]{4}" autoFocus required disabled={loading} /></div></label>
+          {error && <Notice>{error}</Notice>}
+          <label className="field"><span>{t("pairing.codeLabel")}</span><div><KeyRound size={18} /><input value={formattedCode} onChange={(event) => setUserCode(event.target.value)} autoComplete="one-time-code" inputMode="text" placeholder={t("pairing.codePlaceholder")} minLength={9} maxLength={9} pattern="[A-Z2-9]{4}-[A-Z2-9]{4}" dir="ltr" autoFocus required disabled={loading} /></div></label>
 
           {isGlobalAdmin ? <>
             <label className="field">
@@ -218,13 +269,13 @@ export function PairApprovalPage() {
               <small id="pairing-category-hint">{t("pairing.categoryAssignmentHint")}</small>
             </label>
             {categoryState === "loading" && <div className="pairing-card__category-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={17} /><span>{t("pairing.categoryLoading")}</span></div>}
-            {categoryState === "ready" && categories.length === 0 && <div role="status"><Notice tone="warning">{t("pairing.categoryEmpty")}</Notice></div>}
-            {(categoryState === "error" || categoryState === "forbidden") && <div className="pairing-card__category-state" role="alert"><Notice>{categoryError}{categoryState === "error" && <Button type="button" variant="ghost" onClick={() => void loadCategories()}><RefreshCw size={16} /> {t("common.actions.tryAgain")}</Button>}</Notice></div>}
+            {categoryState === "ready" && categories.length === 0 && <Notice tone="warning">{t("pairing.categoryEmpty")}</Notice>}
+            {(categoryState === "error" || categoryState === "forbidden") && <div className="pairing-card__category-state"><Notice>{categoryError}{categoryState === "error" && <Button type="button" variant="ghost" onClick={() => void loadCategories()}><RefreshCw size={16} /> {t("common.actions.tryAgain")}</Button>}</Notice></div>}
           </> : sessionCategory ? <div className="field pairing-card__category" aria-describedby="pairing-category-hint">
             <span>{t("pairing.assignedCategory")}</span>
             <div className="pairing-card__category-badge"><FolderKey size={17} /><strong>{sessionCategory.name}</strong></div>
             <small id="pairing-category-hint">{t("pairing.categoryAssignmentHint")}</small>
-          </div> : <div role="alert"><Notice>{t("pairing.categoryUnavailable")}</Notice></div>}
+          </div> : <Notice>{t("pairing.categoryUnavailable")}</Notice>}
 
           <label className="field"><span>{t("pairing.deviceNameLabel")}</span><div><Tag size={18} /><input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} maxLength={120} placeholder={t("pairing.deviceNamePlaceholder")} disabled={loading} /></div></label>
           <label className="field pairing-card__note"><span>{t("pairing.internalNoteLabel")}</span><div><NotebookPen size={18} /><textarea value={internalNote} onChange={(event) => setInternalNote(event.target.value)} maxLength={500} rows={3} placeholder={t("pairing.internalNotePlaceholder")} disabled={loading} /></div><small>{t("pairing.internalNoteHint")}</small></label>

@@ -2,23 +2,31 @@ import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleS
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
-import { AddTile, Button, ConfirmDialog, EmptyState, IconButton, Modal, Notice, Skeleton } from "../components";
-import { interfaceLanguages, translate, type TranslationKey } from "../i18n";
+import { AddTile, Button, ConfirmDialog, EmptyState, handleDirectionalFocus, IconButton, Modal, Notice, Skeleton } from "../components";
+import { interfaceLanguages, locale, translate, type TranslationKey } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
 import type { AccessCategory, AddonManifest, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstalledAddon, InterfaceLanguage, MaintenanceSettings, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
 
 type AdminTab = "categories" | "profiles" | "devices" | "addons" | "collections" | "activity" | "operations" | "settings";
+type AdminTabGroup = "access" | "catalog" | "supervision" | "preferences";
 
-const tabs: Array<{ id: AdminTab; labelKey: TranslationKey; descriptionKey: TranslationKey; icon: typeof Users; globalOnly?: boolean }> = [
-  { id: "categories", labelKey: "admin.categories.tab.label", descriptionKey: "admin.categories.tab.description", icon: Palette, globalOnly: true },
-  { id: "profiles", labelKey: "admin.tabs.profiles.label", descriptionKey: "admin.tabs.profiles.description", icon: Users },
-  { id: "devices", labelKey: "admin.devices.tab.label", descriptionKey: "admin.devices.tab.description", icon: MonitorSmartphone, globalOnly: true },
-  { id: "addons", labelKey: "admin.tabs.addons.label", descriptionKey: "admin.tabs.addons.description", icon: Boxes, globalOnly: true },
-  { id: "collections", labelKey: "admin.tabs.collections.label", descriptionKey: "admin.tabs.collections.description", icon: Layers3, globalOnly: true },
-  { id: "activity", labelKey: "admin.tabs.activity.label", descriptionKey: "admin.tabs.activity.description", icon: Activity, globalOnly: true },
-  { id: "operations", labelKey: "admin.tabs.operations.label", descriptionKey: "admin.tabs.operations.description", icon: Wrench, globalOnly: true },
-  { id: "settings", labelKey: "admin.tabs.settings.label", descriptionKey: "admin.tabs.settings.description", icon: Settings2 },
+const adminTabGroups: Array<{ id: AdminTabGroup; labelKey: TranslationKey }> = [
+  { id: "access", labelKey: "admin.tabs.groups.access" },
+  { id: "catalog", labelKey: "admin.tabs.groups.catalog" },
+  { id: "supervision", labelKey: "admin.tabs.groups.supervision" },
+  { id: "preferences", labelKey: "admin.tabs.groups.preferences" },
+];
+
+const tabs: Array<{ id: AdminTab; group: AdminTabGroup; labelKey: TranslationKey; descriptionKey: TranslationKey; icon: typeof Users; globalOnly?: boolean }> = [
+  { id: "categories", group: "access", labelKey: "admin.categories.tab.label", descriptionKey: "admin.categories.tab.description", icon: Palette, globalOnly: true },
+  { id: "profiles", group: "access", labelKey: "admin.tabs.profiles.label", descriptionKey: "admin.tabs.profiles.description", icon: Users },
+  { id: "devices", group: "access", labelKey: "admin.devices.tab.label", descriptionKey: "admin.devices.tab.description", icon: MonitorSmartphone, globalOnly: true },
+  { id: "addons", group: "catalog", labelKey: "admin.tabs.addons.label", descriptionKey: "admin.tabs.addons.description", icon: Boxes, globalOnly: true },
+  { id: "collections", group: "catalog", labelKey: "admin.tabs.collections.label", descriptionKey: "admin.tabs.collections.description", icon: Layers3, globalOnly: true },
+  { id: "activity", group: "supervision", labelKey: "admin.tabs.activity.label", descriptionKey: "admin.tabs.activity.description", icon: Activity, globalOnly: true },
+  { id: "operations", group: "supervision", labelKey: "admin.tabs.operations.label", descriptionKey: "admin.tabs.operations.description", icon: Wrench, globalOnly: true },
+  { id: "settings", group: "preferences", labelKey: "admin.tabs.settings.label", descriptionKey: "admin.tabs.settings.description", icon: Settings2 },
 ];
 
 type SettingsSection = "appearance" | "playback" | "transcoding" | "language" | "subtitles" | "connections";
@@ -70,24 +78,32 @@ export function AdminPage() {
   const { account, activeProfile } = useAuth();
   const canManage = Boolean(activeProfile?.canManage);
   const canManageGlobally = canManage && account?.session.authorizationScope === "global_admin";
-  const visibleTabs = tabs.filter((item) => !item.globalOnly || canManageGlobally);
+  const visibleTabs = canManage ? tabs.filter((item) => !item.globalOnly || canManageGlobally) : tabs.filter((item) => item.id === "settings");
+  const fallbackTab: AdminTab = canManage ? "profiles" : "settings";
   const [tab, setTab] = useState<AdminTab>(() => {
-    if (!canManage) return "settings";
     const requested = requestedAdminTab();
-    return requested && visibleTabs.some((item) => item.id === requested) ? requested : "profiles";
+    return requested && visibleTabs.some((item) => item.id === requested) ? requested : fallbackTab;
   });
-  const selectedTab = !canManage ? "settings" : visibleTabs.some((item) => item.id === tab) ? tab : "profiles";
+  const selectedTab = visibleTabs.some((item) => item.id === tab) ? tab : fallbackTab;
 
   useEffect(() => {
-    if (!canManage) setTab("settings");
-    else if (!tabs.some((item) => item.id === tab && (!item.globalOnly || canManageGlobally))) setTab("profiles");
-  }, [canManage, canManageGlobally, tab]);
+    const requested = requestedAdminTab();
+    const requestedIsVisible = requested !== null && visibleTabs.some((item) => item.id === requested);
+    if (!visibleTabs.some((item) => item.id === tab)) setTab(fallbackTab);
+    if (requested && !requestedIsVisible) updateAdminRoute(fallbackTab, undefined, true);
+  }, [canManage, canManageGlobally, fallbackTab, tab]);
 
   useEffect(() => {
     const syncRoute = () => {
       const requested = requestedAdminTab();
-      if (!canManage) setTab("settings");
-      else if (requested && tabs.some((item) => item.id === requested && (!item.globalOnly || canManageGlobally))) setTab(requested);
+      if (requested && visibleTabs.some((item) => item.id === requested)) {
+        setTab(requested);
+        return;
+      }
+      if (requested) {
+        setTab(fallbackTab);
+        updateAdminRoute(fallbackTab, undefined, true);
+      }
     };
     window.addEventListener("hashchange", syncRoute);
     window.addEventListener("popstate", syncRoute);
@@ -95,12 +111,13 @@ export function AdminPage() {
       window.removeEventListener("hashchange", syncRoute);
       window.removeEventListener("popstate", syncRoute);
     };
-  }, [canManage, canManageGlobally]);
+  }, [canManage, canManageGlobally, fallbackTab]);
 
   function navigateTab(next: AdminTab) {
     setTab(next);
     updateAdminRoute(next, next === "settings" ? requestedSettingsSection() ?? undefined : undefined);
   }
+
 
   return <div className="standard-page admin-page page-enter">
     <header className="admin-page__header">
@@ -115,11 +132,21 @@ export function AdminPage() {
       </div>
     </header>
     <div className={`admin-layout ${canManage ? "" : "admin-layout--preferences"}`}>
-      {canManage && <nav className="admin-tabs" aria-label={translate("admin.tabs.navigationLabel")}>{visibleTabs.map((item) => {
-        const Icon = item.icon;
-        const label = translate(item.labelKey);
-        const description = translate(item.descriptionKey);
-        return <button type="button" aria-current={selectedTab === item.id ? "page" : undefined} key={item.id} className={selectedTab === item.id ? "is-active" : ""} onClick={() => navigateTab(item.id)}><span><Icon size={20} aria-hidden="true" /></span><div><strong>{label}</strong><small>{description}</small></div><ChevronDown size={17} aria-hidden="true" /></button>;
+      {canManage && <nav className="admin-tabs" aria-label={translate("admin.tabs.navigationLabel")} onKeyDown={(event) => {
+        const horizontal = getComputedStyle(event.currentTarget).gridAutoFlow === "column";
+        handleDirectionalFocus(event, { orientation: horizontal ? "horizontal" : "vertical", wrap: true });
+      }}>{adminTabGroups.map((group) => {
+        const groupTabs = visibleTabs.filter((item) => item.group === group.id);
+        if (groupTabs.length === 0) return null;
+        return <div className="admin-tabs__group" data-admin-tab-group={group.id} key={group.id}>
+          <span className="admin-tabs__label">{translate(group.labelKey)}</span>
+          <div className="admin-tabs__items">{groupTabs.map((item) => {
+            const Icon = item.icon;
+            const label = translate(item.labelKey);
+            const description = translate(item.descriptionKey);
+            return <button type="button" data-admin-tab={item.id} aria-current={selectedTab === item.id ? "page" : undefined} key={item.id} className={selectedTab === item.id ? "is-active" : ""} onClick={() => navigateTab(item.id)}><span><Icon size={20} aria-hidden="true" /></span><div><strong>{label}</strong><small>{description}</small></div><ChevronDown size={17} aria-hidden="true" /></button>;
+          })}</div>
+        </div>;
       })}</nav>}
       <section className="admin-panel">
         {selectedTab === "categories" ? <CategoriesAdmin />
@@ -158,7 +185,6 @@ function CategoriesAdmin() {
   const [categories, setCategories] = useState<AccessCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
-  const [status, setStatus] = useState("");
   const [editor, setEditor] = useState<AccessCategory | "new" | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -195,7 +221,6 @@ function CategoriesAdmin() {
     setColor(category === "new" ? "" : category.color ?? "");
     setIcon(category === "new" ? "" : category.icon ?? "");
     setEditorError("");
-    setStatus("");
   }
 
   async function saveCategory(event: FormEvent) {
@@ -227,7 +252,6 @@ function CategoriesAdmin() {
 
     setCategories((current) => editor === "new" ? [...current, saved] : current.map((category) => category.id === saved.id ? saved : category));
     const message = translate(editor === "new" ? "admin.categories.notifications.created" : "admin.categories.notifications.saved", { name: saved.name });
-    setStatus(message);
     notifySuccess(message);
     setEditor(null);
     setSaving(false);
@@ -241,10 +265,9 @@ function CategoriesAdmin() {
     [reordered[index], reordered[destination]] = [reordered[destination]!, reordered[index]!];
     setReordering(true);
     setLoadError("");
-    setStatus("");
     try {
       setCategories(await api.reorderCategories(reordered.map((category) => category.id)));
-      setStatus(translate("admin.categories.notifications.reordered"));
+      notifySuccess(translate("admin.categories.notifications.reordered"));
     } catch (cause) {
       setLoadError(notifyError(cause, translate("admin.categories.errors.reorder")));
     } finally {
@@ -255,14 +278,12 @@ function CategoriesAdmin() {
     if (category.isDefault || defaultSavingId !== null) return;
     setDefaultSavingId(category.id);
     setLoadError("");
-    setStatus("");
     try {
       const saved = await api.updateCategory(category.id, { isDefault: true });
       setCategories((current) => current.map((candidate) =>
         candidate.id === saved.id ? saved : { ...candidate, isDefault: false },
       ));
       const message = translate("admin.categories.notifications.saved", { name: saved.name });
-      setStatus(message);
       notifySuccess(message);
     } catch (cause) {
       setLoadError(notifyError(cause, translate("admin.categories.errors.save")));
@@ -278,7 +299,6 @@ function CategoriesAdmin() {
     setReassignTo(destination?.id ?? "");
     setDeleteError("");
     setDeleteNeedsReassignment(false);
-    setStatus("");
   }
 
   async function deleteCategory() {
@@ -297,7 +317,6 @@ function CategoriesAdmin() {
       setCategories((current) => current.filter((category) => category.id !== deleting.id));
       await refreshAccount();
       setDeleting(null);
-      setStatus(message);
       notifySuccess(message);
       void loadCategories();
     } catch (cause) {
@@ -315,7 +334,6 @@ function CategoriesAdmin() {
       <div><span>{translate("admin.categories.eyebrow")}</span><h2>{translate("admin.categories.title")}</h2><p>{translate("admin.categories.description")}</p></div>
       <div className="admin-section__actions"><Button onClick={() => openEditor("new")}><Plus size={18} /> {translate("admin.categories.actions.new")}</Button></div>
     </div>
-    {status && <div role="status"><Notice tone="success">{status}</Notice></div>}
     {loadError && <Notice>{loadError}</Notice>}
     {loading ? <div className="admin-loading-state" aria-live="polite"><LoaderCircle size={28} className="spin" /><strong>{translate("admin.categories.loading.title")}</strong><span>{translate("admin.categories.loading.description")}</span></div>
       : categories.length === 0 ? <EmptyState icon={<Layers3 size={44} />} title={translate("admin.categories.empty.title")} description={translate("admin.categories.empty.description")} action={<Button onClick={() => openEditor("new")}><Plus size={18} /> {translate("admin.categories.actions.create")}</Button>} />
@@ -374,7 +392,6 @@ function DevicesAdmin() {
   const [filter, setFilter] = useState("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [status, setStatus] = useState("");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [editing, setEditing] = useState<ManagedDevice | null>(null);
   const [deviceName, setDeviceName] = useState("");
@@ -383,6 +400,8 @@ function DevicesAdmin() {
   const [moving, setMoving] = useState<ManagedDevice[]>([]);
   const [moveCategoryId, setMoveCategoryId] = useState("");
   const [moveSaving, setMoveSaving] = useState(false);
+  const [deleting, setDeleting] = useState<ManagedDevice | null>(null);
+  const [deleteSaving, setDeleteSaving] = useState(false);
   const deviceLoadGeneration = useRef(0);
 
   const loadDevices = useCallback(async (categoryId: string) => {
@@ -413,7 +432,6 @@ function DevicesAdmin() {
     setDeviceName(device.name);
     setInternalNote(device.internalNote ?? "");
     setError("");
-    setStatus("");
   }
 
   async function saveDevice(event: FormEvent) {
@@ -427,7 +445,6 @@ function DevicesAdmin() {
       setDevices((current) => current.map((device) => device.id === saved.id ? saved : device));
       const message = translate("admin.devices.edit.success", { name: saved.name });
       setEditing(null);
-      setStatus(message);
       notifySuccess(message);
     } catch (cause) {
       setError(notifyError(cause, translate("admin.devices.edit.error")));
@@ -442,7 +459,6 @@ function DevicesAdmin() {
     setMoving(targets);
     setMoveCategoryId(destination?.id ?? "");
     setError("");
-    setStatus("");
   }
 
   async function moveDevices() {
@@ -454,13 +470,35 @@ function DevicesAdmin() {
       const message = translate(moving.length === 1 ? "admin.devices.move.successOne" : "admin.devices.move.successMany", moving.length === 1 ? { name: moving[0]!.name } : { count: moving.length });
       setMoving([]);
       setSelected(new Set());
-      setStatus(message);
       notifySuccess(message);
       await loadDevices(filter);
     } catch (cause) {
       setError(notifyError(cause, translate("admin.devices.move.error")));
     } finally {
       setMoveSaving(false);
+    }
+  }
+
+  async function deleteDevice() {
+    if (!deleting || deleteSaving) return;
+    setDeleteSaving(true);
+    setError("");
+    try {
+      await api.deleteDevice(deleting.id);
+      setDevices((current) => current.filter((device) => device.id !== deleting.id));
+      setSelected((current) => {
+        if (!current.has(deleting.id)) return current;
+        const next = new Set(current);
+        next.delete(deleting.id);
+        return next;
+      });
+      const message = translate("admin.devices.delete.success", { name: deleting.name });
+      setDeleting(null);
+      notifySuccess(message);
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.devices.delete.error")));
+    } finally {
+      setDeleteSaving(false);
     }
   }
 
@@ -471,7 +509,6 @@ function DevicesAdmin() {
       <div><span>{translate("admin.devices.eyebrow")}</span><h2>{translate("admin.devices.title")}</h2><p>{translate("admin.devices.description")}</p></div>
       <CategoryFilter categories={categories} value={filter} onChange={setFilter} />
     </div>
-    {status && <div role="status"><Notice tone="success">{status}</Notice></div>}
     {error && <Notice>{error}</Notice>}
     {selectedDevices.length > 0 && <div className="bulk-move-bar" role="status"><strong>{translate("admin.devices.bulk.selected", { count: selectedDevices.length })}</strong><Button variant="secondary" onClick={() => openMove(selectedDevices)}><Layers3 size={16} /> {translate("admin.devices.bulk.move")}</Button></div>}
     {loading ? <div className="admin-loading-state" aria-live="polite"><LoaderCircle size={28} className="spin" /><strong>{translate("admin.devices.loading.title")}</strong><span>{translate("admin.devices.loading.description")}</span></div>
@@ -480,7 +517,7 @@ function DevicesAdmin() {
           <label className="admin-select-control"><input type="checkbox" checked={selected.has(device.id)} aria-label={translate("admin.devices.bulk.select", { name: device.name })} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(device.id); else next.delete(device.id); return next; })} /><span /></label>
           <span className="device-admin-card__icon" aria-hidden="true"><MonitorSmartphone size={22} /></span>
           <div className="device-admin-card__copy"><div><h3>{device.name}</h3><CategoryBadge category={device.category} /></div><p>{device.platform} · {translate("admin.devices.approved", { date: device.approvedAt ? new Date(device.approvedAt).toLocaleString() : new Date(device.createdAt).toLocaleString() })} · {device.lastSeenAt ? translate("admin.devices.lastSeen", { date: new Date(device.lastSeenAt).toLocaleString() }) : translate("admin.devices.neverSeen")}</p>{device.internalNote && <small>{device.internalNote}</small>}</div>
-          <div className="device-admin-card__actions"><Button variant="secondary" onClick={() => openEditor(device)}><Pencil size={16} /> {translate("common.actions.edit")}</Button><Button variant="ghost" disabled={categories.length < 2} onClick={() => openMove([device])}><Layers3 size={16} /> {translate("admin.devices.move.action")}</Button></div>
+          <div className="device-admin-card__actions"><Button variant="secondary" onClick={() => openEditor(device)}><Pencil size={16} /> {translate("common.actions.edit")}</Button><Button variant="ghost" disabled={categories.length < 2} onClick={() => openMove([device])}><Layers3 size={16} /> {translate("admin.devices.move.action")}</Button><Button variant="ghost" className="admin-destructive-action" onClick={() => { setError(""); setDeleting(device); }}><Trash2 size={16} /> {translate("common.actions.delete")}</Button></div>
         </article>)}</div>}
     {editing && <Modal onClose={() => { if (!saving) setEditing(null); }} className="editor-modal device-editor">
       <div className="editor-modal__heading"><span><MonitorSmartphone size={18} /> {translate("admin.devices.edit.eyebrow")}</span><h2>{translate("admin.devices.edit.title", { name: editing.name })}</h2><CategoryBadge category={editing.category} /></div>
@@ -499,6 +536,7 @@ function DevicesAdmin() {
         <div className="modal-actions"><Button type="button" variant="secondary" disabled={moveSaving} onClick={() => setMoving([])}>{translate("common.cancel")}</Button><Button type="button" loading={moveSaving} disabled={!moveCategoryId} onClick={() => void moveDevices()}>{translate("admin.devices.move.confirm")}</Button></div>
       </div>
     </Modal>}
+    {deleting && <ConfirmDialog title={translate("admin.devices.delete.title", { name: deleting.name })} description={translate("admin.devices.delete.description")} confirmLabel={translate("admin.devices.delete.confirm")} loading={deleteSaving} onCancel={() => setDeleting(null)} onConfirm={() => void deleteDevice()} />}
   </div>;
 }
 
@@ -551,7 +589,6 @@ function ProfilesAdmin() {
   const [categoriesLoading, setCategoriesLoading] = useState(isGlobalAdmin);
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [categoryId, setCategoryId] = useState(account?.session.category?.id ?? "");
-  const [profileStatus, setProfileStatus] = useState("");
   const [selectedProfiles, setSelectedProfiles] = useState<Set<string>>(() => new Set());
   const [movingProfiles, setMovingProfiles] = useState<Profile[]>([]);
   const [moveCategoryId, setMoveCategoryId] = useState("");
@@ -608,7 +645,6 @@ function ProfilesAdmin() {
     setEditing(profile);
     const defaultCategoryId = account?.session.category?.id ?? categories.find((category) => category.isDefault)?.id ?? categories[0]?.id ?? "";
     setCategoryId(profile === "new" ? defaultCategoryId : profile.categoryId);
-    setProfileStatus("");
     setName(profile === "new" ? "" : profile.name);
     setDescription(profile === "new" ? "" : profile.description ?? "");
     setPin("");
@@ -699,7 +735,6 @@ function ProfilesAdmin() {
     setMovingProfiles(targets);
     setMoveCategoryId(destination?.id ?? "");
     setError("");
-    setProfileStatus("");
   }
 
   async function moveProfiles() {
@@ -715,7 +750,6 @@ function ProfilesAdmin() {
       await refreshAccount();
       setMovingProfiles([]);
       setSelectedProfiles(new Set());
-      setProfileStatus(message);
       notifySuccess(message);
     } catch (cause) {
       setError(notifyError(cause, translate("admin.profiles.move.error")));
@@ -876,7 +910,6 @@ function ProfilesAdmin() {
       <CategoryFilter categories={categories} value={categoryFilter} disabled={categoriesLoading} onChange={(value) => { setCategoryFilter(value); setSelectedProfiles(new Set()); }} />
       {selectedProfileValues.length > 0 && <div className="bulk-move-bar" role="status"><strong>{translate("admin.profiles.bulk.selected", { count: selectedProfileValues.length })}</strong><Button variant="secondary" onClick={() => openProfileMove(selectedProfileValues)}><Layers3 size={16} /> {translate("admin.profiles.bulk.move")}</Button></div>}
     </div>}
-    {profileStatus && <div role="status"><Notice tone="success">{profileStatus}</Notice></div>}
     {error && <Notice>{error}</Notice>}
     {visibleProfiles.length ? <div className="profile-admin-grid">{visibleProfiles.map((profile) =>
       <article key={profile.id} className={`profile-admin-card ${isGlobalAdmin ? "profile-admin-card--selectable" : ""}`}>
@@ -977,8 +1010,8 @@ function ProfilesAdmin() {
               </div>
               <div className="profile-session__actions">
                 {session.current && <i>{translate("admin.profiles.sessions.currentDevice")}</i>}
-                <Button variant="secondary" disabled={sendingMessage} onClick={() => openSessionMessage(session)}><Bell size={15} /> {translate("admin.profiles.sessions.actions.message")}</Button>
-                {!session.current && <Button variant="secondary" onClick={() => setRevokingSession(session)}>{translate("admin.profiles.sessions.actions.revoke")}</Button>}
+                <Button variant="secondary" className="profile-session__message-action" disabled={sendingMessage} onClick={() => openSessionMessage(session)}><Bell size={15} /> {translate("admin.profiles.sessions.actions.message")}</Button>
+                {!session.current && <Button variant="danger" onClick={() => setRevokingSession(session)}>{translate("admin.profiles.sessions.actions.revoke")}</Button>}
               </div>
             </article>,
           )}</div>}
@@ -1271,7 +1304,6 @@ function CollectionsAdmin() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [transfer, setTransfer] = useState<"" | "export" | "import">("");
-  const [success, setSuccess] = useState("");
   const [draggedFolderIndex, setDraggedFolderIndex] = useState<number | null>(null);
   const [draggedSource, setDraggedSource] = useState<{ folderIndex: number; sourceIndex: number } | null>(null);
   const [deleting, setDeleting] = useState<Collection | null>(null);
@@ -1387,7 +1419,6 @@ function CollectionsAdmin() {
   async function exportCollections() {
     setTransfer("export");
     setError("");
-    setSuccess("");
     try {
       const document = await api.exportCollections();
       const url = URL.createObjectURL(new Blob([JSON.stringify(document, null, 2)], { type: "application/json" }));
@@ -1399,7 +1430,6 @@ function CollectionsAdmin() {
       anchor.remove();
       URL.revokeObjectURL(url);
       const message = translate(document.collections.length === 1 ? "admin.collections.export.successOne" : "admin.collections.export.successMany", { count: document.collections.length });
-      setSuccess(message);
       notifySuccess(message, translate("admin.collections.export.successTitle"));
     } catch (cause) {
       setError(notifyError(cause, translate("admin.collections.errors.export")));
@@ -1413,13 +1443,11 @@ function CollectionsAdmin() {
     if (!file) return;
     setTransfer("import");
     setError("");
-    setSuccess("");
     try {
       const document: unknown = JSON.parse(await file.text());
       const result = await api.importCollections(document);
       await load();
       const message = translate(result.imported === 1 ? "admin.collections.import.successOne" : "admin.collections.import.successMany", { count: result.imported });
-      setSuccess(message);
       notifySuccess(message, translate("admin.collections.import.successTitle"));
     } catch (cause) {
       setError(cause instanceof SyntaxError
@@ -1478,7 +1506,6 @@ function CollectionsAdmin() {
       <article><span><Database size={18} aria-hidden="true" /></span><div><strong>{loading ? "—" : totalSources}</strong><small>{translate("admin.collections.overview.sources")}</small></div></article>
       <article><span><CircleUserRound size={18} aria-hidden="true" /></span><div><strong>{loading ? "—" : assignedProfiles}</strong><small>{translate("admin.common.profilesReached")}</small></div></article>
     </section>
-    {success && <Notice tone="success">{success}</Notice>}
     {error && <Notice>{error}</Notice>}
     {loading
       ? <div className="collection-admin-grid" aria-label={translate("admin.collections.loadingLabel")}><Skeleton className="collection-skeleton" /><Skeleton className="collection-skeleton" /></div>
@@ -1497,7 +1524,7 @@ function CollectionsAdmin() {
           </article>,
         )}</div>
         : <EmptyState icon={<Layers3 size={44} />} title={translate(error ? "admin.collections.errors.unavailableTitle" : "admin.collections.empty.title")} description={translate(error ? "admin.collections.errors.retryDescription" : "admin.collections.empty.description")} action={error ? <Button variant="secondary" onClick={() => void load()}><RefreshCw size={17} /> {translate("common.actions.tryAgain")}</Button> : <Button onClick={() => openEditor("new")}><Plus size={18} /> {translate("admin.collections.actions.create")}</Button>} />}
-    {editing && <Modal onClose={() => setEditing(null)} className="editor-modal collection-editor"><form onSubmit={submit}>
+    {editing && <Modal onClose={() => { if (!saving) setEditing(null); }} className="editor-modal collection-editor"><form onSubmit={submit}>
       <div className="editor-modal__heading">
         <span><Layers3 size={18} /> {translate(editing === "new" ? "admin.collections.editor.newEyebrow" : "admin.collections.editor.editEyebrow")}</span>
         <h2>{translate("admin.collections.editor.title")}</h2>
@@ -1633,7 +1660,7 @@ function CollectionsAdmin() {
       )}</div>
       <AddTile label={translate("admin.collections.folders.addAnother")} onClick={() => setDraft((current) => ({ ...current, folders: [...current.folders, blankFolder()] }))} />
       <div className="modal-actions modal-actions--sticky">
-        <Button type="button" variant="ghost" onClick={() => setEditing(null)}>{translate("common.cancel")}</Button>
+        <Button type="button" variant="ghost" disabled={saving} onClick={() => setEditing(null)}>{translate("common.cancel")}</Button>
         <Button type="submit" loading={saving}><Save size={18} /> {translate("admin.collections.actions.save")}</Button>
       </div>
     </form></Modal>}
@@ -2094,10 +2121,12 @@ function OperationsAdmin() {
         return <article className={`operation-action-card ${card.destructive ? "is-destructive" : ""}`} key={card.action}>
           <header><span><Icon aria-hidden="true" /></span><div><h4>{translate(card.titleKey)}</h4><p>{translate(card.descriptionKey)}</p></div></header>
           <div className="operation-action-card__scope"><Shield size={15} aria-hidden="true" /><span>{translate(card.scopeKey)}</span></div>
-          {lastRun && !(card.action === "fetch-missing-metadata" && metadataRequestFailed) && (card.action === "fetch-missing-metadata" && lastRun.result.metadata
-            ? lastRun.status !== "succeeded" && <Notice tone={lastRun.status === "failed" ? "error" : "warning"}><span role="status" aria-live="polite"><strong>{metadataResultMessage(lastRun.result.metadata)}</strong>{lastRun.status === "failed" ? ` ${translate("admin.operations.notifications.metadataFailedMessage")}` : ` ${translate("admin.operations.notifications.metadataPartialMessage")}`}</span>{lastRun.status === "failed" && <Button variant="secondary" aria-label={translate("admin.operations.actions.metadata.retry")} loading={runningAction === card.action} disabled={Boolean(runningAction)} onClick={() => void runAction(card.action)}><RefreshCw size={16} /> {translate("admin.operations.actions.metadata.retry")}</Button>}</Notice>
-            : lastRun.status !== "succeeded" && <small className={`operation-action-card__result is-${lastRun.status}`} role="status">{translate(`admin.operations.status.${lastRun.status}` as TranslationKey)} · {formatOperationsDate(lastRun.completedAt)}</small>)}
-          {card.action === "fetch-missing-metadata" && metadataRequestFailed && <Notice><span role="alert">{translate("admin.operations.notifications.metadataFailedMessage")}</span><Button variant="secondary" aria-label={translate("admin.operations.actions.metadata.retry")} loading={runningAction === card.action} disabled={Boolean(runningAction)} onClick={() => void runAction(card.action)}><RefreshCw size={16} /> {translate("admin.operations.actions.metadata.retry")}</Button></Notice>}
+          <div className="operation-action-card__feedback" aria-live="polite">
+            {lastRun && !(card.action === "fetch-missing-metadata" && metadataRequestFailed) && (card.action === "fetch-missing-metadata" && lastRun.result.metadata
+              ? lastRun.status !== "succeeded" && <Notice tone={lastRun.status === "failed" ? "error" : "warning"}><span role="status"><strong>{metadataResultMessage(lastRun.result.metadata)}</strong>{lastRun.status === "failed" ? ` ${translate("admin.operations.notifications.metadataFailedMessage")}` : ` ${translate("admin.operations.notifications.metadataPartialMessage")}`}</span>{lastRun.status === "failed" && <Button variant="secondary" aria-label={translate("admin.operations.actions.metadata.retry")} loading={runningAction === card.action} disabled={Boolean(runningAction)} onClick={() => void runAction(card.action)}><RefreshCw size={16} /> {translate("admin.operations.actions.metadata.retry")}</Button>}</Notice>
+              : lastRun.status !== "succeeded" && <small className={`operation-action-card__result is-${lastRun.status}`} role="status">{translate(`admin.operations.status.${lastRun.status}` as TranslationKey)} · {formatOperationsDate(lastRun.completedAt)}</small>)}
+            {card.action === "fetch-missing-metadata" && metadataRequestFailed && <Notice><span role="alert">{translate("admin.operations.notifications.metadataFailedMessage")}</span><Button variant="secondary" aria-label={translate("admin.operations.actions.metadata.retry")} loading={runningAction === card.action} disabled={Boolean(runningAction)} onClick={() => void runAction(card.action)}><RefreshCw size={16} /> {translate("admin.operations.actions.metadata.retry")}</Button></Notice>}
+          </div>
           <Button variant={card.destructive ? "danger" : "secondary"} aria-label={translate("admin.operations.actions.runNamed", { action: translate(card.titleKey) })} loading={runningAction === card.action} disabled={Boolean(runningAction) || savingSchedule || savingMaintenance || (card.action === "fetch-missing-metadata" && scheduleDirty)} onClick={() => card.destructive ? setConfirmAction(card.action) : void runAction(card.action)}>{card.destructive ? <Trash2 size={16} /> : <RefreshCw size={16} />} {translate(runningAction === card.action ? "admin.operations.actions.running" : "admin.operations.actions.run")}</Button>
         </article>;
       })}</div>
@@ -2131,6 +2160,9 @@ function ActivityAdmin() {
   const [stopping, setStopping] = useState(false);
   const [selectedSession, setSelectedSession] = useState<PlaybackActivitySession | null>(null);
   const [error, setError] = useState("");
+  const activityRootRef = useRef<HTMLDivElement>(null);
+  const focusReturnRef = useRef<HTMLButtonElement>(null);
+  const pendingStoppedSessionRef = useRef<string | null>(null);
 
   async function load(silent = false) {
     if (!silent) setRefreshing(true);
@@ -2169,14 +2201,53 @@ function ActivityAdmin() {
       window.clearInterval(interval);
     };
   }, []);
+  const firstActivityControl = useCallback((): HTMLButtonElement | null => {
+    const root = activityRootRef.current;
+    return root?.querySelector<HTMLButtonElement>(".activity-session .button")
+      ?? root?.querySelector<HTMLButtonElement>(".admin-section__actions .button")
+      ?? null;
+  }, []);
+
+  useEffect(() => {
+    const stoppedSessionID = pendingStoppedSessionRef.current;
+    if (!stoppedSessionID || selectedSession || !activity || activity.sessions.some((session) => session.id === stoppedSessionID)) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      if (pendingStoppedSessionRef.current !== stoppedSessionID) return;
+      pendingStoppedSessionRef.current = null;
+      focusReturnRef.current = null;
+      const target = firstActivityControl();
+      target?.focus();
+      target?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activity, firstActivityControl, selectedSession]);
+
+
+  function restoreActivityFocus() {
+    window.requestAnimationFrame(() => {
+      const returnTarget = focusReturnRef.current;
+      const fallback = firstActivityControl();
+      const target = returnTarget?.isConnected ? returnTarget : fallback;
+      target?.focus();
+      target?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  }
+
+  function closeSessionDialog() {
+    setSelectedSession(null);
+    restoreActivityFocus();
+  }
 
 
   async function stopSession() {
     if (!selectedSession) return;
+    const stoppedSession = selectedSession;
     setStopping(true);
     try {
-      await api.stopPlaybackActivitySession(selectedSession.id);
-      notifySuccess(translate("admin.activity.notifications.stoppedMessage", { title: selectedSession.title }), translate("admin.activity.notifications.stoppedTitle"));
+      await api.stopPlaybackActivitySession(stoppedSession.id);
+      notifySuccess(translate("admin.activity.notifications.stoppedMessage", { title: stoppedSession.title }), translate("admin.activity.notifications.stoppedTitle"));
+      pendingStoppedSessionRef.current = stoppedSession.id;
       setSelectedSession(null);
       await load(true);
     } catch (cause) {
@@ -2196,7 +2267,7 @@ function ActivityAdmin() {
   for (const job of activity?.jobs ?? []) {
     if (!job.prewarming && job.sessionId) jobsBySession.set(job.sessionId, job);
   }
-  return <div className="admin-section activity-admin">
+  return <div className="admin-section activity-admin" ref={activityRootRef}>
     <div className="admin-section__header"><div><span>{translate("admin.activity.eyebrow")}</span><h2>{translate("admin.activity.title")}</h2><p>{translate("admin.activity.description")}</p></div><div className="admin-section__actions"><Button variant="secondary" onClick={() => void load()} loading={refreshing}><RefreshCw size={16} /> {translate("common.actions.refresh")}</Button></div></div>
     {error && <Notice>{error}</Notice>}
     <div className="activity-overview" aria-label={translate("admin.activity.overview.label")} aria-live="polite">
@@ -2218,21 +2289,35 @@ function ActivityAdmin() {
             {session.decision && <ActivitySessionDecision decision={session.decision} />}
           </div>
           <div className="activity-session__time">
-            <strong>{formatActivityProgress(session.positionSeconds, session.durationSeconds)}</strong>
+            <ActivitySessionProgress positionSeconds={session.positionSeconds} durationSeconds={session.durationSeconds} />
             <ActivityJobProgress job={jobsBySession.get(session.id)} />
             <small>{activityAge(session.lastSeenAt)} · {translate("admin.activity.sessions.started", { age: activityAge(session.createdAt) })}</small>
           </div>
-          <Button variant="danger" onClick={() => setSelectedSession(session)}><CircleStop size={16} />{translate("common.actions.stop")}</Button>
+          <Button variant="danger" onClick={(event) => { focusReturnRef.current = event.currentTarget; setSelectedSession(session); }}><CircleStop size={16} />{translate("common.actions.stop")}</Button>
         </article>)}</div>
         : <EmptyState icon={<Radio />} title={translate("admin.activity.sessions.emptyTitle")} description={translate("admin.activity.sessions.emptyDescription")} />}
     </section>
     <section className="activity-panel">
       <header><div><span>{translate("admin.activity.jobs.eyebrow")}</span><h3>{translate("admin.activity.jobs.title")}</h3></div><small>{translate((activity?.jobs.length ?? 0) === 1 ? "admin.activity.jobs.countOne" : "admin.activity.jobs.countMany", { count: activity?.jobs.length ?? 0 })}</small></header>
       {activity?.jobs.length
-        ? <div className="activity-job-list">{activity.jobs.map((job, index) => <article className="activity-job" key={`${job.sessionId ?? "prewarm"}-${job.assetId}-${index}`}><span className={`activity-job__dot is-${job.state}`} /><div><strong>{job.prewarming ? translate("admin.activity.jobs.preparingSource") : activityModeLabel(job.mode)}</strong><small>{job.assetId} · {translate("admin.activity.jobs.lastRequest", { age: activityAge(job.lastSeenAt) })}</small></div><ActivityJobProgress job={job} /></article>)}</div>
+        ? <div className="activity-job-list">{activity.jobs.map((job, index) => <article className="activity-job" key={`${job.sessionId ?? "prewarm"}-${job.assetId}-${index}`}><span className={`activity-job__dot is-${job.state}`} aria-hidden="true" /><div><strong>{job.prewarming ? translate("admin.activity.jobs.preparingSource") : activityModeLabel(job.mode)}</strong><small>{job.assetId} · {translate("admin.activity.jobs.lastRequest", { age: activityAge(job.lastSeenAt) })}</small></div><ActivityJobProgress job={job} /></article>)}</div>
         : <EmptyState icon={<Cpu />} title={translate("admin.activity.jobs.emptyTitle")} description={translate("admin.activity.jobs.emptyDescription")} />}
     </section>
-    {selectedSession && <ConfirmDialog title={translate("admin.activity.stop.title", { title: selectedSession.title })} description={translate("admin.activity.stop.description", { device: selectedSession.device })} confirmLabel={translate("admin.activity.stop.confirm")} loading={stopping} onConfirm={() => void stopSession()} onCancel={() => setSelectedSession(null)} />}
+    {selectedSession && <ConfirmDialog title={translate("admin.activity.stop.title", { title: selectedSession.title })} description={translate("admin.activity.stop.description", { device: selectedSession.device })} confirmLabel={translate("admin.activity.stop.confirm")} loading={stopping} onConfirm={() => void stopSession()} onCancel={closeSessionDialog} />}
+  </div>;
+}
+
+function ActivitySessionProgress({ positionSeconds, durationSeconds }: { positionSeconds: number; durationSeconds: number }) {
+  const label = formatActivityProgress(positionSeconds, durationSeconds);
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return <div className="activity-session__progress is-unavailable" role="status" aria-label={label}><strong>{label}</strong></div>;
+  }
+  const position = Number.isFinite(positionSeconds) ? Math.max(0, Math.min(positionSeconds, durationSeconds)) : 0;
+  const percent = position / durationSeconds;
+  const percentLabel = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(percent);
+  return <div className="activity-session__progress" role="status" aria-label={label}>
+    <span><strong>{label}</strong><span aria-hidden="true">{percentLabel}</span></span>
+    <progress max={durationSeconds} value={position} aria-label={label}>{percentLabel}</progress>
   </div>;
 }
 
@@ -2263,7 +2348,7 @@ function ActivitySessionProviders({ session }: { session: PlaybackActivitySessio
 }
 
 function ActivityMetric({ icon, label, value, detail }: { icon: React.ReactNode; label: string; value: string; detail: string }) {
-  return <article className="activity-metric"><span>{icon}</span><div><small>{label}</small><strong>{value}</strong><span>{detail}</span></div></article>;
+  return <article className="activity-metric"><span aria-hidden="true">{icon}</span><div><small>{label}</small><strong>{value}</strong><span>{detail}</span></div></article>;
 }
 function ActivityJobProgress({ job }: { job?: PlaybackActivity["jobs"][number] }) {
   const progressPercent = job?.progressPercent;
@@ -2341,9 +2426,20 @@ function activityAge(value: string): string {
 
 function formatActivityProgress(positionSeconds: number, durationSeconds: number): string {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return translate("admin.activity.progress.durationUnavailable");
-  const positionMinutes = Math.max(0, Math.floor(positionSeconds / 60));
-  const durationMinutes = Math.max(1, Math.ceil(durationSeconds / 60));
-  return translate("admin.activity.progress.minutes", { positionMinutes: Math.min(positionMinutes, durationMinutes), durationMinutes });
+  const duration = Math.max(1, Math.ceil(durationSeconds));
+  const position = Number.isFinite(positionSeconds) ? Math.max(0, Math.min(Math.floor(positionSeconds), duration)) : 0;
+  return `${formatActivityTime(position)} / ${formatActivityTime(duration)}`;
+}
+
+function formatActivityTime(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts: string[] = [];
+  if (hours > 0) parts.push(new Intl.NumberFormat(locale, { style: "unit", unit: "hour", unitDisplay: "narrow" }).format(hours));
+  if (minutes > 0) parts.push(new Intl.NumberFormat(locale, { style: "unit", unit: "minute", unitDisplay: "narrow" }).format(minutes));
+  if (seconds > 0 || parts.length === 0) parts.push(new Intl.NumberFormat(locale, { style: "unit", unit: "second", unitDisplay: "narrow" }).format(seconds));
+  return parts.join(" ");
 }
 
 const rivuneSettingDefaults = {
@@ -2577,6 +2673,9 @@ function SettingsAdmin() {
   const [loaded, setLoaded] = useState(false);
   const [activeSection, setActiveSection] = useState<SettingsSection>(() => requestedSettingsSection() ?? "appearance");
   const [sectionSearch, setSectionSearch] = useState("");
+  const initialSection = requestedSettingsSection() ?? "appearance";
+  const lastProfileSection = useRef<SettingsSection>(initialSection === "transcoding" ? "appearance" : initialSection);
+  const lastServerSection = useRef<SettingsSection>(initialSection === "connections" ? "appearance" : initialSection);
   const settingsTargetRef = useRef(settingsTarget);
   settingsTargetRef.current = settingsTarget;
   const canManageProfiles = Boolean(activeProfile?.canManage);
@@ -2597,19 +2696,31 @@ function SettingsAdmin() {
 
   function navigateSettingsSection(section: SettingsSection, replace = false) {
     if (!sectionAllowed(section)) return;
+    if (serverSelected) lastServerSection.current = section;
+    else lastProfileSection.current = section;
     setActiveSection(section);
     updateAdminRoute("settings", section, replace);
   }
 
+  function changeSettingsTarget(nextTarget: string) {
+    if (nextTarget === settingsTarget || hasUnsavedChanges) return;
+    const nextSection = nextTarget === "server" ? lastServerSection.current : lastProfileSection.current;
+    setSettingsTarget(nextTarget);
+    setActiveSection(nextSection);
+    updateAdminRoute("settings", nextSection, true);
+  }
+
   function handleSectionKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
-    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     const buttons = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[data-settings-section]") ?? []);
     const currentIndex = buttons.indexOf(event.currentTarget);
     if (currentIndex < 0 || buttons.length === 0) return;
     event.preventDefault();
+    const rtl = document.documentElement.dir === "rtl";
+    const forward = event.key === "ArrowDown" || event.key === (rtl ? "ArrowLeft" : "ArrowRight");
     const nextIndex = event.key === "Home" ? 0
       : event.key === "End" ? buttons.length - 1
-        : event.key === "ArrowDown" ? (currentIndex + 1) % buttons.length
+        : forward ? (currentIndex + 1) % buttons.length
           : (currentIndex - 1 + buttons.length) % buttons.length;
     buttons[nextIndex]?.focus();
   }
@@ -2622,10 +2733,14 @@ function SettingsAdmin() {
 
   useEffect(() => {
     const syncSection = () => {
+      const requestedTab = requestedAdminTab();
+      if (requestedTab && requestedTab !== "settings") return;
       const requested = requestedSettingsSection();
       const next = requested && sectionAllowed(requested) ? requested : "appearance";
+      if (serverSelected) lastServerSection.current = next;
+      else lastProfileSection.current = next;
       setActiveSection(next);
-      if (requested !== next || requestedAdminTab() !== "settings") updateAdminRoute("settings", next, true);
+      if (requested !== next || requestedTab !== "settings") updateAdminRoute("settings", next, true);
     };
     syncSection();
     window.addEventListener("hashchange", syncSection);
@@ -2705,7 +2820,7 @@ function SettingsAdmin() {
           setInstance(updated.settings);
           setSavedInstance(updated.settings);
         }
-        updateServerInterfaceLanguage(updated.settings.interfaceLanguage ?? "en");
+        await updateServerInterfaceLanguage(updated.settings.interfaceLanguage ?? "en");
         if (confirmedTranscodingSessions !== undefined) {
           const activity = await api.playbackActivity().catch(() => null);
           remainingTranscodingSessions = activity
@@ -2750,7 +2865,16 @@ function SettingsAdmin() {
             ? translate("settings.scope.serverDefaultCount", { count: overrideCount })
             : translate(overrideCount === 1 ? "settings.scope.profileOverrideCountOne" : "settings.scope.profileOverrideCountMany", { count: overrideCount })}</span>
         </div>
-        {canManageProfiles && <label className="field settings-profile-picker"><span>{translate("settings.scope.switch")}</span><div>{serverSelected ? <Server size={16} aria-hidden="true" /> : <CircleUserRound size={16} aria-hidden="true" />}<select value={settingsTarget} disabled={saving || checkingTranscodingDisable || hasUnsavedChanges} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">{translate("settings.scope.serverDefaults")}</option>}{administrationProfiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{translate("settings.scope.profileOption", { profileName: candidate.name })}</option>)}</select></div>{hasUnsavedChanges && <small>{translate("settings.scope.unsavedSwitchHint")}</small>}</label>}
+        {canManageProfiles && <label className={`field settings-profile-picker ${hasUnsavedChanges ? "is-locked" : ""}`}>
+          <span>{translate("settings.scope.switch")}</span>
+          <div>{serverSelected ? <Server size={16} aria-hidden="true" /> : <CircleUserRound size={16} aria-hidden="true" />}
+            <select value={settingsTarget} disabled={saving || checkingTranscodingDisable || hasUnsavedChanges} onChange={(event) => changeSettingsTarget(event.target.value)}>
+              {canManageServer && <option value="server">{translate("settings.scope.serverDefaults")}</option>}
+              {administrationProfiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{translate("settings.scope.profileOption", { profileName: candidate.name })}</option>)}
+            </select>
+          </div>
+          {hasUnsavedChanges && <small>{translate("settings.scope.unsavedSwitchHint")}</small>}
+        </label>}
       </div>
       <label className="settings-navigation__search">
         <span className="visually-hidden">{translate("common.search")}</span>
@@ -2764,12 +2888,17 @@ function SettingsAdmin() {
           data-settings-section={section.id}
           className={visibleSection === section.id ? "is-active" : ""}
           aria-current={visibleSection === section.id ? "page" : undefined}
+          aria-label={section.label}
+          aria-describedby={`settings-navigation-description-${section.id}`}
           aria-controls={`settings-section-${section.id}`}
           onKeyDown={handleSectionKeyDown}
           onClick={() => navigateSettingsSection(section.id)}
         >
           <span>{section.icon}</span>
-          <span><strong>{section.label}</strong><small>{section.description}</small></span>
+          <span className="settings-navigation__item-copy">
+            <strong className="settings-navigation__item-title">{section.label}</strong>
+            <small id={`settings-navigation-description-${section.id}`} className="settings-navigation__item-description">{section.description}</small>
+          </span>
         </button>)}
         {filteredSections.length === 0 && <p className="settings-navigation__empty" role="status">{translate("common.noResults")}</p>}
       </nav>
@@ -2977,7 +3106,7 @@ function TrackingSettings({ profileId }: { profileId: string }) {
               {!status.connected && <Button disabled={!status.configured || Boolean(authorization) || providerBusy} loading={busy === `${status.provider}:connect`} onClick={() => void connect(status.provider)}>{translate("settings.trackingConnect")}</Button>}
             </div>
             {status.connected && <details className="tracking-provider-details">
-              <summary aria-label={`${translate("shell.manage")} · ${providerName(status.provider)}`}><span><Settings2 size={16} aria-hidden="true" /> {translate("shell.manage")}</span><ChevronDown size={16} aria-hidden="true" /></summary>
+              <summary aria-label={`${translate("admin.tabs.settings.label")} · ${providerName(status.provider)}`}><span><Settings2 size={16} aria-hidden="true" /> {translate("admin.tabs.settings.label")}</span><ChevronDown size={16} aria-hidden="true" /></summary>
               <div className="tracking-provider-details__body">
                 <div className="tracking-provider-options">
                   <TrackingToggle id={`tracking-${status.provider}-watched`} label={translate("settings.trackingWatched")} description={translate("settings.trackingWatchedDescription")} checked={status.syncWatched} disabled={providerBusy} saving={busy === `${status.provider}:syncWatched`} onChange={(value) => void toggle(status, "syncWatched", value)} />
@@ -3061,8 +3190,8 @@ function SettingsCard({ activeSection, serverScope = false, canConfigureTranscod
     onChange({ ...values, [key]: value });
   }
 
-  return <section className="settings-card preferences-workspace">
-    <div className="settings-groups settings-groups--preferences">
+  return <section className="settings-card preferences-workspace" aria-busy={saving}>
+    <fieldset className="settings-groups settings-groups--preferences" disabled={saving}>
       {activeSection === "appearance" && <SettingsGroup sectionId="appearance" icon={<Palette />} title={translate("settings.groups.appearance.title")} description={translate("settings.groups.appearance.description")}>
         <SelectSetting name="theme" presentation="theme" label={translate("settings.fields.theme")} value={values.theme} defaultValue={effective.theme} options={settingOptions.theme} emptyLabel={emptyLabel} onChange={(value) => change("theme", value)} />
         <SelectSetting name="cardDensity" presentation="density" label={translate("settings.fields.cardDensity")} value={values.cardDensity} defaultValue={effective.cardDensity} options={settingOptions.density} emptyLabel={emptyLabel} onChange={(value) => change("cardDensity", value as "comfortable" | "compact" | null)} />
@@ -3114,8 +3243,8 @@ function SettingsCard({ activeSection, serverScope = false, canConfigureTranscod
           <figcaption><span className="subtitle-preview__caption">{translate("settings.groups.subtitles.description")}</span></figcaption>
         </figure>
       </SettingsGroup>}
-    </div>
-    {(dirty || saving) && <footer className={`settings-save-bar ${dirty ? "is-dirty" : ""}`}>
+    </fieldset>
+    {(dirty || saving) && <footer className={`settings-save-bar ${dirty ? "is-dirty" : ""}`} aria-label={translate("common.status.unsavedChanges")}>
       <span className={`settings-save-state ${dirty ? "is-dirty" : "is-saved"}`} role="status" aria-live="polite">{saving ? <><LoaderCircle size={14} className="spin" /> {translate("common.status.saving")}</> : <><Save size={14} /> {translate("common.status.unsavedChanges")}</>}</span>
       <div>
         <Button variant="secondary" disabled={saving} onClick={onReset}>{translate("common.actions.discardChanges")}</Button>
