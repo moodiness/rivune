@@ -48,8 +48,15 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   const fetchRequest = await rivune.waitForRequest("/api/v1/operations/actions/fetch-missing-metadata", "POST");
   expect(fetchRequest.body).toBeUndefined();
   const metadataCard = page.locator(".operation-action-card").filter({ has: page.getByRole("heading", { name: "Fetch missing metadata" }) });
-  await expect(metadataCard.getByText("12 of 12 candidates refreshed; 0 failed.")).toBeVisible();
+  await expect(page.locator(".app-notification--success").filter({ hasText: "12 of 12 candidates refreshed; 0 failed." })).toBeVisible();
+  await expect(metadataCard.locator(".notice--success")).toHaveCount(0);
 
+  await page.getByRole("button", { name: "Run Run housekeeping" }).click();
+  const housekeepingRequest = await rivune.waitForRequest("/api/v1/operations/actions/run-housekeeping", "POST");
+  expect(housekeepingRequest.body).toBeUndefined();
+  const housekeepingCard = page.locator(".operation-action-card").filter({ has: page.getByRole("heading", { name: "Run housekeeping" }) });
+  await expect(page.locator(".app-notification--success").filter({ hasText: "The maintenance action completed." })).toBeVisible();
+  await expect(housekeepingCard.locator(".operation-action-card__result.is-succeeded")).toHaveCount(0);
   const clearMetadataPath = "/api/v1/operations/actions/clear-metadata-cache";
   await page.getByRole("button", { name: "Run Clear metadata cache" }).click();
   await expect(page.getByRole("heading", { name: "Clear all localized metadata?" })).toBeVisible();
@@ -130,7 +137,8 @@ test("total metadata failure offers one retry and recovers without exposing diag
   await retry.click();
   await expect(retry).toBeDisabled();
   await expect.poll(() => rivune.matching("/api/v1/operations/actions/fetch-missing-metadata", "POST").length).toBe(2);
-  await expect(metadataCard.locator(".notice--success")).toContainText("100 of 100 candidates refreshed; 0 failed.");
+  await expect(page.locator(".app-notification--success").filter({ hasText: "100 of 100 candidates refreshed; 0 failed." })).toBeVisible();
+  await expect(metadataCard.locator(".notice--success")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Retry metadata refresh" })).toHaveCount(0);
   for (const value of Object.values(technicalText)) await expect(page.getByText(value, { exact: false })).toHaveCount(0);
 });
