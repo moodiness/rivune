@@ -49,8 +49,9 @@ test("interface language inherits server defaults and supports profile RTL overr
   await page.goto("/#admin");
   await page.getByRole("button", { name: /Settings/ }).click();
   const scope = page.locator(".settings-profile-picker select");
-  const savePreferences = page.locator(".preferences-workspace .settings-card__actions button").last();
+  const savePreferences = page.locator(".settings-save-bar").getByRole("button").last();
   await scope.selectOption("server");
+  await page.locator('[data-settings-section="language"]').click();
 
   const language = page.locator('select[name="interfaceLanguage"]');
   await expect(language.locator("option")).toHaveCount(46);
@@ -74,6 +75,10 @@ test("interface language inherits server defaults and supports profile RTL overr
   await expect(language).toHaveValue("");
   const effectiveRequestCount = rivune.matching("/api/v1/profiles/alice/settings/effective", "GET").length;
   rivune.delayNextEffectiveSettings(250);
+  const delayedEffectiveSettings = page.waitForResponse((response) => {
+    const request = response.request();
+    return new URL(response.url()).pathname === "/api/v1/profiles/alice/settings/effective" && request.method() === "GET";
+  });
   await language.selectOption("he");
   await savePreferences.click();
 
@@ -88,7 +93,7 @@ test("interface language inherits server defaults and supports profile RTL overr
   await expect(page.locator("html")).toHaveAttribute("lang", "ar");
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
   await expect(page.getByRole("button", { name: "الرئيسية", exact: true })).toBeVisible();
-  await page.waitForTimeout(300);
+  await delayedEffectiveSettings;
   await expect(page.locator("html")).toHaveAttribute("lang", "ar");
 
   await expect(language).toBeVisible();
@@ -116,16 +121,18 @@ test("server transcoding disable confirms active sessions and the global veto wi
   await page.route("**/api/v1/playback/activity", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify(activity) }));
   await page.goto("/#admin");
   await page.getByRole("button", { name: /Settings/ }).click();
+  await page.locator('[data-settings-section="playback"]').click();
   const scope = page.locator(".settings-profile-picker select");
   const inheritedPolicy = page.locator(".setting-control--transcoding select");
   await expect(inheritedPolicy).toHaveValue("inherit");
   await expect(page.getByText("Transcoding is available as a last resort for this profile.")).toBeVisible();
   await scope.selectOption("server");
+  await page.locator('[data-settings-section="transcoding"]').click();
 
   const allowTranscoding = page.getByRole("checkbox", { name: /Allow transcoding/ });
   await expect(allowTranscoding).toBeChecked();
   await allowTranscoding.uncheck();
-  const savePreferences = page.getByRole("button", { name: "Save preferences" });
+  const savePreferences = page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" });
   await savePreferences.click();
 
   const confirm = page.getByRole("dialog");
@@ -143,20 +150,22 @@ test("server transcoding disable confirms active sessions and the global veto wi
   expect(rivune.requests.filter((request) => request.method === "DELETE" && request.pathname.startsWith("/api/v1/playback/sessions/"))).toHaveLength(0);
 
   await scope.selectOption("alice");
+  await page.locator('[data-settings-section="playback"]').click();
   const profilePolicy = page.locator(".setting-control--transcoding select");
   await expect(profilePolicy).toHaveValue("inherit");
   await expect(profilePolicy.locator("option")).toHaveText(["Inherit server setting", "Enabled", "Disabled"]);
   await profilePolicy.selectOption("enabled");
   await expect(page.getByText("The server setting takes priority, so this profile cannot enable transcoding.")).toBeVisible();
-  await page.getByRole("button", { name: "Save preferences" }).click();
+  await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
   const profileRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
   expect(profileRequest.body).toMatchObject({ transcoding: "enabled" });
 });
 test("cast member limits persist in server and profile scopes", async ({ page, rivune }) => {
   await page.goto("/#admin");
   await page.getByRole("button", { name: /Settings/ }).click();
+  await page.locator('[data-settings-section="playback"]').click();
   const scope = page.locator(".settings-profile-picker select");
-  const savePreferences = page.getByRole("button", { name: "Save preferences" });
+  const savePreferences = page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" });
   const mode = page.getByRole("combobox", { name: "Cast member limit mode" });
   const limit = page.getByRole("spinbutton", { name: "Maximum cast members" });
 
@@ -203,9 +212,10 @@ test("the selected interface language localizes Home copy", async ({ page, rivun
   await page.goto("/#admin");
   await page.getByRole("button", { name: /Settings/ }).click();
   await page.locator(".settings-profile-picker select").selectOption("server");
+  await page.locator('[data-settings-section="language"]').click();
 
   await page.locator('select[name="interfaceLanguage"]').selectOption("fr");
-  await page.locator(".preferences-workspace .settings-card__actions button").last().click();
+  await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
   await rivune.waitForRequest("/api/v1/settings", "PATCH");
   await expect(page.locator("html")).toHaveAttribute("lang", "fr");
 
@@ -220,12 +230,16 @@ test("viewer preferences use the full desktop workspace", async ({ page, rivune 
   await page.goto("/");
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Preferences" }).click();
 
-  const layout = page.locator(".admin-layout--preferences");
-  const preferences = layout.locator(".preferences-admin");
-  await expect(layout.locator(".admin-tabs")).toHaveCount(0);
-  await expect(preferences).toBeVisible();
-  await expect.poll(async () => (await preferences.boundingBox())?.width ?? 0).toBeGreaterThan(1100);
-  await expect(preferences.getByRole("heading", { name: "Device notifications" })).toHaveCount(0);
+  const workspace = page.locator(".settings-workspace");
+  const navigation = workspace.locator(".settings-navigation");
+  const content = workspace.locator(".settings-content");
+  await expect(page.locator(".admin-layout--preferences .admin-tabs")).toHaveCount(0);
+  await expect(workspace).toBeVisible();
+  await expect(navigation).toBeVisible();
+  await expect(content).toBeVisible();
+  await expect.poll(async () => (await workspace.boundingBox())?.width ?? 0).toBeGreaterThan(1100);
+  await expect.poll(() => navigation.locator("[data-settings-section]").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("data-settings-section")))).toEqual(["appearance", "playback", "language", "subtitles", "connections"]);
+  await expect(content.getByRole("heading", { name: "Device notifications" })).toHaveCount(0);
 });
 
 test("tracking authorization survives provider slow-down and completes polling", async ({ page, rivune: _rivune }) => {
@@ -285,6 +299,7 @@ test("tracking authorization survives provider slow-down and completes polling",
 
   await page.goto("/#admin");
   await page.getByRole("button", { name: /Settings/ }).click();
+  await page.locator('[data-settings-section="connections"]').click();
   await page.getByRole("button", { name: "Connect account" }).click();
 
   const authorizationCode = page.locator(".tracking-settings code");

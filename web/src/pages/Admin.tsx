@@ -1,5 +1,5 @@
-import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Clock3, Cpu, Database, ExternalLink, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Languages, Layers3, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, Wrench, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Clock3, Cpu, Database, ExternalLink, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Languages, Layers3, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Search, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, Wrench, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
 import { AddTile, Button, ConfirmDialog, EmptyState, IconButton, Modal, Notice, Skeleton } from "../components";
@@ -20,6 +20,34 @@ const tabs: Array<{ id: AdminTab; labelKey: TranslationKey; descriptionKey: Tran
   { id: "operations", labelKey: "admin.tabs.operations.label", descriptionKey: "admin.tabs.operations.description", icon: Wrench, globalOnly: true },
   { id: "settings", labelKey: "admin.tabs.settings.label", descriptionKey: "admin.tabs.settings.description", icon: Settings2 },
 ];
+
+type SettingsSection = "appearance" | "playback" | "transcoding" | "language" | "subtitles" | "connections";
+
+const settingsSections: Record<SettingsSection, true> = { appearance: true, playback: true, transcoding: true, language: true, subtitles: true, connections: true };
+
+function adminRouteParameters() {
+  const [route, query = ""] = window.location.hash.slice(1).split("?", 2);
+  return route === "admin" ? new URLSearchParams(query) : new URLSearchParams();
+}
+
+function requestedAdminTab() {
+  const requested = adminRouteParameters().get("tab");
+  return tabs.some((item) => item.id === requested) ? requested as AdminTab : null;
+}
+
+function requestedSettingsSection() {
+  const requested = adminRouteParameters().get("section");
+  return requested !== null && settingsSections[requested as SettingsSection] === true ? requested as SettingsSection : null;
+}
+
+function updateAdminRoute(tab: AdminTab, section?: SettingsSection, replace = false) {
+  const parameters = new URLSearchParams();
+  parameters.set("tab", tab);
+  if (tab === "settings" && section) parameters.set("section", section);
+  const url = `/#admin?${parameters.toString()}`;
+  if (`${window.location.pathname}${window.location.hash}` === url) return;
+  window.history[replace ? "replaceState" : "pushState"]({ ...window.history.state, rivuneView: "admin" }, "", url);
+}
 
 function countCodePoints(value: string) {
   let count = 0;
@@ -43,13 +71,36 @@ export function AdminPage() {
   const isGlobalAdmin = account?.session.authorizationScope === "global_admin";
   const canManage = isGlobalAdmin || Boolean(activeProfile?.canManage);
   const visibleTabs = tabs.filter((item) => !item.globalOnly || isGlobalAdmin);
-  const [tab, setTab] = useState<AdminTab>(() => canManage ? "profiles" : "settings");
+  const [tab, setTab] = useState<AdminTab>(() => {
+    if (!canManage) return "settings";
+    const requested = requestedAdminTab();
+    return requested && visibleTabs.some((item) => item.id === requested) ? requested : "profiles";
+  });
   const selectedTab = !canManage ? "settings" : visibleTabs.some((item) => item.id === tab) ? tab : "profiles";
 
   useEffect(() => {
     if (!canManage) setTab("settings");
     else if (!tabs.some((item) => item.id === tab && (!item.globalOnly || isGlobalAdmin))) setTab("profiles");
   }, [canManage, isGlobalAdmin, tab]);
+
+  useEffect(() => {
+    const syncRoute = () => {
+      const requested = requestedAdminTab();
+      if (!canManage) setTab("settings");
+      else if (requested && tabs.some((item) => item.id === requested && (!item.globalOnly || isGlobalAdmin))) setTab(requested);
+    };
+    window.addEventListener("hashchange", syncRoute);
+    window.addEventListener("popstate", syncRoute);
+    return () => {
+      window.removeEventListener("hashchange", syncRoute);
+      window.removeEventListener("popstate", syncRoute);
+    };
+  }, [canManage, isGlobalAdmin]);
+
+  function navigateTab(next: AdminTab) {
+    setTab(next);
+    updateAdminRoute(next, next === "settings" ? requestedSettingsSection() ?? undefined : undefined);
+  }
 
   return <div className="standard-page admin-page page-enter">
     <header className="admin-page__header">
@@ -68,7 +119,7 @@ export function AdminPage() {
         const Icon = item.icon;
         const label = translate(item.labelKey);
         const description = translate(item.descriptionKey);
-        return <button type="button" aria-current={selectedTab === item.id ? "page" : undefined} key={item.id} className={selectedTab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}><span><Icon size={20} aria-hidden="true" /></span><div><strong>{label}</strong><small>{description}</small></div><ChevronDown size={17} aria-hidden="true" /></button>;
+        return <button type="button" aria-current={selectedTab === item.id ? "page" : undefined} key={item.id} className={selectedTab === item.id ? "is-active" : ""} onClick={() => navigateTab(item.id)}><span><Icon size={20} aria-hidden="true" /></span><div><strong>{label}</strong><small>{description}</small></div><ChevronDown size={17} aria-hidden="true" /></button>;
       })}</nav>}
       <section className="admin-panel">
         {selectedTab === "categories" ? <CategoriesAdmin />
@@ -2435,6 +2486,78 @@ const settingOptions = {
   mapping: [{ value: "tmdb", labelKey: "settings.seriesMapping.tmdb" }, { value: "tvdb", labelKey: "settings.seriesMapping.tvdb" }],
 } as const satisfies Record<string, ReadonlyArray<SettingOption>>;
 
+type SettingsSectionDefinition = {
+  id: SettingsSection;
+  label: string;
+  description: string;
+  icon: React.ReactNode;
+  searchText: string;
+};
+
+function settingsSectionDefinitions(serverScope: boolean): SettingsSectionDefinition[] {
+  const definition = (id: SettingsSection, label: string, description: string, icon: React.ReactNode, fields: string[]): SettingsSectionDefinition => ({
+    id,
+    label,
+    description,
+    icon,
+    searchText: [label, description, ...fields].join(" ").toLocaleLowerCase(),
+  });
+  const appearance = definition("appearance", translate("settings.groups.appearance.title"), translate("settings.groups.appearance.description"), <Palette />, [
+    translate("settings.fields.theme"),
+    translate("settings.fields.cardDensity"),
+    translate("settings.fields.animations"),
+    translate("settings.fields.animationsDescription"),
+    translate("settings.fields.hideUnreleased"),
+    translate("settings.fields.hideUnreleasedDescription"),
+  ]);
+  const playbackFields = [
+    translate("settings.fields.maximumResolution"),
+    translate("settings.fields.maximumCastMembers"),
+    translate("settings.fields.preferDirectPlay"),
+    translate("settings.fields.preferDirectPlayDescription"),
+    translate("settings.fields.autoplayNextEpisode"),
+    translate("settings.fields.autoplayNextEpisodeDescription"),
+    translate("settings.skipIntro"),
+    translate("settings.skipIntroDescription"),
+    translate("settings.skipRecap"),
+    translate("settings.skipRecapDescription"),
+    translate("settings.skipOutro"),
+    translate("settings.skipOutroDescription"),
+  ];
+  if (!serverScope) playbackFields.push(translate("settings.fields.transcoding"), translate("settings.fields.transcodingDescription"));
+  const playback = definition("playback", translate("settings.groups.playback.title"), translate("settings.groups.playback.description"), <Film />, playbackFields);
+  const language = definition("language", translate("settings.groups.languageMetadata.title"), translate("settings.groups.languageMetadata.description"), <Languages />, [
+    translate("settings.interfaceLanguage"),
+    translate("settings.interfaceLanguageDescription"),
+    translate("settings.fields.metadataLanguage"),
+    translate("settings.fields.metadataRegion"),
+    translate("settings.fields.seriesMapping"),
+    translate("settings.fields.audioLanguage"),
+  ]);
+  const subtitles = definition("subtitles", translate("settings.groups.subtitles.title"), translate("settings.groups.subtitles.description"), <Captions />, [
+    translate("settings.fields.subtitleLanguage"),
+    translate("settings.forcedSubtitleLanguage"),
+    translate("settings.forcedSubtitleDescription"),
+    translate("settings.fields.subtitleSize"),
+    translate("settings.fields.subtitleTextColor"),
+    translate("settings.fields.subtitleBackgroundOpacity"),
+  ]);
+  if (serverScope) {
+    const transcoding = definition("transcoding", translate("settings.fields.transcoding"), translate("settings.fields.allowTranscodingDescription"), <Cpu />, [
+      translate("settings.fields.allowTranscoding"),
+      translate("settings.fields.allowTranscodingDescription"),
+    ]);
+    return [appearance, playback, transcoding, language, subtitles];
+  }
+  const connections = definition("connections", translate("settings.trackingTitle"), translate("settings.trackingDescription"), <Radio />, [
+    translate("settings.trackingWatched"),
+    translate("settings.trackingProgress"),
+    translate("settings.trackingLibrary"),
+    translate("settings.trackingConnect"),
+  ]);
+  return [appearance, playback, language, subtitles, connections];
+}
+
 
 
 function SettingsAdmin() {
@@ -2451,6 +2574,8 @@ function SettingsAdmin() {
   const [transcodingDisableCount, setTranscodingDisableCount] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const [activeSection, setActiveSection] = useState<SettingsSection>(() => requestedSettingsSection() ?? "appearance");
+  const [sectionSearch, setSectionSearch] = useState("");
   const settingsTargetRef = useRef(settingsTarget);
   settingsTargetRef.current = settingsTarget;
   const canManageServer = account?.session.authorizationScope === "global_admin";
@@ -2460,6 +2585,55 @@ function SettingsAdmin() {
   const settingsDirty = serverSelected ? JSON.stringify(instance) !== JSON.stringify(savedInstance) : JSON.stringify(profile) !== JSON.stringify(savedProfile);
   const hasUnsavedChanges = settingsDirty;
   const overrideCount = Object.entries(serverSelected ? instance : profile).filter(([key, value]) => !isDeviceNotificationSetting(key) && value !== null && value !== undefined && !(key === "transcoding" && value === "inherit")).length;
+  const sectionDefinitions = settingsSectionDefinitions(serverSelected);
+  const normalizedSearch = sectionSearch.trim().toLocaleLowerCase();
+  const filteredSections = normalizedSearch ? sectionDefinitions.filter((section) => section.searchText.includes(normalizedSearch)) : sectionDefinitions;
+
+  function sectionAllowed(section: SettingsSection) {
+    return serverSelected ? section !== "connections" : section !== "transcoding";
+  }
+  const visibleSection = sectionAllowed(activeSection) ? activeSection : "appearance";
+
+  function navigateSettingsSection(section: SettingsSection, replace = false) {
+    if (!sectionAllowed(section)) return;
+    setActiveSection(section);
+    updateAdminRoute("settings", section, replace);
+  }
+
+  function handleSectionKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const buttons = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[data-settings-section]") ?? []);
+    const currentIndex = buttons.indexOf(event.currentTarget);
+    if (currentIndex < 0 || buttons.length === 0) return;
+    event.preventDefault();
+    const nextIndex = event.key === "Home" ? 0
+      : event.key === "End" ? buttons.length - 1
+        : event.key === "ArrowDown" ? (currentIndex + 1) % buttons.length
+          : (currentIndex - 1 + buttons.length) % buttons.length;
+    buttons[nextIndex]?.focus();
+  }
+
+  useEffect(() => {
+    if (!normalizedSearch) return;
+    const matches = settingsSectionDefinitions(serverSelected).filter((section) => section.searchText.includes(normalizedSearch));
+    if (matches.length === 1 && matches[0]?.id !== activeSection) navigateSettingsSection(matches[0]!.id);
+  }, [normalizedSearch, serverSelected]);
+
+  useEffect(() => {
+    const syncSection = () => {
+      const requested = requestedSettingsSection();
+      const next = requested && sectionAllowed(requested) ? requested : "appearance";
+      setActiveSection(next);
+      if (requested !== next || requestedAdminTab() !== "settings") updateAdminRoute("settings", next, true);
+    };
+    syncSection();
+    window.addEventListener("hashchange", syncSection);
+    window.addEventListener("popstate", syncSection);
+    return () => {
+      window.removeEventListener("hashchange", syncSection);
+      window.removeEventListener("popstate", syncSection);
+    };
+  }, [serverSelected]);
 
   useEffect(() => {
     setSettingsTarget(activeProfile?.id ?? "");
@@ -2564,26 +2738,53 @@ function SettingsAdmin() {
   if (!loaded) return <Skeleton className="settings-skeleton" />;
   const profileName = targetProfile?.name ?? translate("settings.scope.profileFallback");
   const scopeName = serverSelected ? translate("settings.scope.serverDefaults") : translate("settings.scope.profileOverrides", { profileName });
-  return <div className="admin-section preferences-admin">
-    <div className={`settings-scope settings-scope--${serverSelected ? "server" : "profile"}`}>
-      <span className="settings-scope__icon">{serverSelected ? <Server size={22} /> : <CircleUserRound size={22} />}</span>
-      <div className="settings-scope__copy">
-        <small>{translate("settings.scope.eyebrow")}</small>
-        <strong>{scopeName}</strong>
-        <p>{serverSelected ? translate("settings.scope.serverDescription") : translate("settings.scope.profileDescription")}</p>
-        <span>{serverSelected
-          ? translate("settings.scope.serverDefaultCount", { count: overrideCount })
-          : translate(overrideCount === 1 ? "settings.scope.profileOverrideCountOne" : "settings.scope.profileOverrideCountMany", { count: overrideCount })}</span>
+  return <div className="admin-section preferences-admin settings-workspace">
+    <aside className="settings-navigation" aria-label={translate("admin.tabs.settings.label")}>
+      <div className={`settings-scope settings-scope--${serverSelected ? "server" : "profile"}`}>
+        <span className="settings-scope__icon">{serverSelected ? <Server size={20} aria-hidden="true" /> : <CircleUserRound size={20} aria-hidden="true" />}</span>
+        <div className="settings-scope__copy">
+          <small>{translate("settings.scope.eyebrow")}</small>
+          <strong>{scopeName}</strong>
+          <span>{serverSelected
+            ? translate("settings.scope.serverDefaultCount", { count: overrideCount })
+            : translate(overrideCount === 1 ? "settings.scope.profileOverrideCountOne" : "settings.scope.profileOverrideCountMany", { count: overrideCount })}</span>
+        </div>
+        {canManageProfiles && <label className="field settings-profile-picker"><span>{translate("settings.scope.switch")}</span><div>{serverSelected ? <Server size={16} aria-hidden="true" /> : <CircleUserRound size={16} aria-hidden="true" />}<select value={settingsTarget} disabled={saving || checkingTranscodingDisable || hasUnsavedChanges} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">{translate("settings.scope.serverDefaults")}</option>}{administrationProfiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{translate("settings.scope.profileOption", { profileName: candidate.name })}</option>)}</select></div>{hasUnsavedChanges && <small>{translate("settings.scope.unsavedSwitchHint")}</small>}</label>}
       </div>
-      {canManageProfiles && <label className="field settings-profile-picker"><span>{translate("settings.scope.switch")}</span><div>{serverSelected ? <Server size={18} /> : <CircleUserRound size={18} />}<select value={settingsTarget} disabled={saving || checkingTranscodingDisable || hasUnsavedChanges} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">{translate("settings.scope.serverDefaults")}</option>}{administrationProfiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{translate("settings.scope.profileOption", { profileName: candidate.name })}</option>)}</select></div>{hasUnsavedChanges && <small>{translate("settings.scope.unsavedSwitchHint")}</small>}</label>}
-    </div>
-    {error && <Notice>{error}</Notice>}
-    {serverSelected
-      ? <SettingsCard serverScope title={translate("settings.server.title")} description={translate("settings.server.description")} icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void requestSave()} onReset={() => setInstance(savedInstance)} saving={saving || checkingTranscodingDisable} dirty={settingsDirty} emptyLabel={translate("settings.defaults.rivune")} />
-      : <>
-        <SettingsCard title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void requestSave()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />
-        <TrackingSettings profileId={settingsTarget} />
-      </>}
+      <label className="settings-navigation__search">
+        <span className="visually-hidden">{translate("common.search")}</span>
+        <Search size={17} aria-hidden="true" />
+        <input type="search" aria-label={translate("common.search")} placeholder={translate("common.search")} value={sectionSearch} onChange={(event) => setSectionSearch(event.target.value)} />
+      </label>
+      <nav aria-label={translate("admin.tabs.settings.label")}>
+        {filteredSections.map((section) => <button
+          type="button"
+          key={section.id}
+          data-settings-section={section.id}
+          className={visibleSection === section.id ? "is-active" : ""}
+          aria-current={visibleSection === section.id ? "page" : undefined}
+          aria-controls={`settings-section-${section.id}`}
+          onKeyDown={handleSectionKeyDown}
+          onClick={() => navigateSettingsSection(section.id)}
+        >
+          <span>{section.icon}</span>
+          <span><strong>{section.label}</strong><small>{section.description}</small></span>
+        </button>)}
+        {filteredSections.length === 0 && <p className="settings-navigation__empty" role="status">{translate("common.noResults")}</p>}
+      </nav>
+    </aside>
+    <main className="settings-content">
+      <header className="settings-content__header">
+        <span>{serverSelected ? <Server size={22} aria-hidden="true" /> : <CircleUserRound size={22} aria-hidden="true" />}</span>
+        <div><small>{translate("settings.scope.eyebrow")}</small><h2>{serverSelected ? translate("settings.server.title") : translate("settings.profile.title", { profileName })}</h2><p>{serverSelected ? translate("settings.scope.serverDescription") : translate("settings.scope.profileDescription")}</p></div>
+      </header>
+      {error && <Notice>{error}</Notice>}
+      {visibleSection === "connections" && !serverSelected
+        ? <div id="settings-section-connections"><TrackingSettings profileId={settingsTarget} /></div>
+        : serverSelected
+          ? <SettingsCard activeSection={visibleSection} serverScope title={translate("settings.server.title")} description={translate("settings.server.description")} icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void requestSave()} onReset={() => setInstance(savedInstance)} saving={saving || checkingTranscodingDisable} dirty={settingsDirty} emptyLabel={translate("settings.defaults.rivune")} />
+          : <SettingsCard activeSection={visibleSection} title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void requestSave()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />}
+    </main>
     {transcodingDisableCount !== null && <ConfirmDialog
       title={translate("settings.transcoding.disableConfirmTitle")}
       description={translate(transcodingDisableCount === 1 ? "settings.transcoding.disableConfirmDescriptionOne" : "settings.transcoding.disableConfirmDescriptionMany", { count: transcodingDisableCount })}
@@ -2722,35 +2923,77 @@ function TrackingSettings({ profileId }: { profileId: string }) {
     }
   }
 
-  if (loading) return <Skeleton className="settings-skeleton" />;
-  return <section className="settings-card tracking-settings">
-    <header>
-      <span><RefreshCw /></span>
-      <div><small>{translate("settings.tracking.eyebrow")}</small><h3>{translate("settings.trackingTitle")}</h3><p>{translate("settings.trackingDescription")}</p></div>
-      <span className="settings-card__meta"><Check size={14} /> {translate("settings.tracking.autoSave")}</span>
-    </header>
+  if (loading) return <Skeleton className="settings-skeleton tracking-settings__skeleton" />;
+  return <section className="tracking-settings" aria-label={translate("settings.trackingTitle")}>
     {error && <Notice>{error}</Notice>}
-    {authorization && <Notice tone="info"><div className="tracking-authorization" aria-live="polite"><strong>{translate("settings.trackingEnterCode", { provider: providerName(authorization.provider) })}</strong><code>{authorization.userCode}</code><a href={authorization.verificationUrl} target="_blank" rel="noreferrer">{translate("settings.trackingOpenProvider")} <ExternalLink size={14} /></a><small><LoaderCircle size={13} className="spin" /> {translate("settings.tracking.waitingForAuthorization")}</small></div></Notice>}
+    {authorization && <section className={`tracking-authorization tracking-authorization--${authorization.provider}`} role="status" aria-live="polite">
+      <span className={`tracking-provider-mark tracking-provider-mark--${authorization.provider}`}><TrackingProviderIcon provider={authorization.provider} /></span>
+      <div className="tracking-authorization__copy">
+        <strong>{translate("settings.trackingEnterCode", { provider: providerName(authorization.provider) })}</strong>
+        <small><LoaderCircle size={13} className="spin" aria-hidden="true" /> {translate("settings.tracking.waitingForAuthorization")}</small>
+      </div>
+      <code>{authorization.userCode}</code>
+      <a className="button button--secondary" href={authorization.verificationUrl} target="_blank" rel="noreferrer">{translate("settings.trackingOpenProvider")} <ExternalLink size={14} aria-hidden="true" /></a>
+    </section>}
     {loadFailed
       ? <div className="tracking-load-retry"><Button variant="secondary" onClick={() => void retryLoad()}><RefreshCw size={16} /> {translate("settings.tracking.retryLoading")}</Button></div>
       : providers.length > 0
-        ? <div className="settings-groups tracking-provider-grid">{providers.map((status) => {
+        ? <div className="tracking-provider-grid">{providers.map((status) => {
           const providerBusy = busy.startsWith(`${status.provider}:`);
-          return <SettingsGroup key={status.provider} icon={<TrackingProviderIcon provider={status.provider} />} iconClassName={`tracking-provider-tile tracking-provider-tile--${status.provider}`} title={providerName(status.provider)} description={status.connected ? translate("settings.tracking.connectedDescription") : status.configured ? translate("settings.trackingConnectDescription") : translate("settings.trackingAdminRequired")} status={status.connected ? translate("settings.trackingStatusConnected") : status.configured ? translate("settings.trackingStatusDisconnected") : translate("settings.trackingStatusUnavailable")} statusTone={status.connected ? "connected" : status.configured ? "disconnected" : "unavailable"}>
-            {status.connected ? <>
-              <TrackingToggle label={translate("settings.trackingWatched")} description={translate("settings.trackingWatchedDescription")} checked={status.syncWatched} disabled={providerBusy} saving={busy === `${status.provider}:syncWatched`} onChange={(value) => void toggle(status, "syncWatched", value)} />
-              <TrackingToggle label={translate("settings.trackingProgress")} description={translate("settings.trackingProgressDescription")} checked={status.syncProgress} disabled={providerBusy} saving={busy === `${status.provider}:syncProgress`} onChange={(value) => void toggle(status, "syncProgress", value)} />
-              <TrackingToggle label={translate("settings.trackingLibrary")} description={translate("settings.trackingLibraryDescription")} checked={status.syncLibrary} disabled={providerBusy} saving={busy === `${status.provider}:syncLibrary`} onChange={(value) => void toggle(status, "syncLibrary", value)} />
-              <div className="tracking-provider-action"><small aria-live="polite">{status.pendingItems ? translate("settings.trackingPending", { count: status.pendingItems }) : status.lastError ? translate("settings.trackingRetrying") : status.lastSuccessAt ? translate("settings.trackingLastSuccess", { date: new Date(status.lastSuccessAt).toLocaleString() }) : translate("settings.trackingReady")}</small><Button variant="secondary" loading={busy === `${status.provider}:disconnect`} disabled={providerBusy} onClick={() => void disconnect(status.provider)}>{translate("settings.trackingDisconnect")}</Button></div>
-            </> : <div className="tracking-provider-action"><small>{status.configured ? translate("settings.tracking.deviceFlowDescription") : translate("settings.trackingStatusUnavailable")}</small><Button disabled={!status.configured || Boolean(authorization) || providerBusy} loading={busy === `${status.provider}:connect`} onClick={() => void connect(status.provider)}>{translate("settings.trackingConnect")}</Button></div>}
-          </SettingsGroup>;
+          const stateLabel = status.lastError
+            ? translate("settings.trackingRetrying")
+            : status.connected
+              ? status.pendingItems
+                ? translate("settings.trackingPending", { count: status.pendingItems })
+                : status.lastSuccessAt
+                  ? translate("settings.trackingLastSuccess", { date: new Date(status.lastSuccessAt).toLocaleString() })
+                  : translate("settings.trackingReady")
+              : status.configured
+                ? translate("settings.tracking.deviceFlowDescription")
+                : translate("settings.trackingStatusUnavailable");
+          const lastSyncLabel = status.connected && status.lastSuccessAt
+            ? translate("settings.trackingLastSuccess", { date: new Date(status.lastSuccessAt).toLocaleString() })
+            : "";
+          const statusLabel = status.lastError
+            ? translate("settings.trackingRetrying")
+            : status.connected
+              ? translate("settings.trackingStatusConnected")
+              : status.configured
+                ? translate("settings.trackingStatusDisconnected")
+                : translate("settings.trackingStatusUnavailable");
+          return <article key={status.provider} aria-labelledby={`tracking-provider-${status.provider}`} className={`tracking-provider-card tracking-provider-card--${status.provider} ${status.connected ? "is-connected" : status.configured ? "is-disconnected" : "is-unavailable"} ${status.lastError ? "has-error" : ""}`}>
+            <header className="tracking-provider-card__identity">
+              <span className={`tracking-provider-mark tracking-provider-mark--${status.provider}`}><TrackingProviderIcon provider={status.provider} /></span>
+              <div>
+                <h3 id={`tracking-provider-${status.provider}`}>{providerName(status.provider)}</h3>
+                <p>{status.connected ? translate("settings.tracking.connectedDescription") : status.configured ? translate("settings.trackingConnectDescription") : translate("settings.trackingAdminRequired")}</p>
+              </div>
+              <span className="tracking-provider-status"><i aria-hidden="true" /> {statusLabel}</span>
+            </header>
+            <div className="tracking-provider-card__activity" aria-live="polite">
+              <Clock3 size={16} aria-hidden="true" />
+              <div className="tracking-provider-card__activity-copy"><strong>{stateLabel}</strong>{lastSyncLabel && stateLabel !== lastSyncLabel && <small>{lastSyncLabel}</small>}</div>
+              {!status.connected && <Button disabled={!status.configured || Boolean(authorization) || providerBusy} loading={busy === `${status.provider}:connect`} onClick={() => void connect(status.provider)}>{translate("settings.trackingConnect")}</Button>}
+            </div>
+            {status.connected && <details className="tracking-provider-details">
+              <summary aria-label={`${translate("shell.manage")} · ${providerName(status.provider)}`}><span><Settings2 size={16} aria-hidden="true" /> {translate("shell.manage")}</span><ChevronDown size={16} aria-hidden="true" /></summary>
+              <div className="tracking-provider-details__body">
+                <div className="tracking-provider-options">
+                  <TrackingToggle id={`tracking-${status.provider}-watched`} label={translate("settings.trackingWatched")} description={translate("settings.trackingWatchedDescription")} checked={status.syncWatched} disabled={providerBusy} saving={busy === `${status.provider}:syncWatched`} onChange={(value) => void toggle(status, "syncWatched", value)} />
+                  <TrackingToggle id={`tracking-${status.provider}-progress`} label={translate("settings.trackingProgress")} description={translate("settings.trackingProgressDescription")} checked={status.syncProgress} disabled={providerBusy} saving={busy === `${status.provider}:syncProgress`} onChange={(value) => void toggle(status, "syncProgress", value)} />
+                  <TrackingToggle id={`tracking-${status.provider}-library`} label={translate("settings.trackingLibrary")} description={translate("settings.trackingLibraryDescription")} checked={status.syncLibrary} disabled={providerBusy} saving={busy === `${status.provider}:syncLibrary`} onChange={(value) => void toggle(status, "syncLibrary", value)} />
+                </div>
+                <div className="tracking-provider-action"><small>{translate("settings.tracking.autoSave")}</small><Button variant="secondary" loading={busy === `${status.provider}:disconnect`} disabled={providerBusy} onClick={() => void disconnect(status.provider)}>{translate("settings.trackingDisconnect")}</Button></div>
+              </div>
+            </details>}
+          </article>;
         })}</div>
         : <div className="tracking-empty"><RefreshCw size={26} /><strong>{translate("settings.tracking.emptyTitle")}</strong><p>{translate("settings.tracking.emptyDescription")}</p></div>}
   </section>;
 }
 
-function TrackingToggle({ label, description, checked, disabled, saving, onChange }: { label: string; description: string; checked: boolean; disabled: boolean; saving: boolean; onChange: (value: boolean) => void }) {
-  return <div className="setting-control setting-control--toggle"><label className="toggle-field"><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} /><span><i /><div><strong>{label}</strong><small>{description}</small></div>{saving && <LoaderCircle size={15} className="spin tracking-toggle__saving" />}</span></label></div>;
+function TrackingToggle({ id, label, description, checked, disabled, saving, onChange }: { id: string; label: string; description: string; checked: boolean; disabled: boolean; saving: boolean; onChange: (value: boolean) => void }) {
+  return <div className="tracking-toggle"><label className="toggle-field" htmlFor={id}><input id={id} type="checkbox" checked={checked} disabled={disabled} aria-describedby={`${id}-description`} onChange={(event) => onChange(event.target.checked)} /><span aria-busy={saving}><i /><div><strong>{label}</strong><small id={`${id}-description`}>{description}</small></div>{saving && <LoaderCircle size={15} className="spin tracking-toggle__saving" aria-hidden="true" />}</span></label></div>;
 }
 
 function providerName(provider: TrackingProvider): string {
@@ -2779,7 +3022,7 @@ function MaintenanceCard({ values, onChange, onSave, onReset, saving, dirty }: {
   </section>;
 }
 
-function SettingsCard({ serverScope = false, title, description, icon, values, defaults = {}, onChange, onSave, onReset, saving, dirty, emptyLabel = translate("settings.defaults.server") }: { serverScope?: boolean; title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean; emptyLabel?: string }) {
+function SettingsCard({ activeSection, serverScope = false, values, defaults = {}, onChange, onSave, onReset, saving, dirty, emptyLabel = translate("settings.defaults.server") }: { activeSection: SettingsSection; serverScope?: boolean; title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean; emptyLabel?: string }) {
   const effective = {
     interfaceLanguage: defaults.interfaceLanguage ?? rivuneSettingDefaults.interfaceLanguage,
     theme: defaults.theme ?? rivuneSettingDefaults.theme,
@@ -2808,40 +3051,32 @@ function SettingsCard({ serverScope = false, title, description, icon, values, d
   const serverAllowsTranscoding = serverScope ? values.allowTranscoding ?? effective.allowTranscoding : effective.allowTranscoding;
   const profileTranscoding = values.transcoding ?? rivuneSettingDefaults.transcoding;
   const effectiveTranscoding = serverAllowsTranscoding && profileTranscoding !== "disabled";
+  const subtitlePreviewStyle = {
+    "--subtitle-preview-scale": values.subtitleSizePercent ?? effective.subtitleSizePercent,
+    "--subtitle-preview-color": values.subtitleTextColor ?? effective.subtitleTextColor,
+    "--subtitle-preview-opacity": values.subtitleBackgroundOpacityPercent ?? effective.subtitleBackgroundOpacityPercent,
+  } as CSSProperties;
   function change<K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) {
     onChange({ ...values, [key]: value });
   }
 
   return <section className="settings-card preferences-workspace">
-    <header>
-      <span>{icon}</span>
-      <div><small>{translate("settings.card.eyebrow")}</small><h3>{title}</h3><p>{description}</p></div>
-      <div className="settings-card__actions">
-        <span className={`settings-save-state ${dirty ? "is-dirty" : "is-saved"}`} role="status" aria-live="polite">{saving ? <><LoaderCircle size={14} className="spin" /> {translate("common.status.saving")}</> : dirty ? <><Save size={14} /> {translate("common.status.unsavedChanges")}</> : <><Check size={14} /> {translate("common.status.allChangesSaved")}</>}</span>
-        <Button variant="secondary" disabled={!dirty || saving} onClick={onReset}>{translate("common.actions.discardChanges")}</Button>
-        <Button loading={saving} disabled={!dirty} onClick={onSave}><Check size={18} /> {translate("settings.actions.savePreferences")}</Button>
-      </div>
-    </header>
     <div className="settings-groups settings-groups--preferences">
-      <SettingsGroup icon={<Palette />} title={translate("settings.groups.appearance.title")} description={translate("settings.groups.appearance.description")} className="settings-group--wide">
-        <SelectSetting label={translate("settings.fields.theme")} value={values.theme} defaultValue={effective.theme} options={settingOptions.theme} emptyLabel={emptyLabel} onChange={(value) => change("theme", value)} />
-        <SelectSetting label={translate("settings.fields.cardDensity")} value={values.cardDensity} defaultValue={effective.cardDensity} options={settingOptions.density} emptyLabel={emptyLabel} onChange={(value) => change("cardDensity", value as "comfortable" | "compact" | null)} />
+      {activeSection === "appearance" && <SettingsGroup sectionId="appearance" icon={<Palette />} title={translate("settings.groups.appearance.title")} description={translate("settings.groups.appearance.description")}>
+        <SelectSetting name="theme" presentation="theme" label={translate("settings.fields.theme")} value={values.theme} defaultValue={effective.theme} options={settingOptions.theme} emptyLabel={emptyLabel} onChange={(value) => change("theme", value)} />
+        <SelectSetting name="cardDensity" presentation="density" label={translate("settings.fields.cardDensity")} value={values.cardDensity} defaultValue={effective.cardDensity} options={settingOptions.density} emptyLabel={emptyLabel} onChange={(value) => change("cardDensity", value as "comfortable" | "compact" | null)} />
         <InheritedToggle label={translate("settings.fields.animations")} description={translate("settings.fields.animationsDescription")} value={values.animationsEnabled} defaultValue={effective.animationsEnabled} onChange={(value) => change("animationsEnabled", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label={translate("settings.fields.hideUnreleased")} description={translate("settings.fields.hideUnreleasedDescription")} value={values.hideUnreleased} defaultValue={effective.hideUnreleased} onChange={(value) => change("hideUnreleased", value)} emptyLabel={emptyLabel} />
-      </SettingsGroup>
+      </SettingsGroup>}
 
-      <SettingsGroup icon={<Film />} title={translate("settings.groups.playback.title")} description={translate("settings.groups.playback.description")} className="settings-group--wide">
-        {serverScope
-          ? <div className="setting-control setting-control--toggle settings-transcoding-control">
-            <label className="toggle-field"><input type="checkbox" checked={serverAllowsTranscoding} disabled={saving} aria-describedby="allow-transcoding-description" onChange={(event) => change("allowTranscoding", event.target.checked)} /><span><i /><div><strong>{translate("settings.fields.allowTranscoding")}</strong><small id="allow-transcoding-description">{translate("settings.fields.allowTranscodingDescription")}</small></div></span></label>
+      {activeSection === "playback" && <SettingsGroup sectionId="playback" icon={<Film />} title={translate("settings.groups.playback.title")} description={translate("settings.groups.playback.description")}>
+        {!serverScope && <div className="setting-control setting-control--transcoding">
+          <label className="field"><span>{translate("settings.fields.transcoding")}</span><div><select value={profileTranscoding} disabled={saving} aria-describedby="profile-transcoding-description" onChange={(event) => change("transcoding", event.target.value as "inherit" | "enabled" | "disabled")}>{settingOptions.transcoding.map((option) => <option key={option.value} value={option.value}>{translate(option.labelKey)}</option>)}</select></div><small id="profile-transcoding-description">{translate("settings.fields.transcodingDescription")}</small></label>
+          <div className={`settings-transcoding-state ${effectiveTranscoding ? "is-enabled" : "is-blocked"}`} role="status" aria-live="polite">
+            {effectiveTranscoding ? <Check aria-hidden="true" /> : <Shield aria-hidden="true" />}
+            <p>{translate(!serverAllowsTranscoding ? "settings.transcoding.blockedByServer" : effectiveTranscoding ? "settings.transcoding.effectiveEnabled" : "settings.transcoding.effectiveDisabled")}</p>
           </div>
-          : <div className="setting-control setting-control--transcoding">
-            <label className="field"><span>{translate("settings.fields.transcoding")}</span><div><select value={profileTranscoding} disabled={saving} aria-describedby="profile-transcoding-description" onChange={(event) => change("transcoding", event.target.value as "inherit" | "enabled" | "disabled")}>{settingOptions.transcoding.map((option) => <option key={option.value} value={option.value}>{translate(option.labelKey)}</option>)}</select></div><small id="profile-transcoding-description">{translate("settings.fields.transcodingDescription")}</small></label>
-            <div className={`settings-transcoding-state ${effectiveTranscoding ? "is-enabled" : "is-blocked"}`} role="status" aria-live="polite">
-              {effectiveTranscoding ? <Check aria-hidden="true" /> : <Shield aria-hidden="true" />}
-              <p>{translate(!serverAllowsTranscoding ? "settings.transcoding.blockedByServer" : effectiveTranscoding ? "settings.transcoding.effectiveEnabled" : "settings.transcoding.effectiveDisabled")}</p>
-            </div>
-          </div>}
+        </div>}
         <SelectSetting label={translate("settings.fields.maximumResolution")} value={values.maximumResolution} defaultValue={effective.maximumResolution} options={settingOptions.resolution} emptyLabel={emptyLabel} onChange={(value) => change("maximumResolution", value)} />
         <MaximumCastMembersSetting serverScope={serverScope} value={values.maximumCastMembers} serverValue={effective.maximumCastMembers} saving={saving} onChange={(value) => change("maximumCastMembers", value)} />
         <InheritedToggle label={translate("settings.fields.preferDirectPlay")} description={translate("settings.fields.preferDirectPlayDescription")} value={values.preferDirectPlay} defaultValue={effective.preferDirectPlay} onChange={(value) => change("preferDirectPlay", value)} emptyLabel={emptyLabel} />
@@ -2849,17 +3084,23 @@ function SettingsCard({ serverScope = false, title, description, icon, values, d
         <InheritedToggle label={translate("settings.skipIntro")} description={translate("settings.skipIntroDescription")} value={values.skipIntroEnabled} defaultValue={effective.skipIntroEnabled} onChange={(value) => change("skipIntroEnabled", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label={translate("settings.skipRecap")} description={translate("settings.skipRecapDescription")} value={values.skipRecapEnabled} defaultValue={effective.skipRecapEnabled} onChange={(value) => change("skipRecapEnabled", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label={translate("settings.skipOutro")} description={translate("settings.skipOutroDescription")} value={values.skipOutroEnabled} defaultValue={effective.skipOutroEnabled} onChange={(value) => change("skipOutroEnabled", value)} emptyLabel={emptyLabel} />
-      </SettingsGroup>
+      </SettingsGroup>}
 
-      <SettingsGroup icon={<Languages />} title={translate("settings.groups.languageMetadata.title")} description={translate("settings.groups.languageMetadata.description")}>
+      {activeSection === "transcoding" && serverScope && <SettingsGroup sectionId="transcoding" icon={<Cpu />} title={translate("settings.fields.transcoding")} description={translate("settings.fields.allowTranscodingDescription")}>
+        <div className="setting-control setting-control--toggle settings-transcoding-control">
+          <label className="toggle-field"><input type="checkbox" checked={serverAllowsTranscoding} disabled={saving} aria-describedby="allow-transcoding-description" onChange={(event) => change("allowTranscoding", event.target.checked)} /><span><i /><div><strong>{translate("settings.fields.allowTranscoding")}</strong><small id="allow-transcoding-description">{translate("settings.fields.allowTranscodingDescription")}</small></div></span></label>
+        </div>
+      </SettingsGroup>}
+
+      {activeSection === "language" && <SettingsGroup sectionId="language" icon={<Languages />} title={translate("settings.groups.languageMetadata.title")} description={translate("settings.groups.languageMetadata.description")}>
         <SelectSetting name="interfaceLanguage" label={translate("settings.interfaceLanguage")} description={translate("settings.interfaceLanguageDescription")} value={values.interfaceLanguage} defaultValue={effective.interfaceLanguage} options={settingOptions.interfaceLanguage} emptyLabel={emptyLabel} onChange={(value) => change("interfaceLanguage", value as InterfaceLanguage | null)} />
         <SelectSetting label={translate("settings.fields.metadataLanguage")} value={values.metadataLanguage} defaultValue={effective.metadataLanguage} options={settingOptions.language} emptyLabel={emptyLabel} onChange={(value) => change("metadataLanguage", value)} />
         <SelectSetting label={translate("settings.fields.metadataRegion")} value={values.metadataRegion} defaultValue={effective.metadataRegion} options={settingOptions.region} emptyLabel={emptyLabel} onChange={(value) => change("metadataRegion", value)} />
         <SelectSetting label={translate("settings.fields.seriesMapping")} value={values.seriesMappingProvider} defaultValue={effective.seriesMappingProvider} options={settingOptions.mapping} emptyLabel={emptyLabel} onChange={(value) => change("seriesMappingProvider", value as "tmdb" | "tvdb" | null)} />
         <TextSetting label={translate("settings.fields.audioLanguage")} value={values.audioLanguage} defaultValue={effective.audioLanguage} placeholder={translate("settings.fields.languageCodePlaceholder")} emptyLabel={emptyLabel} onChange={(value) => change("audioLanguage", value)} />
-      </SettingsGroup>
+      </SettingsGroup>}
 
-      <SettingsGroup icon={<Captions />} title={translate("settings.groups.subtitles.title")} description={translate("settings.groups.subtitles.description")}>
+      {activeSection === "subtitles" && <SettingsGroup sectionId="subtitles" icon={<Captions />} title={translate("settings.groups.subtitles.title")} description={translate("settings.groups.subtitles.description")}>
         <TextSetting label={translate("settings.fields.subtitleLanguage")} value={values.subtitleLanguage} defaultValue={effective.subtitleLanguage} placeholder={translate("settings.fields.languageCodePlaceholder")} emptyLabel={emptyLabel} onChange={(value) => change("subtitleLanguage", value)} />
         <TextSetting label={translate("settings.forcedSubtitleLanguage")} value={values.forcedSubtitleLanguage} defaultValue={effective.forcedSubtitleLanguage} placeholder={emptyLabel} emptyLabel={emptyLabel} list="forced-subtitle-languages" description={translate("settings.forcedSubtitleDescription")} onChange={(value) => change("forcedSubtitleLanguage", value)}>
           <datalist id="forced-subtitle-languages"><option value="off">{translate("settings.forcedSubtitleOff")}</option><option value="en">{translate("languages.english")}</option><option value="fr">Français</option><option value="es">Español</option><option value="de">Deutsch</option><option value="it">Italiano</option><option value="pt">Português</option><option value="ja">日本語</option></datalist>
@@ -2867,9 +3108,19 @@ function SettingsCard({ serverScope = false, title, description, icon, values, d
         <RangeSetting label={translate("settings.fields.subtitleSize")} value={values.subtitleSizePercent} defaultValue={effective.subtitleSizePercent} min={50} max={200} step={1} suffix="%" emptyLabel={emptyLabel} onChange={(value) => change("subtitleSizePercent", value)} />
         <ColorSetting value={values.subtitleTextColor} defaultValue={effective.subtitleTextColor} emptyLabel={emptyLabel} onChange={(value) => change("subtitleTextColor", value)} />
         <RangeSetting label={translate("settings.fields.subtitleBackgroundOpacity")} value={values.subtitleBackgroundOpacityPercent} defaultValue={effective.subtitleBackgroundOpacityPercent} min={0} max={100} step={1} suffix="%" emptyLabel={emptyLabel} onChange={(value) => change("subtitleBackgroundOpacityPercent", value)} />
-      </SettingsGroup>
-
+        <figure className="subtitle-preview" style={subtitlePreviewStyle} aria-label={translate("settings.groups.subtitles.title")}>
+          <div className="subtitle-preview__scene" aria-hidden="true"><i /><i /><i /></div>
+          <figcaption><span className="subtitle-preview__caption">{translate("settings.groups.subtitles.description")}</span></figcaption>
+        </figure>
+      </SettingsGroup>}
     </div>
+    {(dirty || saving) && <footer className={`settings-save-bar ${dirty ? "is-dirty" : ""}`}>
+      <span className={`settings-save-state ${dirty ? "is-dirty" : "is-saved"}`} role="status" aria-live="polite">{saving ? <><LoaderCircle size={14} className="spin" /> {translate("common.status.saving")}</> : <><Save size={14} /> {translate("common.status.unsavedChanges")}</>}</span>
+      <div>
+        <Button variant="secondary" disabled={saving} onClick={onReset}>{translate("common.actions.discardChanges")}</Button>
+        <Button loading={saving} onClick={onSave}><Check size={18} /> {translate("settings.actions.savePreferences")}</Button>
+      </div>
+    </footer>}
   </section>;
 }
 
@@ -2881,46 +3132,69 @@ function DeviceNotificationFields({ values, defaults, emptyLabel, onChange }: { 
   </>;
 }
 
-function SettingsGroup({ icon, iconClassName = "", title, description, status, statusTone = "", className = "", children }: { icon: React.ReactNode; iconClassName?: string; title: string; description: string; status?: string; statusTone?: "connected" | "disconnected" | "unavailable" | ""; className?: string; children: React.ReactNode }) {
-  return <section className={`settings-group ${className}`}>
+function SettingsGroup({ sectionId, icon, iconClassName = "", title, description, status, statusTone = "", className = "", children }: { sectionId?: SettingsSection; icon: React.ReactNode; iconClassName?: string; title: string; description: string; status?: string; statusTone?: "connected" | "disconnected" | "unavailable" | ""; className?: string; children: React.ReactNode }) {
+  return <section id={sectionId ? `settings-section-${sectionId}` : undefined} className={`settings-group ${className}`}>
     <div className="settings-group__heading"><span className={iconClassName}>{icon}</span><div><div className="settings-group__title"><h4>{title}</h4>{status && <span className={`settings-group__status ${statusTone ? `is-${statusTone}` : ""}`}>{status}</span>}</div><p>{description}</p></div></div>
     <div className="settings-group__grid">{children}</div>
   </section>;
 }
 
+function SettingInheritAction({ source, settingLabel, onClick }: { source: string; settingLabel: string; onClick: () => void }) {
+  const label = translate("settings.actions.useInherited", { source: source.toLowerCase() });
+  return <button type="button" className="setting-inherit-action" aria-label={`${label} · ${settingLabel}`} onClick={onClick}><RefreshCw size={12} aria-hidden="true" /><span>{label}</span></button>;
+}
+
 function InheritedToggle({ label, description, value, defaultValue, onChange, emptyLabel }: { label: string; description: string; value: boolean | null | undefined; defaultValue: boolean; onChange: (value: boolean | null) => void; emptyLabel: string }) {
   const inherited = value === null || value === undefined;
   const shown = value ?? defaultValue;
+  const state = inherited
+    ? translate("settings.value.inheritedBoolean", { source: emptyLabel, value: translate(shown ? "common.status.on" : "common.status.off") })
+    : translate("settings.value.overrideBoolean", { value: translate(shown ? "common.status.on" : "common.status.off") });
   return <div className="setting-control setting-control--toggle">
-    <label className="toggle-field"><input type="checkbox" checked={shown} onChange={(event) => onChange(event.target.checked)} /><span><i /><div><strong>{label}</strong><small>{description}</small><em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? translate("settings.value.inheritedBoolean", { source: emptyLabel, value: translate(shown ? "common.status.on" : "common.status.off") }) : translate("settings.value.overrideBoolean", { value: translate(shown ? "common.status.on" : "common.status.off") })}</em></div></span></label>
+    <div className="setting-row">
+      <div className="setting-row__copy"><strong>{label}</strong><small>{description}</small><em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{state}</em></div>
+      <div className="setting-row__actions">
+        {!inherited && <SettingInheritAction source={emptyLabel} settingLabel={label} onClick={() => onChange(null)} />}
+        <label className="setting-toggle">
+          <input type="checkbox" aria-label={label} checked={shown} onChange={(event) => onChange(event.target.checked)} />
+          <span aria-hidden="true"><i /></span>
+        </label>
+      </div>
+    </div>
   </div>;
 }
 function MaximumCastMembersSetting({ serverScope, value, serverValue, saving, onChange }: { serverScope: boolean; value: number | null | undefined; serverValue: number; saving: boolean; onChange: (value: number | null) => void }) {
-  const inherited = !serverScope && (value === null || value === undefined);
+  const inherited = value === null || value === undefined;
   const maximum = serverScope ? 100 : boundedInteger(serverValue, 20, 1, 100);
-  const shown = inherited ? maximum : boundedInteger(value, serverScope ? 20 : maximum, 1, maximum);
-  const input = <input
-    aria-label={translate("settings.fields.maximumCastMembers")}
-    name="maximumCastMembers"
-    type="number"
-    min={1}
-    max={maximum}
-    step={1}
-    required
-    disabled={saving || inherited}
-    value={shown}
-    onChange={(event) => {
-      const next = event.currentTarget.valueAsNumber;
-      if (Number.isInteger(next) && next >= 1 && next <= maximum) onChange(next);
-    }}
-  />;
+  const shown = inherited ? boundedInteger(serverValue, 20, 1, maximum) : boundedInteger(value, serverScope ? 20 : maximum, 1, maximum);
+  const source = serverScope ? translate("settings.defaults.rivune") : translate("settings.defaults.server");
+  const state = inherited
+    ? translate("settings.value.inheritedNumber", { source, value: shown, suffix: "" })
+    : translate("settings.value.overrideNumber", { value: shown, suffix: "" });
   return <div className="setting-control setting-control--number">
-    <label className="field">
-      <span>{translate("settings.fields.maximumCastMembers")}</span>
-      {!serverScope && <div><select name="maximumCastMembersMode" aria-label={translate("settings.fields.maximumCastMembersMode")} disabled={saving} value={inherited ? "inherit" : "custom"} onChange={(event) => onChange(event.target.value === "inherit" ? null : maximum)}><option value="inherit">{translate("settings.options.transcodingInherit")}</option><option value="custom">{translate("settings.options.customValue")}</option></select></div>}
-      <div>{input}</div>
-      {!serverScope && <small className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? translate("settings.value.inheritedNumber", { source: translate("settings.defaults.server"), value: maximum, suffix: "" }) : translate("settings.value.overrideNumber", { value: shown, suffix: "" })}</small>}
-    </label>
+    <div className="setting-row">
+      <div className="setting-row__copy"><strong>{translate("settings.fields.maximumCastMembers")}</strong><em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{state}</em></div>
+      <div className="setting-row__actions">
+        {!serverScope && <select className="setting-mode-select" name="maximumCastMembersMode" aria-label={translate("settings.fields.maximumCastMembersMode")} disabled={saving} value={inherited ? "inherit" : "custom"} onChange={(event) => onChange(event.target.value === "inherit" ? null : maximum)}><option value="inherit">{translate("settings.options.transcodingInherit")}</option><option value="custom">{translate("settings.options.customValue")}</option></select>}
+        <input
+          className="setting-number-input"
+          aria-label={translate("settings.fields.maximumCastMembers")}
+          name="maximumCastMembers"
+          type="number"
+          min={1}
+          max={maximum}
+          step={1}
+          required
+          disabled={saving || (!serverScope && inherited)}
+          value={shown}
+          onChange={(event) => {
+            const next = event.currentTarget.valueAsNumber;
+            if (Number.isInteger(next) && next >= 1 && next <= maximum) onChange(next);
+          }}
+        />
+        {!inherited && <SettingInheritAction source={source} settingLabel={translate("settings.fields.maximumCastMembers")} onClick={() => onChange(null)} />}
+      </div>
+    </div>
   </div>;
 }
 
@@ -2932,33 +3206,95 @@ function boundedInteger(value: number | null | undefined, fallback: number, mini
 function RangeSetting({ label, value, defaultValue, min, max, step, suffix, emptyLabel, onChange }: { label: string; value: number | null | undefined; defaultValue: number; min: number; max: number; step: number; suffix: string; emptyLabel: string; onChange: (value: number | null) => void }) {
   const inherited = value === null || value === undefined;
   const shown = value ?? defaultValue;
+  const state = inherited
+    ? translate("settings.value.inheritedNumber", { source: emptyLabel, value: shown, suffix })
+    : translate("settings.value.overrideNumber", { value: shown, suffix });
   return <div className="setting-control setting-control--range">
-    <label className="field"><span>{label}</span><div><input type="range" min={min} max={max} step={step} value={shown} onChange={(event) => onChange(Number(event.target.value))} /><output>{shown}{suffix}</output></div><small className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? translate("settings.value.inheritedNumber", { source: emptyLabel, value: shown, suffix }) : translate("settings.value.overrideNumber", { value: shown, suffix })}</small></label>
+    <div className="setting-row">
+      <div className="setting-row__copy"><strong>{label}</strong><em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{state}</em></div>
+      <div className="setting-row__actions">
+        <input aria-label={label} type="range" min={min} max={max} step={step} value={shown} onChange={(event) => onChange(Number(event.target.value))} />
+        <output>{shown}{suffix}</output>
+        {!inherited && <SettingInheritAction source={emptyLabel} settingLabel={label} onClick={() => onChange(null)} />}
+      </div>
+    </div>
   </div>;
 }
 
 function ColorSetting({ value, defaultValue, emptyLabel, onChange }: { value: string | null | undefined; defaultValue: string; emptyLabel: string; onChange: (value: string | null) => void }) {
   const inherited = value === null || value === undefined;
   const shown = value ?? defaultValue;
+  const label = translate("settings.fields.subtitleTextColor");
+  const state = inherited
+    ? translate("settings.value.inheritedText", { source: emptyLabel, value: shown })
+    : translate("settings.value.overrideText", { value: shown });
   return <div className="setting-control setting-control--color">
-    <label className="field"><span>{translate("settings.fields.subtitleTextColor")}</span><div><input type="color" value={shown} onChange={(event) => onChange(event.target.value.toUpperCase())} /><output>{shown}</output></div><small className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? translate("settings.value.inheritedText", { source: emptyLabel, value: shown }) : translate("settings.value.overrideText", { value: shown })}</small></label>
+    <div className="setting-row">
+      <div className="setting-row__copy"><strong>{label}</strong><em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{state}</em></div>
+      <div className="setting-row__actions">
+        <input aria-label={label} type="color" value={shown} onChange={(event) => onChange(event.target.value.toUpperCase())} />
+        <output>{shown}</output>
+        {!inherited && <SettingInheritAction source={emptyLabel} settingLabel={label} onClick={() => onChange(null)} />}
+      </div>
+    </div>
   </div>;
 }
 
-function SelectSetting({ name, label, description, value, defaultValue, options, emptyLabel, onChange }: { name?: string; label: string; description?: string; value: string | null | undefined; defaultValue: string; options: ReadonlyArray<SettingOption>; emptyLabel: string; onChange: (value: string | null) => void }) {
+function SelectSetting({ name, label, description, value, defaultValue, options, emptyLabel, presentation, onChange }: { name?: string; label: string; description?: string; value: string | null | undefined; defaultValue: string; options: ReadonlyArray<SettingOption>; emptyLabel: string; presentation?: "theme" | "density"; onChange: (value: string | null) => void }) {
   const inherited = value === null || value === undefined;
   const shown = value ?? defaultValue;
   const shownOption = options.find((option) => option.value === shown);
   const shownLabel = shownOption ? ("labelKey" in shownOption ? translate(shownOption.labelKey) : shownOption.label) : shown;
+  const state = inherited
+    ? translate("settings.value.inheritedText", { source: emptyLabel, value: shownLabel })
+    : translate("settings.value.overrideText", { value: shownLabel });
+  const copy = <div className="setting-row__copy"><strong>{label}</strong>{description && <small>{description}</small>}<em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{state}</em></div>;
+  if (presentation) {
+    const radioName = name ?? (presentation === "theme" ? "theme" : "cardDensity");
+    return <div className={`setting-control setting-control--visual setting-control--${presentation}`}>
+      <div className="setting-row">
+        {copy}
+        <div className="setting-row__actions setting-row__actions--visual">
+          <div className={`setting-visual-options setting-visual-options--${presentation}`} role="radiogroup" aria-label={label}>
+            {options.map((option) => {
+              const optionLabel = "labelKey" in option ? translate(option.labelKey) : option.label;
+              const effectiveOption = option.value === shown;
+              return <label key={option.value} className={`setting-visual-option ${effectiveOption ? "is-effective" : ""} ${effectiveOption && inherited ? "is-inherited" : ""}`}>
+                <input type="radio" name={radioName} value={option.value} checked={effectiveOption} onClick={() => { if (inherited && effectiveOption) onChange(option.value); }} onChange={() => onChange(option.value)} />
+                <span className="setting-visual-option__preview" aria-hidden="true"><i /><i /><i /></span>
+                <strong>{optionLabel}</strong>
+              </label>;
+            })}
+          </div>
+          {!inherited && <SettingInheritAction source={emptyLabel} settingLabel={label} onClick={() => onChange(null)} />}
+        </div>
+      </div>
+    </div>;
+  }
   return <div className="setting-control">
-    <label className="field"><span>{label}</span><div><select name={name} value={value ?? ""} onChange={(event) => onChange(event.target.value || null)}><option value="">{translate("settings.actions.useInherited", { source: emptyLabel.toLowerCase() })}</option>{options.map((option) => <option key={option.value} value={option.value}>{"labelKey" in option ? translate(option.labelKey) : option.label}</option>)}</select></div>{description && <small>{description}</small>}<small className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? translate("settings.value.inheritedText", { source: emptyLabel, value: shownLabel }) : translate("settings.value.overrideText", { value: shownLabel })}</small></label>
+    <div className="setting-row">
+      {copy}
+      <div className="setting-row__actions">
+        <select name={name} aria-label={label} value={value ?? ""} onChange={(event) => onChange(event.target.value || null)}><option value="">{translate("settings.actions.useInherited", { source: emptyLabel.toLowerCase() })}</option>{options.map((option) => <option key={option.value} value={option.value}>{"labelKey" in option ? translate(option.labelKey) : option.label}</option>)}</select>
+        {!inherited && <SettingInheritAction source={emptyLabel} settingLabel={label} onClick={() => onChange(null)} />}
+      </div>
+    </div>
   </div>;
 }
 
 function TextSetting({ label, value, defaultValue, placeholder, emptyLabel, list, description, onChange, children }: { label: string; value: string | null | undefined; defaultValue: string; placeholder: string; emptyLabel: string; list?: string; description?: string; onChange: (value: string | null) => void; children?: React.ReactNode }) {
   const inherited = value === null || value === undefined;
   const shown = value ?? defaultValue;
-  return <div className="setting-control">
-    <label className="field"><span>{label}</span><div><input list={list} value={value ?? ""} onChange={(event) => onChange(event.target.value || null)} placeholder={inherited ? shown : placeholder} />{children}</div>{description && <small>{description}</small>}<small className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{inherited ? translate("settings.value.inheritedText", { source: emptyLabel, value: shown }) : translate("settings.value.overrideText", { value: shown })}</small></label>
+  const state = inherited
+    ? translate("settings.value.inheritedText", { source: emptyLabel, value: shown })
+    : translate("settings.value.overrideText", { value: shown });
+  return <div className="setting-control setting-control--text">
+    <div className="setting-row">
+      <div className="setting-row__copy"><strong>{label}</strong>{description && <small>{description}</small>}<em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{state}</em></div>
+      <div className="setting-row__actions">
+        <span className="setting-text-input"><input aria-label={label} list={list} value={value ?? ""} onChange={(event) => onChange(event.target.value || null)} placeholder={inherited ? shown : placeholder} />{children}</span>
+        {!inherited && <SettingInheritAction source={emptyLabel} settingLabel={label} onClick={() => onChange(null)} />}
+      </div>
+    </div>
   </div>;
 }
