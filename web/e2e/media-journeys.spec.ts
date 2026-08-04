@@ -80,6 +80,22 @@ test("media details use a refresh-safe route with browser and in-page history", 
   await expect(page.locator(".route-surface").getByRole("heading").first()).toBeFocused();
 });
 
+test("TMDB media routes canonicalize to IMDb identifiers after metadata resolves", async ({ page, rivune }) => {
+  await page.goto("/media/movie/tmdb:550");
+  await expect(page.getByRole("heading", { name: "Fight Club" })).toBeVisible();
+  await expect(page).toHaveURL(/\/media\/movie\/tt0137523$/);
+  expect(rivune.matching("/api/v1/titles/resolve", "POST").at(-1)?.body).toMatchObject({ mediaType: "movie", provider: "tmdb", externalId: "550" });
+
+  await page.goto("/media/series/tmdb:9000");
+  await expect(page.getByRole("heading", { name: "Signal Horizon" })).toBeAttached();
+  await expect(page).toHaveURL(/\/media\/series\/tt9000$/);
+  expect(rivune.matching("/api/v1/titles/resolve", "POST").at(-1)?.body).toMatchObject({ mediaType: "series", provider: "tmdb", externalId: "9000" });
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Signal Horizon" })).toBeAttached();
+  await expect(page).toHaveURL(/\/media\/series\/tt9000$/);
+});
+
 test("season route overrides stale history state for numeric season zero", async ({ page, rivune }) => {
   await page.goto("/media/series/tt9000/season/1");
   await expect(page.getByRole("button", { name: /First Light/ }).first()).toBeVisible();

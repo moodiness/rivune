@@ -9,6 +9,14 @@ import { cachedMediaItem, cacheMediaItem } from "./metadataCache";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "./notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "./titleProviders";
 import type { CastMember, EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
+export type CanonicalRouteMetadata = {
+  sourceID: string;
+  sourceMediaType: string;
+  titleID: string;
+  titleMediaType: "movie" | "series";
+  externalIds: Record<string, string>;
+};
+
 
 type ExternalTitleLink = {
   externalID: string;
@@ -319,7 +327,7 @@ function withoutEmptySeasons(series: SeriesMetadata): SeriesMetadata {
   return seasons.length === series.seasons.length ? series : { ...series, seasons };
 }
 
-export function MediaDetails({ item, maximumCastMembers, onClose, onNavigateContext, onOpenMedia, onOpenSeason, onLibraryMutation }: { item: MediaItem; maximumCastMembers: number; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenMedia?: (item: MediaItem) => void; onOpenSeason?: (item: MediaItem) => void; onLibraryMutation?: () => void }) {
+export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClose, onNavigateContext, onOpenMedia, onOpenSeason, onLibraryMutation }: { item: MediaItem; maximumCastMembers: number; onCanonicalRoute?: (metadata: CanonicalRouteMetadata) => void; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenMedia?: (item: MediaItem) => void; onOpenSeason?: (item: MediaItem) => void; onLibraryMutation?: () => void }) {
   const metadataLocale = api.metadataLocale();
   const [details, setDetails] = useState(() => cachedMediaItem(item, metadataLocale));
   const [playing, setPlaying] = useState(false);
@@ -506,23 +514,32 @@ export function MediaDetails({ item, maximumCastMembers, onClose, onNavigateCont
       if (!active) return;
       setTitleID(resolvedTitleID);
       setTitleProgress(progress);
-      if (movie) setDetails((current) => ({
-        ...current,
-        title: movie.title || current.title,
-        description: movie.overview || current.description,
-        voteAverage: movie.voteAverage,
-        posterUrl: movie.posterUrl || current.posterUrl,
-        backgroundUrl: movie.backdropUrl || current.backgroundUrl,
-        logoUrl: movie.logoUrl || current.logoUrl,
-        releaseInfo: movie.releaseDate || current.releaseInfo,
-        released: movie.releaseDate || current.released,
-        voteCount: movie.voteCount,
-        externalIds: { ...current.externalIds, ...movie.externalIds },
-        raw: { ...current.raw, ...movie },
-      }));
+      if (movie) {
+        onCanonicalRoute?.({
+          sourceID: item.id,
+          sourceMediaType: item.mediaType,
+          titleID: resolvedTitleID,
+          titleMediaType: "movie",
+          externalIds: movie.externalIds,
+        });
+        setDetails((current) => ({
+          ...current,
+          title: movie.title || current.title,
+          description: movie.overview || current.description,
+          voteAverage: movie.voteAverage,
+          posterUrl: movie.posterUrl || current.posterUrl,
+          backgroundUrl: movie.backdropUrl || current.backgroundUrl,
+          logoUrl: movie.logoUrl || current.logoUrl,
+          releaseInfo: movie.releaseDate || current.releaseInfo,
+          released: movie.releaseDate || current.released,
+          voteCount: movie.voteCount,
+          externalIds: { ...current.externalIds, ...movie.externalIds },
+          raw: { ...current.raw, ...movie },
+        }));
+      }
     })().catch(() => undefined);
     return () => { active = false; };
-  }, [item.id, item.mediaType, item.titleId]);
+  }, [item.id, item.mediaType, item.titleId, onCanonicalRoute]);
 
   useEffect(() => {
     let active = true;
@@ -544,6 +561,13 @@ export function MediaDetails({ item, maximumCastMembers, onClose, onNavigateCont
           : await resolveMediaTitle(item);
       const resolved = withoutEmptySeasons(await api.seriesDetails(resolvedTitleID));
       if (!active) return;
+      onCanonicalRoute?.({
+        sourceID: item.id,
+        sourceMediaType: item.mediaType,
+        titleID: resolvedTitleID,
+        titleMediaType: "series",
+        externalIds: resolved.externalIds,
+      });
       if (item.mediaType === "series") setTitleID(resolvedTitleID);
       setSeries(resolved);
       seasonCacheRef.current.clear();
@@ -604,7 +628,7 @@ export function MediaDetails({ item, maximumCastMembers, onClose, onNavigateCont
       if (active) setSeriesError(notifyError(cause, t("media.series.error.loadFailed"), t("media.series.error.unavailableTitle")));
     }).finally(() => { if (active) setSeriesLoading(false); });
     return () => { active = false; };
-  }, [continueEpisodeID, continueSeasonID, continueSeasonNumber, continueSeriesID, item.id, item.mediaType, item.releaseInfo, item.released, item.titleId, routeSeriesResourceID, seriesContextEnabled]);
+  }, [continueEpisodeID, continueSeasonID, continueSeasonNumber, continueSeriesID, item.id, item.mediaType, item.releaseInfo, item.released, item.titleId, onCanonicalRoute, routeSeriesResourceID, seriesContextEnabled]);
 
   useEffect(() => {
     let active = true;

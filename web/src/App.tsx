@@ -5,6 +5,7 @@ import { api, APIError, clearMaintenanceMode, MAINTENANCE_MODE_EVENT, maintenanc
 import { Button, RivuneMark } from "./components";
 import { setLocale, translate as t } from "./i18n";
 import { mediaIdentity, mediaResourceID } from "./mediaIdentity";
+import type { CanonicalRouteMetadata } from "./media";
 import { configureNotificationDuration, notifyInfo } from "./notifications";
 import { Shell } from "./Shell";
 import type { View } from "./Shell";
@@ -52,8 +53,14 @@ function storedRouteItem(mediaType: string): MediaItem | undefined {
 function encodeRouteID(value: string): string {
   return encodeURIComponent(value).replaceAll("%3A", ":");
 }
+function imdbRouteID(item: Pick<MediaItem, "externalIds">): string {
+  const value = item.externalIds?.imdb?.trim() ?? "";
+  return /^tt\d+$/i.test(value) ? value.toLowerCase() : "";
+}
 
 function seriesRouteID(item: MediaItem): string {
+  const imdbID = imdbRouteID(item);
+  if (imdbID) return imdbID;
   const configured = item.raw?.routeSeriesResourceId;
   if (typeof configured === "string" && configured.trim()) return configured.trim();
   if (item.mediaType === "series") return item.id;
@@ -210,7 +217,8 @@ function mediaRouteURL(item: MediaItem, _origin: View, context?: MediaRouteConte
   if (item.mediaType === "tv" && item.sourceAddonId) {
     return `/media/tv/${encodeRouteID(item.sourceAddonId)}/${encodeRouteID(mediaResourceID(item))}`;
   }
-  return `/media/${encodeURIComponent(item.mediaType)}/${encodeRouteID(item.id)}`;
+  const routeID = item.mediaType === "movie" ? imdbRouteID(item) || item.id : item.id;
+  return `/media/${encodeURIComponent(item.mediaType)}/${encodeRouteID(routeID)}`;
 }
 
 function restoreScroll(top: number): void {
@@ -515,6 +523,31 @@ export default function App() {
     }
   }
 
+  const canonicalizeMediaRoute = useCallback((metadata: CanonicalRouteMetadata) => {
+    const currentRoute = mediaRouteRef.current;
+    if (!currentRoute || currentRoute.item.id !== metadata.sourceID || currentRoute.item.mediaType !== metadata.sourceMediaType) return;
+    const externalIds = { ...currentRoute.item.externalIds, ...metadata.externalIds };
+    const canonicalSeriesID = metadata.titleMediaType === "series" ? imdbRouteID({ externalIds }) : "";
+    const storedItem: MediaItem = {
+      ...currentRoute.item,
+      titleId: currentRoute.item.mediaType === metadata.titleMediaType ? metadata.titleID : currentRoute.item.titleId,
+      externalIds,
+      raw: canonicalSeriesID
+        ? {
+            ...currentRoute.item.raw,
+            routeSeriesResourceId: canonicalSeriesID,
+            ...(currentRoute.item.mediaType === "episode" ? { continueSeriesId: metadata.titleID } : {}),
+          }
+        : currentRoute.item.raw,
+    };
+    mediaRouteRef.current = { ...currentRoute, item: storedItem };
+    window.history.replaceState(
+      { ...window.history.state, rivuneMediaItem: storedItem },
+      "",
+      mediaRouteURL(storedItem, currentRoute.origin),
+    );
+  }, []);
+
   function openMedia(item: MediaItem) {
     invokingElementRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     window.history.replaceState({ ...window.history.state, rivuneView: view, rivuneScrollTop: window.scrollY }, "", viewURL(view));
@@ -526,20 +559,22 @@ export default function App() {
   }
 
   function updateMediaRoute(context: MediaRouteContext) {
-    if (!mediaRoute) return;
+    const currentRoute = mediaRouteRef.current;
+    if (!currentRoute) return;
     const storedItem: MediaItem = {
-      ...mediaRoute.item,
+      ...currentRoute.item,
       seasonNumber: context.seasonNumber,
       episodeNumber: context.episodeNumber,
       raw: {
-        ...mediaRoute.item.raw,
+        ...currentRoute.item.raw,
         continueSeasonId: context.seasonID,
         continueSeasonNumber: context.seasonNumber,
         continueEpisodeId: context.episodeID,
         continueEpisodeNumber: context.episodeNumber,
       },
     };
-    window.history.replaceState({ ...window.history.state, rivuneMediaItem: storedItem }, "", mediaRouteURL(storedItem, mediaRoute.origin, context));
+    mediaRouteRef.current = { ...currentRoute, item: storedItem };
+    window.history.replaceState({ ...window.history.state, rivuneMediaItem: storedItem }, "", mediaRouteURL(storedItem, currentRoute.origin, context));
   }
 
   function openNestedMedia(item: MediaItem) {
@@ -602,6 +637,6 @@ export default function App() {
         {visibleView === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} /> : visibleView === "search" ? <SearchPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.search} onLibraryMutation={invalidateLibrarySurfaces} /> : visibleView === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : visibleView === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
       </Suspense>
     </div>
-    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaIdentity(mediaRoute.item)}:${mediaRoute.item.titleId ?? ""}`} item={mediaRoute.item} maximumCastMembers={settings.maximumCastMembers} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} onLibraryMutation={invalidateLibrarySurfaces} /></Suspense>}
+    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaIdentity(mediaRoute.item)}:${mediaRoute.item.titleId ?? ""}`} item={mediaRoute.item} maximumCastMembers={settings.maximumCastMembers} onCanonicalRoute={canonicalizeMediaRoute} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} onLibraryMutation={invalidateLibrarySurfaces} /></Suspense>}
   </Shell>;
 }

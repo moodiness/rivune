@@ -1202,11 +1202,11 @@ export class RivuneHarness {
       const input = body as { externalId?: string; mediaType?: string; sourceAddonId?: string; resourceId?: string };
       const titleId = input.mediaType === "tv"
         ? `tv-${input.sourceAddonId ?? "addon"}-${input.resourceId ?? input.externalId ?? "channel"}`
-        : input.externalId === "tt9000"
+        : input.externalId === "tt9000" || input.externalId === "9000"
           ? "series-1"
           : input.externalId === "tt21209876"
             ? "series-anime"
-            : input.externalId === "tt0137523"
+            : input.externalId === "tt0137523" || input.externalId === "550"
               ? "movie-1"
               : "resolved-title";
       const resolved = { ...(body as object), titleId };
