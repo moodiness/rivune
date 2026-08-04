@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  Rivune is under active development. The web client and backend are usable today. Typed protocol-v17 clients for Apple, Android, and Windows are included; their native application interfaces are planned.
+  Rivune is under active development. The web client and backend are usable today. Typed protocol-v18 clients for Apple, Android, and Windows are included; their native application interfaces are planned.
 </p>
 
 ## Features

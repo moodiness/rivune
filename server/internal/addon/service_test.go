@@ -8,11 +8,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/moodiness/rivune/server/internal/auth"
 )
 
 type catalogSearchTransport struct {
@@ -48,6 +53,20 @@ func (transport functionTransport) Resource(ctx context.Context, transportURL st
 	return transport.resource(ctx, transportURL, path)
 }
 
+type installManifestTransport struct {
+	calls    int
+	manifest func(context.Context, string) (Manifest, json.RawMessage, error)
+}
+
+func (transport *installManifestTransport) Manifest(ctx context.Context, transportURL string) (Manifest, json.RawMessage, error) {
+	transport.calls++
+	return transport.manifest(ctx, transportURL)
+}
+
+func (*installManifestTransport) Resource(context.Context, string, ResourcePath) (json.RawMessage, CachePolicy, error) {
+	return nil, CachePolicy{}, errors.New("unexpected resource request")
+}
+
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -62,6 +81,134 @@ func executeTestRequest(id string) plannedRequest {
 			},
 		},
 		path: ResourcePath{Resource: "catalog", Type: "movie", ID: id},
+	}
+}
+
+func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run addon installation authorization tests")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	config.MaxConns = 2
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	const (
+		userID       = "2a000000-0000-4000-8000-000000000001"
+		categoryAID  = "2a000000-0000-4000-8000-000000000002"
+		categoryBID  = "2a000000-0000-4000-8000-000000000003"
+		profileAID   = "2a000000-0000-4000-8000-000000000004"
+		profileBID   = "2a000000-0000-4000-8000-000000000005"
+		transportURL = "https://authorization-boundary.example/manifest.json"
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cleanup := func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM profiles WHERE id = ANY($1::uuid[])`, []string{profileAID, profileBID})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1::uuid`, userID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM access_categories WHERE id = ANY($1::uuid[])`, []string{categoryAID, categoryBID})
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	if _, err := pool.Exec(ctx, `
+		WITH inserted_categories AS (
+			INSERT INTO access_categories (id, name, normalized_name, position)
+			VALUES ($1::uuid, 'Addon authorization A', 'addon authorization a', 910001),
+			       ($2::uuid, 'Addon authorization B', 'addon authorization b', 910002)
+			RETURNING id
+		), inserted_user AS (
+			INSERT INTO users (id, username, password_hash, role)
+			VALUES ($3::uuid, 'addon-authorization-user', 'unused-test-hash', 'admin')
+			RETURNING id
+		), inserted_profiles AS (
+			INSERT INTO profiles (id, category_id, name)
+			VALUES ($4::uuid, $1::uuid, 'Addon authorization profile A'),
+			       ($5::uuid, $1::uuid, 'Addon authorization profile B')
+			RETURNING id
+		)
+		INSERT INTO user_profile_access (user_id, profile_id, can_manage)
+		VALUES ($3::uuid, $4::uuid, true)
+	`, categoryAID, categoryBID, userID, profileAID, profileBID); err != nil {
+		t.Fatalf("seed addon authorization boundary: %v", err)
+	}
+
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	categoryA := categoryAID
+	principal := auth.Principal{
+		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory,
+		CategoryID: &categoryA, ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
+	}
+	rawManifest := json.RawMessage(`{"id":"org.rivune.authorization-boundary","version":"1.0.0","name":"Authorization Boundary","types":["movie"],"resources":["stream"],"catalogs":[]}`)
+	manifest := Manifest{
+		ID: "org.rivune.authorization-boundary", Version: "1.0.0", Name: "Authorization Boundary",
+		Types: []string{"movie"}, Resources: []ManifestResource{{Name: "stream", Short: true}},
+	}
+	transport := &installManifestTransport{manifest: func(context.Context, string) (Manifest, json.RawMessage, error) {
+		return manifest, rawManifest, nil
+	}}
+	service := NewService(pool, transport, discardLogger())
+	input := InstallInput{TransportURL: transportURL, ProfileIDs: []string{profileAID, profileBID}}
+
+	if _, err := service.Install(ctx, principal, input); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("unauthorized install error = %v, want %v", err, ErrForbidden)
+	}
+	if transport.calls != 0 {
+		t.Fatalf("manifest transport calls after denied preflight = %d, want 0", transport.calls)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO user_profile_access (user_id, profile_id, can_manage)
+		VALUES ($1::uuid, $2::uuid, true)
+	`, userID, profileBID); err != nil {
+		t.Fatalf("grant second profile management: %v", err)
+	}
+	transport.manifest = func(ctx context.Context, _ string) (Manifest, json.RawMessage, error) {
+		if _, err := pool.Exec(ctx, `UPDATE profiles SET category_id = $2::uuid WHERE id = $1::uuid`, profileBID, categoryBID); err != nil {
+			return Manifest{}, nil, fmt.Errorf("move profile during manifest request: %w", err)
+		}
+		return manifest, rawManifest, nil
+	}
+	if _, err := service.Install(ctx, principal, input); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("install after post-manifest category move error = %v, want %v", err, ErrForbidden)
+	}
+	if transport.calls != 1 {
+		t.Fatalf("manifest transport calls after post-network reauthorization = %d, want 1", transport.calls)
+	}
+	var installedCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM profile_addons WHERE transport_url = $1
+	`, transportURL).Scan(&installedCount); err != nil {
+		t.Fatalf("count protected addon writes: %v", err)
+	}
+	if installedCount != 0 {
+		t.Fatalf("protected addon writes after failed reauthorization = %d, want 0", installedCount)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE profiles SET category_id = $2::uuid WHERE id = $1::uuid`, profileBID, categoryAID); err != nil {
+		t.Fatalf("restore authorized profile category: %v", err)
+	}
+	transport.manifest = func(context.Context, string) (Manifest, json.RawMessage, error) {
+		return manifest, rawManifest, nil
+	}
+	installed, err := service.Install(ctx, principal, input)
+	if err != nil {
+		t.Fatalf("authorized install: %v", err)
+	}
+	if transport.calls != 2 {
+		t.Fatalf("manifest transport calls after authorized install = %d, want 2", transport.calls)
+	}
+	if len(installed.ProfileIDs) != 2 {
+		t.Fatalf("installed profile assignments = %v, want both profiles", installed.ProfileIDs)
 	}
 }
 
@@ -342,6 +489,40 @@ func TestExecuteLogsFailureIdentityAndCauseWithoutPayload(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "must-not-be-logged") {
 		t.Fatalf("failure log leaked response payload: %s", logs.String())
+	}
+}
+
+func TestSameInstalledAddonDetectsReturnedRevisionChanges(t *testing.T) {
+	now := time.Now().UTC()
+	expected := InstalledAddon{
+		ID:           "00000000-0000-4000-8000-000000000001",
+		TransportURL: "https://example.com/manifest.json",
+		Manifest:     json.RawMessage(`{"id":"example","version":"1.0.0"}`),
+		Position:     2,
+		ProfileIDs:   []string{"00000000-0000-4000-8000-000000000010"},
+		InstalledAt:  now.Add(-time.Hour),
+		UpdatedAt:    now,
+	}
+	current := expected
+	current.Manifest = append(json.RawMessage(nil), expected.Manifest...)
+	current.ProfileIDs = append([]string(nil), expected.ProfileIDs...)
+	if !sameInstalledAddon(current, expected) {
+		t.Fatal("identical addon revisions did not match")
+	}
+
+	current.Position++
+	if sameInstalledAddon(current, expected) {
+		t.Fatal("position change was not detected")
+	}
+	current = expected
+	current.Manifest = json.RawMessage(`{"id":"example","version":"2.0.0"}`)
+	if sameInstalledAddon(current, expected) {
+		t.Fatal("manifest change was not detected")
+	}
+	current = expected
+	current.ProfileIDs = append(append([]string(nil), expected.ProfileIDs...), "00000000-0000-4000-8000-000000000011")
+	if sameInstalledAddon(current, expected) {
+		t.Fatal("profile assignment change was not detected")
 	}
 }
 

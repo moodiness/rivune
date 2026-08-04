@@ -339,7 +339,17 @@ func TestRunActionDispatchesToSelectedServices(t *testing.T) {
 }
 
 func adminPrincipal() auth.Principal {
-	return auth.Principal{Role: "admin"}
+	return auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}
+}
+
+func TestRequireAdministratorRejectsCategoryScopedAdministrator(t *testing.T) {
+	categoryID := "11111111-1111-4111-8111-111111111111"
+	err := requireAdministrator(auth.Principal{
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID,
+	})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("category-scoped administrator authorization error = %v, want %v", err, ErrForbidden)
+	}
 }
 
 func newTestService(pool *pgxpool.Pool, metadataService MetadataRefresher, cleaner MaintenanceCleaner, playbackService PlaybackMaintenance) *Service {

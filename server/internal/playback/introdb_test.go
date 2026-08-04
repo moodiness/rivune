@@ -81,11 +81,10 @@ func TestMarkersFailsOpenWhenIntroDBIsUnavailable(t *testing.T) {
 	expiresAt := now.Add(time.Hour)
 	service := &Service{
 		introDBClient: server.Client(), introDBBaseURL: server.URL,
-		now: func() time.Time { return now },
+		now:              func() time.Time { return now },
+		profileTxFactory: testPlaybackProfileTxFactory,
 	}
-	result, err := service.Markers(context.Background(), auth.Principal{
-		ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
-	}, MarkerInput{
+	result, err := service.Markers(context.Background(), auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}, MarkerInput{
 		IMDBID: "tt0903747", Season: 1, Episode: 1,
 		IncludeIntro: true, IncludeRecap: true, IncludeOutro: true,
 	})

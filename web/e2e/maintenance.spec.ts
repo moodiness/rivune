@@ -1,6 +1,7 @@
-import { expect, test } from "./fixtures/rivune";
+import { CATEGORY_IDS, expect, test } from "./fixtures/rivune";
 
 test("maintenance holds viewer profiles at selection and lets a manager profile enter", async ({ page, rivune }) => {
+  rivune.setProfileCategory("bob", CATEGORY_IDS.household);
   rivune.setMaintenance(true, "Upgrading the media library");
 
   await page.goto("/");
@@ -20,6 +21,7 @@ test("maintenance holds viewer profiles at selection and lets a manager profile 
 });
 
 test("maintenance profile gate shows its default message when none is configured", async ({ page, rivune }) => {
+  rivune.setProfileCategory("bob", CATEGORY_IDS.household);
   rivune.setMaintenance(true);
 
   await page.goto("/");
@@ -212,11 +214,10 @@ test("the selected interface language localizes Home copy", async ({ page, rivun
   await expect(page.getByText("Continue Watching", { exact: true })).toHaveCount(0);
 });
 
-test("viewer preferences use the full desktop workspace", async ({ page, rivune: _rivune }) => {
+test("viewer preferences use the full desktop workspace", async ({ page, rivune }) => {
+  rivune.configureCategoryScope(CATEGORY_IDS.kids);
   await page.setViewportSize({ width: 1568, height: 899 });
   await page.goto("/");
-  await page.getByRole("button", { name: "Switch profile" }).first().click();
-  await page.getByRole("button", { name: "Bob Profile" }).click();
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Preferences" }).click();
 
   const layout = page.locator(".admin-layout--preferences");

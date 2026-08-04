@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/category"
 	"github.com/moodiness/rivune/server/internal/instance"
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/operations"
@@ -22,13 +23,14 @@ import (
 )
 
 const (
-	contractUserID    = "11111111-1111-4111-8111-111111111111"
-	contractSessionID = "22222222-2222-4222-8222-222222222222"
-	contractDeviceID  = "33333333-3333-4333-8333-333333333333"
-	contractProfileID = "44444444-4444-4444-8444-444444444444"
-	contractTitleID   = "55555555-5555-4555-8555-555555555555"
-	contractAddonID   = "66666666-6666-4666-8666-666666666666"
-	contractSeasonID  = "tvdb:77777777-7777-4777-8777-777777777777:1"
+	contractUserID     = "11111111-1111-4111-8111-111111111111"
+	contractSessionID  = "22222222-2222-4222-8222-222222222222"
+	contractDeviceID   = "33333333-3333-4333-8333-333333333333"
+	contractProfileID  = "44444444-4444-4444-8444-444444444444"
+	contractCategoryID = "77777777-7777-4777-8777-777777777777"
+	contractTitleID    = "55555555-5555-4555-8555-555555555555"
+	contractAddonID    = "66666666-6666-4666-8666-666666666666"
+	contractSeasonID   = "tvdb:77777777-7777-4777-8777-777777777777:1"
 )
 
 var (
@@ -148,6 +150,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 				AccessToken: "rivune_at_contract", AccessExpiresAt: now.Add(15 * time.Minute),
 				RefreshToken: "rivune_rt_contract", RefreshExpiresAt: now.Add(30 * 24 * time.Hour),
 				SessionID: contractSessionID, DeviceID: contractDeviceID,
+				AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 			},
 			principal: contractPrincipal(),
 			account: auth.Account{
@@ -155,6 +158,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 				Profiles: []auth.Profile{{
 					ID: contractProfileID, Name: "Admin", CanManage: true, Enabled: true,
 					AccessTimezone: "UTC", Accessible: true, AvatarKind: "preset", AvatarPreset: "aurora",
+					Category: category.CategoryRef{ID: contractCategoryID, Name: "Uncategorized"},
 				}},
 			},
 		}
@@ -607,16 +611,21 @@ func contractPrincipal() auth.Principal {
 	grantExpiresAt := time.Date(2026, time.July, 31, 14, 0, 0, 0, time.UTC)
 	return auth.Principal{
 		SessionID: contractSessionID, UserID: contractUserID, DeviceID: contractDeviceID,
-		Username: "admin", Role: "admin", ActiveProfileID: new(contractProfileID),
-		ProfileGrantExpiresAt: &grantExpiresAt,
+		Username: "admin", Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+		ActiveProfileID: contractStringPointer(contractProfileID), ProfileGrantExpiresAt: &grantExpiresAt,
 	}
 }
 
 func contractProfile() profile.Profile {
 	return profile.Profile{
-		ID: contractProfileID, Name: "Admin", CanManage: true, Enabled: true,
+		ID: contractProfileID, CategoryID: contractCategoryID, CategoryName: "Uncategorized",
+		Name: "Admin", CanManage: true, Enabled: true,
 		AccessTimezone: "UTC", Accessible: true, AvatarKind: "preset", AvatarPreset: "aurora",
 	}
+}
+
+func contractStringPointer(value string) *string {
+	return &value
 }
 
 func instanceInfoForContract() instance.Info {

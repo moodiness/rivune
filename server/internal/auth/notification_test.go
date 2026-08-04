@@ -17,7 +17,7 @@ func TestBroadcastSessionNotificationRequiresAdministratorBeforeStorage(t *testi
 
 func TestBroadcastSessionNotificationValidatesBoundedPlainTextBeforeStorage(t *testing.T) {
 	service := &Service{}
-	principal := Principal{Role: "admin"}
+	principal := Principal{Role: "admin", AuthorizationScope: AuthorizationScopeGlobalAdministrator}
 	for _, test := range []struct {
 		name    string
 		key     string

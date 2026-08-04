@@ -58,10 +58,6 @@ func (s *Service) enqueueTrackingTx(ctx context.Context, tx pgx.Tx, profileID, t
 }
 
 func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput) (TitleReference, error) {
-	profileID, err := activeProfileID(principal)
-	if err != nil {
-		return TitleReference{}, err
-	}
 	input.MediaType = strings.ToLower(strings.TrimSpace(input.MediaType))
 	input.Provider = strings.ToLower(strings.TrimSpace(input.Provider))
 	input.ExternalID = strings.TrimSpace(input.ExternalID)
@@ -99,19 +95,6 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 		if len(input.SourceCatalogID) > 512 || len(input.SourceName) > 500 || len(input.Country) > 128 || len(input.Language) > 128 || len(input.Category) > 256 {
 			return TitleReference{}, fmt.Errorf("%w: invalid TV source snapshot", ErrInvalidInput)
 		}
-		var accessible bool
-		if err := s.pool.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1
-				FROM addon_profile_access
-				WHERE addon_id = $1::uuid AND profile_id = $2::uuid
-			)
-		`, input.SourceAddonID, profileID).Scan(&accessible); err != nil {
-			return TitleReference{}, fmt.Errorf("check TV addon access: %w", err)
-		}
-		if !accessible {
-			return TitleReference{}, ErrNotFound
-		}
 		input.ExternalID = tvExternalID(input.SourceAddonID, input.ResourceID)
 		input.Released = ""
 	} else {
@@ -144,6 +127,25 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 		return TitleReference{}, fmt.Errorf("begin title resolution: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	if err != nil {
+		return TitleReference{}, err
+	}
+	if input.MediaType == "tv" {
+		var accessible bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM addon_profile_access
+				WHERE addon_id = $1::uuid AND profile_id = $2::uuid
+			)
+		`, input.SourceAddonID, profileID).Scan(&accessible); err != nil {
+			return TitleReference{}, fmt.Errorf("check TV addon access: %w", err)
+		}
+		if !accessible {
+			return TitleReference{}, ErrNotFound
+		}
+	}
 	lockKey := input.Provider + ":" + input.MediaType + ":" + storedExternalID
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
 		return TitleReference{}, fmt.Errorf("lock title resolution: %w", err)
@@ -215,17 +217,22 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 }
 
 func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titleID string) (LibraryItem, error) {
-	profileID, err := activeProfileID(principal)
+	titleID, err := normalizeTitleID(titleID)
 	if err != nil {
 		return LibraryItem{}, err
 	}
-	titleID, err = normalizeTitleID(titleID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return LibraryItem{}, fmt.Errorf("begin library addition: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
 	if err != nil {
 		return LibraryItem{}, err
 	}
 	var mediaType string
 	var accessible bool
-	if err := s.pool.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		SELECT title.media_type,
 		       title.media_type <> 'tv' OR EXISTS (
 		           SELECT 1
@@ -247,11 +254,6 @@ func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titl
 	if !accessible {
 		return LibraryItem{}, ErrNotFound
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return LibraryItem{}, fmt.Errorf("begin library addition: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	var item LibraryItem
 	err = tx.QueryRow(ctx, `
 		WITH library AS (
@@ -306,16 +308,8 @@ func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titl
 }
 
 func (s *Service) RemoveLibrary(ctx context.Context, principal auth.Principal, titleID string) error {
-	profileID, err := activeProfileID(principal)
+	titleID, err := normalizeTitleID(titleID)
 	if err != nil {
-		return err
-	}
-	titleID, err = normalizeTitleID(titleID)
-	if err != nil {
-		return err
-	}
-	mediaType, err := s.titleMediaType(ctx, titleID)
-	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -323,6 +317,14 @@ func (s *Service) RemoveLibrary(ctx context.Context, principal auth.Principal, t
 		return fmt.Errorf("begin library removal: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	if err != nil {
+		return err
+	}
+	mediaType, err := titleMediaType(ctx, tx, titleID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM profile_library WHERE profile_id = $1::uuid AND title_id = $2::uuid`, profileID, titleID); err != nil {
 		return fmt.Errorf("remove library title: %w", err)
 	}
@@ -341,17 +343,23 @@ func (s *Service) RemoveLibrary(ctx context.Context, principal auth.Principal, t
 }
 
 func (s *Service) Library(ctx context.Context, principal auth.Principal, mediaType string, page, pageSize int) (LibraryPage, error) {
-	profileID, err := activeProfileID(principal)
+	var err error
+	mediaType, page, pageSize, err = normalizeLibraryQuery(mediaType, page, pageSize)
 	if err != nil {
 		return LibraryPage{}, err
 	}
-	mediaType, page, pageSize, err = normalizeLibraryQuery(mediaType, page, pageSize)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return LibraryPage{}, fmt.Errorf("begin library query: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
 	if err != nil {
 		return LibraryPage{}, err
 	}
 
 	var totalResults int
-	if err := s.pool.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
 		FROM profile_library library
 		JOIN titles title ON title.id = library.title_id
@@ -359,7 +367,7 @@ func (s *Service) Library(ctx context.Context, principal auth.Principal, mediaTy
 	`, profileID, mediaType).Scan(&totalResults); err != nil {
 		return LibraryPage{}, fmt.Errorf("count library titles: %w", err)
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := tx.Query(ctx, `
 		SELECT title.id::text, title.media_type,
 		       COALESCE(title.resource_provider, ''), COALESCE(identity.external_id, ''),
 		       COALESCE(title.resource_id, ''), COALESCE(title.display_title, ''),
@@ -403,6 +411,7 @@ func (s *Service) Library(ctx context.Context, principal auth.Principal, mediaTy
 		}
 		items = append(items, item)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return LibraryPage{}, fmt.Errorf("iterate library titles: %w", err)
 	}
@@ -410,52 +419,67 @@ func (s *Service) Library(ctx context.Context, principal auth.Principal, mediaTy
 	if totalResults > 0 {
 		totalPages = (totalResults + pageSize - 1) / pageSize
 	}
-	return LibraryPage{Items: items, Page: page, TotalPages: totalPages, TotalResults: totalResults}, nil
+	pageResult := LibraryPage{Items: items, Page: page, TotalPages: totalPages, TotalResults: totalResults}
+	if err := tx.Commit(ctx); err != nil {
+		return LibraryPage{}, fmt.Errorf("commit library query: %w", err)
+	}
+	return pageResult, nil
 }
 
 func (s *Service) GetProgress(ctx context.Context, principal auth.Principal, titleID string) (Progress, error) {
-	profileID, err := activeProfileID(principal)
+	titleID, err := normalizeTitleID(titleID)
 	if err != nil {
 		return Progress{}, err
 	}
-	titleID, err = normalizeTitleID(titleID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Progress{}, fmt.Errorf("begin playback progress query: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
 	if err != nil {
 		return Progress{}, err
 	}
-	progress, err := s.progress(ctx, profileID, titleID)
+	progress, err := progressForProfile(ctx, tx, profileID, titleID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		if _, titleErr := s.titleMediaType(ctx, titleID); titleErr != nil {
+		if _, titleErr := titleMediaType(ctx, tx, titleID); titleErr != nil {
 			return Progress{}, titleErr
 		}
 		return Progress{}, ErrProgressNotFound
 	}
-	return progress, err
-}
-
-func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, titleID string, input UpdateProgressInput) (Progress, error) {
-	profileID, err := activeProfileID(principal)
 	if err != nil {
 		return Progress{}, err
 	}
-	titleID, err = normalizeTitleID(titleID)
+	if err := tx.Commit(ctx); err != nil {
+		return Progress{}, fmt.Errorf("commit playback progress query: %w", err)
+	}
+	return progress, nil
+}
+
+func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, titleID string, input UpdateProgressInput) (Progress, error) {
+	titleID, err := normalizeTitleID(titleID)
 	if err != nil {
 		return Progress{}, err
 	}
 	if err := validateProgressInput(input); err != nil {
 		return Progress{}, err
 	}
-	mediaType, err := s.titleMediaType(ctx, titleID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Progress{}, fmt.Errorf("begin playback progress update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	if err != nil {
+		return Progress{}, err
+	}
+	mediaType, err := titleMediaType(ctx, tx, titleID)
 	if err != nil {
 		return Progress{}, err
 	}
 	if mediaType != "movie" && mediaType != "episode" {
 		return Progress{}, fmt.Errorf("%w: progress titles must be movies or episodes", ErrInvalidInput)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Progress{}, fmt.Errorf("begin playback progress update: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	var progress Progress
 	if input.ExpectedVersion == 0 {
 		err = scanProgress(tx.QueryRow(ctx, `
@@ -498,29 +522,29 @@ func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, 
 }
 
 func (s *Service) SetWatched(ctx context.Context, principal auth.Principal, titleID string, completed bool, input CompletionInput) (Progress, error) {
-	profileID, err := activeProfileID(principal)
-	if err != nil {
-		return Progress{}, err
-	}
-	titleID, err = normalizeTitleID(titleID)
+	titleID, err := normalizeTitleID(titleID)
 	if err != nil {
 		return Progress{}, err
 	}
 	if input.ExpectedVersion < 0 {
 		return Progress{}, fmt.Errorf("%w: expectedVersion must be zero or greater", ErrInvalidInput)
 	}
-	mediaType, err := s.titleMediaType(ctx, titleID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Progress{}, fmt.Errorf("begin watched state update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	if err != nil {
+		return Progress{}, err
+	}
+	mediaType, err := titleMediaType(ctx, tx, titleID)
 	if err != nil {
 		return Progress{}, err
 	}
 	if mediaType != "movie" && mediaType != "episode" {
 		return Progress{}, fmt.Errorf("%w: watched titles must be movies or episodes", ErrInvalidInput)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Progress{}, fmt.Errorf("begin watched state update: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	var progress Progress
 	if input.ExpectedVersion == 0 {
 		err = scanProgress(tx.QueryRow(ctx, `
@@ -562,11 +586,7 @@ func (s *Service) SetWatched(ctx context.Context, principal auth.Principal, titl
 }
 
 func (s *Service) ClearProgress(ctx context.Context, principal auth.Principal, titleID string, expectedVersion int64) error {
-	profileID, err := activeProfileID(principal)
-	if err != nil {
-		return err
-	}
-	titleID, err = normalizeTitleID(titleID)
+	titleID, err := normalizeTitleID(titleID)
 	if err != nil {
 		return err
 	}
@@ -578,6 +598,10 @@ func (s *Service) ClearProgress(ctx context.Context, principal auth.Principal, t
 		return fmt.Errorf("begin playback progress clear: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	if err != nil {
+		return err
+	}
 	result, err := tx.Exec(ctx, `
 		DELETE FROM profile_progress
 		WHERE profile_id = $1::uuid AND title_id = $2::uuid AND version = $3
@@ -607,16 +631,21 @@ func (s *Service) ClearProgress(ctx context.Context, principal auth.Principal, t
 }
 
 func (s *Service) DismissContinue(ctx context.Context, principal auth.Principal, titleID string) error {
-	profileID, err := activeProfileID(principal)
+	titleID, err := normalizeTitleID(titleID)
 	if err != nil {
 		return err
 	}
-	titleID, err = normalizeTitleID(titleID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin continue watching dismissal: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
 	if err != nil {
 		return err
 	}
 	var targetID, mediaType string
-	err = s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT COALESCE(CASE WHEN title.media_type = 'episode' THEN series.id END, title.id)::text,
 		       title.media_type
 		FROM titles title
@@ -635,12 +664,15 @@ func (s *Service) DismissContinue(ctx context.Context, principal auth.Principal,
 	if mediaType != "movie" && mediaType != "episode" {
 		return fmt.Errorf("%w: continue watching titles must be movies or episodes", ErrInvalidInput)
 	}
-	if _, err := s.pool.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO profile_continue_dismissals (profile_id, title_id, dismissed_at)
 		VALUES ($1::uuid, $2::uuid, now())
 		ON CONFLICT (profile_id, title_id) DO UPDATE SET dismissed_at = EXCLUDED.dismissed_at
 	`, profileID, targetID); err != nil {
 		return fmt.Errorf("dismiss continue watching title: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit continue watching dismissal: %w", err)
 	}
 	return nil
 }
@@ -665,23 +697,28 @@ func clearContinueDismissalTx(ctx context.Context, tx pgx.Tx, profileID, titleID
 }
 
 func (s *Service) ContinueWatching(ctx context.Context, principal auth.Principal, limit int) (ContinuePage, error) {
-	profileID, err := activeProfileID(principal)
-	if err != nil {
-		return ContinuePage{}, err
-	}
 	if limit == 0 {
 		limit = defaultPageSize
 	}
 	if limit < 1 || limit > maximumPageSize {
 		return ContinuePage{}, fmt.Errorf("%w: limit must be between 1 and %d", ErrInvalidInput, maximumPageSize)
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ContinuePage{}, fmt.Errorf("begin continue watching query: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	if err != nil {
+		return ContinuePage{}, err
+	}
 
-	items, activeSeries, err := s.resumeItems(ctx, profileID, limit)
+	items, activeSeries, err := resumeItems(ctx, tx, profileID, limit)
 	if err != nil {
 		return ContinuePage{}, err
 	}
 	if len(items) < limit {
-		next, err := s.nextEpisodeItems(ctx, profileID, activeSeries, limit-len(items))
+		next, err := nextEpisodeItems(ctx, tx, profileID, activeSeries, limit-len(items))
 		if err != nil {
 			return ContinuePage{}, err
 		}
@@ -693,11 +730,14 @@ func (s *Service) ContinueWatching(ctx context.Context, principal auth.Principal
 	if len(items) > limit {
 		items = items[:limit]
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return ContinuePage{}, fmt.Errorf("commit continue watching query: %w", err)
+	}
 	return ContinuePage{Items: items}, nil
 }
 
-func (s *Service) resumeItems(ctx context.Context, profileID string, limit int) ([]ContinueItem, map[string]struct{}, error) {
-	rows, err := s.pool.Query(ctx, `
+func resumeItems(ctx context.Context, tx pgx.Tx, profileID string, limit int) ([]ContinueItem, map[string]struct{}, error) {
+	rows, err := tx.Query(ctx, `
 		WITH resumable AS (
 			SELECT title.id,
 			       title.media_type,
@@ -848,11 +888,11 @@ const nextEpisodeQuery = `
 		LIMIT $2
 	`
 
-func (s *Service) nextEpisodeItems(ctx context.Context, profileID string, activeSeries map[string]struct{}, limit int) ([]ContinueItem, error) {
+func nextEpisodeItems(ctx context.Context, tx pgx.Tx, profileID string, activeSeries map[string]struct{}, limit int) ([]ContinueItem, error) {
 	if limit < 1 {
 		return []ContinueItem{}, nil
 	}
-	rows, err := s.pool.Query(ctx, nextEpisodeQuery, profileID, limit+len(activeSeries))
+	rows, err := tx.Query(ctx, nextEpisodeQuery, profileID, limit+len(activeSeries))
 	if err != nil {
 		return nil, fmt.Errorf("query next episodes: %w", err)
 	}
@@ -884,9 +924,9 @@ func (s *Service) nextEpisodeItems(ctx context.Context, profileID string, active
 	return items, nil
 }
 
-func (s *Service) progress(ctx context.Context, profileID, titleID string) (Progress, error) {
+func progressForProfile(ctx context.Context, tx pgx.Tx, profileID, titleID string) (Progress, error) {
 	var progress Progress
-	err := scanProgress(s.pool.QueryRow(ctx, `
+	err := scanProgress(tx.QueryRow(ctx, `
 		SELECT progress.title_id::text, title.media_type,
 		       progress.position_seconds, progress.duration_seconds,
 		       progress.completed, progress.version,
@@ -904,15 +944,30 @@ func (s *Service) progress(ctx context.Context, profileID, titleID string) (Prog
 	return progress, nil
 }
 
-func (s *Service) titleMediaType(ctx context.Context, titleID string) (string, error) {
+func titleMediaType(ctx context.Context, tx pgx.Tx, titleID string) (string, error) {
 	var mediaType string
-	if err := s.pool.QueryRow(ctx, "SELECT media_type FROM titles WHERE id = $1::uuid", titleID).Scan(&mediaType); err != nil {
+	if err := tx.QueryRow(ctx, "SELECT media_type FROM titles WHERE id = $1::uuid", titleID).Scan(&mediaType); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", ErrNotFound
 		}
 		return "", fmt.Errorf("query title type: %w", err)
 	}
 	return mediaType, nil
+}
+
+func authorizedActiveProfileID(ctx context.Context, tx pgx.Tx, principal auth.Principal) (string, error) {
+	profileID, err := activeProfileID(principal)
+	if err != nil {
+		return "", err
+	}
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, false)
+	if err != nil {
+		return "", fmt.Errorf("authorize active watchstate profile: %w", err)
+	}
+	if !authorized {
+		return "", ErrProfileRequired
+	}
+	return profileID, nil
 }
 
 func activeProfileID(principal auth.Principal) (string, error) {

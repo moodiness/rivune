@@ -161,7 +161,7 @@ func formatActivityTitle(
 }
 
 func (service *Service) Activity(ctx context.Context, principal auth.Principal) (Activity, error) {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		return Activity{}, ErrForbidden
 	}
 	if _, err := service.cleanupInactiveSessions(ctx); err != nil {
@@ -298,7 +298,7 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 }
 
 func (service *Service) StopActivitySession(ctx context.Context, principal auth.Principal, sessionID string) error {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		return ErrForbidden
 	}
 	sessionID = strings.TrimSpace(sessionID)
@@ -330,7 +330,7 @@ func (service *Service) RunHousekeeping(ctx context.Context) (PurgeResult, error
 }
 
 func (service *Service) PurgeActivity(ctx context.Context, principal auth.Principal) (PurgeResult, error) {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		return PurgeResult{}, ErrForbidden
 	}
 	return service.cleanupActivity(ctx)

@@ -264,6 +264,11 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
+	var categoryID string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM access_categories WHERE is_default`).Scan(&categoryID); err != nil {
+		t.Fatalf("query default access category: %v", err)
+	}
+
 	username := "activity-" + userID[:12]
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO users (id, username, password_hash, role)
@@ -272,15 +277,15 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 		t.Fatalf("seed playback activity user: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO devices (id, user_id, name, platform)
-		VALUES ($1::uuid, $2::uuid, 'Activity test device', 'test')
-	`, deviceID, userID); err != nil {
+		INSERT INTO devices (id, user_id, name, platform, category_id, approved_at)
+		VALUES ($1::uuid, $2::uuid, 'Activity test device', 'test', $3::uuid, now())
+	`, deviceID, userID, categoryID); err != nil {
 		t.Fatalf("seed playback activity device: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO profiles (id, name)
-		VALUES ($1::uuid, 'Activity test profile')
-	`, profileID); err != nil {
+		INSERT INTO profiles (id, name, category_id)
+		VALUES ($1::uuid, 'Activity test profile', $2::uuid)
+	`, profileID, categoryID); err != nil {
 		t.Fatalf("seed playback activity profile: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -294,13 +299,15 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO auth_sessions (
 			id, user_id, device_id, access_token_hash, access_expires_at,
-			refresh_expires_at, active_profile_id, profile_grant_expires_at
+			refresh_expires_at, active_profile_id, profile_grant_expires_at,
+			authorization_scope, category_id
 		)
 		VALUES (
 			$1::uuid, $2::uuid, $3::uuid, $4, now() + interval '1 hour',
-			now() + interval '2 hours', $5::uuid, now() + interval '1 hour'
+			now() + interval '2 hours', $5::uuid, now() + interval '1 hour',
+			'category', $6::uuid
 		)
-	`, authSessionID, userID, deviceID, accessTokenHash[:], profileID); err != nil {
+	`, authSessionID, userID, deviceID, accessTokenHash[:], profileID, categoryID); err != nil {
 		t.Fatalf("seed playback activity auth session: %v", err)
 	}
 
@@ -387,7 +394,9 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create playback service: %v", err)
 	}
-	activity, err := service.Activity(ctx, auth.Principal{Role: "admin"})
+	activity, err := service.Activity(ctx, auth.Principal{
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+	})
 	if err != nil {
 		t.Fatalf("load playback activity: %v", err)
 	}
@@ -429,7 +438,9 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 	`, profileID, episodeID); err != nil {
 		t.Fatalf("remove playback progress: %v", err)
 	}
-	activityWithoutProgress, err := service.Activity(ctx, auth.Principal{Role: "admin"})
+	activityWithoutProgress, err := service.Activity(ctx, auth.Principal{
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+	})
 	if err != nil {
 		t.Fatalf("reload playback activity without saved progress: %v", err)
 	}

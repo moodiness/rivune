@@ -276,18 +276,24 @@ func TestUpdateMaintenanceSettingsRequiresEnabledBoolean(t *testing.T) {
 	}
 }
 
-func TestMaintenanceSettingsAreAdminOnly(t *testing.T) {
-	api := testAPI(&fakeInstanceService{})
-	api.auth = &fakeAuthService{principal: auth.Principal{UserID: "user-id", Role: "member", SessionID: "session-id"}}
-	api.settings = &fakeSettingsService{}
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/settings/maintenance", nil)
-	request.Header.Set("Authorization", "Bearer access-token")
-	response := httptest.NewRecorder()
+func TestMaintenanceSettingsRequireGlobalAdministrator(t *testing.T) {
+	categoryID := "11111111-1111-4111-8111-111111111111"
+	for _, principal := range []auth.Principal{
+		{UserID: "user-id", Role: "member", SessionID: "session-id", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID},
+		{UserID: "user-id", Role: "admin", SessionID: "session-id", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID},
+	} {
+		api := testAPI(&fakeInstanceService{})
+		api.auth = &fakeAuthService{principal: principal}
+		api.settings = &fakeSettingsService{}
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/settings/maintenance", nil)
+		request.Header.Set("Authorization", "Bearer access-token")
+		response := httptest.NewRecorder()
 
-	api.Handler().ServeHTTP(response, request)
+		api.Handler().ServeHTTP(response, request)
 
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("expected status 403, got %d: %s", response.Code, response.Body.String())
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("expected status 403 for %#v, got %d: %s", principal, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -464,7 +470,10 @@ func TestEffectiveSettingsResponseIncludesTranscodingPolicyAndSources(t *testing
 
 func authenticatedSettingsAPI(service settingsService) *API {
 	api := testAPI(&fakeInstanceService{})
-	api.auth = &fakeAuthService{principal: auth.Principal{UserID: "user-id", DeviceID: "device-id", Role: "admin", SessionID: "session-id"}}
+	api.auth = &fakeAuthService{principal: auth.Principal{
+		UserID: "user-id", DeviceID: "device-id", Role: "admin", SessionID: "session-id",
+		AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+	}}
 	api.settings = service
 	return api
 }

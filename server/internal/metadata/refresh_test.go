@@ -244,7 +244,7 @@ func TestRefreshMissingRetriesTemporaryFailureOnceAndPreservesMixedSuccesses(t *
 		`"title":"Permanent Movie"`,
 		`"mediaType":"movie"`,
 		`"provider":"tmdb"`,
-		`"requestedResource":"/movie/32?append_to_response=credits\u0026language=en-US"`,
+		`"requestedResource":"/movie/32?append_to_response=credits&language=en-US"`,
 		`"error":"title not found: provider title not found: TMDB returned HTTP 404"`,
 		`"temporary":false`,
 		`"attempts":1`,

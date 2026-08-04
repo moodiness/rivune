@@ -142,7 +142,7 @@ public actor RivuneAPIClient {
     }
 
     @discardableResult
-    public func login(username: String, password: String, device: Device) async throws -> TokenPair {
+    public func login(username: String, password: String, device: LoginDevice) async throws -> TokenPair {
         let payload = LoginRequest(username: username, password: password, device: device)
         let tokens: TokenPair = try await request("auth/login", method: "POST", body: payload, authenticated: false)
         try await setCredentials(tokens)
@@ -166,6 +166,99 @@ public actor RivuneAPIClient {
 
     public func currentAccount() async throws -> Account {
         try await request("auth/me", authenticated: true)
+    }
+
+    public func sessions() async throws -> [Session] {
+        let result: SessionList = try await request("auth/sessions", authenticated: true)
+        return result.sessions
+    }
+
+    public func categories() async throws -> [Category] {
+        let result: CategoryList = try await request("categories", authenticated: true)
+        return result.categories
+    }
+
+    public func createCategory(_ input: CategoryCreateRequest) async throws -> Category {
+        try await request("categories", method: "POST", body: input, authenticated: true)
+    }
+
+    public func updateCategory(id: UUID, input: CategoryUpdateRequest) async throws -> Category {
+        try await request("categories/\(id.uuidString.lowercased())", method: "PATCH", body: input, authenticated: true)
+    }
+
+    public func deleteCategory(id: UUID, reassignToCategoryId: UUID? = nil) async throws {
+        _ = try await requestData(
+            "categories/\(id.uuidString.lowercased())",
+            method: "DELETE",
+            body: try encoder.encode(CategoryDeleteRequest(reassignToCategoryId: reassignToCategoryId)),
+            authenticated: true
+        )
+    }
+
+    public func reorderCategories(_ categoryIds: [UUID]) async throws -> [Category] {
+        let result: CategoryList = try await request(
+            "categories/order",
+            method: "PUT",
+            body: CategoryOrderRequest(categoryIds: categoryIds),
+            authenticated: true
+        )
+        return result.categories
+    }
+
+    public func devices(categoryId: UUID? = nil) async throws -> [Device] {
+        let result: DeviceList = try await request(
+            "devices",
+            query: queryItems(("categoryId", categoryId?.uuidString.lowercased())),
+            authenticated: true
+        )
+        return result.devices
+    }
+
+    public func updateDevice(id: UUID, input: DeviceUpdateRequest) async throws -> Device {
+        try await request("devices/\(id.uuidString.lowercased())", method: "PATCH", body: input, authenticated: true)
+    }
+
+    public func moveProfiles(_ profileIds: [UUID], to categoryId: UUID) async throws {
+        _ = try await requestData(
+            "profiles/category-moves",
+            method: "POST",
+            body: try encoder.encode(ProfileCategoryMoveRequest(profileIds: profileIds, categoryId: categoryId)),
+            authenticated: true
+        )
+    }
+
+    public func moveDevices(_ deviceIds: [UUID], to categoryId: UUID) async throws {
+        _ = try await requestData(
+            "devices/category-moves",
+            method: "POST",
+            body: try encoder.encode(DeviceCategoryMoveRequest(deviceIds: deviceIds, categoryId: categoryId)),
+            authenticated: true
+        )
+    }
+
+    public func beginDeviceAuthorization(deviceName: String, platform: String) async throws -> DeviceAuthorizationResponse {
+        try await request(
+            "auth/device-code",
+            method: "POST",
+            body: DeviceAuthorizationRequest(deviceName: deviceName, platform: platform),
+            authenticated: false
+        )
+    }
+
+    @discardableResult
+    public func exchangeDeviceAuthorization(deviceCode: String) async throws -> TokenPair {
+        let tokens: TokenPair = try await request(
+            "auth/device-code/token",
+            method: "POST",
+            body: DeviceCodeTokenRequest(deviceCode: deviceCode),
+            authenticated: false
+        )
+        try await setCredentials(tokens)
+        return tokens
+    }
+
+    public func approveDeviceAuthorization(_ input: DeviceCodeApprovalRequest) async throws {
+        _ = try await requestData("auth/device-code/approve", method: "POST", body: try encoder.encode(input), authenticated: true)
     }
 
     public func profiles() async throws -> [Profile] {
@@ -264,7 +357,7 @@ public actor RivuneAPIClient {
 
     private func request<Response: Decodable, Body: Encodable>(_ path: String, method: String = "GET", query: [URLQueryItem] = [], body: Body, authenticated: Bool) async throws -> Response {
         let data = try encoder.encode(body)
-        return try await request(path, method: method, query: query, body: data, authenticated: authenticated)
+        return try await request(path, method: method, query: query, body: Optional(data), authenticated: authenticated)
     }
 
     private func request<Response: Decodable>(_ path: String, method: String, query: [URLQueryItem], body: Data?, authenticated: Bool) async throws -> Response {

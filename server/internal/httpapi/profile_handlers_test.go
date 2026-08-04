@@ -90,11 +90,12 @@ func (f *fakeProfileService) AvatarImage(context.Context, auth.Principal, string
 func TestCreateProfileReturnsSafeRepresentation(t *testing.T) {
 	pin := "1234"
 	profiles := &fakeProfileService{created: profile.Profile{
-		ID: "profile-id", Name: "Kids", IsChild: true, HasPIN: true, CanManage: true,
+		ID: "profile-id", CategoryID: "11111111-1111-4111-8111-111111111111", CategoryName: "Kids devices",
+		Name: "Kids", Description: new("Shared family profile"), IsChild: true, HasPIN: true, CanManage: true,
 		Enabled: true, AccessTimezone: "UTC", Accessible: true,
 	}}
 	api := authenticatedProfileAPI(profiles)
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/profiles", bytes.NewBufferString(`{"name":"Kids","isChild":true,"pin":"1234"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/profiles", bytes.NewBufferString(`{"name":"Kids","description":"Shared family profile","categoryId":"11111111-1111-4111-8111-111111111111","isChild":true,"pin":"1234"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
 	response := httptest.NewRecorder()
@@ -104,12 +105,21 @@ func TestCreateProfileReturnsSafeRepresentation(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("expected status 201, got %d: %s", response.Code, response.Body.String())
 	}
-	if profiles.createInput.Name != "Kids" || profiles.createInput.PIN == nil || *profiles.createInput.PIN != pin {
+	if profiles.createInput.Name != "Kids" || profiles.createInput.Description == nil || *profiles.createInput.Description != "Shared family profile" ||
+		profiles.createInput.CategoryID != "11111111-1111-4111-8111-111111111111" ||
+		profiles.createInput.PIN == nil || *profiles.createInput.PIN != pin {
 		t.Fatalf("unexpected create input: %+v", profiles.createInput)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"color":null`)) ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"icon":null`)) {
+		t.Fatalf("nullable category fields were omitted: %s", response.Body.String())
 	}
 	var body profileResponse
 	decodeResponse(t, response, &body)
-	if body.ID != "profile-id" || !body.HasPIN || !body.IsChild || !body.CanManage ||
+	if body.ID != "profile-id" || body.Description == nil || *body.Description != "Shared family profile" ||
+		body.CategoryID != "11111111-1111-4111-8111-111111111111" ||
+		body.Category.ID != body.CategoryID || body.Category.Name != "Kids devices" ||
+		!body.HasPIN || !body.IsChild || !body.CanManage ||
 		!body.Enabled || !body.Accessible || body.AccessTimezone != "UTC" {
 		t.Fatalf("unexpected profile response: %+v", body)
 	}
@@ -140,6 +150,59 @@ func TestCreateProfileAcceptsTemporaryAccess(t *testing.T) {
 	}
 }
 
+func TestUpdateProfileDistinguishesCategoryIDPresence(t *testing.T) {
+	const categoryID = "11111111-1111-4111-8111-111111111111"
+	tests := []struct {
+		name           string
+		body           string
+		wantStatus     int
+		wantCategoryID string
+	}{
+		{name: "omitted", body: `{}`, wantStatus: http.StatusOK},
+		{name: "value", body: `{"categoryId":"` + categoryID + `"}`, wantStatus: http.StatusOK, wantCategoryID: categoryID},
+		{name: "null", body: `{"categoryId":null}`, wantStatus: http.StatusUnprocessableEntity},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profiles := &fakeProfileService{updated: profile.Profile{ID: "profile-id", Name: "Kids", CanManage: true}}
+			api := authenticatedProfileAPI(profiles)
+			request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id", bytes.NewBufferString(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer access-token")
+			response := httptest.NewRecorder()
+
+			api.Handler().ServeHTTP(response, request)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", test.wantStatus, response.Code, response.Body.String())
+			}
+			if test.name == "null" {
+				if profiles.updatedID != "" {
+					t.Fatal("explicit null categoryId reached the profile service")
+				}
+				var body errorEnvelope
+				decodeResponse(t, response, &body)
+				if body.Error.Code != "invalid_profile" || body.Error.Message != "categoryId cannot be null" {
+					t.Fatalf("unexpected error response: %+v", body.Error)
+				}
+				return
+			}
+			if profiles.updatedID != "profile-id" {
+				t.Fatalf("profile update did not reach the service: %+v", profiles.updateInput)
+			}
+			if test.wantCategoryID == "" {
+				if profiles.updateInput.CategoryID != nil {
+					t.Fatalf("omitted categoryId became %+v", profiles.updateInput.CategoryID)
+				}
+				return
+			}
+			if profiles.updateInput.CategoryID == nil || *profiles.updateInput.CategoryID != test.wantCategoryID {
+				t.Fatalf("unexpected categoryId service input: %+v", profiles.updateInput.CategoryID)
+			}
+		})
+	}
+}
+
 func TestUpdateProfileDistinguishesClearedPIN(t *testing.T) {
 	profiles := &fakeProfileService{updated: profile.Profile{ID: "profile-id", Name: "Kids", CanManage: true}}
 	api := authenticatedProfileAPI(profiles)
@@ -155,6 +218,24 @@ func TestUpdateProfileDistinguishesClearedPIN(t *testing.T) {
 	}
 	if profiles.updatedID != "profile-id" || !profiles.updateInput.PINSet || profiles.updateInput.PIN != nil {
 		t.Fatalf("expected explicit PIN removal, got %+v", profiles.updateInput)
+	}
+}
+
+func TestUpdateProfileDistinguishesDescriptionClear(t *testing.T) {
+	profiles := &fakeProfileService{updated: profile.Profile{ID: "profile-id", Name: "Kids", CanManage: true}}
+	api := authenticatedProfileAPI(profiles)
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id", bytes.NewBufferString(`{"description":null}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if profiles.updatedID != "profile-id" || !profiles.updateInput.DescriptionSet || profiles.updateInput.Description != nil {
+		t.Fatalf("expected explicit profile description removal, got %+v", profiles.updateInput)
 	}
 }
 

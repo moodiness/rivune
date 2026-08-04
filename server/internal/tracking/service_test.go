@@ -22,8 +22,14 @@ const (
 func TestAuthorizeProfileRejectsMalformedID(t *testing.T) {
 	pool := openTrackingTestPool(t)
 	service := &Service{pool: pool}
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin authorization transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	_, err := service.authorizeProfile(context.Background(), trackingTestPrincipal(), "not-a-uuid")
+	_, err = service.authorizeProfile(ctx, tx, trackingTestPrincipal(), "not-a-uuid")
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("authorize malformed profile ID: got %v, want ErrForbidden", err)
 	}
@@ -32,8 +38,14 @@ func TestAuthorizeProfileRejectsMalformedID(t *testing.T) {
 func TestAuthorizeProfileCanonicalizesUppercaseID(t *testing.T) {
 	pool := openTrackingTestPool(t)
 	service := &Service{pool: pool}
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin authorization transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	profileID, err := service.authorizeProfile(context.Background(), trackingTestPrincipal(), strings.ToUpper(trackingTestProfileID))
+	profileID, err := service.authorizeProfile(ctx, tx, trackingTestPrincipal(), strings.ToUpper(trackingTestProfileID))
 	if err != nil {
 		t.Fatalf("authorize uppercase profile ID: %v", err)
 	}
@@ -128,8 +140,8 @@ func openTrackingTestPool(t *testing.T) *pgxpool.Pool {
 
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `
-		CREATE TEMPORARY TABLE profiles (id uuid PRIMARY KEY);
-		CREATE TEMPORARY TABLE user_profile_access (profile_id uuid NOT NULL, user_id uuid NOT NULL)
+		CREATE TEMPORARY TABLE profiles (id uuid PRIMARY KEY, category_id uuid);
+		CREATE TEMPORARY TABLE user_profile_access (profile_id uuid NOT NULL, user_id uuid NOT NULL, can_manage boolean NOT NULL DEFAULT false)
 	`); err != nil {
 		t.Fatalf("create tracking authorization fixtures: %v", err)
 	}
@@ -140,5 +152,8 @@ func openTrackingTestPool(t *testing.T) *pgxpool.Pool {
 }
 
 func trackingTestPrincipal() auth.Principal {
-	return auth.Principal{UserID: trackingTestUserID, Role: "admin"}
+	return auth.Principal{
+		UserID: trackingTestUserID, Role: "admin",
+		AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+	}
 }

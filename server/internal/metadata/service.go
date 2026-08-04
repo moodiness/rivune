@@ -55,7 +55,7 @@ func NewService(pool *pgxpool.Pool, provider Provider, enricher TelevisionEnrich
 }
 
 func (s *Service) DiscoverMovies(ctx context.Context, principal auth.Principal, options QueryOptions) (MoviePage, error) {
-	if err := requireActiveProfile(principal); err != nil {
+	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return MoviePage{}, err
 	}
 	normalized, err := normalizeQueryOptions(options)
@@ -69,11 +69,11 @@ func (s *Service) DiscoverMovies(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return MoviePage{}, err
 	}
-	return s.persistMoviePage(ctx, page)
+	return s.persistMoviePage(ctx, principal, page)
 }
 
 func (s *Service) SearchMovies(ctx context.Context, principal auth.Principal, options SearchOptions) (MoviePage, error) {
-	if err := requireActiveProfile(principal); err != nil {
+	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return MoviePage{}, err
 	}
 	normalized, err := normalizeQueryOptions(options.QueryOptions)
@@ -91,24 +91,33 @@ func (s *Service) SearchMovies(ctx context.Context, principal auth.Principal, op
 	if err != nil {
 		return MoviePage{}, err
 	}
-	return s.persistMoviePage(ctx, page)
+	return s.persistMoviePage(ctx, principal, page)
 }
 
 func (s *Service) MovieDetails(ctx context.Context, principal auth.Principal, titleID, language string) (Movie, error) {
-	if err := requireActiveProfile(principal); err != nil {
+	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return Movie{}, err
 	}
-	return s.movieDetails(ctx, titleID, language)
+	return s.movieDetails(ctx, titleID, language, &principal)
 }
 
-func (s *Service) movieDetails(ctx context.Context, titleID, language string) (Movie, error) {
+func (s *Service) movieDetails(ctx context.Context, titleID, language string, principals ...*auth.Principal) (Movie, error) {
 	normalizedLanguage, err := normalizeLanguage(language)
 	if err != nil {
 		return Movie{}, err
 	}
-	externalID, cachedPayload, err := s.loadTitleMetadata(ctx, titleID, MediaTypeMovie, normalizedLanguage)
-	if errors.Is(err, ErrNotFound) {
-		externalID, err = s.resolveProviderExternalID(ctx, titleID, MediaTypeMovie)
+	readTx, err := s.beginMetadataWorkTx(ctx, firstPrincipal(principals))
+	if err != nil {
+		return Movie{}, err
+	}
+	defer func() { _ = readTx.Rollback(ctx) }()
+	externalID, cachedPayload, err := s.loadTitleMetadata(ctx, readTx, titleID, MediaTypeMovie, normalizedLanguage)
+	titleMissing := errors.Is(err, ErrNotFound)
+	if titleMissing {
+		if commitErr := readTx.Commit(ctx); commitErr != nil {
+			return Movie{}, fmt.Errorf("commit movie metadata read: %w", commitErr)
+		}
+		externalID, err = s.resolveProviderExternalID(ctx, titleID, MediaTypeMovie, firstPrincipal(principals))
 	}
 	if err != nil {
 		return Movie{}, err
@@ -119,10 +128,18 @@ func (s *Service) movieDetails(ctx context.Context, titleID, language string) (M
 			return Movie{}, fmt.Errorf("decode cached title metadata: %w", err)
 		}
 		if cached.Cast != nil {
-			if err := s.persistCachedMovieSnapshot(ctx, cached); err != nil {
+			if err := s.persistCachedMovieSnapshot(ctx, readTx, cached); err != nil {
 				return Movie{}, err
 			}
+			if err := readTx.Commit(ctx); err != nil {
+				return Movie{}, fmt.Errorf("commit cached movie snapshot persistence: %w", err)
+			}
 			return cached, nil
+		}
+	}
+	if !titleMissing {
+		if err := readTx.Commit(ctx); err != nil {
+			return Movie{}, fmt.Errorf("commit movie metadata read: %w", err)
 		}
 	}
 	if s.provider == nil {
@@ -153,11 +170,11 @@ func (s *Service) movieDetails(ctx context.Context, titleID, language string) (M
 		return Movie{}, errors.New("metadata provider returned a conflicting external ID")
 	}
 	movie := normalizeMovie(titleID, provided)
-	tx, err := s.pool.Begin(ctx)
+	writeTx, err := s.beginMetadataWorkTx(ctx, firstPrincipal(principals))
 	if err != nil {
-		return Movie{}, fmt.Errorf("begin movie persistence: %w", err)
+		return Movie{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() { _ = writeTx.Rollback(ctx) }()
 	canonicalIDs := make(map[string]string, len(provided.AdditionalIDs)+1)
 	for provider, additionalID := range provided.AdditionalIDs {
 		if strings.ToLower(strings.TrimSpace(provider)) == providerName &&
@@ -168,26 +185,26 @@ func (s *Service) movieDetails(ctx context.Context, titleID, language string) (M
 		canonicalIDs[provider] = additionalID
 	}
 	canonicalIDs[providerName] = externalID
-	if err := consolidateCanonicalTitle(ctx, tx, titleID, MediaTypeMovie, canonicalIDs); err != nil {
+	if err := consolidateCanonicalTitle(ctx, writeTx, titleID, MediaTypeMovie, canonicalIDs); err != nil {
 		return Movie{}, err
 	}
-	if err := persistTitleSnapshot(ctx, tx, titleID, provided.Title, provided.PosterURL, provided.BackdropURL, provided.ReleaseDate); err != nil {
+	if err := persistTitleSnapshot(ctx, writeTx, titleID, provided.Title, provided.PosterURL, provided.BackdropURL, provided.ReleaseDate); err != nil {
 		return Movie{}, err
 	}
-	if err := linkAdditionalIDs(ctx, tx, titleID, MediaTypeMovie, canonicalIDs); err != nil {
+	if err := linkAdditionalIDs(ctx, writeTx, titleID, MediaTypeMovie, canonicalIDs); err != nil {
 		return Movie{}, err
 	}
-	if err := cacheTitle(ctx, tx, titleID, providerName, normalizedLanguage, movie, s.cacheTTL); err != nil {
+	if err := cacheTitle(ctx, writeTx, titleID, providerName, normalizedLanguage, movie, s.cacheTTL); err != nil {
 		return Movie{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := writeTx.Commit(ctx); err != nil {
 		return Movie{}, fmt.Errorf("commit movie persistence: %w", err)
 	}
 	return movie, nil
 }
 
 func (s *Service) DiscoverSeries(ctx context.Context, principal auth.Principal, options QueryOptions) (SeriesPage, error) {
-	if err := requireActiveProfile(principal); err != nil {
+	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return SeriesPage{}, err
 	}
 	normalized, err := normalizeQueryOptions(options)
@@ -201,11 +218,11 @@ func (s *Service) DiscoverSeries(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return SeriesPage{}, err
 	}
-	return s.persistSeriesPage(ctx, page)
+	return s.persistSeriesPage(ctx, principal, page)
 }
 
 func (s *Service) SearchSeries(ctx context.Context, principal auth.Principal, options SearchOptions) (SeriesPage, error) {
-	if err := requireActiveProfile(principal); err != nil {
+	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return SeriesPage{}, err
 	}
 	normalized, err := normalizeQueryOptions(options.QueryOptions)
@@ -223,11 +240,11 @@ func (s *Service) SearchSeries(ctx context.Context, principal auth.Principal, op
 	if err != nil {
 		return SeriesPage{}, err
 	}
-	return s.persistSeriesPage(ctx, page)
+	return s.persistSeriesPage(ctx, principal, page)
 }
 
 func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, titleID string, options SeriesDetailsOptions) (Series, error) {
-	if err := requireActiveProfile(principal); err != nil {
+	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return Series{}, err
 	}
 	mappingProvider, err := normalizeSeriesMappingProvider(options.MappingProvider)
@@ -246,17 +263,26 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 		options.EpisodeOrderID = episodeOrderID
 		return s.mappedSeriesDetails(ctx, principal, titleID, options)
 	}
-	return s.seriesDetails(ctx, titleID, options)
+	return s.seriesDetails(ctx, titleID, options, &principal)
 }
 
-func (s *Service) seriesDetails(ctx context.Context, titleID string, options SeriesDetailsOptions) (Series, error) {
+func (s *Service) seriesDetails(ctx context.Context, titleID string, options SeriesDetailsOptions, principals ...*auth.Principal) (Series, error) {
 	normalizedLanguage, err := normalizeLanguage(options.Language)
 	if err != nil {
 		return Series{}, err
 	}
-	externalID, cachedPayload, err := s.loadTitleMetadata(ctx, titleID, MediaTypeSeries, normalizedLanguage)
-	if errors.Is(err, ErrNotFound) {
-		externalID, err = s.resolveProviderExternalID(ctx, titleID, MediaTypeSeries)
+	readTx, err := s.beginMetadataWorkTx(ctx, firstPrincipal(principals))
+	if err != nil {
+		return Series{}, err
+	}
+	defer func() { _ = readTx.Rollback(ctx) }()
+	externalID, cachedPayload, err := s.loadTitleMetadata(ctx, readTx, titleID, MediaTypeSeries, normalizedLanguage)
+	titleMissing := errors.Is(err, ErrNotFound)
+	if titleMissing {
+		if commitErr := readTx.Commit(ctx); commitErr != nil {
+			return Series{}, fmt.Errorf("commit series metadata read: %w", commitErr)
+		}
+		externalID, err = s.resolveProviderExternalID(ctx, titleID, MediaTypeSeries, firstPrincipal(principals))
 	}
 	if err != nil {
 		return Series{}, err
@@ -271,10 +297,18 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 				cached.MappingProvider = providerName
 			}
 			cached.EpisodeOrders = normalizeEpisodeOrders(cached.EpisodeOrders)
-			if err := s.persistCachedSeriesSnapshots(ctx, cached); err != nil {
+			if err := s.persistCachedSeriesSnapshots(ctx, readTx, cached); err != nil {
 				return Series{}, err
 			}
+			if err := readTx.Commit(ctx); err != nil {
+				return Series{}, fmt.Errorf("commit cached series snapshot persistence: %w", err)
+			}
 			return cached, nil
+		}
+	}
+	if !titleMissing {
+		if err := readTx.Commit(ctx); err != nil {
+			return Series{}, fmt.Errorf("commit series metadata read: %w", err)
 		}
 	}
 	if s.provider == nil {
@@ -312,11 +346,11 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 	if returnedExternalID := strings.TrimSpace(provided.ExternalID); returnedExternalID != "" && returnedExternalID != externalID {
 		return Series{}, errors.New("metadata provider returned a conflicting external ID")
 	}
-	tx, err := s.pool.Begin(ctx)
+	writeTx, err := s.beginMetadataWorkTx(ctx, firstPrincipal(principals))
 	if err != nil {
-		return Series{}, fmt.Errorf("begin series persistence: %w", err)
+		return Series{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() { _ = writeTx.Rollback(ctx) }()
 	canonicalIDs := make(map[string]string, len(provided.AdditionalIDs)+1)
 	for provider, additionalID := range provided.AdditionalIDs {
 		if strings.ToLower(strings.TrimSpace(provider)) == providerName &&
@@ -327,13 +361,13 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 		canonicalIDs[provider] = additionalID
 	}
 	canonicalIDs[providerName] = externalID
-	if err := consolidateCanonicalTitle(ctx, tx, titleID, MediaTypeSeries, canonicalIDs); err != nil {
+	if err := consolidateCanonicalTitle(ctx, writeTx, titleID, MediaTypeSeries, canonicalIDs); err != nil {
 		return Series{}, err
 	}
-	if err := linkAdditionalIDs(ctx, tx, titleID, MediaTypeSeries, canonicalIDs); err != nil {
+	if err := linkAdditionalIDs(ctx, writeTx, titleID, MediaTypeSeries, canonicalIDs); err != nil {
 		return Series{}, err
 	}
-	if err := persistTitleSnapshot(ctx, tx, titleID, provided.Name, provided.PosterURL, provided.BackdropURL, provided.FirstAirDate); err != nil {
+	if err := persistTitleSnapshot(ctx, writeTx, titleID, provided.Name, provided.PosterURL, provided.BackdropURL, provided.FirstAirDate); err != nil {
 		return Series{}, err
 	}
 	seasons := make([]SeasonSummary, 0, len(provided.Seasons))
@@ -342,21 +376,21 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 			return Series{}, errors.New("metadata provider returned an invalid season")
 		}
 		seasonNumber := season.SeasonNumber
-		seasonID, err := ensureCanonicalSeasonTitle(ctx, tx, season.ExternalID, &titleID, &seasonNumber)
+		seasonID, err := ensureCanonicalSeasonTitle(ctx, writeTx, season.ExternalID, &titleID, &seasonNumber)
 		if err != nil {
 			return Series{}, err
 		}
-		if err := persistTitleSnapshot(ctx, tx, seasonID, season.Name, season.PosterURL, season.BackdropURL, season.AirDate); err != nil {
+		if err := persistTitleSnapshot(ctx, writeTx, seasonID, season.Name, season.PosterURL, season.BackdropURL, season.AirDate); err != nil {
 			return Series{}, err
 		}
 		seasons = append(seasons, normalizeSeasonSummary(titleID, seasonID, season))
 	}
 	series := normalizeSeries(titleID, provided)
 	series.Seasons = seasons
-	if err := cacheTitle(ctx, tx, titleID, providerName, normalizedLanguage, series, s.cacheTTL); err != nil {
+	if err := cacheTitle(ctx, writeTx, titleID, providerName, normalizedLanguage, series, s.cacheTTL); err != nil {
 		return Series{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := writeTx.Commit(ctx); err != nil {
 		return Series{}, fmt.Errorf("commit series persistence: %w", err)
 	}
 	return series, nil
@@ -630,7 +664,7 @@ func appendFailedTitle(result *RefreshResult, seen map[string]struct{}, title st
 }
 
 func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, seasonID, language, mappingProvider string) (Season, error) {
-	if err := requireActiveProfile(principal); err != nil {
+	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return Season{}, err
 	}
 	mappingProvider, err := normalizeSeriesMappingProvider(mappingProvider)
@@ -640,22 +674,26 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 	if mappingProvider == "tvdb" || strings.HasPrefix(strings.TrimSpace(seasonID), "tvdb:") {
 		return s.mappedSeasonDetails(ctx, principal, seasonID, language)
 	}
-	return s.seasonDetails(ctx, seasonID, language)
+	return s.seasonDetails(ctx, seasonID, language, &principal)
 }
 
-func (s *Service) seasonDetails(ctx context.Context, seasonID, language string) (Season, error) {
+func (s *Service) seasonDetails(ctx context.Context, seasonID, language string, principals ...*auth.Principal) (Season, error) {
 	normalizedLanguage, err := normalizeLanguage(language)
 	if err != nil {
 		return Season{}, err
 	}
-
+	readTx, err := s.beginMetadataWorkTx(ctx, firstPrincipal(principals))
+	if err != nil {
+		return Season{}, err
+	}
+	defer func() { _ = readTx.Rollback(ctx) }()
 	var seriesID string
 	var seriesExternalID string
 	var seriesTVDBID *string
 	var seasonExternalID string
 	var seasonNumber int
 	var cachedPayload []byte
-	err = s.pool.QueryRow(ctx, `
+	err = readTx.QueryRow(ctx, `
 		SELECT series.id::text,
 		       series_external.external_id,
 		       season_external.external_id,
@@ -697,11 +735,17 @@ func (s *Service) seasonDetails(ctx context.Context, seasonID, language string) 
 			return Season{}, fmt.Errorf("decode cached season metadata: %w", err)
 		}
 		if cachedSeasonMatchesHierarchy(cached, seasonID, seriesID, seasonNumber) {
-			if err := s.persistCachedSeasonSnapshot(ctx, cached); err != nil {
+			if err := s.persistCachedSeasonSnapshot(ctx, readTx, cached); err != nil {
 				return Season{}, err
+			}
+			if err := readTx.Commit(ctx); err != nil {
+				return Season{}, fmt.Errorf("commit cached season snapshot persistence: %w", err)
 			}
 			return cached, nil
 		}
+	}
+	if err := readTx.Commit(ctx); err != nil {
+		return Season{}, fmt.Errorf("commit season metadata read: %w", err)
 	}
 	if s.provider == nil {
 		return Season{}, ErrProviderUnavailable
@@ -737,12 +781,12 @@ func (s *Service) seasonDetails(ctx context.Context, seasonID, language string) 
 		}
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	writeTx, err := s.beginMetadataWorkTx(ctx, firstPrincipal(principals))
 	if err != nil {
-		return Season{}, fmt.Errorf("begin season persistence: %w", err)
+		return Season{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := persistTitleSnapshot(ctx, tx, seasonID, provided.Name, provided.PosterURL, provided.BackdropURL, provided.AirDate); err != nil {
+	defer func() { _ = writeTx.Rollback(ctx) }()
+	if err := persistTitleSnapshot(ctx, writeTx, seasonID, provided.Name, provided.PosterURL, provided.BackdropURL, provided.AirDate); err != nil {
 		return Season{}, err
 	}
 	episodes := make([]Episode, 0, len(provided.Episodes))
@@ -751,29 +795,29 @@ func (s *Service) seasonDetails(ctx context.Context, seasonID, language string) 
 			return Season{}, errors.New("metadata provider returned an invalid episode")
 		}
 		episodeNumber := episode.EpisodeNumber
-		episodeID, err := ensureTitle(ctx, tx, episode.ExternalID, MediaTypeEpisode, &seasonID, &episodeNumber)
+		episodeID, err := ensureTitle(ctx, writeTx, episode.ExternalID, MediaTypeEpisode, &seasonID, &episodeNumber)
 		if err != nil {
 			return Season{}, fmt.Errorf("resolve episode %d canonical identity: %w", episodeNumber, err)
 		}
 		if tvdbID := strings.TrimSpace(episode.AdditionalIDs["tvdb"]); tvdbID != "" {
-			if err := replaceTVDBEpisodeID(ctx, tx, episodeID, tvdbID); err != nil {
+			if err := replaceTVDBEpisodeID(ctx, writeTx, episodeID, tvdbID); err != nil {
 				return Season{}, fmt.Errorf("repair episode %d TVDB identity: %w", episodeNumber, err)
 			}
 		}
-		if err := linkAdditionalIDs(ctx, tx, episodeID, MediaTypeEpisode, episode.AdditionalIDs); err != nil {
+		if err := linkAdditionalIDs(ctx, writeTx, episodeID, MediaTypeEpisode, episode.AdditionalIDs); err != nil {
 			return Season{}, fmt.Errorf("link episode %d provider identities: %w", episodeNumber, err)
 		}
-		if err := persistTitleSnapshot(ctx, tx, episodeID, episode.Name, episode.StillURL, episode.BackdropURL, episode.AirDate); err != nil {
+		if err := persistTitleSnapshot(ctx, writeTx, episodeID, episode.Name, episode.StillURL, episode.BackdropURL, episode.AirDate); err != nil {
 			return Season{}, err
 		}
 		episodes = append(episodes, normalizeEpisode(seasonID, episodeID, episode))
 	}
 	season := normalizeSeason(seriesID, seasonID, provided)
 	season.Episodes = episodes
-	if err := cacheTitle(ctx, tx, seasonID, providerName, normalizedLanguage, season, s.cacheTTL); err != nil {
+	if err := cacheTitle(ctx, writeTx, seasonID, providerName, normalizedLanguage, season, s.cacheTTL); err != nil {
 		return Season{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := writeTx.Commit(ctx); err != nil {
 		return Season{}, fmt.Errorf("commit season persistence: %w", err)
 	}
 	return season, nil
@@ -790,7 +834,7 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 	if s.mapper == nil {
 		if options.EpisodeOrderID == "" {
 			s.logTVDBMappingFallback(base.ID, ErrProviderUnavailable)
-			return base, nil
+			return base, s.requireActiveProfile(ctx, principal)
 		}
 		return Series{}, ErrProviderUnavailable
 	}
@@ -799,7 +843,12 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 		return Series{}, err
 	}
 	if options.EpisodeOrderID == "" {
-		cachedPayload, err := s.loadCachedTitleMetadata(ctx, base.ID, MediaTypeSeries, "tvdb", normalizedLanguage)
+		cacheTx, err := s.beginAuthorizedProfileTx(ctx, principal)
+		if err != nil {
+			return Series{}, err
+		}
+		defer func() { _ = cacheTx.Rollback(ctx) }()
+		cachedPayload, err := s.loadCachedTitleMetadata(ctx, cacheTx, base.ID, MediaTypeSeries, "tvdb", normalizedLanguage)
 		if err != nil {
 			return Series{}, err
 		}
@@ -814,15 +863,21 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 				cached.SelectedEpisodeOrderID = defaultEpisodeOrderID(cached.EpisodeOrders)
 			}
 			if len(base.EpisodeOrders) == 0 || len(cached.EpisodeOrders) > 0 {
+				if err := cacheTx.Commit(ctx); err != nil {
+					return Series{}, fmt.Errorf("commit cached TVDB series mapping read: %w", err)
+				}
 				return cached, nil
 			}
+		}
+		if err := cacheTx.Commit(ctx); err != nil {
+			return Series{}, fmt.Errorf("commit cached TVDB series mapping read: %w", err)
 		}
 	}
 	seriesTVDBID := strings.TrimSpace(base.ExternalIDs["tvdb"])
 	if seriesTVDBID == "" {
 		if options.EpisodeOrderID == "" {
 			s.logTVDBMappingFallback(base.ID, ErrProviderNotFound)
-			return base, nil
+			return base, s.requireActiveProfile(ctx, principal)
 		}
 		return Series{}, ErrProviderNotFound
 	}
@@ -830,7 +885,7 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 	if err != nil {
 		if options.EpisodeOrderID == "" && isProviderMappingUnavailable(err) {
 			s.logTVDBMappingFallback(base.ID, err)
-			return base, nil
+			return base, s.requireActiveProfile(ctx, principal)
 		}
 		return Series{}, err
 	}
@@ -882,9 +937,9 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 		})
 	}
 	if options.EpisodeOrderID == "" {
-		tx, err := s.pool.Begin(ctx)
+		tx, err := s.beginAuthorizedProfileTx(ctx, principal)
 		if err != nil {
-			return Series{}, fmt.Errorf("begin TVDB series mapping cache: %w", err)
+			return Series{}, err
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
 		if err := cacheTitle(ctx, tx, base.ID, "tvdb", normalizedLanguage, mapped, s.cacheTTL); err != nil {
@@ -893,8 +948,9 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 		if err := tx.Commit(ctx); err != nil {
 			return Series{}, fmt.Errorf("commit TVDB series mapping cache: %w", err)
 		}
+		return mapped, nil
 	}
-	return mapped, nil
+	return mapped, s.requireActiveProfile(ctx, principal)
 }
 
 func isProviderMappingUnavailable(err error) bool {
@@ -977,9 +1033,9 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 		episodes = make([]Episode, 0, len(provided.Episodes))
 		tvdbLinks = make(map[string]string)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginAuthorizedProfileTx(ctx, principal)
 	if err != nil {
-		return Season{}, fmt.Errorf("begin TVDB episode mapping persistence: %w", err)
+		return Season{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	for episodeID, tvdbID := range tvdbLinks {
@@ -1203,10 +1259,10 @@ func mappedSeasonID(seriesID, seasonTVDBID string) string {
 	return "tvdb:" + seriesID + ":" + strings.TrimSpace(seasonTVDBID)
 }
 
-func (s *Service) persistMoviePage(ctx context.Context, provided ProviderMoviePage) (MoviePage, error) {
-	tx, err := s.pool.Begin(ctx)
+func (s *Service) persistMoviePage(ctx context.Context, principal auth.Principal, provided ProviderMoviePage) (MoviePage, error) {
+	tx, err := s.beginAuthorizedProfileTx(ctx, principal)
 	if err != nil {
-		return MoviePage{}, fmt.Errorf("begin title persistence: %w", err)
+		return MoviePage{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -1235,10 +1291,10 @@ func (s *Service) persistMoviePage(ctx context.Context, provided ProviderMoviePa
 	}, nil
 }
 
-func (s *Service) persistSeriesPage(ctx context.Context, provided ProviderSeriesPage) (SeriesPage, error) {
-	tx, err := s.pool.Begin(ctx)
+func (s *Service) persistSeriesPage(ctx context.Context, principal auth.Principal, provided ProviderSeriesPage) (SeriesPage, error) {
+	tx, err := s.beginAuthorizedProfileTx(ctx, principal)
 	if err != nil {
-		return SeriesPage{}, fmt.Errorf("begin series title persistence: %w", err)
+		return SeriesPage{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -1267,10 +1323,10 @@ func (s *Service) persistSeriesPage(ctx context.Context, provided ProviderSeries
 	}, nil
 }
 
-func (s *Service) loadTitleMetadata(ctx context.Context, titleID, mediaType, language string) (string, []byte, error) {
+func (s *Service) loadTitleMetadata(ctx context.Context, tx pgx.Tx, titleID, mediaType, language string) (string, []byte, error) {
 	var externalID string
 	var cachedPayload []byte
-	err := s.pool.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		SELECT external.external_id,
 		       CASE WHEN metadata.expires_at > now() THEN metadata.payload ELSE NULL END
 		FROM titles AS title
@@ -1293,9 +1349,9 @@ func (s *Service) loadTitleMetadata(ctx context.Context, titleID, mediaType, lan
 	return externalID, cachedPayload, nil
 }
 
-func (s *Service) loadCachedTitleMetadata(ctx context.Context, titleID, mediaType, metadataProvider, language string) ([]byte, error) {
+func (s *Service) loadCachedTitleMetadata(ctx context.Context, tx pgx.Tx, titleID, mediaType, metadataProvider, language string) ([]byte, error) {
 	var cachedPayload []byte
-	err := s.pool.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		SELECT CASE WHEN metadata.expires_at > now() THEN metadata.payload ELSE NULL END
 		FROM titles AS title
 		LEFT JOIN title_metadata AS metadata
@@ -1313,11 +1369,16 @@ func (s *Service) loadCachedTitleMetadata(ctx context.Context, titleID, mediaTyp
 	return cachedPayload, nil
 }
 
-func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaType string) (string, error) {
+func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaType string, principals ...*auth.Principal) (string, error) {
 	if s.resolver == nil {
 		return "", ErrNotFound
 	}
-	rows, err := s.pool.Query(ctx, `
+	tx, err := s.beginMetadataWorkTx(ctx, firstPrincipal(principals))
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
 		SELECT external.provider, external.external_id
 		FROM titles AS title
 		JOIN title_external_ids AS external ON external.title_id = title.id
@@ -1331,15 +1392,30 @@ func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaT
 	if err != nil {
 		return "", fmt.Errorf("query external title identities: %w", err)
 	}
-	defer rows.Close()
-	var lastNotFound error
+	type identity struct {
+		provider   string
+		externalID string
+	}
+	identities := make([]identity, 0)
 	for rows.Next() {
-		var provider string
-		var externalID string
-		if err := rows.Scan(&provider, &externalID); err != nil {
+		var value identity
+		if err := rows.Scan(&value.provider, &value.externalID); err != nil {
+			rows.Close()
 			return "", fmt.Errorf("scan external title identity: %w", err)
 		}
-		resolved, resolveErr := s.resolver.ResolveExternalID(ctx, mediaType, provider, externalID)
+		identities = append(identities, value)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", fmt.Errorf("iterate external title identities: %w", err)
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit external title identity read: %w", err)
+	}
+	var lastNotFound error
+	for _, identity := range identities {
+		resolved, resolveErr := s.resolver.ResolveExternalID(ctx, mediaType, identity.provider, identity.externalID)
 		if resolveErr == nil {
 			return resolved, nil
 		}
@@ -1347,9 +1423,6 @@ func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaT
 			return "", resolveErr
 		}
 		lastNotFound = resolveErr
-	}
-	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("iterate external title identities: %w", err)
 	}
 	if lastNotFound != nil {
 		return "", fmt.Errorf("%w: resolve provider identity: %w", ErrNotFound, lastNotFound)
@@ -1375,27 +1448,11 @@ func cacheTitle(ctx context.Context, tx pgx.Tx, titleID, metadataProvider, langu
 	return nil
 }
 
-func (s *Service) persistCachedMovieSnapshot(ctx context.Context, movie Movie) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin cached movie snapshot persistence: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := persistTitleSnapshot(ctx, tx, movie.ID, movie.Title, movie.PosterURL, movie.BackdropURL, movie.ReleaseDate); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit cached movie snapshot persistence: %w", err)
-	}
-	return nil
+func (s *Service) persistCachedMovieSnapshot(ctx context.Context, tx pgx.Tx, movie Movie) error {
+	return persistTitleSnapshot(ctx, tx, movie.ID, movie.Title, movie.PosterURL, movie.BackdropURL, movie.ReleaseDate)
 }
 
-func (s *Service) persistCachedSeriesSnapshots(ctx context.Context, series Series) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin cached series snapshot persistence: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+func (s *Service) persistCachedSeriesSnapshots(ctx context.Context, tx pgx.Tx, series Series) error {
 	if err := persistTitleSnapshot(ctx, tx, series.ID, series.Name, series.PosterURL, series.BackdropURL, series.FirstAirDate); err != nil {
 		return err
 	}
@@ -1403,9 +1460,6 @@ func (s *Service) persistCachedSeriesSnapshots(ctx context.Context, series Serie
 		if err := persistTitleSnapshot(ctx, tx, season.ID, season.Name, season.PosterURL, season.BackdropURL, season.AirDate); err != nil {
 			return err
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit cached series snapshot persistence: %w", err)
 	}
 	return nil
 }
@@ -1434,12 +1488,7 @@ func validateProviderSeasonHierarchy(season ProviderSeason, externalID string, s
 	return nil
 }
 
-func (s *Service) persistCachedSeasonSnapshot(ctx context.Context, season Season) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin cached season snapshot persistence: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+func (s *Service) persistCachedSeasonSnapshot(ctx context.Context, tx pgx.Tx, season Season) error {
 	persistMissingSnapshot := func(titleID, title, posterURL, backgroundURL, releaseDate string) error {
 		var existingTitle, existingPosterURL, existingBackgroundURL, existingReleaseDate string
 		err := tx.QueryRow(ctx, `
@@ -1474,9 +1523,6 @@ func (s *Service) persistCachedSeasonSnapshot(ctx context.Context, season Season
 		if err := persistMissingSnapshot(episode.ID, episode.Name, episode.StillURL, episode.BackdropURL, episode.AirDate); err != nil {
 			return err
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit cached season snapshot persistence: %w", err)
 	}
 	return nil
 }
@@ -2292,6 +2338,58 @@ func normalizeExternalIDs(externalID string, additional map[string]string) map[s
 		}
 	}
 	return externalIDs
+}
+
+func (s *Service) beginAuthorizedProfileTx(ctx context.Context, principal auth.Principal) (pgx.Tx, error) {
+	if err := requireActiveProfile(principal); err != nil {
+		return nil, err
+	}
+	if s.pool == nil {
+		return nil, ErrProfileRequired
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin active metadata profile authorization: %w", err)
+	}
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{*principal.ActiveProfileID}, false)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, fmt.Errorf("authorize active metadata profile: %w", err)
+	}
+	if !authorized {
+		_ = tx.Rollback(ctx)
+		return nil, ErrProfileRequired
+	}
+	return tx, nil
+}
+
+func firstPrincipal(principals []*auth.Principal) *auth.Principal {
+	if len(principals) == 0 {
+		return nil
+	}
+	return principals[0]
+}
+
+func (s *Service) beginMetadataWorkTx(ctx context.Context, principal *auth.Principal) (pgx.Tx, error) {
+	if principal != nil {
+		return s.beginAuthorizedProfileTx(ctx, *principal)
+	}
+	if s.pool == nil {
+		return nil, errors.New("metadata database unavailable")
+	}
+	return s.pool.Begin(ctx)
+}
+
+func (s *Service) requireActiveProfile(ctx context.Context, principal auth.Principal) error {
+	tx, err := s.beginAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit active metadata profile authorization: %w", err)
+	}
+	return nil
 }
 
 func requireActiveProfile(principal auth.Principal) error {

@@ -15,25 +15,26 @@ const (
 	CookieName = "rivune_demo"
 	APIPrefix  = "/api/v1"
 
-	AlexProfileID = "d0000000-0000-4000-8000-000000000001"
-	KidsProfileID = "d0000000-0000-4000-8000-000000000002"
+	AlexProfileID  = "d0000000-0000-4000-8000-000000000001"
+	KidsProfileID  = "d0000000-0000-4000-8000-000000000002"
 	DemoUserID     = "d0000000-0000-4000-8000-000000000003"
 	DemoDeviceID   = "d0000000-0000-4000-8000-000000000004"
+	DemoCategoryID = "d0000000-0000-4000-8000-000000000005"
 
-	SignalMovieID    = "d1000000-0000-4000-8000-000000000001"
-	LighthouseID     = "d1000000-0000-4000-8000-000000000002"
-	OpenSkiesID      = "d1000000-0000-4000-8000-000000000003"
-	OrbitSeriesID    = "d2000000-0000-4000-8000-000000000001"
-	OrbitSeasonOneID = "d2100000-0000-4000-8000-000000000001"
-	OrbitSeasonTwoID = "d2100000-0000-4000-8000-000000000002"
-	OrbitEpisodeOne  = "d2200000-0000-4000-8000-000000000001"
-	OrbitEpisodeTwo  = "d2200000-0000-4000-8000-000000000002"
+	SignalMovieID     = "d1000000-0000-4000-8000-000000000001"
+	LighthouseID      = "d1000000-0000-4000-8000-000000000002"
+	OpenSkiesID       = "d1000000-0000-4000-8000-000000000003"
+	OrbitSeriesID     = "d2000000-0000-4000-8000-000000000001"
+	OrbitSeasonOneID  = "d2100000-0000-4000-8000-000000000001"
+	OrbitSeasonTwoID  = "d2100000-0000-4000-8000-000000000002"
+	OrbitEpisodeOne   = "d2200000-0000-4000-8000-000000000001"
+	OrbitEpisodeTwo   = "d2200000-0000-4000-8000-000000000002"
 	OrbitEpisodeThree = "d2200000-0000-4000-8000-000000000003"
 	OrbitEpisodeFour  = "d2200000-0000-4000-8000-000000000004"
-	WorldNewsID      = "d3000000-0000-4000-8000-000000000001"
-	CultureLiveID    = "d3000000-0000-4000-8000-000000000002"
+	WorldNewsID       = "d3000000-0000-4000-8000-000000000001"
+	CultureLiveID     = "d3000000-0000-4000-8000-000000000002"
 
-	HomeCollectionID = "d4000000-0000-4000-8000-000000000001"
+	HomeCollectionID  = "d4000000-0000-4000-8000-000000000001"
 	SpotlightFolderID = "d4100000-0000-4000-8000-000000000001"
 	SeriesFolderID    = "d4100000-0000-4000-8000-000000000002"
 	LiveFolderID      = "d4100000-0000-4000-8000-000000000003"
@@ -116,11 +117,11 @@ func New(admission SetupAdmission, options Options) *Service {
 	}
 	return &Service{
 		admission: admission,
-		ttl: options.TTL,
-		max: options.MaxSessions,
-		now: options.Now,
-		random: options.Random,
-		sessions: make(map[[sha256.Size]byte]*session),
+		ttl:       options.TTL,
+		max:       options.MaxSessions,
+		now:       options.Now,
+		random:    options.Random,
+		sessions:  make(map[[sha256.Size]byte]*session),
 	}
 }
 

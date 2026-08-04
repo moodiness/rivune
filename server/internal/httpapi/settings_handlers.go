@@ -99,7 +99,7 @@ func (a *API) updateInstanceSettings(w http.ResponseWriter, r *http.Request, pri
 	writeJSON(w, http.StatusOK, newSettingsLayerResponse(layer))
 }
 func (a *API) maintenanceSettings(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		writeError(w, http.StatusForbidden, "settings_forbidden", "This account cannot read maintenance settings")
 		return
 	}

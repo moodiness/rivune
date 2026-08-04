@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/moodiness/rivune/server/internal/category"
 	"github.com/moodiness/rivune/server/internal/password"
 )
 
@@ -24,6 +25,13 @@ var (
 	ErrSessionNotFound      = errors.New("session not found")
 	ErrNotificationNotFound = errors.New("notification not found")
 	ErrForbidden            = errors.New("authentication operation forbidden")
+)
+
+type AuthorizationScope string
+
+const (
+	AuthorizationScopeGlobalAdministrator AuthorizationScope = "global_admin"
+	AuthorizationScopeCategory            AuthorizationScope = "category"
 )
 
 const (
@@ -51,12 +59,14 @@ type LoginInput struct {
 }
 
 type TokenPair struct {
-	AccessToken      string
-	AccessExpiresAt  time.Time
-	RefreshToken     string
-	RefreshExpiresAt time.Time
-	SessionID        string
-	DeviceID         string
+	AccessToken        string
+	AccessExpiresAt    time.Time
+	RefreshToken       string
+	RefreshExpiresAt   time.Time
+	SessionID          string
+	DeviceID           string
+	AuthorizationScope AuthorizationScope
+	Category           *category.CategoryRef
 }
 
 type Principal struct {
@@ -65,14 +75,22 @@ type Principal struct {
 	DeviceID               string
 	Username               string
 	Role                   string
+	AuthorizationScope     AuthorizationScope
+	CategoryID             *string
+	Category               *category.CategoryRef
 	ActiveProfileID        *string
 	ProfileGrantExpiresAt  *time.Time
 	ActiveProfileCanManage bool
 }
 
+func (principal Principal) IsGlobalAdministrator() bool {
+	return principal.Role == "admin" && principal.AuthorizationScope == AuthorizationScopeGlobalAdministrator
+}
+
 type Profile struct {
 	ID              string
 	Name            string
+	Description     *string
 	IsChild         bool
 	HasPIN          bool
 	CanManage       bool
@@ -85,6 +103,7 @@ type Profile struct {
 	AccessEndTime   *string
 	AccessTimezone  string
 	Accessible      bool
+	Category        category.CategoryRef
 }
 
 type Account struct {
@@ -100,6 +119,8 @@ type Session struct {
 	DeviceName            string
 	Platform              string
 	IPAddress             string
+	AuthorizationScope    AuthorizationScope
+	Category              *category.CategoryRef
 	CreatedAt             time.Time
 	LastSeenAt            time.Time
 	ProfileGrantExpiresAt *time.Time
@@ -143,16 +164,15 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 		return TokenPair{}, fmt.Errorf("begin login: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-
-	var userID, passwordHash string
+	var userID, passwordHash, role string
 	var lockedUntil *time.Time
 	var failedLoginCount int
 	err = tx.QueryRow(ctx, `
-		SELECT id::text, password_hash, failed_login_count, locked_until
+		SELECT id::text, password_hash, role, failed_login_count, locked_until
 		FROM users
 		WHERE lower(username) = lower($1)
 		FOR UPDATE
-	`, input.Username).Scan(&userID, &passwordHash, &failedLoginCount, &lockedUntil)
+	`, input.Username).Scan(&userID, &passwordHash, &role, &failedLoginCount, &lockedUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		_, _ = password.Verify(input.Password, s.dummyHash)
 		return TokenPair{}, ErrInvalidCredentials
@@ -186,8 +206,17 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 	if _, err := tx.Exec(ctx, "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = $1", userID); err != nil {
 		return TokenPair{}, fmt.Errorf("clear failed login state: %w", err)
 	}
-
-	tokens, err := s.createSession(ctx, tx, userID, input, now)
+	deviceID, deviceCategory, err := upsertDevice(ctx, tx, userID, input)
+	if err != nil {
+		return TokenPair{}, err
+	}
+	scope := AuthorizationScopeCategory
+	sessionCategory := deviceCategory
+	if role == "admin" {
+		scope = AuthorizationScopeGlobalAdministrator
+		sessionCategory = nil
+	}
+	tokens, err := s.createSession(ctx, tx, userID, deviceID, scope, sessionCategory, now)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -209,16 +238,28 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var sessionID, deviceID string
+	var sessionID, deviceID, role string
+	var scope AuthorizationScope
+	var sessionCategoryID, categoryName, categoryColor, categoryIcon, deviceCategoryID, activeProfileCategoryID *string
 	var refreshExpiresAt time.Time
 	var consumedAt, revokedAt *time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT s.id::text, s.device_id::text, s.refresh_expires_at, rt.consumed_at, s.revoked_at
+		SELECT s.id::text, s.device_id::text, u.role, s.authorization_scope,
+		       s.category_id::text, c.name, c.color, c.icon, d.category_id::text,
+		       p.category_id::text, s.refresh_expires_at, rt.consumed_at, s.revoked_at
 		FROM auth_refresh_tokens rt
 		JOIN auth_sessions s ON s.id = rt.session_id
+		JOIN users u ON u.id = s.user_id
+		JOIN devices d ON d.id = s.device_id
+		LEFT JOIN access_categories c ON c.id = s.category_id
+		LEFT JOIN profiles p ON p.id = s.active_profile_id
 		WHERE rt.token_hash = $1
 		FOR UPDATE OF rt, s
-	`, tokenDigest(refreshToken)).Scan(&sessionID, &deviceID, &refreshExpiresAt, &consumedAt, &revokedAt)
+	`, tokenDigest(refreshToken)).Scan(
+		&sessionID, &deviceID, &role, &scope,
+		&sessionCategoryID, &categoryName, &categoryColor, &categoryIcon, &deviceCategoryID,
+		&activeProfileCategoryID, &refreshExpiresAt, &consumedAt, &revokedAt,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TokenPair{}, ErrInvalidToken
 	}
@@ -235,6 +276,19 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 			if err := tx.Commit(ctx); err != nil {
 				return TokenPair{}, fmt.Errorf("commit replay revocation: %w", err)
 			}
+		}
+		return TokenPair{}, ErrInvalidToken
+	}
+	if !validSessionScope(role, scope, sessionCategoryID, deviceCategoryID, activeProfileCategoryID) {
+		if _, err := tx.Exec(ctx, `
+			UPDATE auth_sessions
+			SET revoked_at = $2, revoked_reason = 'authorization_category_mismatch'
+			WHERE id = $1 AND revoked_at IS NULL
+		`, sessionID, now); err != nil {
+			return TokenPair{}, fmt.Errorf("revoke mismatched session: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return TokenPair{}, fmt.Errorf("commit mismatch revocation: %w", err)
 		}
 		return TokenPair{}, ErrInvalidToken
 	}
@@ -274,12 +328,10 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 	}
 
 	return TokenPair{
-		AccessToken:      accessToken,
-		AccessExpiresAt:  accessExpiresAt,
-		RefreshToken:     newRefreshToken,
-		RefreshExpiresAt: refreshExpiresAt,
-		SessionID:        sessionID,
-		DeviceID:         deviceID,
+		AccessToken: accessToken, AccessExpiresAt: accessExpiresAt,
+		RefreshToken: newRefreshToken, RefreshExpiresAt: refreshExpiresAt,
+		SessionID: sessionID, DeviceID: deviceID, AuthorizationScope: scope,
+		Category: newCategoryRef(sessionCategoryID, categoryName, categoryColor, categoryIcon),
 	}, nil
 }
 
@@ -290,21 +342,24 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 
 	var principal Principal
 	var lastIPAddress string
+	var categoryName, categoryColor, categoryIcon, deviceCategoryID, activeProfileCategoryID *string
+	var hasActiveProfileAccess bool
 	var access ProfileAccess
 	err := s.pool.QueryRow(ctx, `
 		SELECT s.id::text, s.user_id::text, s.device_id::text, u.username, u.role,
-		       s.active_profile_id::text,
+		       s.authorization_scope, s.category_id::text, c.name, c.color, c.icon,
+		       d.category_id::text, s.active_profile_id::text, p.category_id::text,
 		       s.profile_grant_expires_at,
 		       COALESCE(upa.can_manage, false),
-		       COALESCE(host(s.last_ip), ''),
-		       COALESCE(p.enabled, false),
-		       p.available_from::text,
-		       p.available_until::text,
-		       to_char(p.access_start_time, 'HH24:MI'),
-		       to_char(p.access_end_time, 'HH24:MI'),
+		       upa.user_id IS NOT NULL,
+		       COALESCE(host(s.last_ip), ''), COALESCE(p.enabled, false),
+		       p.available_from::text, p.available_until::text,
+		       to_char(p.access_start_time, 'HH24:MI'), to_char(p.access_end_time, 'HH24:MI'),
 		       COALESCE(p.access_timezone, 'UTC')
 		FROM auth_sessions s
 		JOIN users u ON u.id = s.user_id
+		JOIN devices d ON d.id = s.device_id
+		LEFT JOIN access_categories c ON c.id = s.category_id
 		LEFT JOIN profiles p ON p.id = s.active_profile_id
 		LEFT JOIN user_profile_access upa
 		  ON upa.user_id = s.user_id AND upa.profile_id = s.active_profile_id
@@ -312,21 +367,12 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 		  AND s.access_expires_at > now()
 		  AND s.revoked_at IS NULL
 	`, tokenDigest(accessToken)).Scan(
-		&principal.SessionID,
-		&principal.UserID,
-		&principal.DeviceID,
-		&principal.Username,
-		&principal.Role,
-		&principal.ActiveProfileID,
-		&principal.ProfileGrantExpiresAt,
-		&principal.ActiveProfileCanManage,
-		&lastIPAddress,
-		&access.Enabled,
-		&access.AvailableFrom,
-		&access.AvailableUntil,
-		&access.AccessStartTime,
-		&access.AccessEndTime,
-		&access.AccessTimezone,
+		&principal.SessionID, &principal.UserID, &principal.DeviceID, &principal.Username, &principal.Role,
+		&principal.AuthorizationScope, &principal.CategoryID, &categoryName, &categoryColor, &categoryIcon,
+		&deviceCategoryID, &principal.ActiveProfileID, &activeProfileCategoryID,
+		&principal.ProfileGrantExpiresAt, &principal.ActiveProfileCanManage, &hasActiveProfileAccess,
+		&lastIPAddress, &access.Enabled, &access.AvailableFrom, &access.AvailableUntil,
+		&access.AccessStartTime, &access.AccessEndTime, &access.AccessTimezone,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, ErrInvalidToken
@@ -334,6 +380,31 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 	if err != nil {
 		return Principal{}, fmt.Errorf("authenticate access token: %w", err)
 	}
+	if !validSessionScope(principal.Role, principal.AuthorizationScope, principal.CategoryID, deviceCategoryID, activeProfileCategoryID) {
+		if _, err := s.pool.Exec(ctx, `
+			UPDATE auth_sessions
+			SET revoked_at = now(), revoked_reason = 'authorization_category_mismatch'
+			WHERE id = $1 AND revoked_at IS NULL
+		`, principal.SessionID); err != nil {
+			return Principal{}, fmt.Errorf("revoke mismatched session: %w", err)
+		}
+		return Principal{}, ErrInvalidToken
+	}
+	if principal.AuthorizationScope == AuthorizationScopeCategory &&
+		principal.ActiveProfileID != nil && !hasActiveProfileAccess {
+		activeProfileID := *principal.ActiveProfileID
+		if _, err := s.pool.Exec(ctx, `
+			UPDATE auth_sessions
+			SET active_profile_id = NULL, profile_grant_expires_at = NULL
+			WHERE id = $1 AND active_profile_id::text = $2
+		`, principal.SessionID, activeProfileID); err != nil {
+			return Principal{}, fmt.Errorf("clear unauthorized profile grant: %w", err)
+		}
+		principal.ActiveProfileID = nil
+		principal.ProfileGrantExpiresAt = nil
+		principal.ActiveProfileCanManage = false
+	}
+	principal.Category = newCategoryRef(principal.CategoryID, categoryName, categoryColor, categoryIcon)
 	access.AccessTimezone = s.timezone
 	activeProfileID := principal.ActiveProfileID
 	if reconcileProfileGrant(&principal, access, time.Now().UTC()) {
@@ -354,49 +425,95 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 }
 
 func (s *Service) Account(ctx context.Context, principal Principal) (Account, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT p.id::text, p.name, p.is_child, p.pin_hash IS NOT NULL,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Account{}, fmt.Errorf("begin account profiles: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	activeProfileID := ""
+	if principal.ActiveProfileID != nil {
+		activeProfileID = *principal.ActiveProfileID
+	}
+	rows, err := tx.Query(ctx, `
+		WITH locked_profiles AS MATERIALIZED (
+			SELECT p.id, p.name, p.description, p.is_child, p.pin_hash, p.avatar_preset,
+			       p.enabled, p.available_from, p.available_until,
+			       p.access_start_time, p.access_end_time, p.access_timezone, p.category_id
+			FROM profiles p
+			WHERE ($2 AND p.category_id = (SELECT category_id FROM devices WHERE id::text = $6))
+			   OR (NOT $2 AND p.category_id::text = $4)
+			   OR p.id::text = $5
+			ORDER BY p.id
+			FOR SHARE
+		), locked_access AS MATERIALIZED (
+			SELECT upa.profile_id, upa.can_manage
+			FROM user_profile_access upa
+			JOIN locked_profiles p ON p.id = upa.profile_id
+			WHERE upa.user_id = $1
+			  AND ($2 OR p.category_id::text = $4)
+			ORDER BY upa.profile_id
+			FOR SHARE OF upa
+		)
+		SELECT p.id::text, p.name, p.description, p.is_child, p.pin_hash IS NOT NULL,
 		       COALESCE(upa.can_manage, false) AS can_manage,
 		       p.avatar_preset,
 		       EXISTS (SELECT 1 FROM profile_avatar_images avatar WHERE avatar.profile_id = p.id),
 		       p.enabled, p.available_from::text, p.available_until::text,
 		       to_char(p.access_start_time, 'HH24:MI'), to_char(p.access_end_time, 'HH24:MI'),
-		       p.access_timezone
-		FROM profiles p
-		LEFT JOIN user_profile_access upa
-		  ON upa.profile_id = p.id AND upa.user_id = $1
-		WHERE $2 = 'admin' OR upa.user_id IS NOT NULL
+		       p.access_timezone, category.id::text, category.name, category.color, category.icon
+		FROM locked_profiles p
+		JOIN access_categories category ON category.id = p.category_id
+		LEFT JOIN locked_access upa ON upa.profile_id = p.id
+		WHERE ($2 AND p.category_id = (SELECT category_id FROM devices WHERE id::text = $6))
+		   OR ($3 = 'category' AND p.category_id::text = $4 AND upa.profile_id IS NOT NULL)
 		ORDER BY lower(p.name), p.id
-	`, principal.UserID, principal.Role)
+	`, principal.UserID, principal.IsGlobalAdministrator(), principal.AuthorizationScope,
+		principalCategoryID(principal), activeProfileID, principal.DeviceID)
 	if err != nil {
 		return Account{}, fmt.Errorf("query account profiles: %w", err)
 	}
-	defer rows.Close()
 
 	profiles := make([]Profile, 0)
+	activeProfileVisible := principal.ActiveProfileID == nil
+	now := time.Now().UTC()
 	for rows.Next() {
 		var profile Profile
 		var customAvatar bool
 		if err := rows.Scan(
-			&profile.ID, &profile.Name, &profile.IsChild, &profile.HasPIN, &profile.CanManage,
+			&profile.ID, &profile.Name, &profile.Description, &profile.IsChild, &profile.HasPIN, &profile.CanManage,
 			&profile.AvatarPreset, &customAvatar, &profile.Enabled, &profile.AvailableFrom,
 			&profile.AvailableUntil, &profile.AccessStartTime, &profile.AccessEndTime, &profile.AccessTimezone,
+			&profile.Category.ID, &profile.Category.Name, &profile.Category.Color, &profile.Category.Icon,
 		); err != nil {
+			rows.Close()
 			return Account{}, fmt.Errorf("scan account profile: %w", err)
 		}
 		profile.AccessTimezone = s.timezone
 		profile.Accessible = ProfileAccessibleAt(ProfileAccess{
 			Enabled: profile.Enabled, AvailableFrom: profile.AvailableFrom, AvailableUntil: profile.AvailableUntil,
 			AccessStartTime: profile.AccessStartTime, AccessEndTime: profile.AccessEndTime, AccessTimezone: profile.AccessTimezone,
-		}, time.Now().UTC())
+		}, now)
 		profile.AvatarKind = "preset"
 		if customAvatar {
 			profile.AvatarKind = "custom"
 		}
 		profiles = append(profiles, profile)
+		activeProfileVisible = activeProfileVisible || profile.ID == activeProfileID
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return Account{}, fmt.Errorf("iterate account profiles: %w", err)
+	}
+	rows.Close()
+
+	if !activeProfileVisible {
+		principal.ActiveProfileID = nil
+		principal.ProfileGrantExpiresAt = nil
+		principal.ActiveProfileCanManage = false
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Account{}, fmt.Errorf("commit account profiles: %w", err)
 	}
 	return Account{Principal: principal, Profiles: profiles}, nil
 }
@@ -415,13 +532,26 @@ func (s *Service) Logout(ctx context.Context, principal Principal) error {
 
 func (s *Service) Sessions(ctx context.Context, principal Principal) ([]Session, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT s.id::text, d.id::text, d.name, d.platform, s.created_at, s.last_seen_at,
-		       COALESCE(host(s.last_ip), '')
+		SELECT s.id::text, d.id::text, d.name, d.platform, s.authorization_scope,
+		       category.id::text, category.name, category.color, category.icon,
+		       s.created_at, s.last_seen_at, COALESCE(host(s.last_ip), '')
 		FROM auth_sessions s
 		JOIN devices d ON d.id = s.device_id
-		WHERE s.user_id = $1 AND s.revoked_at IS NULL AND s.refresh_expires_at > now()
+		LEFT JOIN profiles active_profile ON active_profile.id = s.active_profile_id
+		LEFT JOIN access_categories category ON category.id = s.category_id
+		WHERE s.user_id = $1
+		  AND (
+		    (s.authorization_scope = 'global_admin' AND s.category_id IS NULL)
+		    OR (
+		      s.authorization_scope = 'category'
+		      AND s.category_id = d.category_id
+		      AND (s.active_profile_id IS NULL OR active_profile.category_id = s.category_id)
+		    )
+		  )
+		  AND ($2 OR (s.authorization_scope = 'category' AND s.category_id::text = $3))
+		  AND s.revoked_at IS NULL AND s.refresh_expires_at > now()
 		ORDER BY s.last_seen_at DESC, s.created_at DESC
-	`, principal.UserID)
+	`, principal.UserID, principal.IsGlobalAdministrator(), principalCategoryID(principal))
 	if err != nil {
 		return nil, fmt.Errorf("query sessions: %w", err)
 	}
@@ -430,12 +560,15 @@ func (s *Service) Sessions(ctx context.Context, principal Principal) ([]Session,
 	sessions := make([]Session, 0)
 	for rows.Next() {
 		var session Session
+		var categoryID, categoryName, categoryColor, categoryIcon *string
 		if err := rows.Scan(
-			&session.ID, &session.DeviceID, &session.DeviceName, &session.Platform,
+			&session.ID, &session.DeviceID, &session.DeviceName, &session.Platform, &session.AuthorizationScope,
+			&categoryID, &categoryName, &categoryColor, &categoryIcon,
 			&session.CreatedAt, &session.LastSeenAt, &session.IPAddress,
 		); err != nil {
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
+		session.Category = newCategoryRef(categoryID, categoryName, categoryColor, categoryIcon)
 		session.Current = session.ID == principal.SessionID
 		sessions = append(sessions, session)
 	}
@@ -450,25 +583,44 @@ func (s *Service) ProfileSessions(ctx context.Context, principal Principal, prof
 	if profileID == "" {
 		return nil, ErrForbidden
 	}
-	authorized, err := s.canManageProfile(ctx, principal, profileID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin profile sessions: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	authorized, err := AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
 	if err != nil {
 		return nil, err
 	}
 	if !authorized {
 		return nil, ErrForbidden
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := tx.Query(ctx, `
 		SELECT s.id::text, s.user_id::text, u.username, d.id::text, d.name, d.platform,
+		       s.authorization_scope, category.id::text, category.name, category.color, category.icon,
 		       s.created_at, s.last_seen_at, s.profile_grant_expires_at, COALESCE(host(s.last_ip), '')
 		FROM auth_sessions s
 		JOIN users u ON u.id = s.user_id
 		JOIN devices d ON d.id = s.device_id
+		LEFT JOIN access_categories category ON category.id = s.category_id
 		WHERE s.active_profile_id::text = $1
+		  AND (
+		    (s.authorization_scope = 'global_admin' AND s.category_id IS NULL AND u.role = 'admin')
+		    OR (s.authorization_scope = 'category' AND s.category_id = d.category_id)
+		  )
+		  AND (
+		    $2
+		    OR (
+		      s.authorization_scope = 'category'
+		      AND s.category_id::text = $3
+		      AND s.category_id = d.category_id
+		    )
+		  )
 		  AND s.profile_grant_expires_at > now()
 		  AND s.revoked_at IS NULL
 		  AND s.refresh_expires_at > now()
 		ORDER BY s.last_seen_at DESC, s.created_at DESC
-	`, profileID)
+	`, profileID, principal.IsGlobalAdministrator(), principalCategoryID(principal))
 	if err != nil {
 		return nil, fmt.Errorf("query profile sessions: %w", err)
 	}
@@ -477,18 +629,24 @@ func (s *Service) ProfileSessions(ctx context.Context, principal Principal, prof
 	sessions := make([]Session, 0)
 	for rows.Next() {
 		var session Session
+		var categoryID, categoryName, categoryColor, categoryIcon *string
 		if err := rows.Scan(
 			&session.ID, &session.UserID, &session.Username, &session.DeviceID, &session.DeviceName,
-			&session.Platform, &session.CreatedAt, &session.LastSeenAt, &session.ProfileGrantExpiresAt,
-			&session.IPAddress,
+			&session.Platform, &session.AuthorizationScope, &categoryID, &categoryName, &categoryColor, &categoryIcon,
+			&session.CreatedAt, &session.LastSeenAt, &session.ProfileGrantExpiresAt, &session.IPAddress,
 		); err != nil {
 			return nil, fmt.Errorf("scan profile session: %w", err)
 		}
+		session.Category = newCategoryRef(categoryID, categoryName, categoryColor, categoryIcon)
 		session.Current = session.ID == principal.SessionID
 		sessions = append(sessions, session)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate profile sessions: %w", err)
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit profile sessions: %w", err)
 	}
 	return sessions, nil
 }
@@ -500,7 +658,12 @@ func (s *Service) SendProfileSessionNotification(ctx context.Context, principal 
 	if profileID == "" || sessionID == "" || message == "" || !utf8.ValidString(message) || strings.ContainsRune(message, '\x00') || utf8.RuneCountInString(message) > maximumSessionNotificationLength {
 		return SessionNotification{}, ErrInvalidInput
 	}
-	authorized, err := s.canManageProfile(ctx, principal, profileID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return SessionNotification{}, fmt.Errorf("begin profile session notification: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	authorized, err := AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
 	if err != nil {
 		return SessionNotification{}, err
 	}
@@ -508,7 +671,7 @@ func (s *Service) SendProfileSessionNotification(ctx context.Context, principal 
 		return SessionNotification{}, ErrForbidden
 	}
 	var notification SessionNotification
-	err = s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		WITH expired AS (
 			DELETE FROM auth_session_notifications
 			WHERE expires_at <= now()
@@ -516,13 +679,23 @@ func (s *Service) SendProfileSessionNotification(ctx context.Context, principal 
 		INSERT INTO auth_session_notifications (session_id, sender_user_id, message)
 		SELECT session.id, $3::uuid, $4
 		FROM auth_sessions session
+		JOIN devices device ON device.id = session.device_id
 		WHERE session.id::text = $1
 		  AND session.active_profile_id::text = $2
+		  AND (
+		    $5
+		    OR (
+		      session.authorization_scope = 'category'
+		      AND session.category_id::text = $6
+		      AND session.category_id = device.category_id
+		    )
+		  )
 		  AND session.profile_grant_expires_at > now()
 		  AND session.revoked_at IS NULL
 		  AND session.refresh_expires_at > now()
 		RETURNING id, message, created_at
-	`, sessionID, profileID, principal.UserID, message).Scan(
+	`, sessionID, profileID, principal.UserID, message,
+		principal.IsGlobalAdministrator(), principalCategoryID(principal)).Scan(
 		&notification.ID, &notification.Message, &notification.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -532,11 +705,14 @@ func (s *Service) SendProfileSessionNotification(ctx context.Context, principal 
 		return SessionNotification{}, fmt.Errorf("send session notification: %w", err)
 	}
 	notification.SenderUsername = principal.Username
+	if err := tx.Commit(ctx); err != nil {
+		return SessionNotification{}, fmt.Errorf("commit profile session notification: %w", err)
+	}
 	return notification, nil
 }
 
 func (s *Service) BroadcastSessionNotification(ctx context.Context, principal Principal, broadcastID, message string) (NotificationBroadcast, error) {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		return NotificationBroadcast{}, ErrForbidden
 	}
 	broadcastID = strings.TrimSpace(broadcastID)
@@ -686,34 +862,49 @@ func (s *Service) RevokeProfileSession(ctx context.Context, principal Principal,
 	if profileID == "" || sessionID == "" {
 		return ErrSessionNotFound
 	}
-	authorized, err := s.canManageProfile(ctx, principal, profileID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin profile session revocation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	authorized, err := AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
 	if err != nil {
 		return err
 	}
 	if !authorized {
 		return ErrForbidden
 	}
-	command, err := s.pool.Exec(ctx, `
-		UPDATE auth_sessions
-		SET revoked_at = COALESCE(revoked_at, now()),
-		    revoked_reason = COALESCE(revoked_reason, 'profile_manager_revoked')
-		WHERE id::text = $1
-		  AND active_profile_id::text = $2
-		  AND profile_grant_expires_at > now()
-		  AND revoked_at IS NULL
-		  AND refresh_expires_at > now()
-	`, sessionID, profileID)
+	command, err := tx.Exec(ctx, `
+		UPDATE auth_sessions session
+		SET revoked_at = COALESCE(session.revoked_at, now()),
+		    revoked_reason = COALESCE(session.revoked_reason, 'profile_manager_revoked')
+		WHERE session.id::text = $1
+		  AND session.active_profile_id::text = $2
+		  AND (
+		    $3
+		    OR (
+		      session.authorization_scope = 'category'
+		      AND session.category_id::text = $4
+		      AND EXISTS (
+		        SELECT 1 FROM devices device
+		        WHERE device.id = session.device_id AND device.category_id = session.category_id
+		      )
+		    )
+		  )
+		  AND session.profile_grant_expires_at > now()
+		  AND session.revoked_at IS NULL
+		  AND session.refresh_expires_at > now()
+	`, sessionID, profileID, principal.IsGlobalAdministrator(), principalCategoryID(principal))
 	if err != nil {
 		return fmt.Errorf("revoke profile session: %w", err)
 	}
 	if command.RowsAffected() == 0 {
 		return ErrSessionNotFound
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit profile session revocation: %w", err)
+	}
 	return nil
-}
-
-func (s *Service) canManageProfile(ctx context.Context, principal Principal, profileID string) (bool, error) {
-	return CanManageProfiles(ctx, s.pool, principal, []string{profileID})
 }
 
 func (s *Service) RevokeSession(ctx context.Context, principal Principal, sessionID string) error {
@@ -721,10 +912,24 @@ func (s *Service) RevokeSession(ctx context.Context, principal Principal, sessio
 		return ErrSessionNotFound
 	}
 	command, err := s.pool.Exec(ctx, `
-		UPDATE auth_sessions
-		SET revoked_at = COALESCE(revoked_at, now()), revoked_reason = COALESCE(revoked_reason, 'user_revoked')
-		WHERE id::text = $1 AND user_id = $2 AND revoked_at IS NULL
-	`, sessionID, principal.UserID)
+		UPDATE auth_sessions session
+		SET revoked_at = COALESCE(session.revoked_at, now()),
+		    revoked_reason = COALESCE(session.revoked_reason, 'user_revoked')
+		WHERE session.id::text = $1
+		  AND session.user_id = $2
+		  AND session.revoked_at IS NULL
+		  AND (
+		    $3
+		    OR (
+		      session.authorization_scope = 'category'
+		      AND session.category_id::text = $4
+		      AND EXISTS (
+		        SELECT 1 FROM devices device
+		        WHERE device.id = session.device_id AND device.category_id = session.category_id
+		      )
+		    )
+		  )
+	`, sessionID, principal.UserID, principal.IsGlobalAdministrator(), principalCategoryID(principal))
 	if err != nil {
 		return fmt.Errorf("revoke session: %w", err)
 	}
@@ -751,52 +956,79 @@ func (s *Service) issueTokens(now time.Time) (TokenPair, []byte, []byte, error) 
 	}, accessHash, refreshHash, nil
 }
 
-func upsertDevice(ctx context.Context, tx pgx.Tx, userID string, input LoginInput) (string, error) {
+func upsertDevice(ctx context.Context, tx pgx.Tx, userID string, input LoginInput) (string, *category.CategoryRef, error) {
+	var deviceID, categoryID string
 	if input.DeviceID == "" {
-		var deviceID string
 		if err := tx.QueryRow(ctx, `
-			INSERT INTO devices (user_id, name, platform, last_seen_at)
-			VALUES ($1, $2, $3, now())
-			RETURNING id::text
-		`, userID, input.DeviceName, input.Platform).Scan(&deviceID); err != nil {
-			return "", fmt.Errorf("create device: %w", err)
+			INSERT INTO devices (user_id, name, platform, category_id, approved_at, last_seen_at)
+			SELECT $1, $2, $3, category.id, now(), now()
+			FROM access_categories category
+			WHERE category.is_default
+			RETURNING id::text, category_id::text
+		`, userID, input.DeviceName, input.Platform).Scan(&deviceID, &categoryID); err != nil {
+			return "", nil, fmt.Errorf("create device: %w", err)
 		}
-		return deviceID, nil
+	} else {
+		err := tx.QueryRow(ctx, `
+			UPDATE devices
+			SET name = $3, platform = $4, last_seen_at = now(), updated_at = now()
+			WHERE id::text = $1 AND user_id = $2
+			RETURNING id::text, category_id::text
+		`, input.DeviceID, userID, input.DeviceName, input.Platform).Scan(&deviceID, &categoryID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil, fmt.Errorf("%w: deviceId does not belong to this user", ErrInvalidInput)
+		}
+		if err != nil {
+			return "", nil, fmt.Errorf("update device: %w", err)
+		}
 	}
-
-	var deviceID string
-	err := tx.QueryRow(ctx, `
-		UPDATE devices
-		SET name = $3, platform = $4, last_seen_at = now(), updated_at = now()
-		WHERE id::text = $1 AND user_id = $2
-		RETURNING id::text
-	`, input.DeviceID, userID, input.DeviceName, input.Platform).Scan(&deviceID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", fmt.Errorf("%w: deviceId does not belong to this user", ErrInvalidInput)
-	}
+	deviceCategory, err := loadCategoryRef(ctx, tx, categoryID)
 	if err != nil {
-		return "", fmt.Errorf("update device: %w", err)
+		return "", nil, err
 	}
-	return deviceID, nil
+	return deviceID, deviceCategory, nil
 }
 
-func (s *Service) createSession(ctx context.Context, tx pgx.Tx, userID string, input LoginInput, now time.Time) (TokenPair, error) {
-	deviceID, err := upsertDevice(ctx, tx, userID, input)
-	if err != nil {
-		return TokenPair{}, err
+func loadCategoryRef(ctx context.Context, querier profileAuthorizationQuerier, categoryID string) (*category.CategoryRef, error) {
+	var reference category.CategoryRef
+	if err := querier.QueryRow(ctx, `
+		SELECT id::text, name, color, icon
+		FROM access_categories
+		WHERE id::text = $1
+	`, categoryID).Scan(&reference.ID, &reference.Name, &reference.Color, &reference.Icon); err != nil {
+		return nil, fmt.Errorf("query access category: %w", err)
+	}
+	return &reference, nil
+}
+
+func (s *Service) createSession(
+	ctx context.Context,
+	tx pgx.Tx,
+	userID, deviceID string,
+	scope AuthorizationScope,
+	sessionCategory *category.CategoryRef,
+	now time.Time,
+) (TokenPair, error) {
+	var categoryID any
+	if sessionCategory != nil {
+		categoryID = sessionCategory.ID
 	}
 	tokens, accessHash, refreshHash, err := s.issueTokens(now)
 	if err != nil {
 		return TokenPair{}, err
 	}
 	tokens.DeviceID = deviceID
+	tokens.AuthorizationScope = scope
+	tokens.Category = sessionCategory
 
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO auth_sessions (
-			user_id, device_id, access_token_hash, access_expires_at, refresh_expires_at, last_seen_at, last_ip
-		) VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::inet)
+			user_id, device_id, authorization_scope, category_id,
+			access_token_hash, access_expires_at, refresh_expires_at, last_seen_at, last_ip
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, '')::inet)
 		RETURNING id::text
-	`, userID, deviceID, accessHash, tokens.AccessExpiresAt, tokens.RefreshExpiresAt, now, clientIPFromContext(ctx)).Scan(&tokens.SessionID); err != nil {
+	`, userID, deviceID, scope, categoryID, accessHash, tokens.AccessExpiresAt,
+		tokens.RefreshExpiresAt, now, clientIPFromContext(ctx)).Scan(&tokens.SessionID); err != nil {
 		return TokenPair{}, fmt.Errorf("create session: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -806,6 +1038,31 @@ func (s *Service) createSession(ctx context.Context, tx pgx.Tx, userID string, i
 		return TokenPair{}, fmt.Errorf("store refresh token: %w", err)
 	}
 	return tokens, nil
+}
+
+func validSessionScope(
+	role string,
+	scope AuthorizationScope,
+	sessionCategoryID, deviceCategoryID, activeProfileCategoryID *string,
+) bool {
+	switch scope {
+	case AuthorizationScopeGlobalAdministrator:
+		return role == "admin" && sessionCategoryID == nil
+	case AuthorizationScopeCategory:
+		if sessionCategoryID == nil || deviceCategoryID == nil || *sessionCategoryID != *deviceCategoryID {
+			return false
+		}
+		return activeProfileCategoryID == nil || *sessionCategoryID == *activeProfileCategoryID
+	default:
+		return false
+	}
+}
+
+func newCategoryRef(id, name, color, icon *string) *category.CategoryRef {
+	if id == nil || name == nil {
+		return nil
+	}
+	return &category.CategoryRef{ID: *id, Name: *name, Color: color, Icon: icon}
 }
 
 func validateLoginInput(input LoginInput) error {

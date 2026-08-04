@@ -76,18 +76,96 @@ func TestDeviceAuthorizationSlowDownSetsRetryAfter(t *testing.T) {
 	}
 }
 
-func TestApproveDeviceAuthorizationPassesUserCode(t *testing.T) {
-	service := &fakeAuthService{principal: auth.Principal{UserID: "user-id", Role: "member"}}
+func TestDeviceAuthorizationExchangeRejectsCategoryClaims(t *testing.T) {
+	service := &fakeAuthService{}
 	api := testAPI(&fakeInstanceService{})
 	api.auth = service
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/device-code/approve", bytes.NewBufferString(`{"userCode":"ABCD-EFGH"}`))
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/auth/device-code/token",
+		bytes.NewBufferString(`{"deviceCode":"rivune_dc_pending","categoryId":"attacker-category"}`),
+	)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer access-token")
 	response := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(response, request)
 
-	if response.Code != http.StatusNoContent || service.approvedUserCode != "ABCD-EFGH" {
-		t.Fatalf("unexpected approval result: status=%d code=%q", response.Code, service.approvedUserCode)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected category claim to be rejected with 400, got %d: %s", response.Code, response.Body.String())
+	}
+	if service.exchangedDeviceCode != "" {
+		t.Fatal("untrusted category payload reached device authorization exchange")
+	}
+}
+
+func TestApproveDeviceAuthorizationDistinguishesDeviceNamePresence(t *testing.T) {
+	tests := []struct {
+		name           string
+		body           string
+		wantStatus     int
+		wantDeviceName string
+	}{
+		{
+			name:           "value",
+			body:           `{"userCode":"ABCD-EFGH","categoryId":"category-id","deviceName":"Cinema","internalNote":"Projector"}`,
+			wantStatus:     http.StatusNoContent,
+			wantDeviceName: "Cinema",
+		},
+		{
+			name:       "omitted",
+			body:       `{"userCode":"ABCD-EFGH","categoryId":"category-id","internalNote":"Projector"}`,
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name:       "null",
+			body:       `{"userCode":"ABCD-EFGH","categoryId":"category-id","deviceName":null,"internalNote":"Projector"}`,
+			wantStatus: http.StatusUnprocessableEntity,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeAuthService{principal: auth.Principal{UserID: "user-id", Role: "member"}}
+			api := testAPI(&fakeInstanceService{})
+			api.auth = service
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/auth/device-code/approve",
+				bytes.NewBufferString(test.body),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer access-token")
+			response := httptest.NewRecorder()
+
+			api.Handler().ServeHTTP(response, request)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", test.wantStatus, response.Code, response.Body.String())
+			}
+			if test.name == "null" {
+				if service.approvalInput.UserCode != "" {
+					t.Fatal("explicit null deviceName reached the authorization service")
+				}
+				var body errorEnvelope
+				decodeResponse(t, response, &body)
+				if body.Error.Code != "invalid_device_approval" || body.Error.Message != "deviceName cannot be null" {
+					t.Fatalf("unexpected error response: %+v", body.Error)
+				}
+				return
+			}
+			input := service.approvalInput
+			if input.UserCode != "ABCD-EFGH" || input.CategoryID != "category-id" ||
+				input.InternalNote == nil || *input.InternalNote != "Projector" {
+				t.Fatalf("unexpected approval input: %+v", input)
+			}
+			if test.wantDeviceName == "" {
+				if input.DeviceName != nil {
+					t.Fatalf("omitted deviceName became %+v", input.DeviceName)
+				}
+				return
+			}
+			if input.DeviceName == nil || *input.DeviceName != test.wantDeviceName {
+				t.Fatalf("unexpected deviceName service input: %+v", input.DeviceName)
+			}
+		})
 	}
 }

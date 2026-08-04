@@ -1,11 +1,13 @@
 package addon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +57,20 @@ func (service *Service) Install(ctx context.Context, principal auth.Principal, i
 	if err != nil {
 		return InstalledAddon{}, err
 	}
+	authorizationTx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return InstalledAddon{}, fmt.Errorf("begin addon installation authorization: %w", err)
+	}
+	defer func() { _ = authorizationTx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, authorizationTx, principal, profileID); err != nil {
+		return InstalledAddon{}, err
+	}
+	if err := authorizeProfileAssignments(ctx, authorizationTx, principal, profileID, profileIDs); err != nil {
+		return InstalledAddon{}, err
+	}
+	if err := authorizationTx.Commit(ctx); err != nil {
+		return InstalledAddon{}, fmt.Errorf("commit addon installation authorization: %w", err)
+	}
 	manifest, rawManifest, err := service.transport.Manifest(ctx, transportURL)
 	if err != nil {
 		return InstalledAddon{}, err
@@ -64,6 +80,9 @@ func (service *Service) Install(ctx context.Context, principal auth.Principal, i
 		return InstalledAddon{}, fmt.Errorf("begin addon installation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return InstalledAddon{}, err
+	}
 	if err := authorizeProfileAssignments(ctx, tx, principal, profileID, profileIDs); err != nil {
 		return InstalledAddon{}, err
 	}
@@ -110,7 +129,22 @@ func (service *Service) List(ctx context.Context, principal auth.Principal) ([]I
 	if err != nil {
 		return nil, err
 	}
-	return service.listForProfile(ctx, profileID)
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin addon list: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return nil, err
+	}
+	addons, err := listForProfile(ctx, tx, profileID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit addon list: %w", err)
+	}
+	return addons, nil
 }
 
 func (service *Service) Remove(ctx context.Context, principal auth.Principal, addonID string) error {
@@ -126,10 +160,13 @@ func (service *Service) Remove(ctx context.Context, principal auth.Principal, ad
 		return fmt.Errorf("begin addon removal: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return err
+	}
 	if err := lockProfile(ctx, tx, profileID); err != nil {
 		return err
 	}
-	authorized, err := auth.CanManageProfiles(ctx, tx, principal, []string{profileID})
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
 	if err != nil {
 		return err
 	}
@@ -176,6 +213,9 @@ func (service *Service) Reorder(ctx context.Context, principal auth.Principal, i
 		return nil, fmt.Errorf("begin addon reorder: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return nil, err
+	}
 	if err := lockProfile(ctx, tx, profileID); err != nil {
 		return nil, err
 	}
@@ -213,10 +253,14 @@ func (service *Service) Reorder(ctx context.Context, principal auth.Principal, i
 			return nil, fmt.Errorf("update addon position: %w", err)
 		}
 	}
+	addons, err := listForProfile(ctx, tx, profileID)
+	if err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit addon reorder: %w", err)
 	}
-	return service.listForProfile(ctx, profileID)
+	return addons, nil
 }
 
 func (service *Service) Refresh(ctx context.Context, principal auth.Principal, addonID string) (InstalledAddon, error) {
@@ -224,30 +268,49 @@ func (service *Service) Refresh(ctx context.Context, principal auth.Principal, a
 	if err != nil {
 		return InstalledAddon{}, err
 	}
-	installed, err := service.addonForProfile(ctx, profileID, addonID)
+	current, err := service.loadAddonForProfile(ctx, principal, profileID, addonID)
 	if err != nil {
 		return InstalledAddon{}, err
 	}
-	manifest, rawManifest, err := service.transport.Manifest(ctx, installed.TransportURL)
+	manifest, rawManifest, err := service.transport.Manifest(ctx, current.TransportURL)
 	if err != nil {
+		if revalidationErr := service.revalidateAddon(ctx, principal, current); revalidationErr != nil {
+			return InstalledAddon{}, revalidationErr
+		}
 		return InstalledAddon{}, err
 	}
-	command, err := service.pool.Exec(ctx, `
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return InstalledAddon{}, fmt.Errorf("begin addon refresh: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return InstalledAddon{}, err
+	}
+	command, err := tx.Exec(ctx, `
 		UPDATE profile_addons pa
 		SET manifest = $3::jsonb, manifest_id = $4, manifest_version = $5, updated_at = now()
 		WHERE pa.id = $2::uuid
+		  AND pa.transport_url = $6
 		  AND EXISTS (
 		      SELECT 1 FROM addon_profile_access access
 		      WHERE access.addon_id = pa.id AND access.profile_id = $1::uuid
 		  )
-	`, profileID, addonID, rawManifest, manifest.ID, manifest.Version)
+	`, profileID, addonID, rawManifest, manifest.ID, manifest.Version, current.TransportURL)
 	if err != nil {
 		return InstalledAddon{}, fmt.Errorf("refresh addon manifest: %w", err)
 	}
 	if command.RowsAffected() == 0 {
 		return InstalledAddon{}, ErrNotFound
 	}
-	return service.addonForProfile(ctx, profileID, addonID)
+	installed, err := addonForProfile(ctx, tx, profileID, addonID)
+	if err != nil {
+		return InstalledAddon{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return InstalledAddon{}, fmt.Errorf("commit addon refresh: %w", err)
+	}
+	return installed, nil
 }
 
 func (service *Service) Catalogs(ctx context.Context, principal auth.Principal) ([]CatalogDescriptor, error) {
@@ -268,6 +331,9 @@ func (service *Service) Catalogs(ctx context.Context, principal auth.Principal) 
 			})
 		}
 	}
+	if err := service.revalidateAddonList(ctx, principal, addons); err != nil {
+		return nil, err
+	}
 	return catalogs, nil
 }
 
@@ -276,7 +342,7 @@ func (service *Service) Fetch(ctx context.Context, principal auth.Principal, add
 	if err != nil {
 		return ResourceResult{}, err
 	}
-	installed, err := service.addonForProfile(ctx, profileID, addonID)
+	installed, err := service.loadAddonForProfile(ctx, principal, profileID, addonID)
 	if err != nil {
 		return ResourceResult{}, err
 	}
@@ -286,9 +352,16 @@ func (service *Service) Fetch(ctx context.Context, principal auth.Principal, add
 	}
 	payload, cache, err := service.transport.Resource(ctx, installed.TransportURL, path)
 	if err != nil {
+		if revalidationErr := service.revalidateAddon(ctx, principal, installed); revalidationErr != nil {
+			return ResourceResult{}, revalidationErr
+		}
 		return ResourceResult{}, err
 	}
-	return resultFor(installed, path, payload, cache), nil
+	result := resultFor(installed, path, payload, cache)
+	if err := service.revalidateAddon(ctx, principal, installed); err != nil {
+		return ResourceResult{}, err
+	}
+	return result, nil
 }
 
 func (service *Service) FetchAll(ctx context.Context, principal auth.Principal, path ResourcePath) (ResourceBatch, error) {
@@ -303,7 +376,11 @@ func (service *Service) FetchAll(ctx context.Context, principal auth.Principal, 
 			requests = append(requests, plannedRequest{addon: installed, path: requestPath})
 		}
 	}
-	return service.execute(ctx, requests), nil
+	batch := service.execute(ctx, requests)
+	if err := service.revalidateAddonList(ctx, principal, addons); err != nil {
+		return ResourceBatch{}, err
+	}
+	return batch, nil
 }
 
 func (service *Service) FetchCatalogs(ctx context.Context, principal auth.Principal, contentType string, extra []ExtraValue, addonCatalogs bool) (ResourceBatch, error) {
@@ -332,7 +409,11 @@ func (service *Service) FetchCatalogs(ctx context.Context, principal auth.Princi
 			}
 		}
 	}
-	return service.execute(ctx, requests), nil
+	batch := service.execute(ctx, requests)
+	if err := service.revalidateAddonList(ctx, principal, addons); err != nil {
+		return ResourceBatch{}, err
+	}
+	return batch, nil
 }
 
 func (service *Service) SearchCatalogs(ctx context.Context, principal auth.Principal, contentType string, input CatalogSearchInput) (ResourceBatch, error) {
@@ -346,7 +427,11 @@ func (service *Service) SearchCatalogs(ctx context.Context, principal auth.Princ
 	if err != nil {
 		return ResourceBatch{}, err
 	}
-	return service.execute(ctx, planCatalogSearch(addons, contentType, input)), nil
+	batch := service.execute(ctx, planCatalogSearch(addons, contentType, input))
+	if err := service.revalidateAddonList(ctx, principal, addons); err != nil {
+		return ResourceBatch{}, err
+	}
+	return batch, nil
 }
 
 func planCatalogSearch(addons []InstalledAddon, contentType string, input CatalogSearchInput) []plannedRequest {
@@ -497,8 +582,8 @@ func (service *Service) effectiveLogger() *slog.Logger {
 	return slog.Default()
 }
 
-func (service *Service) listForProfile(ctx context.Context, profileID string) ([]InstalledAddon, error) {
-	rows, err := service.pool.Query(ctx, `
+func listForProfile(ctx context.Context, tx pgx.Tx, profileID string) ([]InstalledAddon, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT pa.id::text, pa.transport_url, pa.manifest::text, access.position,
 		       ARRAY(
 		           SELECT assignment.profile_id::text
@@ -531,11 +616,11 @@ func (service *Service) listForProfile(ctx context.Context, profileID string) ([
 	return addons, nil
 }
 
-func (service *Service) addonForProfile(ctx context.Context, profileID, addonID string) (InstalledAddon, error) {
+func addonForProfile(ctx context.Context, tx pgx.Tx, profileID, addonID string) (InstalledAddon, error) {
 	if !validUUID(addonID) {
 		return InstalledAddon{}, ErrInvalidInput
 	}
-	installed, err := queryAddon(service.pool.QueryRow(ctx, addonForProfileQuery, addonID, profileID))
+	installed, err := queryAddon(tx.QueryRow(ctx, addonForProfileQuery, addonID, profileID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return InstalledAddon{}, ErrNotFound
 	}
@@ -545,11 +630,108 @@ func (service *Service) addonForProfile(ctx context.Context, profileID, addonID 
 	return installed, nil
 }
 
+func (service *Service) loadAddonForProfile(ctx context.Context, principal auth.Principal, profileID, addonID string) (InstalledAddon, error) {
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return InstalledAddon{}, fmt.Errorf("begin addon query: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return InstalledAddon{}, err
+	}
+	installed, err := addonForProfile(ctx, tx, profileID, addonID)
+	if err != nil {
+		return InstalledAddon{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return InstalledAddon{}, fmt.Errorf("commit addon query: %w", err)
+	}
+	return installed, nil
+}
+
+func (service *Service) revalidateAddon(ctx context.Context, principal auth.Principal, expected InstalledAddon) error {
+	profileID, err := activeProfileID(principal)
+	if err != nil {
+		return err
+	}
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin addon revalidation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return err
+	}
+	current, err := addonForProfile(ctx, tx, profileID, expected.ID)
+	if err != nil {
+		return err
+	}
+	if !sameInstalledAddon(current, expected) {
+		return ErrNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit addon revalidation: %w", err)
+	}
+	return nil
+}
+
+func (service *Service) revalidateAddonList(ctx context.Context, principal auth.Principal, expected []InstalledAddon) error {
+	profileID, err := activeProfileID(principal)
+	if err != nil {
+		return err
+	}
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin addon list revalidation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return err
+	}
+	current, err := listForProfile(ctx, tx, profileID)
+	if err != nil {
+		return err
+	}
+	if len(current) != len(expected) {
+		return ErrNotFound
+	}
+	for index := range current {
+		if !sameInstalledAddon(current[index], expected[index]) {
+			return ErrNotFound
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit addon list revalidation: %w", err)
+	}
+	return nil
+}
+
+func sameInstalledAddon(left, right InstalledAddon) bool {
+	return left.ID == right.ID &&
+		left.TransportURL == right.TransportURL &&
+		left.Position == right.Position &&
+		left.InstalledAt.Equal(right.InstalledAt) &&
+		left.UpdatedAt.Equal(right.UpdatedAt) &&
+		bytes.Equal(left.Manifest, right.Manifest) &&
+		slices.Equal(left.ProfileIDs, right.ProfileIDs)
+}
+
 func activeProfileID(principal auth.Principal) (string, error) {
 	if principal.ActiveProfileID == nil || principal.ProfileGrantExpiresAt == nil || !principal.ProfileGrantExpiresAt.After(time.Now().UTC()) {
 		return "", ErrActiveProfileRequired
 	}
 	return *principal.ActiveProfileID, nil
+}
+
+func authorizeActiveProfile(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID string) error {
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, false)
+	if err != nil {
+		return fmt.Errorf("authorize active addon profile: %w", err)
+	}
+	if !authorized {
+		return ErrActiveProfileRequired
+	}
+	return nil
 }
 
 func lockProfile(ctx context.Context, tx pgx.Tx, profileID string) error {

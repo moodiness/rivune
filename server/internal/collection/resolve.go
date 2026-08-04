@@ -28,15 +28,23 @@ func (service *Service) ResolveFolder(ctx context.Context, principal auth.Princi
 		return ResolvedFolder{}, ErrInvalidInput
 	}
 	for _, folder := range value.Folders {
-		if folder.ID == folderID {
-			return service.resolve(ctx, principal, value.ID, folder, page, limit, language, region)
+		if folder.ID != folderID {
+			continue
 		}
+		resolved, err := service.resolve(ctx, principal, value.ID, folder, page, limit, language, region)
+		if err != nil {
+			return ResolvedFolder{}, err
+		}
+		if err := service.revalidateCollectionVersion(ctx, principal, value.ID, value.Version); err != nil {
+			return ResolvedFolder{}, err
+		}
+		return resolved, nil
 	}
 	return ResolvedFolder{}, ErrNotFound
 }
 
 func (service *Service) LookupTMDB(ctx context.Context, principal auth.Principal, kind, query, language string, page int) ([]LookupResult, error) {
-	if _, err := activeProfileID(principal); err != nil {
+	if _, err := service.validateActiveProfile(ctx, principal); err != nil {
 		return nil, err
 	}
 	if service.tmdb == nil {
@@ -48,11 +56,18 @@ func (service *Service) LookupTMDB(ctx context.Context, principal auth.Principal
 	if err != nil || !map[string]bool{"company": true, "collection": true, "person": true, "keyword": true}[kind] || !validText(query, 1, 200) || page < 1 || page > 1000 {
 		return nil, ErrInvalidInput
 	}
-	return service.tmdb.LookupCollectionSource(ctx, kind, query, language, page)
+	results, err := service.tmdb.LookupCollectionSource(ctx, kind, query, language, page)
+	if _, err := service.validateActiveProfile(ctx, principal); err != nil {
+		return nil, err
+	}
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 func (service *Service) TMDBGenres(ctx context.Context, principal auth.Principal, mediaType, language string) ([]Genre, error) {
-	if _, err := activeProfileID(principal); err != nil {
+	if _, err := service.validateActiveProfile(ctx, principal); err != nil {
 		return nil, err
 	}
 	if service.tmdb == nil {
@@ -63,7 +78,14 @@ func (service *Service) TMDBGenres(ctx context.Context, principal auth.Principal
 	if err != nil || mediaType != MediaTypeMovie && mediaType != MediaTypeSeries {
 		return nil, ErrInvalidInput
 	}
-	return service.tmdb.CollectionGenres(ctx, mediaType, language)
+	genres, err := service.tmdb.CollectionGenres(ctx, mediaType, language)
+	if _, err := service.validateActiveProfile(ctx, principal); err != nil {
+		return nil, err
+	}
+	if err != nil {
+		return nil, err
+	}
+	return genres, nil
 }
 
 func (service *Service) resolve(ctx context.Context, principal auth.Principal, collectionID string, folder Folder, page, limit int, language, region string) (ResolvedFolder, error) {

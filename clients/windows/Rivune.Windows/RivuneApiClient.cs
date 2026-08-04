@@ -93,7 +93,7 @@ public sealed class RivuneApiClient : IDisposable
     public async Task<TokenPair> LoginAsync(
         string username,
         string password,
-        Device device,
+        LoginDevice device,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(username);
@@ -136,6 +136,136 @@ public sealed class RivuneApiClient : IDisposable
 
     public Task<Account> GetCurrentAccountAsync(CancellationToken cancellationToken = default) =>
         RequestJsonAsync<Account>(HttpMethod.Get, ["auth", "me"], null, null, true, cancellationToken);
+
+    public async Task<IReadOnlyList<Session>> GetSessionsAsync(CancellationToken cancellationToken = default) =>
+        (await RequestJsonAsync<SessionList>(
+            HttpMethod.Get, ["auth", "sessions"], null, null, true, cancellationToken).ConfigureAwait(false)).Sessions;
+
+    public async Task<IReadOnlyList<Category>> GetCategoriesAsync(CancellationToken cancellationToken = default) =>
+        (await RequestJsonAsync<CategoryList>(
+            HttpMethod.Get, ["categories"], null, null, true, cancellationToken).ConfigureAwait(false)).Categories;
+
+    public Task<Category> CreateCategoryAsync(
+        CategoryCreateRequest input,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<Category>(
+            HttpMethod.Post, ["categories"], null, input, true, cancellationToken);
+
+    public Task<Category> UpdateCategoryAsync(
+        Guid categoryId,
+        CategoryUpdateRequest input,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<Category>(
+            HttpMethod.Patch,
+            ["categories", categoryId.ToString("D")],
+            null,
+            CategoryUpdateBody(input),
+            true,
+            cancellationToken);
+
+    public Task DeleteCategoryAsync(
+        Guid categoryId,
+        Guid? reassignToCategoryId = null,
+        CancellationToken cancellationToken = default) =>
+        RequestEmptyWithBodyAsync(
+            HttpMethod.Delete,
+            ["categories", categoryId.ToString("D")],
+            new Dictionary<string, object?> { ["reassignToCategoryId"] = reassignToCategoryId },
+            true,
+            cancellationToken);
+
+    public async Task<IReadOnlyList<Category>> ReorderCategoriesAsync(
+        IReadOnlyList<Guid> categoryIds,
+        CancellationToken cancellationToken = default) =>
+        (await RequestJsonAsync<CategoryList>(
+            HttpMethod.Put,
+            ["categories", "order"],
+            null,
+            new CategoryOrderRequest { CategoryIds = categoryIds },
+            true,
+            cancellationToken).ConfigureAwait(false)).Categories;
+
+    public async Task<IReadOnlyList<Device>> GetDevicesAsync(
+        Guid? categoryId = null,
+        CancellationToken cancellationToken = default) =>
+        (await RequestJsonAsync<DeviceList>(
+            HttpMethod.Get,
+            ["devices"],
+            Query(("categoryId", categoryId?.ToString("D"))),
+            null,
+            true,
+            cancellationToken).ConfigureAwait(false)).Devices;
+
+    public Task<Device> UpdateDeviceAsync(
+        Guid deviceId,
+        DeviceUpdateRequest input,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<Device>(
+            HttpMethod.Patch,
+            ["devices", deviceId.ToString("D")],
+            null,
+            DeviceUpdateBody(input),
+            true,
+            cancellationToken);
+
+    public Task MoveProfilesAsync(
+        IReadOnlyList<Guid> profileIds,
+        Guid categoryId,
+        CancellationToken cancellationToken = default) =>
+        RequestEmptyWithBodyAsync(
+            HttpMethod.Post,
+            ["profiles", "category-moves"],
+            new ProfileCategoryMoveRequest { ProfileIds = profileIds, CategoryId = categoryId },
+            true,
+            cancellationToken);
+
+    public Task MoveDevicesAsync(
+        IReadOnlyList<Guid> deviceIds,
+        Guid categoryId,
+        CancellationToken cancellationToken = default) =>
+        RequestEmptyWithBodyAsync(
+            HttpMethod.Post,
+            ["devices", "category-moves"],
+            new DeviceCategoryMoveRequest { DeviceIds = deviceIds, CategoryId = categoryId },
+            true,
+            cancellationToken);
+
+    public Task<DeviceAuthorizationResponse> BeginDeviceAuthorizationAsync(
+        string deviceName,
+        string platform,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<DeviceAuthorizationResponse>(
+            HttpMethod.Post,
+            ["auth", "device-code"],
+            null,
+            new DeviceAuthorizationRequest { DeviceName = deviceName, Platform = platform },
+            false,
+            cancellationToken);
+
+    public async Task<TokenPair> ExchangeDeviceAuthorizationAsync(
+        string deviceCode,
+        CancellationToken cancellationToken = default)
+    {
+        var tokens = await RequestJsonAsync<TokenPair>(
+            HttpMethod.Post,
+            ["auth", "device-code", "token"],
+            null,
+            new DeviceCodeTokenRequest { DeviceCode = deviceCode },
+            false,
+            cancellationToken).ConfigureAwait(false);
+        await SetCredentialsAsync(tokens, cancellationToken).ConfigureAwait(false);
+        return tokens;
+    }
+
+    public Task ApproveDeviceAuthorizationAsync(
+        DeviceCodeApprovalRequest input,
+        CancellationToken cancellationToken = default) =>
+        RequestEmptyWithBodyAsync(
+            HttpMethod.Post,
+            ["auth", "device-code", "approve"],
+            input,
+            true,
+            cancellationToken);
 
     public async Task<IReadOnlyList<Profile>> GetProfilesAsync(CancellationToken cancellationToken = default) =>
         (await RequestJsonAsync<ProfileList>(
@@ -458,6 +588,36 @@ public sealed class RivuneApiClient : IDisposable
         CryptographicOperations.ZeroMemory(responseBody);
     }
 
+    private async Task RequestEmptyWithBodyAsync(
+        HttpMethod method,
+        IReadOnlyList<string> pathSegments,
+        object body,
+        bool authenticated,
+        CancellationToken cancellationToken)
+    {
+        var uri = await BuildEndpointAsync(pathSegments, query: null, cancellationToken).ConfigureAwait(false);
+        var serializedBody = SerializeBody(body);
+        byte[] responseBody;
+        try
+        {
+            responseBody = await SendResponseBytesAsync(
+                method,
+                uri,
+                serializedBody,
+                authenticated,
+                retryAfterRefresh: authenticated,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (serializedBody is not null)
+            {
+                CryptographicOperations.ZeroMemory(serializedBody);
+            }
+        }
+        CryptographicOperations.ZeroMemory(responseBody);
+    }
+
     private async Task<T> SendJsonResponseAsync<T>(
         HttpMethod method,
         Uri uri,
@@ -708,6 +868,34 @@ public sealed class RivuneApiClient : IDisposable
         _ => throw new ArgumentOutOfRangeException(nameof(provider)),
     };
 
+    private static Dictionary<string, object?> CategoryUpdateBody(CategoryUpdateRequest input)
+    {
+        var body = new Dictionary<string, object?>();
+        if (input.Name is not null) body["name"] = input.Name;
+        AddPatch(body, "description", input.Description);
+        AddPatch(body, "color", input.Color);
+        AddPatch(body, "icon", input.Icon);
+        if (input.IsDefault is not null) body["isDefault"] = input.IsDefault;
+        return body;
+    }
+
+    private static Dictionary<string, object?> DeviceUpdateBody(DeviceUpdateRequest input)
+    {
+        var body = new Dictionary<string, object?>();
+        if (input.Name is not null) body["name"] = input.Name;
+        if (input.CategoryId is not null) body["categoryId"] = input.CategoryId;
+        AddPatch(body, "internalNote", input.InternalNote);
+        return body;
+    }
+
+    private static void AddPatch(
+        IDictionary<string, object?> body,
+        string name,
+        PatchField<string> field)
+    {
+        if (field.IsSpecified) body[name] = field.Value;
+    }
+
     private static RivuneServerException DecodeServerError(int statusCode, byte[] body)
     {
         try
@@ -769,7 +957,7 @@ public sealed class RivuneApiClient : IDisposable
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
 
-    private sealed record LoginRequest(string Username, string Password, Device Device);
+    private sealed record LoginRequest(string Username, string Password, LoginDevice Device);
     private sealed record RefreshRequest(string RefreshToken);
     private sealed record SelectProfileRequest(string? Pin);
     private sealed record InstanceTranscodingPatch(

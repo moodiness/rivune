@@ -13,8 +13,8 @@ import (
 
 func TestAvatarPresetsAreUniqueValidSVGs(t *testing.T) {
 	presets := AvatarPresets()
-	if len(presets) < 8 {
-		t.Fatalf("expected at least 8 presets, got %d", len(presets))
+	if len(presets) < 16 {
+		t.Fatalf("expected at least 16 presets, got %d", len(presets))
 	}
 	seen := make(map[string]struct{}, len(presets))
 	for _, preset := range presets {

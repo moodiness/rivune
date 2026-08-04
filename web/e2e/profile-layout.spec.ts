@@ -1,6 +1,20 @@
-import { expect, test } from "./fixtures/rivune";
+import { CATEGORY_IDS, expect, test } from "./fixtures/rivune";
+
+test("global administrator chooser stays inside the device category", async ({ page, rivune }) => {
+  await page.goto("/");
+  await rivune.waitForRequest("/api/v1/collections", "GET");
+  await page.getByRole("button", { name: "Switch profile" }).first().click();
+
+  await expect(page.getByRole("heading", { name: "Who's watching?" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Alice Administrator" })).toBeVisible();
+  await expect(page.getByText("Primary household profile.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Bob/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Casey/ })).toHaveCount(0);
+});
+
 
 test("rapid profile switching never paints a late response from the prior profile", async ({ page, rivune }) => {
+  rivune.setProfileCategory("bob", CATEGORY_IDS.household);
   rivune.delayCollections("alice", 2_000);
   await page.goto("/");
   await rivune.waitForRequest("/api/v1/collections", "GET");

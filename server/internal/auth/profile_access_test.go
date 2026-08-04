@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func TestProfileAccessibleAtInclusiveDateBounds(t *testing.T) {
@@ -71,5 +74,71 @@ func TestValidateProfileAccessRejectsInvalidRestrictions(t *testing.T) {
 		if err := ValidateProfileAccess(value); err == nil {
 			t.Fatalf("expected invalid access restrictions to fail: %+v", value)
 		}
+	}
+}
+
+type profileAuthorizationTestQuerier struct {
+	args []any
+}
+
+func (querier *profileAuthorizationTestQuerier) QueryRow(_ context.Context, _ string, args ...any) pgx.Row {
+	querier.args = args
+	return profileAuthorizationTestRow{authorized: true}
+}
+
+type profileAuthorizationTestRow struct {
+	authorized bool
+}
+
+func (row profileAuthorizationTestRow) Scan(destinations ...any) error {
+	*destinations[0].(*bool) = row.authorized
+	return nil
+}
+
+func TestProfileAuthorizationPassesScopeAndCategoryToCentralGuard(t *testing.T) {
+	categoryID := "category-a"
+	principal := Principal{
+		UserID: "administrator-id", Role: "admin",
+		AuthorizationScope: AuthorizationScopeCategory, CategoryID: &categoryID,
+	}
+	querier := &profileAuthorizationTestQuerier{}
+	authorized, err := CanManageProfiles(
+		context.Background(), querier, principal,
+		[]string{"2d554099-8950-4f85-b3aa-a8c7b157413e"},
+	)
+	if err != nil || !authorized {
+		t.Fatalf("authorize categorized profile management: authorized=%v err=%v", authorized, err)
+	}
+	if len(querier.args) != 6 || querier.args[2] != false ||
+		querier.args[3] != AuthorizationScopeCategory || querier.args[4] != categoryID ||
+		querier.args[5] != true {
+		t.Fatalf("paired administrator guard omitted category scope: %+v", querier.args)
+	}
+
+	globalQuerier := &profileAuthorizationTestQuerier{}
+	global := Principal{UserID: "administrator-id", Role: "admin", AuthorizationScope: AuthorizationScopeGlobalAdministrator}
+	if _, err := CanAccessProfiles(
+		context.Background(), globalQuerier, global,
+		[]string{"2d554099-8950-4f85-b3aa-a8c7b157413e"},
+	); err != nil {
+		t.Fatalf("authorize global profile access: %v", err)
+	}
+	if len(globalQuerier.args) != 6 || globalQuerier.args[2] != true || globalQuerier.args[5] != false {
+		t.Fatalf("global administrator guard did not use explicit global authority: %+v", globalQuerier.args)
+	}
+}
+
+func TestProfileAuthorizationRejectsMalformedIdentifiersWithoutDatabaseEnumeration(t *testing.T) {
+	querier := &profileAuthorizationTestQuerier{}
+	authorized, err := CanAccessProfiles(
+		context.Background(), querier,
+		Principal{Role: "admin", AuthorizationScope: AuthorizationScopeGlobalAdministrator},
+		[]string{"not-a-profile-id"},
+	)
+	if err != nil || authorized {
+		t.Fatalf("malformed profile identifier authorization = %v, %v; want false, nil", authorized, err)
+	}
+	if querier.args != nil {
+		t.Fatal("malformed profile identifier reached the database")
 	}
 }

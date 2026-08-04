@@ -10,19 +10,53 @@ export type CapturedRequest = {
   authorization: string | null;
 };
 
+type CategoryRef = {
+  id: string;
+  name: string;
+  color: string | null;
+  icon: string | null;
+};
+
+type AccessCategory = CategoryRef & {
+  description: string | null;
+  position: number;
+  isDefault: boolean;
+  profileCount: number;
+  deviceCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type Profile = {
   id: string;
   name: string;
+  description: string | null;
+  categoryId: string;
+  category: CategoryRef;
   isChild: boolean;
+  hasPin: boolean;
   canManage: boolean;
   enabled: boolean;
-  availableFrom: null;
-  availableUntil: null;
-  accessStartTime: null;
-  accessEndTime: null;
+  availableFrom: string | null;
+  availableUntil: string | null;
+  accessStartTime: string | null;
+  accessEndTime: string | null;
   accessTimezone: string;
   accessible: boolean;
   avatar: { kind: "preset"; presetId: string; url: string };
+};
+
+type ManagedDevice = {
+  id: string;
+  name: string;
+  platform: string;
+  categoryId: string;
+  category: CategoryRef;
+  internalNote: string | null;
+  approvedAt: string | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 type MetadataOperationResponse = {
@@ -36,20 +70,53 @@ const expiresAt = "2099-01-01T00:00:00Z";
 const createdAt = "2024-01-01T00:00:00Z";
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="100%" height="100%" fill="#241f35"/></svg>`;
 
+export const CATEGORY_IDS = {
+  household: "10000000-0000-4000-8000-000000000001",
+  kids: "10000000-0000-4000-8000-000000000002",
+  guest: "10000000-0000-4000-8000-000000000003",
+} as const;
+
+export const DEVICE_IDS = {
+  livingRoom: "20000000-0000-4000-8000-000000000001",
+  tablet: "20000000-0000-4000-8000-000000000002",
+} as const;
+
+const categoryFixtures: AccessCategory[] = [
+  { id: CATEGORY_IDS.household, name: "Household", description: "Primary household access.", color: "#6E7FF2", icon: "home", position: 0, isDefault: true, profileCount: 0, deviceCount: 0, createdAt, updatedAt: createdAt },
+  { id: CATEGORY_IDS.kids, name: "Kids", description: "Age-appropriate profiles and devices.", color: "#F29A78", icon: "sparkles", position: 1, isDefault: false, profileCount: 0, deviceCount: 0, createdAt, updatedAt: createdAt },
+  { id: CATEGORY_IDS.guest, name: "Guest", description: null, color: null, icon: null, position: 2, isDefault: false, profileCount: 0, deviceCount: 0, createdAt, updatedAt: createdAt },
+];
+
+const categoryRef = (category: AccessCategory): CategoryRef => ({
+  id: category.id,
+  name: category.name,
+  color: category.color,
+  icon: category.icon,
+});
+
+const fixtureCategoryRef = (id: string) => categoryRef(categoryFixtures.find((category) => category.id === id)!);
+
 function wait(milliseconds: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
   setTimeout(resolve, milliseconds);
   return promise;
 }
 
-const profiles: Profile[] = [
-  { id: "alice", name: "Alice", isChild: false, canManage: true, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "alice", url: "https://fixtures.rivune.test/alice.svg" } },
-  { id: "bob", name: "Bob", isChild: false, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "bob", url: "https://fixtures.rivune.test/bob.svg" } },
+const profileFixtures: Profile[] = [
+  { id: "alice", name: "Alice", description: "Primary household profile.", categoryId: CATEGORY_IDS.household, category: fixtureCategoryRef(CATEGORY_IDS.household), isChild: false, hasPin: false, canManage: true, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "alice", url: "https://fixtures.rivune.test/alice.svg" } },
+  { id: "bob", name: "Bob", description: null, categoryId: CATEGORY_IDS.kids, category: fixtureCategoryRef(CATEGORY_IDS.kids), isChild: false, hasPin: false, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "bob", url: "https://fixtures.rivune.test/bob.svg" } },
+  { id: "casey", name: "Casey", description: null, categoryId: CATEGORY_IDS.kids, category: fixtureCategoryRef(CATEGORY_IDS.kids), isChild: true, hasPin: true, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "casey", url: "https://fixtures.rivune.test/casey.svg" } },
 ];
 
+const demoCategory: CategoryRef = { id: "30000000-0000-4000-8000-000000000001", name: "Demo", color: "#6E7FF2", icon: "sparkles" };
 const demoProfiles: Profile[] = [
-  { id: "demo-00000000-0000-4000-8000-000000000001", name: "Alex", isChild: false, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "demo-alex", url: "/api/v1/demo/assets/alex.svg" } },
-  { id: "demo-00000000-0000-4000-8000-000000000002", name: "Kids", isChild: true, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "demo-kids", url: "/api/v1/demo/assets/kids.svg" } },
+  { id: "demo-00000000-0000-4000-8000-000000000001", name: "Alex", description: null, categoryId: demoCategory.id, category: demoCategory, isChild: false, hasPin: false, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "demo-alex", url: "/api/v1/demo/assets/alex.svg" } },
+  { id: "demo-00000000-0000-4000-8000-000000000002", name: "Kids", description: null, categoryId: demoCategory.id, category: demoCategory, isChild: true, hasPin: false, canManage: false, enabled: true, availableFrom: null, availableUntil: null, accessStartTime: null, accessEndTime: null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "demo-kids", url: "/api/v1/demo/assets/kids.svg" } },
+];
+
+const deviceFixtures: ManagedDevice[] = [
+  { id: DEVICE_IDS.livingRoom, name: "Living room TV", platform: "WebOS", categoryId: CATEGORY_IDS.household, category: fixtureCategoryRef(CATEGORY_IDS.household), internalNote: "Main display", approvedAt: createdAt, lastSeenAt: "2024-01-02T00:00:00Z", createdAt, updatedAt: createdAt },
+  { id: DEVICE_IDS.tablet, name: "Kids tablet", platform: "Android", categoryId: CATEGORY_IDS.kids, category: fixtureCategoryRef(CATEGORY_IDS.kids), internalNote: null, approvedAt: createdAt, lastSeenAt: null, createdAt, updatedAt: createdAt },
 ];
 
 const seasonZero = {
@@ -210,11 +277,23 @@ function collection(profileId: string) {
 export class RivuneHarness {
   readonly requests: CapturedRequest[] = [];
   readonly collectionResponses: string[] = [];
+  readonly deviceResponseCompletions: string[] = [];
+  readonly accountRefreshCompletions: number[] = [];
   private activeProfileId: string | null = "alice";
   private userRole: "admin" | "member" | "demo" = "admin";
   private setupRequired = false;
   private demoAvailable = false;
   private demoSessionActive = false;
+  private authorizationScope: "global_admin" | "category" = "global_admin";
+  private sessionCategoryId: string | null = null;
+  private deviceCategoryId = CATEGORY_IDS.household as string;
+  private categories = categoryFixtures.map((category) => ({ ...category }));
+  private profiles = profileFixtures.map((profile) => ({ ...profile, category: { ...profile.category }, avatar: { ...profile.avatar } }));
+  private devices = deviceFixtures.map((device) => ({ ...device, category: { ...device.category } }));
+  private nextCategorySequence = 4;
+  private nextProfileSequence = 3;
+  private nextDeviceSequence = 3;
+  private readonly approvedDeviceCodes = new Map<string, { categoryId: string; deviceName?: string; internalNote?: string }>();
   private maintenance: { enabled: boolean; message: string | null } = { enabled: false, message: null };
   private instanceSettings: Record<string, unknown> = { allowTranscoding: true, maximumCastMembers: 20 };
   private readonly profileSettings = new Map<string, Record<string, unknown>>([
@@ -230,6 +309,10 @@ export class RivuneHarness {
   private libraryItems: Array<Record<string, unknown>> = [];
   private readonly demoProgress = new Map<string, { positionSeconds: number; durationSeconds: number; completed: boolean; version: number }>();
   private readonly searchResponses = new Map<string, { body: unknown; status: number; delay: number }>();
+  private readonly deviceResponses = new Map<string, { status: number; delay: number }>();
+  private readonly accountRefreshResponses: Array<{ status: number; delay: number }> = [];
+  private readonly profileRefreshAfterSelection = new Map<string, string>();
+  private readonly hiddenCategoryCounts = new Set<string>();
   private readonly resolvedTitles = new Map<string, Record<string, unknown>>();
   private operations = {
     metadataCache: {
@@ -275,6 +358,8 @@ export class RivuneHarness {
     this.demoAvailable = true;
     this.demoSessionActive = false;
     this.userRole = "demo";
+    this.authorizationScope = "category";
+    this.sessionCategoryId = demoCategory.id;
     this.activeProfileId = demoProfiles[0].id;
     this.libraryItems = [];
     this.demoProgress.clear();
@@ -290,10 +375,92 @@ export class RivuneHarness {
   completeSetup() {
     this.setupRequired = false;
     this.demoAvailable = false;
+    this.authorizationScope = "global_admin";
+    this.sessionCategoryId = null;
+    this.deviceCategoryId = CATEGORY_IDS.household;
+  }
+
+  configureCategoryScope(categoryId = CATEGORY_IDS.household) {
+    const category = this.categories.find((candidate) => candidate.id === categoryId);
+    if (!category) throw new Error(`Unknown fixture category ${categoryId}`);
+    this.userRole = "admin";
+    this.authorizationScope = "category";
+    this.sessionCategoryId = category.id;
+    this.deviceCategoryId = category.id;
+    this.activeProfileId = this.profiles.find((profile) => profile.categoryId === category.id)?.id ?? null;
+  }
+
+  configureGlobalAdmin(activeProfileId = "alice", deviceCategoryId = CATEGORY_IDS.household) {
+    const category = this.categories.find((candidate) => candidate.id === deviceCategoryId);
+    if (!category) throw new Error(`Unknown fixture category ${deviceCategoryId}`);
+    this.userRole = "admin";
+    this.authorizationScope = "global_admin";
+    this.sessionCategoryId = null;
+    this.deviceCategoryId = category.id;
+    this.activeProfileId = activeProfileId;
+  }
+
+  setProfileCategory(profileId: string, categoryId: string) {
+    const category = this.categories.find((candidate) => candidate.id === categoryId);
+    if (!category) throw new Error(`Unknown fixture category ${categoryId}`);
+    const index = this.profiles.findIndex((candidate) => candidate.id === profileId);
+    if (index < 0) throw new Error(`Unknown fixture profile ${profileId}`);
+    this.profiles[index] = { ...this.profiles[index]!, categoryId, category: categoryRef(category) };
+  }
+
+  setInterfaceLanguage(language: string) {
+    this.instanceSettings = { ...this.instanceSettings, interfaceLanguage: language };
+  }
+
+  seedCategory(name: string) {
+    const id = `10000000-0000-4000-8000-${String(this.nextCategorySequence++).padStart(12, "0")}`;
+    this.categories.push({ id, name, description: null, color: null, icon: null, position: this.categories.length, isDefault: false, profileCount: 0, deviceCount: 0, createdAt, updatedAt: createdAt });
+    return id;
   }
 
   private currentProfiles() {
-    return this.userRole === "demo" ? demoProfiles : profiles;
+    if (this.userRole === "demo") return demoProfiles;
+    if (this.authorizationScope === "category") return this.profiles.filter((profile) => profile.categoryId === this.sessionCategoryId);
+    return this.profiles;
+  }
+
+  private accountProfiles() {
+    if (this.userRole === "demo") return demoProfiles;
+    const categoryId = this.authorizationScope === "category" ? this.sessionCategoryId : this.deviceCategoryId;
+    return this.profiles.filter((profile) => profile.categoryId === categoryId);
+  }
+
+  private categoryReference(categoryId: string) {
+    const category = this.categories.find((candidate) => candidate.id === categoryId);
+    return category ? categoryRef(category) : null;
+  }
+
+  private categoryList() {
+    return this.categories.map((category, position) => ({
+      ...category,
+      position,
+      profileCount: this.hiddenCategoryCounts.has(category.id) ? 0 : this.profiles.filter((profile) => profile.categoryId === category.id).length,
+      deviceCount: this.hiddenCategoryCounts.has(category.id) ? 0 : this.devices.filter((device) => device.categoryId === category.id).length,
+    }));
+  }
+  setDeviceResponse(categoryId: string | undefined, options: { status?: number; delay?: number } = {}) {
+    this.deviceResponses.set(categoryId ?? "all", { status: options.status ?? 200, delay: options.delay ?? 0 });
+  }
+
+  failNextAccountRefresh(delay = 0) {
+    this.accountRefreshResponses.push({ status: 503, delay });
+  }
+
+  refreshProfileNameAfterSelection(profileId: string, name: string) {
+    this.profileRefreshAfterSelection.set(profileId, name);
+  }
+
+  seedHiddenCategoryReference(categoryId: string) {
+    const category = this.categoryReference(categoryId);
+    const profileIndex = this.profiles.findIndex((profile) => profile.id === "casey");
+    if (!category || profileIndex < 0) throw new Error(`Cannot seed a hidden reference for category ${categoryId}`);
+    this.profiles[profileIndex] = { ...this.profiles[profileIndex]!, categoryId, category };
+    this.hiddenCategoryCounts.add(categoryId);
   }
   setMaintenance(enabled: boolean, message: string | null = null) {
     if (enabled) this.activeProfileId = "bob";
@@ -363,10 +530,21 @@ export class RivuneHarness {
   }
 
   private account() {
-    const currentProfiles = this.currentProfiles();
+    const currentProfiles = this.accountProfiles();
+    const sessionCategory = this.userRole === "demo"
+      ? demoCategory
+      : this.authorizationScope === "category" && this.sessionCategoryId
+        ? this.categoryReference(this.sessionCategoryId)
+        : null;
     return {
       user: { id: this.userRole === "demo" ? "demo-user" : "user-1", username: this.userRole === "demo" ? "demo" : "fixture-owner", role: this.userRole },
-      session: { id: this.userRole === "demo" ? "demo-session" : "session-1", deviceId: this.userRole === "demo" ? "demo-browser" : "fixture-device", activeProfile: this.activeProfileId ? { id: this.activeProfileId, expiresAt } : null },
+      session: {
+        id: this.userRole === "demo" ? "demo-session" : "session-1",
+        deviceId: this.userRole === "demo" ? "demo-browser" : "fixture-device",
+        activeProfile: this.activeProfileId && currentProfiles.some((profile) => profile.id === this.activeProfileId) ? { id: this.activeProfileId, expiresAt } : null,
+        authorizationScope: this.userRole === "demo" ? "category" : this.authorizationScope,
+        category: sessionCategory,
+      },
       profiles: currentProfiles,
       maintenance: this.maintenance,
     };
@@ -399,7 +577,7 @@ export class RivuneHarness {
     this.requests.push({ method: request.method(), pathname: url.pathname, search: new URLSearchParams(url.search), body, profileId: profileAtRequest, authorization: request.headers().authorization ?? null });
 
     if (url.pathname === "/.well-known/rivune") {
-      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 17, apiBaseUrl: "/api/v1", setupRequired: this.setupRequired, setupCompleted: !this.setupRequired, demoAvailable: this.setupRequired && this.demoAvailable, timezone: "UTC", interfaceLanguage: typeof this.instanceSettings.interfaceLanguage === "string" ? this.instanceSettings.interfaceLanguage : "en" });
+      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 18, apiBaseUrl: "/api/v1", setupRequired: this.setupRequired, setupCompleted: !this.setupRequired, demoAvailable: this.setupRequired && this.demoAvailable, timezone: "UTC", interfaceLanguage: typeof this.instanceSettings.interfaceLanguage === "string" ? this.instanceSettings.interfaceLanguage : "en" });
       return;
     }
     const path = url.pathname.slice("/api/v1".length);
@@ -410,6 +588,8 @@ export class RivuneHarness {
       }
       this.demoSessionActive = true;
       this.userRole = "demo";
+      this.authorizationScope = "category";
+      this.sessionCategoryId = demoCategory.id;
       this.activeProfileId = demoProfiles[0].id;
       this.libraryItems = [];
       this.demoProgress.clear();
@@ -484,12 +664,16 @@ export class RivuneHarness {
       this.demoAvailable = false;
       this.demoSessionActive = false;
       this.userRole = "admin";
+      this.authorizationScope = "global_admin";
+      this.sessionCategoryId = null;
       this.activeProfileId = "alice";
       await json(route, { instance: { id: "instance-1" }, admin: { id: "user-1" }, profile: { id: "alice" } }, 201);
       return;
     }
     if (path === "/auth/login" && request.method() === "POST") {
-      await json(route, { tokenType: "Bearer", accessToken: "fixture-access", accessTokenExpiresAt: expiresAt, refreshToken: "fixture-refresh", refreshTokenExpiresAt: expiresAt, sessionId: "session-1", deviceId: "fixture-device" });
+      this.authorizationScope = "global_admin";
+      this.sessionCategoryId = null;
+      await json(route, { tokenType: "Bearer", accessToken: "fixture-access", accessTokenExpiresAt: expiresAt, refreshToken: "fixture-refresh", refreshTokenExpiresAt: expiresAt, sessionId: "session-1", deviceId: "fixture-device", authorizationScope: "global_admin", category: null });
       return;
     }
     const maintenanceSelection = path.match(/^\/profiles\/([^/]+)\/select$/);
@@ -501,10 +685,58 @@ export class RivuneHarness {
       return;
     }
     if (path === "/auth/refresh" && request.method() === "POST") {
-      await json(route, { tokenType: "Bearer", accessToken: "fixture-access", accessTokenExpiresAt: expiresAt, refreshToken: "fixture-refresh", refreshTokenExpiresAt: expiresAt, sessionId: "session-1", deviceId: "fixture-device" });
+      const sessionCategory = this.authorizationScope === "category" && this.sessionCategoryId ? this.categoryReference(this.sessionCategoryId) : null;
+      await json(route, { tokenType: "Bearer", accessToken: "fixture-access", accessTokenExpiresAt: expiresAt, refreshToken: "fixture-refresh", refreshTokenExpiresAt: expiresAt, sessionId: "session-1", deviceId: "fixture-device", authorizationScope: this.authorizationScope, category: sessionCategory });
       return;
     }
-    if (path === "/auth/me") { await json(route, this.account()); return; }
+    if (path === "/auth/device-code" && request.method() === "POST") {
+      await json(route, { deviceCode: "fixture-device-code", userCode: "BCDF-GHJK", verificationUri: "/pair", verificationUriComplete: "/pair?code=BCDF-GHJK", expiresAt, intervalSeconds: 60 });
+      return;
+    }
+    if (path === "/auth/device-code/token" && request.method() === "POST") {
+      const approval = this.approvedDeviceCodes.get("BCDF-GHJK");
+      if (!approval) {
+        await json(route, { error: { code: "authorization_pending", message: "Authorization is pending" } }, 428);
+        return;
+      }
+      const approvedCategory = this.categoryReference(approval.categoryId);
+      await json(route, { tokenType: "Bearer", accessToken: "fixture-device-access", accessTokenExpiresAt: expiresAt, refreshToken: "fixture-device-refresh", refreshTokenExpiresAt: expiresAt, sessionId: "session-device-code", deviceId: this.devices.at(-1)?.id ?? DEVICE_IDS.livingRoom, authorizationScope: "category", category: approvedCategory });
+      return;
+    }
+    if (path === "/auth/device-code/approve" && request.method() === "POST") {
+      const input = body as { userCode?: string; categoryId?: string; deviceName?: string; internalNote?: string };
+      const approvedCategory = input.categoryId ? this.categoryReference(input.categoryId) : null;
+      const authorizedCategory = this.authorizationScope === "global_admin" || input.categoryId === this.sessionCategoryId;
+      if (!approvedCategory || !authorizedCategory) {
+        await json(route, { error: { code: "forbidden", message: "The server session cannot assign this category" } }, 403);
+        return;
+      }
+      if (!input.userCode) {
+        await json(route, { error: { code: "validation_failed", message: "A user code is required" } }, 422);
+        return;
+      }
+      this.approvedDeviceCodes.set(input.userCode, { categoryId: approvedCategory.id, ...(input.deviceName ? { deviceName: input.deviceName } : {}), ...(input.internalNote ? { internalNote: input.internalNote } : {}) });
+      const id = `20000000-0000-4000-8000-${String(this.nextDeviceSequence++).padStart(12, "0")}`;
+      this.devices.push({ id, name: input.deviceName ?? "Approved device", platform: "Unknown", categoryId: approvedCategory.id, category: approvedCategory, internalNote: input.internalNote ?? null, approvedAt: createdAt, lastSeenAt: null, createdAt, updatedAt: createdAt });
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    if (path === "/auth/sessions" && request.method() === "GET") {
+      const sessionCategory = this.authorizationScope === "category" && this.sessionCategoryId ? this.categoryReference(this.sessionCategoryId) : null;
+      await json(route, { sessions: [{ id: "session-1", deviceId: "fixture-device", deviceName: "Fixture browser", platform: "Web", ipAddress: null, createdAt, lastSeenAt: createdAt, current: true, authorizationScope: this.authorizationScope, category: sessionCategory }] });
+      return;
+    }
+    if (path === "/auth/me") {
+      const configured = this.accountRefreshResponses.shift();
+      if (configured?.delay) await wait(configured.delay);
+      if (configured && configured.status !== 200) {
+        await json(route, { error: { code: "account_refresh_failed", message: "The refreshed account snapshot is unavailable" } }, configured.status);
+        this.accountRefreshCompletions.push(configured.status);
+        return;
+      }
+      await json(route, this.account());
+      return;
+    }
     if (path === "/settings/maintenance" && request.method() === "GET") { await json(route, this.maintenance); return; }
     if (path === "/settings/maintenance" && request.method() === "PUT") {
       this.maintenance = body as { enabled: boolean; message: string | null };
@@ -562,8 +794,171 @@ export class RivuneHarness {
       await json(route, this.playbackActivity);
       return;
     }
+    if (path === "/categories" && request.method() === "GET") {
+      if (this.authorizationScope !== "global_admin") { await json(route, { error: { code: "forbidden", message: "Global administration is required" } }, 403); return; }
+      await json(route, { categories: this.categoryList() });
+      return;
+    }
+    if (path === "/categories" && request.method() === "POST") {
+      if (this.authorizationScope !== "global_admin") { await json(route, { error: { code: "forbidden", message: "Global administration is required" } }, 403); return; }
+      const input = body as { name?: string; description?: string | null; color?: string | null; icon?: string | null };
+      const normalizedName = input.name?.trim().toLocaleLowerCase();
+      if (!normalizedName) { await json(route, { error: { code: "validation_failed", message: "A category name is required" } }, 422); return; }
+      if (this.categories.some((category) => category.name.trim().toLocaleLowerCase() === normalizedName)) {
+        await json(route, { error: { code: "category_name_conflict", message: "A category with this name already exists" } }, 409);
+        return;
+      }
+      const id = `10000000-0000-4000-8000-${String(this.nextCategorySequence++).padStart(12, "0")}`;
+      const category: AccessCategory = { id, name: input.name!.trim(), description: input.description ?? null, color: input.color ?? null, icon: input.icon ?? null, position: this.categories.length, isDefault: false, profileCount: 0, deviceCount: 0, createdAt, updatedAt: createdAt };
+      this.categories.push(category);
+      await json(route, { ...category }, 201);
+      return;
+    }
+    if (path === "/categories/order" && request.method() === "PUT") {
+      if (this.authorizationScope !== "global_admin") { await json(route, { error: { code: "forbidden", message: "Global administration is required" } }, 403); return; }
+      const reorderInput = body as { categoryIds?: string[] };
+      const categoryIds = reorderInput.categoryIds ?? [];
+      const completeOrder = categoryIds.length === this.categories.length && new Set(categoryIds).size === categoryIds.length && categoryIds.every((id) => this.categories.some((category) => category.id === id));
+      if (!completeOrder) { await json(route, { error: { code: "validation_failed", message: "The complete category order is required" } }, 422); return; }
+      this.categories = categoryIds.map((id) => this.categories.find((category) => category.id === id)!);
+      await json(route, { categories: this.categoryList() });
+      return;
+    }
+    const categoryResource = path.match(/^\/categories\/([^/]+)$/);
+    if (categoryResource && request.method() === "PATCH") {
+      if (this.authorizationScope !== "global_admin") { await json(route, { error: { code: "forbidden", message: "Global administration is required" } }, 403); return; }
+      const index = this.categories.findIndex((category) => category.id === categoryResource[1]);
+      if (index < 0) { await json(route, { error: { code: "not_found", message: "Category not found" } }, 404); return; }
+      const input = body as Partial<Pick<AccessCategory, "name" | "description" | "color" | "icon" | "isDefault">>;
+      const normalizedName = input.name?.trim().toLocaleLowerCase();
+      if (normalizedName && this.categories.some((category, candidateIndex) => candidateIndex !== index && category.name.trim().toLocaleLowerCase() === normalizedName)) {
+        await json(route, { error: { code: "category_name_conflict", message: "A category with this name already exists" } }, 409);
+        return;
+      }
+      let updated = { ...this.categories[index]!, ...input, ...(input.name ? { name: input.name.trim() } : {}), updatedAt: createdAt };
+      this.categories[index] = updated;
+      if (input.isDefault) {
+        this.categories = this.categories.map((category) => ({ ...category, isDefault: category.id === updated.id }));
+        updated = this.categories[index]!;
+      }
+      const updatedRef = categoryRef(updated);
+      this.profiles = this.profiles.map((profile) => profile.categoryId === updated.id ? { ...profile, category: updatedRef } : profile);
+      this.devices = this.devices.map((device) => device.categoryId === updated.id ? { ...device, category: updatedRef } : device);
+      await json(route, { ...this.categoryList()[index] });
+      return;
+    }
+    if (categoryResource && request.method() === "DELETE") {
+      if (this.authorizationScope !== "global_admin") { await json(route, { error: { code: "forbidden", message: "Global administration is required" } }, 403); return; }
+      const source = this.categories.find((category) => category.id === categoryResource[1]);
+      if (!source) { await json(route, { error: { code: "not_found", message: "Category not found" } }, 404); return; }
+      if (source.isDefault || this.categories.length === 1) { await json(route, { error: { code: "category_delete_conflict", message: "The default or final category cannot be deleted" } }, 409); return; }
+      const input = body as { reassignToCategoryId?: string | null };
+      const hasAssignments = this.profiles.some((profile) => profile.categoryId === source.id) || this.devices.some((device) => device.categoryId === source.id);
+      const destination = input.reassignToCategoryId ? this.categories.find((category) => category.id === input.reassignToCategoryId && category.id !== source.id) : undefined;
+      if (hasAssignments && !destination) { await json(route, { error: { code: "category_reassignment_required", message: "Referenced resources require reassignment" } }, 409); return; }
+      if (destination) {
+        const destinationRef = categoryRef(destination);
+        this.profiles = this.profiles.map((profile) => profile.categoryId === source.id ? { ...profile, categoryId: destination.id, category: destinationRef } : profile);
+        this.devices = this.devices.map((device) => device.categoryId === source.id ? { ...device, categoryId: destination.id, category: destinationRef } : device);
+      }
+      this.categories = this.categories.filter((category) => category.id !== source.id);
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    if (path === "/devices" && request.method() === "GET") {
+      if (this.authorizationScope !== "global_admin") { await json(route, { error: { code: "forbidden", message: "Global administration is required" } }, 403); return; }
+      const filter = url.searchParams.get("categoryId");
+      if (filter && !this.categoryReference(filter)) { await json(route, { error: { code: "not_found", message: "Category not found" } }, 404); return; }
+      const responseKey = filter ?? "all";
+      const configured = this.deviceResponses.get(responseKey);
+      const devices = filter ? this.devices.filter((device) => device.categoryId === filter) : this.devices;
+      if (configured?.delay) await wait(configured.delay);
+      if (configured && configured.status !== 200) {
+        await json(route, { error: { code: "device_list_failed", message: "The device list is temporarily unavailable" } }, configured.status);
+      } else {
+        await json(route, { devices });
+      }
+      this.deviceResponseCompletions.push(responseKey);
+      return;
+    }
+    if (path === "/devices/category-moves" && request.method() === "POST") {
+      if (this.authorizationScope !== "global_admin") { await json(route, { error: { code: "forbidden", message: "Global administration is required" } }, 403); return; }
+      const input = body as { deviceIds?: string[]; categoryId?: string };
+      const destination = input.categoryId ? this.categoryReference(input.categoryId) : null;
+      if (!destination || !input.deviceIds?.length || input.deviceIds.some((id) => !this.devices.some((device) => device.id === id))) { await json(route, { error: { code: "not_found", message: "Device or category not found" } }, 404); return; }
+      const deviceIds = new Set(input.deviceIds);
+      this.devices = this.devices.map((device) => deviceIds.has(device.id) ? { ...device, categoryId: destination.id, category: destination, updatedAt: createdAt } : device);
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    const deviceResource = path.match(/^\/devices\/([^/]+)$/);
+    if (deviceResource && request.method() === "PATCH") {
+      if (this.authorizationScope !== "global_admin") { await json(route, { error: { code: "forbidden", message: "Global administration is required" } }, 403); return; }
+      const index = this.devices.findIndex((device) => device.id === deviceResource[1]);
+      if (index < 0) { await json(route, { error: { code: "not_found", message: "Device not found" } }, 404); return; }
+      const input = body as { name?: string; categoryId?: string; internalNote?: string | null };
+      const destination = input.categoryId ? this.categoryReference(input.categoryId) : null;
+      if (input.categoryId && !destination) { await json(route, { error: { code: "not_found", message: "Category not found" } }, 404); return; }
+      const updated = { ...this.devices[index]!, ...input, ...(destination ? { categoryId: destination.id, category: destination } : {}), updatedAt: createdAt };
+      this.devices[index] = updated;
+      await json(route, updated);
+      return;
+    }
+    if (path === "/profiles/category-moves" && request.method() === "POST") {
+      if (this.authorizationScope !== "global_admin") { await json(route, { error: { code: "forbidden", message: "Global administration is required" } }, 403); return; }
+      const input = body as { profileIds?: string[]; categoryId?: string };
+      const destination = input.categoryId ? this.categoryReference(input.categoryId) : null;
+      if (!destination || !input.profileIds?.length || input.profileIds.some((id) => !this.profiles.some((profile) => profile.id === id))) { await json(route, { error: { code: "not_found", message: "Profile or category not found" } }, 404); return; }
+      const profileIds = new Set(input.profileIds);
+      this.profiles = this.profiles.map((profile) => profileIds.has(profile.id) ? { ...profile, categoryId: destination.id, category: destination } : profile);
+      if (this.activeProfileId && profileIds.has(this.activeProfileId)) this.activeProfileId = null;
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    if (path === "/profiles" && request.method() === "POST") {
+      const input = body as { name?: string; description?: string | null; categoryId?: string; isChild?: boolean; pin?: string; enabled?: boolean; availableFrom?: string; availableUntil?: string; accessStartTime?: string; accessEndTime?: string };
+      const destination = input.categoryId ? this.categoryReference(input.categoryId) : null;
+      const authorizedCategory = this.authorizationScope === "global_admin" || input.categoryId === this.sessionCategoryId;
+      if (!destination || !authorizedCategory) { await json(route, { error: { code: "forbidden", message: "The server session cannot create a profile in this category" } }, 403); return; }
+      if (!input.name?.trim()) { await json(route, { error: { code: "validation_failed", message: "A profile name is required" } }, 422); return; }
+      const id = `40000000-0000-4000-8000-${String(this.nextProfileSequence++).padStart(12, "0")}`;
+      const profile: Profile = { id, name: input.name.trim(), description: input.description ?? null, categoryId: destination.id, category: destination, isChild: input.isChild ?? false, hasPin: Boolean(input.pin), canManage: this.authorizationScope === "category", enabled: input.enabled ?? true, availableFrom: input.availableFrom ?? null, availableUntil: input.availableUntil ?? null, accessStartTime: input.accessStartTime ?? null, accessEndTime: input.accessEndTime ?? null, accessTimezone: "UTC", accessible: true, avatar: { kind: "preset", presetId: "aurora", url: "/api/v1/profile-avatars/aurora" } };
+      this.profiles.push(profile);
+      await json(route, profile, 201);
+      return;
+    }
     if (path === "/profiles" && request.method() === "GET") { await json(route, { profiles: this.currentProfiles() }); return; }
-    if (path === "/profile-avatars" && request.method() === "GET") { await json(route, { presets: [] }); return; }
+    const profileResource = path.match(/^\/profiles\/([^/]+)$/);
+    if (profileResource && request.method() === "PATCH") {
+      const index = this.profiles.findIndex((profile) => profile.id === profileResource[1]);
+      const visible = index >= 0 && (this.authorizationScope === "global_admin" || this.profiles[index]!.categoryId === this.sessionCategoryId);
+      if (!visible) { await json(route, { error: { code: "not_found", message: "Profile not found" } }, 404); return; }
+      const input = body as { name?: string; description?: string | null; categoryId?: string; isChild?: boolean; pin?: string | null; enabled?: boolean; availableFrom?: string | null; availableUntil?: string | null; accessStartTime?: string | null; accessEndTime?: string | null };
+      const destination = input.categoryId ? this.categoryReference(input.categoryId) : null;
+      if (input.categoryId && (!destination || this.authorizationScope === "category" && input.categoryId !== this.sessionCategoryId)) { await json(route, { error: { code: "forbidden", message: "The server session cannot move this profile" } }, 403); return; }
+      const { pin: _pin, ...profileFields } = input;
+      const updated = { ...this.profiles[index]!, ...profileFields, ...(destination ? { categoryId: destination.id, category: destination } : {}), ...(input.pin !== undefined ? { hasPin: input.pin !== null } : {}) };
+      this.profiles[index] = updated;
+      await json(route, updated);
+      return;
+    }
+    if (profileResource && request.method() === "DELETE") {
+      const index = this.profiles.findIndex((profile) => profile.id === profileResource[1]);
+      const visible = index >= 0 && (this.authorizationScope === "global_admin" || this.profiles[index]!.categoryId === this.sessionCategoryId);
+      if (!visible) { await json(route, { error: { code: "not_found", message: "Profile not found" } }, 404); return; }
+      this.profiles.splice(index, 1);
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    if (path === "/profile-avatars" && request.method() === "GET") { await json(route, { presets: [{ id: "aurora", name: "Aurora", url: "/api/v1/profile-avatars/aurora" }] }); return; }
+    const profileSessionsResource = path.match(/^\/profiles\/([^/]+)\/sessions$/);
+    if (profileSessionsResource && request.method() === "GET") {
+      const profile = this.currentProfiles().find((candidate) => candidate.id === profileSessionsResource[1]);
+      if (!profile) { await json(route, { error: { code: "not_found", message: "Profile not found" } }, 404); return; }
+      const sessionCategory = this.authorizationScope === "category" && this.sessionCategoryId ? this.categoryReference(this.sessionCategoryId) : null;
+      await json(route, { sessions: [{ id: "profile-session-1", userId: "user-1", username: "fixture-owner", deviceId: "fixture-device", deviceName: "Fixture browser", platform: "Web", ipAddress: null, createdAt, lastSeenAt: createdAt, profileGrantExpiresAt: expiresAt, current: profile.id === this.activeProfileId, authorizationScope: this.authorizationScope, category: sessionCategory }] });
+      return;
+    }
     if (path === "/settings" && request.method() === "GET") { await json(route, { schemaVersion: 1, settings: this.instanceSettings, updatedAt: createdAt }); return; }
     if (path === "/settings" && request.method() === "PATCH") {
       this.instanceSettings = { ...this.instanceSettings, ...(body as Record<string, unknown>) };
@@ -581,13 +976,18 @@ export class RivuneHarness {
     if (path === "/profiles/selection" && request.method() === "DELETE") { this.activeProfileId = null; await route.fulfill({ status: 204 }); return; }
     const profileSelection = path.match(/^\/profiles\/([^/]+)\/select$/);
     if (profileSelection && request.method() === "POST") {
-      const selected = this.currentProfiles().find((profile) => profile.id === profileSelection[1]);
+      const selected = this.accountProfiles().find((profile) => profile.id === profileSelection[1]);
       if (!selected) { await json(route, { error: { code: "not_found", message: "Profile not found" } }, 404); return; }
       if (this.maintenance.enabled && !selected.canManage) {
         await json(route, { error: { code: "maintenance_mode", message: "Rivune is temporarily unavailable for maintenance.", ...(this.maintenance.message ? { publicMessage: this.maintenance.message } : {}) } }, 503);
         return;
       }
       this.activeProfileId = selected.id;
+      const refreshedName = this.profileRefreshAfterSelection.get(selected.id);
+      if (refreshedName) {
+        this.profiles = this.profiles.map((profile) => profile.id === selected.id ? { ...profile, name: refreshedName } : profile);
+        this.profileRefreshAfterSelection.delete(selected.id);
+      }
       await json(route, { profile: selected, expiresAt });
       return;
     }

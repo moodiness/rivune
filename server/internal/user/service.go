@@ -63,7 +63,7 @@ func NewService(pool *pgxpool.Pool) *Service {
 }
 
 func (s *Service) List(ctx context.Context, principal auth.Principal) ([]User, error) {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		return nil, ErrForbidden
 	}
 	rows, err := s.pool.Query(ctx, `
@@ -91,7 +91,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]User, e
 }
 
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input CreateInput) (User, error) {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		return User{}, ErrForbidden
 	}
 	input.Username = strings.TrimSpace(input.Username)
@@ -130,7 +130,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 }
 
 func (s *Service) Update(ctx context.Context, principal auth.Principal, userID string, input UpdateInput) (User, error) {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		return User{}, ErrForbidden
 	}
 	if input.Username == nil && input.Password == nil && input.Role == nil {
@@ -232,7 +232,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, userID s
 }
 
 func (s *Service) Delete(ctx context.Context, principal auth.Principal, userID string) error {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		return ErrForbidden
 	}
 	userID = strings.TrimSpace(userID)
@@ -274,46 +274,115 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, userID s
 }
 
 func (s *Service) ProfileAccess(ctx context.Context, principal auth.Principal, userID string) ([]ProfileAccess, error) {
-	if principal.Role != "admin" {
-		return nil, ErrForbidden
+	userID = strings.TrimSpace(userID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin profile access list: %w", err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	var exists bool
-	if err := s.pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM users WHERE id::text = $1)", strings.TrimSpace(userID)).Scan(&exists); err != nil {
+	if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM users WHERE id::text = $1)", userID).Scan(&exists); err != nil {
 		return nil, fmt.Errorf("query user for profile access: %w", err)
 	}
 	if !exists {
 		return nil, ErrNotFound
 	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT p.id::text, p.name, upa.user_id IS NOT NULL, COALESCE(upa.can_manage, false)
-		FROM profiles p
-		LEFT JOIN user_profile_access upa
-		  ON upa.profile_id = p.id AND upa.user_id::text = $1
-		ORDER BY lower(p.name), p.id
-	`, strings.TrimSpace(userID))
-	if err != nil {
-		return nil, fmt.Errorf("query profile access: %w", err)
-	}
-	defer rows.Close()
 
-	access := make([]ProfileAccess, 0)
+	rows, err := tx.Query(ctx, `
+		/* ProfileAccess: lock profiles before grants */
+		SELECT p.id::text
+		FROM profiles p
+		WHERE $1
+		   OR ($3 = 'category' AND p.category_id::text = $2)
+		ORDER BY p.id
+		FOR SHARE
+	`, principal.IsGlobalAdministrator(), principalCategoryID(principal), principal.AuthorizationScope)
+	if err != nil {
+		return nil, fmt.Errorf("lock profiles for profile access: %w", err)
+	}
+	profileIDs := make([]string, 0)
 	for rows.Next() {
-		var item ProfileAccess
-		if err := rows.Scan(&item.ProfileID, &item.ProfileName, &item.HasAccess, &item.CanManage); err != nil {
-			return nil, fmt.Errorf("scan profile access: %w", err)
+		var profileID string
+		if err := rows.Scan(&profileID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan locked profile for profile access: %w", err)
 		}
-		access = append(access, item)
+		profileIDs = append(profileIDs, profileID)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate profile access: %w", err)
+		rows.Close()
+		return nil, fmt.Errorf("iterate locked profiles for profile access: %w", err)
+	}
+	rows.Close()
+
+	authorizedProfileIDs := profileIDs
+	if !principal.IsGlobalAdministrator() {
+		authorizedProfileIDs = make([]string, 0)
+		if principal.AuthorizationScope == auth.AuthorizationScopeCategory && len(profileIDs) > 0 {
+			rows, err = tx.Query(ctx, `
+				/* ProfileAccess: lock actor management grants after profiles */
+				SELECT upa.profile_id::text
+				FROM user_profile_access upa
+				WHERE upa.user_id::text = $1
+				  AND upa.profile_id = ANY($2::uuid[])
+				  AND upa.can_manage
+				ORDER BY upa.profile_id
+				FOR SHARE
+			`, principal.UserID, profileIDs)
+			if err != nil {
+				return nil, fmt.Errorf("lock management grants for profile access: %w", err)
+			}
+			for rows.Next() {
+				var profileID string
+				if err := rows.Scan(&profileID); err != nil {
+					rows.Close()
+					return nil, fmt.Errorf("scan locked management grant for profile access: %w", err)
+				}
+				authorizedProfileIDs = append(authorizedProfileIDs, profileID)
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("iterate locked management grants for profile access: %w", err)
+			}
+			rows.Close()
+		}
+	}
+
+	access := make([]ProfileAccess, 0, len(authorizedProfileIDs))
+	if len(authorizedProfileIDs) > 0 {
+		rows, err = tx.Query(ctx, `
+			SELECT p.id::text, p.name, target_access.user_id IS NOT NULL, COALESCE(target_access.can_manage, false)
+			FROM profiles p
+			LEFT JOIN user_profile_access target_access
+			  ON target_access.profile_id = p.id AND target_access.user_id::text = $1
+			WHERE p.id = ANY($2::uuid[])
+			ORDER BY lower(p.name), p.id
+		`, userID, authorizedProfileIDs)
+		if err != nil {
+			return nil, fmt.Errorf("query profile access: %w", err)
+		}
+		for rows.Next() {
+			var item ProfileAccess
+			if err := rows.Scan(&item.ProfileID, &item.ProfileName, &item.HasAccess, &item.CanManage); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan profile access: %w", err)
+			}
+			access = append(access, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("iterate profile access: %w", err)
+		}
+		rows.Close()
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit profile access list: %w", err)
 	}
 	return access, nil
 }
 
 func (s *Service) GrantProfileAccess(ctx context.Context, principal auth.Principal, userID, profileID string, canManage bool) (ProfileAccess, error) {
-	if principal.Role != "admin" {
-		return ProfileAccess{}, ErrForbidden
-	}
 	userID = strings.TrimSpace(userID)
 	profileID = strings.TrimSpace(profileID)
 	tx, err := s.pool.Begin(ctx)
@@ -321,6 +390,13 @@ func (s *Service) GrantProfileAccess(ctx context.Context, principal auth.Princip
 		return ProfileAccess{}, fmt.Errorf("begin profile access grant: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
+	if err != nil {
+		return ProfileAccess{}, fmt.Errorf("authorize profile access grant: %w", err)
+	}
+	if !authorized {
+		return ProfileAccess{}, ErrProfileNotFound
+	}
 
 	var userExists bool
 	var profileName string
@@ -352,9 +428,6 @@ func (s *Service) GrantProfileAccess(ctx context.Context, principal auth.Princip
 }
 
 func (s *Service) RevokeProfileAccess(ctx context.Context, principal auth.Principal, userID, profileID string) error {
-	if principal.Role != "admin" {
-		return ErrForbidden
-	}
 	userID = strings.TrimSpace(userID)
 	profileID = strings.TrimSpace(profileID)
 	tx, err := s.pool.Begin(ctx)
@@ -362,6 +435,13 @@ func (s *Service) RevokeProfileAccess(ctx context.Context, principal auth.Princi
 		return fmt.Errorf("begin profile access revocation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
+	if err != nil {
+		return fmt.Errorf("authorize profile access revocation: %w", err)
+	}
+	if !authorized {
+		return ErrAccessNotFound
+	}
 
 	command, err := tx.Exec(ctx, `
 		DELETE FROM user_profile_access
@@ -421,4 +501,11 @@ func validateRole(value string) error {
 func isUniqueViolation(err error) bool {
 	var postgresError *pgconn.PgError
 	return errors.As(err, &postgresError) && postgresError.Code == "23505"
+}
+
+func principalCategoryID(principal auth.Principal) string {
+	if principal.CategoryID == nil {
+		return ""
+	}
+	return *principal.CategoryID
 }

@@ -89,6 +89,8 @@ class RivuneApiClient(
         ?: throw RivuneApiException.InvalidServerUrl(serverUrl)
     private val json = Json {
         ignoreUnknownKeys = true
+    }
+    private val requestJson = Json {
         explicitNulls = false
     }
     private val refreshMutex = Mutex()
@@ -116,11 +118,11 @@ class RivuneApiClient(
         return credentials != null
     }
 
-    suspend fun login(username: String, password: String, device: Device): TokenPair {
+    suspend fun login(username: String, password: String, device: LoginDevice): TokenPair {
         val result: TokenPair = request(
             path = "auth/login",
             method = "POST",
-            body = json.encodeToString(LoginRequest(username, password, device)),
+            body = requestJson.encodeToString(LoginRequest(username, password, device)),
             authenticated = false,
         )
         setCredentials(result)
@@ -141,12 +143,99 @@ class RivuneApiClient(
 
     suspend fun currentAccount(): Account = request("auth/me", authenticated = true)
 
+    suspend fun sessions(): List<Session> = request<SessionList>("auth/sessions", authenticated = true).sessions
+
+    suspend fun categories(): List<Category> = request<CategoryList>("categories", authenticated = true).categories
+
+    suspend fun createCategory(input: CategoryCreateRequest): Category = request(
+        path = "categories",
+        method = "POST",
+        body = requestJson.encodeToString(input),
+        authenticated = true,
+    )
+
+    suspend fun updateCategory(id: UUID, input: CategoryUpdateRequest): Category = request(
+        path = "categories/$id",
+        method = "PATCH",
+        body = categoryUpdateBody(input),
+        authenticated = true,
+    )
+
+    suspend fun deleteCategory(id: UUID, reassignToCategoryId: UUID? = null) = requestUnit(
+        path = "categories/$id",
+        method = "DELETE",
+        body = buildJsonObject {
+            if (reassignToCategoryId == null) put("reassignToCategoryId", JsonNull)
+            else put("reassignToCategoryId", reassignToCategoryId.toString())
+        }.toString(),
+        authenticated = true,
+    )
+
+    suspend fun reorderCategories(categoryIds: List<UUID>): List<Category> = request<CategoryList>(
+        path = "categories/order",
+        method = "PUT",
+        body = requestJson.encodeToString(CategoryOrderRequest(categoryIds)),
+        authenticated = true,
+    ).categories
+
+    suspend fun devices(categoryId: UUID? = null): List<Device> = request<DeviceList>(
+        path = "devices",
+        query = mapOf("categoryId" to categoryId?.toString()),
+        authenticated = true,
+    ).devices
+
+    suspend fun updateDevice(id: UUID, input: DeviceUpdateRequest): Device = request(
+        path = "devices/$id",
+        method = "PATCH",
+        body = deviceUpdateBody(input),
+        authenticated = true,
+    )
+
+    suspend fun moveProfiles(profileIds: List<UUID>, categoryId: UUID) = requestUnit(
+        path = "profiles/category-moves",
+        method = "POST",
+        body = requestJson.encodeToString(ProfileCategoryMoveRequest(profileIds, categoryId)),
+        authenticated = true,
+    )
+
+    suspend fun moveDevices(deviceIds: List<UUID>, categoryId: UUID) = requestUnit(
+        path = "devices/category-moves",
+        method = "POST",
+        body = requestJson.encodeToString(DeviceCategoryMoveRequest(deviceIds, categoryId)),
+        authenticated = true,
+    )
+
+    suspend fun beginDeviceAuthorization(deviceName: String, platform: String): DeviceAuthorizationResponse = request(
+        path = "auth/device-code",
+        method = "POST",
+        body = requestJson.encodeToString(DeviceAuthorizationRequest(deviceName, platform)),
+        authenticated = false,
+    )
+
+    suspend fun exchangeDeviceAuthorization(deviceCode: String): TokenPair {
+        val result: TokenPair = request(
+            path = "auth/device-code/token",
+            method = "POST",
+            body = requestJson.encodeToString(DeviceCodeTokenRequest(deviceCode)),
+            authenticated = false,
+        )
+        setCredentials(result)
+        return result
+    }
+
+    suspend fun approveDeviceAuthorization(input: DeviceCodeApprovalRequest) = requestUnit(
+        path = "auth/device-code/approve",
+        method = "POST",
+        body = requestJson.encodeToString(input),
+        authenticated = true,
+    )
+
     suspend fun profiles(): List<Profile> = request<ProfileList>("profiles", authenticated = true).profiles
 
     suspend fun selectProfile(id: UUID, pin: String? = null): ProfileSelection = request(
         path = "profiles/$id/select",
         method = "POST",
-        body = json.encodeToString(SelectProfileRequest(pin)),
+        body = requestJson.encodeToString(SelectProfileRequest(pin)),
         authenticated = true,
     )
 
@@ -210,14 +299,14 @@ class RivuneApiClient(
     suspend fun playbackSources(mediaType: String, resourceId: String, capabilities: PlaybackCapabilities): PlaybackSourceList = request(
         path = "playback/sources",
         method = "POST",
-        body = json.encodeToString(PlaybackSourcesRequest(mediaType, resourceId, capabilities)),
+        body = requestJson.encodeToString(PlaybackSourcesRequest(mediaType, resourceId, capabilities)),
         authenticated = true,
     )
 
     suspend fun preparePlayback(sourceRef: String, startSeconds: Int? = null): PlaybackPreparation = request(
         path = "playback/prepare",
         method = "POST",
-        body = json.encodeToString(PlaybackPrepareRequest(sourceRef, startSeconds)),
+        body = requestJson.encodeToString(PlaybackPrepareRequest(sourceRef, startSeconds)),
         authenticated = true,
     )
 
@@ -230,7 +319,7 @@ class RivuneApiClient(
     ): PlaybackSession = request(
         path = "playback/resolve",
         method = "POST",
-        body = json.encodeToString(PlaybackResolveRequest(sourceRef, titleId, preferredAudioTrack, preferredSubtitleId, startSeconds)),
+        body = requestJson.encodeToString(PlaybackResolveRequest(sourceRef, titleId, preferredAudioTrack, preferredSubtitleId, startSeconds)),
         authenticated = true,
     )
 
@@ -249,9 +338,14 @@ class RivuneApiClient(
         return execute(url, method, body, authenticated, retryAfterRefresh = authenticated)
     }
 
-    private suspend fun requestUnit(path: String, method: String, authenticated: Boolean) {
+    private suspend fun requestUnit(
+        path: String,
+        method: String,
+        body: String? = null,
+        authenticated: Boolean,
+    ) {
         val url = endpoint(path, emptyMap())
-        executeData(url, method, null, authenticated, retryAfterRefresh = authenticated)
+        executeData(url, method, body, authenticated, retryAfterRefresh = authenticated)
     }
 
     private suspend fun endpoint(path: String, query: Map<String, String?>): HttpUrl {
@@ -325,7 +419,7 @@ class RivuneApiClient(
             val result: TokenPair = execute(
                 url = url,
                 method = "POST",
-                body = json.encodeToString(RefreshRequest(refreshToken)),
+                body = requestJson.encodeToString(RefreshRequest(refreshToken)),
                 authenticated = false,
                 retryAfterRefresh = false,
             )
@@ -367,6 +461,28 @@ class RivuneApiClient(
         .encodedPathSegments
         .last()
 
+
+    private fun categoryUpdateBody(input: CategoryUpdateRequest): String = buildJsonObject {
+        input.name?.let { put("name", it) }
+        putPatch("description", input.description)
+        putPatch("color", input.color)
+        putPatch("icon", input.icon)
+        input.isDefault?.let { put("isDefault", it) }
+    }.toString()
+
+    private fun deviceUpdateBody(input: DeviceUpdateRequest): String = buildJsonObject {
+        input.name?.let { put("name", it) }
+        input.categoryId?.let { put("categoryId", it.toString()) }
+        putPatch("internalNote", input.internalNote)
+    }.toString()
+
+    private fun kotlinx.serialization.json.JsonObjectBuilder.putPatch(name: String, field: PatchField<String>) {
+        when (field) {
+            PatchField.Omitted -> Unit
+            PatchField.Null -> put(name, JsonNull)
+            is PatchField.Value -> put(name, field.value)
+        }
+    }
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }

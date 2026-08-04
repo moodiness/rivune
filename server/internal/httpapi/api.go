@@ -20,6 +20,7 @@ import (
 	artworkcache "github.com/moodiness/rivune/server/internal/artwork"
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/calendar"
+	"github.com/moodiness/rivune/server/internal/category"
 	"github.com/moodiness/rivune/server/internal/collection"
 	collectionmdblist "github.com/moodiness/rivune/server/internal/collection/mdblist"
 	collectiontrakt "github.com/moodiness/rivune/server/internal/collection/trakt"
@@ -41,7 +42,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/webui"
 )
 
-const protocolVersion = 17
+const protocolVersion = 18
 
 type instanceService interface {
 	Info(context.Context) (instance.Info, error)
@@ -64,7 +65,7 @@ type authService interface {
 	BroadcastSessionNotification(context.Context, auth.Principal, string, string) (auth.NotificationBroadcast, error)
 	SendProfileSessionNotification(context.Context, auth.Principal, string, string, string) (auth.SessionNotification, error)
 	BeginDeviceAuthorization(context.Context, string, string) (auth.DeviceAuthorization, error)
-	ApproveDeviceAuthorization(context.Context, auth.Principal, string) error
+	ApproveDeviceAuthorization(context.Context, auth.Principal, auth.DeviceAuthorizationApproval) error
 	ExchangeDeviceAuthorization(context.Context, string) (auth.TokenPair, error)
 }
 
@@ -78,6 +79,20 @@ type profileService interface {
 	SetAvatarPreset(context.Context, auth.Principal, string, string) (profile.Profile, error)
 	SetAvatarImage(context.Context, auth.Principal, string, []byte) (profile.Profile, error)
 	AvatarImage(context.Context, auth.Principal, string) (profile.AvatarImage, error)
+}
+
+type categoryService interface {
+	List(context.Context, category.Actor) ([]category.Category, error)
+	Create(context.Context, category.Actor, category.CreateInput) (category.Category, error)
+	Update(context.Context, category.Actor, string, category.UpdateInput) (category.Category, error)
+	Delete(context.Context, category.Actor, string, *string) error
+	Reorder(context.Context, category.Actor, []string) ([]category.Category, error)
+	MoveProfile(context.Context, category.Actor, string, string) error
+	MoveProfiles(context.Context, category.Actor, []string, string) error
+	ListDevices(context.Context, category.Actor, *string) ([]category.Device, error)
+	UpdateDevice(context.Context, category.Actor, string, category.DeviceUpdateInput) (category.Device, error)
+	MoveDevice(context.Context, category.Actor, string, string) error
+	MoveDevices(context.Context, category.Actor, []string, string) error
 }
 
 type settingsService interface {
@@ -189,6 +204,7 @@ type API struct {
 	addons              addonService
 	artwork             *artworkcache.Service
 	calendar            calendarService
+	categories          categoryService
 	pool                *pgxpool.Pool
 	instances           instanceService
 	demo                *demo.Service
@@ -289,6 +305,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		addons:              addonService,
 		config:              cfg,
 		calendar:            calendar.NewService(pool, metadataService, logger),
+		categories:          category.NewService(pool),
 		collections:         collectionService,
 		pool:                pool,
 		instances:           instanceManager,
@@ -332,6 +349,15 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("POST /api/v1/profiles/{profileId}/sessions/{sessionId}/notifications", a.requireAuthentication(a.sendProfileSessionNotification))
 	mux.HandleFunc("GET /api/v1/profile-avatars/{presetId}", a.profileAvatarPresetImage)
 	mux.Handle("GET /api/v1/profile-avatars", a.requireAuthentication(a.listProfileAvatarPresets))
+	mux.Handle("GET /api/v1/categories", a.requireAuthentication(a.listCategories))
+	mux.Handle("POST /api/v1/categories", a.requireAuthentication(a.createCategory))
+	mux.Handle("PUT /api/v1/categories/order", a.requireAuthentication(a.reorderCategories))
+	mux.Handle("PATCH /api/v1/categories/{categoryId}", a.requireAuthentication(a.updateCategory))
+	mux.Handle("DELETE /api/v1/categories/{categoryId}", a.requireAuthentication(a.deleteCategory))
+	mux.Handle("GET /api/v1/devices", a.requireAuthentication(a.listDevices))
+	mux.Handle("PATCH /api/v1/devices/{deviceId}", a.requireAuthentication(a.updateDevice))
+	mux.Handle("POST /api/v1/profiles/category-moves", a.requireAuthentication(a.moveProfilesToCategory))
+	mux.Handle("POST /api/v1/devices/category-moves", a.requireAuthentication(a.moveDevicesToCategory))
 	mux.Handle("GET /api/v1/profiles", a.requireAuthentication(a.listProfiles))
 	mux.Handle("POST /api/v1/profiles", a.requireAuthentication(a.createProfile))
 	mux.Handle("PATCH /api/v1/profiles/{profileId}", a.requireAuthentication(a.updateProfile))

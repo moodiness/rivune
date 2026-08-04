@@ -62,7 +62,7 @@ func (a *API) runOperationAction(w http.ResponseWriter, r *http.Request, princip
 }
 
 func requireOperationsAdministrator(w http.ResponseWriter, principal auth.Principal) bool {
-	if principal.Role == "admin" {
+	if principal.IsGlobalAdministrator() {
 		return true
 	}
 	writeError(w, http.StatusForbidden, "admin_required", "An administrator account is required")

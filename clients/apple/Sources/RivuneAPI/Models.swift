@@ -1,7 +1,7 @@
 import Foundation
 
 public enum RivuneProtocol {
-    public static let version = 17
+    public static let version = 18
 }
 
 public struct Discovery: Codable, Sendable, Equatable {
@@ -14,7 +14,197 @@ public struct Discovery: Codable, Sendable, Equatable {
     public let interfaceLanguage: String
 }
 
-public struct Device: Codable, Sendable, Equatable {
+public enum AuthorizationScope: String, Codable, Sendable, Equatable {
+    case globalAdministrator = "global_admin"
+    case category
+}
+
+public struct CategoryRef: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let name: String
+    public let color: String?
+    public let icon: String?
+
+    public init(id: UUID, name: String, color: String?, icon: String?) {
+        self.id = id
+        self.name = name
+        self.color = color
+        self.icon = icon
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        color = try values.decodeRequiredNullable(String.self, forKey: .color)
+        icon = try values.decodeRequiredNullable(String.self, forKey: .icon)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, color, icon
+    }
+}
+
+public struct Category: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let name: String
+    public let description: String?
+    public let color: String?
+    public let icon: String?
+    public let position: Int
+    public let isDefault: Bool
+    public let profileCount: Int
+    public let deviceCount: Int
+    public let createdAt: String
+    public let updatedAt: String
+
+    public init(
+        id: UUID,
+        name: String,
+        description: String?,
+        color: String?,
+        icon: String?,
+        position: Int,
+        isDefault: Bool,
+        profileCount: Int,
+        deviceCount: Int,
+        createdAt: String,
+        updatedAt: String
+    ) {
+        self.id = id
+        self.name = name
+        self.description = description
+        self.color = color
+        self.icon = icon
+        self.position = position
+        self.isDefault = isDefault
+        self.profileCount = profileCount
+        self.deviceCount = deviceCount
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        description = try values.decodeRequiredNullable(String.self, forKey: .description)
+        color = try values.decodeRequiredNullable(String.self, forKey: .color)
+        icon = try values.decodeRequiredNullable(String.self, forKey: .icon)
+        position = try values.decode(Int.self, forKey: .position)
+        isDefault = try values.decode(Bool.self, forKey: .isDefault)
+        profileCount = try values.decode(Int.self, forKey: .profileCount)
+        deviceCount = try values.decode(Int.self, forKey: .deviceCount)
+        createdAt = try values.decode(String.self, forKey: .createdAt)
+        updatedAt = try values.decode(String.self, forKey: .updatedAt)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, description, color, icon, position, isDefault, profileCount, deviceCount, createdAt, updatedAt
+    }
+}
+
+public struct CategoryList: Codable, Sendable, Equatable {
+    public let categories: [Category]
+}
+
+public enum PatchField<Value: Encodable & Sendable & Equatable>: Sendable, Equatable {
+    case omitted
+    case null
+    case value(Value)
+}
+
+public struct CategoryCreateRequest: Codable, Sendable, Equatable {
+    public let name: String
+    public let description: String?
+    public let color: String?
+    public let icon: String?
+
+    public init(name: String, description: String? = nil, color: String? = nil, icon: String? = nil) {
+        self.name = name
+        self.description = description
+        self.color = color
+        self.icon = icon
+    }
+}
+
+public struct CategoryUpdateRequest: Encodable, Sendable, Equatable {
+    public let name: String?
+    public let description: PatchField<String>
+    public let color: PatchField<String>
+    public let icon: PatchField<String>
+    public let isDefault: Bool?
+
+    public init(
+        name: String? = nil,
+        description: PatchField<String> = .omitted,
+        color: PatchField<String> = .omitted,
+        icon: PatchField<String> = .omitted,
+        isDefault: Bool? = nil
+    ) {
+        self.name = name
+        self.description = description
+        self.color = color
+        self.icon = icon
+        self.isDefault = isDefault
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encodeIfPresent(name, forKey: .name)
+        try values.encode(description, forKey: .description)
+        try values.encode(color, forKey: .color)
+        try values.encode(icon, forKey: .icon)
+        try values.encodeIfPresent(isDefault, forKey: .isDefault)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, description, color, icon, isDefault
+    }
+}
+
+private extension KeyedEncodingContainer {
+    mutating func encode<Value: Encodable & Sendable & Equatable>(_ field: PatchField<Value>, forKey key: Key) throws {
+        switch field {
+        case .omitted:
+            break
+        case .null:
+            try encodeNil(forKey: key)
+        case .value(let value):
+            try encode(value, forKey: key)
+        }
+    }
+}
+
+private extension KeyedDecodingContainer {
+    func decodeRequiredNullable<Value: Decodable>(_ type: Value.Type, forKey key: Key) throws -> Value? {
+        guard contains(key) else {
+            throw DecodingError.keyNotFound(
+                key,
+                DecodingError.Context(codingPath: codingPath, debugDescription: "Required nullable field is missing.")
+            )
+        }
+        return try decodeIfPresent(type, forKey: key)
+    }
+}
+
+private func validateAuthorizationContext(
+    _ scope: AuthorizationScope,
+    category: CategoryRef?,
+    codingPath: [CodingKey]
+) throws {
+    let isValid = (scope == .globalAdministrator && category == nil) || (scope == .category && category != nil)
+    guard isValid else {
+        throw DecodingError.dataCorrupted(
+            DecodingError.Context(
+                codingPath: codingPath,
+                debugDescription: "authorizationScope and category do not form a valid authorization context."
+            )
+        )
+    }
+}
+
+public struct LoginDevice: Codable, Sendable, Equatable {
     public let id: UUID?
     public let name: String
     public let platform: String
@@ -26,12 +216,94 @@ public struct Device: Codable, Sendable, Equatable {
     }
 }
 
+public struct Device: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let name: String
+    public let platform: String
+    public let categoryId: UUID
+    public let category: CategoryRef
+    public let internalNote: String?
+    public let approvedAt: String?
+    public let lastSeenAt: String?
+    public let createdAt: String
+    public let updatedAt: String
+
+    public init(
+        id: UUID,
+        name: String,
+        platform: String,
+        categoryId: UUID,
+        category: CategoryRef,
+        internalNote: String?,
+        approvedAt: String?,
+        lastSeenAt: String?,
+        createdAt: String,
+        updatedAt: String
+    ) {
+        self.id = id
+        self.name = name
+        self.platform = platform
+        self.categoryId = categoryId
+        self.category = category
+        self.internalNote = internalNote
+        self.approvedAt = approvedAt
+        self.lastSeenAt = lastSeenAt
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        platform = try values.decode(String.self, forKey: .platform)
+        categoryId = try values.decode(UUID.self, forKey: .categoryId)
+        category = try values.decode(CategoryRef.self, forKey: .category)
+        internalNote = try values.decodeRequiredNullable(String.self, forKey: .internalNote)
+        approvedAt = try values.decodeRequiredNullable(String.self, forKey: .approvedAt)
+        lastSeenAt = try values.decodeRequiredNullable(String.self, forKey: .lastSeenAt)
+        createdAt = try values.decode(String.self, forKey: .createdAt)
+        updatedAt = try values.decode(String.self, forKey: .updatedAt)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, platform, categoryId, category, internalNote, approvedAt, lastSeenAt, createdAt, updatedAt
+    }
+}
+
+public struct DeviceList: Codable, Sendable, Equatable {
+    public let devices: [Device]
+}
+
+public struct DeviceUpdateRequest: Encodable, Sendable, Equatable {
+    public let name: String?
+    public let categoryId: UUID?
+    public let internalNote: PatchField<String>
+
+    public init(name: String? = nil, categoryId: UUID? = nil, internalNote: PatchField<String> = .omitted) {
+        self.name = name
+        self.categoryId = categoryId
+        self.internalNote = internalNote
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encodeIfPresent(name, forKey: .name)
+        try values.encodeIfPresent(categoryId, forKey: .categoryId)
+        try values.encode(internalNote, forKey: .internalNote)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, categoryId, internalNote
+    }
+}
+
 public struct LoginRequest: Codable, Sendable, Equatable {
     public let username: String
     public let password: String
-    public let device: Device
+    public let device: LoginDevice
 
-    public init(username: String, password: String, device: Device) {
+    public init(username: String, password: String, device: LoginDevice) {
         self.username = username
         self.password = password
         self.device = device
@@ -46,6 +318,85 @@ public struct TokenPair: Codable, Sendable, Equatable {
     public let refreshTokenExpiresAt: String
     public let sessionId: UUID
     public let deviceId: UUID
+    public let authorizationScope: AuthorizationScope
+    public let category: CategoryRef?
+
+    public init(
+        tokenType: String,
+        accessToken: String,
+        accessTokenExpiresAt: String,
+        refreshToken: String,
+        refreshTokenExpiresAt: String,
+        sessionId: UUID,
+        deviceId: UUID,
+        authorizationScope: AuthorizationScope,
+        category: CategoryRef?
+    ) {
+        self.tokenType = tokenType
+        self.accessToken = accessToken
+        self.accessTokenExpiresAt = accessTokenExpiresAt
+        self.refreshToken = refreshToken
+        self.refreshTokenExpiresAt = refreshTokenExpiresAt
+        self.sessionId = sessionId
+        self.deviceId = deviceId
+        self.authorizationScope = authorizationScope
+        self.category = category
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        tokenType = try values.decode(String.self, forKey: .tokenType)
+        accessToken = try values.decode(String.self, forKey: .accessToken)
+        accessTokenExpiresAt = try values.decode(String.self, forKey: .accessTokenExpiresAt)
+        refreshToken = try values.decode(String.self, forKey: .refreshToken)
+        refreshTokenExpiresAt = try values.decode(String.self, forKey: .refreshTokenExpiresAt)
+        sessionId = try values.decode(UUID.self, forKey: .sessionId)
+        deviceId = try values.decode(UUID.self, forKey: .deviceId)
+        authorizationScope = try values.decode(AuthorizationScope.self, forKey: .authorizationScope)
+        category = try values.decodeRequiredNullable(CategoryRef.self, forKey: .category)
+        try validateAuthorizationContext(authorizationScope, category: category, codingPath: decoder.codingPath)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tokenType, accessToken, accessTokenExpiresAt, refreshToken, refreshTokenExpiresAt
+        case sessionId, deviceId, authorizationScope, category
+    }
+}
+
+public struct AccountSession: Codable, Sendable, Equatable {
+    public let id: UUID
+    public let deviceId: UUID
+    public let activeProfile: ActiveProfileGrant?
+    public let authorizationScope: AuthorizationScope
+    public let category: CategoryRef?
+
+    public init(
+        id: UUID,
+        deviceId: UUID,
+        activeProfile: ActiveProfileGrant?,
+        authorizationScope: AuthorizationScope,
+        category: CategoryRef?
+    ) {
+        self.id = id
+        self.deviceId = deviceId
+        self.activeProfile = activeProfile
+        self.authorizationScope = authorizationScope
+        self.category = category
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        deviceId = try values.decode(UUID.self, forKey: .deviceId)
+        activeProfile = try values.decodeRequiredNullable(ActiveProfileGrant.self, forKey: .activeProfile)
+        authorizationScope = try values.decode(AuthorizationScope.self, forKey: .authorizationScope)
+        category = try values.decodeRequiredNullable(CategoryRef.self, forKey: .category)
+        try validateAuthorizationContext(authorizationScope, category: category, codingPath: decoder.codingPath)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, deviceId, activeProfile, authorizationScope, category
+    }
 }
 
 public struct Account: Codable, Sendable, Equatable {
@@ -55,20 +406,148 @@ public struct Account: Codable, Sendable, Equatable {
         public let role: String
     }
 
-    public struct Session: Codable, Sendable, Equatable {
-        public let id: UUID
-        public let deviceId: UUID
-        public let activeProfile: ActiveProfileGrant?
-    }
-
     public let user: User
-    public let session: Session
+    public let session: AccountSession
     public let profiles: [Profile]
 }
 
 public struct ActiveProfileGrant: Codable, Sendable, Equatable {
     public let id: UUID
     public let expiresAt: String
+}
+
+public struct SessionList: Codable, Sendable, Equatable {
+    public let sessions: [Session]
+}
+
+public struct Session: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let deviceId: UUID
+    public let deviceName: String
+    public let platform: String
+    public let ipAddress: String?
+    public let createdAt: String
+    public let lastSeenAt: String
+    public let current: Bool
+    public let authorizationScope: AuthorizationScope
+    public let category: CategoryRef?
+
+    public init(
+        id: UUID,
+        deviceId: UUID,
+        deviceName: String,
+        platform: String,
+        ipAddress: String?,
+        createdAt: String,
+        lastSeenAt: String,
+        current: Bool,
+        authorizationScope: AuthorizationScope,
+        category: CategoryRef?
+    ) {
+        self.id = id
+        self.deviceId = deviceId
+        self.deviceName = deviceName
+        self.platform = platform
+        self.ipAddress = ipAddress
+        self.createdAt = createdAt
+        self.lastSeenAt = lastSeenAt
+        self.current = current
+        self.authorizationScope = authorizationScope
+        self.category = category
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        deviceId = try values.decode(UUID.self, forKey: .deviceId)
+        deviceName = try values.decode(String.self, forKey: .deviceName)
+        platform = try values.decode(String.self, forKey: .platform)
+        ipAddress = try values.decodeRequiredNullable(String.self, forKey: .ipAddress)
+        createdAt = try values.decode(String.self, forKey: .createdAt)
+        lastSeenAt = try values.decode(String.self, forKey: .lastSeenAt)
+        current = try values.decode(Bool.self, forKey: .current)
+        authorizationScope = try values.decode(AuthorizationScope.self, forKey: .authorizationScope)
+        category = try values.decodeRequiredNullable(CategoryRef.self, forKey: .category)
+        try validateAuthorizationContext(authorizationScope, category: category, codingPath: decoder.codingPath)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, deviceId, deviceName, platform, ipAddress, createdAt, lastSeenAt, current
+        case authorizationScope, category
+    }
+}
+
+public struct ProfileSessionList: Codable, Sendable, Equatable {
+    public let sessions: [ProfileSession]
+}
+
+public struct ProfileSession: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let userId: UUID
+    public let username: String
+    public let deviceId: UUID
+    public let deviceName: String
+    public let platform: String
+    public let ipAddress: String?
+    public let createdAt: String
+    public let lastSeenAt: String
+    public let profileGrantExpiresAt: String
+    public let current: Bool
+    public let authorizationScope: AuthorizationScope
+    public let category: CategoryRef?
+
+    public init(
+        id: UUID,
+        userId: UUID,
+        username: String,
+        deviceId: UUID,
+        deviceName: String,
+        platform: String,
+        ipAddress: String?,
+        createdAt: String,
+        lastSeenAt: String,
+        profileGrantExpiresAt: String,
+        current: Bool,
+        authorizationScope: AuthorizationScope,
+        category: CategoryRef?
+    ) {
+        self.id = id
+        self.userId = userId
+        self.username = username
+        self.deviceId = deviceId
+        self.deviceName = deviceName
+        self.platform = platform
+        self.ipAddress = ipAddress
+        self.createdAt = createdAt
+        self.lastSeenAt = lastSeenAt
+        self.profileGrantExpiresAt = profileGrantExpiresAt
+        self.current = current
+        self.authorizationScope = authorizationScope
+        self.category = category
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        userId = try values.decode(UUID.self, forKey: .userId)
+        username = try values.decode(String.self, forKey: .username)
+        deviceId = try values.decode(UUID.self, forKey: .deviceId)
+        deviceName = try values.decode(String.self, forKey: .deviceName)
+        platform = try values.decode(String.self, forKey: .platform)
+        ipAddress = try values.decodeRequiredNullable(String.self, forKey: .ipAddress)
+        createdAt = try values.decode(String.self, forKey: .createdAt)
+        lastSeenAt = try values.decode(String.self, forKey: .lastSeenAt)
+        profileGrantExpiresAt = try values.decode(String.self, forKey: .profileGrantExpiresAt)
+        current = try values.decode(Bool.self, forKey: .current)
+        authorizationScope = try values.decode(AuthorizationScope.self, forKey: .authorizationScope)
+        category = try values.decodeRequiredNullable(CategoryRef.self, forKey: .category)
+        try validateAuthorizationContext(authorizationScope, category: category, codingPath: decoder.codingPath)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, userId, username, deviceId, deviceName, platform, ipAddress, createdAt, lastSeenAt
+        case profileGrantExpiresAt, current, authorizationScope, category
+    }
 }
 
 public struct ProfileList: Codable, Sendable, Equatable {
@@ -78,6 +557,9 @@ public struct ProfileList: Codable, Sendable, Equatable {
 public struct Profile: Codable, Sendable, Equatable, Identifiable {
     public let id: UUID
     public let name: String
+    public let description: String?
+    public let categoryId: UUID
+    public let category: CategoryRef
     public let isChild: Bool
     public let hasPin: Bool
     public let canManage: Bool
@@ -100,6 +582,77 @@ public struct ProfileAvatar: Codable, Sendable, Equatable {
 public struct ProfileSelection: Codable, Sendable, Equatable {
     public let profile: Profile
     public let expiresAt: String
+}
+
+public struct CategoryOrderRequest: Codable, Sendable, Equatable {
+    public let categoryIds: [UUID]
+    public init(categoryIds: [UUID]) { self.categoryIds = categoryIds }
+}
+
+public struct CategoryDeleteRequest: Encodable, Sendable, Equatable {
+    public let reassignToCategoryId: UUID?
+    public init(reassignToCategoryId: UUID? = nil) { self.reassignToCategoryId = reassignToCategoryId }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        if let reassignToCategoryId {
+            try values.encode(reassignToCategoryId, forKey: .reassignToCategoryId)
+        } else {
+            try values.encodeNil(forKey: .reassignToCategoryId)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey { case reassignToCategoryId }
+}
+
+public struct ProfileCategoryMoveRequest: Codable, Sendable, Equatable {
+    public let profileIds: [UUID]
+    public let categoryId: UUID
+    public init(profileIds: [UUID], categoryId: UUID) {
+        self.profileIds = profileIds
+        self.categoryId = categoryId
+    }
+}
+
+public struct DeviceCategoryMoveRequest: Codable, Sendable, Equatable {
+    public let deviceIds: [UUID]
+    public let categoryId: UUID
+    public init(deviceIds: [UUID], categoryId: UUID) {
+        self.deviceIds = deviceIds
+        self.categoryId = categoryId
+    }
+}
+
+public struct DeviceAuthorizationRequest: Codable, Sendable, Equatable {
+    public let deviceName: String
+    public let platform: String
+}
+
+public struct DeviceAuthorizationResponse: Codable, Sendable, Equatable {
+    public let deviceCode: String
+    public let userCode: String
+    public let verificationUri: String
+    public let verificationUriComplete: String
+    public let expiresAt: String
+    public let intervalSeconds: Int
+}
+
+public struct DeviceCodeApprovalRequest: Codable, Sendable, Equatable {
+    public let userCode: String
+    public let categoryId: UUID
+    public let deviceName: String?
+    public let internalNote: String?
+
+    public init(userCode: String, categoryId: UUID, deviceName: String? = nil, internalNote: String? = nil) {
+        self.userCode = userCode
+        self.categoryId = categoryId
+        self.deviceName = deviceName
+        self.internalNote = internalNote
+    }
+}
+
+public struct DeviceCodeTokenRequest: Codable, Sendable, Equatable {
+    public let deviceCode: String
 }
 
 public struct InstanceTranscodingPatch: Encodable, Sendable, Equatable {

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/addon"
@@ -27,20 +30,30 @@ type ResourceFetcher interface {
 	FetchAll(context.Context, auth.Principal, addon.ResourcePath) (addon.ResourceBatch, error)
 }
 
+type playbackProfileTransaction interface {
+	Commit(context.Context) error
+	Rollback(context.Context) error
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
 type Service struct {
-	pool           *pgxpool.Pool
-	addons         ResourceFetcher
-	client         *http.Client
-	introDBClient  *http.Client
-	introDBBaseURL string
-	processor      MediaProcessor
-	now            func() time.Time
-	mediaOptions   MediaOptions
-	references     *sourceReferenceStore
-	probes         *mediaProbeCache
-	preparations   *playbackPreparationCache
-	hlsMu          sync.Mutex
-	hlsJobs        map[string]*hlsJob
+	pool                    *pgxpool.Pool
+	addons                  ResourceFetcher
+	client                  *http.Client
+	introDBClient           *http.Client
+	introDBBaseURL          string
+	processor               MediaProcessor
+	now                     func() time.Time
+	mediaOptions            MediaOptions
+	references              *sourceReferenceStore
+	probes                  *mediaProbeCache
+	preparations            *playbackPreparationCache
+	hlsMu                   sync.Mutex
+	profileTxFactory        func(context.Context, auth.Principal) (playbackProfileTransaction, error)
+	sessionCleanupTxFactory func(context.Context) (playbackProfileTransaction, error)
+	hlsJobs                 map[string]*hlsJob
 }
 
 type rawStream struct {
@@ -102,8 +115,8 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 	input.PreferredAudioLanguage = strings.TrimSpace(input.PreferredAudioLanguage)
 	input.PreferredSubtitleLanguage = strings.TrimSpace(input.PreferredSubtitleLanguage)
 	input.PreferredForcedSubtitleLanguage = strings.TrimSpace(input.PreferredForcedSubtitleLanguage)
-	if !service.hasActiveProfile(principal) {
-		return SourceList{}, ErrActiveProfileRequired
+	if err := service.authorizeActiveProfile(ctx, principal); err != nil {
+		return SourceList{}, err
 	}
 	if err := validateSourcesInput(input); err != nil {
 		return SourceList{}, err
@@ -132,6 +145,11 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 		return SourceList{}, ErrProviderUnavailable
 	}
 	providerErrors := providerFailures(batch.Errors)
+	tx, err := service.beginAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return SourceList{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	options := make([]SourceOption, 0, len(sources))
 	for index := range sources {
 		source := sources[index]
@@ -157,20 +175,29 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 			Filename: source.Filename, Protocol: source.Protocol, Container: source.Container, ExpiresAt: reference.ExpiresAt,
 		})
 	}
-	return SourceList{Sources: options, ProviderErrors: providerErrors}, nil
+	result := SourceList{Sources: options, ProviderErrors: providerErrors}
+	if err := tx.Commit(ctx); err != nil {
+		return SourceList{}, fmt.Errorf("commit active playback profile authorization: %w", err)
+	}
+	return result, nil
 }
 
 func (service *Service) Prepare(ctx context.Context, principal auth.Principal, input PrepareInput) (Preparation, error) {
 	input.SourceRef = strings.TrimSpace(input.SourceRef)
-	if !service.hasActiveProfile(principal) {
-		return Preparation{}, ErrActiveProfileRequired
+	tx, err := service.beginAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return Preparation{}, err
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if len(input.SourceRef) < 16 || len(input.SourceRef) > 128 || !validPlaybackStart(input.StartSeconds) {
 		return Preparation{}, ErrInvalidInput
 	}
 	reference, err := service.references.get(input.SourceRef, principal)
 	if err != nil {
 		return Preparation{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Preparation{}, fmt.Errorf("commit active playback profile authorization: %w", err)
 	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
 	prepared, err := service.preparedPlayback(ctx, principal, reference, playbackPolicy{
@@ -207,26 +234,36 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 			return Preparation{}, err
 		}
 	}
-	return Preparation{
+	result := Preparation{
 		SourceRef: reference.ID, Mode: source.Mode, Protocol: source.Protocol, Container: source.Container,
 		Media: source.Media, Decision: clonePlaybackDecision(source.Decision),
 		SubtitleCount: len(prepared.subtitles), ExpiresAt: reference.ExpiresAt,
-	}, nil
+	}
+	if err := service.commitAuthorizedProfileBoundary(ctx, principal); err != nil {
+		service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+		return Preparation{}, err
+	}
+	return result, nil
 }
 
 func (service *Service) Resolve(ctx context.Context, principal auth.Principal, input ResolveInput) (Session, error) {
 	input.SourceRef = strings.TrimSpace(input.SourceRef)
 	input.TitleID = strings.TrimSpace(input.TitleID)
 	input.PreferredSubtitleID = strings.TrimSpace(input.PreferredSubtitleID)
-	if !service.hasActiveProfile(principal) {
-		return Session{}, ErrActiveProfileRequired
+	tx, err := service.beginAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return Session{}, err
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if err := validateResolveInput(input); err != nil {
 		return Session{}, err
 	}
 	reference, err := service.references.get(input.SourceRef, principal)
 	if err != nil {
 		return Session{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Session{}, fmt.Errorf("commit active playback profile authorization: %w", err)
 	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
 	prepared, err := service.preparedPlayback(ctx, principal, reference, playbackPolicy{
@@ -284,21 +321,42 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 	}
 	now := service.now()
 	expiresAt := now.Add(sessionTTL)
-	if _, err := service.cleanupInactiveSessions(ctx); err != nil {
+	inactiveSessionIDs := make([]string, 0)
+	tx, err := service.beginAuthorizedProfileTx(ctx, principal)
+	if err != nil {
 		return Session{}, err
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
+		DELETE FROM playback_sessions
+		WHERE profile_id = $1::uuid
+		  AND (expires_at <= now() OR last_seen_at <= now() - $2::interval)
+		RETURNING id::text
+	`, *principal.ActiveProfileID, intervalLiteral(playbackSessionIdleTTL))
+	if err != nil {
+		return Session{}, fmt.Errorf("clean inactive playback sessions: %w", err)
+	}
+	for rows.Next() {
+		var identifier string
+		if err := rows.Scan(&identifier); err != nil {
+			rows.Close()
+			return Session{}, fmt.Errorf("scan inactive playback session: %w", err)
+		}
+		inactiveSessionIDs = append(inactiveSessionIDs, identifier)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Session{}, fmt.Errorf("iterate inactive playback sessions: %w", err)
+	}
+	rows.Close()
 	var sessionID string
-	if err := service.pool.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO playback_sessions (
 			auth_session_id, profile_id, title_id, media_type, resource_id, token_hash, assets, expires_at
 		) VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8)
 		RETURNING id::text
 	`, principal.SessionID, *principal.ActiveProfileID, titleID, reference.MediaType, reference.ResourceID, tokenHash, assetsJSON, expiresAt).Scan(&sessionID); err != nil {
 		return Session{}, fmt.Errorf("store playback session: %w", err)
-	}
-	if err := service.startSessionHLS(ctx, prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID), sessionID, sources, assets); err != nil {
-		_, _ = service.pool.Exec(ctx, "DELETE FROM playback_sessions WHERE id::text = $1", sessionID)
-		return Session{}, err
 	}
 	for index := range sources {
 		sources[index].URL = sessionSourceURL(sources[index], assets, sessionID, token)
@@ -308,11 +366,27 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 			subtitles[index].URL = assetURL(sessionID, subtitles[index].ID, token, "", "")
 		}
 	}
-	return Session{
+	result := Session{
 		ID: sessionID, SelectedSourceID: firstCompatibleSource(sources), SelectedAudioTrack: selectedAudioTrack(sources, assets),
 		SelectedSubtitleID: selectedSubtitle(subtitles), Sources: sources, Subtitles: subtitles,
 		ProviderErrors: providerErrors, ExpiresAt: expiresAt,
-	}, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Session{}, fmt.Errorf("commit playback session: %w", err)
+	}
+	for _, identifier := range inactiveSessionIDs {
+		service.stopHLSSession(identifier)
+	}
+	if err := service.startSessionHLS(ctx, prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID), sessionID, sources, assets); err != nil {
+		_ = service.deleteCreatedSession(ctx, principal.SessionID, sessionID)
+		return Session{}, err
+	}
+	if err := service.commitAuthorizedProfileBoundary(ctx, principal); err != nil {
+		service.stopHLSSession(sessionID)
+		_ = service.deleteCreatedSession(ctx, principal.SessionID, sessionID)
+		return Session{}, err
+	}
+	return result, nil
 }
 
 func sessionSourceURL(source Source, assets []storedAsset, sessionID, token string) string {
@@ -334,7 +408,15 @@ func (service *Service) Stop(ctx context.Context, principal auth.Principal, sess
 	if sessionID == "" || principal.ActiveProfileID == nil {
 		return ErrSessionNotFound
 	}
-	command, err := service.pool.Exec(ctx, `
+	tx, err := service.beginAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		if errors.Is(err, ErrActiveProfileRequired) {
+			return ErrSessionNotFound
+		}
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	command, err := tx.Exec(ctx, `
 		DELETE FROM playback_sessions
 		WHERE id::text = $1 AND auth_session_id = $2 AND profile_id = $3
 	`, sessionID, principal.SessionID, *principal.ActiveProfileID)
@@ -343,6 +425,9 @@ func (service *Service) Stop(ctx context.Context, principal auth.Principal, sess
 	}
 	if command.RowsAffected() == 0 {
 		return ErrSessionNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit playback session deletion: %w", err)
 	}
 	service.stopHLSSession(sessionID)
 	return nil
@@ -450,9 +535,73 @@ func validUniqueModes(values, allowed []string, maximum int) bool {
 	}
 	return true
 }
+func (service *Service) beginAuthorizedProfileTx(ctx context.Context, principal auth.Principal) (playbackProfileTransaction, error) {
+	if principal.ActiveProfileID == nil || principal.ProfileGrantExpiresAt == nil || !principal.ProfileGrantExpiresAt.After(service.now()) {
+		return nil, ErrActiveProfileRequired
+	}
+	if service.profileTxFactory != nil {
+		return service.profileTxFactory(ctx, principal)
+	}
+	if service.pool == nil {
+		return nil, ErrActiveProfileRequired
+	}
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin active playback profile authorization: %w", err)
+	}
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{*principal.ActiveProfileID}, false)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, fmt.Errorf("authorize active playback profile: %w", err)
+	}
+	if !authorized {
+		_ = tx.Rollback(ctx)
+		return nil, ErrActiveProfileRequired
+	}
+	return tx, nil
+}
 
-func (service *Service) hasActiveProfile(principal auth.Principal) bool {
-	return principal.ActiveProfileID != nil && principal.ProfileGrantExpiresAt != nil && principal.ProfileGrantExpiresAt.After(service.now())
+func (service *Service) authorizeActiveProfile(ctx context.Context, principal auth.Principal) error {
+	return service.commitAuthorizedProfileBoundary(ctx, principal)
+}
+
+func (service *Service) commitAuthorizedProfileBoundary(ctx context.Context, principal auth.Principal) error {
+	tx, err := service.beginAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit active playback profile authorization: %w", err)
+	}
+	return nil
+}
+
+func (service *Service) deleteCreatedSession(ctx context.Context, authSessionID, sessionID string) error {
+	var tx playbackProfileTransaction
+	var err error
+	if service.sessionCleanupTxFactory != nil {
+		tx, err = service.sessionCleanupTxFactory(ctx)
+	} else {
+		if service.pool == nil {
+			return errors.New("begin playback session cleanup: pool is unavailable")
+		}
+		tx, err = service.pool.Begin(ctx)
+	}
+	if err != nil {
+		return fmt.Errorf("begin playback session cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM playback_sessions
+		WHERE id::text = $1 AND auth_session_id = $2
+	`, sessionID, authSessionID); err != nil {
+		return fmt.Errorf("delete created playback session: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit created playback session deletion: %w", err)
+	}
+	return nil
 }
 
 func effectivePlaybackMaximumHeight(clientMaximum, settingsMaximum int) int {

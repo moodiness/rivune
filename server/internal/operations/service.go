@@ -376,7 +376,7 @@ func metadataRefreshStatus(result *MetadataRefreshResult, err error) string {
 }
 
 func requireAdministrator(principal auth.Principal) error {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		return ErrForbidden
 	}
 	return nil

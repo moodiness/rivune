@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/category"
 )
 
 type fakeAuthService struct {
@@ -57,7 +58,7 @@ type fakeAuthService struct {
 	sendNotificationErr        error
 	deviceAuthorization        auth.DeviceAuthorization
 	deviceAuthorizationErr     error
-	approvedUserCode           string
+	approvalInput              auth.DeviceAuthorizationApproval
 	approvalErr                error
 	exchangedDeviceCode        string
 	exchangeTokens             auth.TokenPair
@@ -140,8 +141,8 @@ func (f *fakeAuthService) BeginDeviceAuthorization(context.Context, string, stri
 	return f.deviceAuthorization, f.deviceAuthorizationErr
 }
 
-func (f *fakeAuthService) ApproveDeviceAuthorization(_ context.Context, _ auth.Principal, userCode string) error {
-	f.approvedUserCode = userCode
+func (f *fakeAuthService) ApproveDeviceAuthorization(_ context.Context, _ auth.Principal, input auth.DeviceAuthorizationApproval) error {
+	f.approvalInput = input
 	return f.approvalErr
 }
 
@@ -153,12 +154,13 @@ func (f *fakeAuthService) ExchangeDeviceAuthorization(_ context.Context, deviceC
 func TestLoginReturnsOpaqueSessionTokens(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	service := &fakeAuthService{loginTokens: auth.TokenPair{
-		AccessToken:      "rivune_at_access",
-		AccessExpiresAt:  now.Add(15 * time.Minute),
-		RefreshToken:     "rivune_rt_refresh",
-		RefreshExpiresAt: now.Add(30 * 24 * time.Hour),
-		SessionID:        "session-id",
-		DeviceID:         "device-id",
+		AccessToken:        "rivune_at_access",
+		AccessExpiresAt:    now.Add(15 * time.Minute),
+		RefreshToken:       "rivune_rt_refresh",
+		RefreshExpiresAt:   now.Add(30 * 24 * time.Hour),
+		SessionID:          "session-id",
+		DeviceID:           "device-id",
+		AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 	}}
 	api := testAPI(&fakeInstanceService{})
 	api.auth = service
@@ -176,7 +178,8 @@ func TestLoginReturnsOpaqueSessionTokens(t *testing.T) {
 	}
 	var body tokenResponse
 	decodeResponse(t, response, &body)
-	if body.TokenType != "Bearer" || body.AccessToken != "rivune_at_access" || body.RefreshToken != "rivune_rt_refresh" || body.SessionID != "session-id" {
+	if body.TokenType != "Bearer" || body.AccessToken != "rivune_at_access" || body.RefreshToken != "rivune_rt_refresh" ||
+		body.SessionID != "session-id" || body.AuthorizationScope != auth.AuthorizationScopeGlobalAdministrator || body.Category != nil {
 		t.Fatalf("unexpected token response: %+v", body)
 	}
 }
@@ -202,12 +205,17 @@ func TestLoginUsesGenericCredentialError(t *testing.T) {
 }
 
 func TestMeReturnsAuthenticatedAccount(t *testing.T) {
-	principal := auth.Principal{SessionID: "session-id", UserID: "user-id", DeviceID: "device-id", Username: "admin", Role: "admin"}
+	categoryID := "category-id"
+	reference := category.CategoryRef{ID: categoryID, Name: "Kids"}
+	principal := auth.Principal{
+		SessionID: "session-id", UserID: "user-id", DeviceID: "device-id", Username: "admin", Role: "admin",
+		AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID, Category: &reference,
+	}
 	service := &fakeAuthService{
 		principal: principal,
 		account: auth.Account{Principal: principal, Profiles: []auth.Profile{{
 			ID: "profile-id", Name: "Admin", HasPIN: true, CanManage: true, Enabled: true,
-			AvailableUntil: new("2026-08-31"), AccessTimezone: "UTC", Accessible: true,
+			AvailableUntil: new("2026-08-31"), AccessTimezone: "UTC", Accessible: true, Category: reference,
 		}}},
 	}
 	api := testAPI(&fakeInstanceService{})
@@ -228,18 +236,27 @@ func TestMeReturnsAuthenticatedAccount(t *testing.T) {
 		User struct {
 			Username string `json:"username"`
 		} `json:"user"`
+		Session struct {
+			AuthorizationScope auth.AuthorizationScope `json:"authorizationScope"`
+			Category           category.CategoryRef    `json:"category"`
+		} `json:"session"`
 		Profiles []struct {
-			Name           string  `json:"name"`
-			CanManage      bool    `json:"canManage"`
-			HasPIN         bool    `json:"hasPin"`
-			Enabled        bool    `json:"enabled"`
-			AvailableUntil *string `json:"availableUntil"`
-			AccessTimezone string  `json:"accessTimezone"`
-			Accessible     bool    `json:"accessible"`
+			CategoryID     string               `json:"categoryId"`
+			Name           string               `json:"name"`
+			CanManage      bool                 `json:"canManage"`
+			HasPIN         bool                 `json:"hasPin"`
+			Enabled        bool                 `json:"enabled"`
+			AvailableUntil *string              `json:"availableUntil"`
+			AccessTimezone string               `json:"accessTimezone"`
+			Accessible     bool                 `json:"accessible"`
+			Category       category.CategoryRef `json:"category"`
 		} `json:"profiles"`
 	}
 	decodeResponse(t, response, &body)
-	if body.User.Username != "admin" || len(body.Profiles) != 1 || body.Profiles[0].Name != "Admin" ||
+	if body.User.Username != "admin" || body.Session.AuthorizationScope != auth.AuthorizationScopeCategory ||
+		body.Session.Category.ID != categoryID || len(body.Profiles) != 1 ||
+		body.Profiles[0].Name != "Admin" || body.Profiles[0].CategoryID != categoryID ||
+		body.Profiles[0].Category.ID != categoryID ||
 		!body.Profiles[0].HasPIN || !body.Profiles[0].CanManage || !body.Profiles[0].Enabled ||
 		!body.Profiles[0].Accessible || body.Profiles[0].AvailableUntil == nil ||
 		*body.Profiles[0].AvailableUntil != "2026-08-31" || body.Profiles[0].AccessTimezone != "UTC" {
@@ -281,11 +298,13 @@ func TestRevokeSessionUsesOwnedPathSession(t *testing.T) {
 
 func TestListProfileSessionsIncludesDeviceAndUser(t *testing.T) {
 	expiresAt := time.Now().UTC().Add(time.Hour)
+	reference := category.CategoryRef{ID: "category-id", Name: "Living Room"}
 	service := &fakeAuthService{
 		principal: auth.Principal{UserID: "manager-id", SessionID: "current-id"},
 		profileSessions: []auth.Session{{
 			ID: "session-id", UserID: "user-id", Username: "alex", DeviceID: "device-id",
 			DeviceName: "Living Room", Platform: "tvos", IPAddress: "203.0.113.42",
+			AuthorizationScope: auth.AuthorizationScopeCategory, Category: &reference,
 			ProfileGrantExpiresAt: &expiresAt,
 		}},
 	}
@@ -302,14 +321,18 @@ func TestListProfileSessionsIncludesDeviceAndUser(t *testing.T) {
 	}
 	var body struct {
 		Sessions []struct {
-			Username   string  `json:"username"`
-			DeviceName string  `json:"deviceName"`
-			IPAddress  *string `json:"ipAddress"`
+			Username           string                  `json:"username"`
+			DeviceName         string                  `json:"deviceName"`
+			IPAddress          *string                 `json:"ipAddress"`
+			AuthorizationScope auth.AuthorizationScope `json:"authorizationScope"`
+			Category           category.CategoryRef    `json:"category"`
 		} `json:"sessions"`
 	}
 	decodeResponse(t, response, &body)
 	if service.profileSessionsID != "profile-id" || len(body.Sessions) != 1 ||
 		body.Sessions[0].Username != "alex" || body.Sessions[0].DeviceName != "Living Room" ||
+		body.Sessions[0].AuthorizationScope != auth.AuthorizationScopeCategory ||
+		body.Sessions[0].Category.ID != reference.ID ||
 		body.Sessions[0].IPAddress == nil || *body.Sessions[0].IPAddress != "203.0.113.42" {
 		t.Fatalf("unexpected profile sessions response: %+v", body)
 	}

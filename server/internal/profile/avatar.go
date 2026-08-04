@@ -53,6 +53,14 @@ var avatarPresetDefinitions = []avatarPresetDefinition{
 	{AvatarPreset: AvatarPreset{ID: "solar", Name: "Solar"}, Start: "#7A2E00", End: "#FFB703", Accent: "#FFF6C2", Path: "M256 91L292 194L401 167L340 259L432 319L323 318L310 427L256 332L202 427L189 318L80 319L172 259L111 167L220 194Z"},
 	{AvatarPreset: AvatarPreset{ID: "glacier", Name: "Glacier"}, Start: "#12355B", End: "#5DD9C1", Accent: "#E9FFFD", Path: "M256 62L409 185L357 420H155L103 185Z"},
 	{AvatarPreset: AvatarPreset{ID: "rose", Name: "Rose"}, Start: "#4A1942", End: "#E56B8A", Accent: "#FFE4EC", Path: "M256 421C215 367 99 303 104 207C108 132 201 107 256 181C311 107 404 132 408 207C413 303 297 367 256 421Z"},
+	{AvatarPreset: AvatarPreset{ID: "luna", Name: "Luna"}, Start: "#10143D", End: "#6D5DFB", Accent: "#F5E8A8", Path: "M340 91C227 120 182 258 249 351C291 410 374 426 429 376C359 384 296 347 272 287C241 210 270 132 340 91Z"},
+	{AvatarPreset: AvatarPreset{ID: "coral", Name: "Coral"}, Start: "#5A153B", End: "#FF7A7A", Accent: "#FFE6C7", Path: "M256 241C181 103 83 158 145 260C58 306 129 405 243 312C275 442 398 399 341 286C460 236 402 124 274 222C328 88 195 54 256 241Z"},
+	{AvatarPreset: AvatarPreset{ID: "nebula", Name: "Nebula"}, Start: "#0B1026", End: "#D946EF", Accent: "#BFFBFF", Path: "M83 301C122 237 207 185 296 166C385 147 447 166 459 207C470 249 421 299 340 336C257 375 155 390 91 365C46 348 42 322 83 301ZM151 300C210 323 303 298 370 252C307 274 218 276 151 300Z"},
+	{AvatarPreset: AvatarPreset{ID: "meadow", Name: "Meadow"}, Start: "#0F3D2E", End: "#82C91E", Accent: "#FFF3A3", Path: "M251 249C202 136 100 126 108 225C112 281 178 291 236 270C198 333 185 412 256 421C327 412 314 333 276 270C334 291 400 281 404 225C412 126 310 136 261 249Z"},
+	{AvatarPreset: AvatarPreset{ID: "cobalt", Name: "Cobalt"}, Start: "#061B3A", End: "#2563EB", Accent: "#D8F3FF", Path: "M256 61L407 174L372 370L256 448L140 370L105 174Z"},
+	{AvatarPreset: AvatarPreset{ID: "peach", Name: "Peach"}, Start: "#7C2D52", End: "#FDBA8C", Accent: "#FFF1E8", Path: "M122 352C70 352 51 286 88 252C110 232 139 227 165 238C174 174 230 132 292 151C335 164 366 198 374 241C430 232 467 274 455 322C446 360 411 382 372 382H133C126 382 122 369 122 352Z"},
+	{AvatarPreset: AvatarPreset{ID: "volt", Name: "Volt"}, Start: "#18203F", End: "#00C2FF", Accent: "#F7FF72", Path: "M286 56L111 285H224L188 456L401 206H281Z"},
+	{AvatarPreset: AvatarPreset{ID: "summit", Name: "Summit"}, Start: "#28203D", End: "#FF7A45", Accent: "#FFF0D1", Path: "M55 405L197 152L262 263L324 105L457 405Z"},
 }
 
 func AvatarPresets() []AvatarPreset {
@@ -279,21 +287,13 @@ func (s *Service) SetAvatarPreset(ctx context.Context, principal auth.Principal,
 		return Profile{}, fmt.Errorf("begin avatar preset update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profile, err := managedAvatarProfile(ctx, tx, principal, profileID, s.defaultTimezone)
+	profile, err := s.updateAvatar(ctx, tx, principal, profileID, presetID, nil)
 	if err != nil {
 		return Profile{}, err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM profile_avatar_images WHERE profile_id = $1::uuid`, profile.ID); err != nil {
-		return Profile{}, fmt.Errorf("remove custom profile avatar: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE profiles SET avatar_preset = $2, updated_at = now() WHERE id = $1::uuid`, profile.ID, presetID); err != nil {
-		return Profile{}, fmt.Errorf("update profile avatar preset: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Profile{}, fmt.Errorf("commit avatar preset update: %w", err)
 	}
-	profile.AvatarKind = "preset"
-	profile.AvatarPreset = presetID
 	return profile, nil
 }
 
@@ -307,67 +307,105 @@ func (s *Service) SetAvatarImage(ctx context.Context, principal auth.Principal, 
 		return Profile{}, fmt.Errorf("begin custom avatar update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profile, err := managedAvatarProfile(ctx, tx, principal, profileID, s.defaultTimezone)
+	profile, err := s.updateAvatar(ctx, tx, principal, profileID, "", normalized)
 	if err != nil {
 		return Profile{}, err
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO profile_avatar_images (profile_id, content_type, image_data)
-		VALUES ($1::uuid, 'image/png', $2)
-		ON CONFLICT (profile_id) DO UPDATE
-		SET content_type = EXCLUDED.content_type, image_data = EXCLUDED.image_data, updated_at = now()
-	`, profile.ID, normalized); err != nil {
-		return Profile{}, fmt.Errorf("store custom profile avatar: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE profiles SET updated_at = now() WHERE id = $1::uuid`, profile.ID); err != nil {
-		return Profile{}, fmt.Errorf("touch profile after avatar update: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Profile{}, fmt.Errorf("commit custom avatar update: %w", err)
 	}
-	profile.AvatarKind = "custom"
 	return profile, nil
 }
 
 func (s *Service) AvatarImage(ctx context.Context, principal auth.Principal, profileID string) (AvatarImage, error) {
+	profileID = strings.TrimSpace(profileID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AvatarImage{}, fmt.Errorf("begin custom profile avatar read: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, false)
+	if err != nil {
+		return AvatarImage{}, fmt.Errorf("authorize custom profile avatar: %w", err)
+	}
+	if !authorized {
+		return AvatarImage{}, ErrNotFound
+	}
 	var image AvatarImage
-	err := s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT avatar.content_type, avatar.image_data, avatar.updated_at
 		FROM profile_avatar_images avatar
-		JOIN profiles profile ON profile.id = avatar.profile_id
-		LEFT JOIN user_profile_access access
-		  ON access.profile_id = profile.id AND access.user_id = $2
-		WHERE profile.id::text = $1
-		  AND ($3 = 'admin' OR access.user_id IS NOT NULL)
-	`, strings.TrimSpace(profileID), principal.UserID, principal.Role).Scan(&image.ContentType, &image.Data, &image.UpdatedAt)
+		WHERE avatar.profile_id::text = $1
+	`, profileID).Scan(&image.ContentType, &image.Data, &image.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AvatarImage{}, ErrNotFound
 	}
 	if err != nil {
 		return AvatarImage{}, fmt.Errorf("read custom profile avatar: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return AvatarImage{}, fmt.Errorf("commit custom profile avatar read: %w", err)
+	}
 	return image, nil
 }
 
-func managedAvatarProfile(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID, timezone string) (Profile, error) {
+func (s *Service) updateAvatar(
+	ctx context.Context,
+	tx pgx.Tx,
+	principal auth.Principal,
+	profileID string,
+	presetID string,
+	imageData []byte,
+) (Profile, error) {
+	profileID = strings.TrimSpace(profileID)
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
+	if err != nil {
+		if imageData != nil {
+			return Profile{}, fmt.Errorf("authorize custom profile avatar update: %w", err)
+		}
+		return Profile{}, fmt.Errorf("authorize profile avatar update: %w", err)
+	}
+	if !authorized {
+		return Profile{}, ErrNotFound
+	}
+	if imageData == nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM profile_avatar_images WHERE profile_id = $1::uuid`, profileID); err != nil {
+			return Profile{}, fmt.Errorf("remove custom profile avatar: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE profiles SET avatar_preset = $2, updated_at = now() WHERE id = $1::uuid`, profileID, presetID); err != nil {
+			return Profile{}, fmt.Errorf("update profile avatar preset: %w", err)
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO profile_avatar_images (profile_id, content_type, image_data)
+			VALUES ($1::uuid, 'image/png', $2)
+			ON CONFLICT (profile_id) DO UPDATE
+			SET content_type = EXCLUDED.content_type, image_data = EXCLUDED.image_data, updated_at = now()
+		`, profileID, imageData); err != nil {
+			return Profile{}, fmt.Errorf("store custom profile avatar: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE profiles SET updated_at = now() WHERE id = $1::uuid`, profileID); err != nil {
+			return Profile{}, fmt.Errorf("touch profile after avatar update: %w", err)
+		}
+	}
+
 	var profile Profile
 	var custom bool
-	err := tx.QueryRow(ctx, `
-		SELECT profile.id::text, profile.name, profile.is_child, profile.pin_hash IS NOT NULL,
-		       COALESCE(access.can_manage, false), profile.avatar_preset, EXISTS (
+	err = tx.QueryRow(ctx, `
+		SELECT profile.id::text, profile.category_id::text, category.name, category.color, category.icon,
+		       profile.name, profile.description, profile.is_child, profile.pin_hash IS NOT NULL,
+		       profile.avatar_preset, EXISTS (
 		           SELECT 1 FROM profile_avatar_images avatar WHERE avatar.profile_id = profile.id
 		       ),
 		       profile.enabled, profile.available_from::text, profile.available_until::text,
 		       to_char(profile.access_start_time, 'HH24:MI'), to_char(profile.access_end_time, 'HH24:MI'),
 		       profile.access_timezone
 		FROM profiles profile
-		LEFT JOIN user_profile_access access
-		  ON access.profile_id = profile.id AND access.user_id = $2
+		JOIN access_categories category ON category.id = profile.category_id
 		WHERE profile.id::text = $1
-		  AND ($3 = 'admin' OR COALESCE(access.can_manage, false))
-		FOR UPDATE OF profile
-	`, strings.TrimSpace(profileID), principal.UserID, principal.Role).Scan(
-		&profile.ID, &profile.Name, &profile.IsChild, &profile.HasPIN, &profile.CanManage, &profile.AvatarPreset, &custom,
+	`, profileID).Scan(
+		&profile.ID, &profile.CategoryID, &profile.CategoryName, &profile.CategoryColor, &profile.CategoryIcon,
+		&profile.Name, &profile.Description, &profile.IsChild, &profile.HasPIN, &profile.AvatarPreset, &custom,
 		&profile.Enabled, &profile.AvailableFrom, &profile.AvailableUntil, &profile.AccessStartTime,
 		&profile.AccessEndTime, &profile.AccessTimezone,
 	)
@@ -375,9 +413,10 @@ func managedAvatarProfile(ctx context.Context, tx pgx.Tx, principal auth.Princip
 		return Profile{}, ErrNotFound
 	}
 	if err != nil {
-		return Profile{}, fmt.Errorf("authorize profile avatar update: %w", err)
+		return Profile{}, fmt.Errorf("query profile avatar update: %w", err)
 	}
-	profile.AccessTimezone = timezone
+	profile.CanManage = true
+	profile.AccessTimezone = s.defaultTimezone
 	profile.Accessible = profileAccessible(profile, time.Now().UTC())
 	profile.AvatarKind = "preset"
 	if custom {

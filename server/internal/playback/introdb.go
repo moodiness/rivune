@@ -79,38 +79,63 @@ type introDBResponse struct {
 
 func (service *Service) Markers(ctx context.Context, principal auth.Principal, input MarkerInput) (MarkerList, error) {
 	input.IMDBID = strings.TrimSpace(input.IMDBID)
-	if !service.hasActiveProfile(principal) {
-		return MarkerList{}, ErrActiveProfileRequired
+	tx, err := service.beginAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return MarkerList{}, err
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if !introDBIMDBIDPattern.MatchString(input.IMDBID) || input.Season < 1 || input.Season > 2_147_483_647 || input.Episode < 1 || input.Episode > 2_147_483_647 {
 		return MarkerList{}, ErrInvalidInput
 	}
 	if !input.IncludeIntro && !input.IncludeRecap && !input.IncludeOutro {
-		return MarkerList{Markers: []Marker{}}, nil
+		result := MarkerList{Markers: []Marker{}}
+		if err := tx.Commit(ctx); err != nil {
+			return MarkerList{}, fmt.Errorf("commit marker profile authorization: %w", err)
+		}
+		return result, nil
 	}
 
-	markers, found, err := service.cachedIntroDBMarkers(ctx, input)
+	markers, found, cacheErr := service.cachedIntroDBMarkers(ctx, tx, input)
+	if cacheErr == nil && found {
+		result := MarkerList{Markers: filterMarkers(markers, input)}
+		if err := tx.Commit(ctx); err != nil {
+			return MarkerList{}, fmt.Errorf("commit marker profile authorization: %w", err)
+		}
+		return result, nil
+	}
+	if cacheErr == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return MarkerList{}, fmt.Errorf("commit marker profile authorization: %w", err)
+		}
+	} else {
+		_ = tx.Rollback(ctx)
+	}
+
+	markers, found, err = service.fetchIntroDBMarkers(ctx, input)
 	if err != nil {
-		found = false
+		result := MarkerList{Markers: []Marker{}}
+		return result, service.commitAuthorizedProfileBoundary(ctx, principal)
 	}
-	if !found {
-		markers, found, err = service.fetchIntroDBMarkers(ctx, input)
-		if err != nil {
-			return MarkerList{Markers: []Marker{}}, nil
-		}
-		if err := service.cacheIntroDBMarkers(ctx, input, markers, found); err != nil {
-			// A cache write failure must not turn an optional skip action into a playback failure.
+	result := MarkerList{Markers: filterMarkers(markers, input)}
+	tx, err = service.beginAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return MarkerList{}, err
+	}
+	if err := service.cacheIntroDBMarkers(ctx, tx, input, markers, found); err == nil {
+		if err := tx.Commit(ctx); err == nil {
+			return result, nil
 		}
 	}
-	return MarkerList{Markers: filterMarkers(markers, input)}, nil
+	_ = tx.Rollback(ctx)
+	return result, service.commitAuthorizedProfileBoundary(ctx, principal)
 }
 
-func (service *Service) cachedIntroDBMarkers(ctx context.Context, input MarkerInput) ([]Marker, bool, error) {
-	if service.pool == nil {
+func (service *Service) cachedIntroDBMarkers(ctx context.Context, tx playbackProfileTransaction, input MarkerInput) ([]Marker, bool, error) {
+	if tx == nil {
 		return nil, false, nil
 	}
 	var encoded []byte
-	err := service.pool.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		SELECT segments
 		FROM introdb_segment_cache
 		WHERE imdb_id = $1 AND season_number = $2 AND episode_number = $3 AND expires_at > now()
@@ -131,8 +156,8 @@ func (service *Service) cachedIntroDBMarkers(ctx context.Context, input MarkerIn
 	return markers, true, nil
 }
 
-func (service *Service) cacheIntroDBMarkers(ctx context.Context, input MarkerInput, markers []Marker, providerFound bool) error {
-	if service.pool == nil {
+func (service *Service) cacheIntroDBMarkers(ctx context.Context, tx playbackProfileTransaction, input MarkerInput, markers []Marker, providerFound bool) error {
+	if tx == nil {
 		return nil
 	}
 	encoded, err := json.Marshal(markers)
@@ -143,7 +168,7 @@ func (service *Service) cacheIntroDBMarkers(ctx context.Context, input MarkerInp
 	if !providerFound {
 		ttl = introDBMissCacheTTL
 	}
-	_, err = service.pool.Exec(ctx, `
+	_, err = tx.Exec(ctx, `
 		WITH purged AS (
 			DELETE FROM introdb_segment_cache WHERE expires_at <= now() RETURNING 1
 		)

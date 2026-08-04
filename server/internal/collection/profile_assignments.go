@@ -44,18 +44,18 @@ func authorizeCollectionProfiles(ctx context.Context, tx pgx.Tx, principal auth.
 	if !included {
 		lockIDs = append(lockIDs, activeProfileID)
 	}
-	sort.Strings(lockIDs)
-	for _, profileID := range lockIDs {
-		if err := lockProfileCollections(ctx, tx, profileID); err != nil {
-			return err
-		}
-	}
-	authorized, err := auth.CanManageProfiles(ctx, tx, principal, lockIDs)
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, lockIDs, true)
 	if err != nil {
 		return err
 	}
 	if !authorized {
 		return ErrForbidden
+	}
+	sort.Strings(lockIDs)
+	for _, profileID := range lockIDs {
+		if err := lockProfileCollections(ctx, tx, profileID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -85,8 +85,15 @@ func writeCollectionProfiles(ctx context.Context, tx pgx.Tx, collectionID string
 func applyCollectionProfiles(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, collectionID string, profileIDs []string) error {
 	var lockedID string
 	if err := tx.QueryRow(ctx, `
-		SELECT id::text FROM profile_collections WHERE id = $1::uuid FOR UPDATE
-	`, collectionID).Scan(&lockedID); err != nil {
+		SELECT pc.id::text
+		FROM profile_collections pc
+		WHERE pc.id = $1::uuid
+		  AND EXISTS (
+		      SELECT 1 FROM collection_profile_access access
+		      WHERE access.collection_id = pc.id AND access.profile_id = $2::uuid
+		  )
+		FOR UPDATE
+	`, collectionID, activeProfileID).Scan(&lockedID); err != nil {
 		if err == pgx.ErrNoRows {
 			return ErrNotFound
 		}

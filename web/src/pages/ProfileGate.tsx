@@ -87,10 +87,13 @@ export function ProfileGate({ maintenanceMessage = null }: { maintenanceMessage?
       <div className="profile-grid">
         {account?.profiles.map((profile, index) => {
           const unavailable = unavailableReason(profile, maintenanceMessage !== null);
-          return <button key={profile.id} className={`profile-card ${unavailable ? "profile-card--unavailable" : ""}`} onClick={() => void choose(profile)} disabled={loading || unavailable !== null} aria-describedby={unavailable ? `profile-${profile.id}-status` : undefined} style={{ "--delay": `${index * 70}ms` } as CSSProperties}>
+          const status = unavailable ?? (profile.isChild ? t("profiles.child") : profile.canManage ? t("profiles.admin") : t("profiles.standard"));
+          const descriptionID = profile.description ? `profile-${profile.id}-description` : undefined;
+          return <button key={profile.id} className={`profile-card ${unavailable ? "profile-card--unavailable" : ""}`} onClick={() => void choose(profile)} disabled={loading || unavailable !== null} aria-label={`${profile.name} ${status}`} aria-describedby={descriptionID} style={{ "--delay": `${index * 70}ms` } as CSSProperties}>
             <span className="profile-card__avatar"><span className="profile-card__glow" /><img src={profile.avatar.url} alt="" />{profile.hasPin && <i><LockKeyhole size={14} /></i>}</span>
             <strong>{profile.name}</strong>
-            <small id={unavailable ? `profile-${profile.id}-status` : undefined}>{unavailable ?? (profile.isChild ? t("profiles.child") : profile.canManage ? t("profiles.admin") : t("profiles.standard"))}</small>
+            <small>{status}</small>
+            {profile.description && <span id={descriptionID} className="profile-card__description">{profile.description}</span>}
           </button>;
         })}
       </div>

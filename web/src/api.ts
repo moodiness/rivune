@@ -3,8 +3,10 @@ import { clearMediaCaches } from "./homeCache";
 import { clearMetadataCache } from "./metadataCache";
 import type {
   Account,
+  AccessCategory,
   AvatarPreset,
   CalendarResponse,
+  CategoryInput,
   Collection,
   CollectionSaveInput,
   CollectionExportDocument,
@@ -12,10 +14,12 @@ import type {
   ContinueWatching,
   Discovery,
   DeviceAuthorization,
+  DeviceUpdateInput,
   InstalledAddon,
   NotificationBroadcast,
   LibraryPage,
   MaintenanceSettings,
+  ManagedDevice,
   MetadataRefreshSchedule,
   MetadataRefreshScheduleInput,
   OperationAction,
@@ -235,21 +239,30 @@ export const api = {
     saveTokens(tokens);
     return tokens;
   },
-  approveDeviceAuthorization: (userCode: string) => request<void>("/auth/device-code/approve", {
+  approveDeviceAuthorization: (input: { userCode: string; categoryId: string; deviceName?: string; internalNote?: string | null }) => request<void>("/auth/device-code/approve", {
     method: "POST",
-    body: JSON.stringify({ userCode }),
+    body: JSON.stringify(input),
   }),
   restore: refreshSession,
   logout: async () => {
     try { await request<void>("/auth/logout", { method: "POST" }, false); } finally { clearSession(); }
   },
   me: () => request<Account>("/auth/me"),
+  categories: async () => (await request<{ categories: AccessCategory[] }>("/categories")).categories,
+  createCategory: (input: CategoryInput) => request<AccessCategory>("/categories", { method: "POST", body: JSON.stringify(input) }),
+  updateCategory: (id: string, input: Partial<CategoryInput> & { isDefault?: true }) => request<AccessCategory>(`/categories/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
+  deleteCategory: (id: string, reassignToCategoryId?: string) => request<void>(`/categories/${id}`, { method: "DELETE", body: JSON.stringify({ reassignToCategoryId }) }),
+  reorderCategories: async (categoryIds: string[]) => (await request<{ categories: AccessCategory[] }>("/categories/order", { method: "PUT", body: JSON.stringify({ categoryIds }) })).categories,
+  devices: async (categoryId?: string) => (await request<{ devices: ManagedDevice[] }>(`/devices${query({ categoryId })}`)).devices,
+  updateDevice: (id: string, input: DeviceUpdateInput) => request<ManagedDevice>(`/devices/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
+  moveProfilesToCategory: (profileIds: string[], categoryId: string) => request<void>("/profiles/category-moves", { method: "POST", body: JSON.stringify({ profileIds, categoryId }) }),
+  moveDevicesToCategory: (deviceIds: string[], categoryId: string) => request<void>("/devices/category-moves", { method: "POST", body: JSON.stringify({ deviceIds, categoryId }) }),
   profiles: () => request<{ profiles: Profile[] }>("/profiles"),
   selectProfile: (id: string, pin?: string) => request<{ profile: Profile; expiresAt: string }>(`/profiles/${id}/select`, { method: "POST", body: JSON.stringify(pin ? { pin } : {}) }),
   clearProfile: () => request<void>("/profiles/selection", { method: "DELETE" }),
   avatarPresets: () => request<{ presets: AvatarPreset[] }>("/profile-avatars"),
-  createProfile: (input: { name: string; isChild: boolean; pin?: string } & ProfileAccessInput) => request<Profile>("/profiles", { method: "POST", body: JSON.stringify(input) }),
-  updateProfile: (id: string, input: { name?: string; isChild?: boolean; pin?: string | null } & ProfileAccessInput) => request<Profile>(`/profiles/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
+  createProfile: (input: { name: string; description?: string | null; categoryId: string; isChild?: boolean; pin?: string } & ProfileAccessInput) => request<Profile>("/profiles", { method: "POST", body: JSON.stringify(input) }),
+  updateProfile: (id: string, input: { name?: string; description?: string | null; categoryId?: string; isChild?: boolean; pin?: string | null } & ProfileAccessInput) => request<Profile>(`/profiles/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
   deleteProfile: (id: string) => request<void>(`/profiles/${id}`, { method: "DELETE" }),
   setProfileAvatar: (id: string, presetId: string) => request<{ avatar: Profile["avatar"] }>(`/profiles/${id}/avatar/preset`, { method: "PUT", body: JSON.stringify({ presetId }) }),
   uploadProfileAvatar: (id: string, image: File) => request<{ avatar: Profile["avatar"] }>(`/profiles/${id}/avatar`, { method: "PUT", headers: { "Content-Type": image.type }, body: image }),

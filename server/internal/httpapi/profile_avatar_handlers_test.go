@@ -32,7 +32,7 @@ func TestProfileAvatarPresetCatalogAndImage(t *testing.T) {
 		} `json:"presets"`
 	}
 	decodeResponse(t, catalogResponse, &catalog)
-	if len(catalog.Presets) < 8 || catalog.Presets[0].ID != "aurora" || catalog.Presets[0].URL != "/api/v1/profile-avatars/aurora" {
+	if len(catalog.Presets) < 16 || catalog.Presets[0].ID != "aurora" || catalog.Presets[0].URL != "/api/v1/profile-avatars/aurora" {
 		t.Fatalf("unexpected preset catalog: %+v", catalog.Presets)
 	}
 

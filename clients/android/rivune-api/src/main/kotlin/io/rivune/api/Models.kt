@@ -11,7 +11,7 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 
 object RivuneProtocol {
-    const val VERSION: Int = 17
+    const val VERSION: Int = 18
 }
 
 object UUIDSerializer : KSerializer<UUID> {
@@ -32,14 +32,107 @@ data class Discovery(
 )
 
 @Serializable
-data class Device(
+enum class AuthorizationScope {
+    @SerialName("global_admin")
+    GLOBAL_ADMIN,
+    @SerialName("category")
+    CATEGORY,
+}
+
+@Serializable
+data class CategoryRef(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val name: String,
+    val color: String?,
+    val icon: String?,
+)
+
+private fun validateAuthorizationContext(
+    authorizationScope: AuthorizationScope,
+    category: CategoryRef?,
+) {
+    require(
+        when (authorizationScope) {
+            AuthorizationScope.GLOBAL_ADMIN -> category == null
+            AuthorizationScope.CATEGORY -> category != null
+        },
+    ) {
+        "global_admin authorization must not have a category, and category authorization must have a category"
+    }
+}
+
+@Serializable
+data class Category(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val name: String,
+    val description: String?,
+    val color: String?,
+    val icon: String?,
+    val position: Int,
+    val isDefault: Boolean,
+    val profileCount: Long,
+    val deviceCount: Long,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
+@Serializable
+data class CategoryList(val categories: List<Category>)
+
+sealed interface PatchField<out T> {
+    data object Omitted : PatchField<Nothing>
+    data object Null : PatchField<Nothing>
+    data class Value<T>(val value: T) : PatchField<T>
+}
+
+@Serializable
+data class CategoryCreateRequest(
+    val name: String,
+    val description: String? = null,
+    val color: String? = null,
+    val icon: String? = null,
+)
+
+data class CategoryUpdateRequest(
+    val name: String? = null,
+    val description: PatchField<String> = PatchField.Omitted,
+    val color: PatchField<String> = PatchField.Omitted,
+    val icon: PatchField<String> = PatchField.Omitted,
+    val isDefault: Boolean? = null,
+)
+
+@Serializable
+data class LoginDevice(
     @Serializable(with = UUIDSerializer::class) val id: UUID? = null,
     val name: String,
     val platform: String,
 )
 
 @Serializable
-data class LoginRequest(val username: String, val password: String, val device: Device)
+data class Device(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val name: String,
+    val platform: String,
+    @Serializable(with = UUIDSerializer::class) val categoryId: UUID,
+    val category: CategoryRef,
+    val internalNote: String?,
+    val approvedAt: String?,
+    val lastSeenAt: String?,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
+@Serializable
+data class DeviceList(val devices: List<Device>)
+
+data class DeviceUpdateRequest(
+    val name: String? = null,
+    @Serializable(with = UUIDSerializer::class) val categoryId: UUID? = null,
+    val internalNote: PatchField<String> = PatchField.Omitted,
+)
+
+@Serializable
+data class LoginRequest(val username: String, val password: String, val device: LoginDevice)
 
 @Serializable
 data class TokenPair(
@@ -50,7 +143,13 @@ data class TokenPair(
     val refreshTokenExpiresAt: String,
     @Serializable(with = UUIDSerializer::class) val sessionId: UUID,
     @Serializable(with = UUIDSerializer::class) val deviceId: UUID,
-)
+    val authorizationScope: AuthorizationScope,
+    val category: CategoryRef?,
+) {
+    init {
+        validateAuthorizationContext(authorizationScope, category)
+    }
+}
 
 @Serializable
 data class Account(
@@ -71,7 +170,13 @@ data class AccountSession(
     @Serializable(with = UUIDSerializer::class) val id: UUID,
     @Serializable(with = UUIDSerializer::class) val deviceId: UUID,
     val activeProfile: ActiveProfileGrant?,
-)
+    val authorizationScope: AuthorizationScope,
+    val category: CategoryRef?,
+) {
+    init {
+        validateAuthorizationContext(authorizationScope, category)
+    }
+}
 
 @Serializable
 data class ActiveProfileGrant(
@@ -80,12 +185,60 @@ data class ActiveProfileGrant(
 )
 
 @Serializable
+data class SessionList(val sessions: List<Session>)
+
+@Serializable
+data class Session(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    @Serializable(with = UUIDSerializer::class) val deviceId: UUID,
+    val deviceName: String,
+    val platform: String,
+    val ipAddress: String?,
+    val createdAt: String,
+    val lastSeenAt: String,
+    val current: Boolean,
+    val authorizationScope: AuthorizationScope,
+    val category: CategoryRef?,
+) {
+    init {
+        validateAuthorizationContext(authorizationScope, category)
+    }
+}
+
+@Serializable
+data class ProfileSessionList(val sessions: List<ProfileSession>)
+
+@Serializable
+data class ProfileSession(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    @Serializable(with = UUIDSerializer::class) val userId: UUID,
+    val username: String,
+    @Serializable(with = UUIDSerializer::class) val deviceId: UUID,
+    val deviceName: String,
+    val platform: String,
+    val ipAddress: String?,
+    val createdAt: String,
+    val lastSeenAt: String,
+    val profileGrantExpiresAt: String,
+    val current: Boolean,
+    val authorizationScope: AuthorizationScope,
+    val category: CategoryRef?,
+) {
+    init {
+        validateAuthorizationContext(authorizationScope, category)
+    }
+}
+
+@Serializable
 data class ProfileList(val profiles: List<Profile>)
 
 @Serializable
 data class Profile(
     @Serializable(with = UUIDSerializer::class) val id: UUID,
     val name: String,
+    val description: String? = null,
+    @Serializable(with = UUIDSerializer::class) val categoryId: UUID,
+    val category: CategoryRef,
     val isChild: Boolean,
     val hasPin: Boolean,
     val canManage: Boolean,
@@ -104,6 +257,47 @@ data class ProfileAvatar(val kind: String, val presetId: String? = null, val url
 
 @Serializable
 data class ProfileSelection(val profile: Profile, val expiresAt: String)
+
+@Serializable
+data class CategoryOrderRequest(
+    val categoryIds: List<@Serializable(with = UUIDSerializer::class) UUID>,
+)
+
+@Serializable
+data class ProfileCategoryMoveRequest(
+    val profileIds: List<@Serializable(with = UUIDSerializer::class) UUID>,
+    @Serializable(with = UUIDSerializer::class) val categoryId: UUID,
+)
+
+@Serializable
+data class DeviceCategoryMoveRequest(
+    val deviceIds: List<@Serializable(with = UUIDSerializer::class) UUID>,
+    @Serializable(with = UUIDSerializer::class) val categoryId: UUID,
+)
+
+@Serializable
+data class DeviceAuthorizationRequest(val deviceName: String, val platform: String)
+
+@Serializable
+data class DeviceAuthorizationResponse(
+    val deviceCode: String,
+    val userCode: String,
+    val verificationUri: String,
+    val verificationUriComplete: String,
+    val expiresAt: String,
+    val intervalSeconds: Int,
+)
+
+@Serializable
+data class DeviceCodeApprovalRequest(
+    val userCode: String,
+    @Serializable(with = UUIDSerializer::class) val categoryId: UUID,
+    val deviceName: String? = null,
+    val internalNote: String? = null,
+)
+
+@Serializable
+data class DeviceCodeTokenRequest(val deviceCode: String)
 
 @Serializable
 data class SettingsValues(

@@ -65,7 +65,7 @@ func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
 		InterfaceLanguage string `json:"interfaceLanguage"`
 	}
 	decodeResponse(t, response, &body)
-	if body.Name != "Rivune" || body.ProtocolVersion != 17 || body.APIBaseURL != "https://media.example/api/v1" ||
+	if body.Name != "Rivune" || body.ProtocolVersion != 18 || body.APIBaseURL != "https://media.example/api/v1" ||
 		body.Timezone != "Europe/Paris" || body.InterfaceLanguage != "en" || !body.SetupRequired {
 		t.Fatalf("unexpected discovery response: %+v", body)
 	}
@@ -194,7 +194,7 @@ func TestSetupRejectsUnknownFields(t *testing.T) {
 
 func TestSuccessfulSetupPurgesInProcessDemoSessions(t *testing.T) {
 	service := &fakeInstanceService{
-		info: instance.Info{Name: "Rivune", SetupRequired: true},
+		info:        instance.Info{Name: "Rivune", SetupRequired: true},
 		setupResult: instance.SetupResult{InstanceID: "instance", UserID: "user", ProfileID: "profile"},
 	}
 	api := testAPI(service)

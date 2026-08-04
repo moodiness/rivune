@@ -1,21 +1,23 @@
 import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Clock3, Cpu, Database, ExternalLink, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Languages, Layers3, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, Wrench, X } from "lucide-react";
-import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
 import { AddTile, Button, ConfirmDialog, EmptyState, IconButton, Modal, Notice, Skeleton } from "../components";
 import { interfaceLanguages, translate, type TranslationKey } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
-import type { AddonManifest, AvatarPreset, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, InstalledAddon, InterfaceLanguage, MaintenanceSettings, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
+import type { AccessCategory, AddonManifest, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstalledAddon, InterfaceLanguage, MaintenanceSettings, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
 
-type AdminTab = "profiles" | "addons" | "collections" | "activity" | "operations" | "settings";
+type AdminTab = "categories" | "profiles" | "devices" | "addons" | "collections" | "activity" | "operations" | "settings";
 
-const tabs: Array<{ id: AdminTab; labelKey: TranslationKey; descriptionKey: TranslationKey; icon: typeof Users; adminOnly?: boolean }> = [
+const tabs: Array<{ id: AdminTab; labelKey: TranslationKey; descriptionKey: TranslationKey; icon: typeof Users; globalOnly?: boolean }> = [
+  { id: "categories", labelKey: "admin.categories.tab.label", descriptionKey: "admin.categories.tab.description", icon: Palette, globalOnly: true },
   { id: "profiles", labelKey: "admin.tabs.profiles.label", descriptionKey: "admin.tabs.profiles.description", icon: Users },
-  { id: "addons", labelKey: "admin.tabs.addons.label", descriptionKey: "admin.tabs.addons.description", icon: Boxes },
-  { id: "collections", labelKey: "admin.tabs.collections.label", descriptionKey: "admin.tabs.collections.description", icon: Layers3 },
-  { id: "activity", labelKey: "admin.tabs.activity.label", descriptionKey: "admin.tabs.activity.description", icon: Activity, adminOnly: true },
-  { id: "operations", labelKey: "admin.tabs.operations.label", descriptionKey: "admin.tabs.operations.description", icon: Wrench, adminOnly: true },
+  { id: "devices", labelKey: "admin.devices.tab.label", descriptionKey: "admin.devices.tab.description", icon: MonitorSmartphone, globalOnly: true },
+  { id: "addons", labelKey: "admin.tabs.addons.label", descriptionKey: "admin.tabs.addons.description", icon: Boxes, globalOnly: true },
+  { id: "collections", labelKey: "admin.tabs.collections.label", descriptionKey: "admin.tabs.collections.description", icon: Layers3, globalOnly: true },
+  { id: "activity", labelKey: "admin.tabs.activity.label", descriptionKey: "admin.tabs.activity.description", icon: Activity, globalOnly: true },
+  { id: "operations", labelKey: "admin.tabs.operations.label", descriptionKey: "admin.tabs.operations.description", icon: Wrench, globalOnly: true },
   { id: "settings", labelKey: "admin.tabs.settings.label", descriptionKey: "admin.tabs.settings.description", icon: Settings2 },
 ];
 
@@ -38,16 +40,16 @@ function newIdempotencyKey() {
 
 export function AdminPage() {
   const { account, activeProfile } = useAuth();
-  const canManage = Boolean(activeProfile?.canManage);
-  const isAdmin = account?.user.role === "admin";
-  const visibleTabs = tabs.filter((item) => !item.adminOnly || isAdmin);
+  const isGlobalAdmin = account?.session.authorizationScope === "global_admin";
+  const canManage = isGlobalAdmin || Boolean(activeProfile?.canManage);
+  const visibleTabs = tabs.filter((item) => !item.globalOnly || isGlobalAdmin);
   const [tab, setTab] = useState<AdminTab>(() => canManage ? "profiles" : "settings");
   const selectedTab = !canManage ? "settings" : visibleTabs.some((item) => item.id === tab) ? tab : "profiles";
 
   useEffect(() => {
     if (!canManage) setTab("settings");
-    else if (!tabs.some((item) => item.id === tab && (!item.adminOnly || isAdmin))) setTab("profiles");
-  }, [canManage, isAdmin, tab]);
+    else if (!tabs.some((item) => item.id === tab && (!item.globalOnly || isGlobalAdmin))) setTab("profiles");
+  }, [canManage, isGlobalAdmin, tab]);
 
   return <div className="standard-page admin-page page-enter">
     <header className="admin-page__header">
@@ -58,15 +60,419 @@ export function AdminPage() {
       </div>
       <div className="admin-page__context" aria-label={translate("admin.header.workspaceAccessLabel")}>
         <span><Server size={16} aria-hidden="true" /> {translate(canManage ? "admin.header.workspaceServer" : "admin.header.workspacePersonal")}</span>
-        <span><Shield size={16} aria-hidden="true" /> {translate(isAdmin ? "admin.header.accessAdministrator" : canManage ? "admin.header.accessManager" : "admin.header.accessProfile")}</span>
+        <span><Shield size={16} aria-hidden="true" /> {isGlobalAdmin ? translate("admin.workspace.accessGlobal") : translate(canManage ? "admin.header.accessManager" : "admin.header.accessProfile")}</span>
       </div>
     </header>
     <div className={`admin-layout ${canManage ? "" : "admin-layout--preferences"}`}>
-      {canManage && <nav className="admin-tabs" aria-label={translate("admin.tabs.navigationLabel")}>{visibleTabs.map((item) => { const Icon = item.icon; return <button type="button" aria-current={selectedTab === item.id ? "page" : undefined} key={item.id} className={selectedTab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}><span><Icon size={20} aria-hidden="true" /></span><div><strong>{translate(item.labelKey)}</strong><small>{translate(item.descriptionKey)}</small></div><ChevronDown size={17} aria-hidden="true" /></button>; })}</nav>}
-      <section className="admin-panel">{selectedTab === "profiles" ? <ProfilesAdmin /> : selectedTab === "addons" ? <AddonsAdmin /> : selectedTab === "collections" ? <CollectionsAdmin /> : selectedTab === "activity" ? <ActivityAdmin /> : selectedTab === "operations" ? <OperationsAdmin /> : <SettingsAdmin />}</section>
+      {canManage && <nav className="admin-tabs" aria-label={translate("admin.tabs.navigationLabel")}>{visibleTabs.map((item) => {
+        const Icon = item.icon;
+        const label = translate(item.labelKey);
+        const description = translate(item.descriptionKey);
+        return <button type="button" aria-current={selectedTab === item.id ? "page" : undefined} key={item.id} className={selectedTab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}><span><Icon size={20} aria-hidden="true" /></span><div><strong>{label}</strong><small>{description}</small></div><ChevronDown size={17} aria-hidden="true" /></button>;
+      })}</nav>}
+      <section className="admin-panel">
+        {selectedTab === "categories" ? <CategoriesAdmin />
+          : selectedTab === "profiles" ? <ProfilesAdmin />
+            : selectedTab === "devices" ? <DevicesAdmin />
+              : selectedTab === "addons" ? <AddonsAdmin />
+                : selectedTab === "collections" ? <CollectionsAdmin />
+                  : selectedTab === "activity" ? <ActivityAdmin />
+                    : selectedTab === "operations" ? <OperationsAdmin />
+                      : <SettingsAdmin />}
+      </section>
     </div>
   </div>;
 }
+function CategoryBadge({ category }: { category: Profile["category"] | ManagedDevice["category"] }) {
+  return <span
+    className="category-badge"
+    aria-label={translate("admin.categories.badge.label", { name: category.name })}
+    style={category.color ? { "--category-color": category.color } as React.CSSProperties : undefined}
+  >
+    <i aria-hidden="true" />
+    {category.icon && <span aria-hidden="true">{category.icon}</span>}
+    <strong>{category.name}</strong>
+  </span>;
+}
+
+function CategoryFilter({ categories, value, onChange, disabled = false }: { categories: AccessCategory[]; value: string; onChange: (value: string) => void; disabled?: boolean }) {
+  return <label className="field category-filter">
+    <span>{translate("admin.categories.filter.label")}</span>
+    <div><Layers3 size={17} aria-hidden="true" /><select value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}><option value="all">{translate("admin.categories.filter.all")}</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div>
+  </label>;
+}
+
+function CategoriesAdmin() {
+  const { refreshAccount } = useAuth();
+  const [categories, setCategories] = useState<AccessCategory[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [status, setStatus] = useState("");
+  const [editor, setEditor] = useState<AccessCategory | "new" | null>(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [color, setColor] = useState("");
+  const [icon, setIcon] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [editorError, setEditorError] = useState("");
+  const [reordering, setReordering] = useState(false);
+  const [deleting, setDeleting] = useState<AccessCategory | null>(null);
+  const [reassignTo, setReassignTo] = useState("");
+  const [deleteNeedsReassignment, setDeleteNeedsReassignment] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [deleteSaving, setDeleteSaving] = useState(false);
+  const [defaultSavingId, setDefaultSavingId] = useState<string | null>(null);
+
+  const loadCategories = useCallback(async () => {
+    setLoading(true);
+    setLoadError("");
+    try {
+      setCategories(await api.categories());
+    } catch (cause) {
+      setLoadError(notifyError(cause, translate("admin.categories.errors.load")));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadCategories(); }, [loadCategories]);
+
+  function openEditor(category: AccessCategory | "new") {
+    setEditor(category);
+    setName(category === "new" ? "" : category.name);
+    setDescription(category === "new" ? "" : category.description ?? "");
+    setColor(category === "new" ? "" : category.color ?? "");
+    setIcon(category === "new" ? "" : category.icon ?? "");
+    setEditorError("");
+    setStatus("");
+  }
+
+  async function saveCategory(event: FormEvent) {
+    event.preventDefault();
+    if (!editor || saving) return;
+    const trimmedName = name.trim();
+    const duplicate = categories.some((category) => category.id !== (editor === "new" ? "" : editor.id) && category.name.trim().toLocaleLowerCase() === trimmedName.toLocaleLowerCase());
+    if (duplicate) {
+      setEditorError(translate("admin.categories.errors.conflict"));
+      return;
+    }
+    const input: CategoryInput = {
+      name: trimmedName,
+      description: description.trim() || null,
+      color: color.trim() || null,
+      icon: icon.trim() || null,
+    };
+    setSaving(true);
+    setEditorError("");
+    let saved: AccessCategory;
+    try {
+      saved = editor === "new" ? await api.createCategory(input) : await api.updateCategory(editor.id, input);
+    } catch (cause) {
+      const message = cause instanceof APIError && cause.status === 409 ? translate("admin.categories.errors.conflict") : notifyError(cause, translate("admin.categories.errors.save"));
+      setEditorError(message);
+      setSaving(false);
+      return;
+    }
+
+    setCategories((current) => editor === "new" ? [...current, saved] : current.map((category) => category.id === saved.id ? saved : category));
+    const message = translate(editor === "new" ? "admin.categories.notifications.created" : "admin.categories.notifications.saved", { name: saved.name });
+    setStatus(message);
+    notifySuccess(message);
+    setEditor(null);
+    setSaving(false);
+    void refreshAccount();
+  }
+
+  async function moveCategory(index: number, direction: -1 | 1) {
+    const destination = index + direction;
+    if (reordering || destination < 0 || destination >= categories.length) return;
+    const reordered = [...categories];
+    [reordered[index], reordered[destination]] = [reordered[destination]!, reordered[index]!];
+    setReordering(true);
+    setLoadError("");
+    setStatus("");
+    try {
+      setCategories(await api.reorderCategories(reordered.map((category) => category.id)));
+      setStatus(translate("admin.categories.notifications.reordered"));
+    } catch (cause) {
+      setLoadError(notifyError(cause, translate("admin.categories.errors.reorder")));
+    } finally {
+      setReordering(false);
+    }
+  }
+  async function makeDefault(category: AccessCategory) {
+    if (category.isDefault || defaultSavingId !== null) return;
+    setDefaultSavingId(category.id);
+    setLoadError("");
+    setStatus("");
+    try {
+      const saved = await api.updateCategory(category.id, { isDefault: true });
+      setCategories((current) => current.map((candidate) =>
+        candidate.id === saved.id ? saved : { ...candidate, isDefault: false },
+      ));
+      const message = translate("admin.categories.notifications.saved", { name: saved.name });
+      setStatus(message);
+      notifySuccess(message);
+    } catch (cause) {
+      setLoadError(notifyError(cause, translate("admin.categories.errors.save")));
+    } finally {
+      setDefaultSavingId(null);
+    }
+  }
+
+
+  function openDelete(category: AccessCategory) {
+    const destination = categories.find((candidate) => candidate.id !== category.id);
+    setDeleting(category);
+    setReassignTo(destination?.id ?? "");
+    setDeleteError("");
+    setDeleteNeedsReassignment(false);
+    setStatus("");
+  }
+
+  async function deleteCategory() {
+    if (!deleting || deleteSaving) return;
+    const hasAssignments = deleting.profileCount + deleting.deviceCount > 0 || deleteNeedsReassignment;
+    const validDestination = categories.some((category) => category.id === reassignTo && category.id !== deleting.id);
+    if (hasAssignments && !validDestination) {
+      setDeleteError(translate("admin.categories.delete.destination"));
+      return;
+    }
+    setDeleteSaving(true);
+    setDeleteError("");
+    try {
+      await api.deleteCategory(deleting.id, hasAssignments ? reassignTo : undefined);
+      const message = translate("admin.categories.notifications.deleted", { name: deleting.name });
+      setCategories((current) => current.filter((category) => category.id !== deleting.id));
+      await refreshAccount();
+      setDeleting(null);
+      setStatus(message);
+      notifySuccess(message);
+      void loadCategories();
+    } catch (cause) {
+      if (cause instanceof APIError && cause.status === 409 && cause.code === "category_reassignment_required") {
+        setDeleteNeedsReassignment(true);
+      }
+      setDeleteError(notifyError(cause, translate("admin.categories.errors.delete")));
+    } finally {
+      setDeleteSaving(false);
+    }
+  }
+
+  return <div className="admin-section categories-admin">
+    <div className="admin-section__header">
+      <div><span>{translate("admin.categories.eyebrow")}</span><h2>{translate("admin.categories.title")}</h2><p>{translate("admin.categories.description")}</p></div>
+      <div className="admin-section__actions"><Button onClick={() => openEditor("new")}><Plus size={18} /> {translate("admin.categories.actions.new")}</Button></div>
+    </div>
+    {status && <div role="status"><Notice tone="success">{status}</Notice></div>}
+    {loadError && <Notice>{loadError}</Notice>}
+    {loading ? <div className="admin-loading-state" aria-live="polite"><LoaderCircle size={28} className="spin" /><strong>{translate("admin.categories.loading.title")}</strong><span>{translate("admin.categories.loading.description")}</span></div>
+      : categories.length === 0 ? <EmptyState icon={<Layers3 size={44} />} title={translate("admin.categories.empty.title")} description={translate("admin.categories.empty.description")} action={<Button onClick={() => openEditor("new")}><Plus size={18} /> {translate("admin.categories.actions.create")}</Button>} />
+        : <div className="category-list">{categories.map((category, index) => <article key={category.id} className="category-card" style={category.color ? { "--category-color": category.color } as React.CSSProperties : undefined}>
+          <div className="category-card__order" aria-label={`${index + 1} / ${categories.length}`}>
+            <IconButton type="button" label={translate("admin.categories.actions.moveUp", { name: category.name })} disabled={reordering || index === 0} onClick={() => void moveCategory(index, -1)}><ChevronUp size={17} /></IconButton>
+            <strong>{index + 1}</strong>
+            <IconButton type="button" label={translate("admin.categories.actions.moveDown", { name: category.name })} disabled={reordering || index === categories.length - 1} onClick={() => void moveCategory(index, 1)}><ChevronDown size={17} /></IconButton>
+          </div>
+          <span className="category-card__mark" aria-hidden="true">{category.icon ? <small>{category.icon}</small> : <Layers3 size={22} />}</span>
+          <div className="category-card__copy">
+            <div><h3>{category.name}</h3>{category.isDefault && <span className="category-badge category-badge--default">{translate("admin.categories.badge.default")}</span>}</div>
+            {category.description && <p>{category.description}</p>}
+            <ul><li><Users size={14} /> {translate("admin.categories.count.profiles", { count: category.profileCount })}</li><li><MonitorSmartphone size={14} /> {translate("admin.categories.count.devices", { count: category.deviceCount })}</li></ul>
+          </div>
+          <div className="category-card__actions">
+            {!category.isDefault && <Button variant="ghost" loading={defaultSavingId === category.id} disabled={defaultSavingId !== null} onClick={() => void makeDefault(category)}><Check size={16} /> {translate("admin.categories.badge.default")}</Button>}
+            <Button variant="secondary" onClick={() => openEditor(category)}><Pencil size={16} /> {translate("common.actions.edit")}</Button>
+            {!category.isDefault && categories.length > 1 && <Button variant="ghost" className="admin-destructive-action" onClick={() => openDelete(category)}><Trash2 size={16} /> {translate("common.actions.delete")}</Button>}
+          </div>
+        </article>)}</div>}
+    {editor && <Modal onClose={() => { if (!saving) setEditor(null); }} className="editor-modal category-editor">
+      <div className="editor-modal__heading">
+        <span><Layers3 size={18} /> {translate(editor === "new" ? "admin.categories.editor.newEyebrow" : "admin.categories.editor.editEyebrow")}</span>
+        <h2>{translate(editor === "new" ? "admin.categories.editor.createTitle" : "admin.categories.editor.editTitle", editor === "new" ? undefined : { name: editor.name })}</h2>
+      </div>
+      <form className="form-stack" onSubmit={saveCategory}>
+        {editorError && <Notice>{editorError}</Notice>}
+        <label className="field"><span>{translate("admin.categories.fields.name")}</span><div><Layers3 size={18} /><input autoFocus required maxLength={80} value={name} disabled={saving} onChange={(event) => setName(event.target.value)} /></div></label>
+        <label className="field"><span>{translate("admin.categories.fields.description")}</span><textarea rows={4} maxLength={500} value={description} disabled={saving} placeholder={translate("admin.categories.fields.descriptionPlaceholder")} onChange={(event) => setDescription(event.target.value)} /></label>
+        <div className="form-grid form-grid--two">
+          <label className="field"><span>{translate("admin.categories.fields.color")}</span><div className="category-color-field"><Palette size={18} /><input type="color" aria-label={translate("admin.categories.fields.color")} value={/^#[0-9A-Fa-f]{6}$/.test(color) ? color : "#F29A78"} disabled={saving} onChange={(event) => setColor(event.target.value.toUpperCase())} /><input aria-label="HEX" value={color} disabled={saving} pattern="^#[0-9A-Fa-f]{6}$" placeholder="#F29A78" onChange={(event) => setColor(event.target.value.toUpperCase())} /></div></label>
+          <label className="field"><span>{translate("admin.categories.fields.icon")}</span><div><Sparkles size={18} /><input value={icon} disabled={saving} pattern="^[a-z0-9]+(?:-[a-z0-9]+)*$" placeholder={translate("admin.categories.fields.iconPlaceholder")} onChange={(event) => setIcon(event.target.value)} /></div></label>
+        </div>
+        <div className="modal-actions modal-actions--sticky"><Button type="button" variant="ghost" disabled={saving} onClick={() => setEditor(null)}>{translate("common.cancel")}</Button><Button type="submit" loading={saving} disabled={!name.trim()}><Save size={18} /> {translate(editor === "new" ? "admin.categories.actions.create" : "admin.categories.actions.save")}</Button></div>
+      </form>
+    </Modal>}
+    {deleting && <Modal onClose={() => { if (!deleteSaving) setDeleting(null); }} className="editor-modal category-delete-modal">
+      <div className="editor-modal__heading">
+        <span><Trash2 size={18} /> {translate("admin.categories.delete.eyebrow")}</span>
+        <h2>{translate("admin.categories.delete.title", { name: deleting.name })}</h2>
+        {!deleteNeedsReassignment && <p>{deleting.profileCount + deleting.deviceCount > 0 ? translate("admin.categories.delete.reassignDescription", { profiles: deleting.profileCount, devices: deleting.deviceCount }) : translate("admin.categories.delete.emptyDescription")}</p>}
+      </div>
+      <div className="form-stack">
+        {deleteError && <Notice>{deleteError}</Notice>}
+        {(deleting.profileCount + deleting.deviceCount > 0 || deleteNeedsReassignment) && <label className="field"><span>{translate("admin.categories.delete.destination")}</span><div><Layers3 size={18} /><select autoFocus required disabled={deleteSaving} value={reassignTo} onChange={(event) => setReassignTo(event.target.value)}>{categories.filter((category) => category.id !== deleting.id).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div></label>}
+        <div className="modal-actions"><Button type="button" variant="secondary" disabled={deleteSaving} onClick={() => setDeleting(null)}>{translate("common.cancel")}</Button><Button type="button" variant="danger" loading={deleteSaving} disabled={(deleting.profileCount + deleting.deviceCount > 0 || deleteNeedsReassignment) && !reassignTo} onClick={() => void deleteCategory()}>{translate(deleting.profileCount + deleting.deviceCount > 0 || deleteNeedsReassignment ? "admin.categories.delete.confirm" : "admin.categories.delete.confirmEmpty")}</Button></div>
+      </div>
+    </Modal>}
+  </div>;
+}
+
+function DevicesAdmin() {
+  const [categories, setCategories] = useState<AccessCategory[]>([]);
+  const [devices, setDevices] = useState<ManagedDevice[]>([]);
+  const [filter, setFilter] = useState("all");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [editing, setEditing] = useState<ManagedDevice | null>(null);
+  const [deviceName, setDeviceName] = useState("");
+  const [internalNote, setInternalNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [moving, setMoving] = useState<ManagedDevice[]>([]);
+  const [moveCategoryId, setMoveCategoryId] = useState("");
+  const [moveSaving, setMoveSaving] = useState(false);
+  const deviceLoadGeneration = useRef(0);
+
+  const loadDevices = useCallback(async (categoryId: string) => {
+    const generation = ++deviceLoadGeneration.current;
+    setLoading(true);
+    setError("");
+    try {
+      const next = await api.devices(categoryId === "all" ? undefined : categoryId);
+      if (deviceLoadGeneration.current === generation) setDevices(next);
+    } catch (cause) {
+      if (deviceLoadGeneration.current === generation) setError(notifyError(cause, translate("admin.devices.errors.load")));
+    } finally {
+      if (deviceLoadGeneration.current === generation) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void api.categories().then(setCategories).catch((cause) => setError(notifyError(cause, translate("admin.categories.errors.load"))));
+  }, []);
+  useEffect(() => {
+    setSelected(new Set());
+    void loadDevices(filter);
+    return () => { deviceLoadGeneration.current += 1; };
+  }, [filter, loadDevices]);
+
+  function openEditor(device: ManagedDevice) {
+    setEditing(device);
+    setDeviceName(device.name);
+    setInternalNote(device.internalNote ?? "");
+    setError("");
+    setStatus("");
+  }
+
+  async function saveDevice(event: FormEvent) {
+    event.preventDefault();
+    if (!editing || saving) return;
+    const input: DeviceUpdateInput = { name: deviceName.trim(), internalNote: internalNote.trim() || null };
+    setSaving(true);
+    setError("");
+    try {
+      const saved = await api.updateDevice(editing.id, input);
+      setDevices((current) => current.map((device) => device.id === saved.id ? saved : device));
+      const message = translate("admin.devices.edit.success", { name: saved.name });
+      setEditing(null);
+      setStatus(message);
+      notifySuccess(message);
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.devices.edit.error")));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function openMove(targets: ManagedDevice[]) {
+    if (!targets.length) return;
+    const destination = categories.find((category) => targets.some((device) => device.categoryId !== category.id));
+    setMoving(targets);
+    setMoveCategoryId(destination?.id ?? "");
+    setError("");
+    setStatus("");
+  }
+
+  async function moveDevices() {
+    if (!moving.length || !moveCategoryId || moveSaving) return;
+    setMoveSaving(true);
+    setError("");
+    try {
+      await api.moveDevicesToCategory(moving.map((device) => device.id), moveCategoryId);
+      const message = translate(moving.length === 1 ? "admin.devices.move.successOne" : "admin.devices.move.successMany", moving.length === 1 ? { name: moving[0]!.name } : { count: moving.length });
+      setMoving([]);
+      setSelected(new Set());
+      setStatus(message);
+      notifySuccess(message);
+      await loadDevices(filter);
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.devices.move.error")));
+    } finally {
+      setMoveSaving(false);
+    }
+  }
+
+  const selectedDevices = devices.filter((device) => selected.has(device.id));
+
+  return <div className="admin-section devices-admin">
+    <div className="admin-section__header">
+      <div><span>{translate("admin.devices.eyebrow")}</span><h2>{translate("admin.devices.title")}</h2><p>{translate("admin.devices.description")}</p></div>
+      <CategoryFilter categories={categories} value={filter} onChange={setFilter} />
+    </div>
+    {status && <div role="status"><Notice tone="success">{status}</Notice></div>}
+    {error && <Notice>{error}</Notice>}
+    {selectedDevices.length > 0 && <div className="bulk-move-bar" role="status"><strong>{translate("admin.devices.bulk.selected", { count: selectedDevices.length })}</strong><Button variant="secondary" onClick={() => openMove(selectedDevices)}><Layers3 size={16} /> {translate("admin.devices.bulk.move")}</Button></div>}
+    {loading ? <div className="admin-loading-state" aria-live="polite"><LoaderCircle size={28} className="spin" /><strong>{translate("admin.devices.loading.title")}</strong><span>{translate("admin.devices.loading.description")}</span></div>
+      : devices.length === 0 ? <EmptyState icon={<MonitorSmartphone size={44} />} title={filter === "all" ? translate("admin.devices.empty.title") : translate("admin.devices.filter.emptyTitle")} description={filter === "all" ? translate("admin.devices.empty.description") : translate("admin.devices.filter.emptyDescription")} />
+        : <div className="device-admin-list">{devices.map((device) => <article key={device.id} className="device-admin-card">
+          <label className="admin-select-control"><input type="checkbox" checked={selected.has(device.id)} aria-label={translate("admin.devices.bulk.select", { name: device.name })} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(device.id); else next.delete(device.id); return next; })} /><span /></label>
+          <span className="device-admin-card__icon" aria-hidden="true"><MonitorSmartphone size={22} /></span>
+          <div className="device-admin-card__copy"><div><h3>{device.name}</h3><CategoryBadge category={device.category} /></div><p>{device.platform} · {translate("admin.devices.approved", { date: device.approvedAt ? new Date(device.approvedAt).toLocaleString() : new Date(device.createdAt).toLocaleString() })} · {device.lastSeenAt ? translate("admin.devices.lastSeen", { date: new Date(device.lastSeenAt).toLocaleString() }) : translate("admin.devices.neverSeen")}</p>{device.internalNote && <small>{device.internalNote}</small>}</div>
+          <div className="device-admin-card__actions"><Button variant="secondary" onClick={() => openEditor(device)}><Pencil size={16} /> {translate("common.actions.edit")}</Button><Button variant="ghost" disabled={categories.length < 2} onClick={() => openMove([device])}><Layers3 size={16} /> {translate("admin.devices.move.action")}</Button></div>
+        </article>)}</div>}
+    {editing && <Modal onClose={() => { if (!saving) setEditing(null); }} className="editor-modal device-editor">
+      <div className="editor-modal__heading"><span><MonitorSmartphone size={18} /> {translate("admin.devices.edit.eyebrow")}</span><h2>{translate("admin.devices.edit.title", { name: editing.name })}</h2><CategoryBadge category={editing.category} /></div>
+      <form className="form-stack" onSubmit={saveDevice}>
+        {error && <Notice>{error}</Notice>}
+        <label className="field"><span>{translate("admin.devices.fields.name")}</span><div><MonitorSmartphone size={18} /><input autoFocus required maxLength={120} value={deviceName} disabled={saving} onChange={(event) => setDeviceName(event.target.value)} /></div></label>
+        <label className="field"><span>{translate("admin.devices.fields.note")}</span><textarea rows={5} maxLength={500} value={internalNote} disabled={saving} placeholder={translate("admin.devices.fields.notePlaceholder")} onChange={(event) => setInternalNote(event.target.value)} /></label>
+        <div className="modal-actions modal-actions--sticky"><Button type="button" variant="ghost" disabled={saving} onClick={() => setEditing(null)}>{translate("common.cancel")}</Button><Button type="submit" loading={saving} disabled={!deviceName.trim()}><Save size={18} /> {translate("admin.devices.edit.save")}</Button></div>
+      </form>
+    </Modal>}
+    {moving.length > 0 && <Modal onClose={() => { if (!moveSaving) setMoving([]); }} className="editor-modal move-category-modal">
+      <div className="editor-modal__heading"><span><Layers3 size={18} /> {translate("admin.devices.move.eyebrow")}</span><h2>{translate(moving.length === 1 ? "admin.devices.move.titleOne" : "admin.devices.move.titleMany", moving.length === 1 ? { name: moving[0]!.name } : { count: moving.length })}</h2><p>{translate("admin.devices.move.description")}</p></div>
+      <div className="form-stack">
+        {error && <Notice>{error}</Notice>}
+        <label className="field"><span>{translate("admin.devices.move.destination")}</span><div><Layers3 size={18} /><select autoFocus required value={moveCategoryId} disabled={moveSaving} onChange={(event) => setMoveCategoryId(event.target.value)}><option value="" disabled>{translate("admin.devices.move.destination")}</option>{categories.filter((category) => moving.some((device) => device.categoryId !== category.id)).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div></label>
+        <div className="modal-actions"><Button type="button" variant="secondary" disabled={moveSaving} onClick={() => setMoving([])}>{translate("common.cancel")}</Button><Button type="button" loading={moveSaving} disabled={!moveCategoryId} onClick={() => void moveDevices()}>{translate("admin.devices.move.confirm")}</Button></div>
+      </div>
+    </Modal>}
+  </div>;
+}
+
+
+function useAdministrationProfiles() {
+  const { account } = useAuth();
+  const isGlobalAdmin = account?.session.authorizationScope === "global_admin";
+  const [profiles, setProfiles] = useState<Profile[]>(account?.profiles ?? []);
+
+  useEffect(() => {
+    if (!isGlobalAdmin) setProfiles(account?.profiles ?? []);
+  }, [account?.profiles, isGlobalAdmin]);
+
+  useEffect(() => {
+    if (!isGlobalAdmin) return;
+    let current = true;
+    void api.profiles()
+      .then((response) => { if (current) setProfiles(response.profiles); })
+      .catch(() => undefined);
+    return () => { current = false; };
+  }, [account?.user.id, isGlobalAdmin]);
+
+  return profiles;
+}
+
 
 function ProfilesAdmin() {
   const { account, activeProfile, discovery, refreshAccount } = useAuth();
@@ -74,6 +480,7 @@ function ProfilesAdmin() {
   const [presets, setPresets] = useState<AvatarPreset[]>([]);
   const [editing, setEditing] = useState<Profile | "new" | null>(null);
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [pin, setPin] = useState("");
   const [showPin, setShowPin] = useState(false);
   const [isChild, setIsChild] = useState(false);
@@ -88,6 +495,16 @@ function ProfilesAdmin() {
   const [image, setImage] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const isGlobalAdmin = account?.session.authorizationScope === "global_admin";
+  const [categories, setCategories] = useState<AccessCategory[]>([]);
+  const [categoriesLoading, setCategoriesLoading] = useState(isGlobalAdmin);
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [categoryId, setCategoryId] = useState(account?.session.category?.id ?? "");
+  const [profileStatus, setProfileStatus] = useState("");
+  const [selectedProfiles, setSelectedProfiles] = useState<Set<string>>(() => new Set());
+  const [movingProfiles, setMovingProfiles] = useState<Profile[]>([]);
+  const [moveCategoryId, setMoveCategoryId] = useState("");
+  const [moveSaving, setMoveSaving] = useState(false);
   const [deleting, setDeleting] = useState<Profile | null>(null);
   const [sessionsProfile, setSessionsProfile] = useState<Profile | null>(null);
   const [profileSessions, setProfileSessions] = useState<ProfileSession[]>([]);
@@ -110,10 +527,39 @@ function ProfilesAdmin() {
   const broadcastCharacterCount = countCodePoints(broadcastMessage);
 
   useEffect(() => { void api.avatarPresets().then((response) => setPresets(response.presets)).catch(() => undefined); }, []);
+  useEffect(() => { if (!isGlobalAdmin) setProfiles(account?.profiles ?? []); }, [account?.profiles, isGlobalAdmin]);
+  useEffect(() => {
+    if (!isGlobalAdmin) return;
+    let current = true;
+    void api.profiles()
+      .then((response) => { if (current) setProfiles(response.profiles); })
+      .catch(() => undefined);
+    return () => { current = false; };
+  }, [account?.user.id, isGlobalAdmin]);
+  useEffect(() => {
+    if (!isGlobalAdmin) {
+      setCategories([]);
+      setCategoriesLoading(false);
+      setCategoryId(account?.session.category?.id ?? "");
+      return;
+    }
+    setCategoriesLoading(true);
+    void api.categories()
+      .then((values) => {
+        setCategories(values);
+        setCategoryId((current) => current || values.find((category) => category.isDefault)?.id || values[0]?.id || "");
+      })
+      .catch((cause) => setError(notifyError(cause, translate("admin.categories.errors.load"))))
+      .finally(() => setCategoriesLoading(false));
+  }, [account?.session.category?.id, isGlobalAdmin]);
 
   function openEditor(profile: Profile | "new") {
     setEditing(profile);
+    const defaultCategoryId = account?.session.category?.id ?? categories.find((category) => category.isDefault)?.id ?? categories[0]?.id ?? "";
+    setCategoryId(profile === "new" ? defaultCategoryId : profile.categoryId);
+    setProfileStatus("");
     setName(profile === "new" ? "" : profile.name);
+    setDescription(profile === "new" ? "" : profile.description ?? "");
     setPin("");
     setShowPin(false);
     setIsChild(profile === "new" ? false : profile.isChild);
@@ -131,14 +577,18 @@ function ProfilesAdmin() {
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!editing) return;
+    const creating = editing === "new";
+    if (creating && !categoryId) {
+      setError(translate("admin.profiles.editor.category"));
+      return;
+    }
     setSaving(true);
     setError("");
-    const creating = editing === "new";
     try {
       let profile: Profile;
-      if (editing === "new") {
+      if (creating) {
         profile = await api.createProfile({
-          name, isChild, pin: pin || undefined, enabled,
+          name, description: description.trim() || null, categoryId, isChild, pin: pin || undefined, enabled,
           availableFrom: availableFrom || undefined,
           availableUntil: availableUntil || undefined,
           accessStartTime: dailyHours ? accessStartTime : undefined,
@@ -159,12 +609,13 @@ function ProfilesAdmin() {
         const nextEnd = dailyHours ? accessEndTime : null;
         if (nextStart !== editing.accessStartTime) accessInput.accessStartTime = nextStart;
         if (nextEnd !== editing.accessEndTime) accessInput.accessEndTime = nextEnd;
-        profile = await api.updateProfile(editing.id, { name, isChild, ...(pin ? { pin } : {}), ...accessInput });
+        profile = await api.updateProfile(editing.id, { name, description: description.trim() || null, isChild, ...(pin ? { pin } : {}), ...accessInput });
       }
       if (image) await api.uploadProfileAvatar(profile.id, image);
       else if (presetId !== profile.avatar.presetId) await api.setProfileAvatar(profile.id, presetId);
       const next = await api.profiles();
       setProfiles(next.profiles);
+      if (isGlobalAdmin) void api.categories().then(setCategories).catch(() => undefined);
       await refreshAccount();
       setEditing(null);
       notifySuccess(
@@ -182,11 +633,43 @@ function ProfilesAdmin() {
     try {
       await api.deleteProfile(profile.id);
       setProfiles((values) => values.filter((value) => value.id !== profile.id));
+      if (isGlobalAdmin) void api.categories().then(setCategories).catch(() => undefined);
       setDeleting(null);
       await refreshAccount();
       notifySuccess(translate("admin.profiles.notifications.deletedMessage", { name: profile.name }), translate("admin.profiles.notifications.deletedTitle"));
     } catch (cause) {
       setError(notifyError(cause, translate("admin.profiles.errors.delete")));
+    }
+  }
+
+  function openProfileMove(targets: Profile[]) {
+    if (!targets.length) return;
+    const destination = categories.find((category) => targets.some((profile) => profile.categoryId !== category.id));
+    setMovingProfiles(targets);
+    setMoveCategoryId(destination?.id ?? "");
+    setError("");
+    setProfileStatus("");
+  }
+
+  async function moveProfiles() {
+    if (!movingProfiles.length || !moveCategoryId || moveSaving) return;
+    setMoveSaving(true);
+    setError("");
+    try {
+      await api.moveProfilesToCategory(movingProfiles.map((profile) => profile.id), moveCategoryId);
+      const message = translate(movingProfiles.length === 1 ? "admin.profiles.move.successOne" : "admin.profiles.move.successMany", movingProfiles.length === 1 ? { name: movingProfiles[0]!.name } : { count: movingProfiles.length });
+      const next = await api.profiles();
+      setProfiles(next.profiles);
+      setCategories(await api.categories());
+      await refreshAccount();
+      setMovingProfiles([]);
+      setSelectedProfiles(new Set());
+      setProfileStatus(message);
+      notifySuccess(message);
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.profiles.move.error")));
+    } finally {
+      setMoveSaving(false);
     }
   }
 
@@ -318,16 +801,18 @@ function ProfilesAdmin() {
       setSendingBroadcast(false);
     }
   }
+  const visibleProfiles = categoryFilter === "all" ? profiles : profiles.filter((profile) => profile.categoryId === categoryFilter);
   const enabledProfiles = profiles.filter((profile) => profile.enabled).length;
   const protectedProfiles = profiles.filter((profile) => profile.hasPin).length;
   const kidsProfiles = profiles.filter((profile) => profile.isChild).length;
+  const selectedProfileValues = profiles.filter((profile) => selectedProfiles.has(profile.id));
 
   return <div className="admin-section profiles-admin">
     <div className="admin-section__header">
       <div><span>{translate("admin.profiles.eyebrow")}</span><h2>{translate("admin.profiles.title")}</h2><p>{translate("admin.profiles.description")}</p></div>
       <div className="admin-section__actions">
-        {account?.user.role === "admin" && <Button variant="secondary" onClick={openBroadcast}><Radio size={18} /> {translate("admin.broadcast.open")}</Button>}
-        <Button onClick={() => openEditor("new")}><Plus size={18} /> {translate("admin.profiles.actions.new")}</Button>
+        {isGlobalAdmin && <Button variant="secondary" onClick={openBroadcast}><Radio size={18} /> {translate("admin.broadcast.open")}</Button>}
+        <Button disabled={isGlobalAdmin && (categoriesLoading || categories.length === 0)} onClick={() => openEditor("new")}><Plus size={18} /> {translate("admin.profiles.actions.new")}</Button>
       </div>
     </div>
     <section className="admin-summary" aria-label={translate("admin.profiles.overview.label")}>
@@ -336,19 +821,26 @@ function ProfilesAdmin() {
       <article><span><Shield size={18} aria-hidden="true" /></span><div><strong>{protectedProfiles}</strong><small>{translate("admin.profiles.status.pinProtected")}</small></div></article>
       <article><span><Sparkles size={18} aria-hidden="true" /></span><div><strong>{kidsProfiles}</strong><small>{translate("admin.profiles.overview.kids")}</small></div></article>
     </section>
+    {isGlobalAdmin && <div className="category-workspace-toolbar">
+      <CategoryFilter categories={categories} value={categoryFilter} disabled={categoriesLoading} onChange={(value) => { setCategoryFilter(value); setSelectedProfiles(new Set()); }} />
+      {selectedProfileValues.length > 0 && <div className="bulk-move-bar" role="status"><strong>{translate("admin.profiles.bulk.selected", { count: selectedProfileValues.length })}</strong><Button variant="secondary" onClick={() => openProfileMove(selectedProfileValues)}><Layers3 size={16} /> {translate("admin.profiles.bulk.move")}</Button></div>}
+    </div>}
+    {profileStatus && <div role="status"><Notice tone="success">{profileStatus}</Notice></div>}
     {error && <Notice>{error}</Notice>}
-    {profiles.length ? <div className="profile-admin-grid">{profiles.map((profile) =>
-      <article key={profile.id} className="profile-admin-card">
+    {visibleProfiles.length ? <div className="profile-admin-grid">{visibleProfiles.map((profile) =>
+      <article key={profile.id} className={`profile-admin-card ${isGlobalAdmin ? "profile-admin-card--selectable" : ""}`}>
+        {isGlobalAdmin && <label className="admin-select-control profile-admin-card__select"><input type="checkbox" disabled={profile.id === activeProfile?.id} checked={selectedProfiles.has(profile.id)} aria-label={translate("admin.profiles.bulk.select", { name: profile.name })} onChange={(event) => setSelectedProfiles((current) => { const next = new Set(current); if (event.target.checked) next.add(profile.id); else next.delete(profile.id); return next; })} /><span /></label>}
         <div className="profile-admin-card__visual"><img src={profile.avatar.url} alt="" /><span className={profile.isChild ? "is-child" : ""}>{translate(profile.isChild ? "admin.profiles.roles.kids" : profile.canManage ? "admin.profiles.roles.manager" : "admin.profiles.roles.viewer")}</span></div>
-        <div className="profile-admin-card__copy"><h3>{profile.name}</h3><p><i className={`admin-status-dot ${profile.enabled ? "" : "is-disabled"}`} /> {translate(profile.enabled ? "common.status.enabled" : "common.status.disabled")} · {translate(profile.hasPin ? "admin.profiles.status.pinProtected" : "admin.profiles.status.noPin")}</p></div>
+        <div className="profile-admin-card__copy"><div><h3>{profile.name}</h3><CategoryBadge category={profile.category} /></div>{profile.description && <p className="profile-admin-card__description">{profile.description}</p>}<p className="profile-admin-card__status"><i className={`admin-status-dot ${profile.enabled ? "" : "is-disabled"}`} /> {translate(profile.enabled ? "common.status.enabled" : "common.status.disabled")} · {translate(profile.hasPin ? "admin.profiles.status.pinProtected" : "admin.profiles.status.noPin")}</p></div>
         <div className="profile-admin-card__actions">
           <Button variant="secondary" onClick={() => void openSessions(profile)}><MonitorSmartphone size={16} /> {translate("admin.profiles.actions.devices")}</Button>
           <Button variant="ghost" onClick={() => openEditor(profile)}><Pencil size={16} /> {translate("common.actions.edit")}</Button>
+          {isGlobalAdmin && profile.id !== activeProfile?.id && <Button variant="ghost" disabled={categories.length < 2} onClick={() => openProfileMove([profile])}><Layers3 size={16} /> {translate("admin.profiles.move.action")}</Button>}
           {profile.id !== activeProfile?.id && <Button variant="ghost" className="admin-destructive-action" onClick={() => setDeleting(profile)}><Trash2 size={16} /> {translate("common.actions.delete")}</Button>}
         </div>
       </article>,
-    )}</div> : <EmptyState icon={<Users size={44} />} title={translate("admin.profiles.empty.title")} description={translate("admin.profiles.empty.description")} action={<Button onClick={() => openEditor("new")}><Plus size={18} /> {translate("admin.profiles.actions.create")}</Button>} />}
-    {editing && <Modal onClose={() => setEditing(null)} className="editor-modal profile-editor">
+    )}</div> : <EmptyState icon={<Users size={44} />} title={profiles.length ? translate("admin.profiles.filter.emptyTitle") : translate("admin.profiles.empty.title")} description={profiles.length ? translate("admin.profiles.filter.emptyDescription") : translate("admin.profiles.empty.description")} action={!profiles.length || categoryFilter !== "all" ? <Button disabled={isGlobalAdmin && categories.length === 0} onClick={() => openEditor("new")}><Plus size={18} /> {translate("admin.profiles.actions.create")}</Button> : undefined} />}
+    {editing && <Modal onClose={() => { if (!saving) setEditing(null); }} className="editor-modal profile-editor">
       <div className="editor-modal__heading">
         <span><CircleUserRound size={18} /> {translate(editing === "new" ? "admin.profiles.editor.newEyebrow" : "admin.profiles.editor.editEyebrow")}</span>
         <h2>{editing === "new" ? translate("admin.profiles.editor.createTitle") : translate("admin.profiles.editor.editTitle", { name: editing.name })}</h2>
@@ -356,33 +848,44 @@ function ProfilesAdmin() {
       <form onSubmit={submit} className="form-stack">
         {error && <Notice>{error}</Notice>}
         <div className="avatar-editor">
-          <button type="button" onClick={() => fileRef.current?.click()}>
+          <button type="button" disabled={saving} onClick={() => fileRef.current?.click()}>
             {image ? <img src={URL.createObjectURL(image)} alt={translate("admin.profiles.editor.selectedAvatarAlt")} /> : <img src={presets.find((preset) => preset.id === presetId)?.url ?? "/api/v1/profile-avatars/aurora"} alt={translate("admin.profiles.editor.selectedAvatarAlt")} />}
             <span><Upload size={17} /> {translate("common.actions.upload")}</span>
           </button>
           <input ref={fileRef} hidden type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => setImage(event.target.files?.[0] ?? null)} />
-          <div>{presets.map((preset) => <button type="button" key={preset.id} className={presetId === preset.id && !image ? "is-active" : ""} aria-label={preset.name} onClick={() => { setPresetId(preset.id); setImage(null); }}><img src={preset.url} alt="" /></button>)}</div>
+          <div>{presets.map((preset) => <button type="button" disabled={saving} key={preset.id} className={presetId === preset.id && !image ? "is-active" : ""} aria-label={preset.name} onClick={() => { setPresetId(preset.id); setImage(null); }}><img src={preset.url} alt="" /></button>)}</div>
         </div>
+        <label className="field"><span>{translate("admin.categories.fields.description")}</span><textarea rows={3} maxLength={500} value={description} disabled={saving} onChange={(event) => setDescription(event.target.value)} /></label>
         <div className="form-grid form-grid--two">
-          <label className="field"><span>{translate("admin.profiles.editor.name")}</span><div><CircleUserRound size={18} /><input value={name} onChange={(event) => setName(event.target.value)} required /></div></label>
-          <label className="field"><span>{translate("admin.profiles.editor.pin")}</span><div><Shield size={18} /><input type={showPin ? "text" : "password"} inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value)} placeholder={translate(editing === "new" ? "admin.profiles.editor.pinCreatePlaceholder" : "admin.profiles.editor.pinEditPlaceholder")} /><IconButton type="button" label={translate(showPin ? "admin.profiles.editor.hidePin" : "admin.profiles.editor.showPin")} onClick={() => setShowPin((value) => !value)}>{showPin ? <EyeOff size={17} /> : <Eye size={17} />}</IconButton></div></label>
-          <label className="toggle-field"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span><i /><div><strong>{translate("common.status.enabled")}</strong><small>{translate("admin.profiles.editor.enabledDescription")}</small></div></span></label>
-          <label className="toggle-field"><input type="checkbox" checked={isChild} onChange={(event) => setIsChild(event.target.checked)} /><span><i /><div><strong>{translate("admin.profiles.editor.kids")}</strong><small>{translate("admin.profiles.editor.kidsDescription")}</small></div></span></label>
+          <label className="field"><span>{translate("admin.profiles.editor.name")}</span><div><CircleUserRound size={18} /><input autoFocus value={name} disabled={saving} onChange={(event) => setName(event.target.value)} required /></div></label>
+          <label className="field"><span>{translate("admin.profiles.editor.pin")}</span><div><Shield size={18} /><input type={showPin ? "text" : "password"} inputMode="numeric" disabled={saving} value={pin} onChange={(event) => setPin(event.target.value)} placeholder={translate(editing === "new" ? "admin.profiles.editor.pinCreatePlaceholder" : "admin.profiles.editor.pinEditPlaceholder")} /><IconButton type="button" disabled={saving} label={translate(showPin ? "admin.profiles.editor.hidePin" : "admin.profiles.editor.showPin")} onClick={() => setShowPin((value) => !value)}>{showPin ? <EyeOff size={17} /> : <Eye size={17} />}</IconButton></div></label>
+          {editing === "new" && isGlobalAdmin && <label className="field"><span>{translate("admin.profiles.editor.category")}</span><div><Layers3 size={18} /><select required value={categoryId} disabled={saving || categoriesLoading} onChange={(event) => setCategoryId(event.target.value)}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div></label>}
+          {editing === "new" && !isGlobalAdmin && account?.session.category && <div className="profile-editor__category"><span>{translate("admin.profiles.editor.category")}</span><CategoryBadge category={account.session.category} /></div>}
+          <label className="toggle-field"><input type="checkbox" checked={enabled} disabled={saving} onChange={(event) => setEnabled(event.target.checked)} /><span><i /><div><strong>{translate("common.status.enabled")}</strong><small>{translate("admin.profiles.editor.enabledDescription")}</small></div></span></label>
+          <label className="toggle-field"><input type="checkbox" checked={isChild} disabled={saving} onChange={(event) => setIsChild(event.target.checked)} /><span><i /><div><strong>{translate("admin.profiles.editor.kids")}</strong><small>{translate("admin.profiles.editor.kidsDescription")}</small></div></span></label>
         </div>
         <section className="profile-access-editor">
           <div><strong>{translate("admin.profiles.editor.availability")}</strong><p>{translate("admin.profiles.editor.availabilityDescription", { timezone: accessTimezone })}</p></div>
           <div className="form-grid form-grid--two">
-            <label className="field"><span>{translate("admin.profiles.editor.availableFrom")}</span><div><input type="date" value={availableFrom} max={availableUntil || undefined} onChange={(event) => setAvailableFrom(event.target.value)} /></div></label>
-            <label className="field"><span>{translate("admin.profiles.editor.availableUntil")}</span><div><input type="date" value={availableUntil} min={availableFrom || undefined} onChange={(event) => setAvailableUntil(event.target.value)} /></div></label>
+            <label className="field"><span>{translate("admin.profiles.editor.availableFrom")}</span><div><input type="date" value={availableFrom} disabled={saving} max={availableUntil || undefined} onChange={(event) => setAvailableFrom(event.target.value)} /></div></label>
+            <label className="field"><span>{translate("admin.profiles.editor.availableUntil")}</span><div><input type="date" value={availableUntil} disabled={saving} min={availableFrom || undefined} onChange={(event) => setAvailableUntil(event.target.value)} /></div></label>
           </div>
-          <label className="toggle-field"><input type="checkbox" checked={dailyHours} onChange={(event) => setDailyHours(event.target.checked)} /><span><i /><div><strong>{translate("admin.profiles.editor.dailyHours")}</strong><small>{translate("admin.profiles.editor.dailyHoursDescription")}</small></div></span></label>
+          <label className="toggle-field"><input type="checkbox" checked={dailyHours} disabled={saving} onChange={(event) => setDailyHours(event.target.checked)} /><span><i /><div><strong>{translate("admin.profiles.editor.dailyHours")}</strong><small>{translate("admin.profiles.editor.dailyHoursDescription")}</small></div></span></label>
           {dailyHours && <><div className="form-grid form-grid--two">
-            <label className="field"><span>{translate("admin.profiles.editor.accessStart")}</span><div><input type="time" value={accessStartTime} onChange={(event) => setAccessStartTime(event.target.value)} required /></div></label>
-            <label className="field"><span>{translate("admin.profiles.editor.accessEnd")}</span><div><input type="time" value={accessEndTime} onChange={(event) => setAccessEndTime(event.target.value)} required /></div></label>
+            <label className="field"><span>{translate("admin.profiles.editor.accessStart")}</span><div><input type="time" value={accessStartTime} disabled={saving} onChange={(event) => setAccessStartTime(event.target.value)} required /></div></label>
+            <label className="field"><span>{translate("admin.profiles.editor.accessEnd")}</span><div><input type="time" value={accessEndTime} disabled={saving} onChange={(event) => setAccessEndTime(event.target.value)} required /></div></label>
           </div><p className="profile-access-editor__hint">{translate("admin.profiles.editor.dailyHoursHint")}</p></>}
         </section>
-        <div className="modal-actions"><Button type="button" variant="ghost" onClick={() => setEditing(null)}>{translate("common.cancel")}</Button><Button type="submit" loading={saving}><Save size={18} /> {translate("admin.profiles.actions.save")}</Button></div>
+        <div className="modal-actions"><Button type="button" variant="ghost" disabled={saving} onClick={() => setEditing(null)}>{translate("common.cancel")}</Button><Button type="submit" loading={saving} disabled={!name.trim() || (editing === "new" && !categoryId)}><Save size={18} /> {translate("admin.profiles.actions.save")}</Button></div>
       </form>
+    </Modal>}
+    {movingProfiles.length > 0 && <Modal onClose={() => { if (!moveSaving) setMovingProfiles([]); }} className="editor-modal move-category-modal">
+      <div className="editor-modal__heading"><span><Layers3 size={18} /> {translate("admin.profiles.move.eyebrow")}</span><h2>{translate(movingProfiles.length === 1 ? "admin.profiles.move.titleOne" : "admin.profiles.move.titleMany", movingProfiles.length === 1 ? { name: movingProfiles[0]!.name } : { count: movingProfiles.length })}</h2><p>{translate("admin.profiles.move.description")}</p></div>
+      <div className="form-stack">
+        {error && <Notice>{error}</Notice>}
+        <label className="field"><span>{translate("admin.profiles.move.destination")}</span><div><Layers3 size={18} /><select autoFocus required value={moveCategoryId} disabled={moveSaving} onChange={(event) => setMoveCategoryId(event.target.value)}><option value="" disabled>{translate("admin.profiles.move.destination")}</option>{categories.filter((category) => movingProfiles.some((profile) => profile.categoryId !== category.id)).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div></label>
+        <div className="modal-actions"><Button type="button" variant="secondary" disabled={moveSaving} onClick={() => setMovingProfiles([])}>{translate("common.cancel")}</Button><Button type="button" loading={moveSaving} disabled={!moveCategoryId} onClick={() => void moveProfiles()}>{translate("admin.profiles.move.confirm")}</Button></div>
+      </div>
     </Modal>}
     {broadcastOpen && <Modal onClose={closeBroadcast} className="editor-modal session-message-modal">
       <div className="editor-modal__heading">
@@ -471,7 +974,8 @@ function SessionIPAddress({ session }: { session: ProfileSession }) {
 
 function AddonsAdmin() {
   const { account, activeProfile } = useAuth();
-  const profiles = account?.profiles.filter((profile) => account.user.role === "admin" || profile.canManage) ?? [];
+  const administrationProfiles = useAdministrationProfiles();
+  const profiles = administrationProfiles.filter((profile) => account?.session.authorizationScope === "global_admin" || profile.canManage);
   const [addons, setAddons] = useState<InstalledAddon[]>([]);
   const [transportUrl, setTransportUrl] = useState("");
   const [installProfileIds, setInstallProfileIds] = useState<string[]>(() => activeProfile ? [activeProfile.id] : []);
@@ -706,7 +1210,8 @@ function collectionCardSummary(collection: Collection): string {
 
 function CollectionsAdmin() {
   const { account, activeProfile } = useAuth();
-  const profiles = account?.profiles.filter((profile) => account.user.role === "admin" || profile.canManage) ?? [];
+  const administrationProfiles = useAdministrationProfiles();
+  const profiles = administrationProfiles.filter((profile) => account?.session.authorizationScope === "global_admin" || profile.canManage);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [editing, setEditing] = useState<Collection | "new" | null>(null);
   const [draft, setDraft] = useState<CollectionSaveInput>(blankCollection(activeProfile ? [activeProfile.id] : []));
@@ -1934,6 +2439,7 @@ const settingOptions = {
 
 function SettingsAdmin() {
   const { account, activeProfile, updateServerInterfaceLanguage } = useAuth();
+  const administrationProfiles = useAdministrationProfiles();
   const [settingsTarget, setSettingsTarget] = useState(activeProfile?.id ?? "");
   const [instance, setInstance] = useState<SettingsValues>({});
   const [savedInstance, setSavedInstance] = useState<SettingsValues>({});
@@ -1947,10 +2453,10 @@ function SettingsAdmin() {
   const [loaded, setLoaded] = useState(false);
   const settingsTargetRef = useRef(settingsTarget);
   settingsTargetRef.current = settingsTarget;
-  const canManageProfiles = Boolean(activeProfile?.canManage);
-  const canManageServer = canManageProfiles && account?.user.role === "admin";
+  const canManageServer = account?.session.authorizationScope === "global_admin";
+  const canManageProfiles = canManageServer || Boolean(activeProfile?.canManage);
   const serverSelected = settingsTarget === "server";
-  const targetProfile = account?.profiles.find((candidate) => candidate.id === settingsTarget) ?? activeProfile;
+  const targetProfile = administrationProfiles.find((candidate) => candidate.id === settingsTarget) ?? activeProfile;
   const settingsDirty = serverSelected ? JSON.stringify(instance) !== JSON.stringify(savedInstance) : JSON.stringify(profile) !== JSON.stringify(savedProfile);
   const hasUnsavedChanges = settingsDirty;
   const overrideCount = Object.entries(serverSelected ? instance : profile).filter(([key, value]) => !isDeviceNotificationSetting(key) && value !== null && value !== undefined && !(key === "transcoding" && value === "inherit")).length;
@@ -2069,7 +2575,7 @@ function SettingsAdmin() {
           ? translate("settings.scope.serverDefaultCount", { count: overrideCount })
           : translate(overrideCount === 1 ? "settings.scope.profileOverrideCountOne" : "settings.scope.profileOverrideCountMany", { count: overrideCount })}</span>
       </div>
-      {canManageProfiles && <label className="field settings-profile-picker"><span>{translate("settings.scope.switch")}</span><div>{serverSelected ? <Server size={18} /> : <CircleUserRound size={18} />}<select value={settingsTarget} disabled={saving || checkingTranscodingDisable || hasUnsavedChanges} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">{translate("settings.scope.serverDefaults")}</option>}{account?.profiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{translate("settings.scope.profileOption", { profileName: candidate.name })}</option>)}</select></div>{hasUnsavedChanges && <small>{translate("settings.scope.unsavedSwitchHint")}</small>}</label>}
+      {canManageProfiles && <label className="field settings-profile-picker"><span>{translate("settings.scope.switch")}</span><div>{serverSelected ? <Server size={18} /> : <CircleUserRound size={18} />}<select value={settingsTarget} disabled={saving || checkingTranscodingDisable || hasUnsavedChanges} onChange={(event) => setSettingsTarget(event.target.value)}>{canManageServer && <option value="server">{translate("settings.scope.serverDefaults")}</option>}{administrationProfiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{translate("settings.scope.profileOption", { profileName: candidate.name })}</option>)}</select></div>{hasUnsavedChanges && <small>{translate("settings.scope.unsavedSwitchHint")}</small>}</label>}
     </div>
     {error && <Notice>{error}</Notice>}
     {serverSelected

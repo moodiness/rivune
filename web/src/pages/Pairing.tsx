@@ -1,11 +1,11 @@
-import { ArrowRight, CheckCircle2, KeyRound, LoaderCircle, RefreshCw, ShieldCheck, Smartphone } from "lucide-react";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { ArrowRight, CheckCircle2, FolderKey, KeyRound, LoaderCircle, NotebookPen, RefreshCw, ShieldCheck, Smartphone, Tag } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
 import { Button, Notice, RivuneMark } from "../components";
 import { notifyError, notifyErrorMessage } from "../notifications";
 import { translate as t } from "../i18n";
-import type { DeviceAuthorization } from "../types";
+import type { AccessCategory, DeviceAuthorization } from "../types";
 import { AuthBackdrop, LoginPage } from "./Onboarding";
 
 export function DevicePairingPage() {
@@ -92,47 +92,144 @@ export function DevicePairingPage() {
 }
 
 export function PairApprovalPage() {
-  const { activeProfile, leaveProfile } = useAuth();
+  const { account, activeProfile, leaveProfile } = useAuth();
+  const session = account?.session;
+  const isGlobalAdmin = session?.authorizationScope === "global_admin";
+  const sessionCategory = session?.authorizationScope === "category" ? session.category : null;
   const [userCode, setUserCode] = useState(() => new URLSearchParams(window.location.search).get("code")?.toUpperCase() ?? "");
+  const [deviceName, setDeviceName] = useState("");
+  const [internalNote, setInternalNote] = useState("");
+  const [categories, setCategories] = useState<AccessCategory[]>([]);
+  const [categoryID, setCategoryID] = useState("");
+  const [categoryState, setCategoryState] = useState<"idle" | "loading" | "ready" | "error" | "forbidden">("idle");
+  const [categoryError, setCategoryError] = useState("");
   const [approved, setApproved] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const submittingRef = useRef(false);
+  const categorySelectRef = useRef<HTMLSelectElement>(null);
+  const successHeadingRef = useRef<HTMLHeadingElement>(null);
+
+  const loadCategories = useCallback(async () => {
+    if (!isGlobalAdmin) return;
+    setCategoryState("loading");
+    setCategoryError("");
+    try {
+      const nextCategories = await api.categories();
+      setCategories(nextCategories);
+      setCategoryID((current) => nextCategories.some((category) => category.id === current) ? current : "");
+      setCategoryState("ready");
+    } catch (cause) {
+      setCategories([]);
+      setCategoryID("");
+      if (cause instanceof APIError && cause.status === 403) {
+        setCategoryState("forbidden");
+        setCategoryError(t("pairing.categoryForbidden"));
+      } else {
+        setCategoryState("error");
+        setCategoryError(notifyError(cause, t("pairing.categoryLoadFailure"), t("pairing.failureTitle")));
+      }
+    }
+  }, [isGlobalAdmin]);
+
+  useEffect(() => {
+    if (isGlobalAdmin) {
+      void loadCategories();
+      return;
+    }
+    setCategories([]);
+    setCategoryID("");
+    setCategoryError("");
+    setCategoryState("idle");
+  }, [isGlobalAdmin, loadCategories]);
+
+  useEffect(() => {
+    if (!approved) return;
+    window.requestAnimationFrame(() => successHeadingRef.current?.focus({ preventScroll: true }));
+  }, [approved]);
+
+  const normalizedCode = userCode.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+  const formattedCode = normalizedCode.length > 4 ? `${normalizedCode.slice(0, 4)}-${normalizedCode.slice(4)}` : normalizedCode;
+  const validCode = /^[A-Z2-9]{8}$/.test(normalizedCode);
+  const selectedCategory = isGlobalAdmin
+    ? categories.find((category) => category.id === categoryID) ?? null
+    : sessionCategory;
+  const categoryReady = isGlobalAdmin
+    ? categoryState === "ready" && categories.length > 0
+    : Boolean(sessionCategory);
+  const canApprove = validCode && categoryReady && Boolean(selectedCategory) && !loading;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (submittingRef.current || loading || !validCode) return;
+    if (!selectedCategory) {
+      setError(t(isGlobalAdmin ? "pairing.categoryRequired" : "pairing.categoryUnavailable"));
+      categorySelectRef.current?.focus();
+      return;
+    }
+
+    submittingRef.current = true;
     setLoading(true);
     setError("");
+    const trimmedDeviceName = deviceName.trim();
+    const trimmedInternalNote = internalNote.trim();
     try {
-      await api.approveDeviceAuthorization(userCode);
+      await api.approveDeviceAuthorization({
+        userCode: formattedCode,
+        categoryId: selectedCategory.id,
+        ...(trimmedDeviceName ? { deviceName: trimmedDeviceName } : {}),
+        ...(trimmedInternalNote ? { internalNote: trimmedInternalNote } : {}),
+      });
       setApproved(true);
     } catch (cause) {
       setError(notifyError(cause, t("pairing.approvalFailure"), t("pairing.approvalFailureTitle")));
     } finally {
+      submittingRef.current = false;
       setLoading(false);
     }
   }
-
-  const normalizedCode = userCode.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
-  const formattedCode = normalizedCode.length > 4 ? `${normalizedCode.slice(0, 4)}-${normalizedCode.slice(4)}` : normalizedCode;
 
   return <main className="auth-page"><AuthBackdrop /><div className="auth-shell auth-shell--login">
     <RivuneMark />
     <section className="auth-card auth-card--login pairing-card pairing-card--approval page-enter">
       {approved ? <>
         <div className="pairing-card__icon pairing-card__icon--success"><CheckCircle2 /></div>
-        <div className="auth-card__header"><span>{t("pairing.approvedEyebrow")}</span><h1>{t("pairing.approvedTitle")}</h1><p>{t("pairing.approvedBody")}</p></div>
+        <div className="auth-card__header"><span>{t("pairing.approvedEyebrow")}</span><h1 ref={successHeadingRef} tabIndex={-1}>{t("pairing.approvedTitle")}</h1><p>{t("pairing.approvedBody")}</p></div>
         <Button onClick={() => window.location.assign("/")}>{t("pairing.returnToRivune")} <ArrowRight size={18} /></Button>
-      </> : !activeProfile?.canManage ? <>
+      </> : !(isGlobalAdmin || activeProfile?.canManage) ? <>
         <div className="pairing-card__icon"><ShieldCheck /></div>
         <div className="auth-card__header"><span>{t("pairing.managerRequiredEyebrow")}</span><h1>{t("pairing.managerRequiredTitle")}</h1><p>{t("pairing.managerRequiredBody")}</p></div>
+        {error && <div role="alert"><Notice>{error}</Notice></div>}
         <Button onClick={() => void leaveProfile().catch((cause) => setError(notifyError(cause, t("profiles.chooserFailure"))))}>{t("pairing.chooseAnotherProfile")}</Button>
       </> : <>
         <div className="pairing-card__icon"><Smartphone /></div>
-        <div className="auth-card__header"><span>{t("pairing.approvalEyebrow")}</span><h1>{t("pairing.approvalTitle")}</h1><p>{t("pairing.approvalBody")}</p></div>
+        <div className="auth-card__header"><span>{t("pairing.approvalEyebrow")}</span><h1>{t("pairing.approvalCategoryTitle")}</h1><p>{t("pairing.approvalBody")}</p></div>
         <form className="form-stack" onSubmit={submit}>
-          {error && <Notice>{error}</Notice>}
-          <label className="field"><span>{t("pairing.codeLabel")}</span><div><KeyRound size={18} /><input value={formattedCode} onChange={(event) => setUserCode(event.target.value)} autoComplete="one-time-code" inputMode="text" placeholder={t("pairing.codePlaceholder")} minLength={9} maxLength={9} autoFocus required /></div></label>
-          <Button type="submit" loading={loading}>{t("pairing.approveDevice")} <ArrowRight size={18} /></Button>
+          {error && <div role="alert"><Notice>{error}</Notice></div>}
+          <label className="field"><span>{t("pairing.codeLabel")}</span><div><KeyRound size={18} /><input value={formattedCode} onChange={(event) => setUserCode(event.target.value)} autoComplete="one-time-code" inputMode="text" placeholder={t("pairing.codePlaceholder")} minLength={9} maxLength={9} pattern="[A-Z2-9]{4}-[A-Z2-9]{4}" autoFocus required disabled={loading} /></div></label>
+
+          {isGlobalAdmin ? <>
+            <label className="field">
+              <span>{t("pairing.categoryLabel")}</span>
+              <div><FolderKey size={18} /><select ref={categorySelectRef} value={categoryID} onChange={(event) => { setCategoryID(event.target.value); setError(""); }} required disabled={categoryState !== "ready" || categories.length === 0 || loading} aria-describedby="pairing-category-hint">
+                <option value="">{t("pairing.categoryPlaceholder")}</option>
+                {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+              </select></div>
+              <small id="pairing-category-hint">{t("pairing.categoryAssignmentHint")}</small>
+            </label>
+            {categoryState === "loading" && <div className="pairing-card__category-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={17} /><span>{t("pairing.categoryLoading")}</span></div>}
+            {categoryState === "ready" && categories.length === 0 && <div role="status"><Notice tone="warning">{t("pairing.categoryEmpty")}</Notice></div>}
+            {(categoryState === "error" || categoryState === "forbidden") && <div className="pairing-card__category-state" role="alert"><Notice>{categoryError}{categoryState === "error" && <Button type="button" variant="ghost" onClick={() => void loadCategories()}><RefreshCw size={16} /> {t("common.actions.tryAgain")}</Button>}</Notice></div>}
+          </> : sessionCategory ? <div className="field pairing-card__category" aria-describedby="pairing-category-hint">
+            <span>{t("pairing.assignedCategory")}</span>
+            <div className="pairing-card__category-badge"><FolderKey size={17} /><strong>{sessionCategory.name}</strong></div>
+            <small id="pairing-category-hint">{t("pairing.categoryAssignmentHint")}</small>
+          </div> : <div role="alert"><Notice>{t("pairing.categoryUnavailable")}</Notice></div>}
+
+          <label className="field"><span>{t("pairing.deviceNameLabel")}</span><div><Tag size={18} /><input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} maxLength={120} placeholder={t("pairing.deviceNamePlaceholder")} disabled={loading} /></div></label>
+          <label className="field pairing-card__note"><span>{t("pairing.internalNoteLabel")}</span><div><NotebookPen size={18} /><textarea value={internalNote} onChange={(event) => setInternalNote(event.target.value)} maxLength={500} rows={3} placeholder={t("pairing.internalNotePlaceholder")} disabled={loading} /></div><small>{t("pairing.internalNoteHint")}</small></label>
+          <Button type="submit" loading={loading} disabled={!canApprove} aria-label={loading ? t("pairing.approvingDevice") : undefined}>{t("pairing.approveDevice")} <ArrowRight size={18} /></Button>
+          <span className="visually-hidden" role="status" aria-live="polite">{loading ? t("pairing.approvingDevice") : ""}</span>
         </form>
       </>}
     </section>

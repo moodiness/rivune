@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/metadata"
 )
@@ -22,12 +24,12 @@ type fakeEventRepository struct {
 	libraryTitles []libraryTitle
 }
 
-func (repository *fakeEventRepository) List(_ context.Context, profileID string, from, to time.Time) ([]Event, error) {
+func (repository *fakeEventRepository) List(_ context.Context, _ pgx.Tx, profileID string, from, to time.Time) ([]Event, error) {
 	repository.profileID, repository.from, repository.to = profileID, from, to
 	return repository.events, repository.err
 }
 
-func (repository *fakeEventRepository) LibraryTitles(_ context.Context, profileID string) ([]libraryTitle, error) {
+func (repository *fakeEventRepository) LibraryTitles(_ context.Context, _ pgx.Tx, profileID string) ([]libraryTitle, error) {
 	repository.profileID = profileID
 	return repository.libraryTitles, repository.err
 }
@@ -83,7 +85,7 @@ func TestActiveProfileIDRequiresCurrentGrant(t *testing.T) {
 	future := now.Add(time.Minute)
 	past := now.Add(-time.Minute)
 
-	got, err := activeProfileID(auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &future}, now)
+	got, err := activeProfileID(auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &future}, now)
 	if err != nil || got != profileID {
 		t.Fatalf("expected active profile %q, got %q error %v", profileID, got, err)
 	}
@@ -126,7 +128,7 @@ func TestListScopesEmptyResultsToActiveProfile(t *testing.T) {
 
 	result, err := service.List(
 		context.Background(),
-		auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt},
+		auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt},
 		"2026-07-01",
 		"2026-07-31",
 		"fr-FR",
@@ -167,7 +169,7 @@ func TestListRefreshesLibrarySeasonThatCanOverlapRequestedMonth(t *testing.T) {
 
 	if _, err := service.List(
 		context.Background(),
-		auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt},
+		auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt},
 		"2026-08-01",
 		"2026-08-31",
 		"fr-FR",

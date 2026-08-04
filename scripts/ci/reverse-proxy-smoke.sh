@@ -89,7 +89,7 @@ start_caddy
 
 https_request --fail --silent --show-error \
   "https://localhost/.well-known/rivune" \
-  | docker run --rm -i "${PYTHON_IMAGE}" python -c 'import json,sys; value=json.load(sys.stdin); assert value["apiBaseUrl"] == "https://localhost/api/v1"; assert value["protocolVersion"] == 17; assert value["interfaceLanguage"] == "en"'
+  | docker run --rm -i "${PYTHON_IMAGE}" python -c 'import json,sys; value=json.load(sys.stdin); assert value["apiBaseUrl"] == "https://localhost/api/v1"; assert value["protocolVersion"] == 18; assert value["interfaceLanguage"] == "en"'
 
 docker rm -f "${CADDY}" "${RIVUNE}" >/dev/null
 docker run -d --name "${PROBE}" --network "${NETWORK}" --network-alias rivune \

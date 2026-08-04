@@ -1,0 +1,375 @@
+import type { Page } from "@playwright/test";
+import { CATEGORY_IDS, DEVICE_IDS, expect, test } from "./fixtures/rivune";
+
+async function openAdministration(page: Page, tab?: "Categories" | "Profiles" | "Devices") {
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Administration", exact: true }).click();
+  if (tab && tab !== "Profiles") {
+    await page.getByRole("navigation", { name: "Administration sections" }).getByRole("button", { name: new RegExp(`^${tab}\\b`) }).click();
+  }
+}
+
+function categoryCard(page: Page, name: string) {
+  return page.locator(".category-card").filter({ has: page.getByRole("heading", { name, exact: true }) });
+}
+
+function profileCard(page: Page, name: string) {
+  return page.locator(".profile-admin-card").filter({ has: page.getByRole("heading", { name, exact: true }) });
+}
+
+function deviceCard(page: Page, name: string) {
+  return page.locator(".device-admin-card").filter({ has: page.getByRole("heading", { name, exact: true }) });
+}
+
+test("global administrators can create a category with the complete server request", async ({ page, rivune }) => {
+  await openAdministration(page, "Categories");
+  await page.getByRole("button", { name: "New category" }).click();
+
+  const dialog = page.locator("dialog");
+  await dialog.getByLabel("Name", { exact: true }).fill("Studio");
+  await expect(dialog.getByLabel("Color", { exact: true })).toHaveAttribute("type", "color");
+  await dialog.getByLabel("Description").fill("Editing workstations");
+  await dialog.getByLabel("Color").fill("#123ABC");
+  await dialog.getByLabel("Icon name").fill("monitor");
+  await dialog.getByRole("button", { name: "Create category" }).click();
+
+  const request = await rivune.waitForRequest("/api/v1/categories", "POST");
+  expect(request.body).toEqual({ name: "Studio", description: "Editing workstations", color: "#123ABC", icon: "monitor" });
+  await expect(categoryCard(page, "Studio")).toContainText("Editing workstations");
+  await expect(categoryCard(page, "Studio")).toContainText("0 profiles");
+  await expect(categoryCard(page, "Studio")).toContainText("0 devices");
+});
+
+test("a category save closes and reports success before a failed account refresh without retrying", async ({ page, rivune }) => {
+  await openAdministration(page, "Categories");
+  await page.getByRole("button", { name: "New category" }).click();
+  const dialog = page.locator("dialog");
+  await dialog.getByLabel("Name", { exact: true }).fill("Studio");
+  rivune.failNextAccountRefresh(3_000);
+
+  await dialog.getByRole("button", { name: "Create category" }).click();
+  await rivune.waitForRequest("/api/v1/categories", "POST");
+
+  await expect(dialog).toHaveCount(0, { timeout: 750 });
+  await expect(categoryCard(page, "Studio")).toBeVisible();
+  await expect(page.locator(".categories-admin [role=status]")).toContainText("Studio");
+  await expect.poll(() => rivune.accountRefreshCompletions).toEqual([503]);
+  expect(rivune.matching("/api/v1/categories", "POST")).toHaveLength(1);
+});
+
+test("a server-detected duplicate category remains an explicit conflict", async ({ page, rivune }) => {
+  await openAdministration(page, "Categories");
+  await expect(categoryCard(page, "Guest")).toBeVisible();
+  rivune.seedCategory("Studio");
+
+  await page.getByRole("button", { name: "New category" }).click();
+  const dialog = page.locator("dialog");
+  await dialog.getByLabel("Name", { exact: true }).fill("Studio");
+  await dialog.getByRole("button", { name: "Create category" }).click();
+
+  const request = await rivune.waitForRequest("/api/v1/categories", "POST");
+  expect(request.body).toEqual({ name: "Studio", description: null, color: null, icon: null });
+  await expect(dialog.getByText("A category with this name already exists.")).toBeVisible();
+  await expect(dialog).toBeVisible();
+});
+
+test("category description, color, and icon edits are persisted together", async ({ page, rivune }) => {
+  await openAdministration(page, "Categories");
+  await categoryCard(page, "Guest").getByRole("button", { name: "Edit" }).click();
+
+  const dialog = page.locator("dialog");
+  await dialog.getByLabel("Description").fill("Short-term visitor access");
+  await dialog.getByLabel("Color").fill("#224466");
+  await dialog.getByLabel("Icon name").fill("users");
+  await dialog.getByRole("button", { name: "Save category" }).click();
+
+  const request = await rivune.waitForRequest(`/api/v1/categories/${CATEGORY_IDS.guest}`, "PATCH");
+  expect(request.body).toEqual({ name: "Guest", description: "Short-term visitor access", color: "#224466", icon: "users" });
+  await expect(categoryCard(page, "Guest")).toContainText("Short-term visitor access");
+  await expect(categoryCard(page, "Guest").locator(".category-card__mark")).toHaveText("users");
+});
+
+test("the default category can be changed and becomes the profile creation default", async ({ page, rivune }) => {
+  await openAdministration(page, "Categories");
+  await categoryCard(page, "Kids").getByRole("button", { name: "Default", exact: true }).click();
+
+  const request = await rivune.waitForRequest(`/api/v1/categories/${CATEGORY_IDS.kids}`, "PATCH");
+  expect(request.body).toEqual({ isDefault: true });
+  await expect(categoryCard(page, "Kids").locator(".category-badge--default")).toHaveText("Default");
+  await expect(categoryCard(page, "Household").locator(".category-badge--default")).toHaveCount(0);
+
+  await page.getByRole("navigation", { name: "Administration sections" }).getByRole("button", { name: /^Profiles\b/ }).click();
+  await page.getByRole("button", { name: "New profile" }).click();
+  await expect(page.locator("dialog").getByLabel("Category")).toHaveValue(CATEGORY_IDS.kids);
+});
+
+test("category reorder sends and renders the complete authoritative order", async ({ page, rivune }) => {
+  await openAdministration(page, "Categories");
+  await page.getByRole("button", { name: "Move Guest up" }).click();
+
+  const request = await rivune.waitForRequest("/api/v1/categories/order", "PUT");
+  expect(request.body).toEqual({ categoryIds: [CATEGORY_IDS.household, CATEGORY_IDS.guest, CATEGORY_IDS.kids] });
+  await expect(page.locator(".category-card h3")).toHaveText(["Household", "Guest", "Kids"]);
+  await expect(page.locator(".categories-admin [role=status]")).toContainText("Category order was saved.");
+});
+
+test("All categories, profile and device filters, counts, and badges reflect server state", async ({ page, rivune }) => {
+  await openAdministration(page, "Profiles");
+  const administrationTabs = page.getByRole("navigation", { name: "Administration sections" });
+  await expect(administrationTabs.getByRole("button", { name: /^Categories\b/ })).toBeVisible();
+  await expect(administrationTabs.getByRole("button", { name: /^Devices\b/ })).toBeVisible();
+  const profiles = page.locator(".profiles-admin");
+  const profileFilter = profiles.locator(".category-filter select");
+
+  await expect(profiles.locator(".profile-admin-card")).toHaveCount(3);
+  await profileFilter.selectOption(CATEGORY_IDS.kids);
+  await expect(profiles.locator(".profile-admin-card")).toHaveCount(2);
+  await expect(profileCard(page, "Bob").getByLabel("Category: Kids")).toBeVisible();
+  await expect(profileCard(page, "Casey").getByLabel("Category: Kids")).toBeVisible();
+  await expect(profileCard(page, "Alice")).toHaveCount(0);
+  await profileFilter.selectOption("all");
+  await expect(profiles.locator(".profile-admin-card")).toHaveCount(3);
+  await expect(profileCard(page, "Alice").getByLabel("Category: Household")).toBeVisible();
+  await expect(profileCard(page, "Alice")).toContainText("Manager");
+  await expect(profileCard(page, "Bob")).toContainText("Viewer");
+
+  await page.getByRole("navigation", { name: "Administration sections" }).getByRole("button", { name: /^Devices\b/ }).click();
+  const devices = page.locator(".devices-admin");
+  const deviceFilter = devices.locator(".category-filter select");
+  await deviceFilter.selectOption(CATEGORY_IDS.kids);
+  await expect.poll(() => rivune.matching("/api/v1/devices", "GET").at(-1)?.search.get("categoryId")).toBe(CATEGORY_IDS.kids);
+  const filteredRequest = rivune.matching("/api/v1/devices", "GET").at(-1)!;
+  expect(filteredRequest.search.get("categoryId")).toBe(CATEGORY_IDS.kids);
+  await expect(devices.locator(".device-admin-card")).toHaveCount(1);
+  await expect(deviceCard(page, "Kids tablet").getByLabel("Category: Kids")).toBeVisible();
+  await deviceFilter.selectOption("all");
+  await expect(devices.locator(".device-admin-card")).toHaveCount(2);
+  await expect(deviceCard(page, "Living room TV").getByLabel("Category: Household")).toBeVisible();
+});
+
+test("late device filter success and error responses cannot replace the latest filter state", async ({ page, rivune }) => {
+  rivune.setDeviceResponse(CATEGORY_IDS.kids, { delay: 600 });
+  rivune.setDeviceResponse(CATEGORY_IDS.guest, { status: 503, delay: 300 });
+  await openAdministration(page, "Devices");
+  const devices = page.locator(".devices-admin");
+  const filter = devices.locator(".category-filter select");
+
+  await filter.selectOption(CATEGORY_IDS.kids);
+  await expect.poll(() => rivune.matching("/api/v1/devices", "GET").at(-1)?.search.get("categoryId")).toBe(CATEGORY_IDS.kids);
+  await filter.selectOption(CATEGORY_IDS.guest);
+  await expect.poll(() => rivune.matching("/api/v1/devices", "GET").at(-1)?.search.get("categoryId")).toBe(CATEGORY_IDS.guest);
+  await filter.selectOption(CATEGORY_IDS.household);
+  await expect.poll(() => rivune.matching("/api/v1/devices", "GET").at(-1)?.search.get("categoryId")).toBe(CATEGORY_IDS.household);
+
+  await expect(deviceCard(page, "Living room TV")).toBeVisible();
+  await expect(devices.locator(".device-admin-card")).toHaveCount(1);
+  await expect.poll(() => rivune.deviceResponseCompletions.slice(-3)).toEqual([CATEGORY_IDS.household, CATEGORY_IDS.guest, CATEGORY_IDS.kids]);
+  await expect(devices.locator(".admin-loading-state")).toHaveCount(0);
+  await expect(page.getByText("The device list is temporarily unavailable", { exact: true })).toHaveCount(0);
+  await expect(deviceCard(page, "Living room TV")).toBeVisible();
+  await expect(deviceCard(page, "Kids tablet")).toHaveCount(0);
+});
+
+test("profile creation requires and submits the chosen category", async ({ page, rivune }) => {
+  await openAdministration(page, "Profiles");
+  await page.getByRole("button", { name: "New profile" }).click();
+
+  const dialog = page.locator("dialog");
+  const category = dialog.getByLabel("Category");
+  await expect(category).toHaveAttribute("required", "");
+  await category.selectOption(CATEGORY_IDS.kids);
+  await dialog.getByLabel("Name").fill("Jordan");
+  await dialog.getByLabel("Description").fill("Weekend guest profile");
+  await dialog.getByRole("button", { name: "Save profile" }).click();
+
+  const request = await rivune.waitForRequest("/api/v1/profiles", "POST");
+  expect(request.body).toEqual({ name: "Jordan", description: "Weekend guest profile", categoryId: CATEGORY_IDS.kids, isChild: false, enabled: true });
+  await expect(profileCard(page, "Jordan").getByLabel("Category: Kids")).toBeVisible();
+  await expect(profileCard(page, "Jordan")).toContainText("Weekend guest profile");
+});
+
+test("a single profile move preserves the profile identity and exact request body", async ({ page, rivune }) => {
+  await openAdministration(page, "Profiles");
+  await profileCard(page, "Bob").getByRole("button", { name: "Move", exact: true }).click();
+  const moveDialog = page.locator("dialog");
+  await moveDialog.getByLabel("Destination category").selectOption(CATEGORY_IDS.household);
+  await moveDialog.getByRole("button", { name: "Confirm move" }).click();
+
+  const move = await rivune.waitForRequest("/api/v1/profiles/category-moves", "POST");
+  expect(move.body).toEqual({ profileIds: ["bob"], categoryId: CATEGORY_IDS.household });
+  await expect(profileCard(page, "Bob").getByLabel("Category: Household")).toBeVisible();
+
+  await profileCard(page, "Bob").getByRole("button", { name: "Edit" }).click();
+  await page.locator("dialog").getByLabel("Description").fill("Updated profile description");
+  await page.locator("dialog").getByRole("button", { name: "Save profile" }).click();
+  const update = await rivune.waitForRequest("/api/v1/profiles/bob", "PATCH");
+  expect(update.body).toMatchObject({ description: "Updated profile description" });
+  await expect(profileCard(page, "Bob")).toContainText("Updated profile description");
+});
+
+test("bulk profile move submits every selected identity once", async ({ page, rivune }) => {
+  await openAdministration(page, "Profiles");
+  await page.getByLabel("Select Bob").check();
+  await page.getByLabel("Select Casey").check();
+  await expect(page.locator(".profiles-admin .bulk-move-bar")).toContainText("2 profiles selected");
+  await page.locator(".profiles-admin .bulk-move-bar").getByRole("button", { name: "Move selected" }).click();
+  await page.locator("dialog").getByLabel("Destination category").selectOption(CATEGORY_IDS.household);
+  await page.locator("dialog").getByRole("button", { name: "Confirm move" }).click();
+
+  const request = await rivune.waitForRequest("/api/v1/profiles/category-moves", "POST");
+  expect(request.body).toEqual({ profileIds: ["bob", "casey"], categoryId: CATEGORY_IDS.household });
+  await expect(profileCard(page, "Bob").getByLabel("Category: Household")).toBeVisible();
+  await expect(profileCard(page, "Casey").getByLabel("Category: Household")).toBeVisible();
+});
+
+test("device name and note edits and a single category move use separate exact requests", async ({ page, rivune }) => {
+  await openAdministration(page, "Devices");
+  await deviceCard(page, "Kids tablet").getByRole("button", { name: "Edit" }).click();
+
+  const editDialog = page.locator("dialog");
+  await editDialog.getByLabel("Device name").fill("  Travel tablet  ");
+  await editDialog.getByLabel("Internal note").fill("  Road trips  ");
+  await editDialog.getByRole("button", { name: "Save device" }).click();
+  const edit = await rivune.waitForRequest(`/api/v1/devices/${DEVICE_IDS.tablet}`, "PATCH");
+  expect(edit.body).toEqual({ name: "Travel tablet", internalNote: "Road trips" });
+  await expect(deviceCard(page, "Travel tablet")).toContainText("Road trips");
+
+  await deviceCard(page, "Travel tablet").getByRole("button", { name: "Move", exact: true }).click();
+  await page.locator("dialog").getByLabel("Destination category").selectOption(CATEGORY_IDS.household);
+  await page.locator("dialog").getByRole("button", { name: "Confirm move" }).click();
+  const move = await rivune.waitForRequest("/api/v1/devices/category-moves", "POST");
+  expect(move.body).toEqual({ deviceIds: [DEVICE_IDS.tablet], categoryId: CATEGORY_IDS.household });
+  await expect(deviceCard(page, "Travel tablet").getByLabel("Category: Household")).toBeVisible();
+});
+
+test("bulk device move submits every selected server device", async ({ page, rivune }) => {
+  await openAdministration(page, "Devices");
+  await page.getByLabel("Select Living room TV").check();
+  await page.getByLabel("Select Kids tablet").check();
+  await expect(page.locator(".devices-admin .bulk-move-bar")).toContainText("2 devices selected");
+  await page.locator(".devices-admin .bulk-move-bar").getByRole("button", { name: "Move selected" }).click();
+  await page.locator("dialog").getByLabel("Destination category").selectOption(CATEGORY_IDS.kids);
+  await page.locator("dialog").getByRole("button", { name: "Confirm move" }).click();
+
+  const request = await rivune.waitForRequest("/api/v1/devices/category-moves", "POST");
+  expect(request.body).toEqual({ deviceIds: [DEVICE_IDS.livingRoom, DEVICE_IDS.tablet], categoryId: CATEGORY_IDS.kids });
+  await expect(deviceCard(page, "Living room TV").getByLabel("Category: Kids")).toBeVisible();
+  await expect(deviceCard(page, "Kids tablet").getByLabel("Category: Kids")).toBeVisible();
+});
+
+test("an empty category deletes without a reassignment claim", async ({ page, rivune }) => {
+  await openAdministration(page, "Categories");
+  await categoryCard(page, "Guest").getByRole("button", { name: "Delete" }).click();
+  const dialog = page.locator("dialog");
+  await expect(dialog).toContainText("This category is unused and can be deleted safely.");
+  await dialog.getByRole("button", { name: "Delete category" }).click();
+
+  const request = await rivune.waitForRequest(`/api/v1/categories/${CATEGORY_IDS.guest}`, "DELETE");
+  expect(request.body).toEqual({});
+  await expect(categoryCard(page, "Guest")).toHaveCount(0);
+});
+
+test("a hidden category reference reveals reassignment after the empty delete is rejected", async ({ page, rivune }) => {
+  rivune.seedHiddenCategoryReference(CATEGORY_IDS.guest);
+  await openAdministration(page, "Categories");
+  await expect(categoryCard(page, "Guest")).toContainText("0 profiles");
+  await expect(categoryCard(page, "Guest")).toContainText("0 devices");
+  await categoryCard(page, "Guest").getByRole("button", { name: "Delete" }).click();
+  const dialog = page.locator("dialog");
+  await expect(dialog).toContainText("This category is unused and can be deleted safely.");
+  await dialog.getByRole("button", { name: "Delete category" }).click();
+
+  await expect.poll(() => rivune.matching(`/api/v1/categories/${CATEGORY_IDS.guest}`, "DELETE").length).toBe(1);
+  expect(rivune.matching(`/api/v1/categories/${CATEGORY_IDS.guest}`, "DELETE")[0]?.body).toEqual({});
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Reassign profiles and devices to")).toBeVisible();
+  await dialog.getByLabel("Reassign profiles and devices to").selectOption(CATEGORY_IDS.household);
+  await dialog.getByRole("button", { name: "Delete and reassign" }).click();
+
+  await expect.poll(() => rivune.matching(`/api/v1/categories/${CATEGORY_IDS.guest}`, "DELETE").length).toBe(2);
+  expect(rivune.matching(`/api/v1/categories/${CATEGORY_IDS.guest}`, "DELETE").map((request) => request.body)).toEqual([
+    {},
+    { reassignToCategoryId: CATEGORY_IDS.household },
+  ]);
+  await expect(dialog).toHaveCount(0);
+  await expect(categoryCard(page, "Guest")).toHaveCount(0);
+});
+
+test("a populated category deletes only with server-side profile and device reassignment", async ({ page, rivune }) => {
+  await openAdministration(page, "Categories");
+  await categoryCard(page, "Kids").getByRole("button", { name: "Delete" }).click();
+  const dialog = page.locator("dialog");
+  await expect(dialog).toContainText("Its 2 profiles and 1 devices must move to another category.");
+  await dialog.getByLabel("Reassign profiles and devices to").selectOption(CATEGORY_IDS.household);
+  await dialog.getByRole("button", { name: "Delete and reassign" }).click();
+
+  const request = await rivune.waitForRequest(`/api/v1/categories/${CATEGORY_IDS.kids}`, "DELETE");
+  expect(request.body).toEqual({ reassignToCategoryId: CATEGORY_IDS.household });
+  await expect(categoryCard(page, "Kids")).toHaveCount(0);
+  await expect(categoryCard(page, "Household")).toContainText("3 profiles");
+  await expect(categoryCard(page, "Household")).toContainText("2 devices");
+});
+
+test("profile selection keeps the refreshed account profile instead of the earlier selection snapshot", async ({ page, rivune }) => {
+  rivune.setProfileCategory("bob", CATEGORY_IDS.household);
+  rivune.refreshProfileNameAfterSelection("bob", "Bobby Refreshed");
+  await page.goto("/");
+  await page.getByRole("button", { name: "Switch profile" }).first().click();
+  await expect(page.getByRole("heading", { name: "Who's watching?" })).toBeVisible();
+  await page.getByRole("button", { name: "Bob Profile" }).click();
+
+  await expect(page.locator(".sidebar-profile")).toContainText("Bobby Refreshed");
+  expect(rivune.matching("/api/v1/profiles/bob/select", "POST")).toHaveLength(1);
+});
+
+test("category and device tabs are absent from a category-scoped administration session", async ({ page, rivune }) => {
+  rivune.configureCategoryScope(CATEGORY_IDS.household);
+  await openAdministration(page, "Profiles");
+
+  const tabs = page.getByRole("navigation", { name: "Administration sections" });
+  await expect(tabs.getByRole("button", { name: /^Categories\b/ })).toHaveCount(0);
+  await expect(tabs.getByRole("button", { name: /^Devices\b/ })).toHaveCount(0);
+  await expect(page.locator(".profile-admin-card")).toHaveCount(1);
+  await expect(profileCard(page, "Alice").getByLabel("Category: Household")).toBeVisible();
+  await expect(profileCard(page, "Bob")).toHaveCount(0);
+  expect(rivune.matching("/api/v1/categories", "GET")).toHaveLength(0);
+});
+
+test("global pairing requires a category and submits normalized optional metadata", async ({ page, rivune }) => {
+  rivune.configureGlobalAdmin("bob", CATEGORY_IDS.kids);
+  await page.goto("/pair?code=bcdfghjk");
+  const form = page.locator(".pairing-card form");
+  const approve = form.getByRole("button", { name: "Approve device" });
+  await expect(approve).toBeDisabled();
+  await form.getByLabel("Access category").selectOption(CATEGORY_IDS.kids);
+  await form.getByLabel("Device name (optional)").fill("  Bedroom TV  ");
+  await form.getByLabel("Internal note (optional)").fill("  Upstairs  ");
+  await approve.click();
+
+  const request = await rivune.waitForRequest("/api/v1/auth/device-code/approve", "POST");
+  expect(request.body).toEqual({ userCode: "BCDF-GHJK", categoryId: CATEGORY_IDS.kids, deviceName: "Bedroom TV", internalNote: "Upstairs" });
+  await expect(page.getByRole("heading", { name: "They can choose a profile now." })).toBeFocused();
+});
+
+test("category-scoped pairing is fixed to its server category on mobile RTL", async ({ page, rivune }) => {
+  rivune.configureCategoryScope(CATEGORY_IDS.household);
+  rivune.setInterfaceLanguage("ar");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/pair?code=bcdfghjk");
+
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  const category = page.locator(".pairing-card__category");
+  await expect(category.getByText("Household", { exact: true })).toBeVisible();
+  expect(rivune.matching("/api/v1/categories", "GET")).toHaveLength(0);
+  await expect(category.locator("select")).toHaveCount(0);
+  const form = page.locator(".pairing-card form");
+  await form.locator('input[maxlength="120"]').fill("  Hall display  ");
+  await form.locator("textarea").fill("  Shared space  ");
+  await form.locator('button[type="submit"]').click();
+
+  const request = await rivune.waitForRequest("/api/v1/auth/device-code/approve", "POST");
+  expect(request.body).toEqual({ userCode: "BCDF-GHJK", categoryId: CATEGORY_IDS.household, deviceName: "Hall display", internalNote: "Shared space" });
+  const bounds = await page.locator(".pairing-card").boundingBox();
+  expect(bounds).not.toBeNull();
+  expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(390);
+});

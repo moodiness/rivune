@@ -84,27 +84,20 @@ func (service *Service) List(ctx context.Context, principal auth.Principal) ([]C
 	if err != nil {
 		return nil, err
 	}
-	rows, err := service.pool.Query(ctx, `
-		SELECT `+sharedCollectionFields+`, access.position`+sharedCollectionTail+`
-		FROM collection_profile_access access
-		JOIN profile_collections pc ON pc.id = access.collection_id
-		WHERE access.profile_id = $1::uuid
-		ORDER BY pc.pin_to_top DESC, access.position, pc.id
-	`, profileID)
+	tx, err := service.pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("query profile collections: %w", err)
+		return nil, fmt.Errorf("begin collection list: %w", err)
 	}
-	defer rows.Close()
-	collections := make([]Collection, 0)
-	for rows.Next() {
-		value, err := scanSharedCollection(rows)
-		if err != nil {
-			return nil, err
-		}
-		collections = append(collections, value)
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate profile collections: %w", err)
+	collections, err := listForProfile(ctx, tx, profileID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit collection list: %w", err)
 	}
 	return collections, nil
 }
@@ -114,11 +107,19 @@ func (service *Service) Export(ctx context.Context, principal auth.Principal) (E
 	if err != nil {
 		return ExportDocument{}, err
 	}
-	values, err := service.List(ctx, principal)
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return ExportDocument{}, fmt.Errorf("begin collection export: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return ExportDocument{}, err
+	}
+	values, err := listForProfile(ctx, tx, profileID)
 	if err != nil {
 		return ExportDocument{}, err
 	}
-	identities, err := loadAddonIdentities(ctx, service.pool, profileID)
+	identities, err := loadAddonIdentities(ctx, tx, profileID)
 	if err != nil {
 		return ExportDocument{}, err
 	}
@@ -126,11 +127,15 @@ func (service *Service) Export(ctx context.Context, principal auth.Principal) (E
 	for index := range values {
 		portable[index] = portableCollection(values[index], identities.byID)
 	}
-	return ExportDocument{
+	document := ExportDocument{
 		SchemaVersion: ExportSchemaVersion,
 		ExportedAt:    time.Now().UTC(),
 		Collections:   portable,
-	}, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ExportDocument{}, fmt.Errorf("commit collection export: %w", err)
+	}
+	return document, nil
 }
 
 func (service *Service) Get(ctx context.Context, principal auth.Principal, collectionID string) (Collection, error) {
@@ -141,7 +146,15 @@ func (service *Service) Get(ctx context.Context, principal auth.Principal, colle
 	if !validUUID(collectionID) {
 		return Collection{}, ErrInvalidInput
 	}
-	value, err := scanSharedCollection(service.pool.QueryRow(ctx, `
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return Collection{}, fmt.Errorf("begin collection query: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return Collection{}, err
+	}
+	value, err := scanSharedCollection(tx.QueryRow(ctx, `
 		SELECT `+sharedCollectionFields+`, access.position`+sharedCollectionTail+`
 		FROM collection_profile_access access
 		JOIN profile_collections pc ON pc.id = access.collection_id
@@ -150,7 +163,13 @@ func (service *Service) Get(ctx context.Context, principal auth.Principal, colle
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Collection{}, ErrNotFound
 	}
-	return value, err
+	if err != nil {
+		return Collection{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Collection{}, fmt.Errorf("commit collection query: %w", err)
+	}
+	return value, nil
 }
 
 func (service *Service) Create(ctx context.Context, principal auth.Principal, input SaveInput) (Collection, error) {
@@ -171,6 +190,9 @@ func (service *Service) Create(ctx context.Context, principal auth.Principal, in
 		return Collection{}, fmt.Errorf("begin collection creation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return Collection{}, err
+	}
 	if err := authorizeCollectionProfiles(ctx, tx, principal, profileID, profileIDs); err != nil {
 		return Collection{}, err
 	}
@@ -231,6 +253,9 @@ func (service *Service) Import(ctx context.Context, principal auth.Principal, do
 		return ImportResult{}, fmt.Errorf("begin collection import: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return ImportResult{}, err
+	}
 	if err := authorizeCollectionProfiles(ctx, tx, principal, profileID, []string{profileID}); err != nil {
 		return ImportResult{}, err
 	}
@@ -312,10 +337,15 @@ func (service *Service) Update(ctx context.Context, principal auth.Principal, co
 		return Collection{}, fmt.Errorf("begin collection update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return Collection{}, err
+	}
 	if profileIDs == nil {
 		if err := lockProfileCollections(ctx, tx, profileID); err != nil {
 			return Collection{}, err
 		}
+	} else if err := applyCollectionProfiles(ctx, tx, principal, profileID, collectionID, profileIDs); err != nil {
+		return Collection{}, err
 	}
 	var updatedID string
 	err = tx.QueryRow(ctx, `
@@ -350,11 +380,6 @@ func (service *Service) Update(ctx context.Context, principal auth.Principal, co
 	if err != nil {
 		return Collection{}, err
 	}
-	if profileIDs != nil {
-		if err := applyCollectionProfiles(ctx, tx, principal, profileID, collectionID, profileIDs); err != nil {
-			return Collection{}, err
-		}
-	}
 	value, err := scanSharedCollection(tx.QueryRow(ctx, collectionByIDQuery, updatedID))
 	if err != nil {
 		return Collection{}, fmt.Errorf("query updated collection: %w", err)
@@ -378,10 +403,13 @@ func (service *Service) Delete(ctx context.Context, principal auth.Principal, co
 		return fmt.Errorf("begin collection deletion: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return err
+	}
 	if err := lockProfileCollections(ctx, tx, profileID); err != nil {
 		return err
 	}
-	authorized, err := auth.CanManageProfiles(ctx, tx, principal, []string{profileID})
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
 	if err != nil {
 		return err
 	}
@@ -428,6 +456,9 @@ func (service *Service) Reorder(ctx context.Context, principal auth.Principal, i
 		return nil, fmt.Errorf("begin collection reorder: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return nil, err
+	}
 	if err := lockProfileCollections(ctx, tx, profileID); err != nil {
 		return nil, err
 	}
@@ -465,10 +496,40 @@ func (service *Service) Reorder(ctx context.Context, principal auth.Principal, i
 			return nil, fmt.Errorf("update collection position: %w", err)
 		}
 	}
+	collections, err := listForProfile(ctx, tx, profileID)
+	if err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit collection reorder: %w", err)
 	}
-	return service.List(ctx, principal)
+	return collections, nil
+}
+
+func listForProfile(ctx context.Context, tx pgx.Tx, profileID string) ([]Collection, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT `+sharedCollectionFields+`, access.position`+sharedCollectionTail+`
+		FROM collection_profile_access access
+		JOIN profile_collections pc ON pc.id = access.collection_id
+		WHERE access.profile_id = $1::uuid
+		ORDER BY pc.pin_to_top DESC, access.position, pc.id
+	`, profileID)
+	if err != nil {
+		return nil, fmt.Errorf("query profile collections: %w", err)
+	}
+	defer rows.Close()
+	collections := make([]Collection, 0)
+	for rows.Next() {
+		value, err := scanSharedCollection(rows)
+		if err != nil {
+			return nil, err
+		}
+		collections = append(collections, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate profile collections: %w", err)
+	}
+	return collections, nil
 }
 
 func activeProfileID(principal auth.Principal) (string, error) {
@@ -476,6 +537,71 @@ func activeProfileID(principal auth.Principal) (string, error) {
 		return "", ErrActiveProfileRequired
 	}
 	return *principal.ActiveProfileID, nil
+}
+
+func authorizeActiveProfile(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID string) error {
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, false)
+	if err != nil {
+		return fmt.Errorf("authorize active collection profile: %w", err)
+	}
+	if !authorized {
+		return ErrActiveProfileRequired
+	}
+	return nil
+}
+
+func (service *Service) validateActiveProfile(ctx context.Context, principal auth.Principal) (string, error) {
+	profileID, err := activeProfileID(principal)
+	if err != nil {
+		return "", err
+	}
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin collection authorization: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit collection authorization: %w", err)
+	}
+	return profileID, nil
+}
+
+func (service *Service) revalidateCollectionVersion(ctx context.Context, principal auth.Principal, collectionID string, expectedVersion int) error {
+	profileID, err := activeProfileID(principal)
+	if err != nil {
+		return err
+	}
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin collection revalidation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return err
+	}
+	var version int
+	err = tx.QueryRow(ctx, `
+		SELECT pc.version
+		FROM collection_profile_access access
+		JOIN profile_collections pc ON pc.id = access.collection_id
+		WHERE access.profile_id = $1::uuid AND pc.id = $2::uuid
+	`, profileID, collectionID).Scan(&version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("revalidate collection: %w", err)
+	}
+	if version != expectedVersion {
+		return ErrConflict
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit collection revalidation: %w", err)
+	}
+	return nil
 }
 
 func lockProfileCollections(ctx context.Context, tx pgx.Tx, profileID string) error {

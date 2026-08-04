@@ -189,7 +189,7 @@ func (s *Service) Maintenance(ctx context.Context) (Maintenance, error) {
 }
 
 func (s *Service) UpdateMaintenance(ctx context.Context, principal auth.Principal, state Maintenance) (Maintenance, error) {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		return Maintenance{}, ErrForbidden
 	}
 	if state.Message != nil {
@@ -234,7 +234,7 @@ func (s *Service) UpdateMaintenance(ctx context.Context, principal auth.Principa
 }
 
 func (s *Service) UpdateInstance(ctx context.Context, principal auth.Principal, patch Patch) (Layer, error) {
-	if principal.Role != "admin" {
+	if !principal.IsGlobalAdministrator() {
 		return Layer{}, ErrForbidden
 	}
 	if err := validateInstancePatch(patch); err != nil {
@@ -271,7 +271,20 @@ func (s *Service) UpdateInstance(ctx context.Context, principal auth.Principal, 
 }
 
 func (s *Service) Profile(ctx context.Context, principal auth.Principal, profileID string) (Layer, error) {
-	return s.queryProfileLayer(ctx, s.pool, principal, profileID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Layer{}, fmt.Errorf("begin profile settings query: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	layer, err := s.queryProfileLayer(ctx, tx, principal, profileID, false)
+	if err != nil {
+		return Layer{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Layer{}, fmt.Errorf("commit profile settings query: %w", err)
+	}
+	return layer, nil
 }
 
 func (s *Service) UpdateProfile(ctx context.Context, principal auth.Principal, profileID string, patch Patch) (Layer, error) {
@@ -284,7 +297,7 @@ func (s *Service) UpdateProfile(ctx context.Context, principal auth.Principal, p
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	current, err := s.queryProfileLayer(ctx, tx, principal, profileID)
+	current, err := s.queryProfileLayer(ctx, tx, principal, profileID, true)
 	if err != nil {
 		return Layer{}, err
 	}
@@ -317,24 +330,34 @@ func (s *Service) UpdateProfile(ctx context.Context, principal auth.Principal, p
 
 func (s *Service) Effective(ctx context.Context, principal auth.Principal, profileID string) (Effective, error) {
 	profileID = strings.TrimSpace(profileID)
-	if principal.ActiveProfileID == nil || principal.ProfileGrantExpiresAt == nil || *principal.ActiveProfileID != profileID {
-		return Effective{}, ErrSelectionRequired
+	if err := validateEffectiveSelection(principal, profileID, time.Now().UTC()); err != nil {
+		return Effective{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Effective{}, fmt.Errorf("begin effective profile settings query: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, false)
+	if err != nil {
+		return Effective{}, fmt.Errorf("authorize effective profile settings: %w", err)
+	}
+	if !authorized {
+		return Effective{}, ErrProfileNotFound
 	}
 
 	var instanceVersion, profileVersion int
 	var instanceRaw, profileRaw json.RawMessage
-	err := s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT i.schema_version, i.settings,
 		       ps.schema_version, ps.settings
 		FROM instance_settings i
 		JOIN profiles p ON true
 		JOIN profile_settings ps ON ps.profile_id = p.id
-		LEFT JOIN user_profile_access upa
-		  ON upa.profile_id = p.id AND upa.user_id = $2
 		WHERE i.instance_id = 1
 		  AND p.id::text = $1
-		  AND ($3 = 'admin' OR upa.user_id IS NOT NULL)
-	`, profileID, principal.UserID, principal.Role).Scan(
+	`, profileID).Scan(
 		&instanceVersion, &instanceRaw,
 		&profileVersion, &profileRaw,
 	)
@@ -364,25 +387,41 @@ func (s *Service) Effective(ctx context.Context, principal auth.Principal, profi
 	applyTranscodingPolicy(&effective, instanceValues, profileValues)
 	applyMaximumCastMembersPolicy(&effective, instanceValues, profileValues)
 	applyNotificationPolicy(&effective, instanceValues)
+	if err := tx.Commit(ctx); err != nil {
+		return Effective{}, fmt.Errorf("commit effective profile settings query: %w", err)
+	}
 	return effective, nil
 }
 
-func (s *Service) queryProfileLayer(ctx context.Context, querier interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}, principal auth.Principal, profileID string) (Layer, error) {
+func validateEffectiveSelection(principal auth.Principal, profileID string, now time.Time) error {
+	if principal.ActiveProfileID == nil ||
+		principal.ProfileGrantExpiresAt == nil ||
+		*principal.ActiveProfileID != profileID ||
+		!principal.ProfileGrantExpiresAt.After(now) {
+		return ErrSelectionRequired
+	}
+	return nil
+}
+
+func (s *Service) queryProfileLayer(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID string, forUpdate bool) (Layer, error) {
+	profileID = strings.TrimSpace(profileID)
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, false)
+	if err != nil {
+		return Layer{}, fmt.Errorf("authorize profile settings: %w", err)
+	}
+	if !authorized {
+		return Layer{}, ErrProfileNotFound
+	}
 	lockClause := ""
-	if _, ok := querier.(pgx.Tx); ok {
+	if forUpdate {
 		lockClause = " FOR UPDATE OF ps"
 	}
 	query := `
 		SELECT ps.schema_version, ps.settings, ps.updated_at
 		FROM profile_settings ps
 		JOIN profiles p ON p.id = ps.profile_id
-		LEFT JOIN user_profile_access upa
-		  ON upa.profile_id = p.id AND upa.user_id = $2
-		WHERE p.id::text = $1
-		  AND ($3 = 'admin' OR upa.user_id IS NOT NULL)` + lockClause
-	layer, err := queryLayer(ctx, querier, query, strings.TrimSpace(profileID), principal.UserID, principal.Role)
+		WHERE p.id::text = $1` + lockClause
+	layer, err := queryLayer(ctx, tx, query, profileID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Layer{}, ErrProfileNotFound
 	}

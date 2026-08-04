@@ -1,6 +1,18 @@
 # Rivune protocol compatibility
 
-The current Rivune wire protocol is **version 17**. The HTTP namespace remains `/api/v1`; the namespace and protocol version are independent. Clients must discover a server through `GET /.well-known/rivune` before using authenticated API routes and must compare the returned `protocolVersion` with the version they implement.
+The current Rivune wire protocol is **version 18**. The HTTP namespace remains `/api/v1`; the namespace and protocol version are independent. Clients must discover a server through `GET /.well-known/rivune` before using authenticated API routes and must compare the returned `protocolVersion` with the version they implement.
+
+## Version 18 cutover
+
+Version 18 is a clean cutover. A v17 client is not compatible with a v18 server, and a v18 client must not silently continue against another protocol version.
+
+- **Access categories are authoritative.** Profiles and approved devices have one server-owned category. Category identifiers submitted by clients select resources for server authorization; they are never authority claims.
+- **Authorization scope is immutable.** Tokens and session DTOs expose required `authorizationScope` (`global_admin` or `category`) plus a nullable category reference. Only administrator password login may issue global authority. Device-code exchange always issues category scope.
+- **Category changes revoke incompatible sessions.** Moving profiles or devices preserves stable profile identifiers and profile-owned data while invalidating sessions or active selections that no longer match.
+- **Device approval assigns a category.** Approval requires `categoryId` and may override device name or store an internal note. The server authorizes the destination against the approver's persisted scope.
+- **Categories and devices are administrable resources.** Global administrators can manage unlimited categories, reorder them, list and update approved devices, and perform atomic profile or device moves.
+
+Version 18 retains every v17 media, language, artwork, mapping, playback, and addon contract described below.
 
 ## Version 17 cutover
 
@@ -29,17 +41,17 @@ There are no compatibility aliases for the singular trailer route or pre-v16 tra
 
 ## Compatibility policy
 
-- A released client declares one implemented protocol integer. The Apple, Android, and Windows clients in this repository implement v17.
+- A released client declares one implemented protocol integer. The Apple, Android, and Windows clients in this repository implement v18.
 - A client must reject discovery when `protocolVersion` differs from its implemented version and present an upgrade-required error. It must not infer compatibility from `serverVersion` or `/api/v1`.
-- A server may add endpoints, optional response properties, optional request properties, or new error codes without incrementing the protocol version when existing v17 behavior remains valid. Clients must ignore unknown response properties and handle unknown structured error codes generically.
+- A server may add endpoints, optional response properties, optional request properties, or new error codes without incrementing the protocol version when existing v18 behavior remains valid. Clients must ignore unknown response properties and handle unknown structured error codes generically.
 - Removing or renaming a route or property, changing a property's type or meaning, adding a required request property, making an optional response property required, changing authentication semantics, or changing identifier interpretation requires a new protocol version.
-- Within v17, an existing required response property remains required. Contract tests validate representative real handler responses against `openapi.yaml`; changes to those handlers and schemas must land together.
+- Within v18, an existing required response property remains required. Contract tests validate representative real handler responses against `openapi.yaml`; changes to those handlers and schemas must land together.
 - Token rotation is part of the v16 contract. Access tokens are bearer tokens, refresh tokens are single-use and replaced on refresh, and native clients must persist credentials in platform-secure storage. A failed refresh clears the local credential set and requires authentication again.
 - Server releases must continue serving the documented version until all bundled clients implement a newer version. A future server that supports multiple versions must advertise the selected protocol explicitly; clients must never assume an undocumented range.
 
 ## Client release checklist
 
-1. Discover the candidate server and require `protocolVersion == 17`.
+1. Discover the candidate server and require `protocolVersion == 18`.
 2. Resolve `apiBaseUrl` from discovery; do not construct it from the browser or app origin after discovery.
 3. Exercise login or refresh, account/profile selection, movie and series metadata, plural trailers, source listing, preparation, resolution, and playback stop.
 4. Verify both TMDB and TVDB series hierarchies and preserve mapped season IDs verbatim.

@@ -8,18 +8,21 @@ import (
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/category"
 )
 
 const defaultMaintenanceMessage = "Rivune is temporarily unavailable for maintenance."
 
 type tokenResponse struct {
-	TokenType             string    `json:"tokenType"`
-	AccessToken           string    `json:"accessToken"`
-	AccessTokenExpiresAt  time.Time `json:"accessTokenExpiresAt"`
-	RefreshToken          string    `json:"refreshToken"`
-	RefreshTokenExpiresAt time.Time `json:"refreshTokenExpiresAt"`
-	SessionID             string    `json:"sessionId"`
-	DeviceID              string    `json:"deviceId"`
+	TokenType             string                  `json:"tokenType"`
+	AccessToken           string                  `json:"accessToken"`
+	AccessTokenExpiresAt  time.Time               `json:"accessTokenExpiresAt"`
+	RefreshToken          string                  `json:"refreshToken"`
+	RefreshTokenExpiresAt time.Time               `json:"refreshTokenExpiresAt"`
+	SessionID             string                  `json:"sessionId"`
+	DeviceID              string                  `json:"deviceId"`
+	AuthorizationScope    auth.AuthorizationScope `json:"authorizationScope"`
+	Category              any                     `json:"category"`
 }
 
 type sessionNotificationResponse struct {
@@ -111,7 +114,8 @@ func (a *API) requireAuthentication(next func(http.ResponseWriter, *http.Request
 			a.internalError(w, "authenticate request", err)
 			return
 		}
-		if !principal.ActiveProfileCanManage && !maintenanceExemptRequest(r) && a.rejectMaintenanceRequest(w, r) {
+		if !principal.IsGlobalAdministrator() && !principal.ActiveProfileCanManage &&
+			!maintenanceExemptRequest(r) && a.rejectMaintenanceRequest(w, r) {
 			return
 		}
 		next(w, r, principal)
@@ -195,7 +199,9 @@ func (a *API) me(w http.ResponseWriter, r *http.Request, principal auth.Principa
 		}
 		profiles = append(profiles, map[string]any{
 			"id":              profile.ID,
+			"categoryId":      profile.Category.ID,
 			"name":            profile.Name,
+			"description":     profile.Description,
 			"isChild":         profile.IsChild,
 			"hasPin":          profile.HasPIN,
 			"canManage":       profile.CanManage,
@@ -207,6 +213,7 @@ func (a *API) me(w http.ResponseWriter, r *http.Request, principal auth.Principa
 			"accessTimezone":  profile.AccessTimezone,
 			"accessible":      profile.Accessible,
 			"avatar":          avatar,
+			"category":        authCategoryRefResponse(&profile.Category),
 		})
 	}
 	var activeProfile any
@@ -223,9 +230,11 @@ func (a *API) me(w http.ResponseWriter, r *http.Request, principal auth.Principa
 			"role":     account.Principal.Role,
 		},
 		"session": map[string]any{
-			"id":            account.Principal.SessionID,
-			"deviceId":      account.Principal.DeviceID,
-			"activeProfile": activeProfile,
+			"id":                 account.Principal.SessionID,
+			"deviceId":           account.Principal.DeviceID,
+			"authorizationScope": account.Principal.AuthorizationScope,
+			"category":           authCategoryRefResponse(account.Principal.Category),
+			"activeProfile":      activeProfile,
 		},
 		"profiles":    profiles,
 		"maintenance": maintenance,
@@ -250,14 +259,16 @@ func (a *API) sessions(w http.ResponseWriter, r *http.Request, principal auth.Pr
 	response := make([]map[string]any, 0, len(sessions))
 	for _, session := range sessions {
 		response = append(response, map[string]any{
-			"id":         session.ID,
-			"deviceId":   session.DeviceID,
-			"deviceName": session.DeviceName,
-			"platform":   session.Platform,
-			"ipAddress":  nullableSessionIPAddress(session.IPAddress),
-			"createdAt":  session.CreatedAt,
-			"lastSeenAt": session.LastSeenAt,
-			"current":    session.Current,
+			"id":                 session.ID,
+			"deviceId":           session.DeviceID,
+			"deviceName":         session.DeviceName,
+			"platform":           session.Platform,
+			"ipAddress":          nullableSessionIPAddress(session.IPAddress),
+			"authorizationScope": session.AuthorizationScope,
+			"category":           authCategoryRefResponse(session.Category),
+			"createdAt":          session.CreatedAt,
+			"lastSeenAt":         session.LastSeenAt,
+			"current":            session.Current,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": response})
@@ -293,6 +304,8 @@ func (a *API) profileSessions(w http.ResponseWriter, r *http.Request, principal 
 				"deviceName":            session.DeviceName,
 				"platform":              session.Platform,
 				"ipAddress":             nullableSessionIPAddress(session.IPAddress),
+				"authorizationScope":    session.AuthorizationScope,
+				"category":              authCategoryRefResponse(session.Category),
 				"createdAt":             session.CreatedAt,
 				"lastSeenAt":            session.LastSeenAt,
 				"profileGrantExpiresAt": session.ProfileGrantExpiresAt,
@@ -456,5 +469,14 @@ func newTokenResponse(tokens auth.TokenPair) tokenResponse {
 		RefreshTokenExpiresAt: tokens.RefreshExpiresAt,
 		SessionID:             tokens.SessionID,
 		DeviceID:              tokens.DeviceID,
+		AuthorizationScope:    tokens.AuthorizationScope,
+		Category:              authCategoryRefResponse(tokens.Category),
 	}
+}
+
+func authCategoryRefResponse(reference *category.CategoryRef) any {
+	if reference == nil {
+		return nil
+	}
+	return newCategoryRefResponse(*reference)
 }

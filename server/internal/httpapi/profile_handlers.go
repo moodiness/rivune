@@ -18,20 +18,30 @@ type profileAvatarResponse struct {
 	URL      string `json:"url"`
 }
 
+type profileCategoryResponse struct {
+	ID    string  `json:"id"`
+	Name  string  `json:"name"`
+	Color *string `json:"color"`
+	Icon  *string `json:"icon"`
+}
+
 type profileResponse struct {
-	ID              string                `json:"id"`
-	Name            string                `json:"name"`
-	IsChild         bool                  `json:"isChild"`
-	HasPIN          bool                  `json:"hasPin"`
-	CanManage       bool                  `json:"canManage"`
-	Enabled         bool                  `json:"enabled"`
-	AvailableFrom   *string               `json:"availableFrom"`
-	AvailableUntil  *string               `json:"availableUntil"`
-	AccessStartTime *string               `json:"accessStartTime"`
-	AccessEndTime   *string               `json:"accessEndTime"`
-	AccessTimezone  string                `json:"accessTimezone"`
-	Accessible      bool                  `json:"accessible"`
-	Avatar          profileAvatarResponse `json:"avatar"`
+	ID              string                  `json:"id"`
+	Name            string                  `json:"name"`
+	Description     *string                 `json:"description"`
+	CategoryID      string                  `json:"categoryId"`
+	Category        profileCategoryResponse `json:"category"`
+	IsChild         bool                    `json:"isChild"`
+	HasPIN          bool                    `json:"hasPin"`
+	CanManage       bool                    `json:"canManage"`
+	Enabled         bool                    `json:"enabled"`
+	AvailableFrom   *string                 `json:"availableFrom"`
+	AvailableUntil  *string                 `json:"availableUntil"`
+	AccessStartTime *string                 `json:"accessStartTime"`
+	AccessEndTime   *string                 `json:"accessEndTime"`
+	AccessTimezone  string                  `json:"accessTimezone"`
+	Accessible      bool                    `json:"accessible"`
+	Avatar          profileAvatarResponse   `json:"avatar"`
 }
 
 type nullableString struct {
@@ -72,6 +82,8 @@ func (a *API) createProfile(w http.ResponseWriter, r *http.Request, principal au
 	}
 	var request struct {
 		Name            string  `json:"name"`
+		Description     *string `json:"description"`
+		CategoryID      string  `json:"categoryId"`
 		IsChild         bool    `json:"isChild"`
 		PIN             *string `json:"pin,omitempty"`
 		Enabled         *bool   `json:"enabled,omitempty"`
@@ -86,7 +98,7 @@ func (a *API) createProfile(w http.ResponseWriter, r *http.Request, principal au
 	}
 
 	created, err := a.profiles.Create(r.Context(), principal, profile.CreateInput{
-		Name: request.Name, IsChild: request.IsChild, PIN: request.PIN, Enabled: request.Enabled,
+		Name: request.Name, Description: request.Description, CategoryID: request.CategoryID, IsChild: request.IsChild, PIN: request.PIN, Enabled: request.Enabled,
 		AvailableFrom: request.AvailableFrom, AvailableUntil: request.AvailableUntil,
 		AccessStartTime: request.AccessStartTime, AccessEndTime: request.AccessEndTime,
 	})
@@ -108,6 +120,8 @@ func (a *API) updateProfile(w http.ResponseWriter, r *http.Request, principal au
 	}
 	var request struct {
 		Name            *string        `json:"name,omitempty"`
+		Description     nullableString `json:"description,omitempty"`
+		CategoryID      nullableString `json:"categoryId,omitempty"`
 		IsChild         *bool          `json:"isChild,omitempty"`
 		PIN             nullableString `json:"pin,omitempty"`
 		Enabled         *bool          `json:"enabled,omitempty"`
@@ -120,9 +134,14 @@ func (a *API) updateProfile(w http.ResponseWriter, r *http.Request, principal au
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if request.CategoryID.Set && request.CategoryID.Value == nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_profile", "categoryId cannot be null")
+		return
+	}
 
 	updated, err := a.profiles.Update(r.Context(), principal, r.PathValue("profileId"), profile.UpdateInput{
-		Name: request.Name, IsChild: request.IsChild, PINSet: request.PIN.Set, PIN: request.PIN.Value,
+		Name: request.Name, DescriptionSet: request.Description.Set, Description: request.Description.Value,
+		CategoryID: request.CategoryID.Value, IsChild: request.IsChild, PINSet: request.PIN.Set, PIN: request.PIN.Value,
 		Enabled:          request.Enabled,
 		AvailableFromSet: request.AvailableFrom.Set, AvailableFrom: request.AvailableFrom.Value,
 		AvailableUntilSet: request.AvailableUntil.Set, AvailableUntil: request.AvailableUntil.Value,
@@ -223,7 +242,9 @@ func newProfileResponse(value profile.Profile) profileResponse {
 		avatar.URL = "/api/v1/profile-avatars/" + value.AvatarPreset
 	}
 	return profileResponse{
-		ID: value.ID, Name: value.Name, IsChild: value.IsChild, HasPIN: value.HasPIN, CanManage: value.CanManage,
+		ID: value.ID, CategoryID: value.CategoryID,
+		Category: profileCategoryResponse{ID: value.CategoryID, Name: value.CategoryName, Color: value.CategoryColor, Icon: value.CategoryIcon},
+		Name:     value.Name, Description: value.Description, IsChild: value.IsChild, HasPIN: value.HasPIN, CanManage: value.CanManage,
 		Enabled: value.Enabled, AvailableFrom: value.AvailableFrom, AvailableUntil: value.AvailableUntil,
 		AccessStartTime: value.AccessStartTime, AccessEndTime: value.AccessEndTime,
 		AccessTimezone: value.AccessTimezone, Accessible: value.Accessible, Avatar: avatar,

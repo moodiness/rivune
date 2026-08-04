@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
 )
@@ -29,6 +30,52 @@ func TestValidatePatchRejectsUnknownValues(t *testing.T) {
 		if err := validatePatch(patch); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("expected invalid settings error, got %v", err)
 		}
+	}
+}
+
+func TestEffectiveRejectsExpiredGrantBeforeDatabaseAccess(t *testing.T) {
+	profileID := "profile-id"
+	expired := time.Now().UTC().Add(-time.Minute)
+
+	_, err := NewService(nil).Effective(context.Background(), auth.Principal{
+		ActiveProfileID:       &profileID,
+		ProfileGrantExpiresAt: &expired,
+	}, profileID)
+	if !errors.Is(err, ErrSelectionRequired) {
+		t.Fatalf("expired profile grant error = %v, want selection required", err)
+	}
+}
+
+func TestValidateEffectiveSelectionRequiresStrictlyCurrentMatchingGrant(t *testing.T) {
+	now := time.Date(2026, time.August, 4, 12, 0, 0, 0, time.UTC)
+	profileID := "profile-id"
+	otherProfileID := "other-profile-id"
+	expired := now.Add(-time.Nanosecond)
+	valid := now.Add(time.Nanosecond)
+
+	tests := []struct {
+		name      string
+		principal auth.Principal
+		wantErr   bool
+	}{
+		{name: "missing profile", principal: auth.Principal{ProfileGrantExpiresAt: &valid}, wantErr: true},
+		{name: "missing expiration", principal: auth.Principal{ActiveProfileID: &profileID}, wantErr: true},
+		{name: "different profile", principal: auth.Principal{ActiveProfileID: &otherProfileID, ProfileGrantExpiresAt: &valid}, wantErr: true},
+		{name: "expired", principal: auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expired}, wantErr: true},
+		{name: "expires now", principal: auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &now}, wantErr: true},
+		{name: "valid", principal: auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &valid}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateEffectiveSelection(test.principal, profileID, now)
+			if test.wantErr && !errors.Is(err, ErrSelectionRequired) {
+				t.Fatalf("selection validation error = %v, want selection required", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("valid profile grant was rejected: %v", err)
+			}
+		})
 	}
 }
 
@@ -451,7 +498,9 @@ func TestLegacySettingsJSONUsesNewDefaults(t *testing.T) {
 func TestMaintenanceMessageBoundAndAuthorization(t *testing.T) {
 	message := strings.Repeat("é", MaintenanceMessageMaximumSize+1)
 	service := NewService(nil)
-	_, err := service.UpdateMaintenance(context.Background(), auth.Principal{Role: "admin"}, Maintenance{Enabled: true, Message: &message})
+	_, err := service.UpdateMaintenance(context.Background(), auth.Principal{
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+	}, Maintenance{Enabled: true, Message: &message})
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected oversized message rejection, got %v", err)
 	}

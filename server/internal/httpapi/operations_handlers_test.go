@@ -279,6 +279,17 @@ func TestOperationsEndpointsRequireAdministrator(t *testing.T) {
 	}
 }
 
+func TestOperationsGuardRejectsCategoryScopedAdministrator(t *testing.T) {
+	categoryID := "11111111-1111-4111-8111-111111111111"
+	response := httptest.NewRecorder()
+	allowed := requireOperationsAdministrator(response, auth.Principal{
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID,
+	})
+	if allowed || response.Code != http.StatusForbidden {
+		t.Fatalf("category-scoped administrator allowed=%v status=%d", allowed, response.Code)
+	}
+}
+
 func TestOperationsOverviewRemainsReachableDuringMaintenance(t *testing.T) {
 	service := &fakeOperationsService{overview: operations.OperationsOverview{
 		MetadataRefresh:             operations.MetadataRefreshSchedule{Task: "metadata-refresh", Enabled: false, IntervalHours: 24, Language: "en-US", BatchSize: 50},
@@ -301,7 +312,10 @@ func TestOperationsOverviewRemainsReachableDuringMaintenance(t *testing.T) {
 }
 
 func authenticatedOperationsAPI(service operationsService) *API {
-	return operationsAPI(service, auth.Principal{UserID: "user-id", DeviceID: "device-id", Role: "admin", SessionID: "session-id"})
+	return operationsAPI(service, auth.Principal{
+		UserID: "user-id", DeviceID: "device-id", Role: "admin", SessionID: "session-id",
+		AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+	})
 }
 
 func operationsAPI(service operationsService, principal auth.Principal) *API {

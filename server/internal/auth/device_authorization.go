@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -35,6 +36,12 @@ type DeviceAuthorization struct {
 	UserCode   string
 	ExpiresAt  time.Time
 	Interval   time.Duration
+}
+type DeviceAuthorizationApproval struct {
+	UserCode     string
+	CategoryID   string
+	DeviceName   *string
+	InternalNote *string
 }
 
 func (s *Service) BeginDeviceAuthorization(ctx context.Context, deviceName, platform string) (DeviceAuthorization, error) {
@@ -83,20 +90,32 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, deviceName, plat
 	return DeviceAuthorization{}, errors.New("could not allocate a unique device user code")
 }
 
-func (s *Service) ApproveDeviceAuthorization(ctx context.Context, principal Principal, userCode string) error {
-	normalized := normalizeDeviceUserCode(userCode)
+func (s *Service) ApproveDeviceAuthorization(ctx context.Context, principal Principal, input DeviceAuthorizationApproval) error {
+	normalized := normalizeDeviceUserCode(input.UserCode)
+	input.CategoryID = strings.TrimSpace(input.CategoryID)
 	if len(normalized) != deviceUserCodeLength {
 		return ErrInvalidUserCode
 	}
-	if principal.ActiveProfileID == nil {
-		return ErrForbidden
+	if input.CategoryID == "" {
+		return fmt.Errorf("%w: categoryId is required", ErrInvalidInput)
 	}
-	authorized, err := s.canManageProfile(ctx, principal, *principal.ActiveProfileID)
-	if err != nil {
-		return err
+	if input.DeviceName != nil {
+		name := strings.TrimSpace(*input.DeviceName)
+		if !validLength(name, 1, 120) {
+			return fmt.Errorf("%w: deviceName must contain 1 to 120 characters", ErrInvalidInput)
+		}
+		input.DeviceName = &name
 	}
-	if !authorized {
-		return ErrForbidden
+	if input.InternalNote != nil {
+		note := strings.TrimSpace(*input.InternalNote)
+		if !utf8.ValidString(note) || strings.ContainsRune(note, '\x00') || utf8.RuneCountInString(note) > 500 {
+			return fmt.Errorf("%w: internalNote must contain at most 500 characters", ErrInvalidInput)
+		}
+		if note == "" {
+			input.InternalNote = nil
+		} else {
+			input.InternalNote = &note
+		}
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -105,15 +124,50 @@ func (s *Service) ApproveDeviceAuthorization(ctx context.Context, principal Prin
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var approvedUserID *string
+	if principal.IsGlobalAdministrator() {
+		if _, err := loadCategoryRef(ctx, tx, input.CategoryID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrForbidden
+			}
+			return err
+		}
+	} else {
+		if principal.AuthorizationScope != AuthorizationScopeCategory ||
+			principal.CategoryID == nil || *principal.CategoryID != input.CategoryID {
+			return ErrForbidden
+		}
+		var lockedProfileID string
+		if err := tx.QueryRow(ctx, `
+			SELECT profile.id::text
+			FROM profiles profile
+			JOIN user_profile_access access ON access.profile_id = profile.id
+			WHERE profile.category_id::text = $1
+			  AND access.user_id::text = $2
+			  AND access.can_manage
+			ORDER BY profile.id
+			LIMIT 1
+			FOR SHARE OF profile, access
+		`, input.CategoryID, principal.UserID).Scan(&lockedProfileID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrForbidden
+			}
+			return fmt.Errorf("authorize category device approval: %w", err)
+		}
+	}
+
+	var approvedUserID, approvedCategoryID, approvedDeviceName, approvedInternalNote *string
 	var expiresAt time.Time
 	var consumedAt *time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT approved_user_id::text, expires_at, consumed_at
+		SELECT approved_user_id::text, approved_category_id::text, approved_device_name,
+		       approved_internal_note, expires_at, consumed_at
 		FROM device_authorizations
 		WHERE user_code = $1
 		FOR UPDATE
-	`, normalized).Scan(&approvedUserID, &expiresAt, &consumedAt)
+	`, normalized).Scan(
+		&approvedUserID, &approvedCategoryID, &approvedDeviceName, &approvedInternalNote,
+		&expiresAt, &consumedAt,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrInvalidUserCode
 	}
@@ -124,16 +178,20 @@ func (s *Service) ApproveDeviceAuthorization(ctx context.Context, principal Prin
 		return ErrInvalidUserCode
 	}
 	if approvedUserID != nil {
-		if *approvedUserID == principal.UserID {
+		if *approvedUserID == principal.UserID &&
+			equalOptionalString(approvedCategoryID, &input.CategoryID) &&
+			equalOptionalString(approvedDeviceName, input.DeviceName) &&
+			equalOptionalString(approvedInternalNote, input.InternalNote) {
 			return nil
 		}
 		return ErrDeviceAuthorizationClaimed
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE device_authorizations
-		SET approved_user_id = $2, approved_at = now()
+		SET approved_user_id = $2, approved_category_id = $3,
+		    approved_device_name = $4, approved_internal_note = $5, approved_at = now()
 		WHERE user_code = $1
-	`, normalized, principal.UserID); err != nil {
+	`, normalized, principal.UserID, input.CategoryID, input.DeviceName, input.InternalNote); err != nil {
 		return fmt.Errorf("approve device authorization: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -154,16 +212,20 @@ func (s *Service) ExchangeDeviceAuthorization(ctx context.Context, deviceCode st
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var deviceName, platform string
-	var approvedUserID *string
+	var requestedDeviceName, platform string
+	var approvedUserID, approvedCategoryID, approvedDeviceName, approvedInternalNote *string
 	var expiresAt time.Time
 	var lastPolledAt, consumedAt *time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT device_name, platform, approved_user_id::text, expires_at, last_polled_at, consumed_at
+		SELECT device_name, platform, approved_user_id::text, approved_category_id::text,
+		       approved_device_name, approved_internal_note, expires_at, last_polled_at, consumed_at
 		FROM device_authorizations
 		WHERE device_code_hash = $1
 		FOR UPDATE
-	`, tokenDigest(deviceCode)).Scan(&deviceName, &platform, &approvedUserID, &expiresAt, &lastPolledAt, &consumedAt)
+	`, tokenDigest(deviceCode)).Scan(
+		&requestedDeviceName, &platform, &approvedUserID, &approvedCategoryID,
+		&approvedDeviceName, &approvedInternalNote, &expiresAt, &lastPolledAt, &consumedAt,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TokenPair{}, ErrInvalidDeviceCode
 	}
@@ -189,11 +251,31 @@ func (s *Service) ExchangeDeviceAuthorization(ctx context.Context, deviceCode st
 		}
 		return TokenPair{}, ErrDeviceAuthorizationPending
 	}
+	if approvedCategoryID == nil {
+		return TokenPair{}, ErrInvalidDeviceCode
+	}
 
-	tokens, err := s.createSession(ctx, tx, *approvedUserID, LoginInput{
-		DeviceName: deviceName,
-		Platform:   platform,
-	}, now)
+	deviceName := requestedDeviceName
+	if approvedDeviceName != nil {
+		deviceName = *approvedDeviceName
+	}
+	var deviceID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO devices (
+			user_id, name, platform, category_id, approved_at, internal_note, last_seen_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $5)
+		RETURNING id::text
+	`, *approvedUserID, deviceName, platform, *approvedCategoryID, now, approvedInternalNote).Scan(&deviceID); err != nil {
+		return TokenPair{}, fmt.Errorf("create approved device: %w", err)
+	}
+	deviceCategory, err := loadCategoryRef(ctx, tx, *approvedCategoryID)
+	if err != nil {
+		return TokenPair{}, err
+	}
+	tokens, err := s.createSession(
+		ctx, tx, *approvedUserID, deviceID, AuthorizationScopeCategory, deviceCategory, now,
+	)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -231,4 +313,8 @@ func normalizeDeviceUserCode(value string) string {
 
 func formatDeviceUserCode(value string) string {
 	return value[:4] + "-" + value[4:]
+}
+
+func equalOptionalString(left, right *string) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }

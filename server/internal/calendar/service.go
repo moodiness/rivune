@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
@@ -44,8 +45,8 @@ type Result struct {
 }
 
 type eventRepository interface {
-	List(context.Context, string, time.Time, time.Time) ([]Event, error)
-	LibraryTitles(context.Context, string) ([]libraryTitle, error)
+	List(context.Context, pgx.Tx, string, time.Time, time.Time) ([]Event, error)
+	LibraryTitles(context.Context, pgx.Tx, string) ([]libraryTitle, error)
 }
 
 type libraryTitle struct {
@@ -59,11 +60,10 @@ type metadataReader interface {
 	SeasonDetails(context.Context, auth.Principal, string, string, string) (metadata.Season, error)
 }
 
-type postgresRepository struct {
-	pool *pgxpool.Pool
-}
+type postgresRepository struct{}
 
 type Service struct {
+	pool       *pgxpool.Pool
 	repository eventRepository
 	metadata   metadataReader
 	logger     *slog.Logger
@@ -75,7 +75,8 @@ func NewService(pool *pgxpool.Pool, metadataService metadataReader, logger *slog
 		logger = slog.Default()
 	}
 	return &Service{
-		repository: &postgresRepository{pool: pool},
+		pool:       pool,
+		repository: &postgresRepository{},
 		metadata:   metadataService,
 		logger:     logger,
 		now:        time.Now,
@@ -87,27 +88,86 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, fromValue,
 	if err != nil {
 		return Result{}, err
 	}
+	if s.pool == nil {
+		if !principal.IsGlobalAdministrator() {
+			return Result{}, ErrProfileRequired
+		}
+		from, to, err := normalizeRange(fromValue, toValue)
+		if err != nil {
+			return Result{}, err
+		}
+		if s.metadata != nil {
+			titles, listErr := s.repository.LibraryTitles(ctx, nil, profileID)
+			if listErr != nil {
+				s.logger.Warn("calendar metadata refresh skipped", "error", listErr)
+			} else {
+				s.refreshLibraryMetadata(ctx, principal, titles, from, to, language)
+			}
+		}
+		events, err := s.repository.List(ctx, nil, profileID, from, to)
+		if err != nil {
+			return Result{}, err
+		}
+		sortEvents(events)
+		return Result{Events: events}, nil
+	}
+
+	initialTx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Result{}, fmt.Errorf("begin calendar query: %w", err)
+	}
+	defer func() { _ = initialTx.Rollback(ctx) }()
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, initialTx, principal, []string{profileID}, false)
+	if err != nil {
+		return Result{}, fmt.Errorf("authorize active calendar profile: %w", err)
+	}
+	if !authorized {
+		return Result{}, ErrProfileRequired
+	}
 	from, to, err := normalizeRange(fromValue, toValue)
 	if err != nil {
 		return Result{}, err
 	}
+
+	resultTx := initialTx
 	if s.metadata != nil {
-		s.refreshLibraryMetadata(ctx, principal, profileID, from, to, language)
+		titles, listErr := s.repository.LibraryTitles(ctx, initialTx, profileID)
+		if listErr != nil {
+			s.logger.Warn("calendar metadata refresh skipped", "error", listErr)
+			_ = initialTx.Rollback(ctx)
+		} else {
+			if err := initialTx.Commit(ctx); err != nil {
+				return Result{}, fmt.Errorf("commit calendar metadata query: %w", err)
+			}
+			s.refreshLibraryMetadata(ctx, principal, titles, from, to, language)
+		}
+
+		resultTx, err = s.pool.Begin(ctx)
+		if err != nil {
+			return Result{}, fmt.Errorf("begin calendar result query: %w", err)
+		}
+		defer func() { _ = resultTx.Rollback(ctx) }()
+		authorized, err = auth.AuthorizeAndLockProfiles(ctx, resultTx, principal, []string{profileID}, false)
+		if err != nil {
+			return Result{}, fmt.Errorf("authorize active calendar profile: %w", err)
+		}
+		if !authorized {
+			return Result{}, ErrProfileRequired
+		}
 	}
-	events, err := s.repository.List(ctx, profileID, from, to)
+
+	events, err := s.repository.List(ctx, resultTx, profileID, from, to)
 	if err != nil {
 		return Result{}, err
 	}
 	sortEvents(events)
+	if err := resultTx.Commit(ctx); err != nil {
+		return Result{}, fmt.Errorf("commit calendar query: %w", err)
+	}
 	return Result{Events: events}, nil
 }
 
-func (s *Service) refreshLibraryMetadata(ctx context.Context, principal auth.Principal, profileID string, from, to time.Time, language string) {
-	titles, err := s.repository.LibraryTitles(ctx, profileID)
-	if err != nil {
-		s.logger.Warn("calendar metadata refresh skipped", "error", err)
-		return
-	}
+func (s *Service) refreshLibraryMetadata(ctx context.Context, principal auth.Principal, titles []libraryTitle, from, to time.Time, language string) {
 	const maximumWorkers = 4
 	workerCount := min(maximumWorkers, len(titles))
 	if workerCount == 0 {
@@ -170,8 +230,8 @@ func seasonMayOverlap(airDate string, from, to time.Time) bool {
 	return !firstRelease.AddDate(1, 0, 0).Before(from)
 }
 
-func (repository *postgresRepository) LibraryTitles(ctx context.Context, profileID string) ([]libraryTitle, error) {
-	rows, err := repository.pool.Query(ctx, `
+func (repository *postgresRepository) LibraryTitles(ctx context.Context, tx pgx.Tx, profileID string) ([]libraryTitle, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT title.id::text, title.media_type
 		FROM profile_library AS library
 		JOIN titles AS title ON title.id = library.title_id
@@ -197,8 +257,8 @@ func (repository *postgresRepository) LibraryTitles(ctx context.Context, profile
 	return titles, nil
 }
 
-func (repository *postgresRepository) List(ctx context.Context, profileID string, from, to time.Time) ([]Event, error) {
-	rows, err := repository.pool.Query(ctx, `
+func (repository *postgresRepository) List(ctx context.Context, tx pgx.Tx, profileID string, from, to time.Time) ([]Event, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT event.id, event.title_id, event.media_type, event.title,
 		       event.release_date, event.poster_url, event.resource_id,
 		       event.resource_provider, event.series_title, event.series_id,

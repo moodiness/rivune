@@ -10,9 +10,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
 )
+
+type testPlaybackProfileTransaction struct{}
+
+func (testPlaybackProfileTransaction) Commit(context.Context) error   { return nil }
+func (testPlaybackProfileTransaction) Rollback(context.Context) error { return nil }
+func (testPlaybackProfileTransaction) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.NewCommandTag("INSERT 0 1"), nil
+}
+func (testPlaybackProfileTransaction) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, errors.New("unexpected profile transaction query")
+}
+func (testPlaybackProfileTransaction) QueryRow(context.Context, string, ...any) pgx.Row {
+	return testPlaybackProfileRow{}
+}
+
+type testPlaybackProfileRow struct{}
+
+func (testPlaybackProfileRow) Scan(...any) error { return pgx.ErrNoRows }
+
+func testPlaybackProfileTxFactory(context.Context, auth.Principal) (playbackProfileTransaction, error) {
+	return testPlaybackProfileTransaction{}, nil
+}
 
 func TestNormalizeStreamsRanksCompatibleSourcesAndKeepsHeadersPrivate(t *testing.T) {
 	batch := addon.ResourceBatch{Results: []addon.ResourceResult{{
@@ -99,13 +124,12 @@ func TestSourcesTargetsRequestedProfileAddon(t *testing.T) {
 	grantExpiresAt := current.Add(time.Hour)
 	fetcher := &recordingResourceFetcher{}
 	service := &Service{
-		addons:     fetcher,
-		now:        func() time.Time { return current },
-		references: newSourceReferenceStore(time.Now),
+		addons:           fetcher,
+		now:              func() time.Time { return current },
+		references:       newSourceReferenceStore(time.Now),
+		profileTxFactory: testPlaybackProfileTxFactory,
 	}
-	list, err := service.Sources(context.Background(), auth.Principal{
-		SessionID: "session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
-	}, SourcesInput{
+	list, err := service.Sources(context.Background(), auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, SessionID: "session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt}, SourcesInput{
 		MediaType: "tv", AddonID: "requested-addon", ResourceID: "channel-1",
 		Capabilities: Capabilities{StreamingProtocols: []string{"hls"}, Containers: []string{"mpegts"}},
 	})
@@ -131,13 +155,12 @@ func TestSourcesWithoutAddonKeepsFanout(t *testing.T) {
 			grantExpiresAt := current.Add(time.Hour)
 			fetcher := &recordingResourceFetcher{}
 			service := &Service{
-				addons:     fetcher,
-				now:        func() time.Time { return current },
-				references: newSourceReferenceStore(time.Now),
+				addons:           fetcher,
+				now:              func() time.Time { return current },
+				references:       newSourceReferenceStore(time.Now),
+				profileTxFactory: testPlaybackProfileTxFactory,
 			}
-			_, err := service.Sources(context.Background(), auth.Principal{
-				SessionID: "session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
-			}, SourcesInput{
+			_, err := service.Sources(context.Background(), auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, SessionID: "session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt}, SourcesInput{
 				MediaType: mediaType, ResourceID: "resource-1",
 				Capabilities: Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}},
 			})
@@ -781,5 +804,233 @@ func TestRemuxArgumentsAlwaysCopyVideo(t *testing.T) {
 	joined := strings.Join(arguments, " ")
 	if !strings.Contains(joined, "-c:v copy") || strings.Contains(joined, "libx264") || strings.Contains(joined, "h264_") {
 		t.Fatalf("remux unexpectedly re-encodes video: %v", arguments)
+	}
+}
+
+type emptyPlaybackRows struct{}
+
+func (emptyPlaybackRows) Close()                                       {}
+func (emptyPlaybackRows) Err() error                                   { return nil }
+func (emptyPlaybackRows) CommandTag() pgconn.CommandTag                { return pgconn.NewCommandTag("") }
+func (emptyPlaybackRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (emptyPlaybackRows) Next() bool                                   { return false }
+func (emptyPlaybackRows) Scan(...any) error                            { return pgx.ErrNoRows }
+func (emptyPlaybackRows) Values() ([]any, error)                       { return nil, nil }
+func (emptyPlaybackRows) RawValues() [][]byte                          { return nil }
+func (emptyPlaybackRows) Conn() *pgx.Conn                              { return nil }
+
+type playbackSessionIDRow struct {
+	id string
+}
+
+func (row playbackSessionIDRow) Scan(destinations ...any) error {
+	if len(destinations) != 1 {
+		return errors.New("unexpected playback session scan destination count")
+	}
+	destination, ok := destinations[0].(*string)
+	if !ok {
+		return errors.New("unexpected playback session scan destination")
+	}
+	*destination = row.id
+	return nil
+}
+
+type playbackTransactionStub struct {
+	commitCalled bool
+	commitErr    error
+	exec         func(string, ...any) (pgconn.CommandTag, error)
+	query        func(string, ...any) (pgx.Rows, error)
+	row          pgx.Row
+}
+
+func (transaction *playbackTransactionStub) Commit(context.Context) error {
+	transaction.commitCalled = true
+	return transaction.commitErr
+}
+
+func (*playbackTransactionStub) Rollback(context.Context) error { return nil }
+
+func (transaction *playbackTransactionStub) Exec(_ context.Context, query string, arguments ...any) (pgconn.CommandTag, error) {
+	if transaction.exec == nil {
+		return pgconn.CommandTag{}, errors.New("unexpected playback transaction exec")
+	}
+	return transaction.exec(query, arguments...)
+}
+
+func (transaction *playbackTransactionStub) Query(_ context.Context, query string, arguments ...any) (pgx.Rows, error) {
+	if transaction.query == nil {
+		return nil, errors.New("unexpected playback transaction query")
+	}
+	return transaction.query(query, arguments...)
+}
+
+func (transaction *playbackTransactionStub) QueryRow(context.Context, string, ...any) pgx.Row {
+	if transaction.row == nil {
+		return testPlaybackProfileRow{}
+	}
+	return transaction.row
+}
+
+func TestStopPropagatesProfileTransactionFailure(t *testing.T) {
+	now := time.Now().UTC()
+	profileID := "profile-id"
+	grantExpiresAt := now.Add(time.Hour)
+	storageErr := errors.New("profile authorization storage unavailable")
+	service := &Service{
+		now: func() time.Time { return now },
+		profileTxFactory: func(context.Context, auth.Principal) (playbackProfileTransaction, error) {
+			return nil, storageErr
+		},
+	}
+
+	err := service.Stop(context.Background(), auth.Principal{
+		SessionID: "auth-session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
+	}, "playback-session-id")
+	if !errors.Is(err, storageErr) {
+		t.Fatalf("Stop error = %v, want storage failure", err)
+	}
+	if errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("Stop hid storage failure as ErrSessionNotFound: %v", err)
+	}
+}
+
+func TestStopHidesActiveProfileAuthorizationDenial(t *testing.T) {
+	now := time.Now().UTC()
+	profileID := "profile-id"
+	grantExpiresAt := now.Add(time.Hour)
+	service := &Service{
+		now: func() time.Time { return now },
+		profileTxFactory: func(context.Context, auth.Principal) (playbackProfileTransaction, error) {
+			return nil, ErrActiveProfileRequired
+		},
+	}
+
+	err := service.Stop(context.Background(), auth.Principal{
+		SessionID: "auth-session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
+	}, "playback-session-id")
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("Stop error = %v, want ErrSessionNotFound", err)
+	}
+}
+
+func TestCreateSessionCleansOnlyCreatedSessionAfterAuthorizationLoss(t *testing.T) {
+	now := time.Now().UTC()
+	profileID := "profile-id"
+	grantExpiresAt := now.Add(time.Hour)
+	const authSessionID = "auth-session-id"
+	const createdSessionID = "created-playback-session-id"
+
+	createTransaction := &playbackTransactionStub{
+		query: func(string, ...any) (pgx.Rows, error) { return emptyPlaybackRows{}, nil },
+		row:   playbackSessionIDRow{id: createdSessionID},
+	}
+	var cleanupQuery string
+	var cleanupArguments []any
+	cleanupTransaction := &playbackTransactionStub{
+		exec: func(query string, arguments ...any) (pgconn.CommandTag, error) {
+			cleanupQuery = query
+			cleanupArguments = append([]any(nil), arguments...)
+			return pgconn.NewCommandTag("DELETE 1"), nil
+		},
+	}
+	authorizationCalls := 0
+	hlsStopped := false
+	hlsDone := make(chan struct{})
+	close(hlsDone)
+	hlsDirectory := t.TempDir()
+	service := &Service{
+		now: func() time.Time { return now },
+		hlsJobs: map[string]*hlsJob{
+			createdSessionID + "/source-id": {
+				directory: hlsDirectory,
+				cancel:    func() { hlsStopped = true },
+				done:      hlsDone,
+			},
+		},
+		mediaOptions: MediaOptions{TempDirectory: hlsDirectory},
+		profileTxFactory: func(context.Context, auth.Principal) (playbackProfileTransaction, error) {
+			authorizationCalls++
+			switch authorizationCalls {
+			case 1:
+				return createTransaction, nil
+			case 2:
+				return nil, ErrActiveProfileRequired
+			default:
+				t.Fatalf("unexpected profile authorization transaction %d", authorizationCalls)
+				return nil, errors.New("unexpected profile authorization transaction")
+			}
+		},
+		sessionCleanupTxFactory: func(context.Context) (playbackProfileTransaction, error) {
+			if authorizationCalls != 2 {
+				t.Fatalf("cleanup started before final authorization was denied")
+			}
+			return cleanupTransaction, nil
+		},
+	}
+	principal := auth.Principal{
+		SessionID: authSessionID, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
+	}
+
+	_, err := service.createSession(context.Background(), principal, sourceReference{
+		MediaType: "movie", ResourceID: "resource-id",
+	}, "", nil, nil, nil, nil)
+	if !errors.Is(err, ErrActiveProfileRequired) {
+		t.Fatalf("createSession error = %v, want original authorization denial", err)
+	}
+	if !createTransaction.commitCalled {
+		t.Fatal("server-created playback session was not committed before final authorization")
+	}
+	if !cleanupTransaction.commitCalled {
+		t.Fatal("created playback session cleanup was not committed")
+	}
+	if !strings.Contains(cleanupQuery, "WHERE id::text = $1 AND auth_session_id = $2") {
+		t.Fatalf("cleanup query is not scoped by playback and auth session IDs: %s", cleanupQuery)
+	}
+	if len(cleanupArguments) != 2 || cleanupArguments[0] != createdSessionID || cleanupArguments[1] != authSessionID {
+		t.Fatalf("cleanup arguments = %#v, want only created session %q and auth session %q", cleanupArguments, createdSessionID, authSessionID)
+	}
+	if !hlsStopped {
+		t.Fatal("authorization-loss cleanup did not stop the created session HLS job")
+	}
+	if _, exists := service.hlsJobs[createdSessionID+"/source-id"]; exists {
+		t.Fatal("authorization-loss cleanup retained the created session HLS job")
+	}
+}
+
+func TestCreateSessionPreservesAuthorizationErrorWhenCleanupFails(t *testing.T) {
+	now := time.Now().UTC()
+	profileID := "profile-id"
+	grantExpiresAt := now.Add(time.Hour)
+	cleanupErr := errors.New("cleanup storage unavailable")
+	createTransaction := &playbackTransactionStub{
+		query: func(string, ...any) (pgx.Rows, error) { return emptyPlaybackRows{}, nil },
+		row:   playbackSessionIDRow{id: "created-playback-session-id"},
+	}
+	authorizationCalls := 0
+	service := &Service{
+		now: func() time.Time { return now },
+		profileTxFactory: func(context.Context, auth.Principal) (playbackProfileTransaction, error) {
+			authorizationCalls++
+			if authorizationCalls == 1 {
+				return createTransaction, nil
+			}
+			return nil, ErrActiveProfileRequired
+		},
+		sessionCleanupTxFactory: func(context.Context) (playbackProfileTransaction, error) {
+			return nil, cleanupErr
+		},
+	}
+	principal := auth.Principal{
+		SessionID: "auth-session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
+	}
+
+	_, err := service.createSession(context.Background(), principal, sourceReference{
+		MediaType: "movie", ResourceID: "resource-id",
+	}, "", nil, nil, nil, nil)
+	if !errors.Is(err, ErrActiveProfileRequired) {
+		t.Fatalf("createSession error = %v, want original authorization denial", err)
+	}
+	if errors.Is(err, cleanupErr) {
+		t.Fatalf("cleanup failure replaced original authorization error: %v", err)
 	}
 }

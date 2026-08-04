@@ -48,11 +48,16 @@ func profileRecords() []map[string]any {
 
 func profileRecord(id, name string, child, manage bool, avatar string) map[string]any {
 	return map[string]any{
-		"id": id, "name": name, "isChild": child, "hasPin": false,
+		"id": id, "categoryId": DemoCategoryID, "category": demoCategoryRef(),
+		"name": name, "description": nil, "isChild": child, "hasPin": false,
 		"canManage": manage, "enabled": true, "availableFrom": nil, "availableUntil": nil,
 		"accessStartTime": nil, "accessEndTime": nil, "accessTimezone": "UTC", "accessible": true,
 		"avatar": map[string]any{"kind": "preset", "presetId": strings.TrimSuffix(avatar, ".svg"), "url": asset(avatar)},
 	}
+}
+
+func demoCategoryRef() map[string]any {
+	return map[string]any{"id": DemoCategoryID, "name": "Uncategorized", "color": nil, "icon": nil}
 }
 
 func mediaCatalog() []mediaSeed {

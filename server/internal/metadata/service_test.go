@@ -96,14 +96,14 @@ func TestNormalizeQueryOptionsRejectsUnsafeValues(t *testing.T) {
 func TestRequireActiveProfileRejectsMissingAndExpiredGrants(t *testing.T) {
 	profileID := "profile-id"
 	expired := time.Now().UTC().Add(-time.Minute)
-	if err := requireActiveProfile(auth.Principal{}); !errors.Is(err, ErrProfileRequired) {
+	if err := requireActiveProfile(auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}); !errors.Is(err, ErrProfileRequired) {
 		t.Fatalf("expected missing profile rejection, got %v", err)
 	}
-	if err := requireActiveProfile(auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expired}); !errors.Is(err, ErrProfileRequired) {
+	if err := requireActiveProfile(auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expired}); !errors.Is(err, ErrProfileRequired) {
 		t.Fatalf("expected expired grant rejection, got %v", err)
 	}
 	active := time.Now().UTC().Add(time.Minute)
-	if err := requireActiveProfile(auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &active}); err != nil {
+	if err := requireActiveProfile(auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &active}); err != nil {
 		t.Fatalf("expected active grant, got %v", err)
 	}
 }
@@ -522,7 +522,7 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 
 	profileID := "44444444-4444-4444-8444-444444444444"
 	expiresAt := time.Now().UTC().Add(time.Hour)
-	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
 	service := &Service{pool: pool}
 	if _, err := service.SeasonDetails(ctx, principal, seasonID, "fr-FR", "tmdb"); err != nil {
 		t.Fatalf("load cached season details: %v", err)
@@ -614,7 +614,7 @@ func TestCachedMovieMetadataRestoresCanonicalSnapshot(t *testing.T) {
 
 	profileID := "44444444-4444-4444-8444-444444444444"
 	expiresAt := time.Now().UTC().Add(time.Hour)
-	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
 	service := &Service{pool: pool}
 	if _, err := service.MovieDetails(ctx, principal, movieID, "fr-FR"); err != nil {
 		t.Fatalf("load cached movie details: %v", err)
@@ -632,7 +632,7 @@ func TestCachedMovieMetadataRestoresCanonicalSnapshot(t *testing.T) {
 		t.Fatalf("unexpected cached movie snapshot: title=%q poster=%q background=%q release=%q", title, posterURL, backgroundURL, releaseDate)
 	}
 
-	if _, err := service.persistMoviePage(ctx, ProviderMoviePage{
+	if _, err := service.persistMoviePage(ctx, principal, ProviderMoviePage{
 		Items: []ProviderMovie{{
 			ExternalID:  "123",
 			Title:       "Shallow Search Result",
@@ -1025,7 +1025,7 @@ func TestDefaultTVDBMappingFallsBackToTMDBWhenTVDBIsUnavailable(t *testing.T) {
 	}
 	profileID := "44444444-4444-4444-8444-444444444444"
 	expiresAt := time.Now().UTC().Add(time.Hour)
-	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
 
 	withoutTVDB, err := (&Service{pool: pool}).SeriesDetails(ctx, principal, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb"})
 	if err != nil {
@@ -1075,7 +1075,7 @@ func TestExplicitTVDBEpisodeOrderDoesNotFallBackToTMDB(t *testing.T) {
 	mapper := &failingTelevisionMapper{err: ErrProviderUnauthorized}
 	_, err = (&Service{pool: pool, mapper: mapper}).SeriesDetails(
 		ctx,
-		auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt},
+		auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt},
 		seriesID,
 		SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb", EpisodeOrderID: "2"},
 	)
@@ -1125,7 +1125,7 @@ func TestCachedTVDBSeriesMappingUsesCanonicalCast(t *testing.T) {
 	profileID := "44444444-4444-4444-8444-444444444444"
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	service := &Service{pool: pool, mapper: cacheOnlyTelevisionMapper{}}
-	resolved, err := service.SeriesDetails(ctx, auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb"})
+	resolved, err := service.SeriesDetails(ctx, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb"})
 	if err != nil {
 		t.Fatalf("load cached TVDB mapping: %v", err)
 	}
@@ -1135,10 +1135,9 @@ func TestCachedTVDBSeriesMappingUsesCanonicalCast(t *testing.T) {
 }
 
 func TestSeriesDetailsValidatesEpisodeOrderSelection(t *testing.T) {
-	profileID := "profile-id"
-	expiresAt := time.Now().UTC().Add(time.Hour)
-	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
-	service := &Service{}
+	pool := newCanonicalMergeTestPool(t)
+	principal := canonicalMergePrincipal()
+	service := &Service{pool: pool}
 
 	_, err := service.SeriesDetails(context.Background(), principal, "series-id", SeriesDetailsOptions{
 		MappingProvider: "tmdb",

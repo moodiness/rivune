@@ -12,6 +12,19 @@ export type Discovery = {
   interfaceLanguage: InterfaceLanguage;
 };
 
+export type AuthorizationScope = "global_admin" | "category";
+
+export type CategoryRef = {
+  id: string;
+  name: string;
+  color: string | null;
+  icon: string | null;
+};
+
+type ScopedAuthorization =
+  | { authorizationScope: "global_admin"; category: null }
+  | { authorizationScope: "category"; category: CategoryRef };
+
 export type TokenPair = {
   tokenType: "Bearer";
   accessToken: string;
@@ -20,14 +33,57 @@ export type TokenPair = {
   refreshTokenExpiresAt: string;
   sessionId: string;
   deviceId: string;
+} & ScopedAuthorization;
+
+export type AccessCategory = {
+  id: string;
+  name: string;
+  description: string | null;
+  color: string | null;
+  icon: string | null;
+  position: number;
+  isDefault: boolean;
+  profileCount: number;
+  deviceCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ManagedDevice = {
+  id: string;
+  name: string;
+  platform: string;
+  categoryId: string;
+  category: CategoryRef;
+  internalNote: string | null;
+  approvedAt: string | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CategoryInput = {
+  name: string;
+  description?: string | null;
+  color?: string | null;
+  icon?: string | null;
+};
+
+export type DeviceUpdateInput = {
+  name?: string;
+  categoryId?: string;
+  internalNote?: string | null;
 };
 
 export type Avatar = { kind: "preset" | "custom"; presetId?: string; url: string };
 export type Profile = {
   id: string;
   name: string;
+  description: string | null;
+  categoryId: string;
+  category: CategoryRef;
   isChild: boolean;
-  hasPin?: boolean;
+  hasPin: boolean;
   canManage: boolean;
   enabled: boolean;
   availableFrom: string | null;
@@ -39,8 +95,12 @@ export type Profile = {
   avatar: Avatar;
 };
 export type Account = {
-  user: { id: string; username: string; role: "admin" | "user" | "member" | "demo" };
-  session: { id: string; deviceId: string; activeProfile: { id: string; expiresAt: string } | null };
+  user: { id: string; username: string; role: "admin" | "member" | "demo" };
+  session: {
+    id: string;
+    deviceId: string;
+    activeProfile: { id: string; expiresAt: string } | null;
+  } & ScopedAuthorization;
   profiles: Profile[];
   maintenance: { enabled: boolean; message: string | null };
 };
@@ -56,7 +116,7 @@ export type ProfileSession = {
   lastSeenAt: string;
   profileGrantExpiresAt: string;
   current: boolean;
-};
+} & ScopedAuthorization;
 export type SessionNotification = {
   id: string;
   message: string;

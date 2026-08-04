@@ -57,17 +57,29 @@ func (a *API) approveDeviceAuthorization(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	var request struct {
-		UserCode string `json:"userCode"`
+		UserCode     string         `json:"userCode"`
+		CategoryID   string         `json:"categoryId"`
+		DeviceName   nullableString `json:"deviceName,omitempty"`
+		InternalNote *string        `json:"internalNote,omitempty"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if request.DeviceName.Set && request.DeviceName.Value == nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_device_approval", "deviceName cannot be null")
+		return
+	}
 
-	err := a.auth.ApproveDeviceAuthorization(r.Context(), principal, request.UserCode)
+	err := a.auth.ApproveDeviceAuthorization(r.Context(), principal, auth.DeviceAuthorizationApproval{
+		UserCode: request.UserCode, CategoryID: request.CategoryID,
+		DeviceName: request.DeviceName.Value, InternalNote: request.InternalNote,
+	})
 	switch {
 	case errors.Is(err, auth.ErrForbidden):
-		writeError(w, http.StatusForbidden, "device_approval_forbidden", "Select a profile allowed to manage devices")
+		writeError(w, http.StatusForbidden, "device_approval_forbidden", "You cannot approve a device into this access category")
+	case errors.Is(err, auth.ErrInvalidInput):
+		writeError(w, http.StatusUnprocessableEntity, "invalid_device_approval", authInputMessage(err))
 	case errors.Is(err, auth.ErrInvalidUserCode):
 		writeError(w, http.StatusNotFound, "device_code_not_found", "The device code is invalid or expired")
 	case errors.Is(err, auth.ErrDeviceAuthorizationClaimed):

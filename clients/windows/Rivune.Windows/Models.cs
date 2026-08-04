@@ -1,10 +1,11 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Rivune.Windows;
 
 public static class RivuneProtocol
 {
-    public const int Version = 17;
+    public const int Version = 18;
 }
 
 public sealed record Discovery
@@ -18,14 +19,131 @@ public sealed record Discovery
     public required string InterfaceLanguage { get; init; }
 }
 
-public sealed record Device
+[JsonConverter(typeof(JsonStringEnumConverter<AuthorizationScope>))]
+public enum AuthorizationScope
+{
+    [JsonStringEnumMemberName("global_admin")]
+    GlobalAdministrator,
+    [JsonStringEnumMemberName("category")]
+    Category,
+}
+
+public sealed record CategoryRef
+{
+    public required Guid Id { get; init; }
+    public required string Name { get; init; }
+    public required string? Color { get; init; }
+    public required string? Icon { get; init; }
+}
+
+internal interface IAuthorizationContext : IJsonOnDeserialized
+{
+    AuthorizationScope AuthorizationScope { get; }
+    CategoryRef? Category { get; }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        switch (AuthorizationScope)
+        {
+            case global::Rivune.Windows.AuthorizationScope.GlobalAdministrator when Category is null:
+            case global::Rivune.Windows.AuthorizationScope.Category when Category is not null:
+                return;
+            case global::Rivune.Windows.AuthorizationScope.GlobalAdministrator:
+                throw new JsonException("A global_admin authorization context cannot include a category.");
+            case global::Rivune.Windows.AuthorizationScope.Category:
+                throw new JsonException("A category authorization context requires a category.");
+            default:
+                throw new JsonException($"Unsupported authorization scope '{AuthorizationScope}'.");
+        }
+    }
+}
+
+public sealed record Category
+{
+    public required Guid Id { get; init; }
+    public required string Name { get; init; }
+    public required string? Description { get; init; }
+    public required string? Color { get; init; }
+    public required string? Icon { get; init; }
+    public required int Position { get; init; }
+    public required bool IsDefault { get; init; }
+    public required long ProfileCount { get; init; }
+    public required long DeviceCount { get; init; }
+    public required string CreatedAt { get; init; }
+    public required string UpdatedAt { get; init; }
+}
+
+public sealed record CategoryList
+{
+    public required IReadOnlyList<Category> Categories { get; init; }
+}
+
+public readonly record struct PatchField<T>
+{
+    private PatchField(bool isSpecified, T? value)
+    {
+        IsSpecified = isSpecified;
+        Value = value;
+    }
+
+    public bool IsSpecified { get; }
+    public T? Value { get; }
+    public static PatchField<T> Omitted => default;
+    public static PatchField<T> Null => new(true, default);
+    public static PatchField<T> FromValue(T value) => new(true, value);
+}
+
+public sealed record CategoryCreateRequest
+{
+    public required string Name { get; init; }
+    public string? Description { get; init; }
+    public string? Color { get; init; }
+    public string? Icon { get; init; }
+}
+
+public sealed record CategoryUpdateRequest
+{
+    public string? Name { get; init; }
+    public PatchField<string> Description { get; init; }
+    public PatchField<string> Color { get; init; }
+    public PatchField<string> Icon { get; init; }
+    public bool? IsDefault { get; init; }
+}
+
+public sealed record LoginDevice
 {
     public Guid? Id { get; init; }
     public required string Name { get; init; }
     public required string Platform { get; init; }
 }
 
-public sealed record TokenPair
+public sealed record Device
+{
+    public required Guid Id { get; init; }
+    public required string Name { get; init; }
+    public required string Platform { get; init; }
+    public required Guid CategoryId { get; init; }
+    public required CategoryRef Category { get; init; }
+    public required string? InternalNote { get; init; }
+    public required string? ApprovedAt { get; init; }
+    public required string? LastSeenAt { get; init; }
+    public required string CreatedAt { get; init; }
+    public required string UpdatedAt { get; init; }
+}
+
+public sealed record DeviceList
+{
+    public required IReadOnlyList<Device> Devices { get; init; }
+}
+
+public sealed record DeviceUpdateRequest
+{
+    public string? Name { get; init; }
+    public Guid? CategoryId { get; init; }
+    public PatchField<string> InternalNote { get; init; }
+}
+
+public sealed record TokenPair : IAuthorizationContext
 {
     public required string TokenType { get; init; }
     public required string AccessToken { get; init; }
@@ -34,6 +152,8 @@ public sealed record TokenPair
     public required string RefreshTokenExpiresAt { get; init; }
     public required Guid SessionId { get; init; }
     public required Guid DeviceId { get; init; }
+    public required AuthorizationScope AuthorizationScope { get; init; }
+    public required CategoryRef? Category { get; init; }
 }
 
 public sealed record Account
@@ -50,17 +170,60 @@ public sealed record AccountUser
     public required string Role { get; init; }
 }
 
-public sealed record AccountSession
+public sealed record AccountSession : IAuthorizationContext
 {
     public required Guid Id { get; init; }
     public required Guid DeviceId { get; init; }
     public required ActiveProfileGrant? ActiveProfile { get; init; }
+    public required AuthorizationScope AuthorizationScope { get; init; }
+    public required CategoryRef? Category { get; init; }
 }
 
 public sealed record ActiveProfileGrant
 {
     public required Guid Id { get; init; }
     public required string ExpiresAt { get; init; }
+}
+
+public sealed record SessionList
+{
+    public required IReadOnlyList<Session> Sessions { get; init; }
+}
+
+public sealed record Session : IAuthorizationContext
+{
+    public required Guid Id { get; init; }
+    public required Guid DeviceId { get; init; }
+    public required string DeviceName { get; init; }
+    public required string Platform { get; init; }
+    public required string? IpAddress { get; init; }
+    public required string CreatedAt { get; init; }
+    public required string LastSeenAt { get; init; }
+    public required bool Current { get; init; }
+    public required AuthorizationScope AuthorizationScope { get; init; }
+    public required CategoryRef? Category { get; init; }
+}
+
+public sealed record ProfileSessionList
+{
+    public required IReadOnlyList<ProfileSession> Sessions { get; init; }
+}
+
+public sealed record ProfileSession : IAuthorizationContext
+{
+    public required Guid Id { get; init; }
+    public required Guid UserId { get; init; }
+    public required string Username { get; init; }
+    public required Guid DeviceId { get; init; }
+    public required string DeviceName { get; init; }
+    public required string Platform { get; init; }
+    public required string? IpAddress { get; init; }
+    public required string CreatedAt { get; init; }
+    public required string LastSeenAt { get; init; }
+    public required string ProfileGrantExpiresAt { get; init; }
+    public required bool Current { get; init; }
+    public required AuthorizationScope AuthorizationScope { get; init; }
+    public required CategoryRef? Category { get; init; }
 }
 
 public sealed record ProfileList
@@ -72,6 +235,9 @@ public sealed record Profile
 {
     public required Guid Id { get; init; }
     public required string Name { get; init; }
+    public string? Description { get; init; }
+    public required Guid CategoryId { get; init; }
+    public required CategoryRef Category { get; init; }
     public required bool IsChild { get; init; }
     public required bool HasPin { get; init; }
     public required bool CanManage { get; init; }
@@ -96,6 +262,52 @@ public sealed record ProfileSelection
 {
     public required Profile Profile { get; init; }
     public required string ExpiresAt { get; init; }
+}
+
+public sealed record CategoryOrderRequest
+{
+    public required IReadOnlyList<Guid> CategoryIds { get; init; }
+}
+
+public sealed record ProfileCategoryMoveRequest
+{
+    public required IReadOnlyList<Guid> ProfileIds { get; init; }
+    public required Guid CategoryId { get; init; }
+}
+
+public sealed record DeviceCategoryMoveRequest
+{
+    public required IReadOnlyList<Guid> DeviceIds { get; init; }
+    public required Guid CategoryId { get; init; }
+}
+
+public sealed record DeviceAuthorizationRequest
+{
+    public required string DeviceName { get; init; }
+    public required string Platform { get; init; }
+}
+
+public sealed record DeviceAuthorizationResponse
+{
+    public required string DeviceCode { get; init; }
+    public required string UserCode { get; init; }
+    public required string VerificationUri { get; init; }
+    public required string VerificationUriComplete { get; init; }
+    public required string ExpiresAt { get; init; }
+    public required int IntervalSeconds { get; init; }
+}
+
+public sealed record DeviceCodeApprovalRequest
+{
+    public required string UserCode { get; init; }
+    public required Guid CategoryId { get; init; }
+    public string? DeviceName { get; init; }
+    public string? InternalNote { get; init; }
+}
+
+public sealed record DeviceCodeTokenRequest
+{
+    public required string DeviceCode { get; init; }
 }
 
 public sealed record SettingsValues

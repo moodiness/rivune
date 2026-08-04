@@ -29,9 +29,6 @@ var trailerSeasonPatterns = []*regexp.Regexp{
 }
 
 func (s *Service) Trailers(ctx context.Context, principal auth.Principal, titleID, language, captionLanguage string, seasonNumber *int) (TrailerList, error) {
-	if err := requireActiveProfile(principal); err != nil {
-		return TrailerList{}, err
-	}
 	normalizedLanguage, err := normalizeLanguage(language)
 	if err != nil {
 		return TrailerList{}, err
@@ -47,9 +44,15 @@ func (s *Service) Trailers(ctx context.Context, principal auth.Principal, titleI
 		return TrailerList{}, fmt.Errorf("%w: seasonNumber must be at least 0", ErrInvalidInput)
 	}
 
+	tx, err := s.beginAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return TrailerList{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	var mediaType string
 	var externalID *string
-	err = s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT title.media_type, external.external_id
 		FROM titles AS title
 		LEFT JOIN title_external_ids AS external
@@ -68,6 +71,9 @@ func (s *Service) Trailers(ctx context.Context, principal auth.Principal, titleI
 	if seasonNumber != nil && mediaType != MediaTypeSeries {
 		return TrailerList{}, fmt.Errorf("%w: seasonNumber is only valid for series", ErrInvalidInput)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return TrailerList{}, fmt.Errorf("commit trailer title identity read: %w", err)
+	}
 	if s.trailerProvider == nil {
 		return TrailerList{}, ErrProviderUnavailable
 	}
@@ -77,12 +83,16 @@ func (s *Service) Trailers(ctx context.Context, principal auth.Principal, titleI
 		resolvedExternalID = strings.TrimSpace(*externalID)
 	}
 	if resolvedExternalID == "" {
-		resolvedExternalID, err = s.resolveProviderExternalID(ctx, titleID, mediaType)
+		resolvedExternalID, err = s.resolveProviderExternalID(ctx, titleID, mediaType, &principal)
 		if err != nil {
 			return TrailerList{}, err
 		}
 	}
-	return chooseTrailers(ctx, s.trailerProvider, mediaType, resolvedExternalID, normalizedLanguage, normalizedCaptionLanguage, seasonNumber)
+	result, err := chooseTrailers(ctx, s.trailerProvider, mediaType, resolvedExternalID, normalizedLanguage, normalizedCaptionLanguage, seasonNumber)
+	if err != nil {
+		return TrailerList{}, err
+	}
+	return result, s.requireActiveProfile(ctx, principal)
 }
 
 func chooseTrailers(ctx context.Context, provider TrailerProvider, mediaType, externalID, language, captionLanguage string, seasonNumber *int) (TrailerList, error) {

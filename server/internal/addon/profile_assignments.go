@@ -40,18 +40,18 @@ func authorizeProfileAssignments(ctx context.Context, tx pgx.Tx, principal auth.
 	if _, included := profileIDSet(profileIDs)[activeProfileID]; !included {
 		lockIDs = append(lockIDs, activeProfileID)
 	}
-	sort.Strings(lockIDs)
-	for _, profileID := range lockIDs {
-		if err := lockProfile(ctx, tx, profileID); err != nil {
-			return err
-		}
-	}
-	authorized, err := auth.CanManageProfiles(ctx, tx, principal, lockIDs)
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, lockIDs, true)
 	if err != nil {
 		return err
 	}
 	if !authorized {
 		return ErrForbidden
+	}
+	sort.Strings(lockIDs)
+	for _, profileID := range lockIDs {
+		if err := lockProfile(ctx, tx, profileID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -98,8 +98,15 @@ func addonTransportAssignedToProfiles(ctx context.Context, tx pgx.Tx, transportU
 func applyAddonUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, addonID, transportURL string, profileIDs []string, manifest Manifest, rawManifest json.RawMessage) error {
 	var lockedID string
 	if err := tx.QueryRow(ctx, `
-		SELECT id::text FROM profile_addons WHERE id = $1::uuid FOR UPDATE
-	`, addonID).Scan(&lockedID); err != nil {
+		SELECT pa.id::text
+		FROM profile_addons pa
+		WHERE pa.id = $1::uuid
+		  AND EXISTS (
+		      SELECT 1 FROM addon_profile_access access
+		      WHERE access.addon_id = pa.id AND access.profile_id = $2::uuid
+		  )
+		FOR UPDATE
+	`, addonID, activeProfileID).Scan(&lockedID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -187,17 +194,6 @@ func (service *Service) Update(ctx context.Context, principal auth.Principal, ad
 	if err != nil {
 		return InstalledAddon{}, err
 	}
-	current, err := service.addonForProfile(ctx, activeProfileID, addonID)
-	if err != nil {
-		return InstalledAddon{}, err
-	}
-	authorized, err := auth.CanManageProfiles(ctx, service.pool, principal, mergeProfileIDs(profileIDs, current.ProfileIDs))
-	if err != nil {
-		return InstalledAddon{}, err
-	}
-	if !authorized {
-		return InstalledAddon{}, ErrForbidden
-	}
 	manifest, rawManifest, err := service.transport.Manifest(ctx, transportURL)
 	if err != nil {
 		return InstalledAddon{}, err
@@ -207,6 +203,9 @@ func (service *Service) Update(ctx context.Context, principal auth.Principal, ad
 		return InstalledAddon{}, fmt.Errorf("begin addon update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, tx, principal, activeProfileID); err != nil {
+		return InstalledAddon{}, err
+	}
 	if err := applyAddonUpdate(ctx, tx, principal, activeProfileID, addonID, transportURL, profileIDs, manifest, rawManifest); err != nil {
 		return InstalledAddon{}, err
 	}

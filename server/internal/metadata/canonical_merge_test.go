@@ -445,7 +445,7 @@ const (
 func canonicalMergePrincipal() auth.Principal {
 	profileID := canonicalProfileID
 	expiresAt := time.Now().UTC().Add(time.Hour)
-	return auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+	return auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
 }
 
 func newCanonicalMergeTestPool(t *testing.T) *pgxpool.Pool {
@@ -479,6 +479,15 @@ func newCanonicalMergeTestPool(t *testing.T) *pgxpool.Pool {
 			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE, provider text NOT NULL, language text NOT NULL, payload jsonb NOT NULL,
 			expires_at timestamptz NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (title_id, provider, language),
 			FOREIGN KEY (title_id, provider) REFERENCES title_external_ids(title_id, provider) ON DELETE CASCADE);
+		CREATE TEMPORARY TABLE profiles (
+			id uuid PRIMARY KEY, category_id uuid, name text NOT NULL DEFAULT '');
+		CREATE TEMPORARY TABLE user_profile_access (
+			user_id uuid NOT NULL, profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE, can_manage boolean NOT NULL DEFAULT false,
+			PRIMARY KEY (user_id, profile_id));
+		INSERT INTO profiles (id) VALUES
+			('44444444-4444-4444-8444-444444444444'::uuid),
+			('11111111-1111-4111-8111-111111111111'::uuid),
+			('22222222-2222-4222-8222-222222222222'::uuid);
 		CREATE TEMPORARY TABLE profile_library (
 			profile_id uuid NOT NULL, title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE, added_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
 			PRIMARY KEY (profile_id, title_id));

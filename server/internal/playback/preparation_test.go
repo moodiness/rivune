@@ -73,7 +73,7 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	now := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
 	profileID := "profile-id"
 	profileGrantExpiresAt := now.Add(time.Hour)
-	principal := auth.Principal{SessionID: "auth-session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &profileGrantExpiresAt}
+	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, SessionID: "auth-session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &profileGrantExpiresAt}
 	fetcher := &preparationResourceFetcher{}
 	processor := &countingProbeProcessor{inspection: MediaInspection{
 		DurationSeconds: 1320,
@@ -83,9 +83,10 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	}}
 	service := &Service{
 		addons: fetcher, processor: processor, now: func() time.Time { return now },
-		references:   newSourceReferenceStore(func() time.Time { return now }),
-		probes:       newMediaProbeCache(func() time.Time { return now }),
-		preparations: newPlaybackPreparationCache(func() time.Time { return now }),
+		references:       newSourceReferenceStore(func() time.Time { return now }),
+		probes:           newMediaProbeCache(func() time.Time { return now }),
+		preparations:     newPlaybackPreparationCache(func() time.Time { return now }),
+		profileTxFactory: testPlaybackProfileTxFactory,
 	}
 
 	list, err := service.Sources(context.Background(), principal, SourcesInput{
@@ -163,7 +164,7 @@ func TestBuildPreparedPlaybackReportsMissingConversionCapabilityWithoutEncoding(
 		addons: fetcher, processor: processor,
 		probes: newMediaProbeCache(time.Now),
 	}
-	playback, err := service.buildPreparedPlayback(context.Background(), auth.Principal{}, sourceReference{
+	playback, err := service.buildPreparedPlayback(context.Background(), auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}, sourceReference{
 		AddonMediaType: "movie", ResourceID: "tt1234567",
 		Source: Source{
 			ID: "stream-1", Mode: "direct", URL: "https://media.example/movie.mkv",
@@ -225,7 +226,7 @@ func TestSourceReferenceIsSessionBoundClonedAndExpired(t *testing.T) {
 	now := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
 	store := newSourceReferenceStore(func() time.Time { return now })
 	profileID := "profile-id"
-	principal := auth.Principal{SessionID: "session-id", ActiveProfileID: &profileID}
+	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, SessionID: "session-id", ActiveProfileID: &profileID}
 	reference, err := store.put(sourceReference{
 		AuthSessionID: principal.SessionID, ProfileID: profileID, MediaType: "movie", ResourceID: "tt1234567",
 		Source: Source{Name: "Original"}, Asset: &storedAsset{URL: "https://media.example/movie.mkv", Headers: map[string]string{"Authorization": "Bearer secret"}},
@@ -246,7 +247,7 @@ func TestSourceReferenceIsSessionBoundClonedAndExpired(t *testing.T) {
 	if reloaded.Source.Name != "Original" || reloaded.Asset.Headers["Authorization"] != "Bearer secret" {
 		t.Fatalf("stored reference was mutated through a clone: %+v", reloaded)
 	}
-	if _, err := store.get(reference.ID, auth.Principal{SessionID: "other-session", ActiveProfileID: &profileID}); err != ErrSourceReferenceExpired {
+	if _, err := store.get(reference.ID, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, SessionID: "other-session", ActiveProfileID: &profileID}); err != ErrSourceReferenceExpired {
 		t.Fatalf("cross-session reference lookup returned %v", err)
 	}
 	now = now.Add(sourceReferenceTTL)

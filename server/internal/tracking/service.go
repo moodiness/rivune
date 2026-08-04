@@ -65,34 +65,45 @@ func providerFacingError(err error) error {
 	return err
 }
 
-func (s *Service) authorizeProfile(ctx context.Context, principal auth.Principal, profileID string) (string, error) {
-	profileID = strings.TrimSpace(profileID)
+func (s *Service) authorizeProfile(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID string) (string, error) {
+	profileID = strings.ToLower(strings.TrimSpace(profileID))
 	if profileID == "" {
 		return "", ErrForbidden
 	}
-	var canonicalProfileID string
-	err := s.pool.QueryRow(ctx, `
-		SELECT p.id::text
-		FROM profiles p
-		LEFT JOIN user_profile_access upa ON upa.profile_id = p.id AND upa.user_id = $2::uuid
-		WHERE p.id::text = lower($1) AND ($3 = 'admin' OR upa.user_id IS NOT NULL)
-	`, profileID, principal.UserID, principal.Role).Scan(&canonicalProfileID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrForbidden
-	}
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, false)
 	if err != nil {
 		return "", fmt.Errorf("authorize tracking profile: %w", err)
 	}
-	return canonicalProfileID, nil
+	if !authorized {
+		return "", ErrForbidden
+	}
+	return profileID, nil
 }
 
 func (s *Service) Statuses(ctx context.Context, principal auth.Principal, profileID string) ([]Status, error) {
-	profileID, err := s.authorizeProfile(ctx, principal, profileID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tracking statuses query: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID)
 	if err != nil {
 		return nil, err
 	}
+	statuses, err := s.statuses(ctx, tx, profileID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tracking statuses query: %w", err)
+	}
+	return statuses, nil
+}
+
+func (s *Service) statuses(ctx context.Context, tx pgx.Tx, profileID string) ([]Status, error) {
 	statuses := []Status{{Provider: "trakt", Configured: s.client.configured("trakt")}, {Provider: "simkl", Configured: s.client.configured("simkl")}}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := tx.Query(ctx, `
 		SELECT account.provider, account.sync_watched, account.sync_progress, account.sync_library,
 		       account.connected_at, account.last_success_at, COALESCE(account.last_error, ''), count(outbox.id)
 		FROM profile_tracking_accounts account
@@ -134,10 +145,19 @@ func (s *Service) Statuses(ctx context.Context, principal auth.Principal, profil
 }
 
 func (s *Service) BeginDeviceAuthorization(ctx context.Context, principal auth.Principal, profileID, provider string) (DeviceAuthorization, error) {
-	profileID, err := s.authorizeProfile(ctx, principal, profileID)
+	authorizationTx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return DeviceAuthorization{}, fmt.Errorf("begin tracking authorization check: %w", err)
+	}
+	defer func() { _ = authorizationTx.Rollback(ctx) }()
+	profileID, err = s.authorizeProfile(ctx, authorizationTx, principal, profileID)
 	if err != nil {
 		return DeviceAuthorization{}, err
 	}
+	if err := authorizationTx.Commit(ctx); err != nil {
+		return DeviceAuthorization{}, fmt.Errorf("commit tracking authorization check: %w", err)
+	}
+
 	provider, err = normalizeProvider(provider)
 	if err != nil {
 		return DeviceAuthorization{}, err
@@ -155,8 +175,18 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, principal auth.P
 		return DeviceAuthorization{}, err
 	}
 	expiresAt := time.Now().UTC().Add(time.Duration(code.ExpiresIn) * time.Second)
+
+	storeTx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return DeviceAuthorization{}, fmt.Errorf("begin tracking authorization storage: %w", err)
+	}
+	defer func() { _ = storeTx.Rollback(ctx) }()
+	profileID, err = s.authorizeProfile(ctx, storeTx, principal, profileID)
+	if err != nil {
+		return DeviceAuthorization{}, err
+	}
 	var result DeviceAuthorization
-	err = s.pool.QueryRow(ctx, `
+	err = storeTx.QueryRow(ctx, `
 		INSERT INTO profile_tracking_authorizations (profile_id, provider, provider_code_encrypted, user_code, verification_url, interval_seconds, expires_at)
 		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (profile_id, provider) DO UPDATE SET provider_code_encrypted = EXCLUDED.provider_code_encrypted,
@@ -168,11 +198,19 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, principal auth.P
 	if err != nil {
 		return DeviceAuthorization{}, fmt.Errorf("store tracking authorization: %w", err)
 	}
+	if err := storeTx.Commit(ctx); err != nil {
+		return DeviceAuthorization{}, fmt.Errorf("commit tracking authorization storage: %w", err)
+	}
 	return result, nil
 }
 
 func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal auth.Principal, profileID, provider, authorizationID string) (Status, error) {
-	profileID, err := s.authorizeProfile(ctx, principal, profileID)
+	pollTx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Status{}, fmt.Errorf("begin tracking authorization poll: %w", err)
+	}
+	defer func() { _ = pollTx.Rollback(ctx) }()
+	profileID, err = s.authorizeProfile(ctx, pollTx, principal, profileID)
 	if err != nil {
 		return Status{}, err
 	}
@@ -184,7 +222,7 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 	var interval int
 	var expiresAt time.Time
 	var lastPolled *time.Time
-	err = s.pool.QueryRow(ctx, `SELECT provider_code_encrypted, interval_seconds, expires_at, last_polled_at FROM profile_tracking_authorizations WHERE id::text = $1 AND profile_id = $2::uuid AND provider = $3`, strings.TrimSpace(authorizationID), profileID, provider).Scan(&encrypted, &interval, &expiresAt, &lastPolled)
+	err = pollTx.QueryRow(ctx, `SELECT provider_code_encrypted, interval_seconds, expires_at, last_polled_at FROM profile_tracking_authorizations WHERE id::text = $1 AND profile_id = $2::uuid AND provider = $3`, strings.TrimSpace(authorizationID), profileID, provider).Scan(&encrypted, &interval, &expiresAt, &lastPolled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Status{}, ErrAuthorizationGone
 	}
@@ -198,9 +236,13 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 	if lastPolled != nil && now.Before(lastPolled.Add(time.Duration(interval)*time.Second)) {
 		return Status{}, ErrAuthorizationSlow
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE profile_tracking_authorizations SET last_polled_at = $2 WHERE id::text = $1`, authorizationID, now); err != nil {
+	if _, err := pollTx.Exec(ctx, `UPDATE profile_tracking_authorizations SET last_polled_at = $2 WHERE id::text = $1`, authorizationID, now); err != nil {
 		return Status{}, fmt.Errorf("update tracking authorization poll: %w", err)
 	}
+	if err := pollTx.Commit(ctx); err != nil {
+		return Status{}, fmt.Errorf("commit tracking authorization poll: %w", err)
+	}
+
 	code, err := s.cipher.decrypt(encrypted, profileID+":"+provider+":authorization")
 	if err != nil {
 		return Status{}, err
@@ -220,11 +262,16 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 			return Status{}, err
 		}
 	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Status{}, fmt.Errorf("begin tracking connection: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID)
+	if err != nil {
+		return Status{}, err
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO profile_tracking_accounts (profile_id, provider, access_token_encrypted, refresh_token_encrypted, token_expires_at)
 		VALUES ($1::uuid, $2, $3, NULLIF($4, ''::bytea), $5)
@@ -240,19 +287,25 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 	if err := s.seedProfileState(ctx, tx, profileID, provider); err != nil {
 		return Status{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Status{}, fmt.Errorf("commit tracking connection: %w", err)
-	}
-	statuses, err := s.Statuses(ctx, principal, profileID)
+	statuses, err := s.statuses(ctx, tx, profileID)
 	if err != nil {
 		return Status{}, err
 	}
+	var result Status
+	found := false
 	for _, status := range statuses {
 		if status.Provider == provider {
-			return status, nil
+			result, found = status, true
+			break
 		}
 	}
-	return Status{}, ErrNotConnected
+	if !found {
+		return Status{}, ErrNotConnected
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Status{}, fmt.Errorf("commit tracking connection: %w", err)
+	}
+	return result, nil
 }
 
 func (s *Service) seedProfileState(ctx context.Context, tx pgx.Tx, profileID, provider string) error {
@@ -329,7 +382,12 @@ func (s *Service) seedProfileState(ctx context.Context, tx pgx.Tx, profileID, pr
 }
 
 func (s *Service) UpdatePreferences(ctx context.Context, principal auth.Principal, profileID, provider string, input PreferencesInput) (Status, error) {
-	profileID, err := s.authorizeProfile(ctx, principal, profileID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Status{}, fmt.Errorf("begin tracking preferences update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID)
 	if err != nil {
 		return Status{}, err
 	}
@@ -340,11 +398,6 @@ func (s *Service) UpdatePreferences(ctx context.Context, principal auth.Principa
 	if input.SyncWatched == nil && input.SyncProgress == nil && input.SyncLibrary == nil {
 		return Status{}, fmt.Errorf("%w: at least one toggle is required", ErrInvalidInput)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Status{}, fmt.Errorf("begin tracking preferences update: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	result, err := tx.Exec(ctx, `
 		UPDATE profile_tracking_accounts
 		SET sync_watched = COALESCE($3, sync_watched), sync_progress = COALESCE($4, sync_progress),
@@ -377,23 +430,34 @@ func (s *Service) UpdatePreferences(ctx context.Context, principal auth.Principa
 			return Status{}, err
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Status{}, fmt.Errorf("commit tracking preferences update: %w", err)
-	}
-	statuses, err := s.Statuses(ctx, principal, profileID)
+	statuses, err := s.statuses(ctx, tx, profileID)
 	if err != nil {
 		return Status{}, err
 	}
+	var updated Status
+	found := false
 	for _, status := range statuses {
 		if status.Provider == provider {
-			return status, nil
+			updated, found = status, true
+			break
 		}
 	}
-	return Status{}, ErrNotConnected
+	if !found {
+		return Status{}, ErrNotConnected
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Status{}, fmt.Errorf("commit tracking preferences update: %w", err)
+	}
+	return updated, nil
 }
 
 func (s *Service) Disconnect(ctx context.Context, principal auth.Principal, profileID, provider string) error {
-	profileID, err := s.authorizeProfile(ctx, principal, profileID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tracking disconnect: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID)
 	if err != nil {
 		return err
 	}
@@ -402,16 +466,30 @@ func (s *Service) Disconnect(ctx context.Context, principal auth.Principal, prof
 		return err
 	}
 	var encrypted []byte
-	err = s.pool.QueryRow(ctx, `DELETE FROM profile_tracking_accounts WHERE profile_id = $1::uuid AND provider = $2 RETURNING access_token_encrypted`, profileID, provider).Scan(&encrypted)
+	err = tx.QueryRow(ctx, `
+		WITH deleted_account AS (
+			DELETE FROM profile_tracking_accounts
+			WHERE profile_id = $1::uuid AND provider = $2
+			RETURNING access_token_encrypted
+		), deleted_authorization AS (
+			DELETE FROM profile_tracking_authorizations
+			WHERE profile_id = $1::uuid AND provider = $2
+		)
+		SELECT access_token_encrypted FROM deleted_account
+	`, profileID, provider).Scan(&encrypted)
 	if errors.Is(err, pgx.ErrNoRows) {
-		_, _ = s.pool.Exec(ctx, `DELETE FROM profile_tracking_authorizations WHERE profile_id = $1::uuid AND provider = $2`, profileID, provider)
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit tracking disconnect: %w", err)
+		}
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("disconnect tracking account: %w", err)
 	}
-	_, _ = s.pool.Exec(ctx, `DELETE FROM profile_tracking_authorizations WHERE profile_id = $1::uuid AND provider = $2`, profileID, provider)
 	accessToken, decryptErr := s.cipher.decrypt(encrypted, profileID+":"+provider+":access")
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tracking disconnect: %w", err)
+	}
 	if decryptErr == nil {
 		revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()

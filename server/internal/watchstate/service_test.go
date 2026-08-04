@@ -25,9 +25,9 @@ func TestActiveProfileIDRequiresUnexpiredSelection(t *testing.T) {
 		principal auth.Principal
 		wantErr   bool
 	}{
-		{name: "selected", principal: auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &future}},
-		{name: "missing", principal: auth.Principal{}, wantErr: true},
-		{name: "expired", principal: auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &past}, wantErr: true},
+		{name: "selected", principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &future}},
+		{name: "missing", principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}, wantErr: true},
+		{name: "expired", principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &past}, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -111,9 +111,7 @@ func TestResolveTitleRejectsNonISOReleaseDate(t *testing.T) {
 	profileID := "11111111-1111-4111-8111-111111111111"
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	service := NewService(nil)
-	_, err := service.ResolveTitle(context.Background(), auth.Principal{
-		ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
-	}, ResolveTitleInput{
+	_, err := service.ResolveTitle(context.Background(), auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}, ResolveTitleInput{
 		MediaType: "movie", Provider: "tmdb", ExternalID: "1", ResourceID: "1",
 		Title: "Movie", Released: "2026-8-01",
 	})
@@ -125,7 +123,7 @@ func TestResolveTitleRejectsNonISOReleaseDate(t *testing.T) {
 func TestResolveTitleRequiresAddonScopedTVIdentity(t *testing.T) {
 	profileID := "11111111-1111-4111-8111-111111111111"
 	expiresAt := time.Now().UTC().Add(time.Hour)
-	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
 	service := NewService(nil)
 
 	for _, input := range []ResolveTitleInput{
@@ -159,6 +157,18 @@ func TestResolveTitlePreservesCanonicalMetadataSnapshot(t *testing.T) {
 
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE profiles (
+			id uuid PRIMARY KEY,
+			category_id uuid
+		);
+		CREATE TEMPORARY TABLE user_profile_access (
+			user_id uuid NOT NULL,
+			profile_id uuid NOT NULL,
+			can_manage boolean NOT NULL DEFAULT false,
+			PRIMARY KEY (user_id, profile_id)
+		);
+		INSERT INTO profiles (id)
+		VALUES ('11111111-1111-4111-8111-111111111111');
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			media_type text NOT NULL,
@@ -198,9 +208,7 @@ func TestResolveTitlePreservesCanonicalMetadataSnapshot(t *testing.T) {
 
 	profileID := "11111111-1111-4111-8111-111111111111"
 	expiresAt := time.Now().UTC().Add(time.Hour)
-	if _, err := NewService(pool).ResolveTitle(ctx, auth.Principal{
-		ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
-	}, ResolveTitleInput{
+	if _, err := NewService(pool).ResolveTitle(ctx, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}, ResolveTitleInput{
 		MediaType:     "movie",
 		Provider:      "tmdb",
 		ExternalID:    "123",
@@ -265,6 +273,19 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE profiles (
+			id uuid PRIMARY KEY,
+			category_id uuid
+		);
+		CREATE TEMPORARY TABLE user_profile_access (
+			user_id uuid NOT NULL,
+			profile_id uuid NOT NULL,
+			can_manage boolean NOT NULL DEFAULT false,
+			PRIMARY KEY (user_id, profile_id)
+		);
+		INSERT INTO profiles (id) VALUES
+			('11111111-1111-4111-8111-111111111111'),
+			('22222222-2222-4222-8222-222222222222');
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			media_type text NOT NULL,
@@ -312,8 +333,8 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	profileOneID := "11111111-1111-4111-8111-111111111111"
 	profileTwoID := "22222222-2222-4222-8222-222222222222"
-	profileOne := auth.Principal{ActiveProfileID: &profileOneID, ProfileGrantExpiresAt: &expiresAt}
-	profileTwo := auth.Principal{ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt}
+	profileOne := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileOneID, ProfileGrantExpiresAt: &expiresAt}
+	profileTwo := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt}
 	trackingSink := &recordingTrackingSink{}
 	service := NewService(pool, trackingSink)
 
@@ -530,8 +551,14 @@ func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 		t.Fatalf("seed temporary progress: %v", err)
 	}
 
-	items, err := NewService(pool).nextEpisodeItems(
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin next-episode query: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	items, err := nextEpisodeItems(
 		ctx,
+		tx,
 		"11111111-1111-4111-8111-111111111111",
 		nil,
 		10,
@@ -578,6 +605,18 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE profiles (
+			id uuid PRIMARY KEY,
+			category_id uuid
+		);
+		CREATE TEMPORARY TABLE user_profile_access (
+			user_id uuid NOT NULL,
+			profile_id uuid NOT NULL,
+			can_manage boolean NOT NULL DEFAULT false,
+			PRIMARY KEY (user_id, profile_id)
+		);
+		INSERT INTO profiles (id)
+		VALUES ('11111111-1111-4111-8111-111111111111');
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY,
 			media_type text NOT NULL,
@@ -622,7 +661,7 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 
 	profileID := "11111111-1111-4111-8111-111111111111"
 	expiresAt := time.Now().UTC().Add(time.Hour)
-	principal := auth.Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
 	service := NewService(pool)
 
 	initial, err := service.ContinueWatching(ctx, principal, 10)
