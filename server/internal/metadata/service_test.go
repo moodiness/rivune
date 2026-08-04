@@ -691,14 +691,14 @@ func TestMatchMappedEpisodesKeepsMatchedEpisodesWhenTVDBHasUnmatchedTail(t *test
 	}
 }
 
-func TestMatchMappedEpisodesRejectsCompletelyUnmatchedTVDBSeason(t *testing.T) {
-	_, _, err := matchMappedEpisodes(
+func TestMatchMappedEpisodesLeavesCompletelyUnmatchedEpisodesForProviderPersistence(t *testing.T) {
+	episodes, links, err := matchMappedEpisodes(
 		"tvdb:series:1002",
 		[]ProviderEpisode{{ExternalID: "1201", Name: "Unknown", SeasonNumber: 2, EpisodeNumber: 1, AirDate: "2025-01-05"}},
 		[]Episode{{ID: "tmdb-episode", Name: "Different", SeasonNumber: 1, EpisodeNumber: 3, AirDate: "2024-01-21", ExternalIDs: map[string]string{"tmdb": "503"}}},
 	)
-	if !errors.Is(err, ErrProviderFailure) {
-		t.Fatalf("expected provider failure for completely unmatched season, got %v", err)
+	if err != nil || len(episodes) != 0 || len(links) != 0 {
+		t.Fatalf("unmatched TVDB episode was not deferred for provider persistence: episodes=%+v links=%+v err=%v", episodes, links, err)
 	}
 }
 
@@ -833,6 +833,56 @@ func TestMappedSpecialsPersistTVDBOnlyEpisodesWithoutTMDBSeason(t *testing.T) {
 	}
 	if persistedEpisodes != 4 {
 		t.Fatalf("persisted %d TVDB-only special episodes, want 4", persistedEpisodes)
+	}
+}
+
+func TestMappedSeasonPersistsTVDBOnlyEpisodeBeforeTMDBPublishesIt(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	seriesID, _, _, _ := seedMappedSpecialsCache(t, pool, false)
+	mapper := &specialsMapper{season: ProviderSeason{
+		ExternalID: "2257111", Name: "Season 2", SeasonNumber: 2,
+		Episodes: []ProviderEpisode{{
+			ExternalID: "11888797", Name: "TBA", SeasonNumber: 2, EpisodeNumber: 1,
+		}},
+	}}
+	service := &Service{pool: pool, mapper: mapper, cacheTTL: time.Hour}
+	mappedID := mappedSeasonID(seriesID, mapper.season.ExternalID)
+
+	season, err := service.SeasonDetails(context.Background(), canonicalMergePrincipal(), mappedID, "en-US", "tvdb")
+	if err != nil {
+		t.Fatalf("load TVDB season before TMDB episode publication: %v", err)
+	}
+	if season.SeasonNumber != 2 || season.ID != mappedID || len(season.Episodes) != 1 ||
+		season.Episodes[0].SeasonID != mappedID || season.Episodes[0].ExternalIDs["tvdb"] != "11888797" {
+		t.Fatalf("unexpected TVDB-only season payload: %+v", season)
+	}
+
+	var persistedEpisodes int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*)
+		FROM titles AS season
+		JOIN title_external_ids AS season_identity
+		  ON season_identity.title_id = season.id
+		 AND season_identity.provider = 'tvdb'
+		 AND season_identity.namespace = 'season'
+		 AND season_identity.external_id = '2257111'
+		JOIN titles AS episode
+		  ON episode.parent_id = season.id
+		 AND episode.media_type = 'episode'
+		 AND episode.ordinal = 1
+		JOIN title_external_ids AS episode_identity
+		  ON episode_identity.title_id = episode.id
+		 AND episode_identity.provider = 'tvdb'
+		 AND episode_identity.namespace = 'episode'
+		 AND episode_identity.external_id = '11888797'
+		WHERE season.parent_id = $1::uuid
+		  AND season.media_type = 'season'
+		  AND season.ordinal = 2
+	`, seriesID).Scan(&persistedEpisodes); err != nil {
+		t.Fatalf("query persisted TVDB-only episode: %v", err)
+	}
+	if persistedEpisodes != 1 {
+		t.Fatalf("persisted %d TVDB-only episodes, want 1", persistedEpisodes)
 	}
 }
 

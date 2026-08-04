@@ -29,7 +29,6 @@ var (
 	externalProviderPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	mappedSeasonPattern     = regexp.MustCompile(`^tvdb:([0-9a-fA-F-]{36}):([1-9][0-9]*)$`)
 	episodeOrderPattern     = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
-	errNoMappedEpisodes     = errors.New("no TVDB episodes could be matched to TMDB")
 )
 
 type Service struct {
@@ -1019,11 +1018,7 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 	}
 	episodes, tvdbLinks, err := matchMappedEpisodes(seasonID, provided.Episodes, canonicalEpisodes)
 	if err != nil {
-		if provided.SeasonNumber != 0 || !errors.Is(err, errNoMappedEpisodes) {
-			return Season{}, err
-		}
-		episodes = make([]Episode, 0, len(provided.Episodes))
-		tvdbLinks = make(map[string]string)
+		return Season{}, err
 	}
 	tx, err := s.beginAuthorizedProfileTx(ctx, principal)
 	if err != nil {
@@ -1035,7 +1030,7 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 			return Season{}, err
 		}
 	}
-	if provided.SeasonNumber == 0 && len(episodes) < len(provided.Episodes) {
+	if len(episodes) < len(provided.Episodes) {
 		matchedTVDBIDs := make(map[string]struct{}, len(tvdbLinks))
 		for _, tvdbID := range tvdbLinks {
 			matchedTVDBIDs[tvdbID] = struct{}{}
@@ -1228,9 +1223,6 @@ func matchMappedEpisodes(seasonID string, provided []ProviderEpisode, canonical 
 			ExternalIDs:    externalIDs,
 		})
 		links[canonicalEpisode.ID] = tvdbID
-	}
-	if len(provided) > 0 && len(result) == 0 {
-		return nil, nil, fmt.Errorf("%w: %w", ErrProviderFailure, errNoMappedEpisodes)
 	}
 	sort.Slice(result, func(left, right int) bool {
 		return result[left].EpisodeNumber < result[right].EpisodeNumber
