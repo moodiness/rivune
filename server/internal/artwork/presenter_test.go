@@ -120,9 +120,11 @@ func TestPresentResolvedFolderLocalizesFallbackArtworkAndRawPayload(t *testing.T
 	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
 
 	poster := fixture.URL + "/fallback-poster.png"
+	sourcePoster := fixture.URL + "/source-poster.png"
 	cover := fixture.URL + "/folder-cover.png"
 	resolved := collection.ResolvedFolder{
-		Folder: collection.Folder{CoverImageURL: cover},
+		Folder:           collection.Folder{CoverImageURL: cover},
+		SourcePosterURLs: map[string]string{"collection-source": sourcePoster},
 		Items: []collection.Item{{
 			ID: "unknown:1", MediaType: "movie", Title: "Fallback", PosterURL: poster,
 			ExternalIDs: map[string]string{}, Raw: json.RawMessage(`{"poster":"` + poster + `","name":"Fallback"}`),
@@ -130,7 +132,9 @@ func TestPresentResolvedFolderLocalizesFallbackArtworkAndRawPayload(t *testing.T
 	}
 	service.PresentResolvedFolder(context.Background(), &resolved)
 
-	if !strings.HasPrefix(resolved.Items[0].PosterURL, publicPrefix) || !strings.HasPrefix(resolved.Folder.CoverImageURL, publicPrefix) {
+	if !strings.HasPrefix(resolved.Items[0].PosterURL, publicPrefix) ||
+		!strings.HasPrefix(resolved.Folder.CoverImageURL, publicPrefix) ||
+		!strings.HasPrefix(resolved.SourcePosterURLs["collection-source"], publicPrefix) {
 		t.Fatalf("fallback artwork was not localized: %#v", resolved)
 	}
 	if strings.Contains(string(resolved.Items[0].Raw), fixture.URL) || !strings.Contains(string(resolved.Items[0].Raw), publicPrefix) {

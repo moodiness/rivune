@@ -9,6 +9,16 @@ export type CapturedRequest = {
   profileId: string | null;
   authorization: string | null;
 };
+type CollectionFolderFixture = {
+  id: string;
+  title: string;
+  tileShape: "poster" | "landscape" | "square";
+  sourceView?: "merged" | "categories" | "folders";
+  focusGifEnabled: boolean;
+  hideTitle: boolean;
+  sources: Array<{ id?: string; kind: string; title: string; [key: string]: unknown }>;
+};
+
 
 type CategoryRef = {
   id: string;
@@ -269,7 +279,7 @@ function collection(profileId: string) {
   const name = profileId === "bob" ? "Bob's Fresh Picks" : "Alice's Slow Shelf";
   return {
     id: `${profileId}-collection`, title: name, heroEnabled: false, pinToTop: false, focusGlowEnabled: false, viewMode: "follow_layout", folderCoverShape: "poster",
-    folders: [{ id: `${profileId}-folder`, title: name, tileShape: "poster", focusGifEnabled: false, hideTitle: false, sources: [] }],
+    folders: [{ id: `${profileId}-folder`, title: name, tileShape: "poster", focusGifEnabled: false, hideTitle: false, sources: [] } as CollectionFolderFixture],
     profileIds: [profileId], position: 0, version: 1, createdAt, updatedAt: createdAt,
   };
 }
@@ -303,7 +313,9 @@ export class RivuneHarness {
   private readonly effectiveSettingsDelays: number[] = [];
   private readonly playbackStopDelays: number[] = [];
   private readonly collectionDelays = new Map<string, number>();
-  private readonly collectionFolders = new Map<string, Array<{ id: string; title: string }>>();
+  private readonly collectionViewModes = new Map<string, "tabbed_grid" | "rows" | "follow_layout">();
+  private readonly collectionSourcePosters = new Map<string, boolean>();
+  private readonly collectionFolders = new Map<string, Array<Pick<CollectionFolderFixture, "id" | "title"> & Partial<CollectionFolderFixture>>>();
   private readonly folderDelays = new Map<string, number>();
   private readonly seasonOverrides = new Map<string, unknown>();
   private libraryItems: Array<Record<string, unknown>> = [];
@@ -467,11 +479,19 @@ export class RivuneHarness {
     this.maintenance = { enabled, message };
   }
 
+  setCollectionViewMode(profileId: string, viewMode: "tabbed_grid" | "rows" | "follow_layout") {
+    this.collectionViewModes.set(profileId, viewMode);
+  }
+  setCollectionSourcePosters(profileId: string, enabled: boolean) {
+    this.collectionSourcePosters.set(profileId, enabled);
+  }
+
+
   delayCollections(profileId: string, milliseconds: number) {
     this.collectionDelays.set(profileId, milliseconds);
   }
 
-  setCollectionFolders(profileId: string, folders: Array<{ id: string; title: string }>) {
+  setCollectionFolders(profileId: string, folders: Array<Pick<CollectionFolderFixture, "id" | "title"> & Partial<CollectionFolderFixture>>) {
     this.collectionFolders.set(profileId, folders.map((folder) => ({ ...folder })));
   }
 
@@ -485,7 +505,7 @@ export class RivuneHarness {
     if (configured) {
       value.folders = configured.map((folder) => ({ ...value.folders[0], ...folder }));
     }
-    return value;
+    return { ...value, viewMode: this.collectionViewModes.get(profileId) ?? value.viewMode };
   }
 
   delayNextEffectiveSettings(milliseconds: number) {
@@ -1039,7 +1059,23 @@ export class RivuneHarness {
       const title = configured ? `${folder.title} Exclusive` : collectionProfile === "bob" ? "Bob Exclusive" : "Alice Exclusive";
       const itemID = configured ? `${collectionProfile}-${folderID}-exclusive` : `${collectionProfile}-exclusive`;
       const posterURL = configured ? `/api/v1/artwork/${itemID}` : `https://fixtures.rivune.test/${itemID}.svg`;
-      await json(route, { collectionId: folderItems[1], folder, items: [{ id: itemID, mediaType: "movie", title, posterUrl: posterURL, description: `${title} fixture` }], page: 1, hasMore: false, errors: [] });
+      const sourcePosterUrls = this.collectionSourcePosters.get(collectionProfile) === false
+        ? {}
+        : Object.fromEntries(folder.sources.flatMap((source) =>
+          source.id ? [[source.id, `/api/v1/artwork/${source.id}-collection-poster`]] : [],
+        ));
+      const itemSources = folder.sources.slice(0, 1).flatMap((source) =>
+        source.id ? [{ id: source.id, kind: source.kind, title: source.title }] : [],
+      );
+      await json(route, {
+        collectionId: folderItems[1],
+        folder,
+        items: [{ id: itemID, mediaType: "movie", title, posterUrl: posterURL, description: `${title} fixture`, sources: itemSources }],
+        ...(Object.keys(sourcePosterUrls).length > 0 ? { sourcePosterUrls } : {}),
+        page: 1,
+        hasMore: false,
+        errors: [],
+      });
       return;
     }
     if (path === "/continue-watching") {

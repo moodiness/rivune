@@ -233,7 +233,16 @@ func (service *Service) PresentResolvedFolder(ctx context.Context, resolved *col
 		}
 	}
 
-	assignments := make([]urlAssignment, 0, len(resolved.Items)*3+3)
+	sourcePosterIDs := make([]string, 0, len(resolved.SourcePosterURLs))
+	sourcePosterURLs := make([]string, 0, len(resolved.SourcePosterURLs))
+	for sourceID, posterURL := range resolved.SourcePosterURLs {
+		sourcePosterIDs = append(sourcePosterIDs, sourceID)
+		sourcePosterURLs = append(sourcePosterURLs, posterURL)
+	}
+	assignments := make([]urlAssignment, 0, len(resolved.Items)*3+3+len(sourcePosterURLs))
+	for index := range sourcePosterURLs {
+		addStringAssignment(&assignments, &sourcePosterURLs[index])
+	}
 	addStringAssignment(&assignments, &resolved.Folder.CoverImageURL)
 	addStringAssignment(&assignments, &resolved.Folder.TitleLogoURL)
 	addStringAssignment(&assignments, &resolved.Folder.HeroBackdropURL)
@@ -257,6 +266,9 @@ func (service *Service) PresentResolvedFolder(ctx context.Context, resolved *col
 		collectMapArtworkAssignments(root, state, &assignments)
 	}
 	service.applyURLAssignments(ctx, assignments)
+	for index, sourceID := range sourcePosterIDs {
+		resolved.SourcePosterURLs[sourceID] = sourcePosterURLs[index]
+	}
 	for _, state := range rawStates {
 		if !state.changed {
 			continue

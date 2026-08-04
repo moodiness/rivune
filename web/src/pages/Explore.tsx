@@ -804,6 +804,7 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
   const [items, setItems] = useState(row.resolved.items);
   const [page, setPage] = useState(row.resolved.page);
   const [hasMore, setHasMore] = useState(row.resolved.hasMore);
+  const [sourcePosterUrls, setSourcePosterUrls] = useState(row.resolved.sourcePosterUrls ?? {});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const sources = useMemo(() => row.resolved.folder.sources.filter((source) => source.id), [row.resolved.folder.sources]);
@@ -816,12 +817,15 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
     setItems(row.resolved.items);
     setPage(row.resolved.page);
     setHasMore(row.resolved.hasMore);
+    setSourcePosterUrls(row.resolved.sourcePosterUrls ?? {});
   }, [row]);
 
   useEffect(() => {
     let active = true;
     void refresh?.then((updated) => {
-      if (!active || !updated || loadedMoreRef.current) return;
+      if (!active || !updated) return;
+      setSourcePosterUrls(updated.resolved.sourcePosterUrls ?? {});
+      if (loadedMoreRef.current) return;
       setItems(updated.resolved.items);
       setPage(updated.resolved.page);
       setHasMore(updated.resolved.hasMore);
@@ -891,7 +895,7 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
     {error && <Notice>{error}</Notice>}
     {browsingSourceFolders ? <div className="source-folder-grid">{sources.map((source) => {
       const sourceItems = itemsBySource.get(source.id ?? "") ?? [];
-      const artwork = sourceItems[0]?.posterUrl || sourceItems[0]?.backgroundUrl;
+      const artwork = sourcePosterUrls[source.id ?? ""] || sourceItems[0]?.posterUrl || sourceItems[0]?.backgroundUrl;
       return <button key={source.id} type="button" className="source-folder-card" onClick={() => setActiveSourceID(source.id ?? "")} aria-label={t("home.folder.openNamed", { name: source.title })}>
         <span className="source-folder-card__visual">{artwork ? <img src={artwork} alt="" loading="lazy" /> : <span>{source.title.slice(0, 2).toUpperCase()}</span>}</span>
         <span className="source-folder-card__copy"><strong>{source.title}</strong><small>{t(sourceItems.length === 1 ? "home.collection.titleCount.one" : "home.collection.titleCount.many", { count: sourceItems.length })}</small></span>

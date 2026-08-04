@@ -358,6 +358,7 @@ export type ResolvedFolder = {
   collectionId: string;
   folder: CollectionFolder;
   items: MediaItem[];
+  sourcePosterUrls?: Record<string, string>;
   page: number;
   hasMore: boolean;
   errors: { sourceId: string; kind: string; code: string; message: string }[];

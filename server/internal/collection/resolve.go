@@ -153,7 +153,7 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, c
 		items = items[:limit]
 		hasMore = true
 	}
-	resolvedFanart, resolvedCollectionFanart := service.enrichFanartArtwork(ctx, folder.Sources, items, language)
+	resolvedFanart, resolvedCollectionFanart, sourcePosterURLs := service.enrichFanartArtwork(ctx, folder.Sources, items, language)
 	if !coverConfigured && resolvedCollectionFanart.poster != "" {
 		folder.CoverImageURL = resolvedCollectionFanart.poster
 	}
@@ -183,7 +183,7 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, c
 		items = []Item{}
 	}
 	resolved := ResolvedFolder{
-		CollectionID: collectionID, Folder: folder, Items: items, Page: page,
+		CollectionID: collectionID, Folder: folder, Items: items, SourcePosterURLs: sourcePosterURLs, Page: page,
 		HasMore: hasMore, Errors: errorsList,
 	}
 	if service.artwork != nil {
@@ -389,13 +389,13 @@ func (value fanartArtwork) available() bool {
 	return value.poster != "" || value.background != "" || value.logo != ""
 }
 
-func (service *Service) enrichFanartArtwork(ctx context.Context, sources []Source, items []Item, language string) ([]fanartArtwork, fanartArtwork) {
+func (service *Service) enrichFanartArtwork(ctx context.Context, sources []Source, items []Item, language string) ([]fanartArtwork, fanartArtwork, map[string]string) {
 	if service.fanart == nil || liveTVOnlySources(sources) {
-		return nil, fanartArtwork{}
+		return nil, fanartArtwork{}, nil
 	}
 	collectionIDs := fanartCollectionTMDBIDs(sources)
 	if len(items) == 0 && len(collectionIDs) == 0 {
-		return nil, fanartArtwork{}
+		return nil, fanartArtwork{}, nil
 	}
 	itemArtwork := make([]fanartArtwork, len(items))
 	itemErrors := make([]error, len(items))
@@ -462,6 +462,8 @@ func (service *Service) enrichFanartArtwork(ctx context.Context, sources []Sourc
 		}
 		items[index].FanartResolved = true
 	}
+	collectionArtworkByTMDBID := make(map[string]fanartArtwork, len(collectionArtwork))
+	var folderArtwork fanartArtwork
 	for index, value := range collectionArtwork {
 		if collectionErrors[index] != nil {
 			if service.logger != nil {
@@ -470,11 +472,28 @@ func (service *Service) enrichFanartArtwork(ctx context.Context, sources []Sourc
 			}
 			continue
 		}
-		if value.available() {
-			return itemArtwork, value
+		if !value.available() {
+			continue
+		}
+		collectionArtworkByTMDBID[collectionIDs[index]] = value
+		if !folderArtwork.available() {
+			folderArtwork = value
 		}
 	}
-	return itemArtwork, fanartArtwork{}
+	sourcePosterURLs := make(map[string]string, len(collectionArtworkByTMDBID))
+	for _, source := range sources {
+		tmdbID, ok := fanartCollectionTMDBID(source)
+		if !ok || source.ID == "" {
+			continue
+		}
+		if poster := collectionArtworkByTMDBID[tmdbID].poster; poster != "" {
+			sourcePosterURLs[source.ID] = poster
+		}
+	}
+	if len(sourcePosterURLs) == 0 {
+		sourcePosterURLs = nil
+	}
+	return itemArtwork, folderArtwork, sourcePosterURLs
 }
 
 func liveTVOnlySources(sources []Source) bool {
@@ -492,21 +511,28 @@ func liveTVOnlySources(sources []Source) bool {
 
 func fanartCollectionTMDBIDs(sources []Source) []string {
 	ids := make([]string, 0, len(sources))
-	seen := make(map[int64]struct{}, len(sources))
+	seen := make(map[string]struct{}, len(sources))
 	for _, source := range sources {
-		if !strings.EqualFold(strings.TrimSpace(source.Kind), "tmdb") || source.TMDB == nil ||
-			!strings.EqualFold(strings.TrimSpace(source.TMDB.SourceType), "collection") ||
-			source.TMDB.TMDBID == nil || *source.TMDB.TMDBID <= 0 {
+		id, ok := fanartCollectionTMDBID(source)
+		if !ok {
 			continue
 		}
-		id := *source.TMDB.TMDBID
 		if _, exists := seen[id]; exists {
 			continue
 		}
 		seen[id] = struct{}{}
-		ids = append(ids, strconv.FormatInt(id, 10))
+		ids = append(ids, id)
 	}
 	return ids
+}
+
+func fanartCollectionTMDBID(source Source) (string, bool) {
+	if !strings.EqualFold(strings.TrimSpace(source.Kind), "tmdb") || source.TMDB == nil ||
+		!strings.EqualFold(strings.TrimSpace(source.TMDB.SourceType), "collection") ||
+		source.TMDB.TMDBID == nil || *source.TMDB.TMDBID <= 0 {
+		return "", false
+	}
+	return strconv.FormatInt(*source.TMDB.TMDBID, 10), true
 }
 
 func (service *Service) fanartArtwork(ctx context.Context, item Item, language string) (fanartArtwork, error) {

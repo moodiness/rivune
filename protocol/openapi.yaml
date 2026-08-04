@@ -6306,6 +6306,12 @@ components:
           format: uuid
         folder:
           $ref: "#/components/schemas/CollectionFolder"
+        sourcePosterUrls:
+          type: object
+          description: Fanart.tv collection posters keyed by the configured collection source UUID.
+          additionalProperties:
+            type: string
+            format: uri-reference
         items:
           type: array
           items:

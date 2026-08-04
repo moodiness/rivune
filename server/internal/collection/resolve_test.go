@@ -283,6 +283,7 @@ func TestResolveUsesTMDBCollectionFanartBeforeMovieArtwork(t *testing.T) {
 	folder := Folder{
 		Title: "Avatar",
 		Sources: []Source{{
+			ID:    "avatar-source",
 			Kind:  SourceKindTMDB,
 			Title: "Avatar collection",
 			TMDB: &TMDBSource{
@@ -301,6 +302,9 @@ func TestResolveUsesTMDBCollectionFanartBeforeMovieArtwork(t *testing.T) {
 		resolved.Folder.HeroBackdropURL != "https://assets.fanart.tv/collection-87096-background.jpg" ||
 		resolved.Folder.TitleLogoURL != "https://assets.fanart.tv/collection-87096-logo.png" {
 		t.Fatalf("folder did not use collection-level Fanart: %+v", resolved.Folder)
+	}
+	if resolved.SourcePosterURLs["avatar-source"] != "https://assets.fanart.tv/collection-87096-poster.jpg" {
+		t.Fatalf("source folder did not use its collection-level Fanart poster: %+v", resolved.SourcePosterURLs)
 	}
 	if len(resolved.Items) != 1 ||
 		resolved.Items[0].PosterURL != "https://assets.fanart.tv/movie-19995-poster.jpg" {
@@ -337,6 +341,7 @@ func TestResolveTriesEveryTMDBCollectionForFolderFanart(t *testing.T) {
 		Title: "Batman",
 		Sources: []Source{
 			{
+				ID:    "the-batman-source",
 				Kind:  SourceKindTMDB,
 				Title: "The Batman",
 				TMDB: &TMDBSource{
@@ -346,6 +351,7 @@ func TestResolveTriesEveryTMDBCollectionForFolderFanart(t *testing.T) {
 				},
 			},
 			{
+				ID:    "dark-knight-source",
 				Kind:  SourceKindTMDB,
 				Title: "The Dark Knight",
 				TMDB: &TMDBSource{
@@ -365,6 +371,10 @@ func TestResolveTriesEveryTMDBCollectionForFolderFanart(t *testing.T) {
 		resolved.Folder.HeroBackdropURL != "https://assets.fanart.tv/dark-knight-collection-background.jpg" ||
 		resolved.Folder.TitleLogoURL != "https://assets.fanart.tv/dark-knight-collection-logo.png" {
 		t.Fatalf("folder did not use the next collection with Fanart: %+v", resolved.Folder)
+	}
+	if _, exists := resolved.SourcePosterURLs["the-batman-source"]; exists ||
+		resolved.SourcePosterURLs["dark-knight-source"] != "https://assets.fanart.tv/dark-knight-collection-poster.jpg" {
+		t.Fatalf("source posters did not preserve collection identities: %+v", resolved.SourcePosterURLs)
 	}
 	requested := make(map[string]bool, len(enricher.collections))
 	for _, id := range enricher.collections {
@@ -395,9 +405,9 @@ func TestEnrichFanartArtworkSkipsLiveTVOnlySources(t *testing.T) {
 		ExternalIDs: map[string]string{"tmdb": "550"},
 	}}
 
-	artwork, folderArtwork := service.enrichFanartArtwork(context.Background(), sources, items, "fr-FR")
+	artwork, folderArtwork, sourcePosterURLs := service.enrichFanartArtwork(context.Background(), sources, items, "fr-FR")
 
-	if artwork != nil || folderArtwork.available() {
+	if artwork != nil || folderArtwork.available() || sourcePosterURLs != nil {
 		t.Fatalf("live TV folder unexpectedly resolved Fanart: items=%+v folder=%+v", artwork, folderArtwork)
 	}
 	if len(enricher.movies) != 0 || len(enricher.series) != 0 || len(enricher.collections) != 0 {

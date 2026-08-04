@@ -101,6 +101,41 @@ test("Home restores persistent rows before revalidation and refreshes opened col
   await expect(page.getByText("Alice Exclusive", { exact: true })).toBeVisible();
 });
 
+test("source folders use Fanart collection posters instead of the first title artwork", async ({ page, rivune }) => {
+  rivune.setCollectionViewMode("alice", "tabbed_grid");
+  rivune.setCollectionSourcePosters("alice", false);
+  rivune.setCollectionFolders("alice", [{
+    id: "alice-folder",
+    title: "Spider-Man",
+    sourceView: "folders",
+    sources: [
+      {
+        id: "mcu-source",
+        kind: "tmdb",
+        title: "Spider-Man (MCU)",
+        tmdb: { sourceType: "collection", tmdbId: 531241, mediaType: "movie", sort: "release_date.desc", filters: {} },
+      },
+      {
+        id: "amazing-source",
+        kind: "tmdb",
+        title: "The Amazing Spider-Man",
+        tmdb: { sourceType: "collection", tmdbId: 125574, mediaType: "movie", sort: "release_date.desc", filters: {} },
+      },
+    ],
+  }]);
+
+  await page.goto("/");
+  const openFolder = page.getByRole("button", { name: "Open Spider-Man", exact: true });
+  await expect(openFolder).toBeEnabled();
+  rivune.setCollectionSourcePosters("alice", true);
+  await openFolder.click();
+
+  const mcu = page.getByRole("button", { name: "Open Spider-Man (MCU)" });
+  const amazing = page.getByRole("button", { name: "Open The Amazing Spider-Man" });
+  await expect(mcu.locator("img")).toHaveAttribute("src", "/api/v1/artwork/mcu-source-collection-poster");
+  await expect(amazing.locator("img")).toHaveAttribute("src", "/api/v1/artwork/amazing-source-collection-poster");
+});
+
 test("Home checkpoints resolved folders while slower rows are still loading", async ({ page, rivune }) => {
   rivune.setCollectionFolders("alice", [
     { id: "alice-fast", title: "Fast" },

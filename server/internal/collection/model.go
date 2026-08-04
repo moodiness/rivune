@@ -207,12 +207,13 @@ type SourceFailure struct {
 }
 
 type ResolvedFolder struct {
-	CollectionID string          `json:"collectionId"`
-	Folder       Folder          `json:"folder"`
-	Items        []Item          `json:"items"`
-	Page         int             `json:"page"`
-	HasMore      bool            `json:"hasMore"`
-	Errors       []SourceFailure `json:"errors"`
+	CollectionID     string            `json:"collectionId"`
+	Folder           Folder            `json:"folder"`
+	Items            []Item            `json:"items"`
+	SourcePosterURLs map[string]string `json:"sourcePosterUrls,omitempty"`
+	Page             int               `json:"page"`
+	HasMore          bool              `json:"hasMore"`
+	Errors           []SourceFailure   `json:"errors"`
 }
 
 type LookupResult struct {
