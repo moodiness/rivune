@@ -68,9 +68,9 @@ function newIdempotencyKey() {
 
 export function AdminPage() {
   const { account, activeProfile } = useAuth();
-  const isGlobalAdmin = account?.session.authorizationScope === "global_admin";
-  const canManage = isGlobalAdmin || Boolean(activeProfile?.canManage);
-  const visibleTabs = tabs.filter((item) => !item.globalOnly || isGlobalAdmin);
+  const canManage = Boolean(activeProfile?.canManage);
+  const canManageGlobally = canManage && account?.session.authorizationScope === "global_admin";
+  const visibleTabs = tabs.filter((item) => !item.globalOnly || canManageGlobally);
   const [tab, setTab] = useState<AdminTab>(() => {
     if (!canManage) return "settings";
     const requested = requestedAdminTab();
@@ -80,14 +80,14 @@ export function AdminPage() {
 
   useEffect(() => {
     if (!canManage) setTab("settings");
-    else if (!tabs.some((item) => item.id === tab && (!item.globalOnly || isGlobalAdmin))) setTab("profiles");
-  }, [canManage, isGlobalAdmin, tab]);
+    else if (!tabs.some((item) => item.id === tab && (!item.globalOnly || canManageGlobally))) setTab("profiles");
+  }, [canManage, canManageGlobally, tab]);
 
   useEffect(() => {
     const syncRoute = () => {
       const requested = requestedAdminTab();
       if (!canManage) setTab("settings");
-      else if (requested && tabs.some((item) => item.id === requested && (!item.globalOnly || isGlobalAdmin))) setTab(requested);
+      else if (requested && tabs.some((item) => item.id === requested && (!item.globalOnly || canManageGlobally))) setTab(requested);
     };
     window.addEventListener("hashchange", syncRoute);
     window.addEventListener("popstate", syncRoute);
@@ -95,7 +95,7 @@ export function AdminPage() {
       window.removeEventListener("hashchange", syncRoute);
       window.removeEventListener("popstate", syncRoute);
     };
-  }, [canManage, isGlobalAdmin]);
+  }, [canManage, canManageGlobally]);
 
   function navigateTab(next: AdminTab) {
     setTab(next);
@@ -111,7 +111,7 @@ export function AdminPage() {
       </div>
       <div className="admin-page__context" aria-label={translate("admin.header.workspaceAccessLabel")}>
         <span><Server size={16} aria-hidden="true" /> {translate(canManage ? "admin.header.workspaceServer" : "admin.header.workspacePersonal")}</span>
-        <span><Shield size={16} aria-hidden="true" /> {isGlobalAdmin ? translate("admin.workspace.accessGlobal") : translate(canManage ? "admin.header.accessManager" : "admin.header.accessProfile")}</span>
+        <span><Shield size={16} aria-hidden="true" /> {canManageGlobally ? translate("admin.workspace.accessGlobal") : translate(canManage ? "admin.header.accessManager" : "admin.header.accessProfile")}</span>
       </div>
     </header>
     <div className={`admin-layout ${canManage ? "" : "admin-layout--preferences"}`}>
@@ -129,7 +129,7 @@ export function AdminPage() {
                 : selectedTab === "collections" ? <CollectionsAdmin />
                   : selectedTab === "activity" ? <ActivityAdmin />
                     : selectedTab === "operations" ? <OperationsAdmin />
-                      : <SettingsAdmin />}
+                      : <SettingsAdmin key={activeProfile?.id} />}
       </section>
     </div>
   </div>;
@@ -2578,8 +2578,8 @@ function SettingsAdmin() {
   const [sectionSearch, setSectionSearch] = useState("");
   const settingsTargetRef = useRef(settingsTarget);
   settingsTargetRef.current = settingsTarget;
-  const canManageServer = account?.session.authorizationScope === "global_admin";
-  const canManageProfiles = canManageServer || Boolean(activeProfile?.canManage);
+  const canManageProfiles = Boolean(activeProfile?.canManage);
+  const canManageServer = canManageProfiles && account?.session.authorizationScope === "global_admin";
   const serverSelected = settingsTarget === "server";
   const targetProfile = administrationProfiles.find((candidate) => candidate.id === settingsTarget) ?? activeProfile;
   const settingsDirty = serverSelected ? JSON.stringify(instance) !== JSON.stringify(savedInstance) : JSON.stringify(profile) !== JSON.stringify(savedProfile);

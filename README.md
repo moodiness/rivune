@@ -18,7 +18,6 @@
 </p>
 
 <p align="center">
-  <a href="#whats-new-in-v050">v0.5.0</a> ·
   <a href="#features">Features</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#quick-start-with-docker-compose">Quick start</a> ·
@@ -33,14 +32,6 @@
 <p align="center">
   Rivune is under active development. The web client and backend are usable today. Typed protocol-v18 clients for Apple, Android, and Windows are included; their native application interfaces are planned.
 </p>
-
-## What's new in v0.5.0
-
-- **Category-scoped access:** organize profiles and devices into access categories with independent management boundaries, availability rules, a single default category, profile descriptions, and an expanded preset-avatar catalog
-- **Capability-aware playback:** negotiate direct play, remuxing, audio conversion, or H.264/AAC transcoding from client capabilities while keeping playback diagnostics and provider details server-side
-- **TV and IPTV integration:** discover IPTV catalogs through search and library, with a streamlined channel layout for television interfaces
-- **Stronger media presentation:** prefer season-aware and original episode artwork, reject unsuitable landscape season posters, expose configurable cast carousels, and keep upcoming episodes actionable
-- **More resilient operations:** isolate addon failures, recover from missing metadata during refresh, prevent duplicate stream loading, enforce server-owned notification policy, and provide a secure pre-setup reviewer demo
 
 ## Features
 

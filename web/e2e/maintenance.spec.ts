@@ -242,6 +242,29 @@ test("viewer preferences use the full desktop workspace", async ({ page, rivune 
   await expect(content.getByRole("heading", { name: "Device notifications" })).toHaveCount(0);
 });
 
+test("a global administrator session exposes server administration only through its manager profile", async ({ page, rivune }) => {
+  rivune.setProfileCategory("bob", CATEGORY_IDS.household);
+  await page.goto("/");
+
+  const mainNavigation = page.getByRole("navigation", { name: "Main navigation" });
+  await expect(mainNavigation.getByRole("button", { name: "Administration", exact: true })).toBeVisible();
+  await mainNavigation.getByRole("button", { name: "Administration", exact: true }).click();
+  await expect(page.getByRole("navigation", { name: "Administration sections" }).getByRole("button", { name: /^Categories\b/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "Switch profile" }).first().click();
+  await page.getByRole("button", { name: "Bob Profile" }).click();
+  await expect(page.getByRole("heading", { name: "Bob's Fresh Picks" })).toBeVisible();
+  await expect(mainNavigation.getByRole("button", { name: "Preferences", exact: true })).toBeVisible();
+  await expect(mainNavigation.getByRole("button", { name: "Administration", exact: true })).toHaveCount(0);
+  await mainNavigation.getByRole("button", { name: "Preferences", exact: true }).click();
+
+  await expect(page.locator(".admin-layout--preferences .admin-tabs")).toHaveCount(0);
+  await expect(page.getByText("Profile access", { exact: true })).toBeVisible();
+  await expect(page.locator(".settings-profile-picker")).toHaveCount(0);
+  await expect(page.getByText("Server defaults", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Bob preferences" })).toBeVisible();
+});
+
 test("tracking authorization survives provider slow-down and completes polling", async ({ page, rivune: _rivune }) => {
   let connected = false;
   let tokenAttempts = 0;
