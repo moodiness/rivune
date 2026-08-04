@@ -206,7 +206,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 	if _, err := tx.Exec(ctx, "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = $1", userID); err != nil {
 		return TokenPair{}, fmt.Errorf("clear failed login state: %w", err)
 	}
-	deviceID, deviceCategory, err := upsertDevice(ctx, tx, userID, input)
+	deviceID, deviceCategory, err := upsertDevice(ctx, tx, userID, role, input)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -956,25 +956,35 @@ func (s *Service) issueTokens(now time.Time) (TokenPair, []byte, []byte, error) 
 	}, accessHash, refreshHash, nil
 }
 
-func upsertDevice(ctx context.Context, tx pgx.Tx, userID string, input LoginInput) (string, *category.CategoryRef, error) {
+func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input LoginInput) (string, *category.CategoryRef, error) {
+	preferredCategoryID, err := passwordLoginCategoryID(ctx, tx, userID, role)
+	if err != nil {
+		return "", nil, err
+	}
 	var deviceID, categoryID string
 	if input.DeviceID == "" {
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO devices (user_id, name, platform, category_id, approved_at, last_seen_at)
-			SELECT $1, $2, $3, category.id, now(), now()
-			FROM access_categories category
-			WHERE category.is_default
+			VALUES (
+				$1, $2, $3,
+				COALESCE($4::uuid, (SELECT id FROM access_categories WHERE is_default)),
+				now(), now()
+			)
 			RETURNING id::text, category_id::text
-		`, userID, input.DeviceName, input.Platform).Scan(&deviceID, &categoryID); err != nil {
+		`, userID, input.DeviceName, input.Platform, preferredCategoryID).Scan(&deviceID, &categoryID); err != nil {
 			return "", nil, fmt.Errorf("create device: %w", err)
 		}
 	} else {
 		err := tx.QueryRow(ctx, `
 			UPDATE devices
-			SET name = $3, platform = $4, last_seen_at = now(), updated_at = now()
+			SET name = $3,
+			    platform = $4,
+			    category_id = COALESCE($5::uuid, category_id),
+			    last_seen_at = now(),
+			    updated_at = now()
 			WHERE id::text = $1 AND user_id = $2
 			RETURNING id::text, category_id::text
-		`, input.DeviceID, userID, input.DeviceName, input.Platform).Scan(&deviceID, &categoryID)
+		`, input.DeviceID, userID, input.DeviceName, input.Platform, preferredCategoryID).Scan(&deviceID, &categoryID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", nil, fmt.Errorf("%w: deviceId does not belong to this user", ErrInvalidInput)
 		}
@@ -987,6 +997,28 @@ func upsertDevice(ctx context.Context, tx pgx.Tx, userID string, input LoginInpu
 		return "", nil, err
 	}
 	return deviceID, deviceCategory, nil
+}
+
+func passwordLoginCategoryID(ctx context.Context, tx pgx.Tx, userID, role string) (*string, error) {
+	if role != "admin" {
+		return nil, nil
+	}
+	var categoryID string
+	err := tx.QueryRow(ctx, `
+		SELECT profile.category_id::text
+		FROM user_profile_access access
+		JOIN profiles profile ON profile.id = access.profile_id
+		WHERE access.user_id = $1::uuid
+		ORDER BY access.can_manage DESC, profile.created_at, profile.id
+		LIMIT 1
+	`, userID).Scan(&categoryID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve administrator login category: %w", err)
+	}
+	return &categoryID, nil
 }
 
 func loadCategoryRef(ctx context.Context, querier profileAuthorizationQuerier, categoryID string) (*category.CategoryRef, error) {
