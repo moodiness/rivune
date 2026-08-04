@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Կատարել հիմա",
   "admin.operations.actions.running": "Կատարվում է…",
   "admin.operations.actions.metadata.title": "Ստանալ բացակայող մետատվյալները",
-  "admin.operations.actions.metadata.description": "Թարմացրեք մեկ սահմանափակ խմբաքանակ՝ օգտագործելով պահպանված լեզուն և խմբաքանակի չափը։",
+  "admin.operations.actions.metadata.description": "Թարմացնել բոլոր բացակայող մետատվյալները պահպանված լեզվով։ Մշակումը շարունակվում է խմբաքանակներով, մինչև յուրաքանչյուր մետատվյալի գրառման մշակման փորձ կատարվի։",
   "admin.operations.actions.metadata.scope": "Օգտագործում է կանոնական TMDB → TVDB/Fanart պահպանման շղթան։ Առկա տեղայնացված տվյալները պահպանվում են մատակարարի խափանումների դեպքում։",
   "admin.operations.actions.housekeeping.title": "Կատարել սպասարկում",
   "admin.operations.actions.housekeeping.description": "Անմիջապես գործարկեք հնացած նույնականացման տվյալների և նվագարկման սովորական մաքրումը։",

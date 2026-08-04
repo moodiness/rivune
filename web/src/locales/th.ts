@@ -837,7 +837,7 @@ const catalog = {
   "admin.operations.actions.run": "เรียกใช้ตอนนี้",
   "admin.operations.actions.running": "กำลังเรียกใช้…",
   "admin.operations.actions.metadata.title": "ดึงเมทาดาทาที่ขาดหาย",
-  "admin.operations.actions.metadata.description": "รีเฟรชชุดข้อมูลที่มีขนาดจำกัดหนึ่งชุดโดยใช้ภาษาและขนาดชุดที่บันทึกไว้",
+  "admin.operations.actions.metadata.description": "รีเฟรชข้อมูลเมตาที่ขาดหายทั้งหมดในภาษาที่บันทึกไว้ ระบบจะประมวลผลต่อเป็นชุด ๆ จนกว่าจะได้ลองประมวลผลระเบียนข้อมูลเมตาทุกรายการ",
   "admin.operations.actions.metadata.scope": "ใช้ไปป์ไลน์การจัดเก็บหลัก TMDB → TVDB/Fanart ข้อมูลที่แปลเป็นภาษาท้องถิ่นที่มีอยู่จะยังคงอยู่เมื่อผู้ให้บริการล้มเหลว",
   "admin.operations.actions.housekeeping.title": "เรียกใช้การบำรุงรักษา",
   "admin.operations.actions.housekeeping.description": "เรียกใช้การล้างข้อมูลการตรวจสอบสิทธิ์และการเล่นที่ล้าสมัยตามปกติทันที",

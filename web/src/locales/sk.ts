@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Spustiť teraz",
   "admin.operations.actions.running": "Spúšťa sa…",
   "admin.operations.actions.metadata.title": "Načítať chýbajúce metadáta",
-  "admin.operations.actions.metadata.description": "Obnovte jednu obmedzenú dávku s uloženým jazykom a veľkosťou dávky.",
+  "admin.operations.actions.metadata.description": "Aktualizovať všetky chýbajúce metadáta v uloženom jazyku. Spracovanie pokračuje po dávkach, kým sa systém nepokúsi spracovať každý záznam metadát.",
   "admin.operations.actions.metadata.scope": "Používa kanonický reťazec ukladania TMDB → TVDB/Fanart. Existujúce lokalizované údaje zostanú zachované aj pri zlyhaní poskytovateľa.",
   "admin.operations.actions.housekeeping.title": "Spustiť údržbu",
   "admin.operations.actions.housekeeping.description": "Okamžite spustite bežné čistenie zastaraných overení a prehrávaní.",

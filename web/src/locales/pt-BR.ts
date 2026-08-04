@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Executar agora",
   "admin.operations.actions.running": "Executando…",
   "admin.operations.actions.metadata.title": "Buscar metadados ausentes",
-  "admin.operations.actions.metadata.description": "Atualize um lote limitado com o idioma e o tamanho de lote salvos.",
+  "admin.operations.actions.metadata.description": "Atualize todos os metadados ausentes no idioma salvo. O processamento continua em lotes até que seja feita uma tentativa para cada registro de metadados.",
   "admin.operations.actions.metadata.scope": "Usa o fluxo de persistência canônico TMDB → TVDB/Fanart. Os dados localizados existentes são preservados em caso de falhas dos provedores.",
   "admin.operations.actions.housekeeping.title": "Executar limpeza",
   "admin.operations.actions.housekeeping.description": "Inicie imediatamente a limpeza normal de dados obsoletos de autenticação e reprodução.",

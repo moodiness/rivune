@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Execută acum",
   "admin.operations.actions.running": "Se execută…",
   "admin.operations.actions.metadata.title": "Preia metadatele lipsă",
-  "admin.operations.actions.metadata.description": "Reîmprospătați un singur lot limitat folosind limba și dimensiunea lotului salvate.",
+  "admin.operations.actions.metadata.description": "Reîmprospătează toate metadatele lipsă în limba salvată. Procesarea continuă în loturi până când se încearcă procesarea fiecărei înregistrări de metadate.",
   "admin.operations.actions.metadata.scope": "Utilizează fluxul canonic de persistență TMDB → TVDB/Fanart. Datele localizate existente se păstrează în cazul erorilor furnizorului.",
   "admin.operations.actions.housekeeping.title": "Execută întreținerea",
   "admin.operations.actions.housekeeping.description": "Porniți imediat curățarea obișnuită a datelor învechite de autentificare și redare.",

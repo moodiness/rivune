@@ -396,9 +396,10 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 	return series, nil
 }
 
-// RefreshMissing refreshes a bounded set of titles whose canonical localized
-// metadata is absent or expired. Child titles use their canonical season
-// detail pipeline so episode and hierarchy snapshots remain consistent.
+// RefreshMissing refreshes canonical localized metadata that is absent or
+// expired. A bounded run processes one batch; an exhaustive run keeps loading
+// batches until every existing or newly discovered payload has been attempted
+// once.
 func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOptions) (RefreshResult, error) {
 	language, err := normalizeLanguage(options.Language)
 	if err != nil {
@@ -407,15 +408,65 @@ func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOpti
 	if options.BatchSize < 1 || options.BatchSize > 100 {
 		return RefreshResult{}, fmt.Errorf("%w: batch size must be between 1 and 100", ErrInvalidInput)
 	}
+
+	var result RefreshResult
+	attemptedTitleIDs := make([]string, 0)
+	failedTitleSet := make(map[string]struct{})
+	for {
+		candidates, err := s.missingRefreshCandidates(ctx, language, options.BatchSize, attemptedTitleIDs)
+		if err != nil {
+			return result, err
+		}
+		if len(candidates) == 0 {
+			return result, nil
+		}
+		result.Candidates += len(candidates)
+		for index, candidate := range candidates {
+			if err := ctx.Err(); err != nil {
+				result.Failed += len(candidates) - index
+				for _, remaining := range candidates[index:] {
+					appendFailedTitle(&result, failedTitleSet, remaining.title)
+				}
+				return result, err
+			}
+			attemptedTitleIDs = append(attemptedTitleIDs, candidate.refreshTitleID)
+			refreshErr, attempts := s.refreshMissingCandidate(ctx, candidate, language)
+			if refreshErr == nil {
+				result.Refreshed++
+				continue
+			}
+			if ctx.Err() != nil {
+				result.Failed += len(candidates) - index
+				for _, remaining := range candidates[index:] {
+					appendFailedTitle(&result, failedTitleSet, remaining.title)
+				}
+				return result, ctx.Err()
+			}
+			result.Failed++
+			appendFailedTitle(&result, failedTitleSet, candidate.title)
+			s.logMetadataRefreshFailure(candidate, refreshErr, attempts)
+		}
+		if !options.Exhaustive {
+			return result, nil
+		}
+	}
+}
+
+func (s *Service) missingRefreshCandidates(
+	ctx context.Context,
+	language string,
+	batchSize int,
+	attemptedTitleIDs []string,
+) ([]metadataRefreshCandidate, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT title.id::text,
 		       btrim(title.display_title),
 		       title.media_type,
 		       identity.provider,
 		       identity.external_id,
-		       refresh_title.id::text,
+		       title.id::text,
 		       COALESCE(series_identity.external_id, ''),
-		       COALESCE(refresh_title.ordinal, -1)
+		       COALESCE(title.ordinal, -1)
 		FROM titles AS title
 		JOIN LATERAL (
 		    SELECT external.provider, external.external_id
@@ -438,13 +489,8 @@ func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOpti
 		    ORDER BY CASE external.provider WHEN $1 THEN 0 ELSE 1 END
 		    LIMIT 1
 		) AS identity ON true
-		JOIN titles AS refresh_title
-		  ON refresh_title.id = CASE
-		      WHEN title.media_type = 'episode' THEN title.parent_id
-		      ELSE title.id
-		  END
 		LEFT JOIN titles AS series
-		  ON series.id = refresh_title.parent_id
+		  ON series.id = title.parent_id
 		 AND series.media_type = 'series'
 		LEFT JOIN title_external_ids AS series_identity
 		  ON series_identity.title_id = series.id
@@ -452,33 +498,21 @@ func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOpti
 		 AND series_identity.namespace = 'series'
 		 AND series_identity.external_id ~ '^[1-9][0-9]*$'
 		 AND char_length(series_identity.external_id) <= 18
-		LEFT JOIN title_external_ids AS refresh_identity
-		  ON refresh_identity.title_id = refresh_title.id
-		 AND refresh_identity.provider = $1
-		 AND refresh_identity.namespace = refresh_title.media_type
-		 AND refresh_identity.external_id ~ '^[1-9][0-9]*$'
-		 AND char_length(refresh_identity.external_id) <= 18
 		LEFT JOIN title_metadata AS cached
-		  ON cached.title_id = refresh_title.id
+		  ON cached.title_id = title.id
 		 AND cached.provider = $1
 		 AND cached.language = $2
-		WHERE title.media_type IN ('movie', 'series', 'season', 'episode')
-		  AND (
-		      title.media_type IN ('movie', 'series')
-		      OR (
-		          refresh_title.media_type = 'season'
-		          AND refresh_identity.external_id IS NOT NULL
-		          AND series_identity.external_id IS NOT NULL
-		      )
-		  )
+		WHERE title.media_type IN ('movie', 'series', 'season')
+		  AND (title.media_type IN ('movie', 'series') OR series_identity.external_id IS NOT NULL)
 		  AND (cached.title_id IS NULL OR cached.expires_at <= now())
+		  AND NOT (title.id::text = ANY($4::text[]))
 		ORDER BY cached.expires_at NULLS FIRST, title.id
 		LIMIT $3
-	`, providerName, language, options.BatchSize)
+	`, providerName, language, batchSize, attemptedTitleIDs)
 	if err != nil {
-		return RefreshResult{}, fmt.Errorf("query metadata refresh candidates: %w", err)
+		return nil, fmt.Errorf("query metadata refresh candidates: %w", err)
 	}
-	candidates := make([]metadataRefreshCandidate, 0, options.BatchSize)
+	candidates := make([]metadataRefreshCandidate, 0, batchSize)
 	for rows.Next() {
 		var value metadataRefreshCandidate
 		if err := rows.Scan(
@@ -492,54 +526,17 @@ func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOpti
 			&value.seasonNumber,
 		); err != nil {
 			rows.Close()
-			return RefreshResult{}, fmt.Errorf("scan metadata refresh candidate: %w", err)
+			return nil, fmt.Errorf("scan metadata refresh candidate: %w", err)
 		}
 		value.requestedResource = value.resource(language)
 		candidates = append(candidates, value)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return RefreshResult{}, fmt.Errorf("iterate metadata refresh candidates: %w", err)
+		return nil, fmt.Errorf("iterate metadata refresh candidates: %w", err)
 	}
 	rows.Close()
-
-	result := RefreshResult{Candidates: len(candidates)}
-	failedTitleSet := make(map[string]struct{})
-	refreshOutcomes := make(map[string]metadataRefreshOutcome)
-	for index, candidate := range candidates {
-		if err := ctx.Err(); err != nil {
-			result.Failed += len(candidates) - index
-			for _, remaining := range candidates[index:] {
-				appendFailedTitle(&result, failedTitleSet, remaining.title)
-			}
-			return result, err
-		}
-		refreshKey := candidate.titleID
-		if candidate.mediaType == MediaTypeSeason || candidate.mediaType == MediaTypeEpisode {
-			refreshKey = candidate.refreshTitleID
-		}
-		outcome, exists := refreshOutcomes[refreshKey]
-		if !exists {
-			outcome.err, outcome.attempts = s.refreshMissingCandidate(ctx, candidate, language)
-			refreshOutcomes[refreshKey] = outcome
-		}
-		refreshErr, attempts := outcome.err, outcome.attempts
-		if refreshErr == nil {
-			result.Refreshed++
-			continue
-		}
-		if ctx.Err() != nil {
-			result.Failed += len(candidates) - index
-			for _, remaining := range candidates[index:] {
-				appendFailedTitle(&result, failedTitleSet, remaining.title)
-			}
-			return result, ctx.Err()
-		}
-		result.Failed++
-		appendFailedTitle(&result, failedTitleSet, candidate.title)
-		s.logMetadataRefreshFailure(candidate, refreshErr, attempts)
-	}
-	return result, nil
+	return candidates, nil
 }
 
 type metadataRefreshCandidate struct {
@@ -552,11 +549,6 @@ type metadataRefreshCandidate struct {
 	seriesExternalID  string
 	seasonNumber      int
 	requestedResource string
-}
-
-type metadataRefreshOutcome struct {
-	err      error
-	attempts int
 }
 
 func (candidate metadataRefreshCandidate) resource(language string) string {
@@ -573,7 +565,7 @@ func (candidate metadataRefreshCandidate) resource(language string) string {
 		case MediaTypeSeries:
 			endpoint = "/tv/" + candidate.externalID
 			query.Set("append_to_response", "external_ids,credits")
-		case MediaTypeSeason, MediaTypeEpisode:
+		case MediaTypeSeason:
 			endpoint = "/tv/" + candidate.seriesExternalID + "/season/" + strconv.Itoa(candidate.seasonNumber)
 		default:
 			return candidate.mediaType
@@ -593,7 +585,7 @@ func (s *Service) refreshMissingCandidate(ctx context.Context, candidate metadat
 			_, refreshErr = s.movieDetails(ctx, candidate.titleID, language)
 		case MediaTypeSeries:
 			_, refreshErr = s.seriesDetails(ctx, candidate.titleID, SeriesDetailsOptions{Language: language})
-		case MediaTypeSeason, MediaTypeEpisode:
+		case MediaTypeSeason:
 			_, refreshErr = s.seasonDetails(ctx, candidate.refreshTitleID, language)
 		default:
 			refreshErr = fmt.Errorf("%w: unsupported refresh media type %q", ErrInvalidInput, candidate.mediaType)

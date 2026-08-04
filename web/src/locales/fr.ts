@@ -837,7 +837,7 @@ const catalog = {
   "admin.operations.actions.run": "Exécuter maintenant",
   "admin.operations.actions.running": "Exécution…",
   "admin.operations.actions.metadata.title": "Récupérer les métadonnées manquantes",
-  "admin.operations.actions.metadata.description": "Actualisez un lot limité avec la langue et la taille de lot enregistrées.",
+  "admin.operations.actions.metadata.description": "Actualisez toutes les métadonnées manquantes dans la langue enregistrée. Le traitement se poursuit par lots jusqu’à ce qu’une tentative ait été effectuée pour chaque fiche de métadonnées.",
   "admin.operations.actions.metadata.scope": "Utilise le pipeline de persistance canonique TMDB → TVDB/Fanart. Les données localisées existantes sont conservées en cas de défaillance des fournisseurs.",
   "admin.operations.actions.housekeeping.title": "Effectuer le nettoyage",
   "admin.operations.actions.housekeeping.description": "Lancez immédiatement le nettoyage normal des authentifications obsolètes et des lectures.",

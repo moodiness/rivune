@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Виконати зараз",
   "admin.operations.actions.running": "Виконується…",
   "admin.operations.actions.metadata.title": "Отримати відсутні метадані",
-  "admin.operations.actions.metadata.description": "Оновити один обмежений за розміром пакет, використовуючи збережені налаштування мови та розміру пакета.",
+  "admin.operations.actions.metadata.description": "Оновити всі відсутні метадані збереженою мовою. Обробка триває пакетами, доки не буде здійснено спробу обробити кожен запис метаданих.",
   "admin.operations.actions.metadata.scope": "Використовує канонічний конвеєр збереження TMDB → TVDB/Fanart. Наявні локалізовані дані зберігаються в разі збоїв постачальника.",
   "admin.operations.actions.housekeeping.title": "Виконати службове обслуговування",
   "admin.operations.actions.housekeeping.description": "Негайно запустити стандартне очищення застарілих даних автентифікації та відтворення.",

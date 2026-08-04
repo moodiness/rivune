@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Spustit nyní",
   "admin.operations.actions.running": "Probíhá…",
   "admin.operations.actions.metadata.title": "Načíst chybějící metadata",
-  "admin.operations.actions.metadata.description": "Aktualizujte jednu omezenou dávku s uloženým jazykem a velikostí dávky.",
+  "admin.operations.actions.metadata.description": "Aktualizovat všechna chybějící metadata v uloženém jazyce. Zpracování pokračuje po dávkách, dokud neproběhne pokus o zpracování každého záznamu metadat.",
   "admin.operations.actions.metadata.scope": "Používá kanonický proces ukládání TMDB → TVDB/Fanart. Stávající lokalizovaná data zůstanou při selhání poskytovatele zachována.",
   "admin.operations.actions.housekeeping.title": "Provést úklid",
   "admin.operations.actions.housekeeping.description": "Okamžitě spusťte běžné čištění zastaralých autentizačních dat a dat přehrávání.",

@@ -837,7 +837,7 @@ const catalog = {
   "admin.operations.actions.run": "今すぐ実行",
   "admin.operations.actions.running": "実行中…",
   "admin.operations.actions.metadata.title": "不足しているメタデータを取得",
-  "admin.operations.actions.metadata.description": "保存済みの言語とバッチサイズを使って、一定数のデータを更新します。",
+  "admin.operations.actions.metadata.description": "保存されている言語で、不足しているすべてのメタデータを更新します。すべてのメタデータレコードの処理が試行されるまで、バッチ単位で処理を続けます。",
   "admin.operations.actions.metadata.scope": "正規のTMDB → TVDB/Fanart永続化パイプラインを使用します。プロバイダーで障害が発生しても、既存のローカライズ済みデータは保持されます。",
   "admin.operations.actions.housekeeping.title": "クリーンアップを実行",
   "admin.operations.actions.housekeeping.description": "古い認証データと再生データの通常のクリーンアップを直ちに実行します。",

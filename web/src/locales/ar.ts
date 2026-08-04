@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "تشغيل الآن",
   "admin.operations.actions.running": "جارٍ التشغيل…",
   "admin.operations.actions.metadata.title": "جلب البيانات الوصفية المفقودة",
-  "admin.operations.actions.metadata.description": "حدّث دفعة محدودة باستخدام اللغة وحجم الدفعة المحفوظين.",
+  "admin.operations.actions.metadata.description": "حدِّث جميع بيانات التعريف المفقودة باللغة المحفوظة. تستمر العملية على دفعات حتى تتم محاولة معالجة كل سجل بيانات تعريف.",
   "admin.operations.actions.metadata.scope": "يستخدم مسار الحفظ الأساسي TMDB → TVDB/Fanart. تبقى البيانات المترجمة الحالية محفوظة عند تعطل المزوّدين.",
   "admin.operations.actions.housekeeping.title": "تشغيل التنظيف",
   "admin.operations.actions.housekeeping.description": "شغّل فورًا التنظيف المعتاد لبيانات المصادقة والتشغيل القديمة.",

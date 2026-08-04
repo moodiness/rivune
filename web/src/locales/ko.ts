@@ -837,7 +837,7 @@ const catalog = {
   "admin.operations.actions.run": "지금 실행",
   "admin.operations.actions.running": "실행 중…",
   "admin.operations.actions.metadata.title": "누락된 메타데이터 가져오기",
-  "admin.operations.actions.metadata.description": "저장된 언어와 배치 크기를 사용하여 제한된 배치 하나를 새로 고칩니다.",
+  "admin.operations.actions.metadata.description": "저장된 언어로 누락된 모든 메타데이터를 새로 고칩니다. 모든 메타데이터 레코드에 대한 처리를 시도할 때까지 배치 단위로 작업이 계속됩니다.",
   "admin.operations.actions.metadata.scope": "정식 TMDB → TVDB/Fanart 영구 저장 파이프라인을 사용합니다. 제공업체에 장애가 발생해도 기존 현지화 데이터는 유지됩니다.",
   "admin.operations.actions.housekeeping.title": "정리 실행",
   "admin.operations.actions.housekeeping.description": "오래된 인증 및 재생 데이터의 일반적인 정리를 즉시 실행합니다.",

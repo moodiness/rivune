@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "הפעלה עכשיו",
   "admin.operations.actions.running": "מתבצעת הפעלה…",
   "admin.operations.actions.metadata.title": "אחזור מטא־נתונים חסרים",
-  "admin.operations.actions.metadata.description": "רענון אצווה מוגבלת אחת לפי השפה וגודל האצווה שנשמרו.",
+  "admin.operations.actions.metadata.description": "רענון כל המטא־נתונים החסרים בשפה השמורה. העיבוד נמשך באצוות עד שמתבצע ניסיון לעבד כל רשומת מטא־נתונים.",
   "admin.operations.actions.metadata.scope": "נעשה שימוש בתהליך השמירה הקנוני TMDB → TVDB/Fanart. נתונים קיימים המותאמים לשפה נשמרים גם במקרה של כשל אצל הספק.",
   "admin.operations.actions.housekeeping.title": "הפעלת תחזוקה",
   "admin.operations.actions.housekeeping.description": "הפעלה מיידית של הניקוי הרגיל לאימותים ולהפעלות שהתיישנו.",

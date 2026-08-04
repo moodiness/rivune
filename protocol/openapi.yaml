@@ -1335,7 +1335,7 @@ paths:
       description: |
         Runs one administrator-only action synchronously:
 
-        - `fetch-missing-metadata` refreshes at most the saved schedule batch size in its saved language through the canonical TMDB-to-TVDB/Fanart persistence pipeline. Existing localized payloads survive provider failures.
+        - `fetch-missing-metadata` refreshes every missing or expired localized payload in the saved language through the canonical TMDB-to-TVDB/Fanart persistence pipeline. It processes work in saved-size batches until no unattempted payload remains; existing localized payloads survive provider failures.
         - `run-housekeeping` invokes the normal stale authentication and playback cleanup.
         - `clear-metadata-cache` deletes only localized payload rows from `title_metadata`. It preserves profiles, libraries, watch progress, stable title identities, canonical title snapshots, and artwork snapshots.
         - `clear-stream-cache` deletes every `playback_sessions` row, stops all HLS and prewarm jobs, clears in-memory source-reference, probe, and preparation entries, and recreates the media temporary workspace. It preserves profiles, libraries, watch progress, title identities, and canonical title snapshots.
@@ -1351,7 +1351,7 @@ paths:
                 $ref: "#/components/schemas/OperationRun"
               examples:
                 fetchMissingMetadata:
-                  summary: A bounded refresh with provider failures
+                  summary: An exhaustive refresh with provider failures
                   value:
                     action: fetch-missing-metadata
                     startedAt: "2026-08-02T14:30:00Z"
@@ -4770,15 +4770,15 @@ components:
       required: [candidates, refreshed, failed]
       properties:
         candidates:
-          description: Titles selected for this bounded refresh attempt.
+          description: Distinct localized payloads selected for this refresh attempt.
           type: integer
           minimum: 0
         refreshed:
-          description: Selected titles whose localized metadata was refreshed successfully.
+          description: Selected payloads whose localized metadata was refreshed successfully.
           type: integer
           minimum: 0
         failed:
-          description: Selected titles that retained stale data because refresh failed.
+          description: Selected payloads that retained stale data because refresh failed.
           type: integer
           minimum: 0
         failedTitles:

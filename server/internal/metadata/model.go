@@ -90,8 +90,9 @@ type SeriesDetailsOptions struct {
 }
 
 type RefreshMissingOptions struct {
-	Language  string
-	BatchSize int
+	Language   string
+	BatchSize  int
+	Exhaustive bool
 }
 
 type RefreshResult struct {

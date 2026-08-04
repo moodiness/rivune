@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Jetzt ausführen",
   "admin.operations.actions.running": "Wird ausgeführt…",
   "admin.operations.actions.metadata.title": "Fehlende Metadaten abrufen",
-  "admin.operations.actions.metadata.description": "Aktualisiere einen begrenzten Stapel mit der gespeicherten Sprache und Stapelgröße.",
+  "admin.operations.actions.metadata.description": "Alle fehlenden Metadaten in der gespeicherten Sprache aktualisieren. Die Verarbeitung wird stapelweise fortgesetzt, bis für jeden Metadatensatz ein Versuch durchgeführt wurde.",
   "admin.operations.actions.metadata.scope": "Verwendet die kanonische Persistenzpipeline TMDB → TVDB/Fanart. Vorhandene lokalisierte Daten bleiben bei Anbieterausfällen erhalten.",
   "admin.operations.actions.housekeeping.title": "Bereinigung ausführen",
   "admin.operations.actions.housekeeping.description": "Starte die normale Bereinigung veralteter Authentifizierungs- und Wiedergabedaten sofort.",

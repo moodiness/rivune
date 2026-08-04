@@ -997,7 +997,7 @@ const en = {
   "admin.operations.actions.run": "Run now",
   "admin.operations.actions.running": "Running…",
   "admin.operations.actions.metadata.title": "Fetch missing metadata",
-  "admin.operations.actions.metadata.description": "Refresh one bounded batch with the saved language and batch size.",
+  "admin.operations.actions.metadata.description": "Refresh all missing metadata in the saved language. Work continues in batches until every payload is attempted.",
   "admin.operations.actions.metadata.scope": "Uses the canonical TMDB → TVDB/Fanart persistence pipeline. Existing localized data survives provider failures.",
   "admin.operations.actions.metadata.retry": "Retry metadata refresh",
   "admin.operations.actions.housekeeping.title": "Run housekeeping",

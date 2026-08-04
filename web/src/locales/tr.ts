@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Şimdi çalıştır",
   "admin.operations.actions.running": "Çalıştırılıyor…",
   "admin.operations.actions.metadata.title": "Eksik meta verileri getir",
-  "admin.operations.actions.metadata.description": "Kaydedilmiş dil ve toplu işlem boyutuyla sınırlı bir grubu yenileyin.",
+  "admin.operations.actions.metadata.description": "Kaydedilen dildeki tüm eksik meta verileri yenileyin. Her meta veri kaydı işlenmeye çalışılana kadar işlem gruplar hâlinde devam eder.",
   "admin.operations.actions.metadata.scope": "Kanonik TMDB → TVDB/Fanart kalıcılık işlem hattını kullanır. Mevcut yerelleştirilmiş veriler, sağlayıcı hatalarında korunur.",
   "admin.operations.actions.housekeeping.title": "Genel bakımı çalıştır",
   "admin.operations.actions.housekeeping.description": "Geçerliliğini yitirmiş kimlik doğrulama ve oynatma verilerine yönelik olağan temizliği hemen çalıştırın.",

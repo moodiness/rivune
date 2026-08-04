@@ -837,7 +837,7 @@ const catalog = {
   "admin.operations.actions.run": "Executa ara",
   "admin.operations.actions.running": "S'està executant…",
   "admin.operations.actions.metadata.title": "Obtén les metadades absents",
-  "admin.operations.actions.metadata.description": "Actualitzeu un lot limitat amb la llengua i la mida del lot desades.",
+  "admin.operations.actions.metadata.description": "Actualitza totes les metadades que falten en l’idioma desat. El procés continua per lots fins que s’intenta processar cada registre de metadades.",
   "admin.operations.actions.metadata.scope": "Utilitza el procés de persistència canònic TMDB → TVDB/Fanart. Les dades localitzades existents es conserven si els proveïdors fallen.",
   "admin.operations.actions.housekeeping.title": "Executa el manteniment",
   "admin.operations.actions.housekeeping.description": "Invoqueu immediatament la neteja habitual de les dades obsoletes d'autenticació i reproducció.",

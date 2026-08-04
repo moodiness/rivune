@@ -837,7 +837,7 @@ const catalog = {
   "admin.operations.actions.run": "立即執行",
   "admin.operations.actions.running": "正在執行…",
   "admin.operations.actions.metadata.title": "擷取缺少的中繼資料",
-  "admin.operations.actions.metadata.description": "使用已儲存的語言與批次大小，重新整理一個有限批次。",
+  "admin.operations.actions.metadata.description": "使用已儲存的語言重新整理所有缺少的中繼資料。系統會分批繼續處理，直到嘗試處理每筆中繼資料記錄。",
   "admin.operations.actions.metadata.scope": "使用正規的 TMDB → TVDB/Fanart 持久化流程。即使提供者發生故障，現有本地化資料仍會保留。",
   "admin.operations.actions.housekeeping.title": "執行清理",
   "admin.operations.actions.housekeeping.description": "立即執行一般的過期驗證與播放資料清理。",

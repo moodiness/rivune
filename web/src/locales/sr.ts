@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Pokreni sada",
   "admin.operations.actions.running": "Pokretanje…",
   "admin.operations.actions.metadata.title": "Preuzmi metapodatke koji nedostaju",
-  "admin.operations.actions.metadata.description": "Osvežite jednu ograničenu grupu sa sačuvanim jezikom i veličinom grupe.",
+  "admin.operations.actions.metadata.description": "Освежи све метаподатке који недостају на сачуваном језику. Обрада се наставља у групама док се не покуша обрада сваког записа метаподатака.",
   "admin.operations.actions.metadata.scope": "Koristi kanonski proces čuvanja TMDB → TVDB/Fanart. Postojeći lokalizovani podaci ostaju sačuvani u slučaju grešaka dobavljača.",
   "admin.operations.actions.housekeeping.title": "Pokreni održavanje",
   "admin.operations.actions.housekeeping.description": "Odmah pokrenite uobičajeno čišćenje zastarele autentifikacije i reprodukcije.",

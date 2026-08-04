@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Futtatás most",
   "admin.operations.actions.running": "Futtatás…",
   "admin.operations.actions.metadata.title": "Hiányzó metaadatok lekérése",
-  "admin.operations.actions.metadata.description": "Egy korlátozott köteg frissítése a mentett nyelvvel és kötegmérettel.",
+  "admin.operations.actions.metadata.description": "Az összes hiányzó metaadat frissítése a mentett nyelven. A feldolgozás kötegekben folytatódik, amíg minden metaadat-rekord feldolgozását meg nem kísérli a rendszer.",
   "admin.operations.actions.metadata.scope": "A kanonikus TMDB → TVDB/Fanart megőrzési folyamatot használja. A meglévő honosított adatok szolgáltatói hiba esetén is megmaradnak.",
   "admin.operations.actions.housekeeping.title": "Karbantartás futtatása",
   "admin.operations.actions.housekeeping.description": "Az elavult hitelesítési és lejátszási adatok szokásos tisztításának azonnali elindítása.",

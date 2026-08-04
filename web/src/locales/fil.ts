@@ -837,7 +837,7 @@ const catalog = {
   "admin.operations.actions.run": "Patakbuhin ngayon",
   "admin.operations.actions.running": "Tumatakbo…",
   "admin.operations.actions.metadata.title": "Kunin ang nawawalang metadata",
-  "admin.operations.actions.metadata.description": "Mag-refresh ng isang limitadong batch gamit ang naka-save na wika at laki ng batch.",
+  "admin.operations.actions.metadata.description": "I-refresh ang lahat ng nawawalang metadata sa naka-save na wika. Magpapatuloy ang pagproseso nang maramihan hanggang sa masubukang iproseso ang bawat talaan ng metadata.",
   "admin.operations.actions.metadata.scope": "Ginagamit ang kanonikong pipeline ng pagpapanatili na TMDB → TVDB/Fanart. Nananatili ang kasalukuyang naka-localize na datos kapag pumalya ang provider.",
   "admin.operations.actions.housekeeping.title": "Patakbuhin ang pagpapanatili",
   "admin.operations.actions.housekeeping.description": "Agad na gawin ang karaniwang paglilinis ng lipas na pagpapatotoo at playback.",

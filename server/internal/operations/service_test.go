@@ -130,8 +130,8 @@ func TestManualMetadataRefreshPersistsStatusAndResult(t *testing.T) {
 				t.Fatalf("unexpected run timestamps: started=%s completed=%s", run.StartedAt, run.CompletedAt)
 			}
 			calls, options := refresher.snapshot()
-			if calls != 1 || len(options) != 1 || options[0] != (metadata.RefreshMissingOptions{Language: "de-DE", BatchSize: 19}) {
-				t.Fatalf("unexpected metadata refresh dispatch: calls=%d options=%+v", calls, options)
+			if calls != 1 || len(options) != 1 || options[0] != (metadata.RefreshMissingOptions{Language: "de-DE", BatchSize: 19, Exhaustive: true}) {
+				t.Fatalf("manual metadata refresh was not exhaustive: calls=%d options=%+v", calls, options)
 			}
 
 			schedule, err := service.metadataRefreshSchedule(context.Background())

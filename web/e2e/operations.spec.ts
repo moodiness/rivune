@@ -44,10 +44,11 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   await expect(page.getByLabel("Metadata language")).toHaveValue("fr-CA");
   await expect(page.getByLabel("Batch size")).toHaveValue("40");
 
+  const metadataCard = page.locator(".operation-action-card").filter({ has: page.getByRole("heading", { name: "Fetch missing metadata" }) });
+  await expect(metadataCard).toContainText("Refresh all missing metadata in the saved language. Work continues in batches until every payload is attempted.");
   await page.getByRole("button", { name: "Run Fetch missing metadata" }).click();
   const fetchRequest = await rivune.waitForRequest("/api/v1/operations/actions/fetch-missing-metadata", "POST");
   expect(fetchRequest.body).toBeUndefined();
-  const metadataCard = page.locator(".operation-action-card").filter({ has: page.getByRole("heading", { name: "Fetch missing metadata" }) });
   await expect(page.locator(".app-notification--success").filter({ hasText: "12 of 12 candidates refreshed; 0 failed." })).toBeVisible();
   await expect(metadataCard.locator(".notice--success")).toHaveCount(0);
 

@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "اکنون اجرا شود",
   "admin.operations.actions.running": "در حال اجرا…",
   "admin.operations.actions.metadata.title": "دریافت فرادادهٔ موجودنشده",
-  "admin.operations.actions.metadata.description": "یک دستهٔ محدود را با زبان و اندازهٔ دستهٔ ذخیره‌شده تازه‌سازی کنید.",
+  "admin.operations.actions.metadata.description": "همهٔ فراداده‌های موجودنبودۀ زبان ذخیره‌شده را تازه‌سازی کنید. پردازش به‌صورت دسته‌ای ادامه می‌یابد تا برای پردازش تک‌تک رکوردهای فراداده تلاش شود.",
   "admin.operations.actions.metadata.scope": "از خط لولهٔ ماندگاری مرجع TMDB → TVDB/Fanart استفاده می‌کند. داده‌های بومی‌سازی‌شدهٔ موجود در صورت شکست ارائه‌دهنده حفظ می‌شوند.",
   "admin.operations.actions.housekeeping.title": "اجرای خانه‌تکانی",
   "admin.operations.actions.housekeeping.description": "پاک‌سازی معمول احراز هویت و پخش منقضی‌شده را فوراً اجرا کنید.",

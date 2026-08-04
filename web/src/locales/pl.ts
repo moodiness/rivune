@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Uruchom teraz",
   "admin.operations.actions.running": "Uruchamianie…",
   "admin.operations.actions.metadata.title": "Pobierz brakujące metadane",
-  "admin.operations.actions.metadata.description": "Odśwież jedną ograniczoną partię przy użyciu zapisanego języka i rozmiaru partii.",
+  "admin.operations.actions.metadata.description": "Odśwież wszystkie brakujące metadane w zapisanym języku. Przetwarzanie jest kontynuowane partiami do czasu podjęcia próby przetworzenia każdego rekordu metadanych.",
   "admin.operations.actions.metadata.scope": "Korzysta z kanonicznego potoku zapisu TMDB → TVDB/Fanart. Istniejące zlokalizowane dane pozostają bezpieczne w razie awarii dostawców.",
   "admin.operations.actions.housekeeping.title": "Uruchom porządkowanie",
   "admin.operations.actions.housekeeping.description": "Natychmiast uruchom standardowe czyszczenie nieaktualnych danych uwierzytelniania i odtwarzania.",

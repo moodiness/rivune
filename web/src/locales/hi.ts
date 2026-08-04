@@ -837,7 +837,7 @@ const catalog = {
   "admin.operations.actions.run": "अभी चलाएँ",
   "admin.operations.actions.running": "चल रहा है…",
   "admin.operations.actions.metadata.title": "गुम मेटाडेटा लाएँ",
-  "admin.operations.actions.metadata.description": "सहेजी गई भाषा और बैच आकार के साथ एक सीमित बैच रीफ़्रेश करें।",
+  "admin.operations.actions.metadata.description": "सहेजी गई भाषा में सभी अनुपलब्ध मेटाडेटा रीफ़्रेश करें। प्रोसेसिंग बैचों में तब तक जारी रहती है, जब तक हर मेटाडेटा रिकॉर्ड को प्रोसेस करने का प्रयास नहीं हो जाता।",
   "admin.operations.actions.metadata.scope": "कैनोनिकल TMDB → TVDB/Fanart स्टोरेज पाइपलाइन का उपयोग करता है। प्रदाता के विफल होने पर भी मौजूदा स्थानीयकृत डेटा सुरक्षित रहता है।",
   "admin.operations.actions.housekeeping.title": "रखरखाव चलाएँ",
   "admin.operations.actions.housekeeping.description": "पुराने प्रमाणीकरण और प्लेबैक की सामान्य सफ़ाई तुरंत शुरू करें।",

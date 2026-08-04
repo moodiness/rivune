@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Εκτέλεση τώρα",
   "admin.operations.actions.running": "Εκτελείται…",
   "admin.operations.actions.metadata.title": "Ανάκτηση μεταδεδομένων που λείπουν",
-  "admin.operations.actions.metadata.description": "Ανανεώστε μία περιορισμένη δέσμη με την αποθηκευμένη γλώσσα και το αποθηκευμένο μέγεθος δέσμης.",
+  "admin.operations.actions.metadata.description": "Ανανέωση όλων των μεταδεδομένων που λείπουν στην αποθηκευμένη γλώσσα. Η επεξεργασία συνεχίζεται σε παρτίδες μέχρι να επιχειρηθεί η επεξεργασία κάθε εγγραφής μεταδεδομένων.",
   "admin.operations.actions.metadata.scope": "Χρησιμοποιεί την κανονική διοχέτευση αποθήκευσης TMDB → TVDB/Fanart. Τα υπάρχοντα τοπικοποιημένα δεδομένα διατηρούνται σε περίπτωση αποτυχίας παρόχου.",
   "admin.operations.actions.housekeeping.title": "Εκτέλεση συντήρησης",
   "admin.operations.actions.housekeeping.description": "Εκτελέστε αμέσως την κανονική εκκαθάριση παρωχημένων δεδομένων ταυτοποίησης και αναπαραγωγής.",

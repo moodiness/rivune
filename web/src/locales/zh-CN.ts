@@ -837,7 +837,7 @@ const catalog = {
   "admin.operations.actions.run": "立即运行",
   "admin.operations.actions.running": "正在运行…",
   "admin.operations.actions.metadata.title": "获取缺失的元数据",
-  "admin.operations.actions.metadata.description": "使用已保存的语言和批次大小刷新一个有限批次。",
+  "admin.operations.actions.metadata.description": "使用已保存的语言刷新所有缺失的元数据。系统将分批继续处理，直到尝试处理每条元数据记录。",
   "admin.operations.actions.metadata.scope": "使用规范的 TMDB → TVDB/Fanart 持久化流程。即使提供方发生故障，现有本地化数据也会保留。",
   "admin.operations.actions.housekeeping.title": "运行清理",
   "admin.operations.actions.housekeeping.description": "立即运行常规的过期身份验证和播放数据清理。",

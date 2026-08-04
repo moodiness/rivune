@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Nu uitvoeren",
   "admin.operations.actions.running": "Bezig met uitvoeren…",
   "admin.operations.actions.metadata.title": "Ontbrekende metadata ophalen",
-  "admin.operations.actions.metadata.description": "Vernieuw één begrensde batch met de opgeslagen taal en batchgrootte.",
+  "admin.operations.actions.metadata.description": "Vernieuw alle ontbrekende metadata in de opgeslagen taal. De verwerking gaat in batches door totdat voor elke metadatarecord een verwerkingspoging is gedaan.",
   "admin.operations.actions.metadata.scope": "Gebruikt de canonieke TMDB → TVDB/Fanart-opslagketen. Bestaande gelokaliseerde gegevens blijven behouden als providers uitvallen.",
   "admin.operations.actions.housekeeping.title": "Opschoning uitvoeren",
   "admin.operations.actions.housekeeping.description": "Voer de gebruikelijke opschoning van verouderde authenticatie- en afspeelgegevens direct uit.",

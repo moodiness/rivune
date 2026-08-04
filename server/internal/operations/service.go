@@ -259,7 +259,7 @@ func (service *Service) runManualMetadataRefresh(ctx context.Context) (*Metadata
 		return nil, fmt.Errorf("mark metadata refresh started: %w", err)
 	}
 	result, refreshErr := service.metadata.RefreshMissing(ctx, metadata.RefreshMissingOptions{
-		Language: schedule.Language, BatchSize: schedule.BatchSize,
+		Language: schedule.Language, BatchSize: schedule.BatchSize, Exhaustive: true,
 	})
 	status := metadataRefreshStatus(&result, refreshErr)
 	resultJSON, err := json.Marshal(result)

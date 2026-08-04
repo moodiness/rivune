@@ -147,7 +147,7 @@ func TestRefreshMissingRefreshesAllCanonicalMediaTypesAndDoesNotReselectEpisode(
 	if err != nil {
 		t.Fatalf("refresh canonical hierarchy: %v", err)
 	}
-	if result.Candidates != 4 || result.Refreshed != 4 || result.Failed != 0 || len(result.FailedTitles) != 0 {
+	if result.Candidates != 3 || result.Refreshed != 3 || result.Failed != 0 || len(result.FailedTitles) != 0 {
 		t.Fatalf("unexpected hierarchy refresh result: %+v", result)
 	}
 	if provider.calls["movie:10"] != 1 || provider.calls["series:20"] != 1 || provider.calls["season:20:1"] != 1 {
@@ -193,6 +193,53 @@ func TestRefreshMissingRefreshesAllCanonicalMediaTypesAndDoesNotReselectEpisode(
 	}
 	if second.Candidates != 0 || second.Refreshed != 0 || second.Failed != 0 {
 		t.Fatalf("fresh season payload did not satisfy episode metadata: %+v", second)
+	}
+}
+
+func TestRefreshMissingExhaustiveContinuesUntilNewSeasonPayloadsAreCached(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	const seriesID = "21000000-0000-4000-8000-000000000010"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title)
+		VALUES ($1::uuid, 'series', 'Series snapshot');
+		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
+		VALUES ($1::uuid, 'tmdb', 'series', '70')
+	`, seriesID); err != nil {
+		t.Fatalf("seed exhaustive refresh series: %v", err)
+	}
+	provider := &refreshTestProvider{
+		series: map[string]ProviderSeries{
+			"70": {
+				ExternalID: "70", Name: "Canonical Series", Cast: []CastMember{}, AdditionalIDs: map[string]string{},
+				Seasons: []ProviderSeasonSummary{
+					{ExternalID: "71", Name: "Season One", SeasonNumber: 1},
+					{ExternalID: "72", Name: "Season Two", SeasonNumber: 2},
+				},
+			},
+		},
+		seasons: map[string]ProviderSeason{
+			"season:70:1": {ExternalID: "71", Name: "Season One", SeasonNumber: 1, Episodes: []ProviderEpisode{}},
+			"season:70:2": {ExternalID: "72", Name: "Season Two", SeasonNumber: 2, Episodes: []ProviderEpisode{}},
+		},
+	}
+	service := NewService(pool, provider, nil, nil, time.Hour, nil)
+	result, err := service.RefreshMissing(ctx, RefreshMissingOptions{Language: "fr-FR", BatchSize: 1, Exhaustive: true})
+	if err != nil {
+		t.Fatalf("refresh every discovered payload: %v", err)
+	}
+	if result.Candidates != 3 || result.Refreshed != 3 || result.Failed != 0 {
+		t.Fatalf("exhaustive refresh stopped before every payload: %+v", result)
+	}
+	if provider.calls["series:70"] != 1 || provider.calls["season:70:1"] != 1 || provider.calls["season:70:2"] != 1 {
+		t.Fatalf("exhaustive refresh did not visit each distinct payload once: calls=%v", provider.calls)
+	}
+	var cacheCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM title_metadata WHERE language = 'fr-FR'`).Scan(&cacheCount); err != nil {
+		t.Fatalf("count exhaustive metadata cache: %v", err)
+	}
+	if cacheCount != 3 {
+		t.Fatalf("exhaustive refresh cached %d payloads, want 3", cacheCount)
 	}
 }
 

@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Suorita nyt",
   "admin.operations.actions.running": "Suoritetaan…",
   "admin.operations.actions.metadata.title": "Hae puuttuvat metatiedot",
-  "admin.operations.actions.metadata.description": "Päivitä yksi rajattu erä käyttäen tallennettua kieltä ja eräkokoa.",
+  "admin.operations.actions.metadata.description": "Päivitä kaikki puuttuvat metatiedot tallennetulla kielellä. Käsittely jatkuu erissä, kunnes jokainen metatietue on yritetty käsitellä.",
   "admin.operations.actions.metadata.scope": "Käyttää kanonista TMDB → TVDB/Fanart -tallennusputkea. Olemassa olevat lokalisoidut tiedot säilyvät palveluntarjoajan virheistä huolimatta.",
   "admin.operations.actions.housekeeping.title": "Suorita siivous",
   "admin.operations.actions.housekeeping.description": "Suorita vanhentuneiden tunnistautumis- ja toistotietojen normaali siivous heti.",

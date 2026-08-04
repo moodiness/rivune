@@ -953,7 +953,7 @@ const catalog = {
   "admin.operations.actions.run": "Kör nu",
   "admin.operations.actions.running": "Körs…",
   "admin.operations.actions.metadata.title": "Hämta metadata som saknas",
-  "admin.operations.actions.metadata.description": "Uppdatera en begränsad batch med det sparade språket och den sparade batchstorleken.",
+  "admin.operations.actions.metadata.description": "Uppdatera alla metadata som saknas på det sparade språket. Bearbetningen fortsätter i batchar tills ett försök har gjorts att bearbeta varje metadatapost.",
   "admin.operations.actions.metadata.scope": "Använder den kanoniska lagringsprocessen TMDB → TVDB/Fanart. Befintliga lokaliserade data bevaras om leverantören drabbas av fel.",
   "admin.operations.actions.housekeeping.title": "Kör underhåll",
   "admin.operations.actions.housekeeping.description": "Starta omedelbart den normala rensningen av inaktuella autentiserings- och uppspelningsdata.",

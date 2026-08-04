@@ -837,7 +837,7 @@ const catalog = {
   "admin.operations.actions.run": "Chạy ngay",
   "admin.operations.actions.running": "Đang chạy…",
   "admin.operations.actions.metadata.title": "Tải siêu dữ liệu còn thiếu",
-  "admin.operations.actions.metadata.description": "Làm mới một lô hữu hạn bằng ngôn ngữ và kích thước lô đã lưu.",
+  "admin.operations.actions.metadata.description": "Làm mới toàn bộ siêu dữ liệu còn thiếu bằng ngôn ngữ đã lưu. Quá trình xử lý tiếp tục theo từng lô cho đến khi hệ thống đã thử xử lý mọi bản ghi siêu dữ liệu.",
   "admin.operations.actions.metadata.scope": "Sử dụng quy trình lưu trữ chuẩn TMDB → TVDB/Fanart. Dữ liệu đã bản địa hóa hiện có vẫn được giữ nguyên khi nhà cung cấp gặp lỗi.",
   "admin.operations.actions.housekeeping.title": "Chạy bảo trì",
   "admin.operations.actions.housekeeping.description": "Thực hiện ngay thao tác dọn dẹp thông thường đối với dữ liệu xác thực và phát đã cũ.",

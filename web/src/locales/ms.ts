@@ -837,7 +837,7 @@ const catalog = {
   "admin.operations.actions.run": "Jalankan sekarang",
   "admin.operations.actions.running": "Sedang berjalan…",
   "admin.operations.actions.metadata.title": "Dapatkan metadata yang tiada",
-  "admin.operations.actions.metadata.description": "Segarkan satu kelompok terhad menggunakan bahasa dan saiz kelompok yang disimpan.",
+  "admin.operations.actions.metadata.description": "Segarkan semua metadata yang tiada dalam bahasa yang disimpan. Pemprosesan diteruskan dalam beberapa kelompok sehingga setiap rekod metadata telah cuba diproses.",
   "admin.operations.actions.metadata.scope": "Menggunakan saluran pengekalan kanonik TMDB → TVDB/Fanart. Data setempat sedia ada kekal jika penyedia gagal.",
   "admin.operations.actions.housekeeping.title": "Jalankan penyelenggaraan",
   "admin.operations.actions.housekeeping.description": "Laksanakan pembersihan biasa bagi pengesahan dan main balik lapuk dengan segera.",
