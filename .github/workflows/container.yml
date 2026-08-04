@@ -50,12 +50,15 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: Initialize PostgreSQL schema for integration tests
+        working-directory: server
+        run: go run ./cmd/rivune-migrate
       - name: Build embedded frontend for Go tests
         working-directory: web
         run: npm ci && npm run build
       - name: Run backend tests with PostgreSQL integration coverage
         working-directory: server
-        run: go test ./...
+        run: go test -p 1 ./...
 
   frontend:
     name: Frontend build and E2E
