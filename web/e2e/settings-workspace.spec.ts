@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 
-import { expect, test } from "./fixtures/rivune";
+import { CATEGORY_IDS, expect, test } from "./fixtures/rivune";
 
 const profileSections = ["appearance", "playback", "language", "subtitles", "connections"];
 const serverSections = ["appearance", "playback", "transcoding", "language", "subtitles"];
@@ -105,6 +105,40 @@ test("dirty preferences can be discarded or saved from the persistent action bar
   expect(request.body).toMatchObject({ animationsEnabled: false });
   await expect(saveBar).toHaveCount(0);
   await expect(page.locator(".settings-profile-picker select")).toBeEnabled();
+});
+
+test("global administrator assigns transcoding per profile", async ({ page, rivune }) => {
+  await openSettings(page, "playback");
+
+  const scope = page.locator(".settings-profile-picker select");
+  const transcoding = page.getByLabel("Transcoding");
+  await expect(transcoding).toBeVisible();
+  await scope.selectOption("bob");
+  await expect(page.getByRole("heading", { name: "Bob preferences" })).toBeVisible();
+  await transcoding.selectOption("disabled");
+  await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
+
+  const request = await rivune.waitForRequest("/api/v1/profiles/bob/settings", "PATCH");
+  expect(request.body).toMatchObject({ transcoding: "disabled" });
+});
+
+test("viewer cannot change transcoding and unrelated saves omit its policy", async ({ page, rivune }) => {
+  rivune.setProfileCategory("bob", CATEGORY_IDS.household);
+  rivune.configureGlobalAdmin("bob");
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Preferences", exact: true }).click();
+  await page.locator('[data-settings-section="playback"]').click();
+
+  await expect(page.getByLabel("Transcoding")).toHaveCount(0);
+  await expect(page.locator(".settings-transcoding-state")).toBeVisible();
+
+  await page.locator('[data-settings-section="appearance"]').click();
+  await page.getByRole("checkbox", { name: "Interface animations" }).uncheck();
+  await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
+
+  const request = await rivune.waitForRequest("/api/v1/profiles/bob/settings", "PATCH");
+  expect(request.body).toMatchObject({ animationsEnabled: false });
+  expect(request.body).not.toHaveProperty("transcoding");
 });
 
 test("appearance choices expose effective inheritance and persist explicit overrides", async ({ page, rivune }) => {

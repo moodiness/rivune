@@ -629,6 +629,17 @@ func TestInstanceTranscodingUpdateKeepsAdminPermission(t *testing.T) {
 	}
 }
 
+func TestProfileTranscodingUpdateRequiresGlobalAdministrator(t *testing.T) {
+	mode := "disabled"
+	_, err := NewService(nil).UpdateProfile(context.Background(), auth.Principal{
+		Role:               "admin",
+		AuthorizationScope: auth.AuthorizationScopeCategory,
+	}, "profile-id", Patch{Transcoding: OptionalString{Set: true, Value: &mode}})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("category profile transcoding update error = %v, want forbidden", err)
+	}
+}
+
 func TestProfileNotificationUpdatesAreRejected(t *testing.T) {
 	enabled := true
 	duration := 10

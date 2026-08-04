@@ -1427,7 +1427,7 @@ paths:
           $ref: "#/components/responses/Error"
     patch:
       summary: Update profile settings
-      description: Profile `transcoding` (`inherit`, `enabled`, or `disabled`) is accepted only here; the instance-wide `allowTranscoding` switch belongs to `/settings`. Notification settings are instance-only and are rejected here.
+      description: Profile `transcoding` (`inherit`, `enabled`, or `disabled`) is accepted only here and may be assigned only by a global administrator; the instance-wide `allowTranscoding` switch belongs to `/settings`. Notification settings are instance-only and are rejected here.
       operationId: updateProfileSettings
       security:
         - bearerAuth: []
@@ -1439,7 +1439,7 @@ paths:
               $ref: "#/components/schemas/SettingsPatch"
       responses:
         "200":
-          description: Profile settings were updated by a user with access to the profile.
+          description: Profile settings were updated by an authorized profile manager. A global administrator is required when the patch contains `transcoding`.
           content:
             application/json:
               schema:
@@ -1447,6 +1447,8 @@ paths:
         "400":
           $ref: "#/components/responses/Error"
         "401":
+          $ref: "#/components/responses/Error"
+        "403":
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
@@ -4973,7 +4975,7 @@ components:
           description: Instance-wide transcoding authorization. Null clears the instance override and restores the default true value.
           type: [boolean, "null"]
         transcoding:
-          description: Profile transcoding choice. Null clears the profile override and restores inherit.
+          description: Global-administrator-assigned profile transcoding policy. Null clears the profile override and restores inherit.
           anyOf:
             - type: string
               enum: [inherit, enabled, disabled]
@@ -5088,7 +5090,7 @@ components:
           description: Instance authorization in a settings layer, or the final effective authorization after applying the absolute global veto.
           type: boolean
         transcoding:
-          description: Profile choice retained in effective settings so clients can explain inheritance and blocking.
+          description: Administrator-assigned profile policy retained in effective settings so clients can explain inheritance and blocking.
           type: string
           enum: [inherit, enabled, disabled]
         preferDirectPlay:

@@ -291,6 +291,9 @@ func (s *Service) UpdateProfile(ctx context.Context, principal auth.Principal, p
 	if err := validateProfilePatch(patch); err != nil {
 		return Layer{}, err
 	}
+	if patch.Transcoding.Set && !principal.IsGlobalAdministrator() {
+		return Layer{}, fmt.Errorf("%w: transcoding assignments require global administrator access", ErrForbidden)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Layer{}, fmt.Errorf("begin profile settings update: %w", err)

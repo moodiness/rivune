@@ -2389,11 +2389,12 @@ function isDeviceNotificationSetting(key: string): boolean {
   return key === "notificationsEnabled" || key === "notificationDurationSeconds" || key === "notificationPollIntervalSeconds";
 }
 
-function preferenceValues(values: SettingsValues): SettingsValues {
+function preferenceValues(values: SettingsValues, includeAdministratorPolicy = false): SettingsValues {
   const preferences = { ...values };
   delete preferences.notificationsEnabled;
   delete preferences.notificationDurationSeconds;
   delete preferences.notificationPollIntervalSeconds;
+  if (!includeAdministratorPolicy) delete preferences.transcoding;
   return preferences;
 }
 
@@ -2713,7 +2714,7 @@ function SettingsAdmin() {
           setTranscodingDisableCount(null);
         }
       } else {
-        const updated = await api.updateProfileSettings(target, preferenceValues(profile));
+        const updated = await api.updateProfileSettings(target, preferenceValues(profile, canManageServer));
         if (settingsTargetRef.current === target) {
           setProfile(updated.settings);
           setSavedProfile(updated.settings);
@@ -2783,7 +2784,7 @@ function SettingsAdmin() {
         ? <div id="settings-section-connections"><TrackingSettings profileId={settingsTarget} /></div>
         : serverSelected
           ? <SettingsCard activeSection={visibleSection} serverScope title={translate("settings.server.title")} description={translate("settings.server.description")} icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void requestSave()} onReset={() => setInstance(savedInstance)} saving={saving || checkingTranscodingDisable} dirty={settingsDirty} emptyLabel={translate("settings.defaults.rivune")} />
-          : <SettingsCard activeSection={visibleSection} title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void requestSave()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />}
+          : <SettingsCard activeSection={visibleSection} canConfigureTranscoding={canManageServer} title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void requestSave()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />}
     </main>
     {transcodingDisableCount !== null && <ConfirmDialog
       title={translate("settings.transcoding.disableConfirmTitle")}
@@ -3022,7 +3023,7 @@ function MaintenanceCard({ values, onChange, onSave, onReset, saving, dirty }: {
   </section>;
 }
 
-function SettingsCard({ activeSection, serverScope = false, values, defaults = {}, onChange, onSave, onReset, saving, dirty, emptyLabel = translate("settings.defaults.server") }: { activeSection: SettingsSection; serverScope?: boolean; title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean; emptyLabel?: string }) {
+function SettingsCard({ activeSection, serverScope = false, canConfigureTranscoding = false, values, defaults = {}, onChange, onSave, onReset, saving, dirty, emptyLabel = translate("settings.defaults.server") }: { activeSection: SettingsSection; serverScope?: boolean; canConfigureTranscoding?: boolean; title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean; emptyLabel?: string }) {
   const effective = {
     interfaceLanguage: defaults.interfaceLanguage ?? rivuneSettingDefaults.interfaceLanguage,
     theme: defaults.theme ?? rivuneSettingDefaults.theme,
@@ -3071,7 +3072,7 @@ function SettingsCard({ activeSection, serverScope = false, values, defaults = {
 
       {activeSection === "playback" && <SettingsGroup sectionId="playback" icon={<Film />} title={translate("settings.groups.playback.title")} description={translate("settings.groups.playback.description")}>
         {!serverScope && <div className="setting-control setting-control--transcoding">
-          <label className="field"><span>{translate("settings.fields.transcoding")}</span><div><select value={profileTranscoding} disabled={saving} aria-describedby="profile-transcoding-description" onChange={(event) => change("transcoding", event.target.value as "inherit" | "enabled" | "disabled")}>{settingOptions.transcoding.map((option) => <option key={option.value} value={option.value}>{translate(option.labelKey)}</option>)}</select></div><small id="profile-transcoding-description">{translate("settings.fields.transcodingDescription")}</small></label>
+          {canConfigureTranscoding && <label className="field"><span>{translate("settings.fields.transcoding")}</span><div><select value={profileTranscoding} disabled={saving} aria-describedby="profile-transcoding-description" onChange={(event) => change("transcoding", event.target.value as "inherit" | "enabled" | "disabled")}>{settingOptions.transcoding.map((option) => <option key={option.value} value={option.value}>{translate(option.labelKey)}</option>)}</select></div><small id="profile-transcoding-description">{translate("settings.fields.transcodingDescription")}</small></label>}
           <div className={`settings-transcoding-state ${effectiveTranscoding ? "is-enabled" : "is-blocked"}`} role="status" aria-live="polite">
             {effectiveTranscoding ? <Check aria-hidden="true" /> : <Shield aria-hidden="true" />}
             <p>{translate(!serverAllowsTranscoding ? "settings.transcoding.blockedByServer" : effectiveTranscoding ? "settings.transcoding.effectiveEnabled" : "settings.transcoding.effectiveDisabled")}</p>
