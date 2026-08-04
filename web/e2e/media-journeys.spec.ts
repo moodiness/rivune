@@ -694,15 +694,19 @@ test("season selector supports horizontal mouse dragging without changing the ac
   const bounds = await seasons.boundingBox();
   if (!bounds) throw new Error("Missing season selector bounds");
 
+  const maxScrollLeft = await seasons.evaluate((element) => element.scrollWidth - element.clientWidth);
+  expect(maxScrollLeft).toBeGreaterThan(80);
+  const dragDistance = Math.min(120, Math.floor(maxScrollLeft / 2));
   const dragStartX = bounds.x + Math.min(bounds.width - 60, 720);
   await page.mouse.move(dragStartX, bounds.y + bounds.height / 2);
   await page.mouse.down();
-  await page.mouse.move(dragStartX - 180, bounds.y + bounds.height / 2, { steps: 4 });
+  await page.mouse.move(dragStartX - dragDistance, bounds.y + bounds.height / 2, { steps: 4 });
   await page.mouse.up();
 
   const releasedScrollLeft = await seasons.evaluate((element) => element.scrollLeft);
-  expect(releasedScrollLeft).toBeGreaterThan(100);
-  await expect.poll(() => seasons.evaluate((element) => element.scrollLeft)).toBeGreaterThan(releasedScrollLeft + 20);
+  expect(releasedScrollLeft).toBeGreaterThan(dragDistance - 10);
+  const momentumTarget = Math.min(maxScrollLeft - 1, dragDistance + 20);
+  await expect.poll(() => seasons.evaluate((element) => element.scrollLeft)).toBeGreaterThan(momentumTarget);
   await expect(activeSeason).toHaveAttribute("aria-selected", "true");
   await page.getByRole("tab", { name: /^Season 2\b/ }).click();
   await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "true");
