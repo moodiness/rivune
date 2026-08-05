@@ -375,14 +375,14 @@ test("a 100-episode season reads and mutates progress in one bounded request", a
   await page.goto("/media/series/tt9000/season/1");
   const markSeasonWatched = page.getByRole("button", { name: "Mark season watched" });
   await expect(markSeasonWatched).toBeVisible();
-  expect(readRequests).toBe(1);
+  await expect.poll(() => readRequests).toBe(1);
   expect(readTitleIds).toHaveLength(100);
   expect(readTitleIds[0]).toBe("episode-1");
   expect(readTitleIds[99]).toBe("episode-100");
 
   await markSeasonWatched.click();
   await expect(page.getByRole("button", { name: "Mark season unwatched" })).toBeVisible();
-  expect(writeRequests).toBe(1);
+  await expect.poll(() => writeRequests).toBe(1);
   expect(writeItems).toHaveLength(100);
   expect(writeItems[0]).toEqual({ titleId: "episode-1", completed: true, expectedVersion: 4 });
   expect(writeItems[99]).toEqual({ titleId: "episode-100", completed: true, expectedVersion: 0 });

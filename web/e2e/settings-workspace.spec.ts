@@ -174,7 +174,7 @@ test("global administrator assigns transcoding per profile", async ({ page, rivu
 
 test("viewer cannot change transcoding and unrelated saves omit its policy", async ({ page, rivune }) => {
   rivune.setProfileCategory("bob", CATEGORY_IDS.household);
-  rivune.configureGlobalAdmin("bob");
+  await rivune.configureGlobalAdmin(page, "bob");
   await page.goto("/");
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
   await page.locator('[data-settings-section="playback"]').click();

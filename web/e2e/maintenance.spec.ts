@@ -228,7 +228,7 @@ test("the selected interface language localizes Home copy", async ({ page, rivun
 });
 
 test("viewer settings use the full desktop workspace", async ({ page, rivune }) => {
-  rivune.configureCategoryScope(CATEGORY_IDS.kids);
+  await rivune.configureCategoryScope(page, CATEGORY_IDS.kids);
   await page.setViewportSize({ width: 1568, height: 899 });
   await page.goto("/");
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true }).click();

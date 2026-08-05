@@ -438,24 +438,39 @@ export class RivuneHarness {
     this.deviceCategoryId = CATEGORY_IDS.household;
   }
 
-  configureCategoryScope(categoryId = CATEGORY_IDS.household) {
+  private async configureActiveProfile(page: Page, profileId: string | null) {
+    this.activeProfileId = profileId;
+    this.activeProfileContext = profileId ? `fixture-profile-context-${profileId}-${++this.profileContextSequence}` : "";
+    const profileContext = this.activeProfileContext;
+    await page.evaluate(({ profileId, profileContext }) => {
+      if (profileId && profileContext) {
+        sessionStorage.setItem("rivune.profile", profileId);
+        sessionStorage.setItem("rivune.profile.context", profileContext);
+        return;
+      }
+      sessionStorage.removeItem("rivune.profile");
+      sessionStorage.removeItem("rivune.profile.context");
+    }, { profileId, profileContext });
+  }
+
+  async configureCategoryScope(page: Page, categoryId = CATEGORY_IDS.household) {
     const category = this.categories.find((candidate) => candidate.id === categoryId);
     if (!category) throw new Error(`Unknown fixture category ${categoryId}`);
     this.userRole = "admin";
     this.authorizationScope = "category";
     this.sessionCategoryId = category.id;
     this.deviceCategoryId = category.id;
-    this.activeProfileId = this.profiles.find((profile) => profile.categoryId === category.id)?.id ?? null;
+    await this.configureActiveProfile(page, this.profiles.find((profile) => profile.categoryId === category.id)?.id ?? null);
   }
 
-  configureGlobalAdmin(activeProfileId = "alice", deviceCategoryId = CATEGORY_IDS.household) {
+  async configureGlobalAdmin(page: Page, activeProfileId = "alice", deviceCategoryId = CATEGORY_IDS.household) {
     const category = this.categories.find((candidate) => candidate.id === deviceCategoryId);
     if (!category) throw new Error(`Unknown fixture category ${deviceCategoryId}`);
     this.userRole = "admin";
     this.authorizationScope = "global_admin";
     this.sessionCategoryId = null;
     this.deviceCategoryId = category.id;
-    this.activeProfileId = activeProfileId;
+    await this.configureActiveProfile(page, activeProfileId);
   }
 
   setProfileCategory(profileId: string, categoryId: string) {
@@ -721,6 +736,7 @@ export class RivuneHarness {
       return;
     }
     const profileContextExempt =
+      path === "/setup" ||
       path === "/auth/logout" ||
       path === "/auth/me" ||
       request.method() === "GET" && (path === "/profiles" || path.startsWith("/profiles/") && path.endsWith("/avatar")) ||

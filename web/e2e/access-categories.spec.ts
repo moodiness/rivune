@@ -414,7 +414,7 @@ test("profile selection keeps the refreshed account profile instead of the earli
 });
 
 test("category and device tabs are absent from a category-scoped administration session", async ({ page, rivune }) => {
-  rivune.configureCategoryScope(CATEGORY_IDS.household);
+  await rivune.configureCategoryScope(page, CATEGORY_IDS.household);
   await openAdministration(page, "Profiles");
 
   const tabs = page.getByRole("navigation", { name: "Administration sections" });
@@ -427,7 +427,7 @@ test("category and device tabs are absent from a category-scoped administration 
 });
 
 test("unauthorized admin deep links are replaced by the visible tab", async ({ page, rivune }) => {
-  rivune.configureCategoryScope(CATEGORY_IDS.household);
+  await rivune.configureCategoryScope(page, CATEGORY_IDS.household);
   await page.goto("/#admin?tab=devices");
 
   const rail = page.getByRole("navigation", { name: "Administration sections" });
@@ -460,7 +460,7 @@ test("mobile admin rail keeps all destinations keyboard reachable without group 
 });
 
 test("global pairing requires a category and submits normalized optional metadata", async ({ page, rivune }) => {
-  rivune.configureGlobalAdmin("bob", CATEGORY_IDS.kids);
+  await rivune.configureGlobalAdmin(page, "bob", CATEGORY_IDS.kids);
   await page.goto("/pair?code=bcdfghjk");
   const form = page.locator(".pairing-card form");
   const approve = form.getByRole("button", { name: "Approve device" });
@@ -476,7 +476,7 @@ test("global pairing requires a category and submits normalized optional metadat
 });
 
 test("category-scoped pairing is fixed to its server category on mobile RTL", async ({ page, rivune }) => {
-  rivune.configureCategoryScope(CATEGORY_IDS.household);
+  await rivune.configureCategoryScope(page, CATEGORY_IDS.household);
   rivune.setInterfaceLanguage("ar");
   await page.setViewportSize({ width: 360, height: 800 });
   await page.goto("/pair?code=bcdfghjk");
