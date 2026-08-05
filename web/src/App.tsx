@@ -256,6 +256,7 @@ type RuntimeSettings = {
   animationsEnabled: boolean;
   hideUnreleased: boolean;
   maximumCastMembers: number;
+  maximumDirectTitles: number;
   subtitleSizePercent: number;
   subtitleTextColor: string;
   subtitleBackgroundOpacityPercent: number;
@@ -270,6 +271,7 @@ const defaultRuntimeSettings: RuntimeSettings = {
   animationsEnabled: true,
   hideUnreleased: false,
   maximumCastMembers: 20,
+  maximumDirectTitles: 20,
   subtitleSizePercent: 100,
   subtitleTextColor: "#FFFFFF",
   subtitleBackgroundOpacityPercent: 60,
@@ -290,6 +292,7 @@ function runtimeSettings(values: SettingsValues): RuntimeSettings {
     animationsEnabled: typeof values.animationsEnabled === "boolean" ? values.animationsEnabled : defaultRuntimeSettings.animationsEnabled,
     hideUnreleased: values.hideUnreleased === true,
     maximumCastMembers: boundedSetting(values.maximumCastMembers, defaultRuntimeSettings.maximumCastMembers, 1, 100),
+    maximumDirectTitles: boundedSetting(values.maximumDirectTitles, defaultRuntimeSettings.maximumDirectTitles, 1, 100),
     subtitleSizePercent: boundedSetting(values.subtitleSizePercent, defaultRuntimeSettings.subtitleSizePercent, 50, 200),
     subtitleTextColor: typeof values.subtitleTextColor === "string" && /^#[0-9A-Fa-f]{6}$/.test(values.subtitleTextColor) ? values.subtitleTextColor.toUpperCase() : defaultRuntimeSettings.subtitleTextColor,
     subtitleBackgroundOpacityPercent: boundedSetting(values.subtitleBackgroundOpacityPercent, defaultRuntimeSettings.subtitleBackgroundOpacityPercent, 0, 100),
@@ -722,7 +725,7 @@ export default function App() {
   return <Shell view={visibleView} onView={setView}>
     <div key={principal ?? "anonymous"} ref={routeSurfaceRef} tabIndex={-1} className={visibleMediaRoute ? "route-surface route-surface--hidden" : "route-surface"}>
       <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingSpace")}</span></div>}>
-        {visibleView === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} mediaPreferences={{ profileID: activeProfile.id, hideUnreleased: settings.hideUnreleased, animationsEnabled: settings.animationsEnabled }} /> : visibleView === "search" ? <SearchPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.search} onLibraryMutation={invalidateLibrarySurfaces} mediaPreferences={{ profileID: activeProfile.id, hideUnreleased: settings.hideUnreleased, animationsEnabled: settings.animationsEnabled }} /> : visibleView === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : visibleView === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
+        {visibleView === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} mediaPreferences={{ profileID: activeProfile.id, hideUnreleased: settings.hideUnreleased, animationsEnabled: settings.animationsEnabled, maximumDirectTitles: settings.maximumDirectTitles }} /> : visibleView === "search" ? <SearchPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.search} onLibraryMutation={invalidateLibrarySurfaces} mediaPreferences={{ profileID: activeProfile.id, hideUnreleased: settings.hideUnreleased, animationsEnabled: settings.animationsEnabled, maximumDirectTitles: settings.maximumDirectTitles }} /> : visibleView === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : visibleView === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
       </Suspense>
     </div>
     {visibleMediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaIdentity(visibleMediaRoute.item)}:${visibleMediaRoute.item.titleId ?? ""}`} item={visibleMediaRoute.item} maximumCastMembers={settings.maximumCastMembers} onCanonicalRoute={canonicalizeMediaRoute} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} onLibraryMutation={invalidateLibrarySurfaces} /></Suspense>}

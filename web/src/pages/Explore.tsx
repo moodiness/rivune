@@ -13,7 +13,7 @@ import type { ActionMenuAnchor } from "../components";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 type OpenMedia = (item: MediaItem) => void;
-type MediaPreferences = { profileID: string; hideUnreleased: boolean; animationsEnabled: boolean };
+type MediaPreferences = { profileID: string; hideUnreleased: boolean; animationsEnabled: boolean; maximumDirectTitles: number };
 type LoadedLibrary = {
   pages: Record<number, LibraryItem[]>;
   page: number;
@@ -154,6 +154,7 @@ function mediaFromBatch(batch: ResourceBatch): MediaItem[] {
       const meta = record(candidate);
       if (!meta || typeof meta.id !== "string") continue;
       const mediaType = stringValue(meta, "type") || result.type;
+      const addonScoped = mediaType === "tv" || !["movie", "series", "episode"].includes(mediaType);
       const title = stringValue(meta, "name", "title") || t("media.untitled");
       const resourceId = stringValue(meta, "resourceId") || meta.id;
       const sourceAddonId = stringValue(meta, "sourceAddonId") || result.addonId;
@@ -177,9 +178,9 @@ function mediaFromBatch(batch: ResourceBatch): MediaItem[] {
         voteAverage: typeof meta.imdbRating === "number" ? meta.imdbRating : undefined,
         externalIds: {},
         sources: [{ id: result.addonId, kind: "addon_catalog", title: sourceName || "", addonId: result.addonId }],
-        sourceAddonId: mediaType === "tv" ? sourceAddonId : undefined,
-        sourceCatalogId: mediaType === "tv" ? sourceCatalogId : undefined,
-        sourceName: mediaType === "tv" ? sourceName : undefined,
+        sourceAddonId: addonScoped ? sourceAddonId : undefined,
+        sourceCatalogId: addonScoped ? sourceCatalogId : undefined,
+        sourceName: addonScoped ? sourceName : undefined,
         country: mediaType === "tv" ? stringValue(meta, "country", "countryCode") : undefined,
         language: mediaType === "tv" ? stringValue(meta, "language", "lang") : undefined,
         category: mediaType === "tv" ? stringValue(meta, "category", "genre") : undefined,
@@ -729,11 +730,12 @@ export function HomePage({ onOpenMedia, mediaRevision, mediaPreferences }: { onO
           .filter((item) => isAvailable(item, mediaPreferences.hideUnreleased))
           .map((item) => [mediaIdentity(item), item])).values());
         const showDirectly = collection.viewMode === "follow_layout";
-        const landscapeItems = directItems.length > 0 && directItems.every((item) => item.mediaType === "tv");
+        const displayedDirectItems = showDirectly ? directItems.slice(0, mediaPreferences.maximumDirectTitles) : directItems;
+        const landscapeItems = displayedDirectItems.length > 0 && displayedDirectItems.every((item) => item.mediaType === "tv");
         const collectionPending = collection.folders.some((folder) => pendingFolderKeys.has(homeFolderCacheKey(collection.id, folder.id ?? "")));
         return <section className={`folder-collection-section folder-collection-section--${collection.folderCoverShape}`} key={collection.id}>
           <SectionHeading title={collection.title} action={<button type="button" className="text-button" onClick={() => openHomeCollection(collection)}>{t("common.actions.viewAll")} <ArrowRight size={16} /></button>} />
-          {showDirectly ? directItems.length > 0 ? <HorizontalDragRow className={landscapeItems ? "media-row media-row--landscape" : "media-row"}>{directItems.map((item) => <MediaCard key={mediaIdentity(item)} shape={item.mediaType === "tv" ? "landscape" : "poster"} title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? tvSubtitle(item) : item.releaseInfo} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} onClick={() => onOpenMedia(item)} />)}</HorizontalDragRow> : collectionPending ? <div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div> : <EmptyState icon={<Clapperboard size={40} />} title={t("home.collection.emptyTitle")} description={t("home.collection.emptySourcesDescription")} /> : <HorizontalDragRow className={`folder-cover-row folder-cover-row--${collection.folderCoverShape}`}>{collection.folders.map((folder, index) => {
+          {showDirectly ? displayedDirectItems.length > 0 ? <HorizontalDragRow className={landscapeItems ? "media-row media-row--landscape" : "media-row"}>{displayedDirectItems.map((item) => <MediaCard key={mediaIdentity(item)} shape={item.mediaType === "tv" ? "landscape" : "poster"} title={item.title} image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl : item.posterUrl} backdrop={item.backgroundUrl} subtitle={item.mediaType === "tv" ? tvSubtitle(item) : item.releaseInfo} badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined} onClick={() => onOpenMedia(item)} />)}</HorizontalDragRow> : collectionPending ? <div className="skeleton-row">{[0, 1, 2, 3, 4, 5].map((card) => <Skeleton key={card} className="card-skeleton" />)}</div> : <EmptyState icon={<Clapperboard size={40} />} title={t("home.collection.emptyTitle")} description={t("home.collection.emptySourcesDescription")} /> : <HorizontalDragRow className={`folder-cover-row folder-cover-row--${collection.folderCoverShape}`}>{collection.folders.map((folder, index) => {
             const row = collectionRows.find((candidate) => candidate.resolved.folder.id === folder.id);
             const artwork = row?.resolved.folder.coverImageUrl || folder.coverImageUrl || row?.resolved.items.find((item) => isAvailable(item, mediaPreferences.hideUnreleased))?.posterUrl || collection.backdropImageUrl;
             return <button key={folder.id ?? index} className="folder-cover-card" disabled={!row} onClick={() => { if (row) openHomeFolder(row); }} aria-label={t("home.folder.openNamed", { name: folder.title })}>

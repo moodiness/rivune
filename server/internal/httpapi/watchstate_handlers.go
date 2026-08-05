@@ -1,8 +1,11 @@
 package httpapi
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,6 +13,72 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/watchstate"
 )
+
+const maximumCustomSeriesResolveBytes int64 = 8 * 1024 * 1024
+
+type customSeriesResolveRequest struct {
+	SourceAddonID string                          `json:"sourceAddonId"`
+	SourceType    string                          `json:"sourceType"`
+	Series        watchstate.CustomSeriesSnapshot `json:"series"`
+	Videos        customVideoResolveRequests      `json:"videos"`
+}
+
+type customVideoResolveRequest struct {
+	ResourceID    string `json:"resourceId"`
+	Title         string `json:"title,omitempty"`
+	SeasonNumber  *int64 `json:"seasonNumber"`
+	EpisodeNumber *int64 `json:"episodeNumber"`
+	ThumbnailURL  string `json:"thumbnailUrl,omitempty"`
+	BackgroundURL string `json:"backgroundUrl,omitempty"`
+	ReleaseInfo   string `json:"releaseInfo,omitempty"`
+	Released      string `json:"released,omitempty"`
+}
+
+type customVideoResolveRequests struct {
+	values   []customVideoResolveRequest
+	assigned bool
+}
+
+var (
+	errDuplicateCustomSeriesVideos = errors.New("custom series videos field is duplicated")
+	errMaximumCustomSeriesVideos   = errors.New("custom series video count exceeds limit")
+)
+
+func (requests *customVideoResolveRequests) UnmarshalJSON(data []byte) error {
+	if requests.assigned {
+		return errDuplicateCustomSeriesVideos
+	}
+	requests.assigned = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		requests.values = nil
+		return nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('[') {
+		return errors.New("videos must be an array")
+	}
+	values := make([]customVideoResolveRequest, 0)
+	for decoder.More() {
+		if len(values) == watchstate.MaximumCustomSeriesVideos {
+			return errMaximumCustomSeriesVideos
+		}
+		var value customVideoResolveRequest
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+		values = append(values, value)
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim(']') {
+		return errors.New("videos must be an array")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("videos must contain one JSON array")
+	}
+	requests.values = values
+	return nil
+}
 
 func (a *API) resolveTitle(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	if !requireJSON(w, r) {
@@ -49,6 +118,57 @@ func (a *API) resolveTitle(w http.ResponseWriter, r *http.Request, principal aut
 	}
 	if a.artwork != nil {
 		a.artwork.LocalizeTitleReference(r.Context(), &result)
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *API) resolveCustomSeries(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !requireJSON(w, r) {
+		return
+	}
+	if r.ContentLength > maximumCustomSeriesResolveBytes {
+		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body: request body too large")
+		return
+	}
+	var request customSeriesResolveRequest
+	if err := decodeJSONLimit(w, r, &request, maximumCustomSeriesResolveBytes); err != nil {
+		if errors.Is(err, errMaximumCustomSeriesVideos) {
+			a.writeWatchstateError(w, "resolve custom series", fmt.Errorf("%w: videos must contain at most %d items", watchstate.ErrInvalidInput, watchstate.MaximumCustomSeriesVideos))
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if !request.Videos.assigned || request.Videos.values == nil {
+		a.writeWatchstateError(w, "resolve custom series", fmt.Errorf("%w: videos is required", watchstate.ErrInvalidInput))
+		return
+	}
+	videos := make([]watchstate.CustomVideoSnapshot, len(request.Videos.values))
+	for index, video := range request.Videos.values {
+		if video.SeasonNumber == nil || video.EpisodeNumber == nil {
+			a.writeWatchstateError(w, "resolve custom series", fmt.Errorf("%w: videos[%d] requires seasonNumber and episodeNumber", watchstate.ErrInvalidInput, index))
+			return
+		}
+		if *video.SeasonNumber < 0 || *video.SeasonNumber > 2147483647 || *video.EpisodeNumber < 0 || *video.EpisodeNumber > 2147483647 {
+			a.writeWatchstateError(w, "resolve custom series", fmt.Errorf("%w: videos[%d] coordinates must be between 0 and 2147483647", watchstate.ErrInvalidInput, index))
+			return
+		}
+		videos[index] = watchstate.CustomVideoSnapshot{
+			ResourceID: video.ResourceID, Title: video.Title,
+			SeasonNumber: int(*video.SeasonNumber), EpisodeNumber: int(*video.EpisodeNumber),
+			ThumbnailURL: video.ThumbnailURL, BackgroundURL: video.BackgroundURL,
+			ReleaseInfo: video.ReleaseInfo, Released: video.Released,
+		}
+	}
+	result, err := a.watchstate.ResolveCustomSeries(r.Context(), principal, watchstate.ResolveCustomSeriesInput{
+		SourceAddonID: request.SourceAddonID,
+		SourceType:    request.SourceType,
+		Series:        request.Series,
+		Videos:        videos,
+	})
+	if err != nil {
+		a.writeWatchstateError(w, "resolve custom series", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, result)
 }

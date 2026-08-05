@@ -38,6 +38,58 @@ type TitleReference struct {
 	Category        string `json:"category,omitempty"`
 }
 
+const MaximumCustomSeriesVideos = 4096
+
+type ResolveCustomSeriesInput struct {
+	SourceAddonID string
+	SourceType    string
+	Series        CustomSeriesSnapshot
+	Videos        []CustomVideoSnapshot
+}
+
+type CustomSeriesSnapshot struct {
+	ResourceID    string `json:"resourceId"`
+	Title         string `json:"title"`
+	PosterURL     string `json:"posterUrl,omitempty"`
+	BackgroundURL string `json:"backgroundUrl,omitempty"`
+	ReleaseInfo   string `json:"releaseInfo,omitempty"`
+}
+
+type CustomVideoSnapshot struct {
+	ResourceID    string `json:"resourceId"`
+	Title         string `json:"title,omitempty"`
+	SeasonNumber  int    `json:"seasonNumber"`
+	EpisodeNumber int    `json:"episodeNumber"`
+	ThumbnailURL  string `json:"thumbnailUrl,omitempty"`
+	BackgroundURL string `json:"backgroundUrl,omitempty"`
+	ReleaseInfo   string `json:"releaseInfo,omitempty"`
+	Released      string `json:"released,omitempty"`
+}
+
+type CustomSeriesReference struct {
+	TitleID    string `json:"titleId"`
+	ResourceID string `json:"resourceId"`
+}
+
+type CustomSeasonReference struct {
+	TitleID      string `json:"titleId"`
+	SeasonNumber int    `json:"seasonNumber"`
+}
+
+type CustomVideoReference struct {
+	TitleID       string `json:"titleId"`
+	ResourceID    string `json:"resourceId"`
+	SeasonTitleID string `json:"seasonTitleId"`
+	SeasonNumber  int    `json:"seasonNumber"`
+	EpisodeNumber int    `json:"episodeNumber"`
+}
+
+type ResolveCustomSeriesResult struct {
+	Series  CustomSeriesReference   `json:"series"`
+	Seasons []CustomSeasonReference `json:"seasons"`
+	Videos  []CustomVideoReference  `json:"videos"`
+}
+
 type LibraryItem struct {
 	TitleID         string    `json:"titleId"`
 	MediaType       string    `json:"mediaType"`

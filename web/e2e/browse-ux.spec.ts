@@ -101,7 +101,7 @@ test("Home restores persistent rows before revalidation and refreshes opened col
   await expect(page.getByText("Alice Exclusive", { exact: true })).toBeVisible();
 });
 
-test("Home preserves every directly displayed collection title across reloads", async ({ page, rivune }) => {
+test("Home applies the active profile direct-title limit without truncating View all", async ({ page, rivune }) => {
   const folderPath = "/api/v1/collections/alice-collection/folders/alice-folder/items";
   const items = Array.from({ length: 8 }, (_, index) => ({
     id: `direct-title-${index + 1}`,
@@ -129,14 +129,34 @@ test("Home preserves every directly displayed collection title across reloads", 
 
   await page.goto("/");
   const collection = page.locator(".folder-collection-section").filter({ hasText: "Alice's Slow Shelf" });
-  const cards = collection.locator(".media-card");
-  await expect(cards).toHaveCount(8);
+  const directCards = collection.locator(".media-card");
+  await expect(directCards).toHaveCount(8);
   await expect.poll(() => folderRequests).toBe(1);
 
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+  await page.locator('[data-admin-tab="settings"]').click();
+  await page.locator('[data-settings-section="appearance"]').click();
+  const mode = page.locator('select[name="maximumDirectTitlesMode"]');
+  const limit = page.locator('input[name="maximumDirectTitles"]');
+  await expect(mode).toHaveValue("inherit");
+  await mode.selectOption("custom");
+  await limit.fill("3");
+  await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
+  const profileRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
+  expect(profileRequest.body).toMatchObject({ maximumDirectTitles: 3 });
+
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Home", exact: true }).click();
+  await expect(directCards).toHaveCount(3);
+  await expect(collection.getByText("Direct title 4", { exact: true })).toHaveCount(0);
+
   await page.reload({ waitUntil: "domcontentloaded" });
-  await expect(cards).toHaveCount(8);
-  await expect.poll(() => rivune.matching("/api/v1/collections", "GET").length).toBe(2);
-  expect(folderRequests).toBe(1);
+  await expect(directCards).toHaveCount(3);
+  await expect(collection.getByText("Direct title 4", { exact: true })).toHaveCount(0);
+
+  await collection.getByRole("button", { name: "View all" }).click();
+  await expect.poll(() => folderRequests).toBe(2);
+  await expect(page.locator(".folder-page .media-card")).toHaveCount(8);
+  await expect(page.getByText("Direct title 8", { exact: true })).toBeVisible();
 });
 
 test("source folders use Fanart collection posters instead of the first title artwork", async ({ page, rivune }) => {

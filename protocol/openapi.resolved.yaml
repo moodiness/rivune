@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Rivune API
-  version: 1.4.0
+  version: 1.5.0
   description: |
     Protocol version 19 between Rivune clients and a self-hosted Rivune Server. While global maintenance mode is enabled, authenticated non-admin application operations return the reusable 503 MaintenanceMode response. Authentication, session recovery, health, discovery, and administrator operations remain available.
   license:
@@ -1530,7 +1530,7 @@ paths:
         '422':
           $ref: '#/components/responses/Error'
         '503':
-          $ref: '#/components/responses/TrackingProviderUnavailable'
+          $ref: '#/components/responses/TrackingOperationUnavailable'
   /profiles/{profileId}/tracking/{provider}/device-code/{authorizationId}/token:
     parameters:
       - $ref: '#/components/parameters/ProfileId'
@@ -1574,7 +1574,7 @@ paths:
         '429':
           $ref: '#/components/responses/Error'
         '503':
-          $ref: '#/components/responses/TrackingProviderUnavailable'
+          $ref: '#/components/responses/TrackingOperationUnavailable'
   /profiles/{profileId}/tracking/{provider}:
     parameters:
       - $ref: '#/components/parameters/ProfileId'
@@ -1610,7 +1610,7 @@ paths:
         '422':
           $ref: '#/components/responses/Error'
         '503':
-          $ref: '#/components/responses/MaintenanceMode'
+          $ref: '#/components/responses/TrackingOperationUnavailable'
     delete:
       summary: Disconnect a profile tracking account
       description: Clears encrypted credentials, authorization codes, and queued outbound work. Provider revocation is best effort.
@@ -2685,7 +2685,8 @@ paths:
     post:
       summary: Resolve a provider title identity
       operationId: resolveTitle
-      description: Resolves a provider identifier to a stable server title and refreshes its display snapshot. TV identities are derived server-side from sourceAddonId and resourceId after verifying that the selected profile can access the addon; stream URLs are not accepted.
+      description: |
+        Resolves a provider identifier to a stable server title and refreshes its display snapshot. TV identities are derived server-side from sourceAddonId and resourceId after verifying that the selected profile can access the addon; stream URLs are not accepted. New profile-scoped identifiers share a retained limit of 100,000 per profile; existing identifiers remain refreshable at that limit.
       security:
         - bearerAuth: []
       requestBody:
@@ -2706,6 +2707,39 @@ paths:
         '401':
           $ref: '#/components/responses/Error'
         '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /titles/custom-series/resolve:
+    post:
+      summary: Resolve an addon custom series hierarchy
+      operationId: resolveCustomSeries
+      description: |
+        Authoritatively resolves up to 4096 season and episode coordinates for the selected profile and exact accessible addon installation. Stable internal UUIDs are profile-scoped and derived from the addon installation, source type, hierarchy kind, and opaque resource IDs; they are not canonical TMDB, IMDb, or TVDB identities. Omitted prior children become inactive without deleting their watch progress, and returning children regain the same UUIDs and progress. Videos are returned in request order and seasons in ascending numeric order. The JSON body is strictly decoded and bounded to 8 MiB; each profile may retain at most 100,000 profile-scoped title identities, while existing identities remain refreshable.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomSeriesResolveInput'
+      responses:
+        '200':
+          description: Stable profile-scoped internal series, season, and episode identities.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomSeriesResolveResult'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '415':
           $ref: '#/components/responses/Error'
         '422':
           $ref: '#/components/responses/Error'
@@ -3708,11 +3742,11 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
-    TrackingProviderUnavailable:
-      description: Tracking provider configuration or availability failed, or global maintenance mode is enabled.
+    TrackingOperationUnavailable:
+      description: Tracking provider configuration or availability failed, synchronization capacity was reached, or global maintenance mode is enabled. Capacity failures use error code `tracking_sync_capacity` and roll back the mutation.
       headers:
         Retry-After:
-          description: Suggested delay in seconds when the response is caused by global maintenance mode.
+          description: Suggested delay in seconds for synchronization capacity or global maintenance mode.
           schema:
             type: integer
             minimum: 1
@@ -7512,6 +7546,184 @@ components:
           type: string
           minLength: 1
           maxLength: 256
+    CustomSeriesResolveInput:
+      type: object
+      additionalProperties: false
+      required:
+        - sourceAddonId
+        - sourceType
+        - series
+        - videos
+      properties:
+        sourceAddonId:
+          type: string
+          format: uuid
+        sourceType:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Exact custom media type used for addon resource lookup and identity scoping.
+        series:
+          $ref: '#/components/schemas/CustomSeriesSnapshot'
+        videos:
+          type: array
+          description: Authoritative child set. Resource IDs and season/episode coordinate pairs must each be unique; an empty array deactivates all prior child seasons and episodes without deleting progress.
+          maxItems: 4096
+          uniqueItems: false
+          items:
+            $ref: '#/components/schemas/CustomVideoSnapshot'
+    CustomSeriesSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - resourceId
+        - title
+      properties:
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Exact opaque addon series resource ID; never interpreted as a canonical provider ID.
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        posterUrl:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          pattern: ^/api/v1/artwork/[0-9a-f]{64}$
+          description: Same-origin localized artwork path; raw provider URLs are rejected.
+        backgroundUrl:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          pattern: ^/api/v1/artwork/[0-9a-f]{64}$
+          description: Same-origin localized artwork path; raw provider URLs are rejected.
+        releaseInfo:
+          type: string
+          minLength: 1
+          maxLength: 120
+    CustomVideoSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - resourceId
+        - seasonNumber
+        - episodeNumber
+      properties:
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Exact opaque addon video resource ID retained for playback lookup.
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        seasonNumber:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        episodeNumber:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        thumbnailUrl:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          pattern: ^/api/v1/artwork/[0-9a-f]{64}$
+          description: Same-origin localized artwork path; raw provider URLs are rejected.
+        backgroundUrl:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          pattern: ^/api/v1/artwork/[0-9a-f]{64}$
+          description: Same-origin localized artwork path; raw provider URLs are rejected.
+        releaseInfo:
+          type: string
+          minLength: 1
+          maxLength: 120
+        released:
+          type: string
+          format: date
+    CustomSeriesResolveResult:
+      type: object
+      additionalProperties: false
+      required:
+        - series
+        - seasons
+        - videos
+      properties:
+        series:
+          $ref: '#/components/schemas/CustomSeriesReference'
+        seasons:
+          type: array
+          maxItems: 4096
+          items:
+            $ref: '#/components/schemas/CustomSeasonReference'
+        videos:
+          type: array
+          maxItems: 4096
+          items:
+            $ref: '#/components/schemas/CustomVideoReference'
+    CustomSeriesReference:
+      type: object
+      additionalProperties: false
+      required:
+        - titleId
+        - resourceId
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 512
+    CustomSeasonReference:
+      type: object
+      additionalProperties: false
+      required:
+        - titleId
+        - seasonNumber
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        seasonNumber:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+    CustomVideoReference:
+      type: object
+      additionalProperties: false
+      required:
+        - titleId
+        - resourceId
+        - seasonTitleId
+        - seasonNumber
+        - episodeNumber
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        seasonTitleId:
+          type: string
+          format: uuid
+        seasonNumber:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        episodeNumber:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
     CalendarEventList:
       type: object
       additionalProperties: false

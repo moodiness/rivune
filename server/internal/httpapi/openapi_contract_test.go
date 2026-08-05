@@ -19,6 +19,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/playback"
 	"github.com/moodiness/rivune/server/internal/profile"
 	"github.com/moodiness/rivune/server/internal/settings"
+	"github.com/moodiness/rivune/server/internal/watchstate"
 	"github.com/pb33f/libopenapi"
 	oasvalidator "github.com/pb33f/libopenapi-validator"
 )
@@ -247,7 +248,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			effective: settings.Effective{
 				SchemaVersion: 1,
 				Values: settings.EffectiveValues{
-					InterfaceLanguage: "en", Theme: "system", MaximumResolution: "1080p", MaximumCastMembers: settings.DefaultMaximumCastMembers,
+					InterfaceLanguage: "en", Theme: "system", MaximumResolution: "1080p", MaximumCastMembers: settings.DefaultMaximumCastMembers, MaximumDirectTitles: settings.DefaultMaximumDirectTitles,
 					AllowTranscoding: false, Transcoding: settings.TranscodingModeEnabled, PreferDirectPlay: true,
 					HideUnreleased: false, MetadataLanguage: "auto", MetadataRegion: "auto",
 					SeriesMappingProvider: "tmdb", AudioLanguage: "auto", SubtitleLanguage: "auto",
@@ -258,7 +259,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 					NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 30,
 				},
 				Sources: map[string]string{
-					"interfaceLanguage": "default", "theme": "default", "maximumResolution": "instance", "maximumCastMembers": "default",
+					"interfaceLanguage": "default", "theme": "default", "maximumResolution": "instance", "maximumCastMembers": "default", "maximumDirectTitles": "default",
 					"allowTranscoding": "instance", "transcoding": "profile", "preferDirectPlay": "default",
 					"hideUnreleased": "default", "metadataLanguage": "default", "metadataRegion": "default",
 					"seriesMappingProvider": "default", "audioLanguage": "default", "subtitleLanguage": "default",
@@ -490,6 +491,28 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		request := authenticatedContractRequest(http.MethodGet, "/api/v1/collections/"+collectionID+"/management", nil)
 		response := serveContractRequest(t, api, request, http.StatusOK)
 		validateContractResponse(t, document, "/collections/{collectionId}/management", map[string]string{"collectionId": collectionID}, request, response)
+	})
+
+	t.Run("custom series resolution", func(t *testing.T) {
+		seasonID := "88888888-8888-4888-8888-888888888888"
+		episodeID := "99999999-9999-4999-8999-999999999999"
+		service := &fakeWatchstateService{customValue: watchstate.ResolveCustomSeriesResult{
+			Series:  watchstate.CustomSeriesReference{TitleID: contractTitleID, ResourceID: "opaque:series"},
+			Seasons: []watchstate.CustomSeasonReference{{TitleID: seasonID, SeasonNumber: 1}},
+			Videos:  []watchstate.CustomVideoReference{{TitleID: episodeID, ResourceID: "opaque:episode", SeasonTitleID: seasonID, SeasonNumber: 1, EpisodeNumber: 2}},
+		}}
+		api := watchstateAPI(service)
+		api.auth = &fakeAuthService{principal: contractPrincipal()}
+		body := `{"sourceAddonId":"` + contractAddonID + `","sourceType":"anime","series":{"resourceId":"opaque:series","title":"Contract Custom Series","posterUrl":"/api/v1/artwork/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"videos":[{"resourceId":"opaque:episode","title":"Episode","seasonNumber":1,"episodeNumber":2}]}`
+		request := authenticatedContractRequest(http.MethodPost, "/api/v1/titles/custom-series/resolve", bytes.NewBufferString(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := serveContractRequest(t, api, request, http.StatusOK)
+		validateContractResponse(t, document, "/titles/custom-series/resolve", nil, request, response)
+
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/titles/custom-series/resolve", body, true)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/titles/custom-series/resolve", `{"sourceAddonId":"`+contractAddonID+`","sourceType":"anime","series":{"resourceId":"opaque","title":"Show"},"videos":[{"resourceId":"episode","seasonNumber":-1,"episodeNumber":0}]}`, false)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/titles/custom-series/resolve", `{"sourceAddonId":"`+contractAddonID+`","sourceType":"anime","series":{"resourceId":"opaque","title":"Show"},"videos":[{"resourceId":"episode","seasonNumber":2147483648,"episodeNumber":0}]}`, false)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/titles/custom-series/resolve", `{"sourceAddonId":"`+contractAddonID+`","sourceType":"anime","series":{"resourceId":"opaque","title":"Show"},"videos":[],"externalId":"canonical-leak"}`, false)
 	})
 
 	t.Run("operations", func(t *testing.T) {

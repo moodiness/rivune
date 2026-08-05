@@ -3,6 +3,7 @@ package watchstate
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -28,35 +29,47 @@ var (
 	ErrProfileRequired  = errors.New("active profile required")
 	ErrOutboxCapacity   = errors.New("tracking synchronization capacity reached")
 
-	uuidPattern     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
-	providerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+	uuidPattern        = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
+	providerPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+	artworkPathPattern = regexp.MustCompile(`^/api/v1/artwork/[0-9a-f]{64}$`)
 )
 
 const (
-	defaultPageSize                      = 20
-	maximumPageSize                      = 100
-	MaximumTVLibraryMembershipIdentities = 100
+	defaultPageSize                         = 20
+	maximumPageSize                         = 100
+	maximumProfileTitleIdentitiesPerProfile = 100_000
+	MaximumTVLibraryMembershipIdentities    = 100
 )
 
 const accessibleTitlesSQL = `
 	SELECT title.id, title.media_type
 	FROM titles title
-	WHERE CASE
+	WHERE title.is_current
+	  AND CASE
 	    WHEN title.media_type = 'tv' THEN EXISTS (
 	        SELECT 1
 	        FROM addon_profile_access access
 	        WHERE access.addon_id = title.source_addon_id
 	          AND access.profile_id = $1::uuid
 	    )
-	    ELSE NOT EXISTS (
-	        SELECT 1
-	        FROM profile_title_external_ids scoped
-	        WHERE scoped.title_id = title.id
-	    ) OR EXISTS (
-	        SELECT 1
-	        FROM profile_title_external_ids scoped
-	        WHERE scoped.title_id = title.id
-	          AND scoped.profile_id = $1::uuid
+	    ELSE (
+	        NOT EXISTS (
+	            SELECT 1
+	            FROM profile_title_external_ids scoped
+	            WHERE scoped.title_id = title.id
+	        ) OR EXISTS (
+	            SELECT 1
+	            FROM profile_title_external_ids scoped
+	            WHERE scoped.title_id = title.id
+	              AND scoped.profile_id = $1::uuid
+	        )
+	    ) AND (
+	        title.source_addon_id IS NULL OR EXISTS (
+	            SELECT 1
+	            FROM addon_profile_access access
+	            WHERE access.addon_id = title.source_addon_id
+	              AND access.profile_id = $1::uuid
+	        )
 	    )
 	END
 `
@@ -182,6 +195,404 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 	}
 
 	return s.persistCanonicalTitle(ctx, principal, input, canonical)
+}
+
+type customResolverVideo struct {
+	InputIndex      int    `json:"inputIndex"`
+	ResourceID      string `json:"resourceId"`
+	Title           string `json:"title"`
+	SeasonNumber    int    `json:"seasonNumber"`
+	EpisodeNumber   int    `json:"episodeNumber"`
+	ThumbnailURL    string `json:"thumbnailUrl"`
+	BackgroundURL   string `json:"backgroundUrl"`
+	ReleaseInfo     string `json:"releaseInfo"`
+	Released        string `json:"released"`
+	SeasonIdentity  string `json:"seasonIdentity"`
+	EpisodeIdentity string `json:"episodeIdentity"`
+}
+
+func (s *Service) ResolveCustomSeries(ctx context.Context, principal auth.Principal, input ResolveCustomSeriesInput) (ResolveCustomSeriesResult, error) {
+	input, videos, err := normalizeCustomSeriesInput(input)
+	if err != nil {
+		return ResolveCustomSeriesResult{}, err
+	}
+	payload, err := json.Marshal(videos)
+	if err != nil {
+		return ResolveCustomSeriesResult{}, fmt.Errorf("encode custom series videos: %w", err)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ResolveCustomSeriesResult{}, fmt.Errorf("begin custom series resolution: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	if err != nil {
+		return ResolveCustomSeriesResult{}, err
+	}
+	var addonAccessible bool
+	err = tx.QueryRow(ctx, `
+		SELECT true
+		FROM addon_profile_access
+		WHERE addon_id = $1::uuid AND profile_id = $2::uuid
+		FOR SHARE
+	`, input.SourceAddonID, profileID).Scan(&addonAccessible)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ResolveCustomSeriesResult{}, ErrNotFound
+	}
+	if err != nil {
+		return ResolveCustomSeriesResult{}, fmt.Errorf("authorize custom series addon: %w", err)
+	}
+	seriesIdentity := customTitleExternalID(input.SourceAddonID, input.SourceType, "series", input.Series.ResourceID)
+	if err := lockProfileTitleIdentities(ctx, tx, profileID); err != nil {
+		return ResolveCustomSeriesResult{}, err
+	}
+	var existingIdentityCount, newIdentityCount int64
+	if err := tx.QueryRow(ctx, `
+		WITH video_input AS (
+			SELECT *
+			FROM jsonb_to_recordset($2::jsonb) AS video(
+				"seasonIdentity" text, "episodeIdentity" text
+			)
+		), requested AS (
+			SELECT 'series'::text AS namespace, $3::text AS external_id
+			UNION
+			SELECT 'season', "seasonIdentity" FROM video_input
+			UNION
+			SELECT 'episode', "episodeIdentity" FROM video_input
+		)
+		SELECT
+			(SELECT count(*)
+			 FROM profile_title_external_ids
+			 WHERE profile_id = $1::uuid),
+			(SELECT count(*)
+			 FROM requested
+			 WHERE NOT EXISTS (
+				 SELECT 1
+				 FROM profile_title_external_ids existing
+				 WHERE existing.profile_id = $1::uuid
+				   AND existing.provider = 'addon'
+				   AND existing.namespace = requested.namespace
+				   AND existing.external_id = requested.external_id
+			 ))
+	`, profileID, payload, seriesIdentity).Scan(&existingIdentityCount, &newIdentityCount); err != nil {
+		return ResolveCustomSeriesResult{}, fmt.Errorf("check custom title identity capacity: %w", err)
+	}
+	if newIdentityCount > 0 && existingIdentityCount+newIdentityCount > maximumProfileTitleIdentitiesPerProfile {
+		return ResolveCustomSeriesResult{}, fmt.Errorf("%w: profile title identity capacity reached", ErrInvalidInput)
+	}
+
+	var seriesTitleID string
+	if err := tx.QueryRow(ctx, `
+		WITH existing AS (
+			SELECT identity.title_id
+			FROM profile_title_external_ids identity
+			WHERE identity.profile_id = $1::uuid
+			  AND identity.provider = 'addon'
+			  AND identity.namespace = 'series'
+			  AND identity.external_id = $2
+		), candidate AS (
+			SELECT COALESCE((SELECT title_id FROM existing), gen_random_uuid()) AS id
+		), inserted_title AS (
+			INSERT INTO titles (
+				id, media_type, display_title, poster_url, background_url, release_info,
+				resource_id, resource_provider, source_addon_id, is_current
+			)
+			SELECT candidate.id, 'series', $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''),
+			       $7, 'addon', $8::uuid, true
+			FROM candidate
+			WHERE NOT EXISTS (SELECT 1 FROM existing)
+			RETURNING id
+		), updated_title AS (
+			UPDATE titles title
+			SET display_title = $3,
+			    poster_url = NULLIF($4, ''),
+			    background_url = NULLIF($5, ''),
+			    release_info = NULLIF($6, ''),
+			    resource_id = $7,
+			    resource_provider = 'addon',
+			    source_addon_id = $8::uuid,
+			    is_current = true,
+			    updated_at = now()
+			FROM existing
+			WHERE title.id = existing.title_id
+			RETURNING title.id
+		), inserted_identity AS (
+			INSERT INTO profile_title_external_ids (profile_id, title_id, provider, namespace, external_id)
+			SELECT $1::uuid, inserted_title.id, 'addon', 'series', $2
+			FROM inserted_title
+			RETURNING title_id
+		)
+		SELECT id::text FROM candidate
+	`, profileID, seriesIdentity, input.Series.Title, input.Series.PosterURL,
+		input.Series.BackgroundURL, input.Series.ReleaseInfo, input.Series.ResourceID,
+		input.SourceAddonID).Scan(&seriesTitleID); err != nil {
+		return ResolveCustomSeriesResult{}, fmt.Errorf("upsert custom series title: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		WITH scoped_seasons AS (
+			SELECT id FROM titles
+			WHERE parent_id = $1::uuid AND media_type = 'season'
+		)
+		UPDATE titles title
+		SET is_current = false, updated_at = now()
+		WHERE title.is_current
+		  AND ((title.media_type = 'season' AND title.parent_id = $1::uuid)
+		       OR (title.media_type = 'episode' AND title.parent_id IN (SELECT id FROM scoped_seasons)))
+	`, seriesTitleID); err != nil {
+		return ResolveCustomSeriesResult{}, fmt.Errorf("deactivate stale custom series titles: %w", err)
+	}
+
+	result := ResolveCustomSeriesResult{
+		Series:  CustomSeriesReference{TitleID: seriesTitleID, ResourceID: input.Series.ResourceID},
+		Seasons: []CustomSeasonReference{},
+		Videos:  []CustomVideoReference{},
+	}
+	if len(videos) > 0 {
+		rows, err := tx.Query(ctx, `
+			WITH video_input AS (
+				SELECT * FROM jsonb_to_recordset($1::jsonb) AS video(
+					"inputIndex" integer, "resourceId" text, title text,
+					"seasonNumber" integer, "episodeNumber" integer,
+					"thumbnailUrl" text, "backgroundUrl" text, "releaseInfo" text,
+					released text, "seasonIdentity" text, "episodeIdentity" text
+				)
+			), season_input AS (
+				SELECT DISTINCT ON ("seasonNumber")
+				       "seasonNumber" AS season_number, "seasonIdentity" AS identity
+				FROM video_input
+				ORDER BY "seasonNumber", "inputIndex"
+			), existing_seasons AS (
+				SELECT identity.title_id AS id, season.season_number
+				FROM season_input season
+				JOIN profile_title_external_ids identity
+				  ON identity.profile_id = $2::uuid
+				 AND identity.provider = 'addon'
+				 AND identity.namespace = 'season'
+				 AND identity.external_id = season.identity
+			), updated_seasons AS (
+				UPDATE titles title
+				SET parent_id = $3::uuid, ordinal = existing.season_number,
+				    display_title = 'Season ' || existing.season_number::text,
+				    poster_url = NULL, background_url = NULL, release_info = NULL,
+				    release_date = NULL, resource_id = $4, resource_provider = 'addon',
+				    source_addon_id = $5::uuid, is_current = true, updated_at = now()
+				FROM existing_seasons existing
+				WHERE title.id = existing.id
+				RETURNING title.id, title.ordinal AS season_number
+			), new_seasons AS (
+				SELECT gen_random_uuid() AS id, season.season_number, season.identity
+				FROM season_input season
+				LEFT JOIN existing_seasons existing ON existing.season_number = season.season_number
+				WHERE existing.id IS NULL
+			), inserted_seasons AS (
+				INSERT INTO titles (
+					id, media_type, parent_id, ordinal, display_title, resource_id,
+					resource_provider, source_addon_id, is_current
+				)
+				SELECT id, 'season', $3::uuid, season_number, 'Season ' || season_number::text,
+				       $4, 'addon', $5::uuid, true
+				FROM new_seasons
+				RETURNING id, ordinal AS season_number
+			), inserted_season_identities AS (
+				INSERT INTO profile_title_external_ids (profile_id, title_id, provider, namespace, external_id)
+				SELECT $2::uuid, new_seasons.id, 'addon', 'season', new_seasons.identity
+				FROM new_seasons
+				JOIN inserted_seasons ON inserted_seasons.id = new_seasons.id
+				RETURNING title_id
+			), season_rows AS (
+				SELECT id, season_number FROM updated_seasons
+				UNION ALL
+				SELECT id, season_number FROM inserted_seasons
+			), existing_episodes AS (
+				SELECT identity.title_id AS id, video.*
+				FROM video_input video
+				JOIN profile_title_external_ids identity
+				  ON identity.profile_id = $2::uuid
+				 AND identity.provider = 'addon'
+				 AND identity.namespace = 'episode'
+				 AND identity.external_id = video."episodeIdentity"
+			), updated_episodes AS (
+				UPDATE titles title
+				SET parent_id = season.id, ordinal = existing."episodeNumber",
+				    display_title = NULLIF(existing.title, ''),
+				    poster_url = NULLIF(existing."thumbnailUrl", ''),
+				    background_url = NULLIF(existing."backgroundUrl", ''),
+				    release_info = NULLIF(existing."releaseInfo", ''),
+				    release_date = NULLIF(existing.released, '')::date,
+				    resource_id = existing."resourceId", resource_provider = 'addon',
+				    source_addon_id = $5::uuid, is_current = true, updated_at = now()
+				FROM existing_episodes existing
+				JOIN season_rows season ON season.season_number = existing."seasonNumber"
+				WHERE title.id = existing.id
+				RETURNING title.id, title.resource_id, title.parent_id AS season_id,
+				          title.ordinal AS episode_number, existing."seasonNumber" AS season_number,
+				          existing."inputIndex" AS input_index
+			), new_episodes AS (
+				SELECT gen_random_uuid() AS id, video.*, season.id AS season_id
+				FROM video_input video
+				JOIN season_rows season ON season.season_number = video."seasonNumber"
+				LEFT JOIN existing_episodes existing ON existing."inputIndex" = video."inputIndex"
+				WHERE existing.id IS NULL
+			), inserted_episodes AS (
+				INSERT INTO titles (
+					id, media_type, parent_id, ordinal, display_title, poster_url,
+					background_url, release_info, release_date, resource_id,
+					resource_provider, source_addon_id, is_current
+				)
+				SELECT id, 'episode', season_id, "episodeNumber", NULLIF(title, ''),
+				       NULLIF("thumbnailUrl", ''), NULLIF("backgroundUrl", ''),
+				       NULLIF("releaseInfo", ''), NULLIF(released, '')::date,
+				       "resourceId", 'addon', $5::uuid, true
+				FROM new_episodes
+				RETURNING id, resource_id, parent_id AS season_id, ordinal AS episode_number
+			), inserted_episode_identities AS (
+				INSERT INTO profile_title_external_ids (profile_id, title_id, provider, namespace, external_id)
+				SELECT $2::uuid, new_episodes.id, 'addon', 'episode', new_episodes."episodeIdentity"
+				FROM new_episodes
+				JOIN inserted_episodes ON inserted_episodes.id = new_episodes.id
+				RETURNING title_id
+			), episode_rows AS (
+				SELECT id, resource_id, season_id, season_number, episode_number, input_index
+				FROM updated_episodes
+				UNION ALL
+				SELECT inserted.id, inserted.resource_id, inserted.season_id,
+				       new_episodes."seasonNumber", inserted.episode_number, new_episodes."inputIndex"
+				FROM inserted_episodes inserted
+				JOIN new_episodes ON new_episodes.id = inserted.id
+			)
+			SELECT 'season', season.id::text, '', '', season.season_number, 0, -1
+			FROM season_rows season
+			UNION ALL
+			SELECT 'video', episode.id::text, episode.resource_id, episode.season_id::text,
+			       episode.season_number, episode.episode_number, episode.input_index
+			FROM episode_rows episode
+			ORDER BY 1, 7, 5
+		`, payload, profileID, seriesTitleID, input.Series.ResourceID, input.SourceAddonID)
+		if err != nil {
+			return ResolveCustomSeriesResult{}, fmt.Errorf("upsert custom series hierarchy: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var rowKind, titleID, resourceID, seasonTitleID string
+			var seasonNumber, episodeNumber, inputIndex int
+			if err := rows.Scan(&rowKind, &titleID, &resourceID, &seasonTitleID, &seasonNumber, &episodeNumber, &inputIndex); err != nil {
+				return ResolveCustomSeriesResult{}, fmt.Errorf("scan custom series hierarchy: %w", err)
+			}
+			if rowKind == "season" {
+				result.Seasons = append(result.Seasons, CustomSeasonReference{TitleID: titleID, SeasonNumber: seasonNumber})
+				continue
+			}
+			result.Videos = append(result.Videos, CustomVideoReference{
+				TitleID: titleID, ResourceID: resourceID, SeasonTitleID: seasonTitleID,
+				SeasonNumber: seasonNumber, EpisodeNumber: episodeNumber,
+			})
+		}
+		if err := rows.Err(); err != nil {
+			return ResolveCustomSeriesResult{}, fmt.Errorf("iterate custom series hierarchy: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ResolveCustomSeriesResult{}, fmt.Errorf("commit custom series resolution: %w", err)
+	}
+	return result, nil
+}
+
+func normalizeCustomSeriesInput(input ResolveCustomSeriesInput) (ResolveCustomSeriesInput, []customResolverVideo, error) {
+	input.SourceAddonID = strings.ToLower(strings.TrimSpace(input.SourceAddonID))
+	if !uuidPattern.MatchString(input.SourceAddonID) {
+		return ResolveCustomSeriesInput{}, nil, fmt.Errorf("%w: sourceAddonId must be a UUID", ErrInvalidInput)
+	}
+	if len(input.SourceType) < 1 || len(input.SourceType) > 512 || strings.TrimSpace(input.SourceType) != input.SourceType || strings.ContainsRune(input.SourceType, '\x00') {
+		return ResolveCustomSeriesInput{}, nil, fmt.Errorf("%w: sourceType must contain between 1 and 512 trimmed non-NUL characters", ErrInvalidInput)
+	}
+	if len(input.Videos) > MaximumCustomSeriesVideos {
+		return ResolveCustomSeriesInput{}, nil, fmt.Errorf("%w: videos must contain at most %d items", ErrInvalidInput, MaximumCustomSeriesVideos)
+	}
+	input.Series.Title = strings.TrimSpace(input.Series.Title)
+	input.Series.PosterURL = strings.TrimSpace(input.Series.PosterURL)
+	input.Series.BackgroundURL = strings.TrimSpace(input.Series.BackgroundURL)
+	input.Series.ReleaseInfo = strings.TrimSpace(input.Series.ReleaseInfo)
+	if err := validateOpaqueResourceID(input.Series.ResourceID); err != nil {
+		return ResolveCustomSeriesInput{}, nil, fmt.Errorf("%w: invalid series resourceId", ErrInvalidInput)
+	}
+	if len(input.Series.Title) < 1 || len(input.Series.Title) > 500 || len(input.Series.ReleaseInfo) > 120 ||
+		strings.ContainsRune(input.Series.Title+input.Series.ReleaseInfo, '\x00') ||
+		!validLocalizedArtwork(input.Series.PosterURL) || !validLocalizedArtwork(input.Series.BackgroundURL) {
+		return ResolveCustomSeriesInput{}, nil, fmt.Errorf("%w: invalid series snapshot", ErrInvalidInput)
+	}
+	resourceIDs := make(map[string]struct{}, len(input.Videos))
+	coordinates := make(map[[2]int]struct{}, len(input.Videos))
+	videos := make([]customResolverVideo, len(input.Videos))
+	for index := range input.Videos {
+		video := &input.Videos[index]
+		video.Title = strings.TrimSpace(video.Title)
+		video.ThumbnailURL = strings.TrimSpace(video.ThumbnailURL)
+		video.BackgroundURL = strings.TrimSpace(video.BackgroundURL)
+		video.ReleaseInfo = strings.TrimSpace(video.ReleaseInfo)
+		video.Released = strings.TrimSpace(video.Released)
+		if err := validateOpaqueResourceID(video.ResourceID); err != nil {
+			return ResolveCustomSeriesInput{}, nil, fmt.Errorf("%w: videos[%d].resourceId is invalid", ErrInvalidInput, index)
+		}
+		if _, exists := resourceIDs[video.ResourceID]; exists {
+			return ResolveCustomSeriesInput{}, nil, fmt.Errorf("%w: duplicate video resourceId", ErrInvalidInput)
+		}
+		resourceIDs[video.ResourceID] = struct{}{}
+		coordinate := [2]int{video.SeasonNumber, video.EpisodeNumber}
+		if video.SeasonNumber < 0 || video.EpisodeNumber < 0 ||
+			int64(video.SeasonNumber) > 2147483647 || int64(video.EpisodeNumber) > 2147483647 {
+			return ResolveCustomSeriesInput{}, nil, fmt.Errorf("%w: video seasonNumber and episodeNumber must be between 0 and 2147483647", ErrInvalidInput)
+		}
+		if _, exists := coordinates[coordinate]; exists {
+			return ResolveCustomSeriesInput{}, nil, fmt.Errorf("%w: duplicate video season and episode numbers", ErrInvalidInput)
+		}
+		coordinates[coordinate] = struct{}{}
+		if len(video.Title) > 500 || len(video.ReleaseInfo) > 120 ||
+			strings.ContainsRune(video.Title+video.ReleaseInfo, '\x00') ||
+			!validLocalizedArtwork(video.ThumbnailURL) || !validLocalizedArtwork(video.BackgroundURL) {
+			return ResolveCustomSeriesInput{}, nil, fmt.Errorf("%w: videos[%d] has an invalid snapshot", ErrInvalidInput, index)
+		}
+		if video.Released != "" {
+			released, err := time.Parse(time.DateOnly, video.Released)
+			if err != nil || released.Year() < 1 || released.Format(time.DateOnly) != video.Released {
+				return ResolveCustomSeriesInput{}, nil, fmt.Errorf("%w: videos[%d].released must be a YYYY-MM-DD date", ErrInvalidInput, index)
+			}
+		}
+		videos[index] = customResolverVideo{
+			InputIndex: index, ResourceID: video.ResourceID, Title: video.Title,
+			SeasonNumber: video.SeasonNumber, EpisodeNumber: video.EpisodeNumber,
+			ThumbnailURL: video.ThumbnailURL, BackgroundURL: video.BackgroundURL,
+			ReleaseInfo: video.ReleaseInfo, Released: video.Released,
+			SeasonIdentity:  customTitleExternalID(input.SourceAddonID, input.SourceType, "season", input.Series.ResourceID, strconv.Itoa(video.SeasonNumber)),
+			EpisodeIdentity: customTitleExternalID(input.SourceAddonID, input.SourceType, "episode", input.Series.ResourceID, video.ResourceID),
+		}
+	}
+	return input, videos, nil
+}
+func validateOpaqueResourceID(value string) error {
+	if len(value) < 1 || len(value) > 512 || strings.TrimSpace(value) != value || strings.ContainsRune(value, '\x00') {
+		return ErrInvalidInput
+	}
+	return nil
+}
+
+func validLocalizedArtwork(value string) bool {
+	return value == "" || (len(value) <= 4096 && artworkPathPattern.MatchString(value))
+}
+
+func customTitleExternalID(sourceAddonID, sourceType, kind string, opaqueIDs ...string) string {
+	parts := []string{sourceAddonID, sourceType, kind}
+	parts = append(parts, opaqueIDs...)
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(strings.Join(parts, "\x00"))))
+}
+
+func lockProfileTitleIdentities(ctx context.Context, tx pgx.Tx, profileID string) error {
+	lockKey := "profile-title-identities:" + profileID
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
+		return fmt.Errorf("lock profile title identities: %w", err)
+	}
+	return nil
 }
 
 type canonicalTitleIdentity struct {
@@ -357,9 +768,8 @@ func (s *Service) persistProfileScopedTitle(ctx context.Context, principal auth.
 	if err != nil {
 		return TitleReference{}, err
 	}
-	lockKey := profileID + ":" + input.Provider + ":" + input.MediaType + ":" + input.ExternalID
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
-		return TitleReference{}, fmt.Errorf("lock profile title resolution: %w", err)
+	if err := lockProfileTitleIdentities(ctx, tx, profileID); err != nil {
+		return TitleReference{}, err
 	}
 
 	var titleID string
@@ -374,6 +784,17 @@ func (s *Service) persistProfileScopedTitle(ctx context.Context, principal auth.
 		FOR UPDATE OF title
 	`, profileID, input.Provider, input.MediaType, input.ExternalID).Scan(&titleID)
 	if errors.Is(err, pgx.ErrNoRows) {
+		var identityCount int64
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*)
+			FROM profile_title_external_ids
+			WHERE profile_id = $1::uuid
+		`, profileID).Scan(&identityCount); err != nil {
+			return TitleReference{}, fmt.Errorf("check profile title identity capacity: %w", err)
+		}
+		if identityCount >= maximumProfileTitleIdentitiesPerProfile {
+			return TitleReference{}, fmt.Errorf("%w: profile title identity capacity reached", ErrInvalidInput)
+		}
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO titles (
 				media_type, display_title, poster_url, background_url, release_info,
@@ -1591,7 +2012,7 @@ func resumeItems(ctx context.Context, tx pgx.Tx, profileID string, limit int) ([
 			  AND progress.position_seconds > 0
 			  AND (
 			      title.media_type <> 'episode'
-			      OR (accessible_season.id IS NOT NULL AND accessible_series.id IS NOT NULL)
+			      OR (accessible_season.id IS NOT NULL AND accessible_series.id IS NOT NULL AND series.source_addon_id IS NULL)
 			  )
 			  AND NOT EXISTS (
 				  SELECT 1
@@ -1661,6 +2082,7 @@ const nextEpisodeQuery = `
 			WHERE progress.profile_id = $1::uuid
 			  AND progress.completed
 			  AND season.ordinal > 0
+			  AND series.source_addon_id IS NULL
 			  AND NOT EXISTS (
 				  SELECT 1
 				  FROM profile_continue_dismissals dismissal

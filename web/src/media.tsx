@@ -4,11 +4,11 @@ import { createPortal } from "react-dom";
 import { api, APIError } from "./api";
 import { Button, HorizontalDragRow, IconButton, Notice } from "./components";
 import { translate as t } from "./i18n";
-import { mediaFromLibraryItem, mediaIdentity, mediaResourceID, resolveMediaTitle } from "./mediaIdentity";
+import { mediaFromLibraryItem, mediaIdentity, mediaResourceID, resolveMediaTitle, titleReleaseDate } from "./mediaIdentity";
 import { cachedMediaItem, cacheMediaItem, flushMetadataCache } from "./metadataCache";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "./notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "./titleProviders";
-import type { CastMember, EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
+import type { CastMember, CustomSeriesResolveResult, EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, ResourceResult, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
 export type CanonicalRouteMetadata = {
   sourceID: string;
   sourceMediaType: string;
@@ -30,23 +30,72 @@ function record(value: unknown): Record<string, unknown> | null {
   return Object.fromEntries(Object.entries(value));
 }
 
-function castMembers(value: unknown, maximumCastMembers: number): CastMember[] {
-  if (!Array.isArray(value) || maximumCastMembers <= 0) return [];
+function textValue(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function localizedArtworkURL(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized.startsWith("/api/v1/artwork/") ? normalized : undefined;
+}
+
+function localizedArtworkValue(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    const localized = localizedArtworkURL(value);
+    if (localized) return localized;
+  }
+  return undefined;
+}
+
+function castCandidates(value: unknown): unknown[] {
+  const envelope = record(value);
+  return Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(",").map((name) => name.trim()).filter(Boolean)
+      : [envelope?.cast, envelope?.actors, envelope?.items].find(Array.isArray) ?? [];
+}
+
+function stremioCastLinkCandidates(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    const link = record(candidate);
+    const category = textValue(link?.category)?.toLowerCase();
+    if (category !== "cast" && category !== "actor" && category !== "actors") return [];
+    const name = textValue(link?.name);
+    return name ? [name] : [];
+  });
+}
+
+function castMembers(value: unknown, maximumCastMembers: number, rawAddon = false): CastMember[] {
+  if (maximumCastMembers <= 0) return [];
+  const candidates = castCandidates(value);
   const members: CastMember[] = [];
-  const seen = new Set<string>();
-  for (const candidate of value) {
+  const seenIDs = new Set<string>();
+  const seenNames = new Set<string>();
+  for (const candidate of candidates) {
     const person = record(candidate);
-    if (!person) continue;
-    const id = typeof person.id === "string" ? person.id.trim() : "";
-    const name = typeof person.name === "string" ? person.name.trim() : "";
-    if (!id || !name || seen.has(id)) continue;
-    members.push({
-      id,
-      name,
-      ...(typeof person.character === "string" && person.character.trim() ? { character: person.character.trim() } : {}),
-      ...(typeof person.profileUrl === "string" && person.profileUrl.trim() ? { profileUrl: person.profileUrl.trim() } : {}),
-    });
-    seen.add(id);
+    const nestedPerson = record(person?.person);
+    const name = typeof candidate === "string"
+      ? candidate.trim()
+      : textValue(person?.name, person?.actor, nestedPerson?.name);
+    if (!name) continue;
+    const explicitID = textValue(person?.id, nestedPerson?.id) ?? "";
+    const normalizedName = name.toLowerCase();
+    if (explicitID ? seenIDs.has(explicitID) : seenNames.has(normalizedName)) continue;
+    const id = explicitID || `name:${normalizedName}`;
+    const profileCandidates = [person?.profileUrl, person?.profile, person?.photo, person?.imageUrl, person?.image, nestedPerson?.profileUrl, nestedPerson?.profile, nestedPerson?.photo, nestedPerson?.imageUrl, nestedPerson?.image];
+    const profileUrl = rawAddon
+      ? localizedArtworkValue(...profileCandidates)
+      : textValue(...profileCandidates);
+    const character = textValue(person?.character, person?.role, person?.characterName);
+    members.push({ id, name, ...(character ? { character } : {}), ...(profileUrl ? { profileUrl } : {}) });
+    if (explicitID) seenIDs.add(explicitID);
+    else seenNames.add(normalizedName);
     if (members.length >= maximumCastMembers) break;
   }
   return members;
@@ -98,16 +147,26 @@ function episodeOrderLabel(order: SeriesMetadata["episodeOrders"][number]): stri
   }
 }
 
-function firstPayloadRecord(batch: ResourceBatch, key: string): Record<string, unknown> | undefined {
-  for (const result of batch.results) {
-    const value = result.payload[key];
-    if (Array.isArray(value)) {
-      const entry = value.map(record).find((candidate) => candidate !== null);
-      if (entry) return entry;
-      continue;
+type SelectedPayloadRecord = { value: Record<string, unknown>; result: ResourceResult };
+
+function payloadRecord(result: ResourceResult, key: string): Record<string, unknown> | undefined {
+  const value = result.payload[key];
+  if (Array.isArray(value)) return value.map(record).find((candidate) => candidate !== null) ?? undefined;
+  return record(value) ?? undefined;
+}
+
+function firstPayloadRecord(batch: ResourceBatch, key: string, preferredAddonID?: string): SelectedPayloadRecord | undefined {
+  if (preferredAddonID) {
+    for (const result of batch.results) {
+      if (result.addonId !== preferredAddonID) continue;
+      const value = payloadRecord(result, key);
+      if (value) return { value, result };
     }
-    const entry = record(value);
-    if (entry) return entry;
+  }
+  for (const result of batch.results) {
+    if (preferredAddonID && result.addonId === preferredAddonID) continue;
+    const value = payloadRecord(result, key);
+    if (value) return { value, result };
   }
   return undefined;
 }
@@ -155,18 +214,23 @@ function groupCustomVideos(videos: CustomMetaVideo[]): CustomVideoSeasonGroup[] 
     if (group) group.push(video);
     else seasons.set(video.season, [video]);
   }
+  const byEpisodeNumber = (left: CustomMetaVideo, right: CustomMetaVideo) => (left.episode ?? Number.MAX_SAFE_INTEGER) - (right.episode ?? Number.MAX_SAFE_INTEGER);
   const groups = Array.from(seasons, ([season, seasonVideos]) => ({
     key: `season:${season}`,
     season,
-    videos: seasonVideos,
+    videos: [...seasonVideos].sort(byEpisodeNumber),
   })).sort((left, right) => left.season - right.season);
   return unseasoned.length > 0
-    ? [...groups, { key: customUnseasonedGroupKey, videos: unseasoned }]
+    ? [...groups, { key: customUnseasonedGroupKey, videos: [...unseasoned].sort(byEpisodeNumber) }]
     : groups;
 }
 
 function opaqueID(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function nonnegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 2_147_483_647 ? value : undefined;
 }
 
 function customMetaPlayback(meta: Record<string, unknown>): CustomMetaPlayback {
@@ -179,13 +243,13 @@ function customMetaPlayback(meta: Record<string, unknown>): CustomMetaPlayback {
     seen.add(id);
     return [{
       id,
-      title: typeof (video.title ?? video.name) === "string" ? String(video.title ?? video.name) : "",
-      overview: typeof (video.overview ?? video.description) === "string" ? String(video.overview ?? video.description) : "",
-      released: typeof (video.released ?? video.releaseInfo) === "string" ? String(video.released ?? video.releaseInfo) : "",
-      thumbnail: opaqueID(video.thumbnail ?? video.thumbnailUrl ?? video.poster),
-      background: opaqueID(video.background ?? video.backgroundUrl),
-      season: typeof video.season === "number" && Number.isFinite(video.season) ? video.season : undefined,
-      episode: typeof video.episode === "number" && Number.isFinite(video.episode) ? video.episode : undefined,
+      title: textValue(video.title, video.name) ?? "",
+      overview: textValue(video.overview, video.description) ?? "",
+      released: textValue(video.released, video.releaseInfo) ?? "",
+      thumbnail: localizedArtworkValue(video.thumbnail, video.thumbnailUrl, video.poster),
+      background: localizedArtworkValue(video.background, video.backgroundUrl),
+      season: nonnegativeInteger(video.season),
+      episode: nonnegativeInteger(video.episode),
       raw: video,
     }];
   }) : [];
@@ -196,20 +260,75 @@ function customMetaPlayback(meta: Record<string, unknown>): CustomMetaPlayback {
   };
 }
 
+function customVideoReleaseInfo(video: CustomMetaVideo): string {
+  return titleReleaseDate(video.released) ?? video.released;
+}
+
+function customVideoIsUpcoming(video: CustomMetaVideo): boolean {
+  const released = titleReleaseDate(video.released);
+  if (!released) return false;
+  const releaseDate = new Date(`${released}T23:59:59Z`);
+  return Number.isFinite(releaseDate.getTime()) && releaseDate.getTime() > Date.now();
+}
+
+function resolvableCustomVideos(videos: CustomMetaVideo[]): Array<CustomMetaVideo & { season: number; episode: number }> | undefined {
+  const resolved: Array<CustomMetaVideo & { season: number; episode: number }> = [];
+  const coordinates = new Set<string>();
+  for (const video of videos) {
+    if (video.season === undefined || video.episode === undefined) continue;
+    const coordinate = `${video.season}:${video.episode}`;
+    if (coordinates.has(coordinate)) return undefined;
+    coordinates.add(coordinate);
+    resolved.push({ ...video, season: video.season, episode: video.episode });
+    if (resolved.length > 4096) return undefined;
+  }
+  return resolved;
+}
+
 function customVideoItem(video: CustomMetaVideo, fallback: MediaItem): MediaItem {
+  const releaseInfo = customVideoReleaseInfo(video);
   return {
     ...fallback,
     id: video.id,
     titleId: undefined,
     title: video.title || fallback.title,
-    posterUrl: video.thumbnail || fallback.posterUrl,
+    posterUrl: fallback.posterUrl,
     backgroundUrl: video.background || video.thumbnail || fallback.backgroundUrl,
     description: video.overview || fallback.description,
-    releaseInfo: video.released || fallback.releaseInfo,
+    releaseInfo: releaseInfo || fallback.releaseInfo,
     released: video.released || fallback.released,
     resourceId: video.id,
     raw: { ...fallback.raw, ...video.raw },
   };
+}
+
+type ResolvedCustomVideo = CustomSeriesResolveResult["videos"][number];
+
+function customEpisodePlayerItem(video: CustomMetaVideo, identity: ResolvedCustomVideo, fallback: MediaItem): MediaItem {
+  const releaseInfo = customVideoReleaseInfo(video);
+  return {
+    id: video.id,
+    titleId: identity.titleId,
+    mediaType: "episode",
+    seasonNumber: identity.seasonNumber,
+    episodeNumber: identity.episodeNumber,
+    title: video.title || fallback.title,
+    posterUrl: fallback.posterUrl,
+    backgroundUrl: video.background || video.thumbnail || fallback.backgroundUrl,
+    description: video.overview || fallback.description,
+    releaseInfo: releaseInfo || fallback.releaseInfo,
+    released: video.released || fallback.released,
+    resourceId: video.id,
+  };
+}
+
+async function progressByTitleID(titleIDs: string[], signal?: AbortSignal): Promise<Record<string, PlaybackProgress | undefined>> {
+  const progress: Record<string, PlaybackProgress | undefined> = {};
+  for (let offset = 0; offset < titleIDs.length; offset += 100) {
+    const response = await api.progressBatch(titleIDs.slice(offset, offset + 100), signal);
+    for (const entry of response.items) progress[entry.titleId] = entry.progress ?? undefined;
+  }
+  return progress;
 }
 
 
@@ -340,6 +459,7 @@ export function mediaTypeLabel(mediaType: string): string {
   if (mediaType === "series") return t("media.type.series");
   if (mediaType === "episode") return t("media.type.episode");
   if (mediaType === "movie") return t("media.type.movie");
+  if (mediaType.toLowerCase() === "anime") return "Anime";
   return mediaType;
 }
 
@@ -436,7 +556,17 @@ function withoutEmptySeasons(series: SeriesMetadata): SeriesMetadata {
 
 export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClose, onNavigateContext, onOpenMedia, onOpenSeason, onLibraryMutation }: { item: MediaItem; maximumCastMembers: number; onCanonicalRoute?: (metadata: CanonicalRouteMetadata) => void; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenMedia?: (item: MediaItem) => void; onOpenSeason?: (item: MediaItem) => void; onLibraryMutation?: () => void }) {
   const metadataLocale = api.metadataLocale();
-  const [details, setDetails] = useState(() => cachedMediaItem(item, metadataLocale));
+  const customType = item.mediaType !== "movie" && item.mediaType !== "series" && item.mediaType !== "episode" && item.mediaType !== "tv";
+  const preferredMetaAddonID = item.sourceAddonId ?? item.sources?.find((source) => source.addonId)?.addonId;
+  const [details, setDetails] = useState(() => {
+    const cached = cachedMediaItem(item, metadataLocale);
+    return customType ? {
+      ...cached,
+      posterUrl: localizedArtworkURL(cached.posterUrl),
+      backgroundUrl: localizedArtworkURL(cached.backgroundUrl),
+      logoUrl: localizedArtworkURL(cached.logoUrl),
+    } : cached;
+  });
   const [playing, setPlaying] = useState(false);
   const [titleID, setTitleID] = useState(item.titleId);
   const [saved, setSaved] = useState(false);
@@ -455,6 +585,9 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   const [selectedCustomVideo, setSelectedCustomVideo] = useState<CustomMetaVideo>();
   const [customVideoChooserVisible, setCustomVideoChooserVisible] = useState(false);
   const [selectedCustomSeasonKey, setSelectedCustomSeasonKey] = useState("");
+  const [resolvedCustomVideos, setResolvedCustomVideos] = useState<Map<string, ResolvedCustomVideo>>(() => new Map());
+  const [customProgressLoading, setCustomProgressLoading] = useState(false);
+  const [customProgressConfirmed, setCustomProgressConfirmed] = useState(false);
   const [availableStreams, setAvailableStreams] = useState<PlaybackSourceOption[]>([]);
   const [selectedStream, setSelectedStream] = useState<PlaybackSourceOption>();
   const [streamsLoading, setStreamsLoading] = useState(item.mediaType !== "tv");
@@ -517,12 +650,12 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   const activeTrailerMessage = trailerOwnerKey === trailerItemKey ? trailerMessage : "";
   const activeTrailerUnavailable = trailerOwnerKey === trailerItemKey && trailerUnavailable;
   const trailerStageVisible = Boolean(activeTrailer || activeTrailerMessage);
-  const customType = item.mediaType !== "movie" && item.mediaType !== "series" && item.mediaType !== "episode" && item.mediaType !== "tv";
   const customVideos = resolvedCustomMeta?.videos ?? emptyCustomVideos;
   const defaultCustomVideo = resolvedCustomMeta?.defaultVideoId
     ? customVideos.find((video) => video.id === resolvedCustomMeta.defaultVideoId)
     : undefined;
   const activeCustomVideo = selectedCustomVideo ?? defaultCustomVideo;
+  const activeCustomIdentity = activeCustomVideo ? resolvedCustomVideos.get(activeCustomVideo.id) : undefined;
   const customVideoGroups = useMemo(() => groupCustomVideos(customVideos), [customVideos]);
   const preferredCustomSeasonKey = activeCustomVideo ? customVideoSeasonKey(activeCustomVideo) : undefined;
   const activeCustomVideoGroup = customVideoGroups.find((group) => group.key === selectedCustomSeasonKey)
@@ -530,8 +663,9 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     ?? customVideoGroups.find((group) => group.season !== undefined && group.season > 0)
     ?? customVideoGroups[0];
   const activeCustomSeasonKey = activeCustomVideoGroup?.key ?? "";
-  const activeCustomSeasonIndex = customVideoGroups.findIndex((group) => group.key === activeCustomSeasonKey);
   const visibleCustomVideos = activeCustomVideoGroup?.videos ?? emptyCustomVideos;
+  const orderedCustomVideos = useMemo(() => customVideoGroups.flatMap((group) => group.videos), [customVideoGroups]);
+  const customSeasonBusyKey = activeCustomSeasonKey ? `custom-season:${activeCustomSeasonKey}` : "";
   const customPlaybackResourceID = selectedCustomVideo?.id
     ?? resolvedCustomMeta?.defaultVideoId
     ?? (customVideos.length === 0 ? resolvedCustomMeta?.id : undefined);
@@ -540,7 +674,9 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     : selectedEpisode && series ? episodeResourceID(series, selectedEpisode, item.id) : mediaResourceID(item);
   const playbackMediaType = selectedEpisode || item.mediaType === "episode" ? "episode" : item.mediaType;
   const startFromBeginning = item.raw?.startFromBeginning === true;
-  const selectedProgress = selectedEpisode ? episodeProgress[selectedEpisode.id] : titleProgress;
+  const selectedProgress = selectedEpisode
+    ? episodeProgress[selectedEpisode.id]
+    : activeCustomIdentity ? episodeProgress[activeCustomIdentity.titleId] : titleProgress;
   const preparationStartSeconds = startFromBeginning ? 0 : selectedProgress?.completed ? 0 : Math.max(0, Math.floor(selectedProgress?.positionSeconds ?? 0));
   const fromContinue = item.raw?.continueReason === "resume" || item.raw?.continueReason === "next_episode";
   const autoplayNextEpisode = document.documentElement.dataset.autoplayNextEpisode !== "false";
@@ -597,6 +733,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   }, [trailerItemKey]);
 
   useEffect(() => {
+    const controller = new AbortController();
     let active = true;
     setMetaLoading(true);
     setMetaResolved(false);
@@ -605,24 +742,93 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     setSelectedCustomVideo(undefined);
     setSelectedCustomSeasonKey("");
     setCustomVideoChooserVisible(false);
-    void api.resources("meta", item.mediaType === "episode" ? "series" : item.mediaType, item.id).then((batch) => {
-      const meta = firstPayloadRecord(batch, "meta");
-      if (!active || !meta) return;
-      if (customType) {
-        const playback = customMetaPlayback(meta);
+    setResolvedCustomVideos(new Map());
+    setCustomProgressLoading(false);
+    if (customType) setEpisodeProgress({});
+    setCustomProgressConfirmed(false);
+    void api.resources("meta", item.mediaType === "episode" ? "series" : item.mediaType, item.id).then(async (batch) => {
+      const selected = firstPayloadRecord(batch, "meta", customType ? preferredMetaAddonID : undefined);
+      if (!active || !selected) return;
+      const { value: meta, result } = selected;
+      const playback = customType ? customMetaPlayback(meta) : undefined;
+      if (playback) {
         setResolvedCustomMeta(playback);
         setCustomVideoChooserVisible(playback.videos.length > 0 && !playback.defaultVideoId);
       }
+      const metaTitle = textValue(meta.name, meta.title);
+      const metaDescription = textValue(meta.description, meta.overview);
+      const metaPoster = localizedArtworkValue(meta.poster, meta.posterUrl);
+      const metaBackground = localizedArtworkValue(meta.background, meta.backgroundUrl, meta.backdrop, meta.backdropUrl);
+      const metaLogo = localizedArtworkValue(meta.logo, meta.logoUrl);
+      const metaReleaseInfo = textValue(meta.releaseInfo, meta.year);
       setDetails((current) => ({
         ...current,
-        title: item.mediaType === "episode" ? current.title : current.title || String(meta.name ?? meta.title ?? ""),
-        description: item.mediaType === "episode" ? current.description : current.description || String(meta.description ?? ""),
-        posterUrl: item.mediaType === "episode" ? current.posterUrl : current.posterUrl || String(meta.poster ?? ""),
-        backgroundUrl: current.backgroundUrl || String(meta.background ?? meta.backgroundUrl ?? ""),
-        logoUrl: current.logoUrl || String(meta.logo ?? ""),
-        releaseInfo: item.mediaType === "episode" ? current.releaseInfo : current.releaseInfo || String(meta.releaseInfo ?? meta.year ?? ""),
+        title: item.mediaType === "episode" ? current.title : customType ? metaTitle || current.title : current.title || metaTitle || "",
+        description: item.mediaType === "episode" ? current.description : customType ? metaDescription || current.description : current.description || metaDescription,
+        posterUrl: item.mediaType === "episode"
+          ? current.posterUrl
+          : customType ? metaPoster || localizedArtworkURL(current.posterUrl) : current.posterUrl || textValue(meta.poster, meta.posterUrl),
+        backgroundUrl: customType
+          ? metaBackground || localizedArtworkURL(current.backgroundUrl)
+          : current.backgroundUrl || textValue(meta.background, meta.backgroundUrl, meta.backdrop, meta.backdropUrl),
+        logoUrl: customType ? metaLogo || localizedArtworkURL(current.logoUrl) : current.logoUrl || textValue(meta.logo, meta.logoUrl),
+        releaseInfo: item.mediaType === "episode" ? current.releaseInfo : customType ? metaReleaseInfo || current.releaseInfo : current.releaseInfo || metaReleaseInfo,
         raw: { ...current.raw, ...meta },
       }));
+      if (!playback) return;
+      const eligibleVideos = resolvableCustomVideos(playback.videos);
+      if (!eligibleVideos) {
+        if (active) setActionError(t("media.watch.error.episodeUpdateFailed"));
+        return;
+      }
+      try {
+        const resolved = await api.resolveCustomSeries({
+          sourceAddonId: result.addonId,
+          sourceType: result.type,
+          series: {
+            resourceId: playback.id ?? item.id,
+            title: metaTitle ?? item.title,
+            ...(metaPoster ? { posterUrl: metaPoster } : {}),
+            ...(metaBackground ? { backgroundUrl: metaBackground } : {}),
+            ...(metaReleaseInfo ? { releaseInfo: metaReleaseInfo } : {}),
+          },
+          videos: eligibleVideos.map((video) => ({
+            resourceId: video.id,
+            ...(video.title ? { title: video.title } : {}),
+            seasonNumber: video.season,
+            episodeNumber: video.episode,
+            ...(video.thumbnail ? { thumbnailUrl: video.thumbnail } : {}),
+            ...(video.background ? { backgroundUrl: video.background } : {}),
+            ...(video.released ? { releaseInfo: video.released } : {}),
+            ...(titleReleaseDate(video.released) ? { released: titleReleaseDate(video.released) } : {}),
+          })),
+        }, controller.signal);
+        if (!active) return;
+        setMetaResolved(true);
+        setMetaLoading(false);
+        setTitleID(resolved.series.titleId);
+        setResolvedCustomVideos(new Map(resolved.videos.map((video) => [video.resourceId, video])));
+        if (resolved.videos.length === 0) {
+          setCustomProgressConfirmed(true);
+          return;
+        }
+        setCustomProgressLoading(true);
+        try {
+          const progress = await progressByTitleID(resolved.videos.map((video) => video.titleId), controller.signal);
+          if (active) {
+            setEpisodeProgress(progress);
+            setCustomProgressConfirmed(true);
+          }
+        } catch (cause) {
+          if (cause instanceof DOMException && cause.name === "AbortError") return;
+          if (active) setActionError(t("media.watch.error.episodeUpdateFailed"));
+        } finally {
+          if (active) setCustomProgressLoading(false);
+        }
+      } catch (cause) {
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        if (active) setActionError(cause instanceof APIError ? cause.message : t("media.watch.error.episodeUpdateFailed"));
+      }
     }).catch((cause) => {
       if (active) setMetaError(cause instanceof APIError ? cause.message : t("media.details.error.additionalDetailsLoadFailed"));
     }).finally(() => {
@@ -630,8 +836,11 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
       setMetaResolved(true);
       setMetaLoading(false);
     });
-    return () => { active = false; };
-  }, [customType, item.id, item.mediaType, item.titleId]);
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [customType, item.id, item.mediaType, item.title, item.titleId, preferredMetaAddonID]);
 
   useEffect(() => {
     let active = true;
@@ -958,13 +1167,13 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   }, [preparationStartSeconds, selectedStream]);
 
   async function toggleLibrary() {
-    if (item.mediaType === "episode" && !libraryTitleID) return;
+    if ((item.mediaType === "episode" || customType) && !libraryTitleID) return;
     setSaving(true);
     setActionError("");
     const removing = saved;
     try {
       const resolvedTitleID = libraryTitleID ?? await resolveMediaTitle(details);
-      if (item.mediaType !== "episode" && !titleID) setTitleID(resolvedTitleID);
+      if (!customType && item.mediaType !== "episode" && !titleID) setTitleID(resolvedTitleID);
       if (saved) await api.removeLibrary(resolvedTitleID);
       else await api.addLibrary(resolvedTitleID);
       setSaved(!removing);
@@ -1122,6 +1331,29 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     }
   }
 
+  async function toggleCustomVideoWatched(video: CustomMetaVideo) {
+    const identity = resolvedCustomVideos.get(video.id);
+    if (!identity || watchedBusy || customVideoIsUpcoming(video)) return;
+    const current = episodeProgress[identity.titleId];
+    const watched = !current?.completed;
+    setWatchedBusy(identity.titleId);
+    setActionError("");
+    try {
+      const progress = await api.setWatched(identity.titleId, watched, current?.version ?? 0);
+      setEpisodeProgress((values) => ({ ...values, [identity.titleId]: progress }));
+      notifySuccess(
+        t(watched ? "media.watch.markedWatched" : "media.watch.markedUnwatched", { title: video.title || details.title }),
+        t(watched ? "media.watch.markedWatchedTitle" : "media.watch.markedUnwatchedTitle"),
+      );
+    } catch (cause) {
+      const refreshed = await progressByTitleID([identity.titleId]).catch(() => undefined);
+      if (refreshed) setEpisodeProgress((values) => ({ ...values, ...refreshed }));
+      setActionError(notifyError(cause, t("media.watch.error.episodeUpdateFailed"), t("media.watch.error.notUpdatedTitle")));
+    } finally {
+      setWatchedBusy("");
+    }
+  }
+
   async function changeEpisodeOrder(episodeOrderID: string) {
     if (!series || episodeOrderLoading || episodeOrderID === (series.selectedEpisodeOrderId ?? "")) return;
     setEpisodeOrderLoading(true);
@@ -1179,6 +1411,40 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     }
   }
 
+  async function toggleCustomSeasonWatched() {
+    const videos = visibleCustomVideos.flatMap((video) => {
+      const identity = resolvedCustomVideos.get(video.id);
+      return identity && !customVideoIsUpcoming(video) ? [{ video, identity }] : [];
+    });
+    if (!customProgressConfirmed || videos.length === 0 || watchedBusy) return;
+    const watched = !videos.every(({ identity }) => episodeProgress[identity.titleId]?.completed);
+    const changed = videos.filter(({ identity }) => Boolean(episodeProgress[identity.titleId]?.completed) !== watched);
+    setWatchedBusy(customSeasonBusyKey);
+    setActionError("");
+    try {
+      const progressUpdates: Record<string, PlaybackProgress> = {};
+      for (let offset = 0; offset < changed.length; offset += 100) {
+        const results = await api.setWatchedBatch(changed.slice(offset, offset + 100).map(({ identity }) => ({
+          titleId: identity.titleId,
+          completed: watched,
+          expectedVersion: episodeProgress[identity.titleId]?.version ?? 0,
+        })));
+        for (const entry of results.items) progressUpdates[entry.titleId] = entry.progress;
+      }
+      setEpisodeProgress((values) => ({ ...values, ...progressUpdates }));
+      notifySuccess(
+        t(watched ? "media.season.watch.allMarkedWatched" : "media.season.watch.allMarkedUnwatched"),
+        t(watched ? "media.season.watch.watchedTitle" : "media.season.watch.unwatchedTitle"),
+      );
+    } catch (cause) {
+      const refreshed = await progressByTitleID(videos.map(({ identity }) => identity.titleId)).catch(() => undefined);
+      if (refreshed) setEpisodeProgress((values) => ({ ...values, ...refreshed }));
+      setActionError(notifyError(cause, t("media.season.watch.error.partialUpdate"), t("media.season.watch.error.partialUpdateTitle")));
+    } finally {
+      setWatchedBusy("");
+    }
+  }
+
   function handleEpisodeEnded() {
     if (!series || !season || !selectedEpisode || !selectedStream) {
       setPlaying(false);
@@ -1204,6 +1470,26 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     autoPlayNextRef.current = false;
   }
 
+  function handleCustomVideoEnded() {
+    if (!activeCustomVideo || !selectedStream) {
+      setPlaying(false);
+      return;
+    }
+    const currentIndex = orderedCustomVideos.findIndex((video) => video.id === activeCustomVideo.id);
+    const nextVideo = orderedCustomVideos.slice(currentIndex + 1).find((video) => !customVideoIsUpcoming(video));
+    setPlaying(false);
+    if (!nextVideo) {
+      nextSourceRef.current = undefined;
+      autoPlayNextRef.current = false;
+      return;
+    }
+    nextSourceRef.current = selectedStream;
+    autoPlayNextRef.current = true;
+    setSelectedCustomSeasonKey(customVideoSeasonKey(nextVideo));
+    setSelectedCustomVideo(nextVideo);
+    setCustomVideoChooserVisible(false);
+  }
+
 
   const orderedEpisodes = useMemo(
     () => [...(season?.episodes ?? [])].sort((left, right) => left.seasonNumber - right.seasonNumber || left.episodeNumber - right.episodeNumber),
@@ -1217,26 +1503,46 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     const rowRect = row.getBoundingClientRect();
     if (rowRect.top < listRect.top) list.scrollTop -= listRect.top - rowRect.top;
     else if (rowRect.bottom > listRect.bottom) list.scrollTop += rowRect.bottom - listRect.bottom;
-  }, [orderedEpisodes, selectedEpisode?.id]);
+  }, [activeCustomVideo?.id, orderedEpisodes, selectedEpisode?.id, showCustomVideoChooser, visibleCustomVideos]);
   const availableSeasonEpisodes = orderedEpisodes.filter((episode) => !episodeIsUpcoming(episode));
   const watchedEpisodeCount = availableSeasonEpisodes.filter((episode) => episodeProgress[episode.id]?.completed).length;
   const allSeasonWatched = availableSeasonEpisodes.length > 0 && watchedEpisodeCount === availableSeasonEpisodes.length;
-  const customDisplayItem = activeCustomVideo ? customVideoItem(activeCustomVideo, details) : details;
+  const watchableCustomSeasonVideos = visibleCustomVideos.filter((video) => video.season !== undefined && video.episode !== undefined && !customVideoIsUpcoming(video));
+  const availableCustomSeasonVideos = watchableCustomSeasonVideos.flatMap((video) => {
+    const identity = resolvedCustomVideos.get(video.id);
+    return identity ? [{ video, identity }] : [];
+  });
+  const watchedCustomVideoCount = availableCustomSeasonVideos.filter(({ identity }) => episodeProgress[identity.titleId]?.completed).length;
+  const allCustomSeasonWatched = watchableCustomSeasonVideos.length > 0
+    && availableCustomSeasonVideos.length === watchableCustomSeasonVideos.length
+    && watchedCustomVideoCount === watchableCustomSeasonVideos.length;
+  const customVideoContext = customType && !showCustomVideoChooser && Boolean(activeCustomVideo);
+  const customEpisodeContext = customVideoContext && activeCustomVideo?.season !== undefined && activeCustomVideo.episode !== undefined;
+  const customWatchPending = Boolean(customEpisodeContext && (!metaResolved || customProgressLoading));
+  const customSeasonPending = !metaResolved || customProgressLoading;
+  const customDisplayItem = customVideoContext && activeCustomVideo ? customVideoItem(activeCustomVideo, details) : details;
   const activePlayerItem = selectedEpisode && series
     ? episodeItem(series, selectedEpisode, details)
-    : customType ? customDisplayItem : { ...details, titleId: titleID };
+    : activeCustomVideo && activeCustomIdentity
+      ? customEpisodePlayerItem(activeCustomVideo, activeCustomIdentity, details)
+      : customType ? customDisplayItem : { ...details, titleId: titleID };
 
   const genres = Array.isArray(details.raw?.genres) ? details.raw.genres.map((genre) => {
     if (typeof genre === "string") return genre;
     const value = record(genre);
     return typeof value?.name === "string" ? value.name : "";
   }).filter(Boolean).slice(0, 4) : [];
-  const castSource = item.mediaType === "episode"
-    ? series?.cast
-    : item.mediaType === "series"
-      ? series?.cast ?? details.raw?.cast
-      : details.raw?.cast;
-  const cast = castMembers(castSource, maximumCastMembers);
+  const rawCredits = record(details.raw?.credits);
+  const rawCast = details.raw?.cast ?? details.raw?.actors ?? rawCredits?.cast;
+  const rawCastCandidates = [
+    ...castCandidates(rawCast),
+    ...stremioCastLinkCandidates(details.raw?.links),
+  ];
+  const seriesCast = series?.cast ?? [];
+  const castSource = (item.mediaType === "episode" || item.mediaType === "series") && seriesCast.length > 0
+    ? seriesCast
+    : rawCastCandidates;
+  const cast = castMembers(castSource, maximumCastMembers, customType);
   const selectedSeasonSummary = series?.seasons.find((candidate) => candidate.id === seasonID);
   const loadedSelectedSeason = season && (
     season.id === seasonID
@@ -1281,19 +1587,20 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     : activeTrailer?.isFallback ? t("media.trailers.fallbackLanguage") : t("media.trailers.preferredLanguage");
 
   if (playing && selectedStream) {
-    return <Player item={activePlayerItem} sourceRef={selectedStream.sourceRef} startSeconds={preparationStartSeconds} autoplayNextEpisode={autoplayNextEpisode} onClose={() => setPlaying(false)} onSourceExpired={() => { setPlaying(false); setStreamRefreshVersion((version) => version + 1); }} onEnded={selectedEpisode ? handleEpisodeEnded : undefined} />;
+    return <Player item={activePlayerItem} sourceRef={selectedStream.sourceRef} startSeconds={preparationStartSeconds} autoplayNextEpisode={autoplayNextEpisode} onClose={() => setPlaying(false)} onSourceExpired={() => { setPlaying(false); setStreamRefreshVersion((version) => version + 1); }} onEnded={selectedEpisode ? handleEpisodeEnded : activeCustomVideo ? handleCustomVideoEnded : undefined} />;
   }
 
-  const typeLabel = mediaTypeLabel(details.mediaType);
+  const isEpisodeContext = item.mediaType === "episode" || Boolean(customEpisodeContext);
+  const typeLabel = mediaTypeLabel(isEpisodeContext ? "episode" : details.mediaType);
   const liveProgramTitle = typeof details.currentProgram === "string"
     ? details.currentProgram
     : details.currentProgram?.title || details.currentProgram?.name;
   const episodeSeriesName = item.mediaType === "episode"
     ? series?.name ?? (typeof item.raw?.episodeSeriesName === "string" ? item.raw.episodeSeriesName : "")
-    : "";
-  const episodeTitle = selectedEpisode?.name || details.title || t("media.episode.fallbackTitle", { number: item.episodeNumber ?? "" });
-  const episodeSeasonNumber = selectedEpisode?.seasonNumber ?? item.seasonNumber;
-  const episodeNumber = selectedEpisode?.episodeNumber ?? item.episodeNumber;
+    : customEpisodeContext ? details.title : "";
+  const episodeTitle = selectedEpisode?.name || (customEpisodeContext ? activeCustomVideo?.title : undefined) || details.title || t("media.episode.fallbackTitle", { number: item.episodeNumber ?? "" });
+  const episodeSeasonNumber = selectedEpisode?.seasonNumber ?? item.seasonNumber ?? (customEpisodeContext ? activeCustomVideo?.season : undefined);
+  const episodeNumber = selectedEpisode?.episodeNumber ?? item.episodeNumber ?? (customEpisodeContext ? activeCustomVideo?.episode : undefined);
   const episodeRuntimeMinutes = selectedEpisode?.runtimeMinutes;
   const externalTitleLinks: ExternalTitleLink[] = (item.mediaType === "movie" || item.mediaType === "series" || item.mediaType === "episode")
     ? TITLE_ID_PROVIDERS.flatMap<ExternalTitleLink>((provider) => {
@@ -1319,7 +1626,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
         <span>{t("media.details.backToBrowse")}</span>
       </button>
 
-      <section className={`details-hero${item.mediaType === "episode" ? " details-hero--episode" : ""}`} style={backdrop ? { backgroundImage: `url(${backdrop})` } : undefined}>
+      <section className={`details-hero${isEpisodeContext ? " details-hero--episode" : ""}`} style={backdrop ? { backgroundImage: `url(${backdrop})` } : undefined}>
         <div className="details-hero__shade" aria-hidden="true" />
         <div className="details-hero__glow" aria-hidden="true" />
         <div className="details-hero__inner">
@@ -1327,11 +1634,11 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
           <div className="details-primary">
             <aside className="details-artwork" aria-hidden="true">
               {heroArtwork ? <img src={heroArtwork} alt="" loading="eager" fetchPriority="high" /> : <span>{customDisplayItem.title.slice(0, 2).toUpperCase()}</span>}
-              {item.mediaType === "episode" && episodeSeasonNumber !== undefined && episodeNumber !== undefined && <small className="details-artwork__episode-code">S{String(episodeSeasonNumber).padStart(2, "0")} · E{String(episodeNumber).padStart(2, "0")}</small>}
+              {isEpisodeContext && episodeSeasonNumber !== undefined && episodeNumber !== undefined && <small className="details-artwork__episode-code">S{String(episodeSeasonNumber).padStart(2, "0")} · E{String(episodeNumber).padStart(2, "0")}</small>}
             </aside>
 
             <div className="details-overview">
-              {item.mediaType === "episode"
+              {isEpisodeContext
                 ? <>
                   {episodeSeriesName && <span className="details-series-name">{episodeSeriesName}</span>}
                   <h1 id="media-details-title">{episodeTitle}</h1>
@@ -1388,13 +1695,17 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                   {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
                   {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
                 </Button>}
+                {customEpisodeContext && activeCustomVideo && <Button type="button" variant="secondary" disabled={customVideoIsUpcoming(activeCustomVideo) || !activeCustomIdentity || !customProgressConfirmed} loading={customWatchPending || watchedBusy === activeCustomIdentity?.titleId} aria-busy={customWatchPending || watchedBusy === activeCustomIdentity?.titleId} aria-label={t(selectedProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")} onClick={() => void toggleCustomVideoWatched(activeCustomVideo)}>
+                  {selectedProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
+                  {t(selectedProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
+                </Button>}
               </div>
 
               {fromContinue && item.mediaType === "episode" && seriesLoading && <div className="details-context-actions">
                 <span className="details-context-loading" role="status"><LoaderCircle className="spin" size={15} /> {t("media.season.loading")}</span>
               </div>}
               {actionError && <Notice>{actionError}</Notice>}
-            </div>
+          </div>
           </div>
             {cast.length > 0 && <section className="details-cast" aria-labelledby="details-cast-title">
               <header className="details-cast__header">
@@ -1497,34 +1808,36 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                       <h2 ref={customChooserHeadingRef} tabIndex={-1}>{t("media.series.episodesTitle")}</h2>
                     </div>
                   </header>
-                  {metaLoading
+                  {metaLoading && !resolvedCustomMeta
                     ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> {t("media.episode.loading")}</div>
                     : <>
                       <HorizontalDragRow className="season-tabs" role="tablist" aria-label={t("media.season.tabsLabel")}>
-                        {customVideoGroups.map((group, index) => {
+                        {customVideoGroups.map((group) => {
                           const active = group.key === activeCustomSeasonKey;
                           return <button
                             key={group.key}
-                            id={`custom-season-tab-${index}`}
                             type="button"
                             role="tab"
-                            tabIndex={active ? 0 : -1}
                             aria-selected={active}
-                            aria-controls="custom-season-episodes"
                             className={active ? "is-active" : ""}
-                            onClick={() => setSelectedCustomSeasonKey(group.key)}
+                            onClick={() => {
+                              autoPlayNextRef.current = false;
+                              setSelectedCustomSeasonKey(group.key);
+                            }}
                           >
                             <span>{group.season === undefined ? t("common.fallback.unknown") : group.season === 0 ? t("media.season.specials") : t("media.season.number", { number: group.season })}</span>
                             <small>{t(group.videos.length === 1 ? "media.episode.count.one" : "media.episode.count.many", { count: group.videos.length })}</small>
                           </button>;
                         })}
                       </HorizontalDragRow>
-                      <div
-                        id="custom-season-episodes"
-                        role="tabpanel"
-                        aria-labelledby={activeCustomSeasonIndex >= 0 ? `custom-season-tab-${activeCustomSeasonIndex}` : undefined}
-                        className="episode-list episode-list--custom"
-                      >
+                      <div className="season-watch-state">
+                        <span>{t("media.season.watchedCount", { watched: watchedCustomVideoCount, total: watchableCustomSeasonVideos.length })}</span>
+                        <button type="button" disabled={!customProgressConfirmed || availableCustomSeasonVideos.length !== watchableCustomSeasonVideos.length || watchableCustomSeasonVideos.length === 0 || Boolean(watchedBusy)} aria-busy={customSeasonPending || watchedBusy === customSeasonBusyKey} onClick={() => void toggleCustomSeasonWatched()}>
+                          {customSeasonPending || watchedBusy === customSeasonBusyKey ? <LoaderCircle className="spin" size={15} /> : allCustomSeasonWatched ? <EyeOff size={15} /> : <Eye size={15} />}
+                          {t(allCustomSeasonWatched ? "media.season.watch.actions.markUnwatched" : "media.season.watch.actions.markWatched")}
+                        </button>
+                      </div>
+                      <div ref={episodeListRef} className="episode-list episode-list--custom">
                         {visibleCustomVideos.map((video, index) => {
                           const number = video.episode ?? index + 1;
                           const title = video.title || t("media.episode.fallbackTitle", { number });
@@ -1532,8 +1845,16 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                             ? t("media.episode.seasonEpisode", { season: video.season, episode: video.episode })
                             : "";
                           const active = activeCustomVideo?.id === video.id;
-                          return <div key={video.id} className={active ? "is-selected" : ""}>
-                            <button type="button" className="episode-main" aria-current={active ? "true" : undefined} onClick={() => {
+                          const identity = resolvedCustomVideos.get(video.id);
+                          const progress = identity ? episodeProgress[identity.titleId] : undefined;
+                          const progressPercent = progress && progress.durationSeconds > 0 ? Math.min(100, progress.positionSeconds / progress.durationSeconds * 100) : 0;
+                          const upcoming = customVideoIsUpcoming(video);
+                          const watchCoordinates = video.season !== undefined && video.episode !== undefined;
+                          const watchPending = watchCoordinates && (!metaResolved || customProgressLoading);
+                          const rowClassName = [active ? "is-selected" : "", watchCoordinates ? "" : "has-no-watch-action"].filter(Boolean).join(" ");
+                          return <div ref={active ? selectedEpisodeRowRef : undefined} key={video.id} className={rowClassName}>
+                            <button type="button" className={upcoming ? "episode-main is-upcoming" : "episode-main"} aria-current={active ? "true" : undefined} onClick={() => {
+                              autoPlayNextRef.current = false;
                               customPanelFocusTargetRef.current = "streams";
                               setSelectedCustomVideo(video);
                               setCustomVideoChooserVisible(false);
@@ -1541,14 +1862,18 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                               <span className="episode-number">{String(number).padStart(2, "0")}</span>
                               <span className="episode-visual">
                                 {video.thumbnail ? <img src={video.thumbnail} alt="" loading="lazy" /> : <span className="episode-placeholder"><Play size={20} /></span>}
+                                {progressPercent > 0 && <i className="episode-progress"><span style={{ width: `${progressPercent}%` }} /></i>}
                               </span>
                               <span className="episode-copy">
                                 <strong>{title}</strong>
-                                <small>{[episodeContext, video.released].filter(Boolean).join(" · ")}</small>
+                                <small>{[episodeContext, customVideoReleaseInfo(video), upcoming ? t("media.episode.upcoming") : ""].filter(Boolean).join(" · ")}</small>
                                 <p>{video.overview || t("media.episode.noSynopsis")}</p>
                               </span>
                               <span className="episode-play" aria-hidden="true"><Play size={16} fill="currentColor" /></span>
                             </button>
+                            {watchCoordinates && <button type="button" className={progress?.completed ? "episode-watched is-watched" : "episode-watched"} aria-busy={watchPending || watchedBusy === identity?.titleId} aria-label={t(progress?.completed ? "media.watch.actions.markNamedUnwatched" : "media.watch.actions.markNamedWatched", { title })} title={t(progress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")} disabled={upcoming || !identity || !customProgressConfirmed || watchedBusy === identity.titleId || watchedBusy === customSeasonBusyKey} onClick={() => void toggleCustomVideoWatched(video)}>
+                              {watchPending || watchedBusy === identity?.titleId ? <LoaderCircle className="spin" size={17} /> : progress?.completed ? <Check size={17} /> : <Eye size={17} />}
+                            </button>}
                           </div>;
                         })}
                       </div>
@@ -1809,7 +2134,10 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   useEffect(() => {
     setProgressReady(false);
     let active = true;
-    if (item.mediaType !== "movie" && item.mediaType !== "episode") return;
+    if (item.mediaType !== "movie" && item.mediaType !== "episode") {
+      setProgressReady(true);
+      return () => { active = false; };
+    }
     void (item.titleId ? Promise.resolve(item.titleId) : resolveMediaTitle(item)).then(async (titleID) => {
       if (!active) return;
       titleIDRef.current = titleID;

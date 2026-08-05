@@ -2720,7 +2720,11 @@ paths:
     post:
       summary: Resolve a provider title identity
       operationId: resolveTitle
-      description: Resolves a provider identifier to a stable server title and refreshes its display snapshot. TV identities are derived server-side from sourceAddonId and resourceId after verifying that the selected profile can access the addon; stream URLs are not accepted.
+      description: >
+        Resolves a provider identifier to a stable server title and refreshes its display snapshot. TV identities
+        are derived server-side from sourceAddonId and resourceId after verifying that the selected profile can
+        access the addon; stream URLs are not accepted. New profile-scoped identifiers share a retained limit of
+        100,000 per profile; existing identifiers remain refreshable at that limit.
       security:
         - bearerAuth: []
       requestBody:
@@ -2741,6 +2745,45 @@ paths:
         "401":
           $ref: "#/components/responses/Error"
         "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /titles/custom-series/resolve:
+    post:
+      summary: Resolve an addon custom series hierarchy
+      operationId: resolveCustomSeries
+      description: >
+        Authoritatively resolves up to 4096 season and episode coordinates for the selected profile and
+        exact accessible addon installation. Stable internal UUIDs are profile-scoped and derived from the
+        addon installation, source type, hierarchy kind, and opaque resource IDs; they are not canonical
+        TMDB, IMDb, or TVDB identities. Omitted prior children become inactive without deleting their watch
+        progress, and returning children regain the same UUIDs and progress. Videos are returned in request
+        order and seasons in ascending numeric order. The JSON body is strictly decoded and bounded to 8 MiB;
+        each profile may retain at most 100,000 profile-scoped title identities, while existing identities remain refreshable.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomSeriesResolveInput"
+      responses:
+        "200":
+          description: Stable profile-scoped internal series, season, and episode identities.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomSeriesResolveResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
@@ -5217,6 +5260,12 @@ components:
           type: [integer, "null"]
           minimum: 1
           maximum: 100
+        maximumDirectTitles:
+          description: Maximum titles displayed directly on the home page for a collection using follow_layout. The instance value is an absolute ceiling and defaults to 20; a profile value may be no greater than that ceiling, while null clears the current layer so a profile inherits the instance value.
+          type: [integer, "null"]
+          default: 20
+          minimum: 1
+          maximum: 100
         allowTranscoding:
           description: Instance-wide transcoding authorization. Null clears the instance override and restores the default true value.
           type: [boolean, "null"]
@@ -5330,6 +5379,12 @@ components:
         maximumCastMembers:
           description: Maximum cast members stored by this settings layer. Null represents no layer override; profiles then inherit the instance value, whose server default is 20.
           type: [integer, "null"]
+          minimum: 1
+          maximum: 100
+        maximumDirectTitles:
+          description: Maximum titles stored by this settings layer for direct home-page display of a follow_layout collection. Null represents no layer override; profiles then inherit the instance value, whose server default is 20 and whose value is the absolute ceiling for profile overrides.
+          type: [integer, "null"]
+          default: 20
           minimum: 1
           maximum: 100
         allowTranscoding:
@@ -5494,11 +5549,11 @@ components:
         settings:
           allOf:
             - $ref: "#/components/schemas/SettingsValues"
-            - required: [interfaceLanguage, theme, maximumResolution, maximumCastMembers, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
+            - required: [interfaceLanguage, theme, maximumResolution, maximumCastMembers, maximumDirectTitles, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
         sources:
           type: object
           additionalProperties: false
-          required: [interfaceLanguage, theme, maximumResolution, maximumCastMembers, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
+          required: [interfaceLanguage, theme, maximumResolution, maximumCastMembers, maximumDirectTitles, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds]
           properties:
             interfaceLanguage:
               $ref: "#/components/schemas/SettingSource"
@@ -5507,6 +5562,8 @@ components:
             maximumResolution:
               $ref: "#/components/schemas/SettingSource"
             maximumCastMembers:
+              $ref: "#/components/schemas/SettingSource"
+            maximumDirectTitles:
               $ref: "#/components/schemas/SettingSource"
             allowTranscoding:
               $ref: "#/components/schemas/SettingSource"
@@ -6765,6 +6822,163 @@ components:
           type: string
           minLength: 1
           maxLength: 256
+    CustomSeriesResolveInput:
+      type: object
+      additionalProperties: false
+      required: [sourceAddonId, sourceType, series, videos]
+      properties:
+        sourceAddonId:
+          type: string
+          format: uuid
+        sourceType:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Exact custom media type used for addon resource lookup and identity scoping.
+        series:
+          $ref: "#/components/schemas/CustomSeriesSnapshot"
+        videos:
+          type: array
+          description: Authoritative child set. Resource IDs and season/episode coordinate pairs must each be unique; an empty array deactivates all prior child seasons and episodes without deleting progress.
+          maxItems: 4096
+          uniqueItems: false
+          items:
+            $ref: "#/components/schemas/CustomVideoSnapshot"
+    CustomSeriesSnapshot:
+      type: object
+      additionalProperties: false
+      required: [resourceId, title]
+      properties:
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Exact opaque addon series resource ID; never interpreted as a canonical provider ID.
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        posterUrl:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          pattern: "^/api/v1/artwork/[0-9a-f]{64}$"
+          description: Same-origin localized artwork path; raw provider URLs are rejected.
+        backgroundUrl:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          pattern: "^/api/v1/artwork/[0-9a-f]{64}$"
+          description: Same-origin localized artwork path; raw provider URLs are rejected.
+        releaseInfo:
+          type: string
+          minLength: 1
+          maxLength: 120
+    CustomVideoSnapshot:
+      type: object
+      additionalProperties: false
+      required: [resourceId, seasonNumber, episodeNumber]
+      properties:
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Exact opaque addon video resource ID retained for playback lookup.
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        seasonNumber:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        episodeNumber:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        thumbnailUrl:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          pattern: "^/api/v1/artwork/[0-9a-f]{64}$"
+          description: Same-origin localized artwork path; raw provider URLs are rejected.
+        backgroundUrl:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          pattern: "^/api/v1/artwork/[0-9a-f]{64}$"
+          description: Same-origin localized artwork path; raw provider URLs are rejected.
+        releaseInfo:
+          type: string
+          minLength: 1
+          maxLength: 120
+        released:
+          type: string
+          format: date
+    CustomSeriesResolveResult:
+      type: object
+      additionalProperties: false
+      required: [series, seasons, videos]
+      properties:
+        series:
+          $ref: "#/components/schemas/CustomSeriesReference"
+        seasons:
+          type: array
+          maxItems: 4096
+          items:
+            $ref: "#/components/schemas/CustomSeasonReference"
+        videos:
+          type: array
+          maxItems: 4096
+          items:
+            $ref: "#/components/schemas/CustomVideoReference"
+    CustomSeriesReference:
+      type: object
+      additionalProperties: false
+      required: [titleId, resourceId]
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 512
+    CustomSeasonReference:
+      type: object
+      additionalProperties: false
+      required: [titleId, seasonNumber]
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        seasonNumber:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+    CustomVideoReference:
+      type: object
+      additionalProperties: false
+      required: [titleId, resourceId, seasonTitleId, seasonNumber, episodeNumber]
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        seasonTitleId:
+          type: string
+          format: uuid
+        seasonNumber:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        episodeNumber:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
     CalendarEventList:
       type: object
       additionalProperties: false

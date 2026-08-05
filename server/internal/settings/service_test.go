@@ -180,6 +180,101 @@ func TestProfileMaximumCastMembersRejectsServerOverflowAndCapsStaleOverride(t *t
 		t.Fatalf("stale profile override was not bounded after server decrease: %+v", effective)
 	}
 }
+func TestMaximumDirectTitlesDefaultsValidationPersistenceAndInheritance(t *testing.T) {
+	effective := defaultEffective()
+	if effective.Values.MaximumDirectTitles != DefaultMaximumDirectTitles || effective.Sources["maximumDirectTitles"] != "default" {
+		t.Fatalf("maximum direct titles default = %d from %q, want %d from default", effective.Values.MaximumDirectTitles, effective.Sources["maximumDirectTitles"], DefaultMaximumDirectTitles)
+	}
+
+	for _, invalid := range []int{MinimumMaximumDirectTitles - 1, MaximumMaximumDirectTitles + 1} {
+		patch := Patch{MaximumDirectTitles: OptionalInt{Set: true, Value: &invalid}}
+		if err := validatePatch(patch); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("maximumDirectTitles %d validation error = %v, want invalid input", invalid, err)
+		}
+	}
+	for _, valid := range []int{MinimumMaximumDirectTitles, MaximumMaximumDirectTitles} {
+		patch := Patch{MaximumDirectTitles: OptionalInt{Set: true, Value: &valid}}
+		if err := validatePatch(patch); err != nil {
+			t.Fatalf("maximumDirectTitles %d was rejected: %v", valid, err)
+		}
+	}
+
+	serverLimit := 60
+	serverValues := applyPatch(Values{}, Patch{MaximumDirectTitles: OptionalInt{Set: true, Value: &serverLimit}})
+	encodedServer, err := json.Marshal(serverValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encodedServer), `"maximumDirectTitles":60`) {
+		t.Fatalf("server maximumDirectTitles used the wrong JSON name: %s", encodedServer)
+	}
+	var persistedServer Values
+	if err := json.Unmarshal(encodedServer, &persistedServer); err != nil {
+		t.Fatal(err)
+	}
+	if persistedServer.MaximumDirectTitles == nil || *persistedServer.MaximumDirectTitles != serverLimit {
+		t.Fatalf("server maximumDirectTitles did not survive JSON persistence: %s", encodedServer)
+	}
+
+	profileLimit := 15
+	profileValues := applyPatch(Values{}, Patch{MaximumDirectTitles: OptionalInt{Set: true, Value: &profileLimit}})
+	encodedProfile, err := json.Marshal(profileValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistedProfile Values
+	if err := json.Unmarshal(encodedProfile, &persistedProfile); err != nil {
+		t.Fatal(err)
+	}
+	if persistedProfile.MaximumDirectTitles == nil || *persistedProfile.MaximumDirectTitles != profileLimit {
+		t.Fatalf("profile maximumDirectTitles did not survive JSON persistence: %s", encodedProfile)
+	}
+
+	inherited := applyPatch(persistedProfile, Patch{MaximumDirectTitles: OptionalInt{Set: true}})
+	if inherited.MaximumDirectTitles != nil {
+		t.Fatalf("null profile maximumDirectTitles did not restore inheritance: %+v", inherited)
+	}
+	effective = defaultEffective()
+	applyLayer(&effective, persistedServer, "instance")
+	applyLayer(&effective, inherited, "profile")
+	applyMaximumDirectTitlesPolicy(&effective, persistedServer, inherited)
+	if effective.Values.MaximumDirectTitles != serverLimit || effective.Sources["maximumDirectTitles"] != "instance" {
+		t.Fatalf("inherited maximumDirectTitles = %d from %q, want %d from instance", effective.Values.MaximumDirectTitles, effective.Sources["maximumDirectTitles"], serverLimit)
+	}
+}
+
+func TestProfileMaximumDirectTitlesRejectsServerOverflowAndCapsStaleOverride(t *testing.T) {
+	aboveDefault := DefaultMaximumDirectTitles + 1
+	if err := validateProfileMaximumDirectTitles(Patch{MaximumDirectTitles: OptionalInt{Set: true, Value: &aboveDefault}}, Values{}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("profile value above default server limit error = %v, want invalid input", err)
+	}
+
+	serverLimit := 40
+	aboveServer := serverLimit + 1
+	instance := Values{MaximumDirectTitles: &serverLimit}
+	if err := validateProfileMaximumDirectTitles(Patch{MaximumDirectTitles: OptionalInt{Set: true, Value: &aboveServer}}, instance); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("profile value above configured server limit error = %v, want invalid input", err)
+	}
+	if err := validateProfileMaximumDirectTitles(Patch{MaximumDirectTitles: OptionalInt{Set: true, Value: &serverLimit}}, instance); err != nil {
+		t.Fatalf("profile value equal to server limit was rejected: %v", err)
+	}
+	if err := validateProfileMaximumDirectTitles(Patch{MaximumDirectTitles: OptionalInt{Set: true}}, instance); err != nil {
+		t.Fatalf("profile inheritance was rejected: %v", err)
+	}
+
+	loweredServerLimit := 10
+	staleProfileLimit := 50
+	loweredInstance := Values{MaximumDirectTitles: &loweredServerLimit}
+	staleProfile := Values{MaximumDirectTitles: &staleProfileLimit}
+	effective := defaultEffective()
+	applyLayer(&effective, loweredInstance, "instance")
+	applyLayer(&effective, staleProfile, "profile")
+	applyMaximumDirectTitlesPolicy(&effective, loweredInstance, staleProfile)
+	if effective.Values.MaximumDirectTitles != loweredServerLimit || effective.Sources["maximumDirectTitles"] != "instance" {
+		t.Fatalf("stale profile override was not bounded after server decrease: %+v", effective)
+	}
+}
+
 func TestInterfaceLanguageValidationAndLayering(t *testing.T) {
 	for _, language := range []string{
 		"en", "fr", "es", "it", "de", "ru", "pt-PT", "pt-BR", "ar", "ja", "ko", "zh-CN", "pl", "hy",
@@ -399,6 +494,7 @@ func TestNewSettingsClearEveryOverride(t *testing.T) {
 	values := Values{
 		InterfaceLanguage:   &text,
 		MaximumCastMembers:  &number,
+		MaximumDirectTitles: &number,
 		AutoplayNextEpisode: &enabled, SkipIntroEnabled: &enabled, SkipRecapEnabled: &enabled, SkipOutroEnabled: &enabled,
 		CardDensity: &text, AnimationsEnabled: &enabled,
 		SubtitleSizePercent: &number, SubtitleTextColor: &text, SubtitleBackgroundOpacityPercent: &number,
@@ -407,6 +503,7 @@ func TestNewSettingsClearEveryOverride(t *testing.T) {
 	updated := applyPatch(values, Patch{
 		InterfaceLanguage:   OptionalString{Set: true},
 		MaximumCastMembers:  OptionalInt{Set: true},
+		MaximumDirectTitles: OptionalInt{Set: true},
 		AutoplayNextEpisode: OptionalBool{Set: true}, SkipIntroEnabled: OptionalBool{Set: true},
 		SkipRecapEnabled: OptionalBool{Set: true}, SkipOutroEnabled: OptionalBool{Set: true}, CardDensity: OptionalString{Set: true},
 		AnimationsEnabled: OptionalBool{Set: true}, SubtitleSizePercent: OptionalInt{Set: true},
@@ -482,7 +579,7 @@ func TestLegacySettingsJSONUsesNewDefaults(t *testing.T) {
 	}
 	effective := defaultEffective()
 	applyLayer(&effective, legacy, "instance")
-	if effective.Values.InterfaceLanguage != "en" || effective.Values.Theme != "dark" || effective.Values.MaximumCastMembers != DefaultMaximumCastMembers || !effective.Values.AutoplayNextEpisode ||
+	if effective.Values.InterfaceLanguage != "en" || effective.Values.Theme != "dark" || effective.Values.MaximumCastMembers != DefaultMaximumCastMembers || effective.Values.MaximumDirectTitles != DefaultMaximumDirectTitles || !effective.Values.AutoplayNextEpisode ||
 		!effective.Values.SkipIntroEnabled || !effective.Values.SkipRecapEnabled || !effective.Values.SkipOutroEnabled || effective.Values.CardDensity != "comfortable" ||
 		!effective.Values.AnimationsEnabled || effective.Values.SubtitleSizePercent != 100 || effective.Values.SubtitleTextColor != "#FFFFFF" ||
 		effective.Values.SubtitleBackgroundOpacityPercent != 60 || !effective.Values.NotificationsEnabled ||
@@ -777,6 +874,30 @@ func TestUpdateProfileSettingsRequiresProfileManagement(t *testing.T) {
 	`, userID, profileID); err != nil {
 		t.Fatalf("grant profile management: %v", err)
 	}
+	serverLimit := 12
+	if _, err := pool.Exec(ctx, `
+		UPDATE instance_settings
+		SET settings = jsonb_build_object('maximumDirectTitles', $1::int)
+		WHERE instance_id = 1
+	`, serverLimit); err != nil {
+		t.Fatalf("set server maximum direct titles: %v", err)
+	}
+	aboveServerLimit := serverLimit + 1
+	if _, err := service.UpdateProfile(ctx, principal, profileID, Patch{
+		MaximumDirectTitles: OptionalInt{Set: true, Value: &aboveServerLimit},
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("profile maximumDirectTitles above server limit error = %v, want invalid input", err)
+	}
+	profileLimit := 8
+	updatedLimit, err := service.UpdateProfile(ctx, principal, profileID, Patch{
+		MaximumDirectTitles: OptionalInt{Set: true, Value: &profileLimit},
+	})
+	if err != nil {
+		t.Fatalf("managed profile maximumDirectTitles update: %v", err)
+	}
+	if updatedLimit.Values.MaximumDirectTitles == nil || *updatedLimit.Values.MaximumDirectTitles != profileLimit {
+		t.Fatalf("managed profile maximumDirectTitles returned unexpected layer: %+v", updatedLimit)
+	}
 	updated, err := service.UpdateProfile(ctx, principal, profileID, Patch{
 		InterfaceLanguage: OptionalString{Set: true, Value: &language},
 	})
@@ -796,5 +917,16 @@ func TestUpdateProfileSettingsRequiresProfileManagement(t *testing.T) {
 	}
 	if persistedLanguage != language {
 		t.Fatalf("persisted interface language = %q, want %q", persistedLanguage, language)
+	}
+	var persistedMaximumDirectTitles int
+	if err := pool.QueryRow(ctx, `
+		SELECT (settings->>'maximumDirectTitles')::int
+		FROM profile_settings
+		WHERE profile_id = $1::uuid
+	`, profileID).Scan(&persistedMaximumDirectTitles); err != nil {
+		t.Fatalf("read managed profile maximumDirectTitles update: %v", err)
+	}
+	if persistedMaximumDirectTitles != profileLimit {
+		t.Fatalf("persisted maximumDirectTitles = %d, want %d", persistedMaximumDirectTitles, profileLimit)
 	}
 }

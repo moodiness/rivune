@@ -274,9 +274,14 @@ test("series episodes open dedicated detail pages that own playback sources", as
   await expect(page.getByRole("region", { name: "Playback sources" })).toHaveCount(0);
 });
 
-test("custom metadata videos preserve their opaque playback identity", async ({ page, rivune: _rivune }) => {
+test("custom metadata preserves opaque playback while watchstate uses resolved UUIDs", async ({ page, rivune }) => {
+  const sourceAddonID = "40000000-0000-4000-8000-000000000001";
   const sourceRequests: Array<Record<string, unknown>> = [];
-  await page.route(/\/api\/v1\/artwork\/custom-anime-episode-(?:5|6|s2|loose)$/i, (route) => route.fulfill({
+  const rawArtworkRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("custom-anime-poster") || request.url().includes("raw-addon.invalid")) rawArtworkRequests.push(request.url());
+  });
+  await page.route(/\/api\/v1\/artwork\/(?:custom-anime-episode-(?:5|6|s2|loose|5-background)|custom-series-(?:poster|background)|custom-cast)$/i, (route) => route.fulfill({
     status: 200,
     contentType: "image/svg+xml",
     body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#345"/></svg>',
@@ -285,28 +290,55 @@ test("custom metadata videos preserve their opaque playback identity", async ({ 
     status: 200,
     contentType: "application/json",
     body: JSON.stringify({
-      results: [{
-        addonId: "fixture-custom-meta",
-        manifestId: "fixture-custom-meta",
-        resource: "meta",
-        type: "anime",
-        id: "fk:1",
-        payload: {
-          meta: {
-            id: "fk:1",
-            type: "anime",
-            name: "Fixture Anime",
-            description: "A deterministic custom metadata fixture.",
-            poster: "https://fixtures.rivune.test/custom-anime-poster.svg",
-            videos: [
-              { id: "fk:1:5", title: "Fixture Episode Five", season: 1, episode: 5, released: "2025-01-05T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-5" },
-              { id: "fk:1:6", title: "Fixture Episode Six", season: 1, episode: 6, released: "2025-01-12T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-6" },
-              { id: "fk:1:s2:opaque-1", title: "Fixture Season Two Premiere", season: 2, episode: 1, released: "2026-01-04T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-s2" },
-              { id: "fk:1:loose:opaque", title: "Fixture Unseasoned Video", episode: 99, released: "2026-02-01T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-loose" },
-            ],
+      results: [
+        {
+          addonId: "40000000-0000-4000-8000-000000000099",
+          manifestId: "fixture-decoy-meta",
+          resource: "meta",
+          type: "anime",
+          id: "fk:1",
+          payload: { meta: [] },
+        },
+        {
+          addonId: sourceAddonID,
+          manifestId: "fixture-custom-meta",
+          resource: "meta",
+          type: "anime",
+          id: "fk:1",
+          payload: {
+            meta: {
+              id: "fk:1",
+              type: "anime",
+              name: "Fixture Anime",
+              description: "",
+              overview: "An authoritative custom series overview.",
+              poster: "",
+              posterUrl: "/api/v1/artwork/custom-series-poster",
+              background: "",
+              backdropUrl: "/api/v1/artwork/custom-series-background",
+              cast: {
+                actors: [
+                  "String Performer",
+                  { actor: "Name Only Performer" },
+                  { id: "localized-cast", name: "Localized Portrait", role: "Guide", profileUrl: "", imageUrl: "/api/v1/artwork/custom-cast" },
+                  { id: "remote-cast", name: "Remote Portrait", profileUrl: "https://raw-addon.invalid/portrait.jpg" },
+                ],
+              },
+              links: [
+                { name: "Action", category: "Genres", url: "stremio:///discover/action" },
+                { name: "Triggerforce", category: "Cast", url: "stremio:///search?search=Triggerforce" },
+                { name: "Akira Ishida", category: "Cast", url: "stremio:///search?search=Akira%20Ishida" },
+              ],
+              videos: [
+                { id: "fk:1:5", title: "", name: "Fixture Episode Five", overview: "", description: "The fifth custom episode overview.", season: 1, episode: 5, released: "", releaseInfo: "2025-01-05T00:00:00.000Z", thumbnail: "", thumbnailUrl: "/api/v1/artwork/custom-anime-episode-5", background: "", backgroundUrl: "/api/v1/artwork/custom-anime-episode-5-background" },
+                { id: "fk:1:6", title: "Fixture Episode Six", season: 1, episode: 6, released: "2025-01-12T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-6" },
+                { id: "fk:1:s2:opaque-1", title: "Fixture Season Two Premiere", season: 2, episode: 1, released: "2099-01-04T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-s2" },
+                { id: "constructor", title: "Fixture Unseasoned Video", episode: 99, released: "2026-02-01T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-loose" },
+              ],
+            },
           },
         },
-      }],
+      ],
       errors: [],
     }),
   }));
@@ -332,10 +364,77 @@ test("custom metadata videos preserve their opaque playback identity", async ({ 
       }),
     });
   });
+  let releaseCustomResolution = () => undefined;
+  const customResolutionGate = new Promise<void>((resolve) => { releaseCustomResolution = resolve; });
+  let delayCustomResolution = true;
+  await page.route("**/api/v1/titles/custom-series/resolve", async (route) => {
+    if (!delayCustomResolution) return route.fallback();
+    delayCustomResolution = false;
+    await customResolutionGate;
+    return route.fallback();
+  });
 
   await page.goto("/media/anime/fk:1");
 
   await expect(page.getByRole("heading", { name: "Episodes" })).toBeVisible();
+  const pendingRowWatch = page.getByRole("button", { name: "Mark Fixture Episode Five watched" });
+  await expect(pendingRowWatch).toBeVisible();
+  await expect(pendingRowWatch).toBeDisabled();
+  await expect(pendingRowWatch).toHaveAttribute("aria-busy", "true");
+  const pendingSeasonState = page.locator(".season-watch-state");
+  await expect(pendingSeasonState).toContainText("0 of 2 watched");
+  const pendingSeasonWatch = pendingSeasonState.getByRole("button", { name: "Mark season watched" });
+  await expect(pendingSeasonWatch).toBeDisabled();
+  await expect(pendingSeasonWatch).toHaveAttribute("aria-busy", "true");
+  releaseCustomResolution();
+  await expect.poll(() => rivune.matching("/api/v1/titles/custom-series/resolve", "POST").length).toBe(1);
+  const resolverRequest = rivune.matching("/api/v1/titles/custom-series/resolve", "POST")[0];
+  expect(resolverRequest.body).toMatchObject({
+    sourceAddonId: sourceAddonID,
+    sourceType: "anime",
+    series: { resourceId: "fk:1", title: "Fixture Anime" },
+    videos: [
+      { resourceId: "fk:1:5", seasonNumber: 1, episodeNumber: 5, released: "2025-01-05" },
+      { resourceId: "fk:1:6", seasonNumber: 1, episodeNumber: 6, released: "2025-01-12" },
+      { resourceId: "fk:1:s2:opaque-1", seasonNumber: 2, episodeNumber: 1, released: "2099-01-04" },
+    ],
+  });
+  const resolverBody = resolverRequest.body;
+  if (!resolverBody || typeof resolverBody !== "object" || !("videos" in resolverBody) || !Array.isArray(resolverBody.videos)) throw new Error("custom resolver request omitted videos");
+  expect(resolverBody.videos).toHaveLength(3);
+  expect(JSON.stringify(resolverBody)).not.toContain("custom-anime-poster");
+  expect(JSON.stringify(resolverBody)).not.toContain("raw-addon.invalid");
+  expect(rivune.matching("/api/v1/titles/resolve", "POST")).toHaveLength(0);
+  const progressRequest = await rivune.waitForRequest("/api/v1/progress/batch", "POST");
+  const progressBody = progressRequest.body;
+  if (!progressBody || typeof progressBody !== "object" || !("titleIds" in progressBody) || !isStringArray(progressBody.titleIds)) throw new Error("custom progress request omitted title IDs");
+  const customTitleIDs = progressBody.titleIds;
+  expect(customTitleIDs).toHaveLength(3);
+  expect(customTitleIDs.every((titleID) => /^70000000-0000-4000-8000-\d{12}$/.test(titleID))).toBe(true);
+  expect(customTitleIDs.some((titleID) => titleID.startsWith("fk:"))).toBe(false);
+  const firstTitleID = customTitleIDs[0];
+  if (!firstTitleID) throw new Error("custom progress request returned no title IDs");
+  const hero = page.locator(".details-hero");
+  const heroArtwork = page.locator(".details-artwork img");
+  await expect(page.getByRole("heading", { name: "Fixture Anime" })).toBeVisible();
+  await expect(page.locator(".details-meta").getByText("Anime", { exact: true })).toBeVisible();
+  await expect(heroArtwork).toHaveAttribute("src", "/api/v1/artwork/custom-series-poster");
+  await expect(hero).toHaveCSS("background-image", /custom-series-background/);
+  await expect(page.locator(".details-description")).toHaveText("An authoritative custom series overview.");
+  await expect(page.locator(".details-actions").getByRole("button", { name: /Mark (?:un)?watched/ })).toHaveCount(0);
+
+  const cast = page.getByRole("region", { name: "Cast" });
+  await expect(cast.getByText("String Performer")).toBeVisible();
+  await expect(cast.getByText("Name Only Performer")).toBeVisible();
+  await expect(cast.getByText("Localized Portrait")).toBeVisible();
+  await expect(cast.getByText("Triggerforce")).toBeVisible();
+  await expect(cast.getByText("Akira Ishida")).toBeVisible();
+  await expect(cast.getByText("Action")).toHaveCount(0);
+  await expect(cast.locator("article", { hasText: "Localized Portrait" }).locator("img")).toHaveAttribute("src", "/api/v1/artwork/custom-cast");
+  await expect(cast.getByText("Guide")).toBeVisible();
+  await expect(cast.locator("article", { hasText: "Remote Portrait" }).locator("img")).toHaveCount(0);
+  expect(rawArtworkRequests).toEqual([]);
+
   const seasonOneTab = page.getByRole("tab", { name: /^Season 1\b.*2 episodes$/ });
   const seasonTwoTab = page.getByRole("tab", { name: /^Season 2\b.*1 episode$/ });
   const unseasonedTab = page.getByRole("tab", { name: /^Unknown\b.*1 episode$/ });
@@ -343,54 +442,133 @@ test("custom metadata videos preserve their opaque playback identity", async ({ 
   await expect(seasonOneTab).toHaveAttribute("aria-selected", "true");
   await expect(seasonTwoTab).toHaveAttribute("aria-selected", "false");
   await expect(unseasonedTab).toHaveAttribute("aria-selected", "false");
-
-  const firstVideo = page.getByRole("button", { name: /Fixture Episode Five/ }).first();
-  await expect(firstVideo).toBeVisible();
-  await expect(firstVideo.locator("img")).toBeVisible();
-  await expect(firstVideo.locator("img")).toHaveAttribute("src", "/api/v1/artwork/custom-anime-episode-5");
-  await expect.poll(() => firstVideo.locator("img").evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
   await expect(page.getByRole("button", { name: /Fixture Episode Six/ }).first()).toBeVisible();
-  await expect(page.getByRole("button", { name: /Fixture Season Two Premiere/ })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /Fixture Unseasoned Video/ })).toHaveCount(0);
-  await unseasonedTab.click();
-  await expect(unseasonedTab).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("button", { name: /Fixture Unseasoned Video/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Fixture Episode Five/ })).toHaveCount(0);
-  await seasonOneTab.click();
-  await expect(seasonOneTab).toHaveAttribute("aria-selected", "true");
+  const firstCustomRow = page.locator(".episode-list--custom > div").filter({ hasText: "Fixture Episode Five" });
+  await expect(firstCustomRow).toBeVisible();
+  expect(await firstCustomRow.evaluate((row) => {
+    const play = row.querySelector(".episode-play")?.getBoundingClientRect();
+    const watched = row.querySelector(".episode-watched")?.getBoundingClientRect();
+    const bounds = row.getBoundingClientRect();
+    return Boolean(play && watched
+      && watched.left >= play.right
+      && Math.abs(watched.top - bounds.top) <= 1
+      && Math.abs(watched.bottom - bounds.bottom) <= 1);
+  })).toBe(true);
+  const markSeasonWatched = page.getByRole("button", { name: "Mark season watched" });
+  const watchedBatchesBeforeSeason = rivune.matching("/api/v1/titles/watched/batch", "PUT").length;
+  await markSeasonWatched.click();
+  await expect(page.getByRole("button", { name: "Mark season unwatched" })).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/titles/watched/batch", "PUT").length).toBeGreaterThan(watchedBatchesBeforeSeason);
+  expect(rivune.matching("/api/v1/titles/watched/batch", "PUT").at(-1)?.body).toEqual({
+    items: customTitleIDs.slice(0, 2).map((titleId) => ({ titleId, completed: true, expectedVersion: 0 })),
+  });
+  const watchedBatchesBeforeReset = rivune.matching("/api/v1/titles/watched/batch", "PUT").length;
+  await page.getByRole("button", { name: "Mark season unwatched" }).click();
+  await expect(markSeasonWatched).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/titles/watched/batch", "PUT").length).toBeGreaterThan(watchedBatchesBeforeReset);
+  expect(rivune.matching("/api/v1/titles/watched/batch", "PUT").at(-1)?.body).toEqual({
+    items: customTitleIDs.slice(0, 2).map((titleId) => ({ titleId, completed: false, expectedVersion: 1 })),
+  });
   expect(sourceRequests).not.toContainEqual(expect.objectContaining({ resourceId: "fk:1" }));
-
-  await firstVideo.click();
-
-  await expect.poll(() => sourceRequests).toContainEqual(expect.objectContaining({
-    mediaType: "anime",
-    resourceId: "fk:1:5",
-  }));
-  const firstSelectedRequest = sourceRequests.find((request) => request.resourceId === "fk:1:5");
-  expect(firstSelectedRequest).not.toHaveProperty("addonId");
-  await expect(page.locator("#details-streams-title")).toBeFocused();
-  await expect(page.getByRole("region", { name: "Playback sources" })).toBeVisible();
-  await expect(page.getByRole("radio", { name: /Custom Fixture 1080p/ })).toBeVisible();
+  await unseasonedTab.click();
+  const looseVideo = page.getByRole("button", { name: /Fixture Unseasoned Video/ }).first();
+  await expect(looseVideo).toBeVisible();
+  await expect(page.getByRole("button", { name: /Mark Fixture Unseasoned Video/ })).toHaveCount(0);
+  await looseVideo.click();
+  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "constructor" });
+  expect(sourceRequests.at(-1)).not.toHaveProperty("addonId");
+  await expect(page.locator(".details-actions").getByRole("button", { name: /Mark (?:un)?watched/ })).toHaveCount(0);
+  const looseSource = page.getByRole("radio", { name: /Custom Fixture 1080p/ });
+  await looseSource.click();
+  await page.getByRole("button", { name: /Play selected stream.*Custom Fixture 1080p/ }).click();
+  const loosePlaybackRequest = await rivune.waitForRequest("/api/v1/playback/resolve", "POST");
+  expect(loosePlaybackRequest.body).toMatchObject({ sourceRef: "fixture-custom-source" });
+  expect(loosePlaybackRequest.body).not.toHaveProperty("titleId");
+  expect(rivune.matching("/api/v1/titles/resolve", "POST")).toHaveLength(0);
+  await page.getByRole("button", { name: "Go back" }).click();
 
   await page.getByRole("button", { name: /Back.*Episodes/ }).click();
-  await expect(page.getByRole("heading", { name: "Episodes" })).toBeFocused();
+  await expect(page.getByRole("heading", { name: "Fixture Anime" })).toBeVisible();
+  await expect(heroArtwork).toHaveAttribute("src", "/api/v1/artwork/custom-series-poster");
+  await expect(hero).toHaveCSS("background-image", /custom-series-background/);
+  await expect(page.locator(".details-description")).toHaveText("An authoritative custom series overview.");
+  await seasonOneTab.click();
+  const firstVideo = page.getByRole("button", { name: /Fixture Episode Five/ }).first();
+  await expect(firstVideo.locator("img")).toHaveAttribute("src", "/api/v1/artwork/custom-anime-episode-5");
+  await firstVideo.click();
+  await expect(page.getByRole("heading", { name: "Fixture Episode Five" })).toBeVisible();
+  await expect(page.locator(".details-artwork__episode-code")).toHaveText("S01 · E05");
+  await expect(heroArtwork).toHaveAttribute("src", "/api/v1/artwork/custom-series-poster");
+  await expect(hero).toHaveCSS("background-image", /custom-anime-episode-5-background/);
+  await expect(page.locator(".details-description")).toHaveText("The fifth custom episode overview.");
+  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "fk:1:5" });
+  expect(sourceRequests.at(-1)).not.toHaveProperty("addonId");
+
+  const heroWatch = page.locator(".details-actions").getByRole("button", { name: "Mark watched" });
+  await expect(heroWatch).toBeVisible();
+  await heroWatch.click();
+  await expect(page.locator(".details-actions").getByRole("button", { name: "Mark unwatched" })).toBeVisible();
+  const watchedRequest = await rivune.waitForRequest(`/api/v1/titles/${firstTitleID}/watched`, "POST");
+  expect(watchedRequest.body).toEqual({ expectedVersion: 2 });
+
+  await page.getByRole("button", { name: /Back.*Episodes/ }).click();
+  await expect(page.getByRole("heading", { name: "Fixture Anime" })).toBeVisible();
+  await expect(heroArtwork).toHaveAttribute("src", "/api/v1/artwork/custom-series-poster");
+  await expect(hero).toHaveCSS("background-image", /custom-series-background/);
+  await expect(page.locator(".details-description")).toHaveText("An authoritative custom series overview.");
+  const rowUnwatch = page.getByRole("button", { name: "Mark Fixture Episode Five unwatched" });
+  await expect(rowUnwatch).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Mark Fixture Episode Five unwatched" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Fixture Episode Five/ }).first().locator(".episode-progress")).toBeVisible();
+  const progressBatchesBeforeConflict = rivune.matching("/api/v1/progress/batch", "POST").length;
+  let rejectUnwatch = true;
+  await page.route(new RegExp(`/api/v1/titles/${firstTitleID}/watched(?:\\?.*)?$`), (route) => {
+    if (rejectUnwatch && route.request().method() === "DELETE") {
+      rejectUnwatch = false;
+      return route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "version_conflict", message: "Progress changed elsewhere" } }),
+      });
+    }
+    return route.fallback();
+  });
+  await page.getByRole("button", { name: "Mark Fixture Episode Five unwatched" }).click();
+  await expect.poll(() => rivune.matching("/api/v1/progress/batch", "POST").length).toBeGreaterThan(progressBatchesBeforeConflict);
+  await expect(page.getByRole("button", { name: "Mark Fixture Episode Five unwatched" })).toBeVisible();
+  await page.getByRole("button", { name: "Mark Fixture Episode Five unwatched" }).click();
+  await expect(page.getByRole("button", { name: "Mark Fixture Episode Five watched" })).toBeVisible();
+  const unwatchedRequest = await rivune.waitForRequest(`/api/v1/titles/${firstTitleID}/watched`, "DELETE");
+  expect(unwatchedRequest.search.get("expectedVersion")).toBe("3");
+
+  await page.getByRole("button", { name: /Fixture Episode Five/ }).first().click();
+  await expect(page.locator(".details-actions").getByRole("button", { name: "Mark watched" })).toBeVisible();
+  const source = page.getByRole("radio", { name: /Custom Fixture 1080p/ });
+  await source.click();
+  expect(sourceRequests.at(-1)).not.toHaveProperty("addonId");
+  const play = page.getByRole("button", { name: /Play selected stream.*Custom Fixture 1080p/ });
+  await expect(play).toBeEnabled();
+  const playbackRequestCount = rivune.matching("/api/v1/playback/resolve", "POST").length;
+  await play.click();
+  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBeGreaterThan(playbackRequestCount);
+  const playbackRequest = rivune.matching("/api/v1/playback/resolve", "POST").at(-1)!;
+  expect(playbackRequest.body).toMatchObject({ sourceRef: "fixture-custom-source", titleId: firstTitleID });
+  expect(rivune.matching(`/api/v1/progress/${firstTitleID}`, "GET").length).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "Go back" }).click();
+  expect(rivune.requests.some((request) => request.pathname.startsWith("/api/v1/progress/fk%3A") || request.pathname.startsWith("/api/v1/titles/fk%3A"))).toBe(false);
+
+  expect(sourceRequests).toContainEqual(expect.objectContaining({ mediaType: "anime", resourceId: "fk:1:5" }));
+  await page.getByRole("button", { name: /Back.*Episodes/ }).click();
   await seasonTwoTab.click();
   await expect(seasonTwoTab).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("button", { name: /Fixture Episode Five/ })).toHaveCount(0);
-  const seasonTwoVideo = page.getByRole("button", { name: /Fixture Season Two Premiere/ });
-  await expect(seasonTwoVideo).toBeVisible();
-  await expect(seasonTwoVideo.locator("img")).toBeVisible();
+  const seasonTwoVideo = page.getByRole("button", { name: /Fixture Season Two Premiere/ }).first();
   await expect(seasonTwoVideo.locator("img")).toHaveAttribute("src", "/api/v1/artwork/custom-anime-episode-s2");
-  await expect.poll(() => seasonTwoVideo.locator("img").evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
-
+  await expect(page.getByRole("button", { name: "Mark Fixture Season Two Premiere watched" })).toBeDisabled();
   await seasonTwoVideo.click();
-
-  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({
-    mediaType: "anime",
-    resourceId: "fk:1:s2:opaque-1",
-  });
-  expect(sourceRequests.find((request) => request.resourceId === "fk:1:s2:opaque-1")).not.toHaveProperty("addonId");
-  await expect(page.locator("#details-streams-title")).toBeFocused();
+  await expect(page.locator(".details-actions").getByRole("button", { name: "Mark watched" })).toBeDisabled();
+  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "fk:1:s2:opaque-1" });
+  expect(sourceRequests.at(-1)).not.toHaveProperty("addonId");
 });
 
 test("custom metadata honors default and returned video identifiers", async ({ page, rivune: _rivune }) => {
@@ -403,7 +581,7 @@ test("custom metadata honors default and returned video identifiers", async ({ p
       contentType: "application/json",
       body: JSON.stringify({
         results: [{
-          addonId: "fixture-custom-meta",
+          addonId: "40000000-0000-4000-8000-000000000001",
           manifestId: "fixture-custom-meta",
           resource: "meta",
           type: "anime",
@@ -442,8 +620,8 @@ test("custom metadata honors default and returned video identifiers", async ({ p
   expect(sourceRequests.find((request) => request.resourceId === "video-default")).not.toHaveProperty("addonId");
   await page.getByRole("button", { name: /Back.*Episodes/ }).click();
   await expect(page.getByRole("heading", { name: "Episodes" })).toBeFocused();
-  await expect(page.getByRole("button", { name: /Default custom video/ })).toHaveAttribute("aria-current", "true");
-  await page.getByRole("button", { name: /Explicit custom video/ }).click();
+  await expect(page.getByRole("button", { name: /Default custom video/ }).first()).toHaveAttribute("aria-current", "true");
+  await page.getByRole("button", { name: /Explicit custom video/ }).first().click();
   await expect.poll(() => sourceRequests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "video-explicit" });
   await expect(page.locator("#details-streams-title")).toBeFocused();
 

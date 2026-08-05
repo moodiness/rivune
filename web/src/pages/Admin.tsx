@@ -2508,6 +2508,7 @@ const rivuneSettingDefaults = {
   theme: "system",
   maximumResolution: "auto",
   maximumCastMembers: 20,
+  maximumDirectTitles: 20,
   preferDirectPlay: true,
   allowTranscoding: true,
   transcoding: "inherit",
@@ -2554,6 +2555,16 @@ function preferenceValues(values: SettingsValues, includeAdministratorPolicy = f
   if (!includeAdministratorPolicy) delete preferences.transcoding;
   return preferences;
 }
+function preferencePatch(values: SettingsValues, saved: SettingsValues, includeAdministratorPolicy = false): SettingsValues {
+  const current = preferenceValues(values, includeAdministratorPolicy);
+  const baseline = preferenceValues(saved, includeAdministratorPolicy);
+  const patch: SettingsValues = {};
+  for (const key of Object.keys(current) as Array<keyof SettingsValues>) {
+    if (current[key] !== baseline[key]) Object.assign(patch, { [key]: current[key] });
+  }
+  return patch;
+}
+
 
 function DeviceNotificationsOperationsCard() {
   const [values, setValues] = useState<DeviceNotificationValues>(() => deviceNotificationValues({}));
@@ -2667,6 +2678,9 @@ function settingsSectionDefinitions(serverScope: boolean): SettingsSectionDefini
     translate("settings.fields.animationsDescription"),
     translate("settings.fields.hideUnreleased"),
     translate("settings.fields.hideUnreleasedDescription"),
+    translate("settings.fields.maximumDirectTitles"),
+    translate("settings.fields.maximumDirectTitlesDescription"),
+    translate("settings.fields.maximumDirectTitlesMode"),
   ]);
   const playbackFields = [
     translate("settings.fields.maximumResolution"),
@@ -2876,7 +2890,7 @@ function SettingsAdmin() {
     try {
       let remainingTranscodingSessions = 0;
       if (savingServer) {
-        const updated = await api.updateInstanceSettings(preferenceValues(instance));
+        const updated = await api.updateInstanceSettings(preferencePatch(instance, savedInstance));
         if (settingsTargetRef.current === target) {
           setInstance(updated.settings);
           setSavedInstance(updated.settings);
@@ -2890,13 +2904,13 @@ function SettingsAdmin() {
           setTranscodingDisableCount(null);
         }
       } else {
-        const updated = await api.updateProfileSettings(target, preferenceValues(profile, canManageServer));
+        const updated = await api.updateProfileSettings(target, preferencePatch(profile, savedProfile, canManageServer));
         if (settingsTargetRef.current === target) {
           setProfile(updated.settings);
           setSavedProfile(updated.settings);
         }
       }
-      if (!savingServer && target === activeProfile.id) window.dispatchEvent(new Event("rivune:settings-changed"));
+      if (savingServer || target === activeProfile.id) window.dispatchEvent(new Event("rivune:settings-changed"));
       notifySuccess(savingServer ? translate("settings.notifications.serverSavedMessage") : translate("settings.notifications.profileSavedMessage", { profileName }), translate("settings.notifications.savedTitle"));
       if (remainingTranscodingSessions > 0) {
         notifyWarning(
@@ -3219,6 +3233,7 @@ function SettingsCard({ activeSection, serverScope = false, canConfigureTranscod
     theme: defaults.theme ?? rivuneSettingDefaults.theme,
     maximumResolution: defaults.maximumResolution ?? rivuneSettingDefaults.maximumResolution,
     maximumCastMembers: defaults.maximumCastMembers ?? rivuneSettingDefaults.maximumCastMembers,
+    maximumDirectTitles: defaults.maximumDirectTitles ?? rivuneSettingDefaults.maximumDirectTitles,
     allowTranscoding: defaults.allowTranscoding ?? rivuneSettingDefaults.allowTranscoding,
     transcoding: defaults.transcoding ?? rivuneSettingDefaults.transcoding,
     preferDirectPlay: defaults.preferDirectPlay ?? rivuneSettingDefaults.preferDirectPlay,
@@ -3258,6 +3273,7 @@ function SettingsCard({ activeSection, serverScope = false, canConfigureTranscod
         <SelectSetting name="cardDensity" presentation="density" label={translate("settings.fields.cardDensity")} value={values.cardDensity} defaultValue={effective.cardDensity} options={settingOptions.density} emptyLabel={emptyLabel} onChange={(value) => change("cardDensity", value as "comfortable" | "compact" | null)} />
         <InheritedToggle label={translate("settings.fields.animations")} description={translate("settings.fields.animationsDescription")} value={values.animationsEnabled} defaultValue={effective.animationsEnabled} onChange={(value) => change("animationsEnabled", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label={translate("settings.fields.hideUnreleased")} description={translate("settings.fields.hideUnreleasedDescription")} value={values.hideUnreleased} defaultValue={effective.hideUnreleased} onChange={(value) => change("hideUnreleased", value)} emptyLabel={emptyLabel} />
+        <BoundedInheritedNumberSetting serverScope={serverScope} value={values.maximumDirectTitles} serverValue={effective.maximumDirectTitles} saving={saving} label={translate("settings.fields.maximumDirectTitles")} description={translate("settings.fields.maximumDirectTitlesDescription")} modeLabel={translate("settings.fields.maximumDirectTitlesMode")} name="maximumDirectTitles" defaultValue={20} minimum={1} absoluteMaximum={100} onChange={(value) => change("maximumDirectTitles", value)} />
       </SettingsGroup>}
 
       {activeSection === "playback" && <SettingsGroup sectionId="playback" icon={<Film />} title={translate("settings.groups.playback.title")} description={translate("settings.groups.playback.description")}>
@@ -3355,24 +3371,40 @@ function InheritedToggle({ label, description, value, defaultValue, onChange, em
   </div>;
 }
 function MaximumCastMembersSetting({ serverScope, value, serverValue, saving, onChange }: { serverScope: boolean; value: number | null | undefined; serverValue: number; saving: boolean; onChange: (value: number | null) => void }) {
+  return <BoundedInheritedNumberSetting
+    serverScope={serverScope}
+    value={value}
+    serverValue={serverValue}
+    saving={saving}
+    label={translate("settings.fields.maximumCastMembers")}
+    modeLabel={translate("settings.fields.maximumCastMembersMode")}
+    name="maximumCastMembers"
+    defaultValue={20}
+    minimum={1}
+    absoluteMaximum={100}
+    onChange={onChange}
+  />;
+}
+
+function BoundedInheritedNumberSetting({ serverScope, value, serverValue, saving, label, description, modeLabel, name, defaultValue, minimum, absoluteMaximum, onChange }: { serverScope: boolean; value: number | null | undefined; serverValue: number; saving: boolean; label: string; description?: string; modeLabel: string; name: string; defaultValue: number; minimum: number; absoluteMaximum: number; onChange: (value: number | null) => void }) {
   const inherited = value === null || value === undefined;
-  const maximum = serverScope ? 100 : boundedInteger(serverValue, 20, 1, 100);
-  const shown = inherited ? boundedInteger(serverValue, 20, 1, maximum) : boundedInteger(value, serverScope ? 20 : maximum, 1, maximum);
+  const maximum = serverScope ? absoluteMaximum : boundedInteger(serverValue, defaultValue, minimum, absoluteMaximum);
+  const shown = inherited ? boundedInteger(serverValue, defaultValue, minimum, maximum) : boundedInteger(value, serverScope ? defaultValue : maximum, minimum, maximum);
   const source = serverScope ? translate("settings.defaults.rivune") : translate("settings.defaults.server");
   const state = inherited
     ? translate("settings.value.inheritedNumber", { source, value: shown, suffix: "" })
     : translate("settings.value.overrideNumber", { value: shown, suffix: "" });
   return <div className="setting-control setting-control--number">
     <div className="setting-row">
-      <div className="setting-row__copy"><strong>{translate("settings.fields.maximumCastMembers")}</strong><em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{state}</em></div>
+      <div className="setting-row__copy"><strong>{label}</strong>{description && <small>{description}</small>}<em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{state}</em></div>
       <div className="setting-row__actions">
-        {!serverScope && <select className="setting-mode-select" name="maximumCastMembersMode" aria-label={translate("settings.fields.maximumCastMembersMode")} disabled={saving} value={inherited ? "inherit" : "custom"} onChange={(event) => onChange(event.target.value === "inherit" ? null : maximum)}><option value="inherit">{translate("settings.options.transcodingInherit")}</option><option value="custom">{translate("settings.options.customValue")}</option></select>}
+        {!serverScope && <select className="setting-mode-select" name={`${name}Mode`} aria-label={modeLabel} disabled={saving} value={inherited ? "inherit" : "custom"} onChange={(event) => onChange(event.target.value === "inherit" ? null : maximum)}><option value="inherit">{translate("settings.options.transcodingInherit")}</option><option value="custom">{translate("settings.options.customValue")}</option></select>}
         <input
           className="setting-number-input"
-          aria-label={translate("settings.fields.maximumCastMembers")}
-          name="maximumCastMembers"
+          aria-label={label}
+          name={name}
           type="number"
-          min={1}
+          min={minimum}
           max={maximum}
           step={1}
           required
@@ -3380,10 +3412,10 @@ function MaximumCastMembersSetting({ serverScope, value, serverValue, saving, on
           value={shown}
           onChange={(event) => {
             const next = event.currentTarget.valueAsNumber;
-            if (Number.isInteger(next) && next >= 1 && next <= maximum) onChange(next);
+            if (Number.isInteger(next) && next >= minimum && next <= maximum) onChange(next);
           }}
         />
-        {!inherited && <SettingInheritAction source={source} settingLabel={translate("settings.fields.maximumCastMembers")} onClick={() => onChange(null)} />}
+        {!inherited && <SettingInheritAction source={source} settingLabel={label} onClick={() => onChange(null)} />}
       </div>
     </div>
   </div>;

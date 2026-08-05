@@ -177,6 +177,59 @@ func TestNormalizeProgressBatchInputs(t *testing.T) {
 	}
 }
 
+func TestNormalizeCustomSeriesInputValidationAndIdentityScope(t *testing.T) {
+	base := ResolveCustomSeriesInput{
+		SourceAddonID: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+		SourceType:    "anime",
+		Series: CustomSeriesSnapshot{
+			ResourceID: "opaque:series", Title: " Custom Show ",
+			PosterURL: "/api/v1/artwork/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		Videos: []CustomVideoSnapshot{
+			{ResourceID: "opaque:episode:2", Title: " Second ", SeasonNumber: 1, EpisodeNumber: 2, Released: "2026-08-06"},
+			{ResourceID: "opaque:episode:1", SeasonNumber: 1, EpisodeNumber: 1},
+		},
+	}
+	normalized, videos, err := normalizeCustomSeriesInput(base)
+	if err != nil {
+		t.Fatalf("normalize valid custom series: %v", err)
+	}
+	if normalized.SourceAddonID != strings.ToLower(base.SourceAddonID) || normalized.Series.Title != "Custom Show" || videos[0].Title != "Second" {
+		t.Fatalf("unexpected normalized snapshot: %+v videos=%+v", normalized, videos)
+	}
+	if videos[0].EpisodeIdentity == videos[1].EpisodeIdentity || videos[0].SeasonIdentity != videos[1].SeasonIdentity {
+		t.Fatalf("custom hierarchy identities are not correctly scoped: %+v", videos)
+	}
+	if videos[0].EpisodeIdentity == customTitleExternalID(normalized.SourceAddonID, "other", "episode", normalized.Series.ResourceID, videos[0].ResourceID) {
+		t.Fatal("source type did not scope custom episode identity")
+	}
+	if videos[0].EpisodeIdentity == customTitleExternalID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", normalized.SourceType, "episode", normalized.Series.ResourceID, videos[0].ResourceID) {
+		t.Fatal("addon installation did not scope custom episode identity")
+	}
+
+	invalid := []ResolveCustomSeriesInput{
+		{SourceAddonID: "invalid", SourceType: "anime", Series: CustomSeriesSnapshot{ResourceID: "series", Title: "Show"}},
+		{SourceAddonID: normalized.SourceAddonID, SourceType: "", Series: CustomSeriesSnapshot{ResourceID: "series", Title: "Show"}},
+		{SourceAddonID: normalized.SourceAddonID, SourceType: "anime", Series: CustomSeriesSnapshot{ResourceID: " series ", Title: "Show"}},
+		{SourceAddonID: normalized.SourceAddonID, SourceType: "anime", Series: CustomSeriesSnapshot{ResourceID: "series", Title: "Show", PosterURL: "https://raw.invalid/poster.jpg"}},
+		{SourceAddonID: normalized.SourceAddonID, SourceType: "anime", Series: CustomSeriesSnapshot{ResourceID: "series", Title: "Show"}, Videos: []CustomVideoSnapshot{{ResourceID: "one", SeasonNumber: -1}}},
+		{SourceAddonID: normalized.SourceAddonID, SourceType: "anime", Series: CustomSeriesSnapshot{ResourceID: "series", Title: "Show"}, Videos: []CustomVideoSnapshot{{ResourceID: "same"}, {ResourceID: "same", EpisodeNumber: 1}}},
+		{SourceAddonID: normalized.SourceAddonID, SourceType: "anime", Series: CustomSeriesSnapshot{ResourceID: "series", Title: "Show"}, Videos: []CustomVideoSnapshot{{ResourceID: "one"}, {ResourceID: "two"}}},
+		{SourceAddonID: normalized.SourceAddonID, SourceType: "anime", Series: CustomSeriesSnapshot{ResourceID: "series", Title: "Show"}, Videos: []CustomVideoSnapshot{{ResourceID: "one", Released: "2026-02-30"}}},
+		{SourceAddonID: normalized.SourceAddonID, SourceType: "anime", Series: CustomSeriesSnapshot{ResourceID: "series", Title: "Show"}, Videos: []CustomVideoSnapshot{{ResourceID: "one", SeasonNumber: 2147483648}}},
+	}
+	for index, input := range invalid {
+		if _, _, err := normalizeCustomSeriesInput(input); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("expected invalid custom input %d rejection, got %v", index, err)
+		}
+	}
+	oversized := base
+	oversized.Videos = make([]CustomVideoSnapshot, MaximumCustomSeriesVideos+1)
+	if _, _, err := normalizeCustomSeriesInput(oversized); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected oversized video list rejection, got %v", err)
+	}
+}
+
 func TestResolveTitleRejectsNonISOReleaseDate(t *testing.T) {
 	profileID := "11111111-1111-4111-8111-111111111111"
 	expiresAt := time.Now().UTC().Add(time.Hour)
@@ -286,6 +339,7 @@ func TestResolveTitleCanonicalIdentityCannotBePoisonedAcrossProfiles(t *testing.
 			country text,
 			language text,
 			category text,
+			is_current boolean NOT NULL DEFAULT true,
 			updated_at timestamptz NOT NULL DEFAULT now()
 		);
 		CREATE TEMPORARY TABLE title_external_ids (
@@ -477,6 +531,7 @@ func TestResolveTitleProfileScopedFallbackIsolatedAndLibraryPreservesIdentity(t 
 			country text,
 			language text,
 			category text,
+			is_current boolean NOT NULL DEFAULT true,
 			updated_at timestamptz NOT NULL DEFAULT now()
 		);
 		CREATE TEMPORARY TABLE title_external_ids (
@@ -826,6 +881,7 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 			country text,
 			language text,
 			category text,
+			is_current boolean NOT NULL DEFAULT true,
 			updated_at timestamptz NOT NULL DEFAULT now()
 		);
 		CREATE TEMPORARY TABLE title_external_ids (
@@ -1068,6 +1124,7 @@ func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 			release_info text,
 			resource_id text,
 			resource_provider text,
+			is_current boolean NOT NULL DEFAULT true,
 			source_addon_id uuid
 		);
 		CREATE TEMPORARY TABLE profile_title_external_ids (
@@ -1217,6 +1274,7 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 			release_info text,
 			resource_id text,
 			resource_provider text,
+			is_current boolean NOT NULL DEFAULT true,
 			source_addon_id uuid
 		);
 		CREATE TEMPORARY TABLE profile_title_external_ids (
@@ -1329,7 +1387,8 @@ func TestProgressBatchUsesOneLogicalQueryAndAtomicVersions(t *testing.T) {
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY,
 			media_type text NOT NULL,
-			source_addon_id uuid
+			source_addon_id uuid,
+			is_current boolean NOT NULL DEFAULT true
 		);
 		CREATE TEMPORARY TABLE profile_title_external_ids (
 			profile_id uuid NOT NULL,
@@ -1439,5 +1498,196 @@ func TestProgressBatchUsesOneLogicalQueryAndAtomicVersions(t *testing.T) {
 	if afterConflict.Items[0].Progress == nil || afterConflict.Items[0].Progress.Version != 5 || !afterConflict.Items[0].Progress.Completed ||
 		afterConflict.Items[1].Progress == nil || afterConflict.Items[1].Progress.Version != 1 || !afterConflict.Items[1].Progress.Completed {
 		t.Fatalf("conflicting batch partially mutated state: %#v", afterConflict.Items)
+	}
+}
+
+func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run the custom series resolution test")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	defer pool.Close()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE profiles (id uuid PRIMARY KEY, category_id uuid);
+		CREATE TEMPORARY TABLE user_profile_access (
+			user_id uuid NOT NULL, profile_id uuid NOT NULL, can_manage boolean NOT NULL DEFAULT false,
+			PRIMARY KEY (user_id, profile_id)
+		);
+		CREATE TEMPORARY TABLE titles (
+			id uuid PRIMARY KEY DEFAULT gen_random_uuid(), media_type text NOT NULL,
+			parent_id uuid REFERENCES titles(id) ON DELETE CASCADE, ordinal integer,
+			display_title text, poster_url text, background_url text, release_info text,
+			release_date date, resource_id text, resource_provider text, source_addon_id uuid,
+			is_current boolean NOT NULL DEFAULT true,
+			created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+		);
+		CREATE UNIQUE INDEX titles_parent_ordinal_unique
+			ON titles (parent_id, media_type, ordinal) WHERE is_current;
+		CREATE TEMPORARY TABLE profile_title_external_ids (
+			profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			provider text NOT NULL, namespace text NOT NULL, external_id text NOT NULL,
+			PRIMARY KEY (profile_id, provider, namespace, external_id), UNIQUE (title_id)
+		);
+		CREATE TEMPORARY TABLE addon_profile_access (
+			addon_id uuid NOT NULL, profile_id uuid NOT NULL, position integer NOT NULL DEFAULT 0,
+			PRIMARY KEY (addon_id, profile_id)
+		);
+		CREATE TEMPORARY TABLE profile_progress (
+			profile_id uuid NOT NULL, title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			position_seconds integer NOT NULL, duration_seconds integer NOT NULL,
+			completed boolean NOT NULL DEFAULT false, version bigint NOT NULL DEFAULT 1,
+			last_watched_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (profile_id, title_id)
+		);
+		CREATE TEMPORARY TABLE profile_continue_dismissals (
+			profile_id uuid NOT NULL, title_id uuid NOT NULL, dismissed_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (profile_id, title_id)
+		);
+		INSERT INTO profiles (id, category_id) VALUES
+			('11111111-1111-4111-8111-111111111111', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'),
+			('22222222-2222-4222-8222-222222222222', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc');
+		INSERT INTO user_profile_access (user_id, profile_id, can_manage) VALUES
+			('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '22222222-2222-4222-8222-222222222222', false);
+		INSERT INTO addon_profile_access (addon_id, profile_id, position) VALUES
+			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '11111111-1111-4111-8111-111111111111', 0),
+			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '22222222-2222-4222-8222-222222222222', 0),
+			('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '11111111-1111-4111-8111-111111111111', 1);
+	`); err != nil {
+		t.Fatalf("create custom series fixtures: %v", err)
+	}
+
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	profileOneID := "11111111-1111-4111-8111-111111111111"
+	profileTwoID := "22222222-2222-4222-8222-222222222222"
+	categoryID := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	profileOne := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileOneID, ProfileGrantExpiresAt: &expiresAt}
+	profileTwo := auth.Principal{UserID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID, ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt}
+	service := NewService(pool)
+	input := ResolveCustomSeriesInput{
+		SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", SourceType: "anime",
+		Series: CustomSeriesSnapshot{ResourceID: "opaque:show", Title: "Custom Show"},
+		Videos: []CustomVideoSnapshot{
+			{ResourceID: "opaque:second", Title: "Second", SeasonNumber: 2, EpisodeNumber: 8},
+			{ResourceID: "opaque:first", Title: "First", SeasonNumber: 1, EpisodeNumber: 3},
+		},
+	}
+	first, err := service.ResolveCustomSeries(ctx, profileOne, input)
+	if err != nil {
+		t.Fatalf("resolve initial custom series: %v", err)
+	}
+	if len(first.Seasons) != 2 || first.Seasons[0].SeasonNumber != 1 || first.Seasons[1].SeasonNumber != 2 {
+		t.Fatalf("seasons not returned ascending: %+v", first.Seasons)
+	}
+	if len(first.Videos) != 2 || first.Videos[0].ResourceID != "opaque:second" || first.Videos[1].ResourceID != "opaque:first" {
+		t.Fatalf("videos not returned in request order: %+v", first.Videos)
+	}
+	progress, err := service.UpdateProgress(ctx, profileOne, first.Videos[0].TitleID, UpdateProgressInput{PositionSeconds: 42, DurationSeconds: 120})
+	if err != nil || progress.Version != 1 {
+		t.Fatalf("store custom episode progress: %+v error %v", progress, err)
+	}
+	var currentTitleCount, identityCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE title.resource_provider = 'addon' AND title.source_addon_id = $2::uuid AND title.is_current)::int,
+		       count(identity.title_id)::int
+		FROM titles title
+		LEFT JOIN profile_title_external_ids identity
+		  ON identity.title_id = title.id AND identity.profile_id = $1::uuid
+		WHERE title.id = $3::uuid OR title.parent_id = $3::uuid
+		   OR title.parent_id IN (SELECT id FROM titles WHERE parent_id = $3::uuid)
+	`, profileOneID, input.SourceAddonID, first.Series.TitleID).Scan(&currentTitleCount, &identityCount); err != nil {
+		t.Fatalf("query custom hierarchy persistence: %v", err)
+	}
+	if currentTitleCount != 5 || identityCount != 5 {
+		t.Fatalf("expected five addon-scoped current titles and identities, got titles=%d identities=%d", currentTitleCount, identityCount)
+	}
+	if _, err := service.SetWatched(ctx, profileOne, first.Videos[1].TitleID, true, CompletionInput{}); err != nil {
+		t.Fatalf("complete custom episode: %v", err)
+	}
+	continuePage, err := service.ContinueWatching(ctx, profileOne, 20)
+	if err != nil {
+		t.Fatalf("query continue watching for custom hierarchy: %v", err)
+	}
+	if len(continuePage.Items) != 0 {
+		t.Fatalf("custom episode hierarchy leaked into continue watching: %+v", continuePage.Items)
+	}
+
+	withoutSecond := input
+	withoutSecond.Videos = []CustomVideoSnapshot{input.Videos[1]}
+	remaining, err := service.ResolveCustomSeries(ctx, profileOne, withoutSecond)
+	if err != nil {
+		t.Fatalf("resolve authoritative reduced hierarchy: %v", err)
+	}
+	if remaining.Videos[0].TitleID != first.Videos[1].TitleID {
+		t.Fatalf("remaining episode identity changed: before=%+v after=%+v", first.Videos, remaining.Videos)
+	}
+	if _, err := service.GetProgress(ctx, profileOne, first.Videos[0].TitleID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("inactive stale episode remained accessible: %v", err)
+	}
+
+	reactivated, err := service.ResolveCustomSeries(ctx, profileOne, input)
+	if err != nil {
+		t.Fatalf("reactivate custom hierarchy: %v", err)
+	}
+	if reactivated.Series.TitleID != first.Series.TitleID ||
+		reactivated.Seasons[0].TitleID != first.Seasons[0].TitleID || reactivated.Seasons[1].TitleID != first.Seasons[1].TitleID ||
+		reactivated.Videos[0].TitleID != first.Videos[0].TitleID || reactivated.Videos[1].TitleID != first.Videos[1].TitleID {
+		t.Fatalf("custom hierarchy IDs changed after reactivation: first=%+v reactivated=%+v", first, reactivated)
+	}
+	restoredProgress, err := service.GetProgress(ctx, profileOne, reactivated.Videos[0].TitleID)
+	if err != nil || restoredProgress.PositionSeconds != 42 || restoredProgress.Version != 1 {
+		t.Fatalf("custom progress was not preserved: %+v error %v", restoredProgress, err)
+	}
+	emptyInput := input
+	emptyInput.Videos = []CustomVideoSnapshot{}
+	emptied, err := service.ResolveCustomSeries(ctx, profileOne, emptyInput)
+	if err != nil || len(emptied.Seasons) != 0 || len(emptied.Videos) != 0 {
+		t.Fatalf("resolve empty authoritative hierarchy: %+v error %v", emptied, err)
+	}
+	if _, err := service.GetProgress(ctx, profileOne, first.Videos[0].TitleID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("empty authoritative hierarchy left episode accessible: %v", err)
+	}
+	reactivated, err = service.ResolveCustomSeries(ctx, profileOne, input)
+	if err != nil || reactivated.Videos[0].TitleID != first.Videos[0].TitleID {
+		t.Fatalf("reactivate hierarchy after empty snapshot: %+v error %v", reactivated, err)
+	}
+
+	isolated, err := service.ResolveCustomSeries(ctx, profileTwo, input)
+	if err != nil {
+		t.Fatalf("resolve second profile hierarchy: %v", err)
+	}
+	if isolated.Series.TitleID == first.Series.TitleID || isolated.Videos[0].TitleID == first.Videos[0].TitleID {
+		t.Fatalf("custom identities leaked across profiles: first=%+v second=%+v", first, isolated)
+	}
+	otherAddonInput := input
+	otherAddonInput.SourceAddonID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	otherAddon, err := service.ResolveCustomSeries(ctx, profileOne, otherAddonInput)
+	if err != nil {
+		t.Fatalf("resolve second addon installation hierarchy: %v", err)
+	}
+	if otherAddon.Series.TitleID == first.Series.TitleID || otherAddon.Videos[0].TitleID == first.Videos[0].TitleID {
+		t.Fatalf("custom identities leaked across addon installations: first=%+v second=%+v", first, otherAddon)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM addon_profile_access WHERE addon_id = $1::uuid AND profile_id = $2::uuid`, input.SourceAddonID, profileOneID); err != nil {
+		t.Fatalf("revoke addon access: %v", err)
+	}
+	if _, err := service.ResolveCustomSeries(ctx, profileOne, input); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected inaccessible addon resolution to be not found, got %v", err)
+	}
+	if _, err := service.GetProgress(ctx, profileOne, first.Videos[0].TitleID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected revoked addon title to be inaccessible, got %v", err)
 	}
 }

@@ -674,7 +674,7 @@ func collectMapArtworkAssignments(
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {
-			if isArtworkKey(key) {
+			if isArtworkKey(key) || isCastProfileKey(key, typed) {
 				if upstream, ok := child.(string); ok && strings.TrimSpace(upstream) != "" {
 					if *count >= maximumAddonArtworkURLsPerResponse {
 						typed[key] = ""
@@ -851,11 +851,28 @@ func normalizedMediaType(value string) string {
 
 func isArtworkKey(value string) bool {
 	switch strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "_", "")) {
-	case "poster", "posterurl", "background", "backgroundurl", "backdrop", "backdropurl", "logo", "logourl", "still", "stillurl", "image", "imageurl", "thumbnail", "thumbnailurl":
+	case "poster", "posterurl", "background", "backgroundurl", "backdrop", "backdropurl", "logo", "logourl", "still", "stillurl", "image", "imageurl", "thumbnail", "thumbnailurl", "profileurl", "photo":
 		return true
 	default:
 		return false
 	}
+}
+
+func isCastProfileKey(value string, object map[string]any) bool {
+	if strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "_", "")) != "profile" {
+		return false
+	}
+	for _, field := range []string{"name", "actor"} {
+		if text, ok := object[field].(string); ok && strings.TrimSpace(text) != "" {
+			return true
+		}
+	}
+	person, ok := object["person"].(map[string]any)
+	if !ok {
+		return false
+	}
+	name, _ := person["name"].(string)
+	return strings.TrimSpace(name) != ""
 }
 
 func decodeJSON(raw json.RawMessage) (any, bool) {

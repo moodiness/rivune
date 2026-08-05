@@ -18,6 +18,9 @@ type fakeWatchstateService struct {
 	resolveInput          watchstate.ResolveTitleInput
 	resolveValue          watchstate.TitleReference
 	resolveErr            error
+	customInput           watchstate.ResolveCustomSeriesInput
+	customValue           watchstate.ResolveCustomSeriesResult
+	customErr             error
 	libraryMediaType      string
 	libraryPage           int
 	libraryPageSize       int
@@ -59,6 +62,11 @@ type fakeWatchstateService struct {
 func (f *fakeWatchstateService) ResolveTitle(_ context.Context, _ auth.Principal, input watchstate.ResolveTitleInput) (watchstate.TitleReference, error) {
 	f.resolveInput = input
 	return f.resolveValue, f.resolveErr
+}
+
+func (f *fakeWatchstateService) ResolveCustomSeries(_ context.Context, _ auth.Principal, input watchstate.ResolveCustomSeriesInput) (watchstate.ResolveCustomSeriesResult, error) {
+	f.customInput = input
+	return f.customValue, f.customErr
 }
 
 func (f *fakeWatchstateService) AddLibrary(_ context.Context, _ auth.Principal, titleID string) (watchstate.LibraryItem, error) {
@@ -202,6 +210,108 @@ func TestResolveTitleRejectsTVStreamURLField(t *testing.T) {
 
 	if response.Code != http.StatusBadRequest || service.resolveInput.MediaType != "" {
 		t.Fatalf("expected unknown stream URL field rejection, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestResolveCustomSeriesStrictlyPassesOpaqueVideosInOrder(t *testing.T) {
+	service := &fakeWatchstateService{customValue: watchstate.ResolveCustomSeriesResult{
+		Series:  watchstate.CustomSeriesReference{TitleID: "550e8400-e29b-41d4-a716-446655440000", ResourceID: "opaque:series"},
+		Seasons: []watchstate.CustomSeasonReference{{TitleID: "550e8400-e29b-41d4-a716-446655440001", SeasonNumber: 2}},
+		Videos: []watchstate.CustomVideoReference{
+			{TitleID: "550e8400-e29b-41d4-a716-446655440002", ResourceID: "opaque/video:b", SeasonTitleID: "550e8400-e29b-41d4-a716-446655440001", SeasonNumber: 2, EpisodeNumber: 8},
+			{TitleID: "550e8400-e29b-41d4-a716-446655440003", ResourceID: "opaque/video:a", SeasonTitleID: "550e8400-e29b-41d4-a716-446655440001", SeasonNumber: 2, EpisodeNumber: 7},
+		},
+	}}
+	api := watchstateAPI(service)
+	body := `{"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sourceType":"anime","series":{"resourceId":"opaque:series","title":"Custom Show","posterUrl":"/api/v1/artwork/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"videos":[{"resourceId":"opaque/video:b","seasonNumber":2,"episodeNumber":8},{"resourceId":"opaque/video:a","seasonNumber":2,"episodeNumber":7}]}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/titles/custom-series/resolve", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.resolveCustomSeries(response, request, auth.Principal{})
+
+	if response.Code != http.StatusOK || service.customInput.SourceType != "anime" || len(service.customInput.Videos) != 2 {
+		t.Fatalf("unexpected custom resolution status=%d input=%+v", response.Code, service.customInput)
+	}
+	if service.customInput.Videos[0].ResourceID != "opaque/video:b" || service.customInput.Videos[1].ResourceID != "opaque/video:a" {
+		t.Fatalf("opaque video order changed: %+v", service.customInput.Videos)
+	}
+	if !strings.Contains(response.Body.String(), `"resourceId":"opaque/video:b"`) {
+		t.Fatalf("unexpected custom resolution response: %s", response.Body.String())
+	}
+}
+
+func TestResolveCustomSeriesRejectsUnknownFieldsAndHasBoundedPayload(t *testing.T) {
+	if maximumCustomSeriesResolveBytes != 8*1024*1024 {
+		t.Fatalf("custom resolver body limit changed to %d", maximumCustomSeriesResolveBytes)
+	}
+	service := &fakeWatchstateService{}
+	api := watchstateAPI(service)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/titles/custom-series/resolve", strings.NewReader(`{"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sourceType":"series","series":{"resourceId":"opaque","title":"Show"},"videos":[],"canonicalId":"not-allowed"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.resolveCustomSeries(response, request, auth.Principal{})
+
+	if response.Code != http.StatusBadRequest || service.customInput.SourceAddonID != "" {
+		t.Fatalf("expected strict unknown-field rejection, got %d input=%+v", response.Code, service.customInput)
+	}
+	oversized := httptest.NewRequest(http.MethodPost, "/api/v1/titles/custom-series/resolve", strings.NewReader(`{}`))
+	oversized.Header.Set("Content-Type", "application/json")
+	oversized.ContentLength = maximumCustomSeriesResolveBytes + 1
+	oversizedResponse := httptest.NewRecorder()
+	api.resolveCustomSeries(oversizedResponse, oversized, auth.Principal{})
+	if oversizedResponse.Code != http.StatusBadRequest || service.customInput.SourceAddonID != "" {
+		t.Fatalf("expected declared oversized body rejection, got %d input=%+v", oversizedResponse.Code, service.customInput)
+	}
+	overCardinalityBody := `{"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sourceType":"series","series":{"resourceId":"opaque","title":"Show"},"videos":[` + strings.Repeat(`{},`, watchstate.MaximumCustomSeriesVideos) + `{}` + `]}`
+	overCardinality := httptest.NewRequest(http.MethodPost, "/api/v1/titles/custom-series/resolve", strings.NewReader(overCardinalityBody))
+	overCardinality.Header.Set("Content-Type", "application/json")
+	overCardinalityResponse := httptest.NewRecorder()
+	api.resolveCustomSeries(overCardinalityResponse, overCardinality, auth.Principal{})
+	if overCardinalityResponse.Code != http.StatusUnprocessableEntity || service.customInput.SourceAddonID != "" {
+		t.Fatalf("expected pre-allocation video cardinality rejection, got %d input=%+v", overCardinalityResponse.Code, service.customInput)
+	}
+	duplicateVideos := httptest.NewRequest(http.MethodPost, "/api/v1/titles/custom-series/resolve", strings.NewReader(`{"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sourceType":"series","series":{"resourceId":"opaque","title":"Show"},"videos":[],"videos":[]}`))
+	duplicateVideos.Header.Set("Content-Type", "application/json")
+	duplicateVideosResponse := httptest.NewRecorder()
+	api.resolveCustomSeries(duplicateVideosResponse, duplicateVideos, auth.Principal{})
+	if duplicateVideosResponse.Code != http.StatusBadRequest || service.customInput.SourceAddonID != "" {
+		t.Fatalf("expected duplicate videos rejection, got %d input=%+v", duplicateVideosResponse.Code, service.customInput)
+	}
+}
+
+func TestResolveCustomSeriesRequiresVideoCoordinatesAndArray(t *testing.T) {
+	for _, body := range []string{
+		`{"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sourceType":"series","series":{"resourceId":"opaque","title":"Show"}}`,
+		`{"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sourceType":"series","series":{"resourceId":"opaque","title":"Show"},"videos":[{"resourceId":"episode","episodeNumber":1}]}`,
+		`{"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sourceType":"series","series":{"resourceId":"opaque","title":"Show"},"videos":[{"resourceId":"episode","seasonNumber":2147483648,"episodeNumber":1}]}`,
+	} {
+		service := &fakeWatchstateService{}
+		api := watchstateAPI(service)
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/titles/custom-series/resolve", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+
+		api.resolveCustomSeries(response, request, auth.Principal{})
+
+		if response.Code != http.StatusUnprocessableEntity || service.customInput.SourceAddonID != "" {
+			t.Fatalf("expected required-field rejection, got %d input=%+v", response.Code, service.customInput)
+		}
+	}
+}
+
+func TestResolveCustomSeriesMapsInaccessibleAddonToNotFound(t *testing.T) {
+	service := &fakeWatchstateService{customErr: watchstate.ErrNotFound}
+	api := watchstateAPI(service)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/titles/custom-series/resolve", strings.NewReader(`{"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sourceType":"series","series":{"resourceId":"opaque","title":"Show"},"videos":[]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.resolveCustomSeries(response, request, auth.Principal{})
+
+	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"title_not_found"`) {
+		t.Fatalf("unexpected inaccessible addon response %d: %s", response.Code, response.Body.String())
 	}
 }
 

@@ -388,6 +388,32 @@ export type ManagedAddon = InstalledAddon & {
 };
 export type ResourceResult = { addonId: string; manifestId: string; resource: string; type: string; id: string; extra?: CollectionExtra[]; payload: Record<string, unknown> };
 export type ResourceBatch = { results: ResourceResult[]; errors: { addonId: string; manifestId: string; code: string; message: string }[] };
+export type CustomSeriesResolveInput = {
+  sourceAddonId: string;
+  sourceType: string;
+  series: {
+    resourceId: string;
+    title: string;
+    posterUrl?: string;
+    backgroundUrl?: string;
+    releaseInfo?: string;
+  };
+  videos: Array<{
+    resourceId: string;
+    title?: string;
+    seasonNumber: number;
+    episodeNumber: number;
+    thumbnailUrl?: string;
+    backgroundUrl?: string;
+    releaseInfo?: string;
+    released?: string;
+  }>;
+};
+export type CustomSeriesResolveResult = {
+  series: { titleId: string; resourceId: string };
+  seasons: Array<{ titleId: string; seasonNumber: number }>;
+  videos: Array<{ titleId: string; resourceId: string; seasonTitleId: string; seasonNumber: number; episodeNumber: number }>;
+};
 
 export type PlaybackMediaProfile = { container: string; videoCodec: string; audioCodec?: string };
 export type PlaybackProcessingMode = "remux" | "transcode_audio" | "transcode";
@@ -718,6 +744,7 @@ export type SettingsValues = {
   theme?: string | null;
   maximumResolution?: string | null;
   maximumCastMembers?: number | null;
+  maximumDirectTitles?: number | null;
   allowTranscoding?: boolean | null;
   transcoding?: "inherit" | "enabled" | "disabled" | null;
   preferDirectPlay?: boolean | null;

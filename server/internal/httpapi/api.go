@@ -172,6 +172,7 @@ type metadataService interface {
 
 type watchstateService interface {
 	ResolveTitle(context.Context, auth.Principal, watchstate.ResolveTitleInput) (watchstate.TitleReference, error)
+	ResolveCustomSeries(context.Context, auth.Principal, watchstate.ResolveCustomSeriesInput) (watchstate.ResolveCustomSeriesResult, error)
 	AddLibrary(context.Context, auth.Principal, string) (watchstate.LibraryItem, error)
 	RemoveLibrary(context.Context, auth.Principal, string) error
 	Library(context.Context, auth.Principal, string, int, int) (watchstate.LibraryPage, error)
@@ -456,6 +457,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/collections/{collectionId}", a.requireAuthentication(a.deleteCollection))
 	mux.Handle("GET /api/v1/collections/{collectionId}/folders/{folderId}/items", a.requireAuthentication(a.resolveCollectionFolder))
 	mux.Handle("POST /api/v1/titles/resolve", a.requireAuthentication(a.resolveTitle))
+	mux.Handle("POST /api/v1/titles/custom-series/resolve", a.requireAuthentication(a.resolveCustomSeries))
 	mux.Handle("POST /api/v1/playback/sources", a.requireAuthentication(a.playbackSources))
 	mux.Handle("GET /api/v1/playback/markers", a.requireAuthentication(a.playbackMarkers))
 	mux.Handle("POST /api/v1/playback/prepare", a.requireAuthentication(a.preparePlayback))

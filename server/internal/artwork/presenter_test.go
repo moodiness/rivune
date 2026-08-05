@@ -179,6 +179,82 @@ func TestPresentAddonResourcesLocalizesNestedVideoThumbnailsBeforeSerialization(
 	}
 }
 
+func TestPresentAddonResourcesLocalizesCastPortraitsBeforeSerialization(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+
+	upstreamByField := map[string]string{
+		"profileUrl": fixture.URL + "/cast-profile-url.webp",
+		"profile":    fixture.URL + "/cast-profile.webp",
+		"photo":      fixture.URL + "/cast-photo.webp",
+		"imageUrl":   fixture.URL + "/cast-image-url.webp",
+	}
+	cast := make([]map[string]any, 0, len(upstreamByField))
+	index := 0
+	for field, upstream := range upstreamByField {
+		index++
+		cast = append(cast, map[string]any{"id": "opaque-cast-" + strconv.Itoa(index), "name": "Performer " + strconv.Itoa(index), field: upstream})
+	}
+	payload, err := json.Marshal(map[string]any{"meta": map[string]any{"id": "opaque-series-id", "type": "anime", "cast": cast}})
+	if err != nil {
+		t.Fatalf("encode cast fixture: %v", err)
+	}
+	results := []addon.ResourceResult{{Resource: "meta", Type: "anime", ID: "opaque-series-id", Payload: payload}}
+
+	service.PresentAddonResources(context.Background(), results)
+	serialized, err := json.Marshal(results[0])
+	if err != nil {
+		t.Fatalf("marshal presented cast resource: %v", err)
+	}
+	if strings.Contains(string(serialized), fixture.URL) {
+		t.Fatalf("presented cast leaked upstream portrait URL: %s", serialized)
+	}
+	var resource struct {
+		Payload struct {
+			Meta struct {
+				Cast []map[string]any `json:"cast"`
+			} `json:"meta"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(serialized, &resource); err != nil || len(resource.Payload.Meta.Cast) != len(cast) {
+		t.Fatalf("decode presented cast: %v payload=%s", err, serialized)
+	}
+	for castIndex, member := range resource.Payload.Meta.Cast {
+		if member["id"] != cast[castIndex]["id"] {
+			t.Fatalf("cast identity changed: got=%#v want=%#v", member["id"], cast[castIndex]["id"])
+		}
+		for field, upstream := range upstreamByField {
+			if _, exists := cast[castIndex][field]; !exists {
+				continue
+			}
+			normalized, normalizeErr := normalizeURL(upstream, false)
+			if normalizeErr != nil {
+				t.Fatalf("normalize cast portrait: %v", normalizeErr)
+			}
+			if got, want := member[field], publicPrefix+artworkKey(normalized); got != want {
+				t.Fatalf("cast %s = %#v, want %q", field, got, want)
+			}
+		}
+	}
+
+	var registered int
+	upstreams := make([]string, 0, len(upstreamByField))
+	for _, upstream := range upstreamByField {
+		upstreams = append(upstreams, upstream)
+	}
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM artwork_cache
+		WHERE source_url = ANY($1::text[])
+	`, upstreams).Scan(&registered); err != nil {
+		t.Fatalf("query cast artwork registrations: %v", err)
+	}
+	if registered != len(upstreamByField) {
+		t.Fatalf("registered %d cast portrait URLs, want %d", registered, len(upstreamByField))
+	}
+}
+
 func TestPresentAddonResourcesBoundsArtworkRegistrationsPerResponse(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

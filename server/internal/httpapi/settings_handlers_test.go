@@ -97,7 +97,7 @@ func TestUpdateInstanceSettingsDecodesEveryNewField(t *testing.T) {
 	service := &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}}
 	api := authenticatedSettingsAPI(service)
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(
-		`{"maximumCastMembers":35,"autoplayNextEpisode":false,"skipIntroEnabled":true,"skipRecapEnabled":false,"skipOutroEnabled":true,"cardDensity":"compact","animationsEnabled":false,"subtitleSizePercent":75,"subtitleTextColor":"#a1b2c3","subtitleBackgroundOpacityPercent":25,"notificationsEnabled":false,"notificationDurationSeconds":7,"notificationPollIntervalSeconds":45}`,
+		`{"maximumCastMembers":35,"maximumDirectTitles":24,"autoplayNextEpisode":false,"skipIntroEnabled":true,"skipRecapEnabled":false,"skipOutroEnabled":true,"cardDensity":"compact","animationsEnabled":false,"subtitleSizePercent":75,"subtitleTextColor":"#a1b2c3","subtitleBackgroundOpacityPercent":25,"notificationsEnabled":false,"notificationDurationSeconds":7,"notificationPollIntervalSeconds":45}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
@@ -110,6 +110,7 @@ func TestUpdateInstanceSettingsDecodesEveryNewField(t *testing.T) {
 	}
 	patch := service.instancePatch
 	if !patch.MaximumCastMembers.Set || patch.MaximumCastMembers.Value == nil || *patch.MaximumCastMembers.Value != 35 ||
+		!patch.MaximumDirectTitles.Set || patch.MaximumDirectTitles.Value == nil || *patch.MaximumDirectTitles.Value != 24 ||
 		!patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value == nil || *patch.AutoplayNextEpisode.Value ||
 		!patch.SkipIntroEnabled.Set || patch.SkipIntroEnabled.Value == nil || !*patch.SkipIntroEnabled.Value ||
 		!patch.SkipRecapEnabled.Set || patch.SkipRecapEnabled.Value == nil || *patch.SkipRecapEnabled.Value ||
@@ -130,7 +131,7 @@ func TestUpdateInstanceSettingsDecodesNullForEveryNewField(t *testing.T) {
 	service := &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}}
 	api := authenticatedSettingsAPI(service)
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(
-		`{"interfaceLanguage":null,"maximumCastMembers":null,"autoplayNextEpisode":null,"skipIntroEnabled":null,"skipRecapEnabled":null,"skipOutroEnabled":null,"cardDensity":null,"animationsEnabled":null,"subtitleSizePercent":null,"subtitleTextColor":null,"subtitleBackgroundOpacityPercent":null,"notificationsEnabled":null,"notificationDurationSeconds":null,"notificationPollIntervalSeconds":null}`,
+		`{"interfaceLanguage":null,"maximumCastMembers":null,"maximumDirectTitles":null,"autoplayNextEpisode":null,"skipIntroEnabled":null,"skipRecapEnabled":null,"skipOutroEnabled":null,"cardDensity":null,"animationsEnabled":null,"subtitleSizePercent":null,"subtitleTextColor":null,"subtitleBackgroundOpacityPercent":null,"notificationsEnabled":null,"notificationDurationSeconds":null,"notificationPollIntervalSeconds":null}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer access-token")
@@ -146,6 +147,7 @@ func TestUpdateInstanceSettingsDecodesNullForEveryNewField(t *testing.T) {
 		t.Fatalf("interface language null was not preserved: %+v", patch)
 	}
 	if !patch.MaximumCastMembers.Set || patch.MaximumCastMembers.Value != nil ||
+		!patch.MaximumDirectTitles.Set || patch.MaximumDirectTitles.Value != nil ||
 		!patch.AutoplayNextEpisode.Set || patch.AutoplayNextEpisode.Value != nil ||
 		!patch.SkipIntroEnabled.Set || patch.SkipIntroEnabled.Value != nil ||
 		!patch.SkipRecapEnabled.Set || patch.SkipRecapEnabled.Value != nil ||
@@ -192,11 +194,12 @@ func TestEffectiveSettingsResponseIncludesNewFieldsAndSources(t *testing.T) {
 		Values: settings.EffectiveValues{
 			InterfaceLanguage:   "pt-BR",
 			MaximumCastMembers:  20,
+			MaximumDirectTitles: 12,
 			AutoplayNextEpisode: true, CardDensity: "comfortable", AnimationsEnabled: true,
 			SubtitleSizePercent: 100, SubtitleTextColor: "#FFFFFF", SubtitleBackgroundOpacityPercent: 60,
 			NotificationsEnabled: true, NotificationDurationSeconds: 5, NotificationPollIntervalSeconds: 5, ForcedSubtitleLanguage: "fr-CA",
 		},
-		Sources: map[string]string{"interfaceLanguage": "profile", "maximumCastMembers": "instance", "autoplayNextEpisode": "default", "subtitleTextColor": "profile", "forcedSubtitleLanguage": "instance"},
+		Sources: map[string]string{"interfaceLanguage": "profile", "maximumCastMembers": "instance", "maximumDirectTitles": "profile", "autoplayNextEpisode": "default", "subtitleTextColor": "profile", "forcedSubtitleLanguage": "instance"},
 	}
 	api := authenticatedSettingsAPI(&fakeSettingsService{effective: effective})
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/profiles/profile-id/settings/effective", nil)
@@ -208,15 +211,18 @@ func TestEffectiveSettingsResponseIncludesNewFieldsAndSources(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"maximumDirectTitles":12`)) {
+		t.Fatalf("effective response omitted maximumDirectTitles JSON field: %s", response.Body.String())
+	}
 	var body struct {
 		SchemaVersion int                      `json:"schemaVersion"`
 		Settings      settings.EffectiveValues `json:"settings"`
 		Sources       map[string]string        `json:"sources"`
 	}
 	decodeResponse(t, response, &body)
-	if body.SchemaVersion != 1 || body.Settings.InterfaceLanguage != "pt-BR" || body.Settings.MaximumCastMembers != 20 || body.Settings.SubtitleTextColor != "#FFFFFF" ||
+	if body.SchemaVersion != 1 || body.Settings.InterfaceLanguage != "pt-BR" || body.Settings.MaximumCastMembers != 20 || body.Settings.MaximumDirectTitles != 12 || body.Settings.SubtitleTextColor != "#FFFFFF" ||
 		body.Settings.NotificationPollIntervalSeconds != 5 || body.Settings.ForcedSubtitleLanguage != "fr-CA" ||
-		body.Sources["interfaceLanguage"] != "profile" || body.Sources["maximumCastMembers"] != "instance" || body.Sources["autoplayNextEpisode"] != "default" ||
+		body.Sources["interfaceLanguage"] != "profile" || body.Sources["maximumCastMembers"] != "instance" || body.Sources["maximumDirectTitles"] != "profile" || body.Sources["autoplayNextEpisode"] != "default" ||
 		body.Sources["subtitleTextColor"] != "profile" || body.Sources["forcedSubtitleLanguage"] != "instance" {
 		t.Fatalf("effective response omitted new settings data: %+v", body)
 	}

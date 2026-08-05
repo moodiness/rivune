@@ -14,6 +14,8 @@ import type {
   CollectionImportResult,
   ContinueWatching,
   Discovery,
+  CustomSeriesResolveInput,
+  CustomSeriesResolveResult,
   DeviceAuthorization,
   DeviceUpdateInput,
   InstalledAddon,
@@ -457,6 +459,8 @@ export const api = {
     language?: string;
     category?: string;
   }) => request<TitleReference>("/titles/resolve", { method: "POST", body: JSON.stringify(input) }),
+  resolveCustomSeries: (input: CustomSeriesResolveInput, signal?: AbortSignal) =>
+    request<CustomSeriesResolveResult>("/titles/custom-series/resolve", { method: "POST", body: JSON.stringify(input), signal }),
   playbackSources: (input: { mediaType: string; resourceId: string; addonId?: string; capabilities: PlaybackCapabilities }, signal?: AbortSignal) =>
     request<PlaybackSourceList>("/playback/sources", { method: "POST", body: JSON.stringify(input), signal }),
   playbackMarkers: (imdbId: string, season: number, episode: number, signal?: AbortSignal) =>

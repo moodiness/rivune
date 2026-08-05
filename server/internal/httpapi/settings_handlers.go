@@ -54,6 +54,7 @@ type settingsPatchRequest struct {
 	Theme                            nullableString `json:"theme,omitempty"`
 	MaximumResolution                nullableString `json:"maximumResolution,omitempty"`
 	MaximumCastMembers               nullableInt    `json:"maximumCastMembers,omitempty"`
+	MaximumDirectTitles              nullableInt    `json:"maximumDirectTitles,omitempty"`
 	PreferDirectPlay                 nullableBool   `json:"preferDirectPlay,omitempty"`
 	AllowTranscoding                 nullableBool   `json:"allowTranscoding,omitempty"`
 	Transcoding                      nullableString `json:"transcoding,omitempty"`
@@ -183,6 +184,7 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		Theme:                            settings.OptionalString{Set: request.Theme.Set, Value: request.Theme.Value},
 		MaximumResolution:                settings.OptionalString{Set: request.MaximumResolution.Set, Value: request.MaximumResolution.Value},
 		MaximumCastMembers:               settings.OptionalInt{Set: request.MaximumCastMembers.Set, Value: request.MaximumCastMembers.Value},
+		MaximumDirectTitles:              settings.OptionalInt{Set: request.MaximumDirectTitles.Set, Value: request.MaximumDirectTitles.Value},
 		PreferDirectPlay:                 settings.OptionalBool{Set: request.PreferDirectPlay.Set, Value: request.PreferDirectPlay.Value},
 		AllowTranscoding:                 settings.OptionalBool{Set: request.AllowTranscoding.Set, Value: request.AllowTranscoding.Value},
 		Transcoding:                      settings.OptionalString{Set: request.Transcoding.Set, Value: request.Transcoding.Value},

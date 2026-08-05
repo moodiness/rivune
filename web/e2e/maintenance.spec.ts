@@ -210,6 +210,61 @@ test("cast member limits persist in server and profile scopes", async ({ page, r
   expect(rivune.matching("/api/v1/profiles/alice/settings", "PATCH").at(-1)?.body).toMatchObject({ maximumCastMembers: null });
 });
 
+test("direct title limits persist in server and profile appearance preferences", async ({ page, rivune }) => {
+  await page.goto("/#admin");
+  await page.locator('[data-admin-tab="settings"]').click();
+  await page.locator('[data-settings-section="appearance"]').click();
+  const scope = page.locator(".settings-profile-picker select");
+  const savePreferences = page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" });
+  const mode = page.locator('select[name="maximumDirectTitlesMode"]');
+  const limit = page.locator('input[name="maximumDirectTitles"]');
+
+  await expect(mode).toHaveValue("inherit");
+  await expect(limit).toBeDisabled();
+  await expect(limit).toHaveValue("20");
+  await expect(limit).toHaveAttribute("max", "20");
+  await mode.selectOption("custom");
+  await savePreferences.click();
+  const initialProfileRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
+  expect(initialProfileRequest.body).toEqual({ maximumDirectTitles: 20 });
+
+  await scope.selectOption("server");
+  await page.locator('[data-settings-section="appearance"]').click();
+  await expect(mode).toHaveCount(0);
+  await expect(limit).toBeEnabled();
+  await expect(limit).toHaveAttribute("min", "1");
+  await expect(limit).toHaveAttribute("max", "100");
+  await limit.fill("6");
+  await savePreferences.click();
+  const serverRequest = await rivune.waitForRequest("/api/v1/settings", "PATCH");
+  expect(serverRequest.body).toEqual({ maximumDirectTitles: 6 });
+
+  await scope.selectOption("alice");
+  await page.locator('[data-settings-section="appearance"]').click();
+  await expect(mode).toHaveValue("custom");
+  await expect(limit).toBeEnabled();
+  await expect(limit).toHaveValue("6");
+  await expect(limit).toHaveAttribute("max", "6");
+  await page.getByRole("checkbox", { name: "Interface animations" }).click();
+  await savePreferences.click();
+  await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings", "PATCH").length).toBe(2);
+  const unrelatedRequest = rivune.matching("/api/v1/profiles/alice/settings", "PATCH").at(-1);
+  expect(unrelatedRequest?.body).toEqual({ animationsEnabled: false });
+
+  await limit.fill("7");
+  await expect(limit).toHaveValue("6");
+  await limit.fill("3");
+  await savePreferences.click();
+  await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings", "PATCH").length).toBe(3);
+  expect(rivune.matching("/api/v1/profiles/alice/settings", "PATCH").at(-1)?.body).toEqual({ maximumDirectTitles: 3 });
+
+  await mode.selectOption("inherit");
+  await expect(limit).toBeDisabled();
+  await savePreferences.click();
+  await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings", "PATCH").length).toBe(4);
+  expect(rivune.matching("/api/v1/profiles/alice/settings", "PATCH").at(-1)?.body).toEqual({ maximumDirectTitles: null });
+});
+
 
 test("the selected interface language localizes Home copy", async ({ page, rivune }) => {
   await page.goto("/#admin");

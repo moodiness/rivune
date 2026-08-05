@@ -336,7 +336,7 @@ export class RivuneHarness {
   };
   private deviceAuthorizationFailure: { code: string; status: number } | null = null;
   private maintenance: { enabled: boolean; message: string | null } = { enabled: false, message: null };
-  private instanceSettings: Record<string, unknown> = { allowTranscoding: true, maximumCastMembers: 20 };
+  private instanceSettings: Record<string, unknown> = { allowTranscoding: true, maximumCastMembers: 20, maximumDirectTitles: 20 };
   private readonly profileSettings = new Map<string, Record<string, unknown>>([
     ["alice", { transcoding: "inherit" }],
     ["bob", { transcoding: "inherit" }],
@@ -353,6 +353,9 @@ export class RivuneHarness {
   private libraryItems: Array<Record<string, unknown>> = [];
   private libraryMembershipDelay = 0;
   private readonly demoProgress = new Map<string, { positionSeconds: number; durationSeconds: number; completed: boolean; version: number }>();
+  private readonly playbackProgress = new Map<string, { positionSeconds: number; durationSeconds: number; completed: boolean; version: number }>();
+  private readonly customTitleIDs = new Map<string, string>();
+  private nextCustomTitleSequence = 1;
   private readonly searchResponses = new Map<string, { body: unknown; status: number; delay: number }>();
   private readonly deviceResponses = new Map<string, { status: number; delay: number }>();
   private readonly deviceDeletionFailures = new Map<string, number>();
@@ -681,6 +684,14 @@ export class RivuneHarness {
       if (profileID) sessionStorage.setItem("rivune.profile", profileID);
       if (profileID && profileContext) sessionStorage.setItem("rivune.profile.context", profileContext);
     }, { profileID, profileContext });
+  }
+
+  private customTitleID(key: string): string {
+    const existing = this.customTitleIDs.get(key);
+    if (existing) return existing;
+    const titleID = `70000000-0000-4000-8000-${String(this.nextCustomTitleSequence++).padStart(12, "0")}`;
+    this.customTitleIDs.set(key, titleID);
+    return titleID;
   }
 
   private account() {
@@ -1190,6 +1201,8 @@ export class RivuneHarness {
       const allowTranscoding = instanceAllowsTranscoding && transcoding !== "disabled";
       const instanceMaximumCastMembers = typeof this.instanceSettings.maximumCastMembers === "number" ? Math.min(100, Math.max(1, this.instanceSettings.maximumCastMembers)) : 20;
       const maximumCastMembers = typeof profileValues.maximumCastMembers === "number" ? Math.min(instanceMaximumCastMembers, Math.max(1, profileValues.maximumCastMembers)) : instanceMaximumCastMembers;
+      const instanceMaximumDirectTitles = typeof this.instanceSettings.maximumDirectTitles === "number" ? Math.min(100, Math.max(1, this.instanceSettings.maximumDirectTitles)) : 20;
+      const maximumDirectTitles = typeof profileValues.maximumDirectTitles === "number" ? Math.min(instanceMaximumDirectTitles, Math.max(1, profileValues.maximumDirectTitles)) : instanceMaximumDirectTitles;
       const notificationsEnabled = typeof this.instanceSettings.notificationsEnabled === "boolean" ? this.instanceSettings.notificationsEnabled : true;
       const notificationDurationSeconds = typeof this.instanceSettings.notificationDurationSeconds === "number" ? this.instanceSettings.notificationDurationSeconds : 5;
       const notificationPollIntervalSeconds = typeof this.instanceSettings.notificationPollIntervalSeconds === "number" ? this.instanceSettings.notificationPollIntervalSeconds : 5;
@@ -1199,7 +1212,7 @@ export class RivuneHarness {
         : typeof instanceLanguage === "string" ? instanceLanguage : "en";
       const responseDelay = this.effectiveSettingsDelays.shift() ?? 0;
       if (responseDelay > 0) await wait(responseDelay);
-      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, allowTranscoding, transcoding, maximumCastMembers, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default", allowTranscoding: instanceAllowsTranscoding ? transcoding === "disabled" ? "profile" : "instance" : "instance", transcoding: "profile", maximumCastMembers: typeof profileValues.maximumCastMembers === "number" ? "profile" : "instance", notificationsEnabled: notificationSource("notificationsEnabled"), notificationDurationSeconds: notificationSource("notificationDurationSeconds"), notificationPollIntervalSeconds: notificationSource("notificationPollIntervalSeconds") } });
+      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, allowTranscoding, transcoding, maximumCastMembers, maximumDirectTitles, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default", allowTranscoding: instanceAllowsTranscoding ? transcoding === "disabled" ? "profile" : "instance" : "instance", transcoding: "profile", maximumCastMembers: typeof profileValues.maximumCastMembers === "number" ? "profile" : "instance", maximumDirectTitles: typeof profileValues.maximumDirectTitles === "number" ? "profile" : "instance", notificationsEnabled: notificationSource("notificationsEnabled"), notificationDurationSeconds: notificationSource("notificationDurationSeconds"), notificationPollIntervalSeconds: notificationSource("notificationPollIntervalSeconds") } });
       return;
     }
     if (path === "/auth/notifications") { await json(route, { notifications: [] }); return; }
@@ -1354,18 +1367,25 @@ export class RivuneHarness {
           ? [{ titleId: input.titleId, completed: input.completed, expectedVersion: input.expectedVersion }]
           : []
       ) : [];
-      const items = inputs.map((input) => ({
-        titleId: input.titleId,
-        progress: {
-          titleId: input.titleId,
-          mediaType: input.titleId.startsWith("episode-") ? "episode" : "movie",
+      const items = inputs.map((input) => {
+        const stored = {
           positionSeconds: input.completed ? 1800 : 0,
           durationSeconds: 1800,
           completed: input.completed,
           version: input.expectedVersion + 1,
-          updatedAt: createdAt,
-        },
-      }));
+        };
+        if (this.userRole === "demo") this.demoProgress.set(input.titleId, stored);
+        else this.playbackProgress.set(input.titleId, stored);
+        return {
+          titleId: input.titleId,
+          progress: {
+            titleId: input.titleId,
+            mediaType: input.titleId.startsWith("episode-") || input.titleId.startsWith("70000000-") ? "episode" : "movie",
+            ...stored,
+            updatedAt: createdAt,
+          },
+        };
+      });
       await json(route, { items });
       return;
     }
@@ -1376,13 +1396,18 @@ export class RivuneHarness {
       const expectedVersion = watched
         ? Number((body as { expectedVersion?: number } | undefined)?.expectedVersion ?? 0)
         : Number(url.searchParams.get("expectedVersion") ?? 0);
-      await json(route, {
-        titleId,
-        mediaType: titleId.startsWith("episode-") ? "episode" : "movie",
+      const stored = {
         positionSeconds: watched ? 1800 : 0,
         durationSeconds: 1800,
         completed: watched,
         version: expectedVersion + 1,
+      };
+      if (this.userRole === "demo") this.demoProgress.set(titleId, stored);
+      else this.playbackProgress.set(titleId, stored);
+      await json(route, {
+        titleId,
+        mediaType: titleId.startsWith("episode-") || titleId.startsWith("70000000-") ? "episode" : "movie",
+        ...stored,
         updatedAt: createdAt,
       });
       return;
@@ -1391,16 +1416,16 @@ export class RivuneHarness {
       const rawTitleIds = body && typeof body === "object" && "titleIds" in body ? body.titleIds : undefined;
       const titleIds = Array.isArray(rawTitleIds) ? rawTitleIds.filter((titleId): titleId is string => typeof titleId === "string") : [];
       const items = titleIds.map((titleId) => {
-        const saved = this.userRole === "demo" ? this.demoProgress.get(titleId) : undefined;
+        const saved = this.userRole === "demo" ? this.demoProgress.get(titleId) : this.playbackProgress.get(titleId);
         const progress = saved ?? { positionSeconds: titleId === "episode-1" ? 321 : 0, durationSeconds: 1800, completed: false, version: titleId === "episode-1" ? 4 : 0 };
-        return { titleId, progress: { titleId, mediaType: titleId.startsWith("episode-") ? "episode" : "movie", ...progress, updatedAt: createdAt } };
+        return { titleId, progress: { titleId, mediaType: titleId.startsWith("episode-") || titleId.startsWith("70000000-") ? "episode" : "movie", ...progress, updatedAt: createdAt } };
       });
       await json(route, { items });
       return;
     }
     if (path.startsWith("/progress/") && request.method() === "GET") {
       const titleId = decodeURIComponent(path.slice("/progress/".length));
-      const saved = this.userRole === "demo" ? this.demoProgress.get(titleId) : undefined;
+      const saved = this.userRole === "demo" ? this.demoProgress.get(titleId) : this.playbackProgress.get(titleId);
       const progress = saved ?? { positionSeconds: titleId === "episode-1" ? 321 : 0, durationSeconds: 1800, completed: false, version: titleId === "episode-1" ? 4 : 0 };
       await json(route, { titleId, ...progress, updatedAt: createdAt });
       return;
@@ -1410,6 +1435,7 @@ export class RivuneHarness {
       const input = body as { positionSeconds: number; durationSeconds: number; completed: boolean; expectedVersion: number };
       const progress = { positionSeconds: input.positionSeconds, durationSeconds: input.durationSeconds, completed: input.completed, version: input.expectedVersion + 1 };
       if (this.userRole === "demo") this.demoProgress.set(titleId, progress);
+      else this.playbackProgress.set(titleId, progress);
       await json(route, { titleId, ...progress, updatedAt: createdAt });
       return;
     }
@@ -1486,6 +1512,40 @@ export class RivuneHarness {
     if (path === "/calendar") {
       const today = new Date().toISOString().slice(0, 10);
       await json(route, { events: [{ id: "calendar-episode-3", titleId: "episode-3", mediaType: "episode", title: "Moonrise", releaseDate: today, resourceId: "tt9000:2:1", resourceProvider: "imdb", seriesTitle: "Signal Horizon", seriesId: "series-1", seasonId: "season-2", seasonNumber: 2, episodeNumber: 1 }] });
+      return;
+    }
+    if (path === "/titles/custom-series/resolve" && request.method() === "POST") {
+      if (!body || typeof body !== "object" ||
+        !("sourceAddonId" in body) || typeof body.sourceAddonId !== "string" ||
+        !("sourceType" in body) || typeof body.sourceType !== "string" ||
+        !("series" in body) || !body.series || typeof body.series !== "object" || !("resourceId" in body.series) || typeof body.series.resourceId !== "string" ||
+        !("videos" in body) || !Array.isArray(body.videos)) {
+        await json(route, { error: { code: "fixture_bad_custom_resolver", message: "Malformed custom resolver request" } }, 400);
+        return;
+      }
+      const videos = body.videos.flatMap((video) => video && typeof video === "object" &&
+        "resourceId" in video && typeof video.resourceId === "string" &&
+        "seasonNumber" in video && typeof video.seasonNumber === "number" &&
+        "episodeNumber" in video && typeof video.episodeNumber === "number"
+        ? [{ resourceId: video.resourceId, seasonNumber: video.seasonNumber, episodeNumber: video.episodeNumber }]
+        : []);
+      const scope = `${body.sourceAddonId}\u0000${body.sourceType}\u0000${body.series.resourceId}`;
+      const seriesTitleID = this.customTitleID(`${scope}\u0000series`);
+      const seasonTitleIDs = new Map<number, string>();
+      for (const video of videos) {
+        if (!seasonTitleIDs.has(video.seasonNumber)) seasonTitleIDs.set(video.seasonNumber, this.customTitleID(`${scope}\u0000season\u0000${video.seasonNumber}`));
+      }
+      await json(route, {
+        series: { titleId: seriesTitleID, resourceId: body.series.resourceId },
+        seasons: [...seasonTitleIDs].sort(([left], [right]) => left - right).map(([seasonNumber, titleId]) => ({ titleId, seasonNumber })),
+        videos: videos.map((video) => ({
+          titleId: this.customTitleID(`${scope}\u0000video\u0000${video.resourceId}`),
+          resourceId: video.resourceId,
+          seasonTitleId: seasonTitleIDs.get(video.seasonNumber)!,
+          seasonNumber: video.seasonNumber,
+          episodeNumber: video.episodeNumber,
+        })),
+      });
       return;
     }
     if (path === "/titles/resolve" && request.method() === "POST") {

@@ -22,6 +22,9 @@ const (
 	DefaultMaximumCastMembers              = 20
 	MinimumMaximumCastMembers              = 1
 	MaximumMaximumCastMembers              = 100
+	DefaultMaximumDirectTitles             = 20
+	MinimumMaximumDirectTitles             = 1
+	MaximumMaximumDirectTitles             = 100
 	MaintenanceMessageMaximumSize          = 500
 	DefaultNotificationsEnabled            = true
 	DefaultNotificationDurationSeconds     = 5
@@ -72,6 +75,7 @@ type Patch struct {
 	Theme                            OptionalString
 	MaximumResolution                OptionalString
 	MaximumCastMembers               OptionalInt
+	MaximumDirectTitles              OptionalInt
 	PreferDirectPlay                 OptionalBool
 	AllowTranscoding                 OptionalBool
 	Transcoding                      OptionalString
@@ -101,6 +105,7 @@ type Values struct {
 	Theme                            *string          `json:"theme,omitempty"`
 	MaximumResolution                *string          `json:"maximumResolution,omitempty"`
 	MaximumCastMembers               *int             `json:"maximumCastMembers,omitempty"`
+	MaximumDirectTitles              *int             `json:"maximumDirectTitles,omitempty"`
 	PreferDirectPlay                 *bool            `json:"preferDirectPlay,omitempty"`
 	AllowTranscoding                 *bool            `json:"allowTranscoding,omitempty"`
 	Transcoding                      *TranscodingMode `json:"transcoding,omitempty"`
@@ -138,6 +143,7 @@ type EffectiveValues struct {
 	Theme                            string          `json:"theme"`
 	MaximumResolution                string          `json:"maximumResolution"`
 	MaximumCastMembers               int             `json:"maximumCastMembers"`
+	MaximumDirectTitles              int             `json:"maximumDirectTitles"`
 	PreferDirectPlay                 bool            `json:"preferDirectPlay"`
 	AllowTranscoding                 bool            `json:"allowTranscoding"`
 	Transcoding                      TranscodingMode `json:"transcoding"`
@@ -311,6 +317,9 @@ func (s *Service) UpdateProfile(ctx context.Context, principal auth.Principal, p
 	if err := validateProfileMaximumCastMembers(patch, instance.Values); err != nil {
 		return Layer{}, err
 	}
+	if err := validateProfileMaximumDirectTitles(patch, instance.Values); err != nil {
+		return Layer{}, err
+	}
 	current.Values = applyPatch(current.Values, patch)
 	encoded, err := json.Marshal(current.Values)
 	if err != nil {
@@ -389,6 +398,7 @@ func (s *Service) Effective(ctx context.Context, principal auth.Principal, profi
 	applyLayer(&effective, profileValues, "profile")
 	applyTranscodingPolicy(&effective, instanceValues, profileValues)
 	applyMaximumCastMembersPolicy(&effective, instanceValues, profileValues)
+	applyMaximumDirectTitlesPolicy(&effective, instanceValues, profileValues)
 	applyNotificationPolicy(&effective, instanceValues)
 	if err := tx.Commit(ctx); err != nil {
 		return Effective{}, fmt.Errorf("commit effective profile settings query: %w", err)
@@ -469,7 +479,7 @@ func defaultEffective() Effective {
 		SchemaVersion: schemaVersion,
 		Values: EffectiveValues{
 			InterfaceLanguage: DefaultInterfaceLanguage,
-			Theme:             "system", MaximumResolution: "auto", MaximumCastMembers: DefaultMaximumCastMembers, PreferDirectPlay: true,
+			Theme:             "system", MaximumResolution: "auto", MaximumCastMembers: DefaultMaximumCastMembers, MaximumDirectTitles: DefaultMaximumDirectTitles, PreferDirectPlay: true,
 			AllowTranscoding: true,
 			Transcoding:      TranscodingModeInherit,
 			HideUnreleased:   false, MetadataLanguage: "auto", MetadataRegion: "auto", SeriesMappingProvider: "tmdb",
@@ -482,7 +492,7 @@ func defaultEffective() Effective {
 		Sources: map[string]string{
 			"interfaceLanguage": "default",
 			"allowTranscoding":  "default", "transcoding": "default",
-			"theme": "default", "maximumResolution": "default", "maximumCastMembers": "default", "preferDirectPlay": "default",
+			"theme": "default", "maximumResolution": "default", "maximumCastMembers": "default", "maximumDirectTitles": "default", "preferDirectPlay": "default",
 			"hideUnreleased": "default", "metadataLanguage": "default", "metadataRegion": "default", "seriesMappingProvider": "default",
 			"audioLanguage": "default", "subtitleLanguage": "default", "forcedSubtitleLanguage": "default",
 			"autoplayNextEpisode": "default", "cardDensity": "default", "animationsEnabled": "default",
@@ -494,7 +504,7 @@ func defaultEffective() Effective {
 }
 
 func validatePatch(patch Patch) error {
-	if !patch.InterfaceLanguage.Set && !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.MaximumCastMembers.Set && !patch.PreferDirectPlay.Set && !patch.AllowTranscoding.Set && !patch.Transcoding.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
+	if !patch.InterfaceLanguage.Set && !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.MaximumCastMembers.Set && !patch.MaximumDirectTitles.Set && !patch.PreferDirectPlay.Set && !patch.AllowTranscoding.Set && !patch.Transcoding.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
 		!patch.AutoplayNextEpisode.Set && !patch.SkipIntroEnabled.Set && !patch.SkipRecapEnabled.Set && !patch.SkipOutroEnabled.Set &&
 		!patch.CardDensity.Set && !patch.AnimationsEnabled.Set && !patch.SubtitleSizePercent.Set && !patch.SubtitleTextColor.Set && !patch.SubtitleBackgroundOpacityPercent.Set &&
 		!patch.NotificationsEnabled.Set && !patch.NotificationDurationSeconds.Set && !patch.NotificationPollIntervalSeconds.Set {
@@ -518,6 +528,9 @@ func validatePatch(patch Patch) error {
 		}
 	}
 	if err := validateIntRange("maximumCastMembers", patch.MaximumCastMembers, MinimumMaximumCastMembers, MaximumMaximumCastMembers); err != nil {
+		return err
+	}
+	if err := validateIntRange("maximumDirectTitles", patch.MaximumDirectTitles, MinimumMaximumDirectTitles, MaximumMaximumDirectTitles); err != nil {
 		return err
 	}
 	if value := patch.Transcoding.Value; patch.Transcoding.Set && value != nil {
@@ -631,6 +644,20 @@ func validateProfileMaximumCastMembers(patch Patch, instance Values) error {
 	return nil
 }
 
+func validateProfileMaximumDirectTitles(patch Patch, instance Values) error {
+	if !patch.MaximumDirectTitles.Set || patch.MaximumDirectTitles.Value == nil {
+		return nil
+	}
+	instanceLimit := DefaultMaximumDirectTitles
+	if instance.MaximumDirectTitles != nil {
+		instanceLimit = *instance.MaximumDirectTitles
+	}
+	if *patch.MaximumDirectTitles.Value > instanceLimit {
+		return fmt.Errorf("%w: maximumDirectTitles must not exceed the server limit of %d", ErrInvalidInput, instanceLimit)
+	}
+	return nil
+}
+
 func validateIntRange(name string, value OptionalInt, minimum, maximum int) error {
 	if value.Set && value.Value != nil && (*value.Value < minimum || *value.Value > maximum) {
 		return fmt.Errorf("%w: %s must be between %d and %d", ErrInvalidInput, name, minimum, maximum)
@@ -650,6 +677,9 @@ func applyPatch(values Values, patch Patch) Values {
 	}
 	if patch.MaximumCastMembers.Set {
 		values.MaximumCastMembers = patch.MaximumCastMembers.Value
+	}
+	if patch.MaximumDirectTitles.Set {
+		values.MaximumDirectTitles = patch.MaximumDirectTitles.Value
 	}
 	if patch.AllowTranscoding.Set {
 		values.AllowTranscoding = patch.AllowTranscoding.Value
@@ -751,6 +781,10 @@ func applyLayer(effective *Effective, values Values, source string) {
 	if values.MaximumCastMembers != nil {
 		effective.Values.MaximumCastMembers = *values.MaximumCastMembers
 		effective.Sources["maximumCastMembers"] = source
+	}
+	if values.MaximumDirectTitles != nil {
+		effective.Values.MaximumDirectTitles = *values.MaximumDirectTitles
+		effective.Sources["maximumDirectTitles"] = source
 	}
 	if values.PreferDirectPlay != nil {
 		effective.Values.PreferDirectPlay = *values.PreferDirectPlay
@@ -878,6 +912,21 @@ func applyMaximumCastMembersPolicy(effective *Effective, instance, profile Value
 	if profile.MaximumCastMembers != nil && *profile.MaximumCastMembers <= serverLimit {
 		effective.Values.MaximumCastMembers = *profile.MaximumCastMembers
 		effective.Sources["maximumCastMembers"] = "profile"
+	}
+}
+
+func applyMaximumDirectTitlesPolicy(effective *Effective, instance, profile Values) {
+	serverLimit := DefaultMaximumDirectTitles
+	serverSource := "default"
+	if instance.MaximumDirectTitles != nil {
+		serverLimit = *instance.MaximumDirectTitles
+		serverSource = "instance"
+	}
+	effective.Values.MaximumDirectTitles = serverLimit
+	effective.Sources["maximumDirectTitles"] = serverSource
+	if profile.MaximumDirectTitles != nil && *profile.MaximumDirectTitles <= serverLimit {
+		effective.Values.MaximumDirectTitles = *profile.MaximumDirectTitles
+		effective.Sources["maximumDirectTitles"] = "profile"
 	}
 }
 
