@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://github.com/moodiness/rivune/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/moodiness/rivune?style=flat-square"></a>
-  <a href="https://github.com/moodiness/rivune/actions/workflows/container.yml"><img alt="Release build" src="https://img.shields.io/github/actions/workflow/status/moodiness/rivune/container.yml?style=flat-square&label=release"></a>
+  <a href="https://github.com/moodiness/rivune/actions/workflows/release-candidate.yml"><img alt="Release build" src="https://img.shields.io/github/actions/workflow/status/moodiness/rivune/release-candidate.yml?style=flat-square&label=release"></a>
   <a href="https://github.com/moodiness/rivune/pkgs/container/rivune"><img alt="Container image" src="https://img.shields.io/badge/container-ghcr.io-2496ED?style=flat-square"></a>
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/github/license/moodiness/rivune?style=flat-square"></a>
 </p>

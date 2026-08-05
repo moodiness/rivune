@@ -32,7 +32,7 @@ The tag push runs `Release candidate CI`, a complete, read-only release gate: ba
 
 Repository administrators must configure the controls that live outside the repository:
 
-1. Protect `main` with required pull-request reviews and the required `CI` status checks; disallow force pushes and direct bypasses.
+1. Protect `main` with required pull-request reviews; disallow force pushes and direct bypasses. Repository workflows do not run for ordinary branch pushes or pull requests: the complete verification gate runs only for an authorized `v*` release tag.
 2. Add a tag ruleset for `v*` that restricts creation to release maintainers and blocks tag updates and deletion.
 3. Create an environment named `release`, add required reviewers who are independent of the tag pusher, enable “Prevent self-review,” and restrict deployments to the protected `main` branch. Do not grant environment secrets to any other deployment branch.
 

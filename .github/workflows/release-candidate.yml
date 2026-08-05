@@ -59,4 +59,4 @@ jobs:
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
-    uses: ./.github/workflows/container.yml
+    uses: ./.github/workflows/release-gate.yml
