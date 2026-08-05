@@ -1,6 +1,16 @@
 # Rivune protocol compatibility
 
-The current Rivune wire protocol is **version 18**. The HTTP namespace remains `/api/v1`; the namespace and protocol version are independent. Clients must discover a server through `GET /.well-known/rivune` before using authenticated API routes and must compare the returned `protocolVersion` with the version they implement.
+The current Rivune wire protocol is **version 19**. The HTTP namespace remains `/api/v1`; the namespace and protocol version are independent. Clients must discover a server through `GET /.well-known/rivune` before using authenticated API routes and must compare the returned `protocolVersion` with the version they implement.
+
+## Version 19 cutover
+
+Version 19 is a clean cutover. A v18 client is not compatible with a v19 server, and a v19 client must not silently continue against another protocol version.
+
+- **Profile selection returns a capability.** The selection response includes the required opaque `profileContext` value alongside the profile and expiry.
+- **Web profile access is tab-bound.** Web clients retain `profileContext` only in the selecting tab and send it as `X-Rivune-Profile-Context` on subsequent authenticated requests that require an active profile.
+- **Stale web contexts require reselection.** Missing, stale, or cross-tab profile capabilities produce `profile_selection_required`; clients must return to profile selection instead of retrying under another profile.
+
+Version 19 retains every v18 category, media, language, artwork, mapping, playback, and addon contract described below.
 
 ## Version 18 cutover
 
@@ -41,11 +51,11 @@ There are no compatibility aliases for the singular trailer route or pre-v16 tra
 
 ## Compatibility policy
 
-- A released client declares one implemented protocol integer. The Apple, Android, and Windows clients in this repository implement v18.
+- A released client declares one implemented protocol integer. The Apple, Android, and Windows clients in this repository implement v19.
 - A client must reject discovery when `protocolVersion` differs from its implemented version and present an upgrade-required error. It must not infer compatibility from `serverVersion` or `/api/v1`.
-- A server may add endpoints, optional response properties, optional request properties, or new error codes without incrementing the protocol version when existing v18 behavior remains valid. Clients must ignore unknown response properties and handle unknown structured error codes generically.
+- A server may add endpoints, optional response properties, optional request properties, or new error codes without incrementing the protocol version when existing v19 behavior remains valid. Clients must ignore unknown response properties and handle unknown structured error codes generically.
 - Removing or renaming a route or property, changing a property's type or meaning, adding a required request property, making an optional response property required, changing authentication semantics, or changing identifier interpretation requires a new protocol version.
-- Within v18, an existing required response property remains required. Contract tests validate representative real handler responses against `openapi.yaml`; changes to those handlers and schemas must land together.
+- Within v19, an existing required response property remains required. Contract tests validate representative real handler responses against `openapi.yaml`; changes to those handlers and schemas must land together.
 - Token rotation is part of the v16 contract. Access tokens are bearer tokens, refresh tokens are single-use and replaced on refresh, and native clients must persist credentials in platform-secure storage. A failed refresh clears the local credential set and requires authentication again.
 - Server releases must continue serving the documented version until all bundled clients implement a newer version. A future server that supports multiple versions must advertise the selected protocol explicitly; clients must never assume an undocumented range.
 
