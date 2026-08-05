@@ -1682,6 +1682,7 @@
   .details-context-panel .season-watch-state { flex: 0 0 auto; }
   .details-context-panel .episode-list { min-height: 0; max-height: none; flex: 1 1 auto; align-content: start; grid-auto-rows: max-content; gap: 8px; padding-right: 4px; }
   .details-context-panel .episode-list > div { min-height: 96px; grid-template-columns: minmax(0, 1fr) 40px; border-radius: 14px; background: rgba(255, 255, 255, .028); }
+  .details-context-panel .episode-list--custom > div { grid-template-columns: minmax(0, 1fr); }
   .details-context-panel .episode-main { grid-template-columns: 21px 112px minmax(0, 1fr) 28px; gap: 9px; padding: 8px; }
   .details-context-panel .episode-visual { width: 112px; border-radius: 9px; }
   .details-context-panel .episode-copy p { display: -webkit-box; overflow: hidden; font-size: 8px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }

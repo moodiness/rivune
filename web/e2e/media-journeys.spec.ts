@@ -274,6 +274,139 @@ test("series episodes open dedicated detail pages that own playback sources", as
   await expect(page.getByRole("region", { name: "Playback sources" })).toHaveCount(0);
 });
 
+test("custom metadata videos preserve their opaque playback identity", async ({ page, rivune: _rivune }) => {
+  const sourceRequests: Array<Record<string, unknown>> = [];
+  await page.route(/\/api\/v1\/addons\/resources\/meta\/anime\/fk(?:%3A|:)1(?:\?.*)?$/i, (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      results: [{
+        addonId: "fixture-custom-meta",
+        manifestId: "fixture-custom-meta",
+        resource: "meta",
+        type: "anime",
+        id: "fk:1",
+        payload: {
+          meta: {
+            id: "fk:1",
+            type: "anime",
+            name: "Fixture Anime",
+            description: "A deterministic custom metadata fixture.",
+            poster: "https://fixtures.rivune.test/custom-anime-poster.svg",
+            videos: [
+              { id: "fk:1:5", title: "Fixture Episode Five", season: 1, episode: 5, released: "2025-01-05T00:00:00.000Z" },
+              { id: "fk:1:6", title: "Fixture Episode Six", season: 1, episode: 6, released: "2025-01-12T00:00:00.000Z" },
+            ],
+          },
+        },
+      }],
+      errors: [],
+    }),
+  }));
+  await page.route("**/api/v1/playback/sources", (route) => {
+    sourceRequests.push(route.request().postDataJSON() as Record<string, unknown>);
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sources: [{
+          id: "fixture-custom-source",
+          sourceRef: "fixture-custom-source",
+          addonId: "fixture-stream-addon",
+          manifestId: "fixture-stream-addon",
+          streamIndex: 0,
+          name: "Custom Fixture 1080p",
+          description: "Deterministic custom video stream",
+          protocol: "http",
+          container: "mp4",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+        }],
+        providerErrors: [],
+      }),
+    });
+  });
+
+  await page.goto("/media/anime/fk:1");
+
+  await expect(page.getByRole("heading", { name: "Episodes" })).toBeVisible();
+  const firstVideo = page.getByRole("button", { name: /Fixture Episode Five/ }).first();
+  await expect(firstVideo).toBeVisible();
+  await expect(page.getByRole("button", { name: /Fixture Episode Six/ }).first()).toBeVisible();
+  expect(sourceRequests).not.toContainEqual(expect.objectContaining({ resourceId: "fk:1" }));
+
+  await firstVideo.click();
+
+  await expect.poll(() => sourceRequests).toContainEqual(expect.objectContaining({
+    mediaType: "anime",
+    resourceId: "fk:1:5",
+  }));
+  const selectedRequest = sourceRequests.find((request) => request.resourceId === "fk:1:5");
+  expect(selectedRequest).not.toHaveProperty("addonId");
+  await expect(page.locator("#details-streams-title")).toBeFocused();
+  await expect(page.getByRole("region", { name: "Playback sources" })).toBeVisible();
+  await expect(page.getByRole("radio", { name: /Custom Fixture 1080p/ })).toBeVisible();
+});
+
+test("custom metadata honors default and returned video identifiers", async ({ page, rivune: _rivune }) => {
+  const sourceRequests: Array<Record<string, unknown>> = [];
+  await page.route(/\/api\/v1\/addons\/resources\/meta\/anime\/(catalog-default|catalog-single)(?:\?.*)?$/i, (route) => {
+    const catalogID = decodeURIComponent(new URL(route.request().url()).pathname.split("/").at(-1) ?? "");
+    const usesDefault = catalogID === "catalog-default";
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        results: [{
+          addonId: "fixture-custom-meta",
+          manifestId: "fixture-custom-meta",
+          resource: "meta",
+          type: "anime",
+          id: catalogID,
+          payload: {
+            meta: usesDefault
+              ? {
+                id: "meta-default",
+                type: "anime",
+                name: "Default video fixture",
+                behaviorHints: { defaultVideoId: "video-default" },
+                videos: [
+                  { id: "video-default", title: "Default custom video", season: 1, episode: 1 },
+                  { id: "video-explicit", title: "Explicit custom video", season: 1, episode: 2 },
+                ],
+              }
+              : { id: "meta-single", type: "anime", name: "Single custom video" },
+          },
+        }],
+        errors: [],
+      }),
+    });
+  });
+  await page.route("**/api/v1/playback/sources", (route) => {
+    sourceRequests.push(route.request().postDataJSON() as Record<string, unknown>);
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sources: [], providerErrors: [] }),
+    });
+  });
+
+  await page.goto("/media/anime/catalog-default");
+  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "video-default" });
+  expect(sourceRequests).not.toContainEqual(expect.objectContaining({ resourceId: "catalog-default" }));
+  expect(sourceRequests.find((request) => request.resourceId === "video-default")).not.toHaveProperty("addonId");
+  await page.getByRole("button", { name: /Back.*Episodes/ }).click();
+  await expect(page.getByRole("heading", { name: "Episodes" })).toBeFocused();
+  await expect(page.getByRole("button", { name: /Default custom video/ })).toHaveAttribute("aria-current", "true");
+  await page.getByRole("button", { name: /Explicit custom video/ }).click();
+  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "video-explicit" });
+  await expect(page.locator("#details-streams-title")).toBeFocused();
+
+  await page.goto("/media/anime/catalog-single");
+  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "meta-single" });
+  expect(sourceRequests).not.toContainEqual(expect.objectContaining({ resourceId: "catalog-single" }));
+  expect(sourceRequests.find((request) => request.resourceId === "meta-single")).not.toHaveProperty("addonId");
+});
+
 test("an episode opened from its season toggles its resolved watched state once per action", async ({ page, rivune }) => {
   await page.route("**/api/v1/titles/episode-1/watched*", async (route) => {
     const { promise, resolve } = Promise.withResolvers<void>();
