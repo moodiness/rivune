@@ -66,6 +66,21 @@ type LibraryPage struct {
 	TotalResults int           `json:"totalResults"`
 }
 
+type TVLibraryIdentity struct {
+	SourceAddonID string `json:"sourceAddonId"`
+	ResourceID    string `json:"resourceId"`
+}
+
+type TVLibraryMembership struct {
+	SourceAddonID string `json:"sourceAddonId"`
+	ResourceID    string `json:"resourceId"`
+	TitleID       string `json:"titleId"`
+}
+
+type TVLibraryMembershipResult struct {
+	Items []TVLibraryMembership `json:"items"`
+}
+
 type Progress struct {
 	TitleID         string    `json:"titleId"`
 	MediaType       string    `json:"mediaType"`
@@ -86,6 +101,23 @@ type UpdateProgressInput struct {
 
 type CompletionInput struct {
 	ExpectedVersion int64
+}
+
+const MaximumProgressBatchSize = 100
+
+type ProgressBatchItem struct {
+	TitleID  string    `json:"titleId"`
+	Progress *Progress `json:"progress"`
+}
+
+type ProgressBatch struct {
+	Items []ProgressBatchItem `json:"items"`
+}
+
+type SetWatchedBatchItem struct {
+	TitleID         string `json:"titleId"`
+	Completed       bool   `json:"completed"`
+	ExpectedVersion int64  `json:"expectedVersion"`
 }
 
 type ContinueItem struct {

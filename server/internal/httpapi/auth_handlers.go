@@ -11,7 +11,10 @@ import (
 	"github.com/moodiness/rivune/server/internal/category"
 )
 
-const defaultMaintenanceMessage = "Rivune is temporarily unavailable for maintenance."
+const (
+	defaultMaintenanceMessage = "Rivune is temporarily unavailable for maintenance."
+	profileContextHeader      = "X-Rivune-Profile-Context"
+)
 
 type tokenResponse struct {
 	TokenType             string                  `json:"tokenType"`
@@ -57,6 +60,18 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	release, retryAfter, admitted := a.credentialAdmission.acquire(requestClientIP(r, a.config.TrustedProxies))
+	if !admitted {
+		writeAdmissionDenied(w, retryAfter)
+		return
+	}
+	defer release()
+
+	retryAfter, admitted = a.usernameAdmission.acquire(request.Username)
+	if !admitted {
+		writeAdmissionDenied(w, retryAfter)
+		return
+	}
 
 	tokens, err := a.auth.Login(r.Context(), auth.LoginInput{
 		Username:   request.Username,
@@ -69,6 +84,8 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "The username or password is invalid")
+	case errors.Is(err, auth.ErrDeviceQuotaReached):
+		writeError(w, http.StatusConflict, "device_quota_reached", "The account has reached its device limit")
 	case errors.Is(err, auth.ErrInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "invalid_login", strings.TrimPrefix(err.Error(), auth.ErrInvalidInput.Error()+": "))
 	case err != nil:
@@ -114,12 +131,36 @@ func (a *API) requireAuthentication(next func(http.ResponseWriter, *http.Request
 			a.internalError(w, "authenticate request", err)
 			return
 		}
+		requiresProfileContext := principal.Platform == "web" &&
+			principal.ActiveProfileID != nil &&
+			!profileContextExemptRequest(r)
+		if requiresProfileContext && !principal.MatchesProfileContext(strings.TrimSpace(r.Header.Get(profileContextHeader))) {
+			writeError(w, http.StatusConflict, "profile_selection_required", "Select the active profile again")
+			return
+		}
 		if !principal.IsGlobalAdministrator() && !principal.ActiveProfileCanManage &&
 			!maintenanceExemptRequest(r) && a.rejectMaintenanceRequest(w, r) {
 			return
 		}
 		next(w, r, principal)
 	})
+}
+
+func profileContextExemptRequest(r *http.Request) bool {
+	path := r.URL.Path
+	if path == "/api/v1/auth/logout" || path == "/api/v1/auth/me" {
+		return true
+	}
+	if path == "/api/v1/profiles/selection" {
+		return r.Method == http.MethodPost
+	}
+	if r.Method == http.MethodGet && (path == "/api/v1/profiles" ||
+		strings.HasSuffix(path, "/avatar") && strings.HasPrefix(path, "/api/v1/profiles/")) {
+		return true
+	}
+	return r.Method == http.MethodPost &&
+		strings.HasPrefix(path, "/api/v1/profiles/") &&
+		strings.HasSuffix(path, "/select")
 }
 
 func maintenanceExemptRequest(r *http.Request) bool {

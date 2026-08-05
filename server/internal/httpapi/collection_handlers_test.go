@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,9 @@ type fakeCollectionService struct {
 	getID              string
 	getValue           collection.Collection
 	getErr             error
+	managementID       string
+	managementValue    collection.Collection
+	managementErr      error
 	saveID             string
 	saveInput          collection.SaveInput
 	saveValue          collection.Collection
@@ -64,6 +68,11 @@ func (fake *fakeCollectionService) Export(context.Context, auth.Principal) (coll
 func (fake *fakeCollectionService) Get(_ context.Context, _ auth.Principal, id string) (collection.Collection, error) {
 	fake.getID = id
 	return fake.getValue, fake.getErr
+}
+
+func (fake *fakeCollectionService) Management(_ context.Context, _ auth.Principal, id string) (collection.Collection, error) {
+	fake.managementID = id
+	return fake.managementValue, fake.managementErr
 }
 
 func (fake *fakeCollectionService) Create(_ context.Context, _ auth.Principal, input collection.SaveInput) (collection.Collection, error) {
@@ -108,6 +117,29 @@ func (fake *fakeCollectionService) LookupTMDB(_ context.Context, _ auth.Principa
 func (fake *fakeCollectionService) TMDBGenres(_ context.Context, _ auth.Principal, mediaType, language string) ([]collection.Genre, error) {
 	fake.genreMediaType, fake.genreLanguage = mediaType, language
 	return fake.genreValues, fake.genreErr
+}
+
+type fakeCollectionArtworkPresenter struct {
+	presentCalls int
+}
+
+func (fake *fakeCollectionArtworkPresenter) PresentCollections(_ context.Context, values []collection.Collection) {
+	fake.presentCalls++
+	for index := range values {
+		values[index].BackdropImageURL = "/api/v1/artwork/collection-backdrop"
+		for folderIndex := range values[index].Folders {
+			folder := &values[index].Folders[folderIndex]
+			folder.CoverImageURL = "/api/v1/artwork/folder-cover"
+			folder.TitleLogoURL = "/api/v1/artwork/folder-logo"
+			folder.HeroBackdropURL = "/api/v1/artwork/folder-backdrop"
+		}
+	}
+}
+
+func (*fakeCollectionArtworkPresenter) RestoreCollectionSaveInput(context.Context, *collection.SaveInput) {
+}
+
+func (*fakeCollectionArtworkPresenter) LocalizeCollectionLookupResults(context.Context, []collection.LookupResult) {
 }
 
 func TestCollectionExportAndImportRoutes(t *testing.T) {
@@ -207,6 +239,109 @@ func TestCollectionTMDBEditorRoutesForwardLookupAndGenres(t *testing.T) {
 	api.Handler().ServeHTTP(genreResponse, genres)
 	if genreResponse.Code != http.StatusOK || service.genreMediaType != "movie" || service.genreLanguage != "fr-FR" {
 		t.Fatalf("unexpected genre result status=%d service=%+v", genreResponse.Code, service)
+	}
+}
+
+func TestCollectionManagementReturnsSourcesWhileOrdinaryReadsRemainLocalized(t *testing.T) {
+	const (
+		collectionID = "11111111-1111-4111-8111-111111111111"
+		backdrop     = "https://images.example/private/collection.jpg?token=collection-secret"
+		cover        = "https://images.example/private/cover.jpg?token=cover-secret"
+		titleLogo    = "https://images.example/private/logo.png?token=logo-secret"
+		heroBackdrop = "https://images.example/private/hero.jpg?token=hero-secret"
+	)
+	stored := collection.Collection{
+		ID: collectionID, Title: "Private art", BackdropImageURL: backdrop,
+		Folders: []collection.Folder{{
+			Title: "Featured", CoverImageURL: cover, TitleLogoURL: titleLogo, HeroBackdropURL: heroBackdrop,
+			Sources: []collection.Source{},
+		}},
+		ProfileIDs: []string{"22222222-2222-4222-8222-222222222222"},
+	}
+	service := &fakeCollectionService{managementValue: stored, listValue: []collection.Collection{stored}, getValue: stored}
+	presenter := &fakeCollectionArtworkPresenter{}
+	api := collectionAPI(service)
+	api.collectionArtwork = presenter
+
+	managementRequest := httptest.NewRequest(http.MethodGet, "/api/v1/collections/"+collectionID+"/management", nil)
+	managementRequest.Header.Set("Authorization", "Bearer access")
+	managementResponse := httptest.NewRecorder()
+	api.Handler().ServeHTTP(managementResponse, managementRequest)
+	if managementResponse.Code != http.StatusOK {
+		t.Fatalf("expected management status 200, got %d: %s", managementResponse.Code, managementResponse.Body.String())
+	}
+	var managed collection.Collection
+	decodeResponse(t, managementResponse, &managed)
+	if service.managementID != collectionID || managed.BackdropImageURL != backdrop || managed.Folders[0].CoverImageURL != cover ||
+		managed.Folders[0].TitleLogoURL != titleLogo || managed.Folders[0].HeroBackdropURL != heroBackdrop {
+		t.Fatalf("management response changed stored artwork sources: %+v", managed)
+	}
+	if presenter.presentCalls != 0 {
+		t.Fatal("management response was passed through the public artwork presenter")
+	}
+
+	for _, path := range []string{"/api/v1/collections", "/api/v1/collections/" + collectionID} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer access")
+		response := httptest.NewRecorder()
+		api.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("ordinary read %s returned %d: %s", path, response.Code, response.Body.String())
+		}
+		body := response.Body.String()
+		for _, source := range []string{backdrop, cover, titleLogo, heroBackdrop} {
+			if strings.Contains(body, source) {
+				t.Fatalf("ordinary read %s exposed source URL %q", path, source)
+			}
+		}
+		if !strings.Contains(body, "/api/v1/artwork/") {
+			t.Fatalf("ordinary read %s did not contain localized artwork URLs: %s", path, body)
+		}
+	}
+}
+
+func TestCollectionManagementForbiddenResponseIsOpaque(t *testing.T) {
+	const source = "https://images.example/private/cover.jpg?token=must-not-leak"
+	service := &fakeCollectionService{managementErr: errors.Join(errors.New(source), collection.ErrForbidden)}
+	api := collectionAPI(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/collections/11111111-1111-4111-8111-111111111111/management", nil)
+	request.Header.Set("Authorization", "Bearer access")
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected management status 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), source) || strings.Contains(response.Body.String(), "must-not-leak") {
+		t.Fatalf("forbidden management response exposed internal details: %s", response.Body.String())
+	}
+	var body errorEnvelope
+	decodeResponse(t, response, &body)
+	if body.Error.Code != "collection_forbidden" {
+		t.Fatalf("management error code = %q, want collection_forbidden", body.Error.Code)
+	}
+}
+
+func TestReorderCollectionsReturnsStableForbiddenResponse(t *testing.T) {
+	const collectionID = "11111111-1111-4111-8111-111111111111"
+	service := &fakeCollectionService{listErr: errors.Join(errors.New("wrapped"), collection.ErrForbidden)}
+	api := collectionAPI(service)
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/collections/order", bytes.NewBufferString(`{"collectionIds":["`+collectionID+`"]}`))
+	request.Header.Set("Authorization", "Bearer access")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if len(service.reorder.CollectionIDs) != 1 || service.reorder.CollectionIDs[0] != collectionID {
+		t.Fatalf("reorder input = %+v, want collection %q", service.reorder, collectionID)
+	}
+	var body errorEnvelope
+	decodeResponse(t, response, &body)
+	if body.Error.Code != "collection_forbidden" {
+		t.Fatalf("reorder error code = %q, want collection_forbidden", body.Error.Code)
 	}
 }
 

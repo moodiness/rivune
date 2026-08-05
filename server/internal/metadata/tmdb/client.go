@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/metadata"
 )
 
@@ -166,7 +167,7 @@ func newWithBaseURL(accessToken, baseURL string, httpClient *http.Client) *Clien
 		accessToken = strings.TrimSpace(accessToken[7:])
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 10 * time.Second}
+		httpClient = metadata.NewProviderHTTPClient(baseURL, 10*time.Second)
 	}
 	return &Client{
 		baseURL:     strings.TrimRight(baseURL, "/"),
@@ -381,6 +382,7 @@ func (c *Client) get(ctx context.Context, endpoint string, query url.Values, des
 		return metadata.NewProviderError(metadata.ErrProviderFailure, err, 0, resource)
 	}
 	defer response.Body.Close()
+	source := addon.BudgetedPayloadReader(ctx, response.Body)
 
 	switch response.StatusCode {
 	case http.StatusOK:
@@ -391,7 +393,7 @@ func (c *Client) get(ctx context.Context, endpoint string, query url.Values, des
 	case http.StatusTooManyRequests:
 		return metadata.NewProviderError(metadata.ErrProviderRateLimited, fmt.Errorf("TMDB returned HTTP %d", response.StatusCode), response.StatusCode, resource)
 	default:
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		_, _ = io.Copy(io.Discard, io.LimitReader(source, 4096))
 		return metadata.NewProviderError(
 			metadata.ErrProviderFailure,
 			fmt.Errorf("TMDB returned HTTP %d", response.StatusCode),
@@ -400,7 +402,7 @@ func (c *Client) get(ctx context.Context, endpoint string, query url.Values, des
 		)
 	}
 
-	decoder := json.NewDecoder(io.LimitReader(response.Body, maxBodyBytes))
+	decoder := json.NewDecoder(io.LimitReader(source, maxBodyBytes))
 	if err := decoder.Decode(destination); err != nil {
 		return metadata.NewProviderError(metadata.ErrProviderFailure, fmt.Errorf("decode TMDB response: %w", err), response.StatusCode, resource)
 	}

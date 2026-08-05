@@ -152,11 +152,10 @@ func (s *Service) dispatchApplication(w http.ResponseWriter, r *http.Request, cu
 		return true
 	case strings.HasPrefix(p, "/playback/sessions/") && r.Method == http.MethodDelete:
 		id := strings.TrimPrefix(p, "/playback/sessions/")
-		if _, ok := current.state.playback[id]; !ok {
+		if !s.deletePlaybackLocked(current, id, s.now().UTC()) {
 			writeError(w, 404, "playback_session_not_found", "The playback session is invalid or expired")
 			return true
 		}
-		delete(current.state.playback, id)
 		w.WriteHeader(204)
 		return true
 	case p == "/calendar" && r.Method == http.MethodGet:
@@ -253,19 +252,12 @@ func serveFolder(w http.ResponseWriter, r *http.Request, p, profileID string) bo
 		}
 		items = append(items, mediaItem(item))
 	}
-	page, pageSize, ok := pagination(r, 1, 24)
+	page, pageSize, offset, ok := pagination(r, 1, 24)
 	if !ok {
 		writeError(w, 400, "invalid_request", "Pagination values must be positive integers")
 		return true
 	}
-	start := (page - 1) * pageSize
-	if start > len(items) {
-		start = len(items)
-	}
-	end := start + pageSize
-	if end > len(items) {
-		end = len(items)
-	}
+	start, end := paginationWindow(offset, pageSize, len(items))
 	writeJSON(w, 200, map[string]any{"collectionId": HomeCollectionID, "folder": folder, "items": items[start:end], "page": page, "hasMore": end < len(items), "errors": []any{}})
 	return true
 }
@@ -314,23 +306,16 @@ func serveLibrary(w http.ResponseWriter, r *http.Request, current *session) {
 			items = append(items, libraryItem(item, now))
 		}
 	}
-	page, pageSize, valid := pagination(r, 1, 100)
+	page, pageSize, offset, valid := pagination(r, 1, 100)
 	if !valid {
 		writeError(w, 400, "invalid_request", "Pagination values must be positive integers")
 		return
 	}
 	total := len(items)
-	start := (page - 1) * pageSize
-	if start > total {
-		start = total
-	}
-	end := start + pageSize
-	if end > total {
-		end = total
-	}
+	start, end := paginationWindow(offset, pageSize, total)
 	pages := 0
 	if total > 0 {
-		pages = (total + pageSize - 1) / pageSize
+		pages = 1 + (total-1)/pageSize
 	}
 	writeJSON(w, 200, map[string]any{"items": items[start:end], "page": page, "totalPages": pages, "totalResults": total})
 }
@@ -533,14 +518,8 @@ func serveSearch(w http.ResponseWriter, r *http.Request, mediaType string) {
 			metas = append(metas, addonMeta(item))
 		}
 	}
-	if skip > len(metas) {
-		skip = len(metas)
-	}
-	end := skip + limit
-	if end > len(metas) {
-		end = len(metas)
-	}
-	writeJSON(w, 200, resourceBatch("catalog", mediaType, "demo-search", map[string]any{"metas": metas[skip:end]}))
+	start, end := paginationWindow(skip, limit, len(metas))
+	writeJSON(w, 200, resourceBatch("catalog", mediaType, "demo-search", map[string]any{"metas": metas[start:end]}))
 }
 func serveResourceMeta(w http.ResponseWriter, remainder string) {
 	parts := strings.SplitN(remainder, "/", 2)
@@ -559,7 +538,7 @@ func serveResourceMeta(w http.ResponseWriter, remainder string) {
 	writeJSON(w, 200, resourceBatch("meta", parts[0], parts[1], map[string]any{"meta": addonMeta(item)}))
 }
 func resourceBatch(resource, mediaType, id string, payload map[string]any) map[string]any {
-	return map[string]any{"results": []map[string]any{{"addonId": "demo-addon", "manifestId": "demo.synthetic", "transportUrl": "demo://embedded", "resource": resource, "type": mediaType, "id": id, "payload": payload}}, "errors": []any{}}
+	return map[string]any{"results": []map[string]any{{"addonId": "demo-addon", "manifestId": "demo.synthetic", "resource": resource, "type": mediaType, "id": id, "payload": payload}}, "errors": []any{}}
 }
 
 func servePlaybackSources(w http.ResponseWriter, r *http.Request, expiresAt any) {
@@ -600,9 +579,11 @@ func (s *Service) servePlaybackResolve(w http.ResponseWriter, r *http.Request, c
 		writeError(w, 404, "playback_source_not_found", "The demo playback source does not exist")
 		return
 	}
-	current.state.playbackCounter++
-	id := fmt.Sprintf("d7000000-0000-4000-8000-%012d", current.state.playbackCounter)
-	current.state.playback[id] = playbackState{TitleID: input.TitleID, CreatedAt: s.now().UTC()}
+	id, allocated := s.allocatePlaybackLocked(current, input.TitleID, s.now().UTC())
+	if !allocated {
+		writeError(w, http.StatusTooManyRequests, "demo_playback_limit_reached", "The demo playback session limit has been reached")
+		return
+	}
 	selected := "demo-stream-720"
 	if strings.HasPrefix(input.SourceRef, "demo-source-360-") {
 		selected = "demo-stream-360"
@@ -650,23 +631,26 @@ func knownTitle(id string) bool {
 	}
 	return false
 }
-func pagination(r *http.Request, defaultPage, defaultSize int) (int, int, bool) {
+func pagination(r *http.Request, defaultPage, defaultSize int) (int, int, int, bool) {
 	page := defaultPage
 	size := defaultSize
 	var err error
 	if value := r.URL.Query().Get("page"); value != "" {
 		page, err = strconv.Atoi(value)
 		if err != nil {
-			return 0, 0, false
+			return 0, 0, 0, false
 		}
 	}
 	if value := r.URL.Query().Get("pageSize"); value != "" {
 		size, err = strconv.Atoi(value)
 		if err != nil {
-			return 0, 0, false
+			return 0, 0, 0, false
 		}
 	}
-	return page, size, page > 0 && size > 0 && size <= 100
+	if page <= 0 || size <= 0 || size > 100 || page-1 > maxInt()/size {
+		return 0, 0, 0, false
+	}
+	return page, size, (page - 1) * size, true
 }
 func skipLimit(r *http.Request) (int, int, bool) {
 	skip, limit := 0, 24
@@ -684,6 +668,19 @@ func skipLimit(r *http.Request) (int, int, bool) {
 		}
 	}
 	return skip, limit, skip >= 0 && limit > 0 && limit <= 100
+}
+func paginationWindow(offset, limit, total int) (int, int) {
+	if offset >= total {
+		return total, total
+	}
+	if limit >= total-offset {
+		return offset, total
+	}
+	return offset, offset + limit
+}
+
+func maxInt() int {
+	return int(^uint(0) >> 1)
 }
 func queryInt64(r *http.Request, name string) (int64, bool) {
 	value := r.URL.Query().Get(name)

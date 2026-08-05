@@ -140,6 +140,40 @@ func TestSimklLibraryAddUsesPerItemDestination(t *testing.T) {
 	}
 }
 
+func TestSimklWatchedUsesHistory(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sync/history" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("client_id") != "simkl-client" {
+			t.Fatalf("missing client ID query")
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"added": map[string]any{"movies": 1}})
+	}))
+	defer server.Close()
+
+	client := newProviderClient("", "", "simkl-client", server.Client())
+	client.simkl.baseURL = server.URL
+	occurredAt := time.Date(2026, time.August, 5, 16, 24, 36, 0, time.UTC)
+	err := client.send(context.Background(), "simkl", "access", "watched", Event{Completed: true, OccurredAt: occurredAt}, mediaItem{
+		MediaType: "movie", Title: "Obsession", Year: 2025, IDs: map[string]any{"tmdb": int64(1339713)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	movie := body["movies"].([]any)[0].(map[string]any)
+	if movie["watched_at"] != "2026-08-05T16:24:36Z" {
+		t.Fatalf("unexpected watched timestamp: %+v", movie)
+	}
+	if _, exists := body["progress"]; exists {
+		t.Fatalf("manual watched event must not use a scrobble payload: %+v", body)
+	}
+}
+
 func TestClearPlaybackDeletesOnlyMappedEntry(t *testing.T) {
 	deleted := ""
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

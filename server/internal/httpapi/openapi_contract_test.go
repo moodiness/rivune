@@ -12,6 +12,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/category"
+	"github.com/moodiness/rivune/server/internal/collection"
 	"github.com/moodiness/rivune/server/internal/instance"
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/operations"
@@ -466,6 +467,29 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 				validateContractResponse(t, document, fixture.path, nil, request, response)
 			})
 		}
+	})
+
+	t.Run("collection management", func(t *testing.T) {
+		const collectionID = "88888888-8888-4888-8888-888888888888"
+		now := time.Date(2026, time.August, 4, 10, 0, 0, 0, time.UTC)
+		service := &fakeCollectionService{managementValue: collection.Collection{
+			ID: collectionID, Title: "Contract collection",
+			BackdropImageURL: "https://art.example/private/backdrop.jpg?token=contract-secret",
+			ViewMode:         "rows", FolderCoverShape: "poster",
+			Folders: []collection.Folder{{
+				ID: "99999999-9999-4999-8999-999999999999", Title: "Featured", TileShape: "poster", SourceView: "merged",
+				CoverImageURL: "https://art.example/private/cover.jpg?token=contract-secret",
+				Sources: []collection.Source{{
+					ID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", Kind: collection.SourceKindTMDB, Title: "Popular",
+					TMDB: &collection.TMDBSource{SourceType: "discover", MediaType: "movie", Sort: "popularity.desc"},
+				}},
+			}},
+			ProfileIDs: []string{contractProfileID}, Version: 1, CreatedAt: now, UpdatedAt: now,
+		}}
+		api := collectionAPI(service)
+		request := authenticatedContractRequest(http.MethodGet, "/api/v1/collections/"+collectionID+"/management", nil)
+		response := serveContractRequest(t, api, request, http.StatusOK)
+		validateContractResponse(t, document, "/collections/{collectionId}/management", map[string]string{"collectionId": collectionID}, request, response)
 	})
 
 	t.Run("operations", func(t *testing.T) {

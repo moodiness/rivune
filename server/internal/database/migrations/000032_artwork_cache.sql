@@ -1,4 +1,3 @@
-BEGIN;
 
 CREATE TABLE IF NOT EXISTS artwork_cache (
     key text PRIMARY KEY,
@@ -21,5 +20,3 @@ CREATE TABLE IF NOT EXISTS artwork_cache (
 CREATE INDEX IF NOT EXISTS artwork_cache_lru_idx
     ON artwork_cache (last_accessed_at, key)
     WHERE byte_size IS NOT NULL;
-
-COMMIT;

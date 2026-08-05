@@ -96,16 +96,25 @@ func (service *Service) proxyConvertedSubtitle(w http.ResponseWriter, r *http.Re
 		w.WriteHeader(http.StatusOK)
 		return nil
 	}
-	var output bytes.Buffer
-	if err := processor.ConvertSubtitle(r.Context(), asset, &output); err != nil {
+	conversionContext, cancel := context.WithTimeout(r.Context(), subtitleConversionTimeout)
+	defer cancel()
+	var converted bytes.Buffer
+	output := &maximumWriter{destination: &converted, remaining: maximumConvertedSubtitleBytes}
+	if err := processor.ConvertSubtitle(conversionContext, asset, output); err != nil {
 		return err
 	}
+	if output.exceeded {
+		return fmt.Errorf("%w: converted subtitle exceeds %d bytes", ErrMediaProcessingFailed, maximumConvertedSubtitleBytes)
+	}
+	if err := conversionContext.Err(); err != nil {
+		return fmt.Errorf("%w: %w", ErrMediaProcessingFailed, err)
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Length", strconv.Itoa(output.Len()))
+	w.Header().Set("Content-Length", strconv.Itoa(converted.Len()))
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
-	_, err := w.Write(output.Bytes())
+	_, err := w.Write(converted.Bytes())
 	return err
 }
 
@@ -483,38 +492,47 @@ func waitForMediaFile(ctx context.Context, job *hlsJob, path string) error {
 }
 
 func rewriteLocalPlaylist(contents []byte, buildURL func(string) string) ([]byte, error) {
-	if len(contents) > maximumPlaylistBytes {
-		return nil, fmt.Errorf("playlist exceeds %d bytes", maximumPlaylistBytes)
+	if err := validatePlaylistCardinality(contents); err != nil {
+		return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
 	}
-	var output bytes.Buffer
-	scanner := bufio.NewScanner(bytes.NewReader(contents))
+	output := newBoundedPlaylistOutput(len(contents))
+	scanner := playlistScanner(contents)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "#") {
-			line = playlistURIAttribute.ReplaceAllStringFunc(line, func(match string) string {
-				reference := strings.TrimSuffix(strings.TrimPrefix(match, `URI="`), `"`)
+			err := writePlaylistURIAttributes(output, line, func(reference string) (string, bool) {
 				if !localMediaName.MatchString(reference) {
-					return match
+					return "", false
 				}
-				return `URI="` + buildURL(reference) + `"`
+				return buildURL(reference), true
 			})
+			if err != nil {
+				return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
+			}
 		} else if strings.TrimSpace(line) != "" {
 			reference := strings.TrimSpace(line)
 			if !localMediaName.MatchString(reference) {
 				return nil, ErrMediaProcessingFailed
 			}
-			line = buildURL(reference)
+			if err := output.writeString(buildURL(reference)); err != nil {
+				return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
+			}
+		} else if err := output.writeString(line); err != nil {
+			return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
 		}
-		output.WriteString(line)
-		output.WriteByte('\n')
+		if err := output.writeByte('\n'); err != nil {
+			return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
+		}
 		if line == "#EXTM3U" {
-			output.WriteString("#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n")
+			if err := output.writeString("#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n"); err != nil {
+				return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan local playlist: %w", err)
+		return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
 	}
-	return output.Bytes(), nil
+	return output.bytes(), nil
 }
 
 func hlsAssetURL(sessionID, assetID, token, file string) string {

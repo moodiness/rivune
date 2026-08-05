@@ -1,4 +1,3 @@
-BEGIN;
 
 CREATE TABLE IF NOT EXISTS fanart_response_cache (
     resource_type text NOT NULL CHECK (resource_type IN ('movie', 'tv')),
@@ -11,6 +10,4 @@ CREATE TABLE IF NOT EXISTS fanart_response_cache (
     PRIMARY KEY (resource_type, external_id, language)
 );
 
-CREATE INDEX fanart_response_cache_expires_at_idx ON fanart_response_cache (expires_at);
-
-COMMIT;
+CREATE INDEX IF NOT EXISTS fanart_response_cache_expires_at_idx ON fanart_response_cache (expires_at);

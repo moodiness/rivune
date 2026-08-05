@@ -3,6 +3,7 @@ package artwork
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -73,7 +75,57 @@ func TestProductionURLValidationRejectsUnsafeTargets(t *testing.T) {
 	}
 }
 
-func TestLocalURLsPreservesOrderDuplicatesAndFallbacks(t *testing.T) {
+func TestProductionURLValidationAllowsOnlyConfiguredLANOrigin(t *testing.T) {
+	policy, err := newTransportPolicy([]string{"http://192.168.1.48:63113"})
+	if err != nil {
+		t.Fatalf("create transport policy: %v", err)
+	}
+	const source = "http://192.168.1.48:63113/poster.jpg?key=private"
+	normalized, err := normalizeURLWithPolicy(source, true, policy)
+	if err != nil {
+		t.Fatalf("configured LAN artwork URL was rejected: %v", err)
+	}
+	if normalized != source {
+		t.Fatalf("LAN artwork URL normalized to %q", normalized)
+	}
+	if public, publicErr := normalizeURLWithPolicy("https://example.com/poster.jpg", true, policy); publicErr != nil || public != "https://example.com/poster.jpg" {
+		t.Fatalf("public HTTPS policy changed: URL=%q error=%v", public, publicErr)
+	}
+	for _, candidate := range []string{
+		"http://192.168.1.49:63113/poster.jpg",
+		"http://192.168.1.48:63114/poster.jpg",
+		"https://192.168.1.48:63113/poster.jpg",
+		"http://user@192.168.1.48:63113/poster.jpg",
+		"http://[::ffff:192.168.1.48]:63113/poster.jpg",
+		"data:image/png;base64,AAAA",
+	} {
+		if value, candidateErr := normalizeURLWithPolicy(candidate, true, policy); candidateErr == nil {
+			t.Errorf("unconfigured artwork URL was accepted as %q", value)
+		}
+	}
+}
+
+func TestLocalURLHidesAllowedLANArtworkSource(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	service, err := New(pool, Options{
+		Directory: t.TempDir(), MaxBytes: 1 << 20,
+		LANArtworkOrigins: []string{"http://192.168.1.48:63113"},
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("create artwork service: %v", err)
+	}
+	const source = "http://192.168.1.48:63113/poster.jpg?key=private"
+	localized := service.LocalURL(context.Background(), source)
+	if !strings.HasPrefix(localized, publicPrefix) || strings.Contains(localized, "private") || strings.Contains(localized, "192.168.1.48") {
+		t.Fatalf("LAN artwork source was not hidden behind a same-origin reference: %q", localized)
+	}
+	if rejected := service.LocalURL(context.Background(), "http://192.168.1.49:63113/poster.jpg"); rejected != "" {
+		t.Fatalf("unconfigured LAN artwork source was localized as %q", rejected)
+	}
+}
+
+func TestLocalURLsPreservesOrderDuplicatesAndFailsClosed(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {}))
 	defer fixture.Close()
@@ -84,8 +136,8 @@ func TestLocalURLsPreservesOrderDuplicatesAndFallbacks(t *testing.T) {
 	if len(localized) != len(inputs) {
 		t.Fatalf("localized length = %d, want %d", len(localized), len(inputs))
 	}
-	if localized[1] != inputs[1] {
-		t.Fatalf("invalid URL changed to %q", localized[1])
+	if localized[1] != "" {
+		t.Fatalf("invalid URL was not removed: %q", localized[1])
 	}
 	if localized[0] != localized[3] || !strings.HasPrefix(localized[0], publicPrefix) || !strings.HasPrefix(localized[2], publicPrefix) {
 		t.Fatalf("unexpected localized URLs: %#v", localized)
@@ -97,8 +149,8 @@ func TestLocalURLsPreservesOrderDuplicatesAndFallbacks(t *testing.T) {
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	failed := service.LocalURLs(canceled, []string{fixture.URL + "/failed-one", fixture.URL + "/failed-two"})
-	if failed[0] != fixture.URL+"/failed-one" || failed[1] != fixture.URL+"/failed-two" {
-		t.Fatalf("failed registration did not preserve inputs: %#v", failed)
+	if failed[0] != "" || failed[1] != "" {
+		t.Fatalf("failed registration exposed provider inputs: %#v", failed)
 	}
 }
 func TestRunWarmupCachesLocalizedArtworkBeforeBrowserRequest(t *testing.T) {
@@ -228,10 +280,10 @@ func TestServeHTTPMissHitHeadAndUpstreamFailure(t *testing.T) {
 	fallbackURL := fixture.URL + "/fallback"
 	fallbackLocalURL := service.LocalURL(context.Background(), fallbackURL)
 	fallback := serveArtwork(service, http.MethodGet, fallbackLocalURL)
-	if fallback.Code != http.StatusTemporaryRedirect ||
-		fallback.Header().Get("Location") != fallbackURL ||
+	if fallback.Code != http.StatusBadGateway ||
+		fallback.Header().Get("Location") != "" ||
 		fallback.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("fallback response = %d location=%q cache=%q", fallback.Code, fallback.Header().Get("Location"), fallback.Header().Get("Cache-Control"))
+		t.Fatalf("failed artwork response = %d location=%q cache=%q", fallback.Code, fallback.Header().Get("Location"), fallback.Header().Get("Cache-Control"))
 	}
 
 	fallbackKey := strings.TrimPrefix(fallbackLocalURL, publicPrefix)
@@ -248,10 +300,10 @@ func TestServeHTTPMissHitHeadAndUpstreamFailure(t *testing.T) {
 
 	requestsAfterFailure := requests.Load()
 	retry := serveArtwork(service, http.MethodGet, fallbackLocalURL)
-	if retry.Code != http.StatusTemporaryRedirect ||
-		retry.Header().Get("Location") != fallbackURL ||
+	if retry.Code != http.StatusBadGateway ||
+		retry.Header().Get("Location") != "" ||
 		retry.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("retry fallback response = %d location=%q cache=%q", retry.Code, retry.Header().Get("Location"), retry.Header().Get("Cache-Control"))
+		t.Fatalf("retry response = %d location=%q cache=%q", retry.Code, retry.Header().Get("Location"), retry.Header().Get("Cache-Control"))
 	}
 	if requests.Load() != requestsAfterFailure+1 {
 		t.Fatalf("failed artwork retry made %d new upstream requests, want 1", requests.Load()-requestsAfterFailure)
@@ -293,7 +345,7 @@ func TestServeHTTPRepairsMissingAndCorruptFile(t *testing.T) {
 	}
 }
 
-func TestServeHTTPRejectsUnsafeContentAndFallsBackToSource(t *testing.T) {
+func TestServeHTTPRejectsUnsafeContentWithoutRedirectingToSource(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	wideImage := testSizedPNG(t, maxImageDimension+1, 1)
 	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -317,10 +369,10 @@ func TestServeHTTPRejectsUnsafeContentAndFallsBackToSource(t *testing.T) {
 	for _, path := range []string{"/wrong", "/oversize", "/dimensions"} {
 		localURL := service.LocalURL(context.Background(), fixture.URL+path)
 		result := serveArtwork(service, http.MethodGet, localURL)
-		if result.Code != http.StatusTemporaryRedirect ||
-			result.Header().Get("Location") != fixture.URL+path ||
+		if result.Code != http.StatusBadGateway ||
+			result.Header().Get("Location") != "" ||
 			result.Header().Get("Cache-Control") != "no-store" {
-			t.Fatalf("%s fallback = %d location=%q cache=%q", path, result.Code, result.Header().Get("Location"), result.Header().Get("Cache-Control"))
+			t.Fatalf("%s response = %d location=%q cache=%q", path, result.Code, result.Header().Get("Location"), result.Header().Get("Cache-Control"))
 		}
 		key := strings.TrimPrefix(localURL, publicPrefix)
 		if _, err := os.Stat(service.path(key)); !os.IsNotExist(err) {
@@ -361,22 +413,184 @@ func TestPruneEnforcesLRUByteCeiling(t *testing.T) {
 		t.Fatalf("prune artwork: %v", err)
 	}
 
-	var firstSize, secondSize *int64
+	var firstExists, secondExists bool
+	var secondSize *int64
 	if err := pool.QueryRow(context.Background(), `
 		SELECT
-			(SELECT byte_size FROM artwork_cache WHERE key = $1),
+			EXISTS (SELECT 1 FROM artwork_cache WHERE key = $1),
+			EXISTS (SELECT 1 FROM artwork_cache WHERE key = $2),
 			(SELECT byte_size FROM artwork_cache WHERE key = $2)
-	`, firstKey, secondKey).Scan(&firstSize, &secondSize); err != nil {
-		t.Fatalf("query pruned metadata: %v", err)
+	`, firstKey, secondKey).Scan(&firstExists, &secondExists, &secondSize); err != nil {
+		t.Fatalf("query pruned registrations: %v", err)
 	}
-	if firstSize != nil || secondSize == nil || *secondSize != int64(len(secondImage)) {
-		t.Fatalf("unexpected sizes after prune: first=%v second=%v", firstSize, secondSize)
+	if firstExists || !secondExists || secondSize == nil || *secondSize != int64(len(secondImage)) {
+		t.Fatalf("unexpected registrations after prune: first_exists=%t second_exists=%t second_size=%v", firstExists, secondExists, secondSize)
 	}
 	if _, err := os.Stat(service.path(firstKey)); !os.IsNotExist(err) {
 		t.Fatalf("LRU file was not removed: %v", err)
 	}
 	if _, err := os.Stat(service.path(secondKey)); err != nil {
 		t.Fatalf("newest file was removed: %v", err)
+	}
+}
+
+func TestLocalURLsChunksAdmissionAtRegistrationLimit(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	service.registrationLimit = 256
+	if _, err := pool.Exec(context.Background(), `DELETE FROM artwork_cache`); err != nil {
+		t.Fatalf("clear artwork registrations: %v", err)
+	}
+
+	upstream := make([]string, 257)
+	for index := range upstream {
+		upstream[index] = fixture.URL + "/oversized/" + stringInt(index)
+	}
+	localized := service.LocalURLs(context.Background(), upstream)
+	var localizedCount int
+	for _, localURL := range localized {
+		if strings.HasPrefix(localURL, publicPrefix) {
+			localizedCount++
+		}
+	}
+	var registrationCount int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM artwork_cache`).Scan(&registrationCount); err != nil {
+		t.Fatalf("count chunked artwork registrations: %v", err)
+	}
+	if registrationCount != service.registrationLimit || localizedCount != service.registrationLimit {
+		t.Fatalf(
+			"chunked admission retained rows=%d localized=%d, want %d",
+			registrationCount,
+			localizedCount,
+			service.registrationLimit,
+		)
+	}
+}
+
+func TestRegistrationBacklogConvergesToGlobalLimit(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	service := newArtworkTestService(t, pool, http.DefaultClient, 1<<20)
+	service.registrationLimit = 128
+	if _, err := pool.Exec(context.Background(), `DELETE FROM artwork_cache`); err != nil {
+		t.Fatalf("clear artwork registrations: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO artwork_cache (key, source_url)
+		SELECT repeat(md5(sequence::text), 2), 'https://example.com/legacy/' || sequence
+		FROM generate_series(1, 700) AS sequence
+	`); err != nil {
+		t.Fatalf("seed legacy artwork registrations: %v", err)
+	}
+
+	if err := service.pruneRegistrationBacklog(context.Background()); err != nil {
+		t.Fatalf("prune legacy artwork registrations: %v", err)
+	}
+	var count int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM artwork_cache`).Scan(&count); err != nil {
+		t.Fatalf("count legacy artwork registrations: %v", err)
+	}
+	if count != service.registrationLimit {
+		t.Fatalf("legacy artwork registration count = %d, want %d", count, service.registrationLimit)
+	}
+}
+
+func TestPruneBoundsFailedPendingAndTotalRegistrations(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	imageBytes := testPNG(t, color.NRGBA{R: 14, G: 82, B: 190, A: 255})
+	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/active" {
+			response.Write(imageBytes)
+			return
+		}
+		http.Error(response, "unavailable", http.StatusBadGateway)
+	}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	service.registrationLimit = 512
+	service.registrationTTL = time.Hour
+	if _, err := pool.Exec(context.Background(), `DELETE FROM artwork_cache`); err != nil {
+		t.Fatalf("clear artwork registrations: %v", err)
+	}
+
+	activeURL := service.LocalURL(context.Background(), fixture.URL+"/active")
+	activeKey := strings.TrimPrefix(activeURL, publicPrefix)
+	assertArtworkResponse(t, serveArtwork(service, http.MethodGet, activeURL), imageBytes, true)
+	recentFailedURL := service.LocalURL(context.Background(), fixture.URL+"/recent-failed")
+	recentFailedKey := strings.TrimPrefix(recentFailedURL, publicPrefix)
+	if response := serveArtwork(service, http.MethodGet, recentFailedURL); response.Code != http.StatusBadGateway {
+		t.Fatalf("recent failed artwork status = %d", response.Code)
+	}
+
+	var oldFailedKey string
+	for batch := range 3 {
+		upstream := make([]string, 256)
+		for index := range upstream {
+			upstream[index] = fixture.URL + "/failed/" + stringInt(batch*256+index)
+		}
+		local := service.LocalURLs(context.Background(), upstream)
+		for index, localURL := range local {
+			if !strings.HasPrefix(localURL, publicPrefix) {
+				t.Fatalf("batch %d registration %d was rejected: %q", batch, index, localURL)
+			}
+			if response := serveArtwork(service, http.MethodGet, localURL); response.Code != http.StatusBadGateway {
+				t.Fatalf("batch %d failed artwork %d status = %d", batch, index, response.Code)
+			}
+		}
+		if batch == 2 {
+			oldFailedKey = strings.TrimPrefix(local[0], publicPrefix)
+		}
+		activeURL = service.LocalURL(context.Background(), fixture.URL+"/active")
+		recentFailedURL = service.LocalURL(context.Background(), fixture.URL+"/recent-failed")
+	}
+
+	oldPendingURL := service.LocalURL(context.Background(), fixture.URL+"/old-pending")
+	oldPendingKey := strings.TrimPrefix(oldPendingURL, publicPrefix)
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE artwork_cache
+		SET registered_at = now() - interval '2 hours'
+		WHERE key = ANY($1::text[])
+	`, []string{oldFailedKey, oldPendingKey, activeKey}); err != nil {
+		t.Fatalf("age stale artwork registrations: %v", err)
+	}
+	if err := service.Prune(context.Background()); err != nil {
+		t.Fatalf("prune artwork registrations: %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM artwork_cache`).Scan(&count); err != nil {
+		t.Fatalf("count artwork registrations: %v", err)
+	}
+	if count > service.registrationLimit {
+		t.Fatalf("artwork registration count = %d, limit = %d", count, service.registrationLimit)
+	}
+	var oldFailedExists, oldPendingExists, activeExists, recentFailedExists bool
+	var activeSize, recentFailedSize *int64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT
+			EXISTS (SELECT 1 FROM artwork_cache WHERE key = $1),
+			EXISTS (SELECT 1 FROM artwork_cache WHERE key = $2),
+			EXISTS (SELECT 1 FROM artwork_cache WHERE key = $3),
+			EXISTS (SELECT 1 FROM artwork_cache WHERE key = $4),
+			(SELECT byte_size FROM artwork_cache WHERE key = $3),
+			(SELECT byte_size FROM artwork_cache WHERE key = $4)
+	`, oldFailedKey, oldPendingKey, activeKey, recentFailedKey).Scan(
+		&oldFailedExists, &oldPendingExists, &activeExists, &recentFailedExists, &activeSize, &recentFailedSize,
+	); err != nil {
+		t.Fatalf("query retained artwork registrations: %v", err)
+	}
+	if oldFailedExists || oldPendingExists {
+		t.Fatalf("stale registrations survived: failed=%t pending=%t", oldFailedExists, oldPendingExists)
+	}
+	if !activeExists || activeSize == nil || *activeSize != int64(len(imageBytes)) {
+		t.Fatalf("active artwork was not retained: exists=%t size=%v", activeExists, activeSize)
+	}
+	if !recentFailedExists || recentFailedSize != nil {
+		t.Fatalf("recent failed artwork was not retained as uncached: exists=%t size=%v", recentFailedExists, recentFailedSize)
+	}
+	if _, err := os.Stat(service.path(activeKey)); err != nil {
+		t.Fatalf("active artwork object was removed: %v", err)
 	}
 }
 
@@ -390,6 +604,69 @@ func TestServeHTTPStableBadKeyAndMissingResponses(t *testing.T) {
 	missing := serveArtwork(service, http.MethodGet, publicPrefix+strings.Repeat("a", 64))
 	if missing.Code != http.StatusNotFound || missing.Body.String() != "artwork not found\n" {
 		t.Fatalf("missing response = %d %q", missing.Code, missing.Body.String())
+	}
+}
+
+type artworkRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip artworkRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
+
+func TestServeHTTPRedactsUpstreamURLFromErrorLogAndResponse(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	secretURL := "https://provider.example/private/poster.png?target=original&token=artwork-secret"
+	networkCause := errors.New("connection reset")
+	client := &http.Client{Transport: artworkRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, networkCause
+	})}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	service, err := New(pool, Options{
+		Directory:  t.TempDir(),
+		MaxBytes:   1 << 20,
+		HTTPClient: client,
+		Logger:     logger,
+	})
+	if err != nil {
+		t.Fatalf("create artwork service: %v", err)
+	}
+	localURL := service.LocalURL(context.Background(), secretURL)
+	key := strings.TrimPrefix(localURL, publicPrefix)
+	record, found, err := service.lookup(context.Background(), key)
+	if err != nil || !found {
+		t.Fatalf("lookup artwork registration: found=%t err=%v", found, err)
+	}
+
+	fetchErr := service.fetch(context.Background(), record)
+
+	if !errors.Is(fetchErr, networkCause) {
+		t.Fatalf("sanitized artwork error lost network cause: %v", fetchErr)
+	}
+	var requestErr *url.Error
+	if !errors.As(fetchErr, &requestErr) || requestErr.Op != "Get" || requestErr.URL != "" {
+		t.Fatalf("artwork URL error was not sanitized with operation intact: %#v", requestErr)
+	}
+	if strings.Contains(fetchErr.Error(), secretURL) ||
+		strings.Contains(fetchErr.Error(), "/private/") ||
+		strings.Contains(fetchErr.Error(), "artwork-secret") {
+		t.Fatalf("artwork error exposed upstream request destination: %v", fetchErr)
+	}
+
+	response := serveArtwork(service, http.MethodGet, localURL)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("failed artwork status = %d, body=%s", response.Code, response.Body.String())
+	}
+	combined := logs.String() + response.Body.String()
+	for _, secret := range []string{secretURL, "/private/poster.png", "artwork-secret"} {
+		if strings.Contains(combined, secret) {
+			t.Fatalf("artwork log or response exposed %q: %s", secret, combined)
+		}
+	}
+	if !strings.Contains(logs.String(), "fetch artwork") ||
+		!strings.Contains(logs.String(), "download artwork") ||
+		!strings.Contains(logs.String(), "connection reset") {
+		t.Fatalf("sanitized artwork log lost operation or cause: %s", logs.String())
 	}
 }
 

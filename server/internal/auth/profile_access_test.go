@@ -52,14 +52,14 @@ func TestReconcileProfileGrantClearsUnavailablePrincipal(t *testing.T) {
 	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
 	profileID := "profile-id"
 	expires := now.Add(time.Hour)
-	principal := Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expires}
+	principal := Principal{ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expires, ActiveProfileCanManage: true}
 	access := ProfileAccess{Enabled: true, AvailableUntil: new("2026-08-01"), AccessTimezone: "UTC"}
 
 	if !reconcileProfileGrant(&principal, access, now) {
 		t.Fatal("unavailable grant was not marked for persistent clearing")
 	}
-	if principal.ActiveProfileID != nil || principal.ProfileGrantExpiresAt != nil {
-		t.Fatal("unavailable grant remained on the authenticated principal")
+	if principal.ActiveProfileID != nil || principal.ProfileGrantExpiresAt != nil || principal.ActiveProfileCanManage {
+		t.Fatal("unavailable grant or its derived management capability remained on the authenticated principal")
 	}
 }
 

@@ -162,6 +162,7 @@ func TestApproveDeviceAuthorizationSerializesManagedProfileCategoryMoves(t *test
 	`, userID, profileID); err != nil {
 		t.Fatalf("insert management grant: %v", err)
 	}
+	legacySourceHash := deviceAuthorizationSourceHash("")
 	for index, code := range []string{firstCode, secondCode} {
 		deviceCodeHash := make([]byte, 32)
 		if _, err := rand.Read(deviceCodeHash); err != nil {
@@ -169,9 +170,9 @@ func TestApproveDeviceAuthorizationSerializesManagedProfileCategoryMoves(t *test
 		}
 		if _, err := setupTx.Exec(ctx, `
 			INSERT INTO device_authorizations (
-				device_code_hash, user_code, device_name, platform, expires_at
-			) VALUES ($1, $2, $3, 'test', now() + interval '10 minutes')
-		`, deviceCodeHash, code, fmt.Sprintf("Approval device %d", index)); err != nil {
+				device_code_hash, user_code, device_name, platform, source_hash, expires_at
+			) VALUES ($1, $2, $3, 'test', $4, now() + interval '10 minutes')
+		`, deviceCodeHash, code, fmt.Sprintf("Approval device %d", index), legacySourceHash[:]); err != nil {
 			t.Fatalf("insert device authorization %d: %v", index, err)
 		}
 	}

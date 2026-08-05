@@ -41,6 +41,28 @@ func TestBeginDeviceAuthorizationReturnsPairingURLs(t *testing.T) {
 	}
 }
 
+func TestBeginDeviceAuthorizationReturnsDeterministicCapacityLimit(t *testing.T) {
+	api := testAPI(&fakeInstanceService{})
+	api.auth = &fakeAuthService{deviceAuthorizationErr: auth.ErrDeviceAuthorizationCapacity}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/device-code", bytes.NewBufferString(`{"deviceName":"Living Room","platform":"tvos"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429: %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Retry-After") != "60" {
+		t.Fatalf("Retry-After = %q, want 60", response.Header().Get("Retry-After"))
+	}
+	var body errorEnvelope
+	decodeResponse(t, response, &body)
+	if body.Error.Code != "device_code_capacity" {
+		t.Fatalf("error code = %q, want device_code_capacity", body.Error.Code)
+	}
+}
+
 func TestDeviceAuthorizationPendingUsesStableError(t *testing.T) {
 	service := &fakeAuthService{exchangeErr: auth.ErrDeviceAuthorizationPending}
 	api := testAPI(&fakeInstanceService{})
@@ -58,6 +80,24 @@ func TestDeviceAuthorizationPendingUsesStableError(t *testing.T) {
 	decodeResponse(t, response, &body)
 	if body.Error.Code != "authorization_pending" {
 		t.Fatalf("unexpected error code %q", body.Error.Code)
+	}
+}
+func TestDeviceAuthorizationExchangeDeviceQuotaUsesStableConflict(t *testing.T) {
+	api := testAPI(&fakeInstanceService{})
+	api.auth = &fakeAuthService{exchangeErr: auth.ErrDeviceQuotaReached}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/device-code/token", bytes.NewBufferString(`{"deviceCode":"rivune_dc_approved"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", response.Code, response.Body.String())
+	}
+	var body errorEnvelope
+	decodeResponse(t, response, &body)
+	if body.Error.Code != "device_quota_reached" {
+		t.Fatalf("error code = %q, want device_quota_reached", body.Error.Code)
 	}
 }
 

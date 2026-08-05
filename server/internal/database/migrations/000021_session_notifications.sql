@@ -1,6 +1,5 @@
-BEGIN;
 
-CREATE TABLE auth_session_notifications (
+CREATE TABLE IF NOT EXISTS auth_session_notifications (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     session_id uuid NOT NULL REFERENCES auth_sessions(id) ON DELETE CASCADE,
     sender_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -10,9 +9,7 @@ CREATE TABLE auth_session_notifications (
     CHECK (expires_at > created_at)
 );
 
-CREATE INDEX auth_session_notifications_session_id_id_idx
+CREATE INDEX IF NOT EXISTS auth_session_notifications_session_id_id_idx
     ON auth_session_notifications (session_id, id);
-CREATE INDEX auth_session_notifications_expires_at_idx
+CREATE INDEX IF NOT EXISTS auth_session_notifications_expires_at_idx
     ON auth_session_notifications (expires_at);
-
-COMMIT;

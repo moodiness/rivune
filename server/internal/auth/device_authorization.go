@@ -3,14 +3,15 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var (
@@ -20,15 +21,25 @@ var (
 	ErrDeviceAuthorizationSlowDown = errors.New("device authorization polling too quickly")
 	ErrDeviceAuthorizationExpired  = errors.New("device authorization expired")
 	ErrDeviceAuthorizationClaimed  = errors.New("device authorization already claimed")
+	ErrDeviceAuthorizationCapacity = errors.New("device authorization capacity reached")
 )
 
 const (
-	deviceCodePrefix             = "rivune_dc_"
-	deviceAuthorizationTTL       = 10 * time.Minute
-	deviceAuthorizationInterval  = 5 * time.Second
-	deviceUserCodeLength         = 8
-	deviceUserCodeAlphabet       = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	deviceUserCodeInsertAttempts = 5
+	deviceCodePrefix                                  = "rivune_dc_"
+	deviceAuthorizationTTL                            = 10 * time.Minute
+	deviceAuthorizationInterval                       = 5 * time.Second
+	deviceUserCodeLength                              = 8
+	deviceUserCodeAlphabet                            = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	deviceUserCodeInsertAttempts                      = 5
+	maximumOutstandingDeviceAuthorizations            = 10_000
+	maximumOutstandingDeviceAuthorizationsPerSource   = 4
+	deviceAuthorizationProtectedReservePercent        = 10
+	deviceAuthorizationCleanupBatch                   = 500
+	deviceAuthorizationAdmissionLockID                = int64(7_249_863_113)
+	deviceAuthorizationSourceHashDomain               = "rivune/device-authorization/source/v1\x00"
+	deviceAuthorizationSourceHashMissingAddressMarker = byte(0)
+	deviceAuthorizationSourceHashIPv4Marker           = byte(4)
+	deviceAuthorizationSourceHashIPv6Marker           = byte(6)
 )
 
 type DeviceAuthorization struct {
@@ -53,6 +64,7 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, deviceName, plat
 	if !validLength(platform, 1, 32) {
 		return DeviceAuthorization{}, fmt.Errorf("%w: platform must contain 1 to 32 characters", ErrInvalidInput)
 	}
+	sourceHash := deviceAuthorizationSourceHash(ClientIP(ctx))
 
 	deviceCode, deviceCodeHash, err := newToken(deviceCodePrefix)
 	if err != nil {
@@ -60,8 +72,40 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, deviceName, plat
 	}
 	now := time.Now().UTC()
 	expiresAt := now.Add(deviceAuthorizationTTL)
-	if _, err := s.pool.Exec(ctx, cleanupStaleDeviceAuthorizationsSQL); err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return DeviceAuthorization{}, fmt.Errorf("begin device authorization: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", deviceAuthorizationAdmissionLockID); err != nil {
+		return DeviceAuthorization{}, fmt.Errorf("lock device authorization admission: %w", err)
+	}
+	if _, err := tx.Exec(ctx, cleanupStaleDeviceAuthorizationsSQL, deviceAuthorizationCleanupBatch); err != nil {
 		return DeviceAuthorization{}, fmt.Errorf("clean device authorizations: %w", err)
+	}
+	var outstanding, sourceOutstanding int
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			count(*),
+			count(*) FILTER (WHERE source_hash = $1)
+		FROM device_authorizations
+		WHERE consumed_at IS NULL AND expires_at > now()
+	`, sourceHash[:]).Scan(&outstanding, &sourceOutstanding); err != nil {
+		return DeviceAuthorization{}, fmt.Errorf("count outstanding device authorizations: %w", err)
+	}
+	capacity := s.deviceAuthorizationCapacity
+	if capacity <= 0 {
+		capacity = maximumOutstandingDeviceAuthorizations
+	}
+	sourceCapacity := s.deviceAuthorizationSourceCapacity
+	if sourceCapacity <= 0 {
+		sourceCapacity = maximumOutstandingDeviceAuthorizationsPerSource
+	}
+	generalCapacity := deviceAuthorizationGeneralCapacity(capacity)
+	if outstanding >= capacity ||
+		sourceOutstanding >= sourceCapacity ||
+		(outstanding >= generalCapacity && sourceOutstanding > 0) {
+		return DeviceAuthorization{}, ErrDeviceAuthorizationCapacity
 	}
 
 	for range deviceUserCodeInsertAttempts {
@@ -69,25 +113,72 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, deviceName, plat
 		if err != nil {
 			return DeviceAuthorization{}, err
 		}
-		_, err = s.pool.Exec(ctx, `
+		command, err := tx.Exec(ctx, `
 			INSERT INTO device_authorizations (
-				device_code_hash, user_code, device_name, platform, expires_at
-			) VALUES ($1, $2, $3, $4, $5)
-		`, deviceCodeHash, userCode, deviceName, platform, expiresAt)
-		if err == nil {
-			return DeviceAuthorization{
-				DeviceCode: deviceCode,
-				UserCode:   formatDeviceUserCode(userCode),
-				ExpiresAt:  expiresAt,
-				Interval:   deviceAuthorizationInterval,
-			}, nil
-		}
-		var postgresError *pgconn.PgError
-		if !errors.As(err, &postgresError) || postgresError.Code != "23505" {
+				device_code_hash, user_code, device_name, platform, source_hash, expires_at
+			) VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT DO NOTHING
+		`, deviceCodeHash, userCode, deviceName, platform, sourceHash[:], expiresAt)
+		if err != nil {
 			return DeviceAuthorization{}, fmt.Errorf("create device authorization: %w", err)
 		}
+		if command.RowsAffected() == 0 {
+			continue
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return DeviceAuthorization{}, fmt.Errorf("commit device authorization: %w", err)
+		}
+		return DeviceAuthorization{
+			DeviceCode: deviceCode,
+			UserCode:   formatDeviceUserCode(userCode),
+			ExpiresAt:  expiresAt,
+			Interval:   deviceAuthorizationInterval,
+		}, nil
 	}
 	return DeviceAuthorization{}, errors.New("could not allocate a unique device user code")
+}
+
+// deviceAuthorizationGeneralCapacity preserves a small part of the hard cap
+// for the first active code from a previously inactive network source. Once
+// the general capacity is full, a source cannot consume a second reserve slot.
+//
+// Network-source quotas are not a complete Sybil defense. Distributed abuse
+// still requires infrastructure-level controls such as edge rate limiting and
+// reputation in addition to this database-enforced bound.
+func deviceAuthorizationGeneralCapacity(hardCapacity int) int {
+	if hardCapacity <= 0 {
+		return 0
+	}
+	reserve := (hardCapacity*deviceAuthorizationProtectedReservePercent + 99) / 100
+	if reserve < 1 {
+		reserve = 1
+	}
+	return hardCapacity - reserve
+}
+
+func deviceAuthorizationSourceHash(source string) [sha256.Size]byte {
+	var material [len(deviceAuthorizationSourceHashDomain) + 1 + 16]byte
+	length := copy(material[:], deviceAuthorizationSourceHashDomain)
+
+	address, err := netip.ParseAddr(source)
+	if err != nil {
+		material[length] = deviceAuthorizationSourceHashMissingAddressMarker
+		return sha256.Sum256(material[:length+1])
+	}
+	address = address.Unmap()
+	if address.Is4() {
+		material[length] = deviceAuthorizationSourceHashIPv4Marker
+		length++
+		bytes := address.As4()
+		length += copy(material[length:], bytes[:])
+		return sha256.Sum256(material[:length])
+	}
+
+	material[length] = deviceAuthorizationSourceHashIPv6Marker
+	length++
+	bytes := address.As16()
+	length += copy(material[length:], bytes[:8])
+	return sha256.Sum256(material[:length])
 }
 
 func (s *Service) ApproveDeviceAuthorization(ctx context.Context, principal Principal, input DeviceAuthorizationApproval) error {
@@ -258,6 +349,9 @@ func (s *Service) ExchangeDeviceAuthorization(ctx context.Context, deviceCode st
 	deviceName := requestedDeviceName
 	if approvedDeviceName != nil {
 		deviceName = *approvedDeviceName
+	}
+	if err := reserveDeviceSlot(ctx, tx, *approvedUserID); err != nil {
+		return TokenPair{}, err
 	}
 	var deviceID string
 	if err := tx.QueryRow(ctx, `

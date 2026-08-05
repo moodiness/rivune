@@ -22,7 +22,19 @@ type operationsMaintenanceService interface {
 
 // RunMaintenance performs an immediate cleanup and then repeats until ctx is canceled.
 func (a *API) RunMaintenance(ctx context.Context) {
+	var calendarDone <-chan struct{}
+	if a.calendarRefresh != nil {
+		done := make(chan struct{})
+		calendarDone = done
+		go func() {
+			defer close(done)
+			a.calendarRefresh.Run(ctx)
+		}()
+	}
 	runMaintenance(ctx, a.logger, a.authMaintenance, a.playbackMaintenance, maintenanceInterval, a.operations)
+	if calendarDone != nil {
+		<-calendarDone
+	}
 }
 
 func runMaintenance(ctx context.Context, logger *slog.Logger, authService authMaintenanceService, playbackService playbackMaintenanceService, interval time.Duration, operationsServices ...operationsMaintenanceService) {

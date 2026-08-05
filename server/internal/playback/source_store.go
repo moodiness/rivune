@@ -3,6 +3,8 @@ package playback
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -48,20 +50,43 @@ func (store *sourceReferenceStore) clear() {
 }
 
 func (store *sourceReferenceStore) put(reference sourceReference) (sourceReference, error) {
-	identifier, err := newOpaqueReference()
+	references, err := store.putAll([]sourceReference{reference})
 	if err != nil {
 		return sourceReference{}, err
 	}
+	return references[0], nil
+}
+
+func (store *sourceReferenceStore) putAll(references []sourceReference) ([]sourceReference, error) {
+	if len(references) == 0 {
+		return nil, nil
+	}
+	if len(references) > maximumSourceReferences {
+		return nil, errors.New("source reference batch exceeds store capacity")
+	}
+	identifiers := make([]string, len(references))
+	for index := range identifiers {
+		identifier, err := newOpaqueReference()
+		if err != nil {
+			return nil, err
+		}
+		identifiers[index] = identifier
+	}
+
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.removeExpiredLocked()
-	for len(store.entries) >= maximumSourceReferences {
-		store.removeEarliestLocked()
+	store.removeEarliestLocked(max(0, len(store.entries)+len(references)-maximumSourceReferences))
+	expiresAt := store.now().Add(sourceReferenceTTL)
+	stored := make([]sourceReference, len(references))
+	for index := range references {
+		reference := references[index]
+		reference.ID = identifiers[index]
+		reference.ExpiresAt = expiresAt
+		store.entries[reference.ID] = cloneSourceReference(reference)
+		stored[index] = reference
 	}
-	reference.ID = identifier
-	reference.ExpiresAt = store.now().Add(sourceReferenceTTL)
-	store.entries[identifier] = cloneSourceReference(reference)
-	return reference, nil
+	return stored, nil
 }
 
 func (store *sourceReferenceStore) get(identifier string, principal auth.Principal) (sourceReference, error) {
@@ -84,17 +109,26 @@ func (store *sourceReferenceStore) removeExpiredLocked() {
 	}
 }
 
-func (store *sourceReferenceStore) removeEarliestLocked() {
-	var earliestID string
-	var earliest time.Time
-	for identifier, reference := range store.entries {
-		if earliestID == "" || reference.ExpiresAt.Before(earliest) {
-			earliestID = identifier
-			earliest = reference.ExpiresAt
-		}
+func (store *sourceReferenceStore) removeEarliestLocked(count int) {
+	if count <= 0 {
+		return
 	}
-	if earliestID != "" {
-		delete(store.entries, earliestID)
+	type expiration struct {
+		identifier string
+		expiresAt  time.Time
+	}
+	expirations := make([]expiration, 0, len(store.entries))
+	for identifier, reference := range store.entries {
+		expirations = append(expirations, expiration{identifier: identifier, expiresAt: reference.ExpiresAt})
+	}
+	sort.Slice(expirations, func(left, right int) bool {
+		if expirations[left].expiresAt.Equal(expirations[right].expiresAt) {
+			return expirations[left].identifier < expirations[right].identifier
+		}
+		return expirations[left].expiresAt.Before(expirations[right].expiresAt)
+	})
+	for index := range min(count, len(expirations)) {
+		delete(store.entries, expirations[index].identifier)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/collection"
 )
 
@@ -147,6 +148,9 @@ func (client *Client) resolveTMDBList(ctx context.Context, source collection.TMD
 	if values == nil {
 		values = response.Results
 	}
+	if err := addon.ConsumePayloadItems(ctx, len(values)); err != nil {
+		return collection.SourcePage{}, err
+	}
 	if shouldFallbackCollectionOverviews(language) && collectionMediaNeedsOverview(values) {
 		query.Set("language", englishCollectionLanguage)
 		var english collectionMediaPage
@@ -175,6 +179,9 @@ func (client *Client) resolveTMDBCollection(ctx context.Context, source collecti
 	query := url.Values{"language": {language}}
 	var response tmdbCollectionResponse
 	if err := client.get(ctx, endpoint, query, &response); err != nil {
+		return collection.SourcePage{}, err
+	}
+	if err := addon.ConsumePayloadItems(ctx, len(response.Parts)); err != nil {
 		return collection.SourcePage{}, err
 	}
 	if shouldFallbackCollectionOverviews(language) && collectionMediaNeedsOverview(response.Parts) {
@@ -206,6 +213,9 @@ func (client *Client) resolveTMDBPerson(ctx context.Context, source collection.T
 	values := response.Cast
 	if source.SourceType == "director" {
 		values = response.Crew
+	}
+	if err := addon.ConsumePayloadItems(ctx, len(values)); err != nil {
+		return collection.SourcePage{}, err
 	}
 	if shouldFallbackCollectionOverviews(language) && collectionMediaNeedsOverview(values) {
 		query.Set("language", englishCollectionLanguage)
@@ -343,6 +353,9 @@ func (client *Client) resolveTMDBDiscoverMedia(ctx context.Context, source colle
 		if err := client.get(ctx, endpoint, query, &response); err != nil {
 			return collection.SourcePage{}, err
 		}
+	}
+	if err := addon.ConsumePayloadItems(ctx, len(response.Results)); err != nil {
+		return collection.SourcePage{}, err
 	}
 	if shouldFallbackCollectionOverviews(language) && collectionMediaNeedsOverview(response.Results) {
 		query.Set("language", englishCollectionLanguage)

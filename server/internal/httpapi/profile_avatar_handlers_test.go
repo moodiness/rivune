@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,15 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/profile"
 )
+
+type observedAvatarRequestBody struct {
+	reads int
+}
+
+func (body *observedAvatarRequestBody) Read([]byte) (int, error) {
+	body.reads++
+	return 0, io.EOF
+}
 
 func TestProfileAvatarPresetCatalogAndImage(t *testing.T) {
 	api := authenticatedProfileAPI(&fakeProfileService{})
@@ -106,6 +116,9 @@ func TestUploadAndReadCustomProfileAvatar(t *testing.T) {
 	if uploadResponse.Code != http.StatusOK {
 		t.Fatalf("expected upload status 200, got %d: %s", uploadResponse.Code, uploadResponse.Body.String())
 	}
+	if service.avatarAuthorizationID != "profile-id" {
+		t.Fatalf("avatar upload preflight profile = %q, want profile-id", service.avatarAuthorizationID)
+	}
 	if service.updatedID != "profile-id" || !bytes.Equal(service.avatarImageData, imageBytes.Bytes()) {
 		t.Fatal("uploaded image was not passed to the profile service")
 	}
@@ -126,6 +139,50 @@ func TestUploadAndReadCustomProfileAvatar(t *testing.T) {
 	}
 	if readResponse.Header().Get("Last-Modified") != updatedAt.Format(http.TimeFormat) {
 		t.Fatalf("unexpected Last-Modified: %q", readResponse.Header().Get("Last-Modified"))
+	}
+}
+
+func TestUploadProfileAvatarRejectsNonManagerBeforeReadingBody(t *testing.T) {
+	service := &fakeProfileService{avatarAuthorizationErr: profile.ErrNotFound}
+	api := authenticatedProfileAPI(service)
+	requestBody := &observedAvatarRequestBody{}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/profiles/profile-id/avatar", requestBody)
+	request.Header.Set("Authorization", "Bearer access-token")
+	request.Header.Set("Content-Type", "multipart/form-data; boundary=unread")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected opaque status 404, got %d: %s", response.Code, response.Body.String())
+	}
+	if service.avatarAuthorizationID != "profile-id" {
+		t.Fatalf("avatar upload preflight profile = %q, want profile-id", service.avatarAuthorizationID)
+	}
+	if requestBody.reads != 0 {
+		t.Fatalf("unauthorized avatar request body reads = %d, want zero", requestBody.reads)
+	}
+	if service.updatedID != "" || service.avatarImageData != nil {
+		t.Fatal("unauthorized avatar reached normalization/persistence service path")
+	}
+}
+
+func TestAvatarNormalizationCapacityErrorIsRetryable(t *testing.T) {
+	api := &API{}
+	response := httptest.NewRecorder()
+
+	api.writeProfileAvatarError(response, "normalize profile avatar", profile.ErrAvatarNormalizationBusy)
+
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429, got %d: %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After = %q, want 1", response.Header().Get("Retry-After"))
+	}
+	var body errorEnvelope
+	decodeResponse(t, response, &body)
+	if body.Error.Code != "avatar_processing_busy" {
+		t.Fatalf("error code = %q, want avatar_processing_busy", body.Error.Code)
 	}
 }
 

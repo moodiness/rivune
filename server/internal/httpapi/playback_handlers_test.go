@@ -1,9 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -243,6 +248,42 @@ func TestPlaybackAssetReturnsStableMediaErrors(t *testing.T) {
 				t.Fatalf("unexpected Retry-After header %q", response.Header().Get("Retry-After"))
 			}
 		})
+	}
+}
+
+func TestPlaybackAssetRedactsUpstreamURLFromLogsAndResponse(t *testing.T) {
+	secretURL := "https://provider.example/private/segment.ts?target=key.bin&token=upstream-secret"
+	networkCause := errors.New("connection reset")
+	service := &fakePlaybackService{proxyErr: fmt.Errorf(
+		"fetch playback asset: %w",
+		&url.Error{Op: "Get", URL: secretURL, Err: networkCause},
+	)}
+	api := testAPI(&fakeInstanceService{})
+	var logs bytes.Buffer
+	api.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	api.playback = service
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/playback/sessions/session-id/assets/asset-id?token=client-secret",
+		nil,
+	)
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("upstream failure status = %d, body=%s", response.Code, response.Body.String())
+	}
+	combined := logs.String() + response.Body.String()
+	for _, secret := range []string{secretURL, "/private/segment.ts", "upstream-secret", "client-secret"} {
+		if strings.Contains(combined, secret) {
+			t.Fatalf("playback log or response exposed %q: %s", secret, combined)
+		}
+	}
+	if !strings.Contains(logs.String(), `msg="proxy playback asset"`) ||
+		!strings.Contains(logs.String(), "fetch playback asset") ||
+		!strings.Contains(logs.String(), "connection reset") {
+		t.Fatalf("sanitized playback log lost operation or cause: %s", logs.String())
 	}
 }
 

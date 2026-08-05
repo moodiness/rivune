@@ -1,10 +1,15 @@
 package collection
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
@@ -40,8 +45,11 @@ func (provider artworkTMDBProvider) SeriesDetails(context.Context, string, strin
 type recordingFanartEnricher struct {
 	mu                sync.Mutex
 	collectionArtwork map[string]metadata.ProviderCollection
+	movieArtwork      *metadata.ProviderMovie
+	movieError        error
 	collections       []string
 	movies            []string
+	movieInputs       []metadata.ProviderMovie
 	series            []string
 }
 
@@ -62,7 +70,25 @@ func (enricher *recordingFanartEnricher) EnrichCollection(_ context.Context, col
 func (enricher *recordingFanartEnricher) EnrichMovie(_ context.Context, movie metadata.ProviderMovie, _ string) (metadata.ProviderMovie, error) {
 	enricher.mu.Lock()
 	enricher.movies = append(enricher.movies, movie.AdditionalIDs["tmdb"])
+	enricher.movieInputs = append(enricher.movieInputs, movie)
+	configured := enricher.movieArtwork
+	err := enricher.movieError
 	enricher.mu.Unlock()
+	if err != nil {
+		return movie, err
+	}
+	if configured != nil {
+		if configured.PosterURL != "" {
+			movie.PosterURL = configured.PosterURL
+		}
+		if configured.BackdropURL != "" {
+			movie.BackdropURL = configured.BackdropURL
+		}
+		if configured.LogoURL != "" {
+			movie.LogoURL = configured.LogoURL
+		}
+		return movie, nil
+	}
 	movie.PosterURL = "https://assets.fanart.tv/movie-" + movie.AdditionalIDs["tmdb"] + "-poster.jpg"
 	movie.BackdropURL = "https://assets.fanart.tv/movie-" + movie.AdditionalIDs["tmdb"] + "-background.jpg"
 	movie.LogoURL = "https://assets.fanart.tv/movie-" + movie.AdditionalIDs["tmdb"] + "-logo.png"
@@ -418,6 +444,54 @@ func TestEnrichFanartArtworkSkipsLiveTVOnlySources(t *testing.T) {
 	}
 }
 
+func TestEnrichFanartArtworkRetainsProviderPosterOnMissAndPartialResult(t *testing.T) {
+	const poster = "https://image.tmdb.org/provider-poster.jpg"
+	const background = "https://image.tmdb.org/provider-background.jpg"
+	tests := []struct {
+		name         string
+		enricher     *recordingFanartEnricher
+		wantLogo     string
+		wantResolved bool
+		wantOverlay  bool
+	}{
+		{
+			name:     "Fanart request fails",
+			enricher: &recordingFanartEnricher{movieError: errors.New("Fanart unavailable")},
+		},
+		{
+			name:     "Fanart has only a logo",
+			enricher: &recordingFanartEnricher{movieArtwork: &metadata.ProviderMovie{LogoURL: "https://assets.fanart.tv/title-logo.png"}},
+			wantLogo: "https://assets.fanart.tv/title-logo.png", wantResolved: true, wantOverlay: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := NewService(nil, nil, nil, nil, nil)
+			service.SetFanartEnricher(nil, nil, test.enricher, nil)
+			items := []Item{{
+				ID: "tt41111628", MediaType: MediaTypeMovie, Title: "Leur vérité",
+				PosterURL: poster, BackgroundURL: background, ExternalIDs: map[string]string{"tmdb": "1659155"},
+			}}
+
+			overlays, _, _ := service.enrichFanartArtwork(context.Background(), nil, items, "fr-FR")
+
+			if items[0].PosterURL != poster || items[0].BackgroundURL != background {
+				t.Fatalf("provider artwork was blanked by partial Fanart result: %+v", items[0])
+			}
+			if items[0].LogoURL != test.wantLogo || items[0].FanartResolved != test.wantResolved {
+				t.Fatalf("Fanart overlay state = %+v", items[0])
+			}
+			if len(overlays) != 1 || overlays[0].available() != test.wantOverlay {
+				t.Fatalf("Fanart overlay = %+v, want available=%t", overlays, test.wantOverlay)
+			}
+			if len(test.enricher.movieInputs) != 1 || test.enricher.movieInputs[0].PosterURL != poster ||
+				test.enricher.movieInputs[0].BackdropURL != background {
+				t.Fatalf("Fanart did not receive provider fallback artwork: %+v", test.enricher.movieInputs)
+			}
+		})
+	}
+}
+
 func TestResolveUsesMDBListProvider(t *testing.T) {
 	provider := &stubMDBListProvider{}
 	service := NewService(nil, nil, nil, nil, provider)
@@ -450,6 +524,21 @@ type staticAddonProvider struct {
 
 func (provider staticAddonProvider) Fetch(context.Context, auth.Principal, string, addon.ResourcePath) (addon.ResourceResult, error) {
 	return provider.result, nil
+}
+
+type recordingCollectionArtworkPresenter struct {
+	poster string
+}
+
+func (presenter *recordingCollectionArtworkPresenter) PresentResolvedFolder(_ context.Context, resolved *ResolvedFolder) {
+	if len(resolved.Items) == 0 {
+		return
+	}
+	presenter.poster = resolved.Items[0].PosterURL
+	resolved.Items[0].PosterURL = "/api/v1/artwork/canonical"
+}
+
+func (*recordingCollectionArtworkPresenter) RestoreCollectionSaveInputs(context.Context, []SaveInput) {
 }
 
 func TestResolveProjectsAddonCatalogIdentity(t *testing.T) {
@@ -513,4 +602,204 @@ func TestNormalizeMediaTypePreservesLiveTV(t *testing.T) {
 	if got := normalizeMediaType("show"); got != MediaTypeSeries {
 		t.Fatalf("show type normalized to %q", got)
 	}
+}
+
+func TestResolveSanitizesAddonCatalogBeforeProjection(t *testing.T) {
+	const providerPoster = "https://images.example/poster.jpg"
+	payload := json.RawMessage(`{"metas":[{"id":"safe-id","type":"movie","name":"Safe","poster":"` + providerPoster + `","externalUrl":"https://provider.example/private?token=secret","behaviorHints":{"proxyHeaders":{"request":{"Authorization":"Bearer secret"}}},"extensions":{"cookie":"session=secret","apiKey":"provider-key","signature":"signed-secret","safe":"kept"}}]}`)
+	presenter := &recordingCollectionArtworkPresenter{}
+	service := NewService(nil, staticAddonProvider{result: addon.ResourceResult{Payload: payload}}, nil, nil, nil)
+	service.SetArtworkPresenter(presenter)
+	folder := Folder{Sources: []Source{{
+		ID: "source-id", Kind: SourceKindAddonCatalog,
+		AddonCatalog: &AddonCatalogSource{AddonID: "addon-id", Type: MediaTypeMovie, CatalogID: "catalog"},
+	}}}
+
+	resolved, err := service.resolve(context.Background(), auth.Principal{}, "collection-id", folder, 1, 100, "en-US", "US")
+	if err != nil {
+		t.Fatalf("resolve sanitized addon catalog: %v", err)
+	}
+	if presenter.poster != providerPoster {
+		t.Fatalf("provider poster was removed before artwork presentation: %q", presenter.poster)
+	}
+	if len(resolved.Items) != 1 || resolved.Items[0].PosterURL != "/api/v1/artwork/canonical" {
+		t.Fatalf("sanitized catalog projection changed safe fields: %+v", resolved.Items)
+	}
+	encoded, err := json.Marshal(resolved)
+	if err != nil {
+		t.Fatalf("marshal resolved folder: %v", err)
+	}
+	for _, secret := range []string{"images.example", "provider.example", "externalUrl", "token", "proxyHeaders", "Authorization", "cookie", "apiKey", "signature", "Bearer secret", "session=secret", "provider-key", "signed-secret"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("resolved folder exposed %q: %s", secret, encoded)
+		}
+	}
+	if !strings.Contains(string(resolved.Items[0].Raw), `"safe":"kept"`) {
+		t.Fatalf("sanitized Raw dropped safe extension: %s", resolved.Items[0].Raw)
+	}
+}
+
+func TestAccountSourcePageSanitizesProviderRawWithoutChangingProjectedFields(t *testing.T) {
+	page := SourcePage{Items: []Item{{
+		ID: "tmdb:42", MediaType: MediaTypeMovie, Title: "Movie",
+		PosterURL: "https://image.tmdb.org/t/p/w500/poster.jpg",
+		Raw:       json.RawMessage(`{"id":42,"title":"Movie","externalUrl":"https://provider.example/private?token=secret","proxyHeaders":{"Authorization":"Bearer secret"},"cookie":"session=secret","apiKey":"provider-key","signature":"signed-secret"}`),
+	}}}
+	accounted, err := accountSourcePage(context.Background(), page, nil)
+	if err != nil {
+		t.Fatalf("account source page: %v", err)
+	}
+	if len(accounted.Items) != 1 || accounted.Items[0].PosterURL != page.Items[0].PosterURL {
+		t.Fatalf("source page projection changed: %+v", accounted.Items)
+	}
+	for _, secret := range []string{"provider.example", "externalUrl", "token", "proxyHeaders", "Authorization", "cookie", "apiKey", "signature", "Bearer secret", "session=secret", "provider-key", "signed-secret"} {
+		if strings.Contains(string(accounted.Items[0].Raw), secret) {
+			t.Fatalf("source Raw exposed %q: %s", secret, accounted.Items[0].Raw)
+		}
+	}
+	if !strings.Contains(string(accounted.Items[0].Raw), `"title":"Movie"`) {
+		t.Fatalf("source Raw dropped safe content: %s", accounted.Items[0].Raw)
+	}
+}
+
+func TestResolutionBudgetAcceptsExactBytesAndItemsThenRejectsNPlusOne(t *testing.T) {
+	ctx, budget := addon.WithPayloadBudget(context.Background(), 10, 2)
+	defer budget.Cancel()
+	sourceCtx := addon.WithPayloadBudgetSource(ctx)
+	if err := addon.EnsurePayloadBytes(sourceCtx, 10); err != nil {
+		t.Fatalf("consume exact byte budget: %v", err)
+	}
+	if err := addon.ConsumePayloadItems(sourceCtx, 2); err != nil {
+		t.Fatalf("consume exact item budget: %v", err)
+	}
+	if budget.Exceeded() {
+		t.Fatal("exact payload budget was rejected")
+	}
+	if err := addon.ConsumePayloadItems(sourceCtx, 1); err == nil {
+		t.Fatal("item budget N+1 was accepted")
+	}
+	if !budget.Exceeded() {
+		t.Fatal("item budget N+1 did not mark the request exceeded")
+	}
+
+	byteCtx, byteBudget := addon.WithPayloadBudget(context.Background(), 10, 2)
+	defer byteBudget.Cancel()
+	if err := addon.EnsurePayloadBytes(addon.WithPayloadBudgetSource(byteCtx), 11); err == nil {
+		t.Fatal("byte budget N+1 was accepted")
+	}
+	if !byteBudget.Exceeded() {
+		t.Fatal("byte budget N+1 did not mark the request exceeded")
+	}
+	budgetErr := resolutionBudgetError()
+	temporary, ok := budgetErr.(interface{ Temporary() bool })
+	if !ok || !temporary.Temporary() {
+		t.Fatalf("resolution budget error is not temporary: %T %v", budgetErr, budgetErr)
+	}
+}
+
+type cancelingBudgetAddonProvider struct {
+	overflowPayload json.RawMessage
+	normalPayload   json.RawMessage
+	overflow        atomic.Bool
+	calls           atomic.Int32
+	canceled        atomic.Int32
+	fanoutStarted   chan struct{}
+}
+
+func (provider *cancelingBudgetAddonProvider) Fetch(ctx context.Context, _ auth.Principal, _ string, _ addon.ResourcePath) (addon.ResourceResult, error) {
+	if !provider.overflow.Load() {
+		return addon.ResourceResult{Payload: provider.normalPayload}, nil
+	}
+	call := provider.calls.Add(1)
+	if call == 3 {
+		close(provider.fanoutStarted)
+	}
+	if call <= 2 {
+		select {
+		case <-provider.fanoutStarted:
+			return addon.ResourceResult{Payload: provider.overflowPayload}, nil
+		case <-ctx.Done():
+			return addon.ResourceResult{}, ctx.Err()
+		case <-time.After(time.Second):
+			return addon.ResourceResult{}, context.DeadlineExceeded
+		}
+	}
+	<-ctx.Done()
+	provider.canceled.Add(1)
+	return addon.ResourceResult{}, ctx.Err()
+}
+
+func TestResolveCancelsFanoutOnAggregatePayloadOverflowAndKeepsBudgetRequestLocal(t *testing.T) {
+	provider := &cancelingBudgetAddonProvider{
+		overflowPayload: addonCatalogPayloadSize(maximumResolutionPayloadBytes),
+		normalPayload:   json.RawMessage(`{"metas":[{"id":"normal","type":"movie","name":"Normal"}]}`),
+		fanoutStarted:   make(chan struct{}),
+	}
+	provider.overflow.Store(true)
+	service := NewService(nil, provider, nil, nil, nil)
+	folder := Folder{Sources: make([]Source, 20)}
+	for index := range folder.Sources {
+		folder.Sources[index] = Source{
+			ID: string(rune('a' + index)), Kind: SourceKindAddonCatalog,
+			AddonCatalog: &AddonCatalogSource{AddonID: string(rune('a' + index)), Type: MediaTypeMovie, CatalogID: "catalog"},
+		}
+	}
+
+	resolved, err := service.resolve(context.Background(), auth.Principal{}, "collection-id", folder, 1, 100, "en-US", "US")
+	if err != nil {
+		t.Fatalf("resolve overflowing folder: %v", err)
+	}
+	if len(resolved.Items) != 0 || len(resolved.Errors) != len(folder.Sources) {
+		t.Fatalf("overflow returned partial data: items=%d errors=%+v", len(resolved.Items), resolved.Errors)
+	}
+	for _, failure := range resolved.Errors {
+		if failure.Code != "collection_provider_unavailable" || strings.Contains(failure.Message, "payload") {
+			t.Fatalf("unstable or revealing overflow failure: %+v", failure)
+		}
+	}
+	if provider.canceled.Load() == 0 {
+		t.Fatal("aggregate overflow did not cancel an in-flight source")
+	}
+
+	provider.overflow.Store(false)
+	resolved, err = service.resolve(context.Background(), auth.Principal{}, "collection-id", folder, 1, 100, "en-US", "US")
+	if err != nil {
+		t.Fatalf("resolve after isolated overflow: %v", err)
+	}
+	if len(resolved.Errors) != 0 || len(resolved.Items) != 1 || len(resolved.Items[0].Sources) != len(folder.Sources) {
+		t.Fatalf("request-local budget changed normal resolution: %+v", resolved)
+	}
+}
+
+func TestResolveRejectsAggregateItemOverflow(t *testing.T) {
+	metas := make([]map[string]string, maximumResolutionItems+1)
+	for index := range metas {
+		metas[index] = map[string]string{"id": "same", "type": MediaTypeMovie, "name": "Movie"}
+	}
+	payload, err := json.Marshal(map[string]any{"metas": metas})
+	if err != nil {
+		t.Fatalf("marshal oversized catalog: %v", err)
+	}
+	service := NewService(nil, staticAddonProvider{result: addon.ResourceResult{Payload: payload}}, nil, nil, nil)
+	folder := Folder{Sources: []Source{{
+		ID: "source-id", Kind: SourceKindAddonCatalog,
+		AddonCatalog: &AddonCatalogSource{AddonID: "addon-id", Type: MediaTypeMovie, CatalogID: "catalog"},
+	}}}
+	resolved, err := service.resolve(context.Background(), auth.Principal{}, "collection-id", folder, 1, 100, "en-US", "US")
+	if err != nil {
+		t.Fatalf("resolve item overflow: %v", err)
+	}
+	if len(resolved.Items) != 0 || len(resolved.Errors) != 1 || resolved.Errors[0].Code != "collection_provider_unavailable" {
+		t.Fatalf("item overflow returned partial data: %+v", resolved)
+	}
+}
+
+func addonCatalogPayloadSize(size int) json.RawMessage {
+	prefix := []byte(`{"metas":[{"id":"large","type":"movie","name":"`)
+	suffix := []byte(`"}]}`)
+	padding := bytes.Repeat([]byte{'x'}, size-len(prefix)-len(suffix))
+	payload := make(json.RawMessage, 0, size)
+	payload = append(payload, prefix...)
+	payload = append(payload, padding...)
+	return append(payload, suffix...)
 }

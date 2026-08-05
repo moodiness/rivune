@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -45,6 +46,37 @@ func (cache *memoryArtworkResponseCache) store(_ context.Context, key artworkCac
 	return nil
 }
 
+func TestPostgresFanartCachePruneIsBoundedCappedAndAmortized(t *testing.T) {
+	query := strings.Join(strings.Fields(pruneFanartCacheSQL), " ")
+	for _, fragment := range []string{
+		"WHERE expires_at <= now()",
+		"ORDER BY expires_at, resource_type, external_id, language",
+		"LIMIT $1 FOR UPDATE SKIP LOCKED",
+		"ORDER BY cached.updated_at DESC, cached.resource_type, cached.external_id, cached.language",
+		"LIMIT GREATEST($1 - (SELECT count(*) FROM expired), 0) OFFSET $2",
+		"FOR UPDATE OF cached SKIP LOCKED",
+		"DELETE FROM fanart_response_cache cached USING victims",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("Fanart prune query lacks %q: %s", fragment, query)
+		}
+	}
+	if fanartCacheMaximumEntries != 10_000 || fanartCachePruneBatch != 256 {
+		t.Fatalf("Fanart cache bounds = maximum %d, batch %d", fanartCacheMaximumEntries, fanartCachePruneBatch)
+	}
+
+	cache := &postgresArtworkResponseCache{}
+	prunes := 0
+	for range fanartCachePruneEveryStore * 2 {
+		if cache.shouldPrune() {
+			prunes++
+		}
+	}
+	if prunes != 2 {
+		t.Fatalf("Fanart prune ran %d times across %d stores, want 2", prunes, fanartCachePruneEveryStore*2)
+	}
+}
+
 func TestMovieArtworkCacheIsSharedAcrossCollectionsFoldersAndClientInstances(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +93,7 @@ func TestMovieArtworkCacheIsSharedAcrossCollectionsFoldersAndClientInstances(t *
 	defer server.Close()
 
 	responseCache := newMemoryArtworkResponseCache()
-	firstClient := newWithBaseURL("project-key", "", server.URL, server.Client())
+	firstClient := newWithBaseURL("project-key", server.URL, server.Client())
 	firstClient.enableResponseCache(responseCache, time.Hour, nil)
 	movie, err := firstClient.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "550"}, "fr-FR")
 	if err != nil {
@@ -72,7 +104,7 @@ func TestMovieArtworkCacheIsSharedAcrossCollectionsFoldersAndClientInstances(t *
 		t.Fatalf("enrich collection from shared movie identity: %v", err)
 	}
 
-	secondClient := newWithBaseURL("project-key", "", server.URL, server.Client())
+	secondClient := newWithBaseURL("project-key", server.URL, server.Client())
 	secondClient.enableResponseCache(responseCache, time.Hour, nil)
 	restored, err := secondClient.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "550"}, "fr-FR")
 	if err != nil {
@@ -104,7 +136,7 @@ func TestFanartCacheCoalescesConcurrentFolderItems(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newWithBaseURL("project-key", "", server.URL, server.Client())
+	client := newWithBaseURL("project-key", server.URL, server.Client())
 	client.enableResponseCache(newMemoryArtworkResponseCache(), time.Hour, nil)
 	var wait sync.WaitGroup
 	errorsByRequest := make(chan error, 24)
@@ -138,7 +170,7 @@ func TestFanartCachePersistsMissingArtwork(t *testing.T) {
 
 	responseCache := newMemoryArtworkResponseCache()
 	for range 2 {
-		client := newWithBaseURL("project-key", "", server.URL, server.Client())
+		client := newWithBaseURL("project-key", server.URL, server.Client())
 		client.enableResponseCache(responseCache, time.Hour, nil)
 		_, err := client.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "999"}, "fr-FR")
 		if !errors.Is(err, metadata.ErrProviderNotFound) {
@@ -167,7 +199,7 @@ func TestSeriesArtworkCacheIsSharedWithSeasonFolders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newWithBaseURL("project-key", "", server.URL, server.Client())
+	client := newWithBaseURL("project-key", server.URL, server.Client())
 	client.enableResponseCache(newMemoryArtworkResponseCache(), time.Hour, nil)
 	series, err := client.EnrichSeries(context.Background(), metadata.ProviderSeries{
 		AdditionalIDs: map[string]string{"tvdb": "81189"},

@@ -2,6 +2,7 @@ package addon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,23 @@ var (
 	ErrProviderUnavailable   = errors.New("addon provider unavailable")
 	ErrInvalidResponse       = errors.New("invalid addon response")
 	ErrInvalidInput          = errors.New("invalid addon input")
+)
+
+const (
+	maxManifestBytes          = 4 << 20
+	maxManifestTypes          = 128
+	maxManifestResources      = 128
+	maxManifestCatalogs       = 256
+	maxManifestConfigEntries  = 128
+	maxManifestListEntries    = 256
+	maxManifestCatalogExtras  = 64
+	maxManifestComplexity     = 4096
+	maxPlannedRequests        = 256
+	maxConcurrentRequests     = 8
+	maxAggregateResponseBytes = 32 << 20
+
+	MaximumProviderStreams   = 256
+	MaximumProviderSubtitles = 512
 )
 
 var semanticVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
@@ -129,15 +147,49 @@ type ResourcePath struct {
 	Extra    []ExtraValue `json:"extra,omitempty"`
 }
 
+func IsExposableResource(resource string) bool {
+	switch resource {
+	case "catalog", "addon_catalog", "meta":
+		return true
+	default:
+		return false
+	}
+}
+
+func isPlaybackResource(resource string) bool {
+	switch resource {
+	case "stream", "subtitles":
+		return true
+	default:
+		return false
+	}
+}
+
 type InstalledAddon struct {
-	ID             string          `json:"id"`
-	TransportURL   string          `json:"transportUrl"`
-	Manifest       json.RawMessage `json:"manifest"`
-	Position       int             `json:"position"`
-	ProfileIDs     []string        `json:"profileIds"`
-	InstalledAt    time.Time       `json:"installedAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+	ID          string          `json:"id"`
+	Manifest    json.RawMessage `json:"manifest"`
+	Position    int             `json:"position"`
+	ProfileIDs  []string        `json:"profileIds"`
+	InstalledAt time.Time       `json:"installedAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
+
+	transportURL   string
 	parsedManifest Manifest
+}
+
+// ManagedAddon is returned only by addon management mutations and lookups.
+// TransportURL is omitted unless the caller is a global administrator.
+type ManagedAddon struct {
+	InstalledAddon
+	TransportURL string `json:"transportUrl,omitempty"`
+}
+
+func managedAddon(installed InstalledAddon, revealTransport bool) ManagedAddon {
+	managed := ManagedAddon{InstalledAddon: installed}
+	if revealTransport {
+		managed.TransportURL = installed.transportURL
+	}
+	return managed
 }
 
 type InstallInput struct {
@@ -146,7 +198,7 @@ type InstallInput struct {
 }
 
 type UpdateAddonInput struct {
-	TransportURL string   `json:"transportUrl"`
+	TransportURL *string  `json:"transportUrl,omitempty"`
 	ProfileIDs   []string `json:"profileIds"`
 }
 
@@ -160,16 +212,278 @@ type CachePolicy struct {
 	StaleIfErrorSeconds         *int64 `json:"staleIfErrorSeconds,omitempty"`
 }
 
+type ProviderStreamResponse struct {
+	Streams []ProviderStream `json:"streams"`
+}
+
+type ProviderStream struct {
+	Name          string                      `json:"name"`
+	Title         string                      `json:"title"`
+	URL           string                      `json:"url"`
+	Description   string                      `json:"description"`
+	YTID          string                      `json:"ytId"`
+	ExternalURL   string                      `json:"externalUrl"`
+	InfoHash      string                      `json:"infoHash"`
+	FileIndex     *int                        `json:"fileIdx"`
+	BehaviorHints ProviderStreamBehaviorHints `json:"behaviorHints"`
+}
+
+type ProviderStreamBehaviorHints struct {
+	NotWebReady  bool   `json:"notWebReady"`
+	Filename     string `json:"filename"`
+	ProxyHeaders struct {
+		Request map[string]string `json:"request"`
+	} `json:"proxyHeaders"`
+}
+
+type ProviderSubtitleResponse struct {
+	Subtitles []ProviderSubtitle `json:"subtitles"`
+}
+
+type ProviderSubtitle struct {
+	ID       string `json:"id"`
+	URL      string `json:"url"`
+	Language string `json:"lang"`
+	Forced   bool   `json:"forced"`
+}
+
+func ParseProviderStreamResponse(payload []byte) (ProviderStreamResponse, error) {
+	var envelope struct {
+		Streams json.RawMessage `json:"streams"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return ProviderStreamResponse{}, fmt.Errorf("%w: decode stream response", ErrInvalidResponse)
+	}
+	streams, err := decodeProviderItems(envelope.Streams, "streams", MaximumProviderStreams, validateProviderStream)
+	if err != nil {
+		return ProviderStreamResponse{}, err
+	}
+	return ProviderStreamResponse{Streams: streams}, nil
+}
+
+func ParseProviderSubtitleResponse(payload []byte) (ProviderSubtitleResponse, error) {
+	var envelope struct {
+		Subtitles json.RawMessage `json:"subtitles"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return ProviderSubtitleResponse{}, fmt.Errorf("%w: decode subtitles response", ErrInvalidResponse)
+	}
+	subtitles, err := decodeProviderItems(envelope.Subtitles, "subtitles", MaximumProviderSubtitles, validateProviderSubtitle)
+	if err != nil {
+		return ProviderSubtitleResponse{}, err
+	}
+	return ProviderSubtitleResponse{Subtitles: subtitles}, nil
+}
+
+func decodeProviderItems[T any](payload json.RawMessage, field string, maximum int, validate func(T) error) ([]T, error) {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('[') {
+		return nil, fmt.Errorf("%w: provider response requires %q array", ErrInvalidResponse, field)
+	}
+	items := make([]T, 0)
+	for decoder.More() {
+		if len(items) == maximum {
+			return nil, fmt.Errorf("%w: provider response %q exceeds %d items", ErrInvalidResponse, field, maximum)
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil || firstJSONToken(raw) != '{' {
+			return nil, fmt.Errorf("%w: provider response %q items must be objects", ErrInvalidResponse, field)
+		}
+		var item T
+		if err := json.Unmarshal(raw, &item); err != nil {
+			return nil, fmt.Errorf("%w: decode provider response %q item", ErrInvalidResponse, field)
+		}
+		if err := validate(item); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("%w: decode provider response %q", ErrInvalidResponse, field)
+	}
+	return items, nil
+}
+
+func validateProviderStream(stream ProviderStream) error {
+	for _, value := range []struct {
+		value   string
+		maximum int
+	}{
+		{stream.Name, 4096},
+		{stream.Title, 4096},
+		{stream.Description, 8192},
+	} {
+		if invalidProviderDisplayText(value.value, value.maximum) {
+			return fmt.Errorf("%w: invalid provider stream field", ErrInvalidResponse)
+		}
+	}
+	for _, value := range []struct {
+		value   string
+		maximum int
+	}{
+		{stream.URL, 8192},
+		{stream.ExternalURL, 8192},
+		{stream.YTID, 1024},
+		{stream.InfoHash, 1024},
+		{stream.BehaviorHints.Filename, 4096},
+	} {
+		if invalidValue(value.value, value.maximum) {
+			return fmt.Errorf("%w: invalid provider stream field", ErrInvalidResponse)
+		}
+	}
+	headers := stream.BehaviorHints.ProxyHeaders.Request
+	if len(headers) > 64 {
+		return fmt.Errorf("%w: provider stream request headers exceed 64 entries", ErrInvalidResponse)
+	}
+	totalHeaderBytes := 0
+	for name, value := range headers {
+		if invalidToken(name, 256) || invalidValue(value, 8192) {
+			return fmt.Errorf("%w: invalid provider stream request header", ErrInvalidResponse)
+		}
+		if len(name) > 32<<10-totalHeaderBytes || len(value) > 32<<10-totalHeaderBytes-len(name) {
+			return fmt.Errorf("%w: provider stream request headers exceed 32768 bytes", ErrInvalidResponse)
+		}
+		totalHeaderBytes += len(name) + len(value)
+	}
+	return nil
+}
+
+func validateProviderSubtitle(subtitle ProviderSubtitle) error {
+	if invalidValue(subtitle.ID, 1024) || invalidValue(subtitle.URL, 8192) || invalidValue(subtitle.Language, 128) {
+		return fmt.Errorf("%w: invalid provider subtitle field", ErrInvalidResponse)
+	}
+	return nil
+}
+
 type ResourceResult struct {
-	AddonID      string          `json:"addonId"`
-	ManifestID   string          `json:"manifestId"`
-	TransportURL string          `json:"transportUrl"`
-	Resource     string          `json:"resource"`
-	Type         string          `json:"type"`
-	ID           string          `json:"id"`
-	Payload      json.RawMessage `json:"payload"`
-	Cache        CachePolicy     `json:"cache"`
-	Extra        []ExtraValue    `json:"extra,omitempty"`
+	AddonID    string          `json:"addonId"`
+	ManifestID string          `json:"manifestId"`
+	Resource   string          `json:"resource"`
+	Type       string          `json:"type"`
+	ID         string          `json:"id"`
+	Payload    json.RawMessage `json:"payload"`
+	Cache      CachePolicy     `json:"cache"`
+	Extra      []ExtraValue    `json:"extra,omitempty"`
+}
+
+func (result ResourceResult) MarshalJSON() ([]byte, error) {
+	type resourceResult ResourceResult
+	safe := resourceResult(result)
+	if !IsExposableResource(result.Resource) {
+		safe.Payload = json.RawMessage("null")
+		return json.Marshal(safe)
+	}
+	payload, err := SanitizeExposablePayload(result.Payload)
+	if err != nil {
+		return nil, err
+	}
+	safe.Payload = payload
+	return json.Marshal(safe)
+}
+
+func SanitizeExposablePayload(payload json.RawMessage) (json.RawMessage, error) {
+	if err := validateExposablePayloadComplexity(context.Background(), payload); err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("sanitize addon resource payload: %w", err)
+	}
+	safe, ok := sanitizeExposableValue(value, "")
+	if !ok {
+		safe = map[string]any{}
+	}
+	encoded, err := json.Marshal(safe)
+	if err != nil {
+		return nil, fmt.Errorf("encode sanitized addon resource payload: %w", err)
+	}
+	return encoded, nil
+}
+
+func sanitizeExposableValue(value any, field string) (any, bool) {
+	normalizedField := normalizedSensitiveField(field)
+	if sensitiveProviderField(normalizedField) {
+		return nil, false
+	}
+	if providerURLField(normalizedField) {
+		text, ok := value.(string)
+		if !ok || !strings.HasPrefix(text, "/api/v1/artwork/") {
+			return nil, false
+		}
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		safe := make(map[string]any, len(typed))
+		for name, child := range typed {
+			sanitized, ok := sanitizeExposableValue(child, name)
+			if ok {
+				safe[name] = sanitized
+			}
+		}
+		return safe, true
+	case []any:
+		safe := make([]any, 0, len(typed))
+		for _, child := range typed {
+			sanitized, ok := sanitizeExposableValue(child, "")
+			if ok {
+				safe = append(safe, sanitized)
+			}
+		}
+		return safe, true
+	case string:
+		if providerURLField(normalizedField) {
+			return typed, true
+		}
+		trimmed := strings.TrimSpace(typed)
+		lower := strings.ToLower(trimmed)
+		if strings.Contains(lower, "://") || strings.Contains(lower, "magnet:") {
+			return nil, false
+		}
+		if !strings.HasSuffix(normalizedField, "id") {
+			parsed, err := url.Parse(trimmed)
+			if err == nil && (parsed.IsAbs() || parsed.Host != "") {
+				return nil, false
+			}
+		}
+		return typed, true
+	default:
+		return value, true
+	}
+}
+
+func normalizedSensitiveField(field string) string {
+	var normalized strings.Builder
+	normalized.Grow(len(field))
+	for _, character := range strings.ToLower(field) {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			normalized.WriteRune(character)
+		}
+	}
+	return normalized.String()
+}
+
+func providerURLField(field string) bool {
+	if strings.Contains(field, "url") {
+		return true
+	}
+	switch field {
+	case "uri", "href", "src":
+		return true
+	default:
+		return false
+	}
+}
+
+func sensitiveProviderField(field string) bool {
+	for _, fragment := range []string{"header", "cookie", "authorization", "credential", "password", "secret", "token", "apikey", "proxy", "signature"} {
+		if strings.Contains(field, fragment) {
+			return true
+		}
+	}
+	return field == "transporturl"
 }
 
 type ResourceFailure struct {
@@ -215,7 +529,7 @@ func NormalizeTransportURL(raw string) (string, error) {
 }
 
 func ParseManifest(raw []byte) (Manifest, json.RawMessage, error) {
-	if len(raw) == 0 || !json.Valid(raw) {
+	if len(raw) == 0 || len(raw) > maxManifestBytes || !json.Valid(raw) {
 		return Manifest{}, nil, ErrInvalidManifest
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -235,6 +549,9 @@ func ParseManifest(raw []byte) (Manifest, json.RawMessage, error) {
 }
 
 func (manifest Manifest) Validate() error {
+	if err := validateManifestCardinality(manifest); err != nil {
+		return err
+	}
 	if invalidToken(manifest.ID, 512) || invalidToken(manifest.Name, 512) || !semanticVersionPattern.MatchString(manifest.Version) {
 		return ErrInvalidManifest
 	}
@@ -287,6 +604,82 @@ func (manifest Manifest) Validate() error {
 			}
 			seen[key] = struct{}{}
 			if err := validateExtras(catalog); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateManifestCardinality(manifest Manifest) error {
+	if len(manifest.Types) > maxManifestTypes {
+		return fmt.Errorf("%w: types exceeds limit of %d", ErrInvalidManifest, maxManifestTypes)
+	}
+	if len(manifest.Resources) > maxManifestResources {
+		return fmt.Errorf("%w: resources exceeds limit of %d", ErrInvalidManifest, maxManifestResources)
+	}
+	if len(manifest.Catalogs)+len(manifest.AddonCatalogs) > maxManifestCatalogs {
+		return fmt.Errorf("%w: catalogs exceeds limit of %d", ErrInvalidManifest, maxManifestCatalogs)
+	}
+	if len(manifest.Config) > maxManifestConfigEntries {
+		return fmt.Errorf("%w: config exceeds limit of %d", ErrInvalidManifest, maxManifestConfigEntries)
+	}
+
+	complexity := len(manifest.Types) + len(manifest.Resources) + len(manifest.Catalogs) + len(manifest.AddonCatalogs) + len(manifest.Config)
+	addList := func(name string, size int) error {
+		if size > maxManifestListEntries {
+			return fmt.Errorf("%w: %s exceeds limit of %d", ErrInvalidManifest, name, maxManifestListEntries)
+		}
+		complexity += size
+		if complexity > maxManifestComplexity {
+			return fmt.Errorf("%w: manifest complexity exceeds limit of %d", ErrInvalidManifest, maxManifestComplexity)
+		}
+		return nil
+	}
+	if manifest.IDPrefixes != nil {
+		if err := addList("idPrefixes", len(*manifest.IDPrefixes)); err != nil {
+			return err
+		}
+	}
+	for _, resource := range manifest.Resources {
+		if resource.Types != nil {
+			if err := addList("resource types", len(*resource.Types)); err != nil {
+				return err
+			}
+		}
+		if resource.IDPrefixes != nil {
+			if err := addList("resource idPrefixes", len(*resource.IDPrefixes)); err != nil {
+				return err
+			}
+		}
+	}
+	validateCatalog := func(catalog ManifestCatalog) error {
+		if len(catalog.Extra) > maxManifestCatalogExtras {
+			return fmt.Errorf("%w: catalog extras exceeds limit of %d", ErrInvalidManifest, maxManifestCatalogExtras)
+		}
+		for _, list := range []struct {
+			name string
+			size int
+		}{
+			{"catalog genres", len(catalog.Genres)},
+			{"catalog extras", len(catalog.Extra)},
+			{"catalog extraRequired", len(catalog.ExtraRequired)},
+			{"catalog extraSupported", len(catalog.ExtraSupported)},
+		} {
+			if err := addList(list.name, list.size); err != nil {
+				return err
+			}
+		}
+		for _, extra := range catalog.Extra {
+			if err := addList("catalog extra options", len(extra.Options)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, catalogs := range [][]ManifestCatalog{manifest.Catalogs, manifest.AddonCatalogs} {
+		for _, catalog := range catalogs {
+			if err := validateCatalog(catalog); err != nil {
 				return err
 			}
 		}
@@ -444,6 +837,18 @@ func invalidValue(value string, maximum int) bool {
 	}
 	for _, character := range value {
 		if character < 0x20 || character == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func invalidProviderDisplayText(value string, maximum int) bool {
+	if len(value) > maximum || strings.ContainsRune(value, '\x00') {
+		return true
+	}
+	for _, character := range value {
+		if character < 0x20 && character != '\t' && character != '\n' && character != '\r' || character == 0x7f {
 			return true
 		}
 	}

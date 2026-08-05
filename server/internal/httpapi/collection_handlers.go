@@ -16,8 +16,8 @@ func (api *API) listCollections(w http.ResponseWriter, r *http.Request, principa
 		api.writeCollectionError(w, "list collections", err)
 		return
 	}
-	if api.artwork != nil {
-		api.artwork.PresentCollections(r.Context(), values)
+	if api.collectionArtwork != nil {
+		api.collectionArtwork.PresentCollections(r.Context(), values)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"collections": values})
 }
@@ -37,22 +37,17 @@ func (api *API) importCollections(w http.ResponseWriter, r *http.Request, princi
 		return
 	}
 	var document collection.ExportDocument
-	if err := decodeJSONLimit(w, r, &document, 16*1024*1024); err != nil {
+	if err := decodeJSONLimit(w, r, &document, collection.MaximumImportDocumentBytes); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
-	}
-	if api.artwork != nil {
-		for index := range document.Collections {
-			api.artwork.RestoreCollectionSaveInput(r.Context(), &document.Collections[index])
-		}
 	}
 	result, err := api.collections.Import(r.Context(), principal, document)
 	if err != nil {
 		api.writeCollectionError(w, "import collections", err)
 		return
 	}
-	if api.artwork != nil {
-		api.artwork.PresentCollections(r.Context(), result.Collections)
+	if api.collectionArtwork != nil {
+		api.collectionArtwork.PresentCollections(r.Context(), result.Collections)
 	}
 	writeJSON(w, http.StatusCreated, result)
 }
@@ -63,10 +58,19 @@ func (api *API) getCollection(w http.ResponseWriter, r *http.Request, principal 
 		api.writeCollectionError(w, "get collection", err)
 		return
 	}
-	if api.artwork != nil {
+	if api.collectionArtwork != nil {
 		values := []collection.Collection{value}
-		api.artwork.PresentCollections(r.Context(), values)
+		api.collectionArtwork.PresentCollections(r.Context(), values)
 		value = values[0]
+	}
+	writeJSON(w, http.StatusOK, value)
+}
+
+func (api *API) collectionManagement(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	value, err := api.collections.Management(r.Context(), principal, r.PathValue("collectionId"))
+	if err != nil {
+		api.writeCollectionError(w, "get collection management details", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, value)
 }
@@ -80,17 +84,17 @@ func (api *API) createCollection(w http.ResponseWriter, r *http.Request, princip
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if api.artwork != nil {
-		api.artwork.RestoreCollectionSaveInput(r.Context(), &input)
+	if api.collectionArtwork != nil {
+		api.collectionArtwork.RestoreCollectionSaveInput(r.Context(), &input)
 	}
 	value, err := api.collections.Create(r.Context(), principal, input)
 	if err != nil {
 		api.writeCollectionError(w, "create collection", err)
 		return
 	}
-	if api.artwork != nil {
+	if api.collectionArtwork != nil {
 		values := []collection.Collection{value}
-		api.artwork.PresentCollections(r.Context(), values)
+		api.collectionArtwork.PresentCollections(r.Context(), values)
 		value = values[0]
 	}
 	writeJSON(w, http.StatusCreated, value)
@@ -105,17 +109,17 @@ func (api *API) updateCollection(w http.ResponseWriter, r *http.Request, princip
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if api.artwork != nil {
-		api.artwork.RestoreCollectionSaveInput(r.Context(), &input)
+	if api.collectionArtwork != nil {
+		api.collectionArtwork.RestoreCollectionSaveInput(r.Context(), &input)
 	}
 	value, err := api.collections.Update(r.Context(), principal, r.PathValue("collectionId"), input)
 	if err != nil {
 		api.writeCollectionError(w, "update collection", err)
 		return
 	}
-	if api.artwork != nil {
+	if api.collectionArtwork != nil {
 		values := []collection.Collection{value}
-		api.artwork.PresentCollections(r.Context(), values)
+		api.collectionArtwork.PresentCollections(r.Context(), values)
 		value = values[0]
 	}
 	writeJSON(w, http.StatusOK, value)
@@ -143,8 +147,8 @@ func (api *API) reorderCollections(w http.ResponseWriter, r *http.Request, princ
 		api.writeCollectionError(w, "reorder collections", err)
 		return
 	}
-	if api.artwork != nil {
-		api.artwork.PresentCollections(r.Context(), values)
+	if api.collectionArtwork != nil {
+		api.collectionArtwork.PresentCollections(r.Context(), values)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"collections": values})
 }
@@ -182,8 +186,8 @@ func (api *API) lookupCollectionTMDB(w http.ResponseWriter, r *http.Request, pri
 		api.writeCollectionError(w, "lookup TMDB collection source", err)
 		return
 	}
-	if api.artwork != nil {
-		api.artwork.LocalizeCollectionLookupResults(r.Context(), values)
+	if api.collectionArtwork != nil {
+		api.collectionArtwork.LocalizeCollectionLookupResults(r.Context(), values)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": values})
 }

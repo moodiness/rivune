@@ -22,6 +22,7 @@ var (
 	ErrInvalidCredentials   = errors.New("invalid credentials")
 	ErrInvalidToken         = errors.New("invalid token")
 	ErrInvalidInput         = errors.New("invalid authentication input")
+	ErrDeviceQuotaReached   = errors.New("device quota reached")
 	ErrSessionNotFound      = errors.New("session not found")
 	ErrNotificationNotFound = errors.New("notification not found")
 	ErrForbidden            = errors.New("authentication operation forbidden")
@@ -37,17 +38,22 @@ const (
 const (
 	accessTokenPrefix                = "rivune_at_"
 	refreshTokenPrefix               = "rivune_rt_"
-	maximumLoginFailures             = 5
-	loginLockDuration                = 15 * time.Minute
 	maximumSessionNotificationLength = 500
+	// Concurrent clients may still have the just-consumed token in flight; it remains invalid but does not revoke the session immediately.
+	refreshTokenReuseGracePeriod = 10 * time.Second
+	// maximumDevicesPerUser bounds persistent device identities. Existing identities
+	// remain usable at the limit; only creation of a 51st identity is rejected.
+	maximumDevicesPerUser = 50
 )
 
 type Service struct {
-	pool       *pgxpool.Pool
-	accessTTL  time.Duration
-	refreshTTL time.Duration
-	timezone   string
-	dummyHash  string
+	pool                              *pgxpool.Pool
+	accessTTL                         time.Duration
+	refreshTTL                        time.Duration
+	timezone                          string
+	dummyHash                         string
+	deviceAuthorizationCapacity       int
+	deviceAuthorizationSourceCapacity int
 }
 
 type LoginInput struct {
@@ -73,6 +79,7 @@ type Principal struct {
 	SessionID              string
 	UserID                 string
 	DeviceID               string
+	Platform               string
 	Username               string
 	Role                   string
 	AuthorizationScope     AuthorizationScope
@@ -80,6 +87,7 @@ type Principal struct {
 	Category               *category.CategoryRef
 	ActiveProfileID        *string
 	ProfileGrantExpiresAt  *time.Time
+	ProfileContextHash     []byte
 	ActiveProfileCanManage bool
 }
 
@@ -147,7 +155,11 @@ func NewService(pool *pgxpool.Pool, accessTTL, refreshTTL time.Duration, timezon
 	if err != nil {
 		return nil, fmt.Errorf("create password timing sentinel: %w", err)
 	}
-	return &Service{pool: pool, accessTTL: accessTTL, refreshTTL: refreshTTL, timezone: timezone, dummyHash: dummyHash}, nil
+	return &Service{
+		pool: pool, accessTTL: accessTTL, refreshTTL: refreshTTL, timezone: timezone, dummyHash: dummyHash,
+		deviceAuthorizationCapacity:       maximumOutstandingDeviceAuthorizations,
+		deviceAuthorizationSourceCapacity: maximumOutstandingDeviceAuthorizationsPerSource,
+	}, nil
 }
 
 func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error) {
@@ -159,20 +171,12 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 		return TokenPair{}, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return TokenPair{}, fmt.Errorf("begin login: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	var userID, passwordHash, role string
-	var lockedUntil *time.Time
-	var failedLoginCount int
-	err = tx.QueryRow(ctx, `
-		SELECT id::text, password_hash, role, failed_login_count, locked_until
+	err := s.pool.QueryRow(ctx, `
+		SELECT id::text, password_hash, role
 		FROM users
 		WHERE lower(username) = lower($1)
-		FOR UPDATE
-	`, input.Username).Scan(&userID, &passwordHash, &role, &failedLoginCount, &lockedUntil)
+	`, input.Username).Scan(&userID, &passwordHash, &role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		_, _ = password.Verify(input.Password, s.dummyHash)
 		return TokenPair{}, ErrInvalidCredentials
@@ -185,27 +189,35 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 	if verifyErr != nil {
 		return TokenPair{}, fmt.Errorf("verify password: %w", verifyErr)
 	}
-	now := time.Now().UTC()
-	if !matches || (lockedUntil != nil && lockedUntil.After(now)) {
-		if lockedUntil == nil || !lockedUntil.After(now) {
-			failedLoginCount++
-			if failedLoginCount >= maximumLoginFailures {
-				if _, err := tx.Exec(ctx, "UPDATE users SET failed_login_count = 0, locked_until = $2 WHERE id = $1", userID, now.Add(loginLockDuration)); err != nil {
-					return TokenPair{}, fmt.Errorf("lock user after failed login: %w", err)
-				}
-			} else if _, err := tx.Exec(ctx, "UPDATE users SET failed_login_count = $2 WHERE id = $1", userID, failedLoginCount); err != nil {
-				return TokenPair{}, fmt.Errorf("record failed login: %w", err)
-			}
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return TokenPair{}, fmt.Errorf("commit failed login: %w", err)
-		}
+	if !matches {
 		return TokenPair{}, ErrInvalidCredentials
 	}
 
-	if _, err := tx.Exec(ctx, "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = $1", userID); err != nil {
-		return TokenPair{}, fmt.Errorf("clear failed login state: %w", err)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return TokenPair{}, fmt.Errorf("begin login: %w", err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var currentPasswordHash string
+	if err := tx.QueryRow(ctx, `
+		SELECT password_hash
+		FROM users
+		WHERE id = $1::uuid
+		FOR UPDATE
+	`, userID).Scan(&currentPasswordHash); errors.Is(err, pgx.ErrNoRows) {
+		return TokenPair{}, ErrInvalidCredentials
+	} else if err != nil {
+		return TokenPair{}, fmt.Errorf("lock login user: %w", err)
+	}
+	if currentPasswordHash != passwordHash {
+		return TokenPair{}, ErrInvalidCredentials
+	}
+	if _, err := tx.Exec(ctx, "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = $1::uuid", userID); err != nil {
+		return TokenPair{}, fmt.Errorf("clear legacy login lock: %w", err)
+	}
+
+	now := time.Now().UTC()
 	deviceID, deviceCategory, err := upsertDevice(ctx, tx, userID, role, input)
 	if err != nil {
 		return TokenPair{}, err
@@ -269,7 +281,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 
 	now := time.Now().UTC()
 	if consumedAt != nil || revokedAt != nil || !refreshExpiresAt.After(now) {
-		if consumedAt != nil && revokedAt == nil {
+		if consumedAt != nil && revokedAt == nil && !now.Before(consumedAt.Add(refreshTokenReuseGracePeriod)) {
 			if _, err := tx.Exec(ctx, "UPDATE auth_sessions SET revoked_at = $2, revoked_reason = 'refresh_token_reuse' WHERE id = $1", sessionID, now); err != nil {
 				return TokenPair{}, fmt.Errorf("revoke replayed session: %w", err)
 			}
@@ -320,7 +332,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 		SET access_token_hash = $2, access_expires_at = $3, last_seen_at = $4,
 		    last_ip = COALESCE(NULLIF($5, '')::inet, last_ip)
 		WHERE id = $1
-	`, sessionID, accessHash, accessExpiresAt, now, clientIPFromContext(ctx)); err != nil {
+	`, sessionID, accessHash, accessExpiresAt, now, ClientIP(ctx)); err != nil {
 		return TokenPair{}, fmt.Errorf("rotate session token: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -346,10 +358,10 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 	var hasActiveProfileAccess bool
 	var access ProfileAccess
 	err := s.pool.QueryRow(ctx, `
-		SELECT s.id::text, s.user_id::text, s.device_id::text, u.username, u.role,
-		       s.authorization_scope, s.category_id::text, c.name, c.color, c.icon,
+		SELECT s.id::text, s.user_id::text, s.device_id::text, d.platform,
+		       u.username, u.role, s.authorization_scope, s.category_id::text, c.name, c.color, c.icon,
 		       d.category_id::text, s.active_profile_id::text, p.category_id::text,
-		       s.profile_grant_expires_at,
+		       s.profile_grant_expires_at, s.profile_context_hash,
 		       COALESCE(upa.can_manage, false),
 		       upa.user_id IS NOT NULL,
 		       COALESCE(host(s.last_ip), ''), COALESCE(p.enabled, false),
@@ -367,10 +379,12 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 		  AND s.access_expires_at > now()
 		  AND s.revoked_at IS NULL
 	`, tokenDigest(accessToken)).Scan(
-		&principal.SessionID, &principal.UserID, &principal.DeviceID, &principal.Username, &principal.Role,
-		&principal.AuthorizationScope, &principal.CategoryID, &categoryName, &categoryColor, &categoryIcon,
+		&principal.SessionID, &principal.UserID, &principal.DeviceID, &principal.Platform,
+		&principal.Username, &principal.Role, &principal.AuthorizationScope,
+		&principal.CategoryID, &categoryName, &categoryColor, &categoryIcon,
 		&deviceCategoryID, &principal.ActiveProfileID, &activeProfileCategoryID,
-		&principal.ProfileGrantExpiresAt, &principal.ActiveProfileCanManage, &hasActiveProfileAccess,
+		&principal.ProfileGrantExpiresAt, &principal.ProfileContextHash,
+		&principal.ActiveProfileCanManage, &hasActiveProfileAccess,
 		&lastIPAddress, &access.Enabled, &access.AvailableFrom, &access.AvailableUntil,
 		&access.AccessStartTime, &access.AccessEndTime, &access.AccessTimezone,
 	)
@@ -395,7 +409,7 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 		activeProfileID := *principal.ActiveProfileID
 		if _, err := s.pool.Exec(ctx, `
 			UPDATE auth_sessions
-			SET active_profile_id = NULL, profile_grant_expires_at = NULL
+			SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
 			WHERE id = $1 AND active_profile_id::text = $2
 		`, principal.SessionID, activeProfileID); err != nil {
 			return Principal{}, fmt.Errorf("clear unauthorized profile grant: %w", err)
@@ -403,6 +417,7 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 		principal.ActiveProfileID = nil
 		principal.ProfileGrantExpiresAt = nil
 		principal.ActiveProfileCanManage = false
+		principal.ProfileContextHash = nil
 	}
 	principal.Category = newCategoryRef(principal.CategoryID, categoryName, categoryColor, categoryIcon)
 	access.AccessTimezone = s.timezone
@@ -410,13 +425,13 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 	if reconcileProfileGrant(&principal, access, time.Now().UTC()) {
 		if _, err := s.pool.Exec(ctx, `
 			UPDATE auth_sessions
-			SET active_profile_id = NULL, profile_grant_expires_at = NULL
+			SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
 			WHERE id = $1 AND active_profile_id::text = $2
 		`, principal.SessionID, *activeProfileID); err != nil {
 			return Principal{}, fmt.Errorf("clear unavailable profile grant: %w", err)
 		}
 	}
-	if currentIPAddress := clientIPFromContext(ctx); currentIPAddress != "" && currentIPAddress != lastIPAddress {
+	if currentIPAddress := ClientIP(ctx); currentIPAddress != "" && currentIPAddress != lastIPAddress {
 		if _, err := s.pool.Exec(ctx, "UPDATE auth_sessions SET last_ip = $2::inet WHERE id = $1", principal.SessionID, currentIPAddress); err != nil {
 			return Principal{}, fmt.Errorf("update session IP address: %w", err)
 		}
@@ -672,10 +687,6 @@ func (s *Service) SendProfileSessionNotification(ctx context.Context, principal 
 	}
 	var notification SessionNotification
 	err = tx.QueryRow(ctx, `
-		WITH expired AS (
-			DELETE FROM auth_session_notifications
-			WHERE expires_at <= now()
-		)
 		INSERT INTO auth_session_notifications (session_id, sender_user_id, message)
 		SELECT session.id, $3::uuid, $4
 		FROM auth_sessions session
@@ -963,6 +974,9 @@ func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input Log
 	}
 	var deviceID, categoryID string
 	if input.DeviceID == "" {
+		if err := reserveDeviceSlot(ctx, tx, userID); err != nil {
+			return "", nil, err
+		}
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO devices (user_id, name, platform, category_id, approved_at, last_seen_at)
 			VALUES (
@@ -997,6 +1011,30 @@ func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input Log
 		return "", nil, err
 	}
 	return deviceID, deviceCategory, nil
+}
+func reserveDeviceSlot(ctx context.Context, tx pgx.Tx, userID string) error {
+	var lockedUserID string
+	if err := tx.QueryRow(ctx, `
+		SELECT id::text
+		FROM users
+		WHERE id = $1::uuid
+		FOR UPDATE
+	`, userID).Scan(&lockedUserID); err != nil {
+		return fmt.Errorf("lock device owner: %w", err)
+	}
+
+	var deviceCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		FROM devices
+		WHERE user_id = $1::uuid
+	`, userID).Scan(&deviceCount); err != nil {
+		return fmt.Errorf("count user devices: %w", err)
+	}
+	if deviceCount >= maximumDevicesPerUser {
+		return ErrDeviceQuotaReached
+	}
+	return nil
 }
 
 func passwordLoginCategoryID(ctx context.Context, tx pgx.Tx, userID, role string) (*string, error) {
@@ -1060,7 +1098,7 @@ func (s *Service) createSession(
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, '')::inet)
 		RETURNING id::text
 	`, userID, deviceID, scope, categoryID, accessHash, tokens.AccessExpiresAt,
-		tokens.RefreshExpiresAt, now, clientIPFromContext(ctx)).Scan(&tokens.SessionID); err != nil {
+		tokens.RefreshExpiresAt, now, ClientIP(ctx)).Scan(&tokens.SessionID); err != nil {
 		return TokenPair{}, fmt.Errorf("create session: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `

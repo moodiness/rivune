@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,11 +24,12 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/netguard"
 )
 
 type ResourceFetcher interface {
-	Fetch(context.Context, auth.Principal, string, addon.ResourcePath) (addon.ResourceResult, error)
-	FetchAll(context.Context, auth.Principal, addon.ResourcePath) (addon.ResourceBatch, error)
+	FetchPlaybackResource(context.Context, auth.Principal, string, addon.ResourcePath) (addon.ResourceResult, error)
+	FetchAllPlaybackResources(context.Context, auth.Principal, addon.ResourcePath) (addon.ResourceBatch, error)
 }
 
 type playbackProfileTransaction interface {
@@ -50,38 +52,18 @@ type Service struct {
 	references              *sourceReferenceStore
 	probes                  *mediaProbeCache
 	preparations            *playbackPreparationCache
+	targetSigningKey        [32]byte
 	hlsMu                   sync.Mutex
+	introDBCacheStores      atomic.Uint64
 	profileTxFactory        func(context.Context, auth.Principal) (playbackProfileTransaction, error)
 	sessionCleanupTxFactory func(context.Context) (playbackProfileTransaction, error)
 	hlsJobs                 map[string]*hlsJob
 }
 
-type rawStream struct {
-	Name          string          `json:"name"`
-	Title         string          `json:"title"`
-	URL           string          `json:"url"`
-	Description   string          `json:"description"`
-	YTID          string          `json:"ytId"`
-	ExternalURL   string          `json:"externalUrl"`
-	InfoHash      string          `json:"infoHash"`
-	FileIndex     *int            `json:"fileIdx"`
-	BehaviorHints json.RawMessage `json:"behaviorHints"`
-}
-
-type rawSubtitle struct {
-	ID       string `json:"id"`
-	URL      string `json:"url"`
-	Language string `json:"lang"`
-	Forced   bool   `json:"forced"`
-}
-
-type behaviorHints struct {
-	NotWebReady  bool   `json:"notWebReady"`
-	Filename     string `json:"filename"`
-	ProxyHeaders struct {
-		Request map[string]json.RawMessage `json:"request"`
-	} `json:"proxyHeaders"`
-}
+const (
+	maximumAggregateProviderStreams   = 512
+	maximumAggregateProviderSubtitles = 1024
+)
 
 type fetchedResources struct {
 	batch addon.ResourceBatch
@@ -90,6 +72,9 @@ type fetchedResources struct {
 
 func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProcessor, options MediaOptions) (*Service, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = netguard.DialContextPublic
+	transport.MaxResponseHeaderBytes = 64 << 10
 	transport.ResponseHeaderTimeout = 15 * time.Second
 	transport.MaxIdleConnsPerHost = 8
 	options = normalizeMediaOptions(options)
@@ -99,13 +84,35 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 	if err := os.MkdirAll(options.TempDirectory, 0o700); err != nil {
 		return nil, fmt.Errorf("create media workspace: %w", err)
 	}
+	var targetSigningKey [32]byte
+	if _, err := rand.Read(targetSigningKey[:]); err != nil {
+		return nil, fmt.Errorf("create HLS target signing key: %w", err)
+	}
 	now := func() time.Time { return time.Now().UTC() }
 	return &Service{
-		pool: pool, addons: addons, client: &http.Client{Transport: transport}, processor: processor,
+		pool: pool, addons: addons, client: &http.Client{Transport: transport, CheckRedirect: playbackRedirectPolicy}, processor: processor,
 		introDBClient: &http.Client{Transport: transport.Clone(), Timeout: 8 * time.Second}, introDBBaseURL: introDBDefaultBaseURL,
-		now: now, mediaOptions: options, hlsJobs: make(map[string]*hlsJob),
+		now: now, mediaOptions: options, hlsJobs: make(map[string]*hlsJob), targetSigningKey: targetSigningKey,
 		references: newSourceReferenceStore(now), probes: newMediaProbeCache(now), preparations: newPlaybackPreparationCache(now),
 	}, nil
+}
+
+func playbackRedirectPolicy(request *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("too many playback redirects")
+	}
+	if request.URL.Scheme != "http" && request.URL.Scheme != "https" {
+		return errors.New("unsupported playback redirect scheme")
+	}
+	previous := via[len(via)-1]
+	if previous.URL.Scheme == "https" && request.URL.Scheme != "https" {
+		return errors.New("playback HTTPS redirect downgrade refused")
+	}
+	if !strings.EqualFold(previous.URL.Host, request.URL.Host) {
+		request.Header = make(http.Header)
+		request.Header.Set("User-Agent", "Rivune-Playback/1")
+	}
+	return nil
 }
 
 func (service *Service) Sources(ctx context.Context, principal auth.Principal, input SourcesInput) (SourceList, error) {
@@ -130,17 +137,20 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 	var err error
 	if input.AddonID != "" {
 		var result addon.ResourceResult
-		result, err = service.addons.Fetch(ctx, principal, input.AddonID, resourcePath)
+		result, err = service.addons.FetchPlaybackResource(ctx, principal, input.AddonID, resourcePath)
 		if err == nil {
 			batch.Results = []addon.ResourceResult{result}
 		}
 	} else {
-		batch, err = service.addons.FetchAll(ctx, principal, resourcePath)
+		batch, err = service.addons.FetchAllPlaybackResources(ctx, principal, resourcePath)
 	}
 	if err != nil {
 		return SourceList{}, fmt.Errorf("%w: %v", ErrProviderUnavailable, err)
 	}
-	sources, assets := normalizeStreams(batch, input.Capabilities)
+	sources, assets, err := normalizeStreams(batch, input.Capabilities)
+	if err != nil {
+		return SourceList{}, ErrProviderUnavailable
+	}
 	if len(sources) == 0 && len(batch.Errors) > 0 {
 		return SourceList{}, ErrProviderUnavailable
 	}
@@ -150,7 +160,7 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 		return SourceList{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	options := make([]SourceOption, 0, len(sources))
+	references := make([]sourceReference, 0, len(sources))
 	for index := range sources {
 		source := sources[index]
 		var asset *storedAsset
@@ -158,7 +168,7 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 			value := cloneStoredAsset(assets[assetIndex])
 			asset = &value
 		}
-		reference, referenceErr := service.references.put(sourceReference{
+		references = append(references, sourceReference{
 			AuthSessionID: principal.SessionID, ProfileID: *principal.ActiveProfileID,
 			MediaType: input.MediaType, AddonMediaType: addonMediaType, ResourceID: input.ResourceID,
 			Source: source, Asset: asset, Capabilities: input.Capabilities,
@@ -166,9 +176,15 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 			PreferredForcedSubtitleLanguage: input.PreferredForcedSubtitleLanguage,
 			ProviderErrors:                  providerErrors,
 		})
-		if referenceErr != nil {
-			return SourceList{}, fmt.Errorf("create source reference: %w", referenceErr)
-		}
+	}
+	storedReferences, err := service.references.putAll(references)
+	if err != nil {
+		return SourceList{}, fmt.Errorf("create source references: %w", err)
+	}
+	options := make([]SourceOption, 0, len(storedReferences))
+	for index := range storedReferences {
+		reference := storedReferences[index]
+		source := reference.Source
 		options = append(options, SourceOption{
 			ID: source.ID, SourceRef: reference.ID, AddonID: source.AddonID, ManifestID: source.ManifestID,
 			StreamIndex: source.StreamIndex, Name: sourceDisplayName(source), Description: source.Description,
@@ -629,27 +645,41 @@ func sourceDisplayName(source Source) string {
 	return "Stream"
 }
 
-func normalizeStreams(batch addon.ResourceBatch, capabilities Capabilities) ([]Source, []storedAsset) {
-	sources := make([]Source, 0)
-	assets := make([]storedAsset, 0)
+func normalizeStreams(batch addon.ResourceBatch, capabilities Capabilities) ([]Source, []storedAsset, error) {
+	type decodedResponse struct {
+		result   addon.ResourceResult
+		response addon.ProviderStreamResponse
+	}
+	if len(batch.Results) > maximumAggregateProviderStreams {
+		return nil, nil, fmt.Errorf("%w: stream provider responses exceed %d items", addon.ErrInvalidResponse, maximumAggregateProviderStreams)
+	}
+	decoded := make([]decodedResponse, 0, len(batch.Results))
+	total := 0
 	for _, result := range batch.Results {
-		var payload struct {
-			Streams []rawStream `json:"streams"`
+		response, err := addon.ParseProviderStreamResponse(result.Payload)
+		if err != nil {
+			return nil, nil, err
 		}
-		if json.Unmarshal(result.Payload, &payload) != nil {
-			continue
+		if len(response.Streams) > maximumAggregateProviderStreams-total {
+			return nil, nil, fmt.Errorf("%w: aggregate streams exceed %d items", addon.ErrInvalidResponse, maximumAggregateProviderStreams)
 		}
-		for streamIndex, stream := range payload.Streams {
+		total += len(response.Streams)
+		decoded = append(decoded, decodedResponse{result: result, response: response})
+	}
+
+	sources := make([]Source, 0, total)
+	assets := make([]storedAsset, 0, total)
+	for _, decodedResult := range decoded {
+		for streamIndex, stream := range decodedResult.response.Streams {
 			streamURL := strings.TrimSpace(stream.URL)
 			externalURL := strings.TrimSpace(stream.ExternalURL)
 			ytID := strings.TrimSpace(stream.YTID)
 			infoHash := strings.TrimSpace(stream.InfoHash)
-			var hints behaviorHints
-			_ = json.Unmarshal(stream.BehaviorHints, &hints)
+			hints := stream.BehaviorHints
 			headers := requestHeaders(hints)
 			id := fmt.Sprintf("stream-%d", len(sources)+1)
 			source := Source{
-				ID: id, AddonID: result.AddonID, ManifestID: result.ManifestID,
+				ID: id, AddonID: decodedResult.result.AddonID, ManifestID: decodedResult.result.ManifestID,
 				Name: strings.TrimSpace(stream.Name), Title: strings.TrimSpace(stream.Title), Description: strings.TrimSpace(stream.Description),
 				Hint:     strings.TrimSpace(stream.Name + " " + stream.Title + " " + stream.Description + " " + hints.Filename),
 				Filename: strings.TrimSpace(hints.Filename), StreamIndex: streamIndex, FileIndex: stream.FileIndex,
@@ -686,20 +716,35 @@ func normalizeStreams(batch addon.ResourceBatch, capabilities Capabilities) ([]S
 		}
 	}
 	sortSources(sources)
-	return sources, assets
+	return sources, assets, nil
 }
 
-func normalizeSubtitles(batch addon.ResourceBatch) ([]Subtitle, []storedAsset) {
-	subtitles := make([]Subtitle, 0)
-	assets := make([]storedAsset, 0)
+func normalizeSubtitles(batch addon.ResourceBatch) ([]Subtitle, []storedAsset, error) {
+	type decodedResponse struct {
+		result   addon.ResourceResult
+		response addon.ProviderSubtitleResponse
+	}
+	if len(batch.Results) > maximumAggregateProviderSubtitles {
+		return nil, nil, fmt.Errorf("%w: subtitle provider responses exceed %d items", addon.ErrInvalidResponse, maximumAggregateProviderSubtitles)
+	}
+	decoded := make([]decodedResponse, 0, len(batch.Results))
+	total := 0
 	for _, result := range batch.Results {
-		var payload struct {
-			Subtitles []rawSubtitle `json:"subtitles"`
+		response, err := addon.ParseProviderSubtitleResponse(result.Payload)
+		if err != nil {
+			return nil, nil, err
 		}
-		if json.Unmarshal(result.Payload, &payload) != nil {
-			continue
+		if len(response.Subtitles) > maximumAggregateProviderSubtitles-total {
+			return nil, nil, fmt.Errorf("%w: aggregate subtitles exceed %d items", addon.ErrInvalidResponse, maximumAggregateProviderSubtitles)
 		}
-		for _, subtitle := range payload.Subtitles {
+		total += len(response.Subtitles)
+		decoded = append(decoded, decodedResponse{result: result, response: response})
+	}
+
+	subtitles := make([]Subtitle, 0, total)
+	assets := make([]storedAsset, 0, total)
+	for _, decodedResult := range decoded {
+		for _, subtitle := range decodedResult.response.Subtitles {
 			if !validMediaURL(subtitle.URL) {
 				continue
 			}
@@ -710,21 +755,23 @@ func normalizeSubtitles(batch addon.ResourceBatch) ([]Subtitle, []storedAsset) {
 				kind = assetKindConvertedSubtitle
 			}
 			subtitles = append(subtitles, Subtitle{
-				ID: id, AddonID: result.AddonID, ManifestID: result.ManifestID,
+				ID: id, AddonID: decodedResult.result.AddonID, ManifestID: decodedResult.result.ManifestID,
 				Language: strings.TrimSpace(subtitle.Language), URL: subtitle.URL,
 				Delivery: "external", Forced: subtitle.Forced,
 			})
 			assets = append(assets, storedAsset{ID: id, Kind: kind, URL: subtitle.URL})
 		}
 	}
-	return subtitles, assets
+	return subtitles, assets, nil
 }
 
-func requestHeaders(hints behaviorHints) map[string]string {
-	headers := make(map[string]string)
-	for name, raw := range hints.ProxyHeaders.Request {
-		var value string
-		if json.Unmarshal(raw, &value) == nil && value != "" {
+func requestHeaders(hints addon.ProviderStreamBehaviorHints) map[string]string {
+	if len(hints.ProxyHeaders.Request) == 0 {
+		return nil
+	}
+	headers := make(map[string]string, len(hints.ProxyHeaders.Request))
+	for name, value := range hints.ProxyHeaders.Request {
+		if value != "" {
 			headers[name] = value
 		}
 	}

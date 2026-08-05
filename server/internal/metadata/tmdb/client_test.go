@@ -11,6 +11,17 @@ import (
 	"github.com/moodiness/rivune/server/internal/metadata"
 )
 
+func TestProductionClientRejectsCrossOriginRedirect(t *testing.T) {
+	client := New("test-token", nil)
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://127.0.0.1/latest/meta-data", nil)
+	if err != nil {
+		t.Fatalf("create redirect request: %v", err)
+	}
+	if err := client.httpClient.CheckRedirect(request, nil); err == nil {
+		t.Fatal("TMDB production client accepted a loopback redirect")
+	}
+}
+
 func TestNormalizeCastRetainsUpToOneHundredUniqueMembers(t *testing.T) {
 	cast := make([]castMemberResponse, 0, 104)
 	cast = append(cast,

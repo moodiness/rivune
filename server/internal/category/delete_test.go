@@ -84,10 +84,10 @@ func TestDeleteLocksEveryReassignedProfileBeforeUpdatingSessions(t *testing.T) {
 	if err := fixture.QueryRow(ctx, `
 		INSERT INTO auth_sessions (
 			user_id, device_id, access_token_hash, access_expires_at, refresh_expires_at,
-			active_profile_id, profile_grant_expires_at, authorization_scope, category_id
+			active_profile_id, profile_grant_expires_at, profile_context_hash, authorization_scope, category_id
 		) VALUES (
 			$1::uuid, $2::uuid, $3, now() + interval '1 hour', now() + interval '2 hours',
-			$4::uuid, now() + interval '1 hour', 'global_admin', NULL
+			$4::uuid, now() + interval '1 hour', decode(repeat('a2', 32), 'hex'), 'global_admin', NULL
 		)
 		RETURNING id::text
 	`, userID, deviceID, tokenHash[:], firstProfileID).Scan(&sessionID); err != nil {

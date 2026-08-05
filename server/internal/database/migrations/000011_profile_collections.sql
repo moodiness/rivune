@@ -1,6 +1,5 @@
-BEGIN;
 
-CREATE TABLE profile_collections (
+CREATE TABLE IF NOT EXISTS profile_collections (
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
  profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
  title text NOT NULL CHECK (title = btrim(title) AND length(title) BETWEEN 1 AND 120),
@@ -18,7 +17,5 @@ CREATE TABLE profile_collections (
  UNIQUE (profile_id, position) DEFERRABLE INITIALLY DEFERRED
 );
 
-CREATE INDEX profile_collections_profile_order_idx
+CREATE INDEX IF NOT EXISTS profile_collections_profile_order_idx
  ON profile_collections (profile_id, pin_to_top DESC, position, id);
-
-COMMIT;

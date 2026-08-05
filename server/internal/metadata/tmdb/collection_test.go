@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/collection"
 )
 
@@ -274,5 +275,51 @@ func TestResolveCollectionSourceKeepsLocalizedPageWhenEnglishFallbackFails(t *te
 	}
 	if len(requests) != 2 || len(page.Items) != 1 || page.Items[0].Title != "Film français" || page.Items[0].Description != "" {
 		t.Fatalf("requests = %d, page = %+v", len(requests), page)
+	}
+}
+
+func TestResolveCollectionSourceAccountsTMDBPayloadBeforeNormalization(t *testing.T) {
+	id := int64(42)
+	source := collection.TMDBSource{
+		SourceType: "list", TMDBID: &id, MediaType: collection.MediaTypeMovie, Sort: "original",
+	}
+	tests := []struct {
+		name      string
+		byteLimit int64
+		itemLimit int64
+		response  string
+	}{
+		{
+			name: "bytes", byteLimit: 8, itemLimit: 10,
+			response: `{"items":[{"id":1,"title":"First","media_type":"movie"}]}`,
+		},
+		{
+			name: "items", byteLimit: 1 << 20, itemLimit: 1,
+			response: `{"items":[{"id":1,"title":"First","media_type":"movie"},{"id":2,"title":"Second","media_type":"movie"}]}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(test.response))
+			}))
+			defer server.Close()
+
+			ctx, budget := addon.WithPayloadBudget(context.Background(), test.byteLimit, test.itemLimit)
+			defer budget.Cancel()
+			sourceCtx := addon.WithPayloadBudgetSource(ctx)
+			client := newWithBaseURL("token", server.URL, server.Client())
+			if _, err := client.ResolveCollectionSource(sourceCtx, source, 1, "en-US", "US"); err == nil {
+				t.Fatal("payload over the request budget was accepted")
+			}
+			if !budget.Exceeded() {
+				t.Fatal("payload over the request budget did not mark it exceeded")
+			}
+			select {
+			case <-ctx.Done():
+			default:
+				t.Fatal("payload over the request budget did not cancel the source context")
+			}
+		})
 	}
 }

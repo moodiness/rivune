@@ -409,17 +409,40 @@ func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOpti
 	}
 
 	var result RefreshResult
-	attemptedTitleIDs := make([]string, 0)
 	failedTitleSet := make(map[string]struct{})
+	phase := int16(0)
+	var phaseBoundary time.Time
+	var phaseUpperBoundary time.Time
+	phaseHadCandidates := false
+	if options.Exhaustive {
+		if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&phaseUpperBoundary); err != nil {
+			return result, fmt.Errorf("query metadata refresh boundary: %w", err)
+		}
+		phase = -1
+	}
+	var cursor metadataRefreshCursor
 	for {
-		candidates, err := s.missingRefreshCandidates(ctx, language, options.BatchSize, attemptedTitleIDs)
+		candidates, err := s.missingRefreshCandidates(
+			ctx, language, options.BatchSize, phase, phaseBoundary, phaseUpperBoundary, cursor,
+		)
 		if err != nil {
 			return result, err
 		}
 		if len(candidates) == 0 {
+			if options.Exhaustive && (phase == -1 || phaseHadCandidates) {
+				phase = 1
+				phaseBoundary = phaseUpperBoundary
+				if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&phaseUpperBoundary); err != nil {
+					return result, fmt.Errorf("query metadata refresh boundary: %w", err)
+				}
+				phaseHadCandidates = false
+				cursor = metadataRefreshCursor{}
+				continue
+			}
 			return result, nil
 		}
 		result.Candidates += len(candidates)
+		phaseHadCandidates = true
 		for index, candidate := range candidates {
 			if err := ctx.Err(); err != nil {
 				result.Failed += len(candidates) - index
@@ -428,7 +451,6 @@ func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOpti
 				}
 				return result, err
 			}
-			attemptedTitleIDs = append(attemptedTitleIDs, candidate.refreshTitleID)
 			refreshErr, attempts := s.refreshMissingCandidate(ctx, candidate, language)
 			if refreshErr == nil {
 				result.Refreshed++
@@ -448,6 +470,7 @@ func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOpti
 		if !options.Exhaustive {
 			return result, nil
 		}
+		cursor = candidates[len(candidates)-1].cursor()
 	}
 }
 
@@ -455,7 +478,10 @@ func (s *Service) missingRefreshCandidates(
 	ctx context.Context,
 	language string,
 	batchSize int,
-	attemptedTitleIDs []string,
+	phase int16,
+	phaseBoundary time.Time,
+	phaseUpperBoundary time.Time,
+	cursor metadataRefreshCursor,
 ) ([]metadataRefreshCandidate, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT title.id::text,
@@ -465,7 +491,8 @@ func (s *Service) missingRefreshCandidates(
 		       identity.external_id,
 		       title.id::text,
 		       COALESCE(series_identity.external_id, ''),
-		       COALESCE(title.ordinal, -1)
+		       COALESCE(title.ordinal, -1),
+		       COALESCE(cached.expires_at, '0001-01-01T00:00:00Z'::timestamptz)
 		FROM titles AS title
 		JOIN LATERAL (
 		    SELECT external.provider, external.external_id
@@ -504,10 +531,19 @@ func (s *Service) missingRefreshCandidates(
 		WHERE title.media_type IN ('movie', 'series', 'season')
 		  AND (title.media_type IN ('movie', 'series') OR series_identity.external_id IS NOT NULL)
 		  AND (cached.title_id IS NULL OR cached.expires_at <= now())
-		  AND NOT (title.id::text = ANY($4::text[]))
+		  AND (
+			$4::smallint = 0
+			OR ($4::smallint = -1 AND title.created_at < $6)
+			OR ($4::smallint = 1 AND title.created_at >= $5 AND title.created_at < $6)
+		  )
+		  AND (
+			NOT $7::boolean
+			OR ROW(COALESCE(cached.expires_at, '0001-01-01T00:00:00Z'::timestamptz), title.id)
+			   > ROW($8::timestamptz, NULLIF($9, '')::uuid)
+		  )
 		ORDER BY cached.expires_at NULLS FIRST, title.id
 		LIMIT $3
-	`, providerName, language, batchSize, attemptedTitleIDs)
+	`, providerName, language, batchSize, phase, phaseBoundary, phaseUpperBoundary, cursor.valid, cursor.expiresAt, cursor.titleID)
 	if err != nil {
 		return nil, fmt.Errorf("query metadata refresh candidates: %w", err)
 	}
@@ -523,6 +559,7 @@ func (s *Service) missingRefreshCandidates(
 			&value.refreshTitleID,
 			&value.seriesExternalID,
 			&value.seasonNumber,
+			&value.refreshOrderExpiresAt,
 		); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan metadata refresh candidate: %w", err)
@@ -539,15 +576,30 @@ func (s *Service) missingRefreshCandidates(
 }
 
 type metadataRefreshCandidate struct {
-	titleID           string
-	title             string
-	mediaType         string
-	identityProvider  string
-	externalID        string
-	refreshTitleID    string
-	seriesExternalID  string
-	seasonNumber      int
-	requestedResource string
+	titleID               string
+	title                 string
+	mediaType             string
+	identityProvider      string
+	externalID            string
+	refreshTitleID        string
+	seriesExternalID      string
+	seasonNumber          int
+	requestedResource     string
+	refreshOrderExpiresAt time.Time
+}
+
+type metadataRefreshCursor struct {
+	valid     bool
+	expiresAt time.Time
+	titleID   string
+}
+
+func (candidate metadataRefreshCandidate) cursor() metadataRefreshCursor {
+	return metadataRefreshCursor{
+		valid:     true,
+		expiresAt: candidate.refreshOrderExpiresAt,
+		titleID:   candidate.titleID,
+	}
 }
 
 func (candidate metadataRefreshCandidate) resource(language string) string {
@@ -1437,15 +1489,24 @@ func (s *Service) persistCachedMovieSnapshot(ctx context.Context, tx pgx.Tx, mov
 }
 
 func (s *Service) persistCachedSeriesSnapshots(ctx context.Context, tx pgx.Tx, series Series) error {
-	if err := persistTitleSnapshot(ctx, tx, series.ID, series.Name, series.PosterURL, series.BackdropURL, series.FirstAirDate); err != nil {
-		return err
-	}
+	snapshots := make([]titleSnapshot, 0, len(series.Seasons)+1)
+	snapshots = append(snapshots, titleSnapshot{
+		id:            series.ID,
+		title:         series.Name,
+		posterURL:     series.PosterURL,
+		backgroundURL: series.BackdropURL,
+		releaseDate:   series.FirstAirDate,
+	})
 	for _, season := range series.Seasons {
-		if err := persistTitleSnapshot(ctx, tx, season.ID, season.Name, season.PosterURL, season.BackdropURL, season.AirDate); err != nil {
-			return err
-		}
+		snapshots = append(snapshots, titleSnapshot{
+			id:            season.ID,
+			title:         season.Name,
+			posterURL:     season.PosterURL,
+			backgroundURL: season.BackdropURL,
+			releaseDate:   season.AirDate,
+		})
 	}
-	return nil
+	return persistTitleSnapshots(ctx, tx, snapshots)
 }
 
 func cachedSeasonMatchesHierarchy(season Season, seasonID, seriesID string, seasonNumber int) bool {
@@ -1473,42 +1534,24 @@ func validateProviderSeasonHierarchy(season ProviderSeason, externalID string, s
 }
 
 func (s *Service) persistCachedSeasonSnapshot(ctx context.Context, tx pgx.Tx, season Season) error {
-	persistMissingSnapshot := func(titleID, title, posterURL, backgroundURL, releaseDate string) error {
-		var existingTitle, existingPosterURL, existingBackgroundURL, existingReleaseDate string
-		err := tx.QueryRow(ctx, `
-			SELECT COALESCE(display_title, ''),
-			       COALESCE(poster_url, ''),
-			       COALESCE(background_url, ''),
-			       COALESCE(release_date::text, '')
-			FROM titles
-			WHERE id = $1::uuid
-		`, titleID).Scan(&existingTitle, &existingPosterURL, &existingBackgroundURL, &existingReleaseDate)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("query cached title snapshot: %w", err)
-		}
-		if strings.TrimSpace(existingTitle) != "" {
-			title = ""
-		}
-		if strings.TrimSpace(existingPosterURL) != "" {
-			posterURL = ""
-		}
-		if strings.TrimSpace(existingBackgroundURL) != "" {
-			backgroundURL = ""
-		}
-		if strings.TrimSpace(existingReleaseDate) != "" {
-			releaseDate = ""
-		}
-		return persistTitleSnapshot(ctx, tx, titleID, title, posterURL, backgroundURL, releaseDate)
-	}
-	if err := persistMissingSnapshot(season.ID, season.Name, season.PosterURL, season.BackdropURL, season.AirDate); err != nil {
-		return err
-	}
+	snapshots := make([]titleSnapshot, 0, len(season.Episodes)+1)
+	snapshots = append(snapshots, titleSnapshot{
+		id:            season.ID,
+		title:         season.Name,
+		posterURL:     season.PosterURL,
+		backgroundURL: season.BackdropURL,
+		releaseDate:   season.AirDate,
+	})
 	for _, episode := range season.Episodes {
-		if err := persistMissingSnapshot(episode.ID, episode.Name, episode.StillURL, episode.BackdropURL, episode.AirDate); err != nil {
-			return err
-		}
+		snapshots = append(snapshots, titleSnapshot{
+			id:            episode.ID,
+			title:         episode.Name,
+			posterURL:     episode.StillURL,
+			backgroundURL: episode.BackdropURL,
+			releaseDate:   episode.AirDate,
+		})
 	}
-	return nil
+	return persistMissingTitleSnapshots(ctx, tx, snapshots)
 }
 
 func persistReleaseDate(ctx context.Context, tx pgx.Tx, titleID, releaseDate string) error {
@@ -1528,6 +1571,118 @@ func persistReleaseDate(ctx context.Context, tx pgx.Tx, titleID, releaseDate str
 		  AND release_date IS DISTINCT FROM $2::date
 	`, titleID, releaseDate); err != nil {
 		return fmt.Errorf("persist cached release date: %w", err)
+	}
+	return nil
+}
+
+type titleSnapshot struct {
+	id            string
+	title         string
+	posterURL     string
+	backgroundURL string
+	releaseDate   string
+}
+
+func normalizedTitleSnapshotColumns(snapshots []titleSnapshot) ([]string, []string, []string, []string, []string, error) {
+	ids := make([]string, len(snapshots))
+	titles := make([]string, len(snapshots))
+	posterURLs := make([]string, len(snapshots))
+	backgroundURLs := make([]string, len(snapshots))
+	releaseDates := make([]string, len(snapshots))
+	for index, snapshot := range snapshots {
+		ids[index] = strings.TrimSpace(snapshot.id)
+		titles[index] = strings.TrimSpace(snapshot.title)
+		posterURLs[index] = strings.TrimSpace(snapshot.posterURL)
+		backgroundURLs[index] = strings.TrimSpace(snapshot.backgroundURL)
+		releaseDates[index] = strings.TrimSpace(snapshot.releaseDate)
+		if releaseDates[index] == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.DateOnly, releaseDates[index])
+		if err != nil || parsed.Year() < 1 || parsed.Format(time.DateOnly) != releaseDates[index] {
+			return nil, nil, nil, nil, nil, errors.New("metadata provider returned an invalid release date")
+		}
+	}
+	return ids, titles, posterURLs, backgroundURLs, releaseDates, nil
+}
+
+func persistTitleSnapshots(ctx context.Context, tx pgx.Tx, snapshots []titleSnapshot) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
+	ids, titles, posterURLs, backgroundURLs, releaseDates, err := normalizedTitleSnapshotColumns(snapshots)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE titles AS title
+		SET display_title = COALESCE(NULLIF(snapshot.display_title, ''), title.display_title),
+		    poster_url = COALESCE(NULLIF(snapshot.poster_url, ''), title.poster_url),
+		    background_url = COALESCE(NULLIF(snapshot.background_url, ''), title.background_url),
+		    release_date = COALESCE(NULLIF(snapshot.release_date, '')::date, title.release_date),
+		    updated_at = now()
+		FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[])
+		     AS snapshot(id, display_title, poster_url, background_url, release_date)
+		WHERE title.id = snapshot.id
+		  AND (
+			title.display_title IS DISTINCT FROM COALESCE(NULLIF(snapshot.display_title, ''), title.display_title)
+			OR title.poster_url IS DISTINCT FROM COALESCE(NULLIF(snapshot.poster_url, ''), title.poster_url)
+			OR title.background_url IS DISTINCT FROM COALESCE(NULLIF(snapshot.background_url, ''), title.background_url)
+			OR title.release_date IS DISTINCT FROM COALESCE(NULLIF(snapshot.release_date, '')::date, title.release_date)
+		  )
+	`, ids, titles, posterURLs, backgroundURLs, releaseDates); err != nil {
+		return fmt.Errorf("persist title snapshots: %w", err)
+	}
+	return nil
+}
+
+func persistMissingTitleSnapshots(ctx context.Context, tx pgx.Tx, snapshots []titleSnapshot) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
+	ids, titles, posterURLs, backgroundURLs, releaseDates, err := normalizedTitleSnapshotColumns(snapshots)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		WITH snapshots AS (
+			SELECT *
+			FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[])
+			     AS snapshot(id, display_title, poster_url, background_url, release_date)
+		),
+		desired AS (
+			SELECT title.id,
+			       CASE WHEN btrim(COALESCE(title.display_title, '')) = ''
+			            THEN COALESCE(NULLIF(snapshot.display_title, ''), title.display_title)
+			            ELSE title.display_title END AS display_title,
+			       CASE WHEN btrim(COALESCE(title.poster_url, '')) = ''
+			            THEN COALESCE(NULLIF(snapshot.poster_url, ''), title.poster_url)
+			            ELSE title.poster_url END AS poster_url,
+			       CASE WHEN btrim(COALESCE(title.background_url, '')) = ''
+			            THEN COALESCE(NULLIF(snapshot.background_url, ''), title.background_url)
+			            ELSE title.background_url END AS background_url,
+			       CASE WHEN title.release_date IS NULL
+			            THEN COALESCE(NULLIF(snapshot.release_date, '')::date, title.release_date)
+			            ELSE title.release_date END AS release_date
+			FROM titles AS title
+			JOIN snapshots AS snapshot ON snapshot.id = title.id
+		)
+		UPDATE titles AS title
+		SET display_title = desired.display_title,
+		    poster_url = desired.poster_url,
+		    background_url = desired.background_url,
+		    release_date = desired.release_date,
+		    updated_at = now()
+		FROM desired
+		WHERE title.id = desired.id
+		  AND (
+			title.display_title IS DISTINCT FROM desired.display_title
+			OR title.poster_url IS DISTINCT FROM desired.poster_url
+			OR title.background_url IS DISTINCT FROM desired.background_url
+			OR title.release_date IS DISTINCT FROM desired.release_date
+		  )
+	`, ids, titles, posterURLs, backgroundURLs, releaseDates); err != nil {
+		return fmt.Errorf("persist missing title snapshots: %w", err)
 	}
 	return nil
 }

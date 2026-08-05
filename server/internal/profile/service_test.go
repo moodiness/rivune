@@ -450,6 +450,11 @@ func TestCategoryBoundariesRejectDirectAndBatchProfileTampering(t *testing.T) {
 	var addonsBefore, collectionsBefore int
 	manager := principal
 	manager.Role = "member"
+	t.Run("category manager cannot delete their last manageable profile", func(t *testing.T) {
+		if err := profiles.Delete(ctx, manager, profileAID); !errors.Is(err, ErrLastProfile) {
+			t.Fatalf("delete last manageable category profile error = %v, want %v", err, ErrLastProfile)
+		}
+	})
 	description := "  Manager-created profile description  "
 	created, err := profiles.Create(ctx, manager, CreateInput{
 		Name: "Manager-created profile", Description: &description, CategoryID: categoryAID,

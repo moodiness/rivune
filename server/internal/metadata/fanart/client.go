@@ -42,7 +42,6 @@ type cachedArtwork struct {
 type Client struct {
 	baseURL          string
 	apiKey           string
-	clientKey        string
 	httpClient       *http.Client
 	responseCache    artworkResponseCache
 	responseCacheTTL time.Duration
@@ -84,26 +83,25 @@ type candidate struct {
 	pixels       int64
 }
 
-func New(apiKey, clientKey string, httpClient *http.Client) *Client {
-	return newWithBaseURL(apiKey, clientKey, defaultBaseURL, httpClient)
+func New(apiKey string, httpClient *http.Client) *Client {
+	return newWithBaseURL(apiKey, defaultBaseURL, httpClient)
 }
 
-func NewCached(apiKey, clientKey string, httpClient *http.Client, pool *pgxpool.Pool, cacheTTL time.Duration, logger *slog.Logger) *Client {
-	client := New(apiKey, clientKey, httpClient)
+func NewCached(apiKey string, httpClient *http.Client, pool *pgxpool.Pool, cacheTTL time.Duration, logger *slog.Logger) *Client {
+	client := New(apiKey, httpClient)
 	if pool != nil && cacheTTL > 0 {
 		client.enableResponseCache(&postgresArtworkResponseCache{pool: pool}, cacheTTL, logger)
 	}
 	return client
 }
 
-func newWithBaseURL(apiKey, clientKey, baseURL string, httpClient *http.Client) *Client {
+func newWithBaseURL(apiKey, baseURL string, httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		httpClient = metadata.NewProviderHTTPClient(baseURL, 15*time.Second)
 	}
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		apiKey:     strings.TrimSpace(apiKey),
-		clientKey:  strings.TrimSpace(clientKey),
 		httpClient: httpClient,
 	}
 }
@@ -387,9 +385,6 @@ func (c *Client) get(ctx context.Context, endpoint string, destination any) erro
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("api-key", c.apiKey)
-	if c.clientKey != "" {
-		request.Header.Set("client-key", c.clientKey)
-	}
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return metadata.NewProviderError(metadata.ErrProviderFailure, err, 0, endpoint)

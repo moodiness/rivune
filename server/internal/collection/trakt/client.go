@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/collection"
 )
 
@@ -101,7 +102,7 @@ func (client *Client) ResolveCollectionSource(ctx context.Context, source collec
 	default:
 		return collection.SourcePage{}, fmt.Errorf("%w: Trakt returned HTTP %d", collection.ErrProviderUnavailable, response.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maximumBodyBytes+1))
+	body, err := io.ReadAll(io.LimitReader(addon.BudgetedPayloadReader(ctx, response.Body), maximumBodyBytes+1))
 	if err != nil {
 		return collection.SourcePage{}, fmt.Errorf("read Trakt list: %w", err)
 	}
@@ -111,6 +112,9 @@ func (client *Client) ResolveCollectionSource(ctx context.Context, source collec
 	var rawItems []json.RawMessage
 	if err := json.Unmarshal(body, &rawItems); err != nil {
 		return collection.SourcePage{}, fmt.Errorf("%w: decode Trakt list: %v", collection.ErrProviderUnavailable, err)
+	}
+	if err := addon.ConsumePayloadItems(ctx, len(rawItems)); err != nil {
+		return collection.SourcePage{}, err
 	}
 	items := make([]collection.Item, 0, len(rawItems))
 	for _, raw := range rawItems {
@@ -156,7 +160,7 @@ func (client *Client) ResolveCollectionSource(ctx context.Context, source collec
 			ID: id, MediaType: mediaType, Title: media.Title, Description: media.Overview,
 			ReleaseInfo: releaseInfo(media.Year, released), Released: released,
 			VoteAverage: &rating, VoteCount: &votes, ExternalIDs: externalIDs,
-			Raw: append(json.RawMessage(nil), raw...),
+			Raw: raw,
 		})
 	}
 	pageCount, _ := strconv.Atoi(response.Header.Get("X-Pagination-Page-Count"))

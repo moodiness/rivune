@@ -91,6 +91,8 @@ func reconcileProfileGrant(principal *Principal, value ProfileAccess, now time.T
 	}
 	principal.ActiveProfileID = nil
 	principal.ProfileGrantExpiresAt = nil
+	principal.ProfileContextHash = nil
+	principal.ActiveProfileCanManage = false
 	return true
 }
 

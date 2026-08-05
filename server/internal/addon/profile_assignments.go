@@ -95,7 +95,23 @@ func addonTransportAssignedToProfiles(ctx context.Context, tx pgx.Tx, transportU
 	return assigned, nil
 }
 
-func applyAddonUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, addonID, transportURL string, profileIDs []string, manifest Manifest, rawManifest json.RawMessage) error {
+func lockAddonTransportURL(ctx context.Context, tx pgx.Tx, addonID string) (string, error) {
+	var transportURL string
+	if err := tx.QueryRow(ctx, `
+		SELECT transport_url
+		FROM profile_addons
+		WHERE id = $1::uuid
+		FOR UPDATE
+	`, addonID).Scan(&transportURL); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("lock addon transport: %w", err)
+	}
+	return transportURL, nil
+}
+
+func authorizeAddonAssignmentChange(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, addonID string, requestedProfileIDs []string) error {
 	var lockedID string
 	if err := tx.QueryRow(ctx, `
 		SELECT pa.id::text
@@ -110,28 +126,67 @@ func applyAddonUpdate(ctx context.Context, tx pgx.Tx, principal auth.Principal, 
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
-		return fmt.Errorf("lock addon update: %w", err)
+		return fmt.Errorf("lock addon assignment change: %w", err)
 	}
-	var currentProfileIDs []string
-	if err := tx.QueryRow(ctx, `
-		SELECT ARRAY(
-			SELECT profile_id::text
-			FROM addon_profile_access
-			WHERE addon_id = $1::uuid
-		)
-	`, addonID).Scan(&currentProfileIDs); err != nil {
-		return fmt.Errorf("query addon profile access: %w", err)
+	currentProfileIDs := make([]string, 0)
+	rows, err := tx.Query(ctx, `
+		SELECT profile_id::text
+		FROM addon_profile_access
+		WHERE addon_id = $1::uuid
+		ORDER BY profile_id
+		FOR UPDATE
+	`, addonID)
+	if err != nil {
+		return fmt.Errorf("lock addon profile access: %w", err)
 	}
+	for rows.Next() {
+		var profileID string
+		if err := rows.Scan(&profileID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan addon profile access: %w", err)
+		}
+		currentProfileIDs = append(currentProfileIDs, profileID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate addon profile access: %w", err)
+	}
+	rows.Close()
 	if len(currentProfileIDs) == 0 {
 		return ErrNotFound
 	}
 	if _, accessible := profileIDSet(currentProfileIDs)[activeProfileID]; !accessible {
 		return ErrNotFound
 	}
-	managedProfileIDs := mergeProfileIDs(profileIDs, currentProfileIDs)
-	if err := authorizeProfileAssignments(ctx, tx, principal, activeProfileID, managedProfileIDs); err != nil {
-		return err
+	return authorizeProfileAssignments(
+		ctx, tx, principal, activeProfileID,
+		mergeProfileIDs(requestedProfileIDs, currentProfileIDs),
+	)
+}
+
+func authorizeAndLoadAddonRefresh(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, addonID string) (InstalledAddon, error) {
+	if principal.IsGlobalAdministrator() {
+		if err := authorizeGlobalAddonOrigin(ctx, tx, principal); err != nil {
+			return InstalledAddon{}, err
+		}
 	}
+	if err := authorizeAddonAssignmentChange(ctx, tx, principal, activeProfileID, addonID, nil); err != nil {
+		return InstalledAddon{}, err
+	}
+	installed, err := queryAddon(tx.QueryRow(ctx, addonForManagementQuery, addonID, activeProfileID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return InstalledAddon{}, ErrNotFound
+	}
+	if err != nil {
+		return InstalledAddon{}, fmt.Errorf("query addon for refresh: %w", err)
+	}
+	if isPrivateNetworkTransportURL(installed.transportURL) && !principal.IsGlobalAdministrator() {
+		return InstalledAddon{}, ErrForbidden
+	}
+	return installed, nil
+}
+
+func applyAddonUpdate(ctx context.Context, tx pgx.Tx, addonID, transportURL string, profileIDs []string, manifest Manifest, rawManifest json.RawMessage) error {
 	assigned, err := addonTransportAssignedToProfiles(ctx, tx, transportURL, profileIDs, &addonID)
 	if err != nil {
 		return err
@@ -175,7 +230,7 @@ func mergeProfileIDs(primary, secondary []string) []string {
 	return merged
 }
 
-func (service *Service) Update(ctx context.Context, principal auth.Principal, addonID string, input UpdateAddonInput) (InstalledAddon, error) {
+func (service *Service) update(ctx context.Context, principal auth.Principal, addonID string, input UpdateAddonInput) (InstalledAddon, error) {
 	activeProfileID, err := activeProfileID(principal)
 	if err != nil {
 		return InstalledAddon{}, err
@@ -190,10 +245,67 @@ func (service *Service) Update(ctx context.Context, principal auth.Principal, ad
 	if err != nil {
 		return InstalledAddon{}, err
 	}
-	transportURL, err := NormalizeTransportURL(input.TransportURL)
+	var requestedTransportURL string
+	if input.TransportURL != nil {
+		requestedTransportURL, err = NormalizeTransportURL(*input.TransportURL)
+		if err != nil {
+			return InstalledAddon{}, err
+		}
+	}
+	authorizationTx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return InstalledAddon{}, fmt.Errorf("begin addon update authorization: %w", err)
+	}
+	defer func() { _ = authorizationTx.Rollback(ctx) }()
+	if principal.IsGlobalAdministrator() {
+		if err := authorizeGlobalAddonOrigin(ctx, authorizationTx, principal); err != nil {
+			return InstalledAddon{}, err
+		}
+	}
+	if err := authorizeActiveProfile(ctx, authorizationTx, principal, activeProfileID); err != nil {
+		return InstalledAddon{}, err
+	}
+	if err := authorizeAddonAssignmentChange(ctx, authorizationTx, principal, activeProfileID, addonID, profileIDs); err != nil {
+		return InstalledAddon{}, err
+	}
+	currentTransportURL, err := lockAddonTransportURL(ctx, authorizationTx, addonID)
 	if err != nil {
 		return InstalledAddon{}, err
 	}
+	transportURL := currentTransportURL
+	if input.TransportURL != nil {
+		transportURL = requestedTransportURL
+	}
+	if currentTransportURL == transportURL {
+		assigned, err := addonTransportAssignedToProfiles(ctx, authorizationTx, transportURL, profileIDs, &addonID)
+		if err != nil {
+			return InstalledAddon{}, err
+		}
+		if assigned {
+			return InstalledAddon{}, ErrAlreadyInstalled
+		}
+		if err := writeProfileAssignments(ctx, authorizationTx, addonID, profileIDs); err != nil {
+			return InstalledAddon{}, err
+		}
+		installed, err := queryAddon(authorizationTx.QueryRow(ctx, addonForManagementQuery, addonID, activeProfileID))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return InstalledAddon{}, ErrNotFound
+			}
+			return InstalledAddon{}, fmt.Errorf("query updated addon: %w", err)
+		}
+		if err := authorizationTx.Commit(ctx); err != nil {
+			return InstalledAddon{}, fmt.Errorf("commit addon assignment update: %w", err)
+		}
+		return installed, nil
+	}
+	if !principal.IsGlobalAdministrator() {
+		return InstalledAddon{}, ErrForbidden
+	}
+	if err := authorizationTx.Commit(ctx); err != nil {
+		return InstalledAddon{}, fmt.Errorf("commit addon update authorization: %w", err)
+	}
+
 	manifest, rawManifest, err := service.transport.Manifest(ctx, transportURL)
 	if err != nil {
 		return InstalledAddon{}, err
@@ -203,13 +315,26 @@ func (service *Service) Update(ctx context.Context, principal auth.Principal, ad
 		return InstalledAddon{}, fmt.Errorf("begin addon update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeGlobalAddonOrigin(ctx, tx, principal); err != nil {
+		return InstalledAddon{}, err
+	}
 	if err := authorizeActiveProfile(ctx, tx, principal, activeProfileID); err != nil {
 		return InstalledAddon{}, err
 	}
-	if err := applyAddonUpdate(ctx, tx, principal, activeProfileID, addonID, transportURL, profileIDs, manifest, rawManifest); err != nil {
+	if err := authorizeAddonAssignmentChange(ctx, tx, principal, activeProfileID, addonID, profileIDs); err != nil {
 		return InstalledAddon{}, err
 	}
-	installed, err := queryAddon(tx.QueryRow(ctx, addonForProfileQuery, addonID, activeProfileID))
+	lockedTransportURL, err := lockAddonTransportURL(ctx, tx, addonID)
+	if err != nil {
+		return InstalledAddon{}, err
+	}
+	if lockedTransportURL != currentTransportURL {
+		return InstalledAddon{}, ErrForbidden
+	}
+	if err := applyAddonUpdate(ctx, tx, addonID, transportURL, profileIDs, manifest, rawManifest); err != nil {
+		return InstalledAddon{}, err
+	}
+	installed, err := queryAddon(tx.QueryRow(ctx, addonForManagementQuery, addonID, activeProfileID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return InstalledAddon{}, ErrNotFound
@@ -220,4 +345,12 @@ func (service *Service) Update(ctx context.Context, principal auth.Principal, ad
 		return InstalledAddon{}, fmt.Errorf("commit addon update: %w", err)
 	}
 	return installed, nil
+}
+
+func (service *Service) Update(ctx context.Context, principal auth.Principal, addonID string, input UpdateAddonInput) (ManagedAddon, error) {
+	installed, err := service.update(ctx, principal, addonID, input)
+	if err != nil {
+		return ManagedAddon{}, err
+	}
+	return managedAddon(installed, principal.IsGlobalAdministrator()), nil
 }

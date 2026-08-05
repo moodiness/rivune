@@ -18,14 +18,39 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/netguard"
 )
 
 const (
-	introDBDefaultBaseURL = "https://api.introdb.app"
-	introDBCacheTTL       = 24 * time.Hour
-	introDBMissCacheTTL   = 6 * time.Hour
-	introDBMaxBodyBytes   = 64 << 10
-	introDBMaxMarkerTime  = 24 * time.Hour / time.Second
+	introDBDefaultBaseURL       = "https://api.introdb.app"
+	introDBCacheTTL             = 24 * time.Hour
+	introDBMissCacheTTL         = 6 * time.Hour
+	introDBMaxBodyBytes         = 64 << 10
+	introDBMaxMarkerTime        = 24 * time.Hour / time.Second
+	introDBCachePruneEveryStore = 32
+	introDBCachePruneBatch      = 128
+
+	pruneIntroDBCacheSQL = `
+		WITH expired AS (
+			SELECT imdb_id, season_number, episode_number
+			FROM introdb_segment_cache
+			WHERE expires_at <= now()
+			ORDER BY expires_at, imdb_id, season_number, episode_number
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		DELETE FROM introdb_segment_cache cached
+		USING expired
+		WHERE cached.imdb_id = expired.imdb_id
+		  AND cached.season_number = expired.season_number
+		  AND cached.episode_number = expired.episode_number
+	`
+	storeIntroDBCacheSQL = `
+		INSERT INTO introdb_segment_cache (imdb_id, season_number, episode_number, segments, expires_at, updated_at)
+		VALUES ($1, $2, $3, $4::jsonb, now() + make_interval(secs => $5), now())
+		ON CONFLICT (imdb_id, season_number, episode_number) DO UPDATE
+		SET segments = EXCLUDED.segments, expires_at = EXCLUDED.expires_at, updated_at = now()
+	`
 )
 
 var introDBIMDBIDPattern = regexp.MustCompile(`^tt[0-9]{7,8}$`)
@@ -168,25 +193,26 @@ func (service *Service) cacheIntroDBMarkers(ctx context.Context, tx playbackProf
 	if !providerFound {
 		ttl = introDBMissCacheTTL
 	}
-	_, err = tx.Exec(ctx, `
-		WITH purged AS (
-			DELETE FROM introdb_segment_cache WHERE expires_at <= now() RETURNING 1
-		)
-		INSERT INTO introdb_segment_cache (imdb_id, season_number, episode_number, segments, expires_at, updated_at)
-		VALUES ($1, $2, $3, $4::jsonb, now() + make_interval(secs => $5), now())
-		ON CONFLICT (imdb_id, season_number, episode_number) DO UPDATE
-		SET segments = EXCLUDED.segments, expires_at = EXCLUDED.expires_at, updated_at = now()
-	`, input.IMDBID, input.Season, input.Episode, encoded, int(ttl/time.Second))
+	if service.shouldPruneIntroDBCache() {
+		if _, err := tx.Exec(ctx, pruneIntroDBCacheSQL, introDBCachePruneBatch); err != nil {
+			return fmt.Errorf("prune IntroDB cache: %w", err)
+		}
+	}
+	_, err = tx.Exec(ctx, storeIntroDBCacheSQL, input.IMDBID, input.Season, input.Episode, encoded, int(ttl/time.Second))
 	if err != nil {
 		return fmt.Errorf("write IntroDB cache: %w", err)
 	}
 	return nil
 }
 
+func (service *Service) shouldPruneIntroDBCache() bool {
+	return service.introDBCacheStores.Add(1)%introDBCachePruneEveryStore == 1
+}
+
 func (service *Service) fetchIntroDBMarkers(ctx context.Context, input MarkerInput) ([]Marker, bool, error) {
 	endpoint, err := url.Parse(service.introDBBaseURL + "/segments")
 	if err != nil {
-		return nil, false, fmt.Errorf("build IntroDB URL: %w", err)
+		return nil, false, fmt.Errorf("build IntroDB URL: %w", netguard.SanitizeURLError(err))
 	}
 	query := endpoint.Query()
 	query.Set("imdb_id", input.IMDBID)
@@ -195,13 +221,13 @@ func (service *Service) fetchIntroDBMarkers(ctx context.Context, input MarkerInp
 	endpoint.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
-		return nil, false, fmt.Errorf("create IntroDB request: %w", err)
+		return nil, false, fmt.Errorf("create IntroDB request: %w", netguard.SanitizeURLError(err))
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "Rivune/1")
 	response, err := service.introDBClient.Do(request)
 	if err != nil {
-		return nil, false, fmt.Errorf("request IntroDB segments: %w", err)
+		return nil, false, fmt.Errorf("request IntroDB segments: %w", netguard.SanitizeURLError(err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {

@@ -1,7 +1,7 @@
 package config
 
 import (
-	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/moodiness/rivune/server/internal/netguard"
 )
 
 const (
@@ -44,7 +46,6 @@ type Config struct {
 	ProfileGrantTTL         time.Duration
 	TMDBAccessToken         string
 	FanartAPIKey            string
-	FanartClientKey         string
 	MDBListAPIKey           string
 	MetadataCacheTTL        time.Duration
 	TVDBAPIKey              string
@@ -54,6 +55,7 @@ type Config struct {
 	SimklClientID           string
 	TrackingEncryptionKey   []byte
 	TrustedProxies          []netip.Prefix
+	NAT64Prefixes           []netip.Prefix
 	FFmpegPath              string
 	FFprobePath             string
 	RemuxConcurrency        int
@@ -65,6 +67,7 @@ type Config struct {
 	ArtworkCacheDir         string
 	MediaStorageBytes       int64
 	ArtworkStorageBytes     int64
+	LANArtworkOrigins       []string
 }
 
 func Load() (Config, error) {
@@ -75,7 +78,6 @@ func Load() (Config, error) {
 		SetupToken:           strings.TrimSpace(os.Getenv("RIVUNE_SETUP_TOKEN")),
 		TMDBAccessToken:      strings.TrimSpace(os.Getenv("RIVUNE_TMDB_ACCESS_TOKEN")),
 		FanartAPIKey:         strings.TrimSpace(os.Getenv("RIVUNE_FANART_API_KEY")),
-		FanartClientKey:      strings.TrimSpace(os.Getenv("RIVUNE_FANART_CLIENT_KEY")),
 		MDBListAPIKey:        strings.TrimSpace(os.Getenv("RIVUNE_MDBLIST_API_KEY")),
 		TVDBAPIKey:           strings.TrimSpace(os.Getenv("RIVUNE_TVDB_API_KEY")),
 		TVDBPIN:              strings.TrimSpace(os.Getenv("RIVUNE_TVDB_PIN")),
@@ -89,6 +91,8 @@ func Load() (Config, error) {
 		HardwareAcceleration: strings.ToLower(envOrDefault("RIVUNE_HARDWARE_ACCELERATION", defaultHardwareAcceleration)),
 		VideoDevice:          envOrDefault("RIVUNE_VIDEO_DEVICE", defaultVideoDevice),
 	}
+
+	trackingKey := strings.TrimSpace(os.Getenv("RIVUNE_TRACKING_ENCRYPTION_KEY"))
 
 	var err error
 	cfg.DatabaseURL, err = loadDatabaseURL()
@@ -117,17 +121,13 @@ func Load() (Config, error) {
 	if cfg.TVDBPIN != "" && cfg.TVDBAPIKey == "" {
 		return Config{}, errors.New("RIVUNE_TVDB_PIN requires RIVUNE_TVDB_API_KEY")
 	}
-	if cfg.FanartClientKey != "" && cfg.FanartAPIKey == "" {
-		return Config{}, errors.New("RIVUNE_FANART_CLIENT_KEY requires RIVUNE_FANART_API_KEY")
-	}
 	if cfg.TraktClientSecret != "" && cfg.TraktClientID == "" {
 		return Config{}, errors.New("RIVUNE_TRAKT_CLIENT_SECRET requires RIVUNE_TRAKT_CLIENT_ID")
 	}
-	trackingKey := strings.TrimSpace(os.Getenv("RIVUNE_TRACKING_ENCRYPTION_KEY"))
 	if trackingKey != "" {
-		cfg.TrackingEncryptionKey, err = base64.StdEncoding.DecodeString(trackingKey)
+		cfg.TrackingEncryptionKey, err = hex.DecodeString(trackingKey)
 		if err != nil || len(cfg.TrackingEncryptionKey) != 32 {
-			return Config{}, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY must be base64 encoding of exactly 32 bytes")
+			return Config{}, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY must be 64 hexadecimal characters encoding exactly 32 bytes")
 		}
 	} else {
 		cfg.TrackingEncryptionKey = make([]byte, 32)
@@ -173,6 +173,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.NAT64Prefixes, err = loadNAT64Prefixes(os.Getenv("RIVUNE_NAT64_PREFIXES"))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.LANArtworkOrigins, err = loadLANArtworkOrigins(os.Getenv("RIVUNE_LAN_ARTWORK_ORIGINS"))
+	if err != nil {
+		return Config{}, err
+	}
 
 	if cfg.PublicURL != "" {
 		parsed, parseErr := url.Parse(cfg.PublicURL)
@@ -182,9 +190,20 @@ func Load() (Config, error) {
 		if parsed.Scheme != "http" && parsed.Scheme != "https" {
 			return Config{}, errors.New("RIVUNE_PUBLIC_URL must use http or https")
 		}
+		if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+			return Config{}, errors.New("RIVUNE_PUBLIC_URL must use https unless its host is loopback")
+		}
 	}
 
 	return cfg, nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	address, err := netip.ParseAddr(host)
+	return err == nil && address.Unmap().IsLoopback()
 }
 
 func loadDatabaseURL() (string, error) {
@@ -209,14 +228,21 @@ func loadDatabaseURL() (string, error) {
 	host := envOrDefault("RIVUNE_DATABASE_HOST", defaultDatabaseHost)
 	name := envOrDefault("RIVUNE_DATABASE_NAME", defaultDatabaseName)
 	user := envOrDefault("RIVUNE_DATABASE_USER", defaultDatabaseUser)
-	sslMode := envOrDefault("RIVUNE_DATABASE_SSLMODE", "disable")
+	sslMode := strings.TrimSpace(os.Getenv("RIVUNE_DATABASE_SSLMODE"))
+	if sslMode == "" {
+		return "", errors.New("RIVUNE_DATABASE_SSLMODE must be set explicitly for component database configuration")
+	}
 
+	query := url.Values{"sslmode": []string{sslMode}}
+	if rootCertificate := strings.TrimSpace(os.Getenv("RIVUNE_DATABASE_SSLROOTCERT")); rootCertificate != "" {
+		query.Set("sslrootcert", rootCertificate)
+	}
 	databaseURL := &url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(user, password),
 		Host:     net.JoinHostPort(host, strconv.Itoa(port)),
 		Path:     "/" + name,
-		RawQuery: url.Values{"sslmode": []string{sslMode}}.Encode(),
+		RawQuery: query.Encode(),
 	}
 	return databaseURL.String(), nil
 }
@@ -275,6 +301,72 @@ func loadTrustedProxies(value string) ([]netip.Prefix, error) {
 		proxies = append(proxies, network.Masked())
 	}
 	return proxies, nil
+}
+
+func loadNAT64Prefixes(value string) ([]netip.Prefix, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	entries := strings.Split(value, ",")
+	if len(entries) > 16 {
+		return nil, errors.New("RIVUNE_NAT64_PREFIXES must contain at most 16 networks")
+	}
+	prefixes := make([]netip.Prefix, 0, len(entries))
+	all := []netip.Prefix{netip.MustParsePrefix("64:ff9b::/96")}
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil || prefix != prefix.Masked() || !prefix.Addr().Is6() || !validNAT64PrefixLength(prefix.Bits()) {
+			return nil, fmt.Errorf("RIVUNE_NAT64_PREFIXES contains invalid RFC 6052 network %q", entry)
+		}
+		for _, existing := range all {
+			if existing.Contains(prefix.Addr()) || prefix.Contains(existing.Addr()) {
+				return nil, fmt.Errorf("RIVUNE_NAT64_PREFIXES contains overlapping networks %q and %q", existing, prefix)
+			}
+		}
+		prefixes = append(prefixes, prefix)
+		all = append(all, prefix)
+	}
+	return prefixes, nil
+}
+
+func loadLANArtworkOrigins(value string) ([]string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	entries := strings.Split(value, ",")
+	if len(entries) > 32 {
+		return nil, errors.New("RIVUNE_LAN_ARTWORK_ORIGINS must contain at most 32 origins")
+	}
+	origins := make([]string, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			return nil, errors.New("RIVUNE_LAN_ARTWORK_ORIGINS contains an empty entry")
+		}
+		origin, err := netguard.ParsePrivateOrigin(entry)
+		if err != nil {
+			return nil, fmt.Errorf("RIVUNE_LAN_ARTWORK_ORIGINS contains an invalid origin: %w", err)
+		}
+		if _, exists := seen[origin.Origin]; exists {
+			continue
+		}
+		seen[origin.Origin] = struct{}{}
+		origins = append(origins, origin.Origin)
+	}
+	return origins, nil
+}
+
+func validNAT64PrefixLength(bits int) bool {
+	switch bits {
+	case 32, 40, 48, 56, 64, 96:
+		return true
+	default:
+		return false
+	}
 }
 
 func envOrDefault(name, fallback string) string {

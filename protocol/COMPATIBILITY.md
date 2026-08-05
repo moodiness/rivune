@@ -51,7 +51,7 @@ There are no compatibility aliases for the singular trailer route or pre-v16 tra
 
 ## Client release checklist
 
-1. Discover the candidate server and require `protocolVersion == 18`.
+1. Discover the candidate server and require `protocolVersion == 19`.
 2. Resolve `apiBaseUrl` from discovery; do not construct it from the browser or app origin after discovery.
 3. Exercise login or refresh, account/profile selection, movie and series metadata, plural trailers, source listing, preparation, resolution, and playback stop.
 4. Verify both TMDB and TVDB series hierarchies and preserve mapped season IDs verbatim.

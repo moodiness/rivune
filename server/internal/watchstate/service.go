@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/tracking"
 )
 
@@ -22,24 +24,65 @@ var (
 	ErrInvalidInput     = errors.New("invalid watch state input")
 	ErrNotFound         = errors.New("title or watch state not found")
 	ErrProgressNotFound = errors.New("playback progress not found")
+	ErrForbidden        = errors.New("watch state operation forbidden")
 	ErrProfileRequired  = errors.New("active profile required")
+	ErrOutboxCapacity   = errors.New("tracking synchronization capacity reached")
 
 	uuidPattern     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 	providerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
 )
 
 const (
-	defaultPageSize = 20
-	maximumPageSize = 100
+	defaultPageSize                      = 20
+	maximumPageSize                      = 100
+	MaximumTVLibraryMembershipIdentities = 100
 )
+
+const accessibleTitlesSQL = `
+	SELECT title.id, title.media_type
+	FROM titles title
+	WHERE CASE
+	    WHEN title.media_type = 'tv' THEN EXISTS (
+	        SELECT 1
+	        FROM addon_profile_access access
+	        WHERE access.addon_id = title.source_addon_id
+	          AND access.profile_id = $1::uuid
+	    )
+	    ELSE NOT EXISTS (
+	        SELECT 1
+	        FROM profile_title_external_ids scoped
+	        WHERE scoped.title_id = title.id
+	    ) OR EXISTS (
+	        SELECT 1
+	        FROM profile_title_external_ids scoped
+	        WHERE scoped.title_id = title.id
+	          AND scoped.profile_id = $1::uuid
+	    )
+	END
+`
 
 type trackingSink interface {
 	EnqueueTx(context.Context, pgx.Tx, string, string, string, tracking.Event) error
 }
 
+type trackingBatchSink interface {
+	EnqueueBatchTx(context.Context, pgx.Tx, string, []tracking.BatchEvent) error
+}
+
+type canonicalTitleProvider interface {
+	MovieDetails(context.Context, string, string) (metadata.ProviderMovie, error)
+	SeriesDetails(context.Context, string, string) (metadata.ProviderSeries, error)
+}
+
+type canonicalExternalIDResolver interface {
+	ResolveExternalID(context.Context, string, string, string) (string, error)
+}
+
 type Service struct {
-	pool     *pgxpool.Pool
-	tracking trackingSink
+	pool              *pgxpool.Pool
+	tracking          trackingSink
+	canonicalProvider canonicalTitleProvider
+	canonicalResolver canonicalExternalIDResolver
 }
 
 func NewService(pool *pgxpool.Pool, sinks ...trackingSink) *Service {
@@ -50,11 +93,23 @@ func NewService(pool *pgxpool.Pool, sinks ...trackingSink) *Service {
 	return service
 }
 
+func (s *Service) SetCanonicalProvider(provider canonicalTitleProvider, resolver canonicalExternalIDResolver) {
+	s.canonicalProvider = provider
+	s.canonicalResolver = resolver
+}
+
+func watchstateTrackingError(err error) error {
+	if errors.Is(err, tracking.ErrOutboxCapacity) {
+		return ErrOutboxCapacity
+	}
+	return err
+}
+
 func (s *Service) enqueueTrackingTx(ctx context.Context, tx pgx.Tx, profileID, titleID, key string, event tracking.Event) error {
 	if s.tracking == nil {
 		return nil
 	}
-	return s.tracking.EnqueueTx(ctx, tx, profileID, titleID, key, event)
+	return watchstateTrackingError(s.tracking.EnqueueTx(ctx, tx, profileID, titleID, key, event))
 }
 
 func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput) (TitleReference, error) {
@@ -97,54 +152,425 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 		}
 		input.ExternalID = tvExternalID(input.SourceAddonID, input.ResourceID)
 		input.Released = ""
-	} else {
-		if len(input.ExternalID) < 1 || len(input.ExternalID) > 512 {
-			return TitleReference{}, fmt.Errorf("%w: invalid external identifier", ErrInvalidInput)
+		return s.resolveTVTitle(ctx, principal, input)
+	}
+	if len(input.ExternalID) < 1 || len(input.ExternalID) > 512 {
+		return TitleReference{}, fmt.Errorf("%w: invalid external identifier", ErrInvalidInput)
+	}
+	if input.MediaType == "movie" && input.Released != "" {
+		released, err := time.Parse(time.DateOnly, input.Released)
+		if err != nil || released.Year() < 1 || released.Format(time.DateOnly) != input.Released {
+			return TitleReference{}, fmt.Errorf("%w: released must be a YYYY-MM-DD date", ErrInvalidInput)
 		}
-		input.SourceAddonID = ""
-		input.SourceCatalogID = ""
-		input.SourceName = ""
-		input.Country = ""
-		input.Language = ""
-		input.Category = ""
-		if input.MediaType == "movie" && input.Released != "" {
-			released, err := time.Parse(time.DateOnly, input.Released)
-			if err != nil || released.Year() < 1 || released.Format(time.DateOnly) != input.Released {
-				return TitleReference{}, fmt.Errorf("%w: released must be a YYYY-MM-DD date", ErrInvalidInput)
-			}
-		}
-		if input.MediaType == "series" {
-			input.Released = ""
-		}
+	}
+	input.SourceAddonID = ""
+	input.SourceCatalogID = ""
+	input.SourceName = ""
+	input.Country = ""
+	input.Language = ""
+	input.Category = ""
+
+	if s.usesProfileScopedTitleIdentity(input) {
+		return s.persistProfileScopedTitle(ctx, principal, input)
+	}
+	if err := s.authorizeCanonicalTitleResolution(ctx, principal); err != nil {
+		return TitleReference{}, err
+	}
+	canonical, err := s.resolveCanonicalTitle(ctx, input)
+	if err != nil {
+		return TitleReference{}, err
 	}
 
-	storedExternalID := input.ExternalID
-	if len(storedExternalID) > 128 {
-		storedExternalID = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(storedExternalID)))
+	return s.persistCanonicalTitle(ctx, principal, input, canonical)
+}
+
+type canonicalTitleIdentity struct {
+	provider   string
+	externalID string
+	storedID   string
+}
+
+type canonicalTitleSnapshot struct {
+	identities    []canonicalTitleIdentity
+	title         string
+	posterURL     string
+	backgroundURL string
+	releaseInfo   string
+	released      string
+	resourceID    string
+	resource      string
+}
+
+func (s *Service) usesProfileScopedTitleIdentity(input ResolveTitleInput) bool {
+	if s.canonicalProvider == nil || input.Provider == "addon" {
+		return true
 	}
+	if input.Provider == "tmdb" {
+		return false
+	}
+	if s.canonicalResolver == nil {
+		return true
+	}
+	switch input.Provider {
+	case "imdb", "tvdb":
+		return false
+	default:
+		return true
+	}
+}
+
+func (s *Service) resolveCanonicalTitle(ctx context.Context, input ResolveTitleInput) (canonicalTitleSnapshot, error) {
+	if s.canonicalProvider == nil {
+		return canonicalTitleSnapshot{}, errors.New("canonical title provider unavailable")
+	}
+	canonicalID := input.ExternalID
+	if input.Provider != "tmdb" {
+		if s.canonicalResolver == nil {
+			return canonicalTitleSnapshot{}, fmt.Errorf("%w: title provider identity cannot be verified", ErrInvalidInput)
+		}
+		resolvedID, err := s.canonicalResolver.ResolveExternalID(ctx, input.MediaType, input.Provider, input.ExternalID)
+		if err != nil {
+			if errors.Is(err, metadata.ErrProviderNotFound) {
+				return canonicalTitleSnapshot{}, fmt.Errorf("%w: title provider identity cannot be verified", ErrInvalidInput)
+			}
+			return canonicalTitleSnapshot{}, errors.New("canonical title provider unavailable")
+		}
+		canonicalID = strings.TrimSpace(resolvedID)
+	}
+	if canonicalID == "" || len(canonicalID) > 512 {
+		return canonicalTitleSnapshot{}, fmt.Errorf("%w: canonical title identity is invalid", ErrInvalidInput)
+	}
+
+	var snapshot canonicalTitleSnapshot
+	additionalIDs := map[string]string{}
+	switch input.MediaType {
+	case "movie":
+		provided, err := s.canonicalProvider.MovieDetails(ctx, canonicalID, "en-US")
+		if err != nil {
+			if errors.Is(err, metadata.ErrProviderNotFound) {
+				return canonicalTitleSnapshot{}, fmt.Errorf("%w: title provider identity cannot be verified", ErrInvalidInput)
+			}
+			return canonicalTitleSnapshot{}, errors.New("canonical title provider unavailable")
+		}
+		if strings.TrimSpace(provided.ExternalID) != canonicalID {
+			return canonicalTitleSnapshot{}, fmt.Errorf("%w: canonical title identity conflicts with provider metadata", ErrInvalidInput)
+		}
+		snapshot.title = strings.TrimSpace(provided.Title)
+		snapshot.posterURL = strings.TrimSpace(provided.PosterURL)
+		snapshot.backgroundURL = strings.TrimSpace(provided.BackdropURL)
+		snapshot.released = strings.TrimSpace(provided.ReleaseDate)
+		additionalIDs = provided.AdditionalIDs
+	case "series":
+		provided, err := s.canonicalProvider.SeriesDetails(ctx, canonicalID, "en-US")
+		if err != nil {
+			if errors.Is(err, metadata.ErrProviderNotFound) {
+				return canonicalTitleSnapshot{}, fmt.Errorf("%w: title provider identity cannot be verified", ErrInvalidInput)
+			}
+			return canonicalTitleSnapshot{}, errors.New("canonical title provider unavailable")
+		}
+		if strings.TrimSpace(provided.ExternalID) != canonicalID {
+			return canonicalTitleSnapshot{}, fmt.Errorf("%w: canonical title identity conflicts with provider metadata", ErrInvalidInput)
+		}
+		snapshot.title = strings.TrimSpace(provided.Name)
+		snapshot.posterURL = strings.TrimSpace(provided.PosterURL)
+		snapshot.backgroundURL = strings.TrimSpace(provided.BackdropURL)
+		snapshot.released = strings.TrimSpace(provided.FirstAirDate)
+		additionalIDs = provided.AdditionalIDs
+	}
+	if len(snapshot.title) < 1 || len(snapshot.title) > 500 || len(snapshot.posterURL) > 4096 || len(snapshot.backgroundURL) > 4096 {
+		return canonicalTitleSnapshot{}, errors.New("canonical title provider returned an invalid snapshot")
+	}
+	if snapshot.released != "" {
+		released, err := time.Parse(time.DateOnly, snapshot.released)
+		if err != nil || released.Year() < 1 || released.Format(time.DateOnly) != snapshot.released {
+			return canonicalTitleSnapshot{}, errors.New("canonical title provider returned an invalid snapshot")
+		}
+		snapshot.releaseInfo = strconv.Itoa(released.Year())
+	}
+
+	resolvedIDs := make(map[string]string, len(additionalIDs)+1)
+	resolvedIDs["tmdb"] = canonicalID
+	for provider, externalID := range additionalIDs {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		externalID = strings.TrimSpace(externalID)
+		if !providerPattern.MatchString(provider) || externalID == "" || len(externalID) > 512 {
+			continue
+		}
+		if existing, exists := resolvedIDs[provider]; exists && existing != externalID {
+			return canonicalTitleSnapshot{}, fmt.Errorf("%w: canonical title identity conflicts with provider metadata", ErrInvalidInput)
+		}
+		resolvedIDs[provider] = externalID
+	}
+	if resolvedIDs[input.Provider] != input.ExternalID {
+		return canonicalTitleSnapshot{}, fmt.Errorf("%w: canonical title identity conflicts with provider metadata", ErrInvalidInput)
+	}
+	providers := make([]string, 0, len(resolvedIDs))
+	for provider := range resolvedIDs {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	snapshot.identities = make([]canonicalTitleIdentity, 0, len(providers))
+	for _, provider := range providers {
+		externalID := resolvedIDs[provider]
+		snapshot.identities = append(snapshot.identities, canonicalTitleIdentity{
+			provider: provider, externalID: externalID, storedID: storedTitleExternalID(externalID),
+		})
+	}
+	snapshot.resource = "tmdb"
+	snapshot.resourceID = canonicalID
+	if imdbID := resolvedIDs["imdb"]; imdbID != "" {
+		snapshot.resource = "imdb"
+		snapshot.resourceID = imdbID
+	}
+	return snapshot, nil
+}
+
+func storedTitleExternalID(externalID string) string {
+	if len(externalID) <= 128 {
+		return externalID
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(externalID)))
+}
+
+func (s *Service) authorizeCanonicalTitleResolution(ctx context.Context, principal auth.Principal) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin title resolution authorization: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := authorizedActiveProfileID(ctx, tx, principal); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit title resolution authorization: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) persistProfileScopedTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput) (TitleReference, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return TitleReference{}, fmt.Errorf("begin profile title resolution: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveManagerProfileID(ctx, tx, principal)
+	if err != nil {
+		return TitleReference{}, err
+	}
+	lockKey := profileID + ":" + input.Provider + ":" + input.MediaType + ":" + input.ExternalID
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
+		return TitleReference{}, fmt.Errorf("lock profile title resolution: %w", err)
+	}
+
+	var titleID string
+	err = tx.QueryRow(ctx, `
+		SELECT identity.title_id::text
+		FROM profile_title_external_ids identity
+		JOIN titles title ON title.id = identity.title_id
+		WHERE identity.profile_id = $1::uuid
+		  AND identity.provider = $2
+		  AND identity.namespace = $3
+		  AND identity.external_id = $4
+		FOR UPDATE OF title
+	`, profileID, input.Provider, input.MediaType, input.ExternalID).Scan(&titleID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO titles (
+				media_type, display_title, poster_url, background_url, release_info,
+				release_date, resource_id, resource_provider
+			)
+			VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''),
+			        NULLIF($6, '')::date, $7, $8)
+			RETURNING id::text
+		`, input.MediaType, input.Title, input.PosterURL, input.BackgroundURL,
+			input.ReleaseInfo, input.Released, input.ResourceID, input.Provider).Scan(&titleID); err != nil {
+			return TitleReference{}, fmt.Errorf("create profile-scoped title: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO profile_title_external_ids (
+				profile_id, title_id, provider, namespace, external_id
+			)
+			VALUES ($1::uuid, $2::uuid, $3, $4, $5)
+		`, profileID, titleID, input.Provider, input.MediaType, input.ExternalID); err != nil {
+			return TitleReference{}, fmt.Errorf("store profile-scoped title identity: %w", err)
+		}
+	} else if err != nil {
+		return TitleReference{}, fmt.Errorf("find profile-scoped title identity: %w", err)
+	} else {
+		if _, err := tx.Exec(ctx, `
+			UPDATE titles
+			SET display_title = $2,
+			    poster_url = COALESCE(NULLIF($3, ''), poster_url),
+			    background_url = COALESCE(NULLIF($4, ''), background_url),
+			    release_info = COALESCE(NULLIF($5, ''), release_info),
+			    release_date = COALESCE(NULLIF($6, '')::date, release_date),
+			    resource_id = $7,
+			    resource_provider = $8,
+			    updated_at = now()
+			WHERE id = $1::uuid
+		`, titleID, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo,
+			input.Released, input.ResourceID, input.Provider); err != nil {
+			return TitleReference{}, fmt.Errorf("update profile-scoped title snapshot: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TitleReference{}, fmt.Errorf("commit profile title resolution: %w", err)
+	}
+	return TitleReference{
+		TitleID: titleID, MediaType: input.MediaType, Provider: input.Provider,
+		ExternalID: input.ExternalID, ResourceID: input.ResourceID, Title: input.Title,
+		PosterURL: input.PosterURL, BackgroundURL: input.BackgroundURL, ReleaseInfo: input.ReleaseInfo,
+	}, nil
+}
+func (s *Service) persistCanonicalTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput, canonical canonicalTitleSnapshot) (TitleReference, error) {
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return TitleReference{}, fmt.Errorf("begin title resolution: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
-	if err != nil {
+	if _, err := authorizedActiveProfileID(ctx, tx, principal); err != nil {
 		return TitleReference{}, err
 	}
-	if input.MediaType == "tv" {
-		var accessible bool
+	for _, identity := range canonical.identities {
+		lockKey := identity.provider + ":" + input.MediaType + ":" + identity.storedID
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
+			return TitleReference{}, fmt.Errorf("lock title resolution: %w", err)
+		}
+	}
+
+	providers := make([]string, len(canonical.identities))
+	externalIDs := make([]string, len(canonical.identities))
+	for index, identity := range canonical.identities {
+		providers[index] = identity.provider
+		externalIDs[index] = identity.storedID
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT external.title_id::text
+		FROM unnest($1::text[], $2::text[]) AS requested(provider, external_id)
+		JOIN title_external_ids external
+		  ON external.provider = requested.provider
+		 AND external.namespace = $3
+		 AND external.external_id = requested.external_id
+		JOIN titles title ON title.id = external.title_id
+		FOR UPDATE OF title
+	`, providers, externalIDs, input.MediaType)
+	if err != nil {
+		return TitleReference{}, fmt.Errorf("find canonical title identities: %w", err)
+	}
+	titleIDs := make([]string, 0, 1)
+	seenTitleIDs := make(map[string]struct{}, 1)
+	for rows.Next() {
+		var titleID string
+		if err := rows.Scan(&titleID); err != nil {
+			rows.Close()
+			return TitleReference{}, fmt.Errorf("scan canonical title identity: %w", err)
+		}
+		if _, exists := seenTitleIDs[titleID]; !exists {
+			seenTitleIDs[titleID] = struct{}{}
+			titleIDs = append(titleIDs, titleID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return TitleReference{}, fmt.Errorf("read canonical title identities: %w", err)
+	}
+	rows.Close()
+	if len(titleIDs) > 1 {
+		return TitleReference{}, ErrConflict
+	}
+
+	var titleID string
+	if len(titleIDs) == 0 {
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO titles (
+				media_type, display_title, poster_url, background_url, release_info,
+				release_date, resource_id, resource_provider
+			)
+			VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''),
+			        NULLIF($6, '')::date, $7, $8)
+			RETURNING id::text
+		`, input.MediaType, canonical.title, canonical.posterURL, canonical.backgroundURL,
+			canonical.releaseInfo, canonical.released, canonical.resourceID, canonical.resource).Scan(&titleID); err != nil {
+			return TitleReference{}, fmt.Errorf("create canonical title: %w", err)
+		}
+	} else {
+		titleID = titleIDs[0]
+		var identityConflict bool
 		if err := tx.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1
-				FROM addon_profile_access
-				WHERE addon_id = $1::uuid AND profile_id = $2::uuid
+				FROM title_external_ids existing
+				JOIN unnest($2::text[], $3::text[]) AS canonical(provider, external_id)
+				  ON canonical.provider = existing.provider
+				WHERE existing.title_id = $1::uuid
+				  AND existing.namespace = $4
+				  AND existing.external_id <> canonical.external_id
 			)
-		`, input.SourceAddonID, profileID).Scan(&accessible); err != nil {
-			return TitleReference{}, fmt.Errorf("check TV addon access: %w", err)
+		`, titleID, providers, externalIDs, input.MediaType).Scan(&identityConflict); err != nil {
+			return TitleReference{}, fmt.Errorf("check canonical title identity conflict: %w", err)
 		}
-		if !accessible {
-			return TitleReference{}, ErrNotFound
+		if identityConflict {
+			return TitleReference{}, ErrConflict
 		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE titles
+			SET display_title = $2,
+			    poster_url = COALESCE(NULLIF($3, ''), poster_url),
+			    background_url = COALESCE(NULLIF($4, ''), background_url),
+			    release_info = COALESCE(NULLIF($5, ''), release_info),
+			    release_date = COALESCE(NULLIF($6, '')::date, release_date),
+			    resource_id = $7,
+			    resource_provider = $8,
+			    updated_at = now()
+			WHERE id = $1::uuid
+		`, titleID, canonical.title, canonical.posterURL, canonical.backgroundURL,
+			canonical.releaseInfo, canonical.released, canonical.resourceID, canonical.resource); err != nil {
+			return TitleReference{}, fmt.Errorf("update canonical title: %w", err)
+		}
+	}
+	for _, identity := range canonical.identities {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO title_external_ids (title_id, provider, external_id, namespace)
+			VALUES ($1::uuid, $2, $3, $4)
+			ON CONFLICT (provider, namespace, external_id) DO NOTHING
+		`, titleID, identity.provider, identity.storedID, input.MediaType); err != nil {
+			return TitleReference{}, fmt.Errorf("store canonical title identity: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TitleReference{}, fmt.Errorf("commit title resolution: %w", err)
+	}
+	return TitleReference{
+		TitleID: titleID, MediaType: input.MediaType, Provider: input.Provider,
+		ExternalID: input.ExternalID, ResourceID: canonical.resourceID, Title: canonical.title,
+		PosterURL: canonical.posterURL, BackgroundURL: canonical.backgroundURL, ReleaseInfo: canonical.releaseInfo,
+	}, nil
+}
+
+func (s *Service) resolveTVTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput) (TitleReference, error) {
+	storedExternalID := storedTitleExternalID(input.ExternalID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return TitleReference{}, fmt.Errorf("begin title resolution: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveManagerProfileID(ctx, tx, principal)
+	if err != nil {
+		return TitleReference{}, err
+	}
+	var accessible bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM addon_profile_access
+			WHERE addon_id = $1::uuid AND profile_id = $2::uuid
+		)
+	`, input.SourceAddonID, profileID).Scan(&accessible); err != nil {
+		return TitleReference{}, fmt.Errorf("check TV addon access: %w", err)
+	}
+	if !accessible {
+		return TitleReference{}, ErrNotFound
 	}
 	lockKey := input.Provider + ":" + input.MediaType + ":" + storedExternalID
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
@@ -153,9 +579,11 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 
 	var titleID string
 	err = tx.QueryRow(ctx, `
-		SELECT title_id::text
-		FROM title_external_ids
-		WHERE provider = $1 AND namespace = $2 AND external_id = $3
+		SELECT external.title_id::text
+		FROM title_external_ids external
+		JOIN titles title ON title.id = external.title_id
+		WHERE external.provider = $1 AND external.namespace = $2 AND external.external_id = $3
+		FOR UPDATE OF title
 	`, input.Provider, input.MediaType, storedExternalID).Scan(&titleID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.QueryRow(ctx, `
@@ -182,27 +610,32 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 		}
 	} else if err != nil {
 		return TitleReference{}, fmt.Errorf("find resolved title: %w", err)
-	} else if _, err := tx.Exec(ctx, `
-		UPDATE titles
-		SET display_title = COALESCE(display_title, $2),
-		    poster_url = COALESCE(poster_url, NULLIF($3, '')),
-		    background_url = COALESCE(background_url, NULLIF($4, '')),
-		    release_info = COALESCE(release_info, NULLIF($5, '')),
-		    release_date = COALESCE(release_date, NULLIF($6, '')::date),
-		    resource_id = $7,
-		    resource_provider = $8,
-		    source_addon_id = NULLIF($9, '')::uuid,
-		    source_catalog_id = NULLIF($10, ''),
-		    source_name = NULLIF($11, ''),
-		    country = NULLIF($12, ''),
-		    language = NULLIF($13, ''),
-		    category = NULLIF($14, ''),
-		    updated_at = now()
-		WHERE id = $1::uuid
-	`, titleID, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo,
-		input.Released, input.ResourceID, input.Provider, input.SourceAddonID,
-		input.SourceCatalogID, input.SourceName, input.Country, input.Language, input.Category); err != nil {
-		return TitleReference{}, fmt.Errorf("update resolved title snapshot: %w", err)
+	} else {
+		if err := authorizeTitleSnapshotProfiles(ctx, tx, principal, profileID, titleID); err != nil {
+			return TitleReference{}, err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE titles
+			SET display_title = COALESCE(display_title, $2),
+			    poster_url = COALESCE(poster_url, NULLIF($3, '')),
+			    background_url = COALESCE(background_url, NULLIF($4, '')),
+			    release_info = COALESCE(release_info, NULLIF($5, '')),
+			    release_date = COALESCE(release_date, NULLIF($6, '')::date),
+			    resource_id = $7,
+			    resource_provider = $8,
+			    source_addon_id = NULLIF($9, '')::uuid,
+			    source_catalog_id = NULLIF($10, ''),
+			    source_name = NULLIF($11, ''),
+			    country = NULLIF($12, ''),
+			    language = NULLIF($13, ''),
+			    category = NULLIF($14, ''),
+			    updated_at = now()
+			WHERE id = $1::uuid
+		`, titleID, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo,
+			input.Released, input.ResourceID, input.Provider, input.SourceAddonID,
+			input.SourceCatalogID, input.SourceName, input.Country, input.Language, input.Category); err != nil {
+			return TitleReference{}, fmt.Errorf("update resolved title snapshot: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return TitleReference{}, fmt.Errorf("commit title resolution: %w", err)
@@ -230,29 +663,12 @@ func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titl
 	if err != nil {
 		return LibraryItem{}, err
 	}
-	var mediaType string
-	var accessible bool
-	if err := tx.QueryRow(ctx, `
-		SELECT title.media_type,
-		       title.media_type <> 'tv' OR EXISTS (
-		           SELECT 1
-		           FROM addon_profile_access access
-		           WHERE access.addon_id = title.source_addon_id
-		             AND access.profile_id = $2::uuid
-		       )
-		FROM titles title
-		WHERE title.id = $1::uuid
-	`, titleID, profileID).Scan(&mediaType, &accessible); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return LibraryItem{}, ErrNotFound
-		}
-		return LibraryItem{}, fmt.Errorf("query library title: %w", err)
+	mediaType, err := accessibleTitleMediaType(ctx, tx, profileID, titleID)
+	if err != nil {
+		return LibraryItem{}, err
 	}
 	if mediaType != "movie" && mediaType != "series" && mediaType != "tv" {
 		return LibraryItem{}, fmt.Errorf("%w: library titles must be movies, series, or TV channels", ErrInvalidInput)
-	}
-	if !accessible {
-		return LibraryItem{}, ErrNotFound
 	}
 	var item LibraryItem
 	err = tx.QueryRow(ctx, `
@@ -263,7 +679,8 @@ func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titl
 			RETURNING added_at, updated_at
 		)
 		SELECT title.id::text, title.media_type,
-		       COALESCE(title.resource_provider, ''), COALESCE(identity.external_id, ''),
+		       COALESCE(title.resource_provider, ''),
+		       COALESCE(scoped_identity.external_id, global_identity.external_id, ''),
 		       COALESCE(title.resource_id, ''), COALESCE(title.display_title, ''),
 		       COALESCE(title.poster_url, ''), COALESCE(title.background_url, ''),
 		       COALESCE(title.release_info, ''), COALESCE(title.source_addon_id::text, ''),
@@ -279,10 +696,15 @@ func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titl
 		       library.added_at, library.updated_at
 		FROM titles title
 		CROSS JOIN library
-		LEFT JOIN title_external_ids identity
-		  ON identity.title_id = title.id
-		 AND identity.provider = title.resource_provider
-		 AND identity.namespace = title.media_type
+		LEFT JOIN title_external_ids global_identity
+		  ON global_identity.title_id = title.id
+		 AND global_identity.provider = title.resource_provider
+		 AND global_identity.namespace = title.media_type
+		LEFT JOIN profile_title_external_ids scoped_identity
+		  ON scoped_identity.title_id = title.id
+		 AND scoped_identity.profile_id = $1::uuid
+		 AND scoped_identity.provider = title.resource_provider
+		 AND scoped_identity.namespace = title.media_type
 		WHERE title.id = $2::uuid
 	`, profileID, titleID).Scan(
 		&item.TitleID, &item.MediaType, &item.Provider, &item.ExternalID,
@@ -321,8 +743,21 @@ func (s *Service) RemoveLibrary(ctx context.Context, principal auth.Principal, t
 	if err != nil {
 		return err
 	}
-	mediaType, err := titleMediaType(ctx, tx, titleID)
-	if err != nil && !errors.Is(err, ErrNotFound) {
+	mediaType, err := accessibleTitleMediaType(ctx, tx, profileID, titleID)
+	if errors.Is(err, ErrNotFound) {
+		err = tx.QueryRow(ctx, `
+			SELECT title.media_type
+			FROM profile_library library
+			JOIN titles title ON title.id = library.title_id
+			WHERE library.profile_id = $1::uuid
+			  AND library.title_id = $2::uuid
+			  AND title.media_type = 'tv'
+		`, profileID, titleID).Scan(&mediaType)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+	}
+	if err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM profile_library WHERE profile_id = $1::uuid AND title_id = $2::uuid`, profileID, titleID); err != nil {
@@ -360,16 +795,22 @@ func (s *Service) Library(ctx context.Context, principal auth.Principal, mediaTy
 
 	var totalResults int
 	if err := tx.QueryRow(ctx, `
+		WITH accessible_titles AS (`+accessibleTitlesSQL+`)
 		SELECT count(*)
 		FROM profile_library library
 		JOIN titles title ON title.id = library.title_id
-		WHERE library.profile_id = $1::uuid AND ($2 = '' OR title.media_type = $2)
+		LEFT JOIN accessible_titles accessible ON accessible.id = title.id
+		WHERE library.profile_id = $1::uuid
+		  AND ($2 = '' OR title.media_type = $2)
+		  AND (title.media_type = 'tv' OR accessible.id IS NOT NULL)
 	`, profileID, mediaType).Scan(&totalResults); err != nil {
 		return LibraryPage{}, fmt.Errorf("count library titles: %w", err)
 	}
 	rows, err := tx.Query(ctx, `
+		WITH accessible_titles AS (`+accessibleTitlesSQL+`)
 		SELECT title.id::text, title.media_type,
-		       COALESCE(title.resource_provider, ''), COALESCE(identity.external_id, ''),
+		       COALESCE(title.resource_provider, ''),
+		       COALESCE(scoped_identity.external_id, global_identity.external_id, ''),
 		       COALESCE(title.resource_id, ''), COALESCE(title.display_title, ''),
 		       COALESCE(title.poster_url, ''), COALESCE(title.background_url, ''),
 		       COALESCE(title.release_info, ''), COALESCE(title.source_addon_id::text, ''),
@@ -385,11 +826,19 @@ func (s *Service) Library(ctx context.Context, principal auth.Principal, mediaTy
 		       library.added_at, library.updated_at
 		FROM profile_library library
 		JOIN titles title ON title.id = library.title_id
-		LEFT JOIN title_external_ids identity
-		  ON identity.title_id = title.id
-		 AND identity.provider = title.resource_provider
-		 AND identity.namespace = title.media_type
-		WHERE library.profile_id = $1::uuid AND ($2 = '' OR title.media_type = $2)
+		LEFT JOIN accessible_titles accessible ON accessible.id = title.id
+		LEFT JOIN title_external_ids global_identity
+		  ON global_identity.title_id = title.id
+		 AND global_identity.provider = title.resource_provider
+		 AND global_identity.namespace = title.media_type
+		LEFT JOIN profile_title_external_ids scoped_identity
+		  ON scoped_identity.title_id = title.id
+		 AND scoped_identity.profile_id = library.profile_id
+		 AND scoped_identity.provider = title.resource_provider
+		 AND scoped_identity.namespace = title.media_type
+		WHERE library.profile_id = $1::uuid
+		  AND ($2 = '' OR title.media_type = $2)
+		  AND (title.media_type = 'tv' OR accessible.id IS NOT NULL)
 		ORDER BY library.added_at DESC, title.id
 		LIMIT $3 OFFSET $4
 	`, profileID, mediaType, pageSize, (page-1)*pageSize)
@@ -426,6 +875,85 @@ func (s *Service) Library(ctx context.Context, principal auth.Principal, mediaTy
 	return pageResult, nil
 }
 
+func (s *Service) TVLibraryMembership(ctx context.Context, principal auth.Principal, identities []TVLibraryIdentity) (TVLibraryMembershipResult, error) {
+	if len(identities) < 1 || len(identities) > MaximumTVLibraryMembershipIdentities {
+		return TVLibraryMembershipResult{}, fmt.Errorf("%w: identities must contain between 1 and %d items", ErrInvalidInput, MaximumTVLibraryMembershipIdentities)
+	}
+	type identityKey struct {
+		sourceAddonID string
+		resourceID    string
+	}
+	seen := make(map[identityKey]struct{}, len(identities))
+	sourceAddonIDs := make([]string, 0, len(identities))
+	resourceIDs := make([]string, 0, len(identities))
+	externalIDs := make([]string, 0, len(identities))
+	for _, identity := range identities {
+		sourceAddonID := strings.ToLower(strings.TrimSpace(identity.SourceAddonID))
+		resourceID := strings.TrimSpace(identity.ResourceID)
+		if !uuidPattern.MatchString(sourceAddonID) {
+			return TVLibraryMembershipResult{}, fmt.Errorf("%w: sourceAddonId must be a UUID", ErrInvalidInput)
+		}
+		if len(resourceID) < 1 || len(resourceID) > 512 {
+			return TVLibraryMembershipResult{}, fmt.Errorf("%w: invalid resource identifier", ErrInvalidInput)
+		}
+		key := identityKey{sourceAddonID: sourceAddonID, resourceID: resourceID}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		sourceAddonIDs = append(sourceAddonIDs, sourceAddonID)
+		resourceIDs = append(resourceIDs, resourceID)
+		externalIDs = append(externalIDs, tvExternalID(sourceAddonID, resourceID))
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return TVLibraryMembershipResult{}, fmt.Errorf("begin TV library membership query: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	if err != nil {
+		return TVLibraryMembershipResult{}, err
+	}
+	rows, err := tx.Query(ctx, `
+		WITH requested AS (
+			SELECT source_addon_id, resource_id, external_id, ordinal
+			FROM unnest($2::uuid[], $3::text[], $4::text[]) WITH ORDINALITY
+			     AS requested_identity(source_addon_id, resource_id, external_id, ordinal)
+		)
+		SELECT requested.source_addon_id::text, requested.resource_id, identity.title_id::text
+		FROM requested
+		JOIN title_external_ids identity
+		  ON identity.provider = 'addon'
+		 AND identity.namespace = 'tv'
+		 AND identity.external_id = requested.external_id
+		JOIN profile_library library
+		  ON library.title_id = identity.title_id
+		 AND library.profile_id = $1::uuid
+		ORDER BY requested.ordinal, identity.title_id
+	`, profileID, sourceAddonIDs, resourceIDs, externalIDs)
+	if err != nil {
+		return TVLibraryMembershipResult{}, fmt.Errorf("query TV library membership: %w", err)
+	}
+	defer rows.Close()
+	items := make([]TVLibraryMembership, 0, len(sourceAddonIDs))
+	for rows.Next() {
+		var item TVLibraryMembership
+		if err := rows.Scan(&item.SourceAddonID, &item.ResourceID, &item.TitleID); err != nil {
+			return TVLibraryMembershipResult{}, fmt.Errorf("scan TV library membership: %w", err)
+		}
+		items = append(items, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return TVLibraryMembershipResult{}, fmt.Errorf("iterate TV library membership: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TVLibraryMembershipResult{}, fmt.Errorf("commit TV library membership query: %w", err)
+	}
+	return TVLibraryMembershipResult{Items: items}, nil
+}
+
 func (s *Service) GetProgress(ctx context.Context, principal auth.Principal, titleID string) (Progress, error) {
 	titleID, err := normalizeTitleID(titleID)
 	if err != nil {
@@ -440,11 +968,11 @@ func (s *Service) GetProgress(ctx context.Context, principal auth.Principal, tit
 	if err != nil {
 		return Progress{}, err
 	}
+	if _, err := accessibleTitleMediaType(ctx, tx, profileID, titleID); err != nil {
+		return Progress{}, err
+	}
 	progress, err := progressForProfile(ctx, tx, profileID, titleID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		if _, titleErr := titleMediaType(ctx, tx, titleID); titleErr != nil {
-			return Progress{}, titleErr
-		}
 		return Progress{}, ErrProgressNotFound
 	}
 	if err != nil {
@@ -454,6 +982,278 @@ func (s *Service) GetProgress(ctx context.Context, principal auth.Principal, tit
 		return Progress{}, fmt.Errorf("commit playback progress query: %w", err)
 	}
 	return progress, nil
+}
+
+func (s *Service) GetProgressBatch(ctx context.Context, principal auth.Principal, titleIDs []string) (ProgressBatch, error) {
+	titleIDs, err := normalizeProgressBatchTitleIDs(titleIDs)
+	if err != nil {
+		return ProgressBatch{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ProgressBatch{}, fmt.Errorf("begin playback progress batch query: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	if err != nil {
+		return ProgressBatch{}, err
+	}
+	rows, err := tx.Query(ctx, `
+		/* watchstate.progress_batch */
+		WITH accessible_titles AS (`+accessibleTitlesSQL+`),
+		input AS (
+			SELECT title_id, ordinality
+			FROM unnest($2::uuid[]) WITH ORDINALITY AS requested(title_id, ordinality)
+		)
+		SELECT input.ordinality, input.title_id::text, title.media_type,
+		       progress.title_id::text, progress.position_seconds, progress.duration_seconds,
+		       progress.completed, progress.version, progress.last_watched_at, progress.updated_at
+		FROM input
+		LEFT JOIN accessible_titles title ON title.id = input.title_id
+		LEFT JOIN profile_progress progress
+		  ON progress.profile_id = $1::uuid
+		 AND progress.title_id = input.title_id
+		 AND title.id IS NOT NULL
+		ORDER BY input.ordinality
+	`, profileID, titleIDs)
+	if err != nil {
+		return ProgressBatch{}, fmt.Errorf("query playback progress batch: %w", err)
+	}
+	defer rows.Close()
+	items := make([]ProgressBatchItem, 0, len(titleIDs))
+	for rows.Next() {
+		var (
+			ordinal         int
+			titleID         string
+			mediaType       *string
+			progressTitleID *string
+			position        *int
+			duration        *int
+			completed       *bool
+			version         *int64
+			lastWatchedAt   *time.Time
+			updatedAt       *time.Time
+		)
+		if err := rows.Scan(
+			&ordinal, &titleID, &mediaType, &progressTitleID, &position, &duration,
+			&completed, &version, &lastWatchedAt, &updatedAt,
+		); err != nil {
+			return ProgressBatch{}, fmt.Errorf("scan playback progress batch: %w", err)
+		}
+		if ordinal != len(items)+1 {
+			return ProgressBatch{}, fmt.Errorf("playback progress batch order mismatch")
+		}
+		if mediaType == nil {
+			return ProgressBatch{}, ErrNotFound
+		}
+		item := ProgressBatchItem{TitleID: titleID}
+		if progressTitleID != nil {
+			item.Progress = &Progress{
+				TitleID:         *progressTitleID,
+				MediaType:       *mediaType,
+				PositionSeconds: *position,
+				DurationSeconds: *duration,
+				Completed:       *completed,
+				Version:         *version,
+				LastWatchedAt:   *lastWatchedAt,
+				UpdatedAt:       *updatedAt,
+			}
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return ProgressBatch{}, fmt.Errorf("iterate playback progress batch: %w", err)
+	}
+	if len(items) != len(titleIDs) {
+		return ProgressBatch{}, ErrNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ProgressBatch{}, fmt.Errorf("commit playback progress batch query: %w", err)
+	}
+	return ProgressBatch{Items: items}, nil
+}
+
+func (s *Service) SetWatchedBatch(ctx context.Context, principal auth.Principal, input []SetWatchedBatchItem) (ProgressBatch, error) {
+	input, err := normalizeSetWatchedBatchInput(input)
+	if err != nil {
+		return ProgressBatch{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ProgressBatch{}, fmt.Errorf("begin watched state batch update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	if err != nil {
+		return ProgressBatch{}, err
+	}
+	titleIDs := make([]string, len(input))
+	completedValues := make([]bool, len(input))
+	expectedVersions := make([]int64, len(input))
+	for index, item := range input {
+		titleIDs[index] = item.TitleID
+		completedValues[index] = item.Completed
+		expectedVersions[index] = item.ExpectedVersion
+	}
+	rows, err := tx.Query(ctx, `
+		/* watchstate.set_watched_batch */
+		WITH accessible_titles AS (`+accessibleTitlesSQL+`),
+		input AS (
+			SELECT title_id, completed, expected_version, ordinality
+			FROM unnest($2::uuid[], $3::boolean[], $4::bigint[]) WITH ORDINALITY
+			  AS requested(title_id, completed, expected_version, ordinality)
+		), candidates AS (
+			SELECT input.*, title.media_type,
+			       CASE
+			         WHEN title.id IS NULL THEN 'not_found'
+			         WHEN title.media_type NOT IN ('movie', 'episode') THEN 'invalid'
+			         ELSE ''
+			       END AS pre_error
+			FROM input
+			LEFT JOIN accessible_titles title ON title.id = input.title_id
+		), updated AS (
+			UPDATE profile_progress progress
+			SET position_seconds = CASE WHEN candidate.completed THEN progress.duration_seconds ELSE 0 END,
+			    completed = candidate.completed,
+			    version = progress.version + 1,
+			    last_watched_at = now(),
+			    updated_at = now()
+			FROM candidates candidate
+			WHERE progress.profile_id = $1::uuid
+			  AND progress.title_id = candidate.title_id
+			  AND candidate.pre_error = ''
+			  AND candidate.expected_version > 0
+			  AND progress.version = candidate.expected_version
+			RETURNING progress.title_id, progress.position_seconds, progress.duration_seconds,
+			          progress.completed, progress.version, progress.last_watched_at, progress.updated_at
+		), inserted AS (
+			INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed)
+			SELECT $1::uuid, candidate.title_id, 0, 0, candidate.completed
+			FROM candidates candidate
+			WHERE candidate.pre_error = '' AND candidate.expected_version = 0
+			ON CONFLICT (profile_id, title_id) DO NOTHING
+			RETURNING title_id, position_seconds, duration_seconds, completed, version, last_watched_at, updated_at
+		), changed AS (
+			SELECT * FROM updated
+			UNION ALL
+			SELECT * FROM inserted
+		), cleared AS (
+			DELETE FROM profile_continue_dismissals dismissal
+			USING changed
+			WHERE dismissal.profile_id = $1::uuid AND dismissal.title_id = changed.title_id
+			RETURNING dismissal.title_id
+		)
+		SELECT candidate.ordinality, candidate.title_id::text, candidate.media_type,
+		       CASE
+		         WHEN candidate.pre_error <> '' THEN candidate.pre_error
+		         WHEN changed.title_id IS NULL THEN 'conflict'
+		         ELSE ''
+		       END,
+		       changed.title_id::text, changed.position_seconds, changed.duration_seconds,
+		       changed.completed, changed.version, changed.last_watched_at, changed.updated_at,
+		       (SELECT count(*) FROM cleared)
+		FROM candidates candidate
+		LEFT JOIN changed ON changed.title_id = candidate.title_id
+		ORDER BY candidate.ordinality
+	`, profileID, titleIDs, completedValues, expectedVersions)
+	if err != nil {
+		return ProgressBatch{}, fmt.Errorf("update watched state batch: %w", err)
+	}
+	defer rows.Close()
+	items := make([]ProgressBatchItem, 0, len(input))
+	var batchErr error
+	for rows.Next() {
+		var (
+			ordinal         int
+			titleID         string
+			mediaType       *string
+			status          string
+			progressTitleID *string
+			position        *int
+			duration        *int
+			completed       *bool
+			version         *int64
+			lastWatchedAt   *time.Time
+			updatedAt       *time.Time
+			clearedCount    int
+		)
+		if err := rows.Scan(
+			&ordinal, &titleID, &mediaType, &status, &progressTitleID, &position, &duration,
+			&completed, &version, &lastWatchedAt, &updatedAt, &clearedCount,
+		); err != nil {
+			return ProgressBatch{}, fmt.Errorf("scan watched state batch: %w", err)
+		}
+		if ordinal != len(items)+1 {
+			return ProgressBatch{}, fmt.Errorf("watched state batch order mismatch")
+		}
+		switch status {
+		case "not_found":
+			batchErr = ErrNotFound
+		case "invalid":
+			if batchErr == nil {
+				batchErr = fmt.Errorf("%w: watched titles must be movies or episodes", ErrInvalidInput)
+			}
+		case "conflict":
+			if batchErr == nil {
+				batchErr = ErrConflict
+			}
+		case "":
+			progress := &Progress{
+				TitleID:         *progressTitleID,
+				MediaType:       *mediaType,
+				PositionSeconds: *position,
+				DurationSeconds: *duration,
+				Completed:       *completed,
+				Version:         *version,
+				LastWatchedAt:   *lastWatchedAt,
+				UpdatedAt:       *updatedAt,
+			}
+			items = append(items, ProgressBatchItem{TitleID: titleID, Progress: progress})
+			continue
+		default:
+			return ProgressBatch{}, fmt.Errorf("unknown watched state batch status %q", status)
+		}
+		items = append(items, ProgressBatchItem{TitleID: titleID})
+	}
+	if err := rows.Err(); err != nil {
+		return ProgressBatch{}, fmt.Errorf("iterate watched state batch: %w", err)
+	}
+	rows.Close()
+	if len(items) != len(input) {
+		return ProgressBatch{}, fmt.Errorf("watched state batch result count mismatch")
+	}
+	if batchErr != nil {
+		return ProgressBatch{}, batchErr
+	}
+	if s.tracking != nil {
+		batch := make([]tracking.BatchEvent, len(items))
+		for index, item := range items {
+			progress := item.Progress
+			batch[index] = tracking.BatchEvent{
+				TitleID:        progress.TitleID,
+				IdempotencyKey: fmt.Sprintf("watched:%s:%d:%t", progress.TitleID, progress.Version, progress.Completed),
+				Event: tracking.Event{
+					Type: "watched", TitleID: progress.TitleID, Completed: progress.Completed,
+					Version: progress.Version, OccurredAt: progress.UpdatedAt,
+				},
+			}
+		}
+		if batchSink, ok := s.tracking.(trackingBatchSink); ok {
+			if err := batchSink.EnqueueBatchTx(ctx, tx, profileID, batch); err != nil {
+				return ProgressBatch{}, watchstateTrackingError(err)
+			}
+		} else {
+			for _, item := range batch {
+				if err := s.enqueueTrackingTx(ctx, tx, profileID, item.TitleID, item.IdempotencyKey, item.Event); err != nil {
+					return ProgressBatch{}, err
+				}
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ProgressBatch{}, fmt.Errorf("commit watched state batch update: %w", err)
+	}
+	return ProgressBatch{Items: items}, nil
 }
 
 func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, titleID string, input UpdateProgressInput) (Progress, error) {
@@ -473,7 +1273,7 @@ func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return Progress{}, err
 	}
-	mediaType, err := titleMediaType(ctx, tx, titleID)
+	mediaType, err := accessibleTitleMediaType(ctx, tx, profileID, titleID)
 	if err != nil {
 		return Progress{}, err
 	}
@@ -538,7 +1338,7 @@ func (s *Service) SetWatched(ctx context.Context, principal auth.Principal, titl
 	if err != nil {
 		return Progress{}, err
 	}
-	mediaType, err := titleMediaType(ctx, tx, titleID)
+	mediaType, err := accessibleTitleMediaType(ctx, tx, profileID, titleID)
 	if err != nil {
 		return Progress{}, err
 	}
@@ -602,6 +1402,9 @@ func (s *Service) ClearProgress(ctx context.Context, principal auth.Principal, t
 	if err != nil {
 		return err
 	}
+	if _, err := accessibleTitleMediaType(ctx, tx, profileID, titleID); err != nil {
+		return err
+	}
 	result, err := tx.Exec(ctx, `
 		DELETE FROM profile_progress
 		WHERE profile_id = $1::uuid AND title_id = $2::uuid AND version = $3
@@ -644,17 +1447,25 @@ func (s *Service) DismissContinue(ctx context.Context, principal auth.Principal,
 	if err != nil {
 		return err
 	}
-	var targetID, mediaType string
+	mediaType, err := accessibleTitleMediaType(ctx, tx, profileID, titleID)
+	if err != nil {
+		return err
+	}
+	var targetID string
 	err = tx.QueryRow(ctx, `
-		SELECT COALESCE(CASE WHEN title.media_type = 'episode' THEN series.id END, title.id)::text,
-		       title.media_type
+		WITH accessible_titles AS (`+accessibleTitlesSQL+`)
+		SELECT COALESCE(CASE WHEN title.media_type = 'episode' THEN series.id END, title.id)::text
 		FROM titles title
 		LEFT JOIN titles season
 		  ON title.media_type = 'episode' AND season.id = title.parent_id AND season.media_type = 'season'
 		LEFT JOIN titles series
 		  ON season.parent_id = series.id AND series.media_type = 'series'
-		WHERE title.id = $1::uuid
-	`, titleID).Scan(&targetID, &mediaType)
+		WHERE title.id = $2::uuid
+		  AND (
+		      title.media_type <> 'episode'
+		      OR EXISTS (SELECT 1 FROM accessible_titles accessible WHERE accessible.id = series.id)
+		  )
+	`, profileID, titleID).Scan(&targetID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -738,7 +1549,8 @@ func (s *Service) ContinueWatching(ctx context.Context, principal auth.Principal
 
 func resumeItems(ctx context.Context, tx pgx.Tx, profileID string, limit int) ([]ContinueItem, map[string]struct{}, error) {
 	rows, err := tx.Query(ctx, `
-		WITH resumable AS (
+		WITH accessible_titles AS (`+accessibleTitlesSQL+`),
+		resumable AS (
 			SELECT title.id,
 			       title.media_type,
 			       series.id AS series_id,
@@ -767,13 +1579,20 @@ func resumeItems(ctx context.Context, tx pgx.Tx, profileID string, limit int) ([
 			       ) AS series_rank
 			FROM profile_progress progress
 			JOIN titles title ON title.id = progress.title_id
+			JOIN accessible_titles accessible_title ON accessible_title.id = title.id
 			LEFT JOIN titles season
 			  ON title.media_type = 'episode' AND season.id = title.parent_id
+			LEFT JOIN accessible_titles accessible_season ON accessible_season.id = season.id
 			LEFT JOIN titles series
 			  ON season.media_type = 'season' AND series.id = season.parent_id
+			LEFT JOIN accessible_titles accessible_series ON accessible_series.id = series.id
 			WHERE progress.profile_id = $1::uuid
 			  AND NOT progress.completed
 			  AND progress.position_seconds > 0
+			  AND (
+			      title.media_type <> 'episode'
+			      OR (accessible_season.id IS NOT NULL AND accessible_series.id IS NOT NULL)
+			  )
 			  AND NOT EXISTS (
 				  SELECT 1
 				  FROM profile_continue_dismissals dismissal
@@ -825,7 +1644,8 @@ func resumeItems(ctx context.Context, tx pgx.Tx, profileID string, limit int) ([
 }
 
 const nextEpisodeQuery = `
-		WITH latest_completed AS (
+		WITH accessible_titles AS (` + accessibleTitlesSQL + `),
+		latest_completed AS (
 			SELECT DISTINCT ON (series.id)
 			       series.id AS series_id,
 			       season.ordinal AS season_number,
@@ -833,8 +1653,11 @@ const nextEpisodeQuery = `
 			       progress.last_watched_at
 			FROM profile_progress progress
 			JOIN titles episode ON episode.id = progress.title_id AND episode.media_type = 'episode'
+			JOIN accessible_titles accessible_episode ON accessible_episode.id = episode.id
 			JOIN titles season ON season.id = episode.parent_id AND season.media_type = 'season'
+			JOIN accessible_titles accessible_season ON accessible_season.id = season.id
 			JOIN titles series ON series.id = season.parent_id AND series.media_type = 'series'
+			JOIN accessible_titles accessible_series ON accessible_series.id = series.id
 			WHERE progress.profile_id = $1::uuid
 			  AND progress.completed
 			  AND season.ordinal > 0
@@ -862,9 +1685,11 @@ const nextEpisodeQuery = `
 		JOIN LATERAL (
 			SELECT candidate_episode.id, candidate_episode.parent_id, candidate_episode.ordinal
 			FROM titles candidate_episode
+			JOIN accessible_titles accessible_candidate_episode ON accessible_candidate_episode.id = candidate_episode.id
 			JOIN titles candidate_season
 			  ON candidate_season.id = candidate_episode.parent_id
 			 AND candidate_season.media_type = 'season'
+			JOIN accessible_titles accessible_candidate_season ON accessible_candidate_season.id = candidate_season.id
 			WHERE candidate_episode.media_type = 'episode'
 			  AND candidate_season.parent_id = latest.series_id
 			  AND candidate_season.ordinal > 0
@@ -944,15 +1769,61 @@ func progressForProfile(ctx context.Context, tx pgx.Tx, profileID, titleID strin
 	return progress, nil
 }
 
-func titleMediaType(ctx context.Context, tx pgx.Tx, titleID string) (string, error) {
+func accessibleTitleMediaType(ctx context.Context, tx pgx.Tx, profileID, titleID string) (string, error) {
 	var mediaType string
-	if err := tx.QueryRow(ctx, "SELECT media_type FROM titles WHERE id = $1::uuid", titleID).Scan(&mediaType); err != nil {
+	if err := tx.QueryRow(ctx, `
+		SELECT accessible.media_type
+		FROM (`+accessibleTitlesSQL+`) accessible
+		WHERE accessible.id = $2::uuid
+	`, profileID, titleID).Scan(&mediaType); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", ErrNotFound
 		}
-		return "", fmt.Errorf("query title type: %w", err)
+		return "", fmt.Errorf("authorize title access: %w", err)
 	}
 	return mediaType, nil
+}
+
+func authorizeTitleSnapshotProfiles(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, titleID string) error {
+	var profileIDs []string
+	if err := tx.QueryRow(ctx, `
+		SELECT ARRAY(
+			SELECT profile_id::text
+			FROM (
+				SELECT $2::uuid AS profile_id
+				UNION
+				SELECT profile_id FROM profile_library WHERE title_id = $1::uuid
+				UNION
+				SELECT profile_id FROM profile_progress WHERE title_id = $1::uuid
+			) affected
+			ORDER BY profile_id::text
+		)
+	`, titleID, activeProfileID).Scan(&profileIDs); err != nil {
+		return fmt.Errorf("query profiles affected by title snapshot: %w", err)
+	}
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, profileIDs, true)
+	if err != nil {
+		return fmt.Errorf("authorize affected title snapshot profiles: %w", err)
+	}
+	if !authorized {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func authorizedActiveManagerProfileID(ctx context.Context, tx pgx.Tx, principal auth.Principal) (string, error) {
+	profileID, err := activeProfileID(principal)
+	if err != nil {
+		return "", err
+	}
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
+	if err != nil {
+		return "", fmt.Errorf("authorize active watchstate profile management: %w", err)
+	}
+	if !authorized {
+		return "", ErrForbidden
+	}
+	return profileID, nil
 }
 
 func authorizedActiveProfileID(ctx context.Context, tx pgx.Tx, principal auth.Principal) (string, error) {
@@ -987,6 +1858,46 @@ func normalizeTitleID(titleID string) (string, error) {
 		return "", fmt.Errorf("%w: titleId must be a UUID", ErrInvalidInput)
 	}
 	return strings.ToLower(titleID), nil
+}
+
+func normalizeProgressBatchTitleIDs(titleIDs []string) ([]string, error) {
+	if len(titleIDs) < 1 || len(titleIDs) > MaximumProgressBatchSize {
+		return nil, fmt.Errorf("%w: titleIds must contain between 1 and %d items", ErrInvalidInput, MaximumProgressBatchSize)
+	}
+	normalized := make([]string, len(titleIDs))
+	seen := make(map[string]struct{}, len(titleIDs))
+	for index, titleID := range titleIDs {
+		titleID, err := normalizeTitleID(titleID)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seen[titleID]; exists {
+			return nil, fmt.Errorf("%w: duplicate titleId", ErrInvalidInput)
+		}
+		seen[titleID] = struct{}{}
+		normalized[index] = titleID
+	}
+	return normalized, nil
+}
+
+func normalizeSetWatchedBatchInput(input []SetWatchedBatchItem) ([]SetWatchedBatchItem, error) {
+	titleIDs := make([]string, len(input))
+	for index := range input {
+		titleIDs[index] = input[index].TitleID
+		if input[index].ExpectedVersion < 0 {
+			return nil, fmt.Errorf("%w: expectedVersion must be zero or greater", ErrInvalidInput)
+		}
+	}
+	normalized, err := normalizeProgressBatchTitleIDs(titleIDs)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]SetWatchedBatchItem, len(input))
+	for index := range input {
+		result[index] = input[index]
+		result[index].TitleID = normalized[index]
+	}
+	return result, nil
 }
 
 func normalizeLibraryQuery(mediaType string, page, pageSize int) (string, int, int, error) {

@@ -102,7 +102,8 @@ func (s *Service) Delete(ctx context.Context, principal Actor, categoryID string
 			SET revoked_at = COALESCE(revoked_at, now()),
 			    revoked_reason = CASE WHEN revoked_at IS NULL THEN 'device category changed' ELSE revoked_reason END,
 			    active_profile_id = NULL,
-			    profile_grant_expires_at = NULL
+			    profile_grant_expires_at = NULL,
+			    profile_context_hash = NULL
 			WHERE device_id IN (SELECT id FROM devices WHERE category_id = $1::uuid)
 		`, categoryID); err != nil {
 			return fmt.Errorf("revoke reassigned device sessions: %w", err)
@@ -112,14 +113,15 @@ func (s *Service) Delete(ctx context.Context, principal Actor, categoryID string
 			SET revoked_at = COALESCE(revoked_at, now()),
 			    revoked_reason = CASE WHEN revoked_at IS NULL THEN 'access category deleted' ELSE revoked_reason END,
 			    active_profile_id = NULL,
-			    profile_grant_expires_at = NULL
+			    profile_grant_expires_at = NULL,
+			    profile_context_hash = NULL
 			WHERE authorization_scope = 'category' AND category_id = $1::uuid
 		`, categoryID); err != nil {
 			return fmt.Errorf("revoke deleted category sessions: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE auth_sessions
-			SET active_profile_id = NULL, profile_grant_expires_at = NULL
+			SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
 			WHERE authorization_scope = 'global_admin'
 			  AND active_profile_id IN (SELECT id FROM profiles WHERE category_id = $1::uuid)
 		`, categoryID); err != nil {

@@ -60,7 +60,8 @@ func revokeDeviceSessions(ctx context.Context, tx pgx.Tx, deviceIDs []string) er
 		SET revoked_at = COALESCE(revoked_at, now()),
 		    revoked_reason = CASE WHEN revoked_at IS NULL THEN 'device category changed' ELSE revoked_reason END,
 		    active_profile_id = NULL,
-		    profile_grant_expires_at = NULL
+		    profile_grant_expires_at = NULL,
+		    profile_context_hash = NULL
 		WHERE device_id = ANY($1::uuid[])
 	`, deviceIDs)
 	if err != nil {

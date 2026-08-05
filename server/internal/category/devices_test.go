@@ -84,7 +84,7 @@ func TestDeleteDeviceRequiresGlobalAdministratorAndAtomicallyAuditsCascade(t *te
 		t.Fatalf("delete device: %v", err)
 	}
 	var deviceExists, sessionExists bool
-	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM devices WHERE id = $1::uuid)`).Scan(&deviceExists); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM devices WHERE id = $1::uuid)`, deviceID).Scan(&deviceExists); err != nil {
 		t.Fatalf("check deleted device: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM auth_sessions WHERE id = $1::uuid)`, sessionID).Scan(&sessionExists); err != nil {

@@ -15,36 +15,45 @@ import (
 )
 
 type fakeWatchstateService struct {
-	resolveInput     watchstate.ResolveTitleInput
-	resolveValue     watchstate.TitleReference
-	resolveErr       error
-	libraryMediaType string
-	libraryPage      int
-	libraryPageSize  int
-	libraryValue     watchstate.LibraryPage
-	libraryErr       error
-	addTitleID       string
-	addValue         watchstate.LibraryItem
-	addErr           error
-	removeTitleID    string
-	removeErr        error
-	progressTitleID  string
-	progressInput    watchstate.UpdateProgressInput
-	progressValue    watchstate.Progress
-	progressErr      error
-	completionID     string
-	completionValue  bool
-	completionInput  watchstate.CompletionInput
-	completionResult watchstate.Progress
-	completionErr    error
-	clearTitleID     string
-	clearVersion     int64
-	clearErr         error
-	continueLimit    int
-	continueValue    watchstate.ContinuePage
-	continueErr      error
-	dismissTitleID   string
-	dismissErr       error
+	resolveInput          watchstate.ResolveTitleInput
+	resolveValue          watchstate.TitleReference
+	resolveErr            error
+	libraryMediaType      string
+	libraryPage           int
+	libraryPageSize       int
+	libraryValue          watchstate.LibraryPage
+	libraryErr            error
+	membershipInput       []watchstate.TVLibraryIdentity
+	membershipValue       watchstate.TVLibraryMembershipResult
+	membershipErr         error
+	addTitleID            string
+	addValue              watchstate.LibraryItem
+	addErr                error
+	removeTitleID         string
+	removeErr             error
+	progressTitleID       string
+	progressInput         watchstate.UpdateProgressInput
+	progressValue         watchstate.Progress
+	progressErr           error
+	progressBatchInput    []string
+	progressBatchValue    watchstate.ProgressBatch
+	progressBatchErr      error
+	completionID          string
+	completionValue       bool
+	completionInput       watchstate.CompletionInput
+	completionResult      watchstate.Progress
+	completionErr         error
+	completionBatchInput  []watchstate.SetWatchedBatchItem
+	completionBatchResult watchstate.ProgressBatch
+	completionBatchErr    error
+	clearTitleID          string
+	clearVersion          int64
+	clearErr              error
+	continueLimit         int
+	continueValue         watchstate.ContinuePage
+	continueErr           error
+	dismissTitleID        string
+	dismissErr            error
 }
 
 func (f *fakeWatchstateService) ResolveTitle(_ context.Context, _ auth.Principal, input watchstate.ResolveTitleInput) (watchstate.TitleReference, error) {
@@ -67,9 +76,19 @@ func (f *fakeWatchstateService) Library(_ context.Context, _ auth.Principal, med
 	return f.libraryValue, f.libraryErr
 }
 
+func (f *fakeWatchstateService) TVLibraryMembership(_ context.Context, _ auth.Principal, identities []watchstate.TVLibraryIdentity) (watchstate.TVLibraryMembershipResult, error) {
+	f.membershipInput = identities
+	return f.membershipValue, f.membershipErr
+}
+
 func (f *fakeWatchstateService) GetProgress(_ context.Context, _ auth.Principal, titleID string) (watchstate.Progress, error) {
 	f.progressTitleID = titleID
 	return f.progressValue, f.progressErr
+}
+
+func (f *fakeWatchstateService) GetProgressBatch(_ context.Context, _ auth.Principal, titleIDs []string) (watchstate.ProgressBatch, error) {
+	f.progressBatchInput = titleIDs
+	return f.progressBatchValue, f.progressBatchErr
 }
 
 func (f *fakeWatchstateService) UpdateProgress(_ context.Context, _ auth.Principal, titleID string, input watchstate.UpdateProgressInput) (watchstate.Progress, error) {
@@ -80,6 +99,11 @@ func (f *fakeWatchstateService) UpdateProgress(_ context.Context, _ auth.Princip
 func (f *fakeWatchstateService) SetWatched(_ context.Context, _ auth.Principal, titleID string, completed bool, input watchstate.CompletionInput) (watchstate.Progress, error) {
 	f.completionID, f.completionValue, f.completionInput = titleID, completed, input
 	return f.completionResult, f.completionErr
+}
+
+func (f *fakeWatchstateService) SetWatchedBatch(_ context.Context, _ auth.Principal, input []watchstate.SetWatchedBatchItem) (watchstate.ProgressBatch, error) {
+	f.completionBatchInput = input
+	return f.completionBatchResult, f.completionBatchErr
 }
 
 func (f *fakeWatchstateService) ClearProgress(_ context.Context, _ auth.Principal, titleID string, expectedVersion int64) error {
@@ -194,6 +218,118 @@ func TestLibraryHandlerPassesFilters(t *testing.T) {
 	}
 }
 
+func TestTVLibraryMembershipHandlerPassesBoundedIdentities(t *testing.T) {
+	service := &fakeWatchstateService{membershipValue: watchstate.TVLibraryMembershipResult{Items: []watchstate.TVLibraryMembership{{
+		SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		ResourceID:    "channel-1",
+		TitleID:       "550e8400-e29b-41d4-a716-446655440000",
+	}}}}
+	api := watchstateAPI(service)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/library/membership", strings.NewReader(`{"identities":[{"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","resourceId":"channel-1"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.tvLibraryMembership(response, request, auth.Principal{})
+
+	if response.Code != http.StatusOK || len(service.membershipInput) != 1 || service.membershipInput[0].ResourceID != "channel-1" {
+		t.Fatalf("unexpected membership request status=%d input=%+v", response.Code, service.membershipInput)
+	}
+	if response.Body.String() != `{"items":[{"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","resourceId":"channel-1","titleId":"550e8400-e29b-41d4-a716-446655440000"}]}`+"\n" {
+		t.Fatalf("unexpected membership response: %s", response.Body.String())
+	}
+}
+
+func TestTVLibraryMembershipHandlerRejectsOversizedBatch(t *testing.T) {
+	service := &fakeWatchstateService{}
+	api := watchstateAPI(service)
+	var body strings.Builder
+	body.WriteString(`{"identities":[`)
+	for index := 0; index <= watchstate.MaximumTVLibraryMembershipIdentities; index++ {
+		if index > 0 {
+			body.WriteByte(',')
+		}
+		body.WriteString(`{"sourceAddonId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","resourceId":"channel"}`)
+	}
+	body.WriteString(`]}`)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/library/membership", strings.NewReader(body.String()))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.tvLibraryMembership(response, request, auth.Principal{})
+
+	if response.Code != http.StatusUnprocessableEntity || service.membershipInput != nil {
+		t.Fatalf("expected oversized batch rejection, got status=%d input=%+v", response.Code, service.membershipInput)
+	}
+}
+
+func TestGetProgressBatchPreservesOrderAndMissingStates(t *testing.T) {
+	progress := watchstate.Progress{TitleID: "first", MediaType: "episode", Version: 4}
+	service := &fakeWatchstateService{progressBatchValue: watchstate.ProgressBatch{Items: []watchstate.ProgressBatchItem{
+		{TitleID: "first", Progress: &progress},
+		{TitleID: "second", Progress: nil},
+	}}}
+	api := watchstateAPI(service)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/progress/batch", strings.NewReader(`{"titleIds":["first","second"]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.getProgressBatch(response, request, auth.Principal{})
+
+	if response.Code != http.StatusOK || len(service.progressBatchInput) != 2 || service.progressBatchInput[0] != "first" || service.progressBatchInput[1] != "second" {
+		t.Fatalf("unexpected progress batch request status=%d input=%v", response.Code, service.progressBatchInput)
+	}
+	if !strings.Contains(response.Body.String(), `"titleId":"second","progress":null`) {
+		t.Fatalf("missing progress state was not preserved: %s", response.Body.String())
+	}
+}
+
+func TestProgressBatchHandlersRejectEmptyInputs(t *testing.T) {
+	service := &fakeWatchstateService{}
+	api := watchstateAPI(service)
+	for _, test := range []struct {
+		name    string
+		handler func(http.ResponseWriter, *http.Request, auth.Principal)
+		path    string
+		body    string
+	}{
+		{name: "read", handler: api.getProgressBatch, path: "/api/v1/progress/batch", body: `{"titleIds":[]}`},
+		{name: "write", handler: api.setWatchedBatch, path: "/api/v1/titles/watched/batch", body: `{"items":[]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			test.handler(response, request, auth.Principal{})
+			if response.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected bounded input rejection, got %d: %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestSetWatchedBatchPassesVersionsAndCompletionStates(t *testing.T) {
+	first := watchstate.Progress{TitleID: "first", MediaType: "episode", Completed: true, Version: 5}
+	second := watchstate.Progress{TitleID: "second", MediaType: "episode", Completed: false, Version: 3}
+	service := &fakeWatchstateService{completionBatchResult: watchstate.ProgressBatch{Items: []watchstate.ProgressBatchItem{
+		{TitleID: "first", Progress: &first},
+		{TitleID: "second", Progress: &second},
+	}}}
+	api := watchstateAPI(service)
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/titles/watched/batch", strings.NewReader(`{"items":[{"titleId":"first","completed":true,"expectedVersion":4},{"titleId":"second","completed":false,"expectedVersion":2}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.setWatchedBatch(response, request, auth.Principal{})
+
+	if response.Code != http.StatusOK || len(service.completionBatchInput) != 2 {
+		t.Fatalf("unexpected watched batch request status=%d input=%+v", response.Code, service.completionBatchInput)
+	}
+	if service.completionBatchInput[0].ExpectedVersion != 4 || !service.completionBatchInput[0].Completed ||
+		service.completionBatchInput[1].ExpectedVersion != 2 || service.completionBatchInput[1].Completed {
+		t.Fatalf("watched batch lost version/completion contract: %+v", service.completionBatchInput)
+	}
+}
+
 func TestGetProgressReturnsNoContentWhenUnset(t *testing.T) {
 	service := &fakeWatchstateService{progressErr: watchstate.ErrProgressNotFound}
 	api := watchstateAPI(service)
@@ -253,8 +389,10 @@ func TestWatchstateErrorsHaveStableHTTPContracts(t *testing.T) {
 	}{
 		{err: watchstate.ErrInvalidInput, status: http.StatusUnprocessableEntity, code: "invalid_watch_state"},
 		{err: watchstate.ErrProfileRequired, status: http.StatusConflict, code: "profile_selection_required"},
+		{err: watchstate.ErrForbidden, status: http.StatusForbidden, code: "watch_state_forbidden"},
 		{err: watchstate.ErrNotFound, status: http.StatusNotFound, code: "title_not_found"},
 		{err: watchstate.ErrConflict, status: http.StatusConflict, code: "watch_state_conflict"},
+		{err: watchstate.ErrOutboxCapacity, status: http.StatusServiceUnavailable, code: "tracking_sync_capacity"},
 	}
 	for _, test := range tests {
 		service := &fakeWatchstateService{continueErr: errors.Join(errors.New("wrapped"), test.err)}
@@ -269,6 +407,9 @@ func TestWatchstateErrorsHaveStableHTTPContracts(t *testing.T) {
 		decodeResponse(t, response, &body)
 		if body.Error.Code != test.code {
 			t.Fatalf("expected code %q, got %q", test.code, body.Error.Code)
+		}
+		if test.err == watchstate.ErrOutboxCapacity && response.Header().Get("Retry-After") != "5" {
+			t.Fatalf("expected Retry-After 5, got %q", response.Header().Get("Retry-After"))
 		}
 	}
 }

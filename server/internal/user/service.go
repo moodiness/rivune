@@ -455,7 +455,7 @@ func (s *Service) RevokeProfileAccess(ctx context.Context, principal auth.Princi
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE auth_sessions
-		SET active_profile_id = NULL, profile_grant_expires_at = NULL
+		SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
 		WHERE user_id::text = $1 AND active_profile_id::text = $2
 	`, userID, profileID); err != nil {
 		return fmt.Errorf("clear revoked profile selections: %w", err)

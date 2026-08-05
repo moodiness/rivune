@@ -1,4 +1,3 @@
-BEGIN;
 
 WITH ranked_administrator_profiles AS (
     SELECT access.user_id,
@@ -18,5 +17,3 @@ FROM ranked_administrator_profiles ranked
 WHERE access.user_id = ranked.user_id
   AND access.profile_id = ranked.profile_id
   AND access.can_manage IS DISTINCT FROM (ranked.profile_ordinal = 1);
-
-COMMIT;

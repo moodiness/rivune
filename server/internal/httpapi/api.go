@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/metadata/fanart"
 	"github.com/moodiness/rivune/server/internal/metadata/tmdb"
 	"github.com/moodiness/rivune/server/internal/metadata/tvdb"
+	"github.com/moodiness/rivune/server/internal/netguard"
 	"github.com/moodiness/rivune/server/internal/operations"
 	"github.com/moodiness/rivune/server/internal/playback"
 	"github.com/moodiness/rivune/server/internal/profile"
@@ -42,12 +44,14 @@ import (
 	"github.com/moodiness/rivune/server/internal/webui"
 )
 
-const protocolVersion = 18
+const protocolVersion = 19
 
 type instanceService interface {
 	Info(context.Context) (instance.Info, error)
 	Setup(context.Context, string, instance.SetupInput) (instance.SetupResult, error)
 	AcquireSetupPending(context.Context) (func(), error)
+	AdmitDemoSession(context.Context, [sha256.Size]byte, string, time.Time, time.Time, int, int, func() error) (string, func(), error)
+	ReleaseDemoSession(context.Context, string) (func(), error)
 }
 
 type authService interface {
@@ -77,6 +81,7 @@ type profileService interface {
 	Select(context.Context, auth.Principal, string, *string, bool) (profile.Selection, error)
 	ClearSelection(context.Context, auth.Principal) error
 	SetAvatarPreset(context.Context, auth.Principal, string, string) (profile.Profile, error)
+	AuthorizeAvatarUpload(context.Context, auth.Principal, string) error
 	SetAvatarImage(context.Context, auth.Principal, string, []byte) (profile.Profile, error)
 	AvatarImage(context.Context, auth.Principal, string) (profile.AvatarImage, error)
 }
@@ -117,12 +122,13 @@ type userService interface {
 }
 
 type addonService interface {
-	Install(context.Context, auth.Principal, addon.InstallInput) (addon.InstalledAddon, error)
+	Install(context.Context, auth.Principal, addon.InstallInput) (addon.ManagedAddon, error)
 	List(context.Context, auth.Principal) ([]addon.InstalledAddon, error)
+	Management(context.Context, auth.Principal, string) (addon.ManagedAddon, error)
 	Remove(context.Context, auth.Principal, string) error
 	Reorder(context.Context, auth.Principal, addon.ReorderInput) ([]addon.InstalledAddon, error)
 	Refresh(context.Context, auth.Principal, string) (addon.InstalledAddon, error)
-	Update(context.Context, auth.Principal, string, addon.UpdateAddonInput) (addon.InstalledAddon, error)
+	Update(context.Context, auth.Principal, string, addon.UpdateAddonInput) (addon.ManagedAddon, error)
 	Catalogs(context.Context, auth.Principal) ([]addon.CatalogDescriptor, error)
 	Fetch(context.Context, auth.Principal, string, addon.ResourcePath) (addon.ResourceResult, error)
 	FetchAll(context.Context, auth.Principal, addon.ResourcePath) (addon.ResourceBatch, error)
@@ -134,6 +140,7 @@ type collectionService interface {
 	List(context.Context, auth.Principal) ([]collection.Collection, error)
 	Export(context.Context, auth.Principal) (collection.ExportDocument, error)
 	Get(context.Context, auth.Principal, string) (collection.Collection, error)
+	Management(context.Context, auth.Principal, string) (collection.Collection, error)
 	Create(context.Context, auth.Principal, collection.SaveInput) (collection.Collection, error)
 	Import(context.Context, auth.Principal, collection.ExportDocument) (collection.ImportResult, error)
 	Update(context.Context, auth.Principal, string, collection.SaveInput) (collection.Collection, error)
@@ -146,6 +153,10 @@ type collectionService interface {
 
 type calendarService interface {
 	List(context.Context, auth.Principal, string, string, string) (calendar.Result, error)
+}
+
+type calendarRefreshWorker interface {
+	Run(context.Context)
 }
 
 type metadataService interface {
@@ -164,9 +175,12 @@ type watchstateService interface {
 	AddLibrary(context.Context, auth.Principal, string) (watchstate.LibraryItem, error)
 	RemoveLibrary(context.Context, auth.Principal, string) error
 	Library(context.Context, auth.Principal, string, int, int) (watchstate.LibraryPage, error)
+	TVLibraryMembership(context.Context, auth.Principal, []watchstate.TVLibraryIdentity) (watchstate.TVLibraryMembershipResult, error)
 	GetProgress(context.Context, auth.Principal, string) (watchstate.Progress, error)
+	GetProgressBatch(context.Context, auth.Principal, []string) (watchstate.ProgressBatch, error)
 	UpdateProgress(context.Context, auth.Principal, string, watchstate.UpdateProgressInput) (watchstate.Progress, error)
 	SetWatched(context.Context, auth.Principal, string, bool, watchstate.CompletionInput) (watchstate.Progress, error)
+	SetWatchedBatch(context.Context, auth.Principal, []watchstate.SetWatchedBatchItem) (watchstate.ProgressBatch, error)
 	ClearProgress(context.Context, auth.Principal, string, int64) error
 	ContinueWatching(context.Context, auth.Principal, int) (watchstate.ContinuePage, error)
 	DismissContinue(context.Context, auth.Principal, string) error
@@ -200,11 +214,19 @@ type operationsService interface {
 	RunScheduled(context.Context) error
 }
 
+type collectionArtworkPresenter interface {
+	PresentCollections(context.Context, []collection.Collection)
+	RestoreCollectionSaveInput(context.Context, *collection.SaveInput)
+	LocalizeCollectionLookupResults(context.Context, []collection.LookupResult)
+}
+
 type API struct {
 	config              config.Config
 	addons              addonService
 	artwork             *artworkcache.Service
+	collectionArtwork   collectionArtworkPresenter
 	calendar            calendarService
+	calendarRefresh     calendarRefreshWorker
 	categories          categoryService
 	pool                *pgxpool.Pool
 	instances           instanceService
@@ -223,6 +245,9 @@ type API struct {
 	version             string
 	watchstate          watchstateService
 	tracking            trackingService
+	credentialAdmission *requestAdmission
+	usernameAdmission   *usernameAdmission
+	deviceCodeAdmission *requestAdmission
 }
 
 type errorEnvelope struct {
@@ -253,12 +278,13 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	}
 	var artworkEnricher metadata.ArtworkEnricher
 	if cfg.FanartAPIKey != "" {
-		artworkEnricher = fanart.NewCached(cfg.FanartAPIKey, cfg.FanartClientKey, nil, pool, cfg.MetadataCacheTTL, logger)
+		artworkEnricher = fanart.NewCached(cfg.FanartAPIKey, nil, pool, cfg.MetadataCacheTTL, logger)
 	}
 	artworkService, err := artworkcache.New(pool, artworkcache.Options{
-		Directory: cfg.ArtworkCacheDir,
-		MaxBytes:  cfg.ArtworkStorageBytes,
-		Logger:    logger,
+		Directory:         cfg.ArtworkCacheDir,
+		MaxBytes:          cfg.ArtworkStorageBytes,
+		LANArtworkOrigins: cfg.LANArtworkOrigins,
+		Logger:            logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize artwork cache: %w", err)
@@ -293,19 +319,24 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		return nil, fmt.Errorf("initialize tracking integrations: %w", err)
 	}
 	metadataService := metadata.NewService(pool, metadataProvider, televisionEnricher, artworkEnricher, cfg.MetadataCacheTTL, logger)
+	calendarService := calendar.NewService(pool, metadataService, logger)
 	operationsService := operations.NewService(
 		pool, metadataService, authService, playbackService, maintenanceInterval, logger,
 	)
 	collectionService := collection.NewService(pool, addonService, collectionTMDB, collectionTrakt, collectionMDBList)
 	externalIDResolver, _ := metadataProvider.(metadata.ExternalIDResolver)
 	collectionService.SetFanartEnricher(metadataProvider, externalIDResolver, artworkEnricher, logger)
+	watchstateService := watchstate.NewService(pool, trackingService)
+	watchstateService.SetCanonicalProvider(metadataProvider, externalIDResolver)
 	collectionService.SetArtworkPresenter(artworkService)
 	instanceManager := instance.NewService(pool, cfg.SetupToken, cfg.Timezone)
 	return &API{
 		artwork:             artworkService,
+		collectionArtwork:   artworkService,
 		addons:              addonService,
 		config:              cfg,
-		calendar:            calendar.NewService(pool, metadataService, logger),
+		calendar:            calendarService,
+		calendarRefresh:     calendarService,
 		categories:          category.NewService(pool),
 		collections:         collectionService,
 		pool:                pool,
@@ -323,7 +354,10 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		operations:          operationsService,
 		version:             version,
 		tracking:            trackingService,
-		watchstate:          watchstate.NewService(pool, trackingService),
+		watchstate:          watchstateService,
+		credentialAdmission: newCredentialAdmission(),
+		usernameAdmission:   newCredentialUsernameAdmission(),
+		deviceCodeAdmission: newDeviceCodeAdmission(),
 	}, nil
 }
 
@@ -398,6 +432,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/users/{userId}/profiles/{profileId}", a.requireAuthentication(a.grantUserProfileAccess))
 	mux.Handle("DELETE /api/v1/users/{userId}/profiles/{profileId}", a.requireAuthentication(a.revokeUserProfileAccess))
 	mux.Handle("GET /api/v1/addons", a.requireAuthentication(a.listAddons))
+	mux.Handle("GET /api/v1/addons/{addonId}/management", a.requireAuthentication(a.addonManagement))
 	mux.Handle("POST /api/v1/addons", a.requireAuthentication(a.installAddon))
 	mux.Handle("PUT /api/v1/addons/order", a.requireAuthentication(a.reorderAddons))
 	mux.Handle("DELETE /api/v1/addons/{addonId}", a.requireAuthentication(a.removeAddon))
@@ -416,6 +451,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/collections/tmdb/lookup", a.requireAuthentication(a.lookupCollectionTMDB))
 	mux.Handle("GET /api/v1/collections/tmdb/genres", a.requireAuthentication(a.collectionTMDBGenres))
 	mux.Handle("GET /api/v1/collections/{collectionId}", a.requireAuthentication(a.getCollection))
+	mux.Handle("GET /api/v1/collections/{collectionId}/management", a.requireAuthentication(a.collectionManagement))
 	mux.Handle("PUT /api/v1/collections/{collectionId}", a.requireAuthentication(a.updateCollection))
 	mux.Handle("DELETE /api/v1/collections/{collectionId}", a.requireAuthentication(a.deleteCollection))
 	mux.Handle("GET /api/v1/collections/{collectionId}/folders/{folderId}/items", a.requireAuthentication(a.resolveCollectionFolder))
@@ -432,13 +468,16 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("HEAD /api/v1/playback/sessions/{sessionId}/assets/{assetId}", a.playbackAsset)
 	mux.Handle("GET /api/v1/calendar", a.requireAuthentication(a.calendarEvents))
 	mux.Handle("GET /api/v1/library", a.requireAuthentication(a.library))
+	mux.Handle("POST /api/v1/library/membership", a.requireAuthentication(a.tvLibraryMembership))
 	mux.Handle("PUT /api/v1/library/{titleId}", a.requireAuthentication(a.addLibrary))
 	mux.Handle("DELETE /api/v1/library/{titleId}", a.requireAuthentication(a.removeLibrary))
+	mux.Handle("POST /api/v1/progress/batch", a.requireAuthentication(a.getProgressBatch))
 	mux.Handle("GET /api/v1/progress/{titleId}", a.requireAuthentication(a.getProgress))
 	mux.Handle("PUT /api/v1/progress/{titleId}", a.requireAuthentication(a.updateProgress))
 	mux.Handle("DELETE /api/v1/progress/{titleId}", a.requireAuthentication(a.clearProgress))
 	mux.Handle("POST /api/v1/titles/{titleId}/watched", a.requireAuthentication(a.markWatched))
 	mux.Handle("DELETE /api/v1/titles/{titleId}/watched", a.requireAuthentication(a.markUnwatched))
+	mux.Handle("PUT /api/v1/titles/watched/batch", a.requireAuthentication(a.setWatchedBatch))
 	mux.Handle("GET /api/v1/continue-watching", a.requireAuthentication(a.continueWatching))
 	mux.Handle("DELETE /api/v1/continue-watching/{titleId}", a.requireAuthentication(a.dismissContinue))
 	mux.HandleFunc("GET /", webui.Handler)
@@ -534,6 +573,12 @@ func (a *API) setup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	release, retryAfter, admitted := a.credentialAdmission.acquire(requestClientIP(r, a.config.TrustedProxies))
+	if !admitted {
+		writeAdmissionDenied(w, retryAfter)
+		return
+	}
+	defer release()
 
 	result, err := a.instances.Setup(r.Context(), bearerToken(r.Header.Get("Authorization")), instance.SetupInput{
 		InstanceName: request.InstanceName,
@@ -575,6 +620,9 @@ func (a *API) middleware(next http.Handler) http.Handler {
 
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				if recoveredErr, ok := recovered.(error); ok {
+					recovered = netguard.SanitizeURLError(recoveredErr)
+				}
 				a.logger.Error("panic serving request", "panic", recovered, "method", r.Method, "path", r.URL.Path)
 				writeError(w, http.StatusInternalServerError, "internal_error", "An internal error occurred")
 			}
@@ -585,7 +633,7 @@ func (a *API) middleware(next http.Handler) http.Handler {
 }
 
 func (a *API) internalError(w http.ResponseWriter, operation string, err error) {
-	a.logger.Error(operation, "error", err)
+	a.logger.Error(operation, "error", netguard.SanitizeURLError(err))
 	writeError(w, http.StatusInternalServerError, "internal_error", "An internal error occurred")
 }
 
@@ -598,15 +646,16 @@ func requireJSON(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+const defaultJSONMaximumBytes int64 = 64 * 1024
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
-	return decodeJSONLimit(w, r, destination, 64*1024)
+	return decodeJSONLimit(w, r, destination, defaultJSONMaximumBytes)
 }
 
 func decodeJSONLimit(w http.ResponseWriter, r *http.Request, destination any, maximumBytes int64) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maximumBytes)
-	body, err := io.ReadAll(r.Body)
+	body, err := readJSONBody(w, r, maximumBytes)
 	if err != nil {
-		return fmt.Errorf("invalid JSON body: %w", err)
+		return err
 	}
 	if !utf8.Valid(body) {
 		return errors.New("invalid JSON body: malformed UTF-8")
@@ -620,6 +669,15 @@ func decodeJSONLimit(w http.ResponseWriter, r *http.Request, destination any, ma
 		return errors.New("request body must contain one JSON object")
 	}
 	return nil
+}
+
+func readJSONBody(w http.ResponseWriter, r *http.Request, maximumBytes int64) ([]byte, error) {
+	limited := http.MaxBytesReader(w, r.Body, maximumBytes)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("invalid JSON body: %w", err)
+	}
+	return body, nil
 }
 
 func bearerToken(authorization string) string {

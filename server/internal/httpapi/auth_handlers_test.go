@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 type fakeAuthService struct {
 	loginInput                 auth.LoginInput
+	loginCalls                 int
 	loginTokens                auth.TokenPair
 	loginErr                   error
 	refreshToken               string
@@ -66,6 +68,7 @@ type fakeAuthService struct {
 }
 
 func (f *fakeAuthService) Login(_ context.Context, input auth.LoginInput) (auth.TokenPair, error) {
+	f.loginCalls++
 	f.loginInput = input
 	return f.loginTokens, f.loginErr
 }
@@ -151,6 +154,71 @@ func (f *fakeAuthService) ExchangeDeviceAuthorization(_ context.Context, deviceC
 	return f.exchangeTokens, f.exchangeErr
 }
 
+func TestAuthenticationRejectsMissingOrStaleWebProfileCapability(t *testing.T) {
+	activeProfileID := "11111111-1111-4111-8111-111111111111"
+	profileContext, profileContextHash, err := auth.NewProfileContext()
+	if err != nil {
+		t.Fatalf("issue profile context: %v", err)
+	}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = &fakeAuthService{principal: auth.Principal{
+		Role: "admin", Platform: "web", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+		ActiveProfileID: &activeProfileID, ProfileContextHash: profileContextHash,
+	}}
+	called := false
+	handler := api.requireAuthentication(func(w http.ResponseWriter, _ *http.Request, _ auth.Principal) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	stale := httptest.NewRequest(http.MethodGet, "/api/v1/collections", nil)
+	stale.Header.Set("Authorization", "Bearer access-token")
+	stale.Header.Set(profileContextHeader, "rivune_pc_stale")
+	staleResponse := httptest.NewRecorder()
+	handler.ServeHTTP(staleResponse, stale)
+	if staleResponse.Code != http.StatusConflict || called {
+		t.Fatalf("stale profile context status=%d called=%v", staleResponse.Code, called)
+	}
+	var body errorEnvelope
+	decodeResponse(t, staleResponse, &body)
+	if body.Error.Code != "profile_selection_required" {
+		t.Fatalf("stale profile context error = %q", body.Error.Code)
+	}
+	missing := httptest.NewRequest(http.MethodGet, "/api/v1/collections", nil)
+	missing.Header.Set("Authorization", "Bearer access-token")
+	missingResponse := httptest.NewRecorder()
+	handler.ServeHTTP(missingResponse, missing)
+	if missingResponse.Code != http.StatusConflict || called {
+		t.Fatalf("missing web profile context status=%d called=%v", missingResponse.Code, called)
+	}
+
+	current := httptest.NewRequest(http.MethodGet, "/api/v1/collections", nil)
+	current.Header.Set("Authorization", "Bearer access-token")
+	current.Header.Set(profileContextHeader, profileContext)
+	currentResponse := httptest.NewRecorder()
+	handler.ServeHTTP(currentResponse, current)
+	if currentResponse.Code != http.StatusNoContent || !called {
+		t.Fatalf("current profile context status=%d called=%v", currentResponse.Code, called)
+	}
+
+	called = false
+	clearWithoutContext := httptest.NewRequest(http.MethodDelete, "/api/v1/profiles/selection", nil)
+	clearWithoutContext.Header.Set("Authorization", "Bearer access-token")
+	clearResponse := httptest.NewRecorder()
+	handler.ServeHTTP(clearResponse, clearWithoutContext)
+	if clearResponse.Code != http.StatusConflict || called {
+		t.Fatalf("profile clear without current context status=%d called=%v", clearResponse.Code, called)
+	}
+
+	selectWithoutContext := httptest.NewRequest(http.MethodPost, "/api/v1/profiles/11111111-1111-4111-8111-111111111111/select", nil)
+	selectWithoutContext.Header.Set("Authorization", "Bearer access-token")
+	selectResponse := httptest.NewRecorder()
+	handler.ServeHTTP(selectResponse, selectWithoutContext)
+	if selectResponse.Code != http.StatusNoContent || !called {
+		t.Fatalf("profile selection without prior context status=%d called=%v", selectResponse.Code, called)
+	}
+}
+
 func TestLoginReturnsOpaqueSessionTokens(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	service := &fakeAuthService{loginTokens: auth.TokenPair{
@@ -201,6 +269,86 @@ func TestLoginUsesGenericCredentialError(t *testing.T) {
 	decodeResponse(t, response, &body)
 	if body.Error.Code != "invalid_credentials" {
 		t.Fatalf("unexpected error code %q", body.Error.Code)
+	}
+}
+func TestLoginDeviceQuotaUsesStableConflict(t *testing.T) {
+	api := testAPI(&fakeInstanceService{})
+	api.auth = &fakeAuthService{loginErr: auth.ErrDeviceQuotaReached}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"username":"member","password":"correct","device":{"name":"Phone","platform":"ios"}}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", response.Code, response.Body.String())
+	}
+	var body errorEnvelope
+	decodeResponse(t, response, &body)
+	if body.Error.Code != "device_quota_reached" {
+		t.Fatalf("error code = %q, want device_quota_reached", body.Error.Code)
+	}
+}
+
+func TestLoginAdmissionLimitsUsernameAcrossRotatingSources(t *testing.T) {
+	service := &fakeAuthService{loginErr: auth.ErrInvalidCredentials}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = service
+	current := time.Unix(1_700_000_000, 0)
+	api.usernameAdmission.now = func() time.Time { return current }
+
+	malformed := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"username":"target"`))
+	malformed.Header.Set("Content-Type", "application/json")
+	malformed.RemoteAddr = "198.51.100.1:4000"
+	malformedResponse := httptest.NewRecorder()
+	api.Handler().ServeHTTP(malformedResponse, malformed)
+	if malformedResponse.Code != http.StatusBadRequest || service.loginCalls != 0 {
+		t.Fatalf("malformed login = status %d, auth calls %d; want 400 and zero calls", malformedResponse.Code, service.loginCalls)
+	}
+
+	const targetLogin = `{"username":"target","password":"wrong","device":{"name":"Phone","platform":"ios"}}`
+	for attempt := range credentialUsernameAttempts {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(targetLogin))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = "198.51.100." + strconv.Itoa(attempt+2) + ":4000"
+		response := httptest.NewRecorder()
+		api.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("target attempt %d = %d, want 401: %s", attempt+1, response.Code, response.Body.String())
+		}
+	}
+
+	blocked := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(targetLogin))
+	blocked.Header.Set("Content-Type", "application/json")
+	blocked.RemoteAddr = "203.0.113.20:4000"
+	blockedResponse := httptest.NewRecorder()
+	api.Handler().ServeHTTP(blockedResponse, blocked)
+	if blockedResponse.Code != http.StatusTooManyRequests || blockedResponse.Header().Get("Retry-After") != "60" {
+		t.Fatalf("eleventh target attempt = %d with Retry-After %q, want 429 and 60", blockedResponse.Code, blockedResponse.Header().Get("Retry-After"))
+	}
+	var blockedBody errorEnvelope
+	decodeResponse(t, blockedResponse, &blockedBody)
+	if blockedBody.Error.Code != "rate_limited" || service.loginCalls != credentialUsernameAttempts {
+		t.Fatalf("blocked login = error %q, auth calls %d; want generic rate_limited and %d calls", blockedBody.Error.Code, service.loginCalls, credentialUsernameAttempts)
+	}
+
+	other := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"username":"other","password":"wrong","device":{"name":"Phone","platform":"ios"}}`))
+	other.Header.Set("Content-Type", "application/json")
+	other.RemoteAddr = "203.0.113.21:4000"
+	otherResponse := httptest.NewRecorder()
+	api.Handler().ServeHTTP(otherResponse, other)
+	if otherResponse.Code != http.StatusUnauthorized || service.loginCalls != credentialUsernameAttempts+1 {
+		t.Fatalf("independent username = status %d, auth calls %d; want 401 and %d calls", otherResponse.Code, service.loginCalls, credentialUsernameAttempts+1)
+	}
+
+	current = current.Add(publicAdmissionWindow)
+	expired := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(targetLogin))
+	expired.Header.Set("Content-Type", "application/json")
+	expired.RemoteAddr = "203.0.113.22:4000"
+	expiredResponse := httptest.NewRecorder()
+	api.Handler().ServeHTTP(expiredResponse, expired)
+	if expiredResponse.Code != http.StatusUnauthorized || service.loginCalls != credentialUsernameAttempts+2 {
+		t.Fatalf("expired username budget = status %d, auth calls %d; want 401 and %d calls", expiredResponse.Code, service.loginCalls, credentialUsernameAttempts+2)
 	}
 }
 

@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
 )
@@ -658,5 +662,139 @@ func TestProfileNotificationUpdatesAreRejected(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestUpdateProfileSettingsRequiresProfileManagement(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run the PostgreSQL profile settings authorization test")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	ctx := context.Background()
+	categoryID := "11111111-1111-4111-8111-111111111111"
+	const (
+		userID    = "22222222-2222-4222-8222-222222222222"
+		profileID = "33333333-3333-4333-8333-333333333333"
+	)
+	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE profiles (
+			id uuid PRIMARY KEY,
+			category_id uuid
+		);
+		CREATE TEMPORARY TABLE user_profile_access (
+			user_id uuid NOT NULL,
+			profile_id uuid NOT NULL,
+			can_manage boolean NOT NULL DEFAULT false,
+			PRIMARY KEY (user_id, profile_id)
+		);
+		CREATE TEMPORARY TABLE profile_settings (
+			profile_id uuid PRIMARY KEY,
+			schema_version integer NOT NULL,
+			settings jsonb NOT NULL,
+			updated_at timestamptz NOT NULL
+		);
+		CREATE TEMPORARY TABLE instance_settings (
+			instance_id integer PRIMARY KEY,
+			schema_version integer NOT NULL,
+			settings jsonb NOT NULL,
+			updated_at timestamptz NOT NULL
+		);
+	`); err != nil {
+		t.Fatalf("create profile settings authorization fixtures: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO profiles (id, category_id)
+		VALUES ($1::uuid, $2::uuid);
+		INSERT INTO user_profile_access (user_id, profile_id, can_manage)
+		VALUES ($3::uuid, $1::uuid, false);
+		INSERT INTO profile_settings (profile_id, schema_version, settings, updated_at)
+		VALUES ($1::uuid, 1, '{"theme":"dark"}'::jsonb, '2026-01-02T03:04:05Z');
+		INSERT INTO instance_settings (instance_id, schema_version, settings, updated_at)
+		VALUES (1, 1, '{}'::jsonb, '2026-01-02T03:04:05Z');
+	`, pgx.QueryExecModeSimpleProtocol, profileID, categoryID, userID); err != nil {
+		t.Fatalf("seed profile settings authorization boundary: %v", err)
+	}
+
+	principal := auth.Principal{
+		UserID:             userID,
+		Role:               "member",
+		AuthorizationScope: auth.AuthorizationScopeCategory,
+		CategoryID:         &categoryID,
+	}
+	var before string
+	if err := pool.QueryRow(ctx, `
+		SELECT ps::text
+		FROM profile_settings ps
+		WHERE profile_id = $1::uuid
+	`, profileID).Scan(&before); err != nil {
+		t.Fatalf("read profile settings row before denied update: %v", err)
+	}
+
+	language := "fr"
+	service := NewService(pool)
+	readable, err := service.Profile(ctx, principal, profileID)
+	if err != nil {
+		t.Fatalf("access-only profile settings read: %v", err)
+	}
+	if readable.Values.Theme == nil || *readable.Values.Theme != "dark" {
+		t.Fatalf("access-only profile settings read returned unexpected layer: %+v", readable)
+	}
+	if _, err := service.UpdateProfile(ctx, principal, profileID, Patch{
+		InterfaceLanguage: OptionalString{Set: true, Value: &language},
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("access-only profile settings update error = %v, want forbidden", err)
+	}
+	var after string
+	if err := pool.QueryRow(ctx, `
+		SELECT ps::text
+		FROM profile_settings ps
+		WHERE profile_id = $1::uuid
+	`, profileID).Scan(&after); err != nil {
+		t.Fatalf("read profile settings row after denied update: %v", err)
+	}
+	if after != before {
+		t.Fatalf("denied profile settings update changed the stored row: before=%q after=%q", before, after)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE user_profile_access
+		SET can_manage = true
+		WHERE user_id = $1::uuid AND profile_id = $2::uuid
+	`, userID, profileID); err != nil {
+		t.Fatalf("grant profile management: %v", err)
+	}
+	updated, err := service.UpdateProfile(ctx, principal, profileID, Patch{
+		InterfaceLanguage: OptionalString{Set: true, Value: &language},
+	})
+	if err != nil {
+		t.Fatalf("managed profile settings update: %v", err)
+	}
+	if updated.Values.InterfaceLanguage == nil || *updated.Values.InterfaceLanguage != language {
+		t.Fatalf("managed profile settings update returned unexpected layer: %+v", updated)
+	}
+	var persistedLanguage string
+	if err := pool.QueryRow(ctx, `
+		SELECT settings->>'interfaceLanguage'
+		FROM profile_settings
+		WHERE profile_id = $1::uuid
+	`, profileID).Scan(&persistedLanguage); err != nil {
+		t.Fatalf("read managed profile settings update: %v", err)
+	}
+	if persistedLanguage != language {
+		t.Fatalf("persisted interface language = %q, want %q", persistedLanguage, language)
 	}
 }

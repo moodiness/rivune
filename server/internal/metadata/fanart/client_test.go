@@ -10,13 +10,24 @@ import (
 	"github.com/moodiness/rivune/server/internal/metadata"
 )
 
+func TestProductionClientRejectsCrossOriginRedirect(t *testing.T) {
+	client := New("test-api-key", nil)
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://169.254.169.254/latest/meta-data", nil)
+	if err != nil {
+		t.Fatalf("create redirect request: %v", err)
+	}
+	if err := client.httpClient.CheckRedirect(request, nil); err == nil {
+		t.Fatal("Fanart production client accepted a metadata-service redirect")
+	}
+}
+
 func TestEnrichMovieAuthenticatesAndSelectsHighestQualityArtwork(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/movies/550" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
-		if r.Header.Get("api-key") != "project-key" || r.Header.Get("client-key") != "personal-key" {
-			t.Fatalf("unexpected Fanart credentials: api=%q client=%q", r.Header.Get("api-key"), r.Header.Get("client-key"))
+		if r.Header.Get("api-key") != "project-key" {
+			t.Fatalf("unexpected Fanart API key: %q", r.Header.Get("api-key"))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -34,7 +45,7 @@ func TestEnrichMovieAuthenticatesAndSelectsHighestQualityArtwork(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newWithBaseURL(" project-key ", " personal-key ", server.URL, server.Client())
+	client := newWithBaseURL(" project-key ", server.URL, server.Client())
 	enriched, err := client.EnrichMovie(context.Background(), metadata.ProviderMovie{
 		ExternalID: "550",
 		PosterURL:  "https://image.tmdb.org/original-poster.jpg",
@@ -63,7 +74,7 @@ func TestEnrichCollectionUsesTMDBCollectionIdentity(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newWithBaseURL("project-key", "", server.URL, server.Client())
+	client := newWithBaseURL("project-key", server.URL, server.Client())
 	enriched, err := client.EnrichCollection(context.Background(), metadata.ProviderCollection{
 		ExternalID: "87096",
 	}, "fr-FR")
@@ -162,7 +173,7 @@ func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonArtwork(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newWithBaseURL("project-key", "", server.URL, server.Client())
+	client := newWithBaseURL("project-key", server.URL, server.Client())
 	enriched, err := client.EnrichSeries(context.Background(), metadata.ProviderSeries{
 		ExternalID:    "1396",
 		AdditionalIDs: map[string]string{"tvdb": "81189"},
@@ -201,7 +212,7 @@ func TestEnrichSeasonSelectsOnlyRequestedSeason(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newWithBaseURL("project-key", "", server.URL, server.Client())
+	client := newWithBaseURL("project-key", server.URL, server.Client())
 	enriched, err := client.EnrichSeason(context.Background(), "81189", metadata.ProviderSeason{SeasonNumber: 2, BackdropURL: "https://image.tmdb.org/season-2-background.jpg"}, "en-US")
 	if err != nil {
 		t.Fatalf("enrich season: %v", err)
@@ -228,7 +239,7 @@ func TestProviderStatusErrorsAreTyped(t *testing.T) {
 				w.WriteHeader(test.status)
 			}))
 			defer server.Close()
-			client := newWithBaseURL("project-key", "", server.URL, server.Client())
+			client := newWithBaseURL("project-key", server.URL, server.Client())
 			_, err := client.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "550"}, "en-US")
 			if !errors.Is(err, test.want) {
 				t.Fatalf("expected %v, got %v", test.want, err)
@@ -238,7 +249,7 @@ func TestProviderStatusErrorsAreTyped(t *testing.T) {
 }
 
 func TestMissingOptionalIdentifiersDoNotCallFanart(t *testing.T) {
-	client := newWithBaseURL("project-key", "", "http://127.0.0.1:1", nil)
+	client := newWithBaseURL("project-key", "http://127.0.0.1:1", &http.Client{})
 	movie, err := client.EnrichMovie(context.Background(), metadata.ProviderMovie{}, "en-US")
 	if err != nil || movie.ExternalID != "" {
 		t.Fatalf("unexpected movie no-op: movie=%+v err=%v", movie, err)

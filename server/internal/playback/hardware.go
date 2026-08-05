@@ -1,7 +1,6 @@
 package playback
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -120,14 +119,14 @@ func probeVideoEncoder(ffmpegPath string, encoder videoEncoder, toneMap bool) er
 	arguments = append(arguments, encoder.codecArguments(1)...)
 	arguments = append(arguments, "-frames:v", "1", "-an", "-f", "null", "-")
 	command := exec.CommandContext(probeContext, ffmpegPath, arguments...)
-	var diagnostic bytes.Buffer
+	diagnostic := newDiagnosticBuffer()
 	command.Stdout = nil
-	command.Stderr = &diagnostic
+	command.Stderr = diagnostic
 	if err := command.Run(); err != nil {
 		if errors.Is(probeContext.Err(), context.DeadlineExceeded) {
 			return errors.New("hardware encoder probe timed out")
 		}
-		return fmt.Errorf("hardware encoder probe: %w: %s", err, boundedDiagnostic(diagnostic.String()))
+		return fmt.Errorf("hardware encoder probe: %w: %s", err, diagnostic.String())
 	}
 	return nil
 }

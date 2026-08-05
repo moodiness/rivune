@@ -267,14 +267,11 @@ func (c *providerClient) send(ctx context.Context, provider, accessToken, eventT
 		}
 		return err
 	case "watched":
-		if event.Completed {
-			err := c.authorizedRequest(ctx, provider, http.MethodPost, "/scrobble/stop", accessToken, scrobbleBody(item, 100))
-			if upstream, ok := err.(*upstreamError); ok && provider == "trakt" && upstream.status == http.StatusConflict {
-				return nil
-			}
-			return err
+		path := "/sync/history"
+		if !event.Completed {
+			path += "/remove"
 		}
-		return c.authorizedRequest(ctx, provider, http.MethodPost, "/sync/history/remove", accessToken, syncBody(item, event, false, provider))
+		return c.authorizedRequest(ctx, provider, http.MethodPost, path, accessToken, syncBody(item, event, false, provider))
 	case "library":
 		if provider == "trakt" {
 			path := "/sync/collection"

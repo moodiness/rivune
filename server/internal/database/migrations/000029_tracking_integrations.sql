@@ -1,6 +1,5 @@
-BEGIN;
 
-CREATE TABLE profile_tracking_accounts (
+CREATE TABLE IF NOT EXISTS profile_tracking_accounts (
     profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
     provider text NOT NULL CHECK (provider IN ('trakt', 'simkl')),
     access_token_encrypted bytea NOT NULL CHECK (octet_length(access_token_encrypted) >= 29),
@@ -16,7 +15,7 @@ CREATE TABLE profile_tracking_accounts (
     PRIMARY KEY (profile_id, provider)
 );
 
-CREATE TABLE profile_tracking_authorizations (
+CREATE TABLE IF NOT EXISTS profile_tracking_authorizations (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
     provider text NOT NULL CHECK (provider IN ('trakt', 'simkl')),
@@ -29,12 +28,12 @@ CREATE TABLE profile_tracking_authorizations (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX profile_tracking_authorizations_profile_provider_idx
+CREATE UNIQUE INDEX IF NOT EXISTS profile_tracking_authorizations_profile_provider_idx
     ON profile_tracking_authorizations (profile_id, provider);
-CREATE INDEX profile_tracking_authorizations_expires_at_idx
+CREATE INDEX IF NOT EXISTS profile_tracking_authorizations_expires_at_idx
     ON profile_tracking_authorizations (expires_at);
 
-CREATE TABLE profile_tracking_event_heads (
+CREATE TABLE IF NOT EXISTS profile_tracking_event_heads (
     profile_id uuid NOT NULL,
     provider text NOT NULL,
     title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
@@ -47,7 +46,7 @@ CREATE TABLE profile_tracking_event_heads (
         REFERENCES profile_tracking_accounts(profile_id, provider) ON DELETE CASCADE
 );
 
-CREATE TABLE profile_tracking_outbox (
+CREATE TABLE IF NOT EXISTS profile_tracking_outbox (
     enqueue_sequence bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     profile_id uuid NOT NULL,
@@ -66,7 +65,5 @@ CREATE TABLE profile_tracking_outbox (
     UNIQUE (profile_id, provider, idempotency_key)
 );
 
-CREATE INDEX profile_tracking_outbox_due_idx
+CREATE INDEX IF NOT EXISTS profile_tracking_outbox_due_idx
     ON profile_tracking_outbox (next_attempt_at, enqueue_sequence);
-
-COMMIT;

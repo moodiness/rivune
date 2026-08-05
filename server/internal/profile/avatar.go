@@ -20,10 +20,16 @@ import (
 )
 
 const (
-	defaultAvatarPreset = "aurora"
-	avatarOutputSize    = 512
-	maximumAvatarPixels = 16_777_216
+	defaultAvatarPreset                   = "aurora"
+	avatarOutputSize                      = 512
+	maximumAvatarPixels                   = 16_777_216
+	maximumConcurrentAvatarNormalizations = 2
 )
+
+// ErrAvatarNormalizationBusy reports that the process-wide avatar normalization capacity is full.
+var ErrAvatarNormalizationBusy = errors.New("avatar normalization capacity exhausted")
+
+var avatarNormalizationSlots = make(chan struct{}, maximumConcurrentAvatarNormalizations)
 
 type AvatarPreset struct {
 	ID   string `json:"id"`
@@ -217,6 +223,20 @@ func tiffOrientation(tiff []byte) int {
 }
 
 func NormalizeAvatarImage(input []byte) ([]byte, error) {
+	return normalizeAvatarImageBounded(input, normalizeAvatarImage)
+}
+
+func normalizeAvatarImageBounded(input []byte, normalize func([]byte) ([]byte, error)) ([]byte, error) {
+	select {
+	case avatarNormalizationSlots <- struct{}{}:
+		defer func() { <-avatarNormalizationSlots }()
+	default:
+		return nil, ErrAvatarNormalizationBusy
+	}
+	return normalize(input)
+}
+
+func normalizeAvatarImage(input []byte) ([]byte, error) {
 	if len(input) == 0 || len(input) > 2<<20 {
 		return nil, fmt.Errorf("%w: avatar image must not exceed 2 MiB", ErrInvalidInput)
 	}
@@ -297,7 +317,22 @@ func (s *Service) SetAvatarPreset(ctx context.Context, principal auth.Principal,
 	return profile, nil
 }
 
+func (s *Service) AuthorizeAvatarUpload(ctx context.Context, principal auth.Principal, profileID string) error {
+	profileID = strings.TrimSpace(profileID)
+	authorized, err := auth.CanManageProfiles(ctx, s.pool, principal, []string{profileID})
+	if err != nil {
+		return fmt.Errorf("preflight authorize custom profile avatar update: %w", err)
+	}
+	if !authorized {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Service) SetAvatarImage(ctx context.Context, principal auth.Principal, profileID string, imageData []byte) (Profile, error) {
+	if err := s.AuthorizeAvatarUpload(ctx, principal, profileID); err != nil {
+		return Profile{}, err
+	}
 	normalized, err := NormalizeAvatarImage(imageData)
 	if err != nil {
 		return Profile{}, err

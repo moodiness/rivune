@@ -14,6 +14,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/config"
 	"github.com/moodiness/rivune/server/internal/database"
 	"github.com/moodiness/rivune/server/internal/httpapi"
+	"github.com/moodiness/rivune/server/internal/netguard"
 )
 
 var version = "dev"
@@ -30,6 +31,9 @@ func run(logger *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+	if err := netguard.ConfigureNAT64Prefixes(cfg.NAT64Prefixes); err != nil {
+		return fmt.Errorf("configure NAT64 egress policy: %w", err)
 	}
 
 	startupContext, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
@@ -55,6 +59,7 @@ func run(logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 
 	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -125,7 +125,7 @@ func New(apiKey, pin string, httpClient *http.Client) *Client {
 
 func newWithBaseURL(apiKey, pin, baseURL string, httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		httpClient = metadata.NewProviderHTTPClient(baseURL, 15*time.Second)
 	}
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),

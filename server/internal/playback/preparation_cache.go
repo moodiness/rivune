@@ -119,7 +119,7 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 	}
 	subtitlesChannel := make(chan subtitleResult, 1)
 	go func() {
-		batch, err := service.addons.FetchAll(ctx, principal, addon.ResourcePath{Resource: "subtitles", Type: reference.AddonMediaType, ID: reference.ResourceID})
+		batch, err := service.addons.FetchAllPlaybackResources(ctx, principal, addon.ResourcePath{Resource: "subtitles", Type: reference.AddonMediaType, ID: reference.ResourceID})
 		subtitlesChannel <- subtitleResult{batch: batch, err: err}
 	}()
 
@@ -154,7 +154,11 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 	providerErrors := append([]ProviderFailure(nil), reference.ProviderErrors...)
 	if subtitleResources.err == nil &&
 		(len(capabilities.SubtitleModes) == 0 || requestedProcessingMode(capabilities.SubtitleModes, "external")) {
-		subtitles, subtitleAssets = normalizeSubtitles(subtitleResources.batch)
+		normalizedSubtitles, normalizedAssets, normalizationErr := normalizeSubtitles(subtitleResources.batch)
+		if normalizationErr == nil {
+			subtitles = normalizedSubtitles
+			subtitleAssets = normalizedAssets
+		}
 		providerErrors = append(providerErrors, providerFailures(subtitleResources.batch.Errors)...)
 	}
 	embedded, embeddedAssets := embeddedSubtitles(sources, assets, capabilities)

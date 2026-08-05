@@ -1,6 +1,5 @@
-BEGIN;
 
-CREATE TABLE profile_addons (
+CREATE TABLE IF NOT EXISTS profile_addons (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
     transport_url text NOT NULL,
@@ -17,7 +16,5 @@ CREATE TABLE profile_addons (
     UNIQUE (profile_id, position) DEFERRABLE INITIALLY DEFERRED
 );
 
-CREATE INDEX profile_addons_profile_manifest_idx
+CREATE INDEX IF NOT EXISTS profile_addons_profile_manifest_idx
     ON profile_addons (profile_id, manifest_id, position);
-
-COMMIT;

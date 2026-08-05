@@ -1,6 +1,5 @@
-BEGIN;
 
-CREATE TABLE auth_notification_broadcasts (
+CREATE TABLE IF NOT EXISTS auth_notification_broadcasts (
     id uuid PRIMARY KEY,
     sender_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     message text CHECK (message IS NULL OR char_length(message) BETWEEN 1 AND 500),
@@ -12,17 +11,16 @@ CREATE TABLE auth_notification_broadcasts (
 );
 
 ALTER TABLE auth_session_notifications
-    ADD COLUMN broadcast_id uuid REFERENCES auth_notification_broadcasts(id) ON DELETE CASCADE,
-    ADD COLUMN acknowledged_at timestamptz,
+    ADD COLUMN IF NOT EXISTS broadcast_id uuid REFERENCES auth_notification_broadcasts(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS acknowledged_at timestamptz,
+    DROP CONSTRAINT IF EXISTS auth_session_notifications_acknowledged_at_check,
     ADD CONSTRAINT auth_session_notifications_acknowledged_at_check
         CHECK (acknowledged_at IS NULL OR acknowledged_at >= created_at);
 
-CREATE UNIQUE INDEX auth_session_notifications_broadcast_session_idx
+CREATE UNIQUE INDEX IF NOT EXISTS auth_session_notifications_broadcast_session_idx
     ON auth_session_notifications (broadcast_id, session_id)
     WHERE broadcast_id IS NOT NULL;
 
-CREATE INDEX auth_notification_broadcasts_unscrubbed_expires_at_idx
+CREATE INDEX IF NOT EXISTS auth_notification_broadcasts_unscrubbed_expires_at_idx
     ON auth_notification_broadcasts (expires_at)
     WHERE message IS NOT NULL;
-
-COMMIT;

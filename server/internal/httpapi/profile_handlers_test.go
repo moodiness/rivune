@@ -33,6 +33,8 @@ type fakeProfileService struct {
 	avatarPresetID             string
 	avatarPresetValue          profile.Profile
 	avatarPresetErr            error
+	avatarAuthorizationID      string
+	avatarAuthorizationErr     error
 	avatarImageData            []byte
 	avatarImageValue           profile.Profile
 	avatarImageErr             error
@@ -75,6 +77,11 @@ func (f *fakeProfileService) SetAvatarPreset(_ context.Context, _ auth.Principal
 	f.updatedID = id
 	f.avatarPresetID = presetID
 	return f.avatarPresetValue, f.avatarPresetErr
+}
+
+func (f *fakeProfileService) AuthorizeAvatarUpload(_ context.Context, _ auth.Principal, id string) error {
+	f.avatarAuthorizationID = id
+	return f.avatarAuthorizationErr
 }
 
 func (f *fakeProfileService) SetAvatarImage(_ context.Context, _ auth.Principal, id string, image []byte) (profile.Profile, error) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -14,6 +15,61 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
+}
+
+func TestExposableResourceAllowlist(t *testing.T) {
+	for _, resource := range []string{"catalog", "addon_catalog", "meta"} {
+		if !IsExposableResource(resource) {
+			t.Fatalf("%q must remain exposable", resource)
+		}
+	}
+	for _, resource := range []string{"stream", "subtitles", "custom-resource", "Meta", ""} {
+		if IsExposableResource(resource) {
+			t.Fatalf("%q must not be exposable", resource)
+		}
+	}
+}
+
+func TestResourceResultSerializationRemovesProviderTransportMaterial(t *testing.T) {
+	result := ResourceResult{
+		Resource: "catalog",
+		Payload:  json.RawMessage(`{"metas":[{"id":"tt123","poster":"/api/v1/artwork/canonical","externalUrl":"https://provider.example/private?token=secret","behaviorHints":{"proxyHeaders":{"request":{"Authorization":"Bearer secret"}}},"extensions":{"cookie":"session=secret","apiKey":"provider-key","signature":"signed-secret","score":9007199254740993}}]}`),
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal catalog resource: %v", err)
+	}
+	for _, exposed := range []string{"provider.example", "externalUrl", "proxyHeaders", "Authorization", "cookie", "apiKey", "signature", "Bearer secret", "session=secret", "provider-key", "signed-secret"} {
+		if strings.Contains(string(encoded), exposed) {
+			t.Fatalf("resource result exposed %q: %s", exposed, encoded)
+		}
+	}
+	for _, preserved := range []string{"/api/v1/artwork/canonical", "9007199254740993", `"id":"tt123"`} {
+		if !strings.Contains(string(encoded), preserved) {
+			t.Fatalf("resource result removed safe value %q: %s", preserved, encoded)
+		}
+	}
+}
+
+func TestResourceResultSerializationCannotExposePlaybackPayload(t *testing.T) {
+	for _, resource := range []string{"stream", "subtitles"} {
+		result := ResourceResult{
+			Resource: resource,
+			Payload:  json.RawMessage(`{"streams":[{"url":"https://provider.example/private?token=secret","behaviorHints":{"proxyHeaders":{"request":{"Authorization":"Bearer secret"}}}}]}`),
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			t.Fatalf("marshal %s resource: %v", resource, err)
+		}
+		if !strings.Contains(string(encoded), `"payload":null`) {
+			t.Fatalf("%s resource payload was not redacted: %s", resource, encoded)
+		}
+		for _, exposed := range []string{"provider.example", "token", "proxyHeaders", "Authorization", "Bearer secret"} {
+			if strings.Contains(string(encoded), exposed) {
+				t.Fatalf("%s resource exposed %q: %s", resource, exposed, encoded)
+			}
+		}
+	}
 }
 
 func TestManifestSupportsOpaqueTypesIDsAndCatalogExtras(t *testing.T) {
@@ -294,6 +350,9 @@ func TestHTTPTransportRejectsInvalidResponsesAndClassifiesProviderErrors(t *test
 			if !errors.Is(err, test.want) {
 				t.Fatalf("expected %v, got %v", test.want, err)
 			}
+			if errors.Is(err, ErrProviderUnavailable) && !strings.Contains(err.Error(), "HTTP "+strconv.Itoa(test.status)) {
+				t.Fatalf("provider error did not preserve HTTP status %d: %v", test.status, err)
+			}
 			if test.checkTemporary {
 				if got := isTemporaryProviderError(err); got != test.wantTemporary {
 					t.Fatalf("temporary = %v, want %v", got, test.wantTemporary)
@@ -310,7 +369,7 @@ func TestHTTPTransportPreservesNetworkCause(t *testing.T) {
 	})}
 	transport := NewHTTPTransport(client)
 
-	_, _, err := transport.Resource(context.Background(), "https://addon.example/manifest.json", ResourcePath{
+	_, _, err := transport.Resource(context.Background(), "https://addon.example/manifest.json?token=network-secret", ResourcePath{
 		Resource: "meta",
 		Type:     "movie",
 		ID:       "tt123",
@@ -320,6 +379,9 @@ func TestHTTPTransportPreservesNetworkCause(t *testing.T) {
 	}
 	if !errors.Is(err, networkCause) {
 		t.Fatalf("network cause was not preserved: %v", err)
+	}
+	if strings.Contains(err.Error(), "network-secret") || strings.Contains(err.Error(), "addon.example") {
+		t.Fatalf("network error exposed request URL: %v", err)
 	}
 	if !isTemporaryProviderError(err) {
 		t.Fatalf("network error is not classified temporary: %v", err)
@@ -338,12 +400,64 @@ func TestParseManifestRejectsInvalidRequiredFields(t *testing.T) {
 	}
 }
 
-func TestInstalledAddonManifestMarshalsAsObject(t *testing.T) {
-	encoded, err := json.Marshal(InstalledAddon{Manifest: json.RawMessage(`{"id":"org.example"}`)})
+func TestManifestRejectsExcessiveCardinalityAndComplexity(t *testing.T) {
+	base := Manifest{
+		ID: "org.example.bounded", Version: "1.0.0", Name: "Bounded",
+		Types: []string{"movie"}, Resources: []ManifestResource{{Name: "catalog", Short: true}},
+	}
+	tooManyCatalogs := base
+	tooManyCatalogs.Catalogs = make([]ManifestCatalog, maxManifestCatalogs+1)
+	if err := tooManyCatalogs.Validate(); !errors.Is(err, ErrInvalidManifest) || !strings.Contains(err.Error(), "catalogs exceeds limit") {
+		t.Fatalf("catalog cardinality error = %v", err)
+	}
+
+	tooComplex := base
+	extras := make([]ExtraProp, 17)
+	for index := range extras {
+		extras[index] = ExtraProp{
+			Name:    "extra",
+			Options: make([]string, maxManifestListEntries),
+		}
+	}
+	tooComplex.Catalogs = []ManifestCatalog{{Type: "movie", ID: "catalog", Extra: extras}}
+	if err := tooComplex.Validate(); !errors.Is(err, ErrInvalidManifest) || !strings.Contains(err.Error(), "manifest complexity exceeds limit") {
+		t.Fatalf("manifest complexity error = %v", err)
+	}
+}
+
+func TestInstalledAddonManifestMarshalsAsObjectWithoutTransport(t *testing.T) {
+	const secret = "https://provider.example/private/path/manifest.json?token=must-not-leak"
+	encoded, err := json.Marshal(InstalledAddon{
+		Manifest:     json.RawMessage(`{"id":"org.example"}`),
+		transportURL: secret,
+	})
 	if err != nil {
 		t.Fatalf("marshal installed addon: %v", err)
 	}
 	if !strings.Contains(string(encoded), `"manifest":{"id":"org.example"}`) {
 		t.Fatalf("manifest was not embedded as JSON: %s", encoded)
+	}
+	if strings.Contains(string(encoded), "transportUrl") || strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "must-not-leak") {
+		t.Fatalf("installed addon exposed internal transport: %s", encoded)
+	}
+}
+
+func TestManagedAddonTransportDisclosureIsExplicit(t *testing.T) {
+	const secret = "https://provider.example/private/path/manifest.json?token=management-secret"
+	installed := InstalledAddon{
+		ID:           "11111111-1111-4111-8111-111111111111",
+		Manifest:     json.RawMessage(`{"id":"org.example"}`),
+		transportURL: secret,
+	}
+	revealed := managedAddon(installed, true)
+	if revealed.TransportURL != secret {
+		t.Fatal("managed addon did not preserve the stored transport URL")
+	}
+	redacted, err := json.Marshal(managedAddon(installed, false))
+	if err != nil {
+		t.Fatalf("marshal redacted managed addon: %v", err)
+	}
+	if strings.Contains(string(redacted), "transportUrl") || strings.Contains(string(redacted), "management-secret") {
+		t.Fatal("redacted managed addon exposed its transport URL")
 	}
 }

@@ -2,6 +2,7 @@ package demo
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/instance"
 )
 
@@ -34,33 +36,89 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
+type bufferedResponse struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func newBufferedResponse() *bufferedResponse {
+	return &bufferedResponse{header: make(http.Header)}
+}
+
+func (b *bufferedResponse) Header() http.Header {
+	return b.header
+}
+
+func (b *bufferedResponse) WriteHeader(status int) {
+	if b.status == 0 {
+		b.status = status
+	}
+}
+
+func (b *bufferedResponse) Write(data []byte) (int, error) {
+	if b.status == 0 {
+		b.status = http.StatusOK
+	}
+	return b.body.Write(data)
+}
+
+func (b *bufferedResponse) flushTo(destination http.ResponseWriter) {
+	for name, values := range b.header {
+		destination.Header()[name] = append([]string(nil), values...)
+	}
+	status := b.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	destination.WriteHeader(status)
+	if b.body.Len() != 0 {
+		_, _ = destination.Write(b.body.Bytes())
+	}
+}
+
+type preparedAsset struct {
+	name        string
+	contentType string
+	data        []byte
+}
+
 func (s *Service) Handler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(destination http.ResponseWriter, r *http.Request) {
 		cookie, cookieErr := r.Cookie(CookieName)
 		cookiePresent := cookieErr == nil || requestHasCookieName(r, CookieName)
 		demoPath := strings.HasPrefix(r.URL.Path, APIPrefix+"/demo/")
 		if !demoPath && (!cookiePresent || !strings.HasPrefix(r.URL.Path, APIPrefix+"/")) {
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(destination, r)
 			return
 		}
 		if s.admission == nil {
-			writeError(w, 500, "demo_internal_error", "The demo is temporarily unavailable")
+			writeError(destination, 500, "demo_internal_error", "The demo is temporarily unavailable")
 			return
 		}
-		release, err := s.admission.AcquireSetupPending(r.Context())
-		if errors.Is(err, instance.ErrAlreadyConfigured) {
-			s.Disable()
-			expireCookie(w, r)
-			writeError(w, http.StatusGone, "demo_unavailable", "The server setup has been completed. Demo mode is no longer available.")
-			return
-		}
-		if err != nil {
-			writeError(w, 500, "demo_internal_error", "The demo is temporarily unavailable")
-			return
-		}
-		defer release()
+
+		response := newBufferedResponse()
+		var release func()
+		var stream func()
+		defer func() {
+			if release != nil {
+				release()
+			}
+			if stream != nil {
+				stream()
+				return
+			}
+			response.flushTo(destination)
+		}()
+		w := http.ResponseWriter(response)
+
 		if !validOrigin(r) {
 			writeError(w, 403, "invalid_origin", "The request origin does not match this server")
+			return
+		}
+		if s.isDisabled() {
+			expireCookie(w, r)
+			writeError(w, http.StatusGone, "demo_unavailable", "The server setup has been completed. Demo mode is no longer available.")
 			return
 		}
 
@@ -69,11 +127,11 @@ func (s *Service) Handler(next http.Handler) http.Handler {
 				writeMethodNotAllowed(w, http.MethodPost)
 				return
 			}
+			replacedValue := ""
 			if cookieErr == nil {
-				_, digest := s.session(cookie.Value)
-				s.remove(digest)
+				replacedValue = cookie.Value
 			}
-			s.createSession(w, r)
+			release = s.createSession(w, r, replacedValue)
 			return
 		}
 		if !cookiePresent || cookieErr != nil || cookie.Value == "" {
@@ -87,24 +145,199 @@ func (s *Service) Handler(next http.Handler) http.Handler {
 			writeError(w, 401, "demo_session_invalid", "A valid demo session is required")
 			return
 		}
+		if r.URL.Path == APIPrefix+"/demo/session" && r.Method == http.MethodDelete {
+			var err error
+			release, err = s.releaseSession(r.Context(), digest, current)
+			if errors.Is(err, instance.ErrAlreadyConfigured) {
+				s.Disable()
+				expireCookie(w, r)
+				writeError(w, http.StatusGone, "demo_unavailable", "The server setup has been completed. Demo mode is no longer available.")
+				return
+			}
+			if err != nil {
+				writeError(w, 500, "demo_internal_error", "The demo is temporarily unavailable")
+				return
+			}
+			expireCookie(w, r)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, APIPrefix+"/demo/assets/") &&
+			(r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			asset, assetErr := prepareAsset(strings.TrimPrefix(r.URL.Path, APIPrefix+"/demo/assets/"))
+			if assetErr != nil {
+				writeError(w, 404, "demo_asset_not_found", "The demo asset does not exist")
+				return
+			}
+			var err error
+			release, err = s.admission.AcquireSetupPending(r.Context())
+			if !s.handleAdmissionError(w, r, err) {
+				return
+			}
+			stream = func() {
+				servePreparedAsset(destination, r, asset)
+			}
+			return
+		}
+
+		handled, readsBody := classifyDemoRoute(r)
+		if !handled {
+			writeError(w, 403, "demo_forbidden", "Demo sessions cannot access this endpoint")
+			return
+		}
+		if readsBody {
+			if err := snapshotRequestBody(r); err != nil {
+				writeError(w, 400, "invalid_request", fmt.Sprintf("invalid JSON body: %v", err))
+				return
+			}
+		}
+
+		var err error
+		release, err = s.admission.AcquireSetupPending(r.Context())
+		if !s.handleAdmissionError(w, r, err) {
+			return
+		}
 		if s.dispatch(w, r, current, digest) {
 			return
 		}
-		writeError(w, 403, "demo_forbidden", "Demo sessions cannot access this endpoint")
+		panic("classified demo route was not dispatched")
 	})
 }
 
-func (s *Service) createSession(w http.ResponseWriter, r *http.Request) {
-	value, current, err := s.newSession()
+func (s *Service) handleAdmissionError(w http.ResponseWriter, r *http.Request, err error) bool {
+	if errors.Is(err, instance.ErrAlreadyConfigured) {
+		s.Disable()
+		expireCookie(w, r)
+		writeError(w, http.StatusGone, "demo_unavailable", "The server setup has been completed. Demo mode is no longer available.")
+		return false
+	}
 	if err != nil {
 		writeError(w, 500, "demo_internal_error", "The demo is temporarily unavailable")
-		return
+		return false
+	}
+	return true
+}
+
+func classifyDemoRoute(r *http.Request) (handled, readsBody bool) {
+	p := r.URL.Path
+	switch {
+	case p == APIPrefix+"/demo/session" && r.Method == http.MethodGet:
+		return true, false
+	case p == APIPrefix+"/demo/session/reset" && r.Method == http.MethodPost:
+		return true, r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0
+	case p == APIPrefix+"/auth/me" && r.Method == http.MethodGet:
+		return true, false
+	case p == APIPrefix+"/auth/sessions" && r.Method == http.MethodGet:
+		return true, false
+	case p == APIPrefix+"/auth/notifications" && r.Method == http.MethodGet:
+		return true, false
+	case strings.HasPrefix(p, APIPrefix+"/auth/notifications/") && r.Method == http.MethodDelete:
+		return true, false
+	}
+
+	p = strings.TrimPrefix(p, APIPrefix)
+	switch {
+	case p == "/profiles" && r.Method == http.MethodGet:
+		return true, false
+	case p == "/profiles/selection" && r.Method == http.MethodDelete:
+		return true, false
+	case strings.HasPrefix(p, "/profiles/") && strings.HasSuffix(p, "/select") && r.Method == http.MethodPost:
+		return true, true
+	case strings.HasPrefix(p, "/profiles/") && strings.HasSuffix(p, "/settings/effective") && r.Method == http.MethodGet:
+		return true, false
+	case p == "/collections" && r.Method == http.MethodGet:
+		return true, false
+	case strings.HasPrefix(p, "/collections/") && strings.Contains(p, "/folders/") && strings.HasSuffix(p, "/items") && r.Method == http.MethodGet:
+		return true, false
+	case p == "/continue-watching" && r.Method == http.MethodGet:
+		return true, false
+	case strings.HasPrefix(p, "/continue-watching/") && r.Method == http.MethodDelete:
+		return true, false
+	case p == "/library" && r.Method == http.MethodGet:
+		return true, false
+	case strings.HasPrefix(p, "/library/") && (r.Method == http.MethodPut || r.Method == http.MethodDelete):
+		return true, false
+	case p == "/titles/resolve" && r.Method == http.MethodPost:
+		return true, true
+	case strings.HasPrefix(p, "/progress/") &&
+		(r.Method == http.MethodGet || r.Method == http.MethodPut || r.Method == http.MethodDelete):
+		return true, r.Method == http.MethodPut
+	case strings.HasPrefix(p, "/titles/") && strings.HasSuffix(p, "/watched") &&
+		(r.Method == http.MethodPost || r.Method == http.MethodDelete):
+		return true, r.Method == http.MethodPost
+	case strings.HasPrefix(p, "/addons/catalogs/search/") && r.Method == http.MethodGet:
+		return true, false
+	case strings.HasPrefix(p, "/addons/resources/meta/") && r.Method == http.MethodGet:
+		return true, false
+	case strings.HasPrefix(p, "/metadata/titles/") && r.Method == http.MethodGet:
+		return true, false
+	case strings.HasPrefix(p, "/metadata/series/") && r.Method == http.MethodGet:
+		return true, false
+	case strings.HasPrefix(p, "/metadata/seasons/") && r.Method == http.MethodGet:
+		return true, false
+	case p == "/playback/sources" && r.Method == http.MethodPost:
+		return true, true
+	case p == "/playback/prepare" && r.Method == http.MethodPost:
+		return true, true
+	case p == "/playback/resolve" && r.Method == http.MethodPost:
+		return true, true
+	case p == "/playback/markers" && r.Method == http.MethodGet:
+		return true, false
+	case strings.HasPrefix(p, "/playback/sessions/") && r.Method == http.MethodDelete:
+		return true, false
+	case p == "/calendar" && r.Method == http.MethodGet:
+		return true, false
+	default:
+		return false, false
+	}
+}
+
+const maxJSONBodyBytes = 64 * 1024
+
+func snapshotRequestBody(r *http.Request) error {
+	original := r.Body
+	if original == nil {
+		original = http.NoBody
+	}
+	data, err := io.ReadAll(io.LimitReader(original, maxJSONBodyBytes+1))
+	_ = original.Close()
+	if err != nil {
+		return err
+	}
+	r.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+	r.Body, _ = r.GetBody()
+	return nil
+}
+
+func (s *Service) createSession(w http.ResponseWriter, r *http.Request, replacedValue string) func() {
+	clientIP := auth.ClientIP(r.Context())
+	if clientIP == "" {
+		clientIP = "unknown"
+	}
+	sourceHash := sha256.Sum256([]byte("rivune-demo-client-ip:" + clientIP))
+	value, current, release, err := s.newSession(r.Context(), sourceHash, replacedValue)
+	if errors.Is(err, instance.ErrAlreadyConfigured) {
+		s.Disable()
+		expireCookie(w, r)
+		writeError(w, http.StatusGone, "demo_unavailable", "The server setup has been completed. Demo mode is no longer available.")
+		return nil
+	}
+	if errors.Is(err, instance.ErrDemoSessionCapacity) {
+		writeError(w, http.StatusTooManyRequests, "demo_session_limit", "The demo session limit has been reached")
+		return nil
+	}
+	if err != nil {
+		writeError(w, 500, "demo_internal_error", "The demo is temporarily unavailable")
+		return nil
 	}
 	setCookie(w, r, value, current.expiresAt, s.ttl)
 	current.mu.Lock()
 	account := accountLocked(current)
 	current.mu.Unlock()
 	writeJSON(w, http.StatusCreated, map[string]any{"account": account})
+	return release
 }
 
 func (s *Service) dispatch(w http.ResponseWriter, r *http.Request, current *session, digest [32]byte) bool {
@@ -121,16 +354,10 @@ func (s *Service) dispatch(w http.ResponseWriter, r *http.Request, current *sess
 			return true
 		}
 		current.mu.Lock()
-		current.state = freshState(s.now().UTC())
+		s.resetStateLocked(current, s.now().UTC())
 		account := accountLocked(current)
 		current.mu.Unlock()
 		writeJSON(w, 200, map[string]any{"account": account})
-	case p == APIPrefix+"/demo/session" && r.Method == http.MethodDelete:
-		s.remove(digest)
-		expireCookie(w, r)
-		w.WriteHeader(http.StatusNoContent)
-	case strings.HasPrefix(p, APIPrefix+"/demo/assets/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
-		s.serveAsset(w, r, strings.TrimPrefix(p, APIPrefix+"/demo/assets/"))
 	case p == APIPrefix+"/auth/me" && r.Method == http.MethodGet:
 		current.mu.Lock()
 		account := accountLocked(current)
@@ -177,15 +404,13 @@ func (s *Service) authSessions(w http.ResponseWriter, current *session) {
 	writeJSON(w, 200, map[string]any{"sessions": sessions})
 }
 
-func (s *Service) serveAsset(w http.ResponseWriter, r *http.Request, name string) {
+func prepareAsset(name string) (preparedAsset, error) {
 	if name == "" || path.Base(name) != name || strings.Contains(name, "\\") {
-		writeError(w, 404, "demo_asset_not_found", "The demo asset does not exist")
-		return
+		return preparedAsset{}, fs.ErrNotExist
 	}
 	data, err := embeddedAsset(name)
 	if err != nil {
-		writeError(w, 404, "demo_asset_not_found", "The demo asset does not exist")
-		return
+		return preparedAsset{}, err
 	}
 	contentType := mime.TypeByExtension(path.Ext(name))
 	switch path.Ext(name) {
@@ -196,9 +421,13 @@ func (s *Service) serveAsset(w http.ResponseWriter, r *http.Request, name string
 	case ".vtt":
 		contentType = "text/vtt; charset=utf-8"
 	}
-	w.Header().Set("Content-Type", contentType)
+	return preparedAsset{name: name, contentType: contentType, data: data}, nil
+}
+
+func servePreparedAsset(w http.ResponseWriter, r *http.Request, asset preparedAsset) {
+	w.Header().Set("Content-Type", asset.contentType)
 	w.Header().Set("Accept-Ranges", "bytes")
-	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
+	http.ServeContent(w, r, asset.name, time.Time{}, bytes.NewReader(asset.data))
 }
 func embeddedAsset(name string) ([]byte, error) {
 	assetCache.Lock()
@@ -273,7 +502,7 @@ func decodeStrict(r *http.Request, destination any) error {
 	if mediaType != "application/json" {
 		return errors.New("Content-Type must be application/json")
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 64*1024))
+	decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxJSONBodyBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return fmt.Errorf("invalid JSON body: %w", err)

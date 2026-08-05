@@ -277,7 +277,7 @@ func (s *Service) Profile(ctx context.Context, principal auth.Principal, profile
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	layer, err := s.queryProfileLayer(ctx, tx, principal, profileID, false)
+	layer, err := s.queryProfileLayer(ctx, tx, principal, profileID, false, false)
 	if err != nil {
 		return Layer{}, err
 	}
@@ -300,7 +300,7 @@ func (s *Service) UpdateProfile(ctx context.Context, principal auth.Principal, p
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	current, err := s.queryProfileLayer(ctx, tx, principal, profileID, true)
+	current, err := s.queryProfileLayer(ctx, tx, principal, profileID, true, true)
 	if err != nil {
 		return Layer{}, err
 	}
@@ -406,13 +406,29 @@ func validateEffectiveSelection(principal auth.Principal, profileID string, now 
 	return nil
 }
 
-func (s *Service) queryProfileLayer(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID string, forUpdate bool) (Layer, error) {
+func (s *Service) queryProfileLayer(
+	ctx context.Context,
+	tx pgx.Tx,
+	principal auth.Principal,
+	profileID string,
+	requireManagement bool,
+	forUpdate bool,
+) (Layer, error) {
 	profileID = strings.TrimSpace(profileID)
-	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, false)
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, requireManagement)
 	if err != nil {
 		return Layer{}, fmt.Errorf("authorize profile settings: %w", err)
 	}
 	if !authorized {
+		if requireManagement {
+			accessible, accessErr := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, false)
+			if accessErr != nil {
+				return Layer{}, fmt.Errorf("authorize profile settings access: %w", accessErr)
+			}
+			if accessible {
+				return Layer{}, ErrForbidden
+			}
+		}
 		return Layer{}, ErrProfileNotFound
 	}
 	lockClause := ""

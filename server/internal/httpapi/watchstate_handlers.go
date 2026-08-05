@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -74,6 +75,29 @@ func (a *API) library(w http.ResponseWriter, r *http.Request, principal auth.Pri
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (a *API) tvLibraryMembership(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !requireJSON(w, r) {
+		return
+	}
+	var request struct {
+		Identities []watchstate.TVLibraryIdentity `json:"identities"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if len(request.Identities) < 1 || len(request.Identities) > watchstate.MaximumTVLibraryMembershipIdentities {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_watch_state", "identities must contain between 1 and 100 items")
+		return
+	}
+	result, err := a.watchstate.TVLibraryMembership(r.Context(), principal, request.Identities)
+	if err != nil {
+		a.writeWatchstateError(w, "query TV library membership", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (a *API) addLibrary(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	item, err := a.watchstate.AddLibrary(r.Context(), principal, r.PathValue("titleId"))
 	if err != nil {
@@ -105,6 +129,29 @@ func (a *API) getProgress(w http.ResponseWriter, r *http.Request, principal auth
 		return
 	}
 	writeJSON(w, http.StatusOK, progress)
+}
+
+func (a *API) getProgressBatch(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !requireJSON(w, r) {
+		return
+	}
+	var request struct {
+		TitleIDs []string `json:"titleIds"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if len(request.TitleIDs) < 1 || len(request.TitleIDs) > watchstate.MaximumProgressBatchSize {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_watch_state", fmt.Sprintf("titleIds must contain between 1 and %d items", watchstate.MaximumProgressBatchSize))
+		return
+	}
+	result, err := a.watchstate.GetProgressBatch(r.Context(), principal, request.TitleIDs)
+	if err != nil {
+		a.writeWatchstateError(w, "read playback progress batch", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *API) updateProgress(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
@@ -174,6 +221,29 @@ func (a *API) markUnwatched(w http.ResponseWriter, r *http.Request, principal au
 	writeJSON(w, http.StatusOK, progress)
 }
 
+func (a *API) setWatchedBatch(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !requireJSON(w, r) {
+		return
+	}
+	var request struct {
+		Items []watchstate.SetWatchedBatchItem `json:"items"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if len(request.Items) < 1 || len(request.Items) > watchstate.MaximumProgressBatchSize {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_watch_state", fmt.Sprintf("items must contain between 1 and %d entries", watchstate.MaximumProgressBatchSize))
+		return
+	}
+	result, err := a.watchstate.SetWatchedBatch(r.Context(), principal, request.Items)
+	if err != nil {
+		a.writeWatchstateError(w, "set watched state batch", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (a *API) continueWatching(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	limit, err := integerQuery(r, "limit")
 	if err != nil {
@@ -239,10 +309,15 @@ func int64Query(r *http.Request, name string) (int64, error) {
 
 func (a *API) writeWatchstateError(w http.ResponseWriter, operation string, err error) {
 	switch {
+	case errors.Is(err, watchstate.ErrOutboxCapacity):
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "tracking_sync_capacity", "Tracking synchronization is temporarily at capacity; retry the mutation")
 	case errors.Is(err, watchstate.ErrInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "invalid_watch_state", strings.TrimPrefix(err.Error(), watchstate.ErrInvalidInput.Error()+": "))
 	case errors.Is(err, watchstate.ErrProfileRequired):
 		writeError(w, http.StatusConflict, "profile_selection_required", "Select an active profile before accessing watch state")
+	case errors.Is(err, watchstate.ErrForbidden):
+		writeError(w, http.StatusForbidden, "watch_state_forbidden", "Management access is required to change shared title snapshots")
 	case errors.Is(err, watchstate.ErrNotFound):
 		writeError(w, http.StatusNotFound, "title_not_found", "The title or playback progress does not exist")
 	case errors.Is(err, watchstate.ErrConflict):

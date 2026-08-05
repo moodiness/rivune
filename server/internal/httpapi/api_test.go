@@ -3,17 +3,20 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/moodiness/rivune/server/internal/config"
 	"github.com/moodiness/rivune/server/internal/demo"
 	"github.com/moodiness/rivune/server/internal/instance"
 	"github.com/moodiness/rivune/server/internal/settings"
+	"github.com/moodiness/rivune/server/internal/tracking"
 )
 
 type fakeInstanceService struct {
@@ -45,6 +48,38 @@ func (f *fakeInstanceService) AcquireSetupPending(context.Context) (func(), erro
 	return func() {}, nil
 }
 
+func (f *fakeInstanceService) AdmitDemoSession(
+	_ context.Context,
+	_ [sha256.Size]byte,
+	_ string,
+	_ time.Time,
+	_ time.Time,
+	_ int,
+	_ int,
+	prepare func() error,
+) (string, func(), error) {
+	if f.infoErr != nil {
+		return "", nil, f.infoErr
+	}
+	if !f.info.SetupRequired {
+		return "", nil, instance.ErrAlreadyConfigured
+	}
+	if err := prepare(); err != nil {
+		return "", nil, err
+	}
+	return "00000000-0000-4000-8000-000000000001", func() {}, nil
+}
+
+func (f *fakeInstanceService) ReleaseDemoSession(context.Context, string) (func(), error) {
+	if f.infoErr != nil {
+		return nil, f.infoErr
+	}
+	if !f.info.SetupRequired {
+		return nil, instance.ErrAlreadyConfigured
+	}
+	return func() {}, nil
+}
+
 func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
 	service := &fakeInstanceService{info: instance.Info{Name: "Rivune", SetupRequired: true}}
 	api := testAPI(service)
@@ -65,7 +100,7 @@ func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
 		InterfaceLanguage string `json:"interfaceLanguage"`
 	}
 	decodeResponse(t, response, &body)
-	if body.Name != "Rivune" || body.ProtocolVersion != 18 || body.APIBaseURL != "https://media.example/api/v1" ||
+	if body.Name != "Rivune" || body.ProtocolVersion != 19 || body.APIBaseURL != "https://media.example/api/v1" ||
 		body.Timezone != "Europe/Paris" || body.InterfaceLanguage != "en" || !body.SetupRequired {
 		t.Fatalf("unexpected discovery response: %+v", body)
 	}
@@ -213,8 +248,8 @@ func TestSuccessfulSetupPurgesInProcessDemoSessions(t *testing.T) {
 	resume.AddCookie(cookie)
 	resumeResponse := httptest.NewRecorder()
 	handler.ServeHTTP(resumeResponse, resume)
-	if resumeResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("purged demo status = %d: %s", resumeResponse.Code, resumeResponse.Body.String())
+	if resumeResponse.Code != http.StatusGone {
+		t.Fatalf("purged demo status = %d, want %d: %s", resumeResponse.Code, http.StatusGone, resumeResponse.Body.String())
 	}
 }
 
@@ -262,11 +297,14 @@ func startDemoSession(t *testing.T, handler http.Handler) *http.Cookie {
 
 func testAPI(service instanceService) *API {
 	api := &API{
-		config:    config.Config{PublicURL: "https://media.example", Timezone: "Europe/Paris"},
-		instances: service,
-		settings:  &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}},
-		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-		version:   "test",
+		config:              config.Config{PublicURL: "https://media.example", Timezone: "Europe/Paris"},
+		instances:           service,
+		settings:            &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}},
+		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		version:             "test",
+		credentialAdmission: newCredentialAdmission(),
+		usernameAdmission:   newCredentialUsernameAdmission(),
+		deviceCodeAdmission: newDeviceCodeAdmission(),
 	}
 	api.demo = demo.New(service, demo.Options{})
 	return api
@@ -276,5 +314,23 @@ func decodeResponse(t *testing.T, response *httptest.ResponseRecorder, destinati
 	t.Helper()
 	if err := json.Unmarshal(response.Body.Bytes(), destination); err != nil {
 		t.Fatalf("decode response: %v", err)
+	}
+}
+
+func TestTrackingOutboxCapacityHasRetryableHTTPContract(t *testing.T) {
+	response := httptest.NewRecorder()
+	if !writeTrackingError(&API{}, response, tracking.ErrOutboxCapacity, "update tracking preferences") {
+		t.Fatal("tracking capacity error was not handled")
+	}
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("tracking capacity status = %d, want 503", response.Code)
+	}
+	if response.Header().Get("Retry-After") != "5" {
+		t.Fatalf("tracking capacity Retry-After = %q, want 5", response.Header().Get("Retry-After"))
+	}
+	var body errorEnvelope
+	decodeResponse(t, response, &body)
+	if body.Error.Code != "tracking_sync_capacity" {
+		t.Fatalf("tracking capacity code = %q, want tracking_sync_capacity", body.Error.Code)
 	}
 }

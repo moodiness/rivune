@@ -18,13 +18,18 @@ import (
 )
 
 var (
-	ErrAlreadyConfigured = errors.New("instance is already configured")
-	ErrInvalidSetupToken = errors.New("invalid setup token")
-	ErrSetupUnavailable  = errors.New("setup token is not configured")
-	ErrInvalidInput      = errors.New("invalid setup input")
+	ErrAlreadyConfigured   = errors.New("instance is already configured")
+	ErrInvalidSetupToken   = errors.New("invalid setup token")
+	ErrSetupUnavailable    = errors.New("setup token is not configured")
+	ErrInvalidInput        = errors.New("invalid setup input")
+	ErrDemoSessionCapacity = errors.New("demo session capacity reached")
 )
 
-const setupLockID int64 = 7_249_863_112
+const (
+	setupLockID                int64 = 7_249_863_112
+	demoSessionAdmissionLockID int64 = 7_249_863_113
+	demoSessionCleanupLimit          = 128
+)
 
 type Service struct {
 	pool       *pgxpool.Pool
@@ -70,9 +75,14 @@ func (s *Service) Info(ctx context.Context) (Info, error) {
 // pre-setup handler is running. Setup takes the matching exclusive transaction
 // lock, so a committed setup can never overlap an admitted demo response.
 func (s *Service) AcquireSetupPending(ctx context.Context) (func(), error) {
+	_, release, err := s.acquireSetupPendingConnection(ctx)
+	return release, err
+}
+
+func (s *Service) acquireSetupPendingConnection(ctx context.Context) (*pgxpool.Conn, func(), error) {
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("acquire setup admission connection: %w", err)
+		return nil, nil, fmt.Errorf("acquire setup admission connection: %w", err)
 	}
 	unlock := func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -89,20 +99,135 @@ func (s *Service) AcquireSetupPending(ctx context.Context) (func(), error) {
 	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock_shared($1)", setupLockID); err != nil {
 		raw := conn.Hijack()
 		_ = raw.Close(context.Background())
-		return nil, fmt.Errorf("lock setup admission: %w", err)
+		return nil, nil, fmt.Errorf("lock setup admission: %w", err)
 	}
 	var configured bool
 	if err := conn.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM instances WHERE id = 1)").Scan(&configured); err != nil {
 		unlock()
-		return nil, fmt.Errorf("check setup admission state: %w", err)
+		return nil, nil, fmt.Errorf("check setup admission state: %w", err)
 	}
 	if configured {
 		unlock()
-		return nil, ErrAlreadyConfigured
+		return nil, nil, ErrAlreadyConfigured
 	}
 
 	var once sync.Once
-	return func() { once.Do(unlock) }, nil
+	return conn, func() { once.Do(unlock) }, nil
+}
+
+// AdmitDemoSession serializes quota checks across server processes. prepare is
+// called only after capacity is available, and its failure rolls back every
+// ledger mutation, including replacement and expired-row cleanup.
+func (s *Service) AdmitDemoSession(
+	ctx context.Context,
+	sourceHash [sha256.Size]byte,
+	replacedAdmissionID string,
+	now, expiresAt time.Time,
+	globalLimit, sourceLimit int,
+	prepare func() error,
+) (string, func(), error) {
+	if globalLimit <= 0 || sourceLimit <= 0 || !expiresAt.After(now) || prepare == nil {
+		return "", nil, errors.New("invalid demo session admission")
+	}
+	conn, release, err := s.acquireSetupPendingConnection(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	releaseOnError := true
+	defer func() {
+		if releaseOnError {
+			release()
+		}
+	}()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return "", nil, fmt.Errorf("begin demo session admission: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", demoSessionAdmissionLockID); err != nil {
+		return "", nil, fmt.Errorf("lock demo session admission: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM demo_session_admissions
+		WHERE id IN (
+			SELECT id
+			FROM demo_session_admissions
+			WHERE expires_at <= $1
+			ORDER BY expires_at, id
+			LIMIT $2
+		)
+	`, now, demoSessionCleanupLimit); err != nil {
+		return "", nil, fmt.Errorf("clean expired demo session admissions: %w", err)
+	}
+
+	var globalCount, currentSourceCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			count(*),
+			count(*) FILTER (WHERE source_hash = $1)
+		FROM demo_session_admissions
+		WHERE expires_at > $2
+		  AND ($3 = '' OR id <> NULLIF($3, '')::uuid)
+	`, sourceHash[:], now, replacedAdmissionID).Scan(&globalCount, &currentSourceCount); err != nil {
+		return "", nil, fmt.Errorf("count demo session admissions: %w", err)
+	}
+	if globalCount >= globalLimit || currentSourceCount >= sourceLimit {
+		return "", nil, ErrDemoSessionCapacity
+	}
+	if err := prepare(); err != nil {
+		return "", nil, fmt.Errorf("prepare demo session: %w", err)
+	}
+
+	if replacedAdmissionID != "" {
+		if _, err := tx.Exec(ctx, "DELETE FROM demo_session_admissions WHERE id = $1::uuid", replacedAdmissionID); err != nil {
+			return "", nil, fmt.Errorf("replace demo session admission: %w", err)
+		}
+	}
+	var admissionID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO demo_session_admissions (source_hash, created_at, expires_at)
+		VALUES ($1, $2, $3)
+		RETURNING id::text
+	`, sourceHash[:], now, expiresAt).Scan(&admissionID); err != nil {
+		return "", nil, fmt.Errorf("create demo session admission: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", nil, fmt.Errorf("commit demo session admission: %w", err)
+	}
+	releaseOnError = false
+	return admissionID, release, nil
+}
+
+func (s *Service) ReleaseDemoSession(ctx context.Context, admissionID string) (func(), error) {
+	conn, release, err := s.acquireSetupPendingConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	releaseOnError := true
+	defer func() {
+		if releaseOnError {
+			release()
+		}
+	}()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin demo session release: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", demoSessionAdmissionLockID); err != nil {
+		return nil, fmt.Errorf("lock demo session release: %w", err)
+	}
+	if admissionID != "" {
+		if _, err := tx.Exec(ctx, "DELETE FROM demo_session_admissions WHERE id = $1::uuid", admissionID); err != nil {
+			return nil, fmt.Errorf("release demo session admission: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit demo session release: %w", err)
+	}
+	releaseOnError = false
+	return release, nil
 }
 
 func (s *Service) Setup(ctx context.Context, token string, input SetupInput) (SetupResult, error) {
@@ -143,6 +268,9 @@ func (s *Service) Setup(ctx context.Context, token string, input SetupInput) (Se
 		return SetupResult{}, ErrAlreadyConfigured
 	}
 
+	if _, err := tx.Exec(ctx, "DELETE FROM demo_session_admissions"); err != nil {
+		return SetupResult{}, fmt.Errorf("clear demo session admissions: %w", err)
+	}
 	var result SetupResult
 	if err := tx.QueryRow(ctx,
 		"INSERT INTO instances (id, name) VALUES (1, $1) RETURNING public_id::text",

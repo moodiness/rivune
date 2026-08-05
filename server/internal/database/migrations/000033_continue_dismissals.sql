@@ -1,4 +1,3 @@
-BEGIN;
 
 CREATE TABLE IF NOT EXISTS profile_continue_dismissals (
     profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
@@ -6,5 +5,3 @@ CREATE TABLE IF NOT EXISTS profile_continue_dismissals (
     dismissed_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (profile_id, title_id)
 );
-
-COMMIT;

@@ -60,3 +60,44 @@ func awaitCleanupCall(t *testing.T, calls <-chan struct{}, service string) {
 		t.Fatalf("%s cleanup was not called", service)
 	}
 }
+
+type calendarRefreshWorkerStub struct {
+	started chan struct{}
+	stopped chan struct{}
+}
+
+func (worker *calendarRefreshWorkerStub) Run(ctx context.Context) {
+	close(worker.started)
+	<-ctx.Done()
+	close(worker.stopped)
+}
+
+func TestAPIMaintenanceOwnsCalendarRefreshWorkerLifecycle(t *testing.T) {
+	worker := &calendarRefreshWorkerStub{started: make(chan struct{}), stopped: make(chan struct{})}
+	api := &API{
+		calendarRefresh: worker,
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		api.RunMaintenance(ctx)
+		close(done)
+	}()
+	select {
+	case <-worker.started:
+	case <-time.After(time.Second):
+		t.Fatal("maintenance did not start calendar refresh worker")
+	}
+	cancel()
+	select {
+	case <-worker.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("maintenance cancellation did not reach calendar refresh worker")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("maintenance returned without joining calendar refresh worker")
+	}
+}

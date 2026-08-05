@@ -15,6 +15,7 @@ var (
 	ErrAuthorizationSlow   = errors.New("tracking authorization polling too quickly")
 	ErrAuthorizationDenied = errors.New("tracking authorization was denied")
 	ErrProviderUnavailable = errors.New("tracking provider unavailable")
+	ErrOutboxCapacity      = errors.New("tracking synchronization capacity reached")
 )
 
 type Status struct {
@@ -55,4 +56,10 @@ type Event struct {
 	DurationSeconds int       `json:"durationSeconds,omitempty"`
 	Version         int64     `json:"version,omitempty"`
 	OccurredAt      time.Time `json:"occurredAt"`
+}
+
+type BatchEvent struct {
+	TitleID        string
+	IdempotencyKey string
+	Event          Event
 }

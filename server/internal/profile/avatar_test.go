@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/xml"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"sync"
 	"testing"
 )
 
@@ -147,5 +149,50 @@ func TestNormalizeAvatarImageAppliesJPEGEXIFOrientation(t *testing.T) {
 	right := color.NRGBAModel.Convert(result.At(492, 256)).(color.NRGBA)
 	if left.B < 180 || left.R > 80 || right.R < 180 || right.B > 80 {
 		t.Fatalf("EXIF orientation was not applied: left=%+v right=%+v", left, right)
+	}
+}
+
+func TestNormalizeAvatarImageRejectsAtGlobalConcurrencyLimit(t *testing.T) {
+	entered := make(chan struct{}, maximumConcurrentAvatarNormalizations)
+	release := make(chan struct{})
+	results := make(chan error, maximumConcurrentAvatarNormalizations)
+	var releaseOnce sync.Once
+	releaseWorkers := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	t.Cleanup(releaseWorkers)
+
+	blockingNormalizer := func(input []byte) ([]byte, error) {
+		entered <- struct{}{}
+		<-release
+		return input, nil
+	}
+	for range maximumConcurrentAvatarNormalizations {
+		go func() {
+			_, err := normalizeAvatarImageBounded([]byte("authorized"), blockingNormalizer)
+			results <- err
+		}()
+	}
+	for range maximumConcurrentAvatarNormalizations {
+		<-entered
+	}
+
+	overflowNormalizerCalled := false
+	_, err := normalizeAvatarImageBounded([]byte("overflow"), func(input []byte) ([]byte, error) {
+		overflowNormalizerCalled = true
+		return input, nil
+	})
+	if !errors.Is(err, ErrAvatarNormalizationBusy) {
+		t.Fatalf("normalization at capacity error = %v, want %v", err, ErrAvatarNormalizationBusy)
+	}
+	if overflowNormalizerCalled {
+		t.Fatal("overflow normalization performed expensive work")
+	}
+
+	releaseWorkers()
+	for range maximumConcurrentAvatarNormalizations {
+		if err := <-results; err != nil {
+			t.Fatalf("authorized normalization failed: %v", err)
+		}
 	}
 }

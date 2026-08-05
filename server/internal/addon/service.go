@@ -44,7 +44,7 @@ func NewService(pool *pgxpool.Pool, transport Transport, logger *slog.Logger) *S
 	}
 }
 
-func (service *Service) Install(ctx context.Context, principal auth.Principal, input InstallInput) (InstalledAddon, error) {
+func (service *Service) install(ctx context.Context, principal auth.Principal, input InstallInput) (InstalledAddon, error) {
 	profileID, err := activeProfileID(principal)
 	if err != nil {
 		return InstalledAddon{}, err
@@ -57,11 +57,17 @@ func (service *Service) Install(ctx context.Context, principal auth.Principal, i
 	if err != nil {
 		return InstalledAddon{}, err
 	}
+	if !principal.IsGlobalAdministrator() {
+		return InstalledAddon{}, ErrForbidden
+	}
 	authorizationTx, err := service.pool.Begin(ctx)
 	if err != nil {
 		return InstalledAddon{}, fmt.Errorf("begin addon installation authorization: %w", err)
 	}
 	defer func() { _ = authorizationTx.Rollback(ctx) }()
+	if err := authorizeGlobalAddonOrigin(ctx, authorizationTx, principal); err != nil {
+		return InstalledAddon{}, err
+	}
 	if err := authorizeActiveProfile(ctx, authorizationTx, principal, profileID); err != nil {
 		return InstalledAddon{}, err
 	}
@@ -80,6 +86,9 @@ func (service *Service) Install(ctx context.Context, principal auth.Principal, i
 		return InstalledAddon{}, fmt.Errorf("begin addon installation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeGlobalAddonOrigin(ctx, tx, principal); err != nil {
+		return InstalledAddon{}, err
+	}
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return InstalledAddon{}, err
 	}
@@ -114,7 +123,7 @@ func (service *Service) Install(ctx context.Context, principal auth.Principal, i
 	if err := writeProfileAssignments(ctx, tx, addonID, profileIDs); err != nil {
 		return InstalledAddon{}, err
 	}
-	installed, err := queryAddon(tx.QueryRow(ctx, addonForProfileQuery, addonID, profileID))
+	installed, err := queryAddon(tx.QueryRow(ctx, addonForManagementQuery, addonID, profileID))
 	if err != nil {
 		return InstalledAddon{}, fmt.Errorf("query installed addon: %w", err)
 	}
@@ -124,7 +133,54 @@ func (service *Service) Install(ctx context.Context, principal auth.Principal, i
 	return installed, nil
 }
 
+func (service *Service) Install(ctx context.Context, principal auth.Principal, input InstallInput) (ManagedAddon, error) {
+	installed, err := service.install(ctx, principal, input)
+	if err != nil {
+		return ManagedAddon{}, err
+	}
+	return managedAddon(installed, principal.IsGlobalAdministrator()), nil
+}
+
 func (service *Service) List(ctx context.Context, principal auth.Principal) ([]InstalledAddon, error) {
+	return service.loadAddonList(ctx, principal, true)
+}
+
+func (service *Service) Management(ctx context.Context, principal auth.Principal, addonID string) (ManagedAddon, error) {
+	if !principal.IsGlobalAdministrator() {
+		return ManagedAddon{}, ErrForbidden
+	}
+	profileID, err := activeProfileID(principal)
+	if err != nil {
+		return ManagedAddon{}, err
+	}
+	if !validUUID(addonID) {
+		return ManagedAddon{}, ErrInvalidInput
+	}
+	tx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return ManagedAddon{}, fmt.Errorf("begin addon management lookup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeGlobalAddonOrigin(ctx, tx, principal); err != nil {
+		return ManagedAddon{}, err
+	}
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return ManagedAddon{}, err
+	}
+	installed, err := queryAddon(tx.QueryRow(ctx, addonForProfileQuery, addonID, profileID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ManagedAddon{}, ErrNotFound
+	}
+	if err != nil {
+		return ManagedAddon{}, fmt.Errorf("query addon management details: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ManagedAddon{}, fmt.Errorf("commit addon management lookup: %w", err)
+	}
+	return managedAddon(installed, true), nil
+}
+
+func (service *Service) loadAddonList(ctx context.Context, principal auth.Principal, requireManagement bool) ([]InstalledAddon, error) {
 	profileID, err := activeProfileID(principal)
 	if err != nil {
 		return nil, err
@@ -136,6 +192,15 @@ func (service *Service) List(ctx context.Context, principal auth.Principal) ([]I
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return nil, err
+	}
+	if requireManagement {
+		authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
+		if err != nil {
+			return nil, fmt.Errorf("authorize addon list management: %w", err)
+		}
+		if !authorized {
+			return nil, ErrForbidden
+		}
 	}
 	addons, err := listForProfile(ctx, tx, profileID)
 	if err != nil {
@@ -163,24 +228,13 @@ func (service *Service) Remove(ctx context.Context, principal auth.Principal, ad
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return err
 	}
-	if err := lockProfile(ctx, tx, profileID); err != nil {
+	if err := authorizeAddonAssignmentChange(ctx, tx, principal, profileID, addonID, nil); err != nil {
 		return err
-	}
-	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
-	if err != nil {
-		return err
-	}
-	if !authorized {
-		return ErrForbidden
 	}
 	command, err := tx.Exec(ctx, `
-		DELETE FROM profile_addons pa
-		WHERE pa.id = $1::uuid
-		  AND EXISTS (
-		      SELECT 1 FROM addon_profile_access access
-		      WHERE access.addon_id = pa.id AND access.profile_id = $2::uuid
-		  )
-	`, addonID, profileID)
+		DELETE FROM profile_addons
+		WHERE id = $1::uuid
+	`, addonID)
 	if err != nil {
 		return fmt.Errorf("remove addon: %w", err)
 	}
@@ -215,6 +269,13 @@ func (service *Service) Reorder(ctx context.Context, principal auth.Principal, i
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return nil, err
+	}
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
+	if err != nil {
+		return nil, fmt.Errorf("authorize addon reorder management: %w", err)
+	}
+	if !authorized {
+		return nil, ErrForbidden
 	}
 	if err := lockProfile(ctx, tx, profileID); err != nil {
 		return nil, err
@@ -268,15 +329,27 @@ func (service *Service) Refresh(ctx context.Context, principal auth.Principal, a
 	if err != nil {
 		return InstalledAddon{}, err
 	}
-	current, err := service.loadAddonForProfile(ctx, principal, profileID, addonID)
+	if !validUUID(addonID) {
+		return InstalledAddon{}, ErrInvalidInput
+	}
+	authorizationTx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return InstalledAddon{}, fmt.Errorf("begin addon refresh authorization: %w", err)
+	}
+	defer func() { _ = authorizationTx.Rollback(ctx) }()
+	if err := authorizeActiveProfile(ctx, authorizationTx, principal, profileID); err != nil {
+		return InstalledAddon{}, err
+	}
+	current, err := authorizeAndLoadAddonRefresh(ctx, authorizationTx, principal, profileID, addonID)
 	if err != nil {
 		return InstalledAddon{}, err
 	}
-	manifest, rawManifest, err := service.transport.Manifest(ctx, current.TransportURL)
+	if err := authorizationTx.Commit(ctx); err != nil {
+		return InstalledAddon{}, fmt.Errorf("commit addon refresh authorization: %w", err)
+	}
+
+	manifest, rawManifest, err := service.transport.Manifest(ctx, current.transportURL)
 	if err != nil {
-		if revalidationErr := service.revalidateAddon(ctx, principal, current); revalidationErr != nil {
-			return InstalledAddon{}, revalidationErr
-		}
 		return InstalledAddon{}, err
 	}
 	tx, err := service.pool.Begin(ctx)
@@ -287,25 +360,26 @@ func (service *Service) Refresh(ctx context.Context, principal auth.Principal, a
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return InstalledAddon{}, err
 	}
-	command, err := tx.Exec(ctx, `
-		UPDATE profile_addons pa
-		SET manifest = $3::jsonb, manifest_id = $4, manifest_version = $5, updated_at = now()
-		WHERE pa.id = $2::uuid
-		  AND pa.transport_url = $6
-		  AND EXISTS (
-		      SELECT 1 FROM addon_profile_access access
-		      WHERE access.addon_id = pa.id AND access.profile_id = $1::uuid
-		  )
-	`, profileID, addonID, rawManifest, manifest.ID, manifest.Version, current.TransportURL)
-	if err != nil {
-		return InstalledAddon{}, fmt.Errorf("refresh addon manifest: %w", err)
-	}
-	if command.RowsAffected() == 0 {
-		return InstalledAddon{}, ErrNotFound
-	}
-	installed, err := addonForProfile(ctx, tx, profileID, addonID)
+	locked, err := authorizeAndLoadAddonRefresh(ctx, tx, principal, profileID, addonID)
 	if err != nil {
 		return InstalledAddon{}, err
+	}
+	if !sameInstalledAddon(locked, current) {
+		return InstalledAddon{}, ErrNotFound
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE profile_addons
+		SET manifest = $2::jsonb, manifest_id = $3, manifest_version = $4, updated_at = now()
+		WHERE id = $1::uuid
+	`, addonID, rawManifest, manifest.ID, manifest.Version); err != nil {
+		return InstalledAddon{}, fmt.Errorf("refresh addon manifest: %w", err)
+	}
+	installed, err := queryAddon(tx.QueryRow(ctx, addonForManagementQuery, addonID, profileID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return InstalledAddon{}, ErrNotFound
+	}
+	if err != nil {
+		return InstalledAddon{}, fmt.Errorf("query refreshed addon: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return InstalledAddon{}, fmt.Errorf("commit addon refresh: %w", err)
@@ -314,7 +388,7 @@ func (service *Service) Refresh(ctx context.Context, principal auth.Principal, a
 }
 
 func (service *Service) Catalogs(ctx context.Context, principal auth.Principal) ([]CatalogDescriptor, error) {
-	addons, err := service.List(ctx, principal)
+	addons, err := service.loadAddonList(ctx, principal, false)
 	if err != nil {
 		return nil, err
 	}
@@ -338,6 +412,20 @@ func (service *Service) Catalogs(ctx context.Context, principal auth.Principal) 
 }
 
 func (service *Service) Fetch(ctx context.Context, principal auth.Principal, addonID string, path ResourcePath) (ResourceResult, error) {
+	if !IsExposableResource(path.Resource) {
+		return ResourceResult{}, ErrUnsupportedResource
+	}
+	return service.fetch(ctx, principal, addonID, path)
+}
+
+func (service *Service) FetchPlaybackResource(ctx context.Context, principal auth.Principal, addonID string, path ResourcePath) (ResourceResult, error) {
+	if !isPlaybackResource(path.Resource) {
+		return ResourceResult{}, ErrUnsupportedResource
+	}
+	return service.fetch(ctx, principal, addonID, path)
+}
+
+func (service *Service) fetch(ctx context.Context, principal auth.Principal, addonID string, path ResourcePath) (ResourceResult, error) {
 	profileID, err := activeProfileID(principal)
 	if err != nil {
 		return ResourceResult{}, err
@@ -350,7 +438,7 @@ func (service *Service) Fetch(ctx context.Context, principal auth.Principal, add
 	if !installed.parsedManifest.Supports(path) {
 		return ResourceResult{}, ErrUnsupportedResource
 	}
-	payload, cache, err := service.transport.Resource(ctx, installed.TransportURL, path)
+	payload, cache, err := service.transport.Resource(ctx, installed.transportURL, path)
 	if err != nil {
 		if revalidationErr := service.revalidateAddon(ctx, principal, installed); revalidationErr != nil {
 			return ResourceResult{}, revalidationErr
@@ -365,26 +453,47 @@ func (service *Service) Fetch(ctx context.Context, principal auth.Principal, add
 }
 
 func (service *Service) FetchAll(ctx context.Context, principal auth.Principal, path ResourcePath) (ResourceBatch, error) {
-	addons, err := service.List(ctx, principal)
+	if !IsExposableResource(path.Resource) {
+		return ResourceBatch{}, ErrUnsupportedResource
+	}
+	return service.fetchAll(ctx, principal, path)
+}
+
+func (service *Service) FetchAllPlaybackResources(ctx context.Context, principal auth.Principal, path ResourcePath) (ResourceBatch, error) {
+	if !isPlaybackResource(path.Resource) {
+		return ResourceBatch{}, ErrUnsupportedResource
+	}
+	return service.fetchAll(ctx, principal, path)
+}
+
+func (service *Service) fetchAll(ctx context.Context, principal auth.Principal, path ResourcePath) (ResourceBatch, error) {
+	addons, err := service.loadAddonList(ctx, principal, false)
 	if err != nil {
 		return ResourceBatch{}, err
 	}
-	requests := make([]plannedRequest, 0, len(addons))
+	requests := make([]plannedRequest, 0, min(len(addons), maxPlannedRequests))
 	for _, installed := range addons {
 		requestPath := installed.parsedManifest.ApplyCatalogDefaults(path)
-		if installed.parsedManifest.Supports(requestPath) {
-			requests = append(requests, plannedRequest{addon: installed, path: requestPath})
+		if !installed.parsedManifest.Supports(requestPath) {
+			continue
 		}
+		if len(requests) == maxPlannedRequests {
+			return ResourceBatch{}, requestPlanLimitError()
+		}
+		requests = append(requests, plannedRequest{addon: installed, path: requestPath})
 	}
-	batch := service.execute(ctx, requests)
+	batch, executeErr := service.execute(ctx, requests)
 	if err := service.revalidateAddonList(ctx, principal, addons); err != nil {
 		return ResourceBatch{}, err
+	}
+	if executeErr != nil {
+		return ResourceBatch{}, executeErr
 	}
 	return batch, nil
 }
 
 func (service *Service) FetchCatalogs(ctx context.Context, principal auth.Principal, contentType string, extra []ExtraValue, addonCatalogs bool) (ResourceBatch, error) {
-	addons, err := service.List(ctx, principal)
+	addons, err := service.loadAddonList(ctx, principal, false)
 	if err != nil {
 		return ResourceBatch{}, err
 	}
@@ -404,14 +513,21 @@ func (service *Service) FetchCatalogs(ctx context.Context, principal auth.Princi
 			}
 			path := ResourcePath{Resource: resource, Type: catalog.Type, ID: catalog.ID, Extra: extra}
 			path = installed.parsedManifest.ApplyCatalogDefaults(path)
-			if installed.parsedManifest.Supports(path) {
-				requests = append(requests, plannedRequest{addon: installed, path: path})
+			if !installed.parsedManifest.Supports(path) {
+				continue
 			}
+			if len(requests) == maxPlannedRequests {
+				return ResourceBatch{}, requestPlanLimitError()
+			}
+			requests = append(requests, plannedRequest{addon: installed, path: path})
 		}
 	}
-	batch := service.execute(ctx, requests)
+	batch, executeErr := service.execute(ctx, requests)
 	if err := service.revalidateAddonList(ctx, principal, addons); err != nil {
 		return ResourceBatch{}, err
+	}
+	if executeErr != nil {
+		return ResourceBatch{}, executeErr
 	}
 	return batch, nil
 }
@@ -423,18 +539,25 @@ func (service *Service) SearchCatalogs(ctx context.Context, principal auth.Princ
 	if input.Limit < 1 || input.Limit > 100 {
 		return ResourceBatch{}, fmt.Errorf("%w: limit must be between 1 and 100", ErrInvalidInput)
 	}
-	addons, err := service.List(ctx, principal)
+	addons, err := service.loadAddonList(ctx, principal, false)
 	if err != nil {
 		return ResourceBatch{}, err
 	}
-	batch := service.execute(ctx, planCatalogSearch(addons, contentType, input))
+	requests, err := planCatalogSearch(addons, contentType, input)
+	if err != nil {
+		return ResourceBatch{}, err
+	}
+	batch, executeErr := service.execute(ctx, requests)
 	if err := service.revalidateAddonList(ctx, principal, addons); err != nil {
 		return ResourceBatch{}, err
+	}
+	if executeErr != nil {
+		return ResourceBatch{}, executeErr
 	}
 	return batch, nil
 }
 
-func planCatalogSearch(addons []InstalledAddon, contentType string, input CatalogSearchInput) []plannedRequest {
+func planCatalogSearch(addons []InstalledAddon, contentType string, input CatalogSearchInput) ([]plannedRequest, error) {
 	requests := make([]plannedRequest, 0)
 	seen := make(map[string]struct{})
 	for _, installed := range addons {
@@ -474,10 +597,17 @@ func planCatalogSearch(addons []InstalledAddon, contentType string, input Catalo
 				continue
 			}
 			seen[key] = struct{}{}
+			if len(requests) == maxPlannedRequests {
+				return nil, requestPlanLimitError()
+			}
 			requests = append(requests, request)
 		}
 	}
-	return requests
+	return requests, nil
+}
+
+func requestPlanLimitError() error {
+	return fmt.Errorf("%w: addon request plan exceeds limit of %d", ErrInvalidInput, maxPlannedRequests)
 }
 
 func plannedRequestKey(request plannedRequest) string {
@@ -487,7 +617,7 @@ func plannedRequestKey(request plannedRequest) string {
 		key.WriteByte(':')
 		key.WriteString(value)
 	}
-	appendKeyPart(request.addon.TransportURL)
+	appendKeyPart(request.addon.transportURL)
 	appendKeyPart(request.path.Resource)
 	appendKeyPart(request.path.Type)
 	appendKeyPart(request.path.ID)
@@ -498,36 +628,71 @@ func plannedRequestKey(request plannedRequest) string {
 	return key.String()
 }
 
-func (service *Service) execute(ctx context.Context, requests []plannedRequest) ResourceBatch {
+func (service *Service) execute(ctx context.Context, requests []plannedRequest) (ResourceBatch, error) {
+	if len(requests) > maxPlannedRequests {
+		return ResourceBatch{}, requestPlanLimitError()
+	}
 	outcomes := make([]resourceOutcome, len(requests))
-	semaphore := make(chan struct{}, 8)
+	if len(requests) == 0 {
+		return ResourceBatch{Results: []ResourceResult{}, Errors: []ResourceFailure{}}, nil
+	}
+
+	batchCtx, cancelBatch := context.WithCancel(ctx)
+	defer cancelBatch()
+	budget := newAggregateResourceBudget(maxAggregateResponseBytes, cancelBatch)
+	workerCount := min(len(requests), maxConcurrentRequests)
+	jobs := make(chan int)
 	var wait sync.WaitGroup
-	for index, request := range requests {
-		index, request := index, request
-		wait.Add(1)
+	wait.Add(workerCount)
+	for range workerCount {
 		go func() {
 			defer wait.Done()
-			select {
-			case semaphore <- struct{}{}:
-				defer func() { <-semaphore }()
-			case <-ctx.Done():
-				outcomes[index] = resourceOutcome{request: request, err: ctx.Err()}
-				return
+			for {
+				select {
+				case <-budget.done:
+					return
+				case index, open := <-jobs:
+					if !open {
+						return
+					}
+					select {
+					case <-budget.done:
+						return
+					default:
+					}
+					request := requests[index]
+					requestCtx, cancel := context.WithTimeout(batchCtx, service.effectiveRequestTimeout())
+					payload, cache, err := service.executeRequest(requestCtx, request, budget)
+					cancel()
+					if budget.wasExceeded() {
+						payload = nil
+					}
+					outcomes[index] = resourceOutcome{request: request, payload: payload, cache: cache, err: err}
+				}
 			}
-			requestCtx, cancel := context.WithTimeout(ctx, service.effectiveRequestTimeout())
-			defer cancel()
-			payload, cache, err := service.executeRequest(requestCtx, request)
-			outcomes[index] = resourceOutcome{request: request, payload: payload, cache: cache, err: err}
 		}()
 	}
+
+enqueue:
+	for index := range requests {
+		select {
+		case <-budget.done:
+			break enqueue
+		case jobs <- index:
+		}
+	}
+	close(jobs)
 	wait.Wait()
+	if budget.wasExceeded() {
+		return ResourceBatch{}, aggregateResourceLimitError()
+	}
+
 	batch := ResourceBatch{Results: make([]ResourceResult, 0, len(outcomes)), Errors: make([]ResourceFailure, 0)}
 	for _, outcome := range outcomes {
 		if outcome.err != nil {
 			service.effectiveLogger().WarnContext(ctx, "addon resource request failed",
 				"addonId", outcome.request.addon.ID,
 				"manifestId", outcome.request.addon.parsedManifest.ID,
-				"transportUrl", outcome.request.addon.TransportURL,
 				"resource", outcome.request.path.Resource,
 				"type", outcome.request.path.Type,
 				"resourceId", outcome.request.path.ID,
@@ -543,11 +708,18 @@ func (service *Service) execute(ctx context.Context, requests []plannedRequest) 
 		}
 		batch.Results = append(batch.Results, resultFor(outcome.request.addon, outcome.request.path, outcome.payload, outcome.cache))
 	}
-	return batch
+	return batch, nil
 }
 
-func (service *Service) executeRequest(ctx context.Context, request plannedRequest) (json.RawMessage, CachePolicy, error) {
-	payload, cache, err := service.transport.Resource(ctx, request.addon.TransportURL, request.path)
+func aggregateResourceLimitError() error {
+	return fmt.Errorf(
+		"%w: aggregate addon response exceeds limit of %d bytes",
+		ErrInvalidResponse, maxAggregateResponseBytes,
+	)
+}
+
+func (service *Service) executeRequest(ctx context.Context, request plannedRequest, budget *aggregateResourceBudget) (json.RawMessage, CachePolicy, error) {
+	payload, cache, err := service.executeTransportRequest(ctx, request, budget)
 	if err == nil || ctx.Err() != nil || !isTemporaryProviderError(err) {
 		return payload, cache, err
 	}
@@ -558,7 +730,20 @@ func (service *Service) executeRequest(ctx context.Context, request plannedReque
 	case <-ctx.Done():
 		return nil, CachePolicy{}, ctx.Err()
 	}
-	return service.transport.Resource(ctx, request.addon.TransportURL, request.path)
+	return service.executeTransportRequest(ctx, request, budget)
+}
+
+func (service *Service) executeTransportRequest(ctx context.Context, request plannedRequest, budget *aggregateResourceBudget) (json.RawMessage, CachePolicy, error) {
+	if transport, ok := service.transport.(aggregateBudgetTransport); ok {
+		return transport.resourceWithBudget(ctx, request.addon.transportURL, request.path, budget)
+	}
+	payload, cache, err := service.transport.Resource(ctx, request.addon.transportURL, request.path)
+	if err == nil {
+		if budgetErr := budget.consumeMaterialized(len(payload)); budgetErr != nil {
+			return nil, CachePolicy{}, budgetErr
+		}
+	}
+	return payload, cache, err
 }
 
 func (service *Service) effectiveRequestTimeout() time.Duration {
@@ -708,7 +893,7 @@ func (service *Service) revalidateAddonList(ctx context.Context, principal auth.
 
 func sameInstalledAddon(left, right InstalledAddon) bool {
 	return left.ID == right.ID &&
-		left.TransportURL == right.TransportURL &&
+		left.transportURL == right.transportURL &&
 		left.Position == right.Position &&
 		left.InstalledAt.Equal(right.InstalledAt) &&
 		left.UpdatedAt.Equal(right.UpdatedAt) &&
@@ -721,6 +906,28 @@ func activeProfileID(principal auth.Principal) (string, error) {
 		return "", ErrActiveProfileRequired
 	}
 	return *principal.ActiveProfileID, nil
+}
+
+func authorizeGlobalAddonOrigin(ctx context.Context, tx pgx.Tx, principal auth.Principal) error {
+	if !principal.IsGlobalAdministrator() {
+		return ErrForbidden
+	}
+	var administrator bool
+	if err := tx.QueryRow(ctx, `
+		SELECT role = 'admin'
+		FROM users
+		WHERE id = $1::uuid
+		FOR SHARE
+	`, principal.UserID).Scan(&administrator); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrForbidden
+		}
+		return fmt.Errorf("authorize global addon origin: %w", err)
+	}
+	if !administrator {
+		return ErrForbidden
+	}
+	return nil
 }
 
 func authorizeActiveProfile(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID string) error {
@@ -743,7 +950,7 @@ func lockProfile(ctx context.Context, tx pgx.Tx, profileID string) error {
 
 func resultFor(installed InstalledAddon, path ResourcePath, payload json.RawMessage, cache CachePolicy) ResourceResult {
 	return ResourceResult{
-		AddonID: installed.ID, ManifestID: installed.parsedManifest.ID, TransportURL: installed.TransportURL,
+		AddonID: installed.ID, ManifestID: installed.parsedManifest.ID,
 		Resource: path.Resource, Type: path.Type, ID: path.ID, Payload: payload, Cache: cache, Extra: path.Extra,
 	}
 }

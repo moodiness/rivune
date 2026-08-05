@@ -54,6 +54,10 @@ func (a *API) setProfileAvatarPreset(w http.ResponseWriter, r *http.Request, pri
 }
 
 func (a *API) uploadProfileAvatar(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if err := a.profiles.AuthorizeAvatarUpload(r.Context(), principal, r.PathValue("profileId")); err != nil {
+		a.writeProfileAvatarError(w, "preflight profile avatar upload", err)
+		return
+	}
 	if r.ContentLength > 3<<20 {
 		writeError(w, http.StatusRequestEntityTooLarge, "avatar_too_large", "The avatar upload must not exceed 2 MiB")
 		return
@@ -107,6 +111,9 @@ func (a *API) writeProfileAvatarError(w http.ResponseWriter, operation string, e
 	switch {
 	case errors.Is(err, profile.ErrNotFound):
 		writeError(w, http.StatusNotFound, "profile_avatar_not_found", "The profile or custom avatar does not exist")
+	case errors.Is(err, profile.ErrAvatarNormalizationBusy):
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "avatar_processing_busy", "Avatar processing is busy; retry shortly")
 	case errors.Is(err, profile.ErrInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "invalid_profile_avatar", profileErrorMessage(err))
 	case errors.Is(err, profile.ErrForbidden):

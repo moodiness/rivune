@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: Rivune API
-  version: 1.4.0
+  version: 1.5.0
   description: >
-    Protocol version 18 between Rivune clients and a self-hosted Rivune Server.
+    Protocol version 19 between Rivune clients and a self-hosted Rivune Server.
     While global maintenance mode is enabled, authenticated non-admin application
     operations return the reusable 503 MaintenanceMode response. Authentication,
     session recovery, health, discovery, and administrator operations remain available.
@@ -134,6 +134,8 @@ paths:
           $ref: "#/components/responses/DemoOriginRejected"
         "410":
           $ref: "#/components/responses/DemoUnavailable"
+        "429":
+          $ref: "#/components/responses/DemoSessionLimit"
         default:
           $ref: "#/components/responses/Error"
   /demo/session:
@@ -315,6 +317,7 @@ paths:
       description: >
         Administrator password login issues global_admin scope. Member password login copies
         category scope from the persisted device; device category values are never accepted as claims.
+        Each user may retain at most 50 device identities; an already-owned device ID remains reusable at the limit.
       operationId: login
       security: []
       requestBody:
@@ -333,6 +336,8 @@ paths:
         "400":
           $ref: "#/components/responses/Error"
         "401":
+          $ref: "#/components/responses/Error"
+        "409":
           $ref: "#/components/responses/Error"
         "415":
           $ref: "#/components/responses/Error"
@@ -1138,7 +1143,7 @@ paths:
               $ref: "#/components/schemas/SelectProfileRequest"
       responses:
         "200":
-          description: The profile is active for the current session until the grant expires.
+          description: The profile is active for the current session until the grant expires. Web clients retain the returned opaque profileContext only in the selecting tab and send it as X-Rivune-Profile-Context on subsequent authenticated requests.
           content:
             application/json:
               schema:
@@ -1545,7 +1550,7 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
         "503":
-          $ref: "#/components/responses/TrackingProviderUnavailable"
+          $ref: "#/components/responses/TrackingOperationUnavailable"
   /profiles/{profileId}/tracking/{provider}/device-code/{authorizationId}/token:
     parameters:
       - $ref: "#/components/parameters/ProfileId"
@@ -1588,7 +1593,7 @@ paths:
         "429":
           $ref: "#/components/responses/Error"
         "503":
-          $ref: "#/components/responses/TrackingProviderUnavailable"
+          $ref: "#/components/responses/TrackingOperationUnavailable"
   /profiles/{profileId}/tracking/{provider}:
     parameters:
       - $ref: "#/components/parameters/ProfileId"
@@ -1624,7 +1629,7 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
         "503":
-          $ref: "#/components/responses/MaintenanceMode"
+          $ref: "#/components/responses/TrackingOperationUnavailable"
     delete:
       summary: Disconnect a profile tracking account
       description: Clears encrypted credentials, authorization codes, and queued outbound work. Provider revocation is best effort.
@@ -1670,6 +1675,7 @@ paths:
       description: >
         Exchanges only the opaque deviceCode. The approved persisted device category determines
         the resulting category-scoped session, including when an administrator approved the device.
+        The exchange creates a new identity and returns a 409 error when the approving user already retains 50 devices.
       operationId: exchangeDeviceAuthorization
       security: []
       requestBody:
@@ -1686,6 +1692,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/TokenPair"
         "400":
+          $ref: "#/components/responses/Error"
+        "409":
           $ref: "#/components/responses/Error"
         "415":
           $ref: "#/components/responses/Error"
@@ -1923,7 +1931,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/InstalledAddon"
+                $ref: "#/components/schemas/ManagedAddon"
         "401":
           $ref: "#/components/responses/Error"
         "409":
@@ -1978,7 +1986,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/InstalledAddon"
+                $ref: "#/components/schemas/ManagedAddon"
         "401":
           $ref: "#/components/responses/Error"
         "403":
@@ -2004,6 +2012,32 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "409":
+          $ref: "#/components/responses/Error"
+  /addons/{addonId}/management:
+    parameters:
+      - $ref: "#/components/parameters/AddonId"
+    get:
+      summary: Get addon management details
+      operationId: getAddonManagement
+      description: Returns the exact stored transport URL only to a global administrator managing an addon assigned to the active profile.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Addon management details, including the stored transport URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedAddon"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
           $ref: "#/components/responses/Error"
   /addons/{addonId}/refresh:
     parameters:
@@ -2057,15 +2091,16 @@ paths:
       summary: Get addon resource
       operationId: getAddonResource
       description: >
-        Calls one installed addon using the Stremio HTTP addon protocol. Every
-        query parameter is forwarded as a Stremio extra value. Resource names,
-        content types, IDs, repeated extras, custom ID prefixes, and response
-        fields are preserved without normalization.
+        Calls one installed addon using the Stremio HTTP addon protocol. Generic
+        access is restricted to catalog, addon_catalog, and meta resources.
+        Every query parameter is forwarded as a Stremio extra value. Content
+        types, IDs, repeated extras, and custom ID prefixes remain opaque;
+        provider URLs, headers, cookies, and credential fields are stripped.
       security:
         - bearerAuth: []
       responses:
         "200":
-          description: Addon payload with transport provenance, cache directives, and server-owned artwork presentation.
+          description: Exposable addon payload with cache directives and server-owned artwork presentation.
           content:
             application/json:
               schema:
@@ -2089,9 +2124,10 @@ paths:
       summary: Get all addon resources
       operationId: getAllAddonResources
       description: >
-        Calls every installed addon whose short or full manifest resource
-        declaration accepts the exact content type and opaque ID. Every query
-        parameter is forwarded as a Stremio extra value.
+        Calls every installed addon whose manifest declaration accepts the exact
+        exposable resource, content type, and opaque ID. Generic access is
+        restricted to catalog, addon_catalog, and meta. Every query parameter is
+        forwarded as a Stremio extra value.
       security:
         - bearerAuth: []
       responses:
@@ -2241,7 +2277,7 @@ paths:
         - bearerAuth: []
       responses:
         "200":
-          description: Portable versioned JSON export of every collection for the active profile.
+          description: Portable versioned JSON export of every collection for the active profile, available only when the caller can manage every assigned profile.
           headers:
             Content-Disposition:
               schema:
@@ -2251,6 +2287,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/CollectionExportDocument"
         "401":
+          $ref: "#/components/responses/Error"
+        "403":
           $ref: "#/components/responses/Error"
         "409":
           $ref: "#/components/responses/Error"
@@ -2388,7 +2426,7 @@ paths:
         - bearerAuth: []
       responses:
         "200":
-          description: Complete editable collection definition.
+          description: Collection definition for the active profile with artwork source URLs replaced by same-origin artwork proxy URLs.
           content:
             application/json:
               schema:
@@ -2438,6 +2476,33 @@ paths:
         "204":
           description: Collection deleted.
         "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /collections/{collectionId}/management:
+    parameters:
+      - $ref: "#/components/parameters/CollectionId"
+    get:
+      summary: Get collection management details
+      operationId: getCollectionManagement
+      description: >
+        Returns the stored collection definition with exact configured artwork
+        source URLs, including path and query. Requires management access to
+        the active profile and every profile assigned to the collection.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Stored collection definition for the administration editor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collection"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
@@ -3087,6 +3152,36 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+  /library/membership:
+    post:
+      summary: Check TV library membership
+      operationId: checkTVLibraryMembership
+      description: Checks at most 100 displayed TV identities for the selected profile in one bounded query. Matches are returned in request order.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TVLibraryMembershipRequest"
+      responses:
+        "200":
+          description: TV identities that belong to the selected profile library.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TVLibraryMembershipResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
   /library/{titleId}:
     parameters:
       - $ref: "#/components/parameters/TitleId"
@@ -3110,6 +3205,8 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/TrackingSyncCapacity"
     delete:
       summary: Remove library title
       operationId: removeLibraryTitle
@@ -3121,6 +3218,40 @@ paths:
         "401":
           $ref: "#/components/responses/Error"
         "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/TrackingSyncCapacity"
+  /progress/batch:
+    post:
+      summary: Get playback progress for a bounded title set
+      description: Returns one item for every requested title in request order. The progress field is null when the selected profile has not started that title.
+      operationId: getPlaybackProgressBatch
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackProgressBatchRequest"
+      responses:
+        "200":
+          description: Ordered playback progress states for the selected profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackProgressBatch"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
@@ -3175,6 +3306,8 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/TrackingSyncCapacity"
     delete:
       summary: Clear playback progress
       operationId: clearPlaybackProgress
@@ -3191,6 +3324,42 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/TrackingSyncCapacity"
+  /titles/watched/batch:
+    put:
+      summary: Set watched state for a bounded title set
+      description: Atomically applies every optimistic versioned mutation and returns results in request order. Any missing title or version conflict rejects the entire batch.
+      operationId: setTitlesWatchedBatch
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetWatchedBatchRequest"
+      responses:
+        "200":
+          description: Ordered watched states with their new synchronization versions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetWatchedBatchResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/TrackingSyncCapacity"
   /titles/{titleId}/watched:
     parameters:
       - $ref: "#/components/parameters/TitleId"
@@ -3220,6 +3389,8 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/TrackingSyncCapacity"
     delete:
       summary: Mark title unwatched
       operationId: markTitleUnwatched
@@ -3242,6 +3413,8 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/TrackingSyncCapacity"
   /continue-watching:
     get:
       summary: List continue watching
@@ -3303,7 +3476,9 @@ components:
         Short-lived opaque Rivune access token. Every session has immutable global_admin or category
         authorization scope. Only administrator password login may issue global_admin. Category identity
         is derived and revalidated from server-owned session and device state; client category fields are
-        resource identifiers to authorize, never claims. Category moves revoke incompatible sessions.
+        resource identifiers to authorize, never claims. Category moves revoke incompatible sessions. After profile
+        selection, web clients must also present that selection's opaque X-Rivune-Profile-Context capability on
+        authenticated requests other than authentication, profile listing, profile selection, and profile avatar reads.
     demoCookie:
       type: apiKey
       in: cookie
@@ -3322,6 +3497,14 @@ components:
       schema:
         type: string
         format: uuid
+    ProfileContext:
+      name: X-Rivune-Profile-Context
+      in: header
+      required: true
+      description: Opaque per-selection, per-tab capability returned by selectProfile. Never share it through localStorage.
+      schema:
+        type: string
+        minLength: 1
     CategoryId:
       name: categoryId
       in: path
@@ -3391,11 +3574,10 @@ components:
       name: resource
       in: path
       required: true
-      description: Exact Stremio resource name, including custom resource names.
+      description: Exposable addon resource name. Stream and subtitle resources are available only through opaque playback APIs.
       schema:
         type: string
-        minLength: 1
-        maxLength: 256
+        enum: [catalog, addon_catalog, meta]
     AddonContentType:
       name: type
       in: path
@@ -3409,7 +3591,7 @@ components:
       name: id
       in: path
       required: true
-      description: Exact opaque addon catalog, metadata, video, stream, or subtitle identifier.
+      description: Exact opaque addon catalog or metadata identifier.
       schema:
         type: string
         minLength: 1
@@ -3509,6 +3691,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/DemoSessionInvalidError"
+    DemoSessionLimit:
+      description: The global demonstration pool or the trusted client source quota is full.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/DemoSessionLimitError"
     DemoOriginRejected:
       description: A state-changing demonstration request failed its same-origin check.
       content:
@@ -3544,11 +3732,24 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/MaintenanceModeError"
-    TrackingProviderUnavailable:
-      description: Tracking provider configuration or availability failed, or global maintenance mode is enabled.
+    TrackingSyncCapacity:
+      description: The tracking synchronization outbox is at capacity. The mutation is rolled back and the standard Error envelope has code `tracking_sync_capacity`; retry without reloading its optimistic version.
       headers:
         Retry-After:
-          description: Suggested delay in seconds when the response is caused by global maintenance mode.
+          required: true
+          description: Fixed delay in seconds before retrying the watch-state mutation.
+          schema:
+            type: integer
+            enum: [5]
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    TrackingOperationUnavailable:
+      description: Tracking provider configuration or availability failed, synchronization capacity was reached, or global maintenance mode is enabled. Capacity failures use error code `tracking_sync_capacity` and roll back the mutation.
+      headers:
+        Retry-After:
+          description: Suggested delay in seconds for synchronization capacity or global maintenance mode.
           schema:
             type: integer
             minimum: 1
@@ -3582,13 +3783,15 @@ components:
     UpdateAddonInput:
       type: object
       additionalProperties: false
-      required: [transportUrl, profileIds]
+      required: [profileIds]
       properties:
         transportUrl:
           type: string
           format: uri
           description: >
-            Modern Stremio HTTP(S) transport URL. A root URL is normalized to
+            Optional replacement Stremio HTTP(S) transport URL. Omit it when
+            changing profile assignments only. Replacing the transport is
+            restricted to global administrators; a root URL is normalized to
             manifest.json and a stremio:// install URL is normalized to HTTPS.
         profileIds:
           type: array
@@ -3621,14 +3824,11 @@ components:
     InstalledAddon:
       type: object
       additionalProperties: false
-      required: [id, transportUrl, manifest, position, profileIds, installedAt, updatedAt]
+      required: [id, manifest, position, profileIds, installedAt, updatedAt]
       properties:
         id:
           type: string
           format: uuid
-        transportUrl:
-          type: string
-          format: uri
         manifest:
           $ref: "#/components/schemas/StremioManifest"
         position:
@@ -3647,6 +3847,37 @@ components:
         updatedAt:
           type: string
           format: date-time
+    ManagedAddon:
+      type: object
+      additionalProperties: false
+      required: [id, manifest, position, profileIds, installedAt, updatedAt]
+      description: Addon management response. transportUrl is present only for a currently authorized global administrator.
+      properties:
+        id:
+          type: string
+          format: uuid
+        manifest:
+          $ref: "#/components/schemas/StremioManifest"
+        position:
+          type: integer
+          minimum: 0
+        profileIds:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+        installedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        transportUrl:
+          type: string
+          format: uri
+          description: Exact stored transport URL, including path and query; omitted for non-global mutation responses.
     StremioManifest:
       type: object
       additionalProperties: true
@@ -3822,16 +4053,13 @@ components:
     AddonResourceResult:
       type: object
       additionalProperties: false
-      required: [addonId, manifestId, transportUrl, resource, type, id, payload, cache]
+      required: [addonId, manifestId, resource, type, id, payload, cache]
       properties:
         addonId:
           type: string
           format: uuid
         manifestId:
           type: string
-        transportUrl:
-          type: string
-          format: uri
         resource:
           type: string
         type:
@@ -3843,11 +4071,11 @@ components:
           type: object
           additionalProperties: true
           description: >
-            Forward-compatible Stremio response object. Unknown fields, SDK cache
-            fields, streams, subtitles, addons, and embedded streams are preserved.
-            For catalog and metadata payloads, Rivune may replace only artwork URL
-            fields with canonical provider choices exposed through same-origin
-            /api/v1/artwork cache URLs.
+            Forward-compatible catalog or metadata response object. Non-sensitive
+            unknown fields and SDK cache fields are preserved. Provider URLs,
+            transport credentials, headers, and cookies are removed. Rivune may
+            replace artwork URL fields with canonical provider choices exposed
+            through same-origin /api/v1/artwork cache URLs.
         cache:
           $ref: "#/components/schemas/AddonCachePolicy"
         extra:
@@ -3901,7 +4129,7 @@ components:
           type: string
         protocolVersion:
           type: integer
-          const: 18
+          const: 19
         apiBaseUrl:
           type: string
         setupRequired:
@@ -4755,13 +4983,17 @@ components:
           format: date-time
     ProfileSelection:
       type: object
-      required: [profile, expiresAt]
+      required: [profile, expiresAt, profileContext]
       properties:
         profile:
           $ref: "#/components/schemas/Profile"
         expiresAt:
           type: string
           format: date-time
+        profileContext:
+          type: string
+          minLength: 1
+          description: Opaque capability bound to this profile selection. Web clients store it only in the selecting tab.
     MaintenanceSettingsInput:
       type: object
       additionalProperties: false
@@ -6168,6 +6400,10 @@ components:
         addonId:
           type: string
           format: uuid
+        manifestId:
+          type: string
+          minLength: 1
+          maxLength: 512
         type:
           type: string
           minLength: 1
@@ -6687,6 +6923,54 @@ components:
         totalResults:
           type: integer
           minimum: 0
+    TVLibraryIdentity:
+      type: object
+      additionalProperties: false
+      required: [sourceAddonId, resourceId]
+      properties:
+        sourceAddonId:
+          type: string
+          format: uuid
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 512
+    TVLibraryMembershipRequest:
+      type: object
+      additionalProperties: false
+      required: [identities]
+      properties:
+        identities:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/TVLibraryIdentity"
+    TVLibraryMembership:
+      type: object
+      additionalProperties: false
+      required: [sourceAddonId, resourceId, titleId]
+      properties:
+        sourceAddonId:
+          type: string
+          format: uuid
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        titleId:
+          type: string
+          format: uuid
+    TVLibraryMembershipResult:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/TVLibraryMembership"
     PlaybackMarkerList:
       type: object
       additionalProperties: false
@@ -7384,6 +7668,88 @@ components:
         updatedAt:
           type: string
           format: date-time
+    PlaybackProgressBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [titleIds]
+      properties:
+        titleIds:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+    PlaybackProgressBatchItem:
+      type: object
+      additionalProperties: false
+      required: [titleId, progress]
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        progress:
+          oneOf:
+            - $ref: "#/components/schemas/PlaybackProgress"
+            - type: "null"
+    PlaybackProgressBatch:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/PlaybackProgressBatchItem"
+    SetWatchedBatchItem:
+      type: object
+      additionalProperties: false
+      required: [titleId, completed, expectedVersion]
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        completed:
+          type: boolean
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+    SetWatchedBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/SetWatchedBatchItem"
+    SetWatchedBatchResultItem:
+      type: object
+      additionalProperties: false
+      required: [titleId, progress]
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        progress:
+          $ref: "#/components/schemas/PlaybackProgress"
+    SetWatchedBatchResult:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/SetWatchedBatchResultItem"
     UpdatePlaybackProgressRequest:
       type: object
       additionalProperties: false
@@ -7474,6 +7840,22 @@ components:
             message:
               type: string
               const: A valid demo session is required
+    DemoSessionLimitError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              const: demo_session_limit
+            message:
+              type: string
+              const: The demo session limit has been reached
     PlaybackUnprocessableError:
       type: object
       additionalProperties: false

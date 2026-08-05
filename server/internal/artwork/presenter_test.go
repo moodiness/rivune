@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -113,6 +114,63 @@ func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *te
 	}
 }
 
+func TestPresentAddonResourcesBoundsArtworkRegistrationsPerResponse(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+
+	metas := make([]map[string]any, maximumAddonArtworkURLsPerResponse+32)
+	for index := range metas {
+		metas[index] = map[string]any{
+			"id":     "malicious:" + strconv.Itoa(index),
+			"type":   "movie",
+			"poster": fixture.URL + "/poster-" + strconv.Itoa(index) + ".png",
+		}
+	}
+	payload, err := json.Marshal(map[string]any{"metas": metas})
+	if err != nil {
+		t.Fatalf("encode addon response: %v", err)
+	}
+	results := []addon.ResourceResult{{Resource: "catalog", Type: "movie", Payload: payload}}
+	service.PresentAddonResources(context.Background(), results)
+
+	var presented struct {
+		Metas []map[string]any `json:"metas"`
+	}
+	if err := json.Unmarshal(results[0].Payload, &presented); err != nil {
+		t.Fatalf("decode presented addon response: %v", err)
+	}
+	nonEmpty := 0
+	for _, meta := range presented.Metas {
+		poster, _ := meta["poster"].(string)
+		if poster == "" {
+			continue
+		}
+		nonEmpty++
+		if !strings.HasPrefix(poster, publicPrefix) {
+			t.Fatalf("provider artwork escaped same-origin presentation: %q", poster)
+		}
+	}
+	if nonEmpty != maximumAddonArtworkURLsPerResponse {
+		t.Fatalf("presented %d artwork URLs, want bounded %d", nonEmpty, maximumAddonArtworkURLsPerResponse)
+	}
+
+	var registered int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM artwork_cache
+		WHERE source_url LIKE $1
+	`, fixture.URL+"/%").Scan(&registered); err != nil {
+		t.Fatalf("count bounded artwork registrations: %v", err)
+	}
+	if registered != maximumAddonArtworkURLsPerResponse {
+		t.Fatalf("registered %d artwork URLs, want bounded %d", registered, maximumAddonArtworkURLsPerResponse)
+	}
+	if queued := len(service.warmupQueue); queued != maximumAddonArtworkURLsPerResponse {
+		t.Fatalf("queued %d artwork warmups, want bounded %d", queued, maximumAddonArtworkURLsPerResponse)
+	}
+}
+
 func TestPresentResolvedFolderLocalizesFallbackArtworkAndRawPayload(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -142,6 +200,51 @@ func TestPresentResolvedFolderLocalizesFallbackArtworkAndRawPayload(t *testing.T
 	}
 	if resolved.Items[0].Title != "Fallback" {
 		t.Fatalf("non-artwork item field changed: %#v", resolved.Items[0])
+	}
+}
+
+func TestPresentResolvedFolderFallsBackWhenCanonicalPosterCannotBeLocalized(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+
+	const titleID = "77777777-7777-4777-8777-777777777777"
+	const imdbID = "tt41111628"
+	if _, err := pool.Exec(context.Background(), `DELETE FROM titles WHERE id = $1::uuid`, titleID); err != nil {
+		t.Fatalf("clear canonical fallback fixture: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM titles WHERE id = $1::uuid`, titleID) })
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO titles (id, media_type, display_title, poster_url)
+		VALUES ($1::uuid, 'movie', 'Leur vérité', 'file:///unusable-canonical-poster.jpg')
+	`, titleID); err != nil {
+		t.Fatalf("insert canonical title fallback fixture: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO title_external_ids (title_id, provider, external_id)
+		VALUES ($1::uuid, 'imdb', $2)
+	`, titleID, imdbID); err != nil {
+		t.Fatalf("insert canonical identity fallback fixture: %v", err)
+	}
+
+	providerPoster := fixture.URL + "/provider-poster.jpg"
+	resolved := collection.ResolvedFolder{Items: []collection.Item{{
+		ID: imdbID, MediaType: "movie", Title: "Leur vérité", PosterURL: providerPoster,
+		ExternalIDs: map[string]string{"imdb": imdbID}, Raw: json.RawMessage(`{"id":"` + imdbID + `","poster":"` + providerPoster + `"}`),
+	}}}
+	service.PresentResolvedFolder(context.Background(), &resolved)
+
+	normalized, err := normalizeURL(providerPoster, false)
+	if err != nil {
+		t.Fatalf("normalize provider poster: %v", err)
+	}
+	want := publicPrefix + artworkKey(normalized)
+	if resolved.Items[0].PosterURL != want {
+		t.Fatalf("poster = %q, want localized provider fallback %q", resolved.Items[0].PosterURL, want)
+	}
+	if strings.Contains(string(resolved.Items[0].Raw), providerPoster) || !strings.Contains(string(resolved.Items[0].Raw), want) {
+		t.Fatalf("raw payload did not use hidden provider fallback: %s", resolved.Items[0].Raw)
 	}
 }
 
@@ -180,14 +283,18 @@ func TestPresentResponseBoundaryArtworkUsesSameOriginReferences(t *testing.T) {
 
 	collectionBackground := fixture.URL + "/collection-background.png"
 	cover := fixture.URL + "/folder-cover.png"
+	titleLogo := fixture.URL + "/folder-title-logo.png"
+	heroBackdrop := fixture.URL + "/folder-hero-backdrop.png"
 	collections := []collection.Collection{{
 		Title:            "Collection",
 		BackdropImageURL: collectionBackground,
-		Folders:          []collection.Folder{{Title: "Folder", CoverImageURL: cover}},
+		Folders:          []collection.Folder{{Title: "Folder", CoverImageURL: cover, TitleLogoURL: titleLogo, HeroBackdropURL: heroBackdrop}},
 	}}
 	service.PresentCollections(context.Background(), collections)
 	if !strings.HasPrefix(collections[0].BackdropImageURL, publicPrefix) ||
-		!strings.HasPrefix(collections[0].Folders[0].CoverImageURL, publicPrefix) {
+		!strings.HasPrefix(collections[0].Folders[0].CoverImageURL, publicPrefix) ||
+		!strings.HasPrefix(collections[0].Folders[0].TitleLogoURL, publicPrefix) ||
+		!strings.HasPrefix(collections[0].Folders[0].HeroBackdropURL, publicPrefix) {
 		t.Fatalf("collection artwork was not localized: %#v", collections[0])
 	}
 	input := collection.SaveInput{
@@ -196,7 +303,8 @@ func TestPresentResponseBoundaryArtworkUsesSameOriginReferences(t *testing.T) {
 		Folders:          collections[0].Folders,
 	}
 	service.RestoreCollectionSaveInput(context.Background(), &input)
-	if input.BackdropImageURL != collectionBackground || input.Folders[0].CoverImageURL != cover {
+	if input.BackdropImageURL != collectionBackground || input.Folders[0].CoverImageURL != cover ||
+		input.Folders[0].TitleLogoURL != titleLogo || input.Folders[0].HeroBackdropURL != heroBackdrop {
 		t.Fatalf("collection artwork sources were not restored before persistence: %#v", input)
 	}
 }

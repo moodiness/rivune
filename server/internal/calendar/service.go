@@ -2,6 +2,8 @@ package calendar
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,7 +24,14 @@ var (
 	ErrProfileRequired = errors.New("active profile required")
 )
 
-const maximumRangeDays = 93
+const (
+	maximumRangeDays          = 93
+	defaultRefreshMinimum     = 5 * time.Minute
+	calendarTitlePageSize     = 32
+	calendarSeasonBudget      = 64
+	defaultRefreshClaimLease  = 10 * time.Minute
+	defaultRefreshTurnTimeout = 4 * time.Minute
+)
 
 type Event struct {
 	ID               string `json:"id"`
@@ -46,12 +55,31 @@ type Result struct {
 
 type eventRepository interface {
 	List(context.Context, pgx.Tx, string, time.Time, time.Time) ([]Event, error)
-	LibraryTitles(context.Context, pgx.Tx, string) ([]libraryTitle, error)
+	LibraryTitlePage(context.Context, pgx.Tx, string, refreshCursor, int) ([]libraryTitle, error)
+	ClaimRefresh(context.Context, pgx.Tx, string, string, time.Time, time.Time, time.Time, string) (refreshCursor, bool, time.Time, error)
+	CompleteRefresh(context.Context, pgx.Tx, string, string, refreshCursor, bool) (bool, time.Time, error)
 }
 
 type libraryTitle struct {
 	ID        string
 	MediaType string
+}
+
+type refreshCursor struct {
+	AfterTitleID            string
+	ResumeTitleID           string
+	ResumeAfterSeasonNumber int
+	ResumeAfterSeasonID     string
+	HasSeasonCursor         bool
+	From                    time.Time
+	To                      time.Time
+	Language                string
+}
+
+type refreshTurnResult struct {
+	continuation  bool
+	cycleComplete bool
+	retryAt       time.Time
 }
 
 type metadataReader interface {
@@ -63,11 +91,31 @@ type metadataReader interface {
 type postgresRepository struct{}
 
 type Service struct {
-	pool       *pgxpool.Pool
-	repository eventRepository
-	metadata   metadataReader
-	logger     *slog.Logger
-	now        func() time.Time
+	pool                   *pgxpool.Pool
+	repository             eventRepository
+	metadata               metadataReader
+	logger                 *slog.Logger
+	now                    func() time.Time
+	refreshMinimumInterval time.Duration
+	refreshClaimLease      time.Duration
+	refreshTurnTimeout     time.Duration
+	titlePageSize          int
+	seasonBudget           int
+	refreshWake            chan struct{}
+	refreshMu              sync.Mutex
+	pendingRefreshes       map[string]refreshRequest
+	refreshQueue           []string
+	runningRefreshes       map[string]struct{}
+}
+
+type refreshRequest struct {
+	key       string
+	profileID string
+	principal auth.Principal
+	from      time.Time
+	to        time.Time
+	language  string
+	notBefore time.Time
 }
 
 func NewService(pool *pgxpool.Pool, metadataService metadataReader, logger *slog.Logger) *Service {
@@ -75,11 +123,19 @@ func NewService(pool *pgxpool.Pool, metadataService metadataReader, logger *slog
 		logger = slog.Default()
 	}
 	return &Service{
-		pool:       pool,
-		repository: &postgresRepository{},
-		metadata:   metadataService,
-		logger:     logger,
-		now:        time.Now,
+		pool:                   pool,
+		repository:             &postgresRepository{},
+		metadata:               metadataService,
+		logger:                 logger,
+		now:                    time.Now,
+		refreshMinimumInterval: defaultRefreshMinimum,
+		refreshClaimLease:      defaultRefreshClaimLease,
+		refreshTurnTimeout:     defaultRefreshTurnTimeout,
+		titlePageSize:          calendarTitlePageSize,
+		seasonBudget:           calendarSeasonBudget,
+		refreshWake:            make(chan struct{}, 1),
+		pendingRefreshes:       make(map[string]refreshRequest),
+		runningRefreshes:       make(map[string]struct{}),
 	}
 }
 
@@ -88,138 +144,459 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, fromValue,
 	if err != nil {
 		return Result{}, err
 	}
+	from, to, err := normalizeRange(fromValue, toValue)
+	if err != nil {
+		return Result{}, err
+	}
 	if s.pool == nil {
 		if !principal.IsGlobalAdministrator() {
 			return Result{}, ErrProfileRequired
-		}
-		from, to, err := normalizeRange(fromValue, toValue)
-		if err != nil {
-			return Result{}, err
-		}
-		if s.metadata != nil {
-			titles, listErr := s.repository.LibraryTitles(ctx, nil, profileID)
-			if listErr != nil {
-				s.logger.Warn("calendar metadata refresh skipped", "error", listErr)
-			} else {
-				s.refreshLibraryMetadata(ctx, principal, titles, from, to, language)
-			}
 		}
 		events, err := s.repository.List(ctx, nil, profileID, from, to)
 		if err != nil {
 			return Result{}, err
 		}
 		sortEvents(events)
+		s.enqueueRefresh(principal, profileID, from, to, language)
 		return Result{Events: events}, nil
 	}
 
-	initialTx, err := s.pool.Begin(ctx)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Result{}, fmt.Errorf("begin calendar query: %w", err)
 	}
-	defer func() { _ = initialTx.Rollback(ctx) }()
-	authorized, err := auth.AuthorizeAndLockProfiles(ctx, initialTx, principal, []string{profileID}, false)
+	defer func() { _ = tx.Rollback(ctx) }()
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, false)
 	if err != nil {
 		return Result{}, fmt.Errorf("authorize active calendar profile: %w", err)
 	}
 	if !authorized {
 		return Result{}, ErrProfileRequired
 	}
-	from, to, err := normalizeRange(fromValue, toValue)
-	if err != nil {
-		return Result{}, err
-	}
-
-	resultTx := initialTx
-	if s.metadata != nil {
-		titles, listErr := s.repository.LibraryTitles(ctx, initialTx, profileID)
-		if listErr != nil {
-			s.logger.Warn("calendar metadata refresh skipped", "error", listErr)
-			_ = initialTx.Rollback(ctx)
-		} else {
-			if err := initialTx.Commit(ctx); err != nil {
-				return Result{}, fmt.Errorf("commit calendar metadata query: %w", err)
-			}
-			s.refreshLibraryMetadata(ctx, principal, titles, from, to, language)
-		}
-
-		resultTx, err = s.pool.Begin(ctx)
-		if err != nil {
-			return Result{}, fmt.Errorf("begin calendar result query: %w", err)
-		}
-		defer func() { _ = resultTx.Rollback(ctx) }()
-		authorized, err = auth.AuthorizeAndLockProfiles(ctx, resultTx, principal, []string{profileID}, false)
-		if err != nil {
-			return Result{}, fmt.Errorf("authorize active calendar profile: %w", err)
-		}
-		if !authorized {
-			return Result{}, ErrProfileRequired
-		}
-	}
-
-	events, err := s.repository.List(ctx, resultTx, profileID, from, to)
+	events, err := s.repository.List(ctx, tx, profileID, from, to)
 	if err != nil {
 		return Result{}, err
 	}
 	sortEvents(events)
-	if err := resultTx.Commit(ctx); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return Result{}, fmt.Errorf("commit calendar query: %w", err)
 	}
+	s.enqueueRefresh(principal, profileID, from, to, language)
 	return Result{Events: events}, nil
 }
 
-func (s *Service) refreshLibraryMetadata(ctx context.Context, principal auth.Principal, titles []libraryTitle, from, to time.Time, language string) {
-	const maximumWorkers = 4
-	workerCount := min(maximumWorkers, len(titles))
-	if workerCount == 0 {
-		return
-	}
-	jobs := make(chan libraryTitle)
-	var workers sync.WaitGroup
-	workers.Add(workerCount)
-	for range workerCount {
-		go func() {
-			defer workers.Done()
-			for title := range jobs {
-				if err := s.refreshTitleMetadata(ctx, principal, title, from, to, language); err != nil &&
-					ctx.Err() == nil && !errors.Is(err, metadata.ErrNotFound) {
-					s.logger.Warn("calendar title refresh failed", "titleId", title.ID, "mediaType", title.MediaType, "error", err)
-				}
-			}
-		}()
-	}
-	for _, title := range titles {
-		select {
-		case jobs <- title:
-		case <-ctx.Done():
-			close(jobs)
-			workers.Wait()
+// Run processes one bounded refresh turn per wake-up. List only records work;
+// provider calls are made exclusively by this caller-owned worker.
+func (s *Service) Run(ctx context.Context) {
+	s.initializeRefreshState()
+	for s.waitForRefresh(ctx) {
+		request, ok := s.takeRefresh(s.now().UTC())
+		if !ok {
+			continue
+		}
+		turnContext, cancel := context.WithTimeout(ctx, s.refreshTurnTimeout)
+		result, err := s.refresh(turnContext, request)
+		cancel()
+		s.finishRefresh(request, result, ctx.Err() == nil)
+		if err != nil && ctx.Err() == nil {
+			s.logger.Warn("calendar metadata refresh failed", "profileId", request.profileID, "error", err)
+		}
+		if ctx.Err() != nil {
 			return
 		}
+		s.wakeRefreshWorker()
 	}
-	close(jobs)
-	workers.Wait()
 }
 
-func (s *Service) refreshTitleMetadata(ctx context.Context, principal auth.Principal, title libraryTitle, from, to time.Time, language string) error {
+func (s *Service) waitForRefresh(ctx context.Context) bool {
+	s.refreshMu.Lock()
+	var next time.Time
+	for _, key := range s.refreshQueue {
+		request, pending := s.pendingRefreshes[key]
+		if !pending {
+			continue
+		}
+		if next.IsZero() || request.notBefore.Before(next) {
+			next = request.notBefore
+		}
+	}
+	s.refreshMu.Unlock()
+
+	if next.IsZero() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-s.refreshWake:
+			return true
+		}
+	}
+	wait := time.Until(next)
+	if s.now != nil {
+		wait = next.Sub(s.now().UTC())
+	}
+	if wait < 0 {
+		wait = 0
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-s.refreshWake:
+		return true
+	case <-timer.C:
+		return true
+	}
+}
+
+func (s *Service) wakeRefreshWorker() {
+	select {
+	case s.refreshWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Service) enqueueRefresh(principal auth.Principal, profileID string, from, to time.Time, language string) {
+	if s.metadata == nil {
+		return
+	}
+	s.initializeRefreshState()
+	key := profileID
+	s.refreshMu.Lock()
+	if _, pending := s.pendingRefreshes[key]; pending {
+		s.refreshMu.Unlock()
+		return
+	}
+	if _, running := s.runningRefreshes[key]; running {
+		s.refreshMu.Unlock()
+		return
+	}
+	profileIDCopy := profileID
+	principal.ActiveProfileID = &profileIDCopy
+	if principal.ProfileGrantExpiresAt != nil {
+		expiresAt := *principal.ProfileGrantExpiresAt
+		principal.ProfileGrantExpiresAt = &expiresAt
+	}
+	s.pendingRefreshes[key] = refreshRequest{
+		key: key, profileID: profileID, principal: principal,
+		from: from, to: to, language: language,
+	}
+	s.refreshQueue = append(s.refreshQueue, key)
+	s.refreshMu.Unlock()
+	s.wakeRefreshWorker()
+}
+
+func (s *Service) takeRefresh(now time.Time) (refreshRequest, bool) {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	for index := 0; index < len(s.refreshQueue); {
+		key := s.refreshQueue[index]
+		request, pending := s.pendingRefreshes[key]
+		if !pending {
+			s.refreshQueue = append(s.refreshQueue[:index], s.refreshQueue[index+1:]...)
+			continue
+		}
+		if !request.notBefore.IsZero() && request.notBefore.After(now) {
+			index++
+			continue
+		}
+		s.refreshQueue = append(s.refreshQueue[:index], s.refreshQueue[index+1:]...)
+		delete(s.pendingRefreshes, key)
+		s.runningRefreshes[key] = struct{}{}
+		return request, true
+	}
+	return refreshRequest{}, false
+}
+
+func (s *Service) finishRefresh(request refreshRequest, result refreshTurnResult, allowContinuation bool) {
+	s.refreshMu.Lock()
+	delete(s.runningRefreshes, request.key)
+	if result.continuation && allowContinuation {
+		if result.retryAt.IsZero() {
+			result.retryAt = s.now().UTC().Add(s.refreshMinimumInterval)
+		}
+		request.notBefore = result.retryAt
+		if _, pending := s.pendingRefreshes[request.key]; !pending {
+			s.pendingRefreshes[request.key] = request
+			s.refreshQueue = append(s.refreshQueue, request.key)
+		}
+	}
+	s.refreshMu.Unlock()
+}
+
+func (s *Service) initializeRefreshState() {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	if s.refreshMinimumInterval <= 0 {
+		s.refreshMinimumInterval = defaultRefreshMinimum
+	}
+	if s.refreshClaimLease <= 0 {
+		s.refreshClaimLease = defaultRefreshClaimLease
+	}
+	if s.refreshTurnTimeout <= 0 {
+		s.refreshTurnTimeout = defaultRefreshTurnTimeout
+	}
+	if s.refreshTurnTimeout >= s.refreshClaimLease {
+		s.refreshTurnTimeout = s.refreshClaimLease / 2
+	}
+	if s.titlePageSize <= 0 || s.titlePageSize > calendarTitlePageSize {
+		s.titlePageSize = calendarTitlePageSize
+	}
+	if s.seasonBudget <= 0 || s.seasonBudget > calendarSeasonBudget {
+		s.seasonBudget = calendarSeasonBudget
+	}
+	if s.logger == nil {
+		s.logger = slog.Default()
+	}
+	if s.refreshWake == nil {
+		s.refreshWake = make(chan struct{}, 1)
+	}
+	if s.pendingRefreshes == nil {
+		s.pendingRefreshes = make(map[string]refreshRequest)
+	}
+	if s.runningRefreshes == nil {
+		s.runningRefreshes = make(map[string]struct{})
+	}
+}
+
+func (s *Service) refresh(ctx context.Context, request refreshRequest) (refreshTurnResult, error) {
+	if _, err := activeProfileID(request.principal, s.now().UTC()); err != nil {
+		return refreshTurnResult{}, err
+	}
+	token, err := newRefreshClaimToken()
+	if err != nil {
+		return refreshTurnResult{}, err
+	}
+	cursor, titles, principal, claimed, retryAt, err := s.claimRefreshPage(ctx, request, token)
+	if err != nil {
+		return refreshTurnResult{}, err
+	}
+	if !claimed {
+		return refreshTurnResult{continuation: true, retryAt: retryAt}, nil
+	}
+
+	nextCursor, continuation, refreshErr := s.refreshLibraryMetadata(
+		ctx, principal, titles, cursor, cursor.From, cursor.To, cursor.Language,
+	)
+	cycleComplete := !continuation && ctx.Err() == nil
+	committed, retryAt, commitErr := s.commitRefresh(
+		ctx, request.profileID, token, nextCursor, cycleComplete,
+	)
+	if commitErr != nil {
+		return refreshTurnResult{}, errors.Join(refreshErr, commitErr)
+	}
+	if !committed {
+		return refreshTurnResult{}, refreshErr
+	}
+	return refreshTurnResult{
+		continuation:  continuation,
+		cycleComplete: cycleComplete,
+		retryAt:       retryAt,
+	}, errors.Join(refreshErr, ctx.Err())
+}
+
+func newRefreshClaimToken() (string, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", fmt.Errorf("generate calendar refresh claim token: %w", err)
+	}
+	return hex.EncodeToString(token[:]), nil
+}
+
+func (s *Service) claimRefreshPage(
+	ctx context.Context,
+	request refreshRequest,
+	token string,
+) (refreshCursor, []libraryTitle, auth.Principal, bool, time.Time, error) {
+	if s.pool == nil {
+		cursor, claimed, retryAt, err := s.repository.ClaimRefresh(
+			ctx, nil, request.profileID, token, s.now().UTC().Add(s.refreshClaimLease),
+			request.from, request.to, request.language,
+		)
+		if err != nil || !claimed {
+			return refreshCursor{}, nil, auth.Principal{}, claimed, retryAt, err
+		}
+		titles, err := s.repository.LibraryTitlePage(ctx, nil, request.profileID, cursor, s.titlePageSize)
+		return cursor, titles, request.principal, true, time.Time{}, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return refreshCursor{}, nil, auth.Principal{}, false, time.Time{}, fmt.Errorf("begin calendar refresh claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	now := s.now().UTC()
+	principal, valid, err := auth.ReloadAndLockPrincipal(ctx, tx, request.principal, now)
+	if err != nil {
+		return refreshCursor{}, nil, auth.Principal{}, false, time.Time{}, fmt.Errorf("reload calendar refresh principal: %w", err)
+	}
+	if !valid || principal.ActiveProfileID == nil || *principal.ActiveProfileID != request.profileID {
+		return refreshCursor{}, nil, auth.Principal{}, false, time.Time{}, ErrProfileRequired
+	}
+	cursor, claimed, retryAt, err := s.repository.ClaimRefresh(
+		ctx, tx, request.profileID, token, now.Add(s.refreshClaimLease),
+		request.from, request.to, request.language,
+	)
+	if err != nil || !claimed {
+		return refreshCursor{}, nil, auth.Principal{}, claimed, retryAt, err
+	}
+	titles, err := s.repository.LibraryTitlePage(ctx, tx, request.profileID, cursor, s.titlePageSize)
+	if err != nil {
+		return refreshCursor{}, nil, auth.Principal{}, false, time.Time{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return refreshCursor{}, nil, auth.Principal{}, false, time.Time{}, fmt.Errorf("commit calendar refresh claim: %w", err)
+	}
+	return cursor, titles, principal, true, time.Time{}, nil
+}
+
+func (s *Service) commitRefresh(
+	ctx context.Context,
+	profileID, token string,
+	cursor refreshCursor,
+	cycleComplete bool,
+) (bool, time.Time, error) {
+	commitContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if s.pool == nil {
+		return s.repository.CompleteRefresh(
+			commitContext, nil, profileID, token, cursor, cycleComplete,
+		)
+	}
+	tx, err := s.pool.Begin(commitContext)
+	if err != nil {
+		return false, time.Time{}, fmt.Errorf("begin calendar refresh completion: %w", err)
+	}
+	defer func() { _ = tx.Rollback(commitContext) }()
+	committed, retryAt, err := s.repository.CompleteRefresh(
+		commitContext, tx, profileID, token, cursor, cycleComplete,
+	)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	if err := tx.Commit(commitContext); err != nil {
+		return false, time.Time{}, fmt.Errorf("commit calendar refresh completion: %w", err)
+	}
+	return committed, retryAt, nil
+}
+
+type titleRefreshResult struct {
+	complete          bool
+	afterSeasonNumber int
+	afterSeasonID     string
+	hasSeasonCursor   bool
+	err               error
+}
+
+func (s *Service) refreshLibraryMetadata(
+	ctx context.Context,
+	principal auth.Principal,
+	page []libraryTitle,
+	cursor refreshCursor,
+	from, to time.Time,
+	language string,
+) (refreshCursor, bool, error) {
+	hasMoreTitles := len(page) == s.titlePageSize
+	if len(page) == 0 {
+		return refreshCursor{}, false, nil
+	}
+
+	next := cursor
+	seasonsStarted := 0
+	var refreshErrors []error
+	for _, title := range page {
+		if ctx.Err() != nil {
+			if title.ID == cursor.ResumeTitleID {
+				return cursor, true, errors.Join(refreshErrors...)
+			}
+			next.ResumeTitleID = title.ID
+			next.ResumeAfterSeasonNumber = 0
+			next.ResumeAfterSeasonID = ""
+			next.HasSeasonCursor = false
+			return next, true, errors.Join(refreshErrors...)
+		}
+		result := s.refreshTitleMetadata(
+			ctx, principal, title, cursor, &seasonsStarted, from, to, language,
+		)
+		if result.err != nil && !errors.Is(result.err, metadata.ErrNotFound) && !errors.Is(result.err, context.Canceled) {
+			refreshErrors = append(refreshErrors, fmt.Errorf("refresh title %s: %w", title.ID, result.err))
+		}
+		if !result.complete {
+			next.ResumeTitleID = title.ID
+			next.ResumeAfterSeasonNumber = result.afterSeasonNumber
+			next.ResumeAfterSeasonID = result.afterSeasonID
+			next.HasSeasonCursor = result.hasSeasonCursor
+			return next, true, errors.Join(refreshErrors...)
+		}
+		next.AfterTitleID = title.ID
+		next.ResumeTitleID = ""
+		next.ResumeAfterSeasonNumber = 0
+		next.ResumeAfterSeasonID = ""
+		next.HasSeasonCursor = false
+	}
+	return next, hasMoreTitles, errors.Join(refreshErrors...)
+}
+
+func (s *Service) refreshTitleMetadata(
+	ctx context.Context,
+	principal auth.Principal,
+	title libraryTitle,
+	cursor refreshCursor,
+	seasonsStarted *int,
+	from, to time.Time,
+	language string,
+) titleRefreshResult {
 	switch title.MediaType {
 	case metadata.MediaTypeMovie:
 		_, err := s.metadata.MovieDetails(ctx, principal, title.ID, language)
-		return err
+		return titleRefreshResult{complete: ctx.Err() == nil, err: err}
 	case metadata.MediaTypeSeries:
 		series, err := s.metadata.SeriesDetails(ctx, principal, title.ID, metadata.SeriesDetailsOptions{Language: language, MappingProvider: "tmdb"})
 		if err != nil {
-			return err
+			return titleRefreshResult{complete: ctx.Err() == nil, err: err}
+		}
+		sort.Slice(series.Seasons, func(i, j int) bool {
+			if series.Seasons[i].SeasonNumber != series.Seasons[j].SeasonNumber {
+				return series.Seasons[i].SeasonNumber < series.Seasons[j].SeasonNumber
+			}
+			return series.Seasons[i].ID < series.Seasons[j].ID
+		})
+		result := titleRefreshResult{}
+		if cursor.ResumeTitleID == title.ID && cursor.HasSeasonCursor {
+			result.afterSeasonNumber = cursor.ResumeAfterSeasonNumber
+			result.afterSeasonID = cursor.ResumeAfterSeasonID
+			result.hasSeasonCursor = true
 		}
 		for _, season := range series.Seasons {
-			if !seasonMayOverlap(season.AirDate, from, to) {
+			if !seasonMayOverlap(season.AirDate, from, to) ||
+				(result.hasSeasonCursor && seasonAtOrBefore(season, result.afterSeasonNumber, result.afterSeasonID)) {
 				continue
 			}
-			if _, err := s.metadata.SeasonDetails(ctx, principal, season.ID, language, "tmdb"); err != nil {
-				return fmt.Errorf("refresh season %d: %w", season.SeasonNumber, err)
+			if *seasonsStarted >= s.seasonBudget {
+				return result
+			}
+			*seasonsStarted = *seasonsStarted + 1
+			_, seasonErr := s.metadata.SeasonDetails(ctx, principal, season.ID, language, "tmdb")
+			if ctx.Err() != nil {
+				result.err = errors.Join(result.err, seasonErr)
+				return result
+			}
+			result.afterSeasonNumber = season.SeasonNumber
+			result.afterSeasonID = season.ID
+			result.hasSeasonCursor = true
+			if seasonErr != nil {
+				result.err = errors.Join(result.err, fmt.Errorf("refresh season %d: %w", season.SeasonNumber, seasonErr))
 			}
 		}
+		result.complete = true
+		return result
+	default:
+		return titleRefreshResult{complete: true}
 	}
-	return nil
+}
+
+func seasonAtOrBefore(season metadata.SeasonSummary, number int, id string) bool {
+	return season.SeasonNumber < number || (season.SeasonNumber == number && season.ID <= id)
 }
 
 func seasonMayOverlap(airDate string, from, to time.Time) bool {
@@ -230,20 +607,31 @@ func seasonMayOverlap(airDate string, from, to time.Time) bool {
 	return !firstRelease.AddDate(1, 0, 0).Before(from)
 }
 
-func (repository *postgresRepository) LibraryTitles(ctx context.Context, tx pgx.Tx, profileID string) ([]libraryTitle, error) {
+func (repository *postgresRepository) LibraryTitlePage(
+	ctx context.Context,
+	tx pgx.Tx,
+	profileID string,
+	cursor refreshCursor,
+	limit int,
+) ([]libraryTitle, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT title.id::text, title.media_type
 		FROM profile_library AS library
 		JOIN titles AS title ON title.id = library.title_id
 		WHERE library.profile_id = $1::uuid
 		  AND title.media_type IN ('movie', 'series')
+		  AND CASE
+			WHEN NULLIF($3, '') IS NOT NULL THEN title.id >= NULLIF($3, '')::uuid
+			ELSE NULLIF($2, '') IS NULL OR title.id > NULLIF($2, '')::uuid
+		  END
 		ORDER BY title.id
-	`, profileID)
+		LIMIT $4
+	`, profileID, cursor.AfterTitleID, cursor.ResumeTitleID, limit)
 	if err != nil {
-		return nil, fmt.Errorf("query calendar library titles: %w", err)
+		return nil, fmt.Errorf("query calendar library title page: %w", err)
 	}
 	defer rows.Close()
-	titles := make([]libraryTitle, 0)
+	titles := make([]libraryTitle, 0, limit)
 	for rows.Next() {
 		var title libraryTitle
 		if err := rows.Scan(&title.ID, &title.MediaType); err != nil {
@@ -255,6 +643,150 @@ func (repository *postgresRepository) LibraryTitles(ctx context.Context, tx pgx.
 		return nil, fmt.Errorf("iterate calendar library titles: %w", err)
 	}
 	return titles, nil
+}
+
+func (repository *postgresRepository) ClaimRefresh(
+	ctx context.Context,
+	tx pgx.Tx,
+	profileID, token string,
+	expiresAt, requestedFrom, requestedTo time.Time,
+	requestedLanguage string,
+) (refreshCursor, bool, time.Time, error) {
+	if token == "" {
+		return refreshCursor{}, false, time.Time{}, fmt.Errorf("claim calendar refresh: token is required")
+	}
+	var cursor refreshCursor
+	var claimed bool
+	var retryAt time.Time
+	err := tx.QueryRow(ctx, `
+		WITH claimed AS (
+			INSERT INTO calendar_refresh_state (
+				profile_id, range_from, range_to, language,
+				claim_token, claim_expires_at, updated_at
+			)
+			VALUES ($1::uuid, $4::date, $5::date, $6, $2, $3, now())
+			ON CONFLICT (profile_id) DO UPDATE
+			SET range_from = CASE
+					WHEN calendar_refresh_state.claim_token IS NULL
+					  AND calendar_refresh_state.after_title_id IS NULL
+					  AND calendar_refresh_state.resume_title_id IS NULL
+					THEN EXCLUDED.range_from
+					ELSE calendar_refresh_state.range_from
+			    END,
+			    range_to = CASE
+					WHEN calendar_refresh_state.claim_token IS NULL
+					  AND calendar_refresh_state.after_title_id IS NULL
+					  AND calendar_refresh_state.resume_title_id IS NULL
+					THEN EXCLUDED.range_to
+					ELSE calendar_refresh_state.range_to
+			    END,
+			    language = CASE
+					WHEN calendar_refresh_state.claim_token IS NULL
+					  AND calendar_refresh_state.after_title_id IS NULL
+					  AND calendar_refresh_state.resume_title_id IS NULL
+					THEN EXCLUDED.language
+					ELSE calendar_refresh_state.language
+			    END,
+			    claim_token = EXCLUDED.claim_token,
+			    claim_expires_at = EXCLUDED.claim_expires_at,
+			    updated_at = now()
+			WHERE (
+				calendar_refresh_state.claim_token IS NULL
+				OR calendar_refresh_state.claim_expires_at <= now()
+			)
+			  AND calendar_refresh_state.next_eligible_at <= now()
+			RETURNING COALESCE(after_title_id::text, '') AS after_title_id,
+			          COALESCE(resume_title_id::text, '') AS resume_title_id,
+			          COALESCE(resume_after_season_number, 0) AS resume_after_season_number,
+			          COALESCE(resume_after_season_id, '') AS resume_after_season_id,
+			          resume_after_season_number IS NOT NULL AS has_season_cursor,
+			          range_from, range_to, language
+		)
+		SELECT after_title_id, resume_title_id, resume_after_season_number,
+		       resume_after_season_id, has_season_cursor,
+		       range_from, range_to, language, true, now()
+		FROM claimed
+		UNION ALL
+		SELECT '', '', 0, '', false,
+		       state.range_from, state.range_to, state.language, false,
+		       GREATEST(
+		           state.next_eligible_at,
+		           COALESCE(state.claim_expires_at, state.next_eligible_at)
+		       )
+		FROM calendar_refresh_state AS state
+		WHERE state.profile_id = $1::uuid
+		  AND NOT EXISTS (SELECT 1 FROM claimed)
+		LIMIT 1
+	`, profileID, token, expiresAt, requestedFrom, requestedTo, requestedLanguage).Scan(
+		&cursor.AfterTitleID,
+		&cursor.ResumeTitleID,
+		&cursor.ResumeAfterSeasonNumber,
+		&cursor.ResumeAfterSeasonID,
+		&cursor.HasSeasonCursor,
+		&cursor.From,
+		&cursor.To,
+		&cursor.Language,
+		&claimed,
+		&retryAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if retryErr := tx.QueryRow(ctx, `
+			SELECT GREATEST(
+				next_eligible_at,
+				COALESCE(claim_expires_at, next_eligible_at)
+			)
+			FROM calendar_refresh_state
+			WHERE profile_id = $1::uuid
+		`, profileID).Scan(&retryAt); retryErr != nil {
+			return refreshCursor{}, false, time.Time{}, fmt.Errorf("read calendar refresh retry deadline: %w", retryErr)
+		}
+		return refreshCursor{}, false, retryAt, nil
+	}
+	if err != nil {
+		return refreshCursor{}, false, time.Time{}, fmt.Errorf("claim calendar refresh: %w", err)
+	}
+	if !claimed {
+		return refreshCursor{}, false, retryAt, nil
+	}
+	return cursor, true, time.Time{}, nil
+}
+
+func (repository *postgresRepository) CompleteRefresh(
+	ctx context.Context,
+	tx pgx.Tx,
+	profileID, token string,
+	cursor refreshCursor,
+	cycleComplete bool,
+) (bool, time.Time, error) {
+	if token == "" {
+		return false, time.Time{}, fmt.Errorf("complete calendar refresh: token is required")
+	}
+	var completed bool
+	var nextEligibleAt time.Time
+	err := tx.QueryRow(ctx, `
+		UPDATE calendar_refresh_state
+		SET after_title_id = CASE WHEN $8::boolean THEN NULL ELSE NULLIF($3, '')::uuid END,
+		    resume_title_id = CASE WHEN $8::boolean THEN NULL ELSE NULLIF($4, '')::uuid END,
+		    resume_after_season_number = CASE WHEN $8::boolean OR NOT $7::boolean THEN NULL ELSE $5::integer END,
+		    resume_after_season_id = CASE WHEN $8::boolean OR NOT $7::boolean THEN NULL ELSE NULLIF($6, '')::text END,
+		    claim_token = NULL,
+		    claim_expires_at = NULL,
+		    next_eligible_at = now() + interval '5 minutes',
+		    updated_at = now()
+		WHERE profile_id = $1::uuid
+		  AND claim_token = $2
+		RETURNING true, next_eligible_at
+	`, profileID, token, cursor.AfterTitleID, cursor.ResumeTitleID,
+		cursor.ResumeAfterSeasonNumber, cursor.ResumeAfterSeasonID,
+		cursor.HasSeasonCursor, cycleComplete,
+	).Scan(&completed, &nextEligibleAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, time.Time{}, nil
+	}
+	if err != nil {
+		return false, time.Time{}, fmt.Errorf("complete calendar refresh: %w", err)
+	}
+	return completed, nextEligibleAt, nil
 }
 
 func (repository *postgresRepository) List(ctx context.Context, tx pgx.Tx, profileID string, from, to time.Time) ([]Event, error) {

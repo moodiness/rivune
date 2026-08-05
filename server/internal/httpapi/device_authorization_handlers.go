@@ -21,11 +21,20 @@ func (a *API) beginDeviceAuthorization(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	release, retryAfter, admitted := a.deviceCodeAdmission.acquire(requestClientIP(r, a.config.TrustedProxies))
+	if !admitted {
+		writeAdmissionDenied(w, retryAfter)
+		return
+	}
+	defer release()
 
 	authorization, err := a.auth.BeginDeviceAuthorization(r.Context(), request.DeviceName, request.Platform)
 	switch {
 	case errors.Is(err, auth.ErrInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "invalid_device", authInputMessage(err))
+	case errors.Is(err, auth.ErrDeviceAuthorizationCapacity):
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "device_code_capacity", "Too many device authorizations are pending; retry later")
 	case err != nil:
 		a.internalError(w, "begin device authorization", err)
 	default:
@@ -114,6 +123,8 @@ func (a *API) exchangeDeviceAuthorization(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "expired_device_code", "The device authorization has expired")
 	case errors.Is(err, auth.ErrInvalidDeviceCode):
 		writeError(w, http.StatusBadRequest, "invalid_device_code", "The device code is invalid")
+	case errors.Is(err, auth.ErrDeviceQuotaReached):
+		writeError(w, http.StatusConflict, "device_quota_reached", "The account has reached its device limit")
 	case err != nil:
 		a.internalError(w, "exchange device authorization", err)
 	default:

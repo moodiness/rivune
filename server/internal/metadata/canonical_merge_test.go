@@ -448,7 +448,7 @@ func canonicalMergePrincipal() auth.Principal {
 	return auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
 }
 
-func newCanonicalMergeTestPool(t *testing.T) *pgxpool.Pool {
+func newCanonicalMergeTestPool(t *testing.T, queryTracers ...pgx.QueryTracer) *pgxpool.Pool {
 	t.Helper()
 	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -462,6 +462,9 @@ func newCanonicalMergeTestPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("parse test database URL: %v", err)
 	}
 	config.MaxConns = 1
+	if len(queryTracers) != 0 {
+		config.ConnConfig.Tracer = queryTracers[0]
+	}
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
 		t.Fatalf("open test database: %v", err)

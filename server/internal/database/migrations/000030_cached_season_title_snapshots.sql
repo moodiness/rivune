@@ -1,4 +1,3 @@
-BEGIN;
 
 WITH season_names AS (
     SELECT DISTINCT ON (metadata.title_id)
@@ -55,5 +54,3 @@ SET display_title = episode_names.display_title,
 FROM episode_names
 WHERE episode.id = episode_names.title_id
   AND NULLIF(btrim(COALESCE(episode.display_title, '')), '') IS NULL;
-
-COMMIT;

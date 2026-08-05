@@ -1,7 +1,6 @@
-BEGIN;
 
 ALTER TABLE profile_collections
-    ADD COLUMN hero_enabled boolean NOT NULL DEFAULT false;
+    ADD COLUMN IF NOT EXISTS hero_enabled boolean NOT NULL DEFAULT false;
 
 UPDATE profile_collections
 SET hero_enabled = true
@@ -11,5 +10,3 @@ WHERE id IN (
     JOIN profile_collections collection ON collection.id = access.collection_id
     ORDER BY access.profile_id, collection.pin_to_top DESC, access.position, collection.id
 );
-
-COMMIT;

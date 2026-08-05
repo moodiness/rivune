@@ -1,6 +1,3 @@
-BEGIN;
 
 ALTER TABLE auth_sessions
-    ADD COLUMN last_ip inet;
-
-COMMIT;
+    ADD COLUMN IF NOT EXISTS last_ip inet;

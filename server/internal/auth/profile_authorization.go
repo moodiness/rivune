@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -10,6 +12,120 @@ import (
 
 type profileAuthorizationQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// ReloadAndLockPrincipal reloads the mutable authorization state for a
+// captured session. Locks follow the mutation order used by account and
+// profile updates: user, device, profile, profile grant, then session.
+// It is intended for deferred work that must not trust enqueue-time claims.
+func ReloadAndLockPrincipal(
+	ctx context.Context,
+	tx pgx.Tx,
+	captured Principal,
+	now time.Time,
+) (Principal, bool, error) {
+	if captured.ActiveProfileID == nil {
+		return Principal{}, false, nil
+	}
+
+	principal := Principal{UserID: captured.UserID, DeviceID: captured.DeviceID}
+	if err := tx.QueryRow(ctx, `
+		SELECT username, role
+		FROM users
+		WHERE id::text = $1
+		FOR SHARE
+	`, captured.UserID).Scan(&principal.Username, &principal.Role); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Principal{}, false, nil
+		}
+		return Principal{}, false, fmt.Errorf("lock deferred authorization user: %w", err)
+	}
+
+	var deviceCategoryID *string
+	if err := tx.QueryRow(ctx, `
+		SELECT category_id::text, platform
+		FROM devices
+		WHERE id::text = $1 AND user_id::text = $2
+		FOR SHARE
+	`, captured.DeviceID, captured.UserID).Scan(&deviceCategoryID, &principal.Platform); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Principal{}, false, nil
+		}
+		return Principal{}, false, fmt.Errorf("lock deferred authorization device: %w", err)
+	}
+
+	var activeProfileCategoryID *string
+	var access ProfileAccess
+	if err := tx.QueryRow(ctx, `
+		SELECT id::text, category_id::text, enabled,
+		       available_from::text, available_until::text,
+		       to_char(access_start_time, 'HH24:MI'),
+		       to_char(access_end_time, 'HH24:MI'),
+		       COALESCE(access_timezone, 'UTC')
+		FROM profiles
+		WHERE id::text = $1
+		FOR SHARE
+	`, *captured.ActiveProfileID).Scan(
+		&principal.ActiveProfileID, &activeProfileCategoryID,
+		&access.Enabled, &access.AvailableFrom, &access.AvailableUntil,
+		&access.AccessStartTime, &access.AccessEndTime, &access.AccessTimezone,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Principal{}, false, nil
+		}
+		return Principal{}, false, fmt.Errorf("lock deferred authorization profile: %w", err)
+	}
+
+	hasProfileAccess := true
+	if err := tx.QueryRow(ctx, `
+		SELECT can_manage
+		FROM user_profile_access
+		WHERE user_id::text = $1 AND profile_id::text = $2
+		FOR SHARE
+	`, captured.UserID, *captured.ActiveProfileID).Scan(&principal.ActiveProfileCanManage); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			hasProfileAccess = false
+		} else {
+			return Principal{}, false, fmt.Errorf("lock deferred profile grant: %w", err)
+		}
+	}
+
+	if err := tx.QueryRow(ctx, `
+		SELECT id::text, authorization_scope, category_id::text,
+		       profile_grant_expires_at
+		FROM auth_sessions
+		WHERE id::text = $1
+		  AND user_id::text = $2
+		  AND device_id::text = $3
+		  AND active_profile_id::text = $4
+		  AND access_expires_at > now()
+		  AND revoked_at IS NULL
+		FOR SHARE
+	`, captured.SessionID, captured.UserID, captured.DeviceID, *captured.ActiveProfileID).Scan(
+		&principal.SessionID, &principal.AuthorizationScope,
+		&principal.CategoryID, &principal.ProfileGrantExpiresAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Principal{}, false, nil
+		}
+		return Principal{}, false, fmt.Errorf("lock deferred authorization session: %w", err)
+	}
+
+	if !validSessionScope(
+		principal.Role,
+		principal.AuthorizationScope,
+		principal.CategoryID,
+		deviceCategoryID,
+		activeProfileCategoryID,
+	) || (principal.AuthorizationScope == AuthorizationScopeCategory && !hasProfileAccess) {
+		return Principal{}, false, nil
+	}
+	if principal.ProfileGrantExpiresAt == nil ||
+		!principal.ProfileGrantExpiresAt.After(now) ||
+		!ProfileAccessibleAt(access, now) {
+		return Principal{}, false, nil
+	}
+	return principal, true, nil
 }
 
 // CanAccessProfiles reports whether the principal may access every requested profile.

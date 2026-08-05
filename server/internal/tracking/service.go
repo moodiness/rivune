@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
@@ -25,15 +24,20 @@ var (
 )
 
 const (
-	workerInterval = 5 * time.Second
-	leaseDuration  = 30 * time.Second
+	workerInterval                        = 5 * time.Second
+	leaseDuration                         = 30 * time.Second
+	trackingOutboxAdvisoryLock      int64 = 0x524956554e454f42
+	defaultProfileProviderOutboxCap       = 4_096
+	defaultGlobalOutboxCap                = 32_768
 )
 
 type Service struct {
-	pool   *pgxpool.Pool
-	cipher *tokenCipher
-	client *providerClient
-	logger *slog.Logger
+	pool                       *pgxpool.Pool
+	cipher                     *tokenCipher
+	client                     *providerClient
+	logger                     *slog.Logger
+	profileProviderOutboxLimit int
+	globalOutboxLimit          int
 }
 
 func NewService(pool *pgxpool.Pool, encryptionKey []byte, traktClientID, traktClientSecret, simklClientID string, httpClient *http.Client, logger *slog.Logger) (*Service, error) {
@@ -65,12 +69,12 @@ func providerFacingError(err error) error {
 	return err
 }
 
-func (s *Service) authorizeProfile(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID string) (string, error) {
+func (s *Service) authorizeProfile(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID string, requireManagement bool) (string, error) {
 	profileID = strings.ToLower(strings.TrimSpace(profileID))
 	if profileID == "" {
 		return "", ErrForbidden
 	}
-	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, false)
+	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, requireManagement)
 	if err != nil {
 		return "", fmt.Errorf("authorize tracking profile: %w", err)
 	}
@@ -87,7 +91,7 @@ func (s *Service) Statuses(ctx context.Context, principal auth.Principal, profil
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID)
+	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +154,7 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, principal auth.P
 		return DeviceAuthorization{}, fmt.Errorf("begin tracking authorization check: %w", err)
 	}
 	defer func() { _ = authorizationTx.Rollback(ctx) }()
-	profileID, err = s.authorizeProfile(ctx, authorizationTx, principal, profileID)
+	profileID, err = s.authorizeProfile(ctx, authorizationTx, principal, profileID, true)
 	if err != nil {
 		return DeviceAuthorization{}, err
 	}
@@ -181,7 +185,7 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, principal auth.P
 		return DeviceAuthorization{}, fmt.Errorf("begin tracking authorization storage: %w", err)
 	}
 	defer func() { _ = storeTx.Rollback(ctx) }()
-	profileID, err = s.authorizeProfile(ctx, storeTx, principal, profileID)
+	profileID, err = s.authorizeProfile(ctx, storeTx, principal, profileID, true)
 	if err != nil {
 		return DeviceAuthorization{}, err
 	}
@@ -210,7 +214,7 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 		return Status{}, fmt.Errorf("begin tracking authorization poll: %w", err)
 	}
 	defer func() { _ = pollTx.Rollback(ctx) }()
-	profileID, err = s.authorizeProfile(ctx, pollTx, principal, profileID)
+	profileID, err = s.authorizeProfile(ctx, pollTx, principal, profileID, true)
 	if err != nil {
 		return Status{}, err
 	}
@@ -219,28 +223,36 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 		return Status{}, err
 	}
 	var encrypted []byte
-	var interval int
-	var expiresAt time.Time
-	var lastPolled *time.Time
-	err = pollTx.QueryRow(ctx, `SELECT provider_code_encrypted, interval_seconds, expires_at, last_polled_at FROM profile_tracking_authorizations WHERE id::text = $1 AND profile_id = $2::uuid AND provider = $3`, strings.TrimSpace(authorizationID), profileID, provider).Scan(&encrypted, &interval, &expiresAt, &lastPolled)
+	err = pollTx.QueryRow(ctx, `
+		UPDATE profile_tracking_authorizations
+		SET last_polled_at = now()
+		WHERE id::text = $1
+		  AND profile_id = $2::uuid
+		  AND provider = $3
+		  AND expires_at > now()
+		  AND (last_polled_at IS NULL OR last_polled_at <= now() - interval_seconds * interval '1 second')
+		RETURNING provider_code_encrypted
+	`, strings.TrimSpace(authorizationID), profileID, provider).Scan(&encrypted)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Status{}, ErrAuthorizationGone
+		var active bool
+		err = pollTx.QueryRow(ctx, `
+			SELECT expires_at > now()
+			FROM profile_tracking_authorizations
+			WHERE id::text = $1 AND profile_id = $2::uuid AND provider = $3
+		`, strings.TrimSpace(authorizationID), profileID, provider).Scan(&active)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && !active) {
+			return Status{}, ErrAuthorizationGone
+		}
+		if err != nil {
+			return Status{}, fmt.Errorf("query tracking authorization eligibility: %w", err)
+		}
+		return Status{}, ErrAuthorizationSlow
 	}
 	if err != nil {
 		return Status{}, fmt.Errorf("query tracking authorization: %w", err)
 	}
-	if time.Now().After(expiresAt) {
-		return Status{}, ErrAuthorizationGone
-	}
-	now := time.Now().UTC()
-	if lastPolled != nil && now.Before(lastPolled.Add(time.Duration(interval)*time.Second)) {
-		return Status{}, ErrAuthorizationSlow
-	}
-	if _, err := pollTx.Exec(ctx, `UPDATE profile_tracking_authorizations SET last_polled_at = $2 WHERE id::text = $1`, authorizationID, now); err != nil {
-		return Status{}, fmt.Errorf("update tracking authorization poll: %w", err)
-	}
 	if err := pollTx.Commit(ctx); err != nil {
-		return Status{}, fmt.Errorf("commit tracking authorization poll: %w", err)
+		return Status{}, fmt.Errorf("commit tracking authorization poll claim: %w", err)
 	}
 
 	code, err := s.cipher.decrypt(encrypted, profileID+":"+provider+":authorization")
@@ -268,9 +280,12 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 		return Status{}, fmt.Errorf("begin tracking connection: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID)
+	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID, true)
 	if err != nil {
 		return Status{}, err
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, trackingOutboxAdvisoryLock); err != nil {
+		return Status{}, fmt.Errorf("lock tracking outbox connection: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO profile_tracking_accounts (profile_id, provider, access_token_encrypted, refresh_token_encrypted, token_expires_at)
@@ -387,7 +402,7 @@ func (s *Service) UpdatePreferences(ctx context.Context, principal auth.Principa
 		return Status{}, fmt.Errorf("begin tracking preferences update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID)
+	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID, true)
 	if err != nil {
 		return Status{}, err
 	}
@@ -397,6 +412,9 @@ func (s *Service) UpdatePreferences(ctx context.Context, principal auth.Principa
 	}
 	if input.SyncWatched == nil && input.SyncProgress == nil && input.SyncLibrary == nil {
 		return Status{}, fmt.Errorf("%w: at least one toggle is required", ErrInvalidInput)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, trackingOutboxAdvisoryLock); err != nil {
+		return Status{}, fmt.Errorf("lock tracking outbox preferences: %w", err)
 	}
 	result, err := tx.Exec(ctx, `
 		UPDATE profile_tracking_accounts
@@ -457,13 +475,16 @@ func (s *Service) Disconnect(ctx context.Context, principal auth.Principal, prof
 		return fmt.Errorf("begin tracking disconnect: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID)
+	profileID, err = s.authorizeProfile(ctx, tx, principal, profileID, true)
 	if err != nil {
 		return err
 	}
 	provider, err = normalizeProvider(provider)
 	if err != nil {
 		return err
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, trackingOutboxAdvisoryLock); err != nil {
+		return fmt.Errorf("lock tracking outbox disconnect: %w", err)
 	}
 	var encrypted []byte
 	err = tx.QueryRow(ctx, `
@@ -498,60 +519,209 @@ func (s *Service) Disconnect(ctx context.Context, principal auth.Principal, prof
 	return nil
 }
 
-type trackingExecer interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-}
-
 func (s *Service) Enqueue(ctx context.Context, profileID, titleID, idempotencyKey string, event Event) error {
-	return s.enqueueWith(ctx, s.pool, profileID, titleID, idempotencyKey, event)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tracking enqueue: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := s.enqueueWith(ctx, tx, profileID, titleID, idempotencyKey, event); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tracking enqueue: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) EnqueueTx(ctx context.Context, tx pgx.Tx, profileID, titleID, idempotencyKey string, event Event) error {
 	return s.enqueueWith(ctx, tx, profileID, titleID, idempotencyKey, event)
 }
 
-func (s *Service) enqueueWith(ctx context.Context, exec trackingExecer, profileID, titleID, idempotencyKey string, event Event) error {
-	return s.enqueueWithProvider(ctx, exec, profileID, "", titleID, idempotencyKey, event)
+func (s *Service) EnqueueBatchTx(ctx context.Context, tx pgx.Tx, profileID string, batch []BatchEvent) error {
+	return s.enqueueBatchWithProviderTx(ctx, tx, profileID, "", batch)
 }
 
-func (s *Service) enqueueWithProvider(ctx context.Context, exec trackingExecer, profileID, provider, titleID, idempotencyKey string, event Event) error {
-	encoded, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("encode tracking event: %w", err)
+func (s *Service) enqueueWith(ctx context.Context, tx pgx.Tx, profileID, titleID, idempotencyKey string, event Event) error {
+	return s.enqueueWithProvider(ctx, tx, profileID, "", titleID, idempotencyKey, event)
+}
+
+func (s *Service) enqueueWithProvider(ctx context.Context, tx pgx.Tx, profileID, provider, titleID, idempotencyKey string, event Event) error {
+	return s.enqueueBatchWithProviderTx(ctx, tx, profileID, provider, []BatchEvent{{
+		TitleID: titleID, IdempotencyKey: idempotencyKey, Event: event,
+	}})
+}
+
+func (s *Service) enqueueBatchWithProviderTx(ctx context.Context, tx pgx.Tx, profileID, provider string, batch []BatchEvent) error {
+	if len(batch) == 0 {
+		return nil
 	}
 	column := "sync_watched"
-	switch event.Type {
+	switch batch[0].Event.Type {
 	case "progress":
 		column = "sync_progress"
 	case "library":
 		column = "sync_library"
 	case "watched":
 	default:
-		if event.Type != "watched" {
-			return fmt.Errorf("%w: unsupported tracking event", ErrInvalidInput)
-		}
+		return fmt.Errorf("%w: unsupported tracking event", ErrInvalidInput)
 	}
-	affectsWatched := event.Type == "watched" || event.Type == "progress" && event.Completed
-	_, err = exec.Exec(ctx, fmt.Sprintf(`
-		WITH enabled AS (
-			SELECT account.profile_id, account.provider
+	titleIDs := make([]string, len(batch))
+	eventTypes := make([]string, len(batch))
+	payloads := make([]string, len(batch))
+	idempotencyKeys := make([]string, len(batch))
+	affectsWatched := make([]bool, len(batch))
+	seenTitles := make(map[string]struct{}, len(batch))
+	for index, item := range batch {
+		if item.Event.Type != batch[0].Event.Type {
+			return fmt.Errorf("%w: tracking batch event types must match", ErrInvalidInput)
+		}
+		if _, exists := seenTitles[item.TitleID]; exists {
+			return fmt.Errorf("%w: duplicate tracking batch title", ErrInvalidInput)
+		}
+		seenTitles[item.TitleID] = struct{}{}
+		encoded, err := json.Marshal(item.Event)
+		if err != nil {
+			return fmt.Errorf("encode tracking batch event: %w", err)
+		}
+		titleIDs[index] = item.TitleID
+		eventTypes[index] = item.Event.Type
+		payloads[index] = string(encoded)
+		idempotencyKeys[index] = item.IdempotencyKey
+		affectsWatched[index] = item.Event.Type == "watched" || item.Event.Type == "progress" && item.Event.Completed
+	}
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, trackingOutboxAdvisoryLock); err != nil {
+		return fmt.Errorf("lock tracking outbox admission: %w", err)
+	}
+	inputSQL := `
+		WITH input AS (
+			SELECT title_id, event_type, payload::jsonb, idempotency_key, affects_watched
+			FROM unnest($2::uuid[], $3::text[], $4::text[], $5::text[], $6::boolean[])
+			  AS event(title_id, event_type, payload, idempotency_key, affects_watched)
+		), enabled AS (
+			SELECT account.profile_id, account.provider, input.*
 			FROM profile_tracking_accounts account
+			CROSS JOIN input
 			WHERE account.profile_id = $1::uuid AND account.%s
 			  AND ($7 = '' OR account.provider = $7)
-		), heads AS (
-			INSERT INTO profile_tracking_event_heads (profile_id, provider, title_id, event_type, idempotency_key, affects_watched)
-			SELECT enabled.profile_id, enabled.provider, $2::uuid, $3, $5, $6
-			FROM enabled
-			ON CONFLICT (profile_id, provider, title_id, event_type)
-			DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key, affects_watched = EXCLUDED.affects_watched, updated_at = now()
-			RETURNING profile_id, provider, title_id, event_type, idempotency_key
+		)`
+	arguments := []any{profileID, titleIDs, eventTypes, payloads, idempotencyKeys, affectsWatched, provider}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(inputSQL+`
+		INSERT INTO profile_tracking_event_heads (
+			profile_id, provider, title_id, event_type, idempotency_key, affects_watched, updated_at
 		)
-		INSERT INTO profile_tracking_outbox (profile_id, provider, title_id, event_type, payload, idempotency_key)
-		SELECT profile_id, provider, title_id, event_type, $4, idempotency_key FROM heads
-		ON CONFLICT (profile_id, provider, idempotency_key) DO NOTHING
-	`, column), profileID, titleID, event.Type, encoded, idempotencyKey, affectsWatched, provider)
-	if err != nil {
-		return fmt.Errorf("enqueue tracking event: %w", err)
+		SELECT profile_id, provider, title_id, event_type, idempotency_key, affects_watched, clock_timestamp()
+		FROM enabled
+		ON CONFLICT (profile_id, provider, title_id, event_type)
+		DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key,
+		              affects_watched = EXCLUDED.affects_watched,
+		              updated_at = clock_timestamp()
+	`, column), arguments...); err != nil {
+		return fmt.Errorf("update tracking event heads: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM profile_tracking_outbox pending
+		WHERE pending.leased_until IS NULL
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM profile_tracking_event_heads current
+			WHERE current.profile_id = pending.profile_id
+			  AND current.provider = pending.provider
+			  AND current.title_id = pending.title_id
+			  AND current.event_type = pending.event_type
+			  AND current.idempotency_key = pending.idempotency_key
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM profile_tracking_event_heads newer
+				WHERE newer.profile_id = current.profile_id
+				  AND newer.provider = current.provider
+				  AND newer.title_id = current.title_id
+				  AND newer.updated_at > current.updated_at
+				  AND (newer.event_type = current.event_type
+				       OR current.affects_watched AND newer.affects_watched)
+			  )
+		  )
+	`); err != nil {
+		return fmt.Errorf("remove superseded tracking work: %w", err)
+	}
+
+	profileProviderLimit := s.profileProviderOutboxLimit
+	if profileProviderLimit <= 0 {
+		profileProviderLimit = defaultProfileProviderOutboxCap
+	}
+	globalLimit := s.globalOutboxLimit
+	if globalLimit <= 0 {
+		globalLimit = defaultGlobalOutboxCap
+	}
+	var globalExceeded, profileProviderExceeded bool
+	if err := tx.QueryRow(ctx, fmt.Sprintf(inputSQL+`
+		, logical_events AS (
+			SELECT DISTINCT profile_id, provider, title_id, event_type
+			FROM enabled
+		), missing AS (
+			SELECT logical.*
+			FROM logical_events logical
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM profile_tracking_outbox pending
+				WHERE pending.profile_id = logical.profile_id
+				  AND pending.provider = logical.provider
+				  AND pending.title_id = logical.title_id
+				  AND pending.event_type = logical.event_type
+				  AND pending.leased_until IS NULL
+			)
+		), provider_delta AS (
+			SELECT provider, count(*) AS delta
+			FROM missing
+			GROUP BY provider
+		)
+		SELECT
+			(SELECT count(*) FROM profile_tracking_outbox)
+			  + (SELECT count(*) FROM missing) > $8,
+			EXISTS (
+				SELECT 1
+				FROM provider_delta delta
+				WHERE (SELECT count(*)
+				       FROM profile_tracking_outbox queued
+				       WHERE queued.profile_id = $1::uuid
+				         AND queued.provider = delta.provider) + delta.delta > $9
+			)
+	`, column), append(arguments, globalLimit, profileProviderLimit)...).Scan(&globalExceeded, &profileProviderExceeded); err != nil {
+		return fmt.Errorf("check tracking outbox capacity: %w", err)
+	}
+	if globalExceeded || profileProviderExceeded {
+		return ErrOutboxCapacity
+	}
+
+	if _, err := tx.Exec(ctx, fmt.Sprintf(inputSQL+`
+		, candidates AS (
+			SELECT enabled.profile_id, enabled.provider, enabled.title_id,
+			       enabled.event_type, enabled.payload, enabled.idempotency_key
+			FROM enabled
+			JOIN profile_tracking_event_heads head
+			  ON head.profile_id = enabled.profile_id
+			 AND head.provider = enabled.provider
+			 AND head.title_id = enabled.title_id
+			 AND head.event_type = enabled.event_type
+			 AND head.idempotency_key = enabled.idempotency_key
+		)
+		INSERT INTO profile_tracking_outbox (
+			profile_id, provider, title_id, event_type, payload, idempotency_key
+		)
+		SELECT profile_id, provider, title_id, event_type, payload, idempotency_key
+		FROM candidates
+		ON CONFLICT (profile_id, provider, title_id, event_type)
+			WHERE leased_until IS NULL
+		DO UPDATE SET payload = EXCLUDED.payload,
+		              idempotency_key = EXCLUDED.idempotency_key,
+		              enqueue_sequence = DEFAULT,
+		              attempt_count = 0,
+		              next_attempt_at = now(),
+		              last_error = NULL,
+		              created_at = now()
+	`, column), arguments...); err != nil {
+		return fmt.Errorf("enqueue tracking event batch: %w", err)
 	}
 	return nil
 }
@@ -571,7 +741,7 @@ func (s *Service) Run(ctx context.Context) {
 }
 
 func (s *Service) processAvailable(ctx context.Context) {
-	for count := 0; count < 20 && ctx.Err() == nil; count++ {
+	for ctx.Err() == nil {
 		work, found, err := s.claim(ctx)
 		if err != nil {
 			s.logger.Error("claim tracking work failed", "error", err)
@@ -595,8 +765,16 @@ type queuedWork struct {
 }
 
 func (s *Service) claim(ctx context.Context) (queuedWork, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return queuedWork{}, false, fmt.Errorf("begin tracking claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, trackingOutboxAdvisoryLock); err != nil {
+		return queuedWork{}, false, fmt.Errorf("lock tracking outbox claim: %w", err)
+	}
 	var work queuedWork
-	err := s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		UPDATE profile_tracking_outbox SET leased_until = now() + $1::interval
 		WHERE id = (
 			SELECT candidate.id
@@ -607,17 +785,23 @@ func (s *Service) claim(ctx context.Context) (queuedWork, bool, error) {
 				SELECT 1 FROM profile_tracking_outbox earlier
 				WHERE earlier.profile_id = candidate.profile_id AND earlier.provider = candidate.provider
 				  AND earlier.title_id = candidate.title_id AND earlier.enqueue_sequence < candidate.enqueue_sequence
-			  )
+			)
 			ORDER BY candidate.next_attempt_at, candidate.enqueue_sequence
 			FOR UPDATE SKIP LOCKED LIMIT 1
 		)
 		RETURNING id::text, profile_id::text, provider, title_id::text, event_type, idempotency_key, payload, attempt_count
 	`, leaseDuration.String()).Scan(&work.ID, &work.ProfileID, &work.Provider, &work.TitleID, &work.EventType, &work.IdempotencyKey, &work.Payload, &work.Attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.Commit(ctx); err != nil {
+			return queuedWork{}, false, fmt.Errorf("commit empty tracking claim: %w", err)
+		}
 		return queuedWork{}, false, nil
 	}
 	if err != nil {
 		return queuedWork{}, false, fmt.Errorf("claim tracking work: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return queuedWork{}, false, fmt.Errorf("commit tracking claim: %w", err)
 	}
 	return work, true, nil
 }
@@ -798,6 +982,10 @@ func (s *Service) complete(ctx context.Context, work queuedWork) {
 		return
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, trackingOutboxAdvisoryLock); err != nil {
+		s.logger.Error("lock tracking outbox completion failed", "error", err)
+		return
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM profile_tracking_outbox WHERE id = $1::uuid`, work.ID); err != nil {
 		s.logger.Error("delete completed tracking work failed", "error", err)
 		return
@@ -846,6 +1034,56 @@ func (s *Service) retry(ctx context.Context, work queuedWork, cause error) {
 		return
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, trackingOutboxAdvisoryLock); err != nil {
+		s.logger.Error("lock tracking outbox retry failed", "error", err)
+		return
+	}
+	var current, hasSuccessor bool
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			EXISTS (
+				SELECT 1
+				FROM profile_tracking_event_heads head
+				WHERE head.profile_id = $1::uuid
+				  AND head.provider = $2
+				  AND head.title_id = $3::uuid
+				  AND head.event_type = $4
+				  AND head.idempotency_key = $5
+				  AND NOT EXISTS (
+					SELECT 1
+					FROM profile_tracking_event_heads newer
+					WHERE newer.profile_id = head.profile_id
+					  AND newer.provider = head.provider
+					  AND newer.title_id = head.title_id
+					  AND newer.updated_at > head.updated_at
+					  AND (newer.event_type = head.event_type
+					       OR head.affects_watched AND newer.affects_watched)
+				  )
+			),
+			EXISTS (
+				SELECT 1
+				FROM profile_tracking_outbox successor
+				WHERE successor.profile_id = $1::uuid
+				  AND successor.provider = $2
+				  AND successor.title_id = $3::uuid
+				  AND successor.event_type = $4
+				  AND successor.id <> $6::uuid
+				  AND successor.leased_until IS NULL
+			)
+	`, work.ProfileID, work.Provider, work.TitleID, work.EventType, work.IdempotencyKey, work.ID).Scan(&current, &hasSuccessor); err != nil {
+		s.logger.Error("check tracking retry currency failed", "error", err)
+		return
+	}
+	if !current || hasSuccessor {
+		if _, err := tx.Exec(ctx, `DELETE FROM profile_tracking_outbox WHERE id = $1::uuid`, work.ID); err != nil {
+			s.logger.Error("delete superseded tracking retry failed", "error", err)
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			s.logger.Error("commit superseded tracking retry failed", "error", err)
+		}
+		return
+	}
 	if _, err := tx.Exec(ctx, `UPDATE profile_tracking_outbox SET attempt_count = $2, next_attempt_at = now() + $3::interval, leased_until = NULL, last_error = $4 WHERE id = $1::uuid`, work.ID, attempt, delay.String(), message); err != nil {
 		s.logger.Error("schedule tracking retry failed", "error", err)
 		return

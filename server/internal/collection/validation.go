@@ -14,6 +14,15 @@ const (
 	maximumFolders          = 100
 	maximumSourcesPerFolder = 20
 	maximumExtrasPerSource  = 32
+
+	MaximumImportDocumentBytes = 16 * 1024 * 1024
+	maximumImportFolders       = 1000
+	maximumImportSources       = 5000
+	maximumImportExtras        = 10000
+	maximumImportFilterValues  = 10000
+	maximumImportProfileIDs    = 1000
+	maximumImportArtworkKeys   = 4096
+	maximumImportStringBytes   = 4 * 1024 * 1024
 )
 
 var (
@@ -21,6 +30,97 @@ var (
 	languagePattern = regexp.MustCompile(`^[A-Za-z]{2,3}$`)
 	regionPattern   = regexp.MustCompile(`^[A-Za-z]{2}$`)
 )
+
+func validateImportDocumentBudget(document ExportDocument) error {
+	var folders, sources, extras, filterValues, profileIDs, artworkKeys, stringBytes int
+	addCount := func(total *int, value, limit int) bool {
+		if value < 0 || value > limit-*total {
+			return false
+		}
+		*total += value
+		return true
+	}
+	addString := func(value string) bool {
+		return addCount(&stringBytes, len(value), maximumImportStringBytes)
+	}
+	addArtwork := func(value string) bool {
+		if !addString(value) {
+			return false
+		}
+		if strings.HasPrefix(value, "/api/v1/artwork/") {
+			return addCount(&artworkKeys, 1, maximumImportArtworkKeys)
+		}
+		return true
+	}
+	for collectionIndex := range document.Collections {
+		input := &document.Collections[collectionIndex]
+		if !addCount(&folders, len(input.Folders), maximumImportFolders) ||
+			!addCount(&profileIDs, len(input.ProfileIDs), maximumImportProfileIDs) ||
+			!addString(input.Title) || !addArtwork(input.BackdropImageURL) ||
+			!addString(input.ViewMode) || !addString(input.FolderCoverShape) {
+			return invalid("collection import exceeds the document complexity limit")
+		}
+		for _, profileID := range input.ProfileIDs {
+			if !addString(profileID) {
+				return invalid("collection import exceeds the document complexity limit")
+			}
+		}
+		for folderIndex := range input.Folders {
+			folder := &input.Folders[folderIndex]
+			if !addCount(&sources, len(folder.Sources), maximumImportSources) ||
+				!addString(folder.ID) || !addString(folder.Title) || !addString(folder.TileShape) ||
+				!addString(folder.SourceView) || !addArtwork(folder.CoverImageURL) ||
+				!addString(folder.CoverEmoji) || !addArtwork(folder.TitleLogoURL) ||
+				!addArtwork(folder.HeroBackdropURL) || !addString(folder.HeroVideoURL) ||
+				!addString(folder.FocusGIFURL) {
+				return invalid("collection import exceeds the document complexity limit")
+			}
+			for sourceIndex := range folder.Sources {
+				source := &folder.Sources[sourceIndex]
+				if !addString(source.ID) || !addString(source.Kind) || !addString(source.Title) {
+					return invalid("collection import exceeds the document complexity limit")
+				}
+				if source.AddonCatalog != nil {
+					settings := source.AddonCatalog
+					if !addCount(&extras, len(settings.Extra), maximumImportExtras) ||
+						!addString(settings.AddonID) || !addString(settings.ManifestID) ||
+						!addString(settings.Type) || !addString(settings.CatalogID) {
+						return invalid("collection import exceeds the document complexity limit")
+					}
+					for _, extra := range settings.Extra {
+						if !addString(extra.Name) || !addString(extra.Value) {
+							return invalid("collection import exceeds the document complexity limit")
+						}
+					}
+				}
+				if source.TMDB != nil {
+					settings := source.TMDB
+					filters := &settings.Filters
+					if !addCount(&filterValues, len(filters.Genres), maximumImportFilterValues) ||
+						!addCount(&filterValues, len(filters.Keywords), maximumImportFilterValues) ||
+						!addCount(&filterValues, len(filters.Companies), maximumImportFilterValues) ||
+						!addCount(&filterValues, len(filters.Networks), maximumImportFilterValues) ||
+						!addCount(&filterValues, len(filters.WatchProviders), maximumImportFilterValues) ||
+						!addString(settings.SourceType) || !addString(settings.MediaType) ||
+						!addString(settings.Sort) || !addString(filters.ReleaseDateFrom) ||
+						!addString(filters.ReleaseDateTo) || !addString(filters.OriginalLanguage) ||
+						!addString(filters.OriginCountry) || !addString(filters.WatchRegion) {
+						return invalid("collection import exceeds the document complexity limit")
+					}
+				}
+				if source.Trakt != nil &&
+					(!addString(source.Trakt.MediaType) || !addString(source.Trakt.SortBy) || !addString(source.Trakt.SortHow)) {
+					return invalid("collection import exceeds the document complexity limit")
+				}
+				if source.MDBList != nil &&
+					(!addString(source.MDBList.MediaType) || !addString(source.MDBList.Sort) || !addString(source.MDBList.Order)) {
+					return invalid("collection import exceeds the document complexity limit")
+				}
+			}
+		}
+	}
+	return nil
+}
 
 func normalizeAndValidate(input SaveInput, updating bool) (SaveInput, error) {
 	input.Title = strings.TrimSpace(input.Title)
@@ -138,10 +238,10 @@ func normalizeSource(source *Source) error {
 		}
 		settings := source.AddonCatalog
 		settings.AddonID = strings.TrimSpace(settings.AddonID)
-		settings.ManifestID = ""
+		settings.ManifestID = strings.TrimSpace(settings.ManifestID)
 		settings.Type = strings.TrimSpace(settings.Type)
 		settings.CatalogID = strings.TrimSpace(settings.CatalogID)
-		if !validUUID(settings.AddonID) || !validText(settings.Type, 1, 256) || !validText(settings.CatalogID, 1, 2048) {
+		if !validUUID(settings.AddonID) || settings.ManifestID != "" && !validText(settings.ManifestID, 1, 512) || !validText(settings.Type, 1, 256) || !validText(settings.CatalogID, 1, 2048) {
 			return errorsText("addon catalog reference is invalid")
 		}
 		if len(settings.Extra) > maximumExtrasPerSource {

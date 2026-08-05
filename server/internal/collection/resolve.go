@@ -17,7 +17,11 @@ import (
 
 var resolutionLanguagePattern = regexp.MustCompile(`^[A-Za-z]{2,3}(?:-[A-Za-z]{2})?$`)
 
-const addonCatalogPageSize = 20
+const (
+	addonCatalogPageSize          = 20
+	maximumResolutionPayloadBytes = 16 << 20
+	maximumResolutionItems        = 2000
+)
 
 func (service *Service) ResolveFolder(ctx context.Context, principal auth.Principal, collectionID, folderID string, page, limit int, language, region string) (ResolvedFolder, error) {
 	value, err := service.Get(ctx, principal, collectionID)
@@ -98,24 +102,32 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, c
 	titleLogoConfigured := folder.TitleLogoURL != ""
 	outcomes := make([]sourceOutcome, len(folder.Sources))
 	semaphore := make(chan struct{}, 8)
+	resolutionCtx, budget := addon.WithPayloadBudget(ctx, maximumResolutionPayloadBytes, maximumResolutionItems)
+	defer budget.Cancel()
 	var wait sync.WaitGroup
 	for index, source := range folder.Sources {
 		index, source := index, source
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
+			sourceCtx := addon.WithPayloadBudgetSource(resolutionCtx)
 			select {
 			case semaphore <- struct{}{}:
 				defer func() { <-semaphore }()
-			case <-ctx.Done():
-				outcomes[index] = sourceOutcome{source: source, err: ctx.Err()}
+			case <-resolutionCtx.Done():
+				outcomes[index] = sourceOutcome{source: source, err: resolutionCtx.Err()}
 				return
 			}
-			result, err := service.resolveSource(ctx, principal, source, page, language, region)
+			result, err := service.resolveSource(sourceCtx, principal, source, page, language, region)
 			outcomes[index] = sourceOutcome{source: source, page: result, err: err}
 		}()
 	}
 	wait.Wait()
+	if budget.Exceeded() {
+		for index, source := range folder.Sources {
+			outcomes[index] = sourceOutcome{source: source, err: resolutionBudgetError()}
+		}
+	}
 	items := make([]Item, 0)
 	errorsList := make([]SourceFailure, 0)
 	hasMore := false
@@ -227,42 +239,114 @@ func (service *Service) resolveSource(ctx context.Context, principal auth.Princi
 		if err != nil {
 			return SourcePage{}, err
 		}
-		return parseAddonCatalog(result.Payload, page)
+		if err := addon.EnsurePayloadBytes(ctx, len(result.Payload)); err != nil {
+			return SourcePage{}, resolutionBudgetError()
+		}
+		return parseAddonCatalog(ctx, result.Payload, page)
 	case SourceKindTMDB:
 		if service.tmdb == nil {
 			return SourcePage{}, ErrProviderUnavailable
 		}
-		return service.tmdb.ResolveCollectionSource(ctx, *source.TMDB, page, language, region)
+		result, err := service.tmdb.ResolveCollectionSource(ctx, *source.TMDB, page, language, region)
+		return accountSourcePage(ctx, result, err)
 	case SourceKindTrakt:
 		if service.trakt == nil {
 			return SourcePage{}, ErrProviderUnavailable
 		}
-		return service.trakt.ResolveCollectionSource(ctx, *source.Trakt, page)
+		result, err := service.trakt.ResolveCollectionSource(ctx, *source.Trakt, page)
+		return accountSourcePage(ctx, result, err)
 	case SourceKindMDBList:
 		if service.mdblist == nil {
 			return SourcePage{}, ErrProviderUnavailable
 		}
-		return service.mdblist.ResolveCollectionSource(ctx, *source.MDBList, page)
+		result, err := service.mdblist.ResolveCollectionSource(ctx, *source.MDBList, page)
+		return accountSourcePage(ctx, result, err)
 	default:
 		return SourcePage{}, ErrInvalidInput
 	}
 }
 
-func parseAddonCatalog(payload json.RawMessage, page int) (SourcePage, error) {
-	var envelope struct {
+func parseAddonCatalog(ctx context.Context, payload json.RawMessage, page int) (SourcePage, error) {
+	safePayload, err := addon.SanitizeExposablePayload(payload)
+	if err != nil {
+		return SourcePage{}, fmt.Errorf("%w: sanitize addon catalog payload", addon.ErrInvalidResponse)
+	}
+	var sourceEnvelope, safeEnvelope struct {
 		Metas []json.RawMessage `json:"metas"`
 	}
-	if err := json.Unmarshal(payload, &envelope); err != nil || envelope.Metas == nil {
+	if err := json.Unmarshal(payload, &sourceEnvelope); err != nil || sourceEnvelope.Metas == nil {
 		return SourcePage{}, fmt.Errorf("%w: addon catalog payload has no metas", addon.ErrInvalidResponse)
 	}
-	items := make([]Item, 0, len(envelope.Metas))
-	for _, raw := range envelope.Metas {
-		item, ok := parseAddonItem(raw)
-		if ok {
-			items = append(items, item)
+	if err := json.Unmarshal(safePayload, &safeEnvelope); err != nil || len(safeEnvelope.Metas) != len(sourceEnvelope.Metas) {
+		return SourcePage{}, fmt.Errorf("%w: sanitized addon catalog payload is inconsistent", addon.ErrInvalidResponse)
+	}
+	if err := addon.ConsumePayloadItems(ctx, len(safeEnvelope.Metas)); err != nil {
+		return SourcePage{}, resolutionBudgetError()
+	}
+	items := make([]Item, 0, len(safeEnvelope.Metas))
+	for index, safeRaw := range safeEnvelope.Metas {
+		item, ok := parseAddonItem(safeRaw)
+		if !ok {
+			continue
 		}
+		var artwork struct {
+			Poster     string `json:"poster"`
+			Background string `json:"background"`
+			Logo       string `json:"logo"`
+		}
+		if json.Unmarshal(sourceEnvelope.Metas[index], &artwork) == nil {
+			item.PosterURL = artwork.Poster
+			item.BackgroundURL = artwork.Background
+			item.LogoURL = artwork.Logo
+		}
+		items = append(items, item)
 	}
 	return SourcePage{Items: items, Page: page, HasMore: len(items) > 0}, nil
+}
+
+func accountSourcePage(ctx context.Context, page SourcePage, err error) (SourcePage, error) {
+	if err != nil {
+		return SourcePage{}, err
+	}
+	rawBytes := 0
+	for index := range page.Items {
+		rawBytes += len(page.Items[index].Raw)
+	}
+	if err := addon.EnsurePayloadBytes(ctx, rawBytes); err != nil {
+		return SourcePage{}, resolutionBudgetError()
+	}
+	if err := addon.EnsurePayloadItems(ctx, len(page.Items)); err != nil {
+		return SourcePage{}, resolutionBudgetError()
+	}
+	for index := range page.Items {
+		if len(page.Items[index].Raw) == 0 {
+			continue
+		}
+		safeRaw, sanitizeErr := addon.SanitizeExposablePayload(page.Items[index].Raw)
+		if sanitizeErr != nil {
+			return SourcePage{}, fmt.Errorf("%w: sanitize collection source item", addon.ErrInvalidResponse)
+		}
+		page.Items[index].Raw = safeRaw
+	}
+	return page, nil
+}
+
+type resolutionBudgetExceededError struct{}
+
+func (resolutionBudgetExceededError) Error() string {
+	return "collection source response budget exceeded"
+}
+
+func (resolutionBudgetExceededError) Is(target error) bool {
+	return target == ErrProviderUnavailable
+}
+
+func (resolutionBudgetExceededError) Temporary() bool {
+	return true
+}
+
+func resolutionBudgetError() error {
+	return resolutionBudgetExceededError{}
 }
 
 func parseAddonItem(raw json.RawMessage) (Item, bool) {
@@ -324,7 +408,7 @@ func parseAddonItem(raw json.RawMessage) (Item, bool) {
 		BackgroundURL: value.Background, LogoURL: value.Logo, Description: value.Description,
 		ReleaseInfo: value.ReleaseInfo, Released: value.Released, VoteAverage: voteAverage,
 		VoteCount: value.VoteCount, Popularity: value.Popularity, ExternalIDs: externalIDs,
-		Raw: append(json.RawMessage(nil), raw...),
+		Raw: raw,
 	}, true
 }
 
@@ -543,13 +627,13 @@ func (service *Service) fanartArtwork(ctx context.Context, item Item, language s
 			return fanartArtwork{}, err
 		}
 		enriched, err := service.fanart.EnrichMovie(ctx, metadata.ProviderMovie{
-			ExternalID:    tmdbID,
+			ExternalID: tmdbID, PosterURL: item.PosterURL, BackdropURL: item.BackgroundURL, LogoURL: item.LogoURL,
 			AdditionalIDs: map[string]string{"tmdb": tmdbID},
 		}, language)
 		if err != nil {
 			return fanartArtwork{}, err
 		}
-		return fanartArtwork{poster: enriched.PosterURL, background: enriched.BackdropURL, logo: enriched.LogoURL}, nil
+		return fanartOverlay(item, enriched.PosterURL, enriched.BackdropURL, enriched.LogoURL), nil
 	case MediaTypeSeries:
 		tvdbID := strings.TrimSpace(item.ExternalIDs["tvdb"])
 		if tvdbID == "" {
@@ -567,15 +651,30 @@ func (service *Service) fanartArtwork(ctx context.Context, item Item, language s
 			return fanartArtwork{}, nil
 		}
 		enriched, err := service.fanart.EnrichSeries(ctx, metadata.ProviderSeries{
+			PosterURL: item.PosterURL, BackdropURL: item.BackgroundURL, LogoURL: item.LogoURL,
 			AdditionalIDs: map[string]string{"tvdb": tvdbID},
 		}, language)
 		if err != nil {
 			return fanartArtwork{}, err
 		}
-		return fanartArtwork{poster: enriched.PosterURL, background: enriched.BackdropURL, logo: enriched.LogoURL}, nil
+		return fanartOverlay(item, enriched.PosterURL, enriched.BackdropURL, enriched.LogoURL), nil
 	default:
 		return fanartArtwork{}, nil
 	}
+}
+
+func fanartOverlay(item Item, poster, background, logo string) fanartArtwork {
+	value := fanartArtwork{}
+	if poster != "" && poster != item.PosterURL {
+		value.poster = poster
+	}
+	if background != "" && background != item.BackgroundURL {
+		value.background = background
+	}
+	if logo != "" && logo != item.LogoURL {
+		value.logo = logo
+	}
+	return value
 }
 
 func (service *Service) resolveTMDBArtworkID(ctx context.Context, item Item) (string, error) {

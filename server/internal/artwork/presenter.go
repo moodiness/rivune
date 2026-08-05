@@ -17,6 +17,12 @@ import (
 
 var titleUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 
+const (
+	maximumAddonArtworkObjectsPerResponse = 256
+	maximumAddonArtworkURLsPerResponse    = 256
+	maximumCollectionRestorationURLs      = 4096
+)
+
 type canonicalArtwork struct {
 	poster     string
 	background string
@@ -35,9 +41,10 @@ type artworkCandidate struct {
 }
 
 type payloadState struct {
-	resultIndex int
-	root        any
-	changed     bool
+	resultIndex     int
+	root            any
+	changed         bool
+	artworkURLCount int
 }
 
 type mapCandidate struct {
@@ -94,8 +101,13 @@ func (service *Service) PresentAddonResources(ctx context.Context, results []add
 			candidates[ordinal].state.changed = true
 		}
 	}
-	for index := range candidates {
-		collectMapArtworkAssignments(candidates[index].object, candidates[index].state, &assignments)
+	for _, state := range states {
+		collectMapArtworkAssignments(
+			state.root,
+			state,
+			&assignments,
+			&state.artworkURLCount,
+		)
 	}
 	service.applyURLAssignments(ctx, assignments)
 	for _, state := range states {
@@ -193,9 +205,38 @@ func (service *Service) RestoreCollectionSaveInput(ctx context.Context, input *c
 	service.restoreSourceURLs(ctx, values)
 }
 
+func (service *Service) RestoreCollectionSaveInputs(ctx context.Context, inputs []collection.SaveInput) {
+	if len(inputs) > 100 {
+		return
+	}
+	valueCount := len(inputs)
+	for index := range inputs {
+		folderCount := len(inputs[index].Folders)
+		if folderCount > (maximumCollectionRestorationURLs-valueCount)/3 {
+			return
+		}
+		valueCount += folderCount * 3
+	}
+	values := make([]*string, 0, valueCount)
+	for index := range inputs {
+		input := &inputs[index]
+		values = append(values, &input.BackdropImageURL)
+		for folderIndex := range input.Folders {
+			folder := &input.Folders[folderIndex]
+			values = append(values, &folder.CoverImageURL, &folder.TitleLogoURL, &folder.HeroBackdropURL)
+		}
+	}
+	service.restoreSourceURLs(ctx, values)
+}
+
 func (service *Service) PresentResolvedFolder(ctx context.Context, resolved *collection.ResolvedFolder) {
 	if resolved == nil {
 		return
+	}
+	originalArtwork := make([]canonicalArtwork, len(resolved.Items))
+	for index := range resolved.Items {
+		item := &resolved.Items[index]
+		originalArtwork[index] = canonicalArtwork{poster: item.PosterURL, background: item.BackgroundURL, logo: item.LogoURL}
 	}
 	candidates := make([]artworkCandidate, len(resolved.Items))
 	for index := range resolved.Items {
@@ -263,13 +304,47 @@ func (service *Service) PresentResolvedFolder(ctx context.Context, resolved *col
 				state.changed = true
 			}
 		}
-		collectMapArtworkAssignments(root, state, &assignments)
+		collectMapArtworkAssignments(root, state, &assignments, &state.artworkURLCount)
 	}
 	service.applyURLAssignments(ctx, assignments)
 	for index, sourceID := range sourcePosterIDs {
 		resolved.SourcePosterURLs[sourceID] = sourcePosterURLs[index]
 	}
+	fallbackAssignments := make([]urlAssignment, 0, len(resolved.Items)*3)
+	for index := range resolved.Items {
+		item := &resolved.Items[index]
+		fallback := &originalArtwork[index]
+		if item.PosterURL == "" {
+			addStringAssignment(&fallbackAssignments, &fallback.poster)
+		}
+		if item.BackgroundURL == "" {
+			addStringAssignment(&fallbackAssignments, &fallback.background)
+		}
+		if item.LogoURL == "" {
+			addStringAssignment(&fallbackAssignments, &fallback.logo)
+		}
+	}
+	service.applyURLAssignments(ctx, fallbackAssignments)
+	for index := range resolved.Items {
+		item := &resolved.Items[index]
+		fallback := originalArtwork[index]
+		if item.PosterURL == "" {
+			item.PosterURL = fallback.poster
+		}
+		if item.BackgroundURL == "" {
+			item.BackgroundURL = fallback.background
+		}
+		if item.LogoURL == "" {
+			item.LogoURL = fallback.logo
+		}
+	}
 	for _, state := range rawStates {
+		item := &resolved.Items[state.resultIndex]
+		if object, ok := state.root.(map[string]any); ok && applyCanonicalArtwork(object, canonicalArtwork{
+			poster: item.PosterURL, background: item.BackgroundURL, logo: item.LogoURL,
+		}) {
+			state.changed = true
+		}
 		if !state.changed {
 			continue
 		}
@@ -590,31 +665,42 @@ func addStringAssignment(assignments *[]urlAssignment, value *string) {
 	})
 }
 
-func collectMapArtworkAssignments(value any, state *payloadState, assignments *[]urlAssignment) {
+func collectMapArtworkAssignments(
+	value any,
+	state *payloadState,
+	assignments *[]urlAssignment,
+	count *int,
+) {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {
 			if isArtworkKey(key) {
 				if upstream, ok := child.(string); ok && strings.TrimSpace(upstream) != "" {
-					object := typed
-					field := key
-					original := upstream
-					*assignments = append(*assignments, urlAssignment{
-						upstream: upstream,
-						assign: func(localized string) {
-							if localized != original {
-								object[field] = localized
-								state.changed = true
-							}
-						},
-					})
+					if *count >= maximumAddonArtworkURLsPerResponse {
+						typed[key] = ""
+						state.changed = true
+					} else {
+						object := typed
+						field := key
+						original := upstream
+						*assignments = append(*assignments, urlAssignment{
+							upstream: upstream,
+							assign: func(localized string) {
+								if localized != original {
+									object[field] = localized
+									state.changed = true
+								}
+							},
+						})
+						(*count)++
+					}
 				}
 			}
-			collectMapArtworkAssignments(child, state, assignments)
+			collectMapArtworkAssignments(child, state, assignments, count)
 		}
 	case []any:
 		for _, child := range typed {
-			collectMapArtworkAssignments(child, state, assignments)
+			collectMapArtworkAssignments(child, state, assignments, count)
 		}
 	}
 }
@@ -633,7 +719,7 @@ func addonArtworkObjects(root any) []map[string]any {
 	if !ok {
 		return nil
 	}
-	objects := make([]map[string]any, 0)
+	objects := make([]map[string]any, 0, maximumAddonArtworkObjectsPerResponse)
 	for _, key := range []string{"metas", "metasDetailed", "meta"} {
 		switch value := envelope[key].(type) {
 		case map[string]any:
@@ -643,7 +729,13 @@ func addonArtworkObjects(root any) []map[string]any {
 				if object, objectOK := child.(map[string]any); objectOK {
 					objects = append(objects, object)
 				}
+				if len(objects) == maximumAddonArtworkObjectsPerResponse {
+					return objects
+				}
 			}
+		}
+		if len(objects) == maximumAddonArtworkObjectsPerResponse {
+			return objects
 		}
 	}
 	return objects

@@ -39,6 +39,10 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+	return migrate(ctx, pool, nil)
+}
+
+func migrate(ctx context.Context, pool *pgxpool.Pool, beforeLedger func(int64) error) error {
 	if _, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version bigint PRIMARY KEY,
@@ -67,14 +71,6 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("parse migration %q: %w", entry.Name(), parseErr)
 		}
 
-		var applied bool
-		if err := pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)", version).Scan(&applied); err != nil {
-			return fmt.Errorf("check migration %q: %w", entry.Name(), err)
-		}
-		if applied {
-			continue
-		}
-
 		contents, readErr := migrationFiles.ReadFile("migrations/" + entry.Name())
 		if readErr != nil {
 			return fmt.Errorf("read migration %q: %w", entry.Name(), readErr)
@@ -84,9 +80,28 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		if beginErr != nil {
 			return fmt.Errorf("begin migration %q: %w", entry.Name(), beginErr)
 		}
+		if _, lockErr := tx.Exec(ctx, "LOCK TABLE schema_migrations IN SHARE ROW EXCLUSIVE MODE"); lockErr != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("lock migration ledger for %q: %w", entry.Name(), lockErr)
+		}
+		var applied bool
+		if checkErr := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)", version).Scan(&applied); checkErr != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("check migration %q: %w", entry.Name(), checkErr)
+		}
+		if applied {
+			_ = tx.Rollback(ctx)
+			continue
+		}
 		if _, execErr := tx.Exec(ctx, string(contents)); execErr != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("apply migration %q: %w", entry.Name(), execErr)
+		}
+		if beforeLedger != nil {
+			if hookErr := beforeLedger(version); hookErr != nil {
+				_ = tx.Rollback(ctx)
+				return fmt.Errorf("stop before recording migration %q: %w", entry.Name(), hookErr)
+			}
 		}
 		if _, execErr := tx.Exec(ctx, "INSERT INTO schema_migrations (version) VALUES ($1)", version); execErr != nil {
 			_ = tx.Rollback(ctx)

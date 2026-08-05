@@ -300,12 +300,12 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 		INSERT INTO auth_sessions (
 			id, user_id, device_id, access_token_hash, access_expires_at,
 			refresh_expires_at, active_profile_id, profile_grant_expires_at,
-			authorization_scope, category_id
+			profile_context_hash, authorization_scope, category_id
 		)
 		VALUES (
 			$1::uuid, $2::uuid, $3::uuid, $4, now() + interval '1 hour',
 			now() + interval '2 hours', $5::uuid, now() + interval '1 hour',
-			'category', $6::uuid
+			decode(repeat('a1', 32), 'hex'), 'category', $6::uuid
 		)
 	`, authSessionID, userID, deviceID, accessTokenHash[:], profileID, categoryID); err != nil {
 		t.Fatalf("seed playback activity auth session: %v", err)

@@ -19,11 +19,18 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/moodiness/rivune/server/internal/netguard"
 )
 
-const maximumPlaylistBytes = 8 * 1024 * 1024
+const (
+	maximumPlaylistBytes          = 8 * 1024 * 1024
+	maximumPlaylistLines          = 20_000
+	maximumPlaylistReferences     = 10_000
+	maximumRewrittenPlaylistBytes = 16 * 1024 * 1024
+)
 
-var playlistURIAttribute = regexp.MustCompile(`URI="([^"]+)"`)
+var playlistURIAttribute = regexp.MustCompile(`[,:][ \t]*[A-Z0-9-]*URI="([^"]+)"`)
 
 const maximumPlaybackStartSeconds = 7 * 24 * 60 * 60
 
@@ -92,7 +99,7 @@ func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessi
 
 	upstreamURL := asset.URL
 	if target != "" {
-		if !validTargetSignature(token, target, signature) || !validMediaURL(target) {
+		if !service.validTargetSignature(sessionID, assetID, target, signature) || !validMediaURL(target) {
 			return ErrSessionNotFound
 		}
 		upstreamURL = target
@@ -109,10 +116,10 @@ func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessi
 			return fmt.Errorf("read HLS playlist: %w", err)
 		}
 		if len(body) > maximumPlaylistBytes {
-			return fmt.Errorf("HLS playlist exceeds %d bytes", maximumPlaylistBytes)
+			return fmt.Errorf("%w: HLS playlist exceeds %d bytes", ErrMediaSourceFailed, maximumPlaylistBytes)
 		}
 		rewritten, err := rewritePlaylist(body, response.Request.URL, func(resolved string) string {
-			signed := signTarget(token, resolved)
+			signed := service.signTarget(sessionID, assetID, resolved)
 			return assetURL(sessionID, assetID, token, resolved, signed)
 		})
 		if err != nil {
@@ -156,11 +163,13 @@ func (service *Service) proxyProcessingAsset(w http.ResponseWriter, r *http.Requ
 func (service *Service) fetchAsset(ctx context.Context, incoming *http.Request, asset storedAsset, upstreamURL string) (*http.Response, error) {
 	request, err := http.NewRequestWithContext(ctx, incoming.Method, upstreamURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, netguard.SanitizeURLError(err)
 	}
-	for name, value := range asset.Headers {
-		if allowedStoredRequestHeader(name) {
-			request.Header.Set(name, value)
+	if sameMediaOrigin(asset.URL, upstreamURL) {
+		for name, value := range asset.Headers {
+			if allowedStoredRequestHeader(name) {
+				request.Header.Set(name, value)
+			}
 		}
 	}
 	for _, name := range []string{"Range", "If-Range", "If-None-Match", "If-Modified-Since"} {
@@ -169,7 +178,19 @@ func (service *Service) fetchAsset(ctx context.Context, incoming *http.Request, 
 		}
 	}
 	request.Header.Set("User-Agent", "Rivune-Playback/1")
-	return service.client.Do(request)
+	response, err := service.client.Do(request)
+	if err != nil {
+		return nil, netguard.SanitizeURLError(err)
+	}
+	return response, nil
+}
+
+func sameMediaOrigin(left, right string) bool {
+	leftURL, leftErr := url.Parse(left)
+	rightURL, rightErr := url.Parse(right)
+	return leftErr == nil && rightErr == nil &&
+		strings.EqualFold(leftURL.Scheme, rightURL.Scheme) &&
+		strings.EqualFold(leftURL.Host, rightURL.Host)
 }
 
 func allowedStoredRequestHeader(name string) bool {
@@ -226,38 +247,167 @@ func pathExtension(value string) string {
 }
 
 func rewritePlaylist(body []byte, base *url.URL, buildProxyURL func(string) string) ([]byte, error) {
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	scanner.Buffer(make([]byte, 64*1024), maximumPlaylistBytes)
-	var rewritten strings.Builder
+	if err := validatePlaylistCardinality(body); err != nil {
+		return nil, fmt.Errorf("%w: invalid HLS playlist: %w", ErrMediaSourceFailed, err)
+	}
+	output := newBoundedPlaylistOutput(len(body))
+	scanner := playlistScanner(body)
 	for scanner.Scan() {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case trimmed == "":
+			if err := output.writeString(line); err != nil {
+				return nil, fmt.Errorf("%w: invalid HLS playlist: %w", ErrMediaSourceFailed, err)
+			}
 		case strings.HasPrefix(trimmed, "#"):
-			line = playlistURIAttribute.ReplaceAllStringFunc(line, func(match string) string {
-				parts := playlistURIAttribute.FindStringSubmatch(match)
-				if len(parts) != 2 {
-					return match
-				}
-				resolved, ok := resolvePlaylistReference(base, parts[1])
+			err := writePlaylistURIAttributes(output, line, func(reference string) (string, bool) {
+				resolved, ok := resolvePlaylistReference(base, reference)
 				if !ok {
-					return match
+					return "", false
 				}
-				return `URI="` + buildProxyURL(resolved) + `"`
+				return buildProxyURL(resolved), true
 			})
+			if err != nil {
+				return nil, fmt.Errorf("%w: invalid HLS playlist: %w", ErrMediaSourceFailed, err)
+			}
 		default:
 			if resolved, ok := resolvePlaylistReference(base, trimmed); ok {
 				line = buildProxyURL(resolved)
 			}
+			if err := output.writeString(line); err != nil {
+				return nil, fmt.Errorf("%w: invalid HLS playlist: %w", ErrMediaSourceFailed, err)
+			}
 		}
-		rewritten.WriteString(line)
-		rewritten.WriteByte('\n')
+		if err := output.writeByte('\n'); err != nil {
+			return nil, fmt.Errorf("%w: invalid HLS playlist: %w", ErrMediaSourceFailed, err)
+		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: invalid HLS playlist: %w", ErrMediaSourceFailed, err)
 	}
-	return []byte(rewritten.String()), nil
+	return output.bytes(), nil
+}
+
+var (
+	errPlaylistTooManyLines      = errors.New("playlist contains too many lines")
+	errPlaylistTooManyReferences = errors.New("playlist contains too many references")
+	errPlaylistOutputTooLarge    = errors.New("rewritten playlist exceeds output limit")
+)
+
+func playlistScanner(contents []byte) *bufio.Scanner {
+	scanner := bufio.NewScanner(bytes.NewReader(contents))
+	scanner.Buffer(make([]byte, 64*1024), maximumPlaylistBytes+1)
+	return scanner
+}
+
+func validatePlaylistCardinality(contents []byte) error {
+	if len(contents) > maximumPlaylistBytes {
+		return fmt.Errorf("playlist exceeds %d bytes", maximumPlaylistBytes)
+	}
+	scanner := playlistScanner(contents)
+	lines := 0
+	references := 0
+	for scanner.Scan() {
+		lines++
+		if lines > maximumPlaylistLines {
+			return errPlaylistTooManyLines
+		}
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			for remaining := line; ; {
+				match := playlistURIAttribute.FindStringSubmatchIndex(remaining)
+				if match == nil {
+					break
+				}
+				references++
+				if references > maximumPlaylistReferences {
+					return errPlaylistTooManyReferences
+				}
+				remaining = remaining[match[1]:]
+			}
+		} else if trimmed != "" {
+			references++
+			if references > maximumPlaylistReferences {
+				return errPlaylistTooManyReferences
+			}
+		}
+	}
+	return scanner.Err()
+}
+
+type boundedPlaylistOutput struct {
+	data []byte
+}
+
+func newBoundedPlaylistOutput(initialCapacity int) *boundedPlaylistOutput {
+	if initialCapacity > maximumRewrittenPlaylistBytes {
+		initialCapacity = maximumRewrittenPlaylistBytes
+	}
+	return &boundedPlaylistOutput{data: make([]byte, 0, initialCapacity)}
+}
+
+func (output *boundedPlaylistOutput) writeString(value string) error {
+	if len(value) > maximumRewrittenPlaylistBytes-len(output.data) {
+		return errPlaylistOutputTooLarge
+	}
+	output.grow(len(value))
+	copy(output.data[len(output.data)-len(value):], value)
+	return nil
+}
+
+func (output *boundedPlaylistOutput) writeByte(value byte) error {
+	if len(output.data) == maximumRewrittenPlaylistBytes {
+		return errPlaylistOutputTooLarge
+	}
+	output.grow(1)
+	output.data[len(output.data)-1] = value
+	return nil
+}
+
+func (output *boundedPlaylistOutput) grow(additional int) {
+	required := len(output.data) + additional
+	if required <= cap(output.data) {
+		output.data = output.data[:required]
+		return
+	}
+	capacity := cap(output.data) * 2
+	if capacity < required {
+		capacity = required
+	}
+	if capacity > maximumRewrittenPlaylistBytes {
+		capacity = maximumRewrittenPlaylistBytes
+	}
+	grown := make([]byte, required, capacity)
+	copy(grown, output.data)
+	output.data = grown
+}
+
+func (output *boundedPlaylistOutput) bytes() []byte {
+	return output.data
+}
+
+func writePlaylistURIAttributes(output *boundedPlaylistOutput, line string, rewrite func(string) (string, bool)) error {
+	remaining := line
+	for {
+		match := playlistURIAttribute.FindStringSubmatchIndex(remaining)
+		if match == nil {
+			return output.writeString(remaining)
+		}
+		if err := output.writeString(remaining[:match[2]]); err != nil {
+			return err
+		}
+		reference := remaining[match[2]:match[3]]
+		if replacement, ok := rewrite(reference); ok {
+			if err := output.writeString(replacement); err != nil {
+				return err
+			}
+		} else if err := output.writeString(reference); err != nil {
+			return err
+		}
+		remaining = remaining[match[3]:]
+	}
 }
 
 func resolvePlaylistReference(base *url.URL, reference string) (string, bool) {
@@ -272,20 +422,28 @@ func resolvePlaylistReference(base *url.URL, reference string) (string, bool) {
 	return resolved.String(), true
 }
 
-func signTarget(token, target string) string {
-	mac := hmac.New(sha256.New, []byte(token))
-	_, _ = mac.Write([]byte(target))
+func (service *Service) signTarget(sessionID, assetID, target string) string {
+	mac := hmac.New(sha256.New, service.targetSigningKey[:])
+	writeTargetSignaturePayload(mac, sessionID, assetID, target)
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func validTargetSignature(token, target, signature string) bool {
+func (service *Service) validTargetSignature(sessionID, assetID, target, signature string) bool {
 	provided, err := base64.RawURLEncoding.DecodeString(signature)
-	if err != nil {
+	if err != nil || service.targetSigningKey == ([32]byte{}) {
 		return false
 	}
-	mac := hmac.New(sha256.New, []byte(token))
-	_, _ = mac.Write([]byte(target))
+	mac := hmac.New(sha256.New, service.targetSigningKey[:])
+	writeTargetSignaturePayload(mac, sessionID, assetID, target)
 	return hmac.Equal(provided, mac.Sum(nil))
+}
+
+func writeTargetSignaturePayload(destination io.Writer, sessionID, assetID, target string) {
+	_, _ = io.WriteString(destination, sessionID)
+	_, _ = destination.Write([]byte{0})
+	_, _ = io.WriteString(destination, assetID)
+	_, _ = destination.Write([]byte{0})
+	_, _ = io.WriteString(destination, target)
 }
 
 func assetURL(sessionID, assetID, token, target, signature string) string {

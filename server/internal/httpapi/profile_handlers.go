@@ -213,8 +213,9 @@ func (a *API) selectProfile(w http.ResponseWriter, r *http.Request, principal au
 		a.internalError(w, "select profile", err)
 	default:
 		writeJSON(w, http.StatusOK, map[string]any{
-			"profile":   newProfileResponse(selection.Profile),
-			"expiresAt": selection.ExpiresAt,
+			"profile":        newProfileResponse(selection.Profile),
+			"expiresAt":      selection.ExpiresAt,
+			"profileContext": selection.ProfileContext,
 		})
 	}
 }

@@ -2,5 +2,5 @@ extends:
   - recommended
 
 apis:
-  rivune@v17:
+  rivune@v18:
     root: protocol/openapi.yaml

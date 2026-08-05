@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/collection"
 )
 
@@ -43,5 +44,25 @@ func TestResolveCollectionSourceSendsTraktContractAndNormalizesItems(t *testing.
 	item := page.Items[0]
 	if item.ID != "tmdb:78" || item.Title != "Blade Runner" || item.ExternalIDs["imdb"] != "tt0083658" || item.ExternalIDs["trakt"] != "1" {
 		t.Fatalf("unexpected normalized item: %+v", item)
+	}
+}
+
+func TestResolveCollectionSourceConsumesSharedItemBudgetBeforeNormalization(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"movie":{"title":"One","ids":{"trakt":1}}},
+			{"movie":{"title":"Two","ids":{"trakt":2}}}
+		]`))
+	}))
+	defer server.Close()
+	ctx, budget := addon.WithPayloadBudget(context.Background(), 1024, 1)
+	defer budget.Cancel()
+
+	client := newWithBaseURL("client-id", server.URL, server.Client())
+	_, err := client.ResolveCollectionSource(addon.WithPayloadBudgetSource(ctx), collection.TraktSource{
+		ListID: 123, MediaType: collection.MediaTypeMovie, SortBy: "rank", SortHow: "asc",
+	}, 1)
+	if err == nil || !budget.Exceeded() {
+		t.Fatalf("Trakt item budget error = %v, exceeded=%t", err, budget.Exceeded())
 	}
 }

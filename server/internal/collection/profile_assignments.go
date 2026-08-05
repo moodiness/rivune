@@ -82,7 +82,7 @@ func writeCollectionProfiles(ctx context.Context, tx pgx.Tx, collectionID string
 	return nil
 }
 
-func applyCollectionProfiles(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, collectionID string, profileIDs []string) error {
+func lockCollectionProfileIDs(ctx context.Context, tx pgx.Tx, activeProfileID, collectionID string) ([]string, error) {
 	var lockedID string
 	if err := tx.QueryRow(ctx, `
 		SELECT pc.id::text
@@ -95,22 +95,39 @@ func applyCollectionProfiles(ctx context.Context, tx pgx.Tx, principal auth.Prin
 		FOR UPDATE
 	`, collectionID, activeProfileID).Scan(&lockedID); err != nil {
 		if err == pgx.ErrNoRows {
-			return ErrNotFound
+			return nil, ErrNotFound
 		}
-		return fmt.Errorf("lock collection profile access: %w", err)
+		return nil, fmt.Errorf("lock collection profile access: %w", err)
 	}
-	var currentProfileIDs []string
+	var profileIDs []string
 	if err := tx.QueryRow(ctx, `
 		SELECT ARRAY(
 			SELECT profile_id::text
 			FROM collection_profile_access
 			WHERE collection_id = $1::uuid
+			ORDER BY profile_id
 		)
-	`, collectionID).Scan(&currentProfileIDs); err != nil {
-		return fmt.Errorf("query collection profile access: %w", err)
+	`, collectionID).Scan(&profileIDs); err != nil {
+		return nil, fmt.Errorf("query collection profile access: %w", err)
 	}
-	if len(currentProfileIDs) == 0 {
-		return ErrNotFound
+	if len(profileIDs) == 0 {
+		return nil, ErrNotFound
+	}
+	return profileIDs, nil
+}
+
+func authorizeExistingCollectionProfiles(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, collectionID string) error {
+	profileIDs, err := lockCollectionProfileIDs(ctx, tx, activeProfileID, collectionID)
+	if err != nil {
+		return err
+	}
+	return authorizeCollectionProfiles(ctx, tx, principal, activeProfileID, profileIDs)
+}
+
+func applyCollectionProfiles(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, collectionID string, profileIDs []string) error {
+	currentProfileIDs, err := lockCollectionProfileIDs(ctx, tx, activeProfileID, collectionID)
+	if err != nil {
+		return err
 	}
 	accessible := false
 	managedProfileIDs := append([]string(nil), profileIDs...)

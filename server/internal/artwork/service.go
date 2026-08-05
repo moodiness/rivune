@@ -18,37 +18,48 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/moodiness/rivune/server/internal/netguard"
 )
 
 const (
-	maxObjectBytes      int64 = 12 << 20
-	maxImageDimension         = 16384
-	maxImagePixels      int64 = 40_000_000
-	publicPrefix              = "/api/v1/artwork/"
-	pruneLockID         int64 = 0x617274776f726b
-	warmupConcurrency         = 6
-	warmupQueueCapacity       = 32_768
+	maxObjectBytes             int64 = 12 << 20
+	maxImageDimension                = 16384
+	maxImagePixels             int64 = 40_000_000
+	publicPrefix                     = "/api/v1/artwork/"
+	pruneLockID                int64 = 0x617274776f726b
+	warmupConcurrency                = 6
+	warmupQueueCapacity              = 32_768
+	maxArtworkRegistrations          = 32_768
+	registrationPruneBatchSize       = 256
+	uncachedRegistrationTTL          = 24 * time.Hour
 )
 
 var errObjectExceedsCache = errors.New("artwork object exceeds cache capacity")
 
 type Options struct {
-	Directory  string
-	MaxBytes   int64
-	HTTPClient *http.Client
-	Logger     *slog.Logger
+	Directory         string
+	MaxBytes          int64
+	HTTPClient        *http.Client
+	LANArtworkOrigins []string
+	Logger            *slog.Logger
 }
 
 type Service struct {
-	pool       *pgxpool.Pool
-	directory  string
-	maxBytes   int64
-	httpClient *http.Client
-	logger     *slog.Logger
-	allowLocal bool
+	pool            *pgxpool.Pool
+	directory       string
+	maxBytes        int64
+	httpClient      *http.Client
+	logger          *slog.Logger
+	allowLocal      bool
+	transportPolicy transportPolicy
+
+	registrationLimit int
+	registrationTTL   time.Duration
 
 	flightsMu sync.Mutex
 	flights   map[string]*flight
@@ -92,17 +103,26 @@ func New(pool *pgxpool.Pool, options Options) (*Service, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	policy, err := newTransportPolicy(options.LANArtworkOrigins)
+	if err != nil {
+		return nil, err
+	}
 	client := options.HTTPClient
 	allowLocal := client != nil
 	if client == nil {
-		client = newProductionHTTPClient()
+		client = newProductionHTTPClient(policy)
 	}
 	service := &Service{
 		pool: pool, directory: absoluteDirectory, maxBytes: options.MaxBytes,
-		httpClient: client, logger: logger, allowLocal: allowLocal,
-		flights:      make(map[string]*flight),
-		warmupQueue:  make(chan string, warmupQueueCapacity),
-		queuedWarmup: make(map[string]struct{}),
+		httpClient: client, logger: logger, allowLocal: allowLocal, transportPolicy: policy,
+		registrationLimit: maxArtworkRegistrations,
+		registrationTTL:   uncachedRegistrationTTL,
+		flights:           make(map[string]*flight),
+		warmupQueue:       make(chan string, warmupQueueCapacity),
+		queuedWarmup:      make(map[string]struct{}),
+	}
+	if err := service.pruneRegistrationBacklog(context.Background()); err != nil {
+		return nil, fmt.Errorf("bound artwork registrations during initialization: %w", err)
 	}
 	if err := service.Prune(context.Background()); err != nil {
 		return nil, fmt.Errorf("prune artwork cache during initialization: %w", err)
@@ -115,7 +135,7 @@ func (service *Service) LocalURL(ctx context.Context, upstream string) string {
 }
 
 func (service *Service) LocalURLs(ctx context.Context, upstream []string) []string {
-	localized := append([]string(nil), upstream...)
+	localized := make([]string, len(upstream))
 	if len(upstream) == 0 {
 		return localized
 	}
@@ -126,7 +146,7 @@ func (service *Service) LocalURLs(ctx context.Context, upstream []string) []stri
 	seen := make(map[string]struct{}, len(upstream))
 	expected := make(map[string]string, len(upstream))
 	for index, candidate := range upstream {
-		normalized, err := normalizeURL(candidate, !service.allowLocal)
+		normalized, err := normalizeURLWithPolicy(candidate, !service.allowLocal, service.transportPolicy)
 		if err != nil {
 			continue
 		}
@@ -144,33 +164,26 @@ func (service *Service) LocalURLs(ctx context.Context, upstream []string) []stri
 		return localized
 	}
 
-	rows, err := service.pool.Query(ctx, `
-		INSERT INTO artwork_cache (key, source_url)
-		SELECT input.key, input.source_url
-		FROM unnest($1::text[], $2::text[]) AS input(key, source_url)
-		ON CONFLICT (key) DO UPDATE SET source_url = artwork_cache.source_url
-		RETURNING key, source_url, byte_size
-	`, keys, urls)
-	if err != nil {
-		return localized
+	for start := 0; start < len(keys); start += registrationPruneBatchSize {
+		end := min(start+registrationPruneBatchSize, len(keys))
+		if !service.registerBatch(ctx, keys[start:end], urls[start:end]) {
+			return localized
+		}
 	}
-	defer rows.Close()
 	registered := make(map[string]string, len(keys))
 	pendingKeys := make([]string, 0, len(keys))
-	for rows.Next() {
-		var key, sourceURL string
-		var byteSize *int64
-		if err := rows.Scan(&key, &sourceURL, &byteSize); err != nil {
-			return append([]string(nil), upstream...)
+	for start := 0; start < len(keys); start += registrationPruneBatchSize {
+		end := min(start+registrationPruneBatchSize, len(keys))
+		batchRegistered, batchPending, ok := service.lookupRegistrationBatch(ctx, keys[start:end])
+		if !ok {
+			return localized
 		}
-		registered[key] = sourceURL
-		if byteSize == nil {
-			pendingKeys = append(pendingKeys, key)
+		for key, sourceURL := range batchRegistered {
+			registered[key] = sourceURL
 		}
+		pendingKeys = append(pendingKeys, batchPending...)
 	}
-	if rows.Err() != nil {
-		return append([]string(nil), upstream...)
-	}
+
 	for key, positions := range indexes {
 		sourceURL, exists := registered[key]
 		if !exists || sourceURL != expected[key] {
@@ -182,6 +195,61 @@ func (service *Service) LocalURLs(ctx context.Context, upstream []string) []stri
 	}
 	service.enqueueWarmups(pendingKeys)
 	return localized
+}
+
+func (service *Service) registerBatch(ctx context.Context, keys, urls []string) bool {
+	transaction, err := service.pool.Begin(ctx)
+	if err != nil {
+		return false
+	}
+	defer transaction.Rollback(ctx)
+	if err := lockArtworkCache(ctx, transaction); err != nil {
+		return false
+	}
+	if _, err := transaction.Exec(ctx, `
+		INSERT INTO artwork_cache (key, source_url)
+		SELECT input.key, input.source_url
+		FROM unnest($1::text[], $2::text[]) AS input(key, source_url)
+		ON CONFLICT (key) DO UPDATE
+		SET registered_at = now()
+	`, keys, urls); err != nil {
+		return false
+	}
+	if _, err := service.pruneRegistrations(ctx, transaction); err != nil {
+		return false
+	}
+	return transaction.Commit(ctx) == nil
+}
+
+func (service *Service) lookupRegistrationBatch(ctx context.Context, keys []string) (map[string]string, []string, bool) {
+	rows, err := service.pool.Query(ctx, `
+		SELECT key, source_url, byte_size
+		FROM artwork_cache
+		WHERE key = ANY($1::text[])
+	`, keys)
+	if err != nil {
+		return nil, nil, false
+	}
+	registered := make(map[string]string, len(keys))
+	pendingKeys := make([]string, 0, len(keys))
+	for rows.Next() {
+		var key, sourceURL string
+		var byteSize *int64
+		if err := rows.Scan(&key, &sourceURL, &byteSize); err != nil {
+			rows.Close()
+			return nil, nil, false
+		}
+		registered[key] = sourceURL
+		if byteSize == nil {
+			pendingKeys = append(pendingKeys, key)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, false
+	}
+	rows.Close()
+	return registered, pendingKeys, true
 }
 
 func (service *Service) RunWarmup(ctx context.Context) {
@@ -262,7 +330,7 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 	record, file, found, err := service.load(request.Context(), key)
 	if err != nil {
 		service.logger.WarnContext(request.Context(), "load artwork", "key", key, "error", err)
-		http.Error(response, "artwork unavailable", http.StatusBadGateway)
+		respondArtworkUnavailable(response)
 		return
 	}
 	if !found {
@@ -270,10 +338,9 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	if file == nil {
-		sourceURL := record.sourceURL
 		if err := service.fetchCoalesced(request.Context(), record); err != nil {
 			service.logger.WarnContext(request.Context(), "fetch artwork", "key", key, "error", err)
-			redirectToArtworkSource(response, request, sourceURL)
+			respondArtworkUnavailable(response)
 			return
 		}
 		record, file, found, err = service.load(request.Context(), key)
@@ -282,7 +349,7 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 				err = errors.New("downloaded artwork was not durable")
 			}
 			service.logger.WarnContext(request.Context(), "reopen artwork", "key", key, "error", err)
-			redirectToArtworkSource(response, request, sourceURL)
+			respondArtworkUnavailable(response)
 			return
 		}
 	}
@@ -306,9 +373,9 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 	}
 }
 
-func redirectToArtworkSource(response http.ResponseWriter, request *http.Request, sourceURL string) {
+func respondArtworkUnavailable(response http.ResponseWriter) {
 	response.Header().Set("Cache-Control", "no-store")
-	http.Redirect(response, request, sourceURL, http.StatusTemporaryRedirect)
+	http.Error(response, "artwork unavailable", http.StatusBadGateway)
 }
 
 func (service *Service) Prune(ctx context.Context) error {
@@ -327,6 +394,42 @@ func (service *Service) Prune(ctx context.Context) error {
 		return fmt.Errorf("commit artwork pruning: %w", err)
 	}
 	return nil
+}
+
+func (service *Service) pruneRegistrationBacklog(ctx context.Context) error {
+	for {
+		transaction, err := service.pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin artwork registration pruning: %w", err)
+		}
+		if err := lockArtworkCache(ctx, transaction); err != nil {
+			transaction.Rollback(ctx)
+			return err
+		}
+		if _, err := service.pruneRegistrations(ctx, transaction); err != nil {
+			transaction.Rollback(ctx)
+			return err
+		}
+		if err := transaction.Commit(ctx); err != nil {
+			return fmt.Errorf("commit artwork registration pruning: %w", err)
+		}
+
+		var overflow bool
+		if err := service.pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM artwork_cache
+				ORDER BY registered_at DESC, key DESC
+				LIMIT 1
+				OFFSET $1
+			)
+		`, service.registrationLimit).Scan(&overflow); err != nil {
+			return fmt.Errorf("check artwork registration budget: %w", err)
+		}
+		if !overflow {
+			return nil
+		}
+	}
 }
 
 func artworkKey(normalized string) string {
@@ -478,7 +581,7 @@ func (service *Service) fetch(ctx context.Context, record cacheRecord) error {
 	}
 
 	if !service.allowLocal {
-		normalized, err := normalizeURL(record.sourceURL, true)
+		normalized, err := normalizeURLWithPolicy(record.sourceURL, true, service.transportPolicy)
 		if err != nil {
 			return fmt.Errorf("validate registered artwork URL: %w", err)
 		}
@@ -487,14 +590,14 @@ func (service *Service) fetch(ctx context.Context, record cacheRecord) error {
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, record.sourceURL, nil)
 	if err != nil {
-		return fmt.Errorf("create artwork request: %w", err)
+		return fmt.Errorf("create artwork request: %w", netguard.SanitizeURLError(err))
 	}
 	request.Header.Set("Accept", "image/webp,image/png,image/jpeg;q=0.9")
 	request.Header.Set("Accept-Encoding", "identity")
 	request.Header.Set("User-Agent", "Rivune-Artwork-Cache/1")
 	upstream, err := service.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("download artwork: %w", err)
+		return fmt.Errorf("download artwork: %w", netguard.SanitizeURLError(err))
 	}
 	defer upstream.Body.Close()
 	if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
@@ -621,7 +724,119 @@ func (service *Service) publish(ctx context.Context, key, temporaryPath, content
 	return nil
 }
 
+func (service *Service) pruneRegistrations(ctx context.Context, transaction pgx.Tx) ([]string, error) {
+	cutoff := time.Now().Add(-service.registrationTTL)
+	stale, err := service.deleteRegistrations(ctx, transaction, `
+		WITH candidates AS (
+			SELECT key
+			FROM artwork_cache
+			WHERE byte_size IS NULL AND registered_at < $1
+			ORDER BY registered_at ASC, key ASC
+			LIMIT $2
+			FOR UPDATE
+		)
+		DELETE FROM artwork_cache AS cache
+		USING candidates
+		WHERE cache.key = candidates.key
+		RETURNING cache.key
+	`, cutoff, registrationPruneBatchSize)
+	if err != nil {
+		return nil, fmt.Errorf("delete expired artwork registrations: %w", err)
+	}
+	remaining := registrationPruneBatchSize - len(stale)
+	if remaining == 0 {
+		return stale, nil
+	}
+	var overflow int
+	if err := transaction.QueryRow(ctx, `
+		SELECT count(*)
+		FROM (
+			SELECT 1
+			FROM artwork_cache
+			ORDER BY registered_at DESC, key DESC
+			LIMIT $2
+			OFFSET $1
+		) AS excess
+	`, service.registrationLimit, remaining).Scan(&overflow); err != nil {
+		return nil, fmt.Errorf("count excess artwork registrations: %w", err)
+	}
+	if overflow == 0 {
+		return stale, nil
+	}
+	uncached, err := service.deleteRegistrations(ctx, transaction, `
+		WITH candidates AS (
+			SELECT key
+			FROM artwork_cache
+			WHERE byte_size IS NULL
+			ORDER BY registered_at ASC, key ASC
+			LIMIT $1
+			FOR UPDATE
+		)
+		DELETE FROM artwork_cache AS cache
+		USING candidates
+		WHERE cache.key = candidates.key
+		RETURNING cache.key
+	`, overflow)
+	if err != nil {
+		return nil, fmt.Errorf("delete excess uncached artwork registrations: %w", err)
+	}
+	stale = append(stale, uncached...)
+	overflow -= len(uncached)
+	if overflow == 0 {
+		return stale, nil
+	}
+	cached, err := service.deleteRegistrations(ctx, transaction, `
+		WITH candidates AS (
+			SELECT key
+			FROM artwork_cache
+			WHERE byte_size IS NOT NULL
+			ORDER BY last_accessed_at ASC, key ASC
+			LIMIT $1
+			FOR UPDATE
+		)
+		DELETE FROM artwork_cache AS cache
+		USING candidates
+		WHERE cache.key = candidates.key
+		RETURNING cache.key
+	`, overflow)
+	if err != nil {
+		return nil, fmt.Errorf("delete excess cached artwork registrations: %w", err)
+	}
+	return append(stale, cached...), nil
+}
+
+func (service *Service) deleteRegistrations(ctx context.Context, transaction pgx.Tx, query string, arguments ...any) ([]string, error) {
+	rows, err := transaction.Query(ctx, query, arguments...)
+	if err != nil {
+		return nil, err
+	}
+	var deleted []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		deleted = append(deleted, key)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for _, key := range deleted {
+		if err := removeIfPresent(service.path(key)); err != nil {
+			return nil, fmt.Errorf("remove artwork object %s: %w", key, err)
+		}
+	}
+	return deleted, nil
+}
+
 func (service *Service) pruneTransaction(ctx context.Context, transaction pgx.Tx) ([]string, error) {
+	evicted, err := service.pruneRegistrations(ctx, transaction)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := transaction.Query(ctx, `
 		SELECT key, byte_size
 		FROM artwork_cache
@@ -653,7 +868,7 @@ func (service *Service) pruneTransaction(ctx context.Context, transaction pgx.Tx
 	}
 	rows.Close()
 
-	var evicted []string
+	var lruEvicted []string
 	for _, entry := range candidates {
 		if total <= service.maxBytes {
 			break
@@ -661,31 +876,19 @@ func (service *Service) pruneTransaction(ctx context.Context, transaction pgx.Tx
 		if err := removeIfPresent(service.path(entry.key)); err != nil {
 			return nil, fmt.Errorf("remove pruned artwork %s: %w", entry.key, err)
 		}
-		evicted = append(evicted, entry.key)
+		lruEvicted = append(lruEvicted, entry.key)
 		total -= entry.size
 	}
-	if len(evicted) == 0 {
-		return nil, nil
+	if len(lruEvicted) == 0 {
+		return evicted, nil
 	}
-	batch := &pgx.Batch{}
-	for _, key := range evicted {
-		batch.Queue(`
-			UPDATE artwork_cache
-			SET content_type = NULL, byte_size = NULL, cached_at = NULL, last_accessed_at = NULL
-			WHERE key = $1
-		`, key)
+	if _, err := transaction.Exec(ctx, `
+		DELETE FROM artwork_cache
+		WHERE key = ANY($1::text[])
+	`, lruEvicted); err != nil {
+		return nil, fmt.Errorf("delete pruned artwork registrations: %w", err)
 	}
-	results := transaction.SendBatch(ctx, batch)
-	for range evicted {
-		if _, err := results.Exec(); err != nil {
-			results.Close()
-			return nil, fmt.Errorf("clear pruned artwork metadata: %w", err)
-		}
-	}
-	if err := results.Close(); err != nil {
-		return nil, fmt.Errorf("finish artwork pruning batch: %w", err)
-	}
-	return evicted, nil
+	return append(evicted, lruEvicted...), nil
 }
 
 func lockArtworkCache(ctx context.Context, transaction pgx.Tx) error {

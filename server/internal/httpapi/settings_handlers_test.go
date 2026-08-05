@@ -372,7 +372,7 @@ func TestUpdateProfileSettingsDecodesTranscodingModesAndNull(t *testing.T) {
 	}
 }
 
-func TestSettingsTranscodingScopeAndPermissionErrorsUseExistingHTTPContract(t *testing.T) {
+func TestSettingsScopeAndPermissionErrorsUseExistingHTTPContract(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		path       string
@@ -402,6 +402,14 @@ func TestSettingsTranscodingScopeAndPermissionErrorsUseExistingHTTPContract(t *t
 			path:       "/api/v1/settings",
 			body:       `{"allowTranscoding":true}`,
 			service:    &fakeSettingsService{instanceErr: settings.ErrForbidden},
+			wantStatus: http.StatusForbidden,
+			wantCode:   "settings_forbidden",
+		},
+		{
+			name:       "profile update requires management access",
+			path:       "/api/v1/profiles/profile-id/settings",
+			body:       `{"interfaceLanguage":"fr"}`,
+			service:    &fakeSettingsService{profileErr: settings.ErrForbidden},
 			wantStatus: http.StatusForbidden,
 			wantCode:   "settings_forbidden",
 		},

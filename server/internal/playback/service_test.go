@@ -2,10 +2,15 @@ package playback
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +44,198 @@ func testPlaybackProfileTxFactory(context.Context, auth.Principal) (playbackProf
 	return testPlaybackProfileTransaction{}, nil
 }
 
+func TestDefaultPlaybackTransportRejectsNonPublicProviderNetworks(t *testing.T) {
+	service, err := NewService(nil, nil, nil, MediaOptions{TempDirectory: filepath.Join(t.TempDir(), "workspace")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := httptest.NewRequest(http.MethodGet, "http://rivune.test/playback", nil)
+	for _, target := range []string{
+		"http://10.0.0.10/video.mp4",
+		"http://172.16.0.10/master.m3u8",
+		"http://192.168.1.10/subtitle.vtt",
+		"http://100.64.0.10/segment.ts",
+		"http://[fc00::10]/key",
+		"http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+	} {
+		t.Run(target, func(t *testing.T) {
+			response, fetchErr := service.fetchAsset(
+				context.Background(),
+				incoming,
+				storedAsset{URL: target},
+				target,
+			)
+			if response != nil {
+				_ = response.Body.Close()
+				t.Fatal("unexpected non-public provider response")
+			}
+			if fetchErr == nil || !strings.Contains(fetchErr.Error(), "outbound destination is not permitted") {
+				t.Fatalf("non-public provider destination error = %v", fetchErr)
+			}
+		})
+	}
+}
+
+func TestPlaybackRedirectPolicyStripsProviderHeadersAcrossHosts(t *testing.T) {
+	original := httptest.NewRequest(http.MethodGet, "https://provider.example/master.m3u8", nil)
+	redirected := httptest.NewRequest(http.MethodGet, "https://cdn.example/segment.ts", nil)
+	redirected.Header.Set("Authorization", "Bearer provider-secret")
+	redirected.Header.Set("Cookie", "provider_session=secret")
+	redirected.Header.Set("X-Provider-Key", "secret")
+	redirected.Header.Set("Range", "bytes=0-1023")
+
+	if err := playbackRedirectPolicy(redirected, []*http.Request{original}); err != nil {
+		t.Fatalf("cross-host redirect policy error: %v", err)
+	}
+	if got := redirected.Header.Get("Authorization"); got != "" {
+		t.Fatalf("cross-host redirect retained Authorization: %q", got)
+	}
+	if got := redirected.Header.Get("Cookie"); got != "" {
+		t.Fatalf("cross-host redirect retained Cookie: %q", got)
+	}
+	if got := redirected.Header.Get("X-Provider-Key"); got != "" {
+		t.Fatalf("cross-host redirect retained provider key: %q", got)
+	}
+	if got := redirected.Header.Get("Range"); got != "" {
+		t.Fatalf("cross-host redirect retained client range: %q", got)
+	}
+	if got := redirected.Header.Get("User-Agent"); got != "Rivune-Playback/1" {
+		t.Fatalf("cross-host redirect User-Agent = %q", got)
+	}
+}
+
+type playbackRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip playbackRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
+
+func TestFetchAssetSanitizesRoundTripURLAndPreservesCause(t *testing.T) {
+	secretURL := "https://provider.example/private/master.m3u8?target=key.bin&token=playback-secret"
+	networkCause := errors.New("connection reset")
+	service := &Service{client: &http.Client{Transport: playbackRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, networkCause
+	})}}
+	incoming := httptest.NewRequest(http.MethodGet, "http://rivune.test/asset", nil)
+
+	response, err := service.fetchAsset(context.Background(), incoming, storedAsset{URL: secretURL}, secretURL)
+
+	if response != nil {
+		_ = response.Body.Close()
+		t.Fatal("failed RoundTripper returned a response")
+	}
+	if !errors.Is(err, networkCause) {
+		t.Fatalf("sanitized playback error lost network cause: %v", err)
+	}
+	var requestErr *url.Error
+	if !errors.As(err, &requestErr) || requestErr.Op != "Get" || requestErr.URL != "" {
+		t.Fatalf("playback URL error was not sanitized with operation intact: %#v", requestErr)
+	}
+	if strings.Contains(err.Error(), secretURL) ||
+		strings.Contains(err.Error(), "/private/") ||
+		strings.Contains(err.Error(), "playback-secret") {
+		t.Fatalf("playback error exposed upstream request destination: %v", err)
+	}
+}
+
+func TestFetchAssetSanitizesRedirectDestination(t *testing.T) {
+	secretRedirect := "https://cdn.example/private/variant.m3u8?target=key.bin&token=redirect-secret"
+	redirectCause := errors.New("redirect refused")
+	service := &Service{client: &http.Client{
+		Transport: playbackRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{secretRedirect}},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    request,
+			}, nil
+		}),
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return redirectCause
+		},
+	}}
+	incoming := httptest.NewRequest(http.MethodGet, "http://rivune.test/asset", nil)
+
+	response, err := service.fetchAsset(
+		context.Background(),
+		incoming,
+		storedAsset{URL: "https://provider.example/master.m3u8"},
+		"https://provider.example/master.m3u8",
+	)
+
+	if response != nil {
+		_ = response.Body.Close()
+		t.Fatal("refused redirect returned a response")
+	}
+	if !errors.Is(err, redirectCause) {
+		t.Fatalf("sanitized redirect error lost cause: %v", err)
+	}
+	if strings.Contains(err.Error(), secretRedirect) ||
+		strings.Contains(err.Error(), "/private/") ||
+		strings.Contains(err.Error(), "redirect-secret") {
+		t.Fatalf("redirect error exposed destination: %v", err)
+	}
+	var requestErr *url.Error
+	if !errors.As(err, &requestErr) || requestErr.URL != "" {
+		t.Fatalf("redirect URL error was not sanitized: %#v", requestErr)
+	}
+}
+
+func TestFetchHLSChildDoesNotForwardProviderHeadersCrossOrigin(t *testing.T) {
+	var captured http.Header
+	service := &Service{client: &http.Client{Transport: playbackRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		captured = request.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("segment")),
+			Request:    request,
+		}, nil
+	})}}
+	incoming := httptest.NewRequest(http.MethodGet, "http://rivune.test/asset", nil)
+	incoming.Header.Set("Range", "bytes=0-1023")
+	response, err := service.fetchAsset(context.Background(), incoming, storedAsset{
+		URL: "https://provider.example/master.m3u8",
+		Headers: map[string]string{
+			"Authorization":  "Bearer provider-secret",
+			"Cookie":         "provider_session=secret",
+			"X-Provider-Key": "secret",
+		},
+	}, "https://cdn.example/segment.ts")
+	if err != nil {
+		t.Fatalf("fetch cross-origin HLS child: %v", err)
+	}
+	_ = response.Body.Close()
+	for _, name := range []string{"Authorization", "Cookie", "X-Provider-Key"} {
+		if got := captured.Get(name); got != "" {
+			t.Fatalf("cross-origin HLS child retained %s: %q", name, got)
+		}
+	}
+	if got := captured.Get("Range"); got != "bytes=0-1023" {
+		t.Fatalf("cross-origin HLS child Range = %q", got)
+	}
+	if got := captured.Get("User-Agent"); got != "Rivune-Playback/1" {
+		t.Fatalf("cross-origin HLS child User-Agent = %q", got)
+	}
+	captured = nil
+	response, err = service.fetchAsset(
+		context.Background(),
+		incoming,
+		storedAsset{
+			URL:     "https://provider.example/master.m3u8",
+			Headers: map[string]string{"Authorization": "Bearer provider-secret"},
+		},
+		"https://provider.example/segment.ts",
+	)
+	if err != nil {
+		t.Fatalf("fetch same-origin HLS child: %v", err)
+	}
+	_ = response.Body.Close()
+	if got := captured.Get("Authorization"); got != "Bearer provider-secret" {
+		t.Fatalf("same-origin HLS child Authorization = %q", got)
+	}
+}
+
 func TestNormalizeStreamsRanksCompatibleSourcesAndKeepsHeadersPrivate(t *testing.T) {
 	batch := addon.ResourceBatch{Results: []addon.ResourceResult{{
 		AddonID: "addon-id", ManifestID: "manifest-id",
@@ -49,10 +246,13 @@ func TestNormalizeStreamsRanksCompatibleSourcesAndKeepsHeadersPrivate(t *testing
 		]}`),
 	}}}
 
-	sources, assets := normalizeStreams(batch, Capabilities{
+	sources, assets, err := normalizeStreams(batch, Capabilities{
 		StreamingProtocols: []string{"hls", "youtube"},
 		Containers:         []string{"mp4", "webm"},
 	})
+	if err != nil {
+		t.Fatalf("normalize streams: %v", err)
+	}
 
 	if len(sources) != 3 || sources[0].Name != "Playable HLS" || !sources[0].Compatible || sources[1].Mode != "youtube" || sources[2].Compatible {
 		t.Fatalf("unexpected normalized sources: %+v", sources)
@@ -81,10 +281,13 @@ func TestNormalizeStreamsTreatsProxiedWebReadyContainerAsCompatible(t *testing.T
 		}]}`),
 	}}}
 
-	sources, _ := normalizeStreams(batch, Capabilities{
+	sources, _, err := normalizeStreams(batch, Capabilities{
 		StreamingProtocols: []string{"http"},
 		Containers:         []string{"mp4"},
 	})
+	if err != nil {
+		t.Fatalf("normalize streams: %v", err)
+	}
 
 	if len(sources) != 1 || !sources[0].Compatible {
 		t.Fatalf("expected server-proxied MP4 to be compatible: %+v", sources)
@@ -99,7 +302,7 @@ type recordingResourceFetcher struct {
 	fetchAllCalls int
 }
 
-func (fetcher *recordingResourceFetcher) Fetch(_ context.Context, _ auth.Principal, addonID string, path addon.ResourcePath) (addon.ResourceResult, error) {
+func (fetcher *recordingResourceFetcher) FetchPlaybackResource(_ context.Context, _ auth.Principal, addonID string, path addon.ResourcePath) (addon.ResourceResult, error) {
 	fetcher.fetchAddonID = addonID
 	fetcher.fetchPath = path
 	fetcher.fetchCalls++
@@ -109,7 +312,7 @@ func (fetcher *recordingResourceFetcher) Fetch(_ context.Context, _ auth.Princip
 	}, nil
 }
 
-func (fetcher *recordingResourceFetcher) FetchAll(_ context.Context, _ auth.Principal, path addon.ResourcePath) (addon.ResourceBatch, error) {
+func (fetcher *recordingResourceFetcher) FetchAllPlaybackResources(_ context.Context, _ auth.Principal, path addon.ResourcePath) (addon.ResourceBatch, error) {
 	fetcher.fetchAllPath = path
 	fetcher.fetchAllCalls++
 	return addon.ResourceBatch{Results: []addon.ResourceResult{{
@@ -204,15 +407,31 @@ func TestRewritePlaylistSignsEveryResolvedAsset(t *testing.T) {
 	}
 }
 
-func TestTargetSignatureRejectsTampering(t *testing.T) {
-	token := "opaque-playback-token"
+func TestTargetSignatureUsesOpaqueServerKey(t *testing.T) {
+	var signingKey [32]byte
+	copy(signingKey[:], "server-only-target-signing-key")
+	service := Service{targetSigningKey: signingKey}
+	sessionID := "session-1"
+	assetID := "stream-1"
+	token := "client-visible-playback-token"
 	target := "https://media.example/segment.ts"
-	signature := signTarget(token, target)
-	if !validTargetSignature(token, target, signature) {
-		t.Fatal("valid playback target signature was rejected")
+
+	signature := service.signTarget(sessionID, assetID, target)
+	if !service.validTargetSignature(sessionID, assetID, target, signature) {
+		t.Fatal("server-signed playback target was rejected")
 	}
-	if validTargetSignature(token, "http://127.0.0.1/private", signature) {
-		t.Fatal("tampered playback target signature was accepted")
+
+	clientMAC := hmac.New(sha256.New, []byte(token))
+	writeTargetSignaturePayload(clientMAC, sessionID, assetID, target)
+	forged := base64.RawURLEncoding.EncodeToString(clientMAC.Sum(nil))
+	if service.validTargetSignature(sessionID, assetID, target, forged) {
+		t.Fatal("client forged a target signature with its playback token")
+	}
+	if service.validTargetSignature(sessionID, assetID, "http://127.0.0.1/private", signature) {
+		t.Fatal("tampered playback target was accepted")
+	}
+	if service.validTargetSignature("session-2", assetID, target, signature) {
+		t.Fatal("target signature was reusable across playback sessions")
 	}
 }
 

@@ -3,11 +3,13 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,50 +18,62 @@ import (
 )
 
 type fakeAddonService struct {
-	installInput addon.InstallInput
-	installValue addon.InstalledAddon
-	installErr   error
-	listValue    []addon.InstalledAddon
-	listErr      error
-	removeID     string
-	removeErr    error
-	reorderInput addon.ReorderInput
-	reorderValue []addon.InstalledAddon
-	reorderErr   error
-	refreshID    string
-	refreshValue addon.InstalledAddon
-	refreshErr   error
-	updateID     string
-	updateInput  addon.UpdateAddonInput
-	updateValue  addon.InstalledAddon
-	updateErr    error
-	catalogs     []addon.CatalogDescriptor
-	catalogsErr  error
-	fetchAddonID string
-	fetchPath    addon.ResourcePath
-	fetchValue   addon.ResourceResult
-	fetchErr     error
-	allPath      addon.ResourcePath
-	allValue     addon.ResourceBatch
-	allErr       error
-	catalogType  string
-	catalogExtra []addon.ExtraValue
-	addonCatalog bool
-	catalogValue addon.ResourceBatch
-	catalogErr   error
-	searchType   string
-	searchInput  addon.CatalogSearchInput
-	searchValue  addon.ResourceBatch
-	searchErr    error
+	installInput        addon.InstallInput
+	installValue        addon.InstalledAddon
+	installTransportURL string
+	installErr          error
+	listValue           []addon.InstalledAddon
+	listErr             error
+	managementID        string
+	managementValue     addon.ManagedAddon
+	managementErr       error
+	removeID            string
+	removeErr           error
+	reorderInput        addon.ReorderInput
+	reorderValue        []addon.InstalledAddon
+	reorderErr          error
+	refreshID           string
+	refreshValue        addon.InstalledAddon
+	refreshErr          error
+	updateID            string
+	updateInput         addon.UpdateAddonInput
+	updateValue         addon.InstalledAddon
+	updateTransportURL  string
+	updateErr           error
+	catalogs            []addon.CatalogDescriptor
+	catalogsErr         error
+	fetchAddonID        string
+	fetchCalls          int
+	fetchPath           addon.ResourcePath
+	fetchValue          addon.ResourceResult
+	fetchErr            error
+	allPath             addon.ResourcePath
+	allCalls            int
+	allValue            addon.ResourceBatch
+	allErr              error
+	catalogType         string
+	catalogExtra        []addon.ExtraValue
+	addonCatalog        bool
+	catalogValue        addon.ResourceBatch
+	catalogErr          error
+	searchType          string
+	searchInput         addon.CatalogSearchInput
+	searchValue         addon.ResourceBatch
+	searchErr           error
 }
 
-func (fake *fakeAddonService) Install(_ context.Context, _ auth.Principal, input addon.InstallInput) (addon.InstalledAddon, error) {
+func (fake *fakeAddonService) Install(_ context.Context, _ auth.Principal, input addon.InstallInput) (addon.ManagedAddon, error) {
 	fake.installInput = input
-	return fake.installValue, fake.installErr
+	return addon.ManagedAddon{InstalledAddon: fake.installValue, TransportURL: fake.installTransportURL}, fake.installErr
 }
 
 func (fake *fakeAddonService) List(context.Context, auth.Principal) ([]addon.InstalledAddon, error) {
 	return fake.listValue, fake.listErr
+}
+
+func (fake *fakeAddonService) Management(_ context.Context, _ auth.Principal, addonID string) (addon.ManagedAddon, error) {
+	fake.managementID = addonID
+	return fake.managementValue, fake.managementErr
 }
 
 func (fake *fakeAddonService) Remove(_ context.Context, _ auth.Principal, addonID string) error {
@@ -76,10 +90,10 @@ func (fake *fakeAddonService) Refresh(_ context.Context, _ auth.Principal, addon
 	fake.refreshID = addonID
 	return fake.refreshValue, fake.refreshErr
 }
-func (fake *fakeAddonService) Update(_ context.Context, _ auth.Principal, addonID string, input addon.UpdateAddonInput) (addon.InstalledAddon, error) {
+func (fake *fakeAddonService) Update(_ context.Context, _ auth.Principal, addonID string, input addon.UpdateAddonInput) (addon.ManagedAddon, error) {
 	fake.updateID = addonID
 	fake.updateInput = input
-	return fake.updateValue, fake.updateErr
+	return addon.ManagedAddon{InstalledAddon: fake.updateValue, TransportURL: fake.updateTransportURL}, fake.updateErr
 }
 
 func (fake *fakeAddonService) Catalogs(context.Context, auth.Principal) ([]addon.CatalogDescriptor, error) {
@@ -87,12 +101,14 @@ func (fake *fakeAddonService) Catalogs(context.Context, auth.Principal) ([]addon
 }
 
 func (fake *fakeAddonService) Fetch(_ context.Context, _ auth.Principal, addonID string, path addon.ResourcePath) (addon.ResourceResult, error) {
+	fake.fetchCalls++
 	fake.fetchAddonID = addonID
 	fake.fetchPath = path
 	return fake.fetchValue, fake.fetchErr
 }
 
 func (fake *fakeAddonService) FetchAll(_ context.Context, _ auth.Principal, path addon.ResourcePath) (addon.ResourceBatch, error) {
+	fake.allCalls++
 	fake.allPath = path
 	return fake.allValue, fake.allErr
 }
@@ -113,7 +129,7 @@ func (fake *fakeAddonService) FetchCatalogs(_ context.Context, _ auth.Principal,
 func TestInstallAddonUsesProfileScopedRegistry(t *testing.T) {
 	installedAt := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	service := &fakeAddonService{installValue: addon.InstalledAddon{
-		ID: "11111111-1111-4111-8111-111111111111", TransportURL: "https://addon.example/config/manifest.json",
+		ID:          "11111111-1111-4111-8111-111111111111",
 		Manifest:    []byte(`{"id":"org.example","version":"1.0.0","name":"Example","types":["movie"],"resources":["stream"],"catalogs":[]}`),
 		InstalledAt: installedAt, UpdatedAt: installedAt,
 	}}
@@ -138,9 +154,8 @@ func TestInstallAddonUsesProfileScopedRegistry(t *testing.T) {
 
 func TestUpdateAddonForwardsCompleteInput(t *testing.T) {
 	service := &fakeAddonService{updateValue: addon.InstalledAddon{
-		ID:           "11111111-1111-4111-8111-111111111111",
-		TransportURL: "https://new-addon.example/manifest.json",
-		ProfileIDs:   []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+		ID:         "11111111-1111-4111-8111-111111111111",
+		ProfileIDs: []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
 	}}
 	api := addonAPI(service)
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/addons/11111111-1111-4111-8111-111111111111", bytes.NewBufferString(`{"transportUrl":"https://new-addon.example","profileIds":["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]}`))
@@ -155,24 +170,51 @@ func TestUpdateAddonForwardsCompleteInput(t *testing.T) {
 	}
 	var body addon.InstalledAddon
 	decodeResponse(t, response, &body)
-	if body.ID != service.updateValue.ID || body.TransportURL != service.updateValue.TransportURL {
+	if body.ID != service.updateValue.ID {
 		t.Fatalf("unexpected update response: %+v", body)
 	}
 	if service.updateID != "11111111-1111-4111-8111-111111111111" {
 		t.Fatalf("unexpected addon ID: %q", service.updateID)
 	}
-	if service.updateInput.TransportURL != "https://new-addon.example" {
-		t.Fatalf("unexpected transport URL: %q", service.updateInput.TransportURL)
+	if service.updateInput.TransportURL == nil || *service.updateInput.TransportURL != "https://new-addon.example" {
+		t.Fatalf("unexpected transport URL: %v", service.updateInput.TransportURL)
 	}
 	if len(service.updateInput.ProfileIDs) != 1 || service.updateInput.ProfileIDs[0] != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
 		t.Fatalf("unexpected profile IDs: %+v", service.updateInput.ProfileIDs)
 	}
 }
 
-func TestAddonResourceRoutePreservesOpaqueIDAndRepeatedExtras(t *testing.T) {
-	service := &fakeAddonService{fetchValue: addon.ResourceResult{Payload: []byte(`{"streams":[]}`)}}
+func TestUpdateAddonAllowsAssignmentOnlyInput(t *testing.T) {
+	service := &fakeAddonService{updateValue: addon.InstalledAddon{
+		ID:         "11111111-1111-4111-8111-111111111111",
+		ProfileIDs: []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+	}}
 	api := addonAPI(service)
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/11111111-1111-4111-8111-111111111111/resource/stream/anime-special/kitsu%3Aanime%2F42%3Aepisode%2F7?genre=Sci%20Fi&genre=Drama%2FAction&custom=a%2Bb", nil)
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/addons/11111111-1111-4111-8111-111111111111", bytes.NewBufferString(`{"profileIds":["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]}`))
+	request.Header.Set("Authorization", "Bearer access")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if service.updateInput.TransportURL != nil {
+		t.Fatalf("assignment-only update unexpectedly supplied transport URL: %v", service.updateInput.TransportURL)
+	}
+	if len(service.updateInput.ProfileIDs) != 1 || service.updateInput.ProfileIDs[0] != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
+		t.Fatalf("unexpected profile IDs: %+v", service.updateInput.ProfileIDs)
+	}
+}
+
+func TestRefreshAddonPreservesSharedMutationOutcome(t *testing.T) {
+	const addonID = "11111111-1111-4111-8111-111111111111"
+	service := &fakeAddonService{refreshValue: addon.InstalledAddon{
+		ID: addonID, Manifest: []byte(`{"id":"org.example","version":"2.0.0"}`),
+	}}
+	api := addonAPI(service)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/addons/"+addonID+"/refresh", nil)
 	request.Header.Set("Authorization", "Bearer access")
 	response := httptest.NewRecorder()
 
@@ -181,10 +223,245 @@ func TestAddonResourceRoutePreservesOpaqueIDAndRepeatedExtras(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
+	if service.refreshID != addonID {
+		t.Fatalf("refresh addon ID = %q, want %q", service.refreshID, addonID)
+	}
+	var refreshed addon.InstalledAddon
+	decodeResponse(t, response, &refreshed)
+	if refreshed.ID != addonID {
+		t.Fatalf("refresh response addon ID = %q, want %q", refreshed.ID, addonID)
+	}
+
+	service.refreshErr = errors.Join(errors.New("wrapped"), addon.ErrForbidden)
+	forbiddenRequest := httptest.NewRequest(http.MethodPost, "/api/v1/addons/"+addonID+"/refresh", nil)
+	forbiddenRequest.Header.Set("Authorization", "Bearer access")
+	forbiddenResponse := httptest.NewRecorder()
+	api.Handler().ServeHTTP(forbiddenResponse, forbiddenRequest)
+	if forbiddenResponse.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d: %s", forbiddenResponse.Code, forbiddenResponse.Body.String())
+	}
+	var body errorEnvelope
+	decodeResponse(t, forbiddenResponse, &body)
+	if body.Error.Code != "addon_forbidden" {
+		t.Fatalf("refresh error code = %q, want addon_forbidden", body.Error.Code)
+	}
+}
+
+func TestReorderAddonsReturnsStableForbiddenResponse(t *testing.T) {
+	const addonID = "11111111-1111-4111-8111-111111111111"
+	service := &fakeAddonService{reorderErr: errors.Join(errors.New("wrapped"), addon.ErrForbidden)}
+	api := addonAPI(service)
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/addons/order", strings.NewReader(`{"addonIds":["`+addonID+`"]}`))
+	request.Header.Set("Authorization", "Bearer access")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if len(service.reorderInput.AddonIDs) != 1 || service.reorderInput.AddonIDs[0] != addonID {
+		t.Fatalf("reorder input = %+v, want addon %q", service.reorderInput, addonID)
+	}
+	var body errorEnvelope
+	decodeResponse(t, response, &body)
+	if body.Error.Code != "addon_forbidden" {
+		t.Fatalf("reorder error code = %q, want addon_forbidden", body.Error.Code)
+	}
+}
+
+func TestAddonManagementReturnsExactTransportOnlyToGlobalAdministrator(t *testing.T) {
+	const (
+		addonID      = "11111111-1111-4111-8111-111111111111"
+		transportURL = "https://provider.example/configured/private/manifest.json?token=management-secret"
+	)
+	managed := addon.ManagedAddon{
+		InstalledAddon: addon.InstalledAddon{ID: addonID, Manifest: json.RawMessage(`{"id":"org.example","name":"Example"}`)},
+		TransportURL:   transportURL,
+	}
+
+	service := &fakeAddonService{managementValue: managed}
+	api := addonAPI(service)
+	api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/"+addonID+"/management", nil)
+	request.Header.Set("Authorization", "Bearer access")
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("global management status = %d, want 200", response.Code)
+	}
+	var body addon.ManagedAddon
+	decodeResponse(t, response, &body)
+	if body.TransportURL != transportURL {
+		t.Fatal("global management response did not preserve the stored transport URL")
+	}
+	if service.managementID != addonID {
+		t.Fatalf("management addon ID = %q, want %q", service.managementID, addonID)
+	}
+
+	categoryID := "22222222-2222-4222-8222-222222222222"
+	for _, principal := range []auth.Principal{
+		{Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID},
+		{Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID},
+	} {
+		service := &fakeAddonService{managementValue: managed}
+		api := addonAPI(service)
+		api.auth = &fakeAuthService{principal: principal}
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/"+addonID+"/management", nil)
+		request.Header.Set("Authorization", "Bearer access")
+		response := httptest.NewRecorder()
+		api.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("non-global management status = %d, want 403", response.Code)
+		}
+		if service.managementID != "" {
+			t.Fatal("non-global management request reached the service")
+		}
+		if strings.Contains(response.Body.String(), "transportUrl") || strings.Contains(response.Body.String(), "management-secret") {
+			t.Fatal("non-global management response exposed transport details")
+		}
+	}
+}
+
+func TestAddonManagementMutationsUseManagedAddonResponse(t *testing.T) {
+	const (
+		addonID      = "11111111-1111-4111-8111-111111111111"
+		transportURL = "https://provider.example/configured/private/manifest.json?token=mutation-secret"
+	)
+	installed := addon.InstalledAddon{ID: addonID, Manifest: json.RawMessage(`{"id":"org.example","name":"Example"}`)}
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		setup  func(*fakeAddonService)
+	}{
+		{name: "install", method: http.MethodPost, path: "/api/v1/addons", body: `{"transportUrl":"https://request.example/manifest.json","profileIds":[]}`, setup: func(service *fakeAddonService) {
+			service.installValue = installed
+			service.installTransportURL = transportURL
+		}},
+		{name: "update", method: http.MethodPut, path: "/api/v1/addons/" + addonID, body: `{"profileIds":[]}`, setup: func(service *fakeAddonService) {
+			service.updateValue = installed
+			service.updateTransportURL = transportURL
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeAddonService{}
+			test.setup(service)
+			api := addonAPI(service)
+			api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}}
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			request.Header.Set("Authorization", "Bearer access")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			api.Handler().ServeHTTP(response, request)
+			if response.Code < http.StatusOK || response.Code >= http.StatusMultipleChoices {
+				t.Fatalf("management mutation status = %d", response.Code)
+			}
+			var body addon.ManagedAddon
+			decodeResponse(t, response, &body)
+			if body.TransportURL != transportURL {
+				t.Fatal("management mutation did not return the exact stored transport URL")
+			}
+		})
+	}
+}
+
+func TestDelegatedAddonMutationResponseRedactsTransportURL(t *testing.T) {
+	const addonID = "11111111-1111-4111-8111-111111111111"
+	service := &fakeAddonService{
+		updateValue:        addon.InstalledAddon{ID: addonID, Manifest: json.RawMessage(`{"id":"org.example","name":"Example"}`)},
+		updateTransportURL: "https://provider.example/configured/private/manifest.json?token=delegated-secret",
+	}
+	categoryID := "22222222-2222-4222-8222-222222222222"
+	api := addonAPI(service)
+	api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID}}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/addons/"+addonID, strings.NewReader(`{"profileIds":[]}`))
+	request.Header.Set("Authorization", "Bearer access")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("delegated mutation status = %d, want 200", response.Code)
+	}
+	if strings.Contains(response.Body.String(), "transportUrl") || strings.Contains(response.Body.String(), "delegated-secret") {
+		t.Fatal("delegated mutation response exposed transport details")
+	}
+}
+
+func TestNonManagementInstalledAddonResponsesNeverExposeTransportURL(t *testing.T) {
+	const addonID = "11111111-1111-4111-8111-111111111111"
+	installed := addon.InstalledAddon{
+		ID:       addonID,
+		Manifest: json.RawMessage(`{"id":"org.example","name":"Example"}`),
+	}
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		setup  func(*fakeAddonService)
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/v1/addons", setup: func(service *fakeAddonService) {
+			service.listValue = []addon.InstalledAddon{installed}
+		}},
+		{name: "reorder", method: http.MethodPut, path: "/api/v1/addons/order", body: `{"addonIds":["` + addonID + `"]}`, setup: func(service *fakeAddonService) {
+			service.reorderValue = []addon.InstalledAddon{installed}
+		}},
+		{name: "refresh", method: http.MethodPost, path: "/api/v1/addons/" + addonID + "/refresh", setup: func(service *fakeAddonService) {
+			service.refreshValue = installed
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeAddonService{}
+			test.setup(service)
+			api := addonAPI(service)
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			request.Header.Set("Authorization", "Bearer access")
+			if test.body != "" {
+				request.Header.Set("Content-Type", "application/json")
+			}
+			response := httptest.NewRecorder()
+
+			api.Handler().ServeHTTP(response, request)
+
+			if response.Code < http.StatusOK || response.Code >= http.StatusMultipleChoices {
+				t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+			}
+			serialized := response.Body.String()
+			if strings.Contains(serialized, "transportUrl") || strings.Contains(serialized, "request-secret") || strings.Contains(serialized, "/private/") {
+				t.Fatalf("response exposed addon transport: %s", serialized)
+			}
+		})
+	}
+}
+
+func TestAddonResourceRoutePreservesOpaqueIDAndRepeatedExtras(t *testing.T) {
+	service := &fakeAddonService{fetchValue: addon.ResourceResult{Resource: "meta", Payload: []byte(`{"meta":{"id":"kitsu:anime/42"}}`)}}
+	api := addonAPI(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/11111111-1111-4111-8111-111111111111/resource/meta/anime-special/kitsu%3Aanime%2F42%3Aepisode%2F7?genre=Sci%20Fi&genre=Drama%2FAction&custom=a%2Bb", nil)
+	request.Header.Set("Authorization", "Bearer access")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"id":"kitsu:anime/42"`) {
+		t.Fatalf("meta payload was not returned: %s", response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "transportUrl") {
+		t.Fatalf("resource response exposed addon transport URL: %s", response.Body.String())
+	}
 	if service.fetchAddonID != "11111111-1111-4111-8111-111111111111" {
 		t.Fatalf("unexpected addon ID: %q", service.fetchAddonID)
 	}
-	if service.fetchPath.Resource != "stream" || service.fetchPath.Type != "anime-special" || service.fetchPath.ID != "kitsu:anime/42:episode/7" {
+	if service.fetchPath.Resource != "meta" || service.fetchPath.Type != "anime-special" || service.fetchPath.ID != "kitsu:anime/42:episode/7" {
 		t.Fatalf("opaque resource path changed: %+v", service.fetchPath)
 	}
 	wantExtra := []addon.ExtraValue{{Name: "genre", Value: "Sci Fi"}, {Name: "genre", Value: "Drama/Action"}, {Name: "custom", Value: "a+b"}}
@@ -195,6 +472,69 @@ func TestAddonResourceRoutePreservesOpaqueIDAndRepeatedExtras(t *testing.T) {
 		if service.fetchPath.Extra[index] != wantExtra[index] {
 			t.Fatalf("extra %d = %+v, want %+v", index, service.fetchPath.Extra[index], wantExtra[index])
 		}
+	}
+}
+
+func TestAddonGenericRoutesRejectPlaybackResourcesWithoutServiceFetch(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "single stream", path: "/api/v1/addons/11111111-1111-4111-8111-111111111111/resource/stream/movie/provider-id"},
+		{name: "single stream with malformed extra", path: "/api/v1/addons/11111111-1111-4111-8111-111111111111/resource/stream/movie/provider-id?malformed"},
+		{name: "single subtitles", path: "/api/v1/addons/11111111-1111-4111-8111-111111111111/resource/subtitles/movie/provider-id"},
+		{name: "all stream", path: "/api/v1/addons/resources/stream/movie/provider-id"},
+		{name: "all subtitles", path: "/api/v1/addons/resources/subtitles/movie/provider-id"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeAddonService{
+				fetchValue: addon.ResourceResult{Payload: []byte(`{"streams":[{"url":"https://provider.example/private?token=secret","behaviorHints":{"proxyHeaders":{"request":{"Authorization":"Bearer secret"}}}}]}`)},
+				allValue:   addon.ResourceBatch{Results: []addon.ResourceResult{{Payload: []byte(`{"subtitles":[{"url":"https://provider.example/private.vtt?token=secret"}]}`)}}},
+			}
+			api := addonAPI(service)
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			request.Header.Set("Authorization", "Bearer access")
+			response := httptest.NewRecorder()
+
+			api.Handler().ServeHTTP(response, request)
+
+			if response.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422: %s", response.Code, response.Body.String())
+			}
+			var body errorEnvelope
+			decodeResponse(t, response, &body)
+			if body.Error.Code != "addon_resource_unsupported" {
+				t.Fatalf("error code = %q, want addon_resource_unsupported", body.Error.Code)
+			}
+			if service.fetchCalls != 0 || service.allCalls != 0 {
+				t.Fatalf("rejected route reached addon service: fetch=%d fetchAll=%d", service.fetchCalls, service.allCalls)
+			}
+			for _, secret := range []string{"provider.example", "private.vtt", "token", "Authorization", "Bearer secret"} {
+				if strings.Contains(response.Body.String(), secret) {
+					t.Fatalf("rejected route exposed %q: %s", secret, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestAddonCatalogResourceRouteRemainsAvailable(t *testing.T) {
+	service := &fakeAddonService{allValue: addon.ResourceBatch{Results: []addon.ResourceResult{{
+		Resource: "catalog", Type: "movie", ID: "popular", Payload: []byte(`{"metas":[]}`),
+	}}}}
+	api := addonAPI(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/resources/catalog/movie/popular", nil)
+	request.Header.Set("Authorization", "Bearer access")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	if service.allCalls != 1 || service.allPath.Resource != "catalog" {
+		t.Fatalf("catalog request was not forwarded: calls=%d path=%+v", service.allCalls, service.allPath)
 	}
 }
 

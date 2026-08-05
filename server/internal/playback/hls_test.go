@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,6 +113,39 @@ func (*failingHLSProcessor) ConvertSubtitle(context.Context, storedAsset, io.Wri
 
 func (*failingHLSProcessor) Probe(context.Context, storedAsset) (MediaInspection, error) {
 	return MediaInspection{}, nil
+}
+
+type excessiveSubtitleProcessor struct{}
+
+func (*excessiveSubtitleProcessor) ProcessHLS(context.Context, storedAsset, string) error {
+	return nil
+}
+
+func (*excessiveSubtitleProcessor) Probe(context.Context, storedAsset) (MediaInspection, error) {
+	return MediaInspection{}, nil
+}
+
+func (*excessiveSubtitleProcessor) ConvertSubtitle(_ context.Context, _ storedAsset, destination io.Writer) error {
+	chunk := bytes.Repeat([]byte("x"), 64<<10)
+	for total := 0; total <= maximumConvertedSubtitleBytes; total += len(chunk) {
+		if _, err := destination.Write(chunk); err != nil {
+			return nil
+		}
+	}
+	return nil
+}
+
+func TestProxyConvertedSubtitleEnforcesOutputLimit(t *testing.T) {
+	service := &Service{processor: &excessiveSubtitleProcessor{}}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/subtitle.vtt", nil)
+	err := service.proxyConvertedSubtitle(response, request, storedAsset{})
+	if !errors.Is(err, ErrMediaProcessingFailed) || !strings.Contains(err.Error(), "converted subtitle exceeds") {
+		t.Fatalf("excessive converted subtitle error = %v", err)
+	}
+	if response.Body.Len() != 0 {
+		t.Fatalf("excessive converted subtitle wrote %d response bytes", response.Body.Len())
+	}
 }
 
 func TestStartSessionHLSWaitsForInitialPlaylistFailure(t *testing.T) {

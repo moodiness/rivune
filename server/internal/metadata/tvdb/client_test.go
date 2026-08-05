@@ -11,6 +11,17 @@ import (
 	"github.com/moodiness/rivune/server/internal/metadata"
 )
 
+func TestProductionClientRejectsCrossOriginRedirect(t *testing.T) {
+	client := New("test-api-key", "test-pin", nil)
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://[::1]/private", nil)
+	if err != nil {
+		t.Fatalf("create redirect request: %v", err)
+	}
+	if err := client.httpClient.CheckRedirect(request, nil); err == nil {
+		t.Fatal("TVDB production client accepted a loopback redirect")
+	}
+}
+
 func TestEnrichSeriesAuthenticatesWithoutPINAndCachesToken(t *testing.T) {
 	var loginCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

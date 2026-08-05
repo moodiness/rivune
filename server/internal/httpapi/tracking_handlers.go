@@ -79,6 +79,9 @@ func writeTrackingError(a *API, w http.ResponseWriter, err error, operation stri
 	case errors.Is(err, tracking.ErrAuthorizationSlow):
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusTooManyRequests, "tracking_authorization_slow_down", "Wait before checking the authorization again")
+	case errors.Is(err, tracking.ErrOutboxCapacity):
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "tracking_sync_capacity", "Tracking synchronization is temporarily at capacity; retry the mutation")
 	case errors.Is(err, tracking.ErrProviderUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "tracking_provider_unavailable", "The tracking provider is temporarily unavailable")
 	default:

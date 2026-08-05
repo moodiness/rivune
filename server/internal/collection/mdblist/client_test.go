@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/collection"
 )
 
@@ -77,5 +78,25 @@ func TestResolveCollectionSourceMapsMDBListProviderErrors(t *testing.T) {
 				t.Fatalf("expected %v, got %v", test.want, err)
 			}
 		})
+	}
+}
+
+func TestResolveCollectionSourceConsumesSharedItemBudgetBeforeNormalization(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"movies":[
+			{"id":1,"title":"One"},
+			{"id":2,"title":"Two"}
+		],"shows":[]}`))
+	}))
+	defer server.Close()
+	ctx, budget := addon.WithPayloadBudget(context.Background(), 1024, 1)
+	defer budget.Cancel()
+
+	client := newWithBaseURL("api-key", server.URL, server.Client())
+	_, err := client.ResolveCollectionSource(addon.WithPayloadBudgetSource(ctx), collection.MDBListSource{
+		ListID: 123, MediaType: collection.MediaTypeMovie, Sort: "score", Order: "desc",
+	}, 1)
+	if err == nil || !budget.Exceeded() {
+		t.Fatalf("MDBList item budget error = %v, exceeded=%t", err, budget.Exceeded())
 	}
 }

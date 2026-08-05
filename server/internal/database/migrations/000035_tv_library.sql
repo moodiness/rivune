@@ -1,14 +1,18 @@
-BEGIN;
 
 ALTER TABLE titles
-    DROP CONSTRAINT titles_media_type_check,
-    DROP CONSTRAINT titles_hierarchy_check,
-    ADD COLUMN source_addon_id uuid,
-    ADD COLUMN source_catalog_id text,
-    ADD COLUMN source_name text,
-    ADD COLUMN country text,
-    ADD COLUMN language text,
-    ADD COLUMN category text,
+    DROP CONSTRAINT IF EXISTS titles_media_type_check,
+    DROP CONSTRAINT IF EXISTS titles_hierarchy_check,
+    ADD COLUMN IF NOT EXISTS source_addon_id uuid,
+    ADD COLUMN IF NOT EXISTS source_catalog_id text,
+    ADD COLUMN IF NOT EXISTS source_name text,
+    ADD COLUMN IF NOT EXISTS country text,
+    ADD COLUMN IF NOT EXISTS language text,
+    ADD COLUMN IF NOT EXISTS category text,
+    DROP CONSTRAINT IF EXISTS titles_source_catalog_id_check,
+    DROP CONSTRAINT IF EXISTS titles_source_name_check,
+    DROP CONSTRAINT IF EXISTS titles_country_check,
+    DROP CONSTRAINT IF EXISTS titles_language_check,
+    DROP CONSTRAINT IF EXISTS titles_category_check,
     ADD CONSTRAINT titles_media_type_check
         CHECK (media_type IN ('movie', 'series', 'season', 'episode', 'tv')),
     ADD CONSTRAINT titles_hierarchy_check
@@ -28,11 +32,11 @@ ALTER TABLE titles
         CHECK (category IS NULL OR (category = btrim(category) AND char_length(category) BETWEEN 1 AND 256));
 
 ALTER TABLE title_external_ids
-    DROP CONSTRAINT title_external_ids_namespace_check,
+    DROP CONSTRAINT IF EXISTS title_external_ids_namespace_check,
     ADD CONSTRAINT title_external_ids_namespace_check
         CHECK (namespace IN ('movie', 'series', 'season', 'episode', 'tv'));
 
-CREATE INDEX titles_source_addon_id_idx
+CREATE INDEX IF NOT EXISTS titles_source_addon_id_idx
     ON titles (source_addon_id)
     WHERE source_addon_id IS NOT NULL;
 
@@ -52,5 +56,3 @@ BEGIN
     RETURN NEW;
 END
 $function$;
-
-COMMIT;

@@ -59,6 +59,29 @@ func TestNormalizeAndValidateAcceptsEveryTMDBSourceType(t *testing.T) {
 	}
 }
 
+func TestNormalizeAndValidatePreservesAddonManifestIdentity(t *testing.T) {
+	input := SaveInput{
+		Title: "Curated",
+		Folders: []Folder{{
+			Title: "Featured",
+			Sources: []Source{{
+				Kind: SourceKindAddonCatalog, Title: "Popular",
+				AddonCatalog: &AddonCatalogSource{
+					AddonID: "33333333-3333-4333-8333-333333333333", ManifestID: "org.example.metadata",
+					Type: MediaTypeMovie, CatalogID: "popular",
+				},
+			}},
+		}},
+	}
+	normalized, err := normalizeAndValidate(input, false)
+	if err != nil {
+		t.Fatalf("normalize addon catalog source: %v", err)
+	}
+	if got := normalized.Folders[0].Sources[0].AddonCatalog.ManifestID; got != "org.example.metadata" {
+		t.Fatalf("normalized manifest identity = %q", got)
+	}
+}
+
 func TestNormalizeAndValidateFolderSourceView(t *testing.T) {
 	validSource := Source{
 		Kind: SourceKindTMDB, Title: "Discover",

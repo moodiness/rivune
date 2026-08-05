@@ -1,4 +1,3 @@
-BEGIN;
 
 CREATE TABLE IF NOT EXISTS operation_schedules (
     task text PRIMARY KEY,
@@ -26,5 +25,3 @@ CREATE TABLE IF NOT EXISTS operation_schedules (
 INSERT INTO operation_schedules (task)
 VALUES ('metadata-refresh')
 ON CONFLICT (task) DO NOTHING;
-
-COMMIT;

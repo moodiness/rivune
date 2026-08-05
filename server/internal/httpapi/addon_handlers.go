@@ -22,6 +22,24 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request, principal auth.
 	writeJSON(w, http.StatusOK, map[string]any{"addons": addons})
 }
 
+func (a *API) addonManagement(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !principal.IsGlobalAdministrator() {
+		a.writeAddonError(w, "read addon management details", addon.ErrForbidden)
+		return
+	}
+	managed, err := a.addons.Management(r.Context(), principal, r.PathValue("addonId"))
+	if err != nil {
+		a.writeAddonError(w, "read addon management details", err)
+		return
+	}
+	if a.artwork != nil {
+		values := []addon.InstalledAddon{managed.InstalledAddon}
+		a.artwork.PresentInstalledAddons(r.Context(), values)
+		managed.InstalledAddon = values[0]
+	}
+	writeJSON(w, http.StatusOK, managed)
+}
+
 func (a *API) installAddon(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	if !requireJSON(w, r) {
 		return
@@ -36,10 +54,13 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request, principal aut
 		a.writeAddonError(w, "install addon", err)
 		return
 	}
+	if !principal.IsGlobalAdministrator() {
+		installed.TransportURL = ""
+	}
 	if a.artwork != nil {
-		values := []addon.InstalledAddon{installed}
+		values := []addon.InstalledAddon{installed.InstalledAddon}
 		a.artwork.PresentInstalledAddons(r.Context(), values)
-		installed = values[0]
+		installed.InstalledAddon = values[0]
 	}
 	writeJSON(w, http.StatusCreated, installed)
 }
@@ -99,10 +120,13 @@ func (a *API) updateAddon(w http.ResponseWriter, r *http.Request, principal auth
 		a.writeAddonError(w, "update addon", err)
 		return
 	}
+	if !principal.IsGlobalAdministrator() {
+		installed.TransportURL = ""
+	}
 	if a.artwork != nil {
-		values := []addon.InstalledAddon{installed}
+		values := []addon.InstalledAddon{installed.InstalledAddon}
 		a.artwork.PresentInstalledAddons(r.Context(), values)
-		installed = values[0]
+		installed.InstalledAddon = values[0]
 	}
 	writeJSON(w, http.StatusOK, installed)
 }
@@ -117,6 +141,10 @@ func (a *API) addonCatalogDescriptors(w http.ResponseWriter, r *http.Request, pr
 }
 
 func (a *API) fetchAddonResource(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !addon.IsExposableResource(r.PathValue("resource")) {
+		a.writeAddonError(w, "fetch addon resource", addon.ErrUnsupportedResource)
+		return
+	}
 	path, err := addonResourcePath(r)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_request", err.Error())
@@ -136,6 +164,10 @@ func (a *API) fetchAddonResource(w http.ResponseWriter, r *http.Request, princip
 }
 
 func (a *API) fetchAllAddonResources(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !addon.IsExposableResource(r.PathValue("resource")) {
+		a.writeAddonError(w, "fetch addon resources", addon.ErrUnsupportedResource)
+		return
+	}
 	path, err := addonResourcePath(r)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_request", err.Error())

@@ -2,13 +2,44 @@ package playback
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
 )
+
+func TestIntroDBCachePruneIsBoundedAndAmortized(t *testing.T) {
+	query := strings.Join(strings.Fields(pruneIntroDBCacheSQL), " ")
+	for _, fragment := range []string{
+		"WHERE expires_at <= now()",
+		"ORDER BY expires_at, imdb_id, season_number, episode_number",
+		"LIMIT $1 FOR UPDATE SKIP LOCKED",
+		"DELETE FROM introdb_segment_cache cached USING expired",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("IntroDB prune query lacks %q: %s", fragment, query)
+		}
+	}
+	if introDBCachePruneBatch != 128 {
+		t.Fatalf("IntroDB prune batch = %d, want 128", introDBCachePruneBatch)
+	}
+
+	service := &Service{}
+	prunes := 0
+	for range introDBCachePruneEveryStore * 2 {
+		if service.shouldPruneIntroDBCache() {
+			prunes++
+		}
+	}
+	if prunes != 2 {
+		t.Fatalf("IntroDB prune ran %d times across %d stores, want 2", prunes, introDBCachePruneEveryStore*2)
+	}
+}
 
 func TestFetchIntroDBMarkersUsesVerifiedSegmentsEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -67,6 +98,32 @@ func TestFetchIntroDBMarkersDoesNotExposeUpstreamErrors(t *testing.T) {
 	_, _, err := service.fetchIntroDBMarkers(context.Background(), MarkerInput{IMDBID: "tt0903747", Season: 1, Episode: 1})
 	if err == nil || err.Error() != "IntroDB returned status 503" {
 		t.Fatalf("unexpected sanitized upstream error: %v", err)
+	}
+}
+
+func TestFetchIntroDBMarkersSanitizesRequestURL(t *testing.T) {
+	networkCause := errors.New("connection reset")
+	service := &Service{
+		introDBClient: &http.Client{Transport: playbackRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, networkCause
+		})},
+		introDBBaseURL: "https://introdb.example/private",
+	}
+
+	_, _, err := service.fetchIntroDBMarkers(
+		context.Background(),
+		MarkerInput{IMDBID: "introdb-secret", Season: 1, Episode: 2},
+	)
+
+	if !errors.Is(err, networkCause) {
+		t.Fatalf("sanitized IntroDB error lost network cause: %v", err)
+	}
+	var requestErr *url.Error
+	if !errors.As(err, &requestErr) || requestErr.Op != "Get" || requestErr.URL != "" {
+		t.Fatalf("IntroDB URL error was not sanitized with operation intact: %#v", requestErr)
+	}
+	if strings.Contains(err.Error(), "/private/segments") || strings.Contains(err.Error(), "introdb-secret") {
+		t.Fatalf("IntroDB error exposed request destination: %v", err)
 	}
 }
 

@@ -62,8 +62,9 @@ type Profile struct {
 }
 
 type Selection struct {
-	Profile   Profile
-	ExpiresAt time.Time
+	Profile        Profile
+	ExpiresAt      time.Time
+	ProfileContext string
 }
 
 type CreateInput struct {
@@ -508,24 +509,31 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 	); err != nil {
 		return Profile{}, fmt.Errorf("update profile: %w", err)
 	}
-	var unrestrictedCount int
-	if err := tx.QueryRow(ctx, `
-		SELECT count(*) FROM profiles
-		WHERE enabled
-		  AND available_from IS NULL AND available_until IS NULL
-		  AND access_start_time IS NULL AND access_end_time IS NULL
-	`).Scan(&unrestrictedCount); err != nil {
-		return Profile{}, fmt.Errorf("count unrestricted profiles: %w", err)
+	categoryIDs := []string{oldCategoryID}
+	if categoryChanged {
+		categoryIDs = append(categoryIDs, current.CategoryID)
 	}
-	if err := ensureUnrestrictedProfile(unrestrictedCount); err != nil {
-		return Profile{}, err
+	for _, categoryID := range categoryIDs {
+		var unrestrictedCount int
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*) FROM profiles
+			WHERE category_id::text = $1
+			  AND enabled
+			  AND available_from IS NULL AND available_until IS NULL
+			  AND access_start_time IS NULL AND access_end_time IS NULL
+		`, categoryID).Scan(&unrestrictedCount); err != nil {
+			return Profile{}, fmt.Errorf("count unrestricted category profiles: %w", err)
+		}
+		if err := ensureUnrestrictedProfile(unrestrictedCount); err != nil {
+			return Profile{}, err
+		}
 	}
 	if categoryChanged {
 		if _, err := tx.Exec(ctx, `
 			UPDATE auth_sessions
 			SET revoked_at = COALESCE(revoked_at, now()),
 			    revoked_reason = COALESCE(revoked_reason, 'profile_category_changed'),
-			    active_profile_id = NULL, profile_grant_expires_at = NULL
+			    active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
 			WHERE active_profile_id::text = $1
 			  AND authorization_scope = 'category'
 			  AND revoked_at IS NULL
@@ -534,7 +542,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE auth_sessions
-			SET active_profile_id = NULL, profile_grant_expires_at = NULL
+			SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
 			WHERE active_profile_id::text = $1
 			  AND authorization_scope = 'global_admin'
 		`, current.ID); err != nil {
@@ -551,7 +559,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 	} else if accessChanged || input.PINSet {
 		if _, err := tx.Exec(ctx, `
 			UPDATE auth_sessions
-			SET active_profile_id = NULL, profile_grant_expires_at = NULL
+			SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
 			WHERE active_profile_id::text = $1
 		`, current.ID); err != nil {
 			return Profile{}, fmt.Errorf("clear changed profile selections: %w", err)
@@ -586,29 +594,61 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, profileI
 	if !authorized {
 		return ErrNotFound
 	}
-	var profileCount int
-	if err := tx.QueryRow(ctx, "SELECT count(*) FROM profiles").Scan(&profileCount); err != nil {
-		return fmt.Errorf("count profiles: %w", err)
+	var categoryID string
+	if err := tx.QueryRow(ctx, `
+		SELECT category_id::text
+		FROM profiles
+		WHERE id::text = $1
+	`, profileID).Scan(&categoryID); err != nil {
+		return fmt.Errorf("query profile deletion category: %w", err)
 	}
-	if profileCount <= 1 {
+	var remainingProfiles int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		FROM profiles
+		WHERE category_id::text = $2
+		  AND id::text <> $1
+	`, profileID, categoryID).Scan(&remainingProfiles); err != nil {
+		return fmt.Errorf("count remaining category profiles: %w", err)
+	}
+	if remainingProfiles == 0 {
 		return ErrLastProfile
+	}
+	if !principal.IsGlobalAdministrator() {
+		var remainingManagedProfiles int
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*)
+			FROM profiles profile
+			JOIN user_profile_access access
+			  ON access.profile_id = profile.id
+			 AND access.user_id::text = $3
+			 AND access.can_manage
+			WHERE profile.category_id::text = $2
+			  AND profile.id::text <> $1
+		`, profileID, categoryID, principal.UserID).Scan(&remainingManagedProfiles); err != nil {
+			return fmt.Errorf("count remaining manageable category profiles: %w", err)
+		}
+		if remainingManagedProfiles == 0 {
+			return ErrLastProfile
+		}
 	}
 	var remainingUnrestricted int
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*) FROM profiles
-		WHERE id::text <> $1
+		WHERE category_id::text = $2
+		  AND id::text <> $1
 		  AND enabled
 		  AND available_from IS NULL AND available_until IS NULL
 		  AND access_start_time IS NULL AND access_end_time IS NULL
-	`, profileID).Scan(&remainingUnrestricted); err != nil {
-		return fmt.Errorf("count remaining unrestricted profiles: %w", err)
+	`, profileID, categoryID).Scan(&remainingUnrestricted); err != nil {
+		return fmt.Errorf("count remaining unrestricted category profiles: %w", err)
 	}
 	if err := ensureUnrestrictedProfile(remainingUnrestricted); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE auth_sessions
-		SET active_profile_id = NULL, profile_grant_expires_at = NULL
+		SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
 		WHERE active_profile_id::text = $1
 	`, profileID); err != nil {
 		return fmt.Errorf("clear deleted profile selections: %w", err)
@@ -766,9 +806,14 @@ func (s *Service) Select(ctx context.Context, principal auth.Principal, profileI
 	}
 
 	expiresAt := now.Add(s.grantTTL)
+	profileContext, profileContextHash, err := auth.NewProfileContext()
+	if err != nil {
+		return Selection{}, fmt.Errorf("issue profile context: %w", err)
+	}
 	command, err := tx.Exec(ctx, `
 		UPDATE auth_sessions session
-		SET active_profile_id = $3::uuid, profile_grant_expires_at = $4, last_seen_at = now()
+		SET active_profile_id = $3::uuid, profile_grant_expires_at = $4,
+		    profile_context_hash = $5, last_seen_at = now()
 		FROM profiles target
 		WHERE session.id = $1::uuid
 		  AND session.user_id = $2::uuid
@@ -787,7 +832,7 @@ func (s *Service) Select(ctx context.Context, principal auth.Principal, profileI
 		      )
 		    )
 		  )
-	`, principal.SessionID, principal.UserID, selected.ID, expiresAt)
+	`, principal.SessionID, principal.UserID, selected.ID, expiresAt, profileContextHash)
 	if err != nil {
 		return Selection{}, fmt.Errorf("activate profile selection: %w", err)
 	}
@@ -797,13 +842,13 @@ func (s *Service) Select(ctx context.Context, principal auth.Principal, profileI
 	if err := tx.Commit(ctx); err != nil {
 		return Selection{}, fmt.Errorf("commit profile selection: %w", err)
 	}
-	return Selection{Profile: selected, ExpiresAt: expiresAt}, nil
+	return Selection{Profile: selected, ExpiresAt: expiresAt, ProfileContext: profileContext}, nil
 }
 
 func (s *Service) ClearSelection(ctx context.Context, principal auth.Principal) error {
 	command, err := s.pool.Exec(ctx, `
 		UPDATE auth_sessions
-		SET active_profile_id = NULL, profile_grant_expires_at = NULL, last_seen_at = now()
+		SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL, last_seen_at = now()
 		WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
 	`, principal.SessionID, principal.UserID)
 	if err != nil {
