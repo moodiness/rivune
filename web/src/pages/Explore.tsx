@@ -1,18 +1,19 @@
 import { ArrowLeft, ArrowRight, Bookmark, Check, Clapperboard, Compass, Film, Info, ListVideo, LoaderCircle, Play, Radio, RefreshCw, RotateCcw, Search, Sparkles, Star, Trash2, Tv, WandSparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useAuth } from "../auth";
+import { principalIdentity, useAuth } from "../auth";
 import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Skeleton, handleDirectionalFocus } from "../components";
 import { translate as t } from "../i18n";
 import { mediaFromLibraryItem, mediaIdentity, resolveMediaTitle } from "../mediaIdentity";
 import { homeCollectionSignature, homeFolderCacheKey, readContinueCache, readHomeCache, writeContinueCache, writeHomeCache, writeHomeFolderCache, type CachedContinueItem } from "../homeCache";
 import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
 import { mediaTypeLabel } from "../media";
-import type { Collection, CurrentProgram, LibraryItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch } from "../types";
+import type { Collection, CollectionListResponse, CurrentProgram, LibraryItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch, TVLibraryIdentity, TVLibraryMembershipResult } from "../types";
 import type { ActionMenuAnchor } from "../components";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 type OpenMedia = (item: MediaItem) => void;
+type MediaPreferences = { profileID: string; hideUnreleased: boolean; animationsEnabled: boolean };
 type LoadedLibrary = {
   pages: Record<number, LibraryItem[]>;
   page: number;
@@ -21,8 +22,8 @@ type LoadedLibrary = {
 };
 const initialLibraryRequests = new Map<string, Promise<LibraryPage>>();
 
-function loadInitialLibraryPage(profileID: string, filter: "" | "movie" | "series" | "tv", pageSize: number): Promise<LibraryPage> {
-  const key = `${profileID}:${api.metadataScope()}:${filter}:${pageSize}`;
+function loadInitialLibraryPage(principalScope: string, filter: "" | "movie" | "series" | "tv", pageSize: number): Promise<LibraryPage> {
+  const key = `${principalScope}:${api.metadataScope()}:${filter}:${pageSize}`;
   const pending = initialLibraryRequests.get(key);
   if (pending) return pending;
 
@@ -44,6 +45,45 @@ function libraryItems(library: LoadedLibrary | null): LibraryItem[] {
       seen.add(item.titleId);
       return true;
     }));
+}
+
+function tvMembershipKey(sourceAddonId: string, resourceId: string): string {
+  return `tv:${sourceAddonId.trim()}:${resourceId.trim()}`;
+}
+
+function tvMembershipLookupKey(sourceAddonId: string, resourceId: string): string {
+  return `${sourceAddonId.trim().toLowerCase()}\u0000${resourceId.trim()}`;
+}
+
+function tvMembershipIdentities(items: MediaItem[]): TVLibraryIdentity[] {
+  const identities = new Map<string, TVLibraryIdentity>();
+  for (const item of items) {
+    if (item.mediaType !== "tv") continue;
+    const sourceAddonId = item.sourceAddonId?.trim() ?? "";
+    const resourceId = (item.resourceId || item.id).trim();
+    if (!sourceAddonId || !resourceId) continue;
+    const key = tvMembershipLookupKey(sourceAddonId, resourceId);
+    if (!identities.has(key)) identities.set(key, { sourceAddonId, resourceId });
+  }
+  return [...identities.values()];
+}
+
+type TVMembershipMaps = {
+  checked: Set<string>;
+  saved: Map<string, string>;
+};
+
+function tvMembershipMaps(identities: TVLibraryIdentity[], result: TVLibraryMembershipResult): TVMembershipMaps {
+  const requestKeys = new Map(identities.map((identity) => [
+    tvMembershipLookupKey(identity.sourceAddonId, identity.resourceId),
+    tvMembershipKey(identity.sourceAddonId, identity.resourceId),
+  ]));
+  const checked = new Set(requestKeys.values());
+  const saved = new Map(result.items.map((item) => [
+    requestKeys.get(tvMembershipLookupKey(item.sourceAddonId, item.resourceId)) ?? tvMembershipKey(item.sourceAddonId, item.resourceId),
+    item.titleId,
+  ]));
+  return { checked, saved };
 }
 
 function handleBrowseGridKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
@@ -280,31 +320,6 @@ async function loadContinueItems(signal?: AbortSignal, cachedItems: EnrichedCont
   });
 }
 
-function useMediaPreferences() {
-  const { activeProfile } = useAuth();
-  const profileID = activeProfile?.id ?? "";
-  const [preferences, setPreferences] = useState({ profileID: "", hideUnreleased: false, animationsEnabled: true });
-
-  useEffect(() => {
-    let active = true;
-    if (!activeProfile) {
-      setPreferences({ profileID: "", hideUnreleased: false, animationsEnabled: true });
-      return () => { active = false; };
-    }
-    void api.effectiveSettings(activeProfile.id)
-      .then((settings) => {
-        if (!active) return;
-        setPreferences({ profileID: activeProfile.id, hideUnreleased: settings.settings.hideUnreleased === true, animationsEnabled: settings.settings.animationsEnabled !== false });
-      })
-      .catch(() => {
-        if (!active) return;
-        setPreferences({ profileID: activeProfile.id, hideUnreleased: false, animationsEnabled: true });
-      });
-    return () => { active = false; };
-  }, [activeProfile]);
-
-  return { ...preferences, profileID, ready: profileID !== "" && preferences.profileID === profileID };
-}
 
 type HomeRow = { collection: Collection; resolved: ResolvedFolder };
 type OpenedHomeFolder = { row: HomeRow; refresh: Promise<HomeRow | undefined> };
@@ -313,10 +328,23 @@ type HeroSlide = { key: string; item: MediaItem; collection: Collection; folder:
 const homeFolderConcurrency = 6;
 const homeFolderTimeoutMilliseconds = 10_000;
 const homeCacheWriteIntervalMilliseconds = 500;
+const homeCollectionRequests = new WeakMap<AbortSignal, Promise<CollectionListResponse>>();
+
+function loadHomeCollections(signal: AbortSignal): Promise<CollectionListResponse> {
+  const existing = homeCollectionRequests.get(signal);
+  if (existing) return existing;
+  const request = api.collections(signal);
+  homeCollectionRequests.set(signal, request);
+  const forget = () => {
+    if (homeCollectionRequests.get(signal) === request) homeCollectionRequests.delete(signal);
+  };
+  void request.then(forget, forget);
+  return request;
+}
 
 
 
-export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedia; mediaRevision: number }) {
+export function HomePage({ onOpenMedia, mediaRevision, mediaPreferences }: { onOpenMedia: OpenMedia; mediaRevision: number; mediaPreferences: MediaPreferences }) {
   const [rows, setRows] = useState<HomeRow[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(true);
@@ -327,18 +355,15 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   const [continueItems, setContinueItems] = useState<EnrichedContinueItem[]>([]);
   const [continueAction, setContinueAction] = useState<{ item: MediaItem; anchor: ActionMenuAnchor }>();
   const [continueActionBusy, setContinueActionBusy] = useState(false);
-  const mediaPreferences = useMediaPreferences();
   const { profileRequestSignal } = useAuth();
   const [pendingFolderKeys, setPendingFolderKeys] = useState<Set<string>>(new Set());
   const [activeHeroIndex, setActiveHeroIndex] = useState(0);
   const homeRequestGeneration = useRef(0);
   const continueRevisionRef = useRef(0);
   const folderRefreshes = useRef(new Map<string, Promise<HomeRow | undefined>>());
-  const warmedFolderCovers = useRef(new Set<string>());
-  const folderCoverWarmups = useRef(new Map<string, HTMLImageElement>());
 
   useEffect(() => {
-    if (!mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
+    if (!mediaPreferences.profileID || profileRequestSignal.aborted) return;
     const profileID = mediaPreferences.profileID;
     const cacheScope = api.metadataScope();
     const cachedHome = readHomeCache(profileID, cacheScope);
@@ -347,6 +372,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
     const controller = new AbortController();
     let active = true;
     let cacheWriteTimer: number | undefined;
+    let publishFrame: number | undefined;
     const isCurrent = () => active && homeRequestGeneration.current === generation;
     const cancelRequest = () => {
       active = false;
@@ -381,7 +407,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
 
     void (async () => {
       try {
-        const response = await api.collections(controller.signal);
+        const response = await loadHomeCollections(profileRequestSignal);
         if (!isCurrent()) return;
         const cacheMatches = cachedHome?.signature === homeCollectionSignature(response.collections);
         const targets = response.collections.flatMap((collection) => collection.folders.map((folder) => ({
@@ -413,10 +439,20 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
           cacheWriteTimer = window.setTimeout(persistResolvedRows, delay);
         };
         const pending = targets.flatMap((target, index) => results[index] ? [] : [{ target, index }]);
+        const pendingKeys = new Set(pending.map(({ target }) => target.key));
+        const publishResolvedFolders = () => {
+          publishFrame = undefined;
+          if (!isCurrent()) return;
+          setRows(results.filter((row): row is HomeRow => row !== undefined));
+          setPendingFolderKeys(new Set(pendingKeys));
+        };
+        const scheduleResolvedFoldersPublish = () => {
+          if (publishFrame === undefined) publishFrame = window.requestAnimationFrame(publishResolvedFolders);
+        };
         setCollections(response.collections);
         setRows(results.filter((row): row is HomeRow => row !== undefined));
         setPartialWarning(hasFolderFailure ? t("home.browser.someTitlesLoadFailed") : "");
-        setPendingFolderKeys(new Set(pending.map(({ target }) => target.key)));
+        setPendingFolderKeys(new Set(pendingKeys));
         setLoading(false);
         if (targets.length === 0) {
           writeHomeCache(profileID, cacheScope, response.collections, []);
@@ -442,7 +478,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
                 hasFolderFailure = true;
                 setPartialWarning(t("home.browser.someTitlesLoadFailed"));
               }
-              setRows(results.filter((row): row is HomeRow => row !== undefined));
+              scheduleResolvedFoldersPublish();
               scheduleCacheWrite();
             } catch {
               hasFolderFailure = true;
@@ -452,17 +488,18 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
               window.clearTimeout(timeout);
               controller.signal.removeEventListener("abort", abortRequest);
               if (isCurrent()) {
-                setPendingFolderKeys((current) => {
-                  const next = new Set(current);
-                  next.delete(target.key);
-                  return next;
-                });
+                pendingKeys.delete(target.key);
+                scheduleResolvedFoldersPublish();
               }
             }
           }
         };
         await Promise.all(Array.from({ length: Math.min(homeFolderConcurrency, pending.length) }, worker));
         if (!isCurrent()) return;
+        if (publishFrame !== undefined) {
+          window.cancelAnimationFrame(publishFrame);
+          publishResolvedFolders();
+        }
         if (cacheWriteTimer !== undefined) {
           window.clearTimeout(cacheWriteTimer);
           cacheWriteTimer = undefined;
@@ -484,13 +521,14 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
 
     return () => {
       if (cacheWriteTimer !== undefined) window.clearTimeout(cacheWriteTimer);
+      if (publishFrame !== undefined) window.cancelAnimationFrame(publishFrame);
       profileRequestSignal.removeEventListener("abort", cancelRequest);
       cancelRequest();
     };
-  }, [mediaPreferences.profileID, mediaPreferences.ready, profileRequestSignal]);
+  }, [mediaPreferences.profileID, profileRequestSignal]);
 
   useEffect(() => {
-    if (mediaRevision === 0 || continueRevisionRef.current === mediaRevision || !mediaPreferences.ready || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
+    if (mediaRevision === 0 || continueRevisionRef.current === mediaRevision || !mediaPreferences.profileID || profileRequestSignal.aborted) return;
     continueRevisionRef.current = mediaRevision;
     const profileID = mediaPreferences.profileID;
     const cacheScope = api.metadataScope();
@@ -502,36 +540,8 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
       writeContinueCache(profileID, cacheScope, items);
     }).catch(() => undefined);
     return () => { active = false; };
-  }, [mediaPreferences.profileID, mediaPreferences.ready, mediaRevision, profileRequestSignal]);
+  }, [mediaPreferences.profileID, mediaRevision, profileRequestSignal]);
 
-  useEffect(() => {
-    for (const row of rows) {
-      const artwork = row.resolved.folder.coverImageUrl
-        || row.resolved.items.find((item) => isAvailable(item, mediaPreferences.hideUnreleased))?.posterUrl;
-      if (!artwork?.startsWith("/api/v1/artwork/") || warmedFolderCovers.current.has(artwork)) continue;
-      warmedFolderCovers.current.add(artwork);
-      const image = new Image();
-      image.decoding = "async";
-      image.fetchPriority = "low";
-      image.onload = () => { folderCoverWarmups.current.delete(artwork); };
-      image.onerror = () => {
-        folderCoverWarmups.current.delete(artwork);
-        warmedFolderCovers.current.delete(artwork);
-      };
-      folderCoverWarmups.current.set(artwork, image);
-      image.src = artwork;
-    }
-  }, [rows, mediaPreferences.hideUnreleased]);
-
-  useEffect(() => () => {
-    for (const [artwork, image] of folderCoverWarmups.current) {
-      warmedFolderCovers.current.delete(artwork);
-      image.onload = null;
-      image.onerror = null;
-      image.removeAttribute("src");
-    }
-    folderCoverWarmups.current.clear();
-  }, []);
 
   const heroSlides = useMemo(() => {
     const seen = new Set<string>();
@@ -566,6 +576,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
   const heroSlide = heroSlides[activeHeroIndex];
   const hero = heroSlide?.item;
   const heroBackdrop = heroSlide && (hero.backgroundUrl || heroSlide.folder.heroBackdropUrl || heroSlide.collection.backdropImageUrl || hero.posterUrl);
+  const heroTitleLogo = heroSlide && (heroSlide.folder.titleLogoUrl || hero?.logoUrl);
   const heroPending = collections.some((collection) => collection.heroEnabled && collection.folders.some((folder) => pendingFolderKeys.has(homeFolderCacheKey(collection.id, folder.id ?? ""))));
   const continueMedia = continueItems.map(mediaFromContinue);
 
@@ -684,7 +695,7 @@ export function HomePage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedi
       {heroBackdrop && <div className="hero__backdrop" aria-hidden="true"><img src={heroBackdrop} alt="" loading="eager" fetchPriority="high" decoding="async" /></div>}
       <div className="hero__content">
         <span className="hero__eyebrow"><WandSparkles size={15} /> {t("home.hero.featuredCollection", { collection: heroSlide.collection.title })}</span>
-        {hero.logoUrl ? <img src={hero.logoUrl} alt={hero.title} loading="eager" fetchPriority="high" decoding="async" /> : <h1>{hero.title}</h1>}
+        {heroTitleLogo ? <img src={heroTitleLogo} alt={hero.title} loading="eager" fetchPriority="high" decoding="async" /> : <h1>{hero.title}</h1>}
         <div className="hero__meta">{hero.releaseInfo && <span>{hero.releaseInfo}</span>}{hero.voteAverage !== undefined && <span><Star size={14} fill="currentColor" /> {hero.voteAverage.toFixed(1)}</span>}<span>{mediaTypeLabel(hero.mediaType)}</span></div>
         <p>{hero.description || t("home.hero.descriptionFallback")}</p>
         <div className="hero__actions"><Button onClick={() => onOpenMedia(hero)}><Play size={19} fill="currentColor" /> {t("home.hero.playNow")}</Button><Button variant="secondary" onClick={() => onOpenMedia(hero)}>{t("home.hero.moreInfo")} <ArrowRight size={18} /></Button></div>
@@ -990,11 +1001,11 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
   </div>;
 }
 
-export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { onOpenMedia: OpenMedia; mediaRevision: number; onLibraryMutation: () => void }) {
+export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, mediaPreferences }: { onOpenMedia: OpenMedia; mediaRevision: number; onLibraryMutation: () => void; mediaPreferences: MediaPreferences }) {
   const pageSize = 24;
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<MediaItem[]>([]);
-  const [tvLibrary, setTvLibrary] = useState<LibraryItem[]>([]);
+  const [tvLibraryMembership, setTvLibraryMembership] = useState<Map<string, string>>(() => new Map());
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
@@ -1004,49 +1015,31 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
   const [nextSkip, setNextSkip] = useState(pageSize);
   const [retryVersion, setRetryVersion] = useState(0);
   const [savingIdentity, setSavingIdentity] = useState("");
-  const [tvLibraryReady, setTvLibraryReady] = useState(false);
-  const mediaPreferences = useMediaPreferences();
+  const [checkedTvIdentities, setCheckedTvIdentities] = useState<Set<string>>(() => new Set());
   const loadedProfileRef = useRef("");
   const paginationControllerRef = useRef<AbortController | null>(null);
+  const membershipRefreshControllerRef = useRef<AbortController | null>(null);
   const searchRequestGenerationRef = useRef(0);
+  const membershipRevisionRef = useRef(mediaRevision);
+  const localMembershipRevisionPendingRef = useRef(false);
   const normalizedQuery = query.trim();
   const searchTypes = filter === "all" ? ["movie", "series", "tv"] : [filter];
 
   useEffect(() => {
-    if (!mediaPreferences.ready || !mediaPreferences.profileID || loadedProfileRef.current === mediaPreferences.profileID) return;
+    if (!mediaPreferences.profileID || loadedProfileRef.current === mediaPreferences.profileID) return;
     loadedProfileRef.current = mediaPreferences.profileID;
     setQuery(sessionStorage.getItem(`rivune.search.${mediaPreferences.profileID}`) ?? "");
     setFilter("all");
-  }, [mediaPreferences.profileID, mediaPreferences.ready]);
+  }, [mediaPreferences.profileID]);
 
-  useEffect(() => {
-    if (!mediaPreferences.ready || !mediaPreferences.profileID) return;
-    let active = true;
-    setTvLibraryReady(false);
-    void (async () => {
-      const firstPage = await api.library("tv");
-      const items = [...firstPage.items];
-      for (let page = firstPage.page + 1; page <= firstPage.totalPages; page++) {
-        items.push(...(await api.library("tv", page)).items);
-      }
-      if (active) {
-        setTvLibrary(items);
-        setTvLibraryReady(true);
-      }
-    })().catch(() => {
-      if (active) {
-        setTvLibrary([]);
-        setTvLibraryReady(false);
-      }
-    });
-    return () => { active = false; };
-  }, [mediaPreferences.profileID, mediaPreferences.ready, mediaRevision]);
 
   useEffect(() => {
     const generation = ++searchRequestGenerationRef.current;
     paginationControllerRef.current?.abort();
+    membershipRefreshControllerRef.current?.abort();
     setLoadingMore(false);
-    if (!mediaPreferences.ready) return;
+    setTvLibraryMembership(new Map());
+    setCheckedTvIdentities(new Set());
     if (normalizedQuery.length < 2) {
       setItems([]);
       setError("");
@@ -1063,12 +1056,26 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
     const controller = new AbortController();
     let active = true;
     const timer = window.setTimeout(() => {
-      void Promise.allSettled(searchTypes.map((type) => api.search(type, normalizedQuery, 0, pageSize, controller.signal))).then((outcomes) => {
-        if (!active || searchRequestGenerationRef.current !== generation) return;
+      const run = async () => {
+        const outcomes = await Promise.allSettled(searchTypes.map((type) => api.search(type, normalizedQuery, 0, pageSize, controller.signal)));
+        if (!active || controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
         const summary = summarizeSearchOutcomes(outcomes, pageSize);
         const hasFailures = summary.httpFailureCount + summary.internalFailureCount > 0;
         const hasSuccessfulResource = summary.successfulResourceResultCount > 0;
-        setItems(hasFailures && !hasSuccessfulResource ? [] : mergeUniqueMedia([], summary.items));
+        const displayedItems = hasFailures && !hasSuccessfulResource ? [] : mergeUniqueMedia([], summary.items);
+        const identities = tvMembershipIdentities(displayedItems).slice(0, 100);
+        let membership = { checked: new Set<string>(), saved: new Map<string, string>() };
+        if (identities.length > 0) {
+          try {
+            membership = tvMembershipMaps(identities, await api.tvLibraryMembership(identities, controller.signal));
+          } catch {
+            if (controller.signal.aborted) return;
+          }
+        }
+        if (!active || controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
+        setItems(displayedItems);
+        setTvLibraryMembership(membership.saved);
+        setCheckedTvIdentities(membership.checked);
         setNextSkip(pageSize);
         setHasMore(hasSuccessfulResource && summary.hasFullPage);
         if (!hasFailures) {
@@ -1081,7 +1088,8 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
           setError(t("search.error.sourcesUnavailable"));
           setWarning("");
         }
-      }).finally(() => {
+      };
+      void run().finally(() => {
         if (active && searchRequestGenerationRef.current === generation) setLoading(false);
       });
     }, 350);
@@ -1090,22 +1098,68 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [filter, mediaPreferences.profileID, mediaPreferences.ready, normalizedQuery, retryVersion]);
+  }, [filter, mediaPreferences.profileID, normalizedQuery, retryVersion]);
 
-  useEffect(() => () => paginationControllerRef.current?.abort(), []);
+  useEffect(() => {
+    if (membershipRevisionRef.current === mediaRevision) return;
+    membershipRevisionRef.current = mediaRevision;
+    if (localMembershipRevisionPendingRef.current) {
+      localMembershipRevisionPendingRef.current = false;
+      return;
+    }
+    const identities = tvMembershipIdentities(items).slice(0, 100);
+    if (identities.length === 0) return;
+    membershipRefreshControllerRef.current?.abort();
+    const controller = new AbortController();
+    const generation = searchRequestGenerationRef.current;
+    membershipRefreshControllerRef.current = controller;
+    void api.tvLibraryMembership(identities, controller.signal).then((result) => {
+      if (controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
+      const membership = tvMembershipMaps(identities, result);
+      setTvLibraryMembership((current) => {
+        const updated = new Map(current);
+        for (const identity of identities) updated.delete(tvMembershipKey(identity.sourceAddonId, identity.resourceId));
+        for (const [identity, titleID] of membership.saved) updated.set(identity, titleID);
+        return updated;
+      });
+      setCheckedTvIdentities((current) => new Set([...current, ...membership.checked]));
+    }).catch(() => undefined);
+    return () => controller.abort();
+  }, [items, mediaRevision]);
+
+  useEffect(() => () => {
+    paginationControllerRef.current?.abort();
+    membershipRefreshControllerRef.current?.abort();
+  }, []);
 
   async function loadMore() {
     paginationControllerRef.current?.abort();
     const controller = new AbortController();
+    const generation = searchRequestGenerationRef.current;
     paginationControllerRef.current = controller;
     setLoadingMore(true);
     try {
       const outcomes = await Promise.allSettled(searchTypes.map((type) => api.search(type, normalizedQuery, nextSkip, pageSize, controller.signal)));
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
       const summary = summarizeSearchOutcomes(outcomes, pageSize);
       const hasFailures = summary.httpFailureCount + summary.internalFailureCount > 0;
       if (summary.successfulResourceResultCount > 0) {
-        setItems((current) => mergeUniqueMedia(current, summary.items));
+        const additions = mergeUniqueMedia([], summary.items);
+        const identities = tvMembershipIdentities(additions).slice(0, 100);
+        let membership: TVMembershipMaps | undefined;
+        if (identities.length > 0) {
+          try {
+            membership = tvMembershipMaps(identities, await api.tvLibraryMembership(identities, controller.signal));
+          } catch {
+            if (controller.signal.aborted) return;
+          }
+        }
+        if (controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
+        if (membership) {
+          setTvLibraryMembership((current) => new Map([...current, ...membership.saved]));
+          setCheckedTvIdentities((current) => new Set([...current, ...membership.checked]));
+        }
+        setItems((current) => mergeUniqueMedia(current, additions));
         setNextSkip((current) => current + pageSize);
         setHasMore(summary.hasFullPage);
       } else if (!hasFailures) {
@@ -1113,45 +1167,32 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
       }
       setWarning(hasFailures ? t("search.warning.sourcesUnavailable") : "");
     } finally {
-      if (!controller.signal.aborted) setLoadingMore(false);
+      if (!controller.signal.aborted && searchRequestGenerationRef.current === generation) setLoadingMore(false);
     }
   }
 
   async function toggleTvLibrary(item: MediaItem) {
     const identity = mediaIdentity(item);
-    const savedEntry = tvLibrary.find((entry) => mediaIdentity(mediaFromLibraryItem(entry, t("media.untitled"))) === identity);
+    const savedTitleID = tvLibraryMembership.get(identity);
     setSavingIdentity(identity);
     try {
-      const titleID = savedEntry?.titleId ?? await resolveMediaTitle(item);
-      if (savedEntry) {
+      const titleID = savedTitleID ?? await resolveMediaTitle(item);
+      if (savedTitleID) {
         await api.removeLibrary(titleID);
-        setTvLibrary((current) => current.filter((entry) => entry.titleId !== titleID));
+        setTvLibraryMembership((current) => {
+          const updated = new Map(current);
+          updated.delete(identity);
+          return updated;
+        });
       } else {
         await api.addLibrary(titleID);
-        const timestamp = new Date().toISOString();
-        setTvLibrary((current) => [...current, {
-          titleId: titleID,
-          mediaType: "tv",
-          resourceId: item.resourceId || item.id,
-          title: item.title,
-          posterUrl: item.posterUrl,
-          backgroundUrl: item.backgroundUrl,
-          sourceAddonId: item.sourceAddonId,
-          sourceCatalogId: item.sourceCatalogId,
-          sourceName: item.sourceName,
-          country: item.country,
-          language: item.language,
-          category: item.category,
-          available: item.available,
-          currentProgram: item.currentProgram,
-          addedAt: timestamp,
-          updatedAt: timestamp,
-        }]);
+        setTvLibraryMembership((current) => new Map(current).set(identity, titleID));
       }
       notifySuccess(
-        t(savedEntry ? "library.notice.removed" : "library.notice.added", { title: item.title }),
-        t(savedEntry ? "library.notice.removedTitle" : "library.notice.addedTitle"),
+        t(savedTitleID ? "library.notice.removed" : "library.notice.added", { title: item.title }),
+        t(savedTitleID ? "library.notice.removedTitle" : "library.notice.addedTitle"),
       );
+      localMembershipRevisionPendingRef.current = true;
       onLibraryMutation();
     } catch (cause) {
       setError(notifyError(cause, t("library.error.updateFailed"), t("library.error.notUpdatedTitle")));
@@ -1163,6 +1204,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
   function updateQuery(value: string) {
     searchRequestGenerationRef.current++;
     paginationControllerRef.current?.abort();
+    membershipRefreshControllerRef.current?.abort();
     setQuery(value);
     setItems([]);
     setError("");
@@ -1177,6 +1219,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
     if (value === filter) return;
     searchRequestGenerationRef.current++;
     paginationControllerRef.current?.abort();
+    membershipRefreshControllerRef.current?.abort();
     setFilter(value);
     setItems([]);
     setError("");
@@ -1208,7 +1251,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
           ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} />
           : <div className="media-grid media-grid--adaptive" onKeyDown={handleBrowseGridKeyDown}>{items.map((item) => {
             const identity = mediaIdentity(item);
-            const saved = item.mediaType === "tv" && tvLibrary.some((entry) => mediaIdentity(mediaFromLibraryItem(entry, t("media.untitled"))) === identity);
+            const saved = item.mediaType === "tv" && tvLibraryMembership.has(identity);
             const metadata = item.mediaType === "tv" ? tvMetadata(item) : "";
             return <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={identity}>
               <MediaCard
@@ -1222,7 +1265,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
                 onClick={() => onOpenMedia(item)}
               />
               {metadata && <small className="tv-media-tile__meta">{metadata}</small>}
-              {item.mediaType === "tv" && <Button className="tv-media-tile__library" variant={saved ? "secondary" : "ghost"} loading={savingIdentity === identity} disabled={!tvLibraryReady} aria-label={`${t(saved ? "library.actions.inLibrary" : "library.actions.add")}: ${item.title}`} onClick={() => void toggleTvLibrary(item)}>
+              {item.mediaType === "tv" && <Button className="tv-media-tile__library" variant={saved ? "secondary" : "ghost"} loading={savingIdentity === identity} disabled={!checkedTvIdentities.has(identity)} aria-label={`${t(saved ? "library.actions.inLibrary" : "library.actions.add")}: ${item.title}`} onClick={() => void toggleTvLibrary(item)}>
                 {saved ? <Check size={16} /> : <Bookmark size={16} />}
                 {t(saved ? "library.actions.inLibrary" : "library.actions.add")}
               </Button>}
@@ -1234,8 +1277,9 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation }: { 
 
 export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenMedia; mediaRevision: number }) {
   const pageSize = 100;
-  const { activeProfile } = useAuth();
+  const { account, activeProfile, discovery } = useAuth();
   const profileID = activeProfile?.id ?? "";
+  const principalScope = principalIdentity(discovery, account, activeProfile);
   const [library, setLibrary] = useState<LoadedLibrary | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -1254,8 +1298,8 @@ export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenM
     setLoading(true);
     setLoadingMore(false);
     setError(null);
-    if (!profileID) return () => { active = false; };
-    void loadInitialLibraryPage(profileID, filter, pageSize).then((value) => {
+    if (!profileID || principalScope === null) return () => { active = false; };
+    void loadInitialLibraryPage(principalScope, filter, pageSize).then((value) => {
       if (!active || libraryRequestGeneration.current !== generation) return;
       setLibrary({
         pages: { [value.page]: value.items },
@@ -1271,7 +1315,7 @@ export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenM
       if (active && libraryRequestGeneration.current === generation) setLoading(false);
     });
     return () => { active = false; };
-  }, [filter, profileID, retryVersion]);
+  }, [filter, principalScope, profileID, retryVersion]);
 
   useEffect(() => {
     if (mediaRevision === 0 || libraryRevisionRef.current === mediaRevision || !library) return;

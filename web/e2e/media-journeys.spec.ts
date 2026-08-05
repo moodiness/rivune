@@ -29,6 +29,47 @@ function longSeason(episodeCount: number) {
   };
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isWatchedBatchItems(value: unknown): value is Array<{ titleId: string; completed: boolean; expectedVersion: number }> {
+  return Array.isArray(value) && value.every((item) =>
+    item !== null && typeof item === "object" &&
+    "titleId" in item && typeof item.titleId === "string" &&
+    "completed" in item && typeof item.completed === "boolean" &&
+    "expectedVersion" in item && typeof item.expectedVersion === "number"
+  );
+}
+
+test("metadata snapshots bound synchronous storage writes across a warm reopen", async ({ page, rivune: _rivune }) => {
+  await page.addInitScript(() => {
+    const state = window as typeof window & { __metadataSetItems?: number };
+    state.__metadataSetItems = 0;
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (this === localStorage && key === "rivune.metadata-cache.v1") state.__metadataSetItems = (state.__metadataSetItems ?? 0) + 1;
+      return original.call(this, key, value);
+    };
+  });
+  await page.goto("/");
+  const card = page.getByRole("button", { name: "Open Signal Horizon" });
+  await card.click();
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  await page.waitForTimeout(3_000);
+  const initialWrites = await page.evaluate(() => (window as typeof window & { __metadataSetItems?: number }).__metadataSetItems ?? 0);
+  expect(initialWrites).toBeGreaterThan(0);
+  expect(initialWrites).toBeLessThanOrEqual(2);
+
+  await page.goBack();
+  await expect(card).toBeVisible();
+  await card.click();
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  await page.waitForTimeout(3_000);
+  const finalWrites = await page.evaluate(() => (window as typeof window & { __metadataSetItems?: number }).__metadataSetItems ?? 0);
+  expect(finalWrites - initialWrites).toBeLessThanOrEqual(1);
+});
+
 test("media details use a refresh-safe route with browser and in-page history", async ({ page, rivune }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
@@ -94,6 +135,86 @@ test("TMDB media routes canonicalize to IMDb identifiers after metadata resolves
   await page.reload();
   await expect(page.getByRole("heading", { name: "Signal Horizon" })).toBeAttached();
   await expect(page).toHaveURL(/\/media\/series\/tt9000$/);
+});
+
+test("legacy media fragments cannot restore artwork URLs from the route or a version 1 cache", async ({ page, rivune }) => {
+  const sentinelURLs = {
+    poster: "https://legacy-poster.invalid/legacy-media-probe/poster.svg",
+    background: "https://legacy-background.invalid/legacy-media-probe/background.svg",
+    logo: "/legacy-media-probe/logo.svg",
+  };
+  const sentinelRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/legacy-media-probe/")) sentinelRequests.push(request.url());
+  });
+  await page.route("**/legacy-media-probe/**", (route) => route.fulfill({
+    status: 200,
+    contentType: "image/svg+xml",
+    body: "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+  }));
+  await page.addInitScript((urls) => {
+    localStorage.setItem("rivune.metadata-cache.v1", JSON.stringify({
+      version: 1,
+      snapshots: {
+        "en|movie|external:tmdb:550": {
+          updatedAt: Date.now(),
+          value: {
+            title: "Poisoned cached title",
+            posterUrl: urls.poster,
+            backgroundUrl: urls.background,
+            logoUrl: urls.logo,
+          },
+        },
+      },
+      aliases: {},
+    }));
+  }, sentinelURLs);
+  const query = new URLSearchParams({
+    title: "Legacy Fight Club",
+    titleId: "movie-1",
+    releaseInfo: "1999",
+    released: "1999-10-15",
+    posterUrl: sentinelURLs.poster,
+    backgroundUrl: sentinelURLs.background,
+    logoUrl: sentinelURLs.logo,
+    "external.tmdb": "550",
+    from: "search",
+  });
+
+  await page.goto(`/#media/movie/tmdb%3A550?${query}`);
+
+  await expect(page.getByRole("heading", { name: "Fight Club" })).toBeVisible();
+  await expect(page.locator(".details-description")).toHaveText("An insomniac and a soap maker form an underground club.");
+  await expect(page).toHaveURL(/\/media\/movie\/tt0137523$/);
+  await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/poster.svg");
+  await expect.poll(() => rivune.matching("/api/v1/metadata/titles/movie-1", "GET").length).toBeGreaterThan(0);
+  await expect.poll(() => page.evaluate(() => {
+    const stored = JSON.parse(localStorage.getItem("rivune.metadata-cache.v1") ?? "null") as { version?: unknown } | null;
+    return stored?.version ?? null;
+  })).toBe(2);
+  expect(sentinelRequests).toEqual([]);
+});
+
+test("legacy series fragments preserve episode context while canonicalizing the route", async ({ page, rivune }) => {
+  const query = new URLSearchParams({
+    title: "Legacy Moonrise",
+    titleId: "episode-3",
+    releaseInfo: "S2 · E1",
+    released: "2025-01-01",
+    season: "2",
+    episode: "1",
+    seriesId: "series-1",
+    seasonId: "season-2",
+    episodeId: "episode-3",
+    from: "search",
+  });
+
+  await page.goto(`/#media/episode/${encodeURIComponent("tt9000:2:1")}?${query}`);
+
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/2\/episode\/1$/);
+  await expect(page.getByRole("heading", { name: "Moonrise" })).toBeVisible();
+  await expect(page.locator(".details-description")).toHaveText("The team reunites on a distant moon.");
+  await expect.poll(() => rivune.matching("/api/v1/metadata/seasons/season-2", "GET").length).toBeGreaterThan(0);
 });
 
 test("season route overrides stale history state for numeric season zero", async ({ page, rivune }) => {
@@ -164,9 +285,9 @@ test("an episode opened from its season toggles its resolved watched state once 
 
   const aggregateActions = page.locator(".details-actions");
   await expect(aggregateActions.getByRole("button", { name: "Mark watched", exact: true })).toHaveCount(0);
-  const progressResponse = page.waitForResponse((response) => response.url().endsWith("/api/v1/progress/episode-1") && response.request().method() === "GET");
+  await expect.poll(() => rivune.matching("/api/v1/progress/batch", "POST").length).toBe(1);
+  expect(rivune.matching("/api/v1/progress/batch", "POST")[0]?.body).toEqual({ titleIds: ["episode-1", "episode-2"] });
   await page.getByRole("button", { name: /First Light/ }).first().click();
-  await progressResponse;
 
   const detailsActions = page.locator(".details-actions");
   const watchedButton = detailsActions.locator("button").last();
@@ -197,6 +318,74 @@ test("an episode opened from its season toggles its resolved watched state once 
   expect(markUnwatched.body).toBeUndefined();
   expect(markUnwatched.search.get("expectedVersion")).toBe("5");
   expect(rivune.matching(watchedPath)).toHaveLength(2);
+});
+
+test("a 100-episode season reads and mutates progress in one bounded request", async ({ page, rivune }) => {
+  rivune.setSeason("season-1", longSeason(100));
+  let readRequests = 0;
+  let writeRequests = 0;
+  let readTitleIds: string[] = [];
+  let writeItems: Array<{ titleId: string; completed: boolean; expectedVersion: number }> = [];
+  await page.route("**/api/v1/progress/batch", async (route) => {
+    readRequests += 1;
+    const payload: unknown = route.request().postDataJSON();
+    if (payload === null || typeof payload !== "object" || !("titleIds" in payload) || !isStringArray(payload.titleIds)) {
+      throw new Error("invalid progress batch request");
+    }
+    readTitleIds = payload.titleIds;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: readTitleIds.map((titleId, index) => ({
+          titleId,
+          progress: index === 0
+            ? { titleId, mediaType: "episode", positionSeconds: 321, durationSeconds: 1800, completed: false, version: 4 }
+            : null,
+        })),
+      }),
+    });
+  });
+  await page.route("**/api/v1/titles/watched/batch", async (route) => {
+    writeRequests += 1;
+    const payload: unknown = route.request().postDataJSON();
+    if (payload === null || typeof payload !== "object" || !("items" in payload) || !isWatchedBatchItems(payload.items)) {
+      throw new Error("invalid watched batch request");
+    }
+    writeItems = payload.items;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: writeItems.map((input) => ({
+          titleId: input.titleId,
+          progress: {
+            titleId: input.titleId,
+            mediaType: "episode",
+            positionSeconds: 1800,
+            durationSeconds: 1800,
+            completed: input.completed,
+            version: input.expectedVersion + 1,
+          },
+        })),
+      }),
+    });
+  });
+
+  await page.goto("/media/series/tt9000/season/1");
+  const markSeasonWatched = page.getByRole("button", { name: "Mark season watched" });
+  await expect(markSeasonWatched).toBeVisible();
+  expect(readRequests).toBe(1);
+  expect(readTitleIds).toHaveLength(100);
+  expect(readTitleIds[0]).toBe("episode-1");
+  expect(readTitleIds[99]).toBe("episode-100");
+
+  await markSeasonWatched.click();
+  await expect(page.getByRole("button", { name: "Mark season unwatched" })).toBeVisible();
+  expect(writeRequests).toBe(1);
+  expect(writeItems).toHaveLength(100);
+  expect(writeItems[0]).toEqual({ titleId: "episode-1", completed: true, expectedVersion: 4 });
+  expect(writeItems[99]).toEqual({ titleId: "episode-100", completed: true, expectedVersion: 0 });
 });
 
 test("upcoming episodes stay dimmed but can open available playback sources", async ({ page, rivune }) => {
@@ -277,6 +466,7 @@ test("series artwork falls back by role when season or episode artwork is absent
   await expect(page.getByRole("button", { name: /Building a World/ }).first()).toBeVisible();
   await expect(artwork).toHaveAttribute("src", "https://fixtures.rivune.test/series-poster.svg");
   await expect(hero).toHaveCSS("background-image", 'url("https://fixtures.rivune.test/season-specials-backdrop.svg")');
+  await expect(page.getByRole("region", { name: "Cast" }).getByText("Avery Stone")).toBeVisible();
 
   await page.getByRole("button", { name: /The Rebellion in Season 2/ }).first().click();
   await expect(page.getByRole("heading", { name: "The Rebellion in Season 2" })).toBeVisible();
@@ -1085,12 +1275,13 @@ test("calendar TVDB episode opens the mapped season containing its canonical epi
   expect(requestedSeasons).toEqual(["official-season-2", "official-season-9", "official-season-9"]);
 });
 
-test("home honors a collection's landscape folder cover shape", async ({ page, rivune: _rivune }) => {
+test("home honors a collection's landscape covers and preferred title logo", async ({ page, rivune: _rivune }) => {
   const folder = {
     id: "streaming-folder",
     title: "Streaming",
     tileShape: "poster",
     coverImageUrl: "https://fixtures.rivune.test/streaming-landscape.svg",
+    titleLogoUrl: "https://fixtures.rivune.test/streaming-title.svg",
     focusGifEnabled: false,
     hideTitle: false,
     sources: [],
@@ -1103,7 +1294,7 @@ test("home honors a collection's landscape folder cover shape", async ({ page, r
       await fulfill({ collections: [{
         id: "streaming-collection",
         title: "Streaming",
-        heroEnabled: false,
+        heroEnabled: true,
         pinToTop: false,
         focusGlowEnabled: false,
         viewMode: "rows",
@@ -1121,7 +1312,7 @@ test("home honors a collection's landscape folder cover shape", async ({ page, r
       await fulfill({
         collectionId: "streaming-collection",
         folder,
-        items: [{ id: "streaming-title", mediaType: "movie", title: "Landscape fixture", posterUrl: "https://fixtures.rivune.test/poster.svg" }],
+        items: [{ id: "streaming-title", mediaType: "movie", title: "Landscape fixture", posterUrl: "https://fixtures.rivune.test/poster.svg", logoUrl: "https://fixtures.rivune.test/item-title.svg" }],
         page: 1,
         hasMore: false,
         errors: [],
@@ -1134,6 +1325,7 @@ test("home honors a collection's landscape folder cover shape", async ({ page, r
   await page.goto("/");
   const card = page.getByRole("button", { name: "Open Streaming" });
   await expect(card).toBeVisible();
+  await expect(page.locator(".hero__content img")).toHaveAttribute("src", "https://fixtures.rivune.test/streaming-title.svg");
   const visual = card.locator(".folder-cover-card__visual");
   const size = await visual.evaluate((element) => {
     const bounds = element.getBoundingClientRect();

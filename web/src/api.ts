@@ -8,6 +8,7 @@ import type {
   CalendarResponse,
   CategoryInput,
   Collection,
+  CollectionListResponse,
   CollectionSaveInput,
   CollectionExportDocument,
   CollectionImportResult,
@@ -16,6 +17,7 @@ import type {
   DeviceAuthorization,
   DeviceUpdateInput,
   InstalledAddon,
+  ManagedAddon,
   NotificationBroadcast,
   LibraryPage,
   MaintenanceSettings,
@@ -28,6 +30,7 @@ import type {
   MovieMetadata,
   PlaybackCapabilities,
   PlaybackActivity,
+  PlaybackProgressBatch,
   PlaybackMarkerList,
   PlaybackPreparation,
   PlaybackSession,
@@ -42,18 +45,28 @@ import type {
   SeriesMetadata,
   SettingsValues,
   TitleReference,
+  SetWatchedBatchItem,
+  SetWatchedBatchResult,
   TokenPair,
   TrailerList,
   TrackingDeviceAuthorization,
   TrackingPreferences,
   TrackingProvider,
   TrackingStatus,
+  TVLibraryIdentity,
+  TVLibraryMembershipResult,
 } from "./types";
 
 const API_BASE = "/api/v1";
 const ACCESS_KEY = "rivune.access";
 const REFRESH_KEY = "rivune.refresh";
+const SESSION_KEY = "rivune.session";
 const DEVICE_KEY = "rivune.device";
+const REFRESH_LOCK = "rivune.auth.refresh";
+const PROFILE_KEY = "rivune.profile";
+const PROFILE_CONTEXT_KEY = "rivune.profile.context";
+export const PROFILE_SELECTION_BROADCAST_KEY = "rivune.profile.selection";
+const SHARED_PROFILE_CONTEXT_KEY = "rivune.profile.shared-context";
 let refreshPromise: Promise<boolean> | null = null;
 let metadataLanguage = navigator.language;
 let trailerLanguage = navigator.language;
@@ -114,50 +127,165 @@ export class APIError extends Error {
     this.name = "APIError";
   }
 }
+type SharedProfileContext = {
+  sessionId: string;
+  profileId: string;
+  profileContext: string;
+};
+
+function readSharedProfileContext(): SharedProfileContext | null {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SHARED_PROFILE_CONTEXT_KEY) ?? "null") as Partial<SharedProfileContext> | null;
+    if (!parsed || typeof parsed.sessionId !== "string" || typeof parsed.profileId !== "string" || typeof parsed.profileContext !== "string") return null;
+    if (!parsed.sessionId || parsed.sessionId !== localStorage.getItem(SESSION_KEY) || !parsed.profileId || !parsed.profileContext) return null;
+    return parsed as SharedProfileContext;
+  } catch {
+    return null;
+  }
+}
+
+function rememberSharedProfileContext(profileID: string, profileContext: string): void {
+  const sessionId = localStorage.getItem(SESSION_KEY);
+  if (!sessionId) return;
+  try {
+    localStorage.setItem(SHARED_PROFILE_CONTEXT_KEY, JSON.stringify({ sessionId, profileId: profileID, profileContext } satisfies SharedProfileContext));
+  } catch {
+    // The active tab remains authorized through its tab-local capability.
+  }
+}
+
+function clearSharedProfileContext(expectedContext?: string): void {
+  try {
+    if (expectedContext && readSharedProfileContext()?.profileContext !== expectedContext) return;
+    localStorage.removeItem(SHARED_PROFILE_CONTEXT_KEY);
+  } catch {
+    // The server remains authoritative when browser storage is unavailable.
+  }
+}
+
+export function profileRequestContext(profileID: string): string | null {
+  const tabContext = sessionStorage.getItem(PROFILE_KEY) === profileID
+    ? sessionStorage.getItem(PROFILE_CONTEXT_KEY)
+    : null;
+  if (tabContext) {
+    rememberSharedProfileContext(profileID, tabContext);
+    return tabContext;
+  }
+  const shared = readSharedProfileContext();
+  if (!shared || shared.profileId !== profileID) return null;
+  sessionStorage.setItem(PROFILE_KEY, profileID);
+  sessionStorage.setItem(PROFILE_CONTEXT_KEY, shared.profileContext);
+  return shared.profileContext;
+}
+
+export function setProfileRequestContext(profileID: string | null, profileContext: string | null): void {
+  if (profileID && profileContext) {
+    sessionStorage.setItem(PROFILE_KEY, profileID);
+    sessionStorage.setItem(PROFILE_CONTEXT_KEY, profileContext);
+    rememberSharedProfileContext(profileID, profileContext);
+    return;
+  }
+  sessionStorage.removeItem(PROFILE_KEY);
+  sessionStorage.removeItem(PROFILE_CONTEXT_KEY);
+}
+
+export function rejectProfileRequestContext(): void {
+  const rejectedContext = sessionStorage.getItem(PROFILE_CONTEXT_KEY);
+  if (rejectedContext) clearSharedProfileContext(rejectedContext);
+}
+
+export function broadcastProfileSelectionChange(): void {
+  try {
+    localStorage.setItem(PROFILE_SELECTION_BROADCAST_KEY, JSON.stringify({
+      sessionId: localStorage.getItem(SESSION_KEY),
+      nonce: `${Date.now()}-${Math.random()}`,
+    }));
+  } catch {
+    // The per-tab opaque profile capability remains the server-side boundary.
+  }
+}
+
 
 
 function saveTokens(tokens: TokenPair) {
   sessionStorage.setItem(ACCESS_KEY, tokens.accessToken);
   localStorage.setItem(ACCESS_KEY, tokens.accessToken);
-  localStorage.setItem(REFRESH_KEY, tokens.refreshToken);
+  localStorage.setItem(SESSION_KEY, tokens.sessionId);
   localStorage.setItem(DEVICE_KEY, tokens.deviceId);
+  localStorage.setItem(REFRESH_KEY, tokens.refreshToken);
 }
 
 export function clearSession() {
   sessionStorage.removeItem(ACCESS_KEY);
+  sessionStorage.removeItem(PROFILE_KEY);
+  sessionStorage.removeItem(PROFILE_CONTEXT_KEY);
   localStorage.removeItem(ACCESS_KEY);
   localStorage.removeItem(REFRESH_KEY);
+  localStorage.removeItem(SESSION_KEY);
+  clearSharedProfileContext();
+}
+
+function adoptNewerSharedSession(refreshToken: string, sessionId: string | null): boolean {
+  const sharedRefreshToken = localStorage.getItem(REFRESH_KEY);
+  const sharedAccessToken = localStorage.getItem(ACCESS_KEY);
+  const sharedSessionId = localStorage.getItem(SESSION_KEY);
+  if (!sessionId || sharedSessionId !== sessionId || !sharedRefreshToken || sharedRefreshToken === refreshToken || !sharedAccessToken) return false;
+  sessionStorage.setItem(ACCESS_KEY, sharedAccessToken);
+  return true;
 }
 
 async function refreshSession(): Promise<boolean> {
   const refreshToken = localStorage.getItem(REFRESH_KEY);
   if (!refreshToken) return false;
-  const response = await fetch(`${API_BASE}/auth/refresh`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refreshToken }),
-  });
-  if (!response.ok) {
-    clearSession();
-    return false;
+  const sessionId = localStorage.getItem(SESSION_KEY);
+
+  const refresh = async () => {
+    if (localStorage.getItem(REFRESH_KEY) !== refreshToken) {
+      return adoptNewerSharedSession(refreshToken, sessionId);
+    }
+    const response = await fetch(`${API_BASE}/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (!response.ok) {
+      if (adoptNewerSharedSession(refreshToken, sessionId)) return true;
+      if (localStorage.getItem(REFRESH_KEY) === refreshToken) clearSession();
+      return false;
+    }
+    const tokens = (await response.json()) as TokenPair;
+    if (localStorage.getItem(REFRESH_KEY) !== refreshToken) {
+      return adoptNewerSharedSession(refreshToken, sessionId);
+    }
+    saveTokens(tokens);
+    return true;
+  };
+
+  if ("locks" in navigator) {
+    return navigator.locks.request(REFRESH_LOCK, refresh);
   }
-  const tokens = (await response.json()) as TokenPair;
-  saveTokens(tokens);
-  return true;
+  return refresh();
 }
 
-async function request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, retry = true, attachSession = true, handleDemoUnavailable = true): Promise<T> {
+  const requestSessionId = localStorage.getItem(SESSION_KEY);
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const token = sessionStorage.getItem(ACCESS_KEY) ?? localStorage.getItem(ACCESS_KEY);
+  const token = attachSession ? sessionStorage.getItem(ACCESS_KEY) ?? localStorage.getItem(ACCESS_KEY) : null;
   if (token && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
+  const profileContext = token ? sessionStorage.getItem(PROFILE_CONTEXT_KEY) : null;
+  if (profileContext && !headers.has("X-Rivune-Profile-Context")) {
+    headers.set("X-Rivune-Profile-Context", profileContext);
+  }
   const requestURL = path.startsWith("/.well-known") || path === "/health" ? path : `${API_BASE}${path}`;
   const response = await fetch(requestURL, { ...init, headers, credentials: "same-origin" });
   if (response.status === 401 && retry && localStorage.getItem(REFRESH_KEY)) {
     refreshPromise ??= refreshSession().finally(() => { refreshPromise = null; });
-    if (await refreshPromise) return request<T>(path, init, false);
+    if (await refreshPromise && requestSessionId !== null && localStorage.getItem(SESSION_KEY) === requestSessionId) {
+      return request<T>(path, init, false, attachSession, handleDemoUnavailable);
+    }
   }
   if (!response.ok) {
     let code = "request_failed";
@@ -176,7 +304,7 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
       currentMaintenanceMessage = publicMessage ?? "";
       window.dispatchEvent(new CustomEvent<{ message: string }>(MAINTENANCE_MODE_EVENT, { detail: { message: currentMaintenanceMessage } }));
     }
-    if (code === "demo_unavailable") {
+    if (code === "demo_unavailable" && handleDemoUnavailable) {
       clearDemoClientState();
       if (!demoUnavailableDispatched) {
         demoUnavailableDispatched = true;
@@ -207,35 +335,35 @@ type ProfileAccessInput = {
 };
 
 export const api = {
-  discovery: () => request<Discovery>("/.well-known/rivune", {}, false),
+  discovery: () => request<Discovery>("/.well-known/rivune", {}, false, false),
   setup: async (input: { instanceName: string; admin: { username: string; password: string }; profileName: string }, token: string) => {
     const result = await request<{ instance: { id: string }; admin: { id: string }; profile: { id: string } }>("/setup", {
       method: "POST", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(input),
-    }, false);
+    }, false, false);
     clearDemoClientState();
     return result;
   },
-  startDemo: () => request<{ account: Account }>("/demo/sessions", { method: "POST" }, false),
-  demoSession: () => request<{ account: Account }>("/demo/session", {}, false),
-  resetDemo: () => request<{ account: Account }>("/demo/session/reset", { method: "POST" }, false),
-  exitDemo: () => request<void>("/demo/session", { method: "DELETE" }, false),
+  startDemo: () => request<{ account: Account }>("/demo/sessions", { method: "POST" }, false, false, false),
+  demoSession: () => request<{ account: Account }>("/demo/session", {}, false, false),
+  resetDemo: () => request<{ account: Account }>("/demo/session/reset", { method: "POST" }, false, false),
+  exitDemo: () => request<void>("/demo/session", { method: "DELETE" }, false, false),
   login: async (username: string, password: string) => {
     const tokens = await request<TokenPair>("/auth/login", {
       method: "POST",
       body: JSON.stringify({ username, password, device: { id: localStorage.getItem(DEVICE_KEY) || undefined, name: browserName(), platform: "web" } }),
-    }, false);
+    }, false, false);
     saveTokens(tokens);
     return tokens;
   },
   beginDeviceAuthorization: () => request<DeviceAuthorization>("/auth/device-code", {
     method: "POST",
     body: JSON.stringify({ deviceName: browserName(), platform: "web" }),
-  }, false),
+  }, false, false),
   exchangeDeviceAuthorization: async (deviceCode: string) => {
     const tokens = await request<TokenPair>("/auth/device-code/token", {
       method: "POST",
       body: JSON.stringify({ deviceCode }),
-    }, false);
+    }, false, false);
     saveTokens(tokens);
     return tokens;
   },
@@ -259,8 +387,11 @@ export const api = {
   moveProfilesToCategory: (profileIds: string[], categoryId: string) => request<void>("/profiles/category-moves", { method: "POST", body: JSON.stringify({ profileIds, categoryId }) }),
   moveDevicesToCategory: (deviceIds: string[], categoryId: string) => request<void>("/devices/category-moves", { method: "POST", body: JSON.stringify({ deviceIds, categoryId }) }),
   profiles: () => request<{ profiles: Profile[] }>("/profiles"),
-  selectProfile: (id: string, pin?: string) => request<{ profile: Profile; expiresAt: string }>(`/profiles/${id}/select`, { method: "POST", body: JSON.stringify(pin ? { pin } : {}) }),
-  clearProfile: () => request<void>("/profiles/selection", { method: "DELETE" }),
+  selectProfile: (id: string, pin?: string) => request<{ profile: Profile; expiresAt: string; profileContext: string }>(`/profiles/${id}/select`, { method: "POST", body: JSON.stringify(pin ? { pin } : {}) }),
+  clearProfile: async () => {
+    await request<void>("/profiles/selection", { method: "DELETE" });
+    clearSharedProfileContext();
+  },
   avatarPresets: () => request<{ presets: AvatarPreset[] }>("/profile-avatars"),
   createProfile: (input: { name: string; description?: string | null; categoryId: string; isChild?: boolean; pin?: string } & ProfileAccessInput) => request<Profile>("/profiles", { method: "POST", body: JSON.stringify(input) }),
   updateProfile: (id: string, input: { name?: string; description?: string | null; categoryId?: string; isChild?: boolean; pin?: string | null } & ProfileAccessInput) => request<Profile>(`/profiles/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
@@ -274,9 +405,10 @@ export const api = {
   broadcastSessionNotification: (idempotencyKey: string, message: string) => request<NotificationBroadcast>("/auth/notifications/broadcast", { method: "POST", body: JSON.stringify({ idempotencyKey, message }) }),
   sendProfileSessionNotification: (profileId: string, sessionId: string, message: string) => request<SessionNotification>(`/profiles/${profileId}/sessions/${sessionId}/notifications`, { method: "POST", body: JSON.stringify({ message }) }),
 
-  collections: (signal?: AbortSignal) => request<{ collections: Collection[] }>("/collections", { signal }),
+  collections: (signal?: AbortSignal) => request<CollectionListResponse>("/collections", { signal }),
   calendar: (from: string, to: string, signal?: AbortSignal) => request<CalendarResponse>(`/calendar${query({ from, to, language: metadataLanguage })}`, { signal }),
   collection: (id: string) => request<Collection>(`/collections/${id}`),
+  collectionManagement: (id: string) => request<Collection>(`/collections/${id}/management`),
   createCollection: (input: CollectionSaveInput) => request<Collection>("/collections", { method: "POST", body: JSON.stringify(input) }),
   updateCollection: (id: string, input: CollectionSaveInput) => request<Collection>(`/collections/${id}`, { method: "PUT", body: JSON.stringify(input) }),
   deleteCollection: (id: string) => request<void>(`/collections/${id}`, { method: "DELETE" }),
@@ -298,14 +430,15 @@ export const api = {
   tmdbGenres: (mediaType: string) => request<{ genres: { id: number; name: string }[] }>(`/collections/tmdb/genres${query({ mediaType, language: metadataLanguage })}`),
 
   addons: () => request<{ addons: InstalledAddon[] }>("/addons"),
-  installAddon: (transportUrl: string, profileIds: string[]) => request<InstalledAddon>("/addons", { method: "POST", body: JSON.stringify({ transportUrl, profileIds }) }),
+  installAddon: (transportUrl: string, profileIds: string[]) => request<ManagedAddon>("/addons", { method: "POST", body: JSON.stringify({ transportUrl, profileIds }) }),
+  addonManagement: (id: string) => request<ManagedAddon>(`/addons/${id}/management`),
   refreshAddon: (id: string) => request<InstalledAddon>(`/addons/${id}/refresh`, { method: "POST" }),
-  updateAddon: (id: string, transportUrl: string, profileIds: string[]) => request<InstalledAddon>(`/addons/${id}`, { method: "PUT", body: JSON.stringify({ transportUrl, profileIds }) }),
+  updateAddon: (id: string, profileIds: string[], replacementTransportUrl?: string) => request<ManagedAddon>(`/addons/${id}`, { method: "PUT", body: JSON.stringify({ ...(replacementTransportUrl ? { transportUrl: replacementTransportUrl } : {}), profileIds }) }),
   reorderAddons: (addonIds: string[]) => request<{ addons: InstalledAddon[] }>("/addons/order", { method: "PUT", body: JSON.stringify({ addonIds }) }),
   deleteAddon: (id: string) => request<void>(`/addons/${id}`, { method: "DELETE" }),
   addonCatalogs: () => request<{ catalogs: Array<{ addonId: string; manifestId: string; position: number; catalog: { type: string; id: string; name?: string }; addonCatalog: boolean }> }>("/addons/catalogs"),
   search: (type: string, search: string, skip: number, limit: number, signal?: AbortSignal) => request<ResourceBatch>(`/addons/catalogs/search/${encodeURIComponent(type)}${query({ search, skip, limit })}`, { signal }),
-  resources: (resource: string, type: string, id: string) => request<ResourceBatch>(`/addons/resources/${encodeURIComponent(resource)}/${encodeURIComponent(type)}/${encodeURIComponent(id)}`),
+  resources: (resource: "catalog" | "addon_catalog" | "meta", type: string, id: string) => request<ResourceBatch>(`/addons/resources/${encodeURIComponent(resource)}/${encodeURIComponent(type)}/${encodeURIComponent(id)}`),
 
   resolveTitle: (input: {
     mediaType: string;
@@ -346,11 +479,17 @@ export const api = {
   trailers: (titleId: string, seasonNumber?: number) => request<TrailerList>(`/metadata/titles/${encodeURIComponent(titleId)}/trailers${query({ language: trailerLanguage, captionLanguage: trailerCaptionLanguage, seasonNumber })}`),
 
   library: (mediaType = "", page = 1, pageSize = 100) => request<LibraryPage>(`/library${query({ mediaType, page, pageSize })}`),
+  tvLibraryMembership: (identities: TVLibraryIdentity[], signal?: AbortSignal) =>
+    request<TVLibraryMembershipResult>("/library/membership", { method: "POST", body: JSON.stringify({ identities }), signal }),
   continueWatching: (signal?: AbortSignal) => request<ContinueWatching>("/continue-watching?limit=30", { signal }),
   dismissContinue: (titleId: string) => request<void>(`/continue-watching/${encodeURIComponent(titleId)}`, { method: "DELETE" }),
   progress: (titleId: string) => request<import("./types").PlaybackProgress | undefined>(`/progress/${encodeURIComponent(titleId)}`),
+  progressBatch: (titleIds: string[], signal?: AbortSignal) =>
+    request<PlaybackProgressBatch>("/progress/batch", { method: "POST", body: JSON.stringify({ titleIds }), signal }),
   updateProgress: (titleId: string, input: { positionSeconds: number; durationSeconds: number; completed: boolean; expectedVersion: number }) => request<import("./types").PlaybackProgress>(`/progress/${encodeURIComponent(titleId)}`, { method: "PUT", body: JSON.stringify(input) }),
   setWatched: (titleId: string, watched: boolean, expectedVersion: number) => request<import("./types").PlaybackProgress>(`/titles/${encodeURIComponent(titleId)}/watched${watched ? "" : query({ expectedVersion })}`, { method: watched ? "POST" : "DELETE", body: watched ? JSON.stringify({ expectedVersion }) : undefined }),
+  setWatchedBatch: (items: SetWatchedBatchItem[], signal?: AbortSignal) =>
+    request<SetWatchedBatchResult>("/titles/watched/batch", { method: "PUT", body: JSON.stringify({ items }), signal }),
   addLibrary: (titleId: string) => request(`/library/${encodeURIComponent(titleId)}`, { method: "PUT" }),
   removeLibrary: (titleId: string) => request<void>(`/library/${encodeURIComponent(titleId)}`, { method: "DELETE" }),
 

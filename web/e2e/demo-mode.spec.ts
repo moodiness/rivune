@@ -17,7 +17,6 @@ const demoSearch = {
   results: [{
     addonId: "demo-addon",
     manifestId: "demo-manifest",
-    transportUrl: "https://fixtures.rivune.test/demo.json",
     resource: "catalog",
     type: "tv",
     id: "demo-tv",
@@ -70,6 +69,69 @@ test("real setup keeps its setup token confined to the setup request", async ({ 
   expect(rivune.matching("/api/v1/demo/sessions", "POST")).toHaveLength(0);
 });
 
+test("intentional demo admission is bearer-free and preserves real credentials until success", async ({ page, rivune }) => {
+  await rivune.configurePreSetup(page);
+  await page.evaluate(() => {
+    localStorage.setItem("rivune.access", "real-access");
+    localStorage.setItem("rivune.refresh", "real-refresh");
+    localStorage.setItem("rivune.session", "real-session");
+    sessionStorage.setItem("rivune.access", "real-access");
+  });
+  const admitted = Promise.withResolvers<void>();
+  const requested = Promise.withResolvers<string | null>();
+  await page.route("**/api/v1/demo/sessions", async (route) => {
+    requested.resolve(route.request().headers().authorization ?? null);
+    await admitted.promise;
+    await route.fallback();
+  });
+  await page.goto("/");
+
+  const entering = page.getByRole("button", { name: "Try demo", exact: true }).click();
+  expect(await requested.promise).toBeNull();
+  expect(await page.evaluate(() => ({
+    access: localStorage.getItem("rivune.access"),
+    refresh: localStorage.getItem("rivune.refresh"),
+    session: localStorage.getItem("rivune.session"),
+    sessionAccess: sessionStorage.getItem("rivune.access"),
+  }))).toEqual({ access: "real-access", refresh: "real-refresh", session: "real-session", sessionAccess: "real-access" });
+
+  admitted.resolve();
+  await entering;
+  await expect(page.locator(".demo-badge")).toHaveText("Demo mode");
+  expect(await page.evaluate(() => ({
+    access: localStorage.getItem("rivune.access"),
+    refresh: localStorage.getItem("rivune.refresh"),
+    session: localStorage.getItem("rivune.session"),
+    sessionAccess: sessionStorage.getItem("rivune.access"),
+  }))).toEqual({ access: null, refresh: null, session: null, sessionAccess: null });
+});
+
+test("refused intentional demo admission leaves real credentials intact", async ({ page, rivune }) => {
+  await rivune.configurePreSetup(page);
+  await page.evaluate(() => {
+    localStorage.setItem("rivune.access", "real-access");
+    localStorage.setItem("rivune.refresh", "real-refresh");
+    localStorage.setItem("rivune.session", "real-session");
+    sessionStorage.setItem("rivune.access", "real-access");
+  });
+  await page.goto("/");
+  const demoButton = page.getByRole("button", { name: "Try demo", exact: true });
+  await expect(demoButton).toBeVisible();
+  rivune.completeSetup();
+
+  await demoButton.click();
+  const start = await rivune.waitForRequest("/api/v1/demo/sessions", "POST");
+
+  expect(start.authorization).toBeNull();
+  expect(await page.evaluate(() => ({
+    access: localStorage.getItem("rivune.access"),
+    refresh: localStorage.getItem("rivune.refresh"),
+    session: localStorage.getItem("rivune.session"),
+    sessionAccess: sessionStorage.getItem("rivune.access"),
+  }))).toEqual({ access: "real-access", refresh: "real-refresh", session: "real-session", sessionAccess: "real-access" });
+  await expect(page.locator(".demo-badge")).toHaveCount(0);
+});
+
 test("demo entry sends no setup secret or bearer token and exposes content, profiles, library, playback, and reset", async ({ page, rivune }) => {
   rivune.setSearchResponse("tv", 0, demoSearch);
   await enterDemo(page, rivune);
@@ -88,7 +150,7 @@ test("demo entry sends no setup secret or bearer token and exposes content, prof
   await expect(page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true })).toHaveCount(0);
   await expect(page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: /^(Administration|Preferences|Manage)$/ })).toHaveCount(0);
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await rivune.waitForRequest("/api/v1/progress/episode-1", "GET");
+  await rivune.waitForRequest("/api/v1/progress/batch", "POST");
   await page.getByRole("button", { name: "Back to browse" }).click();
 
   await page.getByRole("button", { name: /Switch profile/ }).click();
@@ -151,15 +213,35 @@ test("refresh resumes only through the backend-validated cookie session", async 
   expect(rivune.matching("/api/v1/demo/session", "GET").at(-1)?.authorization).toBeNull();
 });
 
-test("direct demo route is backend-refused after setup and shows the terminal message", async ({ page, rivune }) => {
-  await rivune.configurePreSetup(page);
-  rivune.completeSetup();
-  await page.goto("/demo");
+test("top-level demo navigation preserves an established real session without starting demo", async ({ page, rivune }) => {
+  await page.goto("/");
+  await rivune.waitForRequest("/api/v1/collections", "GET");
+  await page.evaluate(() => {
+    sessionStorage.setItem("rivune.search.alice", "principal-owned-query");
+    localStorage.setItem("rivune.demo", "1");
+  });
+  const before = await page.evaluate(() => ({
+    access: localStorage.getItem("rivune.access"),
+    refresh: localStorage.getItem("rivune.refresh"),
+    session: localStorage.getItem("rivune.session"),
+    sessionAccess: sessionStorage.getItem("rivune.access"),
+    hint: localStorage.getItem("rivune.demo"),
+  }));
 
-  await expect(page.getByText("The server setup has been completed. Demo mode is no longer available.", { exact: true })).toBeVisible();
-  const start = await rivune.waitForRequest("/api/v1/demo/sessions", "POST");
-  expect(start.body).toBeUndefined();
-  expect(start.authorization).toBeNull();
+  await page.goto("/demo");
+  await expect(page.locator(".sidebar-profile")).toContainText("Alice");
+
+  expect(await page.evaluate(() => ({
+    access: localStorage.getItem("rivune.access"),
+    refresh: localStorage.getItem("rivune.refresh"),
+    session: localStorage.getItem("rivune.session"),
+    hint: localStorage.getItem("rivune.demo"),
+    sessionAccess: sessionStorage.getItem("rivune.access"),
+    search: sessionStorage.getItem("rivune.search.alice"),
+  }))).toEqual({ ...before, search: "principal-owned-query" });
+  expect(rivune.matching("/api/v1/demo/sessions", "POST")).toHaveLength(0);
+  expect(rivune.matching("/api/v1/demo/session", "GET")).toHaveLength(0);
+  expect(rivune.matching("/api/v1/auth/logout", "POST")).toHaveLength(0);
   await expect(page).not.toHaveURL(/\/demo/);
 });
 

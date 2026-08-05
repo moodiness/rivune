@@ -244,6 +244,37 @@ test("profile creation requires and submits the chosen category", async ({ page,
   await expect(profileCard(page, "Jordan")).toContainText("Weekend guest profile");
 });
 
+test("avatar previews keep one blob URL and revoke it when the editor closes", async ({ page, rivune: _rivune }) => {
+  await page.addInitScript(() => {
+    const state = window as typeof window & { __avatarURLs?: { created: string[]; revoked: string[] } };
+    state.__avatarURLs = { created: [], revoked: [] };
+    URL.createObjectURL = () => {
+      const url = `blob:avatar-${state.__avatarURLs!.created.length + 1}`;
+      state.__avatarURLs!.created.push(url);
+      return url;
+    };
+    URL.revokeObjectURL = (url) => {
+      state.__avatarURLs!.revoked.push(url);
+    };
+  });
+  await openAdministration(page, "Profiles");
+  await page.getByRole("button", { name: "New profile" }).click();
+  const dialog = page.locator("dialog");
+  await dialog.locator('input[type="file"]').setInputFiles({
+    name: "avatar.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("avatar"),
+  });
+  await expect(dialog.locator(".avatar-editor img").first()).toHaveAttribute("src", "blob:avatar-1");
+  await dialog.getByLabel("Name").fill("A profile name that triggers the editor to render repeatedly");
+  await dialog.getByLabel("Description").fill("A description that also changes editor state.");
+  expect(await page.evaluate(() => (window as typeof window & { __avatarURLs?: { created: string[] } }).__avatarURLs?.created)).toEqual(["blob:avatar-1"]);
+
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await page.evaluate(() => (window as typeof window & { __avatarURLs?: { revoked: string[] } }).__avatarURLs?.revoked)).toEqual(["blob:avatar-1"]);
+});
+
 test("a single profile move preserves the profile identity and exact request body", async ({ page, rivune }) => {
   await openAdministration(page, "Profiles");
   await profileCard(page, "Bob").getByRole("button", { name: "Move", exact: true }).click();

@@ -8,15 +8,26 @@ export type CapturedRequest = {
   body: unknown;
   profileId: string | null;
   authorization: string | null;
+  profileContext: string | null;
 };
 type CollectionFolderFixture = {
   id: string;
   title: string;
   tileShape: "poster" | "landscape" | "square";
   sourceView?: "merged" | "categories" | "folders";
+  coverImageUrl?: string;
+  titleLogoUrl?: string;
+  heroBackdropUrl?: string;
   focusGifEnabled: boolean;
   hideTitle: boolean;
   sources: Array<{ id?: string; kind: string; title: string; [key: string]: unknown }>;
+};
+
+type CollectionArtworkFixture = {
+  backdropImageUrl: string;
+  coverImageUrl: string;
+  titleLogoUrl: string;
+  heroBackdropUrl: string;
 };
 
 
@@ -299,6 +310,8 @@ export class RivuneHarness {
   readonly deviceResponseCompletions: string[] = [];
   readonly accountRefreshCompletions: number[] = [];
   private activeProfileId: string | null = "alice";
+  private activeProfileContext = "fixture-profile-context-alice-0";
+  private profileContextSequence = 0;
   private userRole: "admin" | "member" | "demo" = "admin";
   private setupRequired = false;
   private demoAvailable = false;
@@ -334,9 +347,11 @@ export class RivuneHarness {
   private readonly collectionViewModes = new Map<string, "tabbed_grid" | "rows" | "follow_layout">();
   private readonly collectionSourcePosters = new Map<string, boolean>();
   private readonly collectionFolders = new Map<string, Array<Pick<CollectionFolderFixture, "id" | "title"> & Partial<CollectionFolderFixture>>>();
+  private readonly collectionArtwork = new Map<string, CollectionArtworkFixture>();
   private readonly folderDelays = new Map<string, number>();
   private readonly seasonOverrides = new Map<string, unknown>();
   private libraryItems: Array<Record<string, unknown>> = [];
+  private libraryMembershipDelay = 0;
   private readonly demoProgress = new Map<string, { positionSeconds: number; durationSeconds: number; completed: boolean; version: number }>();
   private readonly searchResponses = new Map<string, { body: unknown; status: number; delay: number }>();
   private readonly deviceResponses = new Map<string, { status: number; delay: number }>();
@@ -398,6 +413,7 @@ export class RivuneHarness {
     await page.evaluate(() => {
       localStorage.removeItem("rivune.access");
       localStorage.removeItem("rivune.refresh");
+      localStorage.removeItem("rivune.session");
       localStorage.removeItem("rivune.demo");
       sessionStorage.removeItem("rivune.access");
     });
@@ -408,6 +424,7 @@ export class RivuneHarness {
     await page.evaluate(() => {
       localStorage.removeItem("rivune.access");
       localStorage.removeItem("rivune.refresh");
+      localStorage.removeItem("rivune.session");
       sessionStorage.removeItem("rivune.access");
     });
   }
@@ -559,6 +576,10 @@ export class RivuneHarness {
     this.collectionFolders.set(profileId, folders.map((folder) => ({ ...folder })));
   }
 
+  setCollectionArtwork(profileId: string, artwork: CollectionArtworkFixture) {
+    this.collectionArtwork.set(profileId, { ...artwork });
+  }
+
   delayFolder(folderId: string, milliseconds: number) {
     this.folderDelays.set(folderId, milliseconds);
   }
@@ -569,7 +590,34 @@ export class RivuneHarness {
     if (configured) {
       value.folders = configured.map((folder) => ({ ...value.folders[0], ...folder }));
     }
-    return { ...value, viewMode: this.collectionViewModes.get(profileId) ?? value.viewMode };
+    const artwork = this.collectionArtwork.get(profileId);
+    return {
+      ...value,
+      ...(artwork ? { backdropImageUrl: `/api/v1/artwork/${profileId}-collection-backdrop` } : {}),
+      folders: value.folders.map((folder, index) => artwork && index === 0 ? {
+        ...folder,
+        coverImageUrl: `/api/v1/artwork/${profileId}-folder-cover`,
+        titleLogoUrl: `/api/v1/artwork/${profileId}-folder-logo`,
+        heroBackdropUrl: `/api/v1/artwork/${profileId}-folder-backdrop`,
+      } : folder),
+      viewMode: this.collectionViewModes.get(profileId) ?? value.viewMode,
+    };
+  }
+
+  private collectionManagementFor(profileId: string) {
+    const value = this.collectionFor(profileId);
+    const artwork = this.collectionArtwork.get(profileId);
+    if (!artwork) return value;
+    return {
+      ...value,
+      backdropImageUrl: artwork.backdropImageUrl,
+      folders: value.folders.map((folder, index) => index === 0 ? {
+        ...folder,
+        coverImageUrl: artwork.coverImageUrl,
+        titleLogoUrl: artwork.titleLogoUrl,
+        heroBackdropUrl: artwork.heroBackdropUrl,
+      } : folder),
+    };
   }
 
   delayNextEffectiveSettings(milliseconds: number) {
@@ -586,6 +634,9 @@ export class RivuneHarness {
 
   setLibraryItems(items: Array<Record<string, unknown>>) {
     this.libraryItems = items;
+  }
+  setLibraryMembershipDelay(milliseconds: number) {
+    this.libraryMembershipDelay = milliseconds;
   }
   setSearchResponse(type: string, skip: number, body: unknown, options: { status?: number; delay?: number } = {}) {
     this.searchResponses.set(`${type}:${skip}`, { body, status: options.status ?? 200, delay: options.delay ?? 0 });
@@ -607,10 +658,14 @@ export class RivuneHarness {
   async install(page: Page) {
     await page.route("**/*", (route) => this.handle(route));
     await page.goto("/__e2e_seed__");
-    await page.evaluate(() => {
+    const profileID = this.activeProfileId;
+    const profileContext = this.activeProfileContext;
+    await page.evaluate(({ profileID, profileContext }) => {
       localStorage.setItem("rivune.refresh", "fixture-refresh");
       localStorage.setItem("rivune.device", "fixture-device");
-    });
+      if (profileID) sessionStorage.setItem("rivune.profile", profileID);
+      if (profileID && profileContext) sessionStorage.setItem("rivune.profile.context", profileContext);
+    }, { profileID, profileContext });
   }
 
   private account() {
@@ -657,14 +712,24 @@ export class RivuneHarness {
 
     let body: unknown;
     try { body = request.postData() ? request.postDataJSON() : undefined; } catch { body = request.postData(); }
+    const path = url.pathname.startsWith("/api/v1") ? url.pathname.slice("/api/v1".length) : url.pathname;
     const profileAtRequest = this.activeProfileId;
-    this.requests.push({ method: request.method(), pathname: url.pathname, search: new URLSearchParams(url.search), body, profileId: profileAtRequest, authorization: request.headers().authorization ?? null });
+    this.requests.push({ method: request.method(), pathname: url.pathname, search: new URLSearchParams(url.search), body, profileId: profileAtRequest, authorization: request.headers().authorization ?? null, profileContext: request.headers()["x-rivune-profile-context"] ?? null });
 
     if (url.pathname === "/.well-known/rivune") {
-      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 18, apiBaseUrl: "/api/v1", setupRequired: this.setupRequired, setupCompleted: !this.setupRequired, demoAvailable: this.setupRequired && this.demoAvailable, timezone: "UTC", interfaceLanguage: typeof this.instanceSettings.interfaceLanguage === "string" ? this.instanceSettings.interfaceLanguage : "en" });
+      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 19, apiBaseUrl: "/api/v1", setupRequired: this.setupRequired, setupCompleted: !this.setupRequired, demoAvailable: this.setupRequired && this.demoAvailable, timezone: "UTC", interfaceLanguage: typeof this.instanceSettings.interfaceLanguage === "string" ? this.instanceSettings.interfaceLanguage : "en" });
       return;
     }
-    const path = url.pathname.slice("/api/v1".length);
+    const profileContextExempt =
+      path === "/auth/logout" ||
+      path === "/auth/me" ||
+      request.method() === "GET" && (path === "/profiles" || path.startsWith("/profiles/") && path.endsWith("/avatar")) ||
+      request.method() === "POST" && path.startsWith("/profiles/") && path.endsWith("/select");
+    if (request.headers().authorization && this.activeProfileId && !profileContextExempt &&
+      request.headers()["x-rivune-profile-context"] !== this.activeProfileContext) {
+      await json(route, { error: { code: "profile_selection_required", message: "Select the active profile again" } }, 409);
+      return;
+    }
     if (path === "/demo/sessions" && request.method() === "POST") {
       if (!this.setupRequired || !this.demoAvailable) {
         await json(route, { error: { code: "demo_unavailable", message: "The server setup has been completed. Demo mode is no longer available." } }, 410);
@@ -1030,7 +1095,7 @@ export class RivuneHarness {
       return;
     }
     if (path === "/profiles" && request.method() === "GET") { await json(route, { profiles: this.currentProfiles() }); return; }
-    const profileResource = path.match(/^\/profiles\/([^/]+)$/);
+    const profileResource = path === "/profiles/selection" ? null : path.match(/^\/profiles\/([^/]+)$/);
     if (profileResource && request.method() === "PATCH") {
       const index = this.profiles.findIndex((profile) => profile.id === profileResource[1]);
       const visible = index >= 0 && (this.authorizationScope === "global_admin" || this.profiles[index]!.categoryId === this.sessionCategoryId);
@@ -1075,7 +1140,12 @@ export class RivuneHarness {
       await json(route, { schemaVersion: 1, settings: next, updatedAt: createdAt });
       return;
     }
-    if (path === "/profiles/selection" && request.method() === "DELETE") { this.activeProfileId = null; await route.fulfill({ status: 204 }); return; }
+    if (path === "/profiles/selection" && request.method() === "DELETE") {
+      this.activeProfileId = null;
+      this.activeProfileContext = "";
+      await route.fulfill({ status: 204 });
+      return;
+    }
     const profileSelection = path.match(/^\/profiles\/([^/]+)\/select$/);
     if (profileSelection && request.method() === "POST") {
       const selected = this.accountProfiles().find((profile) => profile.id === profileSelection[1]);
@@ -1085,12 +1155,13 @@ export class RivuneHarness {
         return;
       }
       this.activeProfileId = selected.id;
+      this.activeProfileContext = `fixture-profile-context-${selected.id}-${++this.profileContextSequence}`;
       const refreshedName = this.profileRefreshAfterSelection.get(selected.id);
       if (refreshedName) {
         this.profiles = this.profiles.map((profile) => profile.id === selected.id ? { ...profile, name: refreshedName } : profile);
         this.profileRefreshAfterSelection.delete(selected.id);
       }
-      await json(route, { profile: selected, expiresAt });
+      await json(route, { profile: selected, expiresAt, profileContext: this.activeProfileContext });
       return;
     }
     const effectiveSettings = path.match(/^\/profiles\/([^/]+)\/settings\/effective$/);
@@ -1119,6 +1190,12 @@ export class RivuneHarness {
     if (path === "/auth/notifications/broadcast" && request.method() === "POST") {
       const input = body as { idempotencyKey: string; message: string };
       await json(route, { id: input.idempotencyKey, message: input.message, senderUsername: "fixture-owner", recipientCount: 3, createdAt }, 201);
+      return;
+    }
+    const collectionManagement = path.match(/^\/collections\/([^/]+)\/management$/);
+    if (collectionManagement && request.method() === "GET") {
+      const collectionProfile = collectionManagement[1].replace(/-collection$/, "");
+      await json(route, this.collectionManagementFor(collectionProfile));
       return;
     }
     if (path === "/collections") {
@@ -1204,6 +1281,31 @@ export class RivuneHarness {
       return;
     }
     if (path.startsWith("/addons/resources/meta/")) { await json(route, { results: [], errors: [] }); return; }
+    if (path === "/library/membership" && request.method() === "POST") {
+      if (this.libraryMembershipDelay) await wait(this.libraryMembershipDelay);
+      const rawIdentities = body && typeof body === "object" && "identities" in body ? body.identities : undefined;
+      const identities = Array.isArray(rawIdentities) ? rawIdentities.flatMap((identity) =>
+        identity && typeof identity === "object" &&
+        "sourceAddonId" in identity && typeof identity.sourceAddonId === "string" &&
+        "resourceId" in identity && typeof identity.resourceId === "string"
+          ? [{ sourceAddonId: identity.sourceAddonId, resourceId: identity.resourceId }]
+          : [],
+      ) : [];
+      const items = identities.flatMap((identity) => {
+        const saved = this.libraryItems.find((item) =>
+          item.mediaType === "tv" &&
+          item.sourceAddonId === identity.sourceAddonId &&
+          item.resourceId === identity.resourceId,
+        );
+        return saved ? [{
+          sourceAddonId: identity.sourceAddonId,
+          resourceId: identity.resourceId,
+          titleId: saved.titleId,
+        }] : [];
+      });
+      await json(route, { items });
+      return;
+    }
     if (path === "/library") {
       const mediaType = url.searchParams.get("mediaType");
       const items = mediaType ? this.libraryItems.filter((item) => item.mediaType === mediaType) : this.libraryItems;
@@ -1226,6 +1328,31 @@ export class RivuneHarness {
       await route.fulfill({ status: 204 });
       return;
     }
+    if (path === "/titles/watched/batch" && request.method() === "PUT") {
+      const rawItems = body && typeof body === "object" && "items" in body ? body.items : undefined;
+      const inputs = Array.isArray(rawItems) ? rawItems.flatMap((input) =>
+        input && typeof input === "object" &&
+        "titleId" in input && typeof input.titleId === "string" &&
+        "completed" in input && typeof input.completed === "boolean" &&
+        "expectedVersion" in input && typeof input.expectedVersion === "number"
+          ? [{ titleId: input.titleId, completed: input.completed, expectedVersion: input.expectedVersion }]
+          : []
+      ) : [];
+      const items = inputs.map((input) => ({
+        titleId: input.titleId,
+        progress: {
+          titleId: input.titleId,
+          mediaType: input.titleId.startsWith("episode-") ? "episode" : "movie",
+          positionSeconds: input.completed ? 1800 : 0,
+          durationSeconds: 1800,
+          completed: input.completed,
+          version: input.expectedVersion + 1,
+          updatedAt: createdAt,
+        },
+      }));
+      await json(route, { items });
+      return;
+    }
     const watchedMutation = path.match(/^\/titles\/([^/]+)\/watched$/);
     if (watchedMutation && (request.method() === "POST" || request.method() === "DELETE")) {
       const titleId = decodeURIComponent(watchedMutation[1]);
@@ -1242,6 +1369,17 @@ export class RivuneHarness {
         version: expectedVersion + 1,
         updatedAt: createdAt,
       });
+      return;
+    }
+    if (path === "/progress/batch" && request.method() === "POST") {
+      const rawTitleIds = body && typeof body === "object" && "titleIds" in body ? body.titleIds : undefined;
+      const titleIds = Array.isArray(rawTitleIds) ? rawTitleIds.filter((titleId): titleId is string => typeof titleId === "string") : [];
+      const items = titleIds.map((titleId) => {
+        const saved = this.userRole === "demo" ? this.demoProgress.get(titleId) : undefined;
+        const progress = saved ?? { positionSeconds: titleId === "episode-1" ? 321 : 0, durationSeconds: 1800, completed: false, version: titleId === "episode-1" ? 4 : 0 };
+        return { titleId, progress: { titleId, mediaType: titleId.startsWith("episode-") ? "episode" : "movie", ...progress, updatedAt: createdAt } };
+      });
+      await json(route, { items });
       return;
     }
     if (path.startsWith("/progress/") && request.method() === "GET") {

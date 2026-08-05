@@ -5,7 +5,7 @@ import { api, APIError } from "./api";
 import { Button, HorizontalDragRow, IconButton, Notice } from "./components";
 import { translate as t } from "./i18n";
 import { mediaFromLibraryItem, mediaIdentity, mediaResourceID, resolveMediaTitle } from "./mediaIdentity";
-import { cachedMediaItem, cacheMediaItem } from "./metadataCache";
+import { cachedMediaItem, cacheMediaItem, flushMetadataCache } from "./metadataCache";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "./notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "./titleProviders";
 import type { CastMember, EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
@@ -427,6 +427,8 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     cacheMediaItem(item, details, metadataLocale, titleID);
   }, [continueEpisodeID, details, item, metadataLocale, selectedEpisode, titleID]);
 
+  useEffect(() => () => flushMetadataCache(), []);
+
   useEffect(() => {
     if (playing) return;
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
@@ -632,6 +634,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     if (!seasonID) {
       setSeason(undefined);
       return;
@@ -639,7 +642,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     setSeasonLoading(true);
     setSelectedEpisode(undefined);
     setEpisodeProgress({});
-    void (seasonCacheRef.current.has(seasonID) ? Promise.resolve(seasonCacheRef.current.get(seasonID)!) : api.seasonDetails(seasonID, undefined, series?.mappingProvider)).then(async (resolved) => {
+    void (seasonCacheRef.current.has(seasonID) ? Promise.resolve(seasonCacheRef.current.get(seasonID)!) : api.seasonDetails(seasonID, controller.signal, series?.mappingProvider)).then(async (resolved) => {
       if (!active) return;
       setSeason(resolved);
       const resolvedPoster = resolved.posterUrl
@@ -661,13 +664,17 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
         const fallbackEpisode = item.mediaType === "episode" || exactMappedEpisodeRequired ? undefined : resolved.episodes[0];
         setSelectedEpisode(requested ?? requestedByNumber ?? fallbackEpisode);
       }
-      const progressEntries = await Promise.all(resolved.episodes.map(async (episode) => [episode.id, await api.progress(episode.id).catch(() => undefined)] as const));
+      if (resolved.episodes.length === 0) {
+        setEpisodeProgress({});
+        return;
+      }
+      const progressBatch = await api.progressBatch(resolved.episodes.map((episode) => episode.id), controller.signal);
       if (!active) return;
-      setEpisodeProgress(Object.fromEntries(progressEntries));
+      setEpisodeProgress(Object.fromEntries(progressBatch.items.map((entry) => [entry.titleId, entry.progress ?? undefined])));
     }).catch((cause) => {
-      if (active) setSeriesError(notifyError(cause, t("media.season.error.episodesLoadFailed"), t("media.season.error.unavailableTitle")));
+      if (active && !controller.signal.aborted) setSeriesError(notifyError(cause, t("media.season.error.episodesLoadFailed"), t("media.season.error.unavailableTitle")));
     }).finally(() => { if (active) setSeasonLoading(false); });
-    return () => { active = false; };
+    return () => { active = false; controller.abort(); };
   }, [continueEpisodeID, continueEpisodeNumber, item.mediaType, seasonID, series?.mappingProvider]);
   useEffect(() => {
     if (item.mediaType !== "episode" || !selectedEpisode) return;
@@ -988,15 +995,24 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     setWatchedBusy(seasonID);
     setActionError("");
     try {
-      const results = await Promise.all(changed.map(async (episode) => [episode.id, await api.setWatched(episode.id, watched, episodeProgress[episode.id]?.version ?? 0)] as const));
-      setEpisodeProgress((values) => ({ ...values, ...Object.fromEntries(results) }));
+      const results = await api.setWatchedBatch(changed.map((episode) => ({
+        titleId: episode.id,
+        completed: watched,
+        expectedVersion: episodeProgress[episode.id]?.version ?? 0,
+      })));
+      setEpisodeProgress((values) => ({
+        ...values,
+        ...Object.fromEntries(results.items.map((entry) => [entry.titleId, entry.progress] as const)),
+      }));
       notifySuccess(
         t(watched ? "media.season.watch.allMarkedWatched" : "media.season.watch.allMarkedUnwatched"),
         t(watched ? "media.season.watch.watchedTitle" : "media.season.watch.unwatchedTitle"),
       );
     } catch (cause) {
-      const refreshed = await Promise.all(episodes.map(async (episode) => [episode.id, await api.progress(episode.id).catch(() => undefined)] as const));
-      setEpisodeProgress(Object.fromEntries(refreshed));
+      const refreshed = await api.progressBatch(episodes.map((episode) => episode.id)).catch(() => undefined);
+      if (refreshed) {
+        setEpisodeProgress(Object.fromEntries(refreshed.items.map((entry) => [entry.titleId, entry.progress ?? undefined])));
+      }
       setActionError(notifyError(cause, t("media.season.watch.error.partialUpdate"), t("media.season.watch.error.partialUpdateTitle")));
     } finally {
       setWatchedBusy("");

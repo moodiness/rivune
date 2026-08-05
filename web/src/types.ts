@@ -141,7 +141,7 @@ export type DeviceAuthorization = {
 
 
 export type CollectionExtra = { name: string; value: string };
-export type AddonCatalogSource = { addonId: string; type: string; catalogId: string; extra?: CollectionExtra[] };
+export type AddonCatalogSource = { addonId: string; manifestId?: string; type: string; catalogId: string; extra?: CollectionExtra[] };
 export type TMDBFilters = {
   genres?: number[];
   releaseDateFrom?: string;
@@ -208,6 +208,7 @@ export type Collection = {
   updatedAt: string;
 };
 export type CollectionSaveInput = Omit<Collection, "id" | "position" | "version" | "createdAt" | "updatedAt"> & { expectedVersion?: number };
+export type CollectionListResponse = { collections: Collection[] };
 export type PortableAddonCatalogSource = Omit<AddonCatalogSource, "addonId"> & {
   addonId?: string;
   manifestId?: string;
@@ -376,14 +377,16 @@ export type AddonManifest = {
 };
 export type InstalledAddon = {
   id: string;
-  transportUrl: string;
   manifest: AddonManifest;
   position: number;
   profileIds: string[];
   installedAt: string;
   updatedAt: string;
 };
-export type ResourceResult = { addonId: string; manifestId: string; transportUrl: string; resource: string; type: string; id: string; extra?: CollectionExtra[]; payload: Record<string, unknown> };
+export type ManagedAddon = InstalledAddon & {
+  transportUrl?: string;
+};
+export type ResourceResult = { addonId: string; manifestId: string; resource: string; type: string; id: string; extra?: CollectionExtra[]; payload: Record<string, unknown> };
 export type ResourceBatch = { results: ResourceResult[]; errors: { addonId: string; manifestId: string; code: string; message: string }[] };
 
 export type PlaybackMediaProfile = { container: string; videoCodec: string; audioCodec?: string };
@@ -601,6 +604,10 @@ export type OperationRun = {
   };
 };
 export type PlaybackProgress = { titleId: string; mediaType?: string; positionSeconds: number; durationSeconds: number; completed: boolean; version: number; updatedAt?: string };
+export type PlaybackProgressBatchItem = { titleId: string; progress: PlaybackProgress | null };
+export type PlaybackProgressBatch = { items: PlaybackProgressBatchItem[] };
+export type SetWatchedBatchItem = { titleId: string; completed: boolean; expectedVersion: number };
+export type SetWatchedBatchResult = { items: Array<{ titleId: string; progress: PlaybackProgress }> };
 export type LibraryItem = {
   titleId: string;
   mediaType: string;
@@ -624,6 +631,9 @@ export type LibraryItem = {
   updatedAt: string;
 };
 export type LibraryPage = { items: LibraryItem[]; page: number; totalPages: number; totalResults: number };
+export type TVLibraryIdentity = { sourceAddonId: string; resourceId: string };
+export type TVLibraryMembership = TVLibraryIdentity & { titleId: string };
+export type TVLibraryMembershipResult = { items: TVLibraryMembership[] };
 export type CalendarEvent = {
   id: string;
   titleId: string;

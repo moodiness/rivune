@@ -1,12 +1,14 @@
 import { LoaderCircle, RefreshCw, ServerOff } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { useAuth } from "./auth";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { principalIdentity, useAuth } from "./auth";
 import { api, APIError, clearMaintenanceMode, MAINTENANCE_MODE_EVENT, maintenanceModeMessage } from "./api";
 import { Button, RivuneMark } from "./components";
+import { clearMediaCaches } from "./homeCache";
 import { setLocale, translate as t } from "./i18n";
 import { mediaIdentity, mediaResourceID } from "./mediaIdentity";
 import type { CanonicalRouteMetadata } from "./media";
-import { configureNotificationDuration, notifyInfo } from "./notifications";
+import { clearMetadataCache } from "./metadataCache";
+import { clearNotifications, configureNotificationDuration, notifyInfo } from "./notifications";
 import { Shell } from "./Shell";
 import type { View } from "./Shell";
 import { LoginPage, SetupPage } from "./pages/Onboarding";
@@ -31,8 +33,27 @@ type MediaRouteContext = { seasonID: string; episodeID?: string; seasonNumber: n
 type AppRoute = { view: View; media: MediaRoute | null; canonicalURL?: string };
 
 const mediaRoutePrefix = "media/";
-const mediaRouteFields = ["titleId", "posterUrl", "backgroundUrl", "logoUrl", "releaseInfo", "released"] as const;
+const legacyMediaRouteFields = ["titleId", "releaseInfo", "released"] as const;
 const uuidRoutePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const principalStorageKey = "rivune.principal.v1";
+
+
+function rememberedPrincipal(): string | null {
+  try {
+    return localStorage.getItem(principalStorageKey);
+  } catch {
+    return null;
+  }
+}
+
+function rememberPrincipal(principal: string | null): void {
+  try {
+    if (principal === null) localStorage.removeItem(principalStorageKey);
+    else localStorage.setItem(principalStorageKey, principal);
+  } catch {
+    // In-memory isolation still applies when persistent storage is unavailable.
+  }
+}
 
 function decodeRouteSegment(value: string): string {
   try {
@@ -156,7 +177,10 @@ function legacyMediaRoute(routePath: string, query: string): MediaRoute | null {
   const stored = storedRouteItem(mediaType);
   const title = params.get("title")?.trim() || stored?.title || t("media.untitled");
   const item: MediaItem = stored?.id === id ? { ...stored, id, mediaType, title } : { id, mediaType, title };
-  for (const field of mediaRouteFields) {
+  delete item.posterUrl;
+  delete item.backgroundUrl;
+  delete item.logoUrl;
+  for (const field of legacyMediaRouteFields) {
     const value = params.get(field);
     if (value) item[field] = value;
   }
@@ -230,6 +254,7 @@ type RuntimeSettings = {
   autoplayNextEpisode: boolean;
   cardDensity: "comfortable" | "compact";
   animationsEnabled: boolean;
+  hideUnreleased: boolean;
   maximumCastMembers: number;
   subtitleSizePercent: number;
   subtitleTextColor: string;
@@ -243,6 +268,7 @@ const defaultRuntimeSettings: RuntimeSettings = {
   autoplayNextEpisode: true,
   cardDensity: "comfortable",
   animationsEnabled: true,
+  hideUnreleased: false,
   maximumCastMembers: 20,
   subtitleSizePercent: 100,
   subtitleTextColor: "#FFFFFF",
@@ -262,6 +288,7 @@ function runtimeSettings(values: SettingsValues): RuntimeSettings {
     autoplayNextEpisode: typeof values.autoplayNextEpisode === "boolean" ? values.autoplayNextEpisode : defaultRuntimeSettings.autoplayNextEpisode,
     cardDensity: values.cardDensity === "compact" ? "compact" : "comfortable",
     animationsEnabled: typeof values.animationsEnabled === "boolean" ? values.animationsEnabled : defaultRuntimeSettings.animationsEnabled,
+    hideUnreleased: values.hideUnreleased === true,
     maximumCastMembers: boundedSetting(values.maximumCastMembers, defaultRuntimeSettings.maximumCastMembers, 1, 100),
     subtitleSizePercent: boundedSetting(values.subtitleSizePercent, defaultRuntimeSettings.subtitleSizePercent, 50, 200),
     subtitleTextColor: typeof values.subtitleTextColor === "string" && /^#[0-9A-Fa-f]{6}$/.test(values.subtitleTextColor) ? values.subtitleTextColor.toUpperCase() : defaultRuntimeSettings.subtitleTextColor,
@@ -272,10 +299,11 @@ function runtimeSettings(values: SettingsValues): RuntimeSettings {
   };
 }
 
-function useRuntimeSettings(profileID: string | undefined, serverLanguage: InterfaceLanguage = "en"): { settings: RuntimeSettings; ready: boolean } {
+function useRuntimeSettings(profileID: string | undefined, serverLanguage: InterfaceLanguage = "en", principalScope: string | null = null): { settings: RuntimeSettings; ready: boolean } {
   const serverDefaults = { ...defaultRuntimeSettings, interfaceLanguage: serverLanguage };
-  const [loaded, setLoaded] = useState<{ profileID: string; settings: RuntimeSettings; ready: boolean }>({
+  const [loaded, setLoaded] = useState<{ profileID: string; principalScope: string | null; settings: RuntimeSettings; ready: boolean }>({
     profileID: "",
+    principalScope: null,
     settings: serverDefaults,
     ready: true,
   });
@@ -289,14 +317,14 @@ function useRuntimeSettings(profileID: string | undefined, serverLanguage: Inter
         api.configureMetadataLocale("auto", "auto");
         void setLocale(serverLanguage).then(() => {
           if (active && generation === requestGeneration) {
-            setLoaded({ profileID: "", settings: serverDefaults, ready: true });
+            setLoaded({ profileID: "", principalScope: null, settings: serverDefaults, ready: true });
           }
         });
         return;
       }
-      setLoaded((current) => current.profileID === profileID
+      setLoaded((current) => current.profileID === profileID && current.principalScope === principalScope
         ? current
-        : { profileID, settings: serverDefaults, ready: false });
+        : { profileID, principalScope, settings: serverDefaults, ready: false });
       void (async () => {
         try {
           const response = await api.effectiveSettings(profileID);
@@ -311,13 +339,13 @@ function useRuntimeSettings(profileID: string | undefined, serverLanguage: Inter
           const next = runtimeSettings(response.settings);
           await setLocale(next.interfaceLanguage);
           if (!active || generation !== requestGeneration) return;
-          setLoaded({ profileID, settings: next, ready: true });
+          setLoaded({ profileID, principalScope, settings: next, ready: true });
         } catch {
           if (!active || generation !== requestGeneration) return;
           api.configureMetadataLocale("auto", "auto");
           await setLocale(serverLanguage);
           if (!active || generation !== requestGeneration) return;
-          setLoaded({ profileID, settings: serverDefaults, ready: true });
+          setLoaded({ profileID, principalScope, settings: serverDefaults, ready: true });
         }
       })();
     };
@@ -327,9 +355,9 @@ function useRuntimeSettings(profileID: string | undefined, serverLanguage: Inter
       active = false;
       window.removeEventListener("rivune:settings-changed", load);
     };
-  }, [profileID, serverLanguage]);
+  }, [principalScope, profileID, serverLanguage]);
 
-  return loaded.profileID === (profileID ?? "")
+  return loaded.profileID === (profileID ?? "") && loaded.principalScope === principalScope
     ? { settings: loaded.settings, ready: loaded.ready }
     : { settings: serverDefaults, ready: false };
 }
@@ -347,9 +375,9 @@ function applyRuntimeSettings(settings: RuntimeSettings): void {
 const nonNegativeDecimal = /^[0-9]+$/;
 
 
-function useSessionNotifications(sessionID: string | undefined, refreshAccount: () => Promise<unknown>, enabled: boolean, pollIntervalSeconds: number) {
+function useSessionNotifications(sessionID: string | undefined, refreshAccount: () => Promise<unknown>, enabled: boolean, pollIntervalSeconds: number, principalScope: string | null) {
   useEffect(() => {
-    if (!sessionID || !enabled) return;
+    if (!sessionID || !enabled || principalScope === null) return;
     let active = true;
     let polling = false;
     const cursorKey = `rivune.notifications.${sessionID}`;
@@ -383,13 +411,14 @@ function useSessionNotifications(sessionID: string | undefined, refreshAccount: 
       active = false;
       window.clearInterval(timer);
     };
-  }, [enabled, pollIntervalSeconds, refreshAccount, sessionID]);
+  }, [enabled, pollIntervalSeconds, principalScope, refreshAccount, sessionID]);
 }
 
 export default function App() {
   const { account, booting, demoRevision, discovery, authenticated, activeProfile, mode, refreshAccount, terminalMessage } = useAuth();
-  const { settings, ready: settingsReady } = useRuntimeSettings(activeProfile?.id, discovery?.interfaceLanguage);
-  useSessionNotifications(account?.session.id, refreshAccount, mode !== "demo" && settings.notificationsEnabled, settings.notificationPollIntervalSeconds);
+  const principal = principalIdentity(discovery, account, activeProfile);
+  const { settings, ready: settingsReady } = useRuntimeSettings(activeProfile?.id, discovery?.interfaceLanguage, principal);
+  useSessionNotifications(account?.session.id, refreshAccount, mode !== "demo" && settings.notificationsEnabled, settings.notificationPollIntervalSeconds, principal);
   const pairingApproval = window.location.pathname === "/pair";
   const [initialRoute] = useState(appRoute);
   const [view, setViewState] = useState<View>(initialRoute.view);
@@ -402,6 +431,9 @@ export default function App() {
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(maintenanceModeMessage);
   const [checkingMaintenance, setCheckingMaintenance] = useState(false);
   const lastDemoRevision = useRef(demoRevision);
+  const lastPrincipal = useRef<string | null | undefined>(undefined);
+  const principalRef = useRef(principal);
+  principalRef.current = principal;
 
   function restoreOriginFocus() {
     const invokingElement = invokingElementRef.current;
@@ -432,6 +464,19 @@ export default function App() {
       library: revisions.library + 1,
     }));
   }
+  const resetPrincipalRoute = useCallback(() => {
+    mediaRouteRef.current = null;
+    setMediaRoute(null);
+    setViewState("home");
+    setHomeResetKey((current) => current + 1);
+    setMediaDataRevisions((revisions) => ({
+      home: revisions.home + 1,
+      search: revisions.search + 1,
+      library: revisions.library + 1,
+    }));
+    window.history.replaceState({ rivuneView: "home", rivuneScrollTop: 0, rivunePrincipal: principalRef.current }, "", viewURL("home"));
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }, []);
 
   const retryMaintenance = useCallback(async () => {
     setCheckingMaintenance(true);
@@ -463,22 +508,43 @@ export default function App() {
     const timer = window.setInterval(() => { void retryMaintenance(); }, 5_000);
     return () => window.clearInterval(timer);
   }, [maintenanceMessage, retryMaintenance]);
+  useLayoutEffect(() => {
+    if (booting) return;
+    const firstObservation = lastPrincipal.current === undefined;
+    const previousPrincipal = firstObservation ? rememberedPrincipal() : lastPrincipal.current!;
+    if (previousPrincipal === principal) {
+      lastPrincipal.current = principal;
+      if (initialRoute.media !== null && window.history.state?.rivunePrincipal !== principal) {
+        if (principal !== null) {
+          window.history.replaceState({ ...window.history.state, rivunePrincipal: principal }, "");
+        } else {
+          resetPrincipalRoute();
+        }
+      }
+      return;
+    }
+
+    clearMediaCaches();
+    clearMetadataCache();
+    clearNotifications();
+    const externalNavigation = firstObservation
+      && previousPrincipal === null
+      && principal !== null
+      && (initialRoute.media === null || window.history.state?.rivuneMediaItem === undefined);
+    if (externalNavigation) {
+      window.history.replaceState({ ...window.history.state, rivunePrincipal: principal }, "");
+    } else {
+      resetPrincipalRoute();
+    }
+    rememberPrincipal(principal);
+    lastPrincipal.current = principal;
+  }, [booting, initialRoute.media, principal, resetPrincipalRoute]);
 
   useEffect(() => {
     if (lastDemoRevision.current === demoRevision) return;
     lastDemoRevision.current = demoRevision;
-    mediaRouteRef.current = null;
-    setMediaRoute(null);
-    setViewState("home");
-    setHomeResetKey((current) => current + 1);
-    setMediaDataRevisions((revisions) => ({
-      home: revisions.home + 1,
-      search: revisions.search + 1,
-      library: revisions.library + 1,
-    }));
-    window.history.replaceState({ rivuneView: "home", rivuneScrollTop: 0 }, "", viewURL("home"));
-    window.scrollTo({ top: 0, behavior: "auto" });
-  }, [demoRevision]);
+    resetPrincipalRoute();
+  }, [demoRevision, resetPrincipalRoute]);
 
   useEffect(() => {
     applyRuntimeSettings(settings);
@@ -487,13 +553,21 @@ export default function App() {
   useEffect(() => {
     const previousRestoration = window.history.scrollRestoration;
     window.history.scrollRestoration = "manual";
-    if (initialRoute.canonicalURL) {
-      window.history.replaceState({ ...window.history.state, rivuneOrigin: initialRoute.view }, "", initialRoute.canonicalURL);
+    if (initialRoute.canonicalURL && mediaRouteRef.current !== null) {
+      window.history.replaceState({ ...window.history.state, rivuneOrigin: initialRoute.view, rivunePrincipal: principalRef.current }, "", initialRoute.canonicalURL);
     }
     const onRouteChange = () => {
       const next = appRoute();
       if (next.canonicalURL) {
         window.history.replaceState({ ...window.history.state, rivuneOrigin: next.view }, "", next.canonicalURL);
+      }
+      const routePrincipal = window.history.state?.rivunePrincipal;
+      if (
+        (routePrincipal !== undefined && routePrincipal !== principalRef.current)
+        || (next.media !== null && routePrincipal !== principalRef.current)
+      ) {
+        resetPrincipalRoute();
+        return;
       }
       const previousMediaRoute = mediaRouteRef.current;
       mediaRouteRef.current = next.media;
@@ -513,7 +587,7 @@ export default function App() {
       window.removeEventListener("hashchange", onRouteChange);
       window.removeEventListener("popstate", onRouteChange);
     };
-  }, [initialRoute.canonicalURL, initialRoute.media, initialRoute.view]);
+  }, [initialRoute.canonicalURL, initialRoute.media, initialRoute.view, resetPrincipalRoute]);
 
 
   function setView(next: View) {
@@ -522,7 +596,7 @@ export default function App() {
     mediaRouteRef.current = null;
     setViewState(next);
     setMediaRoute(null);
-    window.history.replaceState({ rivuneView: next, rivuneScrollTop: 0 }, "", viewURL(next));
+    window.history.replaceState({ rivuneView: next, rivuneScrollTop: 0, rivunePrincipal: principalRef.current }, "", viewURL(next));
     window.scrollTo({ top: 0, behavior: next === "home" ? "smooth" : "auto" });
     if (previousMediaRoute !== null) {
       invokingElementRef.current = null;
@@ -558,8 +632,8 @@ export default function App() {
 
   function openMedia(item: MediaItem) {
     invokingElementRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    window.history.replaceState({ ...window.history.state, rivuneView: view, rivuneScrollTop: window.scrollY }, "", viewURL(view));
-    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item, rivuneOrigin: view }, "", mediaRouteURL(item, view));
+    window.history.replaceState({ ...window.history.state, rivuneView: view, rivuneScrollTop: window.scrollY, rivunePrincipal: principalRef.current }, "", viewURL(view));
+    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item, rivuneOrigin: view, rivunePrincipal: principalRef.current }, "", mediaRouteURL(item, view));
     const nextRoute = { item, origin: view };
     mediaRouteRef.current = nextRoute;
     setMediaRoute(nextRoute);
@@ -589,7 +663,7 @@ export default function App() {
     if (!mediaRoute) return;
     const nextRoute = { item, origin: mediaRoute.origin };
     const fromSeriesSeason = mediaRoute.item.mediaType === "series" && item.mediaType === "episode";
-    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item, rivuneOrigin: mediaRoute.origin, rivuneParentSeason: fromSeriesSeason }, "", mediaRouteURL(item, mediaRoute.origin));
+    window.history.pushState({ rivuneMedia: true, rivuneMediaItem: item, rivuneOrigin: mediaRoute.origin, rivuneParentSeason: fromSeriesSeason, rivunePrincipal: principalRef.current }, "", mediaRouteURL(item, mediaRoute.origin));
     mediaRouteRef.current = nextRoute;
     setMediaRoute(nextRoute);
     window.scrollTo({ top: 0, behavior: "auto" });
@@ -618,7 +692,7 @@ export default function App() {
     setMediaRoute(null);
     setViewState(mediaRoute.origin);
     invalidateMediaOrigin(mediaRoute.origin);
-    window.history.replaceState({ rivuneView: mediaRoute.origin, rivuneScrollTop: 0 }, "", viewURL(mediaRoute.origin));
+    window.history.replaceState({ rivuneView: mediaRoute.origin, rivuneScrollTop: 0, rivunePrincipal: principalRef.current }, "", viewURL(mediaRoute.origin));
     restoreScroll(0);
     restoreOriginFocus();
   }
@@ -628,6 +702,12 @@ export default function App() {
     : maintenanceMessage;
   const validatedDemo = mode === "demo" && account?.user.role === "demo";
   const visibleView: View = validatedDemo && view === "admin" ? "home" : view;
+  const routePrincipal = window.history.state?.rivunePrincipal;
+  const visibleMediaRoute = mediaRoute !== null
+    && principal !== null
+    && (routePrincipal === principal || routePrincipal === undefined && window.history.state?.rivuneMediaItem === undefined)
+    ? mediaRoute
+    : null;
 
   if (booting) return <div className="boot-screen"><div className="boot-screen__aura" /><RivuneMark /><LoaderCircle className="spin" /><p>{t("app.connecting")}</p></div>;
   if (terminalMessage) return <LoginPage message={terminalMessage} />;
@@ -640,11 +720,11 @@ export default function App() {
   if (!settingsReady) return <Shell view={visibleView} onView={setView}><div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingProfileSettings")}</span></div></Shell>;
 
   return <Shell view={visibleView} onView={setView}>
-    <div ref={routeSurfaceRef} tabIndex={-1} className={mediaRoute ? "route-surface route-surface--hidden" : "route-surface"}>
+    <div key={principal ?? "anonymous"} ref={routeSurfaceRef} tabIndex={-1} className={visibleMediaRoute ? "route-surface route-surface--hidden" : "route-surface"}>
       <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingSpace")}</span></div>}>
-        {visibleView === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} /> : visibleView === "search" ? <SearchPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.search} onLibraryMutation={invalidateLibrarySurfaces} /> : visibleView === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : visibleView === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
+        {visibleView === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} mediaPreferences={{ profileID: activeProfile.id, hideUnreleased: settings.hideUnreleased, animationsEnabled: settings.animationsEnabled }} /> : visibleView === "search" ? <SearchPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.search} onLibraryMutation={invalidateLibrarySurfaces} mediaPreferences={{ profileID: activeProfile.id, hideUnreleased: settings.hideUnreleased, animationsEnabled: settings.animationsEnabled }} /> : visibleView === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : visibleView === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
       </Suspense>
     </div>
-    {mediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaIdentity(mediaRoute.item)}:${mediaRoute.item.titleId ?? ""}`} item={mediaRoute.item} maximumCastMembers={settings.maximumCastMembers} onCanonicalRoute={canonicalizeMediaRoute} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} onLibraryMutation={invalidateLibrarySurfaces} /></Suspense>}
+    {visibleMediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaIdentity(visibleMediaRoute.item)}:${visibleMediaRoute.item.titleId ?? ""}`} item={visibleMediaRoute.item} maximumCastMembers={settings.maximumCastMembers} onCanonicalRoute={canonicalizeMediaRoute} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} onLibraryMutation={invalidateLibrarySurfaces} /></Suspense>}
   </Shell>;
 }

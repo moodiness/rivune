@@ -156,19 +156,43 @@ test("Home checkpoints resolved folders while slower rows are still loading", as
   await expect.poll(() => rivune.matching(slowPath, "GET").length).toBe(2);
 });
 
-test("Home eagerly warms every resolved folder cover", async ({ page, rivune }) => {
+test("Home publishes resolved folders in frame-bounded commits without preloading offscreen artwork", async ({ page, rivune }) => {
   const folders = Array.from({ length: 30 }, (_, index) => ({
-    id: `eager-${index + 1}`,
-    title: `Eager ${index + 1}`,
+    id: `lazy-${index + 1}`,
+    title: `Lazy ${index + 1}`,
   }));
   rivune.setCollectionFolders("alice", folders);
+  rivune.setCollectionViewMode("alice", "rows");
+  await page.addInitScript(() => {
+    (window as typeof window & { __homeFolderCommits?: number }).__homeFolderCommits = 0;
+    window.addEventListener("DOMContentLoaded", () => {
+      const observer = new MutationObserver((records) => {
+        if (records.some((record) => record.type === "attributes" && (record.target as Element).classList.contains("folder-cover-card"))) {
+          const state = window as typeof window & { __homeFolderCommits?: number };
+          state.__homeFolderCommits = (state.__homeFolderCommits ?? 0) + 1;
+        }
+      });
+      observer.observe(document.body, { subtree: true, attributes: true, attributeFilter: ["disabled"] });
+    });
+  });
+  await page.setViewportSize({ width: 800, height: 600 });
 
   await page.goto("/");
-  await expect(page.getByText("Eager 1 Exclusive", { exact: true })).toBeVisible();
-  await expect.poll(
-    () => rivune.matching("/api/v1/artwork/alice-eager-30-exclusive", "GET").length,
-    { timeout: 10_000 },
-  ).toBe(1);
+  await expect(page.locator(".folder-cover-card:not(:disabled)")).toHaveCount(30);
+  await page.waitForTimeout(500);
+
+  expect(await page.evaluate(() => (window as typeof window & { __homeFolderCommits?: number }).__homeFolderCommits ?? 0)).toBeLessThanOrEqual(10);
+  expect(rivune.matching("/api/v1/artwork/alice-lazy-30-exclusive", "GET")).toHaveLength(0);
+});
+
+test("Explore views reuse the profile settings loaded by App", async ({ page, rivune }) => {
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Home", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("button", { name: "Library", exact: true }).click();
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+
+  expect(rivune.matching("/api/v1/profiles/alice/settings/effective", "GET")).toHaveLength(1);
 });
 
 test("Library keeps loaded pages, retries the failed page, and never exposes private diagnostics", async ({ page, rivune: _rivune }) => {
@@ -296,7 +320,12 @@ test("Home keeps successful folder results beside a safe partial-error warning",
 
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Open Partial Home Title" })).toBeVisible();
-  await expect(page.locator(".home-page .notice--warning")).toContainText("Some titles could not be loaded.");
+  const warning = page.locator(".home-page .notice--warning");
+  await expect(warning).toContainText("Some titles could not be loaded.");
+  const warningWidth = await warning.evaluate((element) => element.getBoundingClientRect().width);
+  const contentWidth = await page.locator(".home-page .content-stack").evaluate((element) => element.getBoundingClientRect().width);
+  expect(warningWidth).toBeLessThanOrEqual(576);
+  expect(warningWidth).toBeLessThan(contentWidth * 0.75);
   await expect(page.getByText("Private upstream hostname", { exact: true })).toHaveCount(0);
   await expect(page.getByText("private-source", { exact: true })).toHaveCount(0);
 });

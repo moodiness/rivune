@@ -1,6 +1,7 @@
 import { expect, test } from "./fixtures/rivune";
 
 test("administrator monitors operations and runs fixed maintenance controls", async ({ page, rivune }) => {
+  await page.setViewportSize({ width: 1568, height: 1000 });
   await page.goto("/#admin");
   await page.getByRole("button", { name: /Operations/ }).click();
 
@@ -49,8 +50,14 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   const actionCards = page.locator(".operation-action-card");
   const initialGeometry = await actionCards.evaluateAll((cards) => cards.map((card) => {
     const cardRect = card.getBoundingClientRect();
+    const scopeRect = card.querySelector(".operation-action-card__scope")!.getBoundingClientRect();
     const actionRect = card.querySelector(":scope > .button")!.getBoundingClientRect();
-    return { cardHeight: cardRect.height, actionHeight: actionRect.height, actionBottom: actionRect.bottom };
+    return {
+      cardHeight: cardRect.height,
+      actionHeight: actionRect.height,
+      actionBottom: actionRect.bottom,
+      scopeToActionGap: actionRect.top - scopeRect.bottom,
+    };
   }));
   expect(initialGeometry).toHaveLength(4);
   expect(initialGeometry[0]!.cardHeight).toBe(initialGeometry[1]!.cardHeight);
@@ -58,6 +65,24 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   expect(new Set(initialGeometry.map((geometry) => geometry.actionHeight)).size).toBe(1);
   expect(initialGeometry[0]!.actionBottom).toBe(initialGeometry[1]!.actionBottom);
   expect(initialGeometry[2]!.actionBottom).toBe(initialGeometry[3]!.actionBottom);
+  for (const geometry of initialGeometry) {
+    expect(geometry.scopeToActionGap).toBeGreaterThanOrEqual(24);
+    expect(geometry.scopeToActionGap).toBeLessThanOrEqual(48);
+  }
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileGeometry = await actionCards.evaluateAll((cards) => cards.map((card) => {
+    const cardRect = card.getBoundingClientRect();
+    const scopeRect = card.querySelector(".operation-action-card__scope")!.getBoundingClientRect();
+    const actionRect = card.querySelector(":scope > .button")!.getBoundingClientRect();
+    return { left: cardRect.left, top: cardRect.top, bottom: cardRect.bottom, scopeToActionGap: actionRect.top - scopeRect.bottom };
+  }));
+  expect(new Set(mobileGeometry.map(({ left }) => Math.round(left))).size).toBe(1);
+  for (const geometry of mobileGeometry) expect(geometry.scopeToActionGap).toBe(24);
+  for (let index = 1; index < mobileGeometry.length; index += 1) {
+    expect(mobileGeometry[index]!.top).toBeGreaterThan(mobileGeometry[index - 1]!.bottom);
+  }
+  await page.setViewportSize({ width: 1568, height: 1000 });
   await page.getByRole("button", { name: "Run Fetch missing metadata" }).click();
   const fetchRequest = await rivune.waitForRequest("/api/v1/operations/actions/fetch-missing-metadata", "POST");
   expect(fetchRequest.body).toBeUndefined();
@@ -122,6 +147,20 @@ test("metadata refresh keeps successful work and warns with safe failed titles",
   await expect(outcome).toContainText("99 of 100 candidates refreshed; 1 failed.");
   await expect(outcome).toContainText("Not refreshed: L'expresso (bein sport).");
   await expect(outcome).toContainText("Existing metadata was kept");
+  const expandedGeometry = await metadataCard.evaluate((card) => {
+    const cardRect = card.getBoundingClientRect();
+    const feedbackRect = card.querySelector(".operation-action-card__feedback")!.getBoundingClientRect();
+    const actionRect = card.querySelector(":scope > .button")!.getBoundingClientRect();
+    return {
+      feedbackHeight: feedbackRect.height,
+      feedbackToActionGap: actionRect.top - feedbackRect.bottom,
+      actionBottomInset: cardRect.bottom - actionRect.bottom,
+    };
+  });
+  expect(expandedGeometry.feedbackHeight).toBeGreaterThanOrEqual(44);
+  expect(expandedGeometry.feedbackToActionGap).toBeGreaterThanOrEqual(12);
+  expect(expandedGeometry.feedbackToActionGap).toBeLessThanOrEqual(13);
+  expect(expandedGeometry.actionBottomInset).toBeGreaterThanOrEqual(16);
   await expect(page.locator(".app-notification--warning")).toContainText("Operation partially completed");
   await expect(page.getByRole("heading", { name: "Metadata health" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Run Fetch missing metadata" })).toBeEnabled();

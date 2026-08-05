@@ -143,6 +143,17 @@ test("now-playing sessions render artwork, provider badges, transcoding progress
 
   const longSession = page.locator(".activity-session").filter({ hasText: "Long feature" });
   await expect(longSession.getByRole("progressbar", { name: "10m 5s / 2h 49m" })).toBeVisible();
+  const desktopTimeBounds = await artworkSession.locator(".activity-session__time").boundingBox();
+  const desktopStopBounds = await artworkSession.getByRole("button", { name: "Stop", exact: true }).boundingBox();
+  expect(desktopTimeBounds).not.toBeNull();
+  expect(desktopStopBounds).not.toBeNull();
+  expect((desktopTimeBounds?.x ?? 0) + (desktopTimeBounds?.width ?? Number.POSITIVE_INFINITY)).toBeLessThanOrEqual(desktopStopBounds?.x ?? 0);
+  expect(Math.abs((desktopTimeBounds?.y ?? 0) - (desktopStopBounds?.y ?? Number.POSITIVE_INFINITY))).toBeLessThanOrEqual(1);
+  const desktopProgressBounds = await artworkSession.locator(".activity-session__progress").boundingBox();
+  const desktopAgeBounds = await artworkSession.locator(".activity-session__time small").boundingBox();
+  expect(desktopProgressBounds).not.toBeNull();
+  expect(desktopAgeBounds).not.toBeNull();
+  expect((desktopAgeBounds?.y ?? Number.POSITIVE_INFINITY) - ((desktopProgressBounds?.y ?? 0) + (desktopProgressBounds?.height ?? 0))).toBeLessThanOrEqual(8);
   const desktopArtworkBounds = await artworkSession.locator(".activity-session__artwork").boundingBox();
   const desktopSessionBounds = await artworkSession.boundingBox();
   expect(desktopArtworkBounds).not.toBeNull();

@@ -16,7 +16,6 @@ const channel = (id: string, name: string, extra: Record<string, unknown> = {}) 
 const result = (addonId: string, catalogId: string, metas: unknown[]) => ({
   addonId,
   manifestId: `${addonId}-manifest`,
-  transportUrl: `https://fixtures.rivune.test/${addonId}.json`,
   resource: "catalog",
   type: "tv",
   id: catalogId,
@@ -39,7 +38,8 @@ test("TV search keeps partial results, warns without inline diagnostics, and ret
     manifestId: "pagination-manifest",
   }, { status: 502 });
 
-  await page.goto("/#search");
+  await page.goto("/");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
   await page.getByRole("button", { name: "Live TV", exact: true }).click();
   const search = page.locator(".search-page .search-box input");
   await search.fill("n");
@@ -62,6 +62,7 @@ test("TV search keeps partial results, warns without inline diagnostics, and ret
   expect(initialRequests[0].search.get("skip")).toBe("0");
   expect(initialRequests[0].search.get("limit")).toBe("24");
   expect(rivune.requests.filter((request) => request.pathname.includes("/addons/catalogs/search/movie") || request.pathname.includes("/addons/catalogs/search/series"))).toHaveLength(0);
+  expect(rivune.matching("/api/v1/library/membership", "POST")).toHaveLength(1);
 
   await page.getByRole("button", { name: "Load more" }).click();
   await expect.poll(() => rivune.matching("/api/v1/addons/catalogs/search/tv", "GET").length).toBe(2);
@@ -71,6 +72,7 @@ test("TV search keeps partial results, warns without inline diagnostics, and ret
   await expect(page.getByText("Private upstream socket failed", { exact: true })).toHaveCount(0);
   await expect(page.getByText("pagination-addon", { exact: true })).toHaveCount(0);
   await expect(page.getByText("pagination-manifest", { exact: true })).toHaveCount(0);
+  expect(rivune.matching("/api/v1/library/membership", "POST")).toHaveLength(1);
 
   rivune.setSearchResponse("tv", 24, { results: [result("addon-a", "catalog-a", [channel("station-25", "Station 25")])], errors: [] });
   await page.getByRole("button", { name: "Load more" }).click();
@@ -79,6 +81,65 @@ test("TV search keeps partial results, warns without inline diagnostics, and ret
   expect(searchRequests).toHaveLength(3);
   expect(searchRequests[1].search.get("skip")).toBe("24");
   expect(searchRequests[2].search.get("skip")).toBe("24");
+  expect(rivune.matching("/api/v1/library/membership", "POST")).toHaveLength(2);
+});
+
+test("TV search checks only the displayed page against a 5000-entry library", async ({ page, rivune }) => {
+  const addonId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  rivune.setLibraryItems(Array.from({ length: 5000 }, (_, index) => ({
+    titleId: `saved-${index + 1}`,
+    mediaType: "tv",
+    resourceId: `large-${index + 1}`,
+    title: `Large Channel ${index + 1}`,
+    sourceAddonId: addonId,
+    addedAt: "2026-08-01T00:00:00Z",
+    updatedAt: "2026-08-01T00:00:00Z",
+  })));
+  rivune.setSearchResponse("tv", 0, {
+    results: [result(addonId, "large-catalog", Array.from({ length: 100 }, (_, index) => channel(`large-${4901 + index}`, `Large Channel ${4901 + index}`)))],
+    errors: [],
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("button", { name: "Live TV", exact: true }).click();
+  await page.locator(".search-page .search-box input").fill("large");
+
+  await expect(page.locator(".tv-media-tile")).toHaveCount(100);
+  await expect(page.getByRole("button", { name: "In your library: Large Channel 5000" })).toBeVisible();
+  expect(rivune.matching("/api/v1/library", "GET")).toHaveLength(0);
+  const membershipRequests = rivune.matching("/api/v1/library/membership", "POST");
+  expect(membershipRequests).toHaveLength(1);
+  const membershipBody = membershipRequests[0].body;
+  expect(membershipBody && typeof membershipBody === "object" && "identities" in membershipBody && Array.isArray(membershipBody.identities)
+    ? membershipBody.identities
+    : []).toHaveLength(100);
+});
+
+test("TV membership cancellation cannot publish stale search state", async ({ page, rivune }) => {
+  rivune.setLibraryMembershipDelay(400);
+  rivune.setSearchResponse("tv", 0, {
+    results: [result("addon-old", "catalog-old", [channel("old-channel", "Old Channel")])],
+    errors: [],
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("button", { name: "Live TV", exact: true }).click();
+  const search = page.locator(".search-page .search-box input");
+  await search.fill("old");
+  await expect.poll(() => rivune.matching("/api/v1/library/membership", "POST").length).toBe(1);
+
+  rivune.setSearchResponse("tv", 0, {
+    results: [result("addon-new", "catalog-new", [channel("new-channel", "New Channel")])],
+    errors: [],
+  });
+  await search.fill("new");
+
+  await expect(page.getByRole("button", { name: "Open New Channel" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add to library: New Channel" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Open Old Channel" })).toHaveCount(0);
+  expect(rivune.matching("/api/v1/library/membership", "POST")).toHaveLength(2);
 });
 
 test("TV search shows a generic retry state when every source fails", async ({ page, rivune }) => {
@@ -108,7 +169,8 @@ test("TV search shows a generic retry state when every source fails", async ({ p
 test("TV library actions update immediately, refresh every surface, keep a stable route, and fetch streams only after play", async ({ page, rivune }) => {
   rivune.setSearchResponse("tv", 0, { results: [result("iptv-addon", "news-catalog", [channel("france-info", "France Info")])], errors: [] });
 
-  await page.goto("/#search");
+  await page.goto("/");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
   await page.getByRole("button", { name: "Live TV", exact: true }).click();
   await page.locator(".search-page .search-box input").fill("france");
   const add = page.getByRole("button", { name: "Add to library: France Info" });

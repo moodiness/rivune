@@ -114,26 +114,32 @@ export function DevicePairingPage() {
 
   return <main className="auth-page"><AuthBackdrop /><div className="auth-shell auth-shell--login">
     <RivuneMark />
-    <section className="auth-card auth-card--login pairing-card page-enter">
+    <section className="auth-card auth-card--login pairing-card pairing-card--device page-enter">
       <div className="auth-card__server"><span className="status-dot" /> {t("auth.connectedTo", { server: discovery?.name ?? "Rivune" })}</div>
-      <div className="pairing-card__icon"><Smartphone /></div>
-      <div className="auth-card__header">
-        <span>{t("pairing.deviceEyebrow")}</span>
-        <h1>{t("pairing.deviceTitle")}</h1>
-        <p>{t("pairing.deviceBody")}</p>
+      <div className="pairing-card__intro">
+        <div className="pairing-card__icon"><Smartphone /></div>
+        <div className="auth-card__header">
+          <span>{t("pairing.deviceEyebrow")}</span>
+          <h1>{t("pairing.deviceTitle")}</h1>
+          <p>{t("pairing.deviceBody")}</p>
+        </div>
       </div>
       {error && <Notice>{error}</Notice>}
       {loading ? <div className="pairing-card__loading" role="status"><LoaderCircle className="spin" /><span>{t("pairing.creatingCode")}</span></div>
         : authorization && verificationURL && verificationCompleteURL ? <div className="pairing-card__code">
-          <span>{t("pairing.codeLabel")}</span>
-          <strong dir="ltr">{authorization.userCode}</strong>
+          <div className="pairing-card__credential">
+            <span>{t("pairing.codeLabel")}</span>
+            <strong dir="ltr">{authorization.userCode}</strong>
+          </div>
           <div className="pairing-card__qr">
             <QRCodeSVG value={verificationCompleteURL} level="M" marginSize={4} title={t("pairing.codeLabel")} role="img" aria-label={t("pairing.codeLabel")} />
           </div>
-          <p>{t("pairing.openApprovalPage")}</p>
-          <a href={verificationURL} dir="ltr">{verificationURL}</a>
-          {expiration && <time dateTime={authorization.expiresAt}>{t("pairing.codeExpiresAt", { time: expiration })}</time>}
-          <small>{t("pairing.deviceInstructions")}</small>
+          <div className="pairing-card__instructions">
+            <p>{t("pairing.openApprovalPage")}</p>
+            <a href={verificationURL} dir="ltr">{verificationURL}</a>
+            {expiration && <time dateTime={authorization.expiresAt}>{t("pairing.codeExpiresAt", { time: expiration })}</time>}
+            <small>{t("pairing.deviceInstructions")}</small>
+          </div>
         </div>
           : <Button onClick={() => void begin()}><RefreshCw size={18} /> {t("pairing.generateCode")}</Button>}
       <button type="button" className="text-button pairing-card__owner" onClick={() => setOwnerSignIn(true)}><KeyRound size={16} /> {t("pairing.ownerSignIn")}</button>

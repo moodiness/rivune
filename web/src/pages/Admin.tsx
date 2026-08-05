@@ -6,7 +6,7 @@ import { AddTile, Button, ConfirmDialog, EmptyState, handleDirectionalFocus, Ico
 import { interfaceLanguages, locale, translate, type TranslationKey } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
-import type { AccessCategory, AddonManifest, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstalledAddon, InterfaceLanguage, MaintenanceSettings, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
+import type { AccessCategory, AddonManifest, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstalledAddon, InterfaceLanguage, MaintenanceSettings, ManagedAddon, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
 
 type AdminTab = "categories" | "profiles" | "devices" | "addons" | "collections" | "activity" | "operations" | "settings";
 type AdminTabGroup = "access" | "catalog" | "supervision" | "preferences";
@@ -614,6 +614,17 @@ function ProfilesAdmin() {
   const messageCharacterCount = countCodePoints(message);
   const broadcastCharacterCount = countCodePoints(broadcastMessage);
 
+  const [imagePreviewURL, setImagePreviewURL] = useState("");
+  useEffect(() => {
+    if (!image || !editing) {
+      setImagePreviewURL("");
+      return;
+    }
+    const url = URL.createObjectURL(image);
+    setImagePreviewURL(url);
+    return () => URL.revokeObjectURL(url);
+  }, [editing, image]);
+
   useEffect(() => { void api.avatarPresets().then((response) => setPresets(response.presets)).catch(() => undefined); }, []);
   useEffect(() => { if (!isGlobalAdmin) setProfiles(account?.profiles ?? []); }, [account?.profiles, isGlobalAdmin]);
   useEffect(() => {
@@ -933,7 +944,7 @@ function ProfilesAdmin() {
         {error && <Notice>{error}</Notice>}
         <div className="avatar-editor">
           <button type="button" disabled={saving} onClick={() => fileRef.current?.click()}>
-            {image ? <img src={URL.createObjectURL(image)} alt={translate("admin.profiles.editor.selectedAvatarAlt")} /> : <img src={presets.find((preset) => preset.id === presetId)?.url ?? "/api/v1/profile-avatars/aurora"} alt={translate("admin.profiles.editor.selectedAvatarAlt")} />}
+            {imagePreviewURL ? <img src={imagePreviewURL} alt={translate("admin.profiles.editor.selectedAvatarAlt")} /> : <img src={presets.find((preset) => preset.id === presetId)?.url ?? "/api/v1/profile-avatars/aurora"} alt={translate("admin.profiles.editor.selectedAvatarAlt")} />}
             <span><Upload size={17} /> {translate("common.actions.upload")}</span>
           </button>
           <input ref={fileRef} hidden type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => setImage(event.target.files?.[0] ?? null)} />
@@ -1067,7 +1078,7 @@ function AddonsAdmin() {
   const [working, setWorking] = useState("");
   const [error, setError] = useState("");
   const [deleting, setDeleting] = useState<InstalledAddon | null>(null);
-  const [editingAddon, setEditingAddon] = useState<InstalledAddon | null>(null);
+  const [editingAddon, setEditingAddon] = useState<ManagedAddon | null>(null);
   const [editTransportUrl, setEditTransportUrl] = useState("");
   const [editProfileIds, setEditProfileIds] = useState<string[]>([]);
   const [draggedAddonIndex, setDraggedAddonIndex] = useState<number | null>(null);
@@ -1084,11 +1095,31 @@ function AddonsAdmin() {
     if (installProfileIds.length === 0 && activeProfile) setInstallProfileIds([activeProfile.id]);
   }, [activeProfile, installProfileIds.length]);
 
-  function openAddonEditor(addon: InstalledAddon) {
-    setEditingAddon(addon);
-    setEditTransportUrl(addon.transportUrl);
-    setEditProfileIds(addon.profileIds);
+  async function openAddonEditor(addon: InstalledAddon) {
     setError("");
+    if (account?.session.authorizationScope !== "global_admin") {
+      setEditingAddon(addon);
+      setEditTransportUrl("");
+      setEditProfileIds(addon.profileIds);
+      return;
+    }
+    setWorking(addon.id);
+    try {
+      const managed = await api.addonManagement(addon.id);
+      if (!managed.transportUrl) throw new Error("Addon management response did not include a transport URL");
+      setEditingAddon(managed);
+      setEditTransportUrl(managed.transportUrl);
+      setEditProfileIds(managed.profileIds);
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.addons.errors.load"), translate("admin.addons.errors.unavailableTitle")));
+    } finally {
+      setWorking("");
+    }
+  }
+
+  function closeAddonEditor() {
+    setEditingAddon(null);
+    setEditTransportUrl("");
   }
 
   async function saveAddon(event: FormEvent) {
@@ -1097,11 +1128,19 @@ function AddonsAdmin() {
     setWorking(editingAddon.id);
     setError("");
     try {
-      const updated = await api.updateAddon(editingAddon.id, editTransportUrl, editProfileIds);
-      setAddons((values) => updated.profileIds.includes(activeProfile.id)
-        ? values.map((value) => value.id === updated.id ? updated : value)
-        : values.filter((value) => value.id !== updated.id));
-      setEditingAddon(null);
+      const updated = await api.updateAddon(editingAddon.id, editProfileIds, editTransportUrl.trim() || undefined);
+      const publicUpdated: InstalledAddon = {
+        id: updated.id,
+        manifest: updated.manifest,
+        position: updated.position,
+        profileIds: updated.profileIds,
+        installedAt: updated.installedAt,
+        updatedAt: updated.updatedAt,
+      };
+      setAddons((values) => publicUpdated.profileIds.includes(activeProfile.id)
+        ? values.map((value) => value.id === publicUpdated.id ? publicUpdated : value)
+        : values.filter((value) => value.id !== publicUpdated.id));
+      closeAddonEditor();
       notifySuccess(translate("admin.addons.notifications.savedMessage", { name: updated.manifest.name }), translate("admin.addons.notifications.savedTitle"));
     } catch (cause) {
       setError(notifyError(cause, translate("admin.addons.errors.save")));
@@ -1213,9 +1252,9 @@ function AddonsAdmin() {
     {loading
       ? <div className="addon-list" aria-label={translate("admin.addons.loadingLabel")}>{[0, 1].map((value) => <Skeleton key={value} className="addon-skeleton" />)}</div>
       : addons.length
-        ? <div className="addon-list">{addons.map((addon, addonIndex) => <AddonCard key={addon.id} addon={addon} index={addonIndex} total={addons.length} working={working === addon.id} reordering={reordering} dragging={draggedAddonIndex === addonIndex} onDragStart={(event) => { setDraggedAddonIndex(addonIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(addonIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedAddonIndex !== null) stageAddonMove(draggedAddonIndex, addonIndex); }} onDragOver={(event) => { if (draggedAddonIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveAddonOrder(); }} onDragEnd={() => { if (draggedAddonIndex !== null) void saveAddonOrder(); }} onMove={(toIndex) => void moveAddon(addonIndex, toIndex)} onRefresh={() => void refresh(addon.id)} onEdit={() => openAddonEditor(addon)} onRemove={() => setDeleting(addon)} />)}</div>
+        ? <div className="addon-list">{addons.map((addon, addonIndex) => <AddonCard key={addon.id} addon={addon} index={addonIndex} total={addons.length} working={working === addon.id} reordering={reordering} dragging={draggedAddonIndex === addonIndex} onDragStart={(event) => { setDraggedAddonIndex(addonIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(addonIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedAddonIndex !== null) stageAddonMove(draggedAddonIndex, addonIndex); }} onDragOver={(event) => { if (draggedAddonIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveAddonOrder(); }} onDragEnd={() => { if (draggedAddonIndex !== null) void saveAddonOrder(); }} onMove={(toIndex) => void moveAddon(addonIndex, toIndex)} onRefresh={() => void refresh(addon.id)} onEdit={() => void openAddonEditor(addon)} onRemove={() => setDeleting(addon)} />)}</div>
         : <EmptyState icon={<Boxes size={44} />} title={translate(error ? "admin.addons.errors.unavailableTitle" : "admin.addons.empty.title")} description={translate(error ? "admin.addons.errors.retryDescription" : "admin.addons.empty.description")} action={error ? <Button variant="secondary" onClick={() => void load()}><RefreshCw size={17} /> {translate("common.actions.tryAgain")}</Button> : undefined} />}
-    {editingAddon && <Modal onClose={() => { if (!addonEditSaving) setEditingAddon(null); }} className="editor-modal addon-edit-modal"><form onSubmit={saveAddon}><div className="editor-modal__heading"><span><Pencil size={18} /> {translate("admin.addons.editor.title")}</span><h2>{editingAddon.manifest.name}</h2><p>{translate("admin.addons.editor.description")}</p></div>{error && <Notice>{error}</Notice>}<label className="field"><span>{translate("admin.addons.editor.transportUrl")}</span><div><WandSparkles size={18} /><input type="url" value={editTransportUrl} onChange={(event) => setEditTransportUrl(event.target.value)} placeholder={translate("admin.addons.manifestUrlPlaceholder")} required /></div></label><ProfileAssignmentPicker profiles={profiles} selected={editProfileIds} onChange={setEditProfileIds} legend={translate("admin.profileAssignment.legend")} /><div className="modal-actions"><Button type="button" variant="ghost" disabled={addonEditSaving} onClick={() => setEditingAddon(null)}>{translate("common.cancel")}</Button><Button type="submit" loading={addonEditSaving} disabled={editProfileIds.length === 0}><Save size={18} /> {translate("admin.addons.actions.save")}</Button></div></form></Modal>}
+    {editingAddon && <Modal onClose={() => { if (!addonEditSaving) closeAddonEditor(); }} className="editor-modal addon-edit-modal"><form onSubmit={saveAddon}><div className="editor-modal__heading"><span><Pencil size={18} /> {translate("admin.addons.editor.title")}</span><h2>{editingAddon.manifest.name}</h2><p>{translate("admin.addons.editor.description")}</p></div>{error && <Notice>{error}</Notice>}{account?.session.authorizationScope === "global_admin" && <label className="field"><span>{translate("admin.addons.editor.transportUrl")}</span><div><WandSparkles size={18} /><input type="url" value={editTransportUrl} onChange={(event) => setEditTransportUrl(event.target.value)} placeholder={translate("admin.addons.manifestUrlPlaceholder")} /></div></label>}<ProfileAssignmentPicker profiles={profiles} selected={editProfileIds} onChange={setEditProfileIds} legend={translate("admin.profileAssignment.legend")} /><div className="modal-actions"><Button type="button" variant="ghost" disabled={addonEditSaving} onClick={closeAddonEditor}>{translate("common.cancel")}</Button><Button type="submit" loading={addonEditSaving} disabled={editProfileIds.length === 0}><Save size={18} /> {translate("admin.addons.actions.save")}</Button></div></form></Modal>}
     {deleting && <ConfirmDialog title={translate("admin.addons.remove.title", { name: deleting.manifest.name })} description={translate("admin.addons.remove.description")} confirmLabel={translate("admin.addons.remove.confirm")} loading={working === deleting.id} onCancel={() => setDeleting(null)} onConfirm={() => void remove(deleting)} />}
   </div>;
 }
@@ -1310,6 +1349,7 @@ function CollectionsAdmin() {
   const [draggedCollectionIndex, setDraggedCollectionIndex] = useState<number | null>(null);
   const [reordering, setReordering] = useState(false);
   const reorderInFlight = useRef(false);
+  const editorRequestSequence = useRef(0);
   const importInput = useRef<HTMLInputElement>(null);
 
   async function load() {
@@ -1319,13 +1359,30 @@ function CollectionsAdmin() {
   }
   useEffect(() => { void load(); void api.addonCatalogs().then((response) => setCatalogs(response.catalogs)).catch(() => undefined); }, []);
 
-  function openEditor(collection: Collection | "new") {
-    setEditing(collection);
-    if (collection === "new") setDraft(blankCollection(activeProfile ? [activeProfile.id] : []));
-    else setDraft({ title: collection.title, backdropImageUrl: collection.backdropImageUrl, heroEnabled: collection.heroEnabled, pinToTop: collection.pinToTop, focusGlowEnabled: collection.focusGlowEnabled, viewMode: collection.viewMode, folderCoverShape: collection.folderCoverShape, folders: structuredClone(collection.folders), profileIds: collection.profileIds, expectedVersion: collection.version });
+  async function openEditor(collection: Collection | "new") {
+    const requestSequence = ++editorRequestSequence.current;
+    const emptyDraft = blankCollection(activeProfile ? [activeProfile.id] : []);
     setError("");
     setDraggedFolderIndex(null);
     setDraggedSource(null);
+    if (collection === "new") {
+      setDraft(emptyDraft);
+      setEditing("new");
+      return;
+    }
+    setEditing(null);
+    setDraft(emptyDraft);
+    try {
+      const managed = await api.collectionManagement(collection.id);
+      if (editorRequestSequence.current !== requestSequence) return;
+      setDraft({ title: managed.title, backdropImageUrl: managed.backdropImageUrl, heroEnabled: managed.heroEnabled, pinToTop: managed.pinToTop, focusGlowEnabled: managed.focusGlowEnabled, viewMode: managed.viewMode, folderCoverShape: managed.folderCoverShape, folders: structuredClone(managed.folders), profileIds: managed.profileIds, expectedVersion: managed.version });
+      setEditing(managed);
+    } catch (cause) {
+      if (editorRequestSequence.current !== requestSequence) return;
+      setEditing(null);
+      setDraft(emptyDraft);
+      setError(notifyError(cause, translate("admin.collections.errors.load"), translate("admin.collections.errors.unavailableTitle")));
+    }
   }
 
   function updateFolder(index: number, patch: Partial<CollectionFolder>) {
@@ -1368,7 +1425,7 @@ function CollectionsAdmin() {
     let source: CollectionSource;
     if (kind === "addon_catalog") {
       const catalog = catalogs[0];
-      source = { kind, title: catalog?.catalog.name || catalog?.catalog.id || translate("admin.collections.sources.defaults.addonCatalog"), addonCatalog: { addonId: catalog?.addonId ?? "", type: catalog?.catalog.type ?? "movie", catalogId: catalog?.catalog.id ?? "" } };
+      source = { kind, title: catalog?.catalog.name || catalog?.catalog.id || translate("admin.collections.sources.defaults.addonCatalog"), addonCatalog: { addonId: catalog?.addonId ?? "", manifestId: catalog?.manifestId, type: catalog?.catalog.type ?? "movie", catalogId: catalog?.catalog.id ?? "" } };
     } else if (kind === "trakt") source = { kind, title: translate("admin.collections.sources.defaults.traktList"), trakt: { listId: 1, mediaType: "movie", sortBy: "rank", sortHow: "asc" } };
     else if (kind === "mdblist") source = { kind, title: "MDBList", mdblist: { listId: 1, mediaType: "movie", sort: "rank", order: "asc" } };
     else source = { kind, title: translate("admin.collections.sources.defaults.tmdbDiscover"), tmdb: { sourceType: "discover", mediaType: "movie", sort: "popularity.desc", filters: {} } };
@@ -1517,7 +1574,7 @@ function CollectionsAdmin() {
             <div><h3>{collection.title}</h3><p>{collectionCardSummary(collection)}</p>
               <div className="collection-admin-card__actions">
                 <span className="collection-admin-card__order"><IconButton label={translate("admin.collections.reorder.moveUp", { title: collection.title })} disabled={reordering || collectionIndex === 0 || collections[collectionIndex - 1]?.pinToTop !== collection.pinToTop} onClick={() => void moveCollection(collectionIndex, collectionIndex - 1)}><ChevronUp size={17} /></IconButton><IconButton label={translate("admin.collections.reorder.moveDown", { title: collection.title })} disabled={reordering || collectionIndex === collections.length - 1 || collections[collectionIndex + 1]?.pinToTop !== collection.pinToTop} onClick={() => void moveCollection(collectionIndex, collectionIndex + 1)}><ChevronDown size={17} /></IconButton></span>
-                <Button variant="secondary" onClick={() => openEditor(collection)}><Pencil size={17} /> {translate("common.actions.edit")}</Button>
+                <Button variant="secondary" onClick={() => void openEditor(collection)}><Pencil size={17} /> {translate("common.actions.edit")}</Button>
                 <Button variant="ghost" className="admin-destructive-action" onClick={() => setDeleting(collection)}><Trash2 size={17} /> {translate("common.actions.delete")}</Button>
               </div>
             </div>
@@ -1687,7 +1744,7 @@ function SourceEditor({ source, catalogs, onChange, onRemove }: { source: Collec
     {source.addonCatalog && <label className="field"><span>{translate("admin.collections.sources.catalog")}</span><div><select value={`${source.addonCatalog.addonId}|${source.addonCatalog.type}|${source.addonCatalog.catalogId}`} onChange={(event) => {
       const [addonId, type, catalogId] = event.target.value.split("|");
       const catalog = catalogs.find((value) => value.addonId === addonId && value.catalog.type === type && value.catalog.id === catalogId);
-      onChange({ ...source, title: catalog?.catalog.name || catalogId, addonCatalog: { addonId, type, catalogId } });
+      onChange({ ...source, title: catalog?.catalog.name || catalogId, addonCatalog: { addonId, manifestId: catalog?.manifestId, type, catalogId } });
     }}>{catalogs.map((catalog) => <option key={`${catalog.addonId}-${catalog.catalog.type}-${catalog.catalog.id}`} value={`${catalog.addonId}|${catalog.catalog.type}|${catalog.catalog.id}`}>{catalog.manifestId} · {catalog.catalog.name || catalog.catalog.id}</option>)}</select></div></label>}
     {tmdb && <>
       <div className="form-grid form-grid--three tmdb-source-fields">
@@ -2288,12 +2345,16 @@ function ActivityAdmin() {
             <small>{session.device} · {session.platform} · {activityModeLabel(session.mode)}</small>
             {session.decision && <ActivitySessionDecision decision={session.decision} />}
           </div>
-          <div className="activity-session__time">
-            <ActivitySessionProgress positionSeconds={session.positionSeconds} durationSeconds={session.durationSeconds} />
-            <ActivityJobProgress job={jobsBySession.get(session.id)} />
-            <small>{activityAge(session.lastSeenAt)} · {translate("admin.activity.sessions.started", { age: activityAge(session.createdAt) })}</small>
+          <div className="activity-session__controls">
+            <div className="activity-session__time">
+              <ActivitySessionProgress positionSeconds={session.positionSeconds} durationSeconds={session.durationSeconds} />
+              <div className="activity-session__meta">
+                <small>{activityAge(session.lastSeenAt)} · {translate("admin.activity.sessions.started", { age: activityAge(session.createdAt) })}</small>
+                <ActivityJobProgress job={jobsBySession.get(session.id)} />
+              </div>
+            </div>
+            <Button variant="danger" onClick={(event) => { focusReturnRef.current = event.currentTarget; setSelectedSession(session); }}><CircleStop size={16} />{translate("common.actions.stop")}</Button>
           </div>
-          <Button variant="danger" onClick={(event) => { focusReturnRef.current = event.currentTarget; setSelectedSession(session); }}><CircleStop size={16} />{translate("common.actions.stop")}</Button>
         </article>)}</div>
         : <EmptyState icon={<Radio />} title={translate("admin.activity.sessions.emptyTitle")} description={translate("admin.activity.sessions.emptyDescription")} />}
     </section>

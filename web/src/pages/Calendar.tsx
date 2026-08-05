@@ -1,7 +1,7 @@
 import { CalendarX2, ChevronLeft, ChevronRight, Film, LoaderCircle, RefreshCw, Tv } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { api, APIError } from "../api";
-import { useAuth } from "../auth";
+import { principalIdentity, useAuth } from "../auth";
 import { Button, EmptyState, handleDirectionalFocus, IconButton, Notice, SectionHeading } from "../components";
 import { locale, translate as t } from "../i18n";
 import type { CalendarEvent, CalendarResponse, MediaItem } from "../types";
@@ -12,8 +12,8 @@ type MonthBounds = { from: string; to: string; days: number; firstWeekday: numbe
 const exactDatePattern = /^(\d{4})-(\d{2})-(\d{2})$/;
 const calendarMonthRequests = new Map<string, Promise<CalendarResponse>>();
 
-function loadCalendarMonth(profileID: string, from: string, to: string): Promise<CalendarResponse> {
-  const key = `${profileID}:${api.metadataScope()}:${from}:${to}`;
+function loadCalendarMonth(principalScope: string, from: string, to: string): Promise<CalendarResponse> {
+  const key = `${principalScope}:${api.metadataScope()}:${from}:${to}`;
   const pending = calendarMonthRequests.get(key);
   if (pending) return pending;
 
@@ -168,7 +168,7 @@ function CalendarEventCard({ event, onOpen }: { event: CalendarEvent; onOpen: (i
 }
 
 export function CalendarPage({ onOpenMedia }: { onOpenMedia: (item: MediaItem) => void }) {
-  const { activeProfile } = useAuth();
+  const { account, activeProfile, discovery } = useAuth();
   const now = new Date();
   const [month, setMonth] = useState<Month>({ year: now.getFullYear(), month: now.getMonth() });
   const [events, setEvents] = useState<CalendarEvent[]>([]);
@@ -179,7 +179,7 @@ export function CalendarPage({ onOpenMedia }: { onOpenMedia: (item: MediaItem) =
   const loadedMonthRef = useRef("");
   const pageRef = useRef<HTMLDivElement>(null);
   const pendingCalendarFocus = useRef<{ day: number; eventIndex?: number } | null>(null);
-  const profileID = activeProfile?.id ?? "";
+  const principalScope = principalIdentity(discovery, account, activeProfile);
   const weekStart = useMemo(() => firstWeekdayForLocale(locale), [locale]);
   const bounds = useMemo(() => boundsFor(month, weekStart), [month, weekStart]);
   const monthDate = useMemo(() => new Date(month.year, month.month, 1), [month]);
@@ -205,10 +205,10 @@ export function CalendarPage({ onOpenMedia }: { onOpenMedia: (item: MediaItem) =
     loadedMonthRef.current = "";
     setEvents([]);
     setError("");
-    setLoading(Boolean(profileID));
-    if (!profileID) return () => { active = false; };
+    setLoading(principalScope !== null);
+    if (principalScope === null) return () => { active = false; };
 
-    void loadCalendarMonth(profileID, bounds.from, bounds.to).then((response) => {
+    void loadCalendarMonth(principalScope, bounds.from, bounds.to).then((response) => {
       if (!active || sequence !== requestSequence.current) return;
       setEvents(response.events.filter((event) => {
         const date = localDate(event.releaseDate);
@@ -225,7 +225,7 @@ export function CalendarPage({ onOpenMedia }: { onOpenMedia: (item: MediaItem) =
     });
 
     return () => { active = false; };
-  }, [bounds.from, bounds.to, profileID, reloadKey]);
+  }, [bounds.from, bounds.to, principalScope, reloadKey]);
 
   useEffect(() => {
     if (loading || loadedMonthRef.current !== bounds.from || !pendingCalendarFocus.current) return;

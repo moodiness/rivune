@@ -6,10 +6,80 @@ test("global administrator chooser stays inside the device category", async ({ p
   await page.getByRole("button", { name: "Switch profile" }).first().click();
 
   await expect(page.getByRole("heading", { name: "Who's watching?" })).toBeVisible();
+  const clearSelection = rivune.matching("/api/v1/profiles/selection", "DELETE");
+  expect(clearSelection).toHaveLength(1);
+  expect(clearSelection[0]?.profileContext).toBe("fixture-profile-context-alice-0");
   await expect(page.getByRole("button", { name: "Alice Administrator" })).toBeVisible();
   await expect(page.getByText("Primary household profile.", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /Bob/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Casey/ })).toHaveCount(0);
+});
+
+test("switching profile cancels pending folder requests without dropping the selection capability", async ({ page, rivune }) => {
+  rivune.delayFolder("alice-folder", 2_000);
+  await page.goto("/");
+  await rivune.waitForRequest("/api/v1/collections/alice-collection/folders/alice-folder/items", "GET");
+
+  await page.getByRole("button", { name: "Switch profile" }).first().click();
+
+  await expect(page.getByRole("heading", { name: "Who's watching?" })).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/auth/me", "GET").length).toBeGreaterThan(1);
+  const clearSelection = rivune.matching("/api/v1/profiles/selection", "DELETE");
+  expect(clearSelection).toHaveLength(1);
+  expect(clearSelection[0]?.profileContext).toBe("fixture-profile-context-alice-0");
+  await expect(page.locator(".app-notification--error")).toHaveCount(0);
+});
+
+test("profile selection in one tab cannot lend its context to another tab", async ({ page, rivune }) => {
+  rivune.setProfileCategory("bob", CATEGORY_IDS.household);
+  await page.goto("/");
+  await rivune.waitForRequest("/api/v1/collections", "GET");
+  const secondPage = await page.context().newPage();
+  await rivune.install(secondPage);
+  await secondPage.goto("/");
+  await expect(secondPage.getByRole("button", { name: "Switch profile" }).first()).toBeVisible();
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("rivune.profile"))).toBe("alice");
+  await expect.poll(() => secondPage.evaluate(() => sessionStorage.getItem("rivune.profile"))).toBe("alice");
+
+  await secondPage.getByRole("button", { name: "Switch profile" }).first().click();
+  await secondPage.getByRole("button", { name: "Bob Profile" }).click();
+  await expect(secondPage.getByRole("heading", { name: "Bob's Fresh Picks" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Who's watching?" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("rivune.profile"))).toBeNull();
+
+  const staleOutcome = await page.evaluate(async () => {
+    try {
+      await (await import("/src/api.ts")).api.collections();
+      return { status: 200, code: "" };
+    } catch (error) {
+      const failure = error as { status?: number; code?: string };
+      return { status: failure.status ?? 0, code: failure.code ?? "" };
+    }
+  });
+  expect(staleOutcome).toEqual({ status: 409, code: "profile_selection_required" });
+
+  const contexts = rivune.matching("/api/v1/collections", "GET").map((request) => request.profileContext);
+  expect(contexts).toContain("fixture-profile-context-alice-0");
+  expect(contexts.some((context) => context?.startsWith("fixture-profile-context-bob-"))).toBe(true);
+  expect(contexts.at(-1)).toBeNull();
+  await secondPage.close();
+});
+
+test("opening Home in a fresh tab restores the current profile without disturbing the original tab", async ({ page, rivune }) => {
+  await page.goto("/#home");
+  await expect(page.getByRole("heading", { name: "Alice's Slow Shelf" })).toBeVisible();
+
+  const secondPage = await page.context().newPage();
+  await rivune.install(secondPage);
+  await secondPage.evaluate(() => {
+    sessionStorage.removeItem("rivune.profile");
+    sessionStorage.removeItem("rivune.profile.context");
+  });
+  await secondPage.goto("/#home");
+
+  await expect(secondPage.getByRole("heading", { name: "Alice's Slow Shelf" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Alice's Slow Shelf" })).toBeVisible();
+  await secondPage.close();
 });
 
 
@@ -31,6 +101,44 @@ test("rapid profile switching never paints a late response from the prior profil
   await expect(page.getByText("Alice's Slow Shelf")).toHaveCount(0);
   await expect(page.getByText("Alice Exclusive")).toHaveCount(0);
   expect(rivune.matching("/api/v1/collections", "GET").map((request) => request.profileId)).toEqual(["alice", "bob"]);
+});
+
+test("profile changes purge principal-owned routes, history, and media caches", async ({ page, rivune }) => {
+  rivune.setProfileCategory("bob", CATEGORY_IDS.household);
+  await page.goto("/");
+  await rivune.waitForRequest("/api/v1/collections", "GET");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await expect(page.getByRole("heading", { name: "Signal Horizon" }).first()).toBeVisible();
+  await page.evaluate(() => {
+    localStorage.setItem("rivune.home-cache.v2.alice.scope", "alice-home");
+    localStorage.setItem("rivune.metadata-cache.v1", "alice-metadata");
+    sessionStorage.setItem("rivune.search.alice", "alice-query");
+    localStorage.setItem("rivune.notifications.session-1", "alice-notification");
+    window.history.pushState(
+      { ...window.history.state, rivuneMediaItem: { id: "alice-secret", mediaType: "movie", title: "Alice Secret Title" } },
+      "",
+      "/media/movie/alice-secret",
+    );
+  });
+
+  await page.getByRole("button", { name: "Switch profile" }).first().click();
+  await page.getByRole("button", { name: "Bob Profile" }).click();
+
+  await expect(page.getByRole("heading", { name: "Bob's Fresh Picks" })).toBeVisible();
+  await expect(page.getByText("Signal Horizon", { exact: true })).toHaveCount(0);
+  await expect(page).not.toHaveURL(/\/media\//);
+  expect(await page.evaluate(() => ({
+    home: localStorage.getItem("rivune.home-cache.v2.alice.scope"),
+    metadata: localStorage.getItem("rivune.metadata-cache.v1"),
+    search: sessionStorage.getItem("rivune.search.alice"),
+    notification: localStorage.getItem("rivune.notifications.session-1"),
+    routeItem: window.history.state?.rivuneMediaItem ?? null,
+  }))).toEqual({ home: null, metadata: null, search: null, notification: null, routeItem: null });
+
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "Bob's Fresh Picks" })).toBeVisible();
+  await expect(page.getByText("Signal Horizon", { exact: true })).toHaveCount(0);
+  await expect(page).not.toHaveURL(/\/media\//);
 });
 
 test("portrait uses bottom navigation while landscape tablet uses the sidebar", async ({ page, rivune }) => {

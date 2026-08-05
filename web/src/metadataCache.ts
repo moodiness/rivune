@@ -25,12 +25,18 @@ type CacheEntry = {
 };
 
 type CacheDocument = {
-  version: 1;
+  version: 2;
   snapshots: Record<string, CacheEntry>;
   aliases: Record<string, string>;
 };
 
 let loadedDocument: CacheDocument | undefined;
+let persistenceTimer: number | undefined;
+let persistenceIdleCallback: number | undefined;
+let persistencePending = false;
+let persistenceListenersInstalled = false;
+const persistenceDebounceMilliseconds = 750;
+
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -38,10 +44,10 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function cacheDocument(): CacheDocument {
   if (loadedDocument) return loadedDocument;
-  const empty: CacheDocument = { version: 1, snapshots: {}, aliases: {} };
+  const empty: CacheDocument = { version: 2, snapshots: {}, aliases: {} };
   try {
     const parsed = record(JSON.parse(localStorage.getItem(storageKey) ?? "null"));
-    if (parsed?.version !== 1) return loadedDocument = empty;
+    if (parsed?.version !== 2) return loadedDocument = empty;
     const snapshots = record(parsed.snapshots);
     const aliases = record(parsed.aliases);
     if (!snapshots || !aliases) return loadedDocument = empty;
@@ -151,8 +157,9 @@ function snapshot(details: MediaItem): MetadataSnapshot {
 }
 
 function persist(document: CacheDocument) {
+  const now = Date.now();
   const retained = Object.entries(document.snapshots)
-    .filter(([, entry]) => Date.now() - entry.updatedAt <= maximumAgeMilliseconds)
+    .filter(([, entry]) => now - entry.updatedAt <= maximumAgeMilliseconds)
     .sort(([, left], [, right]) => right.updatedAt - left.updatedAt)
     .slice(0, maximumSnapshots);
   document.snapshots = Object.fromEntries(retained);
@@ -165,25 +172,77 @@ function persist(document: CacheDocument) {
   }
 }
 
+function cancelScheduledPersistence(): void {
+  if (persistenceTimer !== undefined) {
+    window.clearTimeout(persistenceTimer);
+    persistenceTimer = undefined;
+  }
+  if (persistenceIdleCallback !== undefined) {
+    if (typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(persistenceIdleCallback);
+    persistenceIdleCallback = undefined;
+  }
+}
+
+export function flushMetadataCache(): void {
+  const shouldPersist = persistencePending;
+  cancelScheduledPersistence();
+  persistencePending = false;
+  if (shouldPersist && loadedDocument) persist(loadedDocument);
+}
+function schedulePersistence(): void {
+  cancelScheduledPersistence();
+  persistencePending = true;
+  persistenceTimer = window.setTimeout(() => {
+    persistenceTimer = undefined;
+    if (typeof window.requestIdleCallback === "function") {
+      persistenceIdleCallback = window.requestIdleCallback(() => {
+        persistenceIdleCallback = undefined;
+        persistencePending = false;
+        if (loadedDocument) persist(loadedDocument);
+      }, { timeout: 1_000 });
+      return;
+    }
+    persistencePending = false;
+    if (loadedDocument) persist(loadedDocument);
+  }, persistenceDebounceMilliseconds);
+  if (persistenceListenersInstalled) return;
+  persistenceListenersInstalled = true;
+  window.addEventListener("pagehide", flushMetadataCache);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushMetadataCache();
+  });
+}
+
 export function cacheMediaItem(item: MediaItem, details: MediaItem, locale: string, titleID?: string) {
   const keys = identityKeys(item, locale, titleID);
   if (keys.length === 0) return;
   const document = cacheDocument();
   const previous = cachedEntry(document, keys);
-  const target = keys[0];
-  document.snapshots[target] = {
-    updatedAt: Date.now(),
-    value: { ...previous?.entry.value, ...snapshot(details) },
-  };
-  if (previous && previous.key !== target) delete document.snapshots[previous.key];
-  for (const [alias, existingTarget] of Object.entries(document.aliases)) {
-    if (previous && existingTarget === previous.key) document.aliases[alias] = target;
+  const target = previous?.key ?? keys[0];
+  const value = { ...previous?.entry.value, ...snapshot(details) };
+  let changed = !previous || previous.key !== target || JSON.stringify(previous.entry.value) !== JSON.stringify(value);
+  if (changed) {
+    document.snapshots[target] = { updatedAt: Date.now(), value };
+    if (previous && previous.key !== target) delete document.snapshots[previous.key];
   }
-  for (const key of keys) document.aliases[key] = target;
-  persist(document);
+  for (const [alias, existingTarget] of Object.entries(document.aliases)) {
+    if (previous && existingTarget === previous.key && existingTarget !== target) {
+      document.aliases[alias] = target;
+      changed = true;
+    }
+  }
+  for (const key of keys) {
+    if (document.aliases[key] !== target) {
+      document.aliases[key] = target;
+      changed = true;
+    }
+  }
+  if (changed) schedulePersistence();
 }
 
 export function clearMetadataCache(): void {
+  cancelScheduledPersistence();
+  persistencePending = false;
   loadedDocument = undefined;
   try {
     localStorage.removeItem(storageKey);

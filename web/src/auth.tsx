@@ -1,13 +1,18 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   api,
+  broadcastProfileSelectionChange,
   clearDemoClientState,
   clearSession,
   DEMO_UNAVAILABLE_EVENT,
   hasDemoHint,
+  profileRequestContext,
   prepareDemoAttempt,
+  PROFILE_SELECTION_BROADCAST_KEY,
   PROFILE_SELECTION_REQUIRED_EVENT,
+  rejectProfileRequestContext,
   rememberDemoSession,
+  setProfileRequestContext,
 } from "./api";
 import { setLocale, translate as t } from "./i18n";
 import type { Account, Discovery, InterfaceLanguage, Profile } from "./types";
@@ -37,6 +42,25 @@ type AuthState = {
 
 const AuthContext = createContext<AuthState | null>(null);
 
+export function principalIdentity(discovery: Discovery | null, account: Account | null, profile: Profile | null): string | null {
+  if (!discovery || !account || !profile) return null;
+  let server = discovery.apiBaseUrl;
+  try {
+    server = new URL(discovery.apiBaseUrl, window.location.origin).href;
+  } catch {
+    // The discovery value is still an identity boundary even when it is not a valid URL.
+  }
+  return JSON.stringify([
+    server,
+    account.user.id,
+    account.session.id,
+    account.session.authorizationScope,
+    account.session.category?.id ?? "",
+    profile.id,
+    profile.categoryId,
+  ]);
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
   const [account, setAccount] = useState<Account | null>(null);
@@ -51,15 +75,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const profileRequestController = useRef(new AbortController());
   const [profileRequestSignal, setProfileRequestSignal] = useState(profileRequestController.current.signal);
 
-  const invalidateProfile = useCallback(() => {
+  const suspendProfile = useCallback(() => {
     confirmedProfileIDRef.current = null;
     profileRequestController.current.abort();
     setConfirmedProfileID(null);
   }, []);
 
-  const confirmProfile = useCallback((profileID: string) => {
+  const invalidateProfile = useCallback(() => {
+    setProfileRequestContext(null, null);
+    suspendProfile();
+  }, [suspendProfile]);
+
+  const confirmProfile = useCallback((profileID: string, profileContext: string | null) => {
     profileRequestController.current.abort();
     const controller = new AbortController();
+    setProfileRequestContext(profileID, profileContext);
     confirmedProfileIDRef.current = profileID;
     profileRequestController.current = controller;
     setProfileRequestSignal(controller.signal);
@@ -72,7 +102,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setTerminalMessage(null);
     setAccount(next);
     const activeProfileID = next.session.activeProfile?.id ?? null;
-    if (activeProfileID && confirmedProfileIDRef.current !== activeProfileID) confirmProfile(activeProfileID);
+    if (activeProfileID && confirmedProfileIDRef.current !== activeProfileID) confirmProfile(activeProfileID, null);
     else if (!activeProfileID) invalidateProfile();
   }, [confirmProfile, invalidateProfile]);
 
@@ -83,7 +113,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (authGeneration.current === generation) {
         setAccount(next);
         const activeProfileID = next.session.activeProfile?.id ?? null;
-        if (options?.restoreActiveProfile && activeProfileID !== null) confirmProfile(activeProfileID);
+        if (options?.restoreActiveProfile && activeProfileID !== null) {
+          const context = profileRequestContext(activeProfileID);
+          if (context) confirmProfile(activeProfileID, context);
+          else invalidateProfile();
+        }
         else if (confirmedProfileIDRef.current !== activeProfileID) invalidateProfile();
       }
       return next;
@@ -96,6 +130,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const requireProfileSelection = () => {
       if (profileSelectionInFlight.current) return;
+      rejectProfileRequestContext();
       const generation = ++authGeneration.current;
       invalidateProfile();
       void api.me()
@@ -108,8 +143,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setAccount(null);
         });
     };
+    const sharedProfileChanged = (event: StorageEvent) => {
+      if (event.key === PROFILE_SELECTION_BROADCAST_KEY && event.newValue !== null) {
+        requireProfileSelection();
+      }
+    };
     window.addEventListener(PROFILE_SELECTION_REQUIRED_EVENT, requireProfileSelection);
-    return () => window.removeEventListener(PROFILE_SELECTION_REQUIRED_EVENT, requireProfileSelection);
+    window.addEventListener("storage", sharedProfileChanged);
+    return () => {
+      window.removeEventListener(PROFILE_SELECTION_REQUIRED_EVENT, requireProfileSelection);
+      window.removeEventListener("storage", sharedProfileChanged);
+    };
   }, [invalidateProfile]);
 
   const rediscover = useCallback(async () => {
@@ -150,23 +194,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!active) return;
         setDiscovery(discovered);
 
-        const directDemo = window.location.pathname === "/demo";
-        if (directDemo) {
-          prepareDemoAttempt();
-          try {
-            const response = await api.startDemo();
-            if (!active) return;
-            applyDemoAccount(response.account);
-            rememberDemoSession();
-          } finally {
-            if (active && window.location.pathname === "/demo") {
-              window.history.replaceState(window.history.state, "", `/${window.location.search}${window.location.hash}`);
-            }
-          }
-          return;
+        if (window.location.pathname === "/demo") {
+          window.history.replaceState({}, "", `/${window.location.search}${window.location.hash}`);
         }
 
-        if (hasDemoHint()) {
+        if (discovered.setupRequired && hasDemoHint()) {
           clearSession();
           try {
             const response = await api.demoSession();
@@ -185,7 +217,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (active) {
             setMode("real");
             setAccount(current);
-            if (current.session.activeProfile?.id) confirmProfile(current.session.activeProfile.id);
+            const activeProfileID = current.session.activeProfile?.id ?? null;
+            const context = activeProfileID ? profileRequestContext(activeProfileID) : null;
+            if (activeProfileID && context) confirmProfile(activeProfileID, context);
             else invalidateProfile();
           }
         }
@@ -211,10 +245,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const enterDemo = useCallback(async () => {
     const generation = ++authGeneration.current;
-    invalidateProfile();
-    prepareDemoAttempt();
     const response = await api.startDemo();
     if (authGeneration.current !== generation) return;
+    prepareDemoAttempt();
+    invalidateProfile();
     applyDemoAccount(response.account);
     rememberDemoSession();
     setDemoRevision((current) => current + 1);
@@ -228,12 +262,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       response = await api.resetDemo();
     } catch (cause) {
-      if (previousProfileID && authGeneration.current === generation) confirmProfile(previousProfileID);
+      if (previousProfileID && authGeneration.current === generation) confirmProfile(previousProfileID, null);
       throw cause;
     }
     if (authGeneration.current !== generation) return;
     clearDemoClientState();
-    if (previousProfileID && response.account.session.activeProfile?.id === previousProfileID) confirmProfile(previousProfileID);
+    if (previousProfileID && response.account.session.activeProfile?.id === previousProfileID) confirmProfile(previousProfileID, null);
     applyDemoAccount(response.account);
     rememberDemoSession();
     setDemoRevision((current) => current + 1);
@@ -267,11 +301,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     invalidateProfile();
     profileSelectionInFlight.current = true;
     try {
-      await api.selectProfile(profile.id, pin);
+      const selection = await api.selectProfile(profile.id, pin);
       const next = await api.me();
       if (authGeneration.current !== generation) return;
       setAccount(next);
-      if (next.session.activeProfile?.id === profile.id) confirmProfile(profile.id);
+      if (next.session.activeProfile?.id === profile.id) confirmProfile(profile.id, selection.profileContext);
+      broadcastProfileSelectionChange();
     } finally {
       if (authGeneration.current === generation) profileSelectionInFlight.current = false;
     }
@@ -279,12 +314,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const leaveProfile = useCallback(async () => {
     const generation = ++authGeneration.current;
-    invalidateProfile();
-    await api.clearProfile();
-    const next = await api.me();
-    if (authGeneration.current !== generation) return;
-    setAccount(next);
-  }, [invalidateProfile]);
+    profileSelectionInFlight.current = true;
+    suspendProfile();
+    try {
+      await api.clearProfile();
+      invalidateProfile();
+      broadcastProfileSelectionChange();
+      const next = await api.me();
+      if (authGeneration.current !== generation) return;
+      setAccount(next);
+    } finally {
+      if (authGeneration.current === generation) profileSelectionInFlight.current = false;
+    }
+  }, [invalidateProfile, suspendProfile]);
 
   const completeDeviceAuthorization = useCallback(async (deviceCode: string) => {
     const generation = ++authGeneration.current;

@@ -18,6 +18,7 @@ type AppNotification = {
 type NotificationListener = (notification: AppNotification) => void;
 
 const listeners = new Set<NotificationListener>();
+const resetListeners = new Set<() => void>();
 let nextNotificationID = 1;
 const defaultNotificationDurationMilliseconds = 5_000;
 let notificationDurationMilliseconds = defaultNotificationDurationMilliseconds;
@@ -26,6 +27,10 @@ export function configureNotificationDuration(durationSeconds: number): void {
   notificationDurationMilliseconds = Number.isFinite(durationSeconds)
     ? Math.min(30, Math.max(2, durationSeconds)) * 1_000
     : defaultNotificationDurationMilliseconds;
+}
+
+export function clearNotifications(): void {
+  for (const listener of resetListeners) listener();
 }
 
 function publish(tone: NotificationTone, title: string, message: string): Promise<void> {
@@ -68,9 +73,19 @@ export function NotificationViewport() {
     const listener: NotificationListener = (notification) => {
       setNotifications((current) => [...current, notification]);
     };
+    const reset = () => {
+      for (const timeout of notificationTimeouts.current.values()) window.clearTimeout(timeout);
+      notificationTimeouts.current.clear();
+      setNotifications((current) => {
+        for (const notification of current) notification.markPresented();
+        return [];
+      });
+    };
     listeners.add(listener);
+    resetListeners.add(reset);
     return () => {
       listeners.delete(listener);
+      resetListeners.delete(reset);
       for (const timeout of notificationTimeouts.current.values()) window.clearTimeout(timeout);
       notificationTimeouts.current.clear();
     };
