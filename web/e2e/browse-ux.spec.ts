@@ -101,6 +101,44 @@ test("Home restores persistent rows before revalidation and refreshes opened col
   await expect(page.getByText("Alice Exclusive", { exact: true })).toBeVisible();
 });
 
+test("Home preserves every directly displayed collection title across reloads", async ({ page, rivune }) => {
+  const folderPath = "/api/v1/collections/alice-collection/folders/alice-folder/items";
+  const items = Array.from({ length: 8 }, (_, index) => ({
+    id: `direct-title-${index + 1}`,
+    mediaType: "movie",
+    title: `Direct title ${index + 1}`,
+    posterUrl: `https://fixtures.rivune.test/direct-title-${index + 1}.svg`,
+    description: `Direct title ${index + 1} fixture`,
+    sources: [],
+  }));
+  let folderRequests = 0;
+  await page.route(`**${folderPath}*`, async (route) => {
+    folderRequests += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        collectionId: "alice-collection",
+        folder: { id: "alice-folder", title: "Alice's Slow Shelf", tileShape: "poster", focusGifEnabled: false, hideTitle: false, sources: [] },
+        items,
+        page: 1,
+        hasMore: false,
+        errors: [],
+      }),
+    });
+  });
+
+  await page.goto("/");
+  const collection = page.locator(".folder-collection-section").filter({ hasText: "Alice's Slow Shelf" });
+  const cards = collection.locator(".media-card");
+  await expect(cards).toHaveCount(8);
+  await expect.poll(() => folderRequests).toBe(1);
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(cards).toHaveCount(8);
+  await expect.poll(() => rivune.matching("/api/v1/collections", "GET").length).toBe(2);
+  expect(folderRequests).toBe(1);
+});
+
 test("source folders use Fanart collection posters instead of the first title artwork", async ({ page, rivune }) => {
   rivune.setCollectionViewMode("alice", "tabbed_grid");
   rivune.setCollectionSourcePosters("alice", false);

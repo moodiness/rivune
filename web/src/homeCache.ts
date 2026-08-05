@@ -144,7 +144,8 @@ function cacheProjection(resolved: ResolvedFolder): ResolvedFolder {
 }
 
 export function writeHomeCache(profileID: string, scope: string, collections: Collection[], rows: Array<{ resolved: ResolvedFolder }>, updatedAt = Date.now()) {
-  const folders = Object.fromEntries(rows.flatMap(({ resolved }) => resolved.folder.id ? [[homeFolderCacheKey(resolved.collectionId, resolved.folder.id), cacheProjection(resolved)] as const] : []));
+  const directCollectionIDs = new Set(collections.filter((collection) => collection.viewMode === "follow_layout").map((collection) => collection.id));
+  const folders = Object.fromEntries(rows.flatMap(({ resolved }) => resolved.folder.id ? [[homeFolderCacheKey(resolved.collectionId, resolved.folder.id), directCollectionIDs.has(resolved.collectionId) ? resolved : cacheProjection(resolved)] as const] : []));
   const document: StoredHomeCache = {
     version: 1,
     collections,
