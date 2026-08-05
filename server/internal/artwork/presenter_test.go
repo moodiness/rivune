@@ -114,6 +114,71 @@ func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *te
 	}
 }
 
+func TestPresentAddonResourcesLocalizesNestedVideoThumbnailsBeforeSerialization(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+
+	upstreamThumbnail := fixture.URL + "/episode-thumbnail.webp"
+	upstreamThumbnailURL := fixture.URL + "/episode-thumbnail-url.webp"
+	results := []addon.ResourceResult{{
+		Resource: "meta", Type: "series", ID: "opaque-series-id",
+		Payload: json.RawMessage(`{"meta":{"id":"opaque-series-id","type":"series","videos":[{"id":"opaque-video-id","season":1,"episode":2,"thumbnail":"` + upstreamThumbnail + `","thumbnailUrl":"` + upstreamThumbnailURL + `"}]}}`),
+	}}
+
+	service.PresentAddonResources(context.Background(), results)
+	serialized, err := json.Marshal(results[0])
+	if err != nil {
+		t.Fatalf("marshal presented meta resource: %v", err)
+	}
+	if strings.Contains(string(serialized), fixture.URL) {
+		t.Fatalf("presented meta resource leaked upstream video artwork: %s", serialized)
+	}
+
+	var resource struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(serialized, &resource); err != nil {
+		t.Fatalf("decode serialized resource result: %v", err)
+	}
+	var envelope struct {
+		Meta struct {
+			Videos []map[string]any `json:"videos"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal(resource.Payload, &envelope); err != nil || len(envelope.Meta.Videos) != 1 {
+		t.Fatalf("decode presented meta videos: %v payload=%s", err, resource.Payload)
+	}
+	video := envelope.Meta.Videos[0]
+	for field, upstream := range map[string]string{
+		"thumbnail":    upstreamThumbnail,
+		"thumbnailUrl": upstreamThumbnailURL,
+	} {
+		normalized, err := normalizeURL(upstream, false)
+		if err != nil {
+			t.Fatalf("normalize expected %s: %v", field, err)
+		}
+		if got, want := video[field], publicPrefix+artworkKey(normalized); got != want {
+			t.Fatalf("video %s = %#v, want %q", field, got, want)
+		}
+	}
+	if video["id"] != "opaque-video-id" {
+		t.Fatalf("video playback ID changed: %#v", video)
+	}
+
+	var registered int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM artwork_cache
+		WHERE source_url = ANY($1::text[])
+	`, []string{upstreamThumbnail, upstreamThumbnailURL}).Scan(&registered); err != nil {
+		t.Fatalf("query video artwork registrations: %v", err)
+	}
+	if registered != 2 {
+		t.Fatalf("registered %d nested video artwork URLs, want 2", registered)
+	}
+}
+
 func TestPresentAddonResourcesBoundsArtworkRegistrationsPerResponse(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

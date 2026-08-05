@@ -130,6 +130,41 @@ type CustomMetaPlayback = {
   videos: CustomMetaVideo[];
 };
 
+const customUnseasonedGroupKey = "unseasoned";
+const emptyCustomVideos: CustomMetaVideo[] = [];
+
+type CustomVideoSeasonGroup = {
+  key: string;
+  season?: number;
+  videos: CustomMetaVideo[];
+};
+
+function customVideoSeasonKey(video: CustomMetaVideo): string {
+  return video.season === undefined ? customUnseasonedGroupKey : `season:${video.season}`;
+}
+
+function groupCustomVideos(videos: CustomMetaVideo[]): CustomVideoSeasonGroup[] {
+  const seasons = new Map<number, CustomMetaVideo[]>();
+  const unseasoned: CustomMetaVideo[] = [];
+  for (const video of videos) {
+    if (video.season === undefined) {
+      unseasoned.push(video);
+      continue;
+    }
+    const group = seasons.get(video.season);
+    if (group) group.push(video);
+    else seasons.set(video.season, [video]);
+  }
+  const groups = Array.from(seasons, ([season, seasonVideos]) => ({
+    key: `season:${season}`,
+    season,
+    videos: seasonVideos,
+  })).sort((left, right) => left.season - right.season);
+  return unseasoned.length > 0
+    ? [...groups, { key: customUnseasonedGroupKey, videos: unseasoned }]
+    : groups;
+}
+
 function opaqueID(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
@@ -147,7 +182,7 @@ function customMetaPlayback(meta: Record<string, unknown>): CustomMetaPlayback {
       title: typeof (video.title ?? video.name) === "string" ? String(video.title ?? video.name) : "",
       overview: typeof (video.overview ?? video.description) === "string" ? String(video.overview ?? video.description) : "",
       released: typeof (video.released ?? video.releaseInfo) === "string" ? String(video.released ?? video.releaseInfo) : "",
-      thumbnail: opaqueID(video.thumbnail ?? video.poster),
+      thumbnail: opaqueID(video.thumbnail ?? video.thumbnailUrl ?? video.poster),
       background: opaqueID(video.background ?? video.backgroundUrl),
       season: typeof video.season === "number" && Number.isFinite(video.season) ? video.season : undefined,
       episode: typeof video.episode === "number" && Number.isFinite(video.episode) ? video.episode : undefined,
@@ -419,6 +454,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   const [resolvedCustomMeta, setResolvedCustomMeta] = useState<CustomMetaPlayback>();
   const [selectedCustomVideo, setSelectedCustomVideo] = useState<CustomMetaVideo>();
   const [customVideoChooserVisible, setCustomVideoChooserVisible] = useState(false);
+  const [selectedCustomSeasonKey, setSelectedCustomSeasonKey] = useState("");
   const [availableStreams, setAvailableStreams] = useState<PlaybackSourceOption[]>([]);
   const [selectedStream, setSelectedStream] = useState<PlaybackSourceOption>();
   const [streamsLoading, setStreamsLoading] = useState(item.mediaType !== "tv");
@@ -482,11 +518,20 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   const activeTrailerUnavailable = trailerOwnerKey === trailerItemKey && trailerUnavailable;
   const trailerStageVisible = Boolean(activeTrailer || activeTrailerMessage);
   const customType = item.mediaType !== "movie" && item.mediaType !== "series" && item.mediaType !== "episode" && item.mediaType !== "tv";
-  const customVideos = resolvedCustomMeta?.videos ?? [];
+  const customVideos = resolvedCustomMeta?.videos ?? emptyCustomVideos;
   const defaultCustomVideo = resolvedCustomMeta?.defaultVideoId
     ? customVideos.find((video) => video.id === resolvedCustomMeta.defaultVideoId)
     : undefined;
   const activeCustomVideo = selectedCustomVideo ?? defaultCustomVideo;
+  const customVideoGroups = useMemo(() => groupCustomVideos(customVideos), [customVideos]);
+  const preferredCustomSeasonKey = activeCustomVideo ? customVideoSeasonKey(activeCustomVideo) : undefined;
+  const activeCustomVideoGroup = customVideoGroups.find((group) => group.key === selectedCustomSeasonKey)
+    ?? customVideoGroups.find((group) => group.key === preferredCustomSeasonKey)
+    ?? customVideoGroups.find((group) => group.season !== undefined && group.season > 0)
+    ?? customVideoGroups[0];
+  const activeCustomSeasonKey = activeCustomVideoGroup?.key ?? "";
+  const activeCustomSeasonIndex = customVideoGroups.findIndex((group) => group.key === activeCustomSeasonKey);
+  const visibleCustomVideos = activeCustomVideoGroup?.videos ?? emptyCustomVideos;
   const customPlaybackResourceID = selectedCustomVideo?.id
     ?? resolvedCustomMeta?.defaultVideoId
     ?? (customVideos.length === 0 ? resolvedCustomMeta?.id : undefined);
@@ -558,6 +603,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     setMetaError("");
     setResolvedCustomMeta(undefined);
     setSelectedCustomVideo(undefined);
+    setSelectedCustomSeasonKey("");
     setCustomVideoChooserVisible(false);
     void api.resources("meta", item.mediaType === "episode" ? "series" : item.mediaType, item.id).then((batch) => {
       const meta = firstPayloadRecord(batch, "meta");
@@ -1453,34 +1499,60 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                   </header>
                   {metaLoading
                     ? <div className="series-browser__loading"><LoaderCircle className="spin" size={18} /> {t("media.episode.loading")}</div>
-                    : <div className="episode-list episode-list--custom">
-                      {customVideos.map((video, index) => {
-                        const number = video.episode ?? index + 1;
-                        const title = video.title || t("media.episode.fallbackTitle", { number });
-                        const episodeContext = video.season !== undefined && video.episode !== undefined
-                          ? t("media.episode.seasonEpisode", { season: video.season, episode: video.episode })
-                          : "";
-                        const active = activeCustomVideo?.id === video.id;
-                        return <div key={video.id} className={active ? "is-selected" : ""}>
-                          <button type="button" className="episode-main" aria-current={active ? "true" : undefined} onClick={() => {
-                            customPanelFocusTargetRef.current = "streams";
-                            setSelectedCustomVideo(video);
-                            setCustomVideoChooserVisible(false);
-                          }}>
-                            <span className="episode-number">{String(number).padStart(2, "0")}</span>
-                            <span className="episode-visual">
-                              {video.thumbnail ? <img src={video.thumbnail} alt="" loading="lazy" /> : <span className="episode-placeholder"><Play size={20} /></span>}
-                            </span>
-                            <span className="episode-copy">
-                              <strong>{title}</strong>
-                              <small>{[episodeContext, video.released].filter(Boolean).join(" · ")}</small>
-                              <p>{video.overview || t("media.episode.noSynopsis")}</p>
-                            </span>
-                            <span className="episode-play" aria-hidden="true"><Play size={16} fill="currentColor" /></span>
-                          </button>
-                        </div>;
-                      })}
-                    </div>}
+                    : <>
+                      <HorizontalDragRow className="season-tabs" role="tablist" aria-label={t("media.season.tabsLabel")}>
+                        {customVideoGroups.map((group, index) => {
+                          const active = group.key === activeCustomSeasonKey;
+                          return <button
+                            key={group.key}
+                            id={`custom-season-tab-${index}`}
+                            type="button"
+                            role="tab"
+                            tabIndex={active ? 0 : -1}
+                            aria-selected={active}
+                            aria-controls="custom-season-episodes"
+                            className={active ? "is-active" : ""}
+                            onClick={() => setSelectedCustomSeasonKey(group.key)}
+                          >
+                            <span>{group.season === undefined ? t("common.fallback.unknown") : group.season === 0 ? t("media.season.specials") : t("media.season.number", { number: group.season })}</span>
+                            <small>{t(group.videos.length === 1 ? "media.episode.count.one" : "media.episode.count.many", { count: group.videos.length })}</small>
+                          </button>;
+                        })}
+                      </HorizontalDragRow>
+                      <div
+                        id="custom-season-episodes"
+                        role="tabpanel"
+                        aria-labelledby={activeCustomSeasonIndex >= 0 ? `custom-season-tab-${activeCustomSeasonIndex}` : undefined}
+                        className="episode-list episode-list--custom"
+                      >
+                        {visibleCustomVideos.map((video, index) => {
+                          const number = video.episode ?? index + 1;
+                          const title = video.title || t("media.episode.fallbackTitle", { number });
+                          const episodeContext = video.season !== undefined && video.episode !== undefined
+                            ? t("media.episode.seasonEpisode", { season: video.season, episode: video.episode })
+                            : "";
+                          const active = activeCustomVideo?.id === video.id;
+                          return <div key={video.id} className={active ? "is-selected" : ""}>
+                            <button type="button" className="episode-main" aria-current={active ? "true" : undefined} onClick={() => {
+                              customPanelFocusTargetRef.current = "streams";
+                              setSelectedCustomVideo(video);
+                              setCustomVideoChooserVisible(false);
+                            }}>
+                              <span className="episode-number">{String(number).padStart(2, "0")}</span>
+                              <span className="episode-visual">
+                                {video.thumbnail ? <img src={video.thumbnail} alt="" loading="lazy" /> : <span className="episode-placeholder"><Play size={20} /></span>}
+                              </span>
+                              <span className="episode-copy">
+                                <strong>{title}</strong>
+                                <small>{[episodeContext, video.released].filter(Boolean).join(" · ")}</small>
+                                <p>{video.overview || t("media.episode.noSynopsis")}</p>
+                              </span>
+                              <span className="episode-play" aria-hidden="true"><Play size={16} fill="currentColor" /></span>
+                            </button>
+                          </div>;
+                        })}
+                      </div>
+                    </>}
                 </div>
               : <section className="details-stream-selector" aria-labelledby="details-streams-title">
                 <header className="details-context-panel__header details-context-panel__header--streams">

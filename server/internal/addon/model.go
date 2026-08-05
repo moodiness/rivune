@@ -470,7 +470,7 @@ func providerURLField(field string) bool {
 		return true
 	}
 	switch field {
-	case "uri", "href", "src":
+	case "uri", "href", "src", "thumbnail", "thumbnailurl":
 		return true
 	default:
 		return false

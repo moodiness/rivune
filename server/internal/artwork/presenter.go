@@ -851,7 +851,7 @@ func normalizedMediaType(value string) string {
 
 func isArtworkKey(value string) bool {
 	switch strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "_", "")) {
-	case "poster", "posterurl", "background", "backgroundurl", "backdrop", "backdropurl", "logo", "logourl", "still", "stillurl", "image", "imageurl":
+	case "poster", "posterurl", "background", "backgroundurl", "backdrop", "backdropurl", "logo", "logourl", "still", "stillurl", "image", "imageurl", "thumbnail", "thumbnailurl":
 		return true
 	default:
 		return false

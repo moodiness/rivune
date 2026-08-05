@@ -276,6 +276,11 @@ test("series episodes open dedicated detail pages that own playback sources", as
 
 test("custom metadata videos preserve their opaque playback identity", async ({ page, rivune: _rivune }) => {
   const sourceRequests: Array<Record<string, unknown>> = [];
+  await page.route(/\/api\/v1\/artwork\/custom-anime-episode-(?:5|6|s2|loose)$/i, (route) => route.fulfill({
+    status: 200,
+    contentType: "image/svg+xml",
+    body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#345"/></svg>',
+  }));
   await page.route(/\/api\/v1\/addons\/resources\/meta\/anime\/fk(?:%3A|:)1(?:\?.*)?$/i, (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
@@ -294,8 +299,10 @@ test("custom metadata videos preserve their opaque playback identity", async ({ 
             description: "A deterministic custom metadata fixture.",
             poster: "https://fixtures.rivune.test/custom-anime-poster.svg",
             videos: [
-              { id: "fk:1:5", title: "Fixture Episode Five", season: 1, episode: 5, released: "2025-01-05T00:00:00.000Z" },
-              { id: "fk:1:6", title: "Fixture Episode Six", season: 1, episode: 6, released: "2025-01-12T00:00:00.000Z" },
+              { id: "fk:1:5", title: "Fixture Episode Five", season: 1, episode: 5, released: "2025-01-05T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-5" },
+              { id: "fk:1:6", title: "Fixture Episode Six", season: 1, episode: 6, released: "2025-01-12T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-6" },
+              { id: "fk:1:s2:opaque-1", title: "Fixture Season Two Premiere", season: 2, episode: 1, released: "2026-01-04T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-s2" },
+              { id: "fk:1:loose:opaque", title: "Fixture Unseasoned Video", episode: 99, released: "2026-02-01T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-loose" },
             ],
           },
         },
@@ -329,9 +336,28 @@ test("custom metadata videos preserve their opaque playback identity", async ({ 
   await page.goto("/media/anime/fk:1");
 
   await expect(page.getByRole("heading", { name: "Episodes" })).toBeVisible();
+  const seasonOneTab = page.getByRole("tab", { name: /^Season 1\b.*2 episodes$/ });
+  const seasonTwoTab = page.getByRole("tab", { name: /^Season 2\b.*1 episode$/ });
+  const unseasonedTab = page.getByRole("tab", { name: /^Unknown\b.*1 episode$/ });
+  await expect(page.getByRole("tablist", { name: "Seasons" })).toBeVisible();
+  await expect(seasonOneTab).toHaveAttribute("aria-selected", "true");
+  await expect(seasonTwoTab).toHaveAttribute("aria-selected", "false");
+  await expect(unseasonedTab).toHaveAttribute("aria-selected", "false");
+
   const firstVideo = page.getByRole("button", { name: /Fixture Episode Five/ }).first();
   await expect(firstVideo).toBeVisible();
+  await expect(firstVideo.locator("img")).toBeVisible();
+  await expect(firstVideo.locator("img")).toHaveAttribute("src", "/api/v1/artwork/custom-anime-episode-5");
+  await expect.poll(() => firstVideo.locator("img").evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
   await expect(page.getByRole("button", { name: /Fixture Episode Six/ }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /Fixture Season Two Premiere/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Fixture Unseasoned Video/ })).toHaveCount(0);
+  await unseasonedTab.click();
+  await expect(unseasonedTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("button", { name: /Fixture Unseasoned Video/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Fixture Episode Five/ })).toHaveCount(0);
+  await seasonOneTab.click();
+  await expect(seasonOneTab).toHaveAttribute("aria-selected", "true");
   expect(sourceRequests).not.toContainEqual(expect.objectContaining({ resourceId: "fk:1" }));
 
   await firstVideo.click();
@@ -340,11 +366,31 @@ test("custom metadata videos preserve their opaque playback identity", async ({ 
     mediaType: "anime",
     resourceId: "fk:1:5",
   }));
-  const selectedRequest = sourceRequests.find((request) => request.resourceId === "fk:1:5");
-  expect(selectedRequest).not.toHaveProperty("addonId");
+  const firstSelectedRequest = sourceRequests.find((request) => request.resourceId === "fk:1:5");
+  expect(firstSelectedRequest).not.toHaveProperty("addonId");
   await expect(page.locator("#details-streams-title")).toBeFocused();
   await expect(page.getByRole("region", { name: "Playback sources" })).toBeVisible();
   await expect(page.getByRole("radio", { name: /Custom Fixture 1080p/ })).toBeVisible();
+
+  await page.getByRole("button", { name: /Back.*Episodes/ }).click();
+  await expect(page.getByRole("heading", { name: "Episodes" })).toBeFocused();
+  await seasonTwoTab.click();
+  await expect(seasonTwoTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("button", { name: /Fixture Episode Five/ })).toHaveCount(0);
+  const seasonTwoVideo = page.getByRole("button", { name: /Fixture Season Two Premiere/ });
+  await expect(seasonTwoVideo).toBeVisible();
+  await expect(seasonTwoVideo.locator("img")).toBeVisible();
+  await expect(seasonTwoVideo.locator("img")).toHaveAttribute("src", "/api/v1/artwork/custom-anime-episode-s2");
+  await expect.poll(() => seasonTwoVideo.locator("img").evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
+
+  await seasonTwoVideo.click();
+
+  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({
+    mediaType: "anime",
+    resourceId: "fk:1:s2:opaque-1",
+  });
+  expect(sourceRequests.find((request) => request.resourceId === "fk:1:s2:opaque-1")).not.toHaveProperty("addonId");
+  await expect(page.locator("#details-streams-title")).toBeFocused();
 });
 
 test("custom metadata honors default and returned video identifiers", async ({ page, rivune: _rivune }) => {

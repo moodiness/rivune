@@ -51,6 +51,49 @@ func TestResourceResultSerializationRemovesProviderTransportMaterial(t *testing.
 	}
 }
 
+func TestResourceResultSerializationOnlyPreservesLocalizedVideoThumbnails(t *testing.T) {
+	result := ResourceResult{
+		Resource: "meta",
+		Payload:  json.RawMessage(`{"meta":{"id":"series-id","videos":[{"id":"external-video","thumbnail":"https://provider.example/episode.webp?token=secret","thumbnailUrl":"https://provider.example/episode-alt.webp?token=secret"},{"id":"localized-video","thumbnail":"/api/v1/artwork/thumbnail","thumbnailUrl":"/api/v1/artwork/thumbnail-url"}]}}`),
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal meta resource: %v", err)
+	}
+	for _, exposed := range []string{"provider.example", "episode.webp", "episode-alt.webp", "token=secret"} {
+		if strings.Contains(string(encoded), exposed) {
+			t.Fatalf("resource result exposed unlocalized thumbnail value %q: %s", exposed, encoded)
+		}
+	}
+
+	var serialized struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(encoded, &serialized); err != nil {
+		t.Fatalf("decode serialized resource result: %v", err)
+	}
+	var envelope struct {
+		Meta struct {
+			Videos []map[string]any `json:"videos"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal(serialized.Payload, &envelope); err != nil || len(envelope.Meta.Videos) != 2 {
+		t.Fatalf("decode sanitized video metadata: %v payload=%s", err, serialized.Payload)
+	}
+	if _, exists := envelope.Meta.Videos[0]["thumbnail"]; exists {
+		t.Fatalf("unlocalized thumbnail survived sanitization: %#v", envelope.Meta.Videos[0])
+	}
+	if _, exists := envelope.Meta.Videos[0]["thumbnailUrl"]; exists {
+		t.Fatalf("unlocalized thumbnailUrl survived sanitization: %#v", envelope.Meta.Videos[0])
+	}
+	if got := envelope.Meta.Videos[1]["thumbnail"]; got != "/api/v1/artwork/thumbnail" {
+		t.Fatalf("localized thumbnail = %#v", got)
+	}
+	if got := envelope.Meta.Videos[1]["thumbnailUrl"]; got != "/api/v1/artwork/thumbnail-url" {
+		t.Fatalf("localized thumbnailUrl = %#v", got)
+	}
+}
+
 func TestResourceResultSerializationCannotExposePlaybackPayload(t *testing.T) {
 	for _, resource := range []string{"stream", "subtitles"} {
 		result := ResourceResult{
