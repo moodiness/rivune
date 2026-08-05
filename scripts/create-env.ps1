@@ -22,11 +22,16 @@ try {
 
     Copy-Item -LiteralPath $sourceFile -Destination $destinationFile
 
-    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $aclOutput = & icacls.exe $destinationFile '/inheritance:r' '/grant:r' "*$($currentSid):(F)" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to restrict .env permissions: $($aclOutput -join [Environment]::NewLine)"
-    }
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $privateAcl = [Security.AccessControl.FileSecurity]::new()
+    $privateAcl.SetOwner($currentSid)
+    $privateAcl.SetAccessRuleProtection($true, $false)
+    $privateAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $currentSid,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+    Set-Acl -LiteralPath $destinationFile -AclObject $privateAcl
 
     $created = $false
     Write-Output "Created private environment file: $destinationFile"

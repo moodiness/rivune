@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  Rivune is under active development. The web client and backend are usable today. Typed protocol-v18 clients for Apple, Android, and Windows are included; their native application interfaces are planned.
+  Rivune is under active development. The web client and backend are usable today. Typed protocol-v19 clients for Apple, Android, and Windows are included; their native application interfaces are planned.
 </p>
 
 ## Features
@@ -130,13 +130,21 @@ Windows PowerShell, then adjust it for the host. The helpers refuse an existing
 file or link rather than overwriting it. They create a mode-`0600` file on
 POSIX or a protected Windows DACL granting only the current identity access.
 For an existing installation, repair the file before using it: run
-`chmod 600 .env` on Linux/macOS. On Windows PowerShell, run the following and
-stop before entering or using secrets if `icacls.exe` fails:
+`chmod 600 .env` on Linux/macOS. On Windows PowerShell, replace the DACL with
+one explicit full-control rule for the current identity before entering or using
+secrets:
 
 ```powershell
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-icacls.exe .env /inheritance:r /grant:r "${identity}:(F)"
-if ($LASTEXITCODE -ne 0) { throw 'Failed to restrict .env permissions' }
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl = [Security.AccessControl.FileSecurity]::new()
+$acl.SetOwner($sid)
+$acl.SetAccessRuleProtection($true, $false)
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+    $sid,
+    [Security.AccessControl.FileSystemRights]::FullControl,
+    [Security.AccessControl.AccessControlType]::Allow
+))
+Set-Acl -LiteralPath .env -AclObject $acl
 ```
 
 | Variable | Purpose | Default |

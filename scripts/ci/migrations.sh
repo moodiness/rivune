@@ -54,7 +54,7 @@ start_rivune() {
   docker run -d --name "${container}" --network "${NETWORK}" \
     -e RIVUNE_DATABASE_URL="${DATABASE_URL}" \
     -e RIVUNE_SETUP_TOKEN="${SETUP_TOKEN}" \
-    -e RIVUNE_PUBLIC_URL="http://${container}:8080" \
+    -e RIVUNE_PUBLIC_URL="http://127.0.0.1:8080" \
     "${IMAGE}" >/dev/null
   wait_for_rivune "${container}"
 }
@@ -109,7 +109,7 @@ for migration in "${MIGRATIONS[@]:0:$((EXPECTED_COUNT - 1))}"; do
   version_name="$(basename "${migration}")"
   version="$((10#${version_name%%_*}))"
   docker exec -i -e PGPASSWORD="${PASSWORD}" "${POSTGRES}" psql --username rivune --dbname rivune \
-    --set ON_ERROR_STOP=1 < "${migration}"
+    --single-transaction --set ON_ERROR_STOP=1 < "${migration}"
   docker exec -e PGPASSWORD="${PASSWORD}" "${POSTGRES}" psql --username rivune --dbname rivune \
     --set ON_ERROR_STOP=1 --command "INSERT INTO schema_migrations (version) VALUES (${version});" >/dev/null
 done

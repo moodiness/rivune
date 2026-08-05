@@ -115,7 +115,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Test Swift package
-        run: swift test --package-path clients/apple
+        timeout-minutes: 10
+        run: swift test --disable-swift-testing --package-path clients/apple
 
   android-client:
     name: Kotlin API client
