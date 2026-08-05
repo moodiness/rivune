@@ -7,9 +7,15 @@ namespace Rivune.Windows;
 
 public interface ICredentialStore
 {
-    ValueTask<TokenPair?> LoadAsync(CancellationToken cancellationToken = default);
-    ValueTask SaveAsync(TokenPair credentials, CancellationToken cancellationToken = default);
+    ValueTask<StoredCredentials?> LoadAsync(CancellationToken cancellationToken = default);
+    ValueTask SaveAsync(StoredCredentials credentials, CancellationToken cancellationToken = default);
     ValueTask ClearAsync(CancellationToken cancellationToken = default);
+}
+
+public sealed record StoredCredentials
+{
+    public required string Issuer { get; init; }
+    public required TokenPair Credentials { get; init; }
 }
 
 public sealed class CredentialStoreException : Exception
@@ -22,31 +28,52 @@ public sealed class CredentialStoreException : Exception
 
 public sealed class DpapiCredentialStore : ICredentialStore, IDisposable
 {
-    private static readonly byte[] OptionalEntropy = Encoding.UTF8.GetBytes("Rivune.Windows.Protocol16.Credentials");
+    private static readonly byte[] OptionalEntropy = Encoding.UTF8.GetBytes("Rivune.Windows.Protocol18.Credentials");
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip,
     };
 
+    private readonly string _issuer;
     private readonly string _filePath;
+    private readonly string? _legacyFilePath;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private bool _disposed;
 
-    public DpapiCredentialStore(string? filePath = null)
+    public DpapiCredentialStore(Uri serverUrl, string? filePath = null)
     {
-        _filePath = Path.GetFullPath(filePath ?? Path.Combine(
+        ArgumentNullException.ThrowIfNull(serverUrl);
+        if (!serverUrl.IsAbsoluteUri)
+        {
+            throw new ArgumentException("The credential issuer must be an absolute URL.", nameof(serverUrl));
+        }
+
+        _issuer = CredentialIssuer.Canonicalize(serverUrl);
+        if (filePath is not null)
+        {
+            _filePath = Path.GetFullPath(filePath);
+            return;
+        }
+
+        var applicationDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Rivune",
-            "credentials.v16.dat"));
+            "Rivune");
+        _legacyFilePath = Path.Combine(applicationDirectory, "credentials.v16.dat");
+        var issuerHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(_issuer)));
+        _filePath = Path.Combine(
+            applicationDirectory,
+            "credentials",
+            $"credentials.v18.{issuerHash}.dat");
     }
 
-    public async ValueTask<TokenPair?> LoadAsync(CancellationToken cancellationToken = default)
+    public async ValueTask<StoredCredentials?> LoadAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         EnsureWindows();
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            DeleteLegacyCredentials();
             if (!File.Exists(_filePath))
             {
                 return null;
@@ -78,8 +105,15 @@ public sealed class DpapiCredentialStore : ICredentialStore, IDisposable
 
             try
             {
-                return JsonSerializer.Deserialize<TokenPair>(plaintext, JsonOptions)
+                var credentials = JsonSerializer.Deserialize<StoredCredentials>(plaintext, JsonOptions)
                     ?? throw new CredentialStoreException("Stored Rivune credentials are empty.");
+                if (!StringComparer.Ordinal.Equals(credentials.Issuer, _issuer))
+                {
+                    DeleteCredentialFile();
+                    return null;
+                }
+
+                return credentials;
             }
             catch (JsonException exception)
             {
@@ -96,14 +130,19 @@ public sealed class DpapiCredentialStore : ICredentialStore, IDisposable
         }
     }
 
-    public async ValueTask SaveAsync(TokenPair credentials, CancellationToken cancellationToken = default)
+    public async ValueTask SaveAsync(StoredCredentials credentials, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(credentials);
+        if (!StringComparer.Ordinal.Equals(credentials.Issuer, _issuer))
+        {
+            throw new CredentialStoreException("Credential issuer does not match this credential store.");
+        }
         ThrowIfDisposed();
         EnsureWindows();
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            DeleteLegacyCredentials();
             var directory = Path.GetDirectoryName(_filePath)!;
             Directory.CreateDirectory(directory);
 
@@ -181,6 +220,7 @@ public sealed class DpapiCredentialStore : ICredentialStore, IDisposable
             try
             {
                 File.Delete(_filePath);
+                DeleteLegacyCredentials();
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
@@ -204,6 +244,39 @@ public sealed class DpapiCredentialStore : ICredentialStore, IDisposable
         _gate.Dispose();
     }
 
+    private void DeleteCredentialFile()
+    {
+        try
+        {
+            File.Delete(_filePath);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private void DeleteLegacyCredentials()
+    {
+        if (_legacyFilePath is null)
+        {
+            return;
+        }
+
+        try
+        {
+            File.Delete(_legacyFilePath);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
     private static void EnsureWindows()
     {
         if (!OperatingSystem.IsWindows())
@@ -213,4 +286,13 @@ public sealed class DpapiCredentialStore : ICredentialStore, IDisposable
     }
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
+}
+
+internal static class CredentialIssuer
+{
+    public static string Canonicalize(Uri serverUrl)
+    {
+        var origin = serverUrl.GetComponents(UriComponents.SchemeAndServer, UriFormat.UriEscaped);
+        return new Uri(origin, UriKind.Absolute).AbsoluteUri;
+    }
 }

@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Runtime.ExceptionServices;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -14,6 +16,8 @@ public sealed class RivuneApiClient : IDisposable
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip,
     };
 
+    private const int MaximumResponseBodyBytes = 16 * 1024 * 1024;
+
     private sealed record DiscoveryEnvelope
     {
         public required string Name { get; init; }
@@ -25,7 +29,10 @@ public sealed class RivuneApiClient : IDisposable
         public string? InterfaceLanguage { get; init; }
     }
 
+    private readonly record struct AuthenticationSnapshot(TokenPair Credentials, long Epoch);
+
     private readonly Uri _serverUrl;
+    private readonly string _credentialIssuer;
     private readonly HttpClient _httpClient;
     private readonly ICredentialStore _credentialStore;
     private readonly bool _ownsCredentialStore;
@@ -37,37 +44,108 @@ public sealed class RivuneApiClient : IDisposable
     private Discovery? _discovery;
     private TokenPair? _credentials;
     private bool _credentialsLoaded;
+    private long _authenticationEpoch;
+    private CancellationTokenSource? _refreshCancellationSource;
     private bool _disposed;
 
-    public RivuneApiClient(string serverUrl, HttpClient httpClient, ICredentialStore credentialStore)
-        : this(ParseServerUrl(serverUrl), httpClient, credentialStore, ownsCredentialStore: false)
+    public RivuneApiClient(string serverUrl, ICredentialStore credentialStore)
+        : this(
+            ParseServerUrl(serverUrl),
+            CreateHttpClient(CreateDefaultHandler()),
+            credentialStore,
+            ownsCredentialStore: false)
     {
     }
 
-    public RivuneApiClient(Uri serverUrl, HttpClient httpClient, ICredentialStore credentialStore)
-        : this(ValidateServerUrl(serverUrl), httpClient, credentialStore, ownsCredentialStore: false)
+    public RivuneApiClient(Uri serverUrl, ICredentialStore credentialStore)
+        : this(
+            ValidateServerUrl(serverUrl),
+            CreateHttpClient(CreateDefaultHandler()),
+            credentialStore,
+            ownsCredentialStore: false)
     {
     }
 
-    public RivuneApiClient(string serverUrl, HttpClient httpClient)
-        : this(ParseServerUrl(serverUrl), httpClient, new DpapiCredentialStore(), ownsCredentialStore: true)
+    public RivuneApiClient(
+        string serverUrl,
+        HttpMessageHandler handler,
+        ICredentialStore credentialStore)
+        : this(
+            ParseServerUrl(serverUrl),
+            CreateHttpClient(handler),
+            credentialStore,
+            ownsCredentialStore: false)
     {
     }
 
-    public RivuneApiClient(Uri serverUrl, HttpClient httpClient)
-        : this(ValidateServerUrl(serverUrl), httpClient, new DpapiCredentialStore(), ownsCredentialStore: true)
+    public RivuneApiClient(
+        Uri serverUrl,
+        HttpMessageHandler handler,
+        ICredentialStore credentialStore)
+        : this(
+            ValidateServerUrl(serverUrl),
+            CreateHttpClient(handler),
+            credentialStore,
+            ownsCredentialStore: false)
+    {
+    }
+
+    public RivuneApiClient(string serverUrl)
+        : this(
+            ParseServerUrl(serverUrl),
+            CreateHttpClient(CreateDefaultHandler()),
+            credentialStore: null,
+            ownsCredentialStore: true)
+    {
+    }
+
+    public RivuneApiClient(Uri serverUrl)
+        : this(
+            ValidateServerUrl(serverUrl),
+            CreateHttpClient(CreateDefaultHandler()),
+            credentialStore: null,
+            ownsCredentialStore: true)
+    {
+    }
+
+    public RivuneApiClient(string serverUrl, HttpMessageHandler handler)
+        : this(
+            ParseServerUrl(serverUrl),
+            CreateHttpClient(handler),
+            credentialStore: null,
+            ownsCredentialStore: true)
+    {
+    }
+
+    public RivuneApiClient(Uri serverUrl, HttpMessageHandler handler)
+        : this(
+            ValidateServerUrl(serverUrl),
+            CreateHttpClient(handler),
+            credentialStore: null,
+            ownsCredentialStore: true)
     {
     }
 
     private RivuneApiClient(
         Uri serverUrl,
         HttpClient httpClient,
-        ICredentialStore credentialStore,
+        ICredentialStore? credentialStore,
         bool ownsCredentialStore)
     {
         _serverUrl = serverUrl;
-        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
-        _credentialStore = credentialStore ?? throw new ArgumentNullException(nameof(credentialStore));
+        _credentialIssuer = CredentialIssuer.Canonicalize(serverUrl);
+        _httpClient = httpClient;
+        try
+        {
+            _credentialStore = ownsCredentialStore
+                ? new DpapiCredentialStore(serverUrl)
+                : credentialStore ?? throw new ArgumentNullException(nameof(credentialStore));
+        }
+        catch
+        {
+            _httpClient.Dispose();
+            throw;
+        }
         _ownsCredentialStore = ownsCredentialStore;
     }
 
@@ -77,10 +155,16 @@ public sealed class RivuneApiClient : IDisposable
     public async Task<bool> RestoreSessionAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+        var epoch = await CaptureAuthenticationEpochAsync(cancellationToken).ConfigureAwait(false);
         await _credentialGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            _credentials = await _credentialStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+            if (epoch != _authenticationEpoch)
+            {
+                return false;
+            }
+
+            _credentials = await LoadCredentialsFromStoreAsync(cancellationToken).ConfigureAwait(false);
             _credentialsLoaded = true;
             return _credentials is not null;
         }
@@ -100,6 +184,8 @@ public sealed class RivuneApiClient : IDisposable
         ArgumentNullException.ThrowIfNull(password);
         ArgumentNullException.ThrowIfNull(device);
 
+        var epoch = await CaptureAuthenticationEpochAsync(cancellationToken).ConfigureAwait(false);
+
         var result = await RequestJsonAsync<TokenPair>(
             HttpMethod.Post,
             ["auth", "login"],
@@ -107,31 +193,112 @@ public sealed class RivuneApiClient : IDisposable
             new LoginRequest(username, password, device),
             authenticated: false,
             cancellationToken).ConfigureAwait(false);
-        await SetCredentialsAsync(result, cancellationToken).ConfigureAwait(false);
+        await SetCredentialsAsync(result, epoch, cancellationToken).ConfigureAwait(false);
         return result;
     }
 
     public async Task<TokenPair> RefreshSessionAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        var current = await GetCredentialsAsync(cancellationToken).ConfigureAwait(false)
+        var current = await GetAuthenticationSnapshotAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new NotAuthenticatedException();
-        return await RefreshCredentialsAsync(current.AccessToken, cancellationToken).ConfigureAwait(false);
+        return await RefreshCredentialsAsync(
+            current.Credentials.AccessToken,
+            current.Epoch,
+            cancellationToken).ConfigureAwait(false);
     }
 
     public async Task LogoutAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        if (await GetCredentialsAsync(cancellationToken).ConfigureAwait(false) is not null)
+
+        string? accessToken = null;
+        Exception? localFailure = null;
+        await _credentialGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
         {
-            await RequestEmptyAsync(
-                HttpMethod.Post,
-                ["auth", "logout"],
-                authenticated: true,
-                cancellationToken).ConfigureAwait(false);
+            unchecked
+            {
+                _authenticationEpoch++;
+            }
+            try
+            {
+                _refreshCancellationSource?.Cancel();
+            }
+            catch (Exception exception)
+            {
+                localFailure = exception;
+            }
+            _refreshCancellationSource = null;
+
+            if (_credentialsLoaded)
+            {
+                accessToken = _credentials?.AccessToken;
+            }
+            else
+            {
+                try
+                {
+                    accessToken = (await LoadCredentialsFromStoreAsync(CancellationToken.None).ConfigureAwait(false))
+                        ?.AccessToken;
+                }
+                catch (Exception exception)
+                {
+                    localFailure = exception;
+                }
+            }
+
+            try
+            {
+                await _credentialStore.ClearAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                localFailure ??= exception;
+            }
+            finally
+            {
+                _credentials = null;
+                _credentialsLoaded = true;
+            }
+        }
+        finally
+        {
+            _credentialGate.Release();
         }
 
-        await ClearCredentialsAsync(cancellationToken).ConfigureAwait(false);
+        Exception? remoteFailure = null;
+        if (accessToken is not null)
+        {
+            try
+            {
+                var uri = await BuildEndpointAsync(
+                    ["auth", "logout"],
+                    query: null,
+                    cancellationToken).ConfigureAwait(false);
+                EnsureCredentialDestination(uri);
+                var responseBody = await SendResponseBytesWithAccessTokenAsync(
+                    HttpMethod.Post,
+                    uri,
+                    body: null,
+                    accessToken,
+                    cancellationToken).ConfigureAwait(false);
+                CryptographicOperations.ZeroMemory(responseBody);
+            }
+            catch (Exception exception)
+            {
+                remoteFailure = exception;
+            }
+        }
+
+        if (localFailure is not null)
+        {
+            ExceptionDispatchInfo.Capture(localFailure).Throw();
+        }
+        if (remoteFailure is not null)
+        {
+            ExceptionDispatchInfo.Capture(remoteFailure).Throw();
+        }
     }
 
     public Task<Account> GetCurrentAccountAsync(CancellationToken cancellationToken = default) =>
@@ -246,6 +413,7 @@ public sealed class RivuneApiClient : IDisposable
         string deviceCode,
         CancellationToken cancellationToken = default)
     {
+        var epoch = await CaptureAuthenticationEpochAsync(cancellationToken).ConfigureAwait(false);
         var tokens = await RequestJsonAsync<TokenPair>(
             HttpMethod.Post,
             ["auth", "device-code", "token"],
@@ -253,7 +421,7 @@ public sealed class RivuneApiClient : IDisposable
             new DeviceCodeTokenRequest { DeviceCode = deviceCode },
             false,
             cancellationToken).ConfigureAwait(false);
-        await SetCredentialsAsync(tokens, cancellationToken).ConfigureAwait(false);
+        await SetCredentialsAsync(tokens, epoch, cancellationToken).ConfigureAwait(false);
         return tokens;
     }
 
@@ -476,6 +644,7 @@ public sealed class RivuneApiClient : IDisposable
         }
 
         _disposed = true;
+        _httpClient.Dispose();
         _discoveryGate.Dispose();
         _credentialGate.Dispose();
         _refreshGate.Dispose();
@@ -528,7 +697,9 @@ public sealed class RivuneApiClient : IDisposable
                 Timezone = response.Timezone,
                 InterfaceLanguage = response.InterfaceLanguage,
             };
-            if (!Uri.TryCreate(_serverUrl, discovery.ApiBaseUrl, out var apiBaseUrl) || !IsHttpUrl(apiBaseUrl))
+            if (!Uri.TryCreate(_serverUrl, discovery.ApiBaseUrl, out var apiBaseUrl) ||
+                !IsAllowedServerUrl(apiBaseUrl) ||
+                !StringComparer.Ordinal.Equals(CredentialIssuer.Canonicalize(apiBaseUrl), _credentialIssuer))
             {
                 _apiBaseUrl = null;
                 _discovery = null;
@@ -673,11 +844,48 @@ public sealed class RivuneApiClient : IDisposable
         CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
-        var accessToken = authenticated
-            ? (await GetCredentialsAsync(cancellationToken).ConfigureAwait(false))?.AccessToken
-                ?? throw new NotAuthenticatedException()
-            : null;
+        EnsureCredentialDestination(uri);
+        AuthenticationSnapshot? authentication = null;
+        if (authenticated)
+        {
+            authentication = await GetAuthenticationSnapshotAsync(cancellationToken).ConfigureAwait(false)
+                ?? throw new NotAuthenticatedException();
+        }
 
+        return await SendResponseBytesCoreAsync(
+            method,
+            uri,
+            body,
+            authentication?.Credentials.AccessToken,
+            authentication?.Epoch,
+            retryAfterRefresh,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private Task<byte[]> SendResponseBytesWithAccessTokenAsync(
+        HttpMethod method,
+        Uri uri,
+        byte[]? body,
+        string accessToken,
+        CancellationToken cancellationToken) =>
+        SendResponseBytesCoreAsync(
+            method,
+            uri,
+            body,
+            accessToken,
+            authenticationEpoch: null,
+            retryAfterRefresh: false,
+            cancellationToken);
+
+    private async Task<byte[]> SendResponseBytesCoreAsync(
+        HttpMethod method,
+        Uri uri,
+        byte[]? body,
+        string? accessToken,
+        long? authenticationEpoch,
+        bool retryAfterRefresh,
+        CancellationToken cancellationToken)
+    {
         using var request = new HttpRequestMessage(method, uri);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         if (accessToken is not null)
@@ -698,12 +906,27 @@ public sealed class RivuneApiClient : IDisposable
             request,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken).ConfigureAwait(false);
-        var responseBody = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+        EnsureCredentialDestination(response.RequestMessage?.RequestUri ?? uri);
+        var statusCode = (int)response.StatusCode;
+        if (statusCode is >= 300 and <= 399)
+        {
+            throw new RivuneServerException(
+                statusCode,
+                "redirect_not_allowed",
+                "Rivune server redirects are not allowed.");
+        }
 
-        if (response.StatusCode == HttpStatusCode.Unauthorized && authenticated && retryAfterRefresh)
+        var responseBody = await ReadResponseBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized &&
+            authenticationEpoch is not null &&
+            retryAfterRefresh)
         {
             CryptographicOperations.ZeroMemory(responseBody);
-            await RefreshCredentialsAsync(accessToken ?? throw new NotAuthenticatedException(), cancellationToken).ConfigureAwait(false);
+            await RefreshCredentialsAsync(
+                accessToken ?? throw new NotAuthenticatedException(),
+                authenticationEpoch.Value,
+                cancellationToken).ConfigureAwait(false);
             return await SendResponseBytesAsync(
                 method,
                 uri,
@@ -723,57 +946,147 @@ public sealed class RivuneApiClient : IDisposable
         return responseBody;
     }
 
+    private static async Task<byte[]> ReadResponseBodyAsync(
+        HttpContent content,
+        CancellationToken cancellationToken)
+    {
+        var declaredLength = content.Headers.ContentLength;
+        if (declaredLength > MaximumResponseBodyBytes)
+        {
+            throw new ResponseTooLargeException(MaximumResponseBodyBytes);
+        }
+
+        await using var stream = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var buffer = declaredLength is >= 0
+            ? new MemoryStream((int)declaredLength.Value)
+            : new MemoryStream();
+        var readBuffer = ArrayPool<byte>.Shared.Rent(81_920);
+        try
+        {
+            var totalBytes = 0;
+            while (true)
+            {
+                var remainingWithSentinel = MaximumResponseBodyBytes + 1 - totalBytes;
+                var bytesRead = await stream.ReadAsync(
+                    readBuffer.AsMemory(0, Math.Min(readBuffer.Length, remainingWithSentinel)),
+                    cancellationToken).ConfigureAwait(false);
+                if (bytesRead == 0)
+                {
+                    return buffer.ToArray();
+                }
+
+                totalBytes += bytesRead;
+                if (totalBytes > MaximumResponseBodyBytes)
+                {
+                    throw new ResponseTooLargeException(MaximumResponseBodyBytes);
+                }
+
+                buffer.Write(readBuffer, 0, bytesRead);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(readBuffer);
+            ArrayPool<byte>.Shared.Return(readBuffer);
+            if (buffer.TryGetBuffer(out var bufferedBytes))
+            {
+                CryptographicOperations.ZeroMemory(bufferedBytes.AsSpan(0, (int)buffer.Length));
+            }
+        }
+    }
+
     private async Task<TokenPair> RefreshCredentialsAsync(
         string failedAccessToken,
+        long expectedEpoch,
         CancellationToken cancellationToken)
     {
         await _refreshGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        CancellationTokenSource? refreshCancellationSource = null;
         try
         {
-            var current = await GetCredentialsAsync(cancellationToken).ConfigureAwait(false)
-                ?? throw new NotAuthenticatedException();
-            if (!StringComparer.Ordinal.Equals(current.AccessToken, failedAccessToken))
+            AuthenticationSnapshot current;
+            await _credentialGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                return current;
+                if (expectedEpoch != _authenticationEpoch)
+                {
+                    throw new NotAuthenticatedException();
+                }
+                if (!_credentialsLoaded)
+                {
+                    _credentials = await LoadCredentialsFromStoreAsync(cancellationToken).ConfigureAwait(false);
+                    _credentialsLoaded = true;
+                }
+
+                current = _credentials is null
+                    ? throw new NotAuthenticatedException()
+                    : new AuthenticationSnapshot(_credentials, _authenticationEpoch);
+                if (!StringComparer.Ordinal.Equals(current.Credentials.AccessToken, failedAccessToken))
+                {
+                    return current.Credentials;
+                }
+
+                refreshCancellationSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                _refreshCancellationSource = refreshCancellationSource;
+            }
+            finally
+            {
+                _credentialGate.Release();
             }
 
             try
             {
-                var uri = await BuildEndpointAsync(["auth", "refresh"], query: null, cancellationToken).ConfigureAwait(false);
+                var refreshCancellationToken = refreshCancellationSource!.Token;
+                var uri = await BuildEndpointAsync(
+                    ["auth", "refresh"],
+                    query: null,
+                    refreshCancellationToken).ConfigureAwait(false);
+                EnsureCredentialDestination(uri);
                 var result = await SendJsonResponseAsync<TokenPair>(
                     HttpMethod.Post,
                     uri,
-                    SerializeBody(new RefreshRequest(current.RefreshToken)),
+                    SerializeBody(new RefreshRequest(current.Credentials.RefreshToken)),
                     authenticated: false,
                     retryAfterRefresh: false,
-                    cancellationToken).ConfigureAwait(false);
-                await SetCredentialsAsync(result, cancellationToken).ConfigureAwait(false);
+                    refreshCancellationToken).ConfigureAwait(false);
+                await SetCredentialsAsync(result, expectedEpoch, refreshCancellationToken).ConfigureAwait(false);
                 return result;
             }
             catch
             {
-                await ClearCredentialsSuppressingStoreErrorsAsync().ConfigureAwait(false);
+                await ClearCredentialsIfEpochSuppressingStoreErrorsAsync(expectedEpoch).ConfigureAwait(false);
                 throw;
             }
         }
         finally
         {
+            if (refreshCancellationSource is not null)
+            {
+                await _credentialGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                try
+                {
+                    if (ReferenceEquals(_refreshCancellationSource, refreshCancellationSource))
+                    {
+                        _refreshCancellationSource = null;
+                    }
+                }
+                finally
+                {
+                    _credentialGate.Release();
+                    refreshCancellationSource.Dispose();
+                }
+            }
             _refreshGate.Release();
         }
     }
 
-    private async Task<TokenPair?> GetCredentialsAsync(CancellationToken cancellationToken)
+    private async Task<long> CaptureAuthenticationEpochAsync(CancellationToken cancellationToken)
     {
+        ThrowIfDisposed();
         await _credentialGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!_credentialsLoaded)
-            {
-                _credentials = await _credentialStore.LoadAsync(cancellationToken).ConfigureAwait(false);
-                _credentialsLoaded = true;
-            }
-
-            return _credentials;
+            return _authenticationEpoch;
         }
         finally
         {
@@ -781,12 +1094,49 @@ public sealed class RivuneApiClient : IDisposable
         }
     }
 
-    private async Task SetCredentialsAsync(TokenPair credentials, CancellationToken cancellationToken)
+    private async Task<AuthenticationSnapshot?> GetAuthenticationSnapshotAsync(
+        CancellationToken cancellationToken)
     {
         await _credentialGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await _credentialStore.SaveAsync(credentials, cancellationToken).ConfigureAwait(false);
+            if (!_credentialsLoaded)
+            {
+                _credentials = await LoadCredentialsFromStoreAsync(cancellationToken).ConfigureAwait(false);
+                _credentialsLoaded = true;
+            }
+
+            return _credentials is null
+                ? null
+                : new AuthenticationSnapshot(_credentials, _authenticationEpoch);
+        }
+        finally
+        {
+            _credentialGate.Release();
+        }
+    }
+
+
+    private async Task SetCredentialsAsync(
+        TokenPair credentials,
+        long expectedEpoch,
+        CancellationToken cancellationToken)
+    {
+        await _credentialGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (expectedEpoch != _authenticationEpoch)
+            {
+                throw new NotAuthenticatedException();
+            }
+
+            await _credentialStore.SaveAsync(
+                new StoredCredentials
+                {
+                    Issuer = _credentialIssuer,
+                    Credentials = credentials,
+                },
+                cancellationToken).ConfigureAwait(false);
             _credentials = credentials;
             _credentialsLoaded = true;
         }
@@ -796,14 +1146,37 @@ public sealed class RivuneApiClient : IDisposable
         }
     }
 
-    private async Task ClearCredentialsAsync(CancellationToken cancellationToken)
+    private async ValueTask<TokenPair?> LoadCredentialsFromStoreAsync(CancellationToken cancellationToken)
     {
-        await _credentialGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var stored = await _credentialStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        if (stored is null)
+        {
+            return null;
+        }
+        if (StringComparer.Ordinal.Equals(stored.Issuer, _credentialIssuer))
+        {
+            return stored.Credentials;
+        }
+
+        return null;
+    }
+
+    private async Task ClearCredentialsIfEpochSuppressingStoreErrorsAsync(long expectedEpoch)
+    {
+        await _credentialGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
+            if (expectedEpoch != _authenticationEpoch)
+            {
+                return;
+            }
+
             try
             {
-                await _credentialStore.ClearAsync(cancellationToken).ConfigureAwait(false);
+                await _credentialStore.ClearAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
             }
             finally
             {
@@ -814,17 +1187,6 @@ public sealed class RivuneApiClient : IDisposable
         finally
         {
             _credentialGate.Release();
-        }
-    }
-
-    private async Task ClearCredentialsSuppressingStoreErrorsAsync()
-    {
-        try
-        {
-            await ClearCredentialsAsync(CancellationToken.None).ConfigureAwait(false);
-        }
-        catch
-        {
         }
     }
 
@@ -919,30 +1281,70 @@ public sealed class RivuneApiClient : IDisposable
             $"Rivune server returned HTTP {statusCode}.");
     }
 
+    private static HttpMessageHandler CreateDefaultHandler() =>
+        new HttpClientHandler { AllowAutoRedirect = false };
+
+    private static HttpClient CreateHttpClient(HttpMessageHandler handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        DisableAutomaticRedirects(handler);
+        return new HttpClient(handler, disposeHandler: true);
+    }
+
+    private static void DisableAutomaticRedirects(HttpMessageHandler handler)
+    {
+        while (true)
+        {
+            switch (handler)
+            {
+                case HttpClientHandler httpClientHandler:
+                    httpClientHandler.AllowAutoRedirect = false;
+                    return;
+                case SocketsHttpHandler socketsHttpHandler:
+                    socketsHttpHandler.AllowAutoRedirect = false;
+                    return;
+                case DelegatingHandler { InnerHandler: not null } delegatingHandler:
+                    handler = delegatingHandler.InnerHandler;
+                    break;
+                default:
+                    return;
+            }
+        }
+    }
+
     private static Uri ParseServerUrl(string value)
     {
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || !IsHttpUrl(uri))
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
         {
             throw new InvalidServerUrlException(value);
         }
 
-        return uri;
+        return ValidateServerUrl(uri);
     }
 
     private static Uri ValidateServerUrl(Uri value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        if (!value.IsAbsoluteUri || !IsHttpUrl(value))
+        if (!value.IsAbsoluteUri || !IsAllowedServerUrl(value))
         {
             throw new InvalidServerUrlException(value.ToString());
         }
 
-        return value;
+        return new Uri(CredentialIssuer.Canonicalize(value), UriKind.Absolute);
     }
 
-    private static bool IsHttpUrl(Uri value) =>
+    private static bool IsAllowedServerUrl(Uri value) =>
         value.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
-        value.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase);
+        (value.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) && value.IsLoopback);
+
+    private void EnsureCredentialDestination(Uri destination)
+    {
+        if (!IsAllowedServerUrl(destination) ||
+            !StringComparer.Ordinal.Equals(CredentialIssuer.Canonicalize(destination), _credentialIssuer))
+        {
+            throw new InvalidServerUrlException(destination.ToString());
+        }
+    }
 
     private static Uri EnsureTrailingSlash(Uri value)
     {

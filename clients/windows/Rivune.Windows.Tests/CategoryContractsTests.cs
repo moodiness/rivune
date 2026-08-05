@@ -150,10 +150,9 @@ public sealed class CategoryContractsTests
     public async Task UpdateCategoryClientUsesPatchRouteAndExactBody()
     {
         var handler = new RecordingHandler();
-        using var httpClient = new HttpClient(handler);
         using var client = new RivuneApiClient(
             new Uri("https://rivune.test"),
-            httpClient,
+            handler,
             new StubCredentialStore(FixtureToken()));
 
         var category = await client.UpdateCategoryAsync(
@@ -218,8 +217,16 @@ public sealed class CategoryContractsTests
 
     private sealed class StubCredentialStore(TokenPair token) : ICredentialStore
     {
-        public ValueTask<TokenPair?> LoadAsync(CancellationToken cancellationToken = default) => ValueTask.FromResult<TokenPair?>(token);
-        public ValueTask SaveAsync(TokenPair credentials, CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
+        public ValueTask<StoredCredentials?> LoadAsync(CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<StoredCredentials?>(new StoredCredentials
+            {
+                Issuer = "https://rivune.test/",
+                Credentials = token,
+            });
+
+        public ValueTask SaveAsync(StoredCredentials credentials, CancellationToken cancellationToken = default) =>
+            ValueTask.CompletedTask;
+
         public ValueTask ClearAsync(CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
     }
 
@@ -232,7 +239,7 @@ public sealed class CategoryContractsTests
             string body;
             if (request.RequestUri!.AbsolutePath == "/.well-known/rivune")
             {
-                body = """{"name":"Rivune","serverVersion":"test","protocolVersion":18,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""";
+                body = """{"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""";
             }
             else
             {

@@ -40,6 +40,17 @@ public sealed class InvalidResponseException : RivuneApiException
     }
 }
 
+public sealed class ResponseTooLargeException : RivuneApiException
+{
+    public ResponseTooLargeException(long maximumBytes)
+        : base($"The Rivune server response exceeded the {maximumBytes}-byte limit.")
+    {
+        MaximumBytes = maximumBytes;
+    }
+
+    public long MaximumBytes { get; }
+}
+
 public sealed class NotAuthenticatedException : RivuneApiException
 {
     public NotAuthenticatedException()

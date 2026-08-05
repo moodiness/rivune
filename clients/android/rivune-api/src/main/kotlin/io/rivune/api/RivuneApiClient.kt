@@ -2,7 +2,10 @@ package io.rivune.api
 
 import android.content.Context
 import java.io.IOException
+import java.nio.charset.StandardCharsets
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -20,6 +23,33 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.ResponseBody
+import okio.Buffer
+
+private fun validatedServerUrl(value: String): HttpUrl {
+    val url = value.toHttpUrlOrNull()?.takeIf(::isCredentialTransportAllowed)
+    return url ?: throw RivuneApiException.InvalidServerUrl(value)
+}
+
+private fun isCredentialTransportAllowed(url: HttpUrl): Boolean =
+    url.encodedUsername.isEmpty() &&
+        url.encodedPassword.isEmpty() &&
+        (url.scheme == "https" || (url.scheme == "http" && isLoopbackHost(url.host)))
+
+private fun isLoopbackHost(host: String): Boolean {
+    if (host == "localhost" || host == "::1") return true
+    val octets = host.split('.')
+    return octets.size == 4 &&
+        octets.first() == "127" &&
+        octets.all { it.toIntOrNull() in 0..255 }
+}
+
+private fun canonicalOrigin(url: HttpUrl): String = HttpUrl.Builder()
+    .scheme(url.scheme)
+    .host(url.host)
+    .port(url.port)
+    .build()
+    .toString()
 
 sealed class RivuneApiException(message: String, cause: Throwable? = null) : Exception(message, cause) {
     class InvalidServerUrl(val value: String) : RivuneApiException("Invalid Rivune server URL: $value")
@@ -27,6 +57,7 @@ sealed class RivuneApiException(message: String, cause: Throwable? = null) : Exc
     class InvalidResponse(cause: Throwable? = null) : RivuneApiException("The Rivune server returned an invalid response", cause)
     class NotAuthenticated : RivuneApiException("Authentication is required")
     class Server(val status: Int, val code: String, override val message: String) : RivuneApiException(message)
+    class ResponseTooLarge : RivuneApiException("The Rivune server response exceeds the 16 MiB limit")
 }
 
 @Serializable
@@ -76,8 +107,8 @@ private data class PlaybackResolveRequest(
 
 class RivuneApiClient(
     serverUrl: String,
-    private val credentialStore: CredentialStore,
-    private val httpClient: OkHttpClient = OkHttpClient(),
+    credentialStore: CredentialStore,
+    httpClient: OkHttpClient = OkHttpClient(),
 ) {
     constructor(serverUrl: String, context: Context, httpClient: OkHttpClient = OkHttpClient()) : this(
         serverUrl = serverUrl,
@@ -85,20 +116,29 @@ class RivuneApiClient(
         httpClient = httpClient,
     )
 
-    private val serverUrl: HttpUrl = serverUrl.toHttpUrlOrNull()?.takeIf { it.scheme == "https" || it.scheme == "http" }
-        ?: throw RivuneApiException.InvalidServerUrl(serverUrl)
+    private val serverUrl: HttpUrl = validatedServerUrl(serverUrl)
+    private val credentialIssuer = canonicalOrigin(this.serverUrl)
     private val json = Json {
         ignoreUnknownKeys = true
     }
     private val requestJson = Json {
         explicitNulls = false
     }
+    private val authenticationMutex = Mutex()
+    private val discoveryMutex = Mutex()
+    private val credentialStore = OrderedCredentialStore(credentialStore)
     private val refreshMutex = Mutex()
+    private val httpClient = httpClient.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
     private var apiBaseUrl: HttpUrl? = null
     private var credentials: TokenPair? = null
     private var credentialsLoaded = false
+    private var authenticationGeneration = 0L
 
-    suspend fun discover(): Discovery {
+    suspend fun discover(): Discovery = discoveryMutex.withLock {
+        val generation = currentAuthenticationGeneration()
         val url = serverUrl.resolve("/.well-known/rivune") ?: throw RivuneApiException.InvalidServerUrl(serverUrl.toString())
         val response: DiscoveryEnvelope = execute(url, method = "GET", body = null, authenticated = false, retryAfterRefresh = false)
         if (response.protocolVersion != RivuneProtocol.VERSION) {
@@ -106,39 +146,77 @@ class RivuneApiClient(
         }
         val interfaceLanguage = response.interfaceLanguage ?: throw RivuneApiException.InvalidResponse()
         val discovery = Discovery(response.name, response.serverVersion, response.protocolVersion, response.apiBaseUrl, response.setupRequired, response.timezone, interfaceLanguage)
-        val resolved = serverUrl.resolve(discovery.apiBaseUrl)?.takeIf { it.scheme == "https" || it.scheme == "http" }
+        val resolved = serverUrl.resolve(discovery.apiBaseUrl)
+            ?.takeIf(::isCredentialTransportAllowed)
+            ?.takeIf { canonicalOrigin(it) == credentialIssuer }
             ?: throw RivuneApiException.InvalidServerUrl(discovery.apiBaseUrl)
-        apiBaseUrl = resolved
-        return discovery
+        authenticationMutex.withLock {
+            requireAuthenticationGeneration(generation)
+            apiBaseUrl = resolved
+        }
+        discovery
     }
 
     suspend fun restoreSession(): Boolean {
-        credentials = credentialStore.load()
-        credentialsLoaded = true
-        return credentials != null
+        loadCredentialsIfNeeded()
+        return authenticationMutex.withLock { credentials != null }
     }
 
     suspend fun login(username: String, password: String, device: LoginDevice): TokenPair {
+        val generation = currentAuthenticationGeneration()
         val result: TokenPair = request(
             path = "auth/login",
             method = "POST",
             body = requestJson.encodeToString(LoginRequest(username, password, device)),
             authenticated = false,
         )
-        setCredentials(result)
+        setCredentials(result, generation)
         return result
     }
 
     suspend fun refreshSession(): TokenPair {
         loadCredentialsIfNeeded()
-        return refreshCredentials(credentials?.accessToken)
+        val snapshot = authenticationSnapshot()
+        return refreshCredentials(snapshot.accessToken, snapshot.generation)
     }
 
     suspend fun logout() {
-        loadCredentialsIfNeeded()
-        if (credentials != null) requestUnit("auth/logout", "POST", authenticated = true)
-        credentials = null
-        credentialStore.clear()
+        val cleanup = withContext(NonCancellable) {
+            authenticationMutex.withLock {
+                authenticationGeneration += 1
+                val generation = authenticationGeneration
+                val capturedCredentials = credentials
+                credentials = null
+                credentialsLoaded = true
+                credentialStore.invalidateAndClear(
+                    issuer = credentialIssuer,
+                    newGeneration = generation,
+                    capturedCredentials = capturedCredentials,
+                )
+            }
+        }
+
+        var remoteError: Exception? = null
+        cleanup.credentials?.accessToken?.let { accessToken ->
+            try {
+                val url = endpoint("auth/logout", emptyMap())
+                executeData(
+                    url = url,
+                    method = "POST",
+                    body = null,
+                    authenticated = false,
+                    retryAfterRefresh = false,
+                    explicitAccessToken = accessToken,
+                )
+            } catch (cause: Exception) {
+                remoteError = cause
+            }
+        }
+        cleanup.error?.let { localError ->
+            remoteError?.let(localError::addSuppressed)
+            throw localError
+        }
+        remoteError?.let { throw it }
     }
 
     suspend fun currentAccount(): Account = request("auth/me", authenticated = true)
@@ -213,13 +291,14 @@ class RivuneApiClient(
     )
 
     suspend fun exchangeDeviceAuthorization(deviceCode: String): TokenPair {
+        val generation = currentAuthenticationGeneration()
         val result: TokenPair = request(
             path = "auth/device-code/token",
             method = "POST",
             body = requestJson.encodeToString(DeviceCodeTokenRequest(deviceCode)),
             authenticated = false,
         )
-        setCredentials(result)
+        setCredentials(result, generation)
         return result
     }
 
@@ -349,9 +428,13 @@ class RivuneApiClient(
     }
 
     private suspend fun endpoint(path: String, query: Map<String, String?>): HttpUrl {
-        if (apiBaseUrl == null) discover()
-        val base = apiBaseUrl ?: throw RivuneApiException.InvalidResponse()
-        return base.newBuilder().apply {
+        var base = authenticationMutex.withLock { apiBaseUrl }
+        if (base == null) {
+            discover()
+            base = authenticationMutex.withLock { apiBaseUrl }
+        }
+        val resolvedBase = base ?: throw RivuneApiException.InvalidResponse()
+        return resolvedBase.newBuilder().apply {
             path.split('/').filter { it.isNotEmpty() }.forEach(::addEncodedPathSegment)
             query.forEach { (name, value) -> if (value != null) addQueryParameter(name, value) }
         }.build()
@@ -378,9 +461,16 @@ class RivuneApiClient(
         body: String?,
         authenticated: Boolean,
         retryAfterRefresh: Boolean,
+        explicitAccessToken: String? = null,
     ): String {
-        if (authenticated) loadCredentialsIfNeeded()
-        val accessToken = if (authenticated) credentials?.accessToken ?: throw RivuneApiException.NotAuthenticated() else null
+        requireServerDestination(url)
+        val authentication = if (authenticated) {
+            loadCredentialsIfNeeded()
+            authenticationSnapshot()
+        } else {
+            null
+        }
+        val accessToken = explicitAccessToken ?: authentication?.accessToken
         val request = Request.Builder()
             .url(url)
             .header("Accept", "application/json")
@@ -397,24 +487,57 @@ class RivuneApiClient(
         } catch (cause: IOException) {
             throw cause
         }
-        response.use {
-            val responseBody = it.body?.string().orEmpty()
-            if (it.code == 401 && authenticated && retryAfterRefresh) {
-                refreshCredentials(accessToken)
-                return executeData(url, method, body, authenticated = true, retryAfterRefresh = false)
-            }
-            if (!it.isSuccessful) throw decodeServerError(it.code, responseBody)
-            return responseBody
+        val responseCode = response.code
+        val responseSuccessful = response.isSuccessful
+        val responseBody = response.use {
+            requireServerDestination(it.request.url)
+            if (responseCode in 300..399) throw decodeServerError(responseCode, "")
+            readResponseBody(it.body)
         }
+        if (responseCode == 401 && authentication != null && retryAfterRefresh) {
+            refreshCredentials(accessToken, authentication.generation)
+            return executeData(url, method, body, authenticated = true, retryAfterRefresh = false)
+        }
+        if (!responseSuccessful) throw decodeServerError(responseCode, responseBody)
+        return responseBody
     }
 
-    private suspend fun refreshCredentials(failedAccessToken: String?): TokenPair = refreshMutex.withLock {
-        if (failedAccessToken != null && credentials?.accessToken != failedAccessToken) {
-            return@withLock credentials ?: throw RivuneApiException.NotAuthenticated()
+    private fun readResponseBody(body: ResponseBody?): String {
+        if (body == null) return ""
+        if (body.contentLength() > MAX_RESPONSE_BODY_BYTES) {
+            throw RivuneApiException.ResponseTooLarge()
         }
-        val refreshToken = credentials?.refreshToken ?: throw RivuneApiException.NotAuthenticated()
-        if (apiBaseUrl == null) discover()
+
+        val source = body.source()
+        val bufferedBody = Buffer()
+        var remaining = MAX_RESPONSE_BODY_BYTES
+        while (remaining > 0L) {
+            val read = source.read(bufferedBody, remaining)
+            if (read == -1L) return bufferedBody.readString(body.contentType()?.charset(StandardCharsets.UTF_8) ?: StandardCharsets.UTF_8)
+            remaining -= read
+        }
+        if (!source.exhausted()) throw RivuneApiException.ResponseTooLarge()
+        return bufferedBody.readString(body.contentType()?.charset(StandardCharsets.UTF_8) ?: StandardCharsets.UTF_8)
+    }
+
+    private suspend fun refreshCredentials(
+        failedAccessToken: String?,
+        expectedGeneration: Long,
+    ): TokenPair = refreshMutex.withLock {
+        val snapshot = authenticationMutex.withLock {
+            requireAuthenticationGeneration(expectedGeneration)
+            AuthenticationSnapshot(
+                expectedGeneration,
+                credentials ?: throw RivuneApiException.NotAuthenticated(),
+            )
+        }
+        if (failedAccessToken != null && snapshot.accessToken != failedAccessToken) {
+            return@withLock snapshot.tokens
+        }
+        val refreshToken = snapshot.tokens.refreshToken
         val url = endpoint("auth/refresh", emptyMap())
+        authenticationMutex.withLock { requireAuthenticationGeneration(expectedGeneration) }
+        requireServerDestination(url)
         try {
             val result: TokenPair = execute(
                 url = url,
@@ -423,25 +546,95 @@ class RivuneApiClient(
                 authenticated = false,
                 retryAfterRefresh = false,
             )
-            setCredentials(result)
+            setCredentials(result, expectedGeneration)
             result
         } catch (cause: Exception) {
-            credentials = null
-            runCatching { credentialStore.clear() }
+            clearCredentialsAfterRefreshFailure(expectedGeneration, refreshToken)
             throw cause
         }
     }
 
-    private suspend fun setCredentials(value: TokenPair) {
-        credentialStore.save(value)
-        credentials = value
-        credentialsLoaded = true
+    private suspend fun setCredentials(value: TokenPair, expectedGeneration: Long) {
+        authenticationMutex.withLock { requireAuthenticationGeneration(expectedGeneration) }
+        val saved = credentialStore.save(
+            StoredCredentials(credentialIssuer, value),
+            expectedGeneration,
+        )
+        if (!saved) throw staleAuthentication()
+        authenticationMutex.withLock {
+            requireAuthenticationGeneration(expectedGeneration)
+            credentials = value
+            credentialsLoaded = true
+        }
     }
 
     private suspend fun loadCredentialsIfNeeded() {
-        if (credentialsLoaded) return
-        credentials = credentialStore.load()
-        credentialsLoaded = true
+        val generation = authenticationMutex.withLock {
+            if (credentialsLoaded) return
+            authenticationGeneration
+        }
+        val stored = credentialStore.load(credentialIssuer, generation)
+        val restored = stored?.takeIf { it.issuer == credentialIssuer }?.tokens
+        if (stored != null && restored == null) {
+            runCatching { credentialStore.clear(credentialIssuer, generation) }
+        }
+        authenticationMutex.withLock {
+            requireAuthenticationGeneration(generation)
+            if (!credentialsLoaded) {
+                credentials = restored
+                credentialsLoaded = true
+            }
+        }
+    }
+
+    private suspend fun clearCredentialsAfterRefreshFailure(
+        expectedGeneration: Long,
+        refreshToken: String,
+    ) {
+        val shouldClear = authenticationMutex.withLock {
+            if (authenticationGeneration != expectedGeneration ||
+                credentials?.refreshToken != refreshToken
+            ) {
+                false
+            } else {
+                credentials = null
+                credentialsLoaded = true
+                true
+            }
+        }
+        if (shouldClear) runCatching { credentialStore.clear(credentialIssuer, expectedGeneration) }
+    }
+
+    private suspend fun currentAuthenticationGeneration(): Long =
+        authenticationMutex.withLock { authenticationGeneration }
+
+    private suspend fun authenticationSnapshot(): AuthenticationSnapshot =
+        authenticationMutex.withLock {
+            AuthenticationSnapshot(
+                generation = authenticationGeneration,
+                tokens = credentials ?: throw RivuneApiException.NotAuthenticated(),
+            )
+        }
+
+    private fun requireAuthenticationGeneration(expectedGeneration: Long) {
+        if (authenticationGeneration != expectedGeneration) throw staleAuthentication()
+    }
+
+    private fun staleAuthentication() =
+        CancellationException("Authentication state changed")
+
+    private data class AuthenticationSnapshot(
+        val generation: Long,
+        val tokens: TokenPair,
+    ) {
+        val accessToken: String
+            get() = tokens.accessToken
+    }
+
+    private fun requireServerDestination(url: HttpUrl) {
+        if (!isCredentialTransportAllowed(url) || canonicalOrigin(url) != credentialIssuer) {
+            throw RivuneApiException.InvalidServerUrl(url.toString())
+        }
     }
 
     private fun decodeServerError(status: Int, body: String): RivuneApiException.Server {
@@ -485,5 +678,6 @@ class RivuneApiClient(
     }
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+        const val MAX_RESPONSE_BODY_BYTES = 16L * 1024L * 1024L
     }
 }

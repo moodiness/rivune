@@ -11,7 +11,7 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 
 object RivuneProtocol {
-    const val VERSION: Int = 18
+    const val VERSION: Int = 19
 }
 
 object UUIDSerializer : KSerializer<UUID> {
@@ -256,7 +256,7 @@ data class Profile(
 data class ProfileAvatar(val kind: String, val presetId: String? = null, val url: String)
 
 @Serializable
-data class ProfileSelection(val profile: Profile, val expiresAt: String)
+data class ProfileSelection(val profile: Profile, val expiresAt: String, val profileContext: String)
 
 @Serializable
 data class CategoryOrderRequest(

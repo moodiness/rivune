@@ -5,7 +5,7 @@ namespace Rivune.Windows;
 
 public static class RivuneProtocol
 {
-    public const int Version = 18;
+    public const int Version = 19;
 }
 
 public sealed record Discovery
@@ -262,6 +262,7 @@ public sealed record ProfileSelection
 {
     public required Profile Profile { get; init; }
     public required string ExpiresAt { get; init; }
+    public required string ProfileContext { get; init; }
 }
 
 public sealed record CategoryOrderRequest

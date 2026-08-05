@@ -171,14 +171,15 @@ class CategoryContractsTest {
     fun updateCategoryClientUsesPatchRouteAndExactBody() = runBlocking {
         val server = MockWebServer()
         server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(
-            """{"name":"Rivune","serverVersion":"test","protocolVersion":18,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
+            """{"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
         ))
         server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(
             """{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Studio","description":null,"color":null,"icon":"briefcase","position":0,"isDefault":false,"profileCount":0,"deviceCount":0,"createdAt":"2026-08-03T10:00:00Z","updatedAt":"2026-08-03T11:00:00Z"}""",
         ))
         server.start()
         try {
-            val client = RivuneApiClient(server.url("/").toString(), StubCredentialStore(fixtureToken()))
+            val serverUrl = server.url("/").toString()
+            val client = RivuneApiClient(serverUrl, StubCredentialStore(serverUrl, fixtureToken()))
             val category = client.updateCategory(
                 categoryId,
                 CategoryUpdateRequest(description = PatchField.Null, icon = PatchField.Value("briefcase"), isDefault = true),
@@ -295,8 +296,10 @@ class CategoryContractsTest {
     }
 }
 
-private class StubCredentialStore(private val token: TokenPair) : CredentialStore {
-    override suspend fun load(): TokenPair = token
-    override suspend fun save(credentials: TokenPair) = Unit
-    override suspend fun clear() = Unit
+private class StubCredentialStore(issuer: String, token: TokenPair) : CredentialStore {
+    private val credentials = StoredCredentials(issuer, token)
+
+    override suspend fun load(issuer: String): StoredCredentials = credentials
+    override suspend fun save(credentials: StoredCredentials) = Unit
+    override suspend fun clear(issuer: String) = Unit
 }

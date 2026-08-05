@@ -8,18 +8,292 @@ public protocol HTTPTransport: Sendable {
 }
 
 public struct URLSessionTransport: HTTPTransport {
-    private let session: URLSession
+    public static let maximumResponseBodyBytes = 16 * 1024 * 1024
+
+    let loader: BoundedURLSessionLoader
 
     public init(session: URLSession = .shared) {
-        self.session = session
+        self.loader = BoundedURLSessionLoader(
+            configuration: session.configuration,
+            authenticationDelegate: session.delegate,
+            delegateQueue: session.delegateQueue,
+            maximumResponseBodyBytes: Self.maximumResponseBodyBytes
+        )
     }
 
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse else {
-            throw RivuneAPIError.invalidResponse
+        try await loader.data(for: request)
+    }
+}
+
+final class BoundedURLSessionLoader: @unchecked Sendable {
+    private struct RequestState {
+        let id: UUID
+        let task: URLSessionDataTask
+        let continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>
+        var response: HTTPURLResponse?
+        var data = Data()
+    }
+
+    private let maximumResponseBodyBytes: Int
+    let delegate: BoundedURLSessionDelegate
+    private let lock = NSLock()
+    private var states: [Int: RequestState] = [:]
+    private var taskIdentifiers: [UUID: Int] = [:]
+    private var cancelledRequests: Set<UUID> = []
+    private var session: URLSession!
+
+    init(
+        configuration: URLSessionConfiguration,
+        authenticationDelegate: (any URLSessionDelegate)?,
+        delegateQueue: OperationQueue,
+        maximumResponseBodyBytes: Int
+    ) {
+        self.maximumResponseBodyBytes = maximumResponseBodyBytes
+        self.delegate = BoundedURLSessionDelegate(authenticationDelegate: authenticationDelegate)
+        delegate.loader = self
+        session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: delegateQueue)
+    }
+
+    deinit {
+        session.invalidateAndCancel()
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                let task = session.dataTask(with: request)
+                let state = RequestState(id: id, task: task, continuation: continuation)
+
+                lock.lock()
+                let wasCancelled = cancelledRequests.remove(id) != nil
+                if !wasCancelled {
+                    states[task.taskIdentifier] = state
+                    taskIdentifiers[id] = task.taskIdentifier
+                }
+                lock.unlock()
+
+                if wasCancelled {
+                    task.cancel()
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    task.resume()
+                }
+            }
+        } onCancel: {
+            self.cancel(id: id)
         }
-        return (data, response)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let response = response as? HTTPURLResponse else {
+            finish(taskIdentifier: dataTask.taskIdentifier, result: .failure(RivuneAPIError.invalidResponse))
+            completionHandler(.cancel)
+            return
+        }
+        let declaredLength = response.expectedContentLength
+        guard declaredLength < 0 || declaredLength <= Int64(maximumResponseBodyBytes) else {
+            finish(
+                taskIdentifier: dataTask.taskIdentifier,
+                result: .failure(RivuneAPIError.responseTooLarge(maximumBytes: maximumResponseBodyBytes))
+            )
+            completionHandler(.cancel)
+            return
+        }
+
+        lock.lock()
+        if var state = states[dataTask.taskIdentifier] {
+            state.response = response
+            state.data.reserveCapacity(
+                declaredLength >= 0
+                    ? min(Int(declaredLength), maximumResponseBodyBytes)
+                    : min(64 * 1024, maximumResponseBodyBytes)
+            )
+            states[dataTask.taskIdentifier] = state
+        }
+        lock.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        var oversizedContinuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+
+        lock.lock()
+        if var state = states[dataTask.taskIdentifier] {
+            if data.count > maximumResponseBodyBytes - state.data.count {
+                states.removeValue(forKey: dataTask.taskIdentifier)
+                taskIdentifiers.removeValue(forKey: state.id)
+                oversizedContinuation = state.continuation
+            } else {
+                state.data.append(data)
+                states[dataTask.taskIdentifier] = state
+            }
+        }
+        lock.unlock()
+
+        if let oversizedContinuation {
+            dataTask.cancel()
+            oversizedContinuation.resume(
+                throwing: RivuneAPIError.responseTooLarge(maximumBytes: maximumResponseBodyBytes)
+            )
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            finish(taskIdentifier: task.taskIdentifier, result: .failure(error))
+            return
+        }
+
+        lock.lock()
+        let state = states[task.taskIdentifier]
+        lock.unlock()
+        guard let state, let response = state.response else {
+            finish(taskIdentifier: task.taskIdentifier, result: .failure(RivuneAPIError.invalidResponse))
+            return
+        }
+        finish(taskIdentifier: task.taskIdentifier, result: .success((state.data, response)))
+    }
+
+    private func cancel(id: UUID) {
+        var state: RequestState?
+        lock.lock()
+        if let taskIdentifier = taskIdentifiers.removeValue(forKey: id) {
+            state = states.removeValue(forKey: taskIdentifier)
+        } else {
+            cancelledRequests.insert(id)
+        }
+        lock.unlock()
+
+        state?.task.cancel()
+        state?.continuation.resume(throwing: CancellationError())
+    }
+
+    private func finish(
+        taskIdentifier: Int,
+        result: Result<(Data, HTTPURLResponse), Error>
+    ) {
+        lock.lock()
+        let state = states.removeValue(forKey: taskIdentifier)
+        if let state {
+            taskIdentifiers.removeValue(forKey: state.id)
+        }
+        lock.unlock()
+        state?.continuation.resume(with: result)
+    }
+}
+
+final class BoundedURLSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    weak var loader: BoundedURLSessionLoader?
+    let authenticationDelegate: (any URLSessionDelegate)?
+
+    init(authenticationDelegate: (any URLSessionDelegate)?) {
+        self.authenticationDelegate = authenticationDelegate
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+#if canImport(ObjectiveC)
+        if let authenticationDelegate,
+           authenticationDelegate.responds(
+               to: #selector(URLSessionDelegate.urlSession(_:didReceive:completionHandler:))
+           ) {
+            authenticationDelegate.urlSession?(
+                session,
+                didReceive: challenge,
+                completionHandler: completionHandler
+            )
+            return
+        }
+#else
+        if let authenticationDelegate {
+            authenticationDelegate.urlSession(
+                session,
+                didReceive: challenge,
+                completionHandler: completionHandler
+            )
+            return
+        }
+#endif
+        completionHandler(.performDefaultHandling, nil)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+#if canImport(ObjectiveC)
+        if let authenticationDelegate = authenticationDelegate as? any URLSessionTaskDelegate,
+           authenticationDelegate.responds(
+               to: #selector(URLSessionTaskDelegate.urlSession(_:task:didReceive:completionHandler:))
+           ) {
+            authenticationDelegate.urlSession?(
+                session,
+                task: task,
+                didReceive: challenge,
+                completionHandler: completionHandler
+            )
+            return
+        }
+#else
+        if let authenticationDelegate = authenticationDelegate as? any URLSessionTaskDelegate {
+            authenticationDelegate.urlSession(
+                session,
+                task: task,
+                didReceive: challenge,
+                completionHandler: completionHandler
+            )
+            return
+        }
+#endif
+        completionHandler(.performDefaultHandling, nil)
+    }
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let loader else {
+            completionHandler(.cancel)
+            return
+        }
+        loader.urlSession(
+            session,
+            dataTask: dataTask,
+            didReceive: response,
+            completionHandler: completionHandler
+        )
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        loader?.urlSession(session, dataTask: dataTask, didReceive: data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        loader?.urlSession(session, task: task, didCompleteWithError: error)
     }
 }
 
@@ -47,6 +321,7 @@ public enum RivuneAPIError: Error, LocalizedError, Sendable {
     case invalidServerURL(String)
     case invalidResponse
     case notAuthenticated
+    case responseTooLarge(maximumBytes: Int)
     case server(status: Int, code: String, message: String)
 
     public var errorDescription: String? {
@@ -59,6 +334,8 @@ public enum RivuneAPIError: Error, LocalizedError, Sendable {
             return "The Rivune server returned an invalid response."
         case .notAuthenticated:
             return "Authentication is required."
+        case .responseTooLarge(let maximumBytes):
+            return "The Rivune server response exceeded the \(maximumBytes)-byte limit."
         case .server(_, _, let message):
             return message
         }
@@ -84,32 +361,40 @@ private struct PlaybackResolveRequest: Encodable {
     let startSeconds: Int?
 }
 
+private struct RefreshOperation {
+    let generation: UInt64
+    let refreshToken: String
+    let task: Task<TokenPair, Error>
+}
+
 public actor RivuneAPIClient {
     private let serverURL: URL
     private let transport: any HTTPTransport
-    private let credentialStore: any CredentialStore
+    private let credentialStore: OrderedCredentialStore
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private var apiBaseURL: URL?
     private var credentials: TokenPair?
     private var loadedCredentials = false
-    private var refreshTask: Task<TokenPair, Error>?
+    private var authenticationGeneration: UInt64 = 0
+    private var refreshOperation: RefreshOperation?
+    private var pendingAuthenticationCancellations: [UUID: @Sendable () -> Void] = [:]
 
     public init(
         serverURL: URL,
         transport: any HTTPTransport = URLSessionTransport(),
         credentialStore: any CredentialStore
-    ) {
-        self.serverURL = serverURL
+    ) throws {
+        self.serverURL = try Self.canonicalServerOrigin(serverURL)
         self.transport = transport
-        self.credentialStore = credentialStore
+        self.credentialStore = OrderedCredentialStore(store: credentialStore)
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
     }
 
 #if canImport(Security)
-    public init(serverURL: URL, transport: any HTTPTransport = URLSessionTransport()) {
-        self.init(serverURL: serverURL, transport: transport, credentialStore: KeychainCredentialStore())
+    public init(serverURL: URL, transport: any HTTPTransport = URLSessionTransport()) throws {
+        try self.init(serverURL: serverURL, transport: transport, credentialStore: KeychainCredentialStore())
     }
 #endif
 
@@ -127,7 +412,7 @@ public actor RivuneAPIClient {
         }
         let discovery = Discovery(name: response.name, serverVersion: response.serverVersion, protocolVersion: response.protocolVersion, apiBaseUrl: response.apiBaseUrl, setupRequired: response.setupRequired, timezone: response.timezone, interfaceLanguage: interfaceLanguage)
         guard let resolved = URL(string: discovery.apiBaseUrl, relativeTo: serverURL)?.absoluteURL,
-              let scheme = resolved.scheme, scheme == "https" || scheme == "http" else {
+              try Self.canonicalServerOrigin(resolved) == serverURL else {
             throw RivuneAPIError.invalidServerURL(discovery.apiBaseUrl)
         }
         apiBaseURL = resolved
@@ -136,17 +421,35 @@ public actor RivuneAPIClient {
 
     @discardableResult
     public func restoreSession() async throws -> Bool {
-        credentials = try await credentialStore.load()
-        loadedCredentials = true
-        return credentials != nil
+        let generation = try await beginCredentialReplacement(preserveStoredCredentials: true)
+        return try await runAuthenticationOperation {
+            let restored = try await self.credentialStore.load(
+                for: self.serverURL,
+                generation: generation
+            )
+            try Task.checkCancellation()
+            let currentGeneration = await self.authenticationGeneration
+            guard generation == currentGeneration else { throw CancellationError() }
+            await self.installRestoredCredentials(restored)
+            return restored != nil
+        }
     }
 
     @discardableResult
     public func login(username: String, password: String, device: LoginDevice) async throws -> TokenPair {
-        let payload = LoginRequest(username: username, password: password, device: device)
-        let tokens: TokenPair = try await request("auth/login", method: "POST", body: payload, authenticated: false)
-        try await setCredentials(tokens)
-        return tokens
+        let generation = try await beginCredentialReplacement(preserveStoredCredentials: false)
+        return try await runAuthenticationOperation {
+            let payload = LoginRequest(username: username, password: password, device: device)
+            let tokens: TokenPair = try await self.request(
+                "auth/login",
+                method: "POST",
+                body: payload,
+                authenticated: false
+            )
+            try Task.checkCancellation()
+            try await self.setCredentials(tokens, generation: generation)
+            return tokens
+        }
     }
 
     @discardableResult
@@ -156,12 +459,41 @@ public actor RivuneAPIClient {
     }
 
     public func logout() async throws {
-        try await loadCredentialsIfNeeded()
-        if credentials != nil {
-            _ = try await requestData("auth/logout", method: "POST", body: Optional<Data>.none, authenticated: true)
-        }
+        authenticationGeneration += 1
+        let generation = authenticationGeneration
+        let capturedCredentials = credentials
         credentials = nil
-        try await credentialStore.clear()
+        loadedCredentials = true
+        refreshOperation?.task.cancel()
+        refreshOperation = nil
+        for cancel in pendingAuthenticationCancellations.values {
+            cancel()
+        }
+        pendingAuthenticationCancellations.removeAll()
+
+        let cleanup = await credentialStore.invalidateAndClear(
+            for: serverURL,
+            generation: generation,
+            capturedCredentials: capturedCredentials
+        )
+
+        var remoteError: Error?
+        if let accessToken = cleanup.credentials?.accessToken {
+            do {
+                _ = try await requestData(
+                    "auth/logout",
+                    method: "POST",
+                    body: Optional<Data>.none,
+                    authorizationToken: accessToken,
+                    retryAfterRefresh: false
+                )
+            } catch {
+                remoteError = error
+            }
+        }
+
+        if let localError = cleanup.error { throw localError }
+        if let remoteError { throw remoteError }
     }
 
     public func currentAccount() async throws -> Account {
@@ -247,14 +579,18 @@ public actor RivuneAPIClient {
 
     @discardableResult
     public func exchangeDeviceAuthorization(deviceCode: String) async throws -> TokenPair {
-        let tokens: TokenPair = try await request(
-            "auth/device-code/token",
-            method: "POST",
-            body: DeviceCodeTokenRequest(deviceCode: deviceCode),
-            authenticated: false
-        )
-        try await setCredentials(tokens)
-        return tokens
+        let generation = try await beginCredentialReplacement(preserveStoredCredentials: false)
+        return try await runAuthenticationOperation {
+            let tokens: TokenPair = try await self.request(
+                "auth/device-code/token",
+                method: "POST",
+                body: DeviceCodeTokenRequest(deviceCode: deviceCode),
+                authenticated: false
+            )
+            try Task.checkCancellation()
+            try await self.setCredentials(tokens, generation: generation)
+            return tokens
+        }
     }
 
     public func approveDeviceAuthorization(_ input: DeviceCodeApprovalRequest) async throws {
@@ -369,6 +705,48 @@ public actor RivuneAPIClient {
     private func requestData(_ path: String, method: String, query: [URLQueryItem] = [], body: Data?, authenticated: Bool) async throws -> Data {
         if apiBaseURL == nil { _ = try await discover() }
         if authenticated { try await loadCredentialsIfNeeded() }
+        let authorizationToken: String?
+        if authenticated {
+            guard let accessToken = credentials?.accessToken else { throw RivuneAPIError.notAuthenticated }
+            authorizationToken = accessToken
+        } else {
+            authorizationToken = nil
+        }
+        let requestGeneration = authenticated ? authenticationGeneration : nil
+        let url = try resolvedAPIURL(path: path, query: query)
+        return try await perform(
+            url: url,
+            method: method,
+            body: body,
+            authorizationToken: authorizationToken,
+            retryAfterRefresh: authenticated,
+            expectedAuthenticationGeneration: requestGeneration,
+            credentialBearing: authenticated || Self.isCredentialBearingURL(url)
+        )
+    }
+
+    private func requestData(
+        _ path: String,
+        method: String,
+        query: [URLQueryItem] = [],
+        body: Data?,
+        authorizationToken: String,
+        retryAfterRefresh: Bool
+    ) async throws -> Data {
+        if apiBaseURL == nil { _ = try await discover() }
+        let url = try resolvedAPIURL(path: path, query: query)
+        return try await perform(
+            url: url,
+            method: method,
+            body: body,
+            authorizationToken: authorizationToken,
+            retryAfterRefresh: retryAfterRefresh,
+            expectedAuthenticationGeneration: nil,
+            credentialBearing: true
+        )
+    }
+
+    private func resolvedAPIURL(path: String, query: [URLQueryItem]) throws -> URL {
         guard let base = apiBaseURL else { throw RivuneAPIError.invalidResponse }
         var url = base
         for component in path.split(separator: "/") { url.appendPathComponent(String(component)) }
@@ -378,84 +756,278 @@ public actor RivuneAPIClient {
             guard let composed = parts?.url else { throw RivuneAPIError.invalidServerURL(url.absoluteString) }
             url = composed
         }
-        return try await perform(url: url, method: method, body: body, authenticated: authenticated, retryAfterRefresh: authenticated)
+        return url
     }
 
     private func perform<Response: Decodable>(url: URL, method: String, body: Data?, authenticated: Bool, retryAfterRefresh: Bool) async throws -> Response {
-        let data = try await perform(url: url, method: method, body: body, authenticated: authenticated, retryAfterRefresh: retryAfterRefresh)
+        if authenticated { try await loadCredentialsIfNeeded() }
+        let authorizationToken: String?
+        if authenticated {
+            guard let accessToken = credentials?.accessToken else { throw RivuneAPIError.notAuthenticated }
+            authorizationToken = accessToken
+        } else {
+            authorizationToken = nil
+        }
+        let requestGeneration = authenticated ? authenticationGeneration : nil
+        let data = try await perform(
+            url: url,
+            method: method,
+            body: body,
+            authorizationToken: authorizationToken,
+            retryAfterRefresh: retryAfterRefresh,
+            expectedAuthenticationGeneration: requestGeneration,
+            credentialBearing: authenticated || Self.isCredentialBearingURL(url)
+        )
         do { return try decoder.decode(Response.self, from: data) }
         catch { throw RivuneAPIError.invalidResponse }
     }
 
-    private func perform(url: URL, method: String, body: Data?, authenticated: Bool, retryAfterRefresh: Bool) async throws -> Data {
+    private func perform(
+        url: URL,
+        method: String,
+        body: Data?,
+        authorizationToken: String?,
+        retryAfterRefresh: Bool,
+        expectedAuthenticationGeneration: UInt64?,
+        credentialBearing: Bool
+    ) async throws -> Data {
+        guard try Self.canonicalServerOrigin(url) == serverURL else {
+            throw RivuneAPIError.invalidServerURL(url.absoluteString)
+        }
         var request = URLRequest(url: url)
         request.httpMethod = method
+        if credentialBearing && url.scheme?.lowercased() != "https" {
+            throw RivuneAPIError.invalidServerURL(url.absoluteString)
+        }
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let requestAccessToken: String?
-        if authenticated {
-            guard let token = credentials?.accessToken else { throw RivuneAPIError.notAuthenticated }
-            requestAccessToken = token
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        } else {
-            requestAccessToken = nil
+        if let authorizationToken {
+            request.setValue("Bearer \(authorizationToken)", forHTTPHeaderField: "Authorization")
         }
 
-        let (data, response) = try await transport.data(for: request)
-        if response.statusCode == 401, authenticated, retryAfterRefresh {
-            _ = try await refreshCredentials(failedAccessToken: requestAccessToken)
-            return try await perform(url: url, method: method, body: body, authenticated: true, retryAfterRefresh: false)
+        let transportRequest = request
+        let result: (Data, HTTPURLResponse)
+        do {
+            if expectedAuthenticationGeneration != nil {
+                result = try await runAuthenticationOperation {
+                    try await self.transport.data(for: transportRequest)
+                }
+            } else {
+                result = try await transport.data(for: request)
+            }
+        } catch {
+            try ensureAuthenticationGeneration(expectedAuthenticationGeneration)
+            throw error
         }
-        guard (200..<300).contains(response.statusCode) else { throw decodeServerError(status: response.statusCode, data: data) }
+        try ensureAuthenticationGeneration(expectedAuthenticationGeneration)
+        let (data, response) = result
+        try Self.enforceResponseLimit(data: data, response: response)
+        if response.statusCode == 401, let authorizationToken, retryAfterRefresh {
+            _ = try await refreshCredentials(failedAccessToken: authorizationToken)
+            try ensureAuthenticationGeneration(expectedAuthenticationGeneration)
+            guard let refreshedAccessToken = credentials?.accessToken else {
+                throw RivuneAPIError.notAuthenticated
+            }
+            return try await perform(
+                url: url,
+                method: method,
+                body: body,
+                authorizationToken: refreshedAccessToken,
+                retryAfterRefresh: false,
+                expectedAuthenticationGeneration: expectedAuthenticationGeneration,
+                credentialBearing: true
+            )
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            throw decodeServerError(status: response.statusCode, data: data)
+        }
         return data
+    }
+
+    private func ensureAuthenticationGeneration(_ expected: UInt64?) throws {
+        if let expected, expected != authenticationGeneration {
+            throw CancellationError()
+        }
+    }
+
+    private static func isCredentialBearingURL(_ url: URL) -> Bool {
+        let path = url.path
+        return path.hasSuffix("/auth/login") ||
+            path.hasSuffix("/auth/refresh") ||
+            path.hasSuffix("/auth/device-code/token")
     }
 
     private func refreshCredentials(failedAccessToken: String? = nil) async throws -> TokenPair {
         if let failedAccessToken, let current = credentials, current.accessToken != failedAccessToken {
             return current
         }
-        if let refreshTask {
-            return try await refreshTask.value
+        let generation = authenticationGeneration
+        if let refreshOperation, refreshOperation.generation == generation {
+            return try await refreshOperation.task.value
         }
         guard let refreshToken = credentials?.refreshToken else { throw RivuneAPIError.notAuthenticated }
         let task = Task<TokenPair, Error> {
-            try await self.issueRefresh(refreshToken: refreshToken)
+            try await self.issueRefresh(refreshToken: refreshToken, generation: generation)
         }
-        refreshTask = task
+        refreshOperation = RefreshOperation(
+            generation: generation,
+            refreshToken: refreshToken,
+            task: task
+        )
         do {
             let tokens = try await task.value
-            refreshTask = nil
+            if refreshOperation?.generation == generation,
+               refreshOperation?.refreshToken == refreshToken {
+                refreshOperation = nil
+            }
             return tokens
         } catch {
-            refreshTask = nil
-            credentials = nil
-            try? await credentialStore.clear()
+            if refreshOperation?.generation == generation,
+               refreshOperation?.refreshToken == refreshToken {
+                refreshOperation = nil
+            }
+            if generation == authenticationGeneration,
+               credentials?.refreshToken == refreshToken {
+                credentials = nil
+                loadedCredentials = true
+                _ = try? await credentialStore.clear(for: serverURL, generation: generation)
+            }
             throw error
         }
     }
 
-    private func issueRefresh(refreshToken: String) async throws -> TokenPair {
+    private func issueRefresh(refreshToken: String, generation: UInt64) async throws -> TokenPair {
         if apiBaseURL == nil { _ = try await discover() }
         guard var url = apiBaseURL else { throw RivuneAPIError.invalidResponse }
         url.appendPathComponent("auth")
         url.appendPathComponent("refresh")
         let data = try encoder.encode(RefreshRequest(refreshToken: refreshToken))
-        let tokens: TokenPair = try await perform(url: url, method: "POST", body: data, authenticated: false, retryAfterRefresh: false)
-        try await setCredentials(tokens)
+        let tokens: TokenPair = try await perform(
+            url: url,
+            method: "POST",
+            body: data,
+            authenticated: false,
+            retryAfterRefresh: false
+        )
+        try await setCredentials(tokens, generation: generation)
         return tokens
     }
 
-    private func setCredentials(_ value: TokenPair) async throws {
-        try await credentialStore.save(value)
+    private func setCredentials(_ value: TokenPair, generation: UInt64) async throws {
+        guard generation == authenticationGeneration else { throw CancellationError() }
+        let saved = try await credentialStore.save(value, for: serverURL, generation: generation)
+        guard saved, generation == authenticationGeneration else { throw CancellationError() }
         credentials = value
+        loadedCredentials = true
+    }
+
+    private func beginCredentialReplacement(preserveStoredCredentials: Bool) async throws -> UInt64 {
+        authenticationGeneration += 1
+        let generation = authenticationGeneration
+        let capturedCredentials = credentials
+        credentials = nil
+        loadedCredentials = !preserveStoredCredentials
+        refreshOperation?.task.cancel()
+        refreshOperation = nil
+        for cancel in pendingAuthenticationCancellations.values {
+            cancel()
+        }
+        pendingAuthenticationCancellations.removeAll()
+
+        if preserveStoredCredentials {
+            await credentialStore.advance(to: generation)
+        } else {
+            let cleanup = await credentialStore.invalidateAndClear(
+                for: serverURL,
+                generation: generation,
+                capturedCredentials: capturedCredentials
+            )
+            guard generation == authenticationGeneration else { throw CancellationError() }
+            if let error = cleanup.error { throw error }
+        }
+        return generation
+    }
+
+    private func runAuthenticationOperation<Value: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        let id = UUID()
+        let task = Task { try await operation() }
+        pendingAuthenticationCancellations[id] = { task.cancel() }
+        defer { pendingAuthenticationCancellations.removeValue(forKey: id) }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private func installRestoredCredentials(_ restored: TokenPair?) {
+        credentials = restored
         loadedCredentials = true
     }
 
     private func loadCredentialsIfNeeded() async throws {
         guard !loadedCredentials else { return }
-        credentials = try await credentialStore.load()
+        let generation = authenticationGeneration
+        let restored = try await credentialStore.load(for: serverURL, generation: generation)
+        guard generation == authenticationGeneration else { throw CancellationError() }
+        credentials = restored
         loadedCredentials = true
+    }
+
+    private static func enforceResponseLimit(data: Data, response: HTTPURLResponse) throws {
+        let maximumBytes = URLSessionTransport.maximumResponseBodyBytes
+        if response.expectedContentLength > Int64(maximumBytes) || data.count > maximumBytes {
+            throw RivuneAPIError.responseTooLarge(maximumBytes: maximumBytes)
+        }
+    }
+    private static func canonicalServerOrigin(_ value: URL) throws -> URL {
+        guard let components = URLComponents(url: value, resolvingAgainstBaseURL: false),
+              let rawScheme = components.scheme,
+              let rawHost = components.host,
+              components.user == nil,
+              components.password == nil else {
+            throw RivuneAPIError.invalidServerURL(value.absoluteString)
+        }
+
+        let scheme = rawScheme.lowercased()
+        let host = rawHost.lowercased()
+        guard scheme == "https" || (scheme == "http" && isLoopback(host)) else {
+            throw RivuneAPIError.invalidServerURL(value.absoluteString)
+        }
+
+        var canonical = URLComponents()
+        canonical.scheme = scheme
+        canonical.host = host
+        if let port = components.port,
+           !((scheme == "https" && port == 443) || (scheme == "http" && port == 80)) {
+            canonical.port = port
+        }
+        guard let origin = canonical.url else {
+            throw RivuneAPIError.invalidServerURL(value.absoluteString)
+        }
+        return origin
+    }
+
+    private static func isLoopback(_ rawHost: String) -> Bool {
+        let host = rawHost
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .lowercased()
+        if host == "localhost" || host == "localhost." || host == "::1" {
+            return true
+        }
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4,
+              octets.first == "127",
+              octets.allSatisfy({ octet in
+                  guard let value = Int(octet) else { return false }
+                  return value >= 0 && value <= 255
+              }) else {
+            return false
+        }
+        return true
     }
 
     private func decodeServerError(status: Int, data: Data) -> RivuneAPIError {

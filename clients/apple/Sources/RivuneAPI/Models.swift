@@ -1,7 +1,7 @@
 import Foundation
 
 public enum RivuneProtocol {
-    public static let version = 18
+    public static let version = 19
 }
 
 public struct Discovery: Codable, Sendable, Equatable {
@@ -582,6 +582,7 @@ public struct ProfileAvatar: Codable, Sendable, Equatable {
 public struct ProfileSelection: Codable, Sendable, Equatable {
     public let profile: Profile
     public let expiresAt: String
+    public let profileContext: String
 }
 
 public struct CategoryOrderRequest: Codable, Sendable, Equatable {

@@ -83,10 +83,11 @@ final class CategoryContractsTests: XCTestCase {
 
     func testUpdateCategoryClientUsesPatchRouteAndExactBody() async throws {
         let transport = RecordingCategoryTransport()
-        let client = RivuneAPIClient(
-            serverURL: URL(string: "https://rivune.test")!,
+        let serverURL = URL(string: "https://rivune.test")!
+        let client = try RivuneAPIClient(
+            serverURL: serverURL,
             transport: transport,
-            credentialStore: StubCredentialStore(token: fixtureToken())
+            credentialStore: StubCredentialStore(issuer: serverURL, token: fixtureToken())
         )
         let category = try await client.updateCategory(
             id: categoryId,
@@ -122,12 +123,15 @@ final class CategoryContractsTests: XCTestCase {
 }
 
 private struct StubCredentialStore: CredentialStore {
+    let issuer: URL
     let token: TokenPair
 
-    func load() async throws -> TokenPair? { token }
+    func load(for requestedIssuer: URL) async throws -> TokenPair? {
+        requestedIssuer == issuer ? token : nil
+    }
 
-    func save(_ credentials: TokenPair) async throws {}
-    func clear() async throws {}
+    func save(_ credentials: TokenPair, for issuer: URL) async throws {}
+    func clear(for issuer: URL) async throws {}
 }
 
 private final class RecordingCategoryTransport: HTTPTransport, @unchecked Sendable {
@@ -141,7 +145,7 @@ private final class RecordingCategoryTransport: HTTPTransport, @unchecked Sendab
         let body: Data
         if request.url?.path == "/.well-known/rivune" {
             body = Data("""
-            {"name":"Rivune","serverVersion":"test","protocolVersion":18,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+            {"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
             """.utf8)
         } else {
             body = Data("""
