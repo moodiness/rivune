@@ -1,0 +1,222 @@
+name: Publish release
+
+on:
+  workflow_run:
+    workflows:
+      - Release candidate CI
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+env:
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
+jobs:
+  authorize:
+    name: Authorize tested release candidate
+    runs-on: ubuntu-latest
+    outputs:
+      authorized: ${{ steps.authorize.outputs.authorized }}
+      sha: ${{ steps.authorize.outputs.sha }}
+      short_sha: ${{ steps.authorize.outputs.short_sha }}
+      stable: ${{ steps.authorize.outputs.stable }}
+      tag: ${{ steps.authorize.outputs.tag }}
+    steps:
+      - name: Verify release policy and candidate provenance
+        id: authorize
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RELEASE_EVENT: ${{ github.event.workflow_run.event }}
+          RELEASE_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          RELEASE_PATH: ${{ github.event.workflow_run.path }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_TITLE: ${{ github.event.workflow_run.display_title }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          candidate_metadata_is_valid() {
+            local tag="$1" title="$2" event="$3" conclusion="$4" path="$5" head_repository="$6" repository="$7" sha="$8"
+            local numeric='0|[1-9][0-9]*'
+            local prerelease_identifier='0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*'
+            local semver="^v(${numeric})\.(${numeric})\.(${numeric})(-(${prerelease_identifier})(\.(${prerelease_identifier}))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"
+            [[ "${title}" == "Release candidate ${tag}" ]] &&
+              [[ "${event}" == push ]] &&
+              [[ "${conclusion}" == success ]] &&
+              [[ "${path}" == .github/workflows/release-candidate.yml ]] &&
+              [[ "${head_repository}" == "${repository}" ]] &&
+              [[ "${tag}" =~ ${semver} ]] &&
+              [[ "${sha}" =~ ^[0-9a-f]{40}$ ]]
+          }
+
+          same_approved_commit() {
+            local run_sha="$1" tag_sha="$2" main_sha="$3"
+            [[ "${run_sha}" == "${tag_sha}" && "${run_sha}" == "${main_sha}" ]]
+          }
+
+          # Behavioral policy checks use the same predicates as live authorization.
+          fixture_sha=0123456789abcdef0123456789abcdef01234567
+          candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" push success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
+          ! candidate_metadata_is_valid release-1 "Release candidate release-1" push success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
+          ! candidate_metadata_is_valid v1.2.3 "Release candidate v9.9.9" push success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
+          ! candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" pull_request success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
+          ! candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" push success .github/workflows/other.yml owner/repo owner/repo "${fixture_sha}"
+          same_approved_commit "${fixture_sha}" "${fixture_sha}" "${fixture_sha}"
+          ! same_approved_commit "${fixture_sha}" ffffffffffffffffffffffffffffffffffffffff "${fixture_sha}"
+
+          release_prefix='Release candidate '
+          RELEASE_TAG="${RELEASE_TITLE#"${release_prefix}"}"
+          if ! candidate_metadata_is_valid "${RELEASE_TAG}" "${RELEASE_TITLE}" "${RELEASE_EVENT}" "${RELEASE_CONCLUSION}" "${RELEASE_PATH}" "${RELEASE_HEAD_REPOSITORY}" "${REPOSITORY}" "${RELEASE_SHA}"; then
+            echo "The completed run is not an eligible release-tag CI run." >&2
+            exit 1
+          fi
+
+          api() {
+            curl --fail-with-body --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPOSITORY}/$1"
+          }
+
+          main_sha="$(api git/ref/heads/main | jq -er '.object.sha')"
+          tag_sha="$(api "commits/${RELEASE_TAG}" | jq -er '.sha')"
+          if ! same_approved_commit "${RELEASE_SHA}" "${tag_sha}" "${main_sha}"; then
+            echo "Release tag, successful CI run, and current main HEAD must resolve to the same commit." >&2
+            exit 1
+          fi
+
+          release_core="${RELEASE_TAG%%+*}"
+          stable=true
+          if [[ "${release_core}" == *-* ]]; then
+            stable=false
+          fi
+
+          echo "authorized=true" >> "${GITHUB_OUTPUT}"
+          echo "sha=${RELEASE_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "short_sha=${RELEASE_SHA:0:7}" >> "${GITHUB_OUTPUT}"
+          echo "stable=${stable}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+
+  publish:
+    name: Publish multi-architecture image
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the approved main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate release image metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.authorize.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.authorize.outputs.tag }},enable=${{ needs.authorize.outputs.stable == 'true' }}
+            type=semver,pattern={{major}},value=${{ needs.authorize.outputs.tag }},enable=${{ needs.authorize.outputs.stable == 'true' }}
+            type=raw,value=sha-${{ needs.authorize.outputs.short_sha }}
+            type=raw,value=latest,enable=${{ needs.authorize.outputs.stable == 'true' }}
+      - name: Reauthorize refs immediately before publication
+        env:
+          APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          api() {
+            curl --fail-with-body --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPOSITORY}/$1"
+          }
+          main_sha="$(api git/ref/heads/main | jq -er '.object.sha')"
+          tag_sha="$(api "commits/${RELEASE_TAG}" | jq -er '.sha')"
+          if [[ "${APPROVED_SHA}" != "${main_sha}" || "${APPROVED_SHA}" != "${tag_sha}" ]]; then
+            echo "Release authorization expired because main or the tag moved." >&2
+            exit 1
+          fi
+      - name: Publish linux/amd64 and linux/arm64 image manifest
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.metadata.outputs.version }}
+          provenance: mode=max
+          sbom: true
+
+  release:
+    name: Create GitHub release notes
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+      - publish
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Reauthorize refs immediately before release creation
+        env:
+          APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          api() {
+            curl --fail-with-body --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPOSITORY}/$1"
+          }
+          main_sha="$(api git/ref/heads/main | jq -er '.object.sha')"
+          tag_sha="$(api "commits/${RELEASE_TAG}" | jq -er '.sha')"
+          if [[ "${APPROVED_SHA}" != "${main_sha}" || "${APPROVED_SHA}" != "${tag_sha}" ]]; then
+            echo "Release authorization expired because main or the tag moved." >&2
+            exit 1
+          fi
+      - name: Create release with generated notes
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ needs.authorize.outputs.tag }}
+          target_commitish: ${{ needs.authorize.outputs.sha }}
+          generate_release_notes: true
+          prerelease: ${{ needs.authorize.outputs.stable != 'true' }}
+          name: ${{ needs.authorize.outputs.tag }}

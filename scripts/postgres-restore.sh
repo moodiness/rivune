@@ -1,53 +1,200 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (( $# != 1 )); then
-  echo "Usage: $0 BACKUP_FILE" >&2
-  exit 64
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=postgres-backup-auth.sh
+source "${SCRIPT_DIR}/postgres-backup-auth.sh"
 
-BACKUP_FILE="$1"
-if [[ ! -r "${BACKUP_FILE}" ]]; then
-  echo "Backup is not readable: ${BACKUP_FILE}" >&2
-  exit 1
+usage() {
+  echo "Usage: $0 --expect-backup-id ID BACKUP_FILE" >&2
+  echo "       $0 --allow-rollback ID BACKUP_FILE" >&2
+  echo "       $0 --initialize-state ID BACKUP_FILE" >&2
+  echo "       $0 --allow-legacy SHA256 BACKUP_FILE" >&2
+  exit 64
+}
+if (( $# != 3 )); then
+  usage
+fi
+RESTORE_MODE="$1"
+OPERATOR_EXPECTATION="$2"
+BACKUP_FILE="$3"
+case "${RESTORE_MODE}" in
+  --expect-backup-id|--allow-rollback|--initialize-state)
+    [[ "${OPERATOR_EXPECTATION}" =~ ^[0-9a-f]{32}$ ]] || usage
+    ;;
+  --allow-legacy)
+    [[ "${OPERATOR_EXPECTATION}" =~ ^[0-9a-f]{64}$ ]] || usage
+    ;;
+  *) usage ;;
+esac
+
+require_repository_archive "${BACKUP_FILE}"
+BACKUP_FILE="$(realpath -e -- "${BACKUP_FILE}")"
+BACKUP_DIR="$(dirname "${BACKUP_FILE}")"
+MANIFEST_FILE="${BACKUP_FILE}.manifest"
+SIGNATURE_FILE="${BACKUP_FILE}.sig"
+: "${RIVUNE_RESTORE_PASSWORD:?RIVUNE_RESTORE_PASSWORD is required}"
+require_backup_key "${RIVUNE_BACKUP_VERIFY_KEY_FILE:-}" "${BACKUP_DIR}" "verification"
+require_backup_signature "${SIGNATURE_FILE}"
+
+AUTHENTICATED_BACKUP_FILE=""
+AUTHENTICATED_MANIFEST_FILE=""
+AUTHENTICATED_SIGNATURE_FILE=""
+STATE_LOCKED=false
+server_was_running=false
+restore_started=false
+cleanup() {
+  cleanup_authenticated_backup
+  if [[ "${STATE_LOCKED}" == true ]]; then
+    unlock_backup_state
+    STATE_LOCKED=false
+  fi
+  if [[ "${server_was_running}" == true && "${restore_started}" == false ]]; then
+    docker compose up -d "${RIVUNE_SERVICE:-server}" >/dev/null
+  elif [[ "${server_was_running}" == true ]]; then
+    echo "Restore failed after the database replacement began; Rivune remains stopped" >&2
+  fi
+}
+trap cleanup EXIT
+
+if [[ "${RESTORE_MODE}" == --allow-legacy ]]; then
+  if [[ -e "${MANIFEST_FILE}" || -L "${MANIFEST_FILE}" ]]; then
+    backup_error "Legacy authorization cannot be used for a manifested backup"
+    exit 1
+  fi
+  require_backup_token "${RIVUNE_BACKUP_LINEAGE:-}" "RIVUNE_BACKUP_LINEAGE"
+  stage_legacy_authenticated_backup "${BACKUP_FILE}" "${SECURE_BACKUP_SIGNATURE_FILE}" \
+    "${SECURE_BACKUP_KEY_FILE}" "${OPERATOR_EXPECTATION}"
+  require_backup_state_location "${RIVUNE_BACKUP_STATE_FILE:-}" "${BACKUP_DIR}" true
+  lock_backup_state
+  STATE_LOCKED=true
+  if [[ ! -e "${SECURE_BACKUP_STATE_FILE}" ]]; then
+    initialize_backup_state "${RIVUNE_BACKUP_LINEAGE}"
+  fi
+  load_backup_state "${RIVUNE_BACKUP_LINEAGE}"
+  record_restore_audit legacy-authorized "${RIVUNE_BACKUP_LINEAGE}" legacy legacy \
+    "${LEGACY_ARCHIVE_SHA256}"
+else
+  require_backup_manifest "${MANIFEST_FILE}"
+  stage_authenticated_manifest "${BACKUP_FILE}" "${SECURE_BACKUP_MANIFEST_FILE}" \
+    "${SECURE_BACKUP_SIGNATURE_FILE}" "${SECURE_BACKUP_KEY_FILE}"
+  if [[ "${OPERATOR_EXPECTATION}" != "${MANIFEST_BACKUP_ID}" ]]; then
+    backup_error "Backup does not match the operator-selected backup ID"
+    exit 1
+  fi
+
+  case "${RESTORE_MODE}" in
+    --expect-backup-id)
+      require_backup_state_location "${RIVUNE_BACKUP_STATE_FILE:-}" "${BACKUP_DIR}" false
+      lock_backup_state
+      STATE_LOCKED=true
+      enforce_current_restore_policy "${OPERATOR_EXPECTATION}"
+      ;;
+    --allow-rollback)
+      require_backup_state_location "${RIVUNE_BACKUP_STATE_FILE:-}" "${BACKUP_DIR}" false
+      lock_backup_state
+      STATE_LOCKED=true
+      load_backup_state "${MANIFEST_LINEAGE}"
+      if (( MANIFEST_SEQUENCE >= STATE_LATEST_SEQUENCE )); then
+        backup_error "Rollback authorization only accepts an older trusted-lineage generation"
+        exit 1
+      fi
+      ;;
+    --initialize-state)
+      require_backup_state_location "${RIVUNE_BACKUP_STATE_FILE:-}" "${BACKUP_DIR}" true
+      lock_backup_state
+      STATE_LOCKED=true
+      if [[ -e "${SECURE_BACKUP_STATE_FILE}" ]]; then
+        backup_error "Backup state initialization requires an absent state file"
+        exit 1
+      fi
+      if (( MANIFEST_SEQUENCE == 999999999999999999 )); then
+        backup_error "Backup generation counter is exhausted"
+        exit 1
+      fi
+      ;;
+  esac
+
+  # No archive bytes are read until the signed metadata, external expectation,
+  # and protected current/rollback/initialization policy have all been accepted.
+  stage_authenticated_archive "${BACKUP_FILE}"
+
+  # Exceptional authorization is recorded only after the private snapshot has
+  # the authenticated exact size and digest.
+  if [[ "${RESTORE_MODE}" == --allow-rollback ]]; then
+    record_restore_audit rollback-authorized "${MANIFEST_LINEAGE}" "${MANIFEST_SEQUENCE}" \
+      "${MANIFEST_BACKUP_ID}" "${MANIFEST_ARCHIVE_SHA256}"
+  elif [[ "${RESTORE_MODE}" == --initialize-state ]]; then
+    if [[ -e "${SECURE_BACKUP_STATE_FILE}" ]]; then
+      backup_error "Backup state initialization requires an absent state file"
+      exit 1
+    fi
+    write_backup_state "${MANIFEST_LINEAGE}" "$(( MANIFEST_SEQUENCE + 1 ))" \
+      "${MANIFEST_SEQUENCE}" "${MANIFEST_BACKUP_ID}" "${MANIFEST_ARCHIVE_SHA256}"
+    record_restore_audit state-initialized "${MANIFEST_LINEAGE}" "${MANIFEST_SEQUENCE}" \
+      "${MANIFEST_BACKUP_ID}" "${MANIFEST_ARCHIVE_SHA256}"
+  fi
 fi
 
 RIVUNE_SERVICE="${RIVUNE_SERVICE:-server}"
-
-server_was_running=false
 if docker compose ps --status running --services | grep -qx "${RIVUNE_SERVICE}"; then
   server_was_running=true
 fi
 
-restart_server() {
-  if [[ "${server_was_running}" == true ]]; then
-    docker compose up -d "${RIVUNE_SERVICE}" >/dev/null
-  fi
-}
-trap restart_server EXIT
+# PostgreSQL parses only the private snapshot, after authentication, expectation,
+# lineage, freshness policy, and any exceptional authorization have succeeded.
+docker compose exec -T postgres pg_restore --list \
+  < "${AUTHENTICATED_BACKUP_FILE}" >/dev/null
 
-docker compose exec -T postgres pg_restore --list < "${BACKUP_FILE}" >/dev/null
+# The state lock remains held across parsing. Re-read the trusted state immediately
+# before destructive work so an inconsistent replacement fails closed.
+if [[ "${RESTORE_MODE}" == --expect-backup-id ]]; then
+  enforce_current_restore_policy "${OPERATOR_EXPECTATION}"
+elif [[ "${RESTORE_MODE}" != --allow-legacy ]]; then
+  load_backup_state "${MANIFEST_LINEAGE}"
+fi
+
 docker compose stop "${RIVUNE_SERVICE}" >/dev/null
+restore_started=true
 
-docker compose exec -T postgres psql --username rivune --dbname postgres \
+PGPASSWORD="${RIVUNE_RESTORE_PASSWORD}" docker compose exec -T -e PGPASSWORD postgres \
+  psql --host 127.0.0.1 --username rivune_restore --dbname postgres \
   --set ON_ERROR_STOP=1 \
   --command 'DROP DATABASE rivune WITH (FORCE);'
-docker compose exec -T postgres psql --username rivune --dbname postgres \
+PGPASSWORD="${RIVUNE_RESTORE_PASSWORD}" docker compose exec -T -e PGPASSWORD postgres \
+  psql --host 127.0.0.1 --username rivune_restore --dbname postgres \
   --set ON_ERROR_STOP=1 \
-  --command 'CREATE DATABASE rivune OWNER rivune;'
-docker compose exec -T postgres pg_restore \
-  --username rivune \
+  --command 'CREATE DATABASE rivune OWNER rivune_owner;'
+PGPASSWORD="${RIVUNE_RESTORE_PASSWORD}" docker compose exec -T -e PGPASSWORD postgres \
+  pg_restore --host 127.0.0.1 \
+  --username rivune_restore \
+  --role rivune_owner \
   --dbname rivune \
   --exit-on-error \
   --no-owner \
-  --no-privileges < "${BACKUP_FILE}"
+  --no-privileges < "${AUTHENTICATED_BACKUP_FILE}"
 
-docker compose exec -T postgres psql --username rivune --dbname rivune \
+PGPASSWORD="${RIVUNE_RESTORE_PASSWORD}" docker compose exec -T -e PGPASSWORD postgres \
+  psql --host 127.0.0.1 --username rivune_restore --dbname rivune \
   --set ON_ERROR_STOP=1 --tuples-only --no-align \
   --command "SELECT CASE WHEN to_regclass('public.schema_migrations') IS NOT NULL AND EXISTS (SELECT FROM schema_migrations) THEN 'verified' ELSE 'invalid' END;" \
   | grep -qx verified
 
-restart_server
-server_was_running=false
+if [[ "${RESTORE_MODE}" == --allow-rollback ]]; then
+  record_restore_audit rollback-completed "${MANIFEST_LINEAGE}" "${MANIFEST_SEQUENCE}" \
+    "${MANIFEST_BACKUP_ID}" "${MANIFEST_ARCHIVE_SHA256}"
+elif [[ "${RESTORE_MODE}" == --allow-legacy ]]; then
+  record_restore_audit legacy-completed "${RIVUNE_BACKUP_LINEAGE}" legacy legacy \
+    "${LEGACY_ARCHIVE_SHA256}"
+fi
+
+if [[ "${server_was_running}" == true ]]; then
+  docker compose up -d "${RIVUNE_SERVICE}" >/dev/null
+  server_was_running=false
+  restore_started=false
+fi
+cleanup_authenticated_backup
+unlock_backup_state
+STATE_LOCKED=false
 trap - EXIT
-printf 'Restore completed and migration ledger verified from: %s\n' "${BACKUP_FILE}"
+printf 'Authenticated restore completed for the operator-selected backup\n'

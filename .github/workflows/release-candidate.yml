@@ -1,0 +1,62 @@
+name: Release candidate CI
+run-name: Release candidate ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  authorize:
+    name: Check tag against current main
+    runs-on: ubuntu-latest
+    outputs:
+      authorized: ${{ steps.authorize.outputs.authorized }}
+    steps:
+      - name: Validate candidate before running the release gate
+        id: authorize
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TYPE: ${{ github.ref_type }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          numeric='0|[1-9][0-9]*'
+          prerelease_identifier='0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*'
+          semver="^v(${numeric})\.(${numeric})\.(${numeric})(-(${prerelease_identifier})(\.(${prerelease_identifier}))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"
+          if [[ "${RELEASE_TYPE}" != tag ||
+                "${RELEASE_REF}" != "refs/tags/${RELEASE_TAG}" ||
+                ! "${RELEASE_TAG}" =~ ${semver} ||
+                ! "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Release candidate must be a valid v-prefixed Semantic Version tag." >&2
+            exit 1
+          fi
+
+          api() {
+            curl --fail-with-body --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPOSITORY}/$1"
+          }
+          main_sha="$(api git/ref/heads/main | jq -er '.object.sha')"
+          tag_sha="$(api "commits/${RELEASE_TAG}" | jq -er '.sha')"
+          if [[ "${RELEASE_SHA}" != "${main_sha}" || "${RELEASE_SHA}" != "${tag_sha}" ]]; then
+            echo "Release tag must point to the current main HEAD before the release gate runs." >&2
+            exit 1
+          fi
+          echo "authorized=true" >> "${GITHUB_OUTPUT}"
+
+  ci:
+    name: Complete release gate
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+    uses: ./.github/workflows/container.yml

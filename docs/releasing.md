@@ -7,11 +7,11 @@ Rivune follows [Semantic Versioning 2.0.0](https://semver.org/). The public HTTP
 - Increment **patch** for backward-compatible fixes and internal hardening.
 - Use prerelease tags such as `v2.0.0-rc.1` for builds that are not stable.
 
-Every release tag must be an annotated `vMAJOR.MINOR.PATCH` Semantic Version. Do not move or reuse a published tag.
+Every release tag must be an annotated `vMAJOR.MINOR.PATCH` Semantic Version pointing to the current `main` HEAD. Do not move or reuse a published tag.
 
 ## Before tagging
 
-1. Confirm the target commit is on `main` and all relevant backend, frontend, protocol, native-client, migration, and container checks pass locally.
+1. Confirm the target commit is the current protected `main` HEAD and all relevant backend, frontend, protocol, native-client, migration, and container checks pass locally.
 2. Review user-visible and operational changes, including required environment changes and migration behavior.
 3. For protocol changes, confirm the protocol version and [`protocol/openapi.yaml`](../protocol/openapi.yaml) describe the shipped behavior and supported native clients have been updated.
 4. For database changes, run the disposable clean-install and immediately-previous-version upgrade checks documented in [Production operations](operations.md#migration-and-proxy-validation).
@@ -26,7 +26,17 @@ git tag -a v1.5.0 -m "Rivune v1.5.0"
 git push origin v1.5.0
 ```
 
-The tag push runs the complete release gate: backend tests against PostgreSQL, frontend clean install/build/E2E, pinned OpenAPI lint and complete contract resolution, clean and upgrade migration validation, HTTPS/forwarded-header smoke, native client builds, and container builds for both release architectures. There is no branch, pull-request, or manual publication path: the publish job depends on every gate and only runs for a pushed `v*` tag.
+The tag push runs `Release candidate CI`, a complete, read-only release gate: backend tests against PostgreSQL, frontend clean install/build/E2E, pinned OpenAPI lint and complete contract resolution, clean and upgrade migration validation, HTTPS/forwarded-header smoke, native client builds, and container builds for both release architectures. When that run succeeds, GitHub starts `Publish release` from the workflow definition on the default branch. Its unprivileged authorization job verifies the `v*` tag is valid SemVer, the completed run came from `.github/workflows/release-candidate.yml`, and the tag commit, tested SHA, and current `main` HEAD are identical. Only then can the environment-gated jobs receive `packages: write` or `contents: write`; each checks the tag and `main` again immediately before publishing. There is no manual publication path.
+
+## Required GitHub protection
+
+Repository administrators must configure the controls that live outside the repository:
+
+1. Protect `main` with required pull-request reviews and the required `CI` status checks; disallow force pushes and direct bypasses.
+2. Add a tag ruleset for `v*` that restricts creation to release maintainers and blocks tag updates and deletion.
+3. Create an environment named `release`, add required reviewers who are independent of the tag pusher, enable “Prevent self-review,” and restrict deployments to the protected `main` branch. Do not grant environment secrets to any other deployment branch.
+
+These controls are part of the release trust boundary. The `workflow_run` publication workflow is loaded from the default branch rather than from the tag, and the environment approval is the final external authorization before either write-capable job starts.
 
 ## Published artifacts
 
@@ -54,4 +64,4 @@ The manifest inspection must list only `linux/amd64` and `linux/arm64`. Confirm 
 
 ## Failure and retry
 
-Fix a gate failure on `main` and create a new version tag. Never force-update a tag that may have been observed or partially published. GitHub Actions jobs may be rerun for transient infrastructure failures on the unchanged tagged commit; image tags are content-addressed and the release-note step is ordered after successful image publication.
+Fix a gate failure on `main` and create a new version tag. Never force-update a tag that may have been observed or partially published. GitHub Actions jobs may be rerun for transient infrastructure failures on the unchanged tagged commit only while it remains the current `main` HEAD; otherwise create a new version tag after the fix reaches `main`. Image tags are content-addressed and the release-note step is ordered after successful image publication.

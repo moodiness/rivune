@@ -1,9 +1,11 @@
-name: CI and release
+name: CI
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+  pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -38,14 +40,14 @@ jobs:
       RIVUNE_DATABASE_URL: postgres://rivune:rivune-test-password@localhost:5432/rivune_test?sslmode=disable
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
           cache: npm
@@ -56,18 +58,21 @@ jobs:
       - name: Build embedded frontend for Go tests
         working-directory: web
         run: npm ci && npm run build
-      - name: Run backend tests with PostgreSQL integration coverage
+      - name: Vet backend
         working-directory: server
-        run: go test -p 1 ./...
+        run: go vet ./...
+      - name: Run backend tests with PostgreSQL integration coverage and race detector
+        working-directory: server
+        run: go test -race -p 1 ./...
 
   frontend:
     name: Frontend build and E2E
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
           cache: npm
@@ -75,6 +80,9 @@ jobs:
       - name: Install frontend dependencies
         working-directory: web
         run: npm ci
+      - name: Audit frontend dependencies
+        working-directory: web
+        run: npm audit --audit-level=high
       - name: Build frontend
         working-directory: web
         run: npm run build
@@ -90,9 +98,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
       - name: Lint OpenAPI contract with pinned Redocly
@@ -105,53 +113,59 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
-      - name: Build Swift package
-        run: swift build --package-path clients/apple
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Swift package
+        run: swift test --package-path clients/apple
 
   android-client:
     name: Kotlin API client
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: 17
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
       - name: Install Android platform
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v5
-      - name: Build Android library
-        run: bash clients/android/gradlew -p clients/android --no-daemon :rivune-api:assembleRelease
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+      - name: Test and build Android library
+        run: bash clients/android/gradlew -p clients/android --no-daemon :rivune-api:testDebugUnitTest :rivune-api:assembleRelease
 
   windows-client:
     name: Windows API client
     runs-on: windows-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
-      - name: Build Windows library
-        run: dotnet build clients/windows/Rivune.Windows.slnx --configuration Release
+      - name: Test private Windows environment-file creation
+        run: pwsh -NoProfile -File scripts/create-env.Tests.ps1
+      - name: Test Windows library
+        run: dotnet test clients/windows/Rivune.Windows.slnx --configuration Release --nologo
 
   container:
     name: Container, migrations, and HTTPS proxy
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test private POSIX environment-file creation
+        run: bash scripts/create-env_test.sh
+      - name: Test PostgreSQL backup hardening
+        run: bash scripts/postgres-backup_test.sh
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
       - name: Build testable linux/amd64 image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           file: server/Dockerfile
@@ -170,7 +184,7 @@ jobs:
           RIVUNE_IMAGE: rivune-ci:current
         run: bash scripts/ci/reverse-proxy-smoke.sh
       - name: Validate both release architectures
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           file: server/Dockerfile
@@ -178,92 +192,3 @@ jobs:
           push: false
           build-args: |
             VERSION=ci-${{ github.sha }}
-
-  publish:
-    name: Publish multi-architecture image
-    outputs:
-      stable: ${{ steps.validate.outputs.stable }}
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs:
-      - backend
-      - frontend
-      - openapi
-      - swift-client
-      - android-client
-      - windows-client
-      - container
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Validate Semantic Version tag
-        id: validate
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          numeric='0|[1-9][0-9]*'
-          prerelease_identifier='0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*'
-          semver="^v(${numeric})\.(${numeric})\.(${numeric})(-(${prerelease_identifier})(\.(${prerelease_identifier}))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"
-          if [[ ! "${RELEASE_TAG}" =~ ${semver} ]]; then
-            echo "Tag must be a valid Semantic Version prefixed with v: ${RELEASE_TAG}" >&2
-            exit 1
-          fi
-          release_core="${RELEASE_TAG%%+*}"
-          if [[ "${release_core}" == *-* ]]; then
-            echo "stable=false" >> "${GITHUB_OUTPUT}"
-          else
-            echo "stable=true" >> "${GITHUB_OUTPUT}"
-          fi
-      - name: Check out repository
-        uses: actions/checkout@v7
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Generate release image metadata
-        id: metadata
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.validate.outputs.stable == 'true' }}
-            type=semver,pattern={{major}},enable=${{ steps.validate.outputs.stable == 'true' }}
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable=${{ steps.validate.outputs.stable == 'true' }}
-      - name: Publish linux/amd64 and linux/arm64 image manifest
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: server/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.metadata.outputs.version }}
-          provenance: mode=max
-          sbom: true
-
-  release:
-    name: Create GitHub release notes
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs:
-      - publish
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Create release with generated notes
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          prerelease: ${{ needs.publish.outputs.stable != 'true' }}
-          name: ${{ github.ref_name }}

@@ -7,6 +7,15 @@ services:
         VERSION: ${RIVUNE_VERSION:-dev}
     restart: unless-stopped
     init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    pids_limit: 512
     depends_on:
       postgres:
         condition: service_healthy
@@ -18,6 +27,7 @@ services:
       RIVUNE_VIDEO_GROUP_ID: ${RIVUNE_VIDEO_GROUP_ID:-}
       RIVUNE_PUBLIC_URL: ${RIVUNE_PUBLIC_URL:-http://localhost:8080}
       RIVUNE_TRUSTED_PROXIES: ${RIVUNE_TRUSTED_PROXIES:-}
+      RIVUNE_NAT64_PREFIXES: ${RIVUNE_NAT64_PREFIXES:-}
       RIVUNE_DATABASE_HOST: postgres
       RIVUNE_DATABASE_PORT: "5432"
       RIVUNE_DATABASE_NAME: rivune
@@ -30,7 +40,6 @@ services:
       RIVUNE_PROFILE_GRANT_TTL: ${RIVUNE_PROFILE_GRANT_TTL:-12h}
       RIVUNE_TMDB_ACCESS_TOKEN: ${RIVUNE_TMDB_ACCESS_TOKEN:-}
       RIVUNE_FANART_API_KEY: ${RIVUNE_FANART_API_KEY:-}
-      RIVUNE_FANART_CLIENT_KEY: ${RIVUNE_FANART_CLIENT_KEY:-}
       RIVUNE_MDBLIST_API_KEY: ${RIVUNE_MDBLIST_API_KEY:-}
       RIVUNE_TVDB_API_KEY: ${RIVUNE_TVDB_API_KEY:-}
       RIVUNE_TVDB_PIN: ${RIVUNE_TVDB_PIN:-}
@@ -50,8 +59,9 @@ services:
       RIVUNE_MEDIA_MAX_STORAGE_MB: ${RIVUNE_MEDIA_MAX_STORAGE_MB:-20480}
       RIVUNE_ARTWORK_CACHE_DIR: /var/lib/rivune/artwork
       RIVUNE_ARTWORK_MAX_STORAGE_MB: ${RIVUNE_ARTWORK_MAX_STORAGE_MB:-20480}
+      RIVUNE_LAN_ARTWORK_ORIGINS: ${RIVUNE_LAN_ARTWORK_ORIGINS:-}
     ports:
-      - "${RIVUNE_PORT:-8080}:8080"
+      - "127.0.0.1:${RIVUNE_PORT:-8080}:8080"
     volumes:
       - artwork_cache:/var/lib/rivune/artwork
     stop_grace_period: 15s
@@ -60,13 +70,31 @@ services:
     image: postgres:18-trixie
     restart: unless-stopped
     shm_size: 128mb
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    pids_limit: 256
+    read_only: true
     environment:
-      POSTGRES_DB: rivune
-      POSTGRES_USER: rivune
-      POSTGRES_PASSWORD: ${RIVUNE_DATABASE_PASSWORD:?Set RIVUNE_DATABASE_PASSWORD in .env}
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${RIVUNE_POSTGRES_SUPERUSER_PASSWORD:?Set a bootstrap-only RIVUNE_POSTGRES_SUPERUSER_PASSWORD in .env}
+      RIVUNE_DATABASE_PASSWORD: ${RIVUNE_DATABASE_PASSWORD:?Set RIVUNE_DATABASE_PASSWORD in .env}
+      RIVUNE_RESTORE_PASSWORD: ${RIVUNE_RESTORE_PASSWORD:?Set a distinct RIVUNE_RESTORE_PASSWORD in .env}
       POSTGRES_INITDB_ARGS: "--data-checksums"
     volumes:
       - postgres_data:/var/lib/postgresql
+      - ./scripts/postgres-init-rivune.sh:/docker-entrypoint-initdb.d/10-rivune.sh:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,mode=3775
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rivune -d rivune"]
       interval: 5s

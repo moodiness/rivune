@@ -1,5 +1,18 @@
 {
 	admin off
+	log default {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					replace token REDACTED
+					replace target REDACTED
+					replace signature REDACTED
+				}
+			}
+		}
+	}
 }
 
 {$RIVUNE_HOST:localhost} {
@@ -12,6 +25,15 @@
 
 	log {
 		output stdout
-		format json
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					replace token REDACTED
+					replace target REDACTED
+					replace signature REDACTED
+				}
+			}
+		}
 	}
 }

@@ -22,6 +22,15 @@ services:
     image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-latest}
     restart: unless-stopped
     init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    pids_limit: 512
     depends_on:
       postgres:
         condition: service_healthy
@@ -38,7 +47,7 @@ services:
       RIVUNE_SETUP_TOKEN: ${RIVUNE_SETUP_TOKEN:?Set RIVUNE_SETUP_TOKEN}
       RIVUNE_TMDB_ACCESS_TOKEN: ${RIVUNE_TMDB_ACCESS_TOKEN:-}
       RIVUNE_FANART_API_KEY: ${RIVUNE_FANART_API_KEY:-}
-      RIVUNE_FANART_CLIENT_KEY: ${RIVUNE_FANART_CLIENT_KEY:-}
+      RIVUNE_MDBLIST_API_KEY: ${RIVUNE_MDBLIST_API_KEY:-}
       RIVUNE_TVDB_API_KEY: ${RIVUNE_TVDB_API_KEY:-}
       RIVUNE_TVDB_PIN: ${RIVUNE_TVDB_PIN:-}
       RIVUNE_TRAKT_CLIENT_ID: ${RIVUNE_TRAKT_CLIENT_ID:-}
@@ -47,6 +56,7 @@ services:
       RIVUNE_TRACKING_ENCRYPTION_KEY: ${RIVUNE_TRACKING_ENCRYPTION_KEY:-}
       RIVUNE_ARTWORK_CACHE_DIR: /var/lib/rivune/artwork
       RIVUNE_ARTWORK_MAX_STORAGE_MB: ${RIVUNE_ARTWORK_MAX_STORAGE_MB:-20480}
+      RIVUNE_LAN_ARTWORK_ORIGINS: ${RIVUNE_LAN_ARTWORK_ORIGINS:-}
       TZ: ${TZ:-UTC}
       PUID: ${PUID:-65532}
       PGID: ${PGID:-65532}
@@ -60,13 +70,31 @@ services:
     image: postgres:18-trixie
     restart: unless-stopped
     shm_size: 128mb
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    pids_limit: 256
+    read_only: true
     environment:
-      POSTGRES_DB: rivune
-      POSTGRES_USER: rivune
-      POSTGRES_PASSWORD: ${RIVUNE_DATABASE_PASSWORD:?Set RIVUNE_DATABASE_PASSWORD}
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${RIVUNE_POSTGRES_SUPERUSER_PASSWORD:?Set a bootstrap-only RIVUNE_POSTGRES_SUPERUSER_PASSWORD}
+      RIVUNE_DATABASE_PASSWORD: ${RIVUNE_DATABASE_PASSWORD:?Set RIVUNE_DATABASE_PASSWORD}
+      RIVUNE_RESTORE_PASSWORD: ${RIVUNE_RESTORE_PASSWORD:?Set a distinct RIVUNE_RESTORE_PASSWORD}
       POSTGRES_INITDB_ARGS: "--data-checksums"
     volumes:
       - postgres_data:/var/lib/postgresql
+      - ../../scripts/postgres-init-rivune.sh:/docker-entrypoint-initdb.d/10-rivune.sh:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,mode=3775
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rivune -d rivune"]
       interval: 5s

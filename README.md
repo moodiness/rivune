@@ -70,24 +70,35 @@ Requirements:
 - Docker Engine with Compose
 - OpenSSL, or another secure random-value generator
 
-Clone the repository and create the local environment file:
+Clone the repository, then create the local environment file before entering any
+secrets. On Linux or macOS:
 
 ```sh
 git clone https://github.com/moodiness/rivune.git
 cd rivune
-cp .env.example .env
+./scripts/create-env.sh
 ```
 
-Generate two independent credentials with `openssl rand -hex 32`, then place them in `.env`:
+On Windows PowerShell:
+
+```powershell
+git clone https://github.com/moodiness/rivune.git
+Set-Location rivune
+.\scripts\create-env.ps1
+```
+
+Generate four independent credentials with `openssl rand -hex 32`, then place them in `.env`:
 
 ```dotenv
-RIVUNE_DATABASE_PASSWORD=<generated database password>
-RIVUNE_SETUP_TOKEN=<generated setup token>
+RIVUNE_POSTGRES_SUPERUSER_PASSWORD=<generated bootstrap-only database password>
+RIVUNE_DATABASE_PASSWORD=<different generated application database password>
+RIVUNE_RESTORE_PASSWORD=<different generated restore-role password>
+RIVUNE_SETUP_TOKEN=<different generated setup token>
 ```
 
-When enabling Trakt or Simkl account tracking, generate a third independent credential with `openssl rand -base64 32` and assign its output to `RIVUNE_TRACKING_ENCRYPTION_KEY`. Do not reuse the database password, setup token, or a provider secret.
+When enabling Trakt or Simkl account tracking, generate another independent credential with `openssl rand -hex 32`. Store it directly in `RIVUNE_TRACKING_ENCRYPTION_KEY`; do not reuse any database password, setup token, or provider secret.
 
-TMDB, TVDB, Fanart.tv, MDBList, Trakt, and Simkl integrations are optional and can remain empty in `.env`. `RIVUNE_TVDB_PIN` is only needed with a TVDB user-supported API key; ordinary project keys authenticate without it. Fanart.tv requires a project API key and supports an optional personal client key. Per-profile Trakt or Simkl account tracking additionally requires the independently generated encryption key above.
+TMDB, TVDB, Fanart.tv, MDBList, Trakt, and Simkl integrations are optional and can remain unconfigured. `RIVUNE_TVDB_PIN` is only needed with a TVDB user-supported API key; ordinary project keys authenticate without it. Fanart.tv requires `RIVUNE_FANART_API_KEY`. Per-profile Trakt or Simkl account tracking additionally requires the independently generated encryption key above.
 
 Start Rivune:
 
@@ -96,6 +107,8 @@ docker compose up -d --build
 ```
 
 Open [http://localhost:8080](http://localhost:8080). Complete first-run setup with the value of `RIVUNE_SETUP_TOKEN` from `.env`, then create the administrator account and first profile.
+
+This plain-HTTP mode is only for local development: the default Compose file binds port `8080` to `127.0.0.1`, not to the LAN. Rivune rejects an `http://` `RIVUNE_PUBLIC_URL` whose host is not loopback.
 
 Check server health:
 
@@ -111,22 +124,40 @@ docker compose down
 
 ## Configuration
 
-Copy [`.env.example`](.env.example) to `.env` and adjust it for the host. Important settings include:
+Create `.env` from [`.env.example`](.env.example) with
+`./scripts/create-env.sh` on Linux/macOS or `.\scripts\create-env.ps1` in
+Windows PowerShell, then adjust it for the host. The helpers refuse an existing
+file or link rather than overwriting it. They create a mode-`0600` file on
+POSIX or a protected Windows DACL granting only the current identity access.
+For an existing installation, repair the file before using it: run
+`chmod 600 .env` on Linux/macOS. On Windows PowerShell, run the following and
+stop before entering or using secrets if `icacls.exe` fails:
+
+```powershell
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+icacls.exe .env /inheritance:r /grant:r "${identity}:(F)"
+if ($LASTEXITCODE -ne 0) { throw 'Failed to restrict .env permissions' }
+```
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `RIVUNE_DATABASE_PASSWORD` | Required password shared by Rivune and the bundled PostgreSQL service | none |
+| `RIVUNE_POSTGRES_SUPERUSER_PASSWORD` | Required bootstrap-only password for the bundled PostgreSQL service; never used by Rivune or restore workflows | none |
+| `RIVUNE_DATABASE_PASSWORD` | Required password for Rivune's non-superuser application role | none |
+| `RIVUNE_DATABASE_SSLMODE` | Required explicit TLS policy for component database settings; the Unraid template fixes this to fail-closed `verify-full` | none |
+| `RIVUNE_DATABASE_SSLROOTCERT` | Optional CA certificate path added to a component-built PostgreSQL DSN; required by the Unraid template | empty |
+| `RIVUNE_RESTORE_PASSWORD` | Required independent password for the non-superuser restore role | none |
 | `RIVUNE_SETUP_TOKEN` | Required one-time value used to claim a new Rivune instance | none |
 | `RIVUNE_TMDB_ACCESS_TOKEN` | Optional TMDB API read access token | empty |
 | `RIVUNE_TVDB_API_KEY` / `RIVUNE_TVDB_PIN` | Optional TVDB project key and user-supported-key PIN | empty |
-| `RIVUNE_FANART_API_KEY` / `RIVUNE_FANART_CLIENT_KEY` | Optional Fanart.tv project key and personal client key for posters, backdrops, logos, and season artwork | empty |
+| `RIVUNE_FANART_API_KEY` | Optional Fanart.tv project API key for posters, backdrops, logos, and season artwork | empty |
 | `RIVUNE_MDBLIST_API_KEY` | Optional MDBList API key for movie and series collection sources | empty |
 | `RIVUNE_TRAKT_CLIENT_ID` | Optional Trakt client ID for collection sources and account tracking | empty |
 | `RIVUNE_TRAKT_CLIENT_SECRET` | Trakt client secret required with the client ID for account tracking | empty |
 | `RIVUNE_SIMKL_CLIENT_ID` | Optional Simkl client ID for account tracking | empty |
-| `RIVUNE_TRACKING_ENCRYPTION_KEY` | Base64-encoded 32-byte key required when account tracking is enabled | empty |
-| `RIVUNE_PUBLIC_URL` | Public origin used by the server | `http://localhost:8080` |
-| `RIVUNE_PORT` | Host port mapped to Rivune | `8080` |
+| `RIVUNE_TRACKING_ENCRYPTION_KEY` | 64-character hexadecimal key encoding exactly 32 bytes, required when account tracking is enabled | empty |
+| `RIVUNE_PUBLIC_URL` | Public origin used by the server; HTTPS is required except for loopback-only local HTTP | `http://localhost:8080` |
+| `RIVUNE_PORT` | Loopback host port mapped to Rivune by the default Compose file | `8080` |
+| `RIVUNE_LAN_ARTWORK_ORIGINS` | Optional comma-separated exact origins for trusted private-IP LAN artwork servers; explicit ports are required and paths, queries, credentials, DNS names, and special-use addresses are rejected | empty |
 | `TZ` | IANA timezone used by profile access dates and daily hours | `UTC` |
 | `PUID` / `PGID` | Non-root identity used inside the container | `65532` |
 | `RIVUNE_HARDWARE_ACCELERATION` | Video encoder selection: `auto`, a supported encoder, or software | `auto` |
@@ -136,9 +167,13 @@ Copy [`.env.example`](.env.example) to `.env` and adjust it for the host. Import
 | `RIVUNE_TRANSCODE_THREADS` | FFmpeg threads per transcode | `4` |
 | `RIVUNE_MEDIA_MAX_STORAGE_MB` | Temporary media workspace limit | `20480` |
 
-The Trakt and Simkl environment variables identify the Rivune server application; they do not connect a global user account. Each Rivune profile links and controls its own Trakt and/or Simkl account from profile settings, and Rivune stores that profile's provider tokens encrypted with `RIVUNE_TRACKING_ENCRYPTION_KEY`.
+The Trakt and Simkl credentials identify the Rivune server application; they do not connect a global user account. Each Rivune profile links and controls its own Trakt and/or Simkl account from profile settings, and Rivune stores that profile's provider tokens encrypted with `RIVUNE_TRACKING_ENCRYPTION_KEY`.
 
-For internet-facing installations, terminate HTTPS at a trusted reverse proxy, set `RIVUNE_PUBLIC_URL` to the HTTPS origin, and configure `RIVUNE_TRUSTED_PROXIES`. The `.env` file contains credentials and must never be committed.
+### Provider credentials
+
+Set optional provider credentials and the tracking encryption key directly in the private `.env` file. Leave credentials for unused providers empty.
+
+For every non-loopback installation, terminate HTTPS at a trusted reverse proxy, set `RIVUNE_PUBLIC_URL` to the HTTPS origin, and configure `RIVUNE_TRUSTED_PROXIES`. Use [`deploy/caddy/compose.yaml`](deploy/caddy/compose.yaml) for the supported HTTPS deployment; do not change the direct Compose binding to expose raw port `8080` on the LAN. The `.env` file contains credentials, must have the private permissions described above, and must never be committed.
 
 Production HTTPS, upgrades, PostgreSQL backup/restore, disaster-recovery verification, and executable migration/proxy checks are documented in [Production operations](docs/operations.md). Maintainers should follow the [Semantic Versioning and release procedure](docs/releasing.md); pushing a `v*` tag runs the complete release gate before any container or GitHub Release is published.
 
@@ -150,7 +185,9 @@ Use the template at [`templates/unraid/rivune.xml`](templates/unraid/rivune.xml)
 https://raw.githubusercontent.com/moodiness/rivune/main/templates/unraid/rivune.xml
 ```
 
-The Unraid template exposes the PostgreSQL password, initial setup token, TMDB, TVDB, Fanart.tv, MDBList, Trakt, and Simkl credentials, plus the tracking encryption key, as masked environment variables. No secret files or `/run/secrets` mounts are required. A reachable PostgreSQL server remains required; when it runs in another container, place both containers on the same custom Docker network.
+The Unraid template exposes the PostgreSQL password, initial setup token, TMDB, TVDB, Fanart.tv, MDBList, Trakt, and Simkl credentials, plus the tracking encryption key, as masked environment variables. It requires the public PostgreSQL CA certificate as a read-only file mount and fixes the component DSN to `sslmode=verify-full`; the PostgreSQL certificate SAN must exactly match the configured database hostname or IP address.
+
+Create separate custom Docker networks for the edge and database tiers. Connect Rivune to both, the HTTPS reverse proxy only to edge, and PostgreSQL only to database; never put the proxy and PostgreSQL together on one shared network. The template intentionally publishes no raw HTTP host port: enter the proxy's HTTPS origin as `RIVUNE_PUBLIC_URL`, trust only the narrow edge network in `RIVUNE_TRUSTED_PROXIES`, and follow [Unraid PostgreSQL TLS](docs/operations.md#unraid-postgresql-tls) before first start or migration. A missing, expired, untrusted, or host-mismatched certificate must prevent Rivune from connecting rather than trigger a plaintext fallback.
 
 ## Development
 
