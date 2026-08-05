@@ -277,20 +277,36 @@ final class CredentialSecurityTests: XCTestCase {
         XCTAssertEqual(authorization, "Bearer \(tokens.accessToken)")
     }
 
-    func testDeclaredResponseAboveLimitIsRejectedBeforeBodyDelivery() async throws {
+    func testDeclaredResponseAtLimitIsAllowedAndAboveLimitIsRejectedBeforeBodyDelivery() {
         let limit = URLSessionTransport.maximumResponseBodyBytes
-        ChunkedURLProtocol.configure(
-            .init(
-                status: 200,
-                headers: ["Content-Length": String(limit + 1)],
-                prefixChunks: [],
-                trailingChunk: Data(repeating: 0x20, count: limit + 1)
-            )
-        )
-        let client = try makeStreamingClient()
+        let session = URLSession(configuration: .ephemeral)
+        let transport = URLSessionTransport(session: session)
+        let task = session.dataTask(with: URL(string: "https://response-limit.test")!)
 
-        await assertResponseTooLarge { try await client.discover() }
-        XCTAssertEqual(ChunkedURLProtocol.deliveredByteCount(), 0)
+        for (length, expectedDisposition) in [
+            (limit, URLSession.ResponseDisposition.allow),
+            (limit + 1, URLSession.ResponseDisposition.cancel)
+        ] {
+            let response = HTTPURLResponse(
+                url: task.originalRequest!.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Length": String(length)]
+            )!
+            var receivedDisposition: URLSession.ResponseDisposition?
+
+            transport.loader.urlSession(
+                session,
+                dataTask: task,
+                didReceive: response
+            ) { disposition in
+                receivedDisposition = disposition
+            }
+
+            XCTAssertEqual(receivedDisposition, expectedDisposition, "length \(length)")
+        }
+
+        session.invalidateAndCancel()
     }
 
     func testChunkedDiscoveryAcceptsLimitAndCancelsAtLimitPlusOne() async throws {
@@ -965,6 +981,22 @@ private final class RedirectURLProtocol: URLProtocol {
     static func recordedRequests() -> [RecordedRequest] {
         sharedLock.withLock { requests }
     }
+    private static func bodyData(for request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count < 0 { return nil }
+            if count == 0 { return body }
+            body.append(contentsOf: buffer[..<count])
+        }
+    }
+
 
     override class func canInit(with request: URLRequest) -> Bool {
         true
@@ -979,12 +1011,13 @@ private final class RedirectURLProtocol: URLProtocol {
             client?.urlProtocol(self, didFailWithError: RivuneAPIError.invalidResponse)
             return
         }
+        let requestBody = Self.bodyData(for: request)
         Self.sharedLock.withLock {
             Self.requests.append(
                 RecordedRequest(
                     url: request.url,
                     method: request.httpMethod,
-                    body: request.httpBody
+                    body: requestBody
                 )
             )
         }
@@ -1011,20 +1044,8 @@ private final class RedirectURLProtocol: URLProtocol {
             httpVersion: "HTTP/1.1",
             headerFields: ["Location": plan.targetURL.absoluteString]
         )!
-#if canImport(FoundationNetworking)
-        // swift-corelibs URLProtocol traps if a custom protocol emits its redirect callback.
-        // Its delegate decision is covered directly above; still exercise 3xx delivery and parsing.
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocolDidFinishLoading(self)
-#else
-        var redirectedRequest = request
-        redirectedRequest.url = plan.targetURL
-        client?.urlProtocol(
-            self,
-            wasRedirectedTo: redirectedRequest,
-            redirectResponse: response
-        )
-#endif
     }
 
     override func stopLoading() {}

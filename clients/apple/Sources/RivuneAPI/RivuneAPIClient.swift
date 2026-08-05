@@ -98,7 +98,8 @@ final class BoundedURLSessionLoader: @unchecked Sendable {
             completionHandler(.cancel)
             return
         }
-        let declaredLength = response.expectedContentLength
+        let headerLength = response.value(forHTTPHeaderField: "Content-Length").flatMap { Int64($0) }
+        let declaredLength = max(response.expectedContentLength, headerLength ?? -1)
         guard declaredLength < 0 || declaredLength <= Int64(maximumResponseBodyBytes) else {
             finish(
                 taskIdentifier: dataTask.taskIdentifier,
@@ -688,15 +689,15 @@ public actor RivuneAPIClient {
     }
 
     private func request<Response: Decodable>(_ path: String, method: String = "GET", query: [URLQueryItem] = [], authenticated: Bool) async throws -> Response {
-        try await request(path, method: method, query: query, body: Optional<Data>.none, authenticated: authenticated)
+        try await decodedRequest(path, method: method, query: query, body: nil, authenticated: authenticated)
     }
 
     private func request<Response: Decodable, Body: Encodable>(_ path: String, method: String = "GET", query: [URLQueryItem] = [], body: Body, authenticated: Bool) async throws -> Response {
         let data = try encoder.encode(body)
-        return try await request(path, method: method, query: query, body: Optional(data), authenticated: authenticated)
+        return try await decodedRequest(path, method: method, query: query, body: data, authenticated: authenticated)
     }
 
-    private func request<Response: Decodable>(_ path: String, method: String, query: [URLQueryItem], body: Data?, authenticated: Bool) async throws -> Response {
+    private func decodedRequest<Response: Decodable>(_ path: String, method: String, query: [URLQueryItem], body: Data?, authenticated: Bool) async throws -> Response {
         let data = try await requestData(path, method: method, query: query, body: body, authenticated: authenticated)
         do { return try decoder.decode(Response.self, from: data) }
         catch { throw RivuneAPIError.invalidResponse }
