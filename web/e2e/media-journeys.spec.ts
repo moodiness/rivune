@@ -1,5 +1,5 @@
 import { expect, test } from "./fixtures/rivune";
-import { selectOption, selectOptions } from "./helpers/select";
+import { selectListbox, selectOption, selectOptions } from "./helpers/select";
 
 function longSeason(episodeCount: number) {
   return {
@@ -1316,6 +1316,16 @@ test("series guide switches to a selected TVDB episode order", async ({ page, ri
     "Story Order",
     "Streaming Order",
   ]);
+  const orderListbox = await selectListbox(order);
+  const triggerTypography = await order.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight, letterSpacing: style.letterSpacing, lineHeight: style.lineHeight };
+  });
+  const optionTypography = await orderListbox.getByRole("option").nth(1).evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight, letterSpacing: style.letterSpacing, lineHeight: style.lineHeight };
+  });
+  expect(optionTypography).toEqual(triggerTypography);
 
   await selectOption(order, "2");
   await expect(order).toHaveAttribute("data-value", "2");

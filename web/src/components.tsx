@@ -44,7 +44,7 @@ export type SelectProps = {
   "aria-invalid"?: boolean | "false" | "true" | "grammar" | "spelling";
 };
 
-type SelectPosition = { left: number; top: number; width: number; maxHeight: number; above: boolean };
+type SelectPosition = { left: number; top: number; width: number; maxHeight: number; above: boolean; fontFamily: string; fontSize: string; fontWeight: string; letterSpacing: string; lineHeight: string };
 
 function selectToken(name: string): number {
   return Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
@@ -98,6 +98,7 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
 
     const updatePosition = () => {
       const rect = trigger.getBoundingClientRect();
+      const triggerStyle = getComputedStyle(trigger);
       const viewport = window.visualViewport;
       const viewportLeft = viewport?.offsetLeft ?? 0;
       const viewportTop = viewport?.offsetTop ?? 0;
@@ -114,7 +115,7 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
       const availableAbove = rect.top - viewportTop - viewportPadding - popupGap;
       const above = availableBelow < maximumHeight && availableAbove > availableBelow;
       const width = Math.min(Math.max(Math.min(rect.width, maximumWidth), minimumWidth), viewportWidth - viewportPadding * 2);
-      const preferredLeft = getComputedStyle(trigger).direction === "rtl" ? rect.right - width : rect.left;
+      const preferredLeft = triggerStyle.direction === "rtl" ? rect.right - width : rect.left;
       const left = Math.max(viewportLeft + viewportPadding, Math.min(preferredLeft, viewportRight - viewportPadding - width));
       setPosition({
         left,
@@ -122,6 +123,11 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
         width,
         maxHeight: Math.max(0, Math.min(maximumHeight, above ? availableAbove : availableBelow)),
         above,
+        fontFamily: triggerStyle.fontFamily,
+        fontSize: triggerStyle.fontSize,
+        fontWeight: triggerStyle.fontWeight,
+        letterSpacing: triggerStyle.letterSpacing,
+        lineHeight: triggerStyle.lineHeight,
       });
     };
 
@@ -246,7 +252,7 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
         aria-label={ariaLabel}
         aria-labelledby={ariaLabelledBy ?? (ariaLabel ? undefined : triggerID)}
         className={`select__listbox ${position?.above ? "select__listbox--above" : ""}`}
-        style={position ? { left: position.left, top: position.top, width: position.width, maxHeight: position.maxHeight } : undefined}
+        style={position ? { left: position.left, top: position.top, width: position.width, maxHeight: position.maxHeight, fontFamily: position.fontFamily, fontSize: position.fontSize, fontWeight: position.fontWeight, letterSpacing: position.letterSpacing, lineHeight: position.lineHeight } : undefined}
       >
         {options.map((option, index) => option.disabled && option.value === "" ? null : <div
           id={`${listboxID}-option-${index}`}
