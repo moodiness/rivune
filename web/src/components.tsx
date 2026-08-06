@@ -106,13 +106,14 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
       const viewportPadding = selectToken("--select-viewport-padding");
       const popupGap = selectToken("--select-popup-gap");
       const minimumWidth = selectToken("--select-popup-min-width");
+      const maximumWidth = selectToken("--select-popup-max-width");
       const maximumHeight = selectToken("--select-popup-max-height");
       const viewportRight = viewportLeft + viewportWidth;
       const viewportBottom = viewportTop + viewportHeight;
       const availableBelow = viewportBottom - viewportPadding - rect.bottom - popupGap;
       const availableAbove = rect.top - viewportTop - viewportPadding - popupGap;
       const above = availableBelow < maximumHeight && availableAbove > availableBelow;
-      const width = Math.min(Math.max(rect.width, minimumWidth), viewportWidth - viewportPadding * 2);
+      const width = Math.min(Math.max(Math.min(rect.width, maximumWidth), minimumWidth), viewportWidth - viewportPadding * 2);
       const preferredLeft = getComputedStyle(trigger).direction === "rtl" ? rect.right - width : rect.left;
       const left = Math.max(viewportLeft + viewportPadding, Math.min(preferredLeft, viewportRight - viewportPadding - width));
       setPosition({
@@ -247,7 +248,7 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
         className={`select__listbox ${position?.above ? "select__listbox--above" : ""}`}
         style={position ? { left: position.left, top: position.top, width: position.width, maxHeight: position.maxHeight } : undefined}
       >
-        {options.map((option, index) => <div
+        {options.map((option, index) => option.disabled && option.value === "" ? null : <div
           id={`${listboxID}-option-${index}`}
           key={option.value}
           role="option"

@@ -1,6 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import { CATEGORY_IDS, DEVICE_IDS, expect, test } from "./fixtures/rivune";
-import { selectOption } from "./helpers/select";
+import { selectListbox, selectOption } from "./helpers/select";
 
 async function openAdministration(page: Page, tab?: "Categories" | "Profiles" | "Devices") {
   await page.goto("/");
@@ -277,10 +277,26 @@ test("avatar previews keep one blob URL and revoke it when the editor closes", a
 });
 
 test("a single profile move preserves the profile identity and exact request body", async ({ page, rivune }) => {
+  await page.setViewportSize({ width: 604, height: 500 });
   await openAdministration(page, "Profiles");
   await profileCard(page, "Bob").getByRole("button", { name: "Move", exact: true }).click();
   const moveDialog = page.locator("dialog");
-  await selectOption(moveDialog.getByLabel("Destination category"), CATEGORY_IDS.household);
+  const destination = moveDialog.getByLabel("Destination category");
+  await selectOption(destination, CATEGORY_IDS.household);
+  await destination.click();
+  const listbox = await selectListbox(destination);
+  await expect(listbox.locator('[role="option"][data-value=""]')).toHaveCount(0);
+  await destination.hover();
+  const triggerStyle = await destination.evaluate((trigger) => {
+    const style = getComputedStyle(trigger);
+    return { backgroundColor: style.backgroundColor, borderLeftWidth: style.borderLeftWidth };
+  });
+  expect(triggerStyle).toEqual({ backgroundColor: "rgba(0, 0, 0, 0)", borderLeftWidth: "0px" });
+  const triggerBounds = await destination.boundingBox();
+  const listboxBounds = await listbox.boundingBox();
+  expect(listboxBounds?.width ?? Infinity).toBeLessThanOrEqual(360);
+  expect(listboxBounds?.width ?? Infinity).toBeLessThan(triggerBounds?.width ?? 0);
+  await destination.press("Escape");
   await moveDialog.getByRole("button", { name: "Confirm move" }).click();
 
   const move = await rivune.waitForRequest("/api/v1/profiles/category-moves", "POST");

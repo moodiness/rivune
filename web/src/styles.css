@@ -64,6 +64,7 @@
     --select-viewport-padding: 8px;
     --select-popup-gap: 4px;
     --select-popup-min-width: 180px;
+    --select-popup-max-width: 360px;
     --select-popup-max-height: 320px;
     --safe-inline-start: env(safe-area-inset-left);
     --safe-inline-end: env(safe-area-inset-right);
@@ -205,6 +206,8 @@
   .field > div:focus-within { color: var(--accent); border-color: rgba(242, 154, 120, .55); background: rgba(255, 255, 255, .065); box-shadow: 0 0 0 4px rgba(242, 154, 120, .08); }
   .field input, .field textarea { width: 100%; min-width: 0; color: var(--text); background: transparent; border: 0; outline: 0; }
   .field .select__trigger { min-height: var(--control-height); flex: 1 1 auto; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; outline: 0; }
+  .field .select__trigger:hover:not(:disabled), .field .select__trigger[aria-expanded="true"] { border-color: transparent; background: transparent; box-shadow: none; }
+  .field > div:has(.select__trigger:hover:not(:disabled)):not(:focus-within) { border-color: var(--line-strong); background: rgba(255, 255, 255, .055); }
   .field .select__trigger:focus-visible { outline: 0; }
   .field > textarea { max-width: 100%; min-height: calc(var(--space-8) + var(--space-8) + var(--space-4)); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-subtle); line-height: 1.5; resize: vertical; transition: border-color var(--duration-fast), background var(--duration-fast), box-shadow var(--duration-fast); }
   .field > textarea::placeholder { color: var(--text-soft); opacity: 1; }
@@ -1042,10 +1045,14 @@
   .assignment-picker__section > header h4 { margin: 0; color: var(--text); font-size: var(--font-size-md); }
   .assignment-picker__section > header p { margin: var(--space-1) 0 0; color: var(--text-muted); font-size: var(--font-size-sm); line-height: 1.5; }
   .assignment-picker__options { min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(calc(var(--space-8) * 3), 1fr)); gap: var(--space-2); }
-  .assignment-picker__options label { --category-color: var(--accent); min-width: 0; min-height: var(--touch-target); display: grid; grid-template-columns: var(--space-5) calc(var(--space-8) - var(--space-3)) minmax(0, 1fr); align-items: center; gap: var(--space-2); padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-subtle); cursor: pointer; transition: border-color var(--duration-fast), background var(--duration-fast); }
+  .assignment-picker__options label { --category-color: var(--accent); min-width: 0; min-height: var(--touch-target); display: grid; grid-template-columns: 22px calc(var(--space-8) - var(--space-3)) minmax(0, 1fr); align-items: center; gap: var(--space-2); padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-subtle); cursor: pointer; transition: border-color var(--duration-fast), background var(--duration-fast); }
   .assignment-picker__options label:hover { border-color: var(--line-strong); background: var(--surface-interactive); }
   .assignment-picker__options label.is-selected { border-color: color-mix(in srgb, var(--category-color) 45%, var(--line)); background: color-mix(in srgb, var(--category-color) 9%, transparent); }
-  .assignment-picker__options input { width: var(--space-5); height: var(--space-5); margin: 0; accent-color: var(--accent); cursor: pointer; }
+  .assignment-picker__options input { width: 22px; height: 22px; display: grid; place-items: center; margin: 0; appearance: none; -webkit-appearance: none; border: 1px solid var(--line-strong); border-radius: 7px; background: rgba(255, 255, 255, .035); box-shadow: inset 0 1px rgba(255, 255, 255, .06); cursor: pointer; transition: border-color var(--duration-fast), background var(--duration-fast), box-shadow var(--duration-fast); }
+  .assignment-picker__options input::after { content: ""; width: 6px; height: 10px; border: solid var(--accent-ink); border-width: 0 2px 2px 0; opacity: 0; transform: translateY(-1px) rotate(45deg) scale(.7); transition: opacity var(--duration-fast), transform var(--duration-fast); }
+  .assignment-picker__options input:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--surface-accent); }
+  .assignment-picker__options input:checked { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 0 3px var(--surface-accent), inset 0 1px rgba(255, 255, 255, .3); }
+  .assignment-picker__options input:checked::after { opacity: 1; transform: translateY(-1px) rotate(45deg) scale(1); }
   .assignment-picker__options input:focus-visible { outline: var(--focus-ring-width) solid var(--accent); outline-offset: var(--focus-ring-offset); }
   .assignment-picker__options input:disabled, .assignment-picker__options label:has(input:disabled) { cursor: not-allowed; opacity: .6; }
   .assignment-picker__options img, .assignment-picker__mark { width: calc(var(--space-8) - var(--space-3)); height: calc(var(--space-8) - var(--space-3)); display: grid; place-items: center; border-radius: var(--space-2); object-fit: cover; }

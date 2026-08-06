@@ -406,6 +406,11 @@ test("category-first addon assignment keeps durable categories independent throu
   await expect(editCategories.getByText("Kids", { exact: true })).toBeVisible();
   await expect(editCategories.getByText("Guest", { exact: true })).toBeVisible();
   await expect(editCategories.locator("label").filter({ hasText: "Kids" }).getByRole("checkbox")).toBeChecked();
+  const selectedCheckboxStyle = await editCategories.locator("label").filter({ hasText: "Kids" }).getByRole("checkbox").evaluate((checkbox) => {
+    const style = getComputedStyle(checkbox);
+    return { appearance: style.appearance, borderRadius: style.borderRadius, width: style.width, backgroundColor: style.backgroundColor };
+  });
+  expect(selectedCheckboxStyle).toEqual({ appearance: "none", borderRadius: "7px", width: "22px", backgroundColor: "rgb(242, 154, 120)" });
   const editProfiles = dialog.locator(".assignment-picker__profiles");
   await expect(editProfiles).not.toHaveAttribute("open", "");
   await expect(editProfiles.getByText("Individual profiles", { exact: true })).not.toBeVisible();
