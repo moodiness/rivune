@@ -404,12 +404,12 @@ func catalogDescriptors(addons []InstalledAddon) []CatalogDescriptor {
 	for _, installed := range addons {
 		for _, catalog := range installed.parsedManifest.Catalogs {
 			catalogs = append(catalogs, CatalogDescriptor{
-				AddonID: installed.ID, AddonName: installed.parsedManifest.Name, ManifestID: installed.parsedManifest.ID, Position: installed.Position, Catalog: catalog, Searchable: catalog.SupportsSearch(),
+				AddonID: installed.ID, AddonName: installed.parsedManifest.Name, AddonLogoURL: installed.parsedManifest.Logo, ManifestID: installed.parsedManifest.ID, Position: installed.Position, Catalog: catalog, Searchable: catalog.SupportsSearch(),
 			})
 		}
 		for _, catalog := range installed.parsedManifest.AddonCatalogs {
 			catalogs = append(catalogs, CatalogDescriptor{
-				AddonID: installed.ID, AddonName: installed.parsedManifest.Name, ManifestID: installed.parsedManifest.ID, Position: installed.Position, Catalog: catalog, AddonCatalog: true,
+				AddonID: installed.ID, AddonName: installed.parsedManifest.Name, AddonLogoURL: installed.parsedManifest.Logo, ManifestID: installed.parsedManifest.ID, Position: installed.Position, Catalog: catalog, AddonCatalog: true,
 			})
 		}
 	}

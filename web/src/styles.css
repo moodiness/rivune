@@ -592,6 +592,22 @@
   .search-result-section { min-width: 0; }
   .search-result-section > .section-heading { position: relative; align-items: center; padding-bottom: 14px; }
   .search-result-section > .section-heading::after { content: ""; width: 60px; height: 3px; position: absolute; bottom: 0; left: 0; border-radius: 999px; background: var(--text); }
+  .search-source-groups { gap: 32px; }
+  .search-source-section { display: grid; gap: 20px; }
+  .search-source-section > .search-source-heading { padding-bottom: 12px; }
+  .search-source-heading__toggle { width: 100%; min-width: 0; display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 0; color: var(--text); text-align: start; background: transparent; }
+  .search-source-heading__toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; border-radius: 10px; }
+  .search-source-heading__logo { width: 44px; height: 44px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; color: var(--accent-strong); background: var(--surface-subtle); font-size: 13px; font-weight: 800; letter-spacing: -.03em; }
+  .search-source-heading__logo img { width: 100%; height: 100%; object-fit: contain; }
+  .search-source-heading__copy { min-width: 0; display: grid; gap: 3px; }
+  .search-source-heading__copy h2 { overflow: hidden; margin: 0; font-size: clamp(20px, 2.2vw, 27px); line-height: 1.15; text-overflow: ellipsis; white-space: nowrap; }
+  .search-source-heading__copy small { color: var(--text-muted); font-size: 10px; }
+  .search-source-heading__chevron { color: var(--text-muted); transform: rotate(90deg); transition: transform .2s var(--ease); }
+  .search-source-section.is-collapsed .search-source-heading__chevron { transform: rotate(0); }
+  .search-source-body { min-width: 0; display: grid; gap: 20px; }
+  .search-source-body > .notice { width: fit-content; max-width: 100%; justify-self: center; }
+  .search-source-actions { display: flex; justify-content: center; padding-top: 8px; }
+  .search-source-actions .button { min-height: var(--control-height); }
   .filter-pills { min-width: 0; display: flex; flex-wrap: wrap; gap: 7px; margin: 18px 0 30px; }
   .filter-pills button { min-height: var(--control-height); display: flex; align-items: center; gap: 7px; padding: 0 13px; border-radius: 999px; color: var(--text-muted); background: var(--surface-subtle); border: 1px solid transparent; font-size: 11px; scroll-margin-inline: var(--space-3); }
   .filter-pills button:hover { color: var(--text); }

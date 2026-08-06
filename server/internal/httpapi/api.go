@@ -221,10 +221,15 @@ type collectionArtworkPresenter interface {
 	LocalizeCollectionLookupResults(context.Context, []collection.LookupResult)
 }
 
+type catalogArtworkPresenter interface {
+	LocalizeCatalogDescriptors(context.Context, []addon.CatalogDescriptor)
+}
+
 type API struct {
 	config              config.Config
 	addons              addonService
 	artwork             *artworkcache.Service
+	catalogArtwork      catalogArtworkPresenter
 	collectionArtwork   collectionArtworkPresenter
 	calendar            calendarService
 	calendarRefresh     calendarRefreshWorker
@@ -333,6 +338,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	instanceManager := instance.NewService(pool, cfg.SetupToken, cfg.Timezone)
 	return &API{
 		artwork:             artworkService,
+		catalogArtwork:      artworkService,
 		collectionArtwork:   artworkService,
 		addons:              addonService,
 		config:              cfg,

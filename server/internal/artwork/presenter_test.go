@@ -114,6 +114,37 @@ func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *te
 	}
 }
 
+func TestLocalizeCatalogDescriptorsHidesProviderLogosAndFailsClosed(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	providerLogo := fixture.URL + "/addon-logo.png?token=private"
+	values := []addon.CatalogDescriptor{
+		{AddonID: "first", AddonName: "First", AddonLogoURL: providerLogo, ManifestID: "org.example.first", Position: 2},
+		{AddonID: "second", AddonName: "Second", AddonLogoURL: "not a URL", ManifestID: "org.example.second", Position: 3},
+	}
+
+	service.LocalizeCatalogDescriptors(context.Background(), values)
+
+	normalized, err := normalizeURL(providerLogo, false)
+	if err != nil {
+		t.Fatalf("normalize descriptor logo: %v", err)
+	}
+	if got, want := values[0].AddonLogoURL, publicPrefix+artworkKey(normalized); got != want {
+		t.Fatalf("localized descriptor logo = %q, want %q", got, want)
+	}
+	if strings.Contains(values[0].AddonLogoURL, fixture.URL) || strings.Contains(values[0].AddonLogoURL, "private") {
+		t.Fatalf("localized descriptor exposed provider URL: %q", values[0].AddonLogoURL)
+	}
+	if values[1].AddonLogoURL != "" {
+		t.Fatalf("invalid descriptor logo did not fail closed: %q", values[1].AddonLogoURL)
+	}
+	if values[0].AddonID != "first" || values[0].AddonName != "First" || values[0].ManifestID != "org.example.first" || values[0].Position != 2 || values[1].AddonID != "second" {
+		t.Fatalf("descriptor order or unrelated fields changed: %#v", values)
+	}
+}
+
 func TestPresentAddonResourcesLocalizesNestedVideoThumbnailsBeforeSerialization(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

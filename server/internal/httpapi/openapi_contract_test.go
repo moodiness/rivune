@@ -190,14 +190,15 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		api.auth = &fakeAuthService{principal: contractPrincipal()}
 		api.addons = &fakeAddonService{catalogs: []addon.CatalogDescriptor{
 			{
-				AddonID: contractAddonID, AddonName: "Contract Add-on", ManifestID: "org.rivune.contract",
+				AddonID: contractAddonID, AddonName: "Contract Add-on", AddonLogoURL: "https://origin.invalid/contract-logo.png", ManifestID: "org.rivune.contract",
 				Position: 0, Catalog: addon.ManifestCatalog{Type: "movie", ID: "featured", Name: "Featured"}, Searchable: true,
 			},
 			{
-				AddonID: contractAddonID, AddonName: "Contract Add-on", ManifestID: "org.rivune.contract",
+				AddonID: contractAddonID, AddonName: "Contract Add-on", AddonLogoURL: "https://origin.invalid/contract-logo.png", ManifestID: "org.rivune.contract",
 				Position: 0, Catalog: addon.ManifestCatalog{Type: "all", ID: "community", Name: "Community"}, AddonCatalog: true,
 			},
 		}}
+		api.catalogArtwork = &fakeCatalogArtworkPresenter{}
 		request := authenticatedContractRequest(http.MethodGet, "/api/v1/addons/catalogs", nil)
 		response := serveContractRequest(t, api, request, http.StatusOK)
 		validateContractResponse(t, document, "/addons/catalogs", nil, request, response)

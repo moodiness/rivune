@@ -755,7 +755,7 @@ func TestCatalogDescriptorsIncludeAddonNamesAndPreserveServiceOrder(t *testing.T
 			ID:       "11111111-1111-4111-8111-111111111111",
 			Position: 0,
 			parsedManifest: Manifest{
-				ID: "org.example.first", Name: "First Add-on",
+				ID: "org.example.first", Name: "First Add-on", Logo: "https://provider.invalid/first-logo.png",
 				Catalogs: []ManifestCatalog{regularCatalog}, AddonCatalogs: []ManifestCatalog{addonCatalog},
 			},
 		},
@@ -763,7 +763,7 @@ func TestCatalogDescriptorsIncludeAddonNamesAndPreserveServiceOrder(t *testing.T
 			ID:       "22222222-2222-4222-8222-222222222222",
 			Position: 1,
 			parsedManifest: Manifest{
-				ID: "org.example.second", Name: "Second Add-on", Catalogs: []ManifestCatalog{secondCatalog},
+				ID: "org.example.second", Name: "Second Add-on", Logo: "https://provider.invalid/second-logo.png", Catalogs: []ManifestCatalog{secondCatalog},
 			},
 		},
 	}
@@ -771,15 +771,15 @@ func TestCatalogDescriptorsIncludeAddonNamesAndPreserveServiceOrder(t *testing.T
 	got := catalogDescriptors(addons)
 	want := []CatalogDescriptor{
 		{
-			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", ManifestID: "org.example.first",
+			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", AddonLogoURL: "https://provider.invalid/first-logo.png", ManifestID: "org.example.first",
 			Position: 0, Catalog: regularCatalog, Searchable: true,
 		},
 		{
-			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", ManifestID: "org.example.first",
+			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", AddonLogoURL: "https://provider.invalid/first-logo.png", ManifestID: "org.example.first",
 			Position: 0, Catalog: addonCatalog, AddonCatalog: true,
 		},
 		{
-			AddonID: "22222222-2222-4222-8222-222222222222", AddonName: "Second Add-on", ManifestID: "org.example.second",
+			AddonID: "22222222-2222-4222-8222-222222222222", AddonName: "Second Add-on", AddonLogoURL: "https://provider.invalid/second-logo.png", ManifestID: "org.example.second",
 			Position: 1, Catalog: secondCatalog,
 		},
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/moodiness/rivune/server/internal/addon"
@@ -137,6 +138,15 @@ func (a *API) addonCatalogDescriptors(w http.ResponseWriter, r *http.Request, pr
 		a.writeAddonError(w, "list addon catalogs", err)
 		return
 	}
+	if a.catalogArtwork != nil {
+		a.catalogArtwork.LocalizeCatalogDescriptors(r.Context(), catalogs)
+	} else if a.artwork != nil {
+		a.artwork.LocalizeCatalogDescriptors(r.Context(), catalogs)
+	} else {
+		for index := range catalogs {
+			catalogs[index].AddonLogoURL = ""
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"catalogs": catalogs})
 }
 
@@ -147,6 +157,10 @@ func (a *API) fetchAddonResource(w http.ResponseWriter, r *http.Request, princip
 	}
 	path, err := addonResourcePath(r)
 	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_request", err.Error())
+		return
+	}
+	if err := validateExactResourcePagination(path.Extra); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_request", err.Error())
 		return
 	}
@@ -252,6 +266,23 @@ func addonResourcePath(r *http.Request) (addon.ResourcePath, error) {
 		ID:       r.PathValue("id"),
 		Extra:    extra,
 	}, nil
+}
+
+func validateExactResourcePagination(extra []addon.ExtraValue) error {
+	for _, value := range extra {
+		parsed, err := strconv.Atoi(value.Value)
+		switch value.Name {
+		case "skip":
+			if err != nil || parsed < 0 {
+				return errors.New("skip must be an integer greater than or equal to 0")
+			}
+		case "limit":
+			if err != nil || parsed < 1 || parsed > 100 {
+				return errors.New("limit must be an integer between 1 and 100")
+			}
+		}
+	}
+	return nil
 }
 
 func parseAddonExtras(rawQuery string, reserved map[string]bool) ([]addon.ExtraValue, error) {

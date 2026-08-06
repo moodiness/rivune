@@ -199,8 +199,12 @@ function mediaFromBatch(batch: ResourceBatch): MediaItem[] {
   return output;
 }
 
+function mediaResultCount(result: ResourceResult): number {
+  return Array.isArray(result.payload.metas) ? result.payload.metas.length : 0;
+}
+
 function mediaPageIsFull(batch: ResourceBatch, limit: number): boolean {
-  return batch.results.some((result) => Array.isArray(result.payload.metas) && result.payload.metas.length >= limit);
+  return batch.results.some((result) => mediaResultCount(result) >= limit);
 }
 
 function summarizeSearchOutcomes(outcomes: PromiseSettledResult<ResourceBatch>[], limit: number) {
@@ -273,8 +277,19 @@ function mergeUniqueMedia(current: MediaItem[], incoming: MediaItem[]): MediaIte
 
 type SearchSourceSection = {
   key: string;
+  addonId: string;
+  type: string;
+  catalogId: string;
   label: string;
+  logoUrl?: string;
+  declaredExtras: string[];
   items: MediaItem[];
+  count: number;
+  nextSkip: number;
+  hasMore: boolean;
+  loading: boolean;
+  error: string;
+  collapsed: boolean;
 };
 
 function searchSourceKey(addonId: string, type: string, catalogId: string): string {
@@ -286,6 +301,18 @@ function searchSourceLabel(descriptor: AddonCatalogDescriptor | undefined, resul
   const catalogName = descriptor?.catalog.name?.trim();
   if (addonName && catalogName && addonName !== catalogName) return `${addonName} · ${catalogName}`;
   return addonName || catalogName || descriptor?.catalog.id.trim() || result.id.trim() || descriptor?.addonId.trim() || result.addonId;
+}
+
+function effectiveCatalogExtras(descriptor: AddonCatalogDescriptor | undefined): string[] {
+  if (!descriptor) return [];
+  const names = descriptor.catalog.extra !== undefined
+    ? descriptor.catalog.extra.map((extra) => extra.name)
+    : descriptor.catalog.extraSupported ?? [];
+  return [...new Set(names)];
+}
+
+function sourceInitials(label: string): string {
+  return label.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
 }
 
 function orderSearchSourceSections(sections: SearchSourceSection[], descriptors: AddonCatalogDescriptor[]): SearchSourceSection[] {
@@ -304,7 +331,7 @@ function orderSearchSourceSections(sections: SearchSourceSection[], descriptors:
   });
 }
 
-function collectSearchSourcePage(resourceBatches: ResourceBatch[], descriptors: AddonCatalogDescriptor[], currentItems: MediaItem[] = []): { items: MediaItem[]; sections: SearchSourceSection[] } {
+function collectSearchSourcePage(resourceBatches: ResourceBatch[], descriptors: AddonCatalogDescriptor[], currentItems: MediaItem[] = [], pageSize = 24): { items: MediaItem[]; sections: SearchSourceSection[] } {
   const descriptorBySource = new Map(descriptors.map((descriptor) => [searchSourceKey(descriptor.addonId, descriptor.catalog.type, descriptor.catalog.id), descriptor]));
   const seen = new Set(currentItems.map(mediaIdentity));
   const items: MediaItem[] = [];
@@ -312,31 +339,41 @@ function collectSearchSourcePage(resourceBatches: ResourceBatch[], descriptors: 
   for (const batch of resourceBatches) {
     for (const result of batch.results) {
       const key = searchSourceKey(result.addonId, result.type, result.id);
-      for (const item of mediaFromResourceResult(result)) {
+      const descriptor = descriptorBySource.get(key);
+      const declaredExtras = effectiveCatalogExtras(descriptor);
+      const sourceItems = mediaFromResourceResult(result);
+      const rawItemCount = mediaResultCount(result);
+      for (const item of sourceItems) {
         const identity = mediaIdentity(item);
         if (seen.has(identity)) continue;
         seen.add(identity);
         items.push(item);
         let section = sectionsBySource.get(key);
         if (!section) {
-          section = { key, label: searchSourceLabel(descriptorBySource.get(key), result), items: [] };
+          section = {
+            key,
+            addonId: result.addonId,
+            type: result.type,
+            catalogId: result.id,
+            label: searchSourceLabel(descriptor, result),
+            logoUrl: descriptor?.addonLogoUrl,
+            declaredExtras,
+            count: 0,
+            items: [],
+            nextSkip: rawItemCount,
+            hasMore: declaredExtras.includes("skip") && rawItemCount >= pageSize,
+            loading: false,
+            error: "",
+            collapsed: false,
+          };
           sectionsBySource.set(key, section);
         }
         section.items.push(item);
+        section.count += 1;
       }
     }
   }
   return { items, sections: orderSearchSourceSections([...sectionsBySource.values()], descriptors) };
-}
-
-function mergeSearchSourceSections(current: SearchSourceSection[], incoming: SearchSourceSection[], descriptors: AddonCatalogDescriptor[]): SearchSourceSection[] {
-  const merged = new Map(current.map((section) => [section.key, { ...section, items: [...section.items] }]));
-  for (const section of incoming) {
-    const existing = merged.get(section.key);
-    if (existing) existing.items.push(...section.items);
-    else merged.set(section.key, section);
-  }
-  return orderSearchSourceSections([...merged.values()], descriptors);
 }
 
 function tvSubtitle(item: MediaItem): string {
@@ -1128,6 +1165,8 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   const [checkedTvIdentities, setCheckedTvIdentities] = useState<Set<string>>(() => new Set());
   const loadedProfileRef = useRef("");
   const paginationControllerRef = useRef<AbortController | null>(null);
+  const sourcePaginationControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const visibleIdentityRef = useRef<Set<string>>(new Set());
   const membershipRefreshControllerRef = useRef<AbortController | null>(null);
   const searchRequestGenerationRef = useRef(0);
   const membershipRevisionRef = useRef(mediaRevision);
@@ -1167,6 +1206,9 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
 
   useEffect(() => {
     if (!mediaPreferences.profileID || loadedProfileRef.current === mediaPreferences.profileID) return;
+    for (const controller of sourcePaginationControllersRef.current.values()) controller.abort();
+    sourcePaginationControllersRef.current.clear();
+    visibleIdentityRef.current.clear();
     loadedProfileRef.current = mediaPreferences.profileID;
     setQuery(sessionStorage.getItem(`rivune.search.${mediaPreferences.profileID}`) ?? "");
     setFilter("all");
@@ -1200,6 +1242,9 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   useEffect(() => {
     const generation = ++searchRequestGenerationRef.current;
     paginationControllerRef.current?.abort();
+    for (const sourceController of sourcePaginationControllersRef.current.values()) sourceController.abort();
+    sourcePaginationControllersRef.current.clear();
+    visibleIdentityRef.current.clear();
     membershipRefreshControllerRef.current?.abort();
     setLoadingMore(false);
     setTvLibraryMembership(new Map());
@@ -1259,12 +1304,13 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
           }
         }
         if (!active || controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
+        visibleIdentityRef.current = new Set(displayedItems.map(mediaIdentity));
         setItems(displayedItems);
         setSourceSections(displayedSourceSections);
         setTvLibraryMembership(membership.saved);
         setCheckedTvIdentities(membership.checked);
         setNextSkip(pageSize);
-        setHasMore(hasSuccessfulResource && summary.hasFullPage);
+        setHasMore(filter === "all" && hasSuccessfulResource && summary.hasFullPage);
         if (!hasFailures) {
           setError("");
           setWarning("");
@@ -1316,11 +1362,13 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
 
   useEffect(() => () => {
     paginationControllerRef.current?.abort();
+    for (const controller of sourcePaginationControllersRef.current.values()) controller.abort();
+    sourcePaginationControllersRef.current.clear();
     membershipRefreshControllerRef.current?.abort();
   }, []);
 
   async function loadMore() {
-    if (!discoveryReady || searchTypes.length === 0) return;
+    if (filter !== "all" || !discoveryReady || searchTypes.length === 0) return;
     paginationControllerRef.current?.abort();
     const controller = new AbortController();
     const generation = searchRequestGenerationRef.current;
@@ -1332,8 +1380,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
       const summary = summarizeSearchOutcomes(outcomes, pageSize);
       const hasFailures = summary.httpFailureCount + summary.internalFailureCount > 0;
       if (summary.successfulResourceResultCount > 0) {
-        const sourcePage = filter === "all" ? undefined : collectSearchSourcePage(summary.resourceBatches, selectedSearchDescriptors, items);
-        const additions = sourcePage?.items ?? mergeUniqueMedia([], summary.items);
+        const additions = mergeUniqueMedia([], summary.items);
         const identities = tvMembershipIdentities(additions).slice(0, 100);
         let membership: TVMembershipMaps | undefined;
         if (identities.length > 0) {
@@ -1348,8 +1395,11 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
           setTvLibraryMembership((current) => new Map([...current, ...membership.saved]));
           setCheckedTvIdentities((current) => new Set([...current, ...membership.checked]));
         }
-        setItems((current) => mergeUniqueMedia(current, additions));
-        if (sourcePage) setSourceSections((current) => mergeSearchSourceSections(current, sourcePage.sections, selectedSearchDescriptors));
+        setItems((current) => {
+          const merged = mergeUniqueMedia(current, additions);
+          visibleIdentityRef.current = new Set(merged.map(mediaIdentity));
+          return merged;
+        });
         setNextSkip((current) => current + pageSize);
         setHasMore(summary.hasFullPage);
       } else if (!hasFailures) {
@@ -1359,6 +1409,67 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     } finally {
       if (!controller.signal.aborted && searchRequestGenerationRef.current === generation) setLoadingMore(false);
     }
+  }
+
+  async function loadMoreSource(sectionKey: string) {
+    const section = sourceSections.find((candidate) => candidate.key === sectionKey);
+    if (!section || section.loading || (!section.hasMore && !section.error)) return;
+    sourcePaginationControllersRef.current.get(sectionKey)?.abort();
+    const controller = new AbortController();
+    const generation = searchRequestGenerationRef.current;
+    sourcePaginationControllersRef.current.set(sectionKey, controller);
+    setSourceSections((current) => current.map((candidate) => candidate.key === sectionKey ? { ...candidate, loading: true, error: "" } : candidate));
+    const extras: { search?: string; skip?: number; limit?: number } = {};
+    if (section.declaredExtras.includes("search")) extras.search = normalizedQuery;
+    if (section.declaredExtras.includes("skip")) extras.skip = section.nextSkip;
+    if (section.declaredExtras.includes("limit")) extras.limit = pageSize;
+    try {
+      const result = await api.addonCatalog(section.addonId, section.type, section.catalogId, extras, controller.signal);
+      if (controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
+      const rawItemCount = mediaResultCount(result);
+      const pageItems = mediaFromResourceResult(result);
+      let candidates = pageItems.filter((item) => !visibleIdentityRef.current.has(mediaIdentity(item)));
+      let membership: TVMembershipMaps | undefined;
+      const identities = tvMembershipIdentities(candidates).slice(0, 100);
+      if (identities.length > 0) {
+        try {
+          membership = tvMembershipMaps(identities, await api.tvLibraryMembership(identities, controller.signal));
+        } catch {
+          if (controller.signal.aborted) return;
+        }
+      }
+      if (controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
+      candidates = candidates.filter((item) => {
+        const identity = mediaIdentity(item);
+        if (visibleIdentityRef.current.has(identity)) return false;
+        visibleIdentityRef.current.add(identity);
+        return true;
+      });
+      if (membership) {
+        setTvLibraryMembership((current) => new Map([...current, ...membership.saved]));
+        setCheckedTvIdentities((current) => new Set([...current, ...membership.checked]));
+      }
+      if (candidates.length > 0) setItems((current) => [...current, ...candidates]);
+      setSourceSections((current) => current.map((candidate) => candidate.key === sectionKey ? {
+        ...candidate,
+        count: candidate.count + candidates.length,
+        items: candidates.length > 0 ? [...candidate.items, ...candidates] : candidate.items,
+        nextSkip: candidate.nextSkip + rawItemCount,
+        hasMore: candidate.declaredExtras.includes("skip") && rawItemCount >= pageSize,
+        loading: false,
+        error: "",
+      } : candidate));
+    } catch {
+      if (!controller.signal.aborted && searchRequestGenerationRef.current === generation) {
+        setSourceSections((current) => current.map((candidate) => candidate.key === sectionKey ? { ...candidate, loading: false, error: t("search.warning.sourcesUnavailable") } : candidate));
+      }
+    } finally {
+      if (sourcePaginationControllersRef.current.get(sectionKey) === controller) sourcePaginationControllersRef.current.delete(sectionKey);
+    }
+  }
+
+  function toggleSourceSection(sectionKey: string) {
+    setSourceSections((current) => current.map((section) => section.key === sectionKey ? { ...section, collapsed: !section.collapsed } : section));
   }
 
   async function toggleTvLibrary(item: MediaItem) {
@@ -1394,6 +1505,9 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   function updateQuery(value: string) {
     searchRequestGenerationRef.current++;
     paginationControllerRef.current?.abort();
+    for (const controller of sourcePaginationControllersRef.current.values()) controller.abort();
+    sourcePaginationControllersRef.current.clear();
+    visibleIdentityRef.current.clear();
     membershipRefreshControllerRef.current?.abort();
     setQuery(value);
     setItems([]);
@@ -1410,6 +1524,9 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     if (value === filter) return;
     searchRequestGenerationRef.current++;
     paginationControllerRef.current?.abort();
+    for (const controller of sourcePaginationControllersRef.current.values()) controller.abort();
+    sourcePaginationControllersRef.current.clear();
+    visibleIdentityRef.current.clear();
     membershipRefreshControllerRef.current?.abort();
     setFilter(value);
     setItems([]);
@@ -1469,11 +1586,26 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
               <SectionHeading title={searchTypeLabel(group.type)} />
               <div className="media-grid media-grid--adaptive">{group.items.map(renderSearchResult)}</div>
             </section>)}</div>
-            : <div className="search-result-groups" onKeyDown={handleBrowseGridKeyDown}>{sourceSections.map((section) => <section className="search-result-section" key={section.key}>
-              <SectionHeading title={section.label} />
-              <div className="media-grid media-grid--adaptive">{section.items.map(renderSearchResult)}</div>
-            </section>)}</div>}
-    {hasMore && items.length > 0 && <div className="load-more"><Button variant="secondary" loading={loadingMore} aria-label={t("common.actions.loadMore")} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
+            : <div className="search-result-groups search-source-groups" onKeyDown={handleBrowseGridKeyDown}>{sourceSections.map((section) => {
+              const bodyID = `search-source-${encodeURIComponent(section.key)}`;
+              const titleID = `${bodyID}-title`;
+              const countLabel = t(section.count === 1 ? "common.results.count.one" : "common.results.count.many", { count: section.count });
+              return <section className={`search-result-section search-source-section${section.collapsed ? " is-collapsed" : ""}`} key={section.key}>
+                <header className="section-heading search-source-heading">
+                  <button type="button" className="search-source-heading__toggle" aria-labelledby={titleID} aria-expanded={!section.collapsed} aria-controls={bodyID} onClick={() => toggleSourceSection(section.key)}>
+                    <span className="search-source-heading__logo" aria-hidden="true">{section.logoUrl ? <img src={section.logoUrl} alt="" /> : <span>{sourceInitials(section.label)}</span>}</span>
+                    <span className="search-source-heading__copy"><h2 id={titleID}>{section.label}</h2><small>{countLabel}</small></span>
+                    <ArrowRight className="search-source-heading__chevron" size={18} aria-hidden="true" />
+                  </button>
+                </header>
+                {!section.collapsed && <div id={bodyID} className="search-source-body" aria-busy={section.loading || undefined}>
+                  <div className="media-grid media-grid--adaptive">{section.items.map(renderSearchResult)}</div>
+                  {section.error && <Notice tone="warning"><span>{section.error}</span><Button variant="ghost" loading={section.loading} onClick={() => void loadMoreSource(section.key)}><RefreshCw size={16} /> {t("common.actions.tryAgain")}</Button></Notice>}
+                  {!section.error && section.hasMore && <div className="search-source-actions"><Button variant="secondary" loading={section.loading} aria-label={t("common.actions.loadMore")} onClick={() => void loadMoreSource(section.key)}>{t("common.actions.loadMore")}</Button></div>}
+                </div>}
+              </section>;
+            })}</div>}
+    {filter === "all" && hasMore && items.length > 0 && <div className="load-more"><Button variant="secondary" loading={loadingMore} aria-label={t("common.actions.loadMore")} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
   </div>;
 }
 

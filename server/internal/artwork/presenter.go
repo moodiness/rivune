@@ -171,6 +171,14 @@ func (service *Service) PresentInstalledAddons(ctx context.Context, values []add
 	}
 }
 
+func (service *Service) LocalizeCatalogDescriptors(ctx context.Context, values []addon.CatalogDescriptor) {
+	assignments := make([]urlAssignment, 0, len(values))
+	for index := range values {
+		addStringAssignment(&assignments, &values[index].AddonLogoURL)
+	}
+	service.applyURLAssignments(ctx, assignments)
+}
+
 func (service *Service) LocalizeCollectionLookupResults(ctx context.Context, values []collection.LookupResult) {
 	assignments := make([]urlAssignment, 0, len(values))
 	for index := range values {

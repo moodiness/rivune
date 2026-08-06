@@ -2093,9 +2093,24 @@ paths:
       description: >
         Calls one installed addon using the Stremio HTTP addon protocol. Generic
         access is restricted to catalog, addon_catalog, and meta resources.
-        Every query parameter is forwarded as a Stremio extra value. Content
+        Every query parameter is forwarded as a Stremio extra value after skip
+        and limit, when present, pass the bounded integer validation below. Content
         types, IDs, repeated extras, and custom ID prefixes remain opaque;
         provider URLs, headers, cookies, and credential fields are stripped.
+      parameters:
+        - name: skip
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+          description: Optional exact-resource offset forwarded as an extra value.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          description: Optional exact-resource page size forwarded as an extra value.
       security:
         - bearerAuth: []
       responses:
@@ -4063,6 +4078,12 @@ components:
         addonName:
           type: string
           description: Current display name of the profile-assigned add-on that declares this catalog.
+        addonLogoUrl:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          pattern: "^/api/v1/artwork/[0-9a-f]{64}$"
+          description: Optional same-origin localized add-on logo; raw provider URLs are never serialized.
         manifestId:
           type: string
         position:

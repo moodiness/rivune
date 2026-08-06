@@ -42,6 +42,7 @@ import type {
   ProfileSession,
   ResolvedFolder,
   ResourceBatch,
+  ResourceResult,
   SettingsLayer,
   SessionNotification,
   SeasonMetadata,
@@ -441,6 +442,7 @@ export const api = {
   deleteAddon: (id: string) => request<void>(`/addons/${id}`, { method: "DELETE" }),
   addonCatalogs: (signal?: AbortSignal) => request<{ catalogs: AddonCatalogDescriptor[] }>("/addons/catalogs", { signal }),
   search: (type: string, search: string, skip: number, limit: number, signal?: AbortSignal) => request<ResourceBatch>(`/addons/catalogs/search/${encodeURIComponent(type)}${query({ search, skip, limit })}`, { signal }),
+  addonCatalog: (addonId: string, type: string, catalogId: string, extras: { search?: string; skip?: number; limit?: number }, signal?: AbortSignal) => request<ResourceResult>(`/addons/${encodeURIComponent(addonId)}/resource/catalog/${encodeURIComponent(type)}/${encodeURIComponent(catalogId)}${query(extras)}`, { signal }),
   resources: (resource: "catalog" | "addon_catalog" | "meta", type: string, id: string) => request<ResourceBatch>(`/addons/resources/${encodeURIComponent(resource)}/${encodeURIComponent(type)}/${encodeURIComponent(id)}`),
 
   resolveTitle: (input: {

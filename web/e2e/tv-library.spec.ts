@@ -24,19 +24,16 @@ const result = (addonId: string, catalogId: string, metas: unknown[], type = "tv
 });
 
 test("Search discovers anime catalogs and targets only the selected custom type", async ({ page, rivune }) => {
+  const primaryPage = Array.from({ length: 24 }, (_, index) => ({
+    id: `anime-primary-${index + 1}`,
+    type: "anime",
+    name: index === 0 ? "Fixture Anime" : `Fixture Anime ${index + 1}`,
+    ...(index === 0 ? { poster: "https://fixtures.rivune.test/fixture-anime.svg" } : {}),
+  }));
   rivune.setSearchResponse("anime", 0, {
     results: [
-      result("anime-secondary-addon", "anime-secondary-search", [{
-        id: "shared-anime",
-        type: "anime",
-        name: "Fixture Anime Alternate",
-      }], "anime", "fixture", "anime-secondary-manifest"),
-      result("anime-primary-addon", "anime-primary-search", [{
-        id: "shared-anime",
-        type: "anime",
-        name: "Fixture Anime",
-        poster: "https://fixtures.rivune.test/fixture-anime.svg",
-      }], "anime", "fixture", "anime-primary-manifest"),
+      result("anime-secondary-addon", "anime-secondary-search", [{ id: "anime-secondary", type: "anime", name: "Fixture Anime Alternate" }], "anime", "fixture", "anime-secondary-manifest"),
+      result("anime-primary-addon", "anime-primary-search", primaryPage, "anime", "fixture", "anime-primary-manifest"),
     ],
     errors: [],
   });
@@ -54,10 +51,24 @@ test("Search discovers anime catalogs and targets only the selected custom type"
   const sourceSections = page.locator(".search-result-section");
   await expect(sourceSections).toHaveCount(2);
   await expect(sourceSections.locator(".section-heading h2")).toHaveText(["Fixture Source One · Anime Premieres", "Fixture Source Two · Anime Archive"]);
+  await expect(sourceSections.nth(0).getByText("24 results", { exact: true })).toBeVisible();
+  await expect(sourceSections.nth(1).getByText("1 result", { exact: true })).toBeVisible();
+  const sourceLogo = sourceSections.nth(0).locator(".search-source-heading__logo img");
+  await expect(sourceLogo).toHaveAttribute("src", "/api/v1/artwork/0000000000000000000000000000000000000000000000000000000000000001");
+  const sourceLogoPath = await sourceLogo.getAttribute("src");
+  expect(sourceLogoPath).not.toBeNull();
+  expect(new URL(sourceLogoPath!, page.url()).origin).toBe(new URL(page.url()).origin);
+  await expect(sourceSections.nth(1).locator(".search-source-heading__logo")).toHaveText("FS");
   await expect(sourceSections.nth(0).getByRole("button", { name: "Open Fixture Anime", exact: true })).toBeVisible();
-  await expect(sourceSections.nth(0).getByRole("button", { name: "Open Fixture Anime Alternate", exact: true })).toHaveCount(0);
   await expect(sourceSections.nth(1).getByRole("button", { name: "Open Fixture Anime Alternate", exact: true })).toBeVisible();
-  await expect(sourceSections.nth(1).getByRole("button", { name: "Open Fixture Anime", exact: true })).toHaveCount(0);
+
+  const headingToggle = sourceSections.nth(0).getByRole("button", { name: "Fixture Source One · Anime Premieres", exact: true });
+  await expect(headingToggle).toHaveAttribute("aria-expanded", "true");
+  const requestsBeforeCollapse = rivune.requests.length;
+  await headingToggle.click();
+  await expect(headingToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(sourceSections.nth(0).getByRole("button", { name: "Open Fixture Anime", exact: true })).toHaveCount(0);
+  expect(rivune.requests).toHaveLength(requestsBeforeCollapse);
 
   const animeRequests = rivune.matching("/api/v1/addons/catalogs/search/anime", "GET");
   expect(animeRequests).toHaveLength(1);
@@ -67,68 +78,62 @@ test("Search discovers anime catalogs and targets only the selected custom type"
   expect(rivune.requests.filter((request) => ["movie", "series", "tv", "other"].some((type) => request.pathname === `/api/v1/addons/catalogs/search/${type}`))).toHaveLength(0);
 });
 
-test("TV search keeps partial results, warns without inline diagnostics, and retries a failed pagination offset", async ({ page, rivune }) => {
-  const firstPage = Array.from({ length: 24 }, (_, index) => channel(`station-${index + 1}`, index === 0 ? "World News" : `Station ${index + 1}`));
-  rivune.setSearchResponse("tv", 0, {
+test("Selected search paginates and retries only the requested source", async ({ page, rivune }) => {
+  const firstPage = [
+    ...Array.from({ length: 23 }, (_, index) => ({ id: `page-one-${index + 1}`, type: "anime", name: `Page One ${index + 1}` })),
+    { type: "anime", name: "Malformed fixture without an ID" },
+  ];
+  rivune.setSearchResponse("anime", 0, {
     results: [
-      result("addon-a", "catalog-a", firstPage),
-      result("addon-b", "catalog-b", [channel("world-news", "World News"), channel("world-news", "World News")]),
+      result("anime-secondary-addon", "anime-secondary-search", [{ id: "secondary-only", type: "anime", name: "Secondary Only" }], "anime", "source", "anime-secondary-manifest"),
+      result("anime-primary-addon", "anime-primary-search", firstPage, "anime", "source", "anime-primary-manifest"),
     ],
-    errors: [{ addonId: "broken-addon", manifestId: "private-manifest", code: "upstream_timeout", message: "Private network timeout" }],
+    errors: [],
   });
-  rivune.setSearchResponse("tv", 24, {
+  rivune.setCatalogResponse("anime-primary-addon", "anime", "anime-primary-search", 24, {
     error: { code: "bad_gateway", message: "Private upstream socket failed" },
-    addonId: "pagination-addon",
-    manifestId: "pagination-manifest",
   }, { status: 502 });
 
-  await page.goto("/");
-  await page.getByRole("button", { name: "Search", exact: true }).click();
-  await page.getByRole("button", { name: "Live TV", exact: true }).click();
-  const search = page.locator(".search-page .search-box input");
-  await search.fill("n");
-  await search.fill("ne");
-  await search.fill("news");
+  await page.goto("/#search");
+  await page.getByRole("button", { name: "Anime", exact: true }).click();
+  await page.locator(".search-page .search-box input").fill("source");
+  const sections = page.locator(".search-source-section");
+  await expect(sections).toHaveCount(2);
+  const primary = sections.nth(0);
+  const secondary = sections.nth(1);
+  await expect(primary.getByRole("button", { name: "Load more", exact: true })).toBeVisible();
+  await expect(secondary.getByRole("button", { name: "Load more", exact: true })).toHaveCount(0);
+  await expect(page.locator(".search-page > .load-more")).toHaveCount(0);
 
-  await expect(page.getByRole("button", { name: "Open World News" })).toHaveCount(2);
-  await expect(page.locator(".tv-media-tile")).toHaveCount(25);
-  await expect(page.locator(".search-result-section > .section-heading h2")).toHaveText(["catalog-a", "catalog-b"]);
-  await expect(page.getByText("Some sources are temporarily unavailable.", { exact: true })).toBeVisible();
-  await expect(page.locator(".search-page .notice--warning")).toHaveCount(1);
-  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
-  await expect(page.getByText("Private network timeout", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("broken-addon", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("private-manifest", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("addon-a", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("addon-a-manifest", { exact: true })).toHaveCount(0);
-  const initialRequests = rivune.matching("/api/v1/addons/catalogs/search/tv", "GET");
-  expect(initialRequests).toHaveLength(1);
-  expect(initialRequests[0].search.get("search")).toBe("news");
-  expect(initialRequests[0].search.get("skip")).toBe("0");
-  expect(initialRequests[0].search.get("limit")).toBe("24");
-  expect(rivune.requests.filter((request) => request.pathname.includes("/addons/catalogs/search/movie") || request.pathname.includes("/addons/catalogs/search/series"))).toHaveLength(0);
-  expect(rivune.matching("/api/v1/library/membership", "POST")).toHaveLength(1);
-
-  await page.getByRole("button", { name: "Load more" }).click();
-  await expect.poll(() => rivune.matching("/api/v1/addons/catalogs/search/tv", "GET").length).toBe(2);
-  await expect(page.locator(".tv-media-tile")).toHaveCount(25);
-  await expect(page.getByRole("button", { name: "Load more" })).toBeVisible();
-  await expect(page.getByText("Some sources are temporarily unavailable.", { exact: true })).toBeVisible();
+  await primary.getByRole("button", { name: "Load more", exact: true }).click();
+  await expect(primary.getByText("Some sources are temporarily unavailable.", { exact: true })).toBeVisible();
+  await expect(primary.getByRole("button", { name: "Try again", exact: true })).toBeVisible();
   await expect(page.getByText("Private upstream socket failed", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("pagination-addon", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("pagination-manifest", { exact: true })).toHaveCount(0);
-  expect(rivune.matching("/api/v1/library/membership", "POST")).toHaveLength(1);
+  const exactPath = "/api/v1/addons/anime-primary-addon/resource/catalog/anime/anime-primary-search";
+  let exactRequests = rivune.matching(exactPath, "GET");
+  expect(exactRequests).toHaveLength(1);
+  expect(exactRequests[0].search.get("search")).toBe("source");
+  expect(exactRequests[0].search.get("skip")).toBe("24");
+  expect(exactRequests[0].search.get("limit")).toBe("24");
+  expect(rivune.matching("/api/v1/addons/anime-secondary-addon/resource/catalog/anime/anime-secondary-search", "GET")).toHaveLength(0);
 
-  rivune.setSearchResponse("tv", 24, { results: [result("addon-a", "catalog-a", [channel("station-25", "Station 25")])], errors: [] });
-  await page.getByRole("button", { name: "Load more" }).click();
-  await expect(page.getByRole("button", { name: "Open Station 25" })).toBeVisible();
-  const firstSourceSection = page.locator(".search-result-section").filter({ has: page.getByRole("heading", { name: "catalog-a", exact: true }) });
-  await expect(firstSourceSection.getByRole("button", { name: "Open Station 25" })).toBeVisible();
-  const searchRequests = rivune.matching("/api/v1/addons/catalogs/search/tv", "GET");
-  expect(searchRequests).toHaveLength(3);
-  expect(searchRequests[1].search.get("skip")).toBe("24");
-  expect(searchRequests[2].search.get("skip")).toBe("24");
-  expect(rivune.matching("/api/v1/library/membership", "POST")).toHaveLength(2);
+  rivune.setCatalogResponse("anime-primary-addon", "anime", "anime-primary-search", 24, result(
+    "anime-primary-addon",
+    "anime-primary-search",
+    [{ id: "page-one-1", type: "anime", name: "Duplicate" }, { id: "page-two-1", type: "anime", name: "Page Two" }],
+    "anime",
+    "source",
+    "anime-primary-manifest",
+  ));
+  await primary.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect(primary.getByRole("button", { name: "Open Page Two", exact: true })).toBeVisible();
+  await expect(primary.getByText("24 results", { exact: true })).toBeVisible();
+  await expect(primary.getByRole("button", { name: "Open Duplicate", exact: true })).toHaveCount(0);
+  await expect(primary.getByRole("button", { name: "Load more", exact: true })).toHaveCount(0);
+  exactRequests = rivune.matching(exactPath, "GET");
+  expect(exactRequests).toHaveLength(2);
+  expect(exactRequests[1].search.get("skip")).toBe("24");
+  expect(rivune.matching("/api/v1/addons/catalogs/search/anime", "GET")).toHaveLength(1);
 });
 
 test("TV search checks only the displayed page against a 5000-entry library", async ({ page, rivune }) => {
@@ -275,9 +280,10 @@ test("Library exposes TV filtering and unavailable channels remain removable", a
 test("Home omits Library TV rows and all-search groups populated media types", async ({ page, rivune }) => {
   rivune.setSearchResponse("movie", 0, { results: [result("movie-addon", "movie-search", [{ id: "movie-result", type: "movie", name: "Search Movie" }])], errors: [] });
   rivune.setSearchResponse("series", 0, { results: [result("series-addon", "series-search", [{ id: "series-result", type: "series", name: "Search Series" }])], errors: [] });
-  rivune.setSearchResponse("tv", 0, { results: [result("tv-addon", "tv-search", [channel("search-tv", "Search Live TV")], "tv", "search", "tv-manifest")], errors: [] });
+  rivune.setSearchResponse("tv", 0, { results: [result("tv-addon", "tv-search", Array.from({ length: 24 }, (_, index) => channel(`search-tv-${index + 1}`, index === 0 ? "Search Live TV" : `Search Live TV ${index + 1}`)), "tv", "search", "tv-manifest")], errors: [] });
   rivune.setSearchResponse("anime", 0, { results: [result("anime-primary-addon", "anime-primary-search", [{ id: "anime-result", type: "anime", name: "Search Anime" }], "anime", "search", "anime-primary-manifest")], errors: [] });
   rivune.setSearchResponse("other", 0, { results: [result("other-addon", "other-search", [{ id: "other-result", type: "other", name: "Search Other" }], "other", "search", "other-manifest")], errors: [] });
+  rivune.setSearchResponse("tv", 24, { results: [result("tv-addon", "tv-search", [channel("search-tv-more", "Search Live TV More")], "tv", "search", "tv-manifest")], errors: [] });
 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "TV — In your library" })).toHaveCount(0);
@@ -287,7 +293,7 @@ test("Home omits Library TV rows and all-search groups populated media types", a
   await expect(page.getByRole("button", { name: "Open Search Series" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Search Anime" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Search Other" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Open Search Live TV" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Search Live TV", exact: true })).toBeVisible();
   await expect(page.locator(".search-result-section > .section-heading h2")).toHaveText(["Movies", "Series", "Anime", "Other", "Live TV"]);
   await expect(page.getByRole("heading", { name: "Fixture Movies · Movies", exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Fixture Source One · Anime Premieres", exact: true })).toHaveCount(0);
@@ -295,7 +301,7 @@ test("Home omits Library TV rows and all-search groups populated media types", a
   const seriesCard = page.getByRole("button", { name: "Open Search Series" });
   const animeCard = page.getByRole("button", { name: "Open Search Anime" });
   const otherCard = page.getByRole("button", { name: "Open Search Other" });
-  const liveTVCard = page.getByRole("button", { name: "Open Search Live TV" });
+  const liveTVCard = page.getByRole("button", { name: "Open Search Live TV", exact: true });
   await movieCard.focus();
   await movieCard.press("ArrowDown");
   await expect(seriesCard).toBeFocused();
@@ -309,6 +315,12 @@ test("Home omits Library TV rows and all-search groups populated media types", a
   expect(rivune.matching("/api/v1/addons/catalogs/search/series", "GET")).toHaveLength(1);
   expect(rivune.matching("/api/v1/addons/catalogs/search/anime", "GET")).toHaveLength(1);
   expect(rivune.matching("/api/v1/addons/catalogs/search/other", "GET")).toHaveLength(1);
+  await page.locator(".search-page > .load-more").getByRole("button", { name: "Load more", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open Search Live TV More", exact: true })).toBeVisible();
+  const tvRequests = rivune.matching("/api/v1/addons/catalogs/search/tv", "GET");
+  expect(tvRequests).toHaveLength(2);
+  expect(tvRequests[1].search.get("skip")).toBe("24");
+  expect(rivune.requests.filter((request) => request.pathname.includes("/resource/catalog/"))).toHaveLength(0);
 });
 
 test("Search clears results from the previous filter when the replacement filter fails", async ({ page, rivune }) => {

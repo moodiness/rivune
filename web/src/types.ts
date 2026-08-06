@@ -145,6 +145,7 @@ export type AddonCatalogSource = { addonId: string; manifestId?: string; type: s
 export type AddonCatalogDescriptor = {
   addonId: string;
   addonName?: string;
+  addonLogoUrl?: string;
   manifestId: string;
   position: number;
   catalog: {

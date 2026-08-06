@@ -62,6 +62,21 @@ type fakeAddonService struct {
 	searchErr           error
 }
 
+type fakeCatalogArtworkPresenter struct {
+	calls int
+}
+
+func (fake *fakeCatalogArtworkPresenter) LocalizeCatalogDescriptors(_ context.Context, values []addon.CatalogDescriptor) {
+	fake.calls++
+	for index := range values {
+		if strings.HasPrefix(values[index].AddonLogoURL, "https://") {
+			values[index].AddonLogoURL = "/api/v1/artwork/" + strings.Repeat("0", 64)
+		} else {
+			values[index].AddonLogoURL = ""
+		}
+	}
+}
+
 func (fake *fakeAddonService) Install(_ context.Context, _ auth.Principal, input addon.InstallInput) (addon.ManagedAddon, error) {
 	fake.installInput = input
 	return addon.ManagedAddon{InstalledAddon: fake.installValue, TransportURL: fake.installTransportURL}, fake.installErr
@@ -443,19 +458,21 @@ func TestNonManagementInstalledAddonResponsesNeverExposeTransportURL(t *testing.
 func TestAddonCatalogDescriptorsExposeNamesInServiceOrder(t *testing.T) {
 	service := &fakeAddonService{catalogs: []addon.CatalogDescriptor{
 		{
-			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", ManifestID: "org.example.first",
+			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", AddonLogoURL: "https://origin.invalid/private-first-logo.png", ManifestID: "org.example.first",
 			Position: 0, Catalog: addon.ManifestCatalog{Type: "movie", ID: "featured", Name: "Featured"}, Searchable: true,
 		},
 		{
-			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", ManifestID: "org.example.first",
+			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", AddonLogoURL: "https://origin.invalid/private-first-logo.png", ManifestID: "org.example.first",
 			Position: 0, Catalog: addon.ManifestCatalog{Type: "all", ID: "community", Name: "Community"}, AddonCatalog: true,
 		},
 		{
-			AddonID: "22222222-2222-4222-8222-222222222222", AddonName: "Second Add-on", ManifestID: "org.example.second",
+			AddonID: "22222222-2222-4222-8222-222222222222", AddonName: "Second Add-on", AddonLogoURL: "invalid logo", ManifestID: "org.example.second",
 			Position: 1, Catalog: addon.ManifestCatalog{Type: "series", ID: "recent", Name: "Recent"},
 		},
 	}}
+	presenter := &fakeCatalogArtworkPresenter{}
 	api := addonAPI(service)
+	api.catalogArtwork = presenter
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/catalogs", nil)
 	request.Header.Set("Authorization", "Bearer access")
 	response := httptest.NewRecorder()
@@ -469,11 +486,17 @@ func TestAddonCatalogDescriptorsExposeNamesInServiceOrder(t *testing.T) {
 		Catalogs []addon.CatalogDescriptor `json:"catalogs"`
 	}
 	decodeResponse(t, response, &body)
+	if presenter.calls != 1 {
+		t.Fatalf("catalog artwork presenter calls = %d, want 1", presenter.calls)
+	}
 	if len(body.Catalogs) != 3 {
 		t.Fatalf("catalog count = %d, want 3: %+v", len(body.Catalogs), body.Catalogs)
 	}
 	if body.Catalogs[0].AddonName != "First Add-on" || body.Catalogs[0].Catalog.ID != "featured" || body.Catalogs[0].AddonCatalog {
 		t.Fatalf("regular descriptor = %+v", body.Catalogs[0])
+	}
+	if body.Catalogs[0].AddonLogoURL != "/api/v1/artwork/"+strings.Repeat("0", 64) || strings.Contains(response.Body.String(), "origin.invalid") {
+		t.Fatalf("regular descriptor exposed an unlocalized logo: %s", response.Body.String())
 	}
 	if body.Catalogs[1].AddonName != "First Add-on" || body.Catalogs[1].Catalog.ID != "community" || !body.Catalogs[1].AddonCatalog {
 		t.Fatalf("add-on catalog descriptor = %+v", body.Catalogs[1])
@@ -481,12 +504,15 @@ func TestAddonCatalogDescriptorsExposeNamesInServiceOrder(t *testing.T) {
 	if body.Catalogs[2].AddonName != "Second Add-on" || body.Catalogs[2].Catalog.ID != "recent" {
 		t.Fatalf("second add-on descriptor = %+v", body.Catalogs[2])
 	}
+	if body.Catalogs[2].AddonLogoURL != "" || strings.Contains(response.Body.String(), "invalid logo") {
+		t.Fatalf("invalid descriptor logo did not fail closed: %s", response.Body.String())
+	}
 }
 
 func TestAddonResourceRoutePreservesOpaqueIDAndRepeatedExtras(t *testing.T) {
 	service := &fakeAddonService{fetchValue: addon.ResourceResult{Resource: "meta", Payload: []byte(`{"meta":{"id":"kitsu:anime/42"}}`)}}
 	api := addonAPI(service)
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/11111111-1111-4111-8111-111111111111/resource/meta/anime-special/kitsu%3Aanime%2F42%3Aepisode%2F7?genre=Sci%20Fi&genre=Drama%2FAction&custom=a%2Bb", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/11111111-1111-4111-8111-111111111111/resource/meta/anime-special/kitsu%3Aanime%2F42%3Aepisode%2F7?genre=Sci%20Fi&skip=0&genre=Drama%2FAction&limit=100&limit=24&custom=a%2Bb", nil)
 	request.Header.Set("Authorization", "Bearer access")
 	response := httptest.NewRecorder()
 
@@ -507,7 +533,7 @@ func TestAddonResourceRoutePreservesOpaqueIDAndRepeatedExtras(t *testing.T) {
 	if service.fetchPath.Resource != "meta" || service.fetchPath.Type != "anime-special" || service.fetchPath.ID != "kitsu:anime/42:episode/7" {
 		t.Fatalf("opaque resource path changed: %+v", service.fetchPath)
 	}
-	wantExtra := []addon.ExtraValue{{Name: "genre", Value: "Sci Fi"}, {Name: "genre", Value: "Drama/Action"}, {Name: "custom", Value: "a+b"}}
+	wantExtra := []addon.ExtraValue{{Name: "genre", Value: "Sci Fi"}, {Name: "skip", Value: "0"}, {Name: "genre", Value: "Drama/Action"}, {Name: "limit", Value: "100"}, {Name: "limit", Value: "24"}, {Name: "custom", Value: "a+b"}}
 	if len(service.fetchPath.Extra) != len(wantExtra) {
 		t.Fatalf("unexpected extras: %+v", service.fetchPath.Extra)
 	}
@@ -515,6 +541,36 @@ func TestAddonResourceRoutePreservesOpaqueIDAndRepeatedExtras(t *testing.T) {
 		if service.fetchPath.Extra[index] != wantExtra[index] {
 			t.Fatalf("extra %d = %+v, want %+v", index, service.fetchPath.Extra[index], wantExtra[index])
 		}
+	}
+}
+
+func TestExactAddonResourceValidatesBoundedPaginationBeforeFetch(t *testing.T) {
+	paths := []string{
+		"?skip=-1",
+		"?skip=next",
+		"?skip=0&skip=-1",
+		"?limit=",
+		"?limit=0",
+		"?limit=101",
+		"?limit=24&limit=101",
+	}
+	for _, query := range paths {
+		t.Run(query, func(t *testing.T) {
+			service := &fakeAddonService{}
+			api := addonAPI(service)
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/11111111-1111-4111-8111-111111111111/resource/catalog/movie/featured"+query, nil)
+			request.Header.Set("Authorization", "Bearer access")
+			response := httptest.NewRecorder()
+
+			api.Handler().ServeHTTP(response, request)
+
+			if response.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422: %s", response.Code, response.Body.String())
+			}
+			if service.fetchCalls != 0 {
+				t.Fatalf("invalid exact pagination reached service %d times", service.fetchCalls)
+			}
+		})
 	}
 }
 
