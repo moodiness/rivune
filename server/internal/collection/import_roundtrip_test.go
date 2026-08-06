@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,11 +18,19 @@ import (
 )
 
 type collectionQueryCounter struct {
-	count atomic.Int64
+	count                    atomic.Int64
+	addonValidationShareLock atomic.Int64
+	importIdentityShareLock  atomic.Int64
 }
 
-func (counter *collectionQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+func (counter *collectionQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	counter.count.Add(1)
+	if strings.Contains(data.SQL, "collection.lock_addon_catalog_references") && strings.Contains(data.SQL, "FOR SHARE OF pa") {
+		counter.addonValidationShareLock.Add(1)
+	}
+	if strings.Contains(data.SQL, "collection.lock_import_addon_identities") && strings.Contains(data.SQL, "FOR SHARE OF pa") {
+		counter.importIdentityShareLock.Add(1)
+	}
 	return ctx
 }
 
@@ -243,6 +252,8 @@ func TestCollectionImportRoundTripRebindsLegacyAddonCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse collection test database URL: %v", err)
 	}
+	counter := &collectionQueryCounter{}
+	config.ConnConfig.Tracer = counter
 	config.MaxConns = 1
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
@@ -280,7 +291,7 @@ func TestCollectionImportRoundTripRebindsLegacyAddonCatalog(t *testing.T) {
 			PRIMARY KEY (collection_id, profile_id)
 		);
 		CREATE TEMPORARY TABLE profile_addons (
-			id uuid PRIMARY KEY, manifest_id text NOT NULL, manifest jsonb NOT NULL
+			id uuid PRIMARY KEY, manifest_id text NOT NULL, manifest jsonb NOT NULL, enabled boolean NOT NULL DEFAULT true
 		);
 		CREATE TEMPORARY TABLE addon_profile_access (
 			addon_id uuid NOT NULL REFERENCES profile_addons(id), profile_id uuid NOT NULL, position integer NOT NULL,
@@ -316,6 +327,9 @@ func TestCollectionImportRoundTripRebindsLegacyAddonCatalog(t *testing.T) {
 	if settings.AddonID != currentAddonID || settings.ManifestID != currentManifest {
 		t.Fatalf("imported addon identity was not rebound: %+v", settings)
 	}
+	if counter.importIdentityShareLock.Load() != 1 || counter.addonValidationShareLock.Load() != 1 {
+		t.Fatalf("collection import addon locks = identities:%d validation:%d, want one FOR SHARE query each", counter.importIdentityShareLock.Load(), counter.addonValidationShareLock.Load())
+	}
 
 	var rawFolders string
 	if err := pool.QueryRow(ctx, `SELECT folders::text FROM profile_collections WHERE id = $1::uuid`, result.Collections[0].ID).Scan(&rawFolders); err != nil {
@@ -328,5 +342,25 @@ func TestCollectionImportRoundTripRebindsLegacyAddonCatalog(t *testing.T) {
 	persistedSettings := persisted[0].Sources[0].AddonCatalog
 	if persistedSettings.AddonID != currentAddonID || persistedSettings.ManifestID != currentManifest {
 		t.Fatalf("persisted addon identity was not rebound: %+v", persistedSettings)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE profile_addons SET enabled = false WHERE id = $1::uuid`, currentAddonID); err != nil {
+		t.Fatalf("disable addon for collection binding checks: %v", err)
+	}
+	identities, err := loadAddonIdentities(ctx, pool, profileID)
+	if err != nil {
+		t.Fatalf("load disabled addon export identity: %v", err)
+	}
+	if identity, exists := identities.byID[currentAddonID]; !exists || identity.ManifestID != currentManifest {
+		t.Fatalf("disabled addon export identity was not preserved: %+v", identities.byID)
+	}
+	direct := legacyAddonCatalogImport(currentAddonID, "movie", "popular")
+	if err := resolveAddonCatalogReferences(ctx, pool, []*SaveInput{&direct}, [][]string{{profileID}}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("disabled direct addon catalog validation error = %v, want %v", err, ErrInvalidInput)
+	}
+	if _, err := NewService(pool, nil, nil, nil, nil).Import(ctx, principal, ExportDocument{
+		SchemaVersion: 1,
+		Collections:   []SaveInput{legacyAddonCatalogImport(staleAddonID, "movie", "popular")},
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("disabled addon import binding error = %v, want %v", err, ErrInvalidInput)
 	}
 }

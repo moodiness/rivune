@@ -750,10 +750,12 @@ func resolveAddonCatalogReferences(ctx context.Context, querier rowsQuerier, inp
 		return nil
 	}
 	rows, err := querier.Query(ctx, `
+		/* collection.lock_addon_catalog_references */
 		SELECT pa.id::text, pa.manifest::text,
 		       ARRAY(SELECT access.profile_id::text FROM addon_profile_access access WHERE access.addon_id = pa.id)
 		FROM profile_addons pa
-		WHERE pa.id = ANY($1::uuid[])
+		WHERE pa.id = ANY($1::uuid[]) AND pa.enabled
+		FOR SHARE OF pa
 	`, addonIDs)
 	if err != nil {
 		return fmt.Errorf("query collection addon catalogs: %w", err)
@@ -868,12 +870,14 @@ func loadImportAddonIdentities(ctx context.Context, querier rowsQuerier, profile
 		return identities, nil
 	}
 	rows, err := querier.Query(ctx, `
+		/* collection.lock_import_addon_identities */
 		SELECT pa.id::text, pa.manifest_id, pa.manifest::text
 		FROM addon_profile_access access
 		JOIN profile_addons pa ON pa.id = access.addon_id
-		WHERE access.profile_id = $1::uuid
+		WHERE access.profile_id = $1::uuid AND pa.enabled
 		ORDER BY access.position, pa.id
 		LIMIT $2
+		FOR SHARE OF pa
 	`, profileID, maximumImportSources+1)
 	if err != nil {
 		return addonIdentitySet{}, fmt.Errorf("query imported addon identities: %w", err)

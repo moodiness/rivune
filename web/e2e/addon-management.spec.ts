@@ -10,6 +10,7 @@ const addon = {
     types: ["movie", "series"],
   },
   position: 0,
+  enabled: true,
   profileIds: ["alice"],
   installedAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-01-01T00:00:00Z",
@@ -17,7 +18,7 @@ const addon = {
 
 const transportUrl = "https://addon.example/nested/provider/manifest.json?token=fixture-credential&locale=fr";
 
-test("global addon editor loads the protected full transport URL", async ({ page, rivune: _rivune }) => {
+test("global addon editor hydrates protected transport and availability from management", async ({ page, rivune: _rivune }) => {
   const managementRequests: string[] = [];
   await page.route(/\/api\/v1\/addons(?:\/.*)?$/, async (route) => {
     const request = route.request();
@@ -28,7 +29,7 @@ test("global addon editor loads the protected full transport URL", async ({ page
     }
     if (request.method() === "GET" && url.pathname === `/api/v1/addons/${addon.id}/management`) {
       managementRequests.push(url.pathname);
-      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ...addon, transportUrl }) });
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ...addon, enabled: false, transportUrl }) });
       return;
     }
     await route.fallback();
@@ -45,7 +46,115 @@ test("global addon editor loads the protected full transport URL", async ({ page
   await card.getByRole("button", { name: "Edit", exact: true }).click();
 
   await expect(page.locator("dialog").getByLabel("Transport URL", { exact: true })).toHaveValue(transportUrl);
+  const availability = page.locator("dialog").locator(".addon-availability");
+  await expect(availability.getByText("Disabled", { exact: true })).toBeVisible();
+  await expect(availability.getByRole("button", { name: "Enable", exact: true })).toHaveAttribute("aria-pressed", "false");
   expect(managementRequests).toEqual([`/api/v1/addons/${addon.id}/management`]);
+});
+
+test("addon availability changes stay local until Save and can be re-enabled", async ({ page, rivune: _rivune }) => {
+  let managed = { ...addon, transportUrl };
+  const updateInputs: unknown[] = [];
+  await page.route(/\/api\/v1\/addons(?:\/.*)?$/, async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === "GET" && pathname === "/api/v1/addons") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ addons: [managed] }) });
+      return;
+    }
+    if (request.method() === "GET" && pathname === "/api/v1/addons/diagnostics") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ observedSince: "2026-01-01T00:00:00Z", diagnostics: [] }) });
+      return;
+    }
+    if (request.method() === "GET" && pathname === `/api/v1/addons/${addon.id}/management`) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(managed) });
+      return;
+    }
+    if (request.method() === "PUT" && pathname === `/api/v1/addons/${addon.id}`) {
+      const input = request.postDataJSON() as { enabled: boolean; profileIds: string[]; transportUrl: string };
+      updateInputs.push(input);
+      managed = { ...managed, ...input };
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(managed) });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/#admin?tab=addons");
+  const card = page.locator(".addon-card").filter({ has: page.getByRole("heading", { name: addon.manifest.name, exact: true }) });
+  await card.getByRole("button", { name: "Edit", exact: true }).click();
+  let dialog = page.locator("dialog");
+  const disableButton = dialog.getByRole("button", { name: "Disable", exact: true });
+  await expect(disableButton).toHaveAttribute("aria-pressed", "true");
+  await disableButton.click();
+  await expect(dialog.getByRole("button", { name: "Enable", exact: true })).toHaveAttribute("aria-pressed", "false");
+  await expect(dialog.locator(".addon-availability").getByText("Disabled", { exact: true })).toBeVisible();
+  expect(updateInputs).toEqual([]);
+
+  await dialog.getByRole("button", { name: "Save addon", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(updateInputs).toEqual([{ profileIds: ["alice"], enabled: false, transportUrl }]);
+  await expect(card).toHaveClass(/\bis-disabled\b/);
+  await expect(card.getByText("Disabled", { exact: true })).toBeVisible();
+
+  await card.getByRole("button", { name: "Edit", exact: true }).click();
+  dialog = page.locator("dialog");
+  const enableButton = dialog.getByRole("button", { name: "Enable", exact: true });
+  await expect(enableButton).toHaveAttribute("aria-pressed", "false");
+  await enableButton.focus();
+  await page.keyboard.press("Space");
+  await expect(dialog.getByRole("button", { name: "Disable", exact: true })).toHaveAttribute("aria-pressed", "true");
+  expect(updateInputs).toHaveLength(1);
+  await dialog.getByRole("button", { name: "Save addon", exact: true }).click();
+
+  await expect(dialog).toHaveCount(0);
+  expect(updateInputs).toEqual([
+    { profileIds: ["alice"], enabled: false, transportUrl },
+    { profileIds: ["alice"], enabled: true, transportUrl },
+  ]);
+  await expect(card).not.toHaveClass(/\bis-disabled\b/);
+  await expect(card.getByText("Disabled", { exact: true })).toHaveCount(0);
+});
+
+test("failed availability save preserves the draft and installed card state", async ({ page, rivune: _rivune }) => {
+  const updateInputs: unknown[] = [];
+  await page.route(/\/api\/v1\/addons(?:\/.*)?$/, async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === "GET" && pathname === "/api/v1/addons") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ addons: [addon] }) });
+      return;
+    }
+    if (request.method() === "GET" && pathname === "/api/v1/addons/diagnostics") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ observedSince: "2026-01-01T00:00:00Z", diagnostics: [] }) });
+      return;
+    }
+    if (request.method() === "GET" && pathname === `/api/v1/addons/${addon.id}/management`) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ...addon, transportUrl }) });
+      return;
+    }
+    if (request.method() === "PUT" && pathname === `/api/v1/addons/${addon.id}`) {
+      updateInputs.push(request.postDataJSON());
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "unavailable", message: "The addon could not be saved." } }) });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/#admin?tab=addons");
+  const card = page.locator(".addon-card").filter({ has: page.getByRole("heading", { name: addon.manifest.name, exact: true }) });
+  await card.getByRole("button", { name: "Edit", exact: true }).click();
+  const dialog = page.locator("dialog");
+  await dialog.getByRole("button", { name: "Disable", exact: true }).click();
+  await dialog.getByRole("button", { name: "Save addon", exact: true }).click();
+
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("The addon could not be saved.", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Enable", exact: true })).toHaveAttribute("aria-pressed", "false");
+  await expect(dialog.locator(".addon-availability").getByText("Disabled", { exact: true })).toBeVisible();
+  await expect(card).not.toHaveClass(/\bis-disabled\b/);
+  await expect(card.getByText("Disabled", { exact: true })).toHaveCount(0);
+  expect(updateInputs).toEqual([{ profileIds: ["alice"], enabled: false, transportUrl }]);
 });
 
 test("global administrators see joined safe addon diagnostics and declared capabilities", async ({ page, rivune: _rivune }) => {

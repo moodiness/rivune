@@ -317,7 +317,7 @@ func TestUpdateAddonForwardsCompleteInput(t *testing.T) {
 		ProfileIDs: []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
 	}}
 	api := addonAPI(service)
-	request := httptest.NewRequest(http.MethodPut, "/api/v1/addons/11111111-1111-4111-8111-111111111111", bytes.NewBufferString(`{"transportUrl":"https://new-addon.example","profileIds":["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]}`))
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/addons/11111111-1111-4111-8111-111111111111", bytes.NewBufferString(`{"transportUrl":"https://new-addon.example","profileIds":["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],"enabled":false}`))
 	request.Header.Set("Authorization", "Bearer access")
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -337,6 +337,9 @@ func TestUpdateAddonForwardsCompleteInput(t *testing.T) {
 	}
 	if service.updateInput.TransportURL == nil || *service.updateInput.TransportURL != "https://new-addon.example" {
 		t.Fatalf("unexpected transport URL: %v", service.updateInput.TransportURL)
+	}
+	if service.updateInput.Enabled == nil || *service.updateInput.Enabled {
+		t.Fatalf("unexpected enabled state: %v", service.updateInput.Enabled)
 	}
 	if len(service.updateInput.ProfileIDs) != 1 || service.updateInput.ProfileIDs[0] != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
 		t.Fatalf("unexpected profile IDs: %+v", service.updateInput.ProfileIDs)
@@ -362,8 +365,47 @@ func TestUpdateAddonAllowsAssignmentOnlyInput(t *testing.T) {
 	if service.updateInput.TransportURL != nil {
 		t.Fatalf("assignment-only update unexpectedly supplied transport URL: %v", service.updateInput.TransportURL)
 	}
+	if service.updateInput.Enabled != nil {
+		t.Fatalf("assignment-only update unexpectedly supplied enabled state: %v", service.updateInput.Enabled)
+	}
 	if len(service.updateInput.ProfileIDs) != 1 || service.updateInput.ProfileIDs[0] != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
 		t.Fatalf("unexpected profile IDs: %+v", service.updateInput.ProfileIDs)
+	}
+}
+
+func TestUpdateAddonForwardsOptionalEnabledExactly(t *testing.T) {
+	const addonID = "11111111-1111-4111-8111-111111111111"
+	tests := []struct {
+		name        string
+		body        string
+		wantPresent bool
+		wantEnabled bool
+	}{
+		{name: "enable", body: `{"profileIds":[],"enabled":true}`, wantPresent: true, wantEnabled: true},
+		{name: "disable", body: `{"profileIds":[],"enabled":false}`, wantPresent: true, wantEnabled: false},
+		{name: "preserve", body: `{"profileIds":[]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeAddonService{updateValue: addon.InstalledAddon{ID: addonID}}
+			api := addonAPI(service)
+			request := httptest.NewRequest(http.MethodPut, "/api/v1/addons/"+addonID, strings.NewReader(test.body))
+			request.Header.Set("Authorization", "Bearer access")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+
+			api.Handler().ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+			}
+			if (service.updateInput.Enabled != nil) != test.wantPresent {
+				t.Fatalf("enabled presence = %v, want %v", service.updateInput.Enabled != nil, test.wantPresent)
+			}
+			if service.updateInput.Enabled != nil && *service.updateInput.Enabled != test.wantEnabled {
+				t.Fatalf("enabled = %v, want %v", *service.updateInput.Enabled, test.wantEnabled)
+			}
+		})
 	}
 }
 
@@ -493,7 +535,7 @@ func TestAddonManagementReturnsExactTransportOnlyToGlobalAdministrator(t *testin
 		transportURL = "https://provider.example/configured/private/manifest.json?token=management-secret"
 	)
 	managed := addon.ManagedAddon{
-		InstalledAddon: addon.InstalledAddon{ID: addonID, Manifest: json.RawMessage(`{"id":"org.example","name":"Example"}`)},
+		InstalledAddon: addon.InstalledAddon{ID: addonID, Manifest: json.RawMessage(`{"id":"org.example","name":"Example"}`), Enabled: false},
 		TransportURL:   transportURL,
 	}
 
@@ -511,6 +553,12 @@ func TestAddonManagementReturnsExactTransportOnlyToGlobalAdministrator(t *testin
 	decodeResponse(t, response, &body)
 	if body.TransportURL != transportURL {
 		t.Fatal("global management response did not preserve the stored transport URL")
+	}
+	if body.Enabled {
+		t.Fatal("disabled management response unexpectedly serialized as enabled")
+	}
+	if !strings.Contains(response.Body.String(), `"enabled":false`) {
+		t.Fatalf("disabled management response omitted enabled:false: %s", response.Body.String())
 	}
 	if service.managementID != addonID {
 		t.Fatalf("management addon ID = %q, want %q", service.managementID, addonID)
@@ -604,6 +652,26 @@ func TestDelegatedAddonMutationResponseRedactsTransportURL(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "transportUrl") || strings.Contains(response.Body.String(), "delegated-secret") {
 		t.Fatal("delegated mutation response exposed transport details")
+	}
+}
+
+func TestDisabledAddonListSerializesEnabledFalse(t *testing.T) {
+	const addonID = "11111111-1111-4111-8111-111111111111"
+	service := &fakeAddonService{listValue: []addon.InstalledAddon{{
+		ID: addonID, Manifest: json.RawMessage(`{"id":"org.example","name":"Example"}`), Enabled: false,
+	}}}
+	api := addonAPI(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/addons", nil)
+	request.Header.Set("Authorization", "Bearer access")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("disabled addon list status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"enabled":false`) {
+		t.Fatalf("disabled addon list omitted enabled:false: %s", response.Body.String())
 	}
 }
 
@@ -927,6 +995,31 @@ func TestAddonErrorsHaveStableHTTPContracts(t *testing.T) {
 				t.Fatalf("expected code %q, got %q", test.code, body.Error.Code)
 			}
 		})
+	}
+}
+
+func TestDisabledAddonRuntimeNotFoundRemainsOpaque(t *testing.T) {
+	privateDetail := "https://provider.invalid/private/manifest.json?token=disabled-secret"
+	service := &fakeAddonService{fetchErr: fmt.Errorf("%w: %s", addon.ErrNotFound, privateDetail)}
+	api := addonAPI(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/11111111-1111-4111-8111-111111111111/resource/meta/movie/id", nil)
+	request.Header.Set("Authorization", "Bearer access")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("disabled runtime lookup status = %d, want 404: %s", response.Code, response.Body.String())
+	}
+	var body errorEnvelope
+	decodeResponse(t, response, &body)
+	if body.Error.Code != "addon_not_found" {
+		t.Fatalf("disabled runtime lookup code = %q, want addon_not_found", body.Error.Code)
+	}
+	for _, private := range []string{"provider.invalid", "private", "disabled-secret"} {
+		if strings.Contains(response.Body.String(), private) {
+			t.Fatalf("disabled runtime lookup exposed private detail %q: %s", private, response.Body.String())
+		}
 	}
 }
 

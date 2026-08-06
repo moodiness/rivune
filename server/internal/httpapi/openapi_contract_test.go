@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -226,6 +227,46 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		request.Header.Set("Content-Type", "application/json")
 		response := serveContractRequest(t, api, request, http.StatusOK)
 		validateContractResponse(t, document, "/addons/preview", nil, request, response)
+	})
+
+	t.Run("add-on availability", func(t *testing.T) {
+		now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+		installed := addon.InstalledAddon{
+			ID:       contractAddonID,
+			Manifest: json.RawMessage(`{"id":"org.rivune.contract","version":"1.0.0","name":"Contract Add-on","types":["movie"],"resources":["catalog"],"catalogs":[]}`),
+			Position: 0, ProfileIDs: []string{contractProfileID}, Enabled: false,
+			InstalledAt: now, UpdatedAt: now,
+		}
+		service := &fakeAddonService{
+			listValue:       []addon.InstalledAddon{installed},
+			managementValue: addon.ManagedAddon{InstalledAddon: installed, TransportURL: "https://contract-addon.example/manifest.json?token=private"},
+			updateValue:     installed,
+		}
+		api := testAPI(&fakeInstanceService{})
+		api.auth = &fakeAuthService{principal: contractPrincipal()}
+		api.addons = service
+
+		list := authenticatedContractRequest(http.MethodGet, "/api/v1/addons", nil)
+		listResponse := serveContractRequest(t, api, list, http.StatusOK)
+		validateContractResponse(t, document, "/addons", nil, list, listResponse)
+
+		management := authenticatedContractRequest(http.MethodGet, "/api/v1/addons/"+contractAddonID+"/management", nil)
+		managementResponse := serveContractRequest(t, api, management, http.StatusOK)
+		validateContractResponse(t, document, "/addons/{addonId}/management", map[string]string{"addonId": contractAddonID}, management, managementResponse)
+
+		updatePath := "/api/v1/addons/" + contractAddonID
+		withEnabled := `{"profileIds":["` + contractProfileID + `"],"enabled":false}`
+		withoutEnabled := `{"profileIds":["` + contractProfileID + `"]}`
+		validateContractRequestBody(t, document, http.MethodPut, updatePath, withEnabled, true)
+		validateContractRequestBody(t, document, http.MethodPut, updatePath, withoutEnabled, true)
+		validateContractRequestBody(t, document, http.MethodPut, updatePath, `{"profileIds":["`+contractProfileID+`"],"enabled":"false"}`, false)
+		update := authenticatedContractRequest(http.MethodPut, updatePath, bytes.NewBufferString(withEnabled))
+		update.Header.Set("Content-Type", "application/json")
+		updateResponse := serveContractRequest(t, api, update, http.StatusOK)
+		validateContractResponse(t, document, "/addons/{addonId}", map[string]string{"addonId": contractAddonID}, update, updateResponse)
+		if service.updateInput.Enabled == nil || *service.updateInput.Enabled {
+			t.Fatalf("enabled input was not forwarded exactly: %v", service.updateInput.Enabled)
+		}
 	})
 
 	t.Run("add-on catalog descriptors", func(t *testing.T) {

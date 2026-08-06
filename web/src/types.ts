@@ -409,6 +409,7 @@ export type InstalledAddon = {
   id: string;
   manifest: AddonManifest;
   position: number;
+  enabled: boolean;
   profileIds: string[];
   installedAt: string;
   updatedAt: string;
@@ -419,6 +420,11 @@ export type ManagedAddon = InstalledAddon & {
 export type InstallAddonInput = {
   transportUrl: string;
   profileIds: string[];
+};
+export type UpdateAddonInput = {
+  profileIds: string[];
+  transportUrl?: string;
+  enabled?: boolean;
 };
 export type AddonDiagnosticState = "unknown" | "available" | "degraded" | "unavailable";
 export type AddonDiagnosticErrorCode = "timeout" | "invalid_response" | "unavailable" | "request_failed";

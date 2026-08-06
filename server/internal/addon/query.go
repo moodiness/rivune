@@ -3,7 +3,7 @@ package addon
 import "fmt"
 
 const addonForProfileQuery = `
-	SELECT pa.id::text, pa.transport_url, pa.manifest::text, COALESCE(access.position, 0),
+	SELECT pa.id::text, pa.transport_url, pa.manifest::text, pa.enabled, COALESCE(access.position, 0),
 	       ARRAY(
 	           SELECT assignment.profile_id::text
 	           FROM addon_profile_access assignment
@@ -15,11 +15,11 @@ const addonForProfileQuery = `
 	FROM profile_addons pa
 	JOIN addon_profile_access access
 	  ON access.addon_id = pa.id AND access.profile_id = $2::uuid
-	WHERE pa.id = $1::uuid
+	WHERE pa.id = $1::uuid AND pa.enabled
 `
 
 const addonForManagementQuery = `
-	SELECT pa.id::text, pa.transport_url, pa.manifest::text, COALESCE(access.position, 0),
+	SELECT pa.id::text, pa.transport_url, pa.manifest::text, pa.enabled, COALESCE(access.position, 0),
 	       ARRAY(
 	           SELECT assignment.profile_id::text
 	           FROM addon_profile_access assignment
@@ -41,7 +41,7 @@ type rowScanner interface {
 func queryAddon(scanner rowScanner) (InstalledAddon, error) {
 	var installed InstalledAddon
 	if err := scanner.Scan(
-		&installed.ID, &installed.transportURL, &installed.Manifest, &installed.Position,
+		&installed.ID, &installed.transportURL, &installed.Manifest, &installed.Enabled, &installed.Position,
 		&installed.ProfileIDs, &installed.InstalledAt, &installed.UpdatedAt,
 	); err != nil {
 		return InstalledAddon{}, err

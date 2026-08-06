@@ -21,13 +21,14 @@ import (
 )
 
 var (
-	ErrConflict         = errors.New("watch state version conflict")
-	ErrInvalidInput     = errors.New("invalid watch state input")
-	ErrNotFound         = errors.New("title or watch state not found")
-	ErrProgressNotFound = errors.New("playback progress not found")
-	ErrForbidden        = errors.New("watch state operation forbidden")
-	ErrProfileRequired  = errors.New("active profile required")
-	ErrOutboxCapacity   = errors.New("tracking synchronization capacity reached")
+	ErrConflict           = errors.New("watch state version conflict")
+	ErrInvalidInput       = errors.New("invalid watch state input")
+	ErrNotFound           = errors.New("title or watch state not found")
+	ErrProgressNotFound   = errors.New("playback progress not found")
+	ErrForbidden          = errors.New("watch state operation forbidden")
+	ErrProfileRequired    = errors.New("active profile required")
+	ErrOutboxCapacity     = errors.New("tracking synchronization capacity reached")
+	errAddonAccessChanged = fmt.Errorf("%w", ErrNotFound)
 
 	uuidPattern        = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 	providerPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
@@ -49,6 +50,8 @@ const accessibleTitlesSQL = `
 	    WHEN title.media_type = 'tv' THEN EXISTS (
 	        SELECT 1
 	        FROM addon_profile_access access
+	        JOIN profile_addons addon ON addon.id = access.addon_id
+	                                  AND addon.enabled = true
 	        WHERE access.addon_id = title.source_addon_id
 	          AND access.profile_id = $1::uuid
 	    )
@@ -67,6 +70,8 @@ const accessibleTitlesSQL = `
 	        title.source_addon_id IS NULL OR EXISTS (
 	            SELECT 1
 	            FROM addon_profile_access access
+	            JOIN profile_addons addon ON addon.id = access.addon_id
+	                                      AND addon.enabled = true
 	            WHERE access.addon_id = title.source_addon_id
 	              AND access.profile_id = $1::uuid
 	        )
@@ -234,7 +239,10 @@ func (s *Service) ResolveCustomSeries(ctx context.Context, principal auth.Princi
 	err = tx.QueryRow(ctx, `
 		SELECT true
 		FROM addon_profile_access
-		WHERE addon_id = $1::uuid AND profile_id = $2::uuid
+		JOIN profile_addons addon ON addon.id = addon_profile_access.addon_id
+		                           AND addon.enabled = true
+		WHERE addon_profile_access.addon_id = $1::uuid
+		  AND addon_profile_access.profile_id = $2::uuid
 		FOR SHARE
 	`, input.SourceAddonID, profileID).Scan(&addonAccessible)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -980,18 +988,21 @@ func (s *Service) resolveTVTitle(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return TitleReference{}, err
 	}
-	var accessible bool
+	var lockedAddonID string
 	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM addon_profile_access
-			WHERE addon_id = $1::uuid AND profile_id = $2::uuid
-		)
-	`, input.SourceAddonID, profileID).Scan(&accessible); err != nil {
-		return TitleReference{}, fmt.Errorf("check TV addon access: %w", err)
-	}
-	if !accessible {
-		return TitleReference{}, ErrNotFound
+		/* watchstate.lock_tv_addon */
+		SELECT addon.id::text
+		FROM addon_profile_access access
+		JOIN profile_addons addon ON addon.id = access.addon_id
+		                           AND addon.enabled = true
+		WHERE access.addon_id = $1::uuid
+		  AND access.profile_id = $2::uuid
+		FOR SHARE OF addon
+	`, input.SourceAddonID, profileID).Scan(&lockedAddonID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TitleReference{}, ErrNotFound
+		}
+		return TitleReference{}, fmt.Errorf("lock TV addon access: %w", err)
 	}
 	lockKey := input.Provider + ":" + input.MediaType + ":" + storedExternalID
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
@@ -1111,6 +1122,8 @@ func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titl
 		       title.media_type <> 'tv' OR EXISTS (
 		           SELECT 1
 		           FROM addon_profile_access access
+		           JOIN profile_addons addon ON addon.id = access.addon_id
+		                                     AND addon.enabled = true
 		           WHERE access.addon_id = title.source_addon_id
 		             AND access.profile_id = $1::uuid
 		       ),
@@ -1166,6 +1179,9 @@ func (s *Service) RemoveLibrary(ctx context.Context, principal auth.Principal, t
 	}
 	mediaType, err := accessibleTitleMediaType(ctx, tx, profileID, titleID)
 	if errors.Is(err, ErrNotFound) {
+		if err == errAddonAccessChanged {
+			return ErrNotFound
+		}
 		err = tx.QueryRow(ctx, `
 			SELECT title.media_type
 			FROM profile_library library
@@ -1241,6 +1257,8 @@ func (s *Service) Library(ctx context.Context, principal auth.Principal, mediaTy
 		       title.media_type <> 'tv' OR EXISTS (
 		           SELECT 1
 		           FROM addon_profile_access access
+		           JOIN profile_addons addon ON addon.id = access.addon_id
+		                                     AND addon.enabled = true
 		           WHERE access.addon_id = title.source_addon_id
 		             AND access.profile_id = library.profile_id
 		       ),
@@ -1515,6 +1533,11 @@ func (s *Service) SetWatchedBatch(ctx context.Context, principal auth.Principal,
 		titleIDs[index] = item.TitleID
 		completedValues[index] = item.Completed
 		expectedVersions[index] = item.ExpectedVersion
+	}
+	for _, titleID := range titleIDs {
+		if _, err := accessibleTitleMediaType(ctx, tx, profileID, titleID); err != nil {
+			return ProgressBatch{}, err
+		}
 	}
 	rows, err := tx.Query(ctx, `
 		/* watchstate.set_watched_batch */
@@ -2192,16 +2215,39 @@ func progressForProfile(ctx context.Context, tx pgx.Tx, profileID, titleID strin
 }
 
 func accessibleTitleMediaType(ctx context.Context, tx pgx.Tx, profileID, titleID string) (string, error) {
-	var mediaType string
+	var (
+		mediaType     string
+		sourceAddonID *string
+	)
 	if err := tx.QueryRow(ctx, `
-		SELECT accessible.media_type
+		SELECT accessible.media_type, title.source_addon_id::text
 		FROM (`+accessibleTitlesSQL+`) accessible
+		JOIN titles title ON title.id = accessible.id
 		WHERE accessible.id = $2::uuid
-	`, profileID, titleID).Scan(&mediaType); err != nil {
+	`, profileID, titleID).Scan(&mediaType, &sourceAddonID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", ErrNotFound
 		}
 		return "", fmt.Errorf("authorize title access: %w", err)
+	}
+	if sourceAddonID == nil {
+		return mediaType, nil
+	}
+	var lockedAddonID string
+	if err := tx.QueryRow(ctx, `
+		/* watchstate.lock_title_addon */
+		SELECT addon.id::text
+		FROM addon_profile_access access
+		JOIN profile_addons addon ON addon.id = access.addon_id
+		                           AND addon.enabled = true
+		WHERE access.addon_id = $2::uuid
+		  AND access.profile_id = $1::uuid
+		FOR SHARE OF addon
+	`, profileID, *sourceAddonID).Scan(&lockedAddonID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", errAddonAccessChanged
+		}
+		return "", fmt.Errorf("lock title addon access: %w", err)
 	}
 	return mediaType, nil
 }

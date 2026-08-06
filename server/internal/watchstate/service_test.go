@@ -19,8 +19,10 @@ import (
 )
 
 type progressBatchQueryCounter struct {
-	read  atomic.Int64
-	write atomic.Int64
+	read                atomic.Int64
+	write               atomic.Int64
+	titleAddonShareLock atomic.Int64
+	tvAddonShareLock    atomic.Int64
 }
 
 func (counter *progressBatchQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
@@ -29,6 +31,12 @@ func (counter *progressBatchQueryCounter) TraceQueryStart(ctx context.Context, _
 	}
 	if strings.Contains(data.SQL, "watchstate.set_watched_batch") {
 		counter.write.Add(1)
+	}
+	if strings.Contains(data.SQL, "watchstate.lock_title_addon") && strings.Contains(data.SQL, "FOR SHARE OF addon") {
+		counter.titleAddonShareLock.Add(1)
+	}
+	if strings.Contains(data.SQL, "watchstate.lock_tv_addon") && strings.Contains(data.SQL, "FOR SHARE OF addon") {
+		counter.tvAddonShareLock.Add(1)
 	}
 	return ctx
 }
@@ -551,6 +559,10 @@ func TestResolveTitleProfileScopedFallbackIsolatedAndLibraryPreservesIdentity(t 
 			PRIMARY KEY (profile_id, provider, namespace, external_id),
 			UNIQUE (title_id)
 		);
+		CREATE TEMPORARY TABLE profile_addons (
+			id uuid PRIMARY KEY,
+			enabled boolean NOT NULL DEFAULT true
+		);
 		CREATE TEMPORARY TABLE addon_profile_access (
 			addon_id uuid NOT NULL,
 			profile_id uuid NOT NULL,
@@ -843,6 +855,8 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse test database URL: %v", err)
 	}
+	counter := &progressBatchQueryCounter{}
+	config.ConnConfig.Tracer = counter
 	config.MaxConns = 1
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
@@ -900,6 +914,10 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 			PRIMARY KEY (profile_id, provider, namespace, external_id),
 			UNIQUE (title_id)
 		);
+		CREATE TEMPORARY TABLE profile_addons (
+			id uuid PRIMARY KEY,
+			enabled boolean NOT NULL DEFAULT true
+		);
 		CREATE TEMPORARY TABLE addon_profile_access (
 			addon_id uuid NOT NULL,
 			profile_id uuid NOT NULL,
@@ -916,9 +934,15 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 			profile_id uuid NOT NULL,
 			title_id uuid NOT NULL
 		);
+		INSERT INTO profile_addons (id, enabled) VALUES
+			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', true),
+			('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', true),
+			('cccccccc-cccc-4ccc-8ccc-cccccccccccc', false);
 		INSERT INTO addon_profile_access (addon_id, profile_id) VALUES
 			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '11111111-1111-4111-8111-111111111111'),
-			('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '22222222-2222-4222-8222-222222222222');
+			('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '22222222-2222-4222-8222-222222222222'),
+			('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '11111111-1111-4111-8111-111111111111'),
+			('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '11111111-1111-4111-8111-111111111111');
 	`); err != nil {
 		t.Fatalf("create TV library fixtures: %v", err)
 	}
@@ -970,12 +994,29 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected inaccessible profile addon to be hidden, got %v", err)
 	}
+	for _, sourceAddonID := range []string{
+		"cccccccc-cccc-4ccc-8ccc-cccccccccccc", // installed but disabled
+		"dddddddd-dddd-4ddd-8ddd-dddddddddddd", // access row without an installation
+	} {
+		if _, err := service.ResolveTitle(ctx, profileOne, ResolveTitleInput{
+			MediaType: "tv", Provider: "addon", ResourceID: "hidden", Title: "Hidden",
+			SourceAddonID: sourceAddonID,
+		}); err != ErrNotFound {
+			t.Fatalf("disabled or missing TV addon %s leaked installation state: %v", sourceAddonID, err)
+		}
+	}
 
 	if _, err := service.AddLibrary(ctx, profileOne, first.TitleID); err != nil {
 		t.Fatalf("add first profile TV library entry: %v", err)
 	}
 	if _, err := service.AddLibrary(ctx, profileTwo, second.TitleID); err != nil {
 		t.Fatalf("add second profile TV library entry: %v", err)
+	}
+	if counter.tvAddonShareLock.Load() < 3 {
+		t.Fatalf("TV resolution emitted %d enabled addon FOR SHARE queries, want at least 3", counter.tvAddonShareLock.Load())
+	}
+	if counter.titleAddonShareLock.Load() < 2 {
+		t.Fatalf("TV library additions emitted %d enabled addon FOR SHARE queries, want at least 2", counter.titleAddonShareLock.Load())
 	}
 	firstMembership, err := service.TVLibraryMembership(ctx, profileOne, []TVLibraryIdentity{
 		{SourceAddonID: second.SourceAddonID, ResourceID: second.ResourceID},
@@ -1022,11 +1063,20 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 	}
 
 	if _, err := pool.Exec(ctx, `
-		DELETE FROM addon_profile_access
-		WHERE addon_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
-		  AND profile_id = '11111111-1111-4111-8111-111111111111'
+		UPDATE profile_addons
+		SET enabled = false
+		WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 	`); err != nil {
-		t.Fatalf("remove first profile addon access: %v", err)
+		t.Fatalf("disable first profile addon: %v", err)
+	}
+	if _, err := service.ResolveTitle(ctx, profileOne, ResolveTitleInput{
+		MediaType: "tv", Provider: "addon", ResourceID: "news", Title: "Refreshed News",
+		SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+	}); err != ErrNotFound {
+		t.Fatalf("disabled TV addon refresh leaked installation state: %v", err)
+	}
+	if _, err := service.AddLibrary(ctx, profileOne, first.TitleID); err != ErrNotFound {
+		t.Fatalf("disabled TV addon library addition leaked installation state: %v", err)
 	}
 	unavailablePage, err := service.Library(ctx, profileOne, "tv", 1, 20)
 	if err != nil {
@@ -1133,6 +1183,10 @@ func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 			provider text NOT NULL,
 			namespace text NOT NULL,
 			external_id text NOT NULL
+		);
+		CREATE TEMPORARY TABLE profile_addons (
+			id uuid PRIMARY KEY,
+			enabled boolean NOT NULL DEFAULT true
 		);
 		CREATE TEMPORARY TABLE addon_profile_access (
 			addon_id uuid NOT NULL,
@@ -1284,6 +1338,10 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 			namespace text NOT NULL,
 			external_id text NOT NULL
 		);
+		CREATE TEMPORARY TABLE profile_addons (
+			id uuid PRIMARY KEY,
+			enabled boolean NOT NULL DEFAULT true
+		);
 		CREATE TEMPORARY TABLE addon_profile_access (
 			addon_id uuid NOT NULL,
 			profile_id uuid NOT NULL
@@ -1397,6 +1455,10 @@ func TestProgressBatchUsesOneLogicalQueryAndAtomicVersions(t *testing.T) {
 			namespace text NOT NULL,
 			external_id text NOT NULL
 		);
+		CREATE TEMPORARY TABLE profile_addons (
+			id uuid PRIMARY KEY,
+			enabled boolean NOT NULL DEFAULT true
+		);
 		CREATE TEMPORARY TABLE addon_profile_access (
 			addon_id uuid NOT NULL,
 			profile_id uuid NOT NULL
@@ -1469,6 +1531,7 @@ func TestProgressBatchUsesOneLogicalQueryAndAtomicVersions(t *testing.T) {
 		t.Fatalf("expected cross-profile batch refusal, got %v", err)
 	}
 
+	titleLockBefore := counter.titleAddonShareLock.Load()
 	writeBefore := counter.write.Load()
 	updated, err := service.SetWatchedBatch(ctx, principal, []SetWatchedBatchItem{
 		{TitleID: titleIDs[0], Completed: true, ExpectedVersion: 4},
@@ -1479,6 +1542,9 @@ func TestProgressBatchUsesOneLogicalQueryAndAtomicVersions(t *testing.T) {
 	}
 	if counter.write.Load()-writeBefore != 1 {
 		t.Fatalf("watched batch executed %d logical queries", counter.write.Load()-writeBefore)
+	}
+	if counter.titleAddonShareLock.Load() != titleLockBefore {
+		t.Fatalf("provider-independent watched batch acquired %d addon locks", counter.titleAddonShareLock.Load()-titleLockBefore)
 	}
 	if len(updated.Items) != 2 || updated.Items[0].Progress == nil || updated.Items[0].Progress.Version != 5 ||
 		updated.Items[1].Progress == nil || updated.Items[1].Progress.Version != 1 {
@@ -1513,6 +1579,8 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 	if err != nil {
 		t.Fatalf("parse test database URL: %v", err)
 	}
+	counter := &progressBatchQueryCounter{}
+	config.ConnConfig.Tracer = counter
 	config.MaxConns = 1
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
@@ -1542,6 +1610,10 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 			provider text NOT NULL, namespace text NOT NULL, external_id text NOT NULL,
 			PRIMARY KEY (profile_id, provider, namespace, external_id), UNIQUE (title_id)
 		);
+		CREATE TEMPORARY TABLE profile_addons (
+			id uuid PRIMARY KEY,
+			enabled boolean NOT NULL DEFAULT true
+		);
 		CREATE TEMPORARY TABLE addon_profile_access (
 			addon_id uuid NOT NULL, profile_id uuid NOT NULL, position integer NOT NULL DEFAULT 0,
 			PRIMARY KEY (addon_id, profile_id)
@@ -1562,6 +1634,9 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 			('22222222-2222-4222-8222-222222222222', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc');
 		INSERT INTO user_profile_access (user_id, profile_id, can_manage) VALUES
 			('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '22222222-2222-4222-8222-222222222222', false);
+		INSERT INTO profile_addons (id, enabled) VALUES
+			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', true),
+			('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', true);
 		INSERT INTO addon_profile_access (addon_id, profile_id, position) VALUES
 			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '11111111-1111-4111-8111-111111111111', 0),
 			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '22222222-2222-4222-8222-222222222222', 0),
@@ -1599,6 +1674,9 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 	if err != nil || progress.Version != 1 {
 		t.Fatalf("store custom episode progress: %+v error %v", progress, err)
 	}
+	if counter.titleAddonShareLock.Load() != 1 {
+		t.Fatalf("addon progress update emitted %d enabled addon FOR SHARE queries, want 1", counter.titleAddonShareLock.Load())
+	}
 	var currentTitleCount, identityCount int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE title.resource_provider = 'addon' AND title.source_addon_id = $2::uuid AND title.is_current)::int,
@@ -1616,6 +1694,9 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 	}
 	if _, err := service.SetWatched(ctx, profileOne, first.Videos[1].TitleID, true, CompletionInput{}); err != nil {
 		t.Fatalf("complete custom episode: %v", err)
+	}
+	if counter.titleAddonShareLock.Load() != 2 {
+		t.Fatalf("addon watched update emitted %d enabled addon FOR SHARE queries, want 2", counter.titleAddonShareLock.Load())
 	}
 	continuePage, err := service.ContinueWatching(ctx, profileOne, 20)
 	if err != nil {
@@ -1680,6 +1761,49 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 	}
 	if otherAddon.Series.TitleID == first.Series.TitleID || otherAddon.Videos[0].TitleID == first.Videos[0].TitleID {
 		t.Fatalf("custom identities leaked across addon installations: first=%+v second=%+v", first, otherAddon)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE profile_addons SET enabled = false WHERE id = $1::uuid`, input.SourceAddonID); err != nil {
+		t.Fatalf("disable custom series addon: %v", err)
+	}
+	if _, err := service.ResolveCustomSeries(ctx, profileOne, input); err != ErrNotFound {
+		t.Fatalf("disabled custom series addon leaked installation state: %v", err)
+	}
+	if _, err := service.GetProgress(ctx, profileOne, first.Videos[0].TitleID); err != ErrNotFound {
+		t.Fatalf("disabled addon title remained accessible or leaked installation state: %v", err)
+	}
+	if _, err := service.UpdateProgress(ctx, profileOne, first.Videos[0].TitleID, UpdateProgressInput{
+		PositionSeconds: 84, DurationSeconds: 120, ExpectedVersion: 1,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disabled addon progress update error = %v, want ErrNotFound", err)
+	}
+	if _, err := service.SetWatched(ctx, profileOne, first.Videos[1].TitleID, false, CompletionInput{ExpectedVersion: 1}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disabled addon watched update error = %v, want ErrNotFound", err)
+	}
+	if _, err := service.SetWatchedBatch(ctx, profileOne, []SetWatchedBatchItem{{
+		TitleID: first.Videos[0].TitleID, Completed: true, ExpectedVersion: 1,
+	}}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disabled addon watched batch error = %v, want ErrNotFound", err)
+	}
+	var unchangedPosition int
+	var unchangedVersion int64
+	if err := pool.QueryRow(ctx, `
+		SELECT position_seconds, version
+		FROM profile_progress
+		WHERE profile_id = $1::uuid AND title_id = $2::uuid
+	`, profileOneID, first.Videos[0].TitleID).Scan(&unchangedPosition, &unchangedVersion); err != nil {
+		t.Fatalf("query progress after disabled mutations: %v", err)
+	}
+	if unchangedPosition != 42 || unchangedVersion != 1 {
+		t.Fatalf("disabled addon mutation changed progress to position=%d version=%d", unchangedPosition, unchangedVersion)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM profile_addons WHERE id = $1::uuid`, input.SourceAddonID); err != nil {
+		t.Fatalf("remove custom series addon installation: %v", err)
+	}
+	if _, err := service.ResolveCustomSeries(ctx, profileOne, input); err != ErrNotFound {
+		t.Fatalf("missing custom series addon differed from disabled addon: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO profile_addons (id, enabled) VALUES ($1::uuid, true)`, input.SourceAddonID); err != nil {
+		t.Fatalf("restore custom series addon installation: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `DELETE FROM addon_profile_access WHERE addon_id = $1::uuid AND profile_id = $2::uuid`, input.SourceAddonID, profileOneID); err != nil {
 		t.Fatalf("revoke addon access: %v", err)

@@ -30,6 +30,7 @@ import (
 type ResourceFetcher interface {
 	FetchPlaybackResource(context.Context, auth.Principal, string, addon.ResourcePath) (addon.ResourceResult, error)
 	FetchAllPlaybackResources(context.Context, auth.Principal, addon.ResourcePath) (addon.ResourceBatch, error)
+	ValidatePlaybackAccess(context.Context, auth.Principal, string) error
 }
 
 type playbackProfileTransaction interface {
@@ -215,6 +216,9 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 	if err := tx.Commit(ctx); err != nil {
 		return Preparation{}, fmt.Errorf("commit active playback profile authorization: %w", err)
 	}
+	if err := service.validateSourceReferenceAccess(ctx, principal, reference); err != nil {
+		return Preparation{}, err
+	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
 	prepared, err := service.preparedPlayback(ctx, principal, reference, playbackPolicy{
 		allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight,
@@ -281,6 +285,9 @@ func (service *Service) Resolve(ctx context.Context, principal auth.Principal, i
 	if err := tx.Commit(ctx); err != nil {
 		return Session{}, fmt.Errorf("commit active playback profile authorization: %w", err)
 	}
+	if err := service.validateSourceReferenceAccess(ctx, principal, reference); err != nil {
+		return Session{}, err
+	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
 	prepared, err := service.preparedPlayback(ctx, principal, reference, playbackPolicy{
 		allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight,
@@ -324,6 +331,21 @@ func (service *Service) Resolve(ctx context.Context, principal auth.Principal, i
 	}
 	assets := append(streamAssets, subtitleAssets...)
 	return service.createSession(ctx, principal, reference, input.TitleID, sources, subtitles, assets, prepared.providerErrors)
+}
+
+func (service *Service) validateSourceReferenceAccess(ctx context.Context, principal auth.Principal, reference sourceReference) error {
+	addonID := strings.TrimSpace(reference.Source.AddonID)
+	if addonID == "" {
+		return ErrSourceReferenceExpired
+	}
+	if err := service.addons.ValidatePlaybackAccess(ctx, principal, addonID); err != nil {
+		if errors.Is(err, addon.ErrNotFound) || errors.Is(err, addon.ErrForbidden) ||
+			errors.Is(err, addon.ErrActiveProfileRequired) || errors.Is(err, addon.ErrInvalidInput) {
+			return ErrSourceReferenceExpired
+		}
+		return fmt.Errorf("validate playback source access: %w", err)
+	}
+	return nil
 }
 
 func (service *Service) createSession(ctx context.Context, principal auth.Principal, reference sourceReference, titleID string, sources []Source, subtitles []Subtitle, assets []storedAsset, providerErrors []ProviderFailure) (Session, error) {

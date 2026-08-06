@@ -217,7 +217,7 @@ func (service *Service) Management(ctx context.Context, principal auth.Principal
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return ManagedAddon{}, err
 	}
-	installed, err := queryAddon(tx.QueryRow(ctx, addonForProfileQuery, addonID, profileID))
+	installed, err := queryAddon(tx.QueryRow(ctx, addonForManagementQuery, addonID, profileID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ManagedAddon{}, ErrNotFound
 	}
@@ -252,7 +252,12 @@ func (service *Service) loadAddonList(ctx context.Context, principal auth.Princi
 			return nil, ErrForbidden
 		}
 	}
-	addons, err := listForProfile(ctx, tx, profileID)
+	var addons []InstalledAddon
+	if requireManagement {
+		addons, err = listForProfile(ctx, tx, profileID)
+	} else {
+		addons, err = listEnabledForProfile(ctx, tx, profileID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -484,6 +489,17 @@ func (service *Service) FetchPlaybackResource(ctx context.Context, principal aut
 	return service.fetch(ctx, principal, addonID, path)
 }
 
+// ValidatePlaybackAccess verifies that an enabled add-on remains available to
+// the principal's active profile without contacting its provider.
+func (service *Service) ValidatePlaybackAccess(ctx context.Context, principal auth.Principal, addonID string) error {
+	profileID, err := activeProfileID(principal)
+	if err != nil {
+		return err
+	}
+	_, err = service.loadAddonForProfile(ctx, principal, profileID, addonID)
+	return err
+}
+
 func (service *Service) fetch(ctx context.Context, principal auth.Principal, addonID string, path ResourcePath) (ResourceResult, error) {
 	profileID, err := activeProfileID(principal)
 	if err != nil {
@@ -544,7 +560,7 @@ func (service *Service) fetchAll(ctx context.Context, principal auth.Principal, 
 		}
 		requests = append(requests, plannedRequest{addon: installed, path: requestPath})
 	}
-	batch, executeErr := service.execute(ctx, requests)
+	batch, executeErr := service.executeAuthenticated(ctx, principal, requests)
 	if err := service.revalidateAddonList(ctx, principal, addons); err != nil {
 		return ResourceBatch{}, err
 	}
@@ -584,7 +600,7 @@ func (service *Service) FetchCatalogs(ctx context.Context, principal auth.Princi
 			requests = append(requests, plannedRequest{addon: installed, path: path})
 		}
 	}
-	batch, executeErr := service.execute(ctx, requests)
+	batch, executeErr := service.executeAuthenticated(ctx, principal, requests)
 	if err := service.revalidateAddonList(ctx, principal, addons); err != nil {
 		return ResourceBatch{}, err
 	}
@@ -609,7 +625,7 @@ func (service *Service) SearchCatalogs(ctx context.Context, principal auth.Princ
 	if err != nil {
 		return ResourceBatch{}, err
 	}
-	batch, executeErr := service.execute(ctx, requests)
+	batch, executeErr := service.executeAuthenticated(ctx, principal, requests)
 	if err := service.revalidateAddonList(ctx, principal, addons); err != nil {
 		return ResourceBatch{}, err
 	}
@@ -694,6 +710,14 @@ func plannedRequestKey(request plannedRequest) string {
 }
 
 func (service *Service) execute(ctx context.Context, requests []plannedRequest) (ResourceBatch, error) {
+	return service.executeBatch(ctx, auth.Principal{}, false, requests)
+}
+
+func (service *Service) executeAuthenticated(ctx context.Context, principal auth.Principal, requests []plannedRequest) (ResourceBatch, error) {
+	return service.executeBatch(ctx, principal, true, requests)
+}
+
+func (service *Service) executeBatch(ctx context.Context, principal auth.Principal, revalidateRetry bool, requests []plannedRequest) (ResourceBatch, error) {
 	if len(requests) > maxPlannedRequests {
 		return ResourceBatch{}, requestPlanLimitError()
 	}
@@ -727,7 +751,7 @@ func (service *Service) execute(ctx context.Context, requests []plannedRequest) 
 					}
 					request := requests[index]
 					requestCtx, cancel := context.WithTimeout(batchCtx, service.effectiveRequestTimeout())
-					payload, cache, err := service.executeRequest(requestCtx, request, budget)
+					payload, cache, err := service.executeRequest(requestCtx, principal, revalidateRetry, request, budget)
 					cancel()
 					if budget.wasExceeded() {
 						payload = nil
@@ -783,7 +807,7 @@ func aggregateResourceLimitError() error {
 	)
 }
 
-func (service *Service) executeRequest(ctx context.Context, request plannedRequest, budget *aggregateResourceBudget) (payload json.RawMessage, cache CachePolicy, err error) {
+func (service *Service) executeRequest(ctx context.Context, principal auth.Principal, revalidateRetry bool, request plannedRequest, budget *aggregateResourceBudget) (payload json.RawMessage, cache CachePolicy, err error) {
 	diagnosticAttempt := service.diagnostics.start(request.addon.ID)
 	defer func() {
 		service.diagnostics.complete(request.addon.ID, diagnosticAttempt, err)
@@ -798,6 +822,11 @@ func (service *Service) executeRequest(ctx context.Context, request plannedReque
 	case <-timer.C:
 	case <-ctx.Done():
 		return nil, CachePolicy{}, ctx.Err()
+	}
+	if revalidateRetry {
+		if err := service.revalidateAddon(ctx, principal, request.addon); err != nil {
+			return nil, CachePolicy{}, err
+		}
 	}
 	return service.executeTransportRequest(ctx, request, budget)
 }
@@ -837,8 +866,16 @@ func (service *Service) effectiveLogger() *slog.Logger {
 }
 
 func listForProfile(ctx context.Context, tx pgx.Tx, profileID string) ([]InstalledAddon, error) {
+	return queryAddonList(ctx, tx, profileID, false)
+}
+
+func listEnabledForProfile(ctx context.Context, tx pgx.Tx, profileID string) ([]InstalledAddon, error) {
+	return queryAddonList(ctx, tx, profileID, true)
+}
+
+func queryAddonList(ctx context.Context, tx pgx.Tx, profileID string, enabledOnly bool) ([]InstalledAddon, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT pa.id::text, pa.transport_url, pa.manifest::text, access.position,
+		SELECT pa.id::text, pa.transport_url, pa.manifest::text, pa.enabled, access.position,
 		       ARRAY(
 		           SELECT assignment.profile_id::text
 		           FROM addon_profile_access assignment
@@ -849,9 +886,9 @@ func listForProfile(ctx context.Context, tx pgx.Tx, profileID string) ([]Install
 		       pa.installed_at, pa.updated_at
 		FROM addon_profile_access access
 		JOIN profile_addons pa ON pa.id = access.addon_id
-		WHERE access.profile_id = $1::uuid
+		WHERE access.profile_id = $1::uuid AND (NOT $2 OR pa.enabled)
 		ORDER BY access.position, pa.id
-	`, profileID)
+	`, profileID, enabledOnly)
 	if err != nil {
 		return nil, fmt.Errorf("query profile addons: %w", err)
 	}
@@ -942,7 +979,7 @@ func (service *Service) revalidateAddonList(ctx context.Context, principal auth.
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return err
 	}
-	current, err := listForProfile(ctx, tx, profileID)
+	current, err := listEnabledForProfile(ctx, tx, profileID)
 	if err != nil {
 		return err
 	}
@@ -962,6 +999,7 @@ func (service *Service) revalidateAddonList(ctx context.Context, principal auth.
 
 func sameInstalledAddon(left, right InstalledAddon) bool {
 	return left.ID == right.ID &&
+		left.Enabled == right.Enabled &&
 		left.transportURL == right.transportURL &&
 		left.Position == right.Position &&
 		left.InstalledAt.Equal(right.InstalledAt) &&

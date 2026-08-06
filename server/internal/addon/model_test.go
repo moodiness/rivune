@@ -480,6 +480,9 @@ func TestInstalledAddonManifestMarshalsAsObjectWithoutTransport(t *testing.T) {
 	if !strings.Contains(string(encoded), `"manifest":{"id":"org.example"}`) {
 		t.Fatalf("manifest was not embedded as JSON: %s", encoded)
 	}
+	if !strings.Contains(string(encoded), `"enabled":false`) {
+		t.Fatalf("installed addon availability was omitted: %s", encoded)
+	}
 	if strings.Contains(string(encoded), "transportUrl") || strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "must-not-leak") {
 		t.Fatalf("installed addon exposed internal transport: %s", encoded)
 	}
@@ -502,5 +505,22 @@ func TestManagedAddonTransportDisclosureIsExplicit(t *testing.T) {
 	}
 	if strings.Contains(string(redacted), "transportUrl") || strings.Contains(string(redacted), "management-secret") {
 		t.Fatal("redacted managed addon exposed its transport URL")
+	}
+}
+func TestUpdateAddonInputAvailabilitySerialization(t *testing.T) {
+	disabled := false
+	update, err := json.Marshal(UpdateAddonInput{Enabled: &disabled, ProfileIDs: []string{}})
+	if err != nil {
+		t.Fatalf("marshal addon availability update: %v", err)
+	}
+	if !strings.Contains(string(update), `"enabled":false`) {
+		t.Fatalf("addon availability update omitted false: %s", update)
+	}
+	omitted, err := json.Marshal(UpdateAddonInput{ProfileIDs: []string{}})
+	if err != nil {
+		t.Fatalf("marshal addon update without availability: %v", err)
+	}
+	if strings.Contains(string(omitted), `"enabled"`) {
+		t.Fatalf("addon update serialized omitted availability: %s", omitted)
 	}
 }

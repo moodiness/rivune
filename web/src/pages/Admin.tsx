@@ -6,7 +6,7 @@ import { AddTile, Button, ConfirmDialog, EmptyState, handleDirectionalFocus, Ico
 import { interfaceLanguages, locale, translate, type TranslationKey } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
-import type { AccessCategory, AddonDiagnostic, AddonDiagnosticErrorCode, AddonDiagnosticState, AddonDiagnosticsResponse, AddonManifest, AddonPreviewResponse, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstallAddonInput, InstalledAddon, InterfaceLanguage, MaintenanceSettings, ManagedAddon, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
+import type { AccessCategory, AddonDiagnostic, AddonDiagnosticErrorCode, AddonDiagnosticState, AddonDiagnosticsResponse, AddonManifest, AddonPreviewResponse, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstallAddonInput, InstalledAddon, InterfaceLanguage, MaintenanceSettings, ManagedAddon, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus, UpdateAddonInput } from "../types";
 
 type AdminTab = "categories" | "profiles" | "devices" | "addons" | "collections" | "activity" | "operations" | "settings";
 type AdminTabGroup = "access" | "catalog" | "supervision" | "preferences";
@@ -1087,6 +1087,7 @@ function AddonsAdmin() {
   const [editingAddon, setEditingAddon] = useState<ManagedAddon | null>(null);
   const [editTransportUrl, setEditTransportUrl] = useState("");
   const [editProfileIds, setEditProfileIds] = useState<string[]>([]);
+  const [editEnabled, setEditEnabled] = useState(true);
   const [draggedAddonIndex, setDraggedAddonIndex] = useState<number | null>(null);
   const [reordering, setReordering] = useState(false);
   const reorderInFlight = useRef(false);
@@ -1165,6 +1166,7 @@ function AddonsAdmin() {
       setEditingAddon(addon);
       setEditTransportUrl("");
       setEditProfileIds(addon.profileIds);
+      setEditEnabled(addon.enabled);
       return;
     }
     setWorking(addon.id);
@@ -1174,6 +1176,7 @@ function AddonsAdmin() {
       setEditingAddon(managed);
       setEditTransportUrl(managed.transportUrl);
       setEditProfileIds(managed.profileIds);
+      setEditEnabled(managed.enabled);
     } catch (cause) {
       setError(notifyError(cause, translate("admin.addons.errors.load"), translate("admin.addons.errors.unavailableTitle")));
     } finally {
@@ -1184,6 +1187,7 @@ function AddonsAdmin() {
   function closeAddonEditor() {
     setEditingAddon(null);
     setEditTransportUrl("");
+    setEditEnabled(true);
   }
 
   async function saveAddon(event: FormEvent) {
@@ -1192,11 +1196,17 @@ function AddonsAdmin() {
     setWorking(editingAddon.id);
     setError("");
     try {
-      const updated = await api.updateAddon(editingAddon.id, editProfileIds, editTransportUrl.trim() || undefined);
+      const input: UpdateAddonInput = {
+        profileIds: [...editProfileIds],
+        ...(isGlobalAdmin ? { enabled: editEnabled } : {}),
+        ...(editTransportUrl.trim() ? { transportUrl: editTransportUrl.trim() } : {}),
+      };
+      const updated = await api.updateAddon(editingAddon.id, input);
       const publicUpdated: InstalledAddon = {
         id: updated.id,
         manifest: updated.manifest,
         position: updated.position,
+        enabled: updated.enabled,
         profileIds: updated.profileIds,
         installedAt: updated.installedAt,
         updatedAt: updated.updatedAt,
@@ -1330,7 +1340,7 @@ function AddonsAdmin() {
       : addons.length
         ? <div className="addon-list">{addons.map((addon, addonIndex) => <AddonCard key={addon.id} addon={addon} diagnostic={diagnosticsByAddonId.get(addon.id)} index={addonIndex} total={addons.length} working={working === addon.id} reordering={reordering} dragging={draggedAddonIndex === addonIndex} onDragStart={(event) => { setDraggedAddonIndex(addonIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(addonIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedAddonIndex !== null) stageAddonMove(draggedAddonIndex, addonIndex); }} onDragOver={(event) => { if (draggedAddonIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveAddonOrder(); }} onDragEnd={() => { if (draggedAddonIndex !== null) void saveAddonOrder(); }} onMove={(toIndex) => void moveAddon(addonIndex, toIndex)} onRefresh={() => void refresh(addon.id)} onEdit={() => void openAddonEditor(addon)} onRemove={() => setDeleting(addon)} />)}</div>
         : <EmptyState icon={<Boxes size={44} />} title={translate(error ? "admin.addons.errors.unavailableTitle" : "admin.addons.empty.title")} description={translate(error ? "admin.addons.errors.retryDescription" : "admin.addons.empty.description")} action={error ? <Button variant="secondary" onClick={() => void load()}><RefreshCw size={17} /> {translate("common.actions.tryAgain")}</Button> : undefined} />}
-    {editingAddon && <Modal onClose={() => { if (!addonEditSaving) closeAddonEditor(); }} className="editor-modal addon-edit-modal"><form onSubmit={saveAddon}><div className="editor-modal__heading"><span><Pencil size={18} /> {translate("admin.addons.editor.title")}</span><h2>{editingAddon.manifest.name}</h2><p>{translate("admin.addons.editor.description")}</p></div>{error && <Notice>{error}</Notice>}{account?.session.authorizationScope === "global_admin" && <label className="field"><span>{translate("admin.addons.editor.transportUrl")}</span><div><WandSparkles size={18} /><input type="url" value={editTransportUrl} onChange={(event) => setEditTransportUrl(event.target.value)} placeholder={translate("admin.addons.manifestUrlPlaceholder")} /></div></label>}<ProfileAssignmentPicker profiles={profiles} selected={editProfileIds} onChange={setEditProfileIds} legend={translate("admin.profileAssignment.legend")} /><div className="modal-actions"><Button type="button" variant="ghost" disabled={addonEditSaving} onClick={closeAddonEditor}>{translate("common.cancel")}</Button><Button type="submit" loading={addonEditSaving} disabled={editProfileIds.length === 0}><Save size={18} /> {translate("admin.addons.actions.save")}</Button></div></form></Modal>}
+    {editingAddon && <Modal onClose={() => { if (!addonEditSaving) closeAddonEditor(); }} className="editor-modal addon-edit-modal"><form onSubmit={saveAddon}><div className="editor-modal__heading"><span><Pencil size={18} /> {translate("admin.addons.editor.title")}</span><h2>{editingAddon.manifest.name}</h2><p>{translate("admin.addons.editor.description")}</p></div>{error && <Notice>{error}</Notice>}{account?.session.authorizationScope === "global_admin" && <><label className="field"><span>{translate("admin.addons.editor.transportUrl")}</span><div><WandSparkles size={18} /><input type="url" value={editTransportUrl} disabled={addonEditSaving} onChange={(event) => setEditTransportUrl(event.target.value)} placeholder={translate("admin.addons.manifestUrlPlaceholder")} /></div></label><section className="addon-availability" aria-labelledby="addon-availability-title" aria-describedby="addon-availability-description"><div><strong id="addon-availability-title">{translate("admin.addons.editor.availability")}</strong><p id="addon-availability-description">{translate("admin.addons.editor.availabilityDescription")}</p><span className={`addon-availability__status ${editEnabled ? "is-enabled" : "is-disabled"}`}>{translate(editEnabled ? "common.status.enabled" : "common.status.disabled")}</span></div><Button type="button" variant="secondary" className="addon-availability__toggle" aria-pressed={editEnabled} disabled={addonEditSaving} onClick={() => setEditEnabled((value) => !value)}>{translate(editEnabled ? "admin.addons.actions.disable" : "admin.addons.actions.enable")}</Button></section></>}<ProfileAssignmentPicker profiles={profiles} selected={editProfileIds} onChange={setEditProfileIds} legend={translate("admin.profileAssignment.legend")} /><div className="modal-actions"><Button type="button" variant="ghost" disabled={addonEditSaving} onClick={closeAddonEditor}>{translate("common.cancel")}</Button><Button type="submit" loading={addonEditSaving} disabled={editProfileIds.length === 0}><Save size={18} /> {translate("admin.addons.actions.save")}</Button></div></form></Modal>}
     {deleting && <ConfirmDialog title={translate("admin.addons.remove.title", { name: deleting.manifest.name })} description={translate("admin.addons.remove.description")} confirmLabel={translate("admin.addons.remove.confirm")} loading={working === deleting.id} onCancel={() => setDeleting(null)} onConfirm={() => void remove(deleting)} />}
   </div>;
 }
@@ -1397,11 +1407,11 @@ function AddonCard({ addon, diagnostic, index, total, working, reordering, dragg
   onRemove: () => void;
 }) {
   const manifest: AddonManifest = addon.manifest;
-  return <article className={`addon-card ${dragging ? "is-dragging" : ""}`} onDragEnter={onDragEnter} onDragOver={onDragOver} onDrop={onDrop}>
+  return <article className={`addon-card ${!addon.enabled ? "is-disabled" : ""} ${dragging ? "is-dragging" : ""}`} onDragEnter={onDragEnter} onDragOver={onDragOver} onDrop={onDrop}>
     <button type="button" className="addon-card__drag" draggable={!reordering && !working} disabled={reordering || working} onDragStart={onDragStart} onDragEnd={onDragEnd} aria-label={translate("admin.addons.reorder.dragLabel", { name: manifest.name })}><GripVertical /></button>
     <div className="addon-card__logo">{manifest.logo ? <img src={manifest.logo} alt="" /> : manifest.name.slice(0, 2).toUpperCase()}</div>
     <div className="addon-card__body">
-      <div><h3>{manifest.name}</h3><span>v{manifest.version}</span>{manifest.behaviorHints?.p2p && <span className="addon-badge addon-badge--warn">P2P</span>}</div>
+      <div><h3>{manifest.name}</h3><span>v{manifest.version}</span>{!addon.enabled && <span className="addon-badge addon-badge--disabled">{translate("common.status.disabled")}</span>}{manifest.behaviorHints?.p2p && <span className="addon-badge addon-badge--warn">P2P</span>}</div>
       <p>{manifest.description || translate("admin.addons.card.noDescription")}</p>
       <div className="addon-card__types">{manifest.types.map((type) => <i key={type}>{type}</i>)}</div>
       {diagnostic && <div className="addon-diagnostics">

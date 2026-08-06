@@ -302,6 +302,10 @@ type recordingResourceFetcher struct {
 	fetchAllCalls int
 }
 
+func (fetcher *recordingResourceFetcher) ValidatePlaybackAccess(context.Context, auth.Principal, string) error {
+	return nil
+}
+
 func (fetcher *recordingResourceFetcher) FetchPlaybackResource(_ context.Context, _ auth.Principal, addonID string, path addon.ResourcePath) (addon.ResourceResult, error) {
 	fetcher.fetchAddonID = addonID
 	fetcher.fetchPath = path

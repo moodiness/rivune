@@ -308,3 +308,47 @@ func explainPlan(t *testing.T, ctx context.Context, connection *pgxpool.Conn, qu
 	}
 	return strings.Join(plan, "\n")
 }
+
+func TestAddonEnabledMigrationBackfillsExistingInstallations(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run addon availability migration tests")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open addon migration database: %v", err)
+	}
+	defer pool.Close()
+	connection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire addon migration connection: %v", err)
+	}
+	defer connection.Release()
+	if _, err := connection.Exec(ctx, `
+		CREATE TEMPORARY TABLE profile_addons (id integer PRIMARY KEY);
+		INSERT INTO profile_addons (id) VALUES (1);
+	`, pgx.QueryExecModeSimpleProtocol); err != nil {
+		t.Fatalf("seed pre-migration addon: %v", err)
+	}
+	contents, err := migrationFiles.ReadFile("migrations/000057_addon_enabled.sql")
+	if err != nil {
+		t.Fatalf("read addon enabled migration: %v", err)
+	}
+	if _, err := connection.Exec(ctx, string(contents)); err != nil {
+		t.Fatalf("apply addon enabled migration: %v", err)
+	}
+	if _, err := connection.Exec(ctx, `INSERT INTO profile_addons (id) VALUES (2)`); err != nil {
+		t.Fatalf("insert post-migration addon: %v", err)
+	}
+	var total, enabled int
+	if err := connection.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE enabled) FROM profile_addons`).Scan(&total, &enabled); err != nil {
+		t.Fatalf("query migrated addon availability: %v", err)
+	}
+	if total != 2 || enabled != 2 {
+		t.Fatalf("migrated addon availability = %d/%d enabled, want 2/2", enabled, total)
+	}
+}

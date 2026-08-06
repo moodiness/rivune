@@ -16,6 +16,10 @@ type cardinalityResourceFetcher struct {
 	payload []byte
 }
 
+func (fetcher *cardinalityResourceFetcher) ValidatePlaybackAccess(context.Context, auth.Principal, string) error {
+	return nil
+}
+
 func (fetcher *cardinalityResourceFetcher) FetchPlaybackResource(_ context.Context, _ auth.Principal, addonID string, _ addon.ResourcePath) (addon.ResourceResult, error) {
 	return addon.ResourceResult{AddonID: addonID, ManifestID: "org.example.cardinality", Payload: fetcher.payload}, nil
 }

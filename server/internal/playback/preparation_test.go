@@ -15,8 +15,11 @@ import (
 )
 
 type preparationResourceFetcher struct {
-	streamCalls   atomic.Int32
-	subtitleCalls atomic.Int32
+	streamCalls       atomic.Int32
+	subtitleCalls     atomic.Int32
+	validationCalls   atomic.Int32
+	validationErr     error
+	validationAddonID string
 }
 
 func (fetcher *preparationResourceFetcher) FetchPlaybackResource(ctx context.Context, principal auth.Principal, _ string, resource addon.ResourcePath) (addon.ResourceResult, error) {
@@ -25,6 +28,12 @@ func (fetcher *preparationResourceFetcher) FetchPlaybackResource(ctx context.Con
 		return addon.ResourceResult{}, err
 	}
 	return batch.Results[0], nil
+}
+
+func (fetcher *preparationResourceFetcher) ValidatePlaybackAccess(_ context.Context, _ auth.Principal, addonID string) error {
+	fetcher.validationCalls.Add(1)
+	fetcher.validationAddonID = addonID
+	return fetcher.validationErr
 }
 
 func (fetcher *preparationResourceFetcher) FetchAllPlaybackResources(_ context.Context, _ auth.Principal, resource addon.ResourcePath) (addon.ResourceBatch, error) {
@@ -148,8 +157,95 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	if _, err := service.Prepare(context.Background(), principal, PrepareInput{SourceRef: selected.SourceRef}); err != nil {
 		t.Fatal(err)
 	}
-	if processor.calls.Load() != 1 || fetcher.streamCalls.Load() != 1 || fetcher.subtitleCalls.Load() != 1 {
-		t.Fatalf("cached preparation repeated remote work: probes=%d streams=%d subtitles=%d", processor.calls.Load(), fetcher.streamCalls.Load(), fetcher.subtitleCalls.Load())
+	if processor.calls.Load() != 1 || fetcher.streamCalls.Load() != 1 || fetcher.subtitleCalls.Load() != 1 || fetcher.validationCalls.Load() != 2 || fetcher.validationAddonID != "addon-id" {
+		t.Fatalf("cached preparation repeated remote work or validated the wrong addon: probes=%d streams=%d subtitles=%d validations=%d addon=%q", processor.calls.Load(), fetcher.streamCalls.Load(), fetcher.subtitleCalls.Load(), fetcher.validationCalls.Load(), fetcher.validationAddonID)
+	}
+}
+
+func TestPrepareAndResolveReauthorizeCachedSourceReferences(t *testing.T) {
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	profileID := "profile-id"
+	grantExpiresAt := now.Add(time.Hour)
+	principal := auth.Principal{
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+		SessionID: "auth-session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
+	}
+	tests := []struct {
+		name          string
+		validationErr error
+		invoke        func(*Service, string) error
+	}{
+		{
+			name: "prepare after disable", validationErr: addon.ErrNotFound,
+			invoke: func(service *Service, sourceRef string) error {
+				_, err := service.Prepare(context.Background(), principal, PrepareInput{SourceRef: sourceRef})
+				return err
+			},
+		},
+		{
+			name: "resolve after profile access loss", validationErr: addon.ErrForbidden,
+			invoke: func(service *Service, sourceRef string) error {
+				_, err := service.Resolve(context.Background(), principal, ResolveInput{SourceRef: sourceRef})
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fetcher := &preparationResourceFetcher{validationErr: test.validationErr}
+			processor := &countingProbeProcessor{}
+			references := newSourceReferenceStore(func() time.Time { return now })
+			reference, err := references.put(sourceReference{
+				AuthSessionID: principal.SessionID, ProfileID: profileID, MediaType: "movie", AddonMediaType: "movie", ResourceID: "tt1234567",
+				Source: Source{ID: "source-id", AddonID: "addon-id", ManifestID: "manifest-id", Mode: "direct", Protocol: "http", Container: "mp4", Compatible: true},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			preparations := newPlaybackPreparationCache(func() time.Time { return now })
+			preparations.entries[playbackPreparationCacheKey(reference.ID, playbackPolicy{})] = playbackPreparationEntry{
+				playback: preparedPlayback{source: cloneSource(reference.Source)}, expiresAt: reference.ExpiresAt,
+			}
+			authorizationCalls := 0
+			service := &Service{
+				addons: fetcher, processor: processor, now: func() time.Time { return now },
+				references: references, probes: newMediaProbeCache(func() time.Time { return now }), preparations: preparations,
+				hlsJobs: make(map[string]*hlsJob),
+				profileTxFactory: func(context.Context, auth.Principal) (playbackProfileTransaction, error) {
+					authorizationCalls++
+					return testPlaybackProfileTransaction{}, nil
+				},
+			}
+
+			if err := test.invoke(service, reference.ID); err != ErrSourceReferenceExpired {
+				t.Fatalf("cached source rejection error = %v, want opaque expiry", err)
+			}
+			if fetcher.validationCalls.Load() != 1 || fetcher.validationAddonID != "addon-id" || fetcher.streamCalls.Load() != 0 || fetcher.subtitleCalls.Load() != 0 || processor.calls.Load() != 0 {
+				t.Fatalf("rejected cached source did work or validated the wrong addon: validations=%d addon=%q streams=%d subtitles=%d probes=%d", fetcher.validationCalls.Load(), fetcher.validationAddonID, fetcher.streamCalls.Load(), fetcher.subtitleCalls.Load(), processor.calls.Load())
+			}
+			if authorizationCalls != 1 || len(service.hlsJobs) != 0 {
+				t.Fatalf("rejected cached source reached prewarm/session work: authorizations=%d hlsJobs=%d", authorizationCalls, len(service.hlsJobs))
+			}
+		})
+	}
+}
+
+func TestSourceReferenceAccessValidationDistinguishesInfrastructureFailure(t *testing.T) {
+	storageErr := errors.New("addon authorization storage unavailable")
+	fetcher := &preparationResourceFetcher{validationErr: storageErr}
+	service := &Service{addons: fetcher}
+	err := service.validateSourceReferenceAccess(context.Background(), auth.Principal{}, sourceReference{Source: Source{AddonID: "addon-id"}})
+	if !errors.Is(err, storageErr) || errors.Is(err, ErrSourceReferenceExpired) {
+		t.Fatalf("validator infrastructure error = %v, want preserved non-expiry failure", err)
+	}
+	if fetcher.validationCalls.Load() != 1 {
+		t.Fatalf("validator calls = %d, want 1", fetcher.validationCalls.Load())
+	}
+	if err := service.validateSourceReferenceAccess(context.Background(), auth.Principal{}, sourceReference{}); err != ErrSourceReferenceExpired {
+		t.Fatalf("empty addon identity error = %v, want opaque expiry", err)
+	}
+	if fetcher.validationCalls.Load() != 1 {
+		t.Fatalf("empty addon identity reached validator: calls=%d", fetcher.validationCalls.Load())
 	}
 }
 

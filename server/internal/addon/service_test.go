@@ -430,12 +430,120 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if installed.TransportURL != transportURL {
 		t.Fatal("install response did not preserve the stored transport URL")
 	}
+	if !installed.Enabled {
+		t.Fatal("new installation was not enabled by default")
+	}
+	var persistedEnabled bool
+	if err := pool.QueryRow(ctx, `SELECT enabled FROM profile_addons WHERE id = $1::uuid`, installed.ID).Scan(&persistedEnabled); err != nil {
+		t.Fatalf("query installed addon availability: %v", err)
+	}
+	if !persistedEnabled {
+		t.Fatal("database default did not enable the new installation")
+	}
+	if err := service.ValidatePlaybackAccess(ctx, globalPrincipal, installed.ID); err != nil {
+		t.Fatalf("validate enabled playback access: %v", err)
+	}
+	if transport.resourceCalls != 0 {
+		t.Fatalf("playback access validation made %d provider calls", transport.resourceCalls)
+	}
+	disabled := false
+	callsBeforeToggle := transport.calls
+	if _, err := service.Update(ctx, principal, installed.ID, UpdateAddonInput{
+		Enabled: &disabled, ProfileIDs: []string{profileAID, profileBID},
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("delegated availability toggle error = %v, want %v", err, ErrForbidden)
+	}
+	if transport.calls != callsBeforeToggle {
+		t.Fatalf("denied availability toggle fetched manifest %d times", transport.calls-callsBeforeToggle)
+	}
+	disabledAddon, err := service.Update(ctx, globalPrincipal, installed.ID, UpdateAddonInput{
+		Enabled: &disabled, ProfileIDs: []string{profileAID, profileBID},
+	})
+	if err != nil {
+		t.Fatalf("disable addon: %v", err)
+	}
+	if disabledAddon.Enabled || transport.calls != callsBeforeToggle {
+		t.Fatalf("disable result = enabled %t with %d manifest calls, want false and %d", disabledAddon.Enabled, transport.calls, callsBeforeToggle)
+	}
+	if err := service.ValidatePlaybackAccess(ctx, globalPrincipal, installed.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disabled playback access validation error = %v, want %v", err, ErrNotFound)
+	}
+	if transport.resourceCalls != 0 {
+		t.Fatalf("disabled playback access validation made %d provider calls", transport.resourceCalls)
+	}
+	manageable, err := service.List(ctx, globalPrincipal)
+	if err != nil || len(manageable) != 1 || manageable[0].ID != installed.ID || manageable[0].Enabled {
+		t.Fatalf("disabled management list = %+v, error %v", manageable, err)
+	}
+	managedDisabled, err := service.Management(ctx, globalPrincipal, installed.ID)
+	if err != nil || managedDisabled.Enabled {
+		t.Fatalf("disabled management lookup = %+v, error %v", managedDisabled, err)
+	}
+	reorderedDisabled, err := service.Reorder(ctx, globalPrincipal, ReorderInput{AddonIDs: []string{installed.ID}})
+	if err != nil || len(reorderedDisabled) != 1 || reorderedDisabled[0].Enabled {
+		t.Fatalf("disabled addon reorder result = %+v, error %v", reorderedDisabled, err)
+	}
+	disabledDiagnostics, err := service.Diagnostics(ctx, globalPrincipal)
+	if err != nil || len(disabledDiagnostics.Diagnostics) != 1 || disabledDiagnostics.Diagnostics[0].AddonID != installed.ID {
+		t.Fatalf("disabled addon diagnostics = %+v, error %v", disabledDiagnostics, err)
+	}
+	if catalogs, err := service.Catalogs(ctx, globalPrincipal); err != nil || len(catalogs) != 0 {
+		t.Fatalf("disabled catalog discovery = %+v, error %v", catalogs, err)
+	}
+	if _, err := service.Fetch(ctx, globalPrincipal, installed.ID, ResourcePath{Resource: "catalog", Type: "movie", ID: "searchable"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disabled exact catalog fetch error = %v, want %v", err, ErrNotFound)
+	}
+	if _, err := service.FetchPlaybackResource(ctx, globalPrincipal, installed.ID, ResourcePath{Resource: "stream", Type: "movie", ID: "tt0000001"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disabled exact playback fetch error = %v, want %v", err, ErrNotFound)
+	}
+	if batch, err := service.FetchAll(ctx, globalPrincipal, ResourcePath{Resource: "catalog", Type: "movie", ID: "searchable"}); err != nil || len(batch.Results) != 0 || len(batch.Errors) != 0 {
+		t.Fatalf("disabled generic fanout = %+v, error %v", batch, err)
+	}
+	if batch, err := service.FetchAllPlaybackResources(ctx, globalPrincipal, ResourcePath{Resource: "stream", Type: "movie", ID: "tt0000001"}); err != nil || len(batch.Results) != 0 || len(batch.Errors) != 0 {
+		t.Fatalf("disabled playback fanout = %+v, error %v", batch, err)
+	}
+	for _, addonCatalogs := range []bool{false, true} {
+		if batch, err := service.FetchCatalogs(ctx, globalPrincipal, "", nil, addonCatalogs); err != nil || len(batch.Results) != 0 || len(batch.Errors) != 0 {
+			t.Fatalf("disabled catalog fanout (%t) = %+v, error %v", addonCatalogs, batch, err)
+		}
+	}
+	if batch, err := service.SearchCatalogs(ctx, globalPrincipal, "movie", CatalogSearchInput{Search: "disabled", Limit: 10}); err != nil || len(batch.Results) != 0 || len(batch.Errors) != 0 {
+		t.Fatalf("disabled catalog search = %+v, error %v", batch, err)
+	}
+	if transport.resourceCalls != 0 {
+		t.Fatalf("disabled runtime paths made %d provider calls", transport.resourceCalls)
+	}
+	refreshedDisabled, err := service.Refresh(ctx, globalPrincipal, installed.ID)
+	if err != nil || refreshedDisabled.Enabled {
+		t.Fatalf("refresh disabled addon = %+v, error %v", refreshedDisabled, err)
+	}
+	if transport.calls != callsBeforeToggle+1 {
+		t.Fatalf("disabled refresh manifest calls = %d, want %d", transport.calls, callsBeforeToggle+1)
+	}
+	enabled := true
+	installed, err = service.Update(ctx, globalPrincipal, installed.ID, UpdateAddonInput{
+		Enabled: &enabled, ProfileIDs: []string{profileAID, profileBID},
+	})
+	if err != nil || !installed.Enabled {
+		t.Fatalf("re-enable addon = %+v, error %v", installed, err)
+	}
+	if transport.calls != callsBeforeToggle+1 {
+		t.Fatal("re-enable unexpectedly fetched the manifest")
+	}
 	diagnostics, err := service.Diagnostics(ctx, globalPrincipal)
 	if err != nil || len(diagnostics.Diagnostics) != 1 || diagnostics.Diagnostics[0].AddonID != installed.ID || diagnostics.Diagnostics[0].State != DiagnosticStateAvailable {
 		t.Fatalf("post-commit installation diagnostics = %+v, error %v", diagnostics, err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'member' WHERE id = $1::uuid`, userID); err != nil {
 		t.Fatalf("revoke persisted global role for diagnostics: %v", err)
+	}
+	if _, err := service.Update(ctx, globalPrincipal, installed.ID, UpdateAddonInput{
+		Enabled: &disabled, ProfileIDs: []string{profileAID, profileBID},
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("availability toggle after persisted role revocation error = %v, want %v", err, ErrForbidden)
+	}
+	if err := pool.QueryRow(ctx, `SELECT enabled FROM profile_addons WHERE id = $1::uuid`, installed.ID).Scan(&persistedEnabled); err != nil || !persistedEnabled {
+		t.Fatalf("denied persisted-role toggle changed availability to %t, error %v", persistedEnabled, err)
 	}
 	if _, err := service.Diagnostics(ctx, globalPrincipal); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("diagnostics after persisted role revocation error = %v, want %v", err, ErrForbidden)
@@ -600,6 +708,64 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if !successfulUpdateObservation.latestSucceeded || successfulUpdateObservation.lastError == nil || successfulUpdateObservation.lastError.Code != DiagnosticErrorInvalidResponse {
 		t.Fatalf("committed replacement update diagnostics = %+v", successfulUpdateObservation)
 	}
+	resourceCallsBeforeGuardedRetry := transport.resourceCalls
+	firstTemporaryAttempt := make(chan struct{})
+	guardedRetryCalls := 0
+	transport.resource = func(context.Context, string, ResourcePath) (json.RawMessage, CachePolicy, error) {
+		guardedRetryCalls++
+		if guardedRetryCalls == 1 {
+			close(firstTemporaryAttempt)
+		}
+		return nil, CachePolicy{}, unavailable("guarded retry temporary provider failure", errors.New("temporary provider failure"), true)
+	}
+	service.retryDelay = time.Second
+	guardedRetryDone := make(chan error, 1)
+	go func() {
+		_, retryErr := service.FetchAll(ctx, principal, ResourcePath{Resource: "catalog", Type: "movie", ID: "searchable"})
+		guardedRetryDone <- retryErr
+	}()
+	select {
+	case <-firstTemporaryAttempt:
+	case <-ctx.Done():
+		t.Fatalf("wait for temporary provider attempt: %v", ctx.Err())
+	}
+	if _, err := pool.Exec(ctx, `UPDATE profile_addons SET enabled = false, updated_at = now() WHERE id = $1::uuid`, installed.ID); err != nil {
+		t.Fatalf("disable addon during retry delay: %v", err)
+	}
+	select {
+	case retryErr := <-guardedRetryDone:
+		if !errors.Is(retryErr, ErrNotFound) {
+			t.Fatalf("retry after persisted disable error = %v, want %v", retryErr, ErrNotFound)
+		}
+	case <-ctx.Done():
+		t.Fatalf("wait for guarded retry result: %v", ctx.Err())
+	}
+	if guardedRetryCalls != 1 || transport.resourceCalls != resourceCallsBeforeGuardedRetry+1 {
+		t.Fatalf("provider calls across persisted disable = guarded %d, total delta %d; want 1", guardedRetryCalls, transport.resourceCalls-resourceCallsBeforeGuardedRetry)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE profile_addons SET enabled = true, updated_at = now() WHERE id = $1::uuid`, installed.ID); err != nil {
+		t.Fatalf("restore addon after guarded retry: %v", err)
+	}
+	service.diagnostics.remove(installed.ID)
+	successfulGuardedRetryCalls := 0
+	transport.resource = func(context.Context, string, ResourcePath) (json.RawMessage, CachePolicy, error) {
+		successfulGuardedRetryCalls++
+		if successfulGuardedRetryCalls == 1 {
+			return nil, CachePolicy{}, unavailable("successful guarded retry temporary failure", errors.New("temporary provider failure"), true)
+		}
+		return json.RawMessage(`{"metas":[]}`), CachePolicy{}, nil
+	}
+	service.retryDelay = time.Millisecond
+	successfulRetryBatch, retryErr := service.FetchAll(ctx, principal, ResourcePath{Resource: "catalog", Type: "movie", ID: "searchable"})
+	if retryErr != nil || len(successfulRetryBatch.Results) != 1 || len(successfulRetryBatch.Errors) != 0 || successfulGuardedRetryCalls != 2 {
+		t.Fatalf("unchanged guarded retry = calls %d, batch %+v, error %v", successfulGuardedRetryCalls, successfulRetryBatch, retryErr)
+	}
+	_, guardedRetryObservations := service.diagnostics.snapshot()
+	guardedRetryObservation := guardedRetryObservations[installed.ID]
+	if !guardedRetryObservation.latestSucceeded || !guardedRetryObservation.hasSuccess || guardedRetryObservation.lastError != nil {
+		t.Fatalf("successful guarded retry recorded an intermediate outcome: %+v", guardedRetryObservation)
+	}
+	service.retryDelay = 0
 	const privateTransportURL = "http://192.168.1.10/manifest.json"
 	if _, err := pool.Exec(ctx, `
 		UPDATE profile_addons SET transport_url = $2 WHERE id = $1::uuid
@@ -608,6 +774,20 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	}
 	if !isPrivateNetworkTransportURL(privateTransportURL) {
 		t.Fatal("private literal addon transport was not recognized")
+	}
+	transport.resource = func(ctx context.Context, _ string, _ ResourcePath) (json.RawMessage, CachePolicy, error) {
+		if _, err := pool.Exec(ctx, `UPDATE profile_addons SET enabled = false, updated_at = now() WHERE id = $1::uuid`, installed.ID); err != nil {
+			return nil, CachePolicy{}, fmt.Errorf("disable addon during provider request: %w", err)
+		}
+		return json.RawMessage(`{"streams":[]}`), CachePolicy{}, nil
+	}
+	if _, err := service.FetchPlaybackResource(ctx, principal, installed.ID, ResourcePath{
+		Resource: "stream", Type: "movie", ID: "disable-during-provider-io",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("concurrently disabled provider result error = %v, want %v", err, ErrNotFound)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE profile_addons SET enabled = true, updated_at = now() WHERE id = $1::uuid`, installed.ID); err != nil {
+		t.Fatalf("restore enabled addon after concurrent provider request: %v", err)
 	}
 	transport.resource = func(context.Context, string, ResourcePath) (json.RawMessage, CachePolicy, error) {
 		return json.RawMessage(`{"streams":[]}`), CachePolicy{}, nil
@@ -619,8 +799,8 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	}); err != nil {
 		t.Fatalf("assigned profile private addon fetch: %v", err)
 	}
-	if transport.resourceCalls != 1 {
-		t.Fatalf("assigned profile private addon resource calls = %d, want 1", transport.resourceCalls)
+	if transport.resourceCalls != resourceCallsBeforeGuardedRetry+5 {
+		t.Fatalf("assigned profile private addon resource calls = %d, want %d", transport.resourceCalls, resourceCallsBeforeGuardedRetry+5)
 	}
 	_, diagnosticObservations := service.diagnostics.snapshot()
 	directObservation := diagnosticObservations[installed.ID]
@@ -661,6 +841,9 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 		t.Fatalf("revoke addon assignment: %v", err)
 	}
 	principal.ActiveProfileID = new(profileBID)
+	if err := service.ValidatePlaybackAccess(ctx, principal, installed.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoked playback access validation error = %v, want %v", err, ErrNotFound)
+	}
 	if _, err := service.FetchPlaybackResource(ctx, principal, installed.ID, ResourcePath{
 		Resource: "stream", Type: "movie", ID: "retained-addon-id",
 	}); !errors.Is(err, ErrNotFound) {
@@ -670,6 +853,12 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 		t.Fatalf("resource transport calls after assignment revocation = %d, want %d", transport.resourceCalls, resourceCallsBeforeRevocation)
 	}
 	globalPrincipal.ActiveProfileID = new(profileAID)
+	disabled = false
+	if _, err := service.Update(ctx, globalPrincipal, installed.ID, UpdateAddonInput{
+		Enabled: &disabled, ProfileIDs: []string{profileAID},
+	}); err != nil {
+		t.Fatalf("disable addon before removal: %v", err)
+	}
 	if err := service.Remove(ctx, globalPrincipal, installed.ID); err != nil {
 		t.Fatalf("remove addon after diagnostics: %v", err)
 	}
@@ -1463,6 +1652,11 @@ func TestSameInstalledAddonDetectsReturnedRevisionChanges(t *testing.T) {
 	current.Manifest = json.RawMessage(`{"id":"example","version":"2.0.0"}`)
 	if sameInstalledAddon(current, expected) {
 		t.Fatal("manifest change was not detected")
+	}
+	current = expected
+	current.Enabled = !expected.Enabled
+	if sameInstalledAddon(current, expected) {
+		t.Fatal("availability change was not detected")
 	}
 	current = expected
 	current.ProfileIDs = append(append([]string(nil), expected.ProfileIDs...), "00000000-0000-4000-8000-000000000011")

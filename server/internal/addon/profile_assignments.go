@@ -186,7 +186,7 @@ func authorizeAndLoadAddonRefresh(ctx context.Context, tx pgx.Tx, principal auth
 	return installed, nil
 }
 
-func applyAddonUpdate(ctx context.Context, tx pgx.Tx, addonID, transportURL string, profileIDs []string, manifest Manifest, rawManifest json.RawMessage) error {
+func applyAddonUpdate(ctx context.Context, tx pgx.Tx, addonID, transportURL string, profileIDs []string, manifest Manifest, rawManifest json.RawMessage, enabled *bool) error {
 	assigned, err := addonTransportAssignedToProfiles(ctx, tx, transportURL, profileIDs, &addonID)
 	if err != nil {
 		return err
@@ -197,9 +197,9 @@ func applyAddonUpdate(ctx context.Context, tx pgx.Tx, addonID, transportURL stri
 	if _, err := tx.Exec(ctx, `
 		UPDATE profile_addons
 		SET transport_url = $2, manifest = $3::jsonb, manifest_id = $4,
-		    manifest_version = $5, updated_at = now()
+		    manifest_version = $5, enabled = COALESCE($6::boolean, enabled), updated_at = now()
 		WHERE id = $1::uuid
-	`, addonID, transportURL, rawManifest, manifest.ID, manifest.Version); err != nil {
+	`, addonID, transportURL, rawManifest, manifest.ID, manifest.Version, enabled); err != nil {
 		var databaseError *pgconn.PgError
 		if errors.As(err, &databaseError) && databaseError.Code == "23505" {
 			return ErrAlreadyInstalled
@@ -238,6 +238,9 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 	if !validUUID(addonID) {
 		return InstalledAddon{}, ErrInvalidInput
 	}
+	if input.Enabled != nil && !principal.IsGlobalAdministrator() {
+		return InstalledAddon{}, ErrForbidden
+	}
 	if input.ProfileIDs == nil {
 		return InstalledAddon{}, fmt.Errorf("%w: profileIds is required", ErrInvalidInput)
 	}
@@ -272,6 +275,13 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 	if err != nil {
 		return InstalledAddon{}, err
 	}
+	current, err := queryAddon(authorizationTx.QueryRow(ctx, addonForManagementQuery, addonID, activeProfileID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return InstalledAddon{}, ErrNotFound
+	}
+	if err != nil {
+		return InstalledAddon{}, fmt.Errorf("query addon update revision: %w", err)
+	}
 	transportURL := currentTransportURL
 	if input.TransportURL != nil {
 		transportURL = requestedTransportURL
@@ -283,6 +293,15 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 		}
 		if assigned {
 			return InstalledAddon{}, ErrAlreadyInstalled
+		}
+		if input.Enabled != nil {
+			if _, err := authorizationTx.Exec(ctx, `
+				UPDATE profile_addons
+				SET enabled = $2, updated_at = CASE WHEN enabled IS DISTINCT FROM $2 THEN now() ELSE updated_at END
+				WHERE id = $1::uuid
+			`, addonID, *input.Enabled); err != nil {
+				return InstalledAddon{}, fmt.Errorf("update addon availability: %w", err)
+			}
 		}
 		if err := writeProfileAssignments(ctx, authorizationTx, addonID, profileIDs); err != nil {
 			return InstalledAddon{}, err
@@ -326,14 +345,23 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 	if err := authorizeAddonAssignmentChange(ctx, tx, principal, activeProfileID, addonID, profileIDs); err != nil {
 		return InstalledAddon{}, err
 	}
-	lockedTransportURL, err := lockAddonTransportURL(ctx, tx, addonID)
-	if err != nil {
+	if _, err := lockAddonTransportURL(ctx, tx, addonID); err != nil {
 		return InstalledAddon{}, err
 	}
-	if lockedTransportURL != currentTransportURL {
+	locked, err := queryAddon(tx.QueryRow(ctx, addonForManagementQuery, addonID, activeProfileID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return InstalledAddon{}, ErrNotFound
+	}
+	if err != nil {
+		return InstalledAddon{}, fmt.Errorf("query locked addon update revision: %w", err)
+	}
+	if locked.transportURL != current.transportURL {
 		return InstalledAddon{}, ErrForbidden
 	}
-	if err := applyAddonUpdate(ctx, tx, addonID, transportURL, profileIDs, manifest, rawManifest); err != nil {
+	if !sameInstalledAddon(locked, current) {
+		return InstalledAddon{}, ErrNotFound
+	}
+	if err := applyAddonUpdate(ctx, tx, addonID, transportURL, profileIDs, manifest, rawManifest, input.Enabled); err != nil {
 		return InstalledAddon{}, err
 	}
 	installed, err := queryAddon(tx.QueryRow(ctx, addonForManagementQuery, addonID, activeProfileID))

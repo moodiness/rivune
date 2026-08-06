@@ -168,6 +168,7 @@ func isPlaybackResource(resource string) bool {
 type InstalledAddon struct {
 	ID          string          `json:"id"`
 	Manifest    json.RawMessage `json:"manifest"`
+	Enabled     bool            `json:"enabled"`
 	Position    int             `json:"position"`
 	ProfileIDs  []string        `json:"profileIds"`
 	InstalledAt time.Time       `json:"installedAt"`
@@ -204,6 +205,7 @@ type AddonPreview struct {
 
 type UpdateAddonInput struct {
 	TransportURL *string  `json:"transportUrl,omitempty"`
+	Enabled      *bool    `json:"enabled,omitempty"`
 	ProfileIDs   []string `json:"profileIds"`
 }
 
