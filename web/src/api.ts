@@ -4,6 +4,7 @@ import { clearMetadataCache } from "./metadataCache";
 import type {
   Account,
   AddonCatalogDescriptor,
+  AddonDiagnosticsResponse,
   AccessCategory,
   AvatarPreset,
   CalendarResponse,
@@ -434,6 +435,7 @@ export const api = {
   tmdbGenres: (mediaType: string) => request<{ genres: { id: number; name: string }[] }>(`/collections/tmdb/genres${query({ mediaType, language: metadataLanguage })}`),
 
   addons: () => request<{ addons: InstalledAddon[] }>("/addons"),
+  addonDiagnostics: () => request<AddonDiagnosticsResponse>("/addons/diagnostics"),
   installAddon: (transportUrl: string, profileIds: string[]) => request<ManagedAddon>("/addons", { method: "POST", body: JSON.stringify({ transportUrl, profileIds }) }),
   addonManagement: (id: string) => request<ManagedAddon>(`/addons/${id}/management`),
   refreshAddon: (id: string) => request<InstalledAddon>(`/addons/${id}/refresh`, { method: "POST" }),

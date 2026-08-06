@@ -416,6 +416,26 @@ export type InstalledAddon = {
 export type ManagedAddon = InstalledAddon & {
   transportUrl?: string;
 };
+export type AddonDiagnosticState = "unknown" | "available" | "degraded" | "unavailable";
+export type AddonDiagnosticErrorCode = "timeout" | "invalid_response" | "unavailable" | "request_failed";
+export type AddonDiagnosticCapabilities = {
+  resources: string[];
+  search: boolean;
+  pagination: boolean;
+  searchPagination: boolean;
+};
+export type AddonDiagnostic = {
+  addonId: string;
+  state: AddonDiagnosticState;
+  lastSuccessAt?: string;
+  approximateLatencyMs?: number;
+  lastError?: { code: AddonDiagnosticErrorCode; at: string };
+  capabilities: AddonDiagnosticCapabilities;
+};
+export type AddonDiagnosticsResponse = {
+  observedSince: string;
+  diagnostics: AddonDiagnostic[];
+};
 export type ResourceResult = { addonId: string; manifestId: string; resource: string; type: string; id: string; extra?: CollectionExtra[]; payload: Record<string, unknown> };
 export type ResourceBatch = { results: ResourceResult[]; errors: { addonId: string; manifestId: string; code: string; message: string }[] };
 export type CustomSeriesResolveInput = {

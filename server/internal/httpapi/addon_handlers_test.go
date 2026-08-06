@@ -24,6 +24,9 @@ type fakeAddonService struct {
 	installErr          error
 	listValue           []addon.InstalledAddon
 	listErr             error
+	diagnosticsCalls    int
+	diagnosticsValue    addon.Diagnostics
+	diagnosticsErr      error
 	managementID        string
 	managementValue     addon.ManagedAddon
 	managementErr       error
@@ -84,6 +87,11 @@ func (fake *fakeAddonService) Install(_ context.Context, _ auth.Principal, input
 
 func (fake *fakeAddonService) List(context.Context, auth.Principal) ([]addon.InstalledAddon, error) {
 	return fake.listValue, fake.listErr
+}
+
+func (fake *fakeAddonService) Diagnostics(context.Context, auth.Principal) (addon.Diagnostics, error) {
+	fake.diagnosticsCalls++
+	return fake.diagnosticsValue, fake.diagnosticsErr
 }
 
 func (fake *fakeAddonService) Management(_ context.Context, _ auth.Principal, addonID string) (addon.ManagedAddon, error) {
@@ -283,6 +291,63 @@ func TestReorderAddonsReturnsStableForbiddenResponse(t *testing.T) {
 	decodeResponse(t, response, &body)
 	if body.Error.Code != "addon_forbidden" {
 		t.Fatalf("reorder error code = %q, want addon_forbidden", body.Error.Code)
+	}
+}
+
+func TestAddonDiagnosticsRequiresGlobalAdministratorBeforeService(t *testing.T) {
+	categoryID := "22222222-2222-4222-8222-222222222222"
+	for _, principal := range []auth.Principal{
+		{Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID},
+		{Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID},
+	} {
+		service := &fakeAddonService{}
+		api := addonAPI(service)
+		api.auth = &fakeAuthService{principal: principal}
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/diagnostics", nil)
+		request.Header.Set("Authorization", "Bearer access")
+		response := httptest.NewRecorder()
+
+		api.Handler().ServeHTTP(response, request)
+
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("non-global diagnostics status = %d, want 403", response.Code)
+		}
+		if service.diagnosticsCalls != 0 {
+			t.Fatal("non-global diagnostics request reached the service")
+		}
+	}
+}
+
+func TestAddonDiagnosticsReturnsOnlySafeStructuredDetails(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	latency := int64(7)
+	service := &fakeAddonService{diagnosticsValue: addon.Diagnostics{
+		ObservedSince: now.Add(-time.Hour),
+		Diagnostics: []addon.DiagnosticEntry{{
+			AddonID:              "11111111-1111-4111-8111-111111111111",
+			State:                addon.DiagnosticStateDegraded,
+			LastSuccessAt:        &now,
+			ApproximateLatencyMS: &latency,
+			LastError:            &addon.DiagnosticLastError{Code: addon.DiagnosticErrorUnavailable, At: now},
+			Capabilities:         addon.AddonCapabilities{Resources: []string{"catalog"}, Search: true},
+		}},
+	}}
+	api := addonAPI(service)
+	api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/diagnostics", nil)
+	request.Header.Set("Authorization", "Bearer access")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || service.diagnosticsCalls != 1 {
+		t.Fatalf("global diagnostics response = %d with %d service calls", response.Code, service.diagnosticsCalls)
+	}
+	serialized := response.Body.String()
+	for _, private := range []string{"transportUrl", "provider.example", "manifest.json", "token=", "HTTP 503", "connection refused"} {
+		if strings.Contains(serialized, private) {
+			t.Fatalf("diagnostics response exposed private detail %q: %s", private, serialized)
+		}
 	}
 }
 

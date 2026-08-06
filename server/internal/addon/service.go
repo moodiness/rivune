@@ -26,6 +26,7 @@ type Service struct {
 	logger         *slog.Logger
 	requestTimeout time.Duration
 	retryDelay     time.Duration
+	diagnostics    *diagnosticStore
 }
 
 func NewService(pool *pgxpool.Pool, transport Transport, logger *slog.Logger) *Service {
@@ -41,6 +42,7 @@ func NewService(pool *pgxpool.Pool, transport Transport, logger *slog.Logger) *S
 		logger:         logger,
 		requestTimeout: 10 * time.Second,
 		retryDelay:     100 * time.Millisecond,
+		diagnostics:    newDiagnosticStore(nil, maximumDiagnosticObservations),
 	}
 }
 
@@ -77,6 +79,7 @@ func (service *Service) install(ctx context.Context, principal auth.Principal, i
 	if err := authorizationTx.Commit(ctx); err != nil {
 		return InstalledAddon{}, fmt.Errorf("commit addon installation authorization: %w", err)
 	}
+	diagnosticAttempt := service.diagnostics.start("")
 	manifest, rawManifest, err := service.transport.Manifest(ctx, transportURL)
 	if err != nil {
 		return InstalledAddon{}, err
@@ -130,6 +133,7 @@ func (service *Service) install(ctx context.Context, principal auth.Principal, i
 	if err := tx.Commit(ctx); err != nil {
 		return InstalledAddon{}, fmt.Errorf("commit addon installation: %w", err)
 	}
+	service.diagnostics.complete(installed.ID, diagnosticAttempt, nil)
 	return installed, nil
 }
 
@@ -244,6 +248,7 @@ func (service *Service) Remove(ctx context.Context, principal auth.Principal, ad
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit addon removal: %w", err)
 	}
+	service.diagnostics.remove(addonID)
 	return nil
 }
 
@@ -348,8 +353,10 @@ func (service *Service) Refresh(ctx context.Context, principal auth.Principal, a
 		return InstalledAddon{}, fmt.Errorf("commit addon refresh authorization: %w", err)
 	}
 
+	diagnosticAttempt := service.diagnostics.start(addonID)
 	manifest, rawManifest, err := service.transport.Manifest(ctx, current.transportURL)
 	if err != nil {
+		service.diagnostics.complete(addonID, diagnosticAttempt, err)
 		return InstalledAddon{}, err
 	}
 	tx, err := service.pool.Begin(ctx)
@@ -384,6 +391,7 @@ func (service *Service) Refresh(ctx context.Context, principal auth.Principal, a
 	if err := tx.Commit(ctx); err != nil {
 		return InstalledAddon{}, fmt.Errorf("commit addon refresh: %w", err)
 	}
+	service.diagnostics.complete(addonID, diagnosticAttempt, nil)
 	return installed, nil
 }
 
@@ -443,17 +451,20 @@ func (service *Service) fetch(ctx context.Context, principal auth.Principal, add
 	if !installed.parsedManifest.Supports(path) {
 		return ResourceResult{}, ErrUnsupportedResource
 	}
-	payload, cache, err := service.transport.Resource(ctx, installed.transportURL, path)
-	if err != nil {
+	diagnosticAttempt := service.diagnostics.start(addonID)
+	payload, cache, providerErr := service.transport.Resource(ctx, installed.transportURL, path)
+	if providerErr != nil {
 		if revalidationErr := service.revalidateAddon(ctx, principal, installed); revalidationErr != nil {
 			return ResourceResult{}, revalidationErr
 		}
-		return ResourceResult{}, err
+		service.diagnostics.complete(addonID, diagnosticAttempt, providerErr)
+		return ResourceResult{}, providerErr
 	}
 	result := resultFor(installed, path, payload, cache)
 	if err := service.revalidateAddon(ctx, principal, installed); err != nil {
 		return ResourceResult{}, err
 	}
+	service.diagnostics.complete(addonID, diagnosticAttempt, nil)
 	return result, nil
 }
 
@@ -726,8 +737,12 @@ func aggregateResourceLimitError() error {
 	)
 }
 
-func (service *Service) executeRequest(ctx context.Context, request plannedRequest, budget *aggregateResourceBudget) (json.RawMessage, CachePolicy, error) {
-	payload, cache, err := service.executeTransportRequest(ctx, request, budget)
+func (service *Service) executeRequest(ctx context.Context, request plannedRequest, budget *aggregateResourceBudget) (payload json.RawMessage, cache CachePolicy, err error) {
+	diagnosticAttempt := service.diagnostics.start(request.addon.ID)
+	defer func() {
+		service.diagnostics.complete(request.addon.ID, diagnosticAttempt, err)
+	}()
+	payload, cache, err = service.executeTransportRequest(ctx, request, budget)
 	if err == nil || ctx.Err() != nil || !isTemporaryProviderError(err) {
 		return payload, cache, err
 	}

@@ -23,6 +23,19 @@ func (a *API) listAddons(w http.ResponseWriter, r *http.Request, principal auth.
 	writeJSON(w, http.StatusOK, map[string]any{"addons": addons})
 }
 
+func (a *API) addonDiagnostics(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !principal.IsGlobalAdministrator() {
+		a.writeAddonError(w, "read addon diagnostics", addon.ErrForbidden)
+		return
+	}
+	diagnostics, err := a.addons.Diagnostics(r.Context(), principal)
+	if err != nil {
+		a.writeAddonError(w, "read addon diagnostics", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, diagnostics)
+}
+
 func (a *API) addonManagement(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	if !principal.IsGlobalAdministrator() {
 		a.writeAddonError(w, "read addon management details", addon.ErrForbidden)

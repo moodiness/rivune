@@ -358,6 +358,42 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if installed.TransportURL != transportURL {
 		t.Fatal("install response did not preserve the stored transport URL")
 	}
+	diagnostics, err := service.Diagnostics(ctx, globalPrincipal)
+	if err != nil || len(diagnostics.Diagnostics) != 1 || diagnostics.Diagnostics[0].AddonID != installed.ID || diagnostics.Diagnostics[0].State != DiagnosticStateAvailable {
+		t.Fatalf("post-commit installation diagnostics = %+v, error %v", diagnostics, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'member' WHERE id = $1::uuid`, userID); err != nil {
+		t.Fatalf("revoke persisted global role for diagnostics: %v", err)
+	}
+	if _, err := service.Diagnostics(ctx, globalPrincipal); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("diagnostics after persisted role revocation error = %v, want %v", err, ErrForbidden)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'admin' WHERE id = $1::uuid`, userID); err != nil {
+		t.Fatalf("restore persisted global role after diagnostics: %v", err)
+	}
+	const profileScopedAddonID = "2a000000-0000-4000-8000-000000000007"
+	if _, err := pool.Exec(ctx, `
+		WITH inserted_addon AS (
+			INSERT INTO profile_addons (
+				id, profile_id, transport_url, manifest, manifest_id, manifest_version, position
+			) VALUES ($1::uuid, $2::uuid, 'https://profile-scope.invalid/manifest.json', $3::jsonb, $4, $5, 1)
+			RETURNING id
+		)
+		INSERT INTO addon_profile_access (addon_id, profile_id, position)
+		SELECT id, $2::uuid, 1 FROM inserted_addon
+	`, profileScopedAddonID, profileBID, rawManifest, manifest.ID, manifest.Version); err != nil {
+		t.Fatalf("seed profile-scoped diagnostics addon: %v", err)
+	}
+	diagnostics, err = service.Diagnostics(ctx, globalPrincipal)
+	if err != nil || len(diagnostics.Diagnostics) != 1 || diagnostics.Diagnostics[0].AddonID != installed.ID {
+		t.Fatalf("active profile A diagnostics = %+v, error %v", diagnostics, err)
+	}
+	globalPrincipal.ActiveProfileID = new(profileBID)
+	diagnostics, err = service.Diagnostics(ctx, globalPrincipal)
+	if err != nil || len(diagnostics.Diagnostics) != 2 || diagnostics.Diagnostics[0].AddonID != installed.ID || diagnostics.Diagnostics[1].AddonID != profileScopedAddonID || diagnostics.Diagnostics[1].State != DiagnosticStateUnknown {
+		t.Fatalf("active profile B diagnostics = %+v, error %v", diagnostics, err)
+	}
+	globalPrincipal.ActiveProfileID = new(profileAID)
 	managed, err := service.Management(ctx, globalPrincipal, installed.ID)
 	if err != nil {
 		t.Fatalf("authorized addon management lookup: %v", err)
@@ -450,6 +486,8 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 		}
 		return manifest, rawManifest, nil
 	}
+	updatePriorFailure := service.diagnostics.start(installed.ID)
+	service.diagnostics.complete(installed.ID, updatePriorFailure, ErrInvalidResponse)
 	if _, err := service.Update(ctx, globalPrincipal, installed.ID, UpdateAddonInput{
 		TransportURL: new(changedTransportURL),
 		ProfileIDs:   []string{profileAID, profileBID},
@@ -458,6 +496,11 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	}
 	if transport.calls != callsBeforeAssignmentUpdate+1 {
 		t.Fatalf("manifest transport calls after concurrent origin change = %d, want %d", transport.calls, callsBeforeAssignmentUpdate+1)
+	}
+	_, failedUpdateObservations := service.diagnostics.snapshot()
+	failedUpdateObservation := failedUpdateObservations[installed.ID]
+	if failedUpdateObservation.latestSucceeded || failedUpdateObservation.lastError == nil || failedUpdateObservation.lastError.Code != DiagnosticErrorInvalidResponse {
+		t.Fatalf("database-rejected update altered diagnostics: %+v", failedUpdateObservation)
 	}
 	if _, err := pool.Exec(ctx, `
 		UPDATE profile_addons SET transport_url = $2 WHERE id = $1::uuid
@@ -480,6 +523,11 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if transport.calls != callsBeforeAssignmentUpdate+2 {
 		t.Fatalf("manifest transport calls after global origin update = %d, want %d", transport.calls, callsBeforeAssignmentUpdate+2)
 	}
+	_, successfulUpdateObservations := service.diagnostics.snapshot()
+	successfulUpdateObservation := successfulUpdateObservations[installed.ID]
+	if !successfulUpdateObservation.latestSucceeded || successfulUpdateObservation.lastError == nil || successfulUpdateObservation.lastError.Code != DiagnosticErrorInvalidResponse {
+		t.Fatalf("committed replacement update diagnostics = %+v", successfulUpdateObservation)
+	}
 	const privateTransportURL = "http://192.168.1.10/manifest.json"
 	if _, err := pool.Exec(ctx, `
 		UPDATE profile_addons SET transport_url = $2 WHERE id = $1::uuid
@@ -492,6 +540,8 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	transport.resource = func(context.Context, string, ResourcePath) (json.RawMessage, CachePolicy, error) {
 		return json.RawMessage(`{"streams":[]}`), CachePolicy{}, nil
 	}
+	priorFailure := service.diagnostics.start(installed.ID)
+	service.diagnostics.complete(installed.ID, priorFailure, ErrProviderUnavailable)
 	if _, err := service.FetchPlaybackResource(ctx, principal, installed.ID, ResourcePath{
 		Resource: "stream", Type: "movie", ID: "private-service-probe",
 	}); err != nil {
@@ -499,6 +549,11 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	}
 	if transport.resourceCalls != 1 {
 		t.Fatalf("assigned profile private addon resource calls = %d, want 1", transport.resourceCalls)
+	}
+	_, diagnosticObservations := service.diagnostics.snapshot()
+	directObservation := diagnosticObservations[installed.ID]
+	if !directObservation.latestSucceeded || !directObservation.hasSuccess || directObservation.lastError == nil {
+		t.Fatalf("direct resource fetch diagnostics = %+v", directObservation)
 	}
 	if _, err := service.Refresh(ctx, principal, installed.ID); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("delegated manager private addon refresh error = %v, want %v", err, ErrForbidden)
@@ -541,6 +596,14 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	}
 	if transport.resourceCalls != resourceCallsBeforeRevocation {
 		t.Fatalf("resource transport calls after assignment revocation = %d, want %d", transport.resourceCalls, resourceCallsBeforeRevocation)
+	}
+	globalPrincipal.ActiveProfileID = new(profileAID)
+	if err := service.Remove(ctx, globalPrincipal, installed.ID); err != nil {
+		t.Fatalf("remove addon after diagnostics: %v", err)
+	}
+	_, removedObservations := service.diagnostics.snapshot()
+	if _, exists := removedObservations[installed.ID]; exists {
+		t.Fatalf("removed addon retained diagnostics: %+v", removedObservations[installed.ID])
 	}
 }
 
@@ -663,12 +726,19 @@ func TestRefreshAuthorizesEveryAssignmentBeforeFetchAndCommit(t *testing.T) {
 	transport.manifest = func(context.Context, string) (Manifest, json.RawMessage, error) {
 		return refreshedManifest, refreshedRawManifest, nil
 	}
+	refreshPriorFailure := service.diagnostics.start(installed.ID)
+	service.diagnostics.complete(installed.ID, refreshPriorFailure, ErrInvalidResponse)
 	refreshed, err := service.Refresh(ctx, manager, installed.ID)
 	if err != nil {
 		t.Fatalf("complete manager refresh: %v", err)
 	}
 	if refreshed.parsedManifest.Version != refreshedManifest.Version || transport.calls != 1 {
 		t.Fatalf("complete manager refresh = version %q with %d fetches", refreshed.parsedManifest.Version, transport.calls)
+	}
+	_, refreshObservations := service.diagnostics.snapshot()
+	refreshObservation := refreshObservations[installed.ID]
+	if !refreshObservation.latestSucceeded || refreshObservation.lastError == nil || refreshObservation.lastError.Code != DiagnosticErrorInvalidResponse {
+		t.Fatalf("manifest refresh diagnostics = %+v", refreshObservation)
 	}
 
 	resetManifest := func() {

@@ -6,7 +6,7 @@ import { AddTile, Button, ConfirmDialog, EmptyState, handleDirectionalFocus, Ico
 import { interfaceLanguages, locale, translate, type TranslationKey } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
-import type { AccessCategory, AddonManifest, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstalledAddon, InterfaceLanguage, MaintenanceSettings, ManagedAddon, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
+import type { AccessCategory, AddonDiagnostic, AddonDiagnosticErrorCode, AddonDiagnosticState, AddonDiagnosticsResponse, AddonManifest, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstalledAddon, InterfaceLanguage, MaintenanceSettings, ManagedAddon, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
 
 type AdminTab = "categories" | "profiles" | "devices" | "addons" | "collections" | "activity" | "operations" | "settings";
 type AdminTabGroup = "access" | "catalog" | "supervision" | "preferences";
@@ -1071,12 +1071,15 @@ function AddonsAdmin() {
   const { account, activeProfile } = useAuth();
   const administrationProfiles = useAdministrationProfiles();
   const profiles = administrationProfiles.filter((profile) => account?.session.authorizationScope === "global_admin" || profile.canManage);
+  const isGlobalAdmin = account?.session.authorizationScope === "global_admin";
   const [addons, setAddons] = useState<InstalledAddon[]>([]);
   const [transportUrl, setTransportUrl] = useState("");
   const [installProfileIds, setInstallProfileIds] = useState<string[]>(() => activeProfile ? [activeProfile.id] : []);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState("");
   const [error, setError] = useState("");
+  const [diagnostics, setDiagnostics] = useState<AddonDiagnosticsResponse | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState("");
   const [deleting, setDeleting] = useState<InstalledAddon | null>(null);
   const [editingAddon, setEditingAddon] = useState<ManagedAddon | null>(null);
   const [editTransportUrl, setEditTransportUrl] = useState("");
@@ -1084,13 +1087,29 @@ function AddonsAdmin() {
   const [draggedAddonIndex, setDraggedAddonIndex] = useState<number | null>(null);
   const [reordering, setReordering] = useState(false);
   const reorderInFlight = useRef(false);
+  const initialLoadStarted = useRef(false);
 
   async function load() {
     setLoading(true);
     setError("");
-    try { setAddons((await api.addons()).addons); } catch (cause) { setError(notifyError(cause, translate("admin.addons.errors.load"), translate("admin.addons.errors.unavailableTitle"))); } finally { setLoading(false); }
+    setDiagnostics(null);
+    setDiagnosticsError("");
+    const addonListRequest = api.addons()
+      .then((response) => setAddons(response.addons))
+      .catch((cause) => setError(notifyError(cause, translate("admin.addons.errors.load"), translate("admin.addons.errors.unavailableTitle"))))
+      .finally(() => setLoading(false));
+    const diagnosticsRequest = isGlobalAdmin
+      ? api.addonDiagnostics()
+        .then(setDiagnostics)
+        .catch(() => setDiagnosticsError(translate("admin.addons.diagnostics.loadFailed")))
+      : Promise.resolve();
+    await Promise.all([addonListRequest, diagnosticsRequest]);
   }
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    if (initialLoadStarted.current) return;
+    initialLoadStarted.current = true;
+    void load();
+  }, []);
   useEffect(() => {
     if (installProfileIds.length === 0 && activeProfile) setInstallProfileIds([activeProfile.id]);
   }, [activeProfile, installProfileIds.length]);
@@ -1231,6 +1250,7 @@ function AddonsAdmin() {
   const addonEditSaving = Boolean(editingAddon && working === editingAddon.id);
   const assignedProfiles = new Set(addons.flatMap((addon) => addon.profileIds)).size;
   const contentTypes = new Set(addons.flatMap((addon) => addon.manifest.types)).size;
+  const diagnosticsByAddonId = new Map(diagnostics?.diagnostics.map((diagnostic) => [diagnostic.addonId, diagnostic]) ?? []);
   return <div className="admin-section addons-admin">
     <div className="admin-section__header">
       <div><span>{translate("admin.addons.eyebrow")}</span><h2>{translate("admin.addons.title")}</h2><p>{translate("admin.addons.description")}</p></div>
@@ -1249,18 +1269,35 @@ function AddonsAdmin() {
       <ProfileAssignmentPicker profiles={profiles} selected={installProfileIds} onChange={setInstallProfileIds} legend={translate("admin.profileAssignment.legend")} />
     </section>
     {error && <Notice>{error}</Notice>}
+    {diagnosticsError && <Notice>{diagnosticsError}</Notice>}
+    {diagnostics && <p className="addon-diagnostics-observed">{translate("admin.addons.diagnostics.observedSince", { date: new Date(diagnostics.observedSince).toLocaleString() })}</p>}
     {loading
       ? <div className="addon-list" aria-label={translate("admin.addons.loadingLabel")}>{[0, 1].map((value) => <Skeleton key={value} className="addon-skeleton" />)}</div>
       : addons.length
-        ? <div className="addon-list">{addons.map((addon, addonIndex) => <AddonCard key={addon.id} addon={addon} index={addonIndex} total={addons.length} working={working === addon.id} reordering={reordering} dragging={draggedAddonIndex === addonIndex} onDragStart={(event) => { setDraggedAddonIndex(addonIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(addonIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedAddonIndex !== null) stageAddonMove(draggedAddonIndex, addonIndex); }} onDragOver={(event) => { if (draggedAddonIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveAddonOrder(); }} onDragEnd={() => { if (draggedAddonIndex !== null) void saveAddonOrder(); }} onMove={(toIndex) => void moveAddon(addonIndex, toIndex)} onRefresh={() => void refresh(addon.id)} onEdit={() => void openAddonEditor(addon)} onRemove={() => setDeleting(addon)} />)}</div>
+        ? <div className="addon-list">{addons.map((addon, addonIndex) => <AddonCard key={addon.id} addon={addon} diagnostic={diagnosticsByAddonId.get(addon.id)} index={addonIndex} total={addons.length} working={working === addon.id} reordering={reordering} dragging={draggedAddonIndex === addonIndex} onDragStart={(event) => { setDraggedAddonIndex(addonIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(addonIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedAddonIndex !== null) stageAddonMove(draggedAddonIndex, addonIndex); }} onDragOver={(event) => { if (draggedAddonIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveAddonOrder(); }} onDragEnd={() => { if (draggedAddonIndex !== null) void saveAddonOrder(); }} onMove={(toIndex) => void moveAddon(addonIndex, toIndex)} onRefresh={() => void refresh(addon.id)} onEdit={() => void openAddonEditor(addon)} onRemove={() => setDeleting(addon)} />)}</div>
         : <EmptyState icon={<Boxes size={44} />} title={translate(error ? "admin.addons.errors.unavailableTitle" : "admin.addons.empty.title")} description={translate(error ? "admin.addons.errors.retryDescription" : "admin.addons.empty.description")} action={error ? <Button variant="secondary" onClick={() => void load()}><RefreshCw size={17} /> {translate("common.actions.tryAgain")}</Button> : undefined} />}
     {editingAddon && <Modal onClose={() => { if (!addonEditSaving) closeAddonEditor(); }} className="editor-modal addon-edit-modal"><form onSubmit={saveAddon}><div className="editor-modal__heading"><span><Pencil size={18} /> {translate("admin.addons.editor.title")}</span><h2>{editingAddon.manifest.name}</h2><p>{translate("admin.addons.editor.description")}</p></div>{error && <Notice>{error}</Notice>}{account?.session.authorizationScope === "global_admin" && <label className="field"><span>{translate("admin.addons.editor.transportUrl")}</span><div><WandSparkles size={18} /><input type="url" value={editTransportUrl} onChange={(event) => setEditTransportUrl(event.target.value)} placeholder={translate("admin.addons.manifestUrlPlaceholder")} /></div></label>}<ProfileAssignmentPicker profiles={profiles} selected={editProfileIds} onChange={setEditProfileIds} legend={translate("admin.profileAssignment.legend")} /><div className="modal-actions"><Button type="button" variant="ghost" disabled={addonEditSaving} onClick={closeAddonEditor}>{translate("common.cancel")}</Button><Button type="submit" loading={addonEditSaving} disabled={editProfileIds.length === 0}><Save size={18} /> {translate("admin.addons.actions.save")}</Button></div></form></Modal>}
     {deleting && <ConfirmDialog title={translate("admin.addons.remove.title", { name: deleting.manifest.name })} description={translate("admin.addons.remove.description")} confirmLabel={translate("admin.addons.remove.confirm")} loading={working === deleting.id} onCancel={() => setDeleting(null)} onConfirm={() => void remove(deleting)} />}
   </div>;
 }
 
-function AddonCard({ addon, index, total, working, reordering, dragging, onDragStart, onDragEnter, onDragOver, onDrop, onDragEnd, onMove, onRefresh, onEdit, onRemove }: {
+const diagnosticStateKeys: Record<AddonDiagnosticState, TranslationKey> = {
+  unknown: "admin.addons.diagnostics.state.unknown",
+  available: "admin.addons.diagnostics.state.available",
+  degraded: "admin.addons.diagnostics.state.degraded",
+  unavailable: "admin.addons.diagnostics.state.unavailable",
+};
+
+const diagnosticErrorKeys: Record<AddonDiagnosticErrorCode, TranslationKey> = {
+  timeout: "admin.addons.diagnostics.error.timeout",
+  invalid_response: "admin.addons.diagnostics.error.invalidResponse",
+  unavailable: "admin.addons.diagnostics.error.unavailable",
+  request_failed: "admin.addons.diagnostics.error.requestFailed",
+};
+
+function AddonCard({ addon, diagnostic, index, total, working, reordering, dragging, onDragStart, onDragEnter, onDragOver, onDrop, onDragEnd, onMove, onRefresh, onEdit, onRemove }: {
   addon: InstalledAddon;
+  diagnostic?: AddonDiagnostic;
   index: number;
   total: number;
   working: boolean;
@@ -1280,7 +1317,26 @@ function AddonCard({ addon, index, total, working, reordering, dragging, onDragS
   return <article className={`addon-card ${dragging ? "is-dragging" : ""}`} onDragEnter={onDragEnter} onDragOver={onDragOver} onDrop={onDrop}>
     <button type="button" className="addon-card__drag" draggable={!reordering && !working} disabled={reordering || working} onDragStart={onDragStart} onDragEnd={onDragEnd} aria-label={translate("admin.addons.reorder.dragLabel", { name: manifest.name })}><GripVertical /></button>
     <div className="addon-card__logo">{manifest.logo ? <img src={manifest.logo} alt="" /> : manifest.name.slice(0, 2).toUpperCase()}</div>
-    <div className="addon-card__body"><div><h3>{manifest.name}</h3><span>v{manifest.version}</span>{manifest.behaviorHints?.p2p && <span className="addon-badge addon-badge--warn">P2P</span>}</div><p>{manifest.description || translate("admin.addons.card.noDescription")}</p><div>{manifest.types.map((type) => <i key={type}>{type}</i>)}</div></div>
+    <div className="addon-card__body">
+      <div><h3>{manifest.name}</h3><span>v{manifest.version}</span>{manifest.behaviorHints?.p2p && <span className="addon-badge addon-badge--warn">P2P</span>}</div>
+      <p>{manifest.description || translate("admin.addons.card.noDescription")}</p>
+      <div className="addon-card__types">{manifest.types.map((type) => <i key={type}>{type}</i>)}</div>
+      {diagnostic && <div className="addon-diagnostics">
+        <div className="addon-diagnostics__summary">
+          <span className={`addon-diagnostics__state addon-diagnostics__state--${diagnostic.state}`}>{translate(diagnosticStateKeys[diagnostic.state])}</span>
+          <div className="addon-diagnostics__capabilities">
+            {(diagnostic.capabilities.search || diagnostic.capabilities.searchPagination) && <span>{translate("admin.addons.diagnostics.capability.search")}</span>}
+            {(diagnostic.capabilities.pagination || diagnostic.capabilities.searchPagination) && <span>{translate("admin.addons.diagnostics.capability.pagination")}</span>}
+            {diagnostic.capabilities.resources.map((resource) => <span key={resource}>{resource}</span>)}
+          </div>
+        </div>
+        {(diagnostic.lastSuccessAt || diagnostic.approximateLatencyMs !== undefined || diagnostic.lastError) && <div className="addon-diagnostics__history">
+          {diagnostic.lastSuccessAt && <span>{translate("admin.addons.diagnostics.lastSuccess", { date: new Date(diagnostic.lastSuccessAt).toLocaleString() })}</span>}
+          {diagnostic.approximateLatencyMs !== undefined && <span>{translate("admin.addons.diagnostics.latency", { milliseconds: diagnostic.approximateLatencyMs })}</span>}
+          {diagnostic.lastError && <span>{translate("admin.addons.diagnostics.lastError", { error: translate(diagnosticErrorKeys[diagnostic.lastError.code]) })}</span>}
+        </div>}
+      </div>}
+    </div>
     <div className="addon-card__controls">
       {working ? <span className="admin-working" role="status"><LoaderCircle className="spin" size={18} /> {translate("common.status.working")}</span> : <>
         <div className="addon-card__order" aria-label={translate("admin.addons.reorder.groupLabel", { name: manifest.name })}><IconButton label={translate("admin.addons.reorder.moveUp", { name: manifest.name })} disabled={reordering || index === 0} onClick={() => onMove(index - 1)}><ChevronUp size={17} /></IconButton><IconButton label={translate("admin.addons.reorder.moveDown", { name: manifest.name })} disabled={reordering || index === total - 1} onClick={() => onMove(index + 1)}><ChevronDown size={17} /></IconButton></div>

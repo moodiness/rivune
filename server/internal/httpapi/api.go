@@ -124,6 +124,7 @@ type userService interface {
 type addonService interface {
 	Install(context.Context, auth.Principal, addon.InstallInput) (addon.ManagedAddon, error)
 	List(context.Context, auth.Principal) ([]addon.InstalledAddon, error)
+	Diagnostics(context.Context, auth.Principal) (addon.Diagnostics, error)
 	Management(context.Context, auth.Principal, string) (addon.ManagedAddon, error)
 	Remove(context.Context, auth.Principal, string) error
 	Reorder(context.Context, auth.Principal, addon.ReorderInput) ([]addon.InstalledAddon, error)
@@ -439,6 +440,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/users/{userId}/profiles/{profileId}", a.requireAuthentication(a.grantUserProfileAccess))
 	mux.Handle("DELETE /api/v1/users/{userId}/profiles/{profileId}", a.requireAuthentication(a.revokeUserProfileAccess))
 	mux.Handle("GET /api/v1/addons", a.requireAuthentication(a.listAddons))
+	mux.Handle("GET /api/v1/addons/diagnostics", a.requireAuthentication(a.addonDiagnostics))
 	mux.Handle("GET /api/v1/addons/{addonId}/management", a.requireAuthentication(a.addonManagement))
 	mux.Handle("POST /api/v1/addons", a.requireAuthentication(a.installAddon))
 	mux.Handle("PUT /api/v1/addons/order", a.requireAuthentication(a.reorderAddons))

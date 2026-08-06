@@ -185,6 +185,29 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		validateContractResponse(t, document, "/profiles", nil, profiles, profilesResponse)
 	})
 
+	t.Run("add-on diagnostics", func(t *testing.T) {
+		now := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
+		latency := int64(12)
+		api := testAPI(&fakeInstanceService{})
+		api.auth = &fakeAuthService{principal: contractPrincipal()}
+		api.addons = &fakeAddonService{diagnosticsValue: addon.Diagnostics{
+			ObservedSince: now.Add(-time.Hour),
+			Diagnostics: []addon.DiagnosticEntry{{
+				AddonID:              contractAddonID,
+				State:                addon.DiagnosticStateDegraded,
+				LastSuccessAt:        &now,
+				ApproximateLatencyMS: &latency,
+				LastError:            &addon.DiagnosticLastError{Code: addon.DiagnosticErrorUnavailable, At: now},
+				Capabilities: addon.AddonCapabilities{
+					Resources: []string{"catalog", "meta"}, Search: true, Pagination: true, SearchPagination: true,
+				},
+			}},
+		}}
+		request := authenticatedContractRequest(http.MethodGet, "/api/v1/addons/diagnostics", nil)
+		response := serveContractRequest(t, api, request, http.StatusOK)
+		validateContractResponse(t, document, "/addons/diagnostics", nil, request, response)
+	})
+
 	t.Run("add-on catalog descriptors", func(t *testing.T) {
 		api := testAPI(&fakeInstanceService{})
 		api.auth = &fakeAuthService{principal: contractPrincipal()}
@@ -600,6 +623,20 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestAddonDiagnosticsOpenAPIRejectsPrivateDetails(t *testing.T) {
+	validator := loadOpenAPIContract(t)
+	request := authenticatedContractRequest(http.MethodGet, "/api/v1/addons/diagnostics", nil)
+	response := httptest.NewRecorder()
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(http.StatusOK)
+	_, _ = response.WriteString(`{"observedSince":"2026-08-06T12:00:00Z","diagnostics":[{"addonId":"66666666-6666-4666-8666-666666666666","state":"unavailable","lastError":{"code":"unavailable","at":"2026-08-06T12:00:01Z","message":"private upstream body"},"capabilities":{"resources":["catalog"],"search":false,"pagination":false,"searchPagination":false},"transportUrl":"https://private.invalid/manifest.json?token=secret"}]}`)
+
+	valid, _ := validator.ValidateHttpResponse(request, response.Result())
+	if valid {
+		t.Fatal("diagnostics OpenAPI response accepted private transport and raw error fields")
+	}
 }
 
 func loadOpenAPIContract(t *testing.T) oasvalidator.Validator {

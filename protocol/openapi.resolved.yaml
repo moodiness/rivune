@@ -1918,6 +1918,26 @@ paths:
           $ref: '#/components/responses/Error'
         '502':
           $ref: '#/components/responses/Error'
+  /addons/diagnostics:
+    get:
+      summary: Get add-on diagnostics
+      operationId: getAddonDiagnostics
+      description: Returns process-local health observations and manifest-derived capabilities for add-ons assigned to the active profile. Available only to a persisted global administrator. The response never includes transport locations, provider payloads, status text, or raw errors.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Safe process-local add-on diagnostics for the active profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddonDiagnostics'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
   /addons/order:
     put:
       summary: Reorder addons
@@ -3832,6 +3852,87 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/InstalledAddon'
+    AddonDiagnostics:
+      type: object
+      additionalProperties: false
+      required:
+        - observedSince
+        - diagnostics
+      properties:
+        observedSince:
+          type: string
+          format: date-time
+          description: Process start of this in-memory observation window.
+        diagnostics:
+          type: array
+          items:
+            $ref: '#/components/schemas/AddonDiagnosticEntry'
+    AddonDiagnosticEntry:
+      type: object
+      additionalProperties: false
+      required:
+        - addonId
+        - state
+        - capabilities
+      properties:
+        addonId:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum:
+            - unknown
+            - available
+            - degraded
+            - unavailable
+        lastSuccessAt:
+          type: string
+          format: date-time
+        approximateLatencyMs:
+          type: integer
+          format: int64
+          minimum: 1
+        lastError:
+          $ref: '#/components/schemas/AddonDiagnosticLastError'
+        capabilities:
+          $ref: '#/components/schemas/AddonDiagnosticCapabilities'
+    AddonDiagnosticLastError:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - at
+      properties:
+        code:
+          type: string
+          enum:
+            - timeout
+            - invalid_response
+            - unavailable
+            - request_failed
+        at:
+          type: string
+          format: date-time
+    AddonDiagnosticCapabilities:
+      type: object
+      additionalProperties: false
+      required:
+        - resources
+        - search
+        - pagination
+        - searchPagination
+      properties:
+        resources:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        search:
+          type: boolean
+        pagination:
+          type: boolean
+        searchPagination:
+          type: boolean
     InstalledAddon:
       type: object
       additionalProperties: false
