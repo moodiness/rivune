@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Sezon izlenmedi olarak işaretlendi",
   "media.season.watch.error.partialUpdate": "Bazı bölümlere ait izlenme durumları güncellenemedi.",
   "media.season.watch.error.partialUpdateTitle": "Sezon tam olarak güncellenemedi",
-  "media.season.watch.actions.markUnwatched": "Sezonu izlenmedi olarak işaretle",
-  "media.season.watch.actions.markWatched": "Sezonu izlendi olarak işaretle",
   "media.sources.error.loadFailed": "Akışlar yüklenemedi.",
   "media.sources.error.unavailableTitle": "Akışlar kullanılamıyor",
   "media.sources.error.encodingRequired": "Bu kaynak için medya kodlaması gerekiyor; Rivune'un web oynatıcısı bu işlemi otomatik olarak başlatmıyor. Başka bir kaynak ya da harici oynatıcı seçeneğini kullanın.",

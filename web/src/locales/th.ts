@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "ยังไม่ได้ดูซีซันนี้",
   "media.season.watch.error.partialUpdate": "ไม่สามารถอัปเดตสถานะการรับชมของบางตอนได้",
   "media.season.watch.error.partialUpdateTitle": "อัปเดตซีซันไม่ครบถ้วน",
-  "media.season.watch.actions.markUnwatched": "ทำเครื่องหมายซีซันว่ายังไม่ได้ดู",
-  "media.season.watch.actions.markWatched": "ทำเครื่องหมายซีซันว่าดูแล้ว",
   "media.sources.error.loadFailed": "ไม่สามารถโหลดสตรีมได้",
   "media.sources.error.unavailableTitle": "สตรีมไม่พร้อมใช้งาน",
   "media.sources.error.encodingRequired": "แหล่งนี้ต้องเข้ารหัสสื่อ ซึ่งการเล่นผ่านเว็บของ Rivune จะไม่เริ่มโดยอัตโนมัติ โปรดเลือกแหล่งอื่นหรือตัวเลือกเครื่องเล่นภายนอก",

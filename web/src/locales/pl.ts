@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Sezon oznaczony jako nieobejrzany",
   "media.season.watch.error.partialUpdate": "Nie udało się zaktualizować stanu obejrzenia niektórych odcinków.",
   "media.season.watch.error.partialUpdateTitle": "Nie zaktualizowano całego sezonu",
-  "media.season.watch.actions.markUnwatched": "Oznacz sezon jako nieobejrzany",
-  "media.season.watch.actions.markWatched": "Oznacz sezon jako obejrzany",
   "media.sources.error.loadFailed": "Nie udało się wczytać strumieni.",
   "media.sources.error.unavailableTitle": "Strumienie są niedostępne",
   "media.sources.error.encodingRequired": "To źródło wymaga kodowania multimediów, którego odtwarzacz internetowy Rivune nie uruchamia automatycznie. Wybierz inne źródło lub opcję odtwarzania w zewnętrznym odtwarzaczu.",

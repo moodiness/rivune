@@ -253,8 +253,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "העונה לא נצפתה",
   "media.season.watch.error.partialUpdate": "לא ניתן לעדכן את מצב הצפייה בחלק מהפרקים.",
   "media.season.watch.error.partialUpdateTitle": "העונה לא עודכנה במלואה",
-  "media.season.watch.actions.markUnwatched": "סימון העונה כלא נצפתה",
-  "media.season.watch.actions.markWatched": "סימון העונה כנצפתה",
   "media.sources.error.loadFailed": "לא ניתן לטעון את מקורות ההזרמה.",
   "media.sources.error.unavailableTitle": "מקורות ההזרמה אינם זמינים",
   "media.sources.error.encodingRequired": "מקור זה דורש קידוד מדיה, שאינו מתחיל אוטומטית בניגון בדפדפן של Rivune. יש לבחור מקור אחר או אפשרות לנגן חיצוני.",

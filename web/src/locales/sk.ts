@@ -253,8 +253,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Sezóna označená ako nepozretá",
   "media.season.watch.error.partialUpdate": "Pri niektorých epizódach sa nepodarilo aktualizovať stav pozretia.",
   "media.season.watch.error.partialUpdateTitle": "Sezóna nebola úplne aktualizovaná",
-  "media.season.watch.actions.markUnwatched": "Označiť sezónu ako nepozretú",
-  "media.season.watch.actions.markWatched": "Označiť sezónu ako pozretú",
   "media.sources.error.loadFailed": "Streamy sa nepodarilo načítať.",
   "media.sources.error.unavailableTitle": "Streamy nie sú k dispozícii",
   "media.sources.error.encodingRequired": "Tento zdroj vyžaduje kódovanie médií, ktoré sa pri webovom prehrávaní v Rivune nespúšťa automaticky. Vyberte iný zdroj alebo možnosť prehrávania v externom prehrávači.",

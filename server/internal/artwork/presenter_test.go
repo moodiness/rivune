@@ -21,7 +21,7 @@ func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *te
 	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
 
 	const titleID = "88888888-8888-4888-8888-888888888888"
-	const imdbID = "tt0948470"
+	const imdbID = "tt9000301"
 	if _, err := pool.Exec(context.Background(), `DELETE FROM titles WHERE id = $1::uuid`, titleID); err != nil {
 		t.Fatalf("clear canonical title fixture: %v", err)
 	}
@@ -31,20 +31,20 @@ func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *te
 	logo := fixture.URL + "/fanart-logo.png"
 	if _, err := pool.Exec(context.Background(), `
 		INSERT INTO titles (id, media_type, display_title, poster_url, background_url)
-		VALUES ($1::uuid, 'movie', 'Spider-Man', 'https://tmdb.example/poster.jpg', 'https://tmdb.example/background.jpg')
+		VALUES ($1::uuid, 'movie', 'Fixture Movie', 'https://tmdb.example/poster.jpg', 'https://tmdb.example/background.jpg')
 	`, titleID); err != nil {
 		t.Fatalf("insert canonical title: %v", err)
 	}
 	if _, err := pool.Exec(context.Background(), `
 		INSERT INTO title_external_ids (title_id, provider, external_id)
-		VALUES ($1::uuid, 'imdb', $2), ($1::uuid, 'tmdb', '1930')
+		VALUES ($1::uuid, 'imdb', $2), ($1::uuid, 'tmdb', '900301')
 	`, titleID, imdbID); err != nil {
 		t.Fatalf("insert canonical title identities: %v", err)
 	}
 	if _, err := pool.Exec(context.Background(), `
 		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at)
 		VALUES ($1::uuid, 'tmdb', 'en-US', jsonb_build_object(
-			'id', $1::text, 'mediaType', 'movie', 'title', 'Spider-Man',
+			'id', $1::text, 'mediaType', 'movie', 'title', 'Fixture Movie',
 			'posterUrl', $2::text, 'backdropUrl', $3::text, 'logoUrl', $4::text,
 			'genres', '[]'::jsonb, 'voteAverage', 0, 'voteCount', 0, 'externalIds', '{}'::jsonb
 		), now() + interval '1 day')
@@ -54,12 +54,12 @@ func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *te
 
 	results := []addon.ResourceResult{
 		{
-			Resource: "catalog", Type: "movie", ID: "netflix",
-			Payload: json.RawMessage(`{"metas":[{"id":"tt0948470","type":"movie","name":"Spider-Man","poster":"` + fixture.URL + `/addon-poster.png","background":"` + fixture.URL + `/addon-background.png","logo":"` + fixture.URL + `/addon-logo.png","customNumber":9007199254740993}]}`),
+			Resource: "catalog", Type: "movie", ID: "featured",
+			Payload: json.RawMessage(`{"metas":[{"id":"tt9000301","type":"movie","name":"Fixture Movie","poster":"` + fixture.URL + `/addon-poster.png","background":"` + fixture.URL + `/addon-background.png","logo":"` + fixture.URL + `/addon-logo.png","customNumber":9007199254740993}]}`),
 		},
 		{
 			Resource: "meta", Type: "tv", ID: imdbID,
-			Payload: json.RawMessage(`{"meta":[{"id":"tt0948470","type":"tv","name":"Live channel","poster":"` + fixture.URL + `/live-tv.png"}]}`),
+			Payload: json.RawMessage(`{"meta":[{"id":"tt9000301","type":"tv","name":"Live channel","poster":"` + fixture.URL + `/live-tv.png"}]}`),
 		},
 	}
 	service.PresentAddonResources(context.Background(), results)
@@ -81,7 +81,7 @@ func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *te
 			t.Fatalf("%s = %#v, want %q", field, meta[field], expected)
 		}
 	}
-	if meta["name"] != "Spider-Man" || !strings.Contains(string(results[0].Payload), `"customNumber":9007199254740993`) {
+	if meta["name"] != "Fixture Movie" || !strings.Contains(string(results[0].Payload), `"customNumber":9007199254740993`) {
 		t.Fatalf("non-artwork catalog values changed: %s", results[0].Payload)
 	}
 	if strings.Contains(string(results[0].Payload), fixture.URL) {

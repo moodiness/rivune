@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Mùa chưa xem",
   "media.season.watch.error.partialUpdate": "Không thể cập nhật trạng thái đã xem của một số tập.",
   "media.season.watch.error.partialUpdateTitle": "Mùa chưa được cập nhật đầy đủ",
-  "media.season.watch.actions.markUnwatched": "Đánh dấu mùa là chưa xem",
-  "media.season.watch.actions.markWatched": "Đánh dấu mùa là đã xem",
   "media.sources.error.loadFailed": "Không thể tải các luồng phát.",
   "media.sources.error.unavailableTitle": "Không có luồng phát",
   "media.sources.error.encodingRequired": "Nguồn này yêu cầu mã hóa nội dung đa phương tiện, nhưng tính năng phát trên web của Rivune không tự động khởi chạy quá trình này. Hãy chọn nguồn khác hoặc tùy chọn trình phát bên ngoài.",

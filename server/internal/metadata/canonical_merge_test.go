@@ -49,10 +49,10 @@ func (provider *canonicalMergeProvider) SeasonDetails(_ context.Context, externa
 	return provider.season, nil
 }
 func (provider *canonicalMergeProvider) ResolveExternalID(_ context.Context, mediaType, externalProvider, externalID string) (string, error) {
-	if mediaType == MediaTypeMovie && externalProvider == "imdb" && externalID == "tt0948470" {
+	if mediaType == MediaTypeMovie && externalProvider == "imdb" && externalID == "tt9000301" {
 		return provider.movie.ExternalID, nil
 	}
-	if mediaType == MediaTypeSeries && externalProvider == "imdb" && externalID == "tt14688458" {
+	if mediaType == MediaTypeSeries && externalProvider == "imdb" && externalID == "tt9000101" {
 		return provider.series.ExternalID, nil
 	}
 	return "", ErrProviderNotFound
@@ -91,9 +91,9 @@ func TestMovieDetailsConsolidatesResolvedCanonicalTitle(t *testing.T) {
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO titles (id, media_type, display_title) VALUES
-			($1::uuid, 'movie', 'Requested Spider-Man'), ($2::uuid, 'movie', 'TMDB Spider-Man');
+			($1::uuid, 'movie', 'Fixture Movie'), ($2::uuid, 'movie', 'Fixture Movie Alternate');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
-			($1::uuid, 'imdb', 'movie', 'tt0948470'), ($2::uuid, 'tmdb', 'movie', '1930');
+			($1::uuid, 'imdb', 'movie', 'tt9000301'), ($2::uuid, 'tmdb', 'movie', '900301');
 		INSERT INTO profile_library (profile_id, title_id, added_at, updated_at) VALUES
 			($3::uuid, $1::uuid, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'),
 			($3::uuid, $2::uuid, '2024-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
@@ -101,8 +101,8 @@ func TestMovieDetailsConsolidatesResolvedCanonicalTitle(t *testing.T) {
 		t.Fatalf("seed canonical movies: %v", err)
 	}
 	provider := &canonicalMergeProvider{movie: ProviderMovie{
-		ExternalID: "1930", Title: "The Amazing Spider-Man", ReleaseDate: "2012-06-23",
-		AdditionalIDs: map[string]string{"imdb": "tt0948470"},
+		ExternalID: "900301", Title: "Fixture Movie Alternate", ReleaseDate: "2024-01-01",
+		AdditionalIDs: map[string]string{"imdb": "tt9000301"},
 	}}
 	artwork := &canonicalArtworkEnricher{}
 	service := NewService(pool, provider, nil, artwork, time.Hour, nil)
@@ -110,7 +110,7 @@ func TestMovieDetailsConsolidatesResolvedCanonicalTitle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load IMDb-only movie through resolved TMDB identity: %v", err)
 	}
-	if movie.ID != canonicalDestinationMovieID || movie.ExternalIDs["tmdb"] != "1930" || movie.ExternalIDs["imdb"] != "tt0948470" ||
+	if movie.ID != canonicalDestinationMovieID || movie.ExternalIDs["tmdb"] != "900301" || movie.ExternalIDs["imdb"] != "tt9000301" ||
 		movie.PosterURL != "https://fanart.example/movie-poster.jpg" || movie.BackdropURL != "https://fanart.example/movie-background.jpg" ||
 		movie.LogoURL != "https://fanart.example/movie-logo.png" || artwork.movieCalls != 1 {
 		t.Fatalf("unexpected consolidated movie: %#v (artwork calls=%d)", movie, artwork.movieCalls)
@@ -131,14 +131,14 @@ func TestMovieDetailsFallsBackWhenFanartFails(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO titles (id, media_type, display_title) VALUES ($1::uuid, 'movie', 'Fallback Movie');
+		INSERT INTO titles (id, media_type, display_title) VALUES ($1::uuid, 'movie', 'Fixture Movie');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
-		VALUES ($1::uuid, 'tmdb', 'movie', '1930');
+		VALUES ($1::uuid, 'tmdb', 'movie', '900301');
 	`, pgx.QueryExecModeSimpleProtocol, canonicalDestinationMovieID); err != nil {
 		t.Fatalf("seed fallback movie: %v", err)
 	}
 	provider := &canonicalMergeProvider{movie: ProviderMovie{
-		ExternalID: "1930", Title: "Fallback Movie",
+		ExternalID: "900301", Title: "Fixture Movie",
 		PosterURL: "https://image.tmdb.org/fallback-poster.jpg",
 	}}
 	artwork := &canonicalArtworkEnricher{movieError: ErrProviderRateLimited}
@@ -159,15 +159,15 @@ func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState
 	seedCanonicalMergeSuccess(t, pool)
 	provider := &canonicalMergeProvider{
 		series: ProviderSeries{
-			ExternalID: "125988", Name: "Silo", Overview: "People survive underground.", FirstAirDate: "2023-05-04",
-			AdditionalIDs: map[string]string{"imdb": "tt14688458"},
-			Seasons:       []ProviderSeasonSummary{{ExternalID: "season-125988-1", Name: "Season 1", SeasonNumber: 1, EpisodeCount: 2}},
+			ExternalID: "900101", Name: "Fixture Series Alpha", Overview: "Fixture series overview.", FirstAirDate: "2024-01-01",
+			AdditionalIDs: map[string]string{"imdb": "tt9000101"},
+			Seasons:       []ProviderSeasonSummary{{ExternalID: "910101", Name: "Season 1", SeasonNumber: 1, EpisodeCount: 2}},
 		},
 		season: ProviderSeason{
-			ExternalID: "season-125988-1", Name: "Season 1", SeasonNumber: 1,
+			ExternalID: "910101", Name: "Season 1", SeasonNumber: 1,
 			Episodes: []ProviderEpisode{
-				{ExternalID: "episode-1", Name: "Freedom Day", SeasonNumber: 1, EpisodeNumber: 1},
-				{ExternalID: "episode-2", Name: "Holston's Pick", SeasonNumber: 1, EpisodeNumber: 2},
+				{ExternalID: "920101", Name: "Fixture Episode 1", SeasonNumber: 1, EpisodeNumber: 1},
+				{ExternalID: "920102", Name: "Fixture Episode 2", SeasonNumber: 1, EpisodeNumber: 2},
 			},
 		},
 	}
@@ -187,7 +187,7 @@ func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState
 	if len(season.Episodes) != 2 || season.Episodes[0].ID != canonicalDestinationEpisodeID || season.Episodes[1].ID != canonicalUniqueEpisodeID {
 		t.Fatalf("unexpected consolidated episodes: %#v", season.Episodes)
 	}
-	for providerName, externalID := range map[string]string{"imdb": "tt14688458", "tmdb": "125988"} {
+	for providerName, externalID := range map[string]string{"imdb": "tt9000101", "tmdb": "900101"} {
 		var mappedTitleID string
 		if err := pool.QueryRow(ctx, `SELECT title_id::text FROM title_external_ids WHERE provider = $1 AND namespace = 'series' AND external_id = $2`, providerName, externalID).Scan(&mappedTitleID); err != nil {
 			t.Fatalf("query %s alias: %v", providerName, err)
@@ -254,24 +254,24 @@ func TestSeasonZeroPersistsCanonicalHierarchy(t *testing.T) {
 	const seriesID = "00000000-0000-4000-8000-000000000100"
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO titles (id, media_type, display_title)
-		VALUES ($1::uuid, 'series', 'Breaking Bad');
+		VALUES ($1::uuid, 'series', 'Fixture Series');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
-		VALUES ($1::uuid, 'tmdb', 'series', '1396')
+		VALUES ($1::uuid, 'tmdb', 'series', '92001')
 	`, pgx.QueryExecModeSimpleProtocol, seriesID); err != nil {
 		t.Fatalf("seed series: %v", err)
 	}
 	provider := &canonicalMergeProvider{
 		series: ProviderSeries{
-			ExternalID: "1396",
-			Name:       "Breaking Bad",
+			ExternalID: "92001",
+			Name:       "Fixture Series",
 			Seasons: []ProviderSeasonSummary{{
-				ExternalID: "3627", Name: "Specials", SeasonNumber: 0, EpisodeCount: 1,
+				ExternalID: "92010", Name: "Specials", SeasonNumber: 0, EpisodeCount: 1,
 			}},
 		},
 		season: ProviderSeason{
-			ExternalID: "3627", Name: "Specials", SeasonNumber: 0,
+			ExternalID: "92010", Name: "Specials", SeasonNumber: 0,
 			Episodes: []ProviderEpisode{{
-				ExternalID: "62084", Name: "No Half Measures", SeasonNumber: 0, EpisodeNumber: 1,
+				ExternalID: "9201001", Name: "Fixture Episode", SeasonNumber: 0, EpisodeNumber: 1,
 			}},
 		},
 	}
@@ -314,21 +314,21 @@ func TestSeriesRefreshRepairsPoisonedSeasonOrdinalAndInvalidatesCachedHierarchy(
 	)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO titles (id, media_type, display_title) VALUES
-			($1::uuid, 'series', 'Demain nous appartient');
+			($1::uuid, 'series', 'Fixture Series Beta');
 		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title) VALUES
 			($2::uuid, 'season', $1::uuid, 2, 'Saison 9');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
-			($1::uuid, 'tmdb', 'series', '72879'),
-			($2::uuid, 'tmdb', 'season', '475463');
+			($1::uuid, 'tmdb', 'series', '900202'),
+			($2::uuid, 'tmdb', 'season', '910209');
 		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at) VALUES
 			($2::uuid, 'tmdb', 'fr-FR',
 			 jsonb_build_object(
-			     'id', $2::text, 'mediaType', 'season', 'seriesId', $1::text, 'name', 'Saison 9', 'seasonNumber', 2,
+			     'id', $2::text, 'mediaType', 'season', 'seriesId', $1::text, 'name', 'Season 9', 'seasonNumber', 2,
 			     'episodes', jsonb_build_array(jsonb_build_object(
-			         'id', $3::text, 'mediaType', 'episode', 'seasonId', $2::text, 'name', 'Épisode 2021',
+			         'id', $3::text, 'mediaType', 'episode', 'seasonId', $2::text, 'name', 'Fixture Episode 2021',
 			         'seasonNumber', 2, 'episodeNumber', 2021
 			     )),
-			     'externalIds', jsonb_build_object('tmdb', '475463')
+			     'externalIds', jsonb_build_object('tmdb', '910209')
 			 ),
 			 now() + interval '1 hour')
 	`, pgx.QueryExecModeSimpleProtocol, seriesID, seasonID, episodeID); err != nil {
@@ -336,17 +336,17 @@ func TestSeriesRefreshRepairsPoisonedSeasonOrdinalAndInvalidatesCachedHierarchy(
 	}
 	provider := &canonicalMergeProvider{
 		series: ProviderSeries{
-			ExternalID: "72879", Name: "Demain nous appartient",
-			AdditionalIDs: map[string]string{"tvdb": "328775"},
+			ExternalID: "900202", Name: "Fixture Series Beta",
+			AdditionalIDs: map[string]string{"tvdb": "900302"},
 			Seasons: []ProviderSeasonSummary{{
-				ExternalID: "475463", Name: "Saison 9", SeasonNumber: 9, EpisodeCount: 2,
+				ExternalID: "910209", Name: "Season 9", SeasonNumber: 9, EpisodeCount: 2,
 			}},
 		},
 		season: ProviderSeason{
-			ExternalID: "475463", Name: "Saison 9", SeasonNumber: 9,
+			ExternalID: "910209", Name: "Season 9", SeasonNumber: 9,
 			Episodes: []ProviderEpisode{
-				{ExternalID: "900001", Name: "Épisode 2021", SeasonNumber: 9, EpisodeNumber: 2021},
-				{ExternalID: "900002", Name: "Épisode 2022", SeasonNumber: 9, EpisodeNumber: 2022},
+				{ExternalID: "920201", Name: "Fixture Episode 2021", SeasonNumber: 9, EpisodeNumber: 2021},
+				{ExternalID: "920202", Name: "Fixture Episode 2022", SeasonNumber: 9, EpisodeNumber: 2022},
 			},
 		},
 	}
@@ -387,16 +387,16 @@ func TestSeriesDetailsCanonicalConflictRollsBackAtomically(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO titles (id, media_type, display_title) VALUES ($1::uuid, 'series', 'Requested Silo'), ($2::uuid, 'series', 'Conflicting Silo');
+		INSERT INTO titles (id, media_type, display_title) VALUES ($1::uuid, 'series', 'Fixture Series Alpha'), ($2::uuid, 'series', 'Fixture Series Alpha Conflict');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
-			($1::uuid, 'imdb', 'series', 'tt14688458'), ($2::uuid, 'tmdb', 'series', '125988'), ($2::uuid, 'imdb', 'series', 'tt-conflicting');
+			($1::uuid, 'imdb', 'series', 'tt9000101'), ($2::uuid, 'tmdb', 'series', '900101'), ($2::uuid, 'imdb', 'series', 'tt9000199');
 		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at) VALUES ($2::uuid, 'tmdb', 'fr-FR', '{"cached":true}', now() + interval '1 hour');
 		INSERT INTO profile_library (profile_id, title_id, added_at, updated_at) VALUES
 			($3::uuid, $1::uuid, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'), ($3::uuid, $2::uuid, '2024-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
 	`, pgx.QueryExecModeSimpleProtocol, canonicalDestinationSeriesID, canonicalSourceSeriesID, canonicalProfileID); err != nil {
 		t.Fatalf("seed conflicting canonical titles: %v", err)
 	}
-	provider := &canonicalMergeProvider{series: ProviderSeries{ExternalID: "125988", Name: "Provider Silo", Overview: "Conflict fixture", AdditionalIDs: map[string]string{"imdb": "tt14688458"}}}
+	provider := &canonicalMergeProvider{series: ProviderSeries{ExternalID: "900101", Name: "Fixture Series Alpha", Overview: "Fixture conflict overview.", AdditionalIDs: map[string]string{"imdb": "tt9000101"}}}
 	service := NewService(pool, provider, nil, nil, time.Hour, nil)
 	_, err := service.SeriesDetails(ctx, canonicalMergePrincipal(), canonicalDestinationSeriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tmdb"})
 	if err == nil || err.Error() != "metadata provider returned a conflicting external ID" {
@@ -416,11 +416,11 @@ func TestSeriesDetailsCanonicalConflictRollsBackAtomically(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT display_title FROM titles WHERE id = $1::uuid`, canonicalDestinationSeriesID).Scan(&destinationTitle); err != nil {
 		t.Fatal(err)
 	}
-	if titleCount != 2 || libraryCount != 2 || metadataCount != 1 || destinationTitle != "Requested Silo" {
+	if titleCount != 2 || libraryCount != 2 || metadataCount != 1 || destinationTitle != "Fixture Series Alpha" {
 		t.Fatalf("conflicting merge was not atomic: titles=%d library=%d metadata=%d destination=%q", titleCount, libraryCount, metadataCount, destinationTitle)
 	}
 	var tmdbTitleID string
-	if err := pool.QueryRow(ctx, `SELECT title_id::text FROM title_external_ids WHERE provider = 'tmdb' AND namespace = 'series' AND external_id = '125988'`).Scan(&tmdbTitleID); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT title_id::text FROM title_external_ids WHERE provider = 'tmdb' AND namespace = 'series' AND external_id = '900101'`).Scan(&tmdbTitleID); err != nil {
 		t.Fatal(err)
 	}
 	if tmdbTitleID != canonicalSourceSeriesID {
@@ -508,14 +508,14 @@ func seedCanonicalMergeSuccess(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(), `
 		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title) VALUES
-			($1::uuid, 'series', NULL, NULL, 'Requested Silo'), ($2::uuid, 'series', NULL, NULL, 'TMDB Silo'),
-			($3::uuid, 'season', $1::uuid, 1, 'Requested Season 1'), ($4::uuid, 'season', $2::uuid, 1, 'TMDB Season 1'),
-			($5::uuid, 'episode', $3::uuid, 1, 'Requested Episode 1'), ($6::uuid, 'episode', $4::uuid, 1, 'TMDB Episode 1'),
-			($7::uuid, 'episode', $4::uuid, 2, 'TMDB Episode 2');
+			($1::uuid, 'series', NULL, NULL, 'Fixture Series Alpha'), ($2::uuid, 'series', NULL, NULL, 'Fixture Series Alpha Source'),
+			($3::uuid, 'season', $1::uuid, 1, 'Requested Season 1'), ($4::uuid, 'season', $2::uuid, 1, 'Source Season 1'),
+			($5::uuid, 'episode', $3::uuid, 1, 'Fixture Episode 1'), ($6::uuid, 'episode', $4::uuid, 1, 'Fixture Episode 1 Source'),
+			($7::uuid, 'episode', $4::uuid, 2, 'Fixture Episode 2');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
-			($1::uuid, 'imdb', 'series', 'tt14688458'), ($2::uuid, 'tmdb', 'series', '125988'),
-			($3::uuid, 'tvdb', 'season', 'silo-season-1'), ($4::uuid, 'tmdb', 'season', 'season-125988-1'),
-			($5::uuid, 'tvdb', 'episode', 'silo-episode-1'), ($6::uuid, 'tmdb', 'episode', 'episode-1'), ($7::uuid, 'tmdb', 'episode', 'episode-2');
+			($1::uuid, 'imdb', 'series', 'tt9000101'), ($2::uuid, 'tmdb', 'series', '900101'),
+			($3::uuid, 'tvdb', 'season', '930101'), ($4::uuid, 'tmdb', 'season', '910101'),
+			($5::uuid, 'tvdb', 'episode', '940101'), ($6::uuid, 'tmdb', 'episode', '920101'), ($7::uuid, 'tmdb', 'episode', '920102');
 		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at) VALUES
 			($1::uuid, 'imdb', 'fr-FR', '{"requested":true}', now() + interval '1 hour'), ($2::uuid, 'tmdb', 'fr-FR', '{"duplicate":true}', now() + interval '1 hour'),
 			($3::uuid, 'tvdb', 'fr-FR', '{"requestedSeason":true}', now() + interval '1 hour'), ($4::uuid, 'tmdb', 'fr-FR', '{"duplicateSeason":true}', now() + interval '1 hour'),

@@ -10,7 +10,7 @@ import (
 func TestHandlerServesEntryPointAndBrowserRoutes(t *testing.T) {
 	t.Parallel()
 
-	for _, requestPath := range []string{"/", "/library", "/settings/profiles", "/media/series/tt14688458/season/3/episode/2"} {
+	for _, requestPath := range []string{"/", "/library", "/settings/profiles", "/media/series/tt9003001/season/3/episode/2"} {
 		requestPath := requestPath
 		t.Run(requestPath, func(t *testing.T) {
 			t.Parallel()

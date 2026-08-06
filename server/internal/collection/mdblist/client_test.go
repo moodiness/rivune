@@ -26,10 +26,10 @@ func TestResolveCollectionSourceSendsMDBListContractAndNormalizesItems(t *testin
 		_, _ = w.Write([]byte(`{
 			"movies":[],
 			"shows":[{
-				"id":1396,"title":"Breaking Bad","imdb_id":"tt0903747","tvdb_id":81189,
-				"ids":{"mdblist":"s1396","imdb":"tt0903747","tmdb":1396,"tvdb":81189},
-				"mediatype":"show","release_year":2008,"poster":"https://images.example/breaking-bad.jpg",
-				"description":"A chemistry teacher builds an empire."
+				"id":92001,"title":"Fixture Series","imdb_id":"tt9002001","tvdb_id":93001,
+				"ids":{"mdblist":"s92001","imdb":"tt9002001","tmdb":92001,"tvdb":93001},
+				"mediatype":"show","release_year":2024,"poster":"https://images.example/fixture-series.jpg",
+				"description":"Fixture series overview."
 			}],
 			"pagination":{"has_more":false}
 		}`))
@@ -47,9 +47,9 @@ func TestResolveCollectionSourceSendsMDBListContractAndNormalizesItems(t *testin
 		t.Fatalf("unexpected page: %+v", page)
 	}
 	item := page.Items[0]
-	if item.ID != "tmdb:1396" || item.MediaType != collection.MediaTypeSeries || item.Title != "Breaking Bad" ||
-		item.PosterURL != "https://images.example/breaking-bad.jpg" || item.Description == "" || item.ReleaseInfo != "2008" ||
-		item.ExternalIDs["mdblist"] != "s1396" || item.ExternalIDs["imdb"] != "tt0903747" || item.ExternalIDs["tvdb"] != "81189" {
+	if item.ID != "tmdb:92001" || item.MediaType != collection.MediaTypeSeries || item.Title != "Fixture Series" ||
+		item.PosterURL != "https://images.example/fixture-series.jpg" || item.Description == "" || item.ReleaseInfo != "2024" ||
+		item.ExternalIDs["mdblist"] != "s92001" || item.ExternalIDs["imdb"] != "tt9002001" || item.ExternalIDs["tvdb"] != "93001" {
 		t.Fatalf("unexpected normalized item: %+v", item)
 	}
 }

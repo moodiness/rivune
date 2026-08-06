@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Temporada no vista",
   "media.season.watch.error.partialUpdate": "No s'ha pogut actualitzar l'estat de visualització d'alguns episodis.",
   "media.season.watch.error.partialUpdateTitle": "La temporada no s'ha actualitzat del tot",
-  "media.season.watch.actions.markUnwatched": "Marca la temporada com a no vista",
-  "media.season.watch.actions.markWatched": "Marca la temporada com a vista",
   "media.sources.error.loadFailed": "No s'han pogut carregar els fluxos.",
   "media.sources.error.unavailableTitle": "Fluxos no disponibles",
   "media.sources.error.encodingRequired": "Aquesta font requereix una codificació multimèdia que la reproducció web de Rivune no inicia automàticament. Tria una altra font o l'opció de reproducció amb un reproductor extern.",

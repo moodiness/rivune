@@ -183,12 +183,12 @@ func TestResolveHydratesFolderArtworkWithoutOverridingConfiguration(t *testing.T
 	}{
 		{
 			name:      "provider artwork",
-			folder:    Folder{Title: "James Bond"},
+			folder:    Folder{Title: "Fixture Collection"},
 			wantCover: "https://image.tmdb.org/collection-poster.jpg", wantBackdrop: "https://image.tmdb.org/collection-backdrop.jpg",
 		},
 		{
 			name:      "configured artwork wins",
-			folder:    Folder{Title: "James Bond", CoverImageURL: "https://example.com/poster.jpg", HeroBackdropURL: "https://example.com/backdrop.jpg"},
+			folder:    Folder{Title: "Fixture Collection", CoverImageURL: "https://example.com/poster.jpg", HeroBackdropURL: "https://example.com/backdrop.jpg"},
 			wantCover: "https://example.com/poster.jpg", wantBackdrop: "https://example.com/backdrop.jpg",
 		},
 	}
@@ -224,8 +224,8 @@ func TestResolveFetchesFanartForItemsAndAutomaticFolderArtwork(t *testing.T) {
 		{
 			name:         "automatic folder artwork uses Fanart",
 			folder:       Folder{Title: "Fanart collection"},
-			wantCover:    "https://assets.fanart.tv/movie-550-poster.jpg",
-			wantBackdrop: "https://assets.fanart.tv/movie-550-background.jpg",
+			wantCover:    "https://assets.fanart.tv/movie-900201-poster.jpg",
+			wantBackdrop: "https://assets.fanart.tv/movie-900201-background.jpg",
 		},
 		{
 			name: "configured folder artwork wins",
@@ -246,17 +246,17 @@ func TestResolveFetchesFanartForItemsAndAutomaticFolderArtwork(t *testing.T) {
 					HeroBackdropURL: "https://image.tmdb.org/source-background.jpg",
 					Items: []Item{
 						{
-							ID: "tt0137523", MediaType: MediaTypeMovie, Title: "Fight Club",
-							PosterURL: "https://image.tmdb.org/movie-poster.jpg", ExternalIDs: map[string]string{"imdb": "tt0137523"},
+							ID: "tt9000201", MediaType: MediaTypeMovie, Title: "Fixture Movie",
+							PosterURL: "https://image.tmdb.org/movie-poster.jpg", ExternalIDs: map[string]string{"imdb": "tt9000201"},
 						},
 						{
-							ID: "tmdb:1396", MediaType: MediaTypeSeries, Title: "Breaking Bad",
-							PosterURL: "https://image.tmdb.org/series-poster.jpg", ExternalIDs: map[string]string{"tmdb": "1396"},
+							ID: "tmdb:92001", MediaType: MediaTypeSeries, Title: "Fixture Series",
+							PosterURL: "https://image.tmdb.org/series-poster.jpg", ExternalIDs: map[string]string{"tmdb": "92001"},
 						},
 					},
 				},
-				resolved: map[string]string{"imdb:tt0137523": "550"},
-				series:   metadata.ProviderSeries{AdditionalIDs: map[string]string{"tvdb": "81189"}},
+				resolved: map[string]string{"imdb:tt9000201": "900201"},
+				series:   metadata.ProviderSeries{AdditionalIDs: map[string]string{"tvdb": "93001"}},
 			}
 			enricher := &recordingFanartEnricher{}
 			service := NewService(nil, nil, provider, nil, nil)
@@ -273,16 +273,16 @@ func TestResolveFetchesFanartForItemsAndAutomaticFolderArtwork(t *testing.T) {
 					resolved.Folder.CoverImageURL, resolved.Folder.HeroBackdropURL, test.wantCover, test.wantBackdrop)
 			}
 			if len(resolved.Items) != 2 ||
-				resolved.Items[0].PosterURL != "https://assets.fanart.tv/movie-550-poster.jpg" ||
-				resolved.Items[0].BackgroundURL != "https://assets.fanart.tv/movie-550-background.jpg" ||
-				resolved.Items[0].LogoURL != "https://assets.fanart.tv/movie-550-logo.png" ||
-				resolved.Items[1].PosterURL != "https://assets.fanart.tv/series-81189-poster.jpg" ||
-				resolved.Items[1].BackgroundURL != "https://assets.fanart.tv/series-81189-background.jpg" ||
-				resolved.Items[1].LogoURL != "https://assets.fanart.tv/series-81189-logo.png" ||
+				resolved.Items[0].PosterURL != "https://assets.fanart.tv/movie-900201-poster.jpg" ||
+				resolved.Items[0].BackgroundURL != "https://assets.fanart.tv/movie-900201-background.jpg" ||
+				resolved.Items[0].LogoURL != "https://assets.fanart.tv/movie-900201-logo.png" ||
+				resolved.Items[1].PosterURL != "https://assets.fanart.tv/series-93001-poster.jpg" ||
+				resolved.Items[1].BackgroundURL != "https://assets.fanart.tv/series-93001-background.jpg" ||
+				resolved.Items[1].LogoURL != "https://assets.fanart.tv/series-93001-logo.png" ||
 				!resolved.Items[0].FanartResolved || !resolved.Items[1].FanartResolved {
 				t.Fatalf("items did not use direct Fanart artwork: %+v", resolved.Items)
 			}
-			if len(enricher.movies) != 1 || enricher.movies[0] != "550" || len(enricher.series) != 1 || enricher.series[0] != "81189" {
+			if len(enricher.movies) != 1 || enricher.movies[0] != "900201" || len(enricher.series) != 1 || enricher.series[0] != "93001" {
 				t.Fatalf("unexpected Fanart requests: movies=%v series=%v", enricher.movies, enricher.series)
 			}
 		})
@@ -290,16 +290,16 @@ func TestResolveFetchesFanartForItemsAndAutomaticFolderArtwork(t *testing.T) {
 }
 
 func TestResolveUsesTMDBCollectionFanartBeforeMovieArtwork(t *testing.T) {
-	collectionTMDBID := int64(87096)
+	collectionTMDBID := int64(700001)
 	provider := artworkTMDBProvider{
 		page: SourcePage{
 			CoverImageURL:   "https://image.tmdb.org/collection-poster.jpg",
 			HeroBackdropURL: "https://image.tmdb.org/collection-background.jpg",
 			Items: []Item{{
-				ID:          "tmdb:19995",
+				ID:          "tmdb:700101",
 				MediaType:   MediaTypeMovie,
-				Title:       "Avatar",
-				ExternalIDs: map[string]string{"tmdb": "19995"},
+				Title:       "Fixture World Collection",
+				ExternalIDs: map[string]string{"tmdb": "700101"},
 			}},
 		},
 	}
@@ -307,11 +307,11 @@ func TestResolveUsesTMDBCollectionFanartBeforeMovieArtwork(t *testing.T) {
 	service := NewService(nil, nil, provider, nil, nil)
 	service.SetFanartEnricher(provider, provider, enricher, nil)
 	folder := Folder{
-		Title: "Avatar",
+		Title: "Fixture World Collection",
 		Sources: []Source{{
-			ID:    "avatar-source",
+			ID:    "fixture-world-source",
 			Kind:  SourceKindTMDB,
-			Title: "Avatar collection",
+			Title: "Fixture World Collection",
 			TMDB: &TMDBSource{
 				SourceType: "collection",
 				TMDBID:     &collectionTMDBID,
@@ -322,29 +322,29 @@ func TestResolveUsesTMDBCollectionFanartBeforeMovieArtwork(t *testing.T) {
 
 	resolved, err := service.resolve(context.Background(), auth.Principal{}, "collection-id", folder, 1, 100, "fr-FR", "FR")
 	if err != nil {
-		t.Fatalf("resolve Avatar collection folder: %v", err)
+		t.Fatalf("resolve fixture world collection folder: %v", err)
 	}
-	if resolved.Folder.CoverImageURL != "https://assets.fanart.tv/collection-87096-poster.jpg" ||
-		resolved.Folder.HeroBackdropURL != "https://assets.fanart.tv/collection-87096-background.jpg" ||
-		resolved.Folder.TitleLogoURL != "https://assets.fanart.tv/collection-87096-logo.png" {
+	if resolved.Folder.CoverImageURL != "https://assets.fanart.tv/collection-700001-poster.jpg" ||
+		resolved.Folder.HeroBackdropURL != "https://assets.fanart.tv/collection-700001-background.jpg" ||
+		resolved.Folder.TitleLogoURL != "https://assets.fanart.tv/collection-700001-logo.png" {
 		t.Fatalf("folder did not use collection-level Fanart: %+v", resolved.Folder)
 	}
-	if resolved.SourcePosterURLs["avatar-source"] != "https://assets.fanart.tv/collection-87096-poster.jpg" {
+	if resolved.SourcePosterURLs["fixture-world-source"] != "https://assets.fanart.tv/collection-700001-poster.jpg" {
 		t.Fatalf("source folder did not use its collection-level Fanart poster: %+v", resolved.SourcePosterURLs)
 	}
 	if len(resolved.Items) != 1 ||
-		resolved.Items[0].PosterURL != "https://assets.fanart.tv/movie-19995-poster.jpg" {
+		resolved.Items[0].PosterURL != "https://assets.fanart.tv/movie-700101-poster.jpg" {
 		t.Fatalf("collection item did not retain its own Fanart artwork: %+v", resolved.Items)
 	}
-	if len(enricher.collections) != 1 || enricher.collections[0] != "87096" ||
-		len(enricher.movies) != 1 || enricher.movies[0] != "19995" {
+	if len(enricher.collections) != 1 || enricher.collections[0] != "700001" ||
+		len(enricher.movies) != 1 || enricher.movies[0] != "700101" {
 		t.Fatalf("unexpected Fanart identities: collections=%v movies=%v", enricher.collections, enricher.movies)
 	}
 }
 
 func TestResolveTriesEveryTMDBCollectionForFolderFanart(t *testing.T) {
-	firstCollectionID := int64(948485)
-	secondCollectionID := int64(263)
+	firstCollectionID := int64(700002)
+	secondCollectionID := int64(700003)
 	provider := artworkTMDBProvider{
 		page: SourcePage{
 			CoverImageURL:   "https://image.tmdb.org/movie-poster.jpg",
@@ -353,23 +353,23 @@ func TestResolveTriesEveryTMDBCollectionForFolderFanart(t *testing.T) {
 	}
 	enricher := &recordingFanartEnricher{
 		collectionArtwork: map[string]metadata.ProviderCollection{
-			"948485": {},
-			"263": {
-				PosterURL:   "https://assets.fanart.tv/dark-knight-collection-poster.jpg",
-				BackdropURL: "https://assets.fanart.tv/dark-knight-collection-background.jpg",
-				LogoURL:     "https://assets.fanart.tv/dark-knight-collection-logo.png",
+			"700002": {},
+			"700003": {
+				PosterURL:   "https://assets.fanart.tv/fixture-vigilante-collection-poster.jpg",
+				BackdropURL: "https://assets.fanart.tv/fixture-vigilante-collection-background.jpg",
+				LogoURL:     "https://assets.fanart.tv/fixture-vigilante-collection-logo.png",
 			},
 		},
 	}
 	service := NewService(nil, nil, provider, nil, nil)
 	service.SetFanartEnricher(provider, provider, enricher, nil)
 	folder := Folder{
-		Title: "Batman",
+		Title: "Fixture Vigilante Movie",
 		Sources: []Source{
 			{
-				ID:    "the-batman-source",
+				ID:    "fixture-vigilante-first-source",
 				Kind:  SourceKindTMDB,
-				Title: "The Batman",
+				Title: "Fixture Vigilante Movie",
 				TMDB: &TMDBSource{
 					SourceType: "collection",
 					TMDBID:     &firstCollectionID,
@@ -377,9 +377,9 @@ func TestResolveTriesEveryTMDBCollectionForFolderFanart(t *testing.T) {
 				},
 			},
 			{
-				ID:    "dark-knight-source",
+				ID:    "fixture-vigilante-second-source",
 				Kind:  SourceKindTMDB,
-				Title: "The Dark Knight",
+				Title: "Fixture Vigilante Movie",
 				TMDB: &TMDBSource{
 					SourceType: "collection",
 					TMDBID:     &secondCollectionID,
@@ -393,20 +393,20 @@ func TestResolveTriesEveryTMDBCollectionForFolderFanart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve multi-collection folder: %v", err)
 	}
-	if resolved.Folder.CoverImageURL != "https://assets.fanart.tv/dark-knight-collection-poster.jpg" ||
-		resolved.Folder.HeroBackdropURL != "https://assets.fanart.tv/dark-knight-collection-background.jpg" ||
-		resolved.Folder.TitleLogoURL != "https://assets.fanart.tv/dark-knight-collection-logo.png" {
+	if resolved.Folder.CoverImageURL != "https://assets.fanart.tv/fixture-vigilante-collection-poster.jpg" ||
+		resolved.Folder.HeroBackdropURL != "https://assets.fanart.tv/fixture-vigilante-collection-background.jpg" ||
+		resolved.Folder.TitleLogoURL != "https://assets.fanart.tv/fixture-vigilante-collection-logo.png" {
 		t.Fatalf("folder did not use the next collection with Fanart: %+v", resolved.Folder)
 	}
-	if _, exists := resolved.SourcePosterURLs["the-batman-source"]; exists ||
-		resolved.SourcePosterURLs["dark-knight-source"] != "https://assets.fanart.tv/dark-knight-collection-poster.jpg" {
+	if _, exists := resolved.SourcePosterURLs["fixture-vigilante-first-source"]; exists ||
+		resolved.SourcePosterURLs["fixture-vigilante-second-source"] != "https://assets.fanart.tv/fixture-vigilante-collection-poster.jpg" {
 		t.Fatalf("source posters did not preserve collection identities: %+v", resolved.SourcePosterURLs)
 	}
 	requested := make(map[string]bool, len(enricher.collections))
 	for _, id := range enricher.collections {
 		requested[id] = true
 	}
-	if len(requested) != 2 || !requested["948485"] || !requested["263"] {
+	if len(requested) != 2 || !requested["700002"] || !requested["700003"] {
 		t.Fatalf("did not try every configured TMDB collection: %v", enricher.collections)
 	}
 }
@@ -424,11 +424,11 @@ func TestEnrichFanartArtworkSkipsLiveTVOnlySources(t *testing.T) {
 		},
 	}}
 	items := []Item{{
-		ID:          "tmdb:550",
+		ID:          "tmdb:900201",
 		MediaType:   MediaTypeMovie,
 		Title:       "Live channel",
 		PosterURL:   "https://addon.example/channel.png",
-		ExternalIDs: map[string]string{"tmdb": "550"},
+		ExternalIDs: map[string]string{"tmdb": "900201"},
 	}}
 
 	artwork, folderArtwork, sourcePosterURLs := service.enrichFanartArtwork(context.Background(), sources, items, "fr-FR")

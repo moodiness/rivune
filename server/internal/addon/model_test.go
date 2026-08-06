@@ -161,7 +161,7 @@ func TestManifestSupportsOpaqueTypesIDsAndCatalogExtras(t *testing.T) {
 		{name: "full resource rejects type", path: ResourcePath{Resource: "stream", Type: "movie", ID: "kitsu:1"}, want: false},
 		{name: "empty prefixes accept every ID", path: ResourcePath{Resource: "subtitles", Type: "anime-special", ID: "anything/at-all"}, want: true},
 		{name: "full omitted prefixes accept every ID", path: ResourcePath{Resource: "custom-resource", Type: "anime-special", ID: "opaque:value"}, want: true},
-		{name: "catalog required extra satisfied", path: ResourcePath{Resource: "catalog", Type: "anime-special", ID: "custom/catalog", Extra: []ExtraValue{{Name: "search", Value: "Frieren"}, {Name: "genre", Value: "Drama"}, {Name: "genre", Value: "Sci-Fi"}}}, want: true},
+		{name: "catalog required extra satisfied", path: ResourcePath{Resource: "catalog", Type: "anime-special", ID: "custom/catalog", Extra: []ExtraValue{{Name: "search", Value: "fixture"}, {Name: "genre", Value: "Drama"}, {Name: "genre", Value: "Sci-Fi"}}}, want: true},
 		{name: "catalog missing required extra", path: ResourcePath{Resource: "catalog", Type: "anime-special", ID: "custom/catalog"}, want: false},
 		{name: "catalog rejects undeclared extra", path: ResourcePath{Resource: "catalog", Type: "anime-special", ID: "custom/catalog", Extra: []ExtraValue{{Name: "search", Value: "x"}, {Name: "unknown", Value: "x"}}}, want: false},
 		{name: "legacy catalog extras", path: ResourcePath{Resource: "catalog", Type: "movie", ID: "legacy", Extra: []ExtraValue{{Name: "search", Value: "x"}, {Name: "skip", Value: "100"}}}, want: true},

@@ -13,9 +13,9 @@ const channel = (id: string, name: string, extra: Record<string, unknown> = {}) 
   ...extra,
 });
 
-const result = (addonId: string, catalogId: string, metas: unknown[], type = "tv", search = "news") => ({
+const result = (addonId: string, catalogId: string, metas: unknown[], type = "tv", search = "news", manifestId = `${addonId}-manifest`) => ({
   addonId,
-  manifestId: `${addonId}-manifest`,
+  manifestId,
   resource: "catalog",
   type,
   id: catalogId,
@@ -23,20 +23,20 @@ const result = (addonId: string, catalogId: string, metas: unknown[], type = "tv
   payload: { metas },
 });
 
-test("Search discovers FKStream anime catalogs and targets only the selected custom type", async ({ page, rivune }) => {
+test("Search discovers anime catalogs and targets only the selected custom type", async ({ page, rivune }) => {
   rivune.setSearchResponse("anime", 0, {
     results: [
-      result("fkstream-addon", "fkstream-search", [{
-        id: "shared-frieren",
+      result("anime-primary-addon", "anime-primary-search", [{
+        id: "shared-anime",
         type: "anime",
-        name: "Frieren — FKStream",
-        poster: "https://fixtures.rivune.test/fkstream-frieren.svg",
-      }], "anime", "frieren"),
-      result("alternate-anime-addon", "alternate-search", [{
-        id: "shared-frieren",
+        name: "Fixture Anime",
+        poster: "https://fixtures.rivune.test/fixture-anime.svg",
+      }], "anime", "fixture", "anime-primary-manifest"),
+      result("anime-secondary-addon", "anime-secondary-search", [{
+        id: "shared-anime",
         type: "anime",
-        name: "Frieren — Alternate",
-      }], "anime", "frieren"),
+        name: "Fixture Anime Alternate",
+      }], "anime", "fixture", "anime-secondary-manifest"),
     ],
     errors: [],
   });
@@ -50,14 +50,14 @@ test("Search discovers FKStream anime catalogs and targets only the selected cus
   await expect(page.getByRole("button", { name: "Other", exact: true }).locator(".lucide-shapes")).toBeVisible();
 
   await animeFilter.click();
-  await page.locator(".search-page .search-box input").fill("frieren");
-  await expect(page.getByRole("button", { name: "Open Frieren — FKStream" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Open Frieren — Alternate" })).toBeVisible();
+  await page.locator(".search-page .search-box input").fill("fixture");
+  await expect(page.getByRole("button", { name: "Open Fixture Anime", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Fixture Anime Alternate", exact: true })).toBeVisible();
   await expect(page.locator(".search-result-section")).toHaveCount(0);
 
   const animeRequests = rivune.matching("/api/v1/addons/catalogs/search/anime", "GET");
   expect(animeRequests).toHaveLength(1);
-  expect(animeRequests[0].search.get("search")).toBe("frieren");
+  expect(animeRequests[0].search.get("search")).toBe("fixture");
   expect(animeRequests[0].search.get("skip")).toBe("0");
   expect(animeRequests[0].search.get("limit")).toBe("24");
   expect(rivune.requests.filter((request) => ["movie", "series", "tv", "other"].some((type) => request.pathname === `/api/v1/addons/catalogs/search/${type}`))).toHaveLength(0);
@@ -207,16 +207,16 @@ test("TV search shows a generic retry state when every source fails", async ({ p
 });
 
 test("TV library actions update immediately, refresh every surface, keep a stable route, and fetch streams only after play", async ({ page, rivune }) => {
-  rivune.setSearchResponse("tv", 0, { results: [result("iptv-addon", "news-catalog", [channel("france-info", "France Info")])], errors: [] });
+  rivune.setSearchResponse("tv", 0, { results: [result("tv-addon", "tv-search", [channel("fixture-tv", "Fixture TV")], "tv", "TV", "tv-manifest")], errors: [] });
 
   await page.goto("/");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await page.getByRole("button", { name: "Live TV", exact: true }).click();
-  await page.locator(".search-page .search-box input").fill("france");
-  const add = page.getByRole("button", { name: "Add to library: France Info" });
+  await page.locator(".search-page .search-box input").fill("TV");
+  const add = page.getByRole("button", { name: "Add to library: Fixture TV" });
   await expect(add).toBeVisible();
   await add.click();
-  const saved = page.getByRole("button", { name: "In your library: France Info" });
+  const saved = page.getByRole("button", { name: "In your library: Fixture TV" });
   await expect(saved).toBeVisible();
   await saved.click();
   await expect(add).toBeVisible();
@@ -224,26 +224,26 @@ test("TV library actions update immediately, refresh every surface, keep a stabl
   await expect(saved).toBeVisible();
 
   await page.getByRole("button", { name: "Home", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "IPTV — In your library" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Open France Info" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "TV — In your library" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open Fixture TV" })).toHaveCount(0);
   await page.getByRole("button", { name: "Library", exact: true }).click();
   await page.getByRole("button", { name: "Live TV", exact: true }).click();
-  await page.getByRole("button", { name: "Open France Info" }).click();
-  await expect(page).toHaveURL(/\/media\/tv\/iptv-addon\/france-info$/);
+  await page.getByRole("button", { name: "Open Fixture TV" }).click();
+  await expect(page).toHaveURL(/\/media\/tv\/tv-addon\/fixture-tv$/);
   await page.reload();
-  await expect(page.getByRole("heading", { name: "France Info" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fixture TV" })).toBeVisible();
   expect(rivune.matching("/api/v1/playback/sources", "POST")).toHaveLength(0);
 
   await page.locator(".details-actions").getByRole("button", { name: /Play.*Live TV/ }).click();
   const playback = await rivune.waitForRequest("/api/v1/playback/sources", "POST");
-  expect(playback.body).toMatchObject({ mediaType: "tv", resourceId: "france-info", addonId: "iptv-addon" });
+  expect(playback.body).toMatchObject({ mediaType: "tv", resourceId: "fixture-tv", addonId: "tv-addon" });
 });
 
 test("Library exposes TV filtering and unavailable channels remain removable", async ({ page, rivune }) => {
   rivune.setLibraryItems([
     { titleId: "movie-kept", mediaType: "movie", resourceId: "movie-kept", title: "Kept Movie", addedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:00:00Z" },
     { titleId: "series-kept", mediaType: "series", resourceId: "series-kept", title: "Kept Series", addedAt: "2026-08-02T00:00:00Z", updatedAt: "2026-08-02T00:00:00Z" },
-    { titleId: "tv-offline", mediaType: "tv", resourceId: "offline", title: "Offline Channel", sourceAddonId: "offline-addon", sourceCatalogId: "offline-catalog", sourceName: "Fixture IPTV", country: "US", language: "en", category: "News", available: false, addedAt: "2026-08-03T00:00:00Z", updatedAt: "2026-08-03T00:00:00Z" },
+    { titleId: "tv-offline", mediaType: "tv", resourceId: "offline", title: "Offline Channel", sourceAddonId: "offline-addon", sourceCatalogId: "offline-catalog", sourceName: "Fixture TV", country: "US", language: "en", category: "News", available: false, addedAt: "2026-08-03T00:00:00Z", updatedAt: "2026-08-03T00:00:00Z" },
   ]);
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -268,12 +268,12 @@ test("Library exposes TV filtering and unavailable channels remain removable", a
 test("Home omits Library TV rows and all-search groups populated media types", async ({ page, rivune }) => {
   rivune.setSearchResponse("movie", 0, { results: [result("movie-addon", "movie-search", [{ id: "movie-result", type: "movie", name: "Search Movie" }])], errors: [] });
   rivune.setSearchResponse("series", 0, { results: [result("series-addon", "series-search", [{ id: "series-result", type: "series", name: "Search Series" }])], errors: [] });
-  rivune.setSearchResponse("tv", 0, { results: [result("iptv-addon", "tv-search", [channel("search-tv", "Search Live TV")], "tv", "search")], errors: [] });
-  rivune.setSearchResponse("anime", 0, { results: [result("fkstream-addon", "fkstream-search", [{ id: "anime-result", type: "anime", name: "Search Anime" }], "anime", "search")], errors: [] });
-  rivune.setSearchResponse("other", 0, { results: [result("ai-metadata-addon", "gemini.search", [{ id: "other-result", type: "other", name: "Search Other" }], "other", "search")], errors: [] });
+  rivune.setSearchResponse("tv", 0, { results: [result("tv-addon", "tv-search", [channel("search-tv", "Search Live TV")], "tv", "search", "tv-manifest")], errors: [] });
+  rivune.setSearchResponse("anime", 0, { results: [result("anime-primary-addon", "anime-primary-search", [{ id: "anime-result", type: "anime", name: "Search Anime" }], "anime", "search", "anime-primary-manifest")], errors: [] });
+  rivune.setSearchResponse("other", 0, { results: [result("other-addon", "other-search", [{ id: "other-result", type: "other", name: "Search Other" }], "other", "search", "other-manifest")], errors: [] });
 
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "IPTV — In your library" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "TV — In your library" })).toHaveCount(0);
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await page.locator(".search-page .search-box input").fill("search");
   await expect(page.getByRole("button", { name: "Open Search Movie" })).toBeVisible();

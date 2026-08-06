@@ -253,8 +253,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Staffel als ungesehen markiert",
   "media.season.watch.error.partialUpdate": "Der Gesehen-Status einiger Folgen konnte nicht aktualisiert werden.",
   "media.season.watch.error.partialUpdateTitle": "Staffel nur teilweise aktualisiert",
-  "media.season.watch.actions.markUnwatched": "Staffel als ungesehen markieren",
-  "media.season.watch.actions.markWatched": "Staffel als gesehen markieren",
   "media.sources.error.loadFailed": "Streams konnten nicht geladen werden.",
   "media.sources.error.unavailableTitle": "Streams nicht verfügbar",
   "media.sources.error.encodingRequired": "Diese Quelle erfordert eine Medienkodierung, die Rivune bei der Webwiedergabe nicht automatisch startet. Wähle eine andere Quelle oder eine Option zur Wiedergabe in einem externen Player.",

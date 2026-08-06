@@ -188,10 +188,10 @@ func TestPlaybackActivityIncludesArtworkAndCanonicalProviderIDs(t *testing.T) {
 			ID: "11111111-1111-4111-8111-111111111111", TitleID: "episode-1",
 			ArtworkURL: "https://images.example.test/episode-still.jpg",
 			ExternalIDs: playback.ActivityExternalIDs{
-				IMDb: "tt0149460", TMDB: "300131", TVDB: "11704240",
+				IMDb: "tt9000001", TMDB: "900001", TVDB: "9000006",
 			},
 			ExternalIDMediaTypes: playback.ActivityExternalIDMediaTypes{IMDb: "series", TMDB: "series", TVDB: "episode"},
-			Title:                "Combat de tétines", MediaType: "episode", Mode: "direct",
+			Title:                "Fixture Episode", MediaType: "episode", Mode: "direct",
 			Username: "admin", ProfileID: "22222222-2222-4222-8222-222222222222",
 			Profile: "Alice", Device: "Living room", Platform: "Web",
 			PositionSeconds: 605, DurationSeconds: 1320,
@@ -210,7 +210,7 @@ func TestPlaybackActivityIncludesArtworkAndCanonicalProviderIDs(t *testing.T) {
 
 	if response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), `"artworkUrl":"https://images.example.test/episode-still.jpg"`) ||
-		!strings.Contains(response.Body.String(), `"externalIds":{"imdb":"tt0149460","tmdb":"300131","tvdb":"11704240"}`) ||
+		!strings.Contains(response.Body.String(), `"externalIds":{"imdb":"tt9000001","tmdb":"900001","tvdb":"9000006"}`) ||
 		!strings.Contains(response.Body.String(), `"externalIdMediaTypes":{"imdb":"series","tmdb":"series","tvdb":"episode"}`) ||
 		!strings.Contains(response.Body.String(), `"positionSeconds":605,"durationSeconds":1320`) {
 		t.Fatalf("unexpected activity response: status=%d body=%s", response.Code, response.Body.String())
@@ -301,7 +301,7 @@ func TestPlaybackMarkersApplyEffectiveSkipSettings(t *testing.T) {
 	api.settings = &fakeSettingsService{effective: settings.Effective{Values: settings.EffectiveValues{
 		SkipIntroEnabled: true, SkipRecapEnabled: false, SkipOutroEnabled: true,
 	}}}
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/markers?imdbId=tt0903747&season=1&episode=1", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/markers?imdbId=tt9002001&season=1&episode=1", nil)
 	request.Header.Set("Authorization", "Bearer access-token")
 	response := httptest.NewRecorder()
 
@@ -310,7 +310,7 @@ func TestPlaybackMarkersApplyEffectiveSkipSettings(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"type":"intro"`) {
 		t.Fatalf("unexpected marker response: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if service.markersInput.IMDBID != "tt0903747" || service.markersInput.Season != 1 || service.markersInput.Episode != 1 ||
+	if service.markersInput.IMDBID != "tt9002001" || service.markersInput.Season != 1 || service.markersInput.Episode != 1 ||
 		!service.markersInput.IncludeIntro || service.markersInput.IncludeRecap || !service.markersInput.IncludeOutro {
 		t.Fatalf("unexpected marker input: %+v", service.markersInput)
 	}

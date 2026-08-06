@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Évad nincs megtekintve",
   "media.season.watch.error.partialUpdate": "Néhány epizód megtekintési állapotát nem sikerült frissíteni.",
   "media.season.watch.error.partialUpdateTitle": "Az évad frissítése nem teljes",
-  "media.season.watch.actions.markUnwatched": "Évad megjelölése nem megtekintettként",
-  "media.season.watch.actions.markWatched": "Évad megjelölése megtekintettként",
   "media.sources.error.loadFailed": "A lejátszási adatfolyamokat nem sikerült betölteni.",
   "media.sources.error.unavailableTitle": "A lejátszási adatfolyamok nem érhetők el",
   "media.sources.error.encodingRequired": "Ehhez a forráshoz médiakódolás szükséges, amelyet a Rivune webes lejátszása nem indít el automatikusan. Válasszon másik forrást, vagy válassza a külső lejátszó használatát.",

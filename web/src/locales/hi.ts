@@ -253,8 +253,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "सीज़न नहीं देखा गया",
   "media.season.watch.error.partialUpdate": "कुछ एपिसोड की देखे या न देखे जाने की स्थिति अपडेट नहीं हो सकी।",
   "media.season.watch.error.partialUpdateTitle": "सीज़न पूरी तरह अपडेट नहीं हुआ",
-  "media.season.watch.actions.markUnwatched": "सीज़न को ‘नहीं देखा गया’ के रूप में चिह्नित करें",
-  "media.season.watch.actions.markWatched": "सीज़न को ‘देखा गया’ के रूप में चिह्नित करें",
   "media.sources.error.loadFailed": "स्ट्रीम लोड नहीं की जा सकीं।",
   "media.sources.error.unavailableTitle": "स्ट्रीम उपलब्ध नहीं हैं",
   "media.sources.error.encodingRequired": "इस स्रोत के लिए मीडिया एन्कोडिंग ज़रूरी है, जिसे Rivune का वेब प्लेबैक अपने-आप शुरू नहीं करता। कोई दूसरा स्रोत या बाहरी प्लेयर विकल्प चुनें।",

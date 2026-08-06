@@ -192,7 +192,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 				Genres: []metadata.Genre{{ID: 18, Name: "Drama"}}, Cast: []metadata.CastMember{{ID: "819", Name: "Contract Actor", Character: "Narrator", ProfileURL: "https://image.example/actor.jpg"}}, VoteAverage: 7.5, VoteCount: 10,
 				PosterURL: "https://fanart.example/movie-poster.jpg", BackdropURL: "https://fanart.example/movie-background.jpg",
 				LogoURL:     "https://fanart.example/movie-logo.png",
-				ExternalIDs: map[string]string{"tmdb": "550"},
+				ExternalIDs: map[string]string{"tmdb": "900101"},
 			},
 			seriesDetailsValue: metadata.Series{
 				ID: contractTitleID, MediaType: metadata.MediaTypeSeries, Name: "Contract Series",
@@ -201,12 +201,12 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 				PosterURL: "https://fanart.example/series-poster.jpg", BackdropURL: "https://fanart.example/series-background.jpg",
 				LogoURL: "https://fanart.example/series-logo.png",
 				Aliases: []metadata.Alias{}, EpisodeOrders: []metadata.EpisodeOrder{}, MappingProvider: "tvdb",
-				ExternalIDs: map[string]string{"tmdb": "1396", "tvdb": "81189"},
+				ExternalIDs: map[string]string{"tmdb": "92001", "tvdb": "93001"},
 			},
 			seasonDetailsValue: metadata.Season{
 				ID: contractSeasonID, MediaType: metadata.MediaTypeSeason, SeriesID: contractTitleID,
 				Name: "Season 1", Overview: "Mapped season fixture.", SeasonNumber: 1, VoteAverage: 8,
-				Episodes: []metadata.Episode{}, ExternalIDs: map[string]string{"tvdb": "349232"},
+				Episodes: []metadata.Episode{}, ExternalIDs: map[string]string{"tvdb": "93011"},
 			},
 			trailersValue: metadata.TrailerList{Trailers: []metadata.Trailer{{
 				YouTubeID: "contract-video", Name: "Official Trailer", Language: "en-US", IsFallback: false,
@@ -370,7 +370,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		api.playback = playbackService
 		api.settings = &fakeSettingsService{}
 
-		sourcesBody := `{"mediaType":"movie","resourceId":"tt0137523","capabilities":{"streamingProtocols":["hls"],"containers":["mpegts"],"processingModes":["remux","transcode_audio","transcode"],"maximumHeight":4320,"maximumVideoBitrateKbps":200000,"maximumAudioChannels":32,"subtitleModes":["external","burn"],"mediaProfiles":[{"container":"mp4","videoCodec":"h264","audioCodec":"aac"}]}}`
+		sourcesBody := `{"mediaType":"movie","resourceId":"tt9001001","capabilities":{"streamingProtocols":["hls"],"containers":["mpegts"],"processingModes":["remux","transcode_audio","transcode"],"maximumHeight":4320,"maximumVideoBitrateKbps":200000,"maximumAudioChannels":32,"subtitleModes":["external","burn"],"mediaProfiles":[{"container":"mp4","videoCodec":"h264","audioCodec":"aac"}]}}`
 		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/playback/sources", sourcesBody, true)
 		sources := authenticatedContractRequest(http.MethodPost, "/api/v1/playback/sources", bytes.NewBufferString(sourcesBody))
 		sources.Header.Set("Content-Type", "application/json")
@@ -401,7 +401,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			{path: "/api/v1/playback/prepare", body: `{"sourceRef":"opaque-contract-source","startSeconds":604800}`},
 			{path: "/api/v1/playback/resolve", body: `{"sourceRef":"opaque-contract-source","startSeconds":0}`},
 			{path: "/api/v1/playback/resolve", body: `{"sourceRef":"opaque-contract-source","startSeconds":604800}`},
-			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt0137523","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumHeight":144,"maximumVideoBitrateKbps":64,"maximumAudioChannels":1}}`},
+			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt9001001","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumHeight":144,"maximumVideoBitrateKbps":64,"maximumAudioChannels":1}}`},
 		}
 		for _, fixture := range validBodies {
 			validateContractRequestBody(t, document, http.MethodPost, fixture.path, fixture.body, true)
@@ -417,13 +417,13 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			{path: "/api/v1/playback/resolve", body: `{"sourceRef":"opaque-contract-source","startSeconds":-1}`},
 			{path: "/api/v1/playback/resolve", body: `{"sourceRef":"opaque-contract-source","startSeconds":1.5}`},
 			{path: "/api/v1/playback/resolve", body: `{"sourceRef":"opaque-contract-source","startSeconds":604801}`},
-			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt0137523","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"processingModes":["transcode","transcode"]}}`},
-			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt0137523","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumHeight":143}}`},
-			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt0137523","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumHeight":4321}}`},
-			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt0137523","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumVideoBitrateKbps":63}}`},
-			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt0137523","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumVideoBitrateKbps":200001}}`},
-			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt0137523","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumAudioChannels":33}}`},
-			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt0137523","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"subtitleModes":["external","external"]}}`},
+			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt9001001","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"processingModes":["transcode","transcode"]}}`},
+			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt9001001","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumHeight":143}}`},
+			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt9001001","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumHeight":4321}}`},
+			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt9001001","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumVideoBitrateKbps":63}}`},
+			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt9001001","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumVideoBitrateKbps":200001}}`},
+			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt9001001","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"maximumAudioChannels":33}}`},
+			{path: "/api/v1/playback/sources", body: `{"mediaType":"movie","resourceId":"tt9001001","capabilities":{"streamingProtocols":["hls"],"containers":["mp4"],"subtitleModes":["external","external"]}}`},
 		}
 		for _, fixture := range invalidBodies {
 			validateContractRequestBody(t, document, http.MethodPost, fixture.path, fixture.body, false)

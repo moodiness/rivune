@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Hindi pa napanood ang season",
   "media.season.watch.error.partialUpdate": "Hindi na-update ang status ng panonood ng ilang episode.",
   "media.season.watch.error.partialUpdateTitle": "Hindi ganap na na-update ang season",
-  "media.season.watch.actions.markUnwatched": "Markahan ang season bilang hindi pa napanood",
-  "media.season.watch.actions.markWatched": "Markahan ang season bilang napanood",
   "media.sources.error.loadFailed": "Hindi ma-load ang mga stream.",
   "media.sources.error.unavailableTitle": "Hindi available ang mga stream",
   "media.sources.error.encodingRequired": "Nangangailangan ang source na ito ng media encoding, na hindi awtomatikong sinisimulan ng web playback ng Rivune. Pumili ng ibang source o opsyon para sa external player.",

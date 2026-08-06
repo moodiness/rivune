@@ -253,8 +253,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "فصل تماشا نشده",
   "media.season.watch.error.partialUpdate": "وضعیت تماشای برخی قسمت‌ها به‌روزرسانی نشد.",
   "media.season.watch.error.partialUpdateTitle": "فصل به‌طور کامل به‌روزرسانی نشد",
-  "media.season.watch.actions.markUnwatched": "علامت‌گذاری فصل به‌عنوان تماشا‌نشده",
-  "media.season.watch.actions.markWatched": "علامت‌گذاری فصل به‌عنوان تماشا‌شده",
   "media.sources.error.loadFailed": "جریان‌ها بارگیری نشدند.",
   "media.sources.error.unavailableTitle": "جریان‌ها در دسترس نیستند",
   "media.sources.error.encodingRequired": "این منبع به کدگذاری رسانه نیاز دارد و پخش وب Rivune آن را به‌طور خودکار آغاز نمی‌کند. منبع دیگری یا گزینه پخش‌کننده خارجی را انتخاب کنید.",

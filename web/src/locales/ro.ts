@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Sezon nevizionat",
   "media.season.watch.error.partialUpdate": "Starea de vizionare a unor episoade nu a putut fi actualizată.",
   "media.season.watch.error.partialUpdateTitle": "Sezonul nu a fost actualizat complet",
-  "media.season.watch.actions.markUnwatched": "Marchează sezonul ca nevizionat",
-  "media.season.watch.actions.markWatched": "Marchează sezonul ca vizionat",
   "media.sources.error.loadFailed": "Fluxurile nu au putut fi încărcate.",
   "media.sources.error.unavailableTitle": "Fluxuri indisponibile",
   "media.sources.error.encodingRequired": "Această sursă necesită codarea conținutului media, pe care redarea web Rivune nu o pornește automat. Alege altă sursă sau o opțiune de redare într-un player extern.",

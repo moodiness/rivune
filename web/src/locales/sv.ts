@@ -253,8 +253,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Säsongen är osedd",
   "media.season.watch.error.partialUpdate": "Visningsstatusen för vissa avsnitt kunde inte uppdateras.",
   "media.season.watch.error.partialUpdateTitle": "Säsongen uppdaterades inte helt",
-  "media.season.watch.actions.markUnwatched": "Markera säsongen som osedd",
-  "media.season.watch.actions.markWatched": "Markera säsongen som sedd",
   "media.sources.error.loadFailed": "Strömmarna kunde inte läsas in.",
   "media.sources.error.unavailableTitle": "Strömmarna är inte tillgängliga",
   "media.sources.error.encodingRequired": "Den här källan kräver mediekodning, vilket Rivunes webbuppspelning inte startar automatiskt. Välj en annan källa eller ett alternativ för extern spelare.",

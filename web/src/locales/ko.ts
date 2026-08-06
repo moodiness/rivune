@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "시즌 미시청",
   "media.season.watch.error.partialUpdate": "일부 에피소드의 시청 상태를 업데이트하지 못했습니다.",
   "media.season.watch.error.partialUpdateTitle": "시즌 시청 상태 일부 업데이트 실패",
-  "media.season.watch.actions.markUnwatched": "시즌을 미시청으로 표시",
-  "media.season.watch.actions.markWatched": "시즌을 시청 완료로 표시",
   "media.sources.error.loadFailed": "스트림을 불러오지 못했습니다.",
   "media.sources.error.unavailableTitle": "스트림 이용 불가",
   "media.sources.error.encodingRequired": "이 소스에는 미디어 인코딩이 필요하지만, Rivune 웹 재생에서는 자동으로 시작되지 않습니다. 다른 소스나 외부 플레이어 옵션을 선택하세요.",

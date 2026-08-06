@@ -253,8 +253,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Seizoen niet bekeken",
   "media.season.watch.error.partialUpdate": "De bekekenstatus van sommige afleveringen kon niet worden bijgewerkt.",
   "media.season.watch.error.partialUpdateTitle": "Seizoen niet volledig bijgewerkt",
-  "media.season.watch.actions.markUnwatched": "Seizoen markeren als niet bekeken",
-  "media.season.watch.actions.markWatched": "Seizoen markeren als bekeken",
   "media.sources.error.loadFailed": "Streams konden niet worden geladen.",
   "media.sources.error.unavailableTitle": "Streams niet beschikbaar",
   "media.sources.error.encodingRequired": "Deze bron vereist mediacodering, maar de webspeler van Rivune start die niet automatisch. Kies een andere bron of een optie voor een externe speler.",

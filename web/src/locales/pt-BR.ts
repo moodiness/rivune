@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Temporada não assistida",
   "media.season.watch.error.partialUpdate": "Não foi possível atualizar o estado de exibição de alguns episódios.",
   "media.season.watch.error.partialUpdateTitle": "Temporada não atualizada por completo",
-  "media.season.watch.actions.markUnwatched": "Marcar temporada como não assistida",
-  "media.season.watch.actions.markWatched": "Marcar temporada como assistida",
   "media.sources.error.loadFailed": "Não foi possível carregar os fluxos.",
   "media.sources.error.unavailableTitle": "Fluxos indisponíveis",
   "media.sources.error.encodingRequired": "Esta fonte exige codificação de mídia, que a reprodução na Web do Rivune não inicia automaticamente. Escolha outra fonte ou uma opção de reprodutor externo.",

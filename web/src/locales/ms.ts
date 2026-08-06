@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Musim belum ditonton",
   "media.season.watch.error.partialUpdate": "Sesetengah status tontonan episod tidak dapat dikemas kini.",
   "media.season.watch.error.partialUpdateTitle": "Musim tidak dikemas kini sepenuhnya",
-  "media.season.watch.actions.markUnwatched": "Tandai musim sebagai belum ditonton",
-  "media.season.watch.actions.markWatched": "Tandai musim sebagai telah ditonton",
   "media.sources.error.loadFailed": "Strim tidak dapat dimuatkan.",
   "media.sources.error.unavailableTitle": "Strim tidak tersedia",
   "media.sources.error.encodingRequired": "Sumber ini memerlukan pengekodan media, yang tidak dimulakan secara automatik oleh main balik web Rivune. Pilih sumber lain atau pilihan pemain luaran.",

@@ -135,7 +135,7 @@ test("administrator monitors operations and runs fixed maintenance controls", as
 test("metadata refresh keeps successful work and warns with safe failed titles", async ({ page, rivune }) => {
   rivune.queueMetadataOperationResponses({
     status: "partial",
-    metadata: { candidates: 100, refreshed: 99, failed: 1, failedTitles: ["L'expresso (bein sport)"] },
+    metadata: { candidates: 100, refreshed: 99, failed: 1, failedTitles: ["Fixture Movie"] },
   });
 
   await page.goto("/#admin");
@@ -145,7 +145,7 @@ test("metadata refresh keeps successful work and warns with safe failed titles",
   const metadataCard = page.locator(".operation-action-card").filter({ has: page.getByRole("heading", { name: "Fetch missing metadata" }) });
   const outcome = metadataCard.locator(".notice--warning");
   await expect(outcome).toContainText("99 of 100 candidates refreshed; 1 failed.");
-  await expect(outcome).toContainText("Not refreshed: L'expresso (bein sport).");
+  await expect(outcome).toContainText("Not refreshed: Fixture Movie.");
   await expect(outcome).toContainText("Existing metadata was kept");
   const expandedGeometry = await metadataCard.evaluate((card) => {
     const cardRect = card.getBoundingClientRect();
@@ -176,7 +176,7 @@ test("total metadata failure offers one retry and recovers without exposing diag
   rivune.queueMetadataOperationResponses(
     {
       status: "failed",
-      metadata: { candidates: 100, refreshed: 0, failed: 100, failedTitles: ["L'expresso (bein sport)"] },
+      metadata: { candidates: 100, refreshed: 0, failed: 100, failedTitles: ["Fixture Movie"] },
       technicalPayload: technicalText,
     },
     {
@@ -194,7 +194,7 @@ test("total metadata failure offers one retry and recovers without exposing diag
   const failedOutcome = metadataCard.locator(".notice--error");
   await expect(failedOutcome).toContainText("0 of 100 candidates refreshed; 100 failed.");
   await expect(failedOutcome).toContainText("No metadata was refreshed. Existing metadata was kept.");
-  await expect(failedOutcome).toContainText("Not refreshed: L'expresso (bein sport).");
+  await expect(failedOutcome).toContainText("Not refreshed: Fixture Movie.");
   for (const value of Object.values(technicalText)) await expect(page.getByText(value, { exact: false })).toHaveCount(0);
 
   const retry = page.getByRole("button", { name: "Retry metadata refresh" });

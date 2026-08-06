@@ -150,12 +150,12 @@ const deviceFixtures: ManagedDevice[] = [
 ];
 
 const seasonZero = {
-  id: "season-specials", mediaType: "season", seriesId: "series-1", name: "Specials", overview: "Behind the voyage.", seasonNumber: 0, episodeCount: 4, airDate: "2023-05-05", backdropUrl: "https://fixtures.rivune.test/season-specials-backdrop.svg", voteAverage: 0, externalIds: { tvdb: "1928275" },
+  id: "season-specials", mediaType: "season", seriesId: "series-1", name: "Specials", overview: "Fixture season overview.", seasonNumber: 0, episodeCount: 4, airDate: "2023-05-05", backdropUrl: "https://fixtures.rivune.test/season-specials-backdrop.svg", voteAverage: 0, externalIds: { tvdb: "930100" },
   episodes: [
-    { id: "special-1", mediaType: "episode", seasonId: "season-specials", name: "Building a World", overview: "The world behind the voyage.", seasonNumber: 0, episodeNumber: 1, airDate: "2023-06-30", stillUrl: "https://fixtures.rivune.test/special-1-still.svg", runtimeMinutes: 10, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "9873798" } },
-    { id: "special-2", mediaType: "episode", seasonId: "season-specials", name: "Questions of the Silo", overview: "Questions from the audience.", seasonNumber: 0, episodeNumber: 2, airDate: "2023-05-05", stillUrl: "https://fixtures.rivune.test/special-2-still.svg", runtimeMinutes: 8, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "9873799" } },
-    { id: "special-3", mediaType: "episode", seasonId: "season-specials", name: "Season 1 Recap", overview: "A recap of season one.", seasonNumber: 0, episodeNumber: 3, airDate: "2024-11-11", stillUrl: "https://fixtures.rivune.test/special-3-still.svg", runtimeMinutes: 5, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "10798335" } },
-    { id: "special-4", mediaType: "episode", seasonId: "season-specials", name: "The Rebellion in Season 2", overview: "Inside the second season.", seasonNumber: 0, episodeNumber: 4, airDate: "2024-11-15", runtimeMinutes: 7, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "10806950" } },
+    { id: "special-1", mediaType: "episode", seasonId: "season-specials", name: "Fixture Episode 1", overview: "Fixture episode overview.", seasonNumber: 0, episodeNumber: 1, airDate: "2023-06-30", stillUrl: "https://fixtures.rivune.test/fixture-episode-1-still.svg", runtimeMinutes: 10, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "940101" } },
+    { id: "special-2", mediaType: "episode", seasonId: "season-specials", name: "Fixture Episode 2", overview: "Fixture episode overview.", seasonNumber: 0, episodeNumber: 2, airDate: "2023-05-05", stillUrl: "https://fixtures.rivune.test/fixture-episode-2-still.svg", runtimeMinutes: 8, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "940102" } },
+    { id: "special-3", mediaType: "episode", seasonId: "season-specials", name: "Fixture Episode 3", overview: "Fixture episode overview.", seasonNumber: 0, episodeNumber: 3, airDate: "2024-11-11", stillUrl: "https://fixtures.rivune.test/fixture-episode-3-still.svg", runtimeMinutes: 5, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "940103" } },
+    { id: "special-4", mediaType: "episode", seasonId: "season-specials", name: "Fixture Episode 4", overview: "Fixture episode overview.", seasonNumber: 0, episodeNumber: 4, airDate: "2024-11-15", runtimeMinutes: 7, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "940104" } },
   ],
 };
 
@@ -272,23 +272,23 @@ const animeSeries = {
 const movie = {
   id: "movie-1",
   mediaType: "movie",
-  title: "Fight Club",
-  originalTitle: "Fight Club",
+  title: "Fixture Movie",
+  originalTitle: "Fixture Movie",
   originalLanguage: "en",
-  overview: "An insomniac and a soap maker form an underground club.",
-  releaseDate: "1999-10-15",
+  overview: "A fixture movie used for deterministic tests.",
+  releaseDate: "2024-01-01",
   posterUrl: "https://fixtures.rivune.test/poster.svg",
   backdropUrl: "https://fixtures.rivune.test/backdrop.svg",
-  runtimeMinutes: 139,
+  runtimeMinutes: 120,
   genres: [{ id: 18, name: "Drama" }],
   voteAverage: 8.4,
   voteCount: 30000,
   cast: [
-    { id: "301", name: "Edward Norton", character: "The Narrator", profileUrl: "https://fixtures.rivune.test/cast-1.svg" },
-    { id: "302", name: "Brad Pitt", character: "Tyler Durden", profileUrl: "https://fixtures.rivune.test/cast-2.svg" },
-    { id: "303", name: "Helena Bonham Carter", character: "Marla Singer", profileUrl: "https://fixtures.rivune.test/cast-3.svg" },
+    { id: "9301", name: "Fixture Performer", character: "Fixture Character", profileUrl: "https://fixtures.rivune.test/cast-1.svg" },
+    { id: "9302", name: "Fixture Performer Alternate", character: "Fixture Character Alternate", profileUrl: "https://fixtures.rivune.test/cast-2.svg" },
+    { id: "9303", name: "Fixture Performer Supporting", character: "Fixture Character Supporting", profileUrl: "https://fixtures.rivune.test/cast-3.svg" },
   ],
-  externalIds: { imdb: "tt0137523", tmdb: "550" },
+  externalIds: { imdb: "tt9000201", tmdb: "900201" },
 };
 
 function json(route: Route, body: unknown, status = 200) {
@@ -1302,11 +1302,11 @@ export class RivuneHarness {
     if (path === "/metadata/titles/movie-1") { await json(route, movie); return; }
     if (path === "/addons/catalogs" && request.method() === "GET") {
       await json(route, { catalogs: [
-        { addonId: "cinema-addon", manifestId: "cinema-manifest", position: 0, catalog: { type: "movie", id: "movie-search", name: "Movies", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
+        { addonId: "movie-addon", manifestId: "movie-manifest", position: 0, catalog: { type: "movie", id: "movie-search", name: "Movies", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
         { addonId: "series-addon", manifestId: "series-manifest", position: 1, catalog: { type: "series", id: "series-search", name: "Series", extraSupported: ["search", "skip", "limit"] }, addonCatalog: false, searchable: true },
-        { addonId: "iptv-addon", manifestId: "iptv-manifest", position: 2, catalog: { type: "tv", id: "tv-search", name: "Live TV", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
-        { addonId: "ai-metadata-addon", manifestId: "ai-metadata-manifest", position: 3, catalog: { type: "other", id: "gemini.search", name: "Recherche IA", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
-        { addonId: "fkstream-addon", manifestId: "fkstream-manifest", position: 4, catalog: { type: "anime", id: "fkstream-search", name: "FKStream Anime", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
+        { addonId: "tv-addon", manifestId: "tv-manifest", position: 2, catalog: { type: "tv", id: "tv-search", name: "Live TV", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
+        { addonId: "other-addon", manifestId: "other-manifest", position: 3, catalog: { type: "other", id: "other-search", name: "Other", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
+        { addonId: "anime-primary-addon", manifestId: "anime-primary-manifest", position: 4, catalog: { type: "anime", id: "anime-primary-search", name: "Anime", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
         { addonId: "documentary-addon", manifestId: "documentary-manifest", position: 5, catalog: { type: "documentary", id: "documentary-conflict", name: "Documentaries", extra: [], extraSupported: ["search"] }, addonCatalog: false, searchable: false },
         { addonId: "community-addon", manifestId: "community-manifest", position: 6, catalog: { type: "community", id: "community-search", name: "Community", extra: [{ name: "search" }] }, addonCatalog: true, searchable: false },
       ] });
@@ -1516,8 +1516,8 @@ export class RivuneHarness {
       const titleID = decodeURIComponent(trailers[1]);
       const seasonNumber = url.searchParams.get("seasonNumber");
       const movieTrailer = titleID === "movie-1";
-      const label = movieTrailer ? "Fight Club Trailer" : seasonNumber === "2" ? "Season Two Trailer" : "Season One Trailer";
-      const youtubeId = movieTrailer ? "fight-club" : seasonNumber === "2" ? "season-two" : "season-one";
+      const label = movieTrailer ? "Fixture Movie Trailer" : seasonNumber === "2" ? "Season Two Trailer" : "Season One Trailer";
+      const youtubeId = movieTrailer ? "fixture-movie" : seasonNumber === "2" ? "season-two" : "season-one";
       await json(route, { trailers: [{ youtubeId, name: label, language: "en", isFallback: false, captionPreference: "en" }] });
       return;
     }
@@ -1568,7 +1568,7 @@ export class RivuneHarness {
           ? "series-1"
           : input.externalId === "tt21209876"
             ? "series-anime"
-            : input.externalId === "tt0137523" || input.externalId === "550"
+            : input.externalId === "tt9000201" || input.externalId === "900201"
               ? "movie-1"
               : "resolved-title";
       const resolved = { ...(body as object), titleId };

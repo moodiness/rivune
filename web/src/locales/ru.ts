@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Сезон не просмотрен",
   "media.season.watch.error.partialUpdate": "Не удалось обновить статус просмотра некоторых серий.",
   "media.season.watch.error.partialUpdateTitle": "Сезон обновлён не полностью",
-  "media.season.watch.actions.markUnwatched": "Отметить сезон как непросмотренный",
-  "media.season.watch.actions.markWatched": "Отметить сезон как просмотренный",
   "media.sources.error.loadFailed": "Не удалось загрузить потоки.",
   "media.sources.error.unavailableTitle": "Потоки недоступны",
   "media.sources.error.encodingRequired": "Для этого источника требуется кодирование медиафайла, которое не запускается автоматически при веб-воспроизведении в Rivune. Выберите другой источник или вариант с внешним проигрывателем.",

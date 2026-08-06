@@ -39,16 +39,16 @@ func TestEnrichSeriesAuthenticatesWithoutPINAndCachesToken(t *testing.T) {
 				t.Fatal("login unexpectedly included a PIN")
 			}
 			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]string{"token": "tvdb-token"}})
-		case "/series/81189/extended":
+		case "/series/93001/extended":
 			if r.Header.Get("Authorization") != "Bearer tvdb-token" {
 				t.Fatalf("unexpected authorization %q", r.Header.Get("Authorization"))
 			}
 			writeJSON(t, w, map[string]any{
 				"status": "success",
 				"data": map[string]any{
-					"id": 81189, "name": "Breaking Bad", "overview": "TVDB overview", "image": "https://artworks.thetvdb.com/poster.jpg",
+					"id": 93001, "name": "Fixture Series", "overview": "Fixture series overview.", "image": "https://artworks.thetvdb.com/poster.jpg",
 					"defaultSeasonType": 1,
-					"aliases":           []map[string]any{{"language": "eng", "name": "Breaking Bad"}, {"language": "eng", "name": "Breaking Bad"}, {"language": "spa", "name": "Breaking Bad: Química"}},
+					"aliases":           []map[string]any{{"language": "eng", "name": "Fixture Series"}, {"language": "eng", "name": "Fixture Series"}, {"language": "spa", "name": "Fixture Series Alternate"}},
 					"seasonTypes": []map[string]any{
 						{"id": 1, "name": "Aired Order", "alternateName": "Official", "type": "official"},
 						{"id": 2, "name": "DVD Order", "type": "dvd"},
@@ -65,7 +65,7 @@ func TestEnrichSeriesAuthenticatesWithoutPINAndCachesToken(t *testing.T) {
 	defer server.Close()
 
 	client := newWithBaseURL("api-key", "", server.URL, server.Client())
-	input := metadata.ProviderSeries{AdditionalIDs: map[string]string{"tvdb": "81189"}}
+	input := metadata.ProviderSeries{AdditionalIDs: map[string]string{"tvdb": "93001"}}
 	first, err := client.EnrichSeries(context.Background(), input)
 	if err != nil {
 		t.Fatalf("enrich first series: %v", err)
@@ -76,7 +76,7 @@ func TestEnrichSeriesAuthenticatesWithoutPINAndCachesToken(t *testing.T) {
 	if loginCalls.Load() != 1 {
 		t.Fatalf("expected one cached login, got %d", loginCalls.Load())
 	}
-	if first.Name != "Breaking Bad" || first.Overview != "TVDB overview" || first.PosterURL == "" {
+	if first.Name != "Fixture Series" || first.Overview != "Fixture series overview." || first.PosterURL == "" {
 		t.Fatalf("unexpected enriched series: %+v", first)
 	}
 	if len(first.Aliases) != 2 || len(first.EpisodeOrders) != 5 || !first.EpisodeOrders[0].IsDefault {
@@ -95,15 +95,15 @@ func TestEnrichSeasonMatchesOfficialEpisodesByNumberAndAirDate(t *testing.T) {
 		switch r.URL.Path {
 		case "/login":
 			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]string{"token": "token"}})
-		case "/series/81189/episodes/official":
+		case "/series/93001/episodes/official":
 			if r.URL.Query().Get("page") != "0" || r.URL.Query().Get("season") != "1" {
 				t.Fatalf("unexpected query %q", r.URL.RawQuery)
 			}
 			writeJSON(t, w, map[string]any{
 				"status": "success",
 				"data": map[string]any{"episodes": []map[string]any{
-					{"id": 62085, "name": "Pilot", "overview": "TVDB pilot", "aired": "2008-01-20", "image": "https://artworks.thetvdb.com/still.jpg", "runtime": 59, "seasonNumber": 1, "number": 1},
-					{"id": 62086, "name": "Cat's in the Bag...", "aired": "2008-01-27", "seasonNumber": 1, "number": 2},
+					{"id": 9301101, "name": "Fixture Episode", "overview": "Fixture episode overview.", "aired": "2024-01-07", "image": "https://artworks.thetvdb.com/still.jpg", "runtime": 59, "seasonNumber": 1, "number": 1},
+					{"id": 9301102, "name": "Fixture Episode 2", "aired": "2024-01-14", "seasonNumber": 1, "number": 2},
 					{"id": 999, "name": "Other season", "seasonNumber": 2, "number": 1},
 				}},
 			})
@@ -114,10 +114,10 @@ func TestEnrichSeasonMatchesOfficialEpisodesByNumberAndAirDate(t *testing.T) {
 	defer server.Close()
 
 	client := newWithBaseURL("api-key", "", server.URL, server.Client())
-	season, err := client.EnrichSeason(context.Background(), "81189", metadata.ProviderSeason{
+	season, err := client.EnrichSeason(context.Background(), "93001", metadata.ProviderSeason{
 		SeasonNumber: 1,
 		Episodes: []metadata.ProviderEpisode{
-			{ExternalID: "tmdb-episode-1", SeasonNumber: 1, EpisodeNumber: 1, AirDate: "2008-01-20"},
+			{ExternalID: "tmdb-episode-1", SeasonNumber: 1, EpisodeNumber: 1, AirDate: "2024-01-07"},
 			{ExternalID: "tmdb-episode-2", Name: "Different hierarchy", SeasonNumber: 1, EpisodeNumber: 2, AirDate: "2025-09-01"},
 		},
 	})
@@ -125,7 +125,7 @@ func TestEnrichSeasonMatchesOfficialEpisodesByNumberAndAirDate(t *testing.T) {
 		t.Fatalf("enrich season: %v", err)
 	}
 	episode := season.Episodes[0]
-	if episode.AdditionalIDs["tvdb"] != "62085" || episode.Name != "Pilot" || episode.RuntimeMinutes != 59 || episode.StillURL == "" {
+	if episode.AdditionalIDs["tvdb"] != "9301101" || episode.Name != "Fixture Episode" || episode.RuntimeMinutes != 59 || episode.StillURL == "" {
 		t.Fatalf("unexpected enriched episode: %+v", episode)
 	}
 	if _, exists := season.Episodes[1].AdditionalIDs["tvdb"]; exists || season.Episodes[1].Name != "Different hierarchy" {

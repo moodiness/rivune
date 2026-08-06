@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Musim belum ditonton",
   "media.season.watch.error.partialUpdate": "Status tontonan beberapa episode tidak dapat diperbarui.",
   "media.season.watch.error.partialUpdateTitle": "Musim belum diperbarui sepenuhnya",
-  "media.season.watch.actions.markUnwatched": "Tandai musim sebagai belum ditonton",
-  "media.season.watch.actions.markWatched": "Tandai musim sebagai sudah ditonton",
   "media.sources.error.loadFailed": "Sumber streaming tidak dapat dimuat.",
   "media.sources.error.unavailableTitle": "Sumber streaming tidak tersedia",
   "media.sources.error.encodingRequired": "Sumber ini memerlukan pengodean media, tetapi pemutaran web Rivune tidak memulainya secara otomatis. Pilih sumber lain atau opsi pemutar eksternal.",

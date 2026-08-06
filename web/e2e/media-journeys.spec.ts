@@ -122,10 +122,10 @@ test("media details use a refresh-safe route with browser and in-page history", 
 });
 
 test("TMDB media routes canonicalize to IMDb identifiers after metadata resolves", async ({ page, rivune }) => {
-  await page.goto("/media/movie/tmdb:550");
-  await expect(page.getByRole("heading", { name: "Fight Club" })).toBeVisible();
-  await expect(page).toHaveURL(/\/media\/movie\/tt0137523$/);
-  expect(rivune.matching("/api/v1/titles/resolve", "POST").at(-1)?.body).toMatchObject({ mediaType: "movie", provider: "tmdb", externalId: "550" });
+  await page.goto("/media/movie/tmdb:900201");
+  await expect(page.getByRole("heading", { name: "Fixture Movie" })).toBeVisible();
+  await expect(page).toHaveURL(/\/media\/movie\/tt9000201$/);
+  expect(rivune.matching("/api/v1/titles/resolve", "POST").at(-1)?.body).toMatchObject({ mediaType: "movie", provider: "tmdb", externalId: "900201" });
 
   await page.goto("/media/series/tmdb:9000");
   await expect(page.getByRole("heading", { name: "Signal Horizon" })).toBeAttached();
@@ -156,7 +156,7 @@ test("legacy media fragments cannot restore artwork URLs from the route or a ver
     localStorage.setItem("rivune.metadata-cache.v1", JSON.stringify({
       version: 1,
       snapshots: {
-        "en|movie|external:tmdb:550": {
+        "en|movie|external:tmdb:900201": {
           updatedAt: Date.now(),
           value: {
             title: "Poisoned cached title",
@@ -170,22 +170,22 @@ test("legacy media fragments cannot restore artwork URLs from the route or a ver
     }));
   }, sentinelURLs);
   const query = new URLSearchParams({
-    title: "Legacy Fight Club",
+    title: "Legacy Fixture Movie",
     titleId: "movie-1",
-    releaseInfo: "1999",
-    released: "1999-10-15",
+    releaseInfo: "2024",
+    released: "2024-01-01",
     posterUrl: sentinelURLs.poster,
     backgroundUrl: sentinelURLs.background,
     logoUrl: sentinelURLs.logo,
-    "external.tmdb": "550",
+    "external.tmdb": "900201",
     from: "search",
   });
 
-  await page.goto(`/#media/movie/tmdb%3A550?${query}`);
+  await page.goto(`/#media/movie/tmdb%3A900201?${query}`);
 
-  await expect(page.getByRole("heading", { name: "Fight Club" })).toBeVisible();
-  await expect(page.locator(".details-description")).toHaveText("An insomniac and a soap maker form an underground club.");
-  await expect(page).toHaveURL(/\/media\/movie\/tt0137523$/);
+  await expect(page.getByRole("heading", { name: "Fixture Movie" })).toBeVisible();
+  await expect(page.locator(".details-description")).toHaveText("A fixture movie used for deterministic tests.");
+  await expect(page).toHaveURL(/\/media\/movie\/tt9000201$/);
   await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/poster.svg");
   await expect.poll(() => rivune.matching("/api/v1/metadata/titles/movie-1", "GET").length).toBeGreaterThan(0);
   await expect.poll(() => page.evaluate(() => {
@@ -243,7 +243,7 @@ test("season route overrides stale history state for numeric season zero", async
 
   await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/0$/);
   await expect(page.getByRole("tab", { name: /^Specials\b/ })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("button", { name: /Building a World/ }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /Fixture Episode 1/ }).first()).toBeVisible();
   await expect.poll(() => rivune.matching("/api/v1/metadata/seasons/season-specials", "GET").length).toBeGreaterThan(0);
   expect(rivune.matching("/api/v1/metadata/seasons/season-1", "GET")).toHaveLength(seasonOneRequests);
 });
@@ -286,7 +286,7 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
     contentType: "image/svg+xml",
     body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#345"/></svg>',
   }));
-  await page.route(/\/api\/v1\/addons\/resources\/meta\/anime\/fk(?:%3A|:)1(?:\?.*)?$/i, (route) => route.fulfill({
+  await page.route(/\/api\/v1\/addons\/resources\/meta\/anime\/fixture-anime(?:%3A|:)1(?:\?.*)?$/i, (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
     body: JSON.stringify({
@@ -296,7 +296,7 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
           manifestId: "fixture-decoy-meta",
           resource: "meta",
           type: "anime",
-          id: "fk:1",
+          id: "fixture-anime:1",
           payload: { meta: [] },
         },
         {
@@ -304,10 +304,10 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
           manifestId: "fixture-custom-meta",
           resource: "meta",
           type: "anime",
-          id: "fk:1",
+          id: "fixture-anime:1",
           payload: {
             meta: {
-              id: "fk:1",
+              id: "fixture-anime:1",
               type: "anime",
               name: "Fixture Anime",
               description: "",
@@ -326,13 +326,13 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
               },
               links: [
                 { name: "Action", category: "Genres", url: "stremio:///discover/action" },
-                { name: "Triggerforce", category: "Cast", url: "stremio:///search?search=Triggerforce" },
-                { name: "Akira Ishida", category: "Cast", url: "stremio:///search?search=Akira%20Ishida" },
+                { name: "Fixture Performer One", category: "Cast", url: "stremio:///search?search=Fixture%20Performer%20One" },
+                { name: "Fixture Performer Two", category: "Cast", url: "stremio:///search?search=Fixture%20Performer%20Two" },
               ],
               videos: [
-                { id: "fk:1:5", title: "", name: "Fixture Episode Five", overview: "", description: "The fifth custom episode overview.", season: 1, episode: 5, released: "", releaseInfo: "2025-01-05T00:00:00.000Z", thumbnail: "", thumbnailUrl: "/api/v1/artwork/custom-anime-episode-5", background: "", backgroundUrl: "/api/v1/artwork/custom-anime-episode-5-background" },
-                { id: "fk:1:6", title: "Fixture Episode Six", season: 1, episode: 6, released: "2025-01-12T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-6" },
-                { id: "fk:1:s2:opaque-1", title: "Fixture Season Two Premiere", season: 2, episode: 1, released: "2099-01-04T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-s2" },
+                { id: "fixture-anime:1:5", title: "", name: "Fixture Episode Five", overview: "", description: "The fifth custom episode overview.", season: 1, episode: 5, released: "", releaseInfo: "2025-01-05T00:00:00.000Z", thumbnail: "", thumbnailUrl: "/api/v1/artwork/custom-anime-episode-5", background: "", backgroundUrl: "/api/v1/artwork/custom-anime-episode-5-background" },
+                { id: "fixture-anime:1:6", title: "Fixture Episode Six", season: 1, episode: 6, released: "2025-01-12T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-6" },
+                { id: "fixture-anime:1:s2:opaque-1", title: "Fixture Season Two Premiere", season: 2, episode: 1, released: "2099-01-04T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-s2" },
                 { id: "constructor", title: "Fixture Unseasoned Video", episode: 99, released: "2026-02-01T00:00:00.000Z", thumbnail: "/api/v1/artwork/custom-anime-episode-loose" },
               ],
             },
@@ -374,7 +374,7 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
     return route.fallback();
   });
 
-  await page.goto("/media/anime/fk:1");
+  await page.goto("/media/anime/fixture-anime:1");
 
   await expect(page.getByRole("heading", { name: "Episodes" })).toBeVisible();
   const pendingRowWatch = page.getByRole("button", { name: "Mark Fixture Episode Five watched" });
@@ -383,20 +383,23 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
   await expect(pendingRowWatch).toHaveAttribute("aria-busy", "true");
   const pendingSeasonState = page.locator(".season-watch-state");
   await expect(pendingSeasonState).toContainText("0 of 2 watched");
-  const pendingSeasonWatch = pendingSeasonState.getByRole("button", { name: "Mark season watched" });
+  await expect(pendingSeasonState.getByRole("button")).toHaveCount(0);
+  const animeActions = page.locator(".details-actions");
+  const pendingSeasonWatch = animeActions.getByRole("button", { name: "Mark watched", exact: true });
   await expect(pendingSeasonWatch).toBeDisabled();
   await expect(pendingSeasonWatch).toHaveAttribute("aria-busy", "true");
+  expect(await pendingSeasonWatch.evaluate((button) => button.previousElementSibling?.textContent?.trim())).toBe("Add to library");
   releaseCustomResolution();
   await expect.poll(() => rivune.matching("/api/v1/titles/custom-series/resolve", "POST").length).toBe(1);
   const resolverRequest = rivune.matching("/api/v1/titles/custom-series/resolve", "POST")[0];
   expect(resolverRequest.body).toMatchObject({
     sourceAddonId: sourceAddonID,
     sourceType: "anime",
-    series: { resourceId: "fk:1", title: "Fixture Anime" },
+    series: { resourceId: "fixture-anime:1", title: "Fixture Anime" },
     videos: [
-      { resourceId: "fk:1:5", seasonNumber: 1, episodeNumber: 5, released: "2025-01-05" },
-      { resourceId: "fk:1:6", seasonNumber: 1, episodeNumber: 6, released: "2025-01-12" },
-      { resourceId: "fk:1:s2:opaque-1", seasonNumber: 2, episodeNumber: 1, released: "2099-01-04" },
+      { resourceId: "fixture-anime:1:5", seasonNumber: 1, episodeNumber: 5, released: "2025-01-05" },
+      { resourceId: "fixture-anime:1:6", seasonNumber: 1, episodeNumber: 6, released: "2025-01-12" },
+      { resourceId: "fixture-anime:1:s2:opaque-1", seasonNumber: 2, episodeNumber: 1, released: "2099-01-04" },
     ],
   });
   const resolverBody = resolverRequest.body;
@@ -411,7 +414,7 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
   const customTitleIDs = progressBody.titleIds;
   expect(customTitleIDs).toHaveLength(3);
   expect(customTitleIDs.every((titleID) => /^70000000-0000-4000-8000-\d{12}$/.test(titleID))).toBe(true);
-  expect(customTitleIDs.some((titleID) => titleID.startsWith("fk:"))).toBe(false);
+  expect(customTitleIDs.some((titleID) => titleID.startsWith("fixture-anime:"))).toBe(false);
   const firstTitleID = customTitleIDs[0];
   if (!firstTitleID) throw new Error("custom progress request returned no title IDs");
   const hero = page.locator(".details-hero");
@@ -421,14 +424,14 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
   await expect(heroArtwork).toHaveAttribute("src", "/api/v1/artwork/custom-series-poster");
   await expect(hero).toHaveCSS("background-image", /custom-series-background/);
   await expect(page.locator(".details-description")).toHaveText("An authoritative custom series overview.");
-  await expect(page.locator(".details-actions").getByRole("button", { name: /Mark (?:un)?watched/ })).toHaveCount(0);
+  await expect(animeActions.getByRole("button", { name: "Mark watched", exact: true })).toHaveCount(1);
 
   const cast = page.getByRole("region", { name: "Cast" });
   await expect(cast.getByText("String Performer")).toBeVisible();
   await expect(cast.getByText("Name Only Performer")).toBeVisible();
   await expect(cast.getByText("Localized Portrait")).toBeVisible();
-  await expect(cast.getByText("Triggerforce")).toBeVisible();
-  await expect(cast.getByText("Akira Ishida")).toBeVisible();
+  await expect(cast.getByText("Fixture Performer One")).toBeVisible();
+  await expect(cast.getByText("Fixture Performer Two")).toBeVisible();
   await expect(cast.getByText("Action")).toHaveCount(0);
   await expect(cast.locator("article", { hasText: "Localized Portrait" }).locator("img")).toHaveAttribute("src", "/api/v1/artwork/custom-cast");
   await expect(cast.getByText("Guide")).toBeVisible();
@@ -454,23 +457,24 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
       && Math.abs(watched.top - bounds.top) <= 1
       && Math.abs(watched.bottom - bounds.bottom) <= 1);
   })).toBe(true);
-  const markSeasonWatched = page.getByRole("button", { name: "Mark season watched" });
+  const markSeasonWatched = animeActions.getByRole("button", { name: "Mark watched", exact: true });
   const watchedBatchesBeforeSeason = rivune.matching("/api/v1/titles/watched/batch", "PUT").length;
   await markSeasonWatched.click();
-  await expect(page.getByRole("button", { name: "Mark season unwatched" })).toBeVisible();
+  await expect(animeActions.getByRole("button", { name: "Mark unwatched", exact: true })).toBeVisible();
   await expect.poll(() => rivune.matching("/api/v1/titles/watched/batch", "PUT").length).toBeGreaterThan(watchedBatchesBeforeSeason);
   expect(rivune.matching("/api/v1/titles/watched/batch", "PUT").at(-1)?.body).toEqual({
     items: customTitleIDs.slice(0, 2).map((titleId) => ({ titleId, completed: true, expectedVersion: 0 })),
   });
   const watchedBatchesBeforeReset = rivune.matching("/api/v1/titles/watched/batch", "PUT").length;
-  await page.getByRole("button", { name: "Mark season unwatched" }).click();
+  await animeActions.getByRole("button", { name: "Mark unwatched", exact: true }).click();
   await expect(markSeasonWatched).toBeVisible();
   await expect.poll(() => rivune.matching("/api/v1/titles/watched/batch", "PUT").length).toBeGreaterThan(watchedBatchesBeforeReset);
   expect(rivune.matching("/api/v1/titles/watched/batch", "PUT").at(-1)?.body).toEqual({
     items: customTitleIDs.slice(0, 2).map((titleId) => ({ titleId, completed: false, expectedVersion: 1 })),
   });
-  expect(sourceRequests).not.toContainEqual(expect.objectContaining({ resourceId: "fk:1" }));
+  expect(sourceRequests).not.toContainEqual(expect.objectContaining({ resourceId: "fixture-anime:1" }));
   await unseasonedTab.click();
+  await expect(animeActions.getByRole("button", { name: /Mark (?:un)?watched/, exact: true })).toHaveCount(0);
   const looseVideo = page.getByRole("button", { name: /Fixture Unseasoned Video/ }).first();
   await expect(looseVideo).toBeVisible();
   await expect(page.getByRole("button", { name: /Mark Fixture Unseasoned Video/ })).toHaveCount(0);
@@ -501,7 +505,7 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
   await expect(heroArtwork).toHaveAttribute("src", "/api/v1/artwork/custom-series-poster");
   await expect(hero).toHaveCSS("background-image", /custom-anime-episode-5-background/);
   await expect(page.locator(".details-description")).toHaveText("The fifth custom episode overview.");
-  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "fk:1:5" });
+  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "fixture-anime:1:5" });
   expect(sourceRequests.at(-1)).not.toHaveProperty("addonId");
 
   const heroWatch = page.locator(".details-actions").getByRole("button", { name: "Mark watched" });
@@ -556,9 +560,9 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
   expect(playbackRequest.body).toMatchObject({ sourceRef: "fixture-custom-source", titleId: firstTitleID });
   expect(rivune.matching(`/api/v1/progress/${firstTitleID}`, "GET").length).toBeGreaterThan(0);
   await page.getByRole("button", { name: "Go back" }).click();
-  expect(rivune.requests.some((request) => request.pathname.startsWith("/api/v1/progress/fk%3A") || request.pathname.startsWith("/api/v1/titles/fk%3A"))).toBe(false);
+  expect(rivune.requests.some((request) => request.pathname.startsWith("/api/v1/progress/fixture-anime%3A") || request.pathname.startsWith("/api/v1/titles/fixture-anime%3A"))).toBe(false);
 
-  expect(sourceRequests).toContainEqual(expect.objectContaining({ mediaType: "anime", resourceId: "fk:1:5" }));
+  expect(sourceRequests).toContainEqual(expect.objectContaining({ mediaType: "anime", resourceId: "fixture-anime:1:5" }));
   await page.getByRole("button", { name: /Back.*Episodes/ }).click();
   await seasonTwoTab.click();
   await expect(seasonTwoTab).toHaveAttribute("aria-selected", "true");
@@ -567,7 +571,7 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
   await expect(page.getByRole("button", { name: "Mark Fixture Season Two Premiere watched" })).toBeDisabled();
   await seasonTwoVideo.click();
   await expect(page.locator(".details-actions").getByRole("button", { name: "Mark watched" })).toBeDisabled();
-  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "fk:1:s2:opaque-1" });
+  await expect.poll(() => sourceRequests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "fixture-anime:1:s2:opaque-1" });
   expect(sourceRequests.at(-1)).not.toHaveProperty("addonId");
 });
 
@@ -641,7 +645,10 @@ test("an episode opened from its season toggles its resolved watched state once 
   await page.goto("/media/series/tt9000/season/1");
 
   const aggregateActions = page.locator(".details-actions");
-  await expect(aggregateActions.getByRole("button", { name: "Mark watched", exact: true })).toHaveCount(0);
+  const seasonWatchedButton = aggregateActions.getByRole("button", { name: "Mark watched", exact: true });
+  await expect(seasonWatchedButton).toBeVisible();
+  expect(await seasonWatchedButton.evaluate((button) => button.previousElementSibling?.textContent?.trim())).toBe("Trailers");
+  await expect(page.locator(".season-watch-state").getByRole("button")).toHaveCount(0);
   await expect.poll(() => rivune.matching("/api/v1/progress/batch", "POST").length).toBe(1);
   expect(rivune.matching("/api/v1/progress/batch", "POST")[0]?.body).toEqual({ titleIds: ["episode-1", "episode-2"] });
   await page.getByRole("button", { name: /First Light/ }).first().click();
@@ -730,7 +737,7 @@ test("a 100-episode season reads and mutates progress in one bounded request", a
   });
 
   await page.goto("/media/series/tt9000/season/1");
-  const markSeasonWatched = page.getByRole("button", { name: "Mark season watched" });
+  const markSeasonWatched = page.locator(".details-actions").getByRole("button", { name: "Mark watched", exact: true });
   await expect(markSeasonWatched).toBeVisible();
   await expect.poll(() => readRequests).toBe(1);
   expect(readTitleIds).toHaveLength(100);
@@ -738,11 +745,40 @@ test("a 100-episode season reads and mutates progress in one bounded request", a
   expect(readTitleIds[99]).toBe("episode-100");
 
   await markSeasonWatched.click();
-  await expect(page.getByRole("button", { name: "Mark season unwatched" })).toBeVisible();
+  await expect(page.locator(".details-actions").getByRole("button", { name: "Mark unwatched", exact: true })).toBeVisible();
   await expect.poll(() => writeRequests).toBe(1);
   expect(writeItems).toHaveLength(100);
   expect(writeItems[0]).toEqual({ titleId: "episode-1", completed: true, expectedVersion: 4 });
   expect(writeItems[99]).toEqual({ titleId: "episode-100", completed: true, expectedVersion: 0 });
+});
+
+test("switching series seasons cannot mutate the previously loaded season", async ({ page, rivune }) => {
+  const { promise: seasonTwoGate, resolve: releaseSeasonTwo } = Promise.withResolvers<void>();
+  await page.route("**/api/v1/metadata/seasons/season-2*", async (route) => {
+    await seasonTwoGate;
+    await route.fallback();
+  });
+
+  await page.goto("/media/series/tt9000/season/1");
+  const actions = page.locator(".details-actions");
+  const seasonAction = actions.getByRole("button", { name: "Mark watched", exact: true });
+  await expect(seasonAction).toBeEnabled();
+  const writesBeforeSwitch = rivune.matching("/api/v1/titles/watched/batch", "PUT").length;
+
+  await page.getByRole("tab", { name: /^Season 2\b/ }).click();
+  await expect(seasonAction).toBeDisabled();
+  await expect(seasonAction).toHaveAttribute("aria-busy", "true");
+  await seasonAction.evaluate((button) => (button as HTMLButtonElement).click());
+  expect(rivune.matching("/api/v1/titles/watched/batch", "PUT")).toHaveLength(writesBeforeSwitch);
+
+  releaseSeasonTwo();
+  await expect(seasonAction).toBeEnabled();
+  await seasonAction.click();
+  await expect(actions.getByRole("button", { name: "Mark unwatched", exact: true })).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/titles/watched/batch", "PUT").length).toBe(writesBeforeSwitch + 1);
+  expect(rivune.matching("/api/v1/titles/watched/batch", "PUT").at(-1)?.body).toEqual({
+    items: [{ titleId: "episode-3", completed: true, expectedVersion: 0 }],
+  });
 });
 
 test("upcoming episodes stay dimmed but can open available playback sources", async ({ page, rivune }) => {
@@ -820,13 +856,13 @@ test("series artwork falls back by role when season or episode artwork is absent
   const hero = page.locator(".details-hero");
 
   await page.goto("/media/series/tt9000/season/0");
-  await expect(page.getByRole("button", { name: /Building a World/ }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /Fixture Episode 1/ }).first()).toBeVisible();
   await expect(artwork).toHaveAttribute("src", "https://fixtures.rivune.test/series-poster.svg");
   await expect(hero).toHaveCSS("background-image", 'url("https://fixtures.rivune.test/season-specials-backdrop.svg")');
   await expect(page.getByRole("region", { name: "Cast" }).getByText("Avery Stone")).toBeVisible();
 
-  await page.getByRole("button", { name: /The Rebellion in Season 2/ }).first().click();
-  await expect(page.getByRole("heading", { name: "The Rebellion in Season 2" })).toBeVisible();
+  await page.getByRole("button", { name: /Fixture Episode 4/ }).first().click();
+  await expect(page.getByRole("heading", { name: "Fixture Episode 4" })).toBeVisible();
   await expect(artwork).toHaveAttribute("src", "https://fixtures.rivune.test/series-poster.svg");
   await expect(hero).toHaveCSS("background-image", 'url("https://fixtures.rivune.test/season-specials-backdrop.svg")');
 });
@@ -1055,10 +1091,10 @@ test("cast rendering stops at the effective profile limit", async ({ page, rivun
 
 test("movie details retain cast and one playback action per source", async ({ page, rivune: _rivune }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto("/media/movie/tt0137523");
+  await page.goto("/media/movie/tt9000201");
 
-  await expect(page.getByRole("heading", { name: "Fight Club" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Cast" }).getByText("Edward Norton")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fixture Movie" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Cast" }).getByText("Fixture Performer", { exact: true })).toBeVisible();
   await expect(page.locator(".details-actions").getByRole("button", { name: /Mark (?:un)?watched/ })).toHaveClass(/button--secondary/);
   const sources = page.getByRole("region", { name: "Playback sources" });
   const sourceRows = sources.locator(".details-stream-list > div");
@@ -1120,9 +1156,9 @@ test("continue-watching episode returns to its dedicated season panel", async ({
 });
 
 test("trailers remain available for movie, series, season, and episode title contexts", async ({ page, rivune }) => {
-  await page.goto("/media/movie/tt0137523");
+  await page.goto("/media/movie/tt9000201");
   await page.getByRole("button", { name: "Trailers" }).click();
-  await expect(page.getByRole("region", { name: /Trailers for/ }).locator("iframe")).toHaveAttribute("title", /Fight Club Trailer/);
+  await expect(page.getByRole("region", { name: /Trailers for/ }).locator("iframe")).toHaveAttribute("title", /Fixture Movie Trailer/);
   const movieRequest = await rivune.waitForRequest("/api/v1/metadata/titles/movie-1/trailers", "GET");
   expect(movieRequest.search.get("seasonNumber")).toBeNull();
 
@@ -1145,7 +1181,7 @@ test("trailers remain available for movie, series, season, and episode title con
 
 test("trailer overlay keeps cinematic fallbacks and clips its card and embedded frame", async ({ page, rivune: _rivune }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto("/media/movie/tt0137523");
+  await page.goto("/media/movie/tt9000201");
   await page.getByRole("button", { name: "Trailers" }).click();
 
   const stage = page.locator(".details-trailer-stage");
@@ -1207,9 +1243,9 @@ test("trailer overlay uses a solid fallback when title artwork is absent", async
   await page.route(/\/api\/v1\/metadata\/titles\/movie-1(?:\?.*)?$/, (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
-    body: JSON.stringify({ id: "movie-1", mediaType: "movie", title: "Fight Club", overview: "No artwork fixture", externalIds: { imdb: "tt0137523" } }),
+    body: JSON.stringify({ id: "movie-1", mediaType: "movie", title: "Fixture Movie", overview: "No artwork fixture", externalIds: { imdb: "tt9000201" } }),
   }));
-  await page.goto("/media/movie/tt0137523");
+  await page.goto("/media/movie/tt9000201");
   await page.getByRole("button", { name: "Trailers" }).click();
 
   const backdrop = page.locator(".details-trailer-stage__backdrop");
@@ -1223,7 +1259,7 @@ test("an unavailable trailer warns once without rendering an empty stage", async
     contentType: "application/json",
     body: JSON.stringify({ trailers: [] }),
   }));
-  await page.goto("/media/movie/tt0137523");
+  await page.goto("/media/movie/tt9000201");
   const trailerButton = page.getByRole("button", { name: "Trailers" });
   await trailerButton.click();
 
@@ -1582,15 +1618,15 @@ test("calendar TVDB episode opens the mapped season containing its canonical epi
   const releaseDate = new Date().toISOString().slice(0, 10);
   const requestedSeasons: string[] = [];
   const seasonTwo = {
-    id: "official-season-2", mediaType: "season", seriesId: "series-1", name: "Season 2", overview: "", seasonNumber: 2, episodeCount: 1, airDate: releaseDate, voteAverage: 0, externalIds: { tvdb: "2" },
+    id: "official-season-2", mediaType: "season", seriesId: "series-1", name: "Season 2", overview: "", seasonNumber: 2, episodeCount: 1, airDate: releaseDate, voteAverage: 0, externalIds: { tvdb: "930202" },
     episodes: [
-      { id: "different-official-season-2-episode", mediaType: "episode", seasonId: "official-season-2", name: "Another episode 241", overview: "", seasonNumber: 2, episodeNumber: 241, airDate: releaseDate, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "2241" } },
+      { id: "different-official-season-2-episode", mediaType: "episode", seasonId: "official-season-2", name: "Fixture Episode Alternate", overview: "", seasonNumber: 2, episodeNumber: 241, airDate: releaseDate, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "940241" } },
     ],
   };
   const seasonNine = {
-    id: "official-season-9", mediaType: "season", seriesId: "series-1", name: "Season 9", overview: "", seasonNumber: 9, episodeCount: 1, airDate: "2025-08-25", voteAverage: 0, externalIds: { tvdb: "9" },
+    id: "official-season-9", mediaType: "season", seriesId: "series-1", name: "Season 9", overview: "", seasonNumber: 9, episodeCount: 1, airDate: "2025-08-25", voteAverage: 0, externalIds: { tvdb: "930209" },
     episodes: [
-      { id: episodeID, mediaType: "episode", seasonId: "official-season-9", name: "Episode 241", overview: "", seasonNumber: 9, episodeNumber: 241, airDate: releaseDate, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "9241" } },
+      { id: episodeID, mediaType: "episode", seasonId: "official-season-9", name: "Fixture Episode", overview: "", seasonNumber: 9, episodeNumber: 241, airDate: releaseDate, voteAverage: 0, voteCount: 0, externalIds: { tvdb: "949241" } },
     ],
   };
   const seasonSummaries = [seasonTwo, seasonNine].map(({ episodes: _episodes, ...seasonSummary }) => seasonSummary);
@@ -1600,11 +1636,11 @@ test("calendar TVDB episode opens the mapped season containing its canonical epi
     const path = url.pathname.slice("/api/v1".length);
     const fulfill = (body: unknown) => route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
     if (path === "/calendar") {
-      await fulfill({ events: [{ id: "calendar-episode-241", titleId: episodeID, mediaType: "episode", title: "Episode 241", releaseDate, resourceId: "9241", resourceProvider: "tvdb", seriesTitle: "Demain nous appartient", seriesId: "series-1", seasonId: "canonical-season-2", seasonNumber: 2, episodeNumber: 241 }] });
+      await fulfill({ events: [{ id: "calendar-episode-241", titleId: episodeID, mediaType: "episode", title: "Fixture Episode", releaseDate, resourceId: "949241", resourceProvider: "tvdb", seriesTitle: "Fixture Series Beta", seriesId: "series-1", seasonId: "canonical-season-2", seasonNumber: 2, episodeNumber: 241 }] });
       return;
     }
     if (path === "/metadata/series/series-1") {
-      await fulfill({ id: "series-1", mediaType: "series", name: "Demain nous appartient", originalName: "Demain nous appartient", originalLanguage: "fr", overview: "", firstAirDate: "2017-07-17", numberOfSeasons: 9, numberOfEpisodes: 241, genres: [], voteAverage: 0, voteCount: 0, seasons: seasonSummaries, episodeOrders: [], mappingProvider: "tvdb", externalIds: { tvdb: "331147", tmdb: "72879" } });
+      await fulfill({ id: "series-1", mediaType: "series", name: "Fixture Series Beta", originalName: "Fixture Series Beta", originalLanguage: "fr", overview: "", firstAirDate: "2024-01-01", numberOfSeasons: 9, numberOfEpisodes: 241, genres: [], voteAverage: 0, voteCount: 0, seasons: seasonSummaries, episodeOrders: [], mappingProvider: "tvdb", externalIds: { tvdb: "900302", tmdb: "900202" } });
       return;
     }
     const seasonMatch = path.match(/^\/metadata\/seasons\/(official-season-[29])$/);
@@ -1618,15 +1654,15 @@ test("calendar TVDB episode opens the mapped season containing its canonical epi
 
   await page.goto("/");
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Calendar" }).click();
-  await page.getByRole("button", { name: "Open Episode 241 details" }).click();
+  await page.getByRole("button", { name: "Open Fixture Episode details" }).click();
 
-  await expect(page.getByRole("heading", { name: "Episode 241" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fixture Episode" })).toBeVisible();
   await expect(page.locator(".details-meta").getByText("Season 9 · Episode 241")).toBeVisible();
   await expect(page.locator(".series-browser")).toHaveCount(0);
   expect(requestedSeasons).toEqual(["official-season-2", "official-season-9"]);
 
   await page.getByRole("button", { name: /Back.*Episodes/ }).click();
-  await expect(page).toHaveURL(/\/media\/series\/tvdb:331147\/season\/9$/);
+  await expect(page).toHaveURL(/\/media\/series\/tvdb:900302\/season\/9$/);
   await expect(page.getByRole("tab", { name: /Season 9/ })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("tab", { name: /^Season 2\b/ })).toHaveAttribute("aria-selected", "false");
   expect(requestedSeasons).toEqual(["official-season-2", "official-season-9", "official-season-9"]);

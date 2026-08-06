@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Kausi katsomatta",
   "media.season.watch.error.partialUpdate": "Joidenkin jaksojen katselutilaa ei voitu päivittää.",
   "media.season.watch.error.partialUpdateTitle": "Kautta ei päivitetty kokonaan",
-  "media.season.watch.actions.markUnwatched": "Merkitse kausi katsomattomaksi",
-  "media.season.watch.actions.markWatched": "Merkitse kausi katsotuksi",
   "media.sources.error.loadFailed": "Suoratoistoja ei voitu ladata.",
   "media.sources.error.unavailableTitle": "Suoratoistot eivät ole käytettävissä",
   "media.sources.error.encodingRequired": "Tämä lähde vaatii median koodausta, jota Rivunen verkkotoisto ei käynnistä automaattisesti. Valitse toinen lähde tai ulkoisen soittimen vaihtoehto.",

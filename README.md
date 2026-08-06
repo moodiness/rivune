@@ -39,7 +39,7 @@
 - **Secure access:** first-run claiming, device authentication, rotating refresh tokens, revocable sessions, and category-scoped authorization
 - **Independent profiles:** descriptions, preset or custom avatars, PIN protection and throttling, management permissions, availability windows, inherited settings, libraries, and watch progress
 - **Access categories:** place profiles and devices behind explicit administrative boundaries, promote one default category, and move assignments without leaking cross-category access
-- **Flexible discovery:** profile-scoped addons, IPTV catalogs, and curated collections backed by addon catalogs, TMDB, Trakt, or MDBList
+- **Flexible discovery:** profile-scoped addons, TV catalogs, and curated collections backed by addon catalogs, TMDB, Trakt, or MDBList
 - **Rich metadata:** optional TMDB, TVDB, and Fanart.tv enrichment, localized season-aware trailers, title logos, original episode artwork, and visible provider identifiers
 - **Account tracking:** optional per-profile Trakt and Simkl connections with encrypted provider tokens
 - **Private playback resolution:** opaque, session-bound source references keep provider URLs and headers on the server

@@ -79,19 +79,19 @@ func TestSearchMoviesSendsBearerTokenAndNormalizesResults(t *testing.T) {
 
 func TestMovieDetailsNormalizesArtworkCastAndIDs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/movie/550" || r.URL.Query().Get("language") != "en-US" || r.URL.Query().Get("append_to_response") != "credits" {
+		if r.URL.Path != "/movie/900201" || r.URL.Query().Get("language") != "en-US" || r.URL.Query().Get("append_to_response") != "credits" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":550,"title":"Fight Club","original_title":"Fight Club","original_language":"en","overview":"Overview","release_date":"1999-10-15","poster_path":"/fight-club-poster.jpg","backdrop_path":"/fight-club-backdrop.jpg","tagline":"Mischief. Mayhem. Soap.","runtime":139,"genres":[{"id":18,"name":"Drama"}],"vote_average":8.4,"vote_count":30000,"imdb_id":"tt0137523","credits":{"cast":[{"id":819,"name":"Edward Norton","character":"The Narrator","profile_path":"/norton.jpg"}]}}`))
+		_, _ = w.Write([]byte(`{"id":900201,"title":"Fixture Movie","original_title":"Fixture Movie","original_language":"en","overview":"Fixture overview","release_date":"2024-01-01","poster_path":"/fixture-movie-poster.jpg","backdrop_path":"/fixture-movie-backdrop.jpg","tagline":"Fixture tagline.","runtime":120,"genres":[{"id":18,"name":"Drama"}],"vote_average":8.4,"vote_count":30000,"imdb_id":"tt9000201","credits":{"cast":[{"id":9301,"name":"Fixture Performer","character":"Fixture Character","profile_path":"/fixture-performer.jpg"}]}}`))
 	}))
 	defer server.Close()
 
 	client := newWithBaseURL("token", server.URL, server.Client())
-	movie, err := client.MovieDetails(context.Background(), "550", "en-US")
+	movie, err := client.MovieDetails(context.Background(), "900201", "en-US")
 	if err != nil {
 		t.Fatalf("movie details: %v", err)
 	}
-	if movie.RuntimeMinutes != 139 || len(movie.Genres) != 1 || movie.Genres[0].Name != "Drama" || movie.AdditionalIDs["imdb"] != "tt0137523" || movie.PosterURL != imageBaseURL+"/w780/fight-club-poster.jpg" || movie.BackdropURL != imageBaseURL+"/original/fight-club-backdrop.jpg" || len(movie.Cast) != 1 || movie.Cast[0].Character != "The Narrator" || movie.Cast[0].ProfileURL != imageBaseURL+"/w185/norton.jpg" {
+	if movie.RuntimeMinutes != 120 || len(movie.Genres) != 1 || movie.Genres[0].Name != "Drama" || movie.AdditionalIDs["imdb"] != "tt9000201" || movie.PosterURL != imageBaseURL+"/w780/fixture-movie-poster.jpg" || movie.BackdropURL != imageBaseURL+"/original/fixture-movie-backdrop.jpg" || len(movie.Cast) != 1 || movie.Cast[0].Character != "Fixture Character" || movie.Cast[0].ProfileURL != imageBaseURL+"/w185/fixture-performer.jpg" {
 		t.Fatalf("unexpected details: %+v", movie)
 	}
 }
@@ -128,41 +128,41 @@ func TestProviderStatusErrorsAreTyped(t *testing.T) {
 
 func TestSearchSeriesNormalizesTelevisionResults(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/search/tv" || r.URL.Query().Get("query") != "Breaking Bad" || r.URL.Query().Get("include_adult") != "false" {
+		if r.URL.Path != "/search/tv" || r.URL.Query().Get("query") != "Fixture Series" || r.URL.Query().Get("include_adult") != "false" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"page":1,"results":[{"id":1396,"name":"Breaking Bad","original_name":"Breaking Bad","original_language":"en","overview":"A chemistry teacher.","first_air_date":"2008-01-20","poster_path":"/poster.jpg","backdrop_path":"/backdrop.jpg","vote_average":8.9,"vote_count":16000}],"total_pages":1,"total_results":1}`))
+		_, _ = w.Write([]byte(`{"page":1,"results":[{"id":92001,"name":"Fixture Series","original_name":"Fixture Series","original_language":"en","overview":"Fixture series overview.","first_air_date":"2024-01-07","poster_path":"/poster.jpg","backdrop_path":"/backdrop.jpg","vote_average":7.5,"vote_count":42}],"total_pages":1,"total_results":1}`))
 	}))
 	defer server.Close()
 
 	client := newWithBaseURL("token", server.URL, server.Client())
 	page, err := client.SearchSeries(context.Background(), metadata.SearchOptions{
 		QueryOptions: metadata.QueryOptions{Page: 1, Language: "en-US"},
-		Query:        "Breaking Bad",
+		Query:        "Fixture Series",
 	})
 	if err != nil {
 		t.Fatalf("search series: %v", err)
 	}
-	if len(page.Items) != 1 || page.Items[0].ExternalID != "1396" || page.Items[0].Name != "Breaking Bad" || page.Items[0].PosterURL != imageBaseURL+"/w780/poster.jpg" || page.Items[0].BackdropURL != imageBaseURL+"/original/backdrop.jpg" {
+	if len(page.Items) != 1 || page.Items[0].ExternalID != "92001" || page.Items[0].Name != "Fixture Series" || page.Items[0].PosterURL != imageBaseURL+"/w780/poster.jpg" || page.Items[0].BackdropURL != imageBaseURL+"/original/backdrop.jpg" {
 		t.Fatalf("unexpected series page: %+v", page)
 	}
 }
 
 func TestResolveExternalIDFindsSeriesByIMDBID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/find/tt0903747" || r.URL.Query().Get("external_source") != "imdb_id" {
+		if r.URL.Path != "/find/tt9002001" || r.URL.Query().Get("external_source") != "imdb_id" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"movie_results":[],"tv_results":[{"id":1396,"name":"Breaking Bad"}]}`))
+		_, _ = w.Write([]byte(`{"movie_results":[],"tv_results":[{"id":92001,"name":"Fixture Series"}]}`))
 	}))
 	defer server.Close()
 
 	client := newWithBaseURL("token", server.URL, server.Client())
-	resolved, err := client.ResolveExternalID(context.Background(), metadata.MediaTypeSeries, "imdb", "tt0903747")
+	resolved, err := client.ResolveExternalID(context.Background(), metadata.MediaTypeSeries, "imdb", "tt9002001")
 	if err != nil {
 		t.Fatalf("resolve external ID: %v", err)
 	}
-	if resolved != "1396" {
+	if resolved != "92001" {
 		t.Fatalf("unexpected resolved ID %q", resolved)
 	}
 }
@@ -186,53 +186,53 @@ func TestResolveExternalIDClassifiesEmptySuccessfulLookupAsPermanentNotFound(t *
 
 func TestSeriesDetailsNormalizesArtworkSeasonsCastAndIDs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tv/1396" || r.URL.Query().Get("append_to_response") != "external_ids,credits" {
+		if r.URL.Path != "/tv/92001" || r.URL.Query().Get("append_to_response") != "external_ids,credits" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":1396,"name":"Breaking Bad","original_name":"Breaking Bad","original_language":"en","overview":"A chemistry teacher.","first_air_date":"2008-01-20","last_air_date":"2013-09-29","poster_path":"/breaking-bad-poster.jpg","backdrop_path":"/breaking-bad-backdrop.jpg","number_of_seasons":5,"number_of_episodes":62,"genres":[{"id":18,"name":"Drama"}],"seasons":[{"id":3572,"name":"Season 1","season_number":1,"episode_count":7,"air_date":"2008-01-20","poster_path":"/season-one-poster.jpg","backdrop_path":"/season-one-backdrop.jpg","vote_average":8.3}],"external_ids":{"imdb_id":"tt0903747","tvdb_id":81189,"wikidata_id":"Q1079"},"credits":{"cast":[{"id":17419,"name":"Bryan Cranston","profile_path":"/cranston.jpg","character":"Walter White"}]}}`))
+		_, _ = w.Write([]byte(`{"id":92001,"name":"Fixture Series","original_name":"Fixture Series","original_language":"en","overview":"Fixture series overview.","first_air_date":"2024-01-07","last_air_date":"2025-02-02","poster_path":"/fixture-series-poster.jpg","backdrop_path":"/fixture-series-backdrop.jpg","number_of_seasons":2,"number_of_episodes":12,"genres":[{"id":18,"name":"Drama"}],"seasons":[{"id":92011,"name":"Season 1","season_number":1,"episode_count":6,"air_date":"2024-01-07","poster_path":"/season-one-poster.jpg","backdrop_path":"/season-one-backdrop.jpg","vote_average":7.3}],"external_ids":{"imdb_id":"tt9002001","tvdb_id":93001,"wikidata_id":"Q9002001"},"credits":{"cast":[{"id":94001,"name":"Fixture Performer","profile_path":"/fixture-performer.jpg","character":"Fixture Performer"}]}}`))
 	}))
 	defer server.Close()
 
 	client := newWithBaseURL("token", server.URL, server.Client())
-	series, err := client.SeriesDetails(context.Background(), "1396", "en-US")
+	series, err := client.SeriesDetails(context.Background(), "92001", "en-US")
 	if err != nil {
 		t.Fatalf("series details: %v", err)
 	}
-	if series.NumberOfEpisodes != 62 || series.PosterURL != imageBaseURL+"/w780/breaking-bad-poster.jpg" || series.BackdropURL != imageBaseURL+"/original/breaking-bad-backdrop.jpg" || len(series.Seasons) != 1 || series.Seasons[0].ExternalID != "3572" || series.Seasons[0].PosterURL != imageBaseURL+"/w780/season-one-poster.jpg" || series.Seasons[0].BackdropURL != imageBaseURL+"/original/season-one-backdrop.jpg" || series.AdditionalIDs["tvdb"] != "81189" || len(series.Cast) != 1 || series.Cast[0].Character != "Walter White" || series.Cast[0].ProfileURL != imageBaseURL+"/w185/cranston.jpg" {
+	if series.NumberOfEpisodes != 12 || series.PosterURL != imageBaseURL+"/w780/fixture-series-poster.jpg" || series.BackdropURL != imageBaseURL+"/original/fixture-series-backdrop.jpg" || len(series.Seasons) != 1 || series.Seasons[0].ExternalID != "92011" || series.Seasons[0].PosterURL != imageBaseURL+"/w780/season-one-poster.jpg" || series.Seasons[0].BackdropURL != imageBaseURL+"/original/season-one-backdrop.jpg" || series.AdditionalIDs["tvdb"] != "93001" || len(series.Cast) != 1 || series.Cast[0].Character != "Fixture Performer" || series.Cast[0].ProfileURL != imageBaseURL+"/w185/fixture-performer.jpg" {
 		t.Fatalf("unexpected series: %+v", series)
 	}
 }
 
 func TestSeasonDetailsNormalizesOriginalEpisodeArtwork(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tv/1396/season/1" || r.URL.Query().Get("language") != "en-US" {
+		if r.URL.Path != "/tv/92001/season/1" || r.URL.Query().Get("language") != "en-US" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":3572,"name":"Season 1","season_number":1,"air_date":"2008-01-20","poster_path":"/season-one-poster.jpg","backdrop_path":"/season-one-backdrop.jpg","episodes":[{"id":62085,"name":"Pilot","overview":"Walter receives a diagnosis.","season_number":1,"episode_number":1,"air_date":"2008-01-20","still_path":"/still.jpg","runtime":59,"vote_average":8.2,"vote_count":4000}]}`))
+		_, _ = w.Write([]byte(`{"id":92011,"name":"Season 1","season_number":1,"air_date":"2024-01-07","poster_path":"/season-one-poster.jpg","backdrop_path":"/season-one-backdrop.jpg","episodes":[{"id":9201101,"name":"Fixture Episode","overview":"Fixture episode overview.","season_number":1,"episode_number":1,"air_date":"2024-01-07","still_path":"/still.jpg","runtime":59,"vote_average":8.2,"vote_count":40}]}`))
 	}))
 	defer server.Close()
 
 	client := newWithBaseURL("token", server.URL, server.Client())
-	season, err := client.SeasonDetails(context.Background(), "1396", 1, "en-US")
+	season, err := client.SeasonDetails(context.Background(), "92001", 1, "en-US")
 	if err != nil {
 		t.Fatalf("season details: %v", err)
 	}
-	if season.ExternalID != "3572" || season.PosterURL != imageBaseURL+"/w780/season-one-poster.jpg" || season.BackdropURL != imageBaseURL+"/original/season-one-backdrop.jpg" || len(season.Episodes) != 1 || season.Episodes[0].ExternalID != "62085" || season.Episodes[0].StillURL != imageBaseURL+"/original/still.jpg" || season.Episodes[0].BackdropURL != imageBaseURL+"/original/still.jpg" {
+	if season.ExternalID != "92011" || season.PosterURL != imageBaseURL+"/w780/season-one-poster.jpg" || season.BackdropURL != imageBaseURL+"/original/season-one-backdrop.jpg" || len(season.Episodes) != 1 || season.Episodes[0].ExternalID != "9201101" || season.Episodes[0].StillURL != imageBaseURL+"/original/still.jpg" || season.Episodes[0].BackdropURL != imageBaseURL+"/original/still.jpg" {
 		t.Fatalf("unexpected season: %+v", season)
 	}
 }
 
 func TestSeasonDetailsPreservesSpecialSeasonZero(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tv/1396/season/0" || r.URL.Query().Get("language") != "en-US" {
+		if r.URL.Path != "/tv/92001/season/0" || r.URL.Query().Get("language") != "en-US" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":3571,"name":"Specials","season_number":0,"episodes":[{"id":62084,"name":"Behind the Scenes","season_number":0,"episode_number":1}]}`))
+		_, _ = w.Write([]byte(`{"id":92010,"name":"Specials","season_number":0,"episodes":[{"id":9201001,"name":"Fixture Episode","season_number":0,"episode_number":1}]}`))
 	}))
 	defer server.Close()
 
 	client := newWithBaseURL("token", server.URL, server.Client())
-	season, err := client.SeasonDetails(context.Background(), "1396", 0, "en-US")
+	season, err := client.SeasonDetails(context.Background(), "92001", 0, "en-US")
 	if err != nil {
 		t.Fatalf("season zero details: %v", err)
 	}
@@ -243,15 +243,15 @@ func TestSeasonDetailsPreservesSpecialSeasonZero(t *testing.T) {
 
 func TestSeasonDetailsRejectsMismatchedSeasonHierarchy(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tv/72879/season/9" || r.URL.Query().Get("language") != "fr-FR" {
+		if r.URL.Path != "/tv/900202/season/9" || r.URL.Query().Get("language") != "fr-FR" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"id":475463,"name":"Saison 9","season_number":2,"episodes":[{"id":500001,"name":"Épisode 2021","season_number":2,"episode_number":2021},{"id":500002,"name":"Épisode 2022","season_number":2,"episode_number":2022}]}`))
+		_, _ = w.Write([]byte(`{"id":910209,"name":"Season 9","season_number":2,"episodes":[{"id":920201,"name":"Fixture Episode 2021","season_number":2,"episode_number":2021},{"id":920202,"name":"Fixture Episode 2022","season_number":2,"episode_number":2022}]}`))
 	}))
 	defer server.Close()
 
 	client := newWithBaseURL("token", server.URL, server.Client())
-	season, err := client.SeasonDetails(context.Background(), "72879", 9, "fr-FR")
+	season, err := client.SeasonDetails(context.Background(), "900202", 9, "fr-FR")
 	if !errors.Is(err, metadata.ErrProviderFailure) {
 		t.Fatalf("expected provider failure for mismatched season, got season=%+v err=%v", season, err)
 	}
@@ -264,8 +264,8 @@ func TestTrailersUsesMediaSpecificVideosPathAndLanguage(t *testing.T) {
 		externalID string
 		wantPath   string
 	}{
-		{name: "movie", mediaType: metadata.MediaTypeMovie, externalID: "550", wantPath: "/movie/550/videos"},
-		{name: "series", mediaType: metadata.MediaTypeSeries, externalID: "1396", wantPath: "/tv/1396/videos"},
+		{name: "movie", mediaType: metadata.MediaTypeMovie, externalID: "900201", wantPath: "/movie/900201/videos"},
+		{name: "series", mediaType: metadata.MediaTypeSeries, externalID: "92001", wantPath: "/tv/92001/videos"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -291,7 +291,7 @@ func TestTrailersUsesMediaSpecificVideosPathAndLanguage(t *testing.T) {
 
 func TestTrailersUsesSeriesSeasonVideosPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tv/1396/season/3/videos" || r.URL.Query().Get("language") != "fr-FR" {
+		if r.URL.Path != "/tv/92001/season/3/videos" || r.URL.Query().Get("language") != "fr-FR" {
 			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
 		_, _ = w.Write([]byte(`{"results":[{"key":"season-three","site":"YouTube","type":"Trailer"}]}`))
@@ -300,7 +300,7 @@ func TestTrailersUsesSeriesSeasonVideosPath(t *testing.T) {
 
 	client := newWithBaseURL("token", server.URL, server.Client())
 	seasonNumber := 3
-	trailers, err := client.Trailers(context.Background(), metadata.MediaTypeSeries, "1396", "fr-FR", &seasonNumber)
+	trailers, err := client.Trailers(context.Background(), metadata.MediaTypeSeries, "92001", "fr-FR", &seasonNumber)
 	if err != nil {
 		t.Fatalf("season trailers: %v", err)
 	}

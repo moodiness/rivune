@@ -253,8 +253,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "لم يُشاهد الموسم",
   "media.season.watch.error.partialUpdate": "تعذّر تحديث حالة المشاهدة لبعض الحلقات.",
   "media.season.watch.error.partialUpdateTitle": "لم يُحدَّث الموسم بالكامل",
-  "media.season.watch.actions.markUnwatched": "وضع علامة «لم يُشاهد» على الموسم",
-  "media.season.watch.actions.markWatched": "وضع علامة «شوهد» على الموسم",
   "media.sources.error.loadFailed": "تعذّر تحميل البثوث.",
   "media.sources.error.unavailableTitle": "البثوث غير متاحة",
   "media.sources.error.encodingRequired": "يتطلب هذا المصدر ترميز الوسائط، ولا يبدأه Rivune تلقائيًا عند التشغيل عبر الويب. اختر مصدرًا آخر أو خيار تشغيل بمشغّل خارجي.",

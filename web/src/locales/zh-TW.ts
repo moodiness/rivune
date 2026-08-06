@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "本季未觀看",
   "media.season.watch.error.partialUpdate": "部分集數的觀看狀態無法更新。",
   "media.season.watch.error.partialUpdateTitle": "本季未完全更新",
-  "media.season.watch.actions.markUnwatched": "將本季標示為未觀看",
-  "media.season.watch.actions.markWatched": "將本季標示為已觀看",
   "media.sources.error.loadFailed": "無法載入串流。",
   "media.sources.error.unavailableTitle": "串流無法使用",
   "media.sources.error.encodingRequired": "此來源需要進行媒體編碼，但 Rivune 網頁播放不會自動啟動編碼。請選擇其他來源或外部播放器選項。",

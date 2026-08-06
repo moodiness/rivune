@@ -29,10 +29,10 @@ func TestNormalizeQueryOptionsDefaultsAndCanonicalizes(t *testing.T) {
 
 func TestSeasonArtworkNormalizationAndSerializationRemainIndependent(t *testing.T) {
 	summary := normalizeSeasonSummary("series-id", "season-id", ProviderSeasonSummary{
-		ExternalID: "3572", PosterURL: "https://images.example/poster.jpg", BackdropURL: "https://images.example/backdrop.jpg",
+		ExternalID: "92011", PosterURL: "https://images.example/poster.jpg", BackdropURL: "https://images.example/backdrop.jpg",
 	})
 	season := normalizeSeason("series-id", "season-id", ProviderSeason{
-		ExternalID: "3572", PosterURL: "https://images.example/poster.jpg", BackdropURL: "https://images.example/backdrop.jpg",
+		ExternalID: "92011", PosterURL: "https://images.example/poster.jpg", BackdropURL: "https://images.example/backdrop.jpg",
 	})
 	for name, value := range map[string]any{"summary": summary, "season": season} {
 		payload, err := json.Marshal(value)
@@ -46,10 +46,10 @@ func TestSeasonArtworkNormalizationAndSerializationRemainIndependent(t *testing.
 	}
 	withoutBackdrop := map[string]any{
 		"summary": normalizeSeasonSummary("series-id", "season-id", ProviderSeasonSummary{
-			ExternalID: "3572", PosterURL: "https://images.example/poster.jpg",
+			ExternalID: "92011", PosterURL: "https://images.example/poster.jpg",
 		}),
 		"season": normalizeSeason("series-id", "season-id", ProviderSeason{
-			ExternalID: "3572", PosterURL: "https://images.example/poster.jpg",
+			ExternalID: "92011", PosterURL: "https://images.example/poster.jpg",
 		}),
 	}
 	for name, value := range withoutBackdrop {
@@ -65,7 +65,7 @@ func TestSeasonArtworkNormalizationAndSerializationRemainIndependent(t *testing.
 
 func TestEpisodeArtworkNormalizationAndSerializationRemainIndependent(t *testing.T) {
 	episode := normalizeEpisode("season-id", "episode-id", ProviderEpisode{
-		ExternalID:  "62085",
+		ExternalID:  "9201101",
 		StillURL:    "https://images.example/still.jpg",
 		BackdropURL: "https://images.example/backdrop.jpg",
 	})
@@ -132,14 +132,14 @@ func TestRefreshMissingSkipsTitlesWithoutResolvableTMDBIdentity(t *testing.T) {
 
 func TestSeasonHierarchyValidationRejectsMismatchedSeason(t *testing.T) {
 	mismatched := ProviderSeason{
-		ExternalID:   "475463",
-		Name:         "Saison 9",
+		ExternalID:   "910209",
+		Name:         "Season 9",
 		SeasonNumber: 2,
 		Episodes: []ProviderEpisode{{
-			ExternalID: "500001", Name: "Épisode 2021", SeasonNumber: 2, EpisodeNumber: 2021,
+			ExternalID: "920201", Name: "Fixture Episode 2021", SeasonNumber: 2, EpisodeNumber: 2021,
 		}},
 	}
-	if err := validateProviderSeasonHierarchy(mismatched, "475463", 9); !errors.Is(err, ErrProviderFailure) {
+	if err := validateProviderSeasonHierarchy(mismatched, "910209", 9); !errors.Is(err, ErrProviderFailure) {
 		t.Fatalf("expected provider failure for season 9 response numbered as season 2, got %v", err)
 	}
 	poisonedCache := Season{
@@ -153,13 +153,13 @@ func TestSeasonHierarchyValidationRejectsMismatchedSeason(t *testing.T) {
 
 func TestSeasonHierarchyValidationPreservesNormalSeason(t *testing.T) {
 	season := ProviderSeason{
-		ExternalID: "475463", Name: "Saison 9", SeasonNumber: 9,
+		ExternalID: "910209", Name: "Season 9", SeasonNumber: 9,
 		Episodes: []ProviderEpisode{
-			{ExternalID: "500001", Name: "Épisode 2021", SeasonNumber: 9, EpisodeNumber: 2021},
-			{ExternalID: "500002", Name: "Épisode 2022", SeasonNumber: 9, EpisodeNumber: 2022},
+			{ExternalID: "920201", Name: "Fixture Episode 2021", SeasonNumber: 9, EpisodeNumber: 2021},
+			{ExternalID: "920202", Name: "Fixture Episode 2022", SeasonNumber: 9, EpisodeNumber: 2022},
 		},
 	}
-	if err := validateProviderSeasonHierarchy(season, "475463", 9); err != nil {
+	if err := validateProviderSeasonHierarchy(season, "910209", 9); err != nil {
 		t.Fatalf("valid season hierarchy rejected: %v", err)
 	}
 	cached := Season{
@@ -212,13 +212,13 @@ func TestTrailersUsesSeriesIdentityForSeasonAndRejectsMovieSeason(t *testing.T) 
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id)
-		VALUES ($1::uuid, 'tmdb', 'series', '1396'), ($2::uuid, 'tmdb', 'movie', '550')
+		VALUES ($1::uuid, 'tmdb', 'series', '92001'), ($2::uuid, 'tmdb', 'movie', '900101')
 	`, seriesID, movieID); err != nil {
 		t.Fatalf("seed trailer external IDs: %v", err)
 	}
 	provider := &fakeTrailerProvider{responsesByCall: map[string][]ProviderTrailer{
-		"series:1396:en-US:3": {{YouTubeID: "season-video", Name: "Season 3 Trailer", Site: "YouTube", Type: "Trailer"}},
-		"movie:550:en-US":     {{YouTubeID: "movie-video", Site: "YouTube", Type: "Trailer"}},
+		"series:92001:en-US:3": {{YouTubeID: "season-video", Name: "Season 3 Trailer", Site: "YouTube", Type: "Trailer"}},
+		"movie:900101:en-US":   {{YouTubeID: "movie-video", Site: "YouTube", Type: "Trailer"}},
 	}}
 	service := &Service{pool: pool, trailerProvider: provider}
 	seasonNumber := 3
@@ -226,7 +226,7 @@ func TestTrailersUsesSeriesIdentityForSeasonAndRejectsMovieSeason(t *testing.T) 
 	if err != nil || len(result.Trailers) != 1 || result.Trailers[0].YouTubeID != "season-video" {
 		t.Fatalf("season trailers=%+v err=%v", result, err)
 	}
-	if len(provider.calls) < 1 || provider.calls[0] != "series:1396:en-US:3" {
+	if len(provider.calls) < 1 || provider.calls[0] != "series:92001:en-US:3" {
 		t.Fatalf("unexpected season provider calls: %+v", provider.calls)
 	}
 
@@ -275,7 +275,7 @@ func TestChooseTrailersPrioritizesPreferredLanguageAndKeepsEnglishOption(t *test
 			{YouTubeID: "english-old", Name: "English Trailer 2", Site: "YouTube", Type: "Trailer", Official: true, PublishedAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)},
 		},
 	}}
-	result, err := chooseTrailers(context.Background(), provider, MediaTypeMovie, "550", "fr-FR", "fr-FR", nil)
+	result, err := chooseTrailers(context.Background(), provider, MediaTypeMovie, "900101", "fr-FR", "fr-FR", nil)
 	if err != nil {
 		t.Fatalf("choose trailers: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestChooseTrailersPrioritizesPreferredLanguageAndKeepsEnglishOption(t *test
 	if fallback.Language != "en-US" || !fallback.IsFallback || fallback.CaptionPreference != "fr" {
 		t.Fatalf("unexpected English fallback: %+v", fallback)
 	}
-	if len(provider.calls) != 2 || provider.calls[0] != "movie:550:fr-FR" || provider.calls[1] != "movie:550:en-US" {
+	if len(provider.calls) != 2 || provider.calls[0] != "movie:900101:fr-FR" || provider.calls[1] != "movie:900101:en-US" {
 		t.Fatalf("unexpected provider calls: %+v", provider.calls)
 	}
 }
@@ -308,7 +308,7 @@ func TestChooseTrailersDeduplicatesVideosAcrossLanguages(t *testing.T) {
 			{YouTubeID: "english", Name: "English Trailer", Site: "YouTube", Type: "Trailer", Official: true},
 		},
 	}}
-	result, err := chooseTrailers(context.Background(), provider, MediaTypeMovie, "550", "fr-FR", "fr-FR", nil)
+	result, err := chooseTrailers(context.Background(), provider, MediaTypeMovie, "900101", "fr-FR", "fr-FR", nil)
 	if err != nil || len(result.Trailers) != 3 {
 		t.Fatalf("deduplicated trailers=%+v err=%v", result, err)
 	}
@@ -372,10 +372,10 @@ func TestChooseTrailersRecoversAllExplicitSeasonVideosFromCollapsedFirstSeason(t
 
 func TestChooseTrailersPreservesSeasonAcrossLocalizedAndEnglishRequests(t *testing.T) {
 	provider := &fakeTrailerProvider{responsesByCall: map[string][]ProviderTrailer{
-		"series:1396:en-US:3": {{YouTubeID: "season-three", Name: "Season 3 Trailer", Site: "YouTube", Type: "Trailer"}},
+		"series:92001:en-US:3": {{YouTubeID: "season-three", Name: "Season 3 Trailer", Site: "YouTube", Type: "Trailer"}},
 	}}
 	seasonNumber := 3
-	result, err := chooseTrailers(context.Background(), provider, MediaTypeSeries, "1396", "fr-FR", "fr-FR", &seasonNumber)
+	result, err := chooseTrailers(context.Background(), provider, MediaTypeSeries, "92001", "fr-FR", "fr-FR", &seasonNumber)
 	if err != nil || len(result.Trailers) != 1 || result.Trailers[0].YouTubeID != "season-three" {
 		t.Fatalf("season fallback trailers=%+v err=%v", result, err)
 	}
@@ -404,7 +404,7 @@ func TestChooseTrailersNonFrenchFallbackDoesNotRequestCaptions(t *testing.T) {
 	provider := &fakeTrailerProvider{responses: map[string][]ProviderTrailer{
 		"en-US": {{YouTubeID: "english", Site: "YouTube", Type: "Trailer"}},
 	}}
-	result, err := chooseTrailers(context.Background(), provider, MediaTypeMovie, "550", "de-DE", "", nil)
+	result, err := chooseTrailers(context.Background(), provider, MediaTypeMovie, "900101", "de-DE", "", nil)
 	if err != nil || len(result.Trailers) != 1 {
 		t.Fatalf("fallback trailers=%+v err=%v", result, err)
 	}
@@ -418,7 +418,7 @@ func TestChooseTrailersReturnsNotFoundWhenNoEligibleVideoExists(t *testing.T) {
 		"fr-FR": {{YouTubeID: "clip", Site: "YouTube", Type: "Clip"}},
 		"en-US": {{YouTubeID: "vimeo", Site: "Vimeo", Type: "Trailer"}},
 	}}
-	_, err := chooseTrailers(context.Background(), provider, MediaTypeMovie, "550", "fr-FR", "", nil)
+	_, err := chooseTrailers(context.Background(), provider, MediaTypeMovie, "900101", "fr-FR", "", nil)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected not found, got %v", err)
 	}
@@ -429,7 +429,7 @@ func TestChooseTrailersPropagatesProviderErrors(t *testing.T) {
 		responses: map[string][]ProviderTrailer{},
 		errors:    map[string]error{"fr-FR": ErrProviderRateLimited},
 	}
-	_, err := chooseTrailers(context.Background(), provider, MediaTypeMovie, "550", "fr-FR", "", nil)
+	_, err := chooseTrailers(context.Background(), provider, MediaTypeMovie, "900101", "fr-FR", "", nil)
 	if !errors.Is(err, ErrProviderRateLimited) {
 		t.Fatalf("expected provider error, got %v", err)
 	}
@@ -445,15 +445,15 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 		seriesID       = "11111111-1111-4111-8111-111111111111"
 		seasonID       = "22222222-2222-4222-8222-222222222222"
 		episodeID      = "5810d584-af52-4ba3-8cef-17a98bc19f77"
-		seriesPoster   = "https://assets.fanart.tv/futurama-poster.jpg"
-		seriesBackdrop = "https://assets.fanart.tv/futurama-background.jpg"
-		seasonPoster   = "https://image.tmdb.org/t/p/w500/futurama-season-5.jpg"
-		episodeStill   = "https://image.tmdb.org/t/p/w500/asteroique.jpg"
+		seriesPoster   = "https://images.example.test/fixture-animated-series-poster.jpg"
+		seriesBackdrop = "https://images.example.test/fixture-animated-series-background.jpg"
+		seasonPoster   = "https://images.example.test/fixture-season-5.jpg"
+		episodeStill   = "https://images.example.test/fixture-episode-6.jpg"
 	)
 	series := Series{
 		ID:           seriesID,
 		MediaType:    MediaTypeSeries,
-		Name:         "Futurama",
+		Name:         "Fixture Animated Series",
 		FirstAirDate: "1999-03-28",
 		PosterURL:    seriesPoster,
 		BackdropURL:  seriesBackdrop,
@@ -481,7 +481,7 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 			ID:            episodeID,
 			MediaType:     MediaTypeEpisode,
 			SeasonID:      seasonID,
-			Name:          "Astéroïque",
+			Name:          "Fixture Episode",
 			SeasonNumber:  5,
 			EpisodeNumber: 6,
 			AirDate:       "2002-03-17",
@@ -498,7 +498,7 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title, poster_url, background_url) VALUES
-			($1::uuid, 'series', NULL, NULL, 'Stale Futurama', 'https://image.tmdb.org/stale-poster.jpg', 'https://image.tmdb.org/stale-background.jpg'),
+			($1::uuid, 'series', NULL, NULL, 'Stale Fixture Animated Series', 'https://images.example.test/stale-poster.jpg', 'https://images.example.test/stale-background.jpg'),
 			($2::uuid, 'season', $1::uuid, 5, NULL, NULL, NULL),
 			($3::uuid, 'episode', $2::uuid, 6, '   ', NULL, NULL)
 	`, seriesID, seasonID, episodeID); err != nil {
@@ -506,9 +506,9 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
-			($1::uuid, 'tmdb', 'series', '615'),
-			($2::uuid, 'tmdb', 'season', '516338'),
-			($3::uuid, 'tmdb', 'episode', '5810d584-af52-4ba3-8cef-17a98bc19f77')
+			($1::uuid, 'tmdb', 'series', '900001'),
+			($2::uuid, 'tmdb', 'season', '900005'),
+			($3::uuid, 'tmdb', 'episode', '900006')
 	`, seriesID, seasonID, episodeID); err != nil {
 		t.Fatalf("seed cached external IDs: %v", err)
 	}
@@ -564,13 +564,13 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 	if seriesDate != "1999-03-28" || seasonDate != "2002-02-10" || episodeDate != "2002-03-17" {
 		t.Fatalf("unexpected backfilled dates: series=%q season=%q episode=%q", seriesDate, seasonDate, episodeDate)
 	}
-	if seriesTitle != "Futurama" || seriesPosterURL != seriesPoster || seriesBackgroundURL != seriesBackdrop {
+	if seriesTitle != "Fixture Animated Series" || seriesPosterURL != seriesPoster || seriesBackgroundURL != seriesBackdrop {
 		t.Fatalf("unexpected cached series snapshot: title=%q poster=%q background=%q", seriesTitle, seriesPosterURL, seriesBackgroundURL)
 	}
 	if seasonTitle != "Saison 5" || seasonPosterURL != seasonPoster {
 		t.Fatalf("unexpected cached season snapshot: title=%q poster=%q", seasonTitle, seasonPosterURL)
 	}
-	if episodeTitle != "Astéroïque" || episodePosterURL != episodeStill {
+	if episodeTitle != "Fixture Episode" || episodePosterURL != episodeStill {
 		t.Fatalf("unexpected cached episode snapshot: title=%q still=%q", episodeTitle, episodePosterURL)
 	}
 }
@@ -724,7 +724,7 @@ func TestMappedSpecialsIgnoreUnrelatedCanonicalSeasonFailure(t *testing.T) {
 	mapper := &specialsMapper{season: ProviderSeason{
 		ExternalID: "1000", Name: "Specials", SeasonNumber: 0,
 		Episodes: []ProviderEpisode{{
-			ExternalID: "10001", Name: "Behind the Scenes", SeasonNumber: 0, EpisodeNumber: 1, AirDate: "2024-01-01",
+			ExternalID: "10001", Name: "Fixture Episode", SeasonNumber: 0, EpisodeNumber: 1, AirDate: "2024-01-01",
 		}},
 	}}
 	var logs bytes.Buffer
@@ -743,7 +743,7 @@ func TestMappedSpecialsIgnoreUnrelatedCanonicalSeasonFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load mapped specials: %v", err)
 	}
-	if mapper.seriesTVDBID != "81189" || mapper.seasonTVDBID != "1000" {
+	if mapper.seriesTVDBID != "93001" || mapper.seasonTVDBID != "1000" {
 		t.Fatalf("unexpected mapped route: series=%q season=%q", mapper.seriesTVDBID, mapper.seasonTVDBID)
 	}
 	if season.SeasonNumber != 0 || season.ID != mappedSeasonID(seriesID, "1000") || len(season.Episodes) != 1 ||
@@ -769,12 +769,12 @@ func TestMappedSpecialsPersistTVDBOnlyEpisodesWithoutTMDBSeason(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	seriesID, _, _, _ := seedMappedSpecialsCache(t, pool, false)
 	mapper := &specialsMapper{season: ProviderSeason{
-		ExternalID: "1928275", Name: "Specials", SeasonNumber: 0,
+		ExternalID: "930199", Name: "Specials", SeasonNumber: 0,
 		Episodes: []ProviderEpisode{
-			{ExternalID: "9873798", Name: "Building a World", SeasonNumber: 0, EpisodeNumber: 1, AirDate: "2023-06-30"},
-			{ExternalID: "9873799", Name: "Questions of the Silo", SeasonNumber: 0, EpisodeNumber: 2, AirDate: "2023-05-05"},
-			{ExternalID: "10798335", Name: "Season 1 Recap", SeasonNumber: 0, EpisodeNumber: 3, AirDate: "2024-11-11"},
-			{ExternalID: "10806950", Name: "The Rebellion in Season 2", SeasonNumber: 0, EpisodeNumber: 4, AirDate: "2024-11-15"},
+			{ExternalID: "940101", Name: "Fixture Episode 1", SeasonNumber: 0, EpisodeNumber: 1, AirDate: "2023-06-30"},
+			{ExternalID: "940102", Name: "Fixture Episode 2", SeasonNumber: 0, EpisodeNumber: 2, AirDate: "2023-05-05"},
+			{ExternalID: "940103", Name: "Fixture Episode 3", SeasonNumber: 0, EpisodeNumber: 3, AirDate: "2024-11-11"},
+			{ExternalID: "940104", Name: "Fixture Episode 4", SeasonNumber: 0, EpisodeNumber: 4, AirDate: "2024-11-15"},
 		},
 	}}
 	service := &Service{pool: pool, mapper: mapper, cacheTTL: time.Hour}
@@ -817,7 +817,7 @@ func TestMappedSpecialsPersistTVDBOnlyEpisodesWithoutTMDBSeason(t *testing.T) {
 		  ON season_identity.title_id = season.id
 		 AND season_identity.provider = 'tvdb'
 		 AND season_identity.namespace = 'season'
-		 AND season_identity.external_id = '1928275'
+		 AND season_identity.external_id = '930199'
 		JOIN titles AS episode
 		  ON episode.parent_id = season.id
 		 AND episode.media_type = 'episode'
@@ -918,12 +918,12 @@ func seedMappedSpecialsCache(t *testing.T, pool *pgxpool.Pool, includeCanonicalS
 		missingSeasonID = "00000000-0000-4000-8000-000000000699"
 	)
 	base := Series{
-		ID: seriesID, MediaType: MediaTypeSeries, Name: "Breaking Bad",
+		ID: seriesID, MediaType: MediaTypeSeries, Name: "Fixture Series",
 		Cast: []CastMember{}, Seasons: []SeasonSummary{{
 			ID: missingSeasonID, MediaType: MediaTypeSeason, SeriesID: seriesID,
 			Name: "Season 1", SeasonNumber: 1,
 		}},
-		ExternalIDs: map[string]string{"tmdb": "1396", "tvdb": "81189"},
+		ExternalIDs: map[string]string{"tmdb": "92001", "tvdb": "93001"},
 	}
 	var specials Season
 	if includeCanonicalSpecials {
@@ -936,10 +936,10 @@ func seedMappedSpecialsCache(t *testing.T, pool *pgxpool.Pool, includeCanonicalS
 			Name: "Specials", SeasonNumber: 0,
 			Episodes: []Episode{{
 				ID: episodeID, MediaType: MediaTypeEpisode, SeasonID: specialsID,
-				Name: "Behind the Scenes", SeasonNumber: 0, EpisodeNumber: 1, AirDate: "2024-01-01",
-				ExternalIDs: map[string]string{"tmdb": "62084"},
+				Name: "Fixture Episode", SeasonNumber: 0, EpisodeNumber: 1, AirDate: "2024-01-01",
+				ExternalIDs: map[string]string{"tmdb": "9201001"},
 			}},
-			ExternalIDs: map[string]string{"tmdb": "3627"},
+			ExternalIDs: map[string]string{"tmdb": "92010"},
 		}
 	}
 	basePayload, err := json.Marshal(base)
@@ -949,12 +949,12 @@ func seedMappedSpecialsCache(t *testing.T, pool *pgxpool.Pool, includeCanonicalS
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO titles (id, media_type, display_title)
-		VALUES ($1::uuid, 'series', 'Breaking Bad');
+		VALUES ($1::uuid, 'series', 'Fixture Series');
 		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title)
 		VALUES ($3::uuid, 'season', $1::uuid, 1, 'Season 1');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
-			($1::uuid, 'tmdb', 'series', '1396'),
-			($1::uuid, 'tvdb', 'series', '81189'),
+			($1::uuid, 'tmdb', 'series', '92001'),
+			($1::uuid, 'tvdb', 'series', '93001'),
 			($3::uuid, 'tmdb', 'season', '4000');
 		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at)
 		VALUES ($1::uuid, 'tmdb', 'en-US', $2::jsonb, now() + interval '1 hour')
@@ -969,10 +969,10 @@ func seedMappedSpecialsCache(t *testing.T, pool *pgxpool.Pool, includeCanonicalS
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO titles (id, media_type, parent_id, ordinal, display_title) VALUES
 				($2::uuid, 'season', $1::uuid, 0, 'Specials'),
-				($3::uuid, 'episode', $2::uuid, 1, 'Behind the Scenes');
+				($3::uuid, 'episode', $2::uuid, 1, 'Fixture Episode');
 			INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
-				($2::uuid, 'tmdb', 'season', '3627'),
-				($3::uuid, 'tmdb', 'episode', '62084');
+				($2::uuid, 'tmdb', 'season', '92010'),
+				($3::uuid, 'tmdb', 'episode', '9201001');
 			INSERT INTO title_metadata (title_id, provider, language, payload, expires_at)
 			VALUES ($2::uuid, 'tmdb', 'en-US', $4::jsonb, now() + interval '1 hour')
 		`, pgx.QueryExecModeSimpleProtocol, seriesID, specialsID, episodeID, string(specialsPayload)); err != nil {

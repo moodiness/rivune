@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "シーズンを未視聴にしました",
   "media.season.watch.error.partialUpdate": "一部のエピソードの視聴状態を更新できませんでした。",
   "media.season.watch.error.partialUpdateTitle": "シーズンを完全には更新できませんでした",
-  "media.season.watch.actions.markUnwatched": "シーズンを未視聴にする",
-  "media.season.watch.actions.markWatched": "シーズンを視聴済みにする",
   "media.sources.error.loadFailed": "ストリームを読み込めませんでした。",
   "media.sources.error.unavailableTitle": "ストリームを利用できません",
   "media.sources.error.encodingRequired": "このソースではメディアのエンコードが必要ですが、RivuneのWeb再生では自動的に開始されません。別のソースまたは外部プレーヤーで再生するオプションを選択してください。",

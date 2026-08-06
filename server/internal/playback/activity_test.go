@@ -182,14 +182,14 @@ func TestFormatActivityTitle(t *testing.T) {
 		want          string
 	}{
 		{
-			name: "full episode label", storedTitle: "Astéroïque",
-			parentType: "season", parentTitle: "Season 5", ancestorTitle: "Futurama",
-			season: &season, episode: &episode, want: "Futurama · S05E06 · Astéroïque",
+			name: "full episode label", storedTitle: "Fixture Episode",
+			parentType: "season", parentTitle: "Season 5", ancestorTitle: "Fixture Animated Series",
+			season: &season, episode: &episode, want: "Fixture Animated Series · S05E06 · Fixture Episode",
 		},
 		{
 			name: "blank episode title", parentType: "season", parentTitle: "Season 5",
-			ancestorTitle: "Futurama", season: &season, episode: &episode,
-			want: "Futurama · S05E06",
+			ancestorTitle: "Fixture Animated Series", season: &season, episode: &episode,
+			want: "Fixture Animated Series · S05E06",
 		},
 		{
 			name: "UUID fallback suppressed",
@@ -233,14 +233,14 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire playback activity fixture lock connection: %v", err)
 	}
-	if _, err := lockConn.Exec(ctx, "SELECT pg_advisory_lock(193648653, 1232874)"); err != nil {
+	if _, err := lockConn.Exec(ctx, "SELECT pg_advisory_lock(193648653, 900006)"); err != nil {
 		lockConn.Release()
 		t.Fatalf("lock playback activity provider fixture: %v", err)
 	}
 	t.Cleanup(func() {
 		unlockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if _, err := lockConn.Exec(unlockCtx, "SELECT pg_advisory_unlock(193648653, 1232874)"); err != nil {
+		if _, err := lockConn.Exec(unlockCtx, "SELECT pg_advisory_unlock(193648653, 900006)"); err != nil {
 			t.Errorf("unlock playback activity provider fixture: %v", err)
 		}
 		lockConn.Release()
@@ -312,17 +312,17 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 	}
 
 	const (
-		episodeStill = "https://images.example.test/futurama/season-5/episode-6.jpg"
-		seriesIMDb   = "tt0149460"
-		seriesTMDB   = "615"
-		episodeTMDB  = "1232874"
-		episodeTVDB  = "131235"
+		episodeStill = "https://images.example.test/fixture-animated-series/season-5/episode-6.jpg"
+		seriesIMDb   = "tt9000001"
+		seriesTMDB   = "900001"
+		episodeTMDB  = "900006"
+		episodeTVDB  = "9000006"
 	)
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title, poster_url) VALUES
-			($1::uuid, 'series', NULL, NULL, 'Futurama', 'https://images.example.test/futurama.jpg'),
-			($2::uuid, 'season', $1::uuid, 5, 'Season 5', 'https://images.example.test/futurama/season-5.jpg'),
-			($3::uuid, 'episode', $2::uuid, 6, 'Astéroïque', $4)
+			($1::uuid, 'series', NULL, NULL, 'Fixture Animated Series', 'https://images.example.test/fixture-animated-series.jpg'),
+			($2::uuid, 'season', $1::uuid, 5, 'Season 5', 'https://images.example.test/fixture-animated-series/season-5.jpg'),
+			($3::uuid, 'episode', $2::uuid, 6, 'Fixture Episode', $4)
 	`, seriesID, seasonID, episodeID, episodeStill); err != nil {
 		t.Fatalf("seed playback activity title hierarchy: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 			token_hash, assets, expires_at, last_seen_at
 		)
 		VALUES (
-			$1::uuid, $2::uuid, $3::uuid, $4, 'episode', 'tmdb:episode:1232874',
+			$1::uuid, $2::uuid, $3::uuid, $4, 'episode', 'tmdb:episode:900006',
 			$5, '[{"kind":"stream","durationSeconds":1320}]'::jsonb, now() + interval '1 hour', now()
 		)
 	`, playbackSessionID, authSessionID, profileID, episodeID, playbackTokenHash[:]); err != nil {
@@ -414,8 +414,8 @@ func TestActivityProjectsEpisodeHierarchyFromDatabase(t *testing.T) {
 	if session.TitleID != episodeID {
 		t.Fatalf("activity title ID = %q, want %q", session.TitleID, episodeID)
 	}
-	if session.Title != "Futurama · S05E06 · Astéroïque" {
-		t.Fatalf("activity title = %q, want %q", session.Title, "Futurama · S05E06 · Astéroïque")
+	if session.Title != "Fixture Animated Series · S05E06 · Fixture Episode" {
+		t.Fatalf("activity title = %q, want %q", session.Title, "Fixture Animated Series · S05E06 · Fixture Episode")
 	}
 	if session.Title == episodeID {
 		t.Fatalf("activity title exposed title UUID: %q", session.Title)

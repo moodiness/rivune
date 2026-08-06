@@ -253,8 +253,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Сезонът е неизгледан",
   "media.season.watch.error.partialUpdate": "Състоянията на гледане на някои епизоди не можаха да бъдат актуализирани.",
   "media.season.watch.error.partialUpdateTitle": "Сезонът не е актуализиран изцяло",
-  "media.season.watch.actions.markUnwatched": "Отбележи сезона като неизгледан",
-  "media.season.watch.actions.markWatched": "Отбележи сезона като изгледан",
   "media.sources.error.loadFailed": "Потоците не можаха да бъдат заредени.",
   "media.sources.error.unavailableTitle": "Потоците не са налични",
   "media.sources.error.encodingRequired": "Този източник изисква кодиране на мултимедийното съдържание, което уеб възпроизвеждането в Rivune не стартира автоматично. Изберете друг източник или опция за външен плейър.",

@@ -1380,6 +1380,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   }
 
   async function toggleSeasonWatched() {
+    if (item.mediaType !== "series" || !seasonID || season?.id !== seasonID || seriesLoading || seasonLoading || watchedBusy) return;
     const episodes = (season?.episodes ?? []).filter((episode) => !episodeIsUpcoming(episode));
     if (episodes.length === 0) return;
     const watched = !episodes.every((episode) => episodeProgress[episode.id]?.completed);
@@ -1412,6 +1413,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   }
 
   async function toggleCustomSeasonWatched() {
+    if (item.mediaType !== "anime" || !showCustomVideoChooser || activeCustomVideoGroup?.season === undefined) return;
     const videos = visibleCustomVideos.flatMap((video) => {
       const identity = resolvedCustomVideos.get(video.id);
       return identity && !customVideoIsUpcoming(video) ? [{ video, identity }] : [];
@@ -1520,6 +1522,9 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   const customEpisodeContext = customVideoContext && activeCustomVideo?.season !== undefined && activeCustomVideo.episode !== undefined;
   const customWatchPending = Boolean(customEpisodeContext && (!metaResolved || customProgressLoading));
   const customSeasonPending = !metaResolved || customProgressLoading;
+  const standardSeasonPending = seriesLoading || seasonLoading || season?.id !== seasonID;
+  const showStandardSeasonWatch = item.mediaType === "series" && Boolean(seasonID);
+  const showCustomSeasonWatch = item.mediaType === "anime" && showCustomVideoChooser && activeCustomVideoGroup?.season !== undefined;
   const customDisplayItem = customVideoContext && activeCustomVideo ? customVideoItem(activeCustomVideo, details) : details;
   const activePlayerItem = selectedEpisode && series
     ? episodeItem(series, selectedEpisode, details)
@@ -1691,6 +1696,14 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                   <Clapperboard size={19} />
                   {t("media.trailers.title")}
                 </Button>}
+                {showStandardSeasonWatch && <Button type="button" variant="secondary" disabled={standardSeasonPending || availableSeasonEpisodes.length === 0 || Boolean(watchedBusy)} loading={standardSeasonPending || watchedBusy === seasonID} aria-busy={standardSeasonPending || watchedBusy === seasonID} aria-label={t(allSeasonWatched ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")} onClick={() => void toggleSeasonWatched()}>
+                  {allSeasonWatched ? <EyeOff size={19} /> : <Eye size={19} />}
+                  {t(allSeasonWatched ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
+                </Button>}
+                {showCustomSeasonWatch && <Button type="button" variant="secondary" disabled={!customProgressConfirmed || availableCustomSeasonVideos.length !== watchableCustomSeasonVideos.length || watchableCustomSeasonVideos.length === 0 || Boolean(watchedBusy)} loading={customSeasonPending || watchedBusy === customSeasonBusyKey} aria-busy={customSeasonPending || watchedBusy === customSeasonBusyKey} aria-label={t(allCustomSeasonWatched ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")} onClick={() => void toggleCustomSeasonWatched()}>
+                  {allCustomSeasonWatched ? <EyeOff size={19} /> : <Eye size={19} />}
+                  {t(allCustomSeasonWatched ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
+                </Button>}
                 {(item.mediaType === "movie" || item.mediaType === "episode") && <Button type="button" variant="secondary" loading={Boolean(watchedBusy)} aria-busy={Boolean(watchedBusy)} aria-label={t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")} onClick={() => void toggleTitleWatched()}>
                   {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
                   {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
@@ -1762,10 +1775,6 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                         : <>
                           <div className="season-watch-state">
                             <span>{t("media.season.watchedCount", { watched: watchedEpisodeCount, total: availableSeasonEpisodes.length })}</span>
-                            <button type="button" disabled={availableSeasonEpisodes.length === 0 || watchedBusy === seasonID} onClick={() => void toggleSeasonWatched()}>
-                              {watchedBusy === seasonID ? <LoaderCircle className="spin" size={15} /> : allSeasonWatched ? <EyeOff size={15} /> : <Eye size={15} />}
-                              {t(allSeasonWatched ? "media.season.watch.actions.markUnwatched" : "media.season.watch.actions.markWatched")}
-                            </button>
                           </div>
 
                           <div ref={episodeListRef} className="episode-list">
@@ -1832,10 +1841,6 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                       </HorizontalDragRow>
                       <div className="season-watch-state">
                         <span>{t("media.season.watchedCount", { watched: watchedCustomVideoCount, total: watchableCustomSeasonVideos.length })}</span>
-                        <button type="button" disabled={!customProgressConfirmed || availableCustomSeasonVideos.length !== watchableCustomSeasonVideos.length || watchableCustomSeasonVideos.length === 0 || Boolean(watchedBusy)} aria-busy={customSeasonPending || watchedBusy === customSeasonBusyKey} onClick={() => void toggleCustomSeasonWatched()}>
-                          {customSeasonPending || watchedBusy === customSeasonBusyKey ? <LoaderCircle className="spin" size={15} /> : allCustomSeasonWatched ? <EyeOff size={15} /> : <Eye size={15} />}
-                          {t(allCustomSeasonWatched ? "media.season.watch.actions.markUnwatched" : "media.season.watch.actions.markWatched")}
-                        </button>
                       </div>
                       <div ref={episodeListRef} className="episode-list episode-list--custom">
                         {visibleCustomVideos.map((video, index) => {

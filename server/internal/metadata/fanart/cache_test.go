@@ -81,7 +81,7 @@ func TestMovieArtworkCacheIsSharedAcrossCollectionsFoldersAndClientInstances(t *
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if r.URL.Path != "/movies/550" {
+		if r.URL.Path != "/movies/900101" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		_, _ = w.Write([]byte(`{
@@ -95,18 +95,18 @@ func TestMovieArtworkCacheIsSharedAcrossCollectionsFoldersAndClientInstances(t *
 	responseCache := newMemoryArtworkResponseCache()
 	firstClient := newWithBaseURL("project-key", server.URL, server.Client())
 	firstClient.enableResponseCache(responseCache, time.Hour, nil)
-	movie, err := firstClient.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "550"}, "fr-FR")
+	movie, err := firstClient.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "900101"}, "fr-FR")
 	if err != nil {
 		t.Fatalf("enrich movie: %v", err)
 	}
-	collection, err := firstClient.EnrichCollection(context.Background(), metadata.ProviderCollection{ExternalID: "550"}, "fr-FR")
+	collection, err := firstClient.EnrichCollection(context.Background(), metadata.ProviderCollection{ExternalID: "900101"}, "fr-FR")
 	if err != nil {
 		t.Fatalf("enrich collection from shared movie identity: %v", err)
 	}
 
 	secondClient := newWithBaseURL("project-key", server.URL, server.Client())
 	secondClient.enableResponseCache(responseCache, time.Hour, nil)
-	restored, err := secondClient.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "550"}, "fr-FR")
+	restored, err := secondClient.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "900101"}, "fr-FR")
 	if err != nil {
 		t.Fatalf("restore movie artwork: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestFanartCacheCoalescesConcurrentFolderItems(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			_, err := client.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "550"}, "fr-FR")
+			_, err := client.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "900101"}, "fr-FR")
 			errorsByRequest <- err
 		}()
 	}
@@ -186,7 +186,7 @@ func TestSeriesArtworkCacheIsSharedWithSeasonFolders(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if r.URL.Path != "/tv/81189" {
+		if r.URL.Path != "/tv/93001" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		_, _ = w.Write([]byte(`{
@@ -202,12 +202,12 @@ func TestSeriesArtworkCacheIsSharedWithSeasonFolders(t *testing.T) {
 	client := newWithBaseURL("project-key", server.URL, server.Client())
 	client.enableResponseCache(newMemoryArtworkResponseCache(), time.Hour, nil)
 	series, err := client.EnrichSeries(context.Background(), metadata.ProviderSeries{
-		AdditionalIDs: map[string]string{"tvdb": "81189"},
+		AdditionalIDs: map[string]string{"tvdb": "93001"},
 	}, "fr-FR")
 	if err != nil {
 		t.Fatalf("enrich series: %v", err)
 	}
-	season, err := client.EnrichSeason(context.Background(), "81189", metadata.ProviderSeason{SeasonNumber: 2, BackdropURL: "https://image.tmdb.org/season-2-background.jpg"}, "fr-FR")
+	season, err := client.EnrichSeason(context.Background(), "93001", metadata.ProviderSeason{SeasonNumber: 2, BackdropURL: "https://image.tmdb.org/season-2-background.jpg"}, "fr-FR")
 	if err != nil {
 		t.Fatalf("enrich season from cached series response: %v", err)
 	}

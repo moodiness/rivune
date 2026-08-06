@@ -164,34 +164,34 @@ test("source folders use Fanart collection posters instead of the first title ar
   rivune.setCollectionSourcePosters("alice", false);
   rivune.setCollectionFolders("alice", [{
     id: "alice-folder",
-    title: "Spider-Man",
+    title: "Fixture Movie Collection",
     sourceView: "folders",
     sources: [
       {
-        id: "mcu-source",
+        id: "fixture-source",
         kind: "tmdb",
-        title: "Spider-Man (MCU)",
-        tmdb: { sourceType: "collection", tmdbId: 531241, mediaType: "movie", sort: "release_date.desc", filters: {} },
+        title: "Fixture Movie",
+        tmdb: { sourceType: "collection", tmdbId: 900401, mediaType: "movie", sort: "release_date.desc", filters: {} },
       },
       {
-        id: "amazing-source",
+        id: "fixture-alternate-source",
         kind: "tmdb",
-        title: "The Amazing Spider-Man",
-        tmdb: { sourceType: "collection", tmdbId: 125574, mediaType: "movie", sort: "release_date.desc", filters: {} },
+        title: "Fixture Movie Alternate",
+        tmdb: { sourceType: "collection", tmdbId: 900402, mediaType: "movie", sort: "release_date.desc", filters: {} },
       },
     ],
   }]);
 
   await page.goto("/");
-  const openFolder = page.getByRole("button", { name: "Open Spider-Man", exact: true });
+  const openFolder = page.getByRole("button", { name: "Open Fixture Movie Collection", exact: true });
   await expect(openFolder).toBeEnabled();
   rivune.setCollectionSourcePosters("alice", true);
   await openFolder.click();
 
-  const mcu = page.getByRole("button", { name: "Open Spider-Man (MCU)" });
-  const amazing = page.getByRole("button", { name: "Open The Amazing Spider-Man" });
-  await expect(mcu.locator("img")).toHaveAttribute("src", "/api/v1/artwork/mcu-source-collection-poster");
-  await expect(amazing.locator("img")).toHaveAttribute("src", "/api/v1/artwork/amazing-source-collection-poster");
+  const fixture = page.getByRole("button", { name: "Open Fixture Movie", exact: true });
+  const alternate = page.getByRole("button", { name: "Open Fixture Movie Alternate", exact: true });
+  await expect(fixture.locator("img")).toHaveAttribute("src", "/api/v1/artwork/fixture-source-collection-poster");
+  await expect(alternate.locator("img")).toHaveAttribute("src", "/api/v1/artwork/fixture-alternate-source-collection-poster");
 });
 
 test("Home checkpoints resolved folders while slower rows are still loading", async ({ page, rivune }) => {

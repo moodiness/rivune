@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Sezona nije odgledana",
   "media.season.watch.error.partialUpdate": "Nije moguće ažurirati status odgledanosti nekih epizoda.",
   "media.season.watch.error.partialUpdateTitle": "Sezona nije potpuno ažurirana",
-  "media.season.watch.actions.markUnwatched": "Označi sezonu kao neodgledanu",
-  "media.season.watch.actions.markWatched": "Označi sezonu kao odgledanu",
   "media.sources.error.loadFailed": "Strimove nije moguće učitati.",
   "media.sources.error.unavailableTitle": "Strimovi nisu dostupni",
   "media.sources.error.encodingRequired": "Ovaj izvor zahteva kodiranje medija, koje se pri reprodukciji na vebu u aplikaciji Rivune ne pokreće automatski. Izaberite drugi izvor ili opciju za spoljni plejer.",

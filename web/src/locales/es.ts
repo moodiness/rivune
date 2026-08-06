@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Temporada no vista",
   "media.season.watch.error.partialUpdate": "No se ha podido actualizar el estado de visualización de algunos episodios.",
   "media.season.watch.error.partialUpdateTitle": "Temporada no actualizada por completo",
-  "media.season.watch.actions.markUnwatched": "Marcar la temporada como no vista",
-  "media.season.watch.actions.markWatched": "Marcar la temporada como vista",
   "media.sources.error.loadFailed": "No se han podido cargar las fuentes de reproducción.",
   "media.sources.error.unavailableTitle": "Fuentes de reproducción no disponibles",
   "media.sources.error.encodingRequired": "Esta fuente requiere codificar el contenido multimedia, un proceso que la reproducción web de Rivune no inicia automáticamente. Elija otra fuente o una opción de reproductor externo.",

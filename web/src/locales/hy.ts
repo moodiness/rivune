@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Եթերաշրջանը չդիտված է",
   "media.season.watch.error.partialUpdate": "Որոշ դրվագների դիտման վիճակները չհաջողվեց թարմացնել։",
   "media.season.watch.error.partialUpdateTitle": "Եթերաշրջանն ամբողջությամբ չի թարմացվել",
-  "media.season.watch.actions.markUnwatched": "Նշել եթերաշրջանը որպես չդիտված",
-  "media.season.watch.actions.markWatched": "Նշել եթերաշրջանը որպես դիտված",
   "media.sources.error.loadFailed": "Հոսքերը չհաջողվեց բեռնել։",
   "media.sources.error.unavailableTitle": "Հոսքերը հասանելի չեն",
   "media.sources.error.encodingRequired": "Այս աղբյուրը պահանջում է մեդիայի կոդավորում, որը Rivune-ի վեբ նվագարկումն ինքնաբերաբար չի սկսում։ Ընտրեք այլ աղբյուր կամ արտաքին նվագարկիչի տարբերակ։",

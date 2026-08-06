@@ -23,7 +23,7 @@ func TestProductionClientRejectsCrossOriginRedirect(t *testing.T) {
 
 func TestEnrichMovieAuthenticatesAndSelectsHighestQualityArtwork(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/movies/550" {
+		if r.URL.Path != "/movies/900101" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
 		if r.Header.Get("api-key") != "project-key" {
@@ -47,7 +47,7 @@ func TestEnrichMovieAuthenticatesAndSelectsHighestQualityArtwork(t *testing.T) {
 
 	client := newWithBaseURL(" project-key ", server.URL, server.Client())
 	enriched, err := client.EnrichMovie(context.Background(), metadata.ProviderMovie{
-		ExternalID: "550",
+		ExternalID: "900101",
 		PosterURL:  "https://image.tmdb.org/original-poster.jpg",
 	}, "fr-FR")
 	if err != nil {
@@ -154,7 +154,7 @@ func TestBestLocalizedImagePrioritizesLanguageWithinQualityTier(t *testing.T) {
 
 func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonArtwork(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tv/81189" {
+		if r.URL.Path != "/tv/93001" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
 		_, _ = w.Write([]byte(`{
@@ -175,11 +175,11 @@ func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonArtwork(t *testing.T) {
 
 	client := newWithBaseURL("project-key", server.URL, server.Client())
 	enriched, err := client.EnrichSeries(context.Background(), metadata.ProviderSeries{
-		ExternalID:    "1396",
-		AdditionalIDs: map[string]string{"tvdb": "81189"},
+		ExternalID:    "92001",
+		AdditionalIDs: map[string]string{"tvdb": "93001"},
 		Seasons: []metadata.ProviderSeasonSummary{
-			{ExternalID: "3572", SeasonNumber: 1, PosterURL: "https://image.tmdb.org/season-1.jpg", BackdropURL: "https://image.tmdb.org/season-1-background.jpg"},
-			{ExternalID: "3573", SeasonNumber: 2},
+			{ExternalID: "92011", SeasonNumber: 1, PosterURL: "https://image.tmdb.org/season-1.jpg", BackdropURL: "https://image.tmdb.org/season-1-background.jpg"},
+			{ExternalID: "92012", SeasonNumber: 2},
 		},
 	}, "fr-FR")
 	if err != nil {
@@ -213,7 +213,7 @@ func TestEnrichSeasonSelectsOnlyRequestedSeason(t *testing.T) {
 	defer server.Close()
 
 	client := newWithBaseURL("project-key", server.URL, server.Client())
-	enriched, err := client.EnrichSeason(context.Background(), "81189", metadata.ProviderSeason{SeasonNumber: 2, BackdropURL: "https://image.tmdb.org/season-2-background.jpg"}, "en-US")
+	enriched, err := client.EnrichSeason(context.Background(), "93001", metadata.ProviderSeason{SeasonNumber: 2, BackdropURL: "https://image.tmdb.org/season-2-background.jpg"}, "en-US")
 	if err != nil {
 		t.Fatalf("enrich season: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestProviderStatusErrorsAreTyped(t *testing.T) {
 			}))
 			defer server.Close()
 			client := newWithBaseURL("project-key", server.URL, server.Client())
-			_, err := client.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "550"}, "en-US")
+			_, err := client.EnrichMovie(context.Background(), metadata.ProviderMovie{ExternalID: "900101"}, "en-US")
 			if !errors.Is(err, test.want) {
 				t.Fatalf("expected %v, got %v", test.want, err)
 			}

@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "本季未观看",
   "media.season.watch.error.partialUpdate": "部分剧集的观看状态无法更新。",
   "media.season.watch.error.partialUpdateTitle": "本季未完全更新",
-  "media.season.watch.actions.markUnwatched": "将本季标记为未观看",
-  "media.season.watch.actions.markWatched": "将本季标记为已观看",
   "media.sources.error.loadFailed": "无法加载视频流。",
   "media.sources.error.unavailableTitle": "视频流不可用",
   "media.sources.error.encodingRequired": "此来源需要进行媒体编码，而 Rivune 网页播放不会自动启动编码。请选择其他来源或外部播放器选项。",

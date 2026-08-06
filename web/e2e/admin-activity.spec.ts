@@ -10,9 +10,9 @@ const activity = {
       id: "11111111-1111-4111-8111-111111111111",
       titleId: "episode-1",
       artworkUrl: "https://fixtures.rivune.test/activity-artwork.jpg",
-      externalIds: { imdb: "tt0149460", tmdb: "615", tvdb: "11704240" },
+      externalIds: { imdb: "tt9000001", tmdb: "900001", tvdb: "9000006" },
       externalIdMediaTypes: { imdb: "series", tmdb: "series", tvdb: "episode" },
-      title: "Futurama · S05E06 · Astéroïque",
+      title: "Fixture Animated Series · S05E06 · Fixture Episode",
       mediaType: "episode",
       mode: "transcode",
       username: "fixture-owner",
@@ -114,16 +114,16 @@ test("now-playing sessions render artwork, provider badges, transcoding progress
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: /Activity/ }).click();
 
-  const artworkSession = page.locator(".activity-session").filter({ hasText: "Futurama · S05E06 · Astéroïque" });
-  const artwork = artworkSession.getByRole("img", { name: "Futurama · S05E06 · Astéroïque" });
+  const artworkSession = page.locator(".activity-session").filter({ hasText: "Fixture Animated Series · S05E06 · Fixture Episode" });
+  const artwork = artworkSession.getByRole("img", { name: "Fixture Animated Series · S05E06 · Fixture Episode" });
   await expect(artwork).toBeVisible();
   await expect(artwork).toHaveAttribute("loading", "lazy");
-  await expect(artworkSession.locator(".activity-session__copy > strong")).toHaveText("Futurama · S05E06 · Astéroïque");
-  await expect(artworkSession.getByLabel("IMDb · tt0149460")).toHaveAttribute("href", "https://www.imdb.com/title/tt0149460/");
-  const tmdb = artworkSession.getByLabel("TMDB · 615");
-  await expect(tmdb).toHaveAttribute("href", "https://www.themoviedb.org/tv/615");
+  await expect(artworkSession.locator(".activity-session__copy > strong")).toHaveText("Fixture Animated Series · S05E06 · Fixture Episode");
+  await expect(artworkSession.getByLabel("IMDb · tt9000001")).toHaveAttribute("href", "https://www.imdb.com/title/tt9000001/");
+  const tmdb = artworkSession.getByLabel("TMDB · 900001");
+  await expect(tmdb).toHaveAttribute("href", "https://www.themoviedb.org/tv/900001");
   await expect(tmdb.locator("svg")).toHaveCount(1);
-  await expect(artworkSession.getByLabel("TVDB · 11704240")).toHaveAttribute("href", "https://thetvdb.com/dereferrer/episode/11704240");
+  await expect(artworkSession.getByLabel("TVDB · 9000006")).toHaveAttribute("href", "https://thetvdb.com/dereferrer/episode/9000006");
   await expect(artworkSession.locator(".activity-session__provider")).toHaveCount(3);
   const sessionProgress = artworkSession.locator(".activity-session__progress");
   await expect(sessionProgress).toContainText("10m 5s / 22m");
@@ -214,9 +214,9 @@ test("stopping a playback session keeps confirmation semantics and returns focus
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: /Activity/ }).click();
 
-  const session = page.locator(".activity-session").filter({ hasText: "Futurama · S05E06 · Astéroïque" });
+  const session = page.locator(".activity-session").filter({ hasText: "Fixture Animated Series · S05E06 · Fixture Episode" });
   await session.getByRole("button", { name: "Stop" }).click();
-  await expect(page.getByRole("heading", { name: /Stop Futurama/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Stop Fixture Animated Series/ })).toBeVisible();
   await page.getByRole("button", { name: "Stop playback" }).click();
 
   await expect.poll(() => deletedSessionID).toBe("11111111-1111-4111-8111-111111111111");

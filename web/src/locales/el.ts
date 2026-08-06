@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Η σεζόν επισημάνθηκε ως μη παρακολουθημένη",
   "media.season.watch.error.partialUpdate": "Δεν ήταν δυνατή η ενημέρωση της κατάστασης παρακολούθησης ορισμένων επεισοδίων.",
   "media.season.watch.error.partialUpdateTitle": "Η σεζόν δεν ενημερώθηκε πλήρως",
-  "media.season.watch.actions.markUnwatched": "Επισήμανση σεζόν ως μη παρακολουθημένης",
-  "media.season.watch.actions.markWatched": "Επισήμανση σεζόν ως παρακολουθημένης",
   "media.sources.error.loadFailed": "Δεν ήταν δυνατή η φόρτωση των ροών.",
   "media.sources.error.unavailableTitle": "Οι ροές δεν είναι διαθέσιμες",
   "media.sources.error.encodingRequired": "Αυτή η πηγή απαιτεί κωδικοποίηση πολυμέσων, την οποία το Rivune δεν ξεκινά αυτόματα κατά την αναπαραγωγή μέσω προγράμματος περιήγησης. Επιλέξτε άλλη πηγή ή μια επιλογή αναπαραγωγής σε εξωτερικό πρόγραμμα.",

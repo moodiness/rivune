@@ -44,7 +44,7 @@ func TestIntroDBCachePruneIsBoundedAndAmortized(t *testing.T) {
 func TestFetchIntroDBMarkersUsesVerifiedSegmentsEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet || request.URL.Path != "/segments" ||
-			request.URL.Query().Get("imdb_id") != "tt0903747" || request.URL.Query().Get("season") != "1" || request.URL.Query().Get("episode") != "1" {
+			request.URL.Query().Get("imdb_id") != "tt9002001" || request.URL.Query().Get("season") != "1" || request.URL.Query().Get("episode") != "1" {
 			t.Fatalf("unexpected IntroDB request %s %s", request.Method, request.URL.String())
 		}
 		if request.Header.Get("Authorization") != "" || request.Header.Get("User-Agent") != "Rivune/1" {
@@ -52,7 +52,7 @@ func TestFetchIntroDBMarkersUsesVerifiedSegmentsEndpoint(t *testing.T) {
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{
-			"imdb_id":"tt0903747","season":1,"episode":1,
+			"imdb_id":"tt9002001","season":1,"episode":1,
 			"intro":{"start_ms":2500,"end_ms":58000,"start_sec":2.5,"end_sec":58,"confidence":0.9,"submission_count":3},
 			"recap":{"start_ms":58000,"end_ms":90000,"start_sec":58,"end_sec":90,"confidence":1,"submission_count":1},
 			"outro":{"start_ms":3431000,"end_ms":3500000,"start_sec":3431,"end_sec":3500,"confidence":1,"submission_count":1}
@@ -61,7 +61,7 @@ func TestFetchIntroDBMarkersUsesVerifiedSegmentsEndpoint(t *testing.T) {
 	defer server.Close()
 
 	service := &Service{introDBClient: server.Client(), introDBBaseURL: server.URL}
-	markers, found, err := service.fetchIntroDBMarkers(context.Background(), MarkerInput{IMDBID: "tt0903747", Season: 1, Episode: 1})
+	markers, found, err := service.fetchIntroDBMarkers(context.Background(), MarkerInput{IMDBID: "tt9002001", Season: 1, Episode: 1})
 	if err != nil {
 		t.Fatalf("fetch IntroDB markers: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestFetchIntroDBMarkersDoesNotExposeUpstreamErrors(t *testing.T) {
 	defer server.Close()
 
 	service := &Service{introDBClient: server.Client(), introDBBaseURL: server.URL}
-	_, _, err := service.fetchIntroDBMarkers(context.Background(), MarkerInput{IMDBID: "tt0903747", Season: 1, Episode: 1})
+	_, _, err := service.fetchIntroDBMarkers(context.Background(), MarkerInput{IMDBID: "tt9002001", Season: 1, Episode: 1})
 	if err == nil || err.Error() != "IntroDB returned status 503" {
 		t.Fatalf("unexpected sanitized upstream error: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestMarkersFailsOpenWhenIntroDBIsUnavailable(t *testing.T) {
 		profileTxFactory: testPlaybackProfileTxFactory,
 	}
 	result, err := service.Markers(context.Background(), auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}, MarkerInput{
-		IMDBID: "tt0903747", Season: 1, Episode: 1,
+		IMDBID: "tt9002001", Season: 1, Episode: 1,
 		IncludeIntro: true, IncludeRecap: true, IncludeOutro: true,
 	})
 	if err != nil || len(result.Markers) != 0 {

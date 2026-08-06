@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Stagione non vista",
   "media.season.watch.error.partialUpdate": "Impossibile aggiornare lo stato di visione di alcuni episodi.",
   "media.season.watch.error.partialUpdateTitle": "Stagione non completamente aggiornata",
-  "media.season.watch.actions.markUnwatched": "Segna la stagione come non vista",
-  "media.season.watch.actions.markWatched": "Segna la stagione come vista",
   "media.sources.error.loadFailed": "Impossibile caricare gli stream.",
   "media.sources.error.unavailableTitle": "Stream non disponibili",
   "media.sources.error.encodingRequired": "Questa sorgente richiede la codifica dei contenuti multimediali, che la riproduzione web di Rivune non avvia automaticamente. Scegli un'altra sorgente o l'opzione per un lettore esterno.",

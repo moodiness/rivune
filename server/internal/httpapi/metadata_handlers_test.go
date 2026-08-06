@@ -141,7 +141,7 @@ func TestSearchMoviesPassesQuery(t *testing.T) {
 }
 
 func TestMovieDetailsPassesStableTitleID(t *testing.T) {
-	service := &fakeMetadataService{detailsMovie: metadata.Movie{ID: "title-id", MediaType: metadata.MediaTypeMovie, Title: "Fight Club", Genres: []metadata.Genre{}, ExternalIDs: map[string]string{"tmdb": "550"}}}
+	service := &fakeMetadataService{detailsMovie: metadata.Movie{ID: "title-id", MediaType: metadata.MediaTypeMovie, Title: "Fixture Movie", Genres: []metadata.Genre{}, ExternalIDs: map[string]string{"tmdb": "900201"}}}
 	api := metadataAPI(service)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/titles/title-id?language=en-US", nil)
 	request.SetPathValue("titleId", "title-id")
@@ -228,20 +228,20 @@ func TestSeriesHandlersPassCanonicalIdentifiers(t *testing.T) {
 	service := &fakeMetadataService{
 		searchSeriesPage: metadata.SeriesPage{Items: []metadata.Series{}, Page: 1},
 		seriesDetailsValue: metadata.Series{
-			ID: "series-id", MediaType: metadata.MediaTypeSeries, Name: "Breaking Bad",
-			Genres: []metadata.Genre{}, Seasons: []metadata.SeasonSummary{}, ExternalIDs: map[string]string{"tmdb": "1396"},
+			ID: "series-id", MediaType: metadata.MediaTypeSeries, Name: "Fixture Series",
+			Genres: []metadata.Genre{}, Seasons: []metadata.SeasonSummary{}, ExternalIDs: map[string]string{"tmdb": "92001"},
 		},
 		seasonDetailsValue: metadata.Season{
 			ID: "season-id", MediaType: metadata.MediaTypeSeason, SeriesID: "series-id", Name: "Season 1",
-			Episodes: []metadata.Episode{}, ExternalIDs: map[string]string{"tmdb": "3572"},
+			Episodes: []metadata.Episode{}, ExternalIDs: map[string]string{"tmdb": "92011"},
 		},
 	}
 	api := metadataAPI(service)
 
-	searchRequest := httptest.NewRequest(http.MethodGet, "/api/v1/search/series?query=Breaking+Bad&language=en-US", nil)
+	searchRequest := httptest.NewRequest(http.MethodGet, "/api/v1/search/series?query=Fixture+Series&language=en-US", nil)
 	searchResponse := httptest.NewRecorder()
 	api.searchSeries(searchResponse, searchRequest, auth.Principal{})
-	if searchResponse.Code != http.StatusOK || service.searchSeriesOptions.Query != "Breaking Bad" {
+	if searchResponse.Code != http.StatusOK || service.searchSeriesOptions.Query != "Fixture Series" {
 		t.Fatalf("unexpected series search status=%d options=%+v", searchResponse.Code, service.searchSeriesOptions)
 	}
 

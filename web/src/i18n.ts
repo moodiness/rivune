@@ -185,8 +185,6 @@ const en = {
   "media.season.watch.unwatchedTitle": "Season unwatched",
   "media.season.watch.error.partialUpdate": "Some episode watch states could not be updated.",
   "media.season.watch.error.partialUpdateTitle": "Season not fully updated",
-  "media.season.watch.actions.markUnwatched": "Mark season unwatched",
-  "media.season.watch.actions.markWatched": "Mark season watched",
   "media.sources.error.loadFailed": "Streams could not be loaded.",
   "media.sources.error.unavailableTitle": "Streams unavailable",
   "media.sources.error.encodingRequired": "This source requires media encoding, which Rivune web playback does not start automatically. Choose another source or an external-player option.",

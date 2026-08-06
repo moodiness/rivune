@@ -185,8 +185,6 @@ const catalog = {
   "media.season.watch.unwatchedTitle": "Sæson ikke set",
   "media.season.watch.error.partialUpdate": "Visningsstatussen for nogle episoder kunne ikke opdateres.",
   "media.season.watch.error.partialUpdateTitle": "Sæsonen blev ikke opdateret fuldt ud",
-  "media.season.watch.actions.markUnwatched": "Markér sæson som ikke set",
-  "media.season.watch.actions.markWatched": "Markér sæson som set",
   "media.sources.error.loadFailed": "Streams kunne ikke indlæses.",
   "media.sources.error.unavailableTitle": "Streams ikke tilgængelige",
   "media.sources.error.encodingRequired": "Denne kilde kræver mediekodning, som Rivunes webafspilning ikke starter automatisk. Vælg en anden kilde eller en mulighed for afspilning i en ekstern afspiller.",
