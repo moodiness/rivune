@@ -8,7 +8,7 @@ import { mediaFromLibraryItem, mediaIdentity, resolveMediaTitle } from "../media
 import { homeCollectionSignature, homeFolderCacheKey, readContinueCache, readHomeCache, writeContinueCache, writeHomeCache, writeHomeFolderCache, type CachedContinueItem } from "../homeCache";
 import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
 import { mediaTypeLabel } from "../media";
-import type { AddonCatalogDescriptor, Collection, CollectionListResponse, CurrentProgram, LibraryItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch, TVLibraryIdentity, TVLibraryMembershipResult } from "../types";
+import type { AddonCatalogDescriptor, Collection, CollectionListResponse, CurrentProgram, LibraryItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch, ResourceResult, TVLibraryIdentity, TVLibraryMembershipResult } from "../types";
 import type { ActionMenuAnchor } from "../components";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
@@ -145,50 +145,56 @@ function currentProgramTitle(value: CurrentProgram | undefined): string | undefi
   return value?.title || value?.name;
 }
 
+function mediaFromResourceResult(result: ResourceResult): MediaItem[] {
+  const output: MediaItem[] = [];
+  const metas = result.payload.metas;
+  if (!Array.isArray(metas)) return output;
+  for (const candidate of metas) {
+    const meta = record(candidate);
+    if (!meta || typeof meta.id !== "string") continue;
+    const mediaType = stringValue(meta, "type") || result.type;
+    const addonScoped = mediaType === "tv" || !["movie", "series", "episode"].includes(mediaType);
+    const title = stringValue(meta, "name", "title") || t("media.untitled");
+    const resourceId = stringValue(meta, "resourceId") || meta.id;
+    const sourceAddonId = stringValue(meta, "sourceAddonId") || result.addonId;
+    const sourceCatalogId = stringValue(meta, "sourceCatalogId", "catalogId") || result.id;
+    const sourceName = stringValue(meta, "sourceName", "source");
+    const program = currentProgram(meta.currentProgram);
+    const logo = stringValue(meta, "logo", "logoUrl");
+    const poster = stringValue(meta, "poster", "posterUrl");
+    const background = stringValue(meta, "background", "backgroundUrl", "backdrop");
+    output.push({
+      id: resourceId,
+      resourceId,
+      mediaType,
+      title,
+      posterUrl: mediaType === "tv" ? logo || poster || background : poster,
+      backgroundUrl: mediaType === "tv" ? background || poster || logo : background,
+      logoUrl: logo,
+      description: stringValue(meta, "description", "overview"),
+      releaseInfo: stringValue(meta, "releaseInfo"),
+      released: stringValue(meta, "released"),
+      voteAverage: typeof meta.imdbRating === "number" ? meta.imdbRating : undefined,
+      externalIds: {},
+      sources: [{ id: result.addonId, kind: "addon_catalog", title: sourceName || "", addonId: result.addonId }],
+      sourceAddonId: addonScoped ? sourceAddonId : undefined,
+      sourceCatalogId: addonScoped ? sourceCatalogId : undefined,
+      sourceName: addonScoped ? sourceName : undefined,
+      country: mediaType === "tv" ? stringValue(meta, "country", "countryCode") : undefined,
+      language: mediaType === "tv" ? stringValue(meta, "language", "lang") : undefined,
+      category: mediaType === "tv" ? stringValue(meta, "category", "genre") : undefined,
+      available: mediaType === "tv" ? meta.available !== false : undefined,
+      currentProgram: mediaType === "tv" ? program : undefined,
+      raw: meta,
+    });
+  }
+  return output;
+}
+
 function mediaFromBatch(batch: ResourceBatch): MediaItem[] {
   const output: MediaItem[] = [];
   for (const result of batch.results) {
-    const metas = result.payload.metas;
-    if (!Array.isArray(metas)) continue;
-    for (const candidate of metas) {
-      const meta = record(candidate);
-      if (!meta || typeof meta.id !== "string") continue;
-      const mediaType = stringValue(meta, "type") || result.type;
-      const addonScoped = mediaType === "tv" || !["movie", "series", "episode"].includes(mediaType);
-      const title = stringValue(meta, "name", "title") || t("media.untitled");
-      const resourceId = stringValue(meta, "resourceId") || meta.id;
-      const sourceAddonId = stringValue(meta, "sourceAddonId") || result.addonId;
-      const sourceCatalogId = stringValue(meta, "sourceCatalogId", "catalogId") || result.id;
-      const sourceName = stringValue(meta, "sourceName", "source");
-      const program = currentProgram(meta.currentProgram);
-      const logo = stringValue(meta, "logo", "logoUrl");
-      const poster = stringValue(meta, "poster", "posterUrl");
-      const background = stringValue(meta, "background", "backgroundUrl", "backdrop");
-      output.push({
-        id: resourceId,
-        resourceId,
-        mediaType,
-        title,
-        posterUrl: mediaType === "tv" ? logo || poster || background : poster,
-        backgroundUrl: mediaType === "tv" ? background || poster || logo : background,
-        logoUrl: logo,
-        description: stringValue(meta, "description", "overview"),
-        releaseInfo: stringValue(meta, "releaseInfo"),
-        released: stringValue(meta, "released"),
-        voteAverage: typeof meta.imdbRating === "number" ? meta.imdbRating : undefined,
-        externalIds: {},
-        sources: [{ id: result.addonId, kind: "addon_catalog", title: sourceName || "", addonId: result.addonId }],
-        sourceAddonId: addonScoped ? sourceAddonId : undefined,
-        sourceCatalogId: addonScoped ? sourceCatalogId : undefined,
-        sourceName: addonScoped ? sourceName : undefined,
-        country: mediaType === "tv" ? stringValue(meta, "country", "countryCode") : undefined,
-        language: mediaType === "tv" ? stringValue(meta, "language", "lang") : undefined,
-        category: mediaType === "tv" ? stringValue(meta, "category", "genre") : undefined,
-        available: mediaType === "tv" ? meta.available !== false : undefined,
-        currentProgram: mediaType === "tv" ? program : undefined,
-        raw: meta,
-      });
-    }
+    for (const item of mediaFromResourceResult(result)) output.push(item);
   }
   return output;
 }
@@ -225,20 +231,24 @@ function summarizeSearchOutcomes(outcomes: PromiseSettledResult<ResourceBatch>[]
 const fallbackSearchTypes = ["movie", "series", "tv"];
 const leadingSearchTypes = ["movie", "series", "anime", "other"];
 
-function discoverSearchCatalogs(catalogs: AddonCatalogDescriptor[]): string[] {
+function discoverSearchCatalogs(catalogs: AddonCatalogDescriptor[]): { descriptors: AddonCatalogDescriptor[]; types: string[] } {
+  const descriptors = catalogs.filter((descriptor) => !descriptor.addonCatalog && descriptor.searchable && Boolean(descriptor.catalog.type.trim()));
   const seen = new Set<string>();
   const types: string[] = [];
-  for (const descriptor of catalogs) {
-    const { catalog } = descriptor;
-    if (descriptor.addonCatalog || !descriptor.searchable || !catalog.type.trim() || seen.has(catalog.type)) continue;
-    seen.add(catalog.type);
-    types.push(catalog.type);
+  for (const descriptor of descriptors) {
+    const { type } = descriptor.catalog;
+    if (seen.has(type)) continue;
+    seen.add(type);
+    types.push(type);
   }
-  return [
-    ...leadingSearchTypes.filter((type) => seen.has(type)),
-    ...types.filter((type) => !leadingSearchTypes.includes(type) && type !== "tv"),
-    ...(seen.has("tv") ? ["tv"] : []),
-  ];
+  return {
+    descriptors,
+    types: [
+      ...leadingSearchTypes.filter((type) => seen.has(type)),
+      ...types.filter((type) => !leadingSearchTypes.includes(type) && type !== "tv"),
+      ...(seen.has("tv") ? ["tv"] : []),
+    ],
+  };
 }
 
 function searchTypeLabel(type: string): string {
@@ -259,6 +269,74 @@ function mergeUniqueMedia(current: MediaItem[], incoming: MediaItem[]): MediaIte
     return true;
   });
   return additions.length > 0 ? [...current, ...additions] : current;
+}
+
+type SearchSourceSection = {
+  key: string;
+  label: string;
+  items: MediaItem[];
+};
+
+function searchSourceKey(addonId: string, type: string, catalogId: string): string {
+  return `${addonId}\u0000${type}\u0000${catalogId}`;
+}
+
+function searchSourceLabel(descriptor: AddonCatalogDescriptor | undefined, result: ResourceResult): string {
+  const addonName = descriptor?.addonName?.trim();
+  const catalogName = descriptor?.catalog.name?.trim();
+  if (addonName && catalogName && addonName !== catalogName) return `${addonName} · ${catalogName}`;
+  return addonName || catalogName || descriptor?.catalog.id.trim() || result.id.trim() || descriptor?.addonId.trim() || result.addonId;
+}
+
+function orderSearchSourceSections(sections: SearchSourceSection[], descriptors: AddonCatalogDescriptor[]): SearchSourceSection[] {
+  const descriptorOrder = new Map<string, number>();
+  descriptors.forEach((descriptor, index) => {
+    const key = searchSourceKey(descriptor.addonId, descriptor.catalog.type, descriptor.catalog.id);
+    if (!descriptorOrder.has(key)) descriptorOrder.set(key, index);
+  });
+  return [...sections].sort((left, right) => {
+    const leftOrder = descriptorOrder.get(left.key);
+    const rightOrder = descriptorOrder.get(right.key);
+    if (leftOrder === undefined && rightOrder === undefined) return 0;
+    if (leftOrder === undefined) return 1;
+    if (rightOrder === undefined) return -1;
+    return leftOrder - rightOrder;
+  });
+}
+
+function collectSearchSourcePage(resourceBatches: ResourceBatch[], descriptors: AddonCatalogDescriptor[], currentItems: MediaItem[] = []): { items: MediaItem[]; sections: SearchSourceSection[] } {
+  const descriptorBySource = new Map(descriptors.map((descriptor) => [searchSourceKey(descriptor.addonId, descriptor.catalog.type, descriptor.catalog.id), descriptor]));
+  const seen = new Set(currentItems.map(mediaIdentity));
+  const items: MediaItem[] = [];
+  const sectionsBySource = new Map<string, SearchSourceSection>();
+  for (const batch of resourceBatches) {
+    for (const result of batch.results) {
+      const key = searchSourceKey(result.addonId, result.type, result.id);
+      for (const item of mediaFromResourceResult(result)) {
+        const identity = mediaIdentity(item);
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        items.push(item);
+        let section = sectionsBySource.get(key);
+        if (!section) {
+          section = { key, label: searchSourceLabel(descriptorBySource.get(key), result), items: [] };
+          sectionsBySource.set(key, section);
+        }
+        section.items.push(item);
+      }
+    }
+  }
+  return { items, sections: orderSearchSourceSections([...sectionsBySource.values()], descriptors) };
+}
+
+function mergeSearchSourceSections(current: SearchSourceSection[], incoming: SearchSourceSection[], descriptors: AddonCatalogDescriptor[]): SearchSourceSection[] {
+  const merged = new Map(current.map((section) => [section.key, { ...section, items: [...section.items] }]));
+  for (const section of incoming) {
+    const existing = merged.get(section.key);
+    if (existing) existing.items.push(...section.items);
+    else merged.set(section.key, section);
+  }
+  return orderSearchSourceSections([...merged.values()], descriptors);
 }
 
 function tvSubtitle(item: MediaItem): string {
@@ -1035,13 +1113,14 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   const pageSize = 24;
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<MediaItem[]>([]);
+  const [sourceSections, setSourceSections] = useState<SearchSourceSection[]>([]);
   const [tvLibraryMembership, setTvLibraryMembership] = useState<Map<string, string>>(() => new Map());
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
   const [filter, setFilter] = useState<string>("all");
-  const [catalogDiscovery, setCatalogDiscovery] = useState<{ profileID: string; status: "loading" | "success" | "failure"; types: string[] }>({ profileID: "", status: "loading", types: [] });
+  const [catalogDiscovery, setCatalogDiscovery] = useState<{ profileID: string; status: "loading" | "success" | "failure"; types: string[]; descriptors: AddonCatalogDescriptor[] }>({ profileID: "", status: "loading", types: [], descriptors: [] });
   const [hasMore, setHasMore] = useState(false);
   const [nextSkip, setNextSkip] = useState(pageSize);
   const [retryVersion, setRetryVersion] = useState(0);
@@ -1061,6 +1140,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     : filter === "all"
       ? discoveredSearchTypes
       : discoveredSearchTypes.includes(filter) ? [filter] : [];
+  const selectedSearchDescriptors = filter === "all" ? [] : catalogDiscovery.descriptors.filter((descriptor) => descriptor.catalog.type === filter);
   const allSearchGroups = useMemo(() => {
     if (filter !== "all") return [];
     const itemsByType = new Map<string, MediaItem[]>();
@@ -1090,23 +1170,25 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     loadedProfileRef.current = mediaPreferences.profileID;
     setQuery(sessionStorage.getItem(`rivune.search.${mediaPreferences.profileID}`) ?? "");
     setFilter("all");
+    setItems([]);
+    setSourceSections([]);
   }, [mediaPreferences.profileID]);
 
   useEffect(() => {
     const profileID = mediaPreferences.profileID;
     const controller = new AbortController();
     let active = true;
-    setCatalogDiscovery({ profileID, status: "loading", types: [] });
+    setCatalogDiscovery({ profileID, status: "loading", types: [], descriptors: [] });
     if (!profileID) {
-      setCatalogDiscovery({ profileID, status: "success", types: [] });
+      setCatalogDiscovery({ profileID, status: "success", types: [], descriptors: [] });
       return () => controller.abort();
     }
     void api.addonCatalogs(controller.signal).then((response) => {
       if (!active || controller.signal.aborted) return;
-      setCatalogDiscovery({ profileID, status: "success", types: discoverSearchCatalogs(response.catalogs) });
+      setCatalogDiscovery({ profileID, status: "success", ...discoverSearchCatalogs(response.catalogs) });
     }).catch(() => {
       if (!active || controller.signal.aborted) return;
-      setCatalogDiscovery({ profileID, status: "failure", types: [...fallbackSearchTypes] });
+      setCatalogDiscovery({ profileID, status: "failure", types: [...fallbackSearchTypes], descriptors: [] });
     });
     return () => {
       active = false;
@@ -1124,6 +1206,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     setCheckedTvIdentities(new Set());
     if (normalizedQuery.length < 2) {
       setItems([]);
+      setSourceSections([]);
       setError("");
       setWarning("");
       setLoading(false);
@@ -1132,6 +1215,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     }
     if (!discoveryReady) {
       setItems([]);
+      setSourceSections([]);
       setError("");
       setWarning("");
       setLoading(true);
@@ -1140,6 +1224,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     }
     if (searchTypes.length === 0) {
       setItems([]);
+      setSourceSections([]);
       setError("");
       setWarning("");
       setLoading(false);
@@ -1147,6 +1232,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
       return;
     }
     setItems([]);
+    setSourceSections([]);
     setError("");
     setWarning("");
     setHasMore(false);
@@ -1160,7 +1246,9 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
         const summary = summarizeSearchOutcomes(outcomes, pageSize);
         const hasFailures = summary.httpFailureCount + summary.internalFailureCount > 0;
         const hasSuccessfulResource = summary.successfulResourceResultCount > 0;
-        const displayedItems = hasFailures && !hasSuccessfulResource ? [] : mergeUniqueMedia([], summary.items);
+        const sourcePage = filter === "all" ? undefined : collectSearchSourcePage(summary.resourceBatches, selectedSearchDescriptors);
+        const displayedItems = hasFailures && !hasSuccessfulResource ? [] : sourcePage?.items ?? mergeUniqueMedia([], summary.items);
+        const displayedSourceSections = hasFailures && !hasSuccessfulResource ? [] : sourcePage?.sections ?? [];
         const identities = tvMembershipIdentities(displayedItems).slice(0, 100);
         let membership = { checked: new Set<string>(), saved: new Map<string, string>() };
         if (identities.length > 0) {
@@ -1172,6 +1260,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
         }
         if (!active || controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
         setItems(displayedItems);
+        setSourceSections(displayedSourceSections);
         setTvLibraryMembership(membership.saved);
         setCheckedTvIdentities(membership.checked);
         setNextSkip(pageSize);
@@ -1243,7 +1332,8 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
       const summary = summarizeSearchOutcomes(outcomes, pageSize);
       const hasFailures = summary.httpFailureCount + summary.internalFailureCount > 0;
       if (summary.successfulResourceResultCount > 0) {
-        const additions = mergeUniqueMedia([], summary.items);
+        const sourcePage = filter === "all" ? undefined : collectSearchSourcePage(summary.resourceBatches, selectedSearchDescriptors, items);
+        const additions = sourcePage?.items ?? mergeUniqueMedia([], summary.items);
         const identities = tvMembershipIdentities(additions).slice(0, 100);
         let membership: TVMembershipMaps | undefined;
         if (identities.length > 0) {
@@ -1259,6 +1349,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
           setCheckedTvIdentities((current) => new Set([...current, ...membership.checked]));
         }
         setItems((current) => mergeUniqueMedia(current, additions));
+        if (sourcePage) setSourceSections((current) => mergeSearchSourceSections(current, sourcePage.sections, selectedSearchDescriptors));
         setNextSkip((current) => current + pageSize);
         setHasMore(summary.hasFullPage);
       } else if (!hasFailures) {
@@ -1306,6 +1397,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     membershipRefreshControllerRef.current?.abort();
     setQuery(value);
     setItems([]);
+    setSourceSections([]);
     setError("");
     setWarning("");
     setHasMore(false);
@@ -1321,6 +1413,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     membershipRefreshControllerRef.current?.abort();
     setFilter(value);
     setItems([]);
+    setSourceSections([]);
     setError("");
     setWarning("");
     setHasMore(false);
@@ -1376,7 +1469,10 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
               <SectionHeading title={searchTypeLabel(group.type)} />
               <div className="media-grid media-grid--adaptive">{group.items.map(renderSearchResult)}</div>
             </section>)}</div>
-            : <div className="media-grid media-grid--adaptive" onKeyDown={handleBrowseGridKeyDown}>{items.map(renderSearchResult)}</div>}
+            : <div className="search-result-groups" onKeyDown={handleBrowseGridKeyDown}>{sourceSections.map((section) => <section className="search-result-section" key={section.key}>
+              <SectionHeading title={section.label} />
+              <div className="media-grid media-grid--adaptive">{section.items.map(renderSearchResult)}</div>
+            </section>)}</div>}
     {hasMore && items.length > 0 && <div className="load-more"><Button variant="secondary" loading={loadingMore} aria-label={t("common.actions.loadMore")} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
   </div>;
 }

@@ -4060,6 +4060,9 @@ components:
         addonId:
           type: string
           format: uuid
+        addonName:
+          type: string
+          description: Current display name of the profile-assigned add-on that declares this catalog.
         manifestId:
           type: string
         position:

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/category"
 	"github.com/moodiness/rivune/server/internal/collection"
@@ -182,6 +183,24 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		profiles.Header.Set("Authorization", "Bearer rivune_at_contract")
 		profilesResponse := serveContractRequest(t, api, profiles, http.StatusOK)
 		validateContractResponse(t, document, "/profiles", nil, profiles, profilesResponse)
+	})
+
+	t.Run("add-on catalog descriptors", func(t *testing.T) {
+		api := testAPI(&fakeInstanceService{})
+		api.auth = &fakeAuthService{principal: contractPrincipal()}
+		api.addons = &fakeAddonService{catalogs: []addon.CatalogDescriptor{
+			{
+				AddonID: contractAddonID, AddonName: "Contract Add-on", ManifestID: "org.rivune.contract",
+				Position: 0, Catalog: addon.ManifestCatalog{Type: "movie", ID: "featured", Name: "Featured"}, Searchable: true,
+			},
+			{
+				AddonID: contractAddonID, AddonName: "Contract Add-on", ManifestID: "org.rivune.contract",
+				Position: 0, Catalog: addon.ManifestCatalog{Type: "all", ID: "community", Name: "Community"}, AddonCatalog: true,
+			},
+		}}
+		request := authenticatedContractRequest(http.MethodGet, "/api/v1/addons/catalogs", nil)
+		response := serveContractRequest(t, api, request, http.StatusOK)
+		validateContractResponse(t, document, "/addons/catalogs", nil, request, response)
 	})
 
 	t.Run("metadata and plural trailers", func(t *testing.T) {

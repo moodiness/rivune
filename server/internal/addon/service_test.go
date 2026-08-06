@@ -746,6 +746,48 @@ func TestRefreshAuthorizesEveryAssignmentBeforeFetchAndCommit(t *testing.T) {
 	assertOldManifest("concurrent permission change")
 }
 
+func TestCatalogDescriptorsIncludeAddonNamesAndPreserveServiceOrder(t *testing.T) {
+	regularCatalog := ManifestCatalog{Type: "movie", ID: "featured", Name: "Featured", ExtraSupported: []string{"search"}}
+	addonCatalog := ManifestCatalog{Type: "all", ID: "community", Name: "Community"}
+	secondCatalog := ManifestCatalog{Type: "series", ID: "recent", Name: "Recent"}
+	addons := []InstalledAddon{
+		{
+			ID:       "11111111-1111-4111-8111-111111111111",
+			Position: 0,
+			parsedManifest: Manifest{
+				ID: "org.example.first", Name: "First Add-on",
+				Catalogs: []ManifestCatalog{regularCatalog}, AddonCatalogs: []ManifestCatalog{addonCatalog},
+			},
+		},
+		{
+			ID:       "22222222-2222-4222-8222-222222222222",
+			Position: 1,
+			parsedManifest: Manifest{
+				ID: "org.example.second", Name: "Second Add-on", Catalogs: []ManifestCatalog{secondCatalog},
+			},
+		},
+	}
+
+	got := catalogDescriptors(addons)
+	want := []CatalogDescriptor{
+		{
+			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", ManifestID: "org.example.first",
+			Position: 0, Catalog: regularCatalog, Searchable: true,
+		},
+		{
+			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", ManifestID: "org.example.first",
+			Position: 0, Catalog: addonCatalog, AddonCatalog: true,
+		},
+		{
+			AddonID: "22222222-2222-4222-8222-222222222222", AddonName: "Second Add-on", ManifestID: "org.example.second",
+			Position: 1, Catalog: secondCatalog,
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("catalog descriptors = %#v, want %#v", got, want)
+	}
+}
+
 func TestPlanCatalogSearchAdaptsEachTVCatalog(t *testing.T) {
 	manifest := Manifest{
 		ID:        "org.example.tv",

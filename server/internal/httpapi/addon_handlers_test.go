@@ -440,6 +440,49 @@ func TestNonManagementInstalledAddonResponsesNeverExposeTransportURL(t *testing.
 	}
 }
 
+func TestAddonCatalogDescriptorsExposeNamesInServiceOrder(t *testing.T) {
+	service := &fakeAddonService{catalogs: []addon.CatalogDescriptor{
+		{
+			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", ManifestID: "org.example.first",
+			Position: 0, Catalog: addon.ManifestCatalog{Type: "movie", ID: "featured", Name: "Featured"}, Searchable: true,
+		},
+		{
+			AddonID: "11111111-1111-4111-8111-111111111111", AddonName: "First Add-on", ManifestID: "org.example.first",
+			Position: 0, Catalog: addon.ManifestCatalog{Type: "all", ID: "community", Name: "Community"}, AddonCatalog: true,
+		},
+		{
+			AddonID: "22222222-2222-4222-8222-222222222222", AddonName: "Second Add-on", ManifestID: "org.example.second",
+			Position: 1, Catalog: addon.ManifestCatalog{Type: "series", ID: "recent", Name: "Recent"},
+		},
+	}}
+	api := addonAPI(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/addons/catalogs", nil)
+	request.Header.Set("Authorization", "Bearer access")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Catalogs []addon.CatalogDescriptor `json:"catalogs"`
+	}
+	decodeResponse(t, response, &body)
+	if len(body.Catalogs) != 3 {
+		t.Fatalf("catalog count = %d, want 3: %+v", len(body.Catalogs), body.Catalogs)
+	}
+	if body.Catalogs[0].AddonName != "First Add-on" || body.Catalogs[0].Catalog.ID != "featured" || body.Catalogs[0].AddonCatalog {
+		t.Fatalf("regular descriptor = %+v", body.Catalogs[0])
+	}
+	if body.Catalogs[1].AddonName != "First Add-on" || body.Catalogs[1].Catalog.ID != "community" || !body.Catalogs[1].AddonCatalog {
+		t.Fatalf("add-on catalog descriptor = %+v", body.Catalogs[1])
+	}
+	if body.Catalogs[2].AddonName != "Second Add-on" || body.Catalogs[2].Catalog.ID != "recent" {
+		t.Fatalf("second add-on descriptor = %+v", body.Catalogs[2])
+	}
+}
+
 func TestAddonResourceRoutePreservesOpaqueIDAndRepeatedExtras(t *testing.T) {
 	service := &fakeAddonService{fetchValue: addon.ResourceResult{Resource: "meta", Payload: []byte(`{"meta":{"id":"kitsu:anime/42"}}`)}}
 	api := addonAPI(service)

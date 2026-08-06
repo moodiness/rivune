@@ -1302,13 +1302,14 @@ export class RivuneHarness {
     if (path === "/metadata/titles/movie-1") { await json(route, movie); return; }
     if (path === "/addons/catalogs" && request.method() === "GET") {
       await json(route, { catalogs: [
-        { addonId: "movie-addon", manifestId: "movie-manifest", position: 0, catalog: { type: "movie", id: "movie-search", name: "Movies", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
-        { addonId: "series-addon", manifestId: "series-manifest", position: 1, catalog: { type: "series", id: "series-search", name: "Series", extraSupported: ["search", "skip", "limit"] }, addonCatalog: false, searchable: true },
-        { addonId: "tv-addon", manifestId: "tv-manifest", position: 2, catalog: { type: "tv", id: "tv-search", name: "Live TV", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
-        { addonId: "other-addon", manifestId: "other-manifest", position: 3, catalog: { type: "other", id: "other-search", name: "Other", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
-        { addonId: "anime-primary-addon", manifestId: "anime-primary-manifest", position: 4, catalog: { type: "anime", id: "anime-primary-search", name: "Anime", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
-        { addonId: "documentary-addon", manifestId: "documentary-manifest", position: 5, catalog: { type: "documentary", id: "documentary-conflict", name: "Documentaries", extra: [], extraSupported: ["search"] }, addonCatalog: false, searchable: false },
-        { addonId: "community-addon", manifestId: "community-manifest", position: 6, catalog: { type: "community", id: "community-search", name: "Community", extra: [{ name: "search" }] }, addonCatalog: true, searchable: false },
+        { addonId: "movie-addon", addonName: "Fixture Movies", manifestId: "movie-manifest", position: 0, catalog: { type: "movie", id: "movie-search", name: "Movies", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
+        { addonId: "series-addon", addonName: "Fixture Series", manifestId: "series-manifest", position: 1, catalog: { type: "series", id: "series-search", name: "Series", extraSupported: ["search", "skip", "limit"] }, addonCatalog: false, searchable: true },
+        { addonId: "tv-addon", addonName: "Fixture Television", manifestId: "tv-manifest", position: 2, catalog: { type: "tv", id: "tv-search", name: "Live TV", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
+        { addonId: "other-addon", addonName: "Fixture Other", manifestId: "other-manifest", position: 3, catalog: { type: "other", id: "other-search", name: "Other", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
+        { addonId: "anime-primary-addon", addonName: "Fixture Source One", manifestId: "anime-primary-manifest", position: 4, catalog: { type: "anime", id: "anime-primary-search", name: "Anime Premieres", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
+        { addonId: "anime-secondary-addon", addonName: "Fixture Source Two", manifestId: "anime-secondary-manifest", position: 5, catalog: { type: "anime", id: "anime-secondary-search", name: "Anime Archive", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
+        { addonId: "documentary-addon", addonName: "Fixture Documentary", manifestId: "documentary-manifest", position: 6, catalog: { type: "documentary", id: "documentary-conflict", name: "Documentaries", extra: [], extraSupported: ["search"] }, addonCatalog: false, searchable: false },
+        { addonId: "community-addon", addonName: "Fixture Community", manifestId: "community-manifest", position: 7, catalog: { type: "community", id: "community-search", name: "Community", extra: [{ name: "search" }] }, addonCatalog: true, searchable: false },
       ] });
       return;
     }

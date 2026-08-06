@@ -500,6 +500,7 @@ type ResourceBatch struct {
 
 type CatalogDescriptor struct {
 	AddonID      string          `json:"addonId"`
+	AddonName    string          `json:"addonName,omitempty"`
 	ManifestID   string          `json:"manifestId"`
 	Position     int             `json:"position"`
 	Catalog      ManifestCatalog `json:"catalog"`

@@ -392,23 +392,28 @@ func (service *Service) Catalogs(ctx context.Context, principal auth.Principal) 
 	if err != nil {
 		return nil, err
 	}
-	catalogs := make([]CatalogDescriptor, 0)
-	for _, installed := range addons {
-		for _, catalog := range installed.parsedManifest.Catalogs {
-			catalogs = append(catalogs, CatalogDescriptor{
-				AddonID: installed.ID, ManifestID: installed.parsedManifest.ID, Position: installed.Position, Catalog: catalog, Searchable: catalog.SupportsSearch(),
-			})
-		}
-		for _, catalog := range installed.parsedManifest.AddonCatalogs {
-			catalogs = append(catalogs, CatalogDescriptor{
-				AddonID: installed.ID, ManifestID: installed.parsedManifest.ID, Position: installed.Position, Catalog: catalog, AddonCatalog: true,
-			})
-		}
-	}
+	catalogs := catalogDescriptors(addons)
 	if err := service.revalidateAddonList(ctx, principal, addons); err != nil {
 		return nil, err
 	}
 	return catalogs, nil
+}
+
+func catalogDescriptors(addons []InstalledAddon) []CatalogDescriptor {
+	catalogs := make([]CatalogDescriptor, 0)
+	for _, installed := range addons {
+		for _, catalog := range installed.parsedManifest.Catalogs {
+			catalogs = append(catalogs, CatalogDescriptor{
+				AddonID: installed.ID, AddonName: installed.parsedManifest.Name, ManifestID: installed.parsedManifest.ID, Position: installed.Position, Catalog: catalog, Searchable: catalog.SupportsSearch(),
+			})
+		}
+		for _, catalog := range installed.parsedManifest.AddonCatalogs {
+			catalogs = append(catalogs, CatalogDescriptor{
+				AddonID: installed.ID, AddonName: installed.parsedManifest.Name, ManifestID: installed.parsedManifest.ID, Position: installed.Position, Catalog: catalog, AddonCatalog: true,
+			})
+		}
+	}
+	return catalogs
 }
 
 func (service *Service) Fetch(ctx context.Context, principal auth.Principal, addonID string, path ResourcePath) (ResourceResult, error) {

@@ -4045,10 +4045,14 @@ components:
         - position
         - catalog
         - addonCatalog
+        - searchable
       properties:
         addonId:
           type: string
           format: uuid
+        addonName:
+          type: string
+          description: Current display name of the profile-assigned add-on that declares this catalog.
         manifestId:
           type: string
         position:
@@ -4058,6 +4062,9 @@ components:
           $ref: '#/components/schemas/StremioManifestCatalog'
         addonCatalog:
           type: boolean
+        searchable:
+          type: boolean
+          description: Whether this regular catalog can participate in the Search endpoint after applying the manifest's modern-versus-legacy extra precedence.
     AddonCachePolicy:
       type: object
       additionalProperties: false

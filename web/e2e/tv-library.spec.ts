@@ -26,17 +26,17 @@ const result = (addonId: string, catalogId: string, metas: unknown[], type = "tv
 test("Search discovers anime catalogs and targets only the selected custom type", async ({ page, rivune }) => {
   rivune.setSearchResponse("anime", 0, {
     results: [
+      result("anime-secondary-addon", "anime-secondary-search", [{
+        id: "shared-anime",
+        type: "anime",
+        name: "Fixture Anime Alternate",
+      }], "anime", "fixture", "anime-secondary-manifest"),
       result("anime-primary-addon", "anime-primary-search", [{
         id: "shared-anime",
         type: "anime",
         name: "Fixture Anime",
         poster: "https://fixtures.rivune.test/fixture-anime.svg",
       }], "anime", "fixture", "anime-primary-manifest"),
-      result("anime-secondary-addon", "anime-secondary-search", [{
-        id: "shared-anime",
-        type: "anime",
-        name: "Fixture Anime Alternate",
-      }], "anime", "fixture", "anime-secondary-manifest"),
     ],
     errors: [],
   });
@@ -51,9 +51,13 @@ test("Search discovers anime catalogs and targets only the selected custom type"
 
   await animeFilter.click();
   await page.locator(".search-page .search-box input").fill("fixture");
-  await expect(page.getByRole("button", { name: "Open Fixture Anime", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Open Fixture Anime Alternate", exact: true })).toBeVisible();
-  await expect(page.locator(".search-result-section")).toHaveCount(0);
+  const sourceSections = page.locator(".search-result-section");
+  await expect(sourceSections).toHaveCount(2);
+  await expect(sourceSections.locator(".section-heading h2")).toHaveText(["Fixture Source One · Anime Premieres", "Fixture Source Two · Anime Archive"]);
+  await expect(sourceSections.nth(0).getByRole("button", { name: "Open Fixture Anime", exact: true })).toBeVisible();
+  await expect(sourceSections.nth(0).getByRole("button", { name: "Open Fixture Anime Alternate", exact: true })).toHaveCount(0);
+  await expect(sourceSections.nth(1).getByRole("button", { name: "Open Fixture Anime Alternate", exact: true })).toBeVisible();
+  await expect(sourceSections.nth(1).getByRole("button", { name: "Open Fixture Anime", exact: true })).toHaveCount(0);
 
   const animeRequests = rivune.matching("/api/v1/addons/catalogs/search/anime", "GET");
   expect(animeRequests).toHaveLength(1);
@@ -88,6 +92,7 @@ test("TV search keeps partial results, warns without inline diagnostics, and ret
 
   await expect(page.getByRole("button", { name: "Open World News" })).toHaveCount(2);
   await expect(page.locator(".tv-media-tile")).toHaveCount(25);
+  await expect(page.locator(".search-result-section > .section-heading h2")).toHaveText(["catalog-a", "catalog-b"]);
   await expect(page.getByText("Some sources are temporarily unavailable.", { exact: true })).toBeVisible();
   await expect(page.locator(".search-page .notice--warning")).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
@@ -117,6 +122,8 @@ test("TV search keeps partial results, warns without inline diagnostics, and ret
   rivune.setSearchResponse("tv", 24, { results: [result("addon-a", "catalog-a", [channel("station-25", "Station 25")])], errors: [] });
   await page.getByRole("button", { name: "Load more" }).click();
   await expect(page.getByRole("button", { name: "Open Station 25" })).toBeVisible();
+  const firstSourceSection = page.locator(".search-result-section").filter({ has: page.getByRole("heading", { name: "catalog-a", exact: true }) });
+  await expect(firstSourceSection.getByRole("button", { name: "Open Station 25" })).toBeVisible();
   const searchRequests = rivune.matching("/api/v1/addons/catalogs/search/tv", "GET");
   expect(searchRequests).toHaveLength(3);
   expect(searchRequests[1].search.get("skip")).toBe("24");
@@ -282,6 +289,8 @@ test("Home omits Library TV rows and all-search groups populated media types", a
   await expect(page.getByRole("button", { name: "Open Search Other" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Search Live TV" })).toBeVisible();
   await expect(page.locator(".search-result-section > .section-heading h2")).toHaveText(["Movies", "Series", "Anime", "Other", "Live TV"]);
+  await expect(page.getByRole("heading", { name: "Fixture Movies · Movies", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Fixture Source One · Anime Premieres", exact: true })).toHaveCount(0);
   const movieCard = page.getByRole("button", { name: "Open Search Movie" });
   const seriesCard = page.getByRole("button", { name: "Open Search Series" });
   const animeCard = page.getByRole("button", { name: "Open Search Anime" });

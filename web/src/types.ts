@@ -144,6 +144,7 @@ export type CollectionExtra = { name: string; value: string };
 export type AddonCatalogSource = { addonId: string; manifestId?: string; type: string; catalogId: string; extra?: CollectionExtra[] };
 export type AddonCatalogDescriptor = {
   addonId: string;
+  addonName?: string;
   manifestId: string;
   position: number;
   catalog: {
