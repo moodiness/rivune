@@ -189,7 +189,7 @@ function mediaFromResourceResult(result: ResourceResult, descriptor?: AddonCatal
       resourceId,
       mediaType,
       title,
-      posterUrl: mediaType === "tv" ? logo || poster || background : poster,
+      posterUrl: mediaType === "tv" ? poster || background || logo : poster,
       backgroundUrl: mediaType === "tv" ? background || poster || logo : background,
       logoUrl: logo,
       description: stringValue(meta, "description", "overview"),
@@ -1607,7 +1607,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
       <MediaCard
         shape={item.mediaType === "tv" ? "landscape" : "poster"}
         title={item.title}
-        image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl || item.logoUrl : item.posterUrl}
+        image={item.mediaType === "tv" ? item.posterUrl || item.backgroundUrl || item.logoUrl : item.posterUrl}
         backdrop={item.backgroundUrl}
         subtitle={item.mediaType === "tv" ? tvTileSubtitle(item) : item.releaseInfo || mediaTypeLabel(item.mediaType)}
         accessibleLabel={item.sourceName ? `${t("media.open", { title: item.title })} · ${item.sourceName}` : undefined}

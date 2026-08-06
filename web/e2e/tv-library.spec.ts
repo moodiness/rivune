@@ -211,6 +211,27 @@ test("Search merges canonical movie provenance across sections and pagination", 
   const availableFrom = page.locator(".details-source-group");
   await expect(availableFrom).toContainText("Available from");
   await expect(availableFrom.locator(".media-source-chip")).toHaveText(["Fixture Movie Archive", "Fixture Movies"]);
+  const detailsLayout = async () => page.locator(".details-overview").evaluate((overview) => {
+    const metadata = overview.querySelector<HTMLElement>(".details-meta");
+    const sourceGroup = overview.querySelector<HTMLElement>(".details-source-group");
+    if (!metadata || !sourceGroup) return null;
+    const metadataBounds = metadata.getBoundingClientRect();
+    const sourceBounds = sourceGroup.getBoundingClientRect();
+    return {
+      sourceGap: sourceBounds.top - metadataBounds.bottom,
+      hasHorizontalOverflow: document.documentElement.scrollWidth > window.innerWidth,
+    };
+  });
+  const desktopLayout = await detailsLayout();
+  expect(desktopLayout).not.toBeNull();
+  expect(desktopLayout?.sourceGap ?? 0).toBeGreaterThanOrEqual(16);
+  expect(desktopLayout?.hasHorizontalOverflow).toBe(false);
+
+  await page.setViewportSize({ width: 355, height: 800 });
+  const mobileLayout = await detailsLayout();
+  expect(mobileLayout).not.toBeNull();
+  expect(mobileLayout?.sourceGap ?? 0).toBeGreaterThanOrEqual(16);
+  expect(mobileLayout?.hasHorizontalOverflow).toBe(false);
   await expect(page.getByText("movie-secondary-manifest", { exact: true })).toHaveCount(0);
   await expect(page.getByText("movie-secondary-search", { exact: true })).toHaveCount(0);
 });
@@ -247,6 +268,32 @@ test("Search keeps TV and custom identities scoped to their add-ons", async ({ p
   await expect(page.getByText("tv-secondary-addon", { exact: true })).toHaveCount(0);
   await expect(page.getByText("tv-secondary-manifest", { exact: true })).toHaveCount(0);
   await expect(page.getByText("tv-secondary-search", { exact: true })).toHaveCount(0);
+});
+
+test("TV search cards render provider posters and retain artwork fallback", async ({ page, rivune }) => {
+  rivune.setSearchResponse("tv", 0, {
+    results: [result("lan-tv-addon", "lan-tv-search", [
+      channel("lan-tv-poster", "LAN TV Poster", {
+        poster: "/api/v1/artwork/lan-tv-provider-poster",
+        background: "/api/v1/artwork/lan-tv-provider-background",
+        logo: "/api/v1/artwork/lan-tv-provider-logo",
+      }),
+      channel("lan-tv-fallback", "LAN TV Fallback", {
+        background: "/api/v1/artwork/lan-tv-fallback-background",
+        logo: "/api/v1/artwork/lan-tv-fallback-logo",
+      }),
+    ], "tv", "lan-tv")],
+    errors: [],
+  });
+
+  await page.goto("/#search");
+  await page.getByRole("button", { name: "Live TV", exact: true }).click();
+  await page.locator(".search-page .search-box input").fill("provider artwork");
+
+  await expect(page.getByRole("button", { name: "Open LAN TV Poster", exact: true }).locator("img"))
+    .toHaveAttribute("src", "/api/v1/artwork/lan-tv-provider-poster");
+  await expect(page.getByRole("button", { name: "Open LAN TV Fallback", exact: true }).locator("img"))
+    .toHaveAttribute("src", "/api/v1/artwork/lan-tv-fallback-background");
 });
 
 test("TV search checks only the displayed page against a 5000-entry library", async ({ page, rivune }) => {

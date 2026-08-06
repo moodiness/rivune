@@ -647,7 +647,7 @@
   .details-series-name { color: rgba(242, 238, 235, .72); font-size: clamp(14px, 1.4vw, 19px); font-weight: 680; letter-spacing: -.02em; }
   .details-overview h1 { max-width: 850px; margin: 0 0 17px; text-wrap: balance; font-size: clamp(46px, 5.2vw, 78px); font-weight: 780; line-height: .95; letter-spacing: -.06em; text-shadow: 0 3px 28px rgba(0, 0, 0, .42); }
   .details-logo { width: min(420px, 72%); max-height: 154px; margin-bottom: 22px; object-fit: contain; object-position: left bottom; filter: drop-shadow(0 5px 24px rgba(0, 0, 0, .34)); }
-  .details-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 14px; }
+  .details-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-block-end: var(--space-4); }
   .details-meta > span { display: inline-flex; align-items: center; gap: 5px; color: rgba(238, 234, 231, .78); font-size: 11px; font-weight: 620; }
   .details-meta > span + span::before { content: ""; width: 3px; height: 3px; margin-right: 2px; border-radius: 50%; background: rgba(255, 255, 255, .4); }
   .details-meta .rating { padding: 4px 8px; border: 1px solid rgba(255, 218, 125, .2); border-radius: 999px; color: #f6cf74; background: rgba(48, 39, 18, .4); }
@@ -655,7 +655,7 @@
   .details-meta > span + .details-meta__live::before, .details-meta .details-meta__live + span::before { display: none; }
   .details-meta > span + .rating::before, .details-meta .rating + span::before { display: none; }
   .details-title-links { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 9px 14px; margin: -2px 0 22px; }
-  .details-source-group { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: -5px 0 17px; }
+  .details-source-group { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-block: 0 var(--space-4); }
   .details-source-group__label { color: rgba(238, 234, 231, .62); font-size: 10px; font-weight: 700; }
   .details-source-group .media-source-chip { min-height: 24px; padding-inline: 9px; color: rgba(238, 234, 231, .78); background: rgba(255, 255, 255, .055); }
   .details-description { max-width: 760px; margin: 0 0 26px; color: rgba(232, 228, 225, .78); font-size: clamp(13px, 1.2vw, 16px); line-height: 1.72; text-wrap: pretty; text-shadow: 0 2px 18px rgba(0, 0, 0, .4); }
@@ -1716,7 +1716,7 @@
   .details-page--immersive .details-overview h1 { margin-bottom: 14px; font-size: clamp(40px, 4vw, 66px); }
   .details-page--immersive .details-series-name { margin-bottom: 8px; }
   .details-page--immersive .details-logo { width: min(340px, 76%); max-height: 118px; margin-bottom: 18px; }
-  .details-page--immersive .details-meta { margin-bottom: 10px; }
+  .details-page--immersive .details-meta { margin-block-end: var(--space-4); }
   .details-page--immersive .details-title-links { margin-bottom: 14px; }
   .details-page--immersive .details-description { width: 100%; max-width: 740px; display: -webkit-box; margin-bottom: 20px; overflow: hidden; font-size: clamp(12px, 1vw, 15px); line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 5; }
   .details-page--immersive .details-actions { gap: 8px; }
@@ -1928,7 +1928,7 @@
     .details-artwork { display: none; }
     .details-overview h1 { margin-bottom: 14px; font-size: clamp(39px, 12vw, 54px); }
     .details-logo { width: min(320px, 78%); max-height: 112px; margin-bottom: 17px; }
-    .details-meta { gap: 6px 8px; margin-bottom: 11px; }
+    .details-meta { gap: 6px 8px; margin-block-end: var(--space-4); }
     .details-title-links { gap: 7px 10px; margin-bottom: 18px; }
     .details-provider-badge { min-height: 31px; padding-inline: 9px; }
     .details-description { display: -webkit-box; margin-bottom: 21px; overflow: hidden; font-size: 12px; line-height: 1.58; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
@@ -2058,7 +2058,7 @@
     .details-artwork { display: none; }
     .details-overview h1 { margin-bottom: 10px; font-size: 39px; }
     .details-logo { max-height: 72px; margin-bottom: 11px; }
-    .details-meta { margin-bottom: 7px; }
+    .details-meta { margin-block-end: var(--space-4); }
     .details-title-links { margin-bottom: 11px; }
     .details-description { display: -webkit-box; margin-bottom: 13px; overflow: hidden; font-size: 11px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
     .details-actions .button { min-height: 40px; padding-inline: 14px; font-size: 10px; }

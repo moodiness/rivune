@@ -192,7 +192,7 @@ func TestResolveTitlePassesTVSourceIdentityWithoutStreamURL(t *testing.T) {
 	}
 }
 
-func TestResolveTitleRejectsTVStreamURLField(t *testing.T) {
+func TestResolveTitleRejectsTVPlaybackURLField(t *testing.T) {
 	service := &fakeWatchstateService{}
 	api := watchstateAPI(service)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/titles/resolve", strings.NewReader(`{
