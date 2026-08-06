@@ -495,6 +495,7 @@ data class PlaybackSourceOption(
     val id: String,
     val sourceRef: String,
     @Serializable(with = UUIDSerializer::class) val addonId: UUID,
+    val addonName: String? = null,
     val manifestId: String,
     val streamIndex: Int,
     val name: String,

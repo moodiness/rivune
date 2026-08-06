@@ -183,7 +183,7 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 		reference := storedReferences[index]
 		source := reference.Source
 		options = append(options, SourceOption{
-			ID: source.ID, SourceRef: reference.ID, AddonID: source.AddonID, ManifestID: source.ManifestID,
+			ID: source.ID, SourceRef: reference.ID, AddonID: source.AddonID, ManifestID: source.ManifestID, AddonName: source.AddonName,
 			StreamIndex: source.StreamIndex, Name: sourceDisplayName(source), Description: source.Description,
 			Filename: source.Filename, Protocol: source.Protocol, Container: source.Container, ExpiresAt: reference.ExpiresAt,
 		})
@@ -736,7 +736,7 @@ func normalizeStreams(batch addon.ResourceBatch, capabilities Capabilities) ([]S
 			headers := requestHeaders(hints)
 			id := fmt.Sprintf("stream-%d", len(sources)+1)
 			source := Source{
-				ID: id, AddonID: decodedResult.result.AddonID, ManifestID: decodedResult.result.ManifestID,
+				ID: id, AddonID: decodedResult.result.AddonID, ManifestID: decodedResult.result.ManifestID, AddonName: strings.TrimSpace(decodedResult.result.AddonName),
 				Name: strings.TrimSpace(stream.Name), Title: strings.TrimSpace(stream.Title), Description: strings.TrimSpace(stream.Description),
 				Hint:     strings.TrimSpace(stream.Name + " " + stream.Title + " " + stream.Description + " " + hints.Filename),
 				Filename: strings.TrimSpace(hints.Filename), StreamIndex: streamIndex, FileIndex: stream.FileIndex,

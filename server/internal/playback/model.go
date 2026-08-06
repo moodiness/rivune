@@ -61,6 +61,7 @@ type SourceOption struct {
 	SourceRef   string    `json:"sourceRef"`
 	AddonID     string    `json:"addonId"`
 	ManifestID  string    `json:"manifestId"`
+	AddonName   string    `json:"addonName,omitempty"`
 	StreamIndex int       `json:"streamIndex"`
 	Name        string    `json:"name"`
 	Description string    `json:"description,omitempty"`
@@ -134,6 +135,7 @@ type Source struct {
 	ID          string            `json:"id"`
 	AddonID     string            `json:"addonId"`
 	ManifestID  string            `json:"manifestId"`
+	AddonName   string            `json:"-"`
 	Name        string            `json:"name,omitempty"`
 	Title       string            `json:"title,omitempty"`
 	Description string            `json:"-"`

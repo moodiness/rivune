@@ -1,5 +1,11 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures/rivune";
+import { selectListbox, selectOption, selectOptions } from "./helpers/select";
+
+function sourceReference(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || !("sourceRef" in value)) return undefined;
+  return typeof value.sourceRef === "string" ? value.sourceRef : undefined;
+}
 
 async function installDeterministicMedia(page: Page) {
   await page.addInitScript(() => {
@@ -66,6 +72,22 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
 
   const stream = page.getByRole("radio", { name: /Fixture 1080p/ });
   await expect(stream).toBeVisible();
+  const singleAddonFilter = page.getByRole("combobox", { name: "Filter streams by add-on" });
+  await expect(singleAddonFilter).toBeVisible();
+  await expect(await selectOptions(singleAddonFilter)).toEqual([
+    { value: "", label: "All" },
+    { value: "fixture-addon", label: "Fixture Add-on" },
+  ]);
+  const compactFilterGeometry = await singleAddonFilter.evaluate((trigger) => {
+    const popup = document.getElementById(trigger.getAttribute("aria-controls") ?? "");
+    return {
+      triggerWidth: trigger.getBoundingClientRect().width,
+      popupWidth: popup?.getBoundingClientRect().width ?? 0,
+    };
+  });
+  expect(compactFilterGeometry.triggerWidth).toBeLessThan(200);
+  expect(Math.abs(compactFilterGeometry.popupWidth - compactFilterGeometry.triggerWidth)).toBeLessThanOrEqual(1);
+  await singleAddonFilter.press("Escape");
   await stream.click();
   const sourceRequest = await rivune.waitForRequest("/api/v1/playback/sources", "POST");
   expect(sourceRequest.body).toMatchObject({
@@ -468,6 +490,113 @@ test("multiline stream metadata stays inside its source card and row actions pla
   preparationGate.resolve();
   await expect(playAction).toBeEnabled();
   await playAction.click();
-  await expect.poll(() => rivune.matching("/api/v1/playback/prepare", "POST").map((request) => (request.body as { sourceRef?: string }).sourceRef)).toContain("multiline-source-4");
-  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").map((request) => (request.body as { sourceRef?: string }).sourceRef)).toContain("multiline-source-4");
+  await expect.poll(() => rivune.matching("/api/v1/playback/prepare", "POST").map((request) => sourceReference(request.body))).toContain("multiline-source-4");
+  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").map((request) => sourceReference(request.body))).toContain("multiline-source-4");
+});
+
+test("stream add-on categories filter exact sources without duplicate options", async ({ page, rivune }) => {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  let sources = [
+    { id: "alpha-primary", sourceRef: "alpha-primary-ref", addonId: "addon-alpha", manifestId: "alpha-manifest", addonName: "  Fixture Alpha  ", streamIndex: 0, name: "Alpha Primary 1080p", description: "Primary alpha stream", protocol: "http", container: "mp4", expiresAt },
+    { id: "alpha-secondary", sourceRef: "alpha-secondary-ref", addonId: "addon-alpha", manifestId: "alpha-manifest", addonName: "Fixture Alpha", streamIndex: 1, name: "Alpha Secondary 4K", description: "Secondary alpha stream", protocol: "http", container: "mkv", expiresAt },
+    { id: "beta-primary", sourceRef: "beta-primary-ref", addonId: "addon-beta", manifestId: "fixture-beta", streamIndex: 0, name: "Beta Primary 720p", description: "Beta stream", protocol: "http", container: "mp4", expiresAt },
+  ];
+  let sourceRequestCount = 0;
+  await page.route("**/api/v1/playback/sources", async (route) => {
+    sourceRequestCount += 1;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ sources, providerErrors: [] }) });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+
+  const filter = page.getByRole("combobox", { name: "Filter streams by add-on" });
+  await expect(filter).toBeVisible();
+  await expect(await selectOptions(filter)).toEqual([
+    { value: "", label: "All" },
+    { value: "addon-alpha", label: "Fixture Alpha" },
+    { value: "addon-beta", label: "fixture-beta" },
+  ]);
+  await filter.press("Escape");
+  const sourceRequestsBeforeFiltering = sourceRequestCount;
+  await expect(page.locator(".details-stream-toolbar__status")).toContainText("3 available");
+  await expect(page.locator(".details-stream-list__addon")).toHaveText(["Fixture Alpha", "Fixture Alpha", "fixture-beta"]);
+
+  await filter.focus();
+  await filter.press("ArrowDown");
+  await filter.press("ArrowDown");
+  await filter.press("Enter");
+  await expect(filter).toHaveAttribute("data-value", "addon-alpha");
+  await expect(page.getByRole("radio")).toHaveCount(2);
+  await expect(page.locator(".details-stream-toolbar__status")).toContainText("2 available");
+  const alphaPrimary = page.getByRole("radio", { name: /Alpha Primary 1080p/ });
+  const alphaSecondary = page.getByRole("radio", { name: /Alpha Secondary 4K/ });
+  await alphaPrimary.focus();
+  await alphaPrimary.press("ArrowDown");
+  await expect(alphaSecondary).toBeFocused();
+  await expect(alphaSecondary).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator('[data-media-action="play-selected-stream"]')).toBeVisible();
+  await selectOption(filter, "addon-beta");
+  await expect(page.locator(".details-stream-list > .is-selected")).toHaveCount(0);
+  await expect(page.locator('[data-media-action="play-selected-stream"]')).toHaveCount(0);
+  await expect(page.getByRole("radio")).toHaveCount(1);
+  await expect(page.locator(".details-stream-toolbar__status")).toContainText("1 available");
+  await expect(page.locator(".details-stream-list__addon")).toHaveText(["fixture-beta"]);
+  expect(sourceRequestCount).toBe(sourceRequestsBeforeFiltering);
+
+  await page.getByRole("radio", { name: /Beta Primary 720p/ }).click();
+  await expect.poll(() => rivune.matching("/api/v1/playback/prepare", "POST").map((request) => sourceReference(request.body))).toContain("beta-primary-ref");
+  const play = page.locator('[data-media-action="play-selected-stream"]');
+  await expect(play).toBeEnabled();
+  await play.click();
+  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").map((request) => sourceReference(request.body))).toContain("beta-primary-ref");
+  await page.getByRole("button", { name: "Go back" }).click();
+
+  await selectOption(filter, "");
+  await expect(page.getByRole("radio")).toHaveCount(3);
+  await expect(page.locator(".details-stream-toolbar__status")).toContainText("3 available");
+
+  await page.setViewportSize({ width: 360, height: 740 });
+  const toolbarGeometry = await page.locator(".details-stream-toolbar").evaluate((toolbar) => {
+    const control = toolbar.querySelector<HTMLElement>(".details-stream-filter");
+    const toolbarRect = toolbar.getBoundingClientRect();
+    const controlRect = control?.getBoundingClientRect();
+    return { toolbarLeft: toolbarRect.left, toolbarRight: toolbarRect.right, controlLeft: controlRect?.left, controlRight: controlRect?.right, viewportWidth: window.innerWidth, scrollWidth: document.documentElement.scrollWidth };
+  });
+  expect(toolbarGeometry.controlLeft).toBeGreaterThanOrEqual(toolbarGeometry.toolbarLeft);
+  expect(toolbarGeometry.controlRight).toBeLessThanOrEqual(toolbarGeometry.toolbarRight);
+  expect(toolbarGeometry.toolbarRight).toBeLessThanOrEqual(toolbarGeometry.viewportWidth);
+  expect(toolbarGeometry.scrollWidth).toBeLessThanOrEqual(toolbarGeometry.viewportWidth);
+  await filter.click();
+  const listbox = await selectListbox(filter);
+  const popupGeometry = await listbox.evaluate((popup) => {
+    const rect = popup.getBoundingClientRect();
+    return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: window.innerWidth, height: window.innerHeight };
+  });
+  expect(popupGeometry.left).toBeGreaterThanOrEqual(0);
+  expect(popupGeometry.right).toBeLessThanOrEqual(popupGeometry.width);
+  expect(popupGeometry.top).toBeGreaterThanOrEqual(0);
+  expect(popupGeometry.bottom).toBeLessThanOrEqual(popupGeometry.height);
+  await filter.press("Escape");
+
+  await selectOption(filter, "addon-beta");
+  const refreshStreams = page.getByRole("button", { name: "Refresh streams" });
+  const requestsBeforePreservingRefresh = sourceRequestCount;
+  await refreshStreams.click();
+  await expect.poll(() => sourceRequestCount).toBeGreaterThan(requestsBeforePreservingRefresh);
+  await expect(refreshStreams).toBeEnabled();
+  await expect(filter).toHaveAttribute("data-value", "addon-beta");
+  sources = sources.filter((source) => source.addonId === "addon-alpha");
+  const requestsBeforeFallbackRefresh = sourceRequestCount;
+  await refreshStreams.click();
+  await expect.poll(() => sourceRequestCount).toBeGreaterThan(requestsBeforeFallbackRefresh);
+  await expect(filter).toBeVisible();
+  await expect(filter).toHaveAttribute("data-value", "");
+  await expect(await selectOptions(filter)).toEqual([
+    { value: "", label: "All" },
+    { value: "addon-alpha", label: "Fixture Alpha" },
+  ]);
+  await filter.press("Escape");
+  await expect(page.getByRole("radio")).toHaveCount(2);
+  await expect(page.locator(".details-stream-toolbar__status")).toContainText("2 available");
 });

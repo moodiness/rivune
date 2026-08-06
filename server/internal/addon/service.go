@@ -1309,7 +1309,7 @@ func lockProfile(ctx context.Context, tx pgx.Tx, profileID string) error {
 
 func resultFor(installed InstalledAddon, path ResourcePath, payload json.RawMessage, cache CachePolicy) ResourceResult {
 	return ResourceResult{
-		AddonID: installed.ID, ManifestID: installed.parsedManifest.ID,
+		AddonID: installed.ID, ManifestID: installed.parsedManifest.ID, AddonName: strings.TrimSpace(installed.parsedManifest.Name),
 		Resource: path.Resource, Type: path.Type, ID: path.ID, Payload: payload, Cache: cache, Extra: path.Extra,
 	}
 }

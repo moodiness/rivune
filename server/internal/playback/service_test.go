@@ -252,7 +252,7 @@ func TestFetchHLSChildDoesNotForwardProviderHeadersCrossOrigin(t *testing.T) {
 
 func TestNormalizeStreamsRanksCompatibleSourcesAndKeepsHeadersPrivate(t *testing.T) {
 	batch := addon.ResourceBatch{Results: []addon.ResourceResult{{
-		AddonID: "addon-id", ManifestID: "manifest-id",
+		AddonID: "addon-id", ManifestID: "manifest-id", AddonName: "  Header-safe Add-on  ",
 		Payload: []byte(`{"streams":[
 			{"name":"Unsupported MKV","url":"https://media.example/movie.mkv"},
 			{"name":"Playable HLS","url":"https://media.example/master.m3u8","behaviorHints":{"proxyHeaders":{"request":{"Authorization":"Bearer secret"}}}},
@@ -268,7 +268,7 @@ func TestNormalizeStreamsRanksCompatibleSourcesAndKeepsHeadersPrivate(t *testing
 		t.Fatalf("normalize streams: %v", err)
 	}
 
-	if len(sources) != 3 || sources[0].Name != "Playable HLS" || !sources[0].Compatible || sources[1].Mode != "youtube" || sources[2].Compatible {
+	if len(sources) != 3 || sources[0].Name != "Playable HLS" || sources[0].AddonName != "Header-safe Add-on" || !sources[0].Compatible || sources[1].Mode != "youtube" || sources[2].Compatible {
 		t.Fatalf("unexpected normalized sources: %+v", sources)
 	}
 	var hlsAsset *storedAsset
@@ -333,7 +333,7 @@ func (fetcher *recordingResourceFetcher) FetchPlaybackResource(_ context.Context
 	fetcher.fetchPath = path
 	fetcher.fetchCalls++
 	return addon.ResourceResult{
-		AddonID: addonID, ManifestID: "org.example.live",
+		AddonID: addonID, ManifestID: "org.example.live", AddonName: "  Live Add-on  ",
 		Payload: []byte(`{"streams":[{"name":"Live","url":"https://media.example/live.m3u8"}]}`),
 	}, nil
 }
@@ -341,10 +341,16 @@ func (fetcher *recordingResourceFetcher) FetchPlaybackResource(_ context.Context
 func (fetcher *recordingResourceFetcher) FetchAllPlaybackResources(_ context.Context, _ auth.Principal, path addon.ResourcePath) (addon.ResourceBatch, error) {
 	fetcher.fetchAllPath = path
 	fetcher.fetchAllCalls++
-	return addon.ResourceBatch{Results: []addon.ResourceResult{{
-		AddonID: "fanout-addon", ManifestID: "org.example.streams",
-		Payload: []byte(`{"streams":[{"name":"Movie","url":"https://media.example/movie.mp4"}]}`),
-	}}}, nil
+	return addon.ResourceBatch{Results: []addon.ResourceResult{
+		{
+			AddonID: "fanout-addon-a", ManifestID: "org.example.streams.a", AddonName: "  First Streams  ",
+			Payload: []byte(`{"streams":[{"name":"First Movie","url":"https://media.example/first.mp4"}]}`),
+		},
+		{
+			AddonID: "fanout-addon-b", ManifestID: "org.example.streams.b", AddonName: "Second Streams",
+			Payload: []byte(`{"streams":[{"name":"Second Movie","url":"https://media.example/second.mp4"}]}`),
+		},
+	}}, nil
 }
 
 func TestSourcesTargetsRequestedProfileAddon(t *testing.T) {
@@ -371,7 +377,7 @@ func TestSourcesTargetsRequestedProfileAddon(t *testing.T) {
 	if fetcher.fetchPath.Resource != "stream" || fetcher.fetchPath.Type != "tv" || fetcher.fetchPath.ID != "channel-1" || len(fetcher.fetchPath.Extra) != 0 {
 		t.Fatalf("unexpected targeted resource: %+v", fetcher.fetchPath)
 	}
-	if len(list.Sources) != 1 || list.Sources[0].AddonID != "requested-addon" || list.Sources[0].SourceRef == "" {
+	if len(list.Sources) != 1 || list.Sources[0].AddonID != "requested-addon" || list.Sources[0].AddonName != "Live Add-on" || list.Sources[0].SourceRef == "" {
 		t.Fatalf("unexpected targeted source list: %+v", list)
 	}
 }
@@ -389,7 +395,7 @@ func TestSourcesWithoutAddonKeepsFanout(t *testing.T) {
 				references:       newSourceReferenceStore(time.Now),
 				profileTxFactory: testPlaybackProfileTxFactory,
 			}
-			_, err := service.Sources(context.Background(), auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, SessionID: "session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt}, SourcesInput{
+			list, err := service.Sources(context.Background(), auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, SessionID: "session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt}, SourcesInput{
 				MediaType: mediaType, ResourceID: "resource-1",
 				Capabilities: Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}},
 			})
@@ -401,6 +407,11 @@ func TestSourcesWithoutAddonKeepsFanout(t *testing.T) {
 			}
 			if fetcher.fetchAllPath.Resource != "stream" || fetcher.fetchAllPath.Type != mediaType || fetcher.fetchAllPath.ID != "resource-1" || len(fetcher.fetchAllPath.Extra) != 0 {
 				t.Fatalf("unexpected fan-out resource: %+v", fetcher.fetchAllPath)
+			}
+			if len(list.Sources) != 2 ||
+				list.Sources[0].AddonID != "fanout-addon-a" || list.Sources[0].ManifestID != "org.example.streams.a" || list.Sources[0].AddonName != "First Streams" || list.Sources[0].Name != "First Movie" || list.Sources[0].SourceRef == "" ||
+				list.Sources[1].AddonID != "fanout-addon-b" || list.Sources[1].ManifestID != "org.example.streams.b" || list.Sources[1].AddonName != "Second Streams" || list.Sources[1].Name != "Second Movie" || list.Sources[1].SourceRef == "" {
+				t.Fatalf("fan-out stream provenance was not preserved: %+v", list.Sources)
 			}
 		})
 	}

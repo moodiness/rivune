@@ -920,6 +920,7 @@ public struct PlaybackSourceOption: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let sourceRef: String
     public let addonId: UUID
+    public let addonName: String?
     public let manifestId: String
     public let streamIndex: Int
     public let name: String

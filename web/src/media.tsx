@@ -334,6 +334,38 @@ async function progressByTitleID(titleIDs: string[], signal?: AbortSignal): Prom
 
 type SourceIdentity = Pick<PlaybackSourceOption, "addonId" | "manifestId" | "streamIndex">;
 
+type StreamAddonCategory = { addonId: string; label: string };
+
+function playbackAddonCategories(options: PlaybackSourceOption[]): StreamAddonCategory[] {
+  const categories: Array<StreamAddonCategory & { manifestId: string }> = [];
+  const seenAddonIDs = new Set<string>();
+  for (const option of options) {
+    if (seenAddonIDs.has(option.addonId)) continue;
+    seenAddonIDs.add(option.addonId);
+    const manifestId = option.manifestId.trim();
+    categories.push({
+      addonId: option.addonId,
+      label: option.addonName?.trim() || manifestId || option.addonId,
+      manifestId,
+    });
+  }
+  const labelCounts = new Map<string, number>();
+  for (const category of categories) labelCounts.set(category.label, (labelCounts.get(category.label) ?? 0) + 1);
+  const candidateLabels = categories.map((category) => {
+    if (labelCounts.get(category.label)! <= 1) return category.label;
+    const discriminator = category.manifestId && category.manifestId !== category.label ? category.manifestId : category.addonId;
+    return `${category.label} · ${discriminator}`;
+  });
+  const candidateCounts = new Map<string, number>();
+  for (const label of candidateLabels) candidateCounts.set(label, (candidateCounts.get(label) ?? 0) + 1);
+  return categories.map((category, index) => ({
+    addonId: category.addonId,
+    label: candidateCounts.get(candidateLabels[index]!)! > 1
+      ? `${candidateLabels[index]} · ${category.addonId}`
+      : candidateLabels[index]!,
+  }));
+}
+
 function preparationLabel(preparation: PlaybackPreparation): string {
   const mode = preparation.mode === "direct" ? t("player.mode.direct")
     : preparation.mode === "remux" ? t("player.mode.remux")
@@ -618,6 +650,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   const [streamsLoading, setStreamsLoading] = useState(item.mediaType !== "tv");
   const [streamsError, setStreamsError] = useState("");
   const [streamRefreshVersion, setStreamRefreshVersion] = useState(0);
+  const [streamAddonFilter, setStreamAddonFilter] = useState("");
   const [streamsRequested, setStreamsRequested] = useState(item.mediaType !== "tv");
   const [preparation, setPreparation] = useState<PlaybackPreparation>();
   const [preparationLoading, setPreparationLoading] = useState(false);
@@ -708,6 +741,15 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   const awaitingRestartEpisode = startFromBeginning && item.mediaType === "episode" && Boolean(continueSeriesID) && !selectedEpisode && !seriesError;
   const playbackIdentityResolved = !customType || metaResolved && Boolean(customPlaybackResourceID);
   const canSelectStream = item.mediaType !== "series" && !awaitingRestartEpisode && playbackIdentityResolved;
+  const streamAddonCategories = useMemo(() => playbackAddonCategories(availableStreams), [availableStreams]);
+  const streamAddonLabels = useMemo(() => new Map(streamAddonCategories.map((category) => [category.addonId, category.label])), [streamAddonCategories]);
+  const filteredStreams = useMemo(() => streamAddonFilter
+    ? availableStreams.filter((option) => option.addonId === streamAddonFilter)
+    : availableStreams, [availableStreams, streamAddonFilter]);
+
+  useEffect(() => {
+    setStreamAddonFilter("");
+  }, [playbackMediaType, streamResourceID]);
 
   useEffect(() => {
     if (!trailerStageVisible || !trailerRevealPendingRef.current) return;
@@ -1110,6 +1152,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
       if (!active) return;
       const options = response.sources;
       setAvailableStreams(options);
+      setStreamAddonFilter((current) => current && !options.some((option) => option.addonId === current) ? "" : current);
       if (item.mediaType === "tv" && tvPlaybackPendingRef.current) {
         tvPlaybackPendingRef.current = false;
         const next = options[0];
@@ -1280,6 +1323,36 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     autoPlayNextRef.current = false;
     playRequestedSourceRef.current = "";
     setSelectedStream(option);
+  }
+
+  function changeStreamAddonFilter(addonId: string) {
+    setStreamAddonFilter(addonId);
+    if (!selectedStream || !addonId || selectedStream.addonId === addonId) return;
+    autoStartRef.current = false;
+    autoPlayNextRef.current = false;
+    playRequestedSourceRef.current = "";
+    sourceRefreshAttemptRef.current = "";
+    setSelectedStream(undefined);
+    setPreparation(undefined);
+    setPreparationLoading(false);
+    setPreparationError("");
+  }
+
+  function handleStreamOptionKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+    const group = event.currentTarget.closest<HTMLElement>('[role="radiogroup"]');
+    const options = group ? Array.from(group.querySelectorAll<HTMLButtonElement>('[role="radio"]')) : [];
+    const currentIndex = options.indexOf(event.currentTarget);
+    if (currentIndex < 0 || options.length === 0) return;
+    event.preventDefault();
+    const nextIndex = event.key === "Home" ? 0
+      : event.key === "End" ? options.length - 1
+        : Math.max(0, Math.min(options.length - 1, currentIndex + (event.key === "ArrowDown" ? 1 : -1)));
+    const next = options[nextIndex];
+    next?.focus({ preventScroll: true });
+    next?.click();
+    next?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 
   function playPlaybackStream(option: PlaybackSourceOption) {
@@ -1937,13 +2010,27 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                 </header>
 
                 {(item.mediaType !== "tv" || streamsRequested) && <div className="details-stream-toolbar">
-                  <span>{streamsLoading ? t("common.status.loading") : t(availableStreams.length === 1 ? "media.sources.availableCount.one" : "media.sources.availableCount.many", { count: availableStreams.length })}</span>
-                  <IconButton label={t("media.sources.refresh")} disabled={streamsLoading} onClick={() => {
-                    autoPlayNextRef.current = false;
-                    setStreamRefreshVersion((version) => version + 1);
-                  }}>
-                    <RefreshCw size={17} className={streamsLoading ? "spin" : ""} />
-                  </IconButton>
+                  {streamAddonCategories.length >= 1 && <div className="details-stream-filter">
+                    <Select
+                      aria-label={t("media.sources.addonFilterLabel")}
+                      fitContent
+                      value={streamAddonFilter}
+                      onChange={changeStreamAddonFilter}
+                      options={[
+                        { value: "", label: t("media.filter.all") },
+                        ...streamAddonCategories.map((category) => ({ value: category.addonId, label: category.label })),
+                      ]}
+                    />
+                  </div>}
+                  <div className="details-stream-toolbar__status">
+                    <span aria-live="polite">{streamsLoading ? t("common.status.loading") : t(filteredStreams.length === 1 ? "media.sources.availableCount.one" : "media.sources.availableCount.many", { count: filteredStreams.length })}</span>
+                    <IconButton label={t("media.sources.refresh")} disabled={streamsLoading} onClick={() => {
+                      autoPlayNextRef.current = false;
+                      setStreamRefreshVersion((version) => version + 1);
+                    }}>
+                      <RefreshCw size={17} className={streamsLoading ? "spin" : ""} />
+                    </IconButton>
+                  </div>
                 </div>}
 
                 <div className="details-context-panel__scroll">
@@ -1963,15 +2050,16 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                             <Notice>{streamsError}</Notice>
                             <Button variant="ghost" onClick={item.mediaType === "tv" ? watchLive : () => setStreamRefreshVersion((version) => version + 1)}><RefreshCw size={16} /> {t("common.actions.retry")}</Button>
                           </div>
-                      : availableStreams.length > 0
-                        ? <div className="details-stream-list" role="radiogroup" aria-label={t("media.sources.availableLabel")}>
-                          {availableStreams.map((option) => {
+                      : filteredStreams.length > 0
+                        ? <div className="details-stream-list" role="radiogroup" aria-orientation="vertical" aria-label={t("media.sources.availableLabel")}>
+                          {filteredStreams.map((option, index) => {
                             const selected = selectedStream?.sourceRef === option.sourceRef;
                             const playDisabled = preparationLoading || Boolean(preparationError);
                             return <div key={option.sourceRef} className={selected ? "is-selected" : ""}>
-                              <button type="button" className="details-stream-list__option" role="radio" aria-checked={selected} onClick={() => selectPlaybackStream(option)}>
+                              <button type="button" className="details-stream-list__option" role="radio" aria-checked={selected} tabIndex={selected ? 0 : selectedStream ? -1 : index === 0 ? 0 : -1} onKeyDown={handleStreamOptionKeyDown} onClick={() => selectPlaybackStream(option)}>
                                 <span>
                                   <strong>{option.name}</strong>
+                                  <small className="details-stream-list__addon">{streamAddonLabels.get(option.addonId) ?? option.addonName?.trim() ?? option.manifestId}</small>
                                   {option.description && <small>{option.description}</small>}
                                   {!option.description && option.filename && <small>{option.filename}</small>}
                                   <small className="details-stream-list__technical">{[option.protocol, option.container].filter(Boolean).map((value) => value!.toUpperCase()).join(" · ")}</small>

@@ -142,6 +142,26 @@ func executeTestRequest(id string) plannedRequest {
 	}
 }
 
+func TestResultForKeepsTrimmedAddonNameInternal(t *testing.T) {
+	result := resultFor(InstalledAddon{
+		ID: "addon-id",
+		parsedManifest: Manifest{
+			ID:   "org.example.streams",
+			Name: "  Example Streams  ",
+		},
+	}, ResourcePath{Resource: "catalog", Type: "movie", ID: "popular"}, json.RawMessage(`{"metas":[]}`), CachePolicy{})
+	if result.AddonName != "Example Streams" {
+		t.Fatalf("internal add-on name = %q", result.AddonName)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal resource result: %v", err)
+	}
+	if strings.Contains(string(encoded), "addonName") || strings.Contains(string(encoded), "Example Streams") {
+		t.Fatalf("resource result exposed internal add-on name: %s", encoded)
+	}
+}
+
 func TestGenericResourceFetchRejectsPlaybackResourcesBeforeProviderAccess(t *testing.T) {
 	providerCalls := 0
 	transport := functionTransport{resource: func(context.Context, string, ResourcePath) (json.RawMessage, CachePolicy, error) {

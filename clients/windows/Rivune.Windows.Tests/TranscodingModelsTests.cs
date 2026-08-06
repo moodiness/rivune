@@ -37,6 +37,30 @@ public sealed class TranscodingModelsTests
     }
 
     [Fact]
+    public void SourceListDecodesOptionalAddonNameAndSourceIdentity()
+    {
+        const string json = """
+        {
+          "sources":[
+            {"id":"source-1","sourceRef":"ref-1","addonId":"66666666-6666-4666-8666-666666666666","addonName":"Test Addon","manifestId":"org.test","streamIndex":0,"name":"Primary","protocol":"hls","expiresAt":"2026-08-03T12:00:00Z"},
+            {"id":"source-2","sourceRef":"ref-2","addonId":"77777777-7777-4777-8777-777777777777","manifestId":"org.other","streamIndex":1,"name":"Fallback","protocol":"dash","expiresAt":"2026-08-03T12:00:00Z"}
+          ],
+          "providerErrors":[]
+        }
+        """;
+
+        var sourceList = JsonSerializer.Deserialize<PlaybackSourceList>(json, JsonOptions)!;
+        Assert.Equal("Test Addon", sourceList.Sources[0].AddonName);
+        Assert.Equal(Guid.Parse("66666666-6666-4666-8666-666666666666"), sourceList.Sources[0].AddonId);
+        Assert.Equal("org.test", sourceList.Sources[0].ManifestId);
+        Assert.Equal("ref-1", sourceList.Sources[0].SourceRef);
+        Assert.Null(sourceList.Sources[1].AddonName);
+        Assert.Equal(Guid.Parse("77777777-7777-4777-8777-777777777777"), sourceList.Sources[1].AddonId);
+        Assert.Equal("org.other", sourceList.Sources[1].ManifestId);
+        Assert.Equal("ref-2", sourceList.Sources[1].SourceRef);
+    }
+
+    [Fact]
     public void SessionDecodesDecisionBurnSubtitleSelectionsAndUnknownProperties()
     {
         const string json = """

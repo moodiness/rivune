@@ -34,6 +34,28 @@ class TranscodingModelsTest {
     }
 
     @Test
+    fun sourceListDecodesOptionalAddonNameAndSourceIdentity() {
+        val sourceList = json.decodeFromString<PlaybackSourceList>("""
+            {
+              "sources":[
+                {"id":"source-1","sourceRef":"ref-1","addonId":"66666666-6666-4666-8666-666666666666","addonName":"Test Addon","manifestId":"org.test","streamIndex":0,"name":"Primary","protocol":"hls","expiresAt":"2026-08-03T12:00:00Z"},
+                {"id":"source-2","sourceRef":"ref-2","addonId":"77777777-7777-4777-8777-777777777777","manifestId":"org.other","streamIndex":1,"name":"Fallback","protocol":"dash","expiresAt":"2026-08-03T12:00:00Z"}
+              ],
+              "providerErrors":[]
+            }
+        """.trimIndent())
+
+        assertEquals("Test Addon", sourceList.sources[0].addonName)
+        assertEquals("66666666-6666-4666-8666-666666666666", sourceList.sources[0].addonId.toString())
+        assertEquals("org.test", sourceList.sources[0].manifestId)
+        assertEquals("ref-1", sourceList.sources[0].sourceRef)
+        assertNull(sourceList.sources[1].addonName)
+        assertEquals("77777777-7777-4777-8777-777777777777", sourceList.sources[1].addonId.toString())
+        assertEquals("org.other", sourceList.sources[1].manifestId)
+        assertEquals("ref-2", sourceList.sources[1].sourceRef)
+    }
+
+    @Test
     fun sessionDecodesDecisionBurnSubtitleSelectionsAndUnknownProperties() {
         val session = json.decodeFromString<PlaybackSession>("""
             {

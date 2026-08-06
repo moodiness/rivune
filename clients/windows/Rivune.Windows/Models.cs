@@ -526,6 +526,7 @@ public sealed record PlaybackSourceOption
     public required string Id { get; init; }
     public required string SourceRef { get; init; }
     public required Guid AddonId { get; init; }
+    public string? AddonName { get; init; }
     public required string ManifestId { get; init; }
     public required int StreamIndex { get; init; }
     public required string Name { get; init; }

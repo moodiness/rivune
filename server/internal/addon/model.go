@@ -371,6 +371,7 @@ func validateProviderSubtitle(subtitle ProviderSubtitle) error {
 type ResourceResult struct {
 	AddonID    string          `json:"addonId"`
 	ManifestID string          `json:"manifestId"`
+	AddonName  string          `json:"-"`
 	Resource   string          `json:"resource"`
 	Type       string          `json:"type"`
 	ID         string          `json:"id"`

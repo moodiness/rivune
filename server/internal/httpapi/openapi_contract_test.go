@@ -491,7 +491,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			sources: playback.SourceList{
 				Sources: []playback.SourceOption{{
 					ID: "source-1", SourceRef: "opaque-contract-source", AddonID: contractAddonID,
-					ManifestID: "org.rivune.contract", StreamIndex: 0, Name: "Contract source",
+					ManifestID: "org.rivune.contract", AddonName: "Contract Add-on", StreamIndex: 0, Name: "Contract source",
 					Protocol: "hls", Container: "mpegts", ExpiresAt: expiresAt,
 				}},
 				ProviderErrors: []playback.ProviderFailure{},
