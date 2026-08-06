@@ -123,6 +123,16 @@ func TestLocalURLHidesAllowedLANArtworkSource(t *testing.T) {
 	if rejected := service.LocalURL(context.Background(), "http://192.168.1.49:63113/poster.jpg"); rejected != "" {
 		t.Fatalf("unconfigured LAN artwork source was localized as %q", rejected)
 	}
+	restricted, err := New(pool, Options{
+		Directory: t.TempDir(), MaxBytes: 1 << 20,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("create restricted artwork service: %v", err)
+	}
+	if preserved := restricted.LocalURL(context.Background(), localized); preserved != localized {
+		t.Fatalf("registered same-origin LAN artwork = %q, want preserved %q", preserved, localized)
+	}
 }
 
 func TestLocalURLsPreservesOrderDuplicatesAndFailsClosed(t *testing.T) {
@@ -144,6 +154,16 @@ func TestLocalURLsPreservesOrderDuplicatesAndFailsClosed(t *testing.T) {
 	}
 	if localized[0] == localized[2] {
 		t.Fatal("distinct upstream URLs received the same local URL")
+	}
+	if relocalized := service.LocalURL(context.Background(), localized[0]); relocalized != localized[0] {
+		t.Fatalf("same-origin artwork reference = %q, want idempotent %q", relocalized, localized[0])
+	}
+	missingReference := publicPrefix + strings.Repeat("f", 64)
+	if _, err := pool.Exec(context.Background(), `DELETE FROM artwork_cache WHERE key = $1`, strings.TrimPrefix(missingReference, publicPrefix)); err != nil {
+		t.Fatalf("clear missing artwork fixture: %v", err)
+	}
+	if preserved := service.LocalURL(context.Background(), missingReference); preserved != "" {
+		t.Fatalf("unregistered same-origin artwork was preserved as %q", preserved)
 	}
 
 	canceled, cancel := context.WithCancel(context.Background())

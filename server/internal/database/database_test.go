@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,6 +112,92 @@ func TestMigrationAndLedgerRollbackTogetherAndResume(t *testing.T) {
 	}
 	if restoredVersions != len(legacyTransactionVersions) {
 		t.Fatalf("restored legacy migration ledgers = %d, want %d", restoredVersions, len(legacyTransactionVersions))
+	}
+}
+
+func TestRestoreLocalTitleArtworkReferencesMigration(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run title artwork migration tests")
+	}
+
+	ctx := context.Background()
+	basePool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open title artwork migration test database: %v", err)
+	}
+	t.Cleanup(basePool.Close)
+
+	schema := fmt.Sprintf("local_title_artwork_%d", time.Now().UnixNano())
+	if _, err := basePool.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatalf("create isolated title artwork schema: %v", err)
+	}
+	t.Cleanup(func() { _, _ = basePool.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") })
+
+	configuration, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse title artwork migration database URL: %v", err)
+	}
+	configuration.MaxConns = 2
+	configuration.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, configuration)
+	if err != nil {
+		t.Fatalf("open isolated title artwork migration pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("establish title artwork migration fixture: %v", err)
+	}
+	posterKey := strings.Repeat("a", 64)
+	backgroundKey := strings.Repeat("b", 64)
+	missingKey := strings.Repeat("c", 64)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO artwork_cache (key, source_url)
+		VALUES ($1, 'http://192.168.1.48:9553/live-poster.png'),
+		       ($2, 'http://192.168.1.48:9553/live-background.png')
+	`, posterKey, backgroundKey); err != nil {
+		t.Fatalf("seed artwork registrations: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title, poster_url, background_url)
+		VALUES ('61000000-0000-4000-8000-000000000001', 'tv', 'Live channel',
+		        'http://192.168.1.48:9553/live-poster.png', 'http://192.168.1.48:9553/live-background.png'),
+		       ('61000000-0000-4000-8000-000000000002', 'tv', 'Missing registration',
+		        '/api/v1/artwork/' || $1, NULL)
+	`, missingKey); err != nil {
+		t.Fatalf("seed source title artwork: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM schema_migrations WHERE version = 61`); err != nil {
+		t.Fatalf("reset local title artwork migration ledger: %v", err)
+	}
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("apply local title artwork restoration migration: %v", err)
+	}
+
+	var posterURL, backgroundURL, missingURL string
+	if err := pool.QueryRow(ctx, `
+		SELECT poster_url, background_url
+		FROM titles
+		WHERE id = '61000000-0000-4000-8000-000000000001'
+	`).Scan(&posterURL, &backgroundURL); err != nil {
+		t.Fatalf("query restored local title artwork: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT poster_url
+		FROM titles
+		WHERE id = '61000000-0000-4000-8000-000000000002'
+	`).Scan(&missingURL); err != nil {
+		t.Fatalf("query unresolved title artwork: %v", err)
+	}
+	if posterURL != "/api/v1/artwork/"+posterKey || backgroundURL != "/api/v1/artwork/"+backgroundKey {
+		t.Fatalf("restored local artwork = (%q, %q)", posterURL, backgroundURL)
+	}
+	if missingURL != "/api/v1/artwork/"+missingKey {
+		t.Fatalf("missing registration artwork = %q, want unchanged reference", missingURL)
 	}
 }
 

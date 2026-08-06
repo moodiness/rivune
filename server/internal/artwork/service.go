@@ -141,32 +141,51 @@ func (service *Service) LocalURLs(ctx context.Context, upstream []string) []stri
 	}
 
 	keys := make([]string, 0, len(upstream))
+	registrationKeys := make([]string, 0, len(upstream))
 	urls := make([]string, 0, len(upstream))
 	indexes := make(map[string][]int, len(upstream))
-	seen := make(map[string]struct{}, len(upstream))
+	referenceIndexes := make(map[string][]int)
+	lookupSeen := make(map[string]struct{}, len(upstream))
+	registrationSeen := make(map[string]struct{}, len(upstream))
 	expected := make(map[string]string, len(upstream))
 	for index, candidate := range upstream {
-		normalized, err := normalizeURLWithPolicy(candidate, !service.allowLocal, service.transportPolicy)
+		trimmed := strings.TrimSpace(candidate)
+		if strings.HasPrefix(trimmed, publicPrefix) {
+			key := strings.TrimPrefix(trimmed, publicPrefix)
+			if validKey(key) {
+				referenceIndexes[key] = append(referenceIndexes[key], index)
+				if _, exists := lookupSeen[key]; !exists {
+					lookupSeen[key] = struct{}{}
+					keys = append(keys, key)
+				}
+			}
+			continue
+		}
+		normalized, err := normalizeURLWithPolicy(trimmed, !service.allowLocal, service.transportPolicy)
 		if err != nil {
 			continue
 		}
 		key := artworkKey(normalized)
 		indexes[key] = append(indexes[key], index)
 		expected[key] = normalized
-		if _, exists := seen[key]; exists {
+		if _, exists := lookupSeen[key]; !exists {
+			lookupSeen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+		if _, exists := registrationSeen[key]; exists {
 			continue
 		}
-		seen[key] = struct{}{}
-		keys = append(keys, key)
+		registrationSeen[key] = struct{}{}
+		registrationKeys = append(registrationKeys, key)
 		urls = append(urls, normalized)
 	}
 	if len(keys) == 0 {
 		return localized
 	}
 
-	for start := 0; start < len(keys); start += registrationPruneBatchSize {
-		end := min(start+registrationPruneBatchSize, len(keys))
-		if !service.registerBatch(ctx, keys[start:end], urls[start:end]) {
+	for start := 0; start < len(registrationKeys); start += registrationPruneBatchSize {
+		end := min(start+registrationPruneBatchSize, len(registrationKeys))
+		if !service.registerBatch(ctx, registrationKeys[start:end], urls[start:end]) {
 			return localized
 		}
 	}
@@ -187,6 +206,14 @@ func (service *Service) LocalURLs(ctx context.Context, upstream []string) []stri
 	for key, positions := range indexes {
 		sourceURL, exists := registered[key]
 		if !exists || sourceURL != expected[key] {
+			continue
+		}
+		for _, position := range positions {
+			localized[position] = publicPrefix + key
+		}
+	}
+	for key, positions := range referenceIndexes {
+		if _, exists := registered[key]; !exists {
 			continue
 		}
 		for _, position := range positions {

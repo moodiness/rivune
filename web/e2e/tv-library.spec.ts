@@ -383,7 +383,8 @@ test("TV search shows a generic retry state when every source fails", async ({ p
 });
 
 test("TV library actions update immediately, refresh every surface, keep a stable route, and fetch streams only after play", async ({ page, rivune }) => {
-  rivune.setSearchResponse("tv", 0, { results: [result("tv-addon", "tv-search", [channel("fixture-tv", "Fixture TV")], "tv", "TV", "tv-manifest")], errors: [] });
+  const libraryPoster = `/api/v1/artwork/${"d".repeat(64)}`;
+  rivune.setSearchResponse("tv", 0, { results: [result("tv-addon", "tv-search", [channel("fixture-tv", "Fixture TV", { poster: libraryPoster })], "tv", "TV", "tv-manifest")], errors: [] });
 
   await page.goto("/");
   await page.getByRole("button", { name: "Search", exact: true }).click();
@@ -404,7 +405,9 @@ test("TV library actions update immediately, refresh every surface, keep a stabl
   await expect(page.getByRole("button", { name: "Open Fixture TV" })).toHaveCount(0);
   await page.getByRole("button", { name: "Library", exact: true }).click();
   await page.getByRole("button", { name: "Live TV", exact: true }).click();
-  await page.getByRole("button", { name: "Open Fixture TV" }).click();
+  const libraryCard = page.getByRole("button", { name: "Open Fixture TV" });
+  await expect(libraryCard.locator("img")).toHaveAttribute("src", libraryPoster);
+  await libraryCard.click();
   await expect(page).toHaveURL(/\/media\/tv\/tv-addon\/fixture-tv$/);
   await page.reload();
   await expect(page.getByRole("heading", { name: "Fixture TV" })).toBeVisible();

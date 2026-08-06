@@ -12,6 +12,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/collection"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/watchstate"
 )
 
 func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *testing.T) {
@@ -51,11 +52,15 @@ func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *te
 	`, titleID, poster, background, logo); err != nil {
 		t.Fatalf("insert canonical title metadata: %v", err)
 	}
+	registeredPoster := service.LocalURL(context.Background(), fixture.URL+"/registered-live-tv.png")
+	if registeredPoster == "" {
+		t.Fatal("register live-TV poster fixture")
+	}
 
 	results := []addon.ResourceResult{
 		{
 			Resource: "catalog", Type: "movie", ID: "featured",
-			Payload: json.RawMessage(`{"metas":[{"id":"tt9000301","type":"movie","name":"Fixture Movie","poster":"` + fixture.URL + `/addon-poster.png","background":"` + fixture.URL + `/addon-background.png","logo":"` + fixture.URL + `/addon-logo.png","customNumber":9007199254740993}]}`),
+			Payload: json.RawMessage(`{"metas":[{"id":"tt9000301","type":"movie","name":"Fixture Movie","poster":"` + fixture.URL + `/addon-poster.png","background":"` + fixture.URL + `/addon-background.png","logo":"` + fixture.URL + `/addon-logo.png","customNumber":9007199254740993},{"id":"registered-tv","type":"tv","name":"Registered TV","poster":"` + registeredPoster + `"}]}`),
 		},
 		{
 			Resource: "meta", Type: "tv", ID: imdbID,
@@ -67,7 +72,7 @@ func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *te
 	var envelope struct {
 		Metas []map[string]any `json:"metas"`
 	}
-	if err := json.Unmarshal(results[0].Payload, &envelope); err != nil || len(envelope.Metas) != 1 {
+	if err := json.Unmarshal(results[0].Payload, &envelope); err != nil || len(envelope.Metas) != 2 {
 		t.Fatalf("decode presented catalog: %v payload=%s", err, results[0].Payload)
 	}
 	meta := envelope.Metas[0]
@@ -80,6 +85,9 @@ func TestPresentAddonResourcesOverlaysCanonicalArtworkAndHidesProviderURLs(t *te
 		if meta[field] != expected {
 			t.Fatalf("%s = %#v, want %q", field, meta[field], expected)
 		}
+	}
+	if got := envelope.Metas[1]["poster"]; got != registeredPoster {
+		t.Fatalf("already-localized Search poster = %#v, want preserved %q", got, registeredPoster)
 	}
 	if meta["name"] != "Fixture Movie" || !strings.Contains(string(results[0].Payload), `"customNumber":9007199254740993`) {
 		t.Fatalf("non-artwork catalog values changed: %s", results[0].Payload)
@@ -478,6 +486,28 @@ func TestPresentResponseBoundaryArtworkUsesSameOriginReferences(t *testing.T) {
 	if input.BackdropImageURL != collectionBackground || input.Folders[0].CoverImageURL != cover ||
 		input.Folders[0].TitleLogoURL != titleLogo || input.Folders[0].HeroBackdropURL != heroBackdrop {
 		t.Fatalf("collection artwork sources were not restored before persistence: %#v", input)
+	}
+}
+
+func TestLocalizeLibraryPagePreservesRegisteredArtworkReference(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+
+	poster := fixture.URL + "/live-tv-poster.png"
+	localized := service.LocalURL(context.Background(), poster)
+	if localized == "" {
+		t.Fatal("live-TV poster was not localized")
+	}
+	page := watchstate.LibraryPage{Items: []watchstate.LibraryItem{{
+		MediaType: "tv",
+		PosterURL: localized,
+	}}}
+	service.LocalizeLibraryPage(context.Background(), &page)
+
+	if got := page.Items[0].PosterURL; got != localized {
+		t.Fatalf("localized library poster = %q, want preserved reference %q", got, localized)
 	}
 }
 
