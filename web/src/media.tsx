@@ -1690,11 +1690,10 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                 {item.mediaType === "tv" && details.category && <span>{details.category}</span>}
                 {item.mediaType === "tv" && liveProgramTitle && <span>{liveProgramTitle}</span>}
                 {genres.map((genre) => <span key={genre}>{genre}</span>)}
-                {sourceLabels.length > 0 && <span className="media-source-chips">{sourceLabels.map((label, index) => <span className="media-source-chip" key={`${label}:${index}`}>{label}</span>)}</span>}
               </div>
 
-              {externalTitleLinks.length > 0 && <div className="details-title-links">
-                <div className="details-provider-badges" role="group" aria-label={t("media.details.externalPagesLabel")}>
+              {(externalTitleLinks.length > 0 || sourceLabels.length > 0) && <div className="details-title-links">
+                <div className="details-provider-badges">
                   {externalTitleLinks.map(({ externalID, provider, mediaType, episode }) => {
                     const label = t("media.details.openExternalPage", { provider: provider.label, id: externalID });
                     return <a key={provider.key} className={`details-provider-badge details-provider-badge--${provider.key}`} href={titleProviderURL(provider.key, externalID, mediaType, episode)} target="_blank" rel="noreferrer" aria-label={label} title={label}>
@@ -1702,6 +1701,10 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                       <ExternalLink size={11} aria-hidden="true" />
                     </a>;
                   })}
+                  {externalTitleLinks.length > 0 && sourceLabels.length > 0 && <span className="details-provider-badges__separator" aria-hidden="true" />}
+                  {sourceLabels.map((label, index) => <span className="details-provider-badge details-provider-badge--source" key={`${label}:${index}`}>
+                    <span className="details-provider-badge__brand">{label}</span>
+                  </span>)}
                 </div>
               </div>}
 

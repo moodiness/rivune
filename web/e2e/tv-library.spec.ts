@@ -138,7 +138,7 @@ test("Selected search paginates and retries only the requested source", async ({
 
 test("Search merges canonical movie provenance across sections and pagination", async ({ page, rivune }) => {
   const sharedMovie = { id: "tt9000201", type: "movie", name: "Canonical Fixture Movie", releaseInfo: "2026" };
-  const paginationMovie = { id: "tt-provenance-page", type: "movie", name: "Pagination First Source", releaseInfo: "2025" };
+  const paginationMovie = { id: "900201", type: "movie", name: "Pagination First Source", releaseInfo: "2025" };
   const primaryMovies = [
     sharedMovie,
     ...Array.from({ length: 23 }, (_, index) => ({ id: `primary-movie-${index + 1}`, type: "movie", name: `Primary Movie ${index + 1}` })),
@@ -208,25 +208,34 @@ test("Search merges canonical movie provenance across sections and pagination", 
     { id: "movie-secondary-addon", kind: "addon_catalog", title: "Fixture Movie Archive", addonId: "movie-secondary-addon", manifestId: "movie-secondary-manifest", catalogId: "movie-secondary-search" },
     { id: "movie-addon", kind: "addon_catalog", title: "Fixture Movies", addonId: "movie-addon", manifestId: "movie-manifest", catalogId: "movie-search" },
   ]);
-  const sourceChips = page.locator(".details-meta > .media-source-chips");
-  await expect(sourceChips.locator(".media-source-chip")).toHaveText(["Fixture Movie Archive", "Fixture Movies"]);
+  const sourceBadges = page.locator(".details-provider-badges > .details-provider-badge--source");
+  await expect(sourceBadges.locator(".details-provider-badge__brand")).toHaveText(["Fixture Movie Archive", "Fixture Movies"]);
+  await expect(page.locator(".details-provider-badges > a.details-provider-badge")).toHaveCount(2);
+  await expect(page.locator(".details-meta > .media-source-chips")).toHaveCount(0);
   await expect(page.locator(".details-source-group")).toHaveCount(0);
   await expect(page.getByText("Available from", { exact: true })).toHaveCount(0);
   const detailsLayout = async () => page.locator(".details-overview").evaluate((overview) => {
-    const metadata = overview.querySelector<HTMLElement>(".details-meta");
-    const chips = metadata?.querySelector<HTMLElement>(":scope > .media-source-chips");
-    if (!metadata || !chips) return null;
+    const providerRow = overview.querySelector<HTMLElement>(".details-provider-badges");
+    const externalBadge = providerRow?.querySelector<HTMLElement>("a.details-provider-badge");
+    const sourceBadge = providerRow?.querySelector<HTMLElement>(".details-provider-badge--source");
+    if (!providerRow || !externalBadge || !sourceBadge) return null;
+    const externalStyle = getComputedStyle(externalBadge);
+    const sourceStyle = getComputedStyle(sourceBadge);
     return {
-      chipsAreLastMetadataItem: metadata.lastElementChild === chips,
+      sourceFollowsExternalBadges: Array.from(providerRow.querySelectorAll(":scope > a.details-provider-badge")).every((badge) => Boolean(badge.compareDocumentPosition(sourceBadge) & Node.DOCUMENT_POSITION_FOLLOWING)),
+      sameHeight: externalBadge.getBoundingClientRect().height === sourceBadge.getBoundingClientRect().height,
+      sameBorderRadius: externalStyle.borderRadius === sourceStyle.borderRadius,
+      sameBackground: externalStyle.backgroundColor === sourceStyle.backgroundColor,
       hasHorizontalOverflow: document.documentElement.scrollWidth > window.innerWidth,
     };
   });
+  await page.setViewportSize({ width: 854, height: 478 });
   const desktopLayout = await detailsLayout();
-  expect(desktopLayout).toEqual({ chipsAreLastMetadataItem: true, hasHorizontalOverflow: false });
+  expect(desktopLayout).toEqual({ sourceFollowsExternalBadges: true, sameHeight: true, sameBorderRadius: true, sameBackground: true, hasHorizontalOverflow: false });
 
   await page.setViewportSize({ width: 355, height: 800 });
   const mobileLayout = await detailsLayout();
-  expect(mobileLayout).toEqual({ chipsAreLastMetadataItem: true, hasHorizontalOverflow: false });
+  expect(mobileLayout).toEqual({ sourceFollowsExternalBadges: true, sameHeight: true, sameBorderRadius: true, sameBackground: true, hasHorizontalOverflow: false });
   await expect(page.getByText("movie-secondary-manifest", { exact: true })).toHaveCount(0);
   await expect(page.getByText("movie-secondary-search", { exact: true })).toHaveCount(0);
 });
