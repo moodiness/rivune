@@ -295,6 +295,11 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 		return Profile{}, fmt.Errorf("begin profile creation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if globalAdministrator {
+		if err := authorizePersistedGlobalProfileOrigin(ctx, tx, principal); err != nil {
+			return Profile{}, err
+		}
+	}
 	if _, err := tx.Exec(ctx, "LOCK TABLE access_categories IN SHARE ROW EXCLUSIVE MODE"); err != nil {
 		return Profile{}, fmt.Errorf("lock access categories for profile creation: %w", err)
 	}
@@ -338,6 +343,9 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 		return Profile{}, fmt.Errorf("%w: categoryId does not identify an access category", ErrInvalidInput)
 	} else if err != nil {
 		return Profile{}, fmt.Errorf("create profile: %w", err)
+	}
+	if err := validateCategoryMoveResourceIntegrity(ctx, tx, profile.ID, profile.CategoryID); err != nil {
+		return Profile{}, err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO user_profile_access (user_id, profile_id, can_manage)
@@ -400,6 +408,11 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 		return Profile{}, fmt.Errorf("begin profile update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if input.CategoryID != nil && principal.IsGlobalAdministrator() {
+		if err := authorizePersistedGlobalProfileOrigin(ctx, tx, principal); err != nil {
+			return Profile{}, err
+		}
+	}
 	if input.CategoryID != nil {
 		if _, err := tx.Exec(ctx, "LOCK TABLE access_categories IN SHARE ROW EXCLUSIVE MODE"); err != nil {
 			return Profile{}, fmt.Errorf("lock access categories for profile update: %w", err)
@@ -464,6 +477,9 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 		}
 		if err != nil {
 			return Profile{}, fmt.Errorf("query profile category: %w", err)
+		}
+		if err := validateCategoryMoveResourceIntegrity(ctx, tx, current.ID, current.CategoryID); err != nil {
+			return Profile{}, err
 		}
 	}
 	if input.Name != nil {
@@ -599,6 +615,7 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, profileI
 		SELECT category_id::text
 		FROM profiles
 		WHERE id::text = $1
+		FOR UPDATE
 	`, profileID).Scan(&categoryID); err != nil {
 		return fmt.Errorf("query profile deletion category: %w", err)
 	}
@@ -646,6 +663,22 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, profileI
 	if err := ensureUnrestrictedProfile(remainingUnrestricted); err != nil {
 		return err
 	}
+	var candidateAddonIDs, candidateCollectionIDs []string
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			ARRAY(
+				SELECT id::text FROM profile_addons WHERE profile_id::text = $1
+				UNION
+				SELECT addon_id::text FROM addon_profile_access WHERE profile_id::text = $1
+			),
+			ARRAY(
+				SELECT id::text FROM profile_collections WHERE profile_id::text = $1
+				UNION
+				SELECT collection_id::text FROM collection_profile_access WHERE profile_id::text = $1
+			)
+	`, profileID).Scan(&candidateAddonIDs, &candidateCollectionIDs); err != nil {
+		return fmt.Errorf("query profile deletion resources: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE auth_sessions
 		SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
@@ -655,6 +688,28 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, profileI
 	}
 	if _, err := tx.Exec(ctx, "DELETE FROM profiles WHERE id::text = $1", profileID); err != nil {
 		return fmt.Errorf("delete profile: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM profile_addons addon
+		WHERE addon.id = ANY($1::uuid[])
+		  AND NOT EXISTS (
+			SELECT 1 FROM addon_profile_access access WHERE access.addon_id = addon.id
+		  ) AND NOT EXISTS (
+			SELECT 1 FROM addon_category_access access WHERE access.addon_id = addon.id
+		  )
+	`, candidateAddonIDs); err != nil {
+		return fmt.Errorf("delete orphaned profile add-ons: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM profile_collections collection
+		WHERE collection.id = ANY($1::uuid[])
+		  AND NOT EXISTS (
+			SELECT 1 FROM collection_profile_access access WHERE access.collection_id = collection.id
+		  ) AND NOT EXISTS (
+			SELECT 1 FROM collection_category_access access WHERE access.collection_id = collection.id
+		  )
+	`, candidateCollectionIDs); err != nil {
+		return fmt.Errorf("delete orphaned profile collections: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit profile deletion: %w", err)
@@ -932,4 +987,67 @@ func principalCategoryID(principal auth.Principal) string {
 		return ""
 	}
 	return *principal.CategoryID
+}
+
+func authorizePersistedGlobalProfileOrigin(ctx context.Context, tx pgx.Tx, principal auth.Principal) error {
+	if !principal.IsGlobalAdministrator() {
+		return ErrForbidden
+	}
+	var administrator bool
+	if err := tx.QueryRow(ctx, `
+		SELECT role = 'admin'
+		FROM users
+		WHERE id = $1::uuid
+		FOR SHARE
+	`, principal.UserID).Scan(&administrator); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrForbidden
+		}
+		return fmt.Errorf("authorize persisted global profile origin: %w", err)
+	}
+	if !administrator {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func validateCategoryMoveResourceIntegrity(ctx context.Context, tx pgx.Tx, profileID, destinationCategoryID string) error {
+	var collectionLimitExceeded, duplicateAddonTransport bool
+	if err := tx.QueryRow(ctx, `
+		WITH effective_collections AS (
+			SELECT collection_id
+			FROM collection_profile_access
+			WHERE profile_id = $1::uuid
+			UNION
+			SELECT collection_id
+			FROM collection_category_access
+			WHERE category_id = $2::uuid
+		), effective_addons AS (
+			SELECT addon_id
+			FROM addon_profile_access
+			WHERE profile_id = $1::uuid
+			UNION
+			SELECT addon_id
+			FROM addon_category_access
+			WHERE category_id = $2::uuid
+		)
+		SELECT
+			(SELECT count(*) > 100 FROM effective_collections),
+			EXISTS (
+				SELECT 1
+				FROM effective_addons access
+				JOIN profile_addons installed ON installed.id = access.addon_id
+				GROUP BY installed.transport_url
+				HAVING count(*) > 1
+			)
+	`, profileID, destinationCategoryID).Scan(&collectionLimitExceeded, &duplicateAddonTransport); err != nil {
+		return fmt.Errorf("validate profile category move resource access: %w", err)
+	}
+	if collectionLimitExceeded {
+		return fmt.Errorf("%w: the profile would have more than 100 collections", ErrInvalidInput)
+	}
+	if duplicateAddonTransport {
+		return fmt.Errorf("%w: the profile would have duplicate add-on transports", ErrInvalidInput)
+	}
+	return nil
 }

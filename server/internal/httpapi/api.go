@@ -669,6 +669,25 @@ func decodeJSONLimit(w http.ResponseWriter, r *http.Request, destination any, ma
 	if err != nil {
 		return err
 	}
+	return decodeJSONBody(body, destination)
+}
+
+func decodeAssignmentJSON(w http.ResponseWriter, r *http.Request, destination any) error {
+	return decodeAssignmentJSONLimit(w, r, destination, defaultJSONMaximumBytes)
+}
+
+func decodeAssignmentJSONLimit(w http.ResponseWriter, r *http.Request, destination any, maximumBytes int64) error {
+	body, err := readJSONBody(w, r, maximumBytes)
+	if err != nil {
+		return err
+	}
+	if err := decodeJSONBody(body, destination); err != nil {
+		return err
+	}
+	return rejectNullAssignmentMembers(body)
+}
+
+func decodeJSONBody(body []byte, destination any) error {
 	if !utf8.Valid(body) {
 		return errors.New("invalid JSON body: malformed UTF-8")
 	}
@@ -679,6 +698,39 @@ func decodeJSONLimit(w http.ResponseWriter, r *http.Request, destination any, ma
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return errors.New("request body must contain one JSON object")
+	}
+	return nil
+}
+
+func rejectNullAssignmentMembers(value json.RawMessage) error {
+	value = bytes.TrimSpace(value)
+	if len(value) == 0 {
+		return nil
+	}
+	switch value[0] {
+	case '{':
+		var members map[string]json.RawMessage
+		if err := json.Unmarshal(value, &members); err != nil {
+			return fmt.Errorf("invalid JSON body: %w", err)
+		}
+		for name, member := range members {
+			if (name == "profileIds" || name == "categoryIds") && bytes.Equal(bytes.TrimSpace(member), []byte("null")) {
+				return fmt.Errorf("invalid JSON body: %s must not be null", name)
+			}
+			if err := rejectNullAssignmentMembers(member); err != nil {
+				return err
+			}
+		}
+	case '[':
+		var elements []json.RawMessage
+		if err := json.Unmarshal(value, &elements); err != nil {
+			return fmt.Errorf("invalid JSON body: %w", err)
+		}
+		for _, element := range elements {
+			if err := rejectNullAssignmentMembers(element); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

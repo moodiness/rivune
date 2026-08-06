@@ -79,6 +79,14 @@ func TestSharedCollectionManagementRequiresEveryAssignedProfile(t *testing.T) {
 			position integer NOT NULL,
 			PRIMARY KEY (collection_id, profile_id)
 		);
+		CREATE TEMPORARY TABLE collection_category_access (
+			collection_id uuid NOT NULL, category_id uuid NOT NULL, position integer NOT NULL,
+			PRIMARY KEY (collection_id, category_id)
+		);
+		CREATE TEMPORARY TABLE collection_profile_order (
+			collection_id uuid NOT NULL, profile_id uuid NOT NULL, position integer NOT NULL,
+			PRIMARY KEY (collection_id, profile_id)
+		);
 	`); err != nil {
 		t.Fatalf("create shared collection authorization fixtures: %v", err)
 	}
@@ -228,9 +236,11 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cleanup := func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM profiles WHERE id = ANY($1::uuid[])`, []string{profileID, foreignProfileID})
-		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1::uuid`, userID)
-		_, _ = pool.Exec(context.Background(), `DELETE FROM access_categories WHERE id = $1::uuid`, categoryID)
+		cleanupCtx := context.Background()
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM profile_collections WHERE id = ANY($1::uuid[])`, []string{collectionAID, collectionBID, foreignCollectionID})
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM profiles WHERE id = ANY($1::uuid[])`, []string{profileID, foreignProfileID})
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM users WHERE id = $1::uuid`, userID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM access_categories WHERE id = $1::uuid`, categoryID)
 	}
 	cleanup()
 	t.Cleanup(cleanup)
@@ -262,8 +272,15 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 				($5::uuid, $3::uuid, 'Reorder B', '[]'::jsonb, 1),
 				($7::uuid, $6::uuid, 'Foreign reorder', '[]'::jsonb, 0)
 			RETURNING id
+		), inserted_collection_access AS (
+			INSERT INTO collection_profile_access (collection_id, profile_id, position)
+			VALUES
+				($4::uuid, $3::uuid, 0),
+				($5::uuid, $3::uuid, 1),
+				($7::uuid, $6::uuid, 0)
+			RETURNING collection_id
 		)
-		INSERT INTO collection_profile_access (collection_id, profile_id, position)
+		INSERT INTO collection_profile_order (collection_id, profile_id, position)
 		VALUES
 			($4::uuid, $3::uuid, 0),
 			($5::uuid, $3::uuid, 1),
@@ -292,7 +309,7 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 			SELECT
 				max(position) FILTER (WHERE collection_id = $2::uuid),
 				max(position) FILTER (WHERE collection_id = $3::uuid)
-			FROM collection_profile_access
+			FROM collection_profile_order
 			WHERE profile_id = $1::uuid
 		`, profileID, collectionAID, collectionBID).Scan(&positionA, &positionB); err != nil {
 			t.Fatalf("query collection reorder positions: %v", err)
@@ -322,6 +339,19 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 		t.Fatalf("manager collection reorder result = %+v", reordered)
 	}
 	assertPositions(1, 0)
+	var explicitPositionA, explicitPositionB int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			max(position) FILTER (WHERE collection_id = $2::uuid),
+			max(position) FILTER (WHERE collection_id = $3::uuid)
+		FROM collection_profile_access
+		WHERE profile_id = $1::uuid
+	`, profileID, collectionAID, collectionBID).Scan(&explicitPositionA, &explicitPositionB); err != nil {
+		t.Fatalf("query explicit collection positions: %v", err)
+	}
+	if explicitPositionA != 0 || explicitPositionB != 1 {
+		t.Fatalf("reorder changed access positions: A:%d B:%d", explicitPositionA, explicitPositionB)
+	}
 
 	if _, err := pool.Exec(ctx, `
 		WITH changed_grant AS (
@@ -329,7 +359,7 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 			WHERE user_id = $1::uuid AND profile_id = $2::uuid
 			RETURNING profile_id
 		)
-		UPDATE collection_profile_access SET position = CASE collection_id
+		UPDATE collection_profile_order SET position = CASE collection_id
 			WHEN $3::uuid THEN 0
 			WHEN $4::uuid THEN 1
 		END
@@ -351,7 +381,7 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 			WHERE user_id = $1::uuid AND profile_id = $2::uuid
 			RETURNING profile_id
 		)
-		UPDATE collection_profile_access SET position = CASE collection_id
+		UPDATE collection_profile_order SET position = CASE collection_id
 			WHEN $3::uuid THEN 0
 			WHEN $4::uuid THEN 1
 		END
@@ -365,13 +395,13 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 	}
 	defer func() { _ = blocker.Rollback(context.Background()) }()
 	if _, err := blocker.Exec(ctx, `
-		SELECT collection_id
-		FROM collection_profile_access
-		WHERE profile_id = $1::uuid
-		ORDER BY collection_id
+		SELECT id
+		FROM profile_collections
+		WHERE id = ANY($1::uuid[])
+		ORDER BY id
 		FOR UPDATE
-	`, profileID); err != nil {
-		t.Fatalf("lock collection assignments: %v", err)
+	`, []string{collectionAID, collectionBID}); err != nil {
+		t.Fatalf("lock collections: %v", err)
 	}
 	reorderDone := make(chan error, 1)
 	go func() {
@@ -408,7 +438,7 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	waitForBlockedQuery("SELECT collection_id::text FROM collection_profile_access")
+	waitForBlockedQuery("collection.lock_effective_collections_for_reorder")
 	revokeDone := make(chan error, 1)
 	go func() {
 		_, revokeErr := pool.Exec(ctx, `

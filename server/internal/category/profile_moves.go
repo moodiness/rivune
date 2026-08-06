@@ -3,6 +3,8 @@ package category
 import (
 	"context"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (s *Service) MoveProfile(ctx context.Context, principal Actor, profileID, categoryID string) error {
@@ -22,6 +24,9 @@ func (s *Service) MoveProfiles(ctx context.Context, principal Actor, profileIDs 
 		return fmt.Errorf("begin profile category move: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeAndLockGlobalAdministrator(ctx, tx, principal); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `LOCK TABLE access_categories IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return fmt.Errorf("lock categories for profile move: %w", err)
 	}
@@ -43,6 +48,9 @@ func (s *Service) MoveProfiles(ctx context.Context, principal Actor, profileIDs 
 	rows.Close()
 	if matched != len(profileIDs) {
 		return ErrNotFound
+	}
+	if err := validateProfileMoveResourceIntegrity(ctx, tx, profileIDs, categoryID); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO access_category_audit_events
@@ -83,6 +91,57 @@ func (s *Service) MoveProfiles(ctx context.Context, principal Actor, profileIDs 
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit profile category move: %w", err)
+	}
+	return nil
+}
+
+func validateProfileMoveResourceIntegrity(ctx context.Context, tx pgx.Tx, profileIDs []string, destinationCategoryID string) error {
+	var collectionLimitExceeded, duplicateAddonTransport bool
+	if err := tx.QueryRow(ctx, `
+		WITH moved_profiles AS (
+			SELECT id
+			FROM profiles
+			WHERE id = ANY($1::uuid[])
+			  AND category_id <> $2::uuid
+		), effective_collections AS (
+			SELECT moved.id AS profile_id, access.collection_id
+			FROM moved_profiles moved
+			JOIN collection_profile_access access ON access.profile_id = moved.id
+			UNION
+			SELECT moved.id AS profile_id, access.collection_id
+			FROM moved_profiles moved
+			JOIN collection_category_access access ON access.category_id = $2::uuid
+		), effective_addons AS (
+			SELECT moved.id AS profile_id, access.addon_id
+			FROM moved_profiles moved
+			JOIN addon_profile_access access ON access.profile_id = moved.id
+			UNION
+			SELECT moved.id AS profile_id, access.addon_id
+			FROM moved_profiles moved
+			JOIN addon_category_access access ON access.category_id = $2::uuid
+		)
+		SELECT
+			EXISTS (
+				SELECT 1
+				FROM effective_collections
+				GROUP BY profile_id
+				HAVING count(*) > 100
+			),
+			EXISTS (
+				SELECT 1
+				FROM effective_addons access
+				JOIN profile_addons installed ON installed.id = access.addon_id
+				GROUP BY access.profile_id, installed.transport_url
+				HAVING count(*) > 1
+			)
+	`, profileIDs, destinationCategoryID).Scan(&collectionLimitExceeded, &duplicateAddonTransport); err != nil {
+		return fmt.Errorf("validate profile category move resource access: %w", err)
+	}
+	if collectionLimitExceeded {
+		return invalid("moving profiles would give a profile more than 100 collections")
+	}
+	if duplicateAddonTransport {
+		return invalid("moving profiles would give a profile duplicate add-on transports")
 	}
 	return nil
 }

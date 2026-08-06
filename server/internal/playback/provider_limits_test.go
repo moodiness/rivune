@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
 )
@@ -17,6 +19,14 @@ type cardinalityResourceFetcher struct {
 }
 
 func (fetcher *cardinalityResourceFetcher) ValidatePlaybackAccess(context.Context, auth.Principal, string) error {
+	return nil
+}
+
+func (fetcher *cardinalityResourceFetcher) ValidatePlaybackAccesses(context.Context, auth.Principal, []string) error {
+	return nil
+}
+
+func (fetcher *cardinalityResourceFetcher) ValidatePlaybackAccessesTx(context.Context, pgx.Tx, auth.Principal, []string) error {
 	return nil
 }
 

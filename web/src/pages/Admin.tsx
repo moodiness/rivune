@@ -1067,14 +1067,23 @@ function SessionIPAddress({ session }: { session: ProfileSession }) {
   </span>;
 }
 
+
+function effectiveProfileIds(resource: { profileIds: string[]; categoryIds: string[] }, profiles: Profile[]) {
+  const explicit = new Set(resource.profileIds);
+  const categories = new Set(resource.categoryIds);
+  return profiles.filter((profile) => explicit.has(profile.id) || categories.has(profile.categoryId)).map((profile) => profile.id);
+}
+
 function AddonsAdmin() {
   const { account, activeProfile } = useAuth();
   const administrationProfiles = useAdministrationProfiles();
   const profiles = administrationProfiles.filter((profile) => account?.session.authorizationScope === "global_admin" || profile.canManage);
+  const [categories, setCategories] = useState<AccessCategory[]>([]);
   const isGlobalAdmin = account?.session.authorizationScope === "global_admin";
   const [addons, setAddons] = useState<InstalledAddon[]>([]);
   const [transportUrl, setTransportUrl] = useState("");
   const [installProfileIds, setInstallProfileIds] = useState<string[]>(() => activeProfile ? [activeProfile.id] : []);
+  const [installCategoryIds, setInstallCategoryIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState("");
   const [error, setError] = useState("");
@@ -1087,12 +1096,14 @@ function AddonsAdmin() {
   const [editingAddon, setEditingAddon] = useState<ManagedAddon | null>(null);
   const [editTransportUrl, setEditTransportUrl] = useState("");
   const [editProfileIds, setEditProfileIds] = useState<string[]>([]);
+  const [editCategoryIds, setEditCategoryIds] = useState<string[]>([]);
   const [editEnabled, setEditEnabled] = useState(true);
   const [draggedAddonIndex, setDraggedAddonIndex] = useState<number | null>(null);
   const [reordering, setReordering] = useState(false);
   const reorderInFlight = useRef(false);
   const initialLoadStarted = useRef(false);
   const previewRequestRef = useRef<{ controller: AbortController } | null>(null);
+  const installAssignmentInitialized = useRef(Boolean(activeProfile));
 
   async function load() {
     setLoading(true);
@@ -1108,7 +1119,10 @@ function AddonsAdmin() {
         .then(setDiagnostics)
         .catch(() => setDiagnosticsError(translate("admin.addons.diagnostics.loadFailed")))
       : Promise.resolve();
-    await Promise.all([addonListRequest, diagnosticsRequest]);
+    const categoriesRequest = isGlobalAdmin
+      ? api.categories().then(setCategories).catch((cause) => setError(notifyError(cause, translate("admin.addons.errors.load"))))
+      : Promise.resolve();
+    await Promise.all([addonListRequest, diagnosticsRequest, categoriesRequest]);
   }
   useEffect(() => {
     if (initialLoadStarted.current) return;
@@ -1121,11 +1135,10 @@ function AddonsAdmin() {
     request?.controller.abort();
   }, []);
   useEffect(() => {
-    if (installProfileIds.length === 0 && activeProfile) {
-      invalidateAddonPreview();
-      setInstallProfileIds([activeProfile.id]);
-    }
-  }, [activeProfile, installProfileIds.length]);
+    if (installAssignmentInitialized.current || !activeProfile) return;
+    installAssignmentInitialized.current = true;
+    setInstallProfileIds([activeProfile.id]);
+  }, [activeProfile]);
 
   function invalidateAddonPreview() {
     previewRequestRef.current?.controller.abort();
@@ -1137,8 +1150,8 @@ function AddonsAdmin() {
 
   async function previewAddon(event: FormEvent) {
     event.preventDefault();
-    if (!isGlobalAdmin || previewRequestRef.current || working === "install" || !transportUrl || installProfileIds.length === 0) return;
-    const input: InstallAddonInput = { transportUrl, profileIds: [...installProfileIds] };
+    if (!isGlobalAdmin || previewRequestRef.current || working === "install" || !transportUrl || installProfileIds.length + installCategoryIds.length === 0) return;
+    const input: InstallAddonInput = { transportUrl, profileIds: [...installProfileIds], categoryIds: [...installCategoryIds] };
     const request = { controller: new AbortController() };
     previewRequestRef.current = request;
     setAddonPreview(null);
@@ -1166,6 +1179,7 @@ function AddonsAdmin() {
       setEditingAddon(addon);
       setEditTransportUrl("");
       setEditProfileIds(addon.profileIds);
+      setEditCategoryIds(addon.categoryIds);
       setEditEnabled(addon.enabled);
       return;
     }
@@ -1176,6 +1190,7 @@ function AddonsAdmin() {
       setEditingAddon(managed);
       setEditTransportUrl(managed.transportUrl);
       setEditProfileIds(managed.profileIds);
+      setEditCategoryIds(managed.categoryIds);
       setEditEnabled(managed.enabled);
     } catch (cause) {
       setError(notifyError(cause, translate("admin.addons.errors.load"), translate("admin.addons.errors.unavailableTitle")));
@@ -1187,19 +1202,27 @@ function AddonsAdmin() {
   function closeAddonEditor() {
     setEditingAddon(null);
     setEditTransportUrl("");
+    setEditProfileIds([]);
+    setEditCategoryIds([]);
     setEditEnabled(true);
   }
 
   async function saveAddon(event: FormEvent) {
     event.preventDefault();
-    if (!editingAddon || !activeProfile || editProfileIds.length === 0) return;
+    if (!editingAddon || !activeProfile || editProfileIds.length + editCategoryIds.length === 0) return;
     setWorking(editingAddon.id);
     setError("");
     try {
+      const existingProfileIds = new Set(editingAddon.profileIds);
+      const existingCategoryIds = new Set(editingAddon.categoryIds);
+      const profileIdsChanged = existingProfileIds.size !== editProfileIds.length || editProfileIds.some((id) => !existingProfileIds.has(id));
+      const categoryIdsChanged = existingCategoryIds.size !== editCategoryIds.length || editCategoryIds.some((id) => !existingCategoryIds.has(id));
+      const nextTransportUrl = editTransportUrl.trim();
       const input: UpdateAddonInput = {
-        profileIds: [...editProfileIds],
-        ...(isGlobalAdmin ? { enabled: editEnabled } : {}),
-        ...(editTransportUrl.trim() ? { transportUrl: editTransportUrl.trim() } : {}),
+        ...(profileIdsChanged ? { profileIds: [...editProfileIds] } : {}),
+        ...(categoryIdsChanged ? { categoryIds: [...editCategoryIds] } : {}),
+        ...(isGlobalAdmin && editEnabled !== editingAddon.enabled ? { enabled: editEnabled } : {}),
+        ...(isGlobalAdmin && nextTransportUrl && nextTransportUrl !== (editingAddon.transportUrl ?? "") ? { transportUrl: nextTransportUrl } : {}),
       };
       const updated = await api.updateAddon(editingAddon.id, input);
       const publicUpdated: InstalledAddon = {
@@ -1208,10 +1231,11 @@ function AddonsAdmin() {
         position: updated.position,
         enabled: updated.enabled,
         profileIds: updated.profileIds,
+        categoryIds: updated.categoryIds,
         installedAt: updated.installedAt,
         updatedAt: updated.updatedAt,
       };
-      setAddons((values) => publicUpdated.profileIds.includes(activeProfile.id)
+      setAddons((values) => effectiveProfileIds(publicUpdated, profiles).includes(activeProfile.id)
         ? values.map((value) => value.id === publicUpdated.id ? publicUpdated : value)
         : values.filter((value) => value.id !== publicUpdated.id));
       closeAddonEditor();
@@ -1225,16 +1249,16 @@ function AddonsAdmin() {
 
   async function install() {
     if (!isGlobalAdmin || !addonPreview || working === "install") return;
-    const profileSelectionMatches = addonPreview.input.profileIds.length === installProfileIds.length
-      && addonPreview.input.profileIds.every((profileId, index) => profileId === installProfileIds[index]);
-    if (addonPreview.input.transportUrl !== transportUrl || !profileSelectionMatches) {
+    const profileSelectionMatches = addonPreview.input.profileIds.length === installProfileIds.length && addonPreview.input.profileIds.every((value, index) => value === installProfileIds[index]);
+    const categorySelectionMatches = addonPreview.input.categoryIds.length === installCategoryIds.length && addonPreview.input.categoryIds.every((value, index) => value === installCategoryIds[index]);
+    if (addonPreview.input.transportUrl !== transportUrl || !profileSelectionMatches || !categorySelectionMatches) {
       invalidateAddonPreview();
       return;
     }
     setWorking("install");
     setError("");
     try {
-      const installed = await api.installAddon(addonPreview.input.transportUrl, addonPreview.input.profileIds);
+      const installed = await api.installAddon(addonPreview.input);
       invalidateAddonPreview();
       setTransportUrl("");
       await load();
@@ -1310,7 +1334,7 @@ function AddonsAdmin() {
   }
 
   const addonEditSaving = Boolean(editingAddon && working === editingAddon.id);
-  const assignedProfiles = new Set(addons.flatMap((addon) => addon.profileIds)).size;
+  const assignedProfiles = new Set(addons.flatMap((addon) => effectiveProfileIds(addon, profiles))).size;
   const contentTypes = new Set(addons.flatMap((addon) => addon.manifest.types)).size;
   const diagnosticsByAddonId = new Map(diagnostics?.diagnostics.map((diagnostic) => [diagnostic.addonId, diagnostic]) ?? []);
   return <div className="admin-section addons-admin">
@@ -1326,9 +1350,9 @@ function AddonsAdmin() {
       <header><div><span>{translate("admin.addons.install.eyebrow")}</span><h3 id="install-addon-title">{translate("admin.addons.install.title")}</h3><p>{translate("admin.addons.install.description")}</p></div></header>
       <form className="install-addon" onSubmit={previewAddon}>
         <label className="field"><span>{translate("admin.addons.install.manifestUrl")}</span><div><WandSparkles size={19} /><input type="url" value={transportUrl} onChange={(event) => { invalidateAddonPreview(); setTransportUrl(event.target.value); }} placeholder={translate("admin.addons.manifestUrlPlaceholder")} required /></div></label>
-        <Button type="submit" loading={previewing} disabled={working === "install" || installProfileIds.length === 0}><Search size={18} /> {translate("admin.addons.actions.preview")}</Button>
+        <Button type="submit" loading={previewing} disabled={working === "install" || installProfileIds.length + installCategoryIds.length === 0}><Search size={18} /> {translate("admin.addons.actions.preview")}</Button>
       </form>
-      <ProfileAssignmentPicker profiles={profiles} selected={installProfileIds} onChange={(profileIds) => { invalidateAddonPreview(); setInstallProfileIds(profileIds); }} legend={translate("admin.profileAssignment.legend")} />
+      <AssignmentPicker categories={categories} profiles={profiles} profileIds={installProfileIds} categoryIds={installCategoryIds} onChange={({ profileIds, categoryIds }) => { installAssignmentInitialized.current = true; invalidateAddonPreview(); setInstallProfileIds(profileIds); setInstallCategoryIds(categoryIds); }} />
       {previewError && <Notice>{previewError}</Notice>}
       {addonPreview && <AddonInstallPreview preview={addonPreview} installing={working === "install"} onInstall={() => void install()} />}
     </section>}
@@ -1338,9 +1362,9 @@ function AddonsAdmin() {
     {loading
       ? <div className="addon-list" aria-label={translate("admin.addons.loadingLabel")}>{[0, 1].map((value) => <Skeleton key={value} className="addon-skeleton" />)}</div>
       : addons.length
-        ? <div className="addon-list">{addons.map((addon, addonIndex) => <AddonCard key={addon.id} addon={addon} diagnostic={diagnosticsByAddonId.get(addon.id)} index={addonIndex} total={addons.length} working={working === addon.id} reordering={reordering} dragging={draggedAddonIndex === addonIndex} onDragStart={(event) => { setDraggedAddonIndex(addonIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(addonIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedAddonIndex !== null) stageAddonMove(draggedAddonIndex, addonIndex); }} onDragOver={(event) => { if (draggedAddonIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveAddonOrder(); }} onDragEnd={() => { if (draggedAddonIndex !== null) void saveAddonOrder(); }} onMove={(toIndex) => void moveAddon(addonIndex, toIndex)} onRefresh={() => void refresh(addon.id)} onEdit={() => void openAddonEditor(addon)} onRemove={() => setDeleting(addon)} />)}</div>
+        ? <div className="addon-list">{addons.map((addon, addonIndex) => <AddonCard key={addon.id} addon={addon} reach={effectiveProfileIds(addon, profiles).length} diagnostic={diagnosticsByAddonId.get(addon.id)} index={addonIndex} total={addons.length} working={working === addon.id} reordering={reordering} dragging={draggedAddonIndex === addonIndex} onDragStart={(event) => { setDraggedAddonIndex(addonIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(addonIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedAddonIndex !== null) stageAddonMove(draggedAddonIndex, addonIndex); }} onDragOver={(event) => { if (draggedAddonIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveAddonOrder(); }} onDragEnd={() => { if (draggedAddonIndex !== null) void saveAddonOrder(); }} onMove={(toIndex) => void moveAddon(addonIndex, toIndex)} onRefresh={() => void refresh(addon.id)} onEdit={() => void openAddonEditor(addon)} onRemove={() => setDeleting(addon)} />)}</div>
         : <EmptyState icon={<Boxes size={44} />} title={translate(error ? "admin.addons.errors.unavailableTitle" : "admin.addons.empty.title")} description={translate(error ? "admin.addons.errors.retryDescription" : "admin.addons.empty.description")} action={error ? <Button variant="secondary" onClick={() => void load()}><RefreshCw size={17} /> {translate("common.actions.tryAgain")}</Button> : undefined} />}
-    {editingAddon && <Modal onClose={() => { if (!addonEditSaving) closeAddonEditor(); }} className="editor-modal addon-edit-modal"><form onSubmit={saveAddon}><div className="editor-modal__heading"><span><Pencil size={18} /> {translate("admin.addons.editor.title")}</span><h2>{editingAddon.manifest.name}</h2><p>{translate("admin.addons.editor.description")}</p></div>{error && <Notice>{error}</Notice>}{account?.session.authorizationScope === "global_admin" && <><label className="field"><span>{translate("admin.addons.editor.transportUrl")}</span><div><WandSparkles size={18} /><input type="url" value={editTransportUrl} disabled={addonEditSaving} onChange={(event) => setEditTransportUrl(event.target.value)} placeholder={translate("admin.addons.manifestUrlPlaceholder")} /></div></label><section className="addon-availability" aria-labelledby="addon-availability-title" aria-describedby="addon-availability-description"><div><strong id="addon-availability-title">{translate("admin.addons.editor.availability")}</strong><p id="addon-availability-description">{translate("admin.addons.editor.availabilityDescription")}</p><span className={`addon-availability__status ${editEnabled ? "is-enabled" : "is-disabled"}`}>{translate(editEnabled ? "common.status.enabled" : "common.status.disabled")}</span></div><Button type="button" variant="secondary" className="addon-availability__toggle" aria-pressed={editEnabled} disabled={addonEditSaving} onClick={() => setEditEnabled((value) => !value)}>{translate(editEnabled ? "admin.addons.actions.disable" : "admin.addons.actions.enable")}</Button></section></>}<ProfileAssignmentPicker profiles={profiles} selected={editProfileIds} onChange={setEditProfileIds} legend={translate("admin.profileAssignment.legend")} /><div className="modal-actions"><Button type="button" variant="ghost" disabled={addonEditSaving} onClick={closeAddonEditor}>{translate("common.cancel")}</Button><Button type="submit" loading={addonEditSaving} disabled={editProfileIds.length === 0}><Save size={18} /> {translate("admin.addons.actions.save")}</Button></div></form></Modal>}
+    {editingAddon && <Modal onClose={() => { if (!addonEditSaving) closeAddonEditor(); }} className="editor-modal addon-edit-modal"><form onSubmit={saveAddon}><div className="editor-modal__heading"><span><Pencil size={18} /> {translate("admin.addons.editor.title")}</span><h2>{editingAddon.manifest.name}</h2><p>{translate("admin.addons.editor.description")}</p></div>{error && <Notice>{error}</Notice>}{account?.session.authorizationScope === "global_admin" && <><label className="field"><span>{translate("admin.addons.editor.transportUrl")}</span><div><WandSparkles size={18} /><input type="url" value={editTransportUrl} disabled={addonEditSaving} onChange={(event) => setEditTransportUrl(event.target.value)} placeholder={translate("admin.addons.manifestUrlPlaceholder")} /></div></label><section className="addon-availability" aria-labelledby="addon-availability-title" aria-describedby="addon-availability-description"><div><strong id="addon-availability-title">{translate("admin.addons.editor.availability")}</strong><p id="addon-availability-description">{translate("admin.addons.editor.availabilityDescription")}</p><span className={`addon-availability__status ${editEnabled ? "is-enabled" : "is-disabled"}`}>{translate(editEnabled ? "common.status.enabled" : "common.status.disabled")}</span></div><Button type="button" variant="secondary" className="addon-availability__toggle" aria-pressed={editEnabled} disabled={addonEditSaving} onClick={() => setEditEnabled((value) => !value)}>{translate(editEnabled ? "admin.addons.actions.disable" : "admin.addons.actions.enable")}</Button></section></>}<AssignmentPicker categories={categories} profiles={profiles} profileIds={editProfileIds} categoryIds={editCategoryIds} disabled={addonEditSaving} onChange={({ profileIds, categoryIds }) => { setEditProfileIds(profileIds); setEditCategoryIds(categoryIds); }} /><div className="modal-actions"><Button type="button" variant="ghost" disabled={addonEditSaving} onClick={closeAddonEditor}>{translate("common.cancel")}</Button><Button type="submit" loading={addonEditSaving} disabled={editProfileIds.length + editCategoryIds.length === 0}><Save size={18} /> {translate("admin.addons.actions.save")}</Button></div></form></Modal>}
     {deleting && <ConfirmDialog title={translate("admin.addons.remove.title", { name: deleting.manifest.name })} description={translate("admin.addons.remove.description")} confirmLabel={translate("admin.addons.remove.confirm")} loading={working === deleting.id} onCancel={() => setDeleting(null)} onConfirm={() => void remove(deleting)} />}
   </div>;
 }
@@ -1388,8 +1412,9 @@ const diagnosticErrorKeys: Record<AddonDiagnosticErrorCode, TranslationKey> = {
   request_failed: "admin.addons.diagnostics.error.requestFailed",
 };
 
-function AddonCard({ addon, diagnostic, index, total, working, reordering, dragging, onDragStart, onDragEnter, onDragOver, onDrop, onDragEnd, onMove, onRefresh, onEdit, onRemove }: {
+function AddonCard({ addon, reach, diagnostic, index, total, working, reordering, dragging, onDragStart, onDragEnter, onDragOver, onDrop, onDragEnd, onMove, onRefresh, onEdit, onRemove }: {
   addon: InstalledAddon;
+  reach: number;
   diagnostic?: AddonDiagnostic;
   index: number;
   total: number;
@@ -1414,6 +1439,7 @@ function AddonCard({ addon, diagnostic, index, total, working, reordering, dragg
       <div><h3>{manifest.name}</h3><span>v{manifest.version}</span>{!addon.enabled && <span className="addon-badge addon-badge--disabled">{translate("common.status.disabled")}</span>}{manifest.behaviorHints?.p2p && <span className="addon-badge addon-badge--warn">P2P</span>}</div>
       <p>{manifest.description || translate("admin.addons.card.noDescription")}</p>
       <div className="addon-card__types">{manifest.types.map((type) => <i key={type}>{type}</i>)}</div>
+      <span className="assignment-reach">{reach} {translate("admin.common.profilesReached")}</span>
       {diagnostic && <div className="addon-diagnostics">
         <div className="addon-diagnostics__summary">
           <span className={`addon-diagnostics__state addon-diagnostics__state--${diagnostic.state}`}>{translate(diagnosticStateKeys[diagnostic.state])}</span>
@@ -1439,51 +1465,62 @@ function AddonCard({ addon, diagnostic, index, total, working, reordering, dragg
   </article>;
 }
 
-function ProfileAssignmentPicker({ profiles, selected, onChange, legend }: {
+function AssignmentPicker({ categories, profiles, profileIds, categoryIds, disabled = false, onChange }: {
+  categories: AccessCategory[];
   profiles: Profile[];
-  selected: string[];
-  onChange: (profileIds: string[]) => void;
-  legend: string;
+  profileIds: string[];
+  categoryIds: string[];
+  disabled?: boolean;
+  onChange: (assignment: { profileIds: string[]; categoryIds: string[] }) => void;
 }) {
-  function toggle(profileID: string) {
-    if (selected.includes(profileID)) {
-      if (selected.length === 1) return;
-      onChange(selected.filter((value) => value !== profileID));
-      return;
-    }
-    onChange([...selected, profileID]);
-  }
 
-  return <fieldset className="profile-assignment">
-    <legend>{legend}</legend>
-    <div>{profiles.map((profile) => {
-      const checked = selected.includes(profile.id);
-      return <label key={profile.id} className={checked ? "is-selected" : ""}>
-        <input type="checkbox" checked={checked} onChange={() => toggle(profile.id)} />
-        <img src={profile.avatar.url} alt="" />
-        <span><strong>{profile.name}</strong><small>{translate(checked ? "admin.profileAssignment.included" : "admin.profileAssignment.notIncluded")}</small></span>
-        <i><Check size={14} /></i>
-      </label>;
-    })}</div>
-    <small>{translate("admin.profileAssignment.description")}</small>
+  return <fieldset className="assignment-picker">
+    <legend>{translate("admin.profileAssignment.legend")}</legend>
+    <section className="assignment-picker__section">
+      <header><h4>{translate("admin.assignment.categories")}</h4><p>{translate("admin.assignment.categoriesDescription")}</p></header>
+      <div className="assignment-picker__options assignment-picker__categories">{categories.map((category) => {
+        const checked = categoryIds.includes(category.id);
+        return <label key={category.id} className={checked ? "is-selected" : ""} style={category.color ? { "--category-color": category.color } as CSSProperties : undefined}>
+          <input type="checkbox" checked={checked} disabled={disabled} onChange={() => onChange({ profileIds, categoryIds: categoryIds.includes(category.id) ? categoryIds.filter((value) => value !== category.id) : [...categoryIds, category.id] })} />
+          <span className="assignment-picker__mark" aria-hidden="true">{category.icon || <Layers3 size={16} />}</span>
+          <span><strong>{category.name}</strong><small>{translate(checked ? "admin.profileAssignment.included" : "admin.profileAssignment.notIncluded")}</small></span>
+        </label>;
+      })}</div>
+    </section>
+    <details className="assignment-picker__profiles">
+      <summary><ChevronDown size={17} aria-hidden="true" /><span>{translate("admin.assignment.showProfiles", { count: profileIds.length })}</span></summary>
+      <section className="assignment-picker__section">
+        <header><h4>{translate("admin.assignment.profiles")}</h4><p>{translate("admin.assignment.profilesDescription")}</p></header>
+        <div className="assignment-picker__options">{profiles.map((profile) => {
+          const checked = profileIds.includes(profile.id);
+          return <label key={profile.id} className={checked ? "is-selected" : ""}>
+            <input type="checkbox" checked={checked} disabled={disabled} onChange={() => onChange({ profileIds: profileIds.includes(profile.id) ? profileIds.filter((value) => value !== profile.id) : [...profileIds, profile.id], categoryIds })} />
+            <img src={profile.avatar.url} alt="" />
+            <span><strong>{profile.name}</strong><small>{translate(checked ? "admin.profileAssignment.included" : "admin.profileAssignment.notIncluded")}</small></span>
+          </label>;
+        })}</div>
+      </section>
+    </details>
+    <small className="assignment-picker__description">{translate("admin.assignment.description")}</small>
   </fieldset>;
 }
 
 const blankFolder = (): CollectionFolder => ({ title: translate("admin.collections.defaults.folderTitle"), tileShape: "poster", sourceView: "merged", focusGifEnabled: false, hideTitle: false, sources: [] });
-const blankCollection = (profileIds: string[] = []): CollectionSaveInput => ({ title: translate("admin.collections.defaults.collectionTitle"), heroEnabled: false, pinToTop: false, focusGlowEnabled: true, viewMode: "rows", folderCoverShape: "poster", folders: [blankFolder()], profileIds })
+const blankCollection = (profileIds: string[] = []): CollectionSaveInput => ({ title: translate("admin.collections.defaults.collectionTitle"), heroEnabled: false, pinToTop: false, focusGlowEnabled: true, viewMode: "rows", folderCoverShape: "poster", folders: [blankFolder()], profileIds, categoryIds: [] })
 
-function collectionCardSummary(collection: Collection): string {
+function collectionCardSummary(collection: Collection, reach: number): string {
   const folderCount = collection.folders.length;
   const sourceCount = collection.folders.reduce((total, folder) => total + folder.sources.length, 0);
   const folders = translate(folderCount === 1 ? "admin.collections.card.folderCountOne" : "admin.collections.card.folderCountMany", { folderCount });
   const sources = translate(sourceCount === 1 ? "admin.collections.card.sourceCountOne" : "admin.collections.card.sourceCountMany", { sourceCount });
-  return `${folders} · ${sources}`;
+  return `${folders} · ${sources} · ${reach} ${translate("admin.common.profilesReached")}`;
 }
 
 function CollectionsAdmin() {
   const { account, activeProfile } = useAuth();
   const administrationProfiles = useAdministrationProfiles();
   const profiles = administrationProfiles.filter((profile) => account?.session.authorizationScope === "global_admin" || profile.canManage);
+  const [categories, setCategories] = useState<AccessCategory[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [editing, setEditing] = useState<Collection | "new" | null>(null);
   const [draft, setDraft] = useState<CollectionSaveInput>(blankCollection(activeProfile ? [activeProfile.id] : []));
@@ -1506,7 +1543,11 @@ function CollectionsAdmin() {
     setError("");
     try { setCollections((await api.collections()).collections); } catch (cause) { setError(notifyError(cause, translate("admin.collections.errors.load"), translate("admin.collections.errors.unavailableTitle"))); } finally { setLoading(false); }
   }
-  useEffect(() => { void load(); void api.addonCatalogs().then((response) => setCatalogs(response.catalogs)).catch(() => undefined); }, []);
+  useEffect(() => {
+    void load();
+    void api.addonCatalogs().then((response) => setCatalogs(response.catalogs)).catch(() => undefined);
+    void api.categories().then(setCategories).catch((cause) => setError(notifyError(cause, translate("admin.collections.errors.load"), translate("admin.collections.errors.unavailableTitle"))));
+  }, []);
 
   async function openEditor(collection: Collection | "new") {
     const requestSequence = ++editorRequestSequence.current;
@@ -1524,7 +1565,7 @@ function CollectionsAdmin() {
     try {
       const managed = await api.collectionManagement(collection.id);
       if (editorRequestSequence.current !== requestSequence) return;
-      setDraft({ title: managed.title, backdropImageUrl: managed.backdropImageUrl, heroEnabled: managed.heroEnabled, pinToTop: managed.pinToTop, focusGlowEnabled: managed.focusGlowEnabled, viewMode: managed.viewMode, folderCoverShape: managed.folderCoverShape, folders: structuredClone(managed.folders), profileIds: managed.profileIds, expectedVersion: managed.version });
+      setDraft({ title: managed.title, backdropImageUrl: managed.backdropImageUrl, heroEnabled: managed.heroEnabled, pinToTop: managed.pinToTop, focusGlowEnabled: managed.focusGlowEnabled, viewMode: managed.viewMode, folderCoverShape: managed.folderCoverShape, folders: structuredClone(managed.folders), profileIds: managed.profileIds, categoryIds: managed.categoryIds, expectedVersion: managed.version });
       setEditing(managed);
     } catch (cause) {
       if (editorRequestSequence.current !== requestSequence) return;
@@ -1667,6 +1708,7 @@ function CollectionsAdmin() {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (draft.profileIds.length + draft.categoryIds.length === 0) return;
     setSaving(true);
     setError("");
     const creating = editing === "new";
@@ -1694,7 +1736,7 @@ function CollectionsAdmin() {
   }
   const totalFolders = collections.reduce((total, collection) => total + collection.folders.length, 0);
   const totalSources = collections.reduce((total, collection) => total + collection.folders.reduce((count, folder) => count + folder.sources.length, 0), 0);
-  const assignedProfiles = new Set(collections.flatMap((collection) => collection.profileIds)).size;
+  const assignedProfiles = new Set(collections.flatMap((collection) => effectiveProfileIds(collection, profiles))).size;
 
   return <div className="admin-section collections-admin">
     <div className="admin-section__header">
@@ -1720,7 +1762,7 @@ function CollectionsAdmin() {
           <article key={collection.id} className={`collection-admin-card ${draggedCollectionIndex === collectionIndex ? "is-dragging" : ""}`} style={collection.backdropImageUrl ? { backgroundImage: `url(${collection.backdropImageUrl})` } : undefined} draggable={!reordering} onDragStart={(event) => { setDraggedCollectionIndex(collectionIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(collectionIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedCollectionIndex !== null) stageCollectionMove(draggedCollectionIndex, collectionIndex); }} onDragOver={(event) => { if (draggedCollectionIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveCollectionOrder(); }} onDragEnd={() => { if (draggedCollectionIndex !== null) void saveCollectionOrder(); }}>
             <div className="collection-admin-card__shade" />
             <span>{collection.pinToTop ? <><Sparkles size={14} /> {translate("admin.collections.card.pinned")}</> : translate("admin.collections.card.position", { position: collection.position + 1 })}</span>
-            <div><h3>{collection.title}</h3><p>{collectionCardSummary(collection)}</p>
+            <div><h3>{collection.title}</h3><p>{collectionCardSummary(collection, effectiveProfileIds(collection, profiles).length)}</p>
               <div className="collection-admin-card__actions">
                 <span className="collection-admin-card__order"><IconButton label={translate("admin.collections.reorder.moveUp", { title: collection.title })} disabled={reordering || collectionIndex === 0 || collections[collectionIndex - 1]?.pinToTop !== collection.pinToTop} onClick={() => void moveCollection(collectionIndex, collectionIndex - 1)}><ChevronUp size={17} /></IconButton><IconButton label={translate("admin.collections.reorder.moveDown", { title: collection.title })} disabled={reordering || collectionIndex === collections.length - 1 || collections[collectionIndex + 1]?.pinToTop !== collection.pinToTop} onClick={() => void moveCollection(collectionIndex, collectionIndex + 1)}><ChevronDown size={17} /></IconButton></span>
                 <Button variant="secondary" onClick={() => void openEditor(collection)}><Pencil size={17} /> {translate("common.actions.edit")}</Button>
@@ -1750,7 +1792,7 @@ function CollectionsAdmin() {
           <label className="toggle-field"><input type="checkbox" checked={draft.viewMode === "follow_layout"} onChange={(event) => setDraft((current) => ({ ...current, viewMode: event.target.checked ? "follow_layout" : "rows" }))} /><span><i /><div><strong>{translate("admin.collections.editor.displayTitlesDirectly")}</strong><small>{translate("admin.collections.editor.displayTitlesDirectlyDescription")}</small></div></span></label>
         </div>
       </section>
-      <ProfileAssignmentPicker profiles={profiles} selected={draft.profileIds} onChange={(profileIds) => setDraft((current) => ({ ...current, profileIds }))} legend={translate("admin.profileAssignment.legend")} />
+      <AssignmentPicker categories={categories} profiles={profiles} profileIds={draft.profileIds} categoryIds={draft.categoryIds} disabled={saving} onChange={({ profileIds, categoryIds }) => setDraft((current) => ({ ...current, profileIds, categoryIds }))} />
       <div className="folder-editor-list">{draft.folders.map((folder, folderIndex) =>
         <section
           className={`folder-editor ${draggedFolderIndex === folderIndex ? "is-dragging" : ""}`}
@@ -1867,7 +1909,7 @@ function CollectionsAdmin() {
       <AddTile label={translate("admin.collections.folders.addAnother")} onClick={() => setDraft((current) => ({ ...current, folders: [...current.folders, blankFolder()] }))} />
       <div className="modal-actions modal-actions--sticky">
         <Button type="button" variant="ghost" disabled={saving} onClick={() => setEditing(null)}>{translate("common.cancel")}</Button>
-        <Button type="submit" loading={saving}><Save size={18} /> {translate("admin.collections.actions.save")}</Button>
+        <Button type="submit" loading={saving} disabled={draft.profileIds.length + draft.categoryIds.length === 0}><Save size={18} /> {translate("admin.collections.actions.save")}</Button>
       </div>
     </form></Modal>}
     {deleting && <ConfirmDialog title={translate("admin.collections.delete.title", { title: deleting.title })} description={translate("admin.collections.delete.description")} confirmLabel={translate("admin.collections.delete.confirm")} onCancel={() => setDeleting(null)} onConfirm={() => void remove(deleting)} />}

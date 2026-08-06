@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures/rivune";
+import { CATEGORY_IDS, test, expect } from "./fixtures/rivune";
 
 const artwork = {
   backdropImageUrl: "https://images.example/private/collection/backdrop.jpg?token=collection-secret&size=original",
@@ -39,4 +39,59 @@ test("collection editor loads exact artwork sources while ordinary collection re
   await expect(dialog.getByLabel("Cover image URL")).toHaveValue(artwork.coverImageUrl);
   await expect(dialog.getByLabel("Backdrop URL")).not.toHaveValue(/\/api\/v1\/artwork\//);
   await expect(dialog.getByLabel("Cover image URL")).not.toHaveValue(/\/api\/v1\/artwork\//);
+});
+
+test("collection assignment hydrates categories independently and persists exact durable policies", async ({ page, rivune }) => {
+  rivune.setCollectionAssignments("alice", { profileIds: ["bob"], categoryIds: [CATEGORY_IDS.kids] });
+  rivune.seedProfiles(1, CATEGORY_IDS.kids);
+  const writes: Array<{ method: string; body: Record<string, unknown> }> = [];
+  await page.route(/\/api\/v1\/collections(?:\/.*)?$/, async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if ((request.method() === "PUT" && pathname === "/api/v1/collections/alice-collection") || (request.method() === "POST" && pathname === "/api/v1/collections")) {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      writes.push({ method: request.method(), body });
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ...body, id: "alice-collection", position: 0, version: 2, createdAt: "2024-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" }) });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/#admin?tab=collections");
+  const card = page.locator(".collection-admin-card").filter({ hasText: "Alice's Slow Shelf" });
+  await expect(card).toContainText("3 Profiles reached");
+  await card.getByRole("button", { name: "Edit", exact: true }).click();
+  let dialog = page.getByRole("dialog");
+  const categories = dialog.locator(".assignment-picker__categories");
+  for (const name of ["Household", "Kids", "Guest"]) await expect(categories.getByText(name, { exact: true })).toBeVisible();
+  const kidsCheckbox = categories.locator("label").filter({ hasText: "Kids" }).getByRole("checkbox");
+  await expect(kidsCheckbox).toBeChecked();
+  const profiles = dialog.locator(".assignment-picker__profiles");
+  await expect(profiles).not.toHaveAttribute("open", "");
+  await profiles.getByText("Choose individual profiles (1 selected)", { exact: true }).click();
+  const bobCheckbox = profiles.locator("label").filter({ hasText: "Bob" }).getByRole("checkbox");
+  await expect(bobCheckbox).toBeChecked();
+  await bobCheckbox.uncheck();
+  await expect(kidsCheckbox).toBeChecked();
+  await dialog.getByRole("button", { name: "Save collection", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+
+  expect(writes[0]?.method).toBe("PUT");
+  expect(writes[0]?.body.profileIds).toEqual([]);
+  expect(writes[0]?.body.categoryIds).toEqual([CATEGORY_IDS.kids]);
+
+  await page.getByRole("button", { name: "New collection", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  const newProfiles = dialog.locator(".assignment-picker__profiles");
+  await newProfiles.getByText("Choose individual profiles (1 selected)", { exact: true }).click();
+  await newProfiles.locator("label").filter({ hasText: "Alice" }).getByRole("checkbox").uncheck();
+  const save = dialog.getByRole("button", { name: "Save collection", exact: true });
+  await expect(save).toBeDisabled();
+  await dialog.locator(".assignment-picker__categories label").filter({ hasText: "Guest" }).getByRole("checkbox").check();
+  await expect(save).toBeEnabled();
+  await save.click();
+
+  expect(writes[1]?.method).toBe("POST");
+  expect(writes[1]?.body.profileIds).toEqual([]);
+  expect(writes[1]?.body.categoryIds).toEqual([CATEGORY_IDS.guest]);
 });

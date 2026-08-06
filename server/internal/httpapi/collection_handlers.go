@@ -28,6 +28,10 @@ func (api *API) exportCollections(w http.ResponseWriter, r *http.Request, princi
 		api.writeCollectionError(w, "export collections", err)
 		return
 	}
+	for index := range document.Collections {
+		document.Collections[index].ProfileIDs = nil
+		document.Collections[index].CategoryIDs = nil
+	}
 	w.Header().Set("Content-Disposition", `attachment; filename="rivune-collections.json"`)
 	writeJSON(w, http.StatusOK, document)
 }
@@ -37,9 +41,15 @@ func (api *API) importCollections(w http.ResponseWriter, r *http.Request, princi
 		return
 	}
 	var document collection.ExportDocument
-	if err := decodeJSONLimit(w, r, &document, collection.MaximumImportDocumentBytes); err != nil {
+	if err := decodeAssignmentJSONLimit(w, r, &document, collection.MaximumImportDocumentBytes); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
+	}
+	for _, value := range document.Collections {
+		if value.ProfileIDs != nil || value.CategoryIDs != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "Portable collections cannot include assignment policy")
+			return
+		}
 	}
 	result, err := api.collections.Import(r.Context(), principal, document)
 	if err != nil {
@@ -80,7 +90,7 @@ func (api *API) createCollection(w http.ResponseWriter, r *http.Request, princip
 		return
 	}
 	var input collection.SaveInput
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeAssignmentJSON(w, r, &input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -105,7 +115,7 @@ func (api *API) updateCollection(w http.ResponseWriter, r *http.Request, princip
 		return
 	}
 	var input collection.SaveInput
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeAssignmentJSON(w, r, &input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}

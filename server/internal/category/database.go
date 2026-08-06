@@ -42,6 +42,25 @@ func deviceScanTargets(item *Device) []any {
 		&item.LastSeenAt, &item.CreatedAt, &item.UpdatedAt}
 }
 
+func authorizeAndLockGlobalAdministrator(ctx context.Context, tx pgx.Tx, principal Actor) error {
+	var administrator bool
+	if err := tx.QueryRow(ctx, `
+		SELECT role = 'admin'
+		FROM users
+		WHERE id = $1::uuid
+		FOR SHARE
+	`, principal.UserID).Scan(&administrator); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrForbidden
+		}
+		return fmt.Errorf("authorize global administrator: %w", err)
+	}
+	if !administrator {
+		return ErrForbidden
+	}
+	return nil
+}
+
 func lockCategory(ctx context.Context, tx pgx.Tx, categoryID string) error {
 	var exists bool
 	err := tx.QueryRow(ctx, `SELECT true FROM access_categories WHERE id = $1::uuid FOR UPDATE`, categoryID).Scan(&exists)

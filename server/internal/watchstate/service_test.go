@@ -568,6 +568,11 @@ func TestResolveTitleProfileScopedFallbackIsolatedAndLibraryPreservesIdentity(t 
 			profile_id uuid NOT NULL,
 			PRIMARY KEY (addon_id, profile_id)
 		);
+		CREATE TEMPORARY TABLE addon_category_access (
+			addon_id uuid NOT NULL,
+			category_id uuid NOT NULL,
+			PRIMARY KEY (addon_id, category_id)
+		);
 		CREATE TEMPORARY TABLE profile_library (
 			profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
 			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
@@ -876,9 +881,9 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 			can_manage boolean NOT NULL DEFAULT false,
 			PRIMARY KEY (user_id, profile_id)
 		);
-		INSERT INTO profiles (id) VALUES
-			('11111111-1111-4111-8111-111111111111'),
-			('22222222-2222-4222-8222-222222222222');
+		INSERT INTO profiles (id, category_id) VALUES
+			('11111111-1111-4111-8111-111111111111', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'),
+			('22222222-2222-4222-8222-222222222222', 'ffffffff-ffff-4fff-8fff-ffffffffffff');
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			media_type text NOT NULL,
@@ -923,6 +928,11 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 			profile_id uuid NOT NULL,
 			PRIMARY KEY (addon_id, profile_id)
 		);
+		CREATE TEMPORARY TABLE addon_category_access (
+			addon_id uuid NOT NULL,
+			category_id uuid NOT NULL,
+			PRIMARY KEY (addon_id, category_id)
+		);
 		CREATE TEMPORARY TABLE profile_library (
 			profile_id uuid NOT NULL,
 			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
@@ -940,9 +950,11 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 			('cccccccc-cccc-4ccc-8ccc-cccccccccccc', false);
 		INSERT INTO addon_profile_access (addon_id, profile_id) VALUES
 			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '11111111-1111-4111-8111-111111111111'),
-			('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '22222222-2222-4222-8222-222222222222'),
-			('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '11111111-1111-4111-8111-111111111111'),
 			('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '11111111-1111-4111-8111-111111111111');
+		INSERT INTO addon_category_access (addon_id, category_id) VALUES
+			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'),
+			('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'ffffffff-ffff-4fff-8fff-ffffffffffff'),
+			('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee');
 	`); err != nil {
 		t.Fatalf("create TV library fixtures: %v", err)
 	}
@@ -950,8 +962,10 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	profileOneID := "11111111-1111-4111-8111-111111111111"
 	profileTwoID := "22222222-2222-4222-8222-222222222222"
+	profileThreeID := "33333333-3333-4333-8333-333333333333"
 	profileOne := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileOneID, ProfileGrantExpiresAt: &expiresAt}
 	profileTwo := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt}
+	profileThree := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileThreeID, ProfileGrantExpiresAt: &expiresAt}
 	trackingSink := &recordingTrackingSink{}
 	service := NewService(pool, trackingSink)
 
@@ -993,6 +1007,49 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 		SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected inaccessible profile addon to be hidden, got %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO profiles (id, category_id)
+		VALUES ($1::uuid, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee')
+	`, profileThreeID); err != nil {
+		t.Fatalf("create profile after category grant: %v", err)
+	}
+	futureProfileTitle, err := service.ResolveTitle(ctx, profileThree, ResolveTitleInput{
+		MediaType: "tv", Provider: "addon", ResourceID: "news", Title: "News",
+		SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+	})
+	if err != nil || futureProfileTitle.TitleID != first.TitleID {
+		t.Fatalf("future profile did not inherit category TV access: result=%+v err=%v", futureProfileTitle, err)
+	}
+	if _, err := service.AddLibrary(ctx, profileThree, first.TitleID); err != nil {
+		t.Fatalf("add category-inherited TV title to future profile library: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE profiles
+		SET category_id = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+		WHERE id = $1::uuid
+	`, profileThreeID); err != nil {
+		t.Fatalf("move future profile category: %v", err)
+	}
+	if _, err := service.ResolveTitle(ctx, profileThree, ResolveTitleInput{
+		MediaType: "tv", Provider: "addon", ResourceID: "news", Title: "News",
+		SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+	}); err != ErrNotFound {
+		t.Fatalf("moved profile retained old category TV access: %v", err)
+	}
+	if _, err := service.AddLibrary(ctx, profileThree, first.TitleID); err != ErrNotFound {
+		t.Fatalf("moved profile added old category TV title: %v", err)
+	}
+	movedPage, err := service.Library(ctx, profileThree, "tv", 1, 20)
+	if err != nil || movedPage.TotalResults != 1 || len(movedPage.Items) != 1 || movedPage.Items[0].Available {
+		t.Fatalf("moved profile library did not retain unavailable TV entry: page=%+v err=%v", movedPage, err)
+	}
+	movedProfileTitle, err := service.ResolveTitle(ctx, profileThree, ResolveTitleInput{
+		MediaType: "tv", Provider: "addon", ResourceID: "news", Title: "News",
+		SourceAddonID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+	})
+	if err != nil || movedProfileTitle.TitleID != second.TitleID {
+		t.Fatalf("moved profile did not inherit new category TV access: result=%+v err=%v", movedProfileTitle, err)
 	}
 	for _, sourceAddonID := range []string{
 		"cccccccc-cccc-4ccc-8ccc-cccccccccccc", // installed but disabled
@@ -1058,7 +1115,8 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 		t.Fatalf("unexpected second profile TV library: %+v", secondPage)
 	}
 	if firstPage.Items[0].SourceAddonID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" ||
-		firstPage.Items[0].SourceCatalogID != "regional" || firstPage.Items[0].SourceName != "Provider One" {
+		firstPage.Items[0].SourceCatalogID != "regional" || firstPage.Items[0].SourceName != "Provider One" ||
+		firstPage.Items[0].Country != "US" || firstPage.Items[0].Language != "en" || firstPage.Items[0].Category != "News" {
 		t.Fatalf("TV source snapshots were not returned: %+v", firstPage.Items[0])
 	}
 
@@ -1191,7 +1249,11 @@ func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 		CREATE TEMPORARY TABLE addon_profile_access (
 			addon_id uuid NOT NULL,
 			profile_id uuid NOT NULL
-		)
+		);
+		CREATE TEMPORARY TABLE addon_category_access (
+			addon_id uuid NOT NULL,
+			category_id uuid NOT NULL
+		);
 	`); err != nil {
 		t.Fatalf("create temporary titles: %v", err)
 	}
@@ -1346,6 +1408,10 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 			addon_id uuid NOT NULL,
 			profile_id uuid NOT NULL
 		);
+		CREATE TEMPORARY TABLE addon_category_access (
+			addon_id uuid NOT NULL,
+			category_id uuid NOT NULL
+		);
 		CREATE TEMPORARY TABLE profile_progress (
 			profile_id uuid NOT NULL,
 			title_id uuid NOT NULL,
@@ -1462,6 +1528,10 @@ func TestProgressBatchUsesOneLogicalQueryAndAtomicVersions(t *testing.T) {
 		CREATE TEMPORARY TABLE addon_profile_access (
 			addon_id uuid NOT NULL,
 			profile_id uuid NOT NULL
+		);
+		CREATE TEMPORARY TABLE addon_category_access (
+			addon_id uuid NOT NULL,
+			category_id uuid NOT NULL
 		);
 		CREATE TEMPORARY TABLE profile_progress (
 			profile_id uuid NOT NULL,
@@ -1618,6 +1688,10 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 			addon_id uuid NOT NULL, profile_id uuid NOT NULL, position integer NOT NULL DEFAULT 0,
 			PRIMARY KEY (addon_id, profile_id)
 		);
+		CREATE TEMPORARY TABLE addon_category_access (
+			addon_id uuid NOT NULL, category_id uuid NOT NULL, position integer NOT NULL DEFAULT 0,
+			PRIMARY KEY (addon_id, category_id)
+		);
 		CREATE TEMPORARY TABLE profile_progress (
 			profile_id uuid NOT NULL, title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
 			position_seconds integer NOT NULL, duration_seconds integer NOT NULL,
@@ -1639,8 +1713,9 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 			('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', true);
 		INSERT INTO addon_profile_access (addon_id, profile_id, position) VALUES
 			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '11111111-1111-4111-8111-111111111111', 0),
-			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '22222222-2222-4222-8222-222222222222', 0),
 			('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '11111111-1111-4111-8111-111111111111', 1);
+		INSERT INTO addon_category_access (addon_id, category_id, position) VALUES
+			('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', 0);
 	`); err != nil {
 		t.Fatalf("create custom series fixtures: %v", err)
 	}
@@ -1670,12 +1745,29 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 	if len(first.Videos) != 2 || first.Videos[0].ResourceID != "opaque:second" || first.Videos[1].ResourceID != "opaque:first" {
 		t.Fatalf("videos not returned in request order: %+v", first.Videos)
 	}
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM addon_profile_access
+		WHERE addon_id = $1::uuid AND profile_id = $2::uuid
+	`, input.SourceAddonID, profileOneID); err != nil {
+		t.Fatalf("remove overlapping explicit addon grant: %v", err)
+	}
 	progress, err := service.UpdateProgress(ctx, profileOne, first.Videos[0].TitleID, UpdateProgressInput{PositionSeconds: 42, DurationSeconds: 120})
 	if err != nil || progress.Version != 1 {
 		t.Fatalf("store custom episode progress: %+v error %v", progress, err)
 	}
 	if counter.titleAddonShareLock.Load() != 1 {
 		t.Fatalf("addon progress update emitted %d enabled addon FOR SHARE queries, want 1", counter.titleAddonShareLock.Load())
+	}
+	progressBatch, err := service.GetProgressBatch(ctx, profileOne, []string{first.Videos[0].TitleID})
+	if err != nil || len(progressBatch.Items) != 1 || progressBatch.Items[0].Progress == nil ||
+		progressBatch.Items[0].Progress.PositionSeconds != 42 {
+		t.Fatalf("read category-inherited progress batch: result=%+v err=%v", progressBatch, err)
+	}
+	setBatch, err := service.SetWatchedBatch(ctx, profileOne, []SetWatchedBatchItem{{
+		TitleID: first.Videos[1].TitleID, Completed: false, ExpectedVersion: 0,
+	}})
+	if err != nil || len(setBatch.Items) != 1 || setBatch.Items[0].Progress == nil || setBatch.Items[0].Progress.Version != 1 {
+		t.Fatalf("write category-inherited watched batch: result=%+v err=%v", setBatch, err)
 	}
 	var currentTitleCount, identityCount int
 	if err := pool.QueryRow(ctx, `
@@ -1692,11 +1784,11 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 	if currentTitleCount != 5 || identityCount != 5 {
 		t.Fatalf("expected five addon-scoped current titles and identities, got titles=%d identities=%d", currentTitleCount, identityCount)
 	}
-	if _, err := service.SetWatched(ctx, profileOne, first.Videos[1].TitleID, true, CompletionInput{}); err != nil {
+	if _, err := service.SetWatched(ctx, profileOne, first.Videos[1].TitleID, true, CompletionInput{ExpectedVersion: 1}); err != nil {
 		t.Fatalf("complete custom episode: %v", err)
 	}
-	if counter.titleAddonShareLock.Load() != 2 {
-		t.Fatalf("addon watched update emitted %d enabled addon FOR SHARE queries, want 2", counter.titleAddonShareLock.Load())
+	if counter.titleAddonShareLock.Load() != 3 {
+		t.Fatalf("addon watched updates emitted %d enabled addon FOR SHARE queries, want 3", counter.titleAddonShareLock.Load())
 	}
 	continuePage, err := service.ContinueWatching(ctx, profileOne, 20)
 	if err != nil {
@@ -1805,13 +1897,16 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 	if _, err := pool.Exec(ctx, `INSERT INTO profile_addons (id, enabled) VALUES ($1::uuid, true)`, input.SourceAddonID); err != nil {
 		t.Fatalf("restore custom series addon installation: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `DELETE FROM addon_profile_access WHERE addon_id = $1::uuid AND profile_id = $2::uuid`, input.SourceAddonID, profileOneID); err != nil {
-		t.Fatalf("revoke addon access: %v", err)
+	if _, err := service.ResolveCustomSeries(ctx, profileOne, input); err != nil {
+		t.Fatalf("restored addon lost durable category access: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM addon_category_access WHERE addon_id = $1::uuid AND category_id = $2::uuid`, input.SourceAddonID, categoryID); err != nil {
+		t.Fatalf("revoke addon category access: %v", err)
 	}
 	if _, err := service.ResolveCustomSeries(ctx, profileOne, input); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected inaccessible addon resolution to be not found, got %v", err)
+		t.Fatalf("expected category-revoked addon resolution to be not found, got %v", err)
 	}
 	if _, err := service.GetProgress(ctx, profileOne, first.Videos[0].TitleID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected revoked addon title to be inaccessible, got %v", err)
+		t.Fatalf("expected category-revoked addon title to be inaccessible, got %v", err)
 	}
 }

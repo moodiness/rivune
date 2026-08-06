@@ -300,7 +300,7 @@ function collection(profileId: string) {
   return {
     id: `${profileId}-collection`, title: name, heroEnabled: false, pinToTop: false, focusGlowEnabled: false, viewMode: "follow_layout", folderCoverShape: "poster",
     folders: [{ id: `${profileId}-folder`, title: name, tileShape: "poster", focusGifEnabled: false, hideTitle: false, sources: [] } as CollectionFolderFixture],
-    profileIds: [profileId], position: 0, version: 1, createdAt, updatedAt: createdAt,
+    profileIds: [profileId], categoryIds: [], position: 0, version: 1, createdAt, updatedAt: createdAt,
   };
 }
 
@@ -348,6 +348,7 @@ export class RivuneHarness {
   private readonly collectionSourcePosters = new Map<string, boolean>();
   private readonly collectionFolders = new Map<string, Array<Pick<CollectionFolderFixture, "id" | "title"> & Partial<CollectionFolderFixture>>>();
   private readonly collectionArtwork = new Map<string, CollectionArtworkFixture>();
+  private readonly collectionAssignments = new Map<string, { profileIds: string[]; categoryIds: string[] }>();
   private readonly folderDelays = new Map<string, number>();
   private readonly seasonOverrides = new Map<string, unknown>();
   private libraryItems: Array<Record<string, unknown>> = [];
@@ -599,12 +600,17 @@ export class RivuneHarness {
     this.collectionArtwork.set(profileId, { ...artwork });
   }
 
+  setCollectionAssignments(profileId: string, assignments: { profileIds: string[]; categoryIds: string[] }) {
+    this.collectionAssignments.set(profileId, { profileIds: [...assignments.profileIds], categoryIds: [...assignments.categoryIds] });
+  }
+
   delayFolder(folderId: string, milliseconds: number) {
     this.folderDelays.set(folderId, milliseconds);
   }
 
   private collectionFor(profileId: string) {
     const value = collection(profileId);
+    const assignments = this.collectionAssignments.get(profileId);
     const configured = this.collectionFolders.get(profileId);
     if (configured) {
       value.folders = configured.map((folder) => ({ ...value.folders[0], ...folder }));
@@ -612,6 +618,7 @@ export class RivuneHarness {
     const artwork = this.collectionArtwork.get(profileId);
     return {
       ...value,
+      ...(assignments ? { profileIds: [...assignments.profileIds], categoryIds: [...assignments.categoryIds] } : {}),
       ...(artwork ? { backdropImageUrl: `/api/v1/artwork/${profileId}-collection-backdrop` } : {}),
       folders: value.folders.map((folder, index) => artwork && index === 0 ? {
         ...folder,

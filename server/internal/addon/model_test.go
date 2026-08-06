@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -472,6 +473,8 @@ func TestInstalledAddonManifestMarshalsAsObjectWithoutTransport(t *testing.T) {
 	const secret = "https://provider.example/private/path/manifest.json?token=must-not-leak"
 	encoded, err := json.Marshal(InstalledAddon{
 		Manifest:     json.RawMessage(`{"id":"org.example"}`),
+		ProfileIDs:   []string{"11111111-1111-4111-8111-111111111111"},
+		CategoryIDs:  []string{"22222222-2222-4222-8222-222222222222"},
 		transportURL: secret,
 	})
 	if err != nil {
@@ -482,6 +485,10 @@ func TestInstalledAddonManifestMarshalsAsObjectWithoutTransport(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"enabled":false`) {
 		t.Fatalf("installed addon availability was omitted: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), `"profileIds":["11111111-1111-4111-8111-111111111111"]`) ||
+		!strings.Contains(string(encoded), `"categoryIds":["22222222-2222-4222-8222-222222222222"]`) {
+		t.Fatalf("installed addon did not preserve separate assignment arrays: %s", encoded)
 	}
 	if strings.Contains(string(encoded), "transportUrl") || strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "must-not-leak") {
 		t.Fatalf("installed addon exposed internal transport: %s", encoded)
@@ -522,5 +529,33 @@ func TestUpdateAddonInputAvailabilitySerialization(t *testing.T) {
 	}
 	if strings.Contains(string(omitted), `"enabled"`) {
 		t.Fatalf("addon update serialized omitted availability: %s", omitted)
+	}
+}
+
+func TestNormalizeInstallAssignmentsKeepsDimensionsSeparate(t *testing.T) {
+	const activeProfileID = "11111111-1111-4111-8111-111111111111"
+	defaulted, err := normalizeInstallAssignments(nil, nil, activeProfileID)
+	if err != nil || !reflect.DeepEqual(defaulted.profileIDs, []string{activeProfileID}) || len(defaulted.categoryIDs) != 0 {
+		t.Fatalf("default assignments = %+v, error %v", defaulted, err)
+	}
+	categoryOnly, err := normalizeInstallAssignments(
+		[]string{}, []string{"22222222-2222-4222-8222-222222222222"}, activeProfileID,
+	)
+	if err != nil || len(categoryOnly.profileIDs) != 0 || !reflect.DeepEqual(categoryOnly.categoryIDs, []string{"22222222-2222-4222-8222-222222222222"}) {
+		t.Fatalf("category-only assignments = %+v, error %v", categoryOnly, err)
+	}
+	if _, err := normalizeInstallAssignments([]string{}, []string{}, activeProfileID); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("empty assignment union error = %v, want %v", err, ErrInvalidInput)
+	}
+	if _, err := normalizeInstallAssignments(
+		[]string{activeProfileID, activeProfileID}, nil, activeProfileID,
+	); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("duplicate profile assignment error = %v, want %v", err, ErrInvalidInput)
+	}
+	if _, err := normalizeInstallAssignments(nil, []string{
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+	}, activeProfileID); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("mixed-case duplicate category assignment error = %v, want %v", err, ErrInvalidInput)
 	}
 }

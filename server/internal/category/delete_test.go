@@ -288,3 +288,135 @@ func openCategoryDeleteTestPool(t *testing.T) *pgxpool.Pool {
 	t.Cleanup(pool.Close)
 	return pool
 }
+
+func TestDeleteRetainsExplicitResourcesAndRemovesCategoryOrphans(t *testing.T) {
+	pool := openCategoryDeleteTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var random [6]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		t.Fatalf("generate category resource deletion suffix: %v", err)
+	}
+	suffix := fmt.Sprintf("%x", random[:])
+	var userID, sourceID, ownerCategoryID, ownerProfileID string
+	if err := pool.QueryRow(ctx, `SELECT id::text FROM access_categories WHERE is_default`).Scan(&ownerCategoryID); err != nil {
+		t.Fatalf("select resource owner category: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO users (username, password_hash, role)
+		VALUES ($1, 'category-resource-delete-test', 'admin')
+		RETURNING id::text
+	`, "category-resource-delete-"+suffix).Scan(&userID); err != nil {
+		t.Fatalf("insert category resource deletion actor: %v", err)
+	}
+	var position int
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(max(position), -1) + 1 FROM access_categories`).Scan(&position); err != nil {
+		t.Fatalf("select category resource deletion position: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO access_categories (name, normalized_name, position)
+		VALUES ($1, $2, $3)
+		RETURNING id::text
+	`, "Resource delete "+suffix, "resource-delete-"+suffix, position).Scan(&sourceID); err != nil {
+		t.Fatalf("insert category resource deletion source: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO profiles (name, category_id)
+		VALUES ($1, $2::uuid)
+		RETURNING id::text
+	`, "Resource owner "+suffix, ownerCategoryID).Scan(&ownerProfileID); err != nil {
+		t.Fatalf("insert category resource owner: %v", err)
+	}
+	var addonIDs, collectionIDs []string
+	if err := pool.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO profile_addons (profile_id, transport_url, manifest, manifest_id, manifest_version, position)
+			SELECT $1::uuid, 'https://category-delete.example/' || $2 || '/' || label,
+			       '{}'::jsonb, label || '-' || $2, '1.0.0', position
+			FROM (VALUES ('explicit', 0), ('orphan', 1)) resources(label, position)
+			RETURNING id, position
+		)
+		SELECT array_agg(id::text ORDER BY position) FROM inserted
+	`, ownerProfileID, suffix).Scan(&addonIDs); err != nil {
+		t.Fatalf("seed category deletion add-ons: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO profile_collections (profile_id, title, position)
+			SELECT $1::uuid, label || '-' || $2, position
+			FROM (VALUES ('explicit', 0), ('orphan', 1)) resources(label, position)
+			RETURNING id, position
+		)
+		SELECT array_agg(id::text ORDER BY position) FROM inserted
+	`, ownerProfileID, suffix).Scan(&collectionIDs); err != nil {
+		t.Fatalf("seed category deletion collections: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM profile_addons WHERE id = ANY($1::uuid[])`, addonIDs)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM profile_collections WHERE id = ANY($1::uuid[])`, collectionIDs)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM access_category_audit_events WHERE actor_user_id = $1::uuid`, userID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM profiles WHERE id = $1::uuid`, ownerProfileID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM access_categories WHERE id = $1::uuid`, sourceID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM users WHERE id = $1::uuid`, userID)
+	})
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO addon_category_access (addon_id, category_id, position)
+		VALUES ($1::uuid, $3::uuid, 0), ($2::uuid, $3::uuid, 1)
+	`, addonIDs[0], addonIDs[1], sourceID); err != nil {
+		t.Fatalf("grant category deletion category add-ons: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO addon_profile_access (addon_id, profile_id, position)
+		VALUES ($1::uuid, $2::uuid, 0)
+	`, addonIDs[0], ownerProfileID); err != nil {
+		t.Fatalf("grant category deletion explicit add-on: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO collection_category_access (collection_id, category_id, position)
+		VALUES ($1::uuid, $3::uuid, 0), ($2::uuid, $3::uuid, 1)
+	`, collectionIDs[0], collectionIDs[1], sourceID); err != nil {
+		t.Fatalf("grant category deletion category collections: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO collection_profile_access (collection_id, profile_id, position)
+		VALUES ($1::uuid, $2::uuid, 0)
+	`, collectionIDs[0], ownerProfileID); err != nil {
+		t.Fatalf("grant category deletion explicit collection: %v", err)
+	}
+
+	if err := NewService(pool).Delete(ctx, Actor{UserID: userID, GlobalAdministrator: true}, sourceID, nil); err != nil {
+		t.Fatalf("delete resource category: %v", err)
+	}
+	for _, resource := range []struct {
+		label string
+		table string
+		ids   []string
+	}{
+		{label: "add-on", table: "profile_addons", ids: addonIDs},
+		{label: "collection", table: "profile_collections", ids: collectionIDs},
+	} {
+		var retainedCount, orphanCount int
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM "+resource.table+" WHERE id = $1::uuid", resource.ids[0]).Scan(&retainedCount); err != nil {
+			t.Fatalf("count retained explicit %s: %v", resource.label, err)
+		}
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM "+resource.table+" WHERE id = $1::uuid", resource.ids[1]).Scan(&orphanCount); err != nil {
+			t.Fatalf("count category-only orphan %s: %v", resource.label, err)
+		}
+		if retainedCount != 1 || orphanCount != 0 {
+			t.Errorf("%s category deletion state = retained %d, orphan %d; want 1 and 0", resource.label, retainedCount, orphanCount)
+		}
+	}
+	var survivingExplicitAssignments int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM addon_profile_access WHERE addon_id = $1::uuid AND profile_id = $3::uuid) +
+			(SELECT count(*) FROM collection_profile_access WHERE collection_id = $2::uuid AND profile_id = $3::uuid)
+	`, addonIDs[0], collectionIDs[0], ownerProfileID).Scan(&survivingExplicitAssignments); err != nil {
+		t.Fatalf("count surviving explicit assignments: %v", err)
+	}
+	if survivingExplicitAssignments != 2 {
+		t.Errorf("surviving explicit assignment count = %d, want 2", survivingExplicitAssignments)
+	}
+}

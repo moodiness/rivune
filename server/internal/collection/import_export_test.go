@@ -13,6 +13,8 @@ func TestPortableCollectionRemovesRuntimeIDsAndAddsAddonIdentity(t *testing.T) {
 		Title:            "Curated",
 		ViewMode:         ViewModeRows,
 		FolderCoverShape: TileShapeLandscape,
+		ProfileIDs:       []string{"44444444-4444-4444-8444-444444444444"},
+		CategoryIDs:      []string{"55555555-5555-4555-8555-555555555555"},
 		Folders: []Folder{{
 			ID:    "11111111-1111-4111-8111-111111111111",
 			Title: "Featured",
@@ -38,11 +40,16 @@ func TestPortableCollectionRemovesRuntimeIDsAndAddsAddonIdentity(t *testing.T) {
 	if source.AddonCatalog.ManifestID != "org.example.metadata" {
 		t.Fatalf("addon identity was not exported: %+v", source.AddonCatalog)
 	}
+	if portable.ProfileIDs != nil || portable.CategoryIDs != nil {
+		t.Fatalf("assignments leaked into portable collection: profiles=%v categories=%v", portable.ProfileIDs, portable.CategoryIDs)
+	}
 }
 
 func TestPrepareImportedCollectionResolvesAddonAndRegeneratesIDs(t *testing.T) {
 	input := SaveInput{
-		Title: "Curated",
+		Title:       "Curated",
+		ProfileIDs:  []string{"44444444-4444-4444-8444-444444444444"},
+		CategoryIDs: []string{"55555555-5555-4555-8555-555555555555"},
 		Folders: []Folder{{
 			ID:    "11111111-1111-4111-8111-111111111111",
 			Title: "Featured",
@@ -66,6 +73,9 @@ func TestPrepareImportedCollectionResolvesAddonAndRegeneratesIDs(t *testing.T) {
 	}
 	if input.Folders[0].ID != "" || input.Folders[0].Sources[0].ID != "" {
 		t.Fatal("import did not discard exported runtime IDs")
+	}
+	if input.ProfileIDs != nil || input.CategoryIDs != nil {
+		t.Fatalf("import retained exported assignments: profiles=%v categories=%v", input.ProfileIDs, input.CategoryIDs)
 	}
 	addon := input.Folders[0].Sources[0].AddonCatalog
 	if addon.AddonID != identity.ID || addon.ManifestID != identity.ManifestID {

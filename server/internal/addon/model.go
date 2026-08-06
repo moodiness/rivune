@@ -171,6 +171,7 @@ type InstalledAddon struct {
 	Enabled     bool            `json:"enabled"`
 	Position    int             `json:"position"`
 	ProfileIDs  []string        `json:"profileIds"`
+	CategoryIDs []string        `json:"categoryIds"`
 	InstalledAt time.Time       `json:"installedAt"`
 	UpdatedAt   time.Time       `json:"updatedAt"`
 
@@ -196,17 +197,21 @@ func managedAddon(installed InstalledAddon, revealTransport bool) ManagedAddon {
 type InstallInput struct {
 	TransportURL string   `json:"transportUrl"`
 	ProfileIDs   []string `json:"profileIds,omitempty"`
+	CategoryIDs  []string `json:"categoryIds,omitempty"`
 }
 
 type AddonPreview struct {
 	Manifest     Manifest          `json:"manifest"`
 	Capabilities AddonCapabilities `json:"capabilities"`
+	ProfileIDs   []string          `json:"profileIds"`
+	CategoryIDs  []string          `json:"categoryIds"`
 }
 
 type UpdateAddonInput struct {
 	TransportURL *string  `json:"transportUrl,omitempty"`
 	Enabled      *bool    `json:"enabled,omitempty"`
 	ProfileIDs   []string `json:"profileIds"`
+	CategoryIDs  []string `json:"categoryIds"`
 }
 
 type ReorderInput struct {

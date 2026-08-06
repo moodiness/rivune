@@ -264,16 +264,26 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	t.Cleanup(pool.Close)
 
 	const (
-		userID       = "2a000000-0000-4000-8000-000000000001"
-		categoryAID  = "2a000000-0000-4000-8000-000000000002"
-		categoryBID  = "2a000000-0000-4000-8000-000000000003"
-		profileAID   = "2a000000-0000-4000-8000-000000000004"
-		profileBID   = "2a000000-0000-4000-8000-000000000005"
-		transportURL = "https://authorization-boundary.example/config/private/manifest.json?credential=stored"
+		userID               = "2a000000-0000-4000-8000-000000000001"
+		categoryAID          = "2a000000-0000-4000-8000-000000000002"
+		categoryBID          = "2a000000-0000-4000-8000-000000000003"
+		profileAID           = "2a000000-0000-4000-8000-000000000004"
+		profileBID           = "2a000000-0000-4000-8000-000000000005"
+		transportURL         = "https://authorization-boundary.example/config/private/manifest.json?credential=stored"
+		profileScopedAddonID = "2a000000-0000-4000-8000-000000000007"
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cleanup := func() {
+		_, _ = pool.Exec(context.Background(), `
+			DELETE FROM profile_addons
+			WHERE id = $1::uuid
+			   OR profile_id = ANY($2::uuid[])
+			   OR transport_url = ANY($3::text[])
+		`, profileScopedAddonID, []string{profileAID, profileBID}, []string{
+			transportURL,
+			"https://profile-scope.invalid/manifest.json",
+		})
 		_, _ = pool.Exec(context.Background(), `DELETE FROM profiles WHERE id = ANY($1::uuid[])`, []string{profileAID, profileBID})
 		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1::uuid`, userID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM access_categories WHERE id = ANY($1::uuid[])`, []string{categoryAID, categoryBID})
@@ -353,6 +363,13 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 		TransportURL: "stremio://authorization-boundary.example/config/private",
 		ProfileIDs:   []string{profileAID, profileBID},
 	}
+	var previewWritesBefore int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM profile_addons
+		WHERE profile_id = $1::uuid AND transport_url = $2
+	`, profileAID, "https://authorization-boundary.example/config/private/manifest.json").Scan(&previewWritesBefore); err != nil {
+		t.Fatalf("count baseline preview persistence: %v", err)
+	}
 	preview, err := service.Preview(ctx, globalPrincipal, previewInput)
 	if err != nil {
 		t.Fatalf("authorized preview: %v", err)
@@ -367,12 +384,15 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if transport.calls != 1 || len(transport.transportURLs) != 1 || transport.transportURLs[0] != "https://authorization-boundary.example/config/private/manifest.json" {
 		t.Fatalf("preview manifest transports = %v with %d calls", transport.transportURLs, transport.calls)
 	}
-	var previewWrites int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM profile_addons WHERE manifest_id = $1`, manifest.ID).Scan(&previewWrites); err != nil {
+	var previewWritesAfter int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM profile_addons
+		WHERE profile_id = $1::uuid AND transport_url = $2
+	`, profileAID, "https://authorization-boundary.example/config/private/manifest.json").Scan(&previewWritesAfter); err != nil {
 		t.Fatalf("count preview persistence: %v", err)
 	}
-	if previewWrites != 0 {
-		t.Fatalf("preview persisted %d add-ons, want 0", previewWrites)
+	if previewWritesAfter != previewWritesBefore {
+		t.Fatalf("preview changed persisted add-ons from %d to %d", previewWritesBefore, previewWritesAfter)
 	}
 	_, previewObservations := service.diagnostics.snapshot()
 	if len(previewObservations) != 0 {
@@ -551,7 +571,6 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'admin' WHERE id = $1::uuid`, userID); err != nil {
 		t.Fatalf("restore persisted global role after diagnostics: %v", err)
 	}
-	const profileScopedAddonID = "2a000000-0000-4000-8000-000000000007"
 	if _, err := pool.Exec(ctx, `
 		WITH inserted_addon AS (
 			INSERT INTO profile_addons (
@@ -1634,12 +1653,14 @@ func TestSameInstalledAddonDetectsReturnedRevisionChanges(t *testing.T) {
 		Manifest:     json.RawMessage(`{"id":"example","version":"1.0.0"}`),
 		Position:     2,
 		ProfileIDs:   []string{"00000000-0000-4000-8000-000000000010"},
+		CategoryIDs:  []string{"00000000-0000-4000-8000-000000000020"},
 		InstalledAt:  now.Add(-time.Hour),
 		UpdatedAt:    now,
 	}
 	current := expected
 	current.Manifest = append(json.RawMessage(nil), expected.Manifest...)
 	current.ProfileIDs = append([]string(nil), expected.ProfileIDs...)
+	current.CategoryIDs = append([]string(nil), expected.CategoryIDs...)
 	if !sameInstalledAddon(current, expected) {
 		t.Fatal("identical addon revisions did not match")
 	}
@@ -1662,6 +1683,11 @@ func TestSameInstalledAddonDetectsReturnedRevisionChanges(t *testing.T) {
 	current.ProfileIDs = append(append([]string(nil), expected.ProfileIDs...), "00000000-0000-4000-8000-000000000011")
 	if sameInstalledAddon(current, expected) {
 		t.Fatal("profile assignment change was not detected")
+	}
+	current = expected
+	current.CategoryIDs = append(append([]string(nil), expected.CategoryIDs...), "00000000-0000-4000-8000-000000000021")
+	if sameInstalledAddon(current, expected) {
+		t.Fatal("category assignment change was not detected")
 	}
 }
 
@@ -1707,6 +1733,9 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cleanup := func() {
+		_, _ = pool.Exec(context.Background(), `
+			DELETE FROM profile_addons WHERE id = ANY($1::uuid[])
+		`, []string{addonAID, addonBID, foreignAddonID})
 		_, _ = pool.Exec(context.Background(), `DELETE FROM profiles WHERE id = ANY($1::uuid[])`, []string{profileID, foreignProfileID})
 		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1::uuid`, userID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM access_categories WHERE id = $1::uuid`, categoryID)
@@ -1770,10 +1799,12 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 		var positionA, positionB int
 		if err := pool.QueryRow(ctx, `
 			SELECT
-				max(position) FILTER (WHERE addon_id = $2::uuid),
-				max(position) FILTER (WHERE addon_id = $3::uuid)
-			FROM addon_profile_access
-			WHERE profile_id = $1::uuid
+				max(COALESCE(profile_order.position, access.position)) FILTER (WHERE access.addon_id = $2::uuid),
+				max(COALESCE(profile_order.position, access.position)) FILTER (WHERE access.addon_id = $3::uuid)
+			FROM addon_profile_access access
+			LEFT JOIN addon_profile_order profile_order
+			  ON profile_order.addon_id = access.addon_id AND profile_order.profile_id = access.profile_id
+			WHERE access.profile_id = $1::uuid
 		`, profileID, addonAID, addonBID).Scan(&positionA, &positionB); err != nil {
 			t.Fatalf("query addon reorder positions: %v", err)
 		}
@@ -1809,10 +1840,10 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 			WHERE user_id = $1::uuid AND profile_id = $2::uuid
 			RETURNING profile_id
 		)
-		UPDATE addon_profile_access SET position = CASE addon_id
+		UPDATE addon_profile_order SET position = CASE addon_id
 			WHEN $3::uuid THEN 0
 			WHEN $4::uuid THEN 1
-		END
+			END
 		WHERE profile_id = (SELECT profile_id FROM changed_grant)
 	`, userID, profileID, addonAID, addonBID); err != nil {
 		t.Fatalf("prepare global addon reorder: %v", err)
@@ -1831,10 +1862,10 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 			WHERE user_id = $1::uuid AND profile_id = $2::uuid
 			RETURNING profile_id
 		)
-		UPDATE addon_profile_access SET position = CASE addon_id
+		UPDATE addon_profile_order SET position = CASE addon_id
 			WHEN $3::uuid THEN 0
 			WHEN $4::uuid THEN 1
-		END
+			END
 		WHERE profile_id = (SELECT profile_id FROM changed_grant)
 	`, userID, profileID, addonAID, addonBID); err != nil {
 		t.Fatalf("prepare concurrent addon reorder: %v", err)
@@ -1934,5 +1965,311 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 	}
 	if canManage {
 		t.Fatal("concurrent addon management revocation did not commit")
+	}
+}
+
+func TestCategoryAssignmentsAreDurableEffectiveAndSeparate(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run addon category assignment tests")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	const (
+		userID          = "2e000000-0000-4000-8000-000000000001"
+		categoryAID     = "2e000000-0000-4000-8000-000000000002"
+		categoryBID     = "2e000000-0000-4000-8000-000000000003"
+		profileAID      = "2e000000-0000-4000-8000-000000000004"
+		profileBID      = "2e000000-0000-4000-8000-000000000005"
+		futureID        = "2e000000-0000-4000-8000-000000000006"
+		transportURL    = "https://category-assignment.example/manifest.json"
+		explicitAddonID = "2e000000-0000-4000-8000-000000000007"
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cleanup := func() {
+		_, _ = pool.Exec(context.Background(), `
+			DELETE FROM profile_addons
+			WHERE id = $1::uuid OR profile_id = ANY($2::uuid[]) OR transport_url = $3
+		`, explicitAddonID, []string{profileAID, profileBID, futureID}, transportURL)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM profiles WHERE id = ANY($1::uuid[])`, []string{profileAID, profileBID, futureID})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1::uuid`, userID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM access_categories WHERE id = ANY($1::uuid[])`, []string{categoryAID, categoryBID})
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	if _, err := pool.Exec(ctx, `
+		WITH inserted_categories AS (
+			INSERT INTO access_categories (id, name, normalized_name, position)
+			VALUES ($1::uuid, 'Addon category assignment A', 'addon category assignment a', 930001),
+			       ($2::uuid, 'Addon category assignment B', 'addon category assignment b', 930002)
+			RETURNING id
+		), inserted_user AS (
+			INSERT INTO users (id, username, password_hash, role)
+			VALUES ($3::uuid, 'addon-category-assignment-user', 'unused-test-hash', 'admin')
+			RETURNING id
+		), inserted_profiles AS (
+			INSERT INTO profiles (id, category_id, name)
+			VALUES ($4::uuid, $1::uuid, 'Addon category active'),
+			       ($5::uuid, $1::uuid, 'Addon category explicit')
+			RETURNING id
+		)
+		INSERT INTO user_profile_access (user_id, profile_id, can_manage)
+		VALUES ($3::uuid, $4::uuid, true), ($3::uuid, $5::uuid, true)
+	`, categoryAID, categoryBID, userID, profileAID, profileBID); err != nil {
+		t.Fatalf("seed addon category assignments: %v", err)
+	}
+
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	globalPrincipal := auth.Principal{
+		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+		ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
+	}
+	rawManifest := json.RawMessage(`{"id":"org.rivune.category-assignment","version":"1.0.0","name":"Category Assignment","types":["movie"],"resources":["catalog","stream"],"catalogs":[{"type":"movie","id":"category"}]}`)
+	manifest, rawManifest, err := ParseManifest(rawManifest)
+	if err != nil {
+		t.Fatalf("parse category assignment manifest: %v", err)
+	}
+	transport := &installManifestTransport{manifest: func(context.Context, string) (Manifest, json.RawMessage, error) {
+		return manifest, rawManifest, nil
+	}}
+	service := NewService(pool, transport, discardLogger())
+	categoryOnly := InstallInput{TransportURL: transportURL, ProfileIDs: []string{}, CategoryIDs: []string{categoryAID}}
+	preview, err := service.Preview(ctx, globalPrincipal, categoryOnly)
+	if err != nil || len(preview.ProfileIDs) != 0 || !reflect.DeepEqual(preview.CategoryIDs, []string{categoryAID}) {
+		t.Fatalf("category-only preview = %+v, error %v", preview, err)
+	}
+	installed, err := service.Install(ctx, globalPrincipal, categoryOnly)
+	if err != nil {
+		t.Fatalf("install category-only addon: %v", err)
+	}
+	disjoint, err := service.Install(ctx, globalPrincipal, InstallInput{
+		TransportURL: transportURL, ProfileIDs: []string{}, CategoryIDs: []string{categoryBID},
+	})
+	if err != nil {
+		t.Fatalf("install same-owner same-transport add-on for disjoint category: %v", err)
+	}
+	if disjoint.ID == installed.ID {
+		t.Fatal("disjoint category install reused the existing add-on row")
+	}
+	if _, err := service.Install(ctx, globalPrincipal, InstallInput{
+		TransportURL: transportURL, ProfileIDs: []string{}, CategoryIDs: []string{categoryBID},
+	}); !errors.Is(err, ErrAlreadyInstalled) {
+		t.Fatalf("overlapping disjoint-category transport policy error = %v, want %v", err, ErrAlreadyInstalled)
+	}
+	var sameOwnerRows int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM profile_addons
+		WHERE id = ANY($1::uuid[]) AND profile_id = $2::uuid AND transport_url = $3
+	`, []string{installed.ID, disjoint.ID}, profileAID, transportURL).Scan(&sameOwnerRows); err != nil {
+		t.Fatalf("count same-owner same-transport add-ons: %v", err)
+	}
+	if sameOwnerRows != 2 {
+		t.Fatalf("same-owner same-transport add-on rows = %d, want 2", sameOwnerRows)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM profile_addons WHERE id = $1::uuid`, disjoint.ID); err != nil {
+		t.Fatalf("remove disjoint category fixture add-on: %v", err)
+	}
+	categoryA := categoryAID
+	categoryDelegated := auth.Principal{
+		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory,
+		CategoryID: &categoryA, ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
+	}
+	manifestCalls := transport.calls
+	if _, err := service.Refresh(ctx, categoryDelegated, installed.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("delegated category refresh error = %v, want %v", err, ErrForbidden)
+	}
+	if transport.calls != manifestCalls {
+		t.Fatalf("delegated category refresh made %d manifest calls", transport.calls-manifestCalls)
+	}
+	if _, err := service.Refresh(ctx, globalPrincipal, installed.ID); err != nil {
+		t.Fatalf("global category refresh: %v", err)
+	}
+	if len(installed.ProfileIDs) != 0 || !reflect.DeepEqual(installed.CategoryIDs, []string{categoryAID}) {
+		t.Fatalf("category-only assignments = profiles %v categories %v", installed.ProfileIDs, installed.CategoryIDs)
+	}
+	list, err := service.List(ctx, globalPrincipal)
+	if err != nil || len(list) != 1 || list[0].ID != installed.ID {
+		t.Fatalf("category effective list = %+v, error %v", list, err)
+	}
+	if err := service.ValidatePlaybackAccess(ctx, globalPrincipal, installed.ID); err != nil {
+		t.Fatalf("category effective playback access: %v", err)
+	}
+	if err := service.ValidatePlaybackAccesses(ctx, globalPrincipal, []string{installed.ID, installed.ID}); err != nil {
+		t.Fatalf("deduplicated category playback access batch: %v", err)
+	}
+	if err := service.ValidatePlaybackAccesses(ctx, globalPrincipal, []string{"not-an-addon-id"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("invalid playback provider batch error = %v, want %v", err, ErrInvalidInput)
+	}
+	if _, err := pool.Exec(ctx, `
+		WITH inserted_addon AS (
+			INSERT INTO profile_addons (
+				id, profile_id, transport_url, manifest, manifest_id, manifest_version, position
+			) VALUES (
+				$1::uuid, $2::uuid, 'https://explicit-management.example/manifest.json',
+				$3::jsonb, 'org.rivune.explicit-management', '1.0.0', 1
+			)
+			RETURNING id
+		), inserted_access AS (
+			INSERT INTO addon_profile_access (addon_id, profile_id, position)
+			SELECT id, $2::uuid, 0 FROM inserted_addon
+			RETURNING addon_id
+		)
+		INSERT INTO addon_profile_order (addon_id, profile_id, position)
+		SELECT addon_id, $2::uuid, 0 FROM inserted_access
+	`, explicitAddonID, profileAID, rawManifest); err != nil {
+		t.Fatalf("seed explicit-only management addon: %v", err)
+	}
+	delegatedManaged, err := service.List(ctx, categoryDelegated)
+	if err != nil || len(delegatedManaged) != 1 || delegatedManaged[0].ID != explicitAddonID || len(delegatedManaged[0].CategoryIDs) != 0 {
+		t.Fatalf("delegated explicit-only management list = %+v, error %v", delegatedManaged, err)
+	}
+	if err := service.ValidatePlaybackAccesses(ctx, globalPrincipal, []string{installed.ID, explicitAddonID, installed.ID}); err != nil {
+		t.Fatalf("multi-provider playback access batch: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM addon_profile_access WHERE addon_id = $1::uuid AND profile_id = $2::uuid
+	`, explicitAddonID, profileAID); err != nil {
+		t.Fatalf("revoke explicit playback provider access: %v", err)
+	}
+	if err := service.ValidatePlaybackAccesses(ctx, globalPrincipal, []string{installed.ID, explicitAddonID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoked provider batch error = %v, want %v", err, ErrNotFound)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM profile_addons WHERE id = $1::uuid`, explicitAddonID); err != nil {
+		t.Fatalf("remove explicit-only management fixture: %v", err)
+	}
+	if delegatedManaged, err := service.List(ctx, categoryDelegated); err != nil || len(delegatedManaged) != 0 {
+		t.Fatalf("delegated category policy leaked through management list = %+v, error %v", delegatedManaged, err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		WITH inserted_profile AS (
+			INSERT INTO profiles (id, category_id, name)
+			VALUES ($1::uuid, $2::uuid, 'Addon category future')
+			RETURNING id
+		)
+		INSERT INTO user_profile_access (user_id, profile_id, can_manage)
+		SELECT $3::uuid, id, true FROM inserted_profile
+	`, futureID, categoryAID, userID); err != nil {
+		t.Fatalf("create future category profile: %v", err)
+	}
+	futurePrincipal := globalPrincipal
+	futurePrincipal.ActiveProfileID = new(futureID)
+	if list, err := service.List(ctx, futurePrincipal); err != nil || len(list) != 1 || list[0].ID != installed.ID {
+		t.Fatalf("future profile inherited addon = %+v, error %v", list, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE profiles SET category_id = $2::uuid WHERE id = $1::uuid`, futureID, categoryBID); err != nil {
+		t.Fatalf("move future profile category: %v", err)
+	}
+	if list, err := service.List(ctx, futurePrincipal); err != nil || len(list) != 0 {
+		t.Fatalf("moved profile retained category addon = %+v, error %v", list, err)
+	}
+
+	installed, err = service.Update(ctx, globalPrincipal, installed.ID, UpdateAddonInput{ProfileIDs: []string{profileBID}})
+	if err != nil || !reflect.DeepEqual(installed.ProfileIDs, []string{profileBID}) || !reflect.DeepEqual(installed.CategoryIDs, []string{categoryAID}) {
+		t.Fatalf("profile update preserving category = %+v, error %v", installed, err)
+	}
+	profileBGlobal := globalPrincipal
+	profileBGlobal.ActiveProfileID = new(profileBID)
+	categoryB := categoryBID
+	profileBDelegated := auth.Principal{
+		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory,
+		CategoryID: &categoryB, ActiveProfileID: new(profileBID), ProfileGrantExpiresAt: &expiresAt,
+	}
+	if list, err := service.List(ctx, profileBGlobal); err != nil || len(list) != 1 {
+		t.Fatalf("overlapping explicit/category access was not deduplicated = %+v, error %v", list, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE profiles SET category_id = $2::uuid WHERE id = $1::uuid`, profileBID, categoryBID); err != nil {
+		t.Fatalf("move explicit profile category: %v", err)
+	}
+	if list, err := service.List(ctx, profileBGlobal); err != nil || len(list) != 1 {
+		t.Fatalf("explicit access did not survive category move = %+v, error %v", list, err)
+	}
+	_, err = service.Update(ctx, profileBDelegated, installed.ID, UpdateAddonInput{CategoryIDs: []string{}})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("delegated category policy clear error = %v, want %v", err, ErrForbidden)
+	}
+	installed, err = service.Update(ctx, profileBGlobal, installed.ID, UpdateAddonInput{CategoryIDs: []string{}})
+	if err != nil || !reflect.DeepEqual(installed.ProfileIDs, []string{profileBID}) || len(installed.CategoryIDs) != 0 {
+		t.Fatalf("category clear preserving explicit assignment = %+v, error %v", installed, err)
+	}
+	if _, err := service.Update(ctx, profileBGlobal, installed.ID, UpdateAddonInput{ProfileIDs: []string{}}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("empty resulting assignment union error = %v, want %v", err, ErrInvalidInput)
+	}
+
+	_, err = service.Update(ctx, profileBDelegated, installed.ID, UpdateAddonInput{
+		ProfileIDs: []string{}, CategoryIDs: []string{categoryAID},
+	})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("delegated category assignment error = %v, want %v", err, ErrForbidden)
+	}
+	installed, err = service.Update(ctx, profileBGlobal, installed.ID, UpdateAddonInput{
+		ProfileIDs: []string{}, CategoryIDs: []string{categoryAID},
+	})
+	if err != nil {
+		t.Fatalf("restore category-only assignment: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'member' WHERE id = $1::uuid`, userID); err != nil {
+		t.Fatalf("revoke persisted global role: %v", err)
+	}
+	if _, err := service.Update(ctx, globalPrincipal, installed.ID, UpdateAddonInput{CategoryIDs: []string{categoryBID}}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("category update after persisted role revocation error = %v, want %v", err, ErrForbidden)
+	}
+	if _, err := service.List(ctx, globalPrincipal); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("management list after persisted role revocation error = %v, want %v", err, ErrForbidden)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'admin' WHERE id = $1::uuid`, userID); err != nil {
+		t.Fatalf("restore persisted global role: %v", err)
+	}
+
+	reordered, err := service.Reorder(ctx, globalPrincipal, ReorderInput{AddonIDs: []string{installed.ID}})
+	if err != nil || len(reordered) != 1 {
+		t.Fatalf("reorder category-effective addon = %+v, error %v", reordered, err)
+	}
+	var explicitAccessCount, profileOrderCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM addon_profile_access WHERE addon_id = $1::uuid AND profile_id = $2::uuid),
+			(SELECT count(*) FROM addon_profile_order WHERE addon_id = $1::uuid AND profile_id = $2::uuid)
+	`, installed.ID, profileAID).Scan(&explicitAccessCount, &profileOrderCount); err != nil {
+		t.Fatalf("query effective reorder persistence: %v", err)
+	}
+	if explicitAccessCount != 0 || profileOrderCount != 1 {
+		t.Fatalf("effective reorder materialized access=%d order=%d", explicitAccessCount, profileOrderCount)
+	}
+
+	if _, err := service.Install(ctx, globalPrincipal, InstallInput{
+		TransportURL: transportURL, ProfileIDs: []string{profileAID}, CategoryIDs: []string{},
+	}); !errors.Is(err, ErrAlreadyInstalled) {
+		t.Fatalf("overlapping transport policy error = %v, want %v", err, ErrAlreadyInstalled)
+	}
+	disabled := false
+	installed, err = service.Update(ctx, globalPrincipal, installed.ID, UpdateAddonInput{Enabled: &disabled})
+	if err != nil || installed.Enabled {
+		t.Fatalf("disable category addon = %+v, error %v", installed, err)
+	}
+	if err := service.ValidatePlaybackAccesses(ctx, globalPrincipal, []string{installed.ID, installed.ID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disabled category playback batch error = %v, want %v", err, ErrNotFound)
+	}
+	diagnostics, err := service.Diagnostics(ctx, globalPrincipal)
+	if err != nil || len(diagnostics.Diagnostics) != 1 || diagnostics.Diagnostics[0].AddonID != installed.ID {
+		t.Fatalf("disabled category diagnostics = %+v, error %v", diagnostics, err)
+	}
+	if err := service.Remove(ctx, categoryDelegated, installed.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("delegated category removal error = %v, want %v", err, ErrForbidden)
+	}
+	if err := service.Remove(ctx, globalPrincipal, installed.ID); err != nil {
+		t.Fatalf("global category removal: %v", err)
 	}
 }

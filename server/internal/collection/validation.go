@@ -32,7 +32,7 @@ var (
 )
 
 func validateImportDocumentBudget(document ExportDocument) error {
-	var folders, sources, extras, filterValues, profileIDs, artworkKeys, stringBytes int
+	var folders, sources, extras, filterValues, assignmentIDs, artworkKeys, stringBytes int
 	addCount := func(total *int, value, limit int) bool {
 		if value < 0 || value > limit-*total {
 			return false
@@ -55,13 +55,18 @@ func validateImportDocumentBudget(document ExportDocument) error {
 	for collectionIndex := range document.Collections {
 		input := &document.Collections[collectionIndex]
 		if !addCount(&folders, len(input.Folders), maximumImportFolders) ||
-			!addCount(&profileIDs, len(input.ProfileIDs), maximumImportProfileIDs) ||
+			!addCount(&assignmentIDs, len(input.ProfileIDs)+len(input.CategoryIDs), maximumImportProfileIDs) ||
 			!addString(input.Title) || !addArtwork(input.BackdropImageURL) ||
 			!addString(input.ViewMode) || !addString(input.FolderCoverShape) {
 			return invalid("collection import exceeds the document complexity limit")
 		}
 		for _, profileID := range input.ProfileIDs {
 			if !addString(profileID) {
+				return invalid("collection import exceeds the document complexity limit")
+			}
+		}
+		for _, categoryID := range input.CategoryIDs {
+			if !addString(categoryID) {
 				return invalid("collection import exceeds the document complexity limit")
 			}
 		}

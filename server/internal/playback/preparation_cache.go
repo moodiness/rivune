@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ type preparedPlayback struct {
 	subtitles      []Subtitle
 	subtitleAssets []storedAsset
 	providerErrors []ProviderFailure
+	addonIDs       []string
 }
 
 type playbackPolicy struct {
@@ -54,6 +56,12 @@ func (cache *playbackPreparationCache) clear() {
 	cache.mu.Lock()
 	cache.generation++
 	clear(cache.entries)
+	cache.mu.Unlock()
+}
+
+func (cache *playbackPreparationCache) evict(referenceID string, policy playbackPolicy) {
+	cache.mu.Lock()
+	delete(cache.entries, playbackPreparationCacheKey(referenceID, policy))
 	cache.mu.Unlock()
 }
 
@@ -171,7 +179,8 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 		asset = &value
 	}
 	return preparedPlayback{
-		source: sources[0], asset: asset, subtitles: subtitles, subtitleAssets: subtitleAssets, providerErrors: providerErrors,
+		source: sources[0], asset: asset, subtitles: subtitles, subtitleAssets: subtitleAssets,
+		providerErrors: providerErrors, addonIDs: preparedPlaybackAddonIDs(sources[0], subtitles),
 	}, nil
 }
 
@@ -197,5 +206,30 @@ func clonePreparedPlayback(playback preparedPlayback) preparedPlayback {
 		playback.subtitleAssets[index] = cloneStoredAsset(subtitleAssets[index])
 	}
 	playback.providerErrors = append([]ProviderFailure(nil), playback.providerErrors...)
+	playback.addonIDs = append([]string(nil), playback.addonIDs...)
 	return playback
+}
+
+func preparedPlaybackAddonIDs(source Source, subtitles []Subtitle) []string {
+	var values []string
+	var seen map[string]struct{}
+	appendID := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, exists := seen[value]; exists {
+			return
+		}
+		if seen == nil {
+			seen = make(map[string]struct{})
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	appendID(source.AddonID)
+	for _, subtitle := range subtitles {
+		appendID(subtitle.AddonID)
+	}
+	return values
 }

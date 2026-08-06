@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures/rivune";
+import { CATEGORY_IDS, expect, test } from "./fixtures/rivune";
 
 const addon = {
   id: "30000000-0000-4000-8000-000000000001",
@@ -12,6 +12,7 @@ const addon = {
   position: 0,
   enabled: true,
   profileIds: ["alice"],
+  categoryIds: [],
   installedAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-01-01T00:00:00Z",
 };
@@ -71,7 +72,7 @@ test("addon availability changes stay local until Save and can be re-enabled", a
       return;
     }
     if (request.method() === "PUT" && pathname === `/api/v1/addons/${addon.id}`) {
-      const input = request.postDataJSON() as { enabled: boolean; profileIds: string[]; transportUrl: string };
+      const input = request.postDataJSON() as { enabled?: boolean; profileIds?: string[]; categoryIds?: string[]; transportUrl?: string };
       updateInputs.push(input);
       managed = { ...managed, ...input };
       await route.fulfill({ contentType: "application/json", body: JSON.stringify(managed) });
@@ -84,6 +85,7 @@ test("addon availability changes stay local until Save and can be re-enabled", a
   const card = page.locator(".addon-card").filter({ has: page.getByRole("heading", { name: addon.manifest.name, exact: true }) });
   await card.getByRole("button", { name: "Edit", exact: true }).click();
   let dialog = page.locator("dialog");
+  await dialog.getByLabel("Transport URL", { exact: true }).fill("");
   const disableButton = dialog.getByRole("button", { name: "Disable", exact: true });
   await expect(disableButton).toHaveAttribute("aria-pressed", "true");
   await disableButton.click();
@@ -93,12 +95,13 @@ test("addon availability changes stay local until Save and can be re-enabled", a
 
   await dialog.getByRole("button", { name: "Save addon", exact: true }).click();
   await expect(dialog).toHaveCount(0);
-  expect(updateInputs).toEqual([{ profileIds: ["alice"], enabled: false, transportUrl }]);
+  expect(updateInputs).toEqual([{ enabled: false }]);
   await expect(card).toHaveClass(/\bis-disabled\b/);
   await expect(card.getByText("Disabled", { exact: true })).toBeVisible();
 
   await card.getByRole("button", { name: "Edit", exact: true }).click();
   dialog = page.locator("dialog");
+  await expect(dialog.getByLabel("Transport URL", { exact: true })).toHaveValue(transportUrl);
   const enableButton = dialog.getByRole("button", { name: "Enable", exact: true });
   await expect(enableButton).toHaveAttribute("aria-pressed", "false");
   await enableButton.focus();
@@ -109,8 +112,8 @@ test("addon availability changes stay local until Save and can be re-enabled", a
 
   await expect(dialog).toHaveCount(0);
   expect(updateInputs).toEqual([
-    { profileIds: ["alice"], enabled: false, transportUrl },
-    { profileIds: ["alice"], enabled: true, transportUrl },
+    { enabled: false },
+    { enabled: true },
   ]);
   await expect(card).not.toHaveClass(/\bis-disabled\b/);
   await expect(card.getByText("Disabled", { exact: true })).toHaveCount(0);
@@ -154,7 +157,7 @@ test("failed availability save preserves the draft and installed card state", as
   await expect(dialog.locator(".addon-availability").getByText("Disabled", { exact: true })).toBeVisible();
   await expect(card).not.toHaveClass(/\bis-disabled\b/);
   await expect(card.getByText("Disabled", { exact: true })).toHaveCount(0);
-  expect(updateInputs).toEqual([{ profileIds: ["alice"], enabled: false, transportUrl }]);
+  expect(updateInputs).toEqual([{ enabled: false }]);
 });
 
 test("global administrators see joined safe addon diagnostics and declared capabilities", async ({ page, rivune: _rivune }) => {
@@ -273,6 +276,8 @@ test("addon installation previews declarations before sending the exact confirme
       behaviorHints: { p2p: true, adult: true, configurationRequired: true },
     },
     capabilities: { resources: ["catalog", "meta", "stream"], search: false, pagination: false, searchPagination: true },
+    profileIds: ["alice"],
+    categoryIds: [],
   };
   const requestOrder: string[] = [];
   const previewInputs: unknown[] = [];
@@ -291,7 +296,8 @@ test("addon installation previews declarations before sending the exact confirme
     if (request.method() === "POST" && pathname === "/api/v1/addons/preview") {
       requestOrder.push("preview");
       previewInputs.push(request.postDataJSON());
-      await route.fulfill({ contentType: "application/json", body: JSON.stringify(previewResponse) });
+      const input = request.postDataJSON() as { profileIds: string[]; categoryIds: string[] };
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ...previewResponse, profileIds: input.profileIds, categoryIds: input.categoryIds }) });
       return;
     }
     if (request.method() === "POST" && pathname === "/api/v1/addons") {
@@ -306,7 +312,9 @@ test("addon installation previews declarations before sending the exact confirme
   await page.goto("/#admin?tab=addons");
   const tool = page.locator(".admin-tool-card").filter({ has: page.getByRole("heading", { name: "Install from a manifest", exact: true }) });
   const manifestUrl = tool.getByLabel("Manifest URL", { exact: true });
-  const bobAssignment = tool.locator(".profile-assignment label").filter({ hasText: "Bob" });
+  const profilesDisclosure = tool.locator(".assignment-picker__profiles");
+  await profilesDisclosure.getByText("Choose individual profiles (1 selected)", { exact: true }).click();
+  const bobAssignment = profilesDisclosure.locator("label").filter({ hasText: "Bob" });
   const bobCheckbox = bobAssignment.getByRole("checkbox");
   await manifestUrl.fill(transportUrl);
   await expect(tool.getByRole("button", { name: "Install addon", exact: true })).toHaveCount(0);
@@ -339,11 +347,107 @@ test("addon installation previews declarations before sending the exact confirme
   await expect.poll(() => requestOrder).toEqual(["preview", "preview", "preview", "install"]);
 
   expect(previewInputs).toEqual([
-    { transportUrl, profileIds: ["alice"] },
-    { transportUrl: changedTransportUrl, profileIds: ["alice", "bob"] },
-    { transportUrl: changedTransportUrl, profileIds: ["alice"] },
+    { transportUrl, profileIds: ["alice"], categoryIds: [] },
+    { transportUrl: changedTransportUrl, profileIds: ["alice", "bob"], categoryIds: [] },
+    { transportUrl: changedTransportUrl, profileIds: ["alice"], categoryIds: [] },
   ]);
-  expect(installInput).toEqual({ transportUrl: changedTransportUrl, profileIds: ["alice"] });
+  expect(installInput).toEqual({ transportUrl: changedTransportUrl, profileIds: ["alice"], categoryIds: [] });
+});
+
+test("category-first addon assignment keeps durable categories independent through preview confirmation", async ({ page, rivune }) => {
+  rivune.seedProfiles(1, CATEGORY_IDS.kids);
+  let assignedAddon = { ...addon, profileIds: ["bob"], categoryIds: [CATEGORY_IDS.kids], transportUrl };
+  const previewInputs: unknown[] = [];
+  const updateInputs: unknown[] = [];
+  let installInput: unknown;
+  await page.route(/\/api\/v1\/addons(?:\/.*)?$/, async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === "GET" && pathname === "/api/v1/addons") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ addons: [assignedAddon] }) });
+      return;
+    }
+    if (request.method() === "GET" && pathname === "/api/v1/addons/diagnostics") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ observedSince: "2026-01-01T00:00:00Z", diagnostics: [] }) });
+      return;
+    }
+    if (request.method() === "GET" && pathname === `/api/v1/addons/${addon.id}/management`) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(assignedAddon) });
+      return;
+    }
+    if (request.method() === "PUT" && pathname === `/api/v1/addons/${addon.id}`) {
+      const input = request.postDataJSON();
+      updateInputs.push(input);
+      assignedAddon = { ...assignedAddon, ...input };
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(assignedAddon) });
+      return;
+    }
+    if (request.method() === "POST" && pathname === "/api/v1/addons/preview") {
+      const input = request.postDataJSON() as { profileIds: string[]; categoryIds: string[] };
+      previewInputs.push(input);
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ manifest: addon.manifest, capabilities: { resources: ["catalog"], search: false, pagination: false, searchPagination: false }, profileIds: input.profileIds, categoryIds: input.categoryIds }) });
+      return;
+    }
+    if (request.method() === "POST" && pathname === "/api/v1/addons") {
+      installInput = request.postDataJSON();
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(assignedAddon) });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/#admin?tab=addons");
+  const card = page.locator(".addon-card").filter({ hasText: addon.manifest.name });
+  await expect(card.getByText("3 Profiles reached", { exact: true })).toBeVisible();
+  await card.getByRole("button", { name: "Edit", exact: true }).click();
+  let dialog = page.getByRole("dialog");
+  const editCategories = dialog.locator(".assignment-picker__categories");
+  await expect(editCategories.getByText("Household", { exact: true })).toBeVisible();
+  await expect(editCategories.getByText("Kids", { exact: true })).toBeVisible();
+  await expect(editCategories.getByText("Guest", { exact: true })).toBeVisible();
+  await expect(editCategories.locator("label").filter({ hasText: "Kids" }).getByRole("checkbox")).toBeChecked();
+  const editProfiles = dialog.locator(".assignment-picker__profiles");
+  await expect(editProfiles).not.toHaveAttribute("open", "");
+  await expect(editProfiles.getByText("Individual profiles", { exact: true })).not.toBeVisible();
+  await editProfiles.getByText("Choose individual profiles (1 selected)", { exact: true }).click();
+  await expect(editProfiles.locator("label").filter({ hasText: "Bob" }).getByRole("checkbox")).toBeChecked();
+  await dialog.getByLabel("Transport URL", { exact: true }).fill("");
+  await editCategories.locator("label").filter({ hasText: "Kids" }).getByRole("checkbox").uncheck();
+  await editCategories.locator("label").filter({ hasText: "Household" }).getByRole("checkbox").check();
+  await dialog.getByRole("button", { name: "Save addon", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await card.getByRole("button", { name: "Edit", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  const secondProfiles = dialog.locator(".assignment-picker__profiles");
+  await expect(dialog.getByLabel("Transport URL", { exact: true })).toHaveValue(transportUrl);
+  await secondProfiles.getByText("Choose individual profiles (1 selected)", { exact: true }).click();
+  await secondProfiles.locator("label").filter({ hasText: "Bob" }).getByRole("checkbox").uncheck();
+  await dialog.getByRole("button", { name: "Save addon", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(updateInputs).toEqual([{ categoryIds: [CATEGORY_IDS.household] }, { profileIds: [] }]);
+
+  const tool = page.locator(".admin-tool-card").filter({ hasText: "Install from a manifest" });
+  await tool.getByLabel("Manifest URL", { exact: true }).fill(transportUrl);
+  const kidsCheckbox = tool.locator(".assignment-picker__categories label").filter({ hasText: "Kids" }).getByRole("checkbox");
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  await expect(kidsCheckbox).toBeFocused();
+  expect(await kidsCheckbox.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("solid");
+  await page.keyboard.press("Space");
+  await tool.locator(".assignment-picker__profiles").getByText("Choose individual profiles (1 selected)", { exact: true }).click();
+  await tool.locator(".assignment-picker__profiles label").filter({ hasText: "Bob" }).getByRole("checkbox").check();
+  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+  await expect(tool.locator(".addon-preview")).toBeVisible();
+  await kidsCheckbox.uncheck();
+  await expect(tool.locator(".addon-preview")).toHaveCount(0);
+  await kidsCheckbox.check();
+  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+  await tool.locator(".addon-preview").getByRole("button", { name: "Install addon", exact: true }).click();
+
+  const snapshot = { transportUrl, profileIds: ["alice", "bob"], categoryIds: [CATEGORY_IDS.kids] };
+  expect(previewInputs).toEqual([snapshot, snapshot]);
+  expect(installInput).toEqual(snapshot);
 });
 
 test("preview failure is isolated and never renders provider details", async ({ page, rivune: _rivune }) => {

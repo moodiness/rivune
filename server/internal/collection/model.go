@@ -49,6 +49,7 @@ type Collection struct {
 	FolderCoverShape string    `json:"folderCoverShape"`
 	Folders          []Folder  `json:"folders"`
 	ProfileIDs       []string  `json:"profileIds"`
+	CategoryIDs      []string  `json:"categoryIds"`
 	Position         int       `json:"position"`
 	Version          int       `json:"version"`
 	CreatedAt        time.Time `json:"createdAt"`
@@ -143,6 +144,7 @@ type SaveInput struct {
 	FolderCoverShape string   `json:"folderCoverShape"`
 	Folders          []Folder `json:"folders"`
 	ProfileIDs       []string `json:"profileIds,omitempty"`
+	CategoryIDs      []string `json:"categoryIds,omitempty"`
 	ExpectedVersion  int      `json:"expectedVersion,omitempty"`
 }
 

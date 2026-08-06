@@ -14,14 +14,29 @@ const sharedCollectionFields = `
 		JOIN profiles p ON p.id = assignment.profile_id
 		WHERE assignment.collection_id = pc.id
 		ORDER BY lower(p.name), p.id
+	),
+	ARRAY(
+		SELECT assignment.category_id::text
+		FROM collection_category_access assignment
+		JOIN access_categories category ON category.id = assignment.category_id
+		WHERE assignment.collection_id = pc.id
+		ORDER BY category.position, category.id
 	)
 `
 
 const sharedCollectionTail = `, pc.version, pc.created_at, pc.updated_at`
 
 const collectionByIDQuery = `
-	SELECT ` + sharedCollectionFields + `, pc.position` + sharedCollectionTail + `
+	SELECT ` + sharedCollectionFields + `,
+	       COALESCE(profile_order.position, explicit_access.position, category_access.position, pc.position)` + sharedCollectionTail + `
 	FROM profile_collections pc
+	JOIN profiles active_profile ON active_profile.id = $2::uuid
+	LEFT JOIN collection_profile_access explicit_access
+	  ON explicit_access.collection_id = pc.id AND explicit_access.profile_id = active_profile.id
+	LEFT JOIN collection_category_access category_access
+	  ON category_access.collection_id = pc.id AND category_access.category_id = active_profile.category_id
+	LEFT JOIN collection_profile_order profile_order
+	  ON profile_order.collection_id = pc.id AND profile_order.profile_id = active_profile.id
 	WHERE pc.id = $1::uuid
 `
 
@@ -31,7 +46,7 @@ func scanSharedCollection(scanner rowScanner) (Collection, error) {
 	if err := scanner.Scan(
 		&value.ID, &value.Title, &value.BackdropImageURL, &value.HeroEnabled, &value.PinToTop,
 		&value.FocusGlowEnabled, &value.ViewMode, &value.FolderCoverShape,
-		&foldersJSON, &value.ProfileIDs, &value.Position, &value.Version, &value.CreatedAt, &value.UpdatedAt,
+		&foldersJSON, &value.ProfileIDs, &value.CategoryIDs, &value.Position, &value.Version, &value.CreatedAt, &value.UpdatedAt,
 	); err != nil {
 		return Collection{}, err
 	}

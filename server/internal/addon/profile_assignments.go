@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -13,31 +14,52 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 )
 
-func normalizeProfileIDs(requested []string, activeProfileID string) ([]string, error) {
-	if requested == nil {
-		return []string{activeProfileID}, nil
+type addonAssignments struct {
+	profileIDs  []string
+	categoryIDs []string
+}
+
+func normalizeInstallAssignments(requestedProfileIDs, requestedCategoryIDs []string, activeProfileID string) (addonAssignments, error) {
+	if requestedProfileIDs == nil && requestedCategoryIDs == nil {
+		return addonAssignments{profileIDs: []string{activeProfileID}, categoryIDs: []string{}}, nil
 	}
-	if len(requested) == 0 || len(requested) > 100 {
-		return nil, fmt.Errorf("%w: profileIds must contain 1 to 100 profiles", ErrInvalidInput)
+	profileIDs, err := normalizeAssignmentIDs("profileIds", requestedProfileIDs)
+	if err != nil {
+		return addonAssignments{}, err
+	}
+	categoryIDs, err := normalizeAssignmentIDs("categoryIds", requestedCategoryIDs)
+	if err != nil {
+		return addonAssignments{}, err
+	}
+	if len(profileIDs)+len(categoryIDs) == 0 {
+		return addonAssignments{}, fmt.Errorf("%w: at least one profileId or categoryId is required", ErrInvalidInput)
+	}
+	return addonAssignments{profileIDs: profileIDs, categoryIDs: categoryIDs}, nil
+}
+
+func normalizeAssignmentIDs(field string, requested []string) ([]string, error) {
+	if len(requested) > 100 {
+		return nil, fmt.Errorf("%w: %s must contain no more than 100 identifiers", ErrInvalidInput, field)
 	}
 	seen := make(map[string]struct{}, len(requested))
-	profileIDs := make([]string, 0, len(requested))
-	for _, profileID := range requested {
-		if !validUUID(profileID) {
-			return nil, fmt.Errorf("%w: profileIds must contain valid profile identifiers", ErrInvalidInput)
+	ids := make([]string, 0, len(requested))
+	for _, id := range requested {
+		if !validUUID(id) {
+			return nil, fmt.Errorf("%w: %s must contain valid identifiers", ErrInvalidInput, field)
 		}
-		if _, duplicate := seen[profileID]; duplicate {
-			return nil, fmt.Errorf("%w: profileIds must not contain duplicates", ErrInvalidInput)
+		canonicalID := strings.ToLower(id)
+		if _, duplicate := seen[canonicalID]; duplicate {
+			return nil, fmt.Errorf("%w: %s must not contain duplicates", ErrInvalidInput, field)
 		}
-		seen[profileID] = struct{}{}
-		profileIDs = append(profileIDs, profileID)
+		seen[canonicalID] = struct{}{}
+		ids = append(ids, canonicalID)
 	}
-	return profileIDs, nil
+	return ids, nil
 }
 
 func authorizeProfileAssignments(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID string, profileIDs []string) error {
 	lockIDs := append([]string(nil), profileIDs...)
-	if _, included := profileIDSet(profileIDs)[activeProfileID]; !included {
+	if _, included := stringSet(profileIDs)[activeProfileID]; !included {
 		lockIDs = append(lockIDs, activeProfileID)
 	}
 	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, lockIDs, true)
@@ -56,41 +78,180 @@ func authorizeProfileAssignments(ctx context.Context, tx pgx.Tx, principal auth.
 	return nil
 }
 
-func writeProfileAssignments(ctx context.Context, tx pgx.Tx, addonID string, profileIDs []string) error {
-	for _, profileID := range profileIDs {
+func authorizeCategoryAssignments(ctx context.Context, tx pgx.Tx, principal auth.Principal, categoryIDs []string) error {
+	if err := authorizeGlobalAddonOrigin(ctx, tx, principal); err != nil {
+		return err
+	}
+	return lockCategoryRows(ctx, tx, categoryIDs)
+}
+
+func lockCategoryRows(ctx context.Context, tx pgx.Tx, categoryIDs []string) error {
+	if len(categoryIDs) == 0 {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT id::text
+		FROM access_categories
+		WHERE id = ANY($1::uuid[])
+		ORDER BY id
+		FOR UPDATE
+	`, categoryIDs)
+	if err != nil {
+		return fmt.Errorf("lock addon assignment categories: %w", err)
+	}
+	defer rows.Close()
+	found := make(map[string]struct{}, len(categoryIDs))
+	for rows.Next() {
+		var categoryID string
+		if err := rows.Scan(&categoryID); err != nil {
+			return fmt.Errorf("scan addon assignment category: %w", err)
+		}
+		found[categoryID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate addon assignment categories: %w", err)
+	}
+	if len(found) != len(stringSet(categoryIDs)) {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func categoriesForProfiles(ctx context.Context, tx pgx.Tx, profileIDs []string) ([]string, error) {
+	if len(profileIDs) == 0 {
+		return []string{}, nil
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT category_id::text
+		FROM profiles
+		WHERE id = ANY($1::uuid[])
+		ORDER BY category_id::text
+	`, profileIDs)
+	if err != nil {
+		return nil, fmt.Errorf("read addon profile categories: %w", err)
+	}
+	defer rows.Close()
+	categoryIDs := make([]string, 0)
+	for rows.Next() {
+		var categoryID string
+		if err := rows.Scan(&categoryID); err != nil {
+			return nil, fmt.Errorf("scan addon profile category: %w", err)
+		}
+		categoryIDs = append(categoryIDs, categoryID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate addon profile categories: %w", err)
+	}
+	return categoryIDs, nil
+}
+
+func authorizeAssignments(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID string, assignments addonAssignments) error {
+	profileCategoryIDs, err := categoriesForProfiles(ctx, tx, mergeIDs(assignments.profileIDs, []string{activeProfileID}))
+	if err != nil {
+		return err
+	}
+	if len(assignments.categoryIDs) > 0 {
+		if err := authorizeGlobalAddonOrigin(ctx, tx, principal); err != nil {
+			return err
+		}
+	}
+	if err := lockCategoryRows(ctx, tx, mergeIDs(assignments.categoryIDs, profileCategoryIDs)); err != nil {
+		return err
+	}
+	if err := authorizeProfileAssignments(ctx, tx, principal, activeProfileID, assignments.profileIDs); err != nil {
+		return err
+	}
+	currentProfileCategoryIDs, err := categoriesForProfiles(ctx, tx, mergeIDs(assignments.profileIDs, []string{activeProfileID}))
+	if err != nil {
+		return err
+	}
+	if !equalIDs(profileCategoryIDs, currentProfileCategoryIDs) {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func writeAddonAssignments(ctx context.Context, tx pgx.Tx, addonID string, assignments addonAssignments) error {
+	for _, profileID := range assignments.profileIDs {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO addon_profile_access (addon_id, profile_id, position)
-			VALUES (
-				$1::uuid, $2::uuid,
-				(SELECT COALESCE(max(position) + 1, 0) FROM addon_profile_access WHERE profile_id = $2::uuid)
-			)
+			VALUES ($1::uuid, $2::uuid,
+				(SELECT COALESCE(max(position) + 1, 0) FROM addon_profile_access WHERE profile_id = $2::uuid))
 			ON CONFLICT (addon_id, profile_id) DO NOTHING
 		`, addonID, profileID); err != nil {
 			return fmt.Errorf("grant addon profile access: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO addon_profile_order (addon_id, profile_id, position)
+			VALUES ($1::uuid, $2::uuid,
+				(SELECT COALESCE(max(position) + 1, 0) FROM addon_profile_order WHERE profile_id = $2::uuid))
+			ON CONFLICT (addon_id, profile_id) DO NOTHING
+		`, addonID, profileID); err != nil {
+			return fmt.Errorf("append addon profile order: %w", err)
 		}
 	}
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM addon_profile_access
 		WHERE addon_id = $1::uuid AND NOT (profile_id = ANY($2::uuid[]))
-	`, addonID, profileIDs); err != nil {
+	`, addonID, assignments.profileIDs); err != nil {
 		return fmt.Errorf("revoke addon profile access: %w", err)
+	}
+	for _, categoryID := range assignments.categoryIDs {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO addon_category_access (addon_id, category_id, position)
+			VALUES ($1::uuid, $2::uuid,
+				(SELECT COALESCE(max(position) + 1, 0) FROM addon_category_access WHERE category_id = $2::uuid))
+			ON CONFLICT (addon_id, category_id) DO NOTHING
+		`, addonID, categoryID); err != nil {
+			return fmt.Errorf("grant addon category access: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM addon_category_access
+		WHERE addon_id = $1::uuid AND NOT (category_id = ANY($2::uuid[]))
+	`, addonID, assignments.categoryIDs); err != nil {
+		return fmt.Errorf("revoke addon category access: %w", err)
 	}
 	return nil
 }
 
-func addonTransportAssignedToProfiles(ctx context.Context, tx pgx.Tx, transportURL string, profileIDs []string, exceptAddonID *string) (bool, error) {
+func addonTransportAssigned(ctx context.Context, tx pgx.Tx, transportURL string, assignments addonAssignments, exceptAddonID *string) (bool, error) {
 	var assigned bool
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
-			FROM addon_profile_access access
-			JOIN profile_addons installed ON installed.id = access.addon_id
-			WHERE access.profile_id = ANY($2::uuid[])
-			  AND installed.transport_url = $1
-			  AND ($3::uuid IS NULL OR installed.id <> $3::uuid)
+			FROM profile_addons installed
+			WHERE installed.transport_url = $1
+			  AND ($4::uuid IS NULL OR installed.id <> $4::uuid)
+			  AND (
+			      EXISTS (
+			          SELECT 1 FROM addon_profile_access explicit_access
+			          WHERE explicit_access.addon_id = installed.id
+			            AND explicit_access.profile_id = ANY($2::uuid[])
+			      )
+			      OR EXISTS (
+			          SELECT 1 FROM addon_category_access category_access
+			          WHERE category_access.addon_id = installed.id
+			            AND category_access.category_id = ANY($3::uuid[])
+			      )
+			      OR EXISTS (
+			          SELECT 1
+			          FROM addon_category_access category_access
+			          JOIN profiles requested_profile ON requested_profile.id = ANY($2::uuid[])
+			          WHERE category_access.addon_id = installed.id
+			            AND category_access.category_id = requested_profile.category_id
+			      )
+			      OR EXISTS (
+			          SELECT 1
+			          FROM addon_profile_access explicit_access
+			          JOIN profiles existing_profile ON existing_profile.id = explicit_access.profile_id
+			          WHERE explicit_access.addon_id = installed.id
+			            AND existing_profile.category_id = ANY($3::uuid[])
+			      )
+			  )
 		)
-	`, transportURL, profileIDs, exceptAddonID).Scan(&assigned); err != nil {
-		return false, fmt.Errorf("check addon transport profile access: %w", err)
+	`, transportURL, assignments.profileIDs, assignments.categoryIDs, exceptAddonID).Scan(&assigned); err != nil {
+		return false, fmt.Errorf("check addon transport assignment overlap: %w", err)
 	}
 	return assigned, nil
 }
@@ -98,10 +259,7 @@ func addonTransportAssignedToProfiles(ctx context.Context, tx pgx.Tx, transportU
 func lockAddonTransportURL(ctx context.Context, tx pgx.Tx, addonID string) (string, error) {
 	var transportURL string
 	if err := tx.QueryRow(ctx, `
-		SELECT transport_url
-		FROM profile_addons
-		WHERE id = $1::uuid
-		FOR UPDATE
+		SELECT transport_url FROM profile_addons WHERE id = $1::uuid FOR UPDATE
 	`, addonID).Scan(&transportURL); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", ErrNotFound
@@ -111,67 +269,190 @@ func lockAddonTransportURL(ctx context.Context, tx pgx.Tx, addonID string) (stri
 	return transportURL, nil
 }
 
-func authorizeAddonAssignmentChange(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, addonID string, requestedProfileIDs []string) error {
+func readAddonAssignments(ctx context.Context, tx pgx.Tx, addonID string) (addonAssignments, error) {
+	assignments := addonAssignments{profileIDs: make([]string, 0), categoryIDs: make([]string, 0)}
+	rows, err := tx.Query(ctx, `
+		SELECT profile_id::text FROM addon_profile_access
+		WHERE addon_id = $1::uuid ORDER BY profile_id
+	`, addonID)
+	if err != nil {
+		return addonAssignments{}, fmt.Errorf("read addon profile access: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return addonAssignments{}, fmt.Errorf("scan addon profile access: %w", err)
+		}
+		assignments.profileIDs = append(assignments.profileIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return addonAssignments{}, fmt.Errorf("iterate addon profile access: %w", err)
+	}
+	rows.Close()
+	rows, err = tx.Query(ctx, `
+		SELECT category_id::text FROM addon_category_access
+		WHERE addon_id = $1::uuid ORDER BY category_id
+	`, addonID)
+	if err != nil {
+		return addonAssignments{}, fmt.Errorf("read addon category access: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return addonAssignments{}, fmt.Errorf("scan addon category access: %w", err)
+		}
+		assignments.categoryIDs = append(assignments.categoryIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return addonAssignments{}, fmt.Errorf("iterate addon category access: %w", err)
+	}
+	rows.Close()
+	return assignments, nil
+}
+
+func loadAddonAssignments(ctx context.Context, tx pgx.Tx, addonID string) (addonAssignments, error) {
+	assignments := addonAssignments{profileIDs: make([]string, 0), categoryIDs: make([]string, 0)}
+	rows, err := tx.Query(ctx, `
+		SELECT profile_id::text FROM addon_profile_access
+		WHERE addon_id = $1::uuid ORDER BY profile_id FOR UPDATE
+	`, addonID)
+	if err != nil {
+		return addonAssignments{}, fmt.Errorf("lock addon profile access: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return addonAssignments{}, fmt.Errorf("scan addon profile access: %w", err)
+		}
+		assignments.profileIDs = append(assignments.profileIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return addonAssignments{}, fmt.Errorf("iterate addon profile access: %w", err)
+	}
+	rows.Close()
+	rows, err = tx.Query(ctx, `
+		SELECT category_id::text FROM addon_category_access
+		WHERE addon_id = $1::uuid ORDER BY category_id FOR UPDATE
+	`, addonID)
+	if err != nil {
+		return addonAssignments{}, fmt.Errorf("lock addon category access: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return addonAssignments{}, fmt.Errorf("scan addon category access: %w", err)
+		}
+		assignments.categoryIDs = append(assignments.categoryIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return addonAssignments{}, fmt.Errorf("iterate addon category access: %w", err)
+	}
+	rows.Close()
+	return assignments, nil
+}
+
+func authorizeAddonAssignmentChange(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, addonID string, requestedProfileIDs, requestedCategoryIDs []string) (addonAssignments, error) {
+	var visibleID string
+	if err := tx.QueryRow(ctx, `
+		SELECT pa.id::text
+		FROM profile_addons pa
+		JOIN profiles active_profile ON active_profile.id = $2::uuid
+		WHERE pa.id = $1::uuid
+		  AND (
+		      EXISTS (SELECT 1 FROM addon_profile_access a WHERE a.addon_id = pa.id AND a.profile_id = active_profile.id)
+		      OR EXISTS (SELECT 1 FROM addon_category_access a WHERE a.addon_id = pa.id AND a.category_id = active_profile.category_id)
+		  )
+	`, addonID, activeProfileID).Scan(&visibleID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return addonAssignments{}, ErrNotFound
+		}
+		return addonAssignments{}, fmt.Errorf("read addon assignment change: %w", err)
+	}
+	snapshot, err := readAddonAssignments(ctx, tx, addonID)
+	if err != nil {
+		return addonAssignments{}, err
+	}
+	result := addonAssignments{profileIDs: snapshot.profileIDs, categoryIDs: snapshot.categoryIDs}
+	if requestedProfileIDs != nil {
+		result.profileIDs = requestedProfileIDs
+	}
+	if requestedCategoryIDs != nil {
+		result.categoryIDs = requestedCategoryIDs
+	}
+	if len(result.profileIDs)+len(result.categoryIDs) == 0 {
+		return addonAssignments{}, fmt.Errorf("%w: at least one profileId or categoryId is required", ErrInvalidInput)
+	}
+	allCategories := mergeIDs(snapshot.categoryIDs, result.categoryIDs)
+	allProfiles := mergeIDs(snapshot.profileIDs, result.profileIDs)
+	profileCategoryIDs, err := categoriesForProfiles(ctx, tx, mergeIDs(allProfiles, []string{activeProfileID}))
+	if err != nil {
+		return addonAssignments{}, err
+	}
+	if len(allCategories) > 0 {
+		if err := authorizeGlobalAddonOrigin(ctx, tx, principal); err != nil {
+			return addonAssignments{}, err
+		}
+	}
+	if err := lockCategoryRows(ctx, tx, mergeIDs(allCategories, profileCategoryIDs)); err != nil {
+		return addonAssignments{}, err
+	}
+	if err := authorizeActiveProfile(ctx, tx, principal, activeProfileID); err != nil {
+		return addonAssignments{}, err
+	}
+	if err := authorizeProfileAssignments(ctx, tx, principal, activeProfileID, allProfiles); err != nil {
+		return addonAssignments{}, err
+	}
+	currentProfileCategoryIDs, err := categoriesForProfiles(ctx, tx, mergeIDs(allProfiles, []string{activeProfileID}))
+	if err != nil {
+		return addonAssignments{}, err
+	}
+	if !equalIDs(profileCategoryIDs, currentProfileCategoryIDs) {
+		return addonAssignments{}, ErrForbidden
+	}
 	var lockedID string
 	if err := tx.QueryRow(ctx, `
 		SELECT pa.id::text
 		FROM profile_addons pa
+		JOIN profiles active_profile ON active_profile.id = $2::uuid
 		WHERE pa.id = $1::uuid
-		  AND EXISTS (
-		      SELECT 1 FROM addon_profile_access access
-		      WHERE access.addon_id = pa.id AND access.profile_id = $2::uuid
+		  AND (
+		      EXISTS (SELECT 1 FROM addon_profile_access a WHERE a.addon_id = pa.id AND a.profile_id = active_profile.id)
+		      OR EXISTS (SELECT 1 FROM addon_category_access a WHERE a.addon_id = pa.id AND a.category_id = active_profile.category_id)
 		  )
-		FOR UPDATE
+		FOR UPDATE OF pa
 	`, addonID, activeProfileID).Scan(&lockedID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotFound
+			return addonAssignments{}, ErrNotFound
 		}
-		return fmt.Errorf("lock addon assignment change: %w", err)
+		return addonAssignments{}, fmt.Errorf("lock addon assignment change: %w", err)
 	}
-	currentProfileIDs := make([]string, 0)
-	rows, err := tx.Query(ctx, `
-		SELECT profile_id::text
-		FROM addon_profile_access
-		WHERE addon_id = $1::uuid
-		ORDER BY profile_id
-		FOR UPDATE
-	`, addonID)
+	current, err := loadAddonAssignments(ctx, tx, addonID)
 	if err != nil {
-		return fmt.Errorf("lock addon profile access: %w", err)
+		return addonAssignments{}, err
 	}
-	for rows.Next() {
-		var profileID string
-		if err := rows.Scan(&profileID); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan addon profile access: %w", err)
-		}
-		currentProfileIDs = append(currentProfileIDs, profileID)
+	if !equalIDs(snapshot.profileIDs, current.profileIDs) || !equalIDs(snapshot.categoryIDs, current.categoryIDs) {
+		return addonAssignments{}, ErrForbidden
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("iterate addon profile access: %w", err)
-	}
-	rows.Close()
-	if len(currentProfileIDs) == 0 {
-		return ErrNotFound
-	}
-	if _, accessible := profileIDSet(currentProfileIDs)[activeProfileID]; !accessible {
-		return ErrNotFound
-	}
-	return authorizeProfileAssignments(
-		ctx, tx, principal, activeProfileID,
-		mergeProfileIDs(requestedProfileIDs, currentProfileIDs),
-	)
+	return result, nil
 }
 
 func authorizeAndLoadAddonRefresh(ctx context.Context, tx pgx.Tx, principal auth.Principal, activeProfileID, addonID string) (InstalledAddon, error) {
+	assignments, err := authorizeAddonAssignmentChange(ctx, tx, principal, activeProfileID, addonID, nil, nil)
+	if err != nil {
+		return InstalledAddon{}, err
+	}
 	if principal.IsGlobalAdministrator() {
 		if err := authorizeGlobalAddonOrigin(ctx, tx, principal); err != nil {
 			return InstalledAddon{}, err
 		}
-	}
-	if err := authorizeAddonAssignmentChange(ctx, tx, principal, activeProfileID, addonID, nil); err != nil {
-		return InstalledAddon{}, err
 	}
 	installed, err := queryAddon(tx.QueryRow(ctx, addonForManagementQuery, addonID, activeProfileID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -180,14 +461,14 @@ func authorizeAndLoadAddonRefresh(ctx context.Context, tx pgx.Tx, principal auth
 	if err != nil {
 		return InstalledAddon{}, fmt.Errorf("query addon for refresh: %w", err)
 	}
-	if isPrivateNetworkTransportURL(installed.transportURL) && !principal.IsGlobalAdministrator() {
+	if (len(assignments.categoryIDs) > 0 || isPrivateNetworkTransportURL(installed.transportURL)) && !principal.IsGlobalAdministrator() {
 		return InstalledAddon{}, ErrForbidden
 	}
 	return installed, nil
 }
 
-func applyAddonUpdate(ctx context.Context, tx pgx.Tx, addonID, transportURL string, profileIDs []string, manifest Manifest, rawManifest json.RawMessage, enabled *bool) error {
-	assigned, err := addonTransportAssignedToProfiles(ctx, tx, transportURL, profileIDs, &addonID)
+func applyAddonUpdate(ctx context.Context, tx pgx.Tx, addonID, transportURL string, assignments addonAssignments, manifest Manifest, rawManifest json.RawMessage, enabled *bool) error {
+	assigned, err := addonTransportAssigned(ctx, tx, transportURL, assignments, &addonID)
 	if err != nil {
 		return err
 	}
@@ -206,28 +487,40 @@ func applyAddonUpdate(ctx context.Context, tx pgx.Tx, addonID, transportURL stri
 		}
 		return fmt.Errorf("update addon: %w", err)
 	}
-	return writeProfileAssignments(ctx, tx, addonID, profileIDs)
+	return writeAddonAssignments(ctx, tx, addonID, assignments)
 }
 
-func profileIDSet(profileIDs []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(profileIDs))
-	for _, profileID := range profileIDs {
-		set[profileID] = struct{}{}
+func stringSet(ids []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
 	}
 	return set
 }
 
-func mergeProfileIDs(primary, secondary []string) []string {
+func mergeIDs(primary, secondary []string) []string {
 	merged := append([]string(nil), primary...)
-	seen := profileIDSet(merged)
-	for _, profileID := range secondary {
-		if _, exists := seen[profileID]; exists {
+	seen := stringSet(merged)
+	for _, id := range secondary {
+		if _, exists := seen[id]; exists {
 			continue
 		}
-		merged = append(merged, profileID)
-		seen[profileID] = struct{}{}
+		merged = append(merged, id)
+		seen[id] = struct{}{}
 	}
 	return merged
+}
+
+func equalIDs(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (service *Service) update(ctx context.Context, principal auth.Principal, addonID string, input UpdateAddonInput) (InstalledAddon, error) {
@@ -241,12 +534,18 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 	if input.Enabled != nil && !principal.IsGlobalAdministrator() {
 		return InstalledAddon{}, ErrForbidden
 	}
-	if input.ProfileIDs == nil {
-		return InstalledAddon{}, fmt.Errorf("%w: profileIds is required", ErrInvalidInput)
+	var profileIDs, categoryIDs []string
+	if input.ProfileIDs != nil {
+		profileIDs, err = normalizeAssignmentIDs("profileIds", input.ProfileIDs)
+		if err != nil {
+			return InstalledAddon{}, err
+		}
 	}
-	profileIDs, err := normalizeProfileIDs(input.ProfileIDs, activeProfileID)
-	if err != nil {
-		return InstalledAddon{}, err
+	if input.CategoryIDs != nil {
+		categoryIDs, err = normalizeAssignmentIDs("categoryIds", input.CategoryIDs)
+		if err != nil {
+			return InstalledAddon{}, err
+		}
 	}
 	var requestedTransportURL string
 	if input.TransportURL != nil {
@@ -265,10 +564,8 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 			return InstalledAddon{}, err
 		}
 	}
-	if err := authorizeActiveProfile(ctx, authorizationTx, principal, activeProfileID); err != nil {
-		return InstalledAddon{}, err
-	}
-	if err := authorizeAddonAssignmentChange(ctx, authorizationTx, principal, activeProfileID, addonID, profileIDs); err != nil {
+	assignments, err := authorizeAddonAssignmentChange(ctx, authorizationTx, principal, activeProfileID, addonID, profileIDs, categoryIDs)
+	if err != nil {
 		return InstalledAddon{}, err
 	}
 	currentTransportURL, err := lockAddonTransportURL(ctx, authorizationTx, addonID)
@@ -287,7 +584,7 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 		transportURL = requestedTransportURL
 	}
 	if currentTransportURL == transportURL {
-		assigned, err := addonTransportAssignedToProfiles(ctx, authorizationTx, transportURL, profileIDs, &addonID)
+		assigned, err := addonTransportAssigned(ctx, authorizationTx, transportURL, assignments, &addonID)
 		if err != nil {
 			return InstalledAddon{}, err
 		}
@@ -303,7 +600,7 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 				return InstalledAddon{}, fmt.Errorf("update addon availability: %w", err)
 			}
 		}
-		if err := writeProfileAssignments(ctx, authorizationTx, addonID, profileIDs); err != nil {
+		if err := writeAddonAssignments(ctx, authorizationTx, addonID, assignments); err != nil {
 			return InstalledAddon{}, err
 		}
 		installed, err := queryAddon(authorizationTx.QueryRow(ctx, addonForManagementQuery, addonID, activeProfileID))
@@ -320,6 +617,9 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 	}
 	if !principal.IsGlobalAdministrator() {
 		return InstalledAddon{}, ErrForbidden
+	}
+	if err := authorizeGlobalAddonOrigin(ctx, authorizationTx, principal); err != nil {
+		return InstalledAddon{}, err
 	}
 	if err := authorizationTx.Commit(ctx); err != nil {
 		return InstalledAddon{}, fmt.Errorf("commit addon update authorization: %w", err)
@@ -339,10 +639,8 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 	if err := authorizeGlobalAddonOrigin(ctx, tx, principal); err != nil {
 		return InstalledAddon{}, err
 	}
-	if err := authorizeActiveProfile(ctx, tx, principal, activeProfileID); err != nil {
-		return InstalledAddon{}, err
-	}
-	if err := authorizeAddonAssignmentChange(ctx, tx, principal, activeProfileID, addonID, profileIDs); err != nil {
+	assignments, err = authorizeAddonAssignmentChange(ctx, tx, principal, activeProfileID, addonID, profileIDs, categoryIDs)
+	if err != nil {
 		return InstalledAddon{}, err
 	}
 	if _, err := lockAddonTransportURL(ctx, tx, addonID); err != nil {
@@ -361,7 +659,7 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 	if !sameInstalledAddon(locked, current) {
 		return InstalledAddon{}, ErrNotFound
 	}
-	if err := applyAddonUpdate(ctx, tx, addonID, transportURL, profileIDs, manifest, rawManifest, input.Enabled); err != nil {
+	if err := applyAddonUpdate(ctx, tx, addonID, transportURL, assignments, manifest, rawManifest, input.Enabled); err != nil {
 		return InstalledAddon{}, err
 	}
 	installed, err := queryAddon(tx.QueryRow(ctx, addonForManagementQuery, addonID, activeProfileID))

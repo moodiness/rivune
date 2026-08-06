@@ -225,6 +225,7 @@ export type Collection = {
   folderCoverShape: "poster" | "landscape" | "square";
   folders: CollectionFolder[];
   profileIds: string[];
+  categoryIds: string[];
   position: number;
   version: number;
   createdAt: string;
@@ -243,7 +244,7 @@ export type PortableCollectionFolder = Omit<CollectionFolder, "id" | "sourceView
   sourceView: NonNullable<CollectionFolder["sourceView"]>;
   sources: PortableCollectionSource[];
 };
-export type PortableCollection = Omit<CollectionSaveInput, "expectedVersion" | "folders" | "profileIds"> & {
+export type PortableCollection = Omit<CollectionSaveInput, "expectedVersion" | "folders" | "profileIds" | "categoryIds"> & {
   folders: PortableCollectionFolder[];
 };
 export type CollectionExportDocument = {
@@ -411,6 +412,7 @@ export type InstalledAddon = {
   position: number;
   enabled: boolean;
   profileIds: string[];
+  categoryIds: string[];
   installedAt: string;
   updatedAt: string;
 };
@@ -420,9 +422,11 @@ export type ManagedAddon = InstalledAddon & {
 export type InstallAddonInput = {
   transportUrl: string;
   profileIds: string[];
+  categoryIds: string[];
 };
 export type UpdateAddonInput = {
-  profileIds: string[];
+  profileIds?: string[];
+  categoryIds?: string[];
   transportUrl?: string;
   enabled?: boolean;
 };
@@ -437,6 +441,8 @@ export type AddonDiagnosticCapabilities = {
 export type AddonPreviewResponse = {
   manifest: AddonManifest;
   capabilities: AddonDiagnosticCapabilities;
+  profileIds: string[];
+  categoryIds: string[];
 };
 export type AddonDiagnostic = {
   addonId: string;

@@ -113,11 +113,27 @@ func measureCollectionImportQueries(t *testing.T, collectionCount int) int64 {
 			profile_id uuid NOT NULL, position integer NOT NULL,
 			PRIMARY KEY (collection_id, profile_id)
 		);
+		CREATE TEMPORARY TABLE collection_category_access (
+			collection_id uuid NOT NULL, category_id uuid NOT NULL, position integer NOT NULL,
+			PRIMARY KEY (collection_id, category_id)
+		);
+		CREATE TEMPORARY TABLE collection_profile_order (
+			collection_id uuid NOT NULL, profile_id uuid NOT NULL, position integer NOT NULL,
+			PRIMARY KEY (collection_id, profile_id)
+		);
 		CREATE TEMPORARY TABLE profile_addons (
 			id uuid PRIMARY KEY, manifest_id text NOT NULL
 		);
 		CREATE TEMPORARY TABLE addon_profile_access (
 			addon_id uuid NOT NULL REFERENCES profile_addons(id), profile_id uuid NOT NULL, position integer NOT NULL,
+			PRIMARY KEY (addon_id, profile_id)
+		);
+		CREATE TEMPORARY TABLE addon_category_access (
+			addon_id uuid NOT NULL, category_id uuid NOT NULL, position integer NOT NULL,
+			PRIMARY KEY (addon_id, category_id)
+		);
+		CREATE TEMPORARY TABLE addon_profile_order (
+			addon_id uuid NOT NULL, profile_id uuid NOT NULL, position integer NOT NULL,
 			PRIMARY KEY (addon_id, profile_id)
 		);
 		INSERT INTO profiles (id, category_id, name) VALUES ($1::uuid, $2::uuid, 'Import owner');
@@ -231,6 +247,9 @@ func measureCollectionImportQueries(t *testing.T, collectionCount int) int64 {
 		if len(value.ProfileIDs) != 1 || value.ProfileIDs[0] != profileID {
 			t.Fatalf("import profile assignment changed at index %d: %+v", index, value.ProfileIDs)
 		}
+		if len(value.CategoryIDs) != 0 {
+			t.Fatalf("import category assignment changed at index %d: %+v", index, value.CategoryIDs)
+		}
 		if value.ViewMode != ViewModeTabbedGrid || value.FolderCoverShape != TileShapePoster ||
 			len(value.Folders) != 1 || len(value.Folders[0].Sources) != 1 ||
 			value.Folders[0].Sources[0].Kind != SourceKindTMDB {
@@ -290,11 +309,27 @@ func TestCollectionImportRoundTripRebindsLegacyAddonCatalog(t *testing.T) {
 			profile_id uuid NOT NULL, position integer NOT NULL,
 			PRIMARY KEY (collection_id, profile_id)
 		);
+		CREATE TEMPORARY TABLE collection_category_access (
+			collection_id uuid NOT NULL, category_id uuid NOT NULL, position integer NOT NULL,
+			PRIMARY KEY (collection_id, category_id)
+		);
+		CREATE TEMPORARY TABLE collection_profile_order (
+			collection_id uuid NOT NULL, profile_id uuid NOT NULL, position integer NOT NULL,
+			PRIMARY KEY (collection_id, profile_id)
+		);
 		CREATE TEMPORARY TABLE profile_addons (
 			id uuid PRIMARY KEY, manifest_id text NOT NULL, manifest jsonb NOT NULL, enabled boolean NOT NULL DEFAULT true
 		);
 		CREATE TEMPORARY TABLE addon_profile_access (
 			addon_id uuid NOT NULL REFERENCES profile_addons(id), profile_id uuid NOT NULL, position integer NOT NULL,
+			PRIMARY KEY (addon_id, profile_id)
+		);
+		CREATE TEMPORARY TABLE addon_category_access (
+			addon_id uuid NOT NULL, category_id uuid NOT NULL, position integer NOT NULL,
+			PRIMARY KEY (addon_id, category_id)
+		);
+		CREATE TEMPORARY TABLE addon_profile_order (
+			addon_id uuid NOT NULL, profile_id uuid NOT NULL, position integer NOT NULL,
 			PRIMARY KEY (addon_id, profile_id)
 		);
 		INSERT INTO profiles (id, category_id, name) VALUES ($1::uuid, $2::uuid, 'Import owner');
@@ -354,7 +389,7 @@ func TestCollectionImportRoundTripRebindsLegacyAddonCatalog(t *testing.T) {
 		t.Fatalf("disabled addon export identity was not preserved: %+v", identities.byID)
 	}
 	direct := legacyAddonCatalogImport(currentAddonID, "movie", "popular")
-	if err := resolveAddonCatalogReferences(ctx, pool, []*SaveInput{&direct}, [][]string{{profileID}}); !errors.Is(err, ErrInvalidInput) {
+	if err := resolveAddonCatalogReferences(ctx, pool, []*SaveInput{&direct}, []collectionAssignments{{profileIDs: []string{profileID}}}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("disabled direct addon catalog validation error = %v, want %v", err, ErrInvalidInput)
 	}
 	if _, err := NewService(pool, nil, nil, nil, nil).Import(ctx, principal, ExportDocument{

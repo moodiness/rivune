@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ type fakeCollectionService struct {
 	listValue          []collection.Collection
 	listErr            error
 	exportValue        collection.ExportDocument
+	importCalls        int
 	exportErr          error
 	importInput        collection.ExportDocument
 	importValue        collection.ImportResult
@@ -81,6 +83,7 @@ func (fake *fakeCollectionService) Create(_ context.Context, _ auth.Principal, i
 }
 
 func (fake *fakeCollectionService) Import(_ context.Context, _ auth.Principal, input collection.ExportDocument) (collection.ImportResult, error) {
+	fake.importCalls++
 	fake.importInput = input
 	return fake.importValue, fake.importErr
 }
@@ -144,7 +147,7 @@ func (*fakeCollectionArtworkPresenter) LocalizeCollectionLookupResults(context.C
 
 func TestCollectionExportAndImportRoutes(t *testing.T) {
 	service := &fakeCollectionService{
-		exportValue: collection.ExportDocument{SchemaVersion: collection.ExportSchemaVersion, Collections: []collection.SaveInput{}},
+		exportValue: collection.ExportDocument{SchemaVersion: collection.ExportSchemaVersion, Collections: []collection.SaveInput{{ProfileIDs: []string{"22222222-2222-4222-8222-222222222222"}, CategoryIDs: []string{"33333333-3333-4333-8333-333333333333"}}}},
 		importValue: collection.ImportResult{Imported: 1, Collections: []collection.Collection{{Title: "Imported"}}},
 	}
 	api := collectionAPI(service)
@@ -159,6 +162,9 @@ func TestCollectionExportAndImportRoutes(t *testing.T) {
 	if disposition := exportResponse.Header().Get("Content-Disposition"); disposition != `attachment; filename="rivune-collections.json"` {
 		t.Fatalf("unexpected export content disposition %q", disposition)
 	}
+	if strings.Contains(exportResponse.Body.String(), "profileIds") || strings.Contains(exportResponse.Body.String(), "categoryIds") {
+		t.Fatalf("portable export exposed assignment policy: %s", exportResponse.Body.String())
+	}
 
 	importRequest := httptest.NewRequest(http.MethodPost, "/api/v1/collections/import", bytes.NewBufferString(`{"schemaVersion":1,"collections":[]}`))
 	importRequest.Header.Set("Authorization", "Bearer access")
@@ -170,6 +176,34 @@ func TestCollectionExportAndImportRoutes(t *testing.T) {
 	}
 	if service.importInput.SchemaVersion != collection.ExportSchemaVersion {
 		t.Fatalf("unexpected imported schema version %d", service.importInput.SchemaVersion)
+	}
+	if service.importCalls != 1 {
+		t.Fatalf("valid portable import calls = %d, want 1", service.importCalls)
+	}
+
+	invalidImports := []struct {
+		name string
+		body string
+	}{
+		{name: "explicit empty assignments", body: `{"schemaVersion":1,"collections":[{"profileIds":[],"categoryIds":[]}]}`},
+		{name: "null profileIds", body: `{"schemaVersion":1,"collections":[{"profileIds":null}]}`},
+		{name: "null categoryIds", body: `{"schemaVersion":1,"collections":[{"categoryIds":null}]}`},
+		{name: "unknown member", body: `{"schemaVersion":1,"collections":[{"unexpectedAssignment":[]}]}`},
+	}
+	for _, invalid := range invalidImports {
+		t.Run(invalid.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/collections/import", bytes.NewBufferString(invalid.body))
+			request.Header.Set("Authorization", "Bearer access")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			api.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("portable import status = %d, want 400: %s", response.Code, response.Body.String())
+			}
+			if service.importCalls != 1 {
+				t.Fatalf("invalid portable import reached service; calls = %d", service.importCalls)
+			}
+		})
 	}
 }
 
@@ -196,6 +230,79 @@ func TestCreateCollectionForwardsCompleteTMDBConfiguration(t *testing.T) {
 	source := service.saveInput.Folders[0].Sources[0]
 	if source.TMDB == nil || source.TMDB.SourceType != "network" || source.TMDB.TMDBID == nil || *source.TMDB.TMDBID != 49 {
 		t.Fatalf("TMDB source configuration changed: %+v", source)
+	}
+}
+
+func TestCollectionAssignmentDimensionsForwardedExactly(t *testing.T) {
+	const (
+		collectionID = "11111111-1111-4111-8111-111111111111"
+		profileID    = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		categoryID   = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	)
+	tests := []struct {
+		name        string
+		body        string
+		profileIDs  []string
+		categoryIDs []string
+	}{
+		{name: "omitted", body: `{}`},
+		{name: "explicit empty", body: `{"profileIds":[],"categoryIds":[]}`, profileIDs: []string{}, categoryIDs: []string{}},
+		{name: "nonempty", body: `{"profileIds":["` + profileID + `"],"categoryIds":["` + categoryID + `"]}`, profileIDs: []string{profileID}, categoryIDs: []string{categoryID}},
+	}
+	for _, endpoint := range []string{"create", "update"} {
+		for _, test := range tests {
+			t.Run(endpoint+"/"+test.name, func(t *testing.T) {
+				service := &fakeCollectionService{saveValue: collection.Collection{ProfileIDs: []string{}, CategoryIDs: []string{}}}
+				api := collectionAPI(service)
+				method, path, wantStatus := http.MethodPost, "/api/v1/collections", http.StatusCreated
+				if endpoint == "update" {
+					method, path, wantStatus = http.MethodPut, "/api/v1/collections/"+collectionID, http.StatusOK
+				}
+				request := httptest.NewRequest(method, path, strings.NewReader(test.body))
+				request.Header.Set("Authorization", "Bearer access")
+				request.Header.Set("Content-Type", "application/json")
+				response := httptest.NewRecorder()
+				api.Handler().ServeHTTP(response, request)
+				if response.Code != wantStatus {
+					t.Fatalf("status = %d, want %d: %s", response.Code, wantStatus, response.Body.String())
+				}
+				if !reflect.DeepEqual(service.saveInput.ProfileIDs, test.profileIDs) || !reflect.DeepEqual(service.saveInput.CategoryIDs, test.categoryIDs) {
+					t.Fatalf("assignments = profileIds:%#v categoryIds:%#v, want profileIds:%#v categoryIds:%#v", service.saveInput.ProfileIDs, service.saveInput.CategoryIDs, test.profileIDs, test.categoryIDs)
+				}
+			})
+		}
+	}
+}
+
+func TestCollectionAssignmentNullAndUnknownMembersAreRejected(t *testing.T) {
+	const collectionID = "11111111-1111-4111-8111-111111111111"
+	invalidMembers := []struct {
+		name string
+		body string
+	}{
+		{name: "null profileIds", body: `{"profileIds":null}`},
+		{name: "null categoryIds", body: `{"categoryIds":null}`},
+		{name: "unknown member", body: `{"unexpectedAssignment":[]}`},
+	}
+	for _, endpoint := range []string{"create", "update"} {
+		for _, invalid := range invalidMembers {
+			t.Run(endpoint+"/"+invalid.name, func(t *testing.T) {
+				service := &fakeCollectionService{}
+				api := collectionAPI(service)
+				method, path := http.MethodPost, "/api/v1/collections"
+				if endpoint == "update" {
+					method, path = http.MethodPut, "/api/v1/collections/"+collectionID
+				}
+				request := httptest.NewRequest(method, path, strings.NewReader(invalid.body))
+				request.Header.Set("Authorization", "Bearer access")
+				request.Header.Set("Content-Type", "application/json")
+				response := httptest.NewRecorder()
+				api.Handler().ServeHTTP(response, request)
+				if response.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want 400: %s", response.Code, response.Body.String())
+				}
+			})
+		}
 	}
 }
 
@@ -245,6 +352,8 @@ func TestCollectionTMDBEditorRoutesForwardLookupAndGenres(t *testing.T) {
 func TestCollectionManagementReturnsSourcesWhileOrdinaryReadsRemainLocalized(t *testing.T) {
 	const (
 		collectionID = "11111111-1111-4111-8111-111111111111"
+		profileID    = "22222222-2222-4222-8222-222222222222"
+		categoryID   = "33333333-3333-4333-8333-333333333333"
 		backdrop     = "https://images.example/private/collection.jpg?token=collection-secret"
 		cover        = "https://images.example/private/cover.jpg?token=cover-secret"
 		titleLogo    = "https://images.example/private/logo.png?token=logo-secret"
@@ -256,7 +365,7 @@ func TestCollectionManagementReturnsSourcesWhileOrdinaryReadsRemainLocalized(t *
 			Title: "Featured", CoverImageURL: cover, TitleLogoURL: titleLogo, HeroBackdropURL: heroBackdrop,
 			Sources: []collection.Source{},
 		}},
-		ProfileIDs: []string{"22222222-2222-4222-8222-222222222222"},
+		ProfileIDs: []string{profileID}, CategoryIDs: []string{categoryID},
 	}
 	service := &fakeCollectionService{managementValue: stored, listValue: []collection.Collection{stored}, getValue: stored}
 	presenter := &fakeCollectionArtworkPresenter{}
@@ -276,6 +385,9 @@ func TestCollectionManagementReturnsSourcesWhileOrdinaryReadsRemainLocalized(t *
 		managed.Folders[0].TitleLogoURL != titleLogo || managed.Folders[0].HeroBackdropURL != heroBackdrop {
 		t.Fatalf("management response changed stored artwork sources: %+v", managed)
 	}
+	if !reflect.DeepEqual(managed.ProfileIDs, []string{profileID}) || !reflect.DeepEqual(managed.CategoryIDs, []string{categoryID}) {
+		t.Fatalf("management assignments were not serialized separately: profileIds:%#v categoryIds:%#v", managed.ProfileIDs, managed.CategoryIDs)
+	}
 	if presenter.presentCalls != 0 {
 		t.Fatal("management response was passed through the public artwork presenter")
 	}
@@ -289,6 +401,9 @@ func TestCollectionManagementReturnsSourcesWhileOrdinaryReadsRemainLocalized(t *
 			t.Fatalf("ordinary read %s returned %d: %s", path, response.Code, response.Body.String())
 		}
 		body := response.Body.String()
+		if !strings.Contains(body, `"profileIds":["`+profileID+`"]`) || !strings.Contains(body, `"categoryIds":["`+categoryID+`"]`) {
+			t.Fatalf("ordinary read %s did not serialize separate assignment arrays: %s", path, body)
+		}
 		for _, source := range []string{backdrop, cover, titleLogo, heroBackdrop} {
 			if strings.Contains(body, source) {
 				t.Fatalf("ordinary read %s exposed source URL %q", path, source)

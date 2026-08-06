@@ -1883,7 +1883,7 @@ paths:
         - bearerAuth: []
       responses:
         '200':
-          description: Installed Stremio addon descriptors in profile priority order.
+          description: Persisted global administrators receive add-ons in effective profile priority order with the full explicit-profile and durable-category policy; effective access is the deduplicated union for the active profile. Delegated managers receive only add-ons explicitly assigned within their scope, with categoryIds empty, and category-policy resources are excluded individually. Runtime discovery and playback continue to use effective union access.
           content:
             application/json:
               schema:
@@ -1895,6 +1895,7 @@ paths:
     post:
       summary: Install addon
       operationId: installAddon
+      description: Installs an add-on with additive explicit-profile and durable category assignments. Category policy may be requested only by a bearer-authenticated persisted global administrator; delegated administrators retain explicit-profile-only behavior.
       security:
         - bearerAuth: []
       requestBody:
@@ -1905,11 +1906,13 @@ paths:
               $ref: '#/components/schemas/InstallAddonInput'
       responses:
         '201':
-          description: The configured addon transport was installed for the active profile.
+          description: The configured addon transport was installed with its explicit profile and durable category assignments.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ManagedAddon'
+        '400':
+          $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
         '409':
@@ -1923,7 +1926,7 @@ paths:
       summary: Preview add-on manifest and capabilities
       operationId: previewAddon
       description: |
-        Fetches and validates an add-on manifest without installing it or recording a health observation. Available only to a persisted global administrator authorized to manage every selected profile. The response never includes the configured transport URL or provider error details.
+        Fetches and validates an add-on manifest without installing it or recording a health observation. Available only to a bearer-authenticated persisted global administrator authorized to manage every selected profile and category. The response confirms both assignment dimensions but never includes the configured transport URL or provider error details.
       security:
         - bearerAuth: []
       requestBody:
@@ -1934,7 +1937,7 @@ paths:
               $ref: '#/components/schemas/InstallAddonInput'
       responses:
         '200':
-          description: Validated add-on manifest and its declared capabilities.
+          description: Validated add-on manifest, declared capabilities, and unexpanded assignment snapshot.
           content:
             application/json:
               schema:
@@ -2004,7 +2007,7 @@ paths:
     put:
       summary: Update addon
       operationId: updateAddon
-      description: Updates the configured transport, manifest, profile assignments, or global availability while preserving addon identity and profile order.
+      description: Updates the configured transport, manifest, explicit profile assignments, durable category assignments, or global availability while preserving addon identity and per-profile order. Omitted assignment dimensions are preserved. A resource with current or requested category policy may be changed only by a bearer-authenticated persisted global administrator; pure explicit-profile delegated behavior is unchanged. An assignment replacement that leaves the final profile/category union empty returns 422.
       security:
         - bearerAuth: []
       requestBody:
@@ -2020,6 +2023,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ManagedAddon'
+        '400':
+          $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
         '403':
@@ -2052,7 +2057,7 @@ paths:
     get:
       summary: Get addon management details
       operationId: getAddonManagement
-      description: Returns the exact stored transport URL only to a global administrator managing an addon assigned to the active profile.
+      description: Returns the exact stored transport URL only to a persisted global administrator managing an addon effectively available to the active profile. Category grants remain durable policy and are never expanded into explicit profile IDs.
       security:
         - bearerAuth: []
       responses:
@@ -2261,7 +2266,7 @@ paths:
         - bearerAuth: []
       responses:
         '200':
-          description: Ordered collections for the active profile.
+          description: Ordered collections effectively available to the active profile through an explicit profile grant or a durable grant to its current category, deduplicated by collection.
           content:
             application/json:
               schema:
@@ -2275,6 +2280,7 @@ paths:
     post:
       summary: Create collection
       operationId: createCollection
+      description: Creates a collection with additive explicit-profile and durable category assignments. Category policy may be requested only by a bearer-authenticated persisted global administrator; delegated administrators retain explicit-profile-only behavior.
       security:
         - bearerAuth: []
       requestBody:
@@ -2282,10 +2288,10 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CollectionSaveInput'
+              $ref: '#/components/schemas/CollectionCreateInput'
       responses:
         '201':
-          description: Collection created for the active profile.
+          description: Collection created with its explicit profile and durable category assignments.
           content:
             application/json:
               schema:
@@ -2308,7 +2314,7 @@ paths:
         - bearerAuth: []
       responses:
         '200':
-          description: Portable versioned JSON export of every collection for the active profile, available only when the caller can manage every assigned profile.
+          description: Portable versioned JSON export of every collection for the active profile, available only when the caller can manage every assignment. Assignment policy is intentionally excluded from the document.
           headers:
             Content-Disposition:
               schema:
@@ -2337,7 +2343,7 @@ paths:
               $ref: '#/components/schemas/CollectionExportDocument'
       responses:
         '201':
-          description: Collections were atomically appended to the active profile.
+          description: Collections were atomically appended with only the active profile as an explicit grant and no category grants; portable documents never carry assignment policy.
           content:
             application/json:
               schema:
@@ -2477,6 +2483,7 @@ paths:
     put:
       summary: Update collection
       operationId: updateCollection
+      description: Replaces collection content and any provided assignment dimensions. Omitted assignment dimensions are preserved. A collection with current or requested category policy may be changed only by a bearer-authenticated persisted global administrator; pure explicit-profile delegated behavior is unchanged. An assignment replacement that leaves the final profile/category union empty returns 422.
       security:
         - bearerAuth: []
       requestBody:
@@ -2525,7 +2532,7 @@ paths:
       summary: Get collection management details
       operationId: getCollectionManagement
       description: |
-        Returns the stored collection definition with exact configured artwork source URLs, including path and query. Requires management access to the active profile and every profile assigned to the collection.
+        Returns the stored collection definition with exact configured artwork source URLs, including path and query. Requires management access to every explicit profile assignment. A collection with durable category policy requires a bearer-authenticated persisted global administrator; category grants are never expanded into explicit profile IDs.
       security:
         - bearerAuth: []
       responses:
@@ -2550,7 +2557,7 @@ paths:
     get:
       summary: Resolve collection folder items
       operationId: resolveCollectionFolderItems
-      description: Resolves configured addon, TMDB, and Trakt sources concurrently in source order.
+      description: Resolves configured addon, TMDB, and Trakt sources concurrently in source order for collections effectively available through explicit profile or durable category access.
       security:
         - bearerAuth: []
       parameters:
@@ -3831,6 +3838,23 @@ components:
       additionalProperties: false
       required:
         - transportUrl
+      anyOf:
+        - not:
+            anyOf:
+              - required:
+                  - profileIds
+              - required:
+                  - categoryIds
+        - required:
+            - profileIds
+          properties:
+            profileIds:
+              minItems: 1
+        - required:
+            - categoryIds
+          properties:
+            categoryIds:
+              minItems: 1
       properties:
         transportUrl:
           type: string
@@ -3839,18 +3863,35 @@ components:
             Modern Stremio HTTP(S) transport URL. A root URL is normalized to manifest.json and a stremio:// install URL is normalized to HTTPS.
         profileIds:
           type: array
-          minItems: 1
           maxItems: 100
           uniqueItems: true
-          description: Profiles receiving the addon. Defaults to the active profile when omitted.
+          description: Explicit profile grants, additive with categoryIds and never populated from category membership. When both dimensions are omitted, installation and preview default to the active profile; an explicit empty array is valid when categoryIds is nonempty.
           items:
             type: string
             format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+        categoryIds:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          description: Durable category grants. Every active profile currently or subsequently in a selected category inherits access without materializing a profileIds entry. Any nonempty category policy requires a bearer-authenticated persisted global administrator.
+          items:
+            type: string
+            format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
     UpdateAddonInput:
       type: object
       additionalProperties: false
-      required:
-        - profileIds
+      description: Partial add-on update. Each omitted assignment dimension is preserved; a provided dimension replaces it. Both dimensions explicitly empty are invalid, and any replacement whose final explicit-profile/category union is empty returns 422.
+      not:
+        required:
+          - profileIds
+          - categoryIds
+        properties:
+          profileIds:
+            maxItems: 0
+          categoryIds:
+            maxItems: 0
       properties:
         enabled:
           type: boolean
@@ -3859,15 +3900,25 @@ components:
           type: string
           format: uri
           description: |
-            Optional replacement Stremio HTTP(S) transport URL. Omit it when changing profile assignments only. Replacing the transport is restricted to global administrators; a root URL is normalized to manifest.json and a stremio:// install URL is normalized to HTTPS.
+            Optional replacement Stremio HTTP(S) transport URL. Omit it when changing assignment policy only. Replacing the transport is restricted to global administrators; a root URL is normalized to manifest.json and a stremio:// install URL is normalized to HTTPS.
         profileIds:
           type: array
-          minItems: 1
           maxItems: 100
           uniqueItems: true
+          description: Explicit profile grants, additive with categoryIds and never populated from categories. Omit to preserve current grants; a provided array replaces them and may be empty only when the resulting category policy is nonempty.
           items:
             type: string
             format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+        categoryIds:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          description: Durable category grants. Omit to preserve current grants; a provided array replaces them. Any resource with current or requested category policy requires a bearer-authenticated persisted global administrator.
+          items:
+            type: string
+            format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
     ReorderAddonsInput:
       type: object
       additionalProperties: false
@@ -3883,6 +3934,7 @@ components:
     AddonList:
       type: object
       additionalProperties: false
+      description: Management list projection. Persisted global administrators receive effective-union resources with full separate assignment arrays. Delegated managers receive explicit-only, category-free resources; this visibility restriction does not narrow runtime effective access.
       required:
         - addons
       properties:
@@ -3896,11 +3948,31 @@ components:
       required:
         - manifest
         - capabilities
+        - profileIds
+        - categoryIds
       properties:
         manifest:
           $ref: '#/components/schemas/StremioManifest'
         capabilities:
           $ref: '#/components/schemas/AddonCapabilities'
+        profileIds:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          description: Explicit profile grants confirmed by the preview; category membership is never expanded into this array.
+          items:
+            type: string
+            format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+        categoryIds:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          description: Durable category grants confirmed by the preview.
+          items:
+            type: string
+            format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
     AddonDiagnostics:
       type: object
       additionalProperties: false
@@ -3990,6 +4062,7 @@ components:
         - manifest
         - position
         - profileIds
+        - categoryIds
         - enabled
         - installedAt
         - updatedAt
@@ -4004,11 +4077,22 @@ components:
           minimum: 0
         profileIds:
           type: array
-          minItems: 1
           uniqueItems: true
+          maxItems: 100
+          description: Explicit profile grants only; profiles inheriting through categoryIds are not materialized here.
           items:
             type: string
             format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+        categoryIds:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          description: Durable category grants. Current and future active profiles in these categories inherit effective runtime access.
+          items:
+            type: string
+            format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
         enabled:
           type: boolean
           description: Whether the installed addon may participate in runtime discovery and execution.
@@ -4026,10 +4110,11 @@ components:
         - manifest
         - position
         - profileIds
+        - categoryIds
         - enabled
         - installedAt
         - updatedAt
-      description: Addon management response. transportUrl is present only for a currently authorized global administrator.
+      description: Addon management response with separate explicit profile and durable category policy. transportUrl is present only for a currently authorized global administrator.
       properties:
         id:
           type: string
@@ -4041,11 +4126,22 @@ components:
           minimum: 0
         profileIds:
           type: array
-          minItems: 1
           uniqueItems: true
+          maxItems: 100
+          description: Explicit profile grants only; profiles inheriting through categoryIds are not materialized here.
           items:
             type: string
             format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+        categoryIds:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          description: Durable category grants. Current and future active profiles in these categories inherit effective runtime access.
+          items:
+            type: string
+            format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
         enabled:
           type: boolean
           description: Whether the installed addon may participate in runtime discovery and execution.
@@ -6867,6 +6963,7 @@ components:
         - folderCoverShape
         - folders
         - profileIds
+        - categoryIds
         - position
         - version
         - createdAt
@@ -6898,11 +6995,22 @@ components:
             $ref: '#/components/schemas/CollectionFolder'
         profileIds:
           type: array
-          minItems: 1
           uniqueItems: true
+          maxItems: 100
+          description: Explicit profile grants only; profiles inheriting through categoryIds are not materialized here.
           items:
             type: string
             format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+        categoryIds:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          description: Durable category grants. Current and future active profiles in these categories inherit effective collection access.
+          items:
+            type: string
+            format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
         position:
           type: integer
           minimum: 0
@@ -6915,9 +7023,40 @@ components:
         updatedAt:
           type: string
           format: date-time
+    CollectionCreateInput:
+      description: Collection creation input. When both assignment dimensions are omitted, the active profile is granted explicitly. Otherwise at least one provided assignment array must be nonempty.
+      allOf:
+        - $ref: '#/components/schemas/CollectionSaveInput'
+        - anyOf:
+            - not:
+                anyOf:
+                  - required:
+                      - profileIds
+                  - required:
+                      - categoryIds
+            - required:
+                - profileIds
+              properties:
+                profileIds:
+                  minItems: 1
+            - required:
+                - categoryIds
+              properties:
+                categoryIds:
+                  minItems: 1
     CollectionSaveInput:
       type: object
       additionalProperties: false
+      description: Partial collection update input. Each omitted assignment dimension is preserved; a provided dimension replaces it. Both dimensions explicitly empty are invalid, and any replacement whose final explicit-profile/category union is empty returns 422.
+      not:
+        required:
+          - profileIds
+          - categoryIds
+        properties:
+          profileIds:
+            maxItems: 0
+          categoryIds:
+            maxItems: 0
       required:
         - title
         - heroEnabled
@@ -6952,13 +7091,22 @@ components:
             $ref: '#/components/schemas/CollectionFolder'
         profileIds:
           type: array
-          minItems: 1
           maxItems: 100
           uniqueItems: true
-          description: Profiles receiving the collection. Defaults to the active profile when omitted on creation and is unchanged when omitted on update.
+          description: Explicit profile grants, additive with categoryIds and never populated from category membership. Defaults to the active profile on creation only when both dimensions are omitted; omitted updates preserve current grants. A provided array replaces them and may be empty when the resulting category policy is nonempty.
           items:
             type: string
             format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+        categoryIds:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          description: Durable category grants. Current and future active profiles in these categories inherit access. Omitted updates preserve current grants. Any nonempty current or requested category policy requires a bearer-authenticated persisted global administrator.
+          items:
+            type: string
+            format: uuid
+            pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
         expectedVersion:
           type: integer
           minimum: 0
@@ -6968,6 +7116,7 @@ components:
       required:
         - schemaVersion
         - collections
+      description: Assignment-free portable collection document. Explicit profile and category grants are never exported or accepted on import; imported collections bind only to the active profile with no category grants.
       properties:
         schemaVersion:
           type: integer
@@ -7007,6 +7156,7 @@ components:
         - viewMode
         - folderCoverShape
         - folders
+      description: Portable collection content without profileIds or categoryIds. Import creates only an explicit grant for the active profile and no durable category policy.
       properties:
         title:
           type: string

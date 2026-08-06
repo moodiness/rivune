@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -219,10 +220,16 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 				BehaviorHints: addon.ManifestBehaviorHints{Adult: true, P2P: true, ConfigurationRequired: true},
 			},
 			Capabilities: addon.AddonCapabilities{Resources: []string{"catalog"}, Search: true, Pagination: true, SearchPagination: true},
+			ProfileIDs:   []string{}, CategoryIDs: []string{contractCategoryID},
 		}}
-		body := `{"transportUrl":"stremio://contract-addon.example/config","profileIds":["` + contractProfileID + `"]}`
+		body := `{"transportUrl":"stremio://contract-addon.example/config","profileIds":[],"categoryIds":["` + contractCategoryID + `"]}`
 		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", body, true)
-		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","profileIds":[]}`, false)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example"}`, true)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","profileIds":[],"categoryIds":["`+contractCategoryID+`"]}`, true)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","profileIds":[],"categoryIds":[]}`, false)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","categoryIds":["`+contractCategoryID+`","`+contractCategoryID+`"]}`, false)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","categoryIds":["not-a-uuid"]}`, false)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","categoryIds":`+contractUUIDArray(101)+`}`, false)
 		request := authenticatedContractRequest(http.MethodPost, "/api/v1/addons/preview", bytes.NewBufferString(body))
 		request.Header.Set("Content-Type", "application/json")
 		response := serveContractRequest(t, api, request, http.StatusOK)
@@ -234,10 +241,11 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		installed := addon.InstalledAddon{
 			ID:       contractAddonID,
 			Manifest: json.RawMessage(`{"id":"org.rivune.contract","version":"1.0.0","name":"Contract Add-on","types":["movie"],"resources":["catalog"],"catalogs":[]}`),
-			Position: 0, ProfileIDs: []string{contractProfileID}, Enabled: false,
+			Position: 0, ProfileIDs: []string{}, CategoryIDs: []string{contractCategoryID}, Enabled: false,
 			InstalledAt: now, UpdatedAt: now,
 		}
 		service := &fakeAddonService{
+			installValue:    installed,
 			listValue:       []addon.InstalledAddon{installed},
 			managementValue: addon.ManagedAddon{InstalledAddon: installed, TransportURL: "https://contract-addon.example/manifest.json?token=private"},
 			updateValue:     installed,
@@ -245,21 +253,77 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		api := testAPI(&fakeInstanceService{})
 		api.auth = &fakeAuthService{principal: contractPrincipal()}
 		api.addons = service
+		installBody := `{"transportUrl":"https://contract-addon.example/manifest.json","profileIds":[],"categoryIds":["` + contractCategoryID + `"]}`
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons", installBody, true)
+		install := authenticatedContractRequest(http.MethodPost, "/api/v1/addons", bytes.NewBufferString(installBody))
+		install.Header.Set("Content-Type", "application/json")
+		installResponse := serveContractRequest(t, api, install, http.StatusCreated)
+		validateContractResponse(t, document, "/addons", nil, install, installResponse)
 
 		list := authenticatedContractRequest(http.MethodGet, "/api/v1/addons", nil)
 		listResponse := serveContractRequest(t, api, list, http.StatusOK)
 		validateContractResponse(t, document, "/addons", nil, list, listResponse)
+
+		delegatedInstalled := installed
+		delegatedInstalled.ProfileIDs = []string{contractProfileID}
+		delegatedInstalled.CategoryIDs = []string{}
+		delegatedPrincipal := contractPrincipal()
+		delegatedPrincipal.AuthorizationScope = auth.AuthorizationScopeCategory
+		delegatedPrincipal.CategoryID = contractStringPointer(contractCategoryID)
+		delegatedAPI := testAPI(&fakeInstanceService{})
+		delegatedAPI.auth = &fakeAuthService{principal: delegatedPrincipal}
+		delegatedAPI.addons = &fakeAddonService{listValue: []addon.InstalledAddon{delegatedInstalled}}
+		delegatedList := authenticatedContractRequest(http.MethodGet, "/api/v1/addons", nil)
+		delegatedResponse := serveContractRequest(t, delegatedAPI, delegatedList, http.StatusOK)
+		validateContractResponse(t, document, "/addons", nil, delegatedList, delegatedResponse)
+		var delegatedBody struct {
+			Addons []addon.InstalledAddon `json:"addons"`
+		}
+		decodeResponse(t, delegatedResponse, &delegatedBody)
+		if len(delegatedBody.Addons) != 1 || len(delegatedBody.Addons[0].CategoryIDs) != 0 || len(delegatedBody.Addons[0].ProfileIDs) != 1 || delegatedBody.Addons[0].ProfileIDs[0] != contractProfileID {
+			t.Fatalf("delegated add-on list did not preserve explicit-only service projection: %+v", delegatedBody.Addons)
+		}
 
 		management := authenticatedContractRequest(http.MethodGet, "/api/v1/addons/"+contractAddonID+"/management", nil)
 		managementResponse := serveContractRequest(t, api, management, http.StatusOK)
 		validateContractResponse(t, document, "/addons/{addonId}/management", map[string]string{"addonId": contractAddonID}, management, managementResponse)
 
 		updatePath := "/api/v1/addons/" + contractAddonID
-		withEnabled := `{"profileIds":["` + contractProfileID + `"],"enabled":false}`
+		withEnabled := `{"profileIds":[],"categoryIds":["` + contractCategoryID + `"],"enabled":false}`
 		withoutEnabled := `{"profileIds":["` + contractProfileID + `"]}`
 		validateContractRequestBody(t, document, http.MethodPut, updatePath, withEnabled, true)
 		validateContractRequestBody(t, document, http.MethodPut, updatePath, withoutEnabled, true)
+		validateContractRequestBody(t, document, http.MethodPut, updatePath, `{}`, true)
+		validateContractRequestBody(t, document, http.MethodPut, updatePath, `{"profileIds":[],"categoryIds":[]}`, false)
+		validateContractRequestBody(t, document, http.MethodPut, updatePath, `{"profileIds":[]}`, true)
+		validateContractRequestBody(t, document, http.MethodPut, updatePath, `{"categoryIds":[]}`, true)
+		validateContractRequestBody(t, document, http.MethodPut, updatePath, `{"categoryIds":["`+contractCategoryID+`","`+contractCategoryID+`"]}`, false)
+		validateContractRequestBody(t, document, http.MethodPut, updatePath, `{"profileIds":["not-a-uuid"]}`, false)
+		validateContractRequestBody(t, document, http.MethodPut, updatePath, `{"profileIds":`+contractUUIDArray(101)+`}`, false)
 		validateContractRequestBody(t, document, http.MethodPut, updatePath, `{"profileIds":["`+contractProfileID+`"],"enabled":"false"}`, false)
+		invalidAssignments := []struct {
+			name   string
+			method string
+			path   string
+			body   string
+		}{
+			{name: "install null profileIds", method: http.MethodPost, path: "/api/v1/addons", body: `{"transportUrl":"https://contract-addon.example/manifest.json","profileIds":null}`},
+			{name: "install null categoryIds", method: http.MethodPost, path: "/api/v1/addons", body: `{"transportUrl":"https://contract-addon.example/manifest.json","categoryIds":null}`},
+			{name: "preview null profileIds", method: http.MethodPost, path: "/api/v1/addons/preview", body: `{"transportUrl":"https://contract-addon.example/manifest.json","profileIds":null}`},
+			{name: "preview null categoryIds", method: http.MethodPost, path: "/api/v1/addons/preview", body: `{"transportUrl":"https://contract-addon.example/manifest.json","categoryIds":null}`},
+			{name: "update null profileIds", method: http.MethodPut, path: updatePath, body: `{"profileIds":null}`},
+			{name: "update null categoryIds", method: http.MethodPut, path: updatePath, body: `{"categoryIds":null}`},
+			{name: "update unknown member", method: http.MethodPut, path: updatePath, body: `{"unexpectedAssignment":[]}`},
+		}
+		for _, invalid := range invalidAssignments {
+			t.Run(invalid.name, func(t *testing.T) {
+				validateContractRequestBody(t, document, invalid.method, invalid.path, invalid.body, false)
+				request := authenticatedContractRequest(invalid.method, invalid.path, bytes.NewBufferString(invalid.body))
+				request.Header.Set("Content-Type", "application/json")
+				response := serveContractRequest(t, api, request, http.StatusBadRequest)
+				validateContractResponse(t, document, invalid.path, nil, request, response)
+			})
+		}
 		update := authenticatedContractRequest(http.MethodPut, updatePath, bytes.NewBufferString(withEnabled))
 		update.Header.Set("Content-Type", "application/json")
 		updateResponse := serveContractRequest(t, api, update, http.StatusOK)
@@ -574,10 +638,10 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		}
 	})
 
-	t.Run("collection management", func(t *testing.T) {
+	t.Run("collection assignments", func(t *testing.T) {
 		const collectionID = "88888888-8888-4888-8888-888888888888"
 		now := time.Date(2026, time.August, 4, 10, 0, 0, 0, time.UTC)
-		service := &fakeCollectionService{managementValue: collection.Collection{
+		stored := collection.Collection{
 			ID: collectionID, Title: "Contract collection",
 			BackdropImageURL: "https://art.example/private/backdrop.jpg?token=contract-secret",
 			ViewMode:         "rows", FolderCoverShape: "poster",
@@ -589,12 +653,79 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 					TMDB: &collection.TMDBSource{SourceType: "discover", MediaType: "movie", Sort: "popularity.desc"},
 				}},
 			}},
-			ProfileIDs: []string{contractProfileID}, Version: 1, CreatedAt: now, UpdatedAt: now,
-		}}
+			ProfileIDs: []string{}, CategoryIDs: []string{contractCategoryID}, Version: 1, CreatedAt: now, UpdatedAt: now,
+		}
+		service := &fakeCollectionService{managementValue: stored, listValue: []collection.Collection{stored}, saveValue: stored}
 		api := collectionAPI(service)
-		request := authenticatedContractRequest(http.MethodGet, "/api/v1/collections/"+collectionID+"/management", nil)
-		response := serveContractRequest(t, api, request, http.StatusOK)
-		validateContractResponse(t, document, "/collections/{collectionId}/management", map[string]string{"collectionId": collectionID}, request, response)
+
+		list := authenticatedContractRequest(http.MethodGet, "/api/v1/collections", nil)
+		listResponse := serveContractRequest(t, api, list, http.StatusOK)
+		validateContractResponse(t, document, "/collections", nil, list, listResponse)
+
+		assignmentBody := contractCollectionAssignmentBody(`,"profileIds":[],"categoryIds":["` + contractCategoryID + `"]`)
+		omittedBody := contractCollectionAssignmentBody("")
+		bothEmptyBody := contractCollectionAssignmentBody(`,"profileIds":[],"categoryIds":[]`)
+		profileEmptyBody := contractCollectionAssignmentBody(`,"profileIds":[]`)
+		categoryEmptyBody := contractCollectionAssignmentBody(`,"categoryIds":[]`)
+		duplicateCategoryBody := contractCollectionAssignmentBody(`,"categoryIds":["` + contractCategoryID + `","` + contractCategoryID + `"]`)
+		invalidProfileBody := contractCollectionAssignmentBody(`,"profileIds":["not-a-uuid"]`)
+		tooManyCategoriesBody := contractCollectionAssignmentBody(`,"categoryIds":` + contractUUIDArray(101))
+		for _, endpoint := range []struct {
+			method string
+			path   string
+			status int
+		}{
+			{method: http.MethodPost, path: "/api/v1/collections", status: http.StatusCreated},
+			{method: http.MethodPut, path: "/api/v1/collections/" + collectionID, status: http.StatusOK},
+		} {
+			validateContractRequestBody(t, document, endpoint.method, endpoint.path, assignmentBody, true)
+			validateContractRequestBody(t, document, endpoint.method, endpoint.path, omittedBody, true)
+			validateContractRequestBody(t, document, endpoint.method, endpoint.path, duplicateCategoryBody, false)
+			validateContractRequestBody(t, document, endpoint.method, endpoint.path, invalidProfileBody, false)
+			validateContractRequestBody(t, document, endpoint.method, endpoint.path, tooManyCategoriesBody, false)
+			request := authenticatedContractRequest(endpoint.method, endpoint.path, bytes.NewBufferString(assignmentBody))
+			request.Header.Set("Content-Type", "application/json")
+			response := serveContractRequest(t, api, request, endpoint.status)
+			validateContractResponse(t, document, endpoint.path, nil, request, response)
+		}
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/collections", bothEmptyBody, false)
+		validateContractRequestBody(t, document, http.MethodPut, "/api/v1/collections/"+collectionID, bothEmptyBody, false)
+		validateContractRequestBody(t, document, http.MethodPut, "/api/v1/collections/"+collectionID, profileEmptyBody, true)
+		validateContractRequestBody(t, document, http.MethodPut, "/api/v1/collections/"+collectionID, categoryEmptyBody, true)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/collections", profileEmptyBody, false)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/collections", categoryEmptyBody, false)
+
+		management := authenticatedContractRequest(http.MethodGet, "/api/v1/collections/"+collectionID+"/management", nil)
+		managementResponse := serveContractRequest(t, api, management, http.StatusOK)
+		validateContractResponse(t, document, "/collections/{collectionId}/management", map[string]string{"collectionId": collectionID}, management, managementResponse)
+
+		portable := `{"schemaVersion":1,"collections":[{"title":"Portable","heroEnabled":false,"pinToTop":false,"focusGlowEnabled":false,"viewMode":"rows","folderCoverShape":"poster","folders":[{"title":"Featured","tileShape":"poster","sourceView":"merged","focusGifEnabled":false,"hideTitle":false,"sources":[{"kind":"tmdb","title":"Popular","tmdb":{"sourceType":"discover","mediaType":"movie","sort":"popularity.desc","filters":{}}}]}]}]}`
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/collections/import", portable, true)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/collections/import", `{"schemaVersion":1,"collections":[{"title":"Portable","heroEnabled":false,"pinToTop":false,"focusGlowEnabled":false,"viewMode":"rows","folderCoverShape":"poster","folders":[],"categoryIds":["`+contractCategoryID+`"]}]}`, false)
+		invalidAssignments := []struct {
+			name   string
+			method string
+			path   string
+			body   string
+		}{
+			{name: "create null profileIds", method: http.MethodPost, path: "/api/v1/collections", body: contractCollectionAssignmentBody(`,"profileIds":null`)},
+			{name: "create null categoryIds", method: http.MethodPost, path: "/api/v1/collections", body: contractCollectionAssignmentBody(`,"categoryIds":null`)},
+			{name: "update null profileIds", method: http.MethodPut, path: "/api/v1/collections/" + collectionID, body: contractCollectionAssignmentBody(`,"profileIds":null`)},
+			{name: "update null categoryIds", method: http.MethodPut, path: "/api/v1/collections/" + collectionID, body: contractCollectionAssignmentBody(`,"categoryIds":null`)},
+			{name: "create unknown member", method: http.MethodPost, path: "/api/v1/collections", body: contractCollectionAssignmentBody(`,"unexpectedAssignment":[]`)},
+			{name: "portable null profileIds", method: http.MethodPost, path: "/api/v1/collections/import", body: `{"schemaVersion":1,"collections":[{"profileIds":null}]}`},
+			{name: "portable null categoryIds", method: http.MethodPost, path: "/api/v1/collections/import", body: `{"schemaVersion":1,"collections":[{"categoryIds":null}]}`},
+			{name: "portable unknown member", method: http.MethodPost, path: "/api/v1/collections/import", body: `{"schemaVersion":1,"collections":[{"unexpectedAssignment":[]}]}`},
+		}
+		for _, invalid := range invalidAssignments {
+			t.Run(invalid.name, func(t *testing.T) {
+				validateContractRequestBody(t, document, invalid.method, invalid.path, invalid.body, false)
+				request := authenticatedContractRequest(invalid.method, invalid.path, bytes.NewBufferString(invalid.body))
+				request.Header.Set("Content-Type", "application/json")
+				response := serveContractRequest(t, api, request, http.StatusBadRequest)
+				validateContractResponse(t, document, invalid.path, nil, request, response)
+			})
+		}
 	})
 
 	t.Run("custom series resolution", func(t *testing.T) {
@@ -707,11 +838,48 @@ func TestAddonPreviewOpenAPIRejectsPrivateDetails(t *testing.T) {
 	response := httptest.NewRecorder()
 	response.Header().Set("Content-Type", "application/json")
 	response.WriteHeader(http.StatusOK)
-	_, _ = response.WriteString(`{"manifest":{"id":"org.rivune.preview","version":"1.0.0","name":"Preview","types":["movie"],"resources":["catalog"],"catalogs":[]},"capabilities":{"resources":["catalog"],"search":true,"pagination":true,"searchPagination":true},"transportUrl":"https://private.invalid/manifest.json?token=secret","providerError":"private response body"}`)
+	_, _ = response.WriteString(`{"manifest":{"id":"org.rivune.preview","version":"1.0.0","name":"Preview","types":["movie"],"resources":["catalog"],"catalogs":[]},"capabilities":{"resources":["catalog"],"search":true,"pagination":true,"searchPagination":true},"profileIds":[],"categoryIds":["77777777-7777-4777-8777-777777777777"],"transportUrl":"https://private.invalid/manifest.json?token=secret","providerError":"private response body"}`)
 
 	valid, _ := validator.ValidateHttpResponse(request, response.Result())
 	if valid {
 		t.Fatal("preview OpenAPI response accepted private transport and provider error fields")
+	}
+}
+
+func TestAssignmentOpenAPIResponsesRequireBoundedSeparateUUIDArrays(t *testing.T) {
+	validator := loadOpenAPIContract(t)
+	previewPrefix := `{"manifest":{"id":"org.rivune.preview","version":"1.0.0","name":"Preview","types":["movie"],"resources":["catalog"],"catalogs":[]},"capabilities":{"resources":["catalog"],"search":true,"pagination":true,"searchPagination":true},"profileIds":[]`
+	addonPrefix := `{"addons":[{"id":"` + contractAddonID + `","manifest":{"id":"org.rivune.contract","version":"1.0.0","name":"Contract","types":["movie"],"resources":["catalog"],"catalogs":[]},"position":0,"profileIds":[],"categoryIds":`
+	collectionWithInvalidProfile := `{"collections":[{"id":"88888888-8888-4888-8888-888888888888","title":"Contract","heroEnabled":false,"pinToTop":false,"focusGlowEnabled":false,"viewMode":"rows","folderCoverShape":"poster","folders":[],"profileIds":["not-a-uuid"],"categoryIds":[],"position":0,"version":1,"createdAt":"2026-08-06T12:00:00Z","updatedAt":"2026-08-06T12:00:00Z"}]}`
+	tests := []struct {
+		name   string
+		method string
+		target string
+		body   string
+	}{
+		{name: "preview missing categoryIds", method: http.MethodPost, target: "/api/v1/addons/preview", body: previewPrefix + `}`},
+		{name: "preview duplicate categoryIds", method: http.MethodPost, target: "/api/v1/addons/preview", body: previewPrefix + `,"categoryIds":["` + contractCategoryID + `","` + contractCategoryID + `"]}`},
+		{name: "addon list exceeds category maximum", method: http.MethodGet, target: "/api/v1/addons", body: addonPrefix + contractUUIDArray(101) + `,"enabled":true,"installedAt":"2026-08-06T12:00:00Z","updatedAt":"2026-08-06T12:00:00Z"}]}`},
+		{name: "collection list rejects non-UUID profile", method: http.MethodGet, target: "/api/v1/collections", body: collectionWithInvalidProfile},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var request *http.Request
+			if test.method == http.MethodPost {
+				request = authenticatedContractRequest(test.method, test.target, bytes.NewBufferString(`{"transportUrl":"https://request.invalid/manifest.json"}`))
+				request.Header.Set("Content-Type", "application/json")
+			} else {
+				request = authenticatedContractRequest(test.method, test.target, nil)
+			}
+			response := httptest.NewRecorder()
+			response.Header().Set("Content-Type", "application/json")
+			response.WriteHeader(http.StatusOK)
+			_, _ = response.WriteString(test.body)
+			valid, _ := validator.ValidateHttpResponse(request, response.Result())
+			if valid {
+				t.Fatalf("OpenAPI response accepted invalid assignment arrays: %s", test.body)
+			}
+		})
 	}
 }
 
@@ -810,4 +978,20 @@ func contractStringPointer(value string) *string {
 
 func instanceInfoForContract() instance.Info {
 	return instance.Info{Name: "Rivune Contract", SetupRequired: false}
+}
+
+func contractUUIDArray(count int) string {
+	values := make([]string, count)
+	for index := range values {
+		values[index] = fmt.Sprintf("%08x-0000-4000-8000-%012x", index+1, index+1)
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
+}
+
+func contractCollectionAssignmentBody(assignments string) string {
+	return `{"title":"Contract collection","heroEnabled":false,"pinToTop":false,"focusGlowEnabled":false,"viewMode":"rows","folderCoverShape":"poster","folders":[{"title":"Featured","tileShape":"poster","focusGifEnabled":false,"hideTitle":false,"sources":[{"kind":"tmdb","title":"Popular","tmdb":{"sourceType":"discover","mediaType":"movie","sort":"popularity.desc","filters":{}}}]}]` + assignments + `}`
 }

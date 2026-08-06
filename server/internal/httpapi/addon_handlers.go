@@ -63,7 +63,7 @@ func (a *API) previewAddon(w http.ResponseWriter, r *http.Request, principal aut
 		return
 	}
 	var input addon.InstallInput
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeAssignmentJSON(w, r, &input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "The add-on preview request is invalid")
 		return
 	}
@@ -80,7 +80,7 @@ func (a *API) installAddon(w http.ResponseWriter, r *http.Request, principal aut
 		return
 	}
 	var input addon.InstallInput
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeAssignmentJSON(w, r, &input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -146,7 +146,7 @@ func (a *API) updateAddon(w http.ResponseWriter, r *http.Request, principal auth
 		return
 	}
 	var input addon.UpdateAddonInput
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeAssignmentJSON(w, r, &input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}

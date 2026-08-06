@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/addon"
@@ -31,14 +30,11 @@ type ResourceFetcher interface {
 	FetchPlaybackResource(context.Context, auth.Principal, string, addon.ResourcePath) (addon.ResourceResult, error)
 	FetchAllPlaybackResources(context.Context, auth.Principal, addon.ResourcePath) (addon.ResourceBatch, error)
 	ValidatePlaybackAccess(context.Context, auth.Principal, string) error
+	ValidatePlaybackAccesses(context.Context, auth.Principal, []string) error
+	ValidatePlaybackAccessesTx(context.Context, pgx.Tx, auth.Principal, []string) error
 }
-
 type playbackProfileTransaction interface {
-	Commit(context.Context) error
-	Rollback(context.Context) error
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
+	pgx.Tx
 }
 
 type Service struct {
@@ -216,13 +212,14 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 	if err := tx.Commit(ctx); err != nil {
 		return Preparation{}, fmt.Errorf("commit active playback profile authorization: %w", err)
 	}
-	if err := service.validateSourceReferenceAccess(ctx, principal, reference); err != nil {
-		return Preparation{}, err
+	if strings.TrimSpace(reference.Source.AddonID) != "" {
+		if err := service.validateSourceReferenceAccess(ctx, principal, reference); err != nil {
+			return Preparation{}, err
+		}
 	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
-	prepared, err := service.preparedPlayback(ctx, principal, reference, playbackPolicy{
-		allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight,
-	})
+	policy := playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight}
+	prepared, err := service.preparedPlayback(ctx, principal, reference, policy)
 	if err != nil {
 		if err == ErrTranscodingDisabled {
 			service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
@@ -263,6 +260,11 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 		service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
 		return Preparation{}, err
 	}
+	if err := service.validatePreparedPlaybackAccess(ctx, principal, prepared.addonIDs); err != nil {
+		service.preparations.evict(reference.ID, policy)
+		service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+		return Preparation{}, err
+	}
 	return result, nil
 }
 
@@ -285,13 +287,14 @@ func (service *Service) Resolve(ctx context.Context, principal auth.Principal, i
 	if err := tx.Commit(ctx); err != nil {
 		return Session{}, fmt.Errorf("commit active playback profile authorization: %w", err)
 	}
-	if err := service.validateSourceReferenceAccess(ctx, principal, reference); err != nil {
-		return Session{}, err
+	if strings.TrimSpace(reference.Source.AddonID) != "" {
+		if err := service.validateSourceReferenceAccess(ctx, principal, reference); err != nil {
+			return Session{}, err
+		}
 	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
-	prepared, err := service.preparedPlayback(ctx, principal, reference, playbackPolicy{
-		allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight,
-	})
+	policy := playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight}
+	prepared, err := service.preparedPlayback(ctx, principal, reference, policy)
 	if err != nil {
 		if err == ErrTranscodingDisabled {
 			service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
@@ -330,7 +333,11 @@ func (service *Service) Resolve(ctx context.Context, principal auth.Principal, i
 		return Session{}, err
 	}
 	assets := append(streamAssets, subtitleAssets...)
-	return service.createSession(ctx, principal, reference, input.TitleID, sources, subtitles, assets, prepared.providerErrors)
+	session, err := service.createSession(ctx, principal, reference, input.TitleID, sources, subtitles, assets, prepared.addonIDs, prepared.providerErrors)
+	if err == ErrSourceReferenceExpired {
+		service.preparations.evict(reference.ID, policy)
+	}
+	return session, err
 }
 
 func (service *Service) validateSourceReferenceAccess(ctx context.Context, principal auth.Principal, reference sourceReference) error {
@@ -348,7 +355,32 @@ func (service *Service) validateSourceReferenceAccess(ctx context.Context, princ
 	return nil
 }
 
-func (service *Service) createSession(ctx context.Context, principal auth.Principal, reference sourceReference, titleID string, sources []Source, subtitles []Subtitle, assets []storedAsset, providerErrors []ProviderFailure) (Session, error) {
+func (service *Service) validatePreparedPlaybackAccess(ctx context.Context, principal auth.Principal, addonIDs []string) error {
+	if err := service.addons.ValidatePlaybackAccesses(ctx, principal, addonIDs); err != nil {
+		if errors.Is(err, addon.ErrNotFound) || errors.Is(err, addon.ErrForbidden) ||
+			errors.Is(err, addon.ErrActiveProfileRequired) || errors.Is(err, addon.ErrInvalidInput) {
+			return ErrSourceReferenceExpired
+		}
+		return fmt.Errorf("validate playback provider access: %w", err)
+	}
+	return nil
+}
+
+func (service *Service) validatePreparedPlaybackAccessTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, addonIDs []string) error {
+	if len(addonIDs) == 0 {
+		return nil
+	}
+	if err := service.addons.ValidatePlaybackAccessesTx(ctx, tx, principal, addonIDs); err != nil {
+		if errors.Is(err, addon.ErrNotFound) || errors.Is(err, addon.ErrForbidden) ||
+			errors.Is(err, addon.ErrActiveProfileRequired) || errors.Is(err, addon.ErrInvalidInput) {
+			return ErrSourceReferenceExpired
+		}
+		return fmt.Errorf("validate playback provider access: %w", err)
+	}
+	return nil
+}
+
+func (service *Service) createSession(ctx context.Context, principal auth.Principal, reference sourceReference, titleID string, sources []Source, subtitles []Subtitle, assets []storedAsset, addonIDs []string, providerErrors []ProviderFailure) (Session, error) {
 	token, tokenHash, err := newSessionToken()
 	if err != nil {
 		return Session{}, fmt.Errorf("create playback token: %w", err)
@@ -365,6 +397,9 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 		return Session{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := service.validatePreparedPlaybackAccessTx(ctx, tx, principal, addonIDs); err != nil {
+		return Session{}, err
+	}
 	rows, err := tx.Query(ctx, `
 		DELETE FROM playback_sessions
 		WHERE profile_id = $1::uuid

@@ -49,11 +49,23 @@ const accessibleTitlesSQL = `
 	  AND CASE
 	    WHEN title.media_type = 'tv' THEN EXISTS (
 	        SELECT 1
-	        FROM addon_profile_access access
-	        JOIN profile_addons addon ON addon.id = access.addon_id
-	                                  AND addon.enabled = true
-	        WHERE access.addon_id = title.source_addon_id
-	          AND access.profile_id = $1::uuid
+	        FROM profile_addons addon
+	        JOIN profiles profile ON profile.id = $1::uuid
+	        WHERE addon.id = title.source_addon_id
+	          AND addon.enabled = true
+	          AND (
+	              EXISTS (
+	                  SELECT 1
+	                  FROM addon_profile_access access
+	                  WHERE access.addon_id = addon.id
+	                    AND access.profile_id = profile.id
+	              ) OR EXISTS (
+	                  SELECT 1
+	                  FROM addon_category_access access
+	                  WHERE access.addon_id = addon.id
+	                    AND access.category_id = profile.category_id
+	              )
+	          )
 	    )
 	    ELSE (
 	        NOT EXISTS (
@@ -69,11 +81,23 @@ const accessibleTitlesSQL = `
 	    ) AND (
 	        title.source_addon_id IS NULL OR EXISTS (
 	            SELECT 1
-	            FROM addon_profile_access access
-	            JOIN profile_addons addon ON addon.id = access.addon_id
-	                                      AND addon.enabled = true
-	            WHERE access.addon_id = title.source_addon_id
-	              AND access.profile_id = $1::uuid
+	            FROM profile_addons addon
+	            JOIN profiles profile ON profile.id = $1::uuid
+	            WHERE addon.id = title.source_addon_id
+	              AND addon.enabled = true
+	              AND (
+	                  EXISTS (
+	                      SELECT 1
+	                      FROM addon_profile_access access
+	                      WHERE access.addon_id = addon.id
+	                        AND access.profile_id = profile.id
+	                  ) OR EXISTS (
+	                      SELECT 1
+	                      FROM addon_category_access access
+	                      WHERE access.addon_id = addon.id
+	                        AND access.category_id = profile.category_id
+	                  )
+	              )
 	        )
 	    )
 	END
@@ -238,12 +262,24 @@ func (s *Service) ResolveCustomSeries(ctx context.Context, principal auth.Princi
 	var addonAccessible bool
 	err = tx.QueryRow(ctx, `
 		SELECT true
-		FROM addon_profile_access
-		JOIN profile_addons addon ON addon.id = addon_profile_access.addon_id
-		                           AND addon.enabled = true
-		WHERE addon_profile_access.addon_id = $1::uuid
-		  AND addon_profile_access.profile_id = $2::uuid
-		FOR SHARE
+		FROM profile_addons addon
+		JOIN profiles profile ON profile.id = $2::uuid
+		WHERE addon.id = $1::uuid
+		  AND addon.enabled = true
+		  AND (
+		      EXISTS (
+		          SELECT 1
+		          FROM addon_profile_access access
+		          WHERE access.addon_id = addon.id
+		            AND access.profile_id = profile.id
+		      ) OR EXISTS (
+		          SELECT 1
+		          FROM addon_category_access access
+		          WHERE access.addon_id = addon.id
+		            AND access.category_id = profile.category_id
+		      )
+		  )
+		FOR SHARE OF addon
 	`, input.SourceAddonID, profileID).Scan(&addonAccessible)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ResolveCustomSeriesResult{}, ErrNotFound
@@ -992,11 +1028,23 @@ func (s *Service) resolveTVTitle(ctx context.Context, principal auth.Principal, 
 	if err := tx.QueryRow(ctx, `
 		/* watchstate.lock_tv_addon */
 		SELECT addon.id::text
-		FROM addon_profile_access access
-		JOIN profile_addons addon ON addon.id = access.addon_id
-		                           AND addon.enabled = true
-		WHERE access.addon_id = $1::uuid
-		  AND access.profile_id = $2::uuid
+		FROM profile_addons addon
+		JOIN profiles profile ON profile.id = $2::uuid
+		WHERE addon.id = $1::uuid
+		  AND addon.enabled = true
+		  AND (
+		      EXISTS (
+		          SELECT 1
+		          FROM addon_profile_access access
+		          WHERE access.addon_id = addon.id
+		            AND access.profile_id = profile.id
+		      ) OR EXISTS (
+		          SELECT 1
+		          FROM addon_category_access access
+		          WHERE access.addon_id = addon.id
+		            AND access.category_id = profile.category_id
+		      )
+		  )
 		FOR SHARE OF addon
 	`, input.SourceAddonID, profileID).Scan(&lockedAddonID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1056,11 +1104,11 @@ func (s *Service) resolveTVTitle(ctx context.Context, principal auth.Principal, 
 			    resource_id = $7,
 			    resource_provider = $8,
 			    source_addon_id = NULLIF($9, '')::uuid,
-			    source_catalog_id = NULLIF($10, ''),
-			    source_name = NULLIF($11, ''),
-			    country = NULLIF($12, ''),
-			    language = NULLIF($13, ''),
-			    category = NULLIF($14, ''),
+			    source_catalog_id = COALESCE(NULLIF($10, ''), source_catalog_id),
+			    source_name = COALESCE(NULLIF($11, ''), source_name),
+			    country = COALESCE(NULLIF($12, ''), country),
+			    language = COALESCE(NULLIF($13, ''), language),
+			    category = COALESCE(NULLIF($14, ''), category),
 			    updated_at = now()
 			WHERE id = $1::uuid
 		`, titleID, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo,
@@ -1121,11 +1169,23 @@ func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titl
 		       COALESCE(title.category, ''),
 		       title.media_type <> 'tv' OR EXISTS (
 		           SELECT 1
-		           FROM addon_profile_access access
-		           JOIN profile_addons addon ON addon.id = access.addon_id
-		                                     AND addon.enabled = true
-		           WHERE access.addon_id = title.source_addon_id
-		             AND access.profile_id = $1::uuid
+		           FROM profile_addons addon
+		           JOIN profiles profile ON profile.id = $1::uuid
+		           WHERE addon.id = title.source_addon_id
+		             AND addon.enabled = true
+		             AND (
+		                 EXISTS (
+		                     SELECT 1
+		                     FROM addon_profile_access access
+		                     WHERE access.addon_id = addon.id
+		                       AND access.profile_id = profile.id
+		                 ) OR EXISTS (
+		                     SELECT 1
+		                     FROM addon_category_access access
+		                     WHERE access.addon_id = addon.id
+		                       AND access.category_id = profile.category_id
+		                 )
+		             )
 		       ),
 		       library.added_at, library.updated_at
 		FROM titles title
@@ -1256,11 +1316,23 @@ func (s *Service) Library(ctx context.Context, principal auth.Principal, mediaTy
 		       COALESCE(title.category, ''),
 		       title.media_type <> 'tv' OR EXISTS (
 		           SELECT 1
-		           FROM addon_profile_access access
-		           JOIN profile_addons addon ON addon.id = access.addon_id
-		                                     AND addon.enabled = true
-		           WHERE access.addon_id = title.source_addon_id
-		             AND access.profile_id = library.profile_id
+		           FROM profile_addons addon
+		           JOIN profiles profile ON profile.id = library.profile_id
+		           WHERE addon.id = title.source_addon_id
+		             AND addon.enabled = true
+		             AND (
+		                 EXISTS (
+		                     SELECT 1
+		                     FROM addon_profile_access access
+		                     WHERE access.addon_id = addon.id
+		                       AND access.profile_id = profile.id
+		                 ) OR EXISTS (
+		                     SELECT 1
+		                     FROM addon_category_access access
+		                     WHERE access.addon_id = addon.id
+		                       AND access.category_id = profile.category_id
+		                 )
+		             )
 		       ),
 		       library.added_at, library.updated_at
 		FROM profile_library library
@@ -2237,11 +2309,23 @@ func accessibleTitleMediaType(ctx context.Context, tx pgx.Tx, profileID, titleID
 	if err := tx.QueryRow(ctx, `
 		/* watchstate.lock_title_addon */
 		SELECT addon.id::text
-		FROM addon_profile_access access
-		JOIN profile_addons addon ON addon.id = access.addon_id
-		                           AND addon.enabled = true
-		WHERE access.addon_id = $2::uuid
-		  AND access.profile_id = $1::uuid
+		FROM profile_addons addon
+		JOIN profiles profile ON profile.id = $1::uuid
+		WHERE addon.id = $2::uuid
+		  AND addon.enabled = true
+		  AND (
+		      EXISTS (
+		          SELECT 1
+		          FROM addon_profile_access access
+		          WHERE access.addon_id = addon.id
+		            AND access.profile_id = profile.id
+		      ) OR EXISTS (
+		          SELECT 1
+		          FROM addon_category_access access
+		          WHERE access.addon_id = addon.id
+		            AND access.category_id = profile.category_id
+		      )
+		  )
 		FOR SHARE OF addon
 	`, profileID, *sourceAddonID).Scan(&lockedAddonID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

@@ -113,29 +113,54 @@ func (service *Service) Export(ctx context.Context, principal auth.Principal) (E
 		return ExportDocument{}, fmt.Errorf("begin collection export: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
-		return ExportDocument{}, err
-	}
-	var managedProfileIDs []string
+	var prelockedCategoryIDs []string
 	if err := tx.QueryRow(ctx, `
 		SELECT ARRAY(
-			SELECT DISTINCT assigned.profile_id::text
-			FROM collection_profile_access active
-			JOIN collection_profile_access assigned ON assigned.collection_id = active.collection_id
-			WHERE active.profile_id = $1::uuid
-			ORDER BY assigned.profile_id::text
+			SELECT DISTINCT assigned_category.category_id::text
+			FROM profiles active_profile
+			JOIN profile_collections pc ON true
+			LEFT JOIN collection_profile_access explicit_access
+			  ON explicit_access.collection_id = pc.id AND explicit_access.profile_id = active_profile.id
+			LEFT JOIN collection_category_access category_access
+			  ON category_access.collection_id = pc.id AND category_access.category_id = active_profile.category_id
+			JOIN collection_category_access assigned_category ON assigned_category.collection_id = pc.id
+			WHERE active_profile.id = $1::uuid
+			  AND (explicit_access.collection_id IS NOT NULL OR category_access.collection_id IS NOT NULL)
+			ORDER BY assigned_category.category_id::text
 		)
-	`, profileID).Scan(&managedProfileIDs); err != nil {
-		return ExportDocument{}, fmt.Errorf("query collection export profile access: %w", err)
+	`, profileID).Scan(&prelockedCategoryIDs); err != nil {
+		return ExportDocument{}, fmt.Errorf("query collection export policies: %w", err)
 	}
-	if len(managedProfileIDs) == 0 {
-		managedProfileIDs = []string{profileID}
+	if len(prelockedCategoryIDs) != 0 {
+		if err := authorizeGlobalCollectionPolicy(ctx, tx, principal); err != nil {
+			return ExportDocument{}, err
+		}
+		if err := lockCollectionCategories(ctx, tx, prelockedCategoryIDs); err != nil {
+			return ExportDocument{}, err
+		}
 	}
-	if err := authorizeCollectionProfiles(ctx, tx, principal, profileID, managedProfileIDs); err != nil {
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return ExportDocument{}, err
 	}
 	values, err := listForProfile(ctx, tx, profileID)
 	if err != nil {
+		return ExportDocument{}, err
+	}
+	managedProfileIDs := make([]string, 0)
+	categoryIDs := make([]string, 0)
+	for _, value := range values {
+		managedProfileIDs = mergeCollectionIDs(managedProfileIDs, value.ProfileIDs)
+		categoryIDs = mergeCollectionIDs(categoryIDs, value.CategoryIDs)
+	}
+	if len(categoryIDs) != 0 {
+		if err := authorizeGlobalCollectionPolicy(ctx, tx, principal); err != nil {
+			return ExportDocument{}, err
+		}
+		if err := lockCollectionCategories(ctx, tx, categoryIDs); err != nil {
+			return ExportDocument{}, err
+		}
+	}
+	if err := authorizeCollectionProfiles(ctx, tx, principal, profileID, managedProfileIDs); err != nil {
 		return ExportDocument{}, err
 	}
 	identities, err := loadAddonIdentities(ctx, tx, profileID)
@@ -174,10 +199,18 @@ func (service *Service) Get(ctx context.Context, principal auth.Principal, colle
 		return Collection{}, err
 	}
 	value, err := scanSharedCollection(tx.QueryRow(ctx, `
-		SELECT `+sharedCollectionFields+`, access.position`+sharedCollectionTail+`
-		FROM collection_profile_access access
-		JOIN profile_collections pc ON pc.id = access.collection_id
-		WHERE access.profile_id = $1::uuid AND pc.id = $2::uuid
+		SELECT `+sharedCollectionFields+`,
+		       COALESCE(profile_order.position, explicit_access.position, category_access.position)`+sharedCollectionTail+`
+		FROM profile_collections pc
+		JOIN profiles active_profile ON active_profile.id = $1::uuid
+		LEFT JOIN collection_profile_access explicit_access
+		  ON explicit_access.collection_id = pc.id AND explicit_access.profile_id = active_profile.id
+		LEFT JOIN collection_category_access category_access
+		  ON category_access.collection_id = pc.id AND category_access.category_id = active_profile.category_id
+		LEFT JOIN collection_profile_order profile_order
+		  ON profile_order.collection_id = pc.id AND profile_order.profile_id = active_profile.id
+		WHERE pc.id = $2::uuid
+		  AND (explicit_access.collection_id IS NOT NULL OR category_access.collection_id IS NOT NULL)
 	`, profileID, collectionID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Collection{}, ErrNotFound
@@ -204,13 +237,16 @@ func (service *Service) Management(ctx context.Context, principal auth.Principal
 		return Collection{}, fmt.Errorf("begin collection management query: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockCollectionPolicyBeforeProfiles(ctx, tx, principal, collectionID, nil); err != nil {
+		return Collection{}, err
+	}
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return Collection{}, err
 	}
-	if err := authorizeExistingCollectionProfiles(ctx, tx, principal, profileID, collectionID); err != nil {
+	if _, err := authorizeExistingCollectionAssignments(ctx, tx, principal, profileID, collectionID); err != nil {
 		return Collection{}, err
 	}
-	value, err := scanSharedCollection(tx.QueryRow(ctx, collectionByIDQuery, collectionID))
+	value, err := scanSharedCollection(tx.QueryRow(ctx, collectionByIDQuery, collectionID, profileID))
 	if err != nil {
 		return Collection{}, fmt.Errorf("query collection management details: %w", err)
 	}
@@ -225,7 +261,7 @@ func (service *Service) Create(ctx context.Context, principal auth.Principal, in
 	if err != nil {
 		return Collection{}, err
 	}
-	profileIDs, err := normalizeCollectionProfileIDs(input.ProfileIDs, profileID)
+	assignments, err := normalizeNewCollectionAssignments(input.ProfileIDs, input.CategoryIDs, profileID)
 	if err != nil {
 		return Collection{}, err
 	}
@@ -238,30 +274,26 @@ func (service *Service) Create(ctx context.Context, principal auth.Principal, in
 		return Collection{}, fmt.Errorf("begin collection creation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if len(assignments.categoryIDs) != 0 {
+		if err := authorizeGlobalCollectionPolicy(ctx, tx, principal); err != nil {
+			return Collection{}, err
+		}
+		if err := lockCollectionCategories(ctx, tx, assignments.categoryIDs); err != nil {
+			return Collection{}, err
+		}
+	}
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return Collection{}, err
 	}
-	if err := authorizeCollectionProfiles(ctx, tx, principal, profileID, profileIDs); err != nil {
+	if err := authorizeCollectionAssignmentPolicy(ctx, tx, principal, profileID, collectionAssignments{}, assignments); err != nil {
 		return Collection{}, err
 	}
-	if err := resolveAddonCatalogReferences(ctx, tx, []*SaveInput{&normalized}, [][]string{profileIDs}); err != nil {
+	targetProfileIDs, err := lockCollectionTargetProfiles(ctx, tx, assignments)
+	if err != nil {
 		return Collection{}, err
 	}
-	var profileAtLimit bool
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM unnest($1::uuid[]) target(profile_id)
-			WHERE (
-				SELECT count(*) FROM collection_profile_access access
-				WHERE access.profile_id = target.profile_id
-			) >= $2
-		)
-	`, profileIDs, maximumCollections).Scan(&profileAtLimit); err != nil {
-		return Collection{}, fmt.Errorf("count assigned profile collections: %w", err)
-	}
-	if profileAtLimit {
-		return Collection{}, invalid("an assigned profile cannot contain more than 100 collections")
+	if err := resolveAddonCatalogReferences(ctx, tx, []*SaveInput{&normalized}, []collectionAssignments{assignments}); err != nil {
+		return Collection{}, err
 	}
 	var ownerPosition int
 	if err := tx.QueryRow(ctx, `
@@ -275,10 +307,16 @@ func (service *Service) Create(ctx context.Context, principal auth.Principal, in
 	if err != nil {
 		return Collection{}, err
 	}
-	if err := writeCollectionProfiles(ctx, tx, created.ID, profileIDs); err != nil {
+	if err := writeCollectionAssignments(ctx, tx, created.ID, assignments); err != nil {
 		return Collection{}, err
 	}
-	value, err := scanSharedCollection(tx.QueryRow(ctx, collectionByIDQuery, created.ID))
+	if err := ensureCollectionProfileLimits(ctx, tx, targetProfileIDs); err != nil {
+		return Collection{}, err
+	}
+	if err := ensureCollectionCategoryLimits(ctx, tx, assignments.categoryIDs); err != nil {
+		return Collection{}, err
+	}
+	value, err := scanSharedCollection(tx.QueryRow(ctx, collectionByIDQuery, created.ID, profileID))
 	if err != nil {
 		return Collection{}, fmt.Errorf("query created collection: %w", err)
 	}
@@ -342,17 +380,25 @@ func (service *Service) Import(ctx context.Context, principal auth.Principal, do
 		}
 	}
 	inputPointers := make([]*SaveInput, len(normalized))
-	inputProfileIDs := make([][]string, len(normalized))
+	inputAssignments := make([]collectionAssignments, len(normalized))
 	for index := range normalized {
 		inputPointers[index] = &normalized[index]
-		inputProfileIDs[index] = []string{profileID}
+		inputAssignments[index] = collectionAssignments{profileIDs: []string{profileID}}
 	}
-	if err := resolveAddonCatalogReferences(ctx, tx, inputPointers, inputProfileIDs); err != nil {
+	if err := resolveAddonCatalogReferences(ctx, tx, inputPointers, inputAssignments); err != nil {
 		return ImportResult{}, err
 	}
 	var visibleCount int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM collection_profile_access WHERE profile_id = $1::uuid`, profileID).Scan(&visibleCount); err != nil {
-		return ImportResult{}, fmt.Errorf("count profile collections: %w", err)
+	if err := tx.QueryRow(ctx, `
+		SELECT count(DISTINCT pc.id)
+		FROM profiles active_profile
+		JOIN profile_collections pc ON true
+		LEFT JOIN collection_profile_access explicit_access ON explicit_access.collection_id = pc.id AND explicit_access.profile_id = active_profile.id
+		LEFT JOIN collection_category_access category_access ON category_access.collection_id = pc.id AND category_access.category_id = active_profile.category_id
+		WHERE active_profile.id = $1::uuid
+		  AND (explicit_access.collection_id IS NOT NULL OR category_access.collection_id IS NOT NULL)
+	`, profileID).Scan(&visibleCount); err != nil {
+		return ImportResult{}, fmt.Errorf("count effective profile collections: %w", err)
 	}
 	if visibleCount+len(normalized) > maximumCollections {
 		return ImportResult{}, invalid("the imported collections would exceed the profile limit of 100")
@@ -401,12 +447,9 @@ func (service *Service) Update(ctx context.Context, principal auth.Principal, co
 	if !validUUID(collectionID) {
 		return Collection{}, ErrInvalidInput
 	}
-	var profileIDs []string
-	if input.ProfileIDs != nil {
-		profileIDs, err = normalizeCollectionProfileIDs(input.ProfileIDs, profileID)
-		if err != nil {
-			return Collection{}, err
-		}
+	requested, err := normalizeCollectionAssignmentUpdate(input.ProfileIDs, input.CategoryIDs)
+	if err != nil {
+		return Collection{}, err
 	}
 	normalized, err := normalizeAndValidate(input, true)
 	if err != nil {
@@ -417,27 +460,25 @@ func (service *Service) Update(ctx context.Context, principal auth.Principal, co
 		return Collection{}, fmt.Errorf("begin collection update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockCollectionPolicyBeforeProfiles(ctx, tx, principal, collectionID, requested.categoryIDs); err != nil {
+		return Collection{}, err
+	}
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return Collection{}, err
 	}
-	if profileIDs == nil {
-		if err := authorizeExistingCollectionProfiles(ctx, tx, principal, profileID, collectionID); err != nil {
-			return Collection{}, err
-		}
-	} else if err := applyCollectionProfiles(ctx, tx, principal, profileID, collectionID, profileIDs); err != nil {
+	var assignments collectionAssignments
+	if input.ProfileIDs == nil && input.CategoryIDs == nil {
+		assignments, err = authorizeExistingCollectionAssignments(ctx, tx, principal, profileID, collectionID)
+	} else {
+		assignments, err = applyCollectionAssignments(
+			ctx, tx, principal, profileID, collectionID, requested,
+			input.ProfileIDs != nil, input.CategoryIDs != nil,
+		)
+	}
+	if err != nil {
 		return Collection{}, err
 	}
-	if profileIDs == nil {
-		if err := tx.QueryRow(ctx, `
-			SELECT ARRAY(
-				SELECT profile_id::text FROM collection_profile_access
-				WHERE collection_id = $1::uuid ORDER BY profile_id
-			)
-		`, collectionID).Scan(&profileIDs); err != nil {
-			return Collection{}, fmt.Errorf("query collection profiles for addon validation: %w", err)
-		}
-	}
-	if err := resolveAddonCatalogReferences(ctx, tx, []*SaveInput{&normalized}, [][]string{profileIDs}); err != nil {
+	if err := resolveAddonCatalogReferences(ctx, tx, []*SaveInput{&normalized}, []collectionAssignments{assignments}); err != nil {
 		return Collection{}, err
 	}
 	folders, err := json.Marshal(normalized.Folders)
@@ -447,37 +488,21 @@ func (service *Service) Update(ctx context.Context, principal auth.Principal, co
 	var updatedID string
 	err = tx.QueryRow(ctx, `
 		UPDATE profile_collections pc
-		SET title = $3, backdrop_image_url = NULLIF($4, ''), hero_enabled = $5, pin_to_top = $6,
-		    focus_glow_enabled = $7, view_mode = $8, folder_cover_shape = $9,
-		    folders = $10::jsonb, version = version + 1, updated_at = now()
-		WHERE pc.id = $2::uuid AND pc.version = $11
-		  AND EXISTS (
-		      SELECT 1 FROM collection_profile_access access
-		      WHERE access.collection_id = pc.id AND access.profile_id = $1::uuid
-		  )
+		SET title = $2, backdrop_image_url = NULLIF($3, ''), hero_enabled = $4, pin_to_top = $5,
+		    focus_glow_enabled = $6, view_mode = $7, folder_cover_shape = $8,
+		    folders = $9::jsonb, version = version + 1, updated_at = now()
+		WHERE pc.id = $1::uuid AND pc.version = $10
 		RETURNING pc.id::text
-	`, profileID, collectionID, normalized.Title, normalized.BackdropImageURL, normalized.HeroEnabled,
+	`, collectionID, normalized.Title, normalized.BackdropImageURL, normalized.HeroEnabled,
 		normalized.PinToTop, normalized.FocusGlowEnabled, normalized.ViewMode,
 		normalized.FolderCoverShape, folders, normalized.ExpectedVersion).Scan(&updatedID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		var exists bool
-		if queryErr := tx.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM collection_profile_access
-				WHERE profile_id = $1::uuid AND collection_id = $2::uuid
-			)
-		`, profileID, collectionID).Scan(&exists); queryErr != nil {
-			return Collection{}, fmt.Errorf("check collection update conflict: %w", queryErr)
-		}
-		if exists {
-			return Collection{}, ErrConflict
-		}
-		return Collection{}, ErrNotFound
+		return Collection{}, ErrConflict
 	}
 	if err != nil {
 		return Collection{}, err
 	}
-	value, err := scanSharedCollection(tx.QueryRow(ctx, collectionByIDQuery, updatedID))
+	value, err := scanSharedCollection(tx.QueryRow(ctx, collectionByIDQuery, updatedID, profileID))
 	if err != nil {
 		return Collection{}, fmt.Errorf("query updated collection: %w", err)
 	}
@@ -500,20 +525,16 @@ func (service *Service) Delete(ctx context.Context, principal auth.Principal, co
 		return fmt.Errorf("begin collection deletion: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockCollectionPolicyBeforeProfiles(ctx, tx, principal, collectionID, nil); err != nil {
+		return err
+	}
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return err
 	}
-	if err := authorizeExistingCollectionProfiles(ctx, tx, principal, profileID, collectionID); err != nil {
+	if _, err := authorizeExistingCollectionAssignments(ctx, tx, principal, profileID, collectionID); err != nil {
 		return err
 	}
-	command, err := tx.Exec(ctx, `
-		DELETE FROM profile_collections pc
-		WHERE pc.id = $1::uuid
-		  AND EXISTS (
-		      SELECT 1 FROM collection_profile_access access
-		      WHERE access.collection_id = pc.id AND access.profile_id = $2::uuid
-		  )
-	`, collectionID, profileID)
+	command, err := tx.Exec(ctx, `DELETE FROM profile_collections WHERE id = $1::uuid`, collectionID)
 	if err != nil {
 		return fmt.Errorf("delete collection: %w", err)
 	}
@@ -546,6 +567,25 @@ func (service *Service) Reorder(ctx context.Context, principal auth.Principal, i
 		return nil, fmt.Errorf("begin collection reorder: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var categoryIDs []string
+	if err := tx.QueryRow(ctx, `
+		SELECT ARRAY(
+			SELECT DISTINCT category_id::text
+			FROM collection_category_access
+			WHERE collection_id = ANY($1::uuid[])
+			ORDER BY category_id::text
+		)
+	`, input.CollectionIDs).Scan(&categoryIDs); err != nil {
+		return nil, fmt.Errorf("query reordered collection policies: %w", err)
+	}
+	if len(categoryIDs) != 0 {
+		if err := authorizeGlobalCollectionPolicy(ctx, tx, principal); err != nil {
+			return nil, err
+		}
+		if err := lockCollectionCategories(ctx, tx, categoryIDs); err != nil {
+			return nil, err
+		}
+	}
 	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
 		return nil, err
 	}
@@ -559,9 +599,19 @@ func (service *Service) Reorder(ctx context.Context, principal auth.Principal, i
 	if err := lockProfileCollections(ctx, tx, profileID); err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(ctx, `SELECT collection_id::text FROM collection_profile_access WHERE profile_id = $1::uuid FOR UPDATE`, profileID)
+	rows, err := tx.Query(ctx, `
+		/* collection.lock_effective_collections_for_reorder */
+		SELECT pc.id::text
+		FROM profile_collections pc
+		JOIN profiles active_profile ON active_profile.id = $1::uuid
+		LEFT JOIN collection_profile_access explicit_access ON explicit_access.collection_id = pc.id AND explicit_access.profile_id = active_profile.id
+		LEFT JOIN collection_category_access category_access ON category_access.collection_id = pc.id AND category_access.category_id = active_profile.category_id
+		WHERE explicit_access.collection_id IS NOT NULL OR category_access.collection_id IS NOT NULL
+		ORDER BY pc.id
+		FOR UPDATE OF pc
+	`, profileID)
 	if err != nil {
-		return nil, fmt.Errorf("query collections for reorder: %w", err)
+		return nil, fmt.Errorf("lock effective collections for reorder: %w", err)
 	}
 	current := make(map[string]struct{})
 	for rows.Next() {
@@ -587,10 +637,11 @@ func (service *Service) Reorder(ctx context.Context, principal auth.Principal, i
 	}
 	for position, collectionID := range input.CollectionIDs {
 		if _, err := tx.Exec(ctx, `
-			UPDATE collection_profile_access SET position = $3
-			WHERE profile_id = $1::uuid AND collection_id = $2::uuid
-		`, profileID, collectionID, position); err != nil {
-			return nil, fmt.Errorf("update collection position: %w", err)
+			INSERT INTO collection_profile_order (collection_id, profile_id, position)
+			VALUES ($1::uuid, $2::uuid, $3)
+			ON CONFLICT (collection_id, profile_id) DO UPDATE SET position = EXCLUDED.position
+		`, collectionID, profileID, position); err != nil {
+			return nil, fmt.Errorf("update collection profile order: %w", err)
 		}
 	}
 	collections, err := listForProfile(ctx, tx, profileID)
@@ -605,14 +656,23 @@ func (service *Service) Reorder(ctx context.Context, principal auth.Principal, i
 
 func listForProfile(ctx context.Context, tx pgx.Tx, profileID string) ([]Collection, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT `+sharedCollectionFields+`, access.position`+sharedCollectionTail+`
-		FROM collection_profile_access access
-		JOIN profile_collections pc ON pc.id = access.collection_id
-		WHERE access.profile_id = $1::uuid
-		ORDER BY pc.pin_to_top DESC, access.position, pc.id
+		SELECT `+sharedCollectionFields+`,
+		       COALESCE(profile_order.position, explicit_access.position, category_access.position)`+sharedCollectionTail+`
+		FROM profile_collections pc
+		JOIN profiles active_profile ON active_profile.id = $1::uuid
+		LEFT JOIN collection_profile_access explicit_access
+		  ON explicit_access.collection_id = pc.id AND explicit_access.profile_id = active_profile.id
+		LEFT JOIN collection_category_access category_access
+		  ON category_access.collection_id = pc.id AND category_access.category_id = active_profile.category_id
+		LEFT JOIN collection_profile_order profile_order
+		  ON profile_order.collection_id = pc.id AND profile_order.profile_id = active_profile.id
+		WHERE explicit_access.collection_id IS NOT NULL OR category_access.collection_id IS NOT NULL
+		ORDER BY pc.pin_to_top DESC,
+		         COALESCE(profile_order.position, explicit_access.position, category_access.position),
+		         pc.id
 	`, profileID)
 	if err != nil {
-		return nil, fmt.Errorf("query profile collections: %w", err)
+		return nil, fmt.Errorf("query effective profile collections: %w", err)
 	}
 	defer rows.Close()
 	collections := make([]Collection, 0)
@@ -624,7 +684,7 @@ func listForProfile(ctx context.Context, tx pgx.Tx, profileID string) ([]Collect
 		collections = append(collections, value)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate profile collections: %w", err)
+		return nil, fmt.Errorf("iterate effective profile collections: %w", err)
 	}
 	return collections, nil
 }
@@ -682,9 +742,12 @@ func (service *Service) revalidateCollectionVersion(ctx context.Context, princip
 	var version int
 	err = tx.QueryRow(ctx, `
 		SELECT pc.version
-		FROM collection_profile_access access
-		JOIN profile_collections pc ON pc.id = access.collection_id
-		WHERE access.profile_id = $1::uuid AND pc.id = $2::uuid
+		FROM profile_collections pc
+		JOIN profiles active_profile ON active_profile.id = $1::uuid
+		LEFT JOIN collection_profile_access explicit_access ON explicit_access.collection_id = pc.id AND explicit_access.profile_id = active_profile.id
+		LEFT JOIN collection_category_access category_access ON category_access.collection_id = pc.id AND category_access.category_id = active_profile.category_id
+		WHERE pc.id = $2::uuid
+		  AND (explicit_access.collection_id IS NOT NULL OR category_access.collection_id IS NOT NULL)
 	`, profileID, collectionID).Scan(&version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
@@ -725,11 +788,12 @@ type rowsQuerier interface {
 }
 
 type installedAddonCatalogs struct {
-	manifest   addon.Manifest
-	profileIDs map[string]struct{}
+	manifest    addon.Manifest
+	profileIDs  map[string]struct{}
+	categoryIDs map[string]struct{}
 }
 
-func resolveAddonCatalogReferences(ctx context.Context, querier rowsQuerier, inputs []*SaveInput, profileIDs [][]string) error {
+func resolveAddonCatalogReferences(ctx context.Context, querier rowsQuerier, inputs []*SaveInput, assignments []collectionAssignments) error {
 	addonIDs := make([]string, 0)
 	seen := make(map[string]struct{})
 	for _, input := range inputs {
@@ -752,7 +816,19 @@ func resolveAddonCatalogReferences(ctx context.Context, querier rowsQuerier, inp
 	rows, err := querier.Query(ctx, `
 		/* collection.lock_addon_catalog_references */
 		SELECT pa.id::text, pa.manifest::text,
-		       ARRAY(SELECT access.profile_id::text FROM addon_profile_access access WHERE access.addon_id = pa.id)
+		       ARRAY(
+		           SELECT p.id::text
+		           FROM profiles p
+		           WHERE EXISTS (SELECT 1 FROM addon_profile_access access WHERE access.addon_id = pa.id AND access.profile_id = p.id)
+		              OR EXISTS (SELECT 1 FROM addon_category_access access WHERE access.addon_id = pa.id AND access.category_id = p.category_id)
+		           ORDER BY p.id
+		       ),
+		       ARRAY(
+		           SELECT access.category_id::text
+		           FROM addon_category_access access
+		           WHERE access.addon_id = pa.id
+		           ORDER BY access.category_id
+		       )
 		FROM profile_addons pa
 		WHERE pa.id = ANY($1::uuid[]) AND pa.enabled
 		FOR SHARE OF pa
@@ -764,19 +840,23 @@ func resolveAddonCatalogReferences(ctx context.Context, querier rowsQuerier, inp
 	installed := make(map[string]installedAddonCatalogs, len(addonIDs))
 	for rows.Next() {
 		var addonID, rawManifest string
-		var assignedProfileIDs []string
-		if err := rows.Scan(&addonID, &rawManifest, &assignedProfileIDs); err != nil {
+		var assignedProfileIDs, assignedCategoryIDs []string
+		if err := rows.Scan(&addonID, &rawManifest, &assignedProfileIDs, &assignedCategoryIDs); err != nil {
 			return fmt.Errorf("scan collection addon catalog: %w", err)
 		}
 		manifest, _, err := addon.ParseManifest([]byte(rawManifest))
 		if err != nil {
 			return fmt.Errorf("parse collection addon manifest: %w", err)
 		}
-		assignments := make(map[string]struct{}, len(assignedProfileIDs))
+		profileSet := make(map[string]struct{}, len(assignedProfileIDs))
 		for _, profileID := range assignedProfileIDs {
-			assignments[profileID] = struct{}{}
+			profileSet[profileID] = struct{}{}
 		}
-		installed[addonID] = installedAddonCatalogs{manifest: manifest, profileIDs: assignments}
+		categorySet := make(map[string]struct{}, len(assignedCategoryIDs))
+		for _, categoryID := range assignedCategoryIDs {
+			categorySet[categoryID] = struct{}{}
+		}
+		installed[addonID] = installedAddonCatalogs{manifest: manifest, profileIDs: profileSet, categoryIDs: categorySet}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate collection addon catalogs: %w", err)
@@ -790,11 +870,16 @@ func resolveAddonCatalogReferences(ctx context.Context, querier rowsQuerier, inp
 				}
 				record, exists := installed[settings.AddonID]
 				if !exists {
-					return invalid("an addon catalog source is not installed")
+					return invalid("an addon catalog source is not installed or enabled")
 				}
-				for _, profileID := range profileIDs[inputIndex] {
+				for _, profileID := range assignments[inputIndex].profileIDs {
 					if _, assigned := record.profileIDs[profileID]; !assigned {
 						return invalid("an addon catalog source is not assigned to every collection profile")
+					}
+				}
+				for _, categoryID := range assignments[inputIndex].categoryIDs {
+					if _, assigned := record.categoryIDs[categoryID]; !assigned {
+						return invalid("an addon catalog source is not assigned to every collection category")
 					}
 				}
 				extra := make([]addon.ExtraValue, len(settings.Extra))
@@ -817,10 +902,14 @@ func resolveAddonCatalogReferences(ctx context.Context, querier rowsQuerier, inp
 func loadAddonIdentities(ctx context.Context, querier rowsQuerier, profileID string) (addonIdentitySet, error) {
 	rows, err := querier.Query(ctx, `
 		SELECT pa.id::text, pa.manifest_id
-		FROM addon_profile_access access
-		JOIN profile_addons pa ON pa.id = access.addon_id
-		WHERE access.profile_id = $1::uuid
-		ORDER BY access.position, pa.id
+		FROM profiles active_profile
+		JOIN profile_addons pa ON true
+		LEFT JOIN addon_profile_access explicit_access ON explicit_access.addon_id = pa.id AND explicit_access.profile_id = active_profile.id
+		LEFT JOIN addon_category_access category_access ON category_access.addon_id = pa.id AND category_access.category_id = active_profile.category_id
+		LEFT JOIN addon_profile_order profile_order ON profile_order.addon_id = pa.id AND profile_order.profile_id = active_profile.id
+		WHERE active_profile.id = $1::uuid
+		  AND (explicit_access.addon_id IS NOT NULL OR category_access.addon_id IS NOT NULL)
+		ORDER BY COALESCE(profile_order.position, explicit_access.position, category_access.position), pa.id
 	`, profileID)
 	if err != nil {
 		return addonIdentitySet{}, fmt.Errorf("query profile addon identities: %w", err)
@@ -872,10 +961,14 @@ func loadImportAddonIdentities(ctx context.Context, querier rowsQuerier, profile
 	rows, err := querier.Query(ctx, `
 		/* collection.lock_import_addon_identities */
 		SELECT pa.id::text, pa.manifest_id, pa.manifest::text
-		FROM addon_profile_access access
-		JOIN profile_addons pa ON pa.id = access.addon_id
-		WHERE access.profile_id = $1::uuid AND pa.enabled
-		ORDER BY access.position, pa.id
+		FROM profiles active_profile
+		JOIN profile_addons pa ON true
+		LEFT JOIN addon_profile_access explicit_access ON explicit_access.addon_id = pa.id AND explicit_access.profile_id = active_profile.id
+		LEFT JOIN addon_category_access category_access ON category_access.addon_id = pa.id AND category_access.category_id = active_profile.category_id
+		LEFT JOIN addon_profile_order profile_order ON profile_order.addon_id = pa.id AND profile_order.profile_id = active_profile.id
+		WHERE active_profile.id = $1::uuid AND pa.enabled
+		  AND (explicit_access.addon_id IS NOT NULL OR category_access.addon_id IS NOT NULL)
+		ORDER BY COALESCE(profile_order.position, explicit_access.position, category_access.position), pa.id
 		LIMIT $2
 		FOR SHARE OF pa
 	`, profileID, maximumImportSources+1)
@@ -937,6 +1030,7 @@ func portableCollection(value Collection, identities map[string]addonIdentity) S
 func prepareImportedCollection(input *SaveInput, identities addonIdentitySet) error {
 	input.ExpectedVersion = 0
 	input.ProfileIDs = nil
+	input.CategoryIDs = nil
 	for folderIndex := range input.Folders {
 		folder := &input.Folders[folderIndex]
 		folder.ID = ""
@@ -1054,6 +1148,11 @@ func insertImportedCollections(ctx context.Context, tx pgx.Tx, profileID string,
 			FROM collection_profile_access
 			WHERE profile_id = $1::uuid
 		),
+		order_position AS (
+			SELECT COALESCE(max(position) + 1, 0) AS value
+			FROM collection_profile_order
+			WHERE profile_id = $1::uuid
+		),
 		inserted AS (
 			INSERT INTO profile_collections (
 				profile_id, title, backdrop_image_url, hero_enabled, pin_to_top, focus_glow_enabled,
@@ -1083,6 +1182,15 @@ func insertImportedCollections(ctx context.Context, tx pgx.Tx, profileID string,
 			FROM inserted
 			CROSS JOIN access_position
 			RETURNING collection_id
+		),
+		ordered AS (
+			INSERT INTO collection_profile_order (collection_id, profile_id, position)
+			SELECT inserted.id,
+			       $1::uuid,
+			       order_position.value + row_number() OVER (ORDER BY inserted.position) - 1
+			FROM inserted
+			CROSS JOIN order_position
+			RETURNING collection_id, position
 		)
 		SELECT inserted.id::text,
 		       inserted.title,
@@ -1094,12 +1202,14 @@ func insertImportedCollections(ctx context.Context, tx pgx.Tx, profileID string,
 		       inserted.folder_cover_shape,
 		       inserted.folders::text,
 		       ARRAY[$1::text],
-		       inserted.position,
+		       ARRAY[]::text[],
+		       ordered.position,
 		       inserted.version,
 		       inserted.created_at,
 		       inserted.updated_at
 		FROM inserted
 		JOIN assigned ON assigned.collection_id = inserted.id
+		JOIN ordered ON ordered.collection_id = inserted.id
 		ORDER BY inserted.position
 	`, profileID, payload)
 	if err != nil {

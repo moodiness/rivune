@@ -33,6 +33,9 @@ func (s *Service) Delete(ctx context.Context, principal Actor, categoryID string
 		return fmt.Errorf("begin category deletion: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeAndLockGlobalAdministrator(ctx, tx, principal); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `LOCK TABLE access_categories IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return fmt.Errorf("lock categories for deletion: %w", err)
 	}
@@ -53,15 +56,33 @@ func (s *Service) Delete(ctx context.Context, principal Actor, categoryID string
 			return err
 		}
 	}
+	var reassignedProfileIDs []string
 	if reassignToCategoryID != nil {
-		if _, err := tx.Exec(ctx, `
-			SELECT id
+		rows, err := tx.Query(ctx, `
+			SELECT id::text
 			FROM profiles
 			WHERE category_id = $1::uuid
 			ORDER BY id
 			FOR UPDATE
-		`, categoryID); err != nil {
+		`, categoryID)
+		if err != nil {
 			return fmt.Errorf("lock reassigned profiles: %w", err)
+		}
+		for rows.Next() {
+			var profileID string
+			if err := rows.Scan(&profileID); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan reassigned profile: %w", err)
+			}
+			reassignedProfileIDs = append(reassignedProfileIDs, profileID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("iterate reassigned profiles: %w", err)
+		}
+		rows.Close()
+		if err := validateProfileMoveResourceIntegrity(ctx, tx, reassignedProfileIDs, *reassignToCategoryID); err != nil {
+			return err
 		}
 	}
 	var profileCount, deviceCount, sessionCount, authorizationCount int64
@@ -148,8 +169,38 @@ func (s *Service) Delete(ctx context.Context, principal Actor, categoryID string
 	`, principal.UserID, categoryID, reassignToCategoryID, profileCount, deviceCount); err != nil {
 		return fmt.Errorf("audit category deletion: %w", err)
 	}
+	var candidateAddonIDs, candidateCollectionIDs []string
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			ARRAY(SELECT addon_id::text FROM addon_category_access WHERE category_id = $1::uuid),
+			ARRAY(SELECT collection_id::text FROM collection_category_access WHERE category_id = $1::uuid)
+	`, categoryID).Scan(&candidateAddonIDs, &candidateCollectionIDs); err != nil {
+		return fmt.Errorf("query category deletion resources: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM access_categories WHERE id = $1::uuid`, categoryID); err != nil {
 		return fmt.Errorf("delete category: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM profile_addons addon
+		WHERE addon.id = ANY($1::uuid[])
+		  AND NOT EXISTS (
+			SELECT 1 FROM addon_profile_access access WHERE access.addon_id = addon.id
+		  ) AND NOT EXISTS (
+			SELECT 1 FROM addon_category_access access WHERE access.addon_id = addon.id
+		  )
+	`, candidateAddonIDs); err != nil {
+		return fmt.Errorf("delete orphaned category add-ons: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM profile_collections collection
+		WHERE collection.id = ANY($1::uuid[])
+		  AND NOT EXISTS (
+			SELECT 1 FROM collection_profile_access access WHERE access.collection_id = collection.id
+		  ) AND NOT EXISTS (
+			SELECT 1 FROM collection_category_access access WHERE access.collection_id = collection.id
+		  )
+	`, candidateCollectionIDs); err != nil {
+		return fmt.Errorf("delete orphaned category collections: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE access_categories SET position = position - 1, updated_at = now() WHERE position > $1`, position); err != nil {
 		return fmt.Errorf("compact category positions: %w", err)
