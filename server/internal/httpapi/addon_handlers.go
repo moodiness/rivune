@@ -54,6 +54,27 @@ func (a *API) addonManagement(w http.ResponseWriter, r *http.Request, principal 
 	writeJSON(w, http.StatusOK, managed)
 }
 
+func (a *API) previewAddon(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !principal.IsGlobalAdministrator() {
+		a.writeAddonPreviewError(w, "preview addon", addon.ErrForbidden)
+		return
+	}
+	if !requireJSON(w, r) {
+		return
+	}
+	var input addon.InstallInput
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "The add-on preview request is invalid")
+		return
+	}
+	preview, err := a.addons.Preview(r.Context(), principal, input)
+	if err != nil {
+		a.writeAddonPreviewError(w, "preview addon", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
 func (a *API) installAddon(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	if !requireJSON(w, r) {
 		return
@@ -325,6 +346,25 @@ func parseAddonExtras(rawQuery string, reserved map[string]bool) ([]addon.ExtraV
 		extra = append(extra, addon.ExtraValue{Name: name, Value: value})
 	}
 	return extra, nil
+}
+
+func (a *API) writeAddonPreviewError(w http.ResponseWriter, operation string, err error) {
+	switch {
+	case errors.Is(err, addon.ErrInvalidTransportURL):
+		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_transport", "The add-on transport URL is invalid")
+	case errors.Is(err, addon.ErrInvalidManifest):
+		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_manifest", "The add-on manifest is invalid")
+	case errors.Is(err, addon.ErrActiveProfileRequired):
+		writeError(w, http.StatusConflict, "profile_selection_required", "Select an active profile before reviewing add-ons")
+	case errors.Is(err, addon.ErrInvalidInput):
+		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_request", "The add-on preview request is invalid")
+	case errors.Is(err, addon.ErrProviderUnavailable), errors.Is(err, addon.ErrInvalidResponse):
+		writeError(w, http.StatusBadGateway, "addon_unavailable", "The add-on could not be reviewed")
+	case errors.Is(err, addon.ErrForbidden):
+		writeError(w, http.StatusForbidden, "addon_forbidden", "Global administrator access is required to review add-ons")
+	default:
+		a.internalError(w, operation, err)
+	}
 }
 
 func (a *API) writeAddonError(w http.ResponseWriter, operation string, err error) {

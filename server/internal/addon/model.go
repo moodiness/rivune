@@ -197,6 +197,11 @@ type InstallInput struct {
 	ProfileIDs   []string `json:"profileIds,omitempty"`
 }
 
+type AddonPreview struct {
+	Manifest     Manifest          `json:"manifest"`
+	Capabilities AddonCapabilities `json:"capabilities"`
+}
+
 type UpdateAddonInput struct {
 	TransportURL *string  `json:"transportUrl,omitempty"`
 	ProfileIDs   []string `json:"profileIds"`

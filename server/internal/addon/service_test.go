@@ -106,12 +106,14 @@ func writeChunkedResponse(writer http.ResponseWriter, request *http.Request, siz
 type installManifestTransport struct {
 	calls         int
 	resourceCalls int
+	transportURLs []string
 	manifest      func(context.Context, string) (Manifest, json.RawMessage, error)
 	resource      resourceTransportFunc
 }
 
 func (transport *installManifestTransport) Manifest(ctx context.Context, transportURL string) (Manifest, json.RawMessage, error) {
 	transport.calls++
+	transport.transportURLs = append(transport.transportURLs, transportURL)
 	return transport.manifest(ctx, transportURL)
 }
 
@@ -205,6 +207,28 @@ func TestInstallRequiresGlobalAdministratorBeforeManifestFetch(t *testing.T) {
 	}
 }
 
+func TestPreviewRequiresGlobalAdministratorBeforeDatabaseOrManifestFetch(t *testing.T) {
+	activeProfileID := "2a000000-0000-4000-8000-000000000004"
+	categoryID := "2a000000-0000-4000-8000-000000000002"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	transport := &installManifestTransport{manifest: func(context.Context, string) (Manifest, json.RawMessage, error) {
+		return Manifest{}, nil, errors.New("unexpected manifest request")
+	}}
+	service := NewService(nil, transport, discardLogger())
+
+	_, err := service.Preview(context.Background(), auth.Principal{
+		UserID: "2a000000-0000-4000-8000-000000000001", Role: "admin",
+		AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID,
+		ActiveProfileID: &activeProfileID, ProfileGrantExpiresAt: &expiresAt,
+	}, InstallInput{TransportURL: "https://addon.example/manifest.json"})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("delegated manager preview error = %v, want %v", err, ErrForbidden)
+	}
+	if transport.calls != 0 {
+		t.Fatalf("manifest transport calls after delegated preview denial = %d, want 0", transport.calls)
+	}
+}
+
 func TestManagementRequiresGlobalAdministratorBeforeDatabaseAccess(t *testing.T) {
 	activeProfileID := "2a000000-0000-4000-8000-000000000004"
 	categoryID := "2a000000-0000-4000-8000-000000000002"
@@ -284,11 +308,12 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory,
 		CategoryID: &categoryA, ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
 	}
-	rawManifest := json.RawMessage(`{"id":"org.rivune.authorization-boundary","version":"1.0.0","name":"Authorization Boundary","types":["movie"],"resources":["stream"],"catalogs":[]}`)
-	manifest := Manifest{
-		ID: "org.rivune.authorization-boundary", Version: "1.0.0", Name: "Authorization Boundary",
-		Types: []string{"movie"}, Resources: []ManifestResource{{Name: "stream", Short: true}},
+	rawManifest := json.RawMessage(`{"id":"org.rivune.authorization-boundary","version":"1.0.0","name":"Authorization Boundary","description":"Validated preview","types":["movie","series"],"resources":["catalog","stream","catalog"],"catalogs":[{"type":"movie","id":"searchable","extra":[{"name":"search"},{"name":"skip"}]}],"behaviorHints":{"adult":true,"p2p":true,"configurationRequired":true}}`)
+	manifest, validatedRawManifest, err := ParseManifest(rawManifest)
+	if err != nil {
+		t.Fatalf("validate preview manifest fixture: %v", err)
 	}
+	rawManifest = validatedRawManifest
 	transport := &installManifestTransport{manifest: func(context.Context, string) (Manifest, json.RawMessage, error) {
 		return manifest, rawManifest, nil
 	}}
@@ -318,6 +343,53 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 		ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
 	}
+	if _, err := service.Preview(ctx, globalPrincipal, InstallInput{TransportURL: transportURL, ProfileIDs: []string{categoryBID}}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("preview with unauthorized profile assignment error = %v, want %v", err, ErrForbidden)
+	}
+	if transport.calls != 0 {
+		t.Fatalf("profile-denied preview reached manifest transport %d times", transport.calls)
+	}
+	previewInput := InstallInput{
+		TransportURL: "stremio://authorization-boundary.example/config/private",
+		ProfileIDs:   []string{profileAID, profileBID},
+	}
+	preview, err := service.Preview(ctx, globalPrincipal, previewInput)
+	if err != nil {
+		t.Fatalf("authorized preview: %v", err)
+	}
+	if preview.Manifest.ID != manifest.ID || preview.Manifest.Description != manifest.Description || !preview.Manifest.BehaviorHints.Adult || !preview.Manifest.BehaviorHints.P2P || !preview.Manifest.BehaviorHints.ConfigurationRequired {
+		t.Fatalf("preview manifest = %+v", preview.Manifest)
+	}
+	wantCapabilities := AddonCapabilities{Resources: []string{"catalog", "stream"}, Search: true, Pagination: true, SearchPagination: true}
+	if !reflect.DeepEqual(preview.Capabilities, wantCapabilities) {
+		t.Fatalf("preview capabilities = %+v, want %+v", preview.Capabilities, wantCapabilities)
+	}
+	if transport.calls != 1 || len(transport.transportURLs) != 1 || transport.transportURLs[0] != "https://authorization-boundary.example/config/private/manifest.json" {
+		t.Fatalf("preview manifest transports = %v with %d calls", transport.transportURLs, transport.calls)
+	}
+	var previewWrites int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM profile_addons WHERE manifest_id = $1`, manifest.ID).Scan(&previewWrites); err != nil {
+		t.Fatalf("count preview persistence: %v", err)
+	}
+	if previewWrites != 0 {
+		t.Fatalf("preview persisted %d add-ons, want 0", previewWrites)
+	}
+	_, previewObservations := service.diagnostics.snapshot()
+	if len(previewObservations) != 0 {
+		t.Fatalf("preview created health observations: %+v", previewObservations)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'member' WHERE id = $1::uuid`, userID); err != nil {
+		t.Fatalf("revoke persisted global authority before preview: %v", err)
+	}
+	if _, err := service.Preview(ctx, globalPrincipal, previewInput); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("preview after persisted global authority revocation error = %v, want %v", err, ErrForbidden)
+	}
+	if transport.calls != 1 {
+		t.Fatalf("persisted-role-denied preview reached manifest transport %d times", transport.calls)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'admin' WHERE id = $1::uuid`, userID); err != nil {
+		t.Fatalf("restore global authority after preview: %v", err)
+	}
 	transport.manifest = func(ctx context.Context, _ string) (Manifest, json.RawMessage, error) {
 		if _, err := pool.Exec(ctx, `UPDATE users SET role = 'member' WHERE id = $1::uuid`, userID); err != nil {
 			return Manifest{}, nil, fmt.Errorf("revoke global authority during manifest request: %w", err)
@@ -327,8 +399,8 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if _, err := service.Install(ctx, globalPrincipal, input); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("install after post-manifest global authority revocation error = %v, want %v", err, ErrForbidden)
 	}
-	if transport.calls != 1 {
-		t.Fatalf("manifest transport calls after post-network reauthorization = %d, want 1", transport.calls)
+	if transport.calls != 2 {
+		t.Fatalf("manifest transport calls after post-network reauthorization = %d, want 2", transport.calls)
 	}
 	var installedCount int
 	if err := pool.QueryRow(ctx, `
@@ -349,8 +421,8 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if err != nil {
 		t.Fatalf("authorized install: %v", err)
 	}
-	if transport.calls != 2 {
-		t.Fatalf("manifest transport calls after authorized install = %d, want 2", transport.calls)
+	if transport.calls != 3 {
+		t.Fatalf("manifest transport calls after authorized install = %d, want 3", transport.calls)
 	}
 	if len(installed.ProfileIDs) != 2 {
 		t.Fatalf("installed profile assignments = %v, want both profiles", installed.ProfileIDs)

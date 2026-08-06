@@ -145,6 +145,52 @@ func (service *Service) Install(ctx context.Context, principal auth.Principal, i
 	return managedAddon(installed, principal.IsGlobalAdministrator()), nil
 }
 
+func (service *Service) Preview(ctx context.Context, principal auth.Principal, input InstallInput) (AddonPreview, error) {
+	if !principal.IsGlobalAdministrator() {
+		return AddonPreview{}, ErrForbidden
+	}
+	profileID, err := activeProfileID(principal)
+	if err != nil {
+		return AddonPreview{}, err
+	}
+	profileIDs, err := normalizeProfileIDs(input.ProfileIDs, profileID)
+	if err != nil {
+		return AddonPreview{}, err
+	}
+	transportURL, err := NormalizeTransportURL(input.TransportURL)
+	if err != nil {
+		return AddonPreview{}, err
+	}
+	authorizationTx, err := service.pool.Begin(ctx)
+	if err != nil {
+		return AddonPreview{}, fmt.Errorf("begin addon preview authorization: %w", err)
+	}
+	defer func() { _ = authorizationTx.Rollback(ctx) }()
+	if err := authorizeGlobalAddonOrigin(ctx, authorizationTx, principal); err != nil {
+		return AddonPreview{}, err
+	}
+	if err := authorizeActiveProfile(ctx, authorizationTx, principal, profileID); err != nil {
+		return AddonPreview{}, err
+	}
+	if err := authorizeProfileAssignments(ctx, authorizationTx, principal, profileID, profileIDs); err != nil {
+		return AddonPreview{}, err
+	}
+	if err := authorizationTx.Commit(ctx); err != nil {
+		return AddonPreview{}, fmt.Errorf("commit addon preview authorization: %w", err)
+	}
+	manifest, _, err := service.transport.Manifest(ctx, transportURL)
+	if err != nil {
+		return AddonPreview{}, err
+	}
+	if manifest.Types == nil {
+		manifest.Types = []string{}
+	}
+	if manifest.Catalogs == nil {
+		manifest.Catalogs = []ManifestCatalog{}
+	}
+	return AddonPreview{Manifest: manifest, Capabilities: capabilitiesFor(manifest)}, nil
+}
+
 func (service *Service) List(ctx context.Context, principal auth.Principal) ([]InstalledAddon, error) {
 	return service.loadAddonList(ctx, principal, true)
 }

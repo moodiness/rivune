@@ -106,18 +106,25 @@ test("global administrators see joined safe addon diagnostics and declared capab
   expect(diagnosticsRequests).toEqual(["/api/v1/addons/diagnostics"]);
 });
 
-test("delegated administration never requests addon diagnostics", async ({ page, rivune }) => {
+test("delegated administration never requests addon diagnostics or preview", async ({ page, rivune }) => {
   const diagnosticsRequests: string[] = [];
+  const previewRequests: string[] = [];
   await rivune.configureCategoryScope(page);
   await page.route("**/api/v1/addons/diagnostics", async (route) => {
     diagnosticsRequests.push(new URL(route.request().url()).pathname);
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ observedSince: "2026-01-01T00:00:00Z", diagnostics: [] }) });
+  });
+  await page.route("**/api/v1/addons/preview", async (route) => {
+    previewRequests.push(new URL(route.request().url()).pathname);
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({}) });
   });
 
   await page.goto("/#admin?tab=addons");
   await expect(page.getByRole("heading", { name: "Profiles", exact: true })).toBeVisible();
   await page.waitForLoadState("networkidle");
   expect(diagnosticsRequests).toEqual([]);
+  expect(previewRequests).toEqual([]);
+  await expect(page.getByRole("button", { name: "Review add-on", exact: true })).toHaveCount(0);
   await expect(page.getByText(/^Health observations since /)).toHaveCount(0);
 });
 
@@ -143,4 +150,125 @@ test("diagnostics failure leaves addon content intact without invented unknown s
   await expect(page.getByText("Addon diagnostics could not be loaded.", { exact: true })).toBeVisible();
   await expect(card.getByText("Unknown", { exact: true })).toHaveCount(0);
   await expect(page.getByText(privateFailure, { exact: false })).toHaveCount(0);
+});
+
+test("addon installation previews declarations before sending the exact confirmed input", async ({ page, rivune: _rivune }) => {
+  const changedTransportUrl = `${transportUrl}&variant=next`;
+  const previewResponse = {
+    manifest: {
+      id: "preview-fixture",
+      name: "Preview fixture",
+      version: "2.4.0",
+      description: "Declared preview description",
+      types: ["movie", "series"],
+      behaviorHints: { p2p: true, adult: true, configurationRequired: true },
+    },
+    capabilities: { resources: ["catalog", "meta", "stream"], search: false, pagination: false, searchPagination: true },
+  };
+  const requestOrder: string[] = [];
+  const previewInputs: unknown[] = [];
+  let installInput: unknown;
+  await page.route(/\/api\/v1\/addons(?:\/.*)?$/, async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === "GET" && pathname === "/api/v1/addons") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ addons: [addon] }) });
+      return;
+    }
+    if (request.method() === "GET" && pathname === "/api/v1/addons/diagnostics") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ observedSince: "2026-01-01T00:00:00Z", diagnostics: [] }) });
+      return;
+    }
+    if (request.method() === "POST" && pathname === "/api/v1/addons/preview") {
+      requestOrder.push("preview");
+      previewInputs.push(request.postDataJSON());
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(previewResponse) });
+      return;
+    }
+    if (request.method() === "POST" && pathname === "/api/v1/addons") {
+      requestOrder.push("install");
+      installInput = request.postDataJSON();
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ...addon, manifest: previewResponse.manifest, profileIds: ["alice"] }) });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/#admin?tab=addons");
+  const tool = page.locator(".admin-tool-card").filter({ has: page.getByRole("heading", { name: "Install from a manifest", exact: true }) });
+  const manifestUrl = tool.getByLabel("Manifest URL", { exact: true });
+  const bobAssignment = tool.locator(".profile-assignment label").filter({ hasText: "Bob" });
+  const bobCheckbox = bobAssignment.getByRole("checkbox");
+  await manifestUrl.fill(transportUrl);
+  await expect(tool.getByRole("button", { name: "Install addon", exact: true })).toHaveCount(0);
+
+  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+  await expect.poll(() => requestOrder).toEqual(["preview"]);
+  const preview = tool.locator(".addon-preview");
+  await expect(preview.getByRole("heading", { name: "Review before installing", exact: true })).toBeVisible();
+  await expect(preview.getByText("Preview fixture", { exact: true })).toBeVisible();
+  await expect(preview.getByText("v2.4.0", { exact: true })).toBeVisible();
+  await expect(preview.getByText("Declared preview description", { exact: true })).toBeVisible();
+  for (const declaration of ["movie", "series", "catalog", "meta", "stream", "Search", "Pagination", "P2P", "Adult content", "Configuration required"]) {
+    await expect(preview.getByText(declaration, { exact: true })).toBeVisible();
+  }
+
+  await manifestUrl.fill(changedTransportUrl);
+  await expect(preview).toHaveCount(0);
+  await bobAssignment.getByText("Bob", { exact: true }).click();
+  await expect(bobCheckbox).toBeChecked();
+  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+  await expect.poll(() => requestOrder).toEqual(["preview", "preview"]);
+  await expect(preview).toBeVisible();
+
+  await bobAssignment.getByText("Bob", { exact: true }).click();
+  await expect(bobCheckbox).not.toBeChecked();
+  await expect(preview).toHaveCount(0);
+  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+  await expect.poll(() => requestOrder).toEqual(["preview", "preview", "preview"]);
+  await preview.getByRole("button", { name: "Install addon", exact: true }).click();
+  await expect.poll(() => requestOrder).toEqual(["preview", "preview", "preview", "install"]);
+
+  expect(previewInputs).toEqual([
+    { transportUrl, profileIds: ["alice"] },
+    { transportUrl: changedTransportUrl, profileIds: ["alice", "bob"] },
+    { transportUrl: changedTransportUrl, profileIds: ["alice"] },
+  ]);
+  expect(installInput).toEqual({ transportUrl: changedTransportUrl, profileIds: ["alice"] });
+});
+
+test("preview failure is isolated and never renders provider details", async ({ page, rivune: _rivune }) => {
+  const privateFailure = "provider.invalid/private?token=secret failed during preview";
+  const requests: string[] = [];
+  await page.route(/\/api\/v1\/addons(?:\/.*)?$/, async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === "GET" && pathname === "/api/v1/addons") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ addons: [addon] }) });
+      return;
+    }
+    if (request.method() === "GET" && pathname === "/api/v1/addons/diagnostics") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ observedSince: "2026-01-01T00:00:00Z", diagnostics: [] }) });
+      return;
+    }
+    if (request.method() === "POST" && pathname === "/api/v1/addons/preview") {
+      requests.push("preview");
+      await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: { code: "unavailable", message: privateFailure } }) });
+      return;
+    }
+    if (request.method() === "POST" && pathname === "/api/v1/addons") requests.push("install");
+    await route.fallback();
+  });
+
+  await page.goto("/#admin?tab=addons");
+  const tool = page.locator(".admin-tool-card").filter({ has: page.getByRole("heading", { name: "Install from a manifest", exact: true }) });
+  await tool.getByLabel("Manifest URL", { exact: true }).fill(transportUrl);
+  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+
+  await expect(tool.getByText("The add-on could not be reviewed.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: addon.manifest.name, exact: true })).toBeVisible();
+  await expect(page.getByText(privateFailure, { exact: false })).toHaveCount(0);
+  await expect(tool.locator(".addon-preview")).toHaveCount(0);
+  await expect(tool.getByRole("button", { name: "Install addon", exact: true })).toHaveCount(0);
+  expect(requests).toEqual(["preview"]);
 });

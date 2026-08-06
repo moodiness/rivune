@@ -1918,6 +1918,41 @@ paths:
           $ref: '#/components/responses/Error'
         '502':
           $ref: '#/components/responses/Error'
+  /addons/preview:
+    post:
+      summary: Preview add-on manifest and capabilities
+      operationId: previewAddon
+      description: |
+        Fetches and validates an add-on manifest without installing it or recording a health observation. Available only to a persisted global administrator authorized to manage every selected profile. The response never includes the configured transport URL or provider error details.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstallAddonInput'
+      responses:
+        '200':
+          description: Validated add-on manifest and its declared capabilities.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddonPreview'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '415':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '502':
+          $ref: '#/components/responses/Error'
   /addons/diagnostics:
     get:
       summary: Get add-on diagnostics
@@ -3852,6 +3887,17 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/InstalledAddon'
+    AddonPreview:
+      type: object
+      additionalProperties: false
+      required:
+        - manifest
+        - capabilities
+      properties:
+        manifest:
+          $ref: '#/components/schemas/StremioManifest'
+        capabilities:
+          $ref: '#/components/schemas/AddonCapabilities'
     AddonDiagnostics:
       type: object
       additionalProperties: false
@@ -3895,7 +3941,7 @@ components:
         lastError:
           $ref: '#/components/schemas/AddonDiagnosticLastError'
         capabilities:
-          $ref: '#/components/schemas/AddonDiagnosticCapabilities'
+          $ref: '#/components/schemas/AddonCapabilities'
     AddonDiagnosticLastError:
       type: object
       additionalProperties: false
@@ -3913,7 +3959,7 @@ components:
         at:
           type: string
           format: date-time
-    AddonDiagnosticCapabilities:
+    AddonCapabilities:
       type: object
       additionalProperties: false
       required:
@@ -5658,6 +5704,14 @@ components:
             - 'null'
           minimum: 1
           maximum: 100
+        maximumDirectTitles:
+          description: Maximum titles displayed directly on the home page for a collection using follow_layout. The instance value is an absolute ceiling and defaults to 20; a profile value may be no greater than that ceiling, while null clears the current layer so a profile inherits the instance value.
+          type:
+            - integer
+            - 'null'
+          default: 20
+          minimum: 1
+          maximum: 100
         allowTranscoding:
           description: Instance-wide transcoding authorization. Null clears the instance override and restores the default true value.
           type:
@@ -5861,6 +5915,14 @@ components:
             - 'null'
           minimum: 1
           maximum: 100
+        maximumDirectTitles:
+          description: Maximum titles stored by this settings layer for direct home-page display of a follow_layout collection. Null represents no layer override; profiles then inherit the instance value, whose server default is 20 and whose value is the absolute ceiling for profile overrides.
+          type:
+            - integer
+            - 'null'
+          default: 20
+          minimum: 1
+          maximum: 100
         allowTranscoding:
           description: Instance authorization in a settings layer, or the final effective authorization after applying the absolute global veto.
           type: boolean
@@ -6059,6 +6121,7 @@ components:
                 - theme
                 - maximumResolution
                 - maximumCastMembers
+                - maximumDirectTitles
                 - preferDirectPlay
                 - hideUnreleased
                 - metadataLanguage
@@ -6087,6 +6150,7 @@ components:
             - theme
             - maximumResolution
             - maximumCastMembers
+            - maximumDirectTitles
             - preferDirectPlay
             - hideUnreleased
             - metadataLanguage
@@ -6115,6 +6179,8 @@ components:
             maximumResolution:
               $ref: '#/components/schemas/SettingSource'
             maximumCastMembers:
+              $ref: '#/components/schemas/SettingSource'
+            maximumDirectTitles:
               $ref: '#/components/schemas/SettingSource'
             allowTranscoding:
               $ref: '#/components/schemas/SettingSource'

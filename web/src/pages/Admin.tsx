@@ -6,7 +6,7 @@ import { AddTile, Button, ConfirmDialog, EmptyState, handleDirectionalFocus, Ico
 import { interfaceLanguages, locale, translate, type TranslationKey } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
-import type { AccessCategory, AddonDiagnostic, AddonDiagnosticErrorCode, AddonDiagnosticState, AddonDiagnosticsResponse, AddonManifest, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstalledAddon, InterfaceLanguage, MaintenanceSettings, ManagedAddon, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
+import type { AccessCategory, AddonDiagnostic, AddonDiagnosticErrorCode, AddonDiagnosticState, AddonDiagnosticsResponse, AddonManifest, AddonPreviewResponse, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstallAddonInput, InstalledAddon, InterfaceLanguage, MaintenanceSettings, ManagedAddon, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus } from "../types";
 
 type AdminTab = "categories" | "profiles" | "devices" | "addons" | "collections" | "activity" | "operations" | "settings";
 type AdminTabGroup = "access" | "catalog" | "supervision" | "preferences";
@@ -1080,6 +1080,9 @@ function AddonsAdmin() {
   const [error, setError] = useState("");
   const [diagnostics, setDiagnostics] = useState<AddonDiagnosticsResponse | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState("");
+  const [addonPreview, setAddonPreview] = useState<(AddonPreviewResponse & { input: InstallAddonInput }) | null>(null);
+  const [previewError, setPreviewError] = useState("");
+  const [previewing, setPreviewing] = useState(false);
   const [deleting, setDeleting] = useState<InstalledAddon | null>(null);
   const [editingAddon, setEditingAddon] = useState<ManagedAddon | null>(null);
   const [editTransportUrl, setEditTransportUrl] = useState("");
@@ -1088,6 +1091,7 @@ function AddonsAdmin() {
   const [reordering, setReordering] = useState(false);
   const reorderInFlight = useRef(false);
   const initialLoadStarted = useRef(false);
+  const previewRequestRef = useRef<{ controller: AbortController } | null>(null);
 
   async function load() {
     setLoading(true);
@@ -1110,9 +1114,50 @@ function AddonsAdmin() {
     initialLoadStarted.current = true;
     void load();
   }, []);
+  useEffect(() => () => {
+    const request = previewRequestRef.current;
+    previewRequestRef.current = null;
+    request?.controller.abort();
+  }, []);
   useEffect(() => {
-    if (installProfileIds.length === 0 && activeProfile) setInstallProfileIds([activeProfile.id]);
+    if (installProfileIds.length === 0 && activeProfile) {
+      invalidateAddonPreview();
+      setInstallProfileIds([activeProfile.id]);
+    }
   }, [activeProfile, installProfileIds.length]);
+
+  function invalidateAddonPreview() {
+    previewRequestRef.current?.controller.abort();
+    previewRequestRef.current = null;
+    setAddonPreview(null);
+    setPreviewError("");
+    setPreviewing(false);
+  }
+
+  async function previewAddon(event: FormEvent) {
+    event.preventDefault();
+    if (!isGlobalAdmin || previewRequestRef.current || working === "install" || !transportUrl || installProfileIds.length === 0) return;
+    const input: InstallAddonInput = { transportUrl, profileIds: [...installProfileIds] };
+    const request = { controller: new AbortController() };
+    previewRequestRef.current = request;
+    setAddonPreview(null);
+    setPreviewError("");
+    setPreviewing(true);
+    setError("");
+    try {
+      const response = await api.previewAddon(input, request.controller.signal);
+      if (previewRequestRef.current !== request) return;
+      setAddonPreview({ ...response, input });
+    } catch {
+      if (previewRequestRef.current !== request) return;
+      setPreviewError(translate("admin.addons.errors.preview"));
+    } finally {
+      if (previewRequestRef.current === request) {
+        previewRequestRef.current = null;
+        setPreviewing(false);
+      }
+    }
+  }
 
   async function openAddonEditor(addon: InstalledAddon) {
     setError("");
@@ -1168,12 +1213,19 @@ function AddonsAdmin() {
     }
   }
 
-  async function install(event: FormEvent) {
-    event.preventDefault();
+  async function install() {
+    if (!isGlobalAdmin || !addonPreview || working === "install") return;
+    const profileSelectionMatches = addonPreview.input.profileIds.length === installProfileIds.length
+      && addonPreview.input.profileIds.every((profileId, index) => profileId === installProfileIds[index]);
+    if (addonPreview.input.transportUrl !== transportUrl || !profileSelectionMatches) {
+      invalidateAddonPreview();
+      return;
+    }
     setWorking("install");
     setError("");
     try {
-      const installed = await api.installAddon(transportUrl, installProfileIds);
+      const installed = await api.installAddon(addonPreview.input.transportUrl, addonPreview.input.profileIds);
+      invalidateAddonPreview();
       setTransportUrl("");
       await load();
       notifySuccess(translate("admin.addons.notifications.installedMessage", { name: installed.manifest.name }), translate("admin.addons.notifications.installedTitle"));
@@ -1260,14 +1312,16 @@ function AddonsAdmin() {
       <article><span><CircleUserRound size={18} aria-hidden="true" /></span><div><strong>{loading ? "—" : assignedProfiles}</strong><small>{translate("admin.common.profilesReached")}</small></div></article>
       <article><span><Film size={18} aria-hidden="true" /></span><div><strong>{loading ? "—" : contentTypes}</strong><small>{translate("admin.addons.overview.contentTypes")}</small></div></article>
     </section>
-    <section className="admin-tool-card" aria-labelledby="install-addon-title">
+    {isGlobalAdmin && <section className="admin-tool-card" aria-labelledby="install-addon-title">
       <header><div><span>{translate("admin.addons.install.eyebrow")}</span><h3 id="install-addon-title">{translate("admin.addons.install.title")}</h3><p>{translate("admin.addons.install.description")}</p></div></header>
-      <form className="install-addon" onSubmit={install}>
-        <label className="field"><span>{translate("admin.addons.install.manifestUrl")}</span><div><WandSparkles size={19} /><input type="url" value={transportUrl} onChange={(event) => setTransportUrl(event.target.value)} placeholder={translate("admin.addons.manifestUrlPlaceholder")} required /></div></label>
-        <Button type="submit" loading={working === "install"}><Plus size={18} /> {translate("admin.addons.actions.install")}</Button>
+      <form className="install-addon" onSubmit={previewAddon}>
+        <label className="field"><span>{translate("admin.addons.install.manifestUrl")}</span><div><WandSparkles size={19} /><input type="url" value={transportUrl} onChange={(event) => { invalidateAddonPreview(); setTransportUrl(event.target.value); }} placeholder={translate("admin.addons.manifestUrlPlaceholder")} required /></div></label>
+        <Button type="submit" loading={previewing} disabled={working === "install" || installProfileIds.length === 0}><Search size={18} /> {translate("admin.addons.actions.preview")}</Button>
       </form>
-      <ProfileAssignmentPicker profiles={profiles} selected={installProfileIds} onChange={setInstallProfileIds} legend={translate("admin.profileAssignment.legend")} />
-    </section>
+      <ProfileAssignmentPicker profiles={profiles} selected={installProfileIds} onChange={(profileIds) => { invalidateAddonPreview(); setInstallProfileIds(profileIds); }} legend={translate("admin.profileAssignment.legend")} />
+      {previewError && <Notice>{previewError}</Notice>}
+      {addonPreview && <AddonInstallPreview preview={addonPreview} installing={working === "install"} onInstall={() => void install()} />}
+    </section>}
     {error && <Notice>{error}</Notice>}
     {diagnosticsError && <Notice>{diagnosticsError}</Notice>}
     {diagnostics && <p className="addon-diagnostics-observed">{translate("admin.addons.diagnostics.observedSince", { date: new Date(diagnostics.observedSince).toLocaleString() })}</p>}
@@ -1279,6 +1333,35 @@ function AddonsAdmin() {
     {editingAddon && <Modal onClose={() => { if (!addonEditSaving) closeAddonEditor(); }} className="editor-modal addon-edit-modal"><form onSubmit={saveAddon}><div className="editor-modal__heading"><span><Pencil size={18} /> {translate("admin.addons.editor.title")}</span><h2>{editingAddon.manifest.name}</h2><p>{translate("admin.addons.editor.description")}</p></div>{error && <Notice>{error}</Notice>}{account?.session.authorizationScope === "global_admin" && <label className="field"><span>{translate("admin.addons.editor.transportUrl")}</span><div><WandSparkles size={18} /><input type="url" value={editTransportUrl} onChange={(event) => setEditTransportUrl(event.target.value)} placeholder={translate("admin.addons.manifestUrlPlaceholder")} /></div></label>}<ProfileAssignmentPicker profiles={profiles} selected={editProfileIds} onChange={setEditProfileIds} legend={translate("admin.profileAssignment.legend")} /><div className="modal-actions"><Button type="button" variant="ghost" disabled={addonEditSaving} onClick={closeAddonEditor}>{translate("common.cancel")}</Button><Button type="submit" loading={addonEditSaving} disabled={editProfileIds.length === 0}><Save size={18} /> {translate("admin.addons.actions.save")}</Button></div></form></Modal>}
     {deleting && <ConfirmDialog title={translate("admin.addons.remove.title", { name: deleting.manifest.name })} description={translate("admin.addons.remove.description")} confirmLabel={translate("admin.addons.remove.confirm")} loading={working === deleting.id} onCancel={() => setDeleting(null)} onConfirm={() => void remove(deleting)} />}
   </div>;
+}
+
+function AddonInstallPreview({ preview, installing, onInstall }: { preview: AddonPreviewResponse; installing: boolean; onInstall: () => void }) {
+  const { manifest, capabilities } = preview;
+  const hasWarnings = Boolean(manifest.behaviorHints?.p2p || manifest.behaviorHints?.adult || manifest.behaviorHints?.configurationRequired);
+  return <section className="addon-preview" aria-labelledby="addon-preview-title">
+    <header>
+      <div><h4 id="addon-preview-title">{translate("admin.addons.preview.title")}</h4><p>{translate("admin.addons.preview.description")}</p></div>
+    </header>
+    <div className="addon-preview__manifest">
+      <div className="addon-card__logo" aria-hidden="true">{manifest.name.slice(0, 2).toUpperCase()}</div>
+      <div className="addon-preview__body">
+        <div className="addon-preview__identity"><strong>{manifest.name}</strong><span>v{manifest.version}</span></div>
+        {manifest.description && <p>{manifest.description}</p>}
+        <div className="addon-card__types" role="list" aria-label={translate("admin.addons.overview.contentTypes")}>{manifest.types.map((type, index) => <i role="listitem" key={`${type}-${index}`}>{type}</i>)}</div>
+        <div className="addon-preview__capabilities" role="list">
+          {(capabilities.search || capabilities.searchPagination) && <span role="listitem">{translate("admin.addons.diagnostics.capability.search")}</span>}
+          {(capabilities.pagination || capabilities.searchPagination) && <span role="listitem">{translate("admin.addons.diagnostics.capability.pagination")}</span>}
+          {capabilities.resources.map((resource, index) => <span role="listitem" key={`${resource}-${index}`}>{resource}</span>)}
+        </div>
+        {hasWarnings && <div className="addon-preview__warnings" role="list">
+          {manifest.behaviorHints?.p2p && <span role="listitem">P2P</span>}
+          {manifest.behaviorHints?.adult && <span role="listitem">{translate("admin.addons.preview.adult")}</span>}
+          {manifest.behaviorHints?.configurationRequired && <span role="listitem">{translate("admin.addons.preview.configurationRequired")}</span>}
+        </div>}
+      </div>
+    </div>
+    <Button type="button" loading={installing} onClick={onInstall}><Plus size={18} /> {translate("admin.addons.actions.install")}</Button>
+  </section>;
 }
 
 const diagnosticStateKeys: Record<AddonDiagnosticState, TranslationKey> = {

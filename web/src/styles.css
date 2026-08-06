@@ -1545,6 +1545,20 @@
   .install-addon { grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--space-3); padding: 0; border: 0; border-radius: 0; background: transparent; }
   .install-addon .field > div { min-height: var(--touch-target); }
   .install-addon .button { min-height: var(--touch-target); }
+  .addon-preview { min-width: 0; display: grid; gap: var(--space-3); padding-top: var(--space-4); border-top: 1px solid var(--line); }
+  .addon-preview > header h4 { margin: 0; font-size: var(--font-size-md); }
+  .addon-preview > header p { max-width: calc(var(--space-8) * 14); margin: var(--space-1) 0 0; color: var(--text-muted); font-size: var(--font-size-sm); line-height: 1.5; }
+  .addon-preview__manifest { min-width: 0; display: grid; grid-template-columns: calc(var(--space-8) + var(--space-3)) minmax(0, 1fr); align-items: center; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-subtle); }
+  .addon-preview__body { min-width: 0; display: grid; gap: var(--space-2); }
+  .addon-preview__identity { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); }
+  .addon-preview__identity strong { overflow: hidden; font-size: var(--font-size-md); text-overflow: ellipsis; white-space: nowrap; }
+  .addon-preview__identity span, .addon-preview__body > p { color: var(--text-muted); font-size: var(--font-size-xs); }
+  .addon-preview__body > p { max-width: calc(var(--space-8) * 14); margin: 0; line-height: 1.5; }
+  .addon-preview__capabilities, .addon-preview__warnings { min-width: 0; display: flex; flex-wrap: wrap; gap: var(--space-1); }
+  .addon-preview__capabilities > span, .addon-preview__warnings > span { min-height: calc(var(--space-5) - var(--space-1)); display: inline-flex; align-items: center; padding-inline: var(--space-2); border-radius: 999px; font-size: var(--font-size-xs); font-weight: 700; }
+  .addon-preview__capabilities > span { color: var(--text-soft); background: var(--surface-interactive); }
+  .addon-preview__warnings > span { color: var(--warning); border: 1px solid color-mix(in srgb, var(--warning) 28%, var(--line)); background: var(--surface-warning); }
+  .addon-preview > .button { justify-self: end; min-height: var(--touch-target); }
   .addon-list { gap: var(--space-3); }
   .addon-skeleton { height: 104px; }
   .addon-card { min-height: calc(var(--space-8) * 2); grid-template-columns: var(--space-5) calc(var(--space-8) + var(--space-3)) minmax(180px, 1fr) auto; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-md); background: var(--surface-subtle); }

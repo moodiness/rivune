@@ -208,6 +208,26 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		validateContractResponse(t, document, "/addons/diagnostics", nil, request, response)
 	})
 
+	t.Run("add-on preview", func(t *testing.T) {
+		api := testAPI(&fakeInstanceService{})
+		api.auth = &fakeAuthService{principal: contractPrincipal()}
+		api.addons = &fakeAddonService{previewValue: addon.AddonPreview{
+			Manifest: addon.Manifest{
+				ID: "org.rivune.contract-preview", Version: "1.0.0", Name: "Contract Preview", Description: "Validated manifest",
+				Types: []string{"movie"}, Resources: []addon.ManifestResource{{Name: "catalog", Short: true}}, Catalogs: []addon.ManifestCatalog{},
+				BehaviorHints: addon.ManifestBehaviorHints{Adult: true, P2P: true, ConfigurationRequired: true},
+			},
+			Capabilities: addon.AddonCapabilities{Resources: []string{"catalog"}, Search: true, Pagination: true, SearchPagination: true},
+		}}
+		body := `{"transportUrl":"stremio://contract-addon.example/config","profileIds":["` + contractProfileID + `"]}`
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", body, true)
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","profileIds":[]}`, false)
+		request := authenticatedContractRequest(http.MethodPost, "/api/v1/addons/preview", bytes.NewBufferString(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := serveContractRequest(t, api, request, http.StatusOK)
+		validateContractResponse(t, document, "/addons/preview", nil, request, response)
+	})
+
 	t.Run("add-on catalog descriptors", func(t *testing.T) {
 		api := testAPI(&fakeInstanceService{})
 		api.auth = &fakeAuthService{principal: contractPrincipal()}
@@ -636,6 +656,21 @@ func TestAddonDiagnosticsOpenAPIRejectsPrivateDetails(t *testing.T) {
 	valid, _ := validator.ValidateHttpResponse(request, response.Result())
 	if valid {
 		t.Fatal("diagnostics OpenAPI response accepted private transport and raw error fields")
+	}
+}
+
+func TestAddonPreviewOpenAPIRejectsPrivateDetails(t *testing.T) {
+	validator := loadOpenAPIContract(t)
+	request := authenticatedContractRequest(http.MethodPost, "/api/v1/addons/preview", bytes.NewBufferString(`{"transportUrl":"https://request.invalid/manifest.json"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(http.StatusOK)
+	_, _ = response.WriteString(`{"manifest":{"id":"org.rivune.preview","version":"1.0.0","name":"Preview","types":["movie"],"resources":["catalog"],"catalogs":[]},"capabilities":{"resources":["catalog"],"search":true,"pagination":true,"searchPagination":true},"transportUrl":"https://private.invalid/manifest.json?token=secret","providerError":"private response body"}`)
+
+	valid, _ := validator.ValidateHttpResponse(request, response.Result())
+	if valid {
+		t.Fatal("preview OpenAPI response accepted private transport and provider error fields")
 	}
 }
 

@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +24,10 @@ type fakeAddonService struct {
 	installValue        addon.InstalledAddon
 	installTransportURL string
 	installErr          error
+	previewCalls        int
+	previewInput        addon.InstallInput
+	previewValue        addon.AddonPreview
+	previewErr          error
 	listValue           []addon.InstalledAddon
 	listErr             error
 	diagnosticsCalls    int
@@ -83,6 +89,12 @@ func (fake *fakeCatalogArtworkPresenter) LocalizeCatalogDescriptors(_ context.Co
 func (fake *fakeAddonService) Install(_ context.Context, _ auth.Principal, input addon.InstallInput) (addon.ManagedAddon, error) {
 	fake.installInput = input
 	return addon.ManagedAddon{InstalledAddon: fake.installValue, TransportURL: fake.installTransportURL}, fake.installErr
+}
+
+func (fake *fakeAddonService) Preview(_ context.Context, _ auth.Principal, input addon.InstallInput) (addon.AddonPreview, error) {
+	fake.previewCalls++
+	fake.previewInput = input
+	return fake.previewValue, fake.previewErr
 }
 
 func (fake *fakeAddonService) List(context.Context, auth.Principal) ([]addon.InstalledAddon, error) {
@@ -147,6 +159,130 @@ func (fake *fakeAddonService) FetchCatalogs(_ context.Context, _ auth.Principal,
 	fake.catalogExtra = extra
 	fake.addonCatalog = addonCatalog
 	return fake.catalogValue, fake.catalogErr
+}
+
+func TestPreviewAddonForwardsInputAndReturnsValidatedShape(t *testing.T) {
+	service := &fakeAddonService{previewValue: addon.AddonPreview{
+		Manifest: addon.Manifest{
+			ID: "org.example.preview", Version: "1.2.3", Name: "Preview Add-on", Description: "Validated manifest",
+			Types: []string{"movie", "series"}, Resources: []addon.ManifestResource{{Name: "catalog", Short: true}},
+		},
+		Capabilities: addon.AddonCapabilities{Resources: []string{"catalog"}, Search: true, Pagination: true, SearchPagination: true},
+	}}
+	api := addonAPI(service)
+	api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/addons/preview", bytes.NewBufferString(`{"transportUrl":"stremio://addon.example/config?token=private","profileIds":["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]}`))
+	request.Header.Set("Authorization", "Bearer access")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	wantInput := addon.InstallInput{TransportURL: "stremio://addon.example/config?token=private", ProfileIDs: []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}
+	if !reflect.DeepEqual(service.previewInput, wantInput) {
+		t.Fatalf("preview input = %+v, want %+v", service.previewInput, wantInput)
+	}
+	var preview addon.AddonPreview
+	decodeResponse(t, response, &preview)
+	if preview.Manifest.ID != "org.example.preview" || preview.Manifest.Description != "Validated manifest" || !reflect.DeepEqual(preview.Capabilities, service.previewValue.Capabilities) {
+		t.Fatalf("preview response = %+v", preview)
+	}
+	serialized := response.Body.String()
+	for _, private := range []string{"transportUrl", "addon.example", "token=private"} {
+		if strings.Contains(serialized, private) {
+			t.Fatalf("preview response exposed private transport detail %q: %s", private, serialized)
+		}
+	}
+}
+
+func TestPreviewAddonRequiresGlobalAdministratorBeforeService(t *testing.T) {
+	categoryID := "22222222-2222-4222-8222-222222222222"
+	for _, principal := range []auth.Principal{
+		{Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID},
+		{Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID},
+	} {
+		service := &fakeAddonService{}
+		api := addonAPI(service)
+		api.auth = &fakeAuthService{principal: principal}
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/addons/preview", strings.NewReader(`{"transportUrl":"https://private.example/manifest.json"}`))
+		request.Header.Set("Authorization", "Bearer access")
+		response := httptest.NewRecorder()
+
+		api.Handler().ServeHTTP(response, request)
+
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("non-global preview status = %d, want 403: %s", response.Code, response.Body.String())
+		}
+		if service.previewCalls != 0 {
+			t.Fatal("non-global preview request reached the service")
+		}
+	}
+}
+
+func TestPreviewAddonErrorsAreSafeAndPreservePublicStatus(t *testing.T) {
+	privateDetail := "https://provider.invalid/manifest.json?credential=secret returned private body"
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "invalid transport", err: fmt.Errorf("%w: %s", addon.ErrInvalidTransportURL, privateDetail), wantStatus: http.StatusUnprocessableEntity, wantCode: "invalid_addon_transport"},
+		{name: "invalid manifest", err: fmt.Errorf("%w: %s", addon.ErrInvalidManifest, privateDetail), wantStatus: http.StatusUnprocessableEntity, wantCode: "invalid_addon_manifest"},
+		{name: "missing profile", err: addon.ErrActiveProfileRequired, wantStatus: http.StatusConflict, wantCode: "profile_selection_required"},
+		{name: "invalid profiles", err: fmt.Errorf("%w: %s", addon.ErrInvalidInput, privateDetail), wantStatus: http.StatusUnprocessableEntity, wantCode: "invalid_addon_request"},
+		{name: "provider", err: fmt.Errorf("%w: %s", addon.ErrProviderUnavailable, privateDetail), wantStatus: http.StatusBadGateway, wantCode: "addon_unavailable"},
+		{name: "persisted authorization", err: fmt.Errorf("%w: %s", addon.ErrForbidden, privateDetail), wantStatus: http.StatusForbidden, wantCode: "addon_forbidden"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeAddonService{previewErr: test.err}
+			api := addonAPI(service)
+			api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}}
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/addons/preview", strings.NewReader(`{"transportUrl":"https://request.invalid/manifest.json"}`))
+			request.Header.Set("Authorization", "Bearer access")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			api.Handler().ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("preview error status = %d, want %d: %s", response.Code, test.wantStatus, response.Body.String())
+			}
+			var body errorEnvelope
+			decodeResponse(t, response, &body)
+			if body.Error.Code != test.wantCode {
+				t.Fatalf("preview error code = %q, want %q", body.Error.Code, test.wantCode)
+			}
+			if strings.Contains(response.Body.String(), "provider.invalid") || strings.Contains(response.Body.String(), "credential=secret") || strings.Contains(response.Body.String(), "private body") {
+				t.Fatalf("preview error leaked provider detail: %s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestPreviewAddonRequiresAuthenticationAndJSON(t *testing.T) {
+	service := &fakeAddonService{}
+	api := addonAPI(service)
+	api.auth = &fakeAuthService{authenticateErr: auth.ErrInvalidToken}
+	unauthenticated := httptest.NewRequest(http.MethodPost, "/api/v1/addons/preview", strings.NewReader(`{"transportUrl":"https://addon.example/manifest.json"}`))
+	unauthenticated.Header.Set("Content-Type", "application/json")
+	unauthenticatedResponse := httptest.NewRecorder()
+	api.Handler().ServeHTTP(unauthenticatedResponse, unauthenticated)
+	if unauthenticatedResponse.Code != http.StatusUnauthorized || service.previewCalls != 0 {
+		t.Fatalf("unauthenticated preview = %d with %d service calls", unauthenticatedResponse.Code, service.previewCalls)
+	}
+
+	api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}}
+	unsupported := httptest.NewRequest(http.MethodPost, "/api/v1/addons/preview", strings.NewReader(`{"transportUrl":"https://addon.example/manifest.json"}`))
+	unsupported.Header.Set("Authorization", "Bearer access")
+	unsupported.Header.Set("Content-Type", "text/plain")
+	unsupportedResponse := httptest.NewRecorder()
+	api.Handler().ServeHTTP(unsupportedResponse, unsupported)
+	if unsupportedResponse.Code != http.StatusUnsupportedMediaType || service.previewCalls != 0 {
+		t.Fatalf("non-JSON preview = %d with %d service calls", unsupportedResponse.Code, service.previewCalls)
+	}
 }
 
 func TestInstallAddonUsesProfileScopedRegistry(t *testing.T) {

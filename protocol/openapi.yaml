@@ -1940,6 +1940,44 @@ paths:
           $ref: "#/components/responses/Error"
         "502":
           $ref: "#/components/responses/Error"
+  /addons/preview:
+    post:
+      summary: Preview add-on manifest and capabilities
+      operationId: previewAddon
+      description: >
+        Fetches and validates an add-on manifest without installing it or recording
+        a health observation. Available only to a persisted global administrator
+        authorized to manage every selected profile. The response never includes
+        the configured transport URL or provider error details.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallAddonInput"
+      responses:
+        "200":
+          description: Validated add-on manifest and its declared capabilities.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddonPreview"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
   /addons/diagnostics:
     get:
       summary: Get add-on diagnostics
@@ -3891,6 +3929,15 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/InstalledAddon"
+    AddonPreview:
+      type: object
+      additionalProperties: false
+      required: [manifest, capabilities]
+      properties:
+        manifest:
+          $ref: "#/components/schemas/StremioManifest"
+        capabilities:
+          $ref: "#/components/schemas/AddonCapabilities"
     AddonDiagnostics:
       type: object
       additionalProperties: false
@@ -3925,7 +3972,7 @@ components:
         lastError:
           $ref: "#/components/schemas/AddonDiagnosticLastError"
         capabilities:
-          $ref: "#/components/schemas/AddonDiagnosticCapabilities"
+          $ref: "#/components/schemas/AddonCapabilities"
     AddonDiagnosticLastError:
       type: object
       additionalProperties: false
@@ -3937,7 +3984,7 @@ components:
         at:
           type: string
           format: date-time
-    AddonDiagnosticCapabilities:
+    AddonCapabilities:
       type: object
       additionalProperties: false
       required: [resources, search, pagination, searchPagination]

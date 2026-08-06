@@ -416,6 +416,10 @@ export type InstalledAddon = {
 export type ManagedAddon = InstalledAddon & {
   transportUrl?: string;
 };
+export type InstallAddonInput = {
+  transportUrl: string;
+  profileIds: string[];
+};
 export type AddonDiagnosticState = "unknown" | "available" | "degraded" | "unavailable";
 export type AddonDiagnosticErrorCode = "timeout" | "invalid_response" | "unavailable" | "request_failed";
 export type AddonDiagnosticCapabilities = {
@@ -423,6 +427,10 @@ export type AddonDiagnosticCapabilities = {
   search: boolean;
   pagination: boolean;
   searchPagination: boolean;
+};
+export type AddonPreviewResponse = {
+  manifest: AddonManifest;
+  capabilities: AddonDiagnosticCapabilities;
 };
 export type AddonDiagnostic = {
   addonId: string;
