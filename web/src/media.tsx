@@ -1690,6 +1690,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                 {item.mediaType === "tv" && details.category && <span>{details.category}</span>}
                 {item.mediaType === "tv" && liveProgramTitle && <span>{liveProgramTitle}</span>}
                 {genres.map((genre) => <span key={genre}>{genre}</span>)}
+                {sourceLabels.length > 0 && <span className="media-source-chips">{sourceLabels.map((label, index) => <span className="media-source-chip" key={`${label}:${index}`}>{label}</span>)}</span>}
               </div>
 
               {externalTitleLinks.length > 0 && <div className="details-title-links">
@@ -1704,10 +1705,6 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                 </div>
               </div>}
 
-              {sourceLabels.length > 0 && <div className="details-source-group" aria-label={t("media.details.availableFrom")}>
-                <span className="details-source-group__label">{t("media.details.availableFrom")}</span>
-                <span className="media-source-chips">{sourceLabels.map((label, index) => <span className="media-source-chip" key={`${label}:${index}`}>{label}</span>)}</span>
-              </div>}
 
               {metaLoading && !customDisplayItem.description
                 ? <div className="details-loading" role="status"><LoaderCircle className="spin" size={18} /> {t("media.details.loading")}</div>

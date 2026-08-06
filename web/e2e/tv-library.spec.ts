@@ -208,30 +208,25 @@ test("Search merges canonical movie provenance across sections and pagination", 
     { id: "movie-secondary-addon", kind: "addon_catalog", title: "Fixture Movie Archive", addonId: "movie-secondary-addon", manifestId: "movie-secondary-manifest", catalogId: "movie-secondary-search" },
     { id: "movie-addon", kind: "addon_catalog", title: "Fixture Movies", addonId: "movie-addon", manifestId: "movie-manifest", catalogId: "movie-search" },
   ]);
-  const availableFrom = page.locator(".details-source-group");
-  await expect(availableFrom).toContainText("Available from");
-  await expect(availableFrom.locator(".media-source-chip")).toHaveText(["Fixture Movie Archive", "Fixture Movies"]);
+  const sourceChips = page.locator(".details-meta > .media-source-chips");
+  await expect(sourceChips.locator(".media-source-chip")).toHaveText(["Fixture Movie Archive", "Fixture Movies"]);
+  await expect(page.locator(".details-source-group")).toHaveCount(0);
+  await expect(page.getByText("Available from", { exact: true })).toHaveCount(0);
   const detailsLayout = async () => page.locator(".details-overview").evaluate((overview) => {
     const metadata = overview.querySelector<HTMLElement>(".details-meta");
-    const sourceGroup = overview.querySelector<HTMLElement>(".details-source-group");
-    if (!metadata || !sourceGroup) return null;
-    const metadataBounds = metadata.getBoundingClientRect();
-    const sourceBounds = sourceGroup.getBoundingClientRect();
+    const chips = metadata?.querySelector<HTMLElement>(":scope > .media-source-chips");
+    if (!metadata || !chips) return null;
     return {
-      sourceGap: sourceBounds.top - metadataBounds.bottom,
+      chipsAreLastMetadataItem: metadata.lastElementChild === chips,
       hasHorizontalOverflow: document.documentElement.scrollWidth > window.innerWidth,
     };
   });
   const desktopLayout = await detailsLayout();
-  expect(desktopLayout).not.toBeNull();
-  expect(desktopLayout?.sourceGap ?? 0).toBeGreaterThanOrEqual(16);
-  expect(desktopLayout?.hasHorizontalOverflow).toBe(false);
+  expect(desktopLayout).toEqual({ chipsAreLastMetadataItem: true, hasHorizontalOverflow: false });
 
   await page.setViewportSize({ width: 355, height: 800 });
   const mobileLayout = await detailsLayout();
-  expect(mobileLayout).not.toBeNull();
-  expect(mobileLayout?.sourceGap ?? 0).toBeGreaterThanOrEqual(16);
-  expect(mobileLayout?.hasHorizontalOverflow).toBe(false);
+  expect(mobileLayout).toEqual({ chipsAreLastMetadataItem: true, hasHorizontalOverflow: false });
   await expect(page.getByText("movie-secondary-manifest", { exact: true })).toHaveCount(0);
   await expect(page.getByText("movie-secondary-search", { exact: true })).toHaveCount(0);
 });
