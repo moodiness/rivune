@@ -49,7 +49,7 @@ jobs:
             local prerelease_identifier='0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*'
             local semver="^v(${numeric})\.(${numeric})\.(${numeric})(-(${prerelease_identifier})(\.(${prerelease_identifier}))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"
             [[ "${title}" == "Release candidate ${tag}" ]] &&
-              [[ "${event}" == push ]] &&
+              [[ "${event}" == push || "${event}" == workflow_dispatch ]] &&
               [[ "${conclusion}" == success ]] &&
               [[ "${path}" == .github/workflows/release-candidate.yml ]] &&
               [[ "${head_repository}" == "${repository}" ]] &&
@@ -68,6 +68,8 @@ jobs:
           ! candidate_metadata_is_valid release-1 "Release candidate release-1" push success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
           ! candidate_metadata_is_valid v1.2.3 "Release candidate v9.9.9" push success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
           ! candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" pull_request success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
+          candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" workflow_dispatch success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
+          ! candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" schedule success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
           ! candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" push success .github/workflows/other.yml owner/repo owner/repo "${fixture_sha}"
           same_approved_commit "${fixture_sha}" "${fixture_sha}" "${fixture_sha}"
           ! same_approved_commit "${fixture_sha}" ffffffffffffffffffffffffffffffffffffffff "${fixture_sha}"

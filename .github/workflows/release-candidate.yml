@@ -1,10 +1,16 @@
 name: Release candidate CI
-run-name: Release candidate ${{ github.ref_name }}
+run-name: Release candidate ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed Semantic Version tag at current main HEAD
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -20,10 +26,12 @@ jobs:
         id: authorize
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_REF: ${{ github.ref }}
+          RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
           RELEASE_SHA: ${{ github.sha }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          RELEASE_TYPE: ${{ github.ref_type }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RELEASE_TYPE: ${{ github.event_name == 'workflow_dispatch' && 'tag' || github.ref_type }}
+          SOURCE_EVENT: ${{ github.event_name }}
+          SOURCE_REF: ${{ github.ref }}
           REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
@@ -36,6 +44,10 @@ jobs:
                 ! "${RELEASE_TAG}" =~ ${semver} ||
                 ! "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Release candidate must be a valid v-prefixed Semantic Version tag." >&2
+            exit 1
+          fi
+          if [[ "${SOURCE_EVENT}" == workflow_dispatch && "${SOURCE_REF}" != refs/heads/main ]]; then
+            echo "Manual release candidates must run from the current main branch." >&2
             exit 1
           fi
 
