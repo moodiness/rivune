@@ -2,7 +2,7 @@ import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleS
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
-import { AddTile, Button, ConfirmDialog, EmptyState, handleDirectionalFocus, IconButton, Modal, Notice, Skeleton } from "../components";
+import { AddTile, Button, ConfirmDialog, EmptyState, handleDirectionalFocus, IconButton, Modal, Notice, Select, Skeleton } from "../components";
 import { interfaceLanguages, locale, translate, type TranslationKey } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
@@ -176,7 +176,7 @@ function CategoryBadge({ category }: { category: Profile["category"] | ManagedDe
 function CategoryFilter({ categories, value, onChange, disabled = false }: { categories: AccessCategory[]; value: string; onChange: (value: string) => void; disabled?: boolean }) {
   return <label className="field category-filter">
     <span>{translate("admin.categories.filter.label")}</span>
-    <div><Layers3 size={17} aria-hidden="true" /><select value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}><option value="all">{translate("admin.categories.filter.all")}</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div>
+    <div><Layers3 size={17} aria-hidden="true" /><Select value={value} disabled={disabled} onChange={onChange} options={[{ value: "all", label: translate("admin.categories.filter.all") }, ...categories.map((category) => ({ value: category.id, label: category.name }))]} /></div>
   </label>;
 }
 
@@ -379,7 +379,7 @@ function CategoriesAdmin() {
       </div>
       <div className="form-stack">
         {deleteError && <Notice>{deleteError}</Notice>}
-        {(deleting.profileCount + deleting.deviceCount > 0 || deleteNeedsReassignment) && <label className="field"><span>{translate("admin.categories.delete.destination")}</span><div><Layers3 size={18} /><select autoFocus required disabled={deleteSaving} value={reassignTo} onChange={(event) => setReassignTo(event.target.value)}>{categories.filter((category) => category.id !== deleting.id).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div></label>}
+        {(deleting.profileCount + deleting.deviceCount > 0 || deleteNeedsReassignment) && <label className="field"><span>{translate("admin.categories.delete.destination")}</span><div><Layers3 size={18} /><Select autoFocus required disabled={deleteSaving} value={reassignTo} onChange={setReassignTo} options={categories.filter((category) => category.id !== deleting.id).map((category) => ({ value: category.id, label: category.name }))} /></div></label>}
         <div className="modal-actions"><Button type="button" variant="secondary" disabled={deleteSaving} onClick={() => setDeleting(null)}>{translate("common.cancel")}</Button><Button type="button" variant="danger" loading={deleteSaving} disabled={(deleting.profileCount + deleting.deviceCount > 0 || deleteNeedsReassignment) && !reassignTo} onClick={() => void deleteCategory()}>{translate(deleting.profileCount + deleting.deviceCount > 0 || deleteNeedsReassignment ? "admin.categories.delete.confirm" : "admin.categories.delete.confirmEmpty")}</Button></div>
       </div>
     </Modal>}
@@ -532,7 +532,7 @@ function DevicesAdmin() {
       <div className="editor-modal__heading"><span><Layers3 size={18} /> {translate("admin.devices.move.eyebrow")}</span><h2>{translate(moving.length === 1 ? "admin.devices.move.titleOne" : "admin.devices.move.titleMany", moving.length === 1 ? { name: moving[0]!.name } : { count: moving.length })}</h2><p>{translate("admin.devices.move.description")}</p></div>
       <div className="form-stack">
         {error && <Notice>{error}</Notice>}
-        <label className="field"><span>{translate("admin.devices.move.destination")}</span><div><Layers3 size={18} /><select autoFocus required value={moveCategoryId} disabled={moveSaving} onChange={(event) => setMoveCategoryId(event.target.value)}><option value="" disabled>{translate("admin.devices.move.destination")}</option>{categories.filter((category) => moving.some((device) => device.categoryId !== category.id)).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div></label>
+        <label className="field"><span>{translate("admin.devices.move.destination")}</span><div><Layers3 size={18} /><Select autoFocus required value={moveCategoryId} disabled={moveSaving} onChange={setMoveCategoryId} options={[{ value: "", label: translate("admin.devices.move.destination"), disabled: true }, ...categories.filter((category) => moving.some((device) => device.categoryId !== category.id)).map((category) => ({ value: category.id, label: category.name }))]} /></div></label>
         <div className="modal-actions"><Button type="button" variant="secondary" disabled={moveSaving} onClick={() => setMoving([])}>{translate("common.cancel")}</Button><Button type="button" loading={moveSaving} disabled={!moveCategoryId} onClick={() => void moveDevices()}>{translate("admin.devices.move.confirm")}</Button></div>
       </div>
     </Modal>}
@@ -954,7 +954,7 @@ function ProfilesAdmin() {
         <div className="form-grid form-grid--two">
           <label className="field"><span>{translate("admin.profiles.editor.name")}</span><div><CircleUserRound size={18} /><input autoFocus value={name} disabled={saving} onChange={(event) => setName(event.target.value)} required /></div></label>
           <label className="field"><span>{translate("admin.profiles.editor.pin")}</span><div><Shield size={18} /><input type={showPin ? "text" : "password"} inputMode="numeric" disabled={saving} value={pin} onChange={(event) => setPin(event.target.value)} placeholder={translate(editing === "new" ? "admin.profiles.editor.pinCreatePlaceholder" : "admin.profiles.editor.pinEditPlaceholder")} /><IconButton type="button" disabled={saving} label={translate(showPin ? "admin.profiles.editor.hidePin" : "admin.profiles.editor.showPin")} onClick={() => setShowPin((value) => !value)}>{showPin ? <EyeOff size={17} /> : <Eye size={17} />}</IconButton></div></label>
-          {editing === "new" && isGlobalAdmin && <label className="field"><span>{translate("admin.profiles.editor.category")}</span><div><Layers3 size={18} /><select required value={categoryId} disabled={saving || categoriesLoading} onChange={(event) => setCategoryId(event.target.value)}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div></label>}
+          {editing === "new" && isGlobalAdmin && <label className="field"><span>{translate("admin.profiles.editor.category")}</span><div><Layers3 size={18} /><Select required value={categoryId} disabled={saving || categoriesLoading} onChange={setCategoryId} options={categories.map((category) => ({ value: category.id, label: category.name }))} /></div></label>}
           {editing === "new" && !isGlobalAdmin && account?.session.category && <div className="profile-editor__category"><span>{translate("admin.profiles.editor.category")}</span><CategoryBadge category={account.session.category} /></div>}
           <label className="toggle-field"><input type="checkbox" checked={enabled} disabled={saving} onChange={(event) => setEnabled(event.target.checked)} /><span><i /><div><strong>{translate("common.status.enabled")}</strong><small>{translate("admin.profiles.editor.enabledDescription")}</small></div></span></label>
           <label className="toggle-field"><input type="checkbox" checked={isChild} disabled={saving} onChange={(event) => setIsChild(event.target.checked)} /><span><i /><div><strong>{translate("admin.profiles.editor.kids")}</strong><small>{translate("admin.profiles.editor.kidsDescription")}</small></div></span></label>
@@ -978,7 +978,7 @@ function ProfilesAdmin() {
       <div className="editor-modal__heading"><span><Layers3 size={18} /> {translate("admin.profiles.move.eyebrow")}</span><h2>{translate(movingProfiles.length === 1 ? "admin.profiles.move.titleOne" : "admin.profiles.move.titleMany", movingProfiles.length === 1 ? { name: movingProfiles[0]!.name } : { count: movingProfiles.length })}</h2><p>{translate("admin.profiles.move.description")}</p></div>
       <div className="form-stack">
         {error && <Notice>{error}</Notice>}
-        <label className="field"><span>{translate("admin.profiles.move.destination")}</span><div><Layers3 size={18} /><select autoFocus required value={moveCategoryId} disabled={moveSaving} onChange={(event) => setMoveCategoryId(event.target.value)}><option value="" disabled>{translate("admin.profiles.move.destination")}</option>{categories.filter((category) => movingProfiles.some((profile) => profile.categoryId !== category.id)).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div></label>
+        <label className="field"><span>{translate("admin.profiles.move.destination")}</span><div><Layers3 size={18} /><Select autoFocus required value={moveCategoryId} disabled={moveSaving} onChange={setMoveCategoryId} options={[{ value: "", label: translate("admin.profiles.move.destination"), disabled: true }, ...categories.filter((category) => movingProfiles.some((profile) => profile.categoryId !== category.id)).map((category) => ({ value: category.id, label: category.name }))]} /></div></label>
         <div className="modal-actions"><Button type="button" variant="secondary" disabled={moveSaving} onClick={() => setMovingProfiles([])}>{translate("common.cancel")}</Button><Button type="button" loading={moveSaving} disabled={!moveCategoryId} onClick={() => void moveProfiles()}>{translate("admin.profiles.move.confirm")}</Button></div>
       </div>
     </Modal>}
@@ -1783,7 +1783,7 @@ function CollectionsAdmin() {
         <div className="form-grid form-grid--three">
           <label className="field"><span>{translate("admin.collections.editor.collectionTitle")}</span><div><Layers3 size={18} /><input value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} required /></div></label>
           <label className="field"><span>{translate("admin.collections.editor.backdropUrl")}</span><div><ImagePlus size={18} /><input inputMode="url" value={draft.backdropImageUrl ?? ""} onChange={(event) => setDraft((current) => ({ ...current, backdropImageUrl: event.target.value || undefined }))} placeholder={translate("admin.collections.editor.imageUrlPlaceholder")} /></div></label>
-          <label className="field"><span>{translate("admin.collections.editor.folderCoverShape")}</span><div><Boxes size={18} /><select value={draft.folderCoverShape} onChange={(event) => setDraft((current) => ({ ...current, folderCoverShape: event.target.value as CollectionSaveInput["folderCoverShape"] }))}><option value="poster">{translate("admin.collections.shapes.poster")}</option><option value="landscape">{translate("admin.collections.shapes.landscape")}</option><option value="square">{translate("admin.collections.shapes.square")}</option></select></div></label>
+          <label className="field"><span>{translate("admin.collections.editor.folderCoverShape")}</span><div><Boxes size={18} /><Select value={draft.folderCoverShape} onChange={(value) => setDraft((current) => ({ ...current, folderCoverShape: value as CollectionSaveInput["folderCoverShape"] }))} options={[{ value: "poster", label: translate("admin.collections.shapes.poster") }, { value: "landscape", label: translate("admin.collections.shapes.landscape") }, { value: "square", label: translate("admin.collections.shapes.square") }]} /></div></label>
         </div>
         <div className="choice-row choice-row--four">
           <label className="toggle-field"><input type="checkbox" checked={draft.heroEnabled} onChange={(event) => setDraft((current) => ({ ...current, heroEnabled: event.target.checked }))} /><span><i /><div><strong>{translate("admin.collections.editor.hero")}</strong><small>{translate("admin.collections.editor.heroDescription")}</small></div></span></label>
@@ -1839,8 +1839,8 @@ function CollectionsAdmin() {
           </header>
           <div className="form-grid form-grid--three">
             <label className="field"><span>{translate("admin.collections.folders.title")}</span><div><Film size={18} /><input value={folder.title} onChange={(event) => updateFolder(folderIndex, { title: event.target.value })} required /></div></label>
-            <label className="field"><span>{translate("admin.collections.folders.tileShape")}</span><div><select value={folder.tileShape} onChange={(event) => updateFolder(folderIndex, { tileShape: event.target.value as CollectionFolder["tileShape"] })}><option value="poster">{translate("admin.collections.shapes.poster")}</option><option value="landscape">{translate("admin.collections.shapes.landscape")}</option><option value="square">{translate("admin.collections.shapes.square")}</option></select></div></label>
-            <label className="field"><span>{translate("admin.collections.folders.multipleSources")}</span><div><select value={folder.sourceView ?? "merged"} onChange={(event) => updateFolder(folderIndex, { sourceView: event.target.value as CollectionFolder["sourceView"] })}><option value="merged">{translate("admin.collections.folders.sourceViewMerged")}</option><option value="categories">{translate("admin.collections.folders.sourceViewCategories")}</option><option value="folders">{translate("admin.collections.folders.sourceViewFolders")}</option></select></div></label>
+            <label className="field"><span>{translate("admin.collections.folders.tileShape")}</span><div><Select value={folder.tileShape} onChange={(value) => updateFolder(folderIndex, { tileShape: value as CollectionFolder["tileShape"] })} options={[{ value: "poster", label: translate("admin.collections.shapes.poster") }, { value: "landscape", label: translate("admin.collections.shapes.landscape") }, { value: "square", label: translate("admin.collections.shapes.square") }]} /></div></label>
+            <label className="field"><span>{translate("admin.collections.folders.multipleSources")}</span><div><Select value={folder.sourceView ?? "merged"} onChange={(value) => updateFolder(folderIndex, { sourceView: value as CollectionFolder["sourceView"] })} options={[{ value: "merged", label: translate("admin.collections.folders.sourceViewMerged") }, { value: "categories", label: translate("admin.collections.folders.sourceViewCategories") }, { value: "folders", label: translate("admin.collections.folders.sourceViewFolders") }]} /></div></label>
             <label className="field"><span>{translate("admin.collections.folders.coverEmoji")}</span><div><Sparkles size={18} /><input value={folder.coverEmoji ?? ""} onChange={(event) => updateFolder(folderIndex, { coverEmoji: event.target.value })} placeholder="✨" /></div></label>
             <label className="field"><span>{translate("admin.collections.folders.coverImageUrl")}</span><div><ImagePlus size={18} /><input inputMode="url" value={folder.coverImageUrl ?? ""} onChange={(event) => updateFolder(folderIndex, { coverImageUrl: event.target.value || undefined })} placeholder={translate("admin.collections.editor.imageUrlPlaceholder")} /></div></label>
             <label className="toggle-field folder-title-toggle"><input type="checkbox" checked={!folder.hideTitle} onChange={(event) => updateFolder(folderIndex, { hideTitle: !event.target.checked })} /><span><i /><div><strong>{translate("admin.collections.folders.showTitle")}</strong><small>{translate("admin.collections.folders.showTitleDescription")}</small></div></span></label>
@@ -1932,38 +1932,38 @@ function SourceEditor({ source, catalogs, onChange, onRemove }: { source: Collec
       <input value={source.title} onChange={(event) => onChange({ ...source, title: event.target.value })} aria-label={translate("admin.collections.sources.categoryTitle")} placeholder={translate("admin.collections.sources.categoryTitle")} required />
       <IconButton type="button" label={translate("admin.collections.sources.remove")} onClick={onRemove}><X size={16} /></IconButton>
     </header>
-    {source.addonCatalog && <label className="field"><span>{translate("admin.collections.sources.catalog")}</span><div><select value={`${source.addonCatalog.addonId}|${source.addonCatalog.type}|${source.addonCatalog.catalogId}`} onChange={(event) => {
-      const [addonId, type, catalogId] = event.target.value.split("|");
-      const catalog = catalogs.find((value) => value.addonId === addonId && value.catalog.type === type && value.catalog.id === catalogId);
+    {source.addonCatalog && <label className="field"><span>{translate("admin.collections.sources.catalog")}</span><div><Select value={`${source.addonCatalog.addonId}|${source.addonCatalog.type}|${source.addonCatalog.catalogId}`} onChange={(value) => {
+      const [addonId, type, catalogId] = value.split("|");
+      const catalog = catalogs.find((candidate) => candidate.addonId === addonId && candidate.catalog.type === type && candidate.catalog.id === catalogId);
       onChange({ ...source, title: catalog?.catalog.name || catalogId, addonCatalog: { addonId, manifestId: catalog?.manifestId, type, catalogId } });
-    }}>{catalogs.map((catalog) => <option key={`${catalog.addonId}-${catalog.catalog.type}-${catalog.catalog.id}`} value={`${catalog.addonId}|${catalog.catalog.type}|${catalog.catalog.id}`}>{catalog.manifestId} · {catalog.catalog.name || catalog.catalog.id}</option>)}</select></div></label>}
+    }} options={catalogs.map((catalog) => ({ value: `${catalog.addonId}|${catalog.catalog.type}|${catalog.catalog.id}`, label: `${catalog.manifestId} · ${catalog.catalog.name || catalog.catalog.id}` }))} /></div></label>}
     {tmdb && <>
       <div className="form-grid form-grid--three tmdb-source-fields">
-        <label className="field"><span>{translate("admin.collections.sources.sourceType")}</span><div><select value={tmdb.sourceType} onChange={(event) => {
-          const sourceType = event.target.value as NonNullable<CollectionSource["tmdb"]>["sourceType"];
+        <label className="field"><span>{translate("admin.collections.sources.sourceType")}</span><div><Select value={tmdb.sourceType} onChange={(value) => {
+          const sourceType = value as NonNullable<CollectionSource["tmdb"]>["sourceType"];
           const mediaType = fixedTMDBMediaType(sourceType) ?? tmdb.mediaType;
           onChange({ ...source, title: tmdbLabel(sourceType), tmdb: { ...tmdb, sourceType, tmdbId: undefined, mediaType } });
-        }}>
-          <option value="list">{translate("admin.collections.tmdb.sourceTypes.publicList")}</option>
-          <option value="company">{translate("admin.collections.tmdb.sourceTypes.productionCompany")}</option>
-          <option value="network">{translate("admin.collections.tmdb.sourceTypes.network")}</option>
-          <option value="collection">{translate("admin.collections.tmdb.sourceTypes.movieCollection")}</option>
-          <option value="person">{translate("admin.collections.tmdb.sourceTypes.personCredits")}</option>
-          <option value="director">{translate("admin.collections.tmdb.sourceTypes.directorCredits")}</option>
-          <option value="discover">{translate("admin.collections.tmdb.sourceTypes.customDiscover")}</option>
-        </select></div></label>
+        }} options={[
+          { value: "list", label: translate("admin.collections.tmdb.sourceTypes.publicList") },
+          { value: "company", label: translate("admin.collections.tmdb.sourceTypes.productionCompany") },
+          { value: "network", label: translate("admin.collections.tmdb.sourceTypes.network") },
+          { value: "collection", label: translate("admin.collections.tmdb.sourceTypes.movieCollection") },
+          { value: "person", label: translate("admin.collections.tmdb.sourceTypes.personCredits") },
+          { value: "director", label: translate("admin.collections.tmdb.sourceTypes.directorCredits") },
+          { value: "discover", label: translate("admin.collections.tmdb.sourceTypes.customDiscover") },
+        ]} /></div></label>
         {tmdb.sourceType !== "discover" && <TMDBReferenceField key={tmdb.sourceType} sourceType={tmdb.sourceType} tmdbId={tmdb.tmdbId} onChange={(tmdbId) => updateTMDB({ tmdbId })} />}
-        <label className="field"><span>{translate("admin.collections.sources.type")}</span><div><select value={fixedMediaType ?? tmdb.mediaType} disabled={fixedMediaType !== undefined} onChange={(event) => updateTMDB({ mediaType: event.target.value as "movie" | "series" | "both" })}>
-          {fixedMediaType ? <option value={fixedMediaType}>{translate(fixedMediaType === "movie" ? "admin.collections.mediaTypes.movie" : "admin.collections.mediaTypes.series")}</option> : <><option value="movie">{translate("admin.collections.mediaTypes.movie")}</option><option value="series">{translate("admin.collections.mediaTypes.series")}</option><option value="both">{translate("admin.collections.mediaTypes.both")}</option></>}
-        </select></div></label>
-        <label className="field"><span>{translate("admin.collections.sources.sortBy")}</span><div><select value={tmdb.sort} onChange={(event) => updateTMDB({ sort: event.target.value })}>
-          <option value="popularity.desc">{translate("admin.collections.sort.popularity")}</option>
-          <option value="vote_average.desc">{translate("admin.collections.sort.rating")}</option>
-          <option value="vote_count.desc">{translate("admin.collections.sort.voteCount")}</option>
-          <option value="release_date.desc">{translate("admin.collections.sort.releaseDate")}</option>
-          <option value="first_air_date.desc">{translate("admin.collections.sort.firstAirDate")}</option>
-          <option value="original">{translate("admin.collections.sort.originalOrder")}</option>
-        </select></div></label>
+        <label className="field"><span>{translate("admin.collections.sources.type")}</span><div><Select value={fixedMediaType ?? tmdb.mediaType} disabled={fixedMediaType !== undefined} onChange={(value) => updateTMDB({ mediaType: value as "movie" | "series" | "both" })} options={fixedMediaType
+          ? [{ value: fixedMediaType, label: translate(fixedMediaType === "movie" ? "admin.collections.mediaTypes.movie" : "admin.collections.mediaTypes.series") }]
+          : [{ value: "movie", label: translate("admin.collections.mediaTypes.movie") }, { value: "series", label: translate("admin.collections.mediaTypes.series") }, { value: "both", label: translate("admin.collections.mediaTypes.both") }]} /></div></label>
+        <label className="field"><span>{translate("admin.collections.sources.sortBy")}</span><div><Select value={tmdb.sort} onChange={(value) => updateTMDB({ sort: value })} options={[
+          { value: "popularity.desc", label: translate("admin.collections.sort.popularity") },
+          { value: "vote_average.desc", label: translate("admin.collections.sort.rating") },
+          { value: "vote_count.desc", label: translate("admin.collections.sort.voteCount") },
+          { value: "release_date.desc", label: translate("admin.collections.sort.releaseDate") },
+          { value: "first_air_date.desc", label: translate("admin.collections.sort.firstAirDate") },
+          { value: "original", label: translate("admin.collections.sort.originalOrder") },
+        ]} /></div></label>
       </div>
       {tmdb.sourceType === "discover" && <details className="tmdb-custom-filters" open>
         <summary><ChevronDown size={15} /> {translate("admin.collections.tmdb.filters.title")}</summary>
@@ -1985,14 +1985,14 @@ function SourceEditor({ source, catalogs, onChange, onRemove }: { source: Collec
     </>}
     {source.trakt && <div className="form-grid form-grid--three">
       <label className="field"><span>{translate("admin.collections.trakt.listId")}</span><div><input type="number" min={1} value={source.trakt.listId} onChange={(event) => onChange({ ...source, trakt: { ...source.trakt!, listId: Number(event.target.value) } })} /></div></label>
-      <label className="field"><span>{translate("admin.collections.trakt.mediaType")}</span><div><select value={source.trakt.mediaType} onChange={(event) => onChange({ ...source, trakt: { ...source.trakt!, mediaType: event.target.value as "movie" | "series" } })}><option value="movie">{translate("admin.collections.mediaTypes.movies")}</option><option value="series">{translate("admin.collections.mediaTypes.series")}</option></select></div></label>
-      <label className="field"><span>{translate("admin.collections.trakt.sort")}</span><div><select value={source.trakt.sortBy} onChange={(event) => onChange({ ...source, trakt: { ...source.trakt!, sortBy: event.target.value } })}><option value="rank">{translate("admin.collections.sort.rank")}</option><option value="added">{translate("admin.collections.sort.added")}</option><option value="title">{translate("admin.collections.sort.title")}</option><option value="released">{translate("admin.collections.sort.released")}</option><option value="popularity">{translate("admin.collections.sort.popularity")}</option><option value="votes">{translate("admin.collections.sort.votes")}</option></select></div></label>
+      <label className="field"><span>{translate("admin.collections.trakt.mediaType")}</span><div><Select value={source.trakt.mediaType} onChange={(value) => onChange({ ...source, trakt: { ...source.trakt!, mediaType: value as "movie" | "series" } })} options={[{ value: "movie", label: translate("admin.collections.mediaTypes.movies") }, { value: "series", label: translate("admin.collections.mediaTypes.series") }]} /></div></label>
+      <label className="field"><span>{translate("admin.collections.trakt.sort")}</span><div><Select value={source.trakt.sortBy} onChange={(value) => onChange({ ...source, trakt: { ...source.trakt!, sortBy: value } })} options={[{ value: "rank", label: translate("admin.collections.sort.rank") }, { value: "added", label: translate("admin.collections.sort.added") }, { value: "title", label: translate("admin.collections.sort.title") }, { value: "released", label: translate("admin.collections.sort.released") }, { value: "popularity", label: translate("admin.collections.sort.popularity") }, { value: "votes", label: translate("admin.collections.sort.votes") }]} /></div></label>
     </div>}
     {source.mdblist && <div className="form-grid form-grid--three">
       <label className="field"><span>MDBList ID</span><div><input type="number" min={1} value={source.mdblist.listId} onChange={(event) => onChange({ ...source, mdblist: { ...source.mdblist!, listId: Number(event.target.value) } })} /></div></label>
-      <label className="field"><span>{translate("admin.collections.trakt.mediaType")}</span><div><select value={source.mdblist.mediaType} onChange={(event) => onChange({ ...source, mdblist: { ...source.mdblist!, mediaType: event.target.value as "movie" | "series" } })}><option value="movie">{translate("admin.collections.mediaTypes.movies")}</option><option value="series">{translate("admin.collections.mediaTypes.series")}</option></select></div></label>
-      <label className="field"><span>{translate("admin.collections.trakt.sort")}</span><div><select value={source.mdblist.sort} onChange={(event) => onChange({ ...source, mdblist: { ...source.mdblist!, sort: event.target.value } })}><option value="rank">{translate("admin.collections.sort.rank")}</option><option value="added">{translate("admin.collections.sort.added")}</option><option value="title">{translate("admin.collections.sort.title")}</option><option value="released">{translate("admin.collections.sort.released")}</option><option value="tmdbpopular">{translate("admin.collections.sort.popularity")}</option><option value="score">{translate("admin.collections.sort.rating")}</option><option value="imdbvotes">{translate("admin.collections.sort.votes")}</option></select></div></label>
-      <label className="field"><span>{translate("media.episodeOrder.label")}</span><div><select value={source.mdblist.order} onChange={(event) => onChange({ ...source, mdblist: { ...source.mdblist!, order: event.target.value as "asc" | "desc" } })}><option value="asc">↑ ASC</option><option value="desc">↓ DESC</option></select></div></label>
+      <label className="field"><span>{translate("admin.collections.trakt.mediaType")}</span><div><Select value={source.mdblist.mediaType} onChange={(value) => onChange({ ...source, mdblist: { ...source.mdblist!, mediaType: value as "movie" | "series" } })} options={[{ value: "movie", label: translate("admin.collections.mediaTypes.movies") }, { value: "series", label: translate("admin.collections.mediaTypes.series") }]} /></div></label>
+      <label className="field"><span>{translate("admin.collections.trakt.sort")}</span><div><Select value={source.mdblist.sort} onChange={(value) => onChange({ ...source, mdblist: { ...source.mdblist!, sort: value } })} options={[{ value: "rank", label: translate("admin.collections.sort.rank") }, { value: "added", label: translate("admin.collections.sort.added") }, { value: "title", label: translate("admin.collections.sort.title") }, { value: "released", label: translate("admin.collections.sort.released") }, { value: "tmdbpopular", label: translate("admin.collections.sort.popularity") }, { value: "score", label: translate("admin.collections.sort.rating") }, { value: "imdbvotes", label: translate("admin.collections.sort.votes") }]} /></div></label>
+      <label className="field"><span>{translate("media.episodeOrder.label")}</span><div><Select value={source.mdblist.order} onChange={(value) => onChange({ ...source, mdblist: { ...source.mdblist!, order: value as "asc" | "desc" } })} options={[{ value: "asc", label: "↑ ASC" }, { value: "desc", label: "↓ DESC" }]} /></div></label>
     </div>}
   </article>;
 }
@@ -2336,7 +2336,7 @@ function OperationsAdmin() {
         <div className="setting-control setting-control--toggle">
           <label className="toggle-field"><input type="checkbox" checked={schedule.enabled} disabled={savingSchedule || Boolean(runningAction)} onChange={(event) => setSchedule((current) => ({ ...current, enabled: event.target.checked }))} /><span><i /><div><strong>{translate("admin.operations.schedule.enabled")}</strong><small>{translate("admin.operations.schedule.enabledDescription")}</small></div></span></label>
         </div>
-        <label className="field"><span>{translate("admin.operations.schedule.interval")}</span><div><select value={schedule.intervalHours} disabled={savingSchedule || Boolean(runningAction)} onChange={(event) => setSchedule((current) => ({ ...current, intervalHours: Number(event.target.value) as MetadataRefreshScheduleInput["intervalHours"] }))}>{metadataRefreshIntervals.map((hours) => <option key={hours} value={hours}>{translate(hours === 6 ? "admin.operations.schedule.interval6" : hours === 12 ? "admin.operations.schedule.interval12" : hours === 24 ? "admin.operations.schedule.interval24" : "admin.operations.schedule.interval168")}</option>)}</select></div></label>
+        <label className="field"><span>{translate("admin.operations.schedule.interval")}</span><div><Select value={String(schedule.intervalHours)} disabled={savingSchedule || Boolean(runningAction)} onChange={(value) => setSchedule((current) => ({ ...current, intervalHours: Number(value) as MetadataRefreshScheduleInput["intervalHours"] }))} options={metadataRefreshIntervals.map((hours) => ({ value: String(hours), label: translate(hours === 6 ? "admin.operations.schedule.interval6" : hours === 12 ? "admin.operations.schedule.interval12" : hours === 24 ? "admin.operations.schedule.interval24" : "admin.operations.schedule.interval168") }))} /></div></label>
         <label className="field"><span>{translate("admin.operations.schedule.language")}</span><div><Languages size={17} aria-hidden="true" /><input value={schedule.language} disabled={savingSchedule || Boolean(runningAction)} maxLength={35} autoComplete="off" spellCheck={false} placeholder="en" aria-invalid={schedule.language.trim().length === 0} aria-describedby="operations-language-help" onChange={(event) => setSchedule((current) => ({ ...current, language: event.target.value }))} /></div><small id="operations-language-help">{translate("admin.operations.schedule.languageHelp")}</small></label>
         <label className="field"><span>{translate("admin.operations.schedule.batchSize")}</span><div><input type="number" value={schedule.batchSize} min={1} max={100} step={1} disabled={savingSchedule || Boolean(runningAction)} aria-invalid={!Number.isInteger(schedule.batchSize) || schedule.batchSize < 1 || schedule.batchSize > 100} aria-describedby="operations-batch-help" onChange={(event) => setSchedule((current) => ({ ...current, batchSize: Number(event.target.value) }))} /></div><small id="operations-batch-help">{translate("admin.operations.schedule.batchSizeHelp")}</small></label>
       </div>
@@ -3134,10 +3134,10 @@ function SettingsAdmin() {
         {canManageProfiles && <label className={`field settings-profile-picker ${hasUnsavedChanges ? "is-locked" : ""}`}>
           <span>{translate("settings.scope.switch")}</span>
           <div>{serverSelected ? <Server size={16} aria-hidden="true" /> : <CircleUserRound size={16} aria-hidden="true" />}
-            <select value={settingsTarget} disabled={saving || checkingTranscodingDisable || hasUnsavedChanges} onChange={(event) => changeSettingsTarget(event.target.value)}>
-              {canManageServer && <option value="server">{translate("settings.scope.serverDefaults")}</option>}
-              {administrationProfiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{translate("settings.scope.profileOption", { profileName: candidate.name })}</option>)}
-            </select>
+            <Select value={settingsTarget} disabled={saving || checkingTranscodingDisable || hasUnsavedChanges} onChange={changeSettingsTarget} options={[
+              ...(canManageServer ? [{ value: "server", label: translate("settings.scope.serverDefaults") }] : []),
+              ...administrationProfiles.map((candidate) => ({ value: candidate.id, label: translate("settings.scope.profileOption", { profileName: candidate.name }) })),
+            ]} />
           </div>
           {hasUnsavedChanges && <small>{translate("settings.scope.unsavedSwitchHint")}</small>}
         </label>}
@@ -3469,7 +3469,7 @@ function SettingsCard({ activeSection, serverScope = false, canConfigureTranscod
 
       {activeSection === "playback" && <SettingsGroup sectionId="playback" icon={<Film />} title={translate("settings.groups.playback.title")} description={translate("settings.groups.playback.description")}>
         {!serverScope && <div className="setting-control setting-control--transcoding">
-          {canConfigureTranscoding && <label className="field"><span>{translate("settings.fields.transcoding")}</span><div><select value={profileTranscoding} disabled={saving} aria-describedby="profile-transcoding-description" onChange={(event) => change("transcoding", event.target.value as "inherit" | "enabled" | "disabled")}>{settingOptions.transcoding.map((option) => <option key={option.value} value={option.value}>{translate(option.labelKey)}</option>)}</select></div><small id="profile-transcoding-description">{translate("settings.fields.transcodingDescription")}</small></label>}
+          {canConfigureTranscoding && <label className="field"><span>{translate("settings.fields.transcoding")}</span><div><Select value={profileTranscoding} disabled={saving} aria-describedby="profile-transcoding-description" onChange={(value) => change("transcoding", value as "inherit" | "enabled" | "disabled")} options={settingOptions.transcoding.map((option) => ({ value: option.value, label: translate(option.labelKey) }))} /></div><small id="profile-transcoding-description">{translate("settings.fields.transcodingDescription")}</small></label>}
           <div className={`settings-transcoding-state ${effectiveTranscoding ? "is-enabled" : "is-blocked"}`} role="status" aria-live="polite">
             {effectiveTranscoding ? <Check aria-hidden="true" /> : <Shield aria-hidden="true" />}
             <p>{translate(!serverAllowsTranscoding ? "settings.transcoding.blockedByServer" : effectiveTranscoding ? "settings.transcoding.effectiveEnabled" : "settings.transcoding.effectiveDisabled")}</p>
@@ -3589,7 +3589,7 @@ function BoundedInheritedNumberSetting({ serverScope, value, serverValue, saving
     <div className="setting-row">
       <div className="setting-row__copy"><strong>{label}</strong>{description && <small>{description}</small>}<em className={`setting-value-state ${inherited ? "is-inherited" : "is-override"}`}>{state}</em></div>
       <div className="setting-row__actions">
-        {!serverScope && <select className="setting-mode-select" name={`${name}Mode`} aria-label={modeLabel} disabled={saving} value={inherited ? "inherit" : "custom"} onChange={(event) => onChange(event.target.value === "inherit" ? null : maximum)}><option value="inherit">{translate("settings.options.transcodingInherit")}</option><option value="custom">{translate("settings.options.customValue")}</option></select>}
+        {!serverScope && <Select className="setting-mode-select" name={`${name}Mode`} aria-label={modeLabel} disabled={saving} value={inherited ? "inherit" : "custom"} onChange={(value) => onChange(value === "inherit" ? null : maximum)} options={[{ value: "inherit", label: translate("settings.options.transcodingInherit") }, { value: "custom", label: translate("settings.options.customValue") }]} />}
         <input
           className="setting-number-input"
           aria-label={label}
@@ -3689,7 +3689,7 @@ function SelectSetting({ name, label, description, value, defaultValue, options,
     <div className="setting-row">
       {copy}
       <div className="setting-row__actions">
-        <select name={name} aria-label={label} value={value ?? ""} onChange={(event) => onChange(event.target.value || null)}><option value="">{translate("settings.actions.useInherited", { source: emptyLabel.toLowerCase() })}</option>{options.map((option) => <option key={option.value} value={option.value}>{"labelKey" in option ? translate(option.labelKey) : option.label}</option>)}</select>
+        <Select name={name} aria-label={label} value={value ?? ""} onChange={(nextValue) => onChange(nextValue || null)} options={[{ value: "", label: translate("settings.actions.useInherited", { source: emptyLabel.toLowerCase() }) }, ...options.map((option) => ({ value: option.value, label: "labelKey" in option ? translate(option.labelKey) : option.label }))]} />
         {!inherited && <SettingInheritAction source={emptyLabel} settingLabel={label} onClick={() => onChange(null)} />}
       </div>
     </div>

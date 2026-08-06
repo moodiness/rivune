@@ -1,6 +1,7 @@
 import type { Page } from "@playwright/test";
 
 import { CATEGORY_IDS, expect, test } from "./fixtures/rivune";
+import { selectOption } from "./helpers/select";
 
 const profileSections = ["appearance", "playback", "language", "subtitles", "connections"];
 const serverSections = ["appearance", "playback", "transcoding", "language", "subtitles"];
@@ -102,13 +103,13 @@ test("settings search opens the single matching category", async ({ page, rivune
 test("scope switching exposes only the categories valid for that target", async ({ page, rivune: _rivune }) => {
   await openSettings(page);
 
-  const scope = page.locator(".settings-profile-picker select");
-  await expect(scope).toHaveValue("alice");
+  const scope = page.getByRole("combobox", { name: "Switch scope" });
+  await expect(scope).toHaveAttribute("data-value", "alice");
   await expect.poll(() => sectionIds(page)).toEqual(profileSections);
 
   await page.locator('[data-settings-section="connections"]').click();
   await expect(page.locator("#settings-section-connections")).toBeVisible();
-  await scope.selectOption("server");
+  await selectOption(scope, "server");
   await expect.poll(() => sectionIds(page)).toEqual(serverSections);
   await expect(page.locator('[data-settings-section="connections"]')).toHaveCount(0);
   await expect(page.locator('[data-settings-section="appearance"]')).toHaveAttribute("aria-current", "page");
@@ -116,7 +117,7 @@ test("scope switching exposes only the categories valid for that target", async 
   await expect(page.locator(".settings-scope--server")).toContainText("Server defaults");
   await expect(page).toHaveURL(/\/#admin\?tab=settings&section=appearance$/);
 
-  await scope.selectOption("alice");
+  await selectOption(scope, "alice");
   await expect.poll(() => sectionIds(page)).toEqual(profileSections);
   await expect(page.locator('[data-settings-section="transcoding"]')).toHaveCount(0);
   await expect(page.locator('[data-settings-section="connections"]')).toHaveAttribute("aria-current", "page");
@@ -139,7 +140,7 @@ test("dirty preferences can be discarded or saved from the persistent action bar
   await expect(saveBar).toHaveCount(1);
   await expect(discard).toBeEnabled();
   await expect(save).toBeEnabled();
-  await expect(page.locator(".settings-profile-picker select")).toBeDisabled();
+  await expect(page.getByRole("combobox", { name: "Switch scope" })).toBeDisabled();
   await expect(page.locator(".settings-profile-picker")).toHaveClass(/is-locked/);
 
   await discard.click();
@@ -154,18 +155,18 @@ test("dirty preferences can be discarded or saved from the persistent action bar
   await expect(saveBar).toHaveCount(0);
   await expect(page.locator(".app-notification--success").filter({ hasText: "Alice" })).toHaveCount(1);
   await expect(page.locator(".settings-content .notice--success")).toHaveCount(0);
-  await expect(page.locator(".settings-profile-picker select")).toBeEnabled();
+  await expect(page.getByRole("combobox", { name: "Switch scope" })).toBeEnabled();
 });
 
 test("global administrator assigns transcoding per profile", async ({ page, rivune }) => {
   await openSettings(page, "playback");
 
-  const scope = page.locator(".settings-profile-picker select");
+  const scope = page.getByRole("combobox", { name: "Switch scope" });
   const transcoding = page.getByLabel("Transcoding");
   await expect(transcoding).toBeVisible();
-  await scope.selectOption("bob");
+  await selectOption(scope, "bob");
   await expect(page.getByRole("heading", { name: "Bob preferences" })).toBeVisible();
-  await transcoding.selectOption("disabled");
+  await selectOption(transcoding, "disabled");
   await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
 
   const request = await rivune.waitForRequest("/api/v1/profiles/bob/settings", "PATCH");

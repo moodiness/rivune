@@ -2,7 +2,7 @@ import { ArrowLeft, ArrowRight, Bookmark, Check, Clapperboard, Compass, Film, In
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { principalIdentity, useAuth } from "../auth";
-import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Skeleton, handleDirectionalFocus } from "../components";
+import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Select, Skeleton, handleDirectionalFocus } from "../components";
 import { translate as t } from "../i18n";
 import { mediaFromLibraryItem, mediaIdentity, resolveMediaTitle } from "../mediaIdentity";
 import { homeCollectionSignature, homeFolderCacheKey, readContinueCache, readHomeCache, writeContinueCache, writeHomeCache, writeHomeFolderCache, type CachedContinueItem } from "../homeCache";
@@ -1815,7 +1815,7 @@ export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenM
     <SectionHeading eyebrow={t("library.eyebrow")} title={t("library.title")} description={t("library.description")} />
     <div className="library-controls">
       <div className="search-box search-box--compact"><Search size={19} /><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && query) { event.preventDefault(); setQuery(""); } }} aria-label={t("nav.search")} aria-keyshortcuts="Escape" placeholder={t("search.placeholder")} />{query && <button type="button" className="search-box__clear" aria-label={t("common.close")} title={t("common.close")} onClick={() => setQuery("")}><X size={16} /></button>}</div>
-      <label className="library-sort"><span>{t("admin.collections.sources.sortBy")}</span><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="added">{t("admin.collections.sort.added")}</option><option value="title">{t("admin.collections.sort.title")}</option><option value="released">{t("admin.collections.sort.released")}</option></select></label>
+      <label className="library-sort"><span>{t("admin.collections.sources.sortBy")}</span><Select value={sort} onChange={(value) => setSort(value as typeof sort)} options={[{ value: "added", label: t("admin.collections.sort.added") }, { value: "title", label: t("admin.collections.sort.title") }, { value: "released", label: t("admin.collections.sort.released") }]} /></label>
     </div>
     <div className="browse-toolbar">
       <div className="filter-pills" role="group" aria-label={t("media.filter.groupLabel")} onKeyDown={(event) => { handleDirectionalFocus(event, { orientation: "horizontal" }); }}>

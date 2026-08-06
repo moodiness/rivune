@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures/rivune";
+import { selectOption, selectOptions } from "./helpers/select";
 
 function longSeason(episodeCount: number) {
   return {
@@ -1307,7 +1308,7 @@ test("series guide switches to a selected TVDB episode order", async ({ page, ri
 
   const order = page.getByRole("combobox", { name: "Episode order" });
   await expect(order).toBeVisible();
-  await expect(order.locator("option")).toHaveText([
+  await expect.poll(async () => (await selectOptions(order)).map((option) => option.label)).toEqual([
     "Profile default",
     "Aired Order",
     "DVD Order",
@@ -1316,8 +1317,8 @@ test("series guide switches to a selected TVDB episode order", async ({ page, ri
     "Streaming Order",
   ]);
 
-  await order.selectOption("2");
-  await expect(order).toHaveValue("2");
+  await selectOption(order, "2");
+  await expect(order).toHaveAttribute("data-value", "2");
   await expect(page.getByRole("tab", { name: /^Season 1.*3 episodes/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Disc Opening/ }).first()).toBeVisible();
 

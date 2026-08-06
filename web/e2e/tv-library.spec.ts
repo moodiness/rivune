@@ -210,7 +210,7 @@ test("Search merges canonical movie provenance across sections and pagination", 
   ]);
   const sourceBadges = page.locator(".details-provider-badges > .details-provider-badge--source");
   await expect(sourceBadges.locator(".details-provider-badge__brand")).toHaveText(["Fixture Movie Archive", "Fixture Movies"]);
-  await expect(page.locator(".details-provider-badges > a.details-provider-badge")).toHaveCount(2);
+  await expect(page.locator(".details-provider-badges__external > a.details-provider-badge")).toHaveCount(2);
   await expect(page.locator(".details-meta > .media-source-chips")).toHaveCount(0);
   await expect(page.locator(".details-source-group")).toHaveCount(0);
   await expect(page.getByText("Available from", { exact: true })).toHaveCount(0);
@@ -222,7 +222,7 @@ test("Search merges canonical movie provenance across sections and pagination", 
     const externalStyle = getComputedStyle(externalBadge);
     const sourceStyle = getComputedStyle(sourceBadge);
     return {
-      sourceFollowsExternalBadges: Array.from(providerRow.querySelectorAll(":scope > a.details-provider-badge")).every((badge) => Boolean(badge.compareDocumentPosition(sourceBadge) & Node.DOCUMENT_POSITION_FOLLOWING)),
+      sourceFollowsExternalBadges: Array.from(providerRow.querySelectorAll("a.details-provider-badge")).every((badge) => Boolean(badge.compareDocumentPosition(sourceBadge) & Node.DOCUMENT_POSITION_FOLLOWING)),
       sameHeight: externalBadge.getBoundingClientRect().height === sourceBadge.getBoundingClientRect().height,
       sameBorderRadius: externalStyle.borderRadius === sourceStyle.borderRadius,
       sameBackground: externalStyle.backgroundColor === sourceStyle.backgroundColor,

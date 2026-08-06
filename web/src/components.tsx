@@ -1,5 +1,6 @@
-import { AlertCircle, AlertTriangle, Check, ChevronRight, LoaderCircle, Play, Plus, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { AlertCircle, AlertTriangle, Check, ChevronDown, ChevronRight, LoaderCircle, Play, Plus, X } from "lucide-react";
+import { forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { translate as t } from "./i18n";
 import type { ButtonHTMLAttributes, CSSProperties, HTMLAttributes, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
@@ -24,11 +25,252 @@ export function IconButton({ label, children, className = "", ...props }: Button
   return <button className={`icon-button ${className}`} aria-label={label} title={label} {...props}>{children}</button>;
 }
 
+export type SelectOption = { value: string; label: string; disabled?: boolean };
+
+export type SelectProps = {
+  value: string;
+  options: ReadonlyArray<SelectOption>;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+  required?: boolean;
+  autoFocus?: boolean;
+  className?: string;
+  id?: string;
+  name?: string;
+  title?: string;
+  "aria-label"?: string;
+  "aria-labelledby"?: string;
+  "aria-describedby"?: string;
+  "aria-invalid"?: boolean | "false" | "true" | "grammar" | "spelling";
+};
+
+type SelectPosition = { left: number; top: number; width: number; maxHeight: number; above: boolean };
+
+function selectToken(name: string): number {
+  return Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
+}
+
+export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select({
+  value,
+  options,
+  onChange,
+  disabled = false,
+  required = false,
+  autoFocus = false,
+  className = "",
+  id,
+  name,
+  title,
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledBy,
+  "aria-describedby": ariaDescribedBy,
+  "aria-invalid": ariaInvalid,
+}, forwardedRef) {
+  const generatedID = useId();
+  const triggerID = id ?? `${generatedID}-trigger`;
+  const listboxID = `${generatedID}-listbox`;
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listboxRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const [position, setPosition] = useState<SelectPosition | null>(null);
+  const selectedIndex = options.findIndex((option) => option.value === value);
+  const selectedOption = selectedIndex >= 0 ? options[selectedIndex] : undefined;
+
+  useImperativeHandle(forwardedRef, () => triggerRef.current as HTMLButtonElement);
+
+  useEffect(() => {
+    if (disabled && open) setOpen(false);
+  }, [disabled, open]);
+
+  useEffect(() => {
+    if (!open || activeIndex < 0) return;
+    document.getElementById(`${listboxID}-option-${activeIndex}`)?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, listboxID, open]);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPosition(null);
+      return;
+    }
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+
+    const updatePosition = () => {
+      const rect = trigger.getBoundingClientRect();
+      const viewport = window.visualViewport;
+      const viewportLeft = viewport?.offsetLeft ?? 0;
+      const viewportTop = viewport?.offsetTop ?? 0;
+      const viewportWidth = viewport?.width ?? window.innerWidth;
+      const viewportHeight = viewport?.height ?? window.innerHeight;
+      const viewportPadding = selectToken("--select-viewport-padding");
+      const popupGap = selectToken("--select-popup-gap");
+      const minimumWidth = selectToken("--select-popup-min-width");
+      const maximumHeight = selectToken("--select-popup-max-height");
+      const viewportRight = viewportLeft + viewportWidth;
+      const viewportBottom = viewportTop + viewportHeight;
+      const availableBelow = viewportBottom - viewportPadding - rect.bottom - popupGap;
+      const availableAbove = rect.top - viewportTop - viewportPadding - popupGap;
+      const above = availableBelow < maximumHeight && availableAbove > availableBelow;
+      const width = Math.min(Math.max(rect.width, minimumWidth), viewportWidth - viewportPadding * 2);
+      const preferredLeft = getComputedStyle(trigger).direction === "rtl" ? rect.right - width : rect.left;
+      const left = Math.max(viewportLeft + viewportPadding, Math.min(preferredLeft, viewportRight - viewportPadding - width));
+      setPosition({
+        left,
+        top: above ? rect.top - popupGap : rect.bottom + popupGap,
+        width,
+        maxHeight: Math.max(0, Math.min(maximumHeight, above ? availableAbove : availableBelow)),
+        above,
+      });
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    window.visualViewport?.addEventListener("resize", updatePosition);
+    window.visualViewport?.addEventListener("scroll", updatePosition);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+      window.visualViewport?.removeEventListener("resize", updatePosition);
+      window.visualViewport?.removeEventListener("scroll", updatePosition);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && !triggerRef.current?.contains(target) && !listboxRef.current?.contains(target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+  }, [open]);
+
+  function enabledIndex(from: number, direction: 1 | -1): number {
+    if (options.length === 0) return -1;
+    for (let offset = 0; offset < options.length; offset += 1) {
+      const index = (from + direction * offset + options.length) % options.length;
+      if (!options[index]?.disabled) return index;
+    }
+    return -1;
+  }
+
+  function openList(direction: 1 | -1 = 1) {
+    if (disabled) return;
+    const initial = selectedIndex >= 0 && !options[selectedIndex]?.disabled
+      ? selectedIndex
+      : enabledIndex(direction === 1 ? 0 : options.length - 1, direction);
+    setActiveIndex(initial);
+    setOpen(true);
+  }
+
+  function moveActive(direction: 1 | -1) {
+    const start = activeIndex >= 0 ? activeIndex + direction : direction === 1 ? 0 : options.length - 1;
+    setActiveIndex(enabledIndex(start, direction));
+  }
+
+  function choose(index: number) {
+    const option = options[index];
+    if (!option || option.disabled) return;
+    if (option.value !== value) onChange(option.value);
+    setActiveIndex(index);
+    setOpen(false);
+    triggerRef.current?.focus({ preventScroll: true });
+  }
+
+  const portalRoot = triggerRef.current?.closest("dialog") ?? (typeof document === "undefined" ? null : document.body);
+  return <>
+    <button
+      ref={triggerRef}
+      type="button"
+      role="combobox"
+      aria-autocomplete="none"
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      aria-controls={listboxID}
+      aria-activedescendant={open && activeIndex >= 0 ? `${listboxID}-option-${activeIndex}` : undefined}
+      aria-label={ariaLabel}
+      aria-labelledby={ariaLabelledBy}
+      aria-describedby={ariaDescribedBy}
+      aria-invalid={ariaInvalid}
+      aria-required={required || undefined}
+      className={`select__trigger ${className}`}
+      data-value={value}
+      id={triggerID}
+      name={name}
+      title={title}
+      disabled={disabled}
+      autoFocus={autoFocus}
+      data-autofocus={autoFocus || undefined}
+      onClick={() => { if (open) setOpen(false); else openList(); }}
+      onKeyDown={(event) => {
+        if (event.altKey || event.ctrlKey || event.metaKey) return;
+        if (event.key === "Escape" && open) {
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen(false);
+          return;
+        }
+        if (event.key === "Tab") {
+          setOpen(false);
+          return;
+        }
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          if (open) choose(activeIndex);
+          else openList();
+          return;
+        }
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          if (!open) openList(event.key === "ArrowDown" ? 1 : -1);
+          else moveActive(event.key === "ArrowDown" ? 1 : -1);
+          return;
+        }
+        if (open && (event.key === "Home" || event.key === "End")) {
+          event.preventDefault();
+          setActiveIndex(enabledIndex(event.key === "Home" ? 0 : options.length - 1, event.key === "Home" ? 1 : -1));
+        }
+      }}
+    >
+      <span className="select__value">{selectedOption?.label ?? value}</span>
+      <ChevronDown className="select__chevron" size={16} aria-hidden="true" />
+    </button>
+    {open && portalRoot && createPortal(
+      <div
+        ref={listboxRef}
+        id={listboxID}
+        role="listbox"
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabelledBy ?? (ariaLabel ? undefined : triggerID)}
+        className={`select__listbox ${position?.above ? "select__listbox--above" : ""}`}
+        style={position ? { left: position.left, top: position.top, width: position.width, maxHeight: position.maxHeight } : undefined}
+      >
+        {options.map((option, index) => <div
+          id={`${listboxID}-option-${index}`}
+          key={option.value}
+          role="option"
+          aria-selected={option.value === value}
+          aria-disabled={option.disabled || undefined}
+          data-value={option.value}
+          className={`${index === activeIndex ? "is-active" : ""} ${option.value === value ? "is-selected" : ""}`}
+          onPointerMove={() => { if (!option.disabled) setActiveIndex(index); }}
+          onClick={() => choose(index)}
+        >
+          <span>{option.label}</span>
+          {option.value === value && <Check size={15} aria-hidden="true" />}
+        </div>)}
+      </div>,
+      portalRoot,
+    )}
+  </>;
+});
+
 const focusableSelector = [
   "button:not(:disabled)",
   "a[href]",
   "input:not(:disabled)",
-  "select:not(:disabled)",
   "textarea:not(:disabled)",
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
@@ -229,7 +471,7 @@ export function Modal({ children, onClose, className = "" }: { children: ReactNo
     const dialog = dialogRef.current;
     if (!dialog) return;
     dialog.showModal();
-    (dialog.querySelector<HTMLElement>("[autofocus]") ?? dialog.querySelector<HTMLElement>("input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [contenteditable=true]"))?.focus();
+    (dialog.querySelector<HTMLElement>("[data-autofocus='true'], [autofocus]") ?? dialog.querySelector<HTMLElement>("input:not(:disabled), textarea:not(:disabled), [contenteditable=true], [role=combobox]:not(:disabled)") ?? dialog.querySelector<HTMLElement>("button:not(:disabled)"))?.focus();
     return () => dialog.close();
   }, []);
 

@@ -3,7 +3,7 @@ import { ArrowRight, CheckCircle2, FolderKey, KeyRound, LoaderCircle, NotebookPe
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
-import { Button, Notice, RivuneMark } from "../components";
+import { Button, Notice, RivuneMark, Select } from "../components";
 import { notifyError, notifyErrorMessage } from "../notifications";
 import { locale, translate as t } from "../i18n";
 import type { AccessCategory, DeviceAuthorization } from "../types";
@@ -164,7 +164,7 @@ export function PairApprovalPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const submittingRef = useRef(false);
-  const categorySelectRef = useRef<HTMLSelectElement>(null);
+  const categorySelectRef = useRef<HTMLButtonElement>(null);
   const successHeadingRef = useRef<HTMLHeadingElement>(null);
 
   const loadCategories = useCallback(async () => {
@@ -268,10 +268,10 @@ export function PairApprovalPage() {
           {isGlobalAdmin ? <>
             <label className="field">
               <span>{t("pairing.categoryLabel")}</span>
-              <div><FolderKey size={18} /><select ref={categorySelectRef} value={categoryID} onChange={(event) => { setCategoryID(event.target.value); setError(""); }} required disabled={categoryState !== "ready" || categories.length === 0 || loading} aria-describedby="pairing-category-hint">
-                <option value="">{t("pairing.categoryPlaceholder")}</option>
-                {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-              </select></div>
+              <div><FolderKey size={18} /><Select ref={categorySelectRef} value={categoryID} onChange={(value) => { setCategoryID(value); setError(""); }} required disabled={categoryState !== "ready" || categories.length === 0 || loading} aria-describedby="pairing-category-hint" options={[
+                { value: "", label: t("pairing.categoryPlaceholder") },
+                ...categories.map((category) => ({ value: category.id, label: category.name })),
+              ]} /></div>
               <small id="pairing-category-hint">{t("pairing.categoryAssignmentHint")}</small>
             </label>
             {categoryState === "loading" && <div className="pairing-card__category-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={17} /><span>{t("pairing.categoryLoading")}</span></div>}

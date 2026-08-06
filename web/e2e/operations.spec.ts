@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures/rivune";
+import { selectOption } from "./helpers/select";
 
 test("administrator monitors operations and runs fixed maintenance controls", async ({ page, rivune }) => {
   await page.setViewportSize({ width: 1568, height: 1000 });
@@ -28,7 +29,7 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   expect(rivune.requests.filter((request) => request.method === "PATCH" && /^\/api\/v1\/profiles\/[^/]+\/settings$/.test(request.pathname))).toHaveLength(0);
 
   await page.getByLabel("Run scheduled refreshes").check();
-  await page.getByLabel("Refresh interval").selectOption("12");
+  await selectOption(page.getByLabel("Refresh interval"), "12");
   await page.getByLabel("Metadata language").fill("fr-CA");
   await page.getByLabel("Batch size").fill("40");
   await page.getByRole("button", { name: "Save refresh schedule" }).click();
@@ -41,7 +42,7 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect.poll(() => rivune.matching("/api/v1/operations", "GET").length).toBeGreaterThan(overviewRequests);
   await expect(page.getByLabel("Run scheduled refreshes")).toBeChecked();
-  await expect(page.getByLabel("Refresh interval")).toHaveValue("12");
+  await expect(page.getByLabel("Refresh interval")).toHaveAttribute("data-value", "12");
   await expect(page.getByLabel("Metadata language")).toHaveValue("fr-CA");
   await expect(page.getByLabel("Batch size")).toHaveValue("40");
 

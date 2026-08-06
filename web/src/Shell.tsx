@@ -50,7 +50,7 @@ export function Shell({ view, onView, children }: { view: View; onView: (view: V
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
       const target = event.target instanceof HTMLElement ? event.target : null;
-      if (target?.closest("input, textarea, select, [contenteditable=true]")) return;
+      if (target?.closest("input, textarea, [role=combobox], [contenteditable=true]")) return;
       const slash = event.key === "/" && !event.altKey && !event.ctrlKey && !event.metaKey;
       const command = event.key.toLowerCase() === "k" && (event.ctrlKey || event.metaKey) && !event.altKey;
       if (!slash && !command) return;
@@ -148,7 +148,7 @@ export function Shell({ view, onView, children }: { view: View; onView: (view: V
   function handleContentKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
-    if (target?.closest("input, textarea, select, [contenteditable=true]")) return;
+    if (target?.closest("input, textarea, [role=combobox], [contenteditable=true]")) return;
     if (!isInlineArrow(event, "backward")) return;
     if (event.defaultPrevented) {
       const row = target?.closest<HTMLElement>("[data-directional-row]");

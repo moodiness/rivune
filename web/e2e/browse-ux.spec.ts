@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures/rivune";
+import { selectOption } from "./helpers/select";
 
 test("global search shortcuts focus and preserve the profile query", async ({ page, rivune: _rivune }) => {
   await page.goto("/");
@@ -27,12 +28,23 @@ test("library titles can be searched, sorted, and filtered", async ({ page, rivu
     { titleId: "orbit", mediaType: "series", title: "Orbit", releaseInfo: "2023", released: "2023-01-01", addedAt: "2024-02-01T00:00:00Z", updatedAt: "2024-02-01T00:00:00Z" },
   ]);
 
+  await page.setViewportSize({ width: 355, height: 600 });
   await page.goto("/#library");
   const cards = page.locator(".library-page .media-card");
   await expect(cards).toHaveCount(3);
   await expect(cards.first()).toContainText("Zulu");
 
-  await page.getByLabel("Sort by").selectOption("title");
+  const sort = page.getByRole("combobox", { name: "Sort by" });
+  await sort.click();
+  await expect(sort).toHaveAttribute("aria-expanded", "true");
+  await sort.press("ArrowDown");
+  await sort.press("Enter");
+  await expect(sort).toHaveAttribute("data-value", "title");
+  await sort.click();
+  await sort.press("End");
+  await sort.press("Escape");
+  await expect(sort).toHaveAttribute("aria-expanded", "false");
+  await expect(sort).toHaveAttribute("data-value", "title");
   await expect(cards.first()).toContainText("Alpha");
 
   const librarySearch = page.locator(".library-page .search-box input");
@@ -136,10 +148,10 @@ test("Home applies the active profile direct-title limit without truncating View
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
   await page.locator('[data-admin-tab="settings"]').click();
   await page.locator('[data-settings-section="appearance"]').click();
-  const mode = page.locator('select[name="maximumDirectTitlesMode"]');
+  const mode = page.getByRole("combobox", { name: "Direct title limit mode" });
   const limit = page.locator('input[name="maximumDirectTitles"]');
-  await expect(mode).toHaveValue("inherit");
-  await mode.selectOption("custom");
+  await expect(mode).toHaveAttribute("data-value", "inherit");
+  await selectOption(mode, "custom");
   await limit.fill("3");
   await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
   const profileRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");

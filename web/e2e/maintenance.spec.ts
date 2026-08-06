@@ -1,4 +1,5 @@
 import { CATEGORY_IDS, expect, test } from "./fixtures/rivune";
+import { selectOption, selectOptions } from "./helpers/select";
 
 test("maintenance holds viewer profiles at selection and lets a manager profile enter", async ({ page, rivune }) => {
   rivune.setProfileCategory("bob", CATEGORY_IDS.household);
@@ -48,17 +49,16 @@ test("administrator can update the global maintenance settings", async ({ page, 
 test("interface language inherits server defaults and supports profile RTL overrides", async ({ page, rivune }) => {
   await page.goto("/#admin");
   await page.locator('[data-admin-tab="settings"]').click();
-  const scope = page.locator(".settings-profile-picker select");
+  const scope = page.locator(".settings-profile-picker").getByRole("combobox");
   const savePreferences = page.locator(".settings-save-bar").getByRole("button").last();
-  await scope.selectOption("server");
+  await selectOption(scope, "server");
   await page.locator('[data-settings-section="language"]').click();
 
-  const language = page.locator('select[name="interfaceLanguage"]');
-  await expect(language.locator("option")).toHaveCount(46);
-  await expect.poll(() => language.locator("option").evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))).toEqual([
+  const language = page.locator('[role="combobox"][name="interfaceLanguage"]');
+  await expect.poll(async () => (await selectOptions(language)).map((option) => option.value)).toEqual([
     "", "en", "fr", "fr-CA", "es", "es-MX", "es-AR", "es-CL", "es-CO", "es-PE", "it", "de", "ru", "pt-PT", "pt-BR", "ar", "ja", "ko", "zh-CN", "zh-TW", "pl", "hy", "nl", "sv", "da", "fi", "nb", "tr", "uk", "cs", "sk", "ro", "el", "he", "hi", "id", "vi", "th", "hu", "bg", "hr", "sr", "ms", "ca", "fa", "fil",
   ]);
-  await language.selectOption("fr");
+  await selectOption(language, "fr");
   await savePreferences.click();
 
   const serverRequest = await rivune.waitForRequest("/api/v1/settings", "PATCH");
@@ -71,23 +71,23 @@ test("interface language inherits server defaults and supports profile RTL overr
   await expect(page.getByRole("navigation", { name: "Navigation principale" }).getByRole("button", { name: "Accueil" })).toBeVisible();
   await expect(language).toBeVisible();
 
-  await scope.selectOption("alice");
+  await selectOption(scope, "alice");
   await page.locator('[data-settings-section="language"]').click();
-  await expect(language).toHaveValue("");
+  await expect(language).toHaveAttribute("data-value", "");
   const effectiveRequestCount = rivune.matching("/api/v1/profiles/alice/settings/effective", "GET").length;
   rivune.delayNextEffectiveSettings(250);
   const delayedEffectiveSettings = page.waitForResponse((response) => {
     const request = response.request();
     return new URL(response.url()).pathname === "/api/v1/profiles/alice/settings/effective" && request.method() === "GET";
   });
-  await language.selectOption("he");
+  await selectOption(language, "he");
   await savePreferences.click();
 
   const firstProfileRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
   expect(firstProfileRequest.body).toMatchObject({ interfaceLanguage: "he" });
   await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings/effective", "GET").length).toBe(effectiveRequestCount + 1);
 
-  await language.selectOption("ar");
+  await selectOption(language, "ar");
   await savePreferences.click();
   await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings", "PATCH").length).toBe(2);
   expect(rivune.matching("/api/v1/profiles/alice/settings", "PATCH").at(-1)?.body).toMatchObject({ interfaceLanguage: "ar" });
@@ -98,7 +98,7 @@ test("interface language inherits server defaults and supports profile RTL overr
   await expect(page.locator("html")).toHaveAttribute("lang", "ar");
 
   await expect(language).toBeVisible();
-  await language.selectOption("");
+  await selectOption(language, "");
   await savePreferences.click();
   await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings", "PATCH").length).toBe(3);
   expect(rivune.matching("/api/v1/profiles/alice/settings", "PATCH").at(-1)?.body).toMatchObject({ interfaceLanguage: null });
@@ -123,11 +123,11 @@ test("server transcoding disable confirms active sessions and the global veto wi
   await page.goto("/#admin");
   await page.locator('[data-admin-tab="settings"]').click();
   await page.locator('[data-settings-section="playback"]').click();
-  const scope = page.locator(".settings-profile-picker select");
-  const inheritedPolicy = page.locator(".setting-control--transcoding select");
-  await expect(inheritedPolicy).toHaveValue("inherit");
+  const scope = page.locator(".settings-profile-picker").getByRole("combobox");
+  const inheritedPolicy = page.getByRole("combobox", { name: "Transcoding" });
+  await expect(inheritedPolicy).toHaveAttribute("data-value", "inherit");
   await expect(page.getByText("Transcoding is available as a last resort for this profile.")).toBeVisible();
-  await scope.selectOption("server");
+  await selectOption(scope, "server");
   await page.locator('[data-settings-section="transcoding"]').click();
 
   const allowTranscoding = page.getByRole("checkbox", { name: /Allow transcoding/ });
@@ -150,12 +150,12 @@ test("server transcoding disable confirms active sessions and the global veto wi
   await expect(page.getByText("1 transcoded session is still active. Stop it from Playback activity if needed.")).toBeVisible();
   expect(rivune.requests.filter((request) => request.method === "DELETE" && request.pathname.startsWith("/api/v1/playback/sessions/"))).toHaveLength(0);
 
-  await scope.selectOption("alice");
+  await selectOption(scope, "alice");
   await page.locator('[data-settings-section="playback"]').click();
-  const profilePolicy = page.locator(".setting-control--transcoding select");
-  await expect(profilePolicy).toHaveValue("inherit");
-  await expect(profilePolicy.locator("option")).toHaveText(["Inherit server setting", "Enabled", "Disabled"]);
-  await profilePolicy.selectOption("enabled");
+  const profilePolicy = page.getByRole("combobox", { name: "Transcoding" });
+  await expect(profilePolicy).toHaveAttribute("data-value", "inherit");
+  await expect.poll(async () => (await selectOptions(profilePolicy)).map((option) => option.label)).toEqual(["Inherit server setting", "Enabled", "Disabled"]);
+  await selectOption(profilePolicy, "enabled");
   await expect(page.getByText("The server setting takes priority, so this profile cannot enable transcoding.")).toBeVisible();
   await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
   const profileRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
@@ -165,18 +165,18 @@ test("cast member limits persist in server and profile scopes", async ({ page, r
   await page.goto("/#admin");
   await page.locator('[data-admin-tab="settings"]').click();
   await page.locator('[data-settings-section="playback"]').click();
-  const scope = page.locator(".settings-profile-picker select");
+  const scope = page.locator(".settings-profile-picker").getByRole("combobox");
   const savePreferences = page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" });
   const mode = page.getByRole("combobox", { name: "Cast member limit mode" });
   const limit = page.getByRole("spinbutton", { name: "Maximum cast members" });
 
-  await expect(mode).toHaveValue("inherit");
-  await expect(mode.locator("option")).toHaveText(["Inherit server setting", "Custom value"]);
+  await expect(mode).toHaveAttribute("data-value", "inherit");
+  await expect.poll(async () => (await selectOptions(mode)).map((option) => option.label)).toEqual(["Inherit server setting", "Custom value"]);
   await expect(limit).toBeDisabled();
   await expect(limit).toHaveValue("20");
   await expect(limit).toHaveAttribute("max", "20");
 
-  await scope.selectOption("server");
+  await selectOption(scope, "server");
   await page.locator('[data-settings-section="playback"]').click();
   await expect(mode).toHaveCount(0);
   await expect(limit).toBeEnabled();
@@ -188,13 +188,13 @@ test("cast member limits persist in server and profile scopes", async ({ page, r
   const serverRequest = await rivune.waitForRequest("/api/v1/settings", "PATCH");
   expect(serverRequest.body).toMatchObject({ maximumCastMembers: 12 });
 
-  await scope.selectOption("alice");
+  await selectOption(scope, "alice");
   await page.locator('[data-settings-section="playback"]').click();
-  await expect(mode).toHaveValue("inherit");
+  await expect(mode).toHaveAttribute("data-value", "inherit");
   await expect(limit).toBeDisabled();
   await expect(limit).toHaveValue("12");
   await expect(limit).toHaveAttribute("max", "12");
-  await mode.selectOption("custom");
+  await selectOption(mode, "custom");
   await expect(limit).toBeEnabled();
   await limit.fill("13");
   await expect(limit).toHaveValue("12");
@@ -203,7 +203,7 @@ test("cast member limits persist in server and profile scopes", async ({ page, r
   const customRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
   expect(customRequest.body).toMatchObject({ maximumCastMembers: 8 });
 
-  await mode.selectOption("inherit");
+  await selectOption(mode, "inherit");
   await expect(limit).toBeDisabled();
   await savePreferences.click();
   await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings", "PATCH").length).toBe(2);
@@ -214,21 +214,21 @@ test("direct title limits persist in server and profile appearance preferences",
   await page.goto("/#admin");
   await page.locator('[data-admin-tab="settings"]').click();
   await page.locator('[data-settings-section="appearance"]').click();
-  const scope = page.locator(".settings-profile-picker select");
+  const scope = page.locator(".settings-profile-picker").getByRole("combobox");
   const savePreferences = page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" });
-  const mode = page.locator('select[name="maximumDirectTitlesMode"]');
+  const mode = page.getByRole("combobox", { name: "Direct title limit mode" });
   const limit = page.locator('input[name="maximumDirectTitles"]');
 
-  await expect(mode).toHaveValue("inherit");
+  await expect(mode).toHaveAttribute("data-value", "inherit");
   await expect(limit).toBeDisabled();
   await expect(limit).toHaveValue("20");
   await expect(limit).toHaveAttribute("max", "20");
-  await mode.selectOption("custom");
+  await selectOption(mode, "custom");
   await savePreferences.click();
   const initialProfileRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
   expect(initialProfileRequest.body).toEqual({ maximumDirectTitles: 20 });
 
-  await scope.selectOption("server");
+  await selectOption(scope, "server");
   await page.locator('[data-settings-section="appearance"]').click();
   await expect(mode).toHaveCount(0);
   await expect(limit).toBeEnabled();
@@ -239,9 +239,9 @@ test("direct title limits persist in server and profile appearance preferences",
   const serverRequest = await rivune.waitForRequest("/api/v1/settings", "PATCH");
   expect(serverRequest.body).toEqual({ maximumDirectTitles: 6 });
 
-  await scope.selectOption("alice");
+  await selectOption(scope, "alice");
   await page.locator('[data-settings-section="appearance"]').click();
-  await expect(mode).toHaveValue("custom");
+  await expect(mode).toHaveAttribute("data-value", "custom");
   await expect(limit).toBeEnabled();
   await expect(limit).toHaveValue("6");
   await expect(limit).toHaveAttribute("max", "6");
@@ -258,7 +258,7 @@ test("direct title limits persist in server and profile appearance preferences",
   await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings", "PATCH").length).toBe(3);
   expect(rivune.matching("/api/v1/profiles/alice/settings", "PATCH").at(-1)?.body).toEqual({ maximumDirectTitles: 3 });
 
-  await mode.selectOption("inherit");
+  await selectOption(mode, "inherit");
   await expect(limit).toBeDisabled();
   await savePreferences.click();
   await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings", "PATCH").length).toBe(4);
@@ -269,10 +269,10 @@ test("direct title limits persist in server and profile appearance preferences",
 test("the selected interface language localizes Home copy", async ({ page, rivune }) => {
   await page.goto("/#admin");
   await page.locator('[data-admin-tab="settings"]').click();
-  await page.locator(".settings-profile-picker select").selectOption("server");
+  await selectOption(page.locator(".settings-profile-picker").getByRole("combobox"), "server");
   await page.locator('[data-settings-section="language"]').click();
 
-  await page.locator('select[name="interfaceLanguage"]').selectOption("fr");
+  await selectOption(page.locator('[role="combobox"][name="interfaceLanguage"]'), "fr");
   await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
   await rivune.waitForRequest("/api/v1/settings", "PATCH");
   await expect(page.locator("html")).toHaveAttribute("lang", "fr");

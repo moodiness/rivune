@@ -2,7 +2,7 @@ import { ArrowLeft, AudioLines, Bookmark, Captions, Check, Clapperboard, Externa
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { api, APIError } from "./api";
-import { Button, HorizontalDragRow, IconButton, Notice } from "./components";
+import { Button, HorizontalDragRow, IconButton, Notice, Select } from "./components";
 import { translate as t } from "./i18n";
 import { mediaFromLibraryItem, mediaIdentity, mediaResourceID, resolveMediaTitle, titleReleaseDate } from "./mediaIdentity";
 import { cachedMediaItem, cacheMediaItem, flushMetadataCache } from "./metadataCache";
@@ -1694,13 +1694,15 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
 
               {(externalTitleLinks.length > 0 || sourceLabels.length > 0) && <div className="details-title-links">
                 <div className="details-provider-badges">
-                  {externalTitleLinks.map(({ externalID, provider, mediaType, episode }) => {
-                    const label = t("media.details.openExternalPage", { provider: provider.label, id: externalID });
-                    return <a key={provider.key} className={`details-provider-badge details-provider-badge--${provider.key}`} href={titleProviderURL(provider.key, externalID, mediaType, episode)} target="_blank" rel="noreferrer" aria-label={label} title={label}>
-                      <span className="details-provider-badge__brand">{provider.label}</span>
-                      <ExternalLink size={11} aria-hidden="true" />
-                    </a>;
-                  })}
+                  {externalTitleLinks.length > 0 && <span className="details-provider-badges__external" role="group" aria-label={t("media.details.externalPagesLabel")}>
+                    {externalTitleLinks.map(({ externalID, provider, mediaType, episode }) => {
+                      const label = t("media.details.openExternalPage", { provider: provider.label, id: externalID });
+                      return <a key={provider.key} className={`details-provider-badge details-provider-badge--${provider.key}`} href={titleProviderURL(provider.key, externalID, mediaType, episode)} target="_blank" rel="noreferrer" aria-label={label} title={label}>
+                        <span className="details-provider-badge__brand">{provider.label}</span>
+                        <ExternalLink size={11} aria-hidden="true" />
+                      </a>;
+                    })}
+                  </span>}
                   {externalTitleLinks.length > 0 && sourceLabels.length > 0 && <span className="details-provider-badges__separator" aria-hidden="true" />}
                   {sourceLabels.map((label, index) => <span className="details-provider-badge details-provider-badge--source" key={`${label}:${index}`}>
                     <span className="details-provider-badge__brand">{label}</span>
@@ -1773,10 +1775,10 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                   {series && series.episodeOrders.length > 0 && <label className="series-order">
                     <span>{t("media.episodeOrder.label")}</span>
                     <span className="series-order__field">
-                      <select aria-label={t("media.episodeOrder.accessibleLabel")} value={series.selectedEpisodeOrderId ?? ""} disabled={episodeOrderLoading} onChange={(event) => void changeEpisodeOrder(event.target.value)}>
-                        <option value="">{t("media.episodeOrder.profileDefault")}</option>
-                        {series.episodeOrders.map((order) => <option key={order.id} value={order.id}>{episodeOrderLabel(order)}</option>)}
-                      </select>
+                      <Select className={episodeOrderLoading ? "is-loading" : ""} aria-label={t("media.episodeOrder.accessibleLabel")} value={series.selectedEpisodeOrderId ?? ""} disabled={episodeOrderLoading} onChange={(value) => void changeEpisodeOrder(value)} options={[
+                        { value: "", label: t("media.episodeOrder.profileDefault") },
+                        ...series.episodeOrders.map((order) => ({ value: order.id, label: episodeOrderLabel(order) })),
+                      ]} />
                       {episodeOrderLoading && <LoaderCircle className="spin" size={15} aria-hidden="true" />}
                     </span>
                   </label>}
@@ -2572,7 +2574,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       const target = event.target;
-      const interactive = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement;
+      const interactive = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || (target instanceof HTMLElement && target.getAttribute("role") === "combobox");
       if (event.key === "Escape" || event.key === "BrowserBack" || event.key === "GoBack") {
         event.preventDefault();
         if (panel) closePanel();
