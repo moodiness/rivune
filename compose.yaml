@@ -1,10 +1,6 @@
 services:
   server:
-    build:
-      context: .
-      dockerfile: server/Dockerfile
-      args:
-        VERSION: ${RIVUNE_VERSION:-dev}
+    image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-latest}
     restart: unless-stopped
     init: true
     security_opt:

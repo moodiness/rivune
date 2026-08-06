@@ -100,10 +100,13 @@ When enabling Trakt or Simkl account tracking, generate another independent cred
 
 TMDB, TVDB, Fanart.tv, MDBList, Trakt, and Simkl integrations are optional and can remain unconfigured. `RIVUNE_TVDB_PIN` is only needed with a TVDB user-supported API key; ordinary project keys authenticate without it. Fanart.tv requires `RIVUNE_FANART_API_KEY`. Per-profile Trakt or Simkl account tracking additionally requires the independently generated encryption key above.
 
-Start Rivune:
+`RIVUNE_VERSION` in `.env` selects the published GHCR image tag. Keep `latest` to follow stable releases, or set a specific release tag to pin deployments.
+
+Pull the selected image and start Rivune:
 
 ```sh
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 Open [http://localhost:8080](http://localhost:8080). Complete first-run setup with the value of `RIVUNE_SETUP_TOKEN` from `.env`, then create the administrator account and first profile.
@@ -217,10 +220,10 @@ cd server
 go test ./...
 ```
 
-Build the complete container:
+Build the complete container locally:
 
 ```sh
-docker compose build server
+docker build --build-arg VERSION=dev -t rivune:dev -f server/Dockerfile .
 ```
 
 ## License
