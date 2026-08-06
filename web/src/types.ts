@@ -253,7 +253,14 @@ export type CollectionExportDocument = {
 };
 export type CollectionImportResult = { imported: number; collections: Collection[] };
 
-export type SourceReference = { id: string; kind: string; title: string; addonId?: string };
+export type SourceReference = {
+  id: string;
+  kind: string;
+  title: string;
+  addonId?: string;
+  manifestId?: string;
+  catalogId?: string;
+};
 export type CurrentProgram = string | {
   title?: string;
   name?: string;

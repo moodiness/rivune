@@ -1307,6 +1307,7 @@ export class RivuneHarness {
     if (path === "/addons/catalogs" && request.method() === "GET") {
       await json(route, { catalogs: [
         { addonId: "movie-addon", addonName: "Fixture Movies", manifestId: "movie-manifest", position: 0, catalog: { type: "movie", id: "movie-search", name: "Movies", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
+        { addonId: "movie-secondary-addon", addonName: "Fixture Movie Archive", manifestId: "movie-secondary-manifest", position: 1, catalog: { type: "movie", id: "movie-secondary-search", name: "Movie Archive", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
         { addonId: "series-addon", addonName: "Fixture Series", manifestId: "series-manifest", position: 1, catalog: { type: "series", id: "series-search", name: "Series", extraSupported: ["search", "skip", "limit"] }, addonCatalog: false, searchable: true },
         { addonId: "tv-addon", addonName: "Fixture Television", manifestId: "tv-manifest", position: 2, catalog: { type: "tv", id: "tv-search", name: "Live TV", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
         { addonId: "other-addon", addonName: "Fixture Other", manifestId: "other-manifest", position: 3, catalog: { type: "other", id: "other-search", name: "Other", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },

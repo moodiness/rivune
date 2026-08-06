@@ -136,6 +136,119 @@ test("Selected search paginates and retries only the requested source", async ({
   expect(rivune.matching("/api/v1/addons/catalogs/search/anime", "GET")).toHaveLength(1);
 });
 
+test("Search merges canonical movie provenance across sections and pagination", async ({ page, rivune }) => {
+  const sharedMovie = { id: "tt9000201", type: "movie", name: "Canonical Fixture Movie", releaseInfo: "2026" };
+  const paginationMovie = { id: "tt-provenance-page", type: "movie", name: "Pagination First Source", releaseInfo: "2025" };
+  const primaryMovies = [
+    sharedMovie,
+    ...Array.from({ length: 23 }, (_, index) => ({ id: `primary-movie-${index + 1}`, type: "movie", name: `Primary Movie ${index + 1}` })),
+  ];
+  rivune.setSearchResponse("movie", 0, {
+    results: [
+      result("movie-addon", "movie-search", primaryMovies, "movie", "provenance", "movie-manifest"),
+      result("movie-secondary-addon", "movie-secondary-search", [
+        { ...sharedMovie, name: "Divergent Duplicate Title" },
+        paginationMovie,
+      ], "movie", "provenance", "movie-secondary-manifest"),
+    ],
+    errors: [],
+  });
+  rivune.setSearchResponse("movie", 24, {
+    results: [
+      result("movie-addon", "movie-search", [sharedMovie], "movie", "provenance", "movie-manifest"),
+      result("movie-secondary-addon", "movie-secondary-search", [sharedMovie, paginationMovie], "movie", "provenance", "movie-secondary-manifest"),
+    ],
+    errors: [],
+  });
+  rivune.setCatalogResponse("movie-addon", "movie", "movie-search", 24, result(
+    "movie-addon",
+    "movie-search",
+    [
+      { ...paginationMovie, name: "Divergent Pagination Duplicate" },
+      { ...paginationMovie, name: "Repeated Pagination Duplicate" },
+    ],
+    "movie",
+    "provenance",
+    "movie-manifest",
+  ));
+
+  await page.goto("/#search");
+  await page.locator(".search-page .search-box input").fill("provenance");
+  const allMovieGroup = page.locator(".search-result-section").filter({ has: page.getByRole("heading", { name: "Movies", exact: true }) });
+  await expect(allMovieGroup.getByRole("button", { name: "Open Canonical Fixture Movie", exact: true })).toHaveCount(1);
+  await expect(allMovieGroup.locator(".media-tile")).toHaveCount(25);
+  const allSharedTile = allMovieGroup.locator(".media-tile").filter({ has: page.getByRole("button", { name: "Open Canonical Fixture Movie", exact: true }) });
+  await expect(allSharedTile.locator(".media-source-chip")).toHaveText(["Fixture Movies", "Fixture Movie Archive"]);
+
+  await page.locator(".search-page > .load-more").getByRole("button", { name: "Load more", exact: true }).click();
+  await expect(page.locator(".search-page > .load-more")).toHaveCount(0);
+  await expect(allMovieGroup.locator(".media-tile")).toHaveCount(25);
+  await expect(allSharedTile.locator(".media-source-chip")).toHaveText(["Fixture Movies", "Fixture Movie Archive"]);
+
+  await page.getByRole("button", { name: "Movies", exact: true }).click();
+  const sections = page.locator(".search-source-section");
+  await expect(sections).toHaveCount(2);
+  const primary = sections.filter({ has: page.getByRole("heading", { name: "Fixture Movies · Movies", exact: true }) });
+  const secondary = sections.filter({ has: page.getByRole("heading", { name: "Fixture Movie Archive · Movie Archive", exact: true }) });
+  await expect(primary.getByRole("button", { name: "Open Canonical Fixture Movie", exact: true })).toHaveCount(1);
+  await expect(secondary.getByRole("button", { name: "Open Canonical Fixture Movie", exact: true })).toHaveCount(1);
+  await expect(primary.locator(".media-tile").filter({ hasText: "Canonical Fixture Movie" }).locator(".media-source-chip")).toHaveText(["Fixture Movies", "Fixture Movie Archive"]);
+  await expect(secondary.locator(".media-tile").filter({ hasText: "Canonical Fixture Movie" }).locator(".media-source-chip")).toHaveText(["Fixture Movies", "Fixture Movie Archive"]);
+  await expect(primary.getByRole("button", { name: "Open Pagination First Source", exact: true })).toHaveCount(0);
+
+  await primary.getByRole("button", { name: "Load more", exact: true }).click();
+  await expect(primary.getByRole("button", { name: "Open Pagination First Source", exact: true })).toHaveCount(1);
+  await expect(primary.getByText("25 results", { exact: true })).toBeVisible();
+  const enrichedTile = primary.locator(".media-tile").filter({ has: page.getByRole("button", { name: "Open Pagination First Source", exact: true }) });
+  await expect(enrichedTile.locator(".media-source-chip")).toHaveText(["Fixture Movie Archive", "Fixture Movies"]);
+
+  await enrichedTile.getByRole("button", { name: "Open Pagination First Source", exact: true }).click();
+  const sources = await page.evaluate(() => window.history.state?.rivuneMediaItem?.sources);
+  expect(sources).toEqual([
+    { id: "movie-secondary-addon", kind: "addon_catalog", title: "Fixture Movie Archive", addonId: "movie-secondary-addon", manifestId: "movie-secondary-manifest", catalogId: "movie-secondary-search" },
+    { id: "movie-addon", kind: "addon_catalog", title: "Fixture Movies", addonId: "movie-addon", manifestId: "movie-manifest", catalogId: "movie-search" },
+  ]);
+  const availableFrom = page.locator(".details-source-group");
+  await expect(availableFrom).toContainText("Available from");
+  await expect(availableFrom.locator(".media-source-chip")).toHaveText(["Fixture Movie Archive", "Fixture Movies"]);
+  await expect(page.getByText("movie-secondary-manifest", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("movie-secondary-search", { exact: true })).toHaveCount(0);
+});
+
+test("Search keeps TV and custom identities scoped to their add-ons", async ({ page, rivune }) => {
+  rivune.setSearchResponse("anime", 0, {
+    results: [
+      result("anime-primary-addon", "anime-primary-search", [{ id: "same-custom-id", type: "anime", name: "Scoped Anime One" }], "anime", "scoped", "anime-primary-manifest"),
+      result("anime-secondary-addon", "anime-secondary-search", [{ id: "same-custom-id", type: "anime", name: "Scoped Anime Two" }], "anime", "scoped", "anime-secondary-manifest"),
+    ],
+    errors: [],
+  });
+  rivune.setSearchResponse("tv", 0, {
+    results: [
+      result("tv-addon", "tv-search", [channel("same-channel-id", "Scoped Channel One")], "tv", "scoped", "tv-manifest"),
+      result("tv-secondary-addon", "tv-secondary-search", [channel("same-channel-id", "Scoped Channel Two")], "tv", "scoped", "tv-secondary-manifest"),
+    ],
+    errors: [],
+  });
+
+  await page.goto("/#search");
+  await page.getByRole("button", { name: "Anime", exact: true }).click();
+  await page.locator(".search-page .search-box input").fill("scoped");
+  await expect(page.locator(".media-tile")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "Open Scoped Anime One", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Scoped Anime Two", exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Live TV", exact: true }).click();
+  await expect(page.locator(".tv-media-tile")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "Open Scoped Channel One", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Scoped Channel Two", exact: true })).toBeVisible();
+  const unlabeledChannel = page.locator(".tv-media-tile").filter({ has: page.getByRole("button", { name: "Open Scoped Channel Two", exact: true }) });
+  await expect(unlabeledChannel.locator(".media-source-chip")).toHaveCount(0);
+  await expect(page.getByText("tv-secondary-addon", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("tv-secondary-manifest", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("tv-secondary-search", { exact: true })).toHaveCount(0);
+});
+
 test("TV search checks only the displayed page against a 5000-entry library", async ({ page, rivune }) => {
   const addonId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   rivune.setLibraryItems(Array.from({ length: 5000 }, (_, index) => ({

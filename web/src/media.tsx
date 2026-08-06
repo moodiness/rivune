@@ -463,6 +463,31 @@ export function mediaTypeLabel(mediaType: string): string {
   return mediaType;
 }
 
+function safeSourceLabel(source: NonNullable<MediaItem["sources"]>[number]): string | undefined {
+  const label = source.title.trim();
+  if (!label || /[\u0000-\u001f\u007f]/.test(label) || /^https?:\/\//i.test(label)) return undefined;
+  const identifiers = [source.id, source.addonId, source.manifestId, source.catalogId]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value));
+  if (identifiers.some((identifier) => identifier.localeCompare(label, undefined, { sensitivity: "accent" }) === 0)) return undefined;
+  if (/^[0-9a-f]{32,}$/i.test(label) || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(label)) return undefined;
+  return label;
+}
+
+export function mediaSourceLabels(item: Pick<MediaItem, "sources">): string[] {
+  const labels: string[] = [];
+  const seenAddons = new Set<string>();
+  for (const source of item.sources ?? []) {
+    if (source.kind !== "addon_catalog") continue;
+    const addonIdentity = (source.addonId || source.id).trim();
+    const label = safeSourceLabel(source);
+    if (!addonIdentity || !label || seenAddons.has(addonIdentity)) continue;
+    seenAddons.add(addonIdentity);
+    labels.push(label);
+  }
+  return labels;
+}
+
 
 function formatPlaybackTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
@@ -1623,6 +1648,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
       return externalID ? [{ externalID, provider, mediaType: item.mediaType, episode: undefined }] : [];
     })
     : [];
+  const sourceLabels = mediaSourceLabels(item);
 
   return (
     <article className="details-page details-page--immersive page-enter" aria-labelledby="media-details-title">
@@ -1676,6 +1702,11 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                     </a>;
                   })}
                 </div>
+              </div>}
+
+              {sourceLabels.length > 0 && <div className="details-source-group" aria-label={t("media.details.availableFrom")}>
+                <span className="details-source-group__label">{t("media.details.availableFrom")}</span>
+                <span className="media-source-chips">{sourceLabels.map((label, index) => <span className="media-source-chip" key={`${label}:${index}`}>{label}</span>)}</span>
               </div>}
 
               {metaLoading && !customDisplayItem.description
