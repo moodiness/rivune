@@ -133,13 +133,11 @@ function descriptorForResult(descriptors: AddonCatalogDescriptor[], result: Reso
     && descriptor.catalog.id === result.id);
 }
 
-function catalogSourceReference(result: ResourceResult, descriptor: AddonCatalogDescriptor | undefined): SourceReference | undefined {
-  const title = descriptor?.addonName?.trim();
-  if (!title) return undefined;
+function catalogSourceReference(result: ResourceResult, descriptor: AddonCatalogDescriptor | undefined): SourceReference {
   return {
     id: result.addonId,
     kind: "addon_catalog",
-    title,
+    title: descriptor?.addonName?.trim() || result.addonId,
     addonId: result.addonId,
     manifestId: result.manifestId,
     catalogId: result.id,
@@ -197,7 +195,7 @@ function mediaFromResourceResult(result: ResourceResult, descriptor?: AddonCatal
       released: stringValue(meta, "released"),
       voteAverage: typeof meta.imdbRating === "number" ? meta.imdbRating : undefined,
       externalIds: {},
-      sources: source ? [source] : [],
+      sources: [source],
       sourceAddonId: addonScoped ? sourceAddonId : undefined,
       sourceCatalogId: addonScoped ? sourceCatalogId : undefined,
       sourceName: addonScoped ? sourceName : undefined,
@@ -212,12 +210,25 @@ function mediaFromResourceResult(result: ResourceResult, descriptor?: AddonCatal
   return output;
 }
 
-function mediaFromBatch(batch: ResourceBatch, descriptors: AddonCatalogDescriptor[]): MediaItem[] {
-  const output: MediaItem[] = [];
-  for (const result of batch.results) {
-    for (const item of mediaFromResourceResult(result, descriptorForResult(descriptors, result))) output.push(item);
-  }
-  return output;
+
+function orderedSearchResults(resourceBatches: ResourceBatch[], descriptors: AddonCatalogDescriptor[]): ResourceResult[] {
+  const descriptorOrder = new Map<string, number>();
+  descriptors.forEach((descriptor, index) => {
+    const key = searchSourceVariantKey(descriptor.addonId, descriptor.catalog.type, descriptor.catalog.id);
+    if (!descriptorOrder.has(key)) descriptorOrder.set(key, index);
+  });
+  return resourceBatches
+    .flatMap((batch) => batch.results)
+    .map((result, index) => ({ result, index }))
+    .sort((left, right) => {
+      const leftOrder = descriptorOrder.get(searchSourceVariantKey(left.result.addonId, left.result.type, left.result.id));
+      const rightOrder = descriptorOrder.get(searchSourceVariantKey(right.result.addonId, right.result.type, right.result.id));
+      if (leftOrder === undefined && rightOrder === undefined) return left.index - right.index;
+      if (leftOrder === undefined) return 1;
+      if (rightOrder === undefined) return -1;
+      return leftOrder - rightOrder || left.index - right.index;
+    })
+    .map(({ result }) => result);
 }
 
 function mediaResultCount(result: ResourceResult): number {
@@ -237,12 +248,12 @@ function summarizeSearchOutcomes(outcomes: PromiseSettledResult<ResourceBatch>[]
   }
   let internalFailureCount = 0;
   let successfulResourceResultCount = 0;
-  const items: MediaItem[] = [];
   for (const batch of resourceBatches) {
     internalFailureCount += batch.errors.length;
     successfulResourceResultCount += batch.results.length;
-    items.push(...mediaFromBatch(batch, descriptors));
   }
+  const items = orderedSearchResults(resourceBatches, descriptors)
+    .flatMap((result) => mediaFromResourceResult(result, descriptorForResult(descriptors, result)));
   return {
     resourceBatches,
     httpFailureCount,
@@ -301,11 +312,18 @@ function mergeMediaItem(current: MediaItem, incoming: MediaItem): MediaItem {
   return additions.length > 0 ? { ...current, sources: [...sources, ...additions] } : current;
 }
 
+function searchMediaIdentity(item: MediaItem): string {
+  if (item.mediaType === "tv" || ["movie", "series", "episode"].includes(item.mediaType)) return mediaIdentity(item);
+  const manifestId = item.sources?.find((source) => source.manifestId?.trim())?.manifestId?.trim();
+  const resourceId = item.resourceId?.trim() || item.id;
+  return manifestId ? `custom:${JSON.stringify([item.mediaType, manifestId, resourceId])}` : mediaIdentity(item);
+}
+
 function mergeUniqueMedia(current: MediaItem[], incoming: MediaItem[]): MediaItem[] {
-  const indexByIdentity = new Map(current.map((item, index) => [mediaIdentity(item), index]));
+  const indexByIdentity = new Map(current.map((item, index) => [searchMediaIdentity(item), index]));
   let merged = current;
   for (const item of incoming) {
-    const identity = mediaIdentity(item);
+    const identity = searchMediaIdentity(item);
     const index = indexByIdentity.get(identity);
     if (index === undefined) {
       if (merged === current) merged = [...current];
@@ -321,32 +339,53 @@ function mergeUniqueMedia(current: MediaItem[], incoming: MediaItem[]): MediaIte
   return merged;
 }
 
-type SearchSourceSection = {
+type SearchSourceVariant = {
   key: string;
   addonId: string;
   type: string;
   catalogId: string;
+  addonName?: string;
+  catalogName?: string;
+  declaredExtras: string[];
+  nextSkip: number;
+  hasMore: boolean;
+  failed: boolean;
+};
+
+type SearchSourceSection = {
+  key: string;
+  type: string;
   label: string;
   logoUrl?: string;
-  declaredExtras: string[];
+  variants: SearchSourceVariant[];
   identities: string[];
   count: number;
-  nextSkip: number;
   hasMore: boolean;
   loading: boolean;
   error: string;
   collapsed: boolean;
 };
 
-function searchSourceKey(addonId: string, type: string, catalogId: string): string {
+function searchSourceVariantKey(addonId: string, type: string, catalogId: string): string {
   return `${addonId}\u0000${type}\u0000${catalogId}`;
 }
 
-function searchSourceLabel(descriptor: AddonCatalogDescriptor | undefined, result: ResourceResult): string {
-  const addonName = descriptor?.addonName?.trim();
-  const catalogName = descriptor?.catalog.name?.trim();
-  if (addonName && catalogName && addonName !== catalogName) return `${addonName} · ${catalogName}`;
-  return addonName || catalogName || searchTypeLabel(result.type);
+function searchSourceGroupKey(addonId: string, manifestId: string, type: string, catalogId: string): string {
+  const normalizedManifestId = manifestId.trim();
+  return type === "tv" || !normalizedManifestId
+    ? searchSourceVariantKey(addonId, type, catalogId)
+    : `${normalizedManifestId}\u0000${type}\u0000${catalogId}`;
+}
+
+function searchSourceGroupLabel(variants: SearchSourceVariant[], type: string): string {
+  const addonNames = [...new Set(variants.map((variant) => variant.addonName).filter((value): value is string => Boolean(value)))];
+  const catalogNames = [...new Set(variants.map((variant) => variant.catalogName).filter((value): value is string => Boolean(value)))];
+  if (addonNames.length === 1) {
+    const addonName = addonNames[0];
+    const catalogName = catalogNames.length === 1 ? catalogNames[0] : undefined;
+    return catalogName && addonName !== catalogName ? `${addonName} · ${catalogName}` : addonName;
+  }
+  return catalogNames.length === 1 ? catalogNames[0] : searchTypeLabel(type);
 }
 
 function effectiveCatalogExtras(descriptor: AddonCatalogDescriptor | undefined): string[] {
@@ -364,7 +403,7 @@ function sourceInitials(label: string): string {
 function orderSearchSourceSections(sections: SearchSourceSection[], descriptors: AddonCatalogDescriptor[]): SearchSourceSection[] {
   const descriptorOrder = new Map<string, number>();
   descriptors.forEach((descriptor, index) => {
-    const key = searchSourceKey(descriptor.addonId, descriptor.catalog.type, descriptor.catalog.id);
+    const key = searchSourceGroupKey(descriptor.addonId, descriptor.manifestId, descriptor.catalog.type, descriptor.catalog.id);
     if (!descriptorOrder.has(key)) descriptorOrder.set(key, index);
   });
   return [...sections].sort((left, right) => {
@@ -379,48 +418,62 @@ function orderSearchSourceSections(sections: SearchSourceSection[], descriptors:
 
 function collectSearchSourcePage(resourceBatches: ResourceBatch[], descriptors: AddonCatalogDescriptor[], currentItems: MediaItem[] = [], pageSize = 24): { items: MediaItem[]; sections: SearchSourceSection[] } {
   const items = [...currentItems];
-  const indexByIdentity = new Map(items.map((item, index) => [mediaIdentity(item), index]));
+  const indexByIdentity = new Map(items.map((item, index) => [searchMediaIdentity(item), index]));
   const sectionsBySource = new Map<string, SearchSourceSection>();
-  for (const batch of resourceBatches) {
-    for (const result of batch.results) {
-      const key = searchSourceKey(result.addonId, result.type, result.id);
-      const descriptor = descriptorForResult(descriptors, result);
-      const declaredExtras = effectiveCatalogExtras(descriptor);
-      const sourceItems = mediaFromResourceResult(result, descriptor);
-      const rawItemCount = mediaResultCount(result);
-      for (const item of sourceItems) {
-        const identity = mediaIdentity(item);
-        const index = indexByIdentity.get(identity);
-        if (index === undefined) {
-          indexByIdentity.set(identity, items.length);
-          items.push(item);
-        } else {
-          items[index] = mergeMediaItem(items[index], item);
-        }
-        let section = sectionsBySource.get(key);
-        if (!section) {
-          section = {
-            key,
-            addonId: result.addonId,
-            type: result.type,
-            catalogId: result.id,
-            label: searchSourceLabel(descriptor, result),
-            logoUrl: descriptor?.addonLogoUrl,
-            declaredExtras,
-            count: 0,
-            identities: [],
-            nextSkip: rawItemCount,
-            hasMore: declaredExtras.includes("skip") && rawItemCount >= pageSize,
-            loading: false,
-            error: "",
-            collapsed: false,
-          };
-          sectionsBySource.set(key, section);
-        }
-        if (!section.identities.includes(identity)) {
-          section.identities.push(identity);
-          section.count += 1;
-        }
+  for (const result of orderedSearchResults(resourceBatches, descriptors)) {
+    const descriptor = descriptorForResult(descriptors, result);
+    const declaredExtras = effectiveCatalogExtras(descriptor);
+    const sourceItems = mediaFromResourceResult(result, descriptor);
+    if (sourceItems.length === 0) continue;
+    const rawItemCount = mediaResultCount(result);
+    const key = searchSourceGroupKey(result.addonId, result.manifestId, result.type, result.id);
+    let section = sectionsBySource.get(key);
+    if (!section) {
+      section = {
+        key,
+        type: result.type,
+        label: searchTypeLabel(result.type),
+        logoUrl: descriptor?.addonLogoUrl,
+        variants: [],
+        count: 0,
+        identities: [],
+        hasMore: false,
+        loading: false,
+        error: "",
+        collapsed: false,
+      };
+      sectionsBySource.set(key, section);
+    }
+    const variantKey = searchSourceVariantKey(result.addonId, result.type, result.id);
+    if (!section.variants.some((variant) => variant.key === variantKey)) {
+      section.variants.push({
+        key: variantKey,
+        addonId: result.addonId,
+        type: result.type,
+        catalogId: result.id,
+        addonName: descriptor?.addonName?.trim() || undefined,
+        catalogName: descriptor?.catalog.name?.trim() || undefined,
+        declaredExtras,
+        nextSkip: rawItemCount,
+        hasMore: declaredExtras.includes("skip") && rawItemCount >= pageSize,
+        failed: false,
+      });
+      section.label = searchSourceGroupLabel(section.variants, section.type);
+      section.logoUrl ||= descriptor?.addonLogoUrl;
+      section.hasMore = section.variants.some((variant) => variant.hasMore);
+    }
+    for (const item of sourceItems) {
+      const identity = searchMediaIdentity(item);
+      const index = indexByIdentity.get(identity);
+      if (index === undefined) {
+        indexByIdentity.set(identity, items.length);
+        items.push(item);
+      } else {
+        items[index] = mergeMediaItem(items[index], item);
+      }
+      if (!section.identities.includes(identity)) {
+        section.identities.push(identity);
+        section.count += 1;
       }
     }
   }
@@ -1254,7 +1307,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     if (itemsByType.has("tv")) orderedTypes.push("tv");
     return orderedTypes.map((type) => ({ type, items: itemsByType.get(type)! }));
   }, [catalogDiscovery.types, filter, items]);
-  const itemByIdentity = useMemo(() => new Map(items.map((item) => [mediaIdentity(item), item])), [items]);
+  const itemByIdentity = useMemo(() => new Map(items.map((item) => [searchMediaIdentity(item), item])), [items]);
 
   useEffect(() => {
     if (!mediaPreferences.profileID || loadedProfileRef.current === mediaPreferences.profileID) return;
@@ -1356,7 +1409,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
           }
         }
         if (!active || controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
-        visibleIdentityRef.current = new Set(displayedItems.map(mediaIdentity));
+        visibleIdentityRef.current = new Set(displayedItems.map(searchMediaIdentity));
         setItems(displayedItems);
         setSourceSections(displayedSourceSections);
         setTvLibraryMembership(membership.saved);
@@ -1449,7 +1502,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
         }
         setItems((current) => {
           const merged = mergeUniqueMedia(current, additions);
-          visibleIdentityRef.current = new Set(merged.map(mediaIdentity));
+          visibleIdentityRef.current = new Set(merged.map(searchMediaIdentity));
           return merged;
         });
         setNextSkip((current) => current + pageSize);
@@ -1466,64 +1519,90 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   async function loadMoreSource(sectionKey: string) {
     const section = sourceSections.find((candidate) => candidate.key === sectionKey);
     if (!section || section.loading || (!section.hasMore && !section.error)) return;
+    const retrying = Boolean(section.error);
+    const targets = section.variants.filter((variant) => retrying ? variant.failed : variant.hasMore);
+    if (targets.length === 0) return;
     sourcePaginationControllersRef.current.get(sectionKey)?.abort();
     const controller = new AbortController();
     const generation = searchRequestGenerationRef.current;
     sourcePaginationControllersRef.current.set(sectionKey, controller);
     setSourceSections((current) => current.map((candidate) => candidate.key === sectionKey ? { ...candidate, loading: true, error: "" } : candidate));
-    const extras: { search?: string; skip?: number; limit?: number } = {};
-    if (section.declaredExtras.includes("search")) extras.search = normalizedQuery;
-    if (section.declaredExtras.includes("skip")) extras.skip = section.nextSkip;
-    if (section.declaredExtras.includes("limit")) extras.limit = pageSize;
     try {
-      const result = await api.addonCatalog(section.addonId, section.type, section.catalogId, extras, controller.signal);
+      const outcomes = await Promise.allSettled(targets.map(async (variant) => {
+        const extras: { search?: string; skip?: number; limit?: number } = {};
+        if (variant.declaredExtras.includes("search")) extras.search = normalizedQuery;
+        if (variant.declaredExtras.includes("skip")) extras.skip = variant.nextSkip;
+        if (variant.declaredExtras.includes("limit")) extras.limit = pageSize;
+        const result = await api.addonCatalog(variant.addonId, variant.type, variant.catalogId, extras, controller.signal);
+        const rawItemCount = mediaResultCount(result);
+        const descriptor = descriptorForResult(catalogDiscovery.descriptors, result);
+        return { variantKey: variant.key, rawItemCount, items: mediaFromResourceResult(result, descriptor) };
+      }));
       if (controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
-      const rawItemCount = mediaResultCount(result);
-      const descriptor = descriptorForResult(catalogDiscovery.descriptors, result);
-      const pageItems = mediaFromResourceResult(result, descriptor);
-      const candidates = pageItems.filter((item) => !visibleIdentityRef.current.has(mediaIdentity(item)));
+      const successful = new Map<string, { rawItemCount: number }>();
+      const failed = new Set<string>();
+      const pageItems: MediaItem[] = [];
+      outcomes.forEach((outcome, index) => {
+        if (outcome.status === "fulfilled") {
+          successful.set(outcome.value.variantKey, { rawItemCount: outcome.value.rawItemCount });
+          pageItems.push(...outcome.value.items);
+        } else {
+          failed.add(targets[index].key);
+        }
+      });
+      const additions = mergeUniqueMedia([], pageItems);
+      const candidates = additions.filter((item) => !visibleIdentityRef.current.has(searchMediaIdentity(item)));
       let membership: TVMembershipMaps | undefined;
-      const identities = tvMembershipIdentities(candidates).slice(0, 100);
-      if (identities.length > 0) {
+      const membershipIdentities = tvMembershipIdentities(candidates).slice(0, 100);
+      if (membershipIdentities.length > 0) {
         try {
-          membership = tvMembershipMaps(identities, await api.tvLibraryMembership(identities, controller.signal));
+          membership = tvMembershipMaps(membershipIdentities, await api.tvLibraryMembership(membershipIdentities, controller.signal));
         } catch {
           if (controller.signal.aborted) return;
         }
       }
       if (controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
-      for (const item of candidates) visibleIdentityRef.current.add(mediaIdentity(item));
       if (membership) {
         setTvLibraryMembership((current) => new Map([...current, ...membership.saved]));
         setCheckedTvIdentities((current) => new Set([...current, ...membership.checked]));
       }
       if (pageItems.length > 0) setItems((current) => {
         const merged = mergeUniqueMedia(current, pageItems);
-        visibleIdentityRef.current = new Set(merged.map(mediaIdentity));
+        visibleIdentityRef.current = new Set(merged.map(searchMediaIdentity));
         return merged;
       });
       setSourceSections((current) => current.map((candidate) => {
         if (candidate.key !== sectionKey) return candidate;
         const identities = [...candidate.identities];
         for (const item of pageItems) {
-          const identity = mediaIdentity(item);
+          const identity = searchMediaIdentity(item);
           if (!identities.includes(identity)) identities.push(identity);
         }
+        const variants = candidate.variants.map((variant) => {
+          if (failed.has(variant.key)) return { ...variant, failed: true };
+          const success = successful.get(variant.key);
+          if (!success) return variant;
+          return {
+            ...variant,
+            nextSkip: variant.nextSkip + success.rawItemCount,
+            hasMore: variant.declaredExtras.includes("skip") && success.rawItemCount >= pageSize,
+            failed: false,
+          };
+        });
         return {
           ...candidate,
           count: identities.length,
           identities,
-          nextSkip: candidate.nextSkip + rawItemCount,
-          hasMore: candidate.declaredExtras.includes("skip") && rawItemCount >= pageSize,
+          variants,
+          hasMore: variants.some((variant) => variant.hasMore),
           loading: false,
-          error: "",
+          error: failed.size > 0 ? t("search.warning.sourcesUnavailable") : "",
         };
       }));
-    } catch {
-      if (!controller.signal.aborted && searchRequestGenerationRef.current === generation) {
-        setSourceSections((current) => current.map((candidate) => candidate.key === sectionKey ? { ...candidate, loading: false, error: t("search.warning.sourcesUnavailable") } : candidate));
-      }
     } finally {
+      if (!controller.signal.aborted && searchRequestGenerationRef.current === generation) {
+        setSourceSections((current) => current.map((candidate) => candidate.key === sectionKey && candidate.loading ? { ...candidate, loading: false } : candidate));
+      }
       if (sourcePaginationControllersRef.current.get(sectionKey) === controller) sourcePaginationControllersRef.current.delete(sectionKey);
     }
   }
@@ -1599,7 +1678,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   }
 
   function renderSearchResult(item: MediaItem) {
-    const identity = mediaIdentity(item);
+    const identity = searchMediaIdentity(item);
     const saved = item.mediaType === "tv" && tvLibraryMembership.has(identity);
     const metadata = item.mediaType === "tv" ? tvMetadata(item) : "";
     const sourceLabels = mediaSourceLabels(item);

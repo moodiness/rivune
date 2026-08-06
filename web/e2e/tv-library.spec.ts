@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures/rivune";
+import { selectOptions } from "./helpers/select";
 
 const channel = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
   id,
@@ -272,6 +273,116 @@ test("Search keeps TV and custom identities scoped to their add-ons", async ({ p
   await expect(page.getByText("tv-secondary-addon", { exact: true })).toHaveCount(0);
   await expect(page.getByText("tv-secondary-manifest", { exact: true })).toHaveCount(0);
   await expect(page.getByText("tv-secondary-search", { exact: true })).toHaveCount(0);
+});
+
+test("Search merges exact custom results from equivalent configurations", async ({ page, rivune }) => {
+  const primaryMetas = [
+    { id: "shared-primary-item", type: "anime", name: "Canonical Shared Item", poster: "/api/v1/artwork/shared-primary-item", releaseInfo: "2020" },
+    { id: "shared-secondary-item", type: "anime", name: "Secondary Shared Item", poster: "/api/v1/artwork/shared-secondary-item", releaseInfo: "2021" },
+    { id: "same-title-primary", type: "anime", name: "Same Display Title", releaseInfo: "2022" },
+  ];
+  rivune.setSearchResponse("anime", 0, {
+    results: [
+      result("shared-secondary", "shared-search", [
+        { ...primaryMetas[0], name: "Divergent Duplicate Title" },
+        primaryMetas[1],
+        { id: "same-title-secondary", type: "anime", name: "Same Display Title", releaseInfo: "2022" },
+      ], "anime", "shared", "fixture.shared"),
+      result("shared-primary", "shared-search", primaryMetas, "anime", "shared", "fixture.shared"),
+    ],
+    errors: [],
+  });
+  await page.route("**/api/v1/addons/resources/meta/anime/shared-primary-item", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      results: [{
+        addonId: "shared-primary",
+        manifestId: "fixture.shared",
+        resource: "meta",
+        type: "anime",
+        id: "shared-primary-item",
+        payload: { meta: { id: "shared-primary-item", type: "anime", name: "Canonical Shared Item", videos: [] } },
+      }],
+      errors: [],
+    }),
+  }));
+  const requests: Array<Record<string, unknown>> = [];
+  await page.route("**/api/v1/playback/sources", (route) => {
+    requests.push(route.request().postDataJSON() as Record<string, unknown>);
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        sources: [
+          { id: "provider-one", sourceRef: "provider-one-ref", addonId: "shared-primary", manifestId: "fixture.shared", addonName: "Fixture Provider One", streamIndex: 0, name: "Option One", protocol: "http", container: "mp4", expiresAt: "2099-01-01T00:00:00Z" },
+          { id: "provider-two", sourceRef: "provider-two-ref", addonId: "shared-secondary", manifestId: "fixture.shared", addonName: "Fixture Provider Two", streamIndex: 0, name: "Option Two", protocol: "http", container: "mp4", expiresAt: "2099-01-01T00:00:00Z" },
+        ],
+        providerErrors: [],
+      }),
+    });
+  });
+
+  await page.goto("/#search");
+  await page.getByRole("button", { name: "Anime", exact: true }).click();
+  await page.locator(".search-page .search-box input").fill("shared");
+
+  const section = page.locator(".search-source-section");
+  await expect(section).toHaveCount(1);
+  await expect(section.getByRole("heading", { name: "Shared Catalog", exact: true })).toBeVisible();
+  await expect(section.getByText("4 results", { exact: true })).toBeVisible();
+  await expect(section.locator(".media-tile")).toHaveCount(4);
+  await expect(section.getByRole("button", { name: "Open Canonical Shared Item", exact: true })).toHaveCount(1);
+  await expect(section.getByRole("button", { name: "Open Divergent Duplicate Title", exact: true })).toHaveCount(0);
+  await expect(section.getByRole("button", { name: "Open Same Display Title", exact: true })).toHaveCount(2);
+  const mergedTile = section.locator(".media-tile").filter({ has: page.getByRole("button", { name: "Open Canonical Shared Item", exact: true }) });
+  await expect(mergedTile.locator(".media-source-chip")).toHaveText(["Fixture Provider One", "Fixture Provider Two"]);
+
+  await mergedTile.getByRole("button", { name: "Open Canonical Shared Item", exact: true }).click();
+  expect(await page.evaluate(() => window.history.state?.rivuneMediaItem)).toMatchObject({
+    sourceAddonId: "shared-primary",
+    sources: [
+      { id: "shared-primary", addonId: "shared-primary", manifestId: "fixture.shared", catalogId: "shared-search" },
+      { id: "shared-secondary", addonId: "shared-secondary", manifestId: "fixture.shared", catalogId: "shared-search" },
+    ],
+  });
+  await expect.poll(() => requests.at(-1)).toMatchObject({ mediaType: "anime", resourceId: "shared-primary-item" });
+  expect(requests.at(-1)).not.toHaveProperty("addonId");
+  const providerFilter = page.locator(".details-stream-filter").getByRole("combobox");
+  await expect(providerFilter).toBeVisible();
+  await expect(await selectOptions(providerFilter)).toEqual([
+    { value: "", label: "All" },
+    { value: "shared-primary", label: "Fixture Provider One" },
+    { value: "shared-secondary", label: "Fixture Provider Two" },
+  ]);
+});
+
+test("Search merges unnamed configurations without exposing source identifiers", async ({ page, rivune }) => {
+  rivune.setSearchResponse("anime", 0, {
+    results: [
+      result("unnamed-secondary-addon", "unnamed-search", [{ id: "unnamed-item", type: "anime", name: "Divergent Unnamed Duplicate" }], "anime", "unnamed", "community.unnamed"),
+      result("unnamed-primary-addon", "unnamed-search", [{ id: "unnamed-item", type: "anime", name: "Canonical Unnamed Item" }], "anime", "unnamed", "community.unnamed"),
+    ],
+    errors: [],
+  });
+
+  await page.goto("/#search");
+  await page.getByRole("button", { name: "Anime", exact: true }).click();
+  await page.locator(".search-page .search-box input").fill("unnamed");
+
+  const section = page.locator(".search-source-section");
+  await expect(section).toHaveCount(1);
+  await expect(section.getByRole("heading", { name: "Unnamed Catalog", exact: true })).toBeVisible();
+  await expect(section.locator(".media-tile")).toHaveCount(1);
+  await expect(section.getByRole("button", { name: "Open Canonical Unnamed Item", exact: true })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Open Divergent Unnamed Duplicate", exact: true })).toHaveCount(0);
+  await expect(section.locator(".media-source-chip")).toHaveCount(0);
+  await expect(page.getByText("unnamed-primary-addon", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("unnamed-secondary-addon", { exact: true })).toHaveCount(0);
+
+  await section.getByRole("button", { name: "Open Canonical Unnamed Item", exact: true }).click();
+  expect(await page.evaluate(() => window.history.state?.rivuneMediaItem?.sources)).toMatchObject([
+    { addonId: "unnamed-primary-addon", manifestId: "community.unnamed", catalogId: "unnamed-search" },
+    { addonId: "unnamed-secondary-addon", manifestId: "community.unnamed", catalogId: "unnamed-search" },
+  ]);
 });
 
 test("TV search cards render provider posters and retain artwork fallback", async ({ page, rivune }) => {
