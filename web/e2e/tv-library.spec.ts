@@ -13,14 +13,54 @@ const channel = (id: string, name: string, extra: Record<string, unknown> = {}) 
   ...extra,
 });
 
-const result = (addonId: string, catalogId: string, metas: unknown[]) => ({
+const result = (addonId: string, catalogId: string, metas: unknown[], type = "tv", search = "news") => ({
   addonId,
   manifestId: `${addonId}-manifest`,
   resource: "catalog",
-  type: "tv",
+  type,
   id: catalogId,
-  extra: [{ name: "search", value: "news" }],
+  extra: [{ name: "search", value: search }],
   payload: { metas },
+});
+
+test("Search discovers FKStream anime catalogs and targets only the selected custom type", async ({ page, rivune }) => {
+  rivune.setSearchResponse("anime", 0, {
+    results: [
+      result("fkstream-addon", "fkstream-search", [{
+        id: "shared-frieren",
+        type: "anime",
+        name: "Frieren — FKStream",
+        poster: "https://fixtures.rivune.test/fkstream-frieren.svg",
+      }], "anime", "frieren"),
+      result("alternate-anime-addon", "alternate-search", [{
+        id: "shared-frieren",
+        type: "anime",
+        name: "Frieren — Alternate",
+      }], "anime", "frieren"),
+    ],
+    errors: [],
+  });
+
+  await page.goto("/#search");
+  const animeFilter = page.getByRole("button", { name: "Anime", exact: true });
+  await expect(animeFilter).toBeVisible();
+  await expect(page.getByRole("button", { name: "Documentary", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Community", exact: true })).toHaveCount(0);
+  await expect(page.locator(".search-page .filter-pills button")).toHaveText(["All", "Movies", "Series", "Anime", "Other", "Live TV"]);
+  await expect(page.getByRole("button", { name: "Other", exact: true }).locator(".lucide-shapes")).toBeVisible();
+
+  await animeFilter.click();
+  await page.locator(".search-page .search-box input").fill("frieren");
+  await expect(page.getByRole("button", { name: "Open Frieren — FKStream" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Frieren — Alternate" })).toBeVisible();
+  await expect(page.locator(".search-result-section")).toHaveCount(0);
+
+  const animeRequests = rivune.matching("/api/v1/addons/catalogs/search/anime", "GET");
+  expect(animeRequests).toHaveLength(1);
+  expect(animeRequests[0].search.get("search")).toBe("frieren");
+  expect(animeRequests[0].search.get("skip")).toBe("0");
+  expect(animeRequests[0].search.get("limit")).toBe("24");
+  expect(rivune.requests.filter((request) => ["movie", "series", "tv", "other"].some((type) => request.pathname === `/api/v1/addons/catalogs/search/${type}`))).toHaveLength(0);
 });
 
 test("TV search keeps partial results, warns without inline diagnostics, and retries a failed pagination offset", async ({ page, rivune }) => {
@@ -225,10 +265,12 @@ test("Library exposes TV filtering and unavailable channels remain removable", a
   await expect(page.getByRole("button", { name: "Open Offline Channel" })).toHaveCount(0);
 });
 
-test("Home omits Library TV rows and all-search still returns movies and series", async ({ page, rivune }) => {
+test("Home omits Library TV rows and all-search groups populated media types", async ({ page, rivune }) => {
   rivune.setSearchResponse("movie", 0, { results: [result("movie-addon", "movie-search", [{ id: "movie-result", type: "movie", name: "Search Movie" }])], errors: [] });
   rivune.setSearchResponse("series", 0, { results: [result("series-addon", "series-search", [{ id: "series-result", type: "series", name: "Search Series" }])], errors: [] });
-  rivune.setSearchResponse("tv", 0, { results: [], errors: [] });
+  rivune.setSearchResponse("tv", 0, { results: [result("iptv-addon", "tv-search", [channel("search-tv", "Search Live TV")], "tv", "search")], errors: [] });
+  rivune.setSearchResponse("anime", 0, { results: [result("fkstream-addon", "fkstream-search", [{ id: "anime-result", type: "anime", name: "Search Anime" }], "anime", "search")], errors: [] });
+  rivune.setSearchResponse("other", 0, { results: [result("ai-metadata-addon", "gemini.search", [{ id: "other-result", type: "other", name: "Search Other" }], "other", "search")], errors: [] });
 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "IPTV — In your library" })).toHaveCount(0);
@@ -236,8 +278,28 @@ test("Home omits Library TV rows and all-search still returns movies and series"
   await page.locator(".search-page .search-box input").fill("search");
   await expect(page.getByRole("button", { name: "Open Search Movie" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Search Series" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Search Anime" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Search Other" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Search Live TV" })).toBeVisible();
+  await expect(page.locator(".search-result-section > .section-heading h2")).toHaveText(["Movies", "Series", "Anime", "Other", "Live TV"]);
+  const movieCard = page.getByRole("button", { name: "Open Search Movie" });
+  const seriesCard = page.getByRole("button", { name: "Open Search Series" });
+  const animeCard = page.getByRole("button", { name: "Open Search Anime" });
+  const otherCard = page.getByRole("button", { name: "Open Search Other" });
+  const liveTVCard = page.getByRole("button", { name: "Open Search Live TV" });
+  await movieCard.focus();
+  await movieCard.press("ArrowDown");
+  await expect(seriesCard).toBeFocused();
+  await seriesCard.press("ArrowDown");
+  await expect(animeCard).toBeFocused();
+  await animeCard.press("ArrowDown");
+  await expect(otherCard).toBeFocused();
+  await otherCard.press("ArrowDown");
+  await expect(liveTVCard).toBeFocused();
   expect(rivune.matching("/api/v1/addons/catalogs/search/movie", "GET")).toHaveLength(1);
   expect(rivune.matching("/api/v1/addons/catalogs/search/series", "GET")).toHaveLength(1);
+  expect(rivune.matching("/api/v1/addons/catalogs/search/anime", "GET")).toHaveLength(1);
+  expect(rivune.matching("/api/v1/addons/catalogs/search/other", "GET")).toHaveLength(1);
 });
 
 test("Search clears results from the previous filter when the replacement filter fails", async ({ page, rivune }) => {

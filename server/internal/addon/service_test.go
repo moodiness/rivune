@@ -757,7 +757,7 @@ func TestPlanCatalogSearchAdaptsEachTVCatalog(t *testing.T) {
 				ID:   "modern",
 				Extra: []ExtraProp{
 					{Name: "search", IsRequired: true},
-					{Name: "skip"},
+					{Name: "skip", IsRequired: true, Default: "0"},
 					{Name: "limit"},
 					{Name: "country", IsRequired: true, Default: "US"},
 				},
@@ -800,7 +800,6 @@ func TestPlanCatalogSearchAdaptsEachTVCatalog(t *testing.T) {
 	}
 	if got, want := firstPage[0].path.Extra, []ExtraValue{
 		{Name: "search", Value: "news"},
-		{Name: "skip", Value: "0"},
 		{Name: "limit", Value: "24"},
 		{Name: "country", Value: "US"},
 	}; !reflect.DeepEqual(got, want) {

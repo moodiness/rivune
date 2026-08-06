@@ -504,6 +504,7 @@ type CatalogDescriptor struct {
 	Position     int             `json:"position"`
 	Catalog      ManifestCatalog `json:"catalog"`
 	AddonCatalog bool            `json:"addonCatalog"`
+	Searchable   bool            `json:"searchable"`
 }
 
 func NormalizeTransportURL(raw string) (string, error) {

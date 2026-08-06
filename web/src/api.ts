@@ -3,6 +3,7 @@ import { clearMediaCaches } from "./homeCache";
 import { clearMetadataCache } from "./metadataCache";
 import type {
   Account,
+  AddonCatalogDescriptor,
   AccessCategory,
   AvatarPreset,
   CalendarResponse,
@@ -438,7 +439,7 @@ export const api = {
   updateAddon: (id: string, profileIds: string[], replacementTransportUrl?: string) => request<ManagedAddon>(`/addons/${id}`, { method: "PUT", body: JSON.stringify({ ...(replacementTransportUrl ? { transportUrl: replacementTransportUrl } : {}), profileIds }) }),
   reorderAddons: (addonIds: string[]) => request<{ addons: InstalledAddon[] }>("/addons/order", { method: "PUT", body: JSON.stringify({ addonIds }) }),
   deleteAddon: (id: string) => request<void>(`/addons/${id}`, { method: "DELETE" }),
-  addonCatalogs: () => request<{ catalogs: Array<{ addonId: string; manifestId: string; position: number; catalog: { type: string; id: string; name?: string }; addonCatalog: boolean }> }>("/addons/catalogs"),
+  addonCatalogs: (signal?: AbortSignal) => request<{ catalogs: AddonCatalogDescriptor[] }>("/addons/catalogs", { signal }),
   search: (type: string, search: string, skip: number, limit: number, signal?: AbortSignal) => request<ResourceBatch>(`/addons/catalogs/search/${encodeURIComponent(type)}${query({ search, skip, limit })}`, { signal }),
   resources: (resource: "catalog" | "addon_catalog" | "meta", type: string, id: string) => request<ResourceBatch>(`/addons/resources/${encodeURIComponent(resource)}/${encodeURIComponent(type)}/${encodeURIComponent(id)}`),
 

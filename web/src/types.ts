@@ -142,6 +142,27 @@ export type DeviceAuthorization = {
 
 export type CollectionExtra = { name: string; value: string };
 export type AddonCatalogSource = { addonId: string; manifestId?: string; type: string; catalogId: string; extra?: CollectionExtra[] };
+export type AddonCatalogDescriptor = {
+  addonId: string;
+  manifestId: string;
+  position: number;
+  catalog: {
+    type: string;
+    id: string;
+    name?: string;
+    extra?: Array<{
+      name: string;
+      isRequired?: boolean;
+      default?: string;
+      options?: string[];
+      optionsLimit?: number;
+    }>;
+    extraRequired?: string[];
+    extraSupported?: string[];
+  };
+  addonCatalog: boolean;
+  searchable: boolean;
+};
 export type TMDBFilters = {
   genres?: number[];
   releaseDateFrom?: string;

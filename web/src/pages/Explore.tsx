@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Bookmark, Check, Clapperboard, Compass, Film, Info, ListVideo, LoaderCircle, Play, Radio, RefreshCw, RotateCcw, Search, Sparkles, Star, Trash2, Tv, WandSparkles, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Bookmark, Check, Clapperboard, Compass, Film, Info, ListVideo, LoaderCircle, Play, Radio, RefreshCw, RotateCcw, Search, Shapes, Sparkles, Star, Trash2, Tv, WandSparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { principalIdentity, useAuth } from "../auth";
@@ -8,7 +8,7 @@ import { mediaFromLibraryItem, mediaIdentity, resolveMediaTitle } from "../media
 import { homeCollectionSignature, homeFolderCacheKey, readContinueCache, readHomeCache, writeContinueCache, writeHomeCache, writeHomeFolderCache, type CachedContinueItem } from "../homeCache";
 import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
 import { mediaTypeLabel } from "../media";
-import type { Collection, CollectionListResponse, CurrentProgram, LibraryItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch, TVLibraryIdentity, TVLibraryMembershipResult } from "../types";
+import type { AddonCatalogDescriptor, Collection, CollectionListResponse, CurrentProgram, LibraryItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch, TVLibraryIdentity, TVLibraryMembershipResult } from "../types";
 import type { ActionMenuAnchor } from "../components";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
@@ -220,6 +220,34 @@ function summarizeSearchOutcomes(outcomes: PromiseSettledResult<ResourceBatch>[]
     items,
     hasFullPage: resourceBatches.some((batch) => mediaPageIsFull(batch, limit)),
   };
+}
+
+const fallbackSearchTypes = ["movie", "series", "tv"];
+const leadingSearchTypes = ["movie", "series", "anime", "other"];
+
+function discoverSearchCatalogs(catalogs: AddonCatalogDescriptor[]): string[] {
+  const seen = new Set<string>();
+  const types: string[] = [];
+  for (const descriptor of catalogs) {
+    const { catalog } = descriptor;
+    if (descriptor.addonCatalog || !descriptor.searchable || !catalog.type.trim() || seen.has(catalog.type)) continue;
+    seen.add(catalog.type);
+    types.push(catalog.type);
+  }
+  return [
+    ...leadingSearchTypes.filter((type) => seen.has(type)),
+    ...types.filter((type) => !leadingSearchTypes.includes(type) && type !== "tv"),
+    ...(seen.has("tv") ? ["tv"] : []),
+  ];
+}
+
+function searchTypeLabel(type: string): string {
+  if (type === "movie") return t("media.filter.movies");
+  if (type === "series") return t("media.filter.series");
+  if (type === "tv") return t("media.type.liveTv");
+  if (type.toLowerCase() === "anime") return mediaTypeLabel(type);
+  const words = type.trim().replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  return words ? words.charAt(0).toLocaleUpperCase() + words.slice(1) : type;
 }
 
 function mergeUniqueMedia(current: MediaItem[], incoming: MediaItem[]): MediaItem[] {
@@ -1012,7 +1040,8 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
-  const [filter, setFilter] = useState<"all" | "movie" | "series" | "tv">("all");
+  const [filter, setFilter] = useState<string>("all");
+  const [catalogDiscovery, setCatalogDiscovery] = useState<{ profileID: string; status: "loading" | "success" | "failure"; types: string[] }>({ profileID: "", status: "loading", types: [] });
   const [hasMore, setHasMore] = useState(false);
   const [nextSkip, setNextSkip] = useState(pageSize);
   const [retryVersion, setRetryVersion] = useState(0);
@@ -1025,13 +1054,64 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   const membershipRevisionRef = useRef(mediaRevision);
   const localMembershipRevisionPendingRef = useRef(false);
   const normalizedQuery = query.trim();
-  const searchTypes = filter === "all" ? ["movie", "series", "tv"] : [filter];
+  const discoveryReady = catalogDiscovery.profileID === mediaPreferences.profileID && catalogDiscovery.status !== "loading";
+  const discoveredSearchTypes = discoveryReady ? catalogDiscovery.types : undefined;
+  const searchTypes = discoveredSearchTypes === undefined
+    ? []
+    : filter === "all"
+      ? discoveredSearchTypes
+      : discoveredSearchTypes.includes(filter) ? [filter] : [];
+  const allSearchGroups = useMemo(() => {
+    if (filter !== "all") return [];
+    const itemsByType = new Map<string, MediaItem[]>();
+    for (const item of items) {
+      const type = item.mediaType.trim().toLowerCase() || "other";
+      const groupedItems = itemsByType.get(type);
+      if (groupedItems) groupedItems.push(item);
+      else itemsByType.set(type, [item]);
+    }
+    const orderedTypes: string[] = [];
+    const includedTypes = new Set<string>();
+    const appendType = (rawType: string) => {
+      const type = rawType.trim().toLowerCase();
+      if (!type || type === "tv" || includedTypes.has(type) || !itemsByType.has(type)) return;
+      includedTypes.add(type);
+      orderedTypes.push(type);
+    };
+    for (const type of ["movie", "series", "anime"]) appendType(type);
+    for (const type of catalogDiscovery.types) appendType(type);
+    for (const type of itemsByType.keys()) appendType(type);
+    if (itemsByType.has("tv")) orderedTypes.push("tv");
+    return orderedTypes.map((type) => ({ type, items: itemsByType.get(type)! }));
+  }, [catalogDiscovery.types, filter, items]);
 
   useEffect(() => {
     if (!mediaPreferences.profileID || loadedProfileRef.current === mediaPreferences.profileID) return;
     loadedProfileRef.current = mediaPreferences.profileID;
     setQuery(sessionStorage.getItem(`rivune.search.${mediaPreferences.profileID}`) ?? "");
     setFilter("all");
+  }, [mediaPreferences.profileID]);
+
+  useEffect(() => {
+    const profileID = mediaPreferences.profileID;
+    const controller = new AbortController();
+    let active = true;
+    setCatalogDiscovery({ profileID, status: "loading", types: [] });
+    if (!profileID) {
+      setCatalogDiscovery({ profileID, status: "success", types: [] });
+      return () => controller.abort();
+    }
+    void api.addonCatalogs(controller.signal).then((response) => {
+      if (!active || controller.signal.aborted) return;
+      setCatalogDiscovery({ profileID, status: "success", types: discoverSearchCatalogs(response.catalogs) });
+    }).catch(() => {
+      if (!active || controller.signal.aborted) return;
+      setCatalogDiscovery({ profileID, status: "failure", types: [...fallbackSearchTypes] });
+    });
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [mediaPreferences.profileID]);
 
 
@@ -1043,6 +1123,22 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     setTvLibraryMembership(new Map());
     setCheckedTvIdentities(new Set());
     if (normalizedQuery.length < 2) {
+      setItems([]);
+      setError("");
+      setWarning("");
+      setLoading(false);
+      setHasMore(false);
+      return;
+    }
+    if (!discoveryReady) {
+      setItems([]);
+      setError("");
+      setWarning("");
+      setLoading(true);
+      setHasMore(false);
+      return;
+    }
+    if (searchTypes.length === 0) {
       setItems([]);
       setError("");
       setWarning("");
@@ -1100,7 +1196,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [filter, mediaPreferences.profileID, normalizedQuery, retryVersion]);
+  }, [catalogDiscovery, filter, mediaPreferences.profileID, normalizedQuery, retryVersion]);
 
   useEffect(() => {
     if (membershipRevisionRef.current === mediaRevision) return;
@@ -1135,6 +1231,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   }, []);
 
   async function loadMore() {
+    if (!discoveryReady || searchTypes.length === 0) return;
     paginationControllerRef.current?.abort();
     const controller = new AbortController();
     const generation = searchRequestGenerationRef.current;
@@ -1231,15 +1328,38 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     setLoadingMore(false);
   }
 
+  function renderSearchResult(item: MediaItem) {
+    const identity = mediaIdentity(item);
+    const saved = item.mediaType === "tv" && tvLibraryMembership.has(identity);
+    const metadata = item.mediaType === "tv" ? tvMetadata(item) : "";
+    return <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={identity}>
+      <MediaCard
+        shape={item.mediaType === "tv" ? "landscape" : "poster"}
+        title={item.title}
+        image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl || item.logoUrl : item.posterUrl}
+        backdrop={item.backgroundUrl}
+        subtitle={item.mediaType === "tv" ? tvTileSubtitle(item) : item.releaseInfo || mediaTypeLabel(item.mediaType)}
+        accessibleLabel={item.sourceName ? `${t("media.open", { title: item.title })} · ${item.sourceName}` : undefined}
+        badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined}
+        onClick={() => onOpenMedia(item)}
+      />
+      {metadata && <small className="tv-media-tile__meta">{metadata}</small>}
+      {item.mediaType === "tv" && <Button className="tv-media-tile__library" variant={saved ? "secondary" : "ghost"} loading={savingIdentity === identity} disabled={!checkedTvIdentities.has(identity)} aria-label={`${t(saved ? "library.actions.inLibrary" : "library.actions.add")}: ${item.title}`} onClick={() => void toggleTvLibrary(item)}>
+        {saved ? <Check size={16} /> : <Bookmark size={16} />}
+        {t(saved ? "library.actions.inLibrary" : "library.actions.add")}
+      </Button>}
+    </div>;
+  }
+
   return <div className="standard-page search-page page-enter">
     <SectionHeading eyebrow={t("search.eyebrow")} title={t("search.title")} description={t("search.description")} />
     <div className="search-box"><Search size={23} /><input type="search" value={query} onChange={(event) => updateQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && query) { event.preventDefault(); updateQuery(""); } }} aria-label={t("nav.search")} aria-keyshortcuts="Escape" placeholder={t("search.placeholder")} autoFocus />{query && <button type="button" className="search-box__clear" aria-label={t("common.close")} title={t("common.close")} onClick={() => updateQuery("")}><X size={17} /></button>}{loading && <LoaderCircle className="spin" />}</div>
     <div className="browse-toolbar">
       <div className="filter-pills" role="group" aria-label={t("media.filter.groupLabel")} onKeyDown={(event) => { handleDirectionalFocus(event, { orientation: "horizontal" }); }}>
         <button type="button" className={filter === "all" ? "is-active" : ""} aria-pressed={filter === "all"} onClick={() => selectSearchFilter("all")}><Compass size={16} /> {t("media.filter.all")}</button>
-        <button type="button" className={filter === "movie" ? "is-active" : ""} aria-pressed={filter === "movie"} onClick={() => selectSearchFilter("movie")}><Film size={16} /> {t("media.filter.movies")}</button>
-        <button type="button" className={filter === "series" ? "is-active" : ""} aria-pressed={filter === "series"} onClick={() => selectSearchFilter("series")}><Tv size={16} /> {t("media.filter.series")}</button>
-        <button type="button" className={filter === "tv" ? "is-active" : ""} aria-pressed={filter === "tv"} onClick={() => selectSearchFilter("tv")}><Radio size={16} /> {t("media.type.liveTv")}</button>
+        {discoveredSearchTypes?.map((type) => <button key={type} type="button" className={filter === type ? "is-active" : ""} aria-pressed={filter === type} onClick={() => selectSearchFilter(type)}>
+          {type === "movie" ? <Film size={16} /> : type === "series" ? <Tv size={16} /> : type === "tv" ? <Radio size={16} /> : type.toLowerCase() === "other" ? <Shapes size={16} /> : <Clapperboard size={16} />} {searchTypeLabel(type)}
+        </button>)}
       </div>
       {normalizedQuery.length >= 2 && !loading && <span className="browse-toolbar__count" role="status">{t(items.length === 1 ? "common.results.count.one" : "common.results.count.many", { count: items.length })}</span>}
     </div>
@@ -1251,28 +1371,12 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
         ? <div className={`media-grid media-grid--adaptive browse-skeleton-grid${error ? " browse-skeleton-grid--replacement" : ""}`} aria-busy={loading || undefined} aria-hidden={error ? true : undefined}>{[0, 1, 2, 3, 4, 5].map((value) => <Skeleton key={value} className={filter === "tv" ? "card-skeleton card-skeleton--landscape" : "card-skeleton"} />)}</div>
         : items.length === 0
           ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} />
-          : <div className="media-grid media-grid--adaptive" onKeyDown={handleBrowseGridKeyDown}>{items.map((item) => {
-            const identity = mediaIdentity(item);
-            const saved = item.mediaType === "tv" && tvLibraryMembership.has(identity);
-            const metadata = item.mediaType === "tv" ? tvMetadata(item) : "";
-            return <div className={item.mediaType === "tv" ? "tv-media-tile" : "media-tile"} key={identity}>
-              <MediaCard
-                shape={item.mediaType === "tv" ? "landscape" : "poster"}
-                title={item.title}
-                image={item.mediaType === "tv" ? item.backgroundUrl || item.posterUrl || item.logoUrl : item.posterUrl}
-                backdrop={item.backgroundUrl}
-                subtitle={item.mediaType === "tv" ? tvTileSubtitle(item) : item.releaseInfo || mediaTypeLabel(item.mediaType)}
-                accessibleLabel={item.sourceName ? `${t("media.open", { title: item.title })} · ${item.sourceName}` : undefined}
-                badge={item.mediaType === "tv" ? mediaTypeLabel("tv") : undefined}
-                onClick={() => onOpenMedia(item)}
-              />
-              {metadata && <small className="tv-media-tile__meta">{metadata}</small>}
-              {item.mediaType === "tv" && <Button className="tv-media-tile__library" variant={saved ? "secondary" : "ghost"} loading={savingIdentity === identity} disabled={!checkedTvIdentities.has(identity)} aria-label={`${t(saved ? "library.actions.inLibrary" : "library.actions.add")}: ${item.title}`} onClick={() => void toggleTvLibrary(item)}>
-                {saved ? <Check size={16} /> : <Bookmark size={16} />}
-                {t(saved ? "library.actions.inLibrary" : "library.actions.add")}
-              </Button>}
-            </div>;
-          })}</div>}
+          : filter === "all"
+            ? <div className="search-result-groups" onKeyDown={handleBrowseGridKeyDown}>{allSearchGroups.map((group) => <section className="search-result-section" key={group.type}>
+              <SectionHeading title={searchTypeLabel(group.type)} />
+              <div className="media-grid media-grid--adaptive">{group.items.map(renderSearchResult)}</div>
+            </section>)}</div>
+            : <div className="media-grid media-grid--adaptive" onKeyDown={handleBrowseGridKeyDown}>{items.map(renderSearchResult)}</div>}
     {hasMore && items.length > 0 && <div className="load-more"><Button variant="secondary" loading={loadingMore} aria-label={t("common.actions.loadMore")} onClick={() => void loadMore()}>{t("common.actions.loadMore")}</Button></div>}
   </div>;
 }

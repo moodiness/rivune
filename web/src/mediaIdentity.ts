@@ -3,12 +3,14 @@ import type { LibraryItem, MediaItem } from "./types";
 
 export type MediaIdentityInput = Pick<MediaItem, "id" | "mediaType" | "resourceId" | "sourceAddonId" | "titleId">;
 
+const globallyIdentifiedMediaTypes = new Set(["movie", "series", "episode"]);
+
 export function mediaResourceID(item: Pick<MediaItem, "id" | "resourceId">): string {
   return item.resourceId?.trim() || item.id;
 }
 
 export function mediaIdentity(item: MediaIdentityInput): string {
-  if (item.mediaType === "tv") return `tv:${item.sourceAddonId?.trim() ?? ""}:${mediaResourceID(item)}`;
+  if (!globallyIdentifiedMediaTypes.has(item.mediaType)) return `${item.mediaType}:${item.sourceAddonId?.trim() ?? ""}:${mediaResourceID(item)}`;
   return `${item.mediaType}:${item.titleId?.trim() || item.id}`;
 }
 

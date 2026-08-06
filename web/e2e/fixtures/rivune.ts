@@ -1300,6 +1300,18 @@ export class RivuneHarness {
     }
     if (path === "/metadata/series/series-anime") { await json(route, animeSeries); return; }
     if (path === "/metadata/titles/movie-1") { await json(route, movie); return; }
+    if (path === "/addons/catalogs" && request.method() === "GET") {
+      await json(route, { catalogs: [
+        { addonId: "cinema-addon", manifestId: "cinema-manifest", position: 0, catalog: { type: "movie", id: "movie-search", name: "Movies", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
+        { addonId: "series-addon", manifestId: "series-manifest", position: 1, catalog: { type: "series", id: "series-search", name: "Series", extraSupported: ["search", "skip", "limit"] }, addonCatalog: false, searchable: true },
+        { addonId: "iptv-addon", manifestId: "iptv-manifest", position: 2, catalog: { type: "tv", id: "tv-search", name: "Live TV", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
+        { addonId: "ai-metadata-addon", manifestId: "ai-metadata-manifest", position: 3, catalog: { type: "other", id: "gemini.search", name: "Recherche IA", extra: [{ name: "search" }] }, addonCatalog: false, searchable: true },
+        { addonId: "fkstream-addon", manifestId: "fkstream-manifest", position: 4, catalog: { type: "anime", id: "fkstream-search", name: "FKStream Anime", extra: [{ name: "search" }, { name: "skip" }, { name: "limit" }] }, addonCatalog: false, searchable: true },
+        { addonId: "documentary-addon", manifestId: "documentary-manifest", position: 5, catalog: { type: "documentary", id: "documentary-conflict", name: "Documentaries", extra: [], extraSupported: ["search"] }, addonCatalog: false, searchable: false },
+        { addonId: "community-addon", manifestId: "community-manifest", position: 6, catalog: { type: "community", id: "community-search", name: "Community", extra: [{ name: "search" }] }, addonCatalog: true, searchable: false },
+      ] });
+      return;
+    }
     const catalogSearch = path.match(/^\/addons\/catalogs\/search\/([^/]+)$/);
     if (catalogSearch && request.method() === "GET") {
       const type = decodeURIComponent(catalogSearch[1]);

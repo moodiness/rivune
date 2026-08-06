@@ -396,7 +396,7 @@ func (service *Service) Catalogs(ctx context.Context, principal auth.Principal) 
 	for _, installed := range addons {
 		for _, catalog := range installed.parsedManifest.Catalogs {
 			catalogs = append(catalogs, CatalogDescriptor{
-				AddonID: installed.ID, ManifestID: installed.parsedManifest.ID, Position: installed.Position, Catalog: catalog,
+				AddonID: installed.ID, ManifestID: installed.parsedManifest.ID, Position: installed.Position, Catalog: catalog, Searchable: catalog.SupportsSearch(),
 			})
 		}
 		for _, catalog := range installed.parsedManifest.AddonCatalogs {
@@ -590,6 +590,9 @@ func planCatalogSearch(addons []InstalledAddon, contentType string, input Catalo
 			})
 			if !manifest.Supports(path) {
 				continue
+			}
+			if input.Skip == 0 {
+				path.Extra = slices.DeleteFunc(path.Extra, func(value ExtraValue) bool { return value.Name == "skip" })
 			}
 			request := plannedRequest{addon: installed, path: path}
 			key := plannedRequestKey(request)

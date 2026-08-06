@@ -4055,7 +4055,7 @@ components:
     AddonCatalogDescriptor:
       type: object
       additionalProperties: false
-      required: [addonId, manifestId, position, catalog, addonCatalog]
+      required: [addonId, manifestId, position, catalog, addonCatalog, searchable]
       properties:
         addonId:
           type: string
@@ -4069,6 +4069,9 @@ components:
           $ref: "#/components/schemas/StremioManifestCatalog"
         addonCatalog:
           type: boolean
+        searchable:
+          type: boolean
+          description: Whether this regular catalog can participate in the Search endpoint after applying the manifest's modern-versus-legacy extra precedence.
     AddonCachePolicy:
       type: object
       additionalProperties: false
