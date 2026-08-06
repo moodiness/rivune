@@ -35,6 +35,56 @@ func TestPublicAdmissionBoundsConcurrentWorkBySourceAndGlobally(t *testing.T) {
 	}
 }
 
+func TestCalendarFeedAdmissionEnforcesConcurrencyAndAttemptBudget(t *testing.T) {
+	admission := newCalendarFeedAdmission()
+	first, _, admitted := admission.acquire("198.51.100.1")
+	if !admitted {
+		t.Fatal("first same-source feed was not admitted")
+	}
+	second, _, admitted := admission.acquire("198.51.100.1")
+	if !admitted {
+		t.Fatal("second same-source feed was not admitted")
+	}
+	if _, retryAfter, admitted := admission.acquire("198.51.100.1"); admitted || retryAfter != time.Second {
+		t.Fatalf("third same-source feed admitted=%v retry=%s", admitted, retryAfter)
+	}
+	first()
+	second()
+
+	admission = newCalendarFeedAdmission()
+	releases := make([]func(), 0, calendarFeedGlobalConcurrency)
+	for index := range calendarFeedGlobalConcurrency {
+		release, _, admitted := admission.acquire("198.51.100." + strconv.Itoa(index+1))
+		if !admitted {
+			t.Fatalf("feed %d was refused below global concurrency", index+1)
+		}
+		releases = append(releases, release)
+	}
+	if _, retryAfter, admitted := admission.acquire("203.0.113.1"); admitted || retryAfter != time.Second {
+		t.Fatalf("ninth concurrent feed admitted=%v retry=%s", admitted, retryAfter)
+	}
+	for _, release := range releases {
+		release()
+	}
+
+	admission = newCalendarFeedAdmission()
+	current := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	admission.now = func() time.Time { return current }
+	for attempt := range calendarFeedSourceAttempts {
+		release, _, admitted := admission.acquire("192.0.2.1")
+		if !admitted {
+			t.Fatalf("attempt %d was refused within the feed budget", attempt+1)
+		}
+		release()
+	}
+	if _, retryAfter, admitted := admission.acquire("192.0.2.1"); admitted || retryAfter != time.Minute {
+		t.Fatalf("attempt above feed budget admitted=%v retry=%s", admitted, retryAfter)
+	}
+	if admission.maximumSources != calendarFeedTrackedSources {
+		t.Fatalf("tracked source capacity=%d want %d", admission.maximumSources, calendarFeedTrackedSources)
+	}
+}
+
 func TestPublicAdmissionUsesIPv4AndIPv6NetworkGranularity(t *testing.T) {
 	admission := newRequestAdmission(2, 1, 10, 10, time.Minute)
 	firstRelease, _, admitted := admission.acquire("2001:db8:1:2::1")

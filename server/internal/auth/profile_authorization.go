@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"time"
@@ -16,15 +17,20 @@ type profileAuthorizationQuerier interface {
 
 // ReloadAndLockPrincipal reloads the mutable authorization state for a
 // captured session. Locks follow the mutation order used by account and
-// profile updates: user, device, profile, profile grant, then session.
+// profile updates: user, device, profile, profile grant, then session. The
+// caller supplies the validated instance timezone used for profile restrictions.
 // It is intended for deferred work that must not trust enqueue-time claims.
 func ReloadAndLockPrincipal(
 	ctx context.Context,
 	tx pgx.Tx,
 	captured Principal,
 	now time.Time,
+	configuredLocation *time.Location,
 ) (Principal, bool, error) {
-	if captured.ActiveProfileID == nil {
+	if configuredLocation == nil {
+		return Principal{}, false, fmt.Errorf("configured timezone is required")
+	}
+	if captured.ActiveProfileID == nil || len(captured.ProfileContextHash) == 0 {
 		return Principal{}, false, nil
 	}
 
@@ -77,12 +83,13 @@ func ReloadAndLockPrincipal(
 	}
 
 	hasProfileAccess := true
+	var grantedCanManage bool
 	if err := tx.QueryRow(ctx, `
 		SELECT can_manage
 		FROM user_profile_access
 		WHERE user_id::text = $1 AND profile_id::text = $2
 		FOR SHARE
-	`, captured.UserID, *captured.ActiveProfileID).Scan(&principal.ActiveProfileCanManage); err != nil {
+	`, captured.UserID, *captured.ActiveProfileID).Scan(&grantedCanManage); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			hasProfileAccess = false
 		} else {
@@ -92,7 +99,7 @@ func ReloadAndLockPrincipal(
 
 	if err := tx.QueryRow(ctx, `
 		SELECT id::text, authorization_scope, category_id::text,
-		       profile_grant_expires_at
+		       profile_grant_expires_at, profile_context_hash
 		FROM auth_sessions
 		WHERE id::text = $1
 		  AND user_id::text = $2
@@ -104,11 +111,15 @@ func ReloadAndLockPrincipal(
 	`, captured.SessionID, captured.UserID, captured.DeviceID, *captured.ActiveProfileID).Scan(
 		&principal.SessionID, &principal.AuthorizationScope,
 		&principal.CategoryID, &principal.ProfileGrantExpiresAt,
+		&principal.ProfileContextHash,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Principal{}, false, nil
 		}
 		return Principal{}, false, fmt.Errorf("lock deferred authorization session: %w", err)
+	}
+	if subtle.ConstantTimeCompare(principal.ProfileContextHash, captured.ProfileContextHash) != 1 {
+		return Principal{}, false, nil
 	}
 
 	if !validSessionScope(
@@ -120,6 +131,8 @@ func ReloadAndLockPrincipal(
 	) || (principal.AuthorizationScope == AuthorizationScopeCategory && !hasProfileAccess) {
 		return Principal{}, false, nil
 	}
+	principal.ActiveProfileCanManage = principal.IsGlobalAdministrator() || grantedCanManage
+	access.AccessTimezone = configuredLocation.String()
 	if principal.ProfileGrantExpiresAt == nil ||
 		!principal.ProfileGrantExpiresAt.After(now) ||
 		!ProfileAccessibleAt(access, now) {

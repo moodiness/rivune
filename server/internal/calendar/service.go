@@ -3,6 +3,8 @@ package calendar
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -22,35 +24,54 @@ import (
 var (
 	ErrInvalidInput    = errors.New("invalid calendar range")
 	ErrProfileRequired = errors.New("active profile required")
+	ErrNotFound        = errors.New("calendar link not found")
+	ErrLinkExists      = errors.New("calendar link already exists")
+	ErrCapacity        = errors.New("calendar event capacity exceeded")
 )
 
 const (
 	maximumRangeDays          = 93
+	maximumCalendarEvents     = 5_000
+	calendarEventQueryLimit   = maximumCalendarEvents + 1
 	defaultRefreshMinimum     = 5 * time.Minute
 	calendarTitlePageSize     = 32
 	calendarSeasonBudget      = 64
 	defaultRefreshClaimLease  = 10 * time.Minute
 	defaultRefreshTurnTimeout = 4 * time.Minute
+	calendarTokenEntropyBytes = 32
+	calendarTokenPrefix       = "rivune_cal_"
 )
 
 type Event struct {
-	ID               string `json:"id"`
-	TitleID          string `json:"titleId"`
-	MediaType        string `json:"mediaType"`
-	Title            string `json:"title"`
-	ReleaseDate      string `json:"releaseDate"`
-	PosterURL        string `json:"posterUrl,omitempty"`
-	ResourceID       string `json:"resourceId,omitempty"`
-	ResourceProvider string `json:"resourceProvider,omitempty"`
-	SeriesTitle      string `json:"seriesTitle,omitempty"`
-	SeriesID         string `json:"seriesId,omitempty"`
-	SeasonID         string `json:"seasonId,omitempty"`
-	SeasonNumber     *int   `json:"seasonNumber,omitempty"`
-	EpisodeNumber    *int   `json:"episodeNumber,omitempty"`
+	ID               string    `json:"id"`
+	TitleID          string    `json:"titleId"`
+	MediaType        string    `json:"mediaType"`
+	Title            string    `json:"title"`
+	ReleaseDate      string    `json:"releaseDate"`
+	PosterURL        string    `json:"posterUrl,omitempty"`
+	ResourceID       string    `json:"resourceId,omitempty"`
+	ResourceProvider string    `json:"resourceProvider,omitempty"`
+	SeriesTitle      string    `json:"seriesTitle,omitempty"`
+	SeriesID         string    `json:"seriesId,omitempty"`
+	SeasonID         string    `json:"seasonId,omitempty"`
+	SeasonNumber     *int      `json:"seasonNumber,omitempty"`
+	EpisodeNumber    *int      `json:"episodeNumber,omitempty"`
+	UpdatedAt        time.Time `json:"-"`
 }
 
 type Result struct {
 	Events []Event `json:"events"`
+}
+
+type Link struct {
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"createdAt,omitempty"`
+	RotatedAt time.Time `json:"rotatedAt,omitempty"`
+}
+
+type Credential struct {
+	Link
+	Token string `json:"-"`
 }
 
 type eventRepository interface {
@@ -95,6 +116,7 @@ type Service struct {
 	repository             eventRepository
 	metadata               metadataReader
 	logger                 *slog.Logger
+	location               *time.Location
 	now                    func() time.Time
 	refreshMinimumInterval time.Duration
 	refreshClaimLease      time.Duration
@@ -118,7 +140,14 @@ type refreshRequest struct {
 	notBefore time.Time
 }
 
-func NewService(pool *pgxpool.Pool, metadataService metadataReader, logger *slog.Logger) *Service {
+func NewService(pool *pgxpool.Pool, metadataService metadataReader, timezone string, logger *slog.Logger) (*Service, error) {
+	if timezone == "" || timezone == "Local" || strings.TrimSpace(timezone) != timezone {
+		return nil, fmt.Errorf("calendar timezone must be an explicit IANA timezone")
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		return nil, fmt.Errorf("load calendar timezone %q: %w", timezone, err)
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -127,6 +156,7 @@ func NewService(pool *pgxpool.Pool, metadataService metadataReader, logger *slog
 		repository:             &postgresRepository{},
 		metadata:               metadataService,
 		logger:                 logger,
+		location:               location,
 		now:                    time.Now,
 		refreshMinimumInterval: defaultRefreshMinimum,
 		refreshClaimLease:      defaultRefreshClaimLease,
@@ -136,7 +166,7 @@ func NewService(pool *pgxpool.Pool, metadataService metadataReader, logger *slog
 		refreshWake:            make(chan struct{}, 1),
 		pendingRefreshes:       make(map[string]refreshRequest),
 		runningRefreshes:       make(map[string]struct{}),
-	}
+	}, nil
 }
 
 func (s *Service) List(ctx context.Context, principal auth.Principal, fromValue, toValue, language string) (Result, error) {
@@ -155,6 +185,9 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, fromValue,
 		events, err := s.repository.List(ctx, nil, profileID, from, to)
 		if err != nil {
 			return Result{}, err
+		}
+		if len(events) > maximumCalendarEvents {
+			return Result{}, ErrCapacity
 		}
 		sortEvents(events)
 		s.enqueueRefresh(principal, profileID, from, to, language)
@@ -177,12 +210,251 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, fromValue,
 	if err != nil {
 		return Result{}, err
 	}
+	if len(events) > maximumCalendarEvents {
+		return Result{}, ErrCapacity
+	}
 	sortEvents(events)
 	if err := tx.Commit(ctx); err != nil {
 		return Result{}, fmt.Errorf("commit calendar query: %w", err)
 	}
 	s.enqueueRefresh(principal, profileID, from, to, language)
 	return Result{Events: events}, nil
+}
+
+func (s *Service) LinkStatus(ctx context.Context, principal auth.Principal, profileID string) (Link, error) {
+	tx, err := s.beginManagedProfile(ctx, principal, profileID)
+	if err != nil {
+		return Link{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var link Link
+	err = tx.QueryRow(ctx, `
+		SELECT created_at, rotated_at
+		FROM profile_calendar_links
+		WHERE profile_id = $1::uuid
+	`, profileID).Scan(&link.CreatedAt, &link.RotatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		link = Link{Active: false}
+	} else if err != nil {
+		return Link{}, fmt.Errorf("query calendar link status: %w", err)
+	} else {
+		link.Active = true
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Link{}, fmt.Errorf("commit calendar link status: %w", err)
+	}
+	return link, nil
+}
+
+func (s *Service) CreateLink(ctx context.Context, principal auth.Principal, profileID string) (Credential, error) {
+	token, digest, err := newCalendarToken()
+	if err != nil {
+		return Credential{}, err
+	}
+	tx, err := s.beginManagedProfile(ctx, principal, profileID)
+	if err != nil {
+		return Credential{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var result Credential
+	err = tx.QueryRow(ctx, `
+		INSERT INTO profile_calendar_links (profile_id, token_hash)
+		VALUES ($1::uuid, $2)
+		ON CONFLICT (profile_id) DO NOTHING
+		RETURNING created_at, rotated_at
+	`, profileID, digest).Scan(&result.CreatedAt, &result.RotatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Credential{}, ErrLinkExists
+	}
+	if err != nil {
+		return Credential{}, fmt.Errorf("create calendar link: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Credential{}, fmt.Errorf("commit calendar link creation: %w", err)
+	}
+	result.Active, result.Token = true, token
+	return result, nil
+}
+
+func (s *Service) RotateLink(ctx context.Context, principal auth.Principal, profileID string) (Credential, error) {
+	token, digest, err := newCalendarToken()
+	if err != nil {
+		return Credential{}, err
+	}
+	tx, err := s.beginManagedProfile(ctx, principal, profileID)
+	if err != nil {
+		return Credential{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var result Credential
+	err = tx.QueryRow(ctx, `
+		UPDATE profile_calendar_links
+		SET token_hash = $2, rotated_at = now()
+		WHERE profile_id = $1::uuid
+		RETURNING created_at, rotated_at
+	`, profileID, digest).Scan(&result.CreatedAt, &result.RotatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Credential{}, ErrNotFound
+	}
+	if err != nil {
+		return Credential{}, fmt.Errorf("rotate calendar link: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Credential{}, fmt.Errorf("commit calendar link rotation: %w", err)
+	}
+	result.Active, result.Token = true, token
+	return result, nil
+}
+
+func (s *Service) RevokeLink(ctx context.Context, principal auth.Principal, profileID string) error {
+	tx, err := s.beginManagedProfile(ctx, principal, profileID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `DELETE FROM profile_calendar_links WHERE profile_id = $1::uuid`, profileID); err != nil {
+		return fmt.Errorf("revoke calendar link: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit calendar link revocation: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) Feed(ctx context.Context, token string, includePayload bool) ([]byte, error) {
+	digest, valid := calendarTokenDigest(token)
+	if !valid || s.pool == nil {
+		return nil, ErrNotFound
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin calendar feed: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var profileID string
+	if err := tx.QueryRow(ctx, `
+		SELECT profile_id::text
+		FROM profile_calendar_links
+		WHERE token_hash = $1
+	`, digest).Scan(&profileID); errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, fmt.Errorf("resolve calendar feed profile: %w", err)
+	}
+
+	var access auth.ProfileAccess
+	err = tx.QueryRow(ctx, `
+		SELECT enabled, available_from::text, available_until::text,
+		       to_char(access_start_time, 'HH24:MI'),
+		       to_char(access_end_time, 'HH24:MI'),
+		       COALESCE(access_timezone, 'UTC')
+		FROM profiles
+		WHERE id = $1::uuid
+		FOR SHARE
+	`, profileID).Scan(
+		&access.Enabled, &access.AvailableFrom, &access.AvailableUntil,
+		&access.AccessStartTime, &access.AccessEndTime, &access.AccessTimezone,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock calendar feed profile: %w", err)
+	}
+
+	var linkStillValid bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM profile_calendar_links
+			WHERE profile_id = $1::uuid AND token_hash = $2
+			FOR SHARE
+		)
+	`, profileID, digest).Scan(&linkStillValid); err != nil {
+		return nil, fmt.Errorf("revalidate calendar feed link: %w", err)
+	}
+	if !linkStillValid {
+		return nil, ErrNotFound
+	}
+
+	now := s.now()
+	access.AccessTimezone = s.location.String()
+	if !auth.ProfileAccessibleAt(access, now) {
+		return nil, ErrNotFound
+	}
+	if !includePayload {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit calendar feed validation: %w", err)
+		}
+		return nil, nil
+	}
+	from, to := calendarFeedRange(now, s.location)
+	events, err := s.repository.List(ctx, tx, profileID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	if len(events) > maximumCalendarEvents {
+		return nil, ErrCapacity
+	}
+	sortEvents(events)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit calendar feed: %w", err)
+	}
+	return SerializeICS(events), nil
+}
+
+func (s *Service) beginManagedProfile(ctx context.Context, principal auth.Principal, profileID string) (pgx.Tx, error) {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" || principal.ActiveProfileID == nil || *principal.ActiveProfileID != profileID || s.pool == nil {
+		return nil, ErrNotFound
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin calendar link management: %w", err)
+	}
+	reloaded, valid, err := auth.ReloadAndLockPrincipal(ctx, tx, principal, s.now().UTC(), s.location)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, fmt.Errorf("reload calendar link principal: %w", err)
+	}
+	if !valid || reloaded.ActiveProfileID == nil || *reloaded.ActiveProfileID != profileID || !reloaded.ActiveProfileCanManage {
+		_ = tx.Rollback(ctx)
+		return nil, ErrNotFound
+	}
+	return tx, nil
+}
+
+func newCalendarToken() (string, []byte, error) {
+	entropy := make([]byte, calendarTokenEntropyBytes)
+	if _, err := rand.Read(entropy); err != nil {
+		return "", nil, fmt.Errorf("generate calendar token: %w", err)
+	}
+	token := calendarTokenPrefix + base64.RawURLEncoding.EncodeToString(entropy)
+	digest := sha256.Sum256([]byte(token))
+	return token, digest[:], nil
+}
+
+func calendarTokenDigest(token string) ([]byte, bool) {
+	if !strings.HasPrefix(token, calendarTokenPrefix) || strings.TrimSpace(token) != token {
+		return nil, false
+	}
+	encoded := strings.TrimPrefix(token, calendarTokenPrefix)
+	entropy, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(entropy) != calendarTokenEntropyBytes || base64.RawURLEncoding.EncodeToString(entropy) != encoded {
+		return nil, false
+	}
+	digest := sha256.Sum256([]byte(token))
+	return digest[:], true
+}
+
+func calendarFeedRange(now time.Time, location *time.Location) (time.Time, time.Time) {
+	local := now.In(location)
+	today := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location)
+	return today.AddDate(0, 0, -31), today.AddDate(0, 0, 61)
 }
 
 // Run processes one bounded refresh turn per wake-up. List only records work;
@@ -426,7 +698,7 @@ func (s *Service) claimRefreshPage(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	now := s.now().UTC()
-	principal, valid, err := auth.ReloadAndLockPrincipal(ctx, tx, request.principal, now)
+	principal, valid, err := auth.ReloadAndLockPrincipal(ctx, tx, request.principal, now, s.location)
 	if err != nil {
 		return refreshCursor{}, nil, auth.Principal{}, false, time.Time{}, fmt.Errorf("reload calendar refresh principal: %w", err)
 	}
@@ -789,52 +1061,57 @@ func (repository *postgresRepository) CompleteRefresh(
 	return completed, nextEligibleAt, nil
 }
 
+const listEventsSQL = `
+	SELECT event.id, event.title_id, event.media_type, event.title,
+	       event.release_date, event.poster_url, event.resource_id,
+	       event.resource_provider, event.series_title, event.series_id,
+	       event.season_id, event.season_number, event.episode_number,
+	       event.updated_at
+	FROM (
+		SELECT movie.id::text AS id, movie.id::text AS title_id,
+		       'movie'::text AS media_type, movie.display_title AS title,
+		       movie.release_date, COALESCE(movie.poster_url, '') AS poster_url,
+		       COALESCE(movie.resource_id, '') AS resource_id,
+		       COALESCE(movie.resource_provider, '') AS resource_provider,
+		       ''::text AS series_title, ''::text AS series_id,
+		       ''::text AS season_id, NULL::integer AS season_number,
+		       NULL::integer AS episode_number, movie.updated_at
+		FROM profile_library AS library
+		JOIN titles AS movie ON movie.id = library.title_id
+		WHERE library.profile_id = $1::uuid
+		  AND movie.media_type = 'movie'
+		  AND movie.display_title IS NOT NULL
+		  AND movie.release_date BETWEEN $2::date AND $3::date
+
+		UNION ALL
+
+		SELECT episode.id::text AS id, episode.id::text AS title_id,
+		       'episode'::text AS media_type, episode.display_title AS title,
+		       episode.release_date,
+		       COALESCE(episode.poster_url, series.poster_url, '') AS poster_url,
+		       COALESCE(series.resource_id, '') AS resource_id,
+		       COALESCE(series.resource_provider, '') AS resource_provider,
+		       series.display_title AS series_title, series.id::text AS series_id,
+		       season.id::text AS season_id, season.ordinal AS season_number,
+		       episode.ordinal AS episode_number,
+		       GREATEST(series.updated_at, season.updated_at, episode.updated_at) AS updated_at
+		FROM profile_library AS library
+		JOIN titles AS series
+		  ON series.id = library.title_id AND series.media_type = 'series'
+		JOIN titles AS season
+		  ON season.parent_id = series.id AND season.media_type = 'season'
+		JOIN titles AS episode
+		  ON episode.parent_id = season.id AND episode.media_type = 'episode'
+		WHERE library.profile_id = $1::uuid
+		  AND series.display_title IS NOT NULL
+		  AND episode.display_title IS NOT NULL
+		  AND episode.release_date BETWEEN $2::date AND $3::date
+	) AS event
+	LIMIT $4
+`
+
 func (repository *postgresRepository) List(ctx context.Context, tx pgx.Tx, profileID string, from, to time.Time) ([]Event, error) {
-	rows, err := tx.Query(ctx, `
-		SELECT event.id, event.title_id, event.media_type, event.title,
-		       event.release_date, event.poster_url, event.resource_id,
-		       event.resource_provider, event.series_title, event.series_id,
-		       event.season_id, event.season_number, event.episode_number
-		FROM (
-			SELECT movie.id::text AS id, movie.id::text AS title_id,
-			       'movie'::text AS media_type, movie.display_title AS title,
-			       movie.release_date, COALESCE(movie.poster_url, '') AS poster_url,
-			       COALESCE(movie.resource_id, '') AS resource_id,
-			       COALESCE(movie.resource_provider, '') AS resource_provider,
-			       ''::text AS series_title, ''::text AS series_id,
-			       ''::text AS season_id, NULL::integer AS season_number,
-			       NULL::integer AS episode_number
-			FROM profile_library AS library
-			JOIN titles AS movie ON movie.id = library.title_id
-			WHERE library.profile_id = $1::uuid
-			  AND movie.media_type = 'movie'
-			  AND movie.display_title IS NOT NULL
-			  AND movie.release_date BETWEEN $2::date AND $3::date
-
-			UNION ALL
-
-			SELECT episode.id::text AS id, episode.id::text AS title_id,
-			       'episode'::text AS media_type, episode.display_title AS title,
-			       episode.release_date,
-			       COALESCE(episode.poster_url, series.poster_url, '') AS poster_url,
-			       COALESCE(series.resource_id, '') AS resource_id,
-			       COALESCE(series.resource_provider, '') AS resource_provider,
-			       series.display_title AS series_title, series.id::text AS series_id,
-			       season.id::text AS season_id, season.ordinal AS season_number,
-			       episode.ordinal AS episode_number
-			FROM profile_library AS library
-			JOIN titles AS series
-			  ON series.id = library.title_id AND series.media_type = 'series'
-			JOIN titles AS season
-			  ON season.parent_id = series.id AND season.media_type = 'season'
-			JOIN titles AS episode
-			  ON episode.parent_id = season.id AND episode.media_type = 'episode'
-			WHERE library.profile_id = $1::uuid
-			  AND series.display_title IS NOT NULL
-			  AND episode.display_title IS NOT NULL
-			  AND episode.release_date BETWEEN $2::date AND $3::date
-		) AS event
-	`, profileID, from.Format(time.DateOnly), to.Format(time.DateOnly))
+	rows, err := tx.Query(ctx, listEventsSQL, profileID, from.Format(time.DateOnly), to.Format(time.DateOnly), calendarEventQueryLimit)
 	if err != nil {
 		return nil, fmt.Errorf("query calendar events: %w", err)
 	}
@@ -848,7 +1125,7 @@ func (repository *postgresRepository) List(ctx context.Context, tx pgx.Tx, profi
 			&event.ID, &event.TitleID, &event.MediaType, &event.Title,
 			&releaseDate, &event.PosterURL, &event.ResourceID,
 			&event.ResourceProvider, &event.SeriesTitle, &event.SeriesID,
-			&event.SeasonID, &event.SeasonNumber, &event.EpisodeNumber,
+			&event.SeasonID, &event.SeasonNumber, &event.EpisodeNumber, &event.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan calendar event: %w", err)
 		}

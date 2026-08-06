@@ -35,6 +35,7 @@ export type SelectProps = {
   required?: boolean;
   autoFocus?: boolean;
   className?: string;
+  fitContent?: boolean;
   id?: string;
   name?: string;
   title?: string;
@@ -58,6 +59,7 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
   required = false,
   autoFocus = false,
   className = "",
+  fitContent = false,
   id,
   name,
   title,
@@ -106,7 +108,7 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
       const viewportHeight = viewport?.height ?? window.innerHeight;
       const viewportPadding = selectToken("--select-viewport-padding");
       const popupGap = selectToken("--select-popup-gap");
-      const minimumWidth = selectToken("--select-popup-min-width");
+      const minimumWidth = fitContent ? rect.width : selectToken("--select-popup-min-width");
       const maximumWidth = selectToken("--select-popup-max-width");
       const maximumHeight = selectToken("--select-popup-max-height");
       const viewportRight = viewportLeft + viewportWidth;
@@ -142,7 +144,7 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
       window.visualViewport?.removeEventListener("resize", updatePosition);
       window.visualViewport?.removeEventListener("scroll", updatePosition);
     };
-  }, [open]);
+  }, [fitContent, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -202,7 +204,7 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
       aria-describedby={ariaDescribedBy}
       aria-invalid={ariaInvalid}
       aria-required={required || undefined}
-      className={`select__trigger ${className}`}
+      className={`select__trigger ${fitContent ? "select__trigger--fit-content" : ""} ${className}`}
       data-value={value}
       id={triggerID}
       name={name}
@@ -242,6 +244,7 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
       }}
     >
       <span className="select__value">{selectedOption?.label ?? value}</span>
+      {fitContent && <span className="select__sizer" aria-hidden="true">{options.map((option) => <span key={option.value}>{option.label}</span>)}</span>}
       <ChevronDown className="select__chevron" size={16} aria-hidden="true" />
     </button>
     {open && portalRoot && createPortal(
@@ -471,7 +474,7 @@ export function Notice({ tone = "error", children }: { tone?: "error" | "success
   return <div className={`notice notice--${tone}`} role={tone === "error" ? "alert" : "status"} aria-live="polite" aria-atomic="true">{icon}{children}</div>;
 }
 
-export function Modal({ children, onClose, className = "" }: { children: ReactNode; onClose: () => void; className?: string }) {
+export function Modal({ children, onClose, className = "", "aria-labelledby": ariaLabelledBy, "aria-describedby": ariaDescribedBy }: { children: ReactNode; onClose: () => void; className?: string; "aria-labelledby"?: string; "aria-describedby"?: string }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
@@ -483,7 +486,7 @@ export function Modal({ children, onClose, className = "" }: { children: ReactNo
   }, []);
 
   return (
-    <dialog ref={dialogRef} className="modal-layer" onCancel={(event) => { event.preventDefault(); onClose(); }} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <dialog ref={dialogRef} className="modal-layer" aria-labelledby={ariaLabelledBy} aria-describedby={ariaDescribedBy} onCancel={(event) => { event.preventDefault(); onClose(); }} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className={`modal ${className}`} role="document">
         <IconButton label={t("common.close")} className="modal__close" onClick={onClose}><X size={20} /></IconButton>
         {children}
@@ -493,9 +496,12 @@ export function Modal({ children, onClose, className = "" }: { children: ReactNo
 }
 
 export function ConfirmDialog({ title, description, confirmLabel = t("common.confirm"), loading = false, onConfirm, onCancel }: { title: string; description: string; confirmLabel?: string; loading?: boolean; onConfirm: () => void; onCancel: () => void }) {
-  return <Modal onClose={loading ? () => undefined : onCancel} className="confirm-modal">
+  const titleId = useId();
+  const descriptionId = useId();
+
+  return <Modal onClose={loading ? () => undefined : onCancel} className="confirm-modal" aria-labelledby={titleId} aria-describedby={descriptionId}>
     <span className="confirm-modal__icon"><AlertTriangle size={21} /></span>
-    <div className="confirm-modal__copy"><h2>{title}</h2><p>{description}</p></div>
+    <div className="confirm-modal__copy"><h2 id={titleId}>{title}</h2><p id={descriptionId}>{description}</p></div>
     <div className="modal-actions"><Button type="button" variant="secondary" disabled={loading} onClick={onCancel}>{t("common.cancel")}</Button><Button type="button" variant="danger" loading={loading} onClick={onConfirm}>{confirmLabel}</Button></div>
   </Modal>;
 }

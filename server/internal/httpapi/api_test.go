@@ -297,14 +297,15 @@ func startDemoSession(t *testing.T, handler http.Handler) *http.Cookie {
 
 func testAPI(service instanceService) *API {
 	api := &API{
-		config:              config.Config{PublicURL: "https://media.example", Timezone: "Europe/Paris"},
-		instances:           service,
-		settings:            &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}},
-		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
-		version:             "test",
-		credentialAdmission: newCredentialAdmission(),
-		usernameAdmission:   newCredentialUsernameAdmission(),
-		deviceCodeAdmission: newDeviceCodeAdmission(),
+		config:                config.Config{PublicURL: "https://media.example", Timezone: "Europe/Paris"},
+		instances:             service,
+		settings:              &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}},
+		logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		version:               "test",
+		credentialAdmission:   newCredentialAdmission(),
+		usernameAdmission:     newCredentialUsernameAdmission(),
+		deviceCodeAdmission:   newDeviceCodeAdmission(),
+		calendarFeedAdmission: newCalendarFeedAdmission(),
 	}
 	api.demo = demo.New(service, demo.Options{})
 	return api

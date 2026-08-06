@@ -1,10 +1,10 @@
-import { CalendarX2, ChevronLeft, ChevronRight, Film, LoaderCircle, RefreshCw, Tv } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { CalendarPlus, CalendarX2, Check, ChevronLeft, ChevronRight, Copy, Film, KeyRound, LoaderCircle, RefreshCw, Trash2, Tv } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { api, APIError } from "../api";
 import { principalIdentity, useAuth } from "../auth";
-import { Button, EmptyState, handleDirectionalFocus, IconButton, Notice, SectionHeading } from "../components";
+import { Button, ConfirmDialog, EmptyState, handleDirectionalFocus, IconButton, Modal, Notice, SectionHeading } from "../components";
 import { locale, translate as t } from "../i18n";
-import type { CalendarEvent, CalendarResponse, MediaItem } from "../types";
+import type { CalendarEvent, CalendarResponse, CalendarSubscription, MediaItem } from "../types";
 
 type Month = { year: number; month: number };
 type MonthBounds = { from: string; to: string; days: number; firstWeekday: number };
@@ -167,6 +167,151 @@ function CalendarEventCard({ event, onOpen }: { event: CalendarEvent; onOpen: (i
   </button>;
 }
 
+type SubscriptionConfirmation = "rotate" | "disable";
+type SubscriptionMutation = "create" | SubscriptionConfirmation;
+
+function CalendarSubscriptionModal({ profileId, onClose }: { profileId: string; onClose: () => void }) {
+  const [subscription, setSubscription] = useState<CalendarSubscription | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadRevision, setLoadRevision] = useState(0);
+  const [mutation, setMutation] = useState<SubscriptionMutation | null>(null);
+  const [confirmation, setConfirmation] = useState<SubscriptionConfirmation | null>(null);
+  const [error, setError] = useState("");
+  const [copyFeedback, setCopyFeedback] = useState<"copied" | "error" | "">("");
+  const urlInputId = useId();
+  const urlInputRef = useRef<HTMLInputElement>(null);
+  const inactiveActionsRef = useRef<HTMLDivElement>(null);
+  const headingId = useId();
+  const descriptionId = useId();
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError("");
+    void api.calendarSubscription(profileId).then((next) => {
+      if (active) setSubscription(next);
+    }).catch(() => {
+      if (active) setError(t("calendar.subscription.error.load"));
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [loadRevision, profileId]);
+
+  async function createSubscription(): Promise<void> {
+    setMutation("create");
+    setError("");
+    setCopyFeedback("");
+    try {
+      const next = await api.createCalendarSubscription(profileId);
+      setSubscription(next);
+      window.requestAnimationFrame(() => urlInputRef.current?.focus());
+    } catch {
+      setError(t("calendar.subscription.error.create"));
+    } finally {
+      setMutation(null);
+    }
+  }
+
+  async function rotateSubscription(): Promise<void> {
+    setMutation("rotate");
+    setError("");
+    setCopyFeedback("");
+    try {
+      const next = await api.rotateCalendarSubscription(profileId);
+      setSubscription(next);
+      window.requestAnimationFrame(() => urlInputRef.current?.focus());
+    } catch {
+      setError(t("calendar.subscription.error.rotate"));
+    } finally {
+      setMutation(null);
+      setConfirmation(null);
+    }
+  }
+
+  async function disableSubscription(): Promise<void> {
+    setMutation("disable");
+    setError("");
+    setCopyFeedback("");
+    try {
+      await api.deleteCalendarSubscription(profileId);
+      setSubscription({ active: false });
+      window.requestAnimationFrame(() => inactiveActionsRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+    } catch {
+      setError(t("calendar.subscription.error.disable"));
+    } finally {
+      setMutation(null);
+      setConfirmation(null);
+    }
+  }
+
+  async function copySubscriptionURL(): Promise<void> {
+    if (!subscription?.url) return;
+    setCopyFeedback("");
+    try {
+      await navigator.clipboard.writeText(subscription.url);
+      setCopyFeedback("copied");
+    } catch {
+      setCopyFeedback("error");
+    }
+  }
+
+  return <>
+    <Modal onClose={mutation ? () => undefined : onClose} className="calendar-subscription-modal" aria-labelledby={headingId} aria-describedby={descriptionId}>
+      <header className="calendar-subscription-modal__heading">
+        <span><CalendarPlus size={18} aria-hidden="true" /> {t("calendar.subscription.action")}</span>
+        <h2 id={headingId} data-autofocus="true" tabIndex={-1}>{t("calendar.subscription.title")}</h2>
+        <p id={descriptionId}>{t("calendar.subscription.description")}</p>
+      </header>
+
+      {loading ? <div className="calendar-subscription-state" role="status" aria-live="polite"><LoaderCircle className="spin" size={24} aria-hidden="true" /><span>{t("calendar.subscription.loading")}</span></div>
+        : subscription === null ? <div className="calendar-subscription-state calendar-subscription-state--error">
+          <Notice>{error || t("calendar.subscription.error.load")}</Notice>
+          <Button type="button" variant="secondary" onClick={() => setLoadRevision((value) => value + 1)}><RefreshCw size={17} aria-hidden="true" /> {t("common.retry")}</Button>
+        </div>
+          : <div className="calendar-subscription-content" aria-busy={mutation !== null || undefined}>
+            {error && <Notice>{error}</Notice>}
+            {subscription.active ? <>
+              <div className="calendar-subscription-status"><Check size={18} aria-hidden="true" /><p>{t("calendar.subscription.active")}</p></div>
+              {subscription.url ? <>
+                <div className="calendar-subscription-url">
+                  <label htmlFor={urlInputId}>{t("calendar.subscription.urlLabel")}</label>
+                  <div><input ref={urlInputRef} id={urlInputId} value={subscription.url} readOnly dir="ltr" spellCheck={false} autoComplete="off" /><Button type="button" variant="secondary" disabled={mutation !== null} onClick={() => void copySubscriptionURL()}>{copyFeedback === "copied" ? <Check size={17} aria-hidden="true" /> : <Copy size={17} aria-hidden="true" />} {t("calendar.subscription.copy")}</Button></div>
+                </div>
+                <p className={`calendar-subscription-feedback${copyFeedback ? " is-visible" : ""}${copyFeedback === "error" ? " is-error" : ""}`} role="status" aria-live="polite" aria-atomic="true">{copyFeedback === "copied" ? t("calendar.subscription.copied") : copyFeedback === "error" ? t("calendar.subscription.error.copy") : ""}</p>
+                <Notice tone="warning">{t("calendar.subscription.warning")}</Notice>
+              </> : <div className="calendar-subscription-hidden"><KeyRound size={18} aria-hidden="true" /><p>{t("calendar.subscription.hidden")}</p></div>}
+              <p className="calendar-subscription-window">{t("calendar.subscription.window")}</p>
+              <div className="calendar-subscription-actions" onKeyDown={(event) => { handleDirectionalFocus(event, { orientation: getComputedStyle(event.currentTarget).display === "grid" ? "vertical" : "horizontal", wrap: true }); }}>
+                <Button type="button" variant="secondary" disabled={mutation !== null} onClick={() => setConfirmation("rotate")}><RefreshCw size={17} aria-hidden="true" /> {t("calendar.subscription.regenerate")}</Button>
+                <Button type="button" variant="danger" disabled={mutation !== null} onClick={() => setConfirmation("disable")}><Trash2 size={17} aria-hidden="true" /> {t("calendar.subscription.disable")}</Button>
+              </div>
+            </> : <>
+              <div className="calendar-subscription-hidden"><KeyRound size={18} aria-hidden="true" /><p>{t("calendar.subscription.hidden")}</p></div>
+              <p className="calendar-subscription-window">{t("calendar.subscription.window")}</p>
+              <div ref={inactiveActionsRef} className="calendar-subscription-actions" onKeyDown={(event) => { handleDirectionalFocus(event, { orientation: "vertical", wrap: true }); }}><Button type="button" loading={mutation === "create"} disabled={mutation !== null} onClick={() => void createSubscription()}><CalendarPlus size={17} aria-hidden="true" /> {t("calendar.subscription.create")}</Button></div>
+            </>}
+          </div>}
+    </Modal>
+    {confirmation === "rotate" && <ConfirmDialog
+      title={t("calendar.subscription.regenerate.title")}
+      description={t("calendar.subscription.regenerate.description")}
+      confirmLabel={t("calendar.subscription.regenerate.confirm")}
+      loading={mutation === "rotate"}
+      onCancel={() => setConfirmation(null)}
+      onConfirm={() => void rotateSubscription()}
+    />}
+    {confirmation === "disable" && <ConfirmDialog
+      title={t("calendar.subscription.disable.title")}
+      description={t("calendar.subscription.disable.description")}
+      confirmLabel={t("calendar.subscription.disable.confirm")}
+      loading={mutation === "disable"}
+      onCancel={() => setConfirmation(null)}
+      onConfirm={() => void disableSubscription()}
+    />}
+  </>;
+}
+
 export function CalendarPage({ onOpenMedia }: { onOpenMedia: (item: MediaItem) => void }) {
   const { account, activeProfile, discovery } = useAuth();
   const now = new Date();
@@ -175,9 +320,11 @@ export function CalendarPage({ onOpenMedia }: { onOpenMedia: (item: MediaItem) =
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
+  const [subscriptionOpen, setSubscriptionOpen] = useState(false);
   const requestSequence = useRef(0);
   const loadedMonthRef = useRef("");
   const pageRef = useRef<HTMLDivElement>(null);
+  const subscriptionOpenerRef = useRef<HTMLButtonElement | null>(null);
   const pendingCalendarFocus = useRef<{ day: number; eventIndex?: number } | null>(null);
   const principalScope = principalIdentity(discovery, account, activeProfile);
   const weekStart = useMemo(() => firstWeekdayForLocale(locale), [locale]);
@@ -198,6 +345,11 @@ export function CalendarPage({ onOpenMedia }: { onOpenMedia: (item: MediaItem) =
   }, [locale, weekStart]);
   const monthLabel = monthFormatter.format(monthDate);
   const todayKey = dateKey(now.getFullYear(), now.getMonth(), now.getDate());
+
+  useEffect(() => {
+    setSubscriptionOpen(false);
+    subscriptionOpenerRef.current = null;
+  }, [activeProfile?.id]);
 
   useEffect(() => {
     const sequence = ++requestSequence.current;
@@ -349,11 +501,17 @@ export function CalendarPage({ onOpenMedia }: { onOpenMedia: (item: MediaItem) =
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") handleDirectionalFocus(event, { orientation: "horizontal" });
   }
 
+  function closeSubscription(): void {
+    setSubscriptionOpen(false);
+    window.requestAnimationFrame(() => subscriptionOpenerRef.current?.focus());
+  }
+
   return <div className="standard-page calendar-page page-enter" ref={pageRef}>
     <SectionHeading
       eyebrow={t("calendar.heading.eyebrow")}
       title={t("calendar.heading.title")}
       description={t("calendar.heading.description")}
+      action={activeProfile?.canManage ? <Button type="button" variant="secondary" onClick={(event) => { subscriptionOpenerRef.current = event.currentTarget; setSubscriptionOpen(true); }}><CalendarPlus size={17} aria-hidden="true" /> {t("calendar.subscription.action")}</Button> : undefined}
     />
 
     <div className="calendar-surface">
@@ -407,5 +565,6 @@ export function CalendarPage({ onOpenMedia }: { onOpenMedia: (item: MediaItem) =
           </div>
         </>}
     </div>
+    {subscriptionOpen && activeProfile?.canManage && <CalendarSubscriptionModal key={activeProfile.id} profileId={activeProfile.id} onClose={closeSubscription} />}
   </div>;
 }

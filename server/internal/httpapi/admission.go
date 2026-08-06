@@ -21,6 +21,10 @@ const (
 	deviceCodeAdmissionSourceConcurrency = 2
 	deviceCodeAdmissionSourceAttempts    = 12
 	deviceCodeAdmissionTrackedSources    = 4_096
+	calendarFeedGlobalConcurrency        = 8
+	calendarFeedSourceConcurrency        = 2
+	calendarFeedSourceAttempts           = 120
+	calendarFeedTrackedSources           = 4_096
 	publicAdmissionWindow                = time.Minute
 	publicAdmissionConcurrencyRetry      = time.Second
 	publicAdmissionCleanupLimit          = 64
@@ -148,6 +152,16 @@ func newDeviceCodeAdmission() *requestAdmission {
 		deviceCodeAdmissionSourceConcurrency,
 		deviceCodeAdmissionSourceAttempts,
 		deviceCodeAdmissionTrackedSources,
+		publicAdmissionWindow,
+	)
+}
+
+func newCalendarFeedAdmission() *requestAdmission {
+	return newRequestAdmission(
+		calendarFeedGlobalConcurrency,
+		calendarFeedSourceConcurrency,
+		calendarFeedSourceAttempts,
+		calendarFeedTrackedSources,
 		publicAdmissionWindow,
 	)
 }

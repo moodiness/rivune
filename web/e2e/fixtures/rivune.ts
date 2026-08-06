@@ -364,6 +364,8 @@ export class RivuneHarness {
   private readonly accountRefreshResponses: Array<{ status: number; delay: number }> = [];
   private readonly profileRefreshAfterSelection = new Map<string, string>();
   private readonly hiddenCategoryCounts = new Set<string>();
+  private calendarSubscriptionSequence = 0;
+  private readonly calendarSubscriptions = new Map<string, { token: string; createdAt: string; rotatedAt: string }>();
   private readonly resolvedTitles = new Map<string, Record<string, unknown>>();
   private operations = {
     metadataCache: {
@@ -705,6 +707,14 @@ export class RivuneHarness {
     return titleID;
   }
 
+  private nextCalendarSubscriptionToken(): string {
+    const sequence = ++this.calendarSubscriptionSequence;
+    const bytes = Uint8Array.from({ length: 32 }, (_, index) => (sequence + index * 37) & 0xff);
+    bytes[0] = 0xfb;
+    bytes[1] = 0xf0;
+    return `rivune_cal_${Buffer.from(bytes).toString("base64url")}`;
+  }
+
   private account() {
     const currentProfiles = this.accountProfiles();
     const sessionCategory = this.userRole === "demo"
@@ -744,6 +754,29 @@ export class RivuneHarness {
     }
     if (!url.pathname.startsWith("/api/v1") && url.pathname !== "/.well-known/rivune") {
       await route.continue();
+      return;
+    }
+
+    if (url.pathname === "/api/v1/calendar.ics") {
+      this.requests.push({ method: request.method(), pathname: url.pathname, search: new URLSearchParams(), body: undefined, profileId: this.activeProfileId, authorization: request.headers().authorization ?? null, profileContext: request.headers()["x-rivune-profile-context"] ?? null });
+      const tokenParameters = [...url.searchParams].filter(([name]) => name === "token");
+      const token = tokenParameters.length === 1 && [...url.searchParams].length === 1 ? tokenParameters[0]?.[1] : undefined;
+      const subscription = token ? [...this.calendarSubscriptions.values()].find((candidate) => candidate.token === token) : undefined;
+      if ((request.method() !== "GET" && request.method() !== "HEAD") || !subscription) {
+        const headers = { "cache-control": "private, no-store", "x-robots-tag": "noindex, nofollow" };
+        if (request.method() === "HEAD") await route.fulfill({ status: 404, headers });
+        else await route.fulfill({ status: 404, headers, body: "" });
+        return;
+      }
+      const feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Rivune//E2E//EN\r\nBEGIN:VEVENT\r\nUID:fixture-release@rivune.test\r\nDTSTAMP:20240101T000000Z\r\nDTSTART;VALUE=DATE:20240101\r\nDTEND;VALUE=DATE:20240102\r\nSUMMARY:Fixture release\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+      const headers = {
+        "cache-control": "private, no-store",
+        "content-disposition": "inline; filename=\"rivune-calendar.ics\"",
+        "content-type": "text/calendar; charset=utf-8",
+        "x-robots-tag": "noindex, nofollow",
+      };
+      if (request.method() === "HEAD") await route.fulfill({ status: 200, headers });
+      else await route.fulfill({ status: 200, headers, body: feed });
       return;
     }
 
@@ -1485,7 +1518,7 @@ export class RivuneHarness {
     }
     if (path === "/playback/sources" && request.method() === "POST") {
       const resourceId = String((body as { resourceId?: string })?.resourceId ?? "unknown");
-      await json(route, { sources: [{ id: `option-${resourceId}`, sourceRef: `source-${resourceId}`, addonId: "fixture-addon", manifestId: "fixture-manifest", streamIndex: 0, name: "Fixture 1080p", description: "Deterministic direct stream", protocol: "http", container: "mp4", expiresAt }], providerErrors: [] });
+      await json(route, { sources: [{ id: `option-${resourceId}`, sourceRef: `source-${resourceId}`, addonId: "fixture-addon", manifestId: "fixture-manifest", addonName: "Fixture Add-on", streamIndex: 0, name: "Fixture 1080p", description: "Deterministic direct stream", protocol: "http", container: "mp4", expiresAt }], providerErrors: [] });
       return;
     }
     if (path === "/playback/prepare" && request.method() === "POST") {
@@ -1548,6 +1581,46 @@ export class RivuneHarness {
       const youtubeId = movieTrailer ? "fixture-movie" : seasonNumber === "2" ? "season-two" : "season-one";
       await json(route, { trailers: [{ youtubeId, name: label, language: "en", isFallback: false, captionPreference: "en" }] });
       return;
+    }
+    const calendarLinkMatch = path.match(/^\/profiles\/([^/]+)\/calendar-link(\/rotate)?$/);
+    if (calendarLinkMatch) {
+      const profileID = decodeURIComponent(calendarLinkMatch[1]);
+      const rotate = calendarLinkMatch[2] === "/rotate";
+      const profile = this.currentProfiles().find((candidate) => candidate.id === profileID);
+      if (this.activeProfileId !== profileID || !profile?.canManage) {
+        await json(route, { error: { code: "forbidden", message: "Manager profile required" } }, 403);
+        return;
+      }
+      const current = this.calendarSubscriptions.get(profileID);
+      if (!rotate && request.method() === "GET") {
+        await json(route, current ? { active: true, createdAt: current.createdAt, rotatedAt: current.rotatedAt } : { active: false });
+        return;
+      }
+      if (!rotate && request.method() === "POST") {
+        if (current) {
+          await json(route, { error: { code: "calendar_link_exists", message: "Calendar link already exists" } }, 409);
+          return;
+        }
+        const subscription = { token: this.nextCalendarSubscriptionToken(), createdAt, rotatedAt: createdAt };
+        this.calendarSubscriptions.set(profileID, subscription);
+        await json(route, { active: true, url: `${url.origin}/api/v1/calendar.ics?token=${encodeURIComponent(subscription.token)}`, createdAt: subscription.createdAt, rotatedAt: subscription.rotatedAt }, 201);
+        return;
+      }
+      if (!rotate && request.method() === "DELETE") {
+        this.calendarSubscriptions.delete(profileID);
+        await route.fulfill({ status: 204 });
+        return;
+      }
+      if (rotate && request.method() === "POST") {
+        if (!current) {
+          await json(route, { error: { code: "calendar_link_not_found", message: "Calendar link not found" } }, 404);
+          return;
+        }
+        const subscription = { ...current, token: this.nextCalendarSubscriptionToken(), rotatedAt: "2024-01-02T00:00:00Z" };
+        this.calendarSubscriptions.set(profileID, subscription);
+        await json(route, { active: true, url: `${url.origin}/api/v1/calendar.ics?token=${encodeURIComponent(subscription.token)}`, createdAt: subscription.createdAt, rotatedAt: subscription.rotatedAt });
+        return;
+      }
     }
     if (path === "/calendar") {
       const today = new Date().toISOString().slice(0, 10);

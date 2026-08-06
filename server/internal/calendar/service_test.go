@@ -1,7 +1,9 @@
 package calendar
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +23,15 @@ import (
 	"github.com/moodiness/rivune/server/internal/metadata"
 )
 
+func newTestService(t testing.TB, pool *pgxpool.Pool, metadataService metadataReader, timezone string, logger *slog.Logger) *Service {
+	t.Helper()
+	service, err := NewService(pool, metadataService, timezone, logger)
+	if err != nil {
+		t.Fatalf("create calendar service: %v", err)
+	}
+	return service
+}
+
 type fakeEventRepository struct {
 	profileID     string
 	from          time.Time
@@ -27,9 +39,11 @@ type fakeEventRepository struct {
 	events        []Event
 	err           error
 	libraryTitles []libraryTitle
+	listCalls     int
 }
 
 func (repository *fakeEventRepository) List(_ context.Context, _ pgx.Tx, profileID string, from, to time.Time) ([]Event, error) {
+	repository.listCalls++
 	repository.profileID, repository.from, repository.to = profileID, from, to
 	return repository.events, repository.err
 }
@@ -175,6 +189,46 @@ func TestListScopesEmptyResultsToActiveProfile(t *testing.T) {
 	}
 	if result.Events == nil || len(result.Events) != 0 {
 		t.Fatalf("expected a non-nil empty event list, got %#v", result.Events)
+	}
+}
+
+func TestListRejectsCapacitySentinelWithoutReturningPartialEvents(t *testing.T) {
+	now := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
+	profileID := "11111111-1111-4111-8111-111111111111"
+	expiresAt := now.Add(time.Hour)
+	principal := auth.Principal{
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+		ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
+	}
+	for _, test := range []struct {
+		name    string
+		count   int
+		wantErr bool
+	}{
+		{name: "at capacity", count: maximumCalendarEvents},
+		{name: "capacity sentinel", count: calendarEventQueryLimit, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := &fakeEventRepository{events: make([]Event, test.count)}
+			service := &Service{repository: repository, now: func() time.Time { return now }}
+			result, err := service.List(context.Background(), principal, "2026-07-01", "2026-07-31", "en-US")
+			if test.wantErr {
+				if !errors.Is(err, ErrCapacity) || result.Events != nil {
+					t.Fatalf("over-capacity result = %d events, error %v; want no partial result and ErrCapacity", len(result.Events), err)
+				}
+				return
+			}
+			if err != nil || len(result.Events) != maximumCalendarEvents {
+				t.Fatalf("at-capacity result = %d events, error %v", len(result.Events), err)
+			}
+		})
+	}
+}
+
+func TestListEventsSQLReadsOnlyCapacitySentinel(t *testing.T) {
+	normalized := strings.Join(strings.Fields(listEventsSQL), " ")
+	if calendarEventQueryLimit != maximumCalendarEvents+1 || !strings.HasSuffix(normalized, "LIMIT $4") {
+		t.Fatalf("calendar event query is not bounded to the capacity sentinel: limit=%d SQL=%s", calendarEventQueryLimit, normalized)
 	}
 }
 
@@ -1109,11 +1163,12 @@ func TestCalendarRefreshTwoInstancesReleasePoolBeforeProvider(t *testing.T) {
 		SessionID: sessionID, UserID: userID, DeviceID: deviceID,
 		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 		ActiveProfileID: new(profileID), ProfileGrantExpiresAt: &expiresAt,
+		ProfileContextHash: bytes.Repeat([]byte{0xa3}, sha256.Size),
 	}
 	reader := newBlockingMetadataReader()
 	observedRepository := &observingCalendarRepository{claims: make(chan struct{}, 2)}
-	first := NewService(pool, reader, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	second := NewService(pool, reader, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	first := newTestService(t, pool, reader, "UTC", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	second := newTestService(t, pool, reader, "UTC", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	first.repository = observedRepository
 	second.repository = observedRepository
 	if _, err := first.List(context.Background(), principal, "2026-08-01", "2026-08-31", "en-US"); err != nil {
@@ -1151,7 +1206,7 @@ func TestCalendarRefreshTwoInstancesReleasePoolBeforeProvider(t *testing.T) {
 		t.Fatalf("revoke deferred calendar session: %v", err)
 	}
 	revokedReader := &budgetMetadataReader{}
-	revokedService := NewService(pool, revokedReader, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	revokedService := newTestService(t, pool, revokedReader, "UTC", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	revokedService.enqueueRefresh(principal, profileID, now, now.AddDate(0, 0, 30), "en-US")
 	revokedRequest, ok := revokedService.takeRefresh(time.Now().UTC())
 	if !ok {
@@ -1175,7 +1230,7 @@ func TestCalendarRefreshTwoInstancesReleasePoolBeforeProvider(t *testing.T) {
 		t.Fatalf("demote deferred calendar principal: %v", err)
 	}
 	demotedReader := &budgetMetadataReader{}
-	demotedService := NewService(pool, demotedReader, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	demotedService := newTestService(t, pool, demotedReader, "UTC", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	demotedService.enqueueRefresh(principal, profileID, now, now.AddDate(0, 0, 30), "en-US")
 	demotedRequest, ok := demotedService.takeRefresh(time.Now().UTC())
 	if !ok {
@@ -1186,6 +1241,29 @@ func TestCalendarRefreshTwoInstancesReleasePoolBeforeProvider(t *testing.T) {
 	}
 	if titleCalls, seasonCalls, _ := demotedReader.counts(); titleCalls != 0 || seasonCalls != 0 {
 		t.Fatalf("demoted principal reached provider: titles=%d seasons=%d", titleCalls, seasonCalls)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		WITH restored_user AS (
+			UPDATE users SET role = 'admin' WHERE id = $1::uuid RETURNING id
+		)
+		UPDATE auth_sessions
+		SET profile_context_hash = decode(repeat('b4', 32), 'hex')
+		WHERE id = $2::uuid AND EXISTS (SELECT 1 FROM restored_user)
+	`, userID, sessionID); err != nil {
+		t.Fatalf("regenerate deferred calendar profile context: %v", err)
+	}
+	staleContextReader := &budgetMetadataReader{}
+	staleContextService := newTestService(t, pool, staleContextReader, "UTC", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	staleContextService.enqueueRefresh(principal, profileID, now, now.AddDate(0, 0, 30), "en-US")
+	staleContextRequest, ok := staleContextService.takeRefresh(time.Now().UTC())
+	if !ok {
+		t.Fatal("stale-context refresh was not queued")
+	}
+	if _, err := staleContextService.refresh(context.Background(), staleContextRequest); !errors.Is(err, ErrProfileRequired) {
+		t.Fatalf("stale-context refresh error = %v, want active profile required", err)
+	}
+	if titleCalls, seasonCalls, _ := staleContextReader.counts(); titleCalls != 0 || seasonCalls != 0 {
+		t.Fatalf("stale-context refresh reached provider: titles=%d seasons=%d", titleCalls, seasonCalls)
 	}
 	queryContext, cancelQuery := context.WithTimeout(context.Background(), time.Second)
 	defer cancelQuery()
@@ -1204,5 +1282,273 @@ func TestCalendarRefreshTwoInstancesReleasePoolBeforeProvider(t *testing.T) {
 	case <-secondDone:
 	case <-time.After(time.Second):
 		t.Fatal("second calendar instance did not join")
+	}
+}
+
+func TestCalendarTokenFormatAndRollingFeedRange(t *testing.T) {
+	token, digest, err := newCalendarToken()
+	if err != nil {
+		t.Fatalf("generate calendar token: %v", err)
+	}
+	if !strings.HasPrefix(token, calendarTokenPrefix) || len(digest) != sha256.Size {
+		t.Fatalf("calendar token format invalid; digest bytes=%d", len(digest))
+	}
+	parsedDigest, valid := calendarTokenDigest(token)
+	if !valid || !bytes.Equal(parsedDigest, digest) {
+		t.Fatal("generated calendar token did not round-trip through strict validation")
+	}
+	for _, invalid := range []string{"", " " + token, token + " ", "rivune_cal_short", strings.Replace(token, "rivune_cal_", "other_", 1), token + "="} {
+		if _, valid := calendarTokenDigest(invalid); valid {
+			t.Fatalf("invalid calendar token was accepted: %q", invalid)
+		}
+	}
+
+	configuredLocation, err := time.LoadLocation("Pacific/Kiritimati")
+	if err != nil {
+		t.Fatalf("load configured timezone: %v", err)
+	}
+	hostLocation, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("load host timezone: %v", err)
+	}
+	originalLocal := time.Local
+	time.Local = hostLocation
+	t.Cleanup(func() { time.Local = originalLocal })
+	from, to := calendarFeedRange(time.Date(2026, time.March, 1, 10, 30, 0, 0, time.UTC), configuredLocation)
+	if from.Format(time.RFC3339) != "2026-01-30T00:00:00+14:00" || to.Format(time.RFC3339) != "2026-05-02T00:00:00+14:00" {
+		t.Fatalf("configured-timezone rolling feed range = %s to %s", from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
+	for _, invalidTimezone := range []string{"", "Local", " not/a-timezone", "not/a-timezone"} {
+		if _, err := NewService(nil, nil, invalidTimezone, nil); err == nil {
+			t.Fatalf("calendar service accepted invalid configured timezone %q", invalidTimezone)
+		}
+	}
+}
+
+func TestCalendarLinkLifecyclePersistsOnlyHashAndImmediatelyRevokesOldTokens(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run calendar link lifecycle tests")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open calendar link test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	var tableExists bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('profile_calendar_links') IS NOT NULL`).Scan(&tableExists); err != nil {
+		t.Fatalf("check calendar link migration: %v", err)
+	}
+	if !tableExists {
+		t.Skip("profile calendar link migration is not applied")
+	}
+
+	const (
+		categoryID     = "ca590000-0000-4000-8000-000000000001"
+		profileID      = "ca590000-0000-4000-8000-000000000002"
+		otherProfileID = "ca590000-0000-4000-8000-000000000003"
+		userID         = "ca590000-0000-4000-8000-000000000004"
+		deviceID       = "ca590000-0000-4000-8000-000000000005"
+		sessionID      = "ca590000-0000-4000-8000-000000000006"
+	)
+	cleanup := func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM auth_sessions WHERE id = $1::uuid`, sessionID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM devices WHERE id = $1::uuid`, deviceID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM profiles WHERE id = ANY($1::uuid[])`, []string{profileID, otherProfileID})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1::uuid`, userID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM access_categories WHERE id = $1::uuid`, categoryID)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	now := time.Now().UTC()
+	configuredLocation, err := time.LoadLocation("Pacific/Kiritimati")
+	if err != nil {
+		t.Fatalf("load calendar link configured timezone: %v", err)
+	}
+	availableDate := now.In(configuredLocation).Format(time.DateOnly)
+	if _, err := pool.Exec(ctx, `
+		WITH category AS (
+			INSERT INTO access_categories (id, name, normalized_name, position)
+			VALUES ($1::uuid, 'Calendar link test', 'calendar link test', 959000)
+		), account AS (
+			INSERT INTO users (id, username, password_hash, role)
+			VALUES ($2::uuid, 'calendar-link-test', 'unused-test-hash', 'admin')
+		), profile AS (
+			INSERT INTO profiles (id, category_id, name, available_from, available_until, access_timezone)
+			VALUES ($3::uuid, $1::uuid, 'Calendar link profile', $7::date, $7::date, 'Pacific/Honolulu'),
+			       ($4::uuid, $1::uuid, 'Other calendar link profile', NULL, NULL, 'Pacific/Honolulu')
+		), device AS (
+			INSERT INTO devices (id, user_id, name, platform, approved_at)
+			VALUES ($5::uuid, $2::uuid, 'Calendar link device', 'test', now())
+		)
+		INSERT INTO auth_sessions (
+			id, user_id, device_id, access_token_hash, access_expires_at, refresh_expires_at,
+			active_profile_id, profile_grant_expires_at, profile_context_hash, authorization_scope
+		)
+		VALUES (
+			$6::uuid, $2::uuid, $5::uuid, decode(repeat('c9', 32), 'hex'),
+			now() + interval '1 hour', now() + interval '2 hours',
+			$3::uuid, now() + interval '1 hour', decode(repeat('a5', 32), 'hex'), 'global_admin'
+		)
+	`, categoryID, userID, profileID, otherProfileID, deviceID, sessionID, availableDate); err != nil {
+		t.Fatalf("seed calendar link authorization fixture: %v", err)
+	}
+
+	expiresAt := now.Add(time.Hour)
+	principal := auth.Principal{
+		SessionID: sessionID, UserID: userID, DeviceID: deviceID,
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+		ActiveProfileID: new(profileID), ProfileGrantExpiresAt: &expiresAt,
+		ProfileContextHash: bytes.Repeat([]byte{0xa5}, sha256.Size), ActiveProfileCanManage: true,
+	}
+	service := newTestService(t, pool, nil, "Pacific/Kiritimati", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	service.now = func() time.Time { return now }
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'member' WHERE id = $1::uuid`, userID); err != nil {
+		t.Fatalf("demote calendar link manager: %v", err)
+	}
+	if _, err := service.LinkStatus(ctx, principal, profileID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("authoritatively demoted calendar link status error = %v, want %v", err, ErrNotFound)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'admin' WHERE id = $1::uuid`, userID); err != nil {
+		t.Fatalf("restore calendar link manager: %v", err)
+	}
+	mismatched := principal
+	mismatched.ActiveProfileID = new(otherProfileID)
+	if _, err := service.LinkStatus(ctx, mismatched, profileID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("mismatched active profile calendar link status error = %v, want %v", err, ErrNotFound)
+	}
+
+	first, err := service.CreateLink(ctx, principal, profileID)
+	if err != nil {
+		t.Fatalf("create calendar link: %v", err)
+	}
+	if first.Token == "" || !first.Active {
+		t.Fatalf("created calendar credential = %+v", first)
+	}
+	if _, err := service.CreateLink(ctx, principal, profileID); !errors.Is(err, ErrLinkExists) {
+		t.Fatalf("duplicate calendar link error = %v, want %v", err, ErrLinkExists)
+	}
+	var storedHash []byte
+	if err := pool.QueryRow(ctx, `SELECT token_hash FROM profile_calendar_links WHERE profile_id = $1::uuid`, profileID).Scan(&storedHash); err != nil {
+		t.Fatalf("read stored calendar token hash: %v", err)
+	}
+	firstHash := sha256.Sum256([]byte(first.Token))
+	if !bytes.Equal(storedHash, firstHash[:]) || bytes.Contains(storedHash, []byte(first.Token)) {
+		t.Fatal("calendar credential was not stored exclusively as its SHA-256 digest")
+	}
+	storedTimezoneService := newTestService(t, pool, nil, "Pacific/Honolulu", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	storedTimezoneService.now = func() time.Time { return now }
+	if _, err := storedTimezoneService.LinkStatus(ctx, principal, profileID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("persisted profile timezone overrode configured management timezone: %v", err)
+	}
+	if _, err := storedTimezoneService.Feed(ctx, first.Token, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("persisted profile timezone overrode configured feed timezone: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE auth_sessions
+		SET active_profile_id = $2::uuid, profile_context_hash = decode(repeat('b6', 32), 'hex')
+		WHERE id = $1::uuid
+	`, sessionID, otherProfileID); err != nil {
+		t.Fatalf("switch authoritative calendar session profile: %v", err)
+	}
+	if _, err := service.LinkStatus(ctx, principal, profileID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale selected-profile calendar link status error = %v, want %v", err, ErrNotFound)
+	}
+	if _, err := service.RotateLink(ctx, principal, profileID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale selected-profile rotation error = %v, want %v", err, ErrNotFound)
+	}
+	var unchangedHash []byte
+	if err := pool.QueryRow(ctx, `SELECT token_hash FROM profile_calendar_links WHERE profile_id = $1::uuid`, profileID).Scan(&unchangedHash); err != nil {
+		t.Fatalf("read link after stale selected-profile rotation: %v", err)
+	}
+	if !bytes.Equal(unchangedHash, firstHash[:]) {
+		t.Fatal("stale selected-profile rotation mutated the calendar link")
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE auth_sessions
+		SET active_profile_id = $2::uuid
+		WHERE id = $1::uuid
+	`, sessionID, profileID); err != nil {
+		t.Fatalf("restore selected profile with regenerated context: %v", err)
+	}
+	if err := service.RevokeLink(ctx, principal, profileID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale regenerated-context revocation error = %v, want %v", err, ErrNotFound)
+	}
+	var linkCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM profile_calendar_links WHERE profile_id = $1::uuid`, profileID).Scan(&linkCount); err != nil {
+		t.Fatalf("count link after stale regenerated-context revocation: %v", err)
+	}
+	if linkCount != 1 {
+		t.Fatalf("stale regenerated-context revocation left %d links, want 1", linkCount)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE auth_sessions
+		SET profile_context_hash = decode(repeat('a5', 32), 'hex')
+		WHERE id = $1::uuid
+	`, sessionID); err != nil {
+		t.Fatalf("restore captured calendar profile context: %v", err)
+	}
+	headRepository := &fakeEventRepository{err: errors.New("HEAD must not list calendar events")}
+	service.repository = headRepository
+	headPayload, err := service.Feed(ctx, first.Token, false)
+	if err != nil || headPayload != nil || headRepository.listCalls != 0 {
+		t.Fatalf("HEAD feed validation payload=%q list calls=%d error=%v", headPayload, headRepository.listCalls, err)
+	}
+	service.repository = &postgresRepository{}
+	if _, err := service.Feed(ctx, first.Token, true); err != nil {
+		t.Fatalf("read newly created calendar feed: %v", err)
+	}
+
+	rotated, err := service.RotateLink(ctx, principal, profileID)
+	if err != nil {
+		t.Fatalf("rotate calendar link: %v", err)
+	}
+	if rotated.Token == first.Token || rotated.RotatedAt.Before(first.RotatedAt) {
+		t.Fatalf("rotated calendar credential = %+v after %+v", rotated, first)
+	}
+	if _, err := service.Feed(ctx, first.Token, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old calendar token after rotation error = %v, want %v", err, ErrNotFound)
+	}
+	if _, err := service.Feed(ctx, rotated.Token, true); err != nil {
+		t.Fatalf("new calendar token after rotation: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE profiles SET enabled = false WHERE id = $1::uuid`, profileID); err != nil {
+		t.Fatalf("restrict calendar feed profile: %v", err)
+	}
+	if _, err := service.Feed(ctx, rotated.Token, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("inaccessible calendar profile feed error = %v, want %v", err, ErrNotFound)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE profiles SET enabled = true WHERE id = $1::uuid`, profileID); err != nil {
+		t.Fatalf("restore calendar feed profile: %v", err)
+	}
+
+	if err := service.RevokeLink(ctx, principal, profileID); err != nil {
+		t.Fatalf("revoke calendar link: %v", err)
+	}
+	if err := service.RevokeLink(ctx, principal, profileID); err != nil {
+		t.Fatalf("idempotent calendar link revoke: %v", err)
+	}
+	if _, err := service.Feed(ctx, rotated.Token, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoked calendar token error = %v, want %v", err, ErrNotFound)
+	}
+	if _, err := service.RotateLink(ctx, principal, profileID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rotate absent calendar link error = %v, want %v", err, ErrNotFound)
+	}
+
+	credential, err := service.CreateLink(ctx, principal, profileID)
+	if err != nil {
+		t.Fatalf("recreate calendar link for cascade: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM profiles WHERE id = $1::uuid`, profileID); err != nil {
+		t.Fatalf("delete calendar link profile: %v", err)
+	}
+	if _, err := service.Feed(ctx, credential.Token, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cascade-revoked calendar token error = %v, want %v", err, ErrNotFound)
 	}
 }

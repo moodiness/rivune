@@ -530,6 +530,7 @@ export type PlaybackSourceOption = {
   sourceRef: string;
   addonId: string;
   manifestId: string;
+  addonName?: string;
   streamIndex: number;
   name: string;
   description?: string;
@@ -746,6 +747,7 @@ export type CalendarEvent = {
   episodeNumber?: number;
 };
 export type CalendarResponse = { events: CalendarEvent[] };
+export type CalendarSubscription = { active: boolean; url?: string; createdAt?: string; rotatedAt?: string };
 export type TitleReference = {
   titleId: string;
   mediaType: string;

@@ -1506,6 +1506,139 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/MaintenanceMode"
+  /profiles/{profileId}/calendar-link:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    get:
+      summary: Get private calendar subscription status
+      operationId: getProfileCalendarLink
+      description: >
+        Returns only whether the active profile has a private calendar subscription and its lifecycle
+        timestamps; the credential URL and token are never returned by this operation. The bearer-authenticated
+        caller must supply the selected profile context, the selected profile must equal profileId, and the caller
+        must be allowed to manage that profile.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Calendar subscription status without credential material.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarLinkStatus"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+    post:
+      summary: Create a private calendar subscription
+      operationId: createProfileCalendarLink
+      description: >
+        Creates the subscription without a request body. The absolute credential URL contains a new bearer secret
+        and is disclosed exactly once in this response; later status reads never return it. The bearer-authenticated
+        caller must supply the matching selected profile context and be allowed to manage the active profile.
+        RIVUNE_PUBLIC_URL must be configured or the operation returns 503 public_url_required.
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          description: A new calendar subscription and its one-time credential URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarLinkCredential"
+        "400":
+          description: The calendar-link request body must be empty.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          description: An active subscription already exists (calendar_link_exists).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: RIVUNE_PUBLIC_URL is not configured (public_url_required).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    delete:
+      summary: Revoke a private calendar subscription
+      operationId: deleteProfileCalendarLink
+      description: >
+        Immediately revokes the current calendar token. The operation is idempotent when no subscription exists.
+        The bearer-authenticated caller must supply the matching selected profile context and be allowed to manage
+        the active profile.
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: The calendar subscription is absent and any former token is revoked.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /profiles/{profileId}/calendar-link/rotate:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    post:
+      summary: Rotate a private calendar subscription
+      operationId: rotateProfileCalendarLink
+      description: >
+        Replaces and immediately revokes the previous token without a request body. The replacement absolute
+        credential URL contains a new bearer secret and is disclosed exactly once in this response. The
+        bearer-authenticated caller must supply the matching selected profile context and be allowed to manage the
+        active profile. RIVUNE_PUBLIC_URL must be configured or the operation returns 503 public_url_required.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The rotated subscription and its new one-time credential URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarLinkCredential"
+        "400":
+          description: The calendar-link rotation request body must be empty.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          description: The profile is inaccessible or no active subscription exists (calendar_link_not_found).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          $ref: "#/components/responses/Error"
+        "503":
+          description: RIVUNE_PUBLIC_URL is not configured (public_url_required).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /profiles/{profileId}/tracking:
     parameters:
       - $ref: "#/components/parameters/ProfileId"
@@ -3244,6 +3377,195 @@ paths:
           $ref: "#/components/responses/Error"
         "409":
           $ref: "#/components/responses/Error"
+        "503":
+          description: Calendar event capacity was exceeded; no partial result is returned.
+          headers:
+            Retry-After:
+              required: true
+              description: Delay in seconds before retrying the calendar request.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /calendar.ics:
+    get:
+      summary: Download a private calendar feed
+      operationId: getPrivateCalendarFeed
+      description: >
+        Returns the token's currently accessible profile calendar for the rolling window in the configured instance
+        timezone, from 31 days before today through 61 days after today, inclusive. Access restrictions are
+        re-evaluated for every request.
+        The feed reads only persisted profile_library and titles snapshots and never refreshes or calls a metadata
+        provider. token must be the only query parameter and must occur exactly once.
+      security:
+        - calendarToken: []
+      responses:
+        "200":
+          description: >
+            RFC 5545 iCalendar feed encoded with CRLF line endings and UTF-8-safe folding at 75 octets. TEXT values
+            are escaped, every event is all-day with an exclusive next-day DTEND, UIDs remain stable across token
+            rotation, and DTSTAMP and LAST-MODIFIED are derived from the stable titles.updated_at snapshot. Movie
+            summaries are the movie title; episode summaries contain the series, SxxExx code, and episode title.
+          headers:
+            Content-Disposition:
+              required: true
+              description: Inline disposition with an iCalendar filename.
+              schema:
+                type: string
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: "private, no-store"
+            X-Robots-Tag:
+              required: true
+              schema:
+                type: string
+                const: "noindex, nofollow"
+          content:
+            text/calendar; charset=utf-8:
+              schema:
+                type: string
+        "404":
+          description: >
+            Uniform not-found response for an absent, malformed, repeated, revoked, or inaccessible token, or for
+            any additional query parameter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          description: The public feed concurrency or per-source attempt budget was exceeded.
+          headers:
+            Retry-After:
+              required: true
+              schema:
+                type: integer
+                minimum: 1
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: "private, no-store"
+            X-Robots-Tag:
+              required: true
+              schema:
+                type: string
+                const: "noindex, nofollow"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Calendar event capacity was exceeded; no partial iCalendar document is returned.
+          headers:
+            Retry-After:
+              required: true
+              schema:
+                type: integer
+                minimum: 1
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: "private, no-store"
+            X-Robots-Tag:
+              required: true
+              schema:
+                type: string
+                const: "noindex, nofollow"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    head:
+      summary: Inspect a private calendar feed
+      operationId: headPrivateCalendarFeed
+      description: >
+        Validates the token and current profile access transactionally under the same strict query rules as GET, but
+        does not load events, sort them, serialize an iCalendar document, or return a body. Successful responses
+        expose text/calendar; charset=utf-8, the iCalendar filename, and private no-store/noindex headers.
+      security:
+        - calendarToken: []
+      responses:
+        "200":
+          description: Calendar feed headers without a response body.
+          headers:
+            Content-Disposition:
+              required: true
+              description: Inline disposition with the same iCalendar filename as GET.
+              schema:
+                type: string
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: "private, no-store"
+            X-Robots-Tag:
+              required: true
+              schema:
+                type: string
+                const: "noindex, nofollow"
+          content:
+            text/calendar; charset=utf-8:
+              schema:
+                type: string
+                description: Representation metadata only; HEAD returns no response body.
+        "404":
+          description: >
+            Uniform not-found response for an absent, malformed, repeated, revoked, or inaccessible token, or for
+            any additional query parameter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          description: The public feed concurrency or per-source attempt budget was exceeded.
+          headers:
+            Retry-After:
+              required: true
+              schema:
+                type: integer
+                minimum: 1
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: "private, no-store"
+            X-Robots-Tag:
+              required: true
+              schema:
+                type: string
+                const: "noindex, nofollow"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Calendar feed validation is temporarily unavailable because capacity was exceeded.
+          headers:
+            Retry-After:
+              required: true
+              schema:
+                type: integer
+                minimum: 1
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: "private, no-store"
+            X-Robots-Tag:
+              required: true
+              schema:
+                type: string
+                const: "noindex, nofollow"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /library:
     get:
       summary: List library
@@ -3615,6 +3937,16 @@ components:
       in: query
       name: token
       description: Opaque short-lived token returned only inside playback asset URLs.
+    calendarToken:
+      type: apiKey
+      in: query
+      name: token
+      description: >
+        Long-lived opaque bearer secret embedded in a private calendar URL. Its rivune_cal_ prefixed value contains
+        32 bytes from a cryptographically secure random generator; the server persists only its SHA-256 digest and
+        never logs or includes the token in an error. The complete secret is disclosed only when the subscription is
+        created or rotated, is invalidated immediately by rotation or revocation, and must be the request's only
+        query parameter with exactly one value. This credential is independent of bearerAuth.
   parameters:
     ProfileId:
       name: profileId
@@ -7281,6 +7613,50 @@ components:
           type: integer
           minimum: 0
           maximum: 2147483647
+    CalendarLinkStatus:
+      type: object
+      additionalProperties: false
+      description: Calendar subscription status that never contains the credential URL or token.
+      required: [active]
+      properties:
+        active:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        rotatedAt:
+          type: string
+          format: date-time
+      oneOf:
+        - properties:
+            active:
+              const: false
+            createdAt: false
+            rotatedAt: false
+        - required: [createdAt, rotatedAt]
+          properties:
+            active:
+              const: true
+    CalendarLinkCredential:
+      type: object
+      additionalProperties: false
+      description: >
+        One-time calendar credential response. url is an absolute private subscription URL whose token is never
+        returned again by status reads.
+      required: [active, url, createdAt, rotatedAt]
+      properties:
+        active:
+          type: boolean
+          const: true
+        url:
+          type: string
+          format: uri
+        createdAt:
+          type: string
+          format: date-time
+        rotatedAt:
+          type: string
+          format: date-time
     CalendarEventList:
       type: object
       additionalProperties: false
@@ -7582,6 +7958,11 @@ components:
           format: uuid
         manifestId:
           type: string
+        addonName:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Human-readable name from the manifest of the add-on that returned this stream.
         streamIndex:
           type: integer
           minimum: 0

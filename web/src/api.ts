@@ -9,6 +9,7 @@ import type {
   AccessCategory,
   AvatarPreset,
   CalendarResponse,
+  CalendarSubscription,
   CategoryInput,
   Collection,
   CollectionListResponse,
@@ -415,6 +416,10 @@ export const api = {
 
   collections: (signal?: AbortSignal) => request<CollectionListResponse>("/collections", { signal }),
   calendar: (from: string, to: string, signal?: AbortSignal) => request<CalendarResponse>(`/calendar${query({ from, to, language: metadataLanguage })}`, { signal }),
+  calendarSubscription: (profileId: string) => request<CalendarSubscription>(`/profiles/${profileId}/calendar-link`),
+  createCalendarSubscription: (profileId: string) => request<CalendarSubscription>(`/profiles/${profileId}/calendar-link`, { method: "POST" }),
+  rotateCalendarSubscription: (profileId: string) => request<CalendarSubscription>(`/profiles/${profileId}/calendar-link/rotate`, { method: "POST" }),
+  deleteCalendarSubscription: (profileId: string) => request<void>(`/profiles/${profileId}/calendar-link`, { method: "DELETE" }),
   collection: (id: string) => request<Collection>(`/collections/${id}`),
   collectionManagement: (id: string) => request<Collection>(`/collections/${id}/management`),
   createCollection: (input: CollectionSaveInput) => request<Collection>("/collections", { method: "POST", body: JSON.stringify(input) }),

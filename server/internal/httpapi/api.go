@@ -155,6 +155,11 @@ type collectionService interface {
 
 type calendarService interface {
 	List(context.Context, auth.Principal, string, string, string) (calendar.Result, error)
+	LinkStatus(context.Context, auth.Principal, string) (calendar.Link, error)
+	CreateLink(context.Context, auth.Principal, string) (calendar.Credential, error)
+	RotateLink(context.Context, auth.Principal, string) (calendar.Credential, error)
+	RevokeLink(context.Context, auth.Principal, string) error
+	Feed(context.Context, string, bool) ([]byte, error)
 }
 
 type calendarRefreshWorker interface {
@@ -228,34 +233,35 @@ type catalogArtworkPresenter interface {
 }
 
 type API struct {
-	config              config.Config
-	addons              addonService
-	artwork             *artworkcache.Service
-	catalogArtwork      catalogArtworkPresenter
-	collectionArtwork   collectionArtworkPresenter
-	calendar            calendarService
-	calendarRefresh     calendarRefreshWorker
-	categories          categoryService
-	pool                *pgxpool.Pool
-	instances           instanceService
-	demo                *demo.Service
-	collections         collectionService
-	auth                authService
-	authMaintenance     authMaintenanceService
-	profiles            profileService
-	playback            playbackService
-	playbackMaintenance playbackMaintenanceService
-	operations          operationsService
-	settings            settingsService
-	users               userService
-	metadata            metadataService
-	logger              *slog.Logger
-	version             string
-	watchstate          watchstateService
-	tracking            trackingService
-	credentialAdmission *requestAdmission
-	usernameAdmission   *usernameAdmission
-	deviceCodeAdmission *requestAdmission
+	config                config.Config
+	addons                addonService
+	artwork               *artworkcache.Service
+	catalogArtwork        catalogArtworkPresenter
+	collectionArtwork     collectionArtworkPresenter
+	calendar              calendarService
+	calendarRefresh       calendarRefreshWorker
+	categories            categoryService
+	pool                  *pgxpool.Pool
+	instances             instanceService
+	demo                  *demo.Service
+	collections           collectionService
+	auth                  authService
+	authMaintenance       authMaintenanceService
+	profiles              profileService
+	playback              playbackService
+	playbackMaintenance   playbackMaintenanceService
+	operations            operationsService
+	settings              settingsService
+	users                 userService
+	metadata              metadataService
+	logger                *slog.Logger
+	version               string
+	watchstate            watchstateService
+	tracking              trackingService
+	credentialAdmission   *requestAdmission
+	usernameAdmission     *usernameAdmission
+	deviceCodeAdmission   *requestAdmission
+	calendarFeedAdmission *requestAdmission
 }
 
 type errorEnvelope struct {
@@ -327,7 +333,10 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		return nil, fmt.Errorf("initialize tracking integrations: %w", err)
 	}
 	metadataService := metadata.NewService(pool, metadataProvider, televisionEnricher, artworkEnricher, cfg.MetadataCacheTTL, logger)
-	calendarService := calendar.NewService(pool, metadataService, logger)
+	calendarService, err := calendar.NewService(pool, metadataService, cfg.Timezone, logger)
+	if err != nil {
+		return nil, fmt.Errorf("initialize calendar service: %w", err)
+	}
 	operationsService := operations.NewService(
 		pool, metadataService, authService, playbackService, maintenanceInterval, logger,
 	)
@@ -339,34 +348,35 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	collectionService.SetArtworkPresenter(artworkService)
 	instanceManager := instance.NewService(pool, cfg.SetupToken, cfg.Timezone)
 	return &API{
-		artwork:             artworkService,
-		catalogArtwork:      artworkService,
-		collectionArtwork:   artworkService,
-		addons:              addonService,
-		config:              cfg,
-		calendar:            calendarService,
-		calendarRefresh:     calendarService,
-		categories:          category.NewService(pool),
-		collections:         collectionService,
-		pool:                pool,
-		instances:           instanceManager,
-		demo:                demo.New(instanceManager, demo.Options{}),
-		auth:                authService,
-		authMaintenance:     authService,
-		profiles:            profile.NewService(pool, cfg.ProfileGrantTTL, cfg.Timezone),
-		playback:            playbackService,
-		playbackMaintenance: playbackService,
-		logger:              logger,
-		settings:            settings.NewService(pool),
-		users:               user.NewService(pool),
-		metadata:            metadataService,
-		operations:          operationsService,
-		version:             version,
-		tracking:            trackingService,
-		watchstate:          watchstateService,
-		credentialAdmission: newCredentialAdmission(),
-		usernameAdmission:   newCredentialUsernameAdmission(),
-		deviceCodeAdmission: newDeviceCodeAdmission(),
+		artwork:               artworkService,
+		catalogArtwork:        artworkService,
+		collectionArtwork:     artworkService,
+		addons:                addonService,
+		config:                cfg,
+		calendar:              calendarService,
+		calendarRefresh:       calendarService,
+		categories:            category.NewService(pool),
+		collections:           collectionService,
+		pool:                  pool,
+		instances:             instanceManager,
+		demo:                  demo.New(instanceManager, demo.Options{}),
+		auth:                  authService,
+		authMaintenance:       authService,
+		profiles:              profile.NewService(pool, cfg.ProfileGrantTTL, cfg.Timezone),
+		playback:              playbackService,
+		playbackMaintenance:   playbackService,
+		logger:                logger,
+		settings:              settings.NewService(pool),
+		users:                 user.NewService(pool),
+		metadata:              metadataService,
+		operations:            operationsService,
+		version:               version,
+		tracking:              trackingService,
+		watchstate:            watchstateService,
+		credentialAdmission:   newCredentialAdmission(),
+		usernameAdmission:     newCredentialUsernameAdmission(),
+		deviceCodeAdmission:   newDeviceCodeAdmission(),
+		calendarFeedAdmission: newCalendarFeedAdmission(),
 	}, nil
 }
 
@@ -479,6 +489,12 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/playback/sessions/{sessionId}/assets/{assetId}", a.playbackAsset)
 	mux.HandleFunc("HEAD /api/v1/playback/sessions/{sessionId}/assets/{assetId}", a.playbackAsset)
 	mux.Handle("GET /api/v1/calendar", a.requireAuthentication(a.calendarEvents))
+	mux.Handle("GET /api/v1/profiles/{profileId}/calendar-link", a.requireAuthentication(a.calendarLinkStatus))
+	mux.Handle("POST /api/v1/profiles/{profileId}/calendar-link", a.requireAuthentication(a.createCalendarLink))
+	mux.Handle("POST /api/v1/profiles/{profileId}/calendar-link/rotate", a.requireAuthentication(a.rotateCalendarLink))
+	mux.Handle("DELETE /api/v1/profiles/{profileId}/calendar-link", a.requireAuthentication(a.revokeCalendarLink))
+	mux.HandleFunc("GET /api/v1/calendar.ics", a.calendarFeed)
+	mux.HandleFunc("HEAD /api/v1/calendar.ics", a.calendarFeed)
 	mux.Handle("GET /api/v1/library", a.requireAuthentication(a.library))
 	mux.Handle("POST /api/v1/library/membership", a.requireAuthentication(a.tvLibraryMembership))
 	mux.Handle("PUT /api/v1/library/{titleId}", a.requireAuthentication(a.addLibrary))

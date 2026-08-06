@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures/rivune";
+import { CATEGORY_IDS, expect, test } from "./fixtures/rivune";
 import { selectListbox, selectOption, selectOptions } from "./helpers/select";
 
 function longSeason(episodeCount: number) {
@@ -1433,6 +1433,158 @@ test("calendar episode opens the matching series season and episode", async ({ p
   expect(calendarRequest.search.get("from")).toMatch(/^\d{4}-\d{2}-01$/);
   expect(calendarRequest.search.get("to")).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   expect(calendarRequest.search.get("language")).toBe("en-US");
+});
+
+test("calendar subscription stays private through create, copy, rotation, feed access, and revocation", async ({ page, rivune }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Mobile navigation" }).getByRole("button", { name: "Calendar" }).click();
+
+  const subscriptionAction = page.getByRole("button", { name: "Calendar subscription", exact: true });
+  await expect(subscriptionAction).toBeVisible();
+  await subscriptionAction.click();
+
+  const subscriptionDialog = page.getByRole("dialog", { name: "Subscribe to this calendar" });
+  const subscriptionHeading = subscriptionDialog.getByRole("heading", { name: "Subscribe to this calendar" });
+  await expect(subscriptionHeading).toBeFocused();
+  const statusRequest = await rivune.waitForRequest("/api/v1/profiles/alice/calendar-link", "GET");
+  expect(statusRequest.authorization).toBe("Bearer fixture-access");
+  expect(statusRequest.profileContext).toBe("fixture-profile-context-alice-0");
+  expect(statusRequest.search.size).toBe(0);
+  await expect(subscriptionDialog.getByText("For security, the full link is shown only when it is created or regenerated.")).toBeVisible();
+  await expect(subscriptionDialog.getByRole("button", { name: "Create private link" })).toBeVisible();
+
+  await subscriptionDialog.getByRole("button", { name: "Create private link" }).click();
+  const createRequest = await rivune.waitForRequest("/api/v1/profiles/alice/calendar-link", "POST");
+  expect(createRequest.body).toBeUndefined();
+  expect(createRequest.authorization).toBe("Bearer fixture-access");
+  expect(createRequest.profileContext).toBe("fixture-profile-context-alice-0");
+
+  const linkInput = subscriptionDialog.getByLabel("Private calendar link");
+  await expect(linkInput).toBeVisible();
+  await expect(linkInput).toBeFocused();
+  const firstURL = await linkInput.inputValue();
+  expect(firstURL).toMatch(/^https?:\/\/[^/]+\/api\/v1\/calendar\.ics\?token=rivune_cal_[A-Za-z0-9_-]{43}$/);
+  await expect(subscriptionDialog.getByText("Anyone with this link can read this profile's release calendar. Keep it private.")).toBeVisible();
+  const token = new URL(firstURL).searchParams.get("token")!;
+  expect(await page.evaluate((secret) => [...Object.values(localStorage), ...Object.values(sessionStorage)].some((value) => value.includes(secret)), token)).toBe(false);
+
+  await subscriptionDialog.getByRole("button", { name: "Copy link" }).click();
+  await expect(subscriptionDialog.getByText("Link copied", { exact: true })).toBeVisible();
+  expect(await page.evaluate(async (expected) => (await navigator.clipboard.readText()) === expected, firstURL)).toBe(true);
+
+  const geometry = await subscriptionDialog.locator(".calendar-subscription-modal").evaluate((dialog) => {
+    const bounds = dialog.getBoundingClientRect();
+    const controlBounds = Array.from(dialog.querySelectorAll<HTMLElement>("button, input"), (control) => control.getBoundingClientRect());
+    return {
+      left: bounds.left,
+      right: bounds.right,
+      viewportWidth: window.innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+      controlsMeetTouchTarget: controlBounds.every((control) => control.height >= 48),
+      controlsStayInside: controlBounds.every((control) => control.left >= bounds.left && control.right <= bounds.right),
+    };
+  });
+  expect(geometry.left).toBeGreaterThanOrEqual(0);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth);
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
+  expect(geometry.controlsMeetTouchTarget).toBe(true);
+  expect(geometry.controlsStayInside).toBe(true);
+
+  await page.evaluate(() => { document.documentElement.dir = "rtl"; });
+  await expect(linkInput).toHaveAttribute("dir", "ltr");
+  const regenerateAction = subscriptionDialog.getByRole("button", { name: "Regenerate link" });
+  const disableAction = subscriptionDialog.getByRole("button", { name: "Disable link" });
+  await regenerateAction.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(disableAction).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+  await expect(regenerateAction).toBeFocused();
+  await page.evaluate(() => { document.documentElement.dir = "ltr"; });
+
+  await subscriptionDialog.getByRole("button", { name: "Close" }).click();
+  await expect(subscriptionAction).toBeFocused();
+  const statusRequestsBeforeReopen = rivune.matching("/api/v1/profiles/alice/calendar-link", "GET").length;
+  await subscriptionAction.click();
+  await expect.poll(() => rivune.matching("/api/v1/profiles/alice/calendar-link", "GET").length).toBeGreaterThan(statusRequestsBeforeReopen);
+  await expect(subscriptionDialog.getByLabel("Private calendar link")).toHaveCount(0);
+  await expect(subscriptionDialog.getByText("For security, the full link is shown only when it is created or regenerated.")).toBeVisible();
+
+  await page.route("**/api/v1/profiles/alice/calendar-link/rotate", (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "fixture_rotation_failure", message: "Fixture rotation failure" } }) }), { times: 1 });
+  await subscriptionDialog.getByRole("button", { name: "Regenerate link" }).click();
+  let confirmation = page.getByRole("dialog", { name: "Regenerate the calendar link?", exact: true });
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation).toHaveAccessibleDescription("The current link will stop working immediately. Calendar apps using it must be updated with the new link.");
+  await expect(confirmation.getByText("The current link will stop working immediately. Calendar apps using it must be updated with the new link.", { exact: true })).toBeVisible();
+  expect(rivune.matching("/api/v1/profiles/alice/calendar-link/rotate", "POST")).toHaveLength(0);
+  await confirmation.getByRole("button", { name: "Regenerate link" }).click();
+  await expect(subscriptionDialog.getByText("The calendar subscription link could not be regenerated.")).toBeVisible();
+  await expect(subscriptionDialog.getByLabel("Private calendar link")).toHaveCount(0);
+  await expect(subscriptionDialog.getByText("A calendar subscription link is active for this profile.")).toBeVisible();
+
+  await subscriptionDialog.getByRole("button", { name: "Regenerate link" }).click();
+  confirmation = page.getByRole("dialog", { name: "Regenerate the calendar link?", exact: true });
+  await expect(confirmation.getByText("The current link will stop working immediately. Calendar apps using it must be updated with the new link.", { exact: true })).toBeVisible();
+  expect(rivune.matching("/api/v1/profiles/alice/calendar-link/rotate", "POST")).toHaveLength(0);
+  await confirmation.getByRole("button", { name: "Regenerate link" }).click();
+  const rotateRequest = await rivune.waitForRequest("/api/v1/profiles/alice/calendar-link/rotate", "POST");
+  expect(rotateRequest.body).toBeUndefined();
+  expect(rotateRequest.authorization).toBe("Bearer fixture-access");
+  expect(rotateRequest.profileContext).toBe("fixture-profile-context-alice-0");
+  await expect(linkInput).not.toHaveValue(firstURL);
+  await expect(linkInput).toBeFocused();
+  const secondURL = await linkInput.inputValue();
+
+  const oldFeedStatus = await page.evaluate(async (url) => (await fetch(url, { credentials: "omit" })).status, firstURL);
+  expect(oldFeedStatus).toBe(404);
+  const liveFeed = await page.evaluate(async (url) => {
+    const response = await fetch(url, { credentials: "omit" });
+    return {
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+      disposition: response.headers.get("content-disposition"),
+      cacheControl: response.headers.get("cache-control"),
+      robots: response.headers.get("x-robots-tag"),
+      bodyStartsWithCalendar: (await response.text()).startsWith("BEGIN:VCALENDAR\r\n"),
+    };
+  }, secondURL);
+  expect(liveFeed).toEqual({
+    status: 200,
+    contentType: "text/calendar; charset=utf-8",
+    disposition: "inline; filename=\"rivune-calendar.ics\"",
+    cacheControl: "private, no-store",
+    robots: "noindex, nofollow",
+    bodyStartsWithCalendar: true,
+  });
+  expect(await page.evaluate(async (url) => (await fetch(url, { method: "HEAD", credentials: "omit" })).status, secondURL)).toBe(200);
+  for (const publicRequest of rivune.matching("/api/v1/calendar.ics")) {
+    expect(publicRequest.authorization).toBeNull();
+    expect(publicRequest.profileContext).toBeNull();
+    expect(publicRequest.search.size).toBe(0);
+  }
+
+  await subscriptionDialog.getByRole("button", { name: "Disable link" }).click();
+  const disableConfirmation = page.getByRole("dialog", { name: "Disable the calendar link?", exact: true });
+  await expect(disableConfirmation).toBeVisible();
+  await expect(disableConfirmation).toHaveAccessibleDescription("Calendar apps using this link will stop receiving updates.");
+  await expect(disableConfirmation.getByText("Calendar apps using this link will stop receiving updates.", { exact: true })).toBeVisible();
+  expect(rivune.matching("/api/v1/profiles/alice/calendar-link", "DELETE")).toHaveLength(0);
+  await disableConfirmation.getByRole("button", { name: "Disable link" }).click();
+  const disableRequest = await rivune.waitForRequest("/api/v1/profiles/alice/calendar-link", "DELETE");
+  expect(disableRequest.authorization).toBe("Bearer fixture-access");
+  expect(disableRequest.profileContext).toBe("fixture-profile-context-alice-0");
+  const createAgain = subscriptionDialog.getByRole("button", { name: "Create private link" });
+  await expect(createAgain).toBeVisible();
+  await expect(createAgain).toBeFocused();
+  expect(await page.evaluate(async (url) => (await fetch(url, { credentials: "omit" })).status, secondURL)).toBe(404);
+
+  await subscriptionDialog.getByRole("button", { name: "Close" }).click();
+  await rivune.configureGlobalAdmin(page, "bob", CATEGORY_IDS.kids);
+  await page.reload();
+  await page.getByRole("navigation", { name: "Mobile navigation" }).getByRole("button", { name: "Calendar" }).click();
+  await expect(page.getByRole("button", { name: "Calendar subscription", exact: true })).toHaveCount(0);
 });
 
 test("calendar mobile agenda stays compact, ordered, accessible, and keyboard navigable", async ({ page, rivune: _rivune }) => {
