@@ -1,0 +1,341 @@
+package jellyfin
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/collection"
+	"github.com/moodiness/rivune/server/internal/watchstate"
+)
+
+const (
+	collectionCompatID         = "55555555-5555-4555-8555-555555555555"
+	foreignCollectionCompatID  = "66666666-6666-4666-8666-666666666666"
+	collectionMovieID          = "77777777-7777-4777-8777-777777777777"
+	collectionSeriesID         = "88888888-8888-4888-8888-888888888888"
+	collectionExtraMovieID     = "99999999-9999-4999-8999-999999999999"
+	collectionHydratedCoverURL = "https://image.tmdb.org/hydrated-collection-cover.jpg"
+)
+
+type collectionCompatStore struct {
+	mu      sync.Mutex
+	titles  map[string]watchstate.CatalogTitle
+	resolve []watchstate.ResolveTitleInput
+	reads   []string
+}
+
+func (store *collectionCompatStore) GetCatalogTitle(_ context.Context, _ auth.Principal, id string) (watchstate.CatalogTitle, error) {
+	store.mu.Lock()
+	store.reads = append(store.reads, id)
+	store.mu.Unlock()
+	title, ok := store.titles[id]
+	if !ok {
+		return watchstate.CatalogTitle{}, watchstate.ErrNotFound
+	}
+	return title, nil
+}
+
+func (*collectionCompatStore) GetCatalogTitles(context.Context, auth.Principal, []string) ([]watchstate.CatalogTitle, error) {
+	return nil, errors.New("unexpected batch read")
+}
+
+func (*collectionCompatStore) ListCatalogItems(context.Context, auth.Principal, watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
+	return watchstate.CatalogPage{}, errors.New("unexpected ordinary catalog list")
+}
+
+func (store *collectionCompatStore) ResolveLinkedCatalogTitle(_ context.Context, _ auth.Principal, input watchstate.ResolveTitleInput) (watchstate.TitleReference, error) {
+	store.mu.Lock()
+	store.resolve = append(store.resolve, input)
+	store.mu.Unlock()
+	var id string
+	switch input.Title {
+	case "Canonical movie", "Duplicate movie":
+		id = collectionMovieID
+	case "Add-on series":
+		id = collectionSeriesID
+	case "Window sentinel":
+		id = collectionExtraMovieID
+	default:
+		return watchstate.TitleReference{}, watchstate.ErrInvalidInput
+	}
+	return watchstate.TitleReference{TitleID: id}, nil
+}
+
+func (store *collectionCompatStore) resolvedInputs() []watchstate.ResolveTitleInput {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return append([]watchstate.ResolveTitleInput(nil), store.resolve...)
+}
+
+type collectionCompatService struct {
+	authorized collection.Collection
+	foreign    collection.Collection
+	calls      []collectionResolveCall
+}
+
+type collectionResolveCall struct {
+	collectionID string
+	folderID     string
+	page         int
+	limit        int
+}
+
+func (service *collectionCompatService) List(context.Context, auth.Principal) ([]collection.Collection, error) {
+	return []collection.Collection{service.authorized}, nil
+}
+
+func (service *collectionCompatService) Get(_ context.Context, _ auth.Principal, id string) (collection.Collection, error) {
+	switch id {
+	case service.authorized.ID:
+		return service.authorized, nil
+	case service.foreign.ID:
+		return collection.Collection{}, collection.ErrNotFound
+	default:
+		return collection.Collection{}, collection.ErrNotFound
+	}
+}
+
+func (service *collectionCompatService) ResolveFolder(_ context.Context, _ auth.Principal, collectionID, folderID string, page, limit int, _, _ string) (collection.ResolvedFolder, error) {
+	service.calls = append(service.calls, collectionResolveCall{collectionID: collectionID, folderID: folderID, page: page, limit: limit})
+	if collectionID != service.authorized.ID || page != 1 {
+		return collection.ResolvedFolder{}, collection.ErrNotFound
+	}
+	switch folderID {
+	case service.authorized.Folders[0].ID:
+		return collection.ResolvedFolder{Items: []collection.Item{
+			{ID: "malformed", MediaType: collection.MediaTypeMovie, Title: "Malformed", ExternalIDs: map[string]string{}},
+			{ID: "tmdb:42", MediaType: collection.MediaTypeMovie, Title: "Canonical movie", ExternalIDs: map[string]string{"tmdb": "42"}},
+		}, Page: 1}, nil
+	case service.authorized.Folders[1].ID:
+		hydrated := service.authorized.Folders[1]
+		hydrated.CoverImageURL = collectionHydratedCoverURL
+		return collection.ResolvedFolder{Folder: hydrated, Items: []collection.Item{
+			{ID: "tt0000042", MediaType: collection.MediaTypeMovie, Title: "Duplicate movie", ExternalIDs: map[string]string{"imdb": "tt0000042"}},
+			{ID: "opaque-series", MediaType: collection.MediaTypeSeries, Title: "Add-on series", ExternalIDs: map[string]string{}, Sources: []collection.SourceReference{{Kind: collection.SourceKindAddonCatalog, AddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", CatalogID: "series", Title: "Trusted Add-on"}}},
+			{ID: "tvdb:84", MediaType: collection.MediaTypeMovie, Title: "Window sentinel", ExternalIDs: map[string]string{"tvdb": "84"}},
+		}, Page: 1, HasMore: true}, nil
+	default:
+		return collection.ResolvedFolder{}, collection.ErrNotFound
+	}
+}
+
+func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
+	handler, service, store, token := newCollectionCompatHandler(t)
+	coverURL := "https://provider.invalid/folder.png?token=FOLDER_SECRET"
+	coverTag := strings.Repeat("a", 64)
+	hydratedTag := strings.Repeat("b", 64)
+	localizedCover := localizedArtworkPrefix + coverTag
+	localizedHydratedCover := localizedArtworkPrefix + hydratedTag
+	service.authorized.Folders[0].CoverImageURL = coverURL
+	presenter := &searchArtworkPresenter{
+		localized:  map[string]string{coverURL: localizedCover, collectionHydratedCoverURL: localizedHydratedCover},
+		registered: map[string]string{localizedCover: coverTag, localizedHydratedCover: hydratedTag},
+	}
+	handler.catalog.(*catalogReader).artwork = presenter
+	handler.artwork = presenter
+	views, ok := handler.virtualViews()
+	if !ok || len(views) != 3 || views[2].Name != "Collections" || views[2].CollectionType != "boxsets" {
+		t.Fatalf("unexpected collection view: %+v", views)
+	}
+
+	viewsRequest := authenticatedCatalogRequest(t, token, "/UserViews?UserId="+catalogTestProfileID)
+	viewsResponse := httptest.NewRecorder()
+	handler.handleViews(viewsResponse, viewsRequest)
+	var namedViews QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, viewsResponse, &namedViews)
+	if viewsResponse.Code != http.StatusOK || len(namedViews.Items) != 4 || namedViews.Items[3].Id != collectionCompatID ||
+		namedViews.Items[3].Name != service.authorized.Title || namedViews.Items[3].Type != "CollectionFolder" || namedViews.Items[3].CollectionType != "mixed" {
+		t.Fatalf("named collection views status=%d result=%+v", viewsResponse.Code, namedViews)
+	}
+
+	userRequest := authenticatedCatalogRequest(t, token, "/Users/Me")
+	userResponse := httptest.NewRecorder()
+	handler.handleCurrentUser(userResponse, userRequest)
+	var user UserDto
+	decodeCatalogResponse(t, userResponse, &user)
+	if userResponse.Code != http.StatusOK || len(user.Configuration.MyMediaExcludes) != 1 ||
+		user.Configuration.MyMediaExcludes[0] != collectionCompatID || len(user.Configuration.OrderedViews) != 4 ||
+		user.Configuration.OrderedViews[3] != collectionCompatID {
+		t.Fatalf("collection view configuration status=%d config=%+v", userResponse.Code, user.Configuration)
+	}
+
+	rootRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+views[2].Id+"&IncludeItemTypes=BoxSet")
+	rootResponse := httptest.NewRecorder()
+	handler.handleItems(rootResponse, rootRequest)
+	var root QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, rootResponse, &root)
+	if rootResponse.Code != http.StatusOK || root.TotalRecordCount != 1 || len(root.Items) != 1 ||
+		root.Items[0].Id != collectionCompatID || root.Items[0].Type != "BoxSet" || !root.Items[0].IsFolder {
+		t.Fatalf("unexpected authorized boxsets: status=%d result=%+v", rootResponse.Code, root)
+	}
+	if strings.Contains(rootResponse.Body.String(), service.foreign.Title) || strings.Contains(rootResponse.Body.String(), service.foreign.ID) {
+		t.Fatalf("foreign collection leaked from root: %s", rootResponse.Body.String())
+	}
+
+	latestRequest := authenticatedCatalogRequest(t, token, "/Items/Latest?ParentId="+collectionCompatID+"&Limit=16")
+	latestResponse := httptest.NewRecorder()
+	handler.handleLatestItems(latestResponse, latestRequest)
+	var latest []BaseItemDto
+	decodeCatalogResponse(t, latestResponse, &latest)
+	if latestResponse.Code != http.StatusOK || len(latest) != 2 || latest[0].Name != "First" || latest[1].Name != "Second" ||
+		latest[0].Type != "Folder" || latest[0].ParentId != collectionCompatID || latest[0].ImageTags["Primary"] != coverTag ||
+		latest[1].ImageTags["Primary"] != hydratedTag {
+		t.Fatalf("collection latest folders status=%d result=%+v", latestResponse.Code, latest)
+	}
+	if len(service.calls) != 1 || service.calls[0].folderID != service.authorized.Folders[1].ID || service.calls[0].limit != 1 {
+		t.Fatalf("missing cover hydration calls=%+v", service.calls)
+	}
+	if strings.Contains(latestResponse.Body.String(), "provider.invalid") || strings.Contains(latestResponse.Body.String(), "FOLDER_SECRET") {
+		t.Fatalf("collection folder cover leaked upstream URL: %s", latestResponse.Body.String())
+	}
+	service.calls = nil
+
+	browseRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&StartIndex=0&Limit=2")
+	browseResponse := httptest.NewRecorder()
+
+	imageRequest := authenticatedCatalogRequest(t, token, "/Items/"+service.authorized.Folders[0].ID+"/Images/Primary?tag="+coverTag)
+	imageRequest.SetPathValue("id", service.authorized.Folders[0].ID)
+	imageRequest.SetPathValue("type", "Primary")
+	imageResponse := httptest.NewRecorder()
+	handler.handleImage(imageResponse, imageRequest)
+	if imageResponse.Code != http.StatusOK || len(presenter.served) != 1 || presenter.served[0] != coverTag {
+		t.Fatalf("authenticated folder artwork status=%d served=%v", imageResponse.Code, presenter.served)
+	}
+	handler.handleItems(browseResponse, browseRequest)
+	var browse QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, browseResponse, &browse)
+	if browseResponse.Code != http.StatusOK || browse.TotalRecordCount != 2 || len(browse.Items) != 2 ||
+		browse.Items[0].Id != service.authorized.Folders[0].ID || browse.Items[1].Id != service.authorized.Folders[1].ID ||
+		browse.Items[0].Type != "Folder" || len(service.calls) != 1 || service.calls[0].folderID != service.authorized.Folders[1].ID ||
+		service.calls[0].limit != 1 {
+		t.Fatalf("unexpected folder browse: status=%d result=%+v calls=%+v", browseResponse.Code, browse, service.calls)
+	}
+	service.calls = nil
+
+	folderRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+service.authorized.Folders[0].ID+"&IncludeItemTypes=Movie,Series&Limit=2")
+	folderResponse := httptest.NewRecorder()
+	handler.handleItems(folderResponse, folderRequest)
+	var folderItems QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, folderResponse, &folderItems)
+	if folderResponse.Code != http.StatusOK || folderItems.TotalRecordCount != 1 || len(folderItems.Items) != 1 ||
+		folderItems.Items[0].Id != collectionMovieID || folderItems.Items[0].Type != "Movie" || len(service.calls) != 1 ||
+		service.calls[0].folderID != service.authorized.Folders[0].ID || service.calls[0].limit != maximumCollectionResolveLimit {
+		t.Fatalf("unexpected canonical folder items: status=%d result=%+v calls=%+v", folderResponse.Code, folderItems, service.calls)
+	}
+	if resolved := store.resolvedInputs(); len(resolved) != 1 || resolved[0].ExternalID != "42" || resolved[0].Provider != "tmdb" {
+		t.Fatalf("folder identities were not canonicalized safely: %+v", resolved)
+	}
+
+	folderDetail := authenticatedCatalogRequest(t, token, "/Items/"+service.authorized.Folders[0].ID)
+	folderDetail.SetPathValue("id", service.authorized.Folders[0].ID)
+	folderDetailResponse := httptest.NewRecorder()
+	handler.handleItem(folderDetailResponse, folderDetail)
+	if folderDetailResponse.Code != http.StatusOK || !strings.Contains(folderDetailResponse.Body.String(), `"Type":"Folder"`) {
+		t.Fatalf("folder detail status=%d body=%s", folderDetailResponse.Code, folderDetailResponse.Body.String())
+	}
+
+	detailRequest := authenticatedCatalogRequest(t, token, "/Items/"+collectionCompatID)
+	detailRequest.SetPathValue("id", collectionCompatID)
+	detailResponse := httptest.NewRecorder()
+	handler.handleItem(detailResponse, detailRequest)
+	if detailResponse.Code != http.StatusOK || !strings.Contains(detailResponse.Body.String(), `"Type":"BoxSet"`) {
+		t.Fatalf("authorized boxset detail status=%d body=%s", detailResponse.Code, detailResponse.Body.String())
+	}
+
+	foreignRequest := authenticatedCatalogRequest(t, token, "/Items/"+foreignCollectionCompatID)
+	foreignRequest.SetPathValue("id", foreignCollectionCompatID)
+	foreignResponse := httptest.NewRecorder()
+	handler.handleItem(foreignResponse, foreignRequest)
+	if foreignResponse.Code != http.StatusNotFound || strings.Contains(foreignResponse.Body.String(), service.foreign.Title) {
+		t.Fatalf("foreign boxset detail leaked status=%d body=%s", foreignResponse.Code, foreignResponse.Body.String())
+	}
+}
+
+func TestBoxSetFilterIsRootOnlyAndIncompatibleFiltersAreEmpty(t *testing.T) {
+	handler, _, _, token := newCollectionCompatHandler(t)
+	views, _ := handler.virtualViews()
+
+	rootRequest := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=BoxSet")
+	rootResponse := httptest.NewRecorder()
+	handler.handleItems(rootResponse, rootRequest)
+	var root QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, rootResponse, &root)
+	if rootResponse.Code != http.StatusOK || len(root.Items) != 1 || root.Items[0].Type != "BoxSet" {
+		t.Fatalf("BoxSet selector did not list collection root: status=%d result=%+v", rootResponse.Code, root)
+	}
+
+	incompatibleRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+views[2].Id+"&IncludeItemTypes=Movie")
+	incompatibleResponse := httptest.NewRecorder()
+	handler.handleItems(incompatibleResponse, incompatibleRequest)
+	var incompatible QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, incompatibleResponse, &incompatible)
+	if incompatibleResponse.Code != http.StatusOK || incompatible.TotalRecordCount != 0 || len(incompatible.Items) != 0 {
+		t.Fatalf("incompatible collection filter was not empty: status=%d result=%+v", incompatibleResponse.Code, incompatible)
+	}
+}
+
+func TestCollectionCompatibilityErrorsAreScrubbedAndMapped(t *testing.T) {
+	handler := &Handler{}
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{name: "not found", err: collection.ErrNotFound, status: http.StatusNotFound},
+		{name: "invalid", err: collection.ErrInvalidInput, status: http.StatusBadRequest},
+		{name: "forbidden", err: collection.ErrForbidden, status: http.StatusUnauthorized},
+		{name: "profile required", err: collection.ErrActiveProfileRequired, status: http.StatusUnauthorized},
+		{name: "provider", err: collection.ErrProviderUnavailable, status: http.StatusBadGateway},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.writeCollectionError(response, test.err)
+			if response.Code != test.status || strings.Contains(response.Body.String(), test.err.Error()) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func newCollectionCompatHandler(t *testing.T) (*Handler, *collectionCompatService, *collectionCompatStore, string) {
+	t.Helper()
+	serverID, err := ParseServerID(catalogTestServerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := newCompatCredential()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	profileID := catalogTestProfileID
+	session := AuthenticatedSession{
+		ID: "22222222-2222-4222-8222-222222222222", ProfileID: profileID, ProfileName: "Viewer", ExpiresAt: expiresAt,
+		Principal: auth.Principal{SessionID: "33333333-3333-4333-8333-333333333333", UserID: "44444444-4444-4444-8444-444444444444", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt},
+	}
+	service := &collectionCompatService{
+		authorized: collection.Collection{ID: collectionCompatID, Title: "Authorized Collection", Folders: []collection.Folder{{ID: "11111111-1111-4111-8111-111111111110", Title: "First"}, {ID: "11111111-1111-4111-8111-111111111120", Title: "Second"}}},
+		foreign:    collection.Collection{ID: foreignCollectionCompatID, Title: "FOREIGN COLLECTION SECRET"},
+	}
+	store := &collectionCompatStore{titles: map[string]watchstate.CatalogTitle{
+		collectionMovieID:      {ID: collectionMovieID, MediaType: "movie", Title: "Canonical movie", Genres: []string{}, ProviderIDs: map[string]string{"tmdb": "42"}},
+		collectionSeriesID:     {ID: collectionSeriesID, MediaType: "series", Title: "Add-on series", Genres: []string{}, ProviderIDs: map[string]string{}},
+		collectionExtraMovieID: {ID: collectionExtraMovieID, MediaType: "movie", Title: "Window sentinel", Genres: []string{}, ProviderIDs: map[string]string{"tvdb": "84"}},
+	}}
+	reader, err := NewCatalogReader(store, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(Dependencies{ServerInfo: ServerInfo{ID: serverID, Name: "Rivune"}, Authentication: &catalogHTTPAuthentication{session: session}, Catalog: reader, Collections: service})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handler, service, store, token
+}

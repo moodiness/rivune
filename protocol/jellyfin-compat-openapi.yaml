@@ -24,12 +24,17 @@ info:
     provider URLs or credentials, or offer an unrestricted proxy. Only the operations
     in this document are supported.
 
+    Browser-hosted Jellyfin clients receive CORS headers only for documented paths and
+    methods. Preflight requests must name an implemented route and use the bounded
+    allowlist of standard content, range, cache, and MediaBrowser authorization headers.
+
     Catalog/search/state list queries accept ASCII-case-insensitive parameter names,
     at most 64 values and 8,192 total name/value bytes; repeated scalar names are
-    rejected. Pages default to 100 items and never exceed 100. Compatibility
-    authorization headers are limited to 2,048 bytes. Authentication JSON is limited
-    to 16 KiB, PlaybackInfo JSON to 256 KiB, and playback-event JSON to 1 MiB. All
-    adapter-generated JSON and error responses use `Cache-Control: no-store`, are
+    rejected while list parameters may repeat. Pages default to 100 items and never
+    exceed 200. Compatibility authorization headers are limited to 2,048 bytes.
+    Authentication JSON is limited to 16 KiB, PlaybackInfo JSON to 256 KiB, and
+    playback-event JSON to 1 MiB. All adapter-generated JSON and error responses use
+    `Cache-Control: no-store`, are
     PascalCase, bounded, and scrubbed of provider URLs, credentials, SQL, and raw
     upstream failures.
 
@@ -37,13 +42,23 @@ info:
     `rivune_at_` tokens fail. Multiple header transports may repeat only the same
     credential, while conflicting transports and duplicate query credentials fail.
     The `api_key` query transport is an explicit exception only for image and stream
-    operations.
+    operations. Artwork may instead use the opaque `tag` returned in item DTOs as an
+    anonymous capability; a supplied invalid credential never falls back to that path.
 
     Playback source enumeration remains lazy and only the selected MediaSourceId is
     opened. Compatibility play sessions contain opaque selectors, are bound to the
     credential/profile/device/item, and are capped at 256 active entries with a
     30-minute idle and two-hour absolute lifetime. Stream URLs never carry the general
     compatibility credential or a provider/source URL.
+
+    The library hierarchy contains the stable `Movies`, `TV Shows`, and `Collections`
+    virtual views plus one ordered, named view per profile-authorized Rivune collection.
+    Collection views expose configured folders through `Items/Latest` and ordinary item
+    browsing; opening a folder resolves only that folder into canonical Rivune movie/series
+    UUIDs. Configured covers are reused directly; missing covers are hydrated through a
+    bounded folder resolution and registered as opaque same-origin artwork tags.
+    `OrderedViews` and `MyMediaExcludes` are emitted as standard client presentation hints;
+    clients remain responsible for their final home layout.
   license:
     name: Apache License 2.0
     identifier: Apache-2.0
@@ -198,6 +213,55 @@ paths:
         "204": { $ref: "#/components/responses/NoContent" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         default: { $ref: "#/components/responses/CompatError" }
+  /Sessions/Capabilities/Full:
+    post:
+      tags: [Sessions]
+      summary: Accept bounded client capability metadata without persisting it
+      operationId: updateJellyfinSessionCapabilities
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        default: { $ref: "#/components/responses/CompatError" }
+  /SyncPlay/List:
+    get:
+      tags: [Sessions]
+      summary: Return no SyncPlay groups
+      operationId: listJellyfinSyncPlayGroups
+      responses:
+        "200":
+          description: SyncPlay is unsupported, represented as a typed empty list.
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 0
+                items: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        default: { $ref: "#/components/responses/CompatError" }
+  /Playback/BitrateTest:
+    get:
+      tags: [Playback]
+      summary: Stream a bounded zero-filled bitrate probe
+      operationId: runJellyfinBitrateTest
+      parameters:
+        - name: Size
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 4194304 }
+      responses:
+        "200":
+          description: Exactly Size bytes, streamed without a Size-proportional allocation.
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        default: { $ref: "#/components/responses/CompatError" }
   /Plugins:
     get:
       tags: [Discovery]
@@ -251,7 +315,7 @@ paths:
       - { $ref: "#/components/parameters/UserIdPath" }
     get:
       tags: [Library]
-      summary: List Movies and TV Shows views
+      summary: List stable media roots and authorized named Rivune collection views
       operationId: listJellyfinUserViews
       responses:
         "200": { $ref: "#/components/responses/ItemQueryResult" }
@@ -261,7 +325,7 @@ paths:
   /UserViews:
     get:
       tags: [Library]
-      summary: List Movies and TV Shows views
+      summary: List stable media roots and authorized named Rivune collection views
       operationId: listJellyfinViews
       parameters:
         - { $ref: "#/components/parameters/UserIdQuery" }
@@ -339,6 +403,24 @@ paths:
         - { $ref: "#/components/parameters/Ids" }
       responses:
         "200": { $ref: "#/components/responses/ItemQueryResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/CompatError" }
+  /Items/Latest:
+    get:
+      tags: [Library]
+      summary: List latest media or ordered folders for an authorized collection view
+      operationId: listJellyfinLatestItems
+      parameters:
+        - { $ref: "#/components/parameters/UserIdQuery" }
+        - { $ref: "#/components/parameters/ParentId" }
+        - { $ref: "#/components/parameters/StartIndex" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Fields" }
+        - { $ref: "#/components/parameters/EnableUserData" }
+      responses:
+        "200": { $ref: "#/components/responses/LatestItems" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -470,8 +552,8 @@ paths:
       - { $ref: "#/components/parameters/ImageTypePath" }
     get:
       tags: [Artwork]
-      summary: Get authorized original artwork bytes
-      description: Resize/quality query knobs are ignored; Rivune never redirects upstream.
+      summary: Get original artwork bytes
+      description: Resize/quality query knobs are ignored; Rivune never redirects upstream. A registered 64-hex artwork tag may replace authentication.
       operationId: getJellyfinImage
       security:
         - XEmbyToken: []
@@ -480,8 +562,10 @@ paths:
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ArtworkTag" }
       responses:
         "200": { $ref: "#/components/responses/Image" }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -490,7 +574,7 @@ paths:
         default: { $ref: "#/components/responses/CompatError" }
     head:
       tags: [Artwork]
-      summary: Inspect authorized original artwork
+      summary: Inspect original artwork
       operationId: headJellyfinImage
       security:
         - XEmbyToken: []
@@ -499,8 +583,10 @@ paths:
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ArtworkTag" }
       responses:
         "200": { $ref: "#/components/responses/ImageHead" }
         "401": { $ref: "#/components/responses/HeadUnauthorized" }
@@ -514,7 +600,7 @@ paths:
       - { $ref: "#/components/parameters/ImageIndexPath" }
     get:
       tags: [Artwork]
-      summary: Get indexed authorized original artwork
+      summary: Get indexed original artwork
       operationId: getJellyfinIndexedImage
       security:
         - XEmbyToken: []
@@ -523,8 +609,10 @@ paths:
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ArtworkTag" }
       responses:
         "200": { $ref: "#/components/responses/Image" }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -533,7 +621,7 @@ paths:
         default: { $ref: "#/components/responses/CompatError" }
     head:
       tags: [Artwork]
-      summary: Inspect indexed authorized original artwork
+      summary: Inspect indexed original artwork
       operationId: headJellyfinIndexedImage
       security:
         - XEmbyToken: []
@@ -542,8 +630,10 @@ paths:
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ArtworkTag" }
       responses:
         "200": { $ref: "#/components/responses/ImageHead" }
         "401": { $ref: "#/components/responses/HeadUnauthorized" }
@@ -933,6 +1023,11 @@ components:
       description: >
         URL authentication accepted only by documented artwork and stream operations.
         A duplicate query value or a value conflicting with any header credential fails.
+    ArtworkTagQuery:
+      type: apiKey
+      in: query
+      name: tag
+      description: Opaque 64-hex artwork capability returned in ImageTags or BackdropImageTags.
   parameters:
     ClientAuthorization:
       name: Authorization
@@ -1030,7 +1125,7 @@ components:
       name: Limit
       in: query
       required: false
-      schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
     Recursive:
       name: Recursive
       in: query
@@ -1040,11 +1135,13 @@ components:
       name: IncludeItemTypes
       in: query
       required: false
-      description: Comma-separated, at most 100 values, each at most 256 bytes.
+      description: Comma-separated, at most 100 values, each at most 256 bytes. BoxSet selects only the authorized Collections root listing; standard Jellyfin kinds that Rivune does not project are ignored.
       schema:
         type: array
         maxItems: 100
-        items: { type: string, enum: [Movie, Series, Season, Episode] }
+        items:
+          type: string
+          enum: [AggregateFolder, Audio, AudioBook, BasePluginFolder, Book, BoxSet, Channel, ChannelFolderItem, CollectionFolder, Episode, Folder, Genre, LiveTvChannel, LiveTvProgram, ManualPlaylistsFolder, Movie, MusicAlbum, MusicArtist, MusicGenre, MusicVideo, Person, Photo, PhotoAlbum, Playlist, Program, Recording, Season, Series, Studio, Trailer, TvChannel, TvProgram, UserRootFolder, UserView, Video, Year]
       style: form
       explode: false
     Fields:
@@ -1062,7 +1159,7 @@ components:
       name: SortBy
       in: query
       required: false
-      description: Accepted bounded comma-separated compatibility hints; catalog order remains authoritative.
+      description: Accepted bounded comma-separated compatibility hints. SortName or Name alone selects title order; other standard Jellyfin sort hints fall back to deterministic native catalog order.
       schema:
         type: array
         maxItems: 100
@@ -1096,6 +1193,12 @@ components:
       required: false
       description: Opaque compatibility token; accepted only on image and stream routes.
       schema: { type: string, minLength: 1 }
+    ArtworkTag:
+      name: tag
+      in: query
+      required: false
+      description: Registered 64-hex artwork capability; accepted without a compatibility token.
+      schema: { type: string, pattern: "^[0-9a-f]{64}$" }
     Range:
       name: Range
       in: header
@@ -1245,17 +1348,25 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/DisplayPreferencesDto" }
     VirtualFolders:
-      description: Movies and TV Shows virtual folders.
+      description: Stable media roots plus profile-authorized named Rivune collection views.
       content:
         application/json:
           schema:
             type: array
             items: { $ref: "#/components/schemas/VirtualFolderInfo" }
     ItemQueryResult:
-      description: Exact bounded page and total from the authorized catalog.
+      description: Bounded authorized page. Catalog and configured-folder totals are exact; a resolved folder page may report the observed canonical window plus one while its provider has more items.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/BaseItemQueryResult" }
+    LatestItems:
+      description: Bounded latest media, or configured folder cards for an authorized named collection view.
+      content:
+        application/json:
+          schema:
+            type: array
+            maxItems: 200
+            items: { $ref: "#/components/schemas/BaseItemDto" }
     Item:
       description: One authorized catalog item.
       content:
@@ -1524,10 +1635,23 @@ components:
     UserConfiguration:
       type: object
       additionalProperties: false
-      required: [PlayDefaultAudioTrack, SubtitleMode]
+      required: [PlayDefaultAudioTrack, SubtitleMode, OrderedViews, LatestItemsExcludes, MyMediaExcludes, GroupedFolders]
       properties:
         PlayDefaultAudioTrack: { type: boolean }
         SubtitleMode: { type: string }
+        OrderedViews:
+          type: array
+          items: { $ref: "#/components/schemas/UUID" }
+        LatestItemsExcludes:
+          type: array
+          items: { $ref: "#/components/schemas/UUID" }
+        MyMediaExcludes:
+          type: array
+          items: { $ref: "#/components/schemas/UUID" }
+          description: Presentation hints for named collection views; client behavior is not mandated.
+        GroupedFolders:
+          type: array
+          items: { $ref: "#/components/schemas/UUID" }
     SessionInfoDto:
       type: object
       additionalProperties: false
@@ -1560,11 +1684,11 @@ components:
         ServerId: { $ref: "#/components/schemas/UUID" }
         Name: { type: string }
         SortName: { type: string }
-        Type: { type: string, enum: [CollectionFolder, Movie, Series, Season, Episode] }
+        Type: { type: string, enum: [CollectionFolder, Folder, BoxSet, Movie, Series, Season, Episode] }
         MediaType: { type: string, enum: [Video] }
         IsFolder: { type: boolean }
         IsPlayable: { type: boolean }
-        CollectionType: { type: string, enum: [movies, tvshows] }
+        CollectionType: { type: string, enum: [movies, tvshows, boxsets, mixed] }
         ParentId: { $ref: "#/components/schemas/UUID" }
         SeriesId: { $ref: "#/components/schemas/UUID" }
         SeasonId: { $ref: "#/components/schemas/UUID" }
@@ -1638,12 +1762,12 @@ components:
       additionalProperties: false
       required: [Name, Locations, CollectionType, ItemId, Id]
       properties:
-        Name: { type: string, enum: [Movies, TV Shows] }
+        Name: { type: string, minLength: 1 }
         Locations:
           type: array
           maxItems: 0
           items: { type: string }
-        CollectionType: { type: string, enum: [movies, tvshows] }
+        CollectionType: { type: string, enum: [movies, tvshows, boxsets, mixed] }
         ItemId: { $ref: "#/components/schemas/UUID" }
         Id: { $ref: "#/components/schemas/UUID" }
     PlaybackInfoRequest:

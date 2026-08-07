@@ -1,9 +1,11 @@
 package jellyfin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -64,10 +66,12 @@ func TestCatalogViewsAreStableRootsAndRejectMismatchedUser(t *testing.T) {
 	}
 	var result QueryResult[BaseItemDto]
 	decodeCatalogResponse(t, response, &result)
-	if result.TotalRecordCount != 2 || len(result.Items) != 2 || result.Items[0].Name != "Movies" ||
+	if result.TotalRecordCount != 3 || len(result.Items) != 3 || result.Items[0].Name != "Movies" ||
 		result.Items[0].CollectionType != "movies" || result.Items[1].Name != "TV Shows" ||
-		result.Items[1].CollectionType != "tvshows" || result.Items[0].Id == result.Items[1].Id ||
-		result.Items[0].ServerId != catalogTestServerID || result.Items[0].Genres == nil || result.Items[0].BackdropImageTags == nil {
+		result.Items[1].CollectionType != "tvshows" || result.Items[2].Name != "Collections" ||
+		result.Items[2].CollectionType != "boxsets" || result.Items[0].Id == result.Items[1].Id ||
+		result.Items[1].Id == result.Items[2].Id || result.Items[0].ServerId != catalogTestServerID ||
+		result.Items[0].Genres == nil || result.Items[0].BackdropImageTags == nil {
 		t.Fatalf("unexpected virtual roots: %+v", result)
 	}
 	if len(reader.queries) != 0 || len(reader.titleIDs) != 0 {
@@ -143,6 +147,33 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 	}
 }
 
+func TestLatestItemsReturnsJellyfinArrayForVirtualView(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	views, ok := handler.virtualViews()
+	if !ok {
+		t.Fatal("derive virtual views")
+	}
+	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{{
+		ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "Latest Movie",
+		Genres: []string{}, ProviderIDs: map[string]string{},
+	}}}
+	request := authenticatedCatalogRequest(t, token, "/Items/Latest?userId="+catalogTestProfileID+"&parentId="+views[0].Id+"&limit=16&fields=PrimaryImageAspectRatio&fields=Path")
+	response := httptest.NewRecorder()
+	handler.handleLatestItems(response, request)
+	if response.Code != http.StatusOK || len(reader.queries) != 1 {
+		t.Fatalf("latest status=%d calls=%d body=%s", response.Code, len(reader.queries), response.Body.String())
+	}
+	query := reader.queries[0]
+	if query.ParentID != "" || query.Limit != 16 || len(query.MediaTypes) != 1 || query.MediaTypes[0] != "movie" {
+		t.Fatalf("unexpected latest query: %+v", query)
+	}
+	var items []BaseItemDto
+	decodeCatalogResponse(t, response, &items)
+	if len(items) != 1 || items[0].Name != "Latest Movie" || items[0].Type != "Movie" {
+		t.Fatalf("unexpected latest items: %+v", items)
+	}
+}
+
 func TestCatalogMapsSeasonZeroAndEpisodeDetailInOneRead(t *testing.T) {
 	handler, reader, token := newCatalogHTTPHandler(t)
 	seasonZero := 0
@@ -212,20 +243,60 @@ func TestCatalogSortIsForwardedOrRejected(t *testing.T) {
 		t.Fatalf("supported sort status=%d queries=%+v body=%s", response.Code, reader.queries, response.Body.String())
 	}
 
-	for _, query := range []string{
-		"?SortBy=DateCreated&SortOrder=Ascending",
-		"?SortBy=SortName,DateCreated&SortOrder=Descending",
-		"?SortOrder=Descending",
-	} {
+	vidHub := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Series,Movie,Video,MusicVideo&SortBy=DateLastContentAdded,DateCreated,SortName&SortOrder=Descending")
+	vidHubResponse := httptest.NewRecorder()
+	handler.handleItems(vidHubResponse, vidHub)
+	if vidHubResponse.Code != http.StatusOK || len(reader.queries) != 2 || reader.queries[1].SortBy != "" || reader.queries[1].SortOrder != "" ||
+		!reflect.DeepEqual(reader.queries[1].MediaTypes, []string{"movie", "series"}) {
+		t.Fatalf("VidHub query status=%d queries=%+v body=%s", vidHubResponse.Code, reader.queries, vidHubResponse.Body.String())
+	}
+
+	videoOnly := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Video,MusicVideo")
+	videoOnlyResponse := httptest.NewRecorder()
+	handler.handleItems(videoOnlyResponse, videoOnly)
+	if videoOnlyResponse.Code != http.StatusOK || len(reader.queries) != 2 {
+		t.Fatalf("unprojected filter status=%d queries=%+v body=%s", videoOnlyResponse.Code, reader.queries, videoOnlyResponse.Body.String())
+	}
+
+	standardKinds := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Movie,Audio,Folder,Trailer")
+	standardKindsResponse := httptest.NewRecorder()
+	handler.handleItems(standardKindsResponse, standardKinds)
+	if standardKindsResponse.Code != http.StatusOK || len(reader.queries) != 3 ||
+		!reflect.DeepEqual(reader.queries[2].MediaTypes, []string{"movie"}) {
+		t.Fatalf("standard unprojected kinds status=%d queries=%+v body=%s", standardKindsResponse.Code, reader.queries, standardKindsResponse.Body.String())
+	}
+
+	for _, query := range []string{"?SortBy=CommunityRating&SortOrder=Ascending", "?SortOrder=Descending"} {
 		request = authenticatedCatalogRequest(t, token, "/Items"+query)
 		response = httptest.NewRecorder()
 		handler.handleItems(response, request)
-		if response.Code != http.StatusBadRequest {
-			t.Fatalf("unsupported sort %q status=%d body=%s", query, response.Code, response.Body.String())
+		if response.Code != http.StatusOK {
+			t.Fatalf("standard sort %q status=%d body=%s", query, response.Code, response.Body.String())
 		}
 	}
-	if len(reader.queries) != 1 {
-		t.Fatalf("unsupported sorts reached catalog: %+v", reader.queries)
+	request = authenticatedCatalogRequest(t, token, "/Items?SortBy=PrivateProviderURL")
+	response = httptest.NewRecorder()
+	handler.handleItems(response, request)
+	if response.Code != http.StatusBadRequest || len(reader.queries) != 5 {
+		t.Fatalf("unknown sort status=%d queries=%+v body=%s", response.Code, reader.queries, response.Body.String())
+	}
+}
+
+func TestCatalogRejectionLogsOnlyClosedStage(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	var logs bytes.Buffer
+	handler.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	privateValue := "PrivateProviderURLSecret"
+	request := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes="+privateValue)
+	response := httptest.NewRecorder()
+	handler.handleItems(response, request)
+	if response.Code != http.StatusBadRequest || len(reader.queries) != 0 {
+		t.Fatalf("rejected query status=%d calls=%d", response.Code, len(reader.queries))
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, `"msg":"`+compatCatalogRejectedMessage+`"`) ||
+		!strings.Contains(logged, `"stage":"include_item_types"`) || strings.Contains(logged, privateValue) {
+		t.Fatalf("unsafe or missing catalog diagnostic: %s", logged)
 	}
 }
 

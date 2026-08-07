@@ -1,6 +1,8 @@
 package jellyfin
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/url"
@@ -10,9 +12,18 @@ import (
 )
 
 const (
-	maximumCompatAuthorizationHeaderBytes = 2048
-	maximumCompatTokenHeaderBytes         = 128
-	maximumCompatQueryBytes               = 2048
+	maximumCompatAuthorizationHeaderBytes  = 2048
+	maximumCompatTokenHeaderBytes          = 128
+	maximumCompatQueryBytes                = 2048
+	maximumCompatSourceDeviceIDRunes       = 1024
+	clientIdentityFailureHeaderBounds      = "header_bounds"
+	clientIdentityFailureAuthorization     = "authorization_syntax"
+	clientIdentityFailureAuthorizationNone = "authorization_absent"
+	clientIdentityFailureClientMissing     = "client_missing"
+	clientIdentityFailureDeviceMissing     = "device_missing"
+	clientIdentityFailureDeviceIDMissing   = "device_id_missing"
+	clientIdentityFailureVersionMissing    = "version_missing"
+	clientIdentityFailureFieldBounds       = "field_bounds"
 )
 
 var ErrInvalidCompatAuthorization = errors.New("invalid compatibility authorization")
@@ -24,27 +35,60 @@ var compatAuthorizationHeaders = []string{
 }
 
 func ParseClientIdentity(headers http.Header) (ClientIdentity, error) {
+	identity, _, err := parseClientIdentity(headers)
+	return identity, err
+}
+
+func parseClientIdentity(headers http.Header) (ClientIdentity, string, error) {
 	if !boundedCompatHeaders(headers) {
-		return ClientIdentity{}, ErrInvalidCompatAuthorization
+		return ClientIdentity{}, clientIdentityFailureHeaderBounds, ErrInvalidCompatAuthorization
 	}
 	parameters, found, err := collectAuthorizationParameters(headers)
-	if err != nil || !found {
-		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	if err != nil {
+		return ClientIdentity{}, clientIdentityFailureAuthorization, ErrInvalidCompatAuthorization
+	}
+	if !found {
+		return ClientIdentity{}, clientIdentityFailureAuthorizationNone, ErrInvalidCompatAuthorization
 	}
 	client, okClient := parameters["client"]
+	if !okClient {
+		return ClientIdentity{}, clientIdentityFailureClientMissing, ErrInvalidCompatAuthorization
+	}
 	device, okDevice := parameters["device"]
+	if !okDevice {
+		return ClientIdentity{}, clientIdentityFailureDeviceMissing, ErrInvalidCompatAuthorization
+	}
 	deviceID, okDeviceID := parameters["deviceid"]
+	if !okDeviceID {
+		return ClientIdentity{}, clientIdentityFailureDeviceIDMissing, ErrInvalidCompatAuthorization
+	}
 	version, okVersion := parameters["version"]
-	if !okClient || !okDevice || !okDeviceID || !okVersion {
-		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	if !okVersion {
+		return ClientIdentity{}, clientIdentityFailureVersionMissing, ErrInvalidCompatAuthorization
+	}
+	deviceID, okDeviceID = canonicalCompatDeviceID(deviceID)
+	if !okDeviceID {
+		return ClientIdentity{}, clientIdentityFailureFieldBounds, ErrInvalidCompatAuthorization
 	}
 	identity, err := normalizeClientIdentity(ClientIdentity{
 		Client: client, Device: device, DeviceID: deviceID, Version: version,
 	})
 	if err != nil {
-		return ClientIdentity{}, ErrInvalidCompatAuthorization
+		return ClientIdentity{}, clientIdentityFailureFieldBounds, ErrInvalidCompatAuthorization
 	}
-	return identity, nil
+	return identity, "", nil
+}
+
+func canonicalCompatDeviceID(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if boundedUTF8(value, 1, 128) {
+		return value, true
+	}
+	if !boundedUTF8(value, 129, maximumCompatSourceDeviceIDRunes) {
+		return "", false
+	}
+	digest := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(digest[:]), true
 }
 
 // ParseCompatToken accepts query authentication only for explicitly scoped
@@ -92,12 +136,15 @@ func ParseCompatToken(request *http.Request, allowQuery bool) (string, error) {
 	if err != nil {
 		return "", ErrInvalidCompatAuthorization
 	}
-	queryTokens, hasQueryToken := query["api_key"]
+	queryToken, hasQueryToken, queryTokenErr := queryScalar(query, "api_key")
+	if queryTokenErr != nil {
+		return "", ErrInvalidCompatAuthorization
+	}
 	if hasQueryToken {
-		if !allowQuery || len(queryTokens) != 1 || strings.TrimSpace(queryTokens[0]) == "" {
+		if !allowQuery || strings.TrimSpace(queryToken) == "" {
 			return "", ErrInvalidCompatAuthorization
 		}
-		candidates = append(candidates, strings.TrimSpace(queryTokens[0]))
+		candidates = append(candidates, strings.TrimSpace(queryToken))
 	}
 	if len(candidates) == 0 {
 		return "", ErrInvalidCompatAuthorization

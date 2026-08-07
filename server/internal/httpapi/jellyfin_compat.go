@@ -66,6 +66,7 @@ func (a *API) initializeJellyfinCompatibility(
 	pool *pgxpool.Pool,
 	nativeAuthentication *auth.Service,
 	catalog *watchstate.Service,
+	collections jellyfin.CollectionReader,
 	artwork *artworkcache.Service,
 	playbackDelivery *playback.Service,
 	instances instanceService,
@@ -78,7 +79,7 @@ func (a *API) initializeJellyfinCompatibility(
 	defer a.jellyfinCompatibilityMu.Unlock()
 	if a.jellyfinCompatibilityBuilder == nil {
 		a.jellyfinCompatibilityBuilder = func(ctx context.Context) (*jellyfin.Handler, bool, error) {
-			return a.buildJellyfinCompatibility(ctx, pool, nativeAuthentication, catalog, artwork, playbackDelivery, instances, searchDependencies...)
+			return a.buildJellyfinCompatibility(ctx, pool, nativeAuthentication, catalog, collections, artwork, playbackDelivery, instances, searchDependencies...)
 		}
 	}
 	if a.jellyfinCompatibilitySignal == nil {
@@ -94,6 +95,7 @@ func (a *API) buildJellyfinCompatibility(
 	pool *pgxpool.Pool,
 	nativeAuthentication *auth.Service,
 	catalog *watchstate.Service,
+	collections jellyfin.CollectionReader,
 	artwork *artworkcache.Service,
 	playbackDelivery *playback.Service,
 	instances instanceService,
@@ -153,7 +155,7 @@ func (a *API) buildJellyfinCompatibility(
 	}
 
 	compatHandler, err := jellyfin.New(jellyfin.Dependencies{
-		ServerInfo: serverInfo, Authentication: compatAuthentication, Catalog: compatCatalog,
+		ServerInfo: serverInfo, Authentication: compatAuthentication, Catalog: compatCatalog, Collections: collections,
 		Artwork: artwork, Playback: playbackDelivery, Watchstate: catalog, Logger: a.logger,
 	})
 	if err != nil {

@@ -57,8 +57,12 @@ type UserPolicy struct {
 }
 
 type UserConfiguration struct {
-	PlayDefaultAudioTrack bool   `json:"PlayDefaultAudioTrack"`
-	SubtitleMode          string `json:"SubtitleMode"`
+	PlayDefaultAudioTrack bool     `json:"PlayDefaultAudioTrack"`
+	SubtitleMode          string   `json:"SubtitleMode"`
+	OrderedViews          []string `json:"OrderedViews"`
+	LatestItemsExcludes   []string `json:"LatestItemsExcludes"`
+	MyMediaExcludes       []string `json:"MyMediaExcludes"`
+	GroupedFolders        []string `json:"GroupedFolders"`
 }
 
 type SessionInfoDto struct {

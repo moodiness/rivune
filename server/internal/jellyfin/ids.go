@@ -32,8 +32,9 @@ type VirtualItemID struct {
 type VirtualItemKey string
 
 const (
-	VirtualMoviesView  VirtualItemKey = "view:movies"
-	VirtualTVShowsView VirtualItemKey = "view:tv-shows"
+	VirtualMoviesView      VirtualItemKey = "view:movies"
+	VirtualTVShowsView     VirtualItemKey = "view:tv-shows"
+	VirtualCollectionsView VirtualItemKey = "view:collections"
 )
 
 func ParseServerID(raw string) (ServerID, error) {

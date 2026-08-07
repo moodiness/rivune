@@ -1,6 +1,7 @@
 package jellyfin
 
 import (
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,23 @@ func TestParseClientIdentityAcceptsStrictMediaBrowserMetadata(t *testing.T) {
 	}
 }
 
+func TestParseClientIdentityCanonicalizesLongJellyfinWebDeviceID(t *testing.T) {
+	longDeviceID := strings.Repeat("d", 300)
+	headers := make(http.Header)
+	headers.Set("Authorization", `MediaBrowser Client="Jellyfin%20Web", Device="Chrome", DeviceId="`+longDeviceID+`", Version="12.0.0"`)
+	first, err := ParseClientIdentity(headers)
+	if err != nil {
+		t.Fatalf("parse long Jellyfin Web device ID: %v", err)
+	}
+	second, err := ParseClientIdentity(headers)
+	if err != nil {
+		t.Fatalf("repeat long Jellyfin Web device ID: %v", err)
+	}
+	if first.DeviceID != second.DeviceID || len(first.DeviceID) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(first.DeviceID, "sha256:") {
+		t.Fatalf("long device ID was not canonical and stable: first=%q second=%q", first.DeviceID, second.DeviceID)
+	}
+}
+
 func TestParseCompatTokenSeparatesAudienceAndRejectsAmbiguity(t *testing.T) {
 	token, _, err := newCompatCredential()
 	if err != nil {
@@ -46,6 +64,12 @@ func TestParseCompatTokenSeparatesAudienceAndRejectsAmbiguity(t *testing.T) {
 	parsed, err := ParseCompatToken(same, true)
 	if err != nil || parsed != token {
 		t.Fatalf("same credential transports parsed %q with error %v", parsed, err)
+	}
+
+	mixedCaseQuery := httptest.NewRequest(http.MethodGet, "/Items/id/Images/Primary?API_KEY="+token, nil)
+	parsed, err = ParseCompatToken(mixedCaseQuery, true)
+	if err != nil || parsed != token {
+		t.Fatalf("case-insensitive query credential parsed %q with error %v", parsed, err)
 	}
 
 	differentToken, _, err := newCompatCredential()

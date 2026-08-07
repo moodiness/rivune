@@ -11,6 +11,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/collection"
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/watchstate"
 )
@@ -94,6 +95,23 @@ func (reader *catalogReader) GetCatalogTitles(ctx context.Context, principal aut
 	return titles, nil
 }
 
+func (reader *catalogReader) LocalizeArtworkURLs(ctx context.Context, upstream []string) []string {
+	localized := make([]string, len(upstream))
+	if reader == nil || reader.artwork == nil || len(upstream) == 0 {
+		return localized
+	}
+	materialized := reader.artwork.LocalURLs(ctx, upstream)
+	if len(materialized) != len(upstream) {
+		return localized
+	}
+	for index, value := range materialized {
+		if _, valid := localizedArtworkTag(value); valid {
+			localized[index] = value
+		}
+	}
+	return localized
+}
+
 func (reader *catalogReader) ListCatalogItems(ctx context.Context, principal auth.Principal, query watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
 	page, err := reader.store.ListCatalogItems(ctx, principal, query)
 	if err != nil {
@@ -101,6 +119,83 @@ func (reader *catalogReader) ListCatalogItems(ctx context.Context, principal aut
 	}
 	reader.localizeCatalogTitles(ctx, page.Items)
 	return page, nil
+}
+
+// ResolveCollectionItem canonicalizes one authorized collection result through
+// the same linked-session title path used by provider search. The returned title
+// is then read back through the catalog boundary so playback keeps using Rivune's
+// canonical UUID.
+func (reader *catalogReader) ResolveCollectionItem(ctx context.Context, principal auth.Principal, item collection.Item) (watchstate.CatalogTitle, error) {
+	mediaType := strings.ToLower(strings.TrimSpace(item.MediaType))
+	if mediaType != collection.MediaTypeMovie && mediaType != collection.MediaTypeSeries {
+		return watchstate.CatalogTitle{}, fmt.Errorf("%w: unsupported collection media type", watchstate.ErrInvalidInput)
+	}
+	resourceID := strings.TrimSpace(item.ID)
+	if resourceID == "" {
+		return watchstate.CatalogTitle{}, fmt.Errorf("%w: missing collection resource identifier", watchstate.ErrInvalidInput)
+	}
+	provider, externalID := collectionProviderIdentity(item)
+	if provider == "" || externalID == "" {
+		return watchstate.CatalogTitle{}, fmt.Errorf("%w: collection item has no authorized provider identity", watchstate.ErrInvalidInput)
+	}
+	input := watchstate.ResolveTitleInput{
+		MediaType: mediaType, Provider: provider, ExternalID: externalID, ResourceID: resourceID,
+		Title: item.Title, PosterURL: item.PosterURL, BackgroundURL: item.BackgroundURL,
+		ReleaseInfo: item.ReleaseInfo, Released: item.Released,
+	}
+	if item.Released != "" {
+		if parsed, err := time.Parse(time.DateOnly, item.Released); err != nil || parsed.Format(time.DateOnly) != item.Released {
+			input.Released = ""
+		}
+	}
+	if provider == "addon" {
+		source, ok := collectionAddonSource(item.Sources)
+		if !ok {
+			return watchstate.CatalogTitle{}, fmt.Errorf("%w: collection item has no authorized provider identity", watchstate.ErrInvalidInput)
+		}
+		input.SourceAddonID = source.AddonID
+		input.SourceCatalogID = source.CatalogID
+		input.SourceName = source.Title
+	}
+	localized := []watchstate.CatalogTitle{{PosterURL: input.PosterURL, BackgroundURL: input.BackgroundURL}}
+	reader.localizeCatalogTitles(ctx, localized)
+	input.PosterURL, input.BackgroundURL = localized[0].PosterURL, localized[0].BackgroundURL
+	reference, err := reader.store.ResolveLinkedCatalogTitle(ctx, principal, input)
+	if err != nil {
+		return watchstate.CatalogTitle{}, err
+	}
+	return reader.GetCatalogTitle(ctx, principal, reference.TitleID)
+}
+
+func collectionProviderIdentity(item collection.Item) (string, string) {
+	identities := copyProviderIDs(item.ExternalIDs)
+	for _, provider := range []string{"tmdb", "imdb", "tvdb"} {
+		if externalID := identities[provider]; externalID != "" {
+			return provider, externalID
+		}
+	}
+	if source, ok := collectionAddonSource(item.Sources); ok {
+		digest := sha256.Sum256([]byte(source.AddonID + "\x00" + strings.ToLower(strings.TrimSpace(item.MediaType)) + "\x00" + strings.TrimSpace(item.ID)))
+		return "addon", fmt.Sprintf("sha256:%x", digest)
+	}
+	return "", ""
+}
+
+func collectionAddonSource(sources []collection.SourceReference) (collection.SourceReference, bool) {
+	for _, source := range sources {
+		addonID := strings.ToLower(strings.TrimSpace(source.AddonID))
+		catalogID := strings.TrimSpace(source.CatalogID)
+		name := strings.TrimSpace(source.Title)
+		if source.Kind != collection.SourceKindAddonCatalog || addonID == "" || catalogID == "" || name == "" {
+			continue
+		}
+		if _, err := ParseItemID(addonID); err != nil {
+			continue
+		}
+		source.AddonID, source.CatalogID, source.Title = addonID, catalogID, name
+		return source, true
+	}
+	return collection.SourceReference{}, false
 }
 
 func (reader *catalogReader) localizeCatalogTitles(ctx context.Context, titles []watchstate.CatalogTitle) {
@@ -550,7 +645,8 @@ func sortCatalogSearch(items []watchstate.CatalogTitle, order string) {
 }
 
 var (
-	_ CatalogReader      = (*catalogReader)(nil)
-	_ catalogBatchReader = (*catalogReader)(nil)
-	_ catalogSearcher    = (*catalogReader)(nil)
+	_ CatalogReader          = (*catalogReader)(nil)
+	_ catalogBatchReader     = (*catalogReader)(nil)
+	_ catalogSearcher        = (*catalogReader)(nil)
+	_ collectionItemResolver = (*catalogReader)(nil)
 )

@@ -435,7 +435,7 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		}
 		return *layer.Values.JellyfinEnabled, nil
 	}
-	api.initializeJellyfinCompatibility(pool, authService, watchstateService, artworkService, playbackService, instanceManager, metadataService, addonService)
+	api.initializeJellyfinCompatibility(pool, authService, watchstateService, collectionService, artworkService, playbackService, instanceManager, metadataService, addonService)
 	return api, nil
 }
 

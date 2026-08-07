@@ -201,6 +201,15 @@ func (handler *Handler) handleResume(response http.ResponseWriter, request *http
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
 		return
 	}
+	mediaTypes, err := commaSeparated(request.URL.Query(), "MediaTypes")
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
+		return
+	}
+	if len(mediaTypes) != 0 && !containsFold(mediaTypes, "Video") {
+		handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: query.StartIndex})
+		return
+	}
 	if !feedOrderOnly(request, query) {
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "Resume sorting is not supported")
 		return

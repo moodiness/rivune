@@ -25,7 +25,8 @@ func TestJellyfinCompatibilityDisabledSkipsConstructionAndReservesRoutes(t *test
 		Name:     "Rivune",
 	}}
 	api := &API{config: config.Config{JellyfinEnabled: false}}
-	api.initializeJellyfinCompatibility(nil, nil, nil, nil, nil, instances)
+	collections := &fakeCollectionService{}
+	api.initializeJellyfinCompatibility(nil, nil, nil, collections, nil, nil, instances)
 	if instances.infoCalls != 0 || api.jellyfinCompatibility != nil {
 		t.Fatalf("disabled compatibility allocated dependencies: info calls=%d handler=%v", instances.infoCalls, api.jellyfinCompatibility)
 	}
@@ -57,13 +58,13 @@ func TestJellyfinCompatibilityDisabledSkipsConstructionAndReservesRoutes(t *test
 	}
 }
 
-func TestJellyfinCompatibilityEnabledRoutesExactRootAndEmbyAliasesBeforeSPA(t *testing.T) {
+func TestJellyfinCompatibilityEnabledRoutesRootAndEmbyAliasesBeforeSPA(t *testing.T) {
 	compatCalls := 0
 	compat, err := jellyfin.New(jellyfin.Dependencies{Handlers: map[jellyfin.Route]http.Handler{
 		jellyfin.RouteSystemPing: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 			compatCalls++
-			if request.URL.Path != "/System/Ping" {
-				t.Errorf("compat normalized path = %q, want /System/Ping", request.URL.Path)
+			if request.URL.Path != "/System/Ping" && request.URL.Path != "/system/Ping" {
+				t.Errorf("compat normalized path = %q", request.URL.Path)
 			}
 			response.WriteHeader(http.StatusNoContent)
 		}),
@@ -78,7 +79,7 @@ func TestJellyfinCompatibilityEnabledRoutesExactRootAndEmbyAliasesBeforeSPA(t *t
 		response.WriteHeader(http.StatusOK)
 	}))
 
-	for _, path := range []string{"/System/Ping", "/emby/System/Ping"} {
+	for _, path := range []string{"/System/Ping", "/system/Ping", "/emby/System/Ping"} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusNoContent {
@@ -90,7 +91,6 @@ func TestJellyfinCompatibilityEnabledRoutesExactRootAndEmbyAliasesBeforeSPA(t *t
 		httptest.NewRequest(http.MethodPost, "/System/Ping", nil),
 		httptest.NewRequest(http.MethodGet, "/Items/not-a-uuid", nil),
 		httptest.NewRequest(http.MethodGet, "/System/Ping/", nil),
-		httptest.NewRequest(http.MethodGet, "/system/Ping", nil),
 		httptest.NewRequest(http.MethodGet, "/Emby/System/Ping", nil),
 		httptest.NewRequest(http.MethodGet, "/emby/emby/System/Ping", nil),
 		httptest.NewRequest(http.MethodGet, "/System//Ping", nil),
@@ -111,8 +111,8 @@ func TestJellyfinCompatibilityEnabledRoutesExactRootAndEmbyAliasesBeforeSPA(t *t
 			t.Errorf("invalid reserved request %s %s status = %d, want 404", request.Method, request.URL.Path, response.Code)
 		}
 	}
-	if compatCalls != 2 || nativeCalls != 0 {
-		t.Fatalf("compat calls=%d native/SPA calls=%d, want 2 and 0", compatCalls, nativeCalls)
+	if compatCalls != 3 || nativeCalls != 0 {
+		t.Fatalf("compat calls=%d native/SPA calls=%d, want 3 and 0", compatCalls, nativeCalls)
 	}
 }
 

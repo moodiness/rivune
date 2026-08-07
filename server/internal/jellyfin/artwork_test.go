@@ -152,6 +152,39 @@ func TestArtworkGETHEADSelectRegisteredPrimaryAndBackdrop(t *testing.T) {
 	}
 }
 
+func TestArtworkServesObservedVidHubTagCapabilityWithoutToken(t *testing.T) {
+	key := strings.Repeat("d", 64)
+	handler, catalog, delivery := newArtworkHandler(t, nil, nil)
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/Items/"+artworkItemOne+"/Images/Primary?tag="+key+"&maxWidth=500&quality=90",
+		nil,
+	)
+	request.SetPathValue("id", artworkItemOne)
+	request.SetPathValue("type", "Primary")
+	response := httptest.NewRecorder()
+	handler.handleImage(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"`+key+`"` || response.Body.String() != "pngbytes" {
+		t.Fatalf("anonymous tag response=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+	if catalog.calls != 0 || len(delivery.lookup) != 0 || len(delivery.servedKeys) != 1 || delivery.servedKeys[0] != key {
+		t.Fatalf("anonymous tag catalog=%d lookup=%v served=%v", catalog.calls, delivery.lookup, delivery.servedKeys)
+	}
+
+	invalidCredential := httptest.NewRequest(
+		http.MethodGet,
+		"/Items/"+artworkItemOne+"/Images/Primary?tag="+key+"&api_key=rivune_at_native",
+		nil,
+	)
+	invalidCredential.SetPathValue("id", artworkItemOne)
+	invalidCredential.SetPathValue("type", "Primary")
+	invalidResponse := httptest.NewRecorder()
+	handler.handleImage(invalidResponse, invalidCredential)
+	if invalidResponse.Code != http.StatusUnauthorized || len(delivery.servedKeys) != 1 {
+		t.Fatalf("invalid credential fallback status=%d served=%v", invalidResponse.Code, delivery.servedKeys)
+	}
+}
+
 func TestArtworkRejectsInvalidSelectorsAndUnregisteredSources(t *testing.T) {
 	poster := "https://provider.invalid/private/poster.png?token=secret"
 	handler, catalog, delivery := newArtworkHandler(t, map[string]map[string]watchstate.CatalogTitle{

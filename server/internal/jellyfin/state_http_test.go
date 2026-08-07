@@ -539,6 +539,15 @@ func TestResumePaginationAndNextUpProjectionAreDeterministic(t *testing.T) {
 		t.Fatalf("resume status=%d offset=%d limit=%d batchCalls=%d body=%s", response.Code, service.resumeOffset, service.resumeLimit, catalog.batchCalls, body)
 	}
 
+	service.resumeOffset = 99
+	nonVideo := httptest.NewRequest(http.MethodGet, "/UserItems/Resume?MediaTypes=Audio&Limit=12", nil)
+	nonVideo.Header.Set("X-Emby-Token", token)
+	nonVideoResponse := httptest.NewRecorder()
+	handler.handleUserResumeItems(nonVideoResponse, nonVideo)
+	if nonVideoResponse.Code != http.StatusOK || service.resumeOffset != 99 || !strings.Contains(nonVideoResponse.Body.String(), `"Items":[]`) {
+		t.Fatalf("non-video resume status=%d offset=%d body=%s", nonVideoResponse.Code, service.resumeOffset, nonVideoResponse.Body.String())
+	}
+
 	service.nextPage = watchstate.ContinueItemsPage{
 		Items: []watchstate.ContinueItem{{TitleID: episodeID, SeriesID: seriesID, SeasonID: seasonID}}, Offset: 0, Limit: 1, Total: 1,
 	}

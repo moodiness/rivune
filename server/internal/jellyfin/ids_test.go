@@ -24,13 +24,17 @@ func TestVirtualItemIDsAreStableAndTypeSeparated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive TV view: %v", err)
 	}
+	collections, err := DeriveVirtualItemID(instance, VirtualCollectionsView)
+	if err != nil {
+		t.Fatalf("derive Collections view: %v", err)
+	}
 	if got, want := movies.String(), "49d9c749-cb99-58f8-ad4b-29749e36aa8e"; got != want {
 		t.Fatalf("movies ID = %q, want %q", got, want)
 	}
 	if movies != moviesAgain {
 		t.Fatal("same namespace and semantic key produced different IDs")
 	}
-	if movies == television {
+	if movies == television || movies == collections || television == collections {
 		t.Fatal("different virtual item types produced the same ID")
 	}
 	item, err := ParseItemID(movies.String())

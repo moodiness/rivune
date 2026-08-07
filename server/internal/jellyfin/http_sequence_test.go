@@ -22,18 +22,18 @@ import (
 )
 
 const (
-	sequenceServerID           = "71000000-0000-4000-8000-000000000001"
-	sequencePrimaryProfileID   = "72000000-0000-4000-8000-000000000002"
-	sequenceSecondaryProfileID = "73000000-0000-4000-8000-000000000003"
-	sequencePrimaryCredentialID = "7d000000-0000-4000-8000-00000000000d"
+	sequenceServerID              = "71000000-0000-4000-8000-000000000001"
+	sequencePrimaryProfileID      = "72000000-0000-4000-8000-000000000002"
+	sequenceSecondaryProfileID    = "73000000-0000-4000-8000-000000000003"
+	sequencePrimaryCredentialID   = "7d000000-0000-4000-8000-00000000000d"
 	sequenceSecondaryCredentialID = "7e000000-0000-4000-8000-00000000000e"
-	sequenceSeriesID           = "74000000-0000-4000-8000-000000000004"
-	sequenceSeasonID           = "75000000-0000-4000-8000-000000000005"
-	sequenceEpisodeID          = "76000000-0000-4000-8000-000000000006"
-	sequenceProviderResource   = "PROVIDER_RESOURCE_SENTINEL"
-	sequenceProviderSource     = "PROVIDER_SOURCE_REF_SENTINEL"
-	sequenceProviderHeader     = "PROVIDER_HEADER_SECRET_SENTINEL"
-	sequencePassword           = "PASSWORD_SECRET_SENTINEL"
+	sequenceSeriesID              = "74000000-0000-4000-8000-000000000004"
+	sequenceSeasonID              = "75000000-0000-4000-8000-000000000005"
+	sequenceEpisodeID             = "76000000-0000-4000-8000-000000000006"
+	sequenceProviderResource      = "PROVIDER_RESOURCE_SENTINEL"
+	sequenceProviderSource        = "PROVIDER_SOURCE_REF_SENTINEL"
+	sequenceProviderHeader        = "PROVIDER_HEADER_SECRET_SENTINEL"
+	sequencePassword              = "PASSWORD_SECRET_SENTINEL"
 )
 
 type sequenceAuthentication struct {
@@ -440,7 +440,7 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	var views QueryResult[BaseItemDto]
 	sequenceDecode(t, viewsResponse, &views)
 	sequenceRequireObjectKeys(t, viewsResponse.Body.Bytes(), "Items", "TotalRecordCount", "StartIndex")
-	if len(views.Items) != 2 || views.TotalRecordCount != 2 || views.Items[0].Id == "" || views.Items[1].Id == "" || views.Items[0].Id == views.Items[1].Id {
+	if len(views.Items) != 3 || views.TotalRecordCount != 3 || views.Items[0].Id == "" || views.Items[1].Id == "" || views.Items[2].Id == "" || views.Items[0].Id == views.Items[1].Id || views.Items[1].Id == views.Items[2].Id {
 		t.Fatalf("virtual views are incomplete or non-opaque: %+v", views)
 	}
 	var tvView BaseItemDto

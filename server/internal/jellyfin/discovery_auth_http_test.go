@@ -1,13 +1,16 @@
 package jellyfin
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -203,6 +206,10 @@ func TestAuthenticateByNameAcceptsObservedFieldAliasesWithoutChangingPassword(t 
 	}{
 		{name: "Username and Pw", body: `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":" secret "}`, password: " secret "},
 		{name: "UserName and Password", body: `{"UserName":"c3000000-0000-4000-8000-000000000003","Password":"other secret"}`, password: "other secret"},
+		{name: "empty Pw and Password", body: `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"","Password":"alias secret"}`, password: "alias secret"},
+		{name: "Pw and empty Password", body: `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"other alias secret","Password":""}`, password: "other alias secret"},
+		{name: "canonical Pw wins conflict", body: `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"rivune_jfa_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","Password":"legacy-hash"}`, password: "rivune_jfa_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+		{name: "canonical Password wins conflict", body: `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"legacy-hash","Password":"rivune_jfa_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`, password: "rivune_jfa_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fake, mux := newDiscoveryHTTPTestServer(t)
@@ -215,6 +222,83 @@ func TestAuthenticateByNameAcceptsObservedFieldAliasesWithoutChangingPassword(t 
 				t.Fatalf("login status=%d client=%q passwordPreserved=%t", response.Code, fake.lastLogin.Client.Client, fake.lastLogin.Password == test.password)
 			}
 		})
+	}
+}
+
+func TestAuthenticateByNameLogsSafeClientMetadataFailureStage(t *testing.T) {
+	fake, _ := newDiscoveryHTTPTestServer(t)
+	serverID, err := ParseServerID(discoveryServerID)
+	if err != nil {
+		t.Fatalf("parse server ID: %v", err)
+	}
+	var logs bytes.Buffer
+	handler, err := New(Dependencies{
+		ServerInfo:     ServerInfo{ID: serverID, Name: "Rivune Home", RuntimeVersion: "test"},
+		Authentication: fake,
+		Logger:         slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	secret := "never-log-this-app-password"
+	device := "never-log-this-device"
+	request := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(
+		`{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"`+secret+`"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="`+device+`"`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assertCompatUnauthorized(t, response)
+
+	logged := logs.String()
+	if !strings.Contains(logged, `"msg":"`+compatLoginRejectedMessage+`"`) ||
+		!strings.Contains(logged, `"stage":"`+compatLoginStageClientMetadata+`:`+clientIdentityFailureDeviceIDMissing+`"`) {
+		t.Fatalf("missing sanitized failure stage: %s", logged)
+	}
+	for _, forbidden := range []string{secret, device, discoveryProfileID} {
+		if strings.Contains(logged, forbidden) {
+			t.Fatalf("login diagnostics disclosed %q: %s", forbidden, logged)
+		}
+	}
+	if fake.loginCalls != 0 {
+		t.Fatalf("invalid client metadata reached authentication: calls=%d", fake.loginCalls)
+	}
+}
+
+func TestAuthenticateByNameLogsSafePasswordFailureDetail(t *testing.T) {
+	fake, _ := newDiscoveryHTTPTestServer(t)
+	serverID, err := ParseServerID(discoveryServerID)
+	if err != nil {
+		t.Fatalf("parse server ID: %v", err)
+	}
+	var logs bytes.Buffer
+	handler, err := New(Dependencies{
+		ServerInfo:     ServerInfo{ID: serverID, Name: "Rivune Home", RuntimeVersion: "test"},
+		Authentication: fake,
+		Logger:         slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	secret := "never-log-this-password-alias"
+	differentSecret := "different-" + secret
+	request := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(
+		`{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"`+secret+`","Password":"`+differentSecret+`"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="TV", DeviceId="infuse-device", Version="8"`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assertCompatUnauthorized(t, response)
+
+	logged := logs.String()
+	wantStage := compatLoginStagePasswordShape + ":" + compatSecretFailureAliasesDiffer
+	if !strings.Contains(logged, `"stage":"`+wantStage+`"`) || strings.Contains(logged, secret) || strings.Contains(logged, differentSecret) {
+		t.Fatalf("unsafe or missing password failure detail: %s", logged)
+	}
+	if fake.loginCalls != 0 {
+		t.Fatalf("conflicting secret aliases reached authentication: calls=%d", fake.loginCalls)
 	}
 }
 
@@ -393,6 +477,44 @@ func TestDiscoveryAndShimsExposeOnlyDeterministicCompatibilityData(t *testing.T)
 	mux.ServeHTTP(quickResponse, httptest.NewRequest(http.MethodGet, "/QuickConnect/Enabled", nil))
 	if quickResponse.Code != http.StatusOK || strings.TrimSpace(quickResponse.Body.String()) != "false" {
 		t.Fatalf("quick connect response = %d %q", quickResponse.Code, quickResponse.Body.String())
+	}
+
+	brandingResponse := httptest.NewRecorder()
+	mux.ServeHTTP(brandingResponse, httptest.NewRequest(http.MethodGet, "/branding/configuration", nil))
+	if brandingResponse.Code != http.StatusOK || strings.TrimSpace(brandingResponse.Body.String()) != "{}" {
+		t.Fatalf("public branding response = %d %q", brandingResponse.Code, brandingResponse.Body.String())
+	}
+
+	capabilities := httptest.NewRequest(http.MethodPost, "/Sessions/Capabilities/Full", strings.NewReader(`{"PlayableMediaTypes":["Video"]}`))
+	capabilities.Header.Set("X-Emby-Token", fake.token)
+	capabilitiesResponse := httptest.NewRecorder()
+	mux.ServeHTTP(capabilitiesResponse, capabilities)
+	if capabilitiesResponse.Code != http.StatusNoContent || capabilitiesResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("session capabilities response = %d headers=%v", capabilitiesResponse.Code, capabilitiesResponse.Header())
+	}
+
+	syncPlay := httptest.NewRequest(http.MethodGet, "/SyncPlay/List", nil)
+	syncPlay.Header.Set("X-Emby-Token", fake.token)
+	syncPlayResponse := httptest.NewRecorder()
+	mux.ServeHTTP(syncPlayResponse, syncPlay)
+	if syncPlayResponse.Code != http.StatusOK || strings.TrimSpace(syncPlayResponse.Body.String()) != "[]" {
+		t.Fatalf("sync play response = %d %q", syncPlayResponse.Code, syncPlayResponse.Body.String())
+	}
+
+	bitrate := httptest.NewRequest(http.MethodGet, "/Playback/BitrateTest?Size=7", nil)
+	bitrate.Header.Set("X-Emby-Token", fake.token)
+	bitrateResponse := httptest.NewRecorder()
+	mux.ServeHTTP(bitrateResponse, bitrate)
+	if bitrateResponse.Code != http.StatusOK || bitrateResponse.Body.Len() != 7 || bitrateResponse.Header().Get("Content-Type") != "application/octet-stream" {
+		t.Fatalf("bitrate response = %d bytes=%d headers=%v", bitrateResponse.Code, bitrateResponse.Body.Len(), bitrateResponse.Header())
+	}
+
+	oversizeBitrate := httptest.NewRequest(http.MethodGet, "/Playback/BitrateTest?Size="+strconv.Itoa(maximumCompatBitrateTestBytes+1), nil)
+	oversizeBitrate.Header.Set("X-Emby-Token", fake.token)
+	oversizeBitrateResponse := httptest.NewRecorder()
+	mux.ServeHTTP(oversizeBitrateResponse, oversizeBitrate)
+	if oversizeBitrateResponse.Code != http.StatusBadRequest || oversizeBitrateResponse.Body.Len() == 0 {
+		t.Fatalf("oversize bitrate response = %d bytes=%d", oversizeBitrateResponse.Code, oversizeBitrateResponse.Body.Len())
 	}
 
 	plugins := httptest.NewRequest(http.MethodGet, "/Plugins", nil)

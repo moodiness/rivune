@@ -18,6 +18,9 @@ func TestReservedPathsFailClosedInsideCompatNamespaces(t *testing.T) {
 		"/Users/" + routeTestUUID + "/Items/" + routeTestUUID,
 		"/Items/not-a-uuid",
 		"/Items/" + routeTestUUID + "/Images/Logo/7",
+		"/UserItems/Resume",
+		"/SyncPlay/List",
+		"/Playback/BitrateTest",
 		"/Videos/" + routeTestUUID + "/stream.bad!",
 		"/System/Info/Public/extra",
 		"/system/ping",
@@ -44,9 +47,9 @@ func TestReservedPathsFailClosedInsideCompatNamespaces(t *testing.T) {
 	}
 }
 
-func TestDispatcherServesAllFortyEightRoutesAtRootAndEmby(t *testing.T) {
-	if len(routeDefinitions) != 48 {
-		t.Fatalf("route definitions = %d, want 48", len(routeDefinitions))
+func TestDispatcherServesAllFiftyTwoRoutesAtRootAndEmby(t *testing.T) {
+	if len(routeDefinitions) != 52 {
+		t.Fatalf("route definitions = %d, want 52", len(routeDefinitions))
 	}
 	calls := make(map[Route]int, len(routeDefinitions))
 	handlers := make(map[Route]http.Handler, len(routeDefinitions))
@@ -78,6 +81,53 @@ func TestDispatcherServesAllFortyEightRoutesAtRootAndEmby(t *testing.T) {
 		if calls[definition.Route] != 2 {
 			t.Errorf("route %s calls = %d, want 2", definition.Route, calls[definition.Route])
 		}
+	}
+}
+
+func TestDispatcherSupportsBoundedJellyfinWebCORS(t *testing.T) {
+	calls := 0
+	handler, err := New(Dependencies{Handlers: map[Route]http.Handler{
+		RoutePublicSystemInfo: http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			calls++
+			response.WriteHeader(http.StatusNoContent)
+		}),
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, prefix := range []string{"", "/emby"} {
+		beforeCalls := calls
+		preflight := httptest.NewRequest(http.MethodOptions, prefix+"/System/Info/Public", nil)
+		preflight.Header.Set("Origin", "http://localhost:8081")
+		preflight.Header.Set("Access-Control-Request-Method", http.MethodGet)
+		preflight.Header.Set("Access-Control-Request-Headers", "cache-control, content-type, x-emby-authorization")
+		preflight.Header.Set("Access-Control-Request-Private-Network", "true")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, preflight)
+		if response.Code != http.StatusNoContent || response.Header().Get("Access-Control-Allow-Origin") != "*" ||
+			!strings.Contains(response.Header().Get("Access-Control-Allow-Headers"), "Cache-Control") ||
+			!strings.Contains(response.Header().Get("Access-Control-Allow-Headers"), "X-Emby-Authorization") ||
+			response.Header().Get("Access-Control-Allow-Private-Network") != "true" || calls != beforeCalls {
+			t.Fatalf("preflight %s status=%d headers=%v calls=%d", prefix, response.Code, response.Header(), calls)
+		}
+
+		actual := httptest.NewRequest(http.MethodGet, prefix+"/System/Info/Public", nil)
+		actual.Header.Set("Origin", "http://localhost:8081")
+		actualResponse := httptest.NewRecorder()
+		handler.ServeHTTP(actualResponse, actual)
+		if actualResponse.Code != http.StatusNoContent || actualResponse.Header().Get("Access-Control-Allow-Origin") != "*" {
+			t.Fatalf("actual CORS %s status=%d headers=%v", prefix, actualResponse.Code, actualResponse.Header())
+		}
+	}
+
+	invalid := httptest.NewRequest(http.MethodOptions, "/System/Info/Public", nil)
+	invalid.Header.Set("Origin", "http://localhost:8081")
+	invalid.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	invalid.Header.Set("Access-Control-Request-Headers", "x-private-secret")
+	invalidResponse := httptest.NewRecorder()
+	handler.ServeHTTP(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusNotFound || invalidResponse.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("invalid preflight status=%d headers=%v", invalidResponse.Code, invalidResponse.Header())
 	}
 }
 
@@ -255,6 +305,29 @@ func TestStreamAndContainerDispatchPrecedence(t *testing.T) {
 	}
 }
 
+func TestStaticRouteSegmentsAreCaseInsensitive(t *testing.T) {
+	calls := 0
+	handler, err := New(Dependencies{Handlers: map[Route]http.Handler{
+		RouteSystemPing: http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			calls++
+			response.WriteHeader(http.StatusNoContent)
+		}),
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, path := range []string{"/system/ping", "/SyStEm/PiNg", "/emby/system/ping"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("case-insensitive route %s status=%d", path, response.Code)
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("case-insensitive route calls=%d", calls)
+	}
+}
+
 func TestNonCanonicalPathsReturn404(t *testing.T) {
 	calls := 0
 	handler, err := New(Dependencies{Handlers: map[Route]http.Handler{
@@ -268,7 +341,6 @@ func TestNonCanonicalPathsReturn404(t *testing.T) {
 	}
 	requests := []*http.Request{
 		httptest.NewRequest(http.MethodGet, "/System/Ping/", nil),
-		httptest.NewRequest(http.MethodGet, "/system/Ping", nil),
 		httptest.NewRequest(http.MethodGet, "/Emby/System/Ping", nil),
 		httptest.NewRequest(http.MethodGet, "/emby/emby/System/Ping", nil),
 		httptest.NewRequest(http.MethodGet, "/System//Ping", nil),

@@ -16,11 +16,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
-	compatCredentialPrefix = "rivune_jf_"
-	compatCredentialBytes  = 32
+	compatCredentialPrefix               = "rivune_jf_"
+	compatCredentialBytes                = 32
+	compatAuthenticationOperationTimeout = 5 * time.Second
 )
 
 var (
@@ -55,8 +57,9 @@ type LinkedPrincipalReloader interface {
 }
 
 type SessionStore struct {
-	pool       *pgxpool.Pool
-	principals LinkedPrincipalReloader
+	pool                  *pgxpool.Pool
+	principals            LinkedPrincipalReloader
+	authenticationFlights singleflight.Group
 }
 
 func NewSessionStore(pool *pgxpool.Pool, principals LinkedPrincipalReloader) (*SessionStore, error) {
@@ -133,7 +136,27 @@ func (s *SessionStore) Authenticate(ctx context.Context, token string) (Authenti
 	if !ok {
 		return AuthenticatedSession{}, ErrInvalidCompatCredential
 	}
+	result := s.authenticationFlights.DoChan(string(digest[:]), func() (any, error) {
+		operationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), compatAuthenticationOperationTimeout)
+		defer cancel()
+		return s.authenticateDigest(operationContext, digest)
+	})
+	select {
+	case <-ctx.Done():
+		return AuthenticatedSession{}, ctx.Err()
+	case completed := <-result:
+		if completed.Err != nil {
+			return AuthenticatedSession{}, completed.Err
+		}
+		session, valid := completed.Val.(AuthenticatedSession)
+		if !valid {
+			return AuthenticatedSession{}, errors.New("invalid compatibility authentication flight result")
+		}
+		return session, nil
+	}
+}
 
+func (s *SessionStore) authenticateDigest(ctx context.Context, digest [sha256.Size]byte) (AuthenticatedSession, error) {
 	var session AuthenticatedSession
 	var authSessionID string
 	err := s.pool.QueryRow(ctx, `

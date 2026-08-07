@@ -16,7 +16,7 @@ func TestParseItemQueryAcceptsCaseInsensitiveNames(t *testing.T) {
 		"LIMIT":            {"25"},
 		"recursive":        {"TRUE"},
 		"includeitemtypes": {"Movie, Episode"},
-		"FIELDS":           {"Overview,ProviderIds"},
+		"FIELDS":           {"Overview", "ProviderIds,Path"},
 		"sortby":           {"SortName"},
 		"sortorder":        {"descending"},
 		"enableuserdata":   {"false"},
@@ -28,7 +28,7 @@ func TestParseItemQueryAcceptsCaseInsensitiveNames(t *testing.T) {
 	}
 	if query.SearchTerm != "Signal" || query.ParentId != "a0b1c2d3-e4f5-4678-89ab-0123456789ab" ||
 		query.StartIndex != 12 || query.Limit != 25 || !query.Recursive || query.EnableUserData ||
-		query.SortOrder != "Descending" || len(query.IncludeItemTypes) != 2 || len(query.Ids) != 1 {
+		query.SortOrder != "Descending" || len(query.IncludeItemTypes) != 2 || len(query.Fields) != 3 || len(query.Ids) != 1 {
 		t.Fatalf("unexpected parsed query: %#v", query)
 	}
 }
