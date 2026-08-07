@@ -1088,7 +1088,7 @@ components:
       name: type
       in: path
       required: true
-      schema: { type: string, enum: [Primary, Backdrop] }
+      schema: { type: string, enum: [Primary, Backdrop, Thumb] }
     ImageIndexPath:
       name: index
       in: path
@@ -1520,22 +1520,25 @@ components:
     PublicSystemInfo:
       type: object
       additionalProperties: false
-      required: [Id, ServerName, Version, ProductName, StartupWizardCompleted]
+      required: [Id, LocalAddress, ServerName, Version, ProductName, OperatingSystem, StartupWizardCompleted]
       properties:
         Id: { $ref: "#/components/schemas/UUID" }
+        LocalAddress: { type: string }
         ServerName: { type: string, minLength: 1, maxLength: 80 }
         Version: { type: string, const: 10.11.0 }
-        ProductName: { type: string, const: Rivune Jellyfin Compatibility }
+        ProductName: { type: string, const: Jellyfin Server }
+        OperatingSystem: { type: string }
         StartupWizardCompleted: { type: boolean, const: true }
     SystemInfo:
       type: object
       additionalProperties: false
-      required: [Id, ServerName, Version, ProductName, StartupWizardCompleted]
+      required: [Id, LocalAddress, ServerName, Version, ProductName, OperatingSystem, StartupWizardCompleted]
       properties:
         Id: { $ref: "#/components/schemas/UUID" }
+        LocalAddress: { type: string }
         ServerName: { type: string, minLength: 1, maxLength: 80 }
         Version: { type: string, const: 10.11.0 }
-        ProductName: { type: string, const: Rivune Jellyfin Compatibility }
+        ProductName: { type: string, const: Jellyfin Server }
         StartupWizardCompleted: { type: boolean, const: true }
         OperatingSystem: { type: string }
     SystemEndpointInfo:
@@ -1655,7 +1658,7 @@ components:
     SessionInfoDto:
       type: object
       additionalProperties: false
-      required: [Id, UserId, UserName, Client, DeviceName, DeviceId, ApplicationVersion]
+      required: [Id, UserId, UserName, Client, DeviceName, DeviceId, ApplicationVersion, ServerId, IsActive]
       properties:
         Id: { $ref: "#/components/schemas/UUID" }
         UserId: { $ref: "#/components/schemas/UUID" }
@@ -1664,6 +1667,8 @@ components:
         DeviceName: { type: string, minLength: 1, maxLength: 120 }
         DeviceId: { type: string, minLength: 1, maxLength: 128 }
         ApplicationVersion: { type: string, minLength: 1, maxLength: 32 }
+        ServerId: { $ref: "#/components/schemas/UUID" }
+        IsActive: { type: boolean, const: true }
         NowPlayingItem: { $ref: "#/components/schemas/BaseItemDto" }
     BaseItemQueryResult:
       type: object
@@ -1678,14 +1683,20 @@ components:
     BaseItemDto:
       type: object
       additionalProperties: false
-      required: [Id, ServerId, Name, Type, IsFolder, IsPlayable, Genres, BackdropImageTags]
+      required: [Id, ServerId, Name, Etag, LocationType, Type, MediaType, IsFolder, IsPlayable, Genres, ImageTags, BackdropImageTags]
       properties:
         Id: { $ref: "#/components/schemas/UUID" }
         ServerId: { $ref: "#/components/schemas/UUID" }
         Name: { type: string }
+        Etag: { $ref: "#/components/schemas/UUID" }
+        Path:
+          type: string
+          description: Local deferred `.strm` path for playable catalogue items; never an upstream provider URL.
+        DisplayPreferencesId: { $ref: "#/components/schemas/UUID" }
+        LocationType: { type: string, enum: [FileSystem] }
         SortName: { type: string }
         Type: { type: string, enum: [CollectionFolder, Folder, BoxSet, Movie, Series, Season, Episode] }
-        MediaType: { type: string, enum: [Video] }
+        MediaType: { type: string, enum: [Video, Unknown] }
         IsFolder: { type: boolean }
         IsPlayable: { type: boolean }
         CollectionType: { type: string, enum: [movies, tvshows, boxsets, mixed] }
@@ -1719,6 +1730,11 @@ components:
           type: array
           items: { type: string }
         UserData: { $ref: "#/components/schemas/UserItemDataDto" }
+        MediaSources:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/MediaSourceInfo" }
+          description: One deferred item-ID sentinel in catalogue responses; scoped resolved sources in PlaybackInfo.
     UserItemDataDto:
       type: object
       additionalProperties: false
@@ -1813,10 +1829,10 @@ components:
         Name: { type: string }
         Path:
           type: string
-          description: Local compatibility stream path containing scoped opaque selectors only.
+          description: Local compatibility path; catalogue sentinels contain only the canonical item UUID and PlaybackInfo paths add scoped opaque selectors.
         Container: { type: string, maxLength: 16 }
-        Protocol: { type: string }
-        Type: { type: string }
+        Protocol: { type: string, enum: [File, Http] }
+        Type: { type: string, enum: [Default] }
         IsRemote: { type: boolean, const: false }
         SupportsDirectPlay: { type: boolean }
         SupportsDirectStream: { type: boolean }

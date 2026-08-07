@@ -129,14 +129,17 @@ func (service *collectionCompatService) ResolveFolder(_ context.Context, _ auth.
 func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
 	handler, service, store, token := newCollectionCompatHandler(t)
 	coverURL := "https://provider.invalid/folder.png?token=FOLDER_SECRET"
+	backdropURL := "https://provider.invalid/collection-backdrop.png?token=BACKDROP_SECRET"
 	coverTag := strings.Repeat("a", 64)
 	hydratedTag := strings.Repeat("b", 64)
+	backdropTag := strings.Repeat("c", 64)
 	localizedCover := localizedArtworkPrefix + coverTag
 	localizedHydratedCover := localizedArtworkPrefix + hydratedTag
+	localizedBackdrop := localizedArtworkPrefix + backdropTag
 	service.authorized.Folders[0].CoverImageURL = coverURL
 	presenter := &searchArtworkPresenter{
-		localized:  map[string]string{coverURL: localizedCover, collectionHydratedCoverURL: localizedHydratedCover},
-		registered: map[string]string{localizedCover: coverTag, localizedHydratedCover: hydratedTag},
+		localized:  map[string]string{coverURL: localizedCover, collectionHydratedCoverURL: localizedHydratedCover, backdropURL: localizedBackdrop},
+		registered: map[string]string{localizedCover: coverTag, localizedHydratedCover: hydratedTag, localizedBackdrop: backdropTag},
 	}
 	handler.catalog.(*catalogReader).artwork = presenter
 	handler.artwork = presenter
@@ -151,7 +154,9 @@ func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
 	var namedViews QueryResult[BaseItemDto]
 	decodeCatalogResponse(t, viewsResponse, &namedViews)
 	if viewsResponse.Code != http.StatusOK || len(namedViews.Items) != 4 || namedViews.Items[3].Id != collectionCompatID ||
-		namedViews.Items[3].Name != service.authorized.Title || namedViews.Items[3].Type != "CollectionFolder" || namedViews.Items[3].CollectionType != "mixed" {
+		namedViews.Items[3].Name != service.authorized.Title || namedViews.Items[3].Type != "CollectionFolder" || namedViews.Items[3].MediaType != "Unknown" || namedViews.Items[3].CollectionType != "mixed" ||
+		namedViews.Items[3].Etag != collectionCompatID || namedViews.Items[3].DisplayPreferencesId != collectionCompatID || namedViews.Items[3].LocationType != "FileSystem" ||
+		namedViews.Items[3].ImageTags["Primary"] != coverTag || namedViews.Items[3].UserData == nil || namedViews.Items[3].UserData.Key != collectionCompatID {
 		t.Fatalf("named collection views status=%d result=%+v", viewsResponse.Code, namedViews)
 	}
 
@@ -172,11 +177,35 @@ func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
 	var root QueryResult[BaseItemDto]
 	decodeCatalogResponse(t, rootResponse, &root)
 	if rootResponse.Code != http.StatusOK || root.TotalRecordCount != 1 || len(root.Items) != 1 ||
-		root.Items[0].Id != collectionCompatID || root.Items[0].Type != "BoxSet" || !root.Items[0].IsFolder {
+		root.Items[0].Id != collectionCompatID || root.Items[0].Type != "BoxSet" || root.Items[0].MediaType != "Unknown" || !root.Items[0].IsFolder ||
+		root.Items[0].Etag != collectionCompatID || root.Items[0].DisplayPreferencesId != collectionCompatID || root.Items[0].LocationType != "FileSystem" ||
+		root.Items[0].ImageTags["Primary"] != coverTag || root.Items[0].UserData == nil || root.Items[0].UserData.Key != collectionCompatID {
 		t.Fatalf("unexpected authorized boxsets: status=%d result=%+v", rootResponse.Code, root)
+	}
+	boxSetImageRequest := authenticatedCatalogRequest(t, token, "/Items/"+collectionCompatID+"/Images/Primary")
+	boxSetImageRequest.SetPathValue("id", collectionCompatID)
+	boxSetImageRequest.SetPathValue("type", "Primary")
+	boxSetImageResponse := httptest.NewRecorder()
+	handler.handleImage(boxSetImageResponse, boxSetImageRequest)
+	if boxSetImageResponse.Code != http.StatusOK || len(presenter.served) != 1 || presenter.served[0] != coverTag {
+		t.Fatalf("BoxSet artwork status=%d served=%v", boxSetImageResponse.Code, presenter.served)
+	}
+	presenter.served = nil
+	missingBackdropRequest := authenticatedCatalogRequest(t, token, "/Items/"+collectionCompatID+"/Images/Backdrop")
+	missingBackdropRequest.SetPathValue("id", collectionCompatID)
+	missingBackdropRequest.SetPathValue("type", "Backdrop")
+	missingBackdropResponse := httptest.NewRecorder()
+	handler.handleImage(missingBackdropResponse, missingBackdropRequest)
+	if missingBackdropResponse.Code != http.StatusNotFound || len(presenter.served) != 0 {
+		t.Fatalf("missing BoxSet backdrop status=%d served=%v", missingBackdropResponse.Code, presenter.served)
 	}
 	if strings.Contains(rootResponse.Body.String(), service.foreign.Title) || strings.Contains(rootResponse.Body.String(), service.foreign.ID) {
 		t.Fatalf("foreign collection leaked from root: %s", rootResponse.Body.String())
+	}
+	for _, body := range []string{viewsResponse.Body.String(), rootResponse.Body.String()} {
+		if strings.Contains(body, "provider.invalid") || strings.Contains(body, "FOLDER_SECRET") {
+			t.Fatalf("collection payload leaked upstream artwork: %s", body)
+		}
 	}
 
 	latestRequest := authenticatedCatalogRequest(t, token, "/Items/Latest?ParentId="+collectionCompatID+"&Limit=16")
@@ -185,7 +214,8 @@ func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
 	var latest []BaseItemDto
 	decodeCatalogResponse(t, latestResponse, &latest)
 	if latestResponse.Code != http.StatusOK || len(latest) != 2 || latest[0].Name != "First" || latest[1].Name != "Second" ||
-		latest[0].Type != "Folder" || latest[0].ParentId != collectionCompatID || latest[0].ImageTags["Primary"] != coverTag ||
+		latest[0].Type != "Folder" || latest[0].MediaType != "Unknown" || latest[0].ParentId != collectionCompatID || latest[0].ImageTags["Primary"] != coverTag ||
+		latest[0].Etag != latest[0].Id || latest[0].DisplayPreferencesId != latest[0].Id || latest[0].LocationType != "FileSystem" || latest[0].UserData == nil ||
 		latest[1].ImageTags["Primary"] != hydratedTag {
 		t.Fatalf("collection latest folders status=%d result=%+v", latestResponse.Code, latest)
 	}
@@ -200,14 +230,24 @@ func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
 	browseRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&StartIndex=0&Limit=2")
 	browseResponse := httptest.NewRecorder()
 
-	imageRequest := authenticatedCatalogRequest(t, token, "/Items/"+service.authorized.Folders[0].ID+"/Images/Primary?tag="+coverTag)
-	imageRequest.SetPathValue("id", service.authorized.Folders[0].ID)
+	imageRequest := authenticatedCatalogRequest(t, token, "/Items/"+service.authorized.Folders[1].ID+"/Images/Primary?tag="+hydratedTag)
+	imageRequest.SetPathValue("id", service.authorized.Folders[1].ID)
 	imageRequest.SetPathValue("type", "Primary")
 	imageResponse := httptest.NewRecorder()
 	handler.handleImage(imageResponse, imageRequest)
-	if imageResponse.Code != http.StatusOK || len(presenter.served) != 1 || presenter.served[0] != coverTag {
-		t.Fatalf("authenticated folder artwork status=%d served=%v", imageResponse.Code, presenter.served)
+	if imageResponse.Code != http.StatusOK || len(presenter.served) != 1 || presenter.served[0] != hydratedTag || len(service.calls) != 0 {
+		t.Fatalf("authenticated folder tag artwork status=%d served=%v calls=%+v", imageResponse.Code, presenter.served, service.calls)
 	}
+	untaggedImageRequest := authenticatedCatalogRequest(t, token, "/Items/"+service.authorized.Folders[1].ID+"/Images/Primary")
+	untaggedImageRequest.SetPathValue("id", service.authorized.Folders[1].ID)
+	untaggedImageRequest.SetPathValue("type", "Primary")
+	untaggedImageResponse := httptest.NewRecorder()
+	handler.handleImage(untaggedImageResponse, untaggedImageRequest)
+	if untaggedImageResponse.Code != http.StatusOK || len(presenter.served) != 2 || presenter.served[1] != hydratedTag ||
+		len(service.calls) != 1 || service.calls[0].folderID != service.authorized.Folders[1].ID || service.calls[0].limit != 1 {
+		t.Fatalf("hydrated folder artwork status=%d served=%v calls=%+v", untaggedImageResponse.Code, presenter.served, service.calls)
+	}
+	service.calls = nil
 	handler.handleItems(browseResponse, browseRequest)
 	var browse QueryResult[BaseItemDto]
 	decodeCatalogResponse(t, browseResponse, &browse)
@@ -233,20 +273,28 @@ func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
 		t.Fatalf("folder identities were not canonicalized safely: %+v", resolved)
 	}
 
-	folderDetail := authenticatedCatalogRequest(t, token, "/Items/"+service.authorized.Folders[0].ID)
-	folderDetail.SetPathValue("id", service.authorized.Folders[0].ID)
+	service.calls = nil
+	folderDetail := authenticatedCatalogRequest(t, token, "/Items/"+service.authorized.Folders[1].ID)
+	folderDetail.SetPathValue("id", service.authorized.Folders[1].ID)
 	folderDetailResponse := httptest.NewRecorder()
 	handler.handleItem(folderDetailResponse, folderDetail)
-	if folderDetailResponse.Code != http.StatusOK || !strings.Contains(folderDetailResponse.Body.String(), `"Type":"Folder"`) {
-		t.Fatalf("folder detail status=%d body=%s", folderDetailResponse.Code, folderDetailResponse.Body.String())
+	var folderDetailItem BaseItemDto
+	decodeCatalogResponse(t, folderDetailResponse, &folderDetailItem)
+	if folderDetailResponse.Code != http.StatusOK || folderDetailItem.Type != "Folder" || folderDetailItem.ImageTags["Primary"] != hydratedTag ||
+		len(service.calls) != 1 || service.calls[0].folderID != service.authorized.Folders[1].ID || service.calls[0].limit != 1 {
+		t.Fatalf("folder detail status=%d item=%+v calls=%+v", folderDetailResponse.Code, folderDetailItem, service.calls)
 	}
 
+	service.authorized.BackdropImageURL = backdropURL
 	detailRequest := authenticatedCatalogRequest(t, token, "/Items/"+collectionCompatID)
 	detailRequest.SetPathValue("id", collectionCompatID)
 	detailResponse := httptest.NewRecorder()
 	handler.handleItem(detailResponse, detailRequest)
-	if detailResponse.Code != http.StatusOK || !strings.Contains(detailResponse.Body.String(), `"Type":"BoxSet"`) {
-		t.Fatalf("authorized boxset detail status=%d body=%s", detailResponse.Code, detailResponse.Body.String())
+	var detail BaseItemDto
+	decodeCatalogResponse(t, detailResponse, &detail)
+	if detailResponse.Code != http.StatusOK || detail.Type != "BoxSet" || detail.ImageTags["Primary"] != backdropTag ||
+		len(detail.BackdropImageTags) != 1 || detail.BackdropImageTags[0] != backdropTag {
+		t.Fatalf("authorized boxset detail status=%d item=%+v body=%s", detailResponse.Code, detail, detailResponse.Body.String())
 	}
 
 	foreignRequest := authenticatedCatalogRequest(t, token, "/Items/"+foreignCollectionCompatID)

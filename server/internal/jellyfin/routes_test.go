@@ -82,6 +82,11 @@ func TestDispatcherServesAllFiftyTwoRoutesAtRootAndEmby(t *testing.T) {
 			t.Errorf("route %s calls = %d, want 2", definition.Route, calls[definition.Route])
 		}
 	}
+	thumbResponse := httptest.NewRecorder()
+	mux.ServeHTTP(thumbResponse, httptest.NewRequest(http.MethodGet, "/Items/"+routeTestUUID+"/Images/Thumb", nil))
+	if thumbResponse.Code != http.StatusNoContent || calls[RouteImage] != 3 {
+		t.Fatalf("Thumb image route status=%d calls=%d", thumbResponse.Code, calls[RouteImage])
+	}
 }
 
 func TestDispatcherSupportsBoundedJellyfinWebCORS(t *testing.T) {

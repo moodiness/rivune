@@ -1,21 +1,23 @@
 package jellyfin
 
 const (
-	CompatibilityVersion = "10.11.0"
-	CompatibilityProduct = "Rivune Jellyfin Compatibility"
+	CompatibilityVersion     = "10.11.0"
+	CompatibilityProduct     = "Rivune Jellyfin Compatibility"
+	compatibilityProductName = "Jellyfin Server"
 )
 
 type PublicSystemInfo struct {
 	Id                     string `json:"Id"`
+	LocalAddress           string `json:"LocalAddress"`
 	ServerName             string `json:"ServerName"`
 	Version                string `json:"Version"`
 	ProductName            string `json:"ProductName"`
 	StartupWizardCompleted bool   `json:"StartupWizardCompleted"`
+	OperatingSystem        string `json:"OperatingSystem"`
 }
 
 type SystemInfo struct {
 	PublicSystemInfo
-	OperatingSystem string `json:"OperatingSystem,omitempty"`
 }
 
 type SystemEndpointInfo struct {
@@ -67,6 +69,8 @@ type UserConfiguration struct {
 
 type SessionInfoDto struct {
 	Id                 string       `json:"Id"`
+	ServerId           string       `json:"ServerId"`
+	IsActive           bool         `json:"IsActive"`
 	UserId             string       `json:"UserId"`
 	UserName           string       `json:"UserName"`
 	Client             string       `json:"Client"`
@@ -83,32 +87,37 @@ type QueryResult[T any] struct {
 }
 
 type BaseItemDto struct {
-	Id                string            `json:"Id"`
-	ServerId          string            `json:"ServerId"`
-	Name              string            `json:"Name"`
-	SortName          string            `json:"SortName,omitempty"`
-	Type              string            `json:"Type"`
-	MediaType         string            `json:"MediaType,omitempty"`
-	IsFolder          bool              `json:"IsFolder"`
-	IsPlayable        bool              `json:"IsPlayable"`
-	CollectionType    string            `json:"CollectionType,omitempty"`
-	ParentId          string            `json:"ParentId,omitempty"`
-	SeriesId          string            `json:"SeriesId,omitempty"`
-	SeasonId          string            `json:"SeasonId,omitempty"`
-	SeriesName        string            `json:"SeriesName,omitempty"`
-	SeasonName        string            `json:"SeasonName,omitempty"`
-	IndexNumber       *int              `json:"IndexNumber,omitempty"`
-	ParentIndexNumber *int              `json:"ParentIndexNumber,omitempty"`
-	Overview          string            `json:"Overview,omitempty"`
-	PremiereDate      string            `json:"PremiereDate,omitempty"`
-	ProductionYear    *int              `json:"ProductionYear,omitempty"`
-	RunTimeTicks      *int64            `json:"RunTimeTicks,omitempty"`
-	Genres            []string          `json:"Genres"`
-	CommunityRating   *float32          `json:"CommunityRating,omitempty"`
-	ProviderIds       map[string]string `json:"ProviderIds,omitempty"`
-	ImageTags         map[string]string `json:"ImageTags,omitempty"`
-	BackdropImageTags []string          `json:"BackdropImageTags"`
-	UserData          *UserItemDataDto  `json:"UserData,omitempty"`
+	Id                   string            `json:"Id"`
+	ServerId             string            `json:"ServerId"`
+	Name                 string            `json:"Name"`
+	Etag                 string            `json:"Etag,omitempty"`
+	Path                 string            `json:"Path,omitempty"`
+	DisplayPreferencesId string            `json:"DisplayPreferencesId,omitempty"`
+	LocationType         string            `json:"LocationType,omitempty"`
+	SortName             string            `json:"SortName,omitempty"`
+	Type                 string            `json:"Type"`
+	MediaType            string            `json:"MediaType,omitempty"`
+	IsFolder             bool              `json:"IsFolder"`
+	IsPlayable           bool              `json:"IsPlayable"`
+	CollectionType       string            `json:"CollectionType,omitempty"`
+	ParentId             string            `json:"ParentId,omitempty"`
+	SeriesId             string            `json:"SeriesId,omitempty"`
+	SeasonId             string            `json:"SeasonId,omitempty"`
+	SeriesName           string            `json:"SeriesName,omitempty"`
+	SeasonName           string            `json:"SeasonName,omitempty"`
+	IndexNumber          *int              `json:"IndexNumber,omitempty"`
+	ParentIndexNumber    *int              `json:"ParentIndexNumber,omitempty"`
+	Overview             string            `json:"Overview,omitempty"`
+	PremiereDate         string            `json:"PremiereDate,omitempty"`
+	ProductionYear       *int              `json:"ProductionYear,omitempty"`
+	RunTimeTicks         *int64            `json:"RunTimeTicks,omitempty"`
+	Genres               []string          `json:"Genres"`
+	CommunityRating      *float32          `json:"CommunityRating,omitempty"`
+	ProviderIds          map[string]string `json:"ProviderIds,omitempty"`
+	ImageTags            map[string]string `json:"ImageTags"`
+	BackdropImageTags    []string          `json:"BackdropImageTags"`
+	UserData             *UserItemDataDto  `json:"UserData,omitempty"`
+	MediaSources         []MediaSourceInfo `json:"MediaSources,omitempty"`
 }
 
 type UserItemDataDto struct {

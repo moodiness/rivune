@@ -110,6 +110,7 @@ func TestArtworkGETHEADSelectRegisteredPrimaryAndBackdrop(t *testing.T) {
 		wantBody   bool
 	}{
 		{name: "primary get", method: http.MethodGet, imageType: "Primary", wantKey: posterKey, wantSource: poster, wantBody: true},
+		{name: "thumb get", method: http.MethodGet, imageType: "Thumb", wantKey: posterKey, wantSource: poster, wantBody: true},
 		{name: "primary head", method: http.MethodHead, imageType: "Primary", indexed: true, wantKey: posterKey, wantSource: poster},
 		{name: "backdrop get", method: http.MethodGet, imageType: "Backdrop", indexed: true, wantKey: backgroundKey, wantSource: background, wantBody: true},
 		{name: "backdrop head", method: http.MethodHead, imageType: "Backdrop", wantKey: backgroundKey, wantSource: background},
@@ -147,7 +148,7 @@ func TestArtworkGETHEADSelectRegisteredPrimaryAndBackdrop(t *testing.T) {
 			}
 		})
 	}
-	if catalog.calls != 4 {
+	if catalog.calls != 5 {
 		t.Fatalf("catalog calls = %d", catalog.calls)
 	}
 }
@@ -170,18 +171,44 @@ func TestArtworkServesObservedVidHubTagCapabilityWithoutToken(t *testing.T) {
 	if catalog.calls != 0 || len(delivery.lookup) != 0 || len(delivery.servedKeys) != 1 || delivery.servedKeys[0] != key {
 		t.Fatalf("anonymous tag catalog=%d lookup=%v served=%v", catalog.calls, delivery.lookup, delivery.servedKeys)
 	}
-
-	invalidCredential := httptest.NewRequest(
+	authenticated := httptest.NewRequest(
 		http.MethodGet,
-		"/Items/"+artworkItemOne+"/Images/Primary?tag="+key+"&api_key=rivune_at_native",
+		"/Items/"+artworkItemOne+"/Images/Primary?tag="+key+"&api_key="+artworkTokenOne,
 		nil,
 	)
-	invalidCredential.SetPathValue("id", artworkItemOne)
-	invalidCredential.SetPathValue("type", "Primary")
-	invalidResponse := httptest.NewRecorder()
-	handler.handleImage(invalidResponse, invalidCredential)
-	if invalidResponse.Code != http.StatusUnauthorized || len(delivery.servedKeys) != 1 {
-		t.Fatalf("invalid credential fallback status=%d served=%v", invalidResponse.Code, delivery.servedKeys)
+	authenticated.SetPathValue("id", artworkItemOne)
+	authenticated.SetPathValue("type", "Primary")
+	authenticatedResponse := httptest.NewRecorder()
+	handler.handleImage(authenticatedResponse, authenticated)
+	if authenticatedResponse.Code != http.StatusOK || catalog.calls != 0 || len(delivery.lookup) != 0 || len(delivery.servedKeys) != 2 || delivery.servedKeys[1] != key {
+		t.Fatalf("authenticated tag response=%d catalog=%d lookup=%v served=%v", authenticatedResponse.Code, catalog.calls, delivery.lookup, delivery.servedKeys)
+	}
+
+	for _, test := range []struct {
+		name        string
+		target      string
+		headerName  string
+		headerValue string
+	}{
+		{name: "invalid api key", target: "?tag=" + key + "&api_key=rivune_at_native"},
+		{name: "malformed api key", target: "?tag=" + key + "&api_key=%ZZ"},
+		{name: "unsupported authorization", target: "?tag=" + key, headerName: "Authorization", headerValue: "Bearer invalid"},
+		{name: "empty authorization token", target: "?tag=" + key, headerName: "X-Emby-Authorization", headerValue: `MediaBrowser Token=""`},
+		{name: "empty token header", target: "?tag=" + key, headerName: "X-Emby-Token", headerValue: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalidCredential := httptest.NewRequest(http.MethodGet, "/Items/"+artworkItemOne+"/Images/Primary"+test.target, nil)
+			invalidCredential.SetPathValue("id", artworkItemOne)
+			invalidCredential.SetPathValue("type", "Primary")
+			if test.headerName != "" {
+				invalidCredential.Header.Set(test.headerName, test.headerValue)
+			}
+			invalidResponse := httptest.NewRecorder()
+			handler.handleImage(invalidResponse, invalidCredential)
+			if invalidResponse.Code != http.StatusUnauthorized || len(delivery.servedKeys) != 2 {
+				t.Fatalf("invalid credential fallback status=%d served=%v", invalidResponse.Code, delivery.servedKeys)
+			}
+		})
 	}
 }
 

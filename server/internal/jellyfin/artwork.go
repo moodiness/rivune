@@ -2,7 +2,10 @@ package jellyfin
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
+
+	"github.com/moodiness/rivune/server/internal/collection"
 )
 
 func (handler *Handler) handleImage(response http.ResponseWriter, request *http.Request) {
@@ -19,7 +22,7 @@ func (handler *Handler) serveImage(response http.ResponseWriter, request *http.R
 		return
 	}
 	imageType := request.PathValue("type")
-	if imageType != "Primary" && imageType != "Backdrop" {
+	if imageType != "Primary" && imageType != "Backdrop" && imageType != "Thumb" {
 		http.NotFound(response, request)
 		return
 	}
@@ -28,7 +31,7 @@ func (handler *Handler) serveImage(response http.ResponseWriter, request *http.R
 		return
 	}
 	if !compatCredentialTransportPresent(request) {
-		if key, ok := anonymousArtworkKey(request); ok {
+		if key, ok := artworkTagKey(request); ok {
 			handler.artwork.ServeKey(response, request, key)
 			return
 		}
@@ -43,6 +46,10 @@ func (handler *Handler) serveImage(response http.ResponseWriter, request *http.R
 		http.NotFound(response, request)
 		return
 	}
+	if key, valid := artworkTagKey(request); valid {
+		handler.artwork.ServeKey(response, request, key)
+		return
+	}
 
 	materialized := ""
 	item, err := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, request.PathValue("id"))
@@ -51,13 +58,31 @@ func (handler *Handler) serveImage(response http.ResponseWriter, request *http.R
 		if imageType == "Backdrop" {
 			materialized = item.BackgroundURL
 		}
-	} else if imageType == "Primary" && handler.collections != nil {
-		_, folder, folderErr := handler.findCollectionFolder(request.Context(), session.Principal, request.PathValue("id"))
-		localizer, canLocalize := handler.catalog.(catalogArtworkLocalizer)
-		if folderErr == nil && canLocalize {
-			localized := localizer.LocalizeArtworkURLs(request.Context(), []string{folder.CoverImageURL})
-			if len(localized) == 1 {
-				materialized = localized[0]
+	} else if handler.collections != nil {
+		value, collectionErr := handler.collections.Get(request.Context(), session.Principal, request.PathValue("id"))
+		if collectionErr == nil {
+			imageTags, backdropTags := handler.collectionArtworkTags(request.Context(), session.Principal, value)
+			key := ""
+			if imageType == "Primary" || imageType == "Thumb" {
+				key = imageTags["Primary"]
+			} else if len(backdropTags) != 0 {
+				key = backdropTags[0]
+			}
+			if key != "" {
+				handler.artwork.ServeKey(response, request, key)
+				return
+			}
+		}
+		if imageType == "Primary" || imageType == "Thumb" {
+			value, folder, folderErr := handler.findCollectionFolder(request.Context(), session.Principal, request.PathValue("id"))
+			localizer, canLocalize := handler.catalog.(catalogArtworkLocalizer)
+			if folderErr == nil && canLocalize {
+				folders := []collection.Folder{folder}
+				handler.hydrateCollectionFolderCovers(request.Context(), session.Principal, value.ID, folders)
+				localized := localizer.LocalizeArtworkURLs(request.Context(), []string{folders[0].CoverImageURL})
+				if len(localized) == 1 {
+					materialized = localized[0]
+				}
 			}
 		}
 	}
@@ -78,7 +103,14 @@ func compatCredentialTransportPresent(request *http.Request) bool {
 			return true
 		}
 	}
-	for name := range request.URL.Query() {
+	if len(request.Header.Values("Authorization")) != 0 {
+		return true
+	}
+	query, err := url.ParseQuery(request.URL.RawQuery)
+	if err != nil {
+		return true
+	}
+	for name := range query {
 		if strings.EqualFold(name, "api_key") {
 			return true
 		}
@@ -90,11 +122,11 @@ func compatCredentialTransportPresent(request *http.Request) bool {
 	if !found {
 		return false
 	}
-	token, tokenFound := parameters["token"]
-	return tokenFound && strings.TrimSpace(token) != ""
+	_, tokenFound := parameters["token"]
+	return tokenFound
 }
 
-func anonymousArtworkKey(request *http.Request) (string, bool) {
+func artworkTagKey(request *http.Request) (string, bool) {
 	if request == nil {
 		return "", false
 	}

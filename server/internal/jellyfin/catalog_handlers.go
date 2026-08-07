@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -284,7 +285,7 @@ func (handler *Handler) sessionViews(ctx context.Context, principal auth.Princip
 		return nil, err
 	}
 	for _, value := range values {
-		views = append(views, handler.collectionViewDTO(value))
+		views = append(views, handler.collectionViewDTO(ctx, principal, value))
 	}
 	return views, nil
 }
@@ -298,9 +299,9 @@ func (handler *Handler) virtualViews() ([]BaseItemDto, bool) {
 	}
 	serverID := handler.serverInfo.ID.String()
 	return []BaseItemDto{
-		{Id: moviesID.String(), ServerId: serverID, Name: "Movies", SortName: "Movies", Type: "CollectionFolder", CollectionType: "movies", IsFolder: true, Genres: []string{}, BackdropImageTags: []string{}},
-		{Id: tvID.String(), ServerId: serverID, Name: "TV Shows", SortName: "TV Shows", Type: "CollectionFolder", CollectionType: "tvshows", IsFolder: true, Genres: []string{}, BackdropImageTags: []string{}},
-		{Id: collectionsID.String(), ServerId: serverID, Name: "Collections", SortName: "Collections", Type: "CollectionFolder", CollectionType: "boxsets", IsFolder: true, Genres: []string{}, BackdropImageTags: []string{}},
+		{Id: moviesID.String(), ServerId: serverID, Name: "Movies", SortName: "Movies", Etag: moviesID.String(), DisplayPreferencesId: moviesID.String(), LocationType: "FileSystem", Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "movies", IsFolder: true, Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: moviesID.String()}},
+		{Id: tvID.String(), ServerId: serverID, Name: "TV Shows", SortName: "TV Shows", Etag: tvID.String(), DisplayPreferencesId: tvID.String(), LocationType: "FileSystem", Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "tvshows", IsFolder: true, Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: tvID.String()}},
+		{Id: collectionsID.String(), ServerId: serverID, Name: "Collections", SortName: "Collections", Etag: collectionsID.String(), DisplayPreferencesId: collectionsID.String(), LocationType: "FileSystem", Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "boxsets", IsFolder: true, Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: collectionsID.String()}},
 	}, true
 }
 
@@ -318,7 +319,7 @@ func (handler *Handler) writeItem(response http.ResponseWriter, request *http.Re
 	if handler.collections != nil {
 		value, collectionErr := handler.collections.Get(request.Context(), session.Principal, itemID.String())
 		if collectionErr == nil {
-			handler.writeJSON(response, http.StatusOK, handler.collectionDTO(value))
+			handler.writeJSON(response, http.StatusOK, handler.collectionDTO(request.Context(), session.Principal, value))
 			return
 		}
 		if !errors.Is(collectionErr, collection.ErrNotFound) {
@@ -327,7 +328,7 @@ func (handler *Handler) writeItem(response http.ResponseWriter, request *http.Re
 		}
 		value, folder, folderErr := handler.findCollectionFolder(request.Context(), session.Principal, itemID.String())
 		if folderErr == nil {
-			handler.writeJSON(response, http.StatusOK, handler.collectionFolderDTO(value, folder))
+			handler.writeJSON(response, http.StatusOK, handler.collectionFolderDetailDTO(request.Context(), session.Principal, value, folder))
 			return
 		}
 		if !errors.Is(folderErr, collection.ErrNotFound) {
@@ -490,7 +491,7 @@ func (handler *Handler) writeCollectionRoot(response http.ResponseWriter, reques
 	}
 	items := make([]BaseItemDto, 0, end-start)
 	for _, value := range filtered[start:end] {
-		items = append(items, handler.collectionDTO(value))
+		items = append(items, handler.collectionDTO(request.Context(), session.Principal, value))
 	}
 	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: total, StartIndex: query.StartIndex})
 }
@@ -750,29 +751,86 @@ func resolveCollectionBatch(ctx context.Context, principal auth.Principal, resol
 	return outcomes
 }
 
-func (handler *Handler) collectionDTO(value collection.Collection) BaseItemDto {
+func (handler *Handler) collectionDTO(ctx context.Context, principal auth.Principal, value collection.Collection) BaseItemDto {
 	parentID := ""
 	if views, ok := handler.virtualViews(); ok {
 		parentID = views[2].Id
 	}
+	imageTags, backdropImageTags := handler.collectionArtworkTags(ctx, principal, value)
 	return BaseItemDto{
 		Id: value.ID, ServerId: handler.serverInfo.ID.String(), Name: value.Title, SortName: value.Title,
-		Type: "BoxSet", IsFolder: true, ParentId: parentID, Genres: []string{}, BackdropImageTags: []string{},
+		Etag: value.ID, DisplayPreferencesId: value.ID, LocationType: "FileSystem",
+		Type: "BoxSet", MediaType: "Unknown", IsFolder: true, ParentId: parentID,
+		Genres: []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags, UserData: &UserItemDataDto{Key: value.ID},
 	}
 }
 
-func (handler *Handler) collectionViewDTO(value collection.Collection) BaseItemDto {
+func (handler *Handler) collectionViewDTO(ctx context.Context, principal auth.Principal, value collection.Collection) BaseItemDto {
+	imageTags, backdropImageTags := handler.collectionArtworkTags(ctx, principal, value)
 	return BaseItemDto{
 		Id: value.ID, ServerId: handler.serverInfo.ID.String(), Name: value.Title, SortName: value.Title,
-		Type: "CollectionFolder", CollectionType: "mixed", IsFolder: true, Genres: []string{}, BackdropImageTags: []string{},
+		Etag: value.ID, DisplayPreferencesId: value.ID, LocationType: "FileSystem",
+		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "mixed", IsFolder: true,
+		Genres: []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags, UserData: &UserItemDataDto{Key: value.ID},
 	}
 }
 
 func (handler *Handler) collectionFolderDTO(value collection.Collection, folder collection.Folder) BaseItemDto {
 	return BaseItemDto{
 		Id: folder.ID, ServerId: handler.serverInfo.ID.String(), Name: folder.Title, SortName: folder.Title,
-		Type: "Folder", IsFolder: true, ParentId: value.ID, Genres: []string{}, BackdropImageTags: []string{},
+		Etag: folder.ID, DisplayPreferencesId: folder.ID, LocationType: "FileSystem",
+		Type: "Folder", MediaType: "Unknown", IsFolder: true, ParentId: value.ID,
+		Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: folder.ID},
 	}
+}
+
+func (handler *Handler) collectionFolderDetailDTO(ctx context.Context, principal auth.Principal, value collection.Collection, folder collection.Folder) BaseItemDto {
+	folders := []collection.Folder{folder}
+	handler.hydrateCollectionFolderCovers(ctx, principal, value.ID, folders)
+	item := handler.collectionFolderDTO(value, folders[0])
+	localizer, ok := handler.catalog.(catalogArtworkLocalizer)
+	if !ok || strings.TrimSpace(folders[0].CoverImageURL) == "" {
+		return item
+	}
+	localized := localizer.LocalizeArtworkURLs(ctx, []string{folders[0].CoverImageURL})
+	if len(localized) == 1 {
+		if tag, valid := localizedArtworkTag(localized[0]); valid {
+			item.ImageTags["Primary"] = tag
+		}
+	}
+	return item
+}
+
+func (handler *Handler) collectionArtworkTags(ctx context.Context, principal auth.Principal, value collection.Collection) (map[string]string, []string) {
+	imageTags := make(map[string]string)
+	backdropImageTags := make([]string, 0)
+	localizer, ok := handler.catalog.(catalogArtworkLocalizer)
+	if !ok {
+		return imageTags, backdropImageTags
+	}
+	upstream := strings.TrimSpace(value.BackdropImageURL)
+	fromBackdrop := upstream != ""
+	if upstream == "" && len(value.Folders) != 0 {
+		folder := []collection.Folder{value.Folders[0]}
+		handler.hydrateCollectionFolderCovers(ctx, principal, value.ID, folder)
+		upstream = strings.TrimSpace(folder[0].CoverImageURL)
+	}
+	if upstream == "" {
+		return imageTags, backdropImageTags
+	}
+	localized := localizer.LocalizeArtworkURLs(ctx, []string{upstream})
+	if len(localized) != 1 {
+		return imageTags, backdropImageTags
+	}
+	tag, valid := localizedArtworkTag(localized[0])
+	if !valid {
+		return imageTags, backdropImageTags
+	}
+	imageTags["Primary"] = tag
+	if fromBackdrop {
+		backdropImageTags = append(backdropImageTags, tag)
+	}
+	return imageTags, backdropImageTags
 }
 
 func stringSet(values []string) map[string]struct{} {
@@ -1008,17 +1066,27 @@ func catalogSort(query ItemQuery, request *http.Request) (string, string, error)
 
 func standardJellyfinSort(value string) bool {
 	switch {
-	case strings.EqualFold(value, "Album"), strings.EqualFold(value, "AlbumArtist"),
+	case strings.EqualFold(value, "Default"), strings.EqualFold(value, "AiredEpisodeOrder"),
+		strings.EqualFold(value, "Album"), strings.EqualFold(value, "AlbumArtist"),
 		strings.EqualFold(value, "Artist"), strings.EqualFold(value, "Budget"),
 		strings.EqualFold(value, "CommunityRating"), strings.EqualFold(value, "CriticRating"),
 		strings.EqualFold(value, "DateCreated"), strings.EqualFold(value, "DateLastContentAdded"),
-		strings.EqualFold(value, "DatePlayed"), strings.EqualFold(value, "IsFavoriteOrLiked"),
-		strings.EqualFold(value, "IsFolder"), strings.EqualFold(value, "IsUnplayed"),
+		strings.EqualFold(value, "DatePlayed"), strings.EqualFold(value, "DigitalReleaseDate"),
+		strings.EqualFold(value, "IsFavoriteOrLiked"), strings.EqualFold(value, "IsFolder"),
+		strings.EqualFold(value, "IsPlayed"), strings.EqualFold(value, "IsUnplayed"),
 		strings.EqualFold(value, "OfficialRating"), strings.EqualFold(value, "PlayCount"),
 		strings.EqualFold(value, "PremiereDate"), strings.EqualFold(value, "ProductionYear"),
 		strings.EqualFold(value, "Random"), strings.EqualFold(value, "Revenue"),
 		strings.EqualFold(value, "Runtime"), strings.EqualFold(value, "SeriesDatePlayed"),
-		strings.EqualFold(value, "SeriesSortName"), strings.EqualFold(value, "StartDate"):
+		strings.EqualFold(value, "SeriesSortName"), strings.EqualFold(value, "StartDate"),
+		strings.EqualFold(value, "VideoBitRate"), strings.EqualFold(value, "AirTime"),
+		strings.EqualFold(value, "Studio"), strings.EqualFold(value, "ParentIndexNumber"),
+		strings.EqualFold(value, "IndexNumber"), strings.EqualFold(value, "SimilarityScore"),
+		strings.EqualFold(value, "SearchScore"), strings.EqualFold(value, "ChannelOrder"),
+		strings.EqualFold(value, "CatalogOrder"), strings.EqualFold(value, "DisplayOrder"),
+		strings.EqualFold(value, "PopularityAllTime"), strings.EqualFold(value, "PopularityDay"),
+		strings.EqualFold(value, "PopularityWeek"), strings.EqualFold(value, "PopularityMonth"),
+		strings.EqualFold(value, "TrendingWeek"), strings.EqualFold(value, "TrendingMonth"):
 		return true
 	default:
 		return false
@@ -1028,6 +1096,7 @@ func standardJellyfinSort(value string) bool {
 func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserData bool) BaseItemDto {
 	item := BaseItemDto{
 		Id: title.ID, ServerId: handler.serverInfo.ID.String(), Name: title.Title, SortName: title.Title,
+		Etag: title.ID, LocationType: "FileSystem",
 		ParentId: title.ParentID, SeriesId: title.SeriesID, SeasonId: title.SeasonID,
 		SeriesName: title.SeriesTitle, SeasonName: title.SeasonTitle,
 		IndexNumber: title.Ordinal, ParentIndexNumber: title.ParentOrdinal, Overview: title.Overview,
@@ -1042,9 +1111,9 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 	case "movie":
 		item.Type, item.MediaType, item.IsPlayable = "Movie", "Video", true
 	case "series":
-		item.Type, item.IsFolder = "Series", true
+		item.Type, item.MediaType, item.IsFolder = "Series", "Unknown", true
 	case "season":
-		item.Type, item.IsFolder = "Season", true
+		item.Type, item.MediaType, item.IsFolder = "Season", "Unknown", true
 	case "episode":
 		item.Type, item.MediaType, item.IsPlayable = "Episode", "Video", true
 	}
@@ -1084,6 +1153,15 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 			}
 		}
 		item.UserData = userData
+	}
+	if item.Type == "Movie" || item.Type == "Episode" {
+		streamPath := "/Videos/" + url.PathEscape(item.Id) + "/stream"
+		item.Path = streamPath + ".strm"
+		item.MediaSources = []MediaSourceInfo{{
+			Id: item.Id, Name: item.Name, Path: streamPath, Protocol: "File", Type: "Default",
+			IsRemote: false, SupportsDirectPlay: true, SupportsDirectStream: true, SupportsTranscoding: true,
+			RunTimeTicks: item.RunTimeTicks,
+		}}
 	}
 	return item
 }

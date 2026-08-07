@@ -526,7 +526,7 @@ func validRouteValue(route Route, name, value string) bool {
 	case "userId", "itemId", "seriesId":
 		return validCompatUUID(value)
 	case "type":
-		return value == "Primary" || value == "Backdrop"
+		return value == "Primary" || value == "Backdrop" || value == "Thumb"
 	case "index":
 		return value == "0"
 	default:

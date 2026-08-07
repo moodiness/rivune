@@ -157,8 +157,23 @@ func TestDiscoveryLoginMeLogoutSequenceUsesOnlyCompatIdentity(t *testing.T) {
 	}
 	var result AuthenticationResult
 	decodeCompatTestResponse(t, loginResponse, &result)
-	if result.AccessToken != fake.token || result.User.Id != discoveryProfileID || result.User.Name != "Kids" || result.User.HasConfiguredEasyPassword || result.ServerId != discoveryServerID {
-		t.Fatalf("unexpected compatibility identity: userID=%q userName=%q serverID=%q tokenMatches=%t", result.User.Id, result.User.Name, result.ServerId, result.AccessToken == fake.token)
+	if result.AccessToken != fake.token || result.User.Id != discoveryProfileID || result.User.Name != "Kids" || result.User.HasConfiguredEasyPassword || result.ServerId != discoveryServerID ||
+		result.SessionInfo.ServerId != discoveryServerID || !result.SessionInfo.IsActive {
+		t.Fatalf("unexpected compatibility identity: userID=%q userName=%q serverID=%q sessionServerID=%q sessionActive=%t tokenMatches=%t", result.User.Id, result.User.Name, result.ServerId, result.SessionInfo.ServerId, result.SessionInfo.IsActive, result.AccessToken == fake.token)
+	}
+	var loginJSON map[string]json.RawMessage
+	if err := json.Unmarshal(loginResponse.Body.Bytes(), &loginJSON); err != nil {
+		t.Fatalf("decode login JSON object: %v", err)
+	}
+	var sessionJSON map[string]json.RawMessage
+	if err := json.Unmarshal(loginJSON["SessionInfo"], &sessionJSON); err != nil {
+		t.Fatalf("decode SessionInfo JSON object: %v", err)
+	}
+	if _, ok := sessionJSON["ServerId"]; !ok {
+		t.Fatalf("SessionInfo JSON omitted ServerId: %s", loginResponse.Body.String())
+	}
+	if active, ok := sessionJSON["IsActive"]; !ok || string(active) != "true" {
+		t.Fatalf("SessionInfo JSON omitted active state: %s", loginResponse.Body.String())
 	}
 	if strings.Contains(loginResponse.Body.String(), fake.session.Principal.SessionID) || strings.Contains(loginResponse.Body.String(), "rivune_at_") {
 		t.Fatal("login disclosed native session material")
@@ -466,11 +481,32 @@ func TestDiscoveryAndShimsExposeOnlyDeterministicCompatibilityData(t *testing.T)
 	}
 	var public PublicSystemInfo
 	decodeCompatTestResponse(t, publicResponse, &public)
-	if public.Id != discoveryServerID || public.ServerName != "Rivune Home" || public.Version != CompatibilityVersion || public.ProductName != CompatibilityProduct {
+	if public.Id != discoveryServerID || public.ServerName != "Rivune Home" || public.Version != CompatibilityVersion || public.ProductName != "Jellyfin Server" ||
+		public.LocalAddress != "" || public.OperatingSystem != "" || !public.StartupWizardCompleted {
 		t.Fatalf("unexpected public identity: %+v", public)
 	}
 	if strings.Contains(publicResponse.Body.String(), "test") {
 		t.Fatalf("public discovery disclosed runtime version: %s", publicResponse.Body.String())
+	}
+	var publicJSON map[string]json.RawMessage
+	if err := json.Unmarshal(publicResponse.Body.Bytes(), &publicJSON); err != nil {
+		t.Fatalf("decode public JSON object: %v", err)
+	}
+	for _, key := range []string{"Id", "LocalAddress", "ServerName", "Version", "ProductName", "StartupWizardCompleted", "OperatingSystem"} {
+		if _, ok := publicJSON[key]; !ok {
+			t.Fatalf("public JSON omitted %q: %s", key, publicResponse.Body.String())
+		}
+	}
+	if len(publicJSON) != 7 || strings.Count(publicResponse.Body.String(), `"OperatingSystem"`) != 1 {
+		t.Fatalf("public JSON fields are not exact: %s", publicResponse.Body.String())
+	}
+
+	systemRequest := httptest.NewRequest(http.MethodGet, "/System/Info", nil)
+	systemRequest.Header.Set("X-Emby-Token", fake.token)
+	systemResponse := httptest.NewRecorder()
+	mux.ServeHTTP(systemResponse, systemRequest)
+	if systemResponse.Code != http.StatusOK || strings.Count(systemResponse.Body.String(), `"OperatingSystem"`) != 1 {
+		t.Fatalf("system info status=%d body=%s", systemResponse.Code, systemResponse.Body.String())
 	}
 
 	quickResponse := httptest.NewRecorder()

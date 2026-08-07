@@ -411,8 +411,8 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	sequenceRequireStatus(t, public, http.StatusOK)
 	var publicInfo PublicSystemInfo
 	sequenceDecode(t, public, &publicInfo)
-	sequenceRequireObjectKeys(t, public.Body.Bytes(), "Id", "ServerName", "Version", "ProductName", "StartupWizardCompleted")
-	if publicInfo.Id != sequenceServerID || publicInfo.Version != CompatibilityVersion || publicInfo.ProductName != CompatibilityProduct || !publicInfo.StartupWizardCompleted {
+	sequenceRequireObjectKeys(t, public.Body.Bytes(), "Id", "LocalAddress", "ServerName", "Version", "ProductName", "StartupWizardCompleted", "OperatingSystem")
+	if publicInfo.Id != sequenceServerID || publicInfo.Version != CompatibilityVersion || publicInfo.ProductName != "Jellyfin Server" || publicInfo.LocalAddress != "" || publicInfo.OperatingSystem != "" || !publicInfo.StartupWizardCompleted {
 		t.Fatalf("public compatibility identity is incomplete: %+v", publicInfo)
 	}
 
@@ -421,7 +421,8 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	var primaryAuth AuthenticationResult
 	sequenceDecode(t, primaryLogin, &primaryAuth)
 	sequenceRequireObjectKeys(t, primaryLogin.Body.Bytes(), "User", "SessionInfo", "AccessToken", "ServerId")
-	if primaryAuth.AccessToken == "" || primaryAuth.User.Id != sequencePrimaryProfileID || primaryAuth.User.Name != "Main" || primaryAuth.SessionInfo.UserId != primaryAuth.User.Id || primaryAuth.SessionInfo.Client != fixture.client || primaryAuth.ServerId != sequenceServerID {
+	if primaryAuth.AccessToken == "" || primaryAuth.User.Id != sequencePrimaryProfileID || primaryAuth.User.Name != "Main" || primaryAuth.SessionInfo.UserId != primaryAuth.User.Id || primaryAuth.SessionInfo.Client != fixture.client ||
+		primaryAuth.SessionInfo.ServerId != sequenceServerID || !primaryAuth.SessionInfo.IsActive || primaryAuth.ServerId != sequenceServerID {
 		t.Fatalf("primary authentication binding is incomplete: %+v", primaryAuth)
 	}
 	primaryToken := primaryAuth.AccessToken
@@ -457,8 +458,9 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	sequenceRequireStatus(t, itemsResponse, http.StatusOK)
 	var seriesPage QueryResult[BaseItemDto]
 	sequenceDecode(t, itemsResponse, &seriesPage)
-	if len(seriesPage.Items) != 1 || seriesPage.TotalRecordCount != 1 || seriesPage.Items[0].Id == "" || seriesPage.Items[0].Type != "Series" || !seriesPage.Items[0].IsFolder || seriesPage.Items[0].ServerId != publicInfo.Id {
-		t.Fatalf("series page is incomplete: %+v", seriesPage)
+	if len(seriesPage.Items) != 1 || seriesPage.TotalRecordCount != 1 || seriesPage.Items[0].Id == "" || seriesPage.Items[0].Type != "Series" || !seriesPage.Items[0].IsFolder ||
+		seriesPage.Items[0].ServerId != publicInfo.Id || seriesPage.Items[0].Path != "" || len(seriesPage.Items[0].MediaSources) != 0 || strings.Contains(itemsResponse.Body.String(), `"MediaSources"`) {
+		t.Fatalf("series page is incomplete or playable: %+v", seriesPage)
 	}
 	seriesID := seriesPage.Items[0].Id
 
@@ -475,10 +477,11 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	sequenceRequireStatus(t, episodesResponse, http.StatusOK)
 	var episodes QueryResult[BaseItemDto]
 	sequenceDecode(t, episodesResponse, &episodes)
-	sequenceRequireArrayObjectKeys(t, episodesResponse.Body.Bytes(), "Items", 0, "Id", "ServerId", "Name", "Type", "MediaType", "IsFolder", "IsPlayable", "SeriesId", "SeasonId", "IndexNumber", "ParentIndexNumber", "Genres", "ImageTags", "BackdropImageTags", "UserData")
+	sequenceRequireArrayObjectKeys(t, episodesResponse.Body.Bytes(), "Items", 0, "Id", "ServerId", "Name", "Path", "Type", "MediaType", "IsFolder", "IsPlayable", "SeriesId", "SeasonId", "IndexNumber", "ParentIndexNumber", "Genres", "ImageTags", "BackdropImageTags", "UserData", "MediaSources")
 	if len(episodes.Items) != 1 || episodes.Items[0].Id == "" || episodes.Items[0].Type != "Episode" || !episodes.Items[0].IsPlayable || episodes.Items[0].SeriesId != seriesID || episodes.Items[0].SeasonId != seasonID || episodes.Items[0].RunTimeTicks == nil || episodes.Items[0].ImageTags["Primary"] == "" {
 		t.Fatalf("episode hierarchy DTO is incomplete: %+v", episodes)
 	}
+	requireDeferredMediaSource(t, episodes.Items[0])
 	episodeID := episodes.Items[0].Id
 
 	searchResponse := fixture.request(t, "search", http.MethodGet, fixture.prefix+"/Search/Hints?SearchTerm=pilot&IncludeItemTypes=Episode&Limit=10", "", primaryToken)

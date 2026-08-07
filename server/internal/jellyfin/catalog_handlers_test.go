@@ -74,6 +74,17 @@ func TestCatalogViewsAreStableRootsAndRejectMismatchedUser(t *testing.T) {
 		result.Items[0].Genres == nil || result.Items[0].BackdropImageTags == nil {
 		t.Fatalf("unexpected virtual roots: %+v", result)
 	}
+	for _, view := range result.Items {
+		if view.Etag != view.Id || view.DisplayPreferencesId != view.Id || view.LocationType != "FileSystem" || view.MediaType != "Unknown" ||
+			view.ImageTags == nil || len(view.ImageTags) != 0 || view.UserData == nil || view.UserData.Key != view.Id {
+			t.Fatalf("virtual root compatibility fields are incomplete: %+v", view)
+		}
+	}
+	for _, field := range []string{`"Etag"`, `"DisplayPreferencesId"`, `"LocationType"`, `"ImageTags":{}`, `"UserData"`} {
+		if !strings.Contains(response.Body.String(), field) {
+			t.Fatalf("UserViews JSON omitted %s: %s", field, response.Body.String())
+		}
+	}
 	if len(reader.queries) != 0 || len(reader.titleIDs) != 0 {
 		t.Fatalf("virtual roots queried catalog: %+v %+v", reader.queries, reader.titleIDs)
 	}
@@ -139,11 +150,15 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 		item.UserData.PlaybackPositionTicks != SecondsToTicks(61) || !item.UserData.Played || item.UserData.PlayCount != 1 {
 		t.Fatalf("movie mapping incomplete: %+v", item)
 	}
+	requireDeferredMediaSource(t, item)
 	body := response.Body.String()
 	for _, forbidden := range []string{"provider.invalid", "profile-secret", "opaque-secondary", "source-secret", "secret-resource", "secret-provider", "secret-source", "/api/v1/artwork/"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("catalog response disclosed %q: %s", forbidden, body)
 		}
+	}
+	if !strings.Contains(body, `"MediaSources"`) || !strings.Contains(body, `"Path":"/Videos/00000000-0000-4000-8000-000000000100/stream.strm"`) {
+		t.Fatalf("movie catalogue JSON omitted deferred media fields: %s", body)
 	}
 }
 
@@ -199,6 +214,24 @@ func TestCatalogMapsSeasonZeroAndEpisodeDetailInOneRead(t *testing.T) {
 		item.IndexNumber == nil || *item.IndexNumber != 1 || item.ParentIndexNumber == nil || *item.ParentIndexNumber != 0 ||
 		item.SeriesName != "Canonical Series" || item.SeasonName != "Specials" || item.ProviderIds["Tvdb"] != "2110" {
 		t.Fatalf("episode hierarchy mapping incomplete: %+v", item)
+	}
+	requireDeferredMediaSource(t, item)
+	if !strings.Contains(response.Body.String(), `"MediaSources"`) {
+		t.Fatalf("episode detail JSON omitted MediaSources: %s", response.Body.String())
+	}
+
+	reader.title = watchstate.CatalogTitle{
+		ID: "00000000-0000-4000-8000-000000000200", MediaType: "series", Title: "Canonical Series",
+		Genres: []string{}, ProviderIDs: map[string]string{"tvdb": "200"},
+	}
+	seriesRequest := authenticatedCatalogRequest(t, token, "/Items/00000000-0000-4000-8000-000000000200")
+	seriesRequest.SetPathValue("id", reader.title.ID)
+	seriesResponse := httptest.NewRecorder()
+	handler.handleItem(seriesResponse, seriesRequest)
+	var series BaseItemDto
+	decodeCatalogResponse(t, seriesResponse, &series)
+	if seriesResponse.Code != http.StatusOK || series.Type != "Series" || !series.IsFolder || series.Path != "" || len(series.MediaSources) != 0 || strings.Contains(seriesResponse.Body.String(), `"MediaSources"`) {
+		t.Fatalf("series detail exposed playable media: status=%d item=%+v body=%s", seriesResponse.Code, series, seriesResponse.Body.String())
 	}
 }
 
@@ -274,10 +307,16 @@ func TestCatalogSortIsForwardedOrRejected(t *testing.T) {
 			t.Fatalf("standard sort %q status=%d body=%s", query, response.Code, response.Body.String())
 		}
 	}
+	remuxSorts := authenticatedCatalogRequest(t, token, "/Items?SortBy=Default,AiredEpisodeOrder,DigitalReleaseDate,IsPlayed,VideoBitRate,AirTime,Studio,ParentIndexNumber,IndexNumber,SimilarityScore,SearchScore,ChannelOrder,CatalogOrder,DisplayOrder,PopularityAllTime,PopularityDay,PopularityWeek,PopularityMonth,TrendingWeek,TrendingMonth")
+	remuxSortsResponse := httptest.NewRecorder()
+	handler.handleItems(remuxSortsResponse, remuxSorts)
+	if remuxSortsResponse.Code != http.StatusOK || len(reader.queries) != 6 || reader.queries[5].SortBy != "" || reader.queries[5].SortOrder != "" {
+		t.Fatalf("Remux-compatible sorts status=%d queries=%+v body=%s", remuxSortsResponse.Code, reader.queries, remuxSortsResponse.Body.String())
+	}
 	request = authenticatedCatalogRequest(t, token, "/Items?SortBy=PrivateProviderURL")
 	response = httptest.NewRecorder()
 	handler.handleItems(response, request)
-	if response.Code != http.StatusBadRequest || len(reader.queries) != 5 {
+	if response.Code != http.StatusBadRequest || len(reader.queries) != 6 {
 		t.Fatalf("unknown sort status=%d queries=%+v body=%s", response.Code, reader.queries, response.Body.String())
 	}
 }
@@ -363,6 +402,23 @@ func TestJellyfinProviderIDsAllowOnlyValidatedTitleIdentities(t *testing.T) {
 		if result := jellyfinProviderIDs(values); len(result) != 0 {
 			t.Fatalf("invalid provider identity %#v projected as %#v", values, result)
 		}
+	}
+}
+
+func requireDeferredMediaSource(t *testing.T, item BaseItemDto) {
+	t.Helper()
+	if len(item.MediaSources) != 1 {
+		t.Fatalf("item has %d deferred sources, want exactly one: %+v", len(item.MediaSources), item)
+	}
+	source := item.MediaSources[0]
+	expectedPath := "/Videos/" + item.Id + "/stream"
+	if source.Id != item.Id || source.Name != item.Name || source.Path != expectedPath || item.Path != expectedPath+".strm" ||
+		source.Protocol != "File" || source.Type != "Default" || source.IsRemote || !source.SupportsDirectPlay ||
+		!source.SupportsDirectStream || !source.SupportsTranscoding {
+		t.Fatalf("deferred source contract is incomplete: item=%+v source=%+v", item, source)
+	}
+	if (source.RunTimeTicks == nil) != (item.RunTimeTicks == nil) || source.RunTimeTicks != nil && *source.RunTimeTicks != *item.RunTimeTicks {
+		t.Fatalf("deferred source runtime differs from item: item=%v source=%v", item.RunTimeTicks, source.RunTimeTicks)
 	}
 }
 

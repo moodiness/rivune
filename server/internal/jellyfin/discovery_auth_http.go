@@ -126,7 +126,8 @@ func (handler *Handler) handleAuthenticateByName(response http.ResponseWriter, r
 	writeJSON(response, http.StatusOK, AuthenticationResult{
 		User: handler.configuredCompatUser(request.Context(), result.Principal, result.Profile.ID, result.Profile.Name),
 		SessionInfo: SessionInfoDto{
-			Id: result.Credential.SessionID, UserId: result.Profile.ID, UserName: result.Profile.Name,
+			Id: result.Credential.SessionID, ServerId: serverID, IsActive: true,
+			UserId: result.Profile.ID, UserName: result.Profile.Name,
 			Client: client.Client, DeviceName: client.Device, DeviceId: client.DeviceID, ApplicationVersion: client.Version,
 		},
 		AccessToken: result.Credential.Token,
@@ -308,8 +309,8 @@ func (handler *Handler) publicSystemInfo() (PublicSystemInfo, bool) {
 		return PublicSystemInfo{}, false
 	}
 	return PublicSystemInfo{
-		Id: handler.serverInfo.ID.String(), ServerName: handler.serverInfo.Name,
-		Version: CompatibilityVersion, ProductName: CompatibilityProduct, StartupWizardCompleted: true,
+		Id: handler.serverInfo.ID.String(), LocalAddress: "", ServerName: handler.serverInfo.Name,
+		Version: CompatibilityVersion, ProductName: compatibilityProductName, StartupWizardCompleted: true, OperatingSystem: "",
 	}, true
 }
 
