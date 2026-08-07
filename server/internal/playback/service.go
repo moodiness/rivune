@@ -203,10 +203,11 @@ func (service *Service) sources(ctx context.Context, principal auth.Principal, i
 	for index := range storedReferences {
 		reference := storedReferences[index]
 		source := reference.Source
+		name, description, filename := sourceOptionDisplay(source, index+1)
 		options = append(options, SourceOption{
 			ID: source.ID, SourceRef: reference.ID, AddonID: source.AddonID, ManifestID: source.ManifestID, AddonName: source.AddonName,
-			StreamIndex: source.StreamIndex, Name: sourceOptionLabel(index + 1), Protocol: source.Protocol, Container: source.Container, ExpiresAt: reference.ExpiresAt,
-			StableIdentity: stableSourceIdentity(source),
+			StreamIndex: source.StreamIndex, Name: name, Description: description, Filename: filename,
+			Protocol: source.Protocol, Container: source.Container, ExpiresAt: reference.ExpiresAt, StableIdentity: stableSourceIdentity(source),
 		})
 		if pin {
 			pinnedIdentifiers = append(pinnedIdentifiers, reference.ID)
@@ -794,6 +795,34 @@ func sourceOptionLabel(ordinal int) string {
 	return fmt.Sprintf("Source %d", ordinal)
 }
 
+func sourceOptionDisplay(source Source, ordinal int) (string, string, string) {
+	name := strings.TrimSpace(source.Name)
+	title := strings.TrimSpace(source.Title)
+	description := strings.TrimSpace(source.Description)
+	filename := strings.TrimSpace(source.Filename)
+	if description == "" {
+		description = title
+	}
+	if name == "" {
+		switch {
+		case title != "":
+			name = title
+		case filename != "":
+			name = filename
+			filename = ""
+		default:
+			name = sourceOptionLabel(ordinal)
+		}
+	}
+	if description == name {
+		description = ""
+	}
+	if filename == name || filename == description {
+		filename = ""
+	}
+	return name, description, filename
+}
+
 func stableSourceIdentity(source Source) string {
 	addonID := strings.TrimSpace(source.AddonID)
 	manifestID := strings.TrimSpace(source.ManifestID)
@@ -867,6 +896,13 @@ func normalizeStreams(batch addon.ResourceBatch, capabilities Capabilities) ([]S
 				source.Container = containerFor(streamURL)
 				source.Compatible = supports(capabilities.StreamingProtocols, source.Protocol) && supportsContainer(capabilities.Containers, source.Container)
 				assets = append(assets, storedAsset{ID: id, Kind: "stream", URL: streamURL, Headers: headers, Container: source.Container})
+			case directMediaExternalURL(externalURL):
+				source.Mode = "direct"
+				source.URL = externalURL
+				source.Protocol = protocolFor(externalURL)
+				source.Container = containerFor(externalURL)
+				source.Compatible = supports(capabilities.StreamingProtocols, source.Protocol) && supportsContainer(capabilities.Containers, source.Container)
+				assets = append(assets, storedAsset{ID: id, Kind: "stream", URL: externalURL, Headers: headers, Container: source.Container})
 			case validYouTubeID(ytID):
 				source.Mode = "youtube"
 				source.YTID = ytID
@@ -1022,6 +1058,10 @@ func containerFor(rawURL string) string {
 	default:
 		return ""
 	}
+}
+
+func directMediaExternalURL(rawURL string) bool {
+	return validMediaURL(rawURL) && (protocolFor(rawURL) == "hls" || containerFor(rawURL) != "")
 }
 
 func supports(values []string, candidate string) bool {

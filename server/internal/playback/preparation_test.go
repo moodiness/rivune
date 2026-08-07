@@ -146,30 +146,31 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	if len(list.Sources) != 2 || processor.calls.Load() != 0 {
 		t.Fatalf("listing sources unexpectedly inspected media: sources=%d probes=%d", len(list.Sources), processor.calls.Load())
 	}
-	if list.Sources[0].Name != "Source 1" || list.Sources[1].Name != "Source 2" || list.Sources[0].Name == list.Sources[1].Name {
-		t.Fatalf("source labels are not neutral and distinct: %+v", list.Sources)
+	if list.Sources[0].Name != "First provider text" || list.Sources[0].Description != "First provider title" || list.Sources[0].Filename != "first-provider-filename-secret" {
+		t.Fatalf("first source display metadata was not preserved: %+v", list.Sources[0])
 	}
-	if sourceOptionLabel(1) != list.Sources[0].Name || sourceOptionLabel(2) != list.Sources[1].Name {
-		t.Fatalf("source labels are not stable by ordinal: %+v", list.Sources)
-	}
-	for _, source := range list.Sources {
-		if source.Description != "" || source.Filename != "" {
-			t.Fatalf("source option retained provider display metadata: %+v", source)
-		}
+	if list.Sources[1].Name != "Bearer provider-name-secret; Cookie=provider-name-cookie; X-Header=provider-name-header" || list.Sources[1].Description != "provider-description-secret" || list.Sources[1].Filename != "Bearer provider-filename-secret; Cookie=provider-filename-cookie; X-Header=provider-filename-header" {
+		t.Fatalf("second source display metadata was not preserved: %+v", list.Sources[1])
 	}
 	encoded, err := json.Marshal(list)
 	if err != nil {
 		t.Fatal(err)
 	}
 	formatted := fmt.Sprintf("%+v", list)
-	for _, secret := range []string{
-		"media.example", "first-provider-url-secret", "first-provider-filename-secret", "First provider text", "First provider title",
-		"provider-name-secret", "provider-name-cookie", "provider-name-header", "provider-title-secret", "provider-title-cookie", "provider-title-header",
-		"provider-description-secret", "provider-signed-url-secret", "provider-filename-secret", "provider-filename-cookie", "provider-filename-header",
+	for _, private := range []string{
+		"media.example", "first-provider-url-secret", "provider-signed-url-secret",
 		"provider-auth-header-secret", "provider-header-cookie-secret", "provider-header-key-secret",
 	} {
-		if strings.Contains(string(encoded), secret) || strings.Contains(formatted, secret) {
-			t.Fatalf("source DTO or log formatting leaked %q: json=%s formatted=%s", secret, encoded, formatted)
+		if strings.Contains(string(encoded), private) || strings.Contains(formatted, private) {
+			t.Fatalf("source DTO or log formatting leaked private transport data %q: json=%s formatted=%s", private, encoded, formatted)
+		}
+	}
+	for _, display := range []string{"First provider text", "First provider title", "provider-description-secret"} {
+		if !strings.Contains(string(encoded), display) {
+			t.Fatalf("source DTO omitted display metadata %q: %s", display, encoded)
+		}
+		if strings.Contains(formatted, display) {
+			t.Fatalf("source log formatting exposed display metadata %q: %s", display, formatted)
 		}
 	}
 	repeated, err := service.Sources(context.Background(), principal, input)

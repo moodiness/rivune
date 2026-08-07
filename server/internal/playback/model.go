@@ -72,6 +72,10 @@ type SourceOption struct {
 	StableIdentity string    `json:"-"`
 }
 
+func (SourceOption) String() string {
+	return "playback.SourceOption(redacted)"
+}
+
 type SourceList struct {
 	Sources        []SourceOption    `json:"sources"`
 	ProviderErrors []ProviderFailure `json:"providerErrors"`

@@ -308,6 +308,32 @@ func TestNormalizeStreamsTreatsProxiedWebReadyContainerAsCompatible(t *testing.T
 	}
 }
 
+func TestNormalizeStreamsProxiesMediaExternalURLAndKeepsWebHandoffExternal(t *testing.T) {
+	batch := addon.ResourceBatch{Results: []addon.ResourceResult{{
+		AddonID: "addon-id", ManifestID: "manifest-id",
+		Payload: []byte(`{"streams":[
+			{"name":"Downloadable MKV","externalUrl":"https://media.example/movie.mkv"},
+			{"name":"Provider page","externalUrl":"https://provider.example/watch"}
+		]}`),
+	}}}
+
+	sources, assets, err := normalizeStreams(batch, Capabilities{
+		StreamingProtocols: []string{"http"}, Containers: []string{"mkv"}, ExternalPlayers: []string{"system"},
+	})
+	if err != nil {
+		t.Fatalf("normalize streams: %v", err)
+	}
+	if len(sources) != 2 || sources[0].Name != "Downloadable MKV" || sources[0].Mode != "direct" || !sources[0].Compatible || sources[0].Container != "mkv" {
+		t.Fatalf("media external URL was not promoted to native playback: %+v", sources)
+	}
+	if sources[1].Name != "Provider page" || sources[1].Mode != "external" || !sources[1].Compatible || sources[1].Container != "" {
+		t.Fatalf("web handoff did not remain external: %+v", sources)
+	}
+	if len(assets) != 2 || assets[0].URL != "https://media.example/movie.mkv" || assets[0].Container != "mkv" {
+		t.Fatalf("promoted media asset was not retained for the playback proxy: %+v", assets)
+	}
+}
+
 type recordingResourceFetcher struct {
 	fetchAddonID  string
 	fetchPath     addon.ResourcePath
@@ -409,8 +435,8 @@ func TestSourcesWithoutAddonKeepsFanout(t *testing.T) {
 				t.Fatalf("unexpected fan-out resource: %+v", fetcher.fetchAllPath)
 			}
 			if len(list.Sources) != 2 ||
-				list.Sources[0].AddonID != "fanout-addon-a" || list.Sources[0].ManifestID != "org.example.streams.a" || list.Sources[0].AddonName != "First Streams" || list.Sources[0].Name != "Source 1" || list.Sources[0].SourceRef == "" ||
-				list.Sources[1].AddonID != "fanout-addon-b" || list.Sources[1].ManifestID != "org.example.streams.b" || list.Sources[1].AddonName != "Second Streams" || list.Sources[1].Name != "Source 2" || list.Sources[1].SourceRef == "" {
+				list.Sources[0].AddonID != "fanout-addon-a" || list.Sources[0].ManifestID != "org.example.streams.a" || list.Sources[0].AddonName != "First Streams" || list.Sources[0].Name != "First Movie" || list.Sources[0].SourceRef == "" ||
+				list.Sources[1].AddonID != "fanout-addon-b" || list.Sources[1].ManifestID != "org.example.streams.b" || list.Sources[1].AddonName != "Second Streams" || list.Sources[1].Name != "Second Movie" || list.Sources[1].SourceRef == "" {
 				t.Fatalf("fan-out stream provenance was not preserved: %+v", list.Sources)
 			}
 		})
