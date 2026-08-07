@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,7 +25,7 @@ func TestJellyfinCompatibilityDisabledSkipsConstructionAndReservesRoutes(t *test
 		Name:     "Rivune",
 	}}
 	api := &API{config: config.Config{JellyfinEnabled: false}}
-	api.initializeJellyfinCompatibility(nil, nil, nil, nil, nil, nil, instances)
+	api.initializeJellyfinCompatibility(nil, nil, nil, nil, nil, instances)
 	if instances.infoCalls != 0 || api.jellyfinCompatibility != nil {
 		t.Fatalf("disabled compatibility allocated dependencies: info calls=%d handler=%v", instances.infoCalls, api.jellyfinCompatibility)
 	}
@@ -133,6 +134,40 @@ func TestJellyfinCompatibilityServerInfoIsStableAcrossCompositionRestarts(t *tes
 	}
 	if first.Name != "Rivune Home" || first.RuntimeVersion != "1.2.3" {
 		t.Fatalf("server info lost persisted/runtime fields: %+v", first)
+	}
+}
+
+func TestJellyfinProfileLoginUsesOpaqueUsernameAndSharedAdmissionBudgets(t *testing.T) {
+	service := &fakeAuthService{jellyfinLoginResult: auth.JellyfinProfileLoginResult{
+		ProfileID: "22222222-2222-4222-8222-222222222222",
+	}}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = service
+	input := auth.JellyfinProfileLoginInput{
+		Username: "11111111-1111-4111-8111-111111111111", Password: "application-password",
+		LinkedDeviceKey: "infuse-device", DeviceName: "Living Room", Platform: "Infuse",
+	}
+	for attempt := range credentialUsernameAttempts {
+		ctx := auth.WithClientIP(context.Background(), "198.51.100."+strconv.Itoa(attempt+1))
+		if _, err := api.loginJellyfinProfile(ctx, input); err != nil {
+			t.Fatalf("admitted Jellyfin login %d failed: %v", attempt, err)
+		}
+	}
+	ctx := auth.WithClientIP(context.Background(), "203.0.113.1")
+	if _, err := api.loginJellyfinProfile(ctx, input); err == nil {
+		t.Fatal("opaque credential username admission budget was bypassed by source rotation")
+	} else {
+		var admissionErr *credentialLoginAdmissionError
+		if !errors.As(err, &admissionErr) {
+			t.Fatalf("blocked Jellyfin login error = %T %v", err, err)
+		}
+	}
+	if service.jellyfinLoginCalls != credentialUsernameAttempts || service.jellyfinLoginInput != input || service.loginCalls != 0 {
+		t.Fatalf("Jellyfin login calls=%d native password login calls=%d input=%+v", service.jellyfinLoginCalls, service.loginCalls, service.jellyfinLoginInput)
+	}
+	input.Username = "33333333-3333-4333-8333-333333333333"
+	if _, err := api.loginJellyfinProfile(auth.WithClientIP(context.Background(), "203.0.113.2"), input); err != nil {
+		t.Fatalf("independent opaque credential was rejected: %v", err)
 	}
 }
 

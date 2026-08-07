@@ -5,7 +5,7 @@ namespace Rivune.Windows;
 
 public static class RivuneProtocol
 {
-    public const int Version = 19;
+    public const int Version = 20;
 }
 
 public sealed record Discovery

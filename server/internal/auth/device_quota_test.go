@@ -72,53 +72,6 @@ func TestDeviceQuotaExactLimitOwnershipAndDeviceCodeExchange(t *testing.T) {
 	assertDeviceCount(t, pool, fixture.userID, maximumDevicesPerUser)
 }
 
-func TestLinkedDeviceLoginSerializesFirstUseMapping(t *testing.T) {
-	firstPool := openDeviceQuotaTestPool(t, "rivune-auth-linked-device-first")
-	secondPool := openDeviceQuotaTestPool(t, "rivune-auth-linked-device-second")
-	fixture := seedDeviceQuotaFixture(t, firstPool, 0)
-	cleanupDeviceQuotaFixtures(t, firstPool, fixture)
-
-	firstService := &Service{pool: firstPool, accessTTL: time.Minute, refreshTTL: time.Hour, timezone: "UTC"}
-	secondService := &Service{pool: secondPool, accessTTL: time.Minute, refreshTTL: time.Hour, timezone: "UTC"}
-	type loginResult struct {
-		tokens TokenPair
-		err    error
-	}
-	start := make(chan struct{})
-	results := make(chan loginResult, 2)
-	login := func(service *Service) {
-		<-start
-		tokens, err := service.Login(context.Background(), LoginInput{
-			Username: fixture.username, Password: fixture.password,
-			LinkedDeviceKey: "shared-jellyfin-device", DeviceName: "Shared Jellyfin device", Platform: "Infuse",
-		})
-		results <- loginResult{tokens: tokens, err: err}
-	}
-	go login(firstService)
-	go login(secondService)
-	close(start)
-
-	first := <-results
-	second := <-results
-	if first.err != nil || second.err != nil {
-		t.Fatalf("concurrent linked device logins failed: %v, %v", first.err, second.err)
-	}
-	if first.tokens.DeviceID != second.tokens.DeviceID {
-		t.Fatalf("linked device mapped to %q and %q", first.tokens.DeviceID, second.tokens.DeviceID)
-	}
-	assertDeviceCount(t, firstPool, fixture.userID, 1)
-	var mappedDeviceID string
-	if err := firstPool.QueryRow(context.Background(), `
-		SELECT device_id::text FROM jellyfin_compat_devices
-		WHERE user_id = $1::uuid AND client_device_id = 'shared-jellyfin-device'
-	`, fixture.userID).Scan(&mappedDeviceID); err != nil {
-		t.Fatalf("read linked device mapping: %v", err)
-	}
-	if mappedDeviceID != first.tokens.DeviceID {
-		t.Fatalf("stored linked device = %q, want %q", mappedDeviceID, first.tokens.DeviceID)
-	}
-}
-
 func TestDeviceQuotaSerializesLoginAndDeviceCodeAcrossServices(t *testing.T) {
 	firstPool := openDeviceQuotaTestPool(t, "rivune-auth-device-quota-first")
 	secondPool := openDeviceQuotaTestPool(t, "rivune-auth-device-quota-second")

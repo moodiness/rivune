@@ -15,7 +15,6 @@ import (
 	"github.com/moodiness/rivune/server/internal/jellyfin"
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/playback"
-	"github.com/moodiness/rivune/server/internal/profile"
 	"github.com/moodiness/rivune/server/internal/watchstate"
 )
 
@@ -49,10 +48,23 @@ func (a *API) loginCredentials(ctx context.Context, input auth.LoginInput) (auth
 	return a.auth.Login(ctx, input)
 }
 
+func (a *API) loginJellyfinProfile(ctx context.Context, input auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error) {
+	release, retryAfter, admitted := a.credentialAdmission.acquire(auth.ClientIP(ctx))
+	if !admitted {
+		return auth.JellyfinProfileLoginResult{}, &credentialLoginAdmissionError{retryAfter: retryAfter}
+	}
+	defer release()
+
+	retryAfter, admitted = a.usernameAdmission.acquire(input.Username)
+	if !admitted {
+		return auth.JellyfinProfileLoginResult{}, &credentialLoginAdmissionError{retryAfter: retryAfter}
+	}
+	return a.auth.LoginJellyfinProfile(ctx, input)
+}
+
 func (a *API) initializeJellyfinCompatibility(
 	pool *pgxpool.Pool,
 	nativeAuthentication *auth.Service,
-	profiles *profile.Service,
 	catalog *watchstate.Service,
 	artwork *artworkcache.Service,
 	playbackDelivery *playback.Service,
@@ -66,7 +78,7 @@ func (a *API) initializeJellyfinCompatibility(
 	defer a.jellyfinCompatibilityMu.Unlock()
 	if a.jellyfinCompatibilityBuilder == nil {
 		a.jellyfinCompatibilityBuilder = func(ctx context.Context) (*jellyfin.Handler, bool, error) {
-			return a.buildJellyfinCompatibility(ctx, pool, nativeAuthentication, profiles, catalog, artwork, playbackDelivery, instances, searchDependencies...)
+			return a.buildJellyfinCompatibility(ctx, pool, nativeAuthentication, catalog, artwork, playbackDelivery, instances, searchDependencies...)
 		}
 	}
 	if a.jellyfinCompatibilitySignal == nil {
@@ -81,7 +93,6 @@ func (a *API) buildJellyfinCompatibility(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	nativeAuthentication *auth.Service,
-	profiles *profile.Service,
 	catalog *watchstate.Service,
 	artwork *artworkcache.Service,
 	playbackDelivery *playback.Service,
@@ -98,16 +109,15 @@ func (a *API) buildJellyfinCompatibility(
 		return nil, false, fmt.Errorf("initialize Jellyfin compatibility sessions: %w", err)
 	}
 	compatAuthentication, err := jellyfin.NewAuthenticationService(
-		func(ctx context.Context, input auth.LoginInput) (auth.TokenPair, error) {
-			tokens, loginErr := a.loginCredentials(ctx, input)
+		func(ctx context.Context, input auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error) {
+			result, loginErr := a.loginJellyfinProfile(ctx, input)
 			var admissionErr *credentialLoginAdmissionError
 			if errors.As(loginErr, &admissionErr) {
-				return auth.TokenPair{}, auth.ErrInvalidCredentials
+				return auth.JellyfinProfileLoginResult{}, auth.ErrInvalidCredentials
 			}
-			return tokens, loginErr
+			return result, loginErr
 		},
 		nativeAuthentication,
-		profiles,
 		sessions,
 	)
 	if err != nil {

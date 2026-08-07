@@ -261,6 +261,21 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, userID s
 			return err
 		}
 	}
+	// Credential operations lock their actor before the credential row. Hold the
+	// deleted owner first, then let the deletion trigger take credential locks.
+	var lockedCredentialCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		FROM (
+			SELECT id
+			FROM profile_jellyfin_credentials
+			WHERE owner_user_id::text = $1
+			ORDER BY id
+			FOR UPDATE
+		) locked_credentials
+	`, userID).Scan(&lockedCredentialCount); err != nil {
+		return fmt.Errorf("lock user Jellyfin credentials for deletion: %w", err)
+	}
 	if _, err := tx.Exec(ctx, "DELETE FROM devices WHERE user_id::text = $1", userID); err != nil {
 		return fmt.Errorf("delete user devices: %w", err)
 	}

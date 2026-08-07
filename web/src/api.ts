@@ -28,6 +28,8 @@ import type {
   ManagedAddon,
   NotificationBroadcast,
   LibraryPage,
+  JellyfinCredentialSecret,
+  JellyfinCredentialStatus,
   MaintenanceSettings,
   ManagedDevice,
   MetadataRefreshSchedule,
@@ -518,6 +520,14 @@ export const api = {
   effectiveSettings: (id: string) => request<{ schemaVersion: number; settings: SettingsValues; sources: Record<string, string> }>(`/profiles/${id}/settings/effective`),
   updateInstanceSettings: (settings: SettingsValues) => request<SettingsLayer>("/settings", { method: "PATCH", body: JSON.stringify(settings) }),
   updateProfileSettings: (id: string, settings: SettingsValues) => request<SettingsLayer>(`/profiles/${id}/settings`, { method: "PATCH", body: JSON.stringify(settings) }),
+  jellyfinCredential: (profileId: string) =>
+    request<JellyfinCredentialStatus>(`/profiles/${encodeURIComponent(profileId)}/jellyfin-credential`),
+  createJellyfinCredential: (profileId: string) =>
+    request<JellyfinCredentialSecret>(`/profiles/${encodeURIComponent(profileId)}/jellyfin-credential`, { method: "POST" }),
+  rotateJellyfinCredential: (profileId: string) =>
+    request<JellyfinCredentialSecret>(`/profiles/${encodeURIComponent(profileId)}/jellyfin-credential/rotate`, { method: "POST" }),
+  revokeJellyfinCredential: (profileId: string) =>
+    request<void>(`/profiles/${encodeURIComponent(profileId)}/jellyfin-credential`, { method: "DELETE" }),
   trackingStatuses: (profileId: string) => request<{ providers: TrackingStatus[] }>(`/profiles/${encodeURIComponent(profileId)}/tracking`),
   beginTrackingAuthorization: (profileId: string, provider: TrackingProvider) =>
     request<TrackingDeviceAuthorization>(`/profiles/${encodeURIComponent(profileId)}/tracking/${provider}/device-code`, { method: "POST" }),

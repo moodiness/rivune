@@ -204,7 +204,7 @@ class CredentialSecurityTest {
     private fun discoveryResponse(apiBaseUrl: String = "/api/v1") = MockResponse()
         .setHeader("Content-Type", "application/json")
         .setBody(
-            """{"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"$apiBaseUrl","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
+            """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"$apiBaseUrl","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
         )
 
     private companion object {

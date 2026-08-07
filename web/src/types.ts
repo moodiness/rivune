@@ -811,6 +811,21 @@ export type TrackingDeviceAuthorization = {
 };
 export type TrackingPreferences = Partial<Pick<TrackingStatus, "syncWatched" | "syncProgress" | "syncLibrary">>;
 
+export type JellyfinCredentialStatus = {
+  active: boolean;
+  canIssue: boolean;
+  generation: number;
+  username?: string;
+  createdAt?: string;
+  rotatedAt?: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+};
+export type JellyfinCredentialSecret = JellyfinCredentialStatus & {
+  username: string;
+  password: string;
+};
+
 export type SettingsValues = {
   interfaceLanguage?: InterfaceLanguage | null;
   theme?: string | null;

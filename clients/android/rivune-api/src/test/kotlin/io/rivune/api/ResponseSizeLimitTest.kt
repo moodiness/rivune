@@ -145,7 +145,7 @@ class ResponseSizeLimitTest {
     private companion object {
         const val RESPONSE_LIMIT_BYTES = 16 * 1024 * 1024
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
-        const val DISCOVERY_JSON = """{"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
+        const val DISCOVERY_JSON = """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
     }
 }
 

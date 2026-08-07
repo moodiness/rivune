@@ -15,7 +15,6 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/database"
-	"github.com/moodiness/rivune/server/internal/profile"
 )
 
 const (
@@ -38,8 +37,12 @@ func (fake *authLifecycleNativeFake) Authenticate(context.Context, string) (auth
 	return auth.Principal{}, fake.authenticateErr
 }
 
-func (*authLifecycleNativeFake) ReloadLinkedPrincipal(context.Context, string, string) (auth.Principal, error) {
-	return auth.Principal{}, errors.New("unexpected linked principal reload")
+func (fake *authLifecycleNativeFake) ReloadLinkedPrincipal(context.Context, string, string) (auth.Principal, error) {
+	if fake.authenticateErr != nil {
+		return auth.Principal{}, fake.authenticateErr
+	}
+	profileID := authLifecycleProfileID
+	return auth.Principal{SessionID: authLifecycleNativeSessionID, UserID: authLifecycleUserID, ActiveProfileID: &profileID}, nil
 }
 
 func (fake *authLifecycleNativeFake) RevokeUnfinishedLinkedSession(ctx context.Context, sessionID string) error {
@@ -60,12 +63,6 @@ func (fake *authLifecycleNativeFake) LogoutLinkedSession(ctx context.Context, pr
 		return nil
 	}
 	return fake.logout(ctx, principal, compatSessionID)
-}
-
-type authLifecycleProfileSelector struct{}
-
-func (authLifecycleProfileSelector) SelectForLinkedSession(context.Context, auth.Principal, string, *string, bool) (profile.Selection, error) {
-	return profile.Selection{}, errors.New("unexpected profile selection")
 }
 
 func TestFailedCompatLoginCleanupIsDetachedFromRequestCancellation(t *testing.T) {
@@ -257,11 +254,16 @@ func TestAtomicLinkedLogoutHonorsCancellationWithoutPartialRevocation(t *testing
 func newAuthLifecycleService(t *testing.T, native *authLifecycleNativeFake) *AuthenticationService {
 	t.Helper()
 	service, err := NewAuthenticationService(
-		func(context.Context, auth.LoginInput) (auth.TokenPair, error) {
-			return auth.TokenPair{AccessToken: authLifecycleAccessToken, SessionID: authLifecycleNativeSessionID}, nil
+		func(context.Context, auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error) {
+			return auth.JellyfinProfileLoginResult{
+				Tokens: auth.TokenPair{
+					AccessToken: authLifecycleAccessToken, SessionID: authLifecycleNativeSessionID,
+					RefreshExpiresAt: time.Now().UTC().Add(time.Hour),
+				},
+				ProfileID: authLifecycleProfileID, ProfileName: "Main",
+			}, nil
 		},
 		native,
-		authLifecycleProfileSelector{},
 		&SessionStore{},
 	)
 	if err != nil {
@@ -272,7 +274,7 @@ func newAuthLifecycleService(t *testing.T, native *authLifecycleNativeFake) *Aut
 
 func validAuthLifecycleLogin() CompatLoginInput {
 	return CompatLoginInput{
-		Username: "owner/Main",
+		Username: authLifecycleProfileID,
 		Password: "correct horse battery staple",
 		Client: ClientIdentity{
 			Client: "Infuse", Device: "Living Room", DeviceID: "auth-lifecycle-device", Version: "8.2",
@@ -441,4 +443,3 @@ func assertAtomicLogoutState(t *testing.T, pool *pgxpool.Pool, fixture atomicLog
 }
 
 var _ NativeAuthentication = (*authLifecycleNativeFake)(nil)
-var _ LinkedProfileSelector = authLifecycleProfileSelector{}

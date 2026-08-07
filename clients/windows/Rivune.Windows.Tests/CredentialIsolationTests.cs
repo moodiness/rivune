@@ -153,7 +153,7 @@ public sealed class CredentialIsolationTests
             if (request.RequestUri!.AbsolutePath == "/.well-known/rivune")
             {
                 var discovery = $$"""
-                    {"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"{{apiBaseUrl}}","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+                    {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"{{apiBaseUrl}}","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
                     """;
                 return JsonResponse(HttpStatusCode.OK, discovery);
             }

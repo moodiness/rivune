@@ -9,6 +9,7 @@ import { mediaIdentity, mediaResourceID } from "./mediaIdentity";
 import type { CanonicalRouteMetadata } from "./media";
 import { clearMetadataCache } from "./metadataCache";
 import { clearNotifications, configureNotificationDuration, notifyInfo } from "./notifications";
+import { restoreOneShotNavigation } from "./oneShotNavigationGuard";
 import { Shell } from "./Shell";
 import type { View } from "./Shell";
 import { LoginPage, SetupPage } from "./pages/Onboarding";
@@ -560,6 +561,7 @@ export default function App() {
       window.history.replaceState({ ...window.history.state, rivuneOrigin: initialRoute.view, rivunePrincipal: principalRef.current }, "", initialRoute.canonicalURL);
     }
     const onRouteChange = () => {
+      if (restoreOneShotNavigation()) return;
       const next = appRoute();
       if (next.canonicalURL) {
         window.history.replaceState({ ...window.history.state, rivuneOrigin: next.view }, "", next.canonicalURL);

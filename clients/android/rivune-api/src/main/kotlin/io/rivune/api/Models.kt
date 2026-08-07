@@ -11,7 +11,7 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 
 object RivuneProtocol {
-    const val VERSION: Int = 19
+    const val VERSION: Int = 20
 }
 
 object UUIDSerializer : KSerializer<UUID> {

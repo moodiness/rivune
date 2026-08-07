@@ -24,11 +24,10 @@ type SystemEndpointInfo struct {
 }
 
 type AuthenticateByName struct {
-	Username   string `json:"Username,omitempty"`
-	UserName   string `json:"UserName,omitempty"`
-	Pw         string `json:"Pw,omitempty"`
-	Password   string `json:"Password,omitempty"`
-	ProfilePin string `json:"ProfilePin,omitempty"`
+	Username string `json:"Username,omitempty"`
+	UserName string `json:"UserName,omitempty"`
+	Pw       string `json:"Pw,omitempty"`
+	Password string `json:"Password,omitempty"`
 }
 
 type AuthenticationResult struct {

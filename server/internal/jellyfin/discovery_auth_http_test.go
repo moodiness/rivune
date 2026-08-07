@@ -144,7 +144,7 @@ func TestLogoutFailurePreservesPlaybackAndRetryRevokesBeforeCleanup(t *testing.T
 
 func TestDiscoveryLoginMeLogoutSequenceUsesOnlyCompatIdentity(t *testing.T) {
 	fake, mux := newDiscoveryHTTPTestServer(t)
-	login := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(`{"Username":"owner/Kids","Pw":"correct horse","ProfilePin":"1234"}`))
+	login := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(`{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"correct horse"}`))
 	login.Header.Set("Content-Type", "application/json")
 	login.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="Living Room", DeviceId="infuse-device", Version="8.2"`)
 	loginResponse := httptest.NewRecorder()
@@ -154,14 +154,14 @@ func TestDiscoveryLoginMeLogoutSequenceUsesOnlyCompatIdentity(t *testing.T) {
 	}
 	var result AuthenticationResult
 	decodeCompatTestResponse(t, loginResponse, &result)
-	if result.AccessToken != fake.token || result.User.Id != discoveryProfileID || result.User.Name != "Kids" || result.ServerId != discoveryServerID {
+	if result.AccessToken != fake.token || result.User.Id != discoveryProfileID || result.User.Name != "Kids" || result.User.HasConfiguredEasyPassword || result.ServerId != discoveryServerID {
 		t.Fatalf("unexpected compatibility identity: userID=%q userName=%q serverID=%q tokenMatches=%t", result.User.Id, result.User.Name, result.ServerId, result.AccessToken == fake.token)
 	}
 	if strings.Contains(loginResponse.Body.String(), fake.session.Principal.SessionID) || strings.Contains(loginResponse.Body.String(), "rivune_at_") {
 		t.Fatal("login disclosed native session material")
 	}
-	if fake.lastLogin.Username != "owner/Kids" || fake.lastLogin.ProfilePIN == nil || *fake.lastLogin.ProfilePIN != "1234" || fake.lastLogin.Client.Client != "Infuse" {
-		t.Fatalf("login fields were not parsed as expected: username=%q pinPresent=%t client=%q", fake.lastLogin.Username, fake.lastLogin.ProfilePIN != nil, fake.lastLogin.Client.Client)
+	if fake.lastLogin.Username != "c3000000-0000-4000-8000-000000000003" || fake.lastLogin.Client.Client != "Infuse" {
+		t.Fatalf("login fields were not parsed as expected: username=%q client=%q", fake.lastLogin.Username, fake.lastLogin.Client.Client)
 	}
 
 	me := httptest.NewRequest(http.MethodGet, "/emby/Users/Me", nil)
@@ -173,7 +173,7 @@ func TestDiscoveryLoginMeLogoutSequenceUsesOnlyCompatIdentity(t *testing.T) {
 	}
 	var user UserDto
 	decodeCompatTestResponse(t, meResponse, &user)
-	if user.Id != discoveryProfileID || user.Name != "Kids" || user.ServerId != discoveryServerID {
+	if user.Id != discoveryProfileID || user.Name != "Kids" || user.ServerId != discoveryServerID || user.HasConfiguredEasyPassword {
 		t.Fatalf("Users/Me returned wrong bound profile: %+v", user)
 	}
 
@@ -201,8 +201,8 @@ func TestAuthenticateByNameAcceptsObservedFieldAliasesWithoutChangingPassword(t 
 		body     string
 		password string
 	}{
-		{name: "Username and Pw", body: `{"Username":"owner/Kids","Pw":" secret "}`, password: " secret "},
-		{name: "UserName and Password", body: `{"UserName":"owner/Kids","Password":"other secret"}`, password: "other secret"},
+		{name: "Username and Pw", body: `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":" secret "}`, password: " secret "},
+		{name: "UserName and Password", body: `{"UserName":"c3000000-0000-4000-8000-000000000003","Password":"other secret"}`, password: "other secret"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fake, mux := newDiscoveryHTTPTestServer(t)
@@ -239,7 +239,7 @@ func TestAuthenticateByNameEnforcesUTF8PasswordByteLimitForBothAliases(t *testin
 			} else {
 				credentialFields = fmt.Sprintf(test.fields, test.password)
 			}
-			body := `{"Username":"owner/Kids",` + credentialFields + `}`
+			body := `{"Username":"c3000000-0000-4000-8000-000000000003",` + credentialFields + `}`
 			request := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`)
@@ -259,6 +259,19 @@ func TestAuthenticateByNameEnforcesUTF8PasswordByteLimitForBothAliases(t *testin
 	}
 }
 
+func TestAuthenticateByNameRejectsNativeAccountUsernameBeforeAuthentication(t *testing.T) {
+	fake, mux := newDiscoveryHTTPTestServer(t)
+	request := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(`{"Username":"owner","Pw":"native-account-password"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	assertCompatUnauthorized(t, response)
+	if fake.loginCalls != 0 || strings.Contains(response.Body.String(), "owner") || strings.Contains(response.Body.String(), "native-account-password") {
+		t.Fatalf("native account credential reached compatibility authentication: calls=%d body=%s", fake.loginCalls, response.Body.String())
+	}
+}
+
 func TestAuthenticateByNameFailsClosedWithoutCredentialEnumeration(t *testing.T) {
 	fake, mux := newDiscoveryHTTPTestServer(t)
 	fake.loginErr = ErrInvalidCompatLogin
@@ -267,11 +280,11 @@ func TestAuthenticateByNameFailsClosedWithoutCredentialEnumeration(t *testing.T)
 		body   string
 		header string
 	}{
-		{name: "bad password", body: `{"Username":"owner/Kids","Pw":"wrong"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
-		{name: "bad pin", body: `{"Username":"owner/Kids","Pw":"correct","ProfilePin":"9999"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
-		{name: "ambiguous bare account", body: `{"Username":"owner","Pw":"correct"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
-		{name: "missing auth metadata", body: `{"Username":"owner/Kids","Pw":"correct"}`},
-		{name: "conflicting aliases", body: `{"Username":"owner/Kids","UserName":"owner/Adults","Pw":"correct"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
+		{name: "bad password", body: `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"wrong"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
+		{name: "native account name", body: `{"Username":"owner","Pw":"correct"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
+		{name: "unknown credential", body: `{"Username":"c4000000-0000-4000-8000-000000000004","Pw":"correct"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
+		{name: "missing auth metadata", body: `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"correct"}`},
+		{name: "conflicting aliases", body: `{"Username":"c3000000-0000-4000-8000-000000000003","UserName":"c4000000-0000-4000-8000-000000000004","Pw":"correct"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
 	}
 	var canonicalBody string
 	for _, test := range requests {
@@ -284,7 +297,7 @@ func TestAuthenticateByNameFailsClosedWithoutCredentialEnumeration(t *testing.T)
 			response := httptest.NewRecorder()
 			mux.ServeHTTP(response, request)
 			assertCompatUnauthorized(t, response)
-			if strings.Contains(response.Body.String(), "owner") || strings.Contains(response.Body.String(), "Kids") || strings.Contains(response.Body.String(), "Adults") || strings.Contains(response.Body.String(), "correct") {
+			if strings.Contains(response.Body.String(), "c3000000") || strings.Contains(response.Body.String(), "c4000000") || strings.Contains(response.Body.String(), "correct") {
 				t.Fatalf("login failure disclosed credential or profile data: %s", response.Body.String())
 			}
 			if canonicalBody == "" {
@@ -298,7 +311,7 @@ func TestAuthenticateByNameFailsClosedWithoutCredentialEnumeration(t *testing.T)
 
 func TestCompatHTTPRejectsOversizeAmbiguousAndCrossProfileRequests(t *testing.T) {
 	fake, mux := newDiscoveryHTTPTestServer(t)
-	oversize := `{"Username":"owner/Kids","Pw":"` + strings.Repeat("secret", 3000) + `"}`
+	oversize := `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"` + strings.Repeat("secret", 3000) + `"}`
 	oversizeRequest := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(oversize))
 	oversizeRequest.Header.Set("Content-Type", "application/json")
 	oversizeRequest.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`)
@@ -308,8 +321,9 @@ func TestCompatHTTPRejectsOversizeAmbiguousAndCrossProfileRequests(t *testing.T)
 		t.Fatalf("oversize request status=%d loginCalls=%d body=%s", oversizeResponse.Code, fake.loginCalls, oversizeResponse.Body.String())
 	}
 	for _, malformedBody := range []string{
-		`{"Username":"owner/Kids","Pw":"correct","Unexpected":"value"}`,
-		`{"Username":"owner/Kids","Pw":"correct"} {"Username":"owner/Kids","Pw":"correct"}`,
+		`{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"correct","ProfilePin":"1234"}`,
+		`{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"correct","Unexpected":"value"}`,
+		`{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"correct"} {"Username":"c3000000-0000-4000-8000-000000000003","Pw":"correct"}`,
 	} {
 		malformedRequest := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(malformedBody))
 		malformedRequest.Header.Set("Content-Type", "application/json")
@@ -427,7 +441,7 @@ func newDiscoveryHTTPTestServer(t *testing.T) (*discoveryAuthenticationFake, htt
 		},
 		session: AuthenticatedSession{
 			ID: "c5000000-0000-4000-8000-000000000005", ProfileID: profileID,
-			ProfileName: "Kids", ProfileHasPIN: true, ExpiresAt: time.Now().UTC().Add(time.Hour), Principal: principal,
+			ProfileName: "Kids", ExpiresAt: time.Now().UTC().Add(time.Hour), Principal: principal,
 		},
 	}
 	handler, err := New(Dependencies{ServerInfo: ServerInfo{ID: serverID, Name: "Rivune Home", RuntimeVersion: "test"}, Authentication: fake})

@@ -102,7 +102,7 @@ func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
 		InterfaceLanguage string `json:"interfaceLanguage"`
 	}
 	decodeResponse(t, response, &body)
-	if body.Name != "Rivune" || body.ProtocolVersion != 19 || body.APIBaseURL != "https://media.example/api/v1" ||
+	if body.Name != "Rivune" || body.ProtocolVersion != 20 || body.APIBaseURL != "https://media.example/api/v1" ||
 		body.Timezone != "Europe/Paris" || body.InterfaceLanguage != "en" || !body.SetupRequired {
 		t.Fatalf("unexpected discovery response: %+v", body)
 	}

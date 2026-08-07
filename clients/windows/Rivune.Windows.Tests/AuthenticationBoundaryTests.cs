@@ -9,7 +9,7 @@ public sealed class AuthenticationBoundaryTests
 {
     private const int MaximumResponseBodyBytes = 16 * 1024 * 1024;
     private const string DiscoveryBody = """
-        {"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1/","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+        {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1/","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
         """;
     private const string TokenBody = """
         {"tokenType":"Bearer","accessToken":"new-access","accessTokenExpiresAt":"2026-08-05T12:15:00Z","refreshToken":"new-refresh","refreshTokenExpiresAt":"2026-09-05T12:00:00Z","sessionId":"22222222-2222-4222-8222-222222222222","deviceId":"33333333-3333-4333-8333-333333333333","authorizationScope":"global_admin","category":null}

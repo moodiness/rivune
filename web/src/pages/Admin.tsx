@@ -1,12 +1,13 @@
-import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Clock3, Cpu, Database, ExternalLink, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, Languages, Layers3, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Search, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, Wrench, X } from "lucide-react";
+import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Clock3, Copy, Cpu, Database, ExternalLink, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, KeyRound, Languages, Layers3, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Search, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, Wrench, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
 import { AddTile, Button, ConfirmDialog, EmptyState, handleDirectionalFocus, IconButton, Modal, Notice, Select, Skeleton } from "../components";
 import { interfaceLanguages, locale, translate, type TranslationKey } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
+import { acquireOneShotNavigationGuard } from "../oneShotNavigationGuard";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
-import type { AccessCategory, AddonDiagnostic, AddonDiagnosticErrorCode, AddonDiagnosticState, AddonDiagnosticsResponse, AddonManifest, AddonPreviewResponse, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstallAddonInput, InstalledAddon, InterfaceLanguage, MaintenanceSettings, ManagedAddon, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus, UpdateAddonInput } from "../types";
+import type { AccessCategory, AddonDiagnostic, AddonDiagnosticErrorCode, AddonDiagnosticState, AddonDiagnosticsResponse, AddonManifest, AddonPreviewResponse, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstallAddonInput, InstalledAddon, InterfaceLanguage, JellyfinCredentialSecret, JellyfinCredentialStatus, MaintenanceSettings, ManagedAddon, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus, UpdateAddonInput } from "../types";
 
 type AdminTab = "categories" | "profiles" | "devices" | "addons" | "collections" | "activity" | "operations" | "settings";
 type AdminTabGroup = "access" | "catalog" | "supervision" | "preferences";
@@ -2917,7 +2918,9 @@ function settingsSectionDefinitions(serverScope: boolean): SettingsSectionDefini
     ]);
     return [appearance, playback, transcoding, language, subtitles, connections];
   }
-  const connections = definition("connections", translate("settings.trackingTitle"), translate("settings.trackingDescription"), <Radio />, [
+  const connections = definition("connections", translate("settings.connectionsTitle"), translate("settings.trackingDescription"), <Radio />, [
+    translate("settings.fields.jellyfinApi"),
+    translate("settings.fields.jellyfinEnabledDescription"),
     translate("settings.trackingWatched"),
     translate("settings.trackingProgress"),
     translate("settings.trackingLibrary"),
@@ -3181,7 +3184,15 @@ function SettingsAdmin() {
       </header>
       {error && <Notice>{error}</Notice>}
       {visibleSection === "connections" && !serverSelected
-        ? <div id="settings-section-connections"><TrackingSettings profileId={settingsTarget} /></div>
+        ? <div id="settings-section-connections" className="settings-connections">
+          {Boolean(inherited.jellyfinEnabled) && targetProfile
+            ? <JellyfinCredentialPanel key={targetProfile.id} profile={targetProfile} />
+            : <div className="jellyfin-access jellyfin-access--disabled" role="note"><div className="jellyfin-access__identity"><span><Radio size={20} aria-hidden="true" /></span><div><small>Jellyfin</small><h3>{translate("settings.fields.jellyfinApi")}</h3><p>{translate("settings.fields.jellyfinEnabledDescription")}</p></div></div><span>{translate("common.status.disabled")}</span></div>}
+          <section className="settings-connections__tracking" aria-label={translate("settings.trackingTitle")}>
+            <header><span><Radio size={19} aria-hidden="true" /></span><div><h3>{translate("settings.trackingTitle")}</h3><p>{translate("settings.trackingDescription")}</p></div></header>
+            <TrackingSettings profileId={settingsTarget} />
+          </section>
+        </div>
         : serverSelected
           ? <SettingsCard activeSection={visibleSection} serverScope title={translate("settings.server.title")} description={translate("settings.server.description")} icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void requestSave()} onReset={() => setInstance(savedInstance)} saving={saving || checkingTranscodingDisable} dirty={settingsDirty} emptyLabel={translate("settings.defaults.rivune")} />
           : <SettingsCard activeSection={visibleSection} canConfigureTranscoding={canManageServer} title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void requestSave()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />}
@@ -3195,6 +3206,188 @@ function SettingsAdmin() {
       onCancel={() => setTranscodingDisableCount(null)}
     />}
   </div>;
+}
+
+function jellyfinServerAddress(apiBaseUrl: string): string {
+  try {
+    const address = new URL(apiBaseUrl, window.location.origin);
+    address.pathname = address.pathname.replace(/\/api\/v1\/?$/, "") || "/";
+    address.search = "";
+    address.hash = "";
+    return address.href.replace(/\/$/, "");
+  } catch {
+    return window.location.origin;
+  }
+}
+
+function JellyfinCredentialPanel({ profile }: { profile: Profile }) {
+  const { discovery } = useAuth();
+  const [credential, setCredential] = useState<JellyfinCredentialStatus | null>(null);
+  const [secret, setSecret] = useState<JellyfinCredentialSecret | null>(null);
+  const [copyState, setCopyState] = useState<{ field: "server" | "username" | "password"; outcome: "copied" | "error" } | null>(null);
+  const [confirmAction, setConfirmAction] = useState<"rotate" | "revoke" | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [error, setError] = useState("");
+  const releaseNavigationGuardRef = useRef<(() => void) | null>(null);
+
+  function protectSecretIssuance() {
+    releaseNavigationGuardRef.current ??= acquireOneShotNavigationGuard();
+  }
+
+  useEffect(() => {
+    if (busy || creating || secret) return;
+    releaseNavigationGuardRef.current?.();
+    releaseNavigationGuardRef.current = null;
+  }, [busy, creating, secret]);
+
+  useEffect(() => () => {
+    releaseNavigationGuardRef.current?.();
+    releaseNavigationGuardRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    setError("");
+    setCredential(null);
+    setSecret(null);
+    setCopyState(null);
+    setConfirmAction(null);
+    void api.jellyfinCredential(profile.id)
+      .then((status) => { if (current) setCredential(status); })
+      .catch((cause) => { if (current) setError(notifyError(cause, translate("settings.errors.load"), translate("settings.fields.jellyfinApi"))); })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
+  }, [loadAttempt, profile.id]);
+
+  if (!discovery) return null;
+  const serverAddress = jellyfinServerAddress(discovery.apiBaseUrl);
+  const copyLabel = translate("admin.activity.actions.copy");
+  const copiedLabel = translate("settings.jellyfinAccess.copied");
+
+  async function copyValue(field: "server" | "username" | "password", value: string) {
+    setCopyState(null);
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopyState({ field, outcome: "copied" });
+    } catch {
+      setCopyState({ field, outcome: "error" });
+    }
+  }
+
+  function copyButton(field: "server" | "username" | "password", value: string, label: string) {
+    const copied = copyState?.field === field && copyState.outcome === "copied";
+    return <Button type="button" variant="secondary" className={copied ? "is-copied" : ""} aria-label={`${copyLabel}: ${label}`} onClick={() => void copyValue(field, value)}>{copied ? <Check size={16} aria-hidden="true" /> : <Copy size={16} aria-hidden="true" />} {copied ? copiedLabel : copyLabel}</Button>;
+  }
+
+  function reveal(next: JellyfinCredentialSecret) {
+    const { password: _password, ...status } = next;
+    void _password;
+    setCredential(status);
+    setSecret(next);
+    setCopyState(null);
+  }
+
+  async function createCredential() {
+    protectSecretIssuance();
+    setCreating(true);
+    setBusy(true);
+    setError("");
+    try {
+      reveal(await api.createJellyfinCredential(profile.id));
+    } catch (cause) {
+      const failure = notifyError(cause, translate("settings.errors.save"), translate("settings.fields.jellyfinApi"));
+      try {
+        const status = await api.jellyfinCredential(profile.id);
+        setCredential(status);
+        setError(status.active ? translate("settings.jellyfinAccess.createUncertain") : failure);
+      } catch {
+        setError(failure);
+      }
+    } finally {
+      setBusy(false);
+      setCreating(false);
+    }
+  }
+
+  async function rotateCredential() {
+    protectSecretIssuance();
+    setBusy(true);
+    setError("");
+    try {
+      reveal(await api.rotateJellyfinCredential(profile.id));
+      setConfirmAction(null);
+    } catch (cause) {
+      setError(notifyError(cause, translate("settings.errors.save"), translate("settings.fields.jellyfinApi")));
+      setConfirmAction(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeCredential() {
+    setBusy(true);
+    setError("");
+    try {
+      await api.revokeJellyfinCredential(profile.id);
+      setCredential((current) => current ? { ...current, active: false, revokedAt: new Date().toISOString() } : { active: false, canIssue: false, generation: 0 });
+      setConfirmAction(null);
+    } catch (cause) {
+      setError(notifyError(cause, translate("settings.errors.save"), translate("settings.fields.jellyfinApi")));
+      setConfirmAction(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function closeSecret() {
+    setSecret(null);
+    setCopyState(null);
+  }
+
+  return <section className="jellyfin-access" aria-label={translate("settings.fields.jellyfinApi")} data-jellyfin-profile={profile.id}>
+    <header className="jellyfin-access__header">
+      <div className="jellyfin-access__identity"><span><Radio size={20} aria-hidden="true" /></span><div><small>Jellyfin</small><h3>{translate("settings.fields.jellyfinApi")}</h3><p>{translate("settings.fields.jellyfinEnabledDescription")}</p></div></div>
+      <div className="jellyfin-access__password" role="note"><KeyRound size={18} aria-hidden="true" /><p>{translate("settings.jellyfinAccess.passwordHint")}</p></div>
+    </header>
+    <div className="jellyfin-access__server">
+      <label><Server size={18} aria-hidden="true" /><span><small>URL</small><input aria-label="URL" value={serverAddress} readOnly dir="ltr" spellCheck={false} autoComplete="off" onFocus={(event) => event.currentTarget.select()} /></span></label>
+      {copyButton("server", serverAddress, "URL")}
+    </div>
+    {error && <Notice>{error}</Notice>}
+    {!loading && !credential && error && <Button type="button" variant="secondary" onClick={() => setLoadAttempt((attempt) => attempt + 1)}><RefreshCw size={16} aria-hidden="true" /> {translate("common.retry")}</Button>}
+    {loading
+      ? <Skeleton className="settings-skeleton" />
+      : credential && <article className="jellyfin-access__profile">
+        <header><div><CircleUserRound size={17} aria-hidden="true" /><strong>{profile.name}</strong></div><span className={credential.active ? "is-active" : ""}>{translate(credential.active ? "common.status.enabled" : "common.status.disabled")}</span></header>
+        {credential.username && <div className="jellyfin-access__credential"><label><span>{translate("auth.username")}</span><input aria-label={translate("auth.username")} value={credential.username} readOnly dir="ltr" spellCheck={false} autoComplete="off" onFocus={(event) => event.currentTarget.select()} /></label>{copyButton("username", credential.username, translate("auth.username"))}</div>}
+        {!credential.canIssue && <Notice tone="info">{translate("settings.jellyfinAccess.issuePermission")}</Notice>}
+        <div className="jellyfin-access__actions">
+          {!credential.active && <Button type="button" loading={busy} disabled={!credential.canIssue} onClick={() => void createCredential()}><Plus size={16} aria-hidden="true" /> {translate("common.add")}</Button>}
+          {credential.active && <><Button type="button" variant="secondary" disabled={busy || !credential.canIssue} onClick={() => setConfirmAction("rotate")}><RefreshCw size={16} aria-hidden="true" /> {translate("common.refresh")}</Button><Button type="button" variant="danger" disabled={busy} onClick={() => setConfirmAction("revoke")}><Trash2 size={16} aria-hidden="true" /> {translate("common.actions.remove")}</Button></>}
+        </div>
+      </article>}
+    <span className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{copyState?.outcome === "copied" ? copiedLabel : copyState?.outcome === "error" ? translate("settings.jellyfinAccess.copyError") : ""}</span>
+    {!secret && copyState?.outcome === "error" && <p className="jellyfin-access__copy-error">{translate("settings.jellyfinAccess.copyError")}</p>}
+    {(creating || secret) && <Modal dismissible={!creating} onClose={closeSecret} className="editor-modal jellyfin-secret-modal" aria-labelledby="jellyfin-secret-title" aria-describedby="jellyfin-secret-warning">
+      <div className="editor-modal__heading"><span><KeyRound size={18} aria-hidden="true" /> Jellyfin</span><h2 id="jellyfin-secret-title">{translate("settings.fields.jellyfinApi")}</h2><p id="jellyfin-secret-warning" className="jellyfin-secret-modal__warning">{translate("settings.jellyfinAccess.pinHint")}</p></div>
+      {creating
+        ? <Skeleton className="settings-skeleton" />
+        : secret && <>
+          <div className="jellyfin-secret-modal__fields">
+            <div className="jellyfin-access__credential"><label><span>{translate("auth.username")}</span><input aria-label={translate("auth.username")} value={secret.username} readOnly dir="ltr" spellCheck={false} autoComplete="off" onFocus={(event) => event.currentTarget.select()} /></label>{copyButton("username", secret.username, translate("auth.username"))}</div>
+            <div className="jellyfin-access__credential"><label><span>{translate("auth.password")}</span><input aria-label={translate("auth.password")} value={secret.password} readOnly dir="ltr" spellCheck={false} autoComplete="off" onFocus={(event) => event.currentTarget.select()} /></label>{copyButton("password", secret.password, translate("auth.password"))}</div>
+          </div>
+          {copyState?.outcome === "error" && <p className="jellyfin-access__copy-error">{translate("settings.jellyfinAccess.copyError")}</p>}
+          <div className="modal-actions"><Button type="button" onClick={closeSecret}>{translate("common.close")}</Button></div>
+        </>}
+    </Modal>}
+    {confirmAction === "rotate" && <ConfirmDialog title={translate("common.refresh")} description={translate("settings.jellyfinAccess.rotateWarning")} confirmLabel={translate("common.refresh")} loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={() => void rotateCredential()} />}
+    {confirmAction === "revoke" && <ConfirmDialog title={translate("common.actions.remove")} description={translate("settings.jellyfinAccess.revokeWarning")} confirmLabel={translate("common.actions.remove")} loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={() => void revokeCredential()} />}
+  </section>;
 }
 
 function TrackingSettings({ profileId }: { profileId: string }) {

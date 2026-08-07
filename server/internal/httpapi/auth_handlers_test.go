@@ -19,6 +19,10 @@ type fakeAuthService struct {
 	loginCalls                 int
 	loginTokens                auth.TokenPair
 	loginErr                   error
+	jellyfinLoginInput          auth.JellyfinProfileLoginInput
+	jellyfinLoginResult         auth.JellyfinProfileLoginResult
+	jellyfinLoginErr            error
+	jellyfinLoginCalls          int
 	refreshToken               string
 	refreshTokens              auth.TokenPair
 	refreshErr                 error
@@ -71,6 +75,12 @@ func (f *fakeAuthService) Login(_ context.Context, input auth.LoginInput) (auth.
 	f.loginCalls++
 	f.loginInput = input
 	return f.loginTokens, f.loginErr
+}
+
+func (f *fakeAuthService) LoginJellyfinProfile(_ context.Context, input auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error) {
+	f.jellyfinLoginCalls++
+	f.jellyfinLoginInput = input
+	return f.jellyfinLoginResult, f.jellyfinLoginErr
 }
 
 func (f *fakeAuthService) Refresh(_ context.Context, token string) (auth.TokenPair, error) {

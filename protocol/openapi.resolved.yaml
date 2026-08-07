@@ -3,7 +3,7 @@ info:
   title: Rivune API
   version: 1.5.0
   description: |
-    Protocol version 19 between Rivune clients and a self-hosted Rivune Server. While global maintenance mode is enabled, authenticated non-admin application operations return the reusable 503 MaintenanceMode response. Authentication, session recovery, health, discovery, and administrator operations remain available.
+    Protocol version 20 between Rivune clients and a self-hosted Rivune Server. While global maintenance mode is enabled, authenticated non-admin application operations return the reusable 503 MaintenanceMode response. Authentication, session recovery, health, discovery, and administrator operations remain available.
   license:
     name: Apache License 2.0
     identifier: Apache-2.0
@@ -878,6 +878,96 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SessionNotification'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+  /profiles/{profileId}/jellyfin-credential:
+    parameters:
+      - $ref: '#/components/parameters/ProfileId'
+    get:
+      summary: Get the profile Jellyfin credential status
+      description: The active profile may read its own non-secret status; otherwise a global administrator or authorized category manager is required. username is absent before first creation and remains stable after revocation.
+      operationId: getProfileJellyfinCredential
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Non-secret credential state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JellyfinCredentialStatus'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+    post:
+      summary: Create the profile Jellyfin credential
+      description: The active profile may create its own credential; otherwise an authorized manager who also has personal access to the profile may create it. Generates a unique application password returned once and never retrievable afterward. The request body must be empty.
+      operationId: createProfileJellyfinCredential
+      security:
+        - bearerAuth: []
+      responses:
+        '201':
+          description: Newly generated one-shot Jellyfin application credential.
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JellyfinProfileCredential'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+    delete:
+      summary: Revoke the profile Jellyfin credential
+      description: The active profile may revoke its own credential; otherwise an authorized manager is required. Atomically revokes the application password and every native or compatibility session derived from it while retaining the stable username. Repeating the request after revocation or before first creation is a successful no-op.
+      operationId: revokeProfileJellyfinCredential
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: The credential is inactive and any derived sessions are revoked.
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+  /profiles/{profileId}/jellyfin-credential/rotate:
+    parameters:
+      - $ref: '#/components/parameters/ProfileId'
+    post:
+      summary: Rotate the profile Jellyfin credential
+      description: The active profile may rotate its own credential; otherwise an authorized manager who also has personal access to the profile may rotate it. Replaces the application password and atomically revokes every native or compatibility session derived from its preceding generation. The request body must be empty.
+      operationId: rotateProfileJellyfinCredential
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Rotated one-shot Jellyfin application credential.
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JellyfinProfileCredential'
         '400':
           $ref: '#/components/responses/Error'
         '401':
@@ -4758,7 +4848,7 @@ components:
           type: string
         protocolVersion:
           type: integer
-          const: 19
+          const: 20
         apiBaseUrl:
           type: string
         setupRequired:
@@ -5457,6 +5547,82 @@ components:
           anyOf:
             - $ref: '#/components/schemas/CategoryRef'
             - type: 'null'
+    JellyfinCredentialStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - active
+        - canIssue
+        - generation
+      properties:
+        username:
+          type: string
+          format: uuid
+          description: Stable opaque Jellyfin username. Absent only before the profile's first credential creation.
+        active:
+          type: boolean
+        canIssue:
+          type: boolean
+          description: Whether the caller has direct profile access and may create or rotate this credential. Revocation requires only management authorization.
+        generation:
+          type: integer
+          format: int64
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        rotatedAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+        revokedAt:
+          type: string
+          format: date-time
+    JellyfinProfileCredential:
+      type: object
+      additionalProperties: false
+      description: One-shot Jellyfin application credential returned only by creation or rotation.
+      required:
+        - username
+        - password
+        - active
+        - canIssue
+        - generation
+        - createdAt
+      properties:
+        username:
+          type: string
+          format: uuid
+        password:
+          type: string
+          minLength: 54
+          maxLength: 54
+          pattern: ^rivune_jfa_[A-Za-z0-9_-]{43}$
+          description: One-shot application password shown only in this creation or rotation response.
+        active:
+          type: boolean
+          const: true
+        canIssue:
+          type: boolean
+          const: true
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        rotatedAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+        revokedAt:
+          type: string
+          format: date-time
     SessionNotificationList:
       type: object
       additionalProperties: false

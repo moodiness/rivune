@@ -1,7 +1,7 @@
 import Foundation
 
 public enum RivuneProtocol {
-    public static let version = 19
+    public static let version = 20
 }
 
 public struct Discovery: Codable, Sendable, Equatable {

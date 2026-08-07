@@ -538,7 +538,7 @@ final class CredentialSecurityTests: XCTestCase {
 
     private func discoveryBody() -> Data {
         Data("""
-        {"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+        {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
         """.utf8)
     }
 
@@ -636,7 +636,7 @@ private final class CredentialSecurityTransport: HTTPTransport, @unchecked Senda
             requests.append(request)
         }
         let body = Data("""
-        {"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"\(apiBaseURL)","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+        {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"\(apiBaseURL)","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
         """.utf8)
         let response = HTTPURLResponse(
             url: request.url!,
@@ -715,7 +715,7 @@ private actor GenerationReplayTransport: HTTPTransport {
         case "/.well-known/rivune":
             status = 200
             body = Data("""
-            {"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+            {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
             """.utf8)
         case "/api/v1/auth/logout":
             status = 204
@@ -814,7 +814,7 @@ private actor ControlledAuthTransport: HTTPTransport {
         case "/.well-known/rivune":
             status = 200
             body = Data("""
-            {"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+            {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
             """.utf8)
         case "/api/v1/auth/logout":
             status = logoutStatus
@@ -1024,7 +1024,7 @@ private final class RedirectURLProtocol: URLProtocol {
 
         guard request.url == plan.originalURL else {
             let body = Data("""
-            {"name":"Unsafe redirect","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+            {"name":"Unsafe redirect","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
             """.utf8)
             let response = HTTPURLResponse(
                 url: request.url!,

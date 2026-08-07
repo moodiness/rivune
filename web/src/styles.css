@@ -1307,6 +1307,47 @@
   .maintenance-settings textarea { min-height: 96px; padding-block: 8px; line-height: 1.45; resize: vertical; }
   .maintenance-settings__actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: var(--space-2); }
   .tracking-settings { min-width: 0; display: grid; gap: var(--space-4); }
+  .settings-connections { min-width: 0; display: grid; gap: var(--space-6); }
+  .settings-connections__tracking { min-width: 0; display: grid; gap: var(--space-4); }
+  .settings-connections__tracking > header { min-width: 0; display: grid; grid-template-columns: var(--space-8) minmax(0, 1fr); align-items: start; gap: var(--space-3); padding-block-end: var(--space-4); border-block-end: 1px solid var(--line); }
+  .settings-connections__tracking > header > span { width: var(--space-8); height: var(--space-8); display: grid; place-items: center; border-radius: var(--radius-sm); color: var(--accent); background: var(--surface-accent); }
+  .settings-connections__tracking h3 { margin: 0; font-size: 20px; letter-spacing: -.025em; }
+  .settings-connections__tracking p { margin: var(--space-1) 0 0; color: var(--text-soft); font-size: 10px; line-height: 1.5; }
+  .jellyfin-access { min-width: 0; display: grid; gap: var(--space-4); padding: var(--space-5); overflow: hidden; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); border-radius: var(--radius-md); background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 5%, var(--surface-subtle)), var(--surface-subtle)); box-shadow: var(--shadow-sm); }
+  .jellyfin-access__header { min-width: 0; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(220px, .75fr); align-items: stretch; gap: var(--space-4); }
+  .jellyfin-access__identity { min-width: 0; display: grid; grid-template-columns: var(--space-8) minmax(0, 1fr); align-items: start; gap: var(--space-3); }
+  .jellyfin-access__identity > span { width: var(--space-8); height: var(--space-8); display: grid; place-items: center; border-radius: var(--radius-sm); color: var(--accent); background: var(--surface-accent); }
+  .jellyfin-access__identity > div { min-width: 0; }
+  .jellyfin-access__identity small { color: var(--accent); font-size: var(--font-size-xs); font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
+  .jellyfin-access__identity h3 { margin: var(--space-1) 0 0; font-size: 18px; letter-spacing: -.025em; }
+  .jellyfin-access__identity p, .settings-card .jellyfin-access__identity p { margin: var(--space-1) 0 0; color: var(--text-soft); font-size: 10px; line-height: 1.5; }
+  .jellyfin-access__password { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-3); padding: var(--space-3); border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--line)); border-radius: var(--radius-sm); color: var(--text-soft); background: color-mix(in srgb, var(--blue) 7%, var(--surface-interactive)); }
+  .jellyfin-access__password > svg { color: var(--blue); }
+  .jellyfin-access__password p, .settings-card .jellyfin-access__password p { margin: 0; color: inherit; font-size: 10px; line-height: 1.5; }
+  .jellyfin-access__server { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-interactive); }
+  .jellyfin-access__server > label { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-3); }
+  .jellyfin-access__server > label > svg { color: var(--accent); }
+  .jellyfin-access__server > label > span { min-width: 0; display: grid; gap: var(--space-1); }
+  .jellyfin-access__server small, .jellyfin-access__credential label > span { color: var(--text-muted); font-size: var(--font-size-xs); font-weight: 740; letter-spacing: .08em; text-transform: uppercase; }
+  .jellyfin-access input, .jellyfin-secret-modal input { width: 100%; min-width: 0; padding: 0; overflow: hidden; border: 0; outline: 0; color: var(--text); background: transparent; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; font-weight: 680; line-height: 1.5; text-overflow: ellipsis; }
+  .jellyfin-access input:focus, .jellyfin-secret-modal input:focus { text-overflow: clip; }
+  .jellyfin-access__profile { min-width: 0; display: grid; align-content: start; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-subtle); }
+  .jellyfin-access__profile > header { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+  .jellyfin-access__profile > header > div { min-width: 0; display: flex; align-items: center; gap: var(--space-2); }
+  .jellyfin-access__profile > header > div > svg { flex: 0 0 auto; color: var(--accent); }
+  .jellyfin-access__profile > header strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+  .jellyfin-access__profile > header > span, .jellyfin-access--disabled > span { flex: 0 0 auto; padding: var(--space-1) var(--space-2); border-radius: 999px; color: var(--text-muted); background: var(--surface-interactive); font-size: 8px; font-weight: 760; letter-spacing: .06em; text-transform: uppercase; }
+  .jellyfin-access__profile > header > span.is-active { color: var(--success); background: var(--surface-success); }
+  .jellyfin-access__credential { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--space-2); }
+  .jellyfin-access__credential label { min-width: 0; display: grid; gap: var(--space-1); padding: var(--space-2) var(--space-3); border: 1px solid var(--line); border-radius: var(--space-2); background: var(--surface-interactive); }
+  .jellyfin-access__actions { min-width: 0; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2); }
+  .jellyfin-access .button, .jellyfin-secret-modal .button { min-height: var(--space-7); white-space: nowrap; }
+  .jellyfin-access .button.is-copied, .jellyfin-secret-modal .button.is-copied { color: var(--success); border-color: color-mix(in srgb, var(--success) 30%, var(--line)); background: var(--surface-success); }
+  .jellyfin-access__copy-error, .settings-card .jellyfin-access__copy-error { margin: 0; color: var(--danger); font-size: 9px; }
+  .jellyfin-access--disabled { grid-template-columns: minmax(0, 1fr) auto; align-items: center; border-style: dashed; border-color: var(--line); background: var(--surface-subtle); box-shadow: none; }
+  .jellyfin-secret-modal { width: min(620px, calc(100vw - var(--space-6))); }
+  .jellyfin-secret-modal__fields { min-width: 0; display: grid; gap: var(--space-3); }
+  .jellyfin-secret-modal .jellyfin-secret-modal__warning { margin-top: var(--space-3); padding: var(--space-3); border: 1px solid color-mix(in srgb, var(--warning) 28%, var(--line)); border-radius: var(--space-2); color: var(--warning); background: var(--surface-warning); }
   .tracking-settings > .notice { margin: 0; }
   .tracking-provider-grid { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: var(--space-4); }
   .tracking-provider-card { --provider-color: var(--text-soft); --provider-tint: var(--surface-interactive); min-width: 0; overflow: hidden; border: 1px solid var(--line); border-top-color: color-mix(in srgb, var(--provider-color) 55%, var(--line)); border-radius: var(--radius-md); background: var(--surface-subtle); box-shadow: var(--shadow-sm); transition: border-color .18s var(--ease), background .18s var(--ease); }
@@ -2424,6 +2465,9 @@
     }
     .settings-navigation [data-settings-section] { min-height: var(--space-8); align-items: center; padding: var(--space-2); }
     .settings-navigation__item-description { display: none; }
+    .jellyfin-access { padding: var(--space-4); }
+    .jellyfin-access__header, .jellyfin-access__server, .jellyfin-access__credential, .jellyfin-access--disabled { grid-template-columns: minmax(0, 1fr); }
+    .jellyfin-access__server > .button, .jellyfin-access__credential > .button { width: 100%; }
     .settings-save-bar {
       display: grid;
       grid-template-columns: minmax(0, 1fr);

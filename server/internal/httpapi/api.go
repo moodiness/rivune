@@ -46,7 +46,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/webui"
 )
 
-const protocolVersion = 19
+const protocolVersion = 20
 
 type instanceService interface {
 	Info(context.Context) (instance.Info, error)
@@ -58,6 +58,7 @@ type instanceService interface {
 
 type authService interface {
 	Login(context.Context, auth.LoginInput) (auth.TokenPair, error)
+	LoginJellyfinProfile(context.Context, auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error)
 	Refresh(context.Context, string) (auth.TokenPair, error)
 	Authenticate(context.Context, string) (auth.Principal, error)
 	Account(context.Context, auth.Principal) (auth.Account, error)
@@ -165,6 +166,13 @@ type calendarService interface {
 	Feed(context.Context, string, bool) ([]byte, error)
 }
 
+type jellyfinCredentialService interface {
+	Status(context.Context, auth.Principal, string) (jellyfin.CredentialStatus, error)
+	Create(context.Context, auth.Principal, string) (jellyfin.ProfileCredential, error)
+	Rotate(context.Context, auth.Principal, string) (jellyfin.ProfileCredential, error)
+	Revoke(context.Context, auth.Principal, string) error
+}
+
 type calendarRefreshWorker interface {
 	Run(context.Context)
 }
@@ -247,6 +255,7 @@ type API struct {
 	pool                                    *pgxpool.Pool
 	instances                               instanceService
 	demo                                    *demo.Service
+	jellyfinCredentials                     jellyfinCredentialService
 	jellyfinCompatibility                   *jellyfin.Handler
 	jellyfinCompatibilityMu                 sync.Mutex
 	jellyfinCompatibilityDesired            bool
@@ -378,6 +387,10 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 	if err != nil {
 		return nil, fmt.Errorf("initialize Jellyfin setting: %w", err)
 	}
+	jellyfinCredentials, err := jellyfin.NewCredentialStore(pool)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Jellyfin profile credentials: %w", err)
+	}
 	instanceManager := instance.NewService(pool, cfg.SetupToken, cfg.Timezone, cfg.JellyfinEnabled)
 	api := &API{
 		artwork:               artworkService,
@@ -392,6 +405,7 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		pool:                  pool,
 		instances:             instanceManager,
 		demo:                  demo.New(instanceManager, demo.Options{}),
+		jellyfinCredentials:   jellyfinCredentials,
 		auth:                  authService,
 		authMaintenance:       authService,
 		profiles:              profileManager,
@@ -421,7 +435,7 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		}
 		return *layer.Values.JellyfinEnabled, nil
 	}
-	api.initializeJellyfinCompatibility(pool, authService, profileManager, watchstateService, artworkService, playbackService, instanceManager, metadataService, addonService)
+	api.initializeJellyfinCompatibility(pool, authService, watchstateService, artworkService, playbackService, instanceManager, metadataService, addonService)
 	return api, nil
 }
 
@@ -466,6 +480,10 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/profiles/selection", a.requireAuthentication(a.clearProfileSelection))
 	mux.Handle("GET /api/v1/profiles/{profileId}/avatar", a.requireAuthentication(a.customProfileAvatar))
 	mux.Handle("PUT /api/v1/profiles/{profileId}/avatar", a.requireAuthentication(a.uploadProfileAvatar))
+	mux.Handle("GET /api/v1/profiles/{profileId}/jellyfin-credential", a.requireAuthentication(a.jellyfinCredentialStatus))
+	mux.Handle("POST /api/v1/profiles/{profileId}/jellyfin-credential", a.requireAuthentication(a.createJellyfinCredential))
+	mux.Handle("POST /api/v1/profiles/{profileId}/jellyfin-credential/rotate", a.requireAuthentication(a.rotateJellyfinCredential))
+	mux.Handle("DELETE /api/v1/profiles/{profileId}/jellyfin-credential", a.requireAuthentication(a.revokeJellyfinCredential))
 	mux.Handle("PUT /api/v1/profiles/{profileId}/avatar/preset", a.requireAuthentication(a.setProfileAvatarPreset))
 	mux.Handle("GET /api/v1/settings", a.requireAuthentication(a.instanceSettings))
 	mux.Handle("PATCH /api/v1/settings", a.requireAuthentication(a.updateInstanceSettings))

@@ -8,7 +8,10 @@ import (
 	"fmt"
 )
 
-const tokenEntropyBytes = 32
+const (
+	tokenEntropyBytes         = 32
+	jellyfinAppPasswordPrefix = "rivune_jfa_"
+)
 
 func newToken(prefix string) (plainText string, digest []byte, err error) {
 	entropy := make([]byte, tokenEntropyBytes)
@@ -23,6 +26,27 @@ func newToken(prefix string) (plainText string, digest []byte, err error) {
 func tokenDigest(plainText string) []byte {
 	hash := sha256.Sum256([]byte(plainText))
 	return hash[:]
+}
+
+// NewJellyfinAppPassword issues a CSPRNG-backed application password and its
+// SHA-256 digest. The plaintext must only be returned at creation or rotation.
+func NewJellyfinAppPassword() (plainText string, digest []byte, err error) {
+	return newToken(jellyfinAppPasswordPrefix)
+}
+
+// JellyfinAppPasswordDigest validates the canonical application-password
+// representation before deriving the digest stored with the profile credential.
+func JellyfinAppPasswordDigest(plainText string) ([]byte, bool) {
+	if len(plainText) != len(jellyfinAppPasswordPrefix)+base64.RawURLEncoding.EncodedLen(tokenEntropyBytes) ||
+		plainText[:len(jellyfinAppPasswordPrefix)] != jellyfinAppPasswordPrefix {
+		return nil, false
+	}
+	encoded := plainText[len(jellyfinAppPasswordPrefix):]
+	entropy, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(entropy) != tokenEntropyBytes || base64.RawURLEncoding.EncodeToString(entropy) != encoded {
+		return nil, false
+	}
+	return tokenDigest(plainText), true
 }
 
 // NewProfileContext issues an opaque per-selection capability. Only its digest

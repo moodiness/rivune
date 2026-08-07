@@ -8,7 +8,7 @@ namespace Rivune.Windows.Tests;
 public sealed class RedirectSecurityTests
 {
     private const string DiscoveryBody = """
-        {"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1/","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+        {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1/","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
         """;
 
     [Theory]

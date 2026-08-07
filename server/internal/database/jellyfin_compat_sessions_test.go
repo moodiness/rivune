@@ -84,9 +84,9 @@ func TestJellyfinCompatSessionsCascadeWithNativeSession(t *testing.T) {
 		t.Fatalf("insert compatibility migration device: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO jellyfin_compat_devices (user_id, client_device_id, device_id)
-		VALUES ($1, 'migration-device', $2)
-	`, userID, deviceID); err != nil {
+		INSERT INTO jellyfin_compat_devices (user_id, profile_id, client_device_id, device_id)
+		VALUES ($1, $2, 'migration-device', $3)
+	`, userID, profileID, deviceID); err != nil {
 		t.Fatalf("insert compatibility device mapping: %v", err)
 	}
 	if err := tx.QueryRow(ctx, `
@@ -142,8 +142,9 @@ func TestJellyfinCompatSessionsCascadeWithNativeSession(t *testing.T) {
 	}
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*) FROM jellyfin_compat_devices
-		WHERE user_id = $1::uuid AND client_device_id = 'migration-device' AND device_id = $2::uuid
-	`, userID, deviceID).Scan(&remaining); err != nil {
+		WHERE user_id = $1::uuid AND profile_id = $2::uuid
+		  AND client_device_id = 'migration-device' AND device_id = $3::uuid
+	`, userID, profileID, deviceID).Scan(&remaining); err != nil {
 		t.Fatalf("count persistent compatibility device mapping: %v", err)
 	}
 	if remaining != 1 {

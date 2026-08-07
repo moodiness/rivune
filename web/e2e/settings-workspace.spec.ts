@@ -11,7 +11,7 @@ const profileSectionCopy = [
   { id: "playback", title: "Playback", description: "Delivery quality, episode flow, and skip actions." },
   { id: "language", title: "Language & metadata", description: "How titles, regions, and episode ordering are resolved." },
   { id: "subtitles", title: "Language & subtitles", description: "Preferred tracks and readable cue styling." },
-  { id: "connections", title: "Tracking accounts", description: "Mirror this profile's activity while Rivune remains the source of truth." },
+  { id: "connections", title: "Connections", description: "Mirror this profile's activity while Rivune remains the source of truth." },
 ] as const;
 
 async function openSettings(page: Page, section?: string) {
@@ -158,39 +158,146 @@ test("dirty preferences can be discarded or saved from the persistent action bar
   await expect(page.getByRole("combobox", { name: "Switch scope" })).toBeEnabled();
 });
 
-test("server Jellyfin API toggle hydrates, discards, and saves minimal patches", async ({ page, rivune }) => {
-  await openSettings(page);
+test("Jellyfin app credential is profile-scoped, copyable once, rotatable, and revocable", async ({ page, rivune }) => {
+  rivune.setJellyfinEnabled(true);
+  const jellyfinPassword = (generation: number) => `rivune_jfa_${String(generation).padStart(43, "A")}`;
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  let rejectCredentialRead = true;
+  await page.route(/\/api\/v1\/profiles\/alice\/jellyfin-credential$/, async (route) => {
+    if (route.request().method() === "GET" && rejectCredentialRead) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "temporarily_unavailable", message: "Credential status is temporarily unavailable." } }) });
+      return;
+    }
+    await route.fallback();
+  });
+  await openSettings(page, "connections");
 
   const scope = page.getByRole("combobox", { name: "Switch scope" });
+  const panel = page.locator('[data-jellyfin-profile="alice"]');
+  await expect(panel).toBeVisible();
+  rejectCredentialRead = false;
+  await panel.getByRole("button", { name: "Try again" }).click();
+  await expect(panel).toContainText("This app password grants access only to this profile.");
+  await expect(panel.getByRole("textbox", { name: "Username" })).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Add" })).toBeVisible();
+
   await selectOption(scope, "server");
   await page.locator('[data-settings-section="connections"]').click();
-
-  const jellyfin = page.getByRole("checkbox", { name: "Jellyfin" });
-  const saveBar = page.locator(".settings-save-bar");
-  await expect(jellyfin).not.toBeChecked();
-  await expect(page.locator("#jellyfin-enabled-description")).toHaveText("Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.");
-
-  await jellyfin.check();
-  await saveBar.getByRole("button", { name: "Discard changes" }).click();
-  await expect(jellyfin).not.toBeChecked();
-  expect(rivune.matching("/api/v1/settings", "PATCH")).toHaveLength(0);
-
-  await jellyfin.check();
-  await saveBar.getByRole("button", { name: "Save preferences" }).click();
-  const enabledRequest = await rivune.waitForRequest("/api/v1/settings", "PATCH");
-  expect(enabledRequest.body).toEqual({ jellyfinEnabled: true });
-  await expect(saveBar).toHaveCount(0);
-  await expect(jellyfin).toBeChecked();
-
-  await jellyfin.uncheck();
-  await saveBar.getByRole("button", { name: "Save preferences" }).click();
-  await expect.poll(() => rivune.matching("/api/v1/settings", "PATCH").length).toBe(2);
-  expect(rivune.matching("/api/v1/settings", "PATCH").at(-1)?.body).toEqual({ jellyfinEnabled: false });
-  await expect(saveBar).toHaveCount(0);
+  await expect(page.getByRole("checkbox", { name: "Jellyfin" })).toBeChecked();
+  await expect(page.locator(".settings-group .jellyfin-access")).toHaveCount(0);
 
   await selectOption(scope, "alice");
   await page.locator('[data-settings-section="connections"]').click();
-  await expect(page.getByRole("checkbox", { name: "Jellyfin" })).toHaveCount(0);
+  let releaseCreate!: () => void;
+  const createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+  await page.route(/\/api\/v1\/profiles\/alice\/jellyfin-credential$/, async (route) => {
+    if (route.request().method() === "POST") await createGate;
+    await route.fallback();
+  });
+  await panel.getByRole("button", { name: "Add" }).click();
+  const secretDialog = page.getByRole("dialog");
+  await expect(secretDialog.locator(".settings-skeleton")).toBeVisible();
+  await expect(secretDialog.getByRole("button", { name: "Close" })).toHaveCount(0);
+  const guardedURL = page.url();
+  await page.goBack();
+  await expect(page).toHaveURL(guardedURL);
+  await expect(secretDialog.locator(".settings-skeleton")).toBeVisible();
+  releaseCreate();
+  await expect(secretDialog).toContainText("This password is shown only once");
+  const username = secretDialog.getByRole("textbox", { name: "Username" });
+  const password = secretDialog.getByRole("textbox", { name: "Password" });
+  const stableUsername = await username.inputValue();
+  expect(stableUsername).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
+  await expect(password).toHaveValue(jellyfinPassword(1));
+
+  await secretDialog.getByRole("button", { name: "Copy: Username" }).click();
+  expect(await page.evaluate(async () => navigator.clipboard.readText())).toBe(stableUsername);
+  await secretDialog.getByRole("button", { name: "Copy: Password" }).click();
+  expect(await page.evaluate(async () => navigator.clipboard.readText())).toBe(jellyfinPassword(1));
+  await secretDialog.locator(".modal-actions").getByRole("button", { name: "Close" }).click();
+
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(panel.getByRole("textbox", { name: "Username" })).toHaveValue(stableUsername);
+  await expect(panel.getByRole("textbox", { name: "Password" })).toHaveCount(0);
+  const persistedBrowserState = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }));
+  expect(persistedBrowserState).not.toContain("rivune_jfa_");
+  await expect(panel).toContainText("Enabled");
+
+  await panel.getByRole("button", { name: "Refresh" }).click();
+  const rotateDialog = page.getByRole("dialog");
+  await expect(rotateDialog).toContainText("immediately invalidates the current password and all Jellyfin sessions");
+  await rotateDialog.getByRole("button", { name: "Refresh" }).click();
+  await expect(secretDialog.getByRole("textbox", { name: "Username" })).toHaveValue(stableUsername);
+  await expect(secretDialog.getByRole("textbox", { name: "Password" })).toHaveValue(jellyfinPassword(2));
+  await secretDialog.locator(".modal-actions").getByRole("button", { name: "Close" }).click();
+
+  await panel.getByRole("button", { name: "Remove" }).click();
+  const revokeDialog = page.getByRole("dialog");
+  await expect(revokeDialog).toContainText("immediately invalidates the password and all Jellyfin sessions");
+  await revokeDialog.getByRole("button", { name: "Remove" }).click();
+  await expect(panel).toContainText("Disabled");
+  await expect(panel.getByRole("textbox", { name: "Username" })).toHaveValue(stableUsername);
+  await expect(panel.getByRole("button", { name: "Add" })).toBeVisible();
+
+  await panel.getByRole("button", { name: "Add" }).click();
+  await expect(secretDialog.getByRole("textbox", { name: "Username" })).toHaveValue(stableUsername);
+  await expect(secretDialog.getByRole("textbox", { name: "Password" })).toHaveValue(jellyfinPassword(3));
+  expect(rivune.matching("/api/v1/profiles/alice/jellyfin-credential", "POST")).toHaveLength(2);
+  expect(rivune.matching("/api/v1/profiles/alice/jellyfin-credential/rotate", "POST")).toHaveLength(1);
+  expect(rivune.matching("/api/v1/profiles/alice/jellyfin-credential", "DELETE")).toHaveLength(1);
+});
+
+test("ambiguous Jellyfin credential creation reconciles status and offers rotation", async ({ page, rivune }) => {
+  rivune.setJellyfinEnabled(true);
+  rivune.failNextJellyfinCredentialCreateAfterCommit();
+  await openSettings(page, "connections");
+
+  const panel = page.locator('[data-jellyfin-profile="alice"]');
+  await panel.getByRole("button", { name: "Add" }).click();
+  await expect(panel).toContainText("password was not received");
+  await expect(panel).toContainText("Enabled");
+  await expect(panel.getByRole("button", { name: "Refresh" })).toBeEnabled();
+  await expect(panel.getByRole("button", { name: "Add" })).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+test("credential issuance actions reflect direct profile access", async ({ page, rivune }) => {
+  rivune.setJellyfinEnabled(true);
+  await page.route(/\/api\/v1\/profiles\/alice\/jellyfin-credential$/, async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        active: true,
+        canIssue: false,
+        generation: 1,
+        username: "20000000-0000-4000-8000-000000000001",
+        createdAt: "2026-08-07T12:00:00Z",
+      }),
+    });
+  });
+  await openSettings(page, "connections");
+
+  const panel = page.locator('[data-jellyfin-profile="alice"]');
+  await expect(panel).toContainText("requires direct access to this profile");
+  await expect(panel.getByRole("button", { name: "Refresh" })).toBeDisabled();
+  await expect(panel.getByRole("button", { name: "Remove" })).toBeEnabled();
+});
+
+test("active profile can manage its Jellyfin credential without manager permission", async ({ page, rivune }) => {
+  rivune.setJellyfinEnabled(true);
+  rivune.setProfileCategory("bob", CATEGORY_IDS.household);
+  await rivune.configureGlobalAdmin(page, "bob");
+  await openSettings(page, "connections");
+
+  await expect(page.getByRole("combobox", { name: "Switch scope" })).toHaveCount(0);
+  const panel = page.locator('[data-jellyfin-profile="bob"]');
+  await expect(panel).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Add" })).toBeEnabled();
 });
 
 test("global administrator assigns transcoding per profile", async ({ page, rivune }) => {
@@ -297,7 +404,7 @@ test("mobile settings contain horizontal category overflow without widening the 
   expect(mobileCategoryMetrics.every(({ height, titleFits }) => height <= 64 && titleFits)).toBe(true);
   await expect(navigation.locator('[data-settings-section="language"]')).toHaveAccessibleName("Language & metadata");
   await expect(navigation.locator('[data-settings-section="subtitles"]')).toHaveAccessibleName("Language & subtitles");
-  await expect(navigation.locator('[data-settings-section="connections"]')).toHaveAccessibleName("Tracking accounts");
+  await expect(navigation.locator('[data-settings-section="connections"]')).toHaveAccessibleName("Connections");
 
   await page.getByRole("checkbox", { name: "Interface animations" }).uncheck();
   const saveBarBounds = await page.locator(".settings-save-bar").boundingBox();

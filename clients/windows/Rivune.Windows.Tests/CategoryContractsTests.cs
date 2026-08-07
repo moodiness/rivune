@@ -239,7 +239,7 @@ public sealed class CategoryContractsTests
             string body;
             if (request.RequestUri!.AbsolutePath == "/.well-known/rivune")
             {
-                body = """{"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""";
+                body = """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""";
             }
             else
             {

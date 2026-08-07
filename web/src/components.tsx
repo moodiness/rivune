@@ -474,7 +474,7 @@ export function Notice({ tone = "error", children }: { tone?: "error" | "success
   return <div className={`notice notice--${tone}`} role={tone === "error" ? "alert" : "status"} aria-live="polite" aria-atomic="true">{icon}{children}</div>;
 }
 
-export function Modal({ children, onClose, className = "", "aria-labelledby": ariaLabelledBy, "aria-describedby": ariaDescribedBy }: { children: ReactNode; onClose: () => void; className?: string; "aria-labelledby"?: string; "aria-describedby"?: string }) {
+export function Modal({ children, onClose, dismissible = true, className = "", "aria-labelledby": ariaLabelledBy, "aria-describedby": ariaDescribedBy }: { children: ReactNode; onClose: () => void; dismissible?: boolean; className?: string; "aria-labelledby"?: string; "aria-describedby"?: string }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
@@ -486,9 +486,9 @@ export function Modal({ children, onClose, className = "", "aria-labelledby": ar
   }, []);
 
   return (
-    <dialog ref={dialogRef} className="modal-layer" aria-labelledby={ariaLabelledBy} aria-describedby={ariaDescribedBy} onCancel={(event) => { event.preventDefault(); onClose(); }} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <dialog ref={dialogRef} className="modal-layer" aria-labelledby={ariaLabelledBy} aria-describedby={ariaDescribedBy} onCancel={(event) => { event.preventDefault(); if (dismissible) onClose(); }} onMouseDown={(event) => { if (dismissible && event.target === event.currentTarget) onClose(); }}>
       <section className={`modal ${className}`} role="document">
-        <IconButton label={t("common.close")} className="modal__close" onClick={onClose}><X size={20} /></IconButton>
+        {dismissible && <IconButton label={t("common.close")} className="modal__close" onClick={onClose}><X size={20} /></IconButton>}
         {children}
       </section>
     </dialog>

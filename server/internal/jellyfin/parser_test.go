@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/moodiness/rivune/server/internal/auth"
 )
 
 func TestParseClientIdentityRejectsConflictingAndDuplicateAuthorization(t *testing.T) {
@@ -89,26 +87,6 @@ func TestParseCompatTokenSeparatesAudienceAndRejectsAmbiguity(t *testing.T) {
 	oversizeHeader.Header.Set("X-Emby-Authorization", "MediaBrowser Token=\""+token+"\", Padding=\""+strings.Repeat("x", maximumCompatAuthorizationHeaderBytes)+"\"")
 	if _, err := ParseCompatToken(oversizeHeader, false); !errors.Is(err, ErrInvalidCompatAuthorization) {
 		t.Fatalf("oversize authorization header error = %v", err)
-	}
-}
-
-func TestResolveLoginProfileRequiresUniqueAccessibleProfile(t *testing.T) {
-	profiles := []auth.Profile{
-		{ID: "10000000-0000-4000-8000-000000000001", Name: "Adults", Accessible: true},
-		{ID: "10000000-0000-4000-8000-000000000002", Name: "Kids", Accessible: true},
-		{ID: "10000000-0000-4000-8000-000000000003", Name: "Away", Accessible: false},
-	}
-	if _, ok := resolveLoginProfile(profiles, "", false); ok {
-		t.Fatal("bare account selected the first of multiple accessible profiles")
-	}
-	if profileID, ok := resolveLoginProfile(profiles, "kids", true); !ok || profileID != profiles[1].ID {
-		t.Fatalf("qualified case-insensitive profile resolved %q, %t", profileID, ok)
-	}
-	if _, ok := resolveLoginProfile(profiles, "Away", true); ok {
-		t.Fatal("qualified unavailable profile was selected")
-	}
-	if account, selector, qualified, ok := splitCompatUsername(" account / Kids "); !ok || !qualified || account != "account" || selector != "Kids" {
-		t.Fatalf("qualified login parsed account=%q selector=%q qualified=%t ok=%t", account, selector, qualified, ok)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/category"
 	"github.com/moodiness/rivune/server/internal/collection"
 	"github.com/moodiness/rivune/server/internal/instance"
+	"github.com/moodiness/rivune/server/internal/jellyfin"
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/operations"
 	"github.com/moodiness/rivune/server/internal/playback"
@@ -399,6 +400,42 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		trailers := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/titles/"+contractTitleID+"/trailers?language=en-US", nil)
 		trailersResponse := serveContractRequest(t, api, trailers, http.StatusOK)
 		validateContractResponse(t, document, "/metadata/titles/{titleId}/trailers", map[string]string{"titleId": contractTitleID}, trailers, trailersResponse)
+	})
+
+	t.Run("Jellyfin profile credentials", func(t *testing.T) {
+		createdAt := time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC)
+		service := &fakeJellyfinCredentialService{
+			status: jellyfin.CredentialStatus{
+				Username: contractProfileID, Active: true, CanIssue: true, Generation: 1, CreatedAt: createdAt,
+			},
+			credential: jellyfin.ProfileCredential{
+				CredentialStatus: jellyfin.CredentialStatus{
+					Username: contractProfileID, Active: true, CanIssue: true, Generation: 2, CreatedAt: createdAt,
+				},
+				Password: "rivune_jfa_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			},
+		}
+		api := testAPI(&fakeInstanceService{})
+		api.auth = &fakeAuthService{principal: contractPrincipal()}
+		api.jellyfinCredentials = service
+		path := "/api/v1/profiles/" + contractProfileID + "/jellyfin-credential"
+		parameters := map[string]string{"profileId": contractProfileID}
+
+		statusRequest := authenticatedContractRequest(http.MethodGet, path, nil)
+		statusResponse := serveContractRequest(t, api, statusRequest, http.StatusOK)
+		validateContractResponse(t, document, "/profiles/{profileId}/jellyfin-credential", parameters, statusRequest, statusResponse)
+
+		createRequest := authenticatedContractRequest(http.MethodPost, path, nil)
+		createResponse := serveContractRequest(t, api, createRequest, http.StatusCreated)
+		validateContractResponse(t, document, "/profiles/{profileId}/jellyfin-credential", parameters, createRequest, createResponse)
+
+		rotateRequest := authenticatedContractRequest(http.MethodPost, path+"/rotate", nil)
+		rotateResponse := serveContractRequest(t, api, rotateRequest, http.StatusOK)
+		validateContractResponse(t, document, "/profiles/{profileId}/jellyfin-credential/rotate", parameters, rotateRequest, rotateResponse)
+
+		revokeRequest := authenticatedContractRequest(http.MethodDelete, path, nil)
+		revokeResponse := serveContractRequest(t, api, revokeRequest, http.StatusNoContent)
+		validateContractResponse(t, document, "/profiles/{profileId}/jellyfin-credential", parameters, revokeRequest, revokeResponse)
 	})
 
 	t.Run("transcoding settings", func(t *testing.T) {

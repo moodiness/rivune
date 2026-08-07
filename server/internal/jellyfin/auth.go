@@ -19,26 +19,20 @@ var (
 )
 
 type NativeAuthentication interface {
-	Authenticate(context.Context, string) (auth.Principal, error)
 	ReloadLinkedPrincipal(context.Context, string, string) (auth.Principal, error)
 	RevokeUnfinishedLinkedSession(context.Context, string) error
 	Account(context.Context, auth.Principal) (auth.Account, error)
 	LogoutLinkedSession(context.Context, auth.Principal, string) error
 }
 
-// NativeCredentialLogin is injected by the HTTP composition root so native
-// and compatibility login share one source and username admission budget.
-type NativeCredentialLogin func(context.Context, auth.LoginInput) (auth.TokenPair, error)
-
-type LinkedProfileSelector interface {
-	SelectForLinkedSession(context.Context, auth.Principal, string, *string, bool) (profile.Selection, error)
-}
+// JellyfinProfileLogin is injected by the HTTP composition root so native and
+// compatibility login share the same source and opaque-username admission budgets.
+type JellyfinProfileLogin func(context.Context, auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error)
 
 type CompatLoginInput struct {
-	Username   string
-	Password   string
-	ProfilePIN *string
-	Client     ClientIdentity
+	Username string
+	Password string
+	Client   ClientIdentity
 }
 
 type LoginResult struct {
@@ -48,19 +42,18 @@ type LoginResult struct {
 }
 
 type AuthenticationService struct {
-	login                     NativeCredentialLogin
+	login                     JellyfinProfileLogin
 	native                    NativeAuthentication
-	profiles                  LinkedProfileSelector
 	sessions                  *SessionStore
 	failedLoginCleanupTimeout time.Duration
 }
 
-func NewAuthenticationService(login NativeCredentialLogin, native NativeAuthentication, profiles LinkedProfileSelector, sessions *SessionStore) (*AuthenticationService, error) {
-	if login == nil || native == nil || profiles == nil || sessions == nil {
+func NewAuthenticationService(login JellyfinProfileLogin, native NativeAuthentication, sessions *SessionStore) (*AuthenticationService, error) {
+	if login == nil || native == nil || sessions == nil {
 		return nil, fmt.Errorf("compatibility authentication dependencies are required")
 	}
 	return &AuthenticationService{
-		login: login, native: native, profiles: profiles, sessions: sessions,
+		login: login, native: native, sessions: sessions,
 		failedLoginCleanupTimeout: defaultFailedLoginCleanupTimeout,
 	}, nil
 }
@@ -70,17 +63,12 @@ func (s *AuthenticationService) Login(ctx context.Context, input CompatLoginInpu
 	if err != nil {
 		return LoginResult{}, ErrInvalidCompatLogin
 	}
-	accountName, profileSelector, qualified, ok := splitCompatUsername(input.Username)
-	if !ok {
-		return LoginResult{}, ErrInvalidCompatLogin
-	}
-
 	platform := client.Client
 	if !boundedUTF8(platform, 1, 32) {
 		platform = "jellyfin"
 	}
-	tokens, err := s.login(ctx, auth.LoginInput{
-		Username:        accountName,
+	login, err := s.login(ctx, auth.JellyfinProfileLoginInput{
+		Username:        input.Username,
 		Password:        input.Password,
 		LinkedDeviceKey: client.DeviceID,
 		DeviceName:      client.Device,
@@ -90,8 +78,9 @@ func (s *AuthenticationService) Login(ctx context.Context, input CompatLoginInpu
 		if isCredentialLoginError(err) {
 			return LoginResult{}, ErrInvalidCompatLogin
 		}
-		return LoginResult{}, fmt.Errorf("compatibility native login: %w", err)
+		return LoginResult{}, fmt.Errorf("compatibility profile login: %w", err)
 	}
+	tokens := login.Tokens
 	keepSession := false
 	defer func() {
 		if keepSession {
@@ -106,35 +95,14 @@ func (s *AuthenticationService) Login(ctx context.Context, input CompatLoginInpu
 		}
 	}()
 
-	principal, err := s.native.Authenticate(ctx, tokens.AccessToken)
-	if err != nil {
-		return LoginResult{}, fmt.Errorf("authenticate newly linked native session: %w", err)
-	}
-
-	account, err := s.native.Account(ctx, principal)
-	if err != nil {
-		return LoginResult{}, fmt.Errorf("load compatibility login profiles: %w", err)
-	}
-	profileID, ok := resolveLoginProfile(account.Profiles, profileSelector, qualified)
-	if !ok {
-		return LoginResult{}, ErrInvalidCompatLogin
-	}
-
-	selection, err := s.profiles.SelectForLinkedSession(ctx, principal, profileID, input.ProfilePIN, false)
-	if err != nil {
-		if isProfileSelectionError(err) {
-			return LoginResult{}, ErrInvalidCompatLogin
-		}
-		return LoginResult{}, fmt.Errorf("select compatibility profile: %w", err)
-	}
-	principal, err = s.native.ReloadLinkedPrincipal(ctx, tokens.SessionID, selection.Profile.ID)
+	principal, err := s.native.ReloadLinkedPrincipal(ctx, tokens.SessionID, login.ProfileID)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidToken) {
 			return LoginResult{}, ErrInvalidCompatLogin
 		}
 		return LoginResult{}, fmt.Errorf("reload selected compatibility profile: %w", err)
 	}
-	credential, err := s.sessions.Issue(ctx, principal, selection.Profile.ID, client, selection.ExpiresAt)
+	credential, err := s.sessions.Issue(ctx, principal, login.ProfileID, client, tokens.RefreshExpiresAt)
 	if err != nil {
 		if errors.Is(err, ErrInvalidCompatCredential) {
 			return LoginResult{}, ErrInvalidCompatLogin
@@ -143,7 +111,11 @@ func (s *AuthenticationService) Login(ctx context.Context, input CompatLoginInpu
 	}
 
 	keepSession = true
-	return LoginResult{Credential: credential, Profile: selection.Profile, Principal: principal}, nil
+	return LoginResult{
+		Credential: credential,
+		Profile:    profile.Profile{ID: login.ProfileID, Name: login.ProfileName, Accessible: true},
+		Principal:  principal,
+	}, nil
 }
 
 func (s *AuthenticationService) revokeFailedLoginSession(requestContext context.Context, sessionID string) error {
@@ -188,7 +160,6 @@ func (s *AuthenticationService) Authenticate(ctx context.Context, token string) 
 		}
 		matched = true
 		session.ProfileName = candidate.Name
-		session.ProfileHasPIN = candidate.HasPIN
 	}
 	if !matched || !boundedUTF8(session.ProfileName, 1, 120) {
 		if revokeErr := s.sessions.Revoke(context.WithoutCancel(ctx), session.ID, "linked_profile_unavailable"); revokeErr != nil {
@@ -210,58 +181,8 @@ func (s *AuthenticationService) Logout(ctx context.Context, session Authenticate
 	return nil
 }
 
-func splitCompatUsername(value string) (accountName, profileSelector string, qualified, ok bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", "", false, false
-	}
-	separatorCount := strings.Count(value, "/")
-	if separatorCount == 0 {
-		return value, "", false, true
-	}
-	if separatorCount != 1 {
-		return "", "", false, false
-	}
-	parts := strings.SplitN(value, "/", 2)
-	accountName = strings.TrimSpace(parts[0])
-	profileSelector = strings.TrimSpace(parts[1])
-	return accountName, profileSelector, true, accountName != "" && profileSelector != ""
-}
-
-func resolveLoginProfile(profiles []auth.Profile, selector string, qualified bool) (string, bool) {
-	matches := make([]string, 0, 1)
-	for _, candidate := range profiles {
-		if !candidate.Accessible {
-			continue
-		}
-		if qualified && !strings.EqualFold(candidate.ID, selector) && !strings.EqualFold(candidate.Name, selector) {
-			continue
-		}
-		alreadyMatched := false
-		for _, matchedID := range matches {
-			alreadyMatched = alreadyMatched || strings.EqualFold(matchedID, candidate.ID)
-		}
-		if !alreadyMatched {
-			matches = append(matches, candidate.ID)
-		}
-	}
-	if len(matches) != 1 {
-		return "", false
-	}
-	return matches[0], true
-}
-
 func isCredentialLoginError(err error) bool {
 	return errors.Is(err, auth.ErrInvalidCredentials) ||
 		errors.Is(err, auth.ErrInvalidInput) ||
 		errors.Is(err, auth.ErrDeviceQuotaReached)
-}
-
-func isProfileSelectionError(err error) bool {
-	return errors.Is(err, profile.ErrNotFound) ||
-		errors.Is(err, profile.ErrForbidden) ||
-		errors.Is(err, profile.ErrInvalidPIN) ||
-		errors.Is(err, profile.ErrPINRateLimited) ||
-		errors.Is(err, profile.ErrUnavailable) ||
-		errors.Is(err, profile.ErrManagementRequired)
 }

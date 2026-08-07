@@ -42,13 +42,12 @@ type CompatCredential struct {
 }
 
 type AuthenticatedSession struct {
-	ID            string
-	ProfileID     string
-	Client        ClientIdentity
-	ExpiresAt     time.Time
-	Principal     auth.Principal
-	ProfileName   string
-	ProfileHasPIN bool
+	ID          string
+	ProfileID   string
+	Client      ClientIdentity
+	ExpiresAt   time.Time
+	Principal   auth.Principal
+	ProfileName string
 }
 
 type LinkedPrincipalReloader interface {

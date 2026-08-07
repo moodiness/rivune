@@ -1,6 +1,17 @@
 # Rivune protocol compatibility
 
-The current Rivune wire protocol is **version 19**. The HTTP namespace remains `/api/v1`; the namespace and protocol version are independent. Clients must discover a server through `GET /.well-known/rivune` before using authenticated API routes and must compare the returned `protocolVersion` with the version they implement.
+The current Rivune wire protocol is **version 20**. The HTTP namespace remains `/api/v1`; the namespace and protocol version are independent. Clients must discover a server through `GET /.well-known/rivune` before using authenticated API routes and must compare the returned `protocolVersion` with the version they implement.
+
+## Version 20 cutover
+
+Version 20 is a clean cutover. A v19 client is not compatible with a v20 server, and a v20 client must not silently continue against another protocol version.
+
+- **Jellyfin usernames are stable profile identifiers.** Each Jellyfin username is the stable UUID of exactly one Rivune profile; display names, account names, administrator identities, and PINs are not Jellyfin usernames.
+- **Application secrets are one-shot credentials.** A newly issued Jellyfin application secret is shown only once and cannot be recovered afterward.
+- **Credential changes revoke Jellyfin sessions.** Rotating or revoking a profile's Jellyfin application secret invalidates every Jellyfin session for that profile.
+- **There is no authentication fallback.** Jellyfin authentication never falls back to a Rivune account password, administrator password, or profile PIN.
+
+Version 20 retains every v19 contract described below.
 
 ## Version 19 cutover
 
@@ -51,17 +62,17 @@ There are no compatibility aliases for the singular trailer route or pre-v16 tra
 
 ## Compatibility policy
 
-- A released client declares one implemented protocol integer. The Apple, Android, and Windows clients in this repository implement v19.
+- A released client declares one implemented protocol integer. The Apple, Android, and Windows clients in this repository implement v20.
 - A client must reject discovery when `protocolVersion` differs from its implemented version and present an upgrade-required error. It must not infer compatibility from `serverVersion` or `/api/v1`.
-- A server may add endpoints, optional response properties, optional request properties, or new error codes without incrementing the protocol version when existing v19 behavior remains valid. Clients must ignore unknown response properties and handle unknown structured error codes generically.
+- A server may add endpoints, optional response properties, optional request properties, or new error codes without incrementing the protocol version when existing v20 behavior remains valid. Clients must ignore unknown response properties and handle unknown structured error codes generically.
 - Removing or renaming a route or property, changing a property's type or meaning, adding a required request property, making an optional response property required, changing authentication semantics, or changing identifier interpretation requires a new protocol version.
-- Within v19, an existing required response property remains required. Contract tests validate representative real handler responses against `openapi.yaml`; changes to those handlers and schemas must land together.
+- Within v20, an existing required response property remains required. Contract tests validate representative real handler responses against `openapi.yaml`; changes to those handlers and schemas must land together.
 - Token rotation is part of the v16 contract. Access tokens are bearer tokens, refresh tokens are single-use and replaced on refresh, and native clients must persist credentials in platform-secure storage. A failed refresh clears the local credential set and requires authentication again.
 - Server releases must continue serving the documented version until all bundled clients implement a newer version. A future server that supports multiple versions must advertise the selected protocol explicitly; clients must never assume an undocumented range.
 
 ## Client release checklist
 
-1. Discover the candidate server and require `protocolVersion == 19`.
+1. Discover the candidate server and require `protocolVersion == 20`.
 2. Resolve `apiBaseUrl` from discovery; do not construct it from the browser or app origin after discovery.
 3. Exercise login or refresh, account/profile selection, movie and series metadata, plural trailers, source listing, preparation, resolution, and playback stop.
 4. Verify both TMDB and TVDB series hierarchies and preserve mapped season IDs verbatim.

@@ -341,6 +341,9 @@ export class RivuneHarness {
     ["alice", { transcoding: "inherit" }],
     ["bob", { transcoding: "inherit" }],
   ]);
+  private readonly jellyfinCredentials = new Map<string, { username: string; active: boolean; generation: number; createdAt: string; rotatedAt?: string; revokedAt?: string }>();
+  private nextJellyfinCredentialSequence = 1;
+  private failNextJellyfinCredentialCreateResponse = false;
   private readonly effectiveSettingsDelays: number[] = [];
   private readonly playbackStopDelays: number[] = [];
   private readonly collectionDelays = new Map<string, number>();
@@ -487,6 +490,12 @@ export class RivuneHarness {
     if (index < 0) throw new Error(`Unknown fixture profile ${profileId}`);
     this.profiles[index] = { ...this.profiles[index]!, categoryId, category: categoryRef(category) };
   }
+  setProfileName(profileId: string, name: string) {
+    const index = this.profiles.findIndex((candidate) => candidate.id === profileId);
+    if (index < 0) throw new Error(`Unknown fixture profile ${profileId}`);
+    this.profiles[index] = { ...this.profiles[index]!, name };
+  }
+
   setProfileAvailability(profileId: string, availability: Partial<Pick<Profile, "enabled" | "accessible" | "availableFrom" | "availableUntil" | "accessStartTime" | "accessEndTime">>) {
     const index = this.profiles.findIndex((candidate) => candidate.id === profileId);
     if (index < 0) throw new Error(`Unknown fixture profile ${profileId}`);
@@ -522,6 +531,13 @@ export class RivuneHarness {
   setInterfaceLanguage(language: string) {
     this.instanceSettings = { ...this.instanceSettings, interfaceLanguage: language };
   }
+  setJellyfinEnabled(enabled: boolean) {
+    this.instanceSettings = { ...this.instanceSettings, jellyfinEnabled: enabled };
+  }
+  failNextJellyfinCredentialCreateAfterCommit() {
+    this.failNextJellyfinCredentialCreateResponse = true;
+  }
+
 
   seedCategory(name: string) {
     const id = `10000000-0000-4000-8000-${String(this.nextCategorySequence++).padStart(12, "0")}`;
@@ -787,7 +803,7 @@ export class RivuneHarness {
     this.requests.push({ method: request.method(), pathname: url.pathname, search: new URLSearchParams(url.search), body, profileId: profileAtRequest, authorization: request.headers().authorization ?? null, profileContext: request.headers()["x-rivune-profile-context"] ?? null });
 
     if (url.pathname === "/.well-known/rivune") {
-      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 19, apiBaseUrl: "/api/v1", setupRequired: this.setupRequired, setupCompleted: !this.setupRequired, demoAvailable: this.setupRequired && this.demoAvailable, timezone: "UTC", interfaceLanguage: typeof this.instanceSettings.interfaceLanguage === "string" ? this.instanceSettings.interfaceLanguage : "en" });
+      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 20, apiBaseUrl: "/api/v1", setupRequired: this.setupRequired, setupCompleted: !this.setupRequired, demoAvailable: this.setupRequired && this.demoAvailable, timezone: "UTC", interfaceLanguage: typeof this.instanceSettings.interfaceLanguage === "string" ? this.instanceSettings.interfaceLanguage : "en" });
       return;
     }
     const profileContextExempt =
@@ -1195,6 +1211,44 @@ export class RivuneHarness {
       if (!profile) { await json(route, { error: { code: "not_found", message: "Profile not found" } }, 404); return; }
       const sessionCategory = this.authorizationScope === "category" && this.sessionCategoryId ? this.categoryReference(this.sessionCategoryId) : null;
       await json(route, { sessions: [{ id: "profile-session-1", userId: "user-1", username: "fixture-owner", deviceId: "fixture-device", deviceName: "Fixture browser", platform: "Web", ipAddress: null, createdAt, lastSeenAt: createdAt, profileGrantExpiresAt: expiresAt, current: profile.id === this.activeProfileId, authorizationScope: this.authorizationScope, category: sessionCategory }] });
+      return;
+    }
+    const jellyfinCredentialResource = path.match(/^\/profiles\/([^/]+)\/jellyfin-credential$/);
+    const jellyfinCredentialRotate = path.match(/^\/profiles\/([^/]+)\/jellyfin-credential\/rotate$/);
+    if (jellyfinCredentialResource && request.method() === "GET") {
+      const credential = this.jellyfinCredentials.get(jellyfinCredentialResource[1]);
+      await json(route, credential ? { active: credential.active, canIssue: true, generation: credential.generation, username: credential.username, createdAt: credential.createdAt, rotatedAt: credential.rotatedAt, revokedAt: credential.revokedAt } : { active: false, canIssue: true, generation: 0 });
+      return;
+    }
+    if (jellyfinCredentialResource && request.method() === "POST") {
+      const profileId = jellyfinCredentialResource[1];
+      const existing = this.jellyfinCredentials.get(profileId);
+      const credential = existing
+        ? { username: existing.username, active: true, generation: existing.generation + 1, createdAt: existing.createdAt, rotatedAt: createdAt }
+        : { username: `20000000-0000-4000-8000-${String(this.nextJellyfinCredentialSequence++).padStart(12, "0")}`, active: true, generation: 1, createdAt };
+      this.jellyfinCredentials.set(profileId, credential);
+      if (this.failNextJellyfinCredentialCreateResponse) {
+        this.failNextJellyfinCredentialCreateResponse = false;
+        await route.abort("connectionreset");
+        return;
+      }
+      await route.fulfill({ status: 201, contentType: "application/json", headers: { "cache-control": "no-store" }, body: JSON.stringify({ active: true, canIssue: true, generation: credential.generation, username: credential.username, createdAt: credential.createdAt, rotatedAt: credential.rotatedAt, password: `rivune_jfa_${String(credential.generation).padStart(43, "A")}` }) });
+      return;
+    }
+    if (jellyfinCredentialRotate && request.method() === "POST") {
+      const profileId = jellyfinCredentialRotate[1];
+      const existing = this.jellyfinCredentials.get(profileId);
+      if (!existing?.active) { await json(route, { error: { code: "not_found", message: "Jellyfin credential not found" } }, 404); return; }
+      const credential = { ...existing, generation: existing.generation + 1, rotatedAt: createdAt };
+      this.jellyfinCredentials.set(profileId, credential);
+      await route.fulfill({ status: 200, contentType: "application/json", headers: { "cache-control": "no-store" }, body: JSON.stringify({ active: true, canIssue: true, generation: credential.generation, username: credential.username, createdAt: credential.createdAt, rotatedAt: credential.rotatedAt, password: `rivune_jfa_${String(credential.generation).padStart(43, "A")}` }) });
+      return;
+    }
+    if (jellyfinCredentialResource && request.method() === "DELETE") {
+      const profileId = jellyfinCredentialResource[1];
+      const existing = this.jellyfinCredentials.get(profileId);
+      if (existing) this.jellyfinCredentials.set(profileId, { ...existing, active: false, revokedAt: createdAt });
+      await route.fulfill({ status: 204 });
       return;
     }
     if (path === "/settings" && request.method() === "GET") { await json(route, { schemaVersion: 1, settings: this.instanceSettings, updatedAt: createdAt }); return; }

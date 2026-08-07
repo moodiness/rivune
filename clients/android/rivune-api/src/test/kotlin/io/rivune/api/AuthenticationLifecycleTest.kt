@@ -251,7 +251,7 @@ private class BlockingAuthTransport : Interceptor {
 
     private companion object {
         val JSON_MEDIA_TYPE = "application/json".toMediaType()
-        const val DISCOVERY_JSON = """{"name":"Rivune","serverVersion":"test","protocolVersion":19,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
+        const val DISCOVERY_JSON = """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
     }
 }
 

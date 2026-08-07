@@ -11,11 +11,10 @@ import (
 const maximumCompatPasswordBytes = 256
 
 type authenticateByNameRequest struct {
-	Username   *string `json:"Username"`
-	UserName   *string `json:"UserName"`
-	Pw         *string `json:"Pw"`
-	Password   *string `json:"Password"`
-	ProfilePin *string `json:"ProfilePin"`
+	Username *string `json:"Username"`
+	UserName *string `json:"UserName"`
+	Pw       *string `json:"Pw"`
+	Password *string `json:"Password"`
 }
 
 func (handler *Handler) handlePublicSystemInfo(response http.ResponseWriter, _ *http.Request) {
@@ -66,7 +65,7 @@ func (handler *Handler) handleAuthenticateByName(response http.ResponseWriter, r
 		return
 	}
 	username, ok := compatAlias(payload.Username, payload.UserName)
-	if !ok || !boundedUTF8(username, 1, 256) {
+	if !ok || !validCompatUUID(username) {
 		writeCompatLoginFailure(response)
 		return
 	}
@@ -75,22 +74,13 @@ func (handler *Handler) handleAuthenticateByName(response http.ResponseWriter, r
 		writeCompatLoginFailure(response)
 		return
 	}
-	var profilePIN *string
-	if payload.ProfilePin != nil {
-		pin := strings.TrimSpace(*payload.ProfilePin)
-		if !validCompatPIN(pin) {
-			writeCompatLoginFailure(response)
-			return
-		}
-		profilePIN = &pin
-	}
 	client, err := ParseClientIdentity(request.Header)
 	if err != nil {
 		writeCompatLoginFailure(response)
 		return
 	}
 	result, err := handler.authentication.Login(request.Context(), CompatLoginInput{
-		Username: username, Password: password, ProfilePIN: profilePIN, Client: client,
+		Username: username, Password: password, Client: client,
 	})
 	if err != nil {
 		if errors.Is(err, ErrInvalidCompatLogin) || errors.Is(err, ErrInvalidCompatCredential) || errors.Is(err, ErrInvalidCompatAuthorization) {
@@ -106,7 +96,7 @@ func (handler *Handler) handleAuthenticateByName(response http.ResponseWriter, r
 	}
 	serverID := handler.serverInfo.ID.String()
 	writeJSON(response, http.StatusOK, AuthenticationResult{
-		User: handler.newCompatUser(result.Profile.ID, result.Profile.Name, result.Profile.HasPIN),
+		User: handler.newCompatUser(result.Profile.ID, result.Profile.Name),
 		SessionInfo: SessionInfoDto{
 			Id: result.Credential.SessionID, UserId: result.Profile.ID, UserName: result.Profile.Name,
 			Client: client.Client, DeviceName: client.Device, DeviceId: client.DeviceID, ApplicationVersion: client.Version,
@@ -228,14 +218,14 @@ func (handler *Handler) publicSystemInfo() (PublicSystemInfo, bool) {
 }
 
 func (handler *Handler) userForSession(session AuthenticatedSession) UserDto {
-	return handler.newCompatUser(session.ProfileID, session.ProfileName, session.ProfileHasPIN)
+	return handler.newCompatUser(session.ProfileID, session.ProfileName)
 }
 
-func (handler *Handler) newCompatUser(profileID, profileName string, hasPIN bool) UserDto {
+func (handler *Handler) newCompatUser(profileID, profileName string) UserDto {
 	playbackEnabled := handler != nil && handler.catalog != nil && handler.playSessions != nil
 	return UserDto{
 		Name: profileName, ServerId: handler.serverInfo.ID.String(), Id: profileID,
-		HasPassword: true, HasConfiguredPassword: true, HasConfiguredEasyPassword: hasPIN,
+		HasPassword: true, HasConfiguredPassword: true, HasConfiguredEasyPassword: false,
 		Policy: UserPolicy{
 			EnablePlayback:                 playbackEnabled,
 			EnableAudioPlaybackTranscoding: playbackEnabled,
@@ -283,18 +273,6 @@ func compatSecretAlias(first, second *string) (string, bool) {
 	return *second, true
 }
 
-func validCompatPIN(pin string) bool {
-	if len(pin) < 4 || len(pin) > 8 {
-		return false
-	}
-	for _, current := range pin {
-		if current < '0' || current > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func writeCompatLoginFailure(response http.ResponseWriter) {
-	writeCompatError(response, http.StatusUnauthorized, "InvalidCredentials", "The supplied credentials or profile selection are invalid")
+	writeCompatError(response, http.StatusUnauthorized, "InvalidCredentials", "The supplied credentials are invalid")
 }

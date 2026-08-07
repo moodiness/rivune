@@ -619,6 +619,21 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, profileI
 	`, profileID).Scan(&categoryID); err != nil {
 		return fmt.Errorf("query profile deletion category: %w", err)
 	}
+	// Credential operations lock the profile before its credential row. Match
+	// that order before the profile DELETE cascades into the credential table.
+	var lockedCredentialCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		FROM (
+			SELECT id
+			FROM profile_jellyfin_credentials
+			WHERE profile_id::text = $1
+			ORDER BY id
+			FOR UPDATE
+		) locked_credentials
+	`, profileID).Scan(&lockedCredentialCount); err != nil {
+		return fmt.Errorf("lock profile Jellyfin credentials for deletion: %w", err)
+	}
 	var remainingProfiles int
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)

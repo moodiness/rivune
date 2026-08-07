@@ -25,6 +25,8 @@ const (
 	sequenceServerID           = "71000000-0000-4000-8000-000000000001"
 	sequencePrimaryProfileID   = "72000000-0000-4000-8000-000000000002"
 	sequenceSecondaryProfileID = "73000000-0000-4000-8000-000000000003"
+	sequencePrimaryCredentialID = "7d000000-0000-4000-8000-00000000000d"
+	sequenceSecondaryCredentialID = "7e000000-0000-4000-8000-00000000000e"
 	sequenceSeriesID           = "74000000-0000-4000-8000-000000000004"
 	sequenceSeasonID           = "75000000-0000-4000-8000-000000000005"
 	sequenceEpisodeID          = "76000000-0000-4000-8000-000000000006"
@@ -46,14 +48,14 @@ func (authentication *sequenceAuthentication) Login(_ context.Context, input Com
 	}
 	var token, sessionID, profileID, profileName, nativeSessionID, userID string
 	switch {
-	case strings.EqualFold(input.Username, "owner/Main"):
+	case strings.EqualFold(input.Username, sequencePrimaryCredentialID):
 		token = compatTestToken(31)
 		sessionID = "77000000-0000-4000-8000-000000000007"
 		profileID = sequencePrimaryProfileID
 		profileName = "Main"
 		nativeSessionID = "78000000-0000-4000-8000-000000000008"
 		userID = "79000000-0000-4000-8000-000000000009"
-	case strings.EqualFold(input.Username, "owner/Guest"):
+	case strings.EqualFold(input.Username, sequenceSecondaryCredentialID):
 		token = compatTestToken(32)
 		sessionID = "7a000000-0000-4000-8000-00000000000a"
 		profileID = sequenceSecondaryProfileID
@@ -414,7 +416,7 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 		t.Fatalf("public compatibility identity is incomplete: %+v", publicInfo)
 	}
 
-	primaryLogin := fixture.login(t, "login-primary", "owner/Main")
+	primaryLogin := fixture.login(t, "login-primary", sequencePrimaryCredentialID)
 	sequenceRequireStatus(t, primaryLogin, http.StatusOK)
 	var primaryAuth AuthenticationResult
 	sequenceDecode(t, primaryLogin, &primaryAuth)
@@ -517,7 +519,7 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 		t.Fatalf("playback source enumeration lost binding or became eager: inputs=%+v profiles=%v opens=%d", fixture.playback.sourceInputs, fixture.playback.sourceProfiles, fixture.playback.openCalls)
 	}
 
-	secondaryLogin := fixture.login(t, "login-secondary", "owner/Guest")
+	secondaryLogin := fixture.login(t, "login-secondary", sequenceSecondaryCredentialID)
 	sequenceRequireStatus(t, secondaryLogin, http.StatusOK)
 	var secondaryAuth AuthenticationResult
 	sequenceDecode(t, secondaryLogin, &secondaryAuth)

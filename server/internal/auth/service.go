@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -57,12 +58,25 @@ type Service struct {
 }
 
 type LoginInput struct {
+	Username   string
+	Password   string
+	DeviceID   string
+	DeviceName string
+	Platform   string
+}
+
+type JellyfinProfileLoginInput struct {
 	Username        string
 	Password        string
-	DeviceID        string
 	LinkedDeviceKey string
 	DeviceName      string
 	Platform        string
+}
+
+type JellyfinProfileLoginResult struct {
+	Tokens      TokenPair
+	ProfileID   string
+	ProfileName string
 }
 
 type TokenPair struct {
@@ -166,7 +180,6 @@ func NewService(pool *pgxpool.Pool, accessTTL, refreshTTL time.Duration, timezon
 func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error) {
 	input.Username = strings.TrimSpace(input.Username)
 	input.DeviceID = strings.TrimSpace(input.DeviceID)
-	input.LinkedDeviceKey = strings.TrimSpace(input.LinkedDeviceKey)
 	input.DeviceName = strings.TrimSpace(input.DeviceName)
 	input.Platform = strings.TrimSpace(input.Platform)
 	if err := validateLoginInput(input); err != nil {
@@ -237,6 +250,291 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 
 	if err := tx.Commit(ctx); err != nil {
 		return TokenPair{}, fmt.Errorf("commit login: %w", err)
+	}
+	return tokens, nil
+}
+
+// LoginJellyfinProfile authenticates an opaque profile credential and creates
+// a category-scoped native session already bound to that profile. It never
+// consults the owning user's password or the profile PIN.
+func (s *Service) LoginJellyfinProfile(ctx context.Context, input JellyfinProfileLoginInput) (JellyfinProfileLoginResult, error) {
+	credentialID, validUsername := parseJellyfinCredentialUsername(input.Username)
+	passwordDigest, validPassword := JellyfinAppPasswordDigest(input.Password)
+	input.LinkedDeviceKey = strings.TrimSpace(input.LinkedDeviceKey)
+	input.DeviceName = strings.TrimSpace(input.DeviceName)
+	input.Platform = strings.TrimSpace(input.Platform)
+	if !validUsername || !validPassword ||
+		!validLength(input.LinkedDeviceKey, 1, 128) ||
+		!validLength(input.DeviceName, 1, 120) ||
+		!validLength(input.Platform, 1, 32) {
+		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return JellyfinProfileLoginResult{}, fmt.Errorf("begin Jellyfin profile login: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var discoveredProfileID, discoveredOwnerUserID string
+	err = tx.QueryRow(ctx, `
+		SELECT profile_id::text, owner_user_id::text
+		FROM profile_jellyfin_credentials
+		WHERE id = $1::uuid AND revoked_at IS NULL
+	`, credentialID).Scan(&discoveredProfileID, &discoveredOwnerUserID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		dummyHash := make([]byte, sha256.Size)
+		_ = subtle.ConstantTimeCompare(passwordDigest, dummyHash)
+		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
+	}
+	if err != nil {
+		return JellyfinProfileLoginResult{}, fmt.Errorf("discover Jellyfin profile credential: %w", err)
+	}
+
+	var lockedUserID string
+	if err := tx.QueryRow(ctx, `
+		SELECT id::text
+		FROM users
+		WHERE id = $1::uuid
+		FOR SHARE
+	`, discoveredOwnerUserID).Scan(&lockedUserID); errors.Is(err, pgx.ErrNoRows) {
+		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
+	} else if err != nil {
+		return JellyfinProfileLoginResult{}, fmt.Errorf("lock Jellyfin credential owner: %w", err)
+	}
+
+	var result JellyfinProfileLoginResult
+	var categoryID, categoryName string
+	var categoryColor, categoryIcon *string
+	var access ProfileAccess
+	if err := tx.QueryRow(ctx, `
+		SELECT profile.id::text, profile.name,
+		       profile.category_id::text, access_category.name, access_category.color, access_category.icon,
+		       profile.enabled, profile.available_from::text, profile.available_until::text,
+		       to_char(profile.access_start_time, 'HH24:MI'),
+		       to_char(profile.access_end_time, 'HH24:MI')
+		FROM profiles profile
+		JOIN access_categories access_category ON access_category.id = profile.category_id
+		WHERE profile.id = $1::uuid
+		FOR SHARE OF profile, access_category
+	`, discoveredProfileID).Scan(
+		&result.ProfileID, &result.ProfileName,
+		&categoryID, &categoryName, &categoryColor, &categoryIcon,
+		&access.Enabled, &access.AvailableFrom, &access.AvailableUntil,
+		&access.AccessStartTime, &access.AccessEndTime,
+	); errors.Is(err, pgx.ErrNoRows) {
+		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
+	} else if err != nil {
+		return JellyfinProfileLoginResult{}, fmt.Errorf("lock Jellyfin credential profile: %w", err)
+	}
+
+	var grantExists bool
+	if err := tx.QueryRow(ctx, `
+		SELECT true
+		FROM user_profile_access
+		WHERE user_id = $1::uuid AND profile_id = $2::uuid
+		FOR SHARE
+	`, discoveredOwnerUserID, result.ProfileID).Scan(&grantExists); errors.Is(err, pgx.ErrNoRows) {
+		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
+	} else if err != nil {
+		return JellyfinProfileLoginResult{}, fmt.Errorf("lock Jellyfin credential profile grant: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, result.ProfileID); err != nil {
+		return JellyfinProfileLoginResult{}, fmt.Errorf("lock Jellyfin profile login: %w", err)
+	}
+
+	var profileID, ownerUserID string
+	var expectedPasswordHash []byte
+	var credentialGeneration int64
+	err = tx.QueryRow(ctx, `
+		SELECT id::text, profile_id::text, owner_user_id::text, password_hash, generation
+		FROM profile_jellyfin_credentials
+		WHERE id = $1::uuid AND revoked_at IS NULL
+		FOR UPDATE
+	`, credentialID).Scan(
+		&credentialID, &profileID, &ownerUserID, &expectedPasswordHash, &credentialGeneration,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		dummyHash := make([]byte, sha256.Size)
+		_ = subtle.ConstantTimeCompare(passwordDigest, dummyHash)
+		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
+	}
+	if err != nil {
+		return JellyfinProfileLoginResult{}, fmt.Errorf("lock Jellyfin profile credential: %w", err)
+	}
+	if profileID != discoveredProfileID || ownerUserID != discoveredOwnerUserID ||
+		len(expectedPasswordHash) != sha256.Size || subtle.ConstantTimeCompare(passwordDigest, expectedPasswordHash) != 1 {
+		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
+	}
+
+	now := time.Now().UTC()
+	access.AccessTimezone = s.timezone
+	if !grantExists || !ProfileAccessibleAt(access, now) {
+		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
+	}
+	deviceID, err := upsertJellyfinProfileDevice(ctx, tx, ownerUserID, result.ProfileID, categoryID, input)
+	if errors.Is(err, ErrDeviceQuotaReached) {
+		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
+	}
+	if err != nil {
+		return JellyfinProfileLoginResult{}, err
+	}
+
+	_, profileContextHash, err := NewProfileContext()
+	if err != nil {
+		return JellyfinProfileLoginResult{}, fmt.Errorf("issue Jellyfin profile context: %w", err)
+	}
+	categoryReference := &category.CategoryRef{
+		ID: categoryID, Name: categoryName, Color: categoryColor, Icon: categoryIcon,
+	}
+	result.Tokens, err = s.createJellyfinProfileSession(
+		ctx, tx, ownerUserID, deviceID, result.ProfileID, credentialID,
+		credentialGeneration, profileContextHash, categoryReference, now,
+	)
+	if err != nil {
+		return JellyfinProfileLoginResult{}, err
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE profile_jellyfin_credentials
+		SET last_used_at = $3
+		WHERE id = $1::uuid AND generation = $2 AND revoked_at IS NULL
+	`, credentialID, credentialGeneration, now)
+	if err != nil {
+		return JellyfinProfileLoginResult{}, fmt.Errorf("touch Jellyfin profile credential: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return JellyfinProfileLoginResult{}, fmt.Errorf("commit Jellyfin profile login: %w", err)
+	}
+	return result, nil
+}
+
+func parseJellyfinCredentialUsername(value string) (string, bool) {
+	if len(value) != 36 {
+		return "", false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if character != '-' {
+				return "", false
+			}
+			continue
+		}
+		if !((character >= '0' && character <= '9') ||
+			(character >= 'a' && character <= 'f') ||
+			(character >= 'A' && character <= 'F')) {
+			return "", false
+		}
+	}
+	return strings.ToLower(value), true
+}
+
+func upsertJellyfinProfileDevice(
+	ctx context.Context,
+	tx pgx.Tx,
+	userID, profileID, categoryID string,
+	input JellyfinProfileLoginInput,
+) (string, error) {
+	var mappedDeviceID string
+	err := tx.QueryRow(ctx, `
+		SELECT device_id::text
+		FROM jellyfin_compat_devices
+		WHERE user_id = $1::uuid
+		  AND profile_id = $2::uuid
+		  AND client_device_id = $3
+	`, userID, profileID, input.LinkedDeviceKey).Scan(&mappedDeviceID)
+	if err == nil {
+		var deviceID string
+		err = tx.QueryRow(ctx, `
+			UPDATE devices
+			SET name = $3, platform = $4, category_id = $5::uuid,
+			    last_seen_at = now(), updated_at = now()
+			WHERE id = $1::uuid AND user_id = $2::uuid
+			RETURNING id::text
+		`, mappedDeviceID, userID, input.DeviceName, input.Platform, categoryID).Scan(&deviceID)
+		if err == nil {
+			command, err := tx.Exec(ctx, `
+				UPDATE jellyfin_compat_devices
+				SET last_seen_at = now()
+				WHERE user_id = $1::uuid AND profile_id = $2::uuid
+				  AND client_device_id = $3 AND device_id = $4::uuid
+			`, userID, profileID, input.LinkedDeviceKey, deviceID)
+			if err != nil {
+				return "", fmt.Errorf("touch Jellyfin profile device mapping: %w", err)
+			}
+			if command.RowsAffected() != 1 {
+				return "", fmt.Errorf("Jellyfin profile device mapping changed while locked")
+			}
+			return deviceID, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("update Jellyfin profile device: %w", err)
+		}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("resolve Jellyfin profile device: %w", err)
+	}
+	var deviceID string
+	if err := reserveDeviceSlot(ctx, tx, userID); err != nil {
+		return "", err
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO devices (user_id, name, platform, category_id, approved_at, last_seen_at)
+		VALUES ($1::uuid, $2, $3, $4::uuid, now(), now())
+		RETURNING id::text
+	`, userID, input.DeviceName, input.Platform, categoryID).Scan(&deviceID); err != nil {
+		return "", fmt.Errorf("create Jellyfin profile device: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO jellyfin_compat_devices (
+			user_id, profile_id, client_device_id, device_id, last_seen_at
+		) VALUES ($1::uuid, $2::uuid, $3, $4::uuid, now())
+	`, userID, profileID, input.LinkedDeviceKey, deviceID); err != nil {
+		return "", fmt.Errorf("bind Jellyfin profile device: %w", err)
+	}
+	return deviceID, nil
+}
+
+func (s *Service) createJellyfinProfileSession(
+	ctx context.Context,
+	tx pgx.Tx,
+	userID, deviceID, profileID, credentialID string,
+	credentialGeneration int64,
+	profileContextHash []byte,
+	sessionCategory *category.CategoryRef,
+	now time.Time,
+) (TokenPair, error) {
+	tokens, accessHash, refreshHash, err := s.issueTokens(now)
+	if err != nil {
+		return TokenPair{}, err
+	}
+	tokens.DeviceID = deviceID
+	tokens.AuthorizationScope = AuthorizationScopeCategory
+	tokens.Category = sessionCategory
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO auth_sessions (
+			user_id, device_id, authorization_scope, category_id,
+			active_profile_id, profile_grant_expires_at, profile_context_hash,
+			jellyfin_credential_id, jellyfin_credential_generation,
+			access_token_hash, access_expires_at, refresh_expires_at, last_seen_at, last_ip
+		) VALUES (
+			$1::uuid, $2::uuid, 'category', $3::uuid,
+			$4::uuid, $5, $6, $7::uuid, $8,
+			$9, $10, $5, $11, NULLIF($12, '')::inet
+		)
+		RETURNING id::text
+	`, userID, deviceID, sessionCategory.ID, profileID, tokens.RefreshExpiresAt,
+		profileContextHash, credentialID, credentialGeneration, accessHash,
+		tokens.AccessExpiresAt, now, ClientIP(ctx)).Scan(&tokens.SessionID); err != nil {
+		return TokenPair{}, fmt.Errorf("create Jellyfin profile session: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO auth_refresh_tokens (token_hash, session_id, expires_at)
+		VALUES ($1, $2::uuid, $3)
+	`, refreshHash, tokens.SessionID, tokens.RefreshExpiresAt); err != nil {
+		return TokenPair{}, fmt.Errorf("store Jellyfin profile refresh token: %w", err)
 	}
 	return tokens, nil
 }
@@ -974,21 +1272,6 @@ func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input Log
 	if err != nil {
 		return "", nil, err
 	}
-	if input.LinkedDeviceKey != "" {
-		var mappedDeviceID string
-		err := tx.QueryRow(ctx, `
-			SELECT mapping.device_id::text
-			FROM jellyfin_compat_devices mapping
-			JOIN devices device
-			  ON device.id = mapping.device_id AND device.user_id = mapping.user_id
-			WHERE mapping.user_id = $1::uuid AND mapping.client_device_id = $2
-		`, userID, input.LinkedDeviceKey).Scan(&mappedDeviceID)
-		if err == nil {
-			input.DeviceID = mappedDeviceID
-		} else if !errors.Is(err, pgx.ErrNoRows) {
-			return "", nil, fmt.Errorf("resolve linked login device: %w", err)
-		}
-	}
 	var deviceID, categoryID string
 	if input.DeviceID == "" {
 		if err := reserveDeviceSlot(ctx, tx, userID); err != nil {
@@ -1023,22 +1306,13 @@ func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input Log
 			return "", nil, fmt.Errorf("update device: %w", err)
 		}
 	}
-	if input.LinkedDeviceKey != "" {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO jellyfin_compat_devices (user_id, client_device_id, device_id, last_seen_at)
-			VALUES ($1::uuid, $2, $3::uuid, now())
-			ON CONFLICT (user_id, client_device_id) DO UPDATE
-			SET device_id = EXCLUDED.device_id, last_seen_at = now()
-		`, userID, input.LinkedDeviceKey, deviceID); err != nil {
-			return "", nil, fmt.Errorf("bind linked login device: %w", err)
-		}
-	}
 	deviceCategory, err := loadCategoryRef(ctx, tx, categoryID)
 	if err != nil {
 		return "", nil, err
 	}
 	return deviceID, deviceCategory, nil
 }
+
 func reserveDeviceSlot(ctx context.Context, tx pgx.Tx, userID string) error {
 	var lockedUserID string
 	if err := tx.QueryRow(ctx, `
@@ -1168,9 +1442,6 @@ func validateLoginInput(input LoginInput) error {
 	}
 	if len(input.Password) < 1 || len(input.Password) > 256 {
 		return fmt.Errorf("%w: password must contain 1 to 256 bytes", ErrInvalidInput)
-	}
-	if input.LinkedDeviceKey != "" && !validLength(input.LinkedDeviceKey, 1, 128) {
-		return fmt.Errorf("%w: linked device key must contain 1 to 128 characters", ErrInvalidInput)
 	}
 	if !validLength(input.DeviceName, 1, 120) {
 		return fmt.Errorf("%w: deviceName must contain 1 to 120 characters", ErrInvalidInput)

@@ -121,16 +121,16 @@ paths:
   /Users/AuthenticateByName:
     post:
       tags: [Authentication]
-      summary: Authenticate an account and bind one profile
+      summary: Authenticate a profile application credential
       description: |
         Client metadata is required in one `MediaBrowser` or `Emby` authorization
         parameter header: `Client` (1–64 runes), `Device` (1–120), `DeviceId`
         (1–128), and `Version` (1–32). The header is metadata here, not an existing
-        credential. Use `account/profile` (profile name or UUID, case-insensitive) to
-        select explicitly. A bare account succeeds only when exactly one accessible
-        profile exists. A PIN-protected profile requires `ProfilePin`. Ambiguity,
-        inaccessible profiles, password/PIN failures, and unknown accounts share the
-        same opaque 401 response.
+        credential. `Username` is the stable opaque UUID displayed in the profile's
+        Rivune preferences and `Pw`/`Password` is its application password, displayed
+        only once by Rivune when it is created or rotated.
+        Native Rivune account names, account passwords, profile names, and profile PINs
+        are never accepted. Every credential failure shares the same opaque 401 response.
       operationId: authenticateJellyfinByName
       security: []
       parameters:
@@ -1447,23 +1447,27 @@ components:
       properties:
         Username:
           type: string
-          minLength: 1
-          maxLength: 256
-          description: "`account/profile` enables explicit profile selection."
-        UserName: { type: string, minLength: 1, maxLength: 256 }
+          format: uuid
+          description: Stable opaque profile credential UUID issued by Rivune.
+        UserName:
+          type: string
+          format: uuid
         Pw:
           type: string
-          minLength: 1
+          minLength: 54
+          maxLength: 54
+          pattern: "^rivune_jfa_[A-Za-z0-9_-]{43}$"
           writeOnly: true
-          x-maxUtf8Bytes: 256
-          description: Maximum 256 UTF-8 bytes.
+          x-maxUtf8Bytes: 54
+          description: Canonical one-shot Rivune profile application password.
         Password:
           type: string
-          minLength: 1
+          minLength: 54
+          maxLength: 54
+          pattern: "^rivune_jfa_[A-Za-z0-9_-]{43}$"
           writeOnly: true
-          x-maxUtf8Bytes: 256
-          description: Maximum 256 UTF-8 bytes.
-        ProfilePin: { type: string, pattern: "^[0-9]{4,8}$", writeOnly: true }
+          x-maxUtf8Bytes: 54
+          description: Canonical one-shot Rivune profile application password.
       description: >
         If both aliases in a pair are sent they must be identical. The JSON body is
         limited to 16 KiB and unknown properties or multiple JSON values are rejected.
@@ -1499,7 +1503,7 @@ components:
           description: UUID of the single profile bound to this compatibility credential.
         HasPassword: { type: boolean }
         HasConfiguredPassword: { type: boolean }
-        HasConfiguredEasyPassword: { type: boolean, description: Whether the bound profile has a PIN. }
+        HasConfiguredEasyPassword: { type: boolean, const: false, description: Profile PINs are not exposed through the compatibility API. }
         Policy: { $ref: "#/components/schemas/UserPolicy" }
         Configuration: { $ref: "#/components/schemas/UserConfiguration" }
     UserPolicy:
