@@ -78,6 +78,7 @@ type Patch struct {
 	MaximumDirectTitles              OptionalInt
 	PreferDirectPlay                 OptionalBool
 	AllowTranscoding                 OptionalBool
+	JellyfinEnabled                  OptionalBool
 	Transcoding                      OptionalString
 	HideUnreleased                   OptionalBool
 	MetadataLanguage                 OptionalString
@@ -108,6 +109,7 @@ type Values struct {
 	MaximumDirectTitles              *int             `json:"maximumDirectTitles,omitempty"`
 	PreferDirectPlay                 *bool            `json:"preferDirectPlay,omitempty"`
 	AllowTranscoding                 *bool            `json:"allowTranscoding,omitempty"`
+	JellyfinEnabled                  *bool            `json:"jellyfinEnabled,omitempty"`
 	Transcoding                      *TranscodingMode `json:"transcoding,omitempty"`
 	HideUnreleased                   *bool            `json:"hideUnreleased,omitempty"`
 	MetadataLanguage                 *string          `json:"metadataLanguage,omitempty"`
@@ -180,6 +182,49 @@ func NewService(pool *pgxpool.Pool) *Service {
 
 func (s *Service) Instance(ctx context.Context) (Layer, error) {
 	return queryLayer(ctx, s.pool, "SELECT schema_version, settings, updated_at FROM instance_settings WHERE instance_id = 1")
+}
+
+// InitializeJellyfinEnabled persists initial exactly once for legacy instance
+// rows. The row lock makes concurrent server starts converge on the first
+// committed value; an existing database value always wins.
+func (s *Service) InitializeJellyfinEnabled(ctx context.Context, initial bool) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin Jellyfin setting initialization: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	current, err := queryLayer(ctx, tx, "SELECT schema_version, settings, updated_at FROM instance_settings WHERE instance_id = 1 FOR UPDATE")
+	if errors.Is(err, pgx.ErrNoRows) {
+		return initial, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("query Jellyfin setting: %w", err)
+	}
+	if current.Values.JellyfinEnabled != nil {
+		value := *current.Values.JellyfinEnabled
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit Jellyfin setting read: %w", err)
+		}
+		return value, nil
+	}
+
+	current.Values.JellyfinEnabled = &initial
+	encoded, err := json.Marshal(current.Values)
+	if err != nil {
+		return false, fmt.Errorf("encode initial Jellyfin setting: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE instance_settings
+		SET schema_version = $1, settings = $2, updated_at = now()
+		WHERE instance_id = 1
+	`, schemaVersion, encoded); err != nil {
+		return false, fmt.Errorf("initialize Jellyfin setting: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit Jellyfin setting initialization: %w", err)
+	}
+	return initial, nil
 }
 func (s *Service) Maintenance(ctx context.Context) (Maintenance, error) {
 	var state Maintenance
@@ -504,7 +549,7 @@ func defaultEffective() Effective {
 }
 
 func validatePatch(patch Patch) error {
-	if !patch.InterfaceLanguage.Set && !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.MaximumCastMembers.Set && !patch.MaximumDirectTitles.Set && !patch.PreferDirectPlay.Set && !patch.AllowTranscoding.Set && !patch.Transcoding.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
+	if !patch.InterfaceLanguage.Set && !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.MaximumCastMembers.Set && !patch.MaximumDirectTitles.Set && !patch.PreferDirectPlay.Set && !patch.AllowTranscoding.Set && !patch.JellyfinEnabled.Set && !patch.Transcoding.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
 		!patch.AutoplayNextEpisode.Set && !patch.SkipIntroEnabled.Set && !patch.SkipRecapEnabled.Set && !patch.SkipOutroEnabled.Set &&
 		!patch.CardDensity.Set && !patch.AnimationsEnabled.Set && !patch.SubtitleSizePercent.Set && !patch.SubtitleTextColor.Set && !patch.SubtitleBackgroundOpacityPercent.Set &&
 		!patch.NotificationsEnabled.Set && !patch.NotificationDurationSeconds.Set && !patch.NotificationPollIntervalSeconds.Set {
@@ -590,6 +635,9 @@ func validateInstancePatch(patch Patch) error {
 	if err := validatePatch(patch); err != nil {
 		return err
 	}
+	if patch.JellyfinEnabled.Set && patch.JellyfinEnabled.Value == nil {
+		return fmt.Errorf("%w: jellyfinEnabled must be a boolean", ErrInvalidInput)
+	}
 	if patch.Transcoding.Set {
 		return fmt.Errorf("%w: transcoding is only valid for profile settings", ErrInvalidInput)
 	}
@@ -602,6 +650,9 @@ func validateProfilePatch(patch Patch) error {
 	}
 	if patch.AllowTranscoding.Set {
 		return fmt.Errorf("%w: allowTranscoding is only valid for instance settings", ErrInvalidInput)
+	}
+	if patch.JellyfinEnabled.Set {
+		return fmt.Errorf("%w: jellyfinEnabled is only valid for instance settings", ErrInvalidInput)
 	}
 	if patch.NotificationsEnabled.Set || patch.NotificationDurationSeconds.Set || patch.NotificationPollIntervalSeconds.Set {
 		return fmt.Errorf("%w: notification settings are only valid for instance settings", ErrInvalidInput)
@@ -683,6 +734,9 @@ func applyPatch(values Values, patch Patch) Values {
 	}
 	if patch.AllowTranscoding.Set {
 		values.AllowTranscoding = patch.AllowTranscoding.Value
+	}
+	if patch.JellyfinEnabled.Set {
+		values.JellyfinEnabled = patch.JellyfinEnabled.Value
 	}
 	if patch.Transcoding.Set {
 		if patch.Transcoding.Value == nil {

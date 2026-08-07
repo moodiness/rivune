@@ -33,6 +33,21 @@ const (
 var playlistURIAttribute = regexp.MustCompile(`[,:][ \t]*[A-Z0-9-]*URI="([^"]+)"`)
 
 const maximumPlaybackStartSeconds = 7 * 24 * 60 * 60
+const proxyAssetSessionSQL = `
+	UPDATE playback_sessions playback
+	SET last_seen_at = now()
+	FROM auth_sessions session
+	WHERE playback.id::text = $1
+	  AND playback.token_hash = $2
+	  AND playback.expires_at > now()
+	  AND playback.last_seen_at > now() - $3::interval
+	  AND session.id = playback.auth_session_id
+	  AND session.revoked_at IS NULL
+	  AND session.refresh_expires_at > now()
+	  AND session.active_profile_id = playback.profile_id
+	  AND session.profile_grant_expires_at > now()
+	RETURNING playback.assets
+`
 
 func processedMediaStart(raw string) (float64, error) {
 	if raw == "" {
@@ -46,25 +61,18 @@ func processedMediaStart(raw string) (float64, error) {
 }
 
 func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessionID, assetID, token, target, signature string) error {
+	return service.proxyAsset(w, r, sessionID, assetID, token, target, signature, nil)
+}
+
+func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessionID, assetID, token, target, signature string, buildChildURL func(deliveryChildState) (string, error)) error {
 	if token == "" {
 		return ErrSessionNotFound
 	}
 	digest := sha256.Sum256([]byte(token))
 	var encodedAssets []byte
-	err := service.pool.QueryRow(r.Context(), `
-		UPDATE playback_sessions playback
-		SET last_seen_at = now()
-		FROM auth_sessions session
-		WHERE playback.id::text = $1
-		  AND playback.token_hash = $2
-		  AND playback.expires_at > now()
-		  AND session.id = playback.auth_session_id
-		  AND session.revoked_at IS NULL
-		  AND session.refresh_expires_at > now()
-		  AND session.active_profile_id = playback.profile_id
-		  AND session.profile_grant_expires_at > now()
-		RETURNING playback.assets
-	`, sessionID, digest[:]).Scan(&encodedAssets)
+	err := service.pool.QueryRow(r.Context(), proxyAssetSessionSQL,
+		sessionID, digest[:], intervalLiteral(playbackSessionIdleTTL),
+	).Scan(&encodedAssets)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrSessionNotFound
 	}
@@ -87,7 +95,7 @@ func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessi
 	}
 	switch asset.Kind {
 	case processingRemux, processingTranscodeAudio, processingTranscode:
-		return service.proxyProcessingAsset(w, r, sessionID, token, target, signature, *asset)
+		return service.proxyProcessingAssetWithLinks(w, r, sessionID, token, target, signature, *asset, buildChildURL)
 	case assetKindEmbeddedSubtitle, assetKindConvertedSubtitle:
 		if target != "" || signature != "" || r.URL.Query().Get("file") != "" {
 			return ErrSessionNotFound
@@ -118,10 +126,24 @@ func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessi
 		if len(body) > maximumPlaylistBytes {
 			return fmt.Errorf("%w: HLS playlist exceeds %d bytes", ErrMediaSourceFailed, maximumPlaylistBytes)
 		}
-		rewritten, err := rewritePlaylist(body, response.Request.URL, func(resolved string) string {
+		var childErr error
+		rewritten, err := rewritePlaylistWithPolicy(body, response.Request.URL, buildChildURL != nil, func(resolved string) string {
 			signed := service.signTarget(sessionID, assetID, resolved)
-			return assetURL(sessionID, assetID, token, resolved, signed)
+			if buildChildURL == nil {
+				return assetURL(sessionID, assetID, token, resolved, signed)
+			}
+			if childErr != nil {
+				return ""
+			}
+			var childURL string
+			childURL, childErr = buildChildURL(deliveryChildState{
+				assetID: assetID, target: resolved, signature: signed,
+			})
+			return childURL
 		})
+		if childErr != nil {
+			return fmt.Errorf("%w: create HLS child capability: %v", ErrMediaSourceFailed, childErr)
+		}
 		if err != nil {
 			return fmt.Errorf("rewrite HLS playlist: %w", err)
 		}
@@ -129,7 +151,9 @@ func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessi
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(rewritten)))
 		w.WriteHeader(response.StatusCode)
-		_, _ = w.Write(rewritten)
+		if _, err := w.Write(rewritten); err != nil {
+			return fmt.Errorf("write HLS playlist: %w", err)
+		}
 		return nil
 	}
 
@@ -141,11 +165,21 @@ func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessi
 	if r.Method == http.MethodHead {
 		return nil
 	}
-	_, _ = io.Copy(w, response.Body)
+	return copyPlaybackAsset(w, response.Body)
+}
+
+func copyPlaybackAsset(destination io.Writer, source io.Reader) error {
+	if _, err := io.Copy(destination, source); err != nil {
+		return fmt.Errorf("copy playback asset: %w", err)
+	}
 	return nil
 }
 
 func (service *Service) proxyProcessingAsset(w http.ResponseWriter, r *http.Request, sessionID, token, target, signature string, asset storedAsset) error {
+	return service.proxyProcessingAssetWithLinks(w, r, sessionID, token, target, signature, asset, nil)
+}
+
+func (service *Service) proxyProcessingAssetWithLinks(w http.ResponseWriter, r *http.Request, sessionID, token, target, signature string, asset storedAsset, buildChildURL func(deliveryChildState) (string, error)) error {
 	if target != "" || signature != "" {
 		return ErrSessionNotFound
 	}
@@ -157,7 +191,7 @@ func (service *Service) proxyProcessingAsset(w http.ResponseWriter, r *http.Requ
 		return err
 	}
 	asset.StartSeconds = startSeconds
-	return service.serveHLS(w, r, sessionID, token, asset)
+	return service.serveHLS(w, r, sessionID, token, asset, buildChildURL)
 }
 
 func (service *Service) fetchAsset(ctx context.Context, incoming *http.Request, asset storedAsset, upstreamURL string) (*http.Response, error) {
@@ -247,6 +281,10 @@ func pathExtension(value string) string {
 }
 
 func rewritePlaylist(body []byte, base *url.URL, buildProxyURL func(string) string) ([]byte, error) {
+	return rewritePlaylistWithPolicy(body, base, false, buildProxyURL)
+}
+
+func rewritePlaylistWithPolicy(body []byte, base *url.URL, rejectUnresolved bool, buildProxyURL func(string) string) ([]byte, error) {
 	if err := validatePlaylistCardinality(body); err != nil {
 		return nil, fmt.Errorf("%w: invalid HLS playlist: %w", ErrMediaSourceFailed, err)
 	}
@@ -261,9 +299,11 @@ func rewritePlaylist(body []byte, base *url.URL, buildProxyURL func(string) stri
 				return nil, fmt.Errorf("%w: invalid HLS playlist: %w", ErrMediaSourceFailed, err)
 			}
 		case strings.HasPrefix(trimmed, "#"):
+			unresolved := false
 			err := writePlaylistURIAttributes(output, line, func(reference string) (string, bool) {
 				resolved, ok := resolvePlaylistReference(base, reference)
 				if !ok {
+					unresolved = true
 					return "", false
 				}
 				return buildProxyURL(resolved), true
@@ -271,9 +311,15 @@ func rewritePlaylist(body []byte, base *url.URL, buildProxyURL func(string) stri
 			if err != nil {
 				return nil, fmt.Errorf("%w: invalid HLS playlist: %w", ErrMediaSourceFailed, err)
 			}
+			if rejectUnresolved && unresolved {
+				return nil, fmt.Errorf("%w: invalid HLS playlist: unproxyable reference", ErrMediaSourceFailed)
+			}
 		default:
-			if resolved, ok := resolvePlaylistReference(base, trimmed); ok {
+			resolved, ok := resolvePlaylistReference(base, trimmed)
+			if ok {
 				line = buildProxyURL(resolved)
+			} else if rejectUnresolved {
+				return nil, fmt.Errorf("%w: invalid HLS playlist: unproxyable reference", ErrMediaSourceFailed)
 			}
 			if err := output.writeString(line); err != nil {
 				return nil, fmt.Errorf("%w: invalid HLS playlist: %w", ErrMediaSourceFailed, err)

@@ -57,18 +57,19 @@ type SourcesInput struct {
 }
 
 type SourceOption struct {
-	ID          string    `json:"id"`
-	SourceRef   string    `json:"sourceRef"`
-	AddonID     string    `json:"addonId"`
-	ManifestID  string    `json:"manifestId"`
-	AddonName   string    `json:"addonName,omitempty"`
-	StreamIndex int       `json:"streamIndex"`
-	Name        string    `json:"name"`
-	Description string    `json:"description,omitempty"`
-	Filename    string    `json:"filename,omitempty"`
-	Protocol    string    `json:"protocol"`
-	Container   string    `json:"container,omitempty"`
-	ExpiresAt   time.Time `json:"expiresAt"`
+	ID             string    `json:"id"`
+	SourceRef      string    `json:"sourceRef"`
+	AddonID        string    `json:"addonId"`
+	ManifestID     string    `json:"manifestId"`
+	AddonName      string    `json:"addonName,omitempty"`
+	StreamIndex    int       `json:"streamIndex"`
+	Name           string    `json:"name"`
+	Description    string    `json:"description,omitempty"`
+	Filename       string    `json:"filename,omitempty"`
+	Protocol       string    `json:"protocol"`
+	Container      string    `json:"container,omitempty"`
+	ExpiresAt      time.Time `json:"expiresAt"`
+	StableIdentity string    `json:"-"`
 }
 
 type SourceList struct {

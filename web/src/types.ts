@@ -818,6 +818,7 @@ export type SettingsValues = {
   maximumCastMembers?: number | null;
   maximumDirectTitles?: number | null;
   allowTranscoding?: boolean | null;
+  jellyfinEnabled?: boolean | null;
   transcoding?: "inherit" | "enabled" | "disabled" | null;
   preferDirectPlay?: boolean | null;
   hideUnreleased?: boolean | null;

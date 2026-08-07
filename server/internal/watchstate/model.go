@@ -195,3 +195,12 @@ type ContinueItem struct {
 type ContinuePage struct {
 	Items []ContinueItem `json:"items"`
 }
+
+// ContinueItemsPage is a deterministic offset window used by protocol
+// adapters without changing the native ContinuePage response contract.
+type ContinueItemsPage struct {
+	Items  []ContinueItem
+	Offset int
+	Limit  int
+	Total  int
+}

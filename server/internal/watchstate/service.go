@@ -122,13 +122,14 @@ type canonicalExternalIDResolver interface {
 
 type Service struct {
 	pool              *pgxpool.Pool
+	location          *time.Location
 	tracking          trackingSink
 	canonicalProvider canonicalTitleProvider
 	canonicalResolver canonicalExternalIDResolver
 }
 
-func NewService(pool *pgxpool.Pool, sinks ...trackingSink) *Service {
-	service := &Service{pool: pool}
+func NewService(pool *pgxpool.Pool, location *time.Location, sinks ...trackingSink) *Service {
+	service := &Service{pool: pool, location: location}
 	if len(sinks) > 0 {
 		service.tracking = sinks[0]
 	}
@@ -155,6 +156,22 @@ func (s *Service) enqueueTrackingTx(ctx context.Context, tx pgx.Tx, profileID, t
 }
 
 func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput) (TitleReference, error) {
+	return s.resolveTitle(ctx, principal, input, true, false)
+}
+
+// ResolveCatalogTitle canonicalizes a provider search result for an active,
+// authorized profile without requiring profile-management authority.
+func (s *Service) ResolveCatalogTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput) (TitleReference, error) {
+	return s.resolveTitle(ctx, principal, input, false, false)
+}
+
+// ResolveLinkedCatalogTitle revalidates linked-session authority after any
+// provider work and holds its authorization locks through persistence commit.
+func (s *Service) ResolveLinkedCatalogTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput) (TitleReference, error) {
+	return s.resolveTitle(ctx, principal, input, false, true)
+}
+
+func (s *Service) resolveTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput, requireManagement, linked bool) (TitleReference, error) {
 	input.MediaType = strings.ToLower(strings.TrimSpace(input.MediaType))
 	input.Provider = strings.ToLower(strings.TrimSpace(input.Provider))
 	input.ExternalID = strings.TrimSpace(input.ExternalID)
@@ -194,7 +211,7 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 		}
 		input.ExternalID = tvExternalID(input.SourceAddonID, input.ResourceID)
 		input.Released = ""
-		return s.resolveTVTitle(ctx, principal, input)
+		return s.resolveTVTitle(ctx, principal, input, linked)
 	}
 	if len(input.ExternalID) < 1 || len(input.ExternalID) > 512 {
 		return TitleReference{}, fmt.Errorf("%w: invalid external identifier", ErrInvalidInput)
@@ -205,17 +222,27 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 			return TitleReference{}, fmt.Errorf("%w: released must be a YYYY-MM-DD date", ErrInvalidInput)
 		}
 	}
-	input.SourceAddonID = ""
-	input.SourceCatalogID = ""
-	input.SourceName = ""
+	if input.Provider == "addon" && input.SourceAddonID != "" {
+		if !uuidPattern.MatchString(input.SourceAddonID) || len(input.SourceCatalogID) < 1 || len(input.SourceCatalogID) > 512 || len(input.SourceName) < 1 || len(input.SourceName) > 500 {
+			return TitleReference{}, fmt.Errorf("%w: invalid addon source snapshot", ErrInvalidInput)
+		}
+		expectedIdentity := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(input.SourceAddonID+"\x00"+input.MediaType+"\x00"+input.ResourceID)))
+		if input.ExternalID != expectedIdentity {
+			return TitleReference{}, fmt.Errorf("%w: addon source does not match external identity", ErrInvalidInput)
+		}
+	} else {
+		input.SourceAddonID = ""
+		input.SourceCatalogID = ""
+		input.SourceName = ""
+	}
 	input.Country = ""
 	input.Language = ""
 	input.Category = ""
 
 	if s.usesProfileScopedTitleIdentity(input) {
-		return s.persistProfileScopedTitle(ctx, principal, input)
+		return s.persistProfileScopedTitle(ctx, principal, input, requireManagement, linked)
 	}
-	if err := s.authorizeCanonicalTitleResolution(ctx, principal); err != nil {
+	if err := s.authorizeCanonicalTitleResolution(ctx, principal, linked); err != nil {
 		return TitleReference{}, err
 	}
 	canonical, err := s.resolveCanonicalTitle(ctx, input)
@@ -223,7 +250,7 @@ func (s *Service) ResolveTitle(ctx context.Context, principal auth.Principal, in
 		return TitleReference{}, err
 	}
 
-	return s.persistCanonicalTitle(ctx, principal, input, canonical)
+	return s.persistCanonicalTitle(ctx, principal, input, canonical, linked)
 }
 
 type customResolverVideo struct {
@@ -787,13 +814,18 @@ func storedTitleExternalID(externalID string) string {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(externalID)))
 }
 
-func (s *Service) authorizeCanonicalTitleResolution(ctx context.Context, principal auth.Principal) error {
+func (s *Service) authorizeCanonicalTitleResolution(ctx context.Context, principal auth.Principal, linked bool) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin title resolution authorization: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := authorizedActiveProfileID(ctx, tx, principal); err != nil {
+	if linked {
+		_, err = s.mutationProfileID(ctx, tx, principal, true)
+	} else {
+		_, err = authorizedActiveProfileID(ctx, tx, principal)
+	}
+	if err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -802,18 +834,51 @@ func (s *Service) authorizeCanonicalTitleResolution(ctx context.Context, princip
 	return nil
 }
 
-func (s *Service) persistProfileScopedTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput) (TitleReference, error) {
+func (s *Service) persistProfileScopedTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput, requireManagement, linked bool) (TitleReference, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return TitleReference{}, fmt.Errorf("begin profile title resolution: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profileID, err := authorizedActiveManagerProfileID(ctx, tx, principal)
+	var profileID string
+	if linked {
+		profileID, err = s.mutationProfileID(ctx, tx, principal, true)
+	} else if requireManagement {
+		profileID, err = authorizedActiveManagerProfileID(ctx, tx, principal)
+	} else {
+		profileID, err = authorizedActiveProfileID(ctx, tx, principal)
+	}
 	if err != nil {
 		return TitleReference{}, err
 	}
 	if err := lockProfileTitleIdentities(ctx, tx, profileID); err != nil {
 		return TitleReference{}, err
+	}
+	if input.SourceAddonID != "" {
+		var lockedAddonID string
+		if err := tx.QueryRow(ctx, `
+			/* watchstate.lock_profile_title_addon */
+			SELECT addon.id::text
+			FROM profile_addons addon
+			JOIN profiles profile ON profile.id = $2::uuid
+			WHERE addon.id = $1::uuid
+			  AND addon.enabled = true
+			  AND (
+			      EXISTS (
+			          SELECT 1 FROM addon_profile_access access
+			          WHERE access.addon_id = addon.id AND access.profile_id = profile.id
+			      ) OR EXISTS (
+			          SELECT 1 FROM addon_category_access access
+			          WHERE access.addon_id = addon.id AND access.category_id = profile.category_id
+			      )
+			  )
+			FOR SHARE OF addon
+		`, input.SourceAddonID, profileID).Scan(&lockedAddonID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return TitleReference{}, ErrNotFound
+			}
+			return TitleReference{}, fmt.Errorf("lock profile title addon access: %w", err)
+		}
 	}
 
 	var titleID string
@@ -839,17 +904,34 @@ func (s *Service) persistProfileScopedTitle(ctx context.Context, principal auth.
 		if identityCount >= maximumProfileTitleIdentitiesPerProfile {
 			return TitleReference{}, fmt.Errorf("%w: profile title identity capacity reached", ErrInvalidInput)
 		}
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO titles (
-				media_type, display_title, poster_url, background_url, release_info,
-				release_date, resource_id, resource_provider
-			)
-			VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''),
-			        NULLIF($6, '')::date, $7, $8)
-			RETURNING id::text
-		`, input.MediaType, input.Title, input.PosterURL, input.BackgroundURL,
-			input.ReleaseInfo, input.Released, input.ResourceID, input.Provider).Scan(&titleID); err != nil {
-			return TitleReference{}, fmt.Errorf("create profile-scoped title: %w", err)
+		if input.SourceAddonID == "" {
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO titles (
+					media_type, display_title, poster_url, background_url, release_info,
+					release_date, resource_id, resource_provider
+				)
+				VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''),
+				        NULLIF($6, '')::date, $7, $8)
+				RETURNING id::text
+			`, input.MediaType, input.Title, input.PosterURL, input.BackgroundURL,
+				input.ReleaseInfo, input.Released, input.ResourceID, input.Provider).Scan(&titleID); err != nil {
+				return TitleReference{}, fmt.Errorf("create profile-scoped title: %w", err)
+			}
+		} else {
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO titles (
+					media_type, display_title, poster_url, background_url, release_info,
+					release_date, resource_id, resource_provider, source_addon_id,
+					source_catalog_id, source_name
+				)
+				VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''),
+				        NULLIF($6, '')::date, $7, $8, $9::uuid, $10, $11)
+				RETURNING id::text
+			`, input.MediaType, input.Title, input.PosterURL, input.BackgroundURL,
+				input.ReleaseInfo, input.Released, input.ResourceID, input.Provider,
+				input.SourceAddonID, input.SourceCatalogID, input.SourceName).Scan(&titleID); err != nil {
+				return TitleReference{}, fmt.Errorf("create profile-scoped addon title: %w", err)
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO profile_title_external_ids (
@@ -862,20 +944,42 @@ func (s *Service) persistProfileScopedTitle(ctx context.Context, principal auth.
 	} else if err != nil {
 		return TitleReference{}, fmt.Errorf("find profile-scoped title identity: %w", err)
 	} else {
-		if _, err := tx.Exec(ctx, `
-			UPDATE titles
-			SET display_title = $2,
-			    poster_url = COALESCE(NULLIF($3, ''), poster_url),
-			    background_url = COALESCE(NULLIF($4, ''), background_url),
-			    release_info = COALESCE(NULLIF($5, ''), release_info),
-			    release_date = COALESCE(NULLIF($6, '')::date, release_date),
-			    resource_id = $7,
-			    resource_provider = $8,
-			    updated_at = now()
-			WHERE id = $1::uuid
-		`, titleID, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo,
-			input.Released, input.ResourceID, input.Provider); err != nil {
-			return TitleReference{}, fmt.Errorf("update profile-scoped title snapshot: %w", err)
+		if input.SourceAddonID == "" {
+			if _, err := tx.Exec(ctx, `
+				UPDATE titles
+				SET display_title = $2,
+				    poster_url = COALESCE(NULLIF($3, ''), poster_url),
+				    background_url = COALESCE(NULLIF($4, ''), background_url),
+				    release_info = COALESCE(NULLIF($5, ''), release_info),
+				    release_date = COALESCE(NULLIF($6, '')::date, release_date),
+				    resource_id = $7,
+				    resource_provider = $8,
+				    updated_at = now()
+				WHERE id = $1::uuid
+			`, titleID, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo,
+				input.Released, input.ResourceID, input.Provider); err != nil {
+				return TitleReference{}, fmt.Errorf("update profile-scoped title snapshot: %w", err)
+			}
+		} else {
+			if _, err := tx.Exec(ctx, `
+				UPDATE titles
+				SET display_title = $2,
+				    poster_url = COALESCE(NULLIF($3, ''), poster_url),
+				    background_url = COALESCE(NULLIF($4, ''), background_url),
+				    release_info = COALESCE(NULLIF($5, ''), release_info),
+				    release_date = COALESCE(NULLIF($6, '')::date, release_date),
+				    resource_id = $7,
+				    resource_provider = $8,
+				    source_addon_id = $9::uuid,
+				    source_catalog_id = $10,
+				    source_name = $11,
+				    updated_at = now()
+				WHERE id = $1::uuid
+			`, titleID, input.Title, input.PosterURL, input.BackgroundURL, input.ReleaseInfo,
+				input.Released, input.ResourceID, input.Provider, input.SourceAddonID,
+				input.SourceCatalogID, input.SourceName); err != nil {
+				return TitleReference{}, fmt.Errorf("update profile-scoped addon title snapshot: %w", err)
+			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -885,16 +989,21 @@ func (s *Service) persistProfileScopedTitle(ctx context.Context, principal auth.
 		TitleID: titleID, MediaType: input.MediaType, Provider: input.Provider,
 		ExternalID: input.ExternalID, ResourceID: input.ResourceID, Title: input.Title,
 		PosterURL: input.PosterURL, BackgroundURL: input.BackgroundURL, ReleaseInfo: input.ReleaseInfo,
+		SourceAddonID: input.SourceAddonID, SourceCatalogID: input.SourceCatalogID, SourceName: input.SourceName,
 	}, nil
 }
-func (s *Service) persistCanonicalTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput, canonical canonicalTitleSnapshot) (TitleReference, error) {
-
+func (s *Service) persistCanonicalTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput, canonical canonicalTitleSnapshot, linked bool) (TitleReference, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return TitleReference{}, fmt.Errorf("begin title resolution: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := authorizedActiveProfileID(ctx, tx, principal); err != nil {
+	if linked {
+		_, err = s.mutationProfileID(ctx, tx, principal, true)
+	} else {
+		_, err = authorizedActiveProfileID(ctx, tx, principal)
+	}
+	if err != nil {
 		return TitleReference{}, err
 	}
 	for _, identity := range canonical.identities {
@@ -1013,14 +1122,19 @@ func (s *Service) persistCanonicalTitle(ctx context.Context, principal auth.Prin
 	}, nil
 }
 
-func (s *Service) resolveTVTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput) (TitleReference, error) {
+func (s *Service) resolveTVTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput, linked bool) (TitleReference, error) {
 	storedExternalID := storedTitleExternalID(input.ExternalID)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return TitleReference{}, fmt.Errorf("begin title resolution: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profileID, err := authorizedActiveManagerProfileID(ctx, tx, principal)
+	var profileID string
+	if linked {
+		profileID, err = s.mutationProfileID(ctx, tx, principal, true)
+	} else {
+		profileID, err = authorizedActiveManagerProfileID(ctx, tx, principal)
+	}
 	if err != nil {
 		return TitleReference{}, err
 	}
@@ -1773,6 +1887,17 @@ func (s *Service) SetWatchedBatch(ctx context.Context, principal auth.Principal,
 }
 
 func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, titleID string, input UpdateProgressInput) (Progress, error) {
+	return s.updateProgress(ctx, principal, titleID, input, false)
+}
+
+// ApplyPlaybackEventForLinkedSession atomically revalidates protocol-linked
+// authority, checks the caller's version, writes the complete playback state,
+// and enqueues tracking before the transaction commits.
+func (s *Service) ApplyPlaybackEventForLinkedSession(ctx context.Context, principal auth.Principal, titleID string, input UpdateProgressInput) (Progress, error) {
+	return s.updateProgress(ctx, principal, titleID, input, true)
+}
+
+func (s *Service) updateProgress(ctx context.Context, principal auth.Principal, titleID string, input UpdateProgressInput, linked bool) (Progress, error) {
 	titleID, err := normalizeTitleID(titleID)
 	if err != nil {
 		return Progress{}, err
@@ -1785,7 +1910,7 @@ func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, 
 		return Progress{}, fmt.Errorf("begin playback progress update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	profileID, err := s.mutationProfileID(ctx, tx, principal, linked)
 	if err != nil {
 		return Progress{}, err
 	}
@@ -1838,6 +1963,16 @@ func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, 
 }
 
 func (s *Service) SetWatched(ctx context.Context, principal auth.Principal, titleID string, completed bool, input CompletionInput) (Progress, error) {
+	return s.setWatched(ctx, principal, titleID, completed, input, false)
+}
+
+// SetWatchedForLinkedSession revalidates protocol-linked authority while
+// holding the same transaction open through the watchstate commit.
+func (s *Service) SetWatchedForLinkedSession(ctx context.Context, principal auth.Principal, titleID string, completed bool, input CompletionInput) (Progress, error) {
+	return s.setWatched(ctx, principal, titleID, completed, input, true)
+}
+
+func (s *Service) setWatched(ctx context.Context, principal auth.Principal, titleID string, completed bool, input CompletionInput, linked bool) (Progress, error) {
 	titleID, err := normalizeTitleID(titleID)
 	if err != nil {
 		return Progress{}, err
@@ -1850,7 +1985,7 @@ func (s *Service) SetWatched(ctx context.Context, principal auth.Principal, titl
 		return Progress{}, fmt.Errorf("begin watched state update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
+	profileID, err := s.mutationProfileID(ctx, tx, principal, linked)
 	if err != nil {
 		return Progress{}, err
 	}
@@ -1899,6 +2034,20 @@ func (s *Service) SetWatched(ctx context.Context, principal auth.Principal, titl
 		return Progress{}, fmt.Errorf("commit watched state update: %w", err)
 	}
 	return progress, nil
+}
+
+func (s *Service) mutationProfileID(ctx context.Context, tx pgx.Tx, principal auth.Principal, linked bool) (string, error) {
+	if !linked {
+		return authorizedActiveProfileID(ctx, tx, principal)
+	}
+	reloaded, valid, err := auth.ReloadAndLockLinkedPrincipal(ctx, tx, principal, time.Now().UTC(), s.location)
+	if err != nil {
+		return "", fmt.Errorf("revalidate linked watchstate authority: %w", err)
+	}
+	if !valid || reloaded.ActiveProfileID == nil {
+		return "", ErrForbidden
+	}
+	return *reloaded.ActiveProfileID, nil
 }
 
 func (s *Service) ClearProgress(ctx context.Context, principal auth.Principal, titleID string, expectedVersion int64) error {

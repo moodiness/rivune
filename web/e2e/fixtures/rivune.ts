@@ -336,7 +336,7 @@ export class RivuneHarness {
   };
   private deviceAuthorizationFailure: { code: string; status: number } | null = null;
   private maintenance: { enabled: boolean; message: string | null } = { enabled: false, message: null };
-  private instanceSettings: Record<string, unknown> = { allowTranscoding: true, maximumCastMembers: 20, maximumDirectTitles: 20 };
+  private instanceSettings: Record<string, unknown> = { allowTranscoding: true, jellyfinEnabled: false, maximumCastMembers: 20, maximumDirectTitles: 20 };
   private readonly profileSettings = new Map<string, Record<string, unknown>>([
     ["alice", { transcoding: "inherit" }],
     ["bob", { transcoding: "inherit" }],

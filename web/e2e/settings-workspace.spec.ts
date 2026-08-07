@@ -4,7 +4,7 @@ import { CATEGORY_IDS, expect, test } from "./fixtures/rivune";
 import { selectOption } from "./helpers/select";
 
 const profileSections = ["appearance", "playback", "language", "subtitles", "connections"];
-const serverSections = ["appearance", "playback", "transcoding", "language", "subtitles"];
+const serverSections = ["appearance", "playback", "transcoding", "language", "subtitles", "connections"];
 
 const profileSectionCopy = [
   { id: "appearance", title: "Appearance", description: "Theme, motion, and content density." },
@@ -111,7 +111,7 @@ test("scope switching exposes only the categories valid for that target", async 
   await expect(page.locator("#settings-section-connections")).toBeVisible();
   await selectOption(scope, "server");
   await expect.poll(() => sectionIds(page)).toEqual(serverSections);
-  await expect(page.locator('[data-settings-section="connections"]')).toHaveCount(0);
+  await expect(page.locator('[data-settings-section="connections"]')).toHaveAccessibleName("Jellyfin API");
   await expect(page.locator('[data-settings-section="appearance"]')).toHaveAttribute("aria-current", "page");
   await expect(page.locator("#settings-section-appearance")).toBeVisible();
   await expect(page.locator(".settings-scope--server")).toContainText("Server defaults");
@@ -156,6 +156,41 @@ test("dirty preferences can be discarded or saved from the persistent action bar
   await expect(page.locator(".app-notification--success").filter({ hasText: "Alice" })).toHaveCount(1);
   await expect(page.locator(".settings-content .notice--success")).toHaveCount(0);
   await expect(page.getByRole("combobox", { name: "Switch scope" })).toBeEnabled();
+});
+
+test("server Jellyfin API toggle hydrates, discards, and saves minimal patches", async ({ page, rivune }) => {
+  await openSettings(page);
+
+  const scope = page.getByRole("combobox", { name: "Switch scope" });
+  await selectOption(scope, "server");
+  await page.locator('[data-settings-section="connections"]').click();
+
+  const jellyfin = page.getByRole("checkbox", { name: "Jellyfin" });
+  const saveBar = page.locator(".settings-save-bar");
+  await expect(jellyfin).not.toBeChecked();
+  await expect(page.locator("#jellyfin-enabled-description")).toHaveText("Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.");
+
+  await jellyfin.check();
+  await saveBar.getByRole("button", { name: "Discard changes" }).click();
+  await expect(jellyfin).not.toBeChecked();
+  expect(rivune.matching("/api/v1/settings", "PATCH")).toHaveLength(0);
+
+  await jellyfin.check();
+  await saveBar.getByRole("button", { name: "Save preferences" }).click();
+  const enabledRequest = await rivune.waitForRequest("/api/v1/settings", "PATCH");
+  expect(enabledRequest.body).toEqual({ jellyfinEnabled: true });
+  await expect(saveBar).toHaveCount(0);
+  await expect(jellyfin).toBeChecked();
+
+  await jellyfin.uncheck();
+  await saveBar.getByRole("button", { name: "Save preferences" }).click();
+  await expect.poll(() => rivune.matching("/api/v1/settings", "PATCH").length).toBe(2);
+  expect(rivune.matching("/api/v1/settings", "PATCH").at(-1)?.body).toEqual({ jellyfinEnabled: false });
+  await expect(saveBar).toHaveCount(0);
+
+  await selectOption(scope, "alice");
+  await page.locator('[data-settings-section="connections"]').click();
+  await expect(page.getByRole("checkbox", { name: "Jellyfin" })).toHaveCount(0);
 });
 
 test("global administrator assigns transcoding per profile", async ({ page, rivune }) => {

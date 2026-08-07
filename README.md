@@ -167,6 +167,7 @@ Set-Acl -LiteralPath .env -AclObject $acl
 | `RIVUNE_SIMKL_CLIENT_ID` | Optional Simkl client ID for account tracking | empty |
 | `RIVUNE_TRACKING_ENCRYPTION_KEY` | 64-character hexadecimal key encoding exactly 32 bytes, required when account tracking is enabled | empty |
 | `RIVUNE_PUBLIC_URL` | Public origin used by the server; HTTPS is required except for loopback-only local HTTP | `http://localhost:8080` |
+| `RIVUNE_JELLYFIN_ENABLED` | Initial default for the limited Jellyfin-compatible API; accepts only `true` or `false`. After setup, the persisted administrator setting is authoritative | `false` |
 | `RIVUNE_PORT` | Loopback host port mapped to Rivune by the default Compose file | `8080` |
 | `RIVUNE_LAN_ARTWORK_ORIGINS` | Optional comma-separated exact origins for trusted private-IP LAN artwork servers; explicit ports are required and paths, queries, credentials, DNS names, and special-use addresses are rejected | empty |
 | `TZ` | IANA timezone used by profile access dates and daily hours | `UTC` |
@@ -179,6 +180,10 @@ Set-Acl -LiteralPath .env -AclObject $acl
 | `RIVUNE_MEDIA_MAX_STORAGE_MB` | Temporary media workspace limit | `20480` |
 
 The Trakt and Simkl credentials identify the Rivune server application; they do not connect a global user account. Each Rivune profile links and controls its own Trakt and/or Simkl account from profile settings, and Rivune stores that profile's provider tokens encrypted with `RIVUNE_TRACKING_ENCRYPTION_KEY`.
+
+### Jellyfin-compatible clients
+
+Rivune can expose a limited Jellyfin-compatible API for supported external client workflows. It is disabled by default and does not turn Rivune into a complete Jellyfin server; unsupported Jellyfin features remain unavailable. For non-loopback installations, clients must use Rivune's HTTPS reverse-proxy origin rather than exposing the raw application port. See [Jellyfin-compatible client access](docs/operations.md#jellyfin-compatible-client-access) for activation, restart, login, and rollback steps.
 
 ### Provider credentials
 

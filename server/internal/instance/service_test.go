@@ -27,7 +27,7 @@ func TestAcquireSetupPendingBlocksExclusiveSetupLockUntilRelease(t *testing.T) {
 		t.Skip("test database is already configured")
 	}
 
-	service := NewService(pool, "setup-secret", "UTC")
+	service := NewService(pool, "setup-secret", "UTC", false)
 	release, err := service.AcquireSetupPending(ctx)
 	if err != nil {
 		t.Fatalf("acquire shared admission: %v", err)
@@ -73,7 +73,7 @@ func TestAdmissionReleaseWorksAfterRequestCancellationAndIsIdempotent(t *testing
 	if configured {
 		t.Skip("test database is already configured")
 	}
-	service := NewService(pool, "setup-secret", "UTC")
+	service := NewService(pool, "setup-secret", "UTC", false)
 	requestContext, cancel := context.WithCancel(context.Background())
 	release, err := service.AcquireSetupPending(requestContext)
 	if err != nil {
@@ -107,7 +107,7 @@ func TestAcquireSetupPendingRejectsConfiguredInstance(t *testing.T) {
 	if !configured {
 		t.Skip("test database is not configured")
 	}
-	_, err := NewService(pool, "setup-secret", "UTC").AcquireSetupPending(context.Background())
+	_, err := NewService(pool, "setup-secret", "UTC", false).AcquireSetupPending(context.Background())
 	if !errors.Is(err, ErrAlreadyConfigured) {
 		t.Fatalf("error = %v, want ErrAlreadyConfigured", err)
 	}
@@ -116,8 +116,8 @@ func TestAcquireSetupPendingRejectsConfiguredInstance(t *testing.T) {
 func TestDemoSessionAdmissionEnforcesSourceAndGlobalLimitsAcrossServices(t *testing.T) {
 	pool := openInstanceTestPool(t)
 	prepareDemoAdmissionTable(t, pool)
-	firstService := NewService(pool, "setup-secret", "UTC")
-	secondService := NewService(pool, "setup-secret", "UTC")
+	firstService := NewService(pool, "setup-secret", "UTC", false)
+	secondService := NewService(pool, "setup-secret", "UTC", false)
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	sourceA := sha256.Sum256([]byte("source-a"))
 	sourceB := sha256.Sum256([]byte("source-b"))
@@ -188,8 +188,8 @@ func TestConcurrentDemoAdmissionAcrossServicesNeverExceedsGlobalLimit(t *testing
 	pool := openInstanceTestPool(t)
 	prepareDemoAdmissionTable(t, pool)
 	services := []*Service{
-		NewService(pool, "setup-secret", "UTC"),
-		NewService(pool, "setup-secret", "UTC"),
+		NewService(pool, "setup-secret", "UTC", false),
+		NewService(pool, "setup-secret", "UTC", false),
 	}
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	const attempts = 12
@@ -251,7 +251,7 @@ func TestDemoAdmissionCleanupIsBounded(t *testing.T) {
 	}
 	activeSource := sha256.Sum256([]byte("active-source"))
 	if _, err := admitDemoSession(
-		NewService(pool, "setup-secret", "UTC"), activeSource, now, now.Add(time.Hour), 2, 1,
+		NewService(pool, "setup-secret", "UTC", false), activeSource, now, now.Add(time.Hour), 2, 1,
 	); err != nil {
 		t.Fatalf("admit after expired cleanup: %v", err)
 	}
@@ -261,6 +261,48 @@ func TestDemoAdmissionCleanupIsBounded(t *testing.T) {
 	}
 	if expired != 50 {
 		t.Fatalf("expired rows after bounded cleanup = %d, want 50", expired)
+	}
+}
+
+func TestSetupPersistsInitialJellyfinEnabled(t *testing.T) {
+	pool := openInstanceTestPool(t)
+	ctx := context.Background()
+	if err := database.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate setup database: %v", err)
+	}
+	var configured bool
+	if err := pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM instances WHERE id = 1)").Scan(&configured); err != nil {
+		t.Fatalf("read setup state: %v", err)
+	}
+	if configured {
+		t.Skip("test database is already configured")
+	}
+
+	result, err := NewService(pool, "setup-secret", "UTC", true).Setup(ctx, "setup-secret", SetupInput{
+		InstanceName: "Jellyfin settings test",
+		Username:     "jellyfin-settings-admin",
+		Password:     "password-long-enough",
+		ProfileName:  "Administrator",
+	})
+	if err != nil {
+		t.Fatalf("setup instance: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM profiles WHERE id = $1::uuid", result.ProfileID)
+		_, _ = pool.Exec(context.Background(), "DELETE FROM users WHERE id = $1::uuid", result.UserID)
+		_, _ = pool.Exec(context.Background(), "DELETE FROM instances WHERE id = 1")
+	})
+
+	var enabled bool
+	if err := pool.QueryRow(ctx, `
+		SELECT (settings ->> 'jellyfinEnabled')::boolean
+		FROM instance_settings
+		WHERE instance_id = 1
+	`).Scan(&enabled); err != nil {
+		t.Fatalf("read initial Jellyfin setting: %v", err)
+	}
+	if !enabled {
+		t.Fatal("setup did not persist enabled Jellyfin setting")
 	}
 }
 

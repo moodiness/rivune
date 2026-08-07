@@ -32,12 +32,14 @@ const (
 )
 
 type Service struct {
-	pool       *pgxpool.Pool
-	setupToken string
-	timezone   string
+	pool            *pgxpool.Pool
+	setupToken      string
+	timezone        string
+	jellyfinEnabled bool
 }
 
 type Info struct {
+	PublicID      string
 	Name          string
 	SetupRequired bool
 }
@@ -55,20 +57,20 @@ type SetupResult struct {
 	ProfileID  string
 }
 
-func NewService(pool *pgxpool.Pool, setupToken, timezone string) *Service {
-	return &Service{pool: pool, setupToken: setupToken, timezone: timezone}
+func NewService(pool *pgxpool.Pool, setupToken, timezone string, jellyfinEnabled bool) *Service {
+	return &Service{pool: pool, setupToken: setupToken, timezone: timezone, jellyfinEnabled: jellyfinEnabled}
 }
 
 func (s *Service) Info(ctx context.Context) (Info, error) {
-	var name string
-	err := s.pool.QueryRow(ctx, "SELECT name FROM instances WHERE id = 1").Scan(&name)
+	var publicID, name string
+	err := s.pool.QueryRow(ctx, "SELECT public_id::text, name FROM instances WHERE id = 1").Scan(&publicID, &name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Info{Name: "Rivune", SetupRequired: true}, nil
 	}
 	if err != nil {
 		return Info{}, fmt.Errorf("query instance: %w", err)
 	}
-	return Info{Name: name, SetupRequired: false}, nil
+	return Info{PublicID: publicID, Name: name, SetupRequired: false}, nil
 }
 
 // AcquireSetupPending holds a process-independent shared admission lock while a
@@ -299,7 +301,10 @@ func (s *Service) Setup(ctx context.Context, token string, input SetupInput) (Se
 	); err != nil {
 		return SetupResult{}, fmt.Errorf("grant profile access: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "INSERT INTO instance_settings (instance_id) VALUES (1)"); err != nil {
+	if _, err := tx.Exec(ctx,
+		"INSERT INTO instance_settings (instance_id, settings) VALUES (1, jsonb_build_object('jellyfinEnabled', $1::boolean))",
+		s.jellyfinEnabled,
+	); err != nil {
 		return SetupResult{}, fmt.Errorf("create instance settings: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "INSERT INTO profile_settings (profile_id) VALUES ($1)", result.ProfileID); err != nil {

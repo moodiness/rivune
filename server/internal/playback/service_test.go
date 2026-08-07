@@ -409,8 +409,8 @@ func TestSourcesWithoutAddonKeepsFanout(t *testing.T) {
 				t.Fatalf("unexpected fan-out resource: %+v", fetcher.fetchAllPath)
 			}
 			if len(list.Sources) != 2 ||
-				list.Sources[0].AddonID != "fanout-addon-a" || list.Sources[0].ManifestID != "org.example.streams.a" || list.Sources[0].AddonName != "First Streams" || list.Sources[0].Name != "First Movie" || list.Sources[0].SourceRef == "" ||
-				list.Sources[1].AddonID != "fanout-addon-b" || list.Sources[1].ManifestID != "org.example.streams.b" || list.Sources[1].AddonName != "Second Streams" || list.Sources[1].Name != "Second Movie" || list.Sources[1].SourceRef == "" {
+				list.Sources[0].AddonID != "fanout-addon-a" || list.Sources[0].ManifestID != "org.example.streams.a" || list.Sources[0].AddonName != "First Streams" || list.Sources[0].Name != "Source 1" || list.Sources[0].SourceRef == "" ||
+				list.Sources[1].AddonID != "fanout-addon-b" || list.Sources[1].ManifestID != "org.example.streams.b" || list.Sources[1].AddonName != "Second Streams" || list.Sources[1].Name != "Source 2" || list.Sources[1].SourceRef == "" {
 				t.Fatalf("fan-out stream provenance was not preserved: %+v", list.Sources)
 			}
 		})
@@ -1152,7 +1152,7 @@ func TestCreateSessionValidatesProvidersInsideTransactionBeforeWrite(t *testing.
 
 	_, err := service.createSession(context.Background(), principal, sourceReference{
 		MediaType: "movie", ResourceID: "resource-id",
-	}, "", nil, nil, nil, []string{"revoked-addon"}, nil)
+	}, "", nil, nil, nil, []string{"revoked-addon"}, nil, nil)
 	if err != ErrSourceReferenceExpired {
 		t.Fatalf("transactional provider denial = %v, want opaque expiry", err)
 	}
@@ -1266,7 +1266,7 @@ func TestCreateSessionCleansOnlyCreatedSessionAfterAuthorizationLoss(t *testing.
 
 	_, err := service.createSession(context.Background(), principal, sourceReference{
 		MediaType: "movie", ResourceID: "resource-id",
-	}, "", nil, nil, nil, nil, nil)
+	}, "", nil, nil, nil, nil, nil, nil)
 	if !errors.Is(err, ErrActiveProfileRequired) {
 		t.Fatalf("createSession error = %v, want original authorization denial", err)
 	}
@@ -1287,6 +1287,55 @@ func TestCreateSessionCleansOnlyCreatedSessionAfterAuthorizationLoss(t *testing.
 	}
 	if _, exists := service.hlsJobs[createdSessionID+"/source-id"]; exists {
 		t.Fatal("authorization-loss cleanup retained the created session HLS job")
+	}
+}
+
+func TestCloseDeliverySessionUsesOpaqueHandleAfterLinkedLoginRevocation(t *testing.T) {
+	profileID := "11111111-1111-4111-8111-111111111111"
+	const (
+		authSessionID     = "revoked-auth-session"
+		playbackSessionID = "playback-session"
+		playbackToken     = "opaque-playback-token"
+	)
+	var cleanupQuery string
+	var cleanupArguments []any
+	transaction := &playbackTransactionStub{exec: func(query string, arguments ...any) (pgconn.CommandTag, error) {
+		cleanupQuery = query
+		cleanupArguments = append([]any(nil), arguments...)
+		return pgconn.NewCommandTag("DELETE 1"), nil
+	}}
+	service := &Service{
+		profileTxFactory: func(context.Context, auth.Principal) (playbackProfileTransaction, error) {
+			t.Fatal("delivery cleanup re-authorized a revoked linked login")
+			return nil, ErrActiveProfileRequired
+		},
+		sessionCleanupTxFactory: func(context.Context) (playbackProfileTransaction, error) {
+			return transaction, nil
+		},
+	}
+	handle := DeliveryHandle{
+		sessionID: playbackSessionID, assetID: "stream-id", token: playbackToken,
+		children: newDeliveryChildTable(),
+	}
+	principal := auth.Principal{SessionID: authSessionID, ActiveProfileID: &profileID}
+	if err := service.Close(context.Background(), principal, handle); err != nil {
+		t.Fatalf("close revoked linked delivery: %v", err)
+	}
+	if !transaction.commitCalled {
+		t.Fatal("delivery cleanup transaction was not committed")
+	}
+	for _, required := range []string{"id::text = $1", "auth_session_id = $2", "profile_id = $3::uuid", "token_hash = $4"} {
+		if !strings.Contains(cleanupQuery, required) {
+			t.Fatalf("delivery cleanup query missing %q: %s", required, cleanupQuery)
+		}
+	}
+	if len(cleanupArguments) != 4 || cleanupArguments[0] != playbackSessionID || cleanupArguments[1] != authSessionID || cleanupArguments[2] != profileID {
+		t.Fatalf("delivery cleanup arguments = %#v", cleanupArguments)
+	}
+	wantHash := sha256.Sum256([]byte(playbackToken))
+	gotHash, ok := cleanupArguments[3].([]byte)
+	if !ok || string(gotHash) != string(wantHash[:]) {
+		t.Fatalf("delivery cleanup token hash = %#v", cleanupArguments[3])
 	}
 }
 
@@ -1319,7 +1368,7 @@ func TestCreateSessionPreservesAuthorizationErrorWhenCleanupFails(t *testing.T) 
 
 	_, err := service.createSession(context.Background(), principal, sourceReference{
 		MediaType: "movie", ResourceID: "resource-id",
-	}, "", nil, nil, nil, nil, nil)
+	}, "", nil, nil, nil, nil, nil, nil)
 	if !errors.Is(err, ErrActiveProfileRequired) {
 		t.Fatalf("createSession error = %v, want original authorization denial", err)
 	}

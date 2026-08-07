@@ -57,6 +57,7 @@ type settingsPatchRequest struct {
 	MaximumDirectTitles              nullableInt    `json:"maximumDirectTitles,omitempty"`
 	PreferDirectPlay                 nullableBool   `json:"preferDirectPlay,omitempty"`
 	AllowTranscoding                 nullableBool   `json:"allowTranscoding,omitempty"`
+	JellyfinEnabled                  nullableBool   `json:"jellyfinEnabled,omitempty"`
 	Transcoding                      nullableString `json:"transcoding,omitempty"`
 	HideUnreleased                   nullableBool   `json:"hideUnreleased,omitempty"`
 	MetadataLanguage                 nullableString `json:"metadataLanguage,omitempty"`
@@ -93,9 +94,19 @@ func (a *API) updateInstanceSettings(w http.ResponseWriter, r *http.Request, pri
 	if !ok {
 		return
 	}
+	if patch.JellyfinEnabled.Set {
+		a.jellyfinCompatibilitySettingsMu.Lock()
+		defer a.jellyfinCompatibilitySettingsMu.Unlock()
+	}
 	layer, err := a.settings.UpdateInstance(r.Context(), principal, patch)
+	if patch.JellyfinEnabled.Set && err != nil {
+		a.requestJellyfinCompatibilityReconciliation()
+	}
 	if writeSettingsError(a, w, err, "update instance settings") {
 		return
+	}
+	if patch.JellyfinEnabled.Set {
+		a.setJellyfinCompatibilityDesired(*patch.JellyfinEnabled.Value)
 	}
 	writeJSON(w, http.StatusOK, newSettingsLayerResponse(layer))
 }
@@ -179,6 +190,10 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return settings.Patch{}, false
 	}
+	if request.JellyfinEnabled.Set && request.JellyfinEnabled.Value == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "jellyfinEnabled must be a boolean")
+		return settings.Patch{}, false
+	}
 	return settings.Patch{
 		InterfaceLanguage:                settings.OptionalString{Set: request.InterfaceLanguage.Set, Value: request.InterfaceLanguage.Value},
 		Theme:                            settings.OptionalString{Set: request.Theme.Set, Value: request.Theme.Value},
@@ -187,6 +202,7 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		MaximumDirectTitles:              settings.OptionalInt{Set: request.MaximumDirectTitles.Set, Value: request.MaximumDirectTitles.Value},
 		PreferDirectPlay:                 settings.OptionalBool{Set: request.PreferDirectPlay.Set, Value: request.PreferDirectPlay.Value},
 		AllowTranscoding:                 settings.OptionalBool{Set: request.AllowTranscoding.Set, Value: request.AllowTranscoding.Value},
+		JellyfinEnabled:                  settings.OptionalBool{Set: request.JellyfinEnabled.Set, Value: request.JellyfinEnabled.Value},
 		Transcoding:                      settings.OptionalString{Set: request.Transcoding.Set, Value: request.Transcoding.Value},
 		HideUnreleased:                   settings.OptionalBool{Set: request.HideUnreleased.Set, Value: request.HideUnreleased.Value},
 		MetadataLanguage:                 settings.OptionalString{Set: request.MetadataLanguage.Set, Value: request.MetadataLanguage.Value},

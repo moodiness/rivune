@@ -57,11 +57,12 @@ type Service struct {
 }
 
 type LoginInput struct {
-	Username   string
-	Password   string
-	DeviceID   string
-	DeviceName string
-	Platform   string
+	Username        string
+	Password        string
+	DeviceID        string
+	LinkedDeviceKey string
+	DeviceName      string
+	Platform        string
 }
 
 type TokenPair struct {
@@ -165,6 +166,7 @@ func NewService(pool *pgxpool.Pool, accessTTL, refreshTTL time.Duration, timezon
 func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error) {
 	input.Username = strings.TrimSpace(input.Username)
 	input.DeviceID = strings.TrimSpace(input.DeviceID)
+	input.LinkedDeviceKey = strings.TrimSpace(input.LinkedDeviceKey)
 	input.DeviceName = strings.TrimSpace(input.DeviceName)
 	input.Platform = strings.TrimSpace(input.Platform)
 	if err := validateLoginInput(input); err != nil {
@@ -972,6 +974,21 @@ func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input Log
 	if err != nil {
 		return "", nil, err
 	}
+	if input.LinkedDeviceKey != "" {
+		var mappedDeviceID string
+		err := tx.QueryRow(ctx, `
+			SELECT mapping.device_id::text
+			FROM jellyfin_compat_devices mapping
+			JOIN devices device
+			  ON device.id = mapping.device_id AND device.user_id = mapping.user_id
+			WHERE mapping.user_id = $1::uuid AND mapping.client_device_id = $2
+		`, userID, input.LinkedDeviceKey).Scan(&mappedDeviceID)
+		if err == nil {
+			input.DeviceID = mappedDeviceID
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return "", nil, fmt.Errorf("resolve linked login device: %w", err)
+		}
+	}
 	var deviceID, categoryID string
 	if input.DeviceID == "" {
 		if err := reserveDeviceSlot(ctx, tx, userID); err != nil {
@@ -1004,6 +1021,16 @@ func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input Log
 		}
 		if err != nil {
 			return "", nil, fmt.Errorf("update device: %w", err)
+		}
+	}
+	if input.LinkedDeviceKey != "" {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO jellyfin_compat_devices (user_id, client_device_id, device_id, last_seen_at)
+			VALUES ($1::uuid, $2, $3::uuid, now())
+			ON CONFLICT (user_id, client_device_id) DO UPDATE
+			SET device_id = EXCLUDED.device_id, last_seen_at = now()
+		`, userID, input.LinkedDeviceKey, deviceID); err != nil {
+			return "", nil, fmt.Errorf("bind linked login device: %w", err)
 		}
 	}
 	deviceCategory, err := loadCategoryRef(ctx, tx, categoryID)
@@ -1141,6 +1168,9 @@ func validateLoginInput(input LoginInput) error {
 	}
 	if len(input.Password) < 1 || len(input.Password) > 256 {
 		return fmt.Errorf("%w: password must contain 1 to 256 bytes", ErrInvalidInput)
+	}
+	if input.LinkedDeviceKey != "" && !validLength(input.LinkedDeviceKey, 1, 128) {
+		return fmt.Errorf("%w: linked device key must contain 1 to 128 characters", ErrInvalidInput)
 	}
 	if !validLength(input.DeviceName, 1, 120) {
 		return fmt.Errorf("%w: deviceName must contain 1 to 120 characters", ErrInvalidInput)

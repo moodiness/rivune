@@ -60,27 +60,18 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	release, retryAfter, admitted := a.credentialAdmission.acquire(requestClientIP(r, a.config.TrustedProxies))
-	if !admitted {
-		writeAdmissionDenied(w, retryAfter)
-		return
-	}
-	defer release()
 
-	retryAfter, admitted = a.usernameAdmission.acquire(request.Username)
-	if !admitted {
-		writeAdmissionDenied(w, retryAfter)
-		return
-	}
-
-	tokens, err := a.auth.Login(r.Context(), auth.LoginInput{
+	tokens, err := a.loginCredentials(r.Context(), auth.LoginInput{
 		Username:   request.Username,
 		Password:   request.Password,
 		DeviceID:   request.Device.ID,
 		DeviceName: request.Device.Name,
 		Platform:   request.Device.Platform,
 	})
+	var admissionErr *credentialLoginAdmissionError
 	switch {
+	case errors.As(err, &admissionErr):
+		writeAdmissionDenied(w, admissionErr.retryAfter)
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "The username or password is invalid")

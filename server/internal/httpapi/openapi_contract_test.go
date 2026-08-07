@@ -403,11 +403,12 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 
 	t.Run("transcoding settings", func(t *testing.T) {
 		instanceAllowed := false
+		jellyfinEnabled := false
 		profileMode := settings.TranscodingModeEnabled
 		settingService := &fakeSettingsService{
 			instance: settings.Layer{
 				SchemaVersion: 1,
-				Values:        settings.Values{AllowTranscoding: &instanceAllowed},
+				Values:        settings.Values{AllowTranscoding: &instanceAllowed, JellyfinEnabled: &jellyfinEnabled},
 			},
 			profile: settings.Layer{
 				SchemaVersion: 1,
@@ -450,6 +451,8 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 
 		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"allowTranscoding":null}`, true)
 		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"allowTranscoding":"false"}`, false)
+		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"jellyfinEnabled":true}`, true)
+		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"jellyfinEnabled":null}`, false)
 		instancePatch := authenticatedContractRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(`{"allowTranscoding":false}`))
 		instancePatch.Header.Set("Content-Type", "application/json")
 		instancePatchResponse := serveContractRequest(t, api, instancePatch, http.StatusOK)
@@ -462,6 +465,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 
 		validateContractRequestBody(t, document, http.MethodPatch, profilePath, `{"transcoding":null}`, true)
 		validateContractRequestBody(t, document, http.MethodPatch, profilePath, `{"transcoding":"future"}`, false)
+		validateContractRequestBody(t, document, http.MethodPatch, profilePath, `{"jellyfinEnabled":true}`, false)
 		profilePatch := authenticatedContractRequest(http.MethodPatch, profilePath, bytes.NewBufferString(`{"transcoding":"enabled"}`))
 		profilePatch.Header.Set("Content-Type", "application/json")
 		profilePatchResponse := serveContractRequest(t, api, profilePatch, http.StatusOK)

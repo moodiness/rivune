@@ -16,16 +16,47 @@ type profileAuthorizationQuerier interface {
 }
 
 // ReloadAndLockPrincipal reloads the mutable authorization state for a
-// captured session. Locks follow the mutation order used by account and
-// profile updates: user, device, profile, profile grant, then session. The
-// caller supplies the validated instance timezone used for profile restrictions.
-// It is intended for deferred work that must not trust enqueue-time claims.
+// captured native access-token session. Locks follow the mutation order used by
+// account and profile updates: user, device, profile, profile grant, then
+// session. Protected work must commit in the caller-owned transaction while
+// these locks remain held.
 func ReloadAndLockPrincipal(
 	ctx context.Context,
 	tx pgx.Tx,
 	captured Principal,
 	now time.Time,
 	configuredLocation *time.Location,
+) (Principal, bool, error) {
+	if configuredLocation == nil {
+		return Principal{}, false, fmt.Errorf("configured timezone is required")
+	}
+	return reloadAndLockPrincipal(ctx, tx, captured, now, configuredLocation, false)
+}
+
+// ReloadAndLockLinkedPrincipal revalidates a captured protocol-linked session
+// in the caller-owned mutation transaction. Its authority is deliberately
+// bounded by refresh expiry, while ReloadAndLockPrincipal retains native
+// access-token expiry semantics.
+func ReloadAndLockLinkedPrincipal(
+	ctx context.Context,
+	tx pgx.Tx,
+	captured Principal,
+	now time.Time,
+	configuredLocation *time.Location,
+) (Principal, bool, error) {
+	if configuredLocation == nil {
+		return Principal{}, false, fmt.Errorf("configured timezone is required")
+	}
+	return reloadAndLockPrincipal(ctx, tx, captured, now, configuredLocation, true)
+}
+
+func reloadAndLockPrincipal(
+	ctx context.Context,
+	tx pgx.Tx,
+	captured Principal,
+	now time.Time,
+	configuredLocation *time.Location,
+	linked bool,
 ) (Principal, bool, error) {
 	if configuredLocation == nil {
 		return Principal{}, false, fmt.Errorf("configured timezone is required")
@@ -66,15 +97,14 @@ func ReloadAndLockPrincipal(
 		SELECT id::text, category_id::text, enabled,
 		       available_from::text, available_until::text,
 		       to_char(access_start_time, 'HH24:MI'),
-		       to_char(access_end_time, 'HH24:MI'),
-		       COALESCE(access_timezone, 'UTC')
+		       to_char(access_end_time, 'HH24:MI')
 		FROM profiles
 		WHERE id::text = $1
 		FOR SHARE
 	`, *captured.ActiveProfileID).Scan(
 		&principal.ActiveProfileID, &activeProfileCategoryID,
 		&access.Enabled, &access.AvailableFrom, &access.AvailableUntil,
-		&access.AccessStartTime, &access.AccessEndTime, &access.AccessTimezone,
+		&access.AccessStartTime, &access.AccessEndTime,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Principal{}, false, nil
@@ -105,10 +135,10 @@ func ReloadAndLockPrincipal(
 		  AND user_id::text = $2
 		  AND device_id::text = $3
 		  AND active_profile_id::text = $4
-		  AND access_expires_at > now()
+		  AND CASE WHEN $5::boolean THEN refresh_expires_at > now() ELSE access_expires_at > now() END
 		  AND revoked_at IS NULL
 		FOR SHARE
-	`, captured.SessionID, captured.UserID, captured.DeviceID, *captured.ActiveProfileID).Scan(
+	`, captured.SessionID, captured.UserID, captured.DeviceID, *captured.ActiveProfileID, linked).Scan(
 		&principal.SessionID, &principal.AuthorizationScope,
 		&principal.CategoryID, &principal.ProfileGrantExpiresAt,
 		&principal.ProfileContextHash,
@@ -122,13 +152,17 @@ func ReloadAndLockPrincipal(
 		return Principal{}, false, nil
 	}
 
-	if !validSessionScope(
+	scopeValid := validSessionScope(
 		principal.Role,
 		principal.AuthorizationScope,
 		principal.CategoryID,
 		deviceCategoryID,
 		activeProfileCategoryID,
-	) || (principal.AuthorizationScope == AuthorizationScopeCategory && !hasProfileAccess) {
+	)
+	if linked && principal.AuthorizationScope == AuthorizationScopeGlobalAdministrator {
+		scopeValid = scopeValid && deviceCategoryID != nil && activeProfileCategoryID != nil && *deviceCategoryID == *activeProfileCategoryID
+	}
+	if !scopeValid || (principal.AuthorizationScope == AuthorizationScopeCategory && !hasProfileAccess) {
 		return Principal{}, false, nil
 	}
 	principal.ActiveProfileCanManage = principal.IsGlobalAdministrator() || grantedCanManage

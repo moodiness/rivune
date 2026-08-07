@@ -20,6 +20,7 @@ import (
 )
 
 type fakeInstanceService struct {
+	infoCalls   int
 	info        instance.Info
 	infoErr     error
 	setupResult instance.SetupResult
@@ -29,6 +30,7 @@ type fakeInstanceService struct {
 }
 
 func (f *fakeInstanceService) Info(context.Context) (instance.Info, error) {
+	f.infoCalls++
 	return f.info, f.infoErr
 }
 

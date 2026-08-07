@@ -177,12 +177,14 @@ func TestNormalizeSubtitlesRejectsAggregateLimitWithoutPartialResults(t *testing
 func TestSourceReferenceStoreRejectsOversizedBatchAtomically(t *testing.T) {
 	current := time.Now().UTC()
 	store := newSourceReferenceStore(func() time.Time { return current })
-	seed, err := store.put(sourceReference{AuthSessionID: "seed"})
+	profileID := "profile-id"
+	principal := auth.Principal{SessionID: "session-id", UserID: "user-id", DeviceID: "device-id", ActiveProfileID: &profileID}
+	seed, err := store.put(principal, sourceReference{})
 	if err != nil {
 		t.Fatalf("seed source reference: %v", err)
 	}
-	oversized := make([]sourceReference, maximumSourceReferences+1)
-	if _, err := store.putAll(oversized); err == nil {
+	oversized := make([]sourceReference, maximumSourceReferencesPerOwner+1)
+	if _, err := store.putAll(principal, oversized); err == nil {
 		t.Fatal("oversized source-reference batch was accepted")
 	}
 	if len(store.entries) != 1 {

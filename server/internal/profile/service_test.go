@@ -443,7 +443,7 @@ func TestCategoryBoundariesRejectDirectAndBatchProfileTampering(t *testing.T) {
 
 	mismatched := principal
 	mismatched.ActiveProfileID = new(profileBID)
-	if _, err := watchstate.NewService(pool).Library(ctx, mismatched, "movie", 1, 20); !errors.Is(err, watchstate.ErrProfileRequired) {
+	if _, err := watchstate.NewService(pool, time.UTC).Library(ctx, mismatched, "movie", 1, 20); !errors.Is(err, watchstate.ErrProfileRequired) {
 		t.Fatalf("cross-category active profile error = %v, want %v", err, watchstate.ErrProfileRequired)
 	}
 

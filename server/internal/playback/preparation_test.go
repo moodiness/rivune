@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -75,8 +76,8 @@ func (fetcher *preparationResourceFetcher) FetchAllPlaybackResources(_ context.C
 		return addon.ResourceBatch{Results: []addon.ResourceResult{{
 			AddonID: "addon-id", ManifestID: "manifest-id",
 			Payload: []byte(`{"streams":[
-				{"name":"First source","url":"https://media.example/first.mkv","behaviorHints":{"filename":"first.mkv"}},
-				{"name":"Selected source","url":"https://media.example/selected.mkv","behaviorHints":{"filename":"selected.mkv"}}
+				{"name":"First provider text","title":"First provider title","url":"https://media.example/first.mkv?signature=first-provider-url-secret","behaviorHints":{"filename":"first-provider-filename-secret"}},
+				{"name":"Bearer provider-name-secret; Cookie=provider-name-cookie; X-Header=provider-name-header","title":"Bearer provider-title-secret; Cookie=provider-title-cookie; X-Header=provider-title-header","description":"provider-description-secret","url":"https://media.example/selected.mkv?signature=provider-signed-url-secret","behaviorHints":{"filename":"Bearer provider-filename-secret; Cookie=provider-filename-cookie; X-Header=provider-filename-header","proxyHeaders":{"request":{"Authorization":"Bearer provider-auth-header-secret","Cookie":"provider-header-cookie-secret","X-Provider-Key":"provider-header-key-secret"}}}}
 			]}`),
 		}}}, nil
 	case "subtitles":
@@ -130,35 +131,56 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 		profileTxFactory: testPlaybackProfileTxFactory,
 	}
 
-	list, err := service.Sources(context.Background(), principal, SourcesInput{
+	input := SourcesInput{
 		MediaType: "movie", ResourceID: "tt1234567",
 		Capabilities: Capabilities{
 			StreamingProtocols: []string{"http"}, Containers: []string{"mp4"},
 			VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
 			ProcessingModes: []string{processingRemux},
 		},
-	})
+	}
+	list, err := service.Sources(context.Background(), principal, input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(list.Sources) != 2 || processor.calls.Load() != 0 {
 		t.Fatalf("listing sources unexpectedly inspected media: sources=%d probes=%d", len(list.Sources), processor.calls.Load())
 	}
+	if list.Sources[0].Name != "Source 1" || list.Sources[1].Name != "Source 2" || list.Sources[0].Name == list.Sources[1].Name {
+		t.Fatalf("source labels are not neutral and distinct: %+v", list.Sources)
+	}
+	if sourceOptionLabel(1) != list.Sources[0].Name || sourceOptionLabel(2) != list.Sources[1].Name {
+		t.Fatalf("source labels are not stable by ordinal: %+v", list.Sources)
+	}
+	for _, source := range list.Sources {
+		if source.Description != "" || source.Filename != "" {
+			t.Fatalf("source option retained provider display metadata: %+v", source)
+		}
+	}
 	encoded, err := json.Marshal(list)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "media.example") {
-		t.Fatalf("source list leaked a provider URL: %s", encoded)
-	}
-
-	var selected SourceOption
-	for _, source := range list.Sources {
-		if source.Name == "Selected source" {
-			selected = source
-			break
+	formatted := fmt.Sprintf("%+v", list)
+	for _, secret := range []string{
+		"media.example", "first-provider-url-secret", "first-provider-filename-secret", "First provider text", "First provider title",
+		"provider-name-secret", "provider-name-cookie", "provider-name-header", "provider-title-secret", "provider-title-cookie", "provider-title-header",
+		"provider-description-secret", "provider-signed-url-secret", "provider-filename-secret", "provider-filename-cookie", "provider-filename-header",
+		"provider-auth-header-secret", "provider-header-cookie-secret", "provider-header-key-secret",
+	} {
+		if strings.Contains(string(encoded), secret) || strings.Contains(formatted, secret) {
+			t.Fatalf("source DTO or log formatting leaked %q: json=%s formatted=%s", secret, encoded, formatted)
 		}
 	}
+	repeated, err := service.Sources(context.Background(), principal, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repeated.Sources) != len(list.Sources) || repeated.Sources[0].Name != list.Sources[0].Name || repeated.Sources[1].Name != list.Sources[1].Name {
+		t.Fatalf("source labels changed across equivalent listings: first=%+v repeated=%+v", list.Sources, repeated.Sources)
+	}
+
+	selected := list.Sources[1]
 	if len(selected.SourceRef) < 16 {
 		t.Fatalf("selected source has no opaque reference: %+v", selected)
 	}
@@ -175,6 +197,9 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	if cachedPlayback.asset == nil {
 		t.Fatal("prepared playback did not retain its stream asset")
 	}
+	if cachedPlayback.asset.Headers["Authorization"] != "Bearer provider-auth-header-secret" || cachedPlayback.asset.Headers["Cookie"] != "provider-header-cookie-secret" || cachedPlayback.asset.Headers["X-Provider-Key"] != "provider-header-key-secret" {
+		t.Fatal("prepared playback lost private provider headers")
+	}
 	cachedDuration := cachedPlayback.asset.DurationSeconds
 	if cachedDuration != 1320 {
 		t.Fatalf("prepared playback asset duration = %v, want 1320", cachedDuration)
@@ -182,14 +207,14 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	processor.mu.Lock()
 	lastURL := processor.lastURL
 	processor.mu.Unlock()
-	if lastURL != "https://media.example/selected.mkv" {
+	if lastURL != "https://media.example/selected.mkv?signature=provider-signed-url-secret" {
 		t.Fatalf("prepared the wrong provider source: %q", lastURL)
 	}
 
 	if _, err := service.Prepare(context.Background(), principal, PrepareInput{SourceRef: selected.SourceRef}); err != nil {
 		t.Fatal(err)
 	}
-	if processor.calls.Load() != 1 || fetcher.streamCalls.Load() != 1 || fetcher.subtitleCalls.Load() != 1 || fetcher.validationCalls.Load() != 4 || fetcher.validationAddonID != "addon-id" {
+	if processor.calls.Load() != 1 || fetcher.streamCalls.Load() != 2 || fetcher.subtitleCalls.Load() != 1 || fetcher.validationCalls.Load() != 4 || fetcher.validationAddonID != "addon-id" {
 		t.Fatalf("cached preparation repeated remote work or validated the wrong addon: probes=%d streams=%d subtitles=%d validations=%d addon=%q", processor.calls.Load(), fetcher.streamCalls.Load(), fetcher.subtitleCalls.Load(), fetcher.validationCalls.Load(), fetcher.validationAddonID)
 	}
 }
@@ -227,8 +252,8 @@ func TestPrepareAndResolveRejectRevokedSourceBeforePreparation(t *testing.T) {
 			fetcher := &preparationResourceFetcher{validationErr: test.validationErr}
 			processor := &countingProbeProcessor{inspection: MediaInspection{Container: "mp4"}}
 			references := newSourceReferenceStore(func() time.Time { return now })
-			reference, err := references.put(sourceReference{
-				AuthSessionID: principal.SessionID, ProfileID: profileID, MediaType: "movie", AddonMediaType: "movie", ResourceID: "tt1234567",
+			reference, err := references.put(principal, sourceReference{
+				MediaType: "movie", AddonMediaType: "movie", ResourceID: "tt1234567",
 				Source: Source{ID: "source-id", AddonID: "addon-id", ManifestID: "manifest-id", Mode: "direct", URL: "https://media.example/movie.mp4", Protocol: "http", Container: "mp4", Compatible: true},
 				Asset:  &storedAsset{ID: "source-id", Kind: "stream", URL: "https://media.example/movie.mp4", Container: "mp4"},
 			})
@@ -286,8 +311,8 @@ func TestCachedSubtitleProviderRevocationBlocksResolveBeforeSessionCreation(t *t
 		AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
 	}}
 	references := newSourceReferenceStore(func() time.Time { return now })
-	reference, err := references.put(sourceReference{
-		AuthSessionID: principal.SessionID, ProfileID: profileID, MediaType: "movie", AddonMediaType: "movie", ResourceID: "resource-id",
+	reference, err := references.put(principal, sourceReference{
+		MediaType: "movie", AddonMediaType: "movie", ResourceID: "resource-id",
 		Source:       Source{ID: "source-id", AddonID: "source-addon", ManifestID: "source-manifest", Mode: "direct", URL: "https://media.example/movie.mp4", Protocol: "http", Container: "mp4", Compatible: true},
 		Asset:        &storedAsset{ID: "source-id", Kind: "stream", URL: "https://media.example/movie.mp4", Container: "mp4"},
 		Capabilities: Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}, SubtitleModes: []string{"external"}},
@@ -359,8 +384,8 @@ func TestLateSourceRevocationBlocksPreparedPlaybackAtFinalBoundary(t *testing.T)
 				AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
 			}}
 			references := newSourceReferenceStore(func() time.Time { return now })
-			reference, err := references.put(sourceReference{
-				AuthSessionID: principal.SessionID, ProfileID: profileID, MediaType: "movie", AddonMediaType: "movie", ResourceID: "resource-id",
+			reference, err := references.put(principal, sourceReference{
+				MediaType: "movie", AddonMediaType: "movie", ResourceID: "resource-id",
 				Source:       Source{ID: "source-id", AddonID: "source-addon", Mode: "direct", URL: "https://media.example/movie.mp4", Protocol: "http", Container: "mp4", Compatible: true},
 				Asset:        &storedAsset{ID: "source-id", Kind: "stream", URL: "https://media.example/movie.mp4", Container: "mp4"},
 				Capabilities: Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}},
@@ -403,8 +428,8 @@ func TestPrepareAllowsPlaybackWithoutAddonProvenance(t *testing.T) {
 		SessionID: "auth-session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
 	}
 	references := newSourceReferenceStore(func() time.Time { return now })
-	reference, err := references.put(sourceReference{
-		AuthSessionID: principal.SessionID, ProfileID: profileID, MediaType: "movie", ResourceID: "local-resource",
+	reference, err := references.put(principal, sourceReference{
+		MediaType: "movie", ResourceID: "local-resource",
 		Source:       Source{ID: "local-source", Mode: "youtube", YTID: "local-video", Protocol: "youtube", Compatible: true},
 		Capabilities: Capabilities{StreamingProtocols: []string{"youtube"}},
 	})
@@ -519,8 +544,8 @@ func TestSourceReferenceIsSessionBoundClonedAndExpired(t *testing.T) {
 	store := newSourceReferenceStore(func() time.Time { return now })
 	profileID := "profile-id"
 	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, SessionID: "session-id", ActiveProfileID: &profileID}
-	reference, err := store.put(sourceReference{
-		AuthSessionID: principal.SessionID, ProfileID: profileID, MediaType: "movie", ResourceID: "tt1234567",
+	reference, err := store.put(principal, sourceReference{
+		MediaType: "movie", ResourceID: "tt1234567",
 		Source: Source{Name: "Original"}, Asset: &storedAsset{URL: "https://media.example/movie.mkv", Headers: map[string]string{"Authorization": "Bearer secret"}},
 	})
 	if err != nil {

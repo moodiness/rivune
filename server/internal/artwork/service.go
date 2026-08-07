@@ -224,6 +224,32 @@ func (service *Service) LocalURLs(ctx context.Context, upstream []string) []stri
 	return localized
 }
 
+// LookupKey resolves a materialized artwork reference to an existing
+// registration without registering, fetching, or exposing its source URL.
+func (service *Service) LookupKey(ctx context.Context, materialized string) (string, bool) {
+	materialized = strings.TrimSpace(materialized)
+	key := ""
+	expectedSource := ""
+	if strings.HasPrefix(materialized, publicPrefix) {
+		key = strings.TrimPrefix(materialized, publicPrefix)
+		if !validKey(key) {
+			return "", false
+		}
+	} else {
+		normalized, err := normalizeURLWithPolicy(materialized, !service.allowLocal, service.transportPolicy)
+		if err != nil {
+			return "", false
+		}
+		key = artworkKey(normalized)
+		expectedSource = normalized
+	}
+	record, found, err := service.lookup(ctx, key)
+	if err != nil || !found || expectedSource != "" && record.sourceURL != expectedSource {
+		return "", false
+	}
+	return key, true
+}
+
 func (service *Service) registerBatch(ctx context.Context, keys, urls []string) bool {
 	transaction, err := service.pool.Begin(ctx)
 	if err != nil {
@@ -343,12 +369,17 @@ func (service *Service) completeWarmup(key string) {
 }
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	service.ServeKey(response, request, request.PathValue("key"))
+}
+
+// ServeKey serves a previously registered artwork key without coupling callers
+// to the native artwork route or requiring an internal HTTP request.
+func (service *Service) ServeKey(response http.ResponseWriter, request *http.Request, key string) {
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		response.Header().Set("Allow", "GET, HEAD")
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	key := request.PathValue("key")
 	if !validKey(key) {
 		http.Error(response, "invalid artwork key", http.StatusBadRequest)
 		return

@@ -173,6 +173,44 @@ func TestLocalURLsPreservesOrderDuplicatesAndFailsClosed(t *testing.T) {
 		t.Fatalf("failed registration exposed provider inputs: %#v", failed)
 	}
 }
+
+func TestLookupKeyRequiresExistingMatchingRegistration(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("LookupKey must not fetch artwork")
+	}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+
+	source := fixture.URL + "/private/poster.png?token=provider-secret"
+	local := service.LocalURL(context.Background(), source)
+	wantKey := strings.TrimPrefix(local, publicPrefix)
+	for _, materialized := range []string{source, local} {
+		if key, ok := service.LookupKey(context.Background(), materialized); !ok || key != wantKey {
+			t.Fatalf("LookupKey(%q) = %q, %t; want %q, true", materialized, key, ok, wantKey)
+		}
+	}
+	for _, invalid := range []string{"", publicPrefix + "not-a-key", publicPrefix + "../" + strings.Repeat("a", 64), "https://user:secret@example.com/poster.png"} {
+		if key, ok := service.LookupKey(context.Background(), invalid); ok || key != "" {
+			t.Fatalf("invalid lookup %q = %q, %t", invalid, key, ok)
+		}
+	}
+	if key, ok := service.LookupKey(context.Background(), fixture.URL+"/unregistered"); ok || key != "" {
+		t.Fatalf("unregistered lookup = %q, %t", key, ok)
+	}
+	if key, ok := service.LookupKey(context.Background(), publicPrefix+strings.Repeat("f", 64)); ok || key != "" {
+		t.Fatalf("unknown local lookup = %q, %t", key, ok)
+	}
+	if key, ok := service.LookupKey(context.Background(), source+"&different=true"); ok || key != "" {
+		t.Fatalf("different source lookup = %q, %t", key, ok)
+	}
+	if _, err := pool.Exec(context.Background(), `DELETE FROM artwork_cache WHERE key = $1`, wantKey); err != nil {
+		t.Fatalf("remove registration: %v", err)
+	}
+	if key, ok := service.LookupKey(context.Background(), local); ok || key != "" {
+		t.Fatalf("stale local lookup = %q, %t", key, ok)
+	}
+}
 func TestRunWarmupCachesLocalizedArtworkBeforeBrowserRequest(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	imageBytes := testPNG(t, color.NRGBA{R: 38, G: 85, B: 119, A: 255})
@@ -327,6 +365,67 @@ func TestServeHTTPMissHitHeadAndUpstreamFailure(t *testing.T) {
 	}
 	if requests.Load() != requestsAfterFailure+1 {
 		t.Fatalf("failed artwork retry made %d new upstream requests, want 1", requests.Load()-requestsAfterFailure)
+	}
+}
+
+func TestServeKeyDirectPreservesDeliveryAndFailsClosed(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	imageBytes := testPNG(t, color.NRGBA{R: 36, G: 90, B: 140, A: 255})
+	var requests atomic.Int32
+	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		response.Header().Set("Content-Type", "image/png")
+		response.Write(imageBytes)
+	}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	localURL := service.LocalURL(context.Background(), fixture.URL+"/private/poster.png?token=provider-secret")
+	key := strings.TrimPrefix(localURL, publicPrefix)
+
+	getRequest := httptest.NewRequest(http.MethodGet, "/Items/item-id/Images/Primary?maxWidth=400", nil)
+	getRequest.SetPathValue("key", "path-value-must-not-be-used")
+	getResponse := httptest.NewRecorder()
+	service.ServeKey(getResponse, getRequest, key)
+	assertArtworkResponse(t, getResponse, imageBytes, true)
+	if getResponse.Header().Get("ETag") != `"`+key+`"` || getResponse.Header().Get("Location") != "" {
+		t.Fatalf("direct response etag=%q location=%q", getResponse.Header().Get("ETag"), getResponse.Header().Get("Location"))
+	}
+	if strings.Contains(getResponse.Body.String(), "provider-secret") || strings.Contains(getResponse.Body.String(), fixture.URL) {
+		t.Fatal("direct response exposed the registered provider URL")
+	}
+
+	headRequest := httptest.NewRequest(http.MethodHead, "/Items/item-id/Images/Primary", nil)
+	headResponse := httptest.NewRecorder()
+	service.ServeKey(headResponse, headRequest, key)
+	assertArtworkResponse(t, headResponse, imageBytes, false)
+	if headResponse.Header().Get("ETag") != `"`+key+`"` {
+		t.Fatalf("HEAD etag = %q", headResponse.Header().Get("ETag"))
+	}
+
+	assertArtworkResponse(t, serveArtwork(service, http.MethodGet, localURL), imageBytes, true)
+	if requests.Load() != 1 {
+		t.Fatalf("direct and native cache delivery made %d upstream requests, want 1", requests.Load())
+	}
+
+	for _, invalid := range []string{"", "bad", strings.Repeat("A", 64), "../" + strings.Repeat("a", 64)} {
+		response := httptest.NewRecorder()
+		service.ServeKey(response, httptest.NewRequest(http.MethodGet, "/Items/item-id/Images/Primary", nil), invalid)
+		if response.Code != http.StatusBadRequest || response.Body.String() != "invalid artwork key\n" || response.Header().Get("Location") != "" {
+			t.Fatalf("invalid key %q response = %d %q location=%q", invalid, response.Code, response.Body.String(), response.Header().Get("Location"))
+		}
+	}
+
+	unknown := artworkKey(t.TempDir())
+	missingResponse := httptest.NewRecorder()
+	service.ServeKey(missingResponse, httptest.NewRequest(http.MethodGet, "/Items/item-id/Images/Primary", nil), unknown)
+	if missingResponse.Code != http.StatusNotFound || missingResponse.Body.String() != "artwork not found\n" || missingResponse.Header().Get("Location") != "" {
+		t.Fatalf("unknown key response = %d %q location=%q", missingResponse.Code, missingResponse.Body.String(), missingResponse.Header().Get("Location"))
+	}
+
+	methodResponse := httptest.NewRecorder()
+	service.ServeKey(methodResponse, httptest.NewRequest(http.MethodPost, "/Items/item-id/Images/Primary", nil), key)
+	if methodResponse.Code != http.StatusMethodNotAllowed || methodResponse.Header().Get("Allow") != "GET, HEAD" || requests.Load() != 1 {
+		t.Fatalf("unsupported method response = %d allow=%q upstream=%d", methodResponse.Code, methodResponse.Header().Get("Allow"), requests.Load())
 	}
 }
 

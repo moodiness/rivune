@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/config"
 	"github.com/moodiness/rivune/server/internal/demo"
 	"github.com/moodiness/rivune/server/internal/instance"
+	"github.com/moodiness/rivune/server/internal/jellyfin"
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/metadata/fanart"
 	"github.com/moodiness/rivune/server/internal/metadata/tmdb"
@@ -103,6 +105,7 @@ type categoryService interface {
 
 type settingsService interface {
 	Instance(context.Context) (settings.Layer, error)
+	InitializeJellyfinEnabled(context.Context, bool) (bool, error)
 	Maintenance(context.Context) (settings.Maintenance, error)
 	UpdateMaintenance(context.Context, auth.Principal, settings.Maintenance) (settings.Maintenance, error)
 	UpdateInstance(context.Context, auth.Principal, settings.Patch) (settings.Layer, error)
@@ -233,35 +236,51 @@ type catalogArtworkPresenter interface {
 }
 
 type API struct {
-	config                config.Config
-	addons                addonService
-	artwork               *artworkcache.Service
-	catalogArtwork        catalogArtworkPresenter
-	collectionArtwork     collectionArtworkPresenter
-	calendar              calendarService
-	calendarRefresh       calendarRefreshWorker
-	categories            categoryService
-	pool                  *pgxpool.Pool
-	instances             instanceService
-	demo                  *demo.Service
-	collections           collectionService
-	auth                  authService
-	authMaintenance       authMaintenanceService
-	profiles              profileService
-	playback              playbackService
-	playbackMaintenance   playbackMaintenanceService
-	operations            operationsService
-	settings              settingsService
-	users                 userService
-	metadata              metadataService
-	logger                *slog.Logger
-	version               string
-	watchstate            watchstateService
-	tracking              trackingService
-	credentialAdmission   *requestAdmission
-	usernameAdmission     *usernameAdmission
-	deviceCodeAdmission   *requestAdmission
-	calendarFeedAdmission *requestAdmission
+	config                                  config.Config
+	addons                                  addonService
+	artwork                                 *artworkcache.Service
+	catalogArtwork                          catalogArtworkPresenter
+	collectionArtwork                       collectionArtworkPresenter
+	calendar                                calendarService
+	calendarRefresh                         calendarRefreshWorker
+	categories                              categoryService
+	pool                                    *pgxpool.Pool
+	instances                               instanceService
+	demo                                    *demo.Service
+	jellyfinCompatibility                   *jellyfin.Handler
+	jellyfinCompatibilityMu                 sync.Mutex
+	jellyfinCompatibilityDesired            bool
+	jellyfinCompatibilityRevision           uint64
+	jellyfinCompatibilitySettingsMu         sync.Mutex
+	jellyfinCompatibilityCancel             context.CancelFunc
+	jellyfinCompatibilityDone               <-chan struct{}
+	jellyfinCompatibilityRunOnce            sync.Once
+	jellyfinCompatibilitySignal             chan struct{}
+	jellyfinCompatibilityBuilder            func(context.Context) (*jellyfin.Handler, bool, error)
+	jellyfinCompatibilityRunner             func(context.Context, *jellyfin.Handler)
+	jellyfinCompatibilityBackoff            func(uint32) time.Duration
+	jellyfinCompatibilityRetrySeed          uint64
+	jellyfinCompatibilityReconciler         func(context.Context) (bool, error)
+	jellyfinCompatibilityReconcileRequested bool
+	jellyfinCompatibilityPollInterval       time.Duration
+	collections                             collectionService
+	auth                                    authService
+	authMaintenance                         authMaintenanceService
+	profiles                                profileService
+	playback                                playbackService
+	playbackMaintenance                     playbackMaintenanceService
+	operations                              operationsService
+	settings                                settingsService
+	users                                   userService
+	metadata                                metadataService
+	logger                                  *slog.Logger
+	version                                 string
+	watchstate                              watchstateService
+	tracking                                trackingService
+	credentialAdmission                     *requestAdmission
+	usernameAdmission                       *usernameAdmission
+	deviceCodeAdmission                     *requestAdmission
+	calendarFeedAdmission                   *requestAdmission
 }
 
 type errorEnvelope struct {
@@ -274,7 +293,14 @@ type apiError struct {
 	PublicMessage *string `json:"publicMessage,omitempty"`
 }
 
-func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version string) (*API, error) {
+func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version string) (*API, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	configuredLocation, err := time.LoadLocation(cfg.Timezone)
+	if err != nil {
+		return nil, fmt.Errorf("load configured timezone %q: %w", cfg.Timezone, err)
+	}
 	authService, err := auth.NewService(pool, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.Timezone)
 	if err != nil {
 		return nil, err
@@ -332,7 +358,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	if err != nil {
 		return nil, fmt.Errorf("initialize tracking integrations: %w", err)
 	}
-	metadataService := metadata.NewService(pool, metadataProvider, televisionEnricher, artworkEnricher, cfg.MetadataCacheTTL, logger)
+	metadataService := metadata.NewService(pool, metadataProvider, televisionEnricher, artworkEnricher, cfg.MetadataCacheTTL, logger, configuredLocation)
 	calendarService, err := calendar.NewService(pool, metadataService, cfg.Timezone, logger)
 	if err != nil {
 		return nil, fmt.Errorf("initialize calendar service: %w", err)
@@ -343,11 +369,17 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 	collectionService := collection.NewService(pool, addonService, collectionTMDB, collectionTrakt, collectionMDBList)
 	externalIDResolver, _ := metadataProvider.(metadata.ExternalIDResolver)
 	collectionService.SetFanartEnricher(metadataProvider, externalIDResolver, artworkEnricher, logger)
-	watchstateService := watchstate.NewService(pool, trackingService)
+	watchstateService := watchstate.NewService(pool, configuredLocation, trackingService)
 	watchstateService.SetCanonicalProvider(metadataProvider, externalIDResolver)
 	collectionService.SetArtworkPresenter(artworkService)
-	instanceManager := instance.NewService(pool, cfg.SetupToken, cfg.Timezone)
-	return &API{
+	profileManager := profile.NewService(pool, cfg.ProfileGrantTTL, cfg.Timezone)
+	settingsManager := settings.NewService(pool)
+	jellyfinEnabled, err := settingsManager.InitializeJellyfinEnabled(ctx, cfg.JellyfinEnabled)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Jellyfin setting: %w", err)
+	}
+	instanceManager := instance.NewService(pool, cfg.SetupToken, cfg.Timezone, cfg.JellyfinEnabled)
+	api := &API{
 		artwork:               artworkService,
 		catalogArtwork:        artworkService,
 		collectionArtwork:     artworkService,
@@ -362,11 +394,11 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		demo:                  demo.New(instanceManager, demo.Options{}),
 		auth:                  authService,
 		authMaintenance:       authService,
-		profiles:              profile.NewService(pool, cfg.ProfileGrantTTL, cfg.Timezone),
+		profiles:              profileManager,
 		playback:              playbackService,
 		playbackMaintenance:   playbackService,
 		logger:                logger,
-		settings:              settings.NewService(pool),
+		settings:              settingsManager,
 		users:                 user.NewService(pool),
 		metadata:              metadataService,
 		operations:            operationsService,
@@ -377,7 +409,20 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, version str
 		usernameAdmission:     newCredentialUsernameAdmission(),
 		deviceCodeAdmission:   newDeviceCodeAdmission(),
 		calendarFeedAdmission: newCalendarFeedAdmission(),
-	}, nil
+	}
+	api.jellyfinCompatibilityDesired = jellyfinEnabled
+	api.jellyfinCompatibilityReconciler = func(reconcileContext context.Context) (bool, error) {
+		layer, readErr := settingsManager.Instance(reconcileContext)
+		if readErr != nil {
+			return false, readErr
+		}
+		if layer.Values.JellyfinEnabled == nil {
+			return false, errors.New("instance Jellyfin setting is missing")
+		}
+		return *layer.Values.JellyfinEnabled, nil
+	}
+	api.initializeJellyfinCompatibility(pool, authService, profileManager, watchstateService, artworkService, playbackService, instanceManager, metadataService, addonService)
+	return api, nil
 }
 
 func (a *API) Handler() http.Handler {
@@ -509,11 +554,11 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/continue-watching", a.requireAuthentication(a.continueWatching))
 	mux.Handle("DELETE /api/v1/continue-watching/{titleId}", a.requireAuthentication(a.dismissContinue))
 	mux.HandleFunc("GET /", webui.Handler)
-	handler := http.Handler(mux)
+	nativeHandler := http.Handler(mux)
 	if a.demo != nil {
-		handler = a.demo.Handler(handler)
+		nativeHandler = a.demo.Handler(nativeHandler)
 	}
-	return a.middleware(handler)
+	return a.routeJellyfinCompatibility(a.middleware(nativeHandler))
 }
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
@@ -626,6 +671,7 @@ func (a *API) setup(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		a.internalError(w, "initialize instance", err)
 	default:
+		a.requestJellyfinCompatibilityActivation()
 		if a.demo != nil {
 			a.demo.Disable()
 		}

@@ -52,6 +52,8 @@ type Service struct {
 	targetSigningKey        [32]byte
 	hlsMu                   sync.Mutex
 	introDBCacheStores      atomic.Uint64
+	deliveryChildrenMu      sync.Mutex
+	deliveryChildren        *deliveryChildBudget
 	profileTxFactory        func(context.Context, auth.Principal) (playbackProfileTransaction, error)
 	sessionCleanupTxFactory func(context.Context) (playbackProfileTransaction, error)
 	hlsJobs                 map[string]*hlsJob
@@ -90,7 +92,8 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 		pool: pool, addons: addons, client: &http.Client{Transport: transport, CheckRedirect: playbackRedirectPolicy}, processor: processor,
 		introDBClient: &http.Client{Transport: transport.Clone(), Timeout: 8 * time.Second}, introDBBaseURL: introDBDefaultBaseURL,
 		now: now, mediaOptions: options, hlsJobs: make(map[string]*hlsJob), targetSigningKey: targetSigningKey,
-		references: newSourceReferenceStore(now), probes: newMediaProbeCache(now), preparations: newPlaybackPreparationCache(now),
+		deliveryChildren: newDeliveryChildBudget(maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerUser),
+		references:       newSourceReferenceStore(now), probes: newMediaProbeCache(now), preparations: newPlaybackPreparationCache(now),
 	}, nil
 }
 
@@ -113,6 +116,16 @@ func playbackRedirectPolicy(request *http.Request, via []*http.Request) error {
 }
 
 func (service *Service) Sources(ctx context.Context, principal auth.Principal, input SourcesInput) (SourceList, error) {
+	return service.sources(ctx, principal, input, false)
+}
+
+// SourcesAndPin creates and retains the returned source capabilities in one
+// store transaction for adapters that register them after this call returns.
+func (service *Service) SourcesAndPin(ctx context.Context, principal auth.Principal, input SourcesInput) (SourceList, error) {
+	return service.sources(ctx, principal, input, true)
+}
+
+func (service *Service) sources(ctx context.Context, principal auth.Principal, input SourcesInput, pin bool) (SourceList, error) {
 	input.MediaType = strings.TrimSpace(input.MediaType)
 	input.AddonID = strings.TrimSpace(input.AddonID)
 	input.ResourceID = strings.TrimSpace(input.ResourceID)
@@ -166,7 +179,6 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 			asset = &value
 		}
 		references = append(references, sourceReference{
-			AuthSessionID: principal.SessionID, ProfileID: *principal.ActiveProfileID,
 			MediaType: input.MediaType, AddonMediaType: addonMediaType, ResourceID: input.ResourceID,
 			Source: source, Asset: asset, Capabilities: input.Capabilities,
 			PreferredAudioLanguage: input.PreferredAudioLanguage, PreferredSubtitleLanguage: input.PreferredSubtitleLanguage,
@@ -174,9 +186,18 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 			ProviderErrors:                  providerErrors,
 		})
 	}
-	storedReferences, err := service.references.putAll(references)
+	var storedReferences []sourceReference
+	if pin {
+		storedReferences, err = service.references.putAllPinned(principal, references)
+	} else {
+		storedReferences, err = service.references.putAll(principal, references)
+	}
 	if err != nil {
 		return SourceList{}, fmt.Errorf("create source references: %w", err)
+	}
+	var pinnedIdentifiers []string
+	if pin {
+		pinnedIdentifiers = make([]string, 0, len(storedReferences))
 	}
 	options := make([]SourceOption, 0, len(storedReferences))
 	for index := range storedReferences {
@@ -184,15 +205,38 @@ func (service *Service) Sources(ctx context.Context, principal auth.Principal, i
 		source := reference.Source
 		options = append(options, SourceOption{
 			ID: source.ID, SourceRef: reference.ID, AddonID: source.AddonID, ManifestID: source.ManifestID, AddonName: source.AddonName,
-			StreamIndex: source.StreamIndex, Name: sourceDisplayName(source), Description: source.Description,
-			Filename: source.Filename, Protocol: source.Protocol, Container: source.Container, ExpiresAt: reference.ExpiresAt,
+			StreamIndex: source.StreamIndex, Name: sourceOptionLabel(index + 1), Protocol: source.Protocol, Container: source.Container, ExpiresAt: reference.ExpiresAt,
+			StableIdentity: stableSourceIdentity(source),
 		})
+		if pin {
+			pinnedIdentifiers = append(pinnedIdentifiers, reference.ID)
+		}
 	}
 	result := SourceList{Sources: options, ProviderErrors: providerErrors}
 	if err := tx.Commit(ctx); err != nil {
+		if pin {
+			service.references.unpin(principal, pinnedIdentifiers)
+		}
 		return SourceList{}, fmt.Errorf("commit active playback profile authorization: %w", err)
 	}
 	return result, nil
+}
+
+// PinSourceReferences retains exact, profile-bound source capabilities while
+// an adapter-owned play session can still open them.
+func (service *Service) PinSourceReferences(principal auth.Principal, identifiers []string) error {
+	if service == nil || service.references == nil {
+		return ErrSourceReferenceExpired
+	}
+	return service.references.pin(principal, identifiers)
+}
+
+// UnpinSourceReferences releases a prior PinSourceReferences call.
+func (service *Service) UnpinSourceReferences(principal auth.Principal, identifiers []string) {
+	if service == nil || service.references == nil {
+		return
+	}
+	service.references.unpin(principal, identifiers)
 }
 
 func (service *Service) Prepare(ctx context.Context, principal auth.Principal, input PrepareInput) (Preparation, error) {
@@ -269,6 +313,10 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 }
 
 func (service *Service) Resolve(ctx context.Context, principal auth.Principal, input ResolveInput) (Session, error) {
+	return service.resolve(ctx, principal, input, nil)
+}
+
+func (service *Service) resolve(ctx context.Context, principal auth.Principal, input ResolveInput, deliveryHandle *DeliveryHandle) (Session, error) {
 	input.SourceRef = strings.TrimSpace(input.SourceRef)
 	input.TitleID = strings.TrimSpace(input.TitleID)
 	input.PreferredSubtitleID = strings.TrimSpace(input.PreferredSubtitleID)
@@ -333,7 +381,7 @@ func (service *Service) Resolve(ctx context.Context, principal auth.Principal, i
 		return Session{}, err
 	}
 	assets := append(streamAssets, subtitleAssets...)
-	session, err := service.createSession(ctx, principal, reference, input.TitleID, sources, subtitles, assets, prepared.addonIDs, prepared.providerErrors)
+	session, err := service.createSession(ctx, principal, reference, input.TitleID, sources, subtitles, assets, prepared.addonIDs, prepared.providerErrors, deliveryHandle)
 	if err == ErrSourceReferenceExpired {
 		service.preparations.evict(reference.ID, policy)
 	}
@@ -380,7 +428,7 @@ func (service *Service) validatePreparedPlaybackAccessTx(ctx context.Context, tx
 	return nil
 }
 
-func (service *Service) createSession(ctx context.Context, principal auth.Principal, reference sourceReference, titleID string, sources []Source, subtitles []Subtitle, assets []storedAsset, addonIDs []string, providerErrors []ProviderFailure) (Session, error) {
+func (service *Service) createSession(ctx context.Context, principal auth.Principal, reference sourceReference, titleID string, sources []Source, subtitles []Subtitle, assets []storedAsset, addonIDs []string, providerErrors []ProviderFailure, deliveryHandle *DeliveryHandle) (Session, error) {
 	token, tokenHash, err := newSessionToken()
 	if err != nil {
 		return Session{}, fmt.Errorf("create playback token: %w", err)
@@ -458,6 +506,12 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 		service.stopHLSSession(sessionID)
 		_ = service.deleteCreatedSession(ctx, principal.SessionID, sessionID)
 		return Session{}, err
+	}
+	if deliveryHandle != nil {
+		*deliveryHandle = deliveryHandleForSession(sessionID, token, sources, assets)
+		if deliveryHandle.children != nil {
+			deliveryHandle.children.bindBudget(service.deliveryChildBudget(), principal.UserID, service.now)
+		}
 	}
 	return result, nil
 }
@@ -650,6 +704,49 @@ func (service *Service) commitAuthorizedProfileBoundary(ctx context.Context, pri
 	return nil
 }
 
+// closeDeliverySession consumes the opaque server-side handle without
+// re-authorizing the linked login. Compatibility logout revokes that login
+// before asynchronous delivery cleanup, so the handle token and its original
+// session/profile owner form the cleanup authority.
+func (service *Service) closeDeliverySession(ctx context.Context, principal auth.Principal, handle DeliveryHandle) error {
+	if service == nil || principal.SessionID == "" || principal.ActiveProfileID == nil || *principal.ActiveProfileID == "" || !handle.Valid() {
+		return ErrSessionNotFound
+	}
+	var tx playbackProfileTransaction
+	var err error
+	if service.sessionCleanupTxFactory != nil {
+		tx, err = service.sessionCleanupTxFactory(ctx)
+	} else {
+		if service.pool == nil {
+			return errors.New("begin playback delivery cleanup: pool is unavailable")
+		}
+		tx, err = service.pool.Begin(ctx)
+	}
+	if err != nil {
+		return fmt.Errorf("begin playback delivery cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tokenHash := sha256.Sum256([]byte(handle.token))
+	command, err := tx.Exec(ctx, `
+		DELETE FROM playback_sessions
+		WHERE id::text = $1
+		  AND auth_session_id = $2
+		  AND profile_id = $3::uuid
+		  AND token_hash = $4
+	`, handle.sessionID, principal.SessionID, *principal.ActiveProfileID, tokenHash[:])
+	if err != nil {
+		return fmt.Errorf("delete playback delivery session: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit playback delivery cleanup: %w", err)
+	}
+	service.stopHLSSession(handle.sessionID)
+	if command.RowsAffected() == 0 {
+		return ErrSessionNotFound
+	}
+	return nil
+}
+
 func (service *Service) deleteCreatedSession(ctx context.Context, authSessionID, sessionID string) error {
 	var tx playbackProfileTransaction
 	var err error
@@ -693,13 +790,34 @@ func (service *Service) playbackCapabilities(client Capabilities, maximumHeight 
 	return capabilities
 }
 
-func sourceDisplayName(source Source) string {
-	for _, value := range []string{source.Name, source.Title, source.Filename} {
-		if value = strings.TrimSpace(value); value != "" {
-			return value
-		}
+func sourceOptionLabel(ordinal int) string {
+	return fmt.Sprintf("Source %d", ordinal)
+}
+
+func stableSourceIdentity(source Source) string {
+	addonID := strings.TrimSpace(source.AddonID)
+	manifestID := strings.TrimSpace(source.ManifestID)
+	if addonID == "" || manifestID == "" {
+		return ""
 	}
-	return "Stream"
+	identity := ""
+	switch {
+	case strings.TrimSpace(source.YTID) != "":
+		identity = "youtube\x00" + strings.TrimSpace(source.YTID)
+	case strings.TrimSpace(source.InfoHash) != "":
+		identity = "torrent\x00" + strings.ToLower(strings.TrimSpace(source.InfoHash))
+		if source.FileIndex != nil {
+			identity += fmt.Sprintf("\x00%d", *source.FileIndex)
+		}
+	case strings.TrimSpace(source.Filename) != "":
+		identity = "filename\x00" + strings.TrimSpace(source.Filename)
+	case strings.TrimSpace(source.Name) != "" || strings.TrimSpace(source.Title) != "" || strings.TrimSpace(source.Description) != "":
+		identity = "metadata\x00" + strings.TrimSpace(source.Name) + "\x00" + strings.TrimSpace(source.Title) + "\x00" + strings.TrimSpace(source.Description)
+	default:
+		return ""
+	}
+	digest := sha256.Sum256([]byte(addonID + "\x00" + manifestID + "\x00" + identity))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
 func normalizeStreams(batch addon.ResourceBatch, capabilities Capabilities) ([]Source, []storedAsset, error) {

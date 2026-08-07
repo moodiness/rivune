@@ -128,6 +128,36 @@ docker compose --env-file .env -f deploy/caddy/compose.yaml up -d rivune
 curl --fail --show-error https://media.example.com/health
 ```
 
+## Jellyfin-compatible client access
+
+Rivune includes a limited Jellyfin-compatible API adapter for supported external client workflows. It is not a complete Jellyfin server, does not implement every Jellyfin endpoint or client feature, and provides no LAN UDP discovery. Configure clients manually with Rivune's public URL.
+
+The adapter is off by default. An administrator can enable or disable it from Rivune's settings page without restarting the service. For unattended initial provisioning, set this non-secret default before first setup:
+
+```dotenv
+RIVUNE_JELLYFIN_ENABLED=true
+```
+
+Only `true` or `false` is accepted, after surrounding whitespace is trimmed and letter case is normalized. Any other non-empty value prevents Rivune from starting. Once an administrator saves the Jellyfin setting, that persisted value is authoritative over the environment default.
+
+On Unraid, **Jellyfin initial default** controls only the value used before the administrator setting is first saved. For every non-loopback deployment, keep Rivune behind the documented HTTPS reverse proxy, give the client the same `https://` origin configured by `RIVUNE_PUBLIC_URL`, and never publish Rivune's raw port `8080` to the LAN or internet.
+
+Sign in with `account/profile`, where `profile` is the accessible profile name or UUID. A bare account is accepted only when it has exactly one accessible profile. PIN-protected profiles require a client able to send Rivune's compatibility `ProfilePin` field; otherwise use an unprotected profile rather than bypassing its PIN.
+
+Clients may use either the exact Jellyfin-style root paths or one lowercase `/emby` prefix. For example, public discovery is available at `/System/Info/Public` and `/emby/System/Info/Public`; nested prefixes, case variants, path normalization, and implicit method fallbacks are rejected. The bounded compatibility contract covers:
+
+- public server identity and availability probes;
+- credential login, the credential-bound user, and logout;
+- library views, items, movie/series hierarchy, enabled metadata and add-on catalog search, and artwork;
+- lazy multi-source `PlaybackInfo`, direct/remux/transcode delivery through Rivune's existing playback pipeline, byte ranges, seeking, and opaque HLS child requests;
+- playing/progress/stopped events, played state, resume items, and next-up.
+
+Private provider URLs, headers, native playback tokens, and source references remain server-side. Query authentication is accepted only on the documented media and artwork routes; use HTTPS because a client may carry its compatibility credential in a generated media URL. Quick Connect is explicitly disabled, plugin and package lists are empty, and unknown paths or methods return `404`. The exact request/response schemas, limits, and status codes are in [`protocol/jellyfin-compat-openapi.yaml`](../protocol/jellyfin-compat-openapi.yaml).
+
+Jellyfin Media Player/Desktop is not a supported compatibility client. It loads the server-hosted Jellyfin Web application from `/` after discovery, while Rivune intentionally serves its own web application there. A successful API probe in that desktop shell therefore does not validate Infuse or VidHub, which use native client flows.
+
+To roll back, disable Jellyfin from the administrator settings page. Confirm normal Rivune access through the HTTPS origin afterward.
+
 ## Unraid PostgreSQL TLS
 
 The Unraid template has no plaintext database mode: it supplies

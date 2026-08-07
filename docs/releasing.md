@@ -28,6 +28,14 @@ git push origin v1.5.0
 
 The tag push runs `Release candidate CI`, a complete, read-only release gate: backend tests against PostgreSQL, frontend clean install/build/E2E, pinned OpenAPI lint and complete contract resolution, clean and upgrade migration validation, HTTPS/forwarded-header smoke, native client builds, and container builds for both release architectures. When that run succeeds, GitHub starts `Publish release` from the workflow definition on the default branch. Its unprivileged authorization job verifies the `v*` tag is valid SemVer, the completed run came from `.github/workflows/release-candidate.yml`, and the tag commit, tested SHA, and current `main` HEAD are identical. Only then can the environment-gated jobs receive `packages: write` or `contents: write`; each checks the tag and `main` again immediately before publishing. There is no manual publication path.
 
+If GitHub does not create the release-candidate run for an otherwise valid tag push, dispatch the same read-only gate without moving the tag:
+
+```sh
+gh workflow run release-candidate.yml --ref main -f tag=v1.5.0
+```
+
+The manual path enforces the same SemVer, current-`main`, and tag-SHA checks. Its successful `workflow_run` is eligible for the same environment-gated publication workflow; it does not weaken artifact authorization or permit a stale tag.
+
 ## Required GitHub protection
 
 Repository administrators must configure the controls that live outside the repository:

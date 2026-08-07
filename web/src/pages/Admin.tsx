@@ -2702,6 +2702,7 @@ const rivuneSettingDefaults = {
   maximumDirectTitles: 20,
   preferDirectPlay: true,
   allowTranscoding: true,
+  jellyfinEnabled: false,
   transcoding: "inherit",
   hideUnreleased: false,
   metadataLanguage: "auto",
@@ -2910,7 +2911,11 @@ function settingsSectionDefinitions(serverScope: boolean): SettingsSectionDefini
       translate("settings.fields.allowTranscoding"),
       translate("settings.fields.allowTranscodingDescription"),
     ]);
-    return [appearance, playback, transcoding, language, subtitles];
+    const connections = definition("connections", translate("settings.fields.jellyfinApi"), translate("settings.fields.jellyfinEnabledDescription"), <Radio />, [
+      translate("settings.fields.jellyfinEnabled"),
+      translate("settings.fields.jellyfinEnabledDescription"),
+    ]);
+    return [appearance, playback, transcoding, language, subtitles, connections];
   }
   const connections = definition("connections", translate("settings.trackingTitle"), translate("settings.trackingDescription"), <Radio />, [
     translate("settings.trackingWatched"),
@@ -2956,7 +2961,7 @@ function SettingsAdmin() {
   const filteredSections = normalizedSearch ? sectionDefinitions.filter((section) => section.searchText.includes(normalizedSearch)) : sectionDefinitions;
 
   function sectionAllowed(section: SettingsSection) {
-    return serverSelected ? section !== "connections" : section !== "transcoding";
+    return serverSelected || section !== "transcoding";
   }
   const visibleSection = sectionAllowed(activeSection) ? activeSection : "appearance";
 
@@ -3426,6 +3431,7 @@ function SettingsCard({ activeSection, serverScope = false, canConfigureTranscod
     maximumCastMembers: defaults.maximumCastMembers ?? rivuneSettingDefaults.maximumCastMembers,
     maximumDirectTitles: defaults.maximumDirectTitles ?? rivuneSettingDefaults.maximumDirectTitles,
     allowTranscoding: defaults.allowTranscoding ?? rivuneSettingDefaults.allowTranscoding,
+    jellyfinEnabled: defaults.jellyfinEnabled ?? rivuneSettingDefaults.jellyfinEnabled,
     transcoding: defaults.transcoding ?? rivuneSettingDefaults.transcoding,
     preferDirectPlay: defaults.preferDirectPlay ?? rivuneSettingDefaults.preferDirectPlay,
     hideUnreleased: defaults.hideUnreleased ?? rivuneSettingDefaults.hideUnreleased,
@@ -3446,6 +3452,7 @@ function SettingsCard({ activeSection, serverScope = false, canConfigureTranscod
     subtitleBackgroundOpacityPercent: defaults.subtitleBackgroundOpacityPercent ?? rivuneSettingDefaults.subtitleBackgroundOpacityPercent,
   };
   const serverAllowsTranscoding = serverScope ? values.allowTranscoding ?? effective.allowTranscoding : effective.allowTranscoding;
+  const jellyfinEnabled = serverScope ? values.jellyfinEnabled ?? effective.jellyfinEnabled : effective.jellyfinEnabled;
   const profileTranscoding = values.transcoding ?? rivuneSettingDefaults.transcoding;
   const effectiveTranscoding = serverAllowsTranscoding && profileTranscoding !== "disabled";
   const subtitlePreviewStyle = {
@@ -3487,6 +3494,12 @@ function SettingsCard({ activeSection, serverScope = false, canConfigureTranscod
       {activeSection === "transcoding" && serverScope && <SettingsGroup sectionId="transcoding" icon={<Cpu />} title={translate("settings.fields.transcoding")} description={translate("settings.fields.allowTranscodingDescription")}>
         <div className="setting-control setting-control--toggle settings-transcoding-control">
           <label className="toggle-field"><input type="checkbox" checked={serverAllowsTranscoding} disabled={saving} aria-describedby="allow-transcoding-description" onChange={(event) => change("allowTranscoding", event.target.checked)} /><span><i /><div><strong>{translate("settings.fields.allowTranscoding")}</strong><small id="allow-transcoding-description">{translate("settings.fields.allowTranscodingDescription")}</small></div></span></label>
+        </div>
+      </SettingsGroup>}
+
+      {activeSection === "connections" && serverScope && <SettingsGroup sectionId="connections" icon={<Radio />} title={translate("settings.fields.jellyfinApi")} description={translate("settings.fields.jellyfinEnabledDescription")}>
+        <div className="setting-control setting-control--toggle">
+          <label className="toggle-field"><input type="checkbox" checked={jellyfinEnabled} disabled={saving} aria-describedby="jellyfin-enabled-description" onChange={(event) => change("jellyfinEnabled", event.target.checked)} /><span><i /><div><strong>{translate("settings.fields.jellyfinEnabled")}</strong><small id="jellyfin-enabled-description">{translate("settings.fields.jellyfinEnabledDescription")}</small></div></span></label>
         </div>
       </SettingsGroup>}
 

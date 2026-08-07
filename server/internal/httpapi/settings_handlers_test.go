@@ -3,11 +3,15 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/jellyfin"
 	"github.com/moodiness/rivune/server/internal/settings"
 )
 
@@ -29,6 +33,13 @@ type fakeSettingsService struct {
 func (f *fakeSettingsService) Instance(context.Context) (settings.Layer, error) {
 	return f.instance, f.instanceErr
 }
+func (f *fakeSettingsService) InitializeJellyfinEnabled(context.Context, bool) (bool, error) {
+	if f.instance.Values.JellyfinEnabled == nil {
+		return false, f.instanceErr
+	}
+	return *f.instance.Values.JellyfinEnabled, f.instanceErr
+}
+
 func (f *fakeSettingsService) Maintenance(context.Context) (settings.Maintenance, error) {
 	return f.maintenance, f.maintenanceErr
 }
@@ -479,6 +490,213 @@ func TestEffectiveSettingsResponseIncludesTranscodingPolicyAndSources(t *testing
 	if body.Settings.AllowTranscoding || body.Settings.Transcoding != settings.TranscodingModeEnabled ||
 		body.Sources["allowTranscoding"] != "instance" || body.Sources["transcoding"] != "profile" {
 		t.Fatalf("effective transcoding policy omitted or altered: %+v", body)
+	}
+}
+
+func TestInstanceSettingsJellyfinEnabledCommitsBeforeSupervisorNotification(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "false", true: "true"}[enabled], func(t *testing.T) {
+			service := &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}}
+			api := authenticatedSettingsAPI(service)
+			api.jellyfinCompatibilityDesired = !enabled
+			request := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(map[bool]string{
+				false: `{"jellyfinEnabled":false}`,
+				true:  `{"jellyfinEnabled":true}`,
+			}[enabled]))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer access-token")
+			response := httptest.NewRecorder()
+
+			api.Handler().ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("jellyfinEnabled=%t status=%d body=%s", enabled, response.Code, response.Body.String())
+			}
+			if !service.instancePatch.JellyfinEnabled.Set || service.instancePatch.JellyfinEnabled.Value == nil ||
+				*service.instancePatch.JellyfinEnabled.Value != enabled {
+				t.Fatalf("jellyfinEnabled=%t patch=%+v", enabled, service.instancePatch.JellyfinEnabled)
+			}
+			if api.HasJellyfinCompatibility() != enabled {
+				t.Fatalf("supervisor desired=%t want=%t", api.HasJellyfinCompatibility(), enabled)
+			}
+		})
+	}
+}
+
+func TestInstanceSettingsJellyfinEnabledRejectsNullWithoutNotification(t *testing.T) {
+	service := &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}}
+	api := authenticatedSettingsAPI(service)
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(`{"jellyfinEnabled":null}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || service.instancePatch.JellyfinEnabled.Set || api.HasJellyfinCompatibility() {
+		t.Fatalf("null jellyfinEnabled status=%d patch=%+v desired=%t", response.Code, service.instancePatch.JellyfinEnabled, api.HasJellyfinCompatibility())
+	}
+}
+
+func TestInstanceSettingsJellyfinEnabledPersistenceFailureDoesNotToggle(t *testing.T) {
+	service := &fakeSettingsService{instanceErr: errors.New("database unavailable")}
+	api := authenticatedSettingsAPI(service)
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(`{"jellyfinEnabled":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError || api.HasJellyfinCompatibility() {
+		t.Fatalf("failed persistence status=%d desired=%t", response.Code, api.HasJellyfinCompatibility())
+	}
+}
+
+type ambiguousJellyfinCommitSettings struct {
+	*fakeSettingsService
+	mu      sync.Mutex
+	enabled bool
+	reads   int
+}
+
+func (service *ambiguousJellyfinCommitSettings) UpdateInstance(_ context.Context, _ auth.Principal, patch settings.Patch) (settings.Layer, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.instancePatch = patch
+	if patch.JellyfinEnabled.Set && patch.JellyfinEnabled.Value != nil {
+		service.enabled = *patch.JellyfinEnabled.Value
+	}
+	return settings.Layer{}, errors.New("commit acknowledgement lost")
+}
+
+func (service *ambiguousJellyfinCommitSettings) Instance(context.Context) (settings.Layer, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.reads++
+	if service.reads == 1 {
+		return settings.Layer{}, errors.New("canonical read temporarily unavailable")
+	}
+	enabled := service.enabled
+	return settings.Layer{SchemaVersion: 1, Values: settings.Values{JellyfinEnabled: &enabled}}, nil
+}
+
+func (service *ambiguousJellyfinCommitSettings) setCanonical(enabled bool) {
+	service.mu.Lock()
+	service.enabled = enabled
+	service.mu.Unlock()
+}
+
+func (service *ambiguousJellyfinCommitSettings) readCount() int {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	return service.reads
+}
+
+func TestInstanceSettingsJellyfinAmbiguousCommitReconcilesCanonicalStateAfterReadRetry(t *testing.T) {
+	service := &ambiguousJellyfinCommitSettings{fakeSettingsService: &fakeSettingsService{}}
+	api := authenticatedSettingsAPI(service)
+	api.jellyfinCompatibilityPollInterval = time.Millisecond
+	api.jellyfinCompatibilityBackoff = func(uint32) time.Duration { return time.Millisecond }
+	api.jellyfinCompatibilityReconciler = func(ctx context.Context) (bool, error) {
+		layer, err := service.Instance(ctx)
+		if err != nil {
+			return false, err
+		}
+		return *layer.Values.JellyfinEnabled, nil
+	}
+	handler := newJellyfinLifecycleHandler(t)
+	api.jellyfinCompatibilityBuilder = func(context.Context) (*jellyfin.Handler, bool, error) {
+		return handler, true, nil
+	}
+	started := make(chan struct{}, 1)
+	cleaned := make(chan struct{}, 1)
+	api.jellyfinCompatibilityRunner = func(ctx context.Context, _ *jellyfin.Handler) {
+		started <- struct{}{}
+		<-ctx.Done()
+		cleaned <- struct{}{}
+	}
+
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(`{"jellyfinEnabled":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError || api.HasJellyfinCompatibility() {
+		t.Fatalf("ambiguous commit response=%d desired=%t", response.Code, api.HasJellyfinCompatibility())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		api.RunJellyfinCompatibility(ctx)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		t.Fatal("committed canonical enable did not survive a failed reconciliation read")
+	}
+	if service.readCount() < 2 || !api.HasJellyfinCompatibility() {
+		t.Fatalf("canonical reconciliation reads=%d desired=%t", service.readCount(), api.HasJellyfinCompatibility())
+	}
+
+	service.setCanonical(false)
+	select {
+	case <-cleaned:
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		t.Fatal("periodic canonical reconciliation did not disable the active generation")
+	}
+	if api.HasJellyfinCompatibility() {
+		t.Fatal("runtime remained enabled after canonical database flip")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("reconciliation supervisor did not terminate")
+	}
+}
+
+func TestJellyfinEnabledRemainsInstanceOnlyAndGlobalAdministratorOnly(t *testing.T) {
+	profileService := &fakeSettingsService{profileErr: settings.ErrInvalidInput}
+	profileAPI := authenticatedSettingsAPI(profileService)
+	profileRequest := httptest.NewRequest(http.MethodPatch, "/api/v1/profiles/profile-id/settings", bytes.NewBufferString(`{"jellyfinEnabled":true}`))
+	profileRequest.Header.Set("Content-Type", "application/json")
+	profileRequest.Header.Set("Authorization", "Bearer access-token")
+	profileResponse := httptest.NewRecorder()
+	profileAPI.Handler().ServeHTTP(profileResponse, profileRequest)
+	if profileResponse.Code != http.StatusUnprocessableEntity || !profileService.profilePatch.JellyfinEnabled.Set || profileAPI.HasJellyfinCompatibility() {
+		t.Fatalf("profile jellyfinEnabled status=%d patch=%+v desired=%t", profileResponse.Code, profileService.profilePatch.JellyfinEnabled, profileAPI.HasJellyfinCompatibility())
+	}
+
+	forbiddenService := &fakeSettingsService{instanceErr: settings.ErrForbidden}
+	forbiddenAPI := authenticatedSettingsAPI(forbiddenService)
+	forbiddenAPI.auth = &fakeAuthService{principal: auth.Principal{Role: "member"}}
+	forbiddenRequest := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(`{"jellyfinEnabled":true}`))
+	forbiddenRequest.Header.Set("Content-Type", "application/json")
+	forbiddenRequest.Header.Set("Authorization", "Bearer access-token")
+	forbiddenResponse := httptest.NewRecorder()
+	forbiddenAPI.Handler().ServeHTTP(forbiddenResponse, forbiddenRequest)
+	if forbiddenResponse.Code != http.StatusForbidden || forbiddenAPI.HasJellyfinCompatibility() {
+		t.Fatalf("non-global jellyfinEnabled status=%d desired=%t", forbiddenResponse.Code, forbiddenAPI.HasJellyfinCompatibility())
+	}
+}
+
+func TestInstanceSettingsResponseIncludesJellyfinEnabled(t *testing.T) {
+	enabled := false
+	api := authenticatedSettingsAPI(&fakeSettingsService{instance: settings.Layer{
+		SchemaVersion: 1,
+		Values:        settings.Values{JellyfinEnabled: &enabled},
+	}})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"jellyfinEnabled":false`)) {
+		t.Fatalf("instance Jellyfin setting response status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

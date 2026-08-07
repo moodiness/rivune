@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/database"
 )
 
 func TestValidatePatchRejectsUnknownValues(t *testing.T) {
@@ -929,4 +931,189 @@ func TestUpdateProfileSettingsRequiresProfileManagement(t *testing.T) {
 	if persistedMaximumDirectTitles != profileLimit {
 		t.Fatalf("persisted maximumDirectTitles = %d, want %d", persistedMaximumDirectTitles, profileLimit)
 	}
+}
+
+func TestJellyfinEnabledValidationAuthorizationAndJSONRoundTrip(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		patch := Patch{JellyfinEnabled: OptionalBool{Set: true, Value: &enabled}}
+		if err := validateInstancePatch(patch); err != nil {
+			t.Fatalf("valid jellyfinEnabled=%t rejected: %v", enabled, err)
+		}
+		values := applyPatch(Values{}, patch)
+		encoded, err := json.Marshal(values)
+		if err != nil {
+			t.Fatalf("encode jellyfinEnabled=%t: %v", enabled, err)
+		}
+		var decoded Values
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatalf("decode jellyfinEnabled=%t: %v", enabled, err)
+		}
+		if decoded.JellyfinEnabled == nil || *decoded.JellyfinEnabled != enabled {
+			t.Fatalf("jellyfinEnabled=%t did not round trip: %s", enabled, encoded)
+		}
+	}
+
+	if err := validateInstancePatch(Patch{JellyfinEnabled: OptionalBool{Set: true}}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("null instance jellyfinEnabled error = %v, want invalid input", err)
+	}
+	enabled := true
+	if err := validateProfilePatch(Patch{JellyfinEnabled: OptionalBool{Set: true, Value: &enabled}}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("profile jellyfinEnabled error = %v, want invalid input", err)
+	}
+	if _, err := NewService(nil).UpdateInstance(context.Background(), auth.Principal{Role: "member"}, Patch{
+		JellyfinEnabled: OptionalBool{Set: true, Value: &enabled},
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("member jellyfinEnabled update error = %v, want forbidden", err)
+	}
+}
+
+func TestJellyfinEnabledInitializationAndPersistence(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL to run PostgreSQL Jellyfin settings tests")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	config.MaxConns = 4
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	ctx := context.Background()
+	if err := database.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate test database: %v", err)
+	}
+
+	var configured bool
+	if err := pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM instances WHERE id = 1)").Scan(&configured); err != nil {
+		t.Fatalf("read instance fixture state: %v", err)
+	}
+	var savedSettings json.RawMessage
+	var savedUpdatedAt time.Time
+	if configured {
+		if err := pool.QueryRow(ctx, `
+			SELECT settings, updated_at
+			FROM instance_settings
+			WHERE instance_id = 1
+		`).Scan(&savedSettings, &savedUpdatedAt); err != nil {
+			t.Fatalf("save instance settings fixture: %v", err)
+		}
+	} else {
+		if _, err := pool.Exec(ctx, "INSERT INTO instances (id, name) VALUES (1, 'Jellyfin settings test')"); err != nil {
+			t.Fatalf("create instance fixture: %v", err)
+		}
+		if _, err := pool.Exec(ctx, "INSERT INTO instance_settings (instance_id) VALUES (1)"); err != nil {
+			t.Fatalf("create instance settings fixture: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		if configured {
+			_, _ = pool.Exec(context.Background(), `
+				UPDATE instance_settings
+				SET settings = $1::jsonb, updated_at = $2
+				WHERE instance_id = 1
+			`, savedSettings, savedUpdatedAt)
+		} else {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM instances WHERE id = 1")
+		}
+	})
+
+	service := NewService(pool)
+	removeSetting := func() {
+		t.Helper()
+		if _, err := pool.Exec(ctx, "UPDATE instance_settings SET settings = settings - 'jellyfinEnabled' WHERE instance_id = 1"); err != nil {
+			t.Fatalf("remove Jellyfin setting fixture: %v", err)
+		}
+	}
+
+	t.Run("environment value is initial only", func(t *testing.T) {
+		removeSetting()
+		initialized, err := service.InitializeJellyfinEnabled(ctx, true)
+		if err != nil || !initialized {
+			t.Fatalf("initialize true = %t, %v", initialized, err)
+		}
+		stored, err := service.InitializeJellyfinEnabled(ctx, false)
+		if err != nil || !stored {
+			t.Fatalf("second initialization replaced database value: value=%t err=%v", stored, err)
+		}
+	})
+
+	t.Run("existing database value wins", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `
+			UPDATE instance_settings
+			SET settings = jsonb_set(settings, '{jellyfinEnabled}', 'false'::jsonb, true)
+			WHERE instance_id = 1
+		`); err != nil {
+			t.Fatalf("seed disabled database value: %v", err)
+		}
+		stored, err := service.InitializeJellyfinEnabled(ctx, true)
+		if err != nil || stored {
+			t.Fatalf("database false did not win: value=%t err=%v", stored, err)
+		}
+	})
+
+	t.Run("concurrent initialization converges", func(t *testing.T) {
+		removeSetting()
+		start := make(chan struct{})
+		results := make(chan bool, 2)
+		errors := make(chan error, 2)
+		var wait sync.WaitGroup
+		for _, initial := range []bool{false, true} {
+			initial := initial
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				<-start
+				value, initializeErr := NewService(pool).InitializeJellyfinEnabled(ctx, initial)
+				results <- value
+				errors <- initializeErr
+			}()
+		}
+		close(start)
+		wait.Wait()
+		close(results)
+		close(errors)
+		for initializeErr := range errors {
+			if initializeErr != nil {
+				t.Fatalf("concurrent initialization: %v", initializeErr)
+			}
+		}
+		values := make([]bool, 0, 2)
+		for value := range results {
+			values = append(values, value)
+		}
+		if len(values) != 2 || values[0] != values[1] {
+			t.Fatalf("concurrent initialization values did not converge: %v", values)
+		}
+		var persisted bool
+		if err := pool.QueryRow(ctx, "SELECT (settings ->> 'jellyfinEnabled')::boolean FROM instance_settings WHERE instance_id = 1").Scan(&persisted); err != nil {
+			t.Fatalf("read concurrently initialized value: %v", err)
+		}
+		if persisted != values[0] {
+			t.Fatalf("persisted concurrent value=%t, returned=%v", persisted, values)
+		}
+	})
+
+	t.Run("administrator true false round trip", func(t *testing.T) {
+		principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}
+		for _, enabled := range []bool{true, false} {
+			updated, err := service.UpdateInstance(ctx, principal, Patch{
+				JellyfinEnabled: OptionalBool{Set: true, Value: &enabled},
+			})
+			if err != nil {
+				t.Fatalf("update jellyfinEnabled=%t: %v", enabled, err)
+			}
+			read, err := service.Instance(ctx)
+			if err != nil {
+				t.Fatalf("read jellyfinEnabled=%t: %v", enabled, err)
+			}
+			if updated.Values.JellyfinEnabled == nil || *updated.Values.JellyfinEnabled != enabled ||
+				read.Values.JellyfinEnabled == nil || *read.Values.JellyfinEnabled != enabled {
+				t.Fatalf("jellyfinEnabled=%t did not persist: updated=%+v read=%+v", enabled, updated.Values, read.Values)
+			}
+		}
+	})
 }

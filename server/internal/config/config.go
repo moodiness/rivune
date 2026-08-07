@@ -41,6 +41,7 @@ type Config struct {
 	DatabaseURL             string
 	Timezone                string
 	SetupToken              string
+	JellyfinEnabled         bool
 	AccessTokenTTL          time.Duration
 	RefreshTokenTTL         time.Duration
 	ProfileGrantTTL         time.Duration
@@ -95,6 +96,10 @@ func Load() (Config, error) {
 	trackingKey := strings.TrimSpace(os.Getenv("RIVUNE_TRACKING_ENCRYPTION_KEY"))
 
 	var err error
+	cfg.JellyfinEnabled, err = loadStrictBoolean("RIVUNE_JELLYFIN_ENABLED")
+	if err != nil {
+		return Config{}, err
+	}
 	cfg.DatabaseURL, err = loadDatabaseURL()
 	if err != nil {
 		return Config{}, err
@@ -366,6 +371,18 @@ func validNAT64PrefixLength(bits int) bool {
 		return true
 	default:
 		return false
+	}
+}
+func loadStrictBoolean(name string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "":
+		return false, nil
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be true or false", name)
 	}
 }
 

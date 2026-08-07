@@ -118,7 +118,7 @@ func (service *Service) proxyConvertedSubtitle(w http.ResponseWriter, r *http.Re
 	return err
 }
 
-func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, sessionID, token string, asset storedAsset) error {
+func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, sessionID, token string, asset storedAsset, buildChildURL func(deliveryChildState) (string, error)) error {
 	processor, ok := service.processor.(HLSProcessor)
 	if !ok {
 		return ErrMediaProcessingFailed
@@ -141,9 +141,23 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 		if err != nil {
 			return fmt.Errorf("%w: read playlist: %v", ErrMediaProcessingFailed, err)
 		}
-		rewritten, err := rewriteLocalPlaylist(contents, func(reference string) string {
-			return hlsAssetURLAt(sessionID, asset.ID, token, reference, asset.StartSeconds)
+		var childErr error
+		rewritten, err := rewriteLocalPlaylistWithPolicy(contents, buildChildURL != nil, func(reference string) string {
+			if buildChildURL == nil {
+				return hlsAssetURLAt(sessionID, asset.ID, token, reference, asset.StartSeconds)
+			}
+			if childErr != nil {
+				return ""
+			}
+			var childURL string
+			childURL, childErr = buildChildURL(deliveryChildState{
+				assetID: asset.ID, file: reference, start: hlsStartKey(asset.StartSeconds),
+			})
+			return childURL
 		})
+		if childErr != nil {
+			return fmt.Errorf("%w: create local HLS child capability: %v", ErrMediaProcessingFailed, childErr)
+		}
 		if err != nil {
 			return err
 		}
@@ -153,7 +167,9 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(http.StatusOK)
 		if r.Method != http.MethodHead {
-			_, _ = w.Write(rewritten)
+			if _, err := w.Write(rewritten); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -492,6 +508,10 @@ func waitForMediaFile(ctx context.Context, job *hlsJob, path string) error {
 }
 
 func rewriteLocalPlaylist(contents []byte, buildURL func(string) string) ([]byte, error) {
+	return rewriteLocalPlaylistWithPolicy(contents, false, buildURL)
+}
+
+func rewriteLocalPlaylistWithPolicy(contents []byte, rejectUnresolved bool, buildURL func(string) string) ([]byte, error) {
 	if err := validatePlaylistCardinality(contents); err != nil {
 		return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
 	}
@@ -500,14 +520,19 @@ func rewriteLocalPlaylist(contents []byte, buildURL func(string) string) ([]byte
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "#") {
+			unresolved := false
 			err := writePlaylistURIAttributes(output, line, func(reference string) (string, bool) {
 				if !localMediaName.MatchString(reference) {
+					unresolved = true
 					return "", false
 				}
 				return buildURL(reference), true
 			})
 			if err != nil {
 				return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
+			}
+			if rejectUnresolved && unresolved {
+				return nil, fmt.Errorf("%w: invalid local HLS playlist: unproxyable reference", ErrMediaProcessingFailed)
 			}
 		} else if strings.TrimSpace(line) != "" {
 			reference := strings.TrimSpace(line)

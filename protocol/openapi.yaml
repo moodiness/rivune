@@ -1183,12 +1183,12 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SettingsLayer"
+                $ref: "#/components/schemas/InstanceSettingsLayer"
         "401":
           $ref: "#/components/responses/Error"
     patch:
       summary: Update instance settings
-      description: Instance-wide `allowTranscoding` and notification settings are accepted only here; profile `transcoding` choices belong to the profile settings route. Every profile inherits notification behavior from this layer.
+      description: Instance-wide `jellyfinEnabled`, `allowTranscoding`, and notification settings are accepted only here and require a global administrator; profile `transcoding` choices belong to the profile settings route. Every profile inherits notification behavior from this layer. `jellyfinEnabled` must be a non-null boolean.
       operationId: updateInstanceSettings
       security:
         - bearerAuth: []
@@ -1197,14 +1197,14 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SettingsPatch"
+              $ref: "#/components/schemas/InstanceSettingsPatch"
       responses:
         "200":
           description: Instance settings were updated.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SettingsLayer"
+                $ref: "#/components/schemas/InstanceSettingsLayer"
         "400":
           $ref: "#/components/responses/Error"
         "401":
@@ -1454,7 +1454,7 @@ paths:
           $ref: "#/components/responses/Error"
     patch:
       summary: Update profile settings
-      description: Profile `transcoding` (`inherit`, `enabled`, or `disabled`) is accepted only here and may be assigned only by a global administrator; the instance-wide `allowTranscoding` switch belongs to `/settings`. Notification settings are instance-only and are rejected here.
+      description: Profile `transcoding` (`inherit`, `enabled`, or `disabled`) is accepted only here and may be assigned only by a global administrator; the instance-wide `jellyfinEnabled` and `allowTranscoding` switches belong to `/settings`. Jellyfin and notification settings are rejected here.
       operationId: updateProfileSettings
       security:
         - bearerAuth: []
@@ -5823,9 +5823,8 @@ components:
               type: string
               maxLength: 500
 
-    SettingsPatch:
+    CommonSettingsPatch:
       type: object
-      additionalProperties: false
       minProperties: 1
       properties:
         interfaceLanguage:
@@ -5935,6 +5934,21 @@ components:
           type: [integer, "null"]
           minimum: 5
           maximum: 300
+    SettingsPatch:
+      type: object
+      allOf:
+        - $ref: "#/components/schemas/CommonSettingsPatch"
+      unevaluatedProperties: false
+    InstanceSettingsPatch:
+      type: object
+      allOf:
+        - $ref: "#/components/schemas/CommonSettingsPatch"
+        - type: object
+          properties:
+            jellyfinEnabled:
+              description: Global-administrator-controlled, instance-only Jellyfin compatibility switch. Null is not accepted.
+              type: boolean
+      unevaluatedProperties: false
     InterfaceLanguage:
       type: string
       description: Language used by the Rivune interface.
@@ -5951,9 +5965,8 @@ components:
       type: string
       description: The value auto or an uppercase ISO 3166-1 alpha-2 region code.
       pattern: "^(auto|[A-Z]{2})$"
-    SettingsValues:
+    CommonSettingsValues:
       type: object
-      additionalProperties: false
       properties:
         interfaceLanguage:
           $ref: "#/components/schemas/InterfaceLanguage"
@@ -6035,6 +6048,22 @@ components:
           type: integer
           minimum: 5
           maximum: 300
+    SettingsValues:
+      type: object
+      allOf:
+        - $ref: "#/components/schemas/CommonSettingsValues"
+      unevaluatedProperties: false
+    InstanceSettingsValues:
+      type: object
+      allOf:
+        - $ref: "#/components/schemas/CommonSettingsValues"
+        - type: object
+          required: [jellyfinEnabled]
+          properties:
+            jellyfinEnabled:
+              description: Persisted, non-null instance-only Jellyfin compatibility switch.
+              type: boolean
+      unevaluatedProperties: false
     TrackingPreferences:
       type: object
       additionalProperties: false
@@ -6112,6 +6141,20 @@ components:
           type: integer
           minimum: 1
           maximum: 300
+    InstanceSettingsLayer:
+      type: object
+      required: [schemaVersion, settings, updatedAt]
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        settings:
+          $ref: "#/components/schemas/InstanceSettingsValues"
+        updatedAt:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
     SettingsLayer:
       type: object
       required: [schemaVersion, settings, updatedAt]

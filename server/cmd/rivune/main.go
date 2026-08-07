@@ -49,7 +49,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	api, err := httpapi.New(cfg, pool, logger, version)
+	api, err := httpapi.New(startupContext, cfg, pool, logger, version)
 	if err != nil {
 		return fmt.Errorf("initialize HTTP API: %w", err)
 	}
@@ -96,6 +96,16 @@ func run(logger *slog.Logger) error {
 		cancelTracking()
 		<-trackingDone
 	}()
+	compatContext, cancelCompat := newJellyfinCompatibilityContext()
+	compatDone := make(chan struct{})
+	go func() {
+		defer close(compatDone)
+		api.RunJellyfinCompatibility(compatContext)
+	}()
+	defer func() {
+		cancelCompat()
+		<-compatDone
+	}()
 
 	serverError := make(chan error, 1)
 	go func() {
@@ -113,9 +123,19 @@ func run(logger *slog.Logger) error {
 		logger.Info("shutting down Rivune server")
 		gracefulContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := server.Shutdown(gracefulContext); err != nil {
-			return err
-		}
-		return nil
+		return shutdownHTTPBeforeJellyfinCompatibility(
+			func() error { return server.Shutdown(gracefulContext) }, cancelCompat, compatDone,
+		)
 	}
+}
+
+func newJellyfinCompatibilityContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
+}
+
+func shutdownHTTPBeforeJellyfinCompatibility(shutdown func() error, cancelCompatibility context.CancelFunc, compatibilityDone <-chan struct{}) error {
+	err := shutdown()
+	cancelCompatibility()
+	<-compatibilityDone
+	return err
 }

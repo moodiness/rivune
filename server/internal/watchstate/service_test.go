@@ -102,7 +102,7 @@ func TestNormalizeLibraryQuery(t *testing.T) {
 }
 
 func TestTVLibraryMembershipRejectsUnboundedInputsBeforeQuery(t *testing.T) {
-	service := NewService(nil)
+	service := NewService(nil, time.UTC)
 	identities := make([]TVLibraryIdentity, MaximumTVLibraryMembershipIdentities+1)
 	for index := range identities {
 		identities[index] = TVLibraryIdentity{
@@ -241,7 +241,7 @@ func TestNormalizeCustomSeriesInputValidationAndIdentityScope(t *testing.T) {
 func TestResolveTitleRejectsNonISOReleaseDate(t *testing.T) {
 	profileID := "11111111-1111-4111-8111-111111111111"
 	expiresAt := time.Now().UTC().Add(time.Hour)
-	service := NewService(nil)
+	service := NewService(nil, time.UTC)
 	_, err := service.ResolveTitle(context.Background(), auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}, ResolveTitleInput{
 		MediaType: "movie", Provider: "tmdb", ExternalID: "1", ResourceID: "1",
 		Title: "Movie", Released: "2026-8-01",
@@ -255,7 +255,7 @@ func TestResolveTitleRequiresAddonScopedTVIdentity(t *testing.T) {
 	profileID := "11111111-1111-4111-8111-111111111111"
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
-	service := NewService(nil)
+	service := NewService(nil, time.UTC)
 
 	for _, input := range []ResolveTitleInput{
 		{MediaType: "tv", Provider: "tmdb", ResourceID: "channel", Title: "Channel", SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
@@ -380,7 +380,7 @@ func TestResolveTitleCanonicalIdentityCannotBePoisonedAcrossProfiles(t *testing.
 			"imdb": "tt00123",
 		},
 	}}
-	service := NewService(pool)
+	service := NewService(pool, time.UTC)
 	service.SetCanonicalProvider(provider, canonicalResolverStub{"movie:imdb:tt00123": "123"})
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	categoryID := "33333333-3333-4333-8333-333333333333"
@@ -606,7 +606,7 @@ func TestResolveTitleProfileScopedFallbackIsolatedAndLibraryPreservesIdentity(t 
 	profileTwoID := "22222222-2222-4222-8222-222222222222"
 	profileOne := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileOneID, ProfileGrantExpiresAt: &expiresAt}
 	profileTwo := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt}
-	service := NewService(pool)
+	service := NewService(pool, time.UTC)
 	externalID := strings.Repeat("addon-claim-", 20)
 
 	first, err := service.ResolveTitle(ctx, profileOne, ResolveTitleInput{
@@ -835,7 +835,7 @@ func (*capacityTrackingSink) EnqueueTx(context.Context, pgx.Tx, string, string, 
 }
 
 func TestTrackingOutboxCapacityIsExposedAsWatchstateError(t *testing.T) {
-	service := NewService(nil, &capacityTrackingSink{})
+	service := NewService(nil, time.UTC, &capacityTrackingSink{})
 	err := service.enqueueTrackingTx(
 		context.Background(), nil, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "550e8400-e29b-41d4-a716-446655440000",
 		"progress:capacity", tracking.Event{Type: "progress"},
@@ -967,7 +967,7 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 	profileTwo := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt}
 	profileThree := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileThreeID, ProfileGrantExpiresAt: &expiresAt}
 	trackingSink := &recordingTrackingSink{}
-	service := NewService(pool, trackingSink)
+	service := NewService(pool, time.UTC, trackingSink)
 
 	first, err := service.ResolveTitle(ctx, profileOne, ResolveTitleInput{
 		MediaType: "tv", Provider: "addon", ExternalID: "https://stream.invalid/live.m3u8",
@@ -1343,6 +1343,17 @@ func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 		items[1].Reason != "next_episode" {
 		t.Fatalf("expected the first deterministic unknown-date candidate, got %#v", items[1])
 	}
+	var compatTotal int
+	if err := tx.QueryRow(ctx, nextUpItemsCTE+`SELECT count(*)::int FROM selected`, "11111111-1111-4111-8111-111111111111", nil).Scan(&compatTotal); err != nil {
+		t.Fatalf("count compatibility next-up items: %v", err)
+	}
+	compatPage, err := queryNextUpItems(ctx, tx, "11111111-1111-4111-8111-111111111111", nil, 1, 1)
+	if err != nil {
+		t.Fatalf("load compatibility next-up page: %v", err)
+	}
+	if compatTotal != 2 || len(compatPage) != 1 || compatPage[0].TitleID != "00000000-0000-4000-8000-000000000312" {
+		t.Fatalf("compatibility next-up total=%d page=%#v", compatTotal, compatPage)
+	}
 }
 
 func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
@@ -1444,7 +1455,7 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 	profileID := "11111111-1111-4111-8111-111111111111"
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
-	service := NewService(pool)
+	service := NewService(pool, time.UTC)
 
 	initial, err := service.ContinueWatching(ctx, principal, 10)
 	if err != nil || len(initial.Items) != 2 {
@@ -1576,7 +1587,7 @@ func TestProgressBatchUsesOneLogicalQueryAndAtomicVersions(t *testing.T) {
 		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 		ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
 	}
-	service := NewService(pool)
+	service := NewService(pool, time.UTC)
 
 	readBefore := counter.read.Load()
 	initial, err := service.GetProgressBatch(ctx, principal, titleIDs)
@@ -1726,7 +1737,7 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 	categoryID := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 	profileOne := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileOneID, ProfileGrantExpiresAt: &expiresAt}
 	profileTwo := auth.Principal{UserID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID, ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt}
-	service := NewService(pool)
+	service := NewService(pool, time.UTC)
 	input := ResolveCustomSeriesInput{
 		SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", SourceType: "anime",
 		Series: CustomSeriesSnapshot{ResourceID: "opaque:show", Title: "Custom Show"},

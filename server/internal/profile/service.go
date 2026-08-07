@@ -718,6 +718,18 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, profileI
 }
 
 func (s *Service) Select(ctx context.Context, principal auth.Principal, profileID string, providedPIN *string, requireManagement bool) (Selection, error) {
+	return s.selectProfile(ctx, principal, profileID, providedPIN, requireManagement, false)
+}
+
+// SelectForLinkedSession performs the same password-adjacent PIN selection as
+// Select, but extends the resulting grant only to the native session's
+// authoritative refresh expiry. It is intended for a trusted protocol adapter
+// that keeps its own credential linked to that native session.
+func (s *Service) SelectForLinkedSession(ctx context.Context, principal auth.Principal, profileID string, providedPIN *string, requireManagement bool) (Selection, error) {
+	return s.selectProfile(ctx, principal, profileID, providedPIN, requireManagement, true)
+}
+
+func (s *Service) selectProfile(ctx context.Context, principal auth.Principal, profileID string, providedPIN *string, requireManagement, linkedSession bool) (Selection, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Selection{}, fmt.Errorf("begin profile selection: %w", err)
@@ -861,6 +873,21 @@ func (s *Service) Select(ctx context.Context, principal auth.Principal, profileI
 	}
 
 	expiresAt := now.Add(s.grantTTL)
+	if linkedSession {
+		if err := tx.QueryRow(ctx, `
+			SELECT refresh_expires_at
+			FROM auth_sessions
+			WHERE id = $1::uuid
+			  AND user_id = $2::uuid
+			  AND revoked_at IS NULL
+			  AND refresh_expires_at > now()
+			FOR SHARE
+		`, principal.SessionID, principal.UserID).Scan(&expiresAt); errors.Is(err, pgx.ErrNoRows) {
+			return Selection{}, ErrForbidden
+		} else if err != nil {
+			return Selection{}, fmt.Errorf("query linked session expiry: %w", err)
+		}
+	}
 	profileContext, profileContextHash, err := auth.NewProfileContext()
 	if err != nil {
 		return Selection{}, fmt.Errorf("issue profile context: %w", err)
@@ -873,6 +900,7 @@ func (s *Service) Select(ctx context.Context, principal auth.Principal, profileI
 		WHERE session.id = $1::uuid
 		  AND session.user_id = $2::uuid
 		  AND session.revoked_at IS NULL
+		  AND (NOT $6 OR session.refresh_expires_at >= $4)
 		  AND target.id = $3::uuid
 		  AND (
 		    session.authorization_scope = 'global_admin'
@@ -887,7 +915,7 @@ func (s *Service) Select(ctx context.Context, principal auth.Principal, profileI
 		      )
 		    )
 		  )
-	`, principal.SessionID, principal.UserID, selected.ID, expiresAt, profileContextHash)
+	`, principal.SessionID, principal.UserID, selected.ID, expiresAt, profileContextHash, linkedSession)
 	if err != nil {
 		return Selection{}, fmt.Errorf("activate profile selection: %w", err)
 	}

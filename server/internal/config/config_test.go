@@ -49,6 +49,63 @@ func TestLoadUsesSecureTokenTTLsByDefault(t *testing.T) {
 	if len(cfg.LANArtworkOrigins) != 0 {
 		t.Fatalf("unexpected default LAN artwork origins: %v", cfg.LANArtworkOrigins)
 	}
+	if cfg.JellyfinEnabled {
+		t.Fatal("expected Jellyfin to default to disabled")
+	}
+}
+
+func TestLoadParsesJellyfinFlag(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "true", value: "true", want: true},
+		{name: "normalized true", value: "  TrUe  ", want: true},
+		{name: "false", value: "false", want: false},
+		{name: "normalized false", value: "  FaLsE  ", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv("RIVUNE_JELLYFIN_ENABLED", test.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			if cfg.JellyfinEnabled != test.want {
+				t.Fatalf("JellyfinEnabled = %t, want %t", cfg.JellyfinEnabled, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadDefaultsJellyfinToDisabledWhenAbsent(t *testing.T) {
+	setRequiredEnvironment(t)
+	if err := os.Unsetenv("RIVUNE_JELLYFIN_ENABLED"); err != nil {
+		t.Fatalf("unset RIVUNE_JELLYFIN_ENABLED: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.JellyfinEnabled {
+		t.Fatal("expected absent Jellyfin flag to disable Jellyfin")
+	}
+}
+
+func TestLoadRejectsInvalidJellyfinFlag(t *testing.T) {
+	for _, value := range []string{"1", "yes", "on", "garbage"} {
+		t.Run(value, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv("RIVUNE_JELLYFIN_ENABLED", value)
+
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RIVUNE_JELLYFIN_ENABLED must be true or false") {
+				t.Fatalf("Load() error = %v, want strict boolean error", err)
+			}
+		})
+	}
 }
 
 func TestLoadNormalizesLANArtworkOrigins(t *testing.T) {
@@ -507,6 +564,7 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("RIVUNE_HARDWARE_ACCELERATION", "")
 	t.Setenv("RIVUNE_VIDEO_DEVICE", "")
 	t.Setenv("RIVUNE_LAN_ARTWORK_ORIGINS", "")
+	t.Setenv("RIVUNE_JELLYFIN_ENABLED", "")
 }
 
 func TestLoadAllowsCollectionOnlyTraktClientID(t *testing.T) {

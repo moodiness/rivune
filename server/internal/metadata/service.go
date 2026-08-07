@@ -41,16 +41,21 @@ type Service struct {
 	mapper          TelevisionMapper
 	artwork         ArtworkEnricher
 	logger          *slog.Logger
+	location        *time.Location
 }
 
-func NewService(pool *pgxpool.Pool, provider Provider, enricher TelevisionEnricher, artwork ArtworkEnricher, cacheTTL time.Duration, logger *slog.Logger) *Service {
+func NewService(pool *pgxpool.Pool, provider Provider, enricher TelevisionEnricher, artwork ArtworkEnricher, cacheTTL time.Duration, logger *slog.Logger, configuredLocations ...*time.Location) *Service {
 	trailerProvider, _ := provider.(TrailerProvider)
 	resolver, _ := provider.(ExternalIDResolver)
 	mapper, _ := enricher.(TelevisionMapper)
-	return &Service{
+	service := &Service{
 		pool: pool, provider: withEnglishOverviewFallback(provider), resolver: resolver, trailerProvider: trailerProvider,
 		enricher: enricher, mapper: mapper, artwork: artwork, cacheTTL: cacheTTL, logger: logger,
 	}
+	if len(configuredLocations) > 0 {
+		service.location = configuredLocations[0]
+	}
+	return service
 }
 
 func (s *Service) DiscoverMovies(ctx context.Context, principal auth.Principal, options QueryOptions) (MoviePage, error) {
@@ -91,6 +96,31 @@ func (s *Service) SearchMovies(ctx context.Context, principal auth.Principal, op
 		return MoviePage{}, err
 	}
 	return s.persistMoviePage(ctx, principal, page)
+}
+
+// SearchLinkedMovies is the compatibility-session variant of SearchMovies.
+// Provider I/O remains outside database transactions; the linked credential is
+// reloaded and locked again in the transaction that persists and returns the page.
+func (s *Service) SearchLinkedMovies(ctx context.Context, principal auth.Principal, options SearchOptions) (MoviePage, error) {
+	if err := s.requireLinkedProfile(ctx, principal); err != nil {
+		return MoviePage{}, err
+	}
+	normalized, err := normalizeQueryOptions(options.QueryOptions)
+	if err != nil {
+		return MoviePage{}, err
+	}
+	query := strings.TrimSpace(options.Query)
+	if !utf8.ValidString(query) || utf8.RuneCountInString(query) < 1 || utf8.RuneCountInString(query) > 200 {
+		return MoviePage{}, fmt.Errorf("%w: query must contain 1 to 200 characters", ErrInvalidInput)
+	}
+	if s.provider == nil {
+		return MoviePage{}, ErrProviderUnavailable
+	}
+	page, err := s.provider.SearchMovies(ctx, SearchOptions{QueryOptions: normalized, Query: query})
+	if err != nil {
+		return MoviePage{}, err
+	}
+	return s.persistLinkedMoviePage(ctx, principal, page)
 }
 
 func (s *Service) MovieDetails(ctx context.Context, principal auth.Principal, titleID, language string) (Movie, error) {
@@ -240,6 +270,31 @@ func (s *Service) SearchSeries(ctx context.Context, principal auth.Principal, op
 		return SeriesPage{}, err
 	}
 	return s.persistSeriesPage(ctx, principal, page)
+}
+
+// SearchLinkedSeries is the compatibility-session variant of SearchSeries.
+// Its post-provider transaction revalidates the exact linked credential before
+// any title row is persisted or any provider result is returned.
+func (s *Service) SearchLinkedSeries(ctx context.Context, principal auth.Principal, options SearchOptions) (SeriesPage, error) {
+	if err := s.requireLinkedProfile(ctx, principal); err != nil {
+		return SeriesPage{}, err
+	}
+	normalized, err := normalizeQueryOptions(options.QueryOptions)
+	if err != nil {
+		return SeriesPage{}, err
+	}
+	query := strings.TrimSpace(options.Query)
+	if !utf8.ValidString(query) || utf8.RuneCountInString(query) < 1 || utf8.RuneCountInString(query) > 200 {
+		return SeriesPage{}, fmt.Errorf("%w: query must contain 1 to 200 characters", ErrInvalidInput)
+	}
+	if s.provider == nil {
+		return SeriesPage{}, ErrProviderUnavailable
+	}
+	page, err := s.provider.SearchSeries(ctx, SearchOptions{QueryOptions: normalized, Query: query})
+	if err != nil {
+		return SeriesPage{}, err
+	}
+	return s.persistLinkedSeriesPage(ctx, principal, page)
 }
 
 func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, titleID string, options SeriesDetailsOptions) (Series, error) {
@@ -1300,8 +1355,19 @@ func (s *Service) persistMoviePage(ctx context.Context, principal auth.Principal
 	if err != nil {
 		return MoviePage{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	return persistMoviePageTx(ctx, tx, provided)
+}
 
+func (s *Service) persistLinkedMoviePage(ctx context.Context, principal auth.Principal, provided ProviderMoviePage) (MoviePage, error) {
+	tx, err := s.beginLinkedAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return MoviePage{}, err
+	}
+	return persistMoviePageTx(ctx, tx, provided)
+}
+
+func persistMoviePageTx(ctx context.Context, tx pgx.Tx, provided ProviderMoviePage) (MoviePage, error) {
+	defer func() { _ = tx.Rollback(ctx) }()
 	items := make([]Movie, 0, len(provided.Items))
 	for _, item := range provided.Items {
 		if strings.TrimSpace(item.ExternalID) == "" {
@@ -1320,10 +1386,7 @@ func (s *Service) persistMoviePage(ctx context.Context, principal auth.Principal
 		return MoviePage{}, fmt.Errorf("commit title persistence: %w", err)
 	}
 	return MoviePage{
-		Items:        items,
-		Page:         provided.Page,
-		TotalPages:   provided.TotalPages,
-		TotalResults: provided.TotalResults,
+		Items: items, Page: provided.Page, TotalPages: provided.TotalPages, TotalResults: provided.TotalResults,
 	}, nil
 }
 
@@ -1332,8 +1395,19 @@ func (s *Service) persistSeriesPage(ctx context.Context, principal auth.Principa
 	if err != nil {
 		return SeriesPage{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	return persistSeriesPageTx(ctx, tx, provided)
+}
 
+func (s *Service) persistLinkedSeriesPage(ctx context.Context, principal auth.Principal, provided ProviderSeriesPage) (SeriesPage, error) {
+	tx, err := s.beginLinkedAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return SeriesPage{}, err
+	}
+	return persistSeriesPageTx(ctx, tx, provided)
+}
+
+func persistSeriesPageTx(ctx context.Context, tx pgx.Tx, provided ProviderSeriesPage) (SeriesPage, error) {
+	defer func() { _ = tx.Rollback(ctx) }()
 	items := make([]Series, 0, len(provided.Items))
 	for _, item := range provided.Items {
 		if strings.TrimSpace(item.ExternalID) == "" {
@@ -1352,10 +1426,7 @@ func (s *Service) persistSeriesPage(ctx context.Context, principal auth.Principa
 		return SeriesPage{}, fmt.Errorf("commit series title persistence: %w", err)
 	}
 	return SeriesPage{
-		Items:        items,
-		Page:         provided.Page,
-		TotalPages:   provided.TotalPages,
-		TotalResults: provided.TotalResults,
+		Items: items, Page: provided.Page, TotalPages: provided.TotalPages, TotalResults: provided.TotalResults,
 	}, nil
 }
 
@@ -2500,6 +2571,38 @@ func (s *Service) beginAuthorizedProfileTx(ctx context.Context, principal auth.P
 		return nil, ErrProfileRequired
 	}
 	return tx, nil
+}
+
+func (s *Service) beginLinkedAuthorizedProfileTx(ctx context.Context, principal auth.Principal) (pgx.Tx, error) {
+	if s.pool == nil || s.location == nil {
+		return nil, ErrProfileRequired
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin linked metadata profile authorization: %w", err)
+	}
+	_, valid, err := auth.ReloadAndLockLinkedPrincipal(ctx, tx, principal, time.Now().UTC(), s.location)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, fmt.Errorf("authorize linked metadata profile: %w", err)
+	}
+	if !valid {
+		_ = tx.Rollback(ctx)
+		return nil, ErrProfileRequired
+	}
+	return tx, nil
+}
+
+func (s *Service) requireLinkedProfile(ctx context.Context, principal auth.Principal) error {
+	tx, err := s.beginLinkedAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit linked metadata profile authorization: %w", err)
+	}
+	return nil
 }
 
 func firstPrincipal(principals []*auth.Principal) *auth.Principal {
