@@ -72,6 +72,10 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
 
   const stream = page.getByRole("radio", { name: /Fixture 1080p/ });
   await expect(stream).toBeVisible();
+  const sourceMetadata = stream.locator(".details-stream-list__metadata");
+  await expect(sourceMetadata).toBeVisible();
+  await expect(sourceMetadata.locator(".details-stream-list__addon")).toHaveText("Fixture Add-on");
+  await expect(sourceMetadata.locator(".details-stream-list__technical")).toHaveText("HTTP · MP4");
   const singleAddonFilter = page.getByRole("combobox", { name: "Filter streams by add-on" });
   await expect(singleAddonFilter).toBeVisible();
   await expect(await selectOptions(singleAddonFilter)).toEqual([

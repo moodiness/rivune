@@ -2055,14 +2055,18 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                           {filteredStreams.map((option, index) => {
                             const selected = selectedStream?.sourceRef === option.sourceRef;
                             const playDisabled = preparationLoading || Boolean(preparationError);
+                            const addonLabel = streamAddonLabels.get(option.addonId) ?? option.addonName?.trim() ?? option.manifestId;
+                            const technicalLabel = [option.protocol, option.container].filter(Boolean).map((value) => value!.toUpperCase()).join(" · ");
                             return <div key={option.sourceRef} className={selected ? "is-selected" : ""}>
                               <button type="button" className="details-stream-list__option" role="radio" aria-checked={selected} tabIndex={selected ? 0 : selectedStream ? -1 : index === 0 ? 0 : -1} onKeyDown={handleStreamOptionKeyDown} onClick={() => selectPlaybackStream(option)}>
                                 <span>
                                   <strong>{option.name}</strong>
-                                  <small className="details-stream-list__addon">{streamAddonLabels.get(option.addonId) ?? option.addonName?.trim() ?? option.manifestId}</small>
                                   {option.description && <small>{option.description}</small>}
                                   {!option.description && option.filename && <small>{option.filename}</small>}
-                                  <small className="details-stream-list__technical">{[option.protocol, option.container].filter(Boolean).map((value) => value!.toUpperCase()).join(" · ")}</small>
+                                  <span className="details-stream-list__metadata">
+                                    <small className="details-stream-list__addon">{addonLabel}</small>
+                                    <small className="details-stream-list__technical">{technicalLabel}</small>
+                                  </span>
                                 </span>
                                 {selected && <span className="details-stream-list__state">
                                   {preparationLoading
