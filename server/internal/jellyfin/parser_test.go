@@ -72,6 +72,12 @@ func TestParseCompatTokenSeparatesAudienceAndRejectsAmbiguity(t *testing.T) {
 		t.Fatalf("native token audience error = %v", err)
 	}
 
+	emptyPreAuthToken := httptest.NewRequest(http.MethodGet, "/Items", nil)
+	emptyPreAuthToken.Header.Set("Authorization", `MediaBrowser Token=""`)
+	if _, err := ParseCompatToken(emptyPreAuthToken, false); !errors.Is(err, ErrInvalidCompatAuthorization) {
+		t.Fatalf("empty pre-auth token credential error = %v", err)
+	}
+
 	mixedAudience := httptest.NewRequest(http.MethodGet, "/Items", nil)
 	mixedAudience.Header.Set("X-Emby-Token", token)
 	mixedAudience.Header.Set("Authorization", "Bearer rivune_at_native-token")

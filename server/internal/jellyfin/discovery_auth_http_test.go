@@ -208,7 +208,7 @@ func TestAuthenticateByNameAcceptsObservedFieldAliasesWithoutChangingPassword(t 
 			fake, mux := newDiscoveryHTTPTestServer(t)
 			request := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(test.body))
 			request.Header.Set("Content-Type", "application/json; charset=utf-8")
-			request.Header.Set("Authorization", `MediaBrowser Client="VidHub", Device="Tablet", DeviceId="vidhub-device", Version="2.4"`)
+			request.Header.Set("Authorization", `MediaBrowser Client="VidHub", Device="Tablet", DeviceId="vidhub-device", Version="2.4", Token=""`)
 			response := httptest.NewRecorder()
 			mux.ServeHTTP(response, request)
 			if response.Code != http.StatusOK || fake.lastLogin.Password != test.password || fake.lastLogin.Client.Client != "VidHub" {

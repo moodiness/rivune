@@ -224,7 +224,9 @@ func parseAuthorizationParameters(value string) (map[string]string, error) {
 			return nil, err
 		}
 		position = next
-		if parsed == "" || containsHeaderControl(parsed) {
+		// Jellyfin clients commonly advertise Token="" before authentication.
+		// Required identity fields still reject empties, and token authentication validates its dedicated credential format later.
+		if containsHeaderControl(parsed) || parsed == "" && key != "token" {
 			return nil, ErrInvalidCompatAuthorization
 		}
 		if _, duplicate := parameters[key]; duplicate {
