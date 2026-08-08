@@ -67,7 +67,7 @@ func (handler *Handler) serveImage(response http.ResponseWriter, request *http.R
 		}
 		value, folder, folderErr := handler.findCollectionFolder(request.Context(), session.Principal, request.PathValue("id"))
 		if folderErr == nil {
-			item := handler.collectionFolderDetailDTO(request.Context(), session.Principal, value, folder)
+			item := handler.collectionFolderDetailDTO(request.Context(), session.Principal, value, folder, isVidHubClient(session.Client))
 			if key := collectionItemArtworkKey(item, imageType); key != "" {
 				handler.artwork.ServeKey(response, request, key)
 				return

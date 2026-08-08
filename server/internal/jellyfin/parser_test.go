@@ -107,6 +107,13 @@ func TestParseCompatTokenSeparatesAudienceAndRejectsAmbiguity(t *testing.T) {
 		t.Fatalf("empty pre-auth token with query credential parsed %q with error %v", parsed, err)
 	}
 
+	emptyDedicatedWithQuery := httptest.NewRequest(http.MethodGet, "/Items/id/Images/Primary?api_key="+token, nil)
+	emptyDedicatedWithQuery.Header.Set("X-Emby-Token", "")
+	parsed, err = ParseCompatToken(emptyDedicatedWithQuery, true)
+	if err != nil || parsed != token {
+		t.Fatalf("empty dedicated token with query credential parsed %q with error %v", parsed, err)
+	}
+
 	mixedAudience := httptest.NewRequest(http.MethodGet, "/Items", nil)
 	mixedAudience.Header.Set("X-Emby-Token", token)
 	mixedAudience.Header.Set("Authorization", "Bearer rivune_at_native-token")

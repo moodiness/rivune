@@ -125,7 +125,7 @@ func (handler *Handler) writeLatestItems(response http.ResponseWriter, request *
 	if parentID != "" && handler.collections != nil {
 		value, collectionErr := handler.collections.Get(request.Context(), session.Principal, parentID)
 		if collectionErr == nil {
-			items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, query)
+			items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, query, isVidHubClient(session.Client))
 			handler.writeJSON(response, http.StatusOK, items)
 			return
 		}
@@ -379,7 +379,7 @@ func (handler *Handler) writeItem(response http.ResponseWriter, request *http.Re
 		}
 		value, folder, folderErr := handler.findCollectionFolder(request.Context(), session.Principal, itemID.String())
 		if folderErr == nil {
-			handler.writeJSON(response, http.StatusOK, handler.collectionFolderDetailDTO(request.Context(), session.Principal, value, folder))
+			handler.writeJSON(response, http.StatusOK, handler.collectionFolderDetailDTO(request.Context(), session.Principal, value, folder, isVidHubClient(session.Client)))
 			return
 		}
 		if !errors.Is(folderErr, collection.ErrNotFound) {
@@ -453,7 +453,7 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 				if parsed.Recursive {
 					handler.writeCollectionItems(response, request, session, parsed, mediaTypes, value, sortBy, sortOrder)
 				} else {
-					handler.writeCollectionFolders(response, request.Context(), session.Principal, parsed, value)
+					handler.writeCollectionFolders(response, request.Context(), session.Principal, parsed, value, isVidHubClient(session.Client))
 				}
 				return
 			}
@@ -565,12 +565,12 @@ func (handler *Handler) writeCollectionRoot(response http.ResponseWriter, reques
 	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: total, StartIndex: query.StartIndex})
 }
 
-func (handler *Handler) writeCollectionFolders(response http.ResponseWriter, ctx context.Context, principal auth.Principal, query ItemQuery, value collection.Collection) {
-	items, total := handler.collectionFolderPage(ctx, principal, value, query)
+func (handler *Handler) writeCollectionFolders(response http.ResponseWriter, ctx context.Context, principal auth.Principal, query ItemQuery, value collection.Collection, promoted bool) {
+	items, total := handler.collectionFolderPage(ctx, principal, value, query, promoted)
 	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: total, StartIndex: query.StartIndex})
 }
 
-func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth.Principal, value collection.Collection, query ItemQuery) ([]BaseItemDto, int) {
+func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth.Principal, value collection.Collection, query ItemQuery, promoted bool) ([]BaseItemDto, int) {
 	idFilter := stringSet(query.Ids)
 	search := strings.ToLower(query.SearchTerm)
 	filtered := make([]collection.Folder, 0, len(value.Folders))
@@ -592,7 +592,7 @@ func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth
 	handler.hydrateCollectionFolderCovers(ctx, principal, value.ID, selected)
 	items := make([]BaseItemDto, 0, len(selected))
 	for _, folder := range selected {
-		items = append(items, handler.collectionFolderDTO(value, folder))
+		items = append(items, handler.collectionFolderDTO(value, folder, promoted))
 	}
 	if localizer, ok := handler.catalog.(catalogArtworkLocalizer); ok && len(selected) != 0 {
 		upstream := make([]string, len(selected))
@@ -869,11 +869,16 @@ func (handler *Handler) collectionViewDTO(ctx context.Context, principal auth.Pr
 	}
 }
 
-func (handler *Handler) collectionFolderDTO(value collection.Collection, folder collection.Folder) BaseItemDto {
+func (handler *Handler) collectionFolderDTO(value collection.Collection, folder collection.Folder, promoted bool) BaseItemDto {
+	itemType := "Folder"
+	if promoted && strings.EqualFold(strings.TrimSpace(value.FolderCoverShape), collection.TileShapeLandscape) {
+		itemType = "CollectionFolder"
+	}
+
 	return BaseItemDto{
 		Id: folder.ID, ServerId: handler.serverInfo.ID.String(), Name: folder.Title, SortName: folder.Title,
 		Etag: folder.ID, DisplayPreferencesId: folder.ID, LocationType: "FileSystem",
-		Type: "Folder", MediaType: "Unknown", CollectionType: collectionViewType(value.FolderCoverShape), IsFolder: true, ParentId: value.ID,
+		Type: itemType, MediaType: "Unknown", CollectionType: collectionViewType(value.FolderCoverShape), IsFolder: true, ParentId: value.ID,
 		PrimaryImageAspectRatio: collectionFolderAspectRatio(value.FolderCoverShape),
 		Genres:                  []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: folder.ID, ItemId: folder.ID},
 	}
@@ -913,10 +918,11 @@ func collectionFolderAspectRatio(shape string) float64 {
 	}
 }
 
-func (handler *Handler) collectionFolderDetailDTO(ctx context.Context, principal auth.Principal, value collection.Collection, folder collection.Folder) BaseItemDto {
+func (handler *Handler) collectionFolderDetailDTO(ctx context.Context, principal auth.Principal, value collection.Collection, folder collection.Folder, promoted bool) BaseItemDto {
 	folders := []collection.Folder{folder}
 	handler.hydrateCollectionFolderCovers(ctx, principal, value.ID, folders)
-	item := handler.collectionFolderDTO(value, folders[0])
+	item := handler.collectionFolderDTO(value, folders[0], promoted)
+
 	localizer, ok := handler.catalog.(catalogArtworkLocalizer)
 	if !ok || strings.TrimSpace(folders[0].CoverImageURL) == "" {
 		return item

@@ -259,6 +259,7 @@ func (handler *Handler) authenticateStreamRequest(response http.ResponseWriter, 
 	playCapability, err := streamCapabilityPresent(request.URL.Query(), playID)
 	if err != nil {
 		handler.writeStreamError(response, request, http.StatusUnauthorized, "Unauthorized", "A valid stream capability is required")
+		handler.logStreamAuthorizationFailure(request, "api_key_shape", false)
 		return AuthenticatedSession{}, false
 	}
 	if playCapability && !compatCredentialHeaderPresent(request) {
@@ -289,7 +290,11 @@ func (handler *Handler) authenticateStreamRequest(response http.ResponseWriter, 
 		clonedURL.RawQuery = values.Encode()
 		authRequest.URL = &clonedURL
 	}
-	return handler.authenticateRequest(response, authRequest, !playCapability)
+	session, ok := handler.authenticateRequest(response, authRequest, !playCapability)
+	if !ok {
+		handler.logStreamAuthorizationFailure(request, "general_credential", playCapability)
+	}
+	return session, ok
 }
 
 func scopedStreamDeliveryRequest(request *http.Request, playID string) *http.Request {
@@ -297,9 +302,16 @@ func scopedStreamDeliveryRequest(request *http.Request, playID string) *http.Req
 	clonedURL := *request.URL
 	values := clonedURL.Query()
 	deleteQueryFold(values, "api_key")
+	deleteQueryFold(values, "X-Emby-Token")
+	deleteQueryFold(values, "X-MediaBrowser-Token")
+
 	values.Set("api_key", playID)
 	clonedURL.RawQuery = values.Encode()
 	cloned.URL = &clonedURL
+	for _, name := range []string{"X-Emby-Token", "X-MediaBrowser-Token", "X-Emby-Authorization", "X-MediaBrowser-Authorization", "Authorization"} {
+		cloned.Header.Del(name)
+	}
+
 	return cloned
 }
 
@@ -342,10 +354,11 @@ func compatCredentialHeaderPresent(request *http.Request) bool {
 		return true
 	}
 	for _, name := range []string{"X-Emby-Token", "X-MediaBrowser-Token"} {
-		if len(request.Header.Values(name)) != 0 {
+		if values := request.Header.Values(name); len(values) == 1 && values[0] != "" {
 			return true
 		}
 	}
+
 	if values := request.Header.Values("Authorization"); len(values) == 1 {
 		parameters, relevant, err := parseAuthorizationValue(values[0], true)
 		if err != nil || !relevant {
@@ -364,6 +377,72 @@ func compatCredentialHeaderPresent(request *http.Request) bool {
 		return hasToken && token != ""
 	}
 	return false
+}
+
+func (handler *Handler) logStreamAuthorizationFailure(request *http.Request, reason string, playCapability bool) {
+	if handler == nil || handler.logger == nil || request == nil {
+		return
+	}
+	query := request.URL.Query()
+	handler.logger.InfoContext(request.Context(), "jellyfin stream authorization rejected",
+		"reason", reason,
+		"playCapability", playCapability,
+		"apiKeyValues", queryValueCountFold(query, "api_key"),
+		"queryEmbyTokenValues", queryValueCountFold(query, "X-Emby-Token"),
+		"xEmbyTokenHeader", headerValueShape(request.Header, "X-Emby-Token"),
+		"xMediaBrowserTokenHeader", headerValueShape(request.Header, "X-MediaBrowser-Token"),
+		"authorizationHeader", authorizationHeaderShape(request.Header),
+		"boundedHeaders", boundedCompatHeaders(request.Header),
+	)
+}
+
+func queryValueCountFold(values url.Values, name string) int {
+	count := 0
+	for actualName, entries := range values {
+		if strings.EqualFold(actualName, name) {
+			count += len(entries)
+		}
+	}
+	return count
+}
+
+func headerValueShape(headers http.Header, name string) string {
+	values := headers.Values(name)
+	if len(values) == 0 {
+		return "absent"
+	}
+	if len(values) != 1 {
+		return "multiple"
+	}
+	if values[0] == "" {
+		return "empty"
+	}
+	return "present"
+}
+
+func authorizationHeaderShape(headers http.Header) string {
+	values := headers.Values("Authorization")
+	if len(values) == 0 {
+		return "absent"
+	}
+	if len(values) != 1 {
+		return "multiple"
+	}
+	parameters, relevant, err := parseAuthorizationValue(values[0], true)
+	if err != nil {
+		return "invalid"
+	}
+	if !relevant {
+		return "unsupported"
+	}
+	token, found := parameters["token"]
+	if !found {
+		return "identity"
+	}
+	if token == "" {
+		return "empty_token"
+	}
+	return "token"
 }
 
 func parsePlaybackInfoRequest(response http.ResponseWriter, request *http.Request) (PlaybackInfoRequest, error) {

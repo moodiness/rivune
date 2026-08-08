@@ -378,7 +378,7 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 		t.Fatalf("VidHub home collection row status=%d items=%+v body=%s", latestResponse.Code, latest, latestResponse.Body.String())
 	}
 	for _, item := range latest {
-		if item.Type != "Folder" || item.ParentId != collectionCompatID || item.CollectionType != "homevideos" ||
+		if item.Type != "CollectionFolder" || item.ParentId != collectionCompatID || item.CollectionType != "homevideos" ||
 			item.PrimaryImageAspectRatio != 16.0/9.0 || item.ImageTags["Thumb"] == "" || len(item.BackdropImageTags) != 1 ||
 			item.BackdropImageTags[0] != item.ImageTags["Thumb"] || item.UserData == nil || item.UserData.ItemId != item.Id {
 			t.Fatalf("VidHub home row contains an invalid landscape folder: %+v", item)
@@ -430,6 +430,25 @@ func TestCollectionFolderAspectRatioUsesCollectionCoverShape(t *testing.T) {
 	} {
 		if got := collectionFolderAspectRatio(test.shape); got != test.want {
 			t.Fatalf("shape %q ratio=%v want=%v", test.shape, got, test.want)
+		}
+	}
+}
+
+func TestCollectionFolderPromotionAppliesOnlyToVidHubLandscape(t *testing.T) {
+	handler := &Handler{}
+	for _, test := range []struct {
+		shape    string
+		promoted bool
+		wantType string
+	}{
+		{shape: collection.TileShapeLandscape, promoted: true, wantType: "CollectionFolder"},
+		{shape: collection.TileShapeLandscape, wantType: "Folder"},
+		{shape: collection.TileShapePoster, promoted: true, wantType: "Folder"},
+		{shape: collection.TileShapeSquare, promoted: true, wantType: "Folder"},
+	} {
+		item := handler.collectionFolderDTO(collection.Collection{FolderCoverShape: test.shape}, collection.Folder{}, test.promoted)
+		if item.Type != test.wantType {
+			t.Fatalf("shape=%q promoted=%t type=%q want=%q", test.shape, test.promoted, item.Type, test.wantType)
 		}
 	}
 }

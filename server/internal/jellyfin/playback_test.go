@@ -449,6 +449,7 @@ func TestAdvertisedStreamCapabilityServesPlayerGETWithoutProfileCredential(t *te
 		name                 string
 		mutatePath           func(string, string, string) string
 		tokenHeader          bool
+		emptyTokenHeader     bool
 		authorizationHeader  string
 		xAuthorizationHeader string
 		wantStatus           int
@@ -458,6 +459,7 @@ func TestAdvertisedStreamCapabilityServesPlayerGETWithoutProfileCredential(t *te
 		{name: "scoped capability with matching header", tokenHeader: true, wantStatus: http.StatusNoContent},
 		{name: "scoped capability with VidHub identity", authorizationHeader: `Emby Client="VidHub", Device="iPhone", DeviceId="vidhub-player", Version="3.0.3"`, wantStatus: http.StatusNoContent, wantRevalidation: 1},
 		{name: "scoped capability with VidHub empty token", authorizationHeader: `Emby Client="VidHub", Device="iPhone", DeviceId="vidhub-player", Version="3.0.3", Token=""`, wantStatus: http.StatusNoContent, wantRevalidation: 1},
+		{name: "scoped capability with empty dedicated token", emptyTokenHeader: true, wantStatus: http.StatusNoContent, wantRevalidation: 1},
 		{name: "scoped capability with appended profile credential", mutatePath: func(path, _, token string) string { return path + "&api_key=" + token }, wantStatus: http.StatusNoContent, wantRevalidation: 1},
 		{name: "scoped capability with appended case-alias credential", mutatePath: func(path, _, token string) string { return path + "&API_KEY=" + token }, wantStatus: http.StatusNoContent, wantRevalidation: 1},
 		{name: "oversized VidHub identity is rejected", authorizationHeader: `Emby Client="VidHub", Device="iPhone", DeviceId="vidhub-player", Version="3.0.3", Token="", Padding="` + strings.Repeat("x", maximumCompatAuthorizationHeaderBytes) + `"`, wantStatus: http.StatusUnauthorized},
@@ -484,6 +486,9 @@ func TestAdvertisedStreamCapabilityServesPlayerGETWithoutProfileCredential(t *te
 			if test.tokenHeader {
 				request.Header.Set("X-Emby-Token", fixture.token)
 			}
+			if test.emptyTokenHeader {
+				request.Header.Set("X-Emby-Token", "")
+			}
 			if test.authorizationHeader != "" {
 				request.Header.Set("Authorization", test.authorizationHeader)
 			}
@@ -497,8 +502,8 @@ func TestAdvertisedStreamCapabilityServesPlayerGETWithoutProfileCredential(t *te
 			}
 			wantServed := test.wantStatus == http.StatusNoContent
 			if (fixture.delivery.serveCalls == 1) != wantServed || (fixture.delivery.openCalls == 1) != wantServed ||
-				wantServed && fixture.delivery.servedAPIKeyCount != 1 || fixture.authentication.revalidateCalls != test.wantRevalidation {
-				t.Fatalf("delivery calls open=%d serve=%d apiKeys=%d revalidate=%d wantServed=%t wantRevalidation=%d", fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.delivery.servedAPIKeyCount, fixture.authentication.revalidateCalls, wantServed, test.wantRevalidation)
+				wantServed && (fixture.delivery.servedAPIKeyCount != 1 || fixture.delivery.servedProfileHeaderCredential) || fixture.authentication.revalidateCalls != test.wantRevalidation {
+				t.Fatalf("delivery calls open=%d serve=%d apiKeys=%d profileHeader=%t revalidate=%d wantServed=%t wantRevalidation=%d", fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.delivery.servedAPIKeyCount, fixture.delivery.servedProfileHeaderCredential, fixture.authentication.revalidateCalls, wantServed, test.wantRevalidation)
 			}
 		})
 	}
@@ -516,11 +521,13 @@ func TestObservedVidHubGeneralQueryCredentialIsReplacedBeforeHLSDelivery(t *test
 		"&DeviceId=vidhub-player&X-Emby-Client=VidHub&X-Emby-Device-Name=iPhone&X-Emby-Device-Id=vidhub-player&X-Emby-Client-Version=3.0.3&X-Emby-Token=" + fixture.token
 	request := httptest.NewRequest(http.MethodGet, path, nil)
 	request.Header.Set("Authorization", `Emby Client="VidHub", Device="iPhone", DeviceId="vidhub-player", Version="3.0.3", Token=""`)
+	request.Header.Set("X-Emby-Token", "")
+
 	request.SetPathValue("id", fixture.item.ID)
 	response := httptest.NewRecorder()
 	fixture.handler.handleStream(response, request)
-	if response.Code != http.StatusNoContent || fixture.delivery.servedAPIKey != info.PlaySessionId || fixture.delivery.servedAPIKey == fixture.token {
-		t.Fatalf("status=%d scopedKey=%t generalCredentialPropagated=%t", response.Code, fixture.delivery.servedAPIKey == info.PlaySessionId, fixture.delivery.servedAPIKey == fixture.token)
+	if response.Code != http.StatusNoContent || fixture.delivery.servedAPIKey != info.PlaySessionId || fixture.delivery.servedAPIKey == fixture.token || fixture.delivery.servedProfileQueryCredential || fixture.delivery.servedProfileHeaderCredential {
+		t.Fatalf("status=%d scopedKey=%t generalCredentialPropagated=%t", response.Code, fixture.delivery.servedAPIKey == info.PlaySessionId, fixture.delivery.servedAPIKey == fixture.token || fixture.delivery.servedProfileQueryCredential || fixture.delivery.servedProfileHeaderCredential)
 	}
 }
 
@@ -1910,41 +1917,43 @@ func advancingPlaybackTestClock(base time.Time) func() time.Time {
 }
 
 type fakeCompatPlaybackDelivery struct {
-	mu                sync.Mutex
-	now               time.Time
-	sources           playback.SourceList
-	handle            playback.DeliveryHandle
-	handles           []playback.DeliveryHandle
-	openErrors        []error
-	closeErrors       []error
-	closeErr          error
-	sourceCalls       int
-	sourceInputs      []playback.SourcesInput
-	inputs            []playback.ResolveInput
-	openCalls         int
-	serveCalls        int
-	closeCalls        int
-	closedHandles     []playback.DeliveryHandle
-	closedSessions    []string
-	events            []string
-	serveErr          error
-	servedMethod      string
-	servedRange       string
-	servedStartTicks  string
-	servedAPIKey      string
-	servedAPIKeyCount int
-	openGate          <-chan struct{}
-	openIgnoreContext bool
-	openStarted       chan<- struct{}
-	closeGate         <-chan struct{}
-	closeStarted      chan<- struct{}
-	closeFinished     chan<- struct{}
-	pinCalls          int
-	unpinCalls        int
-	pinErr            error
-	pinned            map[string]int
-	closeActive       int
-	closeMaxActive    int
+	mu                            sync.Mutex
+	now                           time.Time
+	sources                       playback.SourceList
+	handle                        playback.DeliveryHandle
+	handles                       []playback.DeliveryHandle
+	openErrors                    []error
+	closeErrors                   []error
+	closeErr                      error
+	sourceCalls                   int
+	sourceInputs                  []playback.SourcesInput
+	inputs                        []playback.ResolveInput
+	openCalls                     int
+	serveCalls                    int
+	closeCalls                    int
+	closedHandles                 []playback.DeliveryHandle
+	closedSessions                []string
+	events                        []string
+	serveErr                      error
+	servedMethod                  string
+	servedRange                   string
+	servedStartTicks              string
+	servedAPIKey                  string
+	servedAPIKeyCount             int
+	servedProfileQueryCredential  bool
+	servedProfileHeaderCredential bool
+	openGate                      <-chan struct{}
+	openIgnoreContext             bool
+	openStarted                   chan<- struct{}
+	closeGate                     <-chan struct{}
+	closeStarted                  chan<- struct{}
+	closeFinished                 chan<- struct{}
+	pinCalls                      int
+	unpinCalls                    int
+	pinErr                        error
+	pinned                        map[string]int
+	closeActive                   int
+	closeMaxActive                int
 }
 
 func (delivery *fakeCompatPlaybackDelivery) Sources(_ context.Context, _ auth.Principal, input playback.SourcesInput) (playback.SourceList, error) {
@@ -2047,10 +2056,19 @@ func (delivery *fakeCompatPlaybackDelivery) Serve(response http.ResponseWriter, 
 	delivery.servedStartTicks = request.URL.Query().Get("StartTimeTicks")
 	delivery.servedAPIKey = request.URL.Query().Get("api_key")
 	for name, entries := range request.URL.Query() {
-		if strings.EqualFold(name, "api_key") {
+		switch {
+		case strings.EqualFold(name, "api_key"):
 			delivery.servedAPIKeyCount += len(entries)
+		case strings.EqualFold(name, "X-Emby-Token"), strings.EqualFold(name, "X-MediaBrowser-Token"):
+			delivery.servedProfileQueryCredential = true
 		}
 	}
+	for _, name := range []string{"X-Emby-Token", "X-MediaBrowser-Token", "X-Emby-Authorization", "X-MediaBrowser-Authorization", "Authorization"} {
+		if len(request.Header.Values(name)) != 0 {
+			delivery.servedProfileHeaderCredential = true
+		}
+	}
+
 	if delivery.serveErr != nil {
 		return delivery.serveErr
 	}

@@ -114,12 +114,16 @@ func ParseCompatToken(request *http.Request, allowQuery bool) (string, error) {
 			return "", ErrInvalidCompatAuthorization
 		}
 		if len(values) == 1 {
+			if values[0] == "" {
+				continue
+			}
 			value := strings.TrimSpace(values[0])
 			if value == "" || strings.ContainsAny(value, ",\r\n\t ") {
 				return "", ErrInvalidCompatAuthorization
 			}
 			candidates = append(candidates, value)
 		}
+
 	}
 
 	parameters, found, err := collectAuthorizationParameters(request.Header)
