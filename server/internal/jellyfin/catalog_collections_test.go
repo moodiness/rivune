@@ -697,11 +697,11 @@ func TestVirtualCatalogRootsProjectAuthorizedCollections(t *testing.T) {
 		handler.handleItems(response, request)
 		var result QueryResult[BaseItemDto]
 		decodeCatalogResponse(t, response, &result)
-		if response.Code != http.StatusOK || result.TotalRecordCount != 0 || len(result.Items) != 0 {
+		if response.Code != http.StatusOK || result.TotalRecordCount != 1 || len(result.Items) != 0 {
 			t.Fatalf("collection-backed count status=%d result=%+v", response.Code, result)
 		}
-		if len(service.calls) != 0 {
-			t.Fatalf("count-only projection resolved remote content: %+v", service.calls)
+		if len(service.calls) != 1 {
+			t.Fatalf("count-only projection was not bounded: %+v", service.calls)
 		}
 	})
 
@@ -716,11 +716,11 @@ func TestVirtualCatalogRootsProjectAuthorizedCollections(t *testing.T) {
 		handler.handleItems(response, request)
 		var result QueryResult[BaseItemDto]
 		decodeCatalogResponse(t, response, &result)
-		if response.Code != http.StatusOK || result.TotalRecordCount != 0 || len(result.Items) != 0 {
+		if response.Code != http.StatusOK || result.TotalRecordCount != 1 || len(result.Items) != 0 {
 			t.Fatalf("collection count status=%d result=%+v", response.Code, result)
 		}
-		if len(service.calls) != 0 {
-			t.Fatalf("collection count resolved remote content: %+v", service.calls)
+		if len(service.calls) != 1 {
+			t.Fatalf("collection count was not bounded: %+v", service.calls)
 		}
 	})
 }

@@ -834,9 +834,6 @@ func (handler *Handler) collectionItemPage(ctx context.Context, principal auth.P
 	if noCatalogMediaTypes(allowed) {
 		return QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: query.StartIndex}, nil
 	}
-	if query.Limit == 0 {
-		return QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: query.StartIndex}, nil
-	}
 	resolver, ok := handler.catalog.(collectionItemResolver)
 	if !ok {
 		return QueryResult[BaseItemDto]{}, errCollectionResolverUnavailable
@@ -875,9 +872,6 @@ func (handler *Handler) virtualCollectionPage(ctx context.Context, principal aut
 	if noCatalogMediaTypes(intersectMediaTypes(mediaTypes, []string{mediaType})) || handler.collections == nil {
 		return QueryResult[BaseItemDto]{}, false
 	}
-	if query.Limit == 0 {
-		return QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: query.StartIndex}, true
-	}
 	resolver, ok := handler.catalog.(collectionItemResolver)
 	if !ok {
 		return QueryResult[BaseItemDto]{}, false
@@ -895,7 +889,7 @@ func (handler *Handler) virtualCollectionPage(ctx context.Context, principal aut
 	}
 	scan := query
 	scan.StartIndex = 0
-	scan.Limit = max(1, target-1)
+	scan.Limit = target - 1
 	seen := make(map[string]struct{}, target)
 	titles := make([]watchstate.CatalogTitle, 0, target)
 	more := false
@@ -970,7 +964,7 @@ func (handler *Handler) writeCollectionItemError(response http.ResponseWriter, e
 
 func (handler *Handler) resolveCollectionWindow(ctx context.Context, principal auth.Principal, resolver collectionItemResolver, value collection.Collection, mediaTypes []string, query ItemQuery, sortBy, sortOrder string) ([]watchstate.CatalogTitle, bool, error) {
 	target := query.StartIndex + query.Limit + 1
-	if query.Limit == 0 || target > maximumCollectionResolveLimit {
+	if target > maximumCollectionResolveLimit {
 		target = maximumCollectionResolveLimit
 	}
 	allowed := stringSet(mediaTypes)
