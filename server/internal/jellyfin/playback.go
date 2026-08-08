@@ -20,6 +20,8 @@ const (
 	maximumCompatibilityMediaSources  = 15
 	maximumCompatibilityMediaStreams  = 64
 	maximumCompatibilitySubtitleIndex = 2047
+	maximumCompatClientBitrate        = int64(1<<31 - 1)
+	maximumCompatPlaybackBitrate      = int64(200_000_000)
 )
 
 func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request *http.Request) {
@@ -116,10 +118,14 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 		return
 	}
 	playID := result.PlaySessionId
-	if input.MediaSourceId != "" {
-		binding, _, native, openErr := handler.playSessions.openAndTouch(request.Context(), session, item.ID, playID, input.MediaSourceId, input.StartTimeTicks)
+	mediaID := input.MediaSourceId
+	if mediaID == "" && len(result.MediaSources) != 0 {
+		mediaID = result.MediaSources[0].Id
+	}
+	if mediaID != "" {
+		binding, _, native, openErr := handler.playSessions.openAndTouch(request.Context(), session, item.ID, playID, mediaID, input.StartTimeTicks)
 		if openErr != nil {
-			_ = handler.playSessions.close(context.WithoutCancel(request.Context()), session, item.ID, playID, input.MediaSourceId)
+			_ = handler.playSessions.close(context.WithoutCancel(request.Context()), session, item.ID, playID, mediaID)
 			handler.writePlaybackError(response, request, openErr)
 			return
 		}
@@ -129,7 +135,7 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 }
 
 func (handler *Handler) detailMediaSources(ctx context.Context, session AuthenticatedSession, item watchstate.CatalogTitle) []MediaSourceInfo {
-	if handler == nil || handler.playback == nil || handler.playSessions == nil || item.ID == "" || item.MediaType != "movie" && item.MediaType != "episode" {
+	if handler == nil || handler.playback == nil || item.ID == "" || item.MediaType != "movie" && item.MediaType != "episode" {
 		return nil
 	}
 	input := PlaybackInfoRequest{DeviceProfile: conservativeCompatibilityProfile()}
@@ -142,11 +148,11 @@ func (handler *Handler) detailMediaSources(ctx context.Context, session Authenti
 		return nil
 	}
 	defer releaseOptions()
-	result, err := handler.registerPlaybackInfo(ctx, session, item, capabilities, allowTranscode, options, "", 0, nil, nil)
-	if err != nil {
-		return nil
+	option := options[0]
+	descriptor := playSourceDescriptor{
+		ID: item.ID, Name: compatibilitySourceName(1, option.ReportedHeight), Protocol: option.Protocol, Container: option.Container,
 	}
-	return result.MediaSources
+	return []MediaSourceInfo{mediaSourceDTO(item, "", descriptor, capabilities, allowTranscode, 0)}
 }
 
 func (handler *Handler) playbackOptions(ctx context.Context, session AuthenticatedSession, item watchstate.CatalogTitle, capabilities playback.Capabilities, allowTranscode bool) ([]playback.SourceOption, func(), error) {
@@ -677,7 +683,7 @@ func parsePlaybackInfoRequest(response http.ResponseWriter, request *http.Reques
 		return PlaybackInfoRequest{}, err
 	}
 	if len(input.UserId) > 128 || len(input.MediaSourceId) > 128 || input.StartTimeTicks < 0 || input.StartTimeTicks > 7*24*60*60*TicksPerSecond ||
-		input.MaxStreamingBitrate < 0 || input.MaxStreamingBitrate > 200_000_000 || input.MaxAudioChannels < 0 || input.MaxAudioChannels > 32 ||
+		input.MaxStreamingBitrate < 0 || input.MaxStreamingBitrate > maximumCompatClientBitrate || input.MaxAudioChannels < 0 || input.MaxAudioChannels > 32 ||
 		!validPlaybackTrackIndex(input.AudioStreamIndex) || !validPlaybackTrackIndex(input.SubtitleStreamIndex) {
 		return PlaybackInfoRequest{}, ErrInvalidQuery
 	}
@@ -789,7 +795,7 @@ func (handler *Handler) effectivePlaybackCapabilities(session AuthenticatedSessi
 
 func validDeviceProfileBounds(profile DeviceProfile) bool {
 	if len(profile.Name) > 128 || len(profile.DirectPlayProfiles) > 32 || len(profile.TranscodingProfiles) > 32 || len(profile.SubtitleProfiles) > 32 ||
-		profile.MaxStreamingBitrate != 0 && (profile.MaxStreamingBitrate < 64_000 || profile.MaxStreamingBitrate > 200_000_000) {
+		profile.MaxStreamingBitrate != 0 && (profile.MaxStreamingBitrate < 64_000 || profile.MaxStreamingBitrate > maximumCompatClientBitrate) {
 		return false
 	}
 	boundedList := func(value string) bool { return len(value) <= 2048 }
@@ -1012,7 +1018,11 @@ func sourceOptionReferenceIDs(options []playback.SourceOption) []string {
 }
 
 func mediaSourceDTO(item watchstate.CatalogTitle, playID string, descriptor playSourceDescriptor, capabilities playback.Capabilities, allowTranscode bool, startTimeTicks int64) MediaSourceInfo {
-	values := url.Values{"PlaySessionId": {playID}, "MediaSourceId": {descriptor.ID}, "Static": {"true"}, "api_key": {playID}}
+	values := url.Values{"MediaSourceId": {descriptor.ID}, "Static": {"true"}}
+	if playID != "" {
+		values.Set("PlaySessionId", playID)
+		values.Set("api_key", playID)
+	}
 	if startTimeTicks > 0 {
 		values.Set("StartTimeTicks", strconv.FormatInt(startTimeTicks, 10))
 	}
@@ -1027,13 +1037,18 @@ func mediaSourceDTO(item watchstate.CatalogTitle, playID string, descriptor play
 		(protocol == "hls" || container == "" || containsFold(capabilities.Containers, container))
 	supportsDirectPlay := direct && playbackFlag(capabilities.PreferDirectPlay, true)
 	supportsDirectStream := containsFold(capabilities.ProcessingModes, "remux") && (direct || supportsHLSRemux(capabilities))
-	source := MediaSourceInfo{
-		Id: descriptor.ID, Name: descriptor.Name, Path: streamPath, Container: container,
-		Protocol: "Http", Type: "Default", IsRemote: false, SupportsDirectPlay: supportsDirectPlay,
-		SupportsDirectStream: supportsDirectStream, SupportsTranscoding: allowTranscode, MediaStreams: []MediaStreamInfo{},
-		RunTimeTicks: catalogRuntimeTicks(item),
+	formats := []string{}
+	if container != "" {
+		formats = append(formats, container)
 	}
-	if supportsDirectStream {
+	source := MediaSourceInfo{
+		Id: descriptor.ID, Name: descriptor.Name, Path: compatibilityMediaPath(item.ID, descriptor.ID, pathContainer), Container: container,
+		Protocol: "File", Type: "Default", IsRemote: false, SupportsDirectPlay: supportsDirectPlay,
+		SupportsDirectStream: supportsDirectStream, SupportsTranscoding: allowTranscode, SupportsProbing: true, VideoType: "VideoFile",
+		Formats: formats, RequiredHttpHeaders: map[string]string{}, MediaAttachments: []any{}, MediaStreams: []MediaStreamInfo{},
+		RunTimeTicks: catalogRuntimeTicks(item), ETag: item.ID,
+	}
+	if supportsDirectPlay || supportsDirectStream {
 		if !direct && supportsHLSRemux(capabilities) {
 			source.DirectStreamUrl = compatibilityMasterPath(item.ID, values)
 		} else {
@@ -1060,6 +1075,14 @@ func compatibilityStreamPath(itemID, container string, values url.Values) string
 	return "/Videos/" + url.PathEscape(itemID) + "/stream." + container + "?" + values.Encode()
 }
 
+func compatibilityMediaPath(itemID, mediaID, container string) string {
+	container = strings.ToLower(strings.TrimSpace(container))
+	if !validContainer(container) {
+		container = "mp4"
+	}
+	return "/rivune/" + url.PathEscape(itemID) + "/" + url.PathEscape(mediaID) + "." + container
+}
+
 func compatibilityMasterPath(itemID string, values url.Values) string {
 	return "/Videos/" + url.PathEscape(itemID) + "/master.m3u8?" + values.Encode()
 }
@@ -1081,7 +1104,12 @@ func applyResolvedMediaSource(sources []MediaSourceInfo, itemID, mediaID, playID
 			if native.ID != session.SelectedSourceID {
 				continue
 			}
-			sources[index].Container = normalizedContainer(native.Container)
+			container := normalizedContainer(native.Container)
+			sources[index].Container = container
+			if container != "" {
+				sources[index].Formats = []string{container}
+				sources[index].Path = compatibilityMediaPath(itemID, mediaID, container)
+			}
 			if native.Media != nil {
 				sources[index].Name = verifiedCompatibilitySourceName(sources[index].Name, native.Media, session.SelectedAudioTrack)
 				sources[index].MediaStreams, sources[index].DefaultAudioStreamIndex = compatibilityMediaStreams(native.Media, session.SelectedAudioTrack)
@@ -1399,8 +1427,11 @@ func effectiveBitrate(requested, profile int64) (int, error) {
 	if value == 0 {
 		return 0, nil
 	}
-	if value < 64_000 || value > 200_000_000 {
+	if value < 64_000 || value > maximumCompatClientBitrate {
 		return 0, ErrInvalidQuery
+	}
+	if value > maximumCompatPlaybackBitrate {
+		value = maximumCompatPlaybackBitrate
 	}
 	return int((value + 999) / 1000), nil
 }

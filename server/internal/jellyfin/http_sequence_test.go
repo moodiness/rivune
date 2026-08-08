@@ -324,6 +324,7 @@ type sequenceHTTPFixture struct {
 	loginHeader        string
 	loginAuthorization string
 	mux                http.Handler
+	handler            *Handler
 	auth               *sequenceAuthentication
 	catalog            *sequenceCatalog
 	watchstate         *sequenceWatchstate
@@ -350,6 +351,87 @@ func TestJellyfinCompatibleClientHTTPSequences(t *testing.T) {
 			fixture.run(t)
 		})
 	}
+}
+
+func TestInfuseGETPlaybackInfoThenTwoUserDetailsThenStaticStream(t *testing.T) {
+	fixture := newSequenceHTTPFixture(t, "", "Infuse", "X-Emby-Token", "X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="Apple TV", DeviceId="infuse-sequence", Version="8.0"`)
+	login := fixture.login(t, "login-primary", sequencePrimaryCredentialID)
+	sequenceRequireStatus(t, login, http.StatusOK)
+	var authentication AuthenticationResult
+	sequenceDecode(t, login, &authentication)
+	if authentication.AccessToken == "" || authentication.User.Id != sequencePrimaryProfileID {
+		t.Fatalf("Infuse authentication=%+v", authentication)
+	}
+	fixture.responses = nil
+
+	playbackResponse := fixture.request(t, "infuse-playback-info", http.MethodGet, "/Items/"+url.PathEscape(sequenceEpisodeID)+"/PlaybackInfo?UserId="+url.QueryEscape(authentication.User.Id), "", authentication.AccessToken)
+	sequenceRequireStatus(t, playbackResponse, http.StatusOK)
+	var info PlaybackInfoResponse
+	sequenceDecode(t, playbackResponse, &info)
+	if len(info.MediaSources) != 1 || !strings.HasPrefix(info.PlaySessionId, playSessionIDPrefix) {
+		t.Fatalf("Infuse PlaybackInfo did not issue one scoped source: %+v", info)
+	}
+	source := info.MediaSources[0]
+	if source.Protocol != "File" || source.Type != "Default" || source.IsRemote || !source.SupportsProbing || source.VideoType != "VideoFile" ||
+		len(source.Formats) != 1 || source.Formats[0] != "mp4" || source.RequiredHttpHeaders == nil || len(source.RequiredHttpHeaders) != 0 || source.MediaAttachments == nil || len(source.MediaAttachments) != 0 ||
+		!strings.HasPrefix(source.Path, "/rivune/") || strings.ContainsAny(source.Path, "?#") || strings.Contains(source.Path, info.PlaySessionId) {
+		t.Fatalf("Infuse file-like source metadata is incomplete or authoritative: %+v", source)
+	}
+	hasVideo, hasAudio := false, false
+	for _, stream := range source.MediaStreams {
+		hasVideo = hasVideo || stream.Type == "Video"
+		hasAudio = hasAudio || stream.Type == "Audio"
+	}
+	if !hasVideo || !hasAudio {
+		t.Fatalf("Infuse source lacks inspected video/audio tracks: %+v", source.MediaStreams)
+	}
+	directURL, err := url.Parse(source.DirectStreamUrl)
+	if err != nil {
+		t.Fatalf("Infuse DirectStreamUrl is invalid: %q err=%v", source.DirectStreamUrl, err)
+	}
+	if directURL.Query().Get("MediaSourceId") != source.Id || directURL.Query().Get("Static") != "true" || directURL.Query().Get("PlaySessionId") != info.PlaySessionId || directURL.Query().Get("api_key") != info.PlaySessionId {
+		t.Fatalf("Infuse DirectStreamUrl is not scoped to the negotiated capability: %q", source.DirectStreamUrl)
+	}
+	for _, forbidden := range []string{authentication.AccessToken, sequenceProviderResource, sequenceProviderSource, sequenceProviderHeader, "provider.invalid"} {
+		if strings.Contains(source.Path, forbidden) || strings.Contains(playbackResponse.Body.String(), forbidden) {
+			t.Fatalf("Infuse PlaybackInfo disclosed %q: %s", forbidden, playbackResponse.Body.String())
+		}
+	}
+	if fixture.playback.openCalls != 1 || len(fixture.playback.inputs) != 1 || fixture.playback.inputs[0].SourceRef != sequenceProviderSource || len(fixture.handler.playSessions.entries) != 1 {
+		t.Fatalf("Infuse negotiation did not eagerly open exactly the first source: opens=%d inputs=%+v sessions=%d", fixture.playback.openCalls, fixture.playback.inputs, len(fixture.handler.playSessions.entries))
+	}
+
+	sessionsBeforeDetails := len(fixture.handler.playSessions.entries)
+	detailTarget := "/Users/" + url.PathEscape(authentication.User.Id) + "/Items/" + url.PathEscape(sequenceEpisodeID)
+	for index := range 2 {
+		detail := fixture.request(t, fmt.Sprintf("infuse-user-detail-%d", index+1), http.MethodGet, detailTarget, "", authentication.AccessToken)
+		sequenceRequireStatus(t, detail, http.StatusOK)
+		var item BaseItemDto
+		sequenceDecode(t, detail, &item)
+		if item.Id != sequenceEpisodeID || len(item.MediaSources) != 1 || item.MediaSources[0].Protocol != "File" || strings.ContainsAny(item.MediaSources[0].Path, "?#") || strings.Contains(item.MediaSources[0].DirectStreamUrl, "api_key=") || strings.Contains(item.MediaSources[0].DirectStreamUrl, "PlaySessionId=") {
+			t.Fatalf("Infuse user detail %d exposed stateful or authoritative media: %+v", index+1, item)
+		}
+		if len(fixture.handler.playSessions.entries) != sessionsBeforeDetails || fixture.playback.openCalls != 1 {
+			t.Fatalf("Infuse user detail %d created playback state: sessions=%d want=%d opens=%d", index+1, len(fixture.handler.playSessions.entries), sessionsBeforeDetails, fixture.playback.openCalls)
+		}
+	}
+
+	staticTarget := "/Videos/" + url.PathEscape(sequenceEpisodeID) + "/stream?MediaSourceId=" + url.QueryEscape(source.Id) + "&Static=true"
+	stream := fixture.request(t, "infuse-static-stream", http.MethodGet, staticTarget, "", authentication.AccessToken)
+	sequenceRequireStatus(t, stream, http.StatusOK)
+	if stream.Body.String() != string(fixture.playback.media) || fixture.playback.serveCalls != 1 || fixture.playback.openCalls != 1 || len(fixture.handler.playSessions.entries) != sessionsBeforeDetails {
+		t.Fatalf("Infuse static stream was not served from the eager session: status=%d opens=%d serves=%d sessions=%d body=%q", stream.Code, fixture.playback.openCalls, fixture.playback.serveCalls, len(fixture.handler.playSessions.entries), stream.Body.String())
+	}
+	wantNames := []string{"infuse-playback-info", "infuse-user-detail-1", "infuse-user-detail-2", "infuse-static-stream"}
+	if len(fixture.responses) != len(wantNames) {
+		t.Fatalf("Infuse request sequence length=%d want=%d", len(fixture.responses), len(wantNames))
+	}
+	for index, want := range wantNames {
+		if fixture.responses[index].name != want {
+			t.Fatalf("Infuse request %d=%q want=%q", index, fixture.responses[index].name, want)
+		}
+	}
+	fixture.assertNoSecretOutputs(t, authentication.AccessToken, "unused-secondary-token")
 }
 
 func newSequenceHTTPFixture(t *testing.T, prefix, client, tokenHeader, loginHeader, loginAuthorization string) *sequenceHTTPFixture {
@@ -419,7 +501,7 @@ func newSequenceHTTPFixture(t *testing.T, prefix, client, tokenHeader, loginHead
 	}
 	handler.playSessions.now = func() time.Time { return now }
 	return &sequenceHTTPFixture{
-		prefix: prefix, client: client, tokenHeader: tokenHeader, loginHeader: loginHeader, loginAuthorization: loginAuthorization, mux: handler,
+		prefix: prefix, client: client, tokenHeader: tokenHeader, loginHeader: loginHeader, loginAuthorization: loginAuthorization, mux: handler, handler: handler,
 		auth: authentication, catalog: catalog, watchstate: state, artwork: artwork, playback: delivery, logs: logs,
 	}
 }
@@ -555,16 +637,22 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	var playbackInfo PlaybackInfoResponse
 	sequenceDecode(t, playbackInfoResponse, &playbackInfo)
 	sequenceRequireObjectKeys(t, playbackInfoResponse.Body.Bytes(), "MediaSources", "PlaySessionId")
-	sequenceRequireArrayObjectKeys(t, playbackInfoResponse.Body.Bytes(), "MediaSources", 0, "Id", "Name", "Path", "Container", "Protocol", "Type", "IsRemote", "SupportsDirectPlay", "SupportsDirectStream", "SupportsTranscoding")
+	sequenceRequireArrayObjectKeys(t, playbackInfoResponse.Body.Bytes(), "MediaSources", 0, "Id", "Name", "Path", "DirectStreamUrl", "Container", "Protocol", "Type", "IsRemote", "SupportsDirectPlay", "SupportsDirectStream", "SupportsTranscoding", "SupportsProbing", "VideoType", "Formats", "RequiredHttpHeaders", "MediaAttachments", "MediaStreams")
 	if playbackInfo.PlaySessionId == "" || len(playbackInfo.MediaSources) != 1 {
 		t.Fatalf("playback negotiation returned no opaque session/source: %+v", playbackInfo)
 	}
 	mediaSource := playbackInfo.MediaSources[0]
-	if mediaSource.Id == "" || mediaSource.Path == "" || mediaSource.Protocol != "Http" || mediaSource.Type != "Default" || mediaSource.IsRemote || !mediaSource.SupportsDirectPlay || !mediaSource.SupportsDirectStream || !strings.Contains(mediaSource.Path, "api_key="+url.QueryEscape(playbackInfo.PlaySessionId)) || strings.Contains(mediaSource.Path, primaryToken) || strings.Contains(mediaSource.Path, sequenceProviderSource) || strings.Contains(mediaSource.Path, sequenceProviderResource) {
+	directURL, directErr := url.Parse(mediaSource.DirectStreamUrl)
+	if directErr != nil {
+		t.Fatalf("media source DirectStreamUrl is invalid: %q err=%v", mediaSource.DirectStreamUrl, directErr)
+	}
+	if mediaSource.Id == "" || mediaSource.Path == "" || mediaSource.Protocol != "File" || mediaSource.Type != "Default" || mediaSource.IsRemote || !mediaSource.SupportsDirectPlay || !mediaSource.SupportsDirectStream || !mediaSource.SupportsProbing || mediaSource.VideoType != "VideoFile" ||
+		directURL.Query().Get("api_key") != playbackInfo.PlaySessionId || directURL.Query().Get("PlaySessionId") != playbackInfo.PlaySessionId || !strings.HasPrefix(mediaSource.Path, "/rivune/") || strings.ContainsAny(mediaSource.Path, "?#") ||
+		strings.Contains(mediaSource.DirectStreamUrl, primaryToken) || strings.Contains(mediaSource.DirectStreamUrl, sequenceProviderSource) || strings.Contains(mediaSource.DirectStreamUrl, sequenceProviderResource) || len(mediaSource.MediaStreams) == 0 {
 		t.Fatalf("media source DTO is incomplete or disclosed provider authority: %+v", mediaSource)
 	}
-	if len(fixture.playback.sourceInputs) != 1 || fixture.playback.sourceInputs[0].ResourceID != sequenceProviderResource || fixture.playback.sourceProfiles[0] != user.Id || fixture.playback.openCalls != 0 {
-		t.Fatalf("playback source enumeration lost binding or became eager: inputs=%+v profiles=%v opens=%d", fixture.playback.sourceInputs, fixture.playback.sourceProfiles, fixture.playback.openCalls)
+	if len(fixture.playback.sourceInputs) != 1 || fixture.playback.sourceInputs[0].ResourceID != sequenceProviderResource || fixture.playback.sourceProfiles[0] != user.Id || fixture.playback.openCalls != 1 || len(fixture.playback.inputs) != 1 || fixture.playback.inputs[0].SourceRef != sequenceProviderSource {
+		t.Fatalf("playback source enumeration or eager first inspection lost binding: inputs=%+v profiles=%v opens=%d resolve=%+v", fixture.playback.sourceInputs, fixture.playback.sourceProfiles, fixture.playback.openCalls, fixture.playback.inputs)
 	}
 
 	secondaryLogin := fixture.login(t, "login-secondary", sequenceSecondaryCredentialID)
@@ -588,11 +676,11 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 		t.Fatal("cross-profile PlaybackInfo enumerated sources")
 	}
 
-	streamTarget := fixture.prefix + mediaSource.Path
+	streamTarget := fixture.prefix + mediaSource.DirectStreamUrl
 	foreignStream := fixture.request(t, "cross-session-stream", http.MethodGet, streamTarget, "", secondaryToken)
 	sequenceRequireStatus(t, foreignStream, http.StatusNotFound)
-	if fixture.playback.openCalls != 0 || fixture.playback.serveCalls != 0 {
-		t.Fatalf("foreign token replay opened or served the primary handle: opens=%d serves=%d", fixture.playback.openCalls, fixture.playback.serveCalls)
+	if fixture.playback.openCalls != 1 || fixture.playback.serveCalls != 0 {
+		t.Fatalf("foreign token replay opened beyond negotiation or served the primary handle: opens=%d serves=%d", fixture.playback.openCalls, fixture.playback.serveCalls)
 	}
 
 	primaryState := fixture.watchstate.profiles[user.Id]
@@ -616,7 +704,7 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 		t.Fatalf("stream Range GET semantics are wrong: headers=%v body=%q", streamGET.Header(), streamGET.Body.String())
 	}
 	if fixture.playback.openCalls != 1 || len(fixture.playback.inputs) != 1 || fixture.playback.inputs[0].SourceRef != sequenceProviderSource || fixture.playback.inputs[0].TitleID != episodeID || fixture.playback.servedRange != "bytes=2-5" {
-		t.Fatalf("stream did not bind opaque selectors to one native source: opens=%d inputs=%+v range=%q", fixture.playback.openCalls, fixture.playback.inputs, fixture.playback.servedRange)
+		t.Fatalf("stream did not reuse the eagerly opened opaque source: opens=%d inputs=%+v range=%q", fixture.playback.openCalls, fixture.playback.inputs, fixture.playback.servedRange)
 	}
 
 	streamHEADRequest := httptest.NewRequest(http.MethodHead, streamTarget, nil)

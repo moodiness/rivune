@@ -341,9 +341,15 @@ type MediaSourceInfo struct {
 	SupportsDirectPlay      bool              `json:"SupportsDirectPlay"`
 	SupportsDirectStream    bool              `json:"SupportsDirectStream"`
 	SupportsTranscoding     bool              `json:"SupportsTranscoding"`
+	SupportsProbing         bool              `json:"SupportsProbing"`
+	VideoType               string            `json:"VideoType,omitempty"`
+	Size                    *int64            `json:"Size,omitempty"`
 	RunTimeTicks            *int64            `json:"RunTimeTicks,omitempty"`
 	Bitrate                 *int64            `json:"Bitrate,omitempty"`
 	ETag                    string            `json:"ETag,omitempty"`
+	Formats                 []string          `json:"Formats"`
+	RequiredHttpHeaders     map[string]string `json:"RequiredHttpHeaders"`
+	MediaAttachments        []any             `json:"MediaAttachments"`
 	MediaStreams            []MediaStreamInfo `json:"MediaStreams"`
 	DefaultAudioStreamIndex *int              `json:"DefaultAudioStreamIndex,omitempty"`
 	TranscodingUrl          string            `json:"TranscodingUrl,omitempty"`

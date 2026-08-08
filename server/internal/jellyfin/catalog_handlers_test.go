@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -161,8 +162,8 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 			t.Fatalf("catalog response disclosed %q: %s", forbidden, body)
 		}
 	}
-	if !strings.Contains(body, `"MediaSources"`) || !strings.Contains(body, `"Path":"/Videos/00000000-0000-4000-8000-000000000100/stream.strm"`) {
-		t.Fatalf("movie catalogue JSON omitted deferred media fields: %s", body)
+	if !strings.Contains(body, `"MediaSources"`) || !strings.Contains(body, `"Path":"/rivune/00000000-0000-4000-8000-000000000100/00000000-0000-4000-8000-000000000100.strm"`) {
+		t.Fatalf("movie catalogue JSON omitted file-like media fields: %s", body)
 	}
 }
 
@@ -415,11 +416,12 @@ func requireDeferredMediaSource(t *testing.T, item BaseItemDto) {
 		t.Fatalf("item has %d deferred sources, want exactly one: %+v", len(item.MediaSources), item)
 	}
 	source := item.MediaSources[0]
-	expectedPath := "/Videos/" + item.Id + "/stream"
-	if source.Id != item.Id || source.Name != item.Name || source.Path != expectedPath || item.Path != expectedPath+".strm" ||
+	expectedPath := "/rivune/" + item.Id + "/" + item.Id + ".strm"
+	expectedDirectURL := "/Videos/" + item.Id + "/stream?MediaSourceId=" + url.QueryEscape(item.Id) + "&Static=true"
+	if source.Id != item.Id || source.Name != item.Name || source.Path != expectedPath || item.Path != expectedPath || source.DirectStreamUrl != expectedDirectURL ||
 		source.Protocol != "File" || source.Type != "Default" || source.IsRemote || !source.SupportsDirectPlay ||
-		!source.SupportsDirectStream || !source.SupportsTranscoding {
-		t.Fatalf("deferred source contract is incomplete: item=%+v source=%+v", item, source)
+		!source.SupportsDirectStream || !source.SupportsTranscoding || !source.SupportsProbing || source.VideoType != "VideoFile" || len(source.Formats) != 0 || source.RequiredHttpHeaders == nil || len(source.RequiredHttpHeaders) != 0 || source.MediaAttachments == nil || len(source.MediaAttachments) != 0 || strings.ContainsAny(source.Path, "?#") {
+		t.Fatalf("deferred file-like source contract is incomplete: item=%+v source=%+v", item, source)
 	}
 	if (source.RunTimeTicks == nil) != (item.RunTimeTicks == nil) || source.RunTimeTicks != nil && *source.RunTimeTicks != *item.RunTimeTicks {
 		t.Fatalf("deferred source runtime differs from item: item=%v source=%v", item.RunTimeTicks, source.RunTimeTicks)

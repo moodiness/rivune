@@ -118,6 +118,34 @@ func TestParsePlaybackInfoRequestAcceptsModernQueryFlagsAndTrackIndices(t *testi
 	}
 }
 
+func TestPlaybackInfoAcceptsVidHubBitrateAndClampsNativeCapability(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{SourceRef: "vidhub-source", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)}}}
+	body := `{"DeviceProfile":{"MaxStreamingBitrate":500000000,"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","AudioCodec":"aac","Type":"Video"}]}}`
+	request := httptest.NewRequest(http.MethodPost, "/Items/"+fixture.item.ID+"/PlaybackInfo?StartTimeTicks=0&AutoOpenLiveStream=false&UserId="+fixture.authentication.session.ProfileID+"&MaxStreamingBitrate=500000000&reqformat=json&IsPlayback=true", strings.NewReader(body))
+	request.SetPathValue("id", fixture.item.ID)
+	request.Header.Set("X-Emby-Token", fixture.token)
+	response := httptest.NewRecorder()
+	fixture.handler.handlePlaybackInfo(response, request)
+	var result PlaybackInfoResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || response.Code != http.StatusOK || result.PlaySessionId == "" {
+		t.Fatalf("VidHub PlaybackInfo status=%d result=%+v err=%v body=%s", response.Code, result, err, response.Body.String())
+	}
+	entry := fixture.handler.playSessions.entries[result.PlaySessionId]
+	if entry == nil || entry.capabilities.MaximumVideoBitrateKbps != int(maximumCompatPlaybackBitrate/1000) {
+		t.Fatalf("VidHub bitrate was not safely clamped: %+v", entry)
+	}
+
+	overflow := httptest.NewRequest(http.MethodPost, "/Items/"+fixture.item.ID+"/PlaybackInfo?MaxStreamingBitrate=2147483648", strings.NewReader(body))
+	overflow.SetPathValue("id", fixture.item.ID)
+	overflow.Header.Set("X-Emby-Token", fixture.token)
+	overflowResponse := httptest.NewRecorder()
+	fixture.handler.handlePlaybackInfo(overflowResponse, overflow)
+	if overflowResponse.Code != http.StatusBadRequest {
+		t.Fatalf("out-of-int32 bitrate status=%d body=%s", overflowResponse.Code, overflowResponse.Body.String())
+	}
+}
+
 func TestPlaybackCapabilitiesRejectUnsupportedAndUnboundedProfiles(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -185,7 +213,7 @@ func TestPlaybackUsesStoredDeviceProfileAndConservativePostedFallback(t *testing
 	}
 }
 
-func TestPlaybackInfoListsMultipleSourcesLazilyInOrderWithoutDisclosure(t *testing.T) {
+func TestPlaybackInfoListsMultipleSourcesInOrderAndEagerlyInspectsFirstWithoutDisclosure(t *testing.T) {
 	fixture := newPlaybackFixture(t)
 	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{
 		{SourceRef: "source-ref-provider-secret-1", Name: "https://provider.invalid/watch?token=provider-secret", Protocol: "http", Container: "mp4", ReportedHeight: 1080, ExpiresAt: fixture.now.Add(time.Hour)},
@@ -201,10 +229,10 @@ func TestPlaybackInfoListsMultipleSourcesLazilyInOrderWithoutDisclosure(t *testi
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if fixture.delivery.openCalls != 0 || len(result.MediaSources) != 2 {
-		t.Fatalf("lazy sources: opens=%d sources=%#v", fixture.delivery.openCalls, result.MediaSources)
+	if fixture.delivery.openCalls != 1 || len(fixture.delivery.inputs) != 1 || fixture.delivery.inputs[0].SourceRef != "source-ref-provider-secret-1" || len(result.MediaSources) != 2 {
+		t.Fatalf("eager first source: opens=%d inputs=%#v sources=%#v", fixture.delivery.openCalls, fixture.delivery.inputs, result.MediaSources)
 	}
-	if result.MediaSources[0].Id != fixture.item.ID || result.MediaSources[0].Name != "Source 1 · 1080p" || result.MediaSources[1].Name != "Source 2 · 2160p" || result.MediaSources[1].Id == fixture.item.ID {
+	if result.MediaSources[0].Id != fixture.item.ID || result.MediaSources[0].Name != "Source 1 · 1080p · H.264 · E-AC-3 · HDR10" || len(result.MediaSources[0].MediaStreams) == 0 || result.MediaSources[1].Name != "Source 2 · 2160p" || result.MediaSources[1].Id == fixture.item.ID {
 		t.Fatalf("source ordering/safe quality/opaque IDs = %#v", result.MediaSources)
 	}
 	encoded := response.Body.String()
@@ -213,17 +241,21 @@ func TestPlaybackInfoListsMultipleSourcesLazilyInOrderWithoutDisclosure(t *testi
 			t.Fatalf("compat playback JSON disclosed %q: %s", secret, encoded)
 		}
 	}
-	if !strings.Contains(result.MediaSources[0].Path, "PlaySessionId=") || !strings.Contains(result.MediaSources[0].Path, "MediaSourceId=") {
-		t.Fatalf("compat stream path lacks scoped selectors: %q", result.MediaSources[0].Path)
-	}
 	for _, source := range result.MediaSources {
-		streamURL, err := url.Parse(source.Path)
-		if err != nil || streamURL.Query().Get("api_key") != result.PlaySessionId {
-			t.Fatalf("compat stream path lacks scoped playback capability: %q", source.Path)
+		if source.Protocol != "File" || !strings.HasPrefix(source.Path, "/rivune/") || strings.ContainsAny(source.Path, "?#") || strings.Contains(source.Path, result.PlaySessionId) {
+			t.Fatalf("descriptive media path contains transport authority: %#v", source)
+		}
+		streamURL, err := url.Parse(source.DirectStreamUrl)
+		if err != nil {
+			t.Fatalf("compat DirectStreamUrl is invalid: %q err=%v", source.DirectStreamUrl, err)
+		}
+		if streamURL.Query().Get("api_key") != result.PlaySessionId || streamURL.Query().Get("PlaySessionId") != result.PlaySessionId || streamURL.Query().Get("MediaSourceId") != source.Id {
+			t.Fatalf("compat DirectStreamUrl lacks scoped playback capability: %q", source.DirectStreamUrl)
 		}
 	}
 }
-func TestPlaybackInfoGETUsesConservativeProfileAndPreservesSeekingInPath(t *testing.T) {
+
+func TestPlaybackInfoGETUsesConservativeProfileAndPreservesSeekingInTransportURLs(t *testing.T) {
 	fixture := newPlaybackFixture(t)
 	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{
 		SourceRef: "source-reference-000000000001", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour),
@@ -240,10 +272,10 @@ func TestPlaybackInfoGETUsesConservativeProfileAndPreservesSeekingInPath(t *test
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.MediaSources) != 1 || !strings.Contains(result.MediaSources[0].Path, "StartTimeTicks=900000000") ||
-		!strings.Contains(result.MediaSources[0].Path, "/stream.mp4?") || result.MediaSources[0].DirectStreamUrl != result.MediaSources[0].Path || !strings.Contains(result.MediaSources[0].DirectStreamUrl, "api_key="+result.PlaySessionId) || strings.Contains(result.MediaSources[0].DirectStreamUrl, fixture.token) ||
-		!result.MediaSources[0].SupportsTranscoding || result.MediaSources[0].TranscodingSubProtocol != "hls" || result.MediaSources[0].TranscodingContainer != "mp4" ||
-		!strings.Contains(result.MediaSources[0].TranscodingUrl, "/master.m3u8?") || result.MediaSources[0].TranscodingUrl == result.MediaSources[0].Path || fixture.delivery.openCalls != 0 {
+	if len(result.MediaSources) != 1 || result.MediaSources[0].Protocol != "File" || !strings.HasPrefix(result.MediaSources[0].Path, "/rivune/") || strings.ContainsAny(result.MediaSources[0].Path, "?#") ||
+		!strings.Contains(result.MediaSources[0].DirectStreamUrl, "StartTimeTicks=900000000") || !strings.Contains(result.MediaSources[0].DirectStreamUrl, "/stream.mp4?") || !strings.Contains(result.MediaSources[0].DirectStreamUrl, "api_key="+result.PlaySessionId) || strings.Contains(result.MediaSources[0].DirectStreamUrl, fixture.token) ||
+		!result.MediaSources[0].SupportsTranscoding || result.MediaSources[0].TranscodingSubProtocol != "hls" || result.MediaSources[0].TranscodingContainer != "mp4" || len(result.MediaSources[0].MediaStreams) == 0 ||
+		!strings.Contains(result.MediaSources[0].TranscodingUrl, "/master.m3u8?") || result.MediaSources[0].TranscodingUrl == result.MediaSources[0].Path || fixture.delivery.openCalls != 1 {
 		t.Fatalf("GET playback result=%#v opens=%d", result, fixture.delivery.openCalls)
 	}
 }
@@ -270,7 +302,7 @@ func TestCompatibilityPlaybackCapsSourcesBelowReferenceQuotas(t *testing.T) {
 	}
 }
 
-func TestItemDetailEmbedsPlayableSources(t *testing.T) {
+func TestItemDetailEmbedsSideEffectFreePlayableSource(t *testing.T) {
 	fixture := newPlaybackFixture(t)
 	fixture.item.Title = "Playable detail"
 	fixture.item.Genres = []string{}
@@ -293,13 +325,14 @@ func TestItemDetailEmbedsPlayableSources(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &item); err != nil {
 		t.Fatal(err)
 	}
-	if len(item.MediaSources) != 2 || item.MediaSources[0].Name != "Source 1" || item.MediaSources[1].Name != "Source 2" ||
-		item.MediaSources[0].Protocol != "Http" || item.MediaSources[0].Container != "mp4" || item.MediaSources[1].Container != "mkv" ||
+	if len(item.MediaSources) != 1 || item.MediaSources[0].Name != "Source 1" ||
+		item.MediaSources[0].Protocol != "File" || item.MediaSources[0].Container != "mp4" ||
 		item.MediaSources[0].RunTimeTicks == nil || *item.MediaSources[0].RunTimeTicks != MinutesToTicks(121) || len(item.MediaSources[0].MediaStreams) != 0 ||
-		!strings.Contains(item.MediaSources[0].Path, "PlaySessionId=") || !strings.Contains(item.MediaSources[0].Path, "MediaSourceId=") || !strings.Contains(item.MediaSources[0].Path, "api_key=") ||
+		!strings.HasPrefix(item.MediaSources[0].Path, "/rivune/") || strings.ContainsAny(item.MediaSources[0].Path, "?#") ||
+		!strings.Contains(item.MediaSources[0].DirectStreamUrl, "MediaSourceId="+url.QueryEscape(item.MediaSources[0].Id)) || !strings.Contains(item.MediaSources[0].DirectStreamUrl, "Static=true") || strings.Contains(item.MediaSources[0].DirectStreamUrl, "PlaySessionId=") || strings.Contains(item.MediaSources[0].DirectStreamUrl, "api_key=") ||
 		strings.Contains(response.Body.String(), "detail-source-secret") || strings.Contains(response.Body.String(), "provider.invalid") || strings.Contains(response.Body.String(), "detail-provider-secret") ||
-		fixture.delivery.sourceCalls != 1 || len(fixture.delivery.sourceInputs) != 1 || fixture.delivery.sourceInputs[0].MaximumSources != maximumCompatibilityMediaSources || fixture.delivery.openCalls != 0 {
-		t.Fatalf("detail sources=%+v sourceCalls=%d openCalls=%d body=%s", item.MediaSources, fixture.delivery.sourceCalls, fixture.delivery.openCalls, response.Body.String())
+		fixture.delivery.sourceCalls != 1 || len(fixture.delivery.sourceInputs) != 1 || fixture.delivery.sourceInputs[0].MaximumSources != maximumCompatibilityMediaSources || fixture.delivery.openCalls != 0 || len(fixture.handler.playSessions.entries) != 0 {
+		t.Fatalf("detail sources=%+v sourceCalls=%d openCalls=%d sessions=%d body=%s", item.MediaSources, fixture.delivery.sourceCalls, fixture.delivery.openCalls, len(fixture.handler.playSessions.entries), response.Body.String())
 	}
 }
 
@@ -322,6 +355,9 @@ func TestItemDetailKeepsDeferredSourceWhenDiscoveryFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireDeferredMediaSource(t, item)
+	if fixture.delivery.openCalls != 0 || len(fixture.handler.playSessions.entries) != 0 {
+		t.Fatalf("fallback detail created playback state: opens=%d sessions=%d", fixture.delivery.openCalls, len(fixture.handler.playSessions.entries))
+	}
 }
 
 func TestEpisodeDetailUsesSeriesPlaybackIdentity(t *testing.T) {
@@ -341,8 +377,9 @@ func TestEpisodeDetailUsesSeriesPlaybackIdentity(t *testing.T) {
 	}}}
 	sources := fixture.handler.detailMediaSources(context.Background(), fixture.authentication.session, fixture.item)
 	if len(sources) != 1 || len(fixture.delivery.sourceInputs) != 1 || fixture.delivery.sourceInputs[0].MediaType != "episode" ||
-		fixture.delivery.sourceInputs[0].ResourceID != "tt7587890:1:2" || fixture.delivery.sourceInputs[0].AddonID != "" || fixture.delivery.sourceInputs[0].MaximumSources != maximumCompatibilityMediaSources {
-		t.Fatalf("episode sources=%+v inputs=%+v", sources, fixture.delivery.sourceInputs)
+		fixture.delivery.sourceInputs[0].ResourceID != "tt7587890:1:2" || fixture.delivery.sourceInputs[0].AddonID != "" || fixture.delivery.sourceInputs[0].MaximumSources != maximumCompatibilityMediaSources ||
+		fixture.delivery.openCalls != 0 || len(fixture.handler.playSessions.entries) != 0 {
+		t.Fatalf("episode sources=%+v inputs=%+v opens=%d sessions=%d", sources, fixture.delivery.sourceInputs, fixture.delivery.openCalls, len(fixture.handler.playSessions.entries))
 	}
 }
 
@@ -591,9 +628,9 @@ func TestPlaybackInfoReusesSecondAndThirdCandidateAcrossRequests(t *testing.T) {
 			}
 		}
 	}
-	if fixture.delivery.sourceCalls != 1 || fixture.delivery.openCalls != 2 ||
-		fixture.delivery.inputs[0].SourceRef != "source-reference-000000000002" || fixture.delivery.inputs[1].SourceRef != "source-reference-000000000003" {
-		t.Fatalf("later selection did not use issued candidates: source calls=%d opens=%d inputs=%#v", fixture.delivery.sourceCalls, fixture.delivery.openCalls, fixture.delivery.inputs)
+	if fixture.delivery.sourceCalls != 1 || fixture.delivery.openCalls != 3 ||
+		fixture.delivery.inputs[0].SourceRef != "source-reference-000000000001" || fixture.delivery.inputs[1].SourceRef != "source-reference-000000000002" || fixture.delivery.inputs[2].SourceRef != "source-reference-000000000003" {
+		t.Fatalf("eager and later selections did not use issued candidates: source calls=%d opens=%d inputs=%#v", fixture.delivery.sourceCalls, fixture.delivery.openCalls, fixture.delivery.inputs)
 	}
 	for _, source := range initial.MediaSources[1:] {
 		if source.Id == "" || strings.Contains(source.Id, "source-reference") {
@@ -619,8 +656,8 @@ func TestPlaybackInfoRejectsForgedAndCrossOwnerCandidateIDs(t *testing.T) {
 	crossOwner := fixture.playbackInfo(http.MethodPost, fmt.Sprintf(`{"MediaSourceId":%q,%s}`, initial.MediaSources[1].Id, profile))
 	fixture.authentication.session = original
 	forged := fixture.playbackInfo(http.MethodPost, fmt.Sprintf(`{"MediaSourceId":%q,%s}`, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", profile))
-	if crossOwner.Code != http.StatusNotFound || forged.Code != http.StatusNotFound || fixture.delivery.openCalls != 0 || fixture.delivery.sourceCalls != 3 {
-		t.Fatalf("candidate isolation failed: cross=%d forged=%d opens=%d source calls=%d", crossOwner.Code, forged.Code, fixture.delivery.openCalls, fixture.delivery.sourceCalls)
+	if crossOwner.Code != http.StatusNotFound || forged.Code != http.StatusNotFound || fixture.delivery.openCalls != 1 || fixture.delivery.sourceCalls != 3 || len(fixture.delivery.inputs) != 1 || fixture.delivery.inputs[0].SourceRef != "source-reference-000000000001" {
+		t.Fatalf("candidate isolation failed after eager first open: cross=%d forged=%d opens=%d inputs=%#v source calls=%d", crossOwner.Code, forged.Code, fixture.delivery.openCalls, fixture.delivery.inputs, fixture.delivery.sourceCalls)
 	}
 }
 
@@ -643,13 +680,13 @@ func TestPlaybackInfoChangedStartTimeTicksReplacesOpenedDelivery(t *testing.T) {
 			t.Fatalf("select at %d ticks status=%d body=%s", ticks, selected.Code, selected.Body.String())
 		}
 	}
-	if fixture.delivery.openCalls != 2 || fixture.delivery.closeCalls != 1 || len(fixture.delivery.inputs) != 2 ||
-		fixture.delivery.inputs[0].StartSeconds != 0 || fixture.delivery.inputs[1].StartSeconds != 0 {
-		t.Fatalf("tick-precise replacement opens=%d closes=%d inputs=%#v", fixture.delivery.openCalls, fixture.delivery.closeCalls, fixture.delivery.inputs)
+	if fixture.delivery.openCalls != 3 || fixture.delivery.closeCalls != 1 || len(fixture.delivery.inputs) != 3 ||
+		fixture.delivery.inputs[0].SourceRef != "source-reference-000000000001" || fixture.delivery.inputs[1].SourceRef != "source-reference-000000000002" || fixture.delivery.inputs[0].StartSeconds != 0 || fixture.delivery.inputs[1].StartSeconds != 0 || fixture.delivery.inputs[2].StartSeconds != 0 {
+		t.Fatalf("tick-precise replacement after eager open: opens=%d closes=%d inputs=%#v", fixture.delivery.openCalls, fixture.delivery.closeCalls, fixture.delivery.inputs)
 	}
 }
 
-func TestStreamOpensOnlySelectedSourceAndPreservesRangeHEADAndSeeking(t *testing.T) {
+func TestStreamEagerlyOpensFirstThenSelectedSourceAndPreservesRangeHEADAndSeeking(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		t.Run(method, func(t *testing.T) {
 			fixture := newPlaybackFixture(t)
@@ -674,8 +711,8 @@ func TestStreamOpensOnlySelectedSourceAndPreservesRangeHEADAndSeeking(t *testing
 			if response.Code != http.StatusNoContent {
 				t.Fatalf("stream status=%d body=%s", response.Code, response.Body.String())
 			}
-			if fixture.delivery.openCalls != 1 || fixture.delivery.inputs[0].SourceRef != "source-reference-000000000002" || fixture.delivery.inputs[0].StartSeconds != 90 {
-				t.Fatalf("selected lazy open = calls %d input %#v", fixture.delivery.openCalls, fixture.delivery.inputs)
+			if fixture.delivery.openCalls != 2 || fixture.delivery.inputs[0].SourceRef != "source-reference-000000000001" || fixture.delivery.inputs[1].SourceRef != "source-reference-000000000002" || fixture.delivery.inputs[1].StartSeconds != 90 {
+				t.Fatalf("eager first and selected stream opens = calls %d inputs %#v", fixture.delivery.openCalls, fixture.delivery.inputs)
 			}
 			if fixture.delivery.servedMethod != method || fixture.delivery.servedRange != "bytes=1024-2047" || fixture.delivery.servedStartTicks != "900000000" || fixture.delivery.servedAPIKey != info.PlaySessionId {
 				t.Fatalf("serve semantics method=%q range=%q ticks=%q scopedKey=%t", fixture.delivery.servedMethod, fixture.delivery.servedRange, fixture.delivery.servedStartTicks, fixture.delivery.servedAPIKey == info.PlaySessionId)
@@ -843,12 +880,15 @@ func TestPlaybackInfoAdvertisesScopedCapabilityAndStreamFallsBackToNegotiatedSes
 			if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil || listed.Code != http.StatusOK || len(info.MediaSources) != 1 {
 				t.Fatalf("playback info status=%d result=%+v err=%v", listed.Code, info, err)
 			}
-			streamURL, err := url.Parse(info.MediaSources[0].Path)
+			if info.MediaSources[0].Protocol != "File" || !strings.HasPrefix(info.MediaSources[0].Path, "/rivune/") || strings.ContainsAny(info.MediaSources[0].Path, "?#") {
+				t.Fatalf("descriptive Path exposed transport authority: %+v", info.MediaSources[0])
+			}
+			streamURL, err := url.Parse(info.MediaSources[0].DirectStreamUrl)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if streamURL.Query().Get("api_key") != info.PlaySessionId || streamURL.Query().Get("PlaySessionId") != info.PlaySessionId || fixture.token == info.PlaySessionId {
-				t.Fatalf("advertised scoped capability=%q playSession=%q path=%q", streamURL.Query().Get("api_key"), info.PlaySessionId, info.MediaSources[0].Path)
+				t.Fatalf("advertised scoped capability=%q playSession=%q directStreamUrl=%q", streamURL.Query().Get("api_key"), info.PlaySessionId, info.MediaSources[0].DirectStreamUrl)
 			}
 			fixture.authentication.sessions = map[string]AuthenticatedSession{fixture.token: fixture.authentication.session}
 			foreignToken := "rivune_jf_" + strings.Repeat("B", 43)
@@ -882,8 +922,8 @@ func TestPlaybackInfoAdvertisesScopedCapabilityAndStreamFallsBackToNegotiatedSes
 				t.Fatalf("stream status=%d want=%d body=%s", response.Code, test.wantStatus, response.Body.String())
 			}
 			wantServed := test.wantStatus == http.StatusNoContent
-			if (fixture.delivery.serveCalls == 1) != wantServed || (fixture.delivery.openCalls == 1) != wantServed || fixture.authentication.revalidateCalls != test.wantRevalidation {
-				t.Fatalf("open=%d serve=%d revalidate=%d wantServed=%t wantRevalidation=%d", fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.authentication.revalidateCalls, wantServed, test.wantRevalidation)
+			if (fixture.delivery.serveCalls == 1) != wantServed || fixture.delivery.openCalls != 1 || fixture.authentication.revalidateCalls != test.wantRevalidation {
+				t.Fatalf("eagerOpen=%d serve=%d revalidate=%d wantServed=%t wantRevalidation=%d", fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.authentication.revalidateCalls, wantServed, test.wantRevalidation)
 			}
 			if wantServed && (fixture.delivery.servedAPIKey != info.PlaySessionId || fixture.delivery.servedAPIKeyCount != 1 || fixture.delivery.servedProfileQueryCredential || fixture.delivery.servedProfileHeaderCredential) {
 				t.Fatalf("delivery scopedKey=%t apiKeys=%d queryCredential=%t headerCredential=%t", fixture.delivery.servedAPIKey == info.PlaySessionId, fixture.delivery.servedAPIKeyCount, fixture.delivery.servedProfileQueryCredential, fixture.delivery.servedProfileHeaderCredential)
@@ -892,7 +932,7 @@ func TestPlaybackInfoAdvertisesScopedCapabilityAndStreamFallsBackToNegotiatedSes
 	}
 }
 
-func TestRevokedBackingSessionRejectsScopedStreamBeforeOpen(t *testing.T) {
+func TestRevokedBackingSessionRejectsScopedStreamBeforeAdditionalOpen(t *testing.T) {
 	fixture := newPlaybackFixture(t)
 	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{SourceRef: "revoked-capability-source", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)}}}
 	listed := fixture.playbackInfo(http.MethodPost, `{"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}}`)
@@ -901,7 +941,7 @@ func TestRevokedBackingSessionRejectsScopedStreamBeforeOpen(t *testing.T) {
 		t.Fatalf("playback info=%+v err=%v", info, err)
 	}
 	fixture.authentication.revalidateErr = ErrInvalidCompatCredential
-	streamURL, err := url.Parse(info.MediaSources[0].Path)
+	streamURL, err := url.Parse(info.MediaSources[0].DirectStreamUrl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -912,8 +952,8 @@ func TestRevokedBackingSessionRejectsScopedStreamBeforeOpen(t *testing.T) {
 	request.SetPathValue("id", fixture.item.ID)
 	response := httptest.NewRecorder()
 	fixture.handler.handleStream(response, request)
-	if response.Code != http.StatusUnauthorized || fixture.authentication.revalidateCalls != 1 || fixture.delivery.openCalls != 0 || fixture.delivery.serveCalls != 0 || len(fixture.handler.playSessions.entries) != 0 {
-		t.Fatalf("status=%d revalidate=%d open=%d serve=%d entries=%d", response.Code, fixture.authentication.revalidateCalls, fixture.delivery.openCalls, fixture.delivery.serveCalls, len(fixture.handler.playSessions.entries))
+	if response.Code != http.StatusUnauthorized || fixture.authentication.revalidateCalls != 1 || fixture.delivery.openCalls != 1 || fixture.delivery.serveCalls != 0 || fixture.delivery.closeCalls != 1 || len(fixture.handler.playSessions.entries) != 0 {
+		t.Fatalf("status=%d revalidate=%d open=%d serve=%d close=%d entries=%d", response.Code, fixture.authentication.revalidateCalls, fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.delivery.closeCalls, len(fixture.handler.playSessions.entries))
 	}
 }
 
@@ -926,7 +966,7 @@ func TestTransientStreamRevalidationFailurePreservesScopedSession(t *testing.T) 
 		t.Fatalf("playback info=%+v err=%v", info, err)
 	}
 	fixture.authentication.revalidateErr = errors.New("database temporarily unavailable")
-	streamURL, err := url.Parse(info.MediaSources[0].Path)
+	streamURL, err := url.Parse(info.MediaSources[0].DirectStreamUrl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -937,7 +977,7 @@ func TestTransientStreamRevalidationFailurePreservesScopedSession(t *testing.T) 
 	request.SetPathValue("id", fixture.item.ID)
 	response := httptest.NewRecorder()
 	fixture.handler.handleStream(response, request)
-	if response.Code != http.StatusInternalServerError || fixture.delivery.openCalls != 0 || fixture.delivery.serveCalls != 0 || fixture.handler.playSessions.entries[info.PlaySessionId] == nil {
+	if response.Code != http.StatusInternalServerError || fixture.delivery.openCalls != 1 || fixture.delivery.serveCalls != 0 || fixture.handler.playSessions.entries[info.PlaySessionId] == nil {
 		t.Fatalf("status=%d open=%d serve=%d sessionPreserved=%t", response.Code, fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.handler.playSessions.entries[info.PlaySessionId] != nil)
 	}
 }
@@ -982,8 +1022,8 @@ func TestStreamRejectsSourceMismatchAndCrossSessionOrProfileReplay(t *testing.T)
 			}
 		})
 	}
-	if fixture.delivery.openCalls != 0 || fixture.delivery.serveCalls != 0 {
-		t.Fatalf("replay reached delivery: open=%d serve=%d", fixture.delivery.openCalls, fixture.delivery.serveCalls)
+	if fixture.delivery.openCalls != 1 || fixture.delivery.serveCalls != 0 {
+		t.Fatalf("replay triggered delivery beyond eager negotiation: open=%d serve=%d", fixture.delivery.openCalls, fixture.delivery.serveCalls)
 	}
 }
 
@@ -1449,8 +1489,8 @@ func TestPlaybackInfoRejectsCapabilityRefreshWithoutStableIdentityRatherThanRema
 	}}
 	restrictedProfile := `"MaxStreamingBitrate":1000000,"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}`
 	selected := fixture.playbackInfo(http.MethodPost, fmt.Sprintf(`{"MediaSourceId":%q,%s}`, initial.MediaSources[0].Id, restrictedProfile))
-	if selected.Code != http.StatusNotFound || fixture.delivery.openCalls != 0 {
-		t.Fatalf("unstable reordered refresh status=%d opens=%d body=%s", selected.Code, fixture.delivery.openCalls, selected.Body.String())
+	if selected.Code != http.StatusNotFound || fixture.delivery.openCalls != 1 || len(fixture.delivery.inputs) != 1 || fixture.delivery.inputs[0].SourceRef != "source-a" {
+		t.Fatalf("unstable reordered refresh status=%d eagerOpens=%d inputs=%#v body=%s", selected.Code, fixture.delivery.openCalls, fixture.delivery.inputs, selected.Body.String())
 	}
 	entry := fixture.handler.playSessions.entries[initial.PlaySessionId]
 	if entry == nil || entry.sources[initial.MediaSources[0].Id].sourceRef != "source-a" {

@@ -54,8 +54,9 @@ info:
     A stream with a missing or unusable credential may fall back to its matching scoped
     playback capability and revalidated owner. A valid foreign credential fails closed.
 
-    Playback source enumeration remains lazy and only the selected MediaSourceId is
-    opened. Compatibility play sessions contain opaque selectors, are bound to the
+    Playback source enumeration remains bounded; the default source is opened during
+    PlaybackInfo so clients receive inspected tracks, while alternate MediaSourceIds are
+    opened only when selected. Compatibility play sessions contain opaque selectors, are bound to the
     credential/profile/device/item, and are capped at 256 active entries with a
     30-minute idle and two-hour absolute lifetime. Adapter-generated stream URLs carry only
     the scoped capability, never the general compatibility credential or a provider/source URL.
@@ -63,10 +64,11 @@ info:
     The library hierarchy contains the stable `Movies`, `TV Shows`, and `Collections`
     virtual views plus one ordered, named view per profile-authorized Rivune collection.
     Collection views expose configured folders through `Items/Latest` and ordinary item
-    browsing; Home projections use landscape `homevideos` cards with Primary, Thumb,
-    Backdrop, and 16:9 metadata regardless of the native folder-cover preference, while
-    ordinary browsing preserves that preference. Opening a folder resolves only that
-    folder into canonical Rivune movie/series UUIDs. Configured covers are reused directly;
+    browsing; promoted collection and folder projections use landscape `homevideos` cards
+    with Primary, Thumb, Backdrop, and 16:9 metadata regardless of the native folder-cover
+    preference. The synthetic Collections/BoxSet root preserves Jellyfin's poster contract.
+    Opening a folder resolves only that folder into canonical Rivune movie/series UUIDs.
+    Configured covers are reused directly;
     missing covers are hydrated through bounded folder resolution and registered as opaque
     same-origin artwork tags.
     `OrderedViews` and `MyMediaExcludes` are emitted as standard client presentation hints;
@@ -93,7 +95,7 @@ tags:
   - name: Artwork
     description: Authorized delivery of registered local artwork bytes.
   - name: Playback
-    description: Lazy source negotiation and scoped in-process media delivery.
+    description: Bounded source negotiation and scoped in-process media delivery.
   - name: Sessions
     description: Bound playback lifecycle events and liveness.
   - name: Watch state
@@ -2014,7 +2016,7 @@ components:
       name: MaxStreamingBitrate
       in: query
       required: false
-      schema: { type: integer, format: int64, minimum: 64000, maximum: 200000000 }
+      schema: { type: integer, format: int64, minimum: 64000, maximum: 2147483647, description: Client ceiling; values above Rivune's playback ceiling are accepted and safely clamped. }
     MediaSourceId:
       name: MediaSourceId
       in: query
@@ -3079,8 +3081,8 @@ components:
         Likes: { type: [boolean, "null"], description: Accepted compatibility field; does not mutate state. }
         LastPlayedDate: { type: [string, "null"], description: Accepted compatibility field; does not mutate state. }
         Played: { type: [boolean, "null"] }
-        Key: { oneOf: [{ $ref: "#/components/schemas/UUID" }, { type: "null" }], description: When present, must identify the path item; does not mutate state. }
-        ItemId: { oneOf: [{ $ref: "#/components/schemas/UUID" }, { type: "null" }], description: When present, must identify the path item; does not mutate state. }
+        Key: { oneOf: [{ $ref: "#/components/schemas/UUID" }, { type: "null" }], description: "When present, must identify the path item; does not mutate state." }
+        ItemId: { oneOf: [{ $ref: "#/components/schemas/UUID" }, { type: "null" }], description: "When present, must identify the path item; does not mutate state." }
       description: Body is limited to 16 KiB. Omitted and null fields both mean unchanged; an empty object is valid.
     SearchHintDto:
       type: object
@@ -3135,7 +3137,7 @@ components:
         MaxStreamingBitrate:
           anyOf:
             - { type: integer, format: int64, const: 0 }
-            - { type: integer, format: int64, minimum: 64000, maximum: 200000000 }
+            - { type: integer, format: int64, minimum: 64000, maximum: 2147483647, description: Client ceiling; values above Rivune's playback ceiling are accepted and safely clamped. }
         MaxAudioChannels: { type: integer, minimum: 0, maximum: 32 }
         MediaSourceId: { type: string, minLength: 1, maxLength: 128 }
         AudioStreamIndex: { type: [integer, "null"], minimum: -1, maximum: 1024 }
@@ -3155,7 +3157,7 @@ components:
         MediaSources:
           type: array
           items: { $ref: "#/components/schemas/MediaSourceInfo" }
-        PlaySessionId: { type: string, minLength: 36, maxLength: 36, pattern: "^rvp_[A-Za-z0-9_-]{32}$", description: Reserved 192-bit owner/item/source-bound capability, never a general credential. }
+        PlaySessionId: { type: string, minLength: 36, maxLength: 36, pattern: "^rvp_[A-Za-z0-9_-]{32}$", description: "Reserved 192-bit owner/item/source-bound capability, never a general credential." }
         ErrorCode: { type: string }
     MediaSourceInfo:
       type: object
@@ -3169,26 +3171,45 @@ components:
         - SupportsDirectPlay
         - SupportsDirectStream
         - SupportsTranscoding
+        - SupportsProbing
+        - Formats
+        - RequiredHttpHeaders
+        - MediaAttachments
         - MediaStreams
       properties:
         Id: { $ref: "#/components/schemas/UUID" }
         Name: { type: string }
         Path:
           type: string
-          description: Local stream URL carrying only opaque item, source, and scoped play-session selectors.
+          description: Synthetic file-like path describing the source; never a provider URL or credential-bearing transport URL.
         DirectStreamUrl:
           type: string
-          description: Local scoped stream URL, emitted only when direct-stream/remux is supported.
+          description: Local stream URL. PlaybackInfo responses scope it to the opaque play-session capability; item details omit credentials.
         Container: { type: string, maxLength: 16 }
-        Protocol: { type: string, const: Http }
+        Protocol: { type: string, const: File }
         Type: { type: string, const: Default }
         IsRemote: { type: boolean, const: false }
         SupportsDirectPlay: { type: boolean }
         SupportsDirectStream: { type: boolean }
         SupportsTranscoding: { type: boolean }
+        SupportsProbing: { type: boolean, const: true }
+        VideoType: { type: string, const: VideoFile }
+        Size: { type: integer, format: int64, minimum: 0 }
         RunTimeTicks: { type: integer, format: int64, minimum: 0 }
         Bitrate: { type: integer, format: int64, minimum: 0 }
         ETag: { type: string }
+        Formats:
+          type: array
+          maxItems: 16
+          items: { type: string, maxLength: 16 }
+        RequiredHttpHeaders:
+          type: object
+          additionalProperties: { type: string, maxLength: 4096 }
+          maxProperties: 32
+        MediaAttachments:
+          type: array
+          maxItems: 64
+          items: { type: object, additionalProperties: true }
         MediaStreams:
           type: array
           maxItems: 64
@@ -3231,7 +3252,7 @@ components:
         MaxStreamingBitrate:
           anyOf:
             - { type: integer, format: int64, const: 0 }
-            - { type: integer, format: int64, minimum: 64000, maximum: 200000000 }
+            - { type: integer, format: int64, minimum: 64000, maximum: 2147483647, description: Client ceiling; values above Rivune's playback ceiling are accepted and safely clamped. }
         DirectPlayProfiles:
           type: array
           maxItems: 32

@@ -127,7 +127,7 @@ func (handler *Handler) writeLatestItems(response http.ResponseWriter, request *
 	if parentID != "" && handler.collections != nil {
 		value, collectionErr := handler.collections.Get(request.Context(), session.Principal, parentID)
 		if collectionErr == nil {
-			items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, query, true)
+			items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, query)
 			handler.writeJSON(response, http.StatusOK, items)
 			return
 		}
@@ -557,11 +557,11 @@ func (handler *Handler) writeCollectionRoot(response http.ResponseWriter, reques
 }
 
 func (handler *Handler) writeCollectionFolders(response http.ResponseWriter, ctx context.Context, principal auth.Principal, query ItemQuery, value collection.Collection) {
-	items, total := handler.collectionFolderPage(ctx, principal, value, query, false)
+	items, total := handler.collectionFolderPage(ctx, principal, value, query)
 	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: total, StartIndex: query.StartIndex})
 }
 
-func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth.Principal, value collection.Collection, query ItemQuery, homePresentation bool) ([]BaseItemDto, int) {
+func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth.Principal, value collection.Collection, query ItemQuery) ([]BaseItemDto, int) {
 	idFilter := stringSet(query.Ids)
 	search := strings.ToLower(query.SearchTerm)
 	filtered := make([]collection.Folder, 0, len(value.Folders))
@@ -580,14 +580,10 @@ func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth
 	start := min(query.StartIndex, total)
 	end := min(start+query.Limit, total)
 	selected := append([]collection.Folder(nil), filtered[start:end]...)
-	presentation := value
-	if homePresentation {
-		presentation.FolderCoverShape = collection.TileShapeLandscape
-	}
 	handler.hydrateCollectionFolderCovers(ctx, principal, value.ID, selected)
 	items := make([]BaseItemDto, 0, len(selected))
 	for _, folder := range selected {
-		items = append(items, handler.collectionFolderDTO(presentation, folder))
+		items = append(items, handler.collectionFolderDTO(value, folder))
 	}
 	if localizer, ok := handler.catalog.(catalogArtworkLocalizer); ok && len(selected) != 0 {
 		upstream := make([]string, len(selected))
@@ -598,8 +594,8 @@ func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth
 		if len(localized) == len(items) {
 			for index, materialized := range localized {
 				if tag, valid := localizedArtworkTag(materialized); valid {
-					items[index].ImageTags = collectionFolderImageTags(presentation.FolderCoverShape, tag)
-					items[index].BackdropImageTags = collectionFolderBackdropImageTags(presentation.FolderCoverShape, tag)
+					items[index].ImageTags = collectionFolderImageTags(tag)
+					items[index].BackdropImageTags = collectionFolderBackdropImageTags(tag)
 				}
 			}
 		}
@@ -847,8 +843,7 @@ func (handler *Handler) collectionDTO(ctx context.Context, principal auth.Princi
 
 func (handler *Handler) collectionViewDTO(ctx context.Context, principal auth.Principal, value collection.Collection) BaseItemDto {
 	imageTags, backdropImageTags := handler.collectionArtworkTags(ctx, principal, value)
-	shape := collection.TileShapeLandscape
-	if tag := imageTags["Primary"]; tag != "" && strings.EqualFold(strings.TrimSpace(shape), collection.TileShapeLandscape) {
+	if tag := imageTags["Primary"]; tag != "" {
 		imageTags["Thumb"] = tag
 		if len(backdropImageTags) == 0 {
 			backdropImageTags = append(backdropImageTags, tag)
@@ -857,59 +852,29 @@ func (handler *Handler) collectionViewDTO(ctx context.Context, principal auth.Pr
 	return BaseItemDto{
 		Id: value.ID, ServerId: handler.serverInfo.ID.String(), Name: value.Title, SortName: value.Title,
 		Etag: value.ID, DisplayPreferencesId: value.ID, LocationType: "FileSystem",
-		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: collectionViewType(shape), IsFolder: true,
-		PrimaryImageAspectRatio: collectionFolderAspectRatio(shape),
+		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "homevideos", IsFolder: true,
+		PrimaryImageAspectRatio: 16.0 / 9.0,
 		Genres:                  []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags,
 		UserData: &UserItemDataDto{Key: value.ID, ItemId: value.ID},
 	}
 }
 
 func (handler *Handler) collectionFolderDTO(value collection.Collection, folder collection.Folder) BaseItemDto {
-	itemType := "Folder"
-	if strings.EqualFold(strings.TrimSpace(value.FolderCoverShape), collection.TileShapeLandscape) {
-		itemType = "CollectionFolder"
-	}
 	return BaseItemDto{
 		Id: folder.ID, ServerId: handler.serverInfo.ID.String(), Name: folder.Title, SortName: folder.Title,
 		Etag: folder.ID, DisplayPreferencesId: folder.ID, LocationType: "FileSystem",
-		Type: itemType, MediaType: "Unknown", CollectionType: collectionViewType(value.FolderCoverShape), IsFolder: true, ParentId: value.ID,
-		PrimaryImageAspectRatio: collectionFolderAspectRatio(value.FolderCoverShape),
+		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "homevideos", IsFolder: true, ParentId: value.ID,
+		PrimaryImageAspectRatio: 16.0 / 9.0,
 		Genres:                  []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: folder.ID, ItemId: folder.ID},
 	}
 }
-func collectionViewType(shape string) string {
-	if strings.EqualFold(strings.TrimSpace(shape), collection.TileShapeLandscape) {
-		return "homevideos"
-	}
-	return "boxsets"
+
+func collectionFolderImageTags(tag string) map[string]string {
+	return map[string]string{"Primary": tag, "Thumb": tag}
 }
 
-func collectionFolderImageTags(shape, tag string) map[string]string {
-	tags := map[string]string{"Primary": tag}
-	if strings.EqualFold(strings.TrimSpace(shape), collection.TileShapeLandscape) {
-		tags["Thumb"] = tag
-	}
-	return tags
-}
-
-func collectionFolderBackdropImageTags(shape, tag string) []string {
-	if strings.EqualFold(strings.TrimSpace(shape), collection.TileShapeLandscape) {
-		return []string{tag}
-	}
-	return []string{}
-}
-
-func collectionFolderAspectRatio(shape string) float64 {
-	switch strings.ToLower(strings.TrimSpace(shape)) {
-	case collection.TileShapePoster:
-		return 2.0 / 3.0
-	case collection.TileShapeLandscape:
-		return 16.0 / 9.0
-	case collection.TileShapeSquare:
-		return 1
-	default:
-		return 0
-	}
+func collectionFolderBackdropImageTags(tag string) []string {
+	return []string{tag}
 }
 
 func (handler *Handler) collectionFolderDetailDTO(ctx context.Context, principal auth.Principal, value collection.Collection, folder collection.Folder) BaseItemDto {
@@ -924,8 +889,8 @@ func (handler *Handler) collectionFolderDetailDTO(ctx context.Context, principal
 	localized := localizer.LocalizeArtworkURLs(ctx, []string{folders[0].CoverImageURL})
 	if len(localized) == 1 {
 		if tag, valid := localizedArtworkTag(localized[0]); valid {
-			item.ImageTags = collectionFolderImageTags(value.FolderCoverShape, tag)
-			item.BackdropImageTags = collectionFolderBackdropImageTags(value.FolderCoverShape, tag)
+			item.ImageTags = collectionFolderImageTags(tag)
+			item.BackdropImageTags = collectionFolderBackdropImageTags(tag)
 		}
 	}
 	return item
@@ -1305,11 +1270,12 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 	}
 	if item.Type == "Movie" || item.Type == "Episode" {
 		streamPath := "/Videos/" + url.PathEscape(item.Id) + "/stream"
-		item.Path = streamPath + ".strm"
+		mediaPath := "/rivune/" + url.PathEscape(item.Id) + "/" + url.PathEscape(item.Id) + ".strm"
+		item.Path = mediaPath
 		item.MediaSources = []MediaSourceInfo{{
-			Id: item.Id, Name: item.Name, Path: streamPath, Protocol: "File", Type: "Default",
-			IsRemote: false, SupportsDirectPlay: true, SupportsDirectStream: true, SupportsTranscoding: true,
-			RunTimeTicks: item.RunTimeTicks, MediaStreams: []MediaStreamInfo{},
+			Id: item.Id, Name: item.Name, Path: mediaPath, DirectStreamUrl: streamPath + "?MediaSourceId=" + url.QueryEscape(item.Id) + "&Static=true", Protocol: "File", Type: "Default",
+			IsRemote: false, SupportsDirectPlay: true, SupportsDirectStream: true, SupportsTranscoding: true, SupportsProbing: true, VideoType: "VideoFile",
+			RunTimeTicks: item.RunTimeTicks, ETag: item.Id, Formats: []string{}, RequiredHttpHeaders: map[string]string{}, MediaAttachments: []any{}, MediaStreams: []MediaStreamInfo{},
 		}}
 	}
 	return item

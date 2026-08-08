@@ -141,6 +141,7 @@ func (service *collectionCompatService) ResolveFolder(_ context.Context, _ auth.
 
 func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	handler, service, store, token := newCollectionCompatHandler(t)
+	service.authorized.FolderCoverShape = collection.TileShapePoster
 	coverURL := "https://provider.invalid/folder.png?token=FOLDER_SECRET"
 	backdropURL := "https://provider.invalid/collection-backdrop.png?token=BACKDROP_SECRET"
 	coverTag := strings.Repeat("a", 64)
@@ -161,7 +162,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 		t.Fatalf("unexpected collection view: %+v", views)
 	}
 
-	viewsRequest := authenticatedCatalogRequest(t, token, "/UserViews?UserId="+catalogTestProfileID)
+	viewsRequest := authenticatedCatalogRequest(t, token, "/UserViews?UserId="+catalogTestProfileID+"&Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb")
 	viewsResponse := httptest.NewRecorder()
 	handler.handleViews(viewsResponse, viewsRequest)
 	var namedViews QueryResult[BaseItemDto]
@@ -185,7 +186,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 		t.Fatalf("collection view configuration status=%d config=%+v", userResponse.Code, user.Configuration)
 	}
 
-	rootRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+views[2].Id+"&IncludeItemTypes=BoxSet")
+	rootRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+views[2].Id+"&IncludeItemTypes=BoxSet&Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb")
 	rootResponse := httptest.NewRecorder()
 	handler.handleItems(rootResponse, rootRequest)
 	var root QueryResult[BaseItemDto]
@@ -193,7 +194,9 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	if rootResponse.Code != http.StatusOK || root.TotalRecordCount != 1 || len(root.Items) != 1 ||
 		root.Items[0].Id != collectionCompatID || root.Items[0].Type != "BoxSet" || root.Items[0].MediaType != "Unknown" || !root.Items[0].IsFolder ||
 		root.Items[0].Etag != collectionCompatID || root.Items[0].DisplayPreferencesId != collectionCompatID || root.Items[0].LocationType != "FileSystem" ||
-		root.Items[0].ImageTags["Primary"] != coverTag || root.Items[0].UserData == nil || root.Items[0].UserData.Key != collectionCompatID || root.Items[0].UserData.ItemId != collectionCompatID {
+		root.Items[0].PrimaryImageAspectRatio == 16.0/9.0 || root.Items[0].CollectionType == "homevideos" || root.Items[0].ImageTags["Primary"] != coverTag ||
+		root.Items[0].ImageTags["Thumb"] != "" || len(root.Items[0].BackdropImageTags) != 0 || root.Items[0].UserData == nil ||
+		root.Items[0].UserData.Key != collectionCompatID || root.Items[0].UserData.ItemId != collectionCompatID {
 		t.Fatalf("unexpected authorized boxsets: status=%d result=%+v", rootResponse.Code, root)
 	}
 	boxSetImageRequest := authenticatedCatalogRequest(t, token, "/Items/"+collectionCompatID+"/Images/Primary")
@@ -223,7 +226,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 		}
 	}
 
-	latestRequest := authenticatedCatalogRequest(t, token, "/Items/Latest?ParentId="+collectionCompatID+"&Limit=16")
+	latestRequest := authenticatedCatalogRequest(t, token, "/Items/Latest?ParentId="+collectionCompatID+"&Limit=16&Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb")
 	latestResponse := httptest.NewRecorder()
 	handler.handleLatestItems(latestResponse, latestRequest)
 	var latest []BaseItemDto
@@ -244,7 +247,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	}
 	service.calls = nil
 
-	browseRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&StartIndex=0&Limit=2")
+	browseRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&StartIndex=0&Limit=2&Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb")
 	browseResponse := httptest.NewRecorder()
 
 	imageRequest := authenticatedCatalogRequest(t, token, "/Items/"+service.authorized.Folders[1].ID+"/Images/Primary?tag="+hydratedTag)
@@ -270,9 +273,15 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	decodeCatalogResponse(t, browseResponse, &browse)
 	if browseResponse.Code != http.StatusOK || browse.TotalRecordCount != 2 || len(browse.Items) != 2 ||
 		browse.Items[0].Id != service.authorized.Folders[0].ID || browse.Items[1].Id != service.authorized.Folders[1].ID ||
-		browse.Items[0].Type != "Folder" || len(service.calls) != 1 || service.calls[0].folderID != service.authorized.Folders[1].ID ||
-		service.calls[0].limit != 1 {
-		t.Fatalf("unexpected folder browse: status=%d result=%+v calls=%+v", browseResponse.Code, browse, service.calls)
+		browse.Items[0].Type != "CollectionFolder" || browse.Items[0].CollectionType != "homevideos" ||
+		browse.Items[0].PrimaryImageAspectRatio != 16.0/9.0 || browse.Items[0].ImageTags["Primary"] != coverTag ||
+		browse.Items[0].ImageTags["Thumb"] != coverTag || len(browse.Items[0].BackdropImageTags) != 1 ||
+		browse.Items[0].BackdropImageTags[0] != coverTag || browse.Items[1].Type != "CollectionFolder" ||
+		browse.Items[1].CollectionType != "homevideos" || browse.Items[1].PrimaryImageAspectRatio != 16.0/9.0 ||
+		browse.Items[1].ImageTags["Primary"] != hydratedTag || browse.Items[1].ImageTags["Thumb"] != hydratedTag ||
+		len(browse.Items[1].BackdropImageTags) != 1 || browse.Items[1].BackdropImageTags[0] != hydratedTag ||
+		len(service.calls) != 1 || service.calls[0].folderID != service.authorized.Folders[1].ID || service.calls[0].limit != 1 {
+		t.Fatalf("unexpected landscape folder browse: status=%d result=%+v calls=%+v", browseResponse.Code, browse, service.calls)
 	}
 	service.calls = nil
 
@@ -291,19 +300,22 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	}
 
 	service.calls = nil
-	folderDetail := authenticatedCatalogRequest(t, token, "/Items/"+service.authorized.Folders[1].ID)
-	folderDetail.SetPathValue("id", service.authorized.Folders[1].ID)
+	folderDetail := authenticatedCatalogRequest(t, token, "/Items/"+latest[1].Id+"?Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb")
+	folderDetail.SetPathValue("id", latest[1].Id)
 	folderDetailResponse := httptest.NewRecorder()
 	handler.handleItem(folderDetailResponse, folderDetail)
 	var folderDetailItem BaseItemDto
 	decodeCatalogResponse(t, folderDetailResponse, &folderDetailItem)
-	if folderDetailResponse.Code != http.StatusOK || folderDetailItem.Type != "Folder" || folderDetailItem.ImageTags["Primary"] != hydratedTag ||
+	if folderDetailResponse.Code != http.StatusOK || folderDetailItem.Id != latest[1].Id || folderDetailItem.Type != "CollectionFolder" ||
+		folderDetailItem.CollectionType != "homevideos" || folderDetailItem.PrimaryImageAspectRatio != 16.0/9.0 ||
+		folderDetailItem.ImageTags["Primary"] != hydratedTag || folderDetailItem.ImageTags["Thumb"] != hydratedTag ||
+		len(folderDetailItem.BackdropImageTags) != 1 || folderDetailItem.BackdropImageTags[0] != hydratedTag ||
 		len(service.calls) != 1 || service.calls[0].folderID != service.authorized.Folders[1].ID || service.calls[0].limit != 1 {
 		t.Fatalf("folder detail status=%d item=%+v calls=%+v", folderDetailResponse.Code, folderDetailItem, service.calls)
 	}
 
 	service.authorized.BackdropImageURL = backdropURL
-	detailRequest := authenticatedCatalogRequest(t, token, "/Items/"+collectionCompatID)
+	detailRequest := authenticatedCatalogRequest(t, token, "/Items/"+collectionCompatID+"?Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb")
 	detailRequest.SetPathValue("id", collectionCompatID)
 	detailResponse := httptest.NewRecorder()
 	handler.handleItem(detailResponse, detailRequest)
@@ -347,7 +359,7 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 		t.Fatal("virtual views unavailable")
 	}
 
-	viewsRequest := authenticatedCatalogRequest(t, token, "/UserViews?UserId="+catalogTestProfileID)
+	viewsRequest := authenticatedCatalogRequest(t, token, "/UserViews?UserId="+catalogTestProfileID+"&Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb")
 	viewsResponse := httptest.NewRecorder()
 	handler.handleViews(viewsResponse, viewsRequest)
 	var views QueryResult[BaseItemDto]
@@ -372,7 +384,7 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 		t.Fatalf("ordered home views status=%d config=%+v", userResponse.Code, user.Configuration)
 	}
 
-	latestRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items/Latest?ParentId="+collectionCompatID+"&Fields=BasicSyncInfo,Overview,CollectionType,UserData&Recursive=true&MediaTypes=Video&Limit=20&IsPlayed=false")
+	latestRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items/Latest?ParentId="+collectionCompatID+"&Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&Recursive=true&MediaTypes=Video&Limit=20&IsPlayed=false")
 	latestResponse := httptest.NewRecorder()
 	handler.ServeHTTP(latestResponse, latestRequest)
 	var latest []BaseItemDto
@@ -396,7 +408,7 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 	if backdropResponse.Code != http.StatusOK || len(presenter.served) != 1 || presenter.served[0] != latest[0].BackdropImageTags[0] {
 		t.Fatalf("advertised folder backdrop status=%d served=%v item=%+v", backdropResponse.Code, presenter.served, latest[0])
 	}
-	detailRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items/"+collectionCompatID)
+	detailRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items/"+collectionCompatID+"?Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb")
 	detailRequest.SetPathValue("userId", catalogTestProfileID)
 	detailRequest.SetPathValue("itemId", collectionCompatID)
 	detailResponse := httptest.NewRecorder()
@@ -408,8 +420,7 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 		len(detail.BackdropImageTags) != 1 || detail.BackdropImageTags[0] != coverTag {
 		t.Fatalf("promoted collection detail status=%d item=%+v", detailResponse.Code, detail)
 	}
-
-	itemsRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&Recursive=true&Limit=2")
+	itemsRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&Recursive=true&Limit=2&Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb")
 	itemsRequest.SetPathValue("id", catalogTestProfileID)
 	itemsResponse := httptest.NewRecorder()
 	handler.handleUserItems(itemsResponse, itemsRequest)
@@ -420,57 +431,20 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 	}
 }
 
-func TestCollectionFolderAspectRatioUsesCollectionCoverShape(t *testing.T) {
-	for _, test := range []struct {
-		shape string
-		want  float64
-	}{
-		{shape: collection.TileShapePoster, want: 2.0 / 3.0},
-		{shape: collection.TileShapeLandscape, want: 16.0 / 9.0},
-		{shape: collection.TileShapeSquare, want: 1},
-		{shape: " LANDSCAPE ", want: 16.0 / 9.0},
-		{shape: "unknown", want: 0},
-	} {
-		if got := collectionFolderAspectRatio(test.shape); got != test.want {
-			t.Fatalf("shape %q ratio=%v want=%v", test.shape, got, test.want)
-		}
-	}
-}
-
-func TestCollectionFolderTypeFollowsCoverShape(t *testing.T) {
+func TestCollectionFolderProjectionIsAlwaysLandscape(t *testing.T) {
 	handler := &Handler{}
-	for _, test := range []struct {
-		shape    string
-		wantType string
-	}{
-		{shape: collection.TileShapeLandscape, wantType: "CollectionFolder"},
-		{shape: collection.TileShapePoster, wantType: "Folder"},
-		{shape: collection.TileShapeSquare, wantType: "Folder"},
-	} {
-		item := handler.collectionFolderDTO(collection.Collection{FolderCoverShape: test.shape}, collection.Folder{})
-		if item.Type != test.wantType {
-			t.Fatalf("shape=%q type=%q want=%q", test.shape, item.Type, test.wantType)
+	for _, shape := range []string{collection.TileShapePoster, collection.TileShapeLandscape, collection.TileShapeSquare, "unknown"} {
+		item := handler.collectionFolderDTO(collection.Collection{ID: collectionCompatID, FolderCoverShape: shape}, collection.Folder{ID: "folder", Title: "Folder"})
+		if item.Type != "CollectionFolder" || item.CollectionType != "homevideos" || item.PrimaryImageAspectRatio != 16.0/9.0 ||
+			item.ParentId != collectionCompatID {
+			t.Fatalf("shape=%q produced a non-landscape promoted folder: %+v", shape, item)
 		}
 	}
-}
 
-func TestCollectionViewTypeAndArtworkFollowSupportedCoverShape(t *testing.T) {
-	for _, test := range []struct {
-		shape          string
-		collectionType string
-		wantThumb      bool
-	}{
-		{shape: collection.TileShapePoster, collectionType: "boxsets"},
-		{shape: collection.TileShapeLandscape, collectionType: "homevideos", wantThumb: true},
-		{shape: collection.TileShapeSquare, collectionType: "boxsets"},
-	} {
-		if got := collectionViewType(test.shape); got != test.collectionType {
-			t.Fatalf("collectionViewType(%q) = %q, want %q", test.shape, got, test.collectionType)
-		}
-		tags := collectionFolderImageTags(test.shape, "safe-tag")
-		if tags["Primary"] != "safe-tag" || (tags["Thumb"] != "") != test.wantThumb {
-			t.Fatalf("collectionFolderImageTags(%q) = %#v, wantThumb=%t", test.shape, tags, test.wantThumb)
-		}
+	tags := collectionFolderImageTags("safe-tag")
+	backdrops := collectionFolderBackdropImageTags("safe-tag")
+	if tags["Primary"] != "safe-tag" || tags["Thumb"] != "safe-tag" || len(backdrops) != 1 || backdrops[0] != "safe-tag" {
+		t.Fatalf("promoted folder artwork projection is incomplete: tags=%#v backdrops=%#v", tags, backdrops)
 	}
 }
 
@@ -499,7 +473,7 @@ func TestCollectionViewProjectionFallsBackTogether(t *testing.T) {
 
 func TestRecursiveCollectionBrowseFlattensFolders(t *testing.T) {
 	handler, service, _, token := newCollectionCompatHandler(t)
-	request := authenticatedCatalogRequest(t, token, "/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&Recursive=true&EnableUserData=true&StartIndex=0&Limit=2")
+	request := authenticatedCatalogRequest(t, token, "/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&Recursive=true&EnableUserData=true&StartIndex=0&Limit=2&Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb")
 	response := httptest.NewRecorder()
 	handler.handleItems(response, request)
 
