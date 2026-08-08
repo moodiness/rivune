@@ -99,7 +99,7 @@ func (handler *Handler) handleLatestItems(response http.ResponseWriter, request 
 	if !ok || !handler.requireOptionalQueryUser(response, request, session) {
 		return
 	}
-	handler.writeLatestItems(response, request, session, false)
+	handler.writeLatestItems(response, request, session)
 }
 
 func (handler *Handler) handleUserLatestItems(response http.ResponseWriter, request *http.Request) {
@@ -107,10 +107,10 @@ func (handler *Handler) handleUserLatestItems(response http.ResponseWriter, requ
 	if !ok || !handler.requireBoundUser(response, request.PathValue("id"), session) {
 		return
 	}
-	handler.writeLatestItems(response, request, session, isVidHubClient(session.Client))
+	handler.writeLatestItems(response, request, session)
 }
 
-func (handler *Handler) writeLatestItems(response http.ResponseWriter, request *http.Request, session AuthenticatedSession, flattenCollections bool) {
+func (handler *Handler) writeLatestItems(response http.ResponseWriter, request *http.Request, session AuthenticatedSession) {
 	query, err := ParseItemQuery(request.URL.Query())
 	if err != nil {
 		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
@@ -125,17 +125,8 @@ func (handler *Handler) writeLatestItems(response http.ResponseWriter, request *
 	if parentID != "" && handler.collections != nil {
 		value, collectionErr := handler.collections.Get(request.Context(), session.Principal, parentID)
 		if collectionErr == nil {
-			if !flattenCollections {
-				items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, query)
-				handler.writeJSON(response, http.StatusOK, items)
-				return
-			}
-			page, resolveErr := handler.collectionItemPage(request.Context(), session.Principal, query, mediaTypes, value, "", "")
-			if resolveErr != nil {
-				handler.writeCollectionItemError(response, resolveErr)
-				return
-			}
-			handler.writeJSON(response, http.StatusOK, page.Items)
+			items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, query)
+			handler.writeJSON(response, http.StatusOK, items)
 			return
 		}
 		if !errors.Is(collectionErr, collection.ErrNotFound) {

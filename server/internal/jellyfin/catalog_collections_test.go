@@ -78,6 +78,7 @@ type collectionCompatService struct {
 	authorized collection.Collection
 	foreign    collection.Collection
 	listErr    error
+	callsMu    sync.Mutex
 	calls      []collectionResolveCall
 }
 
@@ -107,7 +108,9 @@ func (service *collectionCompatService) Get(_ context.Context, _ auth.Principal,
 }
 
 func (service *collectionCompatService) ResolveFolder(_ context.Context, _ auth.Principal, collectionID, folderID string, page, limit int, _, _ string) (collection.ResolvedFolder, error) {
+	service.callsMu.Lock()
 	service.calls = append(service.calls, collectionResolveCall{collectionID: collectionID, folderID: folderID, page: page, limit: limit})
+	service.callsMu.Unlock()
 	if collectionID != service.authorized.ID {
 		return collection.ResolvedFolder{}, collection.ErrNotFound
 	}
@@ -353,12 +356,12 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 	handler.ServeHTTP(latestResponse, latestRequest)
 	var latest []BaseItemDto
 	decodeCatalogResponse(t, latestResponse, &latest)
-	if latestResponse.Code != http.StatusOK || len(latest) != 3 {
+	if latestResponse.Code != http.StatusOK || len(latest) != 2 || latest[0].Name != "First" || latest[1].Name != "Second" {
 		t.Fatalf("VidHub home collection row status=%d items=%+v body=%s", latestResponse.Code, latest, latestResponse.Body.String())
 	}
 	for _, item := range latest {
-		if item.Type == "Folder" || item.UserData == nil || item.UserData.ItemId != item.Id {
-			t.Fatalf("VidHub home row contains an invalid media item: %+v", item)
+		if item.Type != "Folder" || item.ParentId != collectionCompatID || item.UserData == nil || item.UserData.ItemId != item.Id {
+			t.Fatalf("VidHub home row contains an invalid collection folder: %+v", item)
 		}
 	}
 
