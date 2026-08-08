@@ -821,7 +821,7 @@ func (handler *Handler) collectionViewDTO(ctx context.Context, principal auth.Pr
 	return BaseItemDto{
 		Id: value.ID, ServerId: handler.serverInfo.ID.String(), Name: value.Title, SortName: value.Title,
 		Etag: value.ID, DisplayPreferencesId: value.ID, LocationType: "FileSystem",
-		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "mixed", IsFolder: true,
+		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "boxsets", IsFolder: true,
 		Genres: []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags,
 		UserData: &UserItemDataDto{Key: value.ID, ItemId: value.ID},
 	}

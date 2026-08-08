@@ -333,7 +333,7 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 	if viewsResponse.Code != http.StatusOK || views.TotalRecordCount != 3 || len(views.Items) != 3 ||
 		views.Items[0].Id != virtual[0].Id || views.Items[1].Id != virtual[1].Id ||
 		views.Items[2].Id != collectionCompatID || views.Items[2].Id == virtual[2].Id ||
-		views.Items[2].Type != "CollectionFolder" || views.Items[2].CollectionType != "mixed" ||
+		views.Items[2].Type != "CollectionFolder" || views.Items[2].CollectionType != "boxsets" ||
 		views.Items[2].UserData == nil || views.Items[2].UserData.ItemId != collectionCompatID {
 		t.Fatalf("VidHub home views status=%d result=%+v", viewsResponse.Code, views)
 	}
