@@ -25,6 +25,10 @@ func (*stateAuthentication) Login(context.Context, CompatLoginInput) (LoginResul
 func (authentication *stateAuthentication) Authenticate(context.Context, string) (AuthenticatedSession, error) {
 	return authentication.session, nil
 }
+func (authentication *stateAuthentication) Revalidate(context.Context, AuthenticatedSession) (AuthenticatedSession, error) {
+	return authentication.session, nil
+}
+
 func (*stateAuthentication) Logout(context.Context, AuthenticatedSession) error { return nil }
 
 type stateCatalog struct {
@@ -70,6 +74,9 @@ func (*statePlaybackDelivery) Open(context.Context, auth.Principal, playback.Res
 func (*statePlaybackDelivery) Serve(http.ResponseWriter, *http.Request, playback.DeliveryHandle) error {
 	return nil
 }
+func (*statePlaybackDelivery) ServeAsset(http.ResponseWriter, *http.Request, playback.DeliveryHandle, string) error {
+	return nil
+}
 func (delivery *statePlaybackDelivery) Close(context.Context, auth.Principal, playback.DeliveryHandle) error {
 	if delivery.onClose != nil {
 		delivery.onClose()
@@ -109,7 +116,7 @@ func TestStoppedUpdatesProgressClosesRegistryAndRejectsDuplicates(t *testing.T) 
 	}
 
 	response = serveStateRequest(handler.handlePlayingStopped, token, body)
-	if response.Code != http.StatusNotFound || service.progress[itemID].Version != 1 {
+	if response.Code != http.StatusNoContent || service.progress[itemID].Version != 1 {
 		t.Fatalf("duplicate stopped status=%d progress=%+v", response.Code, service.progress[itemID])
 	}
 
@@ -117,11 +124,21 @@ func TestStoppedUpdatesProgressClosesRegistryAndRejectsDuplicates(t *testing.T) 
 	authentication.session.ID = "66666666-6666-4666-8666-666666666666"
 	crossAccountBody := `{"ItemId":"` + itemID + `","PlaySessionId":"` + playID + `","PositionTicks":500000000}`
 	response = serveStateRequest(handler.handlePlayingProgress, token, crossAccountBody)
-	if response.Code != http.StatusNotFound {
+	if response.Code != http.StatusNoContent {
 		t.Fatalf("cross-account progress status=%d body=%s", response.Code, response.Body.String())
 	}
 	if len(registry.entries) != 1 || len(service.progress) != 0 {
 		t.Fatal("cross-account request changed playback or watch state")
+	}
+}
+
+func TestProgressFallsBackToUniqueNegotiatedItemAndSource(t *testing.T) {
+	handler, _, service, registry, token, itemID, playID, mediaID := stateHTTPFixture(t)
+	body := `{"ItemId":"` + itemID + `","PlaySessionId":"client-play-session-alias-0001","MediaSourceId":"` + mediaID + `","PositionTicks":250000000}`
+	response := serveStateRequest(handler.handlePlayingProgress, token, body)
+	progress := service.progress[itemID]
+	if response.Code != http.StatusNoContent || progress.PositionSeconds != 25 || progress.Version != 1 || registry.entries[playID] == nil {
+		t.Fatalf("fallback progress status=%d progress=%+v sessionPreserved=%t", response.Code, progress, registry.entries[playID] != nil)
 	}
 }
 
@@ -181,7 +198,7 @@ func TestStoppedSerializesQueuedProgressThroughTerminalClose(t *testing.T) {
 	close(blocking.release)
 	stoppedResponse := <-stoppedResult
 	progressResponse := <-progressResult
-	if stoppedResponse.Code != http.StatusNoContent || progressResponse.Code != http.StatusNotFound {
+	if stoppedResponse.Code != http.StatusNoContent || progressResponse.Code != http.StatusNoContent {
 		t.Fatalf("concurrent statuses stopped=%d progress=%d", stoppedResponse.Code, progressResponse.Code)
 	}
 	progress := service.progress[itemID]
@@ -218,7 +235,7 @@ func TestConcurrentStoppedEventsPersistOnlyFirst(t *testing.T) {
 	close(blocking.release)
 	firstResponse := <-firstResult
 	secondResponse := <-secondResult
-	if firstResponse.Code != http.StatusNoContent || secondResponse.Code != http.StatusNotFound {
+	if firstResponse.Code != http.StatusNoContent || secondResponse.Code != http.StatusNoContent {
 		t.Fatalf("concurrent stopped statuses first=%d second=%d", firstResponse.Code, secondResponse.Code)
 	}
 	if progress := service.progress[itemID]; progress.PositionSeconds != 600 || service.updateCalls != 1 {
@@ -331,7 +348,7 @@ func TestPlaybackEventWithoutMediaSourceRejectsNoOrMultipleOpenSources(t *testin
 			lastSeen := entry.lastSeenAt
 			body := `{"ItemId":"` + itemID + `","PlaySessionId":"` + playID + `","PositionTicks":250000000}`
 			response := serveStateRequest(handler.handlePlayingProgress, token, body)
-			if response.Code != http.StatusNotFound || len(service.progress) != 0 {
+			if response.Code != http.StatusNoContent || len(service.progress) != 0 {
 				t.Fatalf("status=%d progress=%+v body=%s", response.Code, service.progress, response.Body.String())
 			}
 			if !entry.lastSeenAt.Equal(lastSeen) {
@@ -461,7 +478,7 @@ func TestPlaybackEventRejectsMismatchedSelectorsAndUnknownPing(t *testing.T) {
 	handler, _, service, registry, token, itemID, playID, mediaID := stateHTTPFixture(t)
 	mismatch := `{"ItemId":"00000000-0000-4000-8000-000000000099","PlaySessionId":"` + playID + `","MediaSourceId":"` + mediaID + `","PositionTicks":100000000}`
 	response := serveStateRequest(handler.handlePlayingProgress, token, mismatch)
-	if response.Code != http.StatusNotFound || len(service.progress) != 0 || len(registry.entries) != 1 {
+	if response.Code != http.StatusNoContent || len(service.progress) != 0 || len(registry.entries) != 1 {
 		t.Fatalf("mismatched item status=%d progress=%+v entries=%d", response.Code, service.progress, len(registry.entries))
 	}
 	mismatch = `{"UserId":"22222222-2222-4222-8222-222222222222","ItemId":"` + itemID + `","PlaySessionId":"` + playID + `","MediaSourceId":"` + mediaID + `","PositionTicks":100000000}`
@@ -471,7 +488,7 @@ func TestPlaybackEventRejectsMismatchedSelectorsAndUnknownPing(t *testing.T) {
 	}
 	unknownPing := `{"PlaySessionId":"unknown-play-session"}`
 	response = serveStateRequest(handler.handlePlayingPing, token, unknownPing)
-	if response.Code != http.StatusNotFound {
+	if response.Code != http.StatusNoContent {
 		t.Fatalf("unknown ping status=%d body=%s", response.Code, response.Body.String())
 	}
 	validPing := `{"PlaySessionId":"` + playID + `"}`
@@ -502,6 +519,17 @@ func TestPlayedEndpointsBindUserRemainIdempotentAndPreserveChildFavorite(t *test
 	if !strings.Contains(response.Body.String(), `"IsFavorite":false`) {
 		t.Fatalf("played child response invented library membership: %s", response.Body.String())
 	}
+	compactUserID := strings.ReplaceAll(authentication.session.ProfileID, "-", "")
+	compactItemID := strings.ReplaceAll(itemID, "-", "")
+	compactRequest := httptest.NewRequest(http.MethodPost, "/Users/"+compactUserID+"/PlayedItems/"+compactItemID, nil)
+	compactRequest.SetPathValue("userId", compactUserID)
+	compactRequest.SetPathValue("itemId", compactItemID)
+	compactRequest.Header.Set("X-Emby-Token", token)
+	compactResponse := httptest.NewRecorder()
+	handler.handlePlayedItem(compactResponse, compactRequest)
+	if compactResponse.Code != http.StatusOK || service.progress[itemID].Version != 1 {
+		t.Fatalf("compact played status=%d progress=%+v", compactResponse.Code, service.progress[itemID])
+	}
 	response = requestPlayed(http.MethodPost, authentication.session.ProfileID)
 	if response.Code != http.StatusOK || service.progress[itemID].Version != 1 {
 		t.Fatalf("duplicate played status=%d progress=%+v", response.Code, service.progress[itemID])
@@ -513,6 +541,168 @@ func TestPlayedEndpointsBindUserRemainIdempotentAndPreserveChildFavorite(t *test
 	response = requestPlayed(http.MethodDelete, authentication.session.ProfileID)
 	if response.Code != http.StatusOK || service.progress[itemID].Completed || service.progress[itemID].Version != 2 {
 		t.Fatalf("unplayed status=%d progress=%+v", response.Code, service.progress[itemID])
+	}
+}
+
+func TestUserDataModernAndLegacyApplyAllStateIdempotently(t *testing.T) {
+	handler, authentication, service, _, token, itemID, _, _ := stateHTTPFixture(t)
+	runtimeMinutes := 2
+	catalog := handler.catalog.(*stateCatalog)
+	item := catalog.items[itemID]
+	item.RuntimeMinutes = &runtimeMinutes
+	catalog.items[itemID] = item
+
+	requestUserData := func(method, path, userID, body string, legacy bool) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.SetPathValue("itemId", itemID)
+		if legacy {
+			request.SetPathValue("userId", userID)
+		}
+		request.Header.Set("X-Emby-Token", token)
+		if method == http.MethodPost {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		response := httptest.NewRecorder()
+		if legacy {
+			handler.handleLegacyUserData(response, request)
+		} else {
+			handler.handleUserData(response, request)
+		}
+		return response
+	}
+
+	response := requestUserData(http.MethodGet, "/UserItems/"+itemID+"/UserData", "", "", false)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"Key":"`+itemID+`"`) || !strings.Contains(response.Body.String(), `"ItemId":"`+itemID+`"`) {
+		t.Fatalf("empty UserData status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := `{"PlaybackPositionTicks":300000000,"PlayCount":0,"IsFavorite":true,"Played":false,"Key":"` + itemID + `","ItemId":"` + itemID + `"}`
+	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
+	progress := service.progress[itemID]
+	if response.Code != http.StatusOK || progress.PositionSeconds != 30 || progress.DurationSeconds != 120 || progress.Completed || progress.Version != 1 || !service.library[itemID] || service.addCalls != 1 {
+		t.Fatalf("modern update status=%d progress=%+v library=%v addCalls=%d body=%s", response.Code, progress, service.library, service.addCalls, response.Body.String())
+	}
+	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
+	if response.Code != http.StatusOK || service.progress[itemID].Version != 1 || service.addCalls != 1 {
+		t.Fatalf("duplicate update status=%d progress=%+v addCalls=%d", response.Code, service.progress[itemID], service.addCalls)
+	}
+
+	body = `{"PlaybackPositionTicks":600000000,"Played":true}`
+	response = requestUserData(http.MethodPost, "/Users/"+authentication.session.ProfileID+"/Items/"+itemID+"/UserData", authentication.session.ProfileID, body, true)
+	progress = service.progress[itemID]
+	if response.Code != http.StatusOK || progress.PositionSeconds != 60 || !progress.Completed || progress.Version != 2 || !service.library[itemID] || service.removeCalls != 0 || !strings.Contains(response.Body.String(), `"PlayedPercentage":50`) {
+		t.Fatalf("legacy partial update status=%d progress=%+v library=%v body=%s", response.Code, progress, service.library, response.Body.String())
+	}
+	body = `{"IsFavorite":false}`
+	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
+	if response.Code != http.StatusOK || service.library[itemID] || service.removeCalls != 1 || service.progress[itemID].Version != 2 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":600000000`) {
+		t.Fatalf("favorite-only update status=%d progress=%+v library=%v removes=%d body=%s", response.Code, service.progress[itemID], service.library, service.removeCalls, response.Body.String())
+	}
+	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
+	if response.Code != http.StatusOK || service.removeCalls != 1 || service.progress[itemID].Version != 2 {
+		t.Fatalf("duplicate favorite-only update status=%d progress=%+v removes=%d", response.Code, service.progress[itemID], service.removeCalls)
+	}
+	response = requestUserData(http.MethodGet, "/Users/foreign/Items/"+itemID+"/UserData", "22222222-2222-4222-8222-222222222222", "", true)
+	if response.Code != http.StatusNotFound || service.progress[itemID].Version != 2 || service.addCalls != 1 {
+		t.Fatalf("foreign legacy status=%d progress=%+v addCalls=%d", response.Code, service.progress[itemID], service.addCalls)
+	}
+}
+
+func TestFavoriteEndpointsMutateLibraryAndPreserveProgress(t *testing.T) {
+	handler, authentication, service, _, token, itemID, _, _ := stateHTTPFixture(t)
+	service.progress[itemID] = watchstate.Progress{TitleID: itemID, MediaType: "movie", PositionSeconds: 45, DurationSeconds: 90, Version: 7, LastWatchedAt: time.Unix(7, 0).UTC()}
+	catalog := handler.catalog.(*stateCatalog)
+
+	requestFavorite := func(method, userID string, legacy bool) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, "/favorite/"+itemID, nil)
+		request.SetPathValue("itemId", itemID)
+		if legacy {
+			request.SetPathValue("userId", userID)
+		}
+		request.Header.Set("X-Emby-Token", token)
+		response := httptest.NewRecorder()
+		if legacy {
+			handler.handleLegacyFavoriteItem(response, request)
+		} else {
+			handler.handleFavoriteItem(response, request)
+		}
+		return response
+	}
+
+	response := requestFavorite(http.MethodPost, "", false)
+	if response.Code != http.StatusOK || !service.library[itemID] || service.addCalls != 1 || service.userDataCalls != 1 || service.progress[itemID].Version != 7 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":450000000`) || !strings.Contains(response.Body.String(), `"IsFavorite":true`) {
+		t.Fatalf("favorite status=%d progress=%+v library=%v addCalls=%d linkedCalls=%d body=%s", response.Code, service.progress[itemID], service.library, service.addCalls, service.userDataCalls, response.Body.String())
+	}
+	item := catalog.items[itemID]
+	item.InLibrary = true
+	catalog.items[itemID] = item
+	response = requestFavorite(http.MethodPost, authentication.session.ProfileID, true)
+	if response.Code != http.StatusOK || service.addCalls != 1 || service.userDataCalls != 2 || service.progress[itemID].Version != 7 {
+		t.Fatalf("duplicate favorite status=%d addCalls=%d linkedCalls=%d progress=%+v", response.Code, service.addCalls, service.userDataCalls, service.progress[itemID])
+	}
+	response = requestFavorite(http.MethodDelete, authentication.session.ProfileID, true)
+	if response.Code != http.StatusOK || service.library[itemID] || service.removeCalls != 1 || service.userDataCalls != 3 || service.progress[itemID].Version != 7 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":450000000`) || !strings.Contains(response.Body.String(), `"IsFavorite":false`) {
+		t.Fatalf("unfavorite status=%d progress=%+v library=%v removeCalls=%d linkedCalls=%d body=%s", response.Code, service.progress[itemID], service.library, service.removeCalls, service.userDataCalls, response.Body.String())
+	}
+	item.InLibrary = false
+	catalog.items[itemID] = item
+	response = requestFavorite(http.MethodDelete, "", false)
+	if response.Code != http.StatusOK || service.removeCalls != 1 || service.userDataCalls != 4 || service.progress[itemID].Version != 7 {
+		t.Fatalf("duplicate unfavorite status=%d removeCalls=%d linkedCalls=%d progress=%+v", response.Code, service.removeCalls, service.userDataCalls, service.progress[itemID])
+	}
+	response = requestFavorite(http.MethodPost, "22222222-2222-4222-8222-222222222222", true)
+	if response.Code != http.StatusNotFound || service.addCalls != 1 || service.userDataCalls != 4 || service.progress[itemID].Version != 7 {
+		t.Fatalf("foreign favorite status=%d addCalls=%d linkedCalls=%d progress=%+v", response.Code, service.addCalls, service.userDataCalls, service.progress[itemID])
+	}
+}
+
+func TestUserDataUpdateBoundsBodyAndFailsClosedForUnknownItem(t *testing.T) {
+	handler, _, service, _, token, itemID, _, _ := stateHTTPFixture(t)
+	nullRequest := httptest.NewRequest(http.MethodPost, "/UserItems/"+itemID+"/UserData", strings.NewReader("null"))
+	nullRequest.SetPathValue("itemId", itemID)
+	nullRequest.Header.Set("X-Emby-Token", token)
+	nullRequest.Header.Set("Content-Type", "application/json")
+	nullResponse := httptest.NewRecorder()
+	handler.handleUserData(nullResponse, nullRequest)
+	if nullResponse.Code != http.StatusBadRequest || service.userDataCalls != 0 || len(service.progress) != 0 || len(service.library) != 0 {
+		t.Fatalf("null body status=%d linkedCalls=%d progress=%+v library=%+v", nullResponse.Code, service.userDataCalls, service.progress, service.library)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/UserItems/"+itemID+"/UserData", strings.NewReader(strings.Repeat(" ", int(maximumCompatJSONBodyBytes)+1)))
+	request.SetPathValue("itemId", itemID)
+	request.Header.Set("X-Emby-Token", token)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.handleUserData(response, request)
+	if response.Code != http.StatusBadRequest || len(service.progress) != 0 || len(service.library) != 0 {
+		t.Fatalf("oversized body status=%d progress=%+v library=%+v", response.Code, service.progress, service.library)
+	}
+
+	unknownID := "00000000-0000-4000-8000-000000000099"
+	request = httptest.NewRequest(http.MethodGet, "/UserItems/"+unknownID+"/UserData", nil)
+	request.SetPathValue("itemId", unknownID)
+	request.Header.Set("X-Emby-Token", token)
+	response = httptest.NewRecorder()
+	handler.handleUserData(response, request)
+	if response.Code != http.StatusNotFound || len(service.progress) != 0 || len(service.library) != 0 {
+		t.Fatalf("unknown item status=%d progress=%+v library=%+v", response.Code, service.progress, service.library)
+	}
+}
+
+func TestUserDataCombinedMutationFailureDoesNotCommitPartially(t *testing.T) {
+	handler, _, service, _, token, itemID, _, _ := stateHTTPFixture(t)
+	runtimeMinutes := 2
+	item := handler.catalog.(*stateCatalog).items[itemID]
+	item.RuntimeMinutes = &runtimeMinutes
+	handler.catalog.(*stateCatalog).items[itemID] = item
+	service.userDataErr = watchstate.ErrOutboxCapacity
+	body := `{"PlaybackPositionTicks":300000000,"Played":true,"IsFavorite":true}`
+	request := httptest.NewRequest(http.MethodPost, "/UserItems/"+itemID+"/UserData", strings.NewReader(body))
+	request.SetPathValue("itemId", itemID)
+	request.Header.Set("X-Emby-Token", token)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.handleUserData(response, request)
+	if response.Code != http.StatusServiceUnavailable || len(service.progress) != 0 || len(service.library) != 0 || service.addCalls != 0 || service.updateCalls != 0 {
+		t.Fatalf("atomic failure status=%d progress=%+v library=%+v add=%d update=%d", response.Code, service.progress, service.library, service.addCalls, service.updateCalls)
 	}
 }
 
@@ -537,6 +727,15 @@ func TestResumePaginationAndNextUpProjectionAreDeterministic(t *testing.T) {
 	if response.Code != http.StatusOK || service.resumeOffset != 1 || service.resumeLimit != 2 || catalog.batchCalls != 1 ||
 		!strings.Contains(body, `"TotalRecordCount":3,"StartIndex":1`) || strings.Index(body, secondID) > strings.Index(body, firstID) {
 		t.Fatalf("resume status=%d offset=%d limit=%d batchCalls=%d body=%s", response.Code, service.resumeOffset, service.resumeLimit, catalog.batchCalls, body)
+	}
+
+	service.resumeOffset = 99
+	nonVideo := httptest.NewRequest(http.MethodGet, "/UserItems/Resume?MediaTypes=Audio&Limit=12", nil)
+	nonVideo.Header.Set("X-Emby-Token", token)
+	nonVideoResponse := httptest.NewRecorder()
+	handler.handleUserResumeItems(nonVideoResponse, nonVideo)
+	if nonVideoResponse.Code != http.StatusOK || service.resumeOffset != 99 || !strings.Contains(nonVideoResponse.Body.String(), `"Items":[]`) {
+		t.Fatalf("non-video resume status=%d offset=%d body=%s", nonVideoResponse.Code, service.resumeOffset, nonVideoResponse.Body.String())
 	}
 
 	service.nextPage = watchstate.ContinueItemsPage{
@@ -613,7 +812,7 @@ func stateHTTPFixture(t *testing.T) (*Handler, *stateAuthentication, *memoryWatc
 	now := time.Now().UTC()
 	session := AuthenticatedSession{
 		ID: "33333333-3333-4333-8333-333333333333", ProfileID: profileID, ProfileName: "Profile",
-		Client:    ClientIdentity{Client: "Infuse", Device: "Living Room", DeviceID: "device-one", Version: "8.1"},
+		Client:    ClientIdentity{Client: "Generic Client", Device: "Living Room", DeviceID: "device-one", Version: "8.1"},
 		ExpiresAt: now.Add(time.Hour),
 		Principal: auth.Principal{SessionID: "44444444-4444-4444-8444-444444444444", UserID: "55555555-5555-4555-8555-555555555555", ActiveProfileID: &profileID},
 	}

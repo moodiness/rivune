@@ -130,7 +130,7 @@ curl --fail --show-error https://media.example.com/health
 
 ## Jellyfin-compatible client access
 
-Rivune includes a limited Jellyfin-compatible API adapter for supported external client workflows. It is not a complete Jellyfin server, does not implement every Jellyfin endpoint or client feature, and provides no LAN UDP discovery. Configure clients manually with Rivune's public URL.
+Rivune includes a limited Jellyfin-compatible API adapter. It is not a complete Jellyfin server, does not implement every Jellyfin endpoint or client feature, and provides no LAN UDP discovery. Configure it manually with Rivune's public URL.
 
 The adapter is off by default. An administrator can enable or disable it from Rivune's settings page without restarting the service. For unattended initial provisioning, set this non-secret default before first setup:
 
@@ -144,19 +144,19 @@ On Unraid, **Jellyfin initial default** controls only the value used before the 
 
 Open the profile's **Preferences → Connections** page and generate its Jellyfin credential. Enter the displayed UUID as the client username and the generated profile-only application password as the password. The password is shown once; copy it before closing the dialog, or rotate it to issue a replacement. Rivune account passwords, administrator credentials, profile names, and profile PINs are never accepted by the compatibility login.
 
-Early development builds of the profile-credential cutover could remove the old Jellyfin mapping after its revoked session had already been purged while leaving the dedicated device row counted against the per-user quota. Migration 66 removes these rows whenever cutover-session evidence remains. If an instance ran one of those unreleased builds and a new application-password login still fails at the device limit, open **Administration → Devices**, remove only the stale duplicate Infuse or VidHub entries created by the old compatibility login, then retry. Once both the mapping and session are gone Rivune cannot safely distinguish that row from a genuine approved native device, so it deliberately does not bulk-delete unmatched devices.
+Early development builds of the profile-credential cutover could remove the old Jellyfin mapping after its revoked session had already been purged while leaving the dedicated device row counted against the per-user quota. Migration 66 removes these rows whenever cutover-session evidence remains. If an instance ran one of those unreleased builds and a new application-password login still fails at the device limit, open **Administration → Devices**, remove only the stale duplicate compatibility-device entries for the affected profile, and retry once. Do not remove unrelated native devices.
 
 Clients may use either the exact Jellyfin-style root paths or one lowercase `/emby` prefix. For example, public discovery is available at `/System/Info/Public` and `/emby/System/Info/Public`; nested prefixes, case variants, path normalization, and implicit method fallbacks are rejected. The bounded compatibility contract covers:
 
 - public server identity and availability probes;
-- credential login, the credential-bound user, and logout;
-- library views, items, movie/series hierarchy, enabled metadata and add-on catalog search, and artwork;
-- lazy multi-source `PlaybackInfo`, direct/remux/transcode delivery through Rivune's existing playback pipeline, byte ranges, seeking, and opaque HLS child requests;
-- playing/progress/stopped events, played state, resume items, and next-up.
+- credential login, the credential-bound user, session/capability projection, logout, and bounded WebSocket liveness;
+- library views, items, movie/series hierarchy, enabled metadata and add-on catalog search, item artwork, and deterministic profile avatars;
+- lazy multi-source `PlaybackInfo`, direct/remux/transcode delivery through Rivune's existing playback pipeline, byte ranges, seeking, opaque HLS child requests, and capability-scoped WebVTT subtitles;
+- playing/progress/stopped events, played state, favorites, resume items, and next-up.
 
-Private provider URLs, headers, native playback tokens, and source references remain server-side. Query authentication is accepted only on the documented media and artwork routes; use HTTPS because a client may carry its compatibility credential in a generated media URL. Quick Connect is explicitly disabled, plugin and package lists are empty, and unknown paths or methods return `404`. The exact request/response schemas, limits, and status codes are in [`protocol/jellyfin-compat-openapi.yaml`](../protocol/jellyfin-compat-openapi.yaml).
+Private provider URLs, headers, native playback tokens, and source references remain server-side. Query authentication is accepted for Jellyfin protocol compatibility, but Rivune-generated playback URLs contain only an owner/item/source/TTL-bound capability and never the profile credential. Use HTTPS for every non-loopback deployment. Quick Connect is explicitly disabled, plugin and package lists are empty, and unknown paths or methods return `404`. The exact request/response schemas, limits, and status codes are in [`protocol/jellyfin-compat-openapi.yaml`](../protocol/jellyfin-compat-openapi.yaml).
 
-Jellyfin Media Player/Desktop is not a supported compatibility client. It loads the server-hosted Jellyfin Web application from `/` after discovery, while Rivune intentionally serves its own web application there. A successful API probe in that desktop shell therefore does not validate Infuse or VidHub, which use native client flows.
+Jellyfin Media Player/Desktop is incompatible with this adapter because it loads the server-hosted Jellyfin Web application from `/` after discovery, while Rivune intentionally serves its own web application there. A successful API probe in that desktop shell therefore does not validate the standalone application flows covered by the adapter.
 
 To roll back, disable Jellyfin from the administrator settings page. Confirm normal Rivune access through the HTTPS origin afterward.
 

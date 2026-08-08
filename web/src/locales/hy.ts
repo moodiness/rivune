@@ -795,7 +795,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Թույլատրել սերվերին փոխարկել անհամատեղելի մեդիան միայն այն դեպքում, երբ ուղղակի նվագարկումն ու ուղղակի հոսքային փոխանցումը ձախողվել են",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Հավելվածի այս գաղտնաբառը սահմանափակված է միայն այս պրոֆիլով։",
   "settings.jellyfinAccess.pinHint": "Այս գաղտնիքը ցուցադրվում է միայն մեկ անգամ։ Պահպանեք այն հիմա։",
   "settings.jellyfinAccess.rotateWarning": "Գաղտնաբառի փոխարինումն անմիջապես անվավեր է դարձնում ընթացիկ գաղտնաբառն ու Jellyfin-ի բոլոր աշխատաշրջանները։",

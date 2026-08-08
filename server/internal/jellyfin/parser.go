@@ -1,6 +1,8 @@
 package jellyfin
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/url"
@@ -10,9 +12,18 @@ import (
 )
 
 const (
-	maximumCompatAuthorizationHeaderBytes = 2048
-	maximumCompatTokenHeaderBytes         = 128
-	maximumCompatQueryBytes               = 2048
+	maximumCompatAuthorizationHeaderBytes  = 2048
+	maximumCompatTokenHeaderBytes          = 128
+	maximumCompatRawQueryBytes             = 3*MaximumQueryBytes + 2*MaximumQueryParameters
+	maximumCompatSourceDeviceIDRunes       = 1024
+	clientIdentityFailureHeaderBounds      = "header_bounds"
+	clientIdentityFailureAuthorization     = "authorization_syntax"
+	clientIdentityFailureAuthorizationNone = "authorization_absent"
+	clientIdentityFailureClientMissing     = "client_missing"
+	clientIdentityFailureDeviceMissing     = "device_missing"
+	clientIdentityFailureDeviceIDMissing   = "device_id_missing"
+	clientIdentityFailureVersionMissing    = "version_missing"
+	clientIdentityFailureFieldBounds       = "field_bounds"
 )
 
 var ErrInvalidCompatAuthorization = errors.New("invalid compatibility authorization")
@@ -24,94 +35,178 @@ var compatAuthorizationHeaders = []string{
 }
 
 func ParseClientIdentity(headers http.Header) (ClientIdentity, error) {
+	identity, _, err := parseClientIdentity(headers)
+	return identity, err
+}
+
+func parseClientIdentity(headers http.Header) (ClientIdentity, string, error) {
 	if !boundedCompatHeaders(headers) {
-		return ClientIdentity{}, ErrInvalidCompatAuthorization
+		return ClientIdentity{}, clientIdentityFailureHeaderBounds, ErrInvalidCompatAuthorization
 	}
 	parameters, found, err := collectAuthorizationParameters(headers)
-	if err != nil || !found {
-		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	if err != nil {
+		return ClientIdentity{}, clientIdentityFailureAuthorization, ErrInvalidCompatAuthorization
+	}
+	if !found {
+		return ClientIdentity{}, clientIdentityFailureAuthorizationNone, ErrInvalidCompatAuthorization
 	}
 	client, okClient := parameters["client"]
+	if !okClient {
+		return ClientIdentity{}, clientIdentityFailureClientMissing, ErrInvalidCompatAuthorization
+	}
 	device, okDevice := parameters["device"]
+	if !okDevice {
+		return ClientIdentity{}, clientIdentityFailureDeviceMissing, ErrInvalidCompatAuthorization
+	}
 	deviceID, okDeviceID := parameters["deviceid"]
+	if !okDeviceID {
+		return ClientIdentity{}, clientIdentityFailureDeviceIDMissing, ErrInvalidCompatAuthorization
+	}
 	version, okVersion := parameters["version"]
-	if !okClient || !okDevice || !okDeviceID || !okVersion {
-		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	if !okVersion {
+		return ClientIdentity{}, clientIdentityFailureVersionMissing, ErrInvalidCompatAuthorization
+	}
+	deviceID, okDeviceID = canonicalCompatDeviceID(deviceID)
+	if !okDeviceID {
+		return ClientIdentity{}, clientIdentityFailureFieldBounds, ErrInvalidCompatAuthorization
 	}
 	identity, err := normalizeClientIdentity(ClientIdentity{
 		Client: client, Device: device, DeviceID: deviceID, Version: version,
 	})
 	if err != nil {
-		return ClientIdentity{}, ErrInvalidCompatAuthorization
+		return ClientIdentity{}, clientIdentityFailureFieldBounds, ErrInvalidCompatAuthorization
 	}
-	return identity, nil
+	return identity, "", nil
 }
 
-// ParseCompatToken accepts query authentication only for explicitly scoped
-// media and image routes. A token repeated in the query is always ambiguous;
-// distinct header transports may repeat only the exact same credential.
-func ParseCompatToken(request *http.Request, allowQuery bool) (string, error) {
-	if request == nil {
+func canonicalCompatDeviceID(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if boundedUTF8(value, 1, 128) {
+		return value, true
+	}
+	if !boundedUTF8(value, 129, maximumCompatSourceDeviceIDRunes) {
+		return "", false
+	}
+	digest := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(digest[:]), true
+}
+
+// ParseCompatToken follows Jellyfin's canonical credential precedence. Query
+// credentials remain accepted for every compatibility route; clients differ on
+// whether they attach ApiKey globally or only to media URLs. The allowQuery
+// argument is retained for source compatibility and no longer narrows parsing.
+func ParseCompatToken(request *http.Request, _ bool) (string, error) {
+	token, found, err := extractCompatToken(request)
+	if err != nil || !found {
 		return "", ErrInvalidCompatAuthorization
 	}
-	if !boundedCompatHeaders(request.Header) || len(request.URL.RawQuery) > maximumCompatQueryBytes {
+	if _, ok := compatCredentialDigest(token); !ok {
 		return "", ErrInvalidCompatAuthorization
 	}
-	if values := request.Header.Values("Authorization"); len(values) == 1 {
-		_, relevant, err := parseAuthorizationValue(values[0], true)
-		if err != nil || !relevant {
-			return "", ErrInvalidCompatAuthorization
+	return token, nil
+}
+
+// extractCompatToken returns the first credential transport Jellyfin would
+// inspect. It deliberately does not validate Rivune's credential audience so
+// stream routes can fall back to an already-negotiated PlaySessionId when an
+// external player replaces the auth header with a playback capability.
+func extractCompatToken(request *http.Request) (string, bool, error) {
+	if request == nil || !boundedCompatHeaders(request.Header) || len(request.URL.RawQuery) > maximumCompatRawQueryBytes {
+		return "", false, ErrInvalidCompatAuthorization
+	}
+	for _, name := range []string{"Authorization", "X-Emby-Authorization", "X-MediaBrowser-Authorization"} {
+		values := request.Header.Values(name)
+		if len(values) == 0 {
+			continue
+		}
+		token, found, err := tokenFromAuthorizationValue(values[0], name == "Authorization")
+		if err != nil {
+			return "", false, err
+		}
+		if found {
+			return token, true, nil
 		}
 	}
-	candidates := make([]string, 0, 4)
 	for _, name := range []string{"X-Emby-Token", "X-MediaBrowser-Token"} {
 		values := request.Header.Values(name)
-		if len(values) > 1 {
-			return "", ErrInvalidCompatAuthorization
+		if len(values) == 0 || values[0] == "" {
+			continue
 		}
-		if len(values) == 1 {
-			value := strings.TrimSpace(values[0])
-			if value == "" || strings.ContainsAny(value, ",\r\n\t ") {
-				return "", ErrInvalidCompatAuthorization
-			}
-			candidates = append(candidates, value)
+		token := strings.TrimSpace(values[0])
+		if token == "" || strings.ContainsAny(token, ",\r\n\t ") {
+			return "", false, ErrInvalidCompatAuthorization
 		}
+		return token, true, nil
 	}
-
-	parameters, found, err := collectAuthorizationParameters(request.Header)
-	if err != nil {
-		return "", ErrInvalidCompatAuthorization
-	}
-	if found {
-		if token, ok := parameters["token"]; ok {
-			candidates = append(candidates, token)
-		}
-	}
-
 	query, err := url.ParseQuery(request.URL.RawQuery)
 	if err != nil {
-		return "", ErrInvalidCompatAuthorization
+		return "", false, ErrInvalidCompatAuthorization
 	}
-	queryTokens, hasQueryToken := query["api_key"]
-	if hasQueryToken {
-		if !allowQuery || len(queryTokens) != 1 || strings.TrimSpace(queryTokens[0]) == "" {
-			return "", ErrInvalidCompatAuthorization
+	for _, name := range []string{"ApiKey", "api_key"} {
+		token, found, scalarErr := queryScalar(query, name)
+		if scalarErr != nil {
+			return "", false, ErrInvalidCompatAuthorization
 		}
-		candidates = append(candidates, strings.TrimSpace(queryTokens[0]))
+		if !found {
+			continue
+		}
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return "", false, ErrInvalidCompatAuthorization
+		}
+		return token, true, nil
 	}
-	if len(candidates) == 0 {
-		return "", ErrInvalidCompatAuthorization
+	return "", false, nil
+}
+
+func tokenFromAuthorizationValue(value string, schemeRequired bool) (string, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || !utf8.ValidString(value) || containsHeaderControl(value) {
+		return "", false, ErrInvalidCompatAuthorization
 	}
-	selected := candidates[0]
-	for _, candidate := range candidates[1:] {
-		if candidate != selected {
-			return "", ErrInvalidCompatAuthorization
+	if split := strings.IndexFunc(value, unicode.IsSpace); split >= 0 && strings.EqualFold(value[:split], "Bearer") {
+		token := strings.TrimSpace(value[split:])
+		if token == "" || strings.ContainsAny(token, ",\r\n\t ") {
+			return "", false, ErrInvalidCompatAuthorization
+		}
+		return token, true, nil
+	}
+	parameters, relevant, err := parseAuthorizationValue(value, schemeRequired)
+	if err != nil || !relevant {
+		return "", false, err
+	}
+	token := strings.TrimSpace(parameters["token"])
+	if token == "" {
+		return "", false, nil
+	}
+	if strings.ContainsAny(token, ",\r\n\t ") {
+		return "", false, ErrInvalidCompatAuthorization
+	}
+	return token, true, nil
+}
+
+func firstAuthorizationParameters(headers http.Header) (map[string]string, bool, error) {
+	if !boundedCompatHeaders(headers) {
+		return nil, false, ErrInvalidCompatAuthorization
+	}
+	for _, name := range []string{"Authorization", "X-Emby-Authorization", "X-MediaBrowser-Authorization"} {
+		values := headers.Values(name)
+		if len(values) == 0 {
+			continue
+		}
+		value := strings.TrimSpace(values[0])
+		if split := strings.IndexFunc(value, unicode.IsSpace); split >= 0 && strings.EqualFold(value[:split], "Bearer") {
+			return nil, false, nil
+		}
+		parameters, relevant, err := parseAuthorizationValue(value, name == "Authorization")
+		if err != nil {
+			return nil, false, err
+		}
+		if relevant {
+			return parameters, true, nil
 		}
 	}
-	if _, ok := compatCredentialDigest(selected); !ok {
-		return "", ErrInvalidCompatAuthorization
-	}
-	return selected, nil
+	return nil, false, nil
 }
 
 func boundedCompatHeaders(headers http.Header) bool {

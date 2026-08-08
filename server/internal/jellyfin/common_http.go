@@ -79,6 +79,9 @@ func (handler *Handler) authenticateRequest(response http.ResponseWriter, reques
 		writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "The requested resource was not found")
 		return AuthenticatedSession{}, false
 	}
+	if handler.bootstrap != nil {
+		handler.bootstrap.observe(session)
+	}
 	return session, true
 }
 
@@ -98,12 +101,12 @@ func validCompatUUID(value string) bool {
 }
 
 func requestUserMatchesSession(request *http.Request, profileID string) bool {
-	parameters, found, err := collectAuthorizationParameters(request.Header)
+	parameters, found, err := firstAuthorizationParameters(request.Header)
 	if err != nil {
 		return false
 	}
 	if found {
-		if headerUserID, exists := parameters["userid"]; exists && !strings.EqualFold(strings.TrimSpace(headerUserID), profileID) {
+		if headerUserID, exists := parameters["userid"]; exists && !sameCompatUUID(headerUserID, profileID) {
 			return false
 		}
 	}
@@ -112,11 +115,25 @@ func requestUserMatchesSession(request *http.Request, profileID string) bool {
 		if !strings.EqualFold(key, "UserId") {
 			continue
 		}
-		if len(values) != 1 || !strings.EqualFold(strings.TrimSpace(values[0]), profileID) {
+		if len(values) != 1 || !sameCompatUUID(values[0], profileID) {
 			return false
 		}
 	}
 	return true
+}
+
+func sameCompatUUID(left, right string) bool {
+	leftID, leftErr := parseUUID(strings.TrimSpace(left))
+	rightID, rightErr := parseUUID(strings.TrimSpace(right))
+	return leftErr == nil && rightErr == nil && leftID == rightID
+}
+
+func canonicalCompatUUID(value string) (string, bool) {
+	parsed, err := parseUUID(strings.TrimSpace(value))
+	if err != nil {
+		return "", false
+	}
+	return formatUUID(parsed), true
 }
 
 func writeCompatError(response http.ResponseWriter, status int, code, message string) {

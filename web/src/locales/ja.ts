@@ -674,7 +674,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "ダイレクト再生とダイレクトストリームがどちらも失敗した場合にのみ、互換性のないメディアをサーバーで変換できるようにします",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "このアプリパスワードは、このプロフィールでのみ使用できます。",
   "settings.jellyfinAccess.pinHint": "このシークレットは一度しか表示されません。今すぐ安全な場所に保存してください。",
   "settings.jellyfinAccess.rotateWarning": "ローテーションすると、現在のパスワードとすべての Jellyfin セッションが直ちに無効になります。",

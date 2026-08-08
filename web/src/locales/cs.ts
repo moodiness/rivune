@@ -795,7 +795,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Povolit serveru převést nekompatibilní média až po selhání přímého přehrávání i přímého streamování",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Toto heslo aplikace je omezeno pouze na tento profil.",
   "settings.jellyfinAccess.pinHint": "Tajný údaj se zobrazí pouze jednou. Nyní jej zkopírujte a bezpečně uložte.",
   "settings.jellyfinAccess.rotateWarning": "Obnovením se okamžitě zneplatní aktuální heslo a všechny relace Jellyfin.",

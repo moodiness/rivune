@@ -112,9 +112,9 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 		}
 		upstreamURL = target
 	}
-	response, err := service.fetchAsset(r.Context(), r, *asset, upstreamURL)
+	response, err := service.fetchProxyAsset(r.Context(), r, *asset, upstreamURL)
 	if err != nil {
-		return fmt.Errorf("fetch playback asset: %w", err)
+		return err
 	}
 	defer response.Body.Close()
 
@@ -126,6 +126,7 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 		if len(body) > maximumPlaylistBytes {
 			return fmt.Errorf("%w: HLS playlist exceeds %d bytes", ErrMediaSourceFailed, maximumPlaylistBytes)
 		}
+		retainChildren := playlistChildrenRetainWhileActive(body)
 		var childErr error
 		rewritten, err := rewritePlaylistWithPolicy(body, response.Request.URL, buildChildURL != nil, func(resolved string) string {
 			signed := service.signTarget(sessionID, assetID, resolved)
@@ -137,7 +138,7 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 			}
 			var childURL string
 			childURL, childErr = buildChildURL(deliveryChildState{
-				assetID: assetID, target: resolved, signature: signed,
+				assetID: assetID, target: resolved, signature: signed, retainWhileActive: retainChildren,
 			})
 			return childURL
 		})
@@ -147,14 +148,7 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 		if err != nil {
 			return fmt.Errorf("rewrite HLS playlist: %w", err)
 		}
-		copyAssetHeaders(w.Header(), response.Header, false)
-		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(rewritten)))
-		w.WriteHeader(response.StatusCode)
-		if _, err := w.Write(rewritten); err != nil {
-			return fmt.Errorf("write HLS playlist: %w", err)
-		}
-		return nil
+		return writeUpstreamHLSPlaylist(w, response.Header, rewritten)
 	}
 
 	copyAssetHeaders(w.Header(), response.Header, true)
@@ -175,8 +169,45 @@ func copyPlaybackAsset(destination io.Writer, source io.Reader) error {
 	return nil
 }
 
+func writeUpstreamHLSPlaylist(w http.ResponseWriter, upstream http.Header, contents []byte) error {
+	copyAssetHeaders(w.Header(), upstream, false)
+	w.Header().Del("Accept-Ranges")
+	w.Header().Del("Content-Range")
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Content-Length", strconv.Itoa(len(contents)))
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(contents); err != nil {
+		return fmt.Errorf("write HLS playlist: %w", err)
+	}
+	return nil
+}
+
 func (service *Service) proxyProcessingAsset(w http.ResponseWriter, r *http.Request, sessionID, token, target, signature string, asset storedAsset) error {
 	return service.proxyProcessingAssetWithLinks(w, r, sessionID, token, target, signature, asset, nil)
+}
+
+func (service *Service) fetchProxyAsset(ctx context.Context, incoming *http.Request, asset storedAsset, upstreamURL string) (*http.Response, error) {
+	response, err := service.fetchAsset(ctx, incoming, asset, upstreamURL)
+	if err != nil {
+		return nil, fmt.Errorf("fetch playback asset: %w", err)
+	}
+	if incoming.Method != http.MethodGet || response.StatusCode != http.StatusPartialContent || !isHLSPlaylist(response, upstreamURL) {
+		return response, nil
+	}
+	_ = response.Body.Close()
+	fullRequest := incoming.Clone(ctx)
+	fullRequest.Header = incoming.Header.Clone()
+	fullRequest.Header.Del("Range")
+	fullRequest.Header.Del("If-Range")
+	response, err = service.fetchAsset(ctx, fullRequest, asset, upstreamURL)
+	if err != nil {
+		return nil, fmt.Errorf("refetch complete HLS playlist: %w", err)
+	}
+	if response.StatusCode == http.StatusPartialContent && isHLSPlaylist(response, upstreamURL) {
+		_ = response.Body.Close()
+		return nil, fmt.Errorf("%w: upstream returned a partial HLS playlist", ErrMediaSourceFailed)
+	}
+	return response, nil
 }
 
 func (service *Service) proxyProcessingAssetWithLinks(w http.ResponseWriter, r *http.Request, sessionID, token, target, signature string, asset storedAsset, buildChildURL func(deliveryChildState) (string, error)) error {
@@ -229,7 +260,7 @@ func sameMediaOrigin(left, right string) bool {
 
 func allowedStoredRequestHeader(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "", "host", "connection", "proxy-connection", "keep-alive", "transfer-encoding", "upgrade", "content-length", "accept-encoding", "range":
+	case "", "host", "connection", "proxy-connection", "keep-alive", "transfer-encoding", "upgrade", "content-length", "accept-encoding", "range", "if-range":
 		return false
 	default:
 		return true
@@ -278,6 +309,15 @@ func pathExtension(value string) string {
 		return ""
 	}
 	return value[index:]
+}
+
+func playlistChildrenRetainWhileActive(body []byte) bool {
+	return bytes.Contains(body, []byte("#EXT-X-ENDLIST")) ||
+		bytes.Contains(body, []byte("#EXT-X-PLAYLIST-TYPE:EVENT")) ||
+		bytes.Contains(body, []byte("#EXT-X-PLAYLIST-TYPE:VOD")) ||
+		bytes.Contains(body, []byte("#EXT-X-STREAM-INF:")) ||
+		bytes.Contains(body, []byte("#EXT-X-I-FRAME-STREAM-INF:")) ||
+		bytes.Contains(body, []byte("#EXT-X-MEDIA:"))
 }
 
 func rewritePlaylist(body []byte, base *url.URL, buildProxyURL func(string) string) ([]byte, error) {

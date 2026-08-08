@@ -795,7 +795,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "לאפשר לשרת להמיר מדיה שאינה תואמת רק לאחר שניגון ישיר והזרמה ישירה נכשלו",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "סיסמת היישום הזו מוגבלת לפרופיל הזה בלבד.",
   "settings.jellyfinAccess.pinHint": "הסוד הזה יוצג פעם אחת בלבד. יש לשמור אותו עכשיו.",
   "settings.jellyfinAccess.rotateWarning": "החלפת הסיסמה מבטלת מיד את הסיסמה הנוכחית ואת כל ההפעלות של Jellyfin.",

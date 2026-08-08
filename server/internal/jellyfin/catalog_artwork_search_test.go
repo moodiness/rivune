@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 )
 
 type searchArtworkPresenter struct {
+	mu         sync.Mutex
 	localized  map[string]string
 	registered map[string]string
 	served     []string
@@ -22,6 +24,8 @@ type searchArtworkPresenter struct {
 }
 
 func (presenter *searchArtworkPresenter) LocalURLs(_ context.Context, upstream []string) []string {
+	presenter.mu.Lock()
+	defer presenter.mu.Unlock()
 	presenter.seen = append(presenter.seen, upstream...)
 	result := make([]string, len(upstream))
 	for index, value := range upstream {
@@ -43,6 +47,8 @@ func (presenter *searchArtworkPresenter) LookupKey(_ context.Context, materializ
 }
 
 func (presenter *searchArtworkPresenter) ServeKey(response http.ResponseWriter, _ *http.Request, key string) {
+	presenter.mu.Lock()
+	defer presenter.mu.Unlock()
 	presenter.served = append(presenter.served, key)
 	response.Header().Set("Content-Type", "image/png")
 	response.WriteHeader(http.StatusOK)

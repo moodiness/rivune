@@ -20,63 +20,59 @@ import (
 // Aggregate limits admit one maximum-sized playlist for any user while
 // bounding the service to four such live child sets across all open handles.
 const (
-	deliveryChildQueryName           = "RivuneChildId"
-	maximumDeliveryChildren          = maximumPlaylistReferences
-	maximumDeliveryChildrenPerUser   = maximumDeliveryChildren
-	maximumDeliveryChildrenGlobal    = 4 * maximumDeliveryChildrenPerUser
-	maximumDeliveryChildIDLength     = 64
-	maximumDeliveryStartTicksLength  = 32
-	maximumDeliveryCompatTokenLength = 128
-	maximumDeliveryTargetLength      = 4096
-	deliveryChildTTL                 = 5 * time.Minute
+	deliveryChildQueryName            = "RivuneChildId"
+	maximumDeliveryChildren           = maximumPlaylistReferences
+	maximumDeliveryChildrenPerProfile = maximumDeliveryChildren
+	maximumDeliveryChildrenGlobal     = 4 * maximumDeliveryChildrenPerProfile
+	maximumDeliveryChildIDLength      = 64
+	maximumDeliveryStartTicksLength   = 32
+	maximumDeliveryCompatTokenLength  = 128
+	maximumDeliveryTargetLength       = 4096
+	deliveryChildTTL                  = 5 * time.Minute
 )
 
 var errDeliveryChildCapacity = errors.New("playback child capability capacity exceeded")
 
 type deliveryChildState struct {
-	assetID   string
-	file      string
-	start     string
-	target    string
-	signature string
+	assetID           string
+	file              string
+	start             string
+	target            string
+	signature         string
+	retainWhileActive bool
 }
 
 type deliveryChildEntry struct {
-	state        deliveryChildState
-	advertisedAt time.Time
-	expiresAt    time.Time
-	resolved     bool
-	previousID   string
-	nextID       string
+	state    deliveryChildState
+	activeAt time.Time
 }
 
 type deliveryChildBudget struct {
-	mu        sync.Mutex
-	live      int
-	byUser    map[string]int
-	tables    sync.Map
-	globalMax int
-	userMax   int
+	mu         sync.Mutex
+	live       int
+	byProfile  map[string]int
+	tables     sync.Map
+	globalMax  int
+	profileMax int
 }
 
 type deliveryChildTable struct {
-	mu      sync.Mutex
-	entries map[string]deliveryChildEntry
-	byState map[deliveryChildState]string
-	headID  string
-	tailID  string
-	now     func() time.Time
-	budget  *deliveryChildBudget
-	userID  string
-	closed  bool
+	mu         sync.Mutex
+	entries    map[string]deliveryChildEntry
+	byState    map[deliveryChildState]string
+	now        func() time.Time
+	budget     *deliveryChildBudget
+	profileID  string
+	activeAt   time.Time
+	nextExpiry time.Time
+	closed     bool
 }
 
 type deliveryLinkTemplate struct {
-	path            string
-	playSessionID   string
-	mediaSourceID   string
-	startTimeTicks  string
-	queryCredential string
+	path           string
+	playSessionID  string
+	mediaSourceID  string
+	startTimeTicks string
 }
 
 type deliveryRequest struct {
@@ -85,6 +81,7 @@ type deliveryRequest struct {
 	target    string
 	signature string
 	template  deliveryLinkTemplate
+	child     bool
 }
 
 // Delivery contains playback metadata that is safe for transport adapters and
@@ -105,6 +102,23 @@ type DeliveryHandle struct {
 	defaultFile  string
 	defaultStart string
 	children     *deliveryChildTable
+	assets       *deliveryAssetTable
+}
+
+type deliveryAssetTable struct {
+	ids map[string]struct{}
+}
+
+type deliveryRequestError struct {
+	cause error
+}
+
+func (err *deliveryRequestError) Error() string {
+	return err.cause.Error()
+}
+
+func (err *deliveryRequestError) Unwrap() error {
+	return err.cause
 }
 
 // MarshalJSON prevents the capability contents from entering an adapter DTO if
@@ -122,6 +136,21 @@ func (DeliveryHandle) Format(state fmt.State, _ rune) {
 // Valid reports whether the opaque capability can be passed to Serve or Close.
 func (handle DeliveryHandle) Valid() bool {
 	return handle.sessionID != "" && handle.assetID != "" && handle.token != ""
+}
+
+// IsTerminalDeliveryError reports whether a Serve failure proves that the
+// opaque delivery handle can no longer be used. Request-scoped failures,
+// including malformed child capabilities and downstream cancellation, are
+// retryable and must not tear down the owning playback session.
+func IsTerminalDeliveryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var requestErr *deliveryRequestError
+	if errors.As(err, &requestErr) {
+		return false
+	}
+	return errors.Is(err, ErrSessionNotFound)
 }
 
 // Open resolves a source through the native playback pipeline while returning
@@ -150,19 +179,55 @@ func (service *Service) Serve(w http.ResponseWriter, r *http.Request, handle Del
 	}
 	delivery, err := requestForDelivery(r, handle)
 	if err != nil {
-		return err
+		return &deliveryRequestError{cause: err}
 	}
 	buildChildURL := func(state deliveryChildState) (string, error) {
 		childID, registerErr := handle.children.register(state)
 		if registerErr != nil {
 			return "", registerErr
 		}
-		return delivery.template.childURL(childID), nil
+		return delivery.template.childURL(childID, state), nil
 	}
-	return service.proxyAsset(
+	err = service.proxyAsset(
 		w, delivery.request, handle.sessionID, delivery.assetID, handle.token,
 		delivery.target, delivery.signature, buildChildURL,
 	)
+	return classifyDeliveryProxyError(err, delivery.child)
+}
+
+func classifyDeliveryProxyError(err error, child bool) error {
+	if err == nil || !child || errors.Is(err, ErrSessionNotFound) {
+		return err
+	}
+	return &deliveryRequestError{cause: err}
+}
+
+// ServeAsset delivers one asset that was captured inside an opaque delivery
+// handle. Callers select only an asset identifier exposed by the URL-free
+// Session metadata; native session credentials and provider URLs never leave
+// this package.
+func (service *Service) ServeAsset(w http.ResponseWriter, r *http.Request, handle DeliveryHandle, assetID string) error {
+	if service == nil || w == nil || r == nil || r.URL == nil || !handle.Valid() ||
+		handle.assets == nil || !handle.assets.contains(assetID) ||
+		(r.Method != http.MethodGet && r.Method != http.MethodHead) {
+		return &deliveryRequestError{cause: ErrSessionNotFound}
+	}
+	request := r.Clone(r.Context())
+	request.URL = cloneRequestURL(r)
+	request.URL.RawQuery = ""
+	request.Header = r.Header.Clone()
+	for _, name := range []string{"Authorization", "X-Emby-Authorization", "X-Emby-Token", "X-MediaBrowser-Authorization", "X-MediaBrowser-Token"} {
+		request.Header.Del(name)
+	}
+	return service.proxyAsset(w, request, handle.sessionID, assetID, handle.token, "", "", nil)
+}
+
+func (table *deliveryAssetTable) contains(assetID string) bool {
+	if table == nil || assetID == "" || len(assetID) > 128 {
+		return false
+	}
+	_, ok := table.ids[assetID]
+	return ok
 }
 
 func requestForDelivery(request *http.Request, handle DeliveryHandle) (deliveryRequest, error) {
@@ -175,6 +240,7 @@ func requestForDelivery(request *http.Request, handle DeliveryHandle) (deliveryR
 		file:    handle.defaultFile,
 		start:   handle.defaultStart,
 	}
+	isChild := false
 	if childID, found, childErr := deliveryQueryScalar(request.URL.Query(), deliveryChildQueryName); childErr != nil {
 		return deliveryRequest{}, ErrSessionNotFound
 	} else if found {
@@ -186,6 +252,7 @@ func requestForDelivery(request *http.Request, handle DeliveryHandle) (deliveryR
 		if !ok {
 			return deliveryRequest{}, ErrSessionNotFound
 		}
+		isChild = true
 	}
 	cloned := request.Clone(request.Context())
 	cloned.URL = cloneRequestURL(request)
@@ -199,7 +266,7 @@ func requestForDelivery(request *http.Request, handle DeliveryHandle) (deliveryR
 	cloned.URL.RawQuery = query.Encode()
 	return deliveryRequest{
 		request: cloned, assetID: state.assetID, target: state.target,
-		signature: state.signature, template: template,
+		signature: state.signature, template: template, child: isChild,
 	}, nil
 }
 
@@ -220,58 +287,58 @@ func cloneRequestURL(request *http.Request) *url.URL {
 	return &cloned
 }
 
-func newDeliveryChildBudget(globalMax, userMax int) *deliveryChildBudget {
+func newDeliveryChildBudget(globalMax, profileMax int) *deliveryChildBudget {
 	return &deliveryChildBudget{
-		byUser: make(map[string]int), globalMax: globalMax, userMax: userMax,
+		byProfile: make(map[string]int), globalMax: globalMax, profileMax: profileMax,
 	}
 }
 
-func (budget *deliveryChildBudget) reserve(userID string) bool {
+func (budget *deliveryChildBudget) reserve(profileID string) bool {
 	if budget == nil {
 		return true
 	}
-	if userID == "" {
+	if profileID == "" {
 		return false
 	}
 	budget.mu.Lock()
 	defer budget.mu.Unlock()
-	if budget.live >= budget.globalMax || budget.byUser[userID] >= budget.userMax {
+	if budget.live >= budget.globalMax || budget.byProfile[profileID] >= budget.profileMax {
 		return false
 	}
 	budget.live++
-	budget.byUser[userID]++
+	budget.byProfile[profileID]++
 	return true
 }
 
-func (budget *deliveryChildBudget) release(userID string, count int) {
+func (budget *deliveryChildBudget) release(profileID string, count int) {
 	if budget == nil || count == 0 {
 		return
 	}
 	budget.mu.Lock()
 	defer budget.mu.Unlock()
-	userLive := budget.byUser[userID]
-	if count < 0 || count > userLive || count > budget.live {
+	profileLive := budget.byProfile[profileID]
+	if count < 0 || count > profileLive || count > budget.live {
 		panic("playback delivery child budget accounting invariant violated")
 	}
 	budget.live -= count
-	userLive -= count
-	if userLive == 0 {
-		delete(budget.byUser, userID)
+	profileLive -= count
+	if profileLive == 0 {
+		delete(budget.byProfile, profileID)
 	} else {
-		budget.byUser[userID] = userLive
+		budget.byProfile[profileID] = profileLive
 	}
 }
 
-func (budget *deliveryChildBudget) usage(userID string) (int, int) {
+func (budget *deliveryChildBudget) usage(profileID string) (int, int) {
 	if budget == nil {
 		return 0, 0
 	}
 	budget.mu.Lock()
 	defer budget.mu.Unlock()
-	return budget.live, budget.byUser[userID]
+	return budget.live, budget.byProfile[profileID]
 }
 
-func (table *deliveryChildTable) bindBudget(budget *deliveryChildBudget, userID string, now func() time.Time) {
+func (table *deliveryChildTable) bindBudget(budget *deliveryChildBudget, profileID string, now func() time.Time) {
 	if table == nil || budget == nil {
 		return
 	}
@@ -281,7 +348,7 @@ func (table *deliveryChildTable) bindBudget(budget *deliveryChildBudget, userID 
 		panic("playback delivery child table bound after use")
 	}
 	table.budget = budget
-	table.userID = userID
+	table.profileID = profileID
 	if now != nil {
 		table.now = now
 	}
@@ -292,7 +359,7 @@ func (service *Service) deliveryChildBudget() *deliveryChildBudget {
 	service.deliveryChildrenMu.Lock()
 	defer service.deliveryChildrenMu.Unlock()
 	if service.deliveryChildren == nil {
-		service.deliveryChildren = newDeliveryChildBudget(maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerUser)
+		service.deliveryChildren = newDeliveryChildBudget(maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerProfile)
 	}
 	return service.deliveryChildren
 }
@@ -375,15 +442,18 @@ func (table *deliveryChildTable) register(state deliveryChildState) (string, err
 			table.mu.Unlock()
 			continue
 		}
-		if !table.budget.reserve(table.userID) {
+		if !table.budget.reserve(table.profileID) {
 			table.mu.Unlock()
 			return "", errDeliveryChildCapacity
 		}
-		entry := deliveryChildEntry{
-			state: state, advertisedAt: now, expiresAt: now.Add(deliveryChildTTL),
-		}
-		table.appendLocked(childID, entry)
+		table.activeAt = now
+		entry := deliveryChildEntry{state: state, activeAt: now}
+		table.entries[childID] = entry
 		table.byState[state] = childID
+		expiresAt := table.childExpiresAt(entry)
+		if table.nextExpiry.IsZero() || expiresAt.Before(table.nextExpiry) {
+			table.nextExpiry = expiresAt
+		}
 		if table.budget != nil {
 			table.budget.tables.Store(table, struct{}{})
 		}
@@ -405,8 +475,9 @@ func (table *deliveryChildTable) resolve(childID string) (deliveryChildState, bo
 	if !ok {
 		return deliveryChildState{}, false
 	}
-	entry.resolved = true
-	table.refreshLocked(childID, entry, now)
+	entry.activeAt = now
+	table.activeAt = now
+	table.entries[childID] = entry
 	return entry.state, true
 }
 
@@ -425,76 +496,44 @@ func (table *deliveryChildTable) clear() {
 }
 
 func (table *deliveryChildTable) clearLocked() {
-	table.budget.release(table.userID, len(table.entries))
+	table.budget.release(table.profileID, len(table.entries))
 	clear(table.entries)
 	clear(table.byState)
-	table.headID = ""
-	table.tailID = ""
+	table.activeAt = time.Time{}
+	table.nextExpiry = time.Time{}
 }
 
 func (table *deliveryChildTable) expireLocked(now time.Time) {
-	for table.headID != "" {
-		childID := table.headID
-		entry, exists := table.entries[childID]
-		if !exists {
-			table.headID = ""
-			table.tailID = ""
-			return
+	if len(table.entries) == 0 || !table.nextExpiry.IsZero() && table.nextExpiry.After(now) {
+		return
+	}
+	expired := 0
+	nextExpiry := time.Time{}
+	for childID, entry := range table.entries {
+		expiresAt := table.childExpiresAt(entry)
+		if !expiresAt.After(now) {
+			delete(table.entries, childID)
+			delete(table.byState, entry.state)
+			expired++
+			continue
 		}
-		if entry.expiresAt.After(now) {
-			return
+		if nextExpiry.IsZero() || expiresAt.Before(nextExpiry) {
+			nextExpiry = expiresAt
 		}
-		table.removeLocked(childID, entry)
 	}
-}
-
-func (table *deliveryChildTable) appendLocked(childID string, entry deliveryChildEntry) {
-	entry.previousID = table.tailID
-	entry.nextID = ""
-	if table.tailID != "" {
-		tail := table.entries[table.tailID]
-		tail.nextID = childID
-		table.entries[table.tailID] = tail
-	} else {
-		table.headID = childID
-	}
-	table.tailID = childID
-	table.entries[childID] = entry
-}
-
-func (table *deliveryChildTable) refreshLocked(childID string, entry deliveryChildEntry, now time.Time) {
-	table.unlinkLocked(entry)
-	entry.expiresAt = now.Add(deliveryChildTTL)
-	table.appendLocked(childID, entry)
-}
-
-func (table *deliveryChildTable) removeLocked(childID string, entry deliveryChildEntry) {
-	table.unlinkLocked(entry)
-	delete(table.entries, childID)
-	if table.byState[entry.state] == childID {
-		delete(table.byState, entry.state)
-	}
-	table.budget.release(table.userID, 1)
+	table.budget.release(table.profileID, expired)
+	table.nextExpiry = nextExpiry
 	if len(table.entries) == 0 && table.budget != nil {
 		table.budget.tables.Delete(table)
 	}
 }
 
-func (table *deliveryChildTable) unlinkLocked(entry deliveryChildEntry) {
-	if entry.previousID != "" {
-		previous := table.entries[entry.previousID]
-		previous.nextID = entry.nextID
-		table.entries[entry.previousID] = previous
-	} else {
-		table.headID = entry.nextID
+func (table *deliveryChildTable) childExpiresAt(entry deliveryChildEntry) time.Time {
+	activeAt := entry.activeAt
+	if entry.state.retainWhileActive && table.activeAt.After(activeAt) {
+		activeAt = table.activeAt
 	}
-	if entry.nextID != "" {
-		next := table.entries[entry.nextID]
-		next.previousID = entry.previousID
-		table.entries[entry.nextID] = next
-	} else {
-		table.tailID = entry.previousID
-	}
+	return activeAt.Add(deliveryChildTTL)
 }
 
 func (table *deliveryChildTable) touchExistingLocked(childID string, now time.Time) {
@@ -502,10 +541,9 @@ func (table *deliveryChildTable) touchExistingLocked(childID string, now time.Ti
 	if !exists {
 		return
 	}
-	if !entry.resolved {
-		entry.advertisedAt = now
-	}
-	table.refreshLocked(childID, entry, now)
+	entry.activeAt = now
+	table.activeAt = now
+	table.entries[childID] = entry
 }
 
 func validDeliveryChildState(state deliveryChildState) bool {
@@ -525,6 +563,10 @@ func validDeliveryChildState(state deliveryChildState) bool {
 
 func newDeliveryLinkTemplate(requestURL *url.URL) (deliveryLinkTemplate, error) {
 	if requestURL == nil || requestURL.Path == "" || len(requestURL.Path) > 2048 {
+		return deliveryLinkTemplate{}, ErrSessionNotFound
+	}
+	basePath, ok := deliveryVideoBasePath(requestURL.Path)
+	if !ok {
 		return deliveryLinkTemplate{}, ErrSessionNotFound
 	}
 	values := requestURL.Query()
@@ -550,35 +592,66 @@ func newDeliveryLinkTemplate(requestURL *url.URL) (deliveryLinkTemplate, error) 
 		}
 		startTimeTicks = strconv.FormatInt(parsed, 10)
 	}
-	var queryCredential string
 	if candidates, found := values["api_key"]; found {
 		if len(candidates) != 1 {
 			return deliveryLinkTemplate{}, ErrSessionNotFound
 		}
-		queryCredential = strings.TrimSpace(candidates[0])
-		if queryCredential == "" || len(queryCredential) > maximumDeliveryCompatTokenLength || strings.ContainsAny(queryCredential, "\r\n\t ") {
+		credential := strings.TrimSpace(candidates[0])
+		if credential == "" || len(credential) > maximumDeliveryCompatTokenLength || strings.ContainsAny(credential, "\r\n\t ") {
 			return deliveryLinkTemplate{}, ErrSessionNotFound
 		}
 	}
 	return deliveryLinkTemplate{
-		path: requestURL.Path, playSessionID: playID, mediaSourceID: mediaID,
-		startTimeTicks: startTimeTicks, queryCredential: queryCredential,
+		path: basePath, playSessionID: playID, mediaSourceID: mediaID, startTimeTicks: startTimeTicks,
 	}, nil
 }
 
-func (template deliveryLinkTemplate) childURL(childID string) string {
+func (template deliveryLinkTemplate) childURL(childID string, state deliveryChildState) string {
+	extension := deliveryChildExtension(state)
 	query := url.Values{
-		"PlaySessionId":        []string{template.playSessionID},
 		"MediaSourceId":        []string{template.mediaSourceID},
 		deliveryChildQueryName: []string{childID},
 	}
 	if template.startTimeTicks != "" {
 		query.Set("StartTimeTicks", template.startTimeTicks)
 	}
-	if template.queryCredential != "" {
-		query.Set("api_key", template.queryCredential)
+	path := template.path + "/hls1/" + url.PathEscape(template.playSessionID) + "/" + url.PathEscape(childID) + "." + extension
+	return (&url.URL{Path: path, RawQuery: query.Encode()}).String()
+}
+
+func deliveryVideoBasePath(rawPath string) (string, bool) {
+	parts := strings.Split(strings.Trim(rawPath, "/"), "/")
+	videoIndex := 0
+	if len(parts) >= 3 && strings.EqualFold(parts[0], "emby") {
+		videoIndex = 1
 	}
-	return (&url.URL{Path: template.path, RawQuery: query.Encode()}).String()
+	if len(parts) <= videoIndex+1 || !strings.EqualFold(parts[videoIndex], "Videos") ||
+		parts[videoIndex+1] == "" || len(parts[videoIndex+1]) > 128 {
+		return "", false
+	}
+	if parts[videoIndex+1] == "." || parts[videoIndex+1] == ".." {
+		return "", false
+	}
+	return "/" + strings.Join(parts[:videoIndex+2], "/"), true
+}
+
+func deliveryChildExtension(state deliveryChildState) string {
+	value := state.file
+	if value == "" && state.target != "" {
+		if parsed, err := url.Parse(state.target); err == nil {
+			value = parsed.Path
+		}
+	}
+	extension := strings.ToLower(strings.TrimPrefix(pathExtension(value), "."))
+	if len(extension) == 0 || len(extension) > 12 {
+		return "bin"
+	}
+	for _, character := range extension {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return "bin"
+		}
+	}
+	return extension
 }
 
 func deliveryQueryScalar(values url.Values, name string) (string, bool, error) {
@@ -616,14 +689,23 @@ func deliveryHandleForSession(sessionID, token string, sources []Source, assets 
 	if selectedID == "" || assetIndex < 0 {
 		return DeliveryHandle{}
 	}
-	handle := DeliveryHandle{sessionID: sessionID, assetID: selectedID, token: token, children: newDeliveryChildTable()}
+	assetIDs := make(map[string]struct{}, len(assets))
+	for index := range assets {
+		if assets[index].ID != "" {
+			assetIDs[assets[index].ID] = struct{}{}
+		}
+	}
+	handle := DeliveryHandle{
+		sessionID: sessionID, assetID: selectedID, token: token,
+		children: newDeliveryChildTable(), assets: &deliveryAssetTable{ids: assetIDs},
+	}
 	for index := range sources {
 		source := sources[index]
 		if source.ID != selectedID {
 			continue
 		}
 		if source.Protocol == "hls" && (source.Mode == processingRemux || source.Mode == processingTranscodeAudio || source.Mode == processingTranscode) {
-			handle.defaultFile = "index.m3u8"
+			handle.defaultFile = "master.m3u8"
 			if assets[assetIndex].StartSeconds > 0 {
 				handle.defaultStart = hlsStartKey(assets[assetIndex].StartSeconds)
 			}

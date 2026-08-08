@@ -674,7 +674,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "डायरेक्ट प्ले और डायरेक्ट स्ट्रीम विफल होने पर ही सर्वर को असंगत मीडिया कन्वर्ट करने दें",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "यह ऐप पासवर्ड केवल इस प्रोफ़ाइल तक सीमित है।",
   "settings.jellyfinAccess.pinHint": "यह सीक्रेट केवल एक बार दिखाया जाएगा। इसे अभी सहेज लें।",
   "settings.jellyfinAccess.rotateWarning": "पासवर्ड बदलने पर मौजूदा पासवर्ड और Jellyfin के सभी सेशन तुरंत अमान्य हो जाएँगे।",

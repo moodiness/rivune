@@ -277,7 +277,7 @@ func validAuthLifecycleLogin() CompatLoginInput {
 		Username: authLifecycleProfileID,
 		Password: "correct horse battery staple",
 		Client: ClientIdentity{
-			Client: "Infuse", Device: "Living Room", DeviceID: "auth-lifecycle-device", Version: "8.2",
+			Client: "Generic Client", Device: "Living Room", DeviceID: "auth-lifecycle-device", Version: "8.2",
 		},
 	}
 }
@@ -318,7 +318,7 @@ func seedAtomicLogoutFixture(t *testing.T, pool *pgxpool.Pool) atomicLogoutFixtu
 	}
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO devices (user_id, name, platform, category_id, approved_at)
-		VALUES ($1, $2, 'Infuse', $3, now()) RETURNING id::text
+		VALUES ($1, $2, 'Generic Client', $3, now()) RETURNING id::text
 	`, fixture.userID, "Atomic logout device "+suffix, categoryID).Scan(&deviceID); err != nil {
 		t.Fatalf("insert linked logout device: %v", err)
 	}
@@ -341,7 +341,7 @@ func seedAtomicLogoutFixture(t *testing.T, pool *pgxpool.Pool) atomicLogoutFixtu
 		INSERT INTO jellyfin_compat_sessions (
 			auth_session_id, profile_id, token_hash, client_name, device_name,
 			client_device_id, client_version, expires_at
-		) VALUES ($1, $2, $3, 'Infuse', $4, $5, '8.2', now() + interval '2 hours')
+		) VALUES ($1, $2, $3, 'Generic Client', $4, $5, '8.2', now() + interval '2 hours')
 		RETURNING id::text
 	`, fixture.authSessionID, fixture.profileID, tokenHash[:], "Atomic logout device "+suffix, "atomic-logout-"+suffix).Scan(&fixture.compatSessionID); err != nil {
 		t.Fatalf("insert linked logout compatibility session: %v", err)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/collection"
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/watchstate"
 )
@@ -51,6 +52,12 @@ type catalogMetadata interface {
 	SearchLinkedSeries(context.Context, auth.Principal, metadata.SearchOptions) (metadata.SeriesPage, error)
 }
 
+type catalogMetadataDetails interface {
+	MovieDetails(context.Context, auth.Principal, string, string) (metadata.Movie, error)
+	SeriesDetails(context.Context, auth.Principal, string, metadata.SeriesDetailsOptions) (metadata.Series, error)
+	SeasonDetails(context.Context, auth.Principal, string, string, string) (metadata.Season, error)
+}
+
 type catalogAddons interface {
 	SearchCatalogItems(context.Context, auth.Principal, []string, string, int, addon.CatalogSearchArtworkPresenter) (addon.CatalogSearchPage, error)
 }
@@ -62,17 +69,19 @@ type CatalogArtworkPresenter interface {
 }
 
 type catalogReader struct {
-	store    catalogStore
-	metadata catalogMetadata
-	addons   catalogAddons
-	artwork  CatalogArtworkPresenter
+	store           catalogStore
+	metadata        catalogMetadata
+	addons          catalogAddons
+	metadataDetails catalogMetadataDetails
+	artwork         CatalogArtworkPresenter
 }
 
 func NewCatalogReader(store catalogStore, metadataService catalogMetadata, addonService catalogAddons, artworkPresenter CatalogArtworkPresenter) (CatalogReader, error) {
 	if store == nil {
 		return nil, ErrInvalidDependencies
 	}
-	return &catalogReader{store: store, metadata: metadataService, addons: addonService, artwork: artworkPresenter}, nil
+	metadataDetails, _ := metadataService.(catalogMetadataDetails)
+	return &catalogReader{store: store, metadata: metadataService, metadataDetails: metadataDetails, addons: addonService, artwork: artworkPresenter}, nil
 }
 
 func (reader *catalogReader) GetCatalogTitle(ctx context.Context, principal auth.Principal, id string) (watchstate.CatalogTitle, error) {
@@ -85,6 +94,59 @@ func (reader *catalogReader) GetCatalogTitle(ctx context.Context, principal auth
 	return titles[0], nil
 }
 
+func (reader *catalogReader) EnrichCatalogTitle(ctx context.Context, principal auth.Principal, title watchstate.CatalogTitle) (watchstate.CatalogTitle, error) {
+	if reader == nil || reader.metadataDetails == nil {
+		return title, nil
+	}
+	var detail watchstate.CatalogTitle
+	var err error
+	switch title.MediaType {
+	case "movie":
+		var movie metadata.Movie
+		movie, err = reader.metadataDetails.MovieDetails(ctx, principal, title.ID, "")
+		if err == nil {
+			detail = catalogTitleFromMovie(movie)
+		}
+	case "series":
+		var series metadata.Series
+		series, err = reader.metadataDetails.SeriesDetails(ctx, principal, title.ID, metadata.SeriesDetailsOptions{})
+		if err == nil {
+			detail = catalogTitleFromSeries(series)
+		}
+	case "season":
+		var season metadata.Season
+		season, err = reader.metadataDetails.SeasonDetails(ctx, principal, title.ID, "", "")
+		if err == nil {
+			detail = catalogTitleFromSeason(season)
+		}
+	case "episode":
+		if title.SeasonID == "" {
+			return title, nil
+		}
+		var season metadata.Season
+		season, err = reader.metadataDetails.SeasonDetails(ctx, principal, title.SeasonID, "", "")
+		if err == nil {
+			for _, episode := range season.Episodes {
+				if episode.ID == title.ID {
+					detail = catalogTitleFromEpisode(episode)
+					break
+				}
+			}
+		}
+	default:
+		return title, nil
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return watchstate.CatalogTitle{}, ctx.Err()
+		}
+		return title, nil
+	}
+	localized := []watchstate.CatalogTitle{detail}
+	reader.localizeCatalogTitles(ctx, localized)
+	return mergeCatalogTitleMetadata(title, localized[0]), nil
+}
+
 func (reader *catalogReader) GetCatalogTitles(ctx context.Context, principal auth.Principal, ids []string) ([]watchstate.CatalogTitle, error) {
 	titles, err := reader.store.GetCatalogTitles(ctx, principal, ids)
 	if err != nil {
@@ -92,6 +154,23 @@ func (reader *catalogReader) GetCatalogTitles(ctx context.Context, principal aut
 	}
 	reader.localizeCatalogTitles(ctx, titles)
 	return titles, nil
+}
+
+func (reader *catalogReader) LocalizeArtworkURLs(ctx context.Context, upstream []string) []string {
+	localized := make([]string, len(upstream))
+	if reader == nil || reader.artwork == nil || len(upstream) == 0 {
+		return localized
+	}
+	materialized := reader.artwork.LocalURLs(ctx, upstream)
+	if len(materialized) != len(upstream) {
+		return localized
+	}
+	for index, value := range materialized {
+		if _, valid := localizedArtworkTag(value); valid {
+			localized[index] = value
+		}
+	}
+	return localized
 }
 
 func (reader *catalogReader) ListCatalogItems(ctx context.Context, principal auth.Principal, query watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
@@ -103,16 +182,104 @@ func (reader *catalogReader) ListCatalogItems(ctx context.Context, principal aut
 	return page, nil
 }
 
+// ResolveCollectionItem canonicalizes one authorized collection result through
+// the same linked-session title path used by provider search. The returned title
+// is then read back through the catalog boundary so playback keeps using Rivune's
+// canonical UUID.
+func (reader *catalogReader) ResolveCollectionItem(ctx context.Context, principal auth.Principal, item collection.Item) (watchstate.CatalogTitle, error) {
+	mediaType := strings.ToLower(strings.TrimSpace(item.MediaType))
+	if mediaType != collection.MediaTypeMovie && mediaType != collection.MediaTypeSeries {
+		return watchstate.CatalogTitle{}, fmt.Errorf("%w: unsupported collection media type", watchstate.ErrInvalidInput)
+	}
+	resourceID := strings.TrimSpace(item.ID)
+	if resourceID == "" {
+		return watchstate.CatalogTitle{}, fmt.Errorf("%w: missing collection resource identifier", watchstate.ErrInvalidInput)
+	}
+	provider, externalID := collectionProviderIdentity(item)
+	if provider == "" || externalID == "" {
+		return watchstate.CatalogTitle{}, fmt.Errorf("%w: collection item has no authorized provider identity", watchstate.ErrInvalidInput)
+	}
+	input := watchstate.ResolveTitleInput{
+		MediaType: mediaType, Provider: provider, ExternalID: externalID, ResourceID: resourceID,
+		Title: item.Title, PosterURL: item.PosterURL, BackgroundURL: item.BackgroundURL,
+		ReleaseInfo: item.ReleaseInfo, Released: item.Released,
+	}
+	if item.Released != "" {
+		if parsed, err := time.Parse(time.DateOnly, item.Released); err != nil || parsed.Format(time.DateOnly) != item.Released {
+			input.Released = ""
+		}
+	}
+	if provider == "addon" {
+		source, ok := collectionAddonSource(item.Sources)
+		if !ok {
+			return watchstate.CatalogTitle{}, fmt.Errorf("%w: collection item has no authorized provider identity", watchstate.ErrInvalidInput)
+		}
+		input.SourceAddonID = source.AddonID
+		input.SourceCatalogID = source.CatalogID
+		input.SourceName = source.Title
+	}
+	localized := []watchstate.CatalogTitle{{PosterURL: input.PosterURL, BackgroundURL: input.BackgroundURL}}
+	reader.localizeCatalogTitles(ctx, localized)
+	input.PosterURL, input.BackgroundURL = localized[0].PosterURL, localized[0].BackgroundURL
+	reference, err := reader.store.ResolveLinkedCatalogTitle(ctx, principal, input)
+	if err != nil {
+		return watchstate.CatalogTitle{}, err
+	}
+	return reader.GetCatalogTitle(ctx, principal, reference.TitleID)
+}
+
+func collectionProviderIdentity(item collection.Item) (string, string) {
+	identities := copyProviderIDs(item.ExternalIDs)
+	for _, provider := range []string{"tmdb", "imdb", "tvdb"} {
+		if externalID := identities[provider]; externalID != "" {
+			return provider, externalID
+		}
+	}
+	if source, ok := collectionAddonSource(item.Sources); ok {
+		digest := sha256.Sum256([]byte(source.AddonID + "\x00" + strings.ToLower(strings.TrimSpace(item.MediaType)) + "\x00" + strings.TrimSpace(item.ID)))
+		return "addon", fmt.Sprintf("sha256:%x", digest)
+	}
+	return "", ""
+}
+
+func collectionAddonSource(sources []collection.SourceReference) (collection.SourceReference, bool) {
+	for _, source := range sources {
+		addonID := strings.ToLower(strings.TrimSpace(source.AddonID))
+		catalogID := strings.TrimSpace(source.CatalogID)
+		name := strings.TrimSpace(source.Title)
+		if source.Kind != collection.SourceKindAddonCatalog || addonID == "" || catalogID == "" || name == "" {
+			continue
+		}
+		if _, err := ParseItemID(addonID); err != nil {
+			continue
+		}
+		source.AddonID, source.CatalogID, source.Title = addonID, catalogID, name
+		return source, true
+	}
+	return collection.SourceReference{}, false
+}
+
 func (reader *catalogReader) localizeCatalogTitles(ctx context.Context, titles []watchstate.CatalogTitle) {
 	if len(titles) == 0 {
 		return
 	}
-	upstream := make([]string, len(titles)*2)
+	peopleCount := 0
+	for index := range titles {
+		peopleCount += len(titles[index].People)
+	}
+	upstream := make([]string, len(titles)*2+peopleCount)
+	peopleOffset := len(titles) * 2
+	peopleIndex := peopleOffset
 	for index := range titles {
 		upstream[index*2] = titles[index].PosterURL
 		upstream[index*2+1] = titles[index].BackgroundURL
 		titles[index].PosterURL = ""
 		titles[index].BackgroundURL = ""
+		for personIndex := range titles[index].People {
+			upstream[peopleIndex] = titles[index].People[personIndex].ImageURL
+			titles[index].People[personIndex].ImageURL = ""
+			peopleIndex++
+		}
 	}
 	if reader.artwork == nil {
 		return
@@ -121,12 +288,19 @@ func (reader *catalogReader) localizeCatalogTitles(ctx context.Context, titles [
 	if len(localized) != len(upstream) {
 		return
 	}
+	peopleIndex = peopleOffset
 	for index := range titles {
 		if _, valid := localizedArtworkTag(localized[index*2]); valid {
 			titles[index].PosterURL = localized[index*2]
 		}
 		if _, valid := localizedArtworkTag(localized[index*2+1]); valid {
 			titles[index].BackgroundURL = localized[index*2+1]
+		}
+		for personIndex := range titles[index].People {
+			if _, valid := localizedArtworkTag(localized[peopleIndex]); valid {
+				titles[index].People[personIndex].ImageURL = localized[peopleIndex]
+			}
+			peopleIndex++
 		}
 	}
 }
@@ -361,10 +535,10 @@ func catalogTitleFromMovie(movie metadata.Movie) watchstate.CatalogTitle {
 		rating = &value
 	}
 	return watchstate.CatalogTitle{
-		ID: movie.ID, MediaType: "movie", Title: movie.Title, Overview: movie.Overview,
+		ID: movie.ID, MediaType: "movie", Title: movie.Title, OriginalTitle: movie.OriginalTitle, Overview: movie.Overview,
 		PosterURL: movie.PosterURL, BackgroundURL: movie.BackdropURL, Released: movie.ReleaseDate,
-		RuntimeMinutes: &runtime, Genres: genres, CommunityRating: rating,
-		ProviderIDs: copyProviderIDs(movie.ExternalIDs),
+		RuntimeMinutes: &runtime, Genres: genres, CommunityRating: rating, Tagline: movie.Tagline,
+		People: catalogPeopleFromCast(movie.Cast), ProviderIDs: copyProviderIDs(movie.ExternalIDs),
 	}
 }
 
@@ -379,10 +553,105 @@ func catalogTitleFromSeries(series metadata.Series) watchstate.CatalogTitle {
 		rating = &value
 	}
 	return watchstate.CatalogTitle{
-		ID: series.ID, MediaType: "series", Title: series.Name, Overview: series.Overview,
+		ID: series.ID, MediaType: "series", Title: series.Name, OriginalTitle: series.OriginalName, Overview: series.Overview,
 		PosterURL: series.PosterURL, BackgroundURL: series.BackdropURL, Released: series.FirstAirDate,
-		Genres: genres, CommunityRating: rating, ProviderIDs: copyProviderIDs(series.ExternalIDs),
+		Genres: genres, CommunityRating: rating, Tagline: series.Tagline, Status: series.Status, EndDate: series.LastAirDate,
+		People: catalogPeopleFromCast(series.Cast), ProviderIDs: copyProviderIDs(series.ExternalIDs),
 	}
+}
+
+func catalogTitleFromSeason(season metadata.Season) watchstate.CatalogTitle {
+	ordinal := season.SeasonNumber
+	var rating *float32
+	if season.VoteAverage > 0 {
+		value := float32(season.VoteAverage)
+		rating = &value
+	}
+	return watchstate.CatalogTitle{
+		ID: season.ID, MediaType: "season", SeriesID: season.SeriesID, Ordinal: &ordinal, Title: season.Name,
+		Overview: season.Overview, PosterURL: season.PosterURL, BackgroundURL: season.BackdropURL, Released: season.AirDate,
+		Genres: []string{}, CommunityRating: rating, ProviderIDs: copyProviderIDs(season.ExternalIDs),
+	}
+}
+
+func catalogTitleFromEpisode(episode metadata.Episode) watchstate.CatalogTitle {
+	ordinal, parentOrdinal, runtime := episode.EpisodeNumber, episode.SeasonNumber, episode.RuntimeMinutes
+	var rating *float32
+	if episode.VoteAverage > 0 {
+		value := float32(episode.VoteAverage)
+		rating = &value
+	}
+	return watchstate.CatalogTitle{
+		ID: episode.ID, MediaType: "episode", SeasonID: episode.SeasonID, Ordinal: &ordinal, ParentOrdinal: &parentOrdinal,
+		Title: episode.Name, Overview: episode.Overview, PosterURL: episode.StillURL, BackgroundURL: episode.BackdropURL,
+		Released: episode.AirDate, RuntimeMinutes: &runtime, Genres: []string{}, CommunityRating: rating,
+		ProviderIDs: copyProviderIDs(episode.ExternalIDs),
+	}
+}
+
+func catalogPeopleFromCast(cast []metadata.CastMember) []watchstate.CatalogPerson {
+	people := make([]watchstate.CatalogPerson, 0, len(cast))
+	for _, member := range cast {
+		name := strings.TrimSpace(member.Name)
+		if name == "" {
+			continue
+		}
+		people = append(people, watchstate.CatalogPerson{
+			Name: name, Role: strings.TrimSpace(member.Character), Type: "Actor", ImageURL: strings.TrimSpace(member.ProfileURL),
+		})
+	}
+	return people
+}
+
+func mergeCatalogTitleMetadata(title, detail watchstate.CatalogTitle) watchstate.CatalogTitle {
+	if detail.Title != "" {
+		title.Title = detail.Title
+	}
+	if detail.OriginalTitle != "" {
+		title.OriginalTitle = detail.OriginalTitle
+	}
+	if detail.Overview != "" {
+		title.Overview = detail.Overview
+	}
+	if detail.Released != "" {
+		title.Released = detail.Released
+	}
+	if detail.RuntimeMinutes != nil && *detail.RuntimeMinutes > 0 {
+		title.RuntimeMinutes = detail.RuntimeMinutes
+	}
+	if len(detail.Genres) != 0 {
+		title.Genres = append([]string(nil), detail.Genres...)
+	}
+	if detail.CommunityRating != nil {
+		title.CommunityRating = detail.CommunityRating
+	}
+	if detail.Tagline != "" {
+		title.Tagline = detail.Tagline
+	}
+	if detail.Status != "" {
+		title.Status = detail.Status
+	}
+	if detail.EndDate != "" {
+		title.EndDate = detail.EndDate
+	}
+	if len(detail.People) != 0 {
+		title.People = append([]watchstate.CatalogPerson(nil), detail.People...)
+	}
+	if detail.PosterURL != "" {
+		title.PosterURL = detail.PosterURL
+	}
+	if detail.BackgroundURL != "" {
+		title.BackgroundURL = detail.BackgroundURL
+	}
+	providerIDs := make(map[string]string, len(title.ProviderIDs)+len(detail.ProviderIDs))
+	for provider, value := range title.ProviderIDs {
+		providerIDs[provider] = value
+	}
+	for provider, value := range detail.ProviderIDs {
+		providerIDs[provider] = value
+	}
+	title.ProviderIDs = providerIDs
+	return title
 }
 
 func copyProviderIDs(values map[string]string) map[string]string {
@@ -550,7 +819,8 @@ func sortCatalogSearch(items []watchstate.CatalogTitle, order string) {
 }
 
 var (
-	_ CatalogReader      = (*catalogReader)(nil)
-	_ catalogBatchReader = (*catalogReader)(nil)
-	_ catalogSearcher    = (*catalogReader)(nil)
+	_ CatalogReader          = (*catalogReader)(nil)
+	_ catalogBatchReader     = (*catalogReader)(nil)
+	_ catalogSearcher        = (*catalogReader)(nil)
+	_ collectionItemResolver = (*catalogReader)(nil)
 )

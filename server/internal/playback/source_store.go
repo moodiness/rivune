@@ -321,6 +321,7 @@ func cloneSource(source Source) Source {
 }
 
 func cloneStoredAsset(asset storedAsset) storedAsset {
+	asset.HLSSegmentContainer = normalizedHLSSegmentContainer(asset.HLSSegmentContainer)
 	if asset.Headers != nil {
 		headers := asset.Headers
 		asset.Headers = make(map[string]string, len(headers))

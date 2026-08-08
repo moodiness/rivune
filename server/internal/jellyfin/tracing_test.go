@@ -116,9 +116,12 @@ func TestRouteTracingEmitsOneBoundedRedactedEventForRootAndEmby(t *testing.T) {
 		if !ok || duration < 0 {
 			t.Errorf("event %d duration = %#v", index, event["duration"])
 		}
+		if event["bytes"] != float64(0) || event["range_request"] != false || event["content_type"] != "" {
+			t.Errorf("event %d transport metadata = %#v", index, event)
+		}
 		for key := range event {
 			switch key {
-			case "time", "level", "msg", "route", "method", "status", "duration":
+			case "time", "level", "msg", "route", "method", "status", "duration", "bytes", "range_request", "content_type":
 			default:
 				t.Errorf("event %d exposes unexpected field %q", index, key)
 			}

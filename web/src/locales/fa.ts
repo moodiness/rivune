@@ -795,7 +795,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "به سرور اجازه داده شود رسانهٔ ناسازگار را فقط پس از ناموفق‌بودن پخش مستقیم و پخش جریانی مستقیم تبدیل کند",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "این گذرواژهٔ برنامه فقط به این نمایه محدود است.",
   "settings.jellyfinAccess.pinHint": "این راز فقط یک‌بار نمایش داده می‌شود. همین حالا آن را ذخیره کنید.",
   "settings.jellyfinAccess.rotateWarning": "با تعویض گذرواژه، گذرواژهٔ فعلی و همهٔ نشست‌های Jellyfin فوراً بی‌اعتبار می‌شوند.",

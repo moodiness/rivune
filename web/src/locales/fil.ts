@@ -674,7 +674,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Payagan lang ang server na mag-convert ng hindi compatible na media kapag hindi gumana ang Direct Play at Direct Stream",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Ang password ng app na ito ay para lamang sa profile na ito.",
   "settings.jellyfinAccess.pinHint": "Isang beses lang ipapakita ang lihim na ito. Itago ito ngayon.",
   "settings.jellyfinAccess.rotateWarning": "Kapag pinalitan, agad na mawawalan ng bisa ang kasalukuyang password at lahat ng session sa Jellyfin.",

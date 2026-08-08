@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,9 @@ func (authentication *artworkAuthentication) Authenticate(_ context.Context, tok
 		return AuthenticatedSession{}, ErrInvalidCompatCredential
 	}
 	return session, nil
+}
+func (*artworkAuthentication) Revalidate(_ context.Context, expected AuthenticatedSession) (AuthenticatedSession, error) {
+	return expected, nil
 }
 
 func (*artworkAuthentication) Logout(context.Context, AuthenticatedSession) error {
@@ -110,6 +114,7 @@ func TestArtworkGETHEADSelectRegisteredPrimaryAndBackdrop(t *testing.T) {
 		wantBody   bool
 	}{
 		{name: "primary get", method: http.MethodGet, imageType: "Primary", wantKey: posterKey, wantSource: poster, wantBody: true},
+		{name: "thumb get", method: http.MethodGet, imageType: "Thumb", wantKey: posterKey, wantSource: poster, wantBody: true},
 		{name: "primary head", method: http.MethodHead, imageType: "Primary", indexed: true, wantKey: posterKey, wantSource: poster},
 		{name: "backdrop get", method: http.MethodGet, imageType: "Backdrop", indexed: true, wantKey: backgroundKey, wantSource: background, wantBody: true},
 		{name: "backdrop head", method: http.MethodHead, imageType: "Backdrop", wantKey: backgroundKey, wantSource: background},
@@ -147,8 +152,68 @@ func TestArtworkGETHEADSelectRegisteredPrimaryAndBackdrop(t *testing.T) {
 			}
 		})
 	}
-	if catalog.calls != 4 {
+	if catalog.calls != 5 {
 		t.Fatalf("catalog calls = %d", catalog.calls)
+	}
+}
+
+func TestArtworkServesSignedTagCapabilityWithoutToken(t *testing.T) {
+	key := strings.Repeat("d", 64)
+	handler, catalog, delivery := newArtworkHandler(t, nil, nil)
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/Items/"+artworkItemOne+"/Images/Primary?tag="+key+"&maxWidth=500&quality=90",
+		nil,
+	)
+	request.SetPathValue("id", artworkItemOne)
+	request.SetPathValue("type", "Primary")
+	response := httptest.NewRecorder()
+	handler.handleImage(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"`+key+`"` || response.Body.String() != "pngbytes" {
+		t.Fatalf("anonymous tag response=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+	if catalog.calls != 0 || len(delivery.lookup) != 0 || len(delivery.servedKeys) != 1 || delivery.servedKeys[0] != key {
+		t.Fatalf("anonymous tag catalog=%d lookup=%v served=%v", catalog.calls, delivery.lookup, delivery.servedKeys)
+	}
+	authenticated := httptest.NewRequest(
+		http.MethodGet,
+		"/Items/"+artworkItemOne+"/Images/Primary?tag="+key+"&api_key="+artworkTokenOne,
+		nil,
+	)
+	authenticated.SetPathValue("id", artworkItemOne)
+	authenticated.SetPathValue("type", "Primary")
+	authenticatedResponse := httptest.NewRecorder()
+	handler.handleImage(authenticatedResponse, authenticated)
+	if authenticatedResponse.Code != http.StatusOK || catalog.calls != 0 || len(delivery.lookup) != 0 || len(delivery.servedKeys) != 2 || delivery.servedKeys[1] != key {
+		t.Fatalf("authenticated tag response=%d catalog=%d lookup=%v served=%v", authenticatedResponse.Code, catalog.calls, delivery.lookup, delivery.servedKeys)
+	}
+
+	for _, test := range []struct {
+		name        string
+		target      string
+		headerName  string
+		headerValue string
+	}{
+		{name: "invalid api key", target: "?tag=" + key + "&api_key=rivune_at_native"},
+		{name: "invalid compact api key", target: "?tag=" + key + "&ApiKey=rivune_at_native"},
+		{name: "malformed api key", target: "?tag=" + key + "&api_key=%ZZ"},
+		{name: "unsupported authorization", target: "?tag=" + key, headerName: "Authorization", headerValue: "Bearer invalid"},
+		{name: "empty authorization token", target: "?tag=" + key, headerName: "X-Emby-Authorization", headerValue: `MediaBrowser Token=""`},
+		{name: "empty token header", target: "?tag=" + key, headerName: "X-Emby-Token", headerValue: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalidCredential := httptest.NewRequest(http.MethodGet, "/Items/"+artworkItemOne+"/Images/Primary"+test.target, nil)
+			invalidCredential.SetPathValue("id", artworkItemOne)
+			invalidCredential.SetPathValue("type", "Primary")
+			if test.headerName != "" {
+				invalidCredential.Header.Set(test.headerName, test.headerValue)
+			}
+			invalidResponse := httptest.NewRecorder()
+			handler.handleImage(invalidResponse, invalidCredential)
+			if invalidResponse.Code != http.StatusUnauthorized || len(delivery.servedKeys) != 2 {
+				t.Fatalf("invalid credential fallback status=%d served=%v", invalidResponse.Code, delivery.servedKeys)
+			}
+		})
 	}
 }
 
@@ -181,7 +246,7 @@ func TestArtworkRejectsInvalidSelectorsAndUnregisteredSources(t *testing.T) {
 		{name: "out of range index", itemID: artworkItemOne, imageType: "Backdrop", index: "1", token: artworkTokenOne},
 		{name: "non decimal index", itemID: artworkItemOne, imageType: "Primary", index: "00", token: artworkTokenOne},
 		{name: "native token", itemID: artworkItemOne, imageType: "Primary", token: "rivune_at_native"},
-		{name: "different transports", itemID: artworkItemOne, imageType: "Primary", token: artworkTokenOne, header: artworkTokenTwo},
+		{name: "header precedence", itemID: artworkItemOne, imageType: "Primary", token: artworkTokenOne, header: artworkTokenTwo},
 		{name: "invalid profile selector", itemID: artworkItemOne, imageType: "Primary", token: artworkTokenOne, profile: artworkProfileTwo},
 	}
 	for _, test := range tests {
@@ -211,7 +276,7 @@ func TestArtworkRejectsInvalidSelectorsAndUnregisteredSources(t *testing.T) {
 				handler.handleImage(response, request)
 			}
 			want := http.StatusNotFound
-			if test.name == "native token" || test.name == "different transports" {
+			if test.name == "native token" {
 				want = http.StatusUnauthorized
 			}
 			challenge := response.Header().Get("WWW-Authenticate")
@@ -243,6 +308,107 @@ func TestArtworkRejectsDuplicateQueryTokenBeforeCatalog(t *testing.T) {
 	}
 }
 
+func TestUserImageIsDeterministicProfileScopedAndPrivate(t *testing.T) {
+	providerURL := "https://provider.invalid/private/avatar.png?token=provider-secret"
+	handler, catalog, delivery := newArtworkHandler(t, map[string]map[string]watchstate.CatalogTitle{
+		artworkProfileOne: {artworkItemOne: {ID: artworkItemOne, MediaType: "movie", PosterURL: providerURL}},
+	}, map[string]string{providerURL: strings.Repeat("a", 64)})
+
+	paths := []string{
+		"/UserImage?uSeRiD=" + artworkProfileOne,
+		"/Users/" + artworkProfileOne + "/Images/Primary",
+	}
+	avatarBody := ""
+	avatarETag := ""
+	for _, prefix := range []string{"", "/emby"} {
+		for _, path := range paths {
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				request := httptest.NewRequest(method, prefix+path, nil)
+				request.Header.Set("X-Emby-Token", artworkTokenOne)
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/svg+xml; charset=utf-8" ||
+					response.Header().Get("X-Content-Type-Options") != "nosniff" || response.Header().Get("Cache-Control") != "private, no-cache" ||
+					response.Header().Get("ETag") == "" || response.Header().Get("Location") != "" {
+					t.Fatalf("%s %s status=%d headers=%v", method, prefix+path, response.Code, response.Header())
+				}
+				if method == http.MethodGet {
+					if response.Body.Len() == 0 || response.Header().Get("Content-Length") != strconv.Itoa(response.Body.Len()) {
+						t.Fatalf("GET %s length=%q body=%q", prefix+path, response.Header().Get("Content-Length"), response.Body.String())
+					}
+					if avatarBody == "" {
+						avatarBody, avatarETag = response.Body.String(), response.Header().Get("ETag")
+					} else if response.Body.String() != avatarBody || response.Header().Get("ETag") != avatarETag {
+						t.Fatalf("avatar changed across equivalent routes: etag=%q body=%q", response.Header().Get("ETag"), response.Body.String())
+					}
+				} else if response.Body.Len() != 0 || response.Header().Get("Content-Length") != strconv.Itoa(len(avatarBody)) {
+					t.Fatalf("HEAD %s length=%q body=%q", prefix+path, response.Header().Get("Content-Length"), response.Body.String())
+				}
+				exposed := response.Body.String()
+				for name, values := range response.Header() {
+					exposed += name + strings.Join(values, ",")
+				}
+				for _, forbidden := range []string{artworkProfileOne, "Profile One", "user-one", "native-one", artworkTokenOne, "provider.invalid", "provider-secret"} {
+					if strings.Contains(exposed, forbidden) {
+						t.Fatalf("avatar response exposed %q: %s", forbidden, exposed)
+					}
+				}
+			}
+		}
+	}
+
+	notModifiedRequest := httptest.NewRequest(http.MethodGet, "/emby/UserImage", nil)
+	notModifiedRequest.Header.Set("X-Emby-Token", artworkTokenOne)
+	notModifiedRequest.Header.Set("If-None-Match", `"unrelated", W/`+avatarETag)
+	notModifiedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(notModifiedResponse, notModifiedRequest)
+	if notModifiedResponse.Code != http.StatusNotModified || notModifiedResponse.Body.Len() != 0 ||
+		notModifiedResponse.Header().Get("ETag") != avatarETag || notModifiedResponse.Header().Get("Cache-Control") != "private, no-cache" {
+		t.Fatalf("conditional avatar status=%d headers=%v body=%q", notModifiedResponse.Code, notModifiedResponse.Header(), notModifiedResponse.Body.String())
+	}
+
+	otherRequest := httptest.NewRequest(http.MethodGet, "/UserImage", nil)
+	otherRequest.Header.Set("X-Emby-Token", artworkTokenTwo)
+	otherResponse := httptest.NewRecorder()
+	handler.ServeHTTP(otherResponse, otherRequest)
+	if otherResponse.Code != http.StatusOK || otherResponse.Body.String() == avatarBody || otherResponse.Header().Get("ETag") == avatarETag {
+		t.Fatalf("different profile avatar was not distinct: status=%d etag=%q body=%q", otherResponse.Code, otherResponse.Header().Get("ETag"), otherResponse.Body.String())
+	}
+
+	for _, path := range []string{"/UserImage?USERID=" + artworkProfileTwo, "/Users/" + artworkProfileTwo + "/Images/Primary"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("X-Emby-Token", artworkTokenOne)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound || strings.Contains(response.Body.String(), artworkProfileTwo) {
+			t.Fatalf("foreign avatar %s status=%d body=%q", path, response.Code, response.Body.String())
+		}
+	}
+	for _, path := range []string{"/UserImage", "/Users/" + artworkProfileOne + "/Images/Primary"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusUnauthorized || response.Header().Get("WWW-Authenticate") != "MediaBrowser" {
+			t.Fatalf("unauthenticated avatar %s status=%d headers=%v", path, response.Code, response.Header())
+		}
+	}
+	for _, path := range []string{
+		"/UserImage?UserId=not-a-uuid",
+		"/UserImage?UserId=" + artworkProfileOne + "&userid=" + artworkProfileOne,
+		"/UserImage?padding=" + strings.Repeat("x", MaximumQueryBytes),
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("X-Emby-Token", artworkTokenOne)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid avatar query %s status=%d body=%q", path, response.Code, response.Body.String())
+		}
+	}
+	if catalog.calls != 0 || len(delivery.lookup) != 0 || len(delivery.servedKeys) != 0 {
+		t.Fatalf("user image reached provider artwork: catalog=%d lookup=%v served=%v", catalog.calls, delivery.lookup, delivery.servedKeys)
+	}
+}
+
 func newArtworkHandler(t *testing.T, items map[string]map[string]watchstate.CatalogTitle, keys map[string]string) (*Handler, *artworkCatalog, *artworkDelivery) {
 	t.Helper()
 	profileOne := artworkProfileOne
@@ -259,7 +425,11 @@ func newArtworkHandler(t *testing.T, items map[string]map[string]watchstate.Cata
 	}}
 	catalog := &artworkCatalog{items: items}
 	delivery := &artworkDelivery{keys: keys, body: []byte("pngbytes")}
-	handler, err := New(Dependencies{Authentication: authentication, Catalog: catalog, Artwork: delivery})
+	serverID, err := ParseServerID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	if err != nil {
+		t.Fatalf("parse artwork server ID: %v", err)
+	}
+	handler, err := New(Dependencies{ServerInfo: ServerInfo{ID: serverID, Name: "Rivune"}, Authentication: authentication, Catalog: catalog, Artwork: delivery})
 	if err != nil {
 		t.Fatalf("create handler: %v", err)
 	}

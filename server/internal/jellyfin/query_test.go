@@ -16,7 +16,7 @@ func TestParseItemQueryAcceptsCaseInsensitiveNames(t *testing.T) {
 		"LIMIT":            {"25"},
 		"recursive":        {"TRUE"},
 		"includeitemtypes": {"Movie, Episode"},
-		"FIELDS":           {"Overview,ProviderIds"},
+		"FIELDS":           {"Overview", "ProviderIds,Path"},
 		"sortby":           {"SortName"},
 		"sortorder":        {"descending"},
 		"enableuserdata":   {"false"},
@@ -28,8 +28,44 @@ func TestParseItemQueryAcceptsCaseInsensitiveNames(t *testing.T) {
 	}
 	if query.SearchTerm != "Signal" || query.ParentId != "a0b1c2d3-e4f5-4678-89ab-0123456789ab" ||
 		query.StartIndex != 12 || query.Limit != 25 || !query.Recursive || query.EnableUserData ||
-		query.SortOrder != "Descending" || len(query.IncludeItemTypes) != 2 || len(query.Ids) != 1 {
+		query.SortOrder != "Descending" || len(query.IncludeItemTypes) != 2 || len(query.Fields) != 3 || len(query.Ids) != 1 {
 		t.Fatalf("unexpected parsed query: %#v", query)
+	}
+}
+
+func TestParseItemQueryCanonicalizesCompactIDs(t *testing.T) {
+	tests := []struct {
+		name   string
+		values url.Values
+	}{
+		{
+			name: "lowerCamel",
+			values: url.Values{
+				"parentId": {"A0B1C2D3E4F5467889AB0123456789AB"},
+				"ids":      {"12345678123442348234123456789ABC"},
+			},
+		},
+		{
+			name: "PascalCase",
+			values: url.Values{
+				"ParentId": {"A0B1C2D3E4F5467889AB0123456789AB"},
+				"Ids":      {"12345678123442348234123456789ABC"},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			query, err := ParseItemQuery(test.values)
+			if err != nil {
+				t.Fatalf("ParseItemQuery: %v", err)
+			}
+			if got, want := query.ParentId, "a0b1c2d3-e4f5-4678-89ab-0123456789ab"; got != want {
+				t.Fatalf("ParentId = %q, want %q", got, want)
+			}
+			if len(query.Ids) != 1 || query.Ids[0] != "12345678-1234-4234-8234-123456789abc" {
+				t.Fatalf("Ids = %#v, want one canonical UUID", query.Ids)
+			}
+		})
 	}
 }
 

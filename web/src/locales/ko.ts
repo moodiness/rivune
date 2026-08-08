@@ -674,7 +674,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "직접 재생과 다이렉트 스트림에 모두 실패한 경우에만 서버에서 호환되지 않는 미디어를 변환하도록 허용",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "이 앱 비밀번호는 이 프로필에서만 사용할 수 있습니다.",
   "settings.jellyfinAccess.pinHint": "이 비밀 값은 한 번만 표시됩니다. 지금 안전한 곳에 저장하세요.",
   "settings.jellyfinAccess.rotateWarning": "교체하면 현재 비밀번호와 모든 Jellyfin 세션이 즉시 무효화됩니다.",

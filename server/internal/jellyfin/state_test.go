@@ -13,10 +13,15 @@ import (
 
 type memoryWatchstate struct {
 	progress        map[string]watchstate.Progress
+	library         map[string]bool
+	addCalls        int
+	removeCalls     int
 	updateCalls     int
+	userDataCalls   int
 	watchedCalls    int
 	updateConflict  func(*memoryWatchstate, string)
 	updateErrors    []error
+	userDataErr     error
 	watchedConflict func(*memoryWatchstate, string, bool)
 	resumePage      watchstate.ContinueItemsPage
 	resumeOffset    int
@@ -28,7 +33,7 @@ type memoryWatchstate struct {
 }
 
 func newMemoryWatchstate() *memoryWatchstate {
-	return &memoryWatchstate{progress: make(map[string]watchstate.Progress)}
+	return &memoryWatchstate{progress: make(map[string]watchstate.Progress), library: make(map[string]bool)}
 }
 
 func (service *memoryWatchstate) GetProgress(_ context.Context, _ auth.Principal, itemID string) (watchstate.Progress, error) {
@@ -103,6 +108,53 @@ func (service *memoryWatchstate) SetWatched(_ context.Context, _ auth.Principal,
 
 func (service *memoryWatchstate) SetWatchedForLinkedSession(ctx context.Context, principal auth.Principal, itemID string, completed bool, input watchstate.CompletionInput) (watchstate.Progress, error) {
 	return service.SetWatched(ctx, principal, itemID, completed, input)
+}
+
+func (service *memoryWatchstate) UpdateUserDataForLinkedSession(_ context.Context, _ auth.Principal, itemID string, input watchstate.UpdateUserDataInput) (watchstate.UserDataState, error) {
+	service.userDataCalls++
+	if service.userDataErr != nil {
+		return watchstate.UserDataState{}, service.userDataErr
+	}
+	current, exists := service.progress[itemID]
+	position, played := current.PositionSeconds, current.Completed
+	if input.PositionSeconds != nil {
+		position = *input.PositionSeconds
+	}
+	if input.Played != nil {
+		played = *input.Played
+	}
+	changed := exists && (position != current.PositionSeconds || played != current.Completed) || !exists && (position != 0 || played)
+	if changed {
+		service.updateCalls++
+		if !exists {
+			current = watchstate.Progress{TitleID: itemID, MediaType: "movie", DurationSeconds: input.DurationSeconds}
+		}
+		if current.DurationSeconds == 0 {
+			current.DurationSeconds = input.DurationSeconds
+		}
+		current.PositionSeconds = position
+		current.Completed = played
+		current.Version++
+		current.LastWatchedAt = time.Unix(current.Version, 0).UTC()
+		current.UpdatedAt = current.LastWatchedAt
+		service.progress[itemID] = current
+		exists = true
+	}
+	if input.Favorite != nil && *input.Favorite != service.library[itemID] {
+		if *input.Favorite {
+			service.addCalls++
+			service.library[itemID] = true
+		} else {
+			service.removeCalls++
+			delete(service.library, itemID)
+		}
+	}
+	result := watchstate.UserDataState{InLibrary: service.library[itemID]}
+	if exists {
+		value := service.progress[itemID]
+		result.Progress = &value
+	}
+	return result, nil
 }
 
 func (*memoryWatchstate) ClearProgress(context.Context, auth.Principal, string, int64) error {

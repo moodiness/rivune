@@ -86,10 +86,13 @@ func TestDeliveryRequestPreservesHEADRangeAndSanitizesNativeRouting(t *testing.T
 	if query.Get("target") != "" || query.Get("signature") != "" || query.Get("api_key") != "" {
 		t.Fatalf("delivery adaptation trusted adapter routing values: %s", delivery.request.URL.RawQuery)
 	}
-	childURL := delivery.template.childURL("child-capability")
+	childURL := delivery.template.childURL("child-capability", deliveryChildState{assetID: "stream-1", file: "segment.ts"})
 	childQuery := httptest.NewRequest(http.MethodGet, childURL, nil).URL.Query()
-	if childQuery.Get("StartTimeTicks") != "900000000" || childQuery.Get("api_key") != "compat-token" {
-		t.Fatalf("compat child URL lost seek or query authentication: %s", childURL)
+	if childQuery.Get("StartTimeTicks") != "900000000" || childQuery.Get("api_key") != "" || childQuery.Get("PlaySessionId") != "" {
+		t.Fatalf("compat child URL selectors exposed a credential: %s", childURL)
+	}
+	if got := httptest.NewRequest(http.MethodGet, childURL, nil).URL.Path; got != "/emby/Videos/item/hls1/compat-play-session/child-capability.ts" {
+		t.Fatalf("extension-correct child path = %q", got)
 	}
 	if request.URL.Query().Get("file") != "" || request.URL.Query().Get("start") != "" {
 		t.Fatal("delivery adaptation mutated the adapter request")
@@ -115,18 +118,24 @@ func TestDeliveryChildURLsResolveOnlyInsideOwningHandle(t *testing.T) {
 	if err != nil || duplicateID != childID {
 		t.Fatalf("duplicate child target = %q, %v; want %q", duplicateID, err, childID)
 	}
-	childURL := template.childURL(childID)
-	for _, forbidden := range []string{"/api/v1", "native-token", "native-signature", "provider.example", "provider_token", "target="} {
+	childURL := template.childURL(childID, state)
+	if parsedPath := httptest.NewRequest(http.MethodGet, childURL, nil).URL.Path; !strings.HasSuffix(parsedPath, ".ts") {
+		t.Fatalf("target-derived child path = %q", parsedPath)
+	}
+	for _, forbidden := range []string{"/api/v1", "native-token", "native-signature", "provider.example", "provider_token", "target=", "compat-secret", "api_key="} {
 		if strings.Contains(childURL, forbidden) {
 			t.Fatalf("compat child URL exposed %q: %s", forbidden, childURL)
 		}
 	}
 	parsed := httptest.NewRequest(http.MethodGet, childURL, nil)
-	if len(parsed.URL.Query()) != 5 || parsed.URL.Query().Get("PlaySessionId") != "compat-play-session" ||
-		parsed.URL.Query().Get("MediaSourceId") != "compat-media-source" || parsed.URL.Query().Get(deliveryChildQueryName) != childID ||
-		parsed.URL.Query().Get("StartTimeTicks") != "900000000" || parsed.URL.Query().Get("api_key") != "compat-secret" {
+	query := parsed.URL.Query()
+	if len(query) != 3 || query.Get("PlaySessionId") != "" ||
+		query.Get("MediaSourceId") != "compat-media-source" || query.Get(deliveryChildQueryName) != childID ||
+		query.Get("StartTimeTicks") != "900000000" || query.Get("api_key") != "" {
 		t.Fatalf("unexpected compat child selectors: %s", childURL)
 	}
+	query.Set("PlaySessionId", "compat-play-session")
+	parsed.URL.RawQuery = query.Encode()
 
 	foreign := handle
 	foreign.children = newDeliveryChildTable()
@@ -138,15 +147,15 @@ func TestDeliveryChildURLsResolveOnlyInsideOwningHandle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("legitimate retry %d: %v", attempt, err)
 		}
-		if resolved.assetID != state.assetID || resolved.target != state.target || resolved.signature != state.signature {
+		if !resolved.child || resolved.assetID != state.assetID || resolved.target != state.target || resolved.signature != state.signature {
 			t.Fatalf("resolved child state = %#v", resolved)
 		}
 	}
-	unknown := httptest.NewRequest(http.MethodGet, template.childURL("unknown-child"), nil)
+	unknown := httptest.NewRequest(http.MethodGet, template.childURL("unknown-child", state), nil)
 	if _, err := requestForDelivery(unknown, handle); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("unknown child resolution error = %v", err)
 	}
-	oversized := httptest.NewRequest(http.MethodGet, template.childURL(strings.Repeat("x", maximumDeliveryChildIDLength+1)), nil)
+	oversized := httptest.NewRequest(http.MethodGet, template.childURL(strings.Repeat("x", maximumDeliveryChildIDLength+1), state), nil)
 	if _, err := requestForDelivery(oversized, handle); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("oversized child ID error = %v", err)
 	}
@@ -171,11 +180,11 @@ func TestDeliveryLinkTemplateRejectsAmbiguousOrUnboundedChildContext(t *testing.
 	}
 }
 
-func TestDeliveryChildTableExpiresUntouchedChildrenDuringContinuousActivity(t *testing.T) {
+func TestDeliveryChildTableReclaimsStaleChildrenDuringContinuousPlayback(t *testing.T) {
 	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
 	table := newDeliveryChildTable()
 	table.now = func() time.Time { return now }
-	activeState := deliveryChildState{assetID: "stream-1", file: "segment-active.m4s", start: "90"}
+	activeState := deliveryChildState{assetID: "stream-1", target: "https://provider.example/live/segment-active.m4s", signature: "signed"}
 
 	const workers = 32
 	ids := make(chan string, workers)
@@ -208,12 +217,12 @@ func TestDeliveryChildTableExpiresUntouchedChildrenDuringContinuousActivity(t *t
 	if len(table.entries) != 1 || len(activeID) > maximumDeliveryChildIDLength {
 		t.Fatalf("deduplicated table size/ID = %d/%d", len(table.entries), len(activeID))
 	}
-	untouchedID, err := table.register(deliveryChildState{assetID: "stream-1", file: "segment-untouched.m4s", start: "90"})
+	futureID, err := table.register(deliveryChildState{assetID: "stream-1", target: "https://provider.example/live/segment-future.m4s", signature: "signed"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if entry := table.entries[untouchedID]; !entry.advertisedAt.Equal(now) || !entry.expiresAt.Equal(now.Add(deliveryChildTTL)) {
-		t.Fatalf("unresolved child timestamps = %s/%s", entry.advertisedAt, entry.expiresAt)
+	if entry := table.entries[futureID]; !entry.activeAt.Equal(now) || !table.nextExpiry.Equal(now.Add(deliveryChildTTL)) {
+		t.Fatalf("child/next expiry timestamps = %s/%s", entry.activeAt, table.nextExpiry)
 	}
 
 	for minute := 1; minute <= 6; minute++ {
@@ -222,7 +231,7 @@ func TestDeliveryChildTableExpiresUntouchedChildrenDuringContinuousActivity(t *t
 			t.Fatalf("active child retry %d failed", minute)
 		}
 		if _, err := table.register(deliveryChildState{
-			assetID: "stream-1", file: fmt.Sprintf("segment-rotating-%06d.m4s", minute), start: "90",
+			assetID: "stream-1", target: fmt.Sprintf("https://provider.example/live/segment-rotating-%06d.m4s", minute), signature: "signed",
 		}); err != nil {
 			t.Fatalf("continuous playlist activity %d: %v", minute, err)
 		}
@@ -230,18 +239,52 @@ func TestDeliveryChildTableExpiresUntouchedChildrenDuringContinuousActivity(t *t
 			t.Fatalf("child table exceeded bound: %d", len(table.entries))
 		}
 	}
-	if _, ok := table.resolve(untouchedID); ok {
-		t.Fatal("untouched unresolved child survived its individual TTL")
+	if _, ok := table.resolve(futureID); ok {
+		t.Fatal("stale future segment capability survived continuous playback")
 	}
 	if _, ok := table.resolve(activeID); !ok {
-		t.Fatal("resolved child retry was not retained for its own TTL")
+		t.Fatal("active segment capability expired during continuous playback")
 	}
 	now = now.Add(deliveryChildTTL)
 	if _, ok := table.resolve(activeID); ok {
-		t.Fatal("resolved child survived beyond its retry TTL")
+		t.Fatal("child capability survived its idle TTL")
+	}
+	if len(table.entries) != 0 {
+		t.Fatalf("idle table retained %d children", len(table.entries))
 	}
 	if _, err := table.register(deliveryChildState{assetID: "stream-1", target: strings.Repeat("x", maximumDeliveryTargetLength+1), signature: "signed"}); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("oversized child state error = %v", err)
+	}
+}
+
+func TestDeliveryChildTableRetainsStaticPlaylistTailWhilePlaybackActive(t *testing.T) {
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	table := newDeliveryChildTable()
+	table.now = func() time.Time { return now }
+	staticState := func(file string) deliveryChildState {
+		return deliveryChildState{assetID: "stream-1", file: file, start: "90", retainWhileActive: true}
+	}
+	activeID, err := table.register(staticState("segment-active.m4s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tailID, err := table.register(staticState("segment-tail.m4s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for minute := 1; minute <= 6; minute++ {
+		now = now.Add(time.Minute)
+		if _, ok := table.resolve(activeID); !ok {
+			t.Fatalf("active static segment retry %d failed", minute)
+		}
+	}
+	if _, ok := table.resolve(tailID); !ok {
+		t.Fatal("static playlist tail expired during active playback")
+	}
+	now = now.Add(deliveryChildTTL)
+	if _, ok := table.resolve(tailID); ok {
+		t.Fatal("static playlist tail survived an idle playback TTL")
 	}
 }
 
@@ -290,6 +333,25 @@ func TestDeliveryChildTableCapacityRejectsOnlySimultaneouslyLiveChildren(t *test
 	}
 }
 
+func TestPlaylistChildrenRetentionPolicySeparatesStaticAndSlidingMedia(t *testing.T) {
+	for name, test := range map[string]struct {
+		playlist string
+		want     bool
+	}{
+		"completed media": {playlist: "#EXTM3U\n#EXTINF:3,\nsegment.m4s\n#EXT-X-ENDLIST\n", want: true},
+		"event media":     {playlist: "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:3,\nsegment.m4s\n", want: true},
+		"explicit VOD":    {playlist: "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\nsegment.m4s\n", want: true},
+		"master":          {playlist: "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nmedia.m3u8\n", want: true},
+		"sliding media":   {playlist: "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:42\n#EXTINF:3,\nsegment.m4s\n", want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := playlistChildrenRetainWhileActive([]byte(test.playlist)); got != test.want {
+				t.Fatalf("retain while active = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCompatPlaylistLinksHideNativeHLSState(t *testing.T) {
 	table := newDeliveryChildTable()
 	template, err := newDeliveryLinkTemplate(httptest.NewRequest(http.MethodGet, "/emby/Videos/item/stream.m3u8?PlaySessionId=compat-play-session&MediaSourceId=compat-media-source&StartTimeTicks=900000000&api_key=compat-secret", nil).URL)
@@ -297,11 +359,12 @@ func TestCompatPlaylistLinksHideNativeHLSState(t *testing.T) {
 		t.Fatal(err)
 	}
 	build := func(target string) string {
-		childID, registerErr := table.register(deliveryChildState{assetID: "stream-1", target: target, signature: "native-signature"})
+		state := deliveryChildState{assetID: "stream-1", target: target, signature: "native-signature"}
+		childID, registerErr := table.register(state)
 		if registerErr != nil {
 			t.Fatal(registerErr)
 		}
-		return template.childURL(childID)
+		return template.childURL(childID, state)
 	}
 	base, _ := new(url.URL).Parse("https://provider.example/private/master.m3u8?native_token=secret")
 	master, err := rewritePlaylist([]byte("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nmedia.m3u8\n"), base, build)
@@ -317,11 +380,12 @@ func TestCompatPlaylistLinksHideNativeHLSState(t *testing.T) {
 	assertCompatPlaylistChildLinks(t, string(media), 2)
 
 	local, err := rewriteLocalPlaylist([]byte("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\nsegment-000001.m4s\n"), func(file string) string {
-		childID, registerErr := table.register(deliveryChildState{assetID: "stream-1", file: file, start: "90"})
+		state := deliveryChildState{assetID: "stream-1", file: file, start: "90"}
+		childID, registerErr := table.register(state)
 		if registerErr != nil {
 			t.Fatal(registerErr)
 		}
-		return template.childURL(childID)
+		return template.childURL(childID, state)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -376,15 +440,18 @@ func assertCompatPlaylistChildLinks(t *testing.T, playlist string, want int) {
 		t.Fatalf("playlist references = %v, want %d in %s", references, want, playlist)
 	}
 	for _, reference := range references {
-		for _, forbidden := range []string{"/api/v1", "native_token", "native-signature", "provider.example", "target=", "signature="} {
+		for _, forbidden := range []string{"/api/v1", "native_token", "native-signature", "provider.example", "target=", "signature=", "compat-secret", "api_key="} {
 			if strings.Contains(reference, forbidden) {
 				t.Fatalf("playlist child link exposed %q: %s", forbidden, reference)
 			}
 		}
 		request := httptest.NewRequest(http.MethodGet, reference, nil)
 		query := request.URL.Query()
-		if len(query) != 5 || query.Get(deliveryChildQueryName) == "" || query.Get("StartTimeTicks") != "900000000" || query.Get("api_key") != "compat-secret" {
+		if len(query) != 3 || query.Get(deliveryChildQueryName) == "" || query.Get("MediaSourceId") != "compat-media-source" || query.Get("StartTimeTicks") != "900000000" || query.Get("PlaySessionId") != "" || query.Get("api_key") != "" {
 			t.Fatalf("playlist child selectors = %s", reference)
+		}
+		if !strings.Contains(request.URL.Path, "/hls1/compat-play-session/") || strings.LastIndex(request.URL.Path, ".") < strings.LastIndex(request.URL.Path, "/") {
+			t.Fatalf("playlist child path is not extension-correct: %s", reference)
 		}
 	}
 }
@@ -400,6 +467,64 @@ func TestCopyPlaybackAssetPropagatesClientCancellation(t *testing.T) {
 	}
 }
 
+func TestDeliveryCancellationAndChildErrorsKeepHandleRetryable(t *testing.T) {
+	handle := DeliveryHandle{
+		sessionID: "session-id", assetID: "stream-1", token: "native-token", defaultFile: "master.m3u8", children: newDeliveryChildTable(),
+	}
+	if IsTerminalDeliveryError(copyPlaybackAsset(canceledPlaybackWriter{}, strings.NewReader("media bytes"))) {
+		t.Fatal("downstream cancellation was classified as terminal")
+	}
+	unknownChild := httptest.NewRequest(http.MethodGet, "/Videos/item/master.m3u8?PlaySessionId=play&MediaSourceId=source&"+deliveryChildQueryName+"=unknown", nil)
+	service := &Service{}
+	childErr := service.Serve(httptest.NewRecorder(), unknownChild, handle)
+	if !errors.Is(childErr, ErrSessionNotFound) || IsTerminalDeliveryError(childErr) {
+		t.Fatalf("child error terminal classification = %v/%t", childErr, IsTerminalDeliveryError(childErr))
+	}
+	retry := httptest.NewRequest(http.MethodGet, "/Videos/item/master.m3u8?PlaySessionId=play&MediaSourceId=source", nil)
+	resolved, err := requestForDelivery(retry, handle)
+	if err != nil || resolved.assetID != "stream-1" || resolved.request.URL.Query().Get("file") != "master.m3u8" {
+		t.Fatalf("retry after child failure = %+v, %v", resolved, err)
+	}
+	if !IsTerminalDeliveryError(ErrSessionNotFound) || IsTerminalDeliveryError(ErrMediaSourceFailed) {
+		t.Fatal("delivery terminal error classification is not conservative")
+	}
+}
+
+func TestResolvedDeliveryChildMissingNativeSessionIsTerminal(t *testing.T) {
+	handle := DeliveryHandle{
+		sessionID: "missing-session", assetID: "stream-1", token: "native-token", children: newDeliveryChildTable(),
+	}
+	state := deliveryChildState{assetID: "stream-1", file: "segment.ts"}
+	childID, err := handle.children.register(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template, err := newDeliveryLinkTemplate(httptest.NewRequest(http.MethodGet, "/Videos/item/master.m3u8?PlaySessionId=play&MediaSourceId=source", nil).URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childRequest := httptest.NewRequest(http.MethodGet, template.childURL(childID, state), nil)
+	childQuery := childRequest.URL.Query()
+	childQuery.Set("PlaySessionId", "play")
+	childRequest.URL.RawQuery = childQuery.Encode()
+	resolved, err := requestForDelivery(childRequest, handle)
+	if err != nil || !resolved.child {
+		t.Fatalf("valid child resolution = %+v, %v", resolved, err)
+	}
+
+	missingSessionErr := classifyDeliveryProxyError(ErrSessionNotFound, resolved.child)
+	if !errors.Is(missingSessionErr, ErrSessionNotFound) || !IsTerminalDeliveryError(missingSessionErr) {
+		t.Fatalf("resolved child missing-session classification = %v/%t", missingSessionErr, IsTerminalDeliveryError(missingSessionErr))
+	}
+
+	httpClientErr := errors.New("HTTP client request failed")
+	retryableErr := classifyDeliveryProxyError(httpClientErr, resolved.child)
+	var requestErr *deliveryRequestError
+	if !errors.Is(retryableErr, httpClientErr) || !errors.As(retryableErr, &requestErr) || IsTerminalDeliveryError(retryableErr) {
+		t.Fatalf("resolved child HTTP client classification = %v/%t", retryableErr, IsTerminalDeliveryError(retryableErr))
+	}
+}
+
 func TestDeliveryHandleSelectsDefaultCompatibleAssetWithoutURLParsing(t *testing.T) {
 	handle := deliveryHandleForSession("session-id", "native-token", []Source{
 		{ID: "incompatible", Compatible: false, URL: "not a URL"},
@@ -407,28 +532,30 @@ func TestDeliveryHandleSelectsDefaultCompatibleAssetWithoutURLParsing(t *testing
 	}, []storedAsset{
 		{ID: "incompatible", URL: "https://provider.example/first"},
 		{ID: "selected", URL: "https://provider.example/selected", StartSeconds: 120},
+		{ID: "subtitle-1", Kind: assetKindConvertedSubtitle, URL: "https://provider.example/subtitle.srt?token=native"},
 	})
 
-	if !handle.Valid() || handle.assetID != "selected" || handle.defaultFile != "index.m3u8" || handle.defaultStart != "120" {
+	if !handle.Valid() || handle.assetID != "selected" || handle.defaultFile != "master.m3u8" || handle.defaultStart != "120" ||
+		handle.assets == nil || !handle.assets.contains("selected") || !handle.assets.contains("subtitle-1") || handle.assets.contains("foreign-asset") {
 		t.Fatalf("unexpected selected delivery handle: %+v", handle)
 	}
 }
 
-func TestDeliveryChildBudgetEnforcesUserAndGlobalLimitsAcrossHandles(t *testing.T) {
-	if maximumDeliveryChildrenPerUser < maximumPlaylistReferences {
-		t.Fatalf("per-user child limit = %d, below one maximum playlist (%d)", maximumDeliveryChildrenPerUser, maximumPlaylistReferences)
+func TestDeliveryChildBudgetEnforcesProfileAndGlobalLimitsAcrossHandles(t *testing.T) {
+	if maximumDeliveryChildrenPerProfile < maximumPlaylistReferences {
+		t.Fatalf("per-profile child limit = %d, below one maximum playlist (%d)", maximumDeliveryChildrenPerProfile, maximumPlaylistReferences)
 	}
-	if maximumDeliveryChildrenGlobal < maximumDeliveryChildrenPerUser {
-		t.Fatalf("global child limit = %d, below per-user limit %d", maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerUser)
+	if maximumDeliveryChildrenGlobal < maximumDeliveryChildrenPerProfile {
+		t.Fatalf("global child limit = %d, below per-profile limit %d", maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerProfile)
 	}
-	if maximumDeliveryChildrenGlobal > 8*maximumDeliveryChildrenPerUser {
-		t.Fatalf("global child limit = %d, want a strict small multiple of per-user limit %d", maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerUser)
+	if maximumDeliveryChildrenGlobal > 8*maximumDeliveryChildrenPerProfile {
+		t.Fatalf("global child limit = %d, want a strict small multiple of per-profile limit %d", maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerProfile)
 	}
 
 	budget := newDeliveryChildBudget(4, 2)
-	newTable := func(userID string) *deliveryChildTable {
+	newTable := func(profileID string) *deliveryChildTable {
 		table := newDeliveryChildTable()
-		table.bindBudget(budget, userID, nil)
+		table.bindBudget(budget, profileID, nil)
 		return table
 	}
 	register := func(table *deliveryChildTable, file string) error {
@@ -437,32 +564,32 @@ func TestDeliveryChildBudgetEnforcesUserAndGlobalLimitsAcrossHandles(t *testing.
 		return err
 	}
 
-	firstUserHandle := newTable("user-a")
-	secondUserAHandle := newTable("user-a")
-	if err := register(firstUserHandle, "segment-a-1.m4s"); err != nil {
+	firstProfileHandle := newTable("profile-a")
+	secondProfileAHandle := newTable("profile-a")
+	if err := register(firstProfileHandle, "segment-a-1.m4s"); err != nil {
 		t.Fatal(err)
 	}
-	if err := register(secondUserAHandle, "segment-a-2.m4s"); err != nil {
+	if err := register(secondProfileAHandle, "segment-a-2.m4s"); err != nil {
 		t.Fatal(err)
 	}
-	if err := register(secondUserAHandle, "segment-a-overflow.m4s"); !errors.Is(err, errDeliveryChildCapacity) {
-		t.Fatalf("cross-handle per-user overflow error = %v", err)
+	if err := register(secondProfileAHandle, "segment-a-overflow.m4s"); !errors.Is(err, errDeliveryChildCapacity) {
+		t.Fatalf("cross-handle per-profile overflow error = %v", err)
 	}
 
-	secondUserHandle := newTable("user-b")
-	if err := register(secondUserHandle, "segment-b-1.m4s"); err != nil {
-		t.Fatalf("second user below global limit: %v", err)
+	secondProfileHandle := newTable("profile-b")
+	if err := register(secondProfileHandle, "segment-b-1.m4s"); err != nil {
+		t.Fatalf("second profile below global limit: %v", err)
 	}
-	thirdUserHandle := newTable("user-c")
-	if err := register(thirdUserHandle, "segment-c-1.m4s"); err != nil {
-		t.Fatalf("third user at global limit: %v", err)
+	thirdProfileHandle := newTable("profile-c")
+	if err := register(thirdProfileHandle, "segment-c-1.m4s"); err != nil {
+		t.Fatalf("third profile at global limit: %v", err)
 	}
-	fourthUserHandle := newTable("user-d")
-	if err := register(fourthUserHandle, "segment-d-overflow.m4s"); !errors.Is(err, errDeliveryChildCapacity) {
+	fourthProfileHandle := newTable("profile-d")
+	if err := register(fourthProfileHandle, "segment-d-overflow.m4s"); !errors.Is(err, errDeliveryChildCapacity) {
 		t.Fatalf("global overflow error = %v", err)
 	}
-	if global, user := budget.usage("user-a"); global != 4 || user != 2 {
-		t.Fatalf("budget usage = global %d/user-a %d, want 4/2", global, user)
+	if global, profile := budget.usage("profile-a"); global != 4 || profile != 2 {
+		t.Fatalf("budget usage = global %d/profile-a %d, want 4/2", global, profile)
 	}
 }
 
@@ -472,7 +599,7 @@ func TestDeliveryChildBudgetPruneAndCloseReleaseCapacity(t *testing.T) {
 	service := &Service{now: func() time.Time { return now }, deliveryChildren: budget}
 	newTable := func() *deliveryChildTable {
 		table := newDeliveryChildTable()
-		table.bindBudget(budget, "user-a", func() time.Time { return now })
+		table.bindBudget(budget, "profile-a", func() time.Time { return now })
 		return table
 	}
 	first := newTable()
@@ -485,8 +612,8 @@ func TestDeliveryChildBudgetPruneAndCloseReleaseCapacity(t *testing.T) {
 
 	now = now.Add(deliveryChildTTL)
 	service.PruneDeliveryHandles()
-	if global, user := budget.usage("user-a"); global != 0 || user != 0 {
-		t.Fatalf("usage after prune = global %d/user %d", global, user)
+	if global, profile := budget.usage("profile-a"); global != 0 || profile != 0 {
+		t.Fatalf("usage after prune = global %d/profile %d", global, profile)
 	}
 	if len(first.entries) != 0 || len(second.entries) != 0 {
 		t.Fatalf("prune retained expired entries: %d/%d", len(first.entries), len(second.entries))
@@ -507,8 +634,8 @@ func TestDeliveryChildBudgetPruneAndCloseReleaseCapacity(t *testing.T) {
 	if err := service.Close(context.Background(), auth.Principal{}, handle); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("Close terminal error = %v", err)
 	}
-	if global, user := budget.usage("user-a"); global != 0 || user != 0 {
-		t.Fatalf("usage after Close = global %d/user %d", global, user)
+	if global, profile := budget.usage("profile-a"); global != 0 || profile != 0 {
+		t.Fatalf("usage after Close = global %d/profile %d", global, profile)
 	}
 	if _, err := first.register(deliveryChildState{assetID: "stream-1", file: "segment-after-close.m4s", start: "90"}); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("closed handle accepted a new child: %v", err)
@@ -518,7 +645,7 @@ func TestDeliveryChildBudgetPruneAndCloseReleaseCapacity(t *testing.T) {
 func TestDeliveryChildBudgetConcurrentClearAndPruneNeverDoubleRelease(t *testing.T) {
 	budget := newDeliveryChildBudget(128, 128)
 	table := newDeliveryChildTable()
-	table.bindBudget(budget, "user-a", nil)
+	table.bindBudget(budget, "profile-a", nil)
 	start := make(chan struct{})
 	var group sync.WaitGroup
 	for worker := range 32 {
@@ -549,7 +676,7 @@ func TestDeliveryChildBudgetConcurrentClearAndPruneNeverDoubleRelease(t *testing
 	close(start)
 	group.Wait()
 	table.clear()
-	if global, user := budget.usage("user-a"); global != 0 || user != 0 {
-		t.Fatalf("concurrent final usage = global %d/user %d", global, user)
+	if global, profile := budget.usage("profile-a"); global != 0 || profile != 0 {
+		t.Fatalf("concurrent final usage = global %d/profile %d", global, profile)
 	}
 }

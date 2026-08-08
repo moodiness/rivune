@@ -107,7 +107,7 @@ func TestJellyfinCompatSessionsCascadeWithNativeSession(t *testing.T) {
 			auth_session_id, profile_id, token_hash, client_name, device_name,
 			client_device_id, client_version, expires_at
 		) VALUES (
-			$1, $2, decode(repeat('33', 32), 'hex'), 'Infuse', 'Migration client',
+			$1, $2, decode(repeat('33', 32), 'hex'), 'Generic Client', 'Migration client',
 			'migration-device', '1.0', now() + interval '2 hours'
 		) RETURNING id::text
 	`, authSessionID, profileID).Scan(&compatSessionID); err != nil {

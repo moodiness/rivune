@@ -795,7 +795,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Sunucunun uyumsuz medyayı yalnızca Doğrudan Oynatma ve Doğrudan Akış başarısız olduğunda dönüştürmesine izin ver",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Bu uygulama parolası yalnızca bu profille sınırlıdır.",
   "settings.jellyfinAccess.pinHint": "Bu gizli değer yalnızca bir kez gösterilir. Şimdi güvenli bir yerde saklayın.",
   "settings.jellyfinAccess.rotateWarning": "Parolayı yenilemek, mevcut uygulama parolasını ve tüm Jellyfin oturumlarını hemen geçersiz kılar.",

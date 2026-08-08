@@ -155,6 +155,18 @@ type CompletionInput struct {
 	ExpectedVersion int64
 }
 
+type UpdateUserDataInput struct {
+	PositionSeconds *int
+	DurationSeconds int
+	Played          *bool
+	Favorite        *bool
+}
+
+type UserDataState struct {
+	Progress  *Progress
+	InLibrary bool
+}
+
 const MaximumProgressBatchSize = 100
 
 type ProgressBatchItem struct {

@@ -38,6 +38,7 @@ type Capabilities struct {
 	ExternalPlayers           []string       `json:"externalPlayers,omitempty"`
 	ProcessingModes           []string       `json:"processingModes,omitempty"`
 	MediaProfiles             []MediaProfile `json:"mediaProfiles,omitempty"`
+	HLSSegmentContainer       string         `json:"hlsSegmentContainer,omitempty"`
 	MaximumVideoBitrateKbps   int            `json:"maximumVideoBitrateKbps,omitempty"`
 	MaximumAudioChannels      int            `json:"maximumAudioChannels,omitempty"`
 	SubtitleModes             []string       `json:"subtitleModes,omitempty"`
@@ -51,6 +52,7 @@ type SourcesInput struct {
 	AddonID                         string       `json:"addonId,omitempty"`
 	ResourceID                      string       `json:"resourceId"`
 	Capabilities                    Capabilities `json:"capabilities"`
+	MaximumSources                  int          `json:"-"`
 	PreferredAudioLanguage          string       `json:"-"`
 	PreferredSubtitleLanguage       string       `json:"-"`
 	PreferredForcedSubtitleLanguage string       `json:"-"`
@@ -69,6 +71,7 @@ type SourceOption struct {
 	Protocol       string    `json:"protocol"`
 	Container      string    `json:"container,omitempty"`
 	ExpiresAt      time.Time `json:"expiresAt"`
+	ReportedHeight int       `json:"-"`
 	StableIdentity string    `json:"-"`
 }
 
@@ -221,6 +224,7 @@ type storedAsset struct {
 	Kind                 string            `json:"kind"`
 	URL                  string            `json:"url"`
 	Container            string            `json:"container,omitempty"`
+	HLSSegmentContainer  string            `json:"hlsSegmentContainer,omitempty"`
 	Headers              map[string]string `json:"headers,omitempty"`
 	ToneMap              bool              `json:"toneMap,omitempty"`
 	AudioTrackIndex      *int              `json:"audioTrackIndex,omitempty"`

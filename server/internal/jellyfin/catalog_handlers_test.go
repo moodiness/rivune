@@ -1,11 +1,14 @@
 package jellyfin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -29,6 +32,9 @@ func (authentication *catalogHTTPAuthentication) Login(context.Context, CompatLo
 }
 
 func (authentication *catalogHTTPAuthentication) Authenticate(context.Context, string) (AuthenticatedSession, error) {
+	return authentication.session, nil
+}
+func (authentication *catalogHTTPAuthentication) Revalidate(context.Context, AuthenticatedSession) (AuthenticatedSession, error) {
 	return authentication.session, nil
 }
 
@@ -70,8 +76,25 @@ func TestCatalogViewsAreStableRootsAndRejectMismatchedUser(t *testing.T) {
 		result.Items[0].ServerId != catalogTestServerID || result.Items[0].Genres == nil || result.Items[0].BackdropImageTags == nil {
 		t.Fatalf("unexpected virtual roots: %+v", result)
 	}
+	for _, view := range result.Items {
+		if view.Etag != view.Id || view.DisplayPreferencesId != view.Id || view.LocationType != "FileSystem" || view.MediaType != "Unknown" ||
+			view.ImageTags == nil || len(view.ImageTags) != 0 || view.UserData == nil || view.UserData.Key != view.Id || view.UserData.ItemId != view.Id {
+			t.Fatalf("virtual root compatibility fields are incomplete: %+v", view)
+		}
+	}
+	for _, field := range []string{`"Etag"`, `"DisplayPreferencesId"`, `"LocationType"`, `"ImageTags":{}`, `"UserData"`} {
+		if !strings.Contains(response.Body.String(), field) {
+			t.Fatalf("UserViews JSON omitted %s: %s", field, response.Body.String())
+		}
+	}
 	if len(reader.queries) != 0 || len(reader.titleIDs) != 0 {
 		t.Fatalf("virtual roots queried catalog: %+v %+v", reader.queries, reader.titleIDs)
+	}
+	compactUser := authenticatedCatalogRequest(t, token, "/UserViews?UserId="+strings.ReplaceAll(catalogTestProfileID, "-", ""))
+	compactResponse := httptest.NewRecorder()
+	handler.handleViews(compactResponse, compactUser)
+	if compactResponse.Code != http.StatusOK {
+		t.Fatalf("compact query UserId status=%d body=%s", compactResponse.Code, compactResponse.Body.String())
 	}
 
 	mismatch := authenticatedCatalogRequest(t, token, "/Users/22222222-2222-4222-8222-222222222222/Views")
@@ -98,6 +121,8 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 			ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "ÉCLAIR Movie",
 			Released: "2025-01-02", Overview: "Résumé", RuntimeMinutes: &runtimeMinutes,
 			Genres: []string{"Drama"}, CommunityRating: &rating, InLibrary: true,
+			OriginalTitle: "Original Éclair", Tagline: "A bright tagline", Status: "Released",
+			People: []watchstate.CatalogPerson{{Name: "Lead Performer", Role: "Hero", Type: "Actor", ImageURL: localizedArtworkPrefix + strings.Repeat("b", 64)}},
 			ProviderIDs: map[string]string{
 				"imdb": "tt0000100", "tmdb": "100", "tvdb": "200",
 				"addon": "profile-secret", "url": "https://provider.invalid/title/100", "unknown": "opaque-secondary",
@@ -128,18 +153,50 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 		t.Fatalf("pagination contract lost: %+v", result)
 	}
 	item := result.Items[0]
-	if item.Type != "Movie" || item.MediaType != "Video" || !item.IsPlayable || item.RunTimeTicks == nil ||
-		*item.RunTimeTicks != MinutesToTicks(123) || item.ProviderIds["Imdb"] != "tt0000100" ||
-		item.ProviderIds["Tmdb"] != "100" || item.ProviderIds["Tvdb"] != "200" ||
+	if item.Type != "Movie" || item.MediaType != "Video" || !item.IsPlayable || item.PrimaryImageAspectRatio != 2.0/3.0 || item.RunTimeTicks == nil ||
+		*item.RunTimeTicks != MinutesToTicks(123) || item.OriginalTitle != "Original Éclair" || len(item.Taglines) != 1 || item.Taglines[0] != "A bright tagline" ||
+		item.Status != "Released" || len(item.People) != 1 || item.People[0].Name != "Lead Performer" || item.People[0].Role != "Hero" || item.People[0].PrimaryImageTag != strings.Repeat("b", 64) ||
+		item.ProviderIds["Imdb"] != "tt0000100" || item.ProviderIds["Tmdb"] != "100" || item.ProviderIds["Tvdb"] != "200" ||
 		item.ImageTags["Primary"] == "" || len(item.BackdropImageTags) != 0 || item.UserData == nil ||
 		item.UserData.PlaybackPositionTicks != SecondsToTicks(61) || !item.UserData.Played || item.UserData.PlayCount != 1 {
 		t.Fatalf("movie mapping incomplete: %+v", item)
 	}
+	requireDeferredMediaSource(t, item)
 	body := response.Body.String()
 	for _, forbidden := range []string{"provider.invalid", "profile-secret", "opaque-secondary", "source-secret", "secret-resource", "secret-provider", "secret-source", "/api/v1/artwork/"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("catalog response disclosed %q: %s", forbidden, body)
 		}
+	}
+	if !strings.Contains(body, `"MediaSources"`) || !strings.Contains(body, `"Path":"/rivune/00000000-0000-4000-8000-000000000100/00000000-0000-4000-8000-000000000100.strm"`) {
+		t.Fatalf("movie catalogue JSON omitted file-like media fields: %s", body)
+	}
+}
+
+func TestLatestItemsReturnsJellyfinArrayForVirtualView(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	views, ok := handler.virtualViews()
+	if !ok {
+		t.Fatal("derive virtual views")
+	}
+	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{{
+		ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "Latest Movie",
+		Genres: []string{}, ProviderIDs: map[string]string{},
+	}}}
+	request := authenticatedCatalogRequest(t, token, "/Items/Latest?userId="+catalogTestProfileID+"&parentId="+views[0].Id+"&limit=16&fields=PrimaryImageAspectRatio&fields=Path")
+	response := httptest.NewRecorder()
+	handler.handleLatestItems(response, request)
+	if response.Code != http.StatusOK || len(reader.queries) != 1 {
+		t.Fatalf("latest status=%d calls=%d body=%s", response.Code, len(reader.queries), response.Body.String())
+	}
+	query := reader.queries[0]
+	if query.ParentID != "" || query.Limit != 16 || len(query.MediaTypes) != 1 || query.MediaTypes[0] != "movie" {
+		t.Fatalf("unexpected latest query: %+v", query)
+	}
+	var items []BaseItemDto
+	decodeCatalogResponse(t, response, &items)
+	if len(items) != 1 || items[0].Name != "Latest Movie" || items[0].Type != "Movie" {
+		t.Fatalf("unexpected latest items: %+v", items)
 	}
 }
 
@@ -168,6 +225,24 @@ func TestCatalogMapsSeasonZeroAndEpisodeDetailInOneRead(t *testing.T) {
 		item.IndexNumber == nil || *item.IndexNumber != 1 || item.ParentIndexNumber == nil || *item.ParentIndexNumber != 0 ||
 		item.SeriesName != "Canonical Series" || item.SeasonName != "Specials" || item.ProviderIds["Tvdb"] != "2110" {
 		t.Fatalf("episode hierarchy mapping incomplete: %+v", item)
+	}
+	requireDeferredMediaSource(t, item)
+	if !strings.Contains(response.Body.String(), `"MediaSources"`) {
+		t.Fatalf("episode detail JSON omitted MediaSources: %s", response.Body.String())
+	}
+
+	reader.title = watchstate.CatalogTitle{
+		ID: "00000000-0000-4000-8000-000000000200", MediaType: "series", Title: "Canonical Series",
+		Genres: []string{}, ProviderIDs: map[string]string{"tvdb": "200"},
+	}
+	seriesRequest := authenticatedCatalogRequest(t, token, "/Items/00000000-0000-4000-8000-000000000200")
+	seriesRequest.SetPathValue("id", reader.title.ID)
+	seriesResponse := httptest.NewRecorder()
+	handler.handleItem(seriesResponse, seriesRequest)
+	var series BaseItemDto
+	decodeCatalogResponse(t, seriesResponse, &series)
+	if seriesResponse.Code != http.StatusOK || series.Type != "Series" || !series.IsFolder || series.Path != "" || len(series.MediaSources) != 0 || strings.Contains(seriesResponse.Body.String(), `"MediaSources"`) {
+		t.Fatalf("series detail exposed playable media: status=%d item=%+v body=%s", seriesResponse.Code, series, seriesResponse.Body.String())
 	}
 }
 
@@ -205,27 +280,73 @@ func TestCatalogSearchIsRecursivePaginatedAndProfileBound(t *testing.T) {
 func TestCatalogSortIsForwardedOrRejected(t *testing.T) {
 	handler, reader, token := newCatalogHTTPHandler(t)
 	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{}, Limit: 10}
-	request := authenticatedCatalogRequest(t, token, "/Items?Limit=10&SortBy=SortName&SortOrder=Descending")
+	request := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&Limit=10&SortBy=SortName&SortOrder=Descending")
 	response := httptest.NewRecorder()
 	handler.handleItems(response, request)
 	if response.Code != http.StatusOK || len(reader.queries) != 1 || reader.queries[0].SortBy != "sortname" || reader.queries[0].SortOrder != "descending" {
 		t.Fatalf("supported sort status=%d queries=%+v body=%s", response.Code, reader.queries, response.Body.String())
 	}
 
-	for _, query := range []string{
-		"?SortBy=DateCreated&SortOrder=Ascending",
-		"?SortBy=SortName,DateCreated&SortOrder=Descending",
-		"?SortOrder=Descending",
-	} {
-		request = authenticatedCatalogRequest(t, token, "/Items"+query)
+	compatibilityClient := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&IncludeItemTypes=Series,Movie,Video,MusicVideo&SortBy=DateLastContentAdded,DateCreated,SortName&SortOrder=Descending")
+	compatibilityClientResponse := httptest.NewRecorder()
+	handler.handleItems(compatibilityClientResponse, compatibilityClient)
+	if compatibilityClientResponse.Code != http.StatusOK || len(reader.queries) != 2 || reader.queries[1].SortBy != "" || reader.queries[1].SortOrder != "" ||
+		!reflect.DeepEqual(reader.queries[1].MediaTypes, []string{"movie", "series"}) {
+		t.Fatalf("Compatibility client query status=%d queries=%+v body=%s", compatibilityClientResponse.Code, reader.queries, compatibilityClientResponse.Body.String())
+	}
+
+	videoOnly := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&IncludeItemTypes=Video,MusicVideo")
+	videoOnlyResponse := httptest.NewRecorder()
+	handler.handleItems(videoOnlyResponse, videoOnly)
+	if videoOnlyResponse.Code != http.StatusOK || len(reader.queries) != 2 {
+		t.Fatalf("unprojected filter status=%d queries=%+v body=%s", videoOnlyResponse.Code, reader.queries, videoOnlyResponse.Body.String())
+	}
+
+	standardKinds := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&IncludeItemTypes=Movie,Audio,Folder,Trailer")
+	standardKindsResponse := httptest.NewRecorder()
+	handler.handleItems(standardKindsResponse, standardKinds)
+	if standardKindsResponse.Code != http.StatusOK || len(reader.queries) != 3 ||
+		!reflect.DeepEqual(reader.queries[2].MediaTypes, []string{"movie"}) {
+		t.Fatalf("standard unprojected kinds status=%d queries=%+v body=%s", standardKindsResponse.Code, reader.queries, standardKindsResponse.Body.String())
+	}
+
+	for _, query := range []string{"&SortBy=CommunityRating&SortOrder=Ascending", "&SortOrder=Descending"} {
+		request = authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222"+query)
 		response = httptest.NewRecorder()
 		handler.handleItems(response, request)
-		if response.Code != http.StatusBadRequest {
-			t.Fatalf("unsupported sort %q status=%d body=%s", query, response.Code, response.Body.String())
+		if response.Code != http.StatusOK {
+			t.Fatalf("standard sort %q status=%d body=%s", query, response.Code, response.Body.String())
 		}
 	}
-	if len(reader.queries) != 1 {
-		t.Fatalf("unsupported sorts reached catalog: %+v", reader.queries)
+	remuxSorts := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&SortBy=Default,AiredEpisodeOrder,DigitalReleaseDate,IsPlayed,VideoBitRate,AirTime,Studio,ParentIndexNumber,IndexNumber,SimilarityScore,SearchScore,ChannelOrder,CatalogOrder,DisplayOrder,PopularityAllTime,PopularityDay,PopularityWeek,PopularityMonth,TrendingWeek,TrendingMonth")
+	remuxSortsResponse := httptest.NewRecorder()
+	handler.handleItems(remuxSortsResponse, remuxSorts)
+	if remuxSortsResponse.Code != http.StatusOK || len(reader.queries) != 6 || reader.queries[5].SortBy != "" || reader.queries[5].SortOrder != "" {
+		t.Fatalf("Remux-compatible sorts status=%d queries=%+v body=%s", remuxSortsResponse.Code, reader.queries, remuxSortsResponse.Body.String())
+	}
+	request = authenticatedCatalogRequest(t, token, "/Items?SortBy=PrivateProviderURL")
+	response = httptest.NewRecorder()
+	handler.handleItems(response, request)
+	if response.Code != http.StatusBadRequest || len(reader.queries) != 6 {
+		t.Fatalf("unknown sort status=%d queries=%+v body=%s", response.Code, reader.queries, response.Body.String())
+	}
+}
+
+func TestCatalogRejectionLogsOnlyClosedStage(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	var logs bytes.Buffer
+	handler.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	privateValue := "PrivateProviderURLSecret"
+	request := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes="+privateValue)
+	response := httptest.NewRecorder()
+	handler.handleItems(response, request)
+	if response.Code != http.StatusBadRequest || len(reader.queries) != 0 {
+		t.Fatalf("rejected query status=%d calls=%d", response.Code, len(reader.queries))
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, `"msg":"`+compatCatalogRejectedMessage+`"`) ||
+		!strings.Contains(logged, `"stage":"include_item_types"`) || strings.Contains(logged, privateValue) {
+		t.Fatalf("unsafe or missing catalog diagnostic: %s", logged)
 	}
 }
 
@@ -292,6 +413,24 @@ func TestJellyfinProviderIDsAllowOnlyValidatedTitleIdentities(t *testing.T) {
 		if result := jellyfinProviderIDs(values); len(result) != 0 {
 			t.Fatalf("invalid provider identity %#v projected as %#v", values, result)
 		}
+	}
+}
+
+func requireDeferredMediaSource(t *testing.T, item BaseItemDto) {
+	t.Helper()
+	if len(item.MediaSources) != 1 {
+		t.Fatalf("item has %d deferred sources, want exactly one: %+v", len(item.MediaSources), item)
+	}
+	source := item.MediaSources[0]
+	expectedPath := "/rivune/" + item.Id + "/" + item.Id + ".strm"
+	expectedDirectURL := "/Videos/" + item.Id + "/stream?MediaSourceId=" + url.QueryEscape(item.Id) + "&Static=true"
+	if source.Id != item.Id || source.Name != item.Name || source.Path != expectedPath || item.Path != expectedPath || source.DirectStreamUrl != expectedDirectURL ||
+		source.Protocol != "File" || source.Type != "Default" || source.IsRemote || !source.SupportsDirectPlay ||
+		!source.SupportsDirectStream || !source.SupportsTranscoding || !source.SupportsProbing || source.VideoType != "VideoFile" || len(source.Formats) != 0 || source.RequiredHttpHeaders == nil || len(source.RequiredHttpHeaders) != 0 || source.MediaAttachments == nil || len(source.MediaAttachments) != 0 || strings.ContainsAny(source.Path, "?#") {
+		t.Fatalf("deferred file-like source contract is incomplete: item=%+v source=%+v", item, source)
+	}
+	if (source.RunTimeTicks == nil) != (item.RunTimeTicks == nil) || source.RunTimeTicks != nil && *source.RunTimeTicks != *item.RunTimeTicks {
+		t.Fatalf("deferred source runtime differs from item: item=%v source=%v", item.RunTimeTicks, source.RunTimeTicks)
 	}
 }
 

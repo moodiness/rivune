@@ -16,11 +16,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
-	compatCredentialPrefix = "rivune_jf_"
-	compatCredentialBytes  = 32
+	compatCredentialPrefix               = "rivune_jf_"
+	compatCredentialBytes                = 32
+	compatAuthenticationOperationTimeout = 5 * time.Second
 )
 
 var (
@@ -55,8 +57,9 @@ type LinkedPrincipalReloader interface {
 }
 
 type SessionStore struct {
-	pool       *pgxpool.Pool
-	principals LinkedPrincipalReloader
+	pool                  *pgxpool.Pool
+	principals            LinkedPrincipalReloader
+	authenticationFlights singleflight.Group
 }
 
 func NewSessionStore(pool *pgxpool.Pool, principals LinkedPrincipalReloader) (*SessionStore, error) {
@@ -133,17 +136,80 @@ func (s *SessionStore) Authenticate(ctx context.Context, token string) (Authenti
 	if !ok {
 		return AuthenticatedSession{}, ErrInvalidCompatCredential
 	}
+	result := s.authenticationFlights.DoChan(string(digest[:]), func() (any, error) {
+		operationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), compatAuthenticationOperationTimeout)
+		defer cancel()
+		return s.authenticateDigest(operationContext, digest)
+	})
+	select {
+	case <-ctx.Done():
+		return AuthenticatedSession{}, ctx.Err()
+	case completed := <-result:
+		if completed.Err != nil {
+			return AuthenticatedSession{}, completed.Err
+		}
+		session, valid := completed.Val.(AuthenticatedSession)
+		if !valid {
+			return AuthenticatedSession{}, errors.New("invalid compatibility authentication flight result")
+		}
+		return session, nil
+	}
+}
 
-	var session AuthenticatedSession
-	var authSessionID string
-	err := s.pool.QueryRow(ctx, `
+func (s *SessionStore) AuthenticateSession(ctx context.Context, sessionID string) (AuthenticatedSession, error) {
+	if _, err := parseUUID(sessionID); err != nil {
+		return AuthenticatedSession{}, ErrInvalidCompatCredential
+	}
+	result := s.authenticationFlights.DoChan("session:"+sessionID, func() (any, error) {
+		operationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), compatAuthenticationOperationTimeout)
+		defer cancel()
+		return s.authenticateSessionID(operationContext, sessionID)
+	})
+	select {
+	case <-ctx.Done():
+		return AuthenticatedSession{}, ctx.Err()
+	case completed := <-result:
+		if completed.Err != nil {
+			return AuthenticatedSession{}, completed.Err
+		}
+		session, valid := completed.Val.(AuthenticatedSession)
+		if !valid {
+			return AuthenticatedSession{}, errors.New("invalid compatibility session authentication flight result")
+		}
+		return session, nil
+	}
+}
+
+func (s *SessionStore) authenticateDigest(ctx context.Context, digest [sha256.Size]byte) (AuthenticatedSession, error) {
+	return s.authenticateRow(ctx, s.pool.QueryRow(ctx, `
 		SELECT id::text, auth_session_id::text, profile_id::text,
 		       client_name, device_name, client_device_id, client_version, expires_at
 		FROM jellyfin_compat_sessions
 		WHERE token_hash = $1
 		  AND expires_at > now()
 		  AND revoked_at IS NULL
-	`, digest[:]).Scan(
+	`, digest[:]))
+}
+
+func (s *SessionStore) authenticateSessionID(ctx context.Context, sessionID string) (AuthenticatedSession, error) {
+	return s.authenticateRow(ctx, s.pool.QueryRow(ctx, `
+		SELECT id::text, auth_session_id::text, profile_id::text,
+		       client_name, device_name, client_device_id, client_version, expires_at
+		FROM jellyfin_compat_sessions
+		WHERE id = $1::uuid
+		  AND expires_at > now()
+		  AND revoked_at IS NULL
+	`, sessionID))
+}
+
+type compatibilitySessionRow interface {
+	Scan(...any) error
+}
+
+func (s *SessionStore) authenticateRow(ctx context.Context, row compatibilitySessionRow) (AuthenticatedSession, error) {
+	var session AuthenticatedSession
+	var authSessionID string
+	err := row.Scan(
 		&session.ID, &authSessionID, &session.ProfileID,
 		&session.Client.Client, &session.Client.Device,
 		&session.Client.DeviceID, &session.Client.Version, &session.ExpiresAt,

@@ -674,7 +674,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Chỉ cho phép máy chủ chuyển đổi nội dung không tương thích sau khi cả Phát trực tiếp và Luồng trực tiếp đều không thành công",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Mật khẩu ứng dụng này chỉ dành cho hồ sơ này.",
   "settings.jellyfinAccess.pinHint": "Mã bí mật này chỉ được hiển thị một lần. Hãy lưu lại ngay.",
   "settings.jellyfinAccess.rotateWarning": "Việc thay đổi mật khẩu sẽ ngay lập tức vô hiệu hóa mật khẩu hiện tại và tất cả phiên Jellyfin.",

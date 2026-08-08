@@ -197,7 +197,7 @@ func (processor *FFmpegProcessor) ProcessHLS(ctx context.Context, asset storedAs
 		return err
 	}
 	defer processor.release()
-	asset.ReadRate = 1.05
+	asset.ReadRate = 1.10
 	err := processor.processHLS(ctx, asset, directory, processor.encoder)
 	if err == nil || asset.Kind != processingTranscode || processor.encoder.normalizedKind() == videoEncoderSoftware || hlsOutputStarted(directory) {
 		return err
@@ -231,19 +231,31 @@ func (processor *FFmpegProcessor) processHLS(ctx context.Context, asset storedAs
 		return err
 	}
 	if asset.Kind == processingTranscode {
-		arguments = append(arguments, "-force_key_frames", "expr:gte(t,n_forced*1)")
+		arguments = append(arguments, "-force_key_frames", "expr:gte(t,n_forced*"+strconv.Itoa(hlsSegmentDurationSeconds)+")")
 	}
 	hlsFlags := "independent_segments+temp_file"
 	if asset.Kind != processingTranscode {
 		hlsFlags = "split_by_time+temp_file"
 	}
-	arguments = append(arguments,
-		"-f", "hls", "-hls_time", "1", "-hls_list_size", "0", "-hls_playlist_type", "event",
-		"-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
-		"-hls_segment_filename", "segment-%06d.m4s",
-		"-hls_flags", hlsFlags, "index.m3u8",
-	)
+	arguments = append(arguments, hlsOutputArguments(asset, hlsFlags)...)
 	return processor.runInDirectory(ctx, arguments, nil, directory)
+}
+
+func hlsOutputArguments(asset storedAsset, hlsFlags string) []string {
+	arguments := []string{
+		"-f", "hls", "-hls_time", strconv.Itoa(hlsSegmentDurationSeconds), "-hls_list_size", "0", "-hls_playlist_type", "event",
+	}
+	if normalizedHLSSegmentContainer(asset.HLSSegmentContainer) == "mp4" {
+		arguments = append(arguments,
+			"-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
+			"-hls_segment_filename", "segment-%06d.m4s",
+		)
+	} else {
+		arguments = append(arguments,
+			"-hls_segment_type", "mpegts", "-hls_segment_filename", "segment-%06d.ts",
+		)
+	}
+	return append(arguments, "-hls_flags", hlsFlags, "index.m3u8")
 }
 
 func hlsOutputStarted(directory string) bool {

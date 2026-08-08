@@ -10,7 +10,7 @@ import (
 
 const (
 	DefaultQueryLimit      = 100
-	MaximumQueryLimit      = 100
+	MaximumQueryLimit      = 200
 	MaximumStartIndex      = 1_000_000
 	MaximumSearchTermBytes = 256
 	MaximumQueryBytes      = 8_192
@@ -181,21 +181,30 @@ func booleanValue(values url.Values, name string, fallback bool) (bool, error) {
 }
 
 func commaSeparated(values url.Values, name string) ([]string, error) {
-	raw, found, err := queryScalar(values, name)
-	if err != nil || !found || raw == "" {
-		return nil, err
+	rawValues := make([]string, 0, 1)
+	for actualName, entries := range values {
+		if strings.EqualFold(actualName, name) {
+			rawValues = append(rawValues, entries...)
+		}
 	}
-	parts := strings.Split(raw, ",")
-	if len(parts) > MaximumQueryListValues {
-		return nil, invalidQuery(name + " contains too many values")
+	if len(rawValues) == 0 {
+		return nil, nil
 	}
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" || len(part) > MaximumQueryValueBytes {
+	result := make([]string, 0, len(rawValues))
+	for _, raw := range rawValues {
+		if raw == "" {
 			return nil, invalidQuery(name + " contains an invalid value")
 		}
-		result = append(result, part)
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" || len(part) > MaximumQueryValueBytes {
+				return nil, invalidQuery(name + " contains an invalid value")
+			}
+			result = append(result, part)
+			if len(result) > MaximumQueryListValues {
+				return nil, invalidQuery(name + " contains too many values")
+			}
+		}
 	}
 	return result, nil
 }

@@ -143,6 +143,21 @@ func (s *AuthenticationService) Authenticate(ctx context.Context, token string) 
 	if err != nil {
 		return AuthenticatedSession{}, err
 	}
+	return s.authorizeSession(ctx, session)
+}
+
+func (s *AuthenticationService) Revalidate(ctx context.Context, expected AuthenticatedSession) (AuthenticatedSession, error) {
+	session, err := s.sessions.AuthenticateSession(ctx, expected.ID)
+	if err != nil {
+		return AuthenticatedSession{}, err
+	}
+	if !sameAuthenticatedSessionOwner(expected, session) {
+		return AuthenticatedSession{}, ErrInvalidCompatCredential
+	}
+	return s.authorizeSession(ctx, session)
+}
+
+func (s *AuthenticationService) authorizeSession(ctx context.Context, session AuthenticatedSession) (AuthenticatedSession, error) {
 	account, err := s.native.Account(ctx, session.Principal)
 	if err != nil {
 		return AuthenticatedSession{}, fmt.Errorf("load compatibility profile identity: %w", err)
@@ -168,6 +183,13 @@ func (s *AuthenticationService) Authenticate(ctx context.Context, token string) 
 		return AuthenticatedSession{}, ErrInvalidCompatCredential
 	}
 	return session, nil
+}
+
+func sameAuthenticatedSessionOwner(expected, actual AuthenticatedSession) bool {
+	return expected.ID != "" && expected.ID == actual.ID && expected.ProfileID == actual.ProfileID &&
+		expected.Client.DeviceID == actual.Client.DeviceID && expected.Principal.SessionID == actual.Principal.SessionID &&
+		expected.Principal.UserID == actual.Principal.UserID && expected.Principal.DeviceID == actual.Principal.DeviceID &&
+		actual.Principal.ActiveProfileID != nil && *actual.Principal.ActiveProfileID == actual.ProfileID
 }
 
 func (s *AuthenticationService) Logout(ctx context.Context, session AuthenticatedSession) error {

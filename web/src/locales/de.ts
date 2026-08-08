@@ -795,7 +795,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Dem Server erlauben, inkompatible Medien erst umzuwandeln, nachdem Direktwiedergabe und Direktstreaming fehlgeschlagen sind",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Dieses App-Passwort ist auf dieses Profil beschränkt.",
   "settings.jellyfinAccess.pinHint": "Dieses Geheimnis wird nur einmal angezeigt. Speichere es jetzt.",
   "settings.jellyfinAccess.rotateWarning": "Beim Erneuern werden das aktuelle Passwort und alle Jellyfin-Sitzungen sofort ungültig.",

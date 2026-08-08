@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/moodiness/rivune/server/internal/addon"
@@ -56,16 +57,21 @@ func (store *orchestrationStore) ResolveLinkedCatalogTitle(_ context.Context, _ 
 }
 
 type orchestrationMetadata struct {
-	movies       metadata.MoviePage
-	series       metadata.SeriesPage
-	movieErr     error
-	seriesErr    error
-	moviePages   map[int]metadata.MoviePage
-	seriesPages  map[int]metadata.SeriesPage
-	movieErrors  map[int]error
-	seriesErrors map[int]error
-	movieCalls   []int
-	seriesCalls  []int
+	movies          metadata.MoviePage
+	series          metadata.SeriesPage
+	movieErr        error
+	seriesErr       error
+	moviePages      map[int]metadata.MoviePage
+	seriesPages     map[int]metadata.SeriesPage
+	movieErrors     map[int]error
+	seriesErrors    map[int]error
+	movieCalls      []int
+	seriesCalls     []int
+	movieDetail     metadata.Movie
+	seriesDetail    metadata.Series
+	movieDetailErr  error
+	seriesDetailErr error
+	detailIDs       []string
 }
 
 func (service *orchestrationMetadata) SearchLinkedMovies(_ context.Context, _ auth.Principal, options metadata.SearchOptions) (metadata.MoviePage, error) {
@@ -87,6 +93,20 @@ func (service *orchestrationMetadata) SearchLinkedSeries(_ context.Context, _ au
 		return service.seriesPages[options.Page], nil
 	}
 	return service.series, service.seriesErr
+}
+
+func (service *orchestrationMetadata) MovieDetails(_ context.Context, _ auth.Principal, id, _ string) (metadata.Movie, error) {
+	service.detailIDs = append(service.detailIDs, id)
+	return service.movieDetail, service.movieDetailErr
+}
+
+func (service *orchestrationMetadata) SeriesDetails(_ context.Context, _ auth.Principal, id string, _ metadata.SeriesDetailsOptions) (metadata.Series, error) {
+	service.detailIDs = append(service.detailIDs, id)
+	return service.seriesDetail, service.seriesDetailErr
+}
+
+func (*orchestrationMetadata) SeasonDetails(context.Context, auth.Principal, string, string, string) (metadata.Season, error) {
+	return metadata.Season{}, nil
 }
 
 type orchestrationAddons struct {
@@ -179,6 +199,42 @@ func TestCatalogOrchestrationSearchesNonLibrarySourcesDeduplicatesSortsAndPages(
 	lookup, err := readerValue.GetCatalogTitle(context.Background(), auth.Principal{}, page.Items[0].ID)
 	if err != nil || lookup.ID != page.Items[0].ID || lookup.ResourceID != "movie-1" || lookup.ResourceProvider != "tmdb" {
 		t.Fatalf("external search result was not immediately readable/playable: %+v error %v", lookup, err)
+	}
+}
+
+func TestCatalogDetailEnrichmentPreservesAuthorizedPlaybackIdentity(t *testing.T) {
+	const titleID = "10000000-0000-4000-8000-000000000010"
+	runtimeMinutes := 99
+	rating := float32(7.5)
+	snapshot := watchstate.CatalogTitle{
+		ID: titleID, MediaType: "movie", Title: "Snapshot", PosterURL: localizedArtworkPrefix + strings.Repeat("a", 64),
+		Genres: []string{}, ProviderIDs: map[string]string{"imdb": "tt0000010"}, ResourceID: "opaque-resource",
+		ResourceProvider: "addon", SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", SourceCatalogID: "movie", SourceName: "Trusted",
+	}
+	store := &orchestrationStore{titles: map[string]watchstate.CatalogTitle{titleID: snapshot}}
+	metadataService := &orchestrationMetadata{movieDetail: metadata.Movie{
+		ID: titleID, MediaType: "movie", Title: "Enriched", OriginalTitle: "Original", Overview: "Full overview",
+		ReleaseDate: "2026-07-24", PosterURL: "https://provider.invalid/poster.jpg?secret=1", BackdropURL: "https://provider.invalid/backdrop.jpg?secret=2",
+		Tagline: "The tagline", RuntimeMinutes: runtimeMinutes, Genres: []metadata.Genre{{Name: "Adventure"}},
+		Cast:        []metadata.CastMember{{Name: "Performer", Character: "Hero", ProfileURL: "https://provider.invalid/cast.jpg?secret=3"}},
+		VoteAverage: float64(rating), ExternalIDs: map[string]string{"tmdb": "10"},
+	}}
+	readerValue, err := NewCatalogReader(store, metadataService, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enriched, err := readerValue.(catalogDetailReader).EnrichCatalogTitle(context.Background(), auth.Principal{}, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(metadataService.detailIDs, []string{titleID}) || enriched.ID != titleID || enriched.ResourceID != "opaque-resource" ||
+		enriched.SourceAddonID != snapshot.SourceAddonID || enriched.SourceCatalogID != snapshot.SourceCatalogID || enriched.Title != "Enriched" ||
+		enriched.OriginalTitle != "Original" || enriched.Overview != "Full overview" || enriched.Tagline != "The tagline" ||
+		enriched.RuntimeMinutes == nil || *enriched.RuntimeMinutes != runtimeMinutes || enriched.CommunityRating == nil || *enriched.CommunityRating != rating ||
+		len(enriched.Genres) != 1 || enriched.Genres[0] != "Adventure" || len(enriched.People) != 1 || enriched.People[0].Role != "Hero" ||
+		enriched.People[0].ImageURL != "" || enriched.ProviderIDs["imdb"] != "tt0000010" || enriched.ProviderIDs["tmdb"] != "10" ||
+		enriched.PosterURL != snapshot.PosterURL || strings.Contains(fmt.Sprintf("%+v", enriched), "provider.invalid") {
+		t.Fatalf("detail enrichment lost identity or leaked provider data: %+v calls=%v", enriched, metadataService.detailIDs)
 	}
 }
 

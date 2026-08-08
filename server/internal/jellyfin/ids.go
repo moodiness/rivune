@@ -32,8 +32,9 @@ type VirtualItemID struct {
 type VirtualItemKey string
 
 const (
-	VirtualMoviesView  VirtualItemKey = "view:movies"
-	VirtualTVShowsView VirtualItemKey = "view:tv-shows"
+	VirtualMoviesView      VirtualItemKey = "view:movies"
+	VirtualTVShowsView     VirtualItemKey = "view:tv-shows"
+	VirtualCollectionsView VirtualItemKey = "view:collections"
 )
 
 func ParseServerID(raw string) (ServerID, error) {
@@ -84,15 +85,22 @@ func (id VirtualItemID) String() string {
 
 func parseUUID(raw string) (uuidValue, error) {
 	var value uuidValue
-	if len(raw) != 36 || raw[8] != '-' || raw[13] != '-' || raw[18] != '-' || raw[23] != '-' {
+	var encoded [32]byte
+	switch len(raw) {
+	case len(encoded):
+		copy(encoded[:], raw)
+	case 36:
+		if raw[8] != '-' || raw[13] != '-' || raw[18] != '-' || raw[23] != '-' {
+			return value, ErrInvalidID
+		}
+		copy(encoded[0:8], raw[0:8])
+		copy(encoded[8:12], raw[9:13])
+		copy(encoded[12:16], raw[14:18])
+		copy(encoded[16:20], raw[19:23])
+		copy(encoded[20:32], raw[24:36])
+	default:
 		return value, ErrInvalidID
 	}
-	var encoded [32]byte
-	copy(encoded[0:8], raw[0:8])
-	copy(encoded[8:12], raw[9:13])
-	copy(encoded[12:16], raw[14:18])
-	copy(encoded[16:20], raw[19:23])
-	copy(encoded[20:32], raw[24:36])
 	if _, err := hex.Decode(value[:], encoded[:]); err != nil || value == (uuidValue{}) {
 		return uuidValue{}, ErrInvalidID
 	}

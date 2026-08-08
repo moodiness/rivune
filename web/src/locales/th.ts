@@ -674,7 +674,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "อนุญาตให้เซิร์ฟเวอร์แปลงสื่อที่ไม่รองรับ เมื่อทั้งการเล่นโดยตรงและสตรีมโดยตรงไม่สำเร็จเท่านั้น",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "รหัสผ่านแอปนี้ใช้ได้เฉพาะกับโปรไฟล์นี้เท่านั้น",
   "settings.jellyfinAccess.pinHint": "ข้อมูลลับนี้จะแสดงเพียงครั้งเดียว โปรดบันทึกไว้ตอนนี้",
   "settings.jellyfinAccess.rotateWarning": "การหมุนเวียนรหัสผ่านจะทำให้รหัสผ่านปัจจุบันและเซสชัน Jellyfin ทั้งหมดใช้ไม่ได้ทันที",
