@@ -327,6 +327,18 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 	for index := range service.authorized.Folders {
 		service.authorized.Folders[index].TileShape = collection.TileShapePoster
 	}
+	coverURL := "https://provider.invalid/vidhub-landscape-cover.png"
+	coverTag := strings.Repeat("d", 64)
+	hydratedTag := strings.Repeat("e", 64)
+	localizedCover := localizedArtworkPrefix + coverTag
+	localizedHydrated := localizedArtworkPrefix + hydratedTag
+	service.authorized.Folders[0].CoverImageURL = coverURL
+	presenter := &searchArtworkPresenter{
+		localized:  map[string]string{coverURL: localizedCover, collectionHydratedCoverURL: localizedHydrated},
+		registered: map[string]string{localizedCover: coverTag, localizedHydrated: hydratedTag},
+	}
+	handler.catalog.(*catalogReader).artwork = presenter
+	handler.artwork = presenter
 	virtual, ok := handler.virtualViews()
 	if !ok {
 		t.Fatal("virtual views unavailable")
@@ -341,6 +353,8 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 		views.Items[0].Id != virtual[0].Id || views.Items[1].Id != virtual[1].Id ||
 		views.Items[2].Id != collectionCompatID || views.Items[2].Id == virtual[2].Id ||
 		views.Items[2].Type != "CollectionFolder" || views.Items[2].CollectionType != "homevideos" ||
+		views.Items[2].PrimaryImageAspectRatio != 16.0/9.0 || views.Items[2].ImageTags["Thumb"] != coverTag ||
+		len(views.Items[2].BackdropImageTags) != 1 || views.Items[2].BackdropImageTags[0] != coverTag ||
 		views.Items[2].UserData == nil || views.Items[2].UserData.ItemId != collectionCompatID {
 		t.Fatalf("VidHub home views status=%d result=%+v", viewsResponse.Code, views)
 	}
@@ -364,10 +378,32 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 		t.Fatalf("VidHub home collection row status=%d items=%+v body=%s", latestResponse.Code, latest, latestResponse.Body.String())
 	}
 	for _, item := range latest {
-		if item.Type != "Folder" || item.ParentId != collectionCompatID || item.PrimaryImageAspectRatio != 16.0/9.0 ||
-			item.UserData == nil || item.UserData.ItemId != item.Id {
+		if item.Type != "Folder" || item.ParentId != collectionCompatID || item.CollectionType != "homevideos" ||
+			item.PrimaryImageAspectRatio != 16.0/9.0 || item.ImageTags["Thumb"] == "" || len(item.BackdropImageTags) != 1 ||
+			item.BackdropImageTags[0] != item.ImageTags["Thumb"] || item.UserData == nil || item.UserData.ItemId != item.Id {
 			t.Fatalf("VidHub home row contains an invalid landscape folder: %+v", item)
 		}
+	}
+	backdropRequest := authenticatedCatalogRequest(t, token, "/Items/"+latest[0].Id+"/Images/Backdrop/0")
+	backdropRequest.SetPathValue("id", latest[0].Id)
+	backdropRequest.SetPathValue("type", "Backdrop")
+	backdropRequest.SetPathValue("index", "0")
+	backdropResponse := httptest.NewRecorder()
+	handler.handleIndexedImage(backdropResponse, backdropRequest)
+	if backdropResponse.Code != http.StatusOK || len(presenter.served) != 1 || presenter.served[0] != latest[0].BackdropImageTags[0] {
+		t.Fatalf("VidHub advertised folder backdrop status=%d served=%v item=%+v", backdropResponse.Code, presenter.served, latest[0])
+	}
+	detailRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items/"+collectionCompatID)
+	detailRequest.SetPathValue("userId", catalogTestProfileID)
+	detailRequest.SetPathValue("itemId", collectionCompatID)
+	detailResponse := httptest.NewRecorder()
+	handler.handleUserItem(detailResponse, detailRequest)
+	var detail BaseItemDto
+	decodeCatalogResponse(t, detailResponse, &detail)
+	if detailResponse.Code != http.StatusOK || detail.Type != "CollectionFolder" || detail.CollectionType != "homevideos" ||
+		detail.PrimaryImageAspectRatio != 16.0/9.0 || detail.ImageTags["Thumb"] != coverTag ||
+		len(detail.BackdropImageTags) != 1 || detail.BackdropImageTags[0] != coverTag {
+		t.Fatalf("VidHub promoted collection detail status=%d item=%+v", detailResponse.Code, detail)
 	}
 
 	itemsRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&Recursive=true&Limit=2")

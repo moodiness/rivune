@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-
-	"github.com/moodiness/rivune/server/internal/collection"
 )
 
 func (handler *Handler) handleImage(response http.ResponseWriter, request *http.Request) {
@@ -61,28 +59,18 @@ func (handler *Handler) serveImage(response http.ResponseWriter, request *http.R
 	} else if handler.collections != nil {
 		value, collectionErr := handler.collections.Get(request.Context(), session.Principal, request.PathValue("id"))
 		if collectionErr == nil {
-			imageTags, backdropTags := handler.collectionArtworkTags(request.Context(), session.Principal, value)
-			key := ""
-			if imageType == "Primary" || imageType == "Thumb" {
-				key = imageTags["Primary"]
-			} else if len(backdropTags) != 0 {
-				key = backdropTags[0]
-			}
-			if key != "" {
+			item := handler.collectionViewDTO(request.Context(), session.Principal, value)
+			if key := collectionItemArtworkKey(item, imageType); key != "" {
 				handler.artwork.ServeKey(response, request, key)
 				return
 			}
 		}
-		if imageType == "Primary" || imageType == "Thumb" {
-			value, folder, folderErr := handler.findCollectionFolder(request.Context(), session.Principal, request.PathValue("id"))
-			localizer, canLocalize := handler.catalog.(catalogArtworkLocalizer)
-			if folderErr == nil && canLocalize {
-				folders := []collection.Folder{folder}
-				handler.hydrateCollectionFolderCovers(request.Context(), session.Principal, value.ID, folders)
-				localized := localizer.LocalizeArtworkURLs(request.Context(), []string{folders[0].CoverImageURL})
-				if len(localized) == 1 {
-					materialized = localized[0]
-				}
+		value, folder, folderErr := handler.findCollectionFolder(request.Context(), session.Principal, request.PathValue("id"))
+		if folderErr == nil {
+			item := handler.collectionFolderDetailDTO(request.Context(), session.Principal, value, folder)
+			if key := collectionItemArtworkKey(item, imageType); key != "" {
+				handler.artwork.ServeKey(response, request, key)
+				return
 			}
 		}
 	}
@@ -92,6 +80,23 @@ func (handler *Handler) serveImage(response http.ResponseWriter, request *http.R
 		return
 	}
 	handler.artwork.ServeKey(response, request, key)
+}
+
+func collectionItemArtworkKey(item BaseItemDto, imageType string) string {
+	switch imageType {
+	case "Primary":
+		return item.ImageTags["Primary"]
+	case "Thumb":
+		if tag := item.ImageTags["Thumb"]; tag != "" {
+			return tag
+		}
+		return item.ImageTags["Primary"]
+	case "Backdrop":
+		if len(item.BackdropImageTags) != 0 {
+			return item.BackdropImageTags[0]
+		}
+	}
+	return ""
 }
 
 func compatCredentialTransportPresent(request *http.Request) bool {

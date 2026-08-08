@@ -366,7 +366,11 @@ func (handler *Handler) writeItem(response http.ResponseWriter, request *http.Re
 	if handler.collections != nil {
 		value, collectionErr := handler.collections.Get(request.Context(), session.Principal, itemID.String())
 		if collectionErr == nil {
-			handler.writeJSON(response, http.StatusOK, handler.collectionDTO(request.Context(), session.Principal, value))
+			if isVidHubClient(session.Client) {
+				handler.writeJSON(response, http.StatusOK, handler.collectionViewDTO(request.Context(), session.Principal, value))
+			} else {
+				handler.writeJSON(response, http.StatusOK, handler.collectionDTO(request.Context(), session.Principal, value))
+			}
 			return
 		}
 		if !errors.Is(collectionErr, collection.ErrNotFound) {
@@ -600,6 +604,7 @@ func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth
 			for index, materialized := range localized {
 				if tag, valid := localizedArtworkTag(materialized); valid {
 					items[index].ImageTags = collectionFolderImageTags(value.FolderCoverShape, tag)
+					items[index].BackdropImageTags = collectionFolderBackdropImageTags(value.FolderCoverShape, tag)
 				}
 			}
 		}
@@ -847,11 +852,19 @@ func (handler *Handler) collectionDTO(ctx context.Context, principal auth.Princi
 
 func (handler *Handler) collectionViewDTO(ctx context.Context, principal auth.Principal, value collection.Collection) BaseItemDto {
 	imageTags, backdropImageTags := handler.collectionArtworkTags(ctx, principal, value)
+	shape := value.FolderCoverShape
+	if tag := imageTags["Primary"]; tag != "" && strings.EqualFold(strings.TrimSpace(shape), collection.TileShapeLandscape) {
+		imageTags["Thumb"] = tag
+		if len(backdropImageTags) == 0 {
+			backdropImageTags = append(backdropImageTags, tag)
+		}
+	}
 	return BaseItemDto{
 		Id: value.ID, ServerId: handler.serverInfo.ID.String(), Name: value.Title, SortName: value.Title,
 		Etag: value.ID, DisplayPreferencesId: value.ID, LocationType: "FileSystem",
-		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: collectionViewType(value.FolderCoverShape), IsFolder: true,
-		Genres: []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags,
+		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: collectionViewType(shape), IsFolder: true,
+		PrimaryImageAspectRatio: collectionFolderAspectRatio(shape),
+		Genres:                  []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags,
 		UserData: &UserItemDataDto{Key: value.ID, ItemId: value.ID},
 	}
 }
@@ -860,7 +873,7 @@ func (handler *Handler) collectionFolderDTO(value collection.Collection, folder 
 	return BaseItemDto{
 		Id: folder.ID, ServerId: handler.serverInfo.ID.String(), Name: folder.Title, SortName: folder.Title,
 		Etag: folder.ID, DisplayPreferencesId: folder.ID, LocationType: "FileSystem",
-		Type: "Folder", MediaType: "Unknown", IsFolder: true, ParentId: value.ID,
+		Type: "Folder", MediaType: "Unknown", CollectionType: collectionViewType(value.FolderCoverShape), IsFolder: true, ParentId: value.ID,
 		PrimaryImageAspectRatio: collectionFolderAspectRatio(value.FolderCoverShape),
 		Genres:                  []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: folder.ID, ItemId: folder.ID},
 	}
@@ -878,6 +891,13 @@ func collectionFolderImageTags(shape, tag string) map[string]string {
 		tags["Thumb"] = tag
 	}
 	return tags
+}
+
+func collectionFolderBackdropImageTags(shape, tag string) []string {
+	if strings.EqualFold(strings.TrimSpace(shape), collection.TileShapeLandscape) {
+		return []string{tag}
+	}
+	return []string{}
 }
 
 func collectionFolderAspectRatio(shape string) float64 {
@@ -905,6 +925,7 @@ func (handler *Handler) collectionFolderDetailDTO(ctx context.Context, principal
 	if len(localized) == 1 {
 		if tag, valid := localizedArtworkTag(localized[0]); valid {
 			item.ImageTags = collectionFolderImageTags(value.FolderCoverShape, tag)
+			item.BackdropImageTags = collectionFolderBackdropImageTags(value.FolderCoverShape, tag)
 		}
 	}
 	return item

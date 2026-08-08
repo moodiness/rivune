@@ -100,6 +100,13 @@ func TestParseCompatTokenSeparatesAudienceAndRejectsAmbiguity(t *testing.T) {
 		t.Fatalf("empty pre-auth token credential error = %v", err)
 	}
 
+	emptyPreAuthWithQuery := httptest.NewRequest(http.MethodGet, "/Items/id/Images/Primary?api_key="+token, nil)
+	emptyPreAuthWithQuery.Header.Set("Authorization", `MediaBrowser Client="VidHub", Device="Tablet", DeviceId="vidhub-device", Version="3.0.3", Token=""`)
+	parsed, err = ParseCompatToken(emptyPreAuthWithQuery, true)
+	if err != nil || parsed != token {
+		t.Fatalf("empty pre-auth token with query credential parsed %q with error %v", parsed, err)
+	}
+
 	mixedAudience := httptest.NewRequest(http.MethodGet, "/Items", nil)
 	mixedAudience.Header.Set("X-Emby-Token", token)
 	mixedAudience.Header.Set("Authorization", "Bearer rivune_at_native-token")

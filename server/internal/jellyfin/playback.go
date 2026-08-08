@@ -256,12 +256,11 @@ func (handler *Handler) handleStream(response http.ResponseWriter, request *http
 }
 
 func (handler *Handler) authenticateStreamRequest(response http.ResponseWriter, request *http.Request, itemID, playID, mediaID string) (AuthenticatedSession, bool) {
-	apiKey, found, err := queryScalar(request.URL.Query(), "api_key")
+	playCapability, err := streamCapabilityPresent(request.URL.Query(), playID)
 	if err != nil {
 		handler.writeStreamError(response, request, http.StatusUnauthorized, "Unauthorized", "A valid stream capability is required")
 		return AuthenticatedSession{}, false
 	}
-	playCapability := found && subtle.ConstantTimeCompare([]byte(apiKey), []byte(playID)) == 1
 	if playCapability && !compatCredentialHeaderPresent(request) {
 		cached, valid := handler.playSessions.streamSession(playID, itemID, mediaID)
 		if !valid {
@@ -286,7 +285,7 @@ func (handler *Handler) authenticateStreamRequest(response http.ResponseWriter, 
 		authRequest = request.Clone(request.Context())
 		clonedURL := *request.URL
 		values := clonedURL.Query()
-		values.Del("api_key")
+		deleteQueryFold(values, "api_key")
 		clonedURL.RawQuery = values.Encode()
 		authRequest.URL = &clonedURL
 	}
@@ -297,18 +296,62 @@ func scopedStreamDeliveryRequest(request *http.Request, playID string) *http.Req
 	cloned := request.Clone(request.Context())
 	clonedURL := *request.URL
 	values := clonedURL.Query()
+	deleteQueryFold(values, "api_key")
 	values.Set("api_key", playID)
 	clonedURL.RawQuery = values.Encode()
 	cloned.URL = &clonedURL
 	return cloned
 }
 
+func streamCapabilityPresent(values url.Values, playID string) (bool, error) {
+	count := 0
+	matches := 0
+	for name, entries := range values {
+		if !strings.EqualFold(name, "api_key") {
+			continue
+		}
+		for _, entry := range entries {
+			count++
+			if subtle.ConstantTimeCompare([]byte(entry), []byte(playID)) == 1 {
+				matches++
+			}
+		}
+	}
+	if count == 0 || count == 1 {
+		return matches == 1, nil
+	}
+	if count == 2 && matches == 1 {
+		return true, nil
+	}
+	return false, ErrInvalidQuery
+}
+
+func deleteQueryFold(values url.Values, name string) {
+	for actualName := range values {
+		if strings.EqualFold(actualName, name) {
+			delete(values, actualName)
+		}
+	}
+}
+
 func compatCredentialHeaderPresent(request *http.Request) bool {
 	if request == nil {
 		return false
 	}
+	if !boundedCompatHeaders(request.Header) {
+		return true
+	}
 	for _, name := range []string{"X-Emby-Token", "X-MediaBrowser-Token"} {
 		if len(request.Header.Values(name)) != 0 {
+			return true
+		}
+	}
+	if values := request.Header.Values("Authorization"); len(values) == 1 {
+		parameters, relevant, err := parseAuthorizationValue(values[0], true)
+		if err != nil || !relevant {
+			return true
+		}
+		if token, found := parameters["token"]; found && token != "" {
 			return true
 		}
 	}
@@ -317,11 +360,12 @@ func compatCredentialHeaderPresent(request *http.Request) bool {
 		return true
 	}
 	if found {
-		_, hasToken := parameters["token"]
-		return hasToken
+		token, hasToken := parameters["token"]
+		return hasToken && token != ""
 	}
-	return len(request.Header.Values("Authorization")) != 0
+	return false
 }
+
 func parsePlaybackInfoRequest(response http.ResponseWriter, request *http.Request) (PlaybackInfoRequest, error) {
 	if err := validateQueryBudget(request.URL.Query()); err != nil {
 		return PlaybackInfoRequest{}, err

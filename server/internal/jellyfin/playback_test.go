@@ -446,16 +446,24 @@ func TestStreamOpensOnlySelectedSourceAndPreservesRangeHEADAndSeeking(t *testing
 
 func TestAdvertisedStreamCapabilityServesPlayerGETWithoutProfileCredential(t *testing.T) {
 	for _, test := range []struct {
-		name             string
-		mutatePath       func(string, string) string
-		header           bool
-		wantStatus       int
-		wantRevalidation int
+		name                 string
+		mutatePath           func(string, string, string) string
+		tokenHeader          bool
+		authorizationHeader  string
+		xAuthorizationHeader string
+		wantStatus           int
+		wantRevalidation     int
 	}{
 		{name: "scoped capability", wantStatus: http.StatusNoContent, wantRevalidation: 1},
-		{name: "scoped capability with matching header", header: true, wantStatus: http.StatusNoContent},
-		{name: "missing capability", mutatePath: func(path, playID string) string { return strings.Replace(path, "&api_key="+playID, "", 1) }, wantStatus: http.StatusUnauthorized},
-		{name: "wrong capability", mutatePath: func(path, playID string) string {
+		{name: "scoped capability with matching header", tokenHeader: true, wantStatus: http.StatusNoContent},
+		{name: "scoped capability with VidHub identity", authorizationHeader: `Emby Client="VidHub", Device="iPhone", DeviceId="vidhub-player", Version="3.0.3"`, wantStatus: http.StatusNoContent, wantRevalidation: 1},
+		{name: "scoped capability with VidHub empty token", authorizationHeader: `Emby Client="VidHub", Device="iPhone", DeviceId="vidhub-player", Version="3.0.3", Token=""`, wantStatus: http.StatusNoContent, wantRevalidation: 1},
+		{name: "scoped capability with appended profile credential", mutatePath: func(path, _, token string) string { return path + "&api_key=" + token }, wantStatus: http.StatusNoContent, wantRevalidation: 1},
+		{name: "scoped capability with appended case-alias credential", mutatePath: func(path, _, token string) string { return path + "&API_KEY=" + token }, wantStatus: http.StatusNoContent, wantRevalidation: 1},
+		{name: "oversized VidHub identity is rejected", authorizationHeader: `Emby Client="VidHub", Device="iPhone", DeviceId="vidhub-player", Version="3.0.3", Token="", Padding="` + strings.Repeat("x", maximumCompatAuthorizationHeaderBytes) + `"`, wantStatus: http.StatusUnauthorized},
+		{name: "mixed unsupported authorization is rejected", authorizationHeader: "Bearer incompatible", xAuthorizationHeader: `MediaBrowser Client="VidHub", Device="iPhone", DeviceId="vidhub-player", Version="3.0.3"`, wantStatus: http.StatusUnauthorized},
+		{name: "missing capability", mutatePath: func(path, playID, _ string) string { return strings.Replace(path, "&api_key="+playID, "", 1) }, wantStatus: http.StatusUnauthorized},
+		{name: "wrong capability", mutatePath: func(path, playID, _ string) string {
 			return strings.Replace(path, "api_key="+playID, "api_key=wrong-capability", 1)
 		}, wantStatus: http.StatusUnauthorized},
 	} {
@@ -469,12 +477,18 @@ func TestAdvertisedStreamCapabilityServesPlayerGETWithoutProfileCredential(t *te
 			}
 			path := info.MediaSources[0].Path
 			if test.mutatePath != nil {
-				path = test.mutatePath(path, info.PlaySessionId)
+				path = test.mutatePath(path, info.PlaySessionId, fixture.token)
 			}
 			request := httptest.NewRequest(http.MethodGet, path, nil)
 			request.SetPathValue("id", fixture.item.ID)
-			if test.header {
+			if test.tokenHeader {
 				request.Header.Set("X-Emby-Token", fixture.token)
+			}
+			if test.authorizationHeader != "" {
+				request.Header.Set("Authorization", test.authorizationHeader)
+			}
+			if test.xAuthorizationHeader != "" {
+				request.Header.Set("X-Emby-Authorization", test.xAuthorizationHeader)
 			}
 			response := httptest.NewRecorder()
 			fixture.handler.handleStream(response, request)
@@ -482,14 +496,15 @@ func TestAdvertisedStreamCapabilityServesPlayerGETWithoutProfileCredential(t *te
 				t.Fatalf("advertised GET status=%d want=%d path=%q body=%s", response.Code, test.wantStatus, path, response.Body.String())
 			}
 			wantServed := test.wantStatus == http.StatusNoContent
-			if (fixture.delivery.serveCalls == 1) != wantServed || (fixture.delivery.openCalls == 1) != wantServed || fixture.authentication.revalidateCalls != test.wantRevalidation {
-				t.Fatalf("delivery calls open=%d serve=%d revalidate=%d wantServed=%t wantRevalidation=%d", fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.authentication.revalidateCalls, wantServed, test.wantRevalidation)
+			if (fixture.delivery.serveCalls == 1) != wantServed || (fixture.delivery.openCalls == 1) != wantServed ||
+				wantServed && fixture.delivery.servedAPIKeyCount != 1 || fixture.authentication.revalidateCalls != test.wantRevalidation {
+				t.Fatalf("delivery calls open=%d serve=%d apiKeys=%d revalidate=%d wantServed=%t wantRevalidation=%d", fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.delivery.servedAPIKeyCount, fixture.authentication.revalidateCalls, wantServed, test.wantRevalidation)
 			}
 		})
 	}
 }
 
-func TestGeneralQueryCredentialIsReplacedBeforeHLSDelivery(t *testing.T) {
+func TestObservedVidHubGeneralQueryCredentialIsReplacedBeforeHLSDelivery(t *testing.T) {
 	fixture := newPlaybackFixture(t)
 	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{SourceRef: "canonical-child-capability", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)}}}
 	listed := fixture.playbackInfo(http.MethodPost, `{"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}}`)
@@ -497,8 +512,10 @@ func TestGeneralQueryCredentialIsReplacedBeforeHLSDelivery(t *testing.T) {
 	if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil || len(info.MediaSources) != 1 {
 		t.Fatalf("playback info=%+v err=%v", info, err)
 	}
-	path := strings.Replace(info.MediaSources[0].Path, "api_key="+info.PlaySessionId, "api_key="+fixture.token, 1)
+	path := strings.Replace(info.MediaSources[0].Path, "api_key="+info.PlaySessionId, "api_key="+fixture.token, 1) +
+		"&DeviceId=vidhub-player&X-Emby-Client=VidHub&X-Emby-Device-Name=iPhone&X-Emby-Device-Id=vidhub-player&X-Emby-Client-Version=3.0.3&X-Emby-Token=" + fixture.token
 	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.Header.Set("Authorization", `Emby Client="VidHub", Device="iPhone", DeviceId="vidhub-player", Version="3.0.3", Token=""`)
 	request.SetPathValue("id", fixture.item.ID)
 	response := httptest.NewRecorder()
 	fixture.handler.handleStream(response, request)
@@ -1915,6 +1932,7 @@ type fakeCompatPlaybackDelivery struct {
 	servedRange       string
 	servedStartTicks  string
 	servedAPIKey      string
+	servedAPIKeyCount int
 	openGate          <-chan struct{}
 	openIgnoreContext bool
 	openStarted       chan<- struct{}
@@ -2028,6 +2046,11 @@ func (delivery *fakeCompatPlaybackDelivery) Serve(response http.ResponseWriter, 
 	delivery.servedRange = request.Header.Get("Range")
 	delivery.servedStartTicks = request.URL.Query().Get("StartTimeTicks")
 	delivery.servedAPIKey = request.URL.Query().Get("api_key")
+	for name, entries := range request.URL.Query() {
+		if strings.EqualFold(name, "api_key") {
+			delivery.servedAPIKeyCount += len(entries)
+		}
+	}
 	if delivery.serveErr != nil {
 		return delivery.serveErr
 	}

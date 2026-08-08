@@ -127,7 +127,7 @@ func ParseCompatToken(request *http.Request, allowQuery bool) (string, error) {
 		return "", ErrInvalidCompatAuthorization
 	}
 	if found {
-		if token, ok := parameters["token"]; ok {
+		if token, ok := parameters["token"]; ok && token != "" {
 			candidates = append(candidates, token)
 		}
 	}
