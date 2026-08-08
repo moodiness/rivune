@@ -981,6 +981,9 @@ func (handler *Handler) resolveCollectionWindow(ctx context.Context, principal a
 	titles := make([]watchstate.CatalogTitle, 0, capacity)
 	providerFailed := false
 	for _, folder := range value.Folders {
+		if !collectionFolderMayContainMediaTypes(folder, allowed) {
+			continue
+		}
 		for page := 1; page <= maximumCollectionResolvePage; page++ {
 			resolved, err := handler.collections.ResolveFolder(ctx, principal, value.ID, folder.ID, page, maximumCollectionResolveLimit, "", "")
 			if err != nil {
@@ -1046,6 +1049,44 @@ func (handler *Handler) resolveCollectionWindow(ctx context.Context, principal a
 		})
 	}
 	return titles, false, nil
+}
+
+func collectionFolderMayContainMediaTypes(folder collection.Folder, allowed map[string]struct{}) bool {
+	if len(folder.Sources) == 0 {
+		return true
+	}
+	for _, source := range folder.Sources {
+		mediaType := ""
+		switch source.Kind {
+		case collection.SourceKindAddonCatalog:
+			if source.AddonCatalog != nil {
+				mediaType = source.AddonCatalog.Type
+			}
+		case collection.SourceKindTMDB:
+			if source.TMDB != nil {
+				mediaType = source.TMDB.MediaType
+			}
+		case collection.SourceKindTrakt:
+			if source.Trakt != nil {
+				mediaType = source.Trakt.MediaType
+			}
+		case collection.SourceKindMDBList:
+			if source.MDBList != nil {
+				mediaType = source.MDBList.MediaType
+			}
+		}
+		mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+		if mediaType == "" || mediaType == collection.MediaTypeBoth {
+			return true
+		}
+		if mediaType == "show" {
+			mediaType = collection.MediaTypeSeries
+		}
+		if _, ok := allowed[mediaType]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 type collectionTitleOutcome struct {

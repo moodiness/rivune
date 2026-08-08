@@ -664,7 +664,9 @@ func TestVirtualCatalogRootsProjectAuthorizedCollections(t *testing.T) {
 	})
 
 	t.Run("latest", func(t *testing.T) {
-		handler, _, _, token := newCollectionCompatHandler(t)
+		handler, service, _, token := newCollectionCompatHandler(t)
+		service.authorized.Folders[0].Sources = []collection.Source{{Kind: collection.SourceKindAddonCatalog, AddonCatalog: &collection.AddonCatalogSource{Type: collection.MediaTypeMovie}}}
+		service.authorized.Folders[1].Sources = []collection.Source{{Kind: collection.SourceKindAddonCatalog, AddonCatalog: &collection.AddonCatalogSource{Type: collection.MediaTypeSeries}}}
 		views, ok := handler.virtualViews()
 		if !ok {
 			t.Fatal("virtual views unavailable")
@@ -676,6 +678,11 @@ func TestVirtualCatalogRootsProjectAuthorizedCollections(t *testing.T) {
 		decodeCatalogResponse(t, response, &items)
 		if response.Code != http.StatusOK || len(items) != 1 || items[0].Id != collectionSeriesID || items[0].Type != "Series" {
 			t.Fatalf("collection-backed series latest status=%d items=%+v", response.Code, items)
+		}
+		for _, call := range service.calls {
+			if call.folderID != service.authorized.Folders[1].ID {
+				t.Fatalf("series projection resolved incompatible folder: %+v", service.calls)
+			}
 		}
 	})
 
