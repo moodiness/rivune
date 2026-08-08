@@ -51,6 +51,7 @@ type SourcesInput struct {
 	AddonID                         string       `json:"addonId,omitempty"`
 	ResourceID                      string       `json:"resourceId"`
 	Capabilities                    Capabilities `json:"capabilities"`
+	MaximumSources                  int          `json:"-"`
 	PreferredAudioLanguage          string       `json:"-"`
 	PreferredSubtitleLanguage       string       `json:"-"`
 	PreferredForcedSubtitleLanguage string       `json:"-"`

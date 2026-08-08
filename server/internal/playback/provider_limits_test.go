@@ -76,12 +76,14 @@ func TestSourcesRejectsOverLimitProviderBeforeReferenceWork(t *testing.T) {
 	for _, test := range []struct {
 		name                string
 		count               int
+		maximumSources      int
 		wantError           bool
 		wantSources         int
 		wantReferences      int
 		wantProfileTxBegins int
 	}{
 		{name: "at limit", count: addon.MaximumProviderStreams, wantSources: addon.MaximumProviderStreams, wantReferences: addon.MaximumProviderStreams, wantProfileTxBegins: 2},
+		{name: "caller limit", count: addon.MaximumProviderStreams, maximumSources: 15, wantSources: 15, wantReferences: 15, wantProfileTxBegins: 2},
 		{name: "over limit", count: addon.MaximumProviderStreams + 1, wantError: true, wantProfileTxBegins: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -104,7 +106,8 @@ func TestSourcesRejectsOverLimitProviderBeforeReferenceWork(t *testing.T) {
 				SessionID: "session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
 			}, SourcesInput{
 				MediaType: "movie", AddonID: "cardinality-addon", ResourceID: "tt-cardinality",
-				Capabilities: Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}},
+				Capabilities:   Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}},
+				MaximumSources: test.maximumSources,
 			})
 			if test.wantError {
 				if !errors.Is(err, ErrProviderUnavailable) {

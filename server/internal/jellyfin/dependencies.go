@@ -25,6 +25,10 @@ type CatalogReader interface {
 	ListCatalogItems(context.Context, auth.Principal, watchstate.CatalogQuery) (watchstate.CatalogPage, error)
 }
 
+type catalogDetailReader interface {
+	EnrichCatalogTitle(context.Context, auth.Principal, watchstate.CatalogTitle) (watchstate.CatalogTitle, error)
+}
+
 type catalogBatchReader interface {
 	GetCatalogTitles(context.Context, auth.Principal, []string) ([]watchstate.CatalogTitle, error)
 }

@@ -12,7 +12,7 @@ func TestProtocolDTOsUseJellyfinPascalCase(t *testing.T) {
 		PublicSystemInfo{}, SystemInfo{}, SystemEndpointInfo{}, AuthenticateByName{},
 		AuthenticationResult{}, UserDto{}, UserPolicy{}, UserConfiguration{}, SessionInfoDto{},
 		CompatErrorResponse{}, CompatErrorStatus{},
-		QueryResult[BaseItemDto]{}, BaseItemDto{}, UserItemDataDto{}, SearchHintDto{}, SearchHintResult{},
+		QueryResult[BaseItemDto]{}, BaseItemDto{}, BaseItemPerson{}, UserItemDataDto{}, SearchHintDto{}, SearchHintResult{},
 		PlaybackInfoRequest{}, PlaybackInfoResponse{}, MediaSourceInfo{}, DeviceProfile{},
 		DirectPlayProfile{}, TranscodingProfile{}, SubtitleProfile{}, PlaybackProgressInfo{},
 		DisplayPreferencesDto{},
@@ -35,18 +35,19 @@ func TestProtocolDTOsUseJellyfinPascalCase(t *testing.T) {
 	}
 
 	payload, err := json.Marshal(BaseItemDto{
-		Id:         "item-id",
-		ServerId:   "server-id",
-		Name:       "Signal",
-		Type:       "Movie",
-		MediaType:  "Video",
-		IsPlayable: true,
+		Id:                      "item-id",
+		ServerId:                "server-id",
+		Name:                    "Signal",
+		Type:                    "Movie",
+		MediaType:               "Video",
+		IsPlayable:              true,
+		PrimaryImageAspectRatio: 16.0 / 9.0,
 	})
 	if err != nil {
 		t.Fatalf("marshal BaseItemDto: %v", err)
 	}
 	encoded := string(payload)
-	for _, key := range []string{"\"Id\"", "\"ServerId\"", "\"Name\"", "\"Type\"", "\"MediaType\"", "\"IsPlayable\""} {
+	for _, key := range []string{"\"Id\"", "\"ServerId\"", "\"Name\"", "\"Type\"", "\"MediaType\"", "\"IsPlayable\"", "\"PrimaryImageAspectRatio\""} {
 		if !strings.Contains(encoded, key) {
 			t.Errorf("encoded DTO does not contain %s: %s", key, encoded)
 		}
@@ -55,6 +56,13 @@ func TestProtocolDTOsUseJellyfinPascalCase(t *testing.T) {
 		if strings.Contains(encoded, key) {
 			t.Errorf("encoded DTO contains native-style key %s: %s", key, encoded)
 		}
+	}
+	withoutRatio, err := json.Marshal(BaseItemDto{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(withoutRatio), "PrimaryImageAspectRatio") {
+		t.Fatalf("zero aspect ratio was serialized: %s", withoutRatio)
 	}
 }
 

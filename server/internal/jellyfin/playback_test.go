@@ -79,8 +79,8 @@ func TestPlaybackCapabilitiesRejectUnsupportedAndUnboundedProfiles(t *testing.T)
 func TestPlaybackInfoListsMultipleSourcesLazilyInOrderWithoutDisclosure(t *testing.T) {
 	fixture := newPlaybackFixture(t)
 	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{
-		{SourceRef: "source-ref-provider-secret-1", Name: "First", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
-		{SourceRef: "source-ref-provider-secret-2", Name: "Second", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour)},
+		{SourceRef: "source-ref-provider-secret-1", Name: "https://provider.invalid/watch?token=provider-secret", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
+		{SourceRef: "source-ref-provider-secret-2", Name: "Bearer provider-name-secret; Cookie=provider-cookie", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour)},
 		{SourceRef: "source-ref-provider-secret-external", Name: "External", Protocol: "external", ExpiresAt: fixture.now.Add(time.Hour)},
 	}}
 	body := fmt.Sprintf(`{"UserId":%q,"MaxStreamingBitrate":5000000,"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4,mkv","VideoCodec":"h264","AudioCodec":"aac","Type":"Video"}]}}`, fixture.authentication.session.ProfileID)
@@ -95,11 +95,11 @@ func TestPlaybackInfoListsMultipleSourcesLazilyInOrderWithoutDisclosure(t *testi
 	if fixture.delivery.openCalls != 0 || len(result.MediaSources) != 2 {
 		t.Fatalf("lazy sources: opens=%d sources=%#v", fixture.delivery.openCalls, result.MediaSources)
 	}
-	if result.MediaSources[0].Id != fixture.item.ID || result.MediaSources[0].Name != "First" || result.MediaSources[1].Name != "Second" || result.MediaSources[1].Id == fixture.item.ID {
+	if result.MediaSources[0].Id != fixture.item.ID || result.MediaSources[0].Name != "Source 1" || result.MediaSources[1].Name != "Source 2" || result.MediaSources[1].Id == fixture.item.ID {
 		t.Fatalf("source ordering/opaque IDs = %#v", result.MediaSources)
 	}
 	encoded := response.Body.String()
-	for _, secret := range []string{"source-ref-provider-secret", "provider-token", "/api/v1/", fixture.token} {
+	for _, secret := range []string{"source-ref-provider-secret", "provider-token", "provider.invalid", "provider-name-secret", "provider-cookie", "/api/v1/", fixture.token} {
 		if strings.Contains(encoded, secret) {
 			t.Fatalf("compat playback JSON disclosed %q: %s", secret, encoded)
 		}
@@ -129,6 +129,105 @@ func TestPlaybackInfoGETUsesConservativeProfileAndPreservesSeekingInPath(t *test
 		!result.MediaSources[0].SupportsTranscoding || result.MediaSources[0].TranscodingSubProtocol != "Hls" ||
 		result.MediaSources[0].TranscodingUrl != result.MediaSources[0].Path || fixture.delivery.openCalls != 0 {
 		t.Fatalf("GET playback result=%#v opens=%d", result, fixture.delivery.openCalls)
+	}
+}
+
+func TestCompatibilityPlaybackCapsSourcesBelowReferenceQuotas(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.delivery.sources.Sources = make([]playback.SourceOption, maximumCompatibilityMediaSources+5)
+	for index := range fixture.delivery.sources.Sources {
+		fixture.delivery.sources.Sources[index] = playback.SourceOption{
+			SourceRef: fmt.Sprintf("bounded-source-%02d", index), Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour),
+		}
+	}
+	response := fixture.playbackInfo(http.MethodGet, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result PlaybackInfoResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.MediaSources) != maximumCompatibilityMediaSources || len(fixture.delivery.sourceInputs) != 1 ||
+		fixture.delivery.sourceInputs[0].MaximumSources != maximumCompatibilityMediaSources {
+		t.Fatalf("sources=%d inputs=%+v", len(result.MediaSources), fixture.delivery.sourceInputs)
+	}
+}
+
+func TestVidHubItemDetailEmbedsScopedPlayableSources(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.authentication.session.Client = ClientIdentity{Client: "VidHub", DeviceID: "vidhub-detail"}
+	fixture.item.Title = "Playable detail"
+	fixture.item.Genres = []string{}
+	fixture.item.ProviderIDs = map[string]string{"imdb": "tt0000042"}
+	fixture.handler.catalog.(*fakeCompatPlaybackCatalog).item = fixture.item
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{
+		{SourceRef: "detail-source-secret-1", Name: "https://provider.invalid/signed?token=detail-secret", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
+		{SourceRef: "detail-source-secret-2", Name: "Bearer detail-provider-secret", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour)},
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/Users/"+fixture.authentication.session.ProfileID+"/Items/"+fixture.item.ID+"?Fields=MediaSources", nil)
+	request.SetPathValue("userId", fixture.authentication.session.ProfileID)
+	request.SetPathValue("itemId", fixture.item.ID)
+	request.Header.Set("X-Emby-Token", fixture.token)
+	response := httptest.NewRecorder()
+	fixture.handler.handleUserItem(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", response.Code, response.Body.String())
+	}
+	var item BaseItemDto
+	if err := json.Unmarshal(response.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if len(item.MediaSources) != 2 || item.MediaSources[0].Name != "Source 1" || item.MediaSources[1].Name != "Source 2" ||
+		item.MediaSources[0].Protocol != "Http" || item.MediaSources[0].Container != "mp4" || item.MediaSources[1].Container != "mkv" ||
+		!strings.Contains(item.MediaSources[0].Path, "PlaySessionId=") || !strings.Contains(item.MediaSources[0].Path, "MediaSourceId=") ||
+		strings.Contains(response.Body.String(), "detail-source-secret") || strings.Contains(response.Body.String(), "provider.invalid") || strings.Contains(response.Body.String(), "detail-provider-secret") ||
+		fixture.delivery.sourceCalls != 1 || len(fixture.delivery.sourceInputs) != 1 || fixture.delivery.sourceInputs[0].MaximumSources != maximumCompatibilityMediaSources || fixture.delivery.openCalls != 0 {
+		t.Fatalf("detail sources=%+v sourceCalls=%d openCalls=%d body=%s", item.MediaSources, fixture.delivery.sourceCalls, fixture.delivery.openCalls, response.Body.String())
+	}
+}
+
+func TestVidHubItemDetailKeepsDeferredSourceWhenDiscoveryFails(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.authentication.session.Client = ClientIdentity{Client: "VidHub", DeviceID: "vidhub-detail-fallback"}
+	fixture.item.Title = "Fallback detail"
+	fixture.item.Genres = []string{}
+	fixture.handler.catalog.(*fakeCompatPlaybackCatalog).item = fixture.item
+	request := httptest.NewRequest(http.MethodGet, "/Users/"+fixture.authentication.session.ProfileID+"/Items/"+fixture.item.ID, nil)
+	request.SetPathValue("userId", fixture.authentication.session.ProfileID)
+	request.SetPathValue("itemId", fixture.item.ID)
+	request.Header.Set("X-Emby-Token", fixture.token)
+	response := httptest.NewRecorder()
+	fixture.handler.handleUserItem(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", response.Code, response.Body.String())
+	}
+	var item BaseItemDto
+	if err := json.Unmarshal(response.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	requireDeferredMediaSource(t, item)
+}
+
+func TestEpisodeDetailUsesSeriesPlaybackIdentity(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	seasonNumber, episodeNumber := 1, 2
+	series := watchstate.CatalogTitle{
+		ID: "66666666-6666-4666-8666-666666666666", MediaType: "series", ProviderIDs: map[string]string{"imdb": "tt7587890"},
+	}
+	fixture.item = watchstate.CatalogTitle{
+		ID: fixture.item.ID, MediaType: "episode", SeriesID: series.ID, ParentOrdinal: &seasonNumber, Ordinal: &episodeNumber,
+		Genres: []string{}, ProviderIDs: map[string]string{"tmdb": "12345"},
+	}
+	fixture.handler.catalog.(*fakeCompatPlaybackCatalog).item = fixture.item
+	fixture.handler.catalog.(*fakeCompatPlaybackCatalog).series = &series
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{
+		SourceRef: "episode-source", Name: "Episode", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour),
+	}}}
+	sources := fixture.handler.detailMediaSources(context.Background(), fixture.authentication.session, fixture.item)
+	if len(sources) != 1 || len(fixture.delivery.sourceInputs) != 1 || fixture.delivery.sourceInputs[0].MediaType != "episode" ||
+		fixture.delivery.sourceInputs[0].ResourceID != "tt7587890:1:2" || fixture.delivery.sourceInputs[0].AddonID != "" || fixture.delivery.sourceInputs[0].MaximumSources != maximumCompatibilityMediaSources {
+		t.Fatalf("episode sources=%+v inputs=%+v", sources, fixture.delivery.sourceInputs)
 	}
 }
 
@@ -1551,13 +1650,19 @@ func (*fakeCompatPlaybackAuthentication) Logout(context.Context, AuthenticatedSe
 	return nil
 }
 
-type fakeCompatPlaybackCatalog struct{ item watchstate.CatalogTitle }
+type fakeCompatPlaybackCatalog struct {
+	item   watchstate.CatalogTitle
+	series *watchstate.CatalogTitle
+}
 
 func (catalog *fakeCompatPlaybackCatalog) GetCatalogTitle(_ context.Context, _ auth.Principal, id string) (watchstate.CatalogTitle, error) {
-	if id != catalog.item.ID {
-		return watchstate.CatalogTitle{}, watchstate.ErrNotFound
+	if id == catalog.item.ID {
+		return catalog.item, nil
 	}
-	return catalog.item, nil
+	if catalog.series != nil && id == catalog.series.ID {
+		return *catalog.series, nil
+	}
+	return watchstate.CatalogTitle{}, watchstate.ErrNotFound
 }
 func (*fakeCompatPlaybackCatalog) ListCatalogItems(context.Context, auth.Principal, watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
 	return watchstate.CatalogPage{}, errors.New("not used")
@@ -1578,6 +1683,7 @@ type fakeCompatPlaybackDelivery struct {
 	closeErrors       []error
 	closeErr          error
 	sourceCalls       int
+	sourceInputs      []playback.SourcesInput
 	inputs            []playback.ResolveInput
 	openCalls         int
 	serveCalls        int
@@ -1603,10 +1709,11 @@ type fakeCompatPlaybackDelivery struct {
 	closeMaxActive    int
 }
 
-func (delivery *fakeCompatPlaybackDelivery) Sources(context.Context, auth.Principal, playback.SourcesInput) (playback.SourceList, error) {
+func (delivery *fakeCompatPlaybackDelivery) Sources(_ context.Context, _ auth.Principal, input playback.SourcesInput) (playback.SourceList, error) {
 	delivery.mu.Lock()
 	defer delivery.mu.Unlock()
 	delivery.sourceCalls++
+	delivery.sourceInputs = append(delivery.sourceInputs, input)
 	return delivery.sources, nil
 }
 func (delivery *fakeCompatPlaybackDelivery) SourcesAndPin(ctx context.Context, principal auth.Principal, input playback.SourcesInput) (playback.SourceList, error) {

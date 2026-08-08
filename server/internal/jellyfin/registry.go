@@ -196,7 +196,7 @@ func (registry *playSessionRegistry) register(ctx context.Context, session Authe
 		if candidateIndex > 0 {
 			mediaID = derivedMediaSourceID(playID, candidateIndex)
 		}
-		descriptor := playSourceDescriptor{ID: mediaID, Name: option.Name, Protocol: option.Protocol, Container: option.Container}
+		descriptor := playSourceDescriptor{ID: mediaID, Name: fmt.Sprintf("Source %d", candidateIndex+1), Protocol: option.Protocol, Container: option.Container}
 		entry.sourceOrder = append(entry.sourceOrder, mediaID)
 		entry.sources[mediaID] = &playSessionSource{descriptor: descriptor, key: playSourceKeyFor(option), sourceRef: option.SourceRef, expiresAt: option.ExpiresAt.UTC()}
 		descriptors = append(descriptors, descriptor)

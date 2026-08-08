@@ -193,6 +193,7 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 			('00000000-0000-4000-8000-000000000310', 'season', '00000000-0000-4000-8000-000000000300', 0, 'Specials', NULL, NULL, NULL, NULL, NULL, NULL, '99999999-9999-4999-8999-999999999999', NULL, NULL, NULL, NULL, NULL),
 			('00000000-0000-4000-8000-000000000311', 'episode', '00000000-0000-4000-8000-000000000310', 4, 'Custom Special', NULL, NULL, 'S00E04', '2026-01-01', 'custom-episode-one', 'addon', '99999999-9999-4999-8999-999999999999', NULL, NULL, NULL, NULL, NULL),
 			('00000000-0000-4000-8000-000000000320', 'series', NULL, NULL, 'Profile One Search Result', NULL, NULL, 'Custom', NULL, 'custom-series-search', 'addon', '99999999-9999-4999-8999-999999999999', 'search', 'Addon One', 'US', 'en', 'Drama'),
+			('00000000-0000-4000-8000-000000000321', 'season', '00000000-0000-4000-8000-000000000320', 1, 'One', NULL, NULL, NULL, NULL, NULL, NULL, '99999999-9999-4999-8999-999999999999', NULL, NULL, NULL, NULL, NULL),
 			('00000000-0000-4000-8000-000000000400', 'series', NULL, NULL, 'Éclair Hidden', NULL, NULL, 'Custom', NULL, 'custom-series-two', 'addon', '99999999-9999-4999-8999-999999999999', 'custom', 'Addon Two', 'GB', 'en', 'Comedy');
 
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
@@ -205,7 +206,8 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 			('00000000-0000-4000-8000-000000000210', 'tmdb', 'season', '200-season-0'),
 			('00000000-0000-4000-8000-000000000211', 'tvdb', 'episode', '2110'),
 			('00000000-0000-4000-8000-000000000220', 'tmdb', 'season', '200-season-1'),
-			('00000000-0000-4000-8000-000000000221', 'tvdb', 'episode', '2210');
+			('00000000-0000-4000-8000-000000000221', 'tvdb', 'episode', '2210'),
+			('00000000-0000-4000-8000-000000000321', 'tmdb', 'season', '320-season-1');
 		INSERT INTO profile_title_external_ids (profile_id, title_id, provider, namespace, external_id) VALUES
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000300', 'addon', 'series', 'series-profile-one'),
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000310', 'addon', 'season', 'season-profile-one-0'),
@@ -284,8 +286,10 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 	episodes, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{
 		ParentID: "00000000-0000-4000-8000-000000000210", MediaTypes: []string{"episode"}, Limit: 20,
 	})
-	if err != nil || episodes.Total != 1 || len(episodes.Items) != 1 {
-		t.Fatalf("list season-zero episodes: %+v error %v", episodes, err)
+	if err != nil || episodes.Total != 1 || len(episodes.Items) != 1 ||
+		episodes.Items[0].SeriesID != "00000000-0000-4000-8000-000000000200" || episodes.Items[0].SeriesTitle != "Canonical Series" ||
+		episodes.Items[0].SeasonID != "00000000-0000-4000-8000-000000000210" || episodes.Items[0].SeasonTitle != "Specials" {
+		t.Fatalf("list season-zero episodes lost authorized hierarchy: %+v error %v", episodes, err)
 	}
 	if counter.pages.Load() != 3 {
 		t.Fatalf("episode children emitted %d catalog page queries, want 3 total", counter.pages.Load())
@@ -385,6 +389,12 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 	})
 	if err != nil || inaccessibleChildren.Total != 0 || len(inaccessibleChildren.Items) != 0 {
 		t.Fatalf("inaccessible parent leaked children: %+v error %v", inaccessibleChildren, err)
+	}
+	linkedSeasons, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{
+		ParentID: "00000000-0000-4000-8000-000000000320", MediaTypes: []string{"season"}, Limit: 20,
+	})
+	if err != nil || linkedSeasons.Total != 1 || len(linkedSeasons.Items) != 1 || linkedSeasons.Items[0].ID != "00000000-0000-4000-8000-000000000321" {
+		t.Fatalf("accessible non-library series lost materialized seasons: %+v error %v", linkedSeasons, err)
 	}
 
 	expiredAt := time.Now().UTC().Add(-time.Minute)

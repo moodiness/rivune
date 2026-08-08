@@ -50,6 +50,13 @@ type CatalogProgress struct {
 	LastWatchedAt   *time.Time
 }
 
+type CatalogPerson struct {
+	Name     string `json:"name"`
+	Role     string `json:"role,omitempty"`
+	Type     string `json:"type"`
+	ImageURL string `json:"imageUrl,omitempty"`
+}
+
 // CatalogTitle is a read-only canonical title snapshot. ProviderIDs contains
 // global identities plus identities belonging to the active profile only.
 // Resource and source fields are internal provenance snapshots and must not be
@@ -63,6 +70,7 @@ type CatalogTitle struct {
 	Ordinal          *int              `json:"ordinal,omitempty"`
 	ParentOrdinal    *int              `json:"parentOrdinal,omitempty"`
 	Title            string            `json:"title,omitempty"`
+	OriginalTitle    string            `json:"originalTitle,omitempty"`
 	SeriesTitle      string            `json:"seriesTitle,omitempty"`
 	SeasonTitle      string            `json:"seasonTitle,omitempty"`
 	PosterURL        string            `json:"posterUrl,omitempty"`
@@ -73,6 +81,10 @@ type CatalogTitle struct {
 	RuntimeMinutes   *int              `json:"runtimeMinutes,omitempty"`
 	Genres           []string          `json:"genres"`
 	CommunityRating  *float32          `json:"communityRating,omitempty"`
+	Tagline          string            `json:"tagline,omitempty"`
+	Status           string            `json:"status,omitempty"`
+	EndDate          string            `json:"endDate,omitempty"`
+	People           []CatalogPerson   `json:"people,omitempty"`
 	InLibrary        bool              `json:"inLibrary"`
 	Progress         *CatalogProgress  `json:"progress,omitempty"`
 	ResourceID       string            `json:"resourceId,omitempty"`
@@ -258,10 +270,11 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		WITH RECURSIVE accessible_titles AS (`+accessibleTitlesSQL+`),
 		profile_catalog AS MATERIALIZED (
 			SELECT title.*, library.added_at AS catalog_added_at
-			FROM profile_library library
-			JOIN titles title ON title.id = library.title_id
+			FROM titles title
 			JOIN accessible_titles accessible ON accessible.id = title.id
-			WHERE library.profile_id = $1::uuid AND title.parent_id IS NULL
+			LEFT JOIN profile_library library ON library.title_id = title.id AND library.profile_id = $1::uuid
+			WHERE ($2::uuid IS NULL AND library.title_id IS NOT NULL AND title.parent_id IS NULL)
+			   OR ($2::uuid IS NOT NULL AND title.id = $2::uuid)
 			UNION ALL
 			SELECT child.*, parent.catalog_added_at
 			FROM titles child
@@ -337,8 +350,10 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		       COALESCE(provider_ids.providers, ARRAY[]::text[]), COALESCE(provider_ids.external_ids, ARRAY[]::text[])
 		FROM catalog_total
 		LEFT JOIN catalog_page title ON true
-		LEFT JOIN profile_catalog parent ON parent.id = title.parent_id
-		LEFT JOIN profile_catalog series ON series.id = parent.parent_id
+		LEFT JOIN titles parent ON parent.id = title.parent_id
+		  AND EXISTS (SELECT 1 FROM accessible_titles accessible_parent WHERE accessible_parent.id = parent.id)
+		LEFT JOIN titles series ON series.id = parent.parent_id
+		  AND EXISTS (SELECT 1 FROM accessible_titles accessible_series WHERE accessible_series.id = series.id)
 		LEFT JOIN profile_library library ON library.profile_id = $1::uuid AND library.title_id = title.id
 		LEFT JOIN profile_progress progress ON progress.profile_id = $1::uuid AND progress.title_id = title.id
 		LEFT JOIN LATERAL (

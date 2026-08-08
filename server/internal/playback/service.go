@@ -161,6 +161,9 @@ func (service *Service) sources(ctx context.Context, principal auth.Principal, i
 	if err != nil {
 		return SourceList{}, ErrProviderUnavailable
 	}
+	if input.MaximumSources > 0 && len(sources) > input.MaximumSources {
+		sources = sources[:input.MaximumSources]
+	}
 	if len(sources) == 0 && len(batch.Errors) > 0 {
 		return SourceList{}, ErrProviderUnavailable
 	}
@@ -562,7 +565,7 @@ func (service *Service) Stop(ctx context.Context, principal auth.Principal, sess
 }
 
 func validateSourcesInput(input SourcesInput) error {
-	if len(input.MediaType) < 1 || len(input.MediaType) > 64 || len(input.ResourceID) < 1 || len(input.ResourceID) > 2048 || len(input.AddonID) > 128 {
+	if len(input.MediaType) < 1 || len(input.MediaType) > 64 || len(input.ResourceID) < 1 || len(input.ResourceID) > 2048 || len(input.AddonID) > 128 || input.MaximumSources < 0 || input.MaximumSources > maximumAggregateProviderStreams {
 		return ErrInvalidInput
 	}
 	if len(input.PreferredAudioLanguage) > 64 || len(input.PreferredSubtitleLanguage) > 64 || len(input.PreferredForcedSubtitleLanguage) > 64 {

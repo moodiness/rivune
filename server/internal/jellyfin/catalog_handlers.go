@@ -181,8 +181,27 @@ func (handler *Handler) handleSeasons(response http.ResponseWriter, request *htt
 	if !ok || !handler.requireOptionalQueryUser(response, request, session) {
 		return
 	}
+	seriesID, err := ParseItemID(request.PathValue("seriesId"))
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid series id")
+		return
+	}
+	series, err := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, seriesID.String())
+	if err != nil {
+		handler.writeCatalogError(response, err)
+		return
+	}
+	if series.MediaType != "series" {
+		handler.writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "Resource not found")
+		return
+	}
+	if detailReader, supported := handler.catalog.(catalogDetailReader); supported {
+		if _, detailErr := detailReader.EnrichCatalogTitle(request.Context(), session.Principal, series); detailErr != nil && request.Context().Err() != nil {
+			return
+		}
+	}
 	types := []string{"season"}
-	handler.writeItems(response, request, session, &catalogHierarchy{parentID: request.PathValue("seriesId"), mediaTypes: types})
+	handler.writeItems(response, request, session, &catalogHierarchy{parentID: seriesID.String(), mediaTypes: types})
 }
 
 func (handler *Handler) handleEpisodes(response http.ResponseWriter, request *http.Request) {
@@ -215,6 +234,11 @@ func (handler *Handler) handleEpisodes(response http.ResponseWriter, request *ht
 		if season.MediaType != "season" || !strings.EqualFold(season.SeriesID, seriesID.String()) {
 			handler.writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "Resource not found")
 			return
+		}
+		if detailReader, supported := handler.catalog.(catalogDetailReader); supported {
+			if _, detailErr := detailReader.EnrichCatalogTitle(request.Context(), session.Principal, season); detailErr != nil && request.Context().Err() != nil {
+				return
+			}
 		}
 		hierarchy.parentID = parsedSeason.String()
 		hierarchy.recursive = false
@@ -364,7 +388,21 @@ func (handler *Handler) writeItem(response http.ResponseWriter, request *http.Re
 		handler.writeCatalogError(response, err)
 		return
 	}
-	handler.writeJSON(response, http.StatusOK, handler.baseItemDTO(title, query.EnableUserData))
+	if detailReader, ok := handler.catalog.(catalogDetailReader); ok {
+		enriched, detailErr := detailReader.EnrichCatalogTitle(request.Context(), session.Principal, title)
+		if detailErr == nil {
+			title = enriched
+		} else if request.Context().Err() != nil {
+			return
+		}
+	}
+	item := handler.baseItemDTO(title, query.EnableUserData)
+	if isVidHubClient(session.Client) && (title.MediaType == "movie" || title.MediaType == "episode") {
+		if sources := handler.detailMediaSources(request.Context(), session, title); len(sources) != 0 {
+			item.MediaSources = sources
+		}
+	}
+	handler.writeJSON(response, http.StatusOK, item)
 }
 
 func (handler *Handler) writeItems(response http.ResponseWriter, request *http.Request, session AuthenticatedSession, fixed *catalogHierarchy) {
@@ -823,7 +861,21 @@ func (handler *Handler) collectionFolderDTO(value collection.Collection, folder 
 		Id: folder.ID, ServerId: handler.serverInfo.ID.String(), Name: folder.Title, SortName: folder.Title,
 		Etag: folder.ID, DisplayPreferencesId: folder.ID, LocationType: "FileSystem",
 		Type: "Folder", MediaType: "Unknown", IsFolder: true, ParentId: value.ID,
-		Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: folder.ID, ItemId: folder.ID},
+		PrimaryImageAspectRatio: collectionFolderAspectRatio(value.FolderCoverShape),
+		Genres:                  []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: folder.ID, ItemId: folder.ID},
+	}
+}
+
+func collectionFolderAspectRatio(shape string) float64 {
+	switch strings.ToLower(strings.TrimSpace(shape)) {
+	case collection.TileShapePoster:
+		return 2.0 / 3.0
+	case collection.TileShapeLandscape:
+		return 16.0 / 9.0
+	case collection.TileShapeSquare:
+		return 1
+	default:
+		return 0
 	}
 }
 
@@ -1139,16 +1191,19 @@ func standardJellyfinSort(value string) bool {
 func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserData bool) BaseItemDto {
 	item := BaseItemDto{
 		Id: title.ID, ServerId: handler.serverInfo.ID.String(), Name: title.Title, SortName: title.Title,
-		Etag: title.ID, LocationType: "FileSystem",
+		Etag: title.ID, LocationType: "FileSystem", OriginalTitle: title.OriginalTitle,
 		ParentId: title.ParentID, SeriesId: title.SeriesID, SeasonId: title.SeasonID,
 		SeriesName: title.SeriesTitle, SeasonName: title.SeasonTitle,
 		IndexNumber: title.Ordinal, ParentIndexNumber: title.ParentOrdinal, Overview: title.Overview,
-		Genres: append([]string(nil), title.Genres...), CommunityRating: title.CommunityRating,
+		Status: title.Status, Genres: append([]string(nil), title.Genres...), CommunityRating: title.CommunityRating,
 		ProviderIds: jellyfinProviderIDs(title.ProviderIDs), ImageTags: make(map[string]string),
 		BackdropImageTags: make([]string, 0),
 	}
 	if item.Genres == nil {
 		item.Genres = make([]string, 0)
+	}
+	if title.Tagline != "" {
+		item.Taglines = []string{title.Tagline}
 	}
 	switch title.MediaType {
 	case "movie":
@@ -1170,6 +1225,9 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 			item.ProductionYear = &year
 		}
 	}
+	if ended, err := time.Parse(time.DateOnly, title.EndDate); err == nil {
+		item.EndDate = time.Date(ended.Year(), ended.Month(), ended.Day(), 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	}
 	if title.RuntimeMinutes != nil && *title.RuntimeMinutes > 0 {
 		ticks := MinutesToTicks(int64(*title.RuntimeMinutes))
 		item.RunTimeTicks = &ticks
@@ -1182,6 +1240,19 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 	}
 	if tag, ok := localizedArtworkTag(title.BackgroundURL); ok {
 		item.BackdropImageTags = append(item.BackdropImageTags, tag)
+	}
+	for _, person := range title.People {
+		if strings.TrimSpace(person.Name) == "" {
+			continue
+		}
+		value := BaseItemPerson{Name: person.Name, Role: person.Role, Type: person.Type}
+		if value.Type == "" {
+			value.Type = "Actor"
+		}
+		if tag, ok := localizedArtworkTag(person.ImageURL); ok {
+			value.PrimaryImageTag = tag
+		}
+		item.People = append(item.People, value)
 	}
 	if includeUserData {
 		userData := &UserItemDataDto{IsFavorite: title.InLibrary, Key: title.ID, ItemId: title.ID}

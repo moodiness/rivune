@@ -321,8 +321,12 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 }
 
 func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
-	handler, _, _, token := newCollectionCompatHandler(t)
+	handler, service, _, token := newCollectionCompatHandler(t)
 	handler.authentication.(*catalogHTTPAuthentication).session.Client = ClientIdentity{Client: "VidHub"}
+	service.authorized.FolderCoverShape = collection.TileShapeLandscape
+	for index := range service.authorized.Folders {
+		service.authorized.Folders[index].TileShape = collection.TileShapePoster
+	}
 	virtual, ok := handler.virtualViews()
 	if !ok {
 		t.Fatal("virtual views unavailable")
@@ -360,7 +364,7 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 		t.Fatalf("VidHub home collection row status=%d items=%+v body=%s", latestResponse.Code, latest, latestResponse.Body.String())
 	}
 	for _, item := range latest {
-		if item.Type != "Folder" || item.ParentId != collectionCompatID || item.UserData == nil || item.UserData.ItemId != item.Id {
+		if item.Type != "Folder" || item.ParentId != collectionCompatID || item.PrimaryImageAspectRatio != 16.0/9.0 || item.UserData == nil || item.UserData.ItemId != item.Id {
 			t.Fatalf("VidHub home row contains an invalid collection folder: %+v", item)
 		}
 	}
@@ -373,6 +377,23 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 	decodeCatalogResponse(t, itemsResponse, &items)
 	if itemsResponse.Code != http.StatusOK || len(items.Items) != 2 || items.Items[0].Type == "Folder" || items.Items[1].Type == "Folder" {
 		t.Fatalf("VidHub direct collection view status=%d result=%+v", itemsResponse.Code, items)
+	}
+}
+
+func TestCollectionFolderAspectRatioUsesCollectionCoverShape(t *testing.T) {
+	for _, test := range []struct {
+		shape string
+		want  float64
+	}{
+		{shape: collection.TileShapePoster, want: 2.0 / 3.0},
+		{shape: collection.TileShapeLandscape, want: 16.0 / 9.0},
+		{shape: collection.TileShapeSquare, want: 1},
+		{shape: " LANDSCAPE ", want: 16.0 / 9.0},
+		{shape: "unknown", want: 0},
+	} {
+		if got := collectionFolderAspectRatio(test.shape); got != test.want {
+			t.Fatalf("shape %q ratio=%v want=%v", test.shape, got, test.want)
+		}
 	}
 }
 

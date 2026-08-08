@@ -113,6 +113,8 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 			ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "ÉCLAIR Movie",
 			Released: "2025-01-02", Overview: "Résumé", RuntimeMinutes: &runtimeMinutes,
 			Genres: []string{"Drama"}, CommunityRating: &rating, InLibrary: true,
+			OriginalTitle: "Original Éclair", Tagline: "A bright tagline", Status: "Released",
+			People: []watchstate.CatalogPerson{{Name: "Lead Performer", Role: "Hero", Type: "Actor", ImageURL: localizedArtworkPrefix + strings.Repeat("b", 64)}},
 			ProviderIDs: map[string]string{
 				"imdb": "tt0000100", "tmdb": "100", "tvdb": "200",
 				"addon": "profile-secret", "url": "https://provider.invalid/title/100", "unknown": "opaque-secondary",
@@ -144,8 +146,9 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 	}
 	item := result.Items[0]
 	if item.Type != "Movie" || item.MediaType != "Video" || !item.IsPlayable || item.RunTimeTicks == nil ||
-		*item.RunTimeTicks != MinutesToTicks(123) || item.ProviderIds["Imdb"] != "tt0000100" ||
-		item.ProviderIds["Tmdb"] != "100" || item.ProviderIds["Tvdb"] != "200" ||
+		*item.RunTimeTicks != MinutesToTicks(123) || item.OriginalTitle != "Original Éclair" || len(item.Taglines) != 1 || item.Taglines[0] != "A bright tagline" ||
+		item.Status != "Released" || len(item.People) != 1 || item.People[0].Name != "Lead Performer" || item.People[0].Role != "Hero" || item.People[0].PrimaryImageTag != strings.Repeat("b", 64) ||
+		item.ProviderIds["Imdb"] != "tt0000100" || item.ProviderIds["Tmdb"] != "100" || item.ProviderIds["Tvdb"] != "200" ||
 		item.ImageTags["Primary"] == "" || len(item.BackdropImageTags) != 0 || item.UserData == nil ||
 		item.UserData.PlaybackPositionTicks != SecondsToTicks(61) || !item.UserData.Played || item.UserData.PlayCount != 1 {
 		t.Fatalf("movie mapping incomplete: %+v", item)

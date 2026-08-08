@@ -14,7 +14,11 @@ import (
 	"github.com/moodiness/rivune/server/internal/watchstate"
 )
 
-const maximumPlaybackInfoBodyBytes = 256 << 10
+const (
+	maximumPlaybackInfoBodyBytes = 256 << 10
+	// Keep one admission beyond the 256-session registry below the 4096-reference global store limit.
+	maximumCompatibilityMediaSources = 15
+)
 
 func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request *http.Request) {
 	if handler.playback == nil || handler.catalog == nil || handler.playSessions == nil {
@@ -51,14 +55,6 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 		handler.writeCompatError(response, http.StatusUnprocessableEntity, "PlaybackProfileUnsupported", "The device playback profile is unsupported")
 		return
 	}
-	resourceID := strings.TrimSpace(item.ResourceID)
-	if resourceID == "" {
-		resourceID = preferredPlaybackResource(item.ProviderIDs)
-	}
-	if resourceID == "" {
-		handler.writeCompatError(response, http.StatusNotFound, "NoPlayableSource", "No playable source was found")
-		return
-	}
 	if input.MediaSourceId != "" {
 		playID, descriptors, reused := handler.playSessions.reuseCandidate(session, item.ID, input.MediaSourceId, capabilities, allowTranscode, nil)
 		if reused {
@@ -76,30 +72,12 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 			return
 		}
 	}
-	sourcesInput := playback.SourcesInput{
-		MediaType: item.MediaType, AddonID: item.SourceAddonID, ResourceID: resourceID, Capabilities: capabilities,
-	}
-	var list playback.SourceList
-	reserved := false
-	if reserver, ok := handler.playback.(sourceReferenceReserver); ok {
-		list, err = reserver.SourcesAndPin(request.Context(), session.Principal, sourcesInput)
-		reserved = err == nil
-	} else {
-		list, err = handler.playback.Sources(request.Context(), session.Principal, sourcesInput)
-	}
+	options, releaseOptions, err := handler.playbackOptions(request.Context(), session, item, capabilities, allowTranscode)
 	if err != nil {
 		handler.writePlaybackError(response, request, err)
 		return
 	}
-	if reserved {
-		references := sourceOptionReferenceIDs(list.Sources)
-		defer handler.playback.(sourceReferenceReserver).UnpinSourceReferences(session.Principal, references)
-	}
-	options := usableSourceOptions(list.Sources, capabilities, allowTranscode)
-	if len(options) == 0 {
-		handler.writeCompatError(response, http.StatusNotFound, "NoPlayableSource", "No playable source was found")
-		return
-	}
+	defer releaseOptions()
 	if input.MediaSourceId != "" {
 		playID, descriptors, reused := handler.playSessions.reuseCandidate(session, item.ID, input.MediaSourceId, capabilities, allowTranscode, options)
 		if reused {
@@ -121,15 +99,12 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 			return
 		}
 	}
-	playID, descriptors, err := handler.playSessions.register(request.Context(), session, item.ID, capabilities, allowTranscode, options)
+	result, err := handler.registerPlaybackInfo(request.Context(), session, item, capabilities, allowTranscode, options, input.StartTimeTicks)
 	if err != nil {
 		handler.writePlaybackError(response, request, err)
 		return
 	}
-	result := PlaybackInfoResponse{PlaySessionId: playID, MediaSources: make([]MediaSourceInfo, 0, len(descriptors))}
-	for _, descriptor := range descriptors {
-		result.MediaSources = append(result.MediaSources, mediaSourceDTO(item.ID, playID, descriptor, capabilities, allowTranscode, input.StartTimeTicks))
-	}
+	playID := result.PlaySessionId
 	if input.MediaSourceId != "" {
 		binding, _, native, openErr := handler.playSessions.openAndTouch(request.Context(), session, item.ID, playID, input.MediaSourceId, input.StartTimeTicks)
 		if openErr != nil {
@@ -140,6 +115,106 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 		applyResolvedMediaSource(result.MediaSources, binding.MediaSourceID, native)
 	}
 	handler.writeJSON(response, http.StatusOK, result)
+}
+
+func (handler *Handler) detailMediaSources(ctx context.Context, session AuthenticatedSession, item watchstate.CatalogTitle) []MediaSourceInfo {
+	if handler == nil || handler.playback == nil || handler.playSessions == nil || item.ID == "" || item.MediaType != "movie" && item.MediaType != "episode" {
+		return nil
+	}
+	input := PlaybackInfoRequest{DeviceProfile: conservativeCompatibilityProfile()}
+	capabilities, allowTranscode, err := playbackCapabilities(input)
+	if err != nil {
+		return nil
+	}
+	options, releaseOptions, err := handler.playbackOptions(ctx, session, item, capabilities, allowTranscode)
+	if err != nil {
+		return nil
+	}
+	defer releaseOptions()
+	result, err := handler.registerPlaybackInfo(ctx, session, item, capabilities, allowTranscode, options, 0)
+	if err != nil {
+		return nil
+	}
+	return result.MediaSources
+}
+
+func (handler *Handler) playbackOptions(ctx context.Context, session AuthenticatedSession, item watchstate.CatalogTitle, capabilities playback.Capabilities, allowTranscode bool) ([]playback.SourceOption, func(), error) {
+	resourceID := strings.TrimSpace(item.ResourceID)
+	addonID := item.SourceAddonID
+	if resourceID == "" && item.MediaType == "episode" {
+		resourceID, addonID = handler.episodePlaybackIdentity(ctx, session, item)
+	}
+	if resourceID == "" {
+		resourceID = preferredPlaybackResource(item.ProviderIDs)
+	}
+	if resourceID == "" {
+		return nil, func() {}, playback.ErrNoPlayableSource
+	}
+	sourcesInput := playback.SourcesInput{
+		MediaType: item.MediaType, AddonID: addonID, ResourceID: resourceID, Capabilities: capabilities,
+		MaximumSources: maximumCompatibilityMediaSources,
+	}
+	var list playback.SourceList
+	var err error
+	reserved := false
+	if reserver, ok := handler.playback.(sourceReferenceReserver); ok {
+		list, err = reserver.SourcesAndPin(ctx, session.Principal, sourcesInput)
+		reserved = err == nil
+	} else {
+		list, err = handler.playback.Sources(ctx, session.Principal, sourcesInput)
+	}
+	if err != nil {
+		return nil, func() {}, err
+	}
+	var references []string
+	if reserved {
+		references = sourceOptionReferenceIDs(list.Sources)
+	}
+	if len(list.Sources) > maximumCompatibilityMediaSources {
+		list.Sources = list.Sources[:maximumCompatibilityMediaSources]
+	}
+	release := func() {}
+	if reserved {
+		release = func() {
+			handler.playback.(sourceReferenceReserver).UnpinSourceReferences(session.Principal, references)
+		}
+	}
+	options := usableSourceOptions(list.Sources, capabilities, allowTranscode)
+	if len(options) == 0 {
+		release()
+		return nil, func() {}, playback.ErrNoPlayableSource
+	}
+	return options, release, nil
+}
+
+func (handler *Handler) episodePlaybackIdentity(ctx context.Context, session AuthenticatedSession, item watchstate.CatalogTitle) (string, string) {
+	if handler == nil || handler.catalog == nil || item.SeriesID == "" || item.ParentOrdinal == nil || item.Ordinal == nil || *item.ParentOrdinal < 0 || *item.Ordinal < 1 {
+		return "", ""
+	}
+	series, err := handler.catalog.GetCatalogTitle(ctx, session.Principal, item.SeriesID)
+	if err != nil || series.MediaType != "series" {
+		return "", ""
+	}
+	resourceID := strings.TrimSpace(series.ResourceID)
+	if resourceID == "" {
+		resourceID = preferredPlaybackResource(series.ProviderIDs)
+	}
+	if resourceID == "" {
+		return "", ""
+	}
+	return resourceID + ":" + strconv.Itoa(*item.ParentOrdinal) + ":" + strconv.Itoa(*item.Ordinal), series.SourceAddonID
+}
+
+func (handler *Handler) registerPlaybackInfo(ctx context.Context, session AuthenticatedSession, item watchstate.CatalogTitle, capabilities playback.Capabilities, allowTranscode bool, options []playback.SourceOption, startTimeTicks int64) (PlaybackInfoResponse, error) {
+	playID, descriptors, err := handler.playSessions.register(ctx, session, item.ID, capabilities, allowTranscode, options)
+	if err != nil {
+		return PlaybackInfoResponse{}, err
+	}
+	result := PlaybackInfoResponse{PlaySessionId: playID, MediaSources: make([]MediaSourceInfo, 0, len(descriptors))}
+	for _, descriptor := range descriptors {
+		result.MediaSources = append(result.MediaSources, mediaSourceDTO(item.ID, playID, descriptor, capabilities, allowTranscode, startTimeTicks))
+	}
+	return result, nil
 }
 
 func (handler *Handler) handleStream(response http.ResponseWriter, request *http.Request) {
