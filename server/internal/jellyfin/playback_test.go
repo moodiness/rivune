@@ -521,7 +521,7 @@ func TestObservedVidHubGeneralQueryCredentialIsReplacedBeforeHLSDelivery(t *test
 		"&DeviceId=vidhub-player&X-Emby-Client=VidHub&X-Emby-Device-Name=iPhone&X-Emby-Device-Id=vidhub-player&X-Emby-Client-Version=3.0.3&X-Emby-Token=" + fixture.token
 	request := httptest.NewRequest(http.MethodGet, path, nil)
 	request.Header.Set("Authorization", `Emby Client="VidHub", Device="iPhone", DeviceId="vidhub-player", Version="3.0.3", Token=""`)
-	request.Header.Set("X-Emby-Token", "")
+	request.Header.Set("X-Emby-Token", "rivune_jf_"+strings.Repeat("B", 43))
 
 	request.SetPathValue("id", fixture.item.ID)
 	response := httptest.NewRecorder()
@@ -529,6 +529,83 @@ func TestObservedVidHubGeneralQueryCredentialIsReplacedBeforeHLSDelivery(t *test
 	if response.Code != http.StatusNoContent || fixture.delivery.servedAPIKey != info.PlaySessionId || fixture.delivery.servedAPIKey == fixture.token || fixture.delivery.servedProfileQueryCredential || fixture.delivery.servedProfileHeaderCredential {
 		t.Fatalf("status=%d scopedKey=%t generalCredentialPropagated=%t", response.Code, fixture.delivery.servedAPIKey == info.PlaySessionId, fixture.delivery.servedAPIKey == fixture.token || fixture.delivery.servedProfileQueryCredential || fixture.delivery.servedProfileHeaderCredential)
 	}
+}
+
+func TestConflictingHeaderStillRejectsOutsideObservedVidHubStreamQuery(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{SourceRef: "non-vidhub-conflict", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)}}}
+	listed := fixture.playbackInfo(http.MethodPost, `{"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}}`)
+	var info PlaybackInfoResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil || len(info.MediaSources) != 1 {
+		t.Fatalf("playback info=%+v err=%v", info, err)
+	}
+	path := strings.Replace(info.MediaSources[0].Path, "api_key="+info.PlaySessionId, "api_key="+fixture.token, 1) +
+		"&X-Emby-Client=Other&X-Emby-Token=" + fixture.token
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.Header.Set("X-Emby-Token", "rivune_jf_"+strings.Repeat("B", 43))
+	request.SetPathValue("id", fixture.item.ID)
+	response := httptest.NewRecorder()
+	fixture.handler.handleStream(response, request)
+	if response.Code != http.StatusUnauthorized || fixture.delivery.openCalls != 0 || fixture.delivery.serveCalls != 0 {
+		t.Fatalf("status=%d open=%d serve=%d", response.Code, fixture.delivery.openCalls, fixture.delivery.serveCalls)
+	}
+}
+
+func TestObservedVidHubHeaderCanonicalizationRejectsUnsafeShapes(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{name: "bearer authorization", mutate: func(request *http.Request) { request.Header.Set("Authorization", "Bearer native-token") }},
+		{name: "duplicate player token", mutate: func(request *http.Request) {
+			request.Header["X-Emby-Token"] = []string{"rivune_jf_" + strings.Repeat("B", 43), "rivune_jf_" + strings.Repeat("C", 43)}
+		}},
+		{name: "oversized player token", mutate: func(request *http.Request) {
+			request.Header.Set("X-Emby-Token", strings.Repeat("x", maximumCompatTokenHeaderBytes+1))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlaybackFixture(t)
+			request := newObservedVidHubConflictRequest(t, fixture, "rivune_jf_"+strings.Repeat("B", 43))
+			test.mutate(request)
+			response := httptest.NewRecorder()
+			fixture.handler.handleStream(response, request)
+			if response.Code != http.StatusUnauthorized || fixture.delivery.openCalls != 0 || fixture.delivery.serveCalls != 0 {
+				t.Fatalf("status=%d open=%d serve=%d", response.Code, fixture.delivery.openCalls, fixture.delivery.serveCalls)
+			}
+		})
+	}
+}
+
+func TestObservedVidHubHeaderCanonicalizationRejectsOtherOwner(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	foreignToken := "rivune_jf_" + strings.Repeat("B", 43)
+	request := newObservedVidHubConflictRequest(t, fixture, foreignToken)
+	fixture.authentication.sessions = map[string]AuthenticatedSession{
+		fixture.token: fixture.authentication.session,
+		foreignToken:  playbackSessionTestOtherOwner(fixture.authentication.session, "foreign-compat-session", "foreign-native-session"),
+	}
+	response := httptest.NewRecorder()
+	fixture.handler.handleStream(response, request)
+	if response.Code != http.StatusUnauthorized || fixture.delivery.openCalls != 0 || fixture.delivery.serveCalls != 0 {
+		t.Fatalf("status=%d open=%d serve=%d", response.Code, fixture.delivery.openCalls, fixture.delivery.serveCalls)
+	}
+}
+
+func newObservedVidHubConflictRequest(t *testing.T, fixture *playbackFixture, headerToken string) *http.Request {
+	t.Helper()
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{SourceRef: "observed-vidhub-conflict", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)}}}
+	listed := fixture.playbackInfo(http.MethodPost, `{"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}}`)
+	var info PlaybackInfoResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil || len(info.MediaSources) != 1 {
+		t.Fatalf("playback info=%+v err=%v", info, err)
+	}
+	path := strings.Replace(info.MediaSources[0].Path, "api_key="+info.PlaySessionId, "api_key="+fixture.token, 1) +
+		"&X-Emby-Client=VidHub&X-Emby-Token=" + fixture.token
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.Header.Set("X-Emby-Token", headerToken)
+	request.SetPathValue("id", fixture.item.ID)
+	return request
 }
 
 func TestRevokedBackingSessionRejectsScopedStreamBeforeOpen(t *testing.T) {
@@ -1868,6 +1945,7 @@ func (fixture *playbackFixture) playbackInfo(method, body string) *httptest.Resp
 
 type fakeCompatPlaybackAuthentication struct {
 	session         AuthenticatedSession
+	sessions        map[string]AuthenticatedSession
 	revalidateErr   error
 	revalidateCalls int
 }
@@ -1875,7 +1953,14 @@ type fakeCompatPlaybackAuthentication struct {
 func (*fakeCompatPlaybackAuthentication) Login(context.Context, CompatLoginInput) (LoginResult, error) {
 	return LoginResult{}, errors.New("not used")
 }
-func (authentication *fakeCompatPlaybackAuthentication) Authenticate(context.Context, string) (AuthenticatedSession, error) {
+func (authentication *fakeCompatPlaybackAuthentication) Authenticate(_ context.Context, token string) (AuthenticatedSession, error) {
+	if authentication.sessions != nil {
+		session, exists := authentication.sessions[token]
+		if !exists {
+			return AuthenticatedSession{}, ErrInvalidCompatCredential
+		}
+		return session, nil
+	}
 	return authentication.session, nil
 }
 func (authentication *fakeCompatPlaybackAuthentication) Revalidate(_ context.Context, expected AuthenticatedSession) (AuthenticatedSession, error) {

@@ -282,6 +282,7 @@ func (handler *Handler) authenticateStreamRequest(response http.ResponseWriter, 
 		return fresh, true
 	}
 	authRequest := request
+	observedHeaderToken := ""
 	if playCapability {
 		authRequest = request.Clone(request.Context())
 		clonedURL := *request.URL
@@ -289,12 +290,29 @@ func (handler *Handler) authenticateStreamRequest(response http.ResponseWriter, 
 		deleteQueryFold(values, "api_key")
 		clonedURL.RawQuery = values.Encode()
 		authRequest.URL = &clonedURL
+	} else if token, observed := observedVidHubStreamHeaderConflict(request); observed {
+		authRequest = request.Clone(request.Context())
+		deleteCompatCredentialHeaders(authRequest.Header)
+		observedHeaderToken = token
 	}
 	session, ok := handler.authenticateRequest(response, authRequest, !playCapability)
 	if !ok {
 		handler.logStreamAuthorizationFailure(request, "general_credential", playCapability)
+		return AuthenticatedSession{}, false
 	}
-	return session, ok
+	if observedHeaderToken != "" {
+		headerSession, headerErr := handler.authenticateObservedVidHubHeader(request.Context(), observedHeaderToken, playID)
+		if headerErr != nil || headerSession != nil && !sameAuthenticatedSessionOwner(session, *headerSession) {
+			if headerErr != nil && !errors.Is(headerErr, ErrInvalidCompatCredential) && !errors.Is(headerErr, ErrInvalidCompatAuthorization) {
+				handler.writeStreamError(response, request, http.StatusInternalServerError, "InternalError", "The stream authorization could not be verified")
+			} else {
+				handler.writeStreamError(response, request, http.StatusUnauthorized, "Unauthorized", "The player credential does not match the stream owner")
+			}
+			handler.logStreamAuthorizationFailure(request, "vidhub_header_owner", false)
+			return AuthenticatedSession{}, false
+		}
+	}
+	return session, true
 }
 
 func scopedStreamDeliveryRequest(request *http.Request, playID string) *http.Request {
@@ -308,11 +326,72 @@ func scopedStreamDeliveryRequest(request *http.Request, playID string) *http.Req
 	values.Set("api_key", playID)
 	clonedURL.RawQuery = values.Encode()
 	cloned.URL = &clonedURL
-	for _, name := range []string{"X-Emby-Token", "X-MediaBrowser-Token", "X-Emby-Authorization", "X-MediaBrowser-Authorization", "Authorization"} {
-		cloned.Header.Del(name)
-	}
+	deleteCompatCredentialHeaders(cloned.Header)
 
 	return cloned
+}
+
+func deleteCompatCredentialHeaders(headers http.Header) {
+	for _, name := range []string{"X-Emby-Token", "X-MediaBrowser-Token", "X-Emby-Authorization", "X-MediaBrowser-Authorization", "Authorization"} {
+		headers.Del(name)
+	}
+}
+
+func observedVidHubStreamQuery(values url.Values) bool {
+	apiKey, hasAPIKey, apiKeyErr := queryScalar(values, "api_key")
+	embyToken, hasEmbyToken, embyTokenErr := queryScalar(values, "X-Emby-Token")
+	client, hasClient, clientErr := queryScalar(values, "X-Emby-Client")
+	if apiKeyErr != nil || embyTokenErr != nil || clientErr != nil || !hasAPIKey || !hasEmbyToken || !hasClient || !strings.EqualFold(strings.TrimSpace(client), "VidHub") {
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(apiKey), []byte(embyToken)) != 1 {
+		return false
+	}
+	_, valid := compatCredentialDigest(apiKey)
+	return valid
+}
+
+func observedVidHubStreamHeaderConflict(request *http.Request) (string, bool) {
+	if request == nil || !observedVidHubStreamQuery(request.URL.Query()) || len(request.URL.RawQuery) > maximumCompatQueryBytes || !boundedCompatHeaders(request.Header) {
+		return "", false
+	}
+	switch authorizationHeaderShape(request.Header) {
+	case "absent", "identity", "empty_token":
+	default:
+		return "", false
+	}
+	for _, name := range []string{"X-MediaBrowser-Token", "X-Emby-Authorization", "X-MediaBrowser-Authorization"} {
+		if len(request.Header.Values(name)) != 0 {
+			return "", false
+		}
+	}
+	values := request.Header.Values("X-Emby-Token")
+	if len(values) != 1 || values[0] == "" {
+		return "", false
+	}
+	token := strings.TrimSpace(values[0])
+	if token == "" || strings.ContainsAny(token, ",\r\n\t ") {
+		return "", false
+	}
+	apiKey, found, err := queryScalar(request.URL.Query(), "api_key")
+	if err != nil || !found || subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) == 1 {
+		return "", false
+	}
+	return token, true
+}
+
+func (handler *Handler) authenticateObservedVidHubHeader(ctx context.Context, token, playID string) (*AuthenticatedSession, error) {
+	if subtle.ConstantTimeCompare([]byte(token), []byte(playID)) == 1 {
+		return nil, nil
+	}
+	if _, valid := compatCredentialDigest(token); !valid {
+		return nil, ErrInvalidCompatAuthorization
+	}
+	session, err := handler.authentication.Authenticate(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	return &session, nil
 }
 
 func streamCapabilityPresent(values url.Values, playID string) (bool, error) {
