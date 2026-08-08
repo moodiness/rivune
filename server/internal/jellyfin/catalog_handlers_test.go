@@ -106,6 +106,28 @@ func TestCatalogViewsAreStableRootsAndRejectMismatchedUser(t *testing.T) {
 	}
 }
 
+func TestVirtualViewDetailsDoNotReadCatalog(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	views, ok := handler.virtualViews()
+	if !ok {
+		t.Fatal("derive virtual views")
+	}
+	for _, view := range views {
+		request := authenticatedCatalogRequest(t, token, "/Items/"+view.Id)
+		request.SetPathValue("id", view.Id)
+		response := httptest.NewRecorder()
+		handler.handleItem(response, request)
+		var item BaseItemDto
+		decodeCatalogResponse(t, response, &item)
+		if response.Code != http.StatusOK || item.Id != view.Id || item.CollectionType != view.CollectionType || !item.IsFolder {
+			t.Fatalf("virtual detail status=%d item=%+v", response.Code, item)
+		}
+	}
+	if len(reader.titleIDs) != 0 || len(reader.queries) != 0 {
+		t.Fatalf("virtual details reached catalog: titles=%v queries=%+v", reader.titleIDs, reader.queries)
+	}
+}
+
 func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 	handler, reader, token := newCatalogHTTPHandler(t)
 	views, ok := handler.virtualViews()
@@ -170,6 +192,25 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 	}
 	if !strings.Contains(body, `"MediaSources"`) || !strings.Contains(body, `"Path":"/rivune/00000000-0000-4000-8000-000000000100/00000000-0000-4000-8000-000000000100.strm"`) {
 		t.Fatalf("movie catalogue JSON omitted file-like media fields: %s", body)
+	}
+}
+
+func TestCatalogItemsLimitZeroReturnsCountWithoutZeroLimitRead(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	reader.page = watchstate.CatalogPage{
+		Items:  []watchstate.CatalogTitle{{ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "Count sentinel"}},
+		Offset: 5, Limit: 1, Total: 9,
+	}
+	request := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&StartIndex=5&Limit=0")
+	response := httptest.NewRecorder()
+	handler.handleItems(response, request)
+	var result QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, response, &result)
+	if response.Code != http.StatusOK || result.TotalRecordCount != 9 || result.StartIndex != 5 || len(result.Items) != 0 {
+		t.Fatalf("count-only status=%d result=%+v", response.Code, result)
+	}
+	if len(reader.queries) != 1 || reader.queries[0].Limit != 1 {
+		t.Fatalf("count-only catalog query=%+v", reader.queries)
 	}
 }
 

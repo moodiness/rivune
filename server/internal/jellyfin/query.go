@@ -68,7 +68,7 @@ func ParseItemQuery(values url.Values) (ItemQuery, error) {
 	if query.StartIndex, err = boundedInteger(values, "StartIndex", 0, MaximumStartIndex, 0); err != nil {
 		return ItemQuery{}, err
 	}
-	if query.Limit, err = boundedInteger(values, "Limit", 1, MaximumQueryLimit, DefaultQueryLimit); err != nil {
+	if query.Limit, err = boundedInteger(values, "Limit", 0, MaximumQueryLimit, DefaultQueryLimit); err != nil {
 		return ItemQuery{}, err
 	}
 	if query.Recursive, err = booleanValue(values, "Recursive", false); err != nil {

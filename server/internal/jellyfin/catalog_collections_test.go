@@ -198,7 +198,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	if rootResponse.Code != http.StatusOK || root.TotalRecordCount != 1 || len(root.Items) != 1 ||
 		root.Items[0].Id != collectionCompatID || root.Items[0].Type != "BoxSet" || root.Items[0].MediaType != "Unknown" || !root.Items[0].IsFolder ||
 		root.Items[0].Etag != collectionCompatID || root.Items[0].DisplayPreferencesId != collectionCompatID || root.Items[0].LocationType != "FileSystem" ||
-		root.Items[0].PrimaryImageAspectRatio == 16.0/9.0 || root.Items[0].CollectionType == "homevideos" || root.Items[0].ImageTags["Primary"] != coverTag ||
+		root.Items[0].PrimaryImageAspectRatio == 16.0/9.0 || root.Items[0].CollectionType != "" || root.Items[0].ImageTags["Primary"] != coverTag ||
 		root.Items[0].ImageTags["Thumb"] != "" || len(root.Items[0].BackdropImageTags) != 0 || root.Items[0].UserData == nil ||
 		root.Items[0].UserData.Key != collectionCompatID || root.Items[0].UserData.ItemId != collectionCompatID {
 		t.Fatalf("unexpected authorized boxsets: status=%d result=%+v", rootResponse.Code, root)
@@ -252,7 +252,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	var latest []BaseItemDto
 	decodeCatalogResponse(t, latestResponse, &latest)
 	if latestResponse.Code != http.StatusOK || len(latest) != 2 || latest[0].Name != "First" || latest[1].Name != "Second" ||
-		latest[0].Type != "CollectionFolder" || latest[0].MediaType != "Unknown" || latest[0].CollectionType != "homevideos" || latest[0].ParentId != promotedID ||
+		latest[0].Type != "CollectionFolder" || latest[0].MediaType != "Unknown" || latest[0].CollectionType != "unknown" || latest[0].ParentId != promotedID ||
 		latest[0].PrimaryImageAspectRatio != 16.0/9.0 || latest[0].ImageTags["Primary"] != coverTag || latest[0].ImageTags["Thumb"] != coverTag ||
 		len(latest[0].BackdropImageTags) != 1 || latest[0].BackdropImageTags[0] != coverTag || latest[0].Etag != latest[0].Id ||
 		latest[0].DisplayPreferencesId != latest[0].Id || latest[0].LocationType != "FileSystem" || latest[0].UserData == nil ||
@@ -293,11 +293,11 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	decodeCatalogResponse(t, browseResponse, &browse)
 	if browseResponse.Code != http.StatusOK || browse.TotalRecordCount != 2 || len(browse.Items) != 2 ||
 		browse.Items[0].Id != service.authorized.Folders[0].ID || browse.Items[1].Id != service.authorized.Folders[1].ID ||
-		browse.Items[0].Type != "CollectionFolder" || browse.Items[0].CollectionType != "homevideos" ||
+		browse.Items[0].Type != "CollectionFolder" || browse.Items[0].CollectionType != "unknown" ||
 		browse.Items[0].PrimaryImageAspectRatio != 16.0/9.0 || browse.Items[0].ImageTags["Primary"] != coverTag ||
 		browse.Items[0].ImageTags["Thumb"] != coverTag || len(browse.Items[0].BackdropImageTags) != 1 ||
 		browse.Items[0].BackdropImageTags[0] != coverTag || browse.Items[1].Type != "CollectionFolder" ||
-		browse.Items[1].CollectionType != "homevideos" || browse.Items[1].PrimaryImageAspectRatio != 16.0/9.0 ||
+		browse.Items[1].CollectionType != "unknown" || browse.Items[1].PrimaryImageAspectRatio != 16.0/9.0 ||
 		browse.Items[1].ImageTags["Primary"] != hydratedTag || browse.Items[1].ImageTags["Thumb"] != hydratedTag ||
 		len(browse.Items[1].BackdropImageTags) != 1 || browse.Items[1].BackdropImageTags[0] != hydratedTag ||
 		len(service.calls) != 1 || service.calls[0].folderID != service.authorized.Folders[1].ID || service.calls[0].limit != 1 {
@@ -327,7 +327,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	var folderDetailItem BaseItemDto
 	decodeCatalogResponse(t, folderDetailResponse, &folderDetailItem)
 	if folderDetailResponse.Code != http.StatusOK || folderDetailItem.Id != latest[1].Id || folderDetailItem.Type != "CollectionFolder" ||
-		folderDetailItem.CollectionType != "homevideos" || folderDetailItem.PrimaryImageAspectRatio != 16.0/9.0 ||
+		folderDetailItem.CollectionType != "unknown" || folderDetailItem.PrimaryImageAspectRatio != 16.0/9.0 ||
 		folderDetailItem.ImageTags["Primary"] != hydratedTag || folderDetailItem.ImageTags["Thumb"] != hydratedTag ||
 		len(folderDetailItem.BackdropImageTags) != 1 || folderDetailItem.BackdropImageTags[0] != hydratedTag ||
 		len(service.calls) != 1 || service.calls[0].folderID != service.authorized.Folders[1].ID || service.calls[0].limit != 1 {
@@ -341,7 +341,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	handler.handleItem(detailResponse, detailRequest)
 	var detail BaseItemDto
 	decodeCatalogResponse(t, detailResponse, &detail)
-	if detailResponse.Code != http.StatusOK || detail.Type != "CollectionFolder" || detail.CollectionType != "homevideos" ||
+	if detailResponse.Code != http.StatusOK || detail.Type != "CollectionFolder" || detail.CollectionType != "unknown" ||
 		detail.PrimaryImageAspectRatio != 16.0/9.0 || detail.ImageTags["Primary"] != backdropTag || detail.ImageTags["Thumb"] != backdropTag ||
 		len(detail.BackdropImageTags) != 1 || detail.BackdropImageTags[0] != backdropTag {
 		t.Fatalf("authorized collection view detail status=%d item=%+v body=%s", detailResponse.Code, detail, detailResponse.Body.String())
@@ -404,7 +404,7 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 	if viewsResponse.Code != http.StatusOK || views.TotalRecordCount != 3 || len(views.Items) != 3 ||
 		views.Items[0].Id != virtual[0].Id || views.Items[1].Id != virtual[1].Id ||
 		views.Items[2].Id != promotedID || views.Items[2].Id == collectionCompatID || views.Items[2].Id == virtual[2].Id ||
-		views.Items[2].Type != "CollectionFolder" || views.Items[2].CollectionType != "homevideos" ||
+		views.Items[2].Type != "CollectionFolder" || views.Items[2].CollectionType != "unknown" ||
 		views.Items[2].PrimaryImageAspectRatio != 16.0/9.0 || views.Items[2].ImageTags["Thumb"] != heroTag ||
 		len(views.Items[2].BackdropImageTags) != 1 || views.Items[2].BackdropImageTags[0] != heroTag ||
 		views.Items[2].UserData == nil || views.Items[2].UserData.ItemId != promotedID {
@@ -495,7 +495,7 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 		t.Fatalf("home collection row status=%d items=%+v body=%s", latestResponse.Code, latest, latestResponse.Body.String())
 	}
 	for index, item := range latest {
-		if item.Type != "CollectionFolder" || item.ParentId != promotedID || item.CollectionType != "homevideos" ||
+		if item.Type != "CollectionFolder" || item.ParentId != promotedID || item.CollectionType != "unknown" ||
 			item.PrimaryImageAspectRatio != 16.0/9.0 || item.ImageTags["Thumb"] == "" || len(item.BackdropImageTags) != 1 ||
 			item.BackdropImageTags[0] != item.ImageTags["Thumb"] || item.UserData == nil || item.UserData.ItemId != item.Id {
 			t.Fatalf("home row contains an invalid landscape folder: %+v", item)
@@ -520,7 +520,7 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 	handler.handleUserItem(detailResponse, detailRequest)
 	var detail BaseItemDto
 	decodeCatalogResponse(t, detailResponse, &detail)
-	if detailResponse.Code != http.StatusOK || detail.Id != promotedID || detail.Type != "CollectionFolder" || detail.CollectionType != "homevideos" ||
+	if detailResponse.Code != http.StatusOK || detail.Id != promotedID || detail.Type != "CollectionFolder" || detail.CollectionType != "unknown" ||
 		detail.PrimaryImageAspectRatio != 16.0/9.0 || detail.ImageTags["Thumb"] != heroTag ||
 		len(detail.BackdropImageTags) != 1 || detail.BackdropImageTags[0] != heroTag {
 		t.Fatalf("promoted collection detail status=%d item=%+v", detailResponse.Code, detail)
@@ -548,7 +548,7 @@ func TestCollectionFolderProjectionIsAlwaysLandscape(t *testing.T) {
 	}
 	for _, shape := range []string{collection.TileShapePoster, collection.TileShapeLandscape, collection.TileShapeSquare, "unknown"} {
 		item := handler.collectionFolderDTO(collection.Collection{ID: collectionCompatID, FolderCoverShape: shape}, collection.Folder{ID: "folder", Title: "Folder"})
-		if item.Type != "CollectionFolder" || item.CollectionType != "homevideos" || item.PrimaryImageAspectRatio != 16.0/9.0 ||
+		if item.Type != "CollectionFolder" || item.CollectionType != "unknown" || item.PrimaryImageAspectRatio != 16.0/9.0 ||
 			item.ParentId != promotedID {
 			t.Fatalf("shape=%q produced a non-landscape promoted folder: %+v", shape, item)
 		}
@@ -638,6 +638,70 @@ func TestCollectionFolderLatestReturnsCanonicalItems(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVirtualCatalogRootsProjectAuthorizedCollections(t *testing.T) {
+	t.Run("items", func(t *testing.T) {
+		handler, service, _, token := newCollectionCompatHandler(t)
+		views, ok := handler.virtualViews()
+		if !ok {
+			t.Fatal("virtual views unavailable")
+		}
+		target := "/Items?ParentId=" + views[0].Id + "&IncludeItemTypes=Movie&Ids=" + collectionMovieID + "," + collectionExtraMovieID + "&SearchTerm=i&SortBy=SortName&SortOrder=Ascending&StartIndex=1&Limit=1"
+		response := httptest.NewRecorder()
+		handler.handleItems(response, authenticatedCatalogRequest(t, token, target))
+		var result QueryResult[BaseItemDto]
+		decodeCatalogResponse(t, response, &result)
+		if response.Code != http.StatusOK || result.TotalRecordCount != 2 || result.StartIndex != 1 || len(result.Items) != 1 ||
+			result.Items[0].Id != collectionExtraMovieID || result.Items[0].Type != "Movie" {
+			t.Fatalf("collection-backed movie root status=%d result=%+v", response.Code, result)
+		}
+		for _, call := range service.calls {
+			if call.limit <= 0 || call.limit > maximumCollectionResolveLimit {
+				t.Fatalf("unbounded collection resolution: %+v", service.calls)
+			}
+		}
+	})
+
+	t.Run("latest", func(t *testing.T) {
+		handler, _, _, token := newCollectionCompatHandler(t)
+		views, ok := handler.virtualViews()
+		if !ok {
+			t.Fatal("virtual views unavailable")
+		}
+		request := authenticatedCatalogRequest(t, token, "/Items/Latest?ParentId="+views[1].Id+"&IncludeItemTypes=Series&StartIndex=0&Limit=2")
+		response := httptest.NewRecorder()
+		handler.handleLatestItems(response, request)
+		var items []BaseItemDto
+		decodeCatalogResponse(t, response, &items)
+		if response.Code != http.StatusOK || len(items) != 1 || items[0].Id != collectionSeriesID || items[0].Type != "Series" {
+			t.Fatalf("collection-backed series latest status=%d items=%+v", response.Code, items)
+		}
+	})
+
+	t.Run("count only", func(t *testing.T) {
+		handler, service, _, token := newCollectionCompatHandler(t)
+		views, ok := handler.virtualViews()
+		if !ok {
+			t.Fatal("virtual views unavailable")
+		}
+		request := authenticatedCatalogRequest(t, token, "/Items?ParentId="+views[0].Id+"&IncludeItemTypes=Movie&Limit=0")
+		response := httptest.NewRecorder()
+		handler.handleItems(response, request)
+		var result QueryResult[BaseItemDto]
+		decodeCatalogResponse(t, response, &result)
+		if response.Code != http.StatusOK || result.TotalRecordCount != 2 || len(result.Items) != 0 {
+			t.Fatalf("collection-backed count status=%d result=%+v", response.Code, result)
+		}
+		if len(service.calls) == 0 {
+			t.Fatal("count-only projection did not inspect authorized collections")
+		}
+		for _, call := range service.calls {
+			if call.limit <= 0 || call.limit > maximumCollectionResolveLimit {
+				t.Fatalf("count-only projection used invalid limit: %+v", service.calls)
+			}
+		}
+	})
 }
 
 func TestRecursiveCollectionBrowseSortsBeforePagination(t *testing.T) {

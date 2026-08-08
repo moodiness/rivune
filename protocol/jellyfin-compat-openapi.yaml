@@ -64,7 +64,7 @@ info:
     The library hierarchy contains the stable `Movies`, `TV Shows`, and `Collections`
     virtual views plus one ordered, named view per profile-authorized Rivune collection.
     Collection views expose configured folders through `Items/Latest` and ordinary item
-    browsing; promoted collection and folder projections use landscape `homevideos` cards
+    browsing; promoted collection and folder projections use landscape `unknown` cards
     with Primary, Thumb, Backdrop, and 16:9 metadata regardless of the native folder-cover
     preference. The synthetic Collections/BoxSet root preserves Jellyfin's poster contract.
     Opening a folder resolves only that folder into canonical Rivune movie/series UUIDs.
@@ -1919,7 +1919,7 @@ components:
       name: Limit
       in: query
       required: false
-      schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+      schema: { type: integer, minimum: 0, maximum: 200, default: 100, description: Zero requests a count-only result with an empty Items array. }
     StateLimit:
       name: Limit
       in: query
@@ -3009,7 +3009,7 @@ components:
         IsFolder: { type: boolean }
         IsPlayable: { type: boolean }
         CanDownload: { type: boolean }
-        CollectionType: { type: string, enum: [movies, tvshows, boxsets, mixed, homevideos] }
+        CollectionType: { type: string, enum: [movies, tvshows, boxsets, mixed, unknown] }
         ParentId: { $ref: "#/components/schemas/UUID" }
         SeriesId: { $ref: "#/components/schemas/UUID" }
         SeasonId: { $ref: "#/components/schemas/UUID" }
@@ -3137,7 +3137,7 @@ components:
           type: array
           maxItems: 0
           items: { type: string }
-        CollectionType: { type: string, enum: [movies, tvshows, boxsets, mixed, homevideos] }
+        CollectionType: { type: string, enum: [movies, tvshows, boxsets, mixed, unknown] }
         ItemId: { $ref: "#/components/schemas/UUID" }
         Id: { $ref: "#/components/schemas/UUID" }
     PlaybackInfoRequest:

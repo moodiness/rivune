@@ -79,9 +79,18 @@ func TestParseItemQueryDefaults(t *testing.T) {
 	}
 }
 
+func TestParseItemQueryAcceptsCountOnlyLimit(t *testing.T) {
+	query, err := ParseItemQuery(url.Values{"Limit": {"0"}})
+	if err != nil {
+		t.Fatalf("ParseItemQuery: %v", err)
+	}
+	if query.Limit != 0 {
+		t.Fatalf("Limit = %d, want count-only zero", query.Limit)
+	}
+}
+
 func TestParseItemQueryRejectsAmbiguityAndBounds(t *testing.T) {
 	tests := []url.Values{
-		{"Limit": {"0"}},
 		{"Limit": {strconv.Itoa(MaximumQueryLimit + 1)}},
 		{"StartIndex": {strconv.Itoa(MaximumStartIndex + 1)}},
 		{"SearchTerm": {strings.Repeat("x", MaximumSearchTermBytes+1)}},
