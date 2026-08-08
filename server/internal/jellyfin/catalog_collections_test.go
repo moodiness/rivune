@@ -690,16 +690,30 @@ func TestVirtualCatalogRootsProjectAuthorizedCollections(t *testing.T) {
 		handler.handleItems(response, request)
 		var result QueryResult[BaseItemDto]
 		decodeCatalogResponse(t, response, &result)
-		if response.Code != http.StatusOK || result.TotalRecordCount != 2 || len(result.Items) != 0 {
+		if response.Code != http.StatusOK || result.TotalRecordCount != 0 || len(result.Items) != 0 {
 			t.Fatalf("collection-backed count status=%d result=%+v", response.Code, result)
 		}
-		if len(service.calls) == 0 {
-			t.Fatal("count-only projection did not inspect authorized collections")
+		if len(service.calls) != 0 {
+			t.Fatalf("count-only projection resolved remote content: %+v", service.calls)
 		}
-		for _, call := range service.calls {
-			if call.limit <= 0 || call.limit > maximumCollectionResolveLimit {
-				t.Fatalf("count-only projection used invalid limit: %+v", service.calls)
-			}
+	})
+
+	t.Run("collection count only", func(t *testing.T) {
+		handler, service, _, token := newCollectionCompatHandler(t)
+		viewID, err := handler.collectionViewID(collectionCompatID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := authenticatedCatalogRequest(t, token, "/Items?ParentId="+viewID+"&Recursive=true&Limit=0")
+		response := httptest.NewRecorder()
+		handler.handleItems(response, request)
+		var result QueryResult[BaseItemDto]
+		decodeCatalogResponse(t, response, &result)
+		if response.Code != http.StatusOK || result.TotalRecordCount != 0 || len(result.Items) != 0 {
+			t.Fatalf("collection count status=%d result=%+v", response.Code, result)
+		}
+		if len(service.calls) != 0 {
+			t.Fatalf("collection count resolved remote content: %+v", service.calls)
 		}
 	})
 }

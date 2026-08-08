@@ -834,6 +834,9 @@ func (handler *Handler) collectionItemPage(ctx context.Context, principal auth.P
 	if noCatalogMediaTypes(allowed) {
 		return QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: query.StartIndex}, nil
 	}
+	if query.Limit == 0 {
+		return QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: query.StartIndex}, nil
+	}
 	resolver, ok := handler.catalog.(collectionItemResolver)
 	if !ok {
 		return QueryResult[BaseItemDto]{}, errCollectionResolverUnavailable
@@ -872,6 +875,9 @@ func (handler *Handler) virtualCollectionPage(ctx context.Context, principal aut
 	if noCatalogMediaTypes(intersectMediaTypes(mediaTypes, []string{mediaType})) || handler.collections == nil {
 		return QueryResult[BaseItemDto]{}, false
 	}
+	if query.Limit == 0 {
+		return QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: query.StartIndex}, true
+	}
 	resolver, ok := handler.catalog.(collectionItemResolver)
 	if !ok {
 		return QueryResult[BaseItemDto]{}, false
@@ -883,16 +889,22 @@ func (handler *Handler) virtualCollectionPage(ctx context.Context, principal aut
 	if len(values) > maximumCollectionResolveLimit {
 		values = values[:maximumCollectionResolveLimit]
 	}
+	target := query.StartIndex + query.Limit + 1
+	if target > maximumCollectionResolveLimit {
+		target = maximumCollectionResolveLimit
+	}
 	scan := query
 	scan.StartIndex = 0
-	scan.Limit = maximumCollectionResolveLimit
-	seen := make(map[string]struct{}, maximumCollectionResolveLimit)
-	titles := make([]watchstate.CatalogTitle, 0, maximumCollectionResolveLimit)
+	scan.Limit = max(1, target-1)
+	seen := make(map[string]struct{}, target)
+	titles := make([]watchstate.CatalogTitle, 0, target)
+	more := false
 	for _, value := range values {
-		resolved, _, resolveErr := handler.resolveCollectionWindow(ctx, principal, resolver, value, []string{mediaType}, scan, "", "")
+		resolved, resolvedMore, resolveErr := handler.resolveCollectionWindow(ctx, principal, resolver, value, []string{mediaType}, scan, "", "")
 		if resolveErr != nil {
 			return QueryResult[BaseItemDto]{}, false
 		}
+		more = more || resolvedMore
 		for _, title := range resolved {
 			canonicalID := strings.ToLower(title.ID)
 			if _, duplicate := seen[canonicalID]; duplicate {
@@ -900,11 +912,12 @@ func (handler *Handler) virtualCollectionPage(ctx context.Context, principal aut
 			}
 			seen[canonicalID] = struct{}{}
 			titles = append(titles, title)
-			if len(titles) == maximumCollectionResolveLimit {
+			if len(titles) >= target {
+				more = true
 				break
 			}
 		}
-		if len(titles) == maximumCollectionResolveLimit {
+		if len(titles) >= target {
 			break
 		}
 	}
@@ -933,7 +946,11 @@ func (handler *Handler) virtualCollectionPage(ctx context.Context, principal aut
 	for _, title := range titles[start:end] {
 		items = append(items, handler.baseItemDTO(title, query.EnableUserData))
 	}
-	return QueryResult[BaseItemDto]{Items: items, TotalRecordCount: len(titles), StartIndex: query.StartIndex}, true
+	total := len(titles)
+	if more {
+		total = max(total, query.StartIndex+len(items)+1)
+	}
+	return QueryResult[BaseItemDto]{Items: items, TotalRecordCount: total, StartIndex: query.StartIndex}, true
 }
 
 func (handler *Handler) writeCollectionItemError(response http.ResponseWriter, err error) {
