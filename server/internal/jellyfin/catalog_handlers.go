@@ -599,7 +599,7 @@ func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth
 		if len(localized) == len(items) {
 			for index, materialized := range localized {
 				if tag, valid := localizedArtworkTag(materialized); valid {
-					items[index].ImageTags = map[string]string{"Primary": tag}
+					items[index].ImageTags = collectionFolderImageTags(value.FolderCoverShape, tag)
 				}
 			}
 		}
@@ -850,7 +850,7 @@ func (handler *Handler) collectionViewDTO(ctx context.Context, principal auth.Pr
 	return BaseItemDto{
 		Id: value.ID, ServerId: handler.serverInfo.ID.String(), Name: value.Title, SortName: value.Title,
 		Etag: value.ID, DisplayPreferencesId: value.ID, LocationType: "FileSystem",
-		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "boxsets", IsFolder: true,
+		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: collectionViewType(value.FolderCoverShape), IsFolder: true,
 		Genres: []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags,
 		UserData: &UserItemDataDto{Key: value.ID, ItemId: value.ID},
 	}
@@ -864,6 +864,20 @@ func (handler *Handler) collectionFolderDTO(value collection.Collection, folder 
 		PrimaryImageAspectRatio: collectionFolderAspectRatio(value.FolderCoverShape),
 		Genres:                  []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: folder.ID, ItemId: folder.ID},
 	}
+}
+func collectionViewType(shape string) string {
+	if strings.EqualFold(strings.TrimSpace(shape), collection.TileShapeLandscape) {
+		return "homevideos"
+	}
+	return "boxsets"
+}
+
+func collectionFolderImageTags(shape, tag string) map[string]string {
+	tags := map[string]string{"Primary": tag}
+	if strings.EqualFold(strings.TrimSpace(shape), collection.TileShapeLandscape) {
+		tags["Thumb"] = tag
+	}
+	return tags
 }
 
 func collectionFolderAspectRatio(shape string) float64 {
@@ -890,7 +904,7 @@ func (handler *Handler) collectionFolderDetailDTO(ctx context.Context, principal
 	localized := localizer.LocalizeArtworkURLs(ctx, []string{folders[0].CoverImageURL})
 	if len(localized) == 1 {
 		if tag, valid := localizedArtworkTag(localized[0]); valid {
-			item.ImageTags["Primary"] = tag
+			item.ImageTags = collectionFolderImageTags(value.FolderCoverShape, tag)
 		}
 	}
 	return item
@@ -1274,7 +1288,7 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 		item.MediaSources = []MediaSourceInfo{{
 			Id: item.Id, Name: item.Name, Path: streamPath, Protocol: "File", Type: "Default",
 			IsRemote: false, SupportsDirectPlay: true, SupportsDirectStream: true, SupportsTranscoding: true,
-			RunTimeTicks: item.RunTimeTicks,
+			RunTimeTicks: item.RunTimeTicks, MediaStreams: []MediaStreamInfo{},
 		}}
 	}
 	return item

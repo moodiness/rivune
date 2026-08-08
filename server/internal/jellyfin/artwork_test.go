@@ -38,6 +38,9 @@ func (authentication *artworkAuthentication) Authenticate(_ context.Context, tok
 	}
 	return session, nil
 }
+func (*artworkAuthentication) Revalidate(_ context.Context, expected AuthenticatedSession) (AuthenticatedSession, error) {
+	return expected, nil
+}
 
 func (*artworkAuthentication) Logout(context.Context, AuthenticatedSession) error {
 	return errors.New("logout is not used by artwork handlers")

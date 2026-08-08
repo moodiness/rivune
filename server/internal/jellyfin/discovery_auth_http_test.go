@@ -58,6 +58,15 @@ func (fake *discoveryAuthenticationFake) Authenticate(_ context.Context, token s
 	}
 	return fake.session, nil
 }
+func (fake *discoveryAuthenticationFake) Revalidate(_ context.Context, expected AuthenticatedSession) (AuthenticatedSession, error) {
+	if fake.authenticateErr != nil || fake.revoked || !sameAuthenticatedSessionOwner(expected, fake.session) {
+		if fake.authenticateErr != nil {
+			return AuthenticatedSession{}, fake.authenticateErr
+		}
+		return AuthenticatedSession{}, ErrInvalidCompatCredential
+	}
+	return fake.session, nil
+}
 
 func (fake *discoveryAuthenticationFake) Logout(_ context.Context, _ AuthenticatedSession) error {
 	fake.logoutCalls++

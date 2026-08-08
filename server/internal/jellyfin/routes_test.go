@@ -449,6 +449,9 @@ func (authentication *routeCountingAuthentication) Authenticate(context.Context,
 	authentication.authenticateCalls++
 	return AuthenticatedSession{}, ErrInvalidCompatCredential
 }
+func (*routeCountingAuthentication) Revalidate(context.Context, AuthenticatedSession) (AuthenticatedSession, error) {
+	return AuthenticatedSession{}, ErrInvalidCompatCredential
+}
 
 func (*routeCountingAuthentication) Logout(context.Context, AuthenticatedSession) error {
 	return nil

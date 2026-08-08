@@ -95,6 +95,14 @@ func (authentication *sequenceAuthentication) Authenticate(_ context.Context, to
 	}
 	return session, nil
 }
+func (authentication *sequenceAuthentication) Revalidate(_ context.Context, expected AuthenticatedSession) (AuthenticatedSession, error) {
+	for token, session := range authentication.sessions {
+		if !authentication.revoked[token] && sameAuthenticatedSessionOwner(expected, session) {
+			return session, nil
+		}
+	}
+	return AuthenticatedSession{}, ErrInvalidCompatCredential
+}
 
 func (authentication *sequenceAuthentication) Logout(_ context.Context, session AuthenticatedSession) error {
 	for token, candidate := range authentication.sessions {

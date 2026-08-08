@@ -115,11 +115,18 @@ type playSessionEntry struct {
 	referencesPinned   bool
 	eventLease         chan struct{}
 }
+type registeredDeviceProfile struct {
+	session    AuthenticatedSession
+	profile    DeviceProfile
+	lastSeenAt time.Time
+	expiresAt  time.Time
+}
 
 type playSessionRegistry struct {
 	mu             sync.Mutex
 	playback       PlaybackDelivery
 	entries        map[string]*playSessionEntry
+	deviceProfiles map[string]*registeredDeviceProfile
 	nextSequence   uint64
 	limit          int
 	userLimit      int
@@ -150,7 +157,7 @@ func newPlaySessionRegistry(delivery PlaybackDelivery) *playSessionRegistry {
 		return nil
 	}
 	return &playSessionRegistry{
-		playback: delivery, entries: make(map[string]*playSessionEntry), limit: defaultPlaySessionLimit,
+		playback: delivery, entries: make(map[string]*playSessionEntry), deviceProfiles: make(map[string]*registeredDeviceProfile), limit: defaultPlaySessionLimit,
 		userLimit: defaultPlaySessionUserLimit, ownerLimit: defaultPlaySessionOwnerLimit,
 		idleTTL: defaultPlaySessionIdleTTL, absoluteTTL: defaultPlaySessionAbsoluteTTL,
 		reapPeriod: defaultPlaySessionReapPeriod, cleanupTimeout: defaultPlaySessionCleanupTimeout,
@@ -196,7 +203,7 @@ func (registry *playSessionRegistry) register(ctx context.Context, session Authe
 		if candidateIndex > 0 {
 			mediaID = derivedMediaSourceID(playID, candidateIndex)
 		}
-		descriptor := playSourceDescriptor{ID: mediaID, Name: fmt.Sprintf("Source %d", candidateIndex+1), Protocol: option.Protocol, Container: option.Container}
+		descriptor := playSourceDescriptor{ID: mediaID, Name: compatibilitySourceName(candidateIndex+1, option.ReportedHeight), Protocol: option.Protocol, Container: option.Container}
 		entry.sourceOrder = append(entry.sourceOrder, mediaID)
 		entry.sources[mediaID] = &playSessionSource{descriptor: descriptor, key: playSourceKeyFor(option), sourceRef: option.SourceRef, expiresAt: option.ExpiresAt.UTC()}
 		descriptors = append(descriptors, descriptor)
@@ -316,12 +323,12 @@ func (registry *playSessionRegistry) reuseCandidate(session AuthenticatedSession
 					releasePrincipal = clonePrincipal(selected.principal)
 					releaseReferences = sourceReferences(selected)
 				}
-				for _, id := range selected.sourceOrder {
+				for index, id := range selected.sourceOrder {
 					source := selected.sources[id]
 					option := freshByKey[source.key]
 					source.sourceRef = option.SourceRef
 					source.expiresAt = option.ExpiresAt.UTC()
-					source.descriptor.Name = option.Name
+					source.descriptor.Name = compatibilitySourceName(index+1, option.ReportedHeight)
 					source.descriptor.Protocol = option.Protocol
 					source.descriptor.Container = option.Container
 				}
@@ -345,6 +352,111 @@ func (registry *playSessionRegistry) reuseCandidate(session AuthenticatedSession
 		return "", nil, false
 	}
 	return selected.playSessionID, descriptors, true
+}
+
+func (registry *playSessionRegistry) setDeviceProfile(session AuthenticatedSession, profile DeviceProfile) bool {
+	if registry == nil || !validPlaySessionOwner(session) || !validDeviceProfileBounds(profile) || emptyDeviceProfile(profile) {
+		return false
+	}
+	now := registry.now().UTC()
+	expiresAt := session.ExpiresAt.UTC()
+	if !expiresAt.After(now) {
+		return false
+	}
+	storedSession := session
+	storedSession.Principal = clonePrincipal(session.Principal)
+	stored := &registeredDeviceProfile{session: storedSession, profile: cloneDeviceProfile(profile), lastSeenAt: now, expiresAt: expiresAt}
+	registry.mu.Lock()
+	stale := registry.removeExpiredLocked(now)
+	if registry.deviceProfiles[session.ID] == nil {
+		ownerLimit := registry.ownerLimit
+		if ownerLimit <= 0 {
+			ownerLimit = defaultPlaySessionOwnerLimit
+		}
+		for registry.deviceProfileOwnerCountLocked(session) >= ownerLimit {
+			victimID := registry.oldestDeviceProfileLocked(func(candidate *registeredDeviceProfile) bool {
+				return deviceProfileQuotaOwnerMatches(candidate, session)
+			})
+			if victimID == "" {
+				break
+			}
+			delete(registry.deviceProfiles, victimID)
+		}
+		userLimit := registry.userLimit
+		if userLimit <= 0 {
+			userLimit = defaultPlaySessionUserLimit
+		}
+		for registry.deviceProfileUserCountLocked(session.Principal.UserID) >= userLimit {
+			victimID := registry.oldestDeviceProfileLocked(func(candidate *registeredDeviceProfile) bool {
+				return candidate.session.Principal.UserID == session.Principal.UserID
+			})
+			if victimID == "" {
+				break
+			}
+			delete(registry.deviceProfiles, victimID)
+		}
+		globalLimit := registry.limit
+		if globalLimit <= 0 {
+			globalLimit = defaultPlaySessionLimit
+		}
+		if len(registry.deviceProfiles) >= globalLimit {
+			victimID := registry.oldestDeviceProfileLocked(func(candidate *registeredDeviceProfile) bool {
+				return candidate.session.Principal.UserID == session.Principal.UserID
+			})
+			if victimID == "" {
+				registry.mu.Unlock()
+				registry.closeEntries(context.Background(), stale)
+				return false
+			}
+			delete(registry.deviceProfiles, victimID)
+		}
+	}
+	registry.deviceProfiles[session.ID] = stored
+	registry.mu.Unlock()
+	registry.closeEntries(context.Background(), stale)
+	return true
+}
+
+func (registry *playSessionRegistry) deviceProfile(session AuthenticatedSession) (DeviceProfile, bool) {
+	if registry == nil || !validPlaySessionOwner(session) {
+		return DeviceProfile{}, false
+	}
+	now := registry.now().UTC()
+	registry.mu.Lock()
+	stale := registry.removeExpiredLocked(now)
+	stored := registry.deviceProfiles[session.ID]
+	ok := deviceProfileOwnerMatches(stored, session) && stored.expiresAt.After(now) && stored.lastSeenAt.Add(registry.idleTTL).After(now)
+	var profile DeviceProfile
+	if ok {
+		stored.lastSeenAt = now
+		profile = cloneDeviceProfile(stored.profile)
+	}
+	registry.mu.Unlock()
+	registry.closeEntries(context.Background(), stale)
+	return profile, ok
+}
+
+func (registry *playSessionRegistry) streamSession(playID, itemID, mediaID string) (AuthenticatedSession, bool) {
+	if registry == nil || playID == "" || itemID == "" || mediaID == "" {
+		return AuthenticatedSession{}, false
+	}
+	now := registry.now().UTC()
+	registry.mu.Lock()
+	stale := registry.removeExpiredLocked(now)
+	entry := registry.entries[playID]
+	var session AuthenticatedSession
+	ok := entry != nil && entry.itemID == itemID && entry.sources[mediaID] != nil && entry.expiresAt.After(now) && entry.lastSeenAt.Add(registry.idleTTL).After(now)
+	if ok {
+		entry.lastSeenAt = now
+		session = AuthenticatedSession{
+			ID: entry.compatSessionID, ProfileID: entry.profileID, Client: ClientIdentity{DeviceID: entry.deviceID},
+			ExpiresAt: entry.expiresAt, Principal: clonePrincipal(entry.principal),
+		}
+		ok = validPlaySessionOwner(session)
+	}
+	registry.mu.Unlock()
+	registry.closeEntries(context.Background(), stale)
+	return session, ok
 }
 
 func (registry *playSessionRegistry) candidateExists(session AuthenticatedSession, itemID, mediaID string) bool {
@@ -614,6 +726,9 @@ func (registry *playSessionRegistry) closeSession(ctx context.Context, session A
 			entries = append(entries, entry)
 		}
 	}
+	if stored := registry.deviceProfiles[session.ID]; deviceProfileOwnerMatches(stored, session) {
+		delete(registry.deviceProfiles, session.ID)
+	}
 	registry.mu.Unlock()
 	registry.closeEntries(ctx, entries)
 	return nil
@@ -802,6 +917,11 @@ func (registry *playSessionRegistry) removeExpiredLocked(now time.Time) []*playS
 		if !entry.expiresAt.After(now) || !entry.lastSeenAt.Add(registry.idleTTL).After(now) {
 			delete(registry.entries, id)
 			removed = append(removed, entry)
+		}
+	}
+	for id, stored := range registry.deviceProfiles {
+		if !stored.expiresAt.After(now) || !stored.lastSeenAt.Add(registry.idleTTL).After(now) {
+			delete(registry.deviceProfiles, id)
 		}
 	}
 	return removed
@@ -1184,6 +1304,59 @@ func quotaOwnerMatches(entry *playSessionEntry, session AuthenticatedSession) bo
 		entry.deviceID != "" && entry.deviceID == session.Client.DeviceID
 }
 
+func deviceProfileOwnerMatches(stored *registeredDeviceProfile, session AuthenticatedSession) bool {
+	return stored != nil && stored.session.ID == session.ID && stored.session.Principal.SessionID == session.Principal.SessionID &&
+		stored.session.Principal.UserID == session.Principal.UserID && stored.session.Principal.DeviceID == session.Principal.DeviceID &&
+		stored.session.ProfileID == session.ProfileID && stored.session.Client.DeviceID == session.Client.DeviceID &&
+		session.Principal.ActiveProfileID != nil && *session.Principal.ActiveProfileID == session.ProfileID
+}
+
+func (registry *playSessionRegistry) deviceProfileOwnerCountLocked(session AuthenticatedSession) int {
+	count := 0
+	for _, candidate := range registry.deviceProfiles {
+		if deviceProfileQuotaOwnerMatches(candidate, session) {
+			count++
+		}
+	}
+	return count
+}
+
+func (registry *playSessionRegistry) deviceProfileUserCountLocked(userID string) int {
+	count := 0
+	for _, candidate := range registry.deviceProfiles {
+		if candidate.session.Principal.UserID == userID {
+			count++
+		}
+	}
+	return count
+}
+
+func (registry *playSessionRegistry) oldestDeviceProfileLocked(matches func(*registeredDeviceProfile) bool) string {
+	oldestID := ""
+	var oldest time.Time
+	for id, candidate := range registry.deviceProfiles {
+		if !matches(candidate) {
+			continue
+		}
+		if oldestID == "" || candidate.lastSeenAt.Before(oldest) {
+			oldestID, oldest = id, candidate.lastSeenAt
+		}
+	}
+	return oldestID
+}
+
+func deviceProfileQuotaOwnerMatches(stored *registeredDeviceProfile, session AuthenticatedSession) bool {
+	return stored != nil && stored.session.Principal.UserID == session.Principal.UserID &&
+		stored.session.ProfileID == session.ProfileID && stored.session.Client.DeviceID == session.Client.DeviceID
+}
+
+func cloneDeviceProfile(profile DeviceProfile) DeviceProfile {
+	profile.DirectPlayProfiles = append([]DirectPlayProfile(nil), profile.DirectPlayProfiles...)
+	profile.TranscodingProfiles = append([]TranscodingProfile(nil), profile.TranscodingProfiles...)
+	profile.SubtitleProfiles = append([]SubtitleProfile(nil), profile.SubtitleProfiles...)
+	return profile
+}
+
 func validPlaySessionOwner(session AuthenticatedSession) bool {
 	return session.ID != "" && session.ProfileID != "" && session.Principal.SessionID != "" &&
 		session.Principal.ActiveProfileID != nil && *session.Principal.ActiveProfileID == session.ProfileID
@@ -1202,6 +1375,16 @@ func deliveryDuration(session playback.Session) float64 {
 	return 0
 }
 
+func compatibilitySourceName(ordinal, reportedHeight int) string {
+	name := fmt.Sprintf("Source %d", ordinal)
+	switch reportedHeight {
+	case 2160, 1080, 720, 480:
+		return fmt.Sprintf("%s · %dp", name, reportedHeight)
+	default:
+		return name
+	}
+}
+
 func newPlaySessionID() (string, error) {
 	var entropy [24]byte
 	if _, err := rand.Read(entropy[:]); err != nil {
@@ -1218,7 +1401,7 @@ func derivedMediaSourceID(playID string, index int) string {
 }
 
 func safeDeliverySession(session playback.Session) playback.Session {
-	result := playback.Session{SelectedSourceID: session.SelectedSourceID}
+	result := playback.Session{SelectedSourceID: session.SelectedSourceID, SelectedAudioTrack: cloneIntPointer(session.SelectedAudioTrack)}
 	for _, source := range session.Sources {
 		if source.ID != session.SelectedSourceID {
 			continue
@@ -1235,6 +1418,14 @@ func safeDeliverySession(session playback.Session) playback.Session {
 		break
 	}
 	return result
+}
+
+func cloneIntPointer(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func clonePrincipal(principal auth.Principal) auth.Principal {

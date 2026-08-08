@@ -340,7 +340,7 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 	if viewsResponse.Code != http.StatusOK || views.TotalRecordCount != 3 || len(views.Items) != 3 ||
 		views.Items[0].Id != virtual[0].Id || views.Items[1].Id != virtual[1].Id ||
 		views.Items[2].Id != collectionCompatID || views.Items[2].Id == virtual[2].Id ||
-		views.Items[2].Type != "CollectionFolder" || views.Items[2].CollectionType != "boxsets" ||
+		views.Items[2].Type != "CollectionFolder" || views.Items[2].CollectionType != "homevideos" ||
 		views.Items[2].UserData == nil || views.Items[2].UserData.ItemId != collectionCompatID {
 		t.Fatalf("VidHub home views status=%d result=%+v", viewsResponse.Code, views)
 	}
@@ -364,8 +364,9 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 		t.Fatalf("VidHub home collection row status=%d items=%+v body=%s", latestResponse.Code, latest, latestResponse.Body.String())
 	}
 	for _, item := range latest {
-		if item.Type != "Folder" || item.ParentId != collectionCompatID || item.PrimaryImageAspectRatio != 16.0/9.0 || item.UserData == nil || item.UserData.ItemId != item.Id {
-			t.Fatalf("VidHub home row contains an invalid collection folder: %+v", item)
+		if item.Type != "Folder" || item.ParentId != collectionCompatID || item.PrimaryImageAspectRatio != 16.0/9.0 ||
+			item.UserData == nil || item.UserData.ItemId != item.Id {
+			t.Fatalf("VidHub home row contains an invalid landscape folder: %+v", item)
 		}
 	}
 
@@ -393,6 +394,26 @@ func TestCollectionFolderAspectRatioUsesCollectionCoverShape(t *testing.T) {
 	} {
 		if got := collectionFolderAspectRatio(test.shape); got != test.want {
 			t.Fatalf("shape %q ratio=%v want=%v", test.shape, got, test.want)
+		}
+	}
+}
+
+func TestCollectionViewTypeAndArtworkFollowSupportedVidHubCoverShape(t *testing.T) {
+	for _, test := range []struct {
+		shape          string
+		collectionType string
+		wantThumb      bool
+	}{
+		{shape: collection.TileShapePoster, collectionType: "boxsets"},
+		{shape: collection.TileShapeLandscape, collectionType: "homevideos", wantThumb: true},
+		{shape: collection.TileShapeSquare, collectionType: "boxsets"},
+	} {
+		if got := collectionViewType(test.shape); got != test.collectionType {
+			t.Fatalf("collectionViewType(%q) = %q, want %q", test.shape, got, test.collectionType)
+		}
+		tags := collectionFolderImageTags(test.shape, "safe-tag")
+		if tags["Primary"] != "safe-tag" || (tags["Thumb"] != "") != test.wantThumb {
+			t.Fatalf("collectionFolderImageTags(%q) = %#v, wantThumb=%t", test.shape, tags, test.wantThumb)
 		}
 	}
 }

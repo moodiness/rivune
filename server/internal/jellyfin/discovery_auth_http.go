@@ -2,6 +2,7 @@ package jellyfin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -208,22 +209,35 @@ func (handler *Handler) handleLogout(response http.ResponseWriter, request *http
 }
 
 func (handler *Handler) handleSessionCapabilitiesFull(response http.ResponseWriter, request *http.Request) {
-	if _, ok := handler.authenticateRequest(response, request, false); !ok {
+	session, ok := handler.authenticateRequest(response, request, false)
+	if !ok {
 		return
 	}
 	if request.ContentLength > maximumCompatCapabilitiesBodyBytes {
 		writeCompatError(response, http.StatusRequestEntityTooLarge, "InvalidRequest", "The request body is too large")
 		return
 	}
-	if request.Body != nil {
-		read, err := io.Copy(io.Discard, io.LimitReader(request.Body, maximumCompatCapabilitiesBodyBytes+1))
+	if request.Body != nil && request.Body != http.NoBody {
+		payload, err := io.ReadAll(io.LimitReader(request.Body, maximumCompatCapabilitiesBodyBytes+1))
 		if err != nil {
 			writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The request body is invalid")
 			return
 		}
-		if read > maximumCompatCapabilitiesBodyBytes {
+		if len(payload) > maximumCompatCapabilitiesBodyBytes {
 			writeCompatError(response, http.StatusRequestEntityTooLarge, "InvalidRequest", "The request body is too large")
 			return
+		}
+		if len(strings.TrimSpace(string(payload))) != 0 {
+			var input struct {
+				DeviceProfile *DeviceProfile `json:"DeviceProfile"`
+			}
+			if err := json.Unmarshal(payload, &input); err != nil || input.DeviceProfile != nil && !validDeviceProfileBounds(*input.DeviceProfile) {
+				writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The request body is invalid")
+				return
+			}
+			if input.DeviceProfile != nil && handler.playSessions != nil {
+				handler.playSessions.setDeviceProfile(session, *input.DeviceProfile)
+			}
 		}
 	}
 	response.Header().Set("Cache-Control", "no-store")

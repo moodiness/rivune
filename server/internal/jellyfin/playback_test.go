@@ -76,11 +76,61 @@ func TestPlaybackCapabilitiesRejectUnsupportedAndUnboundedProfiles(t *testing.T)
 	}
 }
 
+func TestVidHubUsesStoredDeviceProfileAndConservativePostedFallback(t *testing.T) {
+	t.Run("stored session profile", func(t *testing.T) {
+		fixture := newPlaybackFixture(t)
+		fixture.authentication.session.Client.Client = "VidHub"
+		fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{SourceRef: "stored-profile-source", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour)}}}
+		body := `{"PlayableMediaTypes":["Video"],"SupportsMediaControl":true,"DeviceProfile":{"Name":"VidHub iOS","DirectPlayProfiles":[{"Container":"mkv","VideoCodec":"h264","AudioCodec":"aac","Type":"Video"}]}}`
+		request := httptest.NewRequest(http.MethodPost, "/Sessions/Capabilities/Full", strings.NewReader(body))
+		request.Header.Set("X-Emby-Token", fixture.token)
+		response := httptest.NewRecorder()
+		fixture.handler.handleSessionCapabilitiesFull(response, request)
+		stored, ok := fixture.handler.playSessions.deviceProfile(fixture.authentication.session)
+		if response.Code != http.StatusNoContent || !ok || stored.Name != "VidHub iOS" || len(stored.DirectPlayProfiles) != 1 {
+			t.Fatalf("stored capabilities status=%d ok=%t profile=%+v", response.Code, ok, stored)
+		}
+		playbackResponse := fixture.playbackInfo(http.MethodPost, `{}`)
+		var result PlaybackInfoResponse
+		if err := json.Unmarshal(playbackResponse.Body.Bytes(), &result); err != nil || playbackResponse.Code != http.StatusOK || len(result.MediaSources) != 1 ||
+			!result.MediaSources[0].SupportsDirectPlay || result.MediaSources[0].SupportsTranscoding {
+			t.Fatalf("stored profile playback status=%d result=%+v err=%v", playbackResponse.Code, result, err)
+		}
+		logout := httptest.NewRequest(http.MethodPost, "/Sessions/Logout", nil)
+		logout.Header.Set("X-Emby-Token", fixture.token)
+		logoutResponse := httptest.NewRecorder()
+		fixture.handler.handleLogout(logoutResponse, logout)
+		if _, stillStored := fixture.handler.playSessions.deviceProfile(fixture.authentication.session); logoutResponse.Code != http.StatusNoContent || stillStored {
+			t.Fatalf("logout status=%d retainedDeviceProfile=%t", logoutResponse.Code, stillStored)
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "empty posted profile", body: `{}`},
+		{name: "bounded broad posted profile", body: `{"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4,mkv,webm,avi","VideoCodec":"h264,hevc,vp9,av1","AudioCodec":"aac,ac3,eac3,opus","Type":"Video"}]}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlaybackFixture(t)
+			fixture.authentication.session.Client.Client = "VidHub"
+			fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{SourceRef: "fallback-profile-source", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour)}}}
+			response := fixture.playbackInfo(http.MethodPost, test.body)
+			var result PlaybackInfoResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || response.Code != http.StatusOK || len(result.MediaSources) != 1 ||
+				result.MediaSources[0].SupportsDirectPlay || !result.MediaSources[0].SupportsTranscoding || !strings.Contains(result.MediaSources[0].TranscodingUrl, "/stream.m3u8?") {
+				t.Fatalf("fallback profile status=%d result=%+v err=%v", response.Code, result, err)
+			}
+		})
+	}
+}
+
 func TestPlaybackInfoListsMultipleSourcesLazilyInOrderWithoutDisclosure(t *testing.T) {
 	fixture := newPlaybackFixture(t)
 	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{
-		{SourceRef: "source-ref-provider-secret-1", Name: "https://provider.invalid/watch?token=provider-secret", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
-		{SourceRef: "source-ref-provider-secret-2", Name: "Bearer provider-name-secret; Cookie=provider-cookie", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour)},
+		{SourceRef: "source-ref-provider-secret-1", Name: "https://provider.invalid/watch?token=provider-secret", Protocol: "http", Container: "mp4", ReportedHeight: 1080, ExpiresAt: fixture.now.Add(time.Hour)},
+		{SourceRef: "source-ref-provider-secret-2", Name: "Bearer provider-name-secret; Cookie=provider-cookie", Protocol: "http", Container: "mkv", ReportedHeight: 2160, ExpiresAt: fixture.now.Add(time.Hour)},
 		{SourceRef: "source-ref-provider-secret-external", Name: "External", Protocol: "external", ExpiresAt: fixture.now.Add(time.Hour)},
 	}}
 	body := fmt.Sprintf(`{"UserId":%q,"MaxStreamingBitrate":5000000,"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4,mkv","VideoCodec":"h264","AudioCodec":"aac","Type":"Video"}]}}`, fixture.authentication.session.ProfileID)
@@ -95,8 +145,8 @@ func TestPlaybackInfoListsMultipleSourcesLazilyInOrderWithoutDisclosure(t *testi
 	if fixture.delivery.openCalls != 0 || len(result.MediaSources) != 2 {
 		t.Fatalf("lazy sources: opens=%d sources=%#v", fixture.delivery.openCalls, result.MediaSources)
 	}
-	if result.MediaSources[0].Id != fixture.item.ID || result.MediaSources[0].Name != "Source 1" || result.MediaSources[1].Name != "Source 2" || result.MediaSources[1].Id == fixture.item.ID {
-		t.Fatalf("source ordering/opaque IDs = %#v", result.MediaSources)
+	if result.MediaSources[0].Id != fixture.item.ID || result.MediaSources[0].Name != "Source 1 · 1080p" || result.MediaSources[1].Name != "Source 2 · 2160p" || result.MediaSources[1].Id == fixture.item.ID {
+		t.Fatalf("source ordering/safe quality/opaque IDs = %#v", result.MediaSources)
 	}
 	encoded := response.Body.String()
 	for _, secret := range []string{"source-ref-provider-secret", "provider-token", "provider.invalid", "provider-name-secret", "provider-cookie", "/api/v1/", fixture.token} {
@@ -126,8 +176,9 @@ func TestPlaybackInfoGETUsesConservativeProfileAndPreservesSeekingInPath(t *test
 		t.Fatal(err)
 	}
 	if len(result.MediaSources) != 1 || !strings.Contains(result.MediaSources[0].Path, "StartTimeTicks=900000000") ||
+		!strings.Contains(result.MediaSources[0].Path, "/stream.mp4?") || !strings.Contains(result.MediaSources[0].Path, "api_key="+result.PlaySessionId) ||
 		!result.MediaSources[0].SupportsTranscoding || result.MediaSources[0].TranscodingSubProtocol != "Hls" ||
-		result.MediaSources[0].TranscodingUrl != result.MediaSources[0].Path || fixture.delivery.openCalls != 0 {
+		!strings.Contains(result.MediaSources[0].TranscodingUrl, "/stream.m3u8?") || result.MediaSources[0].TranscodingUrl == result.MediaSources[0].Path || fixture.delivery.openCalls != 0 {
 		t.Fatalf("GET playback result=%#v opens=%d", result, fixture.delivery.openCalls)
 	}
 }
@@ -180,7 +231,8 @@ func TestVidHubItemDetailEmbedsScopedPlayableSources(t *testing.T) {
 	}
 	if len(item.MediaSources) != 2 || item.MediaSources[0].Name != "Source 1" || item.MediaSources[1].Name != "Source 2" ||
 		item.MediaSources[0].Protocol != "Http" || item.MediaSources[0].Container != "mp4" || item.MediaSources[1].Container != "mkv" ||
-		!strings.Contains(item.MediaSources[0].Path, "PlaySessionId=") || !strings.Contains(item.MediaSources[0].Path, "MediaSourceId=") ||
+		item.MediaSources[0].RunTimeTicks == nil || *item.MediaSources[0].RunTimeTicks != MinutesToTicks(121) || len(item.MediaSources[0].MediaStreams) != 0 ||
+		!strings.Contains(item.MediaSources[0].Path, "PlaySessionId=") || !strings.Contains(item.MediaSources[0].Path, "MediaSourceId=") || !strings.Contains(item.MediaSources[0].Path, "api_key=") ||
 		strings.Contains(response.Body.String(), "detail-source-secret") || strings.Contains(response.Body.String(), "provider.invalid") || strings.Contains(response.Body.String(), "detail-provider-secret") ||
 		fixture.delivery.sourceCalls != 1 || len(fixture.delivery.sourceInputs) != 1 || fixture.delivery.sourceInputs[0].MaximumSources != maximumCompatibilityMediaSources || fixture.delivery.openCalls != 0 {
 		t.Fatalf("detail sources=%+v sourceCalls=%d openCalls=%d body=%s", item.MediaSources, fixture.delivery.sourceCalls, fixture.delivery.openCalls, response.Body.String())
@@ -249,7 +301,12 @@ func TestPlaybackInfoSelectedSourceOpensOnlyThatSource(t *testing.T) {
 	if fixture.delivery.openCalls != 1 || fixture.delivery.inputs[0].SourceRef != "source-reference-000000000001" || fixture.delivery.inputs[0].StartSeconds != 120 {
 		t.Fatalf("selected open calls=%d inputs=%#v", fixture.delivery.openCalls, fixture.delivery.inputs)
 	}
-	if result.MediaSources[0].RunTimeTicks == nil || *result.MediaSources[0].RunTimeTicks != SecondsToTicks(3600) {
+	if result.MediaSources[0].RunTimeTicks == nil || *result.MediaSources[0].RunTimeTicks != SecondsToTicks(3600) ||
+		result.MediaSources[0].Name != "Source 1 · 1080p · H.264 · E-AC-3 · HDR10" || len(result.MediaSources[0].MediaStreams) != 3 ||
+		result.MediaSources[0].MediaStreams[0].Type != "Video" || result.MediaSources[0].MediaStreams[0].Height != 1080 ||
+		result.MediaSources[0].MediaStreams[1].Type != "Audio" || result.MediaSources[0].MediaStreams[1].IsDefault ||
+		result.MediaSources[0].MediaStreams[2].Codec != "eac3" || !result.MediaSources[0].MediaStreams[2].IsDefault ||
+		result.MediaSources[0].DefaultAudioStreamIndex == nil || *result.MediaSources[0].DefaultAudioStreamIndex != 2 {
 		t.Fatalf("resolved media metadata=%#v", result.MediaSources[0])
 	}
 	if strings.Contains(response.Body.String(), "provider-secret") || strings.Contains(response.Body.String(), "source-reference") {
@@ -380,10 +437,109 @@ func TestStreamOpensOnlySelectedSourceAndPreservesRangeHEADAndSeeking(t *testing
 			if fixture.delivery.openCalls != 1 || fixture.delivery.inputs[0].SourceRef != "source-reference-000000000002" || fixture.delivery.inputs[0].StartSeconds != 90 {
 				t.Fatalf("selected lazy open = calls %d input %#v", fixture.delivery.openCalls, fixture.delivery.inputs)
 			}
-			if fixture.delivery.servedMethod != method || fixture.delivery.servedRange != "bytes=1024-2047" || fixture.delivery.servedStartTicks != "900000000" {
-				t.Fatalf("serve semantics method=%q range=%q ticks=%q", fixture.delivery.servedMethod, fixture.delivery.servedRange, fixture.delivery.servedStartTicks)
+			if fixture.delivery.servedMethod != method || fixture.delivery.servedRange != "bytes=1024-2047" || fixture.delivery.servedStartTicks != "900000000" || fixture.delivery.servedAPIKey != info.PlaySessionId {
+				t.Fatalf("serve semantics method=%q range=%q ticks=%q scopedKey=%t", fixture.delivery.servedMethod, fixture.delivery.servedRange, fixture.delivery.servedStartTicks, fixture.delivery.servedAPIKey == info.PlaySessionId)
 			}
 		})
+	}
+}
+
+func TestAdvertisedStreamCapabilityServesPlayerGETWithoutProfileCredential(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		mutatePath       func(string, string) string
+		header           bool
+		wantStatus       int
+		wantRevalidation int
+	}{
+		{name: "scoped capability", wantStatus: http.StatusNoContent, wantRevalidation: 1},
+		{name: "scoped capability with matching header", header: true, wantStatus: http.StatusNoContent},
+		{name: "missing capability", mutatePath: func(path, playID string) string { return strings.Replace(path, "&api_key="+playID, "", 1) }, wantStatus: http.StatusUnauthorized},
+		{name: "wrong capability", mutatePath: func(path, playID string) string {
+			return strings.Replace(path, "api_key="+playID, "api_key=wrong-capability", 1)
+		}, wantStatus: http.StatusUnauthorized},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlaybackFixture(t)
+			fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{SourceRef: "advertised-player-source", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)}}}
+			listed := fixture.playbackInfo(http.MethodPost, `{"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","AudioCodec":"aac","Type":"Video"}]}}`)
+			var info PlaybackInfoResponse
+			if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil || listed.Code != http.StatusOK || len(info.MediaSources) != 1 {
+				t.Fatalf("playback info status=%d result=%+v err=%v", listed.Code, info, err)
+			}
+			path := info.MediaSources[0].Path
+			if test.mutatePath != nil {
+				path = test.mutatePath(path, info.PlaySessionId)
+			}
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.SetPathValue("id", fixture.item.ID)
+			if test.header {
+				request.Header.Set("X-Emby-Token", fixture.token)
+			}
+			response := httptest.NewRecorder()
+			fixture.handler.handleStream(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("advertised GET status=%d want=%d path=%q body=%s", response.Code, test.wantStatus, path, response.Body.String())
+			}
+			wantServed := test.wantStatus == http.StatusNoContent
+			if (fixture.delivery.serveCalls == 1) != wantServed || (fixture.delivery.openCalls == 1) != wantServed || fixture.authentication.revalidateCalls != test.wantRevalidation {
+				t.Fatalf("delivery calls open=%d serve=%d revalidate=%d wantServed=%t wantRevalidation=%d", fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.authentication.revalidateCalls, wantServed, test.wantRevalidation)
+			}
+		})
+	}
+}
+
+func TestGeneralQueryCredentialIsReplacedBeforeHLSDelivery(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{SourceRef: "canonical-child-capability", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)}}}
+	listed := fixture.playbackInfo(http.MethodPost, `{"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}}`)
+	var info PlaybackInfoResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil || len(info.MediaSources) != 1 {
+		t.Fatalf("playback info=%+v err=%v", info, err)
+	}
+	path := strings.Replace(info.MediaSources[0].Path, "api_key="+info.PlaySessionId, "api_key="+fixture.token, 1)
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.SetPathValue("id", fixture.item.ID)
+	response := httptest.NewRecorder()
+	fixture.handler.handleStream(response, request)
+	if response.Code != http.StatusNoContent || fixture.delivery.servedAPIKey != info.PlaySessionId || fixture.delivery.servedAPIKey == fixture.token {
+		t.Fatalf("status=%d scopedKey=%t generalCredentialPropagated=%t", response.Code, fixture.delivery.servedAPIKey == info.PlaySessionId, fixture.delivery.servedAPIKey == fixture.token)
+	}
+}
+
+func TestRevokedBackingSessionRejectsScopedStreamBeforeOpen(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{SourceRef: "revoked-capability-source", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)}}}
+	listed := fixture.playbackInfo(http.MethodPost, `{"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}}`)
+	var info PlaybackInfoResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil || len(info.MediaSources) != 1 {
+		t.Fatalf("playback info=%+v err=%v", info, err)
+	}
+	fixture.authentication.revalidateErr = ErrInvalidCompatCredential
+	request := httptest.NewRequest(http.MethodGet, info.MediaSources[0].Path, nil)
+	request.SetPathValue("id", fixture.item.ID)
+	response := httptest.NewRecorder()
+	fixture.handler.handleStream(response, request)
+	if response.Code != http.StatusUnauthorized || fixture.authentication.revalidateCalls != 1 || fixture.delivery.openCalls != 0 || fixture.delivery.serveCalls != 0 || len(fixture.handler.playSessions.entries) != 0 {
+		t.Fatalf("status=%d revalidate=%d open=%d serve=%d entries=%d", response.Code, fixture.authentication.revalidateCalls, fixture.delivery.openCalls, fixture.delivery.serveCalls, len(fixture.handler.playSessions.entries))
+	}
+}
+
+func TestTransientStreamRevalidationFailurePreservesScopedSession(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{SourceRef: "transient-capability-source", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)}}}
+	listed := fixture.playbackInfo(http.MethodPost, `{"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}}`)
+	var info PlaybackInfoResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil || len(info.MediaSources) != 1 {
+		t.Fatalf("playback info=%+v err=%v", info, err)
+	}
+	fixture.authentication.revalidateErr = errors.New("database temporarily unavailable")
+	request := httptest.NewRequest(http.MethodGet, info.MediaSources[0].Path, nil)
+	request.SetPathValue("id", fixture.item.ID)
+	response := httptest.NewRecorder()
+	fixture.handler.handleStream(response, request)
+	if response.Code != http.StatusInternalServerError || fixture.delivery.openCalls != 0 || fixture.delivery.serveCalls != 0 || fixture.handler.playSessions.entries[info.PlaySessionId] == nil {
+		t.Fatalf("status=%d open=%d serve=%d sessionPreserved=%t", response.Code, fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.handler.playSessions.entries[info.PlaySessionId] != nil)
 	}
 }
 
@@ -826,24 +982,29 @@ func TestPlaySessionRegistryRefreshMatchesReorderedCandidatesByIdentity(t *testi
 	fixture := newPlaybackFixture(t)
 	capabilities := playback.Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}}
 	initial := []playback.SourceOption{
-		{ID: "stream-1", AddonID: "addon", ManifestID: "manifest", StreamIndex: 0, StableIdentity: "stable-a", SourceRef: "old-a", Name: "A", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
-		{ID: "stream-2", AddonID: "addon", ManifestID: "manifest", StreamIndex: 1, StableIdentity: "stable-b", SourceRef: "old-b", Name: "B", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
-		{ID: "stream-3", AddonID: "addon", ManifestID: "manifest", StreamIndex: 2, StableIdentity: "stable-c", SourceRef: "old-c", Name: "C", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
+		{ID: "stream-1", AddonID: "addon", ManifestID: "manifest", StreamIndex: 0, StableIdentity: "stable-a", SourceRef: "old-a", Name: "A", Protocol: "http", Container: "mp4", ReportedHeight: 480, ExpiresAt: fixture.now.Add(time.Hour)},
+		{ID: "stream-2", AddonID: "addon", ManifestID: "manifest", StreamIndex: 1, StableIdentity: "stable-b", SourceRef: "old-b", Name: "B", Protocol: "http", Container: "mp4", ReportedHeight: 720, ExpiresAt: fixture.now.Add(time.Hour)},
+		{ID: "stream-3", AddonID: "addon", ManifestID: "manifest", StreamIndex: 2, StableIdentity: "stable-c", SourceRef: "old-c", Name: "C", Protocol: "http", Container: "mp4", ReportedHeight: 1080, ExpiresAt: fixture.now.Add(time.Hour)},
 	}
 	playID, descriptors, err := fixture.handler.playSessions.register(context.Background(), fixture.authentication.session, fixture.item.ID, capabilities, false, initial)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fresh := []playback.SourceOption{
-		{ID: "stream-1", AddonID: "addon", ManifestID: "manifest", StreamIndex: 2, StableIdentity: "stable-c", SourceRef: "new-c", Name: "C", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
-		{ID: "stream-2", AddonID: "addon", ManifestID: "manifest", StreamIndex: 0, StableIdentity: "stable-a", SourceRef: "new-a", Name: "A", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
-		{ID: "stream-3", AddonID: "addon", ManifestID: "manifest", StreamIndex: 1, StableIdentity: "stable-b", SourceRef: "new-b", Name: "B", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
+		{ID: "stream-1", AddonID: "addon", ManifestID: "manifest", StreamIndex: 2, StableIdentity: "stable-c", SourceRef: "new-c", Name: "https://provider.invalid/secret-c", Protocol: "http", Container: "mp4", ReportedHeight: 1080, ExpiresAt: fixture.now.Add(time.Hour)},
+		{ID: "stream-2", AddonID: "addon", ManifestID: "manifest", StreamIndex: 0, StableIdentity: "stable-a", SourceRef: "new-a", Name: "Bearer secret-a", Protocol: "http", Container: "mp4", ReportedHeight: 480, ExpiresAt: fixture.now.Add(time.Hour)},
+		{ID: "stream-3", AddonID: "addon", ManifestID: "manifest", StreamIndex: 1, StableIdentity: "stable-b", SourceRef: "new-b", Name: "Cookie=secret-b", Protocol: "http", Container: "mp4", ReportedHeight: 2160, ExpiresAt: fixture.now.Add(time.Hour)},
 	}
 	refreshedCapabilities := clonePlaybackCapabilities(capabilities)
 	refreshedCapabilities.MaximumVideoBitrateKbps = 1000
 	reusedID, refreshed, ok := fixture.handler.playSessions.reuseCandidate(fixture.authentication.session, fixture.item.ID, descriptors[1].ID, refreshedCapabilities, false, fresh)
-	if !ok || reusedID != playID || len(refreshed) != 3 || refreshed[1].ID != descriptors[1].ID {
-		t.Fatalf("reordered refresh lost identity: id=%q ok=%t descriptors=%#v", reusedID, ok, refreshed)
+	if !ok || reusedID != playID || len(refreshed) != 3 || refreshed[1].ID != descriptors[1].ID || refreshed[1].Name != "Source 2 · 2160p" {
+		t.Fatalf("reordered refresh lost safe identity: id=%q ok=%t descriptors=%#v", reusedID, ok, refreshed)
+	}
+	for _, descriptor := range refreshed {
+		if strings.Contains(descriptor.Name, "provider.invalid") || strings.Contains(descriptor.Name, "Bearer") || strings.Contains(descriptor.Name, "Cookie") {
+			t.Fatalf("reordered refresh disclosed provider label: %#v", refreshed)
+		}
 	}
 	if _, _, _, err := fixture.handler.playSessions.openAndTouch(context.Background(), fixture.authentication.session, fixture.item.ID, playID, descriptors[1].ID, 0); err != nil {
 		t.Fatal(err)
@@ -951,6 +1112,48 @@ func TestPlaySessionRegistryOwnerQuotaNeverEvictsAnotherOwner(t *testing.T) {
 	}
 	if registry.ownerCountLocked(ownerA) != 1 || registry.ownerCountLocked(ownerB) != 1 {
 		t.Fatalf("per-owner quota not enforced: A=%d B=%d", registry.ownerCountLocked(ownerA), registry.ownerCountLocked(ownerB))
+	}
+}
+
+func TestDeviceProfileCacheNeverEvictsAnotherOwnerAtGlobalLimit(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	registry := fixture.handler.playSessions
+	registry.limit = 1
+	registry.ownerLimit = 2
+	registry.userLimit = 2
+	ownerA := fixture.authentication.session
+	ownerB := playbackSessionTestOtherOwner(ownerA, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+	profile := conservativeCompatibilityProfile()
+	if !registry.setDeviceProfile(ownerA, profile) {
+		t.Fatal("first owner profile was rejected")
+	}
+	if registry.setDeviceProfile(ownerB, profile) {
+		t.Fatal("global saturation admitted a second owner by evicting the first")
+	}
+	if _, ok := registry.deviceProfile(ownerA); !ok {
+		t.Fatal("global saturation evicted the existing owner")
+	}
+	if _, ok := registry.deviceProfile(ownerB); ok || len(registry.deviceProfiles) != 1 {
+		t.Fatalf("unexpected device profile cache state: ownerB=%t entries=%d", ok, len(registry.deviceProfiles))
+	}
+}
+
+func TestDeviceProfileCacheReloginsShareStableOwnerQuota(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	registry := fixture.handler.playSessions
+	registry.limit = 3
+	registry.ownerLimit = 1
+	first := fixture.authentication.session
+	second := playbackSessionTestRelogin(first, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+	profile := conservativeCompatibilityProfile()
+	if !registry.setDeviceProfile(first, profile) || !registry.setDeviceProfile(second, profile) {
+		t.Fatal("stable owner profile admission failed")
+	}
+	if _, ok := registry.deviceProfile(first); ok {
+		t.Fatal("stable owner quota retained the older relogin")
+	}
+	if _, ok := registry.deviceProfile(second); !ok || len(registry.deviceProfiles) != 1 {
+		t.Fatalf("stable owner profile missing=%t entries=%d", !ok, len(registry.deviceProfiles))
 	}
 }
 
@@ -1620,7 +1823,8 @@ func newPlaybackFixture(t *testing.T) *playbackFixture {
 	}
 	token := "rivune_jf_" + base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	authentication := &fakeCompatPlaybackAuthentication{session: session}
-	item := watchstate.CatalogTitle{ID: "11111111-1111-4111-8111-111111111111", MediaType: "movie", ResourceID: "tt-provider-token-secret"}
+	runtimeMinutes := 121
+	item := watchstate.CatalogTitle{ID: "11111111-1111-4111-8111-111111111111", MediaType: "movie", ResourceID: "tt-provider-token-secret", RuntimeMinutes: &runtimeMinutes}
 	delivery := &fakeCompatPlaybackDelivery{handle: opaquePlaybackHandle(t), now: now}
 	catalog := &fakeCompatPlaybackCatalog{item: item}
 	handler := &Handler{authentication: authentication, catalog: catalog, playback: delivery}
@@ -1638,7 +1842,11 @@ func (fixture *playbackFixture) playbackInfo(method, body string) *httptest.Resp
 	return response
 }
 
-type fakeCompatPlaybackAuthentication struct{ session AuthenticatedSession }
+type fakeCompatPlaybackAuthentication struct {
+	session         AuthenticatedSession
+	revalidateErr   error
+	revalidateCalls int
+}
 
 func (*fakeCompatPlaybackAuthentication) Login(context.Context, CompatLoginInput) (LoginResult, error) {
 	return LoginResult{}, errors.New("not used")
@@ -1646,6 +1854,17 @@ func (*fakeCompatPlaybackAuthentication) Login(context.Context, CompatLoginInput
 func (authentication *fakeCompatPlaybackAuthentication) Authenticate(context.Context, string) (AuthenticatedSession, error) {
 	return authentication.session, nil
 }
+func (authentication *fakeCompatPlaybackAuthentication) Revalidate(_ context.Context, expected AuthenticatedSession) (AuthenticatedSession, error) {
+	authentication.revalidateCalls++
+	if authentication.revalidateErr != nil {
+		return AuthenticatedSession{}, authentication.revalidateErr
+	}
+	if !sameAuthenticatedSessionOwner(expected, authentication.session) {
+		return AuthenticatedSession{}, ErrInvalidCompatCredential
+	}
+	return authentication.session, nil
+}
+
 func (*fakeCompatPlaybackAuthentication) Logout(context.Context, AuthenticatedSession) error {
 	return nil
 }
@@ -1695,6 +1914,7 @@ type fakeCompatPlaybackDelivery struct {
 	servedMethod      string
 	servedRange       string
 	servedStartTicks  string
+	servedAPIKey      string
 	openGate          <-chan struct{}
 	openIgnoreContext bool
 	openStarted       chan<- struct{}
@@ -1791,9 +2011,10 @@ func (delivery *fakeCompatPlaybackDelivery) Open(ctx context.Context, _ auth.Pri
 	if openErr != nil {
 		return playback.Delivery{Handle: handle}, openErr
 	}
+	selectedAudio := 2
 	return playback.Delivery{
 		Handle:  handle,
-		Session: playback.Session{SelectedSourceID: "native-selected", Sources: []playback.Source{{ID: "native-selected", Mode: "direct", Protocol: "http", Container: "mp4", URL: "https://provider.invalid/video?token=provider-secret", Media: &playback.MediaInspection{DurationSeconds: 3600, VideoTracks: []playback.MediaTrack{{Codec: "h264", BitrateKbps: 4000}}, AudioTracks: []playback.MediaTrack{{Codec: "aac", BitrateKbps: 192}}}}}},
+		Session: playback.Session{SelectedSourceID: "native-selected", SelectedAudioTrack: &selectedAudio, Sources: []playback.Source{{ID: "native-selected", Mode: "direct", Protocol: "http", Container: "mp4", URL: "https://provider.invalid/video?token=provider-secret", Media: &playback.MediaInspection{Container: "mp4", DurationSeconds: 3600, HDRFormat: "hdr10", VideoTracks: []playback.MediaTrack{{Index: 0, Codec: "h264", Width: 1920, Height: 1080, BitrateKbps: 4000}}, AudioTracks: []playback.MediaTrack{{Index: 1, Codec: "truehd", Language: "en", Channels: 8, BitrateKbps: 3000}, {Index: 2, Codec: "eac3", Language: "fr", Channels: 6, BitrateKbps: 768}}}}}},
 	}, nil
 }
 func (delivery *fakeCompatPlaybackDelivery) Serve(response http.ResponseWriter, request *http.Request, handle playback.DeliveryHandle) error {
@@ -1806,6 +2027,7 @@ func (delivery *fakeCompatPlaybackDelivery) Serve(response http.ResponseWriter, 
 	delivery.servedMethod = request.Method
 	delivery.servedRange = request.Header.Get("Range")
 	delivery.servedStartTicks = request.URL.Query().Get("StartTimeTicks")
+	delivery.servedAPIKey = request.URL.Query().Get("api_key")
 	if delivery.serveErr != nil {
 		return delivery.serveErr
 	}

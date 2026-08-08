@@ -210,7 +210,7 @@ func (service *Service) sources(ctx context.Context, principal auth.Principal, i
 		options = append(options, SourceOption{
 			ID: source.ID, SourceRef: reference.ID, AddonID: source.AddonID, ManifestID: source.ManifestID, AddonName: source.AddonName,
 			StreamIndex: source.StreamIndex, Name: name, Description: description, Filename: filename,
-			Protocol: source.Protocol, Container: source.Container, ExpiresAt: reference.ExpiresAt, StableIdentity: stableSourceIdentity(source),
+			Protocol: source.Protocol, Container: source.Container, ExpiresAt: reference.ExpiresAt, ReportedHeight: sourceResolutionHint(source), StableIdentity: stableSourceIdentity(source),
 		})
 		if pin {
 			pinnedIdentifiers = append(pinnedIdentifiers, reference.ID)

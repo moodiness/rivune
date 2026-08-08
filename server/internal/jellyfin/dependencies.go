@@ -14,6 +14,7 @@ import (
 type Authentication interface {
 	Login(context.Context, CompatLoginInput) (LoginResult, error)
 	Authenticate(context.Context, string) (AuthenticatedSession, error)
+	Revalidate(context.Context, AuthenticatedSession) (AuthenticatedSession, error)
 	Logout(context.Context, AuthenticatedSession) error
 }
 

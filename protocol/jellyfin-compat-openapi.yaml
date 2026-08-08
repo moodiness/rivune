@@ -40,16 +40,17 @@ info:
 
     Only the dedicated `rivune_jf_` credential audience is accepted; native
     `rivune_at_` tokens fail. Multiple header transports may repeat only the same
-    credential, while conflicting transports and duplicate query credentials fail.
-    The `api_key` query transport is an explicit exception only for image and stream
-    operations. Artwork may instead use the opaque `tag` returned in item DTOs as an
-    anonymous capability; a supplied invalid credential never falls back to that path.
+    credential. The `api_key` query transport is an explicit exception only for image and stream
+    operations. Advertised media URLs use the 192-bit `PlaySessionId` as a short-lived,
+    item/source-bound stream capability instead of serializing the profile credential.
+    Artwork may instead use the opaque `tag` returned in item DTOs as an anonymous capability;
+    a supplied invalid credential never falls back to either capability path.
 
     Playback source enumeration remains lazy and only the selected MediaSourceId is
     opened. Compatibility play sessions contain opaque selectors, are bound to the
     credential/profile/device/item, and are capped at 256 active entries with a
-    30-minute idle and two-hour absolute lifetime. Stream URLs never carry the general
-    compatibility credential or a provider/source URL.
+    30-minute idle and two-hour absolute lifetime. Stream URLs carry only the scoped
+    PlaySessionId capability, never the general compatibility credential or a provider/source URL.
 
     The library hierarchy contains the stable `Movies`, `TV Shows`, and `Collections`
     virtual views plus one ordered, named view per profile-authorized Rivune collection.
@@ -216,13 +217,17 @@ paths:
   /Sessions/Capabilities/Full:
     post:
       tags: [Sessions]
-      summary: Accept bounded client capability metadata without persisting it
+      summary: Cache a bounded device profile for the authenticated session
       operationId: updateJellyfinSessionCapabilities
       requestBody:
         required: false
         content:
           application/json:
-            schema: { type: object, additionalProperties: true }
+            schema:
+              type: object
+              additionalProperties: true
+              properties:
+                DeviceProfile: { $ref: "#/components/schemas/DeviceProfile" }
       responses:
         "204": { $ref: "#/components/responses/NoContent" }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -1022,6 +1027,7 @@ components:
       name: api_key
       description: >
         URL authentication accepted only by documented artwork and stream operations.
+        Stream URLs may use the matching PlaySessionId as an item/source-bound capability.
         A duplicate query value or a value conflicting with any header credential fails.
     ArtworkTagQuery:
       type: apiKey
@@ -1191,7 +1197,7 @@ components:
       name: api_key
       in: query
       required: false
-      description: Opaque compatibility token; accepted only on image and stream routes.
+      description: Opaque compatibility credential, or the matching scoped PlaySessionId on stream URLs; accepted only on image and stream routes.
       schema: { type: string, minLength: 1 }
     ArtworkTag:
       name: tag
@@ -1700,7 +1706,7 @@ components:
         MediaType: { type: string, enum: [Video, Unknown] }
         IsFolder: { type: boolean }
         IsPlayable: { type: boolean }
-        CollectionType: { type: string, enum: [movies, tvshows, boxsets, mixed] }
+        CollectionType: { type: string, enum: [movies, tvshows, boxsets, mixed, homevideos] }
         ParentId: { $ref: "#/components/schemas/UUID" }
         SeriesId: { $ref: "#/components/schemas/UUID" }
         SeasonId: { $ref: "#/components/schemas/UUID" }
@@ -1806,7 +1812,7 @@ components:
           type: array
           maxItems: 0
           items: { type: string }
-        CollectionType: { type: string, enum: [movies, tvshows, boxsets, mixed] }
+        CollectionType: { type: string, enum: [movies, tvshows, boxsets, mixed, homevideos] }
         ItemId: { $ref: "#/components/schemas/UUID" }
         Id: { $ref: "#/components/schemas/UUID" }
     PlaybackInfoRequest:
@@ -1847,12 +1853,13 @@ components:
         - SupportsDirectPlay
         - SupportsDirectStream
         - SupportsTranscoding
+        - MediaStreams
       properties:
         Id: { type: string, minLength: 1, maxLength: 256 }
         Name: { type: string }
         Path:
           type: string
-          description: Local compatibility path; catalogue sentinels contain only the canonical item UUID and PlaybackInfo paths add scoped opaque selectors.
+          description: Local stream URL carrying only opaque item, source, and scoped play-session selectors.
         Container: { type: string, maxLength: 16 }
         Protocol: { type: string, enum: [File, Http] }
         Type: { type: string, enum: [Default] }
@@ -1863,14 +1870,36 @@ components:
         RunTimeTicks: { type: integer, format: int64, minimum: 0 }
         Bitrate: { type: integer, format: int64, minimum: 0 }
         ETag: { type: string }
+        MediaStreams:
+          type: array
+          maxItems: 64
+          items: { $ref: "#/components/schemas/MediaStreamInfo" }
+        DefaultAudioStreamIndex: { type: integer, minimum: 0 }
         TranscodingUrl:
           type: string
-          description: Local scoped compatibility URL only, never an upstream provider URL.
+          description: Local scoped HLS compatibility URL only, never an upstream provider URL.
         TranscodingSubProtocol: { type: string }
         TranscodingContainer: { type: string }
-    DeviceProfile:
+    MediaStreamInfo:
       type: object
       additionalProperties: false
+      required: [Type, Index, IsDefault, IsForced, IsExternal]
+      properties:
+        Codec: { type: string, enum: [h264, hevc, av1, vp9, aac, ac3, eac3, opus, dts, truehd, flac, mp3, srt, ass, webvtt, pgs] }
+        Language: { type: string, pattern: "^[a-z]{1,12}$" }
+        DisplayTitle: { type: string, maxLength: 16 }
+        Type: { type: string, enum: [Video, Audio, Subtitle] }
+        Index: { type: integer, minimum: 0 }
+        IsDefault: { type: boolean }
+        IsForced: { type: boolean }
+        IsExternal: { type: boolean, const: false }
+        Width: { type: integer, minimum: 1, maximum: 16384 }
+        Height: { type: integer, minimum: 1, maximum: 16384 }
+        Channels: { type: integer, minimum: 1, maximum: 64 }
+        BitRate: { type: integer, format: int64, minimum: 1 }
+    DeviceProfile:
+      type: object
+      additionalProperties: true
       properties:
         Name: { type: string, maxLength: 128 }
         MaxStreamingBitrate:
@@ -1891,7 +1920,7 @@ components:
           items: { $ref: "#/components/schemas/SubtitleProfile" }
     DirectPlayProfile:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       properties:
         Container: { type: string, maxLength: 2048 }
         AudioCodec: { type: string, maxLength: 2048 }
@@ -1899,7 +1928,7 @@ components:
         Type: { type: string, maxLength: 64 }
     TranscodingProfile:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       properties:
         Container: { type: string, maxLength: 2048 }
         Type: { type: string, maxLength: 64 }
@@ -1911,7 +1940,7 @@ components:
         BreakOnNonKeyFrames: { type: boolean }
     SubtitleProfile:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       properties:
         Format: { type: string, maxLength: 2048 }
         Method: { type: string, maxLength: 64 }

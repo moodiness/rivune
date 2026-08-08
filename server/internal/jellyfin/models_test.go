@@ -13,7 +13,7 @@ func TestProtocolDTOsUseJellyfinPascalCase(t *testing.T) {
 		AuthenticationResult{}, UserDto{}, UserPolicy{}, UserConfiguration{}, SessionInfoDto{},
 		CompatErrorResponse{}, CompatErrorStatus{},
 		QueryResult[BaseItemDto]{}, BaseItemDto{}, BaseItemPerson{}, UserItemDataDto{}, SearchHintDto{}, SearchHintResult{},
-		PlaybackInfoRequest{}, PlaybackInfoResponse{}, MediaSourceInfo{}, DeviceProfile{},
+		PlaybackInfoRequest{}, PlaybackInfoResponse{}, MediaSourceInfo{}, MediaStreamInfo{}, DeviceProfile{},
 		DirectPlayProfile{}, TranscodingProfile{}, SubtitleProfile{}, PlaybackProgressInfo{},
 		DisplayPreferencesDto{},
 	}

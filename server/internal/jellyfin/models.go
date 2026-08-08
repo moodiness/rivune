@@ -179,22 +179,39 @@ type PlaybackInfoResponse struct {
 }
 
 type MediaSourceInfo struct {
-	Id                     string `json:"Id"`
-	Name                   string `json:"Name,omitempty"`
-	Path                   string `json:"Path"`
-	Container              string `json:"Container,omitempty"`
-	Protocol               string `json:"Protocol"`
-	Type                   string `json:"Type"`
-	IsRemote               bool   `json:"IsRemote"`
-	SupportsDirectPlay     bool   `json:"SupportsDirectPlay"`
-	SupportsDirectStream   bool   `json:"SupportsDirectStream"`
-	SupportsTranscoding    bool   `json:"SupportsTranscoding"`
-	RunTimeTicks           *int64 `json:"RunTimeTicks,omitempty"`
-	Bitrate                *int64 `json:"Bitrate,omitempty"`
-	ETag                   string `json:"ETag,omitempty"`
-	TranscodingUrl         string `json:"TranscodingUrl,omitempty"`
-	TranscodingSubProtocol string `json:"TranscodingSubProtocol,omitempty"`
-	TranscodingContainer   string `json:"TranscodingContainer,omitempty"`
+	Id                      string            `json:"Id"`
+	Name                    string            `json:"Name,omitempty"`
+	Path                    string            `json:"Path"`
+	Container               string            `json:"Container,omitempty"`
+	Protocol                string            `json:"Protocol"`
+	Type                    string            `json:"Type"`
+	IsRemote                bool              `json:"IsRemote"`
+	SupportsDirectPlay      bool              `json:"SupportsDirectPlay"`
+	SupportsDirectStream    bool              `json:"SupportsDirectStream"`
+	SupportsTranscoding     bool              `json:"SupportsTranscoding"`
+	RunTimeTicks            *int64            `json:"RunTimeTicks,omitempty"`
+	Bitrate                 *int64            `json:"Bitrate,omitempty"`
+	ETag                    string            `json:"ETag,omitempty"`
+	MediaStreams            []MediaStreamInfo `json:"MediaStreams"`
+	DefaultAudioStreamIndex *int              `json:"DefaultAudioStreamIndex,omitempty"`
+	TranscodingUrl          string            `json:"TranscodingUrl,omitempty"`
+	TranscodingSubProtocol  string            `json:"TranscodingSubProtocol,omitempty"`
+	TranscodingContainer    string            `json:"TranscodingContainer,omitempty"`
+}
+
+type MediaStreamInfo struct {
+	Codec        string `json:"Codec,omitempty"`
+	Language     string `json:"Language,omitempty"`
+	DisplayTitle string `json:"DisplayTitle,omitempty"`
+	Type         string `json:"Type"`
+	Index        int    `json:"Index"`
+	IsDefault    bool   `json:"IsDefault"`
+	IsForced     bool   `json:"IsForced"`
+	IsExternal   bool   `json:"IsExternal"`
+	Width        int    `json:"Width,omitempty"`
+	Height       int    `json:"Height,omitempty"`
+	Channels     int    `json:"Channels,omitempty"`
+	BitRate      int64  `json:"BitRate,omitempty"`
 }
 
 type DeviceProfile struct {

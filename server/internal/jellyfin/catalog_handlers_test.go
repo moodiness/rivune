@@ -33,6 +33,9 @@ func (authentication *catalogHTTPAuthentication) Login(context.Context, CompatLo
 func (authentication *catalogHTTPAuthentication) Authenticate(context.Context, string) (AuthenticatedSession, error) {
 	return authentication.session, nil
 }
+func (authentication *catalogHTTPAuthentication) Revalidate(context.Context, AuthenticatedSession) (AuthenticatedSession, error) {
+	return authentication.session, nil
+}
 
 func (*catalogHTTPAuthentication) Logout(context.Context, AuthenticatedSession) error { return nil }
 

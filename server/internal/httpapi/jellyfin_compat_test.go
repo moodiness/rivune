@@ -180,6 +180,9 @@ func (jellyfinLifecycleAuthentication) Login(context.Context, jellyfin.CompatLog
 func (jellyfinLifecycleAuthentication) Authenticate(context.Context, string) (jellyfin.AuthenticatedSession, error) {
 	return jellyfin.AuthenticatedSession{}, jellyfin.ErrInvalidCompatCredential
 }
+func (jellyfinLifecycleAuthentication) Revalidate(context.Context, jellyfin.AuthenticatedSession) (jellyfin.AuthenticatedSession, error) {
+	return jellyfin.AuthenticatedSession{}, jellyfin.ErrInvalidCompatCredential
+}
 
 func (jellyfinLifecycleAuthentication) Logout(context.Context, jellyfin.AuthenticatedSession) error {
 	return nil

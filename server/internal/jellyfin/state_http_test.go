@@ -25,6 +25,10 @@ func (*stateAuthentication) Login(context.Context, CompatLoginInput) (LoginResul
 func (authentication *stateAuthentication) Authenticate(context.Context, string) (AuthenticatedSession, error) {
 	return authentication.session, nil
 }
+func (authentication *stateAuthentication) Revalidate(context.Context, AuthenticatedSession) (AuthenticatedSession, error) {
+	return authentication.session, nil
+}
+
 func (*stateAuthentication) Logout(context.Context, AuthenticatedSession) error { return nil }
 
 type stateCatalog struct {

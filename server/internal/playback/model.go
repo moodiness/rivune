@@ -70,6 +70,7 @@ type SourceOption struct {
 	Protocol       string    `json:"protocol"`
 	Container      string    `json:"container,omitempty"`
 	ExpiresAt      time.Time `json:"expiresAt"`
+	ReportedHeight int       `json:"-"`
 	StableIdentity string    `json:"-"`
 }
 
