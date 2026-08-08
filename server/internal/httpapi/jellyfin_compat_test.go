@@ -212,6 +212,10 @@ func (jellyfinLifecyclePlayback) Serve(http.ResponseWriter, *http.Request, playb
 	return errors.New("not used")
 }
 
+func (jellyfinLifecyclePlayback) ServeAsset(http.ResponseWriter, *http.Request, playback.DeliveryHandle, string) error {
+	return errors.New("not used")
+}
+
 func (jellyfinLifecyclePlayback) Close(context.Context, auth.Principal, playback.DeliveryHandle) error {
 	return nil
 }

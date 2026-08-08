@@ -157,6 +157,10 @@ func (state *sequenceWatchstate) SetWatchedForLinkedSession(ctx context.Context,
 	return state.forPrincipal(principal).SetWatchedForLinkedSession(ctx, principal, itemID, completed, input)
 }
 
+func (state *sequenceWatchstate) UpdateUserDataForLinkedSession(ctx context.Context, principal auth.Principal, itemID string, input watchstate.UpdateUserDataInput) (watchstate.UserDataState, error) {
+	return state.forPrincipal(principal).UpdateUserDataForLinkedSession(ctx, principal, itemID, input)
+}
+
 func (state *sequenceWatchstate) ClearProgress(ctx context.Context, principal auth.Principal, itemID string, expectedVersion int64) error {
 	return state.forPrincipal(principal).ClearProgress(ctx, principal, itemID, expectedVersion)
 }
@@ -304,6 +308,10 @@ func (delivery *sequencePlaybackDelivery) Serve(response http.ResponseWriter, re
 	return nil
 }
 
+func (delivery *sequencePlaybackDelivery) ServeAsset(response http.ResponseWriter, request *http.Request, handle playback.DeliveryHandle, _ string) error {
+	return delivery.Serve(response, request, handle)
+}
+
 type recordedSequenceResponse struct {
 	name     string
 	response *httptest.ResponseRecorder
@@ -428,6 +436,14 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 		t.Fatalf("public compatibility identity is incomplete: %+v", publicInfo)
 	}
 
+	ping := fixture.request(t, "system-ping-post", http.MethodPost, fixture.prefix+"/System/Ping", "", "")
+	sequenceRequireStatus(t, ping, http.StatusOK)
+	var pingName string
+	sequenceDecode(t, ping, &pingName)
+	if pingName != publicInfo.ServerName {
+		t.Fatalf("system ping name=%q want=%q", pingName, publicInfo.ServerName)
+	}
+
 	primaryLogin := fixture.login(t, "login-primary", sequencePrimaryCredentialID)
 	sequenceRequireStatus(t, primaryLogin, http.StatusOK)
 	var primaryAuth AuthenticationResult
@@ -438,6 +454,13 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 		t.Fatalf("primary authentication binding is incomplete: %+v", primaryAuth)
 	}
 	primaryToken := primaryAuth.AccessToken
+
+	capabilitiesTarget := fixture.prefix + "/Sessions/Capabilities?Id=" + url.QueryEscape(primaryAuth.SessionInfo.Id) + "&PlayableMediaTypes=Video&SupportedCommands=DisplayContent%2CPlay&SupportsMediaControl=true&SupportsPersistentIdentifier=true"
+	capabilities := fixture.request(t, "session-capabilities", http.MethodPost, capabilitiesTarget, "", primaryToken)
+	sequenceRequireStatus(t, capabilities, http.StatusNoContent)
+	if capabilities.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("session capabilities headers=%v", capabilities.Header())
+	}
 
 	me := fixture.request(t, "me", http.MethodGet, fixture.prefix+"/Users/Me", "", primaryToken)
 	sequenceRequireStatus(t, me, http.StatusOK)

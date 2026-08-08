@@ -392,3 +392,12 @@ func sourceReferenceStoreIdentifiers(store *sourceReferenceStore) []string {
 	sort.Strings(identifiers)
 	return identifiers
 }
+
+func TestCloneStoredAssetNormalizesHLSSegmentContainer(t *testing.T) {
+	if got := cloneStoredAsset(storedAsset{}).HLSSegmentContainer; got != "ts" {
+		t.Fatalf("default cloned HLS segment container = %q", got)
+	}
+	if got := cloneStoredAsset(storedAsset{HLSSegmentContainer: "mp4"}).HLSSegmentContainer; got != "mp4" {
+		t.Fatalf("explicit cloned HLS segment container = %q", got)
+	}
+}

@@ -1257,6 +1257,9 @@ func (s *Service) AddLibrary(ctx context.Context, principal auth.Principal, titl
 	if err != nil {
 		return LibraryItem{}, err
 	}
+	if err := lockUserDataMutation(ctx, tx, profileID, titleID); err != nil {
+		return LibraryItem{}, err
+	}
 	mediaType, err := accessibleTitleMediaType(ctx, tx, profileID, titleID)
 	if err != nil {
 		return LibraryItem{}, err
@@ -1349,6 +1352,9 @@ func (s *Service) RemoveLibrary(ctx context.Context, principal auth.Principal, t
 	defer func() { _ = tx.Rollback(ctx) }()
 	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
 	if err != nil {
+		return err
+	}
+	if err := lockUserDataMutation(ctx, tx, profileID, titleID); err != nil {
 		return err
 	}
 	mediaType, err := accessibleTitleMediaType(ctx, tx, profileID, titleID)
@@ -1720,6 +1726,9 @@ func (s *Service) SetWatchedBatch(ctx context.Context, principal auth.Principal,
 		completedValues[index] = item.Completed
 		expectedVersions[index] = item.ExpectedVersion
 	}
+	if err := lockUserDataMutations(ctx, tx, profileID, titleIDs); err != nil {
+		return ProgressBatch{}, err
+	}
 	for _, titleID := range titleIDs {
 		if _, err := accessibleTitleMediaType(ctx, tx, profileID, titleID); err != nil {
 			return ProgressBatch{}, err
@@ -1886,6 +1895,155 @@ func (s *Service) SetWatchedBatch(ctx context.Context, principal auth.Principal,
 	return ProgressBatch{Items: items}, nil
 }
 
+// UpdateUserDataForLinkedSession merges the supplied compatibility fields and
+// commits progress, library membership, and their tracking records together.
+func (s *Service) UpdateUserDataForLinkedSession(ctx context.Context, principal auth.Principal, titleID string, input UpdateUserDataInput) (UserDataState, error) {
+	titleID, err := normalizeTitleID(titleID)
+	if err != nil {
+		return UserDataState{}, err
+	}
+	if input.DurationSeconds < 0 || input.PositionSeconds != nil && *input.PositionSeconds < 0 {
+		return UserDataState{}, fmt.Errorf("%w: playback times must be zero or greater", ErrInvalidInput)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return UserDataState{}, fmt.Errorf("begin user data update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, err := s.mutationProfileID(ctx, tx, principal, true)
+	if err != nil {
+		return UserDataState{}, err
+	}
+	if err := lockUserDataMutation(ctx, tx, profileID, titleID); err != nil {
+		return UserDataState{}, err
+	}
+	mediaType, err := accessibleTitleMediaType(ctx, tx, profileID, titleID)
+	if err != nil {
+		return UserDataState{}, err
+	}
+
+	var current Progress
+	progressExists := true
+	err = scanProgress(tx.QueryRow(ctx, `
+		SELECT progress.title_id::text, $3::text, progress.position_seconds,
+		       progress.duration_seconds, progress.completed, progress.version,
+		       progress.last_watched_at, progress.updated_at
+		FROM profile_progress progress
+		WHERE progress.profile_id = $1::uuid AND progress.title_id = $2::uuid
+		FOR UPDATE
+	`, profileID, titleID, mediaType), &current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		progressExists = false
+		current = Progress{TitleID: titleID, MediaType: mediaType}
+	} else if err != nil {
+		return UserDataState{}, fmt.Errorf("read user data progress: %w", err)
+	}
+	var inLibrary bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM profile_library
+			WHERE profile_id = $1::uuid AND title_id = $2::uuid
+		)
+	`, profileID, titleID).Scan(&inLibrary); err != nil {
+		return UserDataState{}, fmt.Errorf("read user data library state: %w", err)
+	}
+
+	position, played := current.PositionSeconds, current.Completed
+	if input.PositionSeconds != nil {
+		position = *input.PositionSeconds
+	}
+	if input.Played != nil {
+		played = *input.Played
+	}
+	progressChanged := input.PositionSeconds != nil && position != current.PositionSeconds || input.Played != nil && played != current.Completed
+	if !progressExists {
+		progressChanged = input.PositionSeconds != nil && position != 0 || input.Played != nil && played
+	}
+	if progressChanged {
+		if mediaType != "movie" && mediaType != "episode" {
+			return UserDataState{}, fmt.Errorf("%w: progress titles must be movies or episodes", ErrInvalidInput)
+		}
+		duration := current.DurationSeconds
+		if duration == 0 {
+			duration = input.DurationSeconds
+		}
+		if err := validateProgressInput(UpdateProgressInput{PositionSeconds: position, DurationSeconds: duration, Completed: played}); err != nil {
+			return UserDataState{}, err
+		}
+		if progressExists {
+			err = scanProgress(tx.QueryRow(ctx, `
+				UPDATE profile_progress
+				SET position_seconds = $3, duration_seconds = $4, completed = $5,
+				    version = version + 1, last_watched_at = now(), updated_at = now()
+				WHERE profile_id = $1::uuid AND title_id = $2::uuid
+				RETURNING title_id::text, $6::text, position_seconds, duration_seconds,
+				          completed, version, last_watched_at, updated_at
+			`, profileID, titleID, position, duration, played, mediaType), &current)
+		} else {
+			err = scanProgress(tx.QueryRow(ctx, `
+				INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed)
+				VALUES ($1::uuid, $2::uuid, $3, $4, $5)
+				RETURNING title_id::text, $6::text, position_seconds, duration_seconds,
+				          completed, version, last_watched_at, updated_at
+			`, profileID, titleID, position, duration, played, mediaType), &current)
+			progressExists = true
+		}
+		if err != nil {
+			return UserDataState{}, fmt.Errorf("update user data progress: %w", err)
+		}
+		if err := clearContinueDismissalTx(ctx, tx, profileID, titleID); err != nil {
+			return UserDataState{}, err
+		}
+		if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("progress:%s:%d", titleID, current.Version), tracking.Event{
+			Type: "progress", TitleID: titleID, Completed: current.Completed,
+			PositionSeconds: current.PositionSeconds, DurationSeconds: current.DurationSeconds,
+			Version: current.Version, OccurredAt: current.UpdatedAt,
+		}); err != nil {
+			return UserDataState{}, err
+		}
+	}
+
+	desiredLibrary := inLibrary
+	if input.Favorite != nil {
+		desiredLibrary = *input.Favorite
+	}
+	if desiredLibrary != inLibrary {
+		if desiredLibrary && mediaType != "movie" && mediaType != "series" && mediaType != "tv" {
+			return UserDataState{}, fmt.Errorf("%w: library titles must be movies, series, or TV channels", ErrInvalidInput)
+		}
+		occurredAt := time.Now().UTC()
+		if desiredLibrary {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO profile_library (profile_id, title_id)
+				VALUES ($1::uuid, $2::uuid)
+			`, profileID, titleID); err != nil {
+				return UserDataState{}, fmt.Errorf("add user data library title: %w", err)
+			}
+		} else if _, err := tx.Exec(ctx, `
+			DELETE FROM profile_library
+			WHERE profile_id = $1::uuid AND title_id = $2::uuid
+		`, profileID, titleID); err != nil {
+			return UserDataState{}, fmt.Errorf("remove user data library title: %w", err)
+		}
+		if mediaType != "tv" {
+			if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("library:%t:%s:%d", desiredLibrary, titleID, occurredAt.UnixNano()), tracking.Event{
+				Type: "library", TitleID: titleID, InLibrary: desiredLibrary, OccurredAt: occurredAt,
+			}); err != nil {
+				return UserDataState{}, err
+			}
+		}
+		inLibrary = desiredLibrary
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return UserDataState{}, fmt.Errorf("commit user data update: %w", err)
+	}
+	result := UserDataState{InLibrary: inLibrary}
+	if progressExists {
+		result.Progress = &current
+	}
+	return result, nil
+}
+
 func (s *Service) UpdateProgress(ctx context.Context, principal auth.Principal, titleID string, input UpdateProgressInput) (Progress, error) {
 	return s.updateProgress(ctx, principal, titleID, input, false)
 }
@@ -1912,6 +2070,9 @@ func (s *Service) updateProgress(ctx context.Context, principal auth.Principal, 
 	defer func() { _ = tx.Rollback(ctx) }()
 	profileID, err := s.mutationProfileID(ctx, tx, principal, linked)
 	if err != nil {
+		return Progress{}, err
+	}
+	if err := lockUserDataMutation(ctx, tx, profileID, titleID); err != nil {
 		return Progress{}, err
 	}
 	mediaType, err := accessibleTitleMediaType(ctx, tx, profileID, titleID)
@@ -1989,6 +2150,9 @@ func (s *Service) setWatched(ctx context.Context, principal auth.Principal, titl
 	if err != nil {
 		return Progress{}, err
 	}
+	if err := lockUserDataMutation(ctx, tx, profileID, titleID); err != nil {
+		return Progress{}, err
+	}
 	mediaType, err := accessibleTitleMediaType(ctx, tx, profileID, titleID)
 	if err != nil {
 		return Progress{}, err
@@ -2036,6 +2200,24 @@ func (s *Service) setWatched(ctx context.Context, principal auth.Principal, titl
 	return progress, nil
 }
 
+func lockUserDataMutation(ctx context.Context, tx pgx.Tx, profileID, titleID string) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "user-data:"+profileID+":"+titleID); err != nil {
+		return fmt.Errorf("lock user data mutation: %w", err)
+	}
+	return nil
+}
+
+func lockUserDataMutations(ctx context.Context, tx pgx.Tx, profileID string, titleIDs []string) error {
+	ordered := append([]string(nil), titleIDs...)
+	sort.Strings(ordered)
+	for _, titleID := range ordered {
+		if err := lockUserDataMutation(ctx, tx, profileID, titleID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Service) mutationProfileID(ctx context.Context, tx pgx.Tx, principal auth.Principal, linked bool) (string, error) {
 	if !linked {
 		return authorizedActiveProfileID(ctx, tx, principal)
@@ -2065,6 +2247,9 @@ func (s *Service) ClearProgress(ctx context.Context, principal auth.Principal, t
 	defer func() { _ = tx.Rollback(ctx) }()
 	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
 	if err != nil {
+		return err
+	}
+	if err := lockUserDataMutation(ctx, tx, profileID, titleID); err != nil {
 		return err
 	}
 	if _, err := accessibleTitleMediaType(ctx, tx, profileID, titleID); err != nil {

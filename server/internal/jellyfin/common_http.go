@@ -79,6 +79,9 @@ func (handler *Handler) authenticateRequest(response http.ResponseWriter, reques
 		writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "The requested resource was not found")
 		return AuthenticatedSession{}, false
 	}
+	if handler.bootstrap != nil {
+		handler.bootstrap.observe(session)
+	}
 	return session, true
 }
 

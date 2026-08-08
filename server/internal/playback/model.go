@@ -38,6 +38,7 @@ type Capabilities struct {
 	ExternalPlayers           []string       `json:"externalPlayers,omitempty"`
 	ProcessingModes           []string       `json:"processingModes,omitempty"`
 	MediaProfiles             []MediaProfile `json:"mediaProfiles,omitempty"`
+	HLSSegmentContainer       string         `json:"hlsSegmentContainer,omitempty"`
 	MaximumVideoBitrateKbps   int            `json:"maximumVideoBitrateKbps,omitempty"`
 	MaximumAudioChannels      int            `json:"maximumAudioChannels,omitempty"`
 	SubtitleModes             []string       `json:"subtitleModes,omitempty"`
@@ -223,6 +224,7 @@ type storedAsset struct {
 	Kind                 string            `json:"kind"`
 	URL                  string            `json:"url"`
 	Container            string            `json:"container,omitempty"`
+	HLSSegmentContainer  string            `json:"hlsSegmentContainer,omitempty"`
 	Headers              map[string]string `json:"headers,omitempty"`
 	ToneMap              bool              `json:"toneMap,omitempty"`
 	AudioTrackIndex      *int              `json:"audioTrackIndex,omitempty"`

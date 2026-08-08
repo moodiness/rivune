@@ -12,10 +12,10 @@ func TestProtocolDTOsUseJellyfinPascalCase(t *testing.T) {
 		PublicSystemInfo{}, SystemInfo{}, SystemEndpointInfo{}, AuthenticateByName{},
 		AuthenticationResult{}, UserDto{}, UserPolicy{}, UserConfiguration{}, SessionInfoDto{},
 		CompatErrorResponse{}, CompatErrorStatus{},
-		QueryResult[BaseItemDto]{}, BaseItemDto{}, BaseItemPerson{}, UserItemDataDto{}, SearchHintDto{}, SearchHintResult{},
+		QueryResult[BaseItemDto]{}, BaseItemDto{}, BaseItemPerson{}, UserItemDataDto{}, UpdateUserItemDataDto{}, SearchHintDto{}, SearchHintResult{},
 		PlaybackInfoRequest{}, PlaybackInfoResponse{}, MediaSourceInfo{}, MediaStreamInfo{}, DeviceProfile{},
 		DirectPlayProfile{}, TranscodingProfile{}, SubtitleProfile{}, PlaybackProgressInfo{},
-		DisplayPreferencesDto{},
+		DisplayPreferencesDto{}, ClientCapabilitiesDto{}, SessionUserInfoDto{}, QueueItemDto{}, SpecialViewOptionDto{}, WebSocketMessageDto{},
 	}
 	for _, model := range models {
 		modelType := reflect.TypeOf(model)
@@ -66,8 +66,25 @@ func TestProtocolDTOsUseJellyfinPascalCase(t *testing.T) {
 	}
 }
 
+func TestUserConfigurationLanguagePreferencesAreRequiredNullableFields(t *testing.T) {
+	payload, err := json.Marshal(UserConfiguration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"AudioLanguagePreference", "SubtitleLanguagePreference"} {
+		value, ok := fields[name]
+		if !ok || string(value) != "null" {
+			t.Fatalf("%s must be present and nullable, got %s in %s", name, value, payload)
+		}
+	}
+}
+
 func TestCompatibilityIdentityConstantsAreProtocolVersions(t *testing.T) {
-	if CompatibilityVersion != "10.11.0" || CompatibilityProduct != "Rivune Jellyfin Compatibility" {
+	if CompatibilityVersion != "10.11.11" || CompatibilityProduct != "Rivune Jellyfin Compatibility" {
 		t.Fatalf("unexpected compatibility identity: %q %q", CompatibilityVersion, CompatibilityProduct)
 	}
 }

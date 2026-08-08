@@ -16,6 +16,8 @@ func TestReservedPathsFailClosedInsideCompatNamespaces(t *testing.T) {
 		"/System/Info/Public",
 		"/emby/System/Info/Public",
 		"/Users/" + routeTestUUID + "/Items/" + routeTestUUID,
+		"/UserImage",
+		"/emby/UserImage",
 		"/Items/not-a-uuid",
 		"/Items/" + routeTestUUID + "/Images/Logo/7",
 		"/UserItems/Resume",
@@ -47,9 +49,9 @@ func TestReservedPathsFailClosedInsideCompatNamespaces(t *testing.T) {
 	}
 }
 
-func TestDispatcherServesAllFiftyThreeRoutesAtRootAndEmby(t *testing.T) {
-	if len(routeDefinitions) != 53 {
-		t.Fatalf("route definitions = %d, want 53", len(routeDefinitions))
+func TestDispatcherServesEveryRouteAtRootAndEmby(t *testing.T) {
+	if len(routeDefinitions) == 0 {
+		t.Fatal("route definitions are empty")
 	}
 	calls := make(map[Route]int, len(routeDefinitions))
 	handlers := make(map[Route]http.Handler, len(routeDefinitions))
@@ -211,11 +213,15 @@ func TestMalformedWildcardPathsAreRejectedBeforeHandler(t *testing.T) {
 	malformed := []string{
 		"/Items/not-a-uuid",
 		"/Users/not-a-uuid/Items/" + routeTestUUID,
+		"/Users/not-a-uuid/Images/Primary",
 		"/Users/" + routeTestUUID + "/Items/not-a-uuid",
 		"/Shows/not-a-uuid/Seasons",
 		"/Items/" + routeTestUUID + "/Images/Logo",
 		"/Items/" + routeTestUUID + "/Images/Primary/1",
 		"/Videos/" + routeTestUUID + "/stream.mp4!",
+		"/Videos/" + routeTestUUID + "/" + routeTestUUID + "/Subtitles/04/Stream.vtt",
+		"/Videos/" + routeTestUUID + "/" + routeTestUUID + "/Subtitles/4/Stream.srt",
+		"/Videos/" + routeTestUUID + "/" + routeTestUUID + "/Subtitles/4/0001/Stream.vtt",
 		"/DisplayPreferences/bad$value",
 		"/Items/" + strings.Repeat("a", maximumCompatPathBytes+1),
 	}
@@ -270,16 +276,31 @@ func TestMalformedSelectorsNeverAuthenticate(t *testing.T) {
 	}
 }
 
-func TestStreamAndContainerDispatchPrecedence(t *testing.T) {
-	seen := make([]Route, 0, 8)
-	handlers := make(map[Route]http.Handler, 4)
-	for _, route := range []Route{RouteStream, RouteStreamHead, RouteContainerStream, RouteContainerStreamHead} {
+func TestMediaDeliveryDispatchPrecedence(t *testing.T) {
+	seen := make([]Route, 0, 36)
+	handlers := make(map[Route]http.Handler, 18)
+	for _, route := range []Route{
+		RouteStream, RouteStreamHead, RouteContainerStream, RouteContainerStreamHead, RouteMasterPlaylist, RouteMasterPlaylistHead,
+		RouteMainPlaylist, RouteMainPlaylistHead, RouteHLSSegment, RouteHLSSegmentHead, RouteLegacyHLSSegment, RouteLegacyHLSSegmentHead,
+		RouteSubtitleStream, RouteSubtitleStreamHead, RouteSubtitleStreamAt, RouteSubtitleStreamAtHead, RouteItemDownload, RouteItemDownloadHead,
+	} {
 		route := route
 		handlers[route] = http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 			seen = append(seen, route)
 			if route == RouteContainerStream || route == RouteContainerStreamHead {
 				if request.PathValue("container") != "mp4" {
 					t.Errorf("container = %q, want mp4", request.PathValue("container"))
+				}
+			}
+			if route == RouteHLSSegment || route == RouteHLSSegmentHead || route == RouteLegacyHLSSegment || route == RouteLegacyHLSSegmentHead {
+				if request.PathValue("playlistId") != strings.Repeat("p", 32) || request.PathValue("segmentId") != strings.Repeat("s", 32) || request.PathValue("container") != "ts" {
+					t.Errorf("HLS selectors playlist=%q segment=%q container=%q", request.PathValue("playlistId"), request.PathValue("segmentId"), request.PathValue("container"))
+				}
+			}
+			if route == RouteSubtitleStream || route == RouteSubtitleStreamHead || route == RouteSubtitleStreamAt || route == RouteSubtitleStreamAtHead {
+				if request.PathValue("mediaSourceId") != routeTestUUID || request.PathValue("subtitleIndex") != "4" || request.PathValue("format") != "vtt" ||
+					(route == RouteSubtitleStreamAt || route == RouteSubtitleStreamAtHead) && request.PathValue("startPositionTicks") != "900000000" {
+					t.Errorf("subtitle selectors media=%q index=%q ticks=%q format=%q", request.PathValue("mediaSourceId"), request.PathValue("subtitleIndex"), request.PathValue("startPositionTicks"), request.PathValue("format"))
 				}
 			}
 			response.WriteHeader(http.StatusNoContent)
@@ -300,6 +321,20 @@ func TestStreamAndContainerDispatchPrecedence(t *testing.T) {
 			{http.MethodHead, "/Videos/" + routeTestUUID + "/stream", RouteStreamHead},
 			{http.MethodGet, "/Videos/" + routeTestUUID + "/stream.mp4", RouteContainerStream},
 			{http.MethodHead, "/Videos/" + routeTestUUID + "/stream.mp4", RouteContainerStreamHead},
+			{http.MethodGet, "/Videos/" + routeTestUUID + "/master.m3u8", RouteMasterPlaylist},
+			{http.MethodHead, "/Videos/" + routeTestUUID + "/master.m3u8", RouteMasterPlaylistHead},
+			{http.MethodGet, "/Videos/" + routeTestUUID + "/main.m3u8", RouteMainPlaylist},
+			{http.MethodHead, "/Videos/" + routeTestUUID + "/main.m3u8", RouteMainPlaylistHead},
+			{http.MethodGet, "/Videos/" + routeTestUUID + "/hls1/" + strings.Repeat("p", 32) + "/" + strings.Repeat("s", 32) + ".ts", RouteHLSSegment},
+			{http.MethodHead, "/Videos/" + routeTestUUID + "/hls1/" + strings.Repeat("p", 32) + "/" + strings.Repeat("s", 32) + ".ts", RouteHLSSegmentHead},
+			{http.MethodGet, "/Videos/" + routeTestUUID + "/hls/" + strings.Repeat("p", 32) + "/" + strings.Repeat("s", 32) + ".ts", RouteLegacyHLSSegment},
+			{http.MethodHead, "/Videos/" + routeTestUUID + "/hls/" + strings.Repeat("p", 32) + "/" + strings.Repeat("s", 32) + ".ts", RouteLegacyHLSSegmentHead},
+			{http.MethodGet, "/Items/" + routeTestUUID + "/Download", RouteItemDownload},
+			{http.MethodHead, "/Items/" + routeTestUUID + "/Download", RouteItemDownloadHead},
+			{http.MethodGet, "/Videos/" + routeTestUUID + "/" + routeTestUUID + "/Subtitles/4/Stream.vtt", RouteSubtitleStream},
+			{http.MethodHead, "/Videos/" + routeTestUUID + "/" + routeTestUUID + "/Subtitles/4/Stream.vtt", RouteSubtitleStreamHead},
+			{http.MethodGet, "/Videos/" + routeTestUUID + "/" + routeTestUUID + "/Subtitles/4/900000000/Stream.vtt", RouteSubtitleStreamAt},
+			{http.MethodHead, "/Videos/" + routeTestUUID + "/" + routeTestUUID + "/Subtitles/4/900000000/Stream.vtt", RouteSubtitleStreamAtHead},
 		} {
 			response := httptest.NewRecorder()
 			mux.ServeHTTP(response, httptest.NewRequest(test.method, prefix+test.path, nil))
@@ -430,6 +465,14 @@ func routeTestPath(definition RouteSpec) string {
 	path = strings.ReplaceAll(path, "{userId}", routeTestUUID)
 	path = strings.ReplaceAll(path, "{itemId}", routeTestUUID)
 	path = strings.ReplaceAll(path, "{seriesId}", routeTestUUID)
+	path = strings.ReplaceAll(path, "{genreName}", "Drama")
+	path = strings.ReplaceAll(path, "{name}", "Example%20Person")
+	path = strings.ReplaceAll(path, "{playlistId}", strings.Repeat("p", 32))
+	path = strings.ReplaceAll(path, "{segmentId}", strings.Repeat("s", 32))
+	path = strings.ReplaceAll(path, "{mediaSourceId}", routeTestUUID)
+	path = strings.ReplaceAll(path, "{subtitleIndex}", "4")
+	path = strings.ReplaceAll(path, "{startPositionTicks}", "900000000")
+	path = strings.ReplaceAll(path, "{format}", "vtt")
 	path = strings.ReplaceAll(path, "{id}", routeTestUUID)
 	path = strings.ReplaceAll(path, "{type}", "Primary")
 	path = strings.ReplaceAll(path, "{index}", "0")

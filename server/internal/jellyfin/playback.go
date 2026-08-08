@@ -17,7 +17,9 @@ import (
 const (
 	maximumPlaybackInfoBodyBytes = 256 << 10
 	// Keep one admission beyond the 256-session registry below the 4096-reference global store limit.
-	maximumCompatibilityMediaSources = 15
+	maximumCompatibilityMediaSources  = 15
+	maximumCompatibilityMediaStreams  = 64
+	maximumCompatibilitySubtitleIndex = 2047
 )
 
 func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request *http.Request) {
@@ -27,6 +29,10 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 	}
 	session, ok := handler.authenticateRequest(response, request, false)
 	if !ok {
+		return
+	}
+	if userID := strings.TrimSpace(request.PathValue("userId")); userID != "" && !strings.EqualFold(userID, session.ProfileID) {
+		handler.writeCompatError(response, http.StatusNotFound, "ItemNotFound", "The item was not found")
 		return
 	}
 	input, err := parsePlaybackInfoRequest(response, request)
@@ -55,6 +61,10 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 	if input.MediaSourceId != "" {
 		playID, descriptors, reused := handler.playSessions.reuseCandidate(session, item.ID, input.MediaSourceId, capabilities, allowTranscode, nil)
 		if reused {
+			if err := handler.playSessions.setPlaybackPreferences(session, item.ID, playID, input.MediaSourceId, input.AudioStreamIndex, input.SubtitleStreamIndex); err != nil {
+				handler.writePlaybackError(response, request, err)
+				return
+			}
 			result := PlaybackInfoResponse{PlaySessionId: playID, MediaSources: make([]MediaSourceInfo, 0, len(descriptors))}
 			for _, descriptor := range descriptors {
 				result.MediaSources = append(result.MediaSources, mediaSourceDTO(item, playID, descriptor, capabilities, allowTranscode, input.StartTimeTicks))
@@ -64,7 +74,7 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 				handler.writePlaybackError(response, request, openErr)
 				return
 			}
-			applyResolvedMediaSource(result.MediaSources, binding.MediaSourceID, native)
+			applyResolvedMediaSource(result.MediaSources, item.ID, binding.MediaSourceID, playID, input.StartTimeTicks, native)
 			handler.writeJSON(response, http.StatusOK, result)
 			return
 		}
@@ -78,6 +88,10 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 	if input.MediaSourceId != "" {
 		playID, descriptors, reused := handler.playSessions.reuseCandidate(session, item.ID, input.MediaSourceId, capabilities, allowTranscode, options)
 		if reused {
+			if err := handler.playSessions.setPlaybackPreferences(session, item.ID, playID, input.MediaSourceId, input.AudioStreamIndex, input.SubtitleStreamIndex); err != nil {
+				handler.writePlaybackError(response, request, err)
+				return
+			}
 			result := PlaybackInfoResponse{PlaySessionId: playID, MediaSources: make([]MediaSourceInfo, 0, len(descriptors))}
 			for _, descriptor := range descriptors {
 				result.MediaSources = append(result.MediaSources, mediaSourceDTO(item, playID, descriptor, capabilities, allowTranscode, input.StartTimeTicks))
@@ -87,7 +101,7 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 				handler.writePlaybackError(response, request, openErr)
 				return
 			}
-			applyResolvedMediaSource(result.MediaSources, binding.MediaSourceID, native)
+			applyResolvedMediaSource(result.MediaSources, item.ID, binding.MediaSourceID, playID, input.StartTimeTicks, native)
 			handler.writeJSON(response, http.StatusOK, result)
 			return
 		}
@@ -96,7 +110,7 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 			return
 		}
 	}
-	result, err := handler.registerPlaybackInfo(request.Context(), session, item, capabilities, allowTranscode, options, input.StartTimeTicks)
+	result, err := handler.registerPlaybackInfo(request.Context(), session, item, capabilities, allowTranscode, options, input.MediaSourceId, input.StartTimeTicks, input.AudioStreamIndex, input.SubtitleStreamIndex)
 	if err != nil {
 		handler.writePlaybackError(response, request, err)
 		return
@@ -109,7 +123,7 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 			handler.writePlaybackError(response, request, openErr)
 			return
 		}
-		applyResolvedMediaSource(result.MediaSources, binding.MediaSourceID, native)
+		applyResolvedMediaSource(result.MediaSources, item.ID, binding.MediaSourceID, playID, input.StartTimeTicks, native)
 	}
 	handler.writeJSON(response, http.StatusOK, result)
 }
@@ -128,7 +142,7 @@ func (handler *Handler) detailMediaSources(ctx context.Context, session Authenti
 		return nil
 	}
 	defer releaseOptions()
-	result, err := handler.registerPlaybackInfo(ctx, session, item, capabilities, allowTranscode, options, 0)
+	result, err := handler.registerPlaybackInfo(ctx, session, item, capabilities, allowTranscode, options, "", 0, nil, nil)
 	if err != nil {
 		return nil
 	}
@@ -202,9 +216,15 @@ func (handler *Handler) episodePlaybackIdentity(ctx context.Context, session Aut
 	return resourceID + ":" + strconv.Itoa(*item.ParentOrdinal) + ":" + strconv.Itoa(*item.Ordinal), series.SourceAddonID
 }
 
-func (handler *Handler) registerPlaybackInfo(ctx context.Context, session AuthenticatedSession, item watchstate.CatalogTitle, capabilities playback.Capabilities, allowTranscode bool, options []playback.SourceOption, startTimeTicks int64) (PlaybackInfoResponse, error) {
+func (handler *Handler) registerPlaybackInfo(ctx context.Context, session AuthenticatedSession, item watchstate.CatalogTitle, capabilities playback.Capabilities, allowTranscode bool, options []playback.SourceOption, mediaID string, startTimeTicks int64, audioIndex, subtitleIndex *int) (PlaybackInfoResponse, error) {
 	playID, descriptors, err := handler.playSessions.register(ctx, session, item.ID, capabilities, allowTranscode, options)
 	if err != nil {
+		return PlaybackInfoResponse{}, err
+	}
+	if err := handler.playSessions.setPlaybackPreferences(session, item.ID, playID, mediaID, audioIndex, subtitleIndex); err != nil {
+		if len(descriptors) > 0 {
+			_ = handler.playSessions.close(context.WithoutCancel(ctx), session, item.ID, playID, descriptors[0].ID)
+		}
 		return PlaybackInfoResponse{}, err
 	}
 	result := PlaybackInfoResponse{PlaySessionId: playID, MediaSources: make([]MediaSourceInfo, 0, len(descriptors))}
@@ -219,26 +239,54 @@ func (handler *Handler) handleStream(response http.ResponseWriter, request *http
 		http.NotFound(response, request)
 		return
 	}
+	request = streamRequestWithPathSelectors(request)
 	if err := validateQueryBudget(request.URL.Query()); err != nil {
 		handler.writeStreamError(response, request, http.StatusBadRequest, "InvalidRequest", "The stream request is invalid")
 		return
 	}
-	playID, mediaID, startTimeTicks, err := parseStreamSelectors(request.URL.Query())
-	if err != nil {
-		handler.writeStreamError(response, request, http.StatusNotFound, "PlaybackSessionNotFound", "The playback session is invalid or expired")
-		return
-	}
-	itemID := request.PathValue("id")
-	session, ok := handler.authenticateStreamRequest(response, request, itemID, playID, mediaID)
-	if !ok {
-		return
-	}
-	item, err := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, itemID)
-	if err != nil {
-		handler.writeStreamPlaybackError(response, request, err)
-		return
+	itemID := streamRequestItemID(request)
+	playID, mediaID, startTimeTicks, selectorErr := parseStreamSelectors(request.URL.Query())
+	var session AuthenticatedSession
+	var item watchstate.CatalogTitle
+	var ok bool
+	if selectorErr != nil {
+		static, staticErr := booleanValue(request.URL.Query(), "Static", false)
+		if staticErr != nil || !static {
+			handler.writeStreamError(response, request, http.StatusNotFound, "PlaybackSessionNotFound", "The playback session is invalid or expired")
+			return
+		}
+		fallbackPlayID, _, fallbackPlayIDErr := queryScalar(request.URL.Query(), "PlaySessionId")
+		if fallbackPlayIDErr != nil || isRivunePlaySessionID(fallbackPlayID) {
+			handler.writeStreamError(response, request, http.StatusNotFound, "PlaybackSessionNotFound", "The playback session is invalid or expired")
+			return
+		}
+		session, item, playID, mediaID, startTimeTicks, ok = handler.prepareStaticStream(response, request, itemID)
+		if !ok {
+			return
+		}
+	} else {
+		session, ok = handler.authenticateStreamRequest(response, request, itemID, playID, mediaID)
+		if !ok {
+			return
+		}
+		var err error
+		item, err = handler.catalog.GetCatalogTitle(request.Context(), session.Principal, itemID)
+		if err != nil {
+			handler.writeStreamPlaybackError(response, request, err)
+			return
+		}
 	}
 	binding, handle, _, err := handler.playSessions.openAndTouch(request.Context(), session, item.ID, playID, mediaID, startTimeTicks)
+	if err != nil {
+		static, staticErr := booleanValue(request.URL.Query(), "Static", false)
+		if staticErr == nil && static && !isRivunePlaySessionID(playID) {
+			session, item, playID, mediaID, startTimeTicks, ok = handler.prepareStaticStream(response, request, itemID)
+			if !ok {
+				return
+			}
+			binding, handle, _, err = handler.playSessions.openAndTouch(request.Context(), session, item.ID, playID, mediaID, startTimeTicks)
+		}
+	}
 	if err != nil {
 		handler.writeStreamPlaybackError(response, request, err)
 		return
@@ -247,11 +295,261 @@ func (handler *Handler) handleStream(response http.ResponseWriter, request *http
 		handler.writeStreamError(response, request, http.StatusNotFound, "PlaybackSessionNotFound", "The playback session is invalid or expired")
 		return
 	}
-	deliveryRequest := scopedStreamDeliveryRequest(request, playID)
+	deliveryRequest := scopedStreamDeliveryRequest(request, playID, mediaID)
 	if err := handler.playback.Serve(response, deliveryRequest, handle); err != nil {
-		_ = handler.playSessions.close(context.WithoutCancel(request.Context()), session, item.ID, playID, mediaID)
+		if playback.IsTerminalDeliveryError(err) {
+			_ = handler.playSessions.close(context.WithoutCancel(request.Context()), session, item.ID, playID, mediaID)
+		}
 		handler.writeStreamPlaybackError(response, request, err)
 	}
+}
+
+func (handler *Handler) handleSubtitleStream(response http.ResponseWriter, request *http.Request) {
+	if handler.playback == nil || handler.catalog == nil || handler.playSessions == nil {
+		http.NotFound(response, request)
+		return
+	}
+	if request == nil || request.URL == nil || len(request.URL.RawQuery) > maximumCompatRawQueryBytes || validateQueryBudget(request.URL.Query()) != nil {
+		http.NotFound(response, request)
+		return
+	}
+	request, subtitleIndex, ok := subtitleStreamRequest(request)
+	if !ok {
+		handler.writeStreamError(response, request, http.StatusNotFound, "PlaybackSessionNotFound", "The subtitle stream is invalid or expired")
+		return
+	}
+	itemID := request.PathValue("id")
+	pathMediaID := request.PathValue("mediaSourceId")
+	playID, mediaID, startTimeTicks, err := parseStreamSelectors(request.URL.Query())
+	if err != nil || mediaID != pathMediaID {
+		handler.writeStreamError(response, request, http.StatusNotFound, "PlaybackSessionNotFound", "The subtitle stream is invalid or expired")
+		return
+	}
+	session, ok := handler.authenticateStreamRequest(response, request, itemID, playID, mediaID)
+	if !ok {
+		return
+	}
+	item, err := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, itemID)
+	if err != nil || item.ID != itemID || item.MediaType != "movie" && item.MediaType != "episode" {
+		if err == nil {
+			err = watchstate.ErrNotFound
+		}
+		handler.writeStreamPlaybackError(response, request, err)
+		return
+	}
+	binding, handle, native, err := handler.playSessions.openAndTouch(request.Context(), session, itemID, playID, mediaID, startTimeTicks)
+	if err != nil {
+		handler.writeStreamPlaybackError(response, request, err)
+		return
+	}
+	if binding.ItemID != itemID || binding.PlaySessionID != playID || binding.MediaSourceID != mediaID {
+		handler.writeStreamError(response, request, http.StatusNotFound, "PlaybackSessionNotFound", "The subtitle stream is invalid or expired")
+		return
+	}
+	assetID, found := compatibilitySubtitleAssetID(native, subtitleIndex)
+	if !found {
+		handler.writeStreamError(response, request, http.StatusNotFound, "PlaybackSessionNotFound", "The subtitle stream is invalid or expired")
+		return
+	}
+	if err := handler.playback.ServeAsset(response, scopedSubtitleDeliveryRequest(request), handle, assetID); err != nil {
+		if playback.IsTerminalDeliveryError(err) {
+			_ = handler.playSessions.close(context.WithoutCancel(request.Context()), session, itemID, playID, mediaID)
+		}
+		handler.writeStreamPlaybackError(response, request, err)
+	}
+}
+
+func subtitleStreamRequest(request *http.Request) (*http.Request, int, bool) {
+	if request == nil || request.URL == nil || request.PathValue("format") != "vtt" {
+		return request, 0, false
+	}
+	rawIndex := request.PathValue("subtitleIndex")
+	index, err := strconv.Atoi(rawIndex)
+	if err != nil || index < 0 || index > maximumCompatibilitySubtitleIndex || strconv.Itoa(index) != rawIndex {
+		return request, 0, false
+	}
+	rawStart := request.PathValue("startPositionTicks")
+	if rawStart == "" {
+		return request, index, true
+	}
+	start, err := strconv.ParseInt(rawStart, 10, 64)
+	if err != nil || start < 0 || start > 7*24*60*60*TicksPerSecond || strconv.FormatInt(start, 10) != rawStart {
+		return request, 0, false
+	}
+	cloned := request.Clone(request.Context())
+	clonedURL := *request.URL
+	values := clonedURL.Query()
+	if queryStart, found, scalarErr := queryScalar(values, "StartTimeTicks"); scalarErr != nil || found && queryStart != rawStart {
+		return request, 0, false
+	} else if !found {
+		values.Set("StartTimeTicks", rawStart)
+	}
+	clonedURL.RawQuery = values.Encode()
+	cloned.URL = &clonedURL
+	return cloned, index, true
+}
+
+func compatibilitySubtitleAssetID(session playback.Session, subtitleIndex int) (string, bool) {
+	for _, source := range session.Sources {
+		if source.ID != session.SelectedSourceID || source.Media == nil {
+			continue
+		}
+		streams, _ := compatibilityMediaStreams(source.Media, session.SelectedAudioTrack)
+		for _, binding := range compatibilitySubtitleBindings(streams, session.Subtitles) {
+			if binding.index == subtitleIndex {
+				return binding.assetID, true
+			}
+		}
+		break
+	}
+	return "", false
+}
+
+func scopedSubtitleDeliveryRequest(request *http.Request) *http.Request {
+	cloned := request.Clone(request.Context())
+	clonedURL := *request.URL
+	clonedURL.RawQuery = ""
+	cloned.URL = &clonedURL
+	cloned.Header = request.Header.Clone()
+	deleteCompatCredentialHeaders(cloned.Header)
+	return cloned
+}
+
+func streamRequestWithPathSelectors(request *http.Request) *http.Request {
+	if request == nil || request.PathValue("playlistId") == "" {
+		return request
+	}
+	cloned := request.Clone(request.Context())
+	clonedURL := *request.URL
+	values := clonedURL.Query()
+	if value, found, err := queryScalar(values, "PlaySessionId"); err == nil {
+		if !found {
+			values.Set("PlaySessionId", request.PathValue("playlistId"))
+		} else if value != request.PathValue("playlistId") {
+			values.Add("PlaySessionId", request.PathValue("playlistId"))
+		}
+	}
+	if value, found, err := queryScalar(values, "RivuneChildId"); err == nil && request.PathValue("segmentId") != "" {
+		if !found {
+			values.Set("RivuneChildId", request.PathValue("segmentId"))
+		} else if value != request.PathValue("segmentId") {
+			values.Add("RivuneChildId", request.PathValue("segmentId"))
+		}
+	}
+	clonedURL.RawQuery = values.Encode()
+	cloned.URL = &clonedURL
+	return cloned
+}
+
+func streamRequestItemID(request *http.Request) string {
+	if value := request.PathValue("id"); value != "" {
+		return value
+	}
+	return request.PathValue("itemId")
+}
+
+func (handler *Handler) prepareStaticStream(response http.ResponseWriter, request *http.Request, itemID string) (AuthenticatedSession, watchstate.CatalogTitle, string, string, int64, bool) {
+	session, ok := handler.authenticateGeneralStreamRequest(response, request)
+	if !ok {
+		return AuthenticatedSession{}, watchstate.CatalogTitle{}, "", "", 0, false
+	}
+	item, err := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, itemID)
+	if err != nil || item.ID == "" || item.MediaType != "movie" && item.MediaType != "episode" {
+		if err == nil {
+			err = watchstate.ErrNotFound
+		}
+		handler.writeStreamPlaybackError(response, request, err)
+		return AuthenticatedSession{}, watchstate.CatalogTitle{}, "", "", 0, false
+	}
+	input, err := parsePlaybackInfoRequest(response, request)
+	if err != nil {
+		handler.writeStreamError(response, request, http.StatusBadRequest, "InvalidRequest", "The stream request is invalid")
+		return AuthenticatedSession{}, watchstate.CatalogTitle{}, "", "", 0, false
+	}
+	capabilities, allowTranscode, err := handler.effectivePlaybackCapabilities(session, input)
+	if err != nil {
+		handler.writeStreamPlaybackError(response, request, err)
+		return AuthenticatedSession{}, watchstate.CatalogTitle{}, "", "", 0, false
+	}
+	if raw, found, scalarErr := queryScalar(request.URL.Query(), "SegmentContainer"); scalarErr != nil {
+		handler.writeStreamError(response, request, http.StatusBadRequest, "InvalidRequest", "The stream request is invalid")
+		return AuthenticatedSession{}, watchstate.CatalogTitle{}, "", "", 0, false
+	} else if found {
+		raw = normalizeCapability(raw)
+		if raw != "ts" && raw != "mp4" {
+			handler.writeStreamError(response, request, http.StatusBadRequest, "InvalidRequest", "The stream request is invalid")
+			return AuthenticatedSession{}, watchstate.CatalogTitle{}, "", "", 0, false
+		}
+		capabilities.HLSSegmentContainer = raw
+	}
+	requestedMediaID := input.MediaSourceId
+	if requestedMediaID == "" {
+		requestedMediaID = item.ID
+	}
+	options, releaseOptions, err := handler.playbackOptions(request.Context(), session, item, capabilities, allowTranscode)
+	if err != nil {
+		handler.writeStreamPlaybackError(response, request, err)
+		return AuthenticatedSession{}, watchstate.CatalogTitle{}, "", "", 0, false
+	}
+	defer releaseOptions()
+	playID, _, reused := handler.playSessions.reuseCandidate(session, item.ID, requestedMediaID, capabilities, allowTranscode, options)
+	if !reused {
+		if requestedMediaID != item.ID {
+			handler.writeStreamError(response, request, http.StatusNotFound, "PlaybackSessionNotFound", "The playback source is invalid or expired")
+			return AuthenticatedSession{}, watchstate.CatalogTitle{}, "", "", 0, false
+		}
+		var descriptors []playSourceDescriptor
+		playID, descriptors, err = handler.playSessions.register(request.Context(), session, item.ID, capabilities, allowTranscode, options)
+		if err != nil || len(descriptors) == 0 || descriptors[0].ID != item.ID {
+			if err == nil {
+				err = errPlaySessionNotFound
+			}
+			handler.writeStreamPlaybackError(response, request, err)
+			return AuthenticatedSession{}, watchstate.CatalogTitle{}, "", "", 0, false
+		}
+	}
+	if err := handler.playSessions.setPlaybackPreferences(session, item.ID, playID, requestedMediaID, input.AudioStreamIndex, input.SubtitleStreamIndex); err != nil {
+		handler.writeStreamPlaybackError(response, request, err)
+		return AuthenticatedSession{}, watchstate.CatalogTitle{}, "", "", 0, false
+	}
+	return session, item, playID, requestedMediaID, input.StartTimeTicks, true
+}
+
+func (handler *Handler) authenticateGeneralStreamRequest(response http.ResponseWriter, request *http.Request) (AuthenticatedSession, bool) {
+	token, found, err := extractCompatToken(request)
+	if err != nil || !found {
+		handler.writeStreamError(response, request, http.StatusUnauthorized, "Unauthorized", "A valid compatibility token is required")
+		return AuthenticatedSession{}, false
+	}
+	session, err := handler.authentication.Authenticate(request.Context(), token)
+	if err != nil || !validAuthenticatedSession(session) {
+		if err != nil && !errors.Is(err, ErrInvalidCompatCredential) && !errors.Is(err, ErrInvalidCompatAuthorization) {
+			handler.writeStreamError(response, request, http.StatusInternalServerError, "InternalError", "The stream authorization could not be verified")
+		} else {
+			handler.writeStreamError(response, request, http.StatusUnauthorized, "Unauthorized", "A valid compatibility token is required")
+		}
+		return AuthenticatedSession{}, false
+	}
+	if !requestUserMatchesSession(request, session.ProfileID) {
+		handler.writeStreamError(response, request, http.StatusNotFound, "ResourceNotFound", "The requested resource was not found")
+		return AuthenticatedSession{}, false
+	}
+	return session, true
+}
+
+func (handler *Handler) handleDownload(response http.ResponseWriter, request *http.Request) {
+	cloned := request.Clone(request.Context())
+	clonedURL := *request.URL
+	values := clonedURL.Query()
+	deleteQueryFold(values, "PlaySessionId")
+	deleteQueryFold(values, "Static")
+	values.Set("Static", "true")
+	if _, found, err := queryScalar(values, "MediaSourceId"); err == nil && !found {
+		values.Set("MediaSourceId", request.PathValue("id"))
+	}
+	clonedURL.RawQuery = values.Encode()
+	cloned.URL = &clonedURL
+	handler.handleStream(response, cloned)
 }
 
 func (handler *Handler) authenticateStreamRequest(response http.ResponseWriter, request *http.Request, itemID, playID, mediaID string) (AuthenticatedSession, bool) {
@@ -297,7 +595,7 @@ func (handler *Handler) authenticateStreamRequest(response http.ResponseWriter, 
 	return fresh, true
 }
 
-func scopedStreamDeliveryRequest(request *http.Request, playID string) *http.Request {
+func scopedStreamDeliveryRequest(request *http.Request, playID, mediaID string) *http.Request {
 	cloned := request.Clone(request.Context())
 	clonedURL := *request.URL
 	values := clonedURL.Query()
@@ -307,6 +605,8 @@ func scopedStreamDeliveryRequest(request *http.Request, playID string) *http.Req
 	deleteQueryFold(values, "X-MediaBrowser-Token")
 
 	values.Set("api_key", playID)
+	values.Set("PlaySessionId", playID)
+	values.Set("MediaSourceId", mediaID)
 	clonedURL.RawQuery = values.Encode()
 	cloned.URL = &clonedURL
 	deleteCompatCredentialHeaders(cloned.Header)
@@ -373,10 +673,87 @@ func parsePlaybackInfoRequest(response http.ResponseWriter, request *http.Reques
 		}
 		input.MaxStreamingBitrate = parsed
 	}
-	if len(input.UserId) > 128 || len(input.MediaSourceId) > 128 || input.StartTimeTicks < 0 || input.StartTimeTicks > 7*24*60*60*TicksPerSecond {
+	if err := parsePlaybackQueryOptions(values, &input); err != nil {
+		return PlaybackInfoRequest{}, err
+	}
+	if len(input.UserId) > 128 || len(input.MediaSourceId) > 128 || input.StartTimeTicks < 0 || input.StartTimeTicks > 7*24*60*60*TicksPerSecond ||
+		input.MaxStreamingBitrate < 0 || input.MaxStreamingBitrate > 200_000_000 || input.MaxAudioChannels < 0 || input.MaxAudioChannels > 32 ||
+		!validPlaybackTrackIndex(input.AudioStreamIndex) || !validPlaybackTrackIndex(input.SubtitleStreamIndex) {
 		return PlaybackInfoRequest{}, ErrInvalidQuery
 	}
 	return input, nil
+}
+
+func validPlaybackTrackIndex(value *int) bool {
+	return value == nil || *value >= -1 && *value <= 1024
+}
+
+func parsePlaybackQueryOptions(values url.Values, input *PlaybackInfoRequest) error {
+	if input == nil {
+		return ErrInvalidQuery
+	}
+	optionalBoolean := func(name string, target **bool) error {
+		raw, found, err := queryScalar(values, name)
+		if err != nil || !found {
+			return err
+		}
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return ErrInvalidQuery
+		}
+		*target = &value
+		return nil
+	}
+	for _, option := range []struct {
+		name   string
+		target **bool
+	}{
+		{"EnableDirectPlay", &input.EnableDirectPlay},
+		{"EnableDirectStream", &input.EnableDirectStream},
+		{"EnableTranscoding", &input.EnableTranscoding},
+		{"AllowVideoStreamCopy", &input.AllowVideoStreamCopy},
+		{"AllowAudioStreamCopy", &input.AllowAudioStreamCopy},
+	} {
+		if err := optionalBoolean(option.name, option.target); err != nil {
+			return err
+		}
+	}
+	optionalIndex := func(name string, target **int) error {
+		raw, found, err := queryScalar(values, name)
+		if err != nil || !found {
+			return err
+		}
+		value, err := strconv.ParseInt(raw, 10, 32)
+		if err != nil || value < -1 || value > 1024 {
+			return ErrInvalidQuery
+		}
+		parsed := int(value)
+		*target = &parsed
+		return nil
+	}
+	if err := optionalIndex("AudioStreamIndex", &input.AudioStreamIndex); err != nil {
+		return err
+	}
+	if err := optionalIndex("SubtitleStreamIndex", &input.SubtitleStreamIndex); err != nil {
+		return err
+	}
+	if raw, found, err := queryScalar(values, "MaxAudioChannels"); err != nil {
+		return err
+	} else if found {
+		value, parseErr := strconv.ParseInt(raw, 10, 32)
+		if parseErr != nil || value < 0 || value > 32 {
+			return ErrInvalidQuery
+		}
+		input.MaxAudioChannels = int(value)
+	}
+	return nil
+}
+
+func playbackFlag(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 func emptyDeviceProfile(profile DeviceProfile) bool {
 	return len(profile.DirectPlayProfiles) == 0 && len(profile.TranscodingProfiles) == 0 && len(profile.SubtitleProfiles) == 0
@@ -441,9 +818,13 @@ func playbackCapabilities(input PlaybackInfoRequest) (playback.Capabilities, boo
 	if !validDeviceProfileBounds(profile) {
 		return playback.Capabilities{}, false, ErrInvalidQuery
 	}
-	capabilities := playback.Capabilities{}
-	preferDirect := true
-	capabilities.PreferDirectPlay = &preferDirect
+	directPlay := playbackFlag(input.EnableDirectPlay, true)
+	directStream := playbackFlag(input.EnableDirectStream, true)
+	enableTranscoding := playbackFlag(input.EnableTranscoding, true)
+	allowVideoCopy := playbackFlag(input.AllowVideoStreamCopy, true)
+	allowAudioCopy := playbackFlag(input.AllowAudioStreamCopy, true)
+	capabilities := playback.Capabilities{MaximumAudioChannels: input.MaxAudioChannels}
+	capabilities.PreferDirectPlay = &directPlay
 	profiles := make(map[string]struct{})
 	addProfile := func(container, video, audio string) error {
 		container, video, audio = normalizeCapability(container), normalizeCapability(video), normalizeCapability(audio)
@@ -461,88 +842,94 @@ func playbackCapabilities(input PlaybackInfoRequest) (playback.Capabilities, boo
 		capabilities.MediaProfiles = append(capabilities.MediaProfiles, playback.MediaProfile{Container: container, VideoCodec: video, AudioCodec: audio})
 		return nil
 	}
-	for _, direct := range profile.DirectPlayProfiles {
-		if direct.Type != "" && !strings.EqualFold(direct.Type, "Video") {
-			continue
-		}
-		containers, err := capabilityList(direct.Container)
-		if err != nil {
-			return playback.Capabilities{}, false, err
-		}
-		videos, err := capabilityList(direct.VideoCodec)
-		if err != nil {
-			return playback.Capabilities{}, false, err
-		}
-		audios, err := capabilityList(direct.AudioCodec)
-		if err != nil {
-			return playback.Capabilities{}, false, err
-		}
-		if len(audios) == 0 {
-			audios = []string{""}
-		}
-		for _, container := range containers {
-			if container == "m3u8" || container == "hls" {
-				appendUnique(&capabilities.StreamingProtocols, "hls")
-			} else {
-				appendUnique(&capabilities.StreamingProtocols, "http")
+	if directPlay || directStream {
+		for _, direct := range profile.DirectPlayProfiles {
+			if direct.Type != "" && !strings.EqualFold(direct.Type, "Video") {
+				continue
 			}
-			appendUnique(&capabilities.Containers, normalizedContainer(container))
-			for _, video := range videos {
-				appendUnique(&capabilities.VideoCodecs, video)
-				for _, audio := range audios {
-					if audio != "" {
-						appendUnique(&capabilities.AudioCodecs, audio)
-					}
-					if err := addProfile(normalizedContainer(container), video, audio); err != nil {
-						return playback.Capabilities{}, false, err
+			containers, err := capabilityList(direct.Container)
+			if err != nil {
+				return playback.Capabilities{}, false, err
+			}
+			videos, err := capabilityList(direct.VideoCodec)
+			if err != nil {
+				return playback.Capabilities{}, false, err
+			}
+			audios, err := capabilityList(direct.AudioCodec)
+			if err != nil {
+				return playback.Capabilities{}, false, err
+			}
+			if len(audios) == 0 {
+				audios = []string{""}
+			}
+			for _, container := range containers {
+				if container == "m3u8" || container == "hls" {
+					appendUnique(&capabilities.StreamingProtocols, "hls")
+				} else {
+					appendUnique(&capabilities.StreamingProtocols, "http")
+				}
+				appendUnique(&capabilities.Containers, normalizedContainer(container))
+				for _, video := range videos {
+					appendUnique(&capabilities.VideoCodecs, video)
+					for _, audio := range audios {
+						if audio != "" {
+							appendUnique(&capabilities.AudioCodecs, audio)
+						}
+						if err := addProfile(normalizedContainer(container), video, audio); err != nil {
+							return playback.Capabilities{}, false, err
+						}
 					}
 				}
 			}
 		}
 	}
+	if directStream && allowVideoCopy && allowAudioCopy {
+		appendUnique(&capabilities.ProcessingModes, "remux")
+	}
 	allowTranscode := false
-	for _, transcode := range profile.TranscodingProfiles {
-		if transcode.Type != "" && !strings.EqualFold(transcode.Type, "Video") || transcode.Context != "" && !strings.EqualFold(transcode.Context, "Streaming") {
-			continue
-		}
-		protocol := normalizeCapability(transcode.Protocol)
-		if protocol != "hls" {
-			continue
-		}
-		containers, err := capabilityList(transcode.Container)
-		if err != nil {
-			return playback.Capabilities{}, false, err
-		}
-		supportedContainer := false
-		for _, container := range containers {
-			switch normalizedContainer(container) {
-			case "mp4", "hls", "ts", "mpegts":
-				supportedContainer = true
+	if directStream || enableTranscoding {
+		for _, transcode := range profile.TranscodingProfiles {
+			segmentContainer, supported, err := hlsTranscodingProfileSegmentContainer(transcode)
+			if err != nil {
+				return playback.Capabilities{}, false, err
+			}
+			if supported && (capabilities.HLSSegmentContainer == "" || segmentContainer == "ts") {
+				capabilities.HLSSegmentContainer = segmentContainer
 			}
 		}
-		if !supportedContainer {
-			continue
-		}
-		videos, err := capabilityList(transcode.VideoCodec)
-		if err != nil {
-			return playback.Capabilities{}, false, err
-		}
-		audios, err := capabilityList(transcode.AudioCodec)
-		if err != nil {
-			return playback.Capabilities{}, false, err
-		}
-		appendUnique(&capabilities.StreamingProtocols, "hls")
-		for _, video := range videos {
-			for _, audio := range audios {
-				if err := addProfile("mp4", video, audio); err != nil {
-					return playback.Capabilities{}, false, err
+		for _, transcode := range profile.TranscodingProfiles {
+			segmentContainer, supported, err := hlsTranscodingProfileSegmentContainer(transcode)
+			if err != nil {
+				return playback.Capabilities{}, false, err
+			}
+			if !supported || segmentContainer != capabilities.HLSSegmentContainer {
+				continue
+			}
+			videos, err := capabilityList(transcode.VideoCodec)
+			if err != nil {
+				return playback.Capabilities{}, false, err
+			}
+			audios, err := capabilityList(transcode.AudioCodec)
+			if err != nil {
+				return playback.Capabilities{}, false, err
+			}
+			appendUnique(&capabilities.StreamingProtocols, "hls")
+			for _, video := range videos {
+				for _, audio := range audios {
+					if err := addProfile("mp4", video, audio); err != nil {
+						return playback.Capabilities{}, false, err
+					}
+					if enableTranscoding && video == "h264" && audio == "aac" {
+						appendUnique(&capabilities.ProcessingModes, "transcode")
+						if allowVideoCopy {
+							appendUnique(&capabilities.ProcessingModes, "transcode_audio")
+						}
+						allowTranscode = true
+					}
+					if directStream && allowVideoCopy && allowAudioCopy {
+						appendUnique(&capabilities.ProcessingModes, "remux")
+					}
 				}
-				if video == "h264" && audio == "aac" {
-					appendUnique(&capabilities.ProcessingModes, "transcode")
-					appendUnique(&capabilities.ProcessingModes, "transcode_audio")
-				}
-				appendUnique(&capabilities.ProcessingModes, "remux")
-				allowTranscode = true
 			}
 		}
 	}
@@ -569,6 +956,30 @@ func playbackCapabilities(input PlaybackInfoRequest) (playback.Capabilities, boo
 	return capabilities, allowTranscode, nil
 }
 
+func hlsTranscodingProfileSegmentContainer(profile TranscodingProfile) (string, bool, error) {
+	if profile.Type != "" && !strings.EqualFold(profile.Type, "Video") ||
+		profile.Context != "" && !strings.EqualFold(profile.Context, "Streaming") ||
+		normalizeCapability(profile.Protocol) != "hls" {
+		return "", false, nil
+	}
+	containers, err := capabilityList(profile.Container)
+	if err != nil {
+		return "", false, err
+	}
+	segmentContainer := ""
+	for _, container := range containers {
+		switch normalizedContainer(container) {
+		case "mp4":
+			if segmentContainer == "" {
+				segmentContainer = "mp4"
+			}
+		case "hls", "ts", "mpegts":
+			segmentContainer = "ts"
+		}
+	}
+	return segmentContainer, segmentContainer != "", nil
+}
+
 func usableSourceOptions(options []playback.SourceOption, capabilities playback.Capabilities, allowTranscode bool) []playback.SourceOption {
 	result := make([]playback.SourceOption, 0, len(options))
 	for _, option := range options {
@@ -578,12 +989,16 @@ func usableSourceOptions(options []playback.SourceOption, capabilities playback.
 		}
 		direct := containsFold(capabilities.StreamingProtocols, protocol) &&
 			(protocol == "hls" || option.Container == "" || containsFold(capabilities.Containers, normalizedContainer(option.Container)))
-		if !direct && !allowTranscode || protocol != "http" && protocol != "hls" {
+		if protocol != "http" && protocol != "hls" || !direct && !allowTranscode && !supportsHLSRemux(capabilities) {
 			continue
 		}
 		result = append(result, option)
 	}
 	return result
+}
+
+func supportsHLSRemux(capabilities playback.Capabilities) bool {
+	return containsFold(capabilities.ProcessingModes, "remux") && containsFold(capabilities.StreamingProtocols, "hls")
 }
 
 func sourceOptionReferenceIDs(options []playback.SourceOption) []string {
@@ -610,16 +1025,29 @@ func mediaSourceDTO(item watchstate.CatalogTitle, playID string, descriptor play
 	streamPath := compatibilityStreamPath(item.ID, pathContainer, values)
 	direct := containsFold(capabilities.StreamingProtocols, protocol) &&
 		(protocol == "hls" || container == "" || containsFold(capabilities.Containers, container))
+	supportsDirectPlay := direct && playbackFlag(capabilities.PreferDirectPlay, true)
+	supportsDirectStream := containsFold(capabilities.ProcessingModes, "remux") && (direct || supportsHLSRemux(capabilities))
 	source := MediaSourceInfo{
 		Id: descriptor.ID, Name: descriptor.Name, Path: streamPath, Container: container,
-		Protocol: "Http", Type: "Default", IsRemote: false, SupportsDirectPlay: direct,
-		SupportsDirectStream: direct, SupportsTranscoding: allowTranscode, MediaStreams: []MediaStreamInfo{},
+		Protocol: "Http", Type: "Default", IsRemote: false, SupportsDirectPlay: supportsDirectPlay,
+		SupportsDirectStream: supportsDirectStream, SupportsTranscoding: allowTranscode, MediaStreams: []MediaStreamInfo{},
 		RunTimeTicks: catalogRuntimeTicks(item),
 	}
+	if supportsDirectStream {
+		if !direct && supportsHLSRemux(capabilities) {
+			source.DirectStreamUrl = compatibilityMasterPath(item.ID, values)
+		} else {
+			source.DirectStreamUrl = streamPath
+		}
+	}
 	if allowTranscode {
-		source.TranscodingUrl = compatibilityStreamPath(item.ID, "m3u8", values)
-		source.TranscodingSubProtocol = "Hls"
-		source.TranscodingContainer = "hls"
+		segmentContainer := capabilities.HLSSegmentContainer
+		if segmentContainer != "mp4" {
+			segmentContainer = "ts"
+		}
+		source.TranscodingUrl = compatibilityMasterPath(item.ID, values)
+		source.TranscodingSubProtocol = "hls"
+		source.TranscodingContainer = segmentContainer
 	}
 	return source
 }
@@ -632,6 +1060,10 @@ func compatibilityStreamPath(itemID, container string, values url.Values) string
 	return "/Videos/" + url.PathEscape(itemID) + "/stream." + container + "?" + values.Encode()
 }
 
+func compatibilityMasterPath(itemID string, values url.Values) string {
+	return "/Videos/" + url.PathEscape(itemID) + "/master.m3u8?" + values.Encode()
+}
+
 func catalogRuntimeTicks(item watchstate.CatalogTitle) *int64 {
 	if item.RuntimeMinutes == nil || *item.RuntimeMinutes <= 0 {
 		return nil
@@ -640,7 +1072,7 @@ func catalogRuntimeTicks(item watchstate.CatalogTitle) *int64 {
 	return &value
 }
 
-func applyResolvedMediaSource(sources []MediaSourceInfo, mediaID string, session playback.Session) {
+func applyResolvedMediaSource(sources []MediaSourceInfo, itemID, mediaID, playID string, startTimeTicks int64, session playback.Session) {
 	for index := range sources {
 		if sources[index].Id != mediaID {
 			continue
@@ -650,12 +1082,12 @@ func applyResolvedMediaSource(sources []MediaSourceInfo, mediaID string, session
 				continue
 			}
 			sources[index].Container = normalizedContainer(native.Container)
-			sources[index].SupportsDirectPlay = native.Mode == "direct"
-			sources[index].SupportsDirectStream = native.Mode == "direct" || native.Mode == "remux"
-			sources[index].SupportsTranscoding = native.Mode == "transcode" || native.Mode == "transcode_audio" || native.Mode == "remux"
 			if native.Media != nil {
 				sources[index].Name = verifiedCompatibilitySourceName(sources[index].Name, native.Media, session.SelectedAudioTrack)
 				sources[index].MediaStreams, sources[index].DefaultAudioStreamIndex = compatibilityMediaStreams(native.Media, session.SelectedAudioTrack)
+				sources[index].MediaStreams = applyCompatibilitySubtitleDelivery(
+					sources[index].MediaStreams, session.Subtitles, itemID, mediaID, playID, startTimeTicks,
+				)
 				if native.Media.DurationSeconds > 0 {
 					ticks := SecondsToTicks(int64(native.Media.DurationSeconds))
 					sources[index].RunTimeTicks = &ticks
@@ -727,10 +1159,10 @@ func compatibilityMediaStreams(media *playback.MediaInspection, selectedAudioInd
 		value := selectedAudio.Index
 		defaultAudio = &value
 	}
-	streams := make([]MediaStreamInfo, 0, min(64, len(media.VideoTracks)+len(media.AudioTracks)+len(media.SubtitleTracks)))
+	streams := make([]MediaStreamInfo, 0, min(maximumCompatibilityMediaStreams, len(media.VideoTracks)+len(media.AudioTracks)+len(media.SubtitleTracks)))
 	appendTracks := func(tracks []playback.MediaTrack, mediaType string) {
 		for _, track := range tracks {
-			if len(streams) >= 64 || track.Index < 0 {
+			if len(streams) >= maximumCompatibilityMediaStreams || track.Index < 0 {
 				break
 			}
 			codec, display := compatibilityCodec(track.Codec)
@@ -757,6 +1189,105 @@ func compatibilityMediaStreams(media *playback.MediaInspection, selectedAudioInd
 	appendTracks(media.AudioTracks, "Audio")
 	appendTracks(media.SubtitleTracks, "Subtitle")
 	return streams, defaultAudio
+}
+
+type compatibilitySubtitleBinding struct {
+	index    int
+	assetID  string
+	subtitle playback.Subtitle
+}
+
+func applyCompatibilitySubtitleDelivery(streams []MediaStreamInfo, subtitles []playback.Subtitle, itemID, mediaID, playID string, startTimeTicks int64) []MediaStreamInfo {
+	bindings := compatibilitySubtitleBindings(streams, subtitles)
+	for _, binding := range bindings {
+		var stream *MediaStreamInfo
+		for streamIndex := range streams {
+			if streams[streamIndex].Type == "Subtitle" && streams[streamIndex].Index == binding.index {
+				stream = &streams[streamIndex]
+				break
+			}
+		}
+		if stream == nil {
+			if len(streams) >= maximumCompatibilityMediaStreams {
+				break
+			}
+			streams = append(streams, MediaStreamInfo{
+				Codec: "webvtt", DisplayTitle: "WEBVTT", Type: "Subtitle", Index: binding.index,
+				Language: compatibilityLanguage(binding.subtitle.Language), IsForced: binding.subtitle.Forced,
+			})
+			stream = &streams[len(streams)-1]
+		}
+		stream.Codec = "webvtt"
+		stream.IsExternal = true
+		stream.IsExternalUrl = false
+		stream.IsTextSubtitleStream = true
+		stream.SupportsExternalStream = true
+		stream.DeliveryMethod = "External"
+		stream.DeliveryUrl = compatibilitySubtitleDeliveryURL(itemID, mediaID, binding.index, playID, startTimeTicks)
+	}
+	return streams
+}
+
+func compatibilitySubtitleBindings(streams []MediaStreamInfo, subtitles []playback.Subtitle) []compatibilitySubtitleBinding {
+	occupied := make(map[int]struct{}, len(streams))
+	next := 0
+	for _, stream := range streams {
+		if stream.Index < 0 || stream.Index > maximumCompatibilitySubtitleIndex {
+			continue
+		}
+		occupied[stream.Index] = struct{}{}
+		if stream.Index >= next {
+			next = stream.Index + 1
+		}
+	}
+	bindings := make([]compatibilitySubtitleBinding, 0, min(len(subtitles), maximumCompatibilityMediaStreams))
+	providerSlots := maximumCompatibilityMediaStreams - len(streams)
+	if providerSlots < 0 {
+		providerSlots = 0
+	}
+	for _, subtitle := range subtitles {
+		if subtitle.Delivery != "external" || subtitle.ID == "" {
+			continue
+		}
+		if strings.HasPrefix(subtitle.ID, "embedded-subtitle-") {
+			index, err := strconv.Atoi(strings.TrimPrefix(subtitle.ID, "embedded-subtitle-"))
+			if err != nil || index < 0 || index > maximumCompatibilitySubtitleIndex {
+				continue
+			}
+			for _, stream := range streams {
+				if stream.Type == "Subtitle" && stream.Index == index {
+					bindings = append(bindings, compatibilitySubtitleBinding{index: index, assetID: subtitle.ID, subtitle: subtitle})
+					break
+				}
+			}
+			continue
+		}
+		if providerSlots == 0 {
+			continue
+		}
+		for next <= maximumCompatibilitySubtitleIndex {
+			if _, exists := occupied[next]; !exists {
+				break
+			}
+			next++
+		}
+		if next > maximumCompatibilitySubtitleIndex {
+			break
+		}
+		bindings = append(bindings, compatibilitySubtitleBinding{index: next, assetID: subtitle.ID, subtitle: subtitle})
+		occupied[next] = struct{}{}
+		next++
+		providerSlots--
+	}
+	return bindings
+}
+
+func compatibilitySubtitleDeliveryURL(itemID, mediaID string, index int, playID string, startTimeTicks int64) string {
+	values := url.Values{"PlaySessionId": {playID}, "MediaSourceId": {mediaID}}
+	if startTimeTicks > 0 {
+		values.Set("StartTimeTicks", strconv.FormatInt(startTimeTicks, 10))
+	}
+	return "/Videos/" + url.PathEscape(itemID) + "/" + url.PathEscape(mediaID) + "/Subtitles/" + strconv.Itoa(index) + "/Stream.vtt?" + values.Encode()
 }
 
 func compatibilityCodec(value string) (string, string) {

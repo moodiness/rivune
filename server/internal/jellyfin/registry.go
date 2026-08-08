@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +26,7 @@ const (
 	defaultPlaySessionIdleTTL           = 30 * time.Minute
 	defaultPlaySessionAbsoluteTTL       = 2 * time.Hour
 	defaultPlaySessionReapPeriod        = time.Minute
+	playSessionIDPrefix                 = "rvp_"
 	defaultPlaySessionCleanupTimeout    = 5 * time.Second
 	defaultPlaySessionCleanupWorkers    = 4
 	defaultPlaySessionCleanupRetryBase  = 100 * time.Millisecond
@@ -96,24 +99,26 @@ func (lease playbackEventLease) release() {
 }
 
 type playSessionEntry struct {
-	compatSessionID    string
-	nativeSessionID    string
-	profileID          string
-	deviceID           string
-	itemID             string
-	playSessionID      string
-	principal          auth.Principal
-	capabilities       playback.Capabilities
-	allowTranscode     bool
-	capabilityRevision uint64
-	createdAt          time.Time
-	sequence           uint64
-	lastSeenAt         time.Time
-	expiresAt          time.Time
-	sourceOrder        []string
-	sources            map[string]*playSessionSource
-	referencesPinned   bool
-	eventLease         chan struct{}
+	compatSessionID     string
+	nativeSessionID     string
+	profileID           string
+	deviceID            string
+	itemID              string
+	playSessionID       string
+	principal           auth.Principal
+	capabilities        playback.Capabilities
+	allowTranscode      bool
+	capabilityRevision  uint64
+	preferredAudioTrack *int
+	preferredSubtitleID string
+	createdAt           time.Time
+	sequence            uint64
+	lastSeenAt          time.Time
+	expiresAt           time.Time
+	sourceOrder         []string
+	sources             map[string]*playSessionSource
+	referencesPinned    bool
+	eventLease          chan struct{}
 }
 type registeredDeviceProfile struct {
 	session    AuthenticatedSession
@@ -478,6 +483,64 @@ func (registry *playSessionRegistry) candidateExists(session AuthenticatedSessio
 	return exists
 }
 
+func (registry *playSessionRegistry) setPlaybackPreferences(session AuthenticatedSession, itemID, playID, mediaID string, audioIndex, subtitleIndex *int) error {
+	if registry == nil || !validPlaySessionOwner(session) || itemID == "" || playID == "" {
+		return errPlaySessionNotFound
+	}
+	var preferredAudio *int
+	if audioIndex != nil && *audioIndex >= 0 {
+		preferredAudio = cloneIntPointer(audioIndex)
+	}
+	now := registry.now().UTC()
+	registry.mu.Lock()
+	stale := registry.removeExpiredLocked(now)
+	entry := registry.entries[playID]
+	valid := entry != nil && ownerMatches(entry, session) && entry.itemID == itemID && entry.expiresAt.After(now) && entry.lastSeenAt.Add(registry.idleTTL).After(now)
+	if valid {
+		preferredSubtitle := ""
+		if subtitleIndex != nil {
+			if *subtitleIndex < 0 {
+				preferredSubtitle = "none"
+			} else if assetID, found := resolvedSubtitleAssetID(entry, mediaID, *subtitleIndex); found {
+				preferredSubtitle = assetID
+			} else {
+				preferredSubtitle = "embedded-subtitle-" + strconv.Itoa(*subtitleIndex)
+			}
+		}
+		changed := !optionalIntEqual(entry.preferredAudioTrack, preferredAudio) || entry.preferredSubtitleID != preferredSubtitle
+		entry.preferredAudioTrack = preferredAudio
+		entry.preferredSubtitleID = preferredSubtitle
+		entry.lastSeenAt = now
+		if changed {
+			entry.capabilityRevision++
+		}
+	}
+	registry.mu.Unlock()
+	registry.closeEntries(context.Background(), stale)
+	if !valid {
+		return errPlaySessionNotFound
+	}
+	return nil
+}
+
+func resolvedSubtitleAssetID(entry *playSessionEntry, mediaID string, subtitleIndex int) (string, bool) {
+	if entry == nil || mediaID == "" || subtitleIndex < 0 {
+		return "", false
+	}
+	source := entry.sources[mediaID]
+	if source == nil {
+		return "", false
+	}
+	return compatibilitySubtitleAssetID(source.resolvedSession, subtitleIndex)
+}
+
+func optionalIntEqual(left, right *int) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
 func (registry *playSessionRegistry) openAndTouch(ctx context.Context, session AuthenticatedSession, itemID, playID, mediaID string, startTimeTicks int64) (playSessionBinding, playback.DeliveryHandle, playback.Session, error) {
 	const maxBindingChanges = 4
 	bindingChanges := 0
@@ -527,6 +590,7 @@ func (registry *playSessionRegistry) openAndTouch(ctx context.Context, session A
 		openingExpiresAt := source.expiresAt
 		input := playback.ResolveInput{
 			SourceRef: source.sourceRef, TitleID: entry.itemID, StartSeconds: float64(TicksToSeconds(startTimeTicks)),
+			PreferredAudioTrack: cloneIntPointer(entry.preferredAudioTrack), PreferredSubtitleID: entry.preferredSubtitleID,
 			Capabilities: clonePlaybackCapabilities(entry.capabilities), AllowTranscoding: entry.allowTranscode,
 		}
 		principal := clonePrincipal(entry.principal)
@@ -1415,7 +1479,11 @@ func newPlaySessionID() (string, error) {
 	if _, err := rand.Read(entropy[:]); err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(entropy[:]), nil
+	return playSessionIDPrefix + base64.RawURLEncoding.EncodeToString(entropy[:]), nil
+}
+
+func isRivunePlaySessionID(value string) bool {
+	return strings.HasPrefix(value, playSessionIDPrefix)
 }
 
 func derivedMediaSourceID(playID string, index int) string {
@@ -1426,7 +1494,13 @@ func derivedMediaSourceID(playID string, index int) string {
 }
 
 func safeDeliverySession(session playback.Session) playback.Session {
-	result := playback.Session{SelectedSourceID: session.SelectedSourceID, SelectedAudioTrack: cloneIntPointer(session.SelectedAudioTrack)}
+	result := playback.Session{
+		SelectedSourceID: session.SelectedSourceID, SelectedAudioTrack: cloneIntPointer(session.SelectedAudioTrack),
+		SelectedSubtitleID: session.SelectedSubtitleID, Subtitles: append([]playback.Subtitle(nil), session.Subtitles...),
+	}
+	for index := range result.Subtitles {
+		result.Subtitles[index].URL = ""
+	}
 	for _, source := range session.Sources {
 		if source.ID != session.SelectedSourceID {
 			continue
@@ -1481,7 +1555,8 @@ func playbackCapabilitiesEqual(left, right playback.Capabilities) bool {
 		slices.Equal(left.SubtitleModes, right.SubtitleModes) &&
 		left.MaximumHeight == right.MaximumHeight &&
 		optionalBoolEqual(left.PreferDirectPlay, right.PreferDirectPlay) &&
-		left.TranscodeVideoBitrateKbps == right.TranscodeVideoBitrateKbps
+		left.TranscodeVideoBitrateKbps == right.TranscodeVideoBitrateKbps &&
+		left.HLSSegmentContainer == right.HLSSegmentContainer
 }
 
 func optionalBoolEqual(left, right *bool) bool {

@@ -205,14 +205,15 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 		t.Fatalf("BoxSet artwork status=%d served=%v", boxSetImageResponse.Code, presenter.served)
 	}
 	presenter.served = nil
-	missingBackdropRequest := authenticatedCatalogRequest(t, token, "/Items/"+collectionCompatID+"/Images/Backdrop")
-	missingBackdropRequest.SetPathValue("id", collectionCompatID)
-	missingBackdropRequest.SetPathValue("type", "Backdrop")
-	missingBackdropResponse := httptest.NewRecorder()
-	handler.handleImage(missingBackdropResponse, missingBackdropRequest)
-	if missingBackdropResponse.Code != http.StatusNotFound || len(presenter.served) != 0 {
-		t.Fatalf("missing BoxSet backdrop status=%d served=%v", missingBackdropResponse.Code, presenter.served)
+	fallbackBackdropRequest := authenticatedCatalogRequest(t, token, "/Items/"+collectionCompatID+"/Images/Backdrop")
+	fallbackBackdropRequest.SetPathValue("id", collectionCompatID)
+	fallbackBackdropRequest.SetPathValue("type", "Backdrop")
+	fallbackBackdropResponse := httptest.NewRecorder()
+	handler.handleImage(fallbackBackdropResponse, fallbackBackdropRequest)
+	if fallbackBackdropResponse.Code != http.StatusOK || len(presenter.served) != 1 || presenter.served[0] != coverTag {
+		t.Fatalf("fallback BoxSet backdrop status=%d served=%v", fallbackBackdropResponse.Code, presenter.served)
 	}
+	presenter.served = nil
 	if strings.Contains(rootResponse.Body.String(), service.foreign.Title) || strings.Contains(rootResponse.Body.String(), service.foreign.ID) {
 		t.Fatalf("foreign collection leaked from root: %s", rootResponse.Body.String())
 	}
@@ -228,9 +229,11 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	var latest []BaseItemDto
 	decodeCatalogResponse(t, latestResponse, &latest)
 	if latestResponse.Code != http.StatusOK || len(latest) != 2 || latest[0].Name != "First" || latest[1].Name != "Second" ||
-		latest[0].Type != "Folder" || latest[0].MediaType != "Unknown" || latest[0].ParentId != collectionCompatID || latest[0].ImageTags["Primary"] != coverTag ||
-		latest[0].Etag != latest[0].Id || latest[0].DisplayPreferencesId != latest[0].Id || latest[0].LocationType != "FileSystem" || latest[0].UserData == nil ||
-		latest[0].UserData.ItemId != latest[0].Id || latest[1].ImageTags["Primary"] != hydratedTag {
+		latest[0].Type != "CollectionFolder" || latest[0].MediaType != "Unknown" || latest[0].CollectionType != "homevideos" || latest[0].ParentId != collectionCompatID ||
+		latest[0].PrimaryImageAspectRatio != 16.0/9.0 || latest[0].ImageTags["Primary"] != coverTag || latest[0].ImageTags["Thumb"] != coverTag ||
+		len(latest[0].BackdropImageTags) != 1 || latest[0].BackdropImageTags[0] != coverTag || latest[0].Etag != latest[0].Id ||
+		latest[0].DisplayPreferencesId != latest[0].Id || latest[0].LocationType != "FileSystem" || latest[0].UserData == nil ||
+		latest[0].UserData.ItemId != latest[0].Id || latest[1].ImageTags["Primary"] != hydratedTag || latest[1].ImageTags["Thumb"] != hydratedTag {
 		t.Fatalf("collection latest folders status=%d result=%+v", latestResponse.Code, latest)
 	}
 	if len(service.calls) != 1 || service.calls[0].folderID != service.authorized.Folders[1].ID || service.calls[0].limit != 1 {
@@ -306,7 +309,8 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	handler.handleItem(detailResponse, detailRequest)
 	var detail BaseItemDto
 	decodeCatalogResponse(t, detailResponse, &detail)
-	if detailResponse.Code != http.StatusOK || detail.Type != "CollectionFolder" || detail.CollectionType != "boxsets" || detail.ImageTags["Primary"] != backdropTag ||
+	if detailResponse.Code != http.StatusOK || detail.Type != "CollectionFolder" || detail.CollectionType != "homevideos" ||
+		detail.PrimaryImageAspectRatio != 16.0/9.0 || detail.ImageTags["Primary"] != backdropTag || detail.ImageTags["Thumb"] != backdropTag ||
 		len(detail.BackdropImageTags) != 1 || detail.BackdropImageTags[0] != backdropTag {
 		t.Fatalf("authorized collection view detail status=%d item=%+v body=%s", detailResponse.Code, detail, detailResponse.Body.String())
 	}
@@ -322,7 +326,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 
 func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 	handler, service, _, token := newCollectionCompatHandler(t)
-	service.authorized.FolderCoverShape = collection.TileShapeLandscape
+	service.authorized.FolderCoverShape = collection.TileShapePoster
 	for index := range service.authorized.Folders {
 		service.authorized.Folders[index].TileShape = collection.TileShapePoster
 	}

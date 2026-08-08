@@ -2,9 +2,7 @@ package jellyfin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -54,7 +52,7 @@ func (handler *Handler) handleSystemPing(response http.ResponseWriter, _ *http.R
 		writeCompatError(response, http.StatusServiceUnavailable, "ServiceUnavailable", "The compatibility service is unavailable")
 		return
 	}
-	writeJSON(response, http.StatusOK, CompatibilityProduct)
+	writeJSON(response, http.StatusOK, handler.serverInfo.Name)
 }
 
 func (handler *Handler) handleSystemEndpoint(response http.ResponseWriter, _ *http.Request) {
@@ -124,13 +122,16 @@ func (handler *Handler) handleAuthenticateByName(response http.ResponseWriter, r
 		return
 	}
 	serverID := handler.serverInfo.ID.String()
+	authenticated := AuthenticatedSession{
+		ID: result.Credential.SessionID, ProfileID: result.Profile.ID, ProfileName: result.Profile.Name,
+		Client: client, ExpiresAt: result.Credential.ExpiresAt, Principal: result.Principal,
+	}
+	if handler.bootstrap != nil {
+		handler.bootstrap.observe(authenticated)
+	}
 	writeJSON(response, http.StatusOK, AuthenticationResult{
-		User: handler.configuredCompatUser(request.Context(), result.Principal, result.Profile.ID, result.Profile.Name),
-		SessionInfo: SessionInfoDto{
-			Id: result.Credential.SessionID, ServerId: serverID, IsActive: true,
-			UserId: result.Profile.ID, UserName: result.Profile.Name,
-			Client: client.Client, DeviceName: client.Device, DeviceId: client.DeviceID, ApplicationVersion: client.Version,
-		},
+		User:        handler.configuredCompatUser(request.Context(), result.Principal, result.Profile.ID, result.Profile.Name),
+		SessionInfo: handler.sessionInfo(authenticated),
 		AccessToken: result.Credential.Token,
 		ServerId:    serverID,
 	})
@@ -204,8 +205,60 @@ func (handler *Handler) handleLogout(response http.ResponseWriter, request *http
 	if handler.playSessions != nil {
 		_ = handler.playSessions.closeSession(request.Context(), session)
 	}
+	if handler.bootstrap != nil {
+		handler.bootstrap.forget(session)
+	}
 	response.Header().Set("Cache-Control", "no-store")
 	response.WriteHeader(http.StatusNoContent)
+}
+
+func (handler *Handler) handleSessionCapabilities(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.authenticateRequest(response, request, false)
+	if !ok {
+		return
+	}
+	if !handler.requireCapabilitiesSession(response, request, session) {
+		return
+	}
+	playableMediaTypes, playableErr := commaSeparated(request.URL.Query(), "PlayableMediaTypes")
+	supportedCommands, commandsErr := commaSeparated(request.URL.Query(), "SupportedCommands")
+	supportsMediaControl, mediaErr := booleanValue(request.URL.Query(), "SupportsMediaControl", false)
+	supportsPersistentIdentifier, persistentErr := booleanValue(request.URL.Query(), "SupportsPersistentIdentifier", true)
+	queryCapabilities := ClientCapabilitiesDto{
+		PlayableMediaTypes: playableMediaTypes, SupportedCommands: supportedCommands,
+		SupportsMediaControl: supportsMediaControl, SupportsPersistentIdentifier: supportsPersistentIdentifier,
+	}
+	if playableErr != nil || commandsErr != nil || mediaErr != nil || persistentErr != nil || !validClientCapabilities(queryCapabilities) {
+		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The capabilities query is invalid")
+		return
+	}
+	bodyCapabilities, replace, present, valid := decodeCapabilitiesReport(response, request)
+	if !valid {
+		return
+	}
+	if handler.bootstrap != nil {
+		handler.bootstrap.setClientCapabilities(session, queryCapabilities, true)
+	}
+	handler.storeCapabilitiesReport(session, bodyCapabilities, replace, present)
+	response.Header().Set("Cache-Control", "no-store")
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func (handler *Handler) requireCapabilitiesSession(response http.ResponseWriter, request *http.Request, session AuthenticatedSession) bool {
+	if err := validateQueryBudget(request.URL.Query()); err != nil {
+		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The capabilities query is invalid")
+		return false
+	}
+	sessionID, found, err := queryScalar(request.URL.Query(), "Id")
+	if err != nil {
+		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The capabilities query is invalid")
+		return false
+	}
+	if found && strings.TrimSpace(sessionID) != "" && !strings.EqualFold(strings.TrimSpace(sessionID), session.ID) {
+		writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "The requested session was not found")
+		return false
+	}
+	return true
 }
 
 func (handler *Handler) handleSessionCapabilitiesFull(response http.ResponseWriter, request *http.Request) {
@@ -213,33 +266,14 @@ func (handler *Handler) handleSessionCapabilitiesFull(response http.ResponseWrit
 	if !ok {
 		return
 	}
-	if request.ContentLength > maximumCompatCapabilitiesBodyBytes {
-		writeCompatError(response, http.StatusRequestEntityTooLarge, "InvalidRequest", "The request body is too large")
+	if !handler.requireCapabilitiesSession(response, request, session) {
 		return
 	}
-	if request.Body != nil && request.Body != http.NoBody {
-		payload, err := io.ReadAll(io.LimitReader(request.Body, maximumCompatCapabilitiesBodyBytes+1))
-		if err != nil {
-			writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The request body is invalid")
-			return
-		}
-		if len(payload) > maximumCompatCapabilitiesBodyBytes {
-			writeCompatError(response, http.StatusRequestEntityTooLarge, "InvalidRequest", "The request body is too large")
-			return
-		}
-		if len(strings.TrimSpace(string(payload))) != 0 {
-			var input struct {
-				DeviceProfile *DeviceProfile `json:"DeviceProfile"`
-			}
-			if err := json.Unmarshal(payload, &input); err != nil || input.DeviceProfile != nil && !validDeviceProfileBounds(*input.DeviceProfile) {
-				writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The request body is invalid")
-				return
-			}
-			if input.DeviceProfile != nil && handler.playSessions != nil {
-				handler.playSessions.setDeviceProfile(session, *input.DeviceProfile)
-			}
-		}
+	capabilities, replace, present, valid := decodeCapabilitiesReport(response, request)
+	if !valid {
+		return
 	}
+	handler.storeCapabilitiesReport(session, capabilities, replace, present)
 	response.Header().Set("Cache-Control", "no-store")
 	response.WriteHeader(http.StatusNoContent)
 }
@@ -307,15 +341,21 @@ func (handler *Handler) handleBrandingSplashscreen(response http.ResponseWriter,
 }
 
 func (handler *Handler) handleDisplayPreferences(response http.ResponseWriter, request *http.Request) {
-	if _, ok := handler.authenticateRequest(response, request, false); !ok {
+	session, ok := handler.authenticateRequest(response, request, false)
+	if !ok {
 		return
 	}
-	preferenceID := strings.TrimSpace(request.PathValue("id"))
-	if !boundedUTF8(preferenceID, 1, 128) {
-		writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "The requested resource was not found")
+	preferenceID, client, ok := displayPreferenceSelector(response, request, session)
+	if !ok {
 		return
 	}
-	writeJSON(response, http.StatusOK, DisplayPreferencesDto{Id: preferenceID, CustomPrefs: map[string]string{}})
+	if handler.bootstrap != nil {
+		if stored, exists := handler.bootstrap.displayPreference(session, client, preferenceID); exists {
+			writeJSON(response, http.StatusOK, stored)
+			return
+		}
+	}
+	writeJSON(response, http.StatusOK, DisplayPreferencesDto{Id: preferenceID, Client: client, CustomPrefs: map[string]string{}})
 }
 
 func (handler *Handler) publicSystemInfo() (PublicSystemInfo, bool) {
@@ -351,12 +391,20 @@ func (handler *Handler) newCompatUser(profileID, profileName string) UserDto {
 		Name: profileName, ServerId: handler.serverInfo.ID.String(), Id: profileID,
 		HasPassword: true, HasConfiguredPassword: true, HasConfiguredEasyPassword: false,
 		Policy: UserPolicy{
-			EnablePlayback:                 playbackEnabled,
-			EnableAudioPlaybackTranscoding: playbackEnabled,
-			EnableVideoPlaybackTranscoding: playbackEnabled,
+			EnableUserPreferenceAccess: true, EnablePlayback: playbackEnabled, EnableMediaPlayback: playbackEnabled,
+			EnableAudioPlaybackTranscoding: playbackEnabled, EnableVideoPlaybackTranscoding: playbackEnabled,
+			EnablePlaybackRemuxing: playbackEnabled, EnableRemoteAccess: true,
+			EnableRemoteControlOfOtherUsers: false, EnableSharedDeviceControl: false,
+			EnableContentDownloading: playbackEnabled, EnableSyncTranscoding: false, EnableMediaConversion: false,
+			EnableAllDevices: true, EnableAllChannels: false, EnableAllFolders: true,
+			EnabledDevices: []string{}, EnabledChannels: []string{}, EnabledFolders: []string{},
+			BlockedMediaFolders: []string{}, BlockedChannels: []string{}, MaxActiveSessions: defaultBootstrapOwnerSessionLimit,
 		},
 		Configuration: UserConfiguration{
-			OrderedViews: []string{}, LatestItemsExcludes: []string{}, MyMediaExcludes: []string{}, GroupedFolders: []string{},
+			PlayDefaultAudioTrack: true, SubtitleMode: "Default", DisplayCollectionsView: true,
+			HidePlayedInLatest: true, RememberAudioSelections: true, RememberSubtitleSelections: true,
+			EnableNextEpisodeAutoPlay: true, OrderedViews: []string{}, LatestItemsExcludes: []string{},
+			MyMediaExcludes: []string{}, GroupedFolders: []string{},
 		},
 	}
 }

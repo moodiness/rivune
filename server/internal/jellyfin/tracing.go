@@ -1,9 +1,11 @@
 package jellyfin
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -51,12 +53,16 @@ func (tracer *routeTracer) ServeHTTP(response http.ResponseWriter, request *http
 		slog.String("method", tracer.method),
 		slog.Int("status", status),
 		slog.Duration("duration", time.Since(started)),
+		slog.Int64("bytes", observed.bytes),
+		slog.Bool("range_request", request.Header.Get("Range") != ""),
+		slog.String("content_type", observed.Header().Get("Content-Type")),
 	)
 }
 
 type observedResponseWriter struct {
 	http.ResponseWriter
 	status int
+	bytes  int64
 }
 
 func (response *observedResponseWriter) WriteHeader(status int) {
@@ -70,7 +76,9 @@ func (response *observedResponseWriter) Write(payload []byte) (int, error) {
 	if response.status == 0 {
 		response.status = http.StatusOK
 	}
-	return response.ResponseWriter.Write(payload)
+	written, err := response.ResponseWriter.Write(payload)
+	response.bytes += int64(written)
+	return written, err
 }
 
 // ReadFrom retains the optimized copy path used for large artwork and media
@@ -79,16 +87,26 @@ func (response *observedResponseWriter) ReadFrom(source io.Reader) (int64, error
 	if response.status == 0 {
 		response.status = http.StatusOK
 	}
+	var written int64
+	var err error
 	if readerFrom, ok := response.ResponseWriter.(io.ReaderFrom); ok {
-		return readerFrom.ReadFrom(source)
+		written, err = readerFrom.ReadFrom(source)
+	} else {
+		written, err = io.Copy(response.ResponseWriter, source)
 	}
-	return io.Copy(response.ResponseWriter, source)
+	response.bytes += written
+	return written, err
 }
 
 // Unwrap lets http.ResponseController reach every optional interface exposed by
 // the original writer (full duplex, deadlines, hijacking, and flushing).
 func (response *observedResponseWriter) Unwrap() http.ResponseWriter {
 	return response.ResponseWriter
+}
+
+// Hijack preserves WebSocket upgrades through the route tracing wrapper.
+func (response *observedResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(response.ResponseWriter).Hijack()
 }
 
 // Flush also preserves the common direct http.Flusher assertion used by

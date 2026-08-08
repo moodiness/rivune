@@ -96,6 +96,10 @@ func (*logoutPlaybackFake) Serve(http.ResponseWriter, *http.Request, playback.De
 	return errors.New("not used")
 }
 
+func (*logoutPlaybackFake) ServeAsset(http.ResponseWriter, *http.Request, playback.DeliveryHandle, string) error {
+	return errors.New("not used")
+}
+
 func (fake *logoutPlaybackFake) Close(context.Context, auth.Principal, playback.DeliveryHandle) error {
 	call := fake.closeCalls
 	fake.closeCalls++
@@ -167,8 +171,10 @@ func TestDiscoveryLoginMeLogoutSequenceUsesOnlyCompatIdentity(t *testing.T) {
 	var result AuthenticationResult
 	decodeCompatTestResponse(t, loginResponse, &result)
 	if result.AccessToken != fake.token || result.User.Id != discoveryProfileID || result.User.Name != "Kids" || result.User.HasConfiguredEasyPassword || result.ServerId != discoveryServerID ||
-		result.SessionInfo.ServerId != discoveryServerID || !result.SessionInfo.IsActive {
-		t.Fatalf("unexpected compatibility identity: userID=%q userName=%q serverID=%q sessionServerID=%q sessionActive=%t tokenMatches=%t", result.User.Id, result.User.Name, result.ServerId, result.SessionInfo.ServerId, result.SessionInfo.IsActive, result.AccessToken == fake.token)
+		result.SessionInfo.ServerId != discoveryServerID || !result.SessionInfo.IsActive ||
+		result.User.Configuration.AudioLanguagePreference != nil || result.User.Configuration.SubtitleLanguagePreference != nil ||
+		!result.User.Configuration.HidePlayedInLatest || !result.User.Configuration.RememberAudioSelections || !result.User.Configuration.RememberSubtitleSelections {
+		t.Fatalf("unexpected compatibility identity: user=%+v serverID=%q session=%+v tokenMatches=%t", result.User, result.ServerId, result.SessionInfo, result.AccessToken == fake.token)
 	}
 	var loginJSON map[string]json.RawMessage
 	if err := json.Unmarshal(loginResponse.Body.Bytes(), &loginJSON); err != nil {
@@ -555,6 +561,48 @@ func TestDiscoveryAndShimsExposeOnlyDeterministicCompatibilityData(t *testing.T)
 	mux.ServeHTTP(capabilitiesResponse, capabilities)
 	if capabilitiesResponse.Code != http.StatusNoContent || capabilitiesResponse.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("session capabilities response = %d headers=%v", capabilitiesResponse.Code, capabilitiesResponse.Header())
+	}
+
+	simpleCapabilities := httptest.NewRequest(http.MethodPost, "/Sessions/Capabilities?Id="+fake.session.ID+"&PlayableMediaTypes=Video&SupportedCommands=DisplayContent%2CPlay&SupportsMediaControl=true&SupportsPersistentIdentifier=true", nil)
+	simpleCapabilities.Header.Set("X-Emby-Token", fake.token)
+	simpleCapabilitiesResponse := httptest.NewRecorder()
+	mux.ServeHTTP(simpleCapabilitiesResponse, simpleCapabilities)
+	if simpleCapabilitiesResponse.Code != http.StatusNoContent || simpleCapabilitiesResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("simple session capabilities response = %d headers=%v", simpleCapabilitiesResponse.Code, simpleCapabilitiesResponse.Header())
+	}
+
+	largePlayableParts := make([]string, 15)
+	largeSupportedParts := make([]string, 17)
+	for index := range largePlayableParts {
+		largePlayableParts[index] = strings.Repeat("a", 64)
+	}
+	for index := range largeSupportedParts {
+		largeSupportedParts[index] = strings.Repeat("b", 64)
+	}
+	largePlayableList := strings.Join(largePlayableParts, ",")
+	largeSupportedList := strings.Join(largeSupportedParts, ",")
+	largeCapabilities := httptest.NewRequest(http.MethodPost, "/Sessions/Capabilities?PlayableMediaTypes="+largePlayableList+"&SupportedCommands="+largeSupportedList, nil)
+	largeCapabilities.Header.Set("X-Emby-Token", fake.token)
+	largeCapabilitiesResponse := httptest.NewRecorder()
+	mux.ServeHTTP(largeCapabilitiesResponse, largeCapabilities)
+	if largeCapabilitiesResponse.Code != http.StatusNoContent {
+		t.Fatalf("large valid session capabilities status = %d, want 204", largeCapabilitiesResponse.Code)
+	}
+
+	foreignCapabilities := httptest.NewRequest(http.MethodPost, "/Sessions/Capabilities?Id=c6000000-0000-4000-8000-000000000006", nil)
+	foreignCapabilities.Header.Set("X-Emby-Token", fake.token)
+	foreignCapabilitiesResponse := httptest.NewRecorder()
+	mux.ServeHTTP(foreignCapabilitiesResponse, foreignCapabilities)
+	if foreignCapabilitiesResponse.Code != http.StatusNotFound {
+		t.Fatalf("foreign session capabilities status = %d, want 404", foreignCapabilitiesResponse.Code)
+	}
+
+	invalidCapabilities := httptest.NewRequest(http.MethodPost, "/Sessions/Capabilities?SupportsMediaControl=maybe", nil)
+	invalidCapabilities.Header.Set("X-Emby-Token", fake.token)
+	invalidCapabilitiesResponse := httptest.NewRecorder()
+	mux.ServeHTTP(invalidCapabilitiesResponse, invalidCapabilities)
+	if invalidCapabilitiesResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid session capabilities status = %d, want 400", invalidCapabilitiesResponse.Code)
 	}
 
 	syncPlay := httptest.NewRequest(http.MethodGet, "/SyncPlay/List", nil)

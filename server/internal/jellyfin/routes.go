@@ -4,65 +4,130 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 type Route string
 
 const (
-	RoutePublicSystemInfo        Route = "public-system-info"
-	RouteSystemPing              Route = "system-ping"
-	RouteSystemEndpoint          Route = "system-endpoint"
-	RouteQuickConnectEnabled     Route = "quick-connect-enabled"
-	RouteAuthenticateByName      Route = "authenticate-by-name"
-	RoutePublicUsers             Route = "public-users"
-	RouteSystemInfo              Route = "system-info"
-	RouteCurrentUser             Route = "current-user"
-	RouteUser                    Route = "user"
-	RouteLogout                  Route = "logout"
-	RouteSessionCapabilitiesFull Route = "session-capabilities-full"
-	RouteSyncPlayList            Route = "sync-play-list"
-	RoutePlaybackBitrateTest     Route = "playback-bitrate-test"
-	RoutePlugins                 Route = "plugins"
-	RoutePackages                Route = "packages"
-	RouteBrandingConfiguration   Route = "branding-configuration"
-	RouteBrandingSplashscreen    Route = "branding-splashscreen"
-	RouteDisplayPreferences      Route = "display-preferences"
-	RouteUserViews               Route = "user-views"
-	RouteViews                   Route = "views"
-	RouteVirtualFolders          Route = "virtual-folders"
-	RouteSelectableMediaFolders  Route = "selectable-media-folders"
-	RouteItems                   Route = "items"
-	RouteUserItems               Route = "user-items"
-	RouteLatestItems             Route = "latest-items"
-	RouteUserLatestItems         Route = "user-latest-items"
-	RouteItem                    Route = "item"
-	RouteUserItem                Route = "user-item"
-	RouteSeasons                 Route = "seasons"
-	RouteEpisodes                Route = "episodes"
-	RouteSearchHints             Route = "search-hints"
-	RouteUserSearchHints         Route = "user-search-hints"
-	RouteImage                   Route = "image"
-	RouteImageHead               Route = "image-head"
-	RouteIndexedImage            Route = "indexed-image"
-	RouteIndexedImageHead        Route = "indexed-image-head"
-	RoutePlaybackInfo            Route = "playback-info"
-	RoutePlaybackInfoPost        Route = "playback-info-post"
-	RouteStream                  Route = "stream"
-	RouteStreamHead              Route = "stream-head"
-	RouteContainerStream         Route = "container-stream"
-	RouteContainerStreamHead     Route = "container-stream-head"
-	RoutePlaying                 Route = "playing"
-	RoutePlayingProgress         Route = "playing-progress"
-	RoutePlayingStopped          Route = "playing-stopped"
-	RoutePlayingPing             Route = "playing-ping"
-	RoutePlayedItem              Route = "played-item"
-	RoutePlayedItemDelete        Route = "played-item-delete"
-	RouteUserPlayedItem          Route = "user-played-item"
-	RouteUserPlayedItemDelete    Route = "user-played-item-delete"
-	RouteResumeItems             Route = "resume-items"
-	RouteUserResumeItems         Route = "user-resume-items"
-	RouteNextUp                  Route = "next-up"
+	RoutePublicSystemInfo         Route = "public-system-info"
+	RouteSystemPing               Route = "system-ping"
+	RouteSystemPingPost           Route = "system-ping-post"
+	RouteSystemEndpoint           Route = "system-endpoint"
+	RouteQuickConnectEnabled      Route = "quick-connect-enabled"
+	RouteAuthenticateByName       Route = "authenticate-by-name"
+	RoutePublicUsers              Route = "public-users"
+	RouteSystemInfo               Route = "system-info"
+	RouteCurrentUser              Route = "current-user"
+	RouteUser                     Route = "user"
+	RouteUsers                    Route = "users"
+	RouteUserImage                Route = "user-image"
+	RouteUserImageHead            Route = "user-image-head"
+	RouteUserPrimaryImage         Route = "user-primary-image"
+	RouteUserPrimaryImageHead     Route = "user-primary-image-head"
+	RouteSessions                 Route = "sessions"
+	RouteLogout                   Route = "logout"
+	RouteSessionCapabilitiesFull  Route = "session-capabilities-full"
+	RouteSessionCapabilities      Route = "session-capabilities"
+	RouteActiveEncodings          Route = "active-encodings"
+	RouteClientLog                Route = "client-log"
+	RouteSocket                   Route = "socket"
+	RouteSyncPlayList             Route = "sync-play-list"
+	RoutePlaybackBitrateTest      Route = "playback-bitrate-test"
+	RoutePlugins                  Route = "plugins"
+	RoutePackages                 Route = "packages"
+	RouteBrandingConfiguration    Route = "branding-configuration"
+	RouteBrandingSplashscreen     Route = "branding-splashscreen"
+	RouteDisplayPreferences       Route = "display-preferences"
+	RouteDisplayPreferencesUpdate Route = "display-preferences-update"
+	RouteGroupingOptions          Route = "grouping-options"
+	RouteUserViews                Route = "user-views"
+	RouteViews                    Route = "views"
+	RouteVirtualFolders           Route = "virtual-folders"
+	RouteSelectableMediaFolders   Route = "selectable-media-folders"
+	RouteItems                    Route = "items"
+	RouteUserItems                Route = "user-items"
+	RouteLatestItems              Route = "latest-items"
+	RouteUserLatestItems          Route = "user-latest-items"
+	RouteItem                     Route = "item"
+	RouteUserItem                 Route = "user-item"
+	RouteSeasons                  Route = "seasons"
+	RouteEpisodes                 Route = "episodes"
+	RouteSearchHints              Route = "search-hints"
+	RouteUserSearchHints          Route = "user-search-hints"
+	RouteItemsFilters             Route = "items-filters"
+	RouteItemsFilters2            Route = "items-filters-2"
+	RouteSuggestions              Route = "suggestions"
+	RouteSimilarItems             Route = "similar-items"
+	RouteSimilarMovies            Route = "similar-movies"
+	RouteSimilarShows             Route = "similar-shows"
+	RouteGenres                   Route = "genres"
+	RouteGenre                    Route = "genre"
+	RoutePersons                  Route = "persons"
+	RoutePerson                   Route = "person"
+	RouteStudios                  Route = "studios"
+	RouteArtists                  Route = "artists"
+	RouteUpcomingShows            Route = "upcoming-shows"
+	RouteMovieRecommendations     Route = "movie-recommendations"
+	RouteMediaSegments            Route = "media-segments"
+	RouteThemeMedia               Route = "theme-media"
+	RouteThemeSongs               Route = "theme-songs"
+	RouteSpecialFeatures          Route = "special-features"
+	RouteIntros                   Route = "intros"
+	RouteLocalTrailers            Route = "local-trailers"
+	RouteLegacyThemeMedia         Route = "legacy-theme-media"
+	RouteLegacyThemeSongs         Route = "legacy-theme-songs"
+	RouteLegacySpecialFeatures    Route = "legacy-special-features"
+	RouteLegacyIntros             Route = "legacy-intros"
+	RouteLegacyLocalTrailers      Route = "legacy-local-trailers"
+	RouteImage                    Route = "image"
+	RouteImageHead                Route = "image-head"
+	RouteIndexedImage             Route = "indexed-image"
+	RouteIndexedImageHead         Route = "indexed-image-head"
+	RoutePlaybackInfo             Route = "playback-info"
+	RoutePlaybackInfoPost         Route = "playback-info-post"
+	RouteUserPlaybackInfo         Route = "user-playback-info"
+	RouteUserPlaybackInfoPost     Route = "user-playback-info-post"
+	RouteStream                   Route = "stream"
+	RouteStreamHead               Route = "stream-head"
+	RouteContainerStream          Route = "container-stream"
+	RouteContainerStreamHead      Route = "container-stream-head"
+	RouteMasterPlaylist           Route = "master-playlist"
+	RouteMasterPlaylistHead       Route = "master-playlist-head"
+	RouteMainPlaylist             Route = "main-playlist"
+	RouteMainPlaylistHead         Route = "main-playlist-head"
+	RouteHLSSegment               Route = "hls-segment"
+	RouteHLSSegmentHead           Route = "hls-segment-head"
+	RouteLegacyHLSSegment         Route = "legacy-hls-segment"
+	RouteLegacyHLSSegmentHead     Route = "legacy-hls-segment-head"
+	RouteSubtitleStream           Route = "subtitle-stream"
+	RouteSubtitleStreamHead       Route = "subtitle-stream-head"
+	RouteSubtitleStreamAt         Route = "subtitle-stream-at"
+	RouteSubtitleStreamAtHead     Route = "subtitle-stream-at-head"
+	RouteItemDownload             Route = "item-download"
+	RouteItemDownloadHead         Route = "item-download-head"
+	RoutePlaying                  Route = "playing"
+	RoutePlayingProgress          Route = "playing-progress"
+	RoutePlayingStopped           Route = "playing-stopped"
+	RoutePlayingPing              Route = "playing-ping"
+	RoutePlayedItem               Route = "played-item"
+	RoutePlayedItemDelete         Route = "played-item-delete"
+	RouteUserPlayedItem           Route = "user-played-item"
+	RouteUserPlayedItemDelete     Route = "user-played-item-delete"
+	RouteUserData                 Route = "user-data"
+	RouteUserDataUpdate           Route = "user-data-update"
+	RouteLegacyUserData           Route = "legacy-user-data"
+	RouteLegacyUserDataUpdate     Route = "legacy-user-data-update"
+	RouteFavoriteItem             Route = "favorite-item"
+	RouteFavoriteItemDelete       Route = "favorite-item-delete"
+	RouteLegacyFavoriteItem       Route = "legacy-favorite-item"
+	RouteLegacyFavoriteItemDelete Route = "legacy-favorite-item-delete"
+	RouteResumeItems              Route = "resume-items"
+	RouteUserResumeItems          Route = "user-resume-items"
+	RouteNextUp                   Route = "next-up"
 )
 
 type RouteSpec struct {
@@ -82,6 +147,7 @@ type ServerInfo struct {
 var routeDefinitions = []RouteSpec{
 	{RoutePublicSystemInfo, http.MethodGet, "/System/Info/Public"},
 	{RouteSystemPing, http.MethodGet, "/System/Ping"},
+	{RouteSystemPingPost, http.MethodPost, "/System/Ping"},
 	{RouteSystemEndpoint, http.MethodGet, "/System/Endpoint"},
 	{RouteQuickConnectEnabled, http.MethodGet, "/QuickConnect/Enabled"},
 	{RouteAuthenticateByName, http.MethodPost, "/Users/AuthenticateByName"},
@@ -89,8 +155,18 @@ var routeDefinitions = []RouteSpec{
 	{RouteSystemInfo, http.MethodGet, "/System/Info"},
 	{RouteCurrentUser, http.MethodGet, "/Users/Me"},
 	{RouteUser, http.MethodGet, "/Users/{id}"},
+	{RouteUsers, http.MethodGet, "/Users"},
+	{RouteUserImage, http.MethodGet, "/UserImage"},
+	{RouteUserImageHead, http.MethodHead, "/UserImage"},
+	{RouteUserPrimaryImage, http.MethodGet, "/Users/{userId}/Images/Primary"},
+	{RouteUserPrimaryImageHead, http.MethodHead, "/Users/{userId}/Images/Primary"},
+	{RouteSessions, http.MethodGet, "/Sessions"},
 	{RouteLogout, http.MethodPost, "/Sessions/Logout"},
 	{RouteSessionCapabilitiesFull, http.MethodPost, "/Sessions/Capabilities/Full"},
+	{RouteSessionCapabilities, http.MethodPost, "/Sessions/Capabilities"},
+	{RouteActiveEncodings, http.MethodDelete, "/Videos/ActiveEncodings"},
+	{RouteClientLog, http.MethodPost, "/ClientLog/Document"},
+	{RouteSocket, http.MethodGet, "/socket"},
 	{RouteSyncPlayList, http.MethodGet, "/SyncPlay/List"},
 	{RoutePlaybackBitrateTest, http.MethodGet, "/Playback/BitrateTest"},
 	{RoutePlugins, http.MethodGet, "/Plugins"},
@@ -98,6 +174,8 @@ var routeDefinitions = []RouteSpec{
 	{RouteBrandingConfiguration, http.MethodGet, "/Branding/Configuration"},
 	{RouteBrandingSplashscreen, http.MethodGet, "/Branding/Splashscreen"},
 	{RouteDisplayPreferences, http.MethodGet, "/DisplayPreferences/{id}"},
+	{RouteDisplayPreferencesUpdate, http.MethodPost, "/DisplayPreferences/{id}"},
+	{RouteGroupingOptions, http.MethodGet, "/UserViews/GroupingOptions"},
 	{RouteUserViews, http.MethodGet, "/Users/{id}/Views"},
 	{RouteViews, http.MethodGet, "/UserViews"},
 	{RouteVirtualFolders, http.MethodGet, "/Library/VirtualFolders"},
@@ -112,16 +190,57 @@ var routeDefinitions = []RouteSpec{
 	{RouteEpisodes, http.MethodGet, "/Shows/{seriesId}/Episodes"},
 	{RouteSearchHints, http.MethodGet, "/Search/Hints"},
 	{RouteUserSearchHints, http.MethodGet, "/Users/{id}/Search/Hints"},
+	{RouteItemsFilters, http.MethodGet, "/Items/Filters"},
+	{RouteItemsFilters2, http.MethodGet, "/Items/Filters2"},
+	{RouteSuggestions, http.MethodGet, "/Items/Suggestions"},
+	{RouteSimilarItems, http.MethodGet, "/Items/{itemId}/Similar"},
+	{RouteSimilarMovies, http.MethodGet, "/Movies/{itemId}/Similar"},
+	{RouteSimilarShows, http.MethodGet, "/Shows/{itemId}/Similar"},
+	{RouteGenres, http.MethodGet, "/Genres"},
+	{RouteGenre, http.MethodGet, "/Genres/{genreName}"},
+	{RoutePersons, http.MethodGet, "/Persons"},
+	{RoutePerson, http.MethodGet, "/Persons/{name}"},
+	{RouteStudios, http.MethodGet, "/Studios"},
+	{RouteArtists, http.MethodGet, "/Artists"},
+	{RouteUpcomingShows, http.MethodGet, "/Shows/Upcoming"},
+	{RouteMovieRecommendations, http.MethodGet, "/Movies/Recommendations"},
+	{RouteMediaSegments, http.MethodGet, "/MediaSegments/{itemId}"},
+	{RouteThemeMedia, http.MethodGet, "/Items/{itemId}/ThemeMedia"},
+	{RouteThemeSongs, http.MethodGet, "/Items/{itemId}/ThemeSongs"},
+	{RouteSpecialFeatures, http.MethodGet, "/Items/{itemId}/SpecialFeatures"},
+	{RouteIntros, http.MethodGet, "/Items/{itemId}/Intros"},
+	{RouteLocalTrailers, http.MethodGet, "/Items/{itemId}/LocalTrailers"},
+	{RouteLegacyThemeMedia, http.MethodGet, "/Users/{userId}/Items/{itemId}/ThemeMedia"},
+	{RouteLegacyThemeSongs, http.MethodGet, "/Users/{userId}/Items/{itemId}/ThemeSongs"},
+	{RouteLegacySpecialFeatures, http.MethodGet, "/Users/{userId}/Items/{itemId}/SpecialFeatures"},
+	{RouteLegacyIntros, http.MethodGet, "/Users/{userId}/Items/{itemId}/Intros"},
+	{RouteLegacyLocalTrailers, http.MethodGet, "/Users/{userId}/Items/{itemId}/LocalTrailers"},
 	{RouteImage, http.MethodGet, "/Items/{id}/Images/{type}"},
 	{RouteImageHead, http.MethodHead, "/Items/{id}/Images/{type}"},
 	{RouteIndexedImage, http.MethodGet, "/Items/{id}/Images/{type}/{index}"},
 	{RouteIndexedImageHead, http.MethodHead, "/Items/{id}/Images/{type}/{index}"},
 	{RoutePlaybackInfo, http.MethodGet, "/Items/{id}/PlaybackInfo"},
 	{RoutePlaybackInfoPost, http.MethodPost, "/Items/{id}/PlaybackInfo"},
+	{RouteUserPlaybackInfo, http.MethodGet, "/Users/{userId}/Items/{id}/PlaybackInfo"},
+	{RouteUserPlaybackInfoPost, http.MethodPost, "/Users/{userId}/Items/{id}/PlaybackInfo"},
 	{RouteStream, http.MethodGet, "/Videos/{id}/stream"},
 	{RouteStreamHead, http.MethodHead, "/Videos/{id}/stream"},
 	{RouteContainerStream, http.MethodGet, "/Videos/{id}/stream.{container}"},
 	{RouteContainerStreamHead, http.MethodHead, "/Videos/{id}/stream.{container}"},
+	{RouteMasterPlaylist, http.MethodGet, "/Videos/{id}/master.m3u8"},
+	{RouteMasterPlaylistHead, http.MethodHead, "/Videos/{id}/master.m3u8"},
+	{RouteMainPlaylist, http.MethodGet, "/Videos/{id}/main.m3u8"},
+	{RouteMainPlaylistHead, http.MethodHead, "/Videos/{id}/main.m3u8"},
+	{RouteHLSSegment, http.MethodGet, "/Videos/{id}/hls1/{playlistId}/{segmentId}.{container}"},
+	{RouteHLSSegmentHead, http.MethodHead, "/Videos/{id}/hls1/{playlistId}/{segmentId}.{container}"},
+	{RouteLegacyHLSSegment, http.MethodGet, "/Videos/{id}/hls/{playlistId}/{segmentId}.{container}"},
+	{RouteLegacyHLSSegmentHead, http.MethodHead, "/Videos/{id}/hls/{playlistId}/{segmentId}.{container}"},
+	{RouteSubtitleStream, http.MethodGet, "/Videos/{id}/{mediaSourceId}/Subtitles/{subtitleIndex}/Stream.{format}"},
+	{RouteSubtitleStreamHead, http.MethodHead, "/Videos/{id}/{mediaSourceId}/Subtitles/{subtitleIndex}/Stream.{format}"},
+	{RouteSubtitleStreamAt, http.MethodGet, "/Videos/{id}/{mediaSourceId}/Subtitles/{subtitleIndex}/{startPositionTicks}/Stream.{format}"},
+	{RouteSubtitleStreamAtHead, http.MethodHead, "/Videos/{id}/{mediaSourceId}/Subtitles/{subtitleIndex}/{startPositionTicks}/Stream.{format}"},
+	{RouteItemDownload, http.MethodGet, "/Items/{id}/Download"},
+	{RouteItemDownloadHead, http.MethodHead, "/Items/{id}/Download"},
 	{RoutePlaying, http.MethodPost, "/Sessions/Playing"},
 	{RoutePlayingProgress, http.MethodPost, "/Sessions/Playing/Progress"},
 	{RoutePlayingStopped, http.MethodPost, "/Sessions/Playing/Stopped"},
@@ -130,6 +249,14 @@ var routeDefinitions = []RouteSpec{
 	{RoutePlayedItemDelete, http.MethodDelete, "/Users/{userId}/PlayedItems/{itemId}"},
 	{RouteUserPlayedItem, http.MethodPost, "/UserPlayedItems/{itemId}"},
 	{RouteUserPlayedItemDelete, http.MethodDelete, "/UserPlayedItems/{itemId}"},
+	{RouteUserData, http.MethodGet, "/UserItems/{itemId}/UserData"},
+	{RouteUserDataUpdate, http.MethodPost, "/UserItems/{itemId}/UserData"},
+	{RouteLegacyUserData, http.MethodGet, "/Users/{userId}/Items/{itemId}/UserData"},
+	{RouteLegacyUserDataUpdate, http.MethodPost, "/Users/{userId}/Items/{itemId}/UserData"},
+	{RouteFavoriteItem, http.MethodPost, "/UserFavoriteItems/{itemId}"},
+	{RouteFavoriteItemDelete, http.MethodDelete, "/UserFavoriteItems/{itemId}"},
+	{RouteLegacyFavoriteItem, http.MethodPost, "/Users/{userId}/FavoriteItems/{itemId}"},
+	{RouteLegacyFavoriteItemDelete, http.MethodDelete, "/Users/{userId}/FavoriteItems/{itemId}"},
 	{RouteResumeItems, http.MethodGet, "/Users/{id}/Items/Resume"},
 	{RouteUserResumeItems, http.MethodGet, "/UserItems/Resume"},
 	{RouteNextUp, http.MethodGet, "/Shows/NextUp"},
@@ -159,6 +286,7 @@ type Handler struct {
 	playback       PlaybackDelivery
 	watchstate     Watchstate
 	playSessions   *playSessionRegistry
+	bootstrap      *bootstrapRegistry
 	logger         *slog.Logger
 	handlers       map[Route]http.Handler
 	routes         map[string][]routeBinding
@@ -188,8 +316,11 @@ func New(dependencies Dependencies) (*Handler, error) {
 		handlers:       make(map[Route]http.Handler, len(routeDefinitions)),
 		routes:         make(map[string][]routeBinding, 4),
 	}
-	if _, serverReady := handler.publicSystemInfo(); serverReady && handler.authentication != nil && handler.catalog != nil && handler.playback != nil {
-		handler.playSessions = newPlaySessionRegistry(handler.playback)
+	if _, serverReady := handler.publicSystemInfo(); serverReady && handler.authentication != nil {
+		handler.bootstrap = newBootstrapRegistry()
+		if handler.catalog != nil && handler.playback != nil {
+			handler.playSessions = newPlaySessionRegistry(handler.playback)
+		}
 	}
 	handler.installBuiltInHandlers()
 	for route, implementation := range dependencies.Handlers {
@@ -212,6 +343,7 @@ func (handler *Handler) installBuiltInHandlers() {
 	if serverReady {
 		handler.handlers[RoutePublicSystemInfo] = http.HandlerFunc(handler.handlePublicSystemInfo)
 		handler.handlers[RouteSystemPing] = http.HandlerFunc(handler.handleSystemPing)
+		handler.handlers[RouteSystemPingPost] = http.HandlerFunc(handler.handleSystemPing)
 		handler.handlers[RouteSystemEndpoint] = http.HandlerFunc(handler.handleSystemEndpoint)
 		handler.handlers[RouteQuickConnectEnabled] = http.HandlerFunc(handler.handleQuickConnectEnabled)
 		handler.handlers[RoutePublicUsers] = http.HandlerFunc(handler.handlePublicUsers)
@@ -223,13 +355,25 @@ func (handler *Handler) installBuiltInHandlers() {
 		handler.handlers[RouteSystemInfo] = http.HandlerFunc(handler.handleSystemInfo)
 		handler.handlers[RouteCurrentUser] = http.HandlerFunc(handler.handleCurrentUser)
 		handler.handlers[RouteUser] = http.HandlerFunc(handler.handleUser)
+		handler.handlers[RouteUsers] = http.HandlerFunc(handler.handleUsers)
+		handler.handlers[RouteUserImage] = http.HandlerFunc(handler.handleUserImage)
+		handler.handlers[RouteUserImageHead] = http.HandlerFunc(handler.handleUserImage)
+		handler.handlers[RouteUserPrimaryImage] = http.HandlerFunc(handler.handleUserImage)
+		handler.handlers[RouteUserPrimaryImageHead] = http.HandlerFunc(handler.handleUserImage)
+		handler.handlers[RouteSessions] = http.HandlerFunc(handler.handleSessions)
 		handler.handlers[RouteLogout] = http.HandlerFunc(handler.handleLogout)
 		handler.handlers[RouteSessionCapabilitiesFull] = http.HandlerFunc(handler.handleSessionCapabilitiesFull)
+		handler.handlers[RouteSessionCapabilities] = http.HandlerFunc(handler.handleSessionCapabilities)
+		handler.handlers[RouteActiveEncodings] = http.HandlerFunc(handler.handleActiveEncodings)
+		handler.handlers[RouteClientLog] = http.HandlerFunc(handler.handleClientLog)
+		handler.handlers[RouteSocket] = http.HandlerFunc(handler.handleSocket)
 		handler.handlers[RouteSyncPlayList] = http.HandlerFunc(handler.handleSyncPlayList)
 		handler.handlers[RoutePlaybackBitrateTest] = http.HandlerFunc(handler.handlePlaybackBitrateTest)
 		handler.handlers[RoutePlugins] = http.HandlerFunc(handler.handlePlugins)
 		handler.handlers[RoutePackages] = http.HandlerFunc(handler.handlePackages)
 		handler.handlers[RouteDisplayPreferences] = http.HandlerFunc(handler.handleDisplayPreferences)
+		handler.handlers[RouteDisplayPreferencesUpdate] = http.HandlerFunc(handler.handleDisplayPreferencesUpdate)
+		handler.handlers[RouteGroupingOptions] = http.HandlerFunc(handler.handleGroupingOptions)
 	}
 	if serverReady && handler.authentication != nil && handler.catalog != nil {
 		handler.handlers[RouteUserViews] = http.HandlerFunc(handler.handleUserViews)
@@ -246,6 +390,31 @@ func (handler *Handler) installBuiltInHandlers() {
 		handler.handlers[RouteEpisodes] = http.HandlerFunc(handler.handleEpisodes)
 		handler.handlers[RouteSearchHints] = http.HandlerFunc(handler.handleSearchHints)
 		handler.handlers[RouteUserSearchHints] = http.HandlerFunc(handler.handleUserSearchHints)
+		handler.handlers[RouteItemsFilters] = http.HandlerFunc(handler.handleItemsFilters)
+		handler.handlers[RouteItemsFilters2] = http.HandlerFunc(handler.handleItemsFilters2)
+		handler.handlers[RouteSuggestions] = http.HandlerFunc(handler.handleSuggestions)
+		handler.handlers[RouteSimilarItems] = http.HandlerFunc(handler.handleSimilarItems)
+		handler.handlers[RouteSimilarMovies] = http.HandlerFunc(handler.handleSimilarItems)
+		handler.handlers[RouteSimilarShows] = http.HandlerFunc(handler.handleSimilarItems)
+		handler.handlers[RouteGenres] = http.HandlerFunc(handler.handleGenres)
+		handler.handlers[RouteGenre] = http.HandlerFunc(handler.handleGenre)
+		handler.handlers[RoutePersons] = http.HandlerFunc(handler.handlePersons)
+		handler.handlers[RoutePerson] = http.HandlerFunc(handler.handlePerson)
+		handler.handlers[RouteStudios] = http.HandlerFunc(handler.handleEmptyCatalogDomain)
+		handler.handlers[RouteArtists] = http.HandlerFunc(handler.handleEmptyCatalogDomain)
+		handler.handlers[RouteUpcomingShows] = http.HandlerFunc(handler.handleUpcomingShows)
+		handler.handlers[RouteMovieRecommendations] = http.HandlerFunc(handler.handleMovieRecommendations)
+		handler.handlers[RouteMediaSegments] = http.HandlerFunc(handler.handleMediaSegments)
+		handler.handlers[RouteThemeMedia] = http.HandlerFunc(handler.handleThemeMedia)
+		handler.handlers[RouteThemeSongs] = http.HandlerFunc(handler.handleThemeSongs)
+		handler.handlers[RouteSpecialFeatures] = http.HandlerFunc(handler.handleSpecialFeatures)
+		handler.handlers[RouteIntros] = http.HandlerFunc(handler.handleIntros)
+		handler.handlers[RouteLocalTrailers] = http.HandlerFunc(handler.handleLocalTrailers)
+		handler.handlers[RouteLegacyThemeMedia] = http.HandlerFunc(handler.handleThemeMedia)
+		handler.handlers[RouteLegacyThemeSongs] = http.HandlerFunc(handler.handleThemeSongs)
+		handler.handlers[RouteLegacySpecialFeatures] = http.HandlerFunc(handler.handleSpecialFeatures)
+		handler.handlers[RouteLegacyIntros] = http.HandlerFunc(handler.handleIntros)
+		handler.handlers[RouteLegacyLocalTrailers] = http.HandlerFunc(handler.handleLocalTrailers)
 	}
 	if serverReady && handler.authentication != nil && handler.catalog != nil && handler.artwork != nil {
 		handler.handlers[RouteImage] = http.HandlerFunc(handler.handleImage)
@@ -256,16 +425,40 @@ func (handler *Handler) installBuiltInHandlers() {
 	if serverReady && handler.authentication != nil && handler.catalog != nil && handler.playSessions != nil {
 		handler.handlers[RoutePlaybackInfo] = http.HandlerFunc(handler.handlePlaybackInfo)
 		handler.handlers[RoutePlaybackInfoPost] = http.HandlerFunc(handler.handlePlaybackInfo)
+		handler.handlers[RouteUserPlaybackInfo] = http.HandlerFunc(handler.handlePlaybackInfo)
+		handler.handlers[RouteUserPlaybackInfoPost] = http.HandlerFunc(handler.handlePlaybackInfo)
 		handler.handlers[RouteStream] = http.HandlerFunc(handler.handleStream)
 		handler.handlers[RouteStreamHead] = http.HandlerFunc(handler.handleStream)
 		handler.handlers[RouteContainerStream] = http.HandlerFunc(handler.handleStream)
 		handler.handlers[RouteContainerStreamHead] = http.HandlerFunc(handler.handleStream)
+		handler.handlers[RouteMasterPlaylist] = http.HandlerFunc(handler.handleStream)
+		handler.handlers[RouteMasterPlaylistHead] = http.HandlerFunc(handler.handleStream)
+		handler.handlers[RouteMainPlaylist] = http.HandlerFunc(handler.handleStream)
+		handler.handlers[RouteMainPlaylistHead] = http.HandlerFunc(handler.handleStream)
+		handler.handlers[RouteHLSSegment] = http.HandlerFunc(handler.handleStream)
+		handler.handlers[RouteHLSSegmentHead] = http.HandlerFunc(handler.handleStream)
+		handler.handlers[RouteLegacyHLSSegment] = http.HandlerFunc(handler.handleStream)
+		handler.handlers[RouteLegacyHLSSegmentHead] = http.HandlerFunc(handler.handleStream)
+		handler.handlers[RouteSubtitleStream] = http.HandlerFunc(handler.handleSubtitleStream)
+		handler.handlers[RouteSubtitleStreamHead] = http.HandlerFunc(handler.handleSubtitleStream)
+		handler.handlers[RouteSubtitleStreamAt] = http.HandlerFunc(handler.handleSubtitleStream)
+		handler.handlers[RouteSubtitleStreamAtHead] = http.HandlerFunc(handler.handleSubtitleStream)
+		handler.handlers[RouteItemDownload] = http.HandlerFunc(handler.handleDownload)
+		handler.handlers[RouteItemDownloadHead] = http.HandlerFunc(handler.handleDownload)
 	}
 	if serverReady && handler.authentication != nil && handler.catalog != nil && handler.watchstate != nil {
 		handler.handlers[RoutePlayedItem] = http.HandlerFunc(handler.handlePlayedItem)
 		handler.handlers[RoutePlayedItemDelete] = http.HandlerFunc(handler.handlePlayedItem)
 		handler.handlers[RouteUserPlayedItem] = http.HandlerFunc(handler.handleUserPlayedItem)
 		handler.handlers[RouteUserPlayedItemDelete] = http.HandlerFunc(handler.handleUserPlayedItem)
+		handler.handlers[RouteUserData] = http.HandlerFunc(handler.handleUserData)
+		handler.handlers[RouteUserDataUpdate] = http.HandlerFunc(handler.handleUserData)
+		handler.handlers[RouteLegacyUserData] = http.HandlerFunc(handler.handleLegacyUserData)
+		handler.handlers[RouteLegacyUserDataUpdate] = http.HandlerFunc(handler.handleLegacyUserData)
+		handler.handlers[RouteFavoriteItem] = http.HandlerFunc(handler.handleFavoriteItem)
+		handler.handlers[RouteFavoriteItemDelete] = http.HandlerFunc(handler.handleFavoriteItem)
+		handler.handlers[RouteLegacyFavoriteItem] = http.HandlerFunc(handler.handleLegacyFavoriteItem)
+		handler.handlers[RouteLegacyFavoriteItemDelete] = http.HandlerFunc(handler.handleLegacyFavoriteItem)
 		handler.handlers[RouteResumeItems] = http.HandlerFunc(handler.handleResumeItems)
 		handler.handlers[RouteUserResumeItems] = http.HandlerFunc(handler.handleUserResumeItems)
 		handler.handlers[RouteNextUp] = http.HandlerFunc(handler.handleNextUp)
@@ -469,7 +662,8 @@ func isCompatRootSegment(segment string) bool {
 var compatRootSegments = []string{
 	"System", "QuickConnect", "Users", "Sessions", "Plugins", "Packages",
 	"Branding", "DisplayPreferences", "UserViews", "UserItems", "Library", "Items",
-	"Playback", "Shows", "Search", "SyncPlay", "Videos", "UserPlayedItems",
+	"Playback", "Shows", "Movies", "Genres", "Persons", "Studios", "Artists", "MediaSegments",
+	"Search", "SyncPlay", "Videos", "UserPlayedItems", "UserFavoriteItems", "UserImage", "ClientLog", "socket",
 }
 
 const maximumCompatPathBytes = 1024
@@ -490,6 +684,17 @@ func matchRoutePath(definition RouteSpec, requestPath string) (map[string]string
 		if pathSegment == "" {
 			return nil, false
 		}
+		if patternSegment == "Stream.{format}" {
+			separator := strings.LastIndexByte(pathSegment, '.')
+			if separator <= 0 || !strings.EqualFold(pathSegment[:separator], "Stream") || pathSegment[separator+1:] != "vtt" {
+				return nil, false
+			}
+			if values == nil {
+				values = make(map[string]string, 1)
+			}
+			values["format"] = "vtt"
+			continue
+		}
 		if patternSegment == "stream.{container}" {
 			container := strings.TrimPrefix(pathSegment, "stream.")
 			if !validContainer(container) || pathSegment != "stream."+container {
@@ -498,6 +703,22 @@ func matchRoutePath(definition RouteSpec, requestPath string) (map[string]string
 			if values == nil {
 				values = make(map[string]string, 1)
 			}
+			values["container"] = container
+			continue
+		}
+		if patternSegment == "{segmentId}.{container}" {
+			separator := strings.LastIndexByte(pathSegment, '.')
+			if separator <= 0 || separator == len(pathSegment)-1 {
+				return nil, false
+			}
+			segmentID, container := pathSegment[:separator], pathSegment[separator+1:]
+			if !validCapabilityPathSelector(segmentID) || !validContainer(container) {
+				return nil, false
+			}
+			if values == nil {
+				values = make(map[string]string, 4)
+			}
+			values["segmentId"] = segmentID
 			values["container"] = container
 			continue
 		}
@@ -522,12 +743,22 @@ func matchRoutePath(definition RouteSpec, requestPath string) (map[string]string
 func validRouteValue(route Route, name, value string) bool {
 	switch name {
 	case "id":
-		if route == RouteDisplayPreferences {
+		if route == RouteDisplayPreferences || route == RouteDisplayPreferencesUpdate {
 			return validDisplayPreferenceID(value)
 		}
 		return validCompatUUID(value)
-	case "userId", "itemId", "seriesId":
+	case "userId", "itemId", "seriesId", "mediaSourceId":
 		return validCompatUUID(value)
+	case "subtitleIndex":
+		parsed, err := strconv.Atoi(value)
+		return err == nil && parsed >= 0 && parsed <= maximumCompatibilitySubtitleIndex && strconv.Itoa(parsed) == value
+	case "startPositionTicks":
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		return err == nil && parsed >= 0 && parsed <= 7*24*60*60*TicksPerSecond && strconv.FormatInt(parsed, 10) == value
+	case "playlistId":
+		return validCapabilityPathSelector(value)
+	case "name", "genreName":
+		return validCatalogPathName(value)
 	case "type":
 		return value == "Primary" || value == "Backdrop" || value == "Thumb"
 	case "index":
@@ -535,6 +766,32 @@ func validRouteValue(route Route, name, value string) bool {
 	default:
 		return false
 	}
+}
+
+func validCatalogPathName(value string) bool {
+	if len(value) == 0 || len(value) > MaximumQueryValueBytes || !utf8.ValidString(value) || strings.TrimSpace(value) == "" {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
+}
+
+func validCapabilityPathSelector(value string) bool {
+	if len(value) < 16 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validDisplayPreferenceID(value string) bool {

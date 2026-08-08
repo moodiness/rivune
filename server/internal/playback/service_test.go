@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -247,6 +248,80 @@ func TestFetchHLSChildDoesNotForwardProviderHeadersCrossOrigin(t *testing.T) {
 	_ = response.Body.Close()
 	if got := captured.Get("Authorization"); got != "Bearer provider-secret" {
 		t.Fatalf("same-origin HLS child Authorization = %q", got)
+	}
+}
+
+func TestFetchProxyAssetRetriesPartialHLSWithoutRange(t *testing.T) {
+	requests := make([]http.Header, 0, 2)
+	service := &Service{client: &http.Client{Transport: playbackRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.Header.Clone())
+		status := http.StatusPartialContent
+		body := "#EXTM3U\n#EXTINF:6,\npart"
+		header := http.Header{"Content-Type": []string{"application/vnd.apple.mpegurl"}, "Content-Range": []string{"bytes 0-23/48"}}
+		if len(requests) == 2 {
+			status = http.StatusOK
+			body = "#EXTM3U\n#EXTINF:6,\nsegment.ts\n#EXT-X-ENDLIST\n"
+			header.Del("Content-Range")
+		}
+		return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})}}
+	incoming := httptest.NewRequest(http.MethodGet, "http://rivune.test/asset", nil)
+	incoming.Header.Set("Range", "bytes=0-23")
+	incoming.Header.Set("If-Range", `"playlist-etag"`)
+	asset := storedAsset{URL: "https://provider.example/master.m3u8", Headers: map[string]string{"If-Range": `"provider-etag"`}}
+
+	response, err := service.fetchProxyAsset(context.Background(), incoming, asset, asset.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "segment.ts") || strings.Contains(string(body), "part") {
+		t.Fatalf("complete retry response = %d %q", response.StatusCode, body)
+	}
+	rewritten, err := rewritePlaylist(body, response.Request.URL, func(string) string { return "/opaque/segment.ts" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Header.Set("Content-Range", "bytes 0-23/48")
+	proxyResponse := httptest.NewRecorder()
+	if err := writeUpstreamHLSPlaylist(proxyResponse, response.Header, rewritten); err != nil {
+		t.Fatal(err)
+	}
+	if proxyResponse.Code != http.StatusOK || proxyResponse.Header().Get("Content-Range") != "" || proxyResponse.Header().Get("Content-Length") != fmt.Sprintf("%d", len(rewritten)) {
+		t.Fatalf("rewritten response = %d headers=%v", proxyResponse.Code, proxyResponse.Header())
+	}
+	if len(requests) != 2 || requests[0].Get("Range") != "bytes=0-23" || requests[0].Get("If-Range") == "" || requests[1].Get("Range") != "" || requests[1].Get("If-Range") != "" {
+		t.Fatalf("upstream request headers = %#v", requests)
+	}
+}
+
+func TestHLSSegmentContainerCapabilityIsStrictAndPropagated(t *testing.T) {
+	for _, valid := range []string{"", "ts", "mp4"} {
+		if err := validateCapabilities(Capabilities{HLSSegmentContainer: valid}); err != nil {
+			t.Fatalf("valid HLS segment container %q: %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{"mpegts", "fmp4", "TS", " mp4"} {
+		if err := validateCapabilities(Capabilities{HLSSegmentContainer: invalid}); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("invalid HLS segment container %q error = %v", invalid, err)
+		}
+	}
+	batch := addon.ResourceBatch{Results: []addon.ResourceResult{{
+		AddonID: "addon-id", ManifestID: "manifest-id",
+		Payload: []byte(`{"streams":[{"url":"https://media.example/movie.mkv"}]}`),
+	}}}
+	for _, test := range []struct{ capability, want string }{{want: "ts"}, {capability: "ts", want: "ts"}, {capability: "mp4", want: "mp4"}} {
+		_, assets, err := normalizeStreams(batch, Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mkv"}, HLSSegmentContainer: test.capability})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(assets) != 1 || assets[0].HLSSegmentContainer != test.want {
+			t.Fatalf("capability %q stored assets = %+v, want %q", test.capability, assets, test.want)
+		}
 	}
 }
 

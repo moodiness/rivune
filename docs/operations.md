@@ -149,10 +149,10 @@ Early development builds of the profile-credential cutover could remove the old 
 Clients may use either the exact Jellyfin-style root paths or one lowercase `/emby` prefix. For example, public discovery is available at `/System/Info/Public` and `/emby/System/Info/Public`; nested prefixes, case variants, path normalization, and implicit method fallbacks are rejected. The bounded compatibility contract covers:
 
 - public server identity and availability probes;
-- credential login, the credential-bound user, and logout;
-- library views, items, movie/series hierarchy, enabled metadata and add-on catalog search, and artwork;
-- lazy multi-source `PlaybackInfo`, direct/remux/transcode delivery through Rivune's existing playback pipeline, byte ranges, seeking, and opaque HLS child requests;
-- playing/progress/stopped events, played state, resume items, and next-up.
+- credential login, the credential-bound user, session/capability projection, logout, and bounded WebSocket liveness;
+- library views, items, movie/series hierarchy, enabled metadata and add-on catalog search, item artwork, and deterministic profile avatars;
+- lazy multi-source `PlaybackInfo`, direct/remux/transcode delivery through Rivune's existing playback pipeline, byte ranges, seeking, opaque HLS child requests, and capability-scoped WebVTT subtitles;
+- playing/progress/stopped events, played state, favorites, resume items, and next-up.
 
 Private provider URLs, headers, native playback tokens, and source references remain server-side. Query authentication is accepted for Jellyfin protocol compatibility, but Rivune-generated playback URLs contain only an owner/item/source/TTL-bound capability and never the profile credential. Use HTTPS for every non-loopback deployment. Quick Connect is explicitly disabled, plugin and package lists are empty, and unknown paths or methods return `404`. The exact request/response schemas, limits, and status codes are in [`protocol/jellyfin-compat-openapi.yaml`](../protocol/jellyfin-compat-openapi.yaml).
 

@@ -621,6 +621,7 @@ func TestCloneCapabilitiesIsolatesAdditiveModeSlices(t *testing.T) {
 	original := Capabilities{
 		ProcessingModes:         []string{processingRemux, processingTranscode},
 		SubtitleModes:           []string{"external", "burn"},
+		HLSSegmentContainer:     "mp4",
 		MaximumVideoBitrateKbps: 8000, MaximumAudioChannels: 2, MaximumHeight: 1080, TranscodeVideoBitrateKbps: 12000,
 	}
 	cloned := cloneCapabilities(original)
@@ -629,7 +630,7 @@ func TestCloneCapabilitiesIsolatesAdditiveModeSlices(t *testing.T) {
 	if original.ProcessingModes[0] != processingRemux || original.SubtitleModes[0] != "external" {
 		t.Fatalf("capability clone shares additive slices: original=%+v clone=%+v", original, cloned)
 	}
-	if cloned.MaximumVideoBitrateKbps != 8000 || cloned.MaximumAudioChannels != 2 || cloned.MaximumHeight != 1080 || cloned.TranscodeVideoBitrateKbps != 12000 {
+	if cloned.HLSSegmentContainer != "mp4" || cloned.MaximumVideoBitrateKbps != 8000 || cloned.MaximumAudioChannels != 2 || cloned.MaximumHeight != 1080 || cloned.TranscodeVideoBitrateKbps != 12000 {
 		t.Fatalf("capability clone lost additive limits: %+v", cloned)
 	}
 }

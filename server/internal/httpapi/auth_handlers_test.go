@@ -19,10 +19,10 @@ type fakeAuthService struct {
 	loginCalls                 int
 	loginTokens                auth.TokenPair
 	loginErr                   error
-	jellyfinLoginInput          auth.JellyfinProfileLoginInput
-	jellyfinLoginResult         auth.JellyfinProfileLoginResult
-	jellyfinLoginErr            error
-	jellyfinLoginCalls          int
+	jellyfinLoginInput         auth.JellyfinProfileLoginInput
+	jellyfinLoginResult        auth.JellyfinProfileLoginResult
+	jellyfinLoginErr           error
+	jellyfinLoginCalls         int
 	refreshToken               string
 	refreshTokens              auth.TokenPair
 	refreshErr                 error

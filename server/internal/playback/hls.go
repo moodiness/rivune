@@ -25,6 +25,8 @@ const (
 	defaultMediaIdleTTL              = 2 * time.Minute
 	defaultTranscodeVideoBitrateKbps = 12000
 	hlsReadyTimeout                  = 45 * time.Second
+	hlsInitialBufferSeconds          = 6
+	hlsSegmentDurationSeconds        = 3
 	hlsRetainedSegments              = 120
 )
 
@@ -48,6 +50,7 @@ type hlsJob struct {
 	sessionID             string
 	assetID               string
 	mode                  string
+	segmentContainer      string
 	prewarming            bool
 	sourceDurationSeconds float64
 	startOffsetSeconds    float64
@@ -127,14 +130,44 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 	if !localMediaName.MatchString(name) {
 		return ErrSessionNotFound
 	}
-	job, err := service.hlsJob(sessionID, asset, processor, name == "index.m3u8")
+	isMaster := name == "master.m3u8"
+	job, err := service.hlsJob(sessionID, asset, processor, isMaster || name == "index.m3u8")
 	if err != nil {
 		return err
 	}
 	service.touchHLSJob(job)
 	path := filepath.Join(job.directory, name)
+	if isMaster {
+		path = filepath.Join(job.directory, "index.m3u8")
+	}
 	if err := waitForMediaFile(r.Context(), job, path); err != nil {
 		return err
+	}
+	if (isMaster || name == "index.m3u8") && r.Method == http.MethodGet {
+		if err := waitForHLSBuffer(r.Context(), job, hlsInitialBufferSeconds); err != nil {
+			return err
+		}
+	}
+	if isMaster {
+		childURL := hlsAssetURLAt(sessionID, asset.ID, token, "index.m3u8", asset.StartSeconds)
+		if buildChildURL != nil {
+			childURL, err = buildChildURL(deliveryChildState{
+				assetID: asset.ID, file: "index.m3u8", start: hlsStartKey(asset.StartSeconds), retainWhileActive: true,
+			})
+			if err != nil {
+				return fmt.Errorf("%w: create local HLS media capability: %v", ErrMediaProcessingFailed, err)
+			}
+		}
+		version := 3
+		if normalizedHLSSegmentContainer(asset.HLSSegmentContainer) == "mp4" {
+			version = 7
+		}
+		bandwidth := asset.VideoBitrateKbps*1000 + 256000
+		if bandwidth <= 256000 {
+			bandwidth = defaultTranscodeVideoBitrateKbps*1000 + 256000
+		}
+		playlist := []byte(fmt.Sprintf("#EXTM3U\n#EXT-X-VERSION:%d\n#EXT-X-STREAM-INF:BANDWIDTH=%d\n%s\n", version, bandwidth, childURL))
+		return writeHLSPlaylist(w, r, playlist)
 	}
 	if strings.HasSuffix(name, ".m3u8") {
 		contents, err := os.ReadFile(path)
@@ -151,7 +184,7 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 			}
 			var childURL string
 			childURL, childErr = buildChildURL(deliveryChildState{
-				assetID: asset.ID, file: reference, start: hlsStartKey(asset.StartSeconds),
+				assetID: asset.ID, file: reference, start: hlsStartKey(asset.StartSeconds), retainWhileActive: true,
 			})
 			return childURL
 		})
@@ -161,17 +194,7 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 		if err != nil {
 			return err
 		}
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(rewritten)))
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.WriteHeader(http.StatusOK)
-		if r.Method != http.MethodHead {
-			if _, err := w.Write(rewritten); err != nil {
-				return err
-			}
-		}
-		return nil
+		return writeHLSPlaylist(w, r, rewritten)
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -183,12 +206,12 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 		return fmt.Errorf("%w: stat media segment: %v", ErrMediaProcessingFailed, err)
 	}
 	contentType := mime.TypeByExtension(filepath.Ext(name))
-	if contentType == "" {
-		if strings.HasSuffix(name, ".m4s") || strings.HasSuffix(name, ".mp4") {
-			contentType = "video/mp4"
-		} else {
-			contentType = "application/octet-stream"
-		}
+	if strings.HasSuffix(name, ".ts") {
+		contentType = "video/mp2t"
+	} else if strings.HasSuffix(name, ".m4s") || strings.HasSuffix(name, ".mp4") {
+		contentType = "video/mp4"
+	} else if contentType == "" {
+		contentType = "application/octet-stream"
 	}
 	w.Header().Set("Cache-Control", "private, max-age=3600, immutable")
 	w.Header().Set("Content-Type", contentType)
@@ -196,6 +219,19 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 	http.ServeContent(w, r, name, info.ModTime(), file)
 	pruneHLSSegments(job.directory, name)
 	return nil
+}
+
+func writeHLSPlaylist(w http.ResponseWriter, r *http.Request, contents []byte) error {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Content-Length", strconv.Itoa(len(contents)))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return nil
+	}
+	_, err := w.Write(contents)
+	return err
 }
 
 func (service *Service) hlsJob(sessionID string, asset storedAsset, processor HLSProcessor, mayStart bool) (*hlsJob, error) {
@@ -225,8 +261,9 @@ func (service *Service) hlsJob(sessionID string, asset storedAsset, processor HL
 	now := service.currentTime()
 	job := &hlsJob{
 		directory: directory, fingerprint: hlsAssetFingerprint(asset), sessionID: sessionID, assetID: asset.ID,
-		mode: asset.Kind, prewarming: strings.HasPrefix(sessionID, "prewarm-"), sourceDurationSeconds: asset.DurationSeconds,
-		startOffsetSeconds: asset.StartSeconds, createdAt: now, lastAccessed: now, cancel: cancel, done: make(chan struct{}),
+		mode: asset.Kind, segmentContainer: normalizedHLSSegmentContainer(asset.HLSSegmentContainer), prewarming: strings.HasPrefix(sessionID, "prewarm-"),
+		sourceDurationSeconds: asset.DurationSeconds, startOffsetSeconds: asset.StartSeconds,
+		createdAt: now, lastAccessed: now, cancel: cancel, done: make(chan struct{}),
 	}
 	service.hlsJobs[key] = job
 	service.hlsMu.Unlock()
@@ -388,8 +425,8 @@ func hlsAssetFingerprint(asset storedAsset) string {
 		subtitleTrack = *asset.SubtitleTrackIndex
 	}
 	return fmt.Sprintf(
-		"%s|%s|%t|%d|%d|%d|%d|%d|%s",
-		mediaProbeKey(asset), asset.Kind, asset.ToneMap, audioTrack, subtitleTrack,
+		"%s|%s|%s|%t|%d|%d|%d|%d|%d|%s",
+		mediaProbeKey(asset), asset.Kind, normalizedHLSSegmentContainer(asset.HLSSegmentContainer), asset.ToneMap, audioTrack, subtitleTrack,
 		asset.TargetHeight, asset.VideoBitrateKbps, asset.MaximumAudioChannels, hlsStartKey(asset.StartSeconds),
 	)
 }
@@ -499,6 +536,47 @@ func waitForMediaFile(ctx context.Context, job *hlsJob, path string) error {
 			if jobErr != nil {
 				return jobErr
 			}
+			if info, statErr := os.Stat(path); statErr == nil && info.Size() > 0 {
+				return nil
+			}
+			return ErrMediaSourceFailed
+		case <-timer.C:
+			return ErrMediaSourceFailed
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForHLSBuffer(ctx context.Context, job *hlsJob, minimumSeconds float64) error {
+	timer := time.NewTimer(hlsReadyTimeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		seconds, readable := hlsPlaylistEncodedSeconds(job.directory)
+		if readable && seconds >= minimumSeconds {
+			return nil
+		}
+		job.mu.RLock()
+		jobErr := job.err
+		job.mu.RUnlock()
+		if jobErr != nil {
+			return jobErr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-job.done:
+			job.mu.RLock()
+			jobErr = job.err
+			job.mu.RUnlock()
+			if jobErr != nil {
+				return jobErr
+			}
+			seconds, readable = hlsPlaylistEncodedSeconds(job.directory)
+			if readable && seconds > 0 {
+				return nil
+			}
 			return ErrMediaSourceFailed
 		case <-timer.C:
 			return ErrMediaSourceFailed
@@ -590,10 +668,18 @@ func pruneHLSSegments(directory, currentName string) {
 }
 
 func hlsSegmentIndex(name string) (int, bool) {
-	if !strings.HasPrefix(name, "segment-") || !strings.HasSuffix(name, ".m4s") {
+	if !strings.HasPrefix(name, "segment-") {
 		return 0, false
 	}
-	value := strings.TrimSuffix(strings.TrimPrefix(name, "segment-"), ".m4s")
+	value := strings.TrimPrefix(name, "segment-")
+	switch {
+	case strings.HasSuffix(value, ".m4s"):
+		value = strings.TrimSuffix(value, ".m4s")
+	case strings.HasSuffix(value, ".ts"):
+		value = strings.TrimSuffix(value, ".ts")
+	default:
+		return 0, false
+	}
 	index, err := strconv.Atoi(value)
 	return index, err == nil && index >= 0
 }

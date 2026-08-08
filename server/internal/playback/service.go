@@ -92,7 +92,7 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 		pool: pool, addons: addons, client: &http.Client{Transport: transport, CheckRedirect: playbackRedirectPolicy}, processor: processor,
 		introDBClient: &http.Client{Transport: transport.Clone(), Timeout: 8 * time.Second}, introDBBaseURL: introDBDefaultBaseURL,
 		now: now, mediaOptions: options, hlsJobs: make(map[string]*hlsJob), targetSigningKey: targetSigningKey,
-		deliveryChildren: newDeliveryChildBudget(maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerUser),
+		deliveryChildren: newDeliveryChildBudget(maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerProfile),
 		references:       newSourceReferenceStore(now), probes: newMediaProbeCache(now), preparations: newPlaybackPreparationCache(now),
 	}, nil
 }
@@ -279,6 +279,7 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 	if prepared.asset != nil {
 		assets = append(assets, cloneStoredAsset(*prepared.asset))
 		assets[len(assets)-1].StartSeconds = input.StartSeconds
+		assets[len(assets)-1].HLSSegmentContainer = normalizedHLSSegmentContainer(reference.Capabilities.HLSSegmentContainer)
 	}
 	capabilities := service.playbackCapabilities(reference.Capabilities, maximumHeight)
 	preferences := ResolveInput{
@@ -358,6 +359,7 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 	if prepared.asset != nil {
 		streamAssets = append(streamAssets, cloneStoredAsset(*prepared.asset))
 		streamAssets[len(streamAssets)-1].StartSeconds = input.StartSeconds
+		streamAssets[len(streamAssets)-1].HLSSegmentContainer = normalizedHLSSegmentContainer(reference.Capabilities.HLSSegmentContainer)
 	}
 	input.Capabilities = service.playbackCapabilities(reference.Capabilities, maximumHeight)
 	input.PreferredAudioLanguage = reference.PreferredAudioLanguage
@@ -514,7 +516,7 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 	if deliveryHandle != nil {
 		*deliveryHandle = deliveryHandleForSession(sessionID, token, sources, assets)
 		if deliveryHandle.children != nil {
-			deliveryHandle.children.bindBudget(service.deliveryChildBudget(), principal.UserID, service.now)
+			deliveryHandle.children.bindBudget(service.deliveryChildBudget(), *principal.ActiveProfileID, service.now)
 		}
 	}
 	return result, nil
@@ -622,6 +624,10 @@ func validateCapabilities(capabilities Capabilities) error {
 				return ErrInvalidInput
 			}
 		}
+	}
+	if capabilities.HLSSegmentContainer != "" &&
+		capabilities.HLSSegmentContainer != "ts" && capabilities.HLSSegmentContainer != "mp4" {
+		return ErrInvalidInput
 	}
 	if !validUniqueModes(capabilities.ProcessingModes, []string{processingRemux, processingTranscodeAudio, processingTranscode}, 3) ||
 		!validUniqueModes(capabilities.SubtitleModes, []string{"external", "burn"}, 2) {
@@ -794,6 +800,13 @@ func (service *Service) playbackCapabilities(client Capabilities, maximumHeight 
 	return capabilities
 }
 
+func normalizedHLSSegmentContainer(container string) string {
+	if container == "mp4" {
+		return "mp4"
+	}
+	return "ts"
+}
+
 func sourceOptionLabel(ordinal int) string {
 	return fmt.Sprintf("Source %d", ordinal)
 }
@@ -898,14 +911,14 @@ func normalizeStreams(batch addon.ResourceBatch, capabilities Capabilities) ([]S
 				source.Protocol = protocolFor(streamURL)
 				source.Container = containerFor(streamURL)
 				source.Compatible = supports(capabilities.StreamingProtocols, source.Protocol) && supportsContainer(capabilities.Containers, source.Container)
-				assets = append(assets, storedAsset{ID: id, Kind: "stream", URL: streamURL, Headers: headers, Container: source.Container})
+				assets = append(assets, storedAsset{ID: id, Kind: "stream", URL: streamURL, Headers: headers, Container: source.Container, HLSSegmentContainer: normalizedHLSSegmentContainer(capabilities.HLSSegmentContainer)})
 			case directMediaExternalURL(externalURL):
 				source.Mode = "direct"
 				source.URL = externalURL
 				source.Protocol = protocolFor(externalURL)
 				source.Container = containerFor(externalURL)
 				source.Compatible = supports(capabilities.StreamingProtocols, source.Protocol) && supportsContainer(capabilities.Containers, source.Container)
-				assets = append(assets, storedAsset{ID: id, Kind: "stream", URL: externalURL, Headers: headers, Container: source.Container})
+				assets = append(assets, storedAsset{ID: id, Kind: "stream", URL: externalURL, Headers: headers, Container: source.Container, HLSSegmentContainer: normalizedHLSSegmentContainer(capabilities.HLSSegmentContainer)})
 			case validYouTubeID(ytID):
 				source.Mode = "youtube"
 				source.YTID = ytID
@@ -917,7 +930,7 @@ func normalizeStreams(batch addon.ResourceBatch, capabilities Capabilities) ([]S
 				source.Protocol = protocolFor(externalURL)
 				source.Container = containerFor(externalURL)
 				source.Compatible = true
-				assets = append(assets, storedAsset{ID: id, Kind: "stream", URL: externalURL, Headers: headers})
+				assets = append(assets, storedAsset{ID: id, Kind: "stream", URL: externalURL, Headers: headers, HLSSegmentContainer: normalizedHLSSegmentContainer(capabilities.HLSSegmentContainer)})
 			case infoHash != "" && len(infoHash) <= 128 && len(capabilities.ExternalPlayers) > 0:
 				source.Mode = "external"
 				source.InfoHash = infoHash

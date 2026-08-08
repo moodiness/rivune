@@ -74,6 +74,9 @@ func (*statePlaybackDelivery) Open(context.Context, auth.Principal, playback.Res
 func (*statePlaybackDelivery) Serve(http.ResponseWriter, *http.Request, playback.DeliveryHandle) error {
 	return nil
 }
+func (*statePlaybackDelivery) ServeAsset(http.ResponseWriter, *http.Request, playback.DeliveryHandle, string) error {
+	return nil
+}
 func (delivery *statePlaybackDelivery) Close(context.Context, auth.Principal, playback.DeliveryHandle) error {
 	if delivery.onClose != nil {
 		delivery.onClose()
@@ -527,6 +530,168 @@ func TestPlayedEndpointsBindUserRemainIdempotentAndPreserveChildFavorite(t *test
 	response = requestPlayed(http.MethodDelete, authentication.session.ProfileID)
 	if response.Code != http.StatusOK || service.progress[itemID].Completed || service.progress[itemID].Version != 2 {
 		t.Fatalf("unplayed status=%d progress=%+v", response.Code, service.progress[itemID])
+	}
+}
+
+func TestUserDataModernAndLegacyApplyAllStateIdempotently(t *testing.T) {
+	handler, authentication, service, _, token, itemID, _, _ := stateHTTPFixture(t)
+	runtimeMinutes := 2
+	catalog := handler.catalog.(*stateCatalog)
+	item := catalog.items[itemID]
+	item.RuntimeMinutes = &runtimeMinutes
+	catalog.items[itemID] = item
+
+	requestUserData := func(method, path, userID, body string, legacy bool) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.SetPathValue("itemId", itemID)
+		if legacy {
+			request.SetPathValue("userId", userID)
+		}
+		request.Header.Set("X-Emby-Token", token)
+		if method == http.MethodPost {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		response := httptest.NewRecorder()
+		if legacy {
+			handler.handleLegacyUserData(response, request)
+		} else {
+			handler.handleUserData(response, request)
+		}
+		return response
+	}
+
+	response := requestUserData(http.MethodGet, "/UserItems/"+itemID+"/UserData", "", "", false)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"Key":"`+itemID+`"`) || !strings.Contains(response.Body.String(), `"ItemId":"`+itemID+`"`) {
+		t.Fatalf("empty UserData status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := `{"PlaybackPositionTicks":300000000,"PlayCount":0,"IsFavorite":true,"Played":false,"Key":"` + itemID + `","ItemId":"` + itemID + `"}`
+	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
+	progress := service.progress[itemID]
+	if response.Code != http.StatusOK || progress.PositionSeconds != 30 || progress.DurationSeconds != 120 || progress.Completed || progress.Version != 1 || !service.library[itemID] || service.addCalls != 1 {
+		t.Fatalf("modern update status=%d progress=%+v library=%v addCalls=%d body=%s", response.Code, progress, service.library, service.addCalls, response.Body.String())
+	}
+	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
+	if response.Code != http.StatusOK || service.progress[itemID].Version != 1 || service.addCalls != 1 {
+		t.Fatalf("duplicate update status=%d progress=%+v addCalls=%d", response.Code, service.progress[itemID], service.addCalls)
+	}
+
+	body = `{"PlaybackPositionTicks":600000000,"Played":true}`
+	response = requestUserData(http.MethodPost, "/Users/"+authentication.session.ProfileID+"/Items/"+itemID+"/UserData", authentication.session.ProfileID, body, true)
+	progress = service.progress[itemID]
+	if response.Code != http.StatusOK || progress.PositionSeconds != 60 || !progress.Completed || progress.Version != 2 || !service.library[itemID] || service.removeCalls != 0 || !strings.Contains(response.Body.String(), `"PlayedPercentage":50`) {
+		t.Fatalf("legacy partial update status=%d progress=%+v library=%v body=%s", response.Code, progress, service.library, response.Body.String())
+	}
+	body = `{"IsFavorite":false}`
+	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
+	if response.Code != http.StatusOK || service.library[itemID] || service.removeCalls != 1 || service.progress[itemID].Version != 2 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":600000000`) {
+		t.Fatalf("favorite-only update status=%d progress=%+v library=%v removes=%d body=%s", response.Code, service.progress[itemID], service.library, service.removeCalls, response.Body.String())
+	}
+	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
+	if response.Code != http.StatusOK || service.removeCalls != 1 || service.progress[itemID].Version != 2 {
+		t.Fatalf("duplicate favorite-only update status=%d progress=%+v removes=%d", response.Code, service.progress[itemID], service.removeCalls)
+	}
+	response = requestUserData(http.MethodGet, "/Users/foreign/Items/"+itemID+"/UserData", "22222222-2222-4222-8222-222222222222", "", true)
+	if response.Code != http.StatusNotFound || service.progress[itemID].Version != 2 || service.addCalls != 1 {
+		t.Fatalf("foreign legacy status=%d progress=%+v addCalls=%d", response.Code, service.progress[itemID], service.addCalls)
+	}
+}
+
+func TestFavoriteEndpointsMutateLibraryAndPreserveProgress(t *testing.T) {
+	handler, authentication, service, _, token, itemID, _, _ := stateHTTPFixture(t)
+	service.progress[itemID] = watchstate.Progress{TitleID: itemID, MediaType: "movie", PositionSeconds: 45, DurationSeconds: 90, Version: 7, LastWatchedAt: time.Unix(7, 0).UTC()}
+	catalog := handler.catalog.(*stateCatalog)
+
+	requestFavorite := func(method, userID string, legacy bool) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, "/favorite/"+itemID, nil)
+		request.SetPathValue("itemId", itemID)
+		if legacy {
+			request.SetPathValue("userId", userID)
+		}
+		request.Header.Set("X-Emby-Token", token)
+		response := httptest.NewRecorder()
+		if legacy {
+			handler.handleLegacyFavoriteItem(response, request)
+		} else {
+			handler.handleFavoriteItem(response, request)
+		}
+		return response
+	}
+
+	response := requestFavorite(http.MethodPost, "", false)
+	if response.Code != http.StatusOK || !service.library[itemID] || service.addCalls != 1 || service.userDataCalls != 1 || service.progress[itemID].Version != 7 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":450000000`) || !strings.Contains(response.Body.String(), `"IsFavorite":true`) {
+		t.Fatalf("favorite status=%d progress=%+v library=%v addCalls=%d linkedCalls=%d body=%s", response.Code, service.progress[itemID], service.library, service.addCalls, service.userDataCalls, response.Body.String())
+	}
+	item := catalog.items[itemID]
+	item.InLibrary = true
+	catalog.items[itemID] = item
+	response = requestFavorite(http.MethodPost, authentication.session.ProfileID, true)
+	if response.Code != http.StatusOK || service.addCalls != 1 || service.userDataCalls != 2 || service.progress[itemID].Version != 7 {
+		t.Fatalf("duplicate favorite status=%d addCalls=%d linkedCalls=%d progress=%+v", response.Code, service.addCalls, service.userDataCalls, service.progress[itemID])
+	}
+	response = requestFavorite(http.MethodDelete, authentication.session.ProfileID, true)
+	if response.Code != http.StatusOK || service.library[itemID] || service.removeCalls != 1 || service.userDataCalls != 3 || service.progress[itemID].Version != 7 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":450000000`) || !strings.Contains(response.Body.String(), `"IsFavorite":false`) {
+		t.Fatalf("unfavorite status=%d progress=%+v library=%v removeCalls=%d linkedCalls=%d body=%s", response.Code, service.progress[itemID], service.library, service.removeCalls, service.userDataCalls, response.Body.String())
+	}
+	item.InLibrary = false
+	catalog.items[itemID] = item
+	response = requestFavorite(http.MethodDelete, "", false)
+	if response.Code != http.StatusOK || service.removeCalls != 1 || service.userDataCalls != 4 || service.progress[itemID].Version != 7 {
+		t.Fatalf("duplicate unfavorite status=%d removeCalls=%d linkedCalls=%d progress=%+v", response.Code, service.removeCalls, service.userDataCalls, service.progress[itemID])
+	}
+	response = requestFavorite(http.MethodPost, "22222222-2222-4222-8222-222222222222", true)
+	if response.Code != http.StatusNotFound || service.addCalls != 1 || service.userDataCalls != 4 || service.progress[itemID].Version != 7 {
+		t.Fatalf("foreign favorite status=%d addCalls=%d linkedCalls=%d progress=%+v", response.Code, service.addCalls, service.userDataCalls, service.progress[itemID])
+	}
+}
+
+func TestUserDataUpdateBoundsBodyAndFailsClosedForUnknownItem(t *testing.T) {
+	handler, _, service, _, token, itemID, _, _ := stateHTTPFixture(t)
+	nullRequest := httptest.NewRequest(http.MethodPost, "/UserItems/"+itemID+"/UserData", strings.NewReader("null"))
+	nullRequest.SetPathValue("itemId", itemID)
+	nullRequest.Header.Set("X-Emby-Token", token)
+	nullRequest.Header.Set("Content-Type", "application/json")
+	nullResponse := httptest.NewRecorder()
+	handler.handleUserData(nullResponse, nullRequest)
+	if nullResponse.Code != http.StatusBadRequest || service.userDataCalls != 0 || len(service.progress) != 0 || len(service.library) != 0 {
+		t.Fatalf("null body status=%d linkedCalls=%d progress=%+v library=%+v", nullResponse.Code, service.userDataCalls, service.progress, service.library)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/UserItems/"+itemID+"/UserData", strings.NewReader(strings.Repeat(" ", int(maximumCompatJSONBodyBytes)+1)))
+	request.SetPathValue("itemId", itemID)
+	request.Header.Set("X-Emby-Token", token)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.handleUserData(response, request)
+	if response.Code != http.StatusBadRequest || len(service.progress) != 0 || len(service.library) != 0 {
+		t.Fatalf("oversized body status=%d progress=%+v library=%+v", response.Code, service.progress, service.library)
+	}
+
+	unknownID := "00000000-0000-4000-8000-000000000099"
+	request = httptest.NewRequest(http.MethodGet, "/UserItems/"+unknownID+"/UserData", nil)
+	request.SetPathValue("itemId", unknownID)
+	request.Header.Set("X-Emby-Token", token)
+	response = httptest.NewRecorder()
+	handler.handleUserData(response, request)
+	if response.Code != http.StatusNotFound || len(service.progress) != 0 || len(service.library) != 0 {
+		t.Fatalf("unknown item status=%d progress=%+v library=%+v", response.Code, service.progress, service.library)
+	}
+}
+
+func TestUserDataCombinedMutationFailureDoesNotCommitPartially(t *testing.T) {
+	handler, _, service, _, token, itemID, _, _ := stateHTTPFixture(t)
+	runtimeMinutes := 2
+	item := handler.catalog.(*stateCatalog).items[itemID]
+	item.RuntimeMinutes = &runtimeMinutes
+	handler.catalog.(*stateCatalog).items[itemID] = item
+	service.userDataErr = watchstate.ErrOutboxCapacity
+	body := `{"PlaybackPositionTicks":300000000,"Played":true,"IsFavorite":true}`
+	request := httptest.NewRequest(http.MethodPost, "/UserItems/"+itemID+"/UserData", strings.NewReader(body))
+	request.SetPathValue("itemId", itemID)
+	request.Header.Set("X-Emby-Token", token)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.handleUserData(response, request)
+	if response.Code != http.StatusServiceUnavailable || len(service.progress) != 0 || len(service.library) != 0 || service.addCalls != 0 || service.updateCalls != 0 {
+		t.Fatalf("atomic failure status=%d progress=%+v library=%+v add=%d update=%d", response.Code, service.progress, service.library, service.addCalls, service.updateCalls)
 	}
 }
 

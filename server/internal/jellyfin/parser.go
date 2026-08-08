@@ -14,7 +14,7 @@ import (
 const (
 	maximumCompatAuthorizationHeaderBytes  = 2048
 	maximumCompatTokenHeaderBytes          = 128
-	maximumCompatQueryBytes                = 2048
+	maximumCompatRawQueryBytes             = 3*MaximumQueryBytes + 2*MaximumQueryParameters
 	maximumCompatSourceDeviceIDRunes       = 1024
 	clientIdentityFailureHeaderBounds      = "header_bounds"
 	clientIdentityFailureAuthorization     = "authorization_syntax"
@@ -111,7 +111,7 @@ func ParseCompatToken(request *http.Request, _ bool) (string, error) {
 // stream routes can fall back to an already-negotiated PlaySessionId when an
 // external player replaces the auth header with a playback capability.
 func extractCompatToken(request *http.Request) (string, bool, error) {
-	if request == nil || !boundedCompatHeaders(request.Header) || len(request.URL.RawQuery) > maximumCompatQueryBytes {
+	if request == nil || !boundedCompatHeaders(request.Header) || len(request.URL.RawQuery) > maximumCompatRawQueryBytes {
 		return "", false, ErrInvalidCompatAuthorization
 	}
 	for _, name := range []string{"Authorization", "X-Emby-Authorization", "X-MediaBrowser-Authorization"} {

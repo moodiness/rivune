@@ -14,7 +14,10 @@ import (
 	"github.com/moodiness/rivune/server/internal/watchstate"
 )
 
-const maximumStateBodyBytes = 1 << 20
+const (
+	maximumStateBodyBytes          = 1 << 20
+	maximumUserDataPositionSeconds = int64(1<<31 - 1)
+)
 
 // Watchstate is the direct domain boundary for compatibility state. It avoids
 // internal HTTP and always receives the principal reloaded from the linked
@@ -23,6 +26,7 @@ type Watchstate interface {
 	GetProgress(context.Context, auth.Principal, string) (watchstate.Progress, error)
 	ApplyPlaybackEventForLinkedSession(context.Context, auth.Principal, string, watchstate.UpdateProgressInput) (watchstate.Progress, error)
 	SetWatchedForLinkedSession(context.Context, auth.Principal, string, bool, watchstate.CompletionInput) (watchstate.Progress, error)
+	UpdateUserDataForLinkedSession(context.Context, auth.Principal, string, watchstate.UpdateUserDataInput) (watchstate.UserDataState, error)
 	ListResume(context.Context, auth.Principal, int, int) (watchstate.ContinueItemsPage, error)
 	ListNextUp(context.Context, auth.Principal, string, int, int) (watchstate.ContinueItemsPage, error)
 }
@@ -178,6 +182,143 @@ func (handler *Handler) handlePlayedState(response http.ResponseWriter, request 
 		return
 	}
 	handler.writeJSON(response, http.StatusOK, userDataFromProgress(progress, item.InLibrary))
+}
+
+func (handler *Handler) handleUserData(response http.ResponseWriter, request *http.Request) {
+	handler.handleItemUserData(response, request, false)
+}
+
+func (handler *Handler) handleLegacyUserData(response http.ResponseWriter, request *http.Request) {
+	handler.handleItemUserData(response, request, true)
+}
+
+func (handler *Handler) handleItemUserData(response http.ResponseWriter, request *http.Request, userScoped bool) {
+	session, item, ok := handler.authorizedStateItem(response, request, userScoped)
+	if !ok {
+		return
+	}
+	if request.Method == http.MethodGet {
+		progress, exists, err := loadProgress(request.Context(), handler.watchstate, session.Principal, item.ID)
+		if err != nil {
+			handler.writeStateError(response, err)
+			return
+		}
+		if !exists {
+			progress = emptyItemProgress(item)
+		}
+		handler.writeJSON(response, http.StatusOK, userDataFromProgress(progress, item.InLibrary))
+		return
+	}
+	var input *UpdateUserItemDataDto
+	if err := decodeCompatJSON(response, request, &input); err != nil || input == nil || !validUserDataUpdate(*input, item.ID) {
+		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The user data is invalid")
+		return
+	}
+	var positionSeconds *int
+	if input.PlaybackPositionTicks != nil {
+		position, valid := userDataPositionSeconds(*input.PlaybackPositionTicks)
+		if !valid {
+			handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The user data is invalid")
+			return
+		}
+		positionSeconds = &position
+	}
+	duration := 0
+	if item.RuntimeMinutes != nil && *item.RuntimeMinutes > 0 && int64(*item.RuntimeMinutes) <= maximumUserDataPositionSeconds/60 {
+		duration = *item.RuntimeMinutes * 60
+	}
+	state, err := handler.watchstate.UpdateUserDataForLinkedSession(request.Context(), session.Principal, item.ID, watchstate.UpdateUserDataInput{
+		PositionSeconds: positionSeconds,
+		DurationSeconds: duration,
+		Played:          input.Played,
+		Favorite:        input.IsFavorite,
+	})
+	if err != nil {
+		handler.writeStateError(response, err)
+		return
+	}
+	progress := emptyItemProgress(item)
+	if state.Progress != nil {
+		progress = *state.Progress
+	}
+	handler.writeJSON(response, http.StatusOK, userDataFromProgress(progress, state.InLibrary))
+}
+
+func (handler *Handler) handleFavoriteItem(response http.ResponseWriter, request *http.Request) {
+	handler.handleFavoriteState(response, request, false)
+}
+
+func (handler *Handler) handleLegacyFavoriteItem(response http.ResponseWriter, request *http.Request) {
+	handler.handleFavoriteState(response, request, true)
+}
+
+func (handler *Handler) handleFavoriteState(response http.ResponseWriter, request *http.Request, userScoped bool) {
+	session, item, ok := handler.authorizedStateItem(response, request, userScoped)
+	if !ok {
+		return
+	}
+	desired := request.Method == http.MethodPost
+	state, err := handler.watchstate.UpdateUserDataForLinkedSession(request.Context(), session.Principal, item.ID, watchstate.UpdateUserDataInput{Favorite: &desired})
+	if err != nil {
+		handler.writeStateError(response, err)
+		return
+	}
+	progress := emptyItemProgress(item)
+	if state.Progress != nil {
+		progress = *state.Progress
+	}
+	handler.writeJSON(response, http.StatusOK, userDataFromProgress(progress, state.InLibrary))
+}
+
+func (handler *Handler) authorizedStateItem(response http.ResponseWriter, request *http.Request, userScoped bool) (AuthenticatedSession, watchstate.CatalogTitle, bool) {
+	if !handler.hasStateDependencies() {
+		http.NotFound(response, request)
+		return AuthenticatedSession{}, watchstate.CatalogTitle{}, false
+	}
+	session, ok := handler.authenticateRequest(response, request, false)
+	if !ok {
+		return AuthenticatedSession{}, watchstate.CatalogTitle{}, false
+	}
+	if userScoped && !strings.EqualFold(strings.TrimSpace(request.PathValue("userId")), session.ProfileID) {
+		http.NotFound(response, request)
+		return AuthenticatedSession{}, watchstate.CatalogTitle{}, false
+	}
+	itemID := strings.TrimSpace(request.PathValue("itemId"))
+	item, err := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, itemID)
+	if err != nil || !strings.EqualFold(item.ID, itemID) {
+		http.NotFound(response, request)
+		return AuthenticatedSession{}, watchstate.CatalogTitle{}, false
+	}
+	return session, item, true
+}
+
+func emptyItemProgress(item watchstate.CatalogTitle) watchstate.Progress {
+	return watchstate.Progress{TitleID: item.ID, MediaType: item.MediaType}
+}
+
+func validUserDataUpdate(input UpdateUserItemDataDto, itemID string) bool {
+	if input.PlaybackPositionTicks != nil && *input.PlaybackPositionTicks < 0 ||
+		input.PlayCount != nil && *input.PlayCount < 0 ||
+		input.UnplayedItemCount != nil && *input.UnplayedItemCount < 0 ||
+		input.ItemId != nil && !strings.EqualFold(strings.TrimSpace(*input.ItemId), itemID) ||
+		input.Key != nil && !strings.EqualFold(strings.TrimSpace(*input.Key), itemID) {
+		return false
+	}
+	if input.PlayedPercentage != nil && (math.IsNaN(*input.PlayedPercentage) || math.IsInf(*input.PlayedPercentage, 0) || *input.PlayedPercentage < 0 || *input.PlayedPercentage > 100) {
+		return false
+	}
+	return input.Rating == nil || !math.IsNaN(*input.Rating) && !math.IsInf(*input.Rating, 0)
+}
+
+func userDataPositionSeconds(ticks int64) (int, bool) {
+	if ticks < 0 {
+		return 0, false
+	}
+	seconds := TicksToSeconds(ticks)
+	if seconds > maximumUserDataPositionSeconds {
+		return 0, false
+	}
+	return int(seconds), true
 }
 
 func (handler *Handler) handleResumeItems(response http.ResponseWriter, request *http.Request) {
@@ -475,6 +616,10 @@ func userDataFromProgress(progress watchstate.Progress, inLibrary bool) UserItem
 		Played:                progress.Completed,
 		Key:                   progress.TitleID,
 		ItemId:                progress.TitleID,
+	}
+	if progress.DurationSeconds > 0 {
+		percentage := math.Min(100, math.Max(0, float64(progress.PositionSeconds)*100/float64(progress.DurationSeconds)))
+		value.PlayedPercentage = &percentage
 	}
 	if progress.Completed {
 		value.PlayCount = 1

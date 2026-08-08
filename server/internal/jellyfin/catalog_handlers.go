@@ -2,7 +2,9 @@ package jellyfin
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -125,7 +127,7 @@ func (handler *Handler) writeLatestItems(response http.ResponseWriter, request *
 	if parentID != "" && handler.collections != nil {
 		value, collectionErr := handler.collections.Get(request.Context(), session.Principal, parentID)
 		if collectionErr == nil {
-			items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, query)
+			items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, query, true)
 			handler.writeJSON(response, http.StatusOK, items)
 			return
 		}
@@ -555,11 +557,11 @@ func (handler *Handler) writeCollectionRoot(response http.ResponseWriter, reques
 }
 
 func (handler *Handler) writeCollectionFolders(response http.ResponseWriter, ctx context.Context, principal auth.Principal, query ItemQuery, value collection.Collection) {
-	items, total := handler.collectionFolderPage(ctx, principal, value, query)
+	items, total := handler.collectionFolderPage(ctx, principal, value, query, false)
 	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: total, StartIndex: query.StartIndex})
 }
 
-func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth.Principal, value collection.Collection, query ItemQuery) ([]BaseItemDto, int) {
+func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth.Principal, value collection.Collection, query ItemQuery, homePresentation bool) ([]BaseItemDto, int) {
 	idFilter := stringSet(query.Ids)
 	search := strings.ToLower(query.SearchTerm)
 	filtered := make([]collection.Folder, 0, len(value.Folders))
@@ -578,10 +580,14 @@ func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth
 	start := min(query.StartIndex, total)
 	end := min(start+query.Limit, total)
 	selected := append([]collection.Folder(nil), filtered[start:end]...)
+	presentation := value
+	if homePresentation {
+		presentation.FolderCoverShape = collection.TileShapeLandscape
+	}
 	handler.hydrateCollectionFolderCovers(ctx, principal, value.ID, selected)
 	items := make([]BaseItemDto, 0, len(selected))
 	for _, folder := range selected {
-		items = append(items, handler.collectionFolderDTO(value, folder))
+		items = append(items, handler.collectionFolderDTO(presentation, folder))
 	}
 	if localizer, ok := handler.catalog.(catalogArtworkLocalizer); ok && len(selected) != 0 {
 		upstream := make([]string, len(selected))
@@ -592,8 +598,8 @@ func (handler *Handler) collectionFolderPage(ctx context.Context, principal auth
 		if len(localized) == len(items) {
 			for index, materialized := range localized {
 				if tag, valid := localizedArtworkTag(materialized); valid {
-					items[index].ImageTags = collectionFolderImageTags(value.FolderCoverShape, tag)
-					items[index].BackdropImageTags = collectionFolderBackdropImageTags(value.FolderCoverShape, tag)
+					items[index].ImageTags = collectionFolderImageTags(presentation.FolderCoverShape, tag)
+					items[index].BackdropImageTags = collectionFolderBackdropImageTags(presentation.FolderCoverShape, tag)
 				}
 			}
 		}
@@ -841,7 +847,7 @@ func (handler *Handler) collectionDTO(ctx context.Context, principal auth.Princi
 
 func (handler *Handler) collectionViewDTO(ctx context.Context, principal auth.Principal, value collection.Collection) BaseItemDto {
 	imageTags, backdropImageTags := handler.collectionArtworkTags(ctx, principal, value)
-	shape := value.FolderCoverShape
+	shape := collection.TileShapeLandscape
 	if tag := imageTags["Primary"]; tag != "" && strings.EqualFold(strings.TrimSpace(shape), collection.TileShapeLandscape) {
 		imageTags["Thumb"] = tag
 		if len(backdropImageTags) == 0 {
@@ -1224,7 +1230,7 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 		ParentId: title.ParentID, SeriesId: title.SeriesID, SeasonId: title.SeasonID,
 		SeriesName: title.SeriesTitle, SeasonName: title.SeasonTitle,
 		IndexNumber: title.Ordinal, ParentIndexNumber: title.ParentOrdinal, Overview: title.Overview,
-		Status: title.Status, Genres: append([]string(nil), title.Genres...), CommunityRating: title.CommunityRating,
+		Status: title.Status, Genres: append([]string(nil), title.Genres[:min(len(title.Genres), MaximumQueryListValues)]...), CommunityRating: title.CommunityRating,
 		ProviderIds: jellyfinProviderIDs(title.ProviderIDs), ImageTags: make(map[string]string),
 		BackdropImageTags: make([]string, 0),
 	}
@@ -1236,13 +1242,13 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 	}
 	switch title.MediaType {
 	case "movie":
-		item.Type, item.MediaType, item.IsPlayable = "Movie", "Video", true
+		item.Type, item.MediaType, item.IsPlayable, item.CanDownload = "Movie", "Video", true, true
 	case "series":
 		item.Type, item.MediaType, item.IsFolder = "Series", "Unknown", true
 	case "season":
 		item.Type, item.MediaType, item.IsFolder = "Season", "Unknown", true
 	case "episode":
-		item.Type, item.MediaType, item.IsPlayable = "Episode", "Video", true
+		item.Type, item.MediaType, item.IsPlayable, item.CanDownload = "Episode", "Video", true, true
 	}
 	if released, err := time.Parse(time.DateOnly, title.Released); err == nil {
 		premiere := time.Date(released.Year(), released.Month(), released.Day(), 0, 0, 0, 0, time.UTC)
@@ -1270,11 +1276,11 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 	if tag, ok := localizedArtworkTag(title.BackgroundURL); ok {
 		item.BackdropImageTags = append(item.BackdropImageTags, tag)
 	}
-	for _, person := range title.People {
+	for _, person := range title.People[:min(len(title.People), MaximumQueryListValues)] {
 		if strings.TrimSpace(person.Name) == "" {
 			continue
 		}
-		value := BaseItemPerson{Name: person.Name, Role: person.Role, Type: person.Type}
+		value := BaseItemPerson{Name: person.Name, Id: handler.catalogFacetID("person", person.Name), Role: person.Role, Type: person.Type}
 		if value.Type == "" {
 			value.Type = "Actor"
 		}
@@ -1400,4 +1406,811 @@ func compatCatalogErrorClass(err error) string {
 	default:
 		return "internal"
 	}
+}
+
+const maximumCatalogSurfaceCandidates = 1000
+
+type catalogPersonFacet struct {
+	Name            string
+	Type            string
+	PrimaryImageTag string
+}
+
+func (handler *Handler) catalogSurfaceSession(response http.ResponseWriter, request *http.Request) (AuthenticatedSession, bool) {
+	session, ok := handler.catalogSession(response, request)
+	if !ok {
+		return AuthenticatedSession{}, false
+	}
+	if userID := request.PathValue("userId"); userID != "" && !handler.requireBoundUser(response, userID, session) {
+		return AuthenticatedSession{}, false
+	}
+	if !handler.requireOptionalQueryUser(response, request, session) {
+		return AuthenticatedSession{}, false
+	}
+	return session, true
+}
+
+func (handler *Handler) handleItemsFilters(response http.ResponseWriter, request *http.Request) {
+	handler.writeItemsFilters(response, request, false)
+}
+
+func (handler *Handler) handleItemsFilters2(response http.ResponseWriter, request *http.Request) {
+	handler.writeItemsFilters(response, request, true)
+}
+
+func (handler *Handler) writeItemsFilters(response http.ResponseWriter, request *http.Request, modern bool) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok {
+		return
+	}
+	_, mediaTypes, parentID, ok := handler.catalogSurfaceQuery(response, request, true)
+	if !ok {
+		return
+	}
+	titles, err := handler.catalogSurfaceCandidates(request.Context(), session.Principal, parentID, mediaTypes)
+	if err != nil {
+		handler.writeCatalogError(response, err)
+		return
+	}
+	genres := catalogGenreNames(titles)
+	if modern {
+		pairs := make([]NameGuidPair, 0, len(genres))
+		for _, name := range genres {
+			pairs = append(pairs, NameGuidPair{Name: name, Id: handler.catalogFacetID("genre", name)})
+		}
+		handler.writeJSON(response, http.StatusOK, QueryFilters{Genres: pairs, Tags: []string{}})
+		return
+	}
+	handler.writeJSON(response, http.StatusOK, QueryFiltersLegacy{
+		Genres: genres, Tags: []string{}, OfficialRatings: []string{}, Years: catalogYears(titles),
+	})
+}
+
+func (handler *Handler) catalogSurfaceQuery(response http.ResponseWriter, request *http.Request, recursive bool) (ItemQuery, []string, string, bool) {
+	query, err := ParseItemQuery(request.URL.Query())
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return ItemQuery{}, nil, "", false
+	}
+	mediaTypes, err := catalogMediaTypes(query.IncludeItemTypes)
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid IncludeItemTypes")
+		return ItemQuery{}, nil, "", false
+	}
+	mediaTypes = projectedCatalogMediaTypes(mediaTypes)
+	rawMediaTypes, err := commaSeparated(request.URL.Query(), "MediaTypes")
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return ItemQuery{}, nil, "", false
+	}
+	for _, mediaType := range rawMediaTypes {
+		if !strings.EqualFold(mediaType, "Video") && !strings.EqualFold(mediaType, "Unknown") {
+			mediaTypes = []string{"__none__"}
+		}
+	}
+	positiveKinds := make([]string, 0, 2)
+	for _, selector := range []struct {
+		Name      string
+		MediaType string
+	}{{"IsMovie", "movie"}, {"IsSeries", "series"}} {
+		_, found, scalarErr := queryScalar(request.URL.Query(), selector.Name)
+		if scalarErr != nil {
+			err = scalarErr
+			break
+		}
+		if found {
+			selected, boolErr := booleanValue(request.URL.Query(), selector.Name, false)
+			if boolErr != nil {
+				err = boolErr
+				break
+			}
+			if selected {
+				positiveKinds = append(positiveKinds, selector.MediaType)
+			}
+		}
+	}
+	for _, selector := range []string{"IsAiring", "IsSports", "IsKids", "IsNews"} {
+		_, found, scalarErr := queryScalar(request.URL.Query(), selector)
+		if scalarErr != nil {
+			err = scalarErr
+			break
+		}
+		if found {
+			selected, boolErr := booleanValue(request.URL.Query(), selector, false)
+			if boolErr != nil {
+				err = boolErr
+				break
+			}
+			if selected {
+				mediaTypes = []string{"__none__"}
+			}
+		}
+	}
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return ItemQuery{}, nil, "", false
+	}
+	if len(positiveKinds) != 0 {
+		mediaTypes = intersectMediaTypes(mediaTypes, positiveKinds)
+	}
+	parentID := query.ParentId
+	if parentID != "" {
+		parentID, mediaTypes, _, err = handler.translateVirtualParent(parentID, mediaTypes, recursive)
+		if err != nil {
+			handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid ParentId")
+			return ItemQuery{}, nil, "", false
+		}
+	}
+	return query, mediaTypes, parentID, true
+}
+
+func (handler *Handler) catalogSurfaceCandidates(ctx context.Context, principal auth.Principal, parentID string, mediaTypes []string) ([]watchstate.CatalogTitle, error) {
+	if noCatalogMediaTypes(mediaTypes) {
+		return []watchstate.CatalogTitle{}, nil
+	}
+	items := make([]watchstate.CatalogTitle, 0, min(MaximumQueryLimit, maximumCatalogSurfaceCandidates))
+	for offset := 0; offset < maximumCatalogSurfaceCandidates; {
+		limit := min(MaximumQueryLimit, maximumCatalogSurfaceCandidates-offset)
+		page, err := handler.catalog.ListCatalogItems(ctx, principal, watchstate.CatalogQuery{
+			ParentID: parentID, MediaTypes: mediaTypes, Recursive: true, Offset: offset, Limit: limit,
+		})
+		if err != nil {
+			return nil, err
+		}
+		remaining := maximumCatalogSurfaceCandidates - len(items)
+		if len(page.Items) > remaining {
+			page.Items = page.Items[:remaining]
+		}
+		items = append(items, page.Items...)
+		next := offset + len(page.Items)
+		if len(page.Items) == 0 || next <= offset || next >= page.Total || len(page.Items) < limit {
+			break
+		}
+		offset = next
+	}
+	return items, nil
+}
+
+func catalogGenreNames(titles []watchstate.CatalogTitle) []string {
+	names := make(map[string]string)
+	for _, title := range titles {
+		for _, raw := range title.Genres[:min(len(title.Genres), MaximumQueryListValues)] {
+			name := strings.TrimSpace(raw)
+			if name == "" || len(name) > MaximumQueryValueBytes {
+				continue
+			}
+			key := strings.ToLower(name)
+			if _, exists := names[key]; !exists {
+				if len(names) == maximumCatalogSurfaceCandidates {
+					break
+				}
+				names[key] = name
+			}
+		}
+		if len(names) == maximumCatalogSurfaceCandidates {
+			break
+		}
+	}
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		result = append(result, name)
+	}
+	sort.Slice(result, func(left, right int) bool {
+		leftKey, rightKey := strings.ToLower(result[left]), strings.ToLower(result[right])
+		if leftKey == rightKey {
+			return result[left] < result[right]
+		}
+		return leftKey < rightKey
+	})
+	return result
+}
+
+func catalogYears(titles []watchstate.CatalogTitle) []int {
+	set := make(map[int]struct{})
+	for _, title := range titles {
+		value := title.Released
+		if len(value) < 4 {
+			value = title.ReleaseInfo
+		}
+		if len(value) < 4 {
+			continue
+		}
+		year, err := strconv.Atoi(value[:4])
+		if err == nil && year > 0 && year <= 9999 {
+			set[year] = struct{}{}
+		}
+	}
+	result := make([]int, 0, len(set))
+	for year := range set {
+		result = append(result, year)
+	}
+	sort.Ints(result)
+	return result
+}
+
+func catalogPeople(titles []watchstate.CatalogTitle) []catalogPersonFacet {
+	people := make(map[string]catalogPersonFacet)
+	for _, title := range titles {
+		for _, person := range title.People[:min(len(title.People), MaximumQueryListValues)] {
+			name := strings.TrimSpace(person.Name)
+			if name == "" || len(name) > MaximumQueryValueBytes {
+				continue
+			}
+			key := strings.ToLower(name)
+			current, exists := people[key]
+			if !exists {
+				if len(people) == maximumCatalogSurfaceCandidates {
+					break
+				}
+				current = catalogPersonFacet{Name: name, Type: person.Type}
+			}
+			if current.Type == "" {
+				current.Type = "Actor"
+			}
+			if current.PrimaryImageTag == "" {
+				current.PrimaryImageTag, _ = localizedArtworkTag(person.ImageURL)
+			}
+			people[key] = current
+		}
+		if len(people) == maximumCatalogSurfaceCandidates {
+			break
+		}
+	}
+	result := make([]catalogPersonFacet, 0, len(people))
+	for _, person := range people {
+		result = append(result, person)
+	}
+	sort.Slice(result, func(left, right int) bool {
+		leftKey, rightKey := strings.ToLower(result[left].Name), strings.ToLower(result[right].Name)
+		if leftKey == rightKey {
+			return result[left].Name < result[right].Name
+		}
+		return leftKey < rightKey
+	})
+	return result
+}
+
+func (handler *Handler) catalogFacetID(kind, value string) string {
+	digest := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(value))))
+	id, err := DeriveVirtualItemID(handler.serverInfo.ID, VirtualItemKey(fmt.Sprintf("catalog-%s:%x", kind, digest)))
+	if err != nil {
+		return ""
+	}
+	return id.String()
+}
+
+func (handler *Handler) handleGenres(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok {
+		return
+	}
+	query, mediaTypes, parentID, ok := handler.catalogSurfaceQuery(response, request, true)
+	if !ok {
+		return
+	}
+	titles, err := handler.catalogSurfaceCandidates(request.Context(), session.Principal, parentID, mediaTypes)
+	if err != nil {
+		handler.writeCatalogError(response, err)
+		return
+	}
+	names := filterCatalogNames(catalogGenreNames(titles), query.SearchTerm)
+	start, end := catalogSurfaceWindow(len(names), query.StartIndex, query.Limit)
+	items := make([]BaseItemDto, 0, end-start)
+	for _, name := range names[start:end] {
+		items = append(items, handler.catalogFacetDTO("genre", name, "Genre", ""))
+	}
+	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: len(names), StartIndex: query.StartIndex})
+}
+
+func (handler *Handler) handleGenre(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok {
+		return
+	}
+	_, mediaTypes, parentID, ok := handler.catalogSurfaceQuery(response, request, true)
+	if !ok {
+		return
+	}
+	titles, err := handler.catalogSurfaceCandidates(request.Context(), session.Principal, parentID, mediaTypes)
+	if err != nil {
+		handler.writeCatalogError(response, err)
+		return
+	}
+	wanted := request.PathValue("genreName")
+	for _, name := range catalogGenreNames(titles) {
+		if strings.EqualFold(name, wanted) {
+			handler.writeJSON(response, http.StatusOK, handler.catalogFacetDTO("genre", name, "Genre", ""))
+			return
+		}
+	}
+	handler.writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "Resource not found")
+}
+
+func (handler *Handler) handlePersons(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok {
+		return
+	}
+	query, mediaTypes, parentID, ok := handler.catalogSurfaceQuery(response, request, true)
+	if !ok {
+		return
+	}
+	var titles []watchstate.CatalogTitle
+	appearsInID, appearsFound, appearsErr := queryScalar(request.URL.Query(), "AppearsInItemId")
+	if appearsErr != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	if appearsFound {
+		itemID, parseErr := ParseItemID(appearsInID)
+		if parseErr != nil {
+			handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid AppearsInItemId")
+			return
+		}
+		title, readErr := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, itemID.String())
+		if readErr != nil {
+			handler.writeCatalogError(response, readErr)
+			return
+		}
+		titles = []watchstate.CatalogTitle{title}
+	} else {
+		listed, readErr := handler.catalogSurfaceCandidates(request.Context(), session.Principal, parentID, mediaTypes)
+		if readErr != nil {
+			handler.writeCatalogError(response, readErr)
+			return
+		}
+		titles = listed
+	}
+	includeTypes, err := commaSeparated(request.URL.Query(), "PersonTypes")
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	excludeTypes, err := commaSeparated(request.URL.Query(), "ExcludePersonTypes")
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	people := catalogPeople(titles)
+	filtered := make([]catalogPersonFacet, 0, len(people))
+	for _, person := range people {
+		if query.SearchTerm != "" && !strings.Contains(strings.ToLower(person.Name), strings.ToLower(query.SearchTerm)) {
+			continue
+		}
+		if len(includeTypes) != 0 && !containsFold(includeTypes, person.Type) {
+			continue
+		}
+		if containsFold(excludeTypes, person.Type) {
+			continue
+		}
+		filtered = append(filtered, person)
+	}
+	start, end := catalogSurfaceWindow(len(filtered), query.StartIndex, query.Limit)
+	items := make([]BaseItemDto, 0, end-start)
+	for _, person := range filtered[start:end] {
+		items = append(items, handler.catalogFacetDTO("person", person.Name, "Person", person.PrimaryImageTag))
+	}
+	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: len(filtered), StartIndex: query.StartIndex})
+}
+
+func (handler *Handler) handlePerson(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok {
+		return
+	}
+	_, mediaTypes, parentID, ok := handler.catalogSurfaceQuery(response, request, true)
+	if !ok {
+		return
+	}
+	titles, err := handler.catalogSurfaceCandidates(request.Context(), session.Principal, parentID, mediaTypes)
+	if err != nil {
+		handler.writeCatalogError(response, err)
+		return
+	}
+	wanted := request.PathValue("name")
+	for _, person := range catalogPeople(titles) {
+		if strings.EqualFold(person.Name, wanted) {
+			handler.writeJSON(response, http.StatusOK, handler.catalogFacetDTO("person", person.Name, "Person", person.PrimaryImageTag))
+			return
+		}
+	}
+	handler.writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "Resource not found")
+}
+
+func filterCatalogNames(names []string, search string) []string {
+	if search == "" {
+		return names
+	}
+	search = strings.ToLower(search)
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		if strings.Contains(strings.ToLower(name), search) {
+			result = append(result, name)
+		}
+	}
+	return result
+}
+
+func catalogSurfaceWindow(total, offset, limit int) (int, int) {
+	start := min(offset, total)
+	return start, min(start+limit, total)
+}
+
+func (handler *Handler) catalogFacetDTO(kind, name, itemType, imageTag string) BaseItemDto {
+	item := BaseItemDto{
+		Id: handler.catalogFacetID(kind, name), ServerId: handler.serverInfo.ID.String(), Name: name,
+		SortName: name, Type: itemType, IsFolder: true, Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{},
+	}
+	if imageTag != "" {
+		item.ImageTags["Primary"] = imageTag
+	}
+	return item
+}
+
+func (handler *Handler) handleSuggestions(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok {
+		return
+	}
+	query, err := ParseItemQuery(request.URL.Query())
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	itemTypes, err := commaSeparated(request.URL.Query(), "Type")
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	if len(itemTypes) == 0 {
+		itemTypes = query.IncludeItemTypes
+	}
+	mediaTypes, err := catalogMediaTypes(itemTypes)
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid item type")
+		return
+	}
+	rawMediaTypes, err := commaSeparated(request.URL.Query(), "MediaType")
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	if len(rawMediaTypes) != 0 {
+		for _, mediaType := range rawMediaTypes {
+			if !strings.EqualFold(mediaType, "Video") && !strings.EqualFold(mediaType, "Unknown") {
+				handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: []BaseItemDto{}, StartIndex: query.StartIndex})
+				return
+			}
+		}
+	}
+	mediaTypes = projectedCatalogMediaTypes(mediaTypes)
+	if noCatalogMediaTypes(mediaTypes) {
+		handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: []BaseItemDto{}, StartIndex: query.StartIndex})
+		return
+	}
+	page, err := handler.catalog.ListCatalogItems(request.Context(), session.Principal, watchstate.CatalogQuery{
+		MediaTypes: mediaTypes, Recursive: true, Offset: query.StartIndex, Limit: query.Limit,
+	})
+	if err != nil {
+		handler.writeCatalogError(response, err)
+		return
+	}
+	items := make([]BaseItemDto, 0, len(page.Items))
+	for _, title := range page.Items {
+		items = append(items, handler.baseItemDTO(title, query.EnableUserData))
+	}
+	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: page.Total, StartIndex: page.Offset})
+}
+
+func (handler *Handler) handleEmptyCatalogDomain(response http.ResponseWriter, request *http.Request) {
+	_, ok := handler.catalogSurfaceSession(response, request)
+	if !ok {
+		return
+	}
+	query, err := ParseItemQuery(request.URL.Query())
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: query.StartIndex})
+}
+
+type scoredCatalogTitle struct {
+	Title watchstate.CatalogTitle
+	Score int
+}
+
+func (handler *Handler) handleSimilarItems(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok {
+		return
+	}
+	query, err := ParseItemQuery(request.URL.Query())
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	if _, err = canonicalIDs(request.URL.Query(), "ExcludeArtistIds"); err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid ExcludeArtistIds")
+		return
+	}
+	itemID, err := ParseItemID(request.PathValue("itemId"))
+	if err != nil {
+		handler.writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "Resource not found")
+		return
+	}
+	baseline, err := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, itemID.String())
+	if err != nil {
+		handler.writeCatalogError(response, err)
+		return
+	}
+	mediaTypes := []string{baseline.MediaType}
+	candidates, err := handler.catalogSurfaceCandidates(request.Context(), session.Principal, "", mediaTypes)
+	if err != nil {
+		handler.writeCatalogError(response, err)
+		return
+	}
+	scored := similarCatalogTitles(baseline, candidates)
+	limit := min(query.Limit, len(scored))
+	items := make([]BaseItemDto, 0, limit)
+	for _, candidate := range scored[:limit] {
+		items = append(items, handler.baseItemDTO(candidate.Title, query.EnableUserData))
+	}
+	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: len(scored), StartIndex: 0})
+}
+
+func similarCatalogTitles(baseline watchstate.CatalogTitle, candidates []watchstate.CatalogTitle) []scoredCatalogTitle {
+	genres := stringFoldSet(baseline.Genres[:min(len(baseline.Genres), MaximumQueryListValues)])
+	peopleLimit := min(len(baseline.People), MaximumQueryListValues)
+	people := make([]string, 0, peopleLimit)
+	for _, person := range baseline.People[:peopleLimit] {
+		people = append(people, person.Name)
+	}
+	personSet := stringFoldSet(people)
+	result := make([]scoredCatalogTitle, 0, len(candidates))
+	for _, candidate := range candidates {
+		if strings.EqualFold(candidate.ID, baseline.ID) {
+			continue
+		}
+		score := 0
+		seenGenres := make(map[string]struct{}, min(len(candidate.Genres), MaximumQueryListValues))
+		for _, genre := range candidate.Genres[:min(len(candidate.Genres), MaximumQueryListValues)] {
+			key := strings.ToLower(strings.TrimSpace(genre))
+			if _, duplicate := seenGenres[key]; duplicate {
+				continue
+			}
+			seenGenres[key] = struct{}{}
+			if _, match := genres[key]; match {
+				score += 2
+			}
+		}
+		seenPeople := make(map[string]struct{}, min(len(candidate.People), MaximumQueryListValues))
+		for _, person := range candidate.People[:min(len(candidate.People), MaximumQueryListValues)] {
+			key := strings.ToLower(strings.TrimSpace(person.Name))
+			if _, duplicate := seenPeople[key]; duplicate {
+				continue
+			}
+			seenPeople[key] = struct{}{}
+			if _, match := personSet[key]; match {
+				score++
+			}
+		}
+		if score > 0 {
+			result = append(result, scoredCatalogTitle{Title: candidate, Score: score})
+		}
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		if result[left].Score != result[right].Score {
+			return result[left].Score > result[right].Score
+		}
+		leftName, rightName := strings.ToLower(result[left].Title.Title), strings.ToLower(result[right].Title.Title)
+		if leftName != rightName {
+			return leftName < rightName
+		}
+		return result[left].Title.ID < result[right].Title.ID
+	})
+	return result
+}
+
+func stringFoldSet(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" {
+			result[value] = struct{}{}
+		}
+	}
+	return result
+}
+
+func (handler *Handler) handleMovieRecommendations(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok {
+		return
+	}
+	query, mediaTypes, parentID, ok := handler.catalogSurfaceQuery(response, request, true)
+	if !ok {
+		return
+	}
+	categoryLimit, err := boundedInteger(request.URL.Query(), "CategoryLimit", 1, 20, 5)
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	itemLimit, err := boundedInteger(request.URL.Query(), "ItemLimit", 1, MaximumQueryLimit, 8)
+	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	movieTypes := intersectMediaTypes(mediaTypes, []string{"movie"})
+	if noCatalogMediaTypes(movieTypes) {
+		handler.writeJSON(response, http.StatusOK, []RecommendationDto{})
+		return
+	}
+	titles, err := handler.catalogSurfaceCandidates(request.Context(), session.Principal, parentID, movieTypes)
+	if err != nil {
+		handler.writeCatalogError(response, err)
+		return
+	}
+	result := make([]RecommendationDto, 0, min(categoryLimit, len(titles)))
+	for _, baseline := range titles {
+		if !baseline.InLibrary && baseline.Progress == nil {
+			continue
+		}
+		similar := similarCatalogTitles(baseline, titles)
+		if len(similar) == 0 {
+			continue
+		}
+		limit := min(itemLimit, len(similar))
+		items := make([]BaseItemDto, 0, limit)
+		for _, candidate := range similar[:limit] {
+			items = append(items, handler.baseItemDTO(candidate.Title, query.EnableUserData))
+		}
+		recommendationType := "SimilarToLikedItem"
+		if baseline.Progress != nil {
+			recommendationType = "SimilarToRecentlyPlayed"
+		}
+		result = append(result, RecommendationDto{
+			Items: items, RecommendationType: recommendationType, BaselineItemName: baseline.Title,
+			CategoryId: handler.catalogFacetID("recommendation", baseline.ID),
+		})
+		if len(result) == categoryLimit {
+			break
+		}
+	}
+	handler.writeJSON(response, http.StatusOK, result)
+}
+
+func (handler *Handler) handleUpcomingShows(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok {
+		return
+	}
+	query, mediaTypes, parentID, ok := handler.catalogSurfaceQuery(response, request, true)
+	if !ok {
+		return
+	}
+	episodeTypes := intersectMediaTypes(mediaTypes, []string{"episode"})
+	if noCatalogMediaTypes(episodeTypes) {
+		handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: []BaseItemDto{}, StartIndex: query.StartIndex})
+		return
+	}
+	titles, err := handler.catalogSurfaceCandidates(request.Context(), session.Principal, parentID, episodeTypes)
+	if err != nil {
+		handler.writeCatalogError(response, err)
+		return
+	}
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	upcoming := make([]watchstate.CatalogTitle, 0, len(titles))
+	for _, title := range titles {
+		released, parseErr := time.Parse(time.DateOnly, title.Released)
+		if parseErr == nil && !released.Before(today) {
+			upcoming = append(upcoming, title)
+		}
+	}
+	sort.SliceStable(upcoming, func(left, right int) bool {
+		if upcoming[left].Released != upcoming[right].Released {
+			return upcoming[left].Released < upcoming[right].Released
+		}
+		return upcoming[left].ID < upcoming[right].ID
+	})
+	start, end := catalogSurfaceWindow(len(upcoming), query.StartIndex, query.Limit)
+	items := make([]BaseItemDto, 0, end-start)
+	for _, title := range upcoming[start:end] {
+		items = append(items, handler.baseItemDTO(title, query.EnableUserData))
+	}
+	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: len(upcoming), StartIndex: query.StartIndex})
+}
+
+func (handler *Handler) handleMediaSegments(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok || !handler.requireCatalogSurfaceItem(response, request, session, request.PathValue("itemId")) {
+		return
+	}
+	if _, err := ParseItemQuery(request.URL.Query()); err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	handler.writeJSON(response, http.StatusOK, QueryResult[MediaSegmentDto]{Items: []MediaSegmentDto{}, TotalRecordCount: 0, StartIndex: 0})
+}
+
+func (handler *Handler) handleThemeMedia(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	itemID := request.PathValue("itemId")
+	if !ok || !handler.requireCatalogSurfaceItem(response, request, session, itemID) {
+		return
+	}
+	if _, err := ParseItemQuery(request.URL.Query()); err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	empty := func() *ThemeMediaResult {
+		return &ThemeMediaResult{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: 0, OwnerId: itemID}
+	}
+	handler.writeJSON(response, http.StatusOK, AllThemeMediaResult{
+		ThemeVideosResult: empty(), ThemeSongsResult: empty(), SoundtrackSongsResult: empty(),
+	})
+}
+
+func (handler *Handler) handleThemeSongs(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	itemID := request.PathValue("itemId")
+	if !ok || !handler.requireCatalogSurfaceItem(response, request, session, itemID) {
+		return
+	}
+	if _, err := ParseItemQuery(request.URL.Query()); err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	handler.writeJSON(response, http.StatusOK, ThemeMediaResult{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: 0, OwnerId: itemID})
+}
+
+func (handler *Handler) handleSpecialFeatures(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok || !handler.requireCatalogSurfaceItem(response, request, session, request.PathValue("itemId")) {
+		return
+	}
+	if _, err := ParseItemQuery(request.URL.Query()); err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	handler.writeJSON(response, http.StatusOK, []BaseItemDto{})
+}
+
+func (handler *Handler) handleIntros(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok || !handler.requireCatalogSurfaceItem(response, request, session, request.PathValue("itemId")) {
+		return
+	}
+	if _, err := ParseItemQuery(request.URL.Query()); err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: 0})
+}
+
+func (handler *Handler) handleLocalTrailers(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSurfaceSession(response, request)
+	if !ok || !handler.requireCatalogSurfaceItem(response, request, session, request.PathValue("itemId")) {
+		return
+	}
+	if _, err := ParseItemQuery(request.URL.Query()); err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
+		return
+	}
+	handler.writeJSON(response, http.StatusOK, []BaseItemDto{})
+}
+
+func (handler *Handler) requireCatalogSurfaceItem(response http.ResponseWriter, request *http.Request, session AuthenticatedSession, rawID string) bool {
+	itemID, err := ParseItemID(rawID)
+	if err != nil {
+		handler.writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "Resource not found")
+		return false
+	}
+	_, err = handler.catalog.GetCatalogTitle(request.Context(), session.Principal, itemID.String())
+	if err != nil {
+		handler.writeCatalogError(response, err)
+		return false
+	}
+	return true
 }

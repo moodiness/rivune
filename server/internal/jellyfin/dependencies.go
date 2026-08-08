@@ -66,5 +66,6 @@ type PlaybackDelivery interface {
 	Sources(context.Context, auth.Principal, playback.SourcesInput) (playback.SourceList, error)
 	Open(context.Context, auth.Principal, playback.ResolveInput) (playback.Delivery, error)
 	Serve(http.ResponseWriter, *http.Request, playback.DeliveryHandle) error
+	ServeAsset(http.ResponseWriter, *http.Request, playback.DeliveryHandle, string) error
 	Close(context.Context, auth.Principal, playback.DeliveryHandle) error
 }
