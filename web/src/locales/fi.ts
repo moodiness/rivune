@@ -795,7 +795,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Salli palvelimen muuntaa yhteensopimaton media vasta, kun suora toisto ja suora suoratoisto eivät onnistu",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Tämä sovellussalasana on rajattu tähän profiiliin.",
   "settings.jellyfinAccess.pinHint": "Salaisuus näytetään vain kerran. Tallenna se nyt.",
   "settings.jellyfinAccess.rotateWarning": "Salasanan uusiminen mitätöi nykyisen salasanan ja kaikki Jellyfin-istunnot välittömästi.",

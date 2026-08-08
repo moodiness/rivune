@@ -680,7 +680,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Benarkan pelayan menukar media yang tidak serasi hanya selepas Main Terus dan Strim Terus gagal",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Kata laluan aplikasi ini terhad kepada profil ini.",
   "settings.jellyfinAccess.pinHint": "Rahsia ini hanya dipaparkan sekali. Simpannya sekarang.",
   "settings.jellyfinAccess.rotateWarning": "Menjana semula kata laluan akan serta-merta membatalkan kata laluan semasa dan semua sesi Jellyfin.",

@@ -795,7 +795,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Να επιτρέπεται στον διακομιστή να μετατρέπει ασύμβατα πολυμέσα μόνο όταν αποτυγχάνουν η άμεση αναπαραγωγή και η άμεση ροή",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Αυτός ο κωδικός πρόσβασης εφαρμογής περιορίζεται σε αυτό το προφίλ.",
   "settings.jellyfinAccess.pinHint": "Αυτό το μυστικό εμφανίζεται μόνο μία φορά. Αποθηκεύστε το τώρα σε ασφαλές μέρος.",
   "settings.jellyfinAccess.rotateWarning": "Η αλλαγή ακυρώνει αμέσως τον τρέχοντα κωδικό πρόσβασης εφαρμογής και όλες τις συνεδρίες Jellyfin.",

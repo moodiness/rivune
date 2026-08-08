@@ -145,7 +145,7 @@ func TestJellyfinProfileLoginUsesOpaqueUsernameAndSharedAdmissionBudgets(t *test
 	api.auth = service
 	input := auth.JellyfinProfileLoginInput{
 		Username: "11111111-1111-4111-8111-111111111111", Password: "application-password",
-		LinkedDeviceKey: "infuse-device", DeviceName: "Living Room", Platform: "Infuse",
+		LinkedDeviceKey: "generic-client-device", DeviceName: "Living Room", Platform: "Generic Client",
 	}
 	for attempt := range credentialUsernameAttempts {
 		ctx := auth.WithClientIP(context.Background(), "198.51.100."+strconv.Itoa(attempt+1))

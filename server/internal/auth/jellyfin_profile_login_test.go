@@ -116,7 +116,7 @@ func TestLoginJellyfinProfileCreatesBoundCategorySessionWithoutNativePasswordOrP
 	loginInput := JellyfinProfileLoginInput{
 		Username: credentialID, Password: applicationPassword,
 		LinkedDeviceKey: "jellyfin-client-" + suffix,
-		DeviceName:      "Jellyfin profile client", Platform: "Infuse",
+		DeviceName:      "Jellyfin profile client", Platform: "Generic Client",
 	}
 	wrongPassword, _, err := NewJellyfinAppPassword()
 	if err != nil {

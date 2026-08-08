@@ -125,7 +125,7 @@ func (handler *Handler) handleAuthenticateByName(response http.ResponseWriter, r
 	}
 	serverID := handler.serverInfo.ID.String()
 	writeJSON(response, http.StatusOK, AuthenticationResult{
-		User: handler.configuredCompatUser(request.Context(), result.Principal, client, result.Profile.ID, result.Profile.Name),
+		User: handler.configuredCompatUser(request.Context(), result.Principal, result.Profile.ID, result.Profile.Name),
 		SessionInfo: SessionInfoDto{
 			Id: result.Credential.SessionID, ServerId: serverID, IsActive: true,
 			UserId: result.Profile.ID, UserName: result.Profile.Name,
@@ -329,12 +329,12 @@ func (handler *Handler) publicSystemInfo() (PublicSystemInfo, bool) {
 }
 
 func (handler *Handler) userForSession(ctx context.Context, session AuthenticatedSession) UserDto {
-	return handler.configuredCompatUser(ctx, session.Principal, session.Client, session.ProfileID, session.ProfileName)
+	return handler.configuredCompatUser(ctx, session.Principal, session.ProfileID, session.ProfileName)
 }
 
-func (handler *Handler) configuredCompatUser(ctx context.Context, principal nativeauth.Principal, client ClientIdentity, profileID, profileName string) UserDto {
+func (handler *Handler) configuredCompatUser(ctx context.Context, principal nativeauth.Principal, profileID, profileName string) UserDto {
 	user := handler.newCompatUser(profileID, profileName)
-	views, err := handler.sessionViews(ctx, principal, client)
+	views, err := handler.sessionViews(ctx, principal)
 	if err != nil {
 		return user
 	}

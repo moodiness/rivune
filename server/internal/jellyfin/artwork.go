@@ -67,7 +67,7 @@ func (handler *Handler) serveImage(response http.ResponseWriter, request *http.R
 		}
 		value, folder, folderErr := handler.findCollectionFolder(request.Context(), session.Principal, request.PathValue("id"))
 		if folderErr == nil {
-			item := handler.collectionFolderDetailDTO(request.Context(), session.Principal, value, folder, isVidHubClient(session.Client))
+			item := handler.collectionFolderDetailDTO(request.Context(), session.Principal, value, folder)
 			if key := collectionItemArtworkKey(item, imageType); key != "" {
 				handler.artwork.ServeKey(response, request, key)
 				return
@@ -116,7 +116,7 @@ func compatCredentialTransportPresent(request *http.Request) bool {
 		return true
 	}
 	for name := range query {
-		if strings.EqualFold(name, "api_key") {
+		if strings.EqualFold(name, "api_key") || strings.EqualFold(name, "ApiKey") {
 			return true
 		}
 	}

@@ -39,12 +39,20 @@ info:
     upstream failures.
 
     Only the dedicated `rivune_jf_` credential audience is accepted; native
-    `rivune_at_` tokens fail. Multiple header transports may repeat only the same
-    credential. The `api_key` query transport is an explicit exception only for image and stream
-    operations. Advertised media URLs use the 192-bit `PlaySessionId` as a short-lived,
+    `rivune_at_` tokens fail. Credential transports are inspected in Jellyfin order:
+    `Authorization`, `X-Emby-Authorization`, `X-MediaBrowser-Authorization`,
+    `X-Emby-Token`, `X-MediaBrowser-Token`, `ApiKey`, then `api_key`. The first
+    populated token wins; lower-precedence transports are ignored. `Authorization`
+    accepts `MediaBrowser`/`Emby` parameters or HTTP Bearer, while the two `X-*`
+    authorization headers also accept unschemed parameters. Query credentials are
+    accepted on every authenticated operation for protocol compatibility.
+
+    Advertised media URLs use the 192-bit `PlaySessionId` as a short-lived,
     item/source-bound stream capability instead of serializing the profile credential.
-    Artwork may instead use the opaque `tag` returned in item DTOs as an anonymous capability;
-    a supplied invalid credential never falls back to either capability path.
+    Artwork may instead use the opaque `tag` returned in item DTOs as an anonymous
+    capability; a supplied invalid credential never falls back to an artwork tag.
+    A stream with a missing or unusable credential may fall back to its matching scoped
+    playback capability and revalidated owner. A valid foreign credential fails closed.
 
     Playback source enumeration remains lazy and only the selected MediaSourceId is
     opened. Compatibility play sessions contain opaque selectors, are bound to the
@@ -93,6 +101,9 @@ security:
   - AuthorizationToken: []
   - XEmbyAuthorizationToken: []
   - XMediaBrowserAuthorizationToken: []
+  - BearerToken: []
+  - ApiKeyQuery: []
+  - ApiKeyCompactQuery: []
 paths:
   /System/Info/Public:
     get:
@@ -564,12 +575,15 @@ paths:
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
+        - BearerToken: []
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ApiKeyCompactQuery: []
         - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/ArtworkTag" }
       responses:
         "200": { $ref: "#/components/responses/Image" }
@@ -585,12 +599,15 @@ paths:
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
+        - BearerToken: []
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ApiKeyCompactQuery: []
         - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/ArtworkTag" }
       responses:
         "200": { $ref: "#/components/responses/ImageHead" }
@@ -611,12 +628,15 @@ paths:
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
+        - BearerToken: []
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ApiKeyCompactQuery: []
         - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/ArtworkTag" }
       responses:
         "200": { $ref: "#/components/responses/Image" }
@@ -632,12 +652,15 @@ paths:
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
+        - BearerToken: []
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ApiKeyCompactQuery: []
         - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/ArtworkTag" }
       responses:
         "200": { $ref: "#/components/responses/ImageHead" }
@@ -699,11 +722,15 @@ paths:
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
+        - BearerToken: []
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ApiKeyCompactQuery: []
+        - PlaybackCapabilityQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/Range" }
         - { $ref: "#/components/parameters/StreamPlaySessionId" }
         - { $ref: "#/components/parameters/StreamMediaSourceId" }
@@ -728,11 +755,15 @@ paths:
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
+        - BearerToken: []
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ApiKeyCompactQuery: []
+        - PlaybackCapabilityQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/Range" }
         - { $ref: "#/components/parameters/StreamPlaySessionId" }
         - { $ref: "#/components/parameters/StreamMediaSourceId" }
@@ -761,11 +792,15 @@ paths:
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
+        - BearerToken: []
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ApiKeyCompactQuery: []
+        - PlaybackCapabilityQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/Range" }
         - { $ref: "#/components/parameters/StreamPlaySessionId" }
         - { $ref: "#/components/parameters/StreamMediaSourceId" }
@@ -790,11 +825,15 @@ paths:
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
+        - BearerToken: []
         - XEmbyAuthorizationToken: []
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
+        - ApiKeyCompactQuery: []
+        - PlaybackCapabilityQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
+        - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/Range" }
         - { $ref: "#/components/parameters/StreamPlaySessionId" }
         - { $ref: "#/components/parameters/StreamMediaSourceId" }
@@ -1006,29 +1045,44 @@ components:
       name: Authorization
       description: >
         `MediaBrowser` or `Emby` authorization parameters containing `Token="rivune_jf_…"`.
-        This is not HTTP Bearer authentication.
+    BearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: rivune_jf_
+      description: HTTP Bearer transport for the compatibility credential.
     XEmbyAuthorizationToken:
       type: apiKey
       in: header
       name: X-Emby-Authorization
       description: >
-        `MediaBrowser` or `Emby` authorization parameters containing the compatibility
-        `Token`, optionally with bounded client metadata.
+        Optionally `MediaBrowser`/`Emby`-prefixed authorization parameters containing
+        the compatibility `Token`, with optional bounded client metadata.
     XMediaBrowserAuthorizationToken:
       type: apiKey
       in: header
       name: X-MediaBrowser-Authorization
       description: >
-        `MediaBrowser` or `Emby` authorization parameters containing the compatibility
-        `Token`, optionally with bounded client metadata.
+        Optionally `MediaBrowser`/`Emby`-prefixed authorization parameters containing
+        the compatibility `Token`, with optional bounded client metadata.
     ApiKeyQuery:
       type: apiKey
       in: query
       name: api_key
       description: >
-        URL authentication accepted only by documented artwork and stream operations.
-        Stream URLs may use the matching PlaySessionId as an item/source-bound capability.
-        A duplicate query value or a value conflicting with any header credential fails.
+        URL transport accepted on every authenticated operation. Lower-precedence
+        transports are ignored after the first populated credential.
+    ApiKeyCompactQuery:
+      type: apiKey
+      in: query
+      name: ApiKey
+      description: Underscore-free Jellyfin alias for the global URL credential transport.
+    PlaybackCapabilityQuery:
+      type: apiKey
+      in: query
+      name: PlaySessionId
+      description: >
+        Short-lived owner/item/source-bound stream capability. Missing or unusable
+        credentials may fall back to this capability; a valid foreign credential may not.
     ArtworkTagQuery:
       type: apiKey
       in: query
@@ -1197,7 +1251,13 @@ components:
       name: api_key
       in: query
       required: false
-      description: Opaque compatibility credential, or the matching scoped PlaySessionId on stream URLs; accepted only on image and stream routes.
+      description: Opaque compatibility credential accepted globally, or the matching scoped PlaySessionId on generated stream URLs.
+      schema: { type: string, minLength: 1 }
+    ApiKeyCompact:
+      name: ApiKey
+      in: query
+      required: false
+      description: Underscore-free alias for the opaque global compatibility credential.
       schema: { type: string, minLength: 1 }
     ArtworkTag:
       name: tag
@@ -1754,7 +1814,7 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/MediaSourceInfo" }
-          description: Deferred item-ID sentinels in catalogue arrays; scoped playable sources on VidHub item details and PlaybackInfo.
+          description: Deferred item-ID sentinels in catalogue arrays; scoped playable sources on item details and PlaybackInfo.
     BaseItemPerson:
       type: object
       additionalProperties: false

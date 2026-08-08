@@ -64,8 +64,12 @@ func (handler *Handler) handlePlayingPing(response http.ResponseWriter, request 
 	if playSessionID == "" {
 		playSessionID = strings.TrimSpace(queryID)
 	}
-	if !boundedStateSelector(playSessionID) || handler.playSessions.ping(session, playSessionID) != nil {
-		handler.writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "The playback session was not found")
+	if !boundedStateSelector(playSessionID) {
+		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The playback event is invalid")
+		return
+	}
+	if handler.playSessions.ping(session, playSessionID) != nil {
+		response.WriteHeader(http.StatusNoContent)
 		return
 	}
 	response.WriteHeader(http.StatusNoContent)
@@ -105,13 +109,14 @@ func (handler *Handler) handlePlaybackEvent(response http.ResponseWriter, reques
 		strings.TrimSpace(input.ItemId),
 		strings.TrimSpace(input.PlaySessionId),
 		strings.TrimSpace(input.MediaSourceId),
+		kind != playbackEventStopped,
 	)
 	if err != nil {
-		if !errors.Is(err, errPlaySessionNotFound) {
-			handler.writeStateError(response, err)
+		if errors.Is(err, errPlaySessionNotFound) {
+			response.WriteHeader(http.StatusNoContent)
 			return
 		}
-		handler.writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "The playback session was not found")
+		handler.writeStateError(response, err)
 		return
 	}
 	defer lease.release()
@@ -132,8 +137,8 @@ func (handler *Handler) handlePlaybackEvent(response http.ResponseWriter, reques
 			request.Context(), session, binding.ItemID, binding.PlaySessionID, binding.MediaSourceID,
 		)
 	}
-	if closeErr != nil {
-		handler.writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "The playback session was not found")
+	if closeErr != nil && !errors.Is(closeErr, errPlaySessionNotFound) {
+		handler.writeStateError(response, closeErr)
 		return
 	}
 	response.WriteHeader(http.StatusNoContent)

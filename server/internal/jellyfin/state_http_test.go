@@ -113,7 +113,7 @@ func TestStoppedUpdatesProgressClosesRegistryAndRejectsDuplicates(t *testing.T) 
 	}
 
 	response = serveStateRequest(handler.handlePlayingStopped, token, body)
-	if response.Code != http.StatusNotFound || service.progress[itemID].Version != 1 {
+	if response.Code != http.StatusNoContent || service.progress[itemID].Version != 1 {
 		t.Fatalf("duplicate stopped status=%d progress=%+v", response.Code, service.progress[itemID])
 	}
 
@@ -121,11 +121,21 @@ func TestStoppedUpdatesProgressClosesRegistryAndRejectsDuplicates(t *testing.T) 
 	authentication.session.ID = "66666666-6666-4666-8666-666666666666"
 	crossAccountBody := `{"ItemId":"` + itemID + `","PlaySessionId":"` + playID + `","PositionTicks":500000000}`
 	response = serveStateRequest(handler.handlePlayingProgress, token, crossAccountBody)
-	if response.Code != http.StatusNotFound {
+	if response.Code != http.StatusNoContent {
 		t.Fatalf("cross-account progress status=%d body=%s", response.Code, response.Body.String())
 	}
 	if len(registry.entries) != 1 || len(service.progress) != 0 {
 		t.Fatal("cross-account request changed playback or watch state")
+	}
+}
+
+func TestProgressFallsBackToUniqueNegotiatedItemAndSource(t *testing.T) {
+	handler, _, service, registry, token, itemID, playID, mediaID := stateHTTPFixture(t)
+	body := `{"ItemId":"` + itemID + `","PlaySessionId":"client-play-session-alias-0001","MediaSourceId":"` + mediaID + `","PositionTicks":250000000}`
+	response := serveStateRequest(handler.handlePlayingProgress, token, body)
+	progress := service.progress[itemID]
+	if response.Code != http.StatusNoContent || progress.PositionSeconds != 25 || progress.Version != 1 || registry.entries[playID] == nil {
+		t.Fatalf("fallback progress status=%d progress=%+v sessionPreserved=%t", response.Code, progress, registry.entries[playID] != nil)
 	}
 }
 
@@ -185,7 +195,7 @@ func TestStoppedSerializesQueuedProgressThroughTerminalClose(t *testing.T) {
 	close(blocking.release)
 	stoppedResponse := <-stoppedResult
 	progressResponse := <-progressResult
-	if stoppedResponse.Code != http.StatusNoContent || progressResponse.Code != http.StatusNotFound {
+	if stoppedResponse.Code != http.StatusNoContent || progressResponse.Code != http.StatusNoContent {
 		t.Fatalf("concurrent statuses stopped=%d progress=%d", stoppedResponse.Code, progressResponse.Code)
 	}
 	progress := service.progress[itemID]
@@ -222,7 +232,7 @@ func TestConcurrentStoppedEventsPersistOnlyFirst(t *testing.T) {
 	close(blocking.release)
 	firstResponse := <-firstResult
 	secondResponse := <-secondResult
-	if firstResponse.Code != http.StatusNoContent || secondResponse.Code != http.StatusNotFound {
+	if firstResponse.Code != http.StatusNoContent || secondResponse.Code != http.StatusNoContent {
 		t.Fatalf("concurrent stopped statuses first=%d second=%d", firstResponse.Code, secondResponse.Code)
 	}
 	if progress := service.progress[itemID]; progress.PositionSeconds != 600 || service.updateCalls != 1 {
@@ -335,7 +345,7 @@ func TestPlaybackEventWithoutMediaSourceRejectsNoOrMultipleOpenSources(t *testin
 			lastSeen := entry.lastSeenAt
 			body := `{"ItemId":"` + itemID + `","PlaySessionId":"` + playID + `","PositionTicks":250000000}`
 			response := serveStateRequest(handler.handlePlayingProgress, token, body)
-			if response.Code != http.StatusNotFound || len(service.progress) != 0 {
+			if response.Code != http.StatusNoContent || len(service.progress) != 0 {
 				t.Fatalf("status=%d progress=%+v body=%s", response.Code, service.progress, response.Body.String())
 			}
 			if !entry.lastSeenAt.Equal(lastSeen) {
@@ -465,7 +475,7 @@ func TestPlaybackEventRejectsMismatchedSelectorsAndUnknownPing(t *testing.T) {
 	handler, _, service, registry, token, itemID, playID, mediaID := stateHTTPFixture(t)
 	mismatch := `{"ItemId":"00000000-0000-4000-8000-000000000099","PlaySessionId":"` + playID + `","MediaSourceId":"` + mediaID + `","PositionTicks":100000000}`
 	response := serveStateRequest(handler.handlePlayingProgress, token, mismatch)
-	if response.Code != http.StatusNotFound || len(service.progress) != 0 || len(registry.entries) != 1 {
+	if response.Code != http.StatusNoContent || len(service.progress) != 0 || len(registry.entries) != 1 {
 		t.Fatalf("mismatched item status=%d progress=%+v entries=%d", response.Code, service.progress, len(registry.entries))
 	}
 	mismatch = `{"UserId":"22222222-2222-4222-8222-222222222222","ItemId":"` + itemID + `","PlaySessionId":"` + playID + `","MediaSourceId":"` + mediaID + `","PositionTicks":100000000}`
@@ -475,7 +485,7 @@ func TestPlaybackEventRejectsMismatchedSelectorsAndUnknownPing(t *testing.T) {
 	}
 	unknownPing := `{"PlaySessionId":"unknown-play-session"}`
 	response = serveStateRequest(handler.handlePlayingPing, token, unknownPing)
-	if response.Code != http.StatusNotFound {
+	if response.Code != http.StatusNoContent {
 		t.Fatalf("unknown ping status=%d body=%s", response.Code, response.Body.String())
 	}
 	validPing := `{"PlaySessionId":"` + playID + `"}`
@@ -626,7 +636,7 @@ func stateHTTPFixture(t *testing.T) (*Handler, *stateAuthentication, *memoryWatc
 	now := time.Now().UTC()
 	session := AuthenticatedSession{
 		ID: "33333333-3333-4333-8333-333333333333", ProfileID: profileID, ProfileName: "Profile",
-		Client:    ClientIdentity{Client: "Infuse", Device: "Living Room", DeviceID: "device-one", Version: "8.1"},
+		Client:    ClientIdentity{Client: "Generic Client", Device: "Living Room", DeviceID: "device-one", Version: "8.1"},
 		ExpiresAt: now.Add(time.Hour),
 		Principal: auth.Principal{SessionID: "44444444-4444-4444-8444-444444444444", UserID: "55555555-5555-4555-8555-555555555555", ActiveProfileID: &profileID},
 	}

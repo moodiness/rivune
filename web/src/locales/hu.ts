@@ -795,7 +795,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "A kiszolgáló csak akkor alakíthatja át a nem kompatibilis médiát, ha sem a közvetlen lejátszás, sem a közvetlen adatfolyam nem használható",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Ez az alkalmazásjelszó kizárólag ehhez a profilhoz használható.",
   "settings.jellyfinAccess.pinHint": "A titkos érték csak egyszer jelenik meg. Másolja ki és mentse el most.",
   "settings.jellyfinAccess.rotateWarning": "A cserével a jelenlegi jelszó és minden Jellyfin-munkamenet azonnal érvénytelenné válik.",

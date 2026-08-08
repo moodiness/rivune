@@ -158,7 +158,7 @@ func TestDiscoveryLoginMeLogoutSequenceUsesOnlyCompatIdentity(t *testing.T) {
 	fake, mux := newDiscoveryHTTPTestServer(t)
 	login := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(`{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"correct horse"}`))
 	login.Header.Set("Content-Type", "application/json")
-	login.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="Living Room", DeviceId="infuse-device", Version="8.2"`)
+	login.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Generic Client", Device="Living Room", DeviceId="generic-client-device", Version="8.2"`)
 	loginResponse := httptest.NewRecorder()
 	mux.ServeHTTP(loginResponse, login)
 	if loginResponse.Code != http.StatusOK {
@@ -187,7 +187,7 @@ func TestDiscoveryLoginMeLogoutSequenceUsesOnlyCompatIdentity(t *testing.T) {
 	if strings.Contains(loginResponse.Body.String(), fake.session.Principal.SessionID) || strings.Contains(loginResponse.Body.String(), "rivune_at_") {
 		t.Fatal("login disclosed native session material")
 	}
-	if fake.lastLogin.Username != "c3000000-0000-4000-8000-000000000003" || fake.lastLogin.Client.Client != "Infuse" {
+	if fake.lastLogin.Username != "c3000000-0000-4000-8000-000000000003" || fake.lastLogin.Client.Client != "Generic Client" {
 		t.Fatalf("login fields were not parsed as expected: username=%q client=%q", fake.lastLogin.Username, fake.lastLogin.Client.Client)
 	}
 
@@ -239,10 +239,10 @@ func TestAuthenticateByNameAcceptsObservedFieldAliasesWithoutChangingPassword(t 
 			fake, mux := newDiscoveryHTTPTestServer(t)
 			request := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(test.body))
 			request.Header.Set("Content-Type", "application/json; charset=utf-8")
-			request.Header.Set("Authorization", `MediaBrowser Client="VidHub", Device="Tablet", DeviceId="vidhub-device", Version="2.4", Token=""`)
+			request.Header.Set("Authorization", `MediaBrowser Client="Compatibility Client", Device="Tablet", DeviceId="compatibility-client-device", Version="2.4", Token=""`)
 			response := httptest.NewRecorder()
 			mux.ServeHTTP(response, request)
-			if response.Code != http.StatusOK || fake.lastLogin.Password != test.password || fake.lastLogin.Client.Client != "VidHub" {
+			if response.Code != http.StatusOK || fake.lastLogin.Password != test.password || fake.lastLogin.Client.Client != "Compatibility Client" {
 				t.Fatalf("login status=%d client=%q passwordPreserved=%t", response.Code, fake.lastLogin.Client.Client, fake.lastLogin.Password == test.password)
 			}
 		})
@@ -270,7 +270,7 @@ func TestAuthenticateByNameLogsSafeClientMetadataFailureStage(t *testing.T) {
 		`{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"`+secret+`"}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="`+device+`"`)
+	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Generic Client", Device="`+device+`"`)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	assertCompatUnauthorized(t, response)
@@ -311,7 +311,7 @@ func TestAuthenticateByNameLogsSafePasswordFailureDetail(t *testing.T) {
 		`{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"`+secret+`","Password":"`+differentSecret+`"}`,
 	))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="TV", DeviceId="infuse-device", Version="8"`)
+	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Generic Client", Device="TV", DeviceId="generic-client-device", Version="8"`)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	assertCompatUnauthorized(t, response)
@@ -350,7 +350,7 @@ func TestAuthenticateByNameEnforcesUTF8PasswordByteLimitForBothAliases(t *testin
 			body := `{"Username":"c3000000-0000-4000-8000-000000000003",` + credentialFields + `}`
 			request := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(body))
 			request.Header.Set("Content-Type", "application/json")
-			request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`)
+			request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Generic Client", Device="TV", DeviceId="dev", Version="8"`)
 			response := httptest.NewRecorder()
 			mux.ServeHTTP(response, request)
 			if response.Code != test.wantStatus {
@@ -371,7 +371,7 @@ func TestAuthenticateByNameRejectsNativeAccountUsernameBeforeAuthentication(t *t
 	fake, mux := newDiscoveryHTTPTestServer(t)
 	request := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(`{"Username":"owner","Pw":"native-account-password"}`))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`)
+	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Generic Client", Device="TV", DeviceId="dev", Version="8"`)
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
 	assertCompatUnauthorized(t, response)
@@ -388,11 +388,11 @@ func TestAuthenticateByNameFailsClosedWithoutCredentialEnumeration(t *testing.T)
 		body   string
 		header string
 	}{
-		{name: "bad password", body: `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"wrong"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
-		{name: "native account name", body: `{"Username":"owner","Pw":"correct"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
-		{name: "unknown credential", body: `{"Username":"c4000000-0000-4000-8000-000000000004","Pw":"correct"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
+		{name: "bad password", body: `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"wrong"}`, header: `MediaBrowser Client="Generic Client", Device="TV", DeviceId="dev", Version="8"`},
+		{name: "native account name", body: `{"Username":"owner","Pw":"correct"}`, header: `MediaBrowser Client="Generic Client", Device="TV", DeviceId="dev", Version="8"`},
+		{name: "unknown credential", body: `{"Username":"c4000000-0000-4000-8000-000000000004","Pw":"correct"}`, header: `MediaBrowser Client="Generic Client", Device="TV", DeviceId="dev", Version="8"`},
 		{name: "missing auth metadata", body: `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"correct"}`},
-		{name: "conflicting aliases", body: `{"Username":"c3000000-0000-4000-8000-000000000003","UserName":"c4000000-0000-4000-8000-000000000004","Pw":"correct"}`, header: `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`},
+		{name: "conflicting aliases", body: `{"Username":"c3000000-0000-4000-8000-000000000003","UserName":"c4000000-0000-4000-8000-000000000004","Pw":"correct"}`, header: `MediaBrowser Client="Generic Client", Device="TV", DeviceId="dev", Version="8"`},
 	}
 	var canonicalBody string
 	for _, test := range requests {
@@ -417,12 +417,12 @@ func TestAuthenticateByNameFailsClosedWithoutCredentialEnumeration(t *testing.T)
 	}
 }
 
-func TestCompatHTTPRejectsOversizeAmbiguousAndCrossProfileRequests(t *testing.T) {
+func TestCompatHTTPRejectsOversizeAndCrossProfileAndHonorsCredentialPrecedence(t *testing.T) {
 	fake, mux := newDiscoveryHTTPTestServer(t)
 	oversize := `{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"` + strings.Repeat("secret", 3000) + `"}`
 	oversizeRequest := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(oversize))
 	oversizeRequest.Header.Set("Content-Type", "application/json")
-	oversizeRequest.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`)
+	oversizeRequest.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Generic Client", Device="TV", DeviceId="dev", Version="8"`)
 	oversizeResponse := httptest.NewRecorder()
 	mux.ServeHTTP(oversizeResponse, oversizeRequest)
 	if oversizeResponse.Code != http.StatusBadRequest || fake.loginCalls != 0 || strings.Contains(oversizeResponse.Body.String(), "secret") {
@@ -435,7 +435,7 @@ func TestCompatHTTPRejectsOversizeAmbiguousAndCrossProfileRequests(t *testing.T)
 	} {
 		malformedRequest := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(malformedBody))
 		malformedRequest.Header.Set("Content-Type", "application/json")
-		malformedRequest.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="TV", DeviceId="dev", Version="8"`)
+		malformedRequest.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Generic Client", Device="TV", DeviceId="dev", Version="8"`)
 		malformedResponse := httptest.NewRecorder()
 		mux.ServeHTTP(malformedResponse, malformedRequest)
 		if malformedResponse.Code != http.StatusBadRequest || fake.loginCalls != 0 {
@@ -449,13 +449,24 @@ func TestCompatHTTPRejectsOversizeAmbiguousAndCrossProfileRequests(t *testing.T)
 	ambiguous.Header.Set("X-MediaBrowser-Token", otherToken)
 	ambiguousResponse := httptest.NewRecorder()
 	mux.ServeHTTP(ambiguousResponse, ambiguous)
-	assertCompatUnauthorized(t, ambiguousResponse)
+	if ambiguousResponse.Code != http.StatusOK {
+		t.Fatalf("credential precedence status=%d body=%s", ambiguousResponse.Code, ambiguousResponse.Body.String())
+	}
 
-	queryToken := httptest.NewRequest(http.MethodGet, "/Users/Me?api_key="+fake.token, nil)
-	queryToken.Header.Set("X-Emby-Token", fake.token)
+	queryToken := httptest.NewRequest(http.MethodGet, "/Users/Me?ApiKey="+fake.token, nil)
 	queryTokenResponse := httptest.NewRecorder()
 	mux.ServeHTTP(queryTokenResponse, queryToken)
-	assertCompatUnauthorized(t, queryTokenResponse)
+	if queryTokenResponse.Code != http.StatusOK {
+		t.Fatalf("global ApiKey query status=%d body=%s", queryTokenResponse.Code, queryTokenResponse.Body.String())
+	}
+
+	bearer := httptest.NewRequest(http.MethodGet, "/Users/Me", nil)
+	bearer.Header.Set("Authorization", "Bearer "+fake.token)
+	bearerResponse := httptest.NewRecorder()
+	mux.ServeHTTP(bearerResponse, bearer)
+	if bearerResponse.Code != http.StatusOK {
+		t.Fatalf("bearer authorization status=%d body=%s", bearerResponse.Code, bearerResponse.Body.String())
+	}
 
 	crossProfile := httptest.NewRequest(http.MethodGet, "/Users/c3000000-0000-4000-8000-000000000003", nil)
 	crossProfile.Header.Set("X-Emby-Token", fake.token)
@@ -471,6 +482,14 @@ func TestCompatHTTPRejectsOversizeAmbiguousAndCrossProfileRequests(t *testing.T)
 	mux.ServeHTTP(headerMismatchResponse, headerMismatch)
 	if headerMismatchResponse.Code != http.StatusNotFound {
 		t.Fatalf("cross-profile auth header status = %d, want 404", headerMismatchResponse.Code)
+	}
+
+	unschemedMismatch := httptest.NewRequest(http.MethodGet, "/Users/Me", nil)
+	unschemedMismatch.Header.Set("X-MediaBrowser-Authorization", `Token="`+fake.token+`", UserId="c3000000-0000-4000-8000-000000000003"`)
+	unschemedMismatchResponse := httptest.NewRecorder()
+	mux.ServeHTTP(unschemedMismatchResponse, unschemedMismatch)
+	if unschemedMismatchResponse.Code != http.StatusNotFound {
+		t.Fatalf("cross-profile unschemed auth header status = %d, want 404", unschemedMismatchResponse.Code)
 	}
 
 	fake.authenticateErr = ErrInvalidCompatCredential

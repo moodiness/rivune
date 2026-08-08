@@ -166,12 +166,12 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	handler.handleViews(viewsResponse, viewsRequest)
 	var namedViews QueryResult[BaseItemDto]
 	decodeCatalogResponse(t, viewsResponse, &namedViews)
-	if viewsResponse.Code != http.StatusOK || namedViews.TotalRecordCount != 3 || len(namedViews.Items) != 3 {
-		t.Fatalf("virtual collection views status=%d result=%+v", viewsResponse.Code, namedViews)
+	if viewsResponse.Code != http.StatusOK || namedViews.TotalRecordCount != 3 || len(namedViews.Items) != 3 || namedViews.Items[2].Id != collectionCompatID || namedViews.Items[2].Type != "CollectionFolder" {
+		t.Fatalf("promoted collection views status=%d result=%+v", viewsResponse.Code, namedViews)
 	}
 	for _, view := range namedViews.Items {
-		if view.Id == collectionCompatID || view.UserData == nil || view.UserData.ItemId != view.Id {
-			t.Fatalf("direct collection leaked into My Media or view identity is incomplete: %+v", view)
+		if view.UserData == nil || view.UserData.ItemId != view.Id {
+			t.Fatalf("view identity is incomplete: %+v", view)
 		}
 	}
 
@@ -181,7 +181,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	var user UserDto
 	decodeCatalogResponse(t, userResponse, &user)
 	if userResponse.Code != http.StatusOK || len(user.Configuration.MyMediaExcludes) != 0 ||
-		len(user.Configuration.OrderedViews) != 3 || user.Configuration.OrderedViews[2] != views[2].Id {
+		len(user.Configuration.OrderedViews) != 3 || user.Configuration.OrderedViews[2] != collectionCompatID {
 		t.Fatalf("collection view configuration status=%d config=%+v", userResponse.Code, user.Configuration)
 	}
 
@@ -306,9 +306,9 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	handler.handleItem(detailResponse, detailRequest)
 	var detail BaseItemDto
 	decodeCatalogResponse(t, detailResponse, &detail)
-	if detailResponse.Code != http.StatusOK || detail.Type != "BoxSet" || detail.ImageTags["Primary"] != backdropTag ||
+	if detailResponse.Code != http.StatusOK || detail.Type != "CollectionFolder" || detail.CollectionType != "boxsets" || detail.ImageTags["Primary"] != backdropTag ||
 		len(detail.BackdropImageTags) != 1 || detail.BackdropImageTags[0] != backdropTag {
-		t.Fatalf("authorized boxset detail status=%d item=%+v body=%s", detailResponse.Code, detail, detailResponse.Body.String())
+		t.Fatalf("authorized collection view detail status=%d item=%+v body=%s", detailResponse.Code, detail, detailResponse.Body.String())
 	}
 
 	foreignRequest := authenticatedCatalogRequest(t, token, "/Items/"+foreignCollectionCompatID)
@@ -320,14 +320,13 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	}
 }
 
-func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
+func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 	handler, service, _, token := newCollectionCompatHandler(t)
-	handler.authentication.(*catalogHTTPAuthentication).session.Client = ClientIdentity{Client: "VidHub"}
 	service.authorized.FolderCoverShape = collection.TileShapeLandscape
 	for index := range service.authorized.Folders {
 		service.authorized.Folders[index].TileShape = collection.TileShapePoster
 	}
-	coverURL := "https://provider.invalid/vidhub-landscape-cover.png"
+	coverURL := "https://provider.invalid/compatibility-client-landscape-cover.png"
 	coverTag := strings.Repeat("d", 64)
 	hydratedTag := strings.Repeat("e", 64)
 	localizedCover := localizedArtworkPrefix + coverTag
@@ -356,7 +355,7 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 		views.Items[2].PrimaryImageAspectRatio != 16.0/9.0 || views.Items[2].ImageTags["Thumb"] != coverTag ||
 		len(views.Items[2].BackdropImageTags) != 1 || views.Items[2].BackdropImageTags[0] != coverTag ||
 		views.Items[2].UserData == nil || views.Items[2].UserData.ItemId != collectionCompatID {
-		t.Fatalf("VidHub home views status=%d result=%+v", viewsResponse.Code, views)
+		t.Fatalf("promoted home views status=%d result=%+v", viewsResponse.Code, views)
 	}
 
 	userRequest := authenticatedCatalogRequest(t, token, "/Users/Me")
@@ -366,7 +365,7 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 	decodeCatalogResponse(t, userResponse, &user)
 	if userResponse.Code != http.StatusOK || len(user.Configuration.OrderedViews) != 3 ||
 		user.Configuration.OrderedViews[2] != collectionCompatID || len(user.Configuration.MyMediaExcludes) != 0 {
-		t.Fatalf("VidHub ordered home views status=%d config=%+v", userResponse.Code, user.Configuration)
+		t.Fatalf("ordered home views status=%d config=%+v", userResponse.Code, user.Configuration)
 	}
 
 	latestRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items/Latest?ParentId="+collectionCompatID+"&Fields=BasicSyncInfo,Overview,CollectionType,UserData&Recursive=true&MediaTypes=Video&Limit=20&IsPlayed=false")
@@ -375,13 +374,13 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 	var latest []BaseItemDto
 	decodeCatalogResponse(t, latestResponse, &latest)
 	if latestResponse.Code != http.StatusOK || len(latest) != 2 || latest[0].Name != "First" || latest[1].Name != "Second" {
-		t.Fatalf("VidHub home collection row status=%d items=%+v body=%s", latestResponse.Code, latest, latestResponse.Body.String())
+		t.Fatalf("home collection row status=%d items=%+v body=%s", latestResponse.Code, latest, latestResponse.Body.String())
 	}
 	for _, item := range latest {
 		if item.Type != "CollectionFolder" || item.ParentId != collectionCompatID || item.CollectionType != "homevideos" ||
 			item.PrimaryImageAspectRatio != 16.0/9.0 || item.ImageTags["Thumb"] == "" || len(item.BackdropImageTags) != 1 ||
 			item.BackdropImageTags[0] != item.ImageTags["Thumb"] || item.UserData == nil || item.UserData.ItemId != item.Id {
-			t.Fatalf("VidHub home row contains an invalid landscape folder: %+v", item)
+			t.Fatalf("home row contains an invalid landscape folder: %+v", item)
 		}
 	}
 	backdropRequest := authenticatedCatalogRequest(t, token, "/Items/"+latest[0].Id+"/Images/Backdrop/0")
@@ -391,7 +390,7 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 	backdropResponse := httptest.NewRecorder()
 	handler.handleIndexedImage(backdropResponse, backdropRequest)
 	if backdropResponse.Code != http.StatusOK || len(presenter.served) != 1 || presenter.served[0] != latest[0].BackdropImageTags[0] {
-		t.Fatalf("VidHub advertised folder backdrop status=%d served=%v item=%+v", backdropResponse.Code, presenter.served, latest[0])
+		t.Fatalf("advertised folder backdrop status=%d served=%v item=%+v", backdropResponse.Code, presenter.served, latest[0])
 	}
 	detailRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items/"+collectionCompatID)
 	detailRequest.SetPathValue("userId", catalogTestProfileID)
@@ -403,7 +402,7 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 	if detailResponse.Code != http.StatusOK || detail.Type != "CollectionFolder" || detail.CollectionType != "homevideos" ||
 		detail.PrimaryImageAspectRatio != 16.0/9.0 || detail.ImageTags["Thumb"] != coverTag ||
 		len(detail.BackdropImageTags) != 1 || detail.BackdropImageTags[0] != coverTag {
-		t.Fatalf("VidHub promoted collection detail status=%d item=%+v", detailResponse.Code, detail)
+		t.Fatalf("promoted collection detail status=%d item=%+v", detailResponse.Code, detail)
 	}
 
 	itemsRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&Recursive=true&Limit=2")
@@ -413,7 +412,7 @@ func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
 	var items QueryResult[BaseItemDto]
 	decodeCatalogResponse(t, itemsResponse, &items)
 	if itemsResponse.Code != http.StatusOK || len(items.Items) != 2 || items.Items[0].Type == "Folder" || items.Items[1].Type == "Folder" {
-		t.Fatalf("VidHub direct collection view status=%d result=%+v", itemsResponse.Code, items)
+		t.Fatalf("direct collection view status=%d result=%+v", itemsResponse.Code, items)
 	}
 }
 
@@ -434,26 +433,24 @@ func TestCollectionFolderAspectRatioUsesCollectionCoverShape(t *testing.T) {
 	}
 }
 
-func TestCollectionFolderPromotionAppliesOnlyToVidHubLandscape(t *testing.T) {
+func TestCollectionFolderTypeFollowsCoverShape(t *testing.T) {
 	handler := &Handler{}
 	for _, test := range []struct {
 		shape    string
-		promoted bool
 		wantType string
 	}{
-		{shape: collection.TileShapeLandscape, promoted: true, wantType: "CollectionFolder"},
-		{shape: collection.TileShapeLandscape, wantType: "Folder"},
-		{shape: collection.TileShapePoster, promoted: true, wantType: "Folder"},
-		{shape: collection.TileShapeSquare, promoted: true, wantType: "Folder"},
+		{shape: collection.TileShapeLandscape, wantType: "CollectionFolder"},
+		{shape: collection.TileShapePoster, wantType: "Folder"},
+		{shape: collection.TileShapeSquare, wantType: "Folder"},
 	} {
-		item := handler.collectionFolderDTO(collection.Collection{FolderCoverShape: test.shape}, collection.Folder{}, test.promoted)
+		item := handler.collectionFolderDTO(collection.Collection{FolderCoverShape: test.shape}, collection.Folder{})
 		if item.Type != test.wantType {
-			t.Fatalf("shape=%q promoted=%t type=%q want=%q", test.shape, test.promoted, item.Type, test.wantType)
+			t.Fatalf("shape=%q type=%q want=%q", test.shape, item.Type, test.wantType)
 		}
 	}
 }
 
-func TestCollectionViewTypeAndArtworkFollowSupportedVidHubCoverShape(t *testing.T) {
+func TestCollectionViewTypeAndArtworkFollowSupportedCoverShape(t *testing.T) {
 	for _, test := range []struct {
 		shape          string
 		collectionType string
@@ -473,9 +470,8 @@ func TestCollectionViewTypeAndArtworkFollowSupportedVidHubCoverShape(t *testing.
 	}
 }
 
-func TestVidHubViewProjectionFallsBackTogether(t *testing.T) {
+func TestCollectionViewProjectionFallsBackTogether(t *testing.T) {
 	handler, service, _, token := newCollectionCompatHandler(t)
-	handler.authentication.(*catalogHTTPAuthentication).session.Client = ClientIdentity{Client: "VidHub"}
 	service.listErr = errors.New("collection store unavailable")
 
 	viewsRequest := authenticatedCatalogRequest(t, token, "/UserViews?UserId="+catalogTestProfileID)
@@ -493,7 +489,7 @@ func TestVidHubViewProjectionFallsBackTogether(t *testing.T) {
 	if viewsResponse.Code != http.StatusOK || userResponse.Code != http.StatusOK || len(views.Items) != 2 ||
 		len(user.Configuration.OrderedViews) != 2 || user.Configuration.OrderedViews[0] != views.Items[0].Id ||
 		user.Configuration.OrderedViews[1] != views.Items[1].Id {
-		t.Fatalf("VidHub fallback diverged: viewsStatus=%d views=%+v userStatus=%d config=%+v", viewsResponse.Code, views, userResponse.Code, user.Configuration)
+		t.Fatalf("collection fallback diverged: viewsStatus=%d views=%+v userStatus=%d config=%+v", viewsResponse.Code, views, userResponse.Code, user.Configuration)
 	}
 }
 

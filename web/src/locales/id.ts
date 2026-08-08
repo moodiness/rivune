@@ -674,7 +674,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Izinkan server mengonversi media yang tidak kompatibel hanya setelah Pemutaran Langsung dan Streaming Langsung gagal",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Kata sandi aplikasi ini hanya berlaku untuk profil ini.",
   "settings.jellyfinAccess.pinHint": "Rahasia ini hanya ditampilkan sekali. Simpan sekarang.",
   "settings.jellyfinAccess.rotateWarning": "Mengganti kata sandi akan segera membatalkan kata sandi saat ini dan semua sesi Jellyfin.",

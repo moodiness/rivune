@@ -801,7 +801,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Permite serverului să convertească fișierele media incompatibile numai după ce redarea directă și redarea în flux directă eșuează",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Această parolă de aplicație este limitată exclusiv la acest profil.",
   "settings.jellyfinAccess.pinHint": "Secretul este afișat o singură dată. Copiază-l și salvează-l acum.",
   "settings.jellyfinAccess.rotateWarning": "Rotirea invalidează imediat parola actuală și toate sesiunile Jellyfin.",

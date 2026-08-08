@@ -631,14 +631,17 @@ func (registry *playSessionRegistry) resolveAndTouch(session AuthenticatedSessio
 	return binding, nil
 }
 
-func (registry *playSessionRegistry) claimPlaybackEvent(ctx context.Context, session AuthenticatedSession, itemID, playID, mediaID string) (playSessionBinding, playbackEventLease, error) {
+func (registry *playSessionRegistry) claimPlaybackEvent(ctx context.Context, session AuthenticatedSession, itemID, playID, mediaID string, allowRouteFallback bool) (playSessionBinding, playbackEventLease, error) {
 	if registry == nil {
 		return playSessionBinding{}, playbackEventLease{}, errPlaySessionNotFound
 	}
 	now := registry.now().UTC()
 	registry.mu.Lock()
 	stale := registry.removeExpiredLocked(now)
-	entry, _, ok := registry.lookupLocked(session, itemID, playID, mediaID, now)
+	entry, source, ok := registry.lookupLocked(session, itemID, playID, mediaID, now)
+	if !ok && allowRouteFallback {
+		entry, source, ok = registry.playbackEventByRouteLocked(session, itemID, mediaID, now)
+	}
 	var token chan struct{}
 	if ok {
 		if entry.eventLease == nil {
@@ -657,10 +660,13 @@ func (registry *playSessionRegistry) claimPlaybackEvent(ctx context.Context, ses
 		return playSessionBinding{}, playbackEventLease{}, ctx.Err()
 	}
 
+	actualItemID := entry.itemID
+	actualPlayID := entry.playSessionID
+	actualMediaID := source.descriptor.ID
 	now = registry.now().UTC()
 	registry.mu.Lock()
 	stale = registry.removeExpiredLocked(now)
-	current, source, currentOK := registry.lookupLocked(session, itemID, playID, mediaID, now)
+	current, source, currentOK := registry.lookupLocked(session, actualItemID, actualPlayID, actualMediaID, now)
 	currentOK = currentOK && current == entry && current.eventLease == token
 	var binding playSessionBinding
 	if currentOK {
@@ -674,6 +680,25 @@ func (registry *playSessionRegistry) claimPlaybackEvent(ctx context.Context, ses
 		return playSessionBinding{}, playbackEventLease{}, errPlaySessionNotFound
 	}
 	return binding, playbackEventLease{token: token}, nil
+}
+
+func (registry *playSessionRegistry) playbackEventByRouteLocked(session AuthenticatedSession, itemID, mediaID string, now time.Time) (*playSessionEntry, *playSessionSource, bool) {
+	if itemID == "" {
+		return nil, nil, false
+	}
+	var matchedEntry *playSessionEntry
+	var matchedSource *playSessionSource
+	for playID := range registry.entries {
+		entry, source, ok := registry.lookupLocked(session, itemID, playID, mediaID, now)
+		if !ok {
+			continue
+		}
+		if matchedEntry != nil {
+			return nil, nil, false
+		}
+		matchedEntry, matchedSource = entry, source
+	}
+	return matchedEntry, matchedSource, matchedEntry != nil
 }
 
 func (registry *playSessionRegistry) ping(session AuthenticatedSession, playID string) error {

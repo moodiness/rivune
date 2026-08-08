@@ -674,7 +674,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "僅在直接播放與直接串流均失敗後，才允許伺服器轉換不相容的媒體",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "此應用程式密碼僅限此個人檔案使用。",
   "settings.jellyfinAccess.pinHint": "此密鑰僅顯示一次，請立即妥善保存。",
   "settings.jellyfinAccess.rotateWarning": "輪替後，目前的密碼和所有 Jellyfin 工作階段將立即失效。",

@@ -156,7 +156,7 @@ func TestArtworkGETHEADSelectRegisteredPrimaryAndBackdrop(t *testing.T) {
 	}
 }
 
-func TestArtworkServesObservedVidHubTagCapabilityWithoutToken(t *testing.T) {
+func TestArtworkServesSignedTagCapabilityWithoutToken(t *testing.T) {
 	key := strings.Repeat("d", 64)
 	handler, catalog, delivery := newArtworkHandler(t, nil, nil)
 	request := httptest.NewRequest(
@@ -194,6 +194,7 @@ func TestArtworkServesObservedVidHubTagCapabilityWithoutToken(t *testing.T) {
 		headerValue string
 	}{
 		{name: "invalid api key", target: "?tag=" + key + "&api_key=rivune_at_native"},
+		{name: "invalid compact api key", target: "?tag=" + key + "&ApiKey=rivune_at_native"},
 		{name: "malformed api key", target: "?tag=" + key + "&api_key=%ZZ"},
 		{name: "unsupported authorization", target: "?tag=" + key, headerName: "Authorization", headerValue: "Bearer invalid"},
 		{name: "empty authorization token", target: "?tag=" + key, headerName: "X-Emby-Authorization", headerValue: `MediaBrowser Token=""`},
@@ -244,7 +245,7 @@ func TestArtworkRejectsInvalidSelectorsAndUnregisteredSources(t *testing.T) {
 		{name: "out of range index", itemID: artworkItemOne, imageType: "Backdrop", index: "1", token: artworkTokenOne},
 		{name: "non decimal index", itemID: artworkItemOne, imageType: "Primary", index: "00", token: artworkTokenOne},
 		{name: "native token", itemID: artworkItemOne, imageType: "Primary", token: "rivune_at_native"},
-		{name: "different transports", itemID: artworkItemOne, imageType: "Primary", token: artworkTokenOne, header: artworkTokenTwo},
+		{name: "header precedence", itemID: artworkItemOne, imageType: "Primary", token: artworkTokenOne, header: artworkTokenTwo},
 		{name: "invalid profile selector", itemID: artworkItemOne, imageType: "Primary", token: artworkTokenOne, profile: artworkProfileTwo},
 	}
 	for _, test := range tests {
@@ -274,7 +275,7 @@ func TestArtworkRejectsInvalidSelectorsAndUnregisteredSources(t *testing.T) {
 				handler.handleImage(response, request)
 			}
 			want := http.StatusNotFound
-			if test.name == "native token" || test.name == "different transports" {
+			if test.name == "native token" {
 				want = http.StatusUnauthorized
 			}
 			challenge := response.Header().Get("WWW-Authenticate")

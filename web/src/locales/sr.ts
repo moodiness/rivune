@@ -795,7 +795,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Dozvoli serveru da konvertuje nekompatibilne medije tek kada direktna reprodukcija i direktno strimovanje ne uspeju",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Ova lozinka aplikacije ograničena je samo na ovaj profil.",
   "settings.jellyfinAccess.pinHint": "Tajna vrednost se prikazuje samo jednom. Kopirajte je i sačuvajte sada.",
   "settings.jellyfinAccess.rotateWarning": "Rotacija odmah poništava trenutnu lozinku i sve Jellyfin sesije.",

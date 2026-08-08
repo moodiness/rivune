@@ -98,7 +98,7 @@ func validCompatUUID(value string) bool {
 }
 
 func requestUserMatchesSession(request *http.Request, profileID string) bool {
-	parameters, found, err := collectAuthorizationParameters(request.Header)
+	parameters, found, err := firstAuthorizationParameters(request.Header)
 	if err != nil {
 		return false
 	}

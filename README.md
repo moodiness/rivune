@@ -183,7 +183,7 @@ The Trakt and Simkl credentials identify the Rivune server application; they do 
 
 ### Jellyfin-compatible clients
 
-Rivune can expose a limited Jellyfin-compatible API for supported external client workflows. It is disabled by default and does not turn Rivune into a complete Jellyfin server; unsupported Jellyfin features remain unavailable. For non-loopback installations, clients must use Rivune's HTTPS reverse-proxy origin rather than exposing the raw application port. See [Jellyfin-compatible client access](docs/operations.md#jellyfin-compatible-client-access) for activation, restart, login, and rollback steps.
+Rivune can expose a limited Jellyfin-compatible API for supported third-party native client workflows. It is disabled by default and does not turn Rivune into a complete Jellyfin server; unsupported Jellyfin features remain unavailable. For non-loopback installations, clients must use Rivune's HTTPS reverse-proxy origin rather than exposing the raw application port. See [Jellyfin-compatible client access](docs/operations.md#jellyfin-compatible-client-access) for activation, restart, login, and rollback steps.
 
 ### Provider credentials
 

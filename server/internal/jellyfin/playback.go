@@ -2,7 +2,6 @@ package jellyfin
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -256,69 +255,53 @@ func (handler *Handler) handleStream(response http.ResponseWriter, request *http
 }
 
 func (handler *Handler) authenticateStreamRequest(response http.ResponseWriter, request *http.Request, itemID, playID, mediaID string) (AuthenticatedSession, bool) {
-	playCapability, err := streamCapabilityPresent(request.URL.Query(), playID)
-	if err != nil {
-		handler.writeStreamError(response, request, http.StatusUnauthorized, "Unauthorized", "A valid stream capability is required")
-		handler.logStreamAuthorizationFailure(request, "api_key_shape", false)
+	token, found, parseErr := extractCompatToken(request)
+	if parseErr == nil && found {
+		session, authErr := handler.authentication.Authenticate(request.Context(), token)
+		if authErr == nil {
+			if !validAuthenticatedSession(session) {
+				handler.writeStreamError(response, request, http.StatusUnauthorized, "Unauthorized", "A valid compatibility token is required")
+				return AuthenticatedSession{}, false
+			}
+			if !requestUserMatchesSession(request, session.ProfileID) {
+				handler.writeStreamError(response, request, http.StatusNotFound, "ResourceNotFound", "The requested resource was not found")
+				return AuthenticatedSession{}, false
+			}
+			return session, true
+		}
+		if !errors.Is(authErr, ErrInvalidCompatCredential) && !errors.Is(authErr, ErrInvalidCompatAuthorization) {
+			handler.writeStreamError(response, request, http.StatusInternalServerError, "InternalError", "The stream authorization could not be verified")
+			return AuthenticatedSession{}, false
+		}
+	}
+
+	// Media players frequently replace or drop Jellyfin credentials after
+	// PlaybackInfo. The negotiated PlaySessionId is an opaque, short-lived
+	// capability already bound to owner, item, source and TTL in the registry.
+	cached, valid := handler.playSessions.streamSession(playID, itemID, mediaID)
+	if !valid {
+		handler.writeStreamError(response, request, http.StatusUnauthorized, "Unauthorized", "A valid compatibility token or playback session is required")
 		return AuthenticatedSession{}, false
 	}
-	if playCapability && !compatCredentialHeaderPresent(request) {
-		cached, valid := handler.playSessions.streamSession(playID, itemID, mediaID)
-		if !valid {
-			handler.writeStreamError(response, request, http.StatusNotFound, "PlaybackSessionNotFound", "The playback session is invalid or expired")
-			return AuthenticatedSession{}, false
+	fresh, revalidateErr := handler.authentication.Revalidate(request.Context(), cached)
+	ownerMismatch := revalidateErr == nil && !sameAuthenticatedSessionOwner(cached, fresh)
+	if revalidateErr != nil || ownerMismatch {
+		if errors.Is(revalidateErr, ErrInvalidCompatCredential) || ownerMismatch {
+			_ = handler.playSessions.close(context.WithoutCancel(request.Context()), cached, itemID, playID, mediaID)
+			handler.writeStreamError(response, request, http.StatusUnauthorized, "Unauthorized", "The playback session is no longer valid")
+		} else {
+			handler.writeStreamError(response, request, http.StatusInternalServerError, "InternalError", "The stream authorization could not be verified")
 		}
-		fresh, revalidateErr := handler.authentication.Revalidate(request.Context(), cached)
-		ownerMismatch := revalidateErr == nil && !sameAuthenticatedSessionOwner(cached, fresh)
-		if revalidateErr != nil || ownerMismatch {
-			if errors.Is(revalidateErr, ErrInvalidCompatCredential) || ownerMismatch {
-				_ = handler.playSessions.close(context.WithoutCancel(request.Context()), cached, itemID, playID, mediaID)
-				handler.writeStreamError(response, request, http.StatusUnauthorized, "Unauthorized", "The stream capability is no longer valid")
-			} else {
-				handler.writeStreamError(response, request, http.StatusInternalServerError, "InternalError", "The stream authorization could not be verified")
-			}
-			return AuthenticatedSession{}, false
-		}
-		return fresh, true
-	}
-	authRequest := request
-	observedHeaderToken := ""
-	if playCapability {
-		authRequest = request.Clone(request.Context())
-		clonedURL := *request.URL
-		values := clonedURL.Query()
-		deleteQueryFold(values, "api_key")
-		clonedURL.RawQuery = values.Encode()
-		authRequest.URL = &clonedURL
-	} else if token, observed := observedVidHubStreamHeaderConflict(request); observed {
-		authRequest = request.Clone(request.Context())
-		deleteCompatCredentialHeaders(authRequest.Header)
-		observedHeaderToken = token
-	}
-	session, ok := handler.authenticateRequest(response, authRequest, !playCapability)
-	if !ok {
-		handler.logStreamAuthorizationFailure(request, "general_credential", playCapability)
 		return AuthenticatedSession{}, false
 	}
-	if observedHeaderToken != "" {
-		headerSession, headerErr := handler.authenticateObservedVidHubHeader(request.Context(), observedHeaderToken, playID)
-		if headerErr != nil || headerSession != nil && !sameAuthenticatedSessionOwner(session, *headerSession) {
-			if headerErr != nil && !errors.Is(headerErr, ErrInvalidCompatCredential) && !errors.Is(headerErr, ErrInvalidCompatAuthorization) {
-				handler.writeStreamError(response, request, http.StatusInternalServerError, "InternalError", "The stream authorization could not be verified")
-			} else {
-				handler.writeStreamError(response, request, http.StatusUnauthorized, "Unauthorized", "The player credential does not match the stream owner")
-			}
-			handler.logStreamAuthorizationFailure(request, "vidhub_header_owner", false)
-			return AuthenticatedSession{}, false
-		}
-	}
-	return session, true
+	return fresh, true
 }
 
 func scopedStreamDeliveryRequest(request *http.Request, playID string) *http.Request {
 	cloned := request.Clone(request.Context())
 	clonedURL := *request.URL
 	values := clonedURL.Query()
+	deleteQueryFold(values, "ApiKey")
 	deleteQueryFold(values, "api_key")
 	deleteQueryFold(values, "X-Emby-Token")
 	deleteQueryFold(values, "X-MediaBrowser-Token")
@@ -337,191 +320,12 @@ func deleteCompatCredentialHeaders(headers http.Header) {
 	}
 }
 
-func observedVidHubStreamQuery(values url.Values) bool {
-	apiKey, hasAPIKey, apiKeyErr := queryScalar(values, "api_key")
-	embyToken, hasEmbyToken, embyTokenErr := queryScalar(values, "X-Emby-Token")
-	client, hasClient, clientErr := queryScalar(values, "X-Emby-Client")
-	if apiKeyErr != nil || embyTokenErr != nil || clientErr != nil || !hasAPIKey || !hasEmbyToken || !hasClient || !strings.EqualFold(strings.TrimSpace(client), "VidHub") {
-		return false
-	}
-	if subtle.ConstantTimeCompare([]byte(apiKey), []byte(embyToken)) != 1 {
-		return false
-	}
-	_, valid := compatCredentialDigest(apiKey)
-	return valid
-}
-
-func observedVidHubStreamHeaderConflict(request *http.Request) (string, bool) {
-	if request == nil || !observedVidHubStreamQuery(request.URL.Query()) || len(request.URL.RawQuery) > maximumCompatQueryBytes || !boundedCompatHeaders(request.Header) {
-		return "", false
-	}
-	switch authorizationHeaderShape(request.Header) {
-	case "absent", "identity", "empty_token":
-	default:
-		return "", false
-	}
-	for _, name := range []string{"X-MediaBrowser-Token", "X-Emby-Authorization", "X-MediaBrowser-Authorization"} {
-		if len(request.Header.Values(name)) != 0 {
-			return "", false
-		}
-	}
-	values := request.Header.Values("X-Emby-Token")
-	if len(values) != 1 || values[0] == "" {
-		return "", false
-	}
-	token := strings.TrimSpace(values[0])
-	if token == "" || strings.ContainsAny(token, ",\r\n\t ") {
-		return "", false
-	}
-	apiKey, found, err := queryScalar(request.URL.Query(), "api_key")
-	if err != nil || !found || subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) == 1 {
-		return "", false
-	}
-	return token, true
-}
-
-func (handler *Handler) authenticateObservedVidHubHeader(ctx context.Context, token, playID string) (*AuthenticatedSession, error) {
-	if subtle.ConstantTimeCompare([]byte(token), []byte(playID)) == 1 {
-		return nil, nil
-	}
-	if _, valid := compatCredentialDigest(token); !valid {
-		return nil, ErrInvalidCompatAuthorization
-	}
-	session, err := handler.authentication.Authenticate(ctx, token)
-	if err != nil {
-		return nil, err
-	}
-	return &session, nil
-}
-
-func streamCapabilityPresent(values url.Values, playID string) (bool, error) {
-	count := 0
-	matches := 0
-	for name, entries := range values {
-		if !strings.EqualFold(name, "api_key") {
-			continue
-		}
-		for _, entry := range entries {
-			count++
-			if subtle.ConstantTimeCompare([]byte(entry), []byte(playID)) == 1 {
-				matches++
-			}
-		}
-	}
-	if count == 0 || count == 1 {
-		return matches == 1, nil
-	}
-	if count == 2 && matches == 1 {
-		return true, nil
-	}
-	return false, ErrInvalidQuery
-}
-
 func deleteQueryFold(values url.Values, name string) {
 	for actualName := range values {
 		if strings.EqualFold(actualName, name) {
 			delete(values, actualName)
 		}
 	}
-}
-
-func compatCredentialHeaderPresent(request *http.Request) bool {
-	if request == nil {
-		return false
-	}
-	if !boundedCompatHeaders(request.Header) {
-		return true
-	}
-	for _, name := range []string{"X-Emby-Token", "X-MediaBrowser-Token"} {
-		if values := request.Header.Values(name); len(values) == 1 && values[0] != "" {
-			return true
-		}
-	}
-
-	if values := request.Header.Values("Authorization"); len(values) == 1 {
-		parameters, relevant, err := parseAuthorizationValue(values[0], true)
-		if err != nil || !relevant {
-			return true
-		}
-		if token, found := parameters["token"]; found && token != "" {
-			return true
-		}
-	}
-	parameters, found, err := collectAuthorizationParameters(request.Header)
-	if err != nil {
-		return true
-	}
-	if found {
-		token, hasToken := parameters["token"]
-		return hasToken && token != ""
-	}
-	return false
-}
-
-func (handler *Handler) logStreamAuthorizationFailure(request *http.Request, reason string, playCapability bool) {
-	if handler == nil || handler.logger == nil || request == nil {
-		return
-	}
-	query := request.URL.Query()
-	handler.logger.InfoContext(request.Context(), "jellyfin stream authorization rejected",
-		"reason", reason,
-		"playCapability", playCapability,
-		"apiKeyValues", queryValueCountFold(query, "api_key"),
-		"queryEmbyTokenValues", queryValueCountFold(query, "X-Emby-Token"),
-		"xEmbyTokenHeader", headerValueShape(request.Header, "X-Emby-Token"),
-		"xMediaBrowserTokenHeader", headerValueShape(request.Header, "X-MediaBrowser-Token"),
-		"authorizationHeader", authorizationHeaderShape(request.Header),
-		"boundedHeaders", boundedCompatHeaders(request.Header),
-	)
-}
-
-func queryValueCountFold(values url.Values, name string) int {
-	count := 0
-	for actualName, entries := range values {
-		if strings.EqualFold(actualName, name) {
-			count += len(entries)
-		}
-	}
-	return count
-}
-
-func headerValueShape(headers http.Header, name string) string {
-	values := headers.Values(name)
-	if len(values) == 0 {
-		return "absent"
-	}
-	if len(values) != 1 {
-		return "multiple"
-	}
-	if values[0] == "" {
-		return "empty"
-	}
-	return "present"
-}
-
-func authorizationHeaderShape(headers http.Header) string {
-	values := headers.Values("Authorization")
-	if len(values) == 0 {
-		return "absent"
-	}
-	if len(values) != 1 {
-		return "multiple"
-	}
-	parameters, relevant, err := parseAuthorizationValue(values[0], true)
-	if err != nil {
-		return "invalid"
-	}
-	if !relevant {
-		return "unsupported"
-	}
-	token, found := parameters["token"]
-	if !found {
-		return "identity"
-	}
-	if token == "" {
-		return "empty_token"
-	}
-	return "token"
 }
 
 func parsePlaybackInfoRequest(response http.ResponseWriter, request *http.Request) (PlaybackInfoRequest, error) {
@@ -597,7 +401,7 @@ func (handler *Handler) effectivePlaybackCapabilities(session AuthenticatedSessi
 		}
 	}
 	capabilities, allowTranscode, err := playbackCapabilities(input)
-	if err == nil || !isVidHubClient(session.Client) || !validDeviceProfileBounds(input.DeviceProfile) {
+	if err == nil || !validDeviceProfileBounds(input.DeviceProfile) {
 		return capabilities, allowTranscode, err
 	}
 	fallback := conservativeCompatibilityProfile()

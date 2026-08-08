@@ -795,7 +795,7 @@ const catalog = {
   "settings.fields.allowTranscodingDescription": "Дозволити серверу конвертувати несумісні медіафайли, лише якщо пряме відтворення й пряме потокове передавання неможливі",
   "settings.fields.jellyfinApi": "Jellyfin API",
   "settings.fields.jellyfinEnabled": "Jellyfin",
-  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API to supported clients such as Infuse and VidHub. Jellyfin Web and Jellyfin Desktop are not provided.",
+  "settings.fields.jellyfinEnabledDescription": "Expose Rivune's limited Jellyfin API. Jellyfin Web and Jellyfin Desktop are not provided.",
   "settings.jellyfinAccess.passwordHint": "Цей пароль застосунку діє лише для цього профілю.",
   "settings.jellyfinAccess.pinHint": "Секрет відображається лише один раз. Скопіюйте та збережіть його зараз.",
   "settings.jellyfinAccess.rotateWarning": "Заміна негайно робить поточний пароль і всі сеанси Jellyfin недійсними.",

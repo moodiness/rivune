@@ -52,7 +52,7 @@ func TestReloadLinkedPrincipalRevalidatesAvailabilityExpiryAndRevocation(t *test
 	}
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO devices (user_id, name, platform, category_id, approved_at)
-		VALUES ($1, $2, 'Infuse', $3, now()) RETURNING id::text
+		VALUES ($1, $2, 'Generic Client', $3, now()) RETURNING id::text
 	`, userID, "Linked principal device "+suffix, categoryID).Scan(&deviceID); err != nil {
 		t.Fatalf("insert linked principal device: %v", err)
 	}

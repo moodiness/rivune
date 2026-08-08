@@ -69,12 +69,10 @@ func TestCatalogViewsAreStableRootsAndRejectMismatchedUser(t *testing.T) {
 	}
 	var result QueryResult[BaseItemDto]
 	decodeCatalogResponse(t, response, &result)
-	if result.TotalRecordCount != 3 || len(result.Items) != 3 || result.Items[0].Name != "Movies" ||
+	if result.TotalRecordCount != 2 || len(result.Items) != 2 || result.Items[0].Name != "Movies" ||
 		result.Items[0].CollectionType != "movies" || result.Items[1].Name != "TV Shows" ||
-		result.Items[1].CollectionType != "tvshows" || result.Items[2].Name != "Collections" ||
-		result.Items[2].CollectionType != "boxsets" || result.Items[0].Id == result.Items[1].Id ||
-		result.Items[1].Id == result.Items[2].Id || result.Items[0].ServerId != catalogTestServerID ||
-		result.Items[0].Genres == nil || result.Items[0].BackdropImageTags == nil {
+		result.Items[1].CollectionType != "tvshows" || result.Items[0].Id == result.Items[1].Id ||
+		result.Items[0].ServerId != catalogTestServerID || result.Items[0].Genres == nil || result.Items[0].BackdropImageTags == nil {
 		t.Fatalf("unexpected virtual roots: %+v", result)
 	}
 	for _, view := range result.Items {
@@ -282,12 +280,12 @@ func TestCatalogSortIsForwardedOrRejected(t *testing.T) {
 		t.Fatalf("supported sort status=%d queries=%+v body=%s", response.Code, reader.queries, response.Body.String())
 	}
 
-	vidHub := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Series,Movie,Video,MusicVideo&SortBy=DateLastContentAdded,DateCreated,SortName&SortOrder=Descending")
-	vidHubResponse := httptest.NewRecorder()
-	handler.handleItems(vidHubResponse, vidHub)
-	if vidHubResponse.Code != http.StatusOK || len(reader.queries) != 2 || reader.queries[1].SortBy != "" || reader.queries[1].SortOrder != "" ||
+	compatibilityClient := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Series,Movie,Video,MusicVideo&SortBy=DateLastContentAdded,DateCreated,SortName&SortOrder=Descending")
+	compatibilityClientResponse := httptest.NewRecorder()
+	handler.handleItems(compatibilityClientResponse, compatibilityClient)
+	if compatibilityClientResponse.Code != http.StatusOK || len(reader.queries) != 2 || reader.queries[1].SortBy != "" || reader.queries[1].SortOrder != "" ||
 		!reflect.DeepEqual(reader.queries[1].MediaTypes, []string{"movie", "series"}) {
-		t.Fatalf("VidHub query status=%d queries=%+v body=%s", vidHubResponse.Code, reader.queries, vidHubResponse.Body.String())
+		t.Fatalf("Compatibility client query status=%d queries=%+v body=%s", compatibilityClientResponse.Code, reader.queries, compatibilityClientResponse.Body.String())
 	}
 
 	videoOnly := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Video,MusicVideo")

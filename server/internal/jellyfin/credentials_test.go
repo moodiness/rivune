@@ -378,7 +378,7 @@ func seedCredentialSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 		INSERT INTO jellyfin_compat_sessions (
 			auth_session_id, profile_id, token_hash, client_name, device_name,
 			client_device_id, client_version, expires_at
-		) VALUES ($1::uuid, $2::uuid, $3, 'Infuse', $4, $5, '1.0', now() + interval '2 hours')
+		) VALUES ($1::uuid, $2::uuid, $3, 'Generic Client', $4, $5, '1.0', now() + interval '2 hours')
 		RETURNING id::text
 	`, sessionID, fixture.profileID, compatHash[:], "Credential session "+suffix, "credential-session-"+suffix).Scan(&compatID); err != nil {
 		t.Fatalf("insert credential-linked compatibility session: %v", err)
