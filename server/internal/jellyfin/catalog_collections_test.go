@@ -525,6 +525,37 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 		len(detail.BackdropImageTags) != 1 || detail.BackdropImageTags[0] != heroTag {
 		t.Fatalf("promoted collection detail status=%d item=%+v", detailResponse.Code, detail)
 	}
+	folderBrowseRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items?ParentId="+promotedID+"&Recursive=true&StartIndex=0&Limit=36&SortBy=SortName,SortName,ProductionYear&SortOrder=Ascending&Fields=PrimaryImageAspectRatio,SortName")
+	folderBrowseRequest.SetPathValue("id", catalogTestProfileID)
+	folderBrowseResponse := httptest.NewRecorder()
+	handler.handleUserItems(folderBrowseResponse, folderBrowseRequest)
+	var folderBrowse QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, folderBrowseResponse, &folderBrowse)
+	if folderBrowseResponse.Code != http.StatusOK || folderBrowse.TotalRecordCount != 2 || len(folderBrowse.Items) != 2 {
+		t.Fatalf("promoted folder browse status=%d result=%+v", folderBrowseResponse.Code, folderBrowse)
+	}
+	for index, item := range folderBrowse.Items {
+		if item.Id != service.authorized.Folders[index].ID || item.Type != "CollectionFolder" || item.ParentId != promotedID {
+			t.Fatalf("promoted folder %d=%+v", index, item)
+		}
+	}
+	folderDetailRequest := authenticatedCatalogRequest(t, token, "/Items/"+folderBrowse.Items[0].Id+"?UserId="+catalogTestProfileID)
+	folderDetailRequest.SetPathValue("id", folderBrowse.Items[0].Id)
+	folderDetailResponse := httptest.NewRecorder()
+	handler.handleItem(folderDetailResponse, folderDetailRequest)
+	var folderDetail BaseItemDto
+	decodeCatalogResponse(t, folderDetailResponse, &folderDetail)
+	if folderDetailResponse.Code != http.StatusOK || folderDetail.Id != folderBrowse.Items[0].Id || folderDetail.Type != "CollectionFolder" {
+		t.Fatalf("folder detail status=%d item=%+v", folderDetailResponse.Code, folderDetail)
+	}
+	folderItemsRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+folderDetail.Id+"&Recursive=true&StartIndex=0&Limit=36&SortBy=SortName,SortName,ProductionYear&SortOrder=Ascending")
+	folderItemsResponse := httptest.NewRecorder()
+	handler.handleItems(folderItemsResponse, folderItemsRequest)
+	var folderItems QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, folderItemsResponse, &folderItems)
+	if folderItemsResponse.Code != http.StatusOK || len(folderItems.Items) != 1 || folderItems.Items[0].Id != collectionMovieID || folderItems.Items[0].Type != "Movie" {
+		t.Fatalf("folder contents status=%d result=%+v", folderItemsResponse.Code, folderItems)
+	}
 	itemsRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items?ParentId="+promotedID+"&IncludeItemTypes=Movie,Series&Recursive=true&Limit=2&Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb")
 	itemsRequest.SetPathValue("id", catalogTestProfileID)
 	itemsResponse := httptest.NewRecorder()
@@ -716,11 +747,11 @@ func TestVirtualCatalogRootsProjectAuthorizedCollections(t *testing.T) {
 		handler.handleItems(response, request)
 		var result QueryResult[BaseItemDto]
 		decodeCatalogResponse(t, response, &result)
-		if response.Code != http.StatusOK || result.TotalRecordCount != 1 || len(result.Items) != 0 {
+		if response.Code != http.StatusOK || result.TotalRecordCount != 2 || len(result.Items) != 0 {
 			t.Fatalf("collection count status=%d result=%+v", response.Code, result)
 		}
-		if len(service.calls) != 1 {
-			t.Fatalf("collection count was not bounded: %+v", service.calls)
+		if len(service.calls) != 0 {
+			t.Fatalf("collection folder count resolved remote content: %+v", service.calls)
 		}
 	})
 }

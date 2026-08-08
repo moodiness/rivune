@@ -195,6 +195,37 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 	}
 }
 
+func TestCatalogItemsSelectRequestedTitleBeforeRootViews(t *testing.T) {
+	for _, mediaType := range []string{"movie", "series", "episode"} {
+		t.Run(mediaType, func(t *testing.T) {
+			handler, reader, token := newCatalogHTTPHandler(t)
+			reader.title = watchstate.CatalogTitle{
+				ID: "00000000-0000-4000-8000-000000000100", MediaType: mediaType, Title: "Selected title",
+				Genres: []string{}, ProviderIDs: map[string]string{},
+			}
+			request := authenticatedCatalogRequest(t, token, "/Items?Ids="+reader.title.ID+"&UserId="+catalogTestProfileID+"&Fields=Overview,MediaSources,MediaStreams")
+			response := httptest.NewRecorder()
+			handler.handleItems(response, request)
+			var result QueryResult[BaseItemDto]
+			decodeCatalogResponse(t, response, &result)
+			if response.Code != http.StatusOK || result.TotalRecordCount != 1 || len(result.Items) != 1 ||
+				result.Items[0].Id != reader.title.ID || len(reader.titleIDs) != 1 || len(reader.queries) != 0 {
+				t.Fatalf("selected detail status=%d result=%+v titleReads=%v listReads=%+v", response.Code, result, reader.titleIDs, reader.queries)
+			}
+			if mediaType == "series" {
+				if result.Items[0].Type != "Series" || len(result.Items[0].MediaSources) != 0 {
+					t.Fatalf("series selection=%+v", result.Items[0])
+				}
+				return
+			}
+			if result.Items[0].Type != strings.ToUpper(mediaType[:1])+mediaType[1:] {
+				t.Fatalf("selected media type=%+v", result.Items[0])
+			}
+			requireDeferredMediaSource(t, result.Items[0])
+		})
+	}
+}
+
 func TestCatalogItemsLimitZeroReturnsCountWithoutZeroLimitRead(t *testing.T) {
 	handler, reader, token := newCatalogHTTPHandler(t)
 	reader.page = watchstate.CatalogPage{

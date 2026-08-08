@@ -423,21 +423,104 @@ func (handler *Handler) writeItem(response http.ResponseWriter, request *http.Re
 		handler.writeCatalogError(response, err)
 		return
 	}
+	item, ok := handler.detailedCatalogItem(request.Context(), session, title, query.EnableUserData)
+	if !ok {
+		return
+	}
+	handler.writeJSON(response, http.StatusOK, item)
+}
+
+func (handler *Handler) detailedCatalogItem(ctx context.Context, session AuthenticatedSession, title watchstate.CatalogTitle, includeUserData bool) (BaseItemDto, bool) {
 	if detailReader, ok := handler.catalog.(catalogDetailReader); ok {
-		enriched, detailErr := detailReader.EnrichCatalogTitle(request.Context(), session.Principal, title)
+		enriched, detailErr := detailReader.EnrichCatalogTitle(ctx, session.Principal, title)
 		if detailErr == nil {
 			title = enriched
-		} else if request.Context().Err() != nil {
-			return
+		} else if ctx.Err() != nil {
+			return BaseItemDto{}, false
 		}
 	}
-	item := handler.baseItemDTO(title, query.EnableUserData)
+	item := handler.baseItemDTO(title, includeUserData)
 	if title.MediaType == "movie" || title.MediaType == "episode" {
-		if sources := handler.detailMediaSources(request.Context(), session, title); len(sources) != 0 {
+		if sources := handler.detailMediaSources(ctx, session, title); len(sources) != 0 {
 			item.MediaSources = sources
 		}
 	}
-	handler.writeJSON(response, http.StatusOK, item)
+	return item, true
+}
+
+func (handler *Handler) writeCatalogIDSelection(response http.ResponseWriter, request *http.Request, session AuthenticatedSession, query ItemQuery, mediaTypes []string, sortBy, sortOrder string) bool {
+	requested := stringSet(query.Ids)
+	projected := make(map[string]watchstate.CatalogTitle, len(query.Ids))
+	if batch, ok := handler.catalog.(catalogBatchReader); ok {
+		titles, err := batch.GetCatalogTitles(request.Context(), session.Principal, query.Ids)
+		if err != nil {
+			handler.writeCatalogError(response, err)
+			return true
+		}
+		for _, title := range titles {
+			id := strings.ToLower(strings.TrimSpace(title.ID))
+			if _, allowed := requested[id]; allowed {
+				projected[id] = title
+			}
+		}
+	} else {
+		for _, id := range query.Ids {
+			title, err := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, id)
+			if err != nil {
+				if errors.Is(err, watchstate.ErrNotFound) {
+					continue
+				}
+				handler.writeCatalogError(response, err)
+				return true
+			}
+			if strings.EqualFold(strings.TrimSpace(title.ID), id) {
+				projected[strings.ToLower(id)] = title
+			}
+		}
+	}
+	if len(projected) == 0 {
+		return false
+	}
+	allowedTypes := intersectMediaTypes(mediaTypes, []string{"movie", "series", "season", "episode"})
+	filterTypes := !noCatalogMediaTypes(allowedTypes)
+	typeSet := stringSet(allowedTypes)
+	search := strings.ToLower(query.SearchTerm)
+	titles := make([]watchstate.CatalogTitle, 0, len(projected))
+	for _, id := range query.Ids {
+		title, ok := projected[strings.ToLower(id)]
+		if !ok {
+			continue
+		}
+		if filterTypes {
+			if _, ok := typeSet[strings.ToLower(title.MediaType)]; !ok {
+				continue
+			}
+		}
+		if search != "" && !strings.Contains(strings.ToLower(title.Title), search) {
+			continue
+		}
+		titles = append(titles, title)
+	}
+	if sortBy == "sortname" {
+		sortCatalogSearch(titles, sortOrder)
+	}
+	total := len(titles)
+	start := min(query.StartIndex, total)
+	end := min(start+query.Limit, total)
+	items := make([]BaseItemDto, 0, end-start)
+	for _, title := range titles[start:end] {
+		if total == 1 {
+			item, ok := handler.detailedCatalogItem(request.Context(), session, title, query.EnableUserData)
+			if !ok {
+				return true
+			}
+			items = append(items, item)
+			continue
+		}
+		items = append(items, handler.baseItemDTO(title, query.EnableUserData))
+	}
+	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: total, StartIndex: query.StartIndex})
+	return true
 }
 
 func (handler *Handler) writeItems(response http.ResponseWriter, request *http.Request, session AuthenticatedSession, fixed *catalogHierarchy) {
@@ -465,6 +548,10 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 		parentID, mediaTypes, recursive = fixed.parentID, fixed.mediaTypes, fixed.recursive
 	}
 	if fixed == nil {
+		idMediaTypes := intersectMediaTypes(mediaTypes, []string{"movie", "series", "season", "episode"})
+		if parentID == "" && len(parsed.Ids) != 0 && !noCatalogMediaTypes(idMediaTypes) && handler.writeCatalogIDSelection(response, request, session, parsed, mediaTypes, sortBy, sortOrder) {
+			return
+		}
 		views, valid := handler.virtualViews()
 		if !valid {
 			handler.writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "Resource not found")
@@ -495,7 +582,8 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 		if parentID != "" && !strings.EqualFold(parentID, views[0].Id) && !strings.EqualFold(parentID, views[1].Id) && handler.collections != nil {
 			value, collectionErr := handler.resolveCollectionView(request.Context(), session.Principal, parentID)
 			if collectionErr == nil {
-				if parsed.Recursive {
+				contentTypes := intersectMediaTypes(mediaTypes, []string{collection.MediaTypeMovie, collection.MediaTypeSeries})
+				if parsed.Recursive && len(parsed.IncludeItemTypes) != 0 && !noCatalogMediaTypes(contentTypes) {
 					handler.writeCollectionItems(response, request, session, parsed, mediaTypes, value, sortBy, sortOrder)
 				} else {
 					handler.writeCollectionFolders(response, request.Context(), session.Principal, parsed, value)
