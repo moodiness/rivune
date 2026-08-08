@@ -104,7 +104,13 @@ func (service *collectionCompatService) Get(_ context.Context, _ auth.Principal,
 
 func (service *collectionCompatService) ResolveFolder(_ context.Context, _ auth.Principal, collectionID, folderID string, page, limit int, _, _ string) (collection.ResolvedFolder, error) {
 	service.calls = append(service.calls, collectionResolveCall{collectionID: collectionID, folderID: folderID, page: page, limit: limit})
-	if collectionID != service.authorized.ID || page != 1 {
+	if collectionID != service.authorized.ID {
+		return collection.ResolvedFolder{}, collection.ErrNotFound
+	}
+	if page != 1 {
+		if folderID == service.authorized.Folders[1].ID && page == 2 {
+			return collection.ResolvedFolder{Page: page}, nil
+		}
 		return collection.ResolvedFolder{}, collection.ErrNotFound
 	}
 	switch folderID {
@@ -126,7 +132,7 @@ func (service *collectionCompatService) ResolveFolder(_ context.Context, _ auth.
 	}
 }
 
-func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
+func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	handler, service, store, token := newCollectionCompatHandler(t)
 	coverURL := "https://provider.invalid/folder.png?token=FOLDER_SECRET"
 	backdropURL := "https://provider.invalid/collection-backdrop.png?token=BACKDROP_SECRET"
@@ -153,11 +159,13 @@ func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
 	handler.handleViews(viewsResponse, viewsRequest)
 	var namedViews QueryResult[BaseItemDto]
 	decodeCatalogResponse(t, viewsResponse, &namedViews)
-	if viewsResponse.Code != http.StatusOK || len(namedViews.Items) != 4 || namedViews.Items[3].Id != collectionCompatID ||
-		namedViews.Items[3].Name != service.authorized.Title || namedViews.Items[3].Type != "CollectionFolder" || namedViews.Items[3].MediaType != "Unknown" || namedViews.Items[3].CollectionType != "mixed" ||
-		namedViews.Items[3].Etag != collectionCompatID || namedViews.Items[3].DisplayPreferencesId != collectionCompatID || namedViews.Items[3].LocationType != "FileSystem" ||
-		namedViews.Items[3].ImageTags["Primary"] != coverTag || namedViews.Items[3].UserData == nil || namedViews.Items[3].UserData.Key != collectionCompatID {
-		t.Fatalf("named collection views status=%d result=%+v", viewsResponse.Code, namedViews)
+	if viewsResponse.Code != http.StatusOK || namedViews.TotalRecordCount != 3 || len(namedViews.Items) != 3 {
+		t.Fatalf("virtual collection views status=%d result=%+v", viewsResponse.Code, namedViews)
+	}
+	for _, view := range namedViews.Items {
+		if view.Id == collectionCompatID || view.UserData == nil || view.UserData.ItemId != view.Id {
+			t.Fatalf("direct collection leaked into My Media or view identity is incomplete: %+v", view)
+		}
 	}
 
 	userRequest := authenticatedCatalogRequest(t, token, "/Users/Me")
@@ -165,9 +173,8 @@ func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
 	handler.handleCurrentUser(userResponse, userRequest)
 	var user UserDto
 	decodeCatalogResponse(t, userResponse, &user)
-	if userResponse.Code != http.StatusOK || len(user.Configuration.MyMediaExcludes) != 1 ||
-		user.Configuration.MyMediaExcludes[0] != collectionCompatID || len(user.Configuration.OrderedViews) != 4 ||
-		user.Configuration.OrderedViews[3] != collectionCompatID {
+	if userResponse.Code != http.StatusOK || len(user.Configuration.MyMediaExcludes) != 0 ||
+		len(user.Configuration.OrderedViews) != 3 || user.Configuration.OrderedViews[2] != views[2].Id {
 		t.Fatalf("collection view configuration status=%d config=%+v", userResponse.Code, user.Configuration)
 	}
 
@@ -179,7 +186,7 @@ func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
 	if rootResponse.Code != http.StatusOK || root.TotalRecordCount != 1 || len(root.Items) != 1 ||
 		root.Items[0].Id != collectionCompatID || root.Items[0].Type != "BoxSet" || root.Items[0].MediaType != "Unknown" || !root.Items[0].IsFolder ||
 		root.Items[0].Etag != collectionCompatID || root.Items[0].DisplayPreferencesId != collectionCompatID || root.Items[0].LocationType != "FileSystem" ||
-		root.Items[0].ImageTags["Primary"] != coverTag || root.Items[0].UserData == nil || root.Items[0].UserData.Key != collectionCompatID {
+		root.Items[0].ImageTags["Primary"] != coverTag || root.Items[0].UserData == nil || root.Items[0].UserData.Key != collectionCompatID || root.Items[0].UserData.ItemId != collectionCompatID {
 		t.Fatalf("unexpected authorized boxsets: status=%d result=%+v", rootResponse.Code, root)
 	}
 	boxSetImageRequest := authenticatedCatalogRequest(t, token, "/Items/"+collectionCompatID+"/Images/Primary")
@@ -216,7 +223,7 @@ func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
 	if latestResponse.Code != http.StatusOK || len(latest) != 2 || latest[0].Name != "First" || latest[1].Name != "Second" ||
 		latest[0].Type != "Folder" || latest[0].MediaType != "Unknown" || latest[0].ParentId != collectionCompatID || latest[0].ImageTags["Primary"] != coverTag ||
 		latest[0].Etag != latest[0].Id || latest[0].DisplayPreferencesId != latest[0].Id || latest[0].LocationType != "FileSystem" || latest[0].UserData == nil ||
-		latest[1].ImageTags["Primary"] != hydratedTag {
+		latest[0].UserData.ItemId != latest[0].Id || latest[1].ImageTags["Primary"] != hydratedTag {
 		t.Fatalf("collection latest folders status=%d result=%+v", latestResponse.Code, latest)
 	}
 	if len(service.calls) != 1 || service.calls[0].folderID != service.authorized.Folders[1].ID || service.calls[0].limit != 1 {
@@ -303,6 +310,48 @@ func TestCollectionsExposeNamedViewsFoldersAndCanonicalItems(t *testing.T) {
 	handler.handleItem(foreignResponse, foreignRequest)
 	if foreignResponse.Code != http.StatusNotFound || strings.Contains(foreignResponse.Body.String(), service.foreign.Title) {
 		t.Fatalf("foreign boxset detail leaked status=%d body=%s", foreignResponse.Code, foreignResponse.Body.String())
+	}
+}
+
+func TestRecursiveCollectionBrowseFlattensFolders(t *testing.T) {
+	handler, service, _, token := newCollectionCompatHandler(t)
+	request := authenticatedCatalogRequest(t, token, "/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&Recursive=true&EnableUserData=true&StartIndex=0&Limit=2")
+	response := httptest.NewRecorder()
+	handler.handleItems(response, request)
+
+	var result QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, response, &result)
+	if response.Code != http.StatusOK || result.TotalRecordCount != 3 || len(result.Items) != 2 ||
+		result.Items[0].Id != collectionMovieID || result.Items[0].Type != "Movie" ||
+		result.Items[1].Id != collectionSeriesID || result.Items[1].Type != "Series" {
+		t.Fatalf("recursive collection browse was not flattened: status=%d result=%+v", response.Code, result)
+	}
+	for _, item := range result.Items {
+		if item.Type == "Folder" || item.UserData == nil || item.UserData.ItemId != item.Id {
+			t.Fatalf("recursive collection item is not client-compatible: %+v", item)
+		}
+	}
+	if len(service.calls) != 2 || service.calls[0].folderID != service.authorized.Folders[0].ID ||
+		service.calls[1].folderID != service.authorized.Folders[1].ID ||
+		service.calls[0].limit != maximumCollectionResolveLimit || service.calls[1].limit != maximumCollectionResolveLimit {
+		t.Fatalf("recursive collection did not resolve every folder: %+v", service.calls)
+	}
+}
+
+func TestRecursiveCollectionBrowseSortsBeforePagination(t *testing.T) {
+	handler, service, _, token := newCollectionCompatHandler(t)
+	request := authenticatedCatalogRequest(t, token, "/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&Recursive=true&SortBy=SortName&SortOrder=Ascending&StartIndex=0&Limit=1")
+	response := httptest.NewRecorder()
+	handler.handleItems(response, request)
+
+	var result QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, response, &result)
+	if response.Code != http.StatusOK || result.TotalRecordCount != 3 || len(result.Items) != 1 ||
+		result.Items[0].Id != collectionSeriesID || result.Items[0].Name != "Add-on series" {
+		t.Fatalf("recursive collection was paginated before sorting: status=%d result=%+v", response.Code, result)
+	}
+	if len(service.calls) != 3 || service.calls[2].folderID != service.authorized.Folders[1].ID || service.calls[2].page != 2 {
+		t.Fatalf("sorted collection did not resolve the complete candidate set: %+v", service.calls)
 	}
 }
 

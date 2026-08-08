@@ -469,6 +469,7 @@ func userDataFromProgress(progress watchstate.Progress, inLibrary bool) UserItem
 		IsFavorite:            inLibrary,
 		Played:                progress.Completed,
 		Key:                   progress.TitleID,
+		ItemId:                progress.TitleID,
 	}
 	if progress.Completed {
 		value.PlayCount = 1

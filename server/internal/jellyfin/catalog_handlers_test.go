@@ -76,7 +76,7 @@ func TestCatalogViewsAreStableRootsAndRejectMismatchedUser(t *testing.T) {
 	}
 	for _, view := range result.Items {
 		if view.Etag != view.Id || view.DisplayPreferencesId != view.Id || view.LocationType != "FileSystem" || view.MediaType != "Unknown" ||
-			view.ImageTags == nil || len(view.ImageTags) != 0 || view.UserData == nil || view.UserData.Key != view.Id {
+			view.ImageTags == nil || len(view.ImageTags) != 0 || view.UserData == nil || view.UserData.Key != view.Id || view.UserData.ItemId != view.Id {
 			t.Fatalf("virtual root compatibility fields are incomplete: %+v", view)
 		}
 	}

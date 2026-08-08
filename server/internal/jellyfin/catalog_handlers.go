@@ -57,7 +57,7 @@ func (handler *Handler) handleVirtualFolders(response http.ResponseWriter, reque
 	if !ok || !handler.requireOptionalQueryUser(response, request, session) {
 		return
 	}
-	views, err := handler.sessionViews(request.Context(), session.Principal)
+	views, err := handler.sessionViews()
 	if err != nil {
 		handler.writeCollectionError(response, err)
 		return
@@ -264,7 +264,7 @@ func (handler *Handler) requireOptionalQueryUser(response http.ResponseWriter, r
 }
 
 func (handler *Handler) writeViews(response http.ResponseWriter, request *http.Request, session AuthenticatedSession) {
-	views, err := handler.sessionViews(request.Context(), session.Principal)
+	views, err := handler.sessionViews()
 	if err != nil {
 		handler.writeCollectionError(response, err)
 		return
@@ -272,20 +272,10 @@ func (handler *Handler) writeViews(response http.ResponseWriter, request *http.R
 	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: views, TotalRecordCount: len(views), StartIndex: 0})
 }
 
-func (handler *Handler) sessionViews(ctx context.Context, principal auth.Principal) ([]BaseItemDto, error) {
+func (handler *Handler) sessionViews() ([]BaseItemDto, error) {
 	views, ok := handler.virtualViews()
 	if !ok {
 		return nil, collection.ErrNotFound
-	}
-	if handler.collections == nil {
-		return views, nil
-	}
-	values, err := handler.collections.List(ctx, principal)
-	if err != nil {
-		return nil, err
-	}
-	for _, value := range values {
-		views = append(views, handler.collectionViewDTO(ctx, principal, value))
 	}
 	return views, nil
 }
@@ -299,9 +289,9 @@ func (handler *Handler) virtualViews() ([]BaseItemDto, bool) {
 	}
 	serverID := handler.serverInfo.ID.String()
 	return []BaseItemDto{
-		{Id: moviesID.String(), ServerId: serverID, Name: "Movies", SortName: "Movies", Etag: moviesID.String(), DisplayPreferencesId: moviesID.String(), LocationType: "FileSystem", Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "movies", IsFolder: true, Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: moviesID.String()}},
-		{Id: tvID.String(), ServerId: serverID, Name: "TV Shows", SortName: "TV Shows", Etag: tvID.String(), DisplayPreferencesId: tvID.String(), LocationType: "FileSystem", Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "tvshows", IsFolder: true, Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: tvID.String()}},
-		{Id: collectionsID.String(), ServerId: serverID, Name: "Collections", SortName: "Collections", Etag: collectionsID.String(), DisplayPreferencesId: collectionsID.String(), LocationType: "FileSystem", Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "boxsets", IsFolder: true, Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: collectionsID.String()}},
+		{Id: moviesID.String(), ServerId: serverID, Name: "Movies", SortName: "Movies", Etag: moviesID.String(), DisplayPreferencesId: moviesID.String(), LocationType: "FileSystem", Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "movies", IsFolder: true, Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: moviesID.String(), ItemId: moviesID.String()}},
+		{Id: tvID.String(), ServerId: serverID, Name: "TV Shows", SortName: "TV Shows", Etag: tvID.String(), DisplayPreferencesId: tvID.String(), LocationType: "FileSystem", Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "tvshows", IsFolder: true, Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: tvID.String(), ItemId: tvID.String()}},
+		{Id: collectionsID.String(), ServerId: serverID, Name: "Collections", SortName: "Collections", Etag: collectionsID.String(), DisplayPreferencesId: collectionsID.String(), LocationType: "FileSystem", Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "boxsets", IsFolder: true, Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: collectionsID.String(), ItemId: collectionsID.String()}},
 	}, true
 }
 
@@ -385,7 +375,11 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 		if parentID != "" && !strings.EqualFold(parentID, views[0].Id) && !strings.EqualFold(parentID, views[1].Id) && handler.collections != nil {
 			value, collectionErr := handler.collections.Get(request.Context(), session.Principal, parentID)
 			if collectionErr == nil {
-				handler.writeCollectionFolders(response, request.Context(), session.Principal, parsed, value)
+				if parsed.Recursive {
+					handler.writeCollectionItems(response, request, session, parsed, mediaTypes, value, sortBy, sortOrder)
+				} else {
+					handler.writeCollectionFolders(response, request.Context(), session.Principal, parsed, value)
+				}
 				return
 			}
 			if !errors.Is(collectionErr, collection.ErrNotFound) {
@@ -396,7 +390,7 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 			value, folder, folderErr := handler.findCollectionFolder(request.Context(), session.Principal, parentID)
 			if folderErr == nil {
 				value.Folders = []collection.Folder{folder}
-				handler.writeCollectionItems(response, request, session, parsed, mediaTypes, value)
+				handler.writeCollectionItems(response, request, session, parsed, mediaTypes, value, sortBy, sortOrder)
 				return
 			}
 			if !errors.Is(folderErr, collection.ErrNotFound) {
@@ -612,7 +606,7 @@ func (handler *Handler) findCollectionFolder(ctx context.Context, principal auth
 	return matchedCollection, matchedFolder, nil
 }
 
-func (handler *Handler) writeCollectionItems(response http.ResponseWriter, request *http.Request, session AuthenticatedSession, query ItemQuery, mediaTypes []string, value collection.Collection) {
+func (handler *Handler) writeCollectionItems(response http.ResponseWriter, request *http.Request, session AuthenticatedSession, query ItemQuery, mediaTypes []string, value collection.Collection, sortBy, sortOrder string) {
 	allowed := intersectMediaTypes(mediaTypes, []string{collection.MediaTypeMovie, collection.MediaTypeSeries})
 	if noCatalogMediaTypes(allowed) {
 		handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: query.StartIndex})
@@ -624,7 +618,7 @@ func (handler *Handler) writeCollectionItems(response http.ResponseWriter, reque
 		handler.writeCompatError(response, http.StatusInternalServerError, "InternalServerError", "Internal server error")
 		return
 	}
-	titles, more, err := handler.resolveCollectionWindow(request.Context(), session.Principal, resolver, value, allowed, query)
+	titles, more, err := handler.resolveCollectionWindow(request.Context(), session.Principal, resolver, value, allowed, query, sortBy, sortOrder)
 	if err != nil {
 		handler.logCompatCatalogEvent(compatCatalogFailedMessage, "collection_items:"+compatCatalogErrorClass(err))
 		if errors.Is(err, collection.ErrActiveProfileRequired) || errors.Is(err, collection.ErrForbidden) ||
@@ -657,7 +651,7 @@ func (handler *Handler) writeCollectionItems(response http.ResponseWriter, reque
 	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: total, StartIndex: query.StartIndex})
 }
 
-func (handler *Handler) resolveCollectionWindow(ctx context.Context, principal auth.Principal, resolver collectionItemResolver, value collection.Collection, mediaTypes []string, query ItemQuery) ([]watchstate.CatalogTitle, bool, error) {
+func (handler *Handler) resolveCollectionWindow(ctx context.Context, principal auth.Principal, resolver collectionItemResolver, value collection.Collection, mediaTypes []string, query ItemQuery, sortBy, sortOrder string) ([]watchstate.CatalogTitle, bool, error) {
 	target := query.StartIndex + query.Limit + 1
 	allowed := stringSet(mediaTypes)
 	idFilter := stringSet(query.Ids)
@@ -708,7 +702,7 @@ func (handler *Handler) resolveCollectionWindow(ctx context.Context, principal a
 						continue
 					}
 					titles = append(titles, outcome.title)
-					if len(titles) >= target {
+					if sortBy != "sortname" && len(titles) >= target {
 						return titles, true, nil
 					}
 				}
@@ -723,6 +717,16 @@ func (handler *Handler) resolveCollectionWindow(ctx context.Context, principal a
 	}
 	if len(titles) == 0 && providerFailed {
 		return nil, false, collection.ErrProviderUnavailable
+	}
+	if sortBy == "sortname" {
+		sort.SliceStable(titles, func(left, right int) bool {
+			leftTitle := strings.ToLower(titles[left].Title)
+			rightTitle := strings.ToLower(titles[right].Title)
+			if sortOrder == "descending" {
+				return leftTitle > rightTitle
+			}
+			return leftTitle < rightTitle
+		})
 	}
 	return titles, false, nil
 }
@@ -761,17 +765,7 @@ func (handler *Handler) collectionDTO(ctx context.Context, principal auth.Princi
 		Id: value.ID, ServerId: handler.serverInfo.ID.String(), Name: value.Title, SortName: value.Title,
 		Etag: value.ID, DisplayPreferencesId: value.ID, LocationType: "FileSystem",
 		Type: "BoxSet", MediaType: "Unknown", IsFolder: true, ParentId: parentID,
-		Genres: []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags, UserData: &UserItemDataDto{Key: value.ID},
-	}
-}
-
-func (handler *Handler) collectionViewDTO(ctx context.Context, principal auth.Principal, value collection.Collection) BaseItemDto {
-	imageTags, backdropImageTags := handler.collectionArtworkTags(ctx, principal, value)
-	return BaseItemDto{
-		Id: value.ID, ServerId: handler.serverInfo.ID.String(), Name: value.Title, SortName: value.Title,
-		Etag: value.ID, DisplayPreferencesId: value.ID, LocationType: "FileSystem",
-		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "mixed", IsFolder: true,
-		Genres: []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags, UserData: &UserItemDataDto{Key: value.ID},
+		Genres: []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags, UserData: &UserItemDataDto{Key: value.ID, ItemId: value.ID},
 	}
 }
 
@@ -780,7 +774,7 @@ func (handler *Handler) collectionFolderDTO(value collection.Collection, folder 
 		Id: folder.ID, ServerId: handler.serverInfo.ID.String(), Name: folder.Title, SortName: folder.Title,
 		Etag: folder.ID, DisplayPreferencesId: folder.ID, LocationType: "FileSystem",
 		Type: "Folder", MediaType: "Unknown", IsFolder: true, ParentId: value.ID,
-		Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: folder.ID},
+		Genres: []string{}, ImageTags: map[string]string{}, BackdropImageTags: []string{}, UserData: &UserItemDataDto{Key: folder.ID, ItemId: folder.ID},
 	}
 }
 
@@ -1141,7 +1135,7 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 		item.BackdropImageTags = append(item.BackdropImageTags, tag)
 	}
 	if includeUserData {
-		userData := &UserItemDataDto{IsFavorite: title.InLibrary, Key: title.ID}
+		userData := &UserItemDataDto{IsFavorite: title.InLibrary, Key: title.ID, ItemId: title.ID}
 		if title.Progress != nil {
 			userData.PlaybackPositionTicks = SecondsToTicks(int64(title.Progress.PositionSeconds))
 			userData.Played = title.Progress.Completed

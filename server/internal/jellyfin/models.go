@@ -126,6 +126,7 @@ type UserItemDataDto struct {
 	IsFavorite            bool   `json:"IsFavorite"`
 	Played                bool   `json:"Played"`
 	Key                   string `json:"Key"`
+	ItemId                string `json:"ItemId"`
 	LastPlayedDate        string `json:"LastPlayedDate,omitempty"`
 }
 
