@@ -441,8 +441,22 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	var views QueryResult[BaseItemDto]
 	sequenceDecode(t, viewsResponse, &views)
 	sequenceRequireObjectKeys(t, viewsResponse.Body.Bytes(), "Items", "TotalRecordCount", "StartIndex")
-	if len(views.Items) != 3 || views.TotalRecordCount != 3 || views.Items[0].Id == "" || views.Items[1].Id == "" || views.Items[2].Id == "" || views.Items[0].Id == views.Items[1].Id || views.Items[1].Id == views.Items[2].Id {
-		t.Fatalf("virtual views are incomplete or non-opaque: %+v", views)
+	expectedViews := 3
+	if isVidHubClient(ClientIdentity{Client: fixture.client}) {
+		expectedViews = 2
+	}
+	if len(views.Items) != expectedViews || views.TotalRecordCount != expectedViews || len(user.Configuration.OrderedViews) != expectedViews {
+		t.Fatalf("client views are incomplete: client=%s views=%+v config=%+v", fixture.client, views, user.Configuration)
+	}
+	seenViews := make(map[string]struct{}, len(views.Items))
+	for index, view := range views.Items {
+		if view.Id == "" || user.Configuration.OrderedViews[index] != view.Id {
+			t.Fatalf("client view order is inconsistent: client=%s views=%+v config=%+v", fixture.client, views, user.Configuration)
+		}
+		if _, duplicate := seenViews[view.Id]; duplicate {
+			t.Fatalf("duplicate client view: client=%s view=%+v", fixture.client, view)
+		}
+		seenViews[view.Id] = struct{}{}
 	}
 	var tvView BaseItemDto
 	for _, view := range views.Items {

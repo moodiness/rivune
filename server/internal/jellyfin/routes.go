@@ -35,6 +35,7 @@ const (
 	RouteItems                   Route = "items"
 	RouteUserItems               Route = "user-items"
 	RouteLatestItems             Route = "latest-items"
+	RouteUserLatestItems         Route = "user-latest-items"
 	RouteItem                    Route = "item"
 	RouteUserItem                Route = "user-item"
 	RouteSeasons                 Route = "seasons"
@@ -104,6 +105,7 @@ var routeDefinitions = []RouteSpec{
 	{RouteItems, http.MethodGet, "/Items"},
 	{RouteUserItems, http.MethodGet, "/Users/{id}/Items"},
 	{RouteLatestItems, http.MethodGet, "/Items/Latest"},
+	{RouteUserLatestItems, http.MethodGet, "/Users/{id}/Items/Latest"},
 	{RouteItem, http.MethodGet, "/Items/{id}"},
 	{RouteUserItem, http.MethodGet, "/Users/{userId}/Items/{itemId}"},
 	{RouteSeasons, http.MethodGet, "/Shows/{seriesId}/Seasons"},
@@ -237,6 +239,7 @@ func (handler *Handler) installBuiltInHandlers() {
 		handler.handlers[RouteItems] = http.HandlerFunc(handler.handleItems)
 		handler.handlers[RouteUserItems] = http.HandlerFunc(handler.handleUserItems)
 		handler.handlers[RouteLatestItems] = http.HandlerFunc(handler.handleLatestItems)
+		handler.handlers[RouteUserLatestItems] = http.HandlerFunc(handler.handleUserLatestItems)
 		handler.handlers[RouteItem] = http.HandlerFunc(handler.handleItem)
 		handler.handlers[RouteUserItem] = http.HandlerFunc(handler.handleUserItem)
 		handler.handlers[RouteSeasons] = http.HandlerFunc(handler.handleSeasons)

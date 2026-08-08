@@ -47,9 +47,9 @@ func TestReservedPathsFailClosedInsideCompatNamespaces(t *testing.T) {
 	}
 }
 
-func TestDispatcherServesAllFiftyTwoRoutesAtRootAndEmby(t *testing.T) {
-	if len(routeDefinitions) != 52 {
-		t.Fatalf("route definitions = %d, want 52", len(routeDefinitions))
+func TestDispatcherServesAllFiftyThreeRoutesAtRootAndEmby(t *testing.T) {
+	if len(routeDefinitions) != 53 {
+		t.Fatalf("route definitions = %d, want 53", len(routeDefinitions))
 	}
 	calls := make(map[Route]int, len(routeDefinitions))
 	handlers := make(map[Route]http.Handler, len(routeDefinitions))

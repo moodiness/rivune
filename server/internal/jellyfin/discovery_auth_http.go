@@ -124,7 +124,7 @@ func (handler *Handler) handleAuthenticateByName(response http.ResponseWriter, r
 	}
 	serverID := handler.serverInfo.ID.String()
 	writeJSON(response, http.StatusOK, AuthenticationResult{
-		User: handler.configuredCompatUser(result.Profile.ID, result.Profile.Name),
+		User: handler.configuredCompatUser(request.Context(), result.Principal, client, result.Profile.ID, result.Profile.Name),
 		SessionInfo: SessionInfoDto{
 			Id: result.Credential.SessionID, ServerId: serverID, IsActive: true,
 			UserId: result.Profile.ID, UserName: result.Profile.Name,
@@ -172,7 +172,7 @@ func (handler *Handler) handleCurrentUser(response http.ResponseWriter, request 
 	if !ok {
 		return
 	}
-	writeJSON(response, http.StatusOK, handler.userForSession(session))
+	writeJSON(response, http.StatusOK, handler.userForSession(request.Context(), session))
 }
 
 func (handler *Handler) handleUser(response http.ResponseWriter, request *http.Request) {
@@ -184,7 +184,7 @@ func (handler *Handler) handleUser(response http.ResponseWriter, request *http.R
 		writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "The requested resource was not found")
 		return
 	}
-	writeJSON(response, http.StatusOK, handler.userForSession(session))
+	writeJSON(response, http.StatusOK, handler.userForSession(request.Context(), session))
 }
 
 func (handler *Handler) handleLogout(response http.ResponseWriter, request *http.Request) {
@@ -314,14 +314,14 @@ func (handler *Handler) publicSystemInfo() (PublicSystemInfo, bool) {
 	}, true
 }
 
-func (handler *Handler) userForSession(session AuthenticatedSession) UserDto {
-	return handler.configuredCompatUser(session.ProfileID, session.ProfileName)
+func (handler *Handler) userForSession(ctx context.Context, session AuthenticatedSession) UserDto {
+	return handler.configuredCompatUser(ctx, session.Principal, session.Client, session.ProfileID, session.ProfileName)
 }
 
-func (handler *Handler) configuredCompatUser(profileID, profileName string) UserDto {
+func (handler *Handler) configuredCompatUser(ctx context.Context, principal nativeauth.Principal, client ClientIdentity, profileID, profileName string) UserDto {
 	user := handler.newCompatUser(profileID, profileName)
-	views, ok := handler.virtualViews()
-	if !ok {
+	views, err := handler.sessionViews(ctx, principal, client)
+	if err != nil {
 		return user
 	}
 	user.Configuration.OrderedViews = make([]string, 0, len(views))

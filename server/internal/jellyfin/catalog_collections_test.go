@@ -77,6 +77,7 @@ func (store *collectionCompatStore) resolvedInputs() []watchstate.ResolveTitleIn
 type collectionCompatService struct {
 	authorized collection.Collection
 	foreign    collection.Collection
+	listErr    error
 	calls      []collectionResolveCall
 }
 
@@ -88,6 +89,9 @@ type collectionResolveCall struct {
 }
 
 func (service *collectionCompatService) List(context.Context, auth.Principal) ([]collection.Collection, error) {
+	if service.listErr != nil {
+		return nil, service.listErr
+	}
 	return []collection.Collection{service.authorized}, nil
 }
 
@@ -266,7 +270,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	}
 	service.calls = nil
 
-	folderRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+service.authorized.Folders[0].ID+"&IncludeItemTypes=Movie,Series&Limit=2")
+	folderRequest := authenticatedCatalogRequest(t, token, "/Items?ParentId="+service.authorized.Folders[0].ID+"&SortBy=IsFolder,Filename&SortOrder=Ascending&Recursive=false&Limit=50")
 	folderResponse := httptest.NewRecorder()
 	handler.handleItems(folderResponse, folderRequest)
 	var folderItems QueryResult[BaseItemDto]
@@ -310,6 +314,86 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 	handler.handleItem(foreignResponse, foreignRequest)
 	if foreignResponse.Code != http.StatusNotFound || strings.Contains(foreignResponse.Body.String(), service.foreign.Title) {
 		t.Fatalf("foreign boxset detail leaked status=%d body=%s", foreignResponse.Code, foreignResponse.Body.String())
+	}
+}
+
+func TestVidHubPromotesCollectionsAsDirectHomeViews(t *testing.T) {
+	handler, _, _, token := newCollectionCompatHandler(t)
+	handler.authentication.(*catalogHTTPAuthentication).session.Client = ClientIdentity{Client: "VidHub"}
+	virtual, ok := handler.virtualViews()
+	if !ok {
+		t.Fatal("virtual views unavailable")
+	}
+
+	viewsRequest := authenticatedCatalogRequest(t, token, "/UserViews?UserId="+catalogTestProfileID)
+	viewsResponse := httptest.NewRecorder()
+	handler.handleViews(viewsResponse, viewsRequest)
+	var views QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, viewsResponse, &views)
+	if viewsResponse.Code != http.StatusOK || views.TotalRecordCount != 3 || len(views.Items) != 3 ||
+		views.Items[0].Id != virtual[0].Id || views.Items[1].Id != virtual[1].Id ||
+		views.Items[2].Id != collectionCompatID || views.Items[2].Id == virtual[2].Id ||
+		views.Items[2].Type != "CollectionFolder" || views.Items[2].CollectionType != "mixed" ||
+		views.Items[2].UserData == nil || views.Items[2].UserData.ItemId != collectionCompatID {
+		t.Fatalf("VidHub home views status=%d result=%+v", viewsResponse.Code, views)
+	}
+
+	userRequest := authenticatedCatalogRequest(t, token, "/Users/Me")
+	userResponse := httptest.NewRecorder()
+	handler.handleCurrentUser(userResponse, userRequest)
+	var user UserDto
+	decodeCatalogResponse(t, userResponse, &user)
+	if userResponse.Code != http.StatusOK || len(user.Configuration.OrderedViews) != 3 ||
+		user.Configuration.OrderedViews[2] != collectionCompatID || len(user.Configuration.MyMediaExcludes) != 0 {
+		t.Fatalf("VidHub ordered home views status=%d config=%+v", userResponse.Code, user.Configuration)
+	}
+
+	latestRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items/Latest?ParentId="+collectionCompatID+"&Fields=BasicSyncInfo,Overview,CollectionType,UserData&Recursive=true&MediaTypes=Video&Limit=20&IsPlayed=false")
+	latestResponse := httptest.NewRecorder()
+	handler.ServeHTTP(latestResponse, latestRequest)
+	var latest []BaseItemDto
+	decodeCatalogResponse(t, latestResponse, &latest)
+	if latestResponse.Code != http.StatusOK || len(latest) != 3 {
+		t.Fatalf("VidHub home collection row status=%d items=%+v body=%s", latestResponse.Code, latest, latestResponse.Body.String())
+	}
+	for _, item := range latest {
+		if item.Type == "Folder" || item.UserData == nil || item.UserData.ItemId != item.Id {
+			t.Fatalf("VidHub home row contains an invalid media item: %+v", item)
+		}
+	}
+
+	itemsRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items?ParentId="+collectionCompatID+"&IncludeItemTypes=Movie,Series&Recursive=true&Limit=2")
+	itemsRequest.SetPathValue("id", catalogTestProfileID)
+	itemsResponse := httptest.NewRecorder()
+	handler.handleUserItems(itemsResponse, itemsRequest)
+	var items QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, itemsResponse, &items)
+	if itemsResponse.Code != http.StatusOK || len(items.Items) != 2 || items.Items[0].Type == "Folder" || items.Items[1].Type == "Folder" {
+		t.Fatalf("VidHub direct collection view status=%d result=%+v", itemsResponse.Code, items)
+	}
+}
+
+func TestVidHubViewProjectionFallsBackTogether(t *testing.T) {
+	handler, service, _, token := newCollectionCompatHandler(t)
+	handler.authentication.(*catalogHTTPAuthentication).session.Client = ClientIdentity{Client: "VidHub"}
+	service.listErr = errors.New("collection store unavailable")
+
+	viewsRequest := authenticatedCatalogRequest(t, token, "/UserViews?UserId="+catalogTestProfileID)
+	viewsResponse := httptest.NewRecorder()
+	handler.handleViews(viewsResponse, viewsRequest)
+	var views QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, viewsResponse, &views)
+
+	userRequest := authenticatedCatalogRequest(t, token, "/Users/Me")
+	userResponse := httptest.NewRecorder()
+	handler.handleCurrentUser(userResponse, userRequest)
+	var user UserDto
+	decodeCatalogResponse(t, userResponse, &user)
+
+	if viewsResponse.Code != http.StatusOK || userResponse.Code != http.StatusOK || len(views.Items) != 2 ||
+		len(user.Configuration.OrderedViews) != 2 || user.Configuration.OrderedViews[0] != views.Items[0].Id ||
+		user.Configuration.OrderedViews[1] != views.Items[1].Id {
+		t.Fatalf("VidHub fallback diverged: viewsStatus=%d views=%+v userStatus=%d config=%+v", viewsResponse.Code, views, userResponse.Code, user.Configuration)
 	}
 }
 

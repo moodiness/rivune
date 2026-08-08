@@ -28,6 +28,8 @@ const (
 
 const localizedArtworkPrefix = "/api/v1/artwork/"
 
+var errCollectionResolverUnavailable = errors.New("collection resolver unavailable")
+
 type virtualFolderInfo struct {
 	Name           string   `json:"Name"`
 	Locations      []string `json:"Locations"`
@@ -57,7 +59,7 @@ func (handler *Handler) handleVirtualFolders(response http.ResponseWriter, reque
 	if !ok || !handler.requireOptionalQueryUser(response, request, session) {
 		return
 	}
-	views, err := handler.sessionViews()
+	views, err := handler.sessionViews(request.Context(), session.Principal, session.Client)
 	if err != nil {
 		handler.writeCollectionError(response, err)
 		return
@@ -97,6 +99,18 @@ func (handler *Handler) handleLatestItems(response http.ResponseWriter, request 
 	if !ok || !handler.requireOptionalQueryUser(response, request, session) {
 		return
 	}
+	handler.writeLatestItems(response, request, session, false)
+}
+
+func (handler *Handler) handleUserLatestItems(response http.ResponseWriter, request *http.Request) {
+	session, ok := handler.catalogSession(response, request)
+	if !ok || !handler.requireBoundUser(response, request.PathValue("id"), session) {
+		return
+	}
+	handler.writeLatestItems(response, request, session, isVidHubClient(session.Client))
+}
+
+func (handler *Handler) writeLatestItems(response http.ResponseWriter, request *http.Request, session AuthenticatedSession, flattenCollections bool) {
 	query, err := ParseItemQuery(request.URL.Query())
 	if err != nil {
 		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
@@ -111,8 +125,17 @@ func (handler *Handler) handleLatestItems(response http.ResponseWriter, request 
 	if parentID != "" && handler.collections != nil {
 		value, collectionErr := handler.collections.Get(request.Context(), session.Principal, parentID)
 		if collectionErr == nil {
-			items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, query)
-			handler.writeJSON(response, http.StatusOK, items)
+			if !flattenCollections {
+				items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, query)
+				handler.writeJSON(response, http.StatusOK, items)
+				return
+			}
+			page, resolveErr := handler.collectionItemPage(request.Context(), session.Principal, query, mediaTypes, value, "", "")
+			if resolveErr != nil {
+				handler.writeCollectionItemError(response, resolveErr)
+				return
+			}
+			handler.writeJSON(response, http.StatusOK, page.Items)
 			return
 		}
 		if !errors.Is(collectionErr, collection.ErrNotFound) {
@@ -264,7 +287,7 @@ func (handler *Handler) requireOptionalQueryUser(response http.ResponseWriter, r
 }
 
 func (handler *Handler) writeViews(response http.ResponseWriter, request *http.Request, session AuthenticatedSession) {
-	views, err := handler.sessionViews()
+	views, err := handler.sessionViews(request.Context(), session.Principal, session.Client)
 	if err != nil {
 		handler.writeCollectionError(response, err)
 		return
@@ -272,12 +295,31 @@ func (handler *Handler) writeViews(response http.ResponseWriter, request *http.R
 	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: views, TotalRecordCount: len(views), StartIndex: 0})
 }
 
-func (handler *Handler) sessionViews() ([]BaseItemDto, error) {
+func isVidHubClient(client ClientIdentity) bool {
+	return strings.EqualFold(strings.TrimSpace(client.Client), "VidHub")
+}
+
+func (handler *Handler) sessionViews(ctx context.Context, principal auth.Principal, client ClientIdentity) ([]BaseItemDto, error) {
 	views, ok := handler.virtualViews()
 	if !ok {
 		return nil, collection.ErrNotFound
 	}
-	return views, nil
+	if !isVidHubClient(client) {
+		return views, nil
+	}
+	promoted := append([]BaseItemDto(nil), views[:2]...)
+	if handler.collections == nil {
+		return promoted, nil
+	}
+	values, err := handler.collections.List(ctx, principal)
+	if err != nil {
+		handler.logCompatCatalogEvent(compatCatalogFailedMessage, "collection_views:"+compatCatalogErrorClass(err))
+		return promoted, nil
+	}
+	for _, value := range values {
+		promoted = append(promoted, handler.collectionViewDTO(ctx, principal, value))
+	}
+	return promoted, nil
 }
 
 func (handler *Handler) virtualViews() ([]BaseItemDto, bool) {
@@ -607,48 +649,53 @@ func (handler *Handler) findCollectionFolder(ctx context.Context, principal auth
 }
 
 func (handler *Handler) writeCollectionItems(response http.ResponseWriter, request *http.Request, session AuthenticatedSession, query ItemQuery, mediaTypes []string, value collection.Collection, sortBy, sortOrder string) {
+	page, err := handler.collectionItemPage(request.Context(), session.Principal, query, mediaTypes, value, sortBy, sortOrder)
+	if err != nil {
+		handler.writeCollectionItemError(response, err)
+		return
+	}
+	handler.writeJSON(response, http.StatusOK, page)
+}
+
+func (handler *Handler) collectionItemPage(ctx context.Context, principal auth.Principal, query ItemQuery, mediaTypes []string, value collection.Collection, sortBy, sortOrder string) (QueryResult[BaseItemDto], error) {
 	allowed := intersectMediaTypes(mediaTypes, []string{collection.MediaTypeMovie, collection.MediaTypeSeries})
 	if noCatalogMediaTypes(allowed) {
-		handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: query.StartIndex})
-		return
+		return QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: query.StartIndex}, nil
 	}
 	resolver, ok := handler.catalog.(collectionItemResolver)
 	if !ok {
-		handler.logCompatCatalogEvent(compatCatalogFailedMessage, "collection_resolver_unavailable")
-		handler.writeCompatError(response, http.StatusInternalServerError, "InternalServerError", "Internal server error")
-		return
+		return QueryResult[BaseItemDto]{}, errCollectionResolverUnavailable
 	}
-	titles, more, err := handler.resolveCollectionWindow(request.Context(), session.Principal, resolver, value, allowed, query, sortBy, sortOrder)
+	titles, more, err := handler.resolveCollectionWindow(ctx, principal, resolver, value, allowed, query, sortBy, sortOrder)
 	if err != nil {
-		handler.logCompatCatalogEvent(compatCatalogFailedMessage, "collection_items:"+compatCatalogErrorClass(err))
-		if errors.Is(err, collection.ErrActiveProfileRequired) || errors.Is(err, collection.ErrForbidden) ||
-			errors.Is(err, collection.ErrNotFound) || errors.Is(err, collection.ErrInvalidInput) || errors.Is(err, collection.ErrProviderUnavailable) {
-			handler.writeCollectionError(response, err)
-		} else {
-			handler.writeCatalogError(response, err)
-		}
-		return
+		return QueryResult[BaseItemDto]{}, err
 	}
-	start := query.StartIndex
-	if start > len(titles) {
-		start = len(titles)
-	}
-	end := start + query.Limit
-	if end > len(titles) {
-		end = len(titles)
-	}
+	start := min(query.StartIndex, len(titles))
+	end := min(start+query.Limit, len(titles))
 	items := make([]BaseItemDto, 0, end-start)
 	for _, title := range titles[start:end] {
 		items = append(items, handler.baseItemDTO(title, query.EnableUserData))
 	}
 	total := len(titles)
 	if more {
-		minimum := query.StartIndex + len(items) + 1
-		if total < minimum {
-			total = minimum
-		}
+		total = max(total, query.StartIndex+len(items)+1)
 	}
-	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: items, TotalRecordCount: total, StartIndex: query.StartIndex})
+	return QueryResult[BaseItemDto]{Items: items, TotalRecordCount: total, StartIndex: query.StartIndex}, nil
+}
+
+func (handler *Handler) writeCollectionItemError(response http.ResponseWriter, err error) {
+	if errors.Is(err, errCollectionResolverUnavailable) {
+		handler.logCompatCatalogEvent(compatCatalogFailedMessage, "collection_resolver_unavailable")
+		handler.writeCompatError(response, http.StatusInternalServerError, "InternalServerError", "Internal server error")
+		return
+	}
+	handler.logCompatCatalogEvent(compatCatalogFailedMessage, "collection_items:"+compatCatalogErrorClass(err))
+	if errors.Is(err, collection.ErrActiveProfileRequired) || errors.Is(err, collection.ErrForbidden) ||
+		errors.Is(err, collection.ErrNotFound) || errors.Is(err, collection.ErrInvalidInput) || errors.Is(err, collection.ErrProviderUnavailable) {
+		handler.writeCollectionError(response, err)
+		return
+	}
+	handler.writeCatalogError(response, err)
 }
 
 func (handler *Handler) resolveCollectionWindow(ctx context.Context, principal auth.Principal, resolver collectionItemResolver, value collection.Collection, mediaTypes []string, query ItemQuery, sortBy, sortOrder string) ([]watchstate.CatalogTitle, bool, error) {
@@ -766,6 +813,17 @@ func (handler *Handler) collectionDTO(ctx context.Context, principal auth.Princi
 		Etag: value.ID, DisplayPreferencesId: value.ID, LocationType: "FileSystem",
 		Type: "BoxSet", MediaType: "Unknown", IsFolder: true, ParentId: parentID,
 		Genres: []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags, UserData: &UserItemDataDto{Key: value.ID, ItemId: value.ID},
+	}
+}
+
+func (handler *Handler) collectionViewDTO(ctx context.Context, principal auth.Principal, value collection.Collection) BaseItemDto {
+	imageTags, backdropImageTags := handler.collectionArtworkTags(ctx, principal, value)
+	return BaseItemDto{
+		Id: value.ID, ServerId: handler.serverInfo.ID.String(), Name: value.Title, SortName: value.Title,
+		Etag: value.ID, DisplayPreferencesId: value.ID, LocationType: "FileSystem",
+		Type: "CollectionFolder", MediaType: "Unknown", CollectionType: "mixed", IsFolder: true,
+		Genres: []string{}, ImageTags: imageTags, BackdropImageTags: backdropImageTags,
+		UserData: &UserItemDataDto{Key: value.ID, ItemId: value.ID},
 	}
 }
 
@@ -1066,7 +1124,7 @@ func standardJellyfinSort(value string) bool {
 		strings.EqualFold(value, "CommunityRating"), strings.EqualFold(value, "CriticRating"),
 		strings.EqualFold(value, "DateCreated"), strings.EqualFold(value, "DateLastContentAdded"),
 		strings.EqualFold(value, "DatePlayed"), strings.EqualFold(value, "DigitalReleaseDate"),
-		strings.EqualFold(value, "IsFavoriteOrLiked"), strings.EqualFold(value, "IsFolder"),
+		strings.EqualFold(value, "Filename"), strings.EqualFold(value, "IsFavoriteOrLiked"), strings.EqualFold(value, "IsFolder"),
 		strings.EqualFold(value, "IsPlayed"), strings.EqualFold(value, "IsUnplayed"),
 		strings.EqualFold(value, "OfficialRating"), strings.EqualFold(value, "PlayCount"),
 		strings.EqualFold(value, "PremiereDate"), strings.EqualFold(value, "ProductionYear"),
