@@ -61,7 +61,7 @@ func (handler *Handler) handleVirtualFolders(response http.ResponseWriter, reque
 	if !ok || !handler.requireOptionalQueryUser(response, request, session) {
 		return
 	}
-	views, err := handler.sessionViews(request.Context(), session.Principal)
+	views, err := handler.sessionViews(request.Context(), session.Principal, false)
 	if err != nil {
 		handler.writeCollectionError(response, err)
 		return
@@ -328,7 +328,7 @@ func (handler *Handler) requireOptionalQueryUser(response http.ResponseWriter, r
 }
 
 func (handler *Handler) writeViews(response http.ResponseWriter, request *http.Request, session AuthenticatedSession) {
-	views, err := handler.sessionViews(request.Context(), session.Principal)
+	views, err := handler.sessionViews(request.Context(), session.Principal, true)
 	if err != nil {
 		handler.writeCollectionError(response, err)
 		return
@@ -336,7 +336,7 @@ func (handler *Handler) writeViews(response http.ResponseWriter, request *http.R
 	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: views, TotalRecordCount: len(views), StartIndex: 0})
 }
 
-func (handler *Handler) sessionViews(ctx context.Context, principal auth.Principal) ([]BaseItemDto, error) {
+func (handler *Handler) sessionViews(ctx context.Context, principal auth.Principal, homeCollectionTypes bool) ([]BaseItemDto, error) {
 	views, ok := handler.virtualViews()
 	if !ok {
 		return nil, collection.ErrNotFound
@@ -353,6 +353,9 @@ func (handler *Handler) sessionViews(ctx context.Context, principal auth.Princip
 	for _, value := range values {
 		view, viewErr := handler.collectionViewDTO(ctx, principal, value)
 		if viewErr == nil {
+			if homeCollectionTypes {
+				view.CollectionType = collectionHomeViewType(value)
+			}
 			promoted = append(promoted, view)
 		}
 	}
@@ -423,14 +426,14 @@ func (handler *Handler) writeItem(response http.ResponseWriter, request *http.Re
 		handler.writeCatalogError(response, err)
 		return
 	}
-	item, ok := handler.detailedCatalogItem(request.Context(), session, title, query.EnableUserData)
+	item, ok := handler.detailedCatalogItem(request.Context(), session, title, query.EnableUserData, itemQueryRequestsMediaSources(query))
 	if !ok {
 		return
 	}
 	handler.writeJSON(response, http.StatusOK, item)
 }
 
-func (handler *Handler) detailedCatalogItem(ctx context.Context, session AuthenticatedSession, title watchstate.CatalogTitle, includeUserData bool) (BaseItemDto, bool) {
+func (handler *Handler) detailedCatalogItem(ctx context.Context, session AuthenticatedSession, title watchstate.CatalogTitle, includeUserData, includeMediaSources bool) (BaseItemDto, bool) {
 	if detailReader, ok := handler.catalog.(catalogDetailReader); ok {
 		enriched, detailErr := detailReader.EnrichCatalogTitle(ctx, session.Principal, title)
 		if detailErr == nil {
@@ -441,11 +444,25 @@ func (handler *Handler) detailedCatalogItem(ctx context.Context, session Authent
 	}
 	item := handler.baseItemDTO(title, includeUserData)
 	if title.MediaType == "movie" || title.MediaType == "episode" {
-		if sources := handler.detailMediaSources(ctx, session, title); len(sources) != 0 {
+		if !includeMediaSources {
+			item.MediaSources = nil
+		} else if sources := handler.detailMediaSources(ctx, session, title); len(sources) != 0 {
 			item.MediaSources = sources
+		}
+		if includeMediaSources {
+			unspecified := -1
+			for index := range item.MediaSources {
+				if item.MediaSources[index].DefaultAudioStreamIndex == nil {
+					item.MediaSources[index].DefaultAudioStreamIndex = &unspecified
+				}
+			}
 		}
 	}
 	return item, true
+}
+
+func itemQueryRequestsMediaSources(query ItemQuery) bool {
+	return len(query.Fields) == 0 || containsItemType(query.Fields, "MediaSources")
 }
 
 func (handler *Handler) writeCatalogIDSelection(response http.ResponseWriter, request *http.Request, session AuthenticatedSession, query ItemQuery, mediaTypes []string, sortBy, sortOrder string) bool {
@@ -510,7 +527,7 @@ func (handler *Handler) writeCatalogIDSelection(response http.ResponseWriter, re
 	items := make([]BaseItemDto, 0, end-start)
 	for _, title := range titles[start:end] {
 		if total == 1 {
-			item, ok := handler.detailedCatalogItem(request.Context(), session, title, query.EnableUserData)
+			item, ok := handler.detailedCatalogItem(request.Context(), session, title, query.EnableUserData, itemQueryRequestsMediaSources(query))
 			if !ok {
 				return true
 			}
@@ -583,7 +600,7 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 			value, collectionErr := handler.resolveCollectionView(request.Context(), session.Principal, parentID)
 			if collectionErr == nil {
 				contentTypes := intersectMediaTypes(mediaTypes, []string{collection.MediaTypeMovie, collection.MediaTypeSeries})
-				if parsed.Recursive && len(parsed.IncludeItemTypes) != 0 && !noCatalogMediaTypes(contentTypes) {
+				if parsed.Recursive && parsed.Limit != 0 && len(parsed.IncludeItemTypes) != 0 && !noCatalogMediaTypes(contentTypes) {
 					handler.writeCollectionItems(response, request, session, parsed, mediaTypes, value, sortBy, sortOrder)
 				} else {
 					handler.writeCollectionFolders(response, request.Context(), session.Principal, parsed, value)
@@ -710,7 +727,7 @@ func (handler *Handler) writeCollectionRoot(response http.ResponseWriter, reques
 }
 
 func (handler *Handler) writeSessionViewRoot(response http.ResponseWriter, ctx context.Context, principal auth.Principal, query ItemQuery, sortBy, sortOrder string) {
-	views, err := handler.sessionViews(ctx, principal)
+	views, err := handler.sessionViews(ctx, principal, false)
 	if err != nil {
 		handler.writeCollectionError(response, err)
 		return
@@ -1133,36 +1150,71 @@ func (handler *Handler) resolveCollectionWindow(ctx context.Context, principal a
 	return titles, false, nil
 }
 
+func configuredCollectionSourceMediaType(source collection.Source) string {
+	mediaType := ""
+	switch source.Kind {
+	case collection.SourceKindAddonCatalog:
+		if source.AddonCatalog != nil {
+			mediaType = source.AddonCatalog.Type
+		}
+	case collection.SourceKindTMDB:
+		if source.TMDB != nil {
+			mediaType = source.TMDB.MediaType
+		}
+	case collection.SourceKindTrakt:
+		if source.Trakt != nil {
+			mediaType = source.Trakt.MediaType
+		}
+	case collection.SourceKindMDBList:
+		if source.MDBList != nil {
+			mediaType = source.MDBList.MediaType
+		}
+	}
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	if mediaType == "show" {
+		return collection.MediaTypeSeries
+	}
+	return mediaType
+}
+
+func collectionHomeViewType(value collection.Collection) string {
+	hasMovie := false
+	hasSeries := false
+	for _, folder := range value.Folders {
+		if len(folder.Sources) == 0 {
+			return "unknown"
+		}
+		for _, source := range folder.Sources {
+			switch configuredCollectionSourceMediaType(source) {
+			case collection.MediaTypeMovie:
+				hasMovie = true
+			case collection.MediaTypeSeries:
+				hasSeries = true
+			case collection.MediaTypeBoth:
+				hasMovie = true
+				hasSeries = true
+			default:
+				return "unknown"
+			}
+		}
+	}
+	if hasMovie {
+		return "movies"
+	}
+	if hasSeries {
+		return "tvshows"
+	}
+	return "unknown"
+}
+
 func collectionFolderMayContainMediaTypes(folder collection.Folder, allowed map[string]struct{}) bool {
 	if len(folder.Sources) == 0 {
 		return true
 	}
 	for _, source := range folder.Sources {
-		mediaType := ""
-		switch source.Kind {
-		case collection.SourceKindAddonCatalog:
-			if source.AddonCatalog != nil {
-				mediaType = source.AddonCatalog.Type
-			}
-		case collection.SourceKindTMDB:
-			if source.TMDB != nil {
-				mediaType = source.TMDB.MediaType
-			}
-		case collection.SourceKindTrakt:
-			if source.Trakt != nil {
-				mediaType = source.Trakt.MediaType
-			}
-		case collection.SourceKindMDBList:
-			if source.MDBList != nil {
-				mediaType = source.MDBList.MediaType
-			}
-		}
-		mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+		mediaType := configuredCollectionSourceMediaType(source)
 		if mediaType == "" || mediaType == collection.MediaTypeBoth {
 			return true
-		}
-		if mediaType == "show" {
-			mediaType = collection.MediaTypeSeries
 		}
 		if _, ok := allowed[mediaType]; ok {
 			return true

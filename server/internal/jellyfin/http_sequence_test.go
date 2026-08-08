@@ -408,11 +408,14 @@ func TestGETPlaybackInfoThenRepeatedUserDetailsAndStaticStream(t *testing.T) {
 		sequenceRequireStatus(t, detail, http.StatusOK)
 		var item BaseItemDto
 		sequenceDecode(t, detail, &item)
-		if item.Id != sequenceEpisodeID || len(item.MediaSources) != 1 || item.MediaSources[0].Protocol != "File" || strings.ContainsAny(item.MediaSources[0].Path, "?#") || strings.Contains(item.MediaSources[0].DirectStreamUrl, "api_key=") || strings.Contains(item.MediaSources[0].DirectStreamUrl, "PlaySessionId=") {
-			t.Fatalf("user detail %d exposed stateful or authoritative media: %+v", index+1, item)
+		if item.Id != sequenceEpisodeID || len(item.MediaSources) != 1 || item.MediaSources[0].Id != source.Id ||
+			item.MediaSources[0].Protocol != "File" || strings.ContainsAny(item.MediaSources[0].Path, "?#") ||
+			!strings.Contains(item.MediaSources[0].DirectStreamUrl, "api_key="+url.QueryEscape(info.PlaySessionId)) ||
+			!strings.Contains(item.MediaSources[0].DirectStreamUrl, "PlaySessionId="+url.QueryEscape(info.PlaySessionId)) {
+			t.Fatalf("user detail %d omitted reusable media selection: %+v", index+1, item)
 		}
 		if len(fixture.handler.playSessions.entries) != sessionsBeforeDetails || fixture.playback.openCalls != 1 {
-			t.Fatalf("user detail %d created playback state: sessions=%d want=%d opens=%d", index+1, len(fixture.handler.playSessions.entries), sessionsBeforeDetails, fixture.playback.openCalls)
+			t.Fatalf("user detail %d duplicated playback state: sessions=%d want=%d opens=%d", index+1, len(fixture.handler.playSessions.entries), sessionsBeforeDetails, fixture.playback.openCalls)
 		}
 	}
 

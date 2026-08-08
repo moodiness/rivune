@@ -374,7 +374,7 @@ func (handler *Handler) userForSession(ctx context.Context, session Authenticate
 
 func (handler *Handler) configuredCompatUser(ctx context.Context, principal nativeauth.Principal, profileID, profileName string) UserDto {
 	user := handler.newCompatUser(profileID, profileName)
-	views, err := handler.sessionViews(ctx, principal)
+	views, err := handler.sessionViews(ctx, principal, false)
 	if err != nil {
 		return user
 	}

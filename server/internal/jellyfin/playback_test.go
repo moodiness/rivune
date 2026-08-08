@@ -410,15 +410,16 @@ func TestCompatibilityPlaybackCapsSourcesBelowReferenceQuotas(t *testing.T) {
 	}
 }
 
-func TestItemDetailEmbedsSideEffectFreePlayableSource(t *testing.T) {
+func TestItemDetailAdvertisesSelectablePlaybackSources(t *testing.T) {
 	fixture := newPlaybackFixture(t)
 	fixture.item.Title = "Playable detail"
-	fixture.item.Genres = []string{}
-	fixture.item.ProviderIDs = map[string]string{"imdb": "tt0000042"}
+	fixture.item.MediaType = "movie"
+	runtimeMinutes := 121
+	fixture.item.RuntimeMinutes = &runtimeMinutes
 	fixture.handler.catalog.(*fakeCompatPlaybackCatalog).item = fixture.item
 	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{
-		{SourceRef: "detail-source-secret-1", Name: "https://provider.invalid/signed?token=detail-secret", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
-		{SourceRef: "detail-source-secret-2", Name: "Bearer detail-provider-secret", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour)},
+		{SourceRef: "detail-source-secret-1", StableIdentity: "detail-source-one", Name: "https://provider.invalid/signed?token=detail-secret", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour)},
+		{SourceRef: "detail-source-secret-2", StableIdentity: "detail-source-two", Name: "Bearer detail-provider-secret", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
 	}}
 	request := httptest.NewRequest(http.MethodGet, "/Users/"+fixture.authentication.session.ProfileID+"/Items/"+fixture.item.ID+"?Fields=MediaSources", nil)
 	request.SetPathValue("userId", fixture.authentication.session.ProfileID)
@@ -433,14 +434,38 @@ func TestItemDetailEmbedsSideEffectFreePlayableSource(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &item); err != nil {
 		t.Fatal(err)
 	}
-	if len(item.MediaSources) != 1 || item.MediaSources[0].Name != "Source 1" ||
-		item.MediaSources[0].Protocol != "File" || item.MediaSources[0].Container != "mp4" ||
-		item.MediaSources[0].RunTimeTicks == nil || *item.MediaSources[0].RunTimeTicks != MinutesToTicks(121) || len(item.MediaSources[0].MediaStreams) != 0 ||
-		!strings.HasPrefix(item.MediaSources[0].Path, "/rivune/") || strings.ContainsAny(item.MediaSources[0].Path, "?#") ||
-		!strings.Contains(item.MediaSources[0].DirectStreamUrl, "MediaSourceId="+url.QueryEscape(item.MediaSources[0].Id)) || !strings.Contains(item.MediaSources[0].DirectStreamUrl, "Static=true") || strings.Contains(item.MediaSources[0].DirectStreamUrl, "PlaySessionId=") || strings.Contains(item.MediaSources[0].DirectStreamUrl, "api_key=") ||
-		strings.Contains(response.Body.String(), "detail-source-secret") || strings.Contains(response.Body.String(), "provider.invalid") || strings.Contains(response.Body.String(), "detail-provider-secret") ||
-		fixture.delivery.sourceCalls != 1 || len(fixture.delivery.sourceInputs) != 1 || fixture.delivery.sourceInputs[0].MaximumSources != maximumCompatibilityMediaSources || fixture.delivery.openCalls != 0 || len(fixture.handler.playSessions.entries) != 0 {
-		t.Fatalf("detail sources=%+v sourceCalls=%d openCalls=%d sessions=%d body=%s", item.MediaSources, fixture.delivery.sourceCalls, fixture.delivery.openCalls, len(fixture.handler.playSessions.entries), response.Body.String())
+	if len(item.MediaSources) != 2 || item.MediaSources[0].Id != fixture.item.ID || item.MediaSources[1].Id == fixture.item.ID ||
+		item.MediaSources[0].Name != "Source 1" || item.MediaSources[1].Name != "Source 2" ||
+		item.MediaSources[0].DefaultAudioStreamIndex == nil || *item.MediaSources[0].DefaultAudioStreamIndex != -1 ||
+		item.MediaSources[1].DefaultAudioStreamIndex == nil || *item.MediaSources[1].DefaultAudioStreamIndex != -1 ||
+		fixture.delivery.sourceCalls != 1 || fixture.delivery.openCalls != 0 || len(fixture.handler.playSessions.entries) != 1 {
+		t.Fatalf("detail sources=%+v sourceCalls=%d openCalls=%d sessions=%d", item.MediaSources, fixture.delivery.sourceCalls, fixture.delivery.openCalls, len(fixture.handler.playSessions.entries))
+	}
+	if strings.Contains(response.Body.String(), "detail-source-secret") || strings.Contains(response.Body.String(), "provider.invalid") || strings.Contains(response.Body.String(), "detail-provider-secret") {
+		t.Fatalf("detail disclosed provider data: %s", response.Body.String())
+	}
+
+	selectedResponse := fixture.playbackInfo(http.MethodPost, fmt.Sprintf(`{"MediaSourceId":%q,"AudioStreamIndex":0,"SubtitleStreamIndex":-1,"DeviceProfile":{"Name":"Client","DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","AudioCodec":"aac","Type":"Video"}]}}`, item.MediaSources[1].Id))
+	var selected PlaybackInfoResponse
+	if err := json.Unmarshal(selectedResponse.Body.Bytes(), &selected); err != nil {
+		t.Fatal(err)
+	}
+	if selectedResponse.Code != http.StatusOK || len(selected.MediaSources) != 1 ||
+		selected.MediaSources[0].Id != item.MediaSources[1].Id ||
+		fixture.delivery.sourceCalls != 2 || fixture.delivery.openCalls != 1 || len(fixture.delivery.inputs) != 1 ||
+		fixture.delivery.inputs[0].SourceRef != "detail-source-secret-2" || fixture.delivery.inputs[0].PreferredAudioTrack != nil ||
+		fixture.delivery.inputs[0].PreferredSubtitleID != "none" {
+		t.Fatalf("selected source status=%d result=%+v sourceCalls=%d inputs=%+v", selectedResponse.Code, selected, fixture.delivery.sourceCalls, fixture.delivery.inputs)
+	}
+	expandedResponse := fixture.playbackInfo(http.MethodPost, fmt.Sprintf(`{"MediaSourceId":%q,"AudioStreamIndex":0,"SubtitleStreamIndex":-1,"DeviceProfile":{"Name":"Client","DirectPlayProfiles":[{"Container":"mp4,mkv","VideoCodec":"h264","AudioCodec":"aac","Type":"Video"}]}}`, item.MediaSources[1].Id))
+	var expanded PlaybackInfoResponse
+	if err := json.Unmarshal(expandedResponse.Body.Bytes(), &expanded); err != nil {
+		t.Fatal(err)
+	}
+	if expandedResponse.Code != http.StatusOK || len(expanded.MediaSources) != 1 || expanded.MediaSources[0].Id != item.MediaSources[1].Id ||
+		fixture.delivery.sourceCalls != 3 || fixture.delivery.openCalls != 2 || len(fixture.delivery.inputs) != 2 ||
+		fixture.delivery.inputs[1].SourceRef != "detail-source-secret-2" {
+		t.Fatalf("expanded profile status=%d result=%+v sourceCalls=%d inputs=%+v", expandedResponse.Code, expanded, fixture.delivery.sourceCalls, fixture.delivery.inputs)
 	}
 }
 
@@ -486,7 +511,7 @@ func TestEpisodeDetailUsesSeriesPlaybackIdentity(t *testing.T) {
 	sources := fixture.handler.detailMediaSources(context.Background(), fixture.authentication.session, fixture.item)
 	if len(sources) != 1 || len(fixture.delivery.sourceInputs) != 1 || fixture.delivery.sourceInputs[0].MediaType != "episode" ||
 		fixture.delivery.sourceInputs[0].ResourceID != "tt7587890:1:2" || fixture.delivery.sourceInputs[0].AddonID != "" || fixture.delivery.sourceInputs[0].MaximumSources != maximumCompatibilityMediaSources ||
-		fixture.delivery.openCalls != 0 || len(fixture.handler.playSessions.entries) != 0 {
+		fixture.delivery.openCalls != 0 || len(fixture.handler.playSessions.entries) != 1 {
 		t.Fatalf("episode sources=%+v inputs=%+v opens=%d sessions=%d", sources, fixture.delivery.sourceInputs, fixture.delivery.openCalls, len(fixture.handler.playSessions.entries))
 	}
 }
@@ -730,9 +755,16 @@ func TestPlaybackInfoReusesSecondAndThirdCandidateAcrossRequests(t *testing.T) {
 		if result.PlaySessionId != initial.PlaySessionId || len(result.MediaSources) != 3 {
 			t.Fatalf("source %d did not reuse candidate set: initial=%#v selected=%#v", index, initial, result)
 		}
-		for candidate := range result.MediaSources {
-			if result.MediaSources[candidate].Id != initial.MediaSources[candidate].Id {
-				t.Fatalf("source %d candidate %d ID changed from %q to %q", index, candidate, initial.MediaSources[candidate].Id, result.MediaSources[candidate].Id)
+		if result.MediaSources[0].Id != initial.MediaSources[index].Id {
+			t.Fatalf("source %d was not promoted: initial=%#v selected=%#v", index, initial.MediaSources, result.MediaSources)
+		}
+		issued := make(map[string]struct{}, len(initial.MediaSources))
+		for _, source := range initial.MediaSources {
+			issued[source.Id] = struct{}{}
+		}
+		for _, source := range result.MediaSources {
+			if _, ok := issued[source.Id]; !ok {
+				t.Fatalf("source %d returned an unissued candidate %q", index, source.Id)
 			}
 		}
 	}

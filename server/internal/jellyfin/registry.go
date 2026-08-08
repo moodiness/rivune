@@ -306,7 +306,7 @@ func (registry *playSessionRegistry) reuseCandidate(session AuthenticatedSession
 			continue
 		}
 		capabilitiesChanged := !playbackCapabilitiesEqual(entry.capabilities, capabilities) || entry.allowTranscode != allowTranscode
-		if capabilitiesChanged && (!uniqueFresh || !candidateSetMatches(entry, freshByKey)) {
+		if capabilitiesChanged && (!uniqueFresh || !candidateSelectionMatches(entry, mediaID, freshByKey)) {
 			continue
 		}
 		if selected == nil || entry.sequence > selected.sequence {
@@ -316,26 +316,41 @@ func (registry *playSessionRegistry) reuseCandidate(session AuthenticatedSession
 	var descriptors []playSourceDescriptor
 	var releasePrincipal auth.Principal
 	var releaseReferences []string
+	retired := make([]*playSessionEntry, 0, 1)
 	if selected != nil {
 		capabilitiesChanged := !playbackCapabilitiesEqual(selected.capabilities, capabilities) || selected.allowTranscode != allowTranscode
 		if capabilitiesChanged {
 			pinner, pinnable := registry.playback.(sourceReferencePinner)
 			freshReferences := sourceReferencesFor(selected, freshByKey)
-			if !pinnable || len(freshReferences) != len(selected.sourceOrder) || pinner.PinSourceReferences(selected.principal, freshReferences) != nil {
+			if !pinnable || len(freshReferences) == 0 || pinner.PinSourceReferences(selected.principal, freshReferences) != nil {
 				selected = nil
 			} else {
 				if selected.referencesPinned {
 					releasePrincipal = clonePrincipal(selected.principal)
 					releaseReferences = sourceReferences(selected)
 				}
-				for index, id := range selected.sourceOrder {
+				keptOrder := make([]string, 0, len(freshByKey))
+				retiredOrder := make([]string, 0, len(selected.sourceOrder))
+				retiredSources := make(map[string]*playSessionSource, cap(retiredOrder))
+				for _, id := range selected.sourceOrder {
 					source := selected.sources[id]
-					option := freshByKey[source.key]
+					option, keep := freshByKey[source.key]
+					if !keep {
+						retiredOrder = append(retiredOrder, id)
+						retiredSources[id] = source
+						delete(selected.sources, id)
+						continue
+					}
+					keptOrder = append(keptOrder, id)
 					source.sourceRef = option.SourceRef
 					source.expiresAt = option.ExpiresAt.UTC()
-					source.descriptor.Name = compatibilitySourceName(index+1, option.ReportedHeight)
+					source.descriptor.Name = compatibilitySourceName(len(keptOrder), option.ReportedHeight)
 					source.descriptor.Protocol = option.Protocol
 					source.descriptor.Container = option.Container
+				}
+				selected.sourceOrder = keptOrder
+				if len(retiredOrder) != 0 {
+					retired = append(retired, &playSessionEntry{principal: clonePrincipal(selected.principal), sourceOrder: retiredOrder, sources: retiredSources})
 				}
 				selected.referencesPinned = true
 				selected.capabilities = clonePlaybackCapabilities(capabilities)
@@ -349,7 +364,7 @@ func (registry *playSessionRegistry) reuseCandidate(session AuthenticatedSession
 		}
 	}
 	registry.mu.Unlock()
-	registry.closeEntries(context.Background(), stale)
+	registry.closeEntries(context.Background(), append(stale, retired...))
 	if len(releaseReferences) > 0 {
 		registry.playback.(sourceReferencePinner).UnpinSourceReferences(releasePrincipal, releaseReferences)
 	}
@@ -488,7 +503,7 @@ func (registry *playSessionRegistry) setPlaybackPreferences(session Authenticate
 		return errPlaySessionNotFound
 	}
 	var preferredAudio *int
-	if audioIndex != nil && *audioIndex >= 0 {
+	if audioIndex != nil && *audioIndex > 0 {
 		preferredAudio = cloneIntPointer(audioIndex)
 	}
 	now := registry.now().UTC()
@@ -1570,8 +1585,15 @@ func playSourceKeyFor(option playback.SourceOption) playSourceKey {
 	return playSourceKey{StableIdentity: option.StableIdentity}
 }
 
-func candidateSetMatches(entry *playSessionEntry, fresh map[playSourceKey]playback.SourceOption) bool {
-	if entry == nil || len(entry.sourceOrder) != len(fresh) {
+func candidateSelectionMatches(entry *playSessionEntry, mediaID string, fresh map[playSourceKey]playback.SourceOption) bool {
+	if entry == nil || len(fresh) == 0 {
+		return false
+	}
+	selected := entry.sources[mediaID]
+	if selected == nil || selected.key.StableIdentity == "" {
+		return false
+	}
+	if _, exists := fresh[selected.key]; !exists {
 		return false
 	}
 	seen := make(map[playSourceKey]struct{}, len(entry.sourceOrder))
@@ -1584,9 +1606,6 @@ func candidateSetMatches(entry *playSessionEntry, fresh map[playSourceKey]playba
 			return false
 		}
 		seen[source.key] = struct{}{}
-		if _, exists := fresh[source.key]; !exists {
-			return false
-		}
 	}
 	return true
 }
@@ -1602,17 +1621,16 @@ func sourceReferences(entry *playSessionEntry) []string {
 }
 
 func sourceReferencesFor(entry *playSessionEntry, options map[playSourceKey]playback.SourceOption) []string {
-	references := make([]string, 0, len(entry.sourceOrder))
+	references := make([]string, 0, min(len(entry.sourceOrder), len(options)))
 	for _, id := range entry.sourceOrder {
 		source := entry.sources[id]
 		if source == nil {
 			return nil
 		}
 		option, exists := options[source.key]
-		if !exists {
-			return nil
+		if exists {
+			references = append(references, option.SourceRef)
 		}
-		references = append(references, option.SourceRef)
 	}
 	return references
 }

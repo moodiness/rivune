@@ -85,6 +85,7 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 				return
 			}
 			applyResolvedMediaSource(result.MediaSources, item.ID, binding.MediaSourceID, playID, input.StartTimeTicks, native)
+			promoteSelectedMediaSource(result.MediaSources, binding.MediaSourceID)
 			handler.writeJSON(response, http.StatusOK, result)
 			return
 		}
@@ -112,6 +113,7 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 				return
 			}
 			applyResolvedMediaSource(result.MediaSources, item.ID, binding.MediaSourceID, playID, input.StartTimeTicks, native)
+			promoteSelectedMediaSource(result.MediaSources, binding.MediaSourceID)
 			handler.writeJSON(response, http.StatusOK, result)
 			return
 		}
@@ -138,16 +140,16 @@ func (handler *Handler) handlePlaybackInfo(response http.ResponseWriter, request
 			return
 		}
 		applyResolvedMediaSource(result.MediaSources, item.ID, binding.MediaSourceID, playID, input.StartTimeTicks, native)
+		promoteSelectedMediaSource(result.MediaSources, binding.MediaSourceID)
 	}
 	handler.writeJSON(response, http.StatusOK, result)
 }
 
 func (handler *Handler) detailMediaSources(ctx context.Context, session AuthenticatedSession, item watchstate.CatalogTitle) []MediaSourceInfo {
-	if handler == nil || handler.playback == nil || item.ID == "" || item.MediaType != "movie" && item.MediaType != "episode" {
+	if handler == nil || handler.playback == nil || handler.playSessions == nil || item.ID == "" || item.MediaType != "movie" && item.MediaType != "episode" {
 		return nil
 	}
-	input := PlaybackInfoRequest{DeviceProfile: conservativeCompatibilityProfile()}
-	capabilities, allowTranscode, err := playbackCapabilities(input)
+	capabilities, allowTranscode, err := handler.effectivePlaybackCapabilities(session, PlaybackInfoRequest{})
 	if err != nil {
 		return nil
 	}
@@ -156,11 +158,21 @@ func (handler *Handler) detailMediaSources(ctx context.Context, session Authenti
 		return nil
 	}
 	defer releaseOptions()
-	option := options[0]
-	descriptor := playSourceDescriptor{
-		ID: item.ID, Name: compatibilitySourceName(1, option.ReportedHeight), Protocol: option.Protocol, Container: option.Container,
+	playID, descriptors, reused := handler.playSessions.reuseCandidate(session, item.ID, item.ID, capabilities, allowTranscode, options)
+	if !reused {
+		playID, descriptors, err = handler.playSessions.register(ctx, session, item.ID, capabilities, allowTranscode, options)
+		if err != nil {
+			return nil
+		}
 	}
-	return []MediaSourceInfo{mediaSourceDTO(item, "", descriptor, capabilities, allowTranscode, 0)}
+	unspecifiedAudio := -1
+	sources := make([]MediaSourceInfo, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		source := mediaSourceDTO(item, playID, descriptor, capabilities, allowTranscode, 0)
+		source.DefaultAudioStreamIndex = &unspecifiedAudio
+		sources = append(sources, source)
+	}
+	return sources
 }
 
 func (handler *Handler) playbackOptions(ctx context.Context, session AuthenticatedSession, item watchstate.CatalogTitle, capabilities playback.Capabilities, allowTranscode bool) ([]playback.SourceOption, func(), error) {
@@ -1189,6 +1201,18 @@ func applyResolvedMediaSource(sources []MediaSourceInfo, itemID, mediaID, playID
 				sources[index].Bitrate = &value
 			}
 		}
+		return
+	}
+}
+
+func promoteSelectedMediaSource(sources []MediaSourceInfo, mediaID string) {
+	for index := range sources {
+		if sources[index].Id != mediaID || index == 0 {
+			continue
+		}
+		selected := sources[index]
+		copy(sources[1:index+1], sources[:index])
+		sources[0] = selected
 		return
 	}
 }

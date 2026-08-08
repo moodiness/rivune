@@ -375,6 +375,8 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 	for index := range service.authorized.Folders {
 		service.authorized.Folders[index].TileShape = collection.TileShapePoster
 	}
+	service.authorized.Folders[0].Sources = []collection.Source{{Kind: collection.SourceKindAddonCatalog, AddonCatalog: &collection.AddonCatalogSource{Type: collection.MediaTypeMovie}}}
+	service.authorized.Folders[1].Sources = []collection.Source{{Kind: collection.SourceKindAddonCatalog, AddonCatalog: &collection.AddonCatalogSource{Type: collection.MediaTypeBoth}}}
 	coverURL := "https://provider.invalid/compatibility-client-poster-cover.png"
 	heroURL := "https://provider.invalid/compatibility-client-landscape-hero.png"
 	coverTag := strings.Repeat("d", 64)
@@ -404,7 +406,7 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 	if viewsResponse.Code != http.StatusOK || views.TotalRecordCount != 3 || len(views.Items) != 3 ||
 		views.Items[0].Id != virtual[0].Id || views.Items[1].Id != virtual[1].Id ||
 		views.Items[2].Id != promotedID || views.Items[2].Id == collectionCompatID || views.Items[2].Id == virtual[2].Id ||
-		views.Items[2].Type != "CollectionFolder" || views.Items[2].CollectionType != "unknown" ||
+		views.Items[2].Type != "CollectionFolder" || views.Items[2].CollectionType != "movies" ||
 		views.Items[2].PrimaryImageAspectRatio != 16.0/9.0 || views.Items[2].ImageTags["Thumb"] != heroTag ||
 		len(views.Items[2].BackdropImageTags) != 1 || views.Items[2].BackdropImageTags[0] != heroTag ||
 		views.Items[2].UserData == nil || views.Items[2].UserData.ItemId != promotedID {
@@ -431,6 +433,9 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 			if root.Items[itemIndex].Id != views.Items[itemIndex].Id || root.Items[itemIndex].Type != views.Items[itemIndex].Type {
 				t.Fatalf("standard root %d identity %d diverged: root=%+v view=%+v", index, itemIndex, root.Items[itemIndex], views.Items[itemIndex])
 			}
+		}
+		if root.Items[2].CollectionType != "unknown" {
+			t.Fatalf("standard root %d leaked UserViews collection type: %+v", index, root.Items[2])
 		}
 	}
 	pagedRootRequest := authenticatedCatalogRequest(t, token, "/Items?StartIndex=2&Limit=1")
@@ -524,6 +529,15 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 		detail.PrimaryImageAspectRatio != 16.0/9.0 || detail.ImageTags["Thumb"] != heroTag ||
 		len(detail.BackdropImageTags) != 1 || detail.BackdropImageTags[0] != heroTag {
 		t.Fatalf("promoted collection detail status=%d item=%+v", detailResponse.Code, detail)
+	}
+	countRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items?ParentId="+promotedID+"&IncludeItemTypes=Movie&Recursive=true&StartIndex=0&Limit=0")
+	countRequest.SetPathValue("id", catalogTestProfileID)
+	countResponse := httptest.NewRecorder()
+	handler.handleUserItems(countResponse, countRequest)
+	var countResult QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, countResponse, &countResult)
+	if countResponse.Code != http.StatusOK || countResult.TotalRecordCount != 2 || len(countResult.Items) != 0 {
+		t.Fatalf("promoted collection count preflight status=%d result=%+v", countResponse.Code, countResult)
 	}
 	folderBrowseRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items?ParentId="+promotedID+"&Recursive=true&StartIndex=0&Limit=36&SortBy=SortName,SortName,ProductionYear&SortOrder=Ascending&Fields=PrimaryImageAspectRatio,SortName")
 	folderBrowseRequest.SetPathValue("id", catalogTestProfileID)
