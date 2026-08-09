@@ -277,6 +277,145 @@ func TestCredentialRotationConcurrentWithProfileDeletionDoesNotDeadlock(t *testi
 	}
 }
 
+func TestProfileDisableRevokesLinkedCredentialsWithoutAffectingOtherProfiles(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL to run profile disable credential tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := database.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open profile disable credential database: %v", err)
+	}
+	defer pool.Close()
+	if err := database.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate profile disable credential database: %v", err)
+	}
+
+	target := seedCredentialStoreFixture(t, ctx, pool)
+	unrelated := seedCredentialStoreFixture(t, ctx, pool)
+	credentialStore, err := NewCredentialStore(pool)
+	if err != nil {
+		t.Fatalf("create profile credential store: %v", err)
+	}
+	targetCredential, err := credentialStore.Create(ctx, target.owner, target.profileID)
+	if err != nil {
+		t.Fatalf("create target profile credential: %v", err)
+	}
+	unrelatedCredential, err := credentialStore.Create(ctx, unrelated.owner, unrelated.profileID)
+	if err != nil {
+		t.Fatalf("create unrelated profile credential: %v", err)
+	}
+	authentication, err := auth.NewService(pool, 15*time.Minute, 2*time.Hour, "UTC")
+	if err != nil {
+		t.Fatalf("create linked authentication service: %v", err)
+	}
+	login := func(label string, credential ProfileCredential) auth.JellyfinProfileLoginResult {
+		t.Helper()
+		result, loginErr := authentication.LoginJellyfinProfile(ctx, auth.JellyfinProfileLoginInput{
+			Username: credential.Username, Password: credential.Password,
+			LinkedDeviceKey: "profile-disable-" + label + "-" + credential.Username,
+			DeviceName:      "Profile disable " + label,
+			Platform:        "jellyfin-test",
+		})
+		if loginErr != nil {
+			t.Fatalf("login %s profile credential: %v", label, loginErr)
+		}
+		return result
+	}
+	targetLogin := login("target", targetCredential)
+	unrelatedLogin := login("unrelated", unrelatedCredential)
+	targetPrincipal, err := authentication.Authenticate(ctx, targetLogin.Tokens.AccessToken)
+	if err != nil {
+		t.Fatalf("authenticate target native token before disable: %v", err)
+	}
+	unrelatedPrincipal, err := authentication.Authenticate(ctx, unrelatedLogin.Tokens.AccessToken)
+	if err != nil {
+		t.Fatalf("authenticate unrelated native token before disable: %v", err)
+	}
+	compatibility, err := NewSessionStore(pool, authentication)
+	if err != nil {
+		t.Fatalf("create compatibility session store: %v", err)
+	}
+	targetCompat, err := compatibility.Issue(ctx, targetPrincipal, target.profileID, ClientIdentity{
+		Client: "Jellyfin Test", Device: "Target client", DeviceID: "target-" + targetCredential.Username, Version: "1.0",
+	}, time.Now().UTC().Add(30*time.Minute))
+	if err != nil {
+		t.Fatalf("issue target compatibility session: %v", err)
+	}
+	unrelatedCompat, err := compatibility.Issue(ctx, unrelatedPrincipal, unrelated.profileID, ClientIdentity{
+		Client: "Jellyfin Test", Device: "Unrelated client", DeviceID: "unrelated-" + unrelatedCredential.Username, Version: "1.0",
+	}, time.Now().UTC().Add(30*time.Minute))
+	if err != nil {
+		t.Fatalf("issue unrelated compatibility session: %v", err)
+	}
+	if _, err := compatibility.Authenticate(ctx, targetCompat.Token); err != nil {
+		t.Fatalf("authenticate target compatibility token before disable: %v", err)
+	}
+	if _, err := compatibility.Authenticate(ctx, unrelatedCompat.Token); err != nil {
+		t.Fatalf("authenticate unrelated compatibility token before disable: %v", err)
+	}
+
+	profiles := profileservice.NewService(pool, time.Hour, "UTC")
+	disabled := false
+	dropFailure := installCredentialSessionRevocationFailure(t, ctx, pool, targetLogin.Tokens.SessionID)
+	if _, err := profiles.Update(ctx, target.manager, target.profileID, profileservice.UpdateInput{Enabled: &disabled}); err == nil {
+		t.Fatal("profile disable succeeded despite linked-session revocation failure")
+	}
+	dropFailure()
+	var targetEnabled bool
+	if err := pool.QueryRow(ctx, `SELECT enabled FROM profiles WHERE id = $1::uuid`, target.profileID).Scan(&targetEnabled); err != nil {
+		t.Fatalf("read target profile after failed disable: %v", err)
+	}
+	if !targetEnabled {
+		t.Fatal("failed session revocation committed the profile disable")
+	}
+	if _, err := authentication.Authenticate(ctx, targetLogin.Tokens.AccessToken); err != nil {
+		t.Fatalf("failed profile disable invalidated reusable native session: %v", err)
+	}
+	if _, err := compatibility.Authenticate(ctx, targetCompat.Token); err != nil {
+		t.Fatalf("failed profile disable invalidated reusable compatibility session: %v", err)
+	}
+	if _, err := authentication.LoginJellyfinProfile(ctx, auth.JellyfinProfileLoginInput{
+		Username: targetCredential.Username, Password: targetCredential.Password,
+		LinkedDeviceKey: "profile-disable-rollback-" + targetCredential.Username,
+		DeviceName:      "Profile disable rollback", Platform: "jellyfin-test",
+	}); err != nil {
+		t.Fatalf("failed profile disable invalidated reusable profile credential: %v", err)
+	}
+
+	if _, err := profiles.Update(ctx, target.manager, target.profileID, profileservice.UpdateInput{Enabled: &disabled}); err != nil {
+		t.Fatalf("disable target profile: %v", err)
+	}
+	enabled := true
+	if _, err := profiles.Update(ctx, target.manager, target.profileID, profileservice.UpdateInput{Enabled: &enabled}); err != nil {
+		t.Fatalf("re-enable target profile: %v", err)
+	}
+	if _, err := authentication.Authenticate(ctx, targetLogin.Tokens.AccessToken); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("target native access token after re-enable error = %v, want %v", err, auth.ErrInvalidToken)
+	}
+	if _, err := authentication.Refresh(ctx, targetLogin.Tokens.RefreshToken); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("target native refresh token after re-enable error = %v, want %v", err, auth.ErrInvalidToken)
+	}
+	if _, err := compatibility.Authenticate(ctx, targetCompat.Token); !errors.Is(err, ErrInvalidCompatCredential) {
+		t.Fatalf("target compatibility token after re-enable error = %v, want %v", err, ErrInvalidCompatCredential)
+	}
+	if _, err := authentication.LoginJellyfinProfile(ctx, auth.JellyfinProfileLoginInput{
+		Username: targetCredential.Username, Password: targetCredential.Password,
+		LinkedDeviceKey: "profile-disable-reenabled-" + targetCredential.Username,
+		DeviceName:      "Profile disable re-enabled", Platform: "jellyfin-test",
+	}); !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Fatalf("target profile credential after re-enable error = %v, want %v", err, auth.ErrInvalidCredentials)
+	}
+	if _, err := authentication.Authenticate(ctx, unrelatedLogin.Tokens.AccessToken); err != nil {
+		t.Fatalf("unrelated native session after target disable: %v", err)
+	}
+	if _, err := compatibility.Authenticate(ctx, unrelatedCompat.Token); err != nil {
+		t.Fatalf("unrelated compatibility session after target disable: %v", err)
+	}
+}
+
 type credentialStoreFixture struct {
 	profileID   string
 	categoryID  string

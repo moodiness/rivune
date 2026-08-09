@@ -8,13 +8,12 @@ import (
 )
 
 const (
-	defaultBootstrapSessionLimit       = 256
-	defaultBootstrapOwnerSessionLimit  = 16
-	defaultBootstrapSessionIdleTTL     = 30 * time.Minute
-	defaultDisplayPreferenceLimit      = 4096
-	defaultDisplayPreferenceOwnerLimit = 128
-	defaultCompatSocketLimit           = 128
-	defaultCompatSocketSessionLimit    = 2
+	defaultBootstrapSessionLimit      = 256
+	defaultBootstrapOwnerSessionLimit = 16
+	defaultBootstrapSessionIdleTTL    = 30 * time.Minute
+	defaultCompatSocketLimit          = 128
+	defaultCompatSocketSessionLimit   = 2
+	defaultCompatSocketQueueLimit     = 32
 )
 
 type bootstrapSessionState struct {
@@ -22,51 +21,57 @@ type bootstrapSessionState struct {
 	lastSeenAt    time.Time
 	deviceProfile *DeviceProfile
 	capabilities  *ClientCapabilitiesDto
+	viewingItemID string
+	playback      *sessionPlaybackState
 }
 
-type displayPreferenceKey struct {
-	profileID string
-	client    string
-	id        string
+type sessionPlaybackState struct {
+	itemID              string
+	mediaSourceID       string
+	playSessionID       string
+	positionTicks       int64
+	audioStreamIndex    *int
+	subtitleStreamIndex *int
+	canSeek             bool
+	isPaused            bool
+	isMuted             bool
+	playMethod          string
+	lastCheckIn         time.Time
 }
 
-type storedDisplayPreference struct {
-	creatorSessionID string
-	value            DisplayPreferencesDto
-	expiresAt        time.Time
-	lastSeenAt       time.Time
+type bootstrapSessionSnapshot struct {
+	viewingItemID string
+	playback      *sessionPlaybackState
 }
 
 type compatSocketLease struct {
-	id        uint64
-	sessionID string
-	closed    chan struct{}
+	id                 uint64
+	sessionID          string
+	closed             chan struct{}
+	outbound           chan WebSocketMessageDto
+	sessionsSubscribed bool
 }
 
 type bootstrapRegistry struct {
-	mu                   sync.Mutex
-	sessions             map[string]*bootstrapSessionState
-	preferences          map[displayPreferenceKey]*storedDisplayPreference
-	sockets              map[uint64]*compatSocketLease
-	nextSocketID         uint64
-	sessionLimit         int
-	ownerSessionLimit    int
-	preferenceLimit      int
-	preferenceOwnerLimit int
-	socketLimit          int
-	socketSessionLimit   int
-	sessionIdleTTL       time.Duration
-	now                  func() time.Time
+	mu                 sync.Mutex
+	sessions           map[string]*bootstrapSessionState
+	sockets            map[uint64]*compatSocketLease
+	nextSocketID       uint64
+	sessionLimit       int
+	ownerSessionLimit  int
+	socketLimit        int
+	socketSessionLimit int
+	sessionIdleTTL     time.Duration
+	now                func() time.Time
 }
 
 func newBootstrapRegistry() *bootstrapRegistry {
 	return &bootstrapRegistry{
-		sessions: make(map[string]*bootstrapSessionState), preferences: make(map[displayPreferenceKey]*storedDisplayPreference),
-		sockets: make(map[uint64]*compatSocketLease), sessionLimit: defaultBootstrapSessionLimit,
-		ownerSessionLimit: defaultBootstrapOwnerSessionLimit, preferenceLimit: defaultDisplayPreferenceLimit,
-		preferenceOwnerLimit: defaultDisplayPreferenceOwnerLimit, socketLimit: defaultCompatSocketLimit,
-		socketSessionLimit: defaultCompatSocketSessionLimit, sessionIdleTTL: defaultBootstrapSessionIdleTTL,
-		now: func() time.Time { return time.Now().UTC() },
+		sessions: make(map[string]*bootstrapSessionState), sockets: make(map[uint64]*compatSocketLease),
+		sessionLimit: defaultBootstrapSessionLimit, ownerSessionLimit: defaultBootstrapOwnerSessionLimit,
+		socketLimit: defaultCompatSocketLimit, socketSessionLimit: defaultCompatSocketSessionLimit,
+		sessionIdleTTL: defaultBootstrapSessionIdleTTL,
+		now:            func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -100,6 +105,13 @@ func (registry *bootstrapRegistry) observe(session AuthenticatedSession) bool {
 
 func (registry *bootstrapRegistry) visibleSessions(session AuthenticatedSession, deviceID string, activeWithin time.Duration) []AuthenticatedSession {
 	if registry == nil || !registry.observe(session) {
+		return []AuthenticatedSession{}
+	}
+	return registry.ownerSessions(session, deviceID, activeWithin)
+}
+
+func (registry *bootstrapRegistry) ownerSessions(session AuthenticatedSession, deviceID string, activeWithin time.Duration) []AuthenticatedSession {
+	if registry == nil {
 		return []AuthenticatedSession{}
 	}
 	deviceID = strings.TrimSpace(deviceID)
@@ -207,43 +219,110 @@ func (registry *bootstrapRegistry) clientCapabilities(session AuthenticatedSessi
 	}
 	return cloneClientCapabilities(*current.capabilities), true
 }
-
-func (registry *bootstrapRegistry) displayPreference(session AuthenticatedSession, client, id string) (DisplayPreferencesDto, bool) {
-	if registry == nil || !registry.observe(session) {
-		return DisplayPreferencesDto{}, false
+func (registry *bootstrapRegistry) sessionSnapshot(session AuthenticatedSession) (bootstrapSessionSnapshot, bool) {
+	if registry == nil {
+		return bootstrapSessionSnapshot{}, false
 	}
-	key := newDisplayPreferenceKey(session.ProfileID, client, id)
 	now := registry.now().UTC()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	registry.pruneLocked(now)
-	stored := registry.preferences[key]
-	if stored == nil || !stored.expiresAt.After(now) {
-		return DisplayPreferencesDto{}, false
+	current := registry.sessions[session.ID]
+	if current == nil || !sameAuthenticatedSessionOwner(current.session, session) {
+		return bootstrapSessionSnapshot{}, false
 	}
-	stored.lastSeenAt = now
-	return cloneDisplayPreferences(stored.value), true
+	snapshot := bootstrapSessionSnapshot{viewingItemID: current.viewingItemID}
+	if current.playback != nil {
+		playback := *current.playback
+		snapshot.playback = &playback
+	}
+	return snapshot, true
 }
 
-func (registry *bootstrapRegistry) setDisplayPreference(session AuthenticatedSession, client, id string, value DisplayPreferencesDto) bool {
-	if registry == nil || !registry.observe(session) {
+func (registry *bootstrapRegistry) setViewing(session AuthenticatedSession, itemID string) bool {
+	if registry == nil || itemID == "" || !registry.observe(session) {
 		return false
 	}
-	key := newDisplayPreferenceKey(session.ProfileID, client, id)
-	now := registry.now().UTC()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	registry.pruneLocked(now)
-	if registry.preferences[key] == nil {
-		if len(registry.preferences) >= registry.positiveLimit(registry.preferenceLimit, defaultDisplayPreferenceLimit) ||
-			registry.preferenceOwnerCountLocked(key) >= registry.positiveLimit(registry.preferenceOwnerLimit, defaultDisplayPreferenceOwnerLimit) {
-			return false
-		}
+	current := registry.sessions[session.ID]
+	if current == nil || !sameAuthenticatedSessionOwner(current.session, session) {
+		return false
 	}
-	registry.preferences[key] = &storedDisplayPreference{
-		creatorSessionID: session.ID, value: cloneDisplayPreferences(value), expiresAt: session.ExpiresAt.UTC(), lastSeenAt: now,
+	current.viewingItemID = itemID
+	return true
+}
+
+func (registry *bootstrapRegistry) setPlayback(session AuthenticatedSession, binding playSessionBinding, input PlaybackProgressInfo, stopped bool) bool {
+	if registry == nil || binding.ItemID == "" || !registry.observe(session) {
+		return false
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	current := registry.sessions[session.ID]
+	if current == nil || !sameAuthenticatedSessionOwner(current.session, session) {
+		return false
+	}
+	if stopped {
+		current.playback = nil
+		return true
+	}
+	current.viewingItemID = ""
+	current.playback = &sessionPlaybackState{
+		itemID: binding.ItemID, mediaSourceID: binding.MediaSourceID, playSessionID: binding.PlaySessionID,
+		positionTicks: input.PositionTicks, audioStreamIndex: cloneIntPointer(input.AudioStreamIndex),
+		subtitleStreamIndex: cloneIntPointer(input.SubtitleStreamIndex), canSeek: input.CanSeek,
+		isPaused: input.IsPaused, isMuted: input.IsMuted,
+		playMethod: canonicalCompatPlayMethod(input.PlayMethod), lastCheckIn: registry.now().UTC(),
 	}
 	return true
+}
+func (registry *bootstrapRegistry) touchPlayback(session AuthenticatedSession, playSessionID string) bool {
+	if registry == nil || playSessionID == "" || !registry.observe(session) {
+		return false
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	current := registry.sessions[session.ID]
+	if current == nil || current.playback == nil || current.playback.playSessionID != playSessionID ||
+		!sameAuthenticatedSessionOwner(current.session, session) {
+		return false
+	}
+	current.playback.lastCheckIn = registry.now().UTC()
+	return true
+}
+
+func (registry *bootstrapRegistry) subscribeSessions(lease *compatSocketLease, subscribed bool) bool {
+	if registry == nil || lease == nil {
+		return false
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if registry.sockets[lease.id] != lease {
+		return false
+	}
+	lease.sessionsSubscribed = subscribed
+	return true
+}
+
+func (registry *bootstrapRegistry) publish(owner AuthenticatedSession, message WebSocketMessageDto, sessionsOnly bool) {
+	if registry == nil {
+		return
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.pruneLocked(registry.now().UTC())
+	for _, lease := range registry.sockets {
+		state := registry.sessions[lease.sessionID]
+		if state == nil || !sameBootstrapVisibilityOwner(state.session, owner) || sessionsOnly && !lease.sessionsSubscribed {
+			continue
+		}
+		select {
+		case lease.outbound <- message:
+		default:
+			registry.removeSocketLocked(lease)
+		}
+	}
 }
 
 func (registry *bootstrapRegistry) acquireSocket(session AuthenticatedSession) (*compatSocketLease, bool) {
@@ -266,7 +345,10 @@ func (registry *bootstrapRegistry) acquireSocket(session AuthenticatedSession) (
 		return nil, false
 	}
 	registry.nextSocketID++
-	lease := &compatSocketLease{id: registry.nextSocketID, sessionID: session.ID, closed: make(chan struct{})}
+	lease := &compatSocketLease{
+		id: registry.nextSocketID, sessionID: session.ID, closed: make(chan struct{}),
+		outbound: make(chan WebSocketMessageDto, defaultCompatSocketQueueLimit),
+	}
 	registry.sockets[lease.id] = lease
 	return lease, true
 }
@@ -276,14 +358,7 @@ func (registry *bootstrapRegistry) releaseSocket(lease *compatSocketLease) {
 		return
 	}
 	registry.mu.Lock()
-	if registry.sockets[lease.id] == lease {
-		delete(registry.sockets, lease.id)
-		select {
-		case <-lease.closed:
-		default:
-			close(lease.closed)
-		}
-	}
+	registry.removeSocketLocked(lease)
 	registry.mu.Unlock()
 }
 
@@ -300,21 +375,22 @@ func (registry *bootstrapRegistry) forget(session AuthenticatedSession) {
 
 func (registry *bootstrapRegistry) removeSessionLocked(sessionID string) {
 	delete(registry.sessions, sessionID)
-	for key, preference := range registry.preferences {
-		if preference.creatorSessionID == sessionID {
-			delete(registry.preferences, key)
+	for _, socket := range registry.sockets {
+		if socket.sessionID == sessionID {
+			registry.removeSocketLocked(socket)
 		}
 	}
-	for id, socket := range registry.sockets {
-		if socket.sessionID != sessionID {
-			continue
-		}
-		delete(registry.sockets, id)
-		select {
-		case <-socket.closed:
-		default:
-			close(socket.closed)
-		}
+}
+
+func (registry *bootstrapRegistry) removeSocketLocked(lease *compatSocketLease) {
+	if lease == nil || registry.sockets[lease.id] != lease {
+		return
+	}
+	delete(registry.sockets, lease.id)
+	select {
+	case <-lease.closed:
+	default:
+		close(lease.closed)
 	}
 }
 
@@ -328,27 +404,12 @@ func (registry *bootstrapRegistry) pruneLocked(now time.Time) {
 			registry.removeSessionLocked(id)
 		}
 	}
-	for key, preference := range registry.preferences {
-		if !preference.expiresAt.After(now) {
-			delete(registry.preferences, key)
-		}
-	}
 }
 
 func (registry *bootstrapRegistry) ownerSessionCountLocked(session AuthenticatedSession) int {
 	count := 0
 	for _, candidate := range registry.sessions {
 		if sameBootstrapVisibilityOwner(candidate.session, session) {
-			count++
-		}
-	}
-	return count
-}
-
-func (registry *bootstrapRegistry) preferenceOwnerCountLocked(key displayPreferenceKey) int {
-	count := 0
-	for candidate := range registry.preferences {
-		if candidate.profileID == key.profileID && candidate.client == key.client {
 			count++
 		}
 	}
@@ -395,26 +456,13 @@ func cloneClientCapabilities(capabilities ClientCapabilitiesDto) ClientCapabilit
 }
 
 func sameBootstrapVisibilityOwner(left, right AuthenticatedSession) bool {
-	return left.ProfileID == right.ProfileID && left.Client.DeviceID == right.Client.DeviceID &&
-		left.Principal.UserID == right.Principal.UserID && left.Principal.ActiveProfileID != nil &&
-		right.Principal.ActiveProfileID != nil && *left.Principal.ActiveProfileID == left.ProfileID && *right.Principal.ActiveProfileID == right.ProfileID
+	return left.ProfileID == right.ProfileID && left.Principal.UserID == right.Principal.UserID &&
+		left.Principal.ActiveProfileID != nil && right.Principal.ActiveProfileID != nil &&
+		*left.Principal.ActiveProfileID == left.ProfileID && *right.Principal.ActiveProfileID == right.ProfileID
 }
 
 func cloneAuthenticatedSession(session AuthenticatedSession) AuthenticatedSession {
 	copy := session
 	copy.Principal = clonePrincipal(session.Principal)
-	return copy
-}
-
-func newDisplayPreferenceKey(profileID, client, id string) displayPreferenceKey {
-	return displayPreferenceKey{profileID: strings.ToLower(strings.TrimSpace(profileID)), client: strings.ToLower(strings.TrimSpace(client)), id: strings.ToLower(strings.TrimSpace(id))}
-}
-
-func cloneDisplayPreferences(value DisplayPreferencesDto) DisplayPreferencesDto {
-	copy := value
-	copy.CustomPrefs = make(map[string]string, len(value.CustomPrefs))
-	for key, preference := range value.CustomPrefs {
-		copy.CustomPrefs[key] = preference
-	}
 	return copy
 }

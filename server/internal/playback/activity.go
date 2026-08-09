@@ -350,6 +350,7 @@ func (service *Service) ResetCache(ctx context.Context) (PurgeResult, error) {
 	service.references.clear()
 	service.probes.clear()
 	service.preparations.clear()
+	service.pruneTrickplayImages(true)
 	if err := os.RemoveAll(service.mediaOptions.TempDirectory); err != nil {
 		return result, fmt.Errorf("clear media workspace: %w", err)
 	}
@@ -382,6 +383,7 @@ func (service *Service) cleanupActivity(ctx context.Context) (PurgeResult, error
 	if err != nil {
 		return PurgeResult{}, err
 	}
+	service.pruneTrickplayImages(false)
 	return PurgeResult{
 		SessionsRemoved: sessionsRemoved,
 		JobsStopped:     jobsStopped,

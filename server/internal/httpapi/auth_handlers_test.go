@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -300,65 +301,68 @@ func TestLoginDeviceQuotaUsesStableConflict(t *testing.T) {
 	}
 }
 
-func TestLoginAdmissionLimitsUsernameAcrossRotatingSources(t *testing.T) {
+func TestLoginFailuresCannotLockOutValidCredentialsOrFillSubjectTable(t *testing.T) {
 	service := &fakeAuthService{loginErr: auth.ErrInvalidCredentials}
 	api := testAPI(&fakeInstanceService{})
 	api.auth = service
-	current := time.Unix(1_700_000_000, 0)
-	api.usernameAdmission.now = func() time.Time { return current }
+	api.usernameAdmission = newUsernameAdmission(credentialUsernameAttempts, 2, time.Minute)
 
-	malformed := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"username":"target"`))
-	malformed.Header.Set("Content-Type", "application/json")
-	malformed.RemoteAddr = "198.51.100.1:4000"
-	malformedResponse := httptest.NewRecorder()
-	api.Handler().ServeHTTP(malformedResponse, malformed)
-	if malformedResponse.Code != http.StatusBadRequest || service.loginCalls != 0 {
-		t.Fatalf("malformed login = status %d, auth calls %d; want 400 and zero calls", malformedResponse.Code, service.loginCalls)
-	}
-
-	const targetLogin = `{"username":"target","password":"wrong","device":{"name":"Phone","platform":"ios"}}`
-	for attempt := range credentialUsernameAttempts {
-		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(targetLogin))
+	serveLogin := func(username, password, source string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := `{"username":"` + username + `","password":"` + password + `","device":{"name":"Phone","platform":"ios"}}`
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(body))
 		request.Header.Set("Content-Type", "application/json")
-		request.RemoteAddr = "198.51.100." + strconv.Itoa(attempt+2) + ":4000"
+		request.RemoteAddr = source + ":4000"
 		response := httptest.NewRecorder()
 		api.Handler().ServeHTTP(response, request)
+		return response
+	}
+
+	for attempt := range credentialUsernameAttempts + 1 {
+		response := serveLogin("target", "wrong", "198.51.100."+strconv.Itoa(attempt+1))
 		if response.Code != http.StatusUnauthorized {
-			t.Fatalf("target attempt %d = %d, want 401: %s", attempt+1, response.Code, response.Body.String())
+			t.Fatalf("invalid target attempt %d = %d, want opaque 401: %s", attempt+1, response.Code, response.Body.String())
+		}
+		var body errorEnvelope
+		decodeResponse(t, response, &body)
+		if body.Error.Code != "invalid_credentials" {
+			t.Fatalf("invalid target attempt %d code = %q, want invalid_credentials", attempt+1, body.Error.Code)
 		}
 	}
-
-	blocked := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(targetLogin))
-	blocked.Header.Set("Content-Type", "application/json")
-	blocked.RemoteAddr = "203.0.113.20:4000"
-	blockedResponse := httptest.NewRecorder()
-	api.Handler().ServeHTTP(blockedResponse, blocked)
-	if blockedResponse.Code != http.StatusTooManyRequests || blockedResponse.Header().Get("Retry-After") != "60" {
-		t.Fatalf("eleventh target attempt = %d with Retry-After %q, want 429 and 60", blockedResponse.Code, blockedResponse.Header().Get("Retry-After"))
-	}
-	var blockedBody errorEnvelope
-	decodeResponse(t, blockedResponse, &blockedBody)
-	if blockedBody.Error.Code != "rate_limited" || service.loginCalls != credentialUsernameAttempts {
-		t.Fatalf("blocked login = error %q, auth calls %d; want generic rate_limited and %d calls", blockedBody.Error.Code, service.loginCalls, credentialUsernameAttempts)
+	targetDigest := sha256.Sum256([]byte("target"))
+	if state := api.usernameAdmission.subjects[targetDigest]; state.attempts != credentialUsernameAttempts {
+		t.Fatalf("target failures = %d, want capped %d", state.attempts, credentialUsernameAttempts)
 	}
 
-	other := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"username":"other","password":"wrong","device":{"name":"Phone","platform":"ios"}}`))
-	other.Header.Set("Content-Type", "application/json")
-	other.RemoteAddr = "203.0.113.21:4000"
-	otherResponse := httptest.NewRecorder()
-	api.Handler().ServeHTTP(otherResponse, other)
-	if otherResponse.Code != http.StatusUnauthorized || service.loginCalls != credentialUsernameAttempts+1 {
-		t.Fatalf("independent username = status %d, auth calls %d; want 401 and %d calls", otherResponse.Code, service.loginCalls, credentialUsernameAttempts+1)
+	service.loginErr = nil
+	service.loginTokens = auth.TokenPair{AccessToken: "rivune_at_valid", RefreshToken: "rivune_rt_valid"}
+	valid := serveLogin("target", "correct", "203.0.113.20")
+	if valid.Code != http.StatusOK {
+		t.Fatalf("valid target after rotated-source failures = %d, want 200: %s", valid.Code, valid.Body.String())
+	}
+	if _, exists := api.usernameAdmission.subjects[targetDigest]; exists {
+		t.Fatal("successful target login did not reset its failure state")
 	}
 
-	current = current.Add(publicAdmissionWindow)
-	expired := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(targetLogin))
-	expired.Header.Set("Content-Type", "application/json")
-	expired.RemoteAddr = "203.0.113.22:4000"
-	expiredResponse := httptest.NewRecorder()
-	api.Handler().ServeHTTP(expiredResponse, expired)
-	if expiredResponse.Code != http.StatusUnauthorized || service.loginCalls != credentialUsernameAttempts+2 {
-		t.Fatalf("expired username budget = status %d, auth calls %d; want 401 and %d calls", expiredResponse.Code, service.loginCalls, credentialUsernameAttempts+2)
+	service.loginErr = auth.ErrInvalidCredentials
+	for index, username := range []string{"first", "second", "third"} {
+		response := serveLogin(username, "wrong", "203.0.113."+strconv.Itoa(index+21))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("invalid %s login = %d, want opaque 401: %s", username, response.Code, response.Body.String())
+		}
+	}
+	thirdDigest := sha256.Sum256([]byte("third"))
+	if _, exists := api.usernameAdmission.subjects[thirdDigest]; !exists {
+		t.Fatal("full subject table rejected a new failed username instead of evicting")
+	}
+	if got := len(api.usernameAdmission.subjects); got != 2 {
+		t.Fatalf("tracked failure subjects = %d, want bounded cardinality 2", got)
+	}
+
+	service.loginErr = nil
+	newValid := serveLogin("new-valid", "correct", "203.0.113.24")
+	if newValid.Code != http.StatusOK {
+		t.Fatalf("new valid login with full subject table = %d, want 200: %s", newValid.Code, newValid.Body.String())
 	}
 }
 

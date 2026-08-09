@@ -55,7 +55,7 @@ func TestNormalizeCatalogQueryBoundsAndTypes(t *testing.T) {
 		t.Fatalf("unexpected normalized query: %+v", query)
 	}
 	defaults, err := normalizeCatalogQuery(CatalogQuery{Limit: 20})
-	if err != nil || !reflect.DeepEqual(defaults.MediaTypes, []string{"episode", "movie", "season", "series"}) {
+	if err != nil || !reflect.DeepEqual(defaults.MediaTypes, []string{"episode", "movie", "season", "series", "video"}) {
 		t.Fatalf("unexpected default catalog media types: %+v error %v", defaults, err)
 	}
 	for _, invalid := range []CatalogQuery{
@@ -65,6 +65,8 @@ func TestNormalizeCatalogQueryBoundsAndTypes(t *testing.T) {
 		{Offset: maximumCatalogOffset + 1, Limit: 20},
 		{ParentID: "not-a-uuid", Limit: 20},
 		{MediaTypes: []string{"tv"}, Limit: 20},
+		{MinCommunityRating: float64Pointer(-0.1), Limit: 20},
+		{MinCommunityRating: float64Pointer(10.1), Limit: 20},
 	} {
 		if _, err := normalizeCatalogQuery(invalid); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("expected invalid catalog query %+v, got %v", invalid, err)
@@ -153,6 +155,24 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 			added_at timestamptz NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
 			PRIMARY KEY (profile_id, title_id)
 		);
+		CREATE TEMPORARY TABLE profile_favorites (
+			profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			created_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (profile_id, title_id)
+		);
+		CREATE TEMPORARY TABLE profile_user_data (
+			profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			rating double precision, rating_set boolean NOT NULL DEFAULT false,
+			played_percentage double precision, played_percentage_set boolean NOT NULL DEFAULT false,
+			unplayed_item_count integer, unplayed_item_count_set boolean NOT NULL DEFAULT false,
+			play_count integer, play_count_set boolean NOT NULL DEFAULT false,
+			likes boolean, likes_set boolean NOT NULL DEFAULT false,
+			last_played_date timestamptz, last_played_date_submicrosecond smallint,
+			last_played_date_set boolean NOT NULL DEFAULT false,
+			PRIMARY KEY (profile_id, title_id)
+		);
 		CREATE TEMPORARY TABLE profile_progress (
 			profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
 			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
@@ -219,13 +239,19 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000200', '2026-08-06T12:02:00Z'),
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000300', '2026-08-06T12:01:00Z'),
 			('22222222-2222-4222-8222-222222222222', '00000000-0000-4000-8000-000000000400', '2026-08-06T12:04:00Z');
+		INSERT INTO profile_favorites (profile_id, title_id) VALUES
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000101');
 		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at, updated_at) VALUES
 			('00000000-0000-4000-8000-000000000100', 'tmdb', 'fr-FR',
-			 '{"overview":"Résumé matérialisé","runtimeMinutes":123,"genres":[{"id":18,"name":"Drama"}],"voteAverage":8.25}',
+			 '{"overview":"Résumé matérialisé","runtimeMinutes":123,"genres":[{"id":18,"name":"Drama"}],"studios":[{"name":"Éclair Films"},{"name":"éCLAIR FILMS"},{"name":"Beta Studio"}],"voteAverage":8.25,"hasSubtitles":true,"officialRating":"PG-13","tags":["Featured"],"cast":[{"id":"9301","name":"Alice Actor","character":"Lead"}]}',
 			 now() + interval '1 hour', '2026-08-06T12:05:00Z'),
 			('00000000-0000-4000-8000-000000000101', 'tmdb', 'fr-FR',
 			 '{"overview":"Résultat metadata autorisé","runtimeMinutes":95,"genres":[{"id":12,"name":"Adventure"}],"voteAverage":7.5}',
 			 now() + interval '1 hour', '2026-08-06T12:05:30Z');
+		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at, updated_at) VALUES
+			('00000000-0000-4000-8000-000000000400', 'addon', 'en',
+			 '{"studios":[{"name":"Profile Two Secret Studio"}]}',
+			 now() + interval '1 hour', '2026-08-06T12:05:45Z');
 		INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed, last_watched_at) VALUES
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000100', 61, 7380, true, '2026-08-06T12:06:00Z'),
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000101', 120, 5700, false, '2026-08-06T12:07:00Z');
@@ -312,8 +338,9 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 		t.Fatalf("global provider IDs missing: %+v error %v", movie, err)
 	}
 	if movie.Title != "ÉCLAIR Movie" || movie.Overview != "Résumé matérialisé" || movie.RuntimeMinutes == nil || *movie.RuntimeMinutes != 123 ||
-		!reflect.DeepEqual(movie.Genres, []string{"Drama"}) || movie.CommunityRating == nil || *movie.CommunityRating != 8.25 ||
-		!movie.InLibrary || movie.Progress == nil || movie.Progress.PositionSeconds != 61 || !movie.Progress.Completed || movie.Progress.LastWatchedAt == nil {
+		!reflect.DeepEqual(movie.Genres, []string{"Drama"}) || !reflect.DeepEqual(movie.Studios, []string{"Beta Studio", "Éclair Films"}) ||
+		movie.CommunityRating == nil || *movie.CommunityRating != 8.25 || !movie.HasSubtitles || !movie.InLibrary ||
+		movie.Progress == nil || movie.Progress.PositionSeconds != 61 || !movie.Progress.Completed || movie.Progress.LastWatchedAt == nil {
 		t.Fatalf("materialized metadata or user state missing: %+v", movie)
 	}
 	if counter.titles.Load() != 2 {
@@ -328,6 +355,9 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 		nonLibrary.RuntimeMinutes == nil || *nonLibrary.RuntimeMinutes != 95 || nonLibrary.ProviderIDs["imdb"] != "tt0000101" ||
 		nonLibrary.Progress == nil || nonLibrary.Progress.PositionSeconds != 120 || nonLibrary.Progress.Completed {
 		t.Fatalf("metadata-only canonical projection incomplete: %+v", nonLibrary)
+	}
+	if len(nonLibrary.Studios) != 0 {
+		t.Fatalf("title without studio metadata synthesized studios: %+v", nonLibrary.Studios)
 	}
 	batch, err := service.GetCatalogTitles(ctx, profileOne, []string{
 		nonLibrary.ID,
@@ -359,8 +389,9 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 		t.Fatalf("profile-two custom title visible to profile one: %v", err)
 	}
 	profileTwoCustom, err := service.GetCatalogTitle(ctx, profileTwo, "00000000-0000-4000-8000-000000000400")
-	if err != nil || !reflect.DeepEqual(profileTwoCustom.ProviderIDs, map[string]string{"addon": "series-profile-two"}) {
-		t.Fatalf("profile-two scoped provider ID missing or leaked: %+v error %v", profileTwoCustom, err)
+	if err != nil || !reflect.DeepEqual(profileTwoCustom.ProviderIDs, map[string]string{"addon": "series-profile-two"}) ||
+		!reflect.DeepEqual(profileTwoCustom.Studios, []string{"Profile Two Secret Studio"}) {
+		t.Fatalf("profile-two scoped provider ID or studio metadata missing or leaked: %+v error %v", profileTwoCustom, err)
 	}
 
 	unicodeSearch, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{
@@ -377,6 +408,41 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 	}
 	if counter.pages.Load() != 5 {
 		t.Fatalf("five list operations emitted %d catalog page queries, want 5", counter.pages.Load())
+	}
+	favorites, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{Favorite: boolPointer(true), Limit: 20})
+	if err != nil || favorites.Total != 1 || len(favorites.Items) != 1 || favorites.Items[0].ID != nonLibrary.ID || !favorites.Items[0].Favorite || favorites.Items[0].InLibrary {
+		t.Fatalf("independent favorite filter = %+v error %v", favorites, err)
+	}
+	played, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{Played: boolPointer(true), Limit: 20})
+	if err != nil || played.Total != 1 || len(played.Items) != 1 || played.Items[0].ID != movie.ID {
+		t.Fatalf("played filter = %+v error %v", played, err)
+	}
+	resumable, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{Resumable: boolPointer(true), Limit: 20})
+	if err != nil || resumable.Total != 1 || len(resumable.Items) != 1 || resumable.Items[0].ID != nonLibrary.ID {
+		t.Fatalf("resumable filter = %+v error %v", resumable, err)
+	}
+	combined, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{
+		Played: boolPointer(true), MinCommunityRating: float64Pointer(8), HasSubtitles: boolPointer(true),
+		Genres: []string{"dRaMa"}, GenreIDs: []string{"18"}, Years: []int{2025}, Studios: []string{"éclair films"},
+		IDs: []string{movie.ID}, OfficialRatings: []string{"pg-13"}, Tags: []string{"FEATURED"}, PersonIDs: []string{"9301"}, Limit: 20, IncludePeople: true,
+	})
+	if err != nil || combined.Total != 1 || len(combined.Items) != 1 || combined.Items[0].ID != movie.ID ||
+		len(combined.Items[0].People) != 1 || combined.Items[0].People[0].ID != "9301" {
+		t.Fatalf("combined metadata filters = %+v error %v", combined, err)
+	}
+	withoutSubtitles, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{
+		IDs: []string{nonLibrary.ID}, HasSubtitles: boolPointer(false), MinCommunityRating: float64Pointer(7.5), Limit: 20,
+	})
+	if err != nil || withoutSubtitles.Total != 1 || len(withoutSubtitles.Items) != 1 || withoutSubtitles.Items[0].ID != nonLibrary.ID || withoutSubtitles.Items[0].HasSubtitles {
+		t.Fatalf("subtitle absence and minimum rating filters = %+v error %v", withoutSubtitles, err)
+	}
+	withoutTotal, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{Genres: []string{"Drama"}, Offset: 0, Limit: 1, OmitTotal: true})
+	if err != nil || withoutTotal.Total != 0 || len(withoutTotal.Items) != 1 {
+		t.Fatalf("disabled total filter = %+v error %v", withoutTotal, err)
+	}
+	unsupported, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{UnavailableDataFilter: true, Limit: 20})
+	if err != nil || unsupported.Total != 0 || len(unsupported.Items) != 0 {
+		t.Fatalf("unsupported data filter should be honestly empty: %+v error %v", unsupported, err)
 	}
 	empty, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{
 		ParentID: "00000000-0000-4000-8000-000000000220", MediaTypes: []string{"episode"}, Offset: 10, Limit: 20,
@@ -413,4 +479,12 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 	if afterCount != beforeCount {
 		t.Fatalf("read-only catalog mutated title count from %d to %d", beforeCount, afterCount)
 	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+func float64Pointer(value float64) *float64 {
+	return &value
 }

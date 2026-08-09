@@ -617,17 +617,21 @@ func TestPreparationCacheIdentityIncludesEffectiveTranscodingPolicy(t *testing.T
 	}
 }
 
-func TestCloneCapabilitiesIsolatesAdditiveModeSlices(t *testing.T) {
+func TestCloneCapabilitiesIsolatesAdditiveModeAndContainerProfileSlices(t *testing.T) {
 	original := Capabilities{
 		ProcessingModes:         []string{processingRemux, processingTranscode},
 		SubtitleModes:           []string{"external", "burn"},
+		ContainerProfiles:       []ContainerProfile{{ContainersCSV: "mp4", Conditions: []ProfileCondition{{Condition: "lessthanequal", Property: "height", Value: "1080"}}}},
 		HLSSegmentContainer:     "mp4",
 		MaximumVideoBitrateKbps: 8000, MaximumAudioChannels: 2, MaximumHeight: 1080, TranscodeVideoBitrateKbps: 12000,
 	}
 	cloned := cloneCapabilities(original)
 	cloned.ProcessingModes[0] = processingTranscodeAudio
 	cloned.SubtitleModes[0] = "burn"
-	if original.ProcessingModes[0] != processingRemux || original.SubtitleModes[0] != "external" {
+	cloned.ContainerProfiles[0].ContainersCSV = "webm"
+	cloned.ContainerProfiles[0].Conditions[0].Value = "1"
+	if original.ProcessingModes[0] != processingRemux || original.SubtitleModes[0] != "external" ||
+		original.ContainerProfiles[0].ContainersCSV != "mp4" || original.ContainerProfiles[0].Conditions[0].Value != "1080" {
 		t.Fatalf("capability clone shares additive slices: original=%+v clone=%+v", original, cloned)
 	}
 	if cloned.HLSSegmentContainer != "mp4" || cloned.MaximumVideoBitrateKbps != 8000 || cloned.MaximumAudioChannels != 2 || cloned.MaximumHeight != 1080 || cloned.TranscodeVideoBitrateKbps != 12000 {

@@ -5,12 +5,14 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	nativeauth "github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/netguard"
 )
 
 const (
@@ -52,15 +54,24 @@ func (handler *Handler) handleSystemPing(response http.ResponseWriter, _ *http.R
 		writeCompatError(response, http.StatusServiceUnavailable, "ServiceUnavailable", "The compatibility service is unavailable")
 		return
 	}
-	writeJSON(response, http.StatusOK, handler.serverInfo.Name)
+	writeJSON(response, http.StatusOK, compatibilityProductName)
 }
 
-func (handler *Handler) handleSystemEndpoint(response http.ResponseWriter, _ *http.Request) {
+func (handler *Handler) handleSystemEndpoint(response http.ResponseWriter, request *http.Request) {
+	if _, ok := handler.authenticateRequest(response, request, false); !ok {
+		return
+	}
 	if _, ok := handler.publicSystemInfo(); !ok {
 		writeCompatError(response, http.StatusServiceUnavailable, "ServiceUnavailable", "The compatibility service is unavailable")
 		return
 	}
-	writeJSON(response, http.StatusOK, SystemEndpointInfo{IsLocal: false, IsInNetwork: false})
+	info := SystemEndpointInfo{}
+	if address, err := netip.ParseAddr(nativeauth.ClientIP(request.Context())); err == nil {
+		address = address.Unmap()
+		info.IsLocal = address.IsLoopback()
+		info.IsInNetwork = info.IsLocal || netguard.IsPrivateNetworkAddress(address)
+	}
+	writeJSON(response, http.StatusOK, info)
 }
 
 func (handler *Handler) handleQuickConnectEnabled(response http.ResponseWriter, _ *http.Request) {
@@ -131,10 +142,11 @@ func (handler *Handler) handleAuthenticateByName(response http.ResponseWriter, r
 	}
 	writeJSON(response, http.StatusOK, AuthenticationResult{
 		User:        handler.configuredCompatUser(request.Context(), result.Principal, result.Profile.ID, result.Profile.Name),
-		SessionInfo: handler.sessionInfo(authenticated),
+		SessionInfo: handler.sessionInfo(request.Context(), authenticated),
 		AccessToken: result.Credential.Token,
 		ServerId:    serverID,
 	})
+	handler.publishSessionUpdate(request.Context(), authenticated)
 }
 
 func (handler *Handler) logCompatLoginRejection(stage string) {
@@ -208,6 +220,7 @@ func (handler *Handler) handleLogout(response http.ResponseWriter, request *http
 	if handler.bootstrap != nil {
 		handler.bootstrap.forget(session)
 	}
+	handler.publishSessionUpdate(request.Context(), session)
 	response.Header().Set("Cache-Control", "no-store")
 	response.WriteHeader(http.StatusNoContent)
 }
@@ -240,6 +253,7 @@ func (handler *Handler) handleSessionCapabilities(response http.ResponseWriter, 
 		handler.bootstrap.setClientCapabilities(session, queryCapabilities, true)
 	}
 	handler.storeCapabilitiesReport(session, bodyCapabilities, replace, present)
+	handler.publishSessionUpdate(request.Context(), session)
 	response.Header().Set("Cache-Control", "no-store")
 	response.WriteHeader(http.StatusNoContent)
 }
@@ -274,6 +288,7 @@ func (handler *Handler) handleSessionCapabilitiesFull(response http.ResponseWrit
 		return
 	}
 	handler.storeCapabilitiesReport(session, capabilities, replace, present)
+	handler.publishSessionUpdate(request.Context(), session)
 	response.Header().Set("Cache-Control", "no-store")
 	response.WriteHeader(http.StatusNoContent)
 }
@@ -349,13 +364,19 @@ func (handler *Handler) handleDisplayPreferences(response http.ResponseWriter, r
 	if !ok {
 		return
 	}
-	if handler.bootstrap != nil {
-		if stored, exists := handler.bootstrap.displayPreference(session, client, preferenceID); exists {
-			writeJSON(response, http.StatusOK, stored)
-			return
-		}
+	if handler.displayPreferences == nil {
+		writeCompatError(response, http.StatusServiceUnavailable, "ServiceUnavailable", "Display preferences are unavailable")
+		return
 	}
-	writeJSON(response, http.StatusOK, DisplayPreferencesDto{Id: preferenceID, Client: client, CustomPrefs: map[string]string{}})
+	stored, exists, err := handler.displayPreferences.Get(request.Context(), session, client, preferenceID)
+	if err != nil {
+		writeCompatError(response, http.StatusInternalServerError, "InternalError", "The display preferences could not be loaded")
+		return
+	}
+	if !exists {
+		stored = DisplayPreferencesDto{Id: preferenceID, Client: client, CustomPrefs: map[string]string{}}
+	}
+	writeJSON(response, http.StatusOK, stored)
 }
 
 func (handler *Handler) publicSystemInfo() (PublicSystemInfo, bool) {
@@ -363,7 +384,7 @@ func (handler *Handler) publicSystemInfo() (PublicSystemInfo, bool) {
 		return PublicSystemInfo{}, false
 	}
 	return PublicSystemInfo{
-		Id: handler.serverInfo.ID.String(), LocalAddress: "", ServerName: handler.serverInfo.Name,
+		Id: handler.serverInfo.ID.String(), LocalAddress: handler.serverInfo.LocalAddress, ServerName: handler.serverInfo.Name,
 		Version: CompatibilityVersion, ProductName: compatibilityProductName, StartupWizardCompleted: true, OperatingSystem: "",
 	}, true
 }

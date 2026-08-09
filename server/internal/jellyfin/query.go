@@ -3,36 +3,61 @@ package jellyfin
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
-	DefaultQueryLimit      = 100
-	MaximumQueryLimit      = 200
-	MaximumStartIndex      = 1_000_000
-	MaximumSearchTermBytes = 256
-	MaximumQueryBytes      = 8_192
-	MaximumQueryParameters = 64
-	MaximumQueryListValues = 100
-	MaximumQueryValueBytes = 256
+	DefaultQueryLimit       = 100
+	MaximumQueryLimit       = 200
+	MaximumLatestQueryLimit = 1008
+	MaximumStartIndex       = 1_000_000
+	MaximumSearchTermBytes  = 256
+	MaximumQueryBytes       = 8_192
+	MaximumQueryParameters  = 64
+	MaximumQueryListValues  = 100
+	MaximumQueryValueBytes  = 256
 )
 
 var ErrInvalidQuery = errors.New("invalid jellyfin query")
 
 type ItemQuery struct {
-	SearchTerm       string
-	ParentId         string
-	StartIndex       int
-	Limit            int
-	Recursive        bool
-	IncludeItemTypes []string
-	Fields           []string
-	SortBy           []string
-	SortOrder        string
-	EnableUserData   bool
-	Ids              []string
+	SearchTerm             string
+	ParentId               string
+	StartIndex             int
+	Limit                  int
+	RequestedLimit         int
+	Recursive              bool
+	IncludeItemTypes       []string
+	ExcludeItemTypes       []string
+	MediaTypes             []string
+	Filters                []string
+	Fields                 []string
+	SortBy                 []string
+	SortOrder              string
+	EnableUserData         bool
+	Ids                    []string
+	IsPlayed               *bool
+	IsFavorite             *bool
+	IsResumable            *bool
+	MinCommunityRating     *float64
+	HasSubtitles           *bool
+	Genres                 []string
+	GenreIds               []string
+	Years                  []int
+	OfficialRatings        []string
+	Tags                   []string
+	PersonIds              []string
+	Studios                []string
+	HasTrailer             *bool
+	EnableImages           bool
+	EnableImageTypes       []string
+	ImageTypeLimit         int
+	EnableTotalRecordCount bool
 }
 
 // ParseItemQuery accepts Jellyfin query names with ASCII-insensitive casing.
@@ -40,9 +65,13 @@ type ItemQuery struct {
 // rejected rather than silently choosing an attacker-controlled value.
 func ParseItemQuery(values url.Values) (ItemQuery, error) {
 	query := ItemQuery{
-		Limit:          DefaultQueryLimit,
-		SortOrder:      "Ascending",
-		EnableUserData: true,
+		Limit:                  DefaultQueryLimit,
+		RequestedLimit:         DefaultQueryLimit,
+		SortOrder:              "Ascending",
+		EnableUserData:         true,
+		EnableImages:           true,
+		ImageTypeLimit:         1,
+		EnableTotalRecordCount: true,
 	}
 	if err := validateQueryBudget(values); err != nil {
 		return ItemQuery{}, err
@@ -68,26 +97,91 @@ func ParseItemQuery(values url.Values) (ItemQuery, error) {
 	if query.StartIndex, err = boundedInteger(values, "StartIndex", 0, MaximumStartIndex, 0); err != nil {
 		return ItemQuery{}, err
 	}
-	if query.Limit, err = boundedInteger(values, "Limit", 0, MaximumQueryLimit, DefaultQueryLimit); err != nil {
+	if query.RequestedLimit, err = boundedInteger(values, "Limit", 0, MaximumLatestQueryLimit, DefaultQueryLimit); err != nil {
 		return ItemQuery{}, err
 	}
+	query.Limit = min(query.RequestedLimit, MaximumQueryLimit)
 	if query.Recursive, err = booleanValue(values, "Recursive", false); err != nil {
 		return ItemQuery{}, err
 	}
 	if query.EnableUserData, err = booleanValue(values, "EnableUserData", true); err != nil {
 		return ItemQuery{}, err
 	}
-	if query.IncludeItemTypes, err = commaSeparated(values, "IncludeItemTypes"); err != nil {
+	if query.EnableImages, err = booleanValue(values, "EnableImages", true); err != nil {
 		return ItemQuery{}, err
 	}
-	if query.Fields, err = commaSeparated(values, "Fields"); err != nil {
+	if query.EnableTotalRecordCount, err = booleanValue(values, "EnableTotalRecordCount", true); err != nil {
 		return ItemQuery{}, err
 	}
-	if query.SortBy, err = commaSeparated(values, "SortBy"); err != nil {
+	if query.ImageTypeLimit, err = boundedInteger(values, "ImageTypeLimit", 0, MaximumQueryListValues, 1); err != nil {
 		return ItemQuery{}, err
+	}
+	for name, destination := range map[string]*[]string{
+		"IncludeItemTypes": &query.IncludeItemTypes,
+		"ExcludeItemTypes": &query.ExcludeItemTypes,
+		"MediaTypes":       &query.MediaTypes,
+		"Filters":          &query.Filters,
+		"Fields":           &query.Fields,
+		"SortBy":           &query.SortBy,
+		"GenreIds":         &query.GenreIds,
+		"PersonIds":        &query.PersonIds,
+		"EnableImageTypes": &query.EnableImageTypes,
+	} {
+		if *destination, err = commaSeparated(values, name); err != nil {
+			return ItemQuery{}, err
+		}
+	}
+	for name, destination := range map[string]*[]string{
+		"Genres":          &query.Genres,
+		"OfficialRatings": &query.OfficialRatings,
+		"Tags":            &query.Tags,
+		"Studios":         &query.Studios,
+	} {
+		if *destination, err = pipeSeparated(values, name); err != nil {
+			return ItemQuery{}, err
+		}
 	}
 	if query.Ids, err = canonicalIDs(values, "Ids"); err != nil {
 		return ItemQuery{}, err
+	}
+	if query.Years, err = integerList(values, "Years", 1, 9999); err != nil {
+		return ItemQuery{}, err
+	}
+	if query.IsPlayed, err = optionalBooleanValue(values, "IsPlayed"); err != nil {
+		return ItemQuery{}, err
+	}
+	if query.IsFavorite, err = optionalBooleanValue(values, "IsFavorite"); err != nil {
+		return ItemQuery{}, err
+	}
+	if query.IsResumable, err = optionalBooleanValue(values, "IsResumable"); err != nil {
+		return ItemQuery{}, err
+	}
+	if query.HasTrailer, err = optionalBooleanValue(values, "HasTrailer"); err != nil {
+		return ItemQuery{}, err
+	}
+	if query.MinCommunityRating, err = optionalBoundedFloat(values, "MinCommunityRating", 0, 10); err != nil {
+		return ItemQuery{}, err
+	}
+	if query.HasSubtitles, err = optionalBooleanValue(values, "HasSubtitles"); err != nil {
+		return ItemQuery{}, err
+	}
+	for index, filter := range query.Filters {
+		switch strings.ToLower(filter) {
+		case "isplayed", "isunplayed", "isfavorite", "isresumable", "isfolder", "isnotfolder":
+			query.Filters[index] = strings.ToLower(filter)
+		default:
+			return ItemQuery{}, invalidQuery("Filters contains an unsupported value")
+		}
+	}
+	for _, field := range query.Fields {
+		if !supportedItemField(field) {
+			return ItemQuery{}, invalidQuery("Fields contains an unsupported value")
+		}
+	}
+	for _, imageType := range query.EnableImageTypes {
+		if !supportedItemImageType(imageType) {
+			return ItemQuery{}, invalidQuery("EnableImageTypes contains an unsupported value")
+		}
 	}
 
 	rawSortOrder, err := boundedString(values, "SortOrder", MaximumQueryValueBytes)
@@ -144,8 +238,8 @@ func boundedString(values url.Values, name string, maximum int) (string, error) 
 	if err != nil || !found {
 		return "", err
 	}
-	if len(value) > maximum {
-		return "", invalidQuery(name + " exceeds its size limit")
+	if !validQueryText(value) || len(value) > maximum {
+		return "", invalidQuery(name + " contains an invalid value")
 	}
 	return value, nil
 }
@@ -180,24 +274,61 @@ func booleanValue(values url.Values, name string, fallback bool) (bool, error) {
 	return value, nil
 }
 
+func optionalBooleanValue(values url.Values, name string) (*bool, error) {
+	raw, found, err := queryScalar(values, name)
+	if err != nil || !found {
+		return nil, err
+	}
+	value, parseErr := strconv.ParseBool(raw)
+	if parseErr != nil {
+		return nil, invalidQuery(name + " must be true or false")
+	}
+	return &value, nil
+}
+
+func optionalBoundedFloat(values url.Values, name string, minimum, maximum float64) (*float64, error) {
+	raw, ok, err := queryScalar(values, name)
+	if err != nil || !ok {
+		return nil, err
+	}
+	value, parseErr := strconv.ParseFloat(raw, 64)
+	if parseErr != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < minimum || value > maximum {
+		return nil, invalidQuery(fmt.Sprintf("%s must be between %g and %g", name, minimum, maximum))
+	}
+	return &value, nil
+}
+
 func commaSeparated(values url.Values, name string) ([]string, error) {
-	rawValues := make([]string, 0, 1)
-	for actualName, entries := range values {
+	return delimitedValues(values, name, ',')
+}
+
+func pipeSeparated(values url.Values, name string) ([]string, error) {
+	return delimitedValues(values, name, '|')
+}
+
+func delimitedValues(values url.Values, name string, separator rune) ([]string, error) {
+	matchingNames := make([]string, 0, 1)
+	for actualName := range values {
 		if strings.EqualFold(actualName, name) {
-			rawValues = append(rawValues, entries...)
+			matchingNames = append(matchingNames, actualName)
 		}
+	}
+	sort.Strings(matchingNames)
+	rawValues := make([]string, 0, len(matchingNames))
+	for _, actualName := range matchingNames {
+		rawValues = append(rawValues, values[actualName]...)
 	}
 	if len(rawValues) == 0 {
 		return nil, nil
 	}
 	result := make([]string, 0, len(rawValues))
 	for _, raw := range rawValues {
-		if raw == "" {
-			return nil, invalidQuery(name + " contains an invalid value")
-		}
-		for _, part := range strings.Split(raw, ",") {
+		for _, part := range strings.Split(raw, string(separator)) {
 			part = strings.TrimSpace(part)
-			if part == "" || len(part) > MaximumQueryValueBytes {
+			if part == "" {
+				continue
+			}
+			if !validQueryText(part) || len(part) > MaximumQueryValueBytes {
 				return nil, invalidQuery(name + " contains an invalid value")
 			}
 			result = append(result, part)
@@ -205,6 +336,50 @@ func commaSeparated(values url.Values, name string) ([]string, error) {
 				return nil, invalidQuery(name + " contains too many values")
 			}
 		}
+	}
+	return result, nil
+}
+
+func validQueryText(value string) bool {
+	return utf8.ValidString(value) && !strings.ContainsRune(value, '\x00')
+}
+
+func supportedItemField(value string) bool {
+	switch {
+	case strings.EqualFold(value, "DisplayPreferencesId"), strings.EqualFold(value, "Etag"),
+		strings.EqualFold(value, "Genres"), strings.EqualFold(value, "MediaSources"),
+		strings.EqualFold(value, "MediaStreams"), strings.EqualFold(value, "OriginalTitle"),
+		strings.EqualFold(value, "Overview"), strings.EqualFold(value, "ParentId"),
+		strings.EqualFold(value, "Path"), strings.EqualFold(value, "People"), strings.EqualFold(value, "Studios"),
+		strings.EqualFold(value, "PrimaryImageAspectRatio"), strings.EqualFold(value, "ProviderIds"),
+		strings.EqualFold(value, "SortName"), strings.EqualFold(value, "Taglines"), strings.EqualFold(value, "Trickplay"):
+		return true
+	default:
+		return false
+	}
+}
+
+func supportedItemImageType(value string) bool {
+	for _, imageType := range compatImageTypes {
+		if strings.EqualFold(value, imageType) {
+			return true
+		}
+	}
+	return false
+}
+
+func integerList(values url.Values, name string, minimum, maximum int) ([]int, error) {
+	parts, err := commaSeparated(values, name)
+	if err != nil || len(parts) == 0 {
+		return nil, err
+	}
+	result := make([]int, 0, len(parts))
+	for _, part := range parts {
+		value, parseErr := strconv.ParseInt(part, 10, 32)
+		if parseErr != nil || value < int64(minimum) || value > int64(maximum) {
+			return nil, invalidQuery(fmt.Sprintf("%s values must be between %d and %d", name, minimum, maximum))
+		}
+		result = append(result, int(value))
 	}
 	return result, nil
 }

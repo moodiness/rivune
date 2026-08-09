@@ -263,18 +263,26 @@ func (reader *catalogReader) localizeCatalogTitles(ctx context.Context, titles [
 	if len(titles) == 0 {
 		return
 	}
+	const titleArtworkCount = 5
 	peopleCount := 0
 	for index := range titles {
 		peopleCount += len(titles[index].People)
 	}
-	upstream := make([]string, len(titles)*2+peopleCount)
-	peopleOffset := len(titles) * 2
+	upstream := make([]string, len(titles)*titleArtworkCount+peopleCount)
+	peopleOffset := len(titles) * titleArtworkCount
 	peopleIndex := peopleOffset
 	for index := range titles {
-		upstream[index*2] = titles[index].PosterURL
-		upstream[index*2+1] = titles[index].BackgroundURL
+		offset := index * titleArtworkCount
+		upstream[offset] = titles[index].PosterURL
+		upstream[offset+1] = titles[index].BackgroundURL
+		upstream[offset+2] = titles[index].LogoURL
+		upstream[offset+3] = titles[index].BannerURL
+		upstream[offset+4] = titles[index].ArtURL
 		titles[index].PosterURL = ""
 		titles[index].BackgroundURL = ""
+		titles[index].LogoURL = ""
+		titles[index].BannerURL = ""
+		titles[index].ArtURL = ""
 		for personIndex := range titles[index].People {
 			upstream[peopleIndex] = titles[index].People[personIndex].ImageURL
 			titles[index].People[personIndex].ImageURL = ""
@@ -290,11 +298,18 @@ func (reader *catalogReader) localizeCatalogTitles(ctx context.Context, titles [
 	}
 	peopleIndex = peopleOffset
 	for index := range titles {
-		if _, valid := localizedArtworkTag(localized[index*2]); valid {
-			titles[index].PosterURL = localized[index*2]
+		offset := index * titleArtworkCount
+		destinations := [...]*string{
+			&titles[index].PosterURL,
+			&titles[index].BackgroundURL,
+			&titles[index].LogoURL,
+			&titles[index].BannerURL,
+			&titles[index].ArtURL,
 		}
-		if _, valid := localizedArtworkTag(localized[index*2+1]); valid {
-			titles[index].BackgroundURL = localized[index*2+1]
+		for artworkIndex, destination := range destinations {
+			if _, valid := localizedArtworkTag(localized[offset+artworkIndex]); valid {
+				*destination = localized[offset+artworkIndex]
+			}
 		}
 		for personIndex := range titles[index].People {
 			if _, valid := localizedArtworkTag(localized[peopleIndex]); valid {
@@ -456,10 +471,7 @@ func (reader *catalogReader) SearchCatalog(ctx context.Context, principal auth.P
 		items = items[:maximumCatalogSearchCandidates]
 		complete = false
 	}
-	result := CatalogSearchPage{Offset: query.Offset, Limit: query.Limit, ExactTotal: complete}
-	if complete {
-		result.Total = len(items)
-	}
+	result := CatalogSearchPage{Offset: query.Offset, Limit: query.Limit, Total: len(items), ExactTotal: complete}
 	if query.Offset < len(items) {
 		end := query.Offset + query.Limit
 		if end > len(items) {
@@ -536,7 +548,8 @@ func catalogTitleFromMovie(movie metadata.Movie) watchstate.CatalogTitle {
 	}
 	return watchstate.CatalogTitle{
 		ID: movie.ID, MediaType: "movie", Title: movie.Title, OriginalTitle: movie.OriginalTitle, Overview: movie.Overview,
-		PosterURL: movie.PosterURL, BackgroundURL: movie.BackdropURL, Released: movie.ReleaseDate,
+		PosterURL: movie.PosterURL, BackgroundURL: movie.BackdropURL, LogoURL: movie.LogoURL,
+		BannerURL: movie.BannerURL, ArtURL: movie.ArtURL, Released: movie.ReleaseDate,
 		RuntimeMinutes: &runtime, Genres: genres, CommunityRating: rating, Tagline: movie.Tagline,
 		People: catalogPeopleFromCast(movie.Cast), ProviderIDs: copyProviderIDs(movie.ExternalIDs),
 	}
@@ -554,7 +567,8 @@ func catalogTitleFromSeries(series metadata.Series) watchstate.CatalogTitle {
 	}
 	return watchstate.CatalogTitle{
 		ID: series.ID, MediaType: "series", Title: series.Name, OriginalTitle: series.OriginalName, Overview: series.Overview,
-		PosterURL: series.PosterURL, BackgroundURL: series.BackdropURL, Released: series.FirstAirDate,
+		PosterURL: series.PosterURL, BackgroundURL: series.BackdropURL, LogoURL: series.LogoURL,
+		BannerURL: series.BannerURL, ArtURL: series.ArtURL, Released: series.FirstAirDate,
 		Genres: genres, CommunityRating: rating, Tagline: series.Tagline, Status: series.Status, EndDate: series.LastAirDate,
 		People: catalogPeopleFromCast(series.Cast), ProviderIDs: copyProviderIDs(series.ExternalIDs),
 	}
@@ -637,11 +651,20 @@ func mergeCatalogTitleMetadata(title, detail watchstate.CatalogTitle) watchstate
 	if len(detail.People) != 0 {
 		title.People = append([]watchstate.CatalogPerson(nil), detail.People...)
 	}
-	if detail.PosterURL != "" {
+	if title.PosterURL == "" {
 		title.PosterURL = detail.PosterURL
 	}
-	if detail.BackgroundURL != "" {
+	if title.BackgroundURL == "" {
 		title.BackgroundURL = detail.BackgroundURL
+	}
+	if title.LogoURL == "" {
+		title.LogoURL = detail.LogoURL
+	}
+	if title.BannerURL == "" {
+		title.BannerURL = detail.BannerURL
+	}
+	if title.ArtURL == "" {
+		title.ArtURL = detail.ArtURL
 	}
 	providerIDs := make(map[string]string, len(title.ProviderIDs)+len(detail.ProviderIDs))
 	for provider, value := range title.ProviderIDs {
@@ -776,6 +799,15 @@ func mergeCatalogSearchTitle(current, incoming watchstate.CatalogTitle) watchsta
 	}
 	if current.BackgroundURL == "" {
 		current.BackgroundURL = incoming.BackgroundURL
+	}
+	if current.LogoURL == "" {
+		current.LogoURL = incoming.LogoURL
+	}
+	if current.BannerURL == "" {
+		current.BannerURL = incoming.BannerURL
+	}
+	if current.ArtURL == "" {
+		current.ArtURL = incoming.ArtURL
 	}
 	if current.Released == "" {
 		current.Released = incoming.Released

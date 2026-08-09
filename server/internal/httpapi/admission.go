@@ -102,7 +102,7 @@ func newUsernameAdmission(subjectAttempts, maximumSubjects int, window time.Dura
 	}
 }
 
-func (admission *usernameAdmission) acquire(username string) (time.Duration, bool) {
+func (admission *usernameAdmission) recordFailure(username string) {
 	subject := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(username))))
 	now := admission.now()
 
@@ -110,27 +110,33 @@ func (admission *usernameAdmission) acquire(username string) (time.Duration, boo
 	defer admission.mu.Unlock()
 	admission.cleanupExpired(now, publicAdmissionCleanupLimit)
 
+	if admission.maximumSubjects <= 0 {
+		return
+	}
 	state, exists := admission.subjects[subject]
 	if !exists {
 		if len(admission.subjects) >= admission.maximumSubjects {
-			return publicAdmissionConcurrencyRetry, false
+			for evicted := range admission.subjects {
+				delete(admission.subjects, evicted)
+				break
+			}
 		}
 		state.windowEnds = now.Add(admission.window)
 	} else if !now.Before(state.windowEnds) {
 		state.attempts = 0
 		state.windowEnds = now.Add(admission.window)
 	}
-	if state.attempts >= admission.subjectAttempts {
-		retryAfter := state.windowEnds.Sub(now)
-		if retryAfter <= 0 {
-			retryAfter = publicAdmissionConcurrencyRetry
-		}
-		return retryAfter, false
+	if state.attempts < admission.subjectAttempts {
+		state.attempts++
 	}
-
-	state.attempts++
 	admission.subjects[subject] = state
-	return 0, true
+}
+
+func (admission *usernameAdmission) forget(username string) {
+	subject := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(username))))
+	admission.mu.Lock()
+	delete(admission.subjects, subject)
+	admission.mu.Unlock()
 }
 
 func (admission *usernameAdmission) cleanupExpired(now time.Time, limit int) {

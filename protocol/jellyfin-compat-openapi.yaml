@@ -49,8 +49,8 @@ info:
 
     Advertised media URLs use `rvp_` plus 192 bits of random material as a short-lived,
     item/source-bound `PlaySessionId` stream capability instead of serializing the profile credential.
-    Artwork may instead use the opaque `tag` returned in item DTOs as an anonymous
-    capability; a supplied invalid credential never falls back to an artwork tag.
+    Artwork access always requires a compatibility credential bound to the authorized profile.
+    An opaque `tag` is only a cache selector and must match that profile's requested item and image type.
     A stream with a missing or unusable credential may fall back to its matching scoped
     playback capability and revalidated owner. A valid foreign credential fails closed.
 
@@ -61,8 +61,10 @@ info:
     30-minute idle and two-hour absolute lifetime. Adapter-generated stream URLs carry only
     the scoped capability, never the general compatibility credential or a provider/source URL.
 
-    The library hierarchy contains the stable `Movies`, `TV Shows`, and `Collections`
-    virtual views plus one ordered, named view per profile-authorized Rivune collection.
+    The library hierarchy retains stable `Movies`, `TV Shows`, and `Collections`
+    virtual views. `Views` returns ordered, named profile-authorized Rivune collection
+    views when at least one is valid, and falls back to `Movies` and `TV Shows` only
+    when no configured collection view is available, avoiding duplicate libraries.
     Collection views expose configured folders through `Items/Latest` and ordinary item
     browsing; promoted collection and folder projections use landscape `unknown` cards
     with Primary, Thumb, Backdrop, and 16:9 metadata regardless of the native folder-cover
@@ -152,11 +154,16 @@ paths:
   /System/Endpoint:
     get:
       tags: [Discovery]
-      summary: Get conservative network classification
+      summary: Get trusted request network classification
+      description: |
+        Requires a profile-bound compatibility credential. Classification uses only
+        the trusted-proxy-aware canonical client address; forwarding headers are never
+        interpreted by this operation. Missing or malformed addresses, and addresses
+        outside loopback or explicit private networks, conservatively return false values.
       operationId: getJellyfinSystemEndpoint
-      security: []
       responses:
         "200": { $ref: "#/components/responses/SystemEndpoint" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/CompatibilityNotRegistered" }
         default: { $ref: "#/components/responses/CompatError" }
   /QuickConnect/Enabled:
@@ -239,6 +246,28 @@ paths:
         "200": { $ref: "#/components/responses/User" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/CompatError" }
+  /Sessions/Viewing:
+    post:
+      tags: [Sessions]
+      summary: Report the item currently viewed by the authenticated session
+      description: ItemId must resolve through the bound profile. SessionId may be omitted or equal the authenticated compatibility session; another session fails closed.
+      operationId: reportJellyfinViewing
+      parameters:
+        - name: ItemId
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/UUIDInput" }
+        - name: SessionId
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/UUIDInput" }
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
         default: { $ref: "#/components/responses/CompatError" }
   /Sessions/Logout:
     post:
@@ -362,25 +391,29 @@ paths:
       responses:
         "204": { $ref: "#/components/responses/NoContent" }
         default: { $ref: "#/components/responses/CompatError" }
-  /DisplayPreferences/{id}:
+  /DisplayPreferences/{displayPreferencesId}:
     parameters:
       - { $ref: "#/components/parameters/DisplayPreferenceIdPath" }
     get:
       tags: [Users]
-      summary: Get minimal display preferences
+      summary: Get durable account/profile/client-scoped display preferences
       operationId: getJellyfinDisplayPreferences
       parameters:
+        - { $ref: "#/components/parameters/UserIdQuery" }
         - { $ref: "#/components/parameters/DisplayClient" }
       responses:
         "200": { $ref: "#/components/responses/DisplayPreferences" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
         default: { $ref: "#/components/responses/CompatError" }
     post:
       tags: [Users]
-      summary: Store bounded session-lifetime display preferences
+      summary: Store bounded durable account/profile/client-scoped display preferences
       operationId: updateJellyfinDisplayPreferences
       parameters:
+        - { $ref: "#/components/parameters/UserIdQuery" }
         - { $ref: "#/components/parameters/DisplayClient" }
       requestBody:
         required: true
@@ -393,6 +426,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
         default: { $ref: "#/components/responses/CompatError" }
   /Users/{id}/Views:
     parameters:
@@ -455,6 +489,26 @@ paths:
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Recursive" }
         - { $ref: "#/components/parameters/IncludeItemTypes" }
+        - { $ref: "#/components/parameters/MinCommunityRating" }
+        - { $ref: "#/components/parameters/HasSubtitles" }
+        - { $ref: "#/components/parameters/ExcludeItemTypes" }
+        - { $ref: "#/components/parameters/MediaTypes" }
+        - { $ref: "#/components/parameters/Filters" }
+        - { $ref: "#/components/parameters/IsPlayed" }
+        - { $ref: "#/components/parameters/IsFavorite" }
+        - { $ref: "#/components/parameters/IsResumable" }
+        - { $ref: "#/components/parameters/Genres" }
+        - { $ref: "#/components/parameters/GenreIds" }
+        - { $ref: "#/components/parameters/Years" }
+        - { $ref: "#/components/parameters/OfficialRatings" }
+        - { $ref: "#/components/parameters/Tags" }
+        - { $ref: "#/components/parameters/PersonIds" }
+        - { $ref: "#/components/parameters/Studios" }
+        - { $ref: "#/components/parameters/HasTrailer" }
+        - { $ref: "#/components/parameters/EnableImages" }
+        - { $ref: "#/components/parameters/EnableImageTypes" }
+        - { $ref: "#/components/parameters/ImageTypeLimit" }
+        - { $ref: "#/components/parameters/EnableTotalRecordCount" }
         - { $ref: "#/components/parameters/Fields" }
         - { $ref: "#/components/parameters/SortBy" }
         - { $ref: "#/components/parameters/SortOrder" }
@@ -480,6 +534,26 @@ paths:
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Recursive" }
         - { $ref: "#/components/parameters/IncludeItemTypes" }
+        - { $ref: "#/components/parameters/MinCommunityRating" }
+        - { $ref: "#/components/parameters/HasSubtitles" }
+        - { $ref: "#/components/parameters/ExcludeItemTypes" }
+        - { $ref: "#/components/parameters/MediaTypes" }
+        - { $ref: "#/components/parameters/Filters" }
+        - { $ref: "#/components/parameters/IsPlayed" }
+        - { $ref: "#/components/parameters/IsFavorite" }
+        - { $ref: "#/components/parameters/IsResumable" }
+        - { $ref: "#/components/parameters/Genres" }
+        - { $ref: "#/components/parameters/GenreIds" }
+        - { $ref: "#/components/parameters/Years" }
+        - { $ref: "#/components/parameters/OfficialRatings" }
+        - { $ref: "#/components/parameters/Tags" }
+        - { $ref: "#/components/parameters/PersonIds" }
+        - { $ref: "#/components/parameters/Studios" }
+        - { $ref: "#/components/parameters/HasTrailer" }
+        - { $ref: "#/components/parameters/EnableImages" }
+        - { $ref: "#/components/parameters/EnableImageTypes" }
+        - { $ref: "#/components/parameters/ImageTypeLimit" }
+        - { $ref: "#/components/parameters/EnableTotalRecordCount" }
         - { $ref: "#/components/parameters/Fields" }
         - { $ref: "#/components/parameters/SortBy" }
         - { $ref: "#/components/parameters/SortOrder" }
@@ -502,6 +576,26 @@ paths:
         - { $ref: "#/components/parameters/StartIndex" }
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Fields" }
+        - { $ref: "#/components/parameters/IncludeItemTypes" }
+        - { $ref: "#/components/parameters/ExcludeItemTypes" }
+        - { $ref: "#/components/parameters/MediaTypes" }
+        - { $ref: "#/components/parameters/Filters" }
+        - { $ref: "#/components/parameters/IsPlayed" }
+        - { $ref: "#/components/parameters/IsFavorite" }
+        - { $ref: "#/components/parameters/IsResumable" }
+        - { $ref: "#/components/parameters/MinCommunityRating" }
+        - { $ref: "#/components/parameters/HasSubtitles" }
+        - { $ref: "#/components/parameters/Genres" }
+        - { $ref: "#/components/parameters/GenreIds" }
+        - { $ref: "#/components/parameters/Years" }
+        - { $ref: "#/components/parameters/OfficialRatings" }
+        - { $ref: "#/components/parameters/Tags" }
+        - { $ref: "#/components/parameters/PersonIds" }
+        - { $ref: "#/components/parameters/Studios" }
+        - { $ref: "#/components/parameters/HasTrailer" }
+        - { $ref: "#/components/parameters/EnableImages" }
+        - { $ref: "#/components/parameters/EnableImageTypes" }
+        - { $ref: "#/components/parameters/ImageTypeLimit" }
         - { $ref: "#/components/parameters/EnableUserData" }
       responses:
         "200": { $ref: "#/components/responses/LatestItems" }
@@ -519,6 +613,10 @@ paths:
       parameters:
         - { $ref: "#/components/parameters/UserIdQuery" }
         - { $ref: "#/components/parameters/EnableUserData" }
+        - { $ref: "#/components/parameters/Fields" }
+        - { $ref: "#/components/parameters/EnableImages" }
+        - { $ref: "#/components/parameters/EnableImageTypes" }
+        - { $ref: "#/components/parameters/ImageTypeLimit" }
       responses:
         "200": { $ref: "#/components/responses/Item" }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -535,6 +633,10 @@ paths:
       operationId: getJellyfinUserItem
       parameters:
         - { $ref: "#/components/parameters/EnableUserData" }
+        - { $ref: "#/components/parameters/Fields" }
+        - { $ref: "#/components/parameters/EnableImages" }
+        - { $ref: "#/components/parameters/EnableImageTypes" }
+        - { $ref: "#/components/parameters/ImageTypeLimit" }
       responses:
         "200": { $ref: "#/components/responses/Item" }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -546,8 +648,9 @@ paths:
       - { $ref: "#/components/parameters/SeriesIdPath" }
     get:
       tags: [Library]
-      summary: List seasons for a series
-      operationId: listJellyfinSeasons
+      summary: List detail-rich seasons for an authorized series
+      operationId: getJellyfinSeasons
+      description: The series must be visible to the credential-bound profile. Hierarchy identity, parent links, user data, artwork, and fixed-route detail fields are preserved unless explicitly disabled.
       parameters:
         - { $ref: "#/components/parameters/UserIdQuery" }
         - { $ref: "#/components/parameters/StartIndex" }
@@ -556,6 +659,9 @@ paths:
         - { $ref: "#/components/parameters/SortBy" }
         - { $ref: "#/components/parameters/SortOrder" }
         - { $ref: "#/components/parameters/EnableUserData" }
+        - { $ref: "#/components/parameters/EnableImages" }
+        - { $ref: "#/components/parameters/EnableImageTypes" }
+        - { $ref: "#/components/parameters/ImageTypeLimit" }
       responses:
         "200": { $ref: "#/components/responses/ItemQueryResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -567,16 +673,21 @@ paths:
       - { $ref: "#/components/parameters/SeriesIdPath" }
     get:
       tags: [Library]
-      summary: List episodes for a series
-      operationId: listJellyfinEpisodes
+      summary: List detail-rich episodes for an authorized series or season
+      operationId: getJellyfinEpisodes
+      description: The series and optional season must be visible to the credential-bound profile and form one coherent hierarchy. Fixed hierarchy routes preserve detail fields unless explicitly disabled.
       parameters:
         - { $ref: "#/components/parameters/UserIdQuery" }
+        - { $ref: "#/components/parameters/SeasonId" }
         - { $ref: "#/components/parameters/StartIndex" }
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Fields" }
         - { $ref: "#/components/parameters/SortBy" }
         - { $ref: "#/components/parameters/SortOrder" }
         - { $ref: "#/components/parameters/EnableUserData" }
+        - { $ref: "#/components/parameters/EnableImages" }
+        - { $ref: "#/components/parameters/EnableImageTypes" }
+        - { $ref: "#/components/parameters/ImageTypeLimit" }
       responses:
         "200": { $ref: "#/components/responses/ItemQueryResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -630,14 +741,30 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         default: { $ref: "#/components/responses/CompatError" }
+  /Items/{id}/Images:
+    parameters:
+      - { $ref: "#/components/parameters/ItemIdPath" }
+    get:
+      tags: [Artwork]
+      summary: List projected artwork metadata for an authorized item
+      description: Returns only Primary, Backdrop, Logo, Thumb, Banner, and Art variants whose opaque tags still resolve to registered local cache records. Derived Thumb aliases reuse the registered Primary tag. Dimensions are omitted when unknown; provider paths and URLs are never returned.
+      operationId: listJellyfinImages
+      parameters:
+        - { $ref: "#/components/parameters/UserIdQuery" }
+      responses:
+        "200": { $ref: "#/components/responses/ImageInfos" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/CompatError" }
   /Items/{id}/Images/{type}:
     parameters:
       - { $ref: "#/components/parameters/ItemIdPath" }
       - { $ref: "#/components/parameters/ImageTypePath" }
     get:
       tags: [Artwork]
-      summary: Get original artwork bytes
-      description: Resize/quality query knobs are ignored; Rivune never redirects upstream. A registered 64-hex artwork tag may replace authentication.
+      summary: Get cached or derived artwork bytes
+      description: Serves registered local bytes without redirecting upstream. Width/fill/max/quality transforms are bounded, deterministic, and represented by a distinct strong ETag. Authentication and profile-scoped item authorization are always required; a supplied tag must match the selected item and image type.
       operationId: getJellyfinImage
       security:
         - XEmbyToken: []
@@ -648,16 +775,25 @@ paths:
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
         - ApiKeyCompactQuery: []
-        - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
         - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/ArtworkTag" }
+        - { $ref: "#/components/parameters/UserIdQuery" }
+        - { $ref: "#/components/parameters/IfNoneMatch" }
+        - { $ref: "#/components/parameters/ImageWidth" }
+        - { $ref: "#/components/parameters/ImageMaxWidth" }
+        - { $ref: "#/components/parameters/ImageMaxHeight" }
+        - { $ref: "#/components/parameters/ImageFillWidth" }
+        - { $ref: "#/components/parameters/ImageFillHeight" }
+        - { $ref: "#/components/parameters/ImageQuality" }
       responses:
         "200": { $ref: "#/components/responses/Image" }
+        "304": { $ref: "#/components/responses/ImageNotModified" }
+        "400": { $ref: "#/components/responses/ImageBadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "502": { $ref: "#/components/responses/BadGateway" }
+        "404": { $ref: "#/components/responses/ImageNotFound" }
+        "502": { $ref: "#/components/responses/ImageBadGateway" }
         default: { $ref: "#/components/responses/CompatError" }
     head:
       tags: [Artwork]
@@ -672,13 +808,22 @@ paths:
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
         - ApiKeyCompactQuery: []
-        - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
         - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/ArtworkTag" }
+        - { $ref: "#/components/parameters/UserIdQuery" }
+        - { $ref: "#/components/parameters/IfNoneMatch" }
+        - { $ref: "#/components/parameters/ImageWidth" }
+        - { $ref: "#/components/parameters/ImageMaxWidth" }
+        - { $ref: "#/components/parameters/ImageMaxHeight" }
+        - { $ref: "#/components/parameters/ImageFillWidth" }
+        - { $ref: "#/components/parameters/ImageFillHeight" }
+        - { $ref: "#/components/parameters/ImageQuality" }
       responses:
         "200": { $ref: "#/components/responses/ImageHead" }
+        "400": { $ref: "#/components/responses/HeadError" }
+        "304": { $ref: "#/components/responses/ImageNotModified" }
         "401": { $ref: "#/components/responses/HeadUnauthorized" }
         "404": { $ref: "#/components/responses/HeadError" }
         "502": { $ref: "#/components/responses/HeadError" }
@@ -701,16 +846,25 @@ paths:
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
         - ApiKeyCompactQuery: []
-        - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
         - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/ArtworkTag" }
+        - { $ref: "#/components/parameters/UserIdQuery" }
+        - { $ref: "#/components/parameters/IfNoneMatch" }
+        - { $ref: "#/components/parameters/ImageWidth" }
+        - { $ref: "#/components/parameters/ImageMaxWidth" }
+        - { $ref: "#/components/parameters/ImageMaxHeight" }
+        - { $ref: "#/components/parameters/ImageFillWidth" }
+        - { $ref: "#/components/parameters/ImageFillHeight" }
+        - { $ref: "#/components/parameters/ImageQuality" }
       responses:
         "200": { $ref: "#/components/responses/Image" }
+        "400": { $ref: "#/components/responses/ImageBadRequest" }
+        "304": { $ref: "#/components/responses/ImageNotModified" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "502": { $ref: "#/components/responses/BadGateway" }
+        "404": { $ref: "#/components/responses/ImageNotFound" }
+        "502": { $ref: "#/components/responses/ImageBadGateway" }
         default: { $ref: "#/components/responses/CompatError" }
     head:
       tags: [Artwork]
@@ -725,13 +879,22 @@ paths:
         - XMediaBrowserAuthorizationToken: []
         - ApiKeyQuery: []
         - ApiKeyCompactQuery: []
-        - ArtworkTagQuery: []
       parameters:
         - { $ref: "#/components/parameters/ApiKey" }
         - { $ref: "#/components/parameters/ApiKeyCompact" }
         - { $ref: "#/components/parameters/ArtworkTag" }
+        - { $ref: "#/components/parameters/UserIdQuery" }
+        - { $ref: "#/components/parameters/IfNoneMatch" }
+        - { $ref: "#/components/parameters/ImageWidth" }
+        - { $ref: "#/components/parameters/ImageMaxWidth" }
+        - { $ref: "#/components/parameters/ImageMaxHeight" }
+        - { $ref: "#/components/parameters/ImageFillWidth" }
+        - { $ref: "#/components/parameters/ImageFillHeight" }
+        - { $ref: "#/components/parameters/ImageQuality" }
       responses:
         "200": { $ref: "#/components/responses/ImageHead" }
+        "400": { $ref: "#/components/responses/HeadError" }
+        "304": { $ref: "#/components/responses/ImageNotModified" }
         "401": { $ref: "#/components/responses/HeadUnauthorized" }
         "404": { $ref: "#/components/responses/HeadError" }
         "502": { $ref: "#/components/responses/HeadError" }
@@ -805,6 +968,43 @@ paths:
         "503": { $ref: "#/components/responses/PlaybackUnavailable" }
         "507": { $ref: "#/components/responses/InsufficientStorage" }
         default: { $ref: "#/components/responses/CompatError" }
+  /Videos/{itemId}/Trickplay/{width}/{index}.jpg:
+    parameters:
+      - { $ref: "#/components/parameters/ItemIdPathNamed" }
+      - { $ref: "#/components/parameters/TrickplayWidthPath" }
+      - { $ref: "#/components/parameters/TrickplayIndexPath" }
+    get:
+      tags: [Playback]
+      summary: Deliver an authorized generated trickplay JPEG sheet
+      operationId: getJellyfinTrickplayTileImage
+      parameters: [{ $ref: "#/components/parameters/TrickplayMediaSourceId" }, { $ref: "#/components/parameters/Range" }]
+      responses:
+        "200": { $ref: "#/components/responses/TrickplayImage" }
+        "206": { $ref: "#/components/responses/PartialTrickplayImage" }
+        "304": { $ref: "#/components/responses/TrickplayImageNotModified" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "416": { $ref: "#/components/responses/RangeNotSatisfiable" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/PlaybackUnavailable" }
+        default: { $ref: "#/components/responses/CompatError" }
+    head:
+      tags: [Playback]
+      summary: Inspect an authorized generated trickplay JPEG sheet
+      operationId: headJellyfinTrickplayTileImage
+      parameters: [{ $ref: "#/components/parameters/TrickplayMediaSourceId" }, { $ref: "#/components/parameters/Range" }]
+      responses:
+        "200": { $ref: "#/components/responses/TrickplayImageHead" }
+        "206": { $ref: "#/components/responses/PartialTrickplayImageHead" }
+        "304": { $ref: "#/components/responses/TrickplayImageNotModified" }
+        "400": { $ref: "#/components/responses/HeadError" }
+        "401": { $ref: "#/components/responses/HeadUnauthorized" }
+        "404": { $ref: "#/components/responses/HeadError" }
+        "416": { $ref: "#/components/responses/RangeNotSatisfiable" }
+        "502": { $ref: "#/components/responses/HeadError" }
+        "503": { $ref: "#/components/responses/HeadPlaybackUnavailable" }
+        default: { $ref: "#/components/responses/HeadError" }
   /Videos/{id}/stream:
     parameters:
       - { $ref: "#/components/parameters/ItemIdPath" }
@@ -1128,14 +1328,19 @@ paths:
       - { $ref: "#/components/parameters/UserIdPath" }
     get:
       tags: [Watch state]
-      summary: List resumable items
-      description: Preserves native continuation order. Any supplied SortBy or SortOrder is rejected; MediaTypes without Video yields a typed empty page.
+      summary: List resumable items for the bound path profile
+      description: Preserves native continuation order and exact totals. The path profile must equal the credential-bound profile. Any supplied SortBy or SortOrder is rejected; MediaTypes without Video yields a typed empty page. General-list detail fields remain field-gated.
       operationId: listJellyfinUserResumeItems
       parameters:
+        - { $ref: "#/components/parameters/UserIdQuery" }
         - { $ref: "#/components/parameters/StartIndex" }
         - { $ref: "#/components/parameters/StateLimit" }
         - { $ref: "#/components/parameters/EnableUserData" }
         - { $ref: "#/components/parameters/MediaTypes" }
+        - { $ref: "#/components/parameters/Fields" }
+        - { $ref: "#/components/parameters/EnableImages" }
+        - { $ref: "#/components/parameters/EnableImageTypes" }
+        - { $ref: "#/components/parameters/ImageTypeLimit" }
       responses:
         "200": { $ref: "#/components/responses/ItemQueryResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -1146,7 +1351,7 @@ paths:
     get:
       tags: [Watch state]
       summary: List resumable items for the bound profile
-      description: Preserves native continuation order. Any supplied SortBy or SortOrder is rejected; MediaTypes without Video yields a typed empty page.
+      description: Preserves native continuation order and exact totals. A supplied UserId must equal the credential-bound profile. Any supplied SortBy or SortOrder is rejected; MediaTypes without Video yields a typed empty page. General-list detail fields remain field-gated.
       operationId: listJellyfinResumeItems
       parameters:
         - { $ref: "#/components/parameters/UserIdQuery" }
@@ -1154,6 +1359,10 @@ paths:
         - { $ref: "#/components/parameters/StateLimit" }
         - { $ref: "#/components/parameters/EnableUserData" }
         - { $ref: "#/components/parameters/MediaTypes" }
+        - { $ref: "#/components/parameters/Fields" }
+        - { $ref: "#/components/parameters/EnableImages" }
+        - { $ref: "#/components/parameters/EnableImageTypes" }
+        - { $ref: "#/components/parameters/ImageTypeLimit" }
       responses:
         "200": { $ref: "#/components/responses/ItemQueryResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -1164,7 +1373,7 @@ paths:
     get:
       tags: [Watch state]
       summary: List next episodes for the bound profile
-      description: Returns the first eligible unwatched episode after each series' latest completion in native order; any supplied SortBy or SortOrder is rejected.
+      description: Returns the first eligible unwatched episode after each series' latest completion in native order with exact totals. UserId, when supplied, must equal the credential-bound profile; SeriesId is revalidated for profile visibility. Any supplied SortBy or SortOrder is rejected. General-list detail fields remain field-gated.
       operationId: listJellyfinNextUp
       parameters:
         - { $ref: "#/components/parameters/UserIdQuery" }
@@ -1172,6 +1381,10 @@ paths:
         - { $ref: "#/components/parameters/StartIndex" }
         - { $ref: "#/components/parameters/StateLimit" }
         - { $ref: "#/components/parameters/EnableUserData" }
+        - { $ref: "#/components/parameters/Fields" }
+        - { $ref: "#/components/parameters/EnableImages" }
+        - { $ref: "#/components/parameters/EnableImageTypes" }
+        - { $ref: "#/components/parameters/ImageTypeLimit" }
       responses:
         "200": { $ref: "#/components/responses/ItemQueryResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -1243,7 +1456,8 @@ paths:
   /Sessions:
     get:
       tags: [Sessions]
-      summary: List only compatibility sessions owned by the authenticated profile and account
+      summary: List profile-authorized compatibility sessions across the authenticated account's devices
+      description: Sessions are limited to the bound profile and native account, but may span their devices. Because Rivune exposes no remote-control administration, ControllableByUserId always produces a typed empty list.
       operationId: listJellyfinSessions
       parameters:
         - { $ref: "#/components/parameters/DeviceId" }
@@ -1290,8 +1504,8 @@ paths:
   /socket:
     get:
       tags: [Sessions]
-      summary: Upgrade to the bounded compatibility WebSocket
-      description: Sends only `ForceKeepAlive` JSON messages. Client messages are activity signals, limited to 4 KiB each and 1,024 per connection; the connection lifetime is at most two hours.
+      summary: Upgrade to the bounded profile-authorized compatibility WebSocket
+      description: Sends ForceKeepAlive, echoes authenticated KeepAlive frames, emits subscribed Sessions snapshots, and publishes profile-scoped UserDataChanged events. Clients may send KeepAlive and bounded SessionsStart/SessionsStop subscription controls. Frames are limited to 4 KiB and 1,024 per connection; outbound queues, subscription intervals, connection lifetime, and concurrent sockets are strictly bounded.
       operationId: openJellyfinSocket
       parameters:
         - { $ref: "#/components/parameters/DeviceId" }
@@ -1327,6 +1541,25 @@ paths:
         - { $ref: "#/components/parameters/StartIndex" }
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/IncludeItemTypes" }
+        - { $ref: "#/components/parameters/ExcludeItemTypes" }
+        - { $ref: "#/components/parameters/MediaTypes" }
+        - { $ref: "#/components/parameters/Filters" }
+        - { $ref: "#/components/parameters/IsPlayed" }
+        - { $ref: "#/components/parameters/IsFavorite" }
+        - { $ref: "#/components/parameters/IsResumable" }
+        - { $ref: "#/components/parameters/MinCommunityRating" }
+        - { $ref: "#/components/parameters/HasSubtitles" }
+        - { $ref: "#/components/parameters/Genres" }
+        - { $ref: "#/components/parameters/GenreIds" }
+        - { $ref: "#/components/parameters/Years" }
+        - { $ref: "#/components/parameters/OfficialRatings" }
+        - { $ref: "#/components/parameters/Tags" }
+        - { $ref: "#/components/parameters/PersonIds" }
+        - { $ref: "#/components/parameters/Studios" }
+        - { $ref: "#/components/parameters/HasTrailer" }
+        - { $ref: "#/components/parameters/EnableImages" }
+        - { $ref: "#/components/parameters/EnableImageTypes" }
+        - { $ref: "#/components/parameters/ImageTypeLimit" }
         - { $ref: "#/components/parameters/Fields" }
         - { $ref: "#/components/parameters/EnableUserData" }
       responses:
@@ -1460,10 +1693,10 @@ paths:
   /Studios:
     get:
       tags: [Library]
-      summary: Return a typed empty studio result because Rivune exposes no studio facet
+      summary: List deterministic studio facet items from authorized catalog metadata
       operationId: listJellyfinStudios
-      parameters: [{ $ref: "#/components/parameters/UserIdQuery" }, { $ref: "#/components/parameters/StartIndex" }, { $ref: "#/components/parameters/Limit" }]
-      responses: { "200": { $ref: "#/components/responses/EmptyItemQueryResult" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, default: { $ref: "#/components/responses/CompatError" } }
+      parameters: [{ $ref: "#/components/parameters/UserIdQuery" }, { $ref: "#/components/parameters/SearchTerm" }, { $ref: "#/components/parameters/ParentId" }, { $ref: "#/components/parameters/StartIndex" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/IncludeItemTypes" }, { $ref: "#/components/parameters/MediaTypes" }, { $ref: "#/components/parameters/IsMovie" }, { $ref: "#/components/parameters/IsSeries" }, { $ref: "#/components/parameters/IsAiring" }, { $ref: "#/components/parameters/IsSports" }, { $ref: "#/components/parameters/IsKids" }, { $ref: "#/components/parameters/IsNews" }]
+      responses: { "200": { $ref: "#/components/responses/ItemQueryResult" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, default: { $ref: "#/components/responses/CompatError" } }
   /Artists:
     get:
       tags: [Library]
@@ -1489,10 +1722,10 @@ paths:
     parameters: [{ $ref: "#/components/parameters/ItemIdPathNamed" }]
     get:
       tags: [Library]
-      summary: Return a typed empty media-segment result because skip segments are not projected
+      summary: Project authorized IntroDB episode markers, or explicitly report unavailable marker data
       operationId: listJellyfinMediaSegments
-      parameters: [{ $ref: "#/components/parameters/UserIdQuery" }]
-      responses: { "200": { $ref: "#/components/responses/MediaSegments" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, default: { $ref: "#/components/responses/CompatError" } }
+      parameters: [{ $ref: "#/components/parameters/IncludeSegmentTypes" }]
+      responses: { "200": { $ref: "#/components/responses/MediaSegments" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, "502": { $ref: "#/components/responses/BadGateway" }, default: { $ref: "#/components/responses/CompatError" } }
   /Items/{itemId}/ThemeMedia:
     parameters: [{ $ref: "#/components/parameters/ItemIdPathNamed" }]
     get:
@@ -1627,11 +1860,11 @@ paths:
     get:
       tags: [Playback]
       summary: Serve a scoped HLS child playlist, initialization segment, or media segment
-      description: The playlistId path value is the owner/item/source-bound PlaySessionId capability; segmentId is a separate opaque child capability. Neither is a general credential.
+      description: The playlistId path value is the owner/item/source-bound PlaySessionId capability; segmentId is a separate opaque child capability. Generated URLs also repeat PlaySessionId and api_key as the same scoped capability for Jellyfin client compatibility. Neither is a general credential.
       operationId: getJellyfinHLSSegment
       security: []
       x-rivune-path-capability: playlistId and segmentId
-      parameters: [{ $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/RivuneChildId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
+      parameters: [{ $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/StreamPlaySessionId" }, { $ref: "#/components/parameters/RivuneChildId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
       responses: { "200": { $ref: "#/components/responses/HLSAsset" }, "206": { $ref: "#/components/responses/PartialStream" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, "422": { $ref: "#/components/responses/UnprocessableEntity" }, "502": { $ref: "#/components/responses/BadGateway" }, default: { $ref: "#/components/responses/CompatError" } }
     head:
       tags: [Playback]
@@ -1639,7 +1872,7 @@ paths:
       operationId: headJellyfinHLSSegment
       security: []
       x-rivune-path-capability: playlistId and segmentId
-      parameters: [{ $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/RivuneChildId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
+      parameters: [{ $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/StreamPlaySessionId" }, { $ref: "#/components/parameters/RivuneChildId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
       responses: { "200": { $ref: "#/components/responses/HLSAssetHead" }, "206": { $ref: "#/components/responses/PartialStreamHead" }, "400": { $ref: "#/components/responses/HeadError" }, "401": { $ref: "#/components/responses/HeadUnauthorized" }, "404": { $ref: "#/components/responses/HeadError" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, default: { $ref: "#/components/responses/HeadError" } }
   /Videos/{id}/hls/{playlistId}/{segmentId}.{container}:
     parameters: [{ $ref: "#/components/parameters/ItemIdPath" }, { $ref: "#/components/parameters/HLSPlaylistIdPath" }, { $ref: "#/components/parameters/HLSSegmentIdPath" }, { $ref: "#/components/parameters/ContainerPath" }]
@@ -1649,7 +1882,7 @@ paths:
       operationId: getJellyfinLegacyHLSSegment
       security: []
       x-rivune-path-capability: playlistId and segmentId
-      parameters: [{ $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/RivuneChildId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
+      parameters: [{ $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/StreamPlaySessionId" }, { $ref: "#/components/parameters/RivuneChildId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
       responses: { "200": { $ref: "#/components/responses/HLSAsset" }, "206": { $ref: "#/components/responses/PartialStream" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, "422": { $ref: "#/components/responses/UnprocessableEntity" }, "502": { $ref: "#/components/responses/BadGateway" }, default: { $ref: "#/components/responses/CompatError" } }
     head:
       tags: [Playback]
@@ -1657,56 +1890,63 @@ paths:
       operationId: headJellyfinLegacyHLSSegment
       security: []
       x-rivune-path-capability: playlistId and segmentId
-      parameters: [{ $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/RivuneChildId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
+      parameters: [{ $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/StreamPlaySessionId" }, { $ref: "#/components/parameters/RivuneChildId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
       responses: { "200": { $ref: "#/components/responses/HLSAssetHead" }, "206": { $ref: "#/components/responses/PartialStreamHead" }, "400": { $ref: "#/components/responses/HeadError" }, "401": { $ref: "#/components/responses/HeadUnauthorized" }, "404": { $ref: "#/components/responses/HeadError" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, default: { $ref: "#/components/responses/HeadError" } }
   /Videos/{id}/{mediaSourceId}/Subtitles/{subtitleIndex}/Stream.{format}:
     parameters: [{ $ref: "#/components/parameters/ItemIdPath" }, { $ref: "#/components/parameters/MediaSourceIdPath" }, { $ref: "#/components/parameters/SubtitleIndexPath" }, { $ref: "#/components/parameters/SubtitleFormatPath" }]
     get:
       tags: [Playback]
       summary: Deliver one scoped external subtitle as WebVTT
-      description: Generated facade URLs carry only MediaSourceId, the scoped PlaySessionId capability, and optional StartTimeTicks; no profile or provider credential is embedded.
+      description: Generated facade URLs carry MediaSourceId plus the scoped PlaySessionId repeated as PlaySessionId and api_key, and optional StartTimeTicks; no profile or provider credential is embedded. A standard URL authenticated with a general credential may reuse only an existing owner-bound candidate when PlaySessionId is omitted.
       operationId: getJellyfinSubtitleStream
       security: *playbackSecurity
-      parameters: [{ $ref: "#/components/parameters/RequiredStreamPlaySessionId" }, { $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
+      parameters: [{ $ref: "#/components/parameters/StreamPlaySessionId" }, { $ref: "#/components/parameters/StreamMediaSourceId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
       responses: { "200": { $ref: "#/components/responses/Subtitle" }, "206": { $ref: "#/components/responses/PartialStream" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, "422": { $ref: "#/components/responses/UnprocessableEntity" }, "502": { $ref: "#/components/responses/BadGateway" }, default: { $ref: "#/components/responses/CompatError" } }
     head:
       tags: [Playback]
       summary: Inspect one scoped external WebVTT subtitle
       operationId: headJellyfinSubtitleStream
       security: *playbackSecurity
-      parameters: [{ $ref: "#/components/parameters/RequiredStreamPlaySessionId" }, { $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
+      parameters: [{ $ref: "#/components/parameters/StreamPlaySessionId" }, { $ref: "#/components/parameters/StreamMediaSourceId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
       responses: { "200": { $ref: "#/components/responses/SubtitleHead" }, "206": { $ref: "#/components/responses/PartialStreamHead" }, "401": { $ref: "#/components/responses/HeadUnauthorized" }, "404": { $ref: "#/components/responses/HeadError" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, default: { $ref: "#/components/responses/HeadError" } }
   /Videos/{id}/{mediaSourceId}/Subtitles/{subtitleIndex}/{startPositionTicks}/Stream.{format}:
     parameters: [{ $ref: "#/components/parameters/ItemIdPath" }, { $ref: "#/components/parameters/MediaSourceIdPath" }, { $ref: "#/components/parameters/SubtitleIndexPath" }, { $ref: "#/components/parameters/SubtitleStartTicksPath" }, { $ref: "#/components/parameters/SubtitleFormatPath" }]
     get:
       tags: [Playback]
-      summary: Deliver a time-offset scoped external subtitle as WebVTT
+      summary: Deliver one scoped external subtitle as WebVTT from an explicit start position
       operationId: getJellyfinSubtitleStreamAt
       security: *playbackSecurity
-      parameters: [{ $ref: "#/components/parameters/RequiredStreamPlaySessionId" }, { $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
+      parameters: [{ $ref: "#/components/parameters/StreamPlaySessionId" }, { $ref: "#/components/parameters/StreamMediaSourceId" }, { $ref: "#/components/parameters/Range" }]
       responses: { "200": { $ref: "#/components/responses/Subtitle" }, "206": { $ref: "#/components/responses/PartialStream" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, "422": { $ref: "#/components/responses/UnprocessableEntity" }, "502": { $ref: "#/components/responses/BadGateway" }, default: { $ref: "#/components/responses/CompatError" } }
     head:
       tags: [Playback]
-      summary: Inspect a time-offset scoped external WebVTT subtitle
+      summary: Inspect one scoped external WebVTT subtitle from an explicit start position
       operationId: headJellyfinSubtitleStreamAt
       security: *playbackSecurity
-      parameters: [{ $ref: "#/components/parameters/RequiredStreamPlaySessionId" }, { $ref: "#/components/parameters/RequiredStreamMediaSourceId" }, { $ref: "#/components/parameters/StreamStartTimeTicks" }, { $ref: "#/components/parameters/Range" }]
+      parameters: [{ $ref: "#/components/parameters/StreamPlaySessionId" }, { $ref: "#/components/parameters/StreamMediaSourceId" }, { $ref: "#/components/parameters/Range" }]
       responses: { "200": { $ref: "#/components/responses/SubtitleHead" }, "206": { $ref: "#/components/responses/PartialStreamHead" }, "401": { $ref: "#/components/responses/HeadUnauthorized" }, "404": { $ref: "#/components/responses/HeadError" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, default: { $ref: "#/components/responses/HeadError" } }
   /Items/{id}/Download:
     parameters: [{ $ref: "#/components/parameters/ItemIdPath" }]
     get:
       tags: [Playback]
-      summary: Negotiate and download an authorized item through the bounded delivery pipeline
-      description: Requires a general compatibility credential; PlaySessionId is removed before static negotiation and is never treated as a general credential.
+      summary: Download an authorized original media file
+      description: |
+        Requires a general profile-bound compatibility credential and re-evaluates item and provider access on every request.
+        Only a bounded, directly resolvable HTTP media-file source is eligible; provider pages, external-player links, playlists,
+        YouTube/torrent selectors and sources requiring conversion fail explicitly; extensionless HTTP sources must first resolve to
+        an inspected supported media container. The response is always
+        streamed in-process: provider URLs, request headers, credentials, and native playback tokens are never returned. A supplied
+        MediaSourceId must identify the item's primary source; it is never silently ignored. Range and HEAD preserve the resolved
+        source semantics, while Content-Disposition is generated from a sanitized catalog title rather than provider metadata.
       operationId: downloadJellyfinItem
-      parameters: [{ $ref: "#/components/parameters/UserIdQuery" }, { $ref: "#/components/parameters/MediaSourceId" }, { $ref: "#/components/parameters/StartTimeTicks" }, { $ref: "#/components/parameters/MaxStreamingBitrate" }, { $ref: "#/components/parameters/MaxAudioChannels" }, { $ref: "#/components/parameters/AudioStreamIndex" }, { $ref: "#/components/parameters/SubtitleStreamIndex" }, { $ref: "#/components/parameters/EnableDirectPlay" }, { $ref: "#/components/parameters/EnableDirectStream" }, { $ref: "#/components/parameters/EnableTranscoding" }, { $ref: "#/components/parameters/AllowVideoStreamCopy" }, { $ref: "#/components/parameters/AllowAudioStreamCopy" }, { $ref: "#/components/parameters/SegmentContainer" }, { $ref: "#/components/parameters/Range" }]
-      responses: { "200": { $ref: "#/components/responses/Stream" }, "206": { $ref: "#/components/responses/PartialStream" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, "422": { $ref: "#/components/responses/UnprocessableEntity" }, "502": { $ref: "#/components/responses/BadGateway" }, "503": { $ref: "#/components/responses/PlaybackUnavailable" }, "507": { $ref: "#/components/responses/InsufficientStorage" }, default: { $ref: "#/components/responses/CompatError" } }
+      parameters: [{ $ref: "#/components/parameters/UserIdQuery" }, { $ref: "#/components/parameters/MediaSourceId" }, { $ref: "#/components/parameters/Range" }]
+      responses: { "200": { $ref: "#/components/responses/Download" }, "206": { $ref: "#/components/responses/PartialDownload" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, "422": { $ref: "#/components/responses/UnprocessableEntity" }, "502": { $ref: "#/components/responses/BadGateway" }, "503": { $ref: "#/components/responses/PlaybackUnavailable" }, "507": { $ref: "#/components/responses/InsufficientStorage" }, default: { $ref: "#/components/responses/CompatError" } }
     head:
       tags: [Playback]
-      summary: Inspect an authorized item download
+      summary: Inspect an authorized original media-file download
       operationId: headJellyfinItemDownload
-      parameters: [{ $ref: "#/components/parameters/UserIdQuery" }, { $ref: "#/components/parameters/MediaSourceId" }, { $ref: "#/components/parameters/StartTimeTicks" }, { $ref: "#/components/parameters/MaxStreamingBitrate" }, { $ref: "#/components/parameters/MaxAudioChannels" }, { $ref: "#/components/parameters/AudioStreamIndex" }, { $ref: "#/components/parameters/SubtitleStreamIndex" }, { $ref: "#/components/parameters/EnableDirectPlay" }, { $ref: "#/components/parameters/EnableDirectStream" }, { $ref: "#/components/parameters/EnableTranscoding" }, { $ref: "#/components/parameters/AllowVideoStreamCopy" }, { $ref: "#/components/parameters/AllowAudioStreamCopy" }, { $ref: "#/components/parameters/SegmentContainer" }, { $ref: "#/components/parameters/Range" }]
-      responses: { "200": { $ref: "#/components/responses/StreamHead" }, "206": { $ref: "#/components/responses/PartialStreamHead" }, "400": { $ref: "#/components/responses/HeadError" }, "401": { $ref: "#/components/responses/HeadUnauthorized" }, "404": { $ref: "#/components/responses/HeadError" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, "422": { $ref: "#/components/responses/HeadError" }, "502": { $ref: "#/components/responses/HeadError" }, "503": { $ref: "#/components/responses/HeadPlaybackUnavailable" }, "507": { $ref: "#/components/responses/HeadError" }, default: { $ref: "#/components/responses/HeadError" } }
+      parameters: [{ $ref: "#/components/parameters/UserIdQuery" }, { $ref: "#/components/parameters/MediaSourceId" }, { $ref: "#/components/parameters/Range" }]
+      responses: { "200": { $ref: "#/components/responses/DownloadHead" }, "206": { $ref: "#/components/responses/PartialDownloadHead" }, "400": { $ref: "#/components/responses/HeadError" }, "401": { $ref: "#/components/responses/HeadUnauthorized" }, "404": { $ref: "#/components/responses/HeadError" }, "416": { $ref: "#/components/responses/RangeNotSatisfiable" }, "422": { $ref: "#/components/responses/HeadError" }, "502": { $ref: "#/components/responses/HeadError" }, "503": { $ref: "#/components/responses/HeadPlaybackUnavailable" }, "507": { $ref: "#/components/responses/HeadError" }, default: { $ref: "#/components/responses/HeadError" } }
   /UserItems/{itemId}/UserData:
     parameters: [{ $ref: "#/components/parameters/ItemIdPathNamed" }]
     get:
@@ -1741,24 +1981,24 @@ paths:
     parameters: [{ $ref: "#/components/parameters/ItemIdPathNamed" }]
     post:
       tags: [Watch state]
-      summary: Idempotently add an authorized item to the bound profile's library
+      summary: Idempotently favorite an authorized item for the bound profile
       operationId: favoriteJellyfinItem
       responses: { "200": { $ref: "#/components/responses/UserData" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, "409": { $ref: "#/components/responses/Conflict" }, "503": { $ref: "#/components/responses/ServiceUnavailable" }, default: { $ref: "#/components/responses/CompatError" } }
     delete:
       tags: [Watch state]
-      summary: Idempotently remove an authorized item from the bound profile's library
+      summary: Idempotently unfavorite an authorized item without changing library membership
       operationId: unfavoriteJellyfinItem
       responses: { "200": { $ref: "#/components/responses/UserData" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, "409": { $ref: "#/components/responses/Conflict" }, "503": { $ref: "#/components/responses/ServiceUnavailable" }, default: { $ref: "#/components/responses/CompatError" } }
   /Users/{userId}/FavoriteItems/{itemId}:
     parameters: [{ $ref: "#/components/parameters/UserIdPathNamed" }, { $ref: "#/components/parameters/ItemIdPathNamed" }]
     post:
       tags: [Watch state]
-      summary: Idempotently add a bound-profile item to the library
+      summary: Idempotently favorite a bound-profile item
       operationId: favoriteJellyfinUserItem
       responses: { "200": { $ref: "#/components/responses/UserData" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, "409": { $ref: "#/components/responses/Conflict" }, "503": { $ref: "#/components/responses/ServiceUnavailable" }, default: { $ref: "#/components/responses/CompatError" } }
     delete:
       tags: [Watch state]
-      summary: Idempotently remove a bound-profile item from the library
+      summary: Idempotently unfavorite a bound-profile item without changing library membership
       operationId: unfavoriteJellyfinUserItem
       responses: { "200": { $ref: "#/components/responses/UserData" }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/NotFound" }, "409": { $ref: "#/components/responses/Conflict" }, "503": { $ref: "#/components/responses/ServiceUnavailable" }, default: { $ref: "#/components/responses/CompatError" } }
 components:
@@ -1817,11 +2057,6 @@ components:
       description: >
         Short-lived owner/item/source-bound stream capability. Missing or unusable
         credentials may fall back to this capability; a valid foreign credential may not.
-    ArtworkTagQuery:
-      type: apiKey
-      in: query
-      name: tag
-      description: Opaque 64-hex artwork capability returned in ImageTags or BackdropImageTags.
   parameters:
     ClientAuthorization:
       name: Authorization
@@ -1867,6 +2102,18 @@ components:
       required: true
       description: Canonical or compact Rivune item UUID.
       schema: { $ref: "#/components/schemas/UUIDInput" }
+    TrickplayWidthPath:
+      name: width
+      in: path
+      required: true
+      description: Fixed thumbnail width from the advertised generated trickplay profile.
+      schema: { type: integer, format: int32, minimum: 1, maximum: 1024 }
+    TrickplayIndexPath:
+      name: index
+      in: path
+      required: true
+      description: Zero-based generated tile-sheet index.
+      schema: { type: integer, format: int32, minimum: 0, maximum: 1000000 }
     SeriesIdPath:
       name: seriesId
       in: path
@@ -1874,7 +2121,7 @@ components:
       description: Canonical or compact series UUID.
       schema: { $ref: "#/components/schemas/UUIDInput" }
     DisplayPreferenceIdPath:
-      name: id
+      name: displayPreferencesId
       in: path
       required: true
       schema: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._-]+$" }
@@ -1882,7 +2129,7 @@ components:
       name: type
       in: path
       required: true
-      schema: { type: string, enum: [Primary, Backdrop, Thumb] }
+      schema: { type: string, enum: [Primary, Backdrop, Logo, Thumb, Banner, Art] }
     ImageIndexPath:
       name: index
       in: path
@@ -1919,13 +2166,19 @@ components:
       name: Limit
       in: query
       required: false
-      schema: { type: integer, minimum: 0, maximum: 200, default: 100, description: Zero requests a count-only result with an empty Items array. }
+      schema: { type: integer, minimum: 0, maximum: 1008, default: 100, description: Values through 1008 are accepted for pinned clients. General catalogue pages remain capped at 200; Items/Latest fulfills the requested window through bounded internal pages of at most 200. Zero returns an empty result. }
     StateLimit:
       name: Limit
       in: query
       required: false
       description: Production watch-state continuation pages are capped at 100 even though general catalog pages permit 200.
       schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+    SeasonId:
+      name: SeasonId
+      in: query
+      required: false
+      description: Optional authorized season selector; it must belong to the series path selector.
+      schema: { $ref: "#/components/schemas/UUIDInput" }
     Recursive:
       name: Recursive
       in: query
@@ -1935,7 +2188,7 @@ components:
       name: IncludeItemTypes
       in: query
       required: false
-      description: Comma-separated, at most 100 values, each at most 256 bytes. BoxSet selects only the authorized Collections root listing; standard Jellyfin kinds that Rivune does not project are ignored.
+      description: Comma-separated, at most 100 values, each at most 256 bytes. Video selects canonical generic-video rows; when none are materialized it returns a typed empty result. BoxSet selects only the authorized Collections root listing; other valid kinds outside Rivune's projected domains contribute no results and never widen the filter.
       schema:
         type: array
         maxItems: 100
@@ -1944,33 +2197,156 @@ components:
           enum: [AggregateFolder, Audio, AudioBook, BasePluginFolder, Book, BoxSet, Channel, ChannelFolderItem, CollectionFolder, Episode, Folder, Genre, LiveTvChannel, LiveTvProgram, ManualPlaylistsFolder, Movie, MusicAlbum, MusicArtist, MusicGenre, MusicVideo, Person, Photo, PhotoAlbum, Playlist, Program, Recording, Season, Series, Studio, Trailer, TvChannel, TvProgram, UserRootFolder, UserView, Video, Year]
       style: form
       explode: false
+    ExcludeItemTypes:
+      name: ExcludeItemTypes
+      in: query
+      required: false
+      schema: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 256 } }
+      style: form
+      explode: false
+    Filters:
+      name: Filters
+      in: query
+      required: false
+      schema: { type: array, maxItems: 100, items: { type: string, enum: [IsPlayed, IsUnplayed, IsFavorite, IsResumable, IsFolder, IsNotFolder] } }
+      style: form
+      explode: false
+    IsPlayed:
+      name: IsPlayed
+      in: query
+      required: false
+      schema: { type: boolean }
+    IsFavorite:
+      name: IsFavorite
+      in: query
+      required: false
+      schema: { type: boolean }
+    IsResumable:
+      name: IsResumable
+      in: query
+      required: false
+      schema: { type: boolean }
+    MinCommunityRating:
+      name: MinCommunityRating
+      in: query
+      required: false
+      description: Inclusive minimum over the authorized materialized community rating. Missing or malformed ratings do not match.
+      schema: { type: number, format: double, minimum: 0, maximum: 10 }
+    HasSubtitles:
+      name: HasSubtitles
+      in: query
+      required: false
+      description: Matches the bounded materialized subtitle-presence facet; missing facet data is treated as false.
+      schema: { type: boolean }
+    Genres:
+      name: Genres
+      in: query
+      required: false
+      description: Pipe-delimited according to the Jellyfin 10.11.11 string-name collection binder; at most 100 values, each at most 256 bytes.
+      schema: { type: array, maxItems: 100, items: { type: string, maxLength: 256 } }
+      style: pipeDelimited
+      explode: false
+    GenreIds:
+      name: GenreIds
+      in: query
+      required: false
+      schema: { type: array, maxItems: 100, items: { type: string, maxLength: 256 } }
+      style: form
+      explode: false
+    Years:
+      name: Years
+      in: query
+      required: false
+      schema: { type: array, maxItems: 100, items: { type: integer, minimum: 1, maximum: 9999 } }
+      style: form
+      explode: false
+    OfficialRatings:
+      name: OfficialRatings
+      in: query
+      required: false
+      description: Pipe-delimited according to the Jellyfin 10.11.11 string-name collection binder; at most 100 values, each at most 256 bytes.
+      schema: { type: array, maxItems: 100, items: { type: string, maxLength: 256 } }
+      style: pipeDelimited
+      explode: false
+    Tags:
+      name: Tags
+      in: query
+      required: false
+      description: Pipe-delimited according to the Jellyfin 10.11.11 string-name collection binder; at most 100 values, each at most 256 bytes.
+      schema: { type: array, maxItems: 100, items: { type: string, maxLength: 256 } }
+      style: pipeDelimited
+      explode: false
+    PersonIds:
+      name: PersonIds
+      in: query
+      required: false
+      schema: { type: array, maxItems: 100, items: { type: string, maxLength: 256 } }
+      style: form
+      explode: false
+    Studios:
+      name: Studios
+      in: query
+      required: false
+      description: Pipe-delimited studio names matched case-insensitively against authorized canonical metadata.
+      schema: { type: array, maxItems: 100, items: { type: string, maxLength: 256 } }
+      style: pipeDelimited
+      explode: false
+    HasTrailer:
+      name: HasTrailer
+      in: query
+      required: false
+      description: Accepted fail-closed; current materialized catalog data has no trailer-presence facet, so a supplied filter returns no items.
+      schema: { type: boolean }
+    EnableImages:
+      name: EnableImages
+      in: query
+      required: false
+      schema: { type: boolean, default: true }
+    EnableImageTypes:
+      name: EnableImageTypes
+      in: query
+      required: false
+      schema: { type: array, maxItems: 100, items: { type: string, enum: [Primary, Backdrop, Thumb, Logo, Banner, Art] } }
+      style: form
+      explode: false
+    ImageTypeLimit:
+      name: ImageTypeLimit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0, maximum: 100, default: 1 }
+    EnableTotalRecordCount:
+      name: EnableTotalRecordCount
+      in: query
+      required: false
+      schema: { type: boolean, default: true }
     Fields:
       name: Fields
       in: query
       required: false
-      description: Accepted bounded comma-separated compatibility hints; unsupported fields are ignored.
+      description: Bounded comma-separated projected fields. Unsupported values are rejected rather than silently ignored.
       schema:
         type: array
         maxItems: 100
-        items: { type: string, minLength: 1, maxLength: 256 }
+        items: { type: string, enum: [DisplayPreferencesId, Etag, Genres, MediaSources, MediaStreams, OriginalTitle, Overview, ParentId, Path, People, PrimaryImageAspectRatio, ProviderIds, SortName, Studios, Taglines] }
       style: form
       explode: false
     SortBy:
       name: SortBy
       in: query
       required: false
-      description: Accepted bounded comma-separated compatibility hints. SortName or Name alone selects title order; other standard Jellyfin sort hints fall back to deterministic native catalog order.
+      description: Comma-separated Name or SortName keys select case-insensitive title order with canonical item ID as a stable final tie-breaker.
       schema:
         type: array
         maxItems: 100
-        items: { type: string, minLength: 1, maxLength: 256 }
+        items: { type: string, enum: [Name, SortName] }
       style: form
       explode: false
     SortOrder:
       name: SortOrder
       in: query
       required: false
-      schema: { type: string, enum: [Ascending, Descending], default: Ascending }
+      description: Valid only when SortBy is supplied.
+      schema: { type: string, enum: [Ascending, Descending] }
     EnableUserData:
       name: EnableUserData
       in: query
@@ -2003,8 +2379,44 @@ components:
       name: tag
       in: query
       required: false
-      description: Registered 64-hex artwork capability; accepted without a compatibility token.
+      description: Optional registered 64-hex cache selector; it must match the authenticated profile's requested item and image type and never replaces authentication.
       schema: { type: string, pattern: "^[0-9a-f]{64}$" }
+    ImageWidth:
+      name: width
+      in: query
+      required: false
+      description: Exact output width while preserving aspect ratio; mutually exclusive with max and fill dimensions.
+      schema: { type: integer, minimum: 1, maximum: 16384 }
+    ImageMaxWidth:
+      name: maxWidth
+      in: query
+      required: false
+      description: Fit ceiling that never upscales; may be paired with maxHeight.
+      schema: { type: integer, minimum: 1, maximum: 16384 }
+    ImageMaxHeight:
+      name: maxHeight
+      in: query
+      required: false
+      description: Fit ceiling that never upscales; may be paired with maxWidth.
+      schema: { type: integer, minimum: 1, maximum: 16384 }
+    ImageFillWidth:
+      name: fillWidth
+      in: query
+      required: false
+      description: Exact output width. Alone it preserves aspect ratio; paired with fillHeight it center-crops to the requested box.
+      schema: { type: integer, minimum: 1, maximum: 16384 }
+    ImageFillHeight:
+      name: fillHeight
+      in: query
+      required: false
+      description: Exact output height. Alone it preserves aspect ratio; paired with fillWidth it center-crops to the requested box.
+      schema: { type: integer, minimum: 1, maximum: 16384 }
+    ImageQuality:
+      name: quality
+      in: query
+      required: false
+      description: Bounded JPEG quality or PNG compression profile. Transforming WebP is explicitly rejected.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 90 }
     Range:
       name: Range
       in: header
@@ -2026,6 +2438,21 @@ components:
       in: query
       required: false
       schema: { type: string, minLength: 1, maxLength: 128 }
+    TrickplayMediaSourceId:
+      name: mediaSourceId
+      in: query
+      required: false
+      description: Optional canonical media-version UUID advertised by item trickplay metadata; alternate UUIDs are not found.
+      schema: { $ref: "#/components/schemas/UUIDInput" }
+    IncludeSegmentTypes:
+      name: includeSegmentTypes
+      in: query
+      required: false
+      description: Jellyfin 10.11.11 segment filter. Repeated and comma-delimited values are accepted and applied after a real marker lookup.
+      schema:
+        type: array
+        maxItems: 6
+        items: { type: string, enum: [Unknown, Commercial, Preview, Recap, Outro, Intro] }
     PlaySessionId:
       name: PlaySessionId
       in: query
@@ -2043,12 +2470,6 @@ components:
       required: false
       description: Required for negotiated delivery unless Static=true; adapter-generated source selectors are deterministic UUIDs.
       schema: { type: string, minLength: 1, maxLength: 128 }
-    RequiredStreamPlaySessionId:
-      name: PlaySessionId
-      in: query
-      required: true
-      description: Scoped owner/item/source capability; generated values use `rvp_` plus 192 bits.
-      schema: { type: string, minLength: 16, maxLength: 128 }
     RequiredStreamMediaSourceId:
       name: MediaSourceId
       in: query
@@ -2348,9 +2769,15 @@ components:
     CacheControlImmutable:
       description: Registered artwork bytes are immutable for one year.
       schema: { type: string, const: "public, max-age=31536000, immutable" }
+    CacheControlPrivateNoCache:
+      description: Generated trickplay bytes are private and must be revalidated before reuse.
+      schema: { type: string, const: "private, no-cache" }
     ContentLength:
       description: Byte length when known.
       schema: { type: integer, minimum: 0 }
+    ContentDisposition:
+      description: Attachment disposition with a bounded catalog-derived filename; provider metadata and path/control characters are excluded.
+      schema: { type: string, pattern: '^attachment;' }
     Location:
       description: Same-origin capability-scoped HLS master playlist target; it never carries a global profile credential.
       schema: { type: string, minLength: 1, maxLength: 2048 }
@@ -2385,7 +2812,9 @@ components:
         application/json:
           schema: { type: string, minLength: 1, maxLength: 80 }
     SystemEndpoint:
-      description: Conservative endpoint classification; neither local nor in-network is claimed.
+      description: Bounded endpoint classification derived from the trusted canonical client address.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/CacheControlNoStore" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/SystemEndpointInfo" }
@@ -2439,7 +2868,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/BrandingConfiguration" }
     DisplayPreferences:
-      description: Minimal stable display defaults.
+      description: Durable preferences isolated by native account, bound profile, client, and display-preference ID.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/DisplayPreferencesDto" }
@@ -2456,12 +2885,12 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/BaseItemQueryResult" }
     LatestItems:
-      description: Bounded latest media, or configured folder cards for an authorized named collection view.
+      description: Bounded latest media, or configured folder cards for an authorized named collection view; pinned-client windows through 1008 are assembled from internal pages of at most 200.
       content:
         application/json:
           schema:
             type: array
-            maxItems: 200
+            maxItems: 1008
             items: { $ref: "#/components/schemas/BaseItemDto" }
     Item:
       description: One authorized catalog item.
@@ -2473,8 +2902,16 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/SearchHintResult" }
+    ImageInfos:
+      description: Projected image variants derived exclusively from opaque tags that still resolve to registered local cache records.
+      content:
+        application/json:
+          schema:
+            type: array
+            maxItems: 6
+            items: { $ref: "#/components/schemas/ImageInfo" }
     Image:
-      description: Original registered artwork bytes; never an upstream redirect.
+      description: Registered original or deterministic JPEG/PNG derivative; never an upstream redirect.
       headers:
         Content-Length: { $ref: "#/components/headers/ContentLength" }
         ETag: { $ref: "#/components/headers/ETag" }
@@ -2489,6 +2926,50 @@ components:
         Content-Length: { $ref: "#/components/headers/ContentLength" }
         ETag: { $ref: "#/components/headers/ETag" }
         Cache-Control: { $ref: "#/components/headers/CacheControlImmutable" }
+    ImageNotModified:
+      description: The supplied If-None-Match weakly matches the current original or deterministic transform ETag; no body is returned and the cached object is not opened, fetched, transformed, or touched.
+      headers:
+        ETag: { $ref: "#/components/headers/ETag" }
+        Cache-Control: { $ref: "#/components/headers/CacheControlImmutable" }
+    TrickplayImage:
+      description: Complete deterministic trickplay JPEG sheet generated from an authorized playable source.
+      headers:
+        Content-Length: { $ref: "#/components/headers/ContentLength" }
+        ETag: { $ref: "#/components/headers/ETag" }
+        Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+        Cache-Control: { $ref: "#/components/headers/CacheControlPrivateNoCache" }
+      content:
+        image/jpeg: { schema: { type: string, format: binary } }
+    PartialTrickplayImage:
+      description: Satisfiable byte range from a deterministic trickplay JPEG sheet.
+      headers:
+        Content-Length: { $ref: "#/components/headers/ContentLength" }
+        Content-Range: { $ref: "#/components/headers/ContentRange" }
+        ETag: { $ref: "#/components/headers/ETag" }
+        Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+        Cache-Control: { $ref: "#/components/headers/CacheControlPrivateNoCache" }
+      content:
+        image/jpeg: { schema: { type: string, format: binary } }
+    TrickplayImageHead:
+      description: Complete trickplay JPEG headers with no body.
+      headers:
+        Content-Length: { $ref: "#/components/headers/ContentLength" }
+        ETag: { $ref: "#/components/headers/ETag" }
+        Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+        Cache-Control: { $ref: "#/components/headers/CacheControlPrivateNoCache" }
+    PartialTrickplayImageHead:
+      description: Partial trickplay JPEG headers with no body.
+      headers:
+        Content-Length: { $ref: "#/components/headers/ContentLength" }
+        Content-Range: { $ref: "#/components/headers/ContentRange" }
+        ETag: { $ref: "#/components/headers/ETag" }
+        Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+        Cache-Control: { $ref: "#/components/headers/CacheControlPrivateNoCache" }
+    TrickplayImageNotModified:
+      description: The supplied conditional validator matches the generated trickplay JPEG; no body is returned.
+      headers:
+        ETag: { $ref: "#/components/headers/ETag" }
+        Cache-Control: { $ref: "#/components/headers/CacheControlPrivateNoCache" }
     PlaybackInfo:
       description: Opaque, profile/session/device-bound playback negotiation.
       content:
@@ -2526,6 +3007,46 @@ components:
         text/vtt: { schema: { type: string } }
         application/x-subrip: { schema: { type: string } }
         text/plain: { schema: { type: string } }
+    Download:
+      description: Complete bytes from one authorized, directly resolvable original media file.
+      headers:
+        Content-Disposition: { $ref: "#/components/headers/ContentDisposition" }
+        Content-Length: { $ref: "#/components/headers/ContentLength" }
+        Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+        Cache-Control: { $ref: "#/components/headers/CacheControlNoStore" }
+      content:
+        application/octet-stream: { schema: { type: string, format: binary } }
+        video/mp4: { schema: { type: string, format: binary } }
+        video/x-matroska: { schema: { type: string, format: binary } }
+        video/webm: { schema: { type: string, format: binary } }
+    PartialDownload:
+      description: Satisfiable byte range from one authorized original media file.
+      headers:
+        Content-Disposition: { $ref: "#/components/headers/ContentDisposition" }
+        Content-Length: { $ref: "#/components/headers/ContentLength" }
+        Content-Range: { $ref: "#/components/headers/ContentRange" }
+        Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+        Cache-Control: { $ref: "#/components/headers/CacheControlNoStore" }
+      content:
+        application/octet-stream: { schema: { type: string, format: binary } }
+        video/mp4: { schema: { type: string, format: binary } }
+        video/x-matroska: { schema: { type: string, format: binary } }
+        video/webm: { schema: { type: string, format: binary } }
+    DownloadHead:
+      description: Complete original media-file headers with no body.
+      headers:
+        Content-Disposition: { $ref: "#/components/headers/ContentDisposition" }
+        Content-Length: { $ref: "#/components/headers/ContentLength" }
+        Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+        Cache-Control: { $ref: "#/components/headers/CacheControlNoStore" }
+    PartialDownloadHead:
+      description: Partial original media-file headers with no body.
+      headers:
+        Content-Disposition: { $ref: "#/components/headers/ContentDisposition" }
+        Content-Length: { $ref: "#/components/headers/ContentLength" }
+        Content-Range: { $ref: "#/components/headers/ContentRange" }
+        Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+        Cache-Control: { $ref: "#/components/headers/CacheControlNoStore" }
     StreamHead:
       description: Complete stream headers with no body.
       headers:
@@ -2584,6 +3105,25 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/CompatErrorResponse" }
+    ImageBadRequest:
+      description: Invalid bounded query or a cached transformation that the source format or dimensions cannot satisfy.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CompatErrorResponse" }
+        text/plain:
+          schema: { type: string }
+    ImageNotFound:
+      description: Unknown, inaccessible, removed, or unregistered artwork.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CompatErrorResponse" }
+        text/plain:
+          schema: { type: string }
+    ImageBadGateway:
+      description: Registered artwork could not be materialized from the bounded cache pipeline.
+      content:
+        text/plain:
+          schema: { type: string }
     UnprocessableEntity:
       description: Device profile or selected source is unsupported.
       content:
@@ -2651,8 +3191,9 @@ components:
         Content-Length: { $ref: "#/components/headers/ContentLength" }
         Cache-Control: { schema: { type: string, const: "private, no-cache" } }
     WebSocketUpgrade:
-      description: WebSocket protocol switch with no HTTP response body, followed by bounded JSON keepalive frames.
+      description: WebSocket protocol switch with no HTTP response body, followed by bounded profile-authorized realtime frames.
       x-websocket-message-schema: { $ref: "#/components/schemas/WebSocketMessageDto" }
+      x-websocket-input-schema: { $ref: "#/components/schemas/WebSocketInputDto" }
     GroupingOptions:
       description: Typed empty list; Rivune exposes no grouping plugins or special views.
       content:
@@ -2678,7 +3219,7 @@ components:
         application/json:
           schema: { type: array, maxItems: 20, items: { $ref: "#/components/schemas/RecommendationDto" } }
     MediaSegments:
-      description: Typed empty media-segment result; skip-marker plugins are not implemented.
+      description: Authorized real IntroDB segments. A successful empty result means a requested type was absent from a known non-empty marker set; unavailable data is 404.
       content: { application/json: { schema: { $ref: "#/components/schemas/MediaSegmentQueryResult" } } }
     AllThemeMedia:
       description: Three non-null typed-empty theme media groups for the authorized owner item.
@@ -2732,7 +3273,7 @@ components:
       description: Request body exceeds the route's fixed byte budget.
       content: { application/json: { schema: { $ref: "#/components/schemas/CompatErrorResponse" } } }
     TooManyRequests:
-      description: The bounded per-owner or global compatibility registry is full.
+      description: A bounded per-owner compatibility resource limit has been reached.
       content: { application/json: { schema: { $ref: "#/components/schemas/CompatErrorResponse" } } }
   schemas:
     UUID:
@@ -2772,8 +3313,8 @@ components:
       additionalProperties: false
       required: [IsLocal, IsInNetwork]
       properties:
-        IsLocal: { type: boolean, const: false }
-        IsInNetwork: { type: boolean, const: false }
+        IsLocal: { type: boolean, description: True only when the trusted canonical client address is loopback. }
+        IsInNetwork: { type: boolean, description: True only for a trusted loopback or explicit private-network client address. }
     AuthenticateByName:
       type: object
       additionalProperties: false
@@ -2922,6 +3463,7 @@ components:
         RemoteEndPoint: { type: string }
         LastActivityDate: { type: string, format: date-time }
         LastPlaybackCheckIn: { type: string, format: date-time }
+        PlayState: { $ref: "#/components/schemas/PlayerStateInfo" }
         NowPlayingItem: { $ref: "#/components/schemas/BaseItemDto" }
         NowViewingItem: { $ref: "#/components/schemas/BaseItemDto" }
         Capabilities: { $ref: "#/components/schemas/ClientCapabilitiesDto" }
@@ -2933,6 +3475,30 @@ components:
         AdditionalUsers: { type: array, items: { $ref: "#/components/schemas/SessionUserInfoDto" } }
         NowPlayingQueue: { type: array, items: { $ref: "#/components/schemas/QueueItemDto" } }
         NowPlayingQueueFullItems: { type: array, items: { $ref: "#/components/schemas/BaseItemDto" } }
+    PlayerStateInfo:
+      type: object
+      additionalProperties: false
+      required: [CanSeek, IsPaused, IsMuted]
+      properties:
+        PositionTicks: { type: integer, format: int64, minimum: 0 }
+        CanSeek: { type: boolean }
+        IsPaused: { type: boolean }
+        IsMuted: { type: boolean }
+        AudioStreamIndex: { type: integer, minimum: 0, maximum: 2047 }
+        SubtitleStreamIndex: { type: integer, minimum: -1, maximum: 2047 }
+        MediaSourceId: { type: string, minLength: 1, maxLength: 256 }
+        PlayMethod: { type: string, enum: [DirectPlay, DirectStream, Transcode] }
+    UserDataChangeInfo:
+      type: object
+      additionalProperties: false
+      required: [UserId, UserDataList]
+      properties:
+        UserId: { $ref: "#/components/schemas/UUID" }
+        UserDataList:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items: { $ref: "#/components/schemas/UserItemDataDto" }
     ClientCapabilitiesDto:
       type: object
       additionalProperties: false
@@ -2991,7 +3557,7 @@ components:
     BaseItemDto:
       type: object
       additionalProperties: false
-      required: [Id, ServerId, Name, Type, IsFolder, IsPlayable, CanDownload, Genres, ImageTags, BackdropImageTags]
+      required: [Id, ServerId, Name, Type, IsFolder, IsPlayable, CanDownload, ImageTags, BackdropImageTags]
       properties:
         Id: { $ref: "#/components/schemas/UUID" }
         ServerId: { $ref: "#/components/schemas/UUID" }
@@ -3004,7 +3570,7 @@ components:
         LocationType: { type: string, enum: [FileSystem] }
         SortName: { type: string }
         OriginalTitle: { type: string }
-        Type: { type: string, enum: [CollectionFolder, Folder, BoxSet, Movie, Series, Season, Episode, Genre, Person] }
+        Type: { type: string, enum: [CollectionFolder, Folder, BoxSet, Movie, Series, Season, Episode, Video, Genre, Person, Studio] }
         MediaType: { type: string, enum: [Video, Unknown] }
         IsFolder: { type: boolean }
         IsPlayable: { type: boolean }
@@ -3033,6 +3599,10 @@ components:
         Genres:
           type: array
           items: { type: string }
+        Studios:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/NameGuidPair" }
         CommunityRating: { type: number, format: float }
         PrimaryImageAspectRatio:
           type: number
@@ -3068,6 +3638,16 @@ components:
         Role: { type: string }
         Type: { type: string, minLength: 1 }
         PrimaryImageTag: { type: string, pattern: "^[0-9a-f]{64}$" }
+    ImageInfo:
+      type: object
+      additionalProperties: false
+      required: [ImageType, ImageIndex, ImageTag]
+      properties:
+        ImageType: { type: string, enum: [Primary, Backdrop, Logo, Thumb, Banner, Art] }
+        ImageIndex: { type: integer, const: 0 }
+        ImageTag: { type: string, pattern: "^[0-9a-f]{64}$" }
+        Width: { type: integer, minimum: 1, maximum: 16384 }
+        Height: { type: integer, minimum: 1, maximum: 16384 }
     UserItemDataDto:
       type: object
       additionalProperties: false
@@ -3078,7 +3658,7 @@ components:
         UnplayedItemCount: { type: integer, minimum: 0 }
         PlaybackPositionTicks: { type: integer, format: int64, minimum: 0 }
         PlayCount: { type: integer, enum: [0, 1] }
-        IsFavorite: { type: boolean, description: Rivune library membership. }
+        IsFavorite: { type: boolean, description: Active profile favorite state. }
         Likes: { type: boolean }
         LastPlayedDate: { type: string, format: date-time }
         Played: { type: boolean }
@@ -3088,18 +3668,12 @@ components:
       type: object
       additionalProperties: false
       properties:
-        Rating: { type: [number, "null"], description: Accepted finite compatibility field; does not mutate state. }
-        PlayedPercentage: { type: [number, "null"], minimum: 0, maximum: 100, description: Validated compatibility field; does not mutate state. }
-        UnplayedItemCount: { type: [integer, "null"], minimum: 0, description: Validated compatibility field; does not mutate state. }
         PlaybackPositionTicks: { type: [integer, "null"], format: int64, minimum: 0, maximum: 21474836470000000 }
-        PlayCount: { type: [integer, "null"], minimum: 0, description: Validated compatibility field; does not mutate state. }
         IsFavorite: { type: [boolean, "null"] }
-        Likes: { type: [boolean, "null"], description: Accepted compatibility field; does not mutate state. }
-        LastPlayedDate: { type: [string, "null"], description: Accepted compatibility field; does not mutate state. }
         Played: { type: [boolean, "null"] }
-        Key: { oneOf: [{ $ref: "#/components/schemas/UUIDInput" }, { type: "null" }], description: "When present, must identify the path item; does not mutate state." }
-        ItemId: { oneOf: [{ $ref: "#/components/schemas/UUIDInput" }, { type: "null" }], description: "When present, must identify the path item; does not mutate state." }
-      description: Body is limited to 16 KiB. Omitted and null fields both mean unchanged; an empty object is valid.
+        Key: { oneOf: [{ $ref: "#/components/schemas/UUIDInput" }, { type: "null" }], description: "When present, must identify the path item." }
+        ItemId: { oneOf: [{ $ref: "#/components/schemas/UUIDInput" }, { type: "null" }], description: "When present, must identify the path item." }
+      description: Body is limited to 16 KiB. Omitted and null fields mean unchanged; an empty object is valid. Unsupported Jellyfin user-data fields are rejected rather than silently ignored.
     SearchHintDto:
       type: object
       additionalProperties: false
@@ -3269,18 +3843,46 @@ components:
           anyOf:
             - { type: integer, format: int64, const: 0 }
             - { type: integer, format: int64, minimum: 64000, maximum: 2147483647, description: Client ceiling; values above Rivune's playback ceiling are accepted and safely clamped. }
+        CodecProfiles:
+          type: array
+          maxItems: 256
+          items: { $ref: "#/components/schemas/CodecProfile" }
+        ContainerProfiles:
+          type: array
+          maxItems: 0
+          items: { type: object, additionalProperties: true }
+          description: Streamyfin sends an empty array; non-empty generic container rules are not implemented and are rejected.
         DirectPlayProfiles:
           type: array
-          maxItems: 32
+          maxItems: 256
           items: { $ref: "#/components/schemas/DirectPlayProfile" }
         TranscodingProfiles:
           type: array
-          maxItems: 32
+          maxItems: 256
           items: { $ref: "#/components/schemas/TranscodingProfile" }
         SubtitleProfiles:
           type: array
-          maxItems: 32
+          maxItems: 256
           items: { $ref: "#/components/schemas/SubtitleProfile" }
+    CodecProfile:
+      type: object
+      additionalProperties: true
+      properties:
+        Type: { type: string, maxLength: 64, description: Video and Audio are recognized case-insensitively. }
+        Codec: { type: string, maxLength: 2048 }
+        Conditions:
+          type: array
+          maxItems: 32
+          items: { $ref: "#/components/schemas/ProfileCondition" }
+    ProfileCondition:
+      type: object
+      additionalProperties: true
+      properties:
+        Condition: { type: string, maxLength: 64, description: LessThanEqual and NotEquals are recognized case-insensitively. }
+        Property: { type: string, maxLength: 64, description: VideoLevel and VideoRangeType are recognized case-insensitively. }
+        Value: { type: string, maxLength: 64 }
+        IsRequired: { type: boolean }
+      description: Required conditions whose inspected property is unknown prevent direct playback; optional unknown properties remain neutral.
     DirectPlayProfile:
       type: object
       additionalProperties: true
@@ -3299,6 +3901,7 @@ components:
         AudioCodec: { type: string, maxLength: 2048 }
         Protocol: { type: string, maxLength: 64 }
         Context: { type: string, maxLength: 64 }
+        MaxAudioChannels: { type: string, pattern: "^(?:[1-9]|[12][0-9]|3[0-2])$", maxLength: 2 }
         EnableMpegtsM2TsMode: { type: boolean }
         BreakOnNonKeyFrames: { type: boolean }
     SubtitleProfile:
@@ -3318,10 +3921,13 @@ components:
         MediaSourceId: { type: string, minLength: 1, maxLength: 256 }
         PlaySessionId: { type: string, minLength: 1, maxLength: 256 }
         PositionTicks: { type: integer, format: int64, minimum: 0 }
+        AudioStreamIndex: { type: integer, minimum: 0, maximum: 2047 }
+        SubtitleStreamIndex: { type: integer, minimum: -1, maximum: 2047 }
+        CanSeek: { type: boolean }
         PlaybackStartTimeTicks: { type: integer, format: int64, minimum: 0 }
         IsPaused: { type: boolean }
         IsMuted: { type: boolean }
-        PlayMethod: { type: string }
+        PlayMethod: { type: string, enum: [DirectPlay, DirectStream, Transcode] }
       description: Body is limited to 1 MiB; profile/item/source/session ownership is revalidated.
     PlaybackPing:
       type: object
@@ -3365,15 +3971,57 @@ components:
         SortOrder: { type: string, maxLength: 128 }
         ShowSidebar: { type: boolean }
         Client: { type: string, maxLength: 64 }
-      description: Missing fields take stable zero defaults; the server canonicalizes Id and Client from the selectors before storing.
+      description: Missing fields take stable zero defaults; Id and Client are canonicalized from the selectors. The JSON body is limited to 16 KiB and preferences are stored without changing global Rivune behavior.
     WebSocketMessageDto:
-      type: object
-      additionalProperties: false
-      required: [MessageType]
-      properties:
-        MessageType: { type: string, const: ForceKeepAlive }
-        MessageId: { type: string }
-        Data: { type: integer, const: 60 }
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [MessageType, MessageId, Data]
+          properties:
+            MessageType: { type: string, const: ForceKeepAlive }
+            MessageId: { $ref: "#/components/schemas/UUID" }
+            Data: { type: integer, const: 60 }
+        - type: object
+          additionalProperties: false
+          required: [MessageType, MessageId]
+          properties:
+            MessageType: { type: string, const: KeepAlive }
+            MessageId: { $ref: "#/components/schemas/UUID" }
+        - type: object
+          additionalProperties: false
+          required: [MessageType, MessageId, Data]
+          properties:
+            MessageType: { type: string, const: Sessions }
+            MessageId: { $ref: "#/components/schemas/UUID" }
+            Data: { type: array, maxItems: 16, items: { $ref: "#/components/schemas/SessionInfoDto" } }
+        - type: object
+          additionalProperties: false
+          required: [MessageType, MessageId, Data]
+          properties:
+            MessageType: { type: string, const: UserDataChanged }
+            MessageId: { $ref: "#/components/schemas/UUID" }
+            Data: { $ref: "#/components/schemas/UserDataChangeInfo" }
+    WebSocketInputDto:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [MessageType]
+          properties:
+            MessageType: { type: string, const: KeepAlive }
+            MessageId: { type: string, maxLength: 128 }
+        - type: object
+          additionalProperties: false
+          required: [MessageType]
+          properties:
+            MessageType: { type: string, const: SessionsStart }
+            MessageId: { type: string, maxLength: 128 }
+            Data: { type: string, pattern: "^[0-9]{1,5},[0-9]{4,5}$", description: "Optional initial delay and repeat interval in milliseconds, each runtime-bounded to at most 60 seconds." }
+        - type: object
+          additionalProperties: false
+          required: [MessageType]
+          properties:
+            MessageType: { type: string, const: SessionsStop }
+            MessageId: { type: string, maxLength: 128 }
     QueryFiltersLegacy:
       type: object
       additionalProperties: false
@@ -3419,18 +4067,18 @@ components:
       additionalProperties: false
       required: [Id, ItemId, Type, StartTicks, EndTicks]
       properties:
-        Id: { type: string }
+        Id: { $ref: "#/components/schemas/UUID" }
         ItemId: { $ref: "#/components/schemas/UUID" }
-        Type: { type: string }
-        StartTicks: { type: integer, format: int64, minimum: 0 }
-        EndTicks: { type: integer, format: int64, minimum: 0 }
+        Type: { type: string, enum: [Unknown, Commercial, Preview, Recap, Outro, Intro] }
+        StartTicks: { type: integer, format: int64, minimum: 0, maximum: 864000000000 }
+        EndTicks: { type: integer, format: int64, minimum: 1, maximum: 864000000000 }
     MediaSegmentQueryResult:
       type: object
       additionalProperties: false
       required: [Items, TotalRecordCount, StartIndex]
       properties:
-        Items: { type: array, maxItems: 0, items: { $ref: "#/components/schemas/MediaSegmentDto" } }
-        TotalRecordCount: { type: integer, const: 0 }
+        Items: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/MediaSegmentDto" } }
+        TotalRecordCount: { type: integer, minimum: 0, maximum: 3 }
         StartIndex: { type: integer, const: 0 }
     ThemeMediaResult:
       type: object

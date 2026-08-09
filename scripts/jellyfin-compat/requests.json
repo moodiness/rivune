@@ -1,0 +1,264 @@
+{
+  "version": 1,
+  "defaults": {
+    "timeoutMs": 15000,
+    "maxResponseBytes": 1048576,
+    "headers": {
+      "Accept": "application/json",
+      "X-Emby-Authorization": "MediaBrowser Client=\"Rivune Compatibility Harness\", Device=\"Differential Runner\", DeviceId=\"rivune-jellyfin-compat\", Version=\"1.0\""
+    }
+  },
+  "steps": [
+    {
+      "id": "system-ping",
+      "clients": ["jellyfin-web", "swiftfin", "streamyfin"],
+      "status": "required",
+      "request": {
+        "method": "GET",
+        "path": "/System/Ping"
+      },
+      "expect": {
+        "statuses": [200],
+        "contentTypes": ["application/json"],
+        "maxBytes": 256
+      },
+      "captures": [],
+      "canonicalize": [],
+      "compare": "semantic"
+    },
+    {
+      "id": "public-system-info",
+      "clients": ["jellyfin-web", "swiftfin", "streamyfin", "infuse"],
+      "status": "required",
+      "request": {
+        "method": "GET",
+        "path": "/System/Info/Public"
+      },
+      "expect": {
+        "statuses": [200],
+        "contentTypes": ["application/json"],
+        "maxBytes": 32768
+      },
+      "captures": [],
+      "canonicalize": [
+        {"op": "replace", "pointer": "/Id", "value": "<server-id>", "optional": true, "reason": "Server identities are intentionally target-local."},
+        {"op": "normalize-url-host", "pointer": "/LocalAddress", "optional": true, "reason": "Published origins are deployment-local; scheme/path semantics remain comparable."},
+        {"op": "replace", "pointer": "/ServerName", "value": "<server-name>", "optional": true, "reason": "Operator-selected server names are not protocol behavior."},
+        {"op": "replace", "pointer": "/Version", "value": "<server-version>", "optional": true, "reason": "The oracle and implementation have independent release branding."}
+      ],
+      "compare": "semantic"
+    },
+    {
+      "id": "system-endpoint",
+      "clients": ["jellyfin-web", "swiftfin"],
+      "status": "required",
+      "request": {
+        "method": "GET",
+        "path": "/System/Endpoint"
+      },
+      "expect": {
+        "statuses": [401],
+        "maxBytes": 1024
+      },
+      "captures": [],
+      "canonicalize": [],
+      "compare": "semantic"
+    },
+    {
+      "id": "login",
+      "clients": ["jellyfin-web", "swiftfin", "streamyfin", "infuse"],
+      "status": "required",
+      "request": {
+        "method": "POST",
+        "path": "/Users/AuthenticateByName",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "json": {
+          "Username": "{{secret:username}}",
+          "Pw": "{{secret:password}}"
+        }
+      },
+      "expect": {
+        "statuses": [200],
+        "contentTypes": ["application/json"],
+        "maxBytes": 262144
+      },
+      "captures": [
+        {"name": "access_token", "pointer": "/AccessToken", "secret": true},
+        {"name": "user_id", "pointer": "/User/Id", "secret": false}
+      ],
+      "canonicalize": [
+        {"op": "replace", "pointer": "/AccessToken", "value": "<secret-token>", "reason": "Authentication tokens are secret and target-local."},
+        {"op": "replace", "pointer": "/ServerId", "value": "<server-id>", "optional": true, "reason": "Server identities are target-local."},
+        {"op": "replace", "pointer": "/User/Id", "value": "<user-id>", "reason": "The two targets use independent user identifiers."},
+        {"op": "replace", "pointer": "/User/ServerId", "value": "<server-id>", "optional": true, "reason": "Nested server identity is target-local."},
+        {"op": "replace", "pointer": "/SessionInfo/Id", "value": "<session-id>", "optional": true, "reason": "A new session identifier is issued by each target."},
+        {"op": "replace", "pointer": "/SessionInfo/ServerId", "value": "<server-id>", "optional": true, "reason": "Session server identity is target-local."},
+        {"op": "replace", "pointer": "/SessionInfo/UserId", "value": "<user-id>", "optional": true, "reason": "Session user identity is target-local."},
+        {"op": "remove", "pointer": "/SessionInfo/LastActivityDate", "optional": true, "reason": "Wall-clock session activity is nondeterministic."},
+        {"op": "remove", "pointer": "/SessionInfo/LastPlaybackCheckIn", "optional": true, "reason": "Wall-clock playback activity is nondeterministic."}
+      ],
+      "compare": "semantic"
+    },
+    {
+      "id": "current-user",
+      "clients": ["jellyfin-web", "swiftfin", "streamyfin", "infuse"],
+      "status": "required",
+      "request": {
+        "method": "GET",
+        "path": "/Users/Me",
+        "headers": {
+          "X-Emby-Token": "{{access_token}}"
+        }
+      },
+      "expect": {
+        "statuses": [200],
+        "contentTypes": ["application/json"],
+        "maxBytes": 262144
+      },
+      "captures": [],
+      "canonicalize": [
+        {"op": "replace", "pointer": "/Id", "value": "<user-id>", "reason": "User identifiers are target-local."},
+        {"op": "replace", "pointer": "/ServerId", "value": "<server-id>", "optional": true, "reason": "Server identities are target-local."},
+        {"op": "remove", "pointer": "/LastLoginDate", "optional": true, "reason": "Login timestamps depend on execution time."},
+        {"op": "remove", "pointer": "/LastActivityDate", "optional": true, "reason": "Activity timestamps depend on execution time."}
+      ],
+      "compare": "semantic"
+    },
+    {
+      "id": "user-views",
+      "clients": ["jellyfin-web", "swiftfin", "streamyfin"],
+      "status": "required",
+      "request": {
+        "method": "GET",
+        "path": "/Users/{{user_id}}/Views",
+        "headers": {
+          "X-Emby-Token": "{{access_token}}"
+        }
+      },
+      "expect": {
+        "statuses": [200],
+        "contentTypes": ["application/json"],
+        "maxBytes": 262144
+      },
+      "captures": [],
+      "canonicalize": [],
+      "compare": "semantic"
+    },
+    {
+      "id": "movie-items",
+      "clients": ["jellyfin-web", "swiftfin", "streamyfin", "infuse"],
+      "status": "required",
+      "request": {
+        "method": "GET",
+        "path": "/Items?UserId={{user_id}}&Recursive=true&IncludeItemTypes=Movie&SearchTerm=Rivune%20Demo&Limit=1&Fields=MediaSources,MediaStreams",
+        "headers": {
+          "X-Emby-Token": "{{access_token}}"
+        }
+      },
+      "expect": {
+        "statuses": [200],
+        "contentTypes": ["application/json"],
+        "maxBytes": 524288
+      },
+      "captures": [
+        {"name": "movie_id", "pointer": "/Items/0/Id", "secret": false}
+      ],
+      "canonicalize": [
+        {"op": "replace", "pointer": "/Items/0/Id", "value": "<movie-id>", "reason": "Library item identifiers are generated independently."},
+        {"op": "replace", "pointer": "/Items/0/ServerId", "value": "<server-id>", "optional": true, "reason": "Server identities are target-local."},
+        {"op": "remove", "pointer": "/Items/0/DateCreated", "optional": true, "reason": "Import time depends on the scan execution."}
+      ],
+      "compare": "semantic"
+    },
+    {
+      "id": "search-hints",
+      "clients": ["jellyfin-web", "swiftfin", "streamyfin"],
+      "status": "required",
+      "request": {
+        "method": "GET",
+        "path": "/Search/Hints?UserId={{user_id}}&SearchTerm=Rivune%20Demo&IncludeItemTypes=Movie&Limit=10",
+        "headers": {
+          "X-Emby-Token": "{{access_token}}"
+        }
+      },
+      "expect": {
+        "statuses": [200],
+        "contentTypes": ["application/json"],
+        "maxBytes": 262144
+      },
+      "captures": [],
+      "canonicalize": [
+        {"op": "replace", "pointer": "/SearchHints/0/ItemId", "value": "<movie-id>", "optional": true, "reason": "Search results reference target-local library identifiers."},
+        {"op": "replace", "pointer": "/SearchHints/0/Id", "value": "<movie-id>", "optional": true, "reason": "Some clients consume the legacy target-local Id alias."}
+      ],
+      "compare": "semantic"
+    },
+    {
+      "id": "artwork-primary-head",
+      "clients": ["jellyfin-web", "swiftfin", "streamyfin", "infuse"],
+      "status": "observed-gap",
+      "request": {
+        "method": "HEAD",
+        "path": "/Items/{{movie_id}}/Images/Primary",
+        "headers": {
+          "X-Emby-Token": "{{access_token}}",
+          "Accept": "image/avif,image/webp,image/png,image/jpeg,image/svg+xml,*/*"
+        }
+      },
+      "expect": {
+        "statuses": [200, 204, 404],
+        "maxBytes": 1024
+      },
+      "captures": [],
+      "canonicalize": [],
+      "compare": "semantic",
+      "observedGap": "Artwork availability and negotiated representation depend on each target's metadata provider; a missing synthetic poster is recorded explicitly rather than treated as body equivalence."
+    },
+    {
+      "id": "playback-info",
+      "clients": ["jellyfin-web", "swiftfin", "streamyfin", "infuse"],
+      "status": "required",
+      "request": {
+        "method": "GET",
+        "path": "/Items/{{movie_id}}/PlaybackInfo?UserId={{user_id}}&StartTimeTicks=0&MaxStreamingBitrate=12000000",
+        "headers": {
+          "X-Emby-Token": "{{access_token}}"
+        }
+      },
+      "expect": {
+        "statuses": [200],
+        "contentTypes": ["application/json"],
+        "maxBytes": 524288
+      },
+      "captures": [],
+      "canonicalize": [
+        {"op": "replace", "pointer": "/PlaySessionId", "value": "<play-session-id>", "optional": true, "reason": "Playback sessions are newly generated for each target."},
+        {"op": "replace", "pointer": "/MediaSources/0/Id", "value": "<media-source-id>", "optional": true, "reason": "Media-source identifiers are target-local."},
+        {"op": "normalize-url-host", "pointer": "/MediaSources/0/DirectStreamUrl", "optional": true, "reason": "Absolute playback URL hosts are deployment-local; route and query semantics remain comparable."},
+        {"op": "normalize-url-host", "pointer": "/MediaSources/0/TranscodingUrl", "optional": true, "reason": "Absolute transcoding URL hosts are deployment-local; route and query semantics remain comparable."}
+      ],
+      "compare": "semantic"
+    },
+    {
+      "id": "logout",
+      "clients": ["jellyfin-web", "swiftfin", "streamyfin", "infuse"],
+      "status": "required",
+      "request": {
+        "method": "POST",
+        "path": "/Sessions/Logout",
+        "headers": {
+          "X-Emby-Token": "{{access_token}}"
+        }
+      },
+      "expect": {
+        "statuses": [204],
+        "maxBytes": 0
+      },
+      "captures": [],
+      "canonicalize": [],
+      "compare": "exact"
+    }
+  ]
+}

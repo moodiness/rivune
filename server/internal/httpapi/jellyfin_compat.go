@@ -26,6 +26,26 @@ const (
 	jellyfinCompatibilityIdleWaitMaximum = time.Duration(1 << 62)
 )
 
+const jellyfinCompatibilityDisabledRevocationReason = "compatibility_disabled"
+
+type jellyfinMaintenancePolicy struct {
+	settings settingsService
+}
+
+func (policy jellyfinMaintenancePolicy) Authorize(ctx context.Context, principal auth.Principal) (jellyfin.AuthenticatedRequestPolicyResult, error) {
+	if principal.IsGlobalAdministrator() || principal.ActiveProfileCanManage {
+		return jellyfin.AuthenticatedRequestPolicyResult{Allowed: true}, nil
+	}
+	if policy.settings == nil {
+		return jellyfin.AuthenticatedRequestPolicyResult{}, errors.New("maintenance settings are unavailable")
+	}
+	state, err := policy.settings.Maintenance(ctx)
+	if err != nil {
+		return jellyfin.AuthenticatedRequestPolicyResult{}, err
+	}
+	return jellyfin.AuthenticatedRequestPolicyResult{Allowed: !state.Enabled, PublicMessage: state.Message}, nil
+}
+
 type credentialLoginAdmissionError struct {
 	retryAfter time.Duration
 }
@@ -41,11 +61,13 @@ func (a *API) loginCredentials(ctx context.Context, input auth.LoginInput) (auth
 	}
 	defer release()
 
-	retryAfter, admitted = a.usernameAdmission.acquire(input.Username)
-	if !admitted {
-		return auth.TokenPair{}, &credentialLoginAdmissionError{retryAfter: retryAfter}
+	tokens, err := a.auth.Login(ctx, input)
+	if errors.Is(err, auth.ErrInvalidCredentials) {
+		a.usernameAdmission.recordFailure(input.Username)
+	} else if err == nil {
+		a.usernameAdmission.forget(input.Username)
 	}
-	return a.auth.Login(ctx, input)
+	return tokens, err
 }
 
 func (a *API) loginJellyfinProfile(ctx context.Context, input auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error) {
@@ -55,11 +77,13 @@ func (a *API) loginJellyfinProfile(ctx context.Context, input auth.JellyfinProfi
 	}
 	defer release()
 
-	retryAfter, admitted = a.usernameAdmission.acquire(input.Username)
-	if !admitted {
-		return auth.JellyfinProfileLoginResult{}, &credentialLoginAdmissionError{retryAfter: retryAfter}
+	result, err := a.auth.LoginJellyfinProfile(ctx, input)
+	if errors.Is(err, auth.ErrInvalidCredentials) {
+		a.usernameAdmission.recordFailure(input.Username)
+	} else if err == nil {
+		a.usernameAdmission.forget(input.Username)
 	}
-	return a.auth.LoginJellyfinProfile(ctx, input)
+	return result, err
 }
 
 func (a *API) initializeJellyfinCompatibility(
@@ -80,6 +104,15 @@ func (a *API) initializeJellyfinCompatibility(
 	if a.jellyfinCompatibilityBuilder == nil {
 		a.jellyfinCompatibilityBuilder = func(ctx context.Context) (*jellyfin.Handler, bool, error) {
 			return a.buildJellyfinCompatibility(ctx, pool, nativeAuthentication, catalog, collections, artwork, playbackDelivery, instances, searchDependencies...)
+		}
+	}
+	if a.jellyfinCompatibilityRevoker == nil {
+		a.jellyfinCompatibilityRevoker = func(ctx context.Context, reason string) error {
+			sessions, err := jellyfin.NewSessionStore(pool, nativeAuthentication)
+			if err != nil {
+				return err
+			}
+			return sessions.RevokeAllActive(ctx, reason)
 		}
 	}
 	if a.jellyfinCompatibilitySignal == nil {
@@ -105,6 +138,7 @@ func (a *API) buildJellyfinCompatibility(
 	if err != nil || !configured {
 		return nil, configured, err
 	}
+	serverInfo.LocalAddress = a.config.PublicURL
 
 	sessions, err := jellyfin.NewSessionStore(pool, nativeAuthentication)
 	if err != nil {
@@ -124,6 +158,14 @@ func (a *API) buildJellyfinCompatibility(
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("initialize Jellyfin compatibility authentication: %w", err)
+	}
+	displayPreferenceRepository, err := jellyfin.NewDisplayPreferenceRepository(pool)
+	if err != nil {
+		return nil, false, fmt.Errorf("initialize Jellyfin display preference repository: %w", err)
+	}
+	displayPreferences, err := jellyfin.NewDisplayPreferenceService(displayPreferenceRepository)
+	if err != nil {
+		return nil, false, fmt.Errorf("initialize Jellyfin display preference service: %w", err)
 	}
 	var metadataSearch *metadata.Service
 	var addonSearch *addon.Service
@@ -153,10 +195,15 @@ func (a *API) buildJellyfinCompatibility(
 	if err != nil {
 		return nil, false, fmt.Errorf("initialize Jellyfin compatibility catalog: %w", err)
 	}
+	var compatMediaSegments jellyfin.MediaSegmentReader
+	if playbackDelivery != nil {
+		compatMediaSegments = playbackDelivery
+	}
 
 	compatHandler, err := jellyfin.New(jellyfin.Dependencies{
-		ServerInfo: serverInfo, Authentication: compatAuthentication, Catalog: compatCatalog, Collections: collections,
-		Artwork: artwork, Playback: playbackDelivery, Watchstate: catalog, Logger: a.logger,
+		ServerInfo: serverInfo, Authentication: compatAuthentication, AuthenticatedPolicy: jellyfinMaintenancePolicy{settings: a.settings},
+		Catalog: compatCatalog, Collections: collections, Artwork: artwork, Playback: playbackDelivery, MediaSegments: compatMediaSegments,
+		Watchstate: catalog, DisplayPreferences: displayPreferences, Logger: a.logger, Debug: a.config.JellyfinDebug,
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("initialize Jellyfin compatibility HTTP adapter: %w", err)
@@ -248,31 +295,47 @@ func (a *API) requestJellyfinCompatibilityReconciliation() {
 	}
 }
 
-func (a *API) applyCanonicalJellyfinCompatibilityDesired(enabled bool) {
+func (a *API) revokeJellyfinCompatibilitySessions(ctx context.Context) error {
+	if a == nil {
+		return errors.New("Jellyfin compatibility lifecycle is unavailable")
+	}
 	a.jellyfinCompatibilityMu.Lock()
-	if a.jellyfinCompatibilityDesired == enabled {
-		a.jellyfinCompatibilityMu.Unlock()
-		return
-	}
-	a.jellyfinCompatibilityDesired = enabled
-	a.jellyfinCompatibilityRevision++
-	if a.jellyfinCompatibilitySignal == nil {
-		a.jellyfinCompatibilitySignal = make(chan struct{}, 1)
-	}
-	signal := a.jellyfinCompatibilitySignal
-	var cancel context.CancelFunc
-	if !enabled {
-		a.jellyfinCompatibility = nil
-		cancel = a.jellyfinCompatibilityCancel
-	}
+	revoker := a.jellyfinCompatibilityRevoker
+	a.jellyfinCompatibilityRevocationPending = true
 	a.jellyfinCompatibilityMu.Unlock()
-	if cancel != nil {
-		cancel()
+	if revoker == nil {
+		return errors.New("Jellyfin compatibility session revocation is unavailable")
 	}
-	select {
-	case signal <- struct{}{}:
-	default:
+	if err := revoker(ctx, jellyfinCompatibilityDisabledRevocationReason); err != nil {
+		return fmt.Errorf("revoke previous Jellyfin compatibility generation: %w", err)
 	}
+	a.jellyfinCompatibilityMu.Lock()
+	a.jellyfinCompatibilityRevocationPending = false
+	a.jellyfinCompatibilityMu.Unlock()
+	return nil
+}
+
+func (a *API) applyCanonicalJellyfinCompatibilityDesired(ctx context.Context, enabled bool) error {
+	a.jellyfinCompatibilityMu.Lock()
+	current := a.jellyfinCompatibilityDesired
+	pending := a.jellyfinCompatibilityRevocationPending
+	a.jellyfinCompatibilityMu.Unlock()
+	if current == enabled && !(pending && !enabled) {
+		return nil
+	}
+	if enabled {
+		if err := a.revokeJellyfinCompatibilitySessions(ctx); err != nil {
+			return err
+		}
+		a.setJellyfinCompatibilityDesired(true)
+		return nil
+	}
+
+	a.setJellyfinCompatibilityDesired(false)
+	if err := a.revokeJellyfinCompatibilitySessions(ctx); err != nil {
+		return fmt.Errorf("disable Jellyfin compatibility: %w", err)
+	}
+	return nil
 }
 
 func (a *API) requestJellyfinCompatibilityActivation() {
@@ -380,7 +443,7 @@ func (a *API) runJellyfinCompatibility(ctx context.Context) {
 			a.jellyfinCompatibilitySettingsMu.Lock()
 			enabled, reconcileErr := reconciler(reconcileContext)
 			if reconcileErr == nil {
-				a.applyCanonicalJellyfinCompatibilityDesired(enabled)
+				reconcileErr = a.applyCanonicalJellyfinCompatibilityDesired(reconcileContext, enabled)
 			}
 			a.jellyfinCompatibilitySettingsMu.Unlock()
 			cancelReconcile()
@@ -389,7 +452,7 @@ func (a *API) runJellyfinCompatibility(ctx context.Context) {
 			}
 			if reconcileErr != nil {
 				if a.logger != nil {
-					a.logger.Error("reconcile Jellyfin compatibility setting", "error", "instance settings read failed")
+					a.logger.Error("reconcile Jellyfin compatibility setting", "error", "canonical compatibility transition failed")
 				}
 				nextReconcile = time.Now().Add(a.jellyfinCompatibilityRetryDelay(reconcileAttempts))
 				if reconcileAttempts < ^uint32(0) {

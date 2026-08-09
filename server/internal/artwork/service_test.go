@@ -2,8 +2,10 @@ package artwork
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -13,7 +15,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -211,7 +215,8 @@ func TestLookupKeyRequiresExistingMatchingRegistration(t *testing.T) {
 		t.Fatalf("stale local lookup = %q, %t", key, ok)
 	}
 }
-func TestRunWarmupCachesLocalizedArtworkBeforeBrowserRequest(t *testing.T) {
+
+func TestLocalURLsRegistersWithoutFetchingUntilServeKey(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	imageBytes := testPNG(t, color.NRGBA{R: 38, G: 85, B: 119, A: 255})
 	var requests atomic.Int32
@@ -222,80 +227,44 @@ func TestRunWarmupCachesLocalizedArtworkBeforeBrowserRequest(t *testing.T) {
 	}))
 	defer fixture.Close()
 	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		service.RunWarmup(ctx)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
 
-	localURL := service.LocalURL(context.Background(), fixture.URL+"/warm-poster.png")
+	localized := service.LocalURLs(context.Background(), []string{fixture.URL + "/lazy-poster.png"})
+	if len(localized) != 1 || !strings.HasPrefix(localized[0], publicPrefix) {
+		t.Fatalf("LocalURLs returned %#v", localized)
+	}
+	localURL := localized[0]
 	key := strings.TrimPrefix(localURL, publicPrefix)
-	waitForArtworkCondition(t, func() bool {
-		var byteSize *int64
-		if err := pool.QueryRow(context.Background(), `SELECT byte_size FROM artwork_cache WHERE key = $1`, key).Scan(&byteSize); err != nil {
-			return false
-		}
-		return byteSize != nil && *byteSize == int64(len(imageBytes))
-	})
-	if requests.Load() != 1 {
-		t.Fatalf("warmup made %d upstream requests, want 1", requests.Load())
+	if requests.Load() != 0 {
+		t.Fatalf("LocalURLs fetched artwork %d times", requests.Load())
+	}
+	var byteSize *int64
+	if err := pool.QueryRow(context.Background(), `SELECT byte_size FROM artwork_cache WHERE key = $1`, key).Scan(&byteSize); err != nil {
+		t.Fatalf("query lazy artwork registration: %v", err)
+	}
+	if byteSize != nil {
+		t.Fatalf("LocalURLs published %d artwork bytes before ServeKey", *byteSize)
+	}
+	if _, err := os.Stat(service.path(key)); !os.IsNotExist(err) {
+		t.Fatalf("LocalURLs created cache file before ServeKey: %v", err)
+	}
+	if metadata, found := service.DescribeKey(context.Background(), key); found || metadata != (ImageMetadata{}) || requests.Load() != 0 {
+		t.Fatalf("uncached DescribeKey metadata=%+v found=%t upstream=%d", metadata, found, requests.Load())
 	}
 
 	response := serveArtwork(service, http.MethodGet, localURL)
 	assertArtworkResponse(t, response, imageBytes, true)
 	if requests.Load() != 1 {
-		t.Fatalf("browser request redownloaded warmed artwork: requests=%d", requests.Load())
+		t.Fatalf("ServeKey made %d lazy upstream requests, want 1", requests.Load())
 	}
-}
-
-func TestRunWarmupBoundsConcurrentDownloads(t *testing.T) {
-	pool := openArtworkTestPool(t)
-	imageBytes := testPNG(t, color.NRGBA{R: 85, G: 119, B: 153, A: 255})
-	var requests atomic.Int32
-	var active atomic.Int32
-	var maximum atomic.Int32
-	release := make(chan struct{})
-	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
-		requests.Add(1)
-		current := active.Add(1)
-		for {
-			observed := maximum.Load()
-			if current <= observed || maximum.CompareAndSwap(observed, current) {
-				break
-			}
-		}
-		<-release
-		active.Add(-1)
-		response.Header().Set("Content-Type", "image/png")
-		_, _ = response.Write(imageBytes)
-	}))
-	t.Cleanup(fixture.Close)
-	service := newArtworkTestService(t, pool, fixture.Client(), 16<<20)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		service.RunWarmup(ctx)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		close(release)
-		<-done
-	})
-
-	upstream := make([]string, warmupConcurrency*2)
-	for index := range upstream {
-		upstream[index] = fixture.URL + "/bounded-" + stringInt(index) + ".png"
+	if err := pool.QueryRow(context.Background(), `SELECT byte_size FROM artwork_cache WHERE key = $1`, key).Scan(&byteSize); err != nil {
+		t.Fatalf("query lazily published artwork: %v", err)
 	}
-	service.LocalURLs(context.Background(), upstream)
-	waitForArtworkCondition(t, func() bool { return requests.Load() >= warmupConcurrency })
-	if got := maximum.Load(); got != warmupConcurrency {
-		t.Fatalf("maximum concurrent warmups = %d, want %d", got, warmupConcurrency)
+	if byteSize == nil || *byteSize != int64(len(imageBytes)) {
+		t.Fatalf("ServeKey published byte size %v, want %d", byteSize, len(imageBytes))
+	}
+	metadata, found := service.DescribeKey(context.Background(), key)
+	if !found || metadata.Width != 1 || metadata.Height != 1 || metadata.Size != int64(len(imageBytes)) || requests.Load() != 1 {
+		t.Fatalf("cached DescribeKey metadata=%+v found=%t upstream=%d", metadata, found, requests.Load())
 	}
 }
 
@@ -315,6 +284,8 @@ func TestServeHTTPMissHitHeadAndUpstreamFailure(t *testing.T) {
 	}))
 	defer fixture.Close()
 	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	service.negativeNow = func() time.Time { return now }
 	localURL := service.LocalURL(context.Background(), fixture.URL+"/poster")
 	if !strings.HasPrefix(localURL, publicPrefix) {
 		t.Fatalf("registration returned %q", localURL)
@@ -358,13 +329,964 @@ func TestServeHTTPMissHitHeadAndUpstreamFailure(t *testing.T) {
 
 	requestsAfterFailure := requests.Load()
 	retry := serveArtwork(service, http.MethodGet, fallbackLocalURL)
-	if retry.Code != http.StatusBadGateway ||
-		retry.Header().Get("Location") != "" ||
-		retry.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("retry response = %d location=%q cache=%q", retry.Code, retry.Header().Get("Location"), retry.Header().Get("Cache-Control"))
+	if retry.Code != http.StatusBadGateway || retry.Header().Get("Location") != "" || retry.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("negative-cache response = %d location=%q cache=%q", retry.Code, retry.Header().Get("Location"), retry.Header().Get("Cache-Control"))
 	}
-	if requests.Load() != requestsAfterFailure+1 {
-		t.Fatalf("failed artwork retry made %d new upstream requests, want 1", requests.Load()-requestsAfterFailure)
+	if requests.Load() != requestsAfterFailure {
+		t.Fatalf("negative cache repeated failed upstream request: requests=%d want %d", requests.Load(), requestsAfterFailure)
+	}
+	if key, ok := service.LookupKey(context.Background(), fallbackLocalURL); ok || key != "" {
+		t.Fatalf("negative cached registration remained projectable: key=%q ok=%t", key, ok)
+	}
+	if projected := service.LocalURL(context.Background(), fallbackURL); projected != "" {
+		t.Fatalf("negative cached artwork remained localizable as %q", projected)
+	}
+	now = now.Add(negativeCacheTTL)
+	retry = serveArtwork(service, http.MethodGet, fallbackLocalURL)
+	if retry.Code != http.StatusBadGateway || requests.Load() != requestsAfterFailure+1 {
+		t.Fatalf("expired negative cache status=%d requests=%d want %d", retry.Code, requests.Load(), requestsAfterFailure+1)
+	}
+}
+
+func TestServeKeyTransformsClientImageQueriesWithStableConditionalHeaders(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	imageBytes := testSizedPNG(t, 4, 2)
+	var requests atomic.Int32
+	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		response.Header().Set("Content-Type", "image/png")
+		_, _ = response.Write(imageBytes)
+	}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	localURL := service.LocalURL(context.Background(), fixture.URL+"/transform")
+	key := strings.TrimPrefix(localURL, publicPrefix)
+
+	request := httptest.NewRequest(http.MethodGet, localURL+"?fillWidth=2&fillHeight=2&quality=80", nil)
+	response := httptest.NewRecorder()
+	service.ServeKey(response, request, key)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/png" || response.Header().Get("ETag") == `"`+key+`"` ||
+		response.Header().Get("Content-Length") != strconv.Itoa(response.Body.Len()) || requests.Load() != 1 {
+		t.Fatalf("transformed GET status=%d headers=%v bytes=%d upstream=%d", response.Code, response.Header(), response.Body.Len(), requests.Load())
+	}
+	configuration, format, err := image.DecodeConfig(bytes.NewReader(response.Body.Bytes()))
+	if err != nil || format != "png" || configuration.Width != 2 || configuration.Height != 2 {
+		t.Fatalf("transformed dimensions=%+v format=%q error=%v", configuration, format, err)
+	}
+	etag := response.Header().Get("ETag")
+	length := response.Header().Get("Content-Length")
+
+	headRequest := httptest.NewRequest(http.MethodHead, localURL+"?fillWidth=2&fillHeight=2&quality=80", nil)
+	headResponse := httptest.NewRecorder()
+	service.ServeKey(headResponse, headRequest, key)
+	if headResponse.Code != http.StatusOK || headResponse.Body.Len() != 0 || headResponse.Header().Get("ETag") != etag || headResponse.Header().Get("Content-Length") != length || requests.Load() != 1 {
+		t.Fatalf("transformed HEAD status=%d headers=%v body=%d upstream=%d", headResponse.Code, headResponse.Header(), headResponse.Body.Len(), requests.Load())
+	}
+
+	lastAccessed := time.Date(2026, time.August, 8, 10, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(context.Background(), `UPDATE artwork_cache SET last_accessed_at = $2 WHERE key = $1`, key, lastAccessed); err != nil {
+		t.Fatalf("set transformed access sentinel: %v", err)
+	}
+	if err := os.Remove(service.path(key)); err != nil {
+		t.Fatalf("remove transformed source cache: %v", err)
+	}
+	conditionalRequest := httptest.NewRequest(http.MethodGet, localURL+"?fillWidth=2&fillHeight=2&quality=80", nil)
+	conditionalRequest.Header.Set("If-None-Match", "W/"+etag)
+	conditionalResponse := httptest.NewRecorder()
+	service.ServeKey(conditionalResponse, conditionalRequest, key)
+	if conditionalResponse.Code != http.StatusNotModified || conditionalResponse.Body.Len() != 0 || conditionalResponse.Header().Get("ETag") != etag || requests.Load() != 1 {
+		t.Fatalf("transformed conditional status=%d headers=%v body=%d upstream=%d", conditionalResponse.Code, conditionalResponse.Header(), conditionalResponse.Body.Len(), requests.Load())
+	}
+	var persistedAccess time.Time
+	if err := pool.QueryRow(context.Background(), `SELECT last_accessed_at FROM artwork_cache WHERE key = $1`, key).Scan(&persistedAccess); err != nil || !persistedAccess.Equal(lastAccessed) {
+		t.Fatalf("conditional transformed request touched cache: access=%v error=%v", persistedAccess, err)
+	}
+}
+
+func TestServeKeyBoundsTransformationsAndReportsSaturation(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	imageBytes := testSizedPNG(t, 4, 2)
+	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "image/png")
+		_, _ = response.Write(imageBytes)
+	}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	localURL := service.LocalURL(context.Background(), fixture.URL+"/bounded-transform")
+	key := strings.TrimPrefix(localURL, publicPrefix)
+	assertArtworkResponse(t, serveArtwork(service, http.MethodGet, localURL), imageBytes, true)
+
+	var active atomic.Int32
+	var maximum atomic.Int32
+	var calls [5]atomic.Int32
+	started := make(chan int, maximumConcurrentImageTransforms)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseTransforms := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseTransforms)
+	service.imageTransformer = func(_ *os.File, _ string, transform imageTransform) ([]byte, string, error) {
+		calls[transform.width].Add(1)
+		current := active.Add(1)
+		for {
+			observed := maximum.Load()
+			if current <= observed || maximum.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		started <- transform.width
+		<-release
+		active.Add(-1)
+		return bytes.Repeat([]byte{byte(transform.width)}, transform.width), "image/png", nil
+	}
+	type served struct {
+		method   string
+		width    int
+		response *httptest.ResponseRecorder
+	}
+	responses := make(chan served, maximumConcurrentImageTransforms)
+	serveTransform := func(method string, width int) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, localURL+"?width="+strconv.Itoa(width), nil)
+		response := httptest.NewRecorder()
+		service.ServeKey(response, request, key)
+		return response
+	}
+	go func() {
+		responses <- served{method: http.MethodGet, width: 2, response: serveTransform(http.MethodGet, 2)}
+	}()
+	go func() {
+		responses <- served{method: http.MethodHead, width: 3, response: serveTransform(http.MethodHead, 3)}
+	}()
+	for range maximumConcurrentImageTransforms {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for bounded HTTP transformations")
+		}
+	}
+	saturatedResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() { saturatedResult <- serveTransform(http.MethodGet, 4) }()
+	var saturated *httptest.ResponseRecorder
+	select {
+	case saturated = <-saturatedResult:
+	case <-time.After(time.Second):
+		t.Fatal("saturated HTTP transformation did not fail promptly")
+	}
+	if saturated.Code != http.StatusServiceUnavailable || saturated.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("saturated transform status=%d headers=%v body=%q", saturated.Code, saturated.Header(), saturated.Body.String())
+	}
+	releaseTransforms()
+	for range maximumConcurrentImageTransforms {
+		select {
+		case result := <-responses:
+			wantLength := strconv.Itoa(result.width)
+			if result.response.Code != http.StatusOK || result.response.Header().Get("Content-Length") != wantLength {
+				t.Fatalf("%s width=%d status=%d headers=%v", result.method, result.width, result.response.Code, result.response.Header())
+			}
+			if result.method == http.MethodHead && result.response.Body.Len() != 0 {
+				t.Fatalf("transformed HEAD wrote %d body bytes", result.response.Body.Len())
+			}
+			if result.method == http.MethodGet && result.response.Body.Len() != result.width {
+				t.Fatalf("transformed GET wrote %d bytes, want %d", result.response.Body.Len(), result.width)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for HTTP transformations")
+		}
+	}
+	if maximum.Load() != maximumConcurrentImageTransforms || calls[2].Load() != 1 || calls[3].Load() != 1 || calls[4].Load() != 0 {
+		t.Fatalf("transform maximum=%d calls=[width2:%d width3:%d width4:%d]", maximum.Load(), calls[2].Load(), calls[3].Load(), calls[4].Load())
+	}
+	service.transformMu.Lock()
+	remainingFlights := len(service.transformFlights)
+	service.transformMu.Unlock()
+	if remainingFlights != 0 || len(service.transformSlots) != 0 {
+		t.Fatalf("HTTP transform cleanup flights=%d slots=%d", remainingFlights, len(service.transformSlots))
+	}
+}
+
+func TestTransformCoalescedBoundsSharesCancelsAndCleansUp(t *testing.T) {
+	service := &Service{
+		transformFlights: make(map[string]*imageTransformFlight),
+		transformSlots:   make(chan struct{}, maximumConcurrentImageTransforms),
+	}
+	var active atomic.Int32
+	var maximum atomic.Int32
+	var calls [4]atomic.Int32
+	started := make(chan int, maximumConcurrentImageTransforms)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseTransforms := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseTransforms)
+	service.imageTransformer = func(_ *os.File, _ string, transform imageTransform) ([]byte, string, error) {
+		calls[transform.width].Add(1)
+		current := active.Add(1)
+		for {
+			observed := maximum.Load()
+			if current <= observed || maximum.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		started <- transform.width
+		<-release
+		active.Add(-1)
+		return bytes.Repeat([]byte{byte(transform.width)}, transform.width), "image/png", nil
+	}
+
+	type outcome struct {
+		content     []byte
+		contentType string
+		err         error
+	}
+	results := make(chan outcome, maximumConcurrentImageTransforms)
+	run := func(etag string, width int) {
+		content, _, err := service.transformCoalesced(context.Background(), etag, nil, "image/png", imageTransform{width: width, requested: true})
+		results <- outcome{content: content, err: err}
+	}
+	go run(`"first"`, 1)
+	go run(`"second"`, 2)
+	seen := make(map[int]bool)
+	for range maximumConcurrentImageTransforms {
+		select {
+		case width := <-started:
+			seen[width] = true
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for admitted transformations")
+		}
+	}
+	if !seen[1] || !seen[2] || maximum.Load() != maximumConcurrentImageTransforms {
+		t.Fatalf("active transformations=%d started=%v", maximum.Load(), seen)
+	}
+
+	saturatedResult := make(chan error, 1)
+	go func() {
+		_, _, err := service.transformCoalesced(context.Background(), `"third"`, nil, "image/png", imageTransform{width: 3, requested: true})
+		saturatedResult <- err
+	}()
+	select {
+	case err := <-saturatedResult:
+		if !errors.Is(err, errImageTransformSaturated) {
+			t.Fatalf("third distinct transformation error = %v, want saturation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("saturated transformation did not fail promptly")
+	}
+	waitingContext, cancelWaiting := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancelWaiting()
+	canceledResult := make(chan error, 1)
+	go func() {
+		_, _, err := service.transformCoalesced(waitingContext, `"first"`, nil, "image/png", imageTransform{width: 1, requested: true})
+		canceledResult <- err
+	}()
+	select {
+	case err := <-canceledResult:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("canceled coalesced transformation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled coalesced transformation did not return")
+	}
+	if calls[1].Load() != 1 {
+		t.Fatalf("canceled waiter started %d first-key transformations, want 1", calls[1].Load())
+	}
+
+	sharedContext := &observedDoneContext{Context: context.Background(), entered: make(chan struct{})}
+	sharedResult := make(chan outcome, 1)
+	go func() {
+		content, contentType, err := service.transformCoalesced(sharedContext, `"first"`, nil, "image/png", imageTransform{width: 1, requested: true})
+		sharedResult <- outcome{content: content, contentType: contentType, err: err}
+	}()
+	select {
+	case <-sharedContext.entered:
+	case <-time.After(time.Second):
+		t.Fatal("same-key request did not join the active transformation")
+	}
+	releaseTransforms()
+	var shared outcome
+	select {
+	case shared = <-sharedResult:
+	case <-time.After(time.Second):
+		t.Fatal("coalesced transformation did not receive the shared result")
+	}
+	if shared.err != nil || shared.contentType != "image/png" || !bytes.Equal(shared.content, []byte{1}) {
+		t.Fatalf("shared transformation content=%v type=%q error=%v", shared.content, shared.contentType, shared.err)
+	}
+	if calls[1].Load() != 1 {
+		t.Fatalf("simultaneous first-key transformations = %d, want 1", calls[1].Load())
+	}
+	for range maximumConcurrentImageTransforms {
+		select {
+		case result := <-results:
+			if result.err != nil || len(result.content) == 0 {
+				t.Fatalf("admitted transformation result=%v error=%v", result.content, result.err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for admitted transformations to finish")
+		}
+	}
+	service.transformMu.Lock()
+	remainingFlights := len(service.transformFlights)
+	service.transformMu.Unlock()
+	if remainingFlights != 0 || len(service.transformSlots) != 0 || active.Load() != 0 {
+		t.Fatalf("transform cleanup flights=%d slots=%d active=%d", remainingFlights, len(service.transformSlots), active.Load())
+	}
+}
+
+func TestServeKeyCachesSequentialImageTransformations(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	imageBytes := testSizedPNG(t, 4, 2)
+	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "image/png")
+		_, _ = response.Write(imageBytes)
+	}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	localURL := service.LocalURL(context.Background(), fixture.URL+"/sequential-transform")
+	key := strings.TrimPrefix(localURL, publicPrefix)
+	assertArtworkResponse(t, serveArtwork(service, http.MethodGet, localURL), imageBytes, true)
+	service.transformMu.Lock()
+	untransformedEntries := len(service.transformCache)
+	service.transformMu.Unlock()
+	if untransformedEntries != 0 {
+		t.Fatalf("untransformed artwork populated %d transformed cache entries", untransformedEntries)
+	}
+
+	var calls atomic.Int32
+	service.imageTransformer = func(_ *os.File, _ string, transform imageTransform) ([]byte, string, error) {
+		calls.Add(1)
+		return []byte{byte(transform.width), byte(transform.quality), 0x5a}, "image/png", nil
+	}
+	serve := func(rawQuery string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, localURL+"?"+rawQuery, nil)
+		response := httptest.NewRecorder()
+		service.ServeKey(response, request, key)
+		return response
+	}
+	first := serve("width=2&quality=80")
+	second := serve("width=2&quality=80")
+	if calls.Load() != 1 {
+		t.Fatalf("two identical sequential requests transformed %d times, want 1", calls.Load())
+	}
+	for _, header := range []string{"Cache-Control", "Content-Length", "Content-Type", "ETag"} {
+		if first.Header().Get(header) != second.Header().Get(header) {
+			t.Fatalf("sequential %s headers differ: %q != %q", header, first.Header().Get(header), second.Header().Get(header))
+		}
+	}
+	if first.Code != http.StatusOK || second.Code != http.StatusOK || !bytes.Equal(first.Body.Bytes(), second.Body.Bytes()) {
+		t.Fatalf("sequential responses first=(%d,%v) second=(%d,%v)", first.Code, first.Body.Bytes(), second.Code, second.Body.Bytes())
+	}
+
+	different := serve("width=3&quality=80")
+	if calls.Load() != 2 {
+		t.Fatalf("different parameters produced %d transformations, want 2", calls.Load())
+	}
+	if different.Header().Get("ETag") == first.Header().Get("ETag") || bytes.Equal(different.Body.Bytes(), first.Body.Bytes()) {
+		t.Fatalf("different parameters reused result: first ETag=%q body=%v different ETag=%q body=%v", first.Header().Get("ETag"), first.Body.Bytes(), different.Header().Get("ETag"), different.Body.Bytes())
+	}
+}
+
+func TestTransformCacheEvictsByEntryAndByteLimits(t *testing.T) {
+	newService := func(maxBytes int64, maxEntries int, calls *[8]atomic.Int32) *Service {
+		service := &Service{
+			transformFlights:         make(map[string]*imageTransformFlight),
+			transformSlots:           make(chan struct{}, maximumConcurrentImageTransforms),
+			transformCache:           make(map[string]*list.Element),
+			transformCacheMaxBytes:   maxBytes,
+			transformCacheMaxEntries: maxEntries,
+		}
+		service.imageTransformer = func(_ *os.File, _ string, transform imageTransform) ([]byte, string, error) {
+			calls[transform.width].Add(1)
+			return bytes.Repeat([]byte{byte(transform.width)}, transform.width), "image/png", nil
+		}
+		return service
+	}
+	transform := func(t *testing.T, service *Service, etag string, width int) []byte {
+		t.Helper()
+		content, contentType, err := service.transformCoalesced(context.Background(), etag, nil, "image/png", imageTransform{width: width, requested: true})
+		if err != nil || contentType != "image/png" {
+			t.Fatalf("transform %s returned type=%q error=%v", etag, contentType, err)
+		}
+		return content
+	}
+
+	t.Run("entries use least recently used order", func(t *testing.T) {
+		var calls [8]atomic.Int32
+		service := newService(100, 2, &calls)
+		transform(t, service, `"a"`, 3)
+		transform(t, service, `"b"`, 4)
+		transform(t, service, `"a"`, 3)
+		transform(t, service, `"c"`, 5)
+		transform(t, service, `"b"`, 4)
+		if calls[3].Load() != 1 || calls[4].Load() != 2 || calls[5].Load() != 1 {
+			t.Fatalf("entry eviction calls a=%d b=%d c=%d", calls[3].Load(), calls[4].Load(), calls[5].Load())
+		}
+		service.transformMu.Lock()
+		entries, cacheBytes := len(service.transformCache), service.transformCacheBytes
+		service.transformMu.Unlock()
+		if entries != 2 || cacheBytes != 9 {
+			t.Fatalf("entry-bounded cache entries=%d bytes=%d, want 2 and 9", entries, cacheBytes)
+		}
+	})
+
+	t.Run("bytes evict and oversized results are not admitted", func(t *testing.T) {
+		var calls [8]atomic.Int32
+		service := newService(5, 3, &calls)
+		transform(t, service, `"a"`, 3)
+		transform(t, service, `"b"`, 3)
+		transform(t, service, `"a"`, 3)
+		transform(t, service, `"oversized"`, 6)
+		transform(t, service, `"oversized"`, 6)
+		if calls[3].Load() != 3 || calls[6].Load() != 2 {
+			t.Fatalf("byte eviction calls cached-size=%d oversized=%d", calls[3].Load(), calls[6].Load())
+		}
+		service.transformMu.Lock()
+		entries, cacheBytes := len(service.transformCache), service.transformCacheBytes
+		service.transformMu.Unlock()
+		if entries != 1 || cacheBytes != 3 {
+			t.Fatalf("byte-bounded cache entries=%d bytes=%d, want 1 and 3", entries, cacheBytes)
+		}
+	})
+}
+
+func TestTransformCacheRejectsErrorsSaturationAndCancellation(t *testing.T) {
+	t.Run("error", func(t *testing.T) {
+		service := newTransformCacheTestService(100, 4)
+		var calls atomic.Int32
+		service.imageTransformer = func(_ *os.File, _ string, _ imageTransform) ([]byte, string, error) {
+			if calls.Add(1) == 1 {
+				return nil, "", errors.New("decode failed")
+			}
+			return []byte("success"), "image/png", nil
+		}
+		if _, _, err := service.transformCoalesced(context.Background(), `"error"`, nil, "image/png", imageTransform{width: 1, requested: true}); err == nil {
+			t.Fatal("failed transformation returned no error")
+		}
+		for range 2 {
+			if _, _, err := service.transformCoalesced(context.Background(), `"error"`, nil, "image/png", imageTransform{width: 1, requested: true}); err != nil {
+				t.Fatalf("successful transformation: %v", err)
+			}
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("failed result was cached: transformer calls=%d, want 2", calls.Load())
+		}
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		service := newTransformCacheTestService(100, 4)
+		var calls atomic.Int32
+		started := make(chan struct{})
+		release := make(chan struct{})
+		service.imageTransformer = func(_ *os.File, _ string, _ imageTransform) ([]byte, string, error) {
+			if calls.Add(1) == 1 {
+				close(started)
+				<-release
+			}
+			return []byte("success"), "image/png", nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() {
+			_, _, err := service.transformCoalesced(ctx, `"canceled"`, nil, "image/png", imageTransform{width: 1, requested: true})
+			result <- err
+		}()
+		<-started
+		cancel()
+		close(release)
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled transformation error=%v", err)
+		}
+		for range 2 {
+			if _, _, err := service.transformCoalesced(context.Background(), `"canceled"`, nil, "image/png", imageTransform{width: 1, requested: true}); err != nil {
+				t.Fatalf("retry canceled transformation: %v", err)
+			}
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("canceled result was cached: transformer calls=%d, want 2", calls.Load())
+		}
+	})
+
+	t.Run("saturation", func(t *testing.T) {
+		service := newTransformCacheTestService(100, 4)
+		service.transformSlots = make(chan struct{}, 1)
+		var targetCalls atomic.Int32
+		started := make(chan struct{})
+		release := make(chan struct{})
+		service.imageTransformer = func(_ *os.File, _ string, transform imageTransform) ([]byte, string, error) {
+			if transform.width == 1 {
+				close(started)
+				<-release
+			} else {
+				targetCalls.Add(1)
+			}
+			return []byte{byte(transform.width)}, "image/png", nil
+		}
+		blocker := make(chan error, 1)
+		go func() {
+			_, _, err := service.transformCoalesced(context.Background(), `"blocker"`, nil, "image/png", imageTransform{width: 1, requested: true})
+			blocker <- err
+		}()
+		<-started
+		if _, _, err := service.transformCoalesced(context.Background(), `"target"`, nil, "image/png", imageTransform{width: 2, requested: true}); !errors.Is(err, errImageTransformSaturated) {
+			t.Fatalf("saturated transformation error=%v", err)
+		}
+		close(release)
+		if err := <-blocker; err != nil {
+			t.Fatalf("blocking transformation: %v", err)
+		}
+		for range 2 {
+			if _, _, err := service.transformCoalesced(context.Background(), `"target"`, nil, "image/png", imageTransform{width: 2, requested: true}); err != nil {
+				t.Fatalf("retry saturated transformation: %v", err)
+			}
+		}
+		if targetCalls.Load() != 1 {
+			t.Fatalf("saturated target transformer calls=%d, want 1 after retry", targetCalls.Load())
+		}
+	})
+}
+
+func TestTransformCacheConcurrentAccessSharesImmutablePayload(t *testing.T) {
+	service := newTransformCacheTestService(1<<20, 64)
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	payload := []byte("shared immutable transformed payload")
+	service.imageTransformer = func(_ *os.File, _ string, _ imageTransform) ([]byte, string, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		return payload, "image/png", nil
+	}
+	const requestCount = 32
+	results := make(chan []byte, requestCount)
+	start := make(chan struct{})
+	for range requestCount {
+		go func() {
+			<-start
+			content, _, err := service.transformCoalesced(context.Background(), `"concurrent"`, nil, "image/png", imageTransform{width: 1, requested: true})
+			if err != nil {
+				results <- nil
+				return
+			}
+			results <- content
+		}()
+	}
+	close(start)
+	<-started
+	close(release)
+	for range requestCount {
+		content := <-results
+		if !bytes.Equal(content, payload) || &content[0] != &payload[0] {
+			t.Fatalf("concurrent cache returned copied or changed payload %q", content)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("concurrent identical requests transformed %d times, want 1", calls.Load())
+	}
+}
+
+func newTransformCacheTestService(maxBytes int64, maxEntries int) *Service {
+	return &Service{
+		transformFlights:         make(map[string]*imageTransformFlight),
+		transformSlots:           make(chan struct{}, maximumConcurrentImageTransforms),
+		transformCache:           make(map[string]*list.Element),
+		transformCacheMaxBytes:   maxBytes,
+		transformCacheMaxEntries: maxEntries,
+	}
+}
+
+func TestTransformCoalescedCleansUpAfterError(t *testing.T) {
+	service := &Service{
+		transformFlights: make(map[string]*imageTransformFlight),
+		transformSlots:   make(chan struct{}, maximumConcurrentImageTransforms),
+	}
+	transformErr := errors.New("transform failed")
+	service.imageTransformer = func(*os.File, string, imageTransform) ([]byte, string, error) {
+		return nil, "", transformErr
+	}
+	transform := imageTransform{width: 1, requested: true}
+	if _, _, err := service.transformCoalesced(context.Background(), `"failed"`, nil, "image/png", transform); !errors.Is(err, transformErr) {
+		t.Fatalf("transformation error = %v, want %v", err, transformErr)
+	}
+	service.transformMu.Lock()
+	remainingFlights := len(service.transformFlights)
+	service.transformMu.Unlock()
+	if remainingFlights != 0 || len(service.transformSlots) != 0 {
+		t.Fatalf("failed transform cleanup flights=%d slots=%d", remainingFlights, len(service.transformSlots))
+	}
+
+	service.imageTransformer = func(*os.File, string, imageTransform) ([]byte, string, error) {
+		return []byte("retry"), "image/png", nil
+	}
+	content, _, err := service.transformCoalesced(context.Background(), `"failed"`, nil, "image/png", transform)
+	if err != nil || string(content) != "retry" {
+		t.Fatalf("retry after failed flight content=%q error=%v", content, err)
+	}
+}
+
+func TestServeKeyRejectsUnsupportedCachedTransformWithoutRefetch(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	var requests atomic.Int32
+	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	localURL := service.LocalURL(context.Background(), fixture.URL+"/cached.webp")
+	key := strings.TrimPrefix(localURL, publicPrefix)
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE artwork_cache
+		SET content_type = 'image/webp', byte_size = 30, cached_at = now(), last_accessed_at = now()
+		WHERE key = $1
+	`, key); err != nil {
+		t.Fatalf("prepare unsupported cached artwork: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, localURL+"?quality=80", nil)
+	response := httptest.NewRecorder()
+	service.ServeKey(response, request, key)
+	if response.Code != http.StatusBadRequest || response.Header().Get("Cache-Control") != "no-store" || requests.Load() != 0 {
+		t.Fatalf("unsupported transform status=%d headers=%v upstream=%d", response.Code, response.Header(), requests.Load())
+	}
+}
+
+func TestImageTransformParserAndNegativeCacheAreBounded(t *testing.T) {
+	for _, values := range []url.Values{
+		{"width": {"0"}},
+		{"width": {"0400"}},
+		{"quality": {"101"}},
+		{"width": {"400"}, "maxWidth": {"400"}},
+		{"fillWidth": {"10000"}, "fillHeight": {"10000"}},
+		{"maxWidth": {"400", "401"}},
+	} {
+		if _, err := parseImageTransform(values); err == nil {
+			t.Fatalf("invalid transform accepted: %#v", values)
+		}
+	}
+	transform, err := parseImageTransform(url.Values{"maxWidth": {"600"}, "maxHeight": {"600"}, "quality": {"90"}})
+	if err != nil || !transform.requested || transform.maxWidth != 600 || transform.maxHeight != 600 || transform.quality != 90 {
+		t.Fatalf("valid transform=%+v error=%v", transform, err)
+	}
+	for _, test := range []struct {
+		transform imageTransform
+		width     int
+		height    int
+		cover     bool
+	}{
+		{transform: imageTransform{width: 400}, width: 400, height: 200},
+		{transform: imageTransform{maxWidth: 600, maxHeight: 600}, width: 600, height: 300},
+		{transform: imageTransform{fillHeight: 400}, width: 800, height: 400},
+		{transform: imageTransform{fillWidth: 280, fillHeight: 280}, width: 280, height: 280, cover: true},
+	} {
+		width, height, cover := transformedDimensions(800, 400, test.transform)
+		if width != test.width || height != test.height || cover != test.cover {
+			t.Fatalf("transform %+v dimensions=%dx%d cover=%t", test.transform, width, height, cover)
+		}
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if cacheableArtworkFailure(canceled, errors.New("transport failure")) || cacheableArtworkFailure(context.Background(), context.Canceled) ||
+		cacheableArtworkFailure(context.Background(), context.DeadlineExceeded) || !cacheableArtworkFailure(context.Background(), errors.New("upstream failure")) {
+		t.Fatal("negative-cache cancellation classification is incorrect")
+	}
+
+	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	service := &Service{negative: make(map[string]time.Time), negativeNow: func() time.Time { return now }}
+	for index := 0; index <= maximumNegativeCacheEntries; index++ {
+		service.markNegative(fmt.Sprintf("%064x", index+1))
+	}
+	if len(service.negative) != maximumNegativeCacheEntries {
+		t.Fatalf("negative cache size=%d want %d", len(service.negative), maximumNegativeCacheEntries)
+	}
+	newest := fmt.Sprintf("%064x", maximumNegativeCacheEntries+1)
+	if !service.negativeCached(newest) {
+		t.Fatal("negative cache evicted newest entry")
+	}
+	now = now.Add(negativeCacheTTL)
+	service.markNegative(strings.Repeat("f", 64))
+	if len(service.negative) != 1 {
+		t.Fatalf("expired negative cache entries retained: %d", len(service.negative))
+	}
+}
+
+func TestFetchAdmissionCoalescesBeforeNonBlockingGlobalAdmission(t *testing.T) {
+	service := &Service{
+		flights: make(map[string]*flight),
+		fetchAdmission: fetchAdmission{
+			maxInFlight:       maximumConcurrentArtworkFetches,
+			maxTemporaryFiles: maximumReservedArtworkTemporaryFiles,
+			maxTemporaryBytes: maximumReservedArtworkTemporaryBytes,
+		},
+		negative:    make(map[string]time.Time),
+		negativeNow: time.Now,
+	}
+	for range maximumConcurrentArtworkFetches {
+		if !service.fetchAdmission.tryReserve() {
+			t.Fatal("fill fetch admission")
+		}
+	}
+	sharedErr := errors.New("shared fetch failed")
+	shared := &flight{done: make(chan struct{}), err: sharedErr}
+	close(shared.done)
+	const sharedKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	service.flights[sharedKey] = shared
+	if err := service.fetchCoalesced(context.Background(), cacheRecord{key: sharedKey}); !errors.Is(err, sharedErr) {
+		t.Fatalf("same-key saturated join error=%v want=%v", err, sharedErr)
+	}
+
+	const distinctKey = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if err := service.fetchCoalesced(context.Background(), cacheRecord{key: distinctKey}); !errors.Is(err, errArtworkFetchSaturated) {
+		t.Fatalf("distinct saturated fetch error=%v", err)
+	}
+	inFlight, temporaryFiles, temporaryBytes := service.fetchAdmission.usage()
+	if inFlight != maximumConcurrentArtworkFetches || temporaryFiles != maximumReservedArtworkTemporaryFiles ||
+		temporaryBytes != maximumReservedArtworkTemporaryBytes || service.flights[distinctKey] != nil {
+		t.Fatalf("saturated admission usage=(%d,%d,%d) flight-created=%t", inFlight, temporaryFiles, temporaryBytes, service.flights[distinctKey] != nil)
+	}
+
+	service.fetchAdmission.release()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := service.fetchCoalesced(canceled, cacheRecord{key: distinctKey}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-canceled fetch error=%v", err)
+	}
+	inFlight, temporaryFiles, temporaryBytes = service.fetchAdmission.usage()
+	if inFlight != maximumConcurrentArtworkFetches-1 || temporaryFiles != maximumReservedArtworkTemporaryFiles-1 ||
+		temporaryBytes != maximumReservedArtworkTemporaryBytes-maxObjectBytes || service.flights[distinctKey] != nil {
+		t.Fatalf("pre-canceled admission usage=(%d,%d,%d) flight-created=%t", inFlight, temporaryFiles, temporaryBytes, service.flights[distinctKey] != nil)
+	}
+}
+
+func TestFetchAdmissionEnforcesEveryConfiguredCeilingAndRecovers(t *testing.T) {
+	tests := []struct {
+		name      string
+		admission *fetchAdmission
+		wantFiles int
+		wantBytes int64
+	}{
+		{
+			name: "in flight",
+			admission: &fetchAdmission{
+				maxInFlight:       1,
+				maxTemporaryFiles: 2,
+				maxTemporaryBytes: 2 * maxObjectBytes,
+			},
+			wantFiles: 1,
+			wantBytes: maxObjectBytes,
+		},
+		{
+			name: "temporary files",
+			admission: &fetchAdmission{
+				maxInFlight:       2,
+				maxTemporaryFiles: 1,
+				maxTemporaryBytes: 2 * maxObjectBytes,
+			},
+			wantFiles: 1,
+			wantBytes: maxObjectBytes,
+		},
+		{
+			name: "temporary bytes",
+			admission: &fetchAdmission{
+				maxInFlight:       2,
+				maxTemporaryFiles: 2,
+				maxTemporaryBytes: maxObjectBytes,
+			},
+			wantFiles: 1,
+			wantBytes: maxObjectBytes,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if !test.admission.tryReserve() {
+				t.Fatal("first fetch was not admitted")
+			}
+			if test.admission.tryReserve() {
+				t.Fatal("fetch exceeding configured ceiling was admitted")
+			}
+			inFlight, temporaryFiles, temporaryBytes := test.admission.usage()
+			if inFlight != 1 || temporaryFiles != test.wantFiles || temporaryBytes != test.wantBytes {
+				t.Fatalf("saturated usage=(%d,%d,%d), want (1,%d,%d)", inFlight, temporaryFiles, temporaryBytes, test.wantFiles, test.wantBytes)
+			}
+			test.admission.release()
+			if !test.admission.tryReserve() {
+				t.Fatal("released capacity was not reusable")
+			}
+			test.admission.release()
+			inFlight, temporaryFiles, temporaryBytes = test.admission.usage()
+			if inFlight != 0 || temporaryFiles != 0 || temporaryBytes != 0 {
+				t.Fatalf("released usage=(%d,%d,%d)", inFlight, temporaryFiles, temporaryBytes)
+			}
+		})
+	}
+}
+
+func TestFetchAdmissionBoundsDistinctFlightsAndAlwaysReleases(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	imageBytes := testPNG(t, color.NRGBA{R: 45, G: 92, B: 138, A: 255})
+	started := make(chan string, maximumConcurrentArtworkFetches)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFetches := func() { releaseOnce.Do(func() { close(release) }) }
+	cancelStarted := make(chan struct{}, 1)
+	var upstreamRequests atomic.Int32
+	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		upstreamRequests.Add(1)
+		response.Header().Set("Content-Type", "image/png")
+		switch request.URL.Path {
+		case "/invalid":
+			_, _ = response.Write([]byte("not an image"))
+			return
+		case "/cancel":
+			response.WriteHeader(http.StatusOK)
+			response.(http.Flusher).Flush()
+			cancelStarted <- struct{}{}
+			<-request.Context().Done()
+			return
+		}
+		response.WriteHeader(http.StatusOK)
+		response.(http.Flusher).Flush()
+		started <- request.URL.Path
+		<-release
+		_, _ = response.Write(imageBytes)
+	}))
+	defer func() {
+		releaseFetches()
+		fixture.Close()
+	}()
+	service := newArtworkTestService(t, pool, fixture.Client(), int64(maximumConcurrentArtworkFetches)*(maxObjectBytes+1))
+
+	localURLs := make([]string, maximumConcurrentArtworkFetches+2)
+	for index := range localURLs {
+		localURLs[index] = service.LocalURL(context.Background(), fmt.Sprintf("%s/distinct-%d", fixture.URL, index))
+		if localURLs[index] == "" {
+			t.Fatalf("register distinct artwork %d", index)
+		}
+	}
+	responses := make(chan *httptest.ResponseRecorder, maximumConcurrentArtworkFetches+1)
+	for index := range maximumConcurrentArtworkFetches {
+		localURL := localURLs[index]
+		go func() { responses <- serveArtwork(service, http.MethodGet, localURL) }()
+	}
+	for range maximumConcurrentArtworkFetches {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("admitted artwork fetch did not reach upstream")
+		}
+	}
+
+	countTemporary := func() int {
+		entries, err := os.ReadDir(service.directory)
+		if err != nil {
+			t.Fatalf("read artwork directory: %v", err)
+		}
+		count := 0
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".artwork-") {
+				count++
+			}
+		}
+		return count
+	}
+	deadline := time.Now().Add(time.Second)
+	for countTemporary() != maximumConcurrentArtworkFetches && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if temporary := countTemporary(); temporary != maximumConcurrentArtworkFetches {
+		t.Fatalf("live temporary files=%d want=%d", temporary, maximumConcurrentArtworkFetches)
+	}
+
+	sharedContext := &observedDoneContext{Context: context.Background(), entered: make(chan struct{})}
+	sharedRequest := httptest.NewRequest(http.MethodHead, localURLs[0], nil).WithContext(sharedContext)
+	sharedRequest.SetPathValue("key", strings.TrimPrefix(localURLs[0], publicPrefix))
+	sharedResponse := httptest.NewRecorder()
+	go func() {
+		service.ServeHTTP(sharedResponse, sharedRequest)
+		responses <- sharedResponse
+	}()
+	select {
+	case <-sharedContext.entered:
+	case <-time.After(time.Second):
+		t.Fatal("same-key request did not join the admitted flight")
+	}
+	inFlight, reservedFiles, reservedBytes := service.fetchAdmission.usage()
+	if upstreamRequests.Load() != maximumConcurrentArtworkFetches || inFlight != maximumConcurrentArtworkFetches ||
+		reservedFiles != maximumReservedArtworkTemporaryFiles || reservedBytes != maximumReservedArtworkTemporaryBytes {
+		t.Fatalf("same-key coalescence requests=%d admission=(%d,%d,%d)", upstreamRequests.Load(), inFlight, reservedFiles, reservedBytes)
+	}
+
+	for index, method := range []string{http.MethodGet, http.MethodHead} {
+		result := make(chan *httptest.ResponseRecorder, 1)
+		go func(localURL string) { result <- serveArtwork(service, method, localURL) }(localURLs[maximumConcurrentArtworkFetches+index])
+		select {
+		case response := <-result:
+			if response.Code != http.StatusServiceUnavailable || response.Header().Get("Cache-Control") != "no-store" ||
+				response.Header().Get("Retry-After") != "1" || response.Header().Get("Location") != "" {
+				t.Fatalf("saturated %s response status=%d headers=%v body=%q", method, response.Code, response.Header(), response.Body.String())
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("saturated %s did not fail promptly", method)
+		}
+	}
+	if upstreamRequests.Load() != maximumConcurrentArtworkFetches || countTemporary() != maximumConcurrentArtworkFetches {
+		t.Fatalf("saturation created work: upstream=%d temporary=%d", upstreamRequests.Load(), countTemporary())
+	}
+
+	releaseFetches()
+	for range maximumConcurrentArtworkFetches + 1 {
+		select {
+		case response := <-responses:
+			assertArtworkResponse(t, response, imageBytes, response != sharedResponse)
+		case <-time.After(time.Second):
+			t.Fatal("admitted artwork fetch did not finish")
+		}
+	}
+	inFlight, reservedFiles, reservedBytes = service.fetchAdmission.usage()
+	if inFlight != 0 || reservedFiles != 0 || reservedBytes != 0 || len(service.flights) != 0 || countTemporary() != 0 {
+		t.Fatalf("successful cleanup admission=(%d,%d,%d) flights=%d temporary=%d", inFlight, reservedFiles, reservedBytes, len(service.flights), countTemporary())
+	}
+
+	raceKey := strings.TrimPrefix(localURLs[0], publicPrefix)
+	raceRecord, found, err := service.lookup(context.Background(), raceKey)
+	if err != nil || !found {
+		t.Fatalf("lookup cached race record found=%t error=%v", found, err)
+	}
+	if err := service.fetchCoalesced(context.Background(), raceRecord); err != nil {
+		t.Fatalf("cache-race fetch: %v", err)
+	}
+	inFlight, reservedFiles, reservedBytes = service.fetchAdmission.usage()
+	if inFlight != 0 || reservedFiles != 0 || reservedBytes != 0 || upstreamRequests.Load() != maximumConcurrentArtworkFetches {
+		t.Fatalf("cache-race cleanup admission=(%d,%d,%d) upstream=%d", inFlight, reservedFiles, reservedBytes, upstreamRequests.Load())
+	}
+
+	invalidURL := service.LocalURL(context.Background(), fixture.URL+"/invalid")
+	if response := serveArtwork(service, http.MethodGet, invalidURL); response.Code != http.StatusBadGateway {
+		t.Fatalf("invalid upstream status=%d body=%q", response.Code, response.Body.String())
+	}
+	inFlight, reservedFiles, reservedBytes = service.fetchAdmission.usage()
+	if inFlight != 0 || reservedFiles != 0 || reservedBytes != 0 || len(service.flights) != 0 || countTemporary() != 0 {
+		t.Fatalf("error cleanup admission=(%d,%d,%d) flights=%d temporary=%d", inFlight, reservedFiles, reservedBytes, len(service.flights), countTemporary())
+	}
+
+	cancelURL := service.LocalURL(context.Background(), fixture.URL+"/cancel")
+	cancelContext, cancel := context.WithCancel(context.Background())
+	cancelRequest := httptest.NewRequest(http.MethodGet, cancelURL, nil).WithContext(cancelContext)
+	cancelRequest.SetPathValue("key", strings.TrimPrefix(cancelURL, publicPrefix))
+	cancelResponse := httptest.NewRecorder()
+	canceledResult := make(chan struct{})
+	go func() {
+		service.ServeHTTP(cancelResponse, cancelRequest)
+		close(canceledResult)
+	}()
+	select {
+	case <-cancelStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cancelable artwork fetch did not reach upstream")
+	}
+	cancel()
+	select {
+	case <-canceledResult:
+	case <-time.After(time.Second):
+		t.Fatal("canceled artwork fetch did not return")
+	}
+	inFlight, reservedFiles, reservedBytes = service.fetchAdmission.usage()
+	if inFlight != 0 || reservedFiles != 0 || reservedBytes != 0 || len(service.flights) != 0 || countTemporary() != 0 {
+		t.Fatalf("canceled cleanup admission=(%d,%d,%d) flights=%d temporary=%d", inFlight, reservedFiles, reservedBytes, len(service.flights), countTemporary())
 	}
 }
 
@@ -382,7 +1304,7 @@ func TestServeKeyDirectPreservesDeliveryAndFailsClosed(t *testing.T) {
 	localURL := service.LocalURL(context.Background(), fixture.URL+"/private/poster.png?token=provider-secret")
 	key := strings.TrimPrefix(localURL, publicPrefix)
 
-	getRequest := httptest.NewRequest(http.MethodGet, "/Items/item-id/Images/Primary?maxWidth=400", nil)
+	getRequest := httptest.NewRequest(http.MethodGet, "/Items/item-id/Images/Primary", nil)
 	getRequest.SetPathValue("key", "path-value-must-not-be-used")
 	getResponse := httptest.NewRecorder()
 	service.ServeKey(getResponse, getRequest, key)
@@ -426,6 +1348,80 @@ func TestServeKeyDirectPreservesDeliveryAndFailsClosed(t *testing.T) {
 	service.ServeKey(methodResponse, httptest.NewRequest(http.MethodPost, "/Items/item-id/Images/Primary", nil), key)
 	if methodResponse.Code != http.StatusMethodNotAllowed || methodResponse.Header().Get("Allow") != "GET, HEAD" || requests.Load() != 1 {
 		t.Fatalf("unsupported method response = %d allow=%q upstream=%d", methodResponse.Code, methodResponse.Header().Get("Allow"), requests.Load())
+	}
+}
+
+func TestServeKeyIfNoneMatchShortCircuitsBeforeOpenFetchAndTouch(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	imageBytes := testPNG(t, color.NRGBA{R: 72, G: 101, B: 144, A: 255})
+	var requests atomic.Int32
+	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		response.Header().Set("Content-Type", "image/png")
+		_, _ = response.Write(imageBytes)
+	}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	localURL := service.LocalURL(context.Background(), fixture.URL+"/conditional")
+	key := strings.TrimPrefix(localURL, publicPrefix)
+	assertArtworkResponse(t, serveArtwork(service, http.MethodGet, localURL), imageBytes, true)
+
+	lastAccessed := time.Date(2026, time.August, 8, 12, 34, 56, 0, time.UTC)
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE artwork_cache SET last_accessed_at = $2 WHERE key = $1
+	`, key, lastAccessed); err != nil {
+		t.Fatalf("set artwork access sentinel: %v", err)
+	}
+	if err := os.Remove(service.path(key)); err != nil {
+		t.Fatalf("remove cached artwork before conditional requests: %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		method string
+		value  string
+	}{
+		{name: "strong GET", method: http.MethodGet, value: `"` + key + `"`},
+		{name: "weak GET", method: http.MethodGet, value: `"other", W/"` + key + `"`},
+		{name: "wildcard GET", method: http.MethodGet, value: `*`},
+		{name: "exact HEAD", method: http.MethodHead, value: `"` + key + `"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, localURL, nil)
+			request.Header.Set("If-None-Match", test.value)
+			response := httptest.NewRecorder()
+			service.ServeKey(response, request, key)
+			if response.Code != http.StatusNotModified || response.Body.Len() != 0 ||
+				response.Header().Get("ETag") != `"`+key+`"` ||
+				response.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+				t.Fatalf("conditional response status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+			}
+		})
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("conditional requests fetched artwork: requests=%d", requests.Load())
+	}
+	var persistedAccess time.Time
+	var byteSize int64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT last_accessed_at, byte_size FROM artwork_cache WHERE key = $1
+	`, key).Scan(&persistedAccess, &byteSize); err != nil {
+		t.Fatalf("read conditional artwork state: %v", err)
+	}
+	if !persistedAccess.Equal(lastAccessed) || byteSize != int64(len(imageBytes)) {
+		t.Fatalf("conditional request mutated cache state: last_accessed_at=%v byte_size=%d", persistedAccess, byteSize)
+	}
+}
+
+func TestIfNoneMatchArtworkBounds(t *testing.T) {
+	etag := `"` + strings.Repeat("a", 64) + `"`
+	for _, values := range [][]string{
+		{strings.Repeat("x", maxIfNoneMatchBytes), etag},
+		{etag, strings.Repeat("x", maxIfNoneMatchBytes)},
+	} {
+		if ifNoneMatchArtwork(values, etag) {
+			t.Fatalf("oversized If-None-Match was accepted: lengths=%d,%d", len(values[0]), len(values[1]))
+		}
 	}
 }
 
@@ -789,16 +1785,15 @@ func TestServeHTTPRedactsUpstreamURLFromErrorLogAndResponse(t *testing.T) {
 	}
 }
 
-func waitForArtworkCondition(t *testing.T, condition func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("timed out waiting for artwork condition")
+type observedDoneContext struct {
+	context.Context
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (ctx *observedDoneContext) Done() <-chan struct{} {
+	ctx.once.Do(func() { close(ctx.entered) })
+	return ctx.Context.Done()
 }
 
 func openArtworkTestPool(t *testing.T) *pgxpool.Pool {

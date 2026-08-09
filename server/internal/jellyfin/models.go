@@ -1,6 +1,12 @@
 package jellyfin
 
-import "time"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"time"
+	"unicode/utf8"
+)
 
 const (
 	CompatibilityVersion     = "10.11.11"
@@ -116,6 +122,7 @@ type SessionInfoDto struct {
 	ApplicationVersion       string                `json:"ApplicationVersion"`
 	RemoteEndPoint           string                `json:"RemoteEndPoint"`
 	LastActivityDate         time.Time             `json:"LastActivityDate"`
+	PlayState                *PlayerStateInfo      `json:"PlayState,omitempty"`
 	LastPlaybackCheckIn      *time.Time            `json:"LastPlaybackCheckIn,omitempty"`
 	NowPlayingItem           *BaseItemDto          `json:"NowPlayingItem,omitempty"`
 	NowViewingItem           *BaseItemDto          `json:"NowViewingItem,omitempty"`
@@ -136,6 +143,31 @@ type ClientCapabilitiesDto struct {
 	SupportsMediaControl         bool           `json:"SupportsMediaControl"`
 	SupportsPersistentIdentifier bool           `json:"SupportsPersistentIdentifier"`
 	DeviceProfile                *DeviceProfile `json:"DeviceProfile,omitempty"`
+}
+type PlayerStateInfo struct {
+	PositionTicks       *int64 `json:"PositionTicks,omitempty"`
+	CanSeek             bool   `json:"CanSeek"`
+	IsPaused            bool   `json:"IsPaused"`
+	IsMuted             bool   `json:"IsMuted"`
+	AudioStreamIndex    *int   `json:"AudioStreamIndex,omitempty"`
+	SubtitleStreamIndex *int   `json:"SubtitleStreamIndex,omitempty"`
+	MediaSourceId       string `json:"MediaSourceId,omitempty"`
+	PlayMethod          string `json:"PlayMethod,omitempty"`
+}
+
+type UserDataChangeInfo struct {
+	UserId       string            `json:"UserId"`
+	UserDataList []UserItemDataDto `json:"UserDataList"`
+}
+
+type LibraryUpdateInfo struct {
+	FoldersAddedTo     []string `json:"FoldersAddedTo"`
+	FoldersRemovedFrom []string `json:"FoldersRemovedFrom"`
+	ItemsAdded         []string `json:"ItemsAdded"`
+	ItemsRemoved       []string `json:"ItemsRemoved"`
+	ItemsUpdated       []string `json:"ItemsUpdated"`
+	CollectionFolders  []string `json:"CollectionFolders"`
+	IsEmpty            bool     `json:"IsEmpty"`
 }
 
 type SessionUserInfoDto struct {
@@ -210,44 +242,73 @@ type AllThemeMediaResult struct {
 }
 
 type BaseItemDto struct {
-	Id                      string            `json:"Id"`
-	ServerId                string            `json:"ServerId"`
-	Name                    string            `json:"Name"`
-	Etag                    string            `json:"Etag,omitempty"`
-	Path                    string            `json:"Path,omitempty"`
-	DisplayPreferencesId    string            `json:"DisplayPreferencesId,omitempty"`
-	LocationType            string            `json:"LocationType,omitempty"`
-	SortName                string            `json:"SortName,omitempty"`
-	OriginalTitle           string            `json:"OriginalTitle,omitempty"`
-	Type                    string            `json:"Type"`
-	MediaType               string            `json:"MediaType,omitempty"`
-	IsFolder                bool              `json:"IsFolder"`
-	IsPlayable              bool              `json:"IsPlayable"`
-	CanDownload             bool              `json:"CanDownload"`
-	CollectionType          string            `json:"CollectionType,omitempty"`
-	ParentId                string            `json:"ParentId,omitempty"`
-	SeriesId                string            `json:"SeriesId,omitempty"`
-	SeasonId                string            `json:"SeasonId,omitempty"`
-	SeriesName              string            `json:"SeriesName,omitempty"`
-	SeasonName              string            `json:"SeasonName,omitempty"`
-	IndexNumber             *int              `json:"IndexNumber,omitempty"`
-	ParentIndexNumber       *int              `json:"ParentIndexNumber,omitempty"`
-	Overview                string            `json:"Overview,omitempty"`
-	Taglines                []string          `json:"Taglines,omitempty"`
-	Status                  string            `json:"Status,omitempty"`
-	EndDate                 string            `json:"EndDate,omitempty"`
-	PremiereDate            string            `json:"PremiereDate,omitempty"`
-	ProductionYear          *int              `json:"ProductionYear,omitempty"`
-	RunTimeTicks            *int64            `json:"RunTimeTicks,omitempty"`
-	Genres                  []string          `json:"Genres"`
-	CommunityRating         *float32          `json:"CommunityRating,omitempty"`
-	ProviderIds             map[string]string `json:"ProviderIds,omitempty"`
-	PrimaryImageAspectRatio float64           `json:"PrimaryImageAspectRatio,omitempty"`
-	ImageTags               map[string]string `json:"ImageTags"`
-	BackdropImageTags       []string          `json:"BackdropImageTags"`
-	UserData                *UserItemDataDto  `json:"UserData,omitempty"`
-	MediaSources            []MediaSourceInfo `json:"MediaSources,omitempty"`
-	People                  []BaseItemPerson  `json:"People,omitempty"`
+	Id                      string                              `json:"Id"`
+	ServerId                string                              `json:"ServerId"`
+	Name                    string                              `json:"Name"`
+	Etag                    string                              `json:"Etag,omitempty"`
+	Path                    string                              `json:"Path,omitempty"`
+	DisplayPreferencesId    string                              `json:"DisplayPreferencesId,omitempty"`
+	LocationType            string                              `json:"LocationType,omitempty"`
+	SortName                string                              `json:"SortName,omitempty"`
+	OriginalTitle           string                              `json:"OriginalTitle,omitempty"`
+	Type                    string                              `json:"Type"`
+	MediaType               string                              `json:"MediaType,omitempty"`
+	IsFolder                bool                                `json:"IsFolder"`
+	IsPlayable              bool                                `json:"IsPlayable"`
+	CanDownload             bool                                `json:"CanDownload"`
+	CollectionType          string                              `json:"CollectionType,omitempty"`
+	ParentId                string                              `json:"ParentId,omitempty"`
+	SeriesId                string                              `json:"SeriesId,omitempty"`
+	SeasonId                string                              `json:"SeasonId,omitempty"`
+	SeriesName              string                              `json:"SeriesName,omitempty"`
+	SeasonName              string                              `json:"SeasonName,omitempty"`
+	IndexNumber             *int                                `json:"IndexNumber,omitempty"`
+	ParentIndexNumber       *int                                `json:"ParentIndexNumber,omitempty"`
+	Overview                string                              `json:"Overview,omitempty"`
+	Taglines                []string                            `json:"Taglines,omitempty"`
+	Status                  string                              `json:"Status,omitempty"`
+	EndDate                 string                              `json:"EndDate,omitempty"`
+	PremiereDate            string                              `json:"PremiereDate,omitempty"`
+	ProductionYear          *int                                `json:"ProductionYear,omitempty"`
+	RunTimeTicks            *int64                              `json:"RunTimeTicks,omitempty"`
+	Genres                  []string                            `json:"Genres,omitempty"`
+	Studios                 []NameGuidPair                      `json:"Studios,omitempty"`
+	CommunityRating         *float32                            `json:"CommunityRating,omitempty"`
+	ProviderIds             map[string]string                   `json:"ProviderIds,omitempty"`
+	PrimaryImageAspectRatio float64                             `json:"PrimaryImageAspectRatio,omitempty"`
+	ImageTags               map[string]string                   `json:"ImageTags"`
+	BackdropImageTags       []string                            `json:"BackdropImageTags"`
+	UserData                *UserItemDataDto                    `json:"UserData,omitempty"`
+	MediaSources            []MediaSourceInfo                   `json:"MediaSources,omitempty"`
+	Trickplay               map[string]map[int]TrickplayInfoDto `json:"Trickplay,omitempty"`
+	People                  []BaseItemPerson                    `json:"People,omitempty"`
+	includeEmptyGenres      bool
+}
+
+// MarshalJSON preserves the established empty Genres array on virtual roots
+// without defeating optional-field projection for ordinary catalog items.
+func (item BaseItemDto) MarshalJSON() ([]byte, error) {
+	type BaseItemDTOAlias BaseItemDto
+	if !item.includeEmptyGenres || item.Genres == nil {
+		return json.Marshal(BaseItemDTOAlias(item))
+	}
+	return json.Marshal(struct {
+		BaseItemDTOAlias
+		Genres []string `json:"Genres"`
+	}{
+		BaseItemDTOAlias: BaseItemDTOAlias(item),
+		Genres:           item.Genres,
+	})
+}
+
+type TrickplayInfoDto struct {
+	Width          int `json:"Width"`
+	Height         int `json:"Height"`
+	TileWidth      int `json:"TileWidth"`
+	TileHeight     int `json:"TileHeight"`
+	ThumbnailCount int `json:"ThumbnailCount"`
+	Interval       int `json:"Interval"`
+	Bandwidth      int `json:"Bandwidth"`
 }
 
 type BaseItemPerson struct {
@@ -256,6 +317,15 @@ type BaseItemPerson struct {
 	Role            string `json:"Role,omitempty"`
 	Type            string `json:"Type"`
 	PrimaryImageTag string `json:"PrimaryImageTag,omitempty"`
+}
+
+type ImageInfo struct {
+	ImageType  string `json:"ImageType"`
+	ImageIndex int    `json:"ImageIndex"`
+	ImageTag   string `json:"ImageTag"`
+	Width      *int   `json:"Width,omitempty"`
+	Height     *int   `json:"Height,omitempty"`
+	Size       *int64 `json:"Size,omitempty"`
 }
 
 type UserItemDataDto struct {
@@ -272,32 +342,63 @@ type UserItemDataDto struct {
 	ItemId                string   `json:"ItemId"`
 }
 
+var errDuplicateUserDataField = errors.New("duplicate user data field")
+
+type nullableUserDataUpdate[T any] struct {
+	Set   bool
+	Value *T
+}
+
+func (value *nullableUserDataUpdate[T]) UnmarshalJSON(data []byte) error {
+	if value.Set {
+		return errDuplicateUserDataField
+	}
+	value.Set = true
+	data = bytes.TrimSpace(data)
+	if !utf8.Valid(data) {
+		return errors.New("user data field is not valid UTF-8")
+	}
+	if bytes.Equal(data, []byte("null")) {
+		value.Value = nil
+		return nil
+	}
+	var decoded T
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	value.Value = &decoded
+	return nil
+}
+
 type UpdateUserItemDataDto struct {
-	Rating                *float64 `json:"Rating"`
-	PlayedPercentage      *float64 `json:"PlayedPercentage"`
-	UnplayedItemCount     *int     `json:"UnplayedItemCount"`
-	PlaybackPositionTicks *int64   `json:"PlaybackPositionTicks"`
-	PlayCount             *int     `json:"PlayCount"`
-	IsFavorite            *bool    `json:"IsFavorite"`
-	Likes                 *bool    `json:"Likes"`
-	LastPlayedDate        *string  `json:"LastPlayedDate"`
-	Played                *bool    `json:"Played"`
-	Key                   *string  `json:"Key"`
-	ItemId                *string  `json:"ItemId"`
+	Rating                nullableUserDataUpdate[float64] `json:"Rating"`
+	PlayedPercentage      nullableUserDataUpdate[float64] `json:"PlayedPercentage"`
+	UnplayedItemCount     nullableUserDataUpdate[int]     `json:"UnplayedItemCount"`
+	PlaybackPositionTicks *int64                          `json:"PlaybackPositionTicks"`
+	PlayCount             nullableUserDataUpdate[int]     `json:"PlayCount"`
+	IsFavorite            *bool                           `json:"IsFavorite"`
+	Likes                 nullableUserDataUpdate[bool]    `json:"Likes"`
+	LastPlayedDate        nullableUserDataUpdate[string]  `json:"LastPlayedDate"`
+	Played                *bool                           `json:"Played"`
+	Key                   *string                         `json:"Key"`
+	ItemId                *string                         `json:"ItemId"`
 }
 
 type SearchHintDto struct {
-	ItemId           string            `json:"ItemId"`
-	Id               string            `json:"Id"`
-	Name             string            `json:"Name"`
-	Type             string            `json:"Type"`
-	MediaType        string            `json:"MediaType,omitempty"`
-	PrimaryImageTag  string            `json:"PrimaryImageTag,omitempty"`
-	ThumbImageTag    string            `json:"ThumbImageTag,omitempty"`
-	BackdropImageTag string            `json:"BackdropImageTag,omitempty"`
-	ProductionYear   *int              `json:"ProductionYear,omitempty"`
-	RunTimeTicks     *int64            `json:"RunTimeTicks,omitempty"`
-	ProviderIds      map[string]string `json:"ProviderIds,omitempty"`
+	ItemId                  string            `json:"ItemId"`
+	Id                      string            `json:"Id"`
+	Name                    string            `json:"Name"`
+	Type                    string            `json:"Type"`
+	MediaType               string            `json:"MediaType,omitempty"`
+	PrimaryImageTag         string            `json:"PrimaryImageTag,omitempty"`
+	ThumbImageTag           string            `json:"ThumbImageTag,omitempty"`
+	BackdropImageTag        string            `json:"BackdropImageTag,omitempty"`
+	Artists                 []string          `json:"Artists"`
+	ChannelId               *string           `json:"ChannelId"`
+	PrimaryImageAspectRatio float64           `json:"PrimaryImageAspectRatio,omitempty"`
+	ProductionYear          *int              `json:"ProductionYear,omitempty"`
+	RunTimeTicks            *int64            `json:"RunTimeTicks,omitempty"`
+	ProviderIds             map[string]string `json:"ProviderIds,omitempty"`
 }
 
 type SearchHintResult struct {
@@ -377,9 +478,31 @@ type MediaStreamInfo struct {
 	BitRate                int64  `json:"BitRate,omitempty"`
 }
 
+type CodecProfile struct {
+	Type       string             `json:"Type,omitempty"`
+	Codec      string             `json:"Codec,omitempty"`
+	Conditions []ProfileCondition `json:"Conditions,omitempty"`
+}
+
+type ProfileCondition struct {
+	Condition  string `json:"Condition,omitempty"`
+	Property   string `json:"Property,omitempty"`
+	Value      string `json:"Value,omitempty"`
+	IsRequired bool   `json:"IsRequired,omitempty"`
+}
+
+type ContainerProfile struct {
+	Type         string             `json:"Type,omitempty"`
+	Container    string             `json:"Container,omitempty"`
+	SubContainer string             `json:"SubContainer,omitempty"`
+	Conditions   []ProfileCondition `json:"Conditions,omitempty"`
+}
+
 type DeviceProfile struct {
 	Name                string               `json:"Name,omitempty"`
 	MaxStreamingBitrate int64                `json:"MaxStreamingBitrate,omitempty"`
+	CodecProfiles       []CodecProfile       `json:"CodecProfiles,omitempty"`
+	ContainerProfiles   []ContainerProfile   `json:"ContainerProfiles,omitempty"`
 	DirectPlayProfiles  []DirectPlayProfile  `json:"DirectPlayProfiles,omitempty"`
 	TranscodingProfiles []TranscodingProfile `json:"TranscodingProfiles,omitempty"`
 	SubtitleProfiles    []SubtitleProfile    `json:"SubtitleProfiles,omitempty"`
@@ -399,6 +522,7 @@ type TranscodingProfile struct {
 	AudioCodec           string `json:"AudioCodec,omitempty"`
 	Protocol             string `json:"Protocol,omitempty"`
 	Context              string `json:"Context,omitempty"`
+	MaxAudioChannels     string `json:"MaxAudioChannels,omitempty"`
 	EnableMpegtsM2TsMode bool   `json:"EnableMpegtsM2TsMode,omitempty"`
 	BreakOnNonKeyFrames  bool   `json:"BreakOnNonKeyFrames,omitempty"`
 }
@@ -414,6 +538,9 @@ type PlaybackProgressInfo struct {
 	MediaSourceId          string `json:"MediaSourceId,omitempty"`
 	PlaySessionId          string `json:"PlaySessionId,omitempty"`
 	PositionTicks          int64  `json:"PositionTicks,omitempty"`
+	AudioStreamIndex       *int   `json:"AudioStreamIndex,omitempty"`
+	SubtitleStreamIndex    *int   `json:"SubtitleStreamIndex,omitempty"`
+	CanSeek                bool   `json:"CanSeek,omitempty"`
 	PlaybackStartTimeTicks int64  `json:"PlaybackStartTimeTicks,omitempty"`
 	IsPaused               bool   `json:"IsPaused,omitempty"`
 	IsMuted                bool   `json:"IsMuted,omitempty"`

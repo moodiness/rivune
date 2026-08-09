@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/netguard"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 const (
@@ -67,6 +68,59 @@ func isTemporaryProviderError(err error) bool {
 type Transport interface {
 	Manifest(context.Context, string) (Manifest, json.RawMessage, error)
 	Resource(context.Context, string, ResourcePath) (json.RawMessage, CachePolicy, error)
+}
+
+type observedTransport struct {
+	Transport
+}
+
+func observeTransport(transport Transport) Transport {
+	if _, observed := transport.(observedTransport); observed {
+		return transport
+	}
+	if _, observed := transport.(observedBudgetTransport); observed {
+		return transport
+	}
+	observed := observedTransport{Transport: transport}
+	if budgeted, ok := transport.(aggregateBudgetTransport); ok {
+		return observedBudgetTransport{observedTransport: observed, budgeted: budgeted}
+	}
+	return observed
+}
+
+func (transport observedTransport) Manifest(ctx context.Context, transportURL string) (manifest Manifest, payload json.RawMessage, err error) {
+	if requestwork.FromContext(ctx) == nil {
+		return transport.Transport.Manifest(ctx, transportURL)
+	}
+	started := requestwork.Now()
+	requestwork.BeginOutbound(ctx, started)
+	defer func() { requestwork.EndOutbound(ctx, requestwork.Now(), int64(len(payload))) }()
+	return transport.Transport.Manifest(ctx, transportURL)
+}
+
+func (transport observedTransport) Resource(ctx context.Context, transportURL string, path ResourcePath) (payload json.RawMessage, cache CachePolicy, err error) {
+	if requestwork.FromContext(ctx) == nil {
+		return transport.Transport.Resource(ctx, transportURL, path)
+	}
+	started := requestwork.Now()
+	requestwork.BeginOutbound(ctx, started)
+	defer func() { requestwork.EndOutbound(ctx, requestwork.Now(), int64(len(payload))) }()
+	return transport.Transport.Resource(ctx, transportURL, path)
+}
+
+type observedBudgetTransport struct {
+	observedTransport
+	budgeted aggregateBudgetTransport
+}
+
+func (transport observedBudgetTransport) resourceWithBudget(ctx context.Context, transportURL string, path ResourcePath, budget *aggregateResourceBudget) (payload json.RawMessage, cache CachePolicy, err error) {
+	if requestwork.FromContext(ctx) == nil {
+		return transport.budgeted.resourceWithBudget(ctx, transportURL, path, budget)
+	}
+	started := requestwork.Now()
+	requestwork.BeginOutbound(ctx, started)
+	defer func() { requestwork.EndOutbound(ctx, requestwork.Now(), int64(len(payload))) }()
+	return transport.budgeted.resourceWithBudget(ctx, transportURL, path, budget)
 }
 
 type aggregateResourceBudget struct {

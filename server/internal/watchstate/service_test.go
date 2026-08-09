@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -1919,5 +1920,50 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 	}
 	if _, err := service.GetProgress(ctx, profileOne, first.Videos[0].TitleID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected category-revoked addon title to be inaccessible, got %v", err)
+	}
+}
+
+func TestValidateUserDataInputBoundsAndNullableSemantics(t *testing.T) {
+	negative, aboveCount := -1, int(maximumSupplementalUserDataCount+1)
+	negativeFloat, aboveRating, abovePercentage := -0.1, 10.1, 100.1
+	invalidDate := time.Date(0, time.January, 1, 0, 0, 0, 0, time.UTC)
+	notANumber, infinity := math.NaN(), math.Inf(1)
+	for _, input := range []UpdateUserDataInput{
+		{Rating: OptionalUserDataValue[float64]{Set: true, Value: &negativeFloat}},
+		{Rating: OptionalUserDataValue[float64]{Set: true, Value: &notANumber}},
+		{PlayedPercentage: OptionalUserDataValue[float64]{Set: true, Value: &infinity}},
+		{Rating: OptionalUserDataValue[float64]{Set: true, Value: &aboveRating}},
+		{PlayedPercentage: OptionalUserDataValue[float64]{Set: true, Value: &negativeFloat}},
+		{PlayedPercentage: OptionalUserDataValue[float64]{Set: true, Value: &abovePercentage}},
+		{UnplayedItemCount: OptionalUserDataValue[int]{Set: true, Value: &negative}},
+		{UnplayedItemCount: OptionalUserDataValue[int]{Set: true, Value: &aboveCount}},
+		{PlayCount: OptionalUserDataValue[int]{Set: true}},
+		{PlayCount: OptionalUserDataValue[int]{Set: true, Value: &negative}},
+		{PlayCount: OptionalUserDataValue[int]{Set: true, Value: &aboveCount}},
+		{LastPlayedDate: OptionalUserDataValue[time.Time]{Set: true, Value: &invalidDate}},
+	} {
+		if err := validateUserDataInput(input); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("invalid supplemental user data input=%+v error=%v", input, err)
+		}
+	}
+	zero, maximum := 0, int(maximumSupplementalUserDataCount)
+	zeroFloat, maximumRating, maximumPercentage := 0.0, 10.0, 100.0
+	validDate := time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+	for _, input := range []UpdateUserDataInput{
+		{Rating: OptionalUserDataValue[float64]{Set: true}},
+		{Rating: OptionalUserDataValue[float64]{Set: true, Value: &zeroFloat}},
+		{Rating: OptionalUserDataValue[float64]{Set: true, Value: &maximumRating}},
+		{PlayedPercentage: OptionalUserDataValue[float64]{Set: true}},
+		{PlayedPercentage: OptionalUserDataValue[float64]{Set: true, Value: &maximumPercentage}},
+		{UnplayedItemCount: OptionalUserDataValue[int]{Set: true}},
+		{UnplayedItemCount: OptionalUserDataValue[int]{Set: true, Value: &maximum}},
+		{PlayCount: OptionalUserDataValue[int]{Set: true, Value: &zero}},
+		{Likes: OptionalUserDataValue[bool]{Set: true}},
+		{LastPlayedDate: OptionalUserDataValue[time.Time]{Set: true}},
+		{LastPlayedDate: OptionalUserDataValue[time.Time]{Set: true, Value: &validDate}},
+	} {
+		if err := validateUserDataInput(input); err != nil {
+			t.Errorf("valid supplemental user data input=%+v error=%v", input, err)
+		}
 	}
 }

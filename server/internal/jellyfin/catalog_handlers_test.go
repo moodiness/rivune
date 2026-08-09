@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -42,21 +43,40 @@ func (*catalogHTTPAuthentication) Logout(context.Context, AuthenticatedSession) 
 
 type catalogHTTPReader struct {
 	title    watchstate.CatalogTitle
+	titles   map[string]watchstate.CatalogTitle
 	titleErr error
 	page     watchstate.CatalogPage
 	pageErr  error
+	pageFunc func(watchstate.CatalogQuery) (watchstate.CatalogPage, error)
 	queries  []watchstate.CatalogQuery
 	titleIDs []string
 }
 
 func (reader *catalogHTTPReader) GetCatalogTitle(_ context.Context, _ auth.Principal, titleID string) (watchstate.CatalogTitle, error) {
 	reader.titleIDs = append(reader.titleIDs, titleID)
+	if title, ok := reader.titles[titleID]; ok {
+		return title, nil
+	}
 	return reader.title, reader.titleErr
 }
 
 func (reader *catalogHTTPReader) ListCatalogItems(_ context.Context, _ auth.Principal, query watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
 	reader.queries = append(reader.queries, query)
+	if reader.pageFunc != nil {
+		return reader.pageFunc(query)
+	}
 	return reader.page, reader.pageErr
+}
+
+type catalogHTTPDetailReader struct {
+	*catalogHTTPReader
+	enrichedTitle  watchstate.CatalogTitle
+	enrichmentRead []watchstate.CatalogTitle
+}
+
+func (reader *catalogHTTPDetailReader) EnrichCatalogTitle(_ context.Context, _ auth.Principal, title watchstate.CatalogTitle) (watchstate.CatalogTitle, error) {
+	reader.enrichmentRead = append(reader.enrichmentRead, title)
+	return reader.enrichedTitle, nil
 }
 
 func TestCatalogViewsAreStableRootsAndRejectMismatchedUser(t *testing.T) {
@@ -142,20 +162,20 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 		Items: []watchstate.CatalogTitle{{
 			ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "ÉCLAIR Movie",
 			Released: "2025-01-02", Overview: "Résumé", RuntimeMinutes: &runtimeMinutes,
-			Genres: []string{"Drama"}, CommunityRating: &rating, InLibrary: true,
+			Genres: []string{"Drama"}, CommunityRating: &rating, InLibrary: false, Favorite: true,
 			OriginalTitle: "Original Éclair", Tagline: "A bright tagline", Status: "Released",
-			People: []watchstate.CatalogPerson{{Name: "Lead Performer", Role: "Hero", Type: "Actor", ImageURL: localizedArtworkPrefix + strings.Repeat("b", 64)}},
+			People: []watchstate.CatalogPerson{{ID: "9301", Name: "Lead Performer", Role: "Hero", Type: "Actor", ImageURL: localizedArtworkPrefix + strings.Repeat("b", 64)}},
 			ProviderIDs: map[string]string{
 				"imdb": "tt0000100", "tmdb": "100", "tvdb": "200",
 				"addon": "profile-secret", "url": "https://provider.invalid/title/100", "unknown": "opaque-secondary",
 			},
-			PosterURL:     "/api/v1/artwork/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			BackgroundURL: "https://provider.invalid/private.jpg?token=source-secret",
+			PosterURL:     localizedArtworkPrefix + strings.Repeat("a", 64),
+			BackgroundURL: localizedArtworkPrefix + strings.Repeat("c", 64),
 			ResourceID:    "secret-resource", ResourceProvider: "secret-provider", SourceName: "secret-source",
 			Progress: &watchstate.CatalogProgress{PositionSeconds: 61, DurationSeconds: 7380, Completed: true, LastWatchedAt: &lastPlayed},
 		}},
 	}
-	target := "/Items?ParentId=" + views[0].Id + "&StartIndex=2&Limit=1&IncludeItemTypes=Movie"
+	target := "/Items?ParentId=" + views[0].Id + "&StartIndex=2&Limit=1&IncludeItemTypes=Movie&Fields=Etag,Genres,MediaSources,MediaStreams,OriginalTitle,Overview,ParentId,Path,People,PrimaryImageAspectRatio,ProviderIds,SortName,Taglines"
 	request := authenticatedCatalogRequest(t, token, target)
 	response := httptest.NewRecorder()
 	handler.handleItems(response, request)
@@ -179,8 +199,8 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 		*item.RunTimeTicks != MinutesToTicks(123) || item.OriginalTitle != "Original Éclair" || len(item.Taglines) != 1 || item.Taglines[0] != "A bright tagline" ||
 		item.Status != "Released" || len(item.People) != 1 || item.People[0].Name != "Lead Performer" || item.People[0].Role != "Hero" || item.People[0].PrimaryImageTag != strings.Repeat("b", 64) ||
 		item.ProviderIds["Imdb"] != "tt0000100" || item.ProviderIds["Tmdb"] != "100" || item.ProviderIds["Tvdb"] != "200" ||
-		item.ImageTags["Primary"] == "" || len(item.BackdropImageTags) != 0 || item.UserData == nil ||
-		item.UserData.PlaybackPositionTicks != SecondsToTicks(61) || !item.UserData.Played || item.UserData.PlayCount != 1 {
+		item.ImageTags["Primary"] != strings.Repeat("a", 64) || len(item.BackdropImageTags) != 1 || item.BackdropImageTags[0] != strings.Repeat("c", 64) || item.UserData == nil ||
+		!item.UserData.IsFavorite || item.UserData.PlaybackPositionTicks != SecondsToTicks(61) || !item.UserData.Played || item.UserData.PlayCount != 1 {
 		t.Fatalf("movie mapping incomplete: %+v", item)
 	}
 	requireDeferredMediaSource(t, item)
@@ -195,6 +215,144 @@ func TestCatalogItemsTranslateRootAndNeverDiscloseProvenance(t *testing.T) {
 	}
 }
 
+func TestCatalogGeneralListsOmitUnrequestedOptionalFields(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	views, ok := handler.virtualViews()
+	if !ok {
+		t.Fatal("derive virtual views")
+	}
+	rating := float32(8.5)
+	reader.page = watchstate.CatalogPage{
+		Items: []watchstate.CatalogTitle{{
+			ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie",
+			ParentID: "00000000-0000-4000-8000-000000000099", Title: "Projected Movie",
+			OriginalTitle: "Original", Overview: "Requested overview", Genres: []string{"Drama"},
+			Studios: []string{"Studio One"}, CommunityRating: &rating, Tagline: "Hidden tagline",
+			People:      []watchstate.CatalogPerson{{Name: "Hidden Person", Type: "Actor"}},
+			ProviderIDs: map[string]string{"tmdb": "100"},
+		}},
+		Limit: 20, Total: 1,
+	}
+	request := authenticatedCatalogRequest(t, token, "/Items?ParentId="+views[0].Id+"&IncludeItemTypes=Movie&Fields=Overview")
+	response := httptest.NewRecorder()
+	handler.handleItems(response, request)
+	var payload struct {
+		Items []map[string]json.RawMessage `json:"Items"`
+	}
+	decodeCatalogResponse(t, response, &payload)
+	if response.Code != http.StatusOK || len(payload.Items) != 1 {
+		t.Fatalf("general-list projection status=%d payload=%+v body=%s", response.Code, payload, response.Body.String())
+	}
+	item := payload.Items[0]
+	if _, ok := item["Overview"]; !ok {
+		t.Fatalf("requested Overview absent: %s", response.Body.String())
+	}
+	for _, field := range []string{
+		"DisplayPreferencesId", "Etag", "Genres", "MediaSources", "OriginalTitle", "ParentId",
+		"Path", "People", "PrimaryImageAspectRatio", "ProviderIds", "SortName", "Studios", "Taglines",
+	} {
+		if _, present := item[field]; present {
+			t.Fatalf("unrequested %s present: %s", field, response.Body.String())
+		}
+	}
+}
+
+func TestUserDataIsFieldForFieldEqualAcrossCatalogAndContinuationSurfaces(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	itemID := "00000000-0000-4000-8000-000000000111"
+	seriesID := "00000000-0000-4000-8000-000000000100"
+	seasonID := "00000000-0000-4000-8000-000000000110"
+	progressDate := time.Date(2026, 8, 1, 2, 3, 4, 0, time.UTC)
+	persistedDate := time.Date(2026, 8, 2, 3, 4, 5, 600_000_000, time.UTC)
+	rating, percentage, unplayed, playCount, likes := 8.75, 37.25, 12, 0, true
+	title := watchstate.CatalogTitle{
+		ID: itemID, MediaType: "episode", Title: "Episode", SeriesID: seriesID, SeasonID: seasonID, Favorite: true,
+		Progress: &watchstate.CatalogProgress{
+			PositionSeconds: 25, DurationSeconds: 100, Completed: true, LastWatchedAt: &progressDate,
+		},
+		UserData: &watchstate.UserDataValues{
+			Rating: &rating, RatingSet: true, PlayedPercentage: &percentage, PlayedPercentageSet: true,
+			UnplayedItemCount: &unplayed, UnplayedItemCountSet: true, PlayCount: &playCount, PlayCountSet: true,
+			Likes: &likes, LikesSet: true, LastPlayedDate: &persistedDate, LastPlayedDateSet: true,
+		},
+	}
+	reader.title = title
+	reader.titles = map[string]watchstate.CatalogTitle{itemID: title}
+	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{title}, Limit: 1, Total: 1}
+	state := newMemoryWatchstate()
+	state.resumePage = watchstate.ContinueItemsPage{Items: []watchstate.ContinueItem{{TitleID: itemID}}, Limit: 1, Total: 1}
+	state.nextPage = watchstate.ContinueItemsPage{Items: []watchstate.ContinueItem{{TitleID: itemID, SeriesID: seriesID, SeasonID: seasonID}}, Limit: 1, Total: 1}
+	handler.watchstate = state
+
+	listResponse := httptest.NewRecorder()
+	handler.handleItems(listResponse, authenticatedCatalogRequest(t, token, "/Items?Ids="+url.QueryEscape(itemID)+"&Limit=1"))
+	var list QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, listResponse, &list)
+
+	detailRequest := authenticatedCatalogRequest(t, token, "/Items/"+itemID)
+	detailRequest.SetPathValue("id", itemID)
+	detailResponse := httptest.NewRecorder()
+	handler.handleItem(detailResponse, detailRequest)
+	var detail BaseItemDto
+	decodeCatalogResponse(t, detailResponse, &detail)
+
+	resumeRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items/Resume?Limit=1")
+	resumeRequest.SetPathValue("id", catalogTestProfileID)
+	resumeResponse := httptest.NewRecorder()
+	handler.handleResumeItems(resumeResponse, resumeRequest)
+	var resume QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, resumeResponse, &resume)
+
+	nextResponse := httptest.NewRecorder()
+	handler.handleNextUp(nextResponse, authenticatedCatalogRequest(t, token, "/Shows/NextUp?Limit=1"))
+	var next QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, nextResponse, &next)
+
+	if listResponse.Code != http.StatusOK || detailResponse.Code != http.StatusOK ||
+		resumeResponse.Code != http.StatusOK || nextResponse.Code != http.StatusOK ||
+		len(list.Items) != 1 || len(resume.Items) != 1 || len(next.Items) != 1 {
+		t.Fatalf("surface responses list=%d/%+v detail=%d resume=%d/%+v next=%d/%+v",
+			listResponse.Code, list, detailResponse.Code, resumeResponse.Code, resume, nextResponse.Code, next)
+	}
+	want := list.Items[0].UserData
+	for name, got := range map[string]*UserItemDataDto{
+		"detail": detail.UserData, "resume": resume.Items[0].UserData, "next-up": next.Items[0].UserData,
+	} {
+		if want == nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s UserData=%+v, catalog UserData=%+v", name, got, want)
+		}
+	}
+	if want.PlayedPercentage == nil || *want.PlayedPercentage != percentage || want.PlayCount != 0 ||
+		want.LastPlayedDate != "2026-08-02T03:04:05.6000000Z" {
+		t.Fatalf("persisted UserData was not authoritative: %+v", want)
+	}
+}
+
+func TestBaseItemDTOAdvertisesOnlyLocalizedPosterAndBackdrop(t *testing.T) {
+	handler, _, _ := newCatalogHTTPHandler(t)
+	posterTag := strings.Repeat("d", 64)
+	backdropTag := strings.Repeat("e", 64)
+	for _, mediaType := range []string{"movie", "series", "episode"} {
+		t.Run(mediaType, func(t *testing.T) {
+			item := handler.baseItemDTO(watchstate.CatalogTitle{
+				ID: "00000000-0000-4000-8000-000000000101", MediaType: mediaType, Title: "Artwork title",
+				PosterURL: localizedArtworkPrefix + posterTag, BackgroundURL: localizedArtworkPrefix + backdropTag,
+			}, false)
+			if item.ImageTags["Primary"] != posterTag || len(item.BackdropImageTags) != 1 || item.BackdropImageTags[0] != backdropTag {
+				t.Fatalf("%s artwork tags=%#v backdrops=%#v", mediaType, item.ImageTags, item.BackdropImageTags)
+			}
+
+			unservable := handler.baseItemDTO(watchstate.CatalogTitle{
+				ID: "00000000-0000-4000-8000-000000000102", MediaType: mediaType, Title: "Unservable artwork",
+				PosterURL: "https://provider.invalid/private-poster.jpg", BackgroundURL: "https://provider.invalid/private-backdrop.jpg",
+			}, false)
+			if len(unservable.ImageTags) != 0 || len(unservable.BackdropImageTags) != 0 {
+				t.Fatalf("%s advertised unservable artwork: tags=%#v backdrops=%#v", mediaType, unservable.ImageTags, unservable.BackdropImageTags)
+			}
+		})
+	}
+}
+
 func TestCatalogItemsSelectRequestedTitleBeforeRootViews(t *testing.T) {
 	for _, mediaType := range []string{"movie", "series", "episode"} {
 		t.Run(mediaType, func(t *testing.T) {
@@ -203,7 +361,7 @@ func TestCatalogItemsSelectRequestedTitleBeforeRootViews(t *testing.T) {
 				ID: "00000000-0000-4000-8000-000000000100", MediaType: mediaType, Title: "Selected title",
 				Genres: []string{}, ProviderIDs: map[string]string{},
 			}
-			request := authenticatedCatalogRequest(t, token, "/Items?Ids="+reader.title.ID+"&UserId="+catalogTestProfileID+"&Fields=Overview,MediaSources,MediaStreams")
+			request := authenticatedCatalogRequest(t, token, "/Items?Ids="+reader.title.ID+"&UserId="+catalogTestProfileID+"&Fields=Overview,MediaSources,MediaStreams,Path")
 			response := httptest.NewRecorder()
 			handler.handleItems(response, request)
 			var result QueryResult[BaseItemDto]
@@ -226,6 +384,43 @@ func TestCatalogItemsSelectRequestedTitleBeforeRootViews(t *testing.T) {
 	}
 }
 
+func TestCatalogItemsDoNotWidenDisjointCollectionFolderFilters(t *testing.T) {
+	for _, target := range []string{
+		"/Items?IncludeItemTypes=CollectionFolder&MediaTypes=Video",
+		"/Items?IncludeItemTypes=CollectionFolder&Filters=IsNotFolder",
+	} {
+		handler, reader, token := newCatalogHTTPHandler(t)
+		response := httptest.NewRecorder()
+		handler.handleItems(response, authenticatedCatalogRequest(t, token, target))
+		var result QueryResult[BaseItemDto]
+		decodeCatalogResponse(t, response, &result)
+		if response.Code != http.StatusOK || result.TotalRecordCount != 0 || len(result.Items) != 0 || len(reader.queries) != 0 || len(reader.titleIDs) != 0 {
+			t.Fatalf("target=%q status=%d result=%+v queries=%+v titles=%v", target, response.Code, result, reader.queries, reader.titleIDs)
+		}
+	}
+}
+
+func TestCatalogItemsIDsUseOrdinaryMetadataFilterSemantics(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	id := "00000000-0000-4000-8000-000000000100"
+	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{{
+		ID: id, MediaType: "movie", Title: "Filtered ID", People: []watchstate.CatalogPerson{{ID: "9301", Name: "Alice Actor"}},
+	}}, Total: 1, Limit: 100}
+	request := authenticatedCatalogRequest(t, token, "/Items?Ids="+id+"&OfficialRatings=PG-13&Tags=Featured&PersonIds=9301")
+	response := httptest.NewRecorder()
+	handler.handleItems(response, request)
+	var result QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, response, &result)
+	if response.Code != http.StatusOK || len(result.Items) != 1 || result.Items[0].Id != id || len(reader.titleIDs) != 0 || len(reader.queries) != 2 {
+		t.Fatalf("status=%d result=%+v titleReads=%v queries=%+v", response.Code, result, reader.titleIDs, reader.queries)
+	}
+	query := reader.queries[1]
+	if !query.Recursive || !reflect.DeepEqual(query.IDs, []string{id}) || !reflect.DeepEqual(query.OfficialRatings, []string{"PG-13"}) ||
+		!reflect.DeepEqual(query.Tags, []string{"Featured"}) || !reflect.DeepEqual(query.PersonIDs, []string{"9301"}) {
+		t.Fatalf("metadata-filtered ID query=%+v", query)
+	}
+}
+
 func TestCatalogItemsLimitZeroReturnsCountWithoutZeroLimitRead(t *testing.T) {
 	handler, reader, token := newCatalogHTTPHandler(t)
 	reader.page = watchstate.CatalogPage{
@@ -242,6 +437,47 @@ func TestCatalogItemsLimitZeroReturnsCountWithoutZeroLimitRead(t *testing.T) {
 	}
 	if len(reader.queries) != 1 || reader.queries[0].Limit != 1 {
 		t.Fatalf("count-only catalog query=%+v", reader.queries)
+	}
+
+	rootRequest := authenticatedCatalogRequest(t, token, "/Items?Limit=0")
+	rootResponse := httptest.NewRecorder()
+	handler.handleItems(rootResponse, rootRequest)
+	var root QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, rootResponse, &root)
+	if rootResponse.Code != http.StatusOK || root.TotalRecordCount != 2 || root.StartIndex != 0 || len(root.Items) != 0 {
+		t.Fatalf("count-only root status=%d result=%+v", rootResponse.Code, root)
+	}
+	if len(reader.queries) != 1 {
+		t.Fatalf("count-only root reached catalog: %+v", reader.queries)
+	}
+}
+
+func TestCatalogItemsDisableTotalsAfterFiltering(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	views, ok := handler.virtualViews()
+	if !ok {
+		t.Fatal("derive virtual views")
+	}
+	reader.page = watchstate.CatalogPage{
+		Items:  []watchstate.CatalogTitle{{ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "Filtered"}},
+		Offset: 0, Limit: 1, Total: 9,
+	}
+	request := authenticatedCatalogRequest(t, token, "/Items?ParentId="+views[0].Id+"&IncludeItemTypes=Movie&Limit=1&EnableTotalRecordCount=false")
+	response := httptest.NewRecorder()
+	handler.handleItems(response, request)
+	var result QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, response, &result)
+	if response.Code != http.StatusOK || result.TotalRecordCount != 0 || len(result.Items) != 1 || len(reader.queries) != 1 || !reader.queries[0].OmitTotal {
+		t.Fatalf("ordinary disabled total status=%d result=%+v queries=%+v", response.Code, result, reader.queries)
+	}
+
+	rootRequest := authenticatedCatalogRequest(t, token, "/Items?Limit=1&EnableTotalRecordCount=false&EnableUserData=false")
+	rootResponse := httptest.NewRecorder()
+	handler.handleItems(rootResponse, rootRequest)
+	var root QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, rootResponse, &root)
+	if rootResponse.Code != http.StatusOK || root.TotalRecordCount != 0 || len(root.Items) != 1 || root.Items[0].UserData != nil || len(reader.queries) != 1 {
+		t.Fatalf("root disabled flags status=%d result=%+v queries=%+v", rootResponse.Code, root, reader.queries)
 	}
 }
 
@@ -269,6 +505,43 @@ func TestLatestItemsReturnsJellyfinArrayForVirtualView(t *testing.T) {
 	decodeCatalogResponse(t, response, &items)
 	if len(items) != 1 || items[0].Name != "Latest Movie" || items[0].Type != "Movie" {
 		t.Fatalf("unexpected latest items: %+v", items)
+	}
+}
+
+func TestLatestItemsStreamsPinnedClientLimitsInBoundedCatalogChunks(t *testing.T) {
+	for _, requested := range []int{1000, MaximumLatestQueryLimit} {
+		t.Run(strconv.Itoa(requested), func(t *testing.T) {
+			handler, reader, token := newCatalogHTTPHandler(t)
+			views, ok := handler.virtualViews()
+			if !ok {
+				t.Fatal("derive virtual views")
+			}
+			reader.pageFunc = func(query watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
+				count := min(query.Limit, 1200-query.Offset)
+				items := make([]watchstate.CatalogTitle, count)
+				for index := range items {
+					items[index] = watchstate.CatalogTitle{
+						ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "Latest Movie",
+						Genres: []string{}, ProviderIDs: map[string]string{},
+					}
+				}
+				return watchstate.CatalogPage{Items: items, Offset: query.Offset, Limit: query.Limit, Total: 1200}, nil
+			}
+			request := authenticatedCatalogRequest(t, token, "/Items/Latest?UserId="+catalogTestProfileID+"&ParentId="+views[0].Id+"&StartIndex=7&Limit="+strconv.Itoa(requested))
+			response := httptest.NewRecorder()
+			handler.handleLatestItems(response, request)
+			var items []BaseItemDto
+			decodeCatalogResponse(t, response, &items)
+			expectedCalls := (requested + MaximumQueryLimit - 1) / MaximumQueryLimit
+			if response.Code != http.StatusOK || len(items) != requested || len(reader.queries) != expectedCalls {
+				t.Fatalf("Limit=%d status=%d items=%d queries=%+v body=%s", requested, response.Code, len(items), reader.queries, response.Body.String())
+			}
+			for index, query := range reader.queries {
+				if query.Limit > MaximumQueryLimit || query.Offset != 7+index*MaximumQueryLimit {
+					t.Fatalf("Limit=%d query[%d]=%+v", requested, index, query)
+				}
+			}
+		})
 	}
 }
 
@@ -336,8 +609,11 @@ func TestCatalogSearchIsRecursivePaginatedAndProfileBound(t *testing.T) {
 	}
 	var result SearchHintResult
 	decodeCatalogResponse(t, response, &result)
-	if result.TotalRecordCount != 9 || len(result.SearchHints) != 1 || result.SearchHints[0].Name != "ÉCLAIR" {
-		t.Fatalf("search result lost exact total: %+v", result)
+	if result.TotalRecordCount != 9 || len(result.SearchHints) != 1 || result.SearchHints[0].Name != "ÉCLAIR" ||
+		result.SearchHints[0].Artists == nil || result.SearchHints[0].ChannelId != nil ||
+		result.SearchHints[0].PrimaryImageAspectRatio != 2.0/3.0 ||
+		!strings.Contains(response.Body.String(), `"Artists":[]`) || !strings.Contains(response.Body.String(), `"ChannelId":null`) {
+		t.Fatalf("search result lost exact total or observed DTO shape: %+v body=%s", result, response.Body.String())
 	}
 
 	foreign := authenticatedCatalogRequest(t, token, "/Users/22222222-2222-4222-8222-222222222222/Search/Hints?SearchTerm=eclair")
@@ -352,55 +628,105 @@ func TestCatalogSearchIsRecursivePaginatedAndProfileBound(t *testing.T) {
 func TestCatalogSortIsForwardedOrRejected(t *testing.T) {
 	handler, reader, token := newCatalogHTTPHandler(t)
 	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{}, Limit: 10}
-	request := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&Limit=10&SortBy=SortName&SortOrder=Descending")
-	response := httptest.NewRecorder()
-	handler.handleItems(response, request)
-	if response.Code != http.StatusOK || len(reader.queries) != 1 || reader.queries[0].SortBy != "sortname" || reader.queries[0].SortOrder != "descending" {
-		t.Fatalf("supported sort status=%d queries=%+v body=%s", response.Code, reader.queries, response.Body.String())
+	for index, test := range []struct {
+		key   string
+		order string
+	}{
+		{key: "SortName", order: "Descending"},
+		{key: "Name", order: "Ascending"},
+	} {
+		request := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&Limit=10&SortBy="+test.key+"&SortOrder="+test.order)
+		response := httptest.NewRecorder()
+		handler.handleItems(response, request)
+		if response.Code != http.StatusOK || len(reader.queries) != index+1 {
+			t.Fatalf("supported sort %s status=%d queries=%+v body=%s", test.key, response.Code, reader.queries, response.Body.String())
+		}
+		query := reader.queries[index]
+		if query.SortBy != "sortname" || query.SortOrder != strings.ToLower(test.order) {
+			t.Fatalf("supported sort %s status=%d query=%+v body=%s", test.key, response.Code, query, response.Body.String())
+		}
 	}
 
-	compatibilityClient := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&IncludeItemTypes=Series,Movie,Video,MusicVideo&SortBy=DateLastContentAdded,DateCreated,SortName&SortOrder=Descending")
-	compatibilityClientResponse := httptest.NewRecorder()
-	handler.handleItems(compatibilityClientResponse, compatibilityClient)
-	if compatibilityClientResponse.Code != http.StatusOK || len(reader.queries) != 2 || reader.queries[1].SortBy != "" || reader.queries[1].SortOrder != "" ||
-		!reflect.DeepEqual(reader.queries[1].MediaTypes, []string{"movie", "series"}) {
-		t.Fatalf("Compatibility client query status=%d queries=%+v body=%s", compatibilityClientResponse.Code, reader.queries, compatibilityClientResponse.Body.String())
-	}
-
-	videoOnly := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&IncludeItemTypes=Video,MusicVideo")
+	reader.page.Offset = 4
+	videoOnly := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Video,MusicVideo&StartIndex=4")
 	videoOnlyResponse := httptest.NewRecorder()
 	handler.handleItems(videoOnlyResponse, videoOnly)
-	if videoOnlyResponse.Code != http.StatusOK || len(reader.queries) != 2 {
-		t.Fatalf("unprojected filter status=%d queries=%+v body=%s", videoOnlyResponse.Code, reader.queries, videoOnlyResponse.Body.String())
+	var videoResult QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, videoOnlyResponse, &videoResult)
+	if videoOnlyResponse.Code != http.StatusOK || len(reader.queries) != 3 ||
+		!reflect.DeepEqual(reader.queries[2].MediaTypes, []string{"video"}) ||
+		videoResult.Items == nil || len(videoResult.Items) != 0 || videoResult.TotalRecordCount != 0 || videoResult.StartIndex != 4 {
+		t.Fatalf("typed-empty Video projection status=%d queries=%+v result=%+v body=%s", videoOnlyResponse.Code, reader.queries, videoResult, videoOnlyResponse.Body.String())
 	}
 
 	standardKinds := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&IncludeItemTypes=Movie,Audio,Folder,Trailer")
 	standardKindsResponse := httptest.NewRecorder()
 	handler.handleItems(standardKindsResponse, standardKinds)
-	if standardKindsResponse.Code != http.StatusOK || len(reader.queries) != 3 ||
-		!reflect.DeepEqual(reader.queries[2].MediaTypes, []string{"movie"}) {
+	if standardKindsResponse.Code != http.StatusOK || len(reader.queries) != 4 ||
+		!reflect.DeepEqual(reader.queries[3].MediaTypes, []string{"movie"}) {
 		t.Fatalf("standard unprojected kinds status=%d queries=%+v body=%s", standardKindsResponse.Code, reader.queries, standardKindsResponse.Body.String())
 	}
 
-	for _, query := range []string{"&SortBy=CommunityRating&SortOrder=Ascending", "&SortOrder=Descending"} {
-		request = authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222"+query)
-		response = httptest.NewRecorder()
+	for _, query := range []string{
+		"&SortBy=CommunityRating&SortOrder=Ascending",
+		"&SortBy=DateLastContentAdded,DateCreated,SortName&SortOrder=Descending",
+		"&SortOrder=Descending",
+		"&SortBy=Default,AiredEpisodeOrder,DigitalReleaseDate",
+		"&SortBy=PrivateProviderURL",
+	} {
+		request := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222"+query)
+		response := httptest.NewRecorder()
 		handler.handleItems(response, request)
-		if response.Code != http.StatusOK {
-			t.Fatalf("standard sort %q status=%d body=%s", query, response.Code, response.Body.String())
+		if response.Code != http.StatusBadRequest || len(reader.queries) != 4 {
+			t.Fatalf("unsupported sort %q status=%d queries=%+v body=%s", query, response.Code, reader.queries, response.Body.String())
 		}
 	}
-	remuxSorts := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&SortBy=Default,AiredEpisodeOrder,DigitalReleaseDate,IsPlayed,VideoBitRate,AirTime,Studio,ParentIndexNumber,IndexNumber,SimilarityScore,SearchScore,ChannelOrder,CatalogOrder,DisplayOrder,PopularityAllTime,PopularityDay,PopularityWeek,PopularityMonth,TrendingWeek,TrendingMonth")
-	remuxSortsResponse := httptest.NewRecorder()
-	handler.handleItems(remuxSortsResponse, remuxSorts)
-	if remuxSortsResponse.Code != http.StatusOK || len(reader.queries) != 6 || reader.queries[5].SortBy != "" || reader.queries[5].SortOrder != "" {
-		t.Fatalf("Remux-compatible sorts status=%d queries=%+v body=%s", remuxSortsResponse.Code, reader.queries, remuxSortsResponse.Body.String())
+}
+
+func TestCatalogProjectsCanonicalGenericVideoRows(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	reader.page = watchstate.CatalogPage{
+		Items: []watchstate.CatalogTitle{{
+			ID: "00000000-0000-4000-8000-000000000500", MediaType: "video", Title: "Generic Video",
+			Genres: []string{}, ProviderIDs: map[string]string{},
+		}},
+		Limit: 20, Total: 1,
 	}
-	request = authenticatedCatalogRequest(t, token, "/Items?SortBy=PrivateProviderURL")
-	response = httptest.NewRecorder()
+	request := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Video&Fields=Path,MediaSources")
+	response := httptest.NewRecorder()
 	handler.handleItems(response, request)
-	if response.Code != http.StatusBadRequest || len(reader.queries) != 6 {
-		t.Fatalf("unknown sort status=%d queries=%+v body=%s", response.Code, reader.queries, response.Body.String())
+	var result QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, response, &result)
+	if response.Code != http.StatusOK || len(reader.queries) != 1 || !reflect.DeepEqual(reader.queries[0].MediaTypes, []string{"video"}) ||
+		result.TotalRecordCount != 1 || len(result.Items) != 1 || result.Items[0].Type != "Video" ||
+		result.Items[0].MediaType != "Video" || !result.Items[0].IsPlayable || !result.Items[0].CanDownload {
+		t.Fatalf("generic Video projection status=%d queries=%+v result=%+v body=%s", response.Code, reader.queries, result, response.Body.String())
+	}
+	requireDeferredMediaSource(t, result.Items[0])
+}
+
+func TestCatalogSortUsesStableIDTieBreaker(t *testing.T) {
+	baseline := []watchstate.CatalogTitle{
+		{ID: "00000000-0000-4000-8000-000000000002", Title: "Same"},
+		{ID: "00000000-0000-4000-8000-000000000003", Title: "Zulu"},
+		{ID: "00000000-0000-4000-8000-000000000001", Title: "same"},
+	}
+	for _, test := range []struct {
+		order string
+		want  []string
+	}{
+		{order: "Ascending", want: []string{baseline[2].ID, baseline[0].ID, baseline[1].ID}},
+		{order: "Descending", want: []string{baseline[1].ID, baseline[2].ID, baseline[0].ID}},
+	} {
+		items := append([]watchstate.CatalogTitle(nil), baseline...)
+		sortCatalogSearch(items, test.order)
+		got := make([]string, len(items))
+		for index := range items {
+			got[index] = items[index].ID
+		}
+		if !reflect.DeepEqual(got, test.want) {
+			t.Fatalf("order=%s got=%v want=%v", test.order, got, test.want)
+		}
 	}
 }
 
@@ -426,23 +752,76 @@ func TestEpisodesSeasonSelectorIsValidatedAndIsolated(t *testing.T) {
 	handler, reader, token := newCatalogHTTPHandler(t)
 	seriesID := "00000000-0000-4000-8000-000000000200"
 	seasonID := "00000000-0000-4000-8000-000000000210"
-	reader.title = watchstate.CatalogTitle{ID: seasonID, MediaType: "season", SeriesID: seriesID, Title: "Season"}
+	reader.titles = map[string]watchstate.CatalogTitle{
+		seriesID: {ID: seriesID, MediaType: "series", Title: "Series"},
+		seasonID: {ID: seasonID, MediaType: "season", SeriesID: seriesID, Title: "Season"},
+	}
 	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{}, Limit: 10}
 	request := authenticatedCatalogRequest(t, token, "/Shows/"+seriesID+"/Episodes?SeasonId="+seasonID+"&Limit=10")
 	request.SetPathValue("seriesId", seriesID)
 	response := httptest.NewRecorder()
 	handler.handleEpisodes(response, request)
-	if response.Code != http.StatusOK || len(reader.titleIDs) != 1 || len(reader.queries) != 1 || reader.queries[0].ParentID != seasonID || reader.queries[0].Recursive {
+	if response.Code != http.StatusOK || len(reader.titleIDs) != 2 || len(reader.queries) != 1 || reader.queries[0].ParentID != seasonID || reader.queries[0].Recursive || !reader.queries[0].IncludePeople {
 		t.Fatalf("season episodes status=%d titles=%+v queries=%+v body=%s", response.Code, reader.titleIDs, reader.queries, response.Body.String())
 	}
 
-	reader.title.SeriesID = "00000000-0000-4000-8000-000000000999"
+	foreignSeason := reader.titles[seasonID]
+	foreignSeason.SeriesID = "00000000-0000-4000-8000-000000000999"
+	reader.titles[seasonID] = foreignSeason
 	request = authenticatedCatalogRequest(t, token, "/Shows/"+seriesID+"/Episodes?SeasonId="+seasonID)
 	request.SetPathValue("seriesId", seriesID)
 	response = httptest.NewRecorder()
 	handler.handleEpisodes(response, request)
 	if response.Code != http.StatusNotFound || len(reader.queries) != 1 {
 		t.Fatalf("foreign season status=%d queries=%+v", response.Code, reader.queries)
+	}
+}
+
+func TestEpisodesRejectsMissingOrNonSeriesRootBeforeListing(t *testing.T) {
+	seriesID := "00000000-0000-4000-8000-000000000200"
+	tests := []struct {
+		name  string
+		title watchstate.CatalogTitle
+		err   error
+	}{
+		{name: "missing", err: watchstate.ErrNotFound},
+		{name: "wrong type", title: watchstate.CatalogTitle{ID: seriesID, MediaType: "movie"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler, reader, token := newCatalogHTTPHandler(t)
+			reader.title, reader.titleErr = test.title, test.err
+			request := authenticatedCatalogRequest(t, token, "/Shows/"+seriesID+"/Episodes")
+			request.SetPathValue("seriesId", seriesID)
+			response := httptest.NewRecorder()
+			handler.handleEpisodes(response, request)
+			if response.Code != http.StatusNotFound || len(reader.titleIDs) != 1 || len(reader.queries) != 0 {
+				t.Fatalf("status=%d titleIDs=%v queries=%v body=%s", response.Code, reader.titleIDs, reader.queries, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestHierarchyRoutesRejectUndocumentedQueryParametersBeforeCatalogAccess(t *testing.T) {
+	seriesID := "00000000-0000-4000-8000-000000000200"
+	for _, target := range []struct {
+		name   string
+		path   string
+		handle func(*Handler, http.ResponseWriter, *http.Request)
+	}{
+		{name: "seasons", path: "/Shows/" + seriesID + "/Seasons?ParentId=" + seriesID, handle: (*Handler).handleSeasons},
+		{name: "episodes", path: "/Shows/" + seriesID + "/Episodes?Recursive=true", handle: (*Handler).handleEpisodes},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			handler, reader, token := newCatalogHTTPHandler(t)
+			request := authenticatedCatalogRequest(t, token, target.path)
+			request.SetPathValue("seriesId", seriesID)
+			response := httptest.NewRecorder()
+			target.handle(handler, response, request)
+			if response.Code != http.StatusBadRequest || len(reader.titleIDs) != 0 || len(reader.queries) != 0 {
+				t.Fatalf("status=%d titles=%v queries=%v body=%s", response.Code, reader.titleIDs, reader.queries, response.Body.String())
+			}
+		})
 	}
 }
 
@@ -488,6 +867,239 @@ func TestJellyfinProviderIDsAllowOnlyValidatedTitleIdentities(t *testing.T) {
 	}
 }
 
+func TestCatalogItemsForwardObservedFilterMatrixBeforePagination(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{{
+		ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "Filtered",
+		Genres: []string{"Drama"}, People: []watchstate.CatalogPerson{{ID: "9301", Name: "Alice Actor"}},
+	}}, Total: 1}
+	target := "/Items?UserId=" + catalogTestProfileID +
+		"&IncludeItemTypes=Movie,Series&ExcludeItemTypes=Series&MediaTypes=Video&Filters=IsFavorite,IsResumable" +
+		"&IsPlayed=false&Genres=Drama%7CComedy&GenreIds=18&Years=2025&OfficialRatings=PG-13%7CTV-MA&Tags=Featured%7CClassic&PersonIds=9301" +
+		"&Studios=Unavailable%7COther&MinCommunityRating=8.25&HasSubtitles=true&HasTrailer=true&EnableImages=false&EnableImageTypes=Primary,Backdrop&ImageTypeLimit=0" +
+		"&EnableTotalRecordCount=false&StartIndex=3&Limit=1008"
+	request := authenticatedCatalogRequest(t, token, target)
+	response := httptest.NewRecorder()
+	handler.handleItems(response, request)
+	if response.Code != http.StatusOK || len(reader.queries) != 2 || len(reader.titleIDs) != 0 {
+		t.Fatalf("filter matrix status=%d queries=%+v titles=%v body=%s", response.Code, reader.queries, reader.titleIDs, response.Body.String())
+	}
+	query := reader.queries[1]
+	if query.ParentID != "" || !reflect.DeepEqual(query.MediaTypes, []string{"movie"}) || query.Offset != 3 || query.Limit != MaximumQueryLimit ||
+		query.Played == nil || *query.Played || query.Favorite == nil || !*query.Favorite || query.Resumable == nil || !*query.Resumable ||
+		query.MinCommunityRating == nil || *query.MinCommunityRating != 8.25 || query.HasSubtitles == nil || !*query.HasSubtitles ||
+		!reflect.DeepEqual(query.Genres, []string{"Drama", "Comedy"}) || !reflect.DeepEqual(query.GenreIDs, []string{"18"}) ||
+		!reflect.DeepEqual(query.Years, []int{2025}) || !reflect.DeepEqual(query.OfficialRatings, []string{"PG-13", "TV-MA"}) ||
+		!reflect.DeepEqual(query.Tags, []string{"Featured", "Classic"}) || !reflect.DeepEqual(query.PersonIDs, []string{"9301"}) ||
+		!reflect.DeepEqual(query.Studios, []string{"Unavailable", "Other"}) || !query.UnavailableDataFilter || !query.OmitTotal {
+		t.Fatalf("unexpected forwarded catalog query: %+v", query)
+	}
+}
+
+func TestCatalogItemsRejectInvalidOrDuplicateScalarFiltersBeforeCatalogAccess(t *testing.T) {
+	for _, query := range []string{
+		"MinCommunityRating=8&MinCommunityRating=9",
+		"MinCommunityRating=-0.1",
+		"MinCommunityRating=NaN",
+		"HasSubtitles=true&HasSubtitles=false",
+		"HasSubtitles=sometimes",
+	} {
+		handler, reader, token := newCatalogHTTPHandler(t)
+		request := authenticatedCatalogRequest(t, token, "/Items?"+query)
+		response := httptest.NewRecorder()
+		handler.handleItems(response, request)
+		if response.Code != http.StatusBadRequest || len(reader.queries) != 0 || len(reader.titleIDs) != 0 {
+			t.Fatalf("query %q status=%d queries=%+v titles=%v body=%s", query, response.Code, reader.queries, reader.titleIDs, response.Body.String())
+		}
+	}
+}
+
+func TestCatalogFieldAndImageGatingIsConsistentForListsAndDetails(t *testing.T) {
+	title := watchstate.CatalogTitle{
+		ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "Fields", Overview: "Heavy overview",
+		Genres: []string{"Drama"}, People: []watchstate.CatalogPerson{{ID: "9301", Name: "Alice Actor"}},
+		PosterURL: localizedArtworkPrefix + strings.Repeat("a", 64), BackgroundURL: localizedArtworkPrefix + strings.Repeat("b", 64),
+	}
+	for _, test := range []struct {
+		name, fields                          string
+		wantOverview, wantPeople, wantSources bool
+	}{
+		{name: "absent"},
+		{name: "overview", fields: "Overview", wantOverview: true},
+		{name: "people", fields: "People", wantPeople: true},
+		{name: "media sources", fields: "MediaSources", wantSources: true},
+		{name: "media streams", fields: "MediaStreams", wantSources: true},
+	} {
+		t.Run("list "+test.name, func(t *testing.T) {
+			handler, reader, token := newCatalogHTTPHandler(t)
+			views, _ := handler.virtualViews()
+			reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{title}, Total: 1, Limit: 20}
+			target := "/Items?ParentId=" + views[0].Id + "&IncludeItemTypes=Movie&Limit=20"
+			if test.fields != "" {
+				target += "&Fields=" + url.QueryEscape(test.fields)
+			}
+			response := httptest.NewRecorder()
+			handler.handleItems(response, authenticatedCatalogRequest(t, token, target))
+			var result QueryResult[BaseItemDto]
+			decodeCatalogResponse(t, response, &result)
+			if response.Code != http.StatusOK || len(result.Items) != 1 || len(reader.queries) != 1 || len(reader.titleIDs) != 0 {
+				t.Fatalf("status=%d result=%+v queries=%+v titles=%v", response.Code, result, reader.queries, reader.titleIDs)
+			}
+			item := result.Items[0]
+			if (item.Overview != "") != test.wantOverview || (len(item.People) != 0) != test.wantPeople || (len(item.MediaSources) != 0) != test.wantSources {
+				t.Fatalf("fields=%q item=%+v", test.fields, item)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name, query                           string
+		wantOverview, wantPeople, wantSources bool
+	}{
+		{name: "absent", wantOverview: true, wantPeople: true, wantSources: true},
+		{name: "overview only", query: "?Fields=Overview", wantOverview: true},
+		{name: "people only without images", query: "?Fields=People&EnableImages=false", wantPeople: true},
+	} {
+		t.Run("detail "+test.name, func(t *testing.T) {
+			handler, reader, token := newCatalogHTTPHandler(t)
+			reader.title = title
+			request := authenticatedCatalogRequest(t, token, "/Items/"+title.ID+test.query)
+			request.SetPathValue("id", title.ID)
+			response := httptest.NewRecorder()
+			handler.handleItem(response, request)
+			var item BaseItemDto
+			decodeCatalogResponse(t, response, &item)
+			if response.Code != http.StatusOK || len(reader.titleIDs) != 1 || (item.Overview != "") != test.wantOverview ||
+				(len(item.People) != 0) != test.wantPeople || (len(item.MediaSources) != 0) != test.wantSources {
+				t.Fatalf("status=%d item=%+v titleReads=%v", response.Code, item, reader.titleIDs)
+			}
+			if strings.Contains(test.query, "EnableImages=false") && (len(item.ImageTags) != 0 || len(item.BackdropImageTags) != 0) {
+				t.Fatalf("disabled images survived: %+v", item)
+			}
+		})
+	}
+}
+
+func TestCatalogDetailEnrichesRequestedMetadataForBothRoutes(t *testing.T) {
+	snapshot := watchstate.CatalogTitle{
+		ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "Snapshot",
+		Genres: []string{}, ProviderIDs: map[string]string{},
+	}
+	for _, route := range []struct {
+		name       string
+		userScoped bool
+	}{
+		{name: "item"},
+		{name: "user item", userScoped: true},
+	} {
+		for _, field := range []string{"", "OriginalTitle", "Taglines", "People"} {
+			name := route.name
+			if field == "" {
+				name += " default fields"
+			} else {
+				name += " " + field
+			}
+			t.Run(name, func(t *testing.T) {
+				handler, reader, token := newCatalogHTTPHandler(t)
+				reader.title = snapshot
+				enriched := snapshot
+				enriched.Overview = "Provider overview"
+				enriched.People = []watchstate.CatalogPerson{{Name: "Provider performer", Type: "Actor"}}
+				switch field {
+				case "":
+					enriched.OriginalTitle = "Provider original title"
+					enriched.Tagline = "Provider tagline"
+				case "OriginalTitle":
+					enriched.OriginalTitle = "Provider original title"
+				case "Taglines":
+					enriched.Tagline = "Provider tagline"
+				}
+				detailReader := &catalogHTTPDetailReader{catalogHTTPReader: reader, enrichedTitle: enriched}
+				handler.catalog = detailReader
+
+				target := "/Items/" + snapshot.ID
+				if route.userScoped {
+					target = "/Users/" + catalogTestProfileID + "/Items/" + snapshot.ID
+				}
+				if field != "" {
+					target += "?Fields=" + field
+				}
+				request := authenticatedCatalogRequest(t, token, target)
+				if route.userScoped {
+					request.SetPathValue("userId", catalogTestProfileID)
+					request.SetPathValue("itemId", snapshot.ID)
+				} else {
+					request.SetPathValue("id", snapshot.ID)
+				}
+				response := httptest.NewRecorder()
+				if route.userScoped {
+					handler.handleUserItem(response, request)
+				} else {
+					handler.handleItem(response, request)
+				}
+
+				var item BaseItemDto
+				decodeCatalogResponse(t, response, &item)
+				if response.Code != http.StatusOK || len(detailReader.enrichmentRead) != 1 || !reflect.DeepEqual(detailReader.enrichmentRead[0], snapshot) {
+					t.Fatalf("status=%d enrichment=%+v item=%+v", response.Code, detailReader.enrichmentRead, item)
+				}
+				switch field {
+				case "":
+					if item.OriginalTitle != "Provider original title" || !reflect.DeepEqual(item.Taglines, []string{"Provider tagline"}) ||
+						item.Overview != "Provider overview" || len(item.People) != 1 {
+						t.Fatalf("default detail metadata was not enriched: %+v", item)
+					}
+				case "OriginalTitle":
+					if item.OriginalTitle != "Provider original title" || item.Overview != "" || len(item.People) != 0 {
+						t.Fatalf("OriginalTitle projection was not enriched and reduced: %+v", item)
+					}
+				case "Taglines":
+					if !reflect.DeepEqual(item.Taglines, []string{"Provider tagline"}) || item.Overview != "" || len(item.People) != 0 {
+						t.Fatalf("Taglines projection was not enriched and reduced: %+v", item)
+					}
+				case "People":
+					if len(item.People) != 1 || item.People[0].Name != "Provider performer" || item.Overview != "" {
+						t.Fatalf("People projection was not enriched and reduced: %+v", item)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCatalogLightIDSelectionDoesNotEnrichMetadataByDefault(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	reader.title = watchstate.CatalogTitle{
+		ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "Snapshot",
+		Genres: []string{}, ProviderIDs: map[string]string{},
+	}
+	enriched := reader.title
+	enriched.OriginalTitle = "Provider original title"
+	detailReader := &catalogHTTPDetailReader{catalogHTTPReader: reader, enrichedTitle: enriched}
+	handler.catalog = detailReader
+
+	response := httptest.NewRecorder()
+	handler.handleItems(response, authenticatedCatalogRequest(t, token, "/Items?Ids="+reader.title.ID))
+	var result QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, response, &result)
+	if response.Code != http.StatusOK || len(result.Items) != 1 || len(detailReader.enrichmentRead) != 0 || result.Items[0].OriginalTitle != "" {
+		t.Fatalf("status=%d result=%+v enrichment=%+v", response.Code, result, detailReader.enrichmentRead)
+	}
+}
+
+func TestCatalogItemsRejectUnsupportedProjectedValuesBeforeReading(t *testing.T) {
+	for _, target := range []string{
+		"/Items?Fields=Overview,DateCreated",
+		"/Items?EnableImageTypes=Primary,Disc",
+	} {
+		handler, reader, token := newCatalogHTTPHandler(t)
+		response := httptest.NewRecorder()
+		handler.handleItems(response, authenticatedCatalogRequest(t, token, target))
+		if response.Code != http.StatusBadRequest || len(reader.queries) != 0 || len(reader.titleIDs) != 0 {
+			t.Fatalf("target=%q status=%d queries=%+v titles=%v body=%s", target, response.Code, reader.queries, reader.titleIDs, response.Body.String())
+		}
+	}
+}
+
 func requireDeferredMediaSource(t *testing.T, item BaseItemDto) {
 	t.Helper()
 	if len(item.MediaSources) != 1 {
@@ -497,8 +1109,10 @@ func requireDeferredMediaSource(t *testing.T, item BaseItemDto) {
 	expectedPath := "/rivune/" + item.Id + "/" + item.Id + ".strm"
 	expectedDirectURL := "/Videos/" + item.Id + "/stream?MediaSourceId=" + url.QueryEscape(item.Id) + "&Static=true"
 	if source.Id != item.Id || source.Name != item.Name || source.Path != expectedPath || item.Path != expectedPath || source.DirectStreamUrl != expectedDirectURL ||
-		source.Protocol != "File" || source.Type != "Default" || source.IsRemote || !source.SupportsDirectPlay ||
-		!source.SupportsDirectStream || !source.SupportsTranscoding || !source.SupportsProbing || source.VideoType != "VideoFile" || len(source.Formats) != 0 || source.RequiredHttpHeaders == nil || len(source.RequiredHttpHeaders) != 0 || source.MediaAttachments == nil || len(source.MediaAttachments) != 0 || strings.ContainsAny(source.Path, "?#") {
+		source.Container != "strm" || source.Protocol != "File" || source.Type != "Default" || source.IsRemote || !source.SupportsDirectPlay ||
+		!source.SupportsDirectStream || !source.SupportsTranscoding || !source.SupportsProbing || source.VideoType != "VideoFile" ||
+		len(source.Formats) != 1 || source.Formats[0] != "strm" || source.RequiredHttpHeaders == nil || len(source.RequiredHttpHeaders) != 0 ||
+		source.MediaAttachments == nil || len(source.MediaAttachments) != 0 || strings.ContainsAny(source.Path, "?#") {
 		t.Fatalf("deferred file-like source contract is incomplete: item=%+v source=%+v", item, source)
 	}
 	if (source.RunTimeTicks == nil) != (item.RunTimeTicks == nil) || source.RunTimeTicks != nil && *source.RunTimeTicks != *item.RunTimeTicks {

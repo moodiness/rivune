@@ -51,7 +51,7 @@ func (handler *Handler) handleSessions(response http.ResponseWriter, request *ht
 		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The session query is invalid")
 		return
 	}
-	if deviceFound && strings.TrimSpace(deviceID) != session.Client.DeviceID || controllableFound {
+	if controllableFound {
 		writeJSON(response, http.StatusOK, []SessionInfoDto{})
 		return
 	}
@@ -59,12 +59,9 @@ func (handler *Handler) handleSessions(response http.ResponseWriter, request *ht
 	if handler.bootstrap != nil {
 		visible = handler.bootstrap.visibleSessions(session, strings.TrimSpace(deviceID), time.Duration(activeWithinSeconds)*time.Second)
 	}
-	if len(visible) == 0 {
-		visible = []AuthenticatedSession{session}
-	}
 	result := make([]SessionInfoDto, 0, len(visible))
 	for _, candidate := range visible {
-		result = append(result, handler.sessionInfo(candidate))
+		result = append(result, handler.sessionInfo(request.Context(), candidate))
 	}
 	writeJSON(response, http.StatusOK, result)
 }
@@ -156,81 +153,18 @@ func (handler *Handler) handleSocket(response http.ResponseWriter, request *http
 		return
 	}
 	defer handler.bootstrap.releaseSocket(lease)
+	requestContext := request.Context()
 	server := websocket.Server{
 		Handshake: func(*websocket.Config, *http.Request) error { return nil },
-		Handler:   func(connection *websocket.Conn) { handler.serveCompatSocket(connection, session, lease) },
+		Handler: func(connection *websocket.Conn) {
+			handler.serveCompatSocket(requestContext, connection, session, lease)
+		},
 	}
 	server.ServeHTTP(response, request)
 }
 
-func (handler *Handler) serveCompatSocket(connection *websocket.Conn, session AuthenticatedSession, lease *compatSocketLease) {
-	if connection == nil || lease == nil {
-		return
-	}
-	defer connection.Close()
-	connection.MaxPayloadBytes = maximumCompatSocketMessageBytes
-	now := time.Now().UTC()
-	deadline := now.Add(maximumCompatSocketLifetime)
-	if session.ExpiresAt.Before(deadline) {
-		deadline = session.ExpiresAt
-	}
-	if !deadline.After(now) {
-		return
-	}
-	_ = connection.SetDeadline(deadline)
-	if err := websocket.JSON.Send(connection, WebSocketMessageDto{MessageType: "ForceKeepAlive", Data: compatSocketLostTimeoutSeconds}); err != nil {
-		return
-	}
-	readResult := make(chan error, 1)
-	activity := make(chan struct{}, 1)
-	go func() {
-		for range maximumCompatSocketMessages {
-			var payload []byte
-			if err := websocket.Message.Receive(connection, &payload); err != nil {
-				readResult <- err
-				return
-			}
-			select {
-			case activity <- struct{}{}:
-			default:
-			}
-		}
-		readResult <- errors.New("compatibility socket message limit reached")
-	}()
-	keepalive := time.NewTicker(compatSocketKeepalivePeriod)
-	revalidate := time.NewTicker(compatSocketRevalidatePeriod)
-	lifetime := time.NewTimer(time.Until(deadline))
-	defer keepalive.Stop()
-	defer revalidate.Stop()
-	defer lifetime.Stop()
-	for {
-		select {
-		case <-lease.closed:
-			return
-		case <-lifetime.C:
-			return
-		case <-readResult:
-			return
-		case <-activity:
-			if handler.bootstrap != nil {
-				handler.bootstrap.observe(session)
-			}
-		case <-keepalive.C:
-			if err := websocket.JSON.Send(connection, WebSocketMessageDto{MessageType: "ForceKeepAlive", Data: compatSocketLostTimeoutSeconds}); err != nil {
-				return
-			}
-		case <-revalidate.C:
-			revalidationContext, cancel := context.WithTimeout(context.Background(), compatSocketRevalidateTimeout)
-			current, err := handler.authentication.Revalidate(revalidationContext, session)
-			cancel()
-			if err != nil || !sameAuthenticatedSessionOwner(session, current) {
-				return
-			}
-			if handler.bootstrap != nil {
-				handler.bootstrap.observe(current)
-			}
-		}
-	}
+func (handler *Handler) serveCompatSocket(ctx context.Context, connection *websocket.Conn, session AuthenticatedSession, lease *compatSocketLease) {
+	handler.serveRealtimeSocket(ctx, connection, session, lease)
 }
 
 func (handler *Handler) handleDisplayPreferencesUpdate(response http.ResponseWriter, request *http.Request) {
@@ -247,10 +181,19 @@ func (handler *Handler) handleDisplayPreferencesUpdate(response http.ResponseWri
 		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The display preferences are invalid")
 		return
 	}
-	input.Id = preferenceID
-	input.Client = client
-	if handler.bootstrap == nil || !handler.bootstrap.setDisplayPreference(session, client, preferenceID, input) {
-		writeCompatError(response, http.StatusTooManyRequests, "ResourceLimitExceeded", "The display preference limit has been reached")
+	if handler.displayPreferences == nil {
+		writeCompatError(response, http.StatusServiceUnavailable, "ServiceUnavailable", "Display preferences are unavailable")
+		return
+	}
+	if err := handler.displayPreferences.Update(request.Context(), session, client, preferenceID, input); err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidDisplayPreferences):
+			writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The display preferences are invalid")
+		case errors.Is(err, ErrDisplayPreferenceLimit):
+			writeCompatError(response, http.StatusTooManyRequests, "ResourceLimitExceeded", "The display preference limit has been reached")
+		default:
+			writeCompatError(response, http.StatusInternalServerError, "InternalError", "The display preferences could not be stored")
+		}
 		return
 	}
 	response.Header().Set("Cache-Control", "no-store")
@@ -269,7 +212,16 @@ func displayPreferenceSelector(response http.ResponseWriter, request *http.Reque
 		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The display preference query is invalid")
 		return "", "", false
 	}
-	preferenceID := strings.TrimSpace(request.PathValue("id"))
+	userID, userFound, userErr := queryScalar(request.URL.Query(), "UserId")
+	if userErr != nil {
+		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The display preference query is invalid")
+		return "", "", false
+	}
+	if userFound && !sameCompatUUID(userID, session.ProfileID) {
+		writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "The requested resource was not found")
+		return "", "", false
+	}
+	preferenceID := strings.TrimSpace(request.PathValue("displayPreferencesId"))
 	if !validDisplayPreferenceID(preferenceID) {
 		writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "The requested resource was not found")
 		return "", "", false
@@ -294,14 +246,18 @@ func displayPreferenceSelector(response http.ResponseWriter, request *http.Reque
 }
 
 func validDisplayPreferences(value DisplayPreferencesDto, expectedID, expectedClient string) bool {
-	if value.Id != "" && !strings.EqualFold(strings.TrimSpace(value.Id), expectedID) ||
-		value.Client != "" && !strings.EqualFold(strings.TrimSpace(value.Client), expectedClient) || len(value.CustomPrefs) > maximumDisplayPreferenceFields {
+	if value.Id != "" && (value.Id != strings.TrimSpace(value.Id) || !strings.EqualFold(value.Id, expectedID)) ||
+		value.Client != "" && (value.Client != strings.TrimSpace(value.Client) || !strings.EqualFold(value.Client, expectedClient)) ||
+		len(value.CustomPrefs) > maximumDisplayPreferenceFields {
 		return false
 	}
-	for _, field := range []string{value.ViewType, value.SortBy, value.IndexBy, value.ScrollDirection, value.SortOrder, value.Client} {
+	for _, field := range []string{value.ViewType, value.SortBy, value.IndexBy, value.ScrollDirection, value.SortOrder} {
 		if !boundedUTF8(field, 0, 128) {
 			return false
 		}
+	}
+	if !boundedUTF8(value.Client, 0, 64) {
+		return false
 	}
 	for key, preference := range value.CustomPrefs {
 		if !boundedUTF8(key, 1, 64) || !boundedUTF8(preference, 0, maximumDisplayPreferenceValue) {
@@ -388,44 +344,6 @@ func (handler *Handler) storeCapabilitiesDeviceProfile(session AuthenticatedSess
 	}
 	if handler.playSessions != nil {
 		handler.playSessions.setDeviceProfile(session, *profile)
-	}
-}
-
-func (handler *Handler) sessionInfo(session AuthenticatedSession) SessionInfoDto {
-	playableMediaTypes := []string{}
-	if handler != nil && handler.catalog != nil && handler.playSessions != nil {
-		playableMediaTypes = []string{"Video"}
-	}
-	capabilities := ClientCapabilitiesDto{PlayableMediaTypes: playableMediaTypes, SupportedCommands: []string{}, SupportsPersistentIdentifier: true}
-	if handler != nil && handler.bootstrap != nil {
-		if reported, ok := handler.bootstrap.clientCapabilities(session); ok {
-			capabilities = reported
-			playableMediaTypes = append([]string{}, reported.PlayableMediaTypes...)
-		}
-		if capabilities.DeviceProfile == nil {
-			if profile, ok := handler.bootstrap.deviceProfile(session); ok {
-				capabilities.DeviceProfile = &profile
-			}
-		}
-	}
-	if handler != nil && handler.playSessions != nil && capabilities.DeviceProfile == nil {
-		if profile, ok := handler.playSessions.deviceProfile(session); ok {
-			capabilities.DeviceProfile = &profile
-		}
-	}
-	lastActivity := time.Now().UTC()
-	if handler != nil && handler.bootstrap != nil {
-		if observed, ok := handler.bootstrap.lastActivity(session); ok {
-			lastActivity = observed
-		}
-	}
-	return SessionInfoDto{
-		Id: session.ID, ServerId: handler.serverInfo.ID.String(), IsActive: true, UserId: session.ProfileID, UserName: session.ProfileName,
-		Client: session.Client.Client, DeviceName: session.Client.Device, DeviceId: session.Client.DeviceID,
-		ApplicationVersion: session.Client.Version, LastActivityDate: lastActivity,
-		SupportsMediaControl: capabilities.SupportsMediaControl, SupportsRemoteControl: false,
-		PlayableMediaTypes: playableMediaTypes, SupportedCommands: append([]string{}, capabilities.SupportedCommands...), Capabilities: capabilities,
-		NowPlayingQueue: []QueueItemDto{}, NowPlayingQueueFullItems: []BaseItemDto{}, AdditionalUsers: []SessionUserInfoDto{},
 	}
 }
 

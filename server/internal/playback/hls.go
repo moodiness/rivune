@@ -25,9 +25,10 @@ const (
 	defaultMediaIdleTTL              = 2 * time.Minute
 	defaultTranscodeVideoBitrateKbps = 12000
 	hlsReadyTimeout                  = 45 * time.Second
-	hlsInitialBufferSeconds          = 6
+	hlsInitialBufferSeconds          = 12
 	hlsSegmentDurationSeconds        = 3
 	hlsRetainedSegments              = 120
+	hlsDeleteThreshold               = 1
 )
 
 var localMediaName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -166,16 +167,22 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 		if bandwidth <= 256000 {
 			bandwidth = defaultTranscodeVideoBitrateKbps*1000 + 256000
 		}
-		playlist := []byte(fmt.Sprintf("#EXTM3U\n#EXT-X-VERSION:%d\n#EXT-X-STREAM-INF:BANDWIDTH=%d\n%s\n", version, bandwidth, childURL))
+		streamInformation := fmt.Sprintf("BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d", bandwidth, bandwidth)
+		if codecs, ok := localHLSRFC6381Codecs(asset.Decision); ok {
+			streamInformation += `,CODECS="` + codecs + `"`
+		}
+		playlist := []byte(fmt.Sprintf("#EXTM3U\n#EXT-X-VERSION:%d\n#EXT-X-STREAM-INF:%s\n%s\n", version, streamInformation, childURL))
 		return writeHLSPlaylist(w, r, playlist)
 	}
+
 	if strings.HasSuffix(name, ".m3u8") {
 		contents, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("%w: read playlist: %v", ErrMediaProcessingFailed, err)
 		}
+		retainMediaSegments := playlistChildrenRetainWhileActive(contents)
 		var childErr error
-		rewritten, err := rewriteLocalPlaylistWithPolicy(contents, buildChildURL != nil, func(reference string) string {
+		rewritten, err := rewriteLocalPlaylistWithReferencePolicy(contents, buildChildURL != nil, func(reference string, mediaSegment bool) string {
 			if buildChildURL == nil {
 				return hlsAssetURLAt(sessionID, asset.ID, token, reference, asset.StartSeconds)
 			}
@@ -184,7 +191,8 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 			}
 			var childURL string
 			childURL, childErr = buildChildURL(deliveryChildState{
-				assetID: asset.ID, file: reference, start: hlsStartKey(asset.StartSeconds), retainWhileActive: true,
+				assetID: asset.ID, file: reference, start: hlsStartKey(asset.StartSeconds),
+				retainWhileActive: !mediaSegment || retainMediaSegments,
 			})
 			return childURL
 		})
@@ -217,8 +225,37 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, name, info.ModTime(), file)
-	pruneHLSSegments(job.directory, name)
 	return nil
+}
+
+func localHLSRFC6381Codecs(decision *PlaybackDecision) (string, bool) {
+	if decision == nil || decision.Target == nil {
+		return "", false
+	}
+	video, videoKnown := localHLSRFC6381VideoCodec(decision.Target.VideoCodec)
+	audio, audioKnown := localHLSRFC6381AudioCodec(decision.Target.AudioCodec)
+	if !videoKnown || !audioKnown {
+		return "", false
+	}
+	return video + "," + audio, true
+}
+
+func localHLSRFC6381VideoCodec(codec string) (string, bool) {
+	switch normalizedCodec(codec) {
+	case "h264":
+		return "avc1", true
+	default:
+		return "", false
+	}
+}
+
+func localHLSRFC6381AudioCodec(codec string) (string, bool) {
+	switch normalizedCodec(codec) {
+	case "aac":
+		return "mp4a", true
+	default:
+		return "", false
+	}
 }
 
 func writeHLSPlaylist(w http.ResponseWriter, r *http.Request, contents []byte) error {
@@ -590,11 +627,18 @@ func rewriteLocalPlaylist(contents []byte, buildURL func(string) string) ([]byte
 }
 
 func rewriteLocalPlaylistWithPolicy(contents []byte, rejectUnresolved bool, buildURL func(string) string) ([]byte, error) {
+	return rewriteLocalPlaylistWithReferencePolicy(contents, rejectUnresolved, func(reference string, _ bool) string {
+		return buildURL(reference)
+	})
+}
+
+func rewriteLocalPlaylistWithReferencePolicy(contents []byte, rejectUnresolved bool, buildURL func(string, bool) string) ([]byte, error) {
 	if err := validatePlaylistCardinality(contents); err != nil {
 		return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
 	}
 	output := newBoundedPlaylistOutput(len(contents))
 	scanner := playlistScanner(contents)
+	mediaSegmentPending := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "#") {
@@ -604,7 +648,7 @@ func rewriteLocalPlaylistWithPolicy(contents []byte, rejectUnresolved bool, buil
 					unresolved = true
 					return "", false
 				}
-				return buildURL(reference), true
+				return buildURL(reference, localHLSURIAttributeIsMediaSegment(line)), true
 			})
 			if err != nil {
 				return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
@@ -612,14 +656,18 @@ func rewriteLocalPlaylistWithPolicy(contents []byte, rejectUnresolved bool, buil
 			if rejectUnresolved && unresolved {
 				return nil, fmt.Errorf("%w: invalid local HLS playlist: unproxyable reference", ErrMediaProcessingFailed)
 			}
+			if strings.HasPrefix(line, "#EXTINF:") {
+				mediaSegmentPending = true
+			}
 		} else if strings.TrimSpace(line) != "" {
 			reference := strings.TrimSpace(line)
 			if !localMediaName.MatchString(reference) {
 				return nil, ErrMediaProcessingFailed
 			}
-			if err := output.writeString(buildURL(reference)); err != nil {
+			if err := output.writeString(buildURL(reference, mediaSegmentPending)); err != nil {
 				return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
 			}
+			mediaSegmentPending = false
 		} else if err := output.writeString(line); err != nil {
 			return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
 		}
@@ -638,6 +686,24 @@ func rewriteLocalPlaylistWithPolicy(contents []byte, rejectUnresolved bool, buil
 	return output.bytes(), nil
 }
 
+func localHLSURIAttributeIsMediaSegment(line string) bool {
+	if strings.HasPrefix(line, "#EXT-X-PART:") {
+		return true
+	}
+	attributes, isPreloadHint := strings.CutPrefix(line, "#EXT-X-PRELOAD-HINT:")
+	for isPreloadHint {
+		attribute, remaining, found := strings.Cut(attributes, ",")
+		if strings.TrimSpace(attribute) == "TYPE=PART" {
+			return true
+		}
+		if !found {
+			return false
+		}
+		attributes = remaining
+	}
+	return false
+}
+
 func hlsAssetURL(sessionID, assetID, token, file string) string {
 	return hlsAssetURLAt(sessionID, assetID, token, file, 0)
 }
@@ -648,40 +714,6 @@ func hlsAssetURLAt(sessionID, assetID, token, file string, startSeconds float64)
 		values.Set("start", hlsStartKey(startSeconds))
 	}
 	return "/api/v1/playback/sessions/" + url.PathEscape(sessionID) + "/assets/" + url.PathEscape(assetID) + "?" + values.Encode()
-}
-func pruneHLSSegments(directory, currentName string) {
-	current, ok := hlsSegmentIndex(currentName)
-	if !ok || current < hlsRetainedSegments {
-		return
-	}
-	cutoff := current - hlsRetainedSegments + 1
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		index, segment := hlsSegmentIndex(entry.Name())
-		if segment && index < cutoff {
-			_ = os.Remove(filepath.Join(directory, entry.Name()))
-		}
-	}
-}
-
-func hlsSegmentIndex(name string) (int, bool) {
-	if !strings.HasPrefix(name, "segment-") {
-		return 0, false
-	}
-	value := strings.TrimPrefix(name, "segment-")
-	switch {
-	case strings.HasSuffix(value, ".m4s"):
-		value = strings.TrimSuffix(value, ".m4s")
-	case strings.HasSuffix(value, ".ts"):
-		value = strings.TrimSuffix(value, ".ts")
-	default:
-		return 0, false
-	}
-	index, err := strconv.Atoi(value)
-	return index, err == nil && index >= 0
 }
 
 func directorySize(root string) int64 {

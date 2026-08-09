@@ -660,6 +660,90 @@ func TestInstanceSettingsJellyfinAmbiguousCommitReconcilesCanonicalStateAfterRea
 	}
 }
 
+type revokingJellyfinSettings struct {
+	*fakeSettingsService
+	enabled     bool
+	updateCalls int
+}
+
+func (service *revokingJellyfinSettings) Instance(context.Context) (settings.Layer, error) {
+	enabled := service.enabled
+	return settings.Layer{SchemaVersion: 1, Values: settings.Values{JellyfinEnabled: &enabled}}, nil
+}
+
+func (service *revokingJellyfinSettings) UpdateInstance(_ context.Context, _ auth.Principal, patch settings.Patch) (settings.Layer, error) {
+	service.instancePatch = patch
+	service.updateCalls++
+	if patch.JellyfinEnabled.Set && patch.JellyfinEnabled.Value != nil {
+		service.enabled = *patch.JellyfinEnabled.Value
+	}
+	return service.Instance(context.Background())
+}
+
+func TestJellyfinDisableRevocationFailureStaysUnpublishedUntilEnableRetrySucceeds(t *testing.T) {
+	service := &revokingJellyfinSettings{fakeSettingsService: &fakeSettingsService{}, enabled: true}
+	api := authenticatedSettingsAPI(service)
+	api.jellyfinCompatibilityDesired = true
+	revocationFailed := true
+	revocations := 0
+	revokedToken := false
+	api.jellyfinCompatibilityRevoker = func(_ context.Context, reason string) error {
+		revocations++
+		if reason != jellyfinCompatibilityDisabledRevocationReason {
+			t.Fatalf("revocation reason=%q", reason)
+		}
+		if revocationFailed {
+			return errors.New("injected database failure")
+		}
+		revokedToken = true
+		return nil
+	}
+
+	disable := performJellyfinSettingPatch(t, api, false)
+	if disable.Code != http.StatusInternalServerError || api.HasJellyfinCompatibility() || service.enabled || revocations != 1 {
+		t.Fatalf("failed disable status=%d desired=%t persisted=%t revocations=%d", disable.Code, api.HasJellyfinCompatibility(), service.enabled, revocations)
+	}
+	enableWhileFailed := performJellyfinSettingPatch(t, api, true)
+	if enableWhileFailed.Code != http.StatusInternalServerError || api.HasJellyfinCompatibility() || service.updateCalls != 1 || revocations != 2 {
+		t.Fatalf("failed enable status=%d desired=%t updates=%d revocations=%d", enableWhileFailed.Code, api.HasJellyfinCompatibility(), service.updateCalls, revocations)
+	}
+
+	revocationFailed = false
+	enableRetry := performJellyfinSettingPatch(t, api, true)
+	if enableRetry.Code != http.StatusOK || !api.HasJellyfinCompatibility() || !service.enabled || !revokedToken || service.updateCalls != 2 || revocations != 3 {
+		t.Fatalf("enable retry status=%d desired=%t persisted=%t tokenRevoked=%t updates=%d revocations=%d", enableRetry.Code, api.HasJellyfinCompatibility(), service.enabled, revokedToken, service.updateCalls, revocations)
+	}
+}
+
+func TestJellyfinIdempotentEnabledPatchDoesNotRevokeSessions(t *testing.T) {
+	service := &revokingJellyfinSettings{fakeSettingsService: &fakeSettingsService{}, enabled: true}
+	api := authenticatedSettingsAPI(service)
+	api.jellyfinCompatibilityDesired = true
+	revocations := 0
+	api.jellyfinCompatibilityRevoker = func(context.Context, string) error {
+		revocations++
+		return nil
+	}
+	response := performJellyfinSettingPatch(t, api, true)
+	if response.Code != http.StatusOK || !api.HasJellyfinCompatibility() || revocations != 0 || service.updateCalls != 1 {
+		t.Fatalf("idempotent enable status=%d desired=%t updates=%d revocations=%d", response.Code, api.HasJellyfinCompatibility(), service.updateCalls, revocations)
+	}
+}
+
+func performJellyfinSettingPatch(t *testing.T, api *API, enabled bool) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{"jellyfinEnabled":false}`
+	if enabled {
+		body = `{"jellyfinEnabled":true}`
+	}
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer access-token")
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+	return response
+}
+
 func TestJellyfinEnabledRemainsInstanceOnlyAndGlobalAdministratorOnly(t *testing.T) {
 	profileService := &fakeSettingsService{profileErr: settings.ErrInvalidInput}
 	profileAPI := authenticatedSettingsAPI(profileService)
@@ -707,5 +791,6 @@ func authenticatedSettingsAPI(service settingsService) *API {
 		AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 	}}
 	api.settings = service
+	api.jellyfinCompatibilityRevoker = func(context.Context, string) error { return nil }
 	return api
 }

@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/watchstate"
@@ -17,6 +18,7 @@ import (
 const (
 	maximumStateBodyBytes          = 1 << 20
 	maximumUserDataPositionSeconds = int64(1<<31 - 1)
+	maximumContinuationPageSize    = 100
 )
 
 // Watchstate is the direct domain boundary for compatibility state. It avoids
@@ -76,6 +78,9 @@ func (handler *Handler) handlePlayingPing(response http.ResponseWriter, request 
 		response.WriteHeader(http.StatusNoContent)
 		return
 	}
+	if handler.bootstrap != nil {
+		handler.bootstrap.touchPlayback(session, playSessionID)
+	}
 	response.WriteHeader(http.StatusNoContent)
 }
 
@@ -100,7 +105,9 @@ func (handler *Handler) handlePlaybackEvent(response http.ResponseWriter, reques
 	if err := decodeStateBody(request, &input); err != nil ||
 		input.PositionTicks < 0 || input.PlaybackStartTimeTicks < 0 ||
 		!boundedStateSelector(input.ItemId) || !boundedStateSelector(input.PlaySessionId) ||
-		input.MediaSourceId != "" && !boundedStateSelector(input.MediaSourceId) {
+		input.MediaSourceId != "" && !boundedStateSelector(input.MediaSourceId) ||
+		!validPlaybackStreamIndex(input.AudioStreamIndex, false) || !validPlaybackStreamIndex(input.SubtitleStreamIndex, true) ||
+		!validCompatPlayMethod(input.PlayMethod) {
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The playback event is invalid")
 		return
 	}
@@ -136,13 +143,16 @@ func (handler *Handler) handlePlaybackEvent(response http.ResponseWriter, reques
 
 	position := ticksToStateSeconds(input.PositionTicks)
 	duration := durationToStateSeconds(binding.DurationSeconds)
-	_, progressErr := applyPlaybackProgress(
+	progress, progressErr := applyPlaybackProgress(
 		request.Context(), handler.watchstate, session.Principal, binding.ItemID,
 		position, duration, kind == playbackEventPlaying && (duration == 0 || position < duration), kind == playbackEventStopped,
 	)
 	if progressErr != nil {
 		handler.writeStateError(response, progressErr)
 		return
+	}
+	if handler.bootstrap.hasSubscribers(session, "UserDataChanged") {
+		handler.publishItemUserData(request.Context(), session, binding.ItemID, progress)
 	}
 	var closeErr error
 	if kind == playbackEventStopped {
@@ -153,6 +163,12 @@ func (handler *Handler) handlePlaybackEvent(response http.ResponseWriter, reques
 	if closeErr != nil && !errors.Is(closeErr, errPlaySessionNotFound) {
 		handler.writeStateError(response, closeErr)
 		return
+	}
+	if handler.bootstrap != nil {
+		handler.bootstrap.setPlayback(session, binding, input, kind == playbackEventStopped)
+	}
+	if handler.bootstrap.hasSubscribers(session, "Sessions") {
+		handler.publishSessionUpdate(request.Context(), session)
 	}
 	response.WriteHeader(http.StatusNoContent)
 }
@@ -195,7 +211,9 @@ func (handler *Handler) handlePlayedState(response http.ResponseWriter, request 
 		handler.writeStateError(response, err)
 		return
 	}
-	handler.writeJSON(response, http.StatusOK, userDataFromProgress(progress, item.InLibrary))
+	userData := userDataFromState(item, progress, item.Favorite, item.UserData)
+	handler.publishMutationUserDataChange(session, userData)
+	handler.writeJSON(response, http.StatusOK, userData)
 }
 
 func (handler *Handler) handleUserData(response http.ResponseWriter, request *http.Request) {
@@ -220,11 +238,16 @@ func (handler *Handler) handleItemUserData(response http.ResponseWriter, request
 		if !exists {
 			progress = emptyItemProgress(item)
 		}
-		handler.writeJSON(response, http.StatusOK, userDataFromProgress(progress, item.InLibrary))
+		handler.writeJSON(response, http.StatusOK, userDataFromState(item, progress, item.Favorite, item.UserData))
 		return
 	}
 	var input *UpdateUserItemDataDto
-	if err := decodeCompatJSON(response, request, &input); err != nil || input == nil || !validUserDataUpdate(*input, item.ID) {
+	if err := decodeCompatJSON(response, request, &input); err != nil || input == nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The user data is invalid")
+		return
+	}
+	mutation, valid := userDataMutation(*input, item.ID)
+	if !valid {
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The user data is invalid")
 		return
 	}
@@ -241,12 +264,9 @@ func (handler *Handler) handleItemUserData(response http.ResponseWriter, request
 	if item.RuntimeMinutes != nil && *item.RuntimeMinutes > 0 && int64(*item.RuntimeMinutes) <= maximumUserDataPositionSeconds/60 {
 		duration = *item.RuntimeMinutes * 60
 	}
-	state, err := handler.watchstate.UpdateUserDataForLinkedSession(request.Context(), session.Principal, item.ID, watchstate.UpdateUserDataInput{
-		PositionSeconds: positionSeconds,
-		DurationSeconds: duration,
-		Played:          input.Played,
-		Favorite:        input.IsFavorite,
-	})
+	mutation.PositionSeconds = positionSeconds
+	mutation.DurationSeconds = duration
+	state, err := handler.watchstate.UpdateUserDataForLinkedSession(request.Context(), session.Principal, item.ID, mutation)
 	if err != nil {
 		handler.writeStateError(response, err)
 		return
@@ -255,7 +275,9 @@ func (handler *Handler) handleItemUserData(response http.ResponseWriter, request
 	if state.Progress != nil {
 		progress = *state.Progress
 	}
-	handler.writeJSON(response, http.StatusOK, userDataFromProgress(progress, state.InLibrary))
+	userData := userDataFromState(item, progress, state.Favorite, state.UserData)
+	handler.publishMutationUserDataChange(session, userData)
+	handler.writeJSON(response, http.StatusOK, userData)
 }
 
 func (handler *Handler) handleFavoriteItem(response http.ResponseWriter, request *http.Request) {
@@ -281,7 +303,9 @@ func (handler *Handler) handleFavoriteState(response http.ResponseWriter, reques
 	if state.Progress != nil {
 		progress = *state.Progress
 	}
-	handler.writeJSON(response, http.StatusOK, userDataFromProgress(progress, state.InLibrary))
+	userData := userDataFromState(item, progress, state.Favorite, state.UserData)
+	handler.publishMutationUserDataChange(session, userData)
+	handler.writeJSON(response, http.StatusOK, userData)
 }
 
 func (handler *Handler) authorizedStateItem(response http.ResponseWriter, request *http.Request, userScoped bool) (AuthenticatedSession, watchstate.CatalogTitle, bool) {
@@ -315,18 +339,57 @@ func emptyItemProgress(item watchstate.CatalogTitle) watchstate.Progress {
 	return watchstate.Progress{TitleID: item.ID, MediaType: item.MediaType}
 }
 
-func validUserDataUpdate(input UpdateUserItemDataDto, itemID string) bool {
+func userDataMutation(input UpdateUserItemDataDto, itemID string) (watchstate.UpdateUserDataInput, bool) {
 	if input.PlaybackPositionTicks != nil && *input.PlaybackPositionTicks < 0 ||
-		input.PlayCount != nil && *input.PlayCount < 0 ||
-		input.UnplayedItemCount != nil && *input.UnplayedItemCount < 0 ||
 		input.ItemId != nil && !sameCompatUUID(*input.ItemId, itemID) ||
-		input.Key != nil && !sameCompatUUID(*input.Key, itemID) {
-		return false
+		input.Key != nil && !sameCompatUUID(*input.Key, itemID) ||
+		input.Rating.Set && input.Rating.Value != nil &&
+			(math.IsNaN(*input.Rating.Value) || math.IsInf(*input.Rating.Value, 0) || *input.Rating.Value < 0 || *input.Rating.Value > 10) ||
+		input.PlayedPercentage.Set && input.PlayedPercentage.Value != nil &&
+			(math.IsNaN(*input.PlayedPercentage.Value) || math.IsInf(*input.PlayedPercentage.Value, 0) ||
+				*input.PlayedPercentage.Value < 0 || *input.PlayedPercentage.Value > 100) ||
+		input.UnplayedItemCount.Set && input.UnplayedItemCount.Value != nil &&
+			(*input.UnplayedItemCount.Value < 0 || int64(*input.UnplayedItemCount.Value) > maximumUserDataPositionSeconds) ||
+		input.PlayCount.Set && (input.PlayCount.Value == nil || *input.PlayCount.Value < 0 ||
+			int64(*input.PlayCount.Value) > maximumUserDataPositionSeconds) {
+		return watchstate.UpdateUserDataInput{}, false
 	}
-	if input.PlayedPercentage != nil && (math.IsNaN(*input.PlayedPercentage) || math.IsInf(*input.PlayedPercentage, 0) || *input.PlayedPercentage < 0 || *input.PlayedPercentage > 100) {
-		return false
+	result := watchstate.UpdateUserDataInput{
+		Played: input.Played, Favorite: input.IsFavorite,
+		Rating:            watchstate.OptionalUserDataValue[float64]{Set: input.Rating.Set, Value: input.Rating.Value},
+		PlayedPercentage:  watchstate.OptionalUserDataValue[float64]{Set: input.PlayedPercentage.Set, Value: input.PlayedPercentage.Value},
+		UnplayedItemCount: watchstate.OptionalUserDataValue[int]{Set: input.UnplayedItemCount.Set, Value: input.UnplayedItemCount.Value},
+		PlayCount:         watchstate.OptionalUserDataValue[int]{Set: input.PlayCount.Set, Value: input.PlayCount.Value},
+		Likes:             watchstate.OptionalUserDataValue[bool]{Set: input.Likes.Set, Value: input.Likes.Value},
+		LastPlayedDate:    watchstate.OptionalUserDataValue[time.Time]{Set: input.LastPlayedDate.Set},
 	}
-	return input.Rating == nil || !math.IsNaN(*input.Rating) && !math.IsInf(*input.Rating, 0)
+	if input.LastPlayedDate.Set && input.LastPlayedDate.Value != nil {
+		parsed, err := time.Parse(time.RFC3339Nano, *input.LastPlayedDate.Value)
+		if err != nil {
+			return watchstate.UpdateUserDataInput{}, false
+		}
+		parsed = parsed.UTC()
+		if parsed.Year() < 1 || parsed.Year() > 9999 {
+			return watchstate.UpdateUserDataInput{}, false
+		}
+		result.LastPlayedDate.Value = &parsed
+	}
+	return result, true
+}
+
+func userDataFromState(item watchstate.CatalogTitle, progress watchstate.Progress, favorite bool, supplemental *watchstate.UserDataValues) UserItemDataDto {
+	item.Favorite = favorite
+	item.Progress = &watchstate.CatalogProgress{
+		PositionSeconds: progress.PositionSeconds,
+		DurationSeconds: progress.DurationSeconds,
+		Completed:       progress.Completed,
+	}
+	if !progress.LastWatchedAt.IsZero() {
+		lastWatchedAt := progress.LastWatchedAt
+		item.Progress.LastWatchedAt = &lastWatchedAt
+	}
+	item.UserData = supplemental
+	return userDataFromCatalogTitle(item)
 }
 
 func userDataPositionSeconds(ticks int64) (int, bool) {
@@ -354,15 +417,23 @@ func (handler *Handler) handleResume(response http.ResponseWriter, request *http
 		return
 	}
 	session, ok := handler.authenticateRequest(response, request, false)
-	if !ok {
+	if !ok || !handler.requireOptionalQueryUser(response, request, session) {
 		return
 	}
 	if !userless && !sameCompatUUID(request.PathValue("id"), session.ProfileID) {
 		http.NotFound(response, request)
 		return
 	}
+	if !validateCompatQueryNames(request.URL.Query(), "UserId", "StartIndex", "Limit", "EnableUserData", "MediaTypes", "Fields", "EnableImages", "EnableImageTypes", "ImageTypeLimit") {
+		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
+		return
+	}
 	query, err := ParseItemQuery(request.URL.Query())
 	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
+		return
+	}
+	if query.Limit < 1 || query.Limit > maximumContinuationPageSize {
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
 		return
 	}
@@ -384,7 +455,7 @@ func (handler *Handler) handleResume(response http.ResponseWriter, request *http
 		handler.writeStateError(response, err)
 		return
 	}
-	handler.writeContinueItems(response, request, session.Principal, page, query.EnableUserData)
+	handler.writeContinueItems(response, request, session.Principal, page, query)
 }
 
 func (handler *Handler) handleNextUp(response http.ResponseWriter, request *http.Request) {
@@ -393,11 +464,19 @@ func (handler *Handler) handleNextUp(response http.ResponseWriter, request *http
 		return
 	}
 	session, ok := handler.authenticateRequest(response, request, false)
-	if !ok {
+	if !ok || !handler.requireOptionalQueryUser(response, request, session) {
+		return
+	}
+	if !validateCompatQueryNames(request.URL.Query(), "UserId", "SeriesId", "StartIndex", "Limit", "EnableUserData", "Fields", "EnableImages", "EnableImageTypes", "ImageTypeLimit") {
+		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
 		return
 	}
 	query, err := ParseItemQuery(request.URL.Query())
 	if err != nil {
+		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
+		return
+	}
+	if query.Limit < 1 || query.Limit > maximumContinuationPageSize {
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
 		return
 	}
@@ -423,10 +502,10 @@ func (handler *Handler) handleNextUp(response http.ResponseWriter, request *http
 		handler.writeStateError(response, err)
 		return
 	}
-	handler.writeContinueItems(response, request, session.Principal, page, query.EnableUserData)
+	handler.writeContinueItems(response, request, session.Principal, page, query)
 }
 
-func (handler *Handler) writeContinueItems(response http.ResponseWriter, request *http.Request, principal auth.Principal, page watchstate.ContinueItemsPage, includeUserData bool) {
+func (handler *Handler) writeContinueItems(response http.ResponseWriter, request *http.Request, principal auth.Principal, page watchstate.ContinueItemsPage, query ItemQuery) {
 	ids := make([]string, 0, len(page.Items))
 	seen := make(map[string]struct{}, len(page.Items))
 	for _, entry := range page.Items {
@@ -463,7 +542,31 @@ func (handler *Handler) writeContinueItems(response http.ResponseWriter, request
 			handler.writeCompatError(response, http.StatusNotFound, "ResourceNotFound", "The item was not found")
 			return
 		}
-		items = append(items, handler.baseItemDTO(title, includeUserData))
+		if title.MediaType == "episode" {
+			if entry.SeriesID != "" {
+				title.SeriesID = entry.SeriesID
+			}
+			if entry.SeasonID != "" {
+				title.ParentID = entry.SeasonID
+				title.SeasonID = entry.SeasonID
+			} else if title.SeasonID != "" {
+				title.ParentID = title.SeasonID
+			} else if title.ParentID != "" {
+				title.SeasonID = title.ParentID
+			}
+			if entry.EpisodeNumber != nil {
+				title.Ordinal = entry.EpisodeNumber
+			}
+			if entry.SeasonNumber != nil {
+				title.ParentOrdinal = entry.SeasonNumber
+			}
+		}
+		item := handler.baseItemDTO(title, query.EnableUserData)
+		applyItemQueryProjection(&item, query, false)
+		if title.MediaType == "episode" && title.SeasonID != "" {
+			item.ParentId = title.SeasonID
+		}
+		items = append(items, item)
 	}
 	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{
 		Items: items, TotalRecordCount: page.Total, StartIndex: page.Offset,
@@ -626,27 +729,6 @@ func updateWatchedWithReload(ctx context.Context, service Watchstate, principal 
 		}
 	}
 	return watchstate.Progress{}, watchstate.ErrConflict
-}
-
-func userDataFromProgress(progress watchstate.Progress, inLibrary bool) UserItemDataDto {
-	value := UserItemDataDto{
-		PlaybackPositionTicks: SecondsToTicks(int64(progress.PositionSeconds)),
-		IsFavorite:            inLibrary,
-		Played:                progress.Completed,
-		Key:                   progress.TitleID,
-		ItemId:                progress.TitleID,
-	}
-	if progress.DurationSeconds > 0 {
-		percentage := math.Min(100, math.Max(0, float64(progress.PositionSeconds)*100/float64(progress.DurationSeconds)))
-		value.PlayedPercentage = &percentage
-	}
-	if progress.Completed {
-		value.PlayCount = 1
-	}
-	if !progress.LastWatchedAt.IsZero() {
-		value.LastPlayedDate = progress.LastWatchedAt.UTC().Format("2006-01-02T15:04:05.0000000Z")
-	}
-	return value
 }
 
 func fmtStateInvalid(message string) error {

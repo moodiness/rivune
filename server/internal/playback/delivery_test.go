@@ -88,14 +88,65 @@ func TestDeliveryRequestPreservesHEADRangeAndSanitizesNativeRouting(t *testing.T
 	}
 	childURL := delivery.template.childURL("child-capability", deliveryChildState{assetID: "stream-1", file: "segment.ts"})
 	childQuery := httptest.NewRequest(http.MethodGet, childURL, nil).URL.Query()
-	if childQuery.Get("StartTimeTicks") != "900000000" || childQuery.Get("api_key") != "" || childQuery.Get("PlaySessionId") != "" {
-		t.Fatalf("compat child URL selectors exposed a credential: %s", childURL)
+	if childQuery.Get("StartTimeTicks") != "900000000" || childQuery.Get("api_key") != "compat-play-session" || childQuery.Get("PlaySessionId") != "compat-play-session" ||
+		childQuery.Get("MediaSourceId") != "compat-media-source" || childQuery.Get(deliveryChildQueryName) != "child-capability" || strings.Contains(childURL, "compat-token") {
+		t.Fatalf("compat child URL selectors are incomplete or exposed the general credential: %s", childURL)
 	}
 	if got := httptest.NewRequest(http.MethodGet, childURL, nil).URL.Path; got != "/emby/Videos/item/hls1/compat-play-session/child-capability.ts" {
 		t.Fatalf("extension-correct child path = %q", got)
 	}
 	if request.URL.Query().Get("file") != "" || request.URL.Query().Get("start") != "" {
 		t.Fatal("delivery adaptation mutated the adapter request")
+	}
+}
+
+func TestDeliveryChildURLUsesConventionalRouteOnlyForLocalMainPlaylist(t *testing.T) {
+	template, err := newDeliveryLinkTemplate(httptest.NewRequest(http.MethodGet, "/emby/Videos/item/stream.m3u8?PlaySessionId=compat-play-session&MediaSourceId=compat-media-source&StartTimeTicks=900000000&api_key=compat-secret", nil).URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	localMain := template.childURL("local-main-capability", deliveryChildState{
+		assetID: "stream-1", file: "index.m3u8", start: "90",
+	})
+	wantLocalMain := "/emby/Videos/item/main.m3u8?MediaSourceId=compat-media-source&PlaySessionId=compat-play-session&RivuneChildId=local-main-capability&StartTimeTicks=900000000&api_key=compat-play-session"
+	if localMain != wantLocalMain {
+		t.Fatalf("local main URL = %q, want %q", localMain, wantLocalMain)
+	}
+
+	for name, test := range map[string]struct {
+		childID string
+		state   deliveryChildState
+		path    string
+	}{
+		"local segment": {
+			childID: "local-segment-capability",
+			state:   deliveryChildState{assetID: "stream-1", file: "segment-000001.m4s", start: "90"},
+			path:    "/emby/Videos/item/hls1/compat-play-session/local-segment-capability.m4s",
+		},
+		"upstream playlist": {
+			childID: "upstream-playlist-capability",
+			state: deliveryChildState{
+				assetID: "stream-1", target: "https://provider.example/private/media.m3u8?provider_token=secret", signature: "native-signature",
+			},
+			path: "/emby/Videos/item/hls1/compat-play-session/upstream-playlist-capability.m3u8",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			childURL := template.childURL(test.childID, test.state)
+			parsed := httptest.NewRequest(http.MethodGet, childURL, nil).URL
+			if parsed.Path != test.path {
+				t.Fatalf("child path = %q, want %q", parsed.Path, test.path)
+			}
+			if parsed.RawQuery != "MediaSourceId=compat-media-source&PlaySessionId=compat-play-session&RivuneChildId="+test.childID+"&StartTimeTicks=900000000&api_key=compat-play-session" {
+				t.Fatalf("child query = %q", parsed.RawQuery)
+			}
+			for _, secret := range []string{"compat-secret", "provider.example", "provider_token", "native-signature"} {
+				if strings.Contains(childURL, secret) {
+					t.Fatalf("child URL exposed %q: %s", secret, childURL)
+				}
+			}
+		})
 	}
 }
 
@@ -122,20 +173,18 @@ func TestDeliveryChildURLsResolveOnlyInsideOwningHandle(t *testing.T) {
 	if parsedPath := httptest.NewRequest(http.MethodGet, childURL, nil).URL.Path; !strings.HasSuffix(parsedPath, ".ts") {
 		t.Fatalf("target-derived child path = %q", parsedPath)
 	}
-	for _, forbidden := range []string{"/api/v1", "native-token", "native-signature", "provider.example", "provider_token", "target=", "compat-secret", "api_key="} {
+	for _, forbidden := range []string{"/api/v1", "native-token", "native-signature", "provider.example", "provider_token", "target=", "compat-secret"} {
 		if strings.Contains(childURL, forbidden) {
 			t.Fatalf("compat child URL exposed %q: %s", forbidden, childURL)
 		}
 	}
 	parsed := httptest.NewRequest(http.MethodGet, childURL, nil)
 	query := parsed.URL.Query()
-	if len(query) != 3 || query.Get("PlaySessionId") != "" ||
+	if len(query) != 5 || query.Get("PlaySessionId") != "compat-play-session" ||
 		query.Get("MediaSourceId") != "compat-media-source" || query.Get(deliveryChildQueryName) != childID ||
-		query.Get("StartTimeTicks") != "900000000" || query.Get("api_key") != "" {
+		query.Get("StartTimeTicks") != "900000000" || query.Get("api_key") != "compat-play-session" {
 		t.Fatalf("unexpected compat child selectors: %s", childURL)
 	}
-	query.Set("PlaySessionId", "compat-play-session")
-	parsed.URL.RawQuery = query.Encode()
 
 	foreign := handle
 	foreign.children = newDeliveryChildTable()
@@ -285,6 +334,91 @@ func TestDeliveryChildTableRetainsStaticPlaylistTailWhilePlaybackActive(t *testi
 	now = now.Add(deliveryChildTTL)
 	if _, ok := table.resolve(tailID); ok {
 		t.Fatal("static playlist tail survived an idle playback TTL")
+	}
+}
+
+func TestSlidingLocalPlaylistCapabilitiesExpireHistoricalSegmentsOnly(t *testing.T) {
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	table := newDeliveryChildTable()
+	table.now = func() time.Time { return now }
+	playlistID, err := table.register(deliveryChildState{
+		assetID: "stream-1", file: "index.m3u8", start: "90", retainWhileActive: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	registerSnapshot := func(first int) map[string]string {
+		t.Helper()
+		var playlist strings.Builder
+		fmt.Fprintf(&playlist, "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:%d\n#EXT-X-MAP:URI=\"init.mp4\"\n", first)
+		for offset := range hlsRetainedSegments {
+			fmt.Fprintf(&playlist, "#EXTINF:%d,\nsegment-%06d.m4s\n", hlsSegmentDurationSeconds, first+offset)
+		}
+		contents := []byte(playlist.String())
+		if playlistChildrenRetainWhileActive(contents) {
+			t.Fatal("sliding playlist was classified as static")
+		}
+		ids := make(map[string]string, hlsRetainedSegments+1)
+		var registerErr error
+		_, rewriteErr := rewriteLocalPlaylistWithReferencePolicy(contents, true, func(reference string, mediaSegment bool) string {
+			if registerErr != nil {
+				return ""
+			}
+			state := deliveryChildState{
+				assetID: "stream-1", file: reference, start: "90", retainWhileActive: !mediaSegment,
+			}
+			ids[reference], registerErr = table.register(state)
+			return "/" + ids[reference]
+		})
+		if rewriteErr != nil {
+			t.Fatal(rewriteErr)
+		}
+		if registerErr != nil {
+			t.Fatal(registerErr)
+		}
+		return ids
+	}
+
+	initial := registerSnapshot(0)
+	oldestID := initial["segment-000000.m4s"]
+	initID := initial["init.mp4"]
+	if table.entries[oldestID].state.retainWhileActive || !table.entries[initID].state.retainWhileActive {
+		t.Fatal("sliding media/init retention policy was not recorded")
+	}
+
+	step := deliveryChildTTL / time.Duration(hlsRetainedSegments)
+	current := initial
+	for first := 1; first <= 3*hlsRetainedSegments; first++ {
+		now = now.Add(step)
+		if _, ok := table.resolve(playlistID); !ok {
+			t.Fatalf("playlist reconnect failed after rotation %d", first)
+		}
+		current = registerSnapshot(first)
+	}
+
+	if _, ok := table.resolve(oldestID); ok {
+		t.Fatal("historical segment survived after leaving the sliding window for its TTL")
+	}
+	if resolved, ok := table.resolve(playlistID); !ok || resolved.file != "index.m3u8" {
+		t.Fatal("playlist capability expired during the active session")
+	}
+	if current["init.mp4"] != initID {
+		t.Fatal("repeated playlist snapshots did not reuse the init capability")
+	}
+	if _, ok := table.resolve(initID); !ok {
+		t.Fatal("init capability expired during the active session")
+	}
+	for file, childID := range current {
+		if file == "init.mp4" {
+			continue
+		}
+		if _, ok := table.resolve(childID); !ok {
+			t.Fatalf("segment in the current seek window expired: %s", file)
+		}
+	}
+	if len(table.entries) > 2*hlsRetainedSegments+2 {
+		t.Fatalf("sliding capability table retained %d entries after long rotation, want at most %d", len(table.entries), 2*hlsRetainedSegments+2)
 	}
 }
 
@@ -440,14 +574,14 @@ func assertCompatPlaylistChildLinks(t *testing.T, playlist string, want int) {
 		t.Fatalf("playlist references = %v, want %d in %s", references, want, playlist)
 	}
 	for _, reference := range references {
-		for _, forbidden := range []string{"/api/v1", "native_token", "native-signature", "provider.example", "target=", "signature=", "compat-secret", "api_key="} {
+		for _, forbidden := range []string{"/api/v1", "native_token", "native-signature", "provider.example", "target=", "signature=", "compat-secret"} {
 			if strings.Contains(reference, forbidden) {
 				t.Fatalf("playlist child link exposed %q: %s", forbidden, reference)
 			}
 		}
 		request := httptest.NewRequest(http.MethodGet, reference, nil)
 		query := request.URL.Query()
-		if len(query) != 3 || query.Get(deliveryChildQueryName) == "" || query.Get("MediaSourceId") != "compat-media-source" || query.Get("StartTimeTicks") != "900000000" || query.Get("PlaySessionId") != "" || query.Get("api_key") != "" {
+		if len(query) != 5 || query.Get(deliveryChildQueryName) == "" || query.Get("MediaSourceId") != "compat-media-source" || query.Get("StartTimeTicks") != "900000000" || query.Get("PlaySessionId") != "compat-play-session" || query.Get("api_key") != "compat-play-session" {
 			t.Fatalf("playlist child selectors = %s", reference)
 		}
 		if !strings.Contains(request.URL.Path, "/hls1/compat-play-session/") || strings.LastIndex(request.URL.Path, ".") < strings.LastIndex(request.URL.Path, "/") {

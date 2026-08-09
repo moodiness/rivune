@@ -39,7 +39,7 @@ type deliveryChildState struct {
 	start             string
 	target            string
 	signature         string
-	retainWhileActive bool
+	retainWhileActive bool // Sliding media segments leave this false so table activity cannot extend their TTL.
 }
 
 type deliveryChildEntry struct {
@@ -610,12 +610,17 @@ func (template deliveryLinkTemplate) childURL(childID string, state deliveryChil
 	extension := deliveryChildExtension(state)
 	query := url.Values{
 		"MediaSourceId":        []string{template.mediaSourceID},
+		"PlaySessionId":        []string{template.playSessionID},
+		"api_key":              []string{template.playSessionID},
 		deliveryChildQueryName: []string{childID},
 	}
 	if template.startTimeTicks != "" {
 		query.Set("StartTimeTicks", template.startTimeTicks)
 	}
 	path := template.path + "/hls1/" + url.PathEscape(template.playSessionID) + "/" + url.PathEscape(childID) + "." + extension
+	if state.file == "index.m3u8" && state.target == "" && state.signature == "" {
+		path = template.path + "/main.m3u8"
+	}
 	return (&url.URL{Path: path, RawQuery: query.Encode()}).String()
 }
 

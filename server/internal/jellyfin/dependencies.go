@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	artworkdomain "github.com/moodiness/rivune/server/internal/artwork"
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/collection"
 	"github.com/moodiness/rivune/server/internal/playback"
@@ -18,12 +19,35 @@ type Authentication interface {
 	Logout(context.Context, AuthenticatedSession) error
 }
 
+// AuthenticatedRequestPolicy applies request-scoped authorization after a
+// compatibility credential has resolved to a principal.
+type AuthenticatedRequestPolicy interface {
+	Authorize(context.Context, auth.Principal) (AuthenticatedRequestPolicyResult, error)
+}
+
+type AuthenticatedRequestPolicyResult struct {
+	Allowed       bool
+	PublicMessage *string
+}
+
 // CatalogReader is the profile-authorized, read-only catalog boundary used by
 // compatibility handlers. It deliberately returns domain models, not /api/v1
 // transport DTOs.
 type CatalogReader interface {
 	GetCatalogTitle(context.Context, auth.Principal, string) (watchstate.CatalogTitle, error)
 	ListCatalogItems(context.Context, auth.Principal, watchstate.CatalogQuery) (watchstate.CatalogPage, error)
+}
+
+// MediaSegmentReader exposes only profile-authorized, normalized playback markers.
+// Compatibility handlers derive provider coordinates from authorized catalog
+// metadata and never accept them from an untrusted Jellyfin request.
+type MediaSegmentReader interface {
+	Markers(context.Context, auth.Principal, playback.MarkerInput) (playback.MarkerList, error)
+}
+
+type trickplayDelivery interface {
+	TrickplayAvailable() bool
+	Trickplay(context.Context, auth.Principal, playback.TrickplayInput) (playback.TrickplayImage, error)
 }
 
 type catalogDetailReader interface {
@@ -58,6 +82,10 @@ type collectionItemResolver interface {
 type ArtworkDelivery interface {
 	LookupKey(context.Context, string) (string, bool)
 	ServeKey(http.ResponseWriter, *http.Request, string)
+}
+
+type artworkMetadataDelivery interface {
+	DescribeKey(context.Context, string) (artworkdomain.ImageMetadata, bool)
 }
 
 // PlaybackDelivery keeps native delivery handles opaque to the compatibility

@@ -33,6 +33,7 @@ func NewService(pool *pgxpool.Pool, transport Transport, logger *slog.Logger) *S
 	if transport == nil {
 		transport = NewHTTPTransport(nil)
 	}
+	transport = observeTransport(transport)
 	if logger == nil {
 		logger = slog.Default()
 	}

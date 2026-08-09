@@ -40,7 +40,9 @@ func TestEnrichMovieAuthenticatesAndSelectsHighestQualityArtwork(t *testing.T) {
 				{"url":"https://images.example/logo-en.png","lang":"en","likes":"100","width":"800","height":"310"},
 				{"url":"https://images.example/logo-fr.png","lang":"fr","likes":"1","width":"800","height":"310"}
 			],
-			"movielogo":[{"url":"https://images.example/logo-fr.png","lang":"fr","likes":"1","width":"400","height":"155"}]
+			"movielogo":[{"url":"https://images.example/logo-fr.png","lang":"fr","likes":"1","width":"400","height":"155"}],
+			"moviebanner":[{"url":"https://images.example/banner.jpg","lang":"00","likes":"4","width":"1000","height":"185"}],
+			"hdmovieclearart":[{"url":"https://images.example/art-fr.png","lang":"fr","likes":"3","width":"1000","height":"562"}]
 		}`))
 	}))
 	defer server.Close()
@@ -55,7 +57,9 @@ func TestEnrichMovieAuthenticatesAndSelectsHighestQualityArtwork(t *testing.T) {
 	}
 	if enriched.PosterURL != "https://images.example/poster-neutral.jpg" ||
 		enriched.BackdropURL != "https://images.example/background.jpg" ||
-		enriched.LogoURL != "https://images.example/logo-fr.png" {
+		enriched.LogoURL != "https://images.example/logo-fr.png" ||
+		enriched.BannerURL != "https://images.example/banner.jpg" ||
+		enriched.ArtURL != "https://images.example/art-fr.png" {
 		t.Fatalf("unexpected enriched movie: %+v", enriched)
 	}
 }
@@ -161,6 +165,8 @@ func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonArtwork(t *testing.T) {
 			"tvposter":[{"url":"https://images.example/show-poster.jpg","lang":"00","likes":"2"}],
 			"showbackground":[{"url":"https://images.example/show-background.jpg","lang":"00","likes":"4"}],
 			"hdtvlogo":[{"url":"https://images.example/show-logo.png","lang":"en","likes":"9"}],
+			"tvbanner":[{"url":"https://images.example/show-banner.jpg","lang":"00","likes":"6"}],
+			"hdclearart":[{"url":"https://images.example/show-art.png","lang":"en","likes":"7"}],
 			"seasonposter":[
 				{"url":"https://images.example/season-1-en.jpg","lang":"en","likes":"20","season":"1"},
 				{"url":"https://images.example/season-1-fr.jpg","lang":"fr","likes":"1","season":"1"},
@@ -187,7 +193,9 @@ func TestEnrichSeriesUsesTVDBIdentityAndUpdatesSeasonArtwork(t *testing.T) {
 	}
 	if enriched.PosterURL != "https://images.example/show-poster.jpg" ||
 		enriched.BackdropURL != "https://images.example/show-background.jpg" ||
-		enriched.LogoURL != "https://images.example/show-logo.png" {
+		enriched.LogoURL != "https://images.example/show-logo.png" ||
+		enriched.BannerURL != "https://images.example/show-banner.jpg" ||
+		enriched.ArtURL != "https://images.example/show-art.png" {
 		t.Fatalf("unexpected series artwork: %+v", enriched)
 	}
 	if enriched.Seasons[0].PosterURL != "https://images.example/season-1-en.jpg" ||

@@ -65,6 +65,9 @@ type movieResponse struct {
 	MovieBackgrounds []image `json:"moviebackground"`
 	HDMovieLogos     []image `json:"hdmovielogo"`
 	MovieLogos       []image `json:"movielogo"`
+	MovieBanners     []image `json:"moviebanner"`
+	HDMovieClearArts []image `json:"hdmovieclearart"`
+	MovieArts        []image `json:"movieart"`
 }
 
 type seriesResponse struct {
@@ -72,6 +75,9 @@ type seriesResponse struct {
 	ShowBackgrounds []image `json:"showbackground"`
 	HDTVLogos       []image `json:"hdtvlogo"`
 	ClearLogos      []image `json:"clearlogo"`
+	TVBanners       []image `json:"tvbanner"`
+	HDClearArts     []image `json:"hdclearart"`
+	ClearArts       []image `json:"clearart"`
 	SeasonPosters   []image `json:"seasonposter"`
 }
 
@@ -127,6 +133,12 @@ func (c *Client) EnrichMovie(ctx context.Context, movie metadata.ProviderMovie, 
 	if artwork.LogoURL != "" {
 		movie.LogoURL = artwork.LogoURL
 	}
+	if artwork.BannerURL != "" {
+		movie.BannerURL = artwork.BannerURL
+	}
+	if artwork.ArtURL != "" {
+		movie.ArtURL = artwork.ArtURL
+	}
 	return movie, nil
 }
 
@@ -148,6 +160,12 @@ func (c *Client) EnrichCollection(ctx context.Context, collection metadata.Provi
 	if artwork.LogoURL != "" {
 		collection.LogoURL = artwork.LogoURL
 	}
+	if artwork.BannerURL != "" {
+		collection.BannerURL = artwork.BannerURL
+	}
+	if artwork.ArtURL != "" {
+		collection.ArtURL = artwork.ArtURL
+	}
 	return collection, nil
 }
 
@@ -168,6 +186,8 @@ func (c *Client) movieArtwork(ctx context.Context, tmdbID, language string) (met
 			PosterURL:   bestImage(language, response.MoviePosters),
 			BackdropURL: bestImage(language, response.MovieBackgrounds),
 			LogoURL:     bestLocalizedImage(language, response.HDMovieLogos, response.MovieLogos),
+			BannerURL:   bestImage(language, response.MovieBanners),
+			ArtURL:      bestLocalizedImage(language, response.HDMovieClearArts, response.MovieArts),
 		}, nil
 	})
 	if err != nil {
@@ -178,6 +198,8 @@ func (c *Client) movieArtwork(ctx context.Context, tmdbID, language string) (met
 		PosterURL:   artwork.PosterURL,
 		BackdropURL: artwork.BackdropURL,
 		LogoURL:     artwork.LogoURL,
+		BannerURL:   artwork.BannerURL,
+		ArtURL:      artwork.ArtURL,
 	}, nil
 }
 
@@ -202,6 +224,12 @@ func (c *Client) EnrichSeries(ctx context.Context, series metadata.ProviderSerie
 	}
 	if artwork.LogoURL != "" {
 		series.LogoURL = artwork.LogoURL
+	}
+	if artwork.BannerURL != "" {
+		series.BannerURL = artwork.BannerURL
+	}
+	if artwork.ArtURL != "" {
+		series.ArtURL = artwork.ArtURL
 	}
 	for index := range series.Seasons {
 		if selected := artwork.SeasonPosters[series.Seasons[index].SeasonNumber]; selected != "" {
@@ -256,6 +284,8 @@ func (c *Client) seriesArtwork(ctx context.Context, tvdbID, language string) (ar
 			PosterURL:     bestImage(language, response.TVPosters),
 			BackdropURL:   bestImage(language, response.ShowBackgrounds),
 			LogoURL:       bestLocalizedImage(language, response.HDTVLogos, response.ClearLogos),
+			BannerURL:     bestImage(language, response.TVBanners),
+			ArtURL:        bestLocalizedImage(language, response.HDClearArts, response.ClearArts),
 			SeasonPosters: seasonPosters,
 		}, nil
 	})

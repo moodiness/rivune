@@ -360,6 +360,10 @@ func cloneCapabilities(capabilities Capabilities) Capabilities {
 	capabilities.ProcessingModes = append([]string(nil), capabilities.ProcessingModes...)
 	capabilities.SubtitleModes = append([]string(nil), capabilities.SubtitleModes...)
 	capabilities.MediaProfiles = append([]MediaProfile(nil), capabilities.MediaProfiles...)
+	capabilities.ContainerProfiles = append([]ContainerProfile(nil), capabilities.ContainerProfiles...)
+	for index := range capabilities.ContainerProfiles {
+		capabilities.ContainerProfiles[index].Conditions = append([]ProfileCondition(nil), capabilities.ContainerProfiles[index].Conditions...)
+	}
 	if capabilities.PreferDirectPlay != nil {
 		value := *capabilities.PreferDirectPlay
 		capabilities.PreferDirectPlay = &value

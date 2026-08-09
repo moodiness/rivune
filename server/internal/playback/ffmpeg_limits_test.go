@@ -61,6 +61,9 @@ func TestFFmpegSubprocessHelper(t *testing.T) {
 	case "probe":
 		_, _ = io.WriteString(os.Stdout, `{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"}],"format":{"format_name":"mov","duration":"1"}}`)
 		os.Exit(0)
+	case "probe-profile":
+		_, _ = io.WriteString(os.Stdout, `{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","level":153,"color_transfer":"bt709"}],"format":{"format_name":"mov","duration":"1"}}`)
+		os.Exit(0)
 	case "subtitle-output":
 		chunk := bytes.Repeat([]byte("x"), 64<<10)
 		for total := 0; total <= maximumConvertedSubtitleBytes; total += len(chunk) {
@@ -172,6 +175,40 @@ func TestProbeRestrictsInputProtocols(t *testing.T) {
 		}
 	}
 	t.Fatalf("probe arguments omitted protocol whitelist: %v", captured)
+}
+
+func TestProbeCarriesInspectedVideoLevelAndRange(t *testing.T) {
+	t.Setenv("RIVUNE_FFMPEG_HELPER_MODE", "probe-profile")
+	processor := testFFmpegProcessor()
+	var captured []string
+	processor.commandContext = func(ctx context.Context, path string, arguments ...string) *exec.Cmd {
+		captured = append([]string(nil), arguments...)
+		return ffmpegHelperCommand(ctx, path, arguments...)
+	}
+	inspection, err := processor.Probe(context.Background(), storedAsset{URL: "https://1.1.1.1/video.mp4"})
+	if err != nil || len(inspection.VideoTracks) != 1 || inspection.VideoTracks[0].Level != 153 || inspection.VideoTracks[0].VideoRangeType != "SDR" ||
+		!strings.Contains(strings.Join(captured, " "), "profile,level,width") {
+		t.Fatalf("inspection=%+v err=%v", inspection, err)
+	}
+}
+
+func TestProcessHLSAppliesReadRate(t *testing.T) {
+	processor := testFFmpegProcessor()
+	var captured []string
+	processor.commandContext = func(ctx context.Context, path string, arguments ...string) *exec.Cmd {
+		captured = append([]string(nil), arguments...)
+		return ffmpegHelperCommand(ctx, path, arguments...)
+	}
+	if err := processor.ProcessHLS(
+		context.Background(),
+		storedAsset{URL: os.Args[0], Kind: processingRemux},
+		t.TempDir(),
+	); err != nil {
+		t.Fatalf("process HLS: %v", err)
+	}
+	if _, readRate := argumentValue(captured, "-readrate"); readRate != "1.50" {
+		t.Fatalf("HLS read rate = %q, want 1.50; arguments=%v", readRate, captured)
+	}
 }
 
 func TestConvertedSubtitleExcessFailsAtOutputLimit(t *testing.T) {

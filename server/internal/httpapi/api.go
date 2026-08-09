@@ -261,6 +261,8 @@ type API struct {
 	jellyfinCompatibilityDesired            bool
 	jellyfinCompatibilityRevision           uint64
 	jellyfinCompatibilitySettingsMu         sync.Mutex
+	jellyfinCompatibilityRevocationPending  bool
+	jellyfinCompatibilityRevoker            func(context.Context, string) error
 	jellyfinCompatibilityCancel             context.CancelFunc
 	jellyfinCompatibilityDone               <-chan struct{}
 	jellyfinCompatibilityRunOnce            sync.Once

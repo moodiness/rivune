@@ -613,6 +613,31 @@ func TestDecidePlaybackSourceProbesCompatibleHLSDuration(t *testing.T) {
 	}
 }
 
+func TestDecidePlaybackSourceAllowsDirectPassthroughWithoutCodecCapabilities(t *testing.T) {
+	sources := []Source{{
+		ID: "stream-1", Mode: "direct", URL: "https://media.example/movie.mp4", Protocol: "http", Container: "mp4",
+	}}
+	assets := []storedAsset{{ID: "stream-1", Kind: "stream", URL: sources[0].URL}}
+	service := &Service{
+		processor: fakeMediaProcessor{info: MediaInspection{
+			Container:   "mp4",
+			VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1280, Height: 720}},
+			AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
+		}},
+		probes: newMediaProbeCache(time.Now),
+	}
+
+	err := service.decidePlaybackSource(context.Background(), sources, assets, Capabilities{
+		StreamingProtocols:     []string{"http"},
+		Containers:             []string{"mp4"},
+		AllowDirectPassthrough: true,
+	})
+
+	if err != nil || !sources[0].Compatible || sources[0].Mode != "direct" || sources[0].Media == nil || assets[0].Kind != "stream" {
+		t.Fatalf("direct passthrough decision = source=%+v asset=%+v err=%v", sources[0], assets[0], err)
+	}
+}
+
 func TestDecidePlaybackSourceRemuxesHLSWithPlayableAlternateAudio(t *testing.T) {
 	sources := []Source{{
 		ID: "stream-1", Mode: "direct", URL: "https://media.example/movie.m3u8",
@@ -828,6 +853,56 @@ func TestMediaProfilesDoNotCrossContainerCodecPairs(t *testing.T) {
 	}
 }
 
+func TestContainerProfileConditionsChangeDirectEligibilityAndTargetSelection(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"http", "hls"},
+		ProcessingModes:    []string{processingTranscode},
+		MediaProfiles: []MediaProfile{
+			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", DirectPlay: true},
+			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true},
+		},
+		ContainerProfiles: []ContainerProfile{
+			{
+				ContainersCSV: "mp4",
+				Conditions:    []ProfileCondition{{Condition: "lessthanequal", Property: "height", Value: "1080", Required: true}},
+			},
+			{
+				ContainersCSV: "webm",
+				Conditions:    []ProfileCondition{{Condition: "lessthanequal", Property: "height", Value: "1", Required: true}},
+			},
+		},
+	}
+	source := Source{Mode: "direct", Protocol: "http", Container: "mp4"}
+	inspection := MediaInspection{
+		Container:   "mp4",
+		VideoTracks: []MediaTrack{{Codec: "h264", Height: 720}},
+		AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+	}
+	allowed, allowedDecision := playbackMode(source, inspection, capabilities)
+	inspection.VideoTracks[0].Height = 2160
+	denied, deniedDecision := playbackMode(source, inspection, capabilities)
+	if allowed != "direct" || allowedDecision == nil || allowedDecision.Reason != decisionDirectSupported {
+		t.Fatalf("satisfied container condition did not allow direct play: mode=%q decision=%+v", allowed, allowedDecision)
+	}
+	if denied != processingTranscode || deniedDecision == nil || deniedDecision.Target == nil ||
+		deniedDecision.Target.Protocol != "hls" || deniedDecision.Target.Container != "hls" || deniedDecision.Target.VideoCodec != "h264" {
+		t.Fatalf("failed container condition did not select the advertised transcode target: mode=%q decision=%+v", denied, deniedDecision)
+	}
+}
+
+func TestCompactMediaProfileListsPreserveContainerAndAudioMembership(t *testing.T) {
+	capabilities := Capabilities{MediaProfiles: []MediaProfile{{
+		Container: "mp4", ContainersCSV: "mp4,mkv", VideoCodec: "h264",
+		AudioCodec: "aac", AudioCodecsCSV: "aac,eac3",
+	}}}
+	video := &MediaTrack{Codec: "h264"}
+	if !mediaProfileSupported("mkv", video, &MediaTrack{Codec: "eac3"}, capabilities) ||
+		mediaProfileSupported("webm", video, &MediaTrack{Codec: "eac3"}, capabilities) ||
+		mediaProfileSupported("mkv", video, &MediaTrack{Codec: "dts"}, capabilities) {
+		t.Fatalf("compact profile membership was widened or narrowed: %+v", capabilities.MediaProfiles)
+	}
+}
+
 func TestSessionSourceURLPreservesAuthorizedExternalHandoff(t *testing.T) {
 	const externalURL = "https://external.example/watch?token=opaque"
 	if got := sessionSourceURL(Source{ID: "external-1", Mode: "external", URL: externalURL}, nil, "session-id", "session-token"); got != externalURL {
@@ -952,6 +1027,34 @@ func TestInspectedContainerUsesSourceHintForMatroskaFamily(t *testing.T) {
 	}
 }
 
+func TestInspectedVideoRangeTypeUsesOnlyFFprobeEvidence(t *testing.T) {
+	dovi := []struct {
+		Type string `json:"side_data_type"`
+	}{{Type: "DOVI configuration record"}}
+	for _, test := range []struct {
+		name, tag, transfer, wantRange, wantHDR string
+		sideData                                []struct {
+			Type string `json:"side_data_type"`
+		}
+	}{
+		{name: "Dolby Vision tag", tag: "dvh1", wantRange: "DOVI", wantHDR: "dolby_vision"},
+		{name: "Dolby Vision side data", sideData: dovi, wantRange: "DOVI", wantHDR: "dolby_vision"},
+		{name: "HDR10", transfer: "smpte2084", wantRange: "HDR10", wantHDR: "hdr10"},
+		{name: "HLG", transfer: "arib-std-b67", wantRange: "HLG", wantHDR: "hlg"},
+		{name: "known SDR", transfer: "bt709", wantRange: "SDR"},
+		{name: "unknown", wantRange: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := inspectedVideoRangeType(test.tag, test.transfer, test.sideData); got != test.wantRange {
+				t.Fatalf("range=%q want=%q", got, test.wantRange)
+			}
+			if got := inspectedHDRFormat(test.tag, test.transfer, test.sideData); got != test.wantHDR {
+				t.Fatalf("HDR=%q want=%q", got, test.wantHDR)
+			}
+		})
+	}
+}
+
 func TestPlaybackDecisionOrdersDirectPlayHLSDirectStreamAndTranscodes(t *testing.T) {
 	capabilities := Capabilities{
 		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"},
@@ -982,6 +1085,62 @@ func TestPlaybackDecisionOrdersDirectPlayHLSDirectStreamAndTranscodes(t *testing
 			}
 			if mode != "direct" && (decision.Target == nil || decision.Target.Protocol != "hls" || decision.Target.Container != "hls") {
 				t.Fatalf("processed mode did not select HLS/fMP4: mode=%q decision=%+v", mode, decision)
+			}
+		})
+	}
+}
+
+func TestCodecProfileConditionsSelectDirectOrHLSFromInspectedMedia(t *testing.T) {
+	base := Capabilities{
+		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h265", "h264", "av1"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingTranscodeAudio, processingTranscode},
+		MediaProfiles: []MediaProfile{
+			{Container: "mp4", VideoCodec: "h265", AudioCodec: "aac", DirectPlay: true, SupportsNonDolbyVisionHDR: true, MaximumVideoLevel: 153, ExcludedVideoRange: "DOVI", VideoRangeRequired: true},
+			{Container: "mp4", VideoCodec: "av1", AudioCodec: "aac", DirectPlay: true},
+			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", DirectPlay: true},
+			{Container: "mp4", VideoCodec: "h265", AudioCodec: "aac", Transcoding: true},
+			{Container: "mp4", VideoCodec: "av1", AudioCodec: "aac", Transcoding: true},
+			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true},
+		},
+	}
+	tests := []struct {
+		name, codec, videoRange, hdr     string
+		level, channels, maximumChannels int
+		requiredConditionUnknown         bool
+		want                             string
+	}{
+		{name: "HEVC level boundary", codec: "hevc", videoRange: "SDR", level: 153, channels: 6, maximumChannels: 6, want: "direct"},
+		{name: "HEVC level above boundary", codec: "hevc", videoRange: "SDR", level: 154, channels: 6, maximumChannels: 6, want: processingTranscode},
+		{name: "optional unknown level", codec: "hevc", videoRange: "SDR", channels: 6, maximumChannels: 6, want: "direct"},
+		{name: "required unknown range", codec: "hevc", level: 153, channels: 6, maximumChannels: 6, want: processingTranscode},
+		{name: "required unknown condition", codec: "hevc", videoRange: "SDR", level: 153, channels: 6, maximumChannels: 6, requiredConditionUnknown: true, want: processingTranscode},
+		{name: "Dolby Vision", codec: "hevc", videoRange: "DOVI", hdr: "dolby_vision", level: 153, channels: 6, maximumChannels: 6, want: processingTranscode},
+		{name: "HDR10 HEVC", codec: "hevc", videoRange: "HDR10", hdr: "hdr10", level: 153, channels: 6, maximumChannels: 6, want: "direct"},
+		{name: "HDR10 unrelated codec", codec: "h264", videoRange: "HDR10", hdr: "hdr10", channels: 2, maximumChannels: 2, want: processingTranscode},
+		{name: "AV1", codec: "av1", channels: 2, maximumChannels: 2, want: "direct"},
+		{name: "stereo downmix", codec: "h264", channels: 6, maximumChannels: 2, want: processingTranscodeAudio},
+		{name: "six channel direct", codec: "h264", channels: 6, maximumChannels: 6, want: "direct"},
+		{name: "eight channel direct", codec: "h264", channels: 8, maximumChannels: 8, want: "direct"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capabilities := base
+			capabilities.MaximumAudioChannels = test.maximumChannels
+			if test.requiredConditionUnknown {
+				capabilities.MediaProfiles = append([]MediaProfile(nil), base.MediaProfiles...)
+				capabilities.MediaProfiles[0].RequiredConditionUnknown = true
+			}
+			mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mp4"}, MediaInspection{
+				Container: "mp4", HDRFormat: test.hdr,
+				VideoTracks: []MediaTrack{{Codec: test.codec, Level: test.level, VideoRangeType: test.videoRange, Height: 1080}},
+				AudioTracks: []MediaTrack{{Codec: "aac", Channels: test.channels}},
+			}, capabilities)
+			if mode != test.want || decision == nil {
+				t.Fatalf("mode=%q decision=%+v want=%q", mode, decision, test.want)
+			}
+			if mode != "direct" && (decision.Target == nil || decision.Target.Protocol != "hls") {
+				t.Fatalf("condition failure did not select HLS: %+v", decision)
 			}
 		})
 	}
@@ -1094,6 +1253,7 @@ func TestValidateCapabilitiesAcceptsBoundedAdditiveProcessingLimits(t *testing.T
 		ProcessingModes:         []string{processingRemux, processingTranscodeAudio, processingTranscode},
 		SubtitleModes:           []string{"external", "burn"},
 		MaximumVideoBitrateKbps: 12000, MaximumAudioChannels: 6, MaximumHeight: 2160,
+		ContainerProfiles: []ContainerProfile{{ContainersCSV: "mp4", Conditions: []ProfileCondition{{Condition: "lessthanequal", Property: "height", Value: "1080", Required: true}}}},
 	}
 	if err := validateCapabilities(valid); err != nil {
 		t.Fatalf("valid capabilities rejected: %v", err)

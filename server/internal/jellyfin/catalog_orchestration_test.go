@@ -250,8 +250,14 @@ func TestAddonSearchIdentityScopesOpaqueResourceToProducer(t *testing.T) {
 	}
 }
 
-func TestCatalogOrchestrationDoesNotInventUnknownOrPartialTotal(t *testing.T) {
-	store := &orchestrationStore{local: watchstate.CatalogPage{Items: []watchstate.CatalogTitle{}, Total: 0}, resolved: map[string]string{}}
+func TestCatalogOrchestrationReportsKnownEmittedCountWhenProvidersArePartial(t *testing.T) {
+	store := &orchestrationStore{local: watchstate.CatalogPage{
+		Items: []watchstate.CatalogTitle{
+			{ID: "10000000-0000-4000-8000-000000000091", MediaType: "movie", Title: "First known match"},
+			{ID: "10000000-0000-4000-8000-000000000092", MediaType: "series", Title: "Second known match"},
+		},
+		Total: 2,
+	}, resolved: map[string]string{}}
 	metadataService := &orchestrationMetadata{movieErr: metadata.ErrProviderUnavailable, series: metadata.SeriesPage{Items: []metadata.Series{}, Page: 1, TotalPages: 1}}
 	addonService := &orchestrationAddons{page: addon.CatalogSearchPage{Items: []addon.CatalogSearchItem{}, Complete: false}}
 	readerValue, err := NewCatalogReader(store, metadataService, addonService, nil)
@@ -264,8 +270,8 @@ func TestCatalogOrchestrationDoesNotInventUnknownOrPartialTotal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("partial search should retain successful providers: %v", err)
 	}
-	if page.ExactTotal || page.Total != 0 {
-		t.Fatalf("partial provider search invented total: %+v", page)
+	if page.ExactTotal || page.Total != len(page.Items) || page.Total != 2 {
+		t.Fatalf("partial provider search did not report its known emitted count: %+v", page)
 	}
 }
 

@@ -6,10 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +31,34 @@ func TestRewriteLocalPlaylistRewritesInitAndSegments(t *testing.T) {
 	result := string(rewritten)
 	if !strings.Contains(result, `URI="/media/init.mp4"`) || !strings.Contains(result, "/media/segment-000001.m4s") {
 		t.Fatalf("playlist references were not rewritten: %s", result)
+	}
+}
+
+func TestRewriteLocalPlaylistClassifiesOnlyMediaSegmentsAsExpiring(t *testing.T) {
+	playlist := []byte("#EXTM3U\n" +
+		"#EXT-X-MAP:URI=\"init.mp4\"\n" +
+		"#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n" +
+		"#EXTINF:4.000,\n" +
+		"#EXT-X-BYTERANGE:1024@0\n" +
+		"segment-000001.m4s\n" +
+		"#EXT-X-PART:DURATION=0.5,URI=\"part-000002.m4s\"\n" +
+		"#EXT-X-PRELOAD-HINT:URI=\"part-000003.m4s\",TYPE=PART\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=1000000\n" +
+		"variant.m3u8\n")
+	got := make(map[string]bool)
+	_, err := rewriteLocalPlaylistWithReferencePolicy(playlist, true, func(reference string, mediaSegment bool) string {
+		got[reference] = mediaSegment
+		return "/media/" + reference
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"init.mp4": false, "key.bin": false, "segment-000001.m4s": true,
+		"part-000002.m4s": true, "part-000003.m4s": true, "variant.m3u8": false,
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("media segment classification = %#v, want %#v", got, want)
 	}
 }
 
@@ -115,11 +147,26 @@ func TestHLSContainerCapabilityMatchesPlaylistSegmentsAndMIME(t *testing.T) {
 	}
 }
 
-func TestFFmpegHLSOutputArgumentsMatchSegmentContainer(t *testing.T) {
-	tsArguments := strings.Join(hlsOutputArguments(storedAsset{}, "flags"), " ")
-	if !strings.Contains(tsArguments, "-hls_segment_type mpegts") || !strings.Contains(tsArguments, "segment-%06d.ts") || strings.Contains(tsArguments, "init.mp4") {
-		t.Fatalf("default TS arguments = %s", tsArguments)
+func TestFFmpegHLSOutputArgumentsUseBoundedSlidingPlaylist(t *testing.T) {
+	arguments := strings.Join(hlsOutputArguments(storedAsset{}, "flags"), " ")
+	for _, expected := range []string{
+		"-hls_list_size 120",
+		"-hls_delete_threshold 1",
+		"-hls_flags flags+delete_segments",
+		"-hls_segment_type mpegts",
+		"segment-%06d.ts",
+	} {
+		if !strings.Contains(arguments, expected) {
+			t.Fatalf("HLS arguments omit %q: %s", expected, arguments)
+		}
 	}
+	if strings.Contains(arguments, "-hls_playlist_type") || strings.Contains(arguments, "init.mp4") {
+		t.Fatalf("default TS arguments retain incompatible EVENT/fMP4 options: %s", arguments)
+	}
+	if maximumPlaylistReferences != 10_000 || hlsRetainedSegments+hlsDeleteThreshold > maximumPlaylistReferences {
+		t.Fatalf("HLS window/reference limits = %d+%d/%d", hlsRetainedSegments, hlsDeleteThreshold, maximumPlaylistReferences)
+	}
+
 	mp4Arguments := strings.Join(hlsOutputArguments(storedAsset{HLSSegmentContainer: "mp4"}, "flags"), " ")
 	if !strings.Contains(mp4Arguments, "-hls_segment_type fmp4") || !strings.Contains(mp4Arguments, "-hls_fmp4_init_filename init.mp4") || !strings.Contains(mp4Arguments, "segment-%06d.m4s") {
 		t.Fatalf("explicit fMP4 arguments = %s", mp4Arguments)
@@ -127,33 +174,56 @@ func TestFFmpegHLSOutputArgumentsMatchSegmentContainer(t *testing.T) {
 }
 
 func TestHLSMasterPlaylistPointsToOpaqueMediaCapability(t *testing.T) {
-	processor := &containerFixtureHLSProcessor{seen: make(chan string, 1)}
-	service := &Service{
-		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1024 * 1024, IdleTTL: time.Minute},
-		hlsJobs:      make(map[string]*hlsJob), processor: processor,
+	tests := []struct {
+		name       string
+		target     *PlaybackDecisionTarget
+		wantCodecs string
+	}{
+		{name: "known target codecs", target: &PlaybackDecisionTarget{VideoCodec: "h264", AudioCodec: "aac"}, wantCodecs: "avc1,mp4a"},
+		{name: "unknown target codec", target: &PlaybackDecisionTarget{VideoCodec: "unknown-video", AudioCodec: "aac"}},
 	}
-	asset := storedAsset{ID: "stream-1", Kind: processingTranscode, URL: "https://provider.example/private.mkv", HLSSegmentContainer: "mp4"}
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/Videos/item/master.m3u8?file=master.m3u8", nil)
-	buildChildURL := func(state deliveryChildState) (string, error) {
-		if state.file != "index.m3u8" || state.assetID != asset.ID {
-			t.Fatalf("master child state = %+v", state)
-		}
-		return "/Videos/item/master.m3u8?RivuneChildId=opaque-media", nil
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			processor := &containerFixtureHLSProcessor{seen: make(chan string, 1)}
+			service := &Service{
+				mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1024 * 1024, IdleTTL: time.Minute},
+				hlsJobs:      make(map[string]*hlsJob), processor: processor,
+			}
+			asset := storedAsset{
+				ID: "stream-1", Kind: processingTranscode, URL: "https://provider.example/private.mkv", HLSSegmentContainer: "mp4",
+				VideoBitrateKbps: 4500, Decision: &PlaybackDecision{Target: test.target},
+			}
+			t.Cleanup(func() { service.stopHLSSession("session-1") })
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/Videos/item/master.m3u8?file=master.m3u8", nil)
+			buildChildURL := func(state deliveryChildState) (string, error) {
+				if state.file != "index.m3u8" || state.assetID != asset.ID {
+					t.Fatalf("master child state = %+v", state)
+				}
+				return "/Videos/item/master.m3u8?RivuneChildId=opaque-media", nil
+			}
+			if err := service.serveHLS(response, request, "session-1", "native-secret", asset, buildChildURL); err != nil {
+				t.Fatal(err)
+			}
+			playlist := response.Body.String()
+			streamInformation := "#EXT-X-STREAM-INF:BANDWIDTH=4756000,AVERAGE-BANDWIDTH=4756000"
+			if test.wantCodecs != "" {
+				streamInformation += `,CODECS="` + test.wantCodecs + `"`
+			}
+			if response.Code != http.StatusOK || !strings.Contains(playlist, streamInformation+"\n") || !strings.Contains(playlist, "RivuneChildId=opaque-media") {
+				t.Fatalf("master status/body = %d/%q", response.Code, playlist)
+			}
+			if test.wantCodecs == "" && strings.Contains(playlist, "CODECS=") {
+				t.Fatalf("master advertised unknown target codec: %s", playlist)
+			}
+			for _, forbidden := range []string{"native-secret", "provider.example", "RESOLUTION=", "FRAME-RATE=", "AUDIO=", "#EXT-X-INDEPENDENT-SEGMENTS"} {
+				if strings.Contains(playlist, forbidden) {
+					t.Fatalf("master playlist exposed or invented %q: %s", forbidden, playlist)
+				}
+			}
+		})
 	}
-	if err := service.serveHLS(response, request, "session-1", "native-secret", asset, buildChildURL); err != nil {
-		t.Fatal(err)
-	}
-	playlist := response.Body.String()
-	if response.Code != http.StatusOK || !strings.Contains(playlist, "#EXT-X-STREAM-INF:") || !strings.Contains(playlist, "RivuneChildId=opaque-media") {
-		t.Fatalf("master status/body = %d/%q", response.Code, playlist)
-	}
-	for _, secret := range []string{"native-secret", "provider.example"} {
-		if strings.Contains(playlist, secret) {
-			t.Fatalf("master playlist exposed %q: %s", secret, playlist)
-		}
-	}
-	service.stopHLSSession("session-1")
 }
 
 func TestHLSPlaylistEncodedSecondsSumsValidDurations(t *testing.T) {
@@ -219,7 +289,9 @@ func (processor *blockingHLSProcessor) ProcessHLS(ctx context.Context, _ storedA
 		"init.mp4":           "fragmented-mp4-init",
 		"segment-000000.m4s": "fragmented-mp4-segment-0",
 		"segment-000001.m4s": "fragmented-mp4-segment-1",
-		"index.m3u8":         "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:3.000,\nsegment-000000.m4s\n#EXTINF:3.000,\nsegment-000001.m4s\n",
+		"segment-000002.m4s": "fragmented-mp4-segment-2",
+		"segment-000003.m4s": "fragmented-mp4-segment-3",
+		"index.m3u8":         "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:3.000,\nsegment-000000.m4s\n#EXTINF:3.000,\nsegment-000001.m4s\n#EXTINF:3.000,\nsegment-000002.m4s\n#EXTINF:3.000,\nsegment-000003.m4s\n",
 	}
 	for name, contents := range files {
 		if err := os.WriteFile(filepath.Join(directory, name), []byte(contents), 0o600); err != nil {
@@ -514,28 +586,200 @@ func TestFFmpegConvertsSRTAndASSToWebVTT(t *testing.T) {
 	}
 }
 
-func TestPruneHLSSegmentsRetainsBoundedTail(t *testing.T) {
-	directory := t.TempDir()
-	for index := 0; index <= hlsRetainedSegments+5; index++ {
+type rotatingSlidingHLSProcessor struct {
+	first   int
+	rotate  chan struct{}
+	updated chan struct{}
+}
+
+func (processor *rotatingSlidingHLSProcessor) ProcessHLS(ctx context.Context, _ storedAsset, directory string) error {
+	if err := os.WriteFile(filepath.Join(directory, "init.mp4"), []byte("init"), 0o600); err != nil {
+		return err
+	}
+	for index := processor.first; index <= processor.first+hlsRetainedSegments; index++ {
 		name := fmt.Sprintf("segment-%06d.m4s", index)
-		if err := os.WriteFile(filepath.Join(directory, name), []byte("segment"), 0o600); err != nil {
-			t.Fatal(err)
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(name), 0o600); err != nil {
+			return err
 		}
 	}
+	if err := writeSlidingPlaylist(directory, processor.first); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-processor.rotate:
+	}
+	if err := writeSlidingPlaylist(directory, processor.first+1); err != nil {
+		return err
+	}
+	close(processor.updated)
+	<-ctx.Done()
+	return ctx.Err()
+}
 
-	current := fmt.Sprintf("segment-%06d.m4s", hlsRetainedSegments+5)
-	pruneHLSSegments(directory, current)
-	entries, err := os.ReadDir(directory)
+func (*rotatingSlidingHLSProcessor) ConvertSubtitle(context.Context, storedAsset, io.Writer) error {
+	return nil
+}
+
+func (*rotatingSlidingHLSProcessor) Probe(context.Context, storedAsset) (MediaInspection, error) {
+	return MediaInspection{}, nil
+}
+
+func writeSlidingPlaylist(directory string, first int) error {
+	var playlist strings.Builder
+	playlist.WriteString("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-MEDIA-SEQUENCE:")
+	playlist.WriteString(strconv.Itoa(first))
+	playlist.WriteByte('\n')
+	for index := first; index < first+hlsRetainedSegments; index++ {
+		playlist.WriteString("#EXTINF:3.000,\n")
+		playlist.WriteString(fmt.Sprintf("segment-%06d.m4s\n", index))
+	}
+	return os.WriteFile(filepath.Join(directory, "index.m3u8"), []byte(playlist.String()), 0o600)
+}
+
+func servedLocalHLSReferences(t *testing.T, playlist string) []string {
+	t.Helper()
+	references := make([]string, 0, hlsRetainedSegments+1)
+	for _, line := range strings.Split(playlist, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			for _, match := range playlistURIAttribute.FindAllStringSubmatch(line, -1) {
+				references = append(references, servedLocalHLSFile(t, match[1]))
+			}
+			continue
+		}
+		references = append(references, servedLocalHLSFile(t, line))
+	}
+	return references
+}
+
+func servedLocalHLSFile(t *testing.T, reference string) string {
+	t.Helper()
+	parsed, err := url.Parse(reference)
+	if err != nil {
+		t.Fatalf("parse served HLS reference %q: %v", reference, err)
+	}
+	file := parsed.Query().Get("file")
+	if !localMediaName.MatchString(file) {
+		t.Fatalf("served HLS reference has invalid local file: %q", reference)
+	}
+	return file
+}
+
+func assertHLSFilesExist(t *testing.T, directory string, references []string) {
+	t.Helper()
+	for _, reference := range references {
+		if _, err := os.Stat(filepath.Join(directory, reference)); err != nil {
+			t.Fatalf("served playlist reference %q is unavailable: %v", reference, err)
+		}
+	}
+}
+
+func TestSlidingHLSPlaylistKeepsServedReferencesAcrossRotationReconnectAndSeek(t *testing.T) {
+	first := maximumPlaylistReferences - hlsRetainedSegments
+	processor := &rotatingSlidingHLSProcessor{
+		first: first, rotate: make(chan struct{}), updated: make(chan struct{}),
+	}
+	service := &Service{
+		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1024 * 1024, IdleTTL: time.Minute},
+		hlsJobs:      make(map[string]*hlsJob), processor: processor,
+	}
+	asset := storedAsset{ID: "stream-1", Kind: processingTranscode, URL: "https://media.example/movie.mkv", HLSSegmentContainer: "mp4"}
+	t.Cleanup(func() { service.stopHLSSession("session-1") })
+
+	childStates := make(map[string]deliveryChildState, hlsRetainedSegments+1)
+	buildChildURL := func(state deliveryChildState) (string, error) {
+		childStates[state.file] = state
+		return hlsAssetURLAt("session-1", state.assetID, "opaque-token", state.file, asset.StartSeconds), nil
+	}
+	initialResponse := httptest.NewRecorder()
+	initialRequest := httptest.NewRequest(http.MethodGet, "/asset?file=index.m3u8", nil)
+	if err := service.serveHLS(initialResponse, initialRequest, "session-1", "opaque-token", asset, buildChildURL); err != nil {
+		t.Fatal(err)
+	}
+	initialReferences := servedLocalHLSReferences(t, initialResponse.Body.String())
+	if len(initialReferences) != hlsRetainedSegments+1 {
+		t.Fatalf("initial playlist references = %d, want %d", len(initialReferences), hlsRetainedSegments+1)
+	}
+	initialSegment := fmt.Sprintf("segment-%06d.m4s", first)
+	if !childStates["init.mp4"].retainWhileActive || childStates[initialSegment].retainWhileActive {
+		t.Fatalf("sliding init/segment retention = %t/%t, want true/false", childStates["init.mp4"].retainWhileActive, childStates[initialSegment].retainWhileActive)
+	}
+	job := service.hlsJobs[hlsJobKey("session-1", asset)]
+	if job == nil {
+		t.Fatal("initial HLS job is missing")
+	}
+	assertHLSFilesExist(t, job.directory, initialReferences)
+
+	close(processor.rotate)
+	select {
+	case <-processor.updated:
+	case <-time.After(time.Second):
+		t.Fatal("HLS playlist did not rotate")
+	}
+	latestName := fmt.Sprintf("segment-%06d.m4s", first+hlsRetainedSegments)
+	latestResponse := httptest.NewRecorder()
+	latestRequest := httptest.NewRequest(http.MethodGet, "/asset?file="+latestName, nil)
+	if err := service.serveHLS(latestResponse, latestRequest, "session-1", "opaque-token", asset, nil); err != nil {
+		t.Fatal(err)
+	}
+	if latestResponse.Code != http.StatusOK || latestResponse.Body.String() != latestName {
+		t.Fatalf("latest segment response = %d/%q", latestResponse.Code, latestResponse.Body.String())
+	}
+	assertHLSFilesExist(t, job.directory, initialReferences)
+
+	reconnectResponse := httptest.NewRecorder()
+	if err := service.serveHLS(reconnectResponse, initialRequest, "session-1", "opaque-token", asset, nil); err != nil {
+		t.Fatal(err)
+	}
+	reconnectReferences := servedLocalHLSReferences(t, reconnectResponse.Body.String())
+	oldestName := fmt.Sprintf("segment-%06d.m4s", first)
+	if len(reconnectReferences) != hlsRetainedSegments+1 || !slices.Contains(reconnectReferences, latestName) || slices.Contains(reconnectReferences, oldestName) {
+		t.Fatalf("reconnect references = %d, latest %q present=%t, pruned %q present=%t", len(reconnectReferences), latestName, slices.Contains(reconnectReferences, latestName), oldestName, slices.Contains(reconnectReferences, oldestName))
+	}
+	assertHLSFilesExist(t, job.directory, reconnectReferences)
+	entries, err := os.ReadDir(job.directory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != hlsRetainedSegments {
-		t.Fatalf("expected %d retained segments, got %d", hlsRetainedSegments, len(entries))
+	if len(entries) > hlsRetainedSegments+hlsDeleteThreshold+2 {
+		t.Fatalf("rotated HLS storage contains %d files, want at most %d", len(entries), hlsRetainedSegments+hlsDeleteThreshold+2)
 	}
-	if _, err := os.Stat(filepath.Join(directory, "segment-000005.m4s")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("old segment was retained: %v", err)
+	segments := 0
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "segment-") && strings.HasSuffix(entry.Name(), ".m4s") {
+			segments++
+		}
 	}
-	if _, err := os.Stat(filepath.Join(directory, current)); err != nil {
-		t.Fatalf("current segment was pruned: %v", err)
+	if segments != hlsRetainedSegments+hlsDeleteThreshold {
+		t.Fatalf("rotated HLS storage contains %d segments, want %d", segments, hlsRetainedSegments+hlsDeleteThreshold)
+	}
+
+	seekProcessor := &rotatingSlidingHLSProcessor{
+		first: 0, rotate: make(chan struct{}), updated: make(chan struct{}),
+	}
+	service.processor = seekProcessor
+	seekAsset := asset
+	seekAsset.StartSeconds = 900
+	seekResponse := httptest.NewRecorder()
+	seekRequest := httptest.NewRequest(http.MethodGet, "/asset?file=index.m3u8&start=900", nil)
+	if err := service.serveHLS(seekResponse, seekRequest, "session-1", "opaque-token", seekAsset, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(job.directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("seek retained previous HLS generation: %v", err)
+	}
+	seekJob := service.hlsJobs[hlsJobKey("session-1", seekAsset)]
+	if seekJob == nil {
+		t.Fatal("seek HLS job is missing")
+	}
+	seekReferences := servedLocalHLSReferences(t, seekResponse.Body.String())
+	assertHLSFilesExist(t, seekJob.directory, seekReferences)
+	if !strings.Contains(seekResponse.Body.String(), "start=900") {
+		t.Fatalf("seek playlist omitted generation start: %s", seekResponse.Body.String())
 	}
 }

@@ -142,6 +142,8 @@ type Movie struct {
 	PosterURL        string            `json:"posterUrl,omitempty"`
 	BackdropURL      string            `json:"backdropUrl,omitempty"`
 	LogoURL          string            `json:"logoUrl,omitempty"`
+	BannerURL        string            `json:"bannerUrl,omitempty"`
+	ArtURL           string            `json:"artUrl,omitempty"`
 	Tagline          string            `json:"tagline,omitempty"`
 	RuntimeMinutes   int               `json:"runtimeMinutes,omitempty"`
 	Genres           []Genre           `json:"genres"`
@@ -185,6 +187,8 @@ type ProviderCollection struct {
 	PosterURL   string
 	BackdropURL string
 	LogoURL     string
+	BannerURL   string
+	ArtURL      string
 }
 
 type ProviderMovie struct {
@@ -197,6 +201,8 @@ type ProviderMovie struct {
 	PosterURL        string
 	BackdropURL      string
 	LogoURL          string
+	BannerURL        string
+	ArtURL           string
 	Tagline          string
 	RuntimeMinutes   int
 	Genres           []Genre
@@ -225,6 +231,8 @@ type Series struct {
 	PosterURL              string            `json:"posterUrl,omitempty"`
 	BackdropURL            string            `json:"backdropUrl,omitempty"`
 	LogoURL                string            `json:"logoUrl,omitempty"`
+	BannerURL              string            `json:"bannerUrl,omitempty"`
+	ArtURL                 string            `json:"artUrl,omitempty"`
 	Tagline                string            `json:"tagline,omitempty"`
 	Status                 string            `json:"status,omitempty"`
 	NumberOfSeasons        int               `json:"numberOfSeasons,omitempty"`
@@ -306,6 +314,8 @@ type ProviderSeries struct {
 	PosterURL        string
 	BackdropURL      string
 	LogoURL          string
+	BannerURL        string
+	ArtURL           string
 	Tagline          string
 	Status           string
 	NumberOfSeasons  int

@@ -49,8 +49,8 @@ func TestLoadUsesSecureTokenTTLsByDefault(t *testing.T) {
 	if len(cfg.LANArtworkOrigins) != 0 {
 		t.Fatalf("unexpected default LAN artwork origins: %v", cfg.LANArtworkOrigins)
 	}
-	if cfg.JellyfinEnabled {
-		t.Fatal("expected Jellyfin to default to disabled")
+	if cfg.JellyfinEnabled || cfg.JellyfinDebug {
+		t.Fatalf("expected Jellyfin and its debug tracing to default to disabled: enabled=%t debug=%t", cfg.JellyfinEnabled, cfg.JellyfinDebug)
 	}
 }
 
@@ -102,6 +102,39 @@ func TestLoadRejectsInvalidJellyfinFlag(t *testing.T) {
 			t.Setenv("RIVUNE_JELLYFIN_ENABLED", value)
 
 			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RIVUNE_JELLYFIN_ENABLED must be true or false") {
+				t.Fatalf("Load() error = %v, want strict boolean error", err)
+			}
+		})
+	}
+}
+
+func TestLoadParsesStrictJellyfinDebugFlag(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "true", want: true},
+		{value: "  TrUe  ", want: true},
+		{value: "false", want: false},
+		{value: "  FaLsE  ", want: false},
+	} {
+		t.Run(strings.TrimSpace(test.value), func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv("RIVUNE_JELLYFIN_DEBUG", test.value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			if cfg.JellyfinDebug != test.want {
+				t.Fatalf("JellyfinDebug = %t, want %t", cfg.JellyfinDebug, test.want)
+			}
+		})
+	}
+	for _, value := range []string{"1", "yes", "on", "garbage"} {
+		t.Run("invalid "+value, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv("RIVUNE_JELLYFIN_DEBUG", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RIVUNE_JELLYFIN_DEBUG must be true or false") {
 				t.Fatalf("Load() error = %v, want strict boolean error", err)
 			}
 		})
@@ -565,6 +598,7 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("RIVUNE_VIDEO_DEVICE", "")
 	t.Setenv("RIVUNE_LAN_ARTWORK_ORIGINS", "")
 	t.Setenv("RIVUNE_JELLYFIN_ENABLED", "")
+	t.Setenv("RIVUNE_JELLYFIN_DEBUG", "")
 }
 
 func TestLoadAllowsCollectionOnlyTraktClientID(t *testing.T) {

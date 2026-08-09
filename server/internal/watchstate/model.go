@@ -155,16 +155,47 @@ type CompletionInput struct {
 	ExpectedVersion int64
 }
 
+// OptionalUserDataValue distinguishes an omitted update from an explicit null.
+type OptionalUserDataValue[T any] struct {
+	Set   bool
+	Value *T
+}
+
 type UpdateUserDataInput struct {
-	PositionSeconds *int
-	DurationSeconds int
-	Played          *bool
-	Favorite        *bool
+	PositionSeconds   *int
+	DurationSeconds   int
+	Played            *bool
+	Favorite          *bool
+	Rating            OptionalUserDataValue[float64]
+	PlayedPercentage  OptionalUserDataValue[float64]
+	UnplayedItemCount OptionalUserDataValue[int]
+	PlayCount         OptionalUserDataValue[int]
+	Likes             OptionalUserDataValue[bool]
+	LastPlayedDate    OptionalUserDataValue[time.Time]
+}
+
+// UserDataValues preserves the same distinction after persistence. A Set field
+// selects its paired value even when that value is nil.
+type UserDataValues struct {
+	Rating               *float64
+	RatingSet            bool
+	PlayedPercentage     *float64
+	PlayedPercentageSet  bool
+	UnplayedItemCount    *int
+	UnplayedItemCountSet bool
+	PlayCount            *int
+	PlayCountSet         bool
+	Likes                *bool
+	LikesSet             bool
+	LastPlayedDate       *time.Time
+	LastPlayedDateSet    bool
 }
 
 type UserDataState struct {
 	Progress  *Progress
 	InLibrary bool
+	Favorite  bool
+	UserData  *UserDataValues
 }
 
 const MaximumProgressBatchSize = 100

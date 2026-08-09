@@ -77,6 +77,19 @@ func (fake *discoveryAuthenticationFake) Logout(_ context.Context, _ Authenticat
 	return nil
 }
 
+type authenticatedRequestPolicyFake struct {
+	result     AuthenticatedRequestPolicyResult
+	err        error
+	calls      int
+	principals []auth.Principal
+}
+
+func (policy *authenticatedRequestPolicyFake) Authorize(_ context.Context, principal auth.Principal) (AuthenticatedRequestPolicyResult, error) {
+	policy.calls++
+	policy.principals = append(policy.principals, principal)
+	return policy.result, policy.err
+}
+
 type logoutPlaybackFake struct {
 	authentication *discoveryAuthenticationFake
 	closeCalls     int
@@ -108,6 +121,153 @@ func (fake *logoutPlaybackFake) Close(context.Context, auth.Principal, playback.
 		return fake.closeErrors[call]
 	}
 	return nil
+}
+
+func TestCompatibilityAuthenticationSaturationIsServiceUnavailable(t *testing.T) {
+	authentication, mux := newDiscoveryHTTPTestServer(t)
+	authentication.authenticateErr = ErrCompatAuthenticationSaturated
+	request := httptest.NewRequest(http.MethodGet, "/Users/Me", nil)
+	request.Header.Set("X-Emby-Token", authentication.token)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("saturated authentication status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		ResponseStatus CompatErrorStatus `json:"ResponseStatus"`
+	}
+	decodeCompatTestResponse(t, response, &payload)
+	if payload.ResponseStatus.ErrorCode != "ServiceUnavailable" {
+		t.Fatalf("saturated authentication response=%+v", payload.ResponseStatus)
+	}
+	if challenge := response.Header().Get("WWW-Authenticate"); challenge != "" {
+		t.Fatalf("saturated authentication advertised credential challenge %q", challenge)
+	}
+}
+func TestAuthenticatedMaintenancePolicyCoversApplicationStateArtworkAndStreams(t *testing.T) {
+	authentication, _ := newDiscoveryHTTPTestServer(t)
+	message := "Library upgrade in progress"
+	policy := &authenticatedRequestPolicyFake{result: AuthenticatedRequestPolicyResult{PublicMessage: &message}}
+	serverID, err := ParseServerID(discoveryServerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(Dependencies{
+		ServerInfo: serverIDInfo(serverID), Authentication: authentication, AuthenticatedPolicy: policy,
+		Catalog: &catalogHTTPReader{}, Artwork: &artworkDelivery{}, Playback: &fakeCompatPlaybackDelivery{}, Watchstate: newMemoryWatchstate(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	itemID := "d1000000-0000-4000-8000-000000000001"
+	tests := []struct {
+		name   string
+		method string
+		target string
+	}{
+		{name: "catalog", method: http.MethodGet, target: "/Items"},
+		{name: "state", method: http.MethodGet, target: "/UserItems/" + itemID + "/UserData"},
+		{name: "artwork", method: http.MethodGet, target: "/Items/" + itemID + "/Images/Primary"},
+		{name: "stream", method: http.MethodGet, target: "/Videos/" + itemID + "/stream"},
+		{name: "stream head", method: http.MethodHead, target: "/Videos/" + itemID + "/stream"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.target, nil)
+			request.Header.Set("X-Emby-Token", authentication.token)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "5" ||
+				response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+			}
+			if test.method == http.MethodHead {
+				if response.Body.Len() != 0 {
+					t.Fatalf("HEAD maintenance response body=%q", response.Body.String())
+				}
+				return
+			}
+			var payload CompatErrorResponse
+			decodeCompatTestResponse(t, response, &payload)
+			if payload.ResponseStatus.ErrorCode != "MaintenanceMode" || payload.ResponseStatus.Message != message {
+				t.Fatalf("maintenance response=%+v", payload.ResponseStatus)
+			}
+		})
+	}
+	if policy.calls != len(tests) {
+		t.Fatalf("policy calls=%d want=%d", policy.calls, len(tests))
+	}
+}
+
+func TestAuthenticatedMaintenancePolicyExemptionsRecoveryAndFailure(t *testing.T) {
+	authentication, _ := newDiscoveryHTTPTestServer(t)
+	message := strings.Repeat("x", maximumCompatErrorMessageRunes+1)
+	policy := &authenticatedRequestPolicyFake{result: AuthenticatedRequestPolicyResult{PublicMessage: &message}}
+	serverID, err := ParseServerID(discoveryServerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(Dependencies{
+		ServerInfo: serverIDInfo(serverID), Authentication: authentication, AuthenticatedPolicy: policy,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	login := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(`{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"correct horse"}`))
+	login.Header.Set("Content-Type", "application/json")
+	login.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Client", Device="Device", DeviceId="device-id", Version="1"`)
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, login)
+	if loginResponse.Code != http.StatusOK || policy.calls != 0 {
+		t.Fatalf("login status=%d policy calls=%d body=%q", loginResponse.Code, policy.calls, loginResponse.Body.String())
+	}
+
+	blocked := httptest.NewRequest(http.MethodGet, "/Users/Me", nil)
+	blocked.Header.Set("X-Emby-Token", authentication.token)
+	blockedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(blockedResponse, blocked)
+	var blockedPayload CompatErrorResponse
+	decodeCompatTestResponse(t, blockedResponse, &blockedPayload)
+	if blockedResponse.Code != http.StatusServiceUnavailable || blockedPayload.ResponseStatus.Message != defaultCompatMaintenanceMessage {
+		t.Fatalf("unsafe maintenance message was not replaced: status=%d payload=%+v", blockedResponse.Code, blockedPayload)
+	}
+
+	policy.result = AuthenticatedRequestPolicyResult{Allowed: true}
+	recovered := httptest.NewRequest(http.MethodGet, "/Users/Me", nil)
+	recovered.Header.Set("X-Emby-Token", authentication.token)
+	recoveredResponse := httptest.NewRecorder()
+	handler.ServeHTTP(recoveredResponse, recovered)
+	if recoveredResponse.Code != http.StatusOK {
+		t.Fatalf("recovered status=%d body=%q", recoveredResponse.Code, recoveredResponse.Body.String())
+	}
+
+	policy.result = AuthenticatedRequestPolicyResult{}
+	policy.err = errors.New("settings database unavailable")
+	failedClosed := httptest.NewRequest(http.MethodGet, "/Users/Me", nil)
+	failedClosed.Header.Set("X-Emby-Token", authentication.token)
+	failedClosedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(failedClosedResponse, failedClosed)
+	var failedPayload CompatErrorResponse
+	decodeCompatTestResponse(t, failedClosedResponse, &failedPayload)
+	if failedClosedResponse.Code != http.StatusServiceUnavailable || failedClosedResponse.Header().Get("Retry-After") != "5" ||
+		failedPayload.ResponseStatus.ErrorCode != "ServiceUnavailable" || strings.Contains(failedClosedResponse.Body.String(), "database") {
+		t.Fatalf("fail-closed response status=%d headers=%v body=%q", failedClosedResponse.Code, failedClosedResponse.Header(), failedClosedResponse.Body.String())
+	}
+
+	policy.err = nil
+	logout := httptest.NewRequest(http.MethodPost, "/Sessions/Logout", nil)
+	logout.Header.Set("X-Emby-Token", authentication.token)
+	logoutResponse := httptest.NewRecorder()
+	callsBeforeLogout := policy.calls
+	handler.ServeHTTP(logoutResponse, logout)
+	if logoutResponse.Code != http.StatusNoContent || policy.calls != callsBeforeLogout || authentication.logoutCalls != 1 {
+		t.Fatalf("logout status=%d policy calls=%d/%d logout calls=%d", logoutResponse.Code, policy.calls, callsBeforeLogout, authentication.logoutCalls)
+	}
+}
+
+func serverIDInfo(id ServerID) ServerInfo {
+	return ServerInfo{ID: id, Name: "Rivune Home", LocalAddress: "https://rivune.example", RuntimeVersion: "test"}
 }
 
 func TestLogoutFailurePreservesPlaybackAndRetryRevokesBeforeCleanup(t *testing.T) {
@@ -527,6 +687,68 @@ func TestCompatHTTPRejectsOversizeAndCrossProfileAndHonorsCredentialPrecedence(t
 	assertCompatUnauthorized(t, expiredResponse)
 }
 
+func TestSystemEndpointRequiresAuthenticationAndUsesOnlyTrustedClientNetwork(t *testing.T) {
+	fake, mux := newDiscoveryHTTPTestServer(t)
+
+	anonymousResponse := httptest.NewRecorder()
+	mux.ServeHTTP(anonymousResponse, httptest.NewRequest(http.MethodGet, "/System/Endpoint", nil))
+	assertCompatUnauthorized(t, anonymousResponse)
+	var anonymous CompatErrorResponse
+	decodeCompatTestResponse(t, anonymousResponse, &anonymous)
+	if anonymous.ResponseStatus.ErrorCode != "Unauthorized" || anonymous.ResponseStatus.Message != "A valid compatibility token is required" ||
+		anonymousResponse.Header().Get("WWW-Authenticate") != "MediaBrowser" ||
+		anonymousResponse.Header().Get("Content-Type") != "application/json; charset=utf-8" ||
+		anonymousResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("anonymous endpoint response=%+v headers=%v", anonymous.ResponseStatus, anonymousResponse.Header())
+	}
+
+	requestEndpoint := func(clientIP string, headers map[string]string) (*httptest.ResponseRecorder, map[string]json.RawMessage, SystemEndpointInfo) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "/System/Endpoint", nil)
+		request.Header.Set("X-Emby-Token", fake.token)
+		for name, value := range headers {
+			request.Header.Set(name, value)
+		}
+		if clientIP != "" {
+			request = request.WithContext(auth.WithClientIP(request.Context(), clientIP))
+		}
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		var fields map[string]json.RawMessage
+		decodeCompatTestResponse(t, response, &fields)
+		var endpoint SystemEndpointInfo
+		decodeCompatTestResponse(t, response, &endpoint)
+		return response, fields, endpoint
+	}
+
+	spoofedResponse, fields, spoofed := requestEndpoint("198.51.100.20", map[string]string{
+		"Forwarded":       `for="127.0.0.1"`,
+		"X-Forwarded-For": "127.0.0.1, 10.0.0.10",
+		"X-Real-IP":       "192.168.1.10",
+	})
+	if spoofedResponse.Code != http.StatusOK || spoofedResponse.Header().Get("Cache-Control") != "no-store" ||
+		len(fields) != 2 || fields["IsLocal"] == nil || fields["IsInNetwork"] == nil || spoofed.IsLocal || spoofed.IsInNetwork {
+		t.Fatalf("spoofed endpoint status=%d headers=%v fields=%v value=%+v", spoofedResponse.Code, spoofedResponse.Header(), fields, spoofed)
+	}
+	missingTrustedAddressResponse, _, missingTrustedAddress := requestEndpoint("", map[string]string{
+		"Forwarded":       "for=127.0.0.1",
+		"X-Forwarded-For": "10.0.0.10",
+		"X-Real-IP":       "192.168.1.10",
+	})
+	if missingTrustedAddressResponse.Code != http.StatusOK || missingTrustedAddress.IsLocal || missingTrustedAddress.IsInNetwork {
+		t.Fatalf("missing trusted address endpoint status=%d value=%+v", missingTrustedAddressResponse.Code, missingTrustedAddress)
+	}
+
+	privateResponse, _, private := requestEndpoint("192.168.1.10", nil)
+	if privateResponse.Code != http.StatusOK || private.IsLocal || !private.IsInNetwork {
+		t.Fatalf("trusted private endpoint status=%d value=%+v", privateResponse.Code, private)
+	}
+	loopbackResponse, _, loopback := requestEndpoint("127.0.0.1", nil)
+	if loopbackResponse.Code != http.StatusOK || !loopback.IsLocal || !loopback.IsInNetwork {
+		t.Fatalf("trusted loopback endpoint status=%d value=%+v", loopbackResponse.Code, loopback)
+	}
+}
+
 func TestDiscoveryAndShimsExposeOnlyDeterministicCompatibilityData(t *testing.T) {
 	fake, mux := newDiscoveryHTTPTestServer(t)
 	publicResponse := httptest.NewRecorder()
@@ -537,7 +759,7 @@ func TestDiscoveryAndShimsExposeOnlyDeterministicCompatibilityData(t *testing.T)
 	var public PublicSystemInfo
 	decodeCompatTestResponse(t, publicResponse, &public)
 	if public.Id != discoveryServerID || public.ServerName != "Rivune Home" || public.Version != CompatibilityVersion || public.ProductName != "Jellyfin Server" ||
-		public.LocalAddress != "" || public.OperatingSystem != "" || !public.StartupWizardCompleted {
+		public.LocalAddress != "https://rivune.example" || public.OperatingSystem != "" || !public.StartupWizardCompleted {
 		t.Fatalf("unexpected public identity: %+v", public)
 	}
 	if strings.Contains(publicResponse.Body.String(), "test") {
@@ -699,7 +921,9 @@ func newDiscoveryHTTPTestServer(t *testing.T) (*discoveryAuthenticationFake, htt
 			ProfileName: "Kids", ExpiresAt: time.Now().UTC().Add(time.Hour), Principal: principal,
 		},
 	}
-	handler, err := New(Dependencies{ServerInfo: ServerInfo{ID: serverID, Name: "Rivune Home", RuntimeVersion: "test"}, Authentication: fake})
+	handler, err := New(Dependencies{ServerInfo: ServerInfo{
+		ID: serverID, Name: "Rivune Home", LocalAddress: "https://rivune.example", RuntimeVersion: "test",
+	}, Authentication: fake})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

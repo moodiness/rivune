@@ -19,6 +19,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/netguard"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 const (
@@ -225,9 +226,17 @@ func (service *Service) fetchIntroDBMarkers(ctx context.Context, input MarkerInp
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "Rivune/1")
+	started := requestwork.Now()
+	requestwork.BeginOutbound(ctx, started)
 	response, err := service.introDBClient.Do(request)
 	if err != nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
 		return nil, false, fmt.Errorf("request IntroDB segments: %w", netguard.SanitizeURLError(err))
+	}
+	if response.Body == nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+	} else {
+		response.Body = requestwork.ObserveBody(ctx, response.Body)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {

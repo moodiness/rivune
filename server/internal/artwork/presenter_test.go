@@ -346,9 +346,6 @@ func TestPresentAddonResourcesBoundsArtworkRegistrationsPerResponse(t *testing.T
 	if registered != maximumAddonArtworkURLsPerResponse {
 		t.Fatalf("registered %d artwork URLs, want bounded %d", registered, maximumAddonArtworkURLsPerResponse)
 	}
-	if queued := len(service.warmupQueue); queued != maximumAddonArtworkURLsPerResponse {
-		t.Fatalf("queued %d artwork warmups, want bounded %d", queued, maximumAddonArtworkURLsPerResponse)
-	}
 }
 
 func TestPresentResolvedFolderLocalizesFallbackArtworkAndRawPayload(t *testing.T) {

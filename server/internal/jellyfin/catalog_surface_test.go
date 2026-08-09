@@ -9,12 +9,12 @@ import (
 	"github.com/moodiness/rivune/server/internal/watchstate"
 )
 
-func TestCatalogFiltersAndGenresUseOnlyAuthorizedBoundedProjection(t *testing.T) {
+func TestCatalogFiltersGenresAndStudiosUseOnlyAuthorizedBoundedProjection(t *testing.T) {
 	handler, reader, token := newCatalogHTTPHandler(t)
 	reader.page = watchstate.CatalogPage{
 		Items: []watchstate.CatalogTitle{
-			{ID: "00000000-0000-4000-8000-000000000101", MediaType: "movie", Title: "First", Released: "2024-01-02", Genres: []string{"Thriller", "Drama"}},
-			{ID: "00000000-0000-4000-8000-000000000102", MediaType: "movie", Title: "Second", Released: "2025-01-02", Genres: []string{"drama", "Comedy"}},
+			{ID: "00000000-0000-4000-8000-000000000101", MediaType: "movie", Title: "First", Released: "2024-01-02", Genres: []string{"Thriller", "Drama"}, Studios: []string{"North Star", "north star", "Alpha Works"}},
+			{ID: "00000000-0000-4000-8000-000000000102", MediaType: "movie", Title: "Second", Released: "2025-01-02", Genres: []string{"drama", "Comedy"}, Studios: []string{"Beta House"}},
 		},
 		Total: 2,
 	}
@@ -45,12 +45,51 @@ func TestCatalogFiltersAndGenresUseOnlyAuthorizedBoundedProjection(t *testing.T)
 		t.Fatalf("unexpected genre page: status=%d result=%+v", genresResponse.Code, genres)
 	}
 
+	studiosRequest := authenticatedCatalogRequest(t, token, "/Studios?StartIndex=1&Limit=1&IncludeItemTypes=Movie")
+	studiosResponse := httptest.NewRecorder()
+	handler.handleStudios(studiosResponse, studiosRequest)
+	var studios QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, studiosResponse, &studios)
+	if studiosResponse.Code != http.StatusOK || studios.TotalRecordCount != 3 || studios.StartIndex != 1 || len(studios.Items) != 1 ||
+		studios.Items[0].Name != "Beta House" || studios.Items[0].Type != "Studio" || !validCompatUUID(studios.Items[0].Id) {
+		t.Fatalf("unexpected studio page: status=%d result=%+v", studiosResponse.Code, studios)
+	}
+	searchRequest := authenticatedCatalogRequest(t, token, "/Studios?SearchTerm=nOrTh&Limit=10")
+	searchResponse := httptest.NewRecorder()
+	handler.handleStudios(searchResponse, searchRequest)
+	var searched QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, searchResponse, &searched)
+	if searchResponse.Code != http.StatusOK || searched.TotalRecordCount != 1 || len(searched.Items) != 1 ||
+		searched.Items[0].Name != "North Star" || searched.Items[0].Id != handler.catalogFacetID("studio", "north star") {
+		t.Fatalf("studio search or case-insensitive identity was unstable: status=%d result=%+v", searchResponse.Code, searched)
+	}
+	projected := handler.baseItemDTO(reader.page.Items[0], false)
+	if len(projected.Studios) != 2 || projected.Studios[0].Name != "Alpha Works" || projected.Studios[1].Name != "North Star" ||
+		projected.Studios[1].Id != searched.Items[0].Id {
+		t.Fatalf("title studio projection was not deterministic: %+v", projected.Studios)
+	}
+
+	reader.titles = map[string]watchstate.CatalogTitle{
+		reader.page.Items[0].ID: reader.page.Items[0],
+		reader.page.Items[1].ID: reader.page.Items[1],
+	}
+	filterRequest := authenticatedCatalogRequest(t, token, "/Items?Ids="+reader.page.Items[0].ID+","+reader.page.Items[1].ID+"&Studios=nOrTh%20StAr&Fields=Studios&Limit=10")
+	filterResponse := httptest.NewRecorder()
+	handler.handleItems(filterResponse, filterRequest)
+	var filtered QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, filterResponse, &filtered)
+	if filterResponse.Code != http.StatusOK || filtered.TotalRecordCount != 1 || len(filtered.Items) != 1 ||
+		filtered.Items[0].Id != reader.page.Items[0].ID || len(filtered.Items[0].Studios) != 2 {
+		t.Fatalf("studio item filter did not look up the matching title exactly: status=%d result=%+v", filterResponse.Code, filtered)
+	}
+
 	queriesBefore := len(reader.queries)
-	mismatch := authenticatedCatalogRequest(t, token, "/Items/Filters?UserId=22222222-2222-4222-8222-222222222222")
+	mismatch := authenticatedCatalogRequest(t, token, "/Studios?UserId=22222222-2222-4222-8222-222222222222")
 	mismatchResponse := httptest.NewRecorder()
-	handler.handleItemsFilters(mismatchResponse, mismatch)
-	if mismatchResponse.Code != http.StatusNotFound || len(reader.queries) != queriesBefore || strings.Contains(mismatchResponse.Body.String(), "Thriller") {
-		t.Fatalf("cross-profile filters leaked catalog: status=%d calls=%d body=%s", mismatchResponse.Code, len(reader.queries), mismatchResponse.Body.String())
+	handler.handleStudios(mismatchResponse, mismatch)
+	if mismatchResponse.Code != http.StatusNotFound || len(reader.queries) != queriesBefore ||
+		strings.Contains(mismatchResponse.Body.String(), "North Star") || strings.Contains(mismatchResponse.Body.String(), "Beta House") {
+		t.Fatalf("cross-profile studios leaked catalog: status=%d calls=%d body=%s", mismatchResponse.Code, len(reader.queries), mismatchResponse.Body.String())
 	}
 }
 
@@ -128,10 +167,8 @@ func TestRecommendationsAndAbsentMediaDomainsStayHonest(t *testing.T) {
 	segmentsRequest.SetPathValue("itemId", baselineID)
 	segmentsResponse := httptest.NewRecorder()
 	handler.handleMediaSegments(segmentsResponse, segmentsRequest)
-	var segments QueryResult[MediaSegmentDto]
-	decodeCatalogResponse(t, segmentsResponse, &segments)
-	if segmentsResponse.Code != http.StatusOK || segments.Items == nil || segments.TotalRecordCount != 0 {
-		t.Fatalf("unexpected empty media segments: status=%d result=%+v", segmentsResponse.Code, segments)
+	if segmentsResponse.Code != http.StatusNotFound || !strings.Contains(segmentsResponse.Body.String(), "MediaSegmentsUnavailable") {
+		t.Fatalf("unsupported movie segments were not explicit: status=%d body=%s", segmentsResponse.Code, segmentsResponse.Body.String())
 	}
 
 	themeRequest := authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+"/Items/"+baselineID+"/ThemeMedia")

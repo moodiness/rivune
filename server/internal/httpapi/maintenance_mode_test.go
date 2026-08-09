@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -68,6 +70,43 @@ func TestMaintenanceModeEnforcementBoundaries(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+func TestJellyfinMaintenancePolicyMatchesCompatPrincipalPermissions(t *testing.T) {
+	message := "Upgrading the compatibility service"
+	readFailure := errors.New("settings unavailable")
+	tests := []struct {
+		name        string
+		principal   auth.Principal
+		maintenance settings.Maintenance
+		settingsErr error
+		wantAllowed bool
+		wantMessage *string
+		wantErr     error
+	}{
+		{name: "viewer denied", principal: auth.Principal{Role: "member"}, maintenance: settings.Maintenance{Enabled: true, Message: &message}, wantMessage: &message},
+		{name: "disabled recovers viewer", principal: auth.Principal{Role: "member"}, maintenance: settings.Maintenance{Enabled: false, Message: &message}, wantAllowed: true, wantMessage: &message},
+		{name: "profile manager allowed", principal: auth.Principal{Role: "member", ActiveProfileCanManage: true}, maintenance: settings.Maintenance{Enabled: true}, settingsErr: readFailure, wantAllowed: true},
+		{name: "global administrator allowed", principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}, maintenance: settings.Maintenance{Enabled: true}, settingsErr: readFailure, wantAllowed: true},
+		{name: "non global administrator denied", principal: auth.Principal{Role: "admin"}, maintenance: settings.Maintenance{Enabled: true}},
+		{name: "viewer settings failure fails closed", principal: auth.Principal{Role: "member"}, settingsErr: readFailure, wantErr: readFailure},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeSettingsService{maintenance: test.maintenance, maintenanceErr: test.settingsErr}
+			result, err := (jellyfinMaintenancePolicy{settings: service}).Authorize(context.Background(), test.principal)
+			if !errors.Is(err, test.wantErr) || result.Allowed != test.wantAllowed {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if test.wantMessage == nil && result.PublicMessage != nil ||
+				test.wantMessage != nil && (result.PublicMessage == nil || *result.PublicMessage != *test.wantMessage) {
+				t.Fatalf("public message=%v want=%v", result.PublicMessage, test.wantMessage)
+			}
+		})
+	}
+
+	if _, err := (jellyfinMaintenancePolicy{}).Authorize(context.Background(), auth.Principal{Role: "member"}); err == nil {
+		t.Fatal("nil settings dependency did not fail closed")
 	}
 }
 

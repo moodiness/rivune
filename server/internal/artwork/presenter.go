@@ -367,8 +367,8 @@ func (service *Service) LocalizeMovie(ctx context.Context, value *metadata.Movie
 	if value == nil {
 		return
 	}
-	values := make([]*string, 0, len(value.Cast)+3)
-	values = append(values, &value.PosterURL, &value.BackdropURL, &value.LogoURL)
+	values := make([]*string, 0, len(value.Cast)+5)
+	values = append(values, &value.PosterURL, &value.BackdropURL, &value.LogoURL, &value.BannerURL, &value.ArtURL)
 	for index := range value.Cast {
 		values = append(values, &value.Cast[index].ProfileURL)
 	}
@@ -379,14 +379,14 @@ func (service *Service) LocalizeMoviePage(ctx context.Context, value *metadata.M
 	if value == nil {
 		return
 	}
-	artworkCount := len(value.Items) * 3
+	artworkCount := len(value.Items) * 5
 	for index := range value.Items {
 		artworkCount += len(value.Items[index].Cast)
 	}
 	values := make([]*string, 0, artworkCount)
 	for index := range value.Items {
 		item := &value.Items[index]
-		values = append(values, &item.PosterURL, &item.BackdropURL, &item.LogoURL)
+		values = append(values, &item.PosterURL, &item.BackdropURL, &item.LogoURL, &item.BannerURL, &item.ArtURL)
 		for castIndex := range item.Cast {
 			values = append(values, &item.Cast[castIndex].ProfileURL)
 		}
@@ -398,8 +398,8 @@ func (service *Service) LocalizeSeries(ctx context.Context, value *metadata.Seri
 	if value == nil {
 		return
 	}
-	values := make([]*string, 0, len(value.Cast)+len(value.Seasons)*2+3)
-	values = append(values, &value.PosterURL, &value.BackdropURL, &value.LogoURL)
+	values := make([]*string, 0, len(value.Cast)+len(value.Seasons)*2+5)
+	values = append(values, &value.PosterURL, &value.BackdropURL, &value.LogoURL, &value.BannerURL, &value.ArtURL)
 	for index := range value.Cast {
 		values = append(values, &value.Cast[index].ProfileURL)
 	}
@@ -413,14 +413,14 @@ func (service *Service) LocalizeSeriesPage(ctx context.Context, value *metadata.
 	if value == nil {
 		return
 	}
-	artworkCount := len(value.Items) * 3
+	artworkCount := len(value.Items) * 5
 	for index := range value.Items {
 		artworkCount += len(value.Items[index].Cast) + len(value.Items[index].Seasons)*2
 	}
 	values := make([]*string, 0, artworkCount)
 	for index := range value.Items {
 		item := &value.Items[index]
-		values = append(values, &item.PosterURL, &item.BackdropURL, &item.LogoURL)
+		values = append(values, &item.PosterURL, &item.BackdropURL, &item.LogoURL, &item.BannerURL, &item.ArtURL)
 		for castIndex := range item.Cast {
 			values = append(values, &item.Cast[castIndex].ProfileURL)
 		}

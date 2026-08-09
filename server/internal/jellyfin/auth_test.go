@@ -226,6 +226,195 @@ func TestAtomicLinkedLogoutRollsBackNativeAndCompatFailuresAndRetries(t *testing
 	}
 }
 
+func TestCompatibilityAuthenticationAdmissionBoundsAndCoalesces(t *testing.T) {
+	const limit = 2
+	store := &SessionStore{
+		authenticationFlights:    make(map[string]*compatAuthenticationFlight),
+		authenticationOperations: make(chan struct{}, limit),
+	}
+	started := make(chan string, limit)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	operation := func(key string) func(context.Context) (AuthenticatedSession, error) {
+		return func(ctx context.Context) (AuthenticatedSession, error) {
+			calls.Add(1)
+			started <- key
+			select {
+			case <-release:
+				return AuthenticatedSession{ID: key}, nil
+			case <-ctx.Done():
+				return AuthenticatedSession{}, ctx.Err()
+			}
+		}
+	}
+	results := make(chan error, limit+1)
+	for _, key := range []string{"first", "second"} {
+		key := key
+		go func() {
+			_, err := store.authenticateSingleflight(context.Background(), key, operation(key))
+			results <- err
+		}()
+	}
+	<-started
+	<-started
+
+	began := time.Now()
+	if _, err := store.authenticateSingleflight(context.Background(), "saturated", operation("saturated")); !errors.Is(err, ErrCompatAuthenticationSaturated) {
+		t.Fatalf("saturated authentication error = %v", err)
+	}
+	if elapsed := time.Since(began); elapsed > 250*time.Millisecond {
+		t.Fatalf("saturated authentication blocked for %s", elapsed)
+	}
+
+	go func() {
+		_, err := store.authenticateSingleflight(context.Background(), "first", operation("first"))
+		results <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		store.authenticationMu.Lock()
+		flight := store.authenticationFlights["first"]
+		joined := flight != nil && flight.waiters == 2
+		store.authenticationMu.Unlock()
+		if joined {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("same-key authentication did not join the active flight")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	for range limit + 1 {
+		if err := <-results; err != nil {
+			t.Fatalf("admitted authentication failed: %v", err)
+		}
+	}
+	if got := calls.Load(); got != limit {
+		t.Fatalf("database authentication calls = %d, want %d after same-key coalescing", got, limit)
+	}
+	if occupied := len(store.authenticationOperations); occupied != 0 {
+		t.Fatalf("authentication slots retained after success: %d", occupied)
+	}
+}
+
+func TestCompatibilityAuthenticationAdmissionReleasesAfterError(t *testing.T) {
+	store := &SessionStore{
+		authenticationFlights:    make(map[string]*compatAuthenticationFlight),
+		authenticationOperations: make(chan struct{}, 1),
+	}
+	expected := errors.New("database authentication failed")
+	if _, err := store.authenticateSingleflight(context.Background(), "failure", func(context.Context) (AuthenticatedSession, error) {
+		return AuthenticatedSession{}, expected
+	}); !errors.Is(err, expected) {
+		t.Fatalf("authentication error = %v, want %v", err, expected)
+	}
+	session, err := store.authenticateSingleflight(context.Background(), "retry", func(context.Context) (AuthenticatedSession, error) {
+		return AuthenticatedSession{ID: "retry"}, nil
+	})
+	if err != nil || session.ID != "retry" {
+		t.Fatalf("authentication after error session=%+v err=%v", session, err)
+	}
+	if occupied := len(store.authenticationOperations); occupied != 0 {
+		t.Fatalf("authentication slots retained after error: %d", occupied)
+	}
+}
+
+func TestCompatibilityAuthenticationCancellationStopsLastDetachedOperation(t *testing.T) {
+	store := &SessionStore{
+		authenticationFlights:    make(map[string]*compatAuthenticationFlight),
+		authenticationOperations: make(chan struct{}, 1),
+	}
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := store.authenticateSingleflight(ctx, "cancelled", func(operationContext context.Context) (AuthenticatedSession, error) {
+			close(started)
+			<-operationContext.Done()
+			close(stopped)
+			return AuthenticatedSession{}, operationContext.Err()
+		})
+		result <- err
+	}()
+	<-started
+	store.authenticationMu.Lock()
+	flight := store.authenticationFlights["cancelled"]
+	store.authenticationMu.Unlock()
+	if flight == nil {
+		t.Fatal("cancelled authentication flight was not registered")
+	}
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled caller error = %v", err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("detached authentication survived cancellation of its last caller")
+	}
+	select {
+	case <-flight.done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled authentication did not release its admission slot")
+	}
+	session, err := store.authenticateSingleflight(context.Background(), "after-cancel", func(context.Context) (AuthenticatedSession, error) {
+		return AuthenticatedSession{ID: "after-cancel"}, nil
+	})
+	if err != nil || session.ID != "after-cancel" {
+		t.Fatalf("authentication after cancellation session=%+v err=%v", session, err)
+	}
+}
+
+func TestSessionStoreBulkRevocationFailsClosedAndRetries(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL to run compatibility generation revocation tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := database.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open compatibility session database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	native, err := auth.NewService(pool, time.Hour, 24*time.Hour, "UTC")
+	if err != nil {
+		t.Fatalf("create native authentication service: %v", err)
+	}
+	store, err := NewSessionStore(pool, native)
+	if err != nil {
+		t.Fatalf("create compatibility session store: %v", err)
+	}
+	fixture := seedAtomicLogoutFixture(t, pool)
+	if _, err := store.Authenticate(ctx, fixture.compatToken); err != nil {
+		t.Fatalf("authenticate active compatibility token: %v", err)
+	}
+	dropFailure := installLogoutFailureTrigger(t, pool, "jellyfin_compat_sessions", fixture)
+	if err := store.RevokeAllActive(ctx, "compatibility_disabled"); err == nil {
+		t.Fatal("bulk revocation succeeded despite injected database failure")
+	}
+	assertAtomicLogoutState(t, pool, fixture, false, time.Time{}, time.Time{})
+	dropFailure()
+	if _, err := store.Authenticate(ctx, fixture.compatToken); err != nil {
+		t.Fatalf("rolled-back bulk revocation invalidated token: %v", err)
+	}
+	if err := store.RevokeAllActive(ctx, "compatibility_disabled"); err != nil {
+		t.Fatalf("retry bulk compatibility revocation: %v", err)
+	}
+	if _, err := store.Authenticate(ctx, fixture.compatToken); !errors.Is(err, ErrInvalidCompatCredential) {
+		t.Fatalf("old compatibility token after revocation error=%v, want invalid credential", err)
+	}
+	var reason *string
+	if err := pool.QueryRow(ctx, `SELECT revoked_reason FROM jellyfin_compat_sessions WHERE id = $1::uuid`, fixture.compatSessionID).Scan(&reason); err != nil {
+		t.Fatalf("read bulk compatibility revocation reason: %v", err)
+	}
+	if reason == nil || *reason != "compatibility_disabled" {
+		t.Fatalf("bulk compatibility revocation reason=%v", reason)
+	}
+}
+
 func TestAtomicLinkedLogoutHonorsCancellationWithoutPartialRevocation(t *testing.T) {
 	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -283,8 +472,8 @@ func validAuthLifecycleLogin() CompatLoginInput {
 }
 
 type atomicLogoutFixture struct {
-	userID, profileID, authSessionID, compatSessionID string
-	session                                           AuthenticatedSession
+	userID, profileID, authSessionID, compatSessionID, compatToken string
+	session                                                        AuthenticatedSession
 }
 
 func seedAtomicLogoutFixture(t *testing.T, pool *pgxpool.Pool) atomicLogoutFixture {
@@ -336,7 +525,11 @@ func seedAtomicLogoutFixture(t *testing.T, pool *pgxpool.Pool) atomicLogoutFixtu
 	`, fixture.userID, deviceID, accessHash[:], categoryID, fixture.profileID, contextHash[:]).Scan(&fixture.authSessionID); err != nil {
 		t.Fatalf("insert linked logout native session: %v", err)
 	}
-	tokenHash := sha256.Sum256([]byte("atomic-logout-compat-" + suffix))
+	compatToken, tokenHash, err := newCompatCredential()
+	if err != nil {
+		t.Fatalf("generate linked logout compatibility token: %v", err)
+	}
+	fixture.compatToken = compatToken
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO jellyfin_compat_sessions (
 			auth_session_id, profile_id, token_hash, client_name, device_name,

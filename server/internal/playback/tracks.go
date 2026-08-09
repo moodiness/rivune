@@ -32,7 +32,7 @@ func applyPlaybackPreferences(sources []Source, assets []storedAsset, input Reso
 		video := primaryTrack(source.Media.VideoTracks)
 		trackCopySupported := video != nil && mp4RemuxableAudio(track.Codec) &&
 			audioWithinClientLimits(track, input.Capabilities) &&
-			mediaProfileSupported("mp4", video, track, input.Capabilities)
+			processingMediaProfileSupported("mp4", video, track, input.Capabilities)
 		requiresTrackSwitch := primary != nil && primary.Index != track.Index
 
 		if source.Mode == processingRemux && !trackCopySupported && !explicit && video != nil {

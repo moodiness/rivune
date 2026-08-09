@@ -2224,6 +2224,20 @@ func mergeProfileState(ctx context.Context, tx pgx.Tx, destinationID, sourceID s
 		return fmt.Errorf("remove duplicate profile library state: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
+		INSERT INTO profile_favorites AS destination (profile_id, title_id, created_at, updated_at)
+		SELECT profile_id, $1::uuid, created_at, updated_at
+		FROM profile_favorites
+		WHERE title_id = $2::uuid
+		ON CONFLICT (profile_id, title_id) DO UPDATE
+		SET created_at = LEAST(destination.created_at, EXCLUDED.created_at),
+		    updated_at = GREATEST(destination.updated_at, EXCLUDED.updated_at)
+	`, destinationID, sourceID); err != nil {
+		return fmt.Errorf("merge profile favorite state: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM profile_favorites WHERE title_id = $1::uuid", sourceID); err != nil {
+		return fmt.Errorf("remove duplicate profile favorite state: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO profile_progress AS destination (
 			profile_id, title_id, position_seconds, duration_seconds, completed,
 			version, last_watched_at, updated_at
@@ -2434,6 +2448,8 @@ func normalizeMovie(titleID string, provided ProviderMovie) Movie {
 		PosterURL:        provided.PosterURL,
 		BackdropURL:      provided.BackdropURL,
 		LogoURL:          provided.LogoURL,
+		BannerURL:        provided.BannerURL,
+		ArtURL:           provided.ArtURL,
 		Tagline:          provided.Tagline,
 		RuntimeMinutes:   provided.RuntimeMinutes,
 		Genres:           genres,
@@ -2470,6 +2486,8 @@ func normalizeSeries(titleID string, provided ProviderSeries) Series {
 		PosterURL:        provided.PosterURL,
 		BackdropURL:      provided.BackdropURL,
 		LogoURL:          provided.LogoURL,
+		BannerURL:        provided.BannerURL,
+		ArtURL:           provided.ArtURL,
 		Tagline:          provided.Tagline,
 		Status:           provided.Status,
 		NumberOfSeasons:  provided.NumberOfSeasons,

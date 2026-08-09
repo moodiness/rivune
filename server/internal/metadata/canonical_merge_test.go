@@ -233,6 +233,25 @@ func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState
 	if libraryCount != 1 || !addedAt.Equal(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)) || !updatedAt.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("unexpected merged library state count=%d added=%s updated=%s", libraryCount, addedAt, updatedAt)
 	}
+	var favoriteCreatedAt, favoriteUpdatedAt time.Time
+	var favoriteCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT min(created_at), max(updated_at), count(*)
+		FROM profile_favorites
+		WHERE profile_id = $1::uuid AND title_id = $2::uuid
+	`, canonicalProfileID, canonicalDestinationEpisodeID).Scan(&favoriteCreatedAt, &favoriteUpdatedAt, &favoriteCount); err != nil {
+		t.Fatalf("query merged favorite state: %v", err)
+	}
+	if favoriteCount != 1 || !favoriteCreatedAt.Equal(time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)) || !favoriteUpdatedAt.Equal(time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("unexpected merged favorite state count=%d created=%s updated=%s", favoriteCount, favoriteCreatedAt, favoriteUpdatedAt)
+	}
+	var transferredFavoriteTitleID string
+	if err := pool.QueryRow(ctx, `
+		SELECT title_id::text FROM profile_favorites
+		WHERE profile_id = $1::uuid AND title_id = $2::uuid
+	`, canonicalOtherProfileID, canonicalDestinationEpisodeID).Scan(&transferredFavoriteTitleID); err != nil {
+		t.Fatalf("query transferred cross-profile favorite: %v", err)
+	}
 	var position, duration int
 	var completed bool
 	var version int64
@@ -494,6 +513,10 @@ func newCanonicalMergeTestPool(t *testing.T, queryTracers ...pgx.QueryTracer) *p
 		CREATE TEMPORARY TABLE profile_library (
 			profile_id uuid NOT NULL, title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE, added_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
 			PRIMARY KEY (profile_id, title_id));
+		CREATE TEMPORARY TABLE profile_favorites (
+			profile_id uuid NOT NULL, title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+			PRIMARY KEY (profile_id, title_id));
 		CREATE TEMPORARY TABLE profile_progress (
 			profile_id uuid NOT NULL, title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE, position_seconds integer NOT NULL, duration_seconds integer NOT NULL,
 			completed boolean NOT NULL, version bigint NOT NULL, last_watched_at timestamptz NOT NULL, updated_at timestamptz NOT NULL, PRIMARY KEY (profile_id, title_id))
@@ -523,6 +546,11 @@ func seedCanonicalMergeSuccess(t *testing.T, pool *pgxpool.Pool) {
 			($7::uuid, 'tmdb', 'fr-FR', '{"movedEpisode":true}', now() + interval '1 hour');
 		INSERT INTO profile_library (profile_id, title_id, added_at, updated_at) VALUES
 			($8::uuid, $1::uuid, '2025-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ($8::uuid, $2::uuid, '2024-01-01T00:00:00Z', '2025-06-01T00:00:00Z');
+		INSERT INTO profile_favorites (profile_id, title_id, created_at, updated_at) VALUES
+			($8::uuid, $5::uuid, '2025-02-01T00:00:00Z', '2025-02-01T00:00:00Z'),
+			($8::uuid, $6::uuid, '2024-02-01T00:00:00Z', '2026-02-01T00:00:00Z'),
+			($9::uuid, $6::uuid, '2025-03-01T00:00:00Z', '2025-03-01T00:00:00Z'),
+			($9::uuid, $7::uuid, '2026-03-01T00:00:00Z', '2026-03-01T00:00:00Z');
 		INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed, version, last_watched_at, updated_at) VALUES
 			($8::uuid, $5::uuid, 20, 100, false, 4, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'),
 			($8::uuid, $6::uuid, 90, 100, true, 7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),

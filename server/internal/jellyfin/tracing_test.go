@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 func TestRouteTracingEmitsOneBoundedRedactedEventForRootAndEmby(t *testing.T) {
@@ -43,6 +45,11 @@ func TestRouteTracingEmitsOneBoundedRedactedEventForRootAndEmby(t *testing.T) {
 		if err != nil || string(payload) != bodySecret {
 			t.Errorf("body = %q, error = %v", payload, err)
 		}
+		requestwork.BeginDB(request.Context(), 10)
+		requestwork.EndDB(request.Context(), 40)
+		requestwork.BeginOutbound(request.Context(), 20)
+		requestwork.EndOutbound(request.Context(), 70, 321)
+		response.Header().Set("Content-Type", `application/json; boundary="`+headerSecret+`"`)
 		response.WriteHeader(http.StatusPartialContent)
 	})
 	handler, err := New(Dependencies{
@@ -116,16 +123,173 @@ func TestRouteTracingEmitsOneBoundedRedactedEventForRootAndEmby(t *testing.T) {
 		if !ok || duration < 0 {
 			t.Errorf("event %d duration = %#v", index, event["duration"])
 		}
-		if event["bytes"] != float64(0) || event["range_request"] != false || event["content_type"] != "" {
+		if event["db_call_count"] != float64(1) || event["db_duration"] != float64(30) ||
+			event["outbound_call_count"] != float64(1) || event["outbound_duration"] != float64(50) ||
+			event["upstream_bytes"] != float64(321) {
+			t.Errorf("event %d work metadata = %#v", index, event)
+		}
+		if event["bytes"] != float64(0) || event["range_request"] != false || event["content_type"] != "application/json" {
 			t.Errorf("event %d transport metadata = %#v", index, event)
 		}
 		for key := range event {
 			switch key {
-			case "time", "level", "msg", "route", "method", "status", "duration", "bytes", "range_request", "content_type":
+			case "time", "level", "msg", "route", "method", "status", "duration", "db_call_count", "db_duration",
+				"outbound_call_count", "outbound_duration", "upstream_bytes", "bytes", "range_request", "content_type":
 			default:
 				t.Errorf("event %d exposes unexpected field %q", index, key)
 			}
 		}
+	}
+}
+
+func TestRouteTracingEmitsZeroWorkWithoutInstrumentation(t *testing.T) {
+	var logs bytes.Buffer
+	handler := tracedHandler(t, slog.New(slog.NewJSONHandler(&logs, nil)), RouteSystemPing,
+		http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			response.WriteHeader(http.StatusNoContent)
+		}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/System/Ping", nil))
+
+	var event map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event); err != nil {
+		t.Fatalf("decode completed event: %v", err)
+	}
+	for _, field := range []string{"db_call_count", "db_duration", "outbound_call_count", "outbound_duration", "upstream_bytes"} {
+		if event[field] != float64(0) {
+			t.Fatalf("%s = %#v, want zero: %#v", field, event[field], event)
+		}
+	}
+}
+
+func TestRouteDebugTracingIsOptInBoundedAndNeverLogsValues(t *testing.T) {
+	const (
+		querySecret    = "query-value-SENTINEL"
+		headerSecret   = "header-value-SENTINEL"
+		bodySecret     = "body-value-SENTINEL"
+		tokenSecret    = "token-value-SENTINEL"
+		itemSecret     = "item-id-SENTINEL"
+		sessionSecret  = "session-id-SENTINEL"
+		providerSecret = "https://provider.invalid/media?password=provider-SENTINEL"
+	)
+	var logs bytes.Buffer
+	implementation := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		payload, err := io.ReadAll(request.Body)
+		if err != nil || string(payload) != bodySecret || request.Header.Get("X-Sentinel") != headerSecret {
+			t.Fatalf("debug tracing changed request: body=%q err=%v headers=%v", payload, err, request.Header)
+		}
+		response.Header().Set("Content-Type", "application/json; charset=utf-8; boundary=content-type-SENTINEL")
+		response.Header().Set("Content-Range", "items 0-0/1")
+		_, _ = response.Write([]byte(`{"Items":[{"Id":"` + itemSecret + `","SessionId":"` + sessionSecret + `","Path":"` + providerSecret + `"}],"TotalRecordCount":1}`))
+	})
+	handler, err := New(Dependencies{
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		Debug:  true,
+		Handlers: map[Route]http.Handler{
+			RoutePlaybackInfoPost: implementation,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New debug handler: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/Items/12345678-1234-4234-8234-123456789abc/PlaybackInfo?Fields=Path&Fields=MediaSources&Limit=1&api_key="+querySecret, strings.NewReader(bodySecret))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Range", "bytes=0-1")
+	request.Header.Set("X-Sentinel", headerSecret)
+	request.Header.Set("Cookie", "sid=cookie-value-SENTINEL")
+	request.Header.Set("User-Agent", "user-agent-SENTINEL")
+	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Generic Client", Device="private-device-SENTINEL", DeviceId="device-id-SENTINEL", Version="8.2", Token="`+tokenSecret+`"`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("debug response status=%d body=%s", response.Code, response.Body.String())
+	}
+	rawLog := strings.TrimSpace(logs.String())
+	for _, forbidden := range []string{
+		querySecret, headerSecret, bodySecret, tokenSecret, itemSecret, sessionSecret, providerSecret,
+		"content-type-SENTINEL", "cookie-value-SENTINEL", "user-agent-SENTINEL", "private-device-SENTINEL", "device-id-SENTINEL", "12345678-1234-4234-8234-123456789abc",
+	} {
+		if strings.Contains(rawLog, forbidden) {
+			t.Errorf("debug log contains forbidden value %q: %s", forbidden, rawLog)
+		}
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(rawLog), &event); err != nil {
+		t.Fatalf("decode debug event: %v", err)
+	}
+	if event["route"] != string(RoutePlaybackInfoPost) || event["method"] != http.MethodPost ||
+		event["status"] != float64(http.StatusOK) || event["bytes"] != float64(response.Body.Len()) || event["content_type"] != "application/json" ||
+		event["client_family"] != "generic-client" || event["client_version_major"] != "8" || event["client_metadata_present"] != true ||
+		event["range_request"] != true || event["range_response"] != true || event["json_top_level"] != "object" {
+		t.Fatalf("debug event metadata=%#v", event)
+	}
+	if duration, ok := event["duration"].(float64); !ok || duration < 0 {
+		t.Fatalf("debug duration=%#v", event["duration"])
+	}
+	if got := event["query_names"]; !equalJSONStrings(got, []string{"Fields", "Limit", "api_key"}) {
+		t.Fatalf("debug query names=%#v", got)
+	}
+	if got := event["query_cardinalities"]; !equalJSONNumbers(got, []float64{2, 1, 1}) {
+		t.Fatalf("debug query cardinalities=%#v", got)
+	}
+	if got := event["headers_present"]; !equalJSONStrings(got, []string{"Content-Type", "Range", "User-Agent", "X-Emby-Authorization"}) {
+		t.Fatalf("debug header presence=%#v", got)
+	}
+	if got := event["json_fields"]; !equalJSONStrings(got, []string{"Items", "TotalRecordCount"}) {
+		t.Fatalf("debug JSON fields=%#v", got)
+	}
+}
+
+func equalJSONStrings(value any, want []string) bool {
+	values, ok := value.([]any)
+	if !ok || len(values) != len(want) {
+		return false
+	}
+	for index := range want {
+		if values[index] != want[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalJSONNumbers(value any, want []float64) bool {
+	values, ok := value.([]any)
+	if !ok || len(values) != len(want) {
+		return false
+	}
+	for index := range want {
+		if values[index] != want[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestDebugTraceQueryAndJSONFieldNamesAreBounded(t *testing.T) {
+	var query strings.Builder
+	var payload strings.Builder
+	payload.WriteByte('{')
+	for index := range maximumCompatTraceQueryNames + 8 {
+		name := "Field" + string(rune('A'+index/26)) + string(rune('A'+index%26))
+		if index != 0 {
+			query.WriteByte('&')
+			payload.WriteByte(',')
+		}
+		query.WriteString(name + "=secret-value-SENTINEL")
+		payload.WriteString(`"` + name + `":"secret-value-SENTINEL"`)
+	}
+	payload.WriteByte('}')
+	request := httptest.NewRequest(http.MethodGet, "/Items?"+query.String(), nil)
+	queryNames, cardinalities := compatTraceQueryShape(request)
+	if len(queryNames) != maximumCompatTraceQueryNames || len(cardinalities) != maximumCompatTraceQueryNames {
+		t.Fatalf("bounded query shape names=%d cardinalities=%d", len(queryNames), len(cardinalities))
+	}
+	shape, fields := compatTraceJSONShape([]byte(payload.String()))
+	if shape != "object" || len(fields) != maximumCompatTraceJSONFields {
+		t.Fatalf("bounded JSON shape=%q fields=%d", shape, len(fields))
+	}
+	if strings.Contains(strings.Join(queryNames, ","), "secret-value-SENTINEL") || strings.Contains(strings.Join(fields, ","), "secret-value-SENTINEL") {
+		t.Fatal("debug shape included a value")
 	}
 }
 
@@ -156,7 +320,7 @@ func TestRouteTracingPreservesHEADRangeStreamingAndCancellation(t *testing.T) {
 				t.Errorf("ResponseController.Flush: %v", err)
 			}
 		})
-		handler := tracedHandler(t, slog.New(slog.NewJSONHandler(&logs, nil)), RouteStream, implementation)
+		handler := tracedDebugHandler(t, slog.New(slog.NewJSONHandler(&logs, nil)), RouteStream, implementation)
 		request := httptest.NewRequest(http.MethodGet, "/Videos/12345678-1234-4234-8234-123456789abc/stream", nil)
 		request.Header.Set("Range", "bytes=4-7")
 		handler.ServeHTTP(writer, request)
@@ -167,7 +331,7 @@ func TestRouteTracingPreservesHEADRangeStreamingAndCancellation(t *testing.T) {
 		if writer.flushes != 2 || !writer.fullDuplex || !writer.writeDeadline {
 			t.Fatalf("stream capabilities: flushes=%d fullDuplex=%t deadline=%t", writer.flushes, writer.fullDuplex, writer.writeDeadline)
 		}
-		if strings.Contains(logs.String(), "12345678-1234-4234-8234-123456789abc") || strings.Count(logs.String(), compatRequestCompletedMessage) != 1 {
+		if strings.Contains(logs.String(), "12345678-1234-4234-8234-123456789abc") || strings.Contains(logs.String(), "5678") || strings.Count(logs.String(), compatRequestCompletedMessage) != 1 {
 			t.Fatalf("unexpected stream logs: %s", logs.String())
 		}
 	})
@@ -307,6 +471,15 @@ func tracedHandler(t *testing.T, logger *slog.Logger, route Route, implementatio
 	handler, err := New(Dependencies{Logger: logger, Handlers: map[Route]http.Handler{route: implementation}})
 	if err != nil {
 		t.Fatalf("New traced handler: %v", err)
+	}
+	return handler
+}
+
+func tracedDebugHandler(t *testing.T, logger *slog.Logger, route Route, implementation http.Handler) http.Handler {
+	t.Helper()
+	handler, err := New(Dependencies{Logger: logger, Debug: true, Handlers: map[Route]http.Handler{route: implementation}})
+	if err != nil {
+		t.Fatalf("New debug traced handler: %v", err)
 	}
 	return handler
 }

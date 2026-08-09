@@ -1,0 +1,29 @@
+{
+  "status": 200,
+  "headers": {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+    "X-Content-Type-Options": "nosniff"
+  },
+  "body": {
+    "SearchHints": [
+      {
+        "ItemId": "22222222-2222-4222-8222-222222222222",
+        "Id": "22222222-2222-4222-8222-222222222222",
+        "Name": "Golden Film",
+        "Type": "Movie",
+        "MediaType": "Video",
+        "PrimaryImageTag": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "Artists": [],
+        "ChannelId": null,
+        "PrimaryImageAspectRatio": 0.6666666666666666,
+        "ProductionYear": 2024,
+        "RunTimeTicks": 57000000000,
+        "ProviderIds": {
+          "Imdb": "tt1234567"
+        }
+      }
+    ],
+    "TotalRecordCount": 3
+  }
+}

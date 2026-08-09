@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -234,8 +235,12 @@ func directPlaybackSupported(source Source, inspection MediaInspection, video, a
 	if inspection.Container != "" {
 		container = inspection.Container
 	}
+	if capabilities.AllowDirectPassthrough {
+		return supports(capabilities.StreamingProtocols, source.Protocol) && supportsContainer(capabilities.Containers, container)
+	}
 	return supports(capabilities.StreamingProtocols, source.Protocol) &&
-		mediaProfileSupported(container, video, audio, capabilities) &&
+		containerProfileConditionsSupported(container, inspection, capabilities.ContainerProfiles) &&
+		directMediaProfileSupported(container, video, audio, capabilities) &&
 		videoWithinClientLimits(video, inspection.HDRFormat, capabilities) && audioWithinClientLimits(audio, capabilities)
 }
 
@@ -256,7 +261,7 @@ func remuxSupported(inspection MediaInspection, capabilities Capabilities) bool 
 		return false
 	}
 	if len(inspection.AudioTracks) == 0 {
-		return mediaProfileSupported("mp4", video, nil, capabilities)
+		return processingMediaProfileSupported("mp4", video, nil, capabilities)
 	}
 	return compatibleRemuxAudioTrack(*video, inspection.AudioTracks, capabilities) != nil
 }
@@ -270,7 +275,7 @@ func audioTranscodeSupported(inspection MediaInspection, capabilities Capabiliti
 		return false
 	}
 	targetAudio := &MediaTrack{Codec: "aac", Channels: targetAudioChannels(capabilities)}
-	return mediaProfileSupported("mp4", video, targetAudio, capabilities)
+	return processingMediaProfileSupported("mp4", video, targetAudio, capabilities)
 }
 
 func fullTranscodeSupported(capabilities Capabilities) bool {
@@ -279,7 +284,7 @@ func fullTranscodeSupported(capabilities Capabilities) bool {
 	}
 	video := &MediaTrack{Codec: "h264"}
 	audio := &MediaTrack{Codec: "aac", Channels: targetAudioChannels(capabilities)}
-	return mediaProfileSupported("mp4", video, audio, capabilities)
+	return processingMediaProfileSupported("mp4", video, audio, capabilities)
 }
 
 func processingDecision(reason, videoAction, audioAction string, inspection MediaInspection, capabilities Capabilities, toneMap bool) *PlaybackDecision {
@@ -339,11 +344,38 @@ func videoWithinClientLimits(video *MediaTrack, hdrFormat string, capabilities C
 		(video.BitrateKbps <= 0 || video.BitrateKbps > capabilities.MaximumVideoBitrateKbps) {
 		return false
 	}
-	return clientSupportsHDR(hdrFormat, capabilities)
+	return videoCodecConditionsSupported(video, capabilities) && clientSupportsVideoHDR(video, hdrFormat, capabilities)
 }
 
 func clientSupportsHDR(format string, capabilities Capabilities) bool {
 	return format == "" || len(capabilities.HDRFormats) > 0 && supports(capabilities.HDRFormats, format)
+}
+
+func clientSupportsVideoHDR(video *MediaTrack, format string, capabilities Capabilities) bool {
+	if clientSupportsHDR(format, capabilities) {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "hdr10", "hlg":
+		for _, profile := range capabilities.MediaProfiles {
+			if profile.DirectPlay && profile.SupportsNonDolbyVisionHDR && video != nil && normalizedCodec(profile.VideoCodec) == normalizedCodec(video.Codec) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func videoCodecConditionsSupported(video *MediaTrack, capabilities Capabilities) bool {
+	for _, profile := range capabilities.MediaProfiles {
+		if !profile.DirectPlay || video == nil || normalizedCodec(profile.VideoCodec) != normalizedCodec(video.Codec) {
+			continue
+		}
+		if !mediaProfileVideoConditionsSupported(profile, video) {
+			return false
+		}
+	}
+	return true
 }
 
 func audioWithinClientLimits(audio *MediaTrack, capabilities Capabilities) bool {
@@ -375,11 +407,151 @@ func requestedProcessingMode(values []string, mode string) bool {
 
 func directMediaSupported(inspection MediaInspection, capabilities Capabilities) bool {
 	video := primaryTrack(inspection.VideoTracks)
-	return video != nil && mediaProfileSupported(inspection.Container, video, primaryTrack(inspection.AudioTracks), capabilities) &&
+	return video != nil && containerProfileConditionsSupported(inspection.Container, inspection, capabilities.ContainerProfiles) &&
+		directMediaProfileSupported(inspection.Container, video, primaryTrack(inspection.AudioTracks), capabilities) &&
 		videoWithinClientLimits(video, inspection.HDRFormat, capabilities) && audioWithinClientLimits(primaryTrack(inspection.AudioTracks), capabilities)
 }
 
+func containerProfileConditionsSupported(container string, inspection MediaInspection, profiles []ContainerProfile) bool {
+	video := primaryTrack(inspection.VideoTracks)
+	for _, profile := range profiles {
+		if !mediaProfileContainerMatches(profile.ContainersCSV, container) {
+			continue
+		}
+		for _, condition := range profile.Conditions {
+			if !containerConditionSatisfied(condition, video, inspection) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func containerConditionSatisfied(condition ProfileCondition, video *MediaTrack, inspection MediaInspection) bool {
+	property := strings.ToLower(strings.TrimSpace(condition.Property))
+	switch property {
+	case "width":
+		return numericConditionSatisfied(condition, trackInteger(video, func(track *MediaTrack) int64 { return int64(track.Width) }))
+	case "height":
+		return numericConditionSatisfied(condition, trackInteger(video, func(track *MediaTrack) int64 { return int64(track.Height) }))
+	case "videolevel":
+		return numericConditionSatisfied(condition, trackInteger(video, func(track *MediaTrack) int64 { return int64(track.Level) }))
+	case "videobitrate":
+		return numericConditionSatisfied(condition, trackInteger(video, func(track *MediaTrack) int64 { return int64(track.BitrateKbps) * 1000 }))
+	case "videoprofile":
+		current, known := trackString(video, func(track *MediaTrack) string { return track.Profile })
+		return stringConditionSatisfied(condition, current, known)
+	case "videorangetype":
+		current, known := trackString(video, func(track *MediaTrack) string { return track.VideoRangeType })
+		return stringConditionSatisfied(condition, current, known)
+	case "numstreams":
+		return numericConditionSatisfied(condition, knownInteger(int64(len(inspection.VideoTracks)+len(inspection.AudioTracks)+len(inspection.SubtitleTracks))))
+	case "numvideostreams":
+		return numericConditionSatisfied(condition, knownInteger(int64(len(inspection.VideoTracks))))
+	case "numaudiostreams":
+		return numericConditionSatisfied(condition, knownInteger(int64(len(inspection.AudioTracks))))
+	default:
+		return false
+	}
+}
+
+type conditionInteger struct {
+	value int64
+	known bool
+}
+
+func knownInteger(value int64) conditionInteger {
+	return conditionInteger{value: value, known: true}
+}
+
+func trackInteger(track *MediaTrack, value func(*MediaTrack) int64) conditionInteger {
+	if track == nil {
+		return conditionInteger{}
+	}
+	current := value(track)
+	return conditionInteger{value: current, known: current > 0}
+}
+
+func trackString(track *MediaTrack, value func(*MediaTrack) string) (string, bool) {
+	if track == nil {
+		return "", false
+	}
+	current := strings.TrimSpace(value(track))
+	return current, current != ""
+}
+
+func numericConditionSatisfied(condition ProfileCondition, current conditionInteger) bool {
+	if !current.known {
+		return !condition.Required
+	}
+	operator := strings.ToLower(strings.TrimSpace(condition.Condition))
+	if operator == "equalsany" {
+		for _, candidate := range strings.Split(condition.Value, "|") {
+			expected, err := strconv.ParseInt(strings.TrimSpace(candidate), 10, 64)
+			if err == nil && current.value == expected {
+				return true
+			}
+		}
+		return false
+	}
+	expected, err := strconv.ParseInt(strings.TrimSpace(condition.Value), 10, 64)
+	if err != nil {
+		return false
+	}
+	switch operator {
+	case "equals":
+		return current.value == expected
+	case "notequals":
+		return current.value != expected
+	case "lessthanequal":
+		return current.value <= expected
+	case "greaterthanequal":
+		return current.value >= expected
+	default:
+		return false
+	}
+}
+
+func stringConditionSatisfied(condition ProfileCondition, current string, known bool) bool {
+	if !known {
+		return !condition.Required
+	}
+	switch strings.ToLower(strings.TrimSpace(condition.Condition)) {
+	case "equals":
+		return strings.EqualFold(current, strings.TrimSpace(condition.Value))
+	case "notequals":
+		return !strings.EqualFold(current, strings.TrimSpace(condition.Value))
+	case "equalsany":
+		for _, expected := range strings.Split(condition.Value, "|") {
+			if strings.EqualFold(current, strings.TrimSpace(expected)) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+const (
+	mediaProfileAny = iota
+	mediaProfileDirect
+	mediaProfileTranscoding
+)
+
 func mediaProfileSupported(container string, video, audio *MediaTrack, capabilities Capabilities) bool {
+	return mediaProfileSupportedFor(container, video, audio, capabilities, mediaProfileAny, true)
+}
+
+func directMediaProfileSupported(container string, video, audio *MediaTrack, capabilities Capabilities) bool {
+	return mediaProfileSupportedFor(container, video, audio, capabilities, mediaProfileDirect, true)
+}
+
+func processingMediaProfileSupported(container string, video, audio *MediaTrack, capabilities Capabilities) bool {
+	return mediaProfileSupportedFor(container, video, audio, capabilities, mediaProfileTranscoding, false)
+}
+
+func mediaProfileSupportedFor(container string, video, audio *MediaTrack, capabilities Capabilities, profileUse int, applyConditions bool) bool {
 	container = strings.ToLower(strings.TrimSpace(container))
 	if container == "" {
 		return false
@@ -390,32 +562,89 @@ func mediaProfileSupported(container string, video, audio *MediaTrack, capabilit
 			(audio == nil || supportsCodec(capabilities.AudioCodecs, audio.Codec))
 	}
 	for _, profile := range capabilities.MediaProfiles {
-		if container != "" && !mediaProfileContainerMatches(profile.Container, container) {
+		hasExplicitUse := profile.DirectPlay || profile.Transcoding
+		if hasExplicitUse && (profileUse == mediaProfileDirect && !profile.DirectPlay || profileUse == mediaProfileTranscoding && !profile.Transcoding) {
+			continue
+		}
+		containers := profile.Container
+		if profile.ContainersCSV != "" {
+			containers = profile.ContainersCSV
+		}
+		if container != "" && !mediaProfileContainerMatches(containers, container) {
 			continue
 		}
 		if video == nil || normalizedCodec(profile.VideoCodec) != normalizedCodec(video.Codec) {
 			continue
 		}
-		if audio == nil || normalizedCodec(profile.AudioCodec) == normalizedCodec(audio.Codec) {
+		if applyConditions && !mediaProfileVideoConditionsSupported(profile, video) {
+			continue
+		}
+		audioCodecs := profile.AudioCodec
+		if profile.AudioCodecsCSV != "" {
+			audioCodecs = profile.AudioCodecsCSV
+		}
+		if audio == nil || mediaProfileCodecMatches(audioCodecs, audio.Codec) {
 			return true
 		}
 	}
 	return false
 }
 
+func mediaProfileVideoConditionsSupported(profile MediaProfile, video *MediaTrack) bool {
+	if video == nil || profile.RequiredConditionUnknown {
+		return false
+	}
+	if profile.MaximumVideoLevel > 0 {
+		if video.Level <= 0 {
+			if profile.VideoLevelRequired {
+				return false
+			}
+		} else if video.Level > profile.MaximumVideoLevel {
+			return false
+		}
+	}
+	if profile.ExcludedVideoRange != "" {
+		videoRange := strings.TrimSpace(video.VideoRangeType)
+		if videoRange == "" {
+			if profile.VideoRangeRequired {
+				return false
+			}
+		} else if strings.EqualFold(videoRange, profile.ExcludedVideoRange) {
+			return false
+		}
+	}
+	return true
+}
+
 func mediaProfileContainerMatches(profile, candidate string) bool {
-	profile = strings.ToLower(strings.TrimSpace(profile))
 	candidate = strings.ToLower(strings.TrimSpace(candidate))
 	if candidate == "m4v" || candidate == "mov" {
 		candidate = "mp4"
+	} else if candidate == "m3u8" {
+		candidate = "hls"
 	}
-	return profile == candidate
+	for _, value := range strings.Split(profile, ",") {
+		if strings.ToLower(strings.TrimSpace(value)) == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func mediaProfileCodecMatches(profile, candidate string) bool {
+	candidate = normalizedCodec(candidate)
+	for _, value := range strings.Split(profile, ",") {
+		if normalizedCodec(value) == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func compatibleRemuxAudioTrack(video MediaTrack, tracks []MediaTrack, capabilities Capabilities) *MediaTrack {
 	for index := range tracks {
 		if mp4RemuxableAudio(tracks[index].Codec) && audioWithinClientLimits(&tracks[index], capabilities) &&
-			mediaProfileSupported("mp4", &video, &tracks[index], capabilities) {
+			processingMediaProfileSupported("mp4", &video, &tracks[index], capabilities) {
 			return &tracks[index]
 		}
 	}

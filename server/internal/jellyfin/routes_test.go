@@ -84,10 +84,20 @@ func TestDispatcherServesEveryRouteAtRootAndEmby(t *testing.T) {
 			t.Errorf("route %s calls = %d, want 2", definition.Route, calls[definition.Route])
 		}
 	}
-	thumbResponse := httptest.NewRecorder()
-	mux.ServeHTTP(thumbResponse, httptest.NewRequest(http.MethodGet, "/Items/"+routeTestUUID+"/Images/Thumb", nil))
-	if thumbResponse.Code != http.StatusNoContent || calls[RouteImage] != 3 {
-		t.Fatalf("Thumb image route status=%d calls=%d", thumbResponse.Code, calls[RouteImage])
+	for _, imageType := range compatImageTypes {
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/Items/"+routeTestUUID+"/Images/"+imageType, nil))
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("%s image route status=%d", imageType, response.Code)
+		}
+		indexedResponse := httptest.NewRecorder()
+		mux.ServeHTTP(indexedResponse, httptest.NewRequest(http.MethodGet, "/Items/"+routeTestUUID+"/Images/"+imageType+"/0", nil))
+		if indexedResponse.Code != http.StatusNoContent {
+			t.Fatalf("indexed %s image route status=%d", imageType, indexedResponse.Code)
+		}
+	}
+	if calls[RouteImage] != 2+len(compatImageTypes) || calls[RouteIndexedImage] != 2+len(compatImageTypes) {
+		t.Fatalf("image route calls=%d indexed=%d", calls[RouteImage], calls[RouteIndexedImage])
 	}
 }
 
@@ -243,7 +253,7 @@ func TestMalformedWildcardPathsAreRejectedBeforeHandler(t *testing.T) {
 		"/Users/not-a-uuid/Images/Primary",
 		"/Users/" + routeTestUUID + "/Items/not-a-uuid",
 		"/Shows/not-a-uuid/Seasons",
-		"/Items/" + routeTestUUID + "/Images/Logo",
+		"/Items/" + routeTestUUID + "/Images/Unknown",
 		"/Items/" + routeTestUUID + "/Images/Primary/1",
 		"/Videos/" + routeTestUUID + "/stream.mp4!",
 		"/Videos/" + routeTestUUID + "/" + routeTestUUID + "/Subtitles/04/Stream.vtt",
@@ -304,12 +314,13 @@ func TestMalformedSelectorsNeverAuthenticate(t *testing.T) {
 }
 
 func TestMediaDeliveryDispatchPrecedence(t *testing.T) {
-	seen := make([]Route, 0, 36)
-	handlers := make(map[Route]http.Handler, 18)
+	seen := make([]Route, 0, 40)
+	handlers := make(map[Route]http.Handler, 20)
 	for _, route := range []Route{
 		RouteStream, RouteStreamHead, RouteContainerStream, RouteContainerStreamHead, RouteMasterPlaylist, RouteMasterPlaylistHead,
 		RouteMainPlaylist, RouteMainPlaylistHead, RouteHLSSegment, RouteHLSSegmentHead, RouteLegacyHLSSegment, RouteLegacyHLSSegmentHead,
 		RouteSubtitleStream, RouteSubtitleStreamHead, RouteSubtitleStreamAt, RouteSubtitleStreamAtHead, RouteItemDownload, RouteItemDownloadHead,
+		RouteTrickplayImage, RouteTrickplayImageHead,
 	} {
 		route := route
 		handlers[route] = http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -329,6 +340,9 @@ func TestMediaDeliveryDispatchPrecedence(t *testing.T) {
 					(route == RouteSubtitleStreamAt || route == RouteSubtitleStreamAtHead) && request.PathValue("startPositionTicks") != "900000000" {
 					t.Errorf("subtitle selectors media=%q index=%q ticks=%q format=%q", request.PathValue("mediaSourceId"), request.PathValue("subtitleIndex"), request.PathValue("startPositionTicks"), request.PathValue("format"))
 				}
+			}
+			if isTrickplayRoute(route) && (request.PathValue("width") != "320" || request.PathValue("index") != "0") {
+				t.Errorf("trickplay selectors width=%q index=%q", request.PathValue("width"), request.PathValue("index"))
 			}
 			response.WriteHeader(http.StatusNoContent)
 		})
@@ -362,6 +376,8 @@ func TestMediaDeliveryDispatchPrecedence(t *testing.T) {
 			{http.MethodHead, "/Videos/" + routeTestUUID + "/" + routeTestUUID + "/Subtitles/4/Stream.vtt", RouteSubtitleStreamHead},
 			{http.MethodGet, "/Videos/" + routeTestUUID + "/" + routeTestUUID + "/Subtitles/4/900000000/Stream.vtt", RouteSubtitleStreamAt},
 			{http.MethodHead, "/Videos/" + routeTestUUID + "/" + routeTestUUID + "/Subtitles/4/900000000/Stream.vtt", RouteSubtitleStreamAtHead},
+			{http.MethodGet, "/Videos/" + routeTestUUID + "/Trickplay/320/0.jpg", RouteTrickplayImage},
+			{http.MethodHead, "/Videos/" + routeTestUUID + "/Trickplay/320/0.jpg", RouteTrickplayImageHead},
 		} {
 			response := httptest.NewRecorder()
 			mux.ServeHTTP(response, httptest.NewRequest(test.method, prefix+test.path, nil))
@@ -500,8 +516,10 @@ func routeTestPath(definition RouteSpec) string {
 	path = strings.ReplaceAll(path, "{subtitleIndex}", "4")
 	path = strings.ReplaceAll(path, "{startPositionTicks}", "900000000")
 	path = strings.ReplaceAll(path, "{format}", "vtt")
+	path = strings.ReplaceAll(path, "{displayPreferencesId}", "home")
 	path = strings.ReplaceAll(path, "{id}", routeTestUUID)
 	path = strings.ReplaceAll(path, "{type}", "Primary")
+	path = strings.ReplaceAll(path, "{width}", "320")
 	path = strings.ReplaceAll(path, "{index}", "0")
 	path = strings.ReplaceAll(path, "{container}", "mp4")
 	return path

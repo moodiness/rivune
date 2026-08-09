@@ -58,6 +58,8 @@ type artworkSnapshot struct {
 	PosterURL     string         `json:"posterUrl,omitempty"`
 	BackdropURL   string         `json:"backdropUrl,omitempty"`
 	LogoURL       string         `json:"logoUrl,omitempty"`
+	BannerURL     string         `json:"bannerUrl,omitempty"`
+	ArtURL        string         `json:"artUrl,omitempty"`
 	SeasonPosters map[int]string `json:"seasonPosters,omitempty"`
 }
 

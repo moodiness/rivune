@@ -30,6 +30,7 @@ const (
 	sequenceSeriesID              = "74000000-0000-4000-8000-000000000004"
 	sequenceSeasonID              = "75000000-0000-4000-8000-000000000005"
 	sequenceEpisodeID             = "76000000-0000-4000-8000-000000000006"
+	sequenceNextEpisodeID         = "76000000-0000-4000-8000-000000000016"
 	sequenceProviderResource      = "PROVIDER_RESOURCE_SENTINEL"
 	sequenceProviderSource        = "PROVIDER_SOURCE_REF_SENTINEL"
 	sequenceProviderHeader        = "PROVIDER_HEADER_SECRET_SENTINEL"
@@ -40,6 +41,7 @@ type sequenceAuthentication struct {
 	now      time.Time
 	sessions map[string]AuthenticatedSession
 	revoked  map[string]bool
+	issued   byte
 }
 
 func (authentication *sequenceAuthentication) Login(_ context.Context, input CompatLoginInput) (LoginResult, error) {
@@ -49,14 +51,12 @@ func (authentication *sequenceAuthentication) Login(_ context.Context, input Com
 	var token, sessionID, profileID, profileName, nativeSessionID, userID string
 	switch {
 	case strings.EqualFold(input.Username, sequencePrimaryCredentialID):
-		token = compatTestToken(31)
 		sessionID = "77000000-0000-4000-8000-000000000007"
 		profileID = sequencePrimaryProfileID
 		profileName = "Main"
 		nativeSessionID = "78000000-0000-4000-8000-000000000008"
 		userID = "79000000-0000-4000-8000-000000000009"
 	case strings.EqualFold(input.Username, sequenceSecondaryCredentialID):
-		token = compatTestToken(32)
 		sessionID = "7a000000-0000-4000-8000-00000000000a"
 		profileID = sequenceSecondaryProfileID
 		profileName = "Guest"
@@ -65,6 +65,8 @@ func (authentication *sequenceAuthentication) Login(_ context.Context, input Com
 	default:
 		return LoginResult{}, ErrInvalidCompatLogin
 	}
+	authentication.issued++
+	token = compatTestToken(30 + authentication.issued)
 	principal := auth.Principal{
 		SessionID:       nativeSessionID,
 		UserID:          userID,
@@ -165,12 +167,39 @@ func (state *sequenceWatchstate) ClearProgress(ctx context.Context, principal au
 	return state.forPrincipal(principal).ClearProgress(ctx, principal, itemID, expectedVersion)
 }
 
-func (state *sequenceWatchstate) ListResume(ctx context.Context, principal auth.Principal, offset, limit int) (watchstate.ContinueItemsPage, error) {
-	return state.forPrincipal(principal).ListResume(ctx, principal, offset, limit)
+func (state *sequenceWatchstate) ListResume(_ context.Context, principal auth.Principal, offset, limit int) (watchstate.ContinueItemsPage, error) {
+	service := state.forPrincipal(principal)
+	items := make([]watchstate.ContinueItem, 0, len(service.progress))
+	for itemID, progress := range service.progress {
+		if progress.PositionSeconds <= 0 || progress.Completed {
+			continue
+		}
+		items = append(items, watchstate.ContinueItem{TitleID: itemID, PositionSeconds: progress.PositionSeconds, DurationSeconds: progress.DurationSeconds, Version: progress.Version, LastWatchedAt: progress.LastWatchedAt})
+	}
+	slices.SortFunc(items, func(left, right watchstate.ContinueItem) int {
+		if order := right.LastWatchedAt.Compare(left.LastWatchedAt); order != 0 {
+			return order
+		}
+		return strings.Compare(left.TitleID, right.TitleID)
+	})
+	total := len(items)
+	start, end := min(offset, total), min(offset+limit, total)
+	return watchstate.ContinueItemsPage{Items: items[start:end], Offset: offset, Limit: limit, Total: total}, nil
 }
 
-func (state *sequenceWatchstate) ListNextUp(ctx context.Context, principal auth.Principal, seriesID string, offset, limit int) (watchstate.ContinueItemsPage, error) {
-	return state.forPrincipal(principal).ListNextUp(ctx, principal, seriesID, offset, limit)
+func (state *sequenceWatchstate) ListNextUp(_ context.Context, principal auth.Principal, seriesID string, offset, limit int) (watchstate.ContinueItemsPage, error) {
+	service := state.forPrincipal(principal)
+	items := []watchstate.ContinueItem{}
+	if completed, ok := service.progress[sequenceEpisodeID]; ok && completed.Completed && (seriesID == "" || seriesID == sequenceSeriesID) {
+		seasonNumber, episodeNumber := 1, 4
+		items = append(items, watchstate.ContinueItem{
+			TitleID: sequenceNextEpisodeID, SeriesID: sequenceSeriesID, SeasonID: sequenceSeasonID,
+			SeasonNumber: &seasonNumber, EpisodeNumber: &episodeNumber, LastWatchedAt: completed.LastWatchedAt,
+		})
+	}
+	total := len(items)
+	start, end := min(offset, total), min(offset+limit, total)
+	return watchstate.ContinueItemsPage{Items: items[start:end], Offset: offset, Limit: limit, Total: total}, nil
 }
 
 type sequenceCatalog struct {
@@ -200,7 +229,7 @@ func (catalog *sequenceCatalog) ListCatalogItems(_ context.Context, principal au
 	}
 	filtered := make([]watchstate.CatalogTitle, 0, len(catalog.order))
 	for _, itemID := range catalog.order {
-		item := catalog.items[itemID]
+		item := catalog.withProgress(principal, catalog.items[itemID])
 		if len(query.MediaTypes) > 0 && !slices.Contains(query.MediaTypes, item.MediaType) {
 			continue
 		}
@@ -219,7 +248,12 @@ func (catalog *sequenceCatalog) ListCatalogItems(_ context.Context, principal au
 		if len(query.IDs) > 0 && !slices.Contains(query.IDs, item.ID) {
 			continue
 		}
-		filtered = append(filtered, catalog.withProgress(principal, item))
+		played := item.Progress != nil && item.Progress.Completed
+		resumable := item.Progress != nil && item.Progress.PositionSeconds > 0 && !item.Progress.Completed
+		if query.Favorite != nil && item.Favorite != *query.Favorite || query.Played != nil && played != *query.Played || query.Resumable != nil && resumable != *query.Resumable {
+			continue
+		}
+		filtered = append(filtered, item)
 	}
 	total := len(filtered)
 	start := min(query.Offset, total)
@@ -229,6 +263,7 @@ func (catalog *sequenceCatalog) ListCatalogItems(_ context.Context, principal au
 
 func (catalog *sequenceCatalog) withProgress(principal auth.Principal, item watchstate.CatalogTitle) watchstate.CatalogTitle {
 	service := catalog.watchstate.forPrincipal(principal)
+	item.Favorite = service.favorites[item.ID]
 	progress, exists := service.progress[item.ID]
 	if !exists {
 		item.Progress = nil
@@ -414,8 +449,8 @@ func TestGETPlaybackInfoThenRepeatedUserDetailsAndStaticStream(t *testing.T) {
 			!strings.Contains(item.MediaSources[0].DirectStreamUrl, "PlaySessionId="+url.QueryEscape(info.PlaySessionId)) {
 			t.Fatalf("user detail %d omitted reusable media selection: %+v", index+1, item)
 		}
-		if len(fixture.handler.playSessions.entries) != sessionsBeforeDetails || fixture.playback.openCalls != 1 {
-			t.Fatalf("user detail %d duplicated playback state: sessions=%d want=%d opens=%d", index+1, len(fixture.handler.playSessions.entries), sessionsBeforeDetails, fixture.playback.openCalls)
+		if len(fixture.handler.playSessions.entries) != sessionsBeforeDetails || fixture.playback.openCalls != 1 || len(fixture.playback.sourceInputs) != 1 {
+			t.Fatalf("user detail %d duplicated playback state: sessions=%d want=%d sources=%d opens=%d", index+1, len(fixture.handler.playSessions.entries), sessionsBeforeDetails, len(fixture.playback.sourceInputs), fixture.playback.openCalls)
 		}
 	}
 
@@ -447,28 +482,40 @@ func newSequenceHTTPFixture(t *testing.T, prefix, client, tokenHeader, loginHead
 	state := newSequenceWatchstate()
 	posterKey := strings.Repeat("a", 64)
 	posterURL := localizedArtworkPrefix + posterKey
-	seasonIndex, episodeIndex := 1, 3
+	seasonIndex, episodeIndex, nextEpisodeIndex := 1, 3, 4
 	runtimeMinutes := 60
 	items := map[string]watchstate.CatalogTitle{
 		sequenceSeriesID: {
 			ID: sequenceSeriesID, MediaType: "series", Title: "Sequence Series", Released: "2025-01-02",
-			PosterURL: posterURL, Genres: []string{"Drama"}, InLibrary: true, ProviderIDs: map[string]string{"tvdb": "7004"},
+			PosterURL: posterURL, Genres: []string{"Drama"}, InLibrary: true, Favorite: true, ProviderIDs: map[string]string{"tvdb": "7004"},
 		},
 		sequenceSeasonID: {
 			ID: sequenceSeasonID, MediaType: "season", ParentID: sequenceSeriesID, SeriesID: sequenceSeriesID,
 			Title: "Season One", SeriesTitle: "Sequence Series", Ordinal: &seasonIndex,
-			PosterURL: posterURL, Genres: []string{}, InLibrary: true, ProviderIDs: map[string]string{"tvdb": "7005"},
+			PosterURL: posterURL, Genres: []string{}, Favorite: true, ProviderIDs: map[string]string{"tvdb": "7005"},
 		},
 		sequenceEpisodeID: {
 			ID: sequenceEpisodeID, MediaType: "episode", ParentID: sequenceSeasonID, SeriesID: sequenceSeriesID, SeasonID: sequenceSeasonID,
 			Title: "Pilot Sequence", SeriesTitle: "Sequence Series", SeasonTitle: "Season One", Ordinal: &episodeIndex, ParentOrdinal: &seasonIndex,
 			Released: "2025-01-03", Overview: "A deterministic compatibility fixture", RuntimeMinutes: &runtimeMinutes,
 			PosterURL: posterURL, BackgroundURL: "https://provider.invalid/backdrop?token=PROVIDER_IMAGE_TOKEN_SENTINEL",
-			Genres: []string{"Drama"}, InLibrary: true, ProviderIDs: map[string]string{"tvdb": "7006"},
+			Genres: []string{"Drama"}, Favorite: true, ProviderIDs: map[string]string{"tvdb": "7006"},
 			ResourceID: sequenceProviderResource, ResourceProvider: "PROVIDER_NAME_SENTINEL", SourceAddonID: "PROVIDER_ADDON_SENTINEL", SourceName: "PROVIDER_SOURCE_NAME_SENTINEL",
+		},
+		sequenceNextEpisodeID: {
+			ID: sequenceNextEpisodeID, MediaType: "episode", ParentID: sequenceSeasonID, SeriesID: sequenceSeriesID, SeasonID: sequenceSeasonID,
+			Title: "Next Sequence", SeriesTitle: "Sequence Series", SeasonTitle: "Season One", Ordinal: &nextEpisodeIndex, ParentOrdinal: &seasonIndex,
+			RuntimeMinutes: &runtimeMinutes, Genres: []string{"Drama"}, ProviderIDs: map[string]string{"tvdb": "7016"},
 		},
 	}
 	catalog := &sequenceCatalog{items: items, order: []string{sequenceSeriesID, sequenceSeasonID, sequenceEpisodeID}, watchstate: state}
+	for _, service := range state.profiles {
+		for itemID, item := range items {
+			if item.Favorite {
+				service.favorites[itemID] = true
+			}
+		}
+	}
 	authentication := &sequenceAuthentication{now: now, sessions: make(map[string]AuthenticatedSession), revoked: make(map[string]bool)}
 	artwork := &artworkDelivery{keys: map[string]string{posterURL: posterKey}, body: []byte("pngbytes")}
 	native := &fakeCompatPlaybackDelivery{
@@ -525,8 +572,8 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	sequenceRequireStatus(t, ping, http.StatusOK)
 	var pingName string
 	sequenceDecode(t, ping, &pingName)
-	if pingName != publicInfo.ServerName {
-		t.Fatalf("system ping name=%q want=%q", pingName, publicInfo.ServerName)
+	if pingName != compatibilityProductName {
+		t.Fatalf("system ping name=%q want=%q", pingName, compatibilityProductName)
 	}
 
 	primaryLogin := fixture.login(t, "login-primary", sequencePrimaryCredentialID)
@@ -589,7 +636,7 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	var seriesPage QueryResult[BaseItemDto]
 	sequenceDecode(t, itemsResponse, &seriesPage)
 	if len(seriesPage.Items) != 1 || seriesPage.TotalRecordCount != 1 || seriesPage.Items[0].Id == "" || seriesPage.Items[0].Type != "Series" || !seriesPage.Items[0].IsFolder ||
-		seriesPage.Items[0].ServerId != publicInfo.Id || seriesPage.Items[0].Path != "" || len(seriesPage.Items[0].MediaSources) != 0 || strings.Contains(itemsResponse.Body.String(), `"MediaSources"`) {
+		seriesPage.Items[0].UserData == nil || !seriesPage.Items[0].UserData.IsFavorite || seriesPage.Items[0].ServerId != publicInfo.Id || seriesPage.Items[0].Path != "" || len(seriesPage.Items[0].MediaSources) != 0 || strings.Contains(itemsResponse.Body.String(), `"MediaSources"`) {
 		t.Fatalf("series page is incomplete or playable: %+v", seriesPage)
 	}
 	seriesID := seriesPage.Items[0].Id
@@ -598,7 +645,7 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	sequenceRequireStatus(t, seasonsResponse, http.StatusOK)
 	var seasons QueryResult[BaseItemDto]
 	sequenceDecode(t, seasonsResponse, &seasons)
-	if len(seasons.Items) != 1 || seasons.Items[0].Id == "" || seasons.Items[0].Type != "Season" || seasons.Items[0].SeriesId != seriesID || seasons.Items[0].IndexNumber == nil {
+	if len(seasons.Items) != 1 || seasons.Items[0].Id == "" || seasons.Items[0].Type != "Season" || seasons.Items[0].SeriesId != seriesID || seasons.Items[0].IndexNumber == nil || seasons.Items[0].UserData == nil || !seasons.Items[0].UserData.IsFavorite {
 		t.Fatalf("season hierarchy is incomplete: %+v", seasons)
 	}
 	seasonID := seasons.Items[0].Id
@@ -608,7 +655,7 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	var episodes QueryResult[BaseItemDto]
 	sequenceDecode(t, episodesResponse, &episodes)
 	sequenceRequireArrayObjectKeys(t, episodesResponse.Body.Bytes(), "Items", 0, "Id", "ServerId", "Name", "Path", "Type", "MediaType", "IsFolder", "IsPlayable", "SeriesId", "SeasonId", "IndexNumber", "ParentIndexNumber", "Genres", "ImageTags", "BackdropImageTags", "UserData", "MediaSources")
-	if len(episodes.Items) != 1 || episodes.Items[0].Id == "" || episodes.Items[0].Type != "Episode" || !episodes.Items[0].IsPlayable || episodes.Items[0].SeriesId != seriesID || episodes.Items[0].SeasonId != seasonID || episodes.Items[0].RunTimeTicks == nil || episodes.Items[0].ImageTags["Primary"] == "" {
+	if len(episodes.Items) != 1 || episodes.Items[0].Id == "" || episodes.Items[0].Type != "Episode" || !episodes.Items[0].IsPlayable || episodes.Items[0].SeriesId != seriesID || episodes.Items[0].SeasonId != seasonID || episodes.Items[0].RunTimeTicks == nil || episodes.Items[0].ImageTags["Primary"] == "" || episodes.Items[0].UserData == nil || !episodes.Items[0].UserData.IsFavorite {
 		t.Fatalf("episode hierarchy DTO is incomplete: %+v", episodes)
 	}
 	requireDeferredMediaSource(t, episodes.Items[0])
@@ -619,11 +666,30 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 	var search SearchHintResult
 	sequenceDecode(t, searchResponse, &search)
 	sequenceRequireObjectKeys(t, searchResponse.Body.Bytes(), "SearchHints", "TotalRecordCount")
-	if len(search.SearchHints) != 1 || search.TotalRecordCount != 1 || search.SearchHints[0].Id != episodeID || search.SearchHints[0].ItemId != episodeID || search.SearchHints[0].Type != "Episode" {
-		t.Fatalf("search did not preserve the returned episode identity: %+v", search)
+	sequenceRequireArrayObjectKeys(t, searchResponse.Body.Bytes(), "SearchHints", 0, "Id", "ItemId", "Name", "Type", "MediaType", "Artists", "ChannelId", "PrimaryImageAspectRatio")
+	if len(search.SearchHints) != 1 || search.TotalRecordCount != 1 || search.SearchHints[0].Id != episodeID || search.SearchHints[0].ItemId != episodeID ||
+		search.SearchHints[0].Type != "Episode" || search.SearchHints[0].Artists == nil || search.SearchHints[0].PrimaryImageAspectRatio != 16.0/9.0 {
+		t.Fatalf("search did not preserve the returned episode identity and shape: %+v", search)
+	}
+	searchID := search.SearchHints[0].ItemId
+
+	detailResponse := fixture.request(t, "search-detail", http.MethodGet, fixture.prefix+"/Users/"+url.PathEscape(user.Id)+"/Items/"+url.PathEscape(searchID), "", primaryToken)
+	sequenceRequireStatus(t, detailResponse, http.StatusOK)
+	var searchedDetail BaseItemDto
+	sequenceDecode(t, detailResponse, &searchedDetail)
+	if searchedDetail.Id != searchID || searchedDetail.Type != "Episode" || !searchedDetail.IsPlayable || searchedDetail.UserData == nil || searchedDetail.UserData.ItemId != searchID {
+		t.Fatalf("search identity was not reusable for detail: %+v", searchedDetail)
 	}
 
-	imagePath := fixture.prefix + "/Items/" + url.PathEscape(episodeID) + "/Images/Primary?api_key=" + url.QueryEscape(primaryToken)
+	userDataResponse := fixture.request(t, "search-user-data", http.MethodGet, fixture.prefix+"/UserItems/"+url.PathEscape(searchID)+"/UserData", "", primaryToken)
+	sequenceRequireStatus(t, userDataResponse, http.StatusOK)
+	var searchedUserData UserItemDataDto
+	sequenceDecode(t, userDataResponse, &searchedUserData)
+	if searchedUserData.ItemId != searchID || searchedUserData.Key != searchID || !searchedUserData.IsFavorite {
+		t.Fatalf("search identity was not reusable for UserData: %+v", searchedUserData)
+	}
+
+	imagePath := fixture.prefix + "/Items/" + url.PathEscape(searchID) + "/Images/Primary?api_key=" + url.QueryEscape(primaryToken)
 	imageGET := fixture.request(t, "image-get", http.MethodGet, imagePath, "", "")
 	sequenceRequireStatus(t, imageGET, http.StatusOK)
 	if imageGET.Body.String() != "pngbytes" || imageGET.Header().Get("Content-Type") != "image/png" || imageGET.Header().Get("Content-Length") != "8" || imageGET.Header().Get("ETag") == "" || imageGET.Header().Get("Location") != "" {
@@ -635,7 +701,7 @@ func (fixture *sequenceHTTPFixture) run(t *testing.T) {
 		t.Fatalf("image HEAD differs from GET metadata: headers=%v body=%q", imageHEAD.Header(), imageHEAD.Body.String())
 	}
 
-	playbackInfoResponse := fixture.request(t, "playback-info", http.MethodGet, fixture.prefix+"/Items/"+url.PathEscape(episodeID)+"/PlaybackInfo?UserId="+url.QueryEscape(user.Id), "", primaryToken)
+	playbackInfoResponse := fixture.request(t, "playback-info", http.MethodGet, fixture.prefix+"/Items/"+url.PathEscape(searchID)+"/PlaybackInfo?UserId="+url.QueryEscape(user.Id), "", primaryToken)
 	sequenceRequireStatus(t, playbackInfoResponse, http.StatusOK)
 	var playbackInfo PlaybackInfoResponse
 	sequenceDecode(t, playbackInfoResponse, &playbackInfo)

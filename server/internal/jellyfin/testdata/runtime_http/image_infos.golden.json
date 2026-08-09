@@ -1,0 +1,26 @@
+{
+  "status": 200,
+  "headers": {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+    "X-Content-Type-Options": "nosniff"
+  },
+  "body": [
+    {
+      "ImageType": "Primary",
+      "ImageIndex": 0,
+      "ImageTag": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "Width": 600,
+      "Height": 900,
+      "Size": 12345
+    },
+    {
+      "ImageType": "Thumb",
+      "ImageIndex": 0,
+      "ImageTag": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "Width": 600,
+      "Height": 900,
+      "Size": 12345
+    }
+  ]
+}

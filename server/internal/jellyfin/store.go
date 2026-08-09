@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -16,18 +17,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
 	compatCredentialPrefix               = "rivune_jf_"
 	compatCredentialBytes                = 32
 	compatAuthenticationOperationTimeout = 5 * time.Second
+	// maximumConcurrentCompatAuthenticationOperations conservatively bounds detached
+	// compatibility credential lookups below the database pool's normal capacity.
+	maximumConcurrentCompatAuthenticationOperations = 16
 )
 
 var (
-	ErrInvalidCompatCredential = errors.New("invalid compatibility credential")
-	ErrInvalidClientIdentity   = errors.New("invalid compatibility client identity")
+	ErrInvalidCompatCredential       = errors.New("invalid compatibility credential")
+	ErrInvalidClientIdentity         = errors.New("invalid compatibility client identity")
+	ErrCompatAuthenticationSaturated = errors.New("compatibility authentication capacity exhausted")
+
+	compatAuthenticationOperations = make(chan struct{}, maximumConcurrentCompatAuthenticationOperations)
 )
 
 type ClientIdentity struct {
@@ -57,16 +63,38 @@ type LinkedPrincipalReloader interface {
 }
 
 type SessionStore struct {
-	pool                  *pgxpool.Pool
-	principals            LinkedPrincipalReloader
-	authenticationFlights singleflight.Group
+	pool                     *pgxpool.Pool
+	principals               LinkedPrincipalReloader
+	authenticationMu         sync.Mutex
+	authenticationFlights    map[string]*compatAuthenticationFlight
+	authenticationOperations chan struct{}
+}
+
+type compatAuthenticationFlight struct {
+	key     string
+	ctx     context.Context
+	cancel  context.CancelFunc
+	done    chan struct{}
+	result  compatAuthenticationResult
+	waiters int
+	running bool
+}
+
+type compatAuthenticationResult struct {
+	session AuthenticatedSession
+	err     error
 }
 
 func NewSessionStore(pool *pgxpool.Pool, principals LinkedPrincipalReloader) (*SessionStore, error) {
 	if pool == nil || principals == nil {
 		return nil, fmt.Errorf("compatibility session store dependencies are required")
 	}
-	return &SessionStore{pool: pool, principals: principals}, nil
+	return &SessionStore{
+		pool:                     pool,
+		principals:               principals,
+		authenticationFlights:    make(map[string]*compatAuthenticationFlight),
+		authenticationOperations: compatAuthenticationOperations,
+	}, nil
 }
 
 func (s *SessionStore) Issue(ctx context.Context, principal auth.Principal, profileID string, client ClientIdentity, expiresAt time.Time) (CompatCredential, error) {
@@ -136,47 +164,97 @@ func (s *SessionStore) Authenticate(ctx context.Context, token string) (Authenti
 	if !ok {
 		return AuthenticatedSession{}, ErrInvalidCompatCredential
 	}
-	result := s.authenticationFlights.DoChan(string(digest[:]), func() (any, error) {
-		operationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), compatAuthenticationOperationTimeout)
-		defer cancel()
+	return s.authenticateSingleflight(ctx, string(digest[:]), func(operationContext context.Context) (AuthenticatedSession, error) {
 		return s.authenticateDigest(operationContext, digest)
 	})
-	select {
-	case <-ctx.Done():
-		return AuthenticatedSession{}, ctx.Err()
-	case completed := <-result:
-		if completed.Err != nil {
-			return AuthenticatedSession{}, completed.Err
-		}
-		session, valid := completed.Val.(AuthenticatedSession)
-		if !valid {
-			return AuthenticatedSession{}, errors.New("invalid compatibility authentication flight result")
-		}
-		return session, nil
-	}
 }
 
 func (s *SessionStore) AuthenticateSession(ctx context.Context, sessionID string) (AuthenticatedSession, error) {
 	if _, err := parseUUID(sessionID); err != nil {
 		return AuthenticatedSession{}, ErrInvalidCompatCredential
 	}
-	result := s.authenticationFlights.DoChan("session:"+sessionID, func() (any, error) {
-		operationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), compatAuthenticationOperationTimeout)
-		defer cancel()
+	return s.authenticateSingleflight(ctx, "session:"+sessionID, func(operationContext context.Context) (AuthenticatedSession, error) {
 		return s.authenticateSessionID(operationContext, sessionID)
 	})
+}
+
+func (s *SessionStore) authenticateSingleflight(
+	ctx context.Context,
+	key string,
+	operation func(context.Context) (AuthenticatedSession, error),
+) (AuthenticatedSession, error) {
+	flight, owner, err := s.joinAuthenticationFlight(ctx, key)
+	if err != nil {
+		return AuthenticatedSession{}, err
+	}
+	if owner {
+		go s.runAuthenticationFlight(flight, operation)
+	}
 	select {
 	case <-ctx.Done():
+		s.leaveAuthenticationFlight(flight)
 		return AuthenticatedSession{}, ctx.Err()
-	case completed := <-result:
-		if completed.Err != nil {
-			return AuthenticatedSession{}, completed.Err
-		}
-		session, valid := completed.Val.(AuthenticatedSession)
-		if !valid {
-			return AuthenticatedSession{}, errors.New("invalid compatibility session authentication flight result")
-		}
-		return session, nil
+	case <-flight.done:
+		s.leaveAuthenticationFlight(flight)
+		return flight.result.session, flight.result.err
+	}
+}
+
+func (s *SessionStore) joinAuthenticationFlight(ctx context.Context, key string) (*compatAuthenticationFlight, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	s.authenticationMu.Lock()
+	defer s.authenticationMu.Unlock()
+	if flight := s.authenticationFlights[key]; flight != nil {
+		flight.waiters++
+		return flight, false, nil
+	}
+	select {
+	case s.authenticationOperations <- struct{}{}:
+	default:
+		return nil, false, ErrCompatAuthenticationSaturated
+	}
+	operationContext, cancel := context.WithTimeout(context.Background(), compatAuthenticationOperationTimeout)
+	flight := &compatAuthenticationFlight{
+		key: key, ctx: operationContext, cancel: cancel, done: make(chan struct{}), waiters: 1, running: true,
+	}
+	s.authenticationFlights[key] = flight
+	return flight, true, nil
+}
+
+func (s *SessionStore) runAuthenticationFlight(
+	flight *compatAuthenticationFlight,
+	operation func(context.Context) (AuthenticatedSession, error),
+) {
+	if err := flight.ctx.Err(); err != nil {
+		flight.result.err = err
+	} else {
+		flight.result.session, flight.result.err = operation(flight.ctx)
+	}
+	s.authenticationMu.Lock()
+	flight.running = false
+	if s.authenticationFlights[flight.key] == flight {
+		delete(s.authenticationFlights, flight.key)
+	}
+	s.authenticationMu.Unlock()
+	flight.cancel()
+	<-s.authenticationOperations
+	close(flight.done)
+}
+
+func (s *SessionStore) leaveAuthenticationFlight(flight *compatAuthenticationFlight) {
+	s.authenticationMu.Lock()
+	defer s.authenticationMu.Unlock()
+	if flight.waiters > 0 {
+		flight.waiters--
+	}
+	if flight.waiters != 0 || !flight.running {
+		return
+	}
+	flight.cancel()
+	if s.authenticationFlights[flight.key] == flight {
+		delete(s.authenticationFlights, flight.key)
 	}
 }
 
@@ -270,6 +348,22 @@ func (s *SessionStore) RevokeByToken(ctx context.Context, token, reason string) 
 	}
 	if command.RowsAffected() != 1 {
 		return ErrInvalidCompatCredential
+	}
+	return nil
+}
+
+func (s *SessionStore) RevokeAllActive(ctx context.Context, reason string) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("compatibility session store database is required")
+	}
+	reason = normalizeRevocationReason(reason)
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE jellyfin_compat_sessions
+		SET revoked_at = now(),
+		    revoked_reason = $1
+		WHERE revoked_at IS NULL
+	`, reason); err != nil {
+		return fmt.Errorf("revoke active compatibility sessions: %w", err)
 	}
 	return nil
 }

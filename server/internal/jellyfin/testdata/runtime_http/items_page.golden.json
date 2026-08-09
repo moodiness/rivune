@@ -1,0 +1,47 @@
+{
+  "status": 200,
+  "headers": {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+    "X-Content-Type-Options": "nosniff"
+  },
+  "body": {
+    "Items": [
+      {
+        "Id": "22222222-2222-4222-8222-222222222222",
+        "ServerId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "Name": "Golden Film",
+        "LocationType": "FileSystem",
+        "Type": "Movie",
+        "MediaType": "Video",
+        "IsFolder": false,
+        "IsPlayable": true,
+        "CanDownload": true,
+        "Overview": "Small deterministic fixture.",
+        "PremiereDate": "2024-02-03T00:00:00Z",
+        "ProductionYear": 2024,
+        "RunTimeTicks": 57000000000,
+        "Genres": [
+          "Drama"
+        ],
+        "ProviderIds": {
+          "Imdb": "tt1234567"
+        },
+        "ImageTags": {
+          "Primary": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "BackdropImageTags": [],
+        "UserData": {
+          "PlaybackPositionTicks": 0,
+          "PlayCount": 0,
+          "IsFavorite": false,
+          "Played": false,
+          "Key": "22222222-2222-4222-8222-222222222222",
+          "ItemId": "22222222-2222-4222-8222-222222222222"
+        }
+      }
+    ],
+    "TotalRecordCount": 3,
+    "StartIndex": 1
+  }
+}

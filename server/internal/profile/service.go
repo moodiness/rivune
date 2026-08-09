@@ -464,6 +464,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 	current.AccessTimezone = s.defaultTimezone
 	current.CanManage = true
 	oldCategoryID := current.CategoryID
+	wasEnabled := current.Enabled
 	categoryChanged := input.CategoryID != nil && *input.CategoryID != current.CategoryID
 	if categoryChanged {
 		err := tx.QueryRow(ctx, `
@@ -512,6 +513,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 	if err := validateAccess(current); err != nil {
 		return Profile{}, err
 	}
+	disabledTransition := wasEnabled && !current.Enabled
 	if _, err := tx.Exec(ctx, `
 		UPDATE profiles
 		SET category_id = $2::uuid, name = $3, is_child = $4, pin_hash = $5, enabled = $6,
@@ -544,25 +546,65 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 			return Profile{}, err
 		}
 	}
-	if categoryChanged {
+	if disabledTransition {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, current.ID); err != nil {
+			return Profile{}, fmt.Errorf("lock disabled profile credentials: %w", err)
+		}
 		if _, err := tx.Exec(ctx, `
-			UPDATE auth_sessions
-			SET revoked_at = COALESCE(revoked_at, now()),
-			    revoked_reason = COALESCE(revoked_reason, 'profile_category_changed'),
-			    active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
-			WHERE active_profile_id::text = $1
-			  AND authorization_scope = 'category'
+			UPDATE profile_jellyfin_credentials
+			SET password_hash = NULL,
+			    generation = generation + 1,
+			    revoked_at = now()
+			WHERE profile_id = $1::uuid
 			  AND revoked_at IS NULL
 		`, current.ID); err != nil {
-			return Profile{}, fmt.Errorf("revoke changed profile category sessions: %w", err)
+			return Profile{}, fmt.Errorf("revoke disabled profile credential: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE auth_sessions
-			SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
-			WHERE active_profile_id::text = $1
-			  AND authorization_scope = 'global_admin'
+			SET revoked_at = COALESCE(revoked_at, now()),
+			    revoked_reason = COALESCE(revoked_reason, 'profile_disabled'),
+			    active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
+			WHERE active_profile_id = $1::uuid
+			   OR id IN (
+			       SELECT auth_session_id FROM jellyfin_compat_sessions WHERE profile_id = $1::uuid
+			   )
+			   OR jellyfin_credential_id IN (
+			       SELECT id FROM profile_jellyfin_credentials WHERE profile_id = $1::uuid
+			   )
 		`, current.ID); err != nil {
-			return Profile{}, fmt.Errorf("clear global profile selections after category change: %w", err)
+			return Profile{}, fmt.Errorf("revoke disabled profile sessions: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE jellyfin_compat_sessions
+			SET revoked_at = COALESCE(revoked_at, now()),
+			    revoked_reason = COALESCE(revoked_reason, 'profile_disabled')
+			WHERE profile_id = $1::uuid
+		`, current.ID); err != nil {
+			return Profile{}, fmt.Errorf("revoke disabled profile compatibility sessions: %w", err)
+		}
+	}
+	if categoryChanged {
+		if !disabledTransition {
+			if _, err := tx.Exec(ctx, `
+				UPDATE auth_sessions
+				SET revoked_at = COALESCE(revoked_at, now()),
+				    revoked_reason = COALESCE(revoked_reason, 'profile_category_changed'),
+				    active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
+				WHERE active_profile_id::text = $1
+				  AND authorization_scope = 'category'
+				  AND revoked_at IS NULL
+			`, current.ID); err != nil {
+				return Profile{}, fmt.Errorf("revoke changed profile category sessions: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE auth_sessions
+				SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
+				WHERE active_profile_id::text = $1
+				  AND authorization_scope = 'global_admin'
+			`, current.ID); err != nil {
+				return Profile{}, fmt.Errorf("clear global profile selections after category change: %w", err)
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO access_category_audit_events (
@@ -572,7 +614,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 		`, principal.UserID, current.ID, oldCategoryID, current.CategoryID); err != nil {
 			return Profile{}, fmt.Errorf("audit profile category change: %w", err)
 		}
-	} else if accessChanged || input.PINSet {
+	} else if !disabledTransition && (accessChanged || input.PINSet) {
 		if _, err := tx.Exec(ctx, `
 			UPDATE auth_sessions
 			SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL

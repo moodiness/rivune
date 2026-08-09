@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -40,6 +41,7 @@ const (
 	maximumPageSize                         = 100
 	maximumProfileTitleIdentitiesPerProfile = 100_000
 	MaximumTVLibraryMembershipIdentities    = 100
+	maximumSupplementalUserDataCount        = int64(1<<31 - 1)
 )
 
 const accessibleTitlesSQL = `
@@ -1895,8 +1897,86 @@ func (s *Service) SetWatchedBatch(ctx context.Context, principal auth.Principal,
 	return ProgressBatch{Items: items}, nil
 }
 
-// UpdateUserDataForLinkedSession merges the supplied compatibility fields and
-// commits progress, library membership, and their tracking records together.
+func validateUserDataInput(input UpdateUserDataInput) error {
+	if input.Rating.Set && input.Rating.Value != nil {
+		value := *input.Rating.Value
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 10 {
+			return fmt.Errorf("%w: rating must be between 0 and 10", ErrInvalidInput)
+		}
+	}
+	if input.PlayedPercentage.Set && input.PlayedPercentage.Value != nil {
+		value := *input.PlayedPercentage.Value
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 100 {
+			return fmt.Errorf("%w: played percentage must be between 0 and 100", ErrInvalidInput)
+		}
+	}
+	if input.UnplayedItemCount.Set && input.UnplayedItemCount.Value != nil &&
+		(*input.UnplayedItemCount.Value < 0 || int64(*input.UnplayedItemCount.Value) > maximumSupplementalUserDataCount) {
+		return fmt.Errorf("%w: unplayed item count must be between 0 and %d", ErrInvalidInput, maximumSupplementalUserDataCount)
+	}
+	if input.PlayCount.Set && (input.PlayCount.Value == nil || *input.PlayCount.Value < 0 ||
+		int64(*input.PlayCount.Value) > maximumSupplementalUserDataCount) {
+		return fmt.Errorf("%w: play count must be between 0 and %d", ErrInvalidInput, maximumSupplementalUserDataCount)
+	}
+	if input.LastPlayedDate.Set && input.LastPlayedDate.Value != nil {
+		year := input.LastPlayedDate.Value.Year()
+		if year < 1 || year > 9999 {
+			return fmt.Errorf("%w: last played date is outside the supported timestamp range", ErrInvalidInput)
+		}
+	}
+	return nil
+}
+
+func hasSupplementalUserDataUpdate(input UpdateUserDataInput) bool {
+	return input.Rating.Set || input.PlayedPercentage.Set || input.UnplayedItemCount.Set ||
+		input.PlayCount.Set || input.Likes.Set || input.LastPlayedDate.Set
+}
+
+func mergeSupplementalUserData(current UserDataValues, input UpdateUserDataInput) UserDataValues {
+	if input.Rating.Set {
+		current.Rating, current.RatingSet = input.Rating.Value, true
+	}
+	if input.PlayedPercentage.Set {
+		current.PlayedPercentage, current.PlayedPercentageSet = input.PlayedPercentage.Value, true
+	}
+	if input.UnplayedItemCount.Set {
+		current.UnplayedItemCount, current.UnplayedItemCountSet = input.UnplayedItemCount.Value, true
+	}
+	if input.PlayCount.Set {
+		current.PlayCount, current.PlayCountSet = input.PlayCount.Value, true
+	}
+	if input.Likes.Set {
+		current.Likes, current.LikesSet = input.Likes.Value, true
+	}
+	if input.LastPlayedDate.Set {
+		current.LastPlayedDate, current.LastPlayedDateSet = input.LastPlayedDate.Value, true
+	}
+	return current
+}
+
+func splitLastPlayedDate(value *time.Time) (*time.Time, *int) {
+	if value == nil {
+		return nil, nil
+	}
+	remainderValue := value.Nanosecond() % int(time.Microsecond)
+	baseValue := time.Unix(value.Unix(), int64(value.Nanosecond()-remainderValue)).UTC()
+	return &baseValue, &remainderValue
+}
+
+func joinLastPlayedDate(value *time.Time, submicrosecond *int) *time.Time {
+	if value == nil {
+		return nil
+	}
+	result := value.UTC()
+	if submicrosecond != nil {
+		result = result.Add(time.Duration(*submicrosecond))
+	}
+	return &result
+}
+
+// UpdateUserDataForLinkedSession merges compatibility progress, favorite, and
+// normalized supplemental fields in one transaction without changing library
+// membership.
 func (s *Service) UpdateUserDataForLinkedSession(ctx context.Context, principal auth.Principal, titleID string, input UpdateUserDataInput) (UserDataState, error) {
 	titleID, err := normalizeTitleID(titleID)
 	if err != nil {
@@ -1904,6 +1984,9 @@ func (s *Service) UpdateUserDataForLinkedSession(ctx context.Context, principal 
 	}
 	if input.DurationSeconds < 0 || input.PositionSeconds != nil && *input.PositionSeconds < 0 {
 		return UserDataState{}, fmt.Errorf("%w: playback times must be zero or greater", ErrInvalidInput)
+	}
+	if err := validateUserDataInput(input); err != nil {
+		return UserDataState{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1938,14 +2021,42 @@ func (s *Service) UpdateUserDataForLinkedSession(ctx context.Context, principal 
 	} else if err != nil {
 		return UserDataState{}, fmt.Errorf("read user data progress: %w", err)
 	}
-	var inLibrary bool
+	var inLibrary, favorite bool
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM profile_library
 			WHERE profile_id = $1::uuid AND title_id = $2::uuid
+		), EXISTS (
+			SELECT 1 FROM profile_favorites
+			WHERE profile_id = $1::uuid AND title_id = $2::uuid
 		)
-	`, profileID, titleID).Scan(&inLibrary); err != nil {
-		return UserDataState{}, fmt.Errorf("read user data library state: %w", err)
+	`, profileID, titleID).Scan(&inLibrary, &favorite); err != nil {
+		return UserDataState{}, fmt.Errorf("read user data state: %w", err)
+	}
+
+	var userData UserDataValues
+	userDataExists := true
+	var storedLastPlayedDate *time.Time
+	var lastPlayedDateSubmicrosecond *int
+	err = tx.QueryRow(ctx, `
+		SELECT rating, rating_set, played_percentage, played_percentage_set,
+		       unplayed_item_count, unplayed_item_count_set, play_count, play_count_set,
+		       likes, likes_set, last_played_date, last_played_date_submicrosecond, last_played_date_set
+		FROM profile_user_data
+		WHERE profile_id = $1::uuid AND title_id = $2::uuid
+	`, profileID, titleID).Scan(
+		&userData.Rating, &userData.RatingSet, &userData.PlayedPercentage, &userData.PlayedPercentageSet,
+		&userData.UnplayedItemCount, &userData.UnplayedItemCountSet, &userData.PlayCount, &userData.PlayCountSet,
+		&userData.Likes, &userData.LikesSet, &storedLastPlayedDate, &lastPlayedDateSubmicrosecond, &userData.LastPlayedDateSet,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		userDataExists = false
+		userData = UserDataValues{}
+	} else if err != nil {
+		return UserDataState{}, fmt.Errorf("read supplemental user data: %w", err)
+	}
+	if userDataExists {
+		userData.LastPlayedDate = joinLastPlayedDate(storedLastPlayedDate, lastPlayedDateSubmicrosecond)
 	}
 
 	position, played := current.PositionSeconds, current.Completed
@@ -2003,41 +2114,59 @@ func (s *Service) UpdateUserDataForLinkedSession(ctx context.Context, principal 
 		}
 	}
 
-	desiredLibrary := inLibrary
+	desiredFavorite := favorite
 	if input.Favorite != nil {
-		desiredLibrary = *input.Favorite
+		desiredFavorite = *input.Favorite
 	}
-	if desiredLibrary != inLibrary {
-		if desiredLibrary && mediaType != "movie" && mediaType != "series" && mediaType != "tv" {
-			return UserDataState{}, fmt.Errorf("%w: library titles must be movies, series, or TV channels", ErrInvalidInput)
-		}
-		occurredAt := time.Now().UTC()
-		if desiredLibrary {
+	if desiredFavorite != favorite {
+		if desiredFavorite {
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO profile_library (profile_id, title_id)
+				INSERT INTO profile_favorites (profile_id, title_id)
 				VALUES ($1::uuid, $2::uuid)
 			`, profileID, titleID); err != nil {
-				return UserDataState{}, fmt.Errorf("add user data library title: %w", err)
+				return UserDataState{}, fmt.Errorf("add user data favorite: %w", err)
 			}
 		} else if _, err := tx.Exec(ctx, `
-			DELETE FROM profile_library
+			DELETE FROM profile_favorites
 			WHERE profile_id = $1::uuid AND title_id = $2::uuid
 		`, profileID, titleID); err != nil {
-			return UserDataState{}, fmt.Errorf("remove user data library title: %w", err)
+			return UserDataState{}, fmt.Errorf("remove user data favorite: %w", err)
 		}
-		if mediaType != "tv" {
-			if err := s.enqueueTrackingTx(ctx, tx, profileID, titleID, fmt.Sprintf("library:%t:%s:%d", desiredLibrary, titleID, occurredAt.UnixNano()), tracking.Event{
-				Type: "library", TitleID: titleID, InLibrary: desiredLibrary, OccurredAt: occurredAt,
-			}); err != nil {
-				return UserDataState{}, err
-			}
+		favorite = desiredFavorite
+	}
+	if hasSupplementalUserDataUpdate(input) {
+		userData = mergeSupplementalUserData(userData, input)
+		lastPlayedDate, lastPlayedDateSubmicrosecond := splitLastPlayedDate(userData.LastPlayedDate)
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO profile_user_data (
+				profile_id, title_id, rating, rating_set, played_percentage, played_percentage_set,
+				unplayed_item_count, unplayed_item_count_set, play_count, play_count_set,
+				likes, likes_set, last_played_date, last_played_date_submicrosecond, last_played_date_set
+			) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			ON CONFLICT (profile_id, title_id) DO UPDATE SET
+				rating = EXCLUDED.rating, rating_set = EXCLUDED.rating_set,
+				played_percentage = EXCLUDED.played_percentage, played_percentage_set = EXCLUDED.played_percentage_set,
+				unplayed_item_count = EXCLUDED.unplayed_item_count, unplayed_item_count_set = EXCLUDED.unplayed_item_count_set,
+				play_count = EXCLUDED.play_count, play_count_set = EXCLUDED.play_count_set,
+				likes = EXCLUDED.likes, likes_set = EXCLUDED.likes_set,
+				last_played_date = EXCLUDED.last_played_date,
+				last_played_date_submicrosecond = EXCLUDED.last_played_date_submicrosecond,
+				last_played_date_set = EXCLUDED.last_played_date_set,
+				updated_at = now()
+		`, profileID, titleID, userData.Rating, userData.RatingSet, userData.PlayedPercentage, userData.PlayedPercentageSet,
+			userData.UnplayedItemCount, userData.UnplayedItemCountSet, userData.PlayCount, userData.PlayCountSet,
+			userData.Likes, userData.LikesSet, lastPlayedDate, lastPlayedDateSubmicrosecond, userData.LastPlayedDateSet); err != nil {
+			return UserDataState{}, fmt.Errorf("update supplemental user data: %w", err)
 		}
-		inLibrary = desiredLibrary
+		userDataExists = true
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return UserDataState{}, fmt.Errorf("commit user data update: %w", err)
 	}
-	result := UserDataState{InLibrary: inLibrary}
+	result := UserDataState{InLibrary: inLibrary, Favorite: favorite}
+	if userDataExists {
+		result.UserData = &userData
+	}
 	if progressExists {
 		result.Progress = &current
 	}
@@ -2681,6 +2810,8 @@ func authorizeTitleSnapshotProfiles(ctx context.Context, tx pgx.Tx, principal au
 				SELECT profile_id FROM profile_library WHERE title_id = $1::uuid
 				UNION
 				SELECT profile_id FROM profile_progress WHERE title_id = $1::uuid
+				UNION
+				SELECT profile_id FROM profile_favorites WHERE title_id = $1::uuid
 			) affected
 			ORDER BY profile_id::text
 		)

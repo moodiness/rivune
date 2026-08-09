@@ -57,6 +57,8 @@ type Service struct {
 	profileTxFactory        func(context.Context, auth.Principal) (playbackProfileTransaction, error)
 	sessionCleanupTxFactory func(context.Context) (playbackProfileTransaction, error)
 	hlsJobs                 map[string]*hlsJob
+	trickplayMu             sync.Mutex
+	trickplayImages         *trickplayCache
 }
 
 const (
@@ -621,6 +623,47 @@ func validateCapabilities(capabilities Capabilities) error {
 		for _, value := range values {
 			value = strings.TrimSpace(value)
 			if len(value) < 1 || len(value) > 64 {
+				return ErrInvalidInput
+			}
+		}
+		for _, list := range []string{profile.ContainersCSV, profile.AudioCodecsCSV} {
+			if list == "" {
+				continue
+			}
+			parts := strings.Split(list, ",")
+			if len(list) > 2048 || len(parts) > 32 {
+				return ErrInvalidInput
+			}
+			for _, part := range parts {
+				if part = strings.TrimSpace(part); len(part) < 1 || len(part) > 64 {
+					return ErrInvalidInput
+				}
+			}
+		}
+		if profile.MaximumVideoLevel < 0 || profile.MaximumVideoLevel > 1000 ||
+			profile.VideoLevelRequired && profile.MaximumVideoLevel == 0 ||
+			len(profile.ExcludedVideoRange) > 64 ||
+			profile.VideoRangeRequired && strings.TrimSpace(profile.ExcludedVideoRange) == "" {
+			return ErrInvalidInput
+		}
+	}
+	if len(capabilities.ContainerProfiles) > 256 {
+		return ErrInvalidInput
+	}
+	for _, profile := range capabilities.ContainerProfiles {
+		containers := strings.Split(profile.ContainersCSV, ",")
+		if len(profile.ContainersCSV) == 0 || len(profile.ContainersCSV) > 2048 || len(containers) > 32 || len(profile.Conditions) > 32 {
+			return ErrInvalidInput
+		}
+		for _, container := range containers {
+			if container = strings.TrimSpace(container); len(container) == 0 || len(container) > 64 {
+				return ErrInvalidInput
+			}
+		}
+		for _, condition := range profile.Conditions {
+			if len(strings.TrimSpace(condition.Condition)) == 0 || len(condition.Condition) > 64 ||
+				len(strings.TrimSpace(condition.Property)) == 0 || len(condition.Property) > 64 ||
+				len(strings.TrimSpace(condition.Value)) == 0 || len(condition.Value) > 64 {
 				return ErrInvalidInput
 			}
 		}

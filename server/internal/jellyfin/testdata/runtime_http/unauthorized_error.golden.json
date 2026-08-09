@@ -1,0 +1,15 @@
+{
+  "status": 401,
+  "headers": {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+    "WWW-Authenticate": "MediaBrowser",
+    "X-Content-Type-Options": "nosniff"
+  },
+  "body": {
+    "ResponseStatus": {
+      "ErrorCode": "Unauthorized",
+      "Message": "A valid compatibility token is required"
+    }
+  }
+}

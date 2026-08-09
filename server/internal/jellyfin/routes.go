@@ -29,6 +29,7 @@ const (
 	RouteUserPrimaryImage         Route = "user-primary-image"
 	RouteUserPrimaryImageHead     Route = "user-primary-image-head"
 	RouteSessions                 Route = "sessions"
+	RouteViewing                  Route = "viewing"
 	RouteLogout                   Route = "logout"
 	RouteSessionCapabilitiesFull  Route = "session-capabilities-full"
 	RouteSessionCapabilities      Route = "session-capabilities"
@@ -73,6 +74,8 @@ const (
 	RouteUpcomingShows            Route = "upcoming-shows"
 	RouteMovieRecommendations     Route = "movie-recommendations"
 	RouteMediaSegments            Route = "media-segments"
+	RouteTrickplayImage           Route = "trickplay-image"
+	RouteTrickplayImageHead       Route = "trickplay-image-head"
 	RouteThemeMedia               Route = "theme-media"
 	RouteThemeSongs               Route = "theme-songs"
 	RouteSpecialFeatures          Route = "special-features"
@@ -83,6 +86,7 @@ const (
 	RouteLegacySpecialFeatures    Route = "legacy-special-features"
 	RouteLegacyIntros             Route = "legacy-intros"
 	RouteLegacyLocalTrailers      Route = "legacy-local-trailers"
+	RouteImageInfos               Route = "image-infos"
 	RouteImage                    Route = "image"
 	RouteImageHead                Route = "image-head"
 	RouteIndexedImage             Route = "indexed-image"
@@ -141,6 +145,7 @@ var ErrInvalidDependencies = errors.New("invalid jellyfin compatibility dependen
 type ServerInfo struct {
 	ID             ServerID
 	Name           string
+	LocalAddress   string
 	RuntimeVersion string
 }
 
@@ -161,6 +166,7 @@ var routeDefinitions = []RouteSpec{
 	{RouteUserPrimaryImage, http.MethodGet, "/Users/{userId}/Images/Primary"},
 	{RouteUserPrimaryImageHead, http.MethodHead, "/Users/{userId}/Images/Primary"},
 	{RouteSessions, http.MethodGet, "/Sessions"},
+	{RouteViewing, http.MethodPost, "/Sessions/Viewing"},
 	{RouteLogout, http.MethodPost, "/Sessions/Logout"},
 	{RouteSessionCapabilitiesFull, http.MethodPost, "/Sessions/Capabilities/Full"},
 	{RouteSessionCapabilities, http.MethodPost, "/Sessions/Capabilities"},
@@ -173,8 +179,8 @@ var routeDefinitions = []RouteSpec{
 	{RoutePackages, http.MethodGet, "/Packages"},
 	{RouteBrandingConfiguration, http.MethodGet, "/Branding/Configuration"},
 	{RouteBrandingSplashscreen, http.MethodGet, "/Branding/Splashscreen"},
-	{RouteDisplayPreferences, http.MethodGet, "/DisplayPreferences/{id}"},
-	{RouteDisplayPreferencesUpdate, http.MethodPost, "/DisplayPreferences/{id}"},
+	{RouteDisplayPreferences, http.MethodGet, "/DisplayPreferences/{displayPreferencesId}"},
+	{RouteDisplayPreferencesUpdate, http.MethodPost, "/DisplayPreferences/{displayPreferencesId}"},
 	{RouteGroupingOptions, http.MethodGet, "/UserViews/GroupingOptions"},
 	{RouteUserViews, http.MethodGet, "/Users/{id}/Views"},
 	{RouteViews, http.MethodGet, "/UserViews"},
@@ -205,6 +211,8 @@ var routeDefinitions = []RouteSpec{
 	{RouteUpcomingShows, http.MethodGet, "/Shows/Upcoming"},
 	{RouteMovieRecommendations, http.MethodGet, "/Movies/Recommendations"},
 	{RouteMediaSegments, http.MethodGet, "/MediaSegments/{itemId}"},
+	{RouteTrickplayImage, http.MethodGet, "/Videos/{itemId}/Trickplay/{width}/{index}.jpg"},
+	{RouteTrickplayImageHead, http.MethodHead, "/Videos/{itemId}/Trickplay/{width}/{index}.jpg"},
 	{RouteThemeMedia, http.MethodGet, "/Items/{itemId}/ThemeMedia"},
 	{RouteThemeSongs, http.MethodGet, "/Items/{itemId}/ThemeSongs"},
 	{RouteSpecialFeatures, http.MethodGet, "/Items/{itemId}/SpecialFeatures"},
@@ -215,6 +223,7 @@ var routeDefinitions = []RouteSpec{
 	{RouteLegacySpecialFeatures, http.MethodGet, "/Users/{userId}/Items/{itemId}/SpecialFeatures"},
 	{RouteLegacyIntros, http.MethodGet, "/Users/{userId}/Items/{itemId}/Intros"},
 	{RouteLegacyLocalTrailers, http.MethodGet, "/Users/{userId}/Items/{itemId}/LocalTrailers"},
+	{RouteImageInfos, http.MethodGet, "/Items/{id}/Images"},
 	{RouteImage, http.MethodGet, "/Items/{id}/Images/{type}"},
 	{RouteImageHead, http.MethodHead, "/Items/{id}/Images/{type}"},
 	{RouteIndexedImage, http.MethodGet, "/Items/{id}/Images/{type}/{index}"},
@@ -263,14 +272,18 @@ var routeDefinitions = []RouteSpec{
 }
 
 type Dependencies struct {
-	ServerInfo     ServerInfo
-	Authentication Authentication
-	Catalog        CatalogReader
-	Collections    CollectionReader
-	Artwork        ArtworkDelivery
-	Playback       PlaybackDelivery
-	Watchstate     Watchstate
-	Logger         *slog.Logger
+	ServerInfo          ServerInfo
+	Authentication      Authentication
+	AuthenticatedPolicy AuthenticatedRequestPolicy
+	Catalog             CatalogReader
+	Collections         CollectionReader
+	Artwork             ArtworkDelivery
+	Playback            PlaybackDelivery
+	MediaSegments       MediaSegmentReader
+	Watchstate          Watchstate
+	DisplayPreferences  DisplayPreferences
+	Logger              *slog.Logger
+	Debug               bool
 
 	// Handlers overrides built-ins for focused tests. Unknown or nil overrides
 	// are rejected; built-ins are installed only when their dependencies exist.
@@ -278,18 +291,20 @@ type Dependencies struct {
 }
 
 type Handler struct {
-	serverInfo     ServerInfo
-	authentication Authentication
-	catalog        CatalogReader
-	collections    CollectionReader
-	artwork        ArtworkDelivery
-	playback       PlaybackDelivery
-	watchstate     Watchstate
-	playSessions   *playSessionRegistry
-	bootstrap      *bootstrapRegistry
-	logger         *slog.Logger
-	handlers       map[Route]http.Handler
-	routes         map[string][]routeBinding
+	serverInfo         ServerInfo
+	authentication     Authentication
+	catalog            CatalogReader
+	collections        CollectionReader
+	artwork            ArtworkDelivery
+	playback           PlaybackDelivery
+	mediaSegments      MediaSegmentReader
+	watchstate         Watchstate
+	displayPreferences DisplayPreferences
+	playSessions       *playSessionRegistry
+	bootstrap          *bootstrapRegistry
+	logger             *slog.Logger
+	handlers           map[Route]http.Handler
+	routes             map[string][]routeBinding
 }
 
 var _ http.Handler = (*Handler)(nil)
@@ -305,16 +320,18 @@ func New(dependencies Dependencies) (*Handler, error) {
 		}
 	}
 	handler := &Handler{
-		serverInfo:     dependencies.ServerInfo,
-		authentication: dependencies.Authentication,
-		catalog:        dependencies.Catalog,
-		collections:    dependencies.Collections,
-		artwork:        dependencies.Artwork,
-		playback:       dependencies.Playback,
-		watchstate:     dependencies.Watchstate,
-		logger:         dependencies.Logger,
-		handlers:       make(map[Route]http.Handler, len(routeDefinitions)),
-		routes:         make(map[string][]routeBinding, 4),
+		serverInfo:         dependencies.ServerInfo,
+		authentication:     newPolicyAuthentication(dependencies.Authentication, dependencies.AuthenticatedPolicy),
+		catalog:            dependencies.Catalog,
+		collections:        dependencies.Collections,
+		artwork:            dependencies.Artwork,
+		playback:           dependencies.Playback,
+		mediaSegments:      dependencies.MediaSegments,
+		watchstate:         dependencies.Watchstate,
+		displayPreferences: dependencies.DisplayPreferences,
+		logger:             dependencies.Logger,
+		handlers:           make(map[Route]http.Handler, len(routeDefinitions)),
+		routes:             make(map[string][]routeBinding, 4),
 	}
 	if _, serverReady := handler.publicSystemInfo(); serverReady && handler.authentication != nil {
 		handler.bootstrap = newBootstrapRegistry()
@@ -333,7 +350,7 @@ func New(dependencies Dependencies) (*Handler, error) {
 		}
 		handler.routes[definition.Method] = append(handler.routes[definition.Method], routeBinding{
 			definition:     definition,
-			implementation: traceRoute(handler.logger, definition, implementation),
+			implementation: traceRoute(handler.logger, dependencies.Debug, definition, implementation),
 		})
 	}
 	return handler, nil
@@ -344,7 +361,6 @@ func (handler *Handler) installBuiltInHandlers() {
 		handler.handlers[RoutePublicSystemInfo] = http.HandlerFunc(handler.handlePublicSystemInfo)
 		handler.handlers[RouteSystemPing] = http.HandlerFunc(handler.handleSystemPing)
 		handler.handlers[RouteSystemPingPost] = http.HandlerFunc(handler.handleSystemPing)
-		handler.handlers[RouteSystemEndpoint] = http.HandlerFunc(handler.handleSystemEndpoint)
 		handler.handlers[RouteQuickConnectEnabled] = http.HandlerFunc(handler.handleQuickConnectEnabled)
 		handler.handlers[RoutePublicUsers] = http.HandlerFunc(handler.handlePublicUsers)
 		handler.handlers[RouteBrandingConfiguration] = http.HandlerFunc(handler.handleBrandingConfiguration)
@@ -352,6 +368,7 @@ func (handler *Handler) installBuiltInHandlers() {
 	}
 	if serverReady && handler.authentication != nil {
 		handler.handlers[RouteAuthenticateByName] = http.HandlerFunc(handler.handleAuthenticateByName)
+		handler.handlers[RouteSystemEndpoint] = http.HandlerFunc(handler.handleSystemEndpoint)
 		handler.handlers[RouteSystemInfo] = http.HandlerFunc(handler.handleSystemInfo)
 		handler.handlers[RouteCurrentUser] = http.HandlerFunc(handler.handleCurrentUser)
 		handler.handlers[RouteUser] = http.HandlerFunc(handler.handleUser)
@@ -376,6 +393,7 @@ func (handler *Handler) installBuiltInHandlers() {
 		handler.handlers[RouteGroupingOptions] = http.HandlerFunc(handler.handleGroupingOptions)
 	}
 	if serverReady && handler.authentication != nil && handler.catalog != nil {
+		handler.handlers[RouteViewing] = http.HandlerFunc(handler.handleViewing)
 		handler.handlers[RouteUserViews] = http.HandlerFunc(handler.handleUserViews)
 		handler.handlers[RouteViews] = http.HandlerFunc(handler.handleViews)
 		handler.handlers[RouteVirtualFolders] = http.HandlerFunc(handler.handleVirtualFolders)
@@ -400,11 +418,13 @@ func (handler *Handler) installBuiltInHandlers() {
 		handler.handlers[RouteGenre] = http.HandlerFunc(handler.handleGenre)
 		handler.handlers[RoutePersons] = http.HandlerFunc(handler.handlePersons)
 		handler.handlers[RoutePerson] = http.HandlerFunc(handler.handlePerson)
-		handler.handlers[RouteStudios] = http.HandlerFunc(handler.handleEmptyCatalogDomain)
+		handler.handlers[RouteStudios] = http.HandlerFunc(handler.handleStudios)
 		handler.handlers[RouteArtists] = http.HandlerFunc(handler.handleEmptyCatalogDomain)
 		handler.handlers[RouteUpcomingShows] = http.HandlerFunc(handler.handleUpcomingShows)
 		handler.handlers[RouteMovieRecommendations] = http.HandlerFunc(handler.handleMovieRecommendations)
 		handler.handlers[RouteMediaSegments] = http.HandlerFunc(handler.handleMediaSegments)
+		handler.handlers[RouteTrickplayImage] = http.HandlerFunc(handler.handleTrickplayImage)
+		handler.handlers[RouteTrickplayImageHead] = http.HandlerFunc(handler.handleTrickplayImage)
 		handler.handlers[RouteThemeMedia] = http.HandlerFunc(handler.handleThemeMedia)
 		handler.handlers[RouteThemeSongs] = http.HandlerFunc(handler.handleThemeSongs)
 		handler.handlers[RouteSpecialFeatures] = http.HandlerFunc(handler.handleSpecialFeatures)
@@ -415,6 +435,7 @@ func (handler *Handler) installBuiltInHandlers() {
 		handler.handlers[RouteLegacySpecialFeatures] = http.HandlerFunc(handler.handleSpecialFeatures)
 		handler.handlers[RouteLegacyIntros] = http.HandlerFunc(handler.handleIntros)
 		handler.handlers[RouteLegacyLocalTrailers] = http.HandlerFunc(handler.handleLocalTrailers)
+		handler.handlers[RouteImageInfos] = http.HandlerFunc(handler.handleImageInfos)
 	}
 	if serverReady && handler.authentication != nil && handler.catalog != nil && handler.artwork != nil {
 		handler.handlers[RouteImage] = http.HandlerFunc(handler.handleImage)
@@ -500,6 +521,9 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			if strings.HasPrefix(dispatchedRequest.RequestURI, "/emby/") {
 				dispatchedRequest.RequestURI = dispatchedRequest.RequestURI[len("/emby"):]
 			}
+		}
+		if binding.definition.Route == RouteLogout {
+			dispatchedRequest = withAuthenticatedPolicyExemption(dispatchedRequest)
 		}
 		for name, value := range pathValues {
 			dispatchedRequest.SetPathValue(name, value)
@@ -706,6 +730,17 @@ func matchRoutePath(definition RouteSpec, requestPath string) (map[string]string
 			values["container"] = container
 			continue
 		}
+		if patternSegment == "{index}.jpg" && isTrickplayRoute(definition.Route) {
+			indexValue := strings.TrimSuffix(pathSegment, ".jpg")
+			if indexValue == pathSegment || !validRouteValue(definition.Route, "index", indexValue) {
+				return nil, false
+			}
+			if values == nil {
+				values = make(map[string]string, 4)
+			}
+			values["index"] = indexValue
+			continue
+		}
 		if patternSegment == "{segmentId}.{container}" {
 			separator := strings.LastIndexByte(pathSegment, '.')
 			if separator <= 0 || separator == len(pathSegment)-1 {
@@ -742,10 +777,9 @@ func matchRoutePath(definition RouteSpec, requestPath string) (map[string]string
 
 func validRouteValue(route Route, name, value string) bool {
 	switch name {
+	case "displayPreferencesId":
+		return validDisplayPreferenceID(value)
 	case "id":
-		if route == RouteDisplayPreferences || route == RouteDisplayPreferencesUpdate {
-			return validDisplayPreferenceID(value)
-		}
 		return validCompatUUID(value)
 	case "userId", "itemId", "seriesId", "mediaSourceId":
 		return validCompatUUID(value)
@@ -757,15 +791,26 @@ func validRouteValue(route Route, name, value string) bool {
 		return err == nil && parsed >= 0 && parsed <= 7*24*60*60*TicksPerSecond && strconv.FormatInt(parsed, 10) == value
 	case "playlistId":
 		return validCapabilityPathSelector(value)
+	case "width":
+		parsed, err := strconv.Atoi(value)
+		return isTrickplayRoute(route) && err == nil && parsed >= minimumTrickplayWidth && parsed <= maximumTrickplayWidth && strconv.Itoa(parsed) == value
 	case "name", "genreName":
 		return validCatalogPathName(value)
 	case "type":
-		return value == "Primary" || value == "Backdrop" || value == "Thumb"
+		return supportedCompatImageType(value)
 	case "index":
+		if isTrickplayRoute(route) {
+			parsed, err := strconv.Atoi(value)
+			return err == nil && parsed >= 0 && parsed <= maximumTrickplayIndex && strconv.Itoa(parsed) == value
+		}
 		return value == "0"
 	default:
 		return false
 	}
+}
+
+func isTrickplayRoute(route Route) bool {
+	return route == RouteTrickplayImage || route == RouteTrickplayImageHead
 }
 
 func validCatalogPathName(value string) bool {

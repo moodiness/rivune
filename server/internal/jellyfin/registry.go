@@ -503,7 +503,7 @@ func (registry *playSessionRegistry) setPlaybackPreferences(session Authenticate
 		return errPlaySessionNotFound
 	}
 	var preferredAudio *int
-	if audioIndex != nil && *audioIndex > 0 {
+	if audioIndex != nil && *audioIndex >= 0 {
 		preferredAudio = cloneIntPointer(audioIndex)
 	}
 	now := registry.now().UTC()
@@ -1455,6 +1455,14 @@ func deviceProfileQuotaOwnerMatches(stored *registeredDeviceProfile, session Aut
 }
 
 func cloneDeviceProfile(profile DeviceProfile) DeviceProfile {
+	profile.CodecProfiles = append([]CodecProfile(nil), profile.CodecProfiles...)
+	for index := range profile.CodecProfiles {
+		profile.CodecProfiles[index].Conditions = append([]ProfileCondition(nil), profile.CodecProfiles[index].Conditions...)
+	}
+	profile.ContainerProfiles = append([]ContainerProfile(nil), profile.ContainerProfiles...)
+	for index := range profile.ContainerProfiles {
+		profile.ContainerProfiles[index].Conditions = append([]ProfileCondition(nil), profile.ContainerProfiles[index].Conditions...)
+	}
 	profile.DirectPlayProfiles = append([]DirectPlayProfile(nil), profile.DirectPlayProfiles...)
 	profile.TranscodingProfiles = append([]TranscodingProfile(nil), profile.TranscodingProfiles...)
 	profile.SubtitleProfiles = append([]SubtitleProfile(nil), profile.SubtitleProfiles...)
@@ -1565,6 +1573,7 @@ func playbackCapabilitiesEqual(left, right playback.Capabilities) bool {
 		slices.Equal(left.ExternalPlayers, right.ExternalPlayers) &&
 		slices.Equal(left.ProcessingModes, right.ProcessingModes) &&
 		slices.Equal(left.MediaProfiles, right.MediaProfiles) &&
+		playbackContainerProfilesEqual(left.ContainerProfiles, right.ContainerProfiles) &&
 		left.MaximumVideoBitrateKbps == right.MaximumVideoBitrateKbps &&
 		left.MaximumAudioChannels == right.MaximumAudioChannels &&
 		slices.Equal(left.SubtitleModes, right.SubtitleModes) &&
@@ -1572,6 +1581,18 @@ func playbackCapabilitiesEqual(left, right playback.Capabilities) bool {
 		optionalBoolEqual(left.PreferDirectPlay, right.PreferDirectPlay) &&
 		left.TranscodeVideoBitrateKbps == right.TranscodeVideoBitrateKbps &&
 		left.HLSSegmentContainer == right.HLSSegmentContainer
+}
+
+func playbackContainerProfilesEqual(left, right []playback.ContainerProfile) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].ContainersCSV != right[index].ContainersCSV || !slices.Equal(left[index].Conditions, right[index].Conditions) {
+			return false
+		}
+	}
+	return true
 }
 
 func optionalBoolEqual(left, right *bool) bool {
@@ -1656,6 +1677,10 @@ func clonePlaybackCapabilities(capabilities playback.Capabilities) playback.Capa
 	copy.ProcessingModes = append([]string(nil), capabilities.ProcessingModes...)
 	copy.SubtitleModes = append([]string(nil), capabilities.SubtitleModes...)
 	copy.MediaProfiles = append([]playback.MediaProfile(nil), capabilities.MediaProfiles...)
+	copy.ContainerProfiles = append([]playback.ContainerProfile(nil), capabilities.ContainerProfiles...)
+	for index := range copy.ContainerProfiles {
+		copy.ContainerProfiles[index].Conditions = append([]playback.ProfileCondition(nil), capabilities.ContainerProfiles[index].Conditions...)
+	}
 	if capabilities.PreferDirectPlay != nil {
 		value := *capabilities.PreferDirectPlay
 		copy.PreferDirectPlay = &value

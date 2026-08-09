@@ -33,11 +33,13 @@ func (*stateAuthentication) Logout(context.Context, AuthenticatedSession) error 
 
 type stateCatalog struct {
 	items      map[string]watchstate.CatalogTitle
+	getCalls   int
 	batchCalls int
 	batchErr   error
 }
 
 func (catalog *stateCatalog) GetCatalogTitle(_ context.Context, _ auth.Principal, itemID string) (watchstate.CatalogTitle, error) {
+	catalog.getCalls++
 	item, ok := catalog.items[itemID]
 	if !ok {
 		return watchstate.CatalogTitle{}, watchstate.ErrNotFound
@@ -575,11 +577,11 @@ func TestUserDataModernAndLegacyApplyAllStateIdempotently(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"Key":"`+itemID+`"`) || !strings.Contains(response.Body.String(), `"ItemId":"`+itemID+`"`) {
 		t.Fatalf("empty UserData status=%d body=%s", response.Code, response.Body.String())
 	}
-	body := `{"PlaybackPositionTicks":300000000,"PlayCount":0,"IsFavorite":true,"Played":false,"Key":"` + itemID + `","ItemId":"` + itemID + `"}`
+	body := `{"PlaybackPositionTicks":300000000,"IsFavorite":true,"Played":false,"Key":"` + itemID + `","ItemId":"` + itemID + `"}`
 	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
 	progress := service.progress[itemID]
-	if response.Code != http.StatusOK || progress.PositionSeconds != 30 || progress.DurationSeconds != 120 || progress.Completed || progress.Version != 1 || !service.library[itemID] || service.addCalls != 1 {
-		t.Fatalf("modern update status=%d progress=%+v library=%v addCalls=%d body=%s", response.Code, progress, service.library, service.addCalls, response.Body.String())
+	if response.Code != http.StatusOK || progress.PositionSeconds != 30 || progress.DurationSeconds != 120 || progress.Completed || progress.Version != 1 || !service.favorites[itemID] || service.addCalls != 1 {
+		t.Fatalf("modern update status=%d progress=%+v favorites=%v addCalls=%d body=%s", response.Code, progress, service.favorites, service.addCalls, response.Body.String())
 	}
 	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
 	if response.Code != http.StatusOK || service.progress[itemID].Version != 1 || service.addCalls != 1 {
@@ -589,13 +591,13 @@ func TestUserDataModernAndLegacyApplyAllStateIdempotently(t *testing.T) {
 	body = `{"PlaybackPositionTicks":600000000,"Played":true}`
 	response = requestUserData(http.MethodPost, "/Users/"+authentication.session.ProfileID+"/Items/"+itemID+"/UserData", authentication.session.ProfileID, body, true)
 	progress = service.progress[itemID]
-	if response.Code != http.StatusOK || progress.PositionSeconds != 60 || !progress.Completed || progress.Version != 2 || !service.library[itemID] || service.removeCalls != 0 || !strings.Contains(response.Body.String(), `"PlayedPercentage":50`) {
-		t.Fatalf("legacy partial update status=%d progress=%+v library=%v body=%s", response.Code, progress, service.library, response.Body.String())
+	if response.Code != http.StatusOK || progress.PositionSeconds != 60 || !progress.Completed || progress.Version != 2 || !service.favorites[itemID] || service.removeCalls != 0 || !strings.Contains(response.Body.String(), `"PlayedPercentage":50`) {
+		t.Fatalf("legacy partial update status=%d progress=%+v favorites=%v body=%s", response.Code, progress, service.favorites, response.Body.String())
 	}
 	body = `{"IsFavorite":false}`
 	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
-	if response.Code != http.StatusOK || service.library[itemID] || service.removeCalls != 1 || service.progress[itemID].Version != 2 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":600000000`) {
-		t.Fatalf("favorite-only update status=%d progress=%+v library=%v removes=%d body=%s", response.Code, service.progress[itemID], service.library, service.removeCalls, response.Body.String())
+	if response.Code != http.StatusOK || service.favorites[itemID] || service.removeCalls != 1 || service.progress[itemID].Version != 2 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":600000000`) {
+		t.Fatalf("favorite-only update status=%d progress=%+v favorites=%v removes=%d body=%s", response.Code, service.progress[itemID], service.favorites, service.removeCalls, response.Body.String())
 	}
 	response = requestUserData(http.MethodPost, "/UserItems/"+itemID+"/UserData", "", body, false)
 	if response.Code != http.StatusOK || service.removeCalls != 1 || service.progress[itemID].Version != 2 {
@@ -607,11 +609,11 @@ func TestUserDataModernAndLegacyApplyAllStateIdempotently(t *testing.T) {
 	}
 }
 
-func TestFavoriteEndpointsMutateLibraryAndPreserveProgress(t *testing.T) {
+func TestFavoriteEndpointsMutateFavoritesPreserveLibraryAndProgress(t *testing.T) {
 	handler, authentication, service, _, token, itemID, _, _ := stateHTTPFixture(t)
 	service.progress[itemID] = watchstate.Progress{TitleID: itemID, MediaType: "movie", PositionSeconds: 45, DurationSeconds: 90, Version: 7, LastWatchedAt: time.Unix(7, 0).UTC()}
+	service.library[itemID] = true
 	catalog := handler.catalog.(*stateCatalog)
-
 	requestFavorite := func(method, userID string, legacy bool) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(method, "/favorite/"+itemID, nil)
 		request.SetPathValue("itemId", itemID)
@@ -629,21 +631,43 @@ func TestFavoriteEndpointsMutateLibraryAndPreserveProgress(t *testing.T) {
 	}
 
 	response := requestFavorite(http.MethodPost, "", false)
-	if response.Code != http.StatusOK || !service.library[itemID] || service.addCalls != 1 || service.userDataCalls != 1 || service.progress[itemID].Version != 7 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":450000000`) || !strings.Contains(response.Body.String(), `"IsFavorite":true`) {
-		t.Fatalf("favorite status=%d progress=%+v library=%v addCalls=%d linkedCalls=%d body=%s", response.Code, service.progress[itemID], service.library, service.addCalls, service.userDataCalls, response.Body.String())
+	if response.Code != http.StatusOK || !service.favorites[itemID] || !service.library[itemID] || service.addCalls != 1 || service.userDataCalls != 1 || service.progress[itemID].Version != 7 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":450000000`) || !strings.Contains(response.Body.String(), `"IsFavorite":true`) {
+		t.Fatalf("favorite status=%d progress=%+v favorites=%v library=%v addCalls=%d linkedCalls=%d body=%s", response.Code, service.progress[itemID], service.favorites, service.library, service.addCalls, service.userDataCalls, response.Body.String())
 	}
 	item := catalog.items[itemID]
-	item.InLibrary = true
+	item.Favorite = true
 	catalog.items[itemID] = item
+	requestUserData := func(userID string, legacy bool) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, "/userdata/"+itemID, nil)
+		request.SetPathValue("itemId", itemID)
+		if legacy {
+			request.SetPathValue("userId", userID)
+		}
+		request.Header.Set("X-Emby-Token", token)
+		response := httptest.NewRecorder()
+		if legacy {
+			handler.handleLegacyUserData(response, request)
+		} else {
+			handler.handleUserData(response, request)
+		}
+		return response
+	}
+	for _, userDataResponse := range []*httptest.ResponseRecorder{
+		requestUserData("", false), requestUserData(authentication.session.ProfileID, true),
+	} {
+		if userDataResponse.Code != http.StatusOK || !strings.Contains(userDataResponse.Body.String(), `"IsFavorite":true`) {
+			t.Fatalf("UserData did not expose favorite: status=%d body=%s", userDataResponse.Code, userDataResponse.Body.String())
+		}
+	}
 	response = requestFavorite(http.MethodPost, authentication.session.ProfileID, true)
 	if response.Code != http.StatusOK || service.addCalls != 1 || service.userDataCalls != 2 || service.progress[itemID].Version != 7 {
 		t.Fatalf("duplicate favorite status=%d addCalls=%d linkedCalls=%d progress=%+v", response.Code, service.addCalls, service.userDataCalls, service.progress[itemID])
 	}
 	response = requestFavorite(http.MethodDelete, authentication.session.ProfileID, true)
-	if response.Code != http.StatusOK || service.library[itemID] || service.removeCalls != 1 || service.userDataCalls != 3 || service.progress[itemID].Version != 7 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":450000000`) || !strings.Contains(response.Body.String(), `"IsFavorite":false`) {
-		t.Fatalf("unfavorite status=%d progress=%+v library=%v removeCalls=%d linkedCalls=%d body=%s", response.Code, service.progress[itemID], service.library, service.removeCalls, service.userDataCalls, response.Body.String())
+	if response.Code != http.StatusOK || service.favorites[itemID] || !service.library[itemID] || service.removeCalls != 1 || service.userDataCalls != 3 || service.progress[itemID].Version != 7 || !strings.Contains(response.Body.String(), `"PlaybackPositionTicks":450000000`) || !strings.Contains(response.Body.String(), `"IsFavorite":false`) {
+		t.Fatalf("unfavorite status=%d progress=%+v favorites=%v library=%v removeCalls=%d linkedCalls=%d body=%s", response.Code, service.progress[itemID], service.favorites, service.library, service.removeCalls, service.userDataCalls, response.Body.String())
 	}
-	item.InLibrary = false
+	item.Favorite = false
 	catalog.items[itemID] = item
 	response = requestFavorite(http.MethodDelete, "", false)
 	if response.Code != http.StatusOK || service.removeCalls != 1 || service.userDataCalls != 4 || service.progress[itemID].Version != 7 {
@@ -712,6 +736,7 @@ func TestResumePaginationAndNextUpProjectionAreDeterministic(t *testing.T) {
 	seriesID := "00000000-0000-4000-8000-000000000100"
 	seasonID := "00000000-0000-4000-8000-000000000110"
 	episodeID := "00000000-0000-4000-8000-000000000111"
+	seasonNumber, episodeNumber := 1, 4
 	catalog := handler.catalog.(*stateCatalog)
 	catalog.items[secondID] = watchstate.CatalogTitle{ID: secondID, MediaType: "movie", Title: "Second"}
 	catalog.items[episodeID] = watchstate.CatalogTitle{ID: episodeID, MediaType: "episode", Title: "Next", SeriesID: seriesID, SeasonID: seasonID}
@@ -725,7 +750,8 @@ func TestResumePaginationAndNextUpProjectionAreDeterministic(t *testing.T) {
 	handler.handleResumeItems(response, request)
 	body := response.Body.String()
 	if response.Code != http.StatusOK || service.resumeOffset != 1 || service.resumeLimit != 2 || catalog.batchCalls != 1 ||
-		!strings.Contains(body, `"TotalRecordCount":3,"StartIndex":1`) || strings.Index(body, secondID) > strings.Index(body, firstID) {
+		!strings.Contains(body, `"TotalRecordCount":3,"StartIndex":1`) || strings.Index(body, secondID) > strings.Index(body, firstID) ||
+		strings.Contains(body, `"MediaSources"`) || strings.Contains(body, `"Overview"`) {
 		t.Fatalf("resume status=%d offset=%d limit=%d batchCalls=%d body=%s", response.Code, service.resumeOffset, service.resumeLimit, catalog.batchCalls, body)
 	}
 
@@ -739,18 +765,119 @@ func TestResumePaginationAndNextUpProjectionAreDeterministic(t *testing.T) {
 	}
 
 	service.nextPage = watchstate.ContinueItemsPage{
-		Items: []watchstate.ContinueItem{{TitleID: episodeID, SeriesID: seriesID, SeasonID: seasonID}}, Offset: 0, Limit: 1, Total: 1,
+		Items: []watchstate.ContinueItem{{
+			TitleID: episodeID, SeriesID: seriesID, SeasonID: seasonID,
+			SeasonNumber: &seasonNumber, EpisodeNumber: &episodeNumber,
+		}},
+		Offset: 0, Limit: 1, Total: 1,
 	}
 	request = httptest.NewRequest(http.MethodGet, "/Shows/NextUp?SeriesId="+seriesID+"&StartIndex=0&Limit=1", nil)
 	request.Header.Set("X-Emby-Token", token)
 	response = httptest.NewRecorder()
 	handler.handleNextUp(response, request)
+	var next QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, response, &next)
 	if response.Code != http.StatusOK || service.nextSeriesID != seriesID || service.nextOffset != 0 || service.nextLimit != 1 ||
-		!strings.Contains(response.Body.String(), episodeID) {
-		t.Fatalf("next-up status=%d series=%s offset=%d limit=%d body=%s", response.Code, service.nextSeriesID, service.nextOffset, service.nextLimit, response.Body.String())
+		len(next.Items) != 1 || next.Items[0].Id != episodeID || next.Items[0].ParentId != seasonID ||
+		next.Items[0].SeriesId != seriesID || next.Items[0].SeasonId != seasonID ||
+		next.Items[0].IndexNumber == nil || *next.Items[0].IndexNumber != episodeNumber ||
+		next.Items[0].ParentIndexNumber == nil || *next.Items[0].ParentIndexNumber != seasonNumber {
+		t.Fatalf("next-up status=%d series=%s offset=%d limit=%d result=%+v body=%s",
+			response.Code, service.nextSeriesID, service.nextOffset, service.nextLimit, next, response.Body.String())
 	}
 	if catalog.batchCalls != 2 {
 		t.Fatalf("resume and next-up projections used %d catalog batches, want 2", catalog.batchCalls)
+	}
+}
+
+func TestResumeAndNextUpBindOptionalUserAndHonorFieldProjection(t *testing.T) {
+	handler, authentication, service, _, token, itemID, _, _ := stateHTTPFixture(t)
+	catalog := handler.catalog.(*stateCatalog)
+	item := catalog.items[itemID]
+	item.Overview = "Visible only when requested"
+	catalog.items[itemID] = item
+	service.resumePage = watchstate.ContinueItemsPage{Items: []watchstate.ContinueItem{{TitleID: itemID}}, Total: 1, Limit: 1}
+
+	foreignUser := "22222222-2222-4222-8222-222222222222"
+	for _, target := range []struct {
+		name   string
+		path   string
+		handle func(http.ResponseWriter, *http.Request)
+	}{
+		{name: "resume", path: "/UserItems/Resume?UserId=" + foreignUser, handle: handler.handleUserResumeItems},
+		{name: "next up", path: "/Shows/NextUp?UserId=" + foreignUser, handle: handler.handleNextUp},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, target.path, nil)
+			request.Header.Set("X-Emby-Token", token)
+			response := httptest.NewRecorder()
+			target.handle(response, request)
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+	if service.resumeLimit != 0 || service.nextLimit != 0 {
+		t.Fatalf("foreign UserId reached state service: resume=%d next=%d", service.resumeLimit, service.nextLimit)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/UserItems/Resume?UserId="+authentication.session.ProfileID+"&Fields=Overview,MediaSources&Limit=1", nil)
+	request.Header.Set("X-Emby-Token", token)
+	response := httptest.NewRecorder()
+	handler.handleUserResumeItems(response, request)
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, `"Overview":"Visible only when requested"`) || !strings.Contains(body, `"MediaSources"`) {
+		t.Fatalf("projected resume status=%d body=%s", response.Code, body)
+	}
+}
+
+func TestResumeAndNextUpRejectUndocumentedQueryParameters(t *testing.T) {
+	handler, _, service, _, token, _, _, _ := stateHTTPFixture(t)
+	for _, target := range []struct {
+		name   string
+		path   string
+		handle func(http.ResponseWriter, *http.Request)
+	}{
+		{name: "resume", path: "/UserItems/Resume?SearchTerm=ignored", handle: handler.handleUserResumeItems},
+		{name: "next up", path: "/Shows/NextUp?Recursive=true", handle: handler.handleNextUp},
+		{name: "resume zero limit", path: "/UserItems/Resume?Limit=0", handle: handler.handleUserResumeItems},
+		{name: "next up excessive limit", path: "/Shows/NextUp?Limit=101", handle: handler.handleNextUp},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, target.path, nil)
+			request.Header.Set("X-Emby-Token", token)
+			response := httptest.NewRecorder()
+			target.handle(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+	if service.resumeLimit != 0 || service.nextLimit != 0 {
+		t.Fatalf("unsupported query reached service: resume=%d next=%d", service.resumeLimit, service.nextLimit)
+	}
+}
+
+func TestUserDataRejectsUnknownAndInvalidFieldsAtomically(t *testing.T) {
+	handler, _, service, _, token, itemID, _, _ := stateHTTPFixture(t)
+	for name, body := range map[string]string{
+		"unknown field":   `{"FutureField":1,"IsFavorite":true}`,
+		"null play count": `{"PlayCount":null,"IsFavorite":true}`,
+		"invalid rating":  `{"Rating":11,"IsFavorite":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/UserItems/"+itemID+"/UserData", strings.NewReader(body))
+			request.SetPathValue("itemId", itemID)
+			request.Header.Set("X-Emby-Token", token)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			handler.handleUserData(response, request)
+			if response.Code != http.StatusBadRequest || service.userDataCalls != 0 || len(service.progress) != 0 ||
+				len(service.favorites) != 0 || len(service.userData) != 0 {
+				t.Fatalf("status=%d calls=%d progress=%v favorites=%v userData=%v body=%s",
+					response.Code, service.userDataCalls, service.progress, service.favorites, service.userData, response.Body.String())
+			}
+		})
 	}
 }
 
@@ -803,6 +930,146 @@ func TestResumeBatchProjectionClassifiesOperationalErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPlaybackReportsSkipRealtimeLookupsWithoutOwnerSockets(t *testing.T) {
+	handler, authentication, service, _, token, itemID, playID, mediaID := stateHTTPFixture(t)
+	handler.bootstrap = newBootstrapRegistry()
+	catalog := handler.catalog.(*stateCatalog)
+	for index, positionTicks := range []int64{250000000, 300000000} {
+		body := fmt.Sprintf(`{"ItemId":%q,"PlaySessionId":%q,"MediaSourceId":%q,"PositionTicks":%d}`, itemID, playID, mediaID, positionTicks)
+		response := serveStateRequest(handler.handlePlayingProgress, token, body)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("progress %d status=%d body=%s", index, response.Code, response.Body.String())
+		}
+	}
+	progress := service.progress[itemID]
+	snapshot, ok := handler.bootstrap.sessionSnapshot(authentication.session)
+	if catalog.getCalls != 0 || progress.PositionSeconds != 30 || progress.Version != 2 || !ok || snapshot.playback == nil ||
+		snapshot.playback.itemID != itemID || snapshot.playback.positionTicks != 300000000 {
+		t.Fatalf("catalogCalls=%d progress=%+v snapshot=%+v stored=%t", catalog.getCalls, progress, snapshot, ok)
+	}
+}
+
+func TestPlaybackReportsPublishOnlyToTargetedOwnerSubscriptions(t *testing.T) {
+	handler, authentication, _, _, token, itemID, playID, mediaID := stateHTTPFixture(t)
+	handler.bootstrap = newBootstrapRegistry()
+	ownerLease, ok := handler.bootstrap.acquireSocket(authentication.session)
+	if !ok {
+		t.Fatal("failed to acquire owner socket")
+	}
+	foreign := authentication.session
+	foreign.ID = "99999999-9999-4999-8999-999999999999"
+	foreign.ProfileID = "88888888-8888-4888-8888-888888888888"
+	foreign.Principal.UserID = "77777777-7777-4777-8777-777777777777"
+	foreign.Principal.ActiveProfileID = &foreign.ProfileID
+	foreignLease, ok := handler.bootstrap.acquireSocket(foreign)
+	if !ok || !handler.bootstrap.subscribeSessions(foreignLease, true) {
+		t.Fatal("failed to subscribe foreign socket")
+	}
+	if !handler.bootstrap.hasSubscribers(authentication.session, "UserDataChanged") ||
+		handler.bootstrap.hasSubscribers(authentication.session, "Sessions") ||
+		!handler.bootstrap.hasSubscribers(authentication.session, "Sessions", "UserDataChanged") ||
+		!handler.bootstrap.hasSubscribers(foreign, "Sessions") {
+		t.Fatal("message subscriptions were not scoped by type and owner")
+	}
+
+	body := `{"ItemId":"` + itemID + `","PlaySessionId":"` + playID + `","MediaSourceId":"` + mediaID + `","PositionTicks":250000000}`
+	response := serveStateRequest(handler.handlePlayingProgress, token, body)
+	event := receiveCompatSocketEvent(t, ownerLease)
+	changed, changedOK := event.Data.(UserDataChangeInfo)
+	catalog := handler.catalog.(*stateCatalog)
+	if response.Code != http.StatusNoContent || catalog.getCalls != 1 || event.MessageType != "UserDataChanged" || !changedOK ||
+		changed.UserId != authentication.session.ProfileID || len(changed.UserDataList) != 1 ||
+		changed.UserDataList[0].ItemId != itemID || changed.UserDataList[0].PlaybackPositionTicks != 250000000 {
+		t.Fatalf("status=%d catalogCalls=%d event=%+v body=%s", response.Code, catalog.getCalls, event, response.Body.String())
+	}
+	select {
+	case extra := <-ownerLease.outbound:
+		t.Fatalf("unsubscribed Sessions projection was published: %+v", extra)
+	default:
+	}
+	select {
+	case leaked := <-foreignLease.outbound:
+		t.Fatalf("owner event leaked to foreign subscription: %+v", leaked)
+	default:
+	}
+	handler.bootstrap.releaseSocket(ownerLease)
+	if handler.bootstrap.hasSubscribers(authentication.session, "UserDataChanged", "Sessions") {
+		t.Fatal("released owner socket remained subscribed")
+	}
+	handler.bootstrap.releaseSocket(foreignLease)
+}
+
+func TestPlaybackReportsDriveSessionProjectionAndProfileScopedRealtimeEvents(t *testing.T) {
+	handler, authentication, _, _, token, itemID, playID, mediaID := stateHTTPFixture(t)
+	serverID, err := ParseServerID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.serverInfo = ServerInfo{ID: serverID, Name: "Rivune"}
+	handler.bootstrap = newBootstrapRegistry()
+	catalog := handler.catalog.(*stateCatalog)
+	ownerLease, ok := handler.bootstrap.acquireSocket(authentication.session)
+	if !ok || !handler.bootstrap.subscribeSessions(ownerLease, true) {
+		t.Fatal("failed to subscribe owner socket")
+	}
+	foreign := authentication.session
+	foreign.ID = "99999999-9999-4999-8999-999999999999"
+	foreign.ProfileID = "88888888-8888-4888-8888-888888888888"
+	foreign.Principal.UserID = "77777777-7777-4777-8777-777777777777"
+	foreign.Principal.ActiveProfileID = &foreign.ProfileID
+	foreignLease, ok := handler.bootstrap.acquireSocket(foreign)
+	if !ok {
+		t.Fatal("failed to acquire foreign socket")
+	}
+
+	start := `{"ItemId":"` + itemID + `","PlaySessionId":"` + playID + `","MediaSourceId":"` + mediaID + `","PositionTicks":250000000,"AudioStreamIndex":0,"SubtitleStreamIndex":-1,"CanSeek":true,"IsPaused":true,"IsMuted":true,"PlayMethod":"DirectPlay"}`
+	started := serveStateRequest(handler.handlePlaying, token, start)
+	if started.Code != http.StatusNoContent || catalog.getCalls != 2 {
+		t.Fatalf("started status=%d catalogCalls=%d body=%s", started.Code, catalog.getCalls, started.Body.String())
+	}
+	userDataEvent := receiveCompatSocketEvent(t, ownerLease)
+	if userDataEvent.MessageType != "UserDataChanged" {
+		t.Fatalf("first event=%+v", userDataEvent)
+	}
+	changed, ok := userDataEvent.Data.(UserDataChangeInfo)
+	if !ok || changed.UserId != authentication.session.ProfileID || len(changed.UserDataList) != 1 || changed.UserDataList[0].ItemId != itemID || changed.UserDataList[0].PlaybackPositionTicks != 250000000 {
+		t.Fatalf("user data event=%+v", userDataEvent)
+	}
+	sessionsEvent := receiveCompatSocketEvent(t, ownerLease)
+	if sessionsEvent.MessageType != "Sessions" {
+		t.Fatalf("second event=%+v", sessionsEvent)
+	}
+	info := handler.sessionInfo(context.Background(), authentication.session)
+	if info.NowPlayingItem == nil || info.NowPlayingItem.Id != itemID || info.PlayState == nil || info.PlayState.PositionTicks == nil || *info.PlayState.PositionTicks != 250000000 ||
+		!info.PlayState.CanSeek || !info.PlayState.IsPaused || !info.PlayState.IsMuted || info.PlayState.AudioStreamIndex == nil || *info.PlayState.AudioStreamIndex != 0 ||
+		info.PlayState.SubtitleStreamIndex == nil || *info.PlayState.SubtitleStreamIndex != -1 || info.PlayState.PlayMethod != "DirectPlay" || info.LastPlaybackCheckIn == nil {
+		t.Fatalf("now playing projection=%+v", info)
+	}
+	select {
+	case leaked := <-foreignLease.outbound:
+		t.Fatalf("cross-profile playback event leaked: %+v", leaked)
+	default:
+	}
+
+	catalog.getCalls = 0
+	stopped := serveStateRequest(handler.handlePlayingStopped, token, `{"ItemId":"`+itemID+`","PlaySessionId":"`+playID+`","MediaSourceId":"`+mediaID+`","PositionTicks":300000000}`)
+	if stopped.Code != http.StatusNoContent || catalog.getCalls != 1 {
+		t.Fatalf("stopped status=%d catalogCalls=%d body=%s", stopped.Code, catalog.getCalls, stopped.Body.String())
+	}
+	if event := receiveCompatSocketEvent(t, ownerLease); event.MessageType != "UserDataChanged" {
+		t.Fatalf("stopped user data event=%+v", event)
+	}
+	if event := receiveCompatSocketEvent(t, ownerLease); event.MessageType != "Sessions" {
+		t.Fatalf("stopped sessions event=%+v", event)
+	}
+	info = handler.sessionInfo(context.Background(), authentication.session)
+	if info.NowPlayingItem != nil || info.PlayState != nil || info.LastPlaybackCheckIn != nil {
+		t.Fatalf("stopped session retained playback=%+v", info)
+	}
+	handler.bootstrap.releaseSocket(ownerLease)
+	handler.bootstrap.releaseSocket(foreignLease)
 }
 
 func stateHTTPFixture(t *testing.T) (*Handler, *stateAuthentication, *memoryWatchstate, *playSessionRegistry, string, string, string, string) {
@@ -871,4 +1138,92 @@ func serveStateRequest(implementation func(http.ResponseWriter, *http.Request), 
 	response := httptest.NewRecorder()
 	implementation(response, request)
 	return response
+}
+
+func TestUserDataSupplementalFieldsRoundTripPartialNullAndRejectInvalidAtomically(t *testing.T) {
+	handler, _, service, _, token, itemID, _, _ := stateHTTPFixture(t)
+	catalog := handler.catalog.(*stateCatalog)
+
+	requestUserData := func(method, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, "/UserItems/"+itemID+"/UserData", strings.NewReader(body))
+		request.SetPathValue("itemId", itemID)
+		request.Header.Set("X-Emby-Token", token)
+		if method == http.MethodPost {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		response := httptest.NewRecorder()
+		handler.handleUserData(response, request)
+		return response
+	}
+
+	response := requestUserData(http.MethodPost, `{"Rating":8.25,"PlayedPercentage":42.5,"UnplayedItemCount":3,"PlayCount":7,"Likes":true,"LastPlayedDate":"2026-08-08T21:22:23.1234567-04:00"}`)
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"Rating":8.25`) ||
+		!strings.Contains(response.Body.String(), `"PlayedPercentage":42.5`) ||
+		!strings.Contains(response.Body.String(), `"UnplayedItemCount":3`) ||
+		!strings.Contains(response.Body.String(), `"PlayCount":7`) ||
+		!strings.Contains(response.Body.String(), `"Likes":true`) ||
+		!strings.Contains(response.Body.String(), `"LastPlayedDate":"2026-08-09T01:22:23.1234567Z"`) {
+		t.Fatalf("supplemental update status=%d body=%s", response.Code, response.Body.String())
+	}
+	initial := service.userData[itemID]
+	if !initial.RatingSet || initial.Rating == nil || *initial.Rating != 8.25 ||
+		!initial.PlayedPercentageSet || initial.PlayedPercentage == nil || *initial.PlayedPercentage != 42.5 ||
+		!initial.UnplayedItemCountSet || initial.UnplayedItemCount == nil || *initial.UnplayedItemCount != 3 ||
+		!initial.PlayCountSet || initial.PlayCount == nil || *initial.PlayCount != 7 ||
+		!initial.LikesSet || initial.Likes == nil || !*initial.Likes ||
+		!initial.LastPlayedDateSet || initial.LastPlayedDate == nil {
+		t.Fatalf("supplemental fields were not forwarded exactly: %+v", initial)
+	}
+
+	response = requestUserData(http.MethodPost, `{"Rating":null,"Likes":false,"LastPlayedDate":null}`)
+	current := service.userData[itemID]
+	if response.Code != http.StatusOK || current.Rating != nil || !current.RatingSet ||
+		current.Likes == nil || *current.Likes || !current.LikesSet ||
+		current.LastPlayedDate != nil || !current.LastPlayedDateSet ||
+		current.PlayedPercentage == nil || *current.PlayedPercentage != 42.5 ||
+		current.UnplayedItemCount == nil || *current.UnplayedItemCount != 3 ||
+		current.PlayCount == nil || *current.PlayCount != 7 ||
+		strings.Contains(response.Body.String(), `"Rating"`) ||
+		!strings.Contains(response.Body.String(), `"PlayedPercentage":42.5`) ||
+		!strings.Contains(response.Body.String(), `"Likes":false`) ||
+		strings.Contains(response.Body.String(), `"LastPlayedDate"`) {
+		t.Fatalf("partial nullable update status=%d state=%+v body=%s", response.Code, current, response.Body.String())
+	}
+
+	item := catalog.items[itemID]
+	item.UserData = &current
+	catalog.items[itemID] = item
+	response = requestUserData(http.MethodGet, "")
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"PlayedPercentage":42.5`) ||
+		!strings.Contains(response.Body.String(), `"UnplayedItemCount":3`) ||
+		!strings.Contains(response.Body.String(), `"PlayCount":7`) ||
+		!strings.Contains(response.Body.String(), `"Likes":false`) ||
+		strings.Contains(response.Body.String(), `"Rating"`) ||
+		strings.Contains(response.Body.String(), `"LastPlayedDate"`) {
+		t.Fatalf("supplemental GET status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	calls := service.userDataCalls
+	for _, body := range []string{
+		`{"Rating":11,"IsFavorite":true}`,
+		`{"PlayedPercentage":101,"IsFavorite":true}`,
+		`{"UnplayedItemCount":-1,"IsFavorite":true}`,
+		`{"PlayCount":null,"IsFavorite":true}`,
+		`{"PlayCount":2147483648,"IsFavorite":true}`,
+		`{"LastPlayedDate":"2026-08-09","IsFavorite":true}`,
+		`{"Rating":"high","IsFavorite":true}`,
+		`{"Rating":1,"Rating":2,"IsFavorite":true}`,
+	} {
+		response = requestUserData(http.MethodPost, body)
+		if response.Code != http.StatusBadRequest || service.userDataCalls != calls || service.favorites[itemID] {
+			t.Fatalf("invalid supplemental mutation body=%s status=%d calls=%d favorite=%t response=%s", body, response.Code, service.userDataCalls, service.favorites[itemID], response.Body.String())
+		}
+	}
+	invalidUTF8 := "{\"LastPlayedDate\":\"2026-08-09T01:22:23Z" + string([]byte{0xff}) + "\",\"IsFavorite\":true}"
+	response = requestUserData(http.MethodPost, invalidUTF8)
+	if response.Code != http.StatusBadRequest || service.userDataCalls != calls || service.favorites[itemID] {
+		t.Fatalf("invalid UTF-8 status=%d calls=%d favorite=%t body=%s", response.Code, service.userDataCalls, service.favorites[itemID], response.Body.String())
+	}
 }

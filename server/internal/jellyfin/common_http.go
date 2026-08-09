@@ -1,6 +1,7 @@
 package jellyfin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,7 +19,135 @@ const (
 	maximumCompatErrorMessageRunes       = 256
 )
 
-var ErrInvalidCompatRequest = errors.New("invalid compatibility request")
+var (
+	ErrInvalidCompatRequest           = errors.New("invalid compatibility request")
+	ErrCompatMaintenanceMode          = errors.New("compatibility request denied by maintenance mode")
+	ErrCompatRequestPolicyUnavailable = errors.New("compatibility request policy unavailable")
+)
+
+const defaultCompatMaintenanceMessage = "Rivune is temporarily unavailable for maintenance."
+
+type authenticatedPolicyExemptionKey struct{}
+
+type policyAuthentication struct {
+	next   Authentication
+	policy AuthenticatedRequestPolicy
+}
+
+type compatMaintenanceModeError struct {
+	publicMessage string
+}
+
+func (err *compatMaintenanceModeError) Error() string {
+	return ErrCompatMaintenanceMode.Error()
+}
+
+func (err *compatMaintenanceModeError) Unwrap() error {
+	return ErrCompatMaintenanceMode
+}
+
+func newPolicyAuthentication(next Authentication, policy AuthenticatedRequestPolicy) Authentication {
+	if next == nil || policy == nil {
+		return next
+	}
+	return &policyAuthentication{next: next, policy: policy}
+}
+
+func (authentication *policyAuthentication) Login(ctx context.Context, input CompatLoginInput) (LoginResult, error) {
+	return authentication.next.Login(ctx, input)
+}
+
+func (authentication *policyAuthentication) Authenticate(ctx context.Context, token string) (AuthenticatedSession, error) {
+	session, err := authentication.next.Authenticate(ctx, token)
+	if err != nil {
+		return AuthenticatedSession{}, err
+	}
+	if err := authentication.authorize(ctx, session); err != nil {
+		return AuthenticatedSession{}, err
+	}
+	return session, nil
+}
+
+func (authentication *policyAuthentication) Revalidate(ctx context.Context, expected AuthenticatedSession) (AuthenticatedSession, error) {
+	session, err := authentication.next.Revalidate(ctx, expected)
+	if err != nil {
+		return AuthenticatedSession{}, err
+	}
+	if err := authentication.authorize(ctx, session); err != nil {
+		return AuthenticatedSession{}, err
+	}
+	return session, nil
+}
+
+func (authentication *policyAuthentication) Logout(ctx context.Context, session AuthenticatedSession) error {
+	return authentication.next.Logout(ctx, session)
+}
+
+func (authentication *policyAuthentication) authorize(ctx context.Context, session AuthenticatedSession) error {
+	if exempt, _ := ctx.Value(authenticatedPolicyExemptionKey{}).(bool); exempt {
+		return nil
+	}
+	result, err := authentication.policy.Authorize(ctx, session.Principal)
+	if err != nil {
+		return errors.Join(ErrCompatRequestPolicyUnavailable, err)
+	}
+	if result.Allowed {
+		return nil
+	}
+	message := ""
+	if result.PublicMessage != nil {
+		message = *result.PublicMessage
+	}
+	return &compatMaintenanceModeError{publicMessage: message}
+}
+
+func withAuthenticatedPolicyExemption(request *http.Request) *http.Request {
+	if request == nil {
+		return nil
+	}
+	return request.WithContext(context.WithValue(request.Context(), authenticatedPolicyExemptionKey{}, true))
+}
+
+func compatMaintenancePublicMessage(err error) string {
+	var maintenanceErr *compatMaintenanceModeError
+	if !errors.As(err, &maintenanceErr) {
+		return defaultCompatMaintenanceMessage
+	}
+	return publicCompatErrorValue(maintenanceErr.publicMessage, defaultCompatMaintenanceMessage, maximumCompatErrorMessageRunes)
+}
+
+func compatRequestPolicyResponse(err error) (string, string, bool) {
+	switch {
+	case errors.Is(err, ErrCompatMaintenanceMode):
+		return "MaintenanceMode", compatMaintenancePublicMessage(err), true
+	case errors.Is(err, ErrCompatRequestPolicyUnavailable):
+		return "ServiceUnavailable", "The compatibility authorization service is unavailable", true
+	default:
+		return "", "", false
+	}
+}
+
+func writeCompatRequestPolicyError(response http.ResponseWriter, err error) bool {
+	code, message, ok := compatRequestPolicyResponse(err)
+	if !ok {
+		return false
+	}
+	response.Header().Set("Retry-After", "5")
+	response.Header().Set("Cache-Control", "no-store")
+	writeCompatError(response, http.StatusServiceUnavailable, code, message)
+	return true
+}
+
+func (handler *Handler) writeCompatStreamRequestPolicyError(response http.ResponseWriter, request *http.Request, err error) bool {
+	code, message, ok := compatRequestPolicyResponse(err)
+	if !ok {
+		return false
+	}
+	response.Header().Set("Retry-After", "5")
+	response.Header().Set("Cache-Control", "no-store")
+	handler.writeStreamError(response, request, http.StatusServiceUnavailable, code, message)
+	return true
+}
 
 type CompatErrorResponse struct {
 	ResponseStatus CompatErrorStatus `json:"ResponseStatus"`
@@ -64,7 +193,12 @@ func (handler *Handler) authenticateRequest(response http.ResponseWriter, reques
 	}
 	session, err := handler.authentication.Authenticate(request.Context(), token)
 	if err != nil {
-		if errors.Is(err, ErrInvalidCompatCredential) || errors.Is(err, ErrInvalidCompatAuthorization) {
+		if writeCompatRequestPolicyError(response, err) {
+			return AuthenticatedSession{}, false
+		}
+		if errors.Is(err, ErrCompatAuthenticationSaturated) {
+			writeCompatError(response, http.StatusServiceUnavailable, "ServiceUnavailable", "The compatibility authentication service is busy")
+		} else if errors.Is(err, ErrInvalidCompatCredential) || errors.Is(err, ErrInvalidCompatAuthorization) {
 			writeCompatError(response, http.StatusUnauthorized, "Unauthorized", "A valid compatibility token is required")
 		} else {
 			writeCompatError(response, http.StatusInternalServerError, "InternalError", "The request could not be completed")

@@ -24,27 +24,51 @@ var (
 const sessionTTL = 2 * time.Hour
 
 type MediaProfile struct {
-	Container  string `json:"container"`
-	VideoCodec string `json:"videoCodec"`
-	AudioCodec string `json:"audioCodec,omitempty"`
+	Container                 string `json:"container"`
+	VideoCodec                string `json:"videoCodec"`
+	AudioCodec                string `json:"audioCodec,omitempty"`
+	ContainersCSV             string `json:"-"`
+	AudioCodecsCSV            string `json:"-"`
+	DirectPlay                bool   `json:"-"`
+	Transcoding               bool   `json:"-"`
+	SupportsNonDolbyVisionHDR bool   `json:"-"`
+	MaximumVideoLevel         int    `json:"-"`
+	VideoLevelRequired        bool   `json:"-"`
+	ExcludedVideoRange        string `json:"-"`
+	VideoRangeRequired        bool   `json:"-"`
+	RequiredConditionUnknown  bool   `json:"-"`
+}
+
+type ContainerProfile struct {
+	ContainersCSV string             `json:"-"`
+	Conditions    []ProfileCondition `json:"-"`
+}
+
+type ProfileCondition struct {
+	Condition string `json:"-"`
+	Property  string `json:"-"`
+	Value     string `json:"-"`
+	Required  bool   `json:"-"`
 }
 
 type Capabilities struct {
-	StreamingProtocols        []string       `json:"streamingProtocols,omitempty"`
-	Containers                []string       `json:"containers,omitempty"`
-	VideoCodecs               []string       `json:"videoCodecs,omitempty"`
-	AudioCodecs               []string       `json:"audioCodecs,omitempty"`
-	HDRFormats                []string       `json:"hdrFormats,omitempty"`
-	ExternalPlayers           []string       `json:"externalPlayers,omitempty"`
-	ProcessingModes           []string       `json:"processingModes,omitempty"`
-	MediaProfiles             []MediaProfile `json:"mediaProfiles,omitempty"`
-	HLSSegmentContainer       string         `json:"hlsSegmentContainer,omitempty"`
-	MaximumVideoBitrateKbps   int            `json:"maximumVideoBitrateKbps,omitempty"`
-	MaximumAudioChannels      int            `json:"maximumAudioChannels,omitempty"`
-	SubtitleModes             []string       `json:"subtitleModes,omitempty"`
-	MaximumHeight             int            `json:"maximumHeight,omitempty"`
-	PreferDirectPlay          *bool          `json:"-"`
-	TranscodeVideoBitrateKbps int            `json:"-"`
+	StreamingProtocols        []string           `json:"streamingProtocols,omitempty"`
+	Containers                []string           `json:"containers,omitempty"`
+	VideoCodecs               []string           `json:"videoCodecs,omitempty"`
+	AudioCodecs               []string           `json:"audioCodecs,omitempty"`
+	HDRFormats                []string           `json:"hdrFormats,omitempty"`
+	ExternalPlayers           []string           `json:"externalPlayers,omitempty"`
+	ProcessingModes           []string           `json:"processingModes,omitempty"`
+	MediaProfiles             []MediaProfile     `json:"mediaProfiles,omitempty"`
+	ContainerProfiles         []ContainerProfile `json:"-"`
+	HLSSegmentContainer       string             `json:"hlsSegmentContainer,omitempty"`
+	MaximumVideoBitrateKbps   int                `json:"maximumVideoBitrateKbps,omitempty"`
+	MaximumAudioChannels      int                `json:"maximumAudioChannels,omitempty"`
+	SubtitleModes             []string           `json:"subtitleModes,omitempty"`
+	MaximumHeight             int                `json:"maximumHeight,omitempty"`
+	PreferDirectPlay          *bool              `json:"-"`
+	TranscodeVideoBitrateKbps int                `json:"-"`
+	AllowDirectPassthrough    bool               `json:"-"`
 }
 
 type SourcesInput struct {
@@ -117,17 +141,19 @@ type ResolveInput struct {
 }
 
 type MediaTrack struct {
-	Index       int    `json:"index"`
-	Type        string `json:"type"`
-	Codec       string `json:"codec"`
-	Profile     string `json:"profile,omitempty"`
-	Language    string `json:"language,omitempty"`
-	Title       string `json:"title,omitempty"`
-	Forced      bool   `json:"forced,omitempty"`
-	Width       int    `json:"width,omitempty"`
-	Height      int    `json:"height,omitempty"`
-	Channels    int    `json:"channels,omitempty"`
-	BitrateKbps int    `json:"-"`
+	Index          int    `json:"index"`
+	Type           string `json:"type"`
+	Codec          string `json:"codec"`
+	Profile        string `json:"profile,omitempty"`
+	Level          int    `json:"-"`
+	VideoRangeType string `json:"-"`
+	Language       string `json:"language,omitempty"`
+	Title          string `json:"title,omitempty"`
+	Forced         bool   `json:"forced,omitempty"`
+	Width          int    `json:"width,omitempty"`
+	Height         int    `json:"height,omitempty"`
+	Channels       int    `json:"channels,omitempty"`
+	BitrateKbps    int    `json:"-"`
 }
 
 type MediaInspection struct {

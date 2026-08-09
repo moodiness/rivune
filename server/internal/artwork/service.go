@@ -1,6 +1,8 @@
 package artwork
 
 import (
+	"bytes"
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -8,11 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	_ "image/jpeg"
-	_ "image/png"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,29 +29,47 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/netguard"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 const (
-	maxObjectBytes             int64 = 12 << 20
-	maxImageDimension                = 16384
-	maxImagePixels             int64 = 40_000_000
-	publicPrefix                     = "/api/v1/artwork/"
-	pruneLockID                int64 = 0x617274776f726b
-	warmupConcurrency                = 6
-	warmupQueueCapacity              = 32_768
-	maxArtworkRegistrations          = 32_768
-	registrationPruneBatchSize       = 256
-	uncachedRegistrationTTL          = 24 * time.Hour
+	maxObjectBytes                       int64 = 12 << 20
+	maxImageDimension                          = 16384
+	maxImagePixels                       int64 = 40_000_000
+	publicPrefix                               = "/api/v1/artwork/"
+	pruneLockID                          int64 = 0x617274776f726b
+	maxArtworkRegistrations                    = 32_768
+	registrationPruneBatchSize                 = 256
+	uncachedRegistrationTTL                    = 24 * time.Hour
+	maxIfNoneMatchBytes                        = 2048
+	negativeCacheTTL                           = 30 * time.Second
+	maximumConcurrentArtworkFetches            = 4
+	maximumReservedArtworkTemporaryFiles       = 4
+	maximumReservedArtworkTemporaryBytes int64 = maximumReservedArtworkTemporaryFiles * maxObjectBytes
+	maximumNegativeCacheEntries                = 4096
+	maximumImageTransformDimension             = 16384
+	maximumImageTransformPixels          int64 = 40_000_000
+	maximumConcurrentImageTransforms           = 2
+	maximumTransformedImageCacheBytes    int64 = 8 << 20
+	maximumTransformedImageCacheEntries        = 64
 )
 
-var errObjectExceedsCache = errors.New("artwork object exceeds cache capacity")
+var (
+	errObjectExceedsCache      = errors.New("artwork object exceeds cache capacity")
+	errArtworkNegativeCached   = errors.New("artwork is temporarily unavailable")
+	errArtworkFetchSaturated   = errors.New("artwork fetch capacity is saturated")
+	errImageTransformSaturated = errors.New("image transformation capacity is saturated")
+)
 
 type Options struct {
-	Directory         string
-	MaxBytes          int64
-	HTTPClient        *http.Client
-	LANArtworkOrigins []string
-	Logger            *slog.Logger
+	Directory            string
+	MaxBytes             int64
+	HTTPClient           *http.Client
+	LANArtworkOrigins    []string
+	Logger               *slog.Logger
+	MaxConcurrentFetches int
+	MaxTemporaryFiles    int
+	MaxTemporaryBytes    int64
 }
 
 type Service struct {
@@ -61,12 +84,63 @@ type Service struct {
 	registrationLimit int
 	registrationTTL   time.Duration
 
-	flightsMu sync.Mutex
-	flights   map[string]*flight
+	flightsMu      sync.Mutex
+	flights        map[string]*flight
+	fetchAdmission fetchAdmission
 
-	warmupMu     sync.Mutex
-	warmupQueue  chan string
-	queuedWarmup map[string]struct{}
+	transformMu              sync.Mutex
+	transformFlights         map[string]*imageTransformFlight
+	transformSlots           chan struct{}
+	transformCache           map[string]*list.Element
+	transformCacheLRU        list.List
+	transformCacheBytes      int64
+	transformCacheMaxBytes   int64
+	transformCacheMaxEntries int
+	imageTransformer         func(*os.File, string, imageTransform) ([]byte, string, error)
+
+	negativeMu  sync.Mutex
+	negative    map[string]time.Time
+	negativeNow func() time.Time
+}
+
+type fetchAdmission struct {
+	mu sync.Mutex
+
+	maxInFlight       int
+	maxTemporaryFiles int
+	maxTemporaryBytes int64
+
+	inFlight       int
+	temporaryFiles int
+	temporaryBytes int64
+}
+
+func (admission *fetchAdmission) tryReserve() bool {
+	admission.mu.Lock()
+	defer admission.mu.Unlock()
+	if admission.inFlight >= admission.maxInFlight ||
+		admission.temporaryFiles >= admission.maxTemporaryFiles ||
+		admission.temporaryBytes > admission.maxTemporaryBytes-maxObjectBytes {
+		return false
+	}
+	admission.inFlight++
+	admission.temporaryFiles++
+	admission.temporaryBytes += maxObjectBytes
+	return true
+}
+
+func (admission *fetchAdmission) release() {
+	admission.mu.Lock()
+	admission.inFlight--
+	admission.temporaryFiles--
+	admission.temporaryBytes -= maxObjectBytes
+	admission.mu.Unlock()
+}
+
+func (admission *fetchAdmission) usage() (int, int, int64) {
+	admission.mu.Lock()
+	defer admission.mu.Unlock()
+	return admission.inFlight, admission.temporaryFiles, admission.temporaryBytes
 }
 
 type flight struct {
@@ -74,11 +148,52 @@ type flight struct {
 	err  error
 }
 
+type byteCountingReader struct {
+	source io.Reader
+	bytes  int64
+}
+
+func (reader *byteCountingReader) Read(buffer []byte) (int, error) {
+	read, err := reader.source.Read(buffer)
+	reader.bytes += int64(read)
+	return read, err
+}
+
+type imageTransformFlight struct {
+	done        chan struct{}
+	content     []byte
+	contentType string
+	err         error
+}
+
+type imageTransformCacheEntry struct {
+	etag        string
+	content     []byte
+	contentType string
+}
+
 type cacheRecord struct {
 	key         string
 	sourceURL   string
 	contentType string
 	byteSize    int64
+}
+
+// ImageMetadata describes only bytes already present in the local cache.
+type ImageMetadata struct {
+	Width  int
+	Height int
+	Size   int64
+}
+
+type imageTransform struct {
+	width      int
+	maxWidth   int
+	maxHeight  int
+	fillWidth  int
+	fillHeight int
+	quality    int
+	requested  bool
 }
 
 func New(pool *pgxpool.Pool, options Options) (*Service, error) {
@@ -91,6 +206,15 @@ func New(pool *pgxpool.Pool, options Options) (*Service, error) {
 	}
 	if options.MaxBytes <= 0 {
 		return nil, errors.New("artwork cache byte limit must be positive")
+	}
+	if options.MaxConcurrentFetches < 0 {
+		return nil, errors.New("artwork concurrent fetch limit cannot be negative")
+	}
+	if options.MaxTemporaryFiles < 0 {
+		return nil, errors.New("artwork temporary file limit cannot be negative")
+	}
+	if options.MaxTemporaryBytes < 0 {
+		return nil, errors.New("artwork temporary byte limit cannot be negative")
 	}
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, fmt.Errorf("create artwork cache directory: %w", err)
@@ -112,14 +236,37 @@ func New(pool *pgxpool.Pool, options Options) (*Service, error) {
 	if client == nil {
 		client = newProductionHTTPClient(policy)
 	}
+	maxConcurrentFetches := options.MaxConcurrentFetches
+	if maxConcurrentFetches == 0 {
+		maxConcurrentFetches = maximumConcurrentArtworkFetches
+	}
+	maxTemporaryFiles := options.MaxTemporaryFiles
+	if maxTemporaryFiles == 0 {
+		maxTemporaryFiles = maximumReservedArtworkTemporaryFiles
+	}
+	maxTemporaryBytes := options.MaxTemporaryBytes
+	if maxTemporaryBytes == 0 {
+		maxTemporaryBytes = maximumReservedArtworkTemporaryBytes
+	}
 	service := &Service{
 		pool: pool, directory: absoluteDirectory, maxBytes: options.MaxBytes,
 		httpClient: client, logger: logger, allowLocal: allowLocal, transportPolicy: policy,
 		registrationLimit: maxArtworkRegistrations,
 		registrationTTL:   uncachedRegistrationTTL,
 		flights:           make(map[string]*flight),
-		warmupQueue:       make(chan string, warmupQueueCapacity),
-		queuedWarmup:      make(map[string]struct{}),
+		fetchAdmission: fetchAdmission{
+			maxInFlight:       maxConcurrentFetches,
+			maxTemporaryFiles: maxTemporaryFiles,
+			maxTemporaryBytes: maxTemporaryBytes,
+		},
+		transformFlights:         make(map[string]*imageTransformFlight),
+		transformSlots:           make(chan struct{}, maximumConcurrentImageTransforms),
+		transformCache:           make(map[string]*list.Element),
+		transformCacheMaxBytes:   maximumTransformedImageCacheBytes,
+		transformCacheMaxEntries: maximumTransformedImageCacheEntries,
+		imageTransformer:         transformImage,
+		negative:                 make(map[string]time.Time),
+		negativeNow:              time.Now,
 	}
 	if err := service.pruneRegistrationBacklog(context.Background()); err != nil {
 		return nil, fmt.Errorf("bound artwork registrations during initialization: %w", err)
@@ -190,22 +337,20 @@ func (service *Service) LocalURLs(ctx context.Context, upstream []string) []stri
 		}
 	}
 	registered := make(map[string]string, len(keys))
-	pendingKeys := make([]string, 0, len(keys))
 	for start := 0; start < len(keys); start += registrationPruneBatchSize {
 		end := min(start+registrationPruneBatchSize, len(keys))
-		batchRegistered, batchPending, ok := service.lookupRegistrationBatch(ctx, keys[start:end])
+		batchRegistered, ok := service.lookupRegistrationBatch(ctx, keys[start:end])
 		if !ok {
 			return localized
 		}
 		for key, sourceURL := range batchRegistered {
 			registered[key] = sourceURL
 		}
-		pendingKeys = append(pendingKeys, batchPending...)
 	}
 
 	for key, positions := range indexes {
 		sourceURL, exists := registered[key]
-		if !exists || sourceURL != expected[key] {
+		if !exists || sourceURL != expected[key] || service.negativeCached(key) {
 			continue
 		}
 		for _, position := range positions {
@@ -213,19 +358,18 @@ func (service *Service) LocalURLs(ctx context.Context, upstream []string) []stri
 		}
 	}
 	for key, positions := range referenceIndexes {
-		if _, exists := registered[key]; !exists {
+		if _, exists := registered[key]; !exists || service.negativeCached(key) {
 			continue
 		}
 		for _, position := range positions {
 			localized[position] = publicPrefix + key
 		}
 	}
-	service.enqueueWarmups(pendingKeys)
 	return localized
 }
 
-// LookupKey resolves a materialized artwork reference to an existing
-// registration without registering, fetching, or exposing its source URL.
+// LookupKey resolves a materialized artwork reference to an existing,
+// currently projectable registration without registering, fetching, or exposing its source URL.
 func (service *Service) LookupKey(ctx context.Context, materialized string) (string, bool) {
 	materialized = strings.TrimSpace(materialized)
 	key := ""
@@ -244,10 +388,33 @@ func (service *Service) LookupKey(ctx context.Context, materialized string) (str
 		expectedSource = normalized
 	}
 	record, found, err := service.lookup(ctx, key)
-	if err != nil || !found || expectedSource != "" && record.sourceURL != expectedSource {
+	if err != nil || !found || expectedSource != "" && record.sourceURL != expectedSource || service.negativeCached(key) {
 		return "", false
 	}
 	return key, true
+}
+
+// DescribeKey reports authoritative metadata for an already cached registered
+// image. It never fetches the provider source merely to populate optional DTO fields.
+func (service *Service) DescribeKey(ctx context.Context, key string) (ImageMetadata, bool) {
+	if service == nil || !validKey(key) {
+		return ImageMetadata{}, false
+	}
+	record, file, found, err := service.load(ctx, key)
+	if err != nil || !found || file == nil || record.byteSize <= 0 {
+		if file != nil {
+			_ = file.Close()
+		}
+		return ImageMetadata{}, false
+	}
+	defer file.Close()
+	metadata := ImageMetadata{Size: record.byteSize}
+	configuration, _, decodeErr := image.DecodeConfig(file)
+	if decodeErr == nil && configuration.Width > 0 && configuration.Height > 0 {
+		metadata.Width = configuration.Width
+		metadata.Height = configuration.Height
+	}
+	return metadata, true
 }
 
 func (service *Service) registerBatch(ctx context.Context, keys, urls []string) bool {
@@ -274,98 +441,30 @@ func (service *Service) registerBatch(ctx context.Context, keys, urls []string) 
 	return transaction.Commit(ctx) == nil
 }
 
-func (service *Service) lookupRegistrationBatch(ctx context.Context, keys []string) (map[string]string, []string, bool) {
+func (service *Service) lookupRegistrationBatch(ctx context.Context, keys []string) (map[string]string, bool) {
 	rows, err := service.pool.Query(ctx, `
-		SELECT key, source_url, byte_size
+		SELECT key, source_url
 		FROM artwork_cache
 		WHERE key = ANY($1::text[])
 	`, keys)
 	if err != nil {
-		return nil, nil, false
+		return nil, false
 	}
 	registered := make(map[string]string, len(keys))
-	pendingKeys := make([]string, 0, len(keys))
 	for rows.Next() {
 		var key, sourceURL string
-		var byteSize *int64
-		if err := rows.Scan(&key, &sourceURL, &byteSize); err != nil {
+		if err := rows.Scan(&key, &sourceURL); err != nil {
 			rows.Close()
-			return nil, nil, false
+			return nil, false
 		}
 		registered[key] = sourceURL
-		if byteSize == nil {
-			pendingKeys = append(pendingKeys, key)
-		}
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return nil, nil, false
+		return nil, false
 	}
 	rows.Close()
-	return registered, pendingKeys, true
-}
-
-func (service *Service) RunWarmup(ctx context.Context) {
-	var wait sync.WaitGroup
-	wait.Add(warmupConcurrency)
-	for range warmupConcurrency {
-		go func() {
-			defer wait.Done()
-			service.runWarmupWorker(ctx)
-		}()
-	}
-	<-ctx.Done()
-	wait.Wait()
-}
-
-func (service *Service) runWarmupWorker(ctx context.Context) {
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case key := <-service.warmupQueue:
-			service.warmArtwork(ctx, key)
-			service.completeWarmup(key)
-		}
-	}
-}
-
-func (service *Service) warmArtwork(ctx context.Context, key string) {
-	record, found, err := service.lookup(ctx, key)
-	if err == nil && found {
-		err = service.fetchCoalesced(ctx, record)
-	}
-	if err != nil && ctx.Err() == nil {
-		service.logger.WarnContext(ctx, "warm artwork", "key", key, "error", err)
-	}
-}
-
-func (service *Service) enqueueWarmups(keys []string) {
-	for _, key := range keys {
-		if !validKey(key) {
-			continue
-		}
-		service.warmupMu.Lock()
-		if _, exists := service.queuedWarmup[key]; exists {
-			service.warmupMu.Unlock()
-			continue
-		}
-		select {
-		case service.warmupQueue <- key:
-			service.queuedWarmup[key] = struct{}{}
-		default:
-		}
-		service.warmupMu.Unlock()
-	}
-}
-
-func (service *Service) completeWarmup(key string) {
-	service.warmupMu.Lock()
-	delete(service.queuedWarmup, key)
-	service.warmupMu.Unlock()
+	return registered, true
 }
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -384,8 +483,41 @@ func (service *Service) ServeKey(response http.ResponseWriter, request *http.Req
 		http.Error(response, "invalid artwork key", http.StatusBadRequest)
 		return
 	}
+	transform, transformErr := parseImageTransform(request.URL.Query())
+	if transformErr != nil {
+		response.Header().Set("Cache-Control", "no-store")
+		http.Error(response, "invalid image transformation", http.StatusBadRequest)
+		return
+	}
 
-	record, file, found, err := service.load(request.Context(), key)
+	record, found, err := service.lookup(request.Context(), key)
+	if err != nil {
+		service.logger.WarnContext(request.Context(), "load artwork", "key", key, "error", err)
+		respondArtworkUnavailable(response)
+		return
+	}
+	if !found {
+		http.Error(response, "artwork not found", http.StatusNotFound)
+		return
+	}
+	if transform.requested && record.byteSize > 0 && record.contentType != "image/jpeg" && record.contentType != "image/png" {
+		response.Header().Set("Cache-Control", "no-store")
+		http.Error(response, "image transformation unsupported", http.StatusBadRequest)
+		return
+	}
+	etag := imageTransformETag(key, transform)
+	if record.byteSize > 0 && ifNoneMatchArtwork(request.Header.Values("If-None-Match"), etag) {
+		response.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		response.Header().Set("ETag", etag)
+		response.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if service.negativeCached(key) {
+		respondArtworkUnavailable(response)
+		return
+	}
+
+	record, file, found, err := service.loadRecord(request.Context(), record)
 	if err != nil {
 		service.logger.WarnContext(request.Context(), "load artwork", "key", key, "error", err)
 		respondArtworkUnavailable(response)
@@ -397,14 +529,22 @@ func (service *Service) ServeKey(response http.ResponseWriter, request *http.Req
 	}
 	if file == nil {
 		if err := service.fetchCoalesced(request.Context(), record); err != nil {
+			if errors.Is(err, errArtworkFetchSaturated) {
+				respondArtworkFetchSaturated(response)
+				return
+			}
 			service.logger.WarnContext(request.Context(), "fetch artwork", "key", key, "error", err)
 			respondArtworkUnavailable(response)
 			return
 		}
+		service.clearNegative(key)
 		record, file, found, err = service.load(request.Context(), key)
 		if err != nil || !found || file == nil {
 			if err == nil {
 				err = errors.New("downloaded artwork was not durable")
+			}
+			if cacheableArtworkFailure(request.Context(), err) {
+				service.markNegative(key)
 			}
 			service.logger.WarnContext(request.Context(), "reopen artwork", "key", key, "error", err)
 			respondArtworkUnavailable(response)
@@ -412,14 +552,42 @@ func (service *Service) ServeKey(response http.ResponseWriter, request *http.Req
 		}
 	}
 	defer file.Close()
-
+	contentType := record.contentType
+	byteSize := record.byteSize
+	var transformed []byte
+	if transform.requested {
+		var cached bool
+		transformed, contentType, cached = service.cachedImageTransform(etag)
+		if !cached {
+			transformed, contentType, err = service.transformCoalesced(request.Context(), etag, file, record.contentType, transform)
+			if errors.Is(err, errImageTransformSaturated) {
+				response.Header().Set("Cache-Control", "no-store")
+				http.Error(response, "image transformation unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if err != nil {
+				if request.Context().Err() != nil {
+					return
+				}
+				response.Header().Set("Cache-Control", "no-store")
+				http.Error(response, "image transformation unsupported", http.StatusBadRequest)
+				return
+			}
+		}
+		byteSize = int64(len(transformed))
+	}
 	response.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	response.Header().Set("Content-Type", record.contentType)
-	response.Header().Set("Content-Length", strconv.FormatInt(record.byteSize, 10))
-	response.Header().Set("ETag", `"`+key+`"`)
+	response.Header().Set("ETag", etag)
+	response.Header().Set("Content-Type", contentType)
+	response.Header().Set("Content-Length", strconv.FormatInt(byteSize, 10))
 	response.WriteHeader(http.StatusOK)
 	if request.Method == http.MethodGet {
-		if _, err := io.CopyN(response, file, record.byteSize); err != nil {
+		if transform.requested {
+			_, err = response.Write(transformed)
+		} else {
+			_, err = io.CopyN(response, file, record.byteSize)
+		}
+		if err != nil {
 			service.logger.WarnContext(request.Context(), "serve artwork", "key", key, "error", err)
 		}
 	}
@@ -429,6 +597,314 @@ func (service *Service) ServeKey(response http.ResponseWriter, request *http.Req
 	`, key); err != nil {
 		service.logger.WarnContext(request.Context(), "touch artwork", "key", key, "error", err)
 	}
+}
+
+func parseImageTransform(values url.Values) (imageTransform, error) {
+	result := imageTransform{quality: 90}
+	parse := func(name string, minimum, maximum int) (int, bool, error) {
+		var entries []string
+		for actual, candidates := range values {
+			if strings.EqualFold(actual, name) {
+				entries = append(entries, candidates...)
+			}
+		}
+		if len(entries) == 0 {
+			return 0, false, nil
+		}
+		if len(entries) != 1 {
+			return 0, false, errors.New("duplicate image transformation parameter")
+		}
+		parsed, err := strconv.ParseInt(entries[0], 10, 32)
+		if err != nil || parsed < int64(minimum) || parsed > int64(maximum) || strconv.FormatInt(parsed, 10) != entries[0] {
+			return 0, false, errors.New("invalid image transformation parameter")
+		}
+		return int(parsed), true, nil
+	}
+	var found bool
+	var err error
+	for _, target := range []struct {
+		name  string
+		value *int
+		max   int
+	}{{"width", &result.width, maximumImageTransformDimension}, {"maxWidth", &result.maxWidth, maximumImageTransformDimension},
+		{"maxHeight", &result.maxHeight, maximumImageTransformDimension}, {"fillWidth", &result.fillWidth, maximumImageTransformDimension},
+		{"fillHeight", &result.fillHeight, maximumImageTransformDimension}, {"quality", &result.quality, 100}} {
+		*target.value, found, err = parse(target.name, 1, target.max)
+		if err != nil {
+			return imageTransform{}, err
+		}
+		result.requested = result.requested || found
+		if target.name == "quality" && !found {
+			result.quality = 90
+		}
+	}
+	if result.width != 0 && (result.maxWidth != 0 || result.maxHeight != 0 || result.fillWidth != 0 || result.fillHeight != 0) ||
+		(result.fillWidth != 0 || result.fillHeight != 0) && (result.maxWidth != 0 || result.maxHeight != 0) {
+		return imageTransform{}, errors.New("conflicting image transformation parameters")
+	}
+	if result.fillWidth != 0 && result.fillHeight != 0 && int64(result.fillWidth)*int64(result.fillHeight) > maximumImageTransformPixels {
+		return imageTransform{}, errors.New("image transformation exceeds pixel budget")
+	}
+	return result, nil
+}
+
+func imageTransformETag(key string, transform imageTransform) string {
+	if !transform.requested {
+		return `"` + key + `"`
+	}
+	canonical := fmt.Sprintf("%s:w=%d,mw=%d,mh=%d,fw=%d,fh=%d,q=%d", key, transform.width, transform.maxWidth, transform.maxHeight, transform.fillWidth, transform.fillHeight, transform.quality)
+	digest := sha256.Sum256([]byte(canonical))
+	return `"` + hex.EncodeToString(digest[:]) + `"`
+}
+
+func (service *Service) cachedImageTransform(etag string) ([]byte, string, bool) {
+	service.transformMu.Lock()
+	defer service.transformMu.Unlock()
+	return service.cachedImageTransformLocked(etag)
+}
+
+func (service *Service) cachedImageTransformLocked(etag string) ([]byte, string, bool) {
+	element := service.transformCache[etag]
+	if element == nil {
+		return nil, "", false
+	}
+	service.transformCacheLRU.MoveToFront(element)
+	entry := element.Value.(*imageTransformCacheEntry)
+	return entry.content, entry.contentType, true
+}
+
+func (service *Service) cacheImageTransformLocked(etag string, content []byte, contentType string) {
+	contentBytes := int64(len(content))
+	if service.transformCacheMaxBytes <= 0 || service.transformCacheMaxEntries <= 0 || contentBytes > service.transformCacheMaxBytes {
+		return
+	}
+	if service.transformCache == nil {
+		service.transformCache = make(map[string]*list.Element)
+	}
+	if element := service.transformCache[etag]; element != nil {
+		service.transformCacheLRU.MoveToFront(element)
+		return
+	}
+	entry := &imageTransformCacheEntry{etag: etag, content: content, contentType: contentType}
+	service.transformCache[etag] = service.transformCacheLRU.PushFront(entry)
+	service.transformCacheBytes += contentBytes
+	for service.transformCacheBytes > service.transformCacheMaxBytes || len(service.transformCache) > service.transformCacheMaxEntries {
+		element := service.transformCacheLRU.Back()
+		evicted := element.Value.(*imageTransformCacheEntry)
+		delete(service.transformCache, evicted.etag)
+		service.transformCacheLRU.Remove(element)
+		service.transformCacheBytes -= int64(len(evicted.content))
+	}
+}
+
+func (service *Service) transformCoalesced(ctx context.Context, etag string, file *os.File, contentType string, transform imageTransform) ([]byte, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+
+	service.transformMu.Lock()
+	if transform.requested {
+		if content, cachedType, ok := service.cachedImageTransformLocked(etag); ok {
+			service.transformMu.Unlock()
+			return content, cachedType, nil
+		}
+	}
+	if current := service.transformFlights[etag]; current != nil {
+		service.transformMu.Unlock()
+		select {
+		case <-current.done:
+			return current.content, current.contentType, current.err
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
+	}
+	select {
+	case service.transformSlots <- struct{}{}:
+	default:
+		service.transformMu.Unlock()
+		return nil, "", errImageTransformSaturated
+	}
+	current := &imageTransformFlight{done: make(chan struct{})}
+	service.transformFlights[etag] = current
+	service.transformMu.Unlock()
+
+	var transformContextErr error
+	defer func() {
+		service.transformMu.Lock()
+		if service.transformFlights[etag] == current {
+			delete(service.transformFlights, etag)
+		}
+		if transform.requested && current.err == nil && transformContextErr == nil {
+			service.cacheImageTransformLocked(etag, current.content, current.contentType)
+		}
+		<-service.transformSlots
+		close(current.done)
+		service.transformMu.Unlock()
+	}()
+	current.content, current.contentType, current.err = service.imageTransformer(file, contentType, transform)
+	transformContextErr = ctx.Err()
+	if transformContextErr != nil {
+		return nil, "", transformContextErr
+	}
+	return current.content, current.contentType, current.err
+}
+
+func transformImage(file *os.File, contentType string, transform imageTransform) ([]byte, string, error) {
+	if contentType != "image/jpeg" && contentType != "image/png" {
+		return nil, "", errors.New("image type cannot be transformed")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, "", err
+	}
+	source, _, err := image.Decode(file)
+	if err != nil {
+		return nil, "", err
+	}
+	bounds := source.Bounds()
+	sourceWidth, sourceHeight := bounds.Dx(), bounds.Dy()
+	targetWidth, targetHeight, cover := transformedDimensions(sourceWidth, sourceHeight, transform)
+	if targetWidth < 1 || targetHeight < 1 || targetWidth > maximumImageTransformDimension || targetHeight > maximumImageTransformDimension ||
+		int64(targetWidth)*int64(targetHeight) > maximumImageTransformPixels {
+		return nil, "", errors.New("transformed dimensions exceed limits")
+	}
+	target := resizeImage(source, targetWidth, targetHeight, cover)
+	var encoded bytes.Buffer
+	if contentType == "image/jpeg" {
+		err = jpeg.Encode(&encoded, target, &jpeg.Options{Quality: transform.quality})
+	} else {
+		compression := png.DefaultCompression
+		if transform.quality >= 80 {
+			compression = png.BestSpeed
+		} else if transform.quality <= 30 {
+			compression = png.BestCompression
+		}
+		err = (&png.Encoder{CompressionLevel: compression}).Encode(&encoded, target)
+	}
+	if err != nil || encoded.Len() == 0 || int64(encoded.Len()) > maxObjectBytes {
+		return nil, "", errors.New("encode transformed image")
+	}
+	return encoded.Bytes(), contentType, nil
+}
+
+func transformedDimensions(width, height int, transform imageTransform) (int, int, bool) {
+	if transform.fillWidth != 0 && transform.fillHeight != 0 {
+		return transform.fillWidth, transform.fillHeight, true
+	}
+	if transform.fillWidth != 0 {
+		return transform.fillWidth, max(1, int(math.Round(float64(height)*float64(transform.fillWidth)/float64(width)))), false
+	}
+	if transform.fillHeight != 0 {
+		return max(1, int(math.Round(float64(width)*float64(transform.fillHeight)/float64(height)))), transform.fillHeight, false
+	}
+	if transform.width != 0 {
+		return transform.width, max(1, int(math.Round(float64(height)*float64(transform.width)/float64(width)))), false
+	}
+	if transform.maxWidth != 0 || transform.maxHeight != 0 {
+		scale := 1.0
+		if transform.maxWidth != 0 {
+			scale = min(scale, float64(transform.maxWidth)/float64(width))
+		}
+		if transform.maxHeight != 0 {
+			scale = min(scale, float64(transform.maxHeight)/float64(height))
+		}
+		return max(1, int(math.Round(float64(width)*scale))), max(1, int(math.Round(float64(height)*scale))), false
+	}
+	return width, height, false
+}
+
+func resizeImage(source image.Image, targetWidth, targetHeight int, cover bool) *image.NRGBA {
+	bounds := source.Bounds()
+	sourceWidth, sourceHeight := bounds.Dx(), bounds.Dy()
+	scaleX := float64(sourceWidth) / float64(targetWidth)
+	scaleY := float64(sourceHeight) / float64(targetHeight)
+	offsetX, offsetY := 0.0, 0.0
+	if cover {
+		scale := min(scaleX, scaleY)
+		offsetX = (float64(sourceWidth) - float64(targetWidth)*scale) / 2
+		offsetY = (float64(sourceHeight) - float64(targetHeight)*scale) / 2
+		scaleX, scaleY = scale, scale
+	}
+	target := image.NewNRGBA(image.Rect(0, 0, targetWidth, targetHeight))
+	for y := range targetHeight {
+		sourceY := min(sourceHeight-1, max(0, int(offsetY+(float64(y)+0.5)*scaleY)))
+		for x := range targetWidth {
+			sourceX := min(sourceWidth-1, max(0, int(offsetX+(float64(x)+0.5)*scaleX)))
+			target.SetNRGBA(x, y, color.NRGBAModel.Convert(source.At(bounds.Min.X+sourceX, bounds.Min.Y+sourceY)).(color.NRGBA))
+		}
+	}
+	return target
+}
+
+func cacheableArtworkFailure(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+func (service *Service) negativeCached(key string) bool {
+	now := service.negativeNow()
+	service.negativeMu.Lock()
+	defer service.negativeMu.Unlock()
+	expiresAt, found := service.negative[key]
+	if !found {
+		return false
+	}
+	if !expiresAt.After(now) {
+		delete(service.negative, key)
+		return false
+	}
+	return true
+}
+
+func (service *Service) markNegative(key string) {
+	now := service.negativeNow()
+	service.negativeMu.Lock()
+	defer service.negativeMu.Unlock()
+	for candidate, expiresAt := range service.negative {
+		if !expiresAt.After(now) {
+			delete(service.negative, candidate)
+		}
+	}
+	if len(service.negative) >= maximumNegativeCacheEntries {
+		var oldestKey string
+		var oldest time.Time
+		for candidate, expiresAt := range service.negative {
+			if oldestKey == "" || expiresAt.Before(oldest) {
+				oldestKey, oldest = candidate, expiresAt
+			}
+		}
+		delete(service.negative, oldestKey)
+	}
+	service.negative[key] = now.Add(negativeCacheTTL)
+}
+
+func (service *Service) clearNegative(key string) {
+	service.negativeMu.Lock()
+	delete(service.negative, key)
+	service.negativeMu.Unlock()
+}
+
+func ifNoneMatchArtwork(values []string, etag string) bool {
+	total := 0
+	for _, value := range values {
+		if len(value) > maxIfNoneMatchBytes-total {
+			return false
+		}
+		total += len(value)
+	}
+	for _, value := range values {
+		for _, candidate := range strings.Split(value, ",") {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "*" || candidate == etag || strings.TrimPrefix(candidate, "W/") == etag {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func respondArtworkFetchSaturated(response http.ResponseWriter) {
+	response.Header().Set("Cache-Control", "no-store")
+	response.Header().Set("Retry-After", "1")
+	http.Error(response, "artwork temporarily unavailable", http.StatusServiceUnavailable)
 }
 
 func respondArtworkUnavailable(response http.ResponseWriter) {
@@ -535,6 +1011,16 @@ func (service *Service) load(ctx context.Context, key string) (cacheRecord, *os.
 	return service.repair(ctx, key)
 }
 
+func (service *Service) loadRecord(ctx context.Context, record cacheRecord) (cacheRecord, *os.File, bool, error) {
+	if record.byteSize == 0 {
+		return record, nil, true, nil
+	}
+	if file, valid := service.openCached(record); valid {
+		return record, file, true, nil
+	}
+	return service.repair(ctx, record.key)
+}
+
 func (service *Service) repair(ctx context.Context, key string) (cacheRecord, *os.File, bool, error) {
 	transaction, err := service.pool.Begin(ctx)
 	if err != nil {
@@ -614,15 +1100,37 @@ func (service *Service) fetchCoalesced(ctx context.Context, record cacheRecord) 
 			return existing.err
 		}
 	}
+	if service.negativeCached(record.key) {
+		service.flightsMu.Unlock()
+		return errArtworkNegativeCached
+	}
+	if err := ctx.Err(); err != nil {
+		service.flightsMu.Unlock()
+		return err
+	}
+	if !service.fetchAdmission.tryReserve() {
+		service.flightsMu.Unlock()
+		return errArtworkFetchSaturated
+	}
 	current := &flight{done: make(chan struct{})}
 	service.flights[record.key] = current
 	service.flightsMu.Unlock()
 
+	defer func() {
+		service.flightsMu.Lock()
+		if service.flights[record.key] == current {
+			delete(service.flights, record.key)
+		}
+		service.fetchAdmission.release()
+		close(current.done)
+		service.flightsMu.Unlock()
+	}()
 	current.err = service.fetch(ctx, record)
-	close(current.done)
-	service.flightsMu.Lock()
-	delete(service.flights, record.key)
-	service.flightsMu.Unlock()
+	if current.err == nil {
+		service.clearNegative(record.key)
+	} else if cacheableArtworkFailure(ctx, current.err) {
+		service.markNegative(record.key)
+	}
 	return current.err
 }
 
@@ -650,14 +1158,24 @@ func (service *Service) fetch(ctx context.Context, record cacheRecord) error {
 	if err != nil {
 		return fmt.Errorf("create artwork request: %w", netguard.SanitizeURLError(err))
 	}
-	request.Header.Set("Accept", "image/webp,image/png,image/jpeg;q=0.9")
+	request.Header.Set("Accept", "image/png,image/jpeg;q=0.9,image/webp;q=0.5")
 	request.Header.Set("Accept-Encoding", "identity")
 	request.Header.Set("User-Agent", "Rivune-Artwork-Cache/1")
+	started := requestwork.Now()
+	requestwork.BeginOutbound(ctx, started)
+	counted := byteCountingReader{}
+	outboundFinished := false
+	defer func() {
+		if !outboundFinished {
+			requestwork.EndOutbound(ctx, requestwork.Now(), counted.bytes)
+		}
+	}()
 	upstream, err := service.httpClient.Do(request)
 	if err != nil {
 		return fmt.Errorf("download artwork: %w", netguard.SanitizeURLError(err))
 	}
 	defer upstream.Body.Close()
+	counted.source = upstream.Body
 	if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
 		return fmt.Errorf("download artwork: upstream returned %s", upstream.Status)
 	}
@@ -678,7 +1196,7 @@ func (service *Service) fetch(ctx context.Context, record cacheRecord) error {
 		os.Remove(temporaryPath)
 	}()
 
-	limited := &io.LimitedReader{R: upstream.Body, N: maxObjectBytes + 1}
+	limited := &io.LimitedReader{R: &counted, N: maxObjectBytes + 1}
 	var prefix [512]byte
 	prefixSize, readErr := io.ReadFull(limited, prefix[:])
 	if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
@@ -696,6 +1214,8 @@ func (service *Service) fetch(ctx context.Context, record cacheRecord) error {
 		return fmt.Errorf("write artwork header: %w", err)
 	}
 	copied, err := io.Copy(temporary, limited)
+	requestwork.EndOutbound(ctx, requestwork.Now(), counted.bytes)
+	outboundFinished = true
 	if err != nil {
 		return fmt.Errorf("write artwork body: %w", err)
 	}

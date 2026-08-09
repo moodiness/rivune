@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 //go:embed migrations/*.sql
@@ -26,6 +28,7 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	poolConfig.MaxConnLifetime = time.Hour
 	poolConfig.MaxConnIdleTime = 15 * time.Minute
 	poolConfig.HealthCheckPeriod = 30 * time.Second
+	poolConfig.ConnConfig.Tracer = requestwork.QueryTracer{}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {

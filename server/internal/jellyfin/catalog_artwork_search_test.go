@@ -104,30 +104,45 @@ func TestCatalogSearchLocalizesMetadataAndAddonArtworkBeforeDTOAndImageRoute(t *
 	)
 	metadataPoster := "https://image.tmdb.org/t/p/w500/poster.jpg?token=tmdb-secret"
 	metadataBackdrop := "https://image.tmdb.org/t/p/original/backdrop.jpg?token=tmdb-backdrop-secret"
+	metadataLogo := "https://assets.fanart.invalid/logo.png?token=fanart-logo-secret"
+	metadataBanner := "https://assets.fanart.invalid/banner.jpg?token=fanart-banner-secret"
+	metadataArt := "https://assets.fanart.invalid/art.png?token=fanart-art-secret"
 	addonPoster := "https://addon.invalid/poster.jpg?token=addon-secret"
 	addonBackdrop := "https://addon.invalid/backdrop.jpg?token=addon-backdrop-secret"
 	rejectedPoster := "http://127.0.0.1/private.jpg?token=rejected-secret"
 	metadataPosterKey := strings.Repeat("a", 64)
 	metadataBackdropKey := strings.Repeat("b", 64)
+	metadataLogoKey := strings.Repeat("e", 64)
+	metadataBannerKey := strings.Repeat("f", 64)
+	metadataArtKey := strings.Repeat("0", 64)
 	addonPosterKey := strings.Repeat("c", 64)
 	addonBackdropKey := strings.Repeat("d", 64)
 	metadataPosterLocal := localizedArtworkPrefix + metadataPosterKey
 	metadataBackdropLocal := localizedArtworkPrefix + metadataBackdropKey
+	metadataLogoLocal := localizedArtworkPrefix + metadataLogoKey
+	metadataBannerLocal := localizedArtworkPrefix + metadataBannerKey
+	metadataArtLocal := localizedArtworkPrefix + metadataArtKey
 	addonPosterLocal := localizedArtworkPrefix + addonPosterKey
 	addonBackdropLocal := localizedArtworkPrefix + addonBackdropKey
 	presenter := &searchArtworkPresenter{
 		localized: map[string]string{
 			metadataPoster: metadataPosterLocal, metadataBackdrop: metadataBackdropLocal,
+			metadataLogo: metadataLogoLocal, metadataBanner: metadataBannerLocal, metadataArt: metadataArtLocal,
 			addonPoster: addonPosterLocal, addonBackdrop: addonBackdropLocal,
 		},
 		registered: map[string]string{
 			metadataPosterLocal: metadataPosterKey, metadataBackdropLocal: metadataBackdropKey,
+			metadataLogoLocal: metadataLogoKey, metadataBannerLocal: metadataBannerKey, metadataArtLocal: metadataArtKey,
 			addonPosterLocal: addonPosterKey, addonBackdropLocal: addonBackdropKey,
 		},
 	}
 	store := &searchArtworkStore{
 		titles: map[string]watchstate.CatalogTitle{
-			metadataID: {ID: metadataID, MediaType: "movie", Title: "TMDB Result", PosterURL: metadataPoster, BackgroundURL: metadataBackdrop, Genres: []string{}, ProviderIDs: map[string]string{"tmdb": "11"}},
+			metadataID: {
+				ID: metadataID, MediaType: "movie", Title: "TMDB Result", PosterURL: metadataPoster, BackgroundURL: metadataBackdrop,
+				LogoURL: metadataLogo, BannerURL: metadataBanner, ArtURL: metadataArt,
+				Genres: []string{}, ProviderIDs: map[string]string{"tmdb": "11"},
+			},
 			rejectedID: {ID: rejectedID, MediaType: "movie", Title: "Rejected Artwork", PosterURL: rejectedPoster, Genres: []string{}, ProviderIDs: map[string]string{"tmdb": "22"}},
 			addonID:    {ID: addonID, MediaType: "series", Title: "Add-on Result", PosterURL: addonPoster, BackgroundURL: addonBackdrop, Genres: []string{}, ProviderIDs: map[string]string{"tmdb": "33"}},
 		},
@@ -135,7 +150,11 @@ func TestCatalogSearchLocalizesMetadataAndAddonArtworkBeforeDTOAndImageRoute(t *
 	}
 	metadataSearch := &orchestrationMetadata{
 		movies: metadata.MoviePage{Items: []metadata.Movie{
-			{ID: metadataID, MediaType: "movie", Title: "TMDB Result", PosterURL: metadataPoster, BackdropURL: metadataBackdrop, Genres: []metadata.Genre{}, ExternalIDs: map[string]string{"tmdb": "11"}},
+			{
+				ID: metadataID, MediaType: "movie", Title: "TMDB Result", PosterURL: metadataPoster, BackdropURL: metadataBackdrop,
+				LogoURL: metadataLogo, BannerURL: metadataBanner, ArtURL: metadataArt,
+				Genres: []metadata.Genre{}, ExternalIDs: map[string]string{"tmdb": "11"},
+			},
 			{ID: rejectedID, MediaType: "movie", Title: "Rejected Artwork", PosterURL: rejectedPoster, Genres: []metadata.Genre{}, ExternalIDs: map[string]string{"tmdb": "22"}},
 		}, Page: 1, TotalPages: 1, TotalResults: 2},
 		series: metadata.SeriesPage{Items: []metadata.Series{}, Page: 1, TotalPages: 1, TotalResults: 0},
@@ -189,7 +208,7 @@ func TestCatalogSearchLocalizesMetadataAndAddonArtworkBeforeDTOAndImageRoute(t *
 		t.Fatalf("unpresentable artwork was projected: %+v", hints[rejectedID])
 	}
 	body := response.Body.String()
-	for _, forbidden := range []string{"image.tmdb.org", "addon.invalid", "127.0.0.1", "tmdb-secret", "addon-secret", "rejected-secret", localizedArtworkPrefix} {
+	for _, forbidden := range []string{"image.tmdb.org", "assets.fanart.invalid", "addon.invalid", "127.0.0.1", "tmdb-secret", "fanart-logo-secret", "fanart-banner-secret", "fanart-art-secret", "addon-secret", "rejected-secret", localizedArtworkPrefix} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("search DTO exposed artwork source %q: %s", forbidden, body)
 		}
@@ -201,19 +220,26 @@ func TestCatalogSearchLocalizesMetadataAndAddonArtworkBeforeDTOAndImageRoute(t *
 		t.Fatal("compatibility search did not pass the artwork presenter to add-on payload decoding")
 	}
 	presented := strings.Join(presenter.seen, "\n")
-	for _, source := range []string{metadataPoster, metadataBackdrop, addonPoster, addonBackdrop, rejectedPoster} {
+	for _, source := range []string{metadataPoster, metadataBackdrop, metadataLogo, metadataBanner, metadataArt, addonPoster, addonBackdrop, rejectedPoster} {
 		if !strings.Contains(presented, source) {
 			t.Fatalf("artwork source did not pass through presenter: %q in %q", source, presented)
 		}
 	}
 
 	for _, item := range []struct {
-		id  string
-		key string
-	}{{metadataID, metadataPosterKey}, {addonID, addonPosterKey}} {
-		imageRequest := authenticatedCatalogRequest(t, token, "/Items/"+item.id+"/Images/Primary")
+		id        string
+		imageType string
+		key       string
+	}{
+		{metadataID, "Primary", metadataPosterKey},
+		{metadataID, "Logo", metadataLogoKey},
+		{metadataID, "Banner", metadataBannerKey},
+		{metadataID, "Art", metadataArtKey},
+		{addonID, "Primary", addonPosterKey},
+	} {
+		imageRequest := authenticatedCatalogRequest(t, token, "/Items/"+item.id+"/Images/"+item.imageType)
 		imageRequest.SetPathValue("id", item.id)
-		imageRequest.SetPathValue("type", "Primary")
+		imageRequest.SetPathValue("type", item.imageType)
 		imageResponse := httptest.NewRecorder()
 		handler.handleImage(imageResponse, imageRequest)
 		if imageResponse.Code != http.StatusOK || len(presenter.served) == 0 || presenter.served[len(presenter.served)-1] != item.key {

@@ -14,6 +14,7 @@ import (
 type memoryWatchstate struct {
 	progress        map[string]watchstate.Progress
 	library         map[string]bool
+	favorites       map[string]bool
 	addCalls        int
 	removeCalls     int
 	updateCalls     int
@@ -30,10 +31,14 @@ type memoryWatchstate struct {
 	nextSeriesID    string
 	nextOffset      int
 	nextLimit       int
+	userData        map[string]watchstate.UserDataValues
 }
 
 func newMemoryWatchstate() *memoryWatchstate {
-	return &memoryWatchstate{progress: make(map[string]watchstate.Progress), library: make(map[string]bool)}
+	return &memoryWatchstate{
+		progress: make(map[string]watchstate.Progress), library: make(map[string]bool),
+		favorites: make(map[string]bool), userData: make(map[string]watchstate.UserDataValues),
+	}
 }
 
 func (service *memoryWatchstate) GetProgress(_ context.Context, _ auth.Principal, itemID string) (watchstate.Progress, error) {
@@ -140,20 +145,41 @@ func (service *memoryWatchstate) UpdateUserDataForLinkedSession(_ context.Contex
 		service.progress[itemID] = current
 		exists = true
 	}
-	if input.Favorite != nil && *input.Favorite != service.library[itemID] {
+	if input.Favorite != nil && *input.Favorite != service.favorites[itemID] {
 		if *input.Favorite {
 			service.addCalls++
-			service.library[itemID] = true
+			service.favorites[itemID] = true
 		} else {
 			service.removeCalls++
-			delete(service.library, itemID)
+			delete(service.favorites, itemID)
 		}
 	}
-	result := watchstate.UserDataState{InLibrary: service.library[itemID]}
+	userData := service.userData[itemID]
+	if input.Rating.Set {
+		userData.Rating, userData.RatingSet = input.Rating.Value, true
+	}
+	if input.PlayedPercentage.Set {
+		userData.PlayedPercentage, userData.PlayedPercentageSet = input.PlayedPercentage.Value, true
+	}
+	if input.UnplayedItemCount.Set {
+		userData.UnplayedItemCount, userData.UnplayedItemCountSet = input.UnplayedItemCount.Value, true
+	}
+	if input.PlayCount.Set {
+		userData.PlayCount, userData.PlayCountSet = input.PlayCount.Value, true
+	}
+	if input.Likes.Set {
+		userData.Likes, userData.LikesSet = input.Likes.Value, true
+	}
+	if input.LastPlayedDate.Set {
+		userData.LastPlayedDate, userData.LastPlayedDateSet = input.LastPlayedDate.Value, true
+	}
+	service.userData[itemID] = userData
+	result := watchstate.UserDataState{InLibrary: service.library[itemID], Favorite: service.favorites[itemID]}
 	if exists {
 		value := service.progress[itemID]
 		result.Progress = &value
 	}
+	result.UserData = &userData
 	return result, nil
 }
 

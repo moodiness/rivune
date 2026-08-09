@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/netguard"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 const (
@@ -451,9 +452,17 @@ func (proxy *ffmpegEgressProxy) fetchTarget(ctx context.Context, method string, 
 		}
 		request.Header.Set("User-Agent", "Rivune-Playback/1")
 		proxy.applySourceCredentials(request)
+		started := requestwork.Now()
+		requestwork.BeginOutbound(ctx, started)
 		upstream, err := proxy.transport.RoundTrip(request)
 		if err != nil {
+			requestwork.EndOutbound(ctx, requestwork.Now(), 0)
 			return nil, err
+		}
+		if upstream.Body == nil {
+			requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+		} else {
+			upstream.Body = requestwork.ObserveBody(ctx, upstream.Body)
 		}
 		if !isHTTPRedirect(upstream.StatusCode) {
 			upstream.Request = request

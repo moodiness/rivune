@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/moodiness/rivune/server/internal/netguard"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 const (
@@ -243,9 +244,17 @@ func (service *Service) fetchAsset(ctx context.Context, incoming *http.Request, 
 		}
 	}
 	request.Header.Set("User-Agent", "Rivune-Playback/1")
+	started := requestwork.Now()
+	requestwork.BeginOutbound(ctx, started)
 	response, err := service.client.Do(request)
 	if err != nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
 		return nil, netguard.SanitizeURLError(err)
+	}
+	if response.Body == nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+	} else {
+		response.Body = requestwork.ObserveBody(ctx, response.Body)
 	}
 	return response, nil
 }

@@ -345,43 +345,41 @@ func TestPublicAdmissionExpiresRateLimitAndCleansSourcesInBoundedBatches(t *test
 	}
 }
 
-func TestUsernameAdmissionHashesNormalizedSubjectsExpiresAndBoundsCardinality(t *testing.T) {
+func TestUsernameAdmissionTracksOnlyFailuresForgetsSuccessAndEvictsAtCapacity(t *testing.T) {
 	current := time.Unix(1_700_000_000, 0)
 	admission := newUsernameAdmission(2, 2, time.Minute)
 	admission.now = func() time.Time { return current }
 
-	if _, admitted := admission.acquire("  ÄDMIN  "); !admitted {
-		t.Fatal("first normalized username attempt was not admitted")
-	}
-	if _, admitted := admission.acquire("ädmin"); !admitted {
-		t.Fatal("case-equivalent username attempt was not admitted")
-	}
-	if retryAfter, admitted := admission.acquire("ÄdMiN"); admitted || retryAfter != time.Minute {
-		t.Fatalf("normalized username budget = admitted %v, retry %s; want false and 1m", admitted, retryAfter)
-	}
+	admission.recordFailure("  ÄDMIN  ")
+	admission.recordFailure("ädmin")
+	admission.recordFailure("ÄdMiN")
 	if got := len(admission.subjects); got != 1 {
 		t.Fatalf("tracked normalized subjects = %d, want 1", got)
 	}
 	digest := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace("  ÄDMIN  "))))
 	state, exists := admission.subjects[digest]
 	if !exists || state.attempts != 2 {
-		t.Fatalf("hashed username state = %+v, exists %v; want two attempts", state, exists)
+		t.Fatalf("hashed username state = %+v, exists %v; want capped two failures", state, exists)
 	}
 
-	if _, admitted := admission.acquire("other"); !admitted {
-		t.Fatal("independent username was not admitted")
+	admission.forget("ädmin")
+	if _, exists := admission.subjects[digest]; exists {
+		t.Fatal("successful normalized username was not forgotten")
 	}
-	if _, admitted := admission.acquire("third"); admitted {
-		t.Fatal("admission exceeded its bounded subject cardinality")
+
+	admission.recordFailure("first")
+	admission.recordFailure("second")
+	admission.recordFailure("third")
+	thirdDigest := sha256.Sum256([]byte("third"))
+	if _, exists := admission.subjects[thirdDigest]; !exists {
+		t.Fatal("full failure table rejected the new subject instead of evicting")
 	}
 	if got := len(admission.subjects); got != 2 {
 		t.Fatalf("tracked subjects = %d, want bounded cardinality 2", got)
 	}
 
 	current = current.Add(time.Minute)
-	if _, admitted := admission.acquire("third"); !admitted {
-		t.Fatal("username admission did not expire its finite window")
-	}
+	admission.recordFailure("fourth")
 	if got := len(admission.subjects); got != 1 {
 		t.Fatalf("expired username subjects were not removed: tracked %d, want 1", got)
 	}

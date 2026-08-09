@@ -98,6 +98,22 @@ func (a *API) updateInstanceSettings(w http.ResponseWriter, r *http.Request, pri
 		a.jellyfinCompatibilitySettingsMu.Lock()
 		defer a.jellyfinCompatibilitySettingsMu.Unlock()
 	}
+	requestedJellyfinEnabled := false
+	wasJellyfinEnabled := false
+	if patch.JellyfinEnabled.Set {
+		requestedJellyfinEnabled = *patch.JellyfinEnabled.Value
+		if requestedJellyfinEnabled && !principal.IsGlobalAdministrator() {
+			writeSettingsError(a, w, settings.ErrForbidden, "update instance settings")
+			return
+		}
+		wasJellyfinEnabled = a.HasJellyfinCompatibility()
+		if requestedJellyfinEnabled && !wasJellyfinEnabled {
+			if err := a.revokeJellyfinCompatibilitySessions(r.Context()); err != nil {
+				a.internalError(w, "prepare Jellyfin compatibility enable", err)
+				return
+			}
+		}
+	}
 	layer, err := a.settings.UpdateInstance(r.Context(), principal, patch)
 	if patch.JellyfinEnabled.Set && err != nil {
 		a.requestJellyfinCompatibilityReconciliation()
@@ -106,7 +122,14 @@ func (a *API) updateInstanceSettings(w http.ResponseWriter, r *http.Request, pri
 		return
 	}
 	if patch.JellyfinEnabled.Set {
-		a.setJellyfinCompatibilityDesired(*patch.JellyfinEnabled.Value)
+		if requestedJellyfinEnabled {
+			if !wasJellyfinEnabled {
+				a.setJellyfinCompatibilityDesired(true)
+			}
+		} else if err := a.applyCanonicalJellyfinCompatibilityDesired(r.Context(), false); err != nil {
+			a.internalError(w, "disable Jellyfin compatibility", err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, newSettingsLayerResponse(layer))
 }

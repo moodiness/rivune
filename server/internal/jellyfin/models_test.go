@@ -14,8 +14,8 @@ func TestProtocolDTOsUseJellyfinPascalCase(t *testing.T) {
 		CompatErrorResponse{}, CompatErrorStatus{},
 		QueryResult[BaseItemDto]{}, BaseItemDto{}, BaseItemPerson{}, UserItemDataDto{}, UpdateUserItemDataDto{}, SearchHintDto{}, SearchHintResult{},
 		PlaybackInfoRequest{}, PlaybackInfoResponse{}, MediaSourceInfo{}, MediaStreamInfo{}, DeviceProfile{},
-		DirectPlayProfile{}, TranscodingProfile{}, SubtitleProfile{}, PlaybackProgressInfo{},
-		DisplayPreferencesDto{}, ClientCapabilitiesDto{}, SessionUserInfoDto{}, QueueItemDto{}, SpecialViewOptionDto{}, WebSocketMessageDto{},
+		CodecProfile{}, ProfileCondition{}, ContainerProfile{}, DirectPlayProfile{}, TranscodingProfile{}, SubtitleProfile{}, PlaybackProgressInfo{},
+		DisplayPreferencesDto{}, ClientCapabilitiesDto{}, PlayerStateInfo{}, UserDataChangeInfo{}, LibraryUpdateInfo{}, SessionUserInfoDto{}, QueueItemDto{}, SpecialViewOptionDto{}, WebSocketMessageDto{},
 	}
 	for _, model := range models {
 		modelType := reflect.TypeOf(model)

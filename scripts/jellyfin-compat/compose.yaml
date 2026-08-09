@@ -1,0 +1,24 @@
+services:
+  upstream:
+    image: jellyfin/jellyfin:10.11.11@sha256:aefb67e6a7ff1debdd154a78a7bbb780fd0c873d8639210a7f6a2016ad2b35db
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:18096:8096"
+    environment:
+      JELLYFIN_PublishedServerUrl: http://127.0.0.1:18096
+    volumes:
+      - upstream-config:/config
+      - upstream-cache:/cache
+      - ./work/media:/media:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8096/health >/dev/null"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 10s
+
+volumes:
+  upstream-config:
+  upstream-cache:

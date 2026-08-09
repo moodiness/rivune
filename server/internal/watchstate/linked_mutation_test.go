@@ -148,6 +148,67 @@ func TestLinkedMutationsRevalidateAfterProviderWorkAndSerializeRevocationThrough
 	}
 	sink := &blockingLinkedMutationSink{entered: make(chan struct{}), release: make(chan struct{})}
 	service := NewService(pool, configuredLocation, sink)
+	rating, percentage := 8.25, 42.5
+	unplayed, playCount, liked := 3, 7, true
+	lastPlayed := time.Date(2026, 8, 9, 1, 22, 23, 123456700, time.UTC)
+	userDataState, err := service.UpdateUserDataForLinkedSession(ctx, principal, titleID, UpdateUserDataInput{
+		Rating:            OptionalUserDataValue[float64]{Set: true, Value: &rating},
+		PlayedPercentage:  OptionalUserDataValue[float64]{Set: true, Value: &percentage},
+		UnplayedItemCount: OptionalUserDataValue[int]{Set: true, Value: &unplayed},
+		PlayCount:         OptionalUserDataValue[int]{Set: true, Value: &playCount},
+		Likes:             OptionalUserDataValue[bool]{Set: true, Value: &liked},
+		LastPlayedDate:    OptionalUserDataValue[time.Time]{Set: true, Value: &lastPlayed},
+	})
+	if err != nil || userDataState.Progress != nil || userDataState.UserData == nil ||
+		userDataState.UserData.Rating == nil || *userDataState.UserData.Rating != rating ||
+		userDataState.UserData.PlayedPercentage == nil || *userDataState.UserData.PlayedPercentage != percentage ||
+		userDataState.UserData.UnplayedItemCount == nil || *userDataState.UserData.UnplayedItemCount != unplayed ||
+		userDataState.UserData.PlayCount == nil || *userDataState.UserData.PlayCount != playCount ||
+		userDataState.UserData.Likes == nil || *userDataState.UserData.Likes != liked ||
+		userDataState.UserData.LastPlayedDate == nil || !userDataState.UserData.LastPlayedDate.Equal(lastPlayed) {
+		t.Fatalf("persist supplemental user data state=%+v error=%v", userDataState, err)
+	}
+	liked = false
+	userDataState, err = service.UpdateUserDataForLinkedSession(ctx, principal, titleID, UpdateUserDataInput{
+		Rating: OptionalUserDataValue[float64]{Set: true},
+		Likes:  OptionalUserDataValue[bool]{Set: true, Value: &liked},
+	})
+	if err != nil || userDataState.UserData == nil || !userDataState.UserData.RatingSet || userDataState.UserData.Rating != nil ||
+		!userDataState.UserData.PlayedPercentageSet || userDataState.UserData.PlayedPercentage == nil || *userDataState.UserData.PlayedPercentage != percentage ||
+		!userDataState.UserData.LikesSet || userDataState.UserData.Likes == nil || *userDataState.UserData.Likes {
+		t.Fatalf("partial supplemental user data state=%+v error=%v", userDataState, err)
+	}
+	detail, err := service.GetCatalogTitle(ctx, principal, titleID)
+	if err != nil || detail.UserData == nil || !detail.UserData.RatingSet || detail.UserData.Rating != nil ||
+		detail.UserData.PlayCount == nil || *detail.UserData.PlayCount != playCount ||
+		detail.UserData.LastPlayedDate == nil || !detail.UserData.LastPlayedDate.Equal(lastPlayed) {
+		t.Fatalf("catalog detail supplemental user data=%+v error=%v", detail.UserData, err)
+	}
+	page, err := service.ListCatalogItems(ctx, principal, CatalogQuery{Limit: 20})
+	if err != nil || len(page.Items) != 1 || page.Items[0].UserData == nil ||
+		page.Items[0].UserData.UnplayedItemCount == nil || *page.Items[0].UserData.UnplayedItemCount != unplayed {
+		t.Fatalf("catalog list supplemental user data page=%+v error=%v", page, err)
+	}
+	invalidRating, favorite := 11.0, true
+	if _, err := service.UpdateUserDataForLinkedSession(ctx, principal, titleID, UpdateUserDataInput{
+		Rating: OptionalUserDataValue[float64]{Set: true, Value: &invalidRating}, Favorite: &favorite,
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("invalid atomic supplemental mutation error=%v", err)
+	}
+	var storedRating *float64
+	var storedPercentage *float64
+	var favoriteExists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT data.rating, data.played_percentage,
+		       EXISTS (SELECT 1 FROM profile_favorites favorite WHERE favorite.profile_id = $1::uuid AND favorite.title_id = $2::uuid)
+		FROM profile_user_data data
+		WHERE data.profile_id = $1::uuid AND data.title_id = $2::uuid
+	`, profileID, titleID).Scan(&storedRating, &storedPercentage, &favoriteExists); err != nil {
+		t.Fatalf("read supplemental atomic rollback: %v", err)
+	}
+	if storedRating != nil || storedPercentage == nil || *storedPercentage != percentage || favoriteExists {
+		t.Fatalf("invalid mutation partially committed rating=%v percentage=%v favorite=%t", storedRating, storedPercentage, favoriteExists)
+	}
 	provider := &blockingLinkedCatalogProvider{entered: make(chan struct{}), release: make(chan struct{})}
 	service.SetCanonicalProvider(provider, nil)
 	providerExternalID := "linked-catalog-" + suffix
@@ -210,6 +271,84 @@ func TestLinkedMutationsRevalidateAfterProviderWorkAndSerializeRevocationThrough
 		UPDATE auth_sessions SET revoked_at = NULL, revoked_reason = NULL WHERE id = $1::uuid
 	`, sessionID); err != nil {
 		t.Fatalf("restore linked session after provider race: %v", err)
+	}
+	var foreignProfileID, seriesID, seasonID, episodeID string
+	if err := pool.QueryRow(ctx, `INSERT INTO profiles (name) VALUES ($1) RETURNING id::text`, "Foreign favorites "+suffix).Scan(&foreignProfileID); err != nil {
+		t.Fatalf("insert foreign favorites profile: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO titles (media_type, display_title) VALUES ('series', $1) RETURNING id::text`, "Favorite series "+suffix).Scan(&seriesID); err != nil {
+		t.Fatalf("insert favorite series: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO titles (media_type, parent_id, ordinal, display_title) VALUES ('season', $1::uuid, 1, $2) RETURNING id::text`, seriesID, "Favorite season "+suffix).Scan(&seasonID); err != nil {
+		t.Fatalf("insert favorite season: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO titles (media_type, parent_id, ordinal, display_title) VALUES ('episode', $1::uuid, 1, $2) RETURNING id::text`, seasonID, "Favorite episode "+suffix).Scan(&episodeID); err != nil {
+		t.Fatalf("insert favorite episode: %v", err)
+	}
+	favoriteTitles := []struct {
+		id        string
+		mediaType string
+	}{
+		{id: titleID, mediaType: "movie"},
+		{id: seriesID, mediaType: "series"},
+		{id: seasonID, mediaType: "season"},
+		{id: episodeID, mediaType: "episode"},
+	}
+	for _, favoriteTitle := range favoriteTitles {
+		if _, err := pool.Exec(ctx, `INSERT INTO profile_favorites (profile_id, title_id) VALUES ($1::uuid, $2::uuid)`, foreignProfileID, favoriteTitle.id); err != nil {
+			t.Fatalf("seed foreign %s favorite: %v", favoriteTitle.mediaType, err)
+		}
+	}
+	t.Cleanup(func() {
+		cleanup := context.Background()
+		_, _ = pool.Exec(cleanup, `DELETE FROM titles WHERE id = $1::uuid`, seriesID)
+		_, _ = pool.Exec(cleanup, `DELETE FROM profiles WHERE id = $1::uuid`, foreignProfileID)
+	})
+	desiredFavorite := true
+	for _, favoriteTitle := range favoriteTitles {
+		state, updateErr := service.UpdateUserDataForLinkedSession(ctx, principal, favoriteTitle.id, UpdateUserDataInput{Favorite: &desiredFavorite})
+		if updateErr != nil || !state.Favorite || state.InLibrary != (favoriteTitle.mediaType == "movie") {
+			t.Fatalf("favorite %s state=%+v error=%v", favoriteTitle.mediaType, state, updateErr)
+		}
+		duplicate, duplicateErr := service.UpdateUserDataForLinkedSession(ctx, principal, favoriteTitle.id, UpdateUserDataInput{Favorite: &desiredFavorite})
+		if duplicateErr != nil || !duplicate.Favorite {
+			t.Fatalf("duplicate favorite %s state=%+v error=%v", favoriteTitle.mediaType, duplicate, duplicateErr)
+		}
+		var ownCount, foreignCount int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FILTER (WHERE profile_id = $1::uuid), count(*) FILTER (WHERE profile_id = $2::uuid)
+			FROM profile_favorites WHERE title_id = $3::uuid
+		`, profileID, foreignProfileID, favoriteTitle.id).Scan(&ownCount, &foreignCount); err != nil {
+			t.Fatalf("count %s favorites: %v", favoriteTitle.mediaType, err)
+		}
+		if ownCount != 1 || foreignCount != 1 {
+			t.Fatalf("favorite %s crossed profiles: own=%d foreign=%d", favoriteTitle.mediaType, ownCount, foreignCount)
+		}
+	}
+	desiredFavorite = false
+	for _, favoriteTitle := range favoriteTitles {
+		state, updateErr := service.UpdateUserDataForLinkedSession(ctx, principal, favoriteTitle.id, UpdateUserDataInput{Favorite: &desiredFavorite})
+		if updateErr != nil || state.Favorite || state.InLibrary != (favoriteTitle.mediaType == "movie") {
+			t.Fatalf("unfavorite %s state=%+v error=%v", favoriteTitle.mediaType, state, updateErr)
+		}
+		duplicate, duplicateErr := service.UpdateUserDataForLinkedSession(ctx, principal, favoriteTitle.id, UpdateUserDataInput{Favorite: &desiredFavorite})
+		if duplicateErr != nil || duplicate.Favorite {
+			t.Fatalf("duplicate unfavorite %s state=%+v error=%v", favoriteTitle.mediaType, duplicate, duplicateErr)
+		}
+		var ownCount, foreignCount int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FILTER (WHERE profile_id = $1::uuid), count(*) FILTER (WHERE profile_id = $2::uuid)
+			FROM profile_favorites WHERE title_id = $3::uuid
+		`, profileID, foreignProfileID, favoriteTitle.id).Scan(&ownCount, &foreignCount); err != nil {
+			t.Fatalf("count unfavorited %s: %v", favoriteTitle.mediaType, err)
+		}
+		if ownCount != 0 || foreignCount != 1 {
+			t.Fatalf("unfavorite %s crossed profiles: own=%d foreign=%d", favoriteTitle.mediaType, ownCount, foreignCount)
+		}
+	}
+	var movieStillInLibrary bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM profile_library WHERE profile_id = $1::uuid AND title_id = $2::uuid)`, profileID, titleID).Scan(&movieStillInLibrary); err != nil || !movieStillInLibrary {
+		t.Fatalf("unfavorite removed movie from library: exists=%t error=%v", movieStillInLibrary, err)
 	}
 	var firstSearchAddonID, secondSearchAddonID string
 	if err := pool.QueryRow(ctx, `
@@ -376,6 +515,23 @@ func TestLinkedMutationsRevalidateAfterProviderWorkAndSerializeRevocationThrough
 			}
 			if position != 120 || duration != 120 || !completed || version != 2 {
 				t.Fatalf("failed replay partially committed: position=%d duration=%d completed=%t version=%d", position, duration, completed, version)
+			}
+			desired := true
+			positionUpdate, playedUpdate := 10, false
+			if _, err := service.UpdateUserDataForLinkedSession(ctx, principal, titleID, UpdateUserDataInput{
+				PositionSeconds: &positionUpdate, DurationSeconds: 120, Played: &playedUpdate, Favorite: &desired,
+			}); !errors.Is(err, failure.want) {
+				t.Fatalf("atomic user data error = %v, want %v", err, failure.want)
+			}
+			var favoriteExists, libraryExists bool
+			if err := pool.QueryRow(ctx, `
+				SELECT EXISTS (SELECT 1 FROM profile_favorites WHERE profile_id = $1::uuid AND title_id = $2::uuid),
+				       EXISTS (SELECT 1 FROM profile_library WHERE profile_id = $1::uuid AND title_id = $2::uuid)
+			`, profileID, titleID).Scan(&favoriteExists, &libraryExists); err != nil {
+				t.Fatalf("read user data after rollback: %v", err)
+			}
+			if favoriteExists || !libraryExists {
+				t.Fatalf("failed user data partially committed: favorite=%t library=%t", favoriteExists, libraryExists)
 			}
 		})
 	}

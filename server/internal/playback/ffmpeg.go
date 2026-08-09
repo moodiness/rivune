@@ -99,7 +99,7 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 	arguments := []string{"-v", "error", "-protocol_whitelist", inputProtocolWhitelist(commandAsset.URL), "-analyzeduration", "1000000", "-probesize", "1000000"}
 	arguments = append(arguments, ffmpegInputArguments(commandAsset)...)
 	arguments = append(arguments,
-		"-show_entries", "stream=index,codec_type,codec_name,profile,width,height,channels,bit_rate,color_transfer,codec_tag_string:stream_tags=language,title:stream_disposition=attached_pic,forced:stream_side_data=side_data_type:format=format_name,duration,bit_rate",
+		"-show_entries", "stream=index,codec_type,codec_name,profile,level,width,height,channels,bit_rate,color_transfer,codec_tag_string:stream_tags=language,title:stream_disposition=attached_pic,forced:stream_side_data=side_data_type:format=format_name,duration,bit_rate",
 		"-of", "json",
 		commandAsset.URL,
 	)
@@ -124,6 +124,7 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 			CodecType      string `json:"codec_type"`
 			CodecName      string `json:"codec_name"`
 			Profile        string `json:"profile"`
+			Level          int    `json:"level"`
 			Width          int    `json:"width"`
 			Height         int    `json:"height"`
 			Channels       int    `json:"channels"`
@@ -162,7 +163,7 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 		bitRate, _ := strconv.ParseInt(stream.BitRate, 10, 64)
 		track := MediaTrack{
 			Index: stream.Index, Type: strings.ToLower(stream.CodecType),
-			Codec: normalizedCodec(stream.CodecName), Profile: strings.TrimSpace(stream.Profile),
+			Codec: normalizedCodec(stream.CodecName), Profile: strings.TrimSpace(stream.Profile), Level: stream.Level,
 			Language: strings.TrimSpace(stream.Tags.Language), Title: strings.TrimSpace(stream.Tags.Title),
 			Width: stream.Width, Height: stream.Height, Channels: stream.Channels, BitrateKbps: int(bitRate / 1000),
 			Forced: stream.Disposition.Forced != 0,
@@ -172,9 +173,10 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 			if stream.Disposition.AttachedPicture != 0 {
 				continue
 			}
+			track.VideoRangeType = inspectedVideoRangeType(stream.CodecTagString, stream.ColorTransfer, stream.SideData)
 			inspection.VideoTracks = append(inspection.VideoTracks, track)
 			if inspection.HDRFormat == "" {
-				inspection.HDRFormat = inspectedHDRFormat(stream.CodecTagString, stream.ColorTransfer, stream.SideData)
+				inspection.HDRFormat = hdrFormatForVideoRange(track.VideoRangeType)
 			}
 		case "audio":
 			inspection.AudioTracks = append(inspection.AudioTracks, track)
@@ -197,7 +199,7 @@ func (processor *FFmpegProcessor) ProcessHLS(ctx context.Context, asset storedAs
 		return err
 	}
 	defer processor.release()
-	asset.ReadRate = 1.10
+	asset.ReadRate = 1.50
 	err := processor.processHLS(ctx, asset, directory, processor.encoder)
 	if err == nil || asset.Kind != processingTranscode || processor.encoder.normalizedKind() == videoEncoderSoftware || hlsOutputStarted(directory) {
 		return err
@@ -243,7 +245,8 @@ func (processor *FFmpegProcessor) processHLS(ctx context.Context, asset storedAs
 
 func hlsOutputArguments(asset storedAsset, hlsFlags string) []string {
 	arguments := []string{
-		"-f", "hls", "-hls_time", strconv.Itoa(hlsSegmentDurationSeconds), "-hls_list_size", "0", "-hls_playlist_type", "event",
+		"-f", "hls", "-hls_time", strconv.Itoa(hlsSegmentDurationSeconds),
+		"-hls_list_size", strconv.Itoa(hlsRetainedSegments), "-hls_delete_threshold", strconv.Itoa(hlsDeleteThreshold),
 	}
 	if normalizedHLSSegmentContainer(asset.HLSSegmentContainer) == "mp4" {
 		arguments = append(arguments,
@@ -255,7 +258,7 @@ func hlsOutputArguments(asset storedAsset, hlsFlags string) []string {
 			"-hls_segment_type", "mpegts", "-hls_segment_filename", "segment-%06d.ts",
 		)
 	}
-	return append(arguments, "-hls_flags", hlsFlags, "index.m3u8")
+	return append(arguments, "-hls_flags", hlsFlags+"+delete_segments", "index.m3u8")
 }
 
 func hlsOutputStarted(directory string) bool {
@@ -301,16 +304,24 @@ func (processor *FFmpegProcessor) ConvertSubtitle(ctx context.Context, asset sto
 		"-analyzeduration", "1000000", "-probesize", "1000000",
 	}
 	arguments = append(arguments, ffmpegInputArguments(commandAsset)...)
+	arguments = append(arguments, "-i", commandAsset.URL)
+	// Text subtitle demuxers may ignore input seeks. Seek after opening the input,
+	// then rebase retained cues onto the requested playback timeline below.
 	if commandAsset.StartSeconds > 0 {
-		arguments = append(arguments, "-ss", strconv.FormatFloat(commandAsset.StartSeconds, 'f', -1, 64))
+		start := strconv.FormatFloat(commandAsset.StartSeconds, 'f', -1, 64)
+		arguments = append(arguments, "-ss", start)
 	}
-	arguments = append(arguments, "-i", commandAsset.URL, "-map")
+	arguments = append(arguments, "-map")
 	if asset.SubtitleTrackIndex != nil {
 		arguments = append(arguments, fmt.Sprintf("0:%d", *asset.SubtitleTrackIndex))
 	} else {
 		arguments = append(arguments, "0:0")
 	}
-	arguments = append(arguments, "-c:s", "webvtt", "-f", "webvtt", "pipe:1")
+	arguments = append(arguments, "-c:s", "webvtt")
+	if commandAsset.StartSeconds > 0 {
+		arguments = append(arguments, "-output_ts_offset", strconv.FormatFloat(-commandAsset.StartSeconds, 'f', -1, 64))
+	}
+	arguments = append(arguments, "-f", "webvtt", "pipe:1")
 	output := &maximumWriter{destination: destination, remaining: maximumConvertedSubtitleBytes}
 	runErr := processor.run(conversionContext, arguments, output)
 	if output.exceeded {
@@ -566,19 +577,40 @@ func inspectedContainer(formatName, hint string) string {
 func inspectedHDRFormat(codecTag, colorTransfer string, sideData []struct {
 	Type string `json:"side_data_type"`
 }) string {
-	tag := strings.ToLower(codecTag)
+	return hdrFormatForVideoRange(inspectedVideoRangeType(codecTag, colorTransfer, sideData))
+}
+
+func inspectedVideoRangeType(codecTag, colorTransfer string, sideData []struct {
+	Type string `json:"side_data_type"`
+}) string {
+	tag := strings.ToLower(strings.TrimSpace(codecTag))
 	if strings.HasPrefix(tag, "dvh") || strings.HasPrefix(tag, "dva") {
-		return "dolby_vision"
+		return "DOVI"
 	}
 	for _, data := range sideData {
 		if strings.Contains(strings.ToLower(data.Type), "dovi") {
-			return "dolby_vision"
+			return "DOVI"
 		}
 	}
-	switch strings.ToLower(colorTransfer) {
+	switch strings.ToLower(strings.TrimSpace(colorTransfer)) {
 	case "smpte2084":
-		return "hdr10"
+		return "HDR10"
 	case "arib-std-b67":
+		return "HLG"
+	case "bt709", "bt470bg", "smpte170m", "gamma22", "gamma28":
+		return "SDR"
+	default:
+		return ""
+	}
+}
+
+func hdrFormatForVideoRange(videoRange string) string {
+	switch strings.ToUpper(strings.TrimSpace(videoRange)) {
+	case "DOVI":
+		return "dolby_vision"
+	case "HDR10":
+		return "hdr10"
+	case "HLG":
 		return "hlg"
 	default:
 		return ""

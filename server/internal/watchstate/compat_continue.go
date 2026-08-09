@@ -44,8 +44,8 @@ func (s *Service) ListResume(ctx context.Context, principal auth.Principal, offs
 }
 
 // ListNextUp returns the first eligible unwatched episode after each series'
-// latest completed episode. seriesID optionally narrows the feed after the
-// same profile-access checks used by the catalog and watch-state services.
+// latest completed episode, plus the first episode of series the profile has
+// never started. seriesID optionally narrows the feed after the same
 func (s *Service) ListNextUp(ctx context.Context, principal auth.Principal, seriesID string, offset, limit int) (ContinueItemsPage, error) {
 	if err := validateContinueWindow(offset, limit); err != nil {
 		return ContinueItemsPage{}, err
@@ -217,14 +217,40 @@ const nextUpItemsCTE = `
 		  AND season.ordinal > 0
 		  AND series.source_addon_id IS NULL
 		  AND ($2::uuid IS NULL OR series.id = $2::uuid)
+		ORDER BY series.id, season.ordinal DESC, episode.ordinal DESC, progress.last_watched_at DESC, episode.id
+	), eligible_series AS (
+		SELECT series.id AS series_id,
+		       latest.season_number,
+		       latest.episode_number,
+		       latest.last_watched_at
+		FROM titles series
+		JOIN accessible_titles accessible_series ON accessible_series.id = series.id
+		LEFT JOIN latest_completed latest ON latest.series_id = series.id
+		WHERE series.media_type = 'series'
+		  AND series.source_addon_id IS NULL
+		  AND ($2::uuid IS NULL OR series.id = $2::uuid)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM profile_continue_dismissals dismissal
-		      WHERE dismissal.profile_id = progress.profile_id AND dismissal.title_id = series.id
+		      WHERE dismissal.profile_id = $1::uuid AND dismissal.title_id = series.id
 		  )
-		ORDER BY series.id, progress.last_watched_at DESC, episode.id
+		  AND (
+		      latest.series_id IS NOT NULL
+		      OR NOT EXISTS (
+		          SELECT 1
+		          FROM profile_progress existing
+		          JOIN titles existing_episode
+		            ON existing_episode.id = existing.title_id
+		           AND existing_episode.media_type = 'episode'
+		          JOIN titles existing_season
+		            ON existing_season.id = existing_episode.parent_id
+		           AND existing_season.media_type = 'season'
+		          WHERE existing.profile_id = $1::uuid
+		            AND existing_season.parent_id = series.id
+		      )
+		  )
 	), selected AS (
 		SELECT next_episode.id,
-		       latest.series_id,
+		       eligible.series_id,
 		       next_season.id AS season_id,
 		       next_season.ordinal AS season_number,
 		       next_episode.ordinal AS episode_number,
@@ -234,8 +260,8 @@ const nextUpItemsCTE = `
 		       COALESCE(series_title.release_info, '') AS release_info,
 		       COALESCE(series_title.resource_id, '') || ':' || next_season.ordinal::text || ':' || next_episode.ordinal::text AS resource_id,
 		       COALESCE(series_title.resource_provider, '') AS resource_provider,
-		       latest.last_watched_at
-		FROM latest_completed latest
+		       COALESCE(eligible.last_watched_at, '0001-01-01T00:00:00Z'::timestamptz) AS last_watched_at
+		FROM eligible_series eligible
 		JOIN LATERAL (
 			SELECT candidate_episode.id, candidate_episode.parent_id, candidate_episode.ordinal
 			FROM titles candidate_episode
@@ -244,9 +270,12 @@ const nextUpItemsCTE = `
 			  ON candidate_season.id = candidate_episode.parent_id AND candidate_season.media_type = 'season'
 			JOIN accessible_titles accessible_candidate_season ON accessible_candidate_season.id = candidate_season.id
 			WHERE candidate_episode.media_type = 'episode'
-			  AND candidate_season.parent_id = latest.series_id
+			  AND candidate_season.parent_id = eligible.series_id
 			  AND candidate_season.ordinal > 0
-			  AND (candidate_season.ordinal, candidate_episode.ordinal) > (latest.season_number, latest.episode_number)
+			  AND (
+			      eligible.season_number IS NULL
+			      OR (candidate_season.ordinal, candidate_episode.ordinal) > (eligible.season_number, eligible.episode_number)
+			  )
 			  AND (candidate_season.release_date IS NULL OR candidate_season.release_date <= CURRENT_DATE)
 			  AND (candidate_episode.release_date IS NULL OR candidate_episode.release_date <= CURRENT_DATE)
 			  AND NOT EXISTS (
@@ -259,7 +288,7 @@ const nextUpItemsCTE = `
 			LIMIT 1
 		) next_episode ON true
 		JOIN titles next_season ON next_season.id = next_episode.parent_id
-		JOIN titles series_title ON series_title.id = latest.series_id
+		JOIN titles series_title ON series_title.id = eligible.series_id
 	)
 `
 
@@ -269,7 +298,7 @@ func queryNextUpItems(ctx context.Context, tx pgx.Tx, profileID string, seriesID
 		       episode_number, display_title, poster_url, background_url,
 		       release_info, resource_id, resource_provider, last_watched_at
 		FROM selected
-		ORDER BY last_watched_at DESC, series_id, id
+		ORDER BY last_watched_at DESC NULLS LAST, series_id, season_number, episode_number, id
 		LIMIT $3 OFFSET $4
 	`, profileID, seriesID, limit, offset)
 	if err != nil {

@@ -2,7 +2,9 @@ package watchstate
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -13,10 +15,11 @@ import (
 
 const (
 	// MaximumCatalogPageSize bounds a single read-only catalog page.
-	MaximumCatalogPageSize    = 200
-	maximumCatalogOffset      = 1_000_000
-	maximumCatalogSearchBytes = 256
-	maximumCatalogIDs         = 100
+	MaximumCatalogPageSize       = 200
+	maximumCatalogOffset         = 1_000_000
+	maximumCatalogSearchBytes    = 256
+	maximumCatalogIDs            = 100
+	maximumCatalogMetadataValues = 100
 )
 
 var catalogMediaTypes = map[string]struct{}{
@@ -24,6 +27,7 @@ var catalogMediaTypes = map[string]struct{}{
 	"series":  {},
 	"season":  {},
 	"episode": {},
+	"video":   {},
 }
 
 // ParentID is the only hierarchy selector. Recursive expands the selected
@@ -31,15 +35,30 @@ var catalogMediaTypes = map[string]struct{}{
 // result to canonical UUIDs. Offset is zero-based and Limit is bounded. SortBy
 // is empty for native catalog order or "sortname" with an explicit direction.
 type CatalogQuery struct {
-	ParentID   string
-	MediaTypes []string
-	SearchTerm string
-	IDs        []string
-	Recursive  bool
-	Offset     int
-	Limit      int
-	SortBy     string
-	SortOrder  string
+	ParentID              string
+	MediaTypes            []string
+	SearchTerm            string
+	IDs                   []string
+	Recursive             bool
+	Offset                int
+	Limit                 int
+	SortBy                string
+	SortOrder             string
+	Played                *bool
+	Favorite              *bool
+	Resumable             *bool
+	MinCommunityRating    *float64
+	HasSubtitles          *bool
+	Genres                []string
+	GenreIDs              []string
+	Years                 []int
+	OfficialRatings       []string
+	Tags                  []string
+	PersonIDs             []string
+	Studios               []string
+	UnavailableDataFilter bool
+	OmitTotal             bool
+	IncludePeople         bool
 }
 
 // CatalogProgress is the active profile's materialized playback state.
@@ -51,6 +70,7 @@ type CatalogProgress struct {
 }
 
 type CatalogPerson struct {
+	ID       string `json:"id,omitempty"`
 	Name     string `json:"name"`
 	Role     string `json:"role,omitempty"`
 	Type     string `json:"type"`
@@ -75,18 +95,25 @@ type CatalogTitle struct {
 	SeasonTitle      string            `json:"seasonTitle,omitempty"`
 	PosterURL        string            `json:"posterUrl,omitempty"`
 	BackgroundURL    string            `json:"backgroundUrl,omitempty"`
+	LogoURL          string            `json:"logoUrl,omitempty"`
+	BannerURL        string            `json:"bannerUrl,omitempty"`
+	ArtURL           string            `json:"artUrl,omitempty"`
 	ReleaseInfo      string            `json:"releaseInfo,omitempty"`
 	Released         string            `json:"released,omitempty"`
 	Overview         string            `json:"overview,omitempty"`
 	RuntimeMinutes   *int              `json:"runtimeMinutes,omitempty"`
 	Genres           []string          `json:"genres"`
+	Studios          []string          `json:"studios"`
+	HasSubtitles     bool              `json:"hasSubtitles"`
 	CommunityRating  *float32          `json:"communityRating,omitempty"`
 	Tagline          string            `json:"tagline,omitempty"`
 	Status           string            `json:"status,omitempty"`
 	EndDate          string            `json:"endDate,omitempty"`
 	People           []CatalogPerson   `json:"people,omitempty"`
 	InLibrary        bool              `json:"inLibrary"`
+	Favorite         bool              `json:"favorite"`
 	Progress         *CatalogProgress  `json:"progress,omitempty"`
+	UserData         *UserDataValues   `json:"userData,omitempty"`
 	ResourceID       string            `json:"resourceId,omitempty"`
 	ResourceProvider string            `json:"resourceProvider,omitempty"`
 	SourceAddonID    string            `json:"sourceAddonId,omitempty"`
@@ -188,9 +215,17 @@ func (s *Service) GetCatalogTitles(ctx context.Context, principal auth.Principal
 		       COALESCE(title.poster_url, ''), COALESCE(title.background_url, ''),
 		       COALESCE(title.release_info, ''), COALESCE(title.release_date::text, ''),
 		       COALESCE(metadata.overview, ''), metadata.runtime_minutes, COALESCE(metadata.genres, ARRAY[]::text[]),
-		       metadata.community_rating,
-		       library.title_id IS NOT NULL, progress.title_id IS NOT NULL,
+		       COALESCE(metadata.studios, ARRAY[]::text[]), metadata.community_rating, COALESCE(metadata.has_subtitles, false), COALESCE(metadata.people, '[]'::jsonb),
+		       library.title_id IS NOT NULL, favorite.title_id IS NOT NULL, progress.title_id IS NOT NULL,
 		       progress.position_seconds, progress.duration_seconds, progress.completed, progress.last_watched_at,
+		       user_data.title_id IS NOT NULL,
+		       user_data.rating, COALESCE(user_data.rating_set, false),
+		       user_data.played_percentage, COALESCE(user_data.played_percentage_set, false),
+		       user_data.unplayed_item_count, COALESCE(user_data.unplayed_item_count_set, false),
+		       user_data.play_count, COALESCE(user_data.play_count_set, false),
+		       user_data.likes, COALESCE(user_data.likes_set, false),
+		       user_data.last_played_date, user_data.last_played_date_submicrosecond,
+		       COALESCE(user_data.last_played_date_set, false),
 		       COALESCE(title.resource_id, ''), COALESCE(title.resource_provider, ''),
 		       COALESCE(title.source_addon_id::text, ''), COALESCE(title.source_catalog_id, ''),
 		       COALESCE(title.source_name, ''), COALESCE(title.country, ''),
@@ -200,7 +235,9 @@ func (s *Service) GetCatalogTitles(ctx context.Context, principal auth.Principal
 		LEFT JOIN titles parent ON parent.id = title.parent_id
 		LEFT JOIN titles series ON series.id = parent.parent_id
 		LEFT JOIN profile_library library ON library.profile_id = $1::uuid AND library.title_id = title.id
+		LEFT JOIN profile_favorites favorite ON favorite.profile_id = $1::uuid AND favorite.title_id = title.id
 		LEFT JOIN profile_progress progress ON progress.profile_id = $1::uuid AND progress.title_id = title.id
+		LEFT JOIN profile_user_data user_data ON user_data.profile_id = $1::uuid AND user_data.title_id = title.id
 		LEFT JOIN LATERAL (
 			SELECT payload ->> 'overview' AS overview,
 			       CASE WHEN jsonb_typeof(payload -> 'runtimeMinutes') = 'number'
@@ -211,10 +248,29 @@ func (s *Service) GetCatalogTitles(ctx context.Context, principal auth.Principal
 			            SELECT genre ->> 'name' FROM jsonb_array_elements(payload -> 'genres') genre
 			            WHERE jsonb_typeof(genre) = 'object' AND NULLIF(btrim(genre ->> 'name'), '') IS NOT NULL
 			       ) ELSE ARRAY[]::text[] END AS genres,
+			       CASE WHEN jsonb_typeof(payload -> 'studios') = 'array' THEN ARRAY(
+			            SELECT btrim(studio.value ->> 'name')
+			            FROM jsonb_array_elements(payload -> 'studios') WITH ORDINALITY studio(value, ordinal)
+			            WHERE studio.ordinal <= 100 AND jsonb_typeof(studio.value) = 'object'
+			              AND NULLIF(btrim(studio.value ->> 'name'), '') IS NOT NULL
+			              AND length(studio.value ->> 'name') <= 256
+			            ORDER BY studio.ordinal
+			       ) ELSE ARRAY[]::text[] END AS studios,
 			       CASE WHEN jsonb_typeof(payload -> 'voteAverage') = 'number'
 			                  AND length(payload ->> 'voteAverage') <= 16
 			                  AND (payload ->> 'voteAverage') ~ '^[0-9]+([.][0-9]+)?$'
-			            THEN (payload ->> 'voteAverage')::real END AS community_rating
+			            THEN (payload ->> 'voteAverage')::real END AS community_rating,
+			       CASE WHEN jsonb_typeof(payload -> 'hasSubtitles') = 'boolean'
+			            THEN (payload ->> 'hasSubtitles')::boolean ELSE false END AS has_subtitles,
+			       CASE WHEN jsonb_typeof(payload -> 'cast') = 'array' THEN (
+			            SELECT COALESCE(jsonb_agg(jsonb_build_object(
+			                'id', COALESCE(member ->> 'id', ''), 'name', member ->> 'name',
+			                'role', COALESCE(member ->> 'character', ''), 'type', 'Actor',
+			                'imageUrl', COALESCE(member ->> 'profileUrl', '')
+			            )), '[]'::jsonb)
+			            FROM jsonb_array_elements(payload -> 'cast') member
+			            WHERE jsonb_typeof(member) = 'object' AND NULLIF(btrim(member ->> 'name'), '') IS NOT NULL
+			       ) ELSE '[]'::jsonb END AS people
 			FROM title_metadata
 			WHERE title_id = title.id
 			ORDER BY updated_at DESC, provider, language LIMIT 1
@@ -273,7 +329,18 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			FROM titles title
 			JOIN accessible_titles accessible ON accessible.id = title.id
 			LEFT JOIN profile_library library ON library.title_id = title.id AND library.profile_id = $1::uuid
-			WHERE ($2::uuid IS NULL AND library.title_id IS NOT NULL AND title.parent_id IS NULL)
+			WHERE ($2::uuid IS NULL AND (
+			          (library.title_id IS NOT NULL AND title.parent_id IS NULL)
+			          OR (cardinality($8::uuid[]) <> 0 AND title.id = ANY($8::uuid[]))
+			          OR ($12::boolean IS TRUE AND EXISTS (
+			              SELECT 1 FROM profile_favorites favorite
+			              WHERE favorite.profile_id = $1::uuid AND favorite.title_id = title.id
+			          ))
+			          OR (($11::boolean IS NOT NULL OR $13::boolean IS NOT NULL) AND EXISTS (
+			              SELECT 1 FROM profile_progress progress
+			              WHERE progress.profile_id = $1::uuid AND progress.title_id = title.id
+			          ))
+			      ))
 			   OR ($2::uuid IS NOT NULL AND title.id = $2::uuid)
 			UNION ALL
 			SELECT child.*, parent.catalog_added_at
@@ -288,12 +355,67 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			SELECT child.id
 			FROM profile_catalog child
 			JOIN selected_descendants parent ON parent.id = child.parent_id
-		), catalog_candidates AS MATERIALIZED (
-			SELECT title.*
+		), catalog_state AS MATERIALIZED (
+			SELECT title.*, favorite.title_id IS NOT NULL AS state_favorite,
+			       progress.completed AS state_played,
+			       (progress.title_id IS NOT NULL AND progress.position_seconds > 0 AND NOT progress.completed) AS state_resumable,
+			       metadata.payload AS metadata_payload
 			FROM profile_catalog title
+			LEFT JOIN profile_favorites favorite ON favorite.profile_id = $1::uuid AND favorite.title_id = title.id
+			LEFT JOIN profile_progress progress ON progress.profile_id = $1::uuid AND progress.title_id = title.id
+			LEFT JOIN LATERAL (
+				SELECT payload FROM title_metadata WHERE title_id = title.id
+				ORDER BY updated_at DESC, provider, language LIMIT 1
+			) metadata ON true
+		), catalog_candidates AS MATERIALIZED (
+			SELECT DISTINCT ON (title.id) title.*
+			FROM catalog_state title
 			WHERE title.media_type = ANY($3::text[])
 			  AND ($6 = '' OR strpos(lower(COALESCE(title.display_title, '')), lower($6)) > 0)
 			  AND (cardinality($8::uuid[]) = 0 OR title.id = ANY($8::uuid[]))
+			  AND ($11::boolean IS NULL OR COALESCE(title.state_played, false) = $11)
+			  AND ($12::boolean IS NULL OR title.state_favorite = $12)
+			  AND ($13::boolean IS NULL OR title.state_resumable = $13)
+			  AND (cardinality($14::text[]) = 0 OR EXISTS (
+			      SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(title.metadata_payload -> 'genres') = 'array' THEN title.metadata_payload -> 'genres' ELSE '[]'::jsonb END) genre
+			      WHERE lower(btrim(genre ->> 'name')) = ANY($14::text[])
+			  ))
+			  AND (cardinality($15::text[]) = 0 OR EXISTS (
+			      SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(title.metadata_payload -> 'genres') = 'array' THEN title.metadata_payload -> 'genres' ELSE '[]'::jsonb END) genre
+			      WHERE lower(btrim(genre ->> 'id')) = ANY($15::text[])
+			  ))
+			  AND (cardinality($16::integer[]) = 0 OR EXTRACT(YEAR FROM title.release_date)::integer = ANY($16::integer[])
+			       OR CASE WHEN left(COALESCE(title.release_info, ''), 4) ~ '^[0-9]{4}$' THEN left(title.release_info, 4)::integer = ANY($16::integer[]) ELSE false END)
+			  AND (cardinality($17::text[]) = 0 OR lower(btrim(COALESCE(title.metadata_payload ->> 'officialRating', ''))) = ANY($17::text[]))
+			  AND (cardinality($18::text[]) = 0 OR EXISTS (
+			      SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(title.metadata_payload -> 'tags') = 'array' THEN title.metadata_payload -> 'tags' ELSE '[]'::jsonb END) tag
+			      WHERE lower(btrim(tag)) = ANY($18::text[])
+			  ))
+			  AND (cardinality($19::text[]) = 0 OR EXISTS (
+			      SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(title.metadata_payload -> 'cast') = 'array' THEN title.metadata_payload -> 'cast' ELSE '[]'::jsonb END) person
+			      WHERE lower(btrim(person ->> 'id')) = ANY($19::text[])
+			  ))
+			  AND (cardinality($20::text[]) = 0 OR EXISTS (
+			      SELECT 1
+			      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(title.metadata_payload -> 'studios') = 'array' THEN title.metadata_payload -> 'studios' ELSE '[]'::jsonb END)
+			           WITH ORDINALITY studio(value, ordinal)
+			      WHERE studio.ordinal <= 100 AND jsonb_typeof(studio.value) = 'object'
+			        AND NULLIF(btrim(studio.value ->> 'name'), '') IS NOT NULL
+			        AND length(studio.value ->> 'name') <= 256
+			        AND lower(btrim(studio.value ->> 'name')) = ANY($20::text[])
+			  ))
+			  AND ($21::double precision IS NULL OR CASE
+			      WHEN jsonb_typeof(title.metadata_payload -> 'voteAverage') = 'number'
+			       AND length(title.metadata_payload ->> 'voteAverage') <= 16
+			       AND (title.metadata_payload ->> 'voteAverage') ~ '^[0-9]+([.][0-9]+)?$'
+			      THEN (title.metadata_payload ->> 'voteAverage')::double precision
+			  END >= $21)
+			  AND ($22::boolean IS NULL OR CASE
+			      WHEN jsonb_typeof(title.metadata_payload -> 'hasSubtitles') = 'boolean'
+			      THEN (title.metadata_payload ->> 'hasSubtitles')::boolean
+			      ELSE false
+			  END = $22)
+			  AND NOT $23::boolean
 			  AND (
 			      ($2::uuid IS NULL AND (($7 AND true) OR (NOT $7 AND title.parent_id IS NULL)))
 			      OR ($2::uuid IS NOT NULL
@@ -301,8 +423,9 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			          AND (($7 AND EXISTS (SELECT 1 FROM selected_descendants child WHERE child.id = title.id))
 			               OR (NOT $7 AND title.parent_id = $2::uuid)))
 			  )
+			ORDER BY title.id, title.catalog_added_at DESC NULLS LAST
 		), catalog_total AS (
-			SELECT count(*)::int AS total FROM catalog_candidates
+			SELECT CASE WHEN $24::boolean THEN 0 ELSE count(*)::int END AS total FROM catalog_candidates
 		), catalog_page AS MATERIALIZED (
 			SELECT * FROM catalog_candidates
 			ORDER BY
@@ -340,9 +463,17 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		       COALESCE(title.poster_url, ''), COALESCE(title.background_url, ''),
 		       COALESCE(title.release_info, ''), COALESCE(title.release_date::text, ''),
 		       COALESCE(metadata.overview, ''), metadata.runtime_minutes, COALESCE(metadata.genres, ARRAY[]::text[]),
-		       metadata.community_rating,
-		       library.title_id IS NOT NULL, progress.title_id IS NOT NULL,
+		       COALESCE(metadata.studios, ARRAY[]::text[]), metadata.community_rating, COALESCE(metadata.has_subtitles, false), COALESCE(metadata.people, '[]'::jsonb),
+		       library.title_id IS NOT NULL, favorite.title_id IS NOT NULL, progress.title_id IS NOT NULL,
 		       progress.position_seconds, progress.duration_seconds, progress.completed, progress.last_watched_at,
+		       user_data.title_id IS NOT NULL,
+		       user_data.rating, COALESCE(user_data.rating_set, false),
+		       user_data.played_percentage, COALESCE(user_data.played_percentage_set, false),
+		       user_data.unplayed_item_count, COALESCE(user_data.unplayed_item_count_set, false),
+		       user_data.play_count, COALESCE(user_data.play_count_set, false),
+		       user_data.likes, COALESCE(user_data.likes_set, false),
+		       user_data.last_played_date, user_data.last_played_date_submicrosecond,
+		       COALESCE(user_data.last_played_date_set, false),
 		       COALESCE(title.resource_id, ''), COALESCE(title.resource_provider, ''),
 		       COALESCE(title.source_addon_id::text, ''), COALESCE(title.source_catalog_id, ''),
 		       COALESCE(title.source_name, ''), COALESCE(title.country, ''),
@@ -355,7 +486,9 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		LEFT JOIN titles series ON series.id = parent.parent_id
 		  AND EXISTS (SELECT 1 FROM accessible_titles accessible_series WHERE accessible_series.id = series.id)
 		LEFT JOIN profile_library library ON library.profile_id = $1::uuid AND library.title_id = title.id
+		LEFT JOIN profile_favorites favorite ON favorite.profile_id = $1::uuid AND favorite.title_id = title.id
 		LEFT JOIN profile_progress progress ON progress.profile_id = $1::uuid AND progress.title_id = title.id
+		LEFT JOIN profile_user_data user_data ON user_data.profile_id = $1::uuid AND user_data.title_id = title.id
 		LEFT JOIN LATERAL (
 			SELECT payload ->> 'overview' AS overview,
 			       CASE WHEN jsonb_typeof(payload -> 'runtimeMinutes') = 'number'
@@ -366,10 +499,29 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			            SELECT genre ->> 'name' FROM jsonb_array_elements(payload -> 'genres') genre
 			            WHERE jsonb_typeof(genre) = 'object' AND NULLIF(btrim(genre ->> 'name'), '') IS NOT NULL
 			       ) ELSE ARRAY[]::text[] END AS genres,
+			       CASE WHEN jsonb_typeof(payload -> 'studios') = 'array' THEN ARRAY(
+			            SELECT btrim(studio.value ->> 'name')
+			            FROM jsonb_array_elements(payload -> 'studios') WITH ORDINALITY studio(value, ordinal)
+			            WHERE studio.ordinal <= 100 AND jsonb_typeof(studio.value) = 'object'
+			              AND NULLIF(btrim(studio.value ->> 'name'), '') IS NOT NULL
+			              AND length(studio.value ->> 'name') <= 256
+			            ORDER BY studio.ordinal
+			       ) ELSE ARRAY[]::text[] END AS studios,
 			       CASE WHEN jsonb_typeof(payload -> 'voteAverage') = 'number'
 			                  AND length(payload ->> 'voteAverage') <= 16
 			                  AND (payload ->> 'voteAverage') ~ '^[0-9]+([.][0-9]+)?$'
-			            THEN (payload ->> 'voteAverage')::real END AS community_rating
+			            THEN (payload ->> 'voteAverage')::real END AS community_rating,
+			       CASE WHEN jsonb_typeof(payload -> 'hasSubtitles') = 'boolean'
+			            THEN (payload ->> 'hasSubtitles')::boolean ELSE false END AS has_subtitles,
+			       CASE WHEN $25::boolean AND jsonb_typeof(payload -> 'cast') = 'array' THEN (
+			            SELECT COALESCE(jsonb_agg(jsonb_build_object(
+			                'id', COALESCE(member ->> 'id', ''), 'name', member ->> 'name',
+			                'role', COALESCE(member ->> 'character', ''), 'type', 'Actor',
+			                'imageUrl', COALESCE(member ->> 'profileUrl', '')
+			            )), '[]'::jsonb)
+			            FROM jsonb_array_elements(payload -> 'cast') member
+			            WHERE jsonb_typeof(member) = 'object' AND NULLIF(btrim(member ->> 'name'), '') IS NOT NULL
+			       ) ELSE '[]'::jsonb END AS people
 			FROM title_metadata WHERE title_id = title.id
 			ORDER BY updated_at DESC, provider, language LIMIT 1
 		) metadata ON true
@@ -381,7 +533,9 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		  CASE WHEN $9 = '' AND $6 = '' AND $2::uuid IS NOT NULL AND NOT $7 THEN title.ordinal END ASC NULLS LAST,
 		  CASE WHEN $9 = '' AND ($6 <> '' OR $7) THEN lower(COALESCE(title.display_title, '')) END COLLATE "C" ASC NULLS LAST,
 		  title.id
-	`, profileID, parentID, query.MediaTypes, query.Limit, query.Offset, query.SearchTerm, query.Recursive, query.IDs, query.SortBy, query.SortOrder)
+	`, profileID, parentID, query.MediaTypes, query.Limit, query.Offset, query.SearchTerm, query.Recursive, query.IDs, query.SortBy, query.SortOrder,
+		query.Played, query.Favorite, query.Resumable, query.Genres, query.GenreIDs, query.Years, query.OfficialRatings, query.Tags, query.PersonIDs,
+		query.Studios, query.MinCommunityRating, query.HasSubtitles, query.UnavailableDataFilter, query.OmitTotal, query.IncludePeople)
 	if err != nil {
 		return CatalogPage{}, fmt.Errorf("query catalog page: %w", err)
 	}
@@ -424,11 +578,20 @@ func scanCatalogTitleDestinations(row catalogScanner, total *int) (CatalogTitle,
 	item := CatalogTitle{}
 	providers := []string{}
 	externalIDs := []string{}
+	people := json.RawMessage(`[]`)
 	var hasProgress bool
 	var position, duration *int
 	var completed *bool
 	var lastWatchedAt *time.Time
-	destinations := make([]any, 0, 36)
+	var hasUserData bool
+	var rating, playedPercentage *float64
+	var unplayedItemCount, playCount *int
+	var likes *bool
+	var lastPlayedDate *time.Time
+	var lastPlayedDateSubmicrosecond *int
+	var ratingSet, playedPercentageSet, unplayedItemCountSet bool
+	var playCountSet, likesSet, lastPlayedDateSet bool
+	destinations := make([]any, 0, 53)
 	if total != nil {
 		destinations = append(destinations, total)
 	}
@@ -436,8 +599,12 @@ func scanCatalogTitleDestinations(row catalogScanner, total *int) (CatalogTitle,
 		&item.ID, &item.MediaType, &item.ParentID, &item.SeriesID, &item.SeasonID,
 		&item.Ordinal, &item.ParentOrdinal, &item.Title, &item.SeriesTitle, &item.SeasonTitle,
 		&item.PosterURL, &item.BackgroundURL, &item.ReleaseInfo, &item.Released,
-		&item.Overview, &item.RuntimeMinutes, &item.Genres, &item.CommunityRating,
-		&item.InLibrary, &hasProgress, &position, &duration, &completed, &lastWatchedAt,
+		&item.Overview, &item.RuntimeMinutes, &item.Genres, &item.Studios, &item.CommunityRating, &item.HasSubtitles, &people,
+		&item.InLibrary, &item.Favorite, &hasProgress, &position, &duration, &completed, &lastWatchedAt,
+		&hasUserData,
+		&rating, &ratingSet, &playedPercentage, &playedPercentageSet,
+		&unplayedItemCount, &unplayedItemCountSet, &playCount, &playCountSet,
+		&likes, &likesSet, &lastPlayedDate, &lastPlayedDateSubmicrosecond, &lastPlayedDateSet,
 		&item.ResourceID, &item.ResourceProvider, &item.SourceAddonID, &item.SourceCatalogID,
 		&item.SourceName, &item.Country, &item.Language, &item.Category, &providers, &externalIDs,
 	)
@@ -447,12 +614,30 @@ func scanCatalogTitleDestinations(row catalogScanner, total *int) (CatalogTitle,
 	if item.Genres == nil {
 		item.Genres = make([]string, 0)
 	}
+	item.Studios = normalizeCatalogStudioProjection(item.Studios)
+	if err := json.Unmarshal(people, &item.People); err != nil {
+		return CatalogTitle{}, fmt.Errorf("decode catalog people: %w", err)
+	}
+	if item.People == nil {
+		item.People = make([]CatalogPerson, 0)
+	}
 	if hasProgress && position != nil && duration != nil && completed != nil {
 		item.Progress = &CatalogProgress{
 			PositionSeconds: *position,
 			DurationSeconds: *duration,
 			Completed:       *completed,
 			LastWatchedAt:   lastWatchedAt,
+		}
+	}
+	lastPlayedDate = joinLastPlayedDate(lastPlayedDate, lastPlayedDateSubmicrosecond)
+	if hasUserData {
+		item.UserData = &UserDataValues{
+			Rating: rating, RatingSet: ratingSet,
+			PlayedPercentage: playedPercentage, PlayedPercentageSet: playedPercentageSet,
+			UnplayedItemCount: unplayedItemCount, UnplayedItemCountSet: unplayedItemCountSet,
+			PlayCount: playCount, PlayCountSet: playCountSet,
+			Likes: likes, LikesSet: likesSet,
+			LastPlayedDate: lastPlayedDate, LastPlayedDateSet: lastPlayedDateSet,
 		}
 	}
 	item.ProviderIDs = make(map[string]string, len(providers))
@@ -515,6 +700,41 @@ func normalizeCatalogQuery(query CatalogQuery) (CatalogQuery, error) {
 	} else if query.SortOrder != "ascending" && query.SortOrder != "descending" {
 		return CatalogQuery{}, fmt.Errorf("%w: unsupported catalog sort order", ErrInvalidInput)
 	}
+	var err error
+	for name, values := range map[string]*[]string{
+		"genres":           &query.Genres,
+		"genre IDs":        &query.GenreIDs,
+		"official ratings": &query.OfficialRatings,
+		"tags":             &query.Tags,
+		"person IDs":       &query.PersonIDs,
+		"studios":          &query.Studios,
+	} {
+		if *values, err = normalizeCatalogFilterValues(*values); err != nil {
+			return CatalogQuery{}, fmt.Errorf("%w: invalid catalog %s", ErrInvalidInput, name)
+		}
+	}
+	if len(query.Years) > maximumCatalogIDs {
+		return CatalogQuery{}, fmt.Errorf("%w: too many catalog years", ErrInvalidInput)
+	}
+	seenYears := make(map[int]struct{}, len(query.Years))
+	years := make([]int, 0, len(query.Years))
+	for _, year := range query.Years {
+		if year < 1 || year > 9999 {
+			return CatalogQuery{}, fmt.Errorf("%w: invalid catalog year", ErrInvalidInput)
+		}
+		if _, duplicate := seenYears[year]; !duplicate {
+			seenYears[year] = struct{}{}
+			years = append(years, year)
+		}
+	}
+	sort.Ints(years)
+	query.Years = years
+	if query.MinCommunityRating != nil {
+		rating := *query.MinCommunityRating
+		if math.IsNaN(rating) || math.IsInf(rating, 0) || rating < 0 || rating > 10 {
+			return CatalogQuery{}, fmt.Errorf("%w: invalid minimum community rating", ErrInvalidInput)
+		}
+	}
 	if len(query.MediaTypes) == 0 {
 		query.MediaTypes = allCatalogMediaTypes()
 		return query, nil
@@ -540,6 +760,57 @@ func normalizeCatalogQuery(query CatalogQuery) (CatalogQuery, error) {
 	return query, nil
 }
 
+func normalizeCatalogFilterValues(values []string) ([]string, error) {
+	if len(values) > maximumCatalogIDs {
+		return nil, fmt.Errorf("too many values")
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		if value == "" || len(value) > maximumCatalogSearchBytes || !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') {
+			return nil, fmt.Errorf("invalid value")
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func normalizeCatalogStudioProjection(values []string) []string {
+	if len(values) > maximumCatalogMetadataValues {
+		values = values[:maximumCatalogMetadataValues]
+	}
+	names := make(map[string]string, len(values))
+	for _, raw := range values {
+		name := strings.TrimSpace(raw)
+		if name == "" || len(name) > maximumCatalogSearchBytes || !utf8.ValidString(name) || strings.ContainsRune(name, '\x00') {
+			continue
+		}
+		key := strings.ToLower(name)
+		current, exists := names[key]
+		if !exists || name < current {
+			names[key] = name
+		}
+	}
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		result = append(result, name)
+	}
+	sort.Slice(result, func(left, right int) bool {
+		leftKey, rightKey := strings.ToLower(result[left]), strings.ToLower(result[right])
+		if leftKey == rightKey {
+			return result[left] < result[right]
+		}
+		return leftKey < rightKey
+	})
+	return result
+}
+
 func allCatalogMediaTypes() []string {
-	return []string{"episode", "movie", "season", "series"}
+	return []string{"episode", "movie", "season", "series", "video"}
 }

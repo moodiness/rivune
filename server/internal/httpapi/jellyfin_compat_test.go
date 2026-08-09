@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -137,37 +139,66 @@ func TestJellyfinCompatibilityServerInfoIsStableAcrossCompositionRestarts(t *tes
 	}
 }
 
-func TestJellyfinProfileLoginUsesOpaqueUsernameAndSharedAdmissionBudgets(t *testing.T) {
-	service := &fakeAuthService{jellyfinLoginResult: auth.JellyfinProfileLoginResult{
-		ProfileID: "22222222-2222-4222-8222-222222222222",
-	}}
+func TestJellyfinProfileLoginFailuresCannotLockOutValidCredentialsOrFillSubjectTable(t *testing.T) {
+	service := &fakeAuthService{jellyfinLoginErr: auth.ErrInvalidCredentials}
 	api := testAPI(&fakeInstanceService{})
 	api.auth = service
+	api.usernameAdmission = newUsernameAdmission(credentialUsernameAttempts, 2, time.Minute)
 	input := auth.JellyfinProfileLoginInput{
-		Username: "11111111-1111-4111-8111-111111111111", Password: "application-password",
+		Username: "11111111-1111-4111-8111-111111111111", Password: "wrong",
 		LinkedDeviceKey: "generic-client-device", DeviceName: "Living Room", Platform: "Generic Client",
 	}
-	for attempt := range credentialUsernameAttempts {
+
+	for attempt := range credentialUsernameAttempts + 1 {
 		ctx := auth.WithClientIP(context.Background(), "198.51.100."+strconv.Itoa(attempt+1))
-		if _, err := api.loginJellyfinProfile(ctx, input); err != nil {
-			t.Fatalf("admitted Jellyfin login %d failed: %v", attempt, err)
+		if _, err := api.loginJellyfinProfile(ctx, input); !errors.Is(err, auth.ErrInvalidCredentials) {
+			t.Fatalf("invalid Jellyfin login %d error = %v, want opaque invalid credentials", attempt+1, err)
 		}
 	}
-	ctx := auth.WithClientIP(context.Background(), "203.0.113.1")
-	if _, err := api.loginJellyfinProfile(ctx, input); err == nil {
-		t.Fatal("opaque credential username admission budget was bypassed by source rotation")
-	} else {
-		var admissionErr *credentialLoginAdmissionError
-		if !errors.As(err, &admissionErr) {
-			t.Fatalf("blocked Jellyfin login error = %T %v", err, err)
+	targetDigest := sha256.Sum256([]byte(input.Username))
+	if state := api.usernameAdmission.subjects[targetDigest]; state.attempts != credentialUsernameAttempts {
+		t.Fatalf("Jellyfin target failures = %d, want capped %d", state.attempts, credentialUsernameAttempts)
+	}
+
+	service.jellyfinLoginErr = nil
+	service.jellyfinLoginResult = auth.JellyfinProfileLoginResult{ProfileID: "22222222-2222-4222-8222-222222222222"}
+	input.Password = "application-password"
+	if _, err := api.loginJellyfinProfile(auth.WithClientIP(context.Background(), "203.0.113.20"), input); err != nil {
+		t.Fatalf("valid Jellyfin login after rotated-source failures: %v", err)
+	}
+	if _, exists := api.usernameAdmission.subjects[targetDigest]; exists {
+		t.Fatal("successful Jellyfin login did not reset its failure state")
+	}
+
+	service.jellyfinLoginErr = auth.ErrInvalidCredentials
+	for index, username := range []string{
+		"33333333-3333-4333-8333-333333333333",
+		"44444444-4444-4444-8444-444444444444",
+		"55555555-5555-4555-8555-555555555555",
+	} {
+		input.Username = username
+		input.Password = "wrong"
+		ctx := auth.WithClientIP(context.Background(), "203.0.113."+strconv.Itoa(index+21))
+		if _, err := api.loginJellyfinProfile(ctx, input); !errors.Is(err, auth.ErrInvalidCredentials) {
+			t.Fatalf("invalid Jellyfin table-fill login %d error = %v", index+1, err)
 		}
 	}
-	if service.jellyfinLoginCalls != credentialUsernameAttempts || service.jellyfinLoginInput != input || service.loginCalls != 0 {
-		t.Fatalf("Jellyfin login calls=%d native password login calls=%d input=%+v", service.jellyfinLoginCalls, service.loginCalls, service.jellyfinLoginInput)
+	thirdDigest := sha256.Sum256([]byte(input.Username))
+	if _, exists := api.usernameAdmission.subjects[thirdDigest]; !exists {
+		t.Fatal("full Jellyfin subject table rejected a new failed username instead of evicting")
 	}
-	input.Username = "33333333-3333-4333-8333-333333333333"
-	if _, err := api.loginJellyfinProfile(auth.WithClientIP(context.Background(), "203.0.113.2"), input); err != nil {
-		t.Fatalf("independent opaque credential was rejected: %v", err)
+	if got := len(api.usernameAdmission.subjects); got != 2 {
+		t.Fatalf("tracked Jellyfin failure subjects = %d, want bounded cardinality 2", got)
+	}
+
+	service.jellyfinLoginErr = nil
+	input.Username = "66666666-6666-4666-8666-666666666666"
+	input.Password = "application-password"
+	if _, err := api.loginJellyfinProfile(auth.WithClientIP(context.Background(), "203.0.113.24"), input); err != nil {
+		t.Fatalf("new valid Jellyfin login with full subject table: %v", err)
+	}
+	if service.loginCalls != 0 {
+		t.Fatalf("Jellyfin profile login unexpectedly used native login %d times", service.loginCalls)
 	}
 }
 
@@ -180,12 +211,47 @@ func (jellyfinLifecycleAuthentication) Login(context.Context, jellyfin.CompatLog
 func (jellyfinLifecycleAuthentication) Authenticate(context.Context, string) (jellyfin.AuthenticatedSession, error) {
 	return jellyfin.AuthenticatedSession{}, jellyfin.ErrInvalidCompatCredential
 }
+
 func (jellyfinLifecycleAuthentication) Revalidate(context.Context, jellyfin.AuthenticatedSession) (jellyfin.AuthenticatedSession, error) {
 	return jellyfin.AuthenticatedSession{}, jellyfin.ErrInvalidCompatCredential
 }
 
 func (jellyfinLifecycleAuthentication) Logout(context.Context, jellyfin.AuthenticatedSession) error {
 	return nil
+}
+
+type revocableJellyfinLifecycleAuthentication struct {
+	mu      sync.Mutex
+	token   string
+	revoked bool
+	session jellyfin.AuthenticatedSession
+}
+
+func (authentication *revocableJellyfinLifecycleAuthentication) Login(context.Context, jellyfin.CompatLoginInput) (jellyfin.LoginResult, error) {
+	return jellyfin.LoginResult{}, errors.New("not used")
+}
+
+func (authentication *revocableJellyfinLifecycleAuthentication) Authenticate(_ context.Context, token string) (jellyfin.AuthenticatedSession, error) {
+	authentication.mu.Lock()
+	defer authentication.mu.Unlock()
+	if authentication.revoked || token != authentication.token {
+		return jellyfin.AuthenticatedSession{}, jellyfin.ErrInvalidCompatCredential
+	}
+	return authentication.session, nil
+}
+
+func (authentication *revocableJellyfinLifecycleAuthentication) Revalidate(_ context.Context, _ jellyfin.AuthenticatedSession) (jellyfin.AuthenticatedSession, error) {
+	return authentication.Authenticate(context.Background(), authentication.token)
+}
+
+func (*revocableJellyfinLifecycleAuthentication) Logout(context.Context, jellyfin.AuthenticatedSession) error {
+	return nil
+}
+
+func (authentication *revocableJellyfinLifecycleAuthentication) revoke() {
+	authentication.mu.Lock()
+	authentication.revoked = true
+	authentication.mu.Unlock()
 }
 
 type jellyfinLifecycleCatalog struct{}
@@ -470,6 +536,147 @@ func TestJellyfinCompatibilityReactivationWaitsForRetiredGenerationDrain(t *test
 	}
 	if builds.Load() != 2 {
 		t.Fatalf("generation builds=%d want=2", builds.Load())
+	}
+}
+
+func TestJellyfinCompatibilityOldTokenIsUnauthorizedAfterDisableAndReenable(t *testing.T) {
+	profileID := "22222222-2222-4222-8222-222222222222"
+	token := "rivune_jf_" + strings.Repeat("A", 43)
+	authentication := &revocableJellyfinLifecycleAuthentication{
+		token: token,
+		session: jellyfin.AuthenticatedSession{
+			ID: "33333333-3333-4333-8333-333333333333", ProfileID: profileID, ProfileName: "Main",
+			Principal: auth.Principal{SessionID: "44444444-4444-4444-8444-444444444444", UserID: "55555555-5555-4555-8555-555555555555", ActiveProfileID: &profileID},
+		},
+	}
+	serverID, err := jellyfin.ParseServerID("11111111-1111-4111-8111-111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newHandler := func() *jellyfin.Handler {
+		handler, buildErr := jellyfin.New(jellyfin.Dependencies{
+			ServerInfo:     jellyfin.ServerInfo{ID: serverID, Name: "Rivune Home", RuntimeVersion: "test"},
+			Authentication: authentication, Catalog: jellyfinLifecycleCatalog{}, Playback: jellyfinLifecyclePlayback{},
+		})
+		if buildErr != nil {
+			t.Fatalf("construct authenticated lifecycle handler: %v", buildErr)
+		}
+		return handler
+	}
+	handlers := []*jellyfin.Handler{newHandler(), newHandler()}
+	api := testAPI(&fakeInstanceService{})
+	api.jellyfinCompatibilityDesired = true
+	revocations := 0
+	api.jellyfinCompatibilityRevoker = func(_ context.Context, reason string) error {
+		if reason != jellyfinCompatibilityDisabledRevocationReason {
+			t.Fatalf("revocation reason=%q", reason)
+		}
+		revocations++
+		authentication.revoke()
+		return nil
+	}
+	var builds atomic.Int32
+	api.jellyfinCompatibilityBuilder = func(context.Context) (*jellyfin.Handler, bool, error) {
+		index := int(builds.Add(1)) - 1
+		return handlers[index], true, nil
+	}
+	started := make(chan *jellyfin.Handler, 2)
+	cleaned := make(chan struct{}, 2)
+	api.jellyfinCompatibilityRunner = func(ctx context.Context, handler *jellyfin.Handler) {
+		started <- handler
+		<-ctx.Done()
+		cleaned <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		api.RunJellyfinCompatibility(ctx)
+		close(done)
+	}()
+	if handler := receiveJellyfinLifecycleHandler(t, started, "initial authenticated generation"); handler != handlers[0] {
+		t.Fatalf("initial handler=%p want=%p", handler, handlers[0])
+	}
+	router := api.routeJellyfinCompatibility(http.NotFoundHandler())
+	request := httptest.NewRequest(http.MethodGet, "/Users/Me", nil)
+	request.Header.Set("X-Emby-Token", token)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		cancel()
+		t.Fatalf("old token before disable status=%d", response.Code)
+	}
+	if err := api.applyCanonicalJellyfinCompatibilityDesired(context.Background(), false); err != nil {
+		cancel()
+		t.Fatalf("disable compatibility: %v", err)
+	}
+	select {
+	case <-cleaned:
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		t.Fatal("disabled generation did not drain")
+	}
+	if err := api.applyCanonicalJellyfinCompatibilityDesired(context.Background(), true); err != nil {
+		cancel()
+		t.Fatalf("reenable compatibility: %v", err)
+	}
+	if handler := receiveJellyfinLifecycleHandler(t, started, "reenabled authenticated generation"); handler != handlers[1] {
+		cancel()
+		t.Fatalf("reenabled handler=%p want=%p", handler, handlers[1])
+	}
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request.Clone(context.Background()))
+	if response.Code != http.StatusUnauthorized || revocations != 2 {
+		cancel()
+		t.Fatalf("old token after reenable status=%d revocations=%d", response.Code, revocations)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("authenticated lifecycle supervisor did not stop")
+	}
+}
+
+func TestJellyfinCompatibilityShutdownAndRestartWithoutDisableDoesNotRevokeSessions(t *testing.T) {
+	revocations := 0
+	for generation := range 2 {
+		api := testAPI(&fakeInstanceService{})
+		api.jellyfinCompatibilityDesired = true
+		api.jellyfinCompatibilityRevoker = func(context.Context, string) error {
+			revocations++
+			return nil
+		}
+		api.jellyfinCompatibilityReconciler = func(context.Context) (bool, error) { return true, nil }
+		handler := newJellyfinLifecycleHandler(t)
+		api.jellyfinCompatibilityBuilder = func(context.Context) (*jellyfin.Handler, bool, error) {
+			return handler, true, nil
+		}
+		started := make(chan struct{}, 1)
+		api.jellyfinCompatibilityRunner = func(ctx context.Context, _ *jellyfin.Handler) {
+			started <- struct{}{}
+			<-ctx.Done()
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			api.RunJellyfinCompatibility(ctx)
+			close(done)
+		}()
+		select {
+		case <-started:
+		case <-time.After(500 * time.Millisecond):
+			cancel()
+			t.Fatalf("generation %d did not start", generation+1)
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("generation %d did not stop", generation+1)
+		}
+	}
+	if revocations != 0 {
+		t.Fatalf("ordinary shutdown/restart revoked compatibility sessions %d times", revocations)
 	}
 }
 

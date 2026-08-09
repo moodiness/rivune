@@ -42,6 +42,7 @@ type Config struct {
 	Timezone                string
 	SetupToken              string
 	JellyfinEnabled         bool
+	JellyfinDebug           bool
 	AccessTokenTTL          time.Duration
 	RefreshTokenTTL         time.Duration
 	ProfileGrantTTL         time.Duration
@@ -97,6 +98,10 @@ func Load() (Config, error) {
 
 	var err error
 	cfg.JellyfinEnabled, err = loadStrictBoolean("RIVUNE_JELLYFIN_ENABLED")
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.JellyfinDebug, err = loadStrictBoolean("RIVUNE_JELLYFIN_DEBUG")
 	if err != nil {
 		return Config{}, err
 	}
