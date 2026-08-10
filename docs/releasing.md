@@ -67,19 +67,19 @@ gh workflow run release-candidate.yml --ref main -f tag=v1.5.0
 
 The manual path enforces the same SemVer, annotated-tag, current-`main`, and tag-target checks. Its successful `workflow_run` is eligible for the same external release-environment gate; it does not weaken artifact authorization or permit a stale or lightweight tag.
 
-## Required external GitHub protection — publication currently blocked
+## Required external GitHub protection
 
-Repository files cannot configure or prove GitHub environment, branch, or ruleset protection. **Do not publish a release until every control below is configured and reverified through both an authenticated API request and the GitHub Settings UI.**
+Repository files cannot configure or prove GitHub environment, branch, or ruleset protection. Reverify the controls below through both authenticated API responses and the GitHub Settings UI before creating a release tag.
 
-Observed on 2026-08-09: the public `GET /repos/moodiness/rivune/environments/release` response showed environment ID `19369667540`, `protection_rules: []`, `deployment_branch_policy: null`, and `can_admins_bypass: true`. Therefore the required reviewers, “Prevent self-review,” and branch restriction were not configured in the observed state, and publication is blocked. The protection state of `main` and GHCR package versions/attestations was not anonymously verifiable because the consulted endpoints returned HTTP 401. The `v*` ruleset was not confirmed. Treat those controls as unverified, not as absent or protected.
+Rivune is currently maintained by the single repository owner, `moodiness`. The repository therefore uses an explicit solo-maintainer gate instead of pretending that an independent approval is available:
 
-Before creating or dispatching a candidate, an administrator must configure and a different release maintainer must verify:
+1. `main` requires a pull request, enforces the rules for administrators, requires linear history and resolved conversations, and blocks force pushes and deletion. The required approval count is zero until another maintainer exists.
+2. Active `v*` tag rulesets allow only `moodiness` to create release tags and allow nobody, including the owner, to update or delete one after creation.
+3. The `release` environment requires approval by `moodiness`, permits self-review for this solo-maintainer workflow, disables administrator bypass, and accepts deployments only from protected branches. Do not grant its secrets to another branch.
 
-1. Protect `main` with required pull-request reviews; disallow force pushes and direct bypasses.
-2. Add a tag ruleset for `v*` that restricts creation to release maintainers and blocks updates and deletion.
-3. Configure the existing `release` environment with independent required reviewers, “Prevent self-review,” administrator bypass disabled, and deployment restricted to the protected `main` branch. Do not grant its secrets to another branch.
+This gate provides deliberate approval and immutable release refs, but not independent separation of duties. As soon as another trusted maintainer is added, require one pull-request approval, enable environment self-review prevention, and make that maintainer the release reviewer.
 
-Run the authenticated checks below, inspect the complete JSON rather than relying only on the selected fields, and compare it with **Settings → Environments → release**, **Settings → Branches/Rules → main**, and **Settings → Rules → Rulesets → `v*`**:
+Run the authenticated checks below, inspect the complete JSON rather than relying only on selected fields, and compare it with **Settings → Environments → release**, **Settings → Branches/Rules → main**, and **Settings → Rules → Rulesets → `v*`**:
 
 ```sh
 gh auth status
@@ -88,7 +88,7 @@ gh api repos/moodiness/rivune/branches/main/protection
 gh api --paginate repos/moodiness/rivune/rulesets
 ```
 
-The environment response must show the required reviewers and branch policy, self-review prevention must be enabled, and administrator bypass must be disabled. The branch and ruleset responses must show the controls above. Record the authenticated outputs and the second maintainer's UI verification in the release record. If any endpoint is unauthorized, any field is missing, or API and UI disagree, stop: neither an environment approval prompt nor a successful workflow run is evidence that protection is configured.
+The environment response must show `moodiness` as required reviewer, `can_admins_bypass: false`, and a protected-branch deployment policy. Branch protection must show administrator enforcement with force pushes and deletion disabled. The two active tag rulesets must separately restrict creation and reject every update or deletion without bypass. If any endpoint is unauthorized, any field is missing, or API and UI disagree, stop: an approval prompt or successful workflow run alone does not prove the complete policy.
 
 ## Published artifacts
 
