@@ -752,6 +752,10 @@ func (processor *FFmpegProcessor) HardwareToneMap() bool {
 	return processor.encoder.usesHardwareToneMap()
 }
 
+func (processor *FFmpegProcessor) ToneMapBackend() string {
+	return string(processor.encoder.normalizedToneMapBackend())
+}
+
 func (processor *FFmpegProcessor) ActiveProcesses() int {
 	return len(processor.slots)
 }
@@ -764,7 +768,7 @@ func (processor *FFmpegProcessor) PlaybackDiagnostics() MediaDiagnostics {
 	if processor == nil {
 		return MediaDiagnostics{
 			FFmpegVersion: "unknown", FFprobeVersion: "unknown", HardwareAcceleration: "unknown", VideoEncoder: "unknown",
-			MaximumReadRate: defaultTranscodeMaximumReadRate,
+			HardwareToneMap: false, ToneMapBackend: string(videoToneMapSoftware), MaximumReadRate: defaultTranscodeMaximumReadRate,
 		}
 	}
 	hardwareAcceleration := processor.hardwareAcceleration
@@ -785,7 +789,7 @@ func (processor *FFmpegProcessor) PlaybackDiagnostics() MediaDiagnostics {
 		FFmpegVersion: boundedMediaVersion(processor.ffmpegVersion), FFprobeVersion: boundedMediaVersion(processor.ffprobeVersion),
 		HardwareAcceleration: hardwareAcceleration, VideoEncoder: videoEncoder,
 		MaximumReadRate: adaptiveTranscodeReadRate(processor.maximumReadRate, 1, 1),
-		HardwareToneMap: processor.HardwareToneMap(), TranscodeThreads: threads,
+		HardwareToneMap: processor.HardwareToneMap(), ToneMapBackend: processor.ToneMapBackend(), TranscodeThreads: threads,
 		Pools: MediaDiagnosticPools{
 			Process: mediaDiagnosticPool(processor.slots), Probe: mediaDiagnosticPool(processor.probeSlots),
 			Subtitle: mediaDiagnosticPool(processor.subtitleSlots), Trickplay: mediaDiagnosticPool(processor.trickplaySlots),

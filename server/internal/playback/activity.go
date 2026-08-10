@@ -54,6 +54,7 @@ type MediaDiagnostics struct {
 	HardwareAcceleration string               `json:"hardwareAcceleration"`
 	VideoEncoder         string               `json:"videoEncoder"`
 	HardwareToneMap      bool                 `json:"hardwareToneMap"`
+	ToneMapBackend       string               `json:"toneMapBackend"`
 	TranscodeThreads     int                  `json:"transcodeThreads"`
 	MaximumReadRate      float64              `json:"maximumReadRate"`
 	Totals               MediaProcessTotals   `json:"totals"`
@@ -303,7 +304,7 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 
 	diagnostics := MediaDiagnostics{
 		FFmpegVersion: "unknown", FFprobeVersion: "unknown", HardwareAcceleration: "unknown", VideoEncoder: "unknown",
-		MaximumReadRate: defaultTranscodeMaximumReadRate,
+		HardwareToneMap: false, ToneMapBackend: string(videoToneMapSoftware), MaximumReadRate: defaultTranscodeMaximumReadRate,
 	}
 	processingSlots := activeJobCount
 	processingLimit := 0

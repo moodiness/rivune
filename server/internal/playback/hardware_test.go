@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -107,6 +108,36 @@ func TestVAAPIUsesHardwareToneMappingOnlyAfterSuccessfulProbe(t *testing.T) {
 	vulkanFilter := videoEncoder{kind: videoEncoderVAAPI, toneMapBackend: videoToneMapVulkan}.filter(true)
 	if !strings.Contains(vulkanFilter, "libplacebo=") || !strings.Contains(vulkanFilter, "hwmap=derive_device=vulkan") || strings.Contains(vulkanFilter, "zscale") {
 		t.Fatalf("Vulkan tone-map capability should use libplacebo surfaces: %q", vulkanFilter)
+	}
+}
+
+func TestHardwareToneMapProbeOrderUsesVulkanFirstOnlyForAMD(t *testing.T) {
+	tests := []struct {
+		name       string
+		vendor     string
+		fail       map[videoToneMapBackend]bool
+		want       videoToneMapBackend
+		wantProbes []videoToneMapBackend
+	}{
+		{name: "AMD selects Vulkan when both succeed", vendor: "0x1002", want: videoToneMapVulkan, wantProbes: []videoToneMapBackend{videoToneMapVulkan}},
+		{name: "AMD falls back to VAAPI", vendor: "0x1002", fail: map[videoToneMapBackend]bool{videoToneMapVulkan: true}, want: videoToneMapVAAPI, wantProbes: []videoToneMapBackend{videoToneMapVulkan, videoToneMapVAAPI}},
+		{name: "other vendors retain VAAPI priority", vendor: "0x8086", want: videoToneMapVAAPI, wantProbes: []videoToneMapBackend{videoToneMapVAAPI}},
+		{name: "failed hardware probes retain software fallback", vendor: "0x1002", fail: map[videoToneMapBackend]bool{videoToneMapVulkan: true, videoToneMapVAAPI: true}, wantProbes: []videoToneMapBackend{videoToneMapVulkan, videoToneMapVAAPI}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var probes []videoToneMapBackend
+			selected := detectHardwareToneMapWithProbe(videoEncoder{kind: videoEncoderVAAPI}, test.vendor, func(candidate videoEncoder) error {
+				probes = append(probes, candidate.toneMapBackend)
+				if test.fail[candidate.toneMapBackend] {
+					return errors.New("probe failed")
+				}
+				return nil
+			})
+			if selected.toneMapBackend != test.want || !reflect.DeepEqual(probes, test.wantProbes) {
+				t.Fatalf("selected backend/probes = %q/%v, want %q/%v", selected.toneMapBackend, probes, test.want, test.wantProbes)
+			}
+		})
 	}
 }
 

@@ -1,14 +1,17 @@
+import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures/rivune";
 import { selectListbox, selectOption, selectOptions } from "./helpers/select";
+
+const seekableSegment = Buffer.from(readFileSync(new URL("./fixtures/seekable-segment.b64", import.meta.url), "utf8"), "base64");
 
 function sourceReference(value: unknown): string | undefined {
   if (!value || typeof value !== "object" || !("sourceRef" in value)) return undefined;
   return typeof value.sourceRef === "string" ? value.sourceRef : undefined;
 }
 
-async function installDeterministicMedia(page: Page) {
-  await page.addInitScript(() => {
+async function installDeterministicMedia(page: Page, duration = 1800) {
+  await page.addInitScript((mediaDuration: number) => {
     type MediaState = { currentTime: number; paused: boolean; src: string };
     const states = new WeakMap<HTMLMediaElement, MediaState>();
     const state = (element: HTMLMediaElement) => {
@@ -41,10 +44,10 @@ async function installDeterministicMedia(page: Page) {
           queueMicrotask(() => this.dispatchEvent(new Event("timeupdate")));
         },
       },
-      duration: { configurable: true, get() { return 1800; } },
+      duration: { configurable: true, get() { return mediaDuration; } },
       readyState: { configurable: true, get() { return HTMLMediaElement.HAVE_ENOUGH_DATA; } },
       paused: { configurable: true, get() { return state(this).paused; } },
-      ended: { configurable: true, get() { return state(this).currentTime >= 1800; } },
+      ended: { configurable: true, get() { return state(this).currentTime >= mediaDuration; } },
       buffered: { configurable: true, get() { return { length: 0, start: () => 0, end: () => 0 }; } },
     });
     prototype.play = function () {
@@ -62,7 +65,7 @@ async function installDeterministicMedia(page: Page) {
       this.dispatchEvent(new Event("loadedmetadata"));
       this.dispatchEvent(new Event("canplay"));
     };
-  });
+  }, duration);
 }
 
 test("player resumes, selects tracks, and autoplays the next episode", async ({ page, rivune }) => {
@@ -252,6 +255,91 @@ test("localized compact player controls do not depend on English accessible labe
   await expect(speed).toBeHidden();
   await expect(page.locator('[data-player-action="playback"]')).toBeVisible();
   await expect(page.locator('[data-player-action="close"]')).toBeVisible();
+});
+
+test("seekable TS resume loads the absolute segment without doubling the displayed position", async ({ page, rivune: _rivune }) => {
+  const segmentRequests: string[] = [];
+  const playlist = [
+    "#EXTM3U",
+    "#EXT-X-VERSION:3",
+    "#EXT-X-PLAYLIST-TYPE:VOD",
+    "#EXT-X-TARGETDURATION:3",
+    "#EXT-X-MEDIA-SEQUENCE:0",
+    "#EXT-X-START:TIME-OFFSET=3080,PRECISE=YES",
+    ...Array.from({ length: 1200 }, (_, index) => `#EXTINF:3.000000,\nseek-${String(index).padStart(6, "0")}.ts`),
+    "#EXT-X-ENDLIST",
+  ].join("\n");
+
+  await page.route("**/api/v1/progress/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    const progress = { positionSeconds: 3080, durationSeconds: 3600, completed: false, version: 4 };
+    if (path.endsWith("/progress/batch")) {
+      const input = request.postDataJSON() as { titleIds?: string[] };
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ items: (input.titleIds ?? []).map((titleId) => ({ titleId, progress: { titleId, mediaType: titleId === "episode-1" ? "episode" : "movie", ...(titleId === "episode-1" ? progress : { ...progress, positionSeconds: 0 }), updatedAt: "2099-01-01T00:00:00Z" } })) }),
+      });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ titleId: "episode-1", ...progress, updatedAt: "2099-01-01T00:00:00Z" }) });
+  });
+  await page.route("**/api/v1/playback/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    if (request.method() === "GET" && path.includes("/playback/sessions/seekable-session/assets/")) {
+      if (path.endsWith(".m3u8")) {
+        await route.fulfill({ contentType: "application/vnd.apple.mpegurl", body: playlist });
+      } else if (path.endsWith(".ts")) {
+        segmentRequests.push(path.slice(path.lastIndexOf("/") + 1));
+        await route.fulfill({ contentType: "video/mp2t", body: seekableSegment });
+      } else {
+        await route.fulfill({ status: 404 });
+      }
+      return;
+    }
+    if (request.method() === "POST" && path.endsWith("/playback/sources")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ sources: [{ id: "seekable-option", sourceRef: "seekable-source", addonId: "fixture-addon", manifestId: "fixture-manifest", streamIndex: 0, name: "Seekable TS", protocol: "http", container: "mkv", expiresAt: "2099-01-01T00:00:00Z" }], providerErrors: [] }) });
+      return;
+    }
+    if (request.method() === "POST" && path.endsWith("/playback/prepare")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ sourceRef: "seekable-source", mode: "transcode", protocol: "hls", container: "hls", media: { container: "mkv", durationSeconds: 3600, hdrFormat: "sdr", videoTracks: [{ index: 0, type: "video", codec: "h264", width: 1920, height: 1080 }], audioTracks: [{ index: 1, type: "audio", codec: "aac", channels: 2 }], subtitleTracks: [] }, subtitleCount: 0, expiresAt: "2099-01-01T00:00:00Z" }) });
+      return;
+    }
+    if (request.method() === "POST" && path.endsWith("/playback/resolve")) {
+      const input = request.postDataJSON() as { startSeconds?: number };
+      expect(input.startSeconds).toBe(3080);
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "seekable-session",
+          selectedSourceId: "seekable-source",
+          selectedAudioTrack: 1,
+          sources: [{ id: "seekable-source", addonId: "fixture-addon", manifestId: "fixture-manifest", name: "Seekable TS", mode: "transcode", url: "/api/v1/playback/sessions/seekable-session/assets/index.m3u8?file=index.m3u8", protocol: "hls", container: "hls", mediaTimeline: "absolute", compatible: true, media: { container: "mkv", durationSeconds: 3600, hdrFormat: "sdr", videoTracks: [{ index: 0, type: "video", codec: "h264", width: 1920, height: 1080 }], audioTracks: [{ index: 1, type: "audio", codec: "aac", channels: 2 }], subtitleTracks: [] } }],
+          subtitles: [],
+          providerErrors: [],
+          expiresAt: "2099-01-01T00:00:00Z",
+        }),
+      });
+      return;
+    }
+    if (path.endsWith("/playback/markers")) {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ markers: [] }) });
+      return;
+    }
+    await route.fulfill({ status: 204 });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await page.getByRole("radio", { name: /Seekable TS/ }).click();
+  await page.getByRole("button", { name: "Play episode" }).click();
+
+  await expect.poll(() => segmentRequests[0]).toBe("seek-001026.ts");
+  expect(segmentRequests).not.toContain("seek-000000.ts");
+  await expect.poll(async () => Number(await page.getByRole("slider", { name: "Playback position" }).inputValue())).toBeGreaterThanOrEqual(3079);
+  expect(Number(await page.getByRole("slider", { name: "Playback position" }).inputValue())).toBeLessThanOrEqual(3081);
 });
 
 test("server transcodes remain in the existing web video and HLS source pipeline", async ({ page, rivune: _rivune }) => {

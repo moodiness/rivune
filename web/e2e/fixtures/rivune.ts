@@ -480,7 +480,7 @@ export class RivuneHarness {
       storageBytes: 12_582_912,
       storageLimitBytes: 1_073_741_824,
     },
-    diagnostics: { ffmpegVersion: "7.1", ffprobeVersion: "7.1", hardwareAcceleration: "software", videoEncoder: "h264", hardwareToneMap: false, transcodeThreads: 4, maximumReadRate: 1.5, totals: { started: 1, succeeded: 0, failed: 0, softwareFallbacks: 0 }, pools: { process: { active: 1, limit: 3 }, probe: { active: 0, limit: 3 }, subtitle: { active: 0, limit: 3 }, trickplay: { active: 0, limit: 1 } } },
+    diagnostics: { ffmpegVersion: "7.1", ffprobeVersion: "7.1", hardwareAcceleration: "software", videoEncoder: "h264", hardwareToneMap: false, toneMapBackend: "software", transcodeThreads: 4, maximumReadRate: 1.5, totals: { started: 1, succeeded: 0, failed: 0, softwareFallbacks: 0 }, pools: { process: { active: 1, limit: 3 }, probe: { active: 0, limit: 3 }, subtitle: { active: 0, limit: 3 }, trickplay: { active: 0, limit: 1 } } },
     sessions: [],
     jobs: [],
   };
@@ -1779,6 +1779,7 @@ export class RivuneHarness {
         mode: burnsSubtitles ? "transcode" : "direct",
         url: burnsSubtitles ? `/api/v1/playback/sessions/${sessionID}/assets/master.m3u8?file=master.m3u8` : "https://fixtures.rivune.test/video.mp4",
         protocol: burnsSubtitles ? "hls" : "http",
+        mediaTimeline: burnsSubtitles ? "relative" : undefined,
         container: "mp4",
         compatible: true,
         media: { container: "mp4", durationSeconds: 1800, hdrFormat: "sdr", videoTracks: [{ index: 0, type: "video", codec: "h264", width: 1920, height: 1080 }], audioTracks: [{ index: 0, type: "audio", codec: "aac", language: "en", title: "English", channels: 2 }, { index: 2, type: "audio", codec: "aac", language: "fr", title: "French", channels: 2 }], subtitleTracks: [] },

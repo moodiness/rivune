@@ -28,7 +28,7 @@ const (
 	defaultRemuxConcurrency        = 4
 	defaultTranscodeThreads        = 4
 	defaultTranscodeMaxReadRate    = 1.5
-	defaultHLSInitialBufferSeconds = 6
+	defaultHLSInitialBufferSeconds = 12
 	defaultVideoDevice             = "/dev/dri/renderD128"
 )
 

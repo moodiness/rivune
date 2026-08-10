@@ -2456,14 +2456,16 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     if (!progressReady || !video || !stream?.url || stream.mode === "external") return;
     const playbackURL = new URL(stream.url, window.location.origin);
     const processed = stream.mode !== "direct";
-    const playbackOffset = processed ? Math.max(0, Math.floor(playbackStart ?? resumePositionRef.current)) : 0;
+    const requestedTimestamp = Math.max(0, Math.floor(playbackStart ?? resumePositionRef.current));
+    const mediaPosition = processed && stream.mediaTimeline === "absolute" ? requestedTimestamp : 0;
+    const playbackOffset = processed && stream.mediaTimeline !== "absolute" ? requestedTimestamp : 0;
     playbackOffsetRef.current = playbackOffset;
-    setCurrentTime(playbackOffset);
+    setCurrentTime(requestedTimestamp);
     setSeekPreview(null);
     setPlaybackBlocked(false);
     setPhase("preparing");
     pausedAtRef.current = 0;
-    if (playbackOffset > 0) playbackURL.searchParams.set("start", String(playbackOffset));
+    if (processed && requestedTimestamp > 0) playbackURL.searchParams.set("start", String(requestedTimestamp));
     const sourceURL = processed ? `${playbackURL.pathname}${playbackURL.search}` : stream.url;
     let disposed = false;
     let destroyHLS = () => {};
@@ -2517,7 +2519,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         const hls = new Hls({
           enableWorker: true,
           autoStartLoad: false,
-          startPosition: 0,
+          startPosition: mediaPosition,
           maxBufferLength: 30,
           backBufferLength: 30,
         });
@@ -2526,7 +2528,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         let networkRecoveries = 0;
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           setPhase("ready");
-          hls.startLoad(0);
+          hls.startLoad(mediaPosition);
           startPlayback();
         });
         hls.on(Hls.Events.FRAG_BUFFERED, () => {

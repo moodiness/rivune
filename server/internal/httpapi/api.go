@@ -374,6 +374,7 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		"hardwareAcceleration", mediaDiagnostics.HardwareAcceleration,
 		"videoEncoder", mediaDiagnostics.VideoEncoder,
 		"hardwareToneMap", mediaDiagnostics.HardwareToneMap,
+		"toneMapBackend", mediaDiagnostics.ToneMapBackend,
 		"transcodeThreads", mediaDiagnostics.TranscodeThreads,
 		"processLimit", mediaDiagnostics.Pools.Process.Limit,
 		"probeLimit", mediaDiagnostics.Pools.Probe.Limit,
