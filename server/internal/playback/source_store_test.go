@@ -267,7 +267,7 @@ func TestSourceReferenceStorePinnedReferencesSurviveOwnerChurnAndRollbackAtomica
 	}
 }
 
-func TestSourceReferenceStorePinRefcountRetainsExpiredReferenceUntilFinalRelease(t *testing.T) {
+func TestSourceReferenceStorePinnedReferenceExpiresBeforeFinalRelease(t *testing.T) {
 	now := time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC)
 	store := newSourceReferenceStore(func() time.Time { return now })
 	profileID := "profile-id"
@@ -289,13 +289,13 @@ func TestSourceReferenceStorePinRefcountRetainsExpiredReferenceUntilFinalRelease
 		t.Fatal(err)
 	}
 	now = now.Add(sourceReferenceTTL)
-	store.unpin(principal, []string{reference.ID})
-	if _, err := store.get(reference.ID, principal); err != nil {
-		t.Fatalf("one remaining pin did not retain expired reference: %v", err)
+	if _, err := store.get(reference.ID, principal); err != ErrSourceReferenceExpired {
+		t.Fatalf("expired pinned reference remained usable: %v", err)
 	}
 	store.unpin(principal, []string{reference.ID})
-	if _, err := store.get(reference.ID, principal); err != ErrSourceReferenceExpired {
-		t.Fatalf("final release retained expired reference: %v", err)
+	store.unpin(principal, []string{reference.ID})
+	if _, exists := store.entries[reference.ID]; exists {
+		t.Fatal("final release retained expired pinned reference")
 	}
 }
 
@@ -357,6 +357,46 @@ func TestSourceReferenceStoreAtomicPinnedBatchRejectsConcurrentOwnerChurn(t *tes
 	store.unpin(principal, identifiers)
 	if _, err := store.putAll(principal, make([]sourceReference, maximumSourceReferencesPerOwner)); err != nil {
 		t.Fatalf("released reservation did not restore admission: %v", err)
+	}
+}
+
+func TestSourceReferenceStoreSelectionCASReturnsCurrentOnLoss(t *testing.T) {
+	now := time.Date(2026, time.August, 10, 15, 0, 0, 0, time.UTC)
+	store := newSourceReferenceStore(func() time.Time { return now })
+	profileID := "profile-id"
+	principal := auth.Principal{SessionID: "session-id", UserID: "user-id", DeviceID: "device-id", ActiveProfileID: &profileID}
+	oldAsset := storedAsset{ID: "source-id", URL: "https://media.example/old", Headers: map[string]string{"Authorization": "Bearer old"}}
+	initial, err := store.put(principal, sourceReference{
+		Source: Source{ID: "source-id", URL: oldAsset.URL}, Asset: &oldAsset,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newerAsset := storedAsset{ID: "source-id", URL: "https://media.example/u2", Headers: map[string]string{"Authorization": "Bearer u2"}}
+	newerSource := initial.Source
+	newerSource.URL = newerAsset.URL
+	newer, replaced, err := store.replaceSelection(initial.ID, principal, initial.SelectionRevision, newerSource, &newerAsset)
+	if err != nil || !replaced || newer.SelectionRevision != initial.SelectionRevision+1 || newer.TransportRevision != initial.TransportRevision+1 {
+		t.Fatalf("newer CAS replacement: replaced=%v selectionRevision=%d transportRevision=%d err=%v", replaced, newer.SelectionRevision, newer.TransportRevision, err)
+	}
+	sameTransport, replaced, err := store.replaceSelection(initial.ID, principal, newer.SelectionRevision, newerSource, &newerAsset)
+	if err != nil || !replaced || sameTransport.SelectionRevision != newer.SelectionRevision+1 || sameTransport.TransportRevision != newer.TransportRevision {
+		t.Fatalf("same-transport CAS replacement: replaced=%v selectionRevision=%d transportRevision=%d err=%v", replaced, sameTransport.SelectionRevision, sameTransport.TransportRevision, err)
+	}
+	newer = sameTransport
+	staleAsset := storedAsset{ID: "source-id", URL: "https://media.example/u1", Headers: map[string]string{"Authorization": "Bearer u1"}}
+	staleSource := initial.Source
+	staleSource.URL = staleAsset.URL
+	current, replaced, err := store.replaceSelection(initial.ID, principal, initial.SelectionRevision, staleSource, &staleAsset)
+	if err != nil || replaced {
+		t.Fatalf("stale CAS replacement: replaced=%v err=%v", replaced, err)
+	}
+	if current.SelectionRevision != newer.SelectionRevision || current.TransportRevision != newer.TransportRevision || current.Asset == nil || current.Asset.URL != newerAsset.URL || current.Asset.Headers["Authorization"] != "Bearer u2" {
+		t.Fatalf("stale CAS did not return current selection: selectionRevision=%d transportRevision=%d asset=%+v", current.SelectionRevision, current.TransportRevision, current.Asset)
+	}
+	current, expired, err := store.expireSelection(initial.ID, principal, initial.SelectionRevision)
+	if err != nil || expired || current.SelectionRevision != newer.SelectionRevision {
+		t.Fatalf("stale expiration did not converge: expired=%v revision=%d err=%v", expired, current.SelectionRevision, err)
 	}
 }
 

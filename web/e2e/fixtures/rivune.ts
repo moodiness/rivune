@@ -403,7 +403,7 @@ export class RivuneHarness {
       storageBytes: 12_582_912,
       storageLimitBytes: 1_073_741_824,
     },
-    diagnostics: { videoEncoder: "h264", hardwareToneMap: false },
+    diagnostics: { ffmpegVersion: "7.1", ffprobeVersion: "7.1", hardwareAcceleration: "software", videoEncoder: "h264", hardwareToneMap: false, transcodeThreads: 4, maximumReadRate: 1.5, totals: { started: 1, succeeded: 0, failed: 0, softwareFallbacks: 0 }, pools: { process: { active: 1, limit: 3 }, probe: { active: 0, limit: 3 }, subtitle: { active: 0, limit: 3 }, trickplay: { active: 0, limit: 1 } } },
     sessions: [],
     jobs: [],
   };

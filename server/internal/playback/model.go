@@ -141,25 +141,46 @@ type ResolveInput struct {
 }
 
 type MediaTrack struct {
-	Index          int    `json:"index"`
-	Type           string `json:"type"`
-	Codec          string `json:"codec"`
-	Profile        string `json:"profile,omitempty"`
-	Level          int    `json:"-"`
-	VideoRangeType string `json:"-"`
-	Language       string `json:"language,omitempty"`
-	Title          string `json:"title,omitempty"`
-	Forced         bool   `json:"forced,omitempty"`
-	Width          int    `json:"width,omitempty"`
-	Height         int    `json:"height,omitempty"`
-	Channels       int    `json:"channels,omitempty"`
-	BitrateKbps    int    `json:"-"`
+	Index          int     `json:"index"`
+	Type           string  `json:"type"`
+	Codec          string  `json:"codec"`
+	Profile        string  `json:"profile,omitempty"`
+	Level          int     `json:"-"`
+	VideoRangeType string  `json:"-"`
+	Language       string  `json:"language,omitempty"`
+	Title          string  `json:"title,omitempty"`
+	Forced         bool    `json:"forced,omitempty"`
+	Default        bool    `json:"-"`
+	Width          int     `json:"width,omitempty"`
+	Height         int     `json:"height,omitempty"`
+	Channels       int     `json:"channels,omitempty"`
+	BitrateKbps    int     `json:"-"`
+	PixelFormat    string  `json:"-"`
+	BitDepth       int     `json:"-"`
+	FrameRate      float64 `json:"-"`
+	ColorRange     string  `json:"-"`
+	ColorSpace     string  `json:"-"`
+	ColorTransfer  string  `json:"-"`
+	ColorPrimaries string  `json:"-"`
+	ChannelLayout  string  `json:"-"`
+	SampleRate     int     `json:"-"`
+	// Dolby Vision configuration is internal probe evidence. In particular,
+	// profile 5 has no HDR10-compatible base layer and must never imply that
+	// generic HDR tone mapping is safe.
+	DolbyVisionProfile         int  `json:"-"`
+	DolbyVisionLevel           int  `json:"-"`
+	DolbyVisionRPUPresent      bool `json:"-"`
+	DolbyVisionELPresent       bool `json:"-"`
+	DolbyVisionBLPresent       bool `json:"-"`
+	DolbyVisionCompatibilityID int  `json:"-"`
 }
 
 type MediaInspection struct {
 	Container       string       `json:"container,omitempty"`
 	DurationSeconds float64      `json:"durationSeconds,omitempty"`
 	HDRFormat       string       `json:"hdrFormat,omitempty"`
+	BitrateKbps     int          `json:"-"`
+	SizeBytes       int64        `json:"-"`
 	VideoTracks     []MediaTrack `json:"videoTracks"`
 	AudioTracks     []MediaTrack `json:"audioTracks"`
 	SubtitleTracks  []MediaTrack `json:"subtitleTracks"`
@@ -228,12 +249,14 @@ type PlaybackDecision struct {
 }
 
 type PlaybackDecisionSource struct {
-	Container        string `json:"container,omitempty"`
-	VideoCodec       string `json:"videoCodec,omitempty"`
-	AudioCodec       string `json:"audioCodec,omitempty"`
-	Height           int    `json:"height,omitempty"`
-	VideoBitrateKbps int    `json:"videoBitrateKbps,omitempty"`
-	HDRFormat        string `json:"hdrFormat,omitempty"`
+	Container                  string `json:"container,omitempty"`
+	VideoCodec                 string `json:"videoCodec,omitempty"`
+	AudioCodec                 string `json:"audioCodec,omitempty"`
+	Height                     int    `json:"height,omitempty"`
+	VideoBitrateKbps           int    `json:"videoBitrateKbps,omitempty"`
+	HDRFormat                  string `json:"hdrFormat,omitempty"`
+	DolbyVisionBLPresent       bool   `json:"-"`
+	DolbyVisionCompatibilityID int    `json:"-"`
 }
 
 type PlaybackDecisionTarget struct {
@@ -246,20 +269,26 @@ type PlaybackDecisionTarget struct {
 }
 
 type storedAsset struct {
-	ID                   string            `json:"id"`
-	Kind                 string            `json:"kind"`
-	URL                  string            `json:"url"`
-	Container            string            `json:"container,omitempty"`
-	HLSSegmentContainer  string            `json:"hlsSegmentContainer,omitempty"`
-	Headers              map[string]string `json:"headers,omitempty"`
-	ToneMap              bool              `json:"toneMap,omitempty"`
-	AudioTrackIndex      *int              `json:"audioTrackIndex,omitempty"`
-	SubtitleTrackIndex   *int              `json:"subtitleTrackIndex,omitempty"`
-	DurationSeconds      float64           `json:"durationSeconds,omitempty"`
-	Decision             *PlaybackDecision `json:"decision,omitempty"`
-	TargetHeight         int               `json:"targetHeight,omitempty"`
-	VideoBitrateKbps     int               `json:"videoBitrateKbps,omitempty"`
-	MaximumAudioChannels int               `json:"maximumAudioChannels,omitempty"`
-	StartSeconds         float64           `json:"-"`
-	ReadRate             float64           `json:"-"`
+	ID                  string            `json:"id"`
+	Kind                string            `json:"kind"`
+	URL                 string            `json:"url"`
+	Container           string            `json:"container,omitempty"`
+	HLSSegmentContainer string            `json:"hlsSegmentContainer,omitempty"`
+	Headers             map[string]string `json:"headers,omitempty"`
+	ToneMap             bool              `json:"toneMap,omitempty"`
+	AudioTrackIndex     *int              `json:"audioTrackIndex,omitempty"`
+	SubtitleTrackIndex  *int              `json:"subtitleTrackIndex,omitempty"`
+	// These fields are persisted only in the private session asset payload; they
+	// are never part of the public playback/session models. The ordinal avoids
+	// treating a global stream index as FFmpeg's subtitle-stream ordinal.
+	SubtitleTrackType      string            `json:"subtitleTrackType,omitempty"`
+	SubtitleTrackOrdinal   int               `json:"subtitleTrackOrdinal,omitempty"`
+	DurationSeconds        float64           `json:"durationSeconds,omitempty"`
+	Decision               *PlaybackDecision `json:"decision,omitempty"`
+	TargetHeight           int               `json:"targetHeight,omitempty"`
+	VideoBitrateKbps       int               `json:"videoBitrateKbps,omitempty"`
+	MaximumAudioChannels   int               `json:"maximumAudioChannels,omitempty"`
+	StartSeconds           float64           `json:"-"`
+	DolbyVisionToneMapSafe bool              `json:"dolbyVisionToneMapSafe,omitempty"`
+	ReadRate               float64           `json:"-"`
 }

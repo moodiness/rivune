@@ -3,9 +3,11 @@ package playback
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +15,8 @@ import (
 )
 
 const (
+	maximumActivitySessions    = 200
+	maximumActivityJobs        = 200
 	playbackSessionIdleTTL     = 30 * time.Minute
 	cleanupInactiveSessionsSQL = `
 		DELETE FROM playback_sessions
@@ -27,10 +31,12 @@ const (
 )
 
 type Activity struct {
-	Summary     ActivitySummary    `json:"summary"`
-	Diagnostics MediaDiagnostics   `json:"diagnostics"`
-	Sessions    []ActivitySession  `json:"sessions"`
-	Jobs        []MediaActivityJob `json:"jobs"`
+	Summary           ActivitySummary    `json:"summary"`
+	Diagnostics       MediaDiagnostics   `json:"diagnostics"`
+	Sessions          []ActivitySession  `json:"sessions"`
+	Jobs              []MediaActivityJob `json:"jobs"`
+	SessionsTruncated bool               `json:"sessionsTruncated"`
+	JobsTruncated     bool               `json:"jobsTruncated"`
 }
 
 type ActivitySummary struct {
@@ -43,8 +49,27 @@ type ActivitySummary struct {
 }
 
 type MediaDiagnostics struct {
-	VideoEncoder    string `json:"videoEncoder"`
-	HardwareToneMap bool   `json:"hardwareToneMap"`
+	FFmpegVersion        string               `json:"ffmpegVersion"`
+	FFprobeVersion       string               `json:"ffprobeVersion"`
+	HardwareAcceleration string               `json:"hardwareAcceleration"`
+	VideoEncoder         string               `json:"videoEncoder"`
+	HardwareToneMap      bool                 `json:"hardwareToneMap"`
+	TranscodeThreads     int                  `json:"transcodeThreads"`
+	MaximumReadRate      float64              `json:"maximumReadRate"`
+	Totals               MediaProcessTotals   `json:"totals"`
+	Pools                MediaDiagnosticPools `json:"pools"`
+}
+
+type MediaDiagnosticPool struct {
+	Active int `json:"active"`
+	Limit  int `json:"limit"`
+}
+
+type MediaDiagnosticPools struct {
+	Process   MediaDiagnosticPool `json:"process"`
+	Probe     MediaDiagnosticPool `json:"probe"`
+	Subtitle  MediaDiagnosticPool `json:"subtitle"`
+	Trickplay MediaDiagnosticPool `json:"trickplay"`
 }
 
 type ActivityExternalIDs struct {
@@ -82,15 +107,17 @@ type ActivitySession struct {
 }
 
 type MediaActivityJob struct {
-	SessionID       string    `json:"sessionId,omitempty"`
-	AssetID         string    `json:"assetId"`
-	Mode            string    `json:"mode"`
-	State           string    `json:"state"`
-	Prewarming      bool      `json:"prewarming"`
-	ProgressPercent *float64  `json:"progressPercent,omitempty"`
-	Speed           *float64  `json:"speed,omitempty"`
-	CreatedAt       time.Time `json:"createdAt"`
-	LastSeenAt      time.Time `json:"lastSeenAt"`
+	SessionID              string    `json:"sessionId,omitempty"`
+	AssetID                string    `json:"assetId"`
+	Mode                   string    `json:"mode"`
+	State                  string    `json:"state"`
+	ErrorClass             string    `json:"errorClass,omitempty"`
+	Prewarming             bool      `json:"prewarming"`
+	ProgressPercent        *float64  `json:"progressPercent,omitempty"`
+	Speed                  *float64  `json:"speed,omitempty"`
+	StartupDurationSeconds *float64  `json:"startupDurationSeconds,omitempty"`
+	CreatedAt              time.Time `json:"createdAt"`
+	LastSeenAt             time.Time `json:"lastSeenAt"`
 }
 
 type PurgeResult struct {
@@ -100,10 +127,7 @@ type PurgeResult struct {
 }
 
 type mediaDiagnosticsProvider interface {
-	VideoEncoder() string
-	HardwareToneMap() bool
-	ActiveProcesses() int
-	ProcessLimit() int
+	PlaybackDiagnostics() MediaDiagnostics
 }
 
 func activityArtworkURL(candidates *[6]string) string {
@@ -185,7 +209,8 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 		       COALESCE(progress.position_seconds, 0),
 		       COALESCE(progress.duration_seconds, floor(NULLIF(playback.assets->0->>'durationSeconds', '')::double precision)::integer, 0),
 		       users.username, playback.profile_id::text, profiles.name, devices.name,
-		       devices.platform, playback.created_at, playback.last_seen_at, playback.expires_at
+		       devices.platform, playback.created_at, playback.last_seen_at, playback.expires_at,
+		       count(*) OVER()
 		FROM playback_sessions playback
 		JOIN auth_sessions sessions ON sessions.id = playback.auth_session_id
 		JOIN users ON users.id = sessions.user_id
@@ -227,13 +252,15 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 		WHERE playback.expires_at > now()
 		  AND playback.last_seen_at > now() - $1::interval
 		ORDER BY playback.last_seen_at DESC, playback.created_at DESC
-	`, intervalLiteral(playbackSessionIdleTTL))
+		LIMIT $2
+	`, intervalLiteral(playbackSessionIdleTTL), maximumActivitySessions+1)
 	if err != nil {
 		return Activity{}, fmt.Errorf("query playback activity: %w", err)
 	}
 	defer rows.Close()
 
 	sessions := make([]ActivitySession, 0)
+	var activeSessionCount int64
 	for rows.Next() {
 		var value ActivitySession
 		var assetsJSON []byte
@@ -249,7 +276,7 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 			&value.ExternalIDMediaTypes.IMDb, &value.ExternalIDMediaTypes.TMDB, &value.ExternalIDMediaTypes.TVDB,
 			&value.MediaType, &assetsJSON, &value.PositionSeconds, &value.DurationSeconds,
 			&value.Username, &value.ProfileID, &value.Profile, &value.Device, &value.Platform,
-			&value.CreatedAt, &value.LastSeenAt, &value.ExpiresAt,
+			&value.CreatedAt, &value.LastSeenAt, &value.ExpiresAt, &activeSessionCount,
 		); err != nil {
 			return Activity{}, fmt.Errorf("scan playback activity: %w", err)
 		}
@@ -264,37 +291,52 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 	if err := rows.Err(); err != nil {
 		return Activity{}, fmt.Errorf("iterate playback activity: %w", err)
 	}
+	sessions, sessionsTruncated := boundedActivitySessions(sessions)
 
 	jobs := service.activityJobs()
-	processingSessions := make(map[string]struct{}, len(jobs))
-	for _, job := range jobs {
-		if job.SessionID != "" {
-			processingSessions[job.SessionID] = struct{}{}
-		}
-	}
+	activeJobCount := len(jobs)
+	processingSessions := service.activityProcessingSessionIDs()
+	jobs, jobsTruncated := boundedActivityJobs(jobs)
 	for index := range sessions {
 		_, sessions[index].Processing = processingSessions[sessions[index].ID]
 	}
 
-	diagnostics := MediaDiagnostics{VideoEncoder: "unknown"}
-	processingSlots := len(jobs)
+	diagnostics := MediaDiagnostics{
+		FFmpegVersion: "unknown", FFprobeVersion: "unknown", HardwareAcceleration: "unknown", VideoEncoder: "unknown",
+		MaximumReadRate: defaultTranscodeMaximumReadRate,
+	}
+	processingSlots := activeJobCount
 	processingLimit := 0
 	if provider, ok := service.processor.(mediaDiagnosticsProvider); ok {
-		diagnostics.VideoEncoder = provider.VideoEncoder()
-		diagnostics.HardwareToneMap = provider.HardwareToneMap()
-		processingSlots = provider.ActiveProcesses()
-		processingLimit = provider.ProcessLimit()
+		diagnostics = provider.PlaybackDiagnostics()
+		processingSlots = diagnostics.Pools.Process.Active
+		processingLimit = diagnostics.Pools.Process.Limit
 	}
 	return Activity{
 		Summary: ActivitySummary{
-			ActiveSessions: len(sessions), ActiveJobs: len(jobs), ProcessingSlots: processingSlots,
+			ActiveSessions: int(activeSessionCount), ActiveJobs: activeJobCount, ProcessingSlots: processingSlots,
 			ProcessingLimit: processingLimit, StorageBytes: directorySize(service.mediaOptions.TempDirectory),
 			StorageLimitBytes: service.mediaOptions.MaxStorageBytes,
 		},
-		Diagnostics: diagnostics,
-		Sessions:    sessions,
-		Jobs:        jobs,
+		Diagnostics:       diagnostics,
+		Sessions:          sessions,
+		Jobs:              jobs,
+		SessionsTruncated: sessionsTruncated,
+		JobsTruncated:     jobsTruncated,
 	}, nil
+}
+func boundedActivitySessions(values []ActivitySession) ([]ActivitySession, bool) {
+	if len(values) <= maximumActivitySessions {
+		return values, false
+	}
+	return values[:maximumActivitySessions], true
+}
+
+func boundedActivityJobs(values []MediaActivityJob) ([]MediaActivityJob, bool) {
+	if len(values) <= maximumActivityJobs {
+		return values, false
+	}
+	return values[:maximumActivityJobs], true
 }
 
 func (service *Service) StopActivitySession(ctx context.Context, principal auth.Principal, sessionID string) error {
@@ -341,12 +383,17 @@ func (service *Service) PurgeActivity(ctx context.Context, principal auth.Princi
 // Authorization is enforced by the operations service that exposes this
 // trusted maintenance primitive.
 func (service *Service) ResetCache(ctx context.Context) (PurgeResult, error) {
+	service.hlsResetMu.Lock()
+	defer service.hlsResetMu.Unlock()
 	command, err := service.pool.Exec(ctx, "DELETE FROM playback_sessions")
 	if err != nil {
 		return PurgeResult{}, fmt.Errorf("delete playback sessions: %w", err)
 	}
 	result := PurgeResult{SessionsRemoved: int(command.RowsAffected())}
-	result.JobsStopped = service.stopAllHLSJobs()
+	result.JobsStopped, err = service.stopAllHLSJobs(ctx)
+	if err != nil {
+		return result, fmt.Errorf("stop media jobs: %w", err)
+	}
 	service.references.clear()
 	service.probes.clear()
 	service.preparations.clear()
@@ -361,17 +408,32 @@ func (service *Service) ResetCache(ctx context.Context) (PurgeResult, error) {
 	return result, nil
 }
 
-func (service *Service) stopAllHLSJobs() int {
+func (service *Service) stopAllHLSJobs(ctx context.Context) (int, error) {
 	service.hlsMu.Lock()
 	keys := make([]string, 0, len(service.hlsJobs))
-	for key := range service.hlsJobs {
+	workers := make(map[*hlsJob]struct{}, len(service.hlsJobs))
+	for key, job := range service.hlsJobs {
 		keys = append(keys, key)
+		workers[job] = struct{}{}
 	}
 	service.hlsMu.Unlock()
 	for _, key := range keys {
 		service.stopHLSJob(key)
 	}
-	return len(keys)
+	for job := range workers {
+		job.mu.RLock()
+		requestsDone := job.activeRequestsDone
+		job.mu.RUnlock()
+		if requestsDone != nil {
+			select {
+			case <-requestsDone:
+			case <-ctx.Done():
+				return len(workers), ctx.Err()
+			}
+		}
+		service.stopDetachedHLSJob(job)
+	}
+	return len(workers), nil
 }
 
 func (service *Service) cleanupActivity(ctx context.Context) (PurgeResult, error) {
@@ -433,32 +495,92 @@ func (service *Service) stopOrphanedHLSJobs(ctx context.Context) (int, error) {
 	}
 	service.hlsMu.Lock()
 	keys := make([]string, 0)
+	totalBindings := make(map[*hlsJob]int, len(service.hlsJobs))
+	orphanedBindings := make(map[*hlsJob]int, len(service.hlsJobs))
 	for key, job := range service.hlsJobs {
-		if job.prewarming {
+		totalBindings[job]++
+		prewarming := job.prewarming
+		if binding := job.bindings[key]; binding != nil {
+			prewarming = binding.prewarming
+		}
+		if prewarming {
 			continue
 		}
-		if _, exists := active[job.sessionID]; !exists {
+		sessionID := job.sessionID
+		if registeredSessionID, _, found := strings.Cut(key, "/"); found {
+			sessionID = registeredSessionID
+		}
+		if _, exists := active[sessionID]; !exists {
 			keys = append(keys, key)
+			orphanedBindings[job]++
+		}
+	}
+	workersStopped := 0
+	for job, count := range orphanedBindings {
+		if count == totalBindings[job] {
+			workersStopped++
 		}
 	}
 	service.hlsMu.Unlock()
 	for _, key := range keys {
 		service.stopHLSJob(key)
 	}
-	return len(keys), nil
+	return workersStopped, nil
+}
+
+type activityHLSRegistration struct {
+	job        *hlsJob
+	sessionID  string
+	prewarming bool
+}
+
+func (service *Service) activityProcessingSessionIDs() map[string]struct{} {
+	service.hlsMu.Lock()
+	defer service.hlsMu.Unlock()
+	result := make(map[string]struct{}, len(service.hlsJobs))
+	for key, job := range service.hlsJobs {
+		prewarming := job.prewarming
+		if binding := job.bindings[key]; binding != nil {
+			prewarming = binding.prewarming
+		}
+		if prewarming {
+			continue
+		}
+		sessionID, _, found := strings.Cut(key, "/")
+		if found && sessionID != "" {
+			result[sessionID] = struct{}{}
+		}
+	}
+	return result
 }
 
 func (service *Service) activityJobs() []MediaActivityJob {
 	service.hlsMu.Lock()
-	jobs := make([]*hlsJob, 0, len(service.hlsJobs))
-	for _, job := range service.hlsJobs {
-		jobs = append(jobs, job)
+	registrations := make(map[*hlsJob]activityHLSRegistration, len(service.hlsJobs))
+	for key, job := range service.hlsJobs {
+		sessionID := job.sessionID
+		if registeredSessionID, _, found := strings.Cut(key, "/"); found {
+			sessionID = registeredSessionID
+		}
+		prewarming := job.prewarming
+		if binding := job.bindings[key]; binding != nil {
+			prewarming = binding.prewarming
+		}
+		current, exists := registrations[job]
+		if !exists || current.prewarming && !prewarming || current.prewarming == prewarming && sessionID < current.sessionID {
+			registrations[job] = activityHLSRegistration{job: job, sessionID: sessionID, prewarming: prewarming}
+		}
+	}
+	jobs := make([]activityHLSRegistration, 0, len(registrations))
+	for _, registration := range registrations {
+		jobs = append(jobs, registration)
 	}
 	service.hlsMu.Unlock()
 
 	now := service.currentTime()
 	result := make([]MediaActivityJob, 0, len(jobs))
-	for _, job := range jobs {
+	for _, registration := range jobs {
+		job := registration.job
 		job.mu.RLock()
 		state := "processing"
 		if job.err != nil {
@@ -471,15 +593,47 @@ func (service *Service) activityJobs() []MediaActivityJob {
 			}
 		}
 		activityJob := MediaActivityJob{
-			SessionID: job.sessionID, AssetID: job.assetID, Mode: job.mode, State: state,
-			Prewarming: job.prewarming, CreatedAt: job.createdAt, LastSeenAt: job.lastAccessed,
+			SessionID: registration.sessionID, AssetID: job.assetID, Mode: job.mode, State: state,
+			Prewarming: registration.prewarming, CreatedAt: job.createdAt, LastSeenAt: job.lastAccessed,
+		}
+		if state == "failed" {
+			activityJob.ErrorClass = mediaJobErrorClass(job.err)
 		}
 		directory := job.directory
 		durationSeconds := job.sourceDurationSeconds
 		startSeconds := job.startOffsetSeconds
 		job.mu.RUnlock()
 
-		if encodedSeconds, ok := hlsPlaylistEncodedSeconds(directory); ok {
+		nativeProgress, hasNativeProgress := readFFmpegProgress(directory)
+		if hasNativeProgress && nativeProgress.state == "end" && activityJob.State != "failed" {
+			activityJob.State = "complete"
+		}
+		encodedSeconds, hasEncodedSeconds := nativeProgress.encodedSeconds, hasNativeProgress && nativeProgress.hasEncodedSeconds
+		if hasNativeProgress && nativeProgress.hasSpeed {
+			speed := nativeProgress.speed
+			activityJob.Speed = &speed
+		}
+		if hasNativeProgress && nativeProgress.hasStartupDuration {
+			startupDuration := nativeProgress.startupDurationSeconds
+			activityJob.StartupDurationSeconds = &startupDuration
+		}
+		if !hasEncodedSeconds || activityJob.Speed == nil {
+			if playlistSeconds, ok := hlsPlaylistEncodedSeconds(directory); ok {
+				if !hasEncodedSeconds {
+					encodedSeconds, hasEncodedSeconds = playlistSeconds, true
+				}
+				if activityJob.Speed == nil && playlistSeconds > 0 {
+					elapsedSeconds := math.Max(now.Sub(activityJob.CreatedAt).Seconds(), 0)
+					if elapsedSeconds > 0 {
+						speed := playlistSeconds / elapsedSeconds
+						if !math.IsNaN(speed) && !math.IsInf(speed, 0) {
+							activityJob.Speed = &speed
+						}
+					}
+				}
+			}
+		}
+		if hasEncodedSeconds {
 			remainingSeconds := math.Max(durationSeconds-startSeconds, 0)
 			if remainingSeconds > 0 && !math.IsInf(remainingSeconds, 0) {
 				progressPercent := math.Min(100, encodedSeconds/remainingSeconds*100)
@@ -487,19 +641,38 @@ func (service *Service) activityJobs() []MediaActivityJob {
 					activityJob.ProgressPercent = &progressPercent
 				}
 			}
-			if encodedSeconds > 0 {
-				elapsedSeconds := math.Max(now.Sub(activityJob.CreatedAt).Seconds(), 0)
-				if elapsedSeconds > 0 {
-					speed := encodedSeconds / elapsedSeconds
-					if !math.IsNaN(speed) && !math.IsInf(speed, 0) {
-						activityJob.Speed = &speed
-					}
-				}
-			}
 		}
 		result = append(result, activityJob)
 	}
+	sort.Slice(result, func(left, right int) bool {
+		if !result[left].LastSeenAt.Equal(result[right].LastSeenAt) {
+			return result[left].LastSeenAt.After(result[right].LastSeenAt)
+		}
+		if !result[left].CreatedAt.Equal(result[right].CreatedAt) {
+			return result[left].CreatedAt.After(result[right].CreatedAt)
+		}
+		return result[left].AssetID < result[right].AssetID
+	})
 	return result
+}
+
+func mediaJobErrorClass(err error) string {
+	switch {
+	case errors.Is(err, ErrMediaCapacityReached):
+		return "capacity"
+	case errors.Is(err, ErrMediaSourceFailed):
+		return "source"
+	case errors.Is(err, ErrMediaStorageLimit):
+		return "storage"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, ErrMediaProcessingFailed):
+		return "processing"
+	default:
+		return "unknown"
+	}
 }
 
 func activityMode(encodedAssets []byte) string {

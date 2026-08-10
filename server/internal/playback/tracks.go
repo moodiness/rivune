@@ -9,6 +9,8 @@ const (
 	assetKindEmbeddedSubtitle  = "embedded_subtitle"
 	assetKindConvertedSubtitle = "converted_subtitle"
 	assetKindBitmapSubtitle    = "bitmap_subtitle"
+	subtitleBurnText           = "text"
+	subtitleBurnBitmap         = "bitmap"
 )
 
 func applyPlaybackPreferences(sources []Source, assets []storedAsset, input ResolveInput) error {
@@ -55,7 +57,7 @@ func applyPlaybackPreferences(sources []Source, assets []storedAsset, input Reso
 				decision = processingDecision(decisionAudioTranscodeRequired, "copy", "transcode", *source.Media, input.Capabilities, false)
 			case fullTranscodeSupported(input.Capabilities):
 				mode = processingTranscode
-				toneMap := !clientSupportsHDR(source.Media.HDRFormat, input.Capabilities)
+				toneMap := videoNeedsToneMapping(*source.Media, input.Capabilities)
 				decision = processingDecision(decisionVideoTranscodeRequired, "transcode", "transcode", *source.Media, input.Capabilities, toneMap)
 			default:
 				if !input.AllowTranscoding {
@@ -65,6 +67,9 @@ func applyPlaybackPreferences(sources []Source, assets []storedAsset, input Reso
 			}
 			if !input.AllowTranscoding {
 				return ErrTranscodingDisabled
+			}
+			if decision != nil && decision.ToneMapping && !genericToneMappingSupported(*source.Media) {
+				return ErrUnsupportedSource
 			}
 			applyPlaybackDecision(sources, assets, sourceCandidate{sourceIndex: sourceIndex, assetIndex: assetIndex}, *source.Media, mode, decision, input.Capabilities)
 		} else if source.Mode == "direct" && requiresTrackSwitch {
@@ -111,14 +116,19 @@ func embeddedSubtitles(sources []Source, assets []storedAsset, capabilityValues 
 		sourceAsset := assets[assetIndex]
 		subtitles := make([]Subtitle, 0, len(source.Media.SubtitleTracks))
 		subtitleAssets := make([]storedAsset, 0, len(source.Media.SubtitleTracks))
-		for _, track := range source.Media.SubtitleTracks {
+		for ordinal, track := range source.Media.SubtitleTracks {
 			kind := assetKindEmbeddedSubtitle
 			delivery := "external"
+			burnType := ""
 			switch {
 			case webVTTConvertibleSubtitle(track.Codec) &&
 				(len(capabilities.SubtitleModes) == 0 || requestedProcessingMode(capabilities.SubtitleModes, "external")):
+			case textSubtitle(track.Codec) && requestedProcessingMode(capabilities.SubtitleModes, "burn"):
+				burnType = subtitleBurnText
+				delivery = "burn"
 			case bitmapSubtitle(track.Codec) && requestedProcessingMode(capabilities.SubtitleModes, "burn"):
 				kind = assetKindBitmapSubtitle
+				burnType = subtitleBurnBitmap
 				delivery = "burn"
 			default:
 				continue
@@ -132,6 +142,7 @@ func embeddedSubtitles(sources []Source, assets []storedAsset, capabilityValues 
 			subtitleAssets = append(subtitleAssets, storedAsset{
 				ID: id, Kind: kind, URL: sourceAsset.URL, Container: sourceAsset.Container,
 				Headers: sourceAsset.Headers, SubtitleTrackIndex: &trackIndex,
+				SubtitleTrackType: burnType, SubtitleTrackOrdinal: ordinal,
 			})
 		}
 		return subtitles, subtitleAssets
@@ -148,9 +159,13 @@ func webVTTConvertibleSubtitle(codec string) bool {
 	}
 }
 
+func textSubtitle(codec string) bool {
+	return webVTTConvertibleSubtitle(codec)
+}
+
 func bitmapSubtitle(codec string) bool {
 	switch strings.ToLower(strings.TrimSpace(codec)) {
-	case "hdmv_pgs_subtitle", "pgs", "dvd_subtitle", "dvdsub":
+	case "hdmv_pgs_subtitle", "pgs", "dvd_subtitle", "dvdsub", "dvb_subtitle", "dvbsub", "xsub":
 		return true
 	default:
 		return false
@@ -193,16 +208,32 @@ func applySubtitleDecision(sources []Source, streamAssets []storedAsset, subtitl
 		if assetIndex < 0 {
 			continue
 		}
-		toneMap := !clientSupportsHDR(source.Media.HDRFormat, capabilities)
+		toneMap := videoNeedsToneMapping(*source.Media, capabilities)
+		if toneMap && !genericToneMappingSupported(*source.Media) {
+			return ErrUnsupportedSource
+		}
 		decision := processingDecision(decisionSubtitleBurnRequired, "transcode", "transcode", *source.Media, capabilities, toneMap)
 		decision.SubtitleAction = "burn"
 		candidate := sourceCandidate{sourceIndex: sourceIndex, assetIndex: assetIndex}
 		applyPlaybackDecision(sources, streamAssets, candidate, *source.Media, processingTranscode, decision, capabilities)
 		index := *subtitleAssets[subtitleAssetIndex].SubtitleTrackIndex
 		streamAssets[assetIndex].SubtitleTrackIndex = &index
+		streamAssets[assetIndex].SubtitleTrackType = subtitleAssets[subtitleAssetIndex].SubtitleTrackType
+		streamAssets[assetIndex].SubtitleTrackOrdinal = subtitleAssets[subtitleAssetIndex].SubtitleTrackOrdinal
 		return nil
 	}
 	return ErrNoPlayableSource
+}
+
+// Generic FFmpeg tone mapping can consume HDR10/HLG. Dolby Vision is different:
+// a profile-5 BL is not HDR10, so a usable base is proven only when FFprobe
+// reports both the BL and a non-zero BL signal compatibility identifier.
+func genericToneMappingSupported(inspection MediaInspection) bool {
+	if !strings.EqualFold(strings.TrimSpace(inspection.HDRFormat), "dolby_vision") {
+		return true
+	}
+	video := primaryTrack(inspection.VideoTracks)
+	return video != nil && video.DolbyVisionBLPresent && video.DolbyVisionCompatibilityID > 0
 }
 
 func setSubtitleAction(sources []Source, assets []storedAsset, action string) {

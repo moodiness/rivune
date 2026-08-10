@@ -263,6 +263,35 @@ func TestFFmpegEgressGatewayFollowsGuardedRedirectsWithOriginScopedCredentials(t
 	}
 }
 
+func TestFFmpegEgressGatewayRejectsHTTPSDowngradeBeforeTargetRequest(t *testing.T) {
+	var targetRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		targetRequests.Add(1)
+		_, _ = io.WriteString(response, "downgraded media")
+	}))
+	defer target.Close()
+	targetURL := publicTestURLWithHost(target.URL, "2.2.2.2")
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		http.Redirect(response, request, targetURL+"/segment.ts", http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+	sourceURL := publicTestURLWithHost(source.URL, "1.1.1.1") + "/master.m3u8"
+	proxy, err := startFFmpegEgressProxyWithDialAndSource(context.Background(), mappedOriginDial(map[string]string{
+		"1.1.1.1": source.Listener.Addr().String(),
+		"2.2.2.2": target.Listener.Addr().String(),
+	}), storedAsset{URL: sourceURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	proxy.transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // test origin certificate
+	_ = getGatewayBody(t, guardedGatewayClient(), proxy.InputURL(), http.StatusBadGateway)
+	if requests := targetRequests.Load(); requests != 0 {
+		t.Fatalf("downgrade target received %d requests", requests)
+	}
+}
+
 func TestFFmpegEgressGatewaySupportsPublicHTTPAndHTTPS(t *testing.T) {
 	for _, secure := range []bool{false, true} {
 		t.Run(fmt.Sprintf("tls=%t", secure), func(t *testing.T) {

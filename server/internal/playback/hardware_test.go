@@ -105,3 +105,60 @@ func TestVAAPIUsesHardwareToneMappingOnlyAfterSuccessfulProbe(t *testing.T) {
 		t.Fatalf("VAAPI tone-map capability should use the hardware filter: %q", hardwareFilter)
 	}
 }
+
+func TestDetectVideoEncoderRejectsUnknownModeBeforeProbe(t *testing.T) {
+	_, err := detectVideoEncoder("unused-ffmpeg", FFmpegOptions{HardwareAcceleration: "vaapi;rm -rf /"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported hardware acceleration mode") {
+		t.Fatalf("unknown encoder mode error = %v", err)
+	}
+}
+
+func TestHardwareDecodeAndFiltersUseZeroCopyOnlyWhenSafe(t *testing.T) {
+	baseAsset := storedAsset{
+		Kind: processingTranscode, URL: "https://media.example/movie.mkv",
+		Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{VideoCodec: "h264", Height: 2160}},
+	}
+	tests := []struct {
+		name       string
+		encoder    videoEncoder
+		mutate     func(*storedAsset)
+		expected   []string
+		unexpected []string
+	}{
+		{name: "VAAPI direct surfaces", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"}, expected: []string{"-hwaccel vaapi -hwaccel_device hw -hwaccel_output_format vaapi"}, unexpected: []string{"hwupload"}},
+		{name: "QSV scale surfaces", encoder: videoEncoder{kind: videoEncoderQSV, device: "/dev/dri/renderD128"}, mutate: func(asset *storedAsset) { asset.TargetHeight = 1080 }, expected: []string{"-hwaccel qsv -hwaccel_device hw -hwaccel_output_format qsv", "-vf scale_qsv=w=-2:h=1080:format=nv12"}, unexpected: []string{"hwupload", "scale=-2:1080"}},
+		{name: "NVENC direct CUDA surfaces", encoder: videoEncoder{kind: videoEncoderNVENC}, expected: []string{"-hwaccel cuda -hwaccel_output_format cuda"}, unexpected: []string{"hwupload"}},
+		{name: "NVENC scaling stays on CPU", encoder: videoEncoder{kind: videoEncoderNVENC}, mutate: func(asset *storedAsset) { asset.TargetHeight = 1080 }, expected: []string{"-vf scale=-2:1080"}, unexpected: []string{"-hwaccel cuda", "scale_cuda"}},
+		{name: "software tone map stays CPU then uploads", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"}, mutate: func(asset *storedAsset) { asset.ToneMap = true }, expected: []string{softwareToneMapFilter + ",format=nv12,hwupload"}, unexpected: []string{"-hwaccel vaapi", "tonemap_vaapi"}},
+		{name: "subtitle burn stays CPU then uploads", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"}, mutate: func(asset *storedAsset) {
+			index := 3
+			asset.SubtitleTrackIndex = &index
+			asset.SubtitleTrackType = subtitleBurnBitmap
+			asset.SubtitleTrackOrdinal = 0
+		}, expected: []string{"overlay=eof_action=pass:repeatlast=0,format=nv12,hwupload"}, unexpected: []string{"-hwaccel vaapi"}},
+		{name: "probed VAAPI tone map stays on surfaces", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", hardwareToneMap: true}, mutate: func(asset *storedAsset) { asset.ToneMap = true; asset.TargetHeight = 1080 }, expected: []string{"-hwaccel vaapi", "-vf tonemap_vaapi=format=nv12:matrix=bt709:primaries=bt709:transfer=bt709,scale_vaapi=w=-2:h=1080:format=nv12"}, unexpected: []string{"hwupload", "zscale"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			asset := baseAsset
+			if test.mutate != nil {
+				test.mutate(&asset)
+			}
+			arguments, err := (&FFmpegProcessor{threads: 4, encoder: test.encoder}).processingArguments(asset)
+			if err != nil {
+				t.Fatal(err)
+			}
+			joined := strings.Join(arguments, " ")
+			for _, expected := range test.expected {
+				if !strings.Contains(joined, expected) {
+					t.Fatalf("arguments missing %q: %v", expected, arguments)
+				}
+			}
+			for _, unexpected := range test.unexpected {
+				if strings.Contains(joined, unexpected) {
+					t.Fatalf("arguments unexpectedly contain %q: %v", unexpected, arguments)
+				}
+			}
+		})
+	}
+}

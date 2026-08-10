@@ -34,14 +34,14 @@ func TestLoadUsesSecureTokenTTLsByDefault(t *testing.T) {
 	if cfg.MetadataCacheTTL != 24*time.Hour {
 		t.Fatalf("expected 24 hour metadata cache TTL, got %s", cfg.MetadataCacheTTL)
 	}
-	if cfg.RemuxConcurrency != 2 || cfg.FFmpegPath != "ffmpeg" || cfg.FFprobePath != "ffprobe" {
-		t.Fatalf("unexpected media processor defaults: ffmpeg=%q ffprobe=%q concurrency=%d", cfg.FFmpegPath, cfg.FFprobePath, cfg.RemuxConcurrency)
+	if cfg.RemuxConcurrency != 4 || cfg.TranscodeThreads != 4 || cfg.TranscodeMaxBitrateKbps != 12000 ||
+		cfg.TranscodeMaxReadRate != 1.5 || cfg.HLSInitialBufferSeconds != 6 ||
+		cfg.FFmpegPath != "ffmpeg" || cfg.FFprobePath != "ffprobe" || cfg.MediaTempDir != "" ||
+		cfg.MediaStorageBytes != 20480*1024*1024 {
+		t.Fatalf("unexpected media defaults: ffmpeg=%q ffprobe=%q concurrency=%d threads=%d bitrate=%d temp=%q storage=%d", cfg.FFmpegPath, cfg.FFprobePath, cfg.RemuxConcurrency, cfg.TranscodeThreads, cfg.TranscodeMaxBitrateKbps, cfg.MediaTempDir, cfg.MediaStorageBytes)
 	}
 	if cfg.HardwareAcceleration != "auto" || cfg.VideoDevice != "/dev/dri/renderD128" {
 		t.Fatalf("unexpected hardware defaults: acceleration=%q device=%q", cfg.HardwareAcceleration, cfg.VideoDevice)
-	}
-	if cfg.TranscodeMaxBitrateKbps != 12000 {
-		t.Fatalf("unexpected transcoding bitrate default: %d", cfg.TranscodeMaxBitrateKbps)
 	}
 	if cfg.ArtworkCacheDir != "/var/lib/rivune/artwork" || cfg.ArtworkStorageBytes != 20480*1024*1024 {
 		t.Fatalf("unexpected artwork cache defaults: directory=%q bytes=%d", cfg.ArtworkCacheDir, cfg.ArtworkStorageBytes)
@@ -457,6 +457,88 @@ func TestLoadRejectsUnsafeRemuxConcurrency(t *testing.T) {
 		t.Fatal("expected invalid remux concurrency to fail")
 	}
 }
+
+func TestLoadParsesMediaProcessorConfiguration(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("RIVUNE_FFMPEG_PATH", "/opt/media/ffmpeg")
+	t.Setenv("RIVUNE_FFPROBE_PATH", "/opt/media/ffprobe")
+	t.Setenv("RIVUNE_REMUX_CONCURRENCY", "7")
+	t.Setenv("RIVUNE_TRANSCODE_THREADS", "12")
+	t.Setenv("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", "24000")
+	t.Setenv("RIVUNE_TRANSCODE_MAX_READ_RATE", "2.25")
+	t.Setenv("RIVUNE_HLS_INITIAL_BUFFER_SECONDS", "9")
+	t.Setenv("RIVUNE_MEDIA_TEMP_DIR", "/var/cache/rivune")
+	t.Setenv("RIVUNE_MEDIA_MAX_STORAGE_MB", "4096")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load custom media configuration: %v", err)
+	}
+	if cfg.FFmpegPath != "/opt/media/ffmpeg" || cfg.FFprobePath != "/opt/media/ffprobe" ||
+		cfg.RemuxConcurrency != 7 || cfg.TranscodeThreads != 12 || cfg.TranscodeMaxBitrateKbps != 24000 ||
+		cfg.TranscodeMaxReadRate != 2.25 || cfg.HLSInitialBufferSeconds != 9 ||
+		cfg.MediaTempDir != "/var/cache/rivune" || cfg.MediaStorageBytes != 4096*1024*1024 {
+		t.Fatalf("custom media configuration = %+v", cfg)
+	}
+}
+
+func TestLoadRejectsUnsafeMediaProcessorLimits(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "threads below minimum", key: "RIVUNE_TRANSCODE_THREADS", value: "0"},
+		{name: "threads above maximum", key: "RIVUNE_TRANSCODE_THREADS", value: "33"},
+		{name: "storage below minimum", key: "RIVUNE_MEDIA_MAX_STORAGE_MB", value: "511"},
+		{name: "storage above maximum", key: "RIVUNE_MEDIA_MAX_STORAGE_MB", value: "102401"},
+		{name: "bitrate above maximum", key: "RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", value: "200001"},
+		{name: "read rate below minimum", key: "RIVUNE_TRANSCODE_MAX_READ_RATE", value: "0.99"},
+		{name: "read rate above maximum", key: "RIVUNE_TRANSCODE_MAX_READ_RATE", value: "4.01"},
+		{name: "read rate non-finite", key: "RIVUNE_TRANSCODE_MAX_READ_RATE", value: "NaN"},
+		{name: "HLS buffer below minimum", key: "RIVUNE_HLS_INITIAL_BUFFER_SECONDS", value: "2"},
+		{name: "HLS buffer above maximum", key: "RIVUNE_HLS_INITIAL_BUFFER_SECONDS", value: "31"},
+		{name: "concurrency below minimum", key: "RIVUNE_REMUX_CONCURRENCY", value: "0"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv(test.key, test.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected %s=%s to fail", test.key, test.value)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsMediaProcessorLimitBoundaries(t *testing.T) {
+	tests := []struct {
+		name        string
+		concurrency string
+		threads     string
+		bitrate     string
+		storage     string
+		readRate    string
+		buffer      string
+	}{
+		{name: "minimum", concurrency: "1", threads: "1", bitrate: "64", storage: "512", readRate: "1", buffer: "3"},
+		{name: "maximum", concurrency: "16", threads: "32", bitrate: "200000", storage: "102400", readRate: "4", buffer: "30"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv("RIVUNE_REMUX_CONCURRENCY", test.concurrency)
+			t.Setenv("RIVUNE_TRANSCODE_THREADS", test.threads)
+			t.Setenv("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", test.bitrate)
+			t.Setenv("RIVUNE_MEDIA_MAX_STORAGE_MB", test.storage)
+			t.Setenv("RIVUNE_TRANSCODE_MAX_READ_RATE", test.readRate)
+			t.Setenv("RIVUNE_HLS_INITIAL_BUFFER_SECONDS", test.buffer)
+			if _, err := Load(); err != nil {
+				t.Fatalf("load boundary media configuration: %v", err)
+			}
+		})
+	}
+}
 func TestLoadRejectsUnsafeTranscodeBitrate(t *testing.T) {
 	setRequiredEnvironment(t)
 	t.Setenv("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", "63")
@@ -594,6 +676,10 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("RIVUNE_REMUX_CONCURRENCY", "")
 	t.Setenv("RIVUNE_TRANSCODE_THREADS", "")
 	t.Setenv("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", "")
+	t.Setenv("RIVUNE_TRANSCODE_MAX_READ_RATE", "")
+	t.Setenv("RIVUNE_HLS_INITIAL_BUFFER_SECONDS", "")
+	t.Setenv("RIVUNE_MEDIA_TEMP_DIR", "")
+	t.Setenv("RIVUNE_MEDIA_MAX_STORAGE_MB", "")
 	t.Setenv("RIVUNE_HARDWARE_ACCELERATION", "")
 	t.Setenv("RIVUNE_VIDEO_DEVICE", "")
 	t.Setenv("RIVUNE_LAN_ARTWORK_ORIGINS", "")

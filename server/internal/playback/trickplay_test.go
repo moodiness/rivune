@@ -175,6 +175,12 @@ func TestFFmpegGeneratesDeterministicJPEGTrickplaySheetWithoutWorkspaceArtifacts
 	if len(entries) != 1 || entries[0].Name() != filepath.Base(source) {
 		t.Fatalf("trickplay generation retained workspace artifacts: %v", entries)
 	}
+	processor.trickplaySlots <- struct{}{}
+	_, capacityErr := processor.GenerateTrickplayJPEG(context.Background(), storedAsset{ID: "source", URL: source}, 16, 0)
+	<-processor.trickplaySlots
+	if !errors.Is(capacityErr, ErrMediaCapacityReached) {
+		t.Fatalf("concurrent trickplay generation error = %v, want capacity error", capacityErr)
+	}
 }
 
 func testTrickplayJPEG(t *testing.T, tileWidth int) []byte {

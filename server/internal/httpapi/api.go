@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -39,6 +41,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/operations"
 	"github.com/moodiness/rivune/server/internal/playback"
 	"github.com/moodiness/rivune/server/internal/profile"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 	"github.com/moodiness/rivune/server/internal/settings"
 	"github.com/moodiness/rivune/server/internal/tracking"
 	"github.com/moodiness/rivune/server/internal/user"
@@ -352,15 +355,33 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 	mediaProcessor, err := playback.NewFFmpegProcessor(cfg.FFmpegPath, cfg.FFprobePath, cfg.RemuxConcurrency, cfg.TranscodeThreads, playback.FFmpegOptions{
 		HardwareAcceleration: cfg.HardwareAcceleration,
 		VideoDevice:          cfg.VideoDevice,
+		MaximumReadRate:      cfg.TranscodeMaxReadRate,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize media processor: %w", err)
 	}
-	logger.Info("media processor initialized", "videoEncoder", mediaProcessor.VideoEncoder(), "hardwareToneMap", mediaProcessor.HardwareToneMap())
+	mediaDiagnostics := mediaProcessor.PlaybackDiagnostics()
+	logger.Info("media processor initialized",
+		"ffmpegVersion", mediaDiagnostics.FFmpegVersion,
+		"ffprobeVersion", mediaDiagnostics.FFprobeVersion,
+		"hardwareAcceleration", mediaDiagnostics.HardwareAcceleration,
+		"videoEncoder", mediaDiagnostics.VideoEncoder,
+		"hardwareToneMap", mediaDiagnostics.HardwareToneMap,
+		"transcodeThreads", mediaDiagnostics.TranscodeThreads,
+		"processLimit", mediaDiagnostics.Pools.Process.Limit,
+		"probeLimit", mediaDiagnostics.Pools.Probe.Limit,
+		"subtitleLimit", mediaDiagnostics.Pools.Subtitle.Limit,
+		"trickplayLimit", mediaDiagnostics.Pools.Trickplay.Limit,
+		"maximumVideoBitrateKbps", cfg.TranscodeMaxBitrateKbps,
+		"maximumReadRate", cfg.TranscodeMaxReadRate,
+		"initialHLSBufferSeconds", cfg.HLSInitialBufferSeconds,
+		"maximumMediaStorageBytes", cfg.MediaStorageBytes,
+	)
 	playbackService, err := playback.NewService(pool, addonService, mediaProcessor, playback.MediaOptions{
 		TempDirectory:             cfg.MediaTempDir,
 		MaxStorageBytes:           cfg.MediaStorageBytes,
 		TranscodeVideoBitrateKbps: cfg.TranscodeMaxBitrateKbps,
+		InitialBufferSeconds:      cfg.HLSInitialBufferSeconds,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize playback service: %w", err)
@@ -705,25 +726,113 @@ func (a *API) setup(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r = r.WithContext(auth.WithClientIP(r.Context(), requestClientIP(r, a.config.TrustedProxies)))
+		requestContext, counters := requestwork.WithCounters(
+			auth.WithClientIP(r.Context(), requestClientIP(r, a.config.TrustedProxies)),
+		)
+		r = r.WithContext(requestContext)
 		started := time.Now()
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
+		observed := &nativeObservedResponseWriter{ResponseWriter: w}
+		observed.Header().Set("Cache-Control", "no-store")
+		observed.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		observed.Header().Set("Referrer-Policy", "no-referrer")
+		observed.Header().Set("X-Content-Type-Options", "nosniff")
 
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				if recoveredErr, ok := recovered.(error); ok {
-					recovered = netguard.SanitizeURLError(recoveredErr)
+				a.logger.Error("panic serving request", "method", r.Method, "route", nativeRequestRoute(r), "committed", observed.Committed())
+				if !observed.Committed() {
+					writeError(observed, http.StatusInternalServerError, "internal_error", "An internal error occurred")
 				}
-				a.logger.Error("panic serving request", "panic", recovered, "method", r.Method, "path", r.URL.Path)
-				writeError(w, http.StatusInternalServerError, "internal_error", "An internal error occurred")
 			}
-			a.logger.Info("request completed", "method", r.Method, "path", r.URL.Path, "duration", time.Since(started))
+			status := observed.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			work := counters.Snapshot()
+			a.logger.LogAttrs(context.Background(), slog.LevelInfo, "request completed",
+				slog.String("route", nativeRequestRoute(r)),
+				slog.String("method", r.Method),
+				slog.Int("status", status),
+				slog.Duration("duration", time.Since(started)),
+				slog.Int64("db_call_count", work.DBCalls),
+				slog.Duration("db_duration", work.DBDuration),
+				slog.Int64("outbound_call_count", work.OutboundCalls),
+				slog.Duration("outbound_duration", work.OutboundDuration),
+				slog.Int64("upstream_bytes", work.UpstreamBytes),
+				slog.Int64("bytes", observed.bytes),
+			)
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(observed, r)
 	})
+}
+
+func nativeRequestRoute(r *http.Request) string {
+	if r == nil || strings.TrimSpace(r.Pattern) == "" {
+		return "unmatched"
+	}
+	return r.Pattern
+}
+
+type nativeObservedResponseWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (response *nativeObservedResponseWriter) WriteHeader(status int) {
+	if response.status != 0 {
+		return
+	}
+	response.status = status
+	response.ResponseWriter.WriteHeader(status)
+}
+
+func (response *nativeObservedResponseWriter) Write(payload []byte) (int, error) {
+	if response.status == 0 {
+		response.WriteHeader(http.StatusOK)
+	}
+	written, err := response.ResponseWriter.Write(payload)
+	response.bytes += int64(written)
+	return written, err
+}
+
+func (response *nativeObservedResponseWriter) ReadFrom(source io.Reader) (int64, error) {
+	if response.status == 0 {
+		response.WriteHeader(http.StatusOK)
+	}
+	var written int64
+	var err error
+	if readerFrom, ok := response.ResponseWriter.(io.ReaderFrom); ok {
+		written, err = readerFrom.ReadFrom(source)
+	} else {
+		written, err = io.Copy(response.ResponseWriter, source)
+	}
+	response.bytes += written
+	return written, err
+}
+
+func (response *nativeObservedResponseWriter) Committed() bool {
+	return response.status != 0
+}
+
+func (response *nativeObservedResponseWriter) Unwrap() http.ResponseWriter {
+	return response.ResponseWriter
+}
+
+func (response *nativeObservedResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(response.ResponseWriter).Hijack()
+}
+
+func (response *nativeObservedResponseWriter) Flush() {
+	if response.status == 0 {
+		response.status = http.StatusOK
+	}
+	_ = http.NewResponseController(response.ResponseWriter).Flush()
+}
+
+func responseCommitted(w http.ResponseWriter) bool {
+	committed, ok := w.(interface{ Committed() bool })
+	return ok && committed.Committed()
 }
 
 func (a *API) internalError(w http.ResponseWriter, operation string, err error) {

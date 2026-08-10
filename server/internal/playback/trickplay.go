@@ -349,6 +349,10 @@ func (processor *FFmpegProcessor) GenerateTrickplayJPEG(ctx context.Context, ass
 	if err := validateMediaSource(ctx, asset.URL); err != nil {
 		return nil, err
 	}
+	if err := acquireSlot(ctx, processor.trickplaySlots); err != nil {
+		return nil, err
+	}
+	defer releaseSlot(processor.trickplaySlots)
 	if err := processor.acquire(ctx); err != nil {
 		return nil, err
 	}

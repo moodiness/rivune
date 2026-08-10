@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,6 +19,7 @@ const softwareToneMapFilter = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p
 type FFmpegOptions struct {
 	HardwareAcceleration string
 	VideoDevice          string
+	MaximumReadRate      float64
 }
 
 type videoEncoderKind string
@@ -47,6 +49,11 @@ func detectVideoEncoder(ffmpegPath string, options FFmpegOptions) (videoEncoder,
 	}
 	if mode == videoEncoderSoftware {
 		return videoEncoder{kind: videoEncoderSoftware}, nil
+	}
+	switch mode {
+	case videoEncoderVAAPI, videoEncoderQSV, videoEncoderNVENC:
+	default:
+		return videoEncoder{}, fmt.Errorf("unsupported hardware acceleration mode %q", mode)
 	}
 	candidate := videoEncoder{kind: mode, device: options.VideoDevice}
 	if mode == videoEncoderNVENC {
@@ -159,6 +166,63 @@ func (encoder videoEncoder) globalArguments() []string {
 	default:
 		return nil
 	}
+}
+
+// hardwareFramesSafe is deliberately conservative: these decoder/encoder pairs
+// share a documented hardware frame type, while subtitle composition and
+// software tone mapping require CPU frames. A startup failure still falls back
+// to software before an HLS playlist is published.
+func (encoder videoEncoder) hardwareFramesSafe(asset storedAsset) bool {
+	if asset.Kind != processingTranscode || asset.SubtitleTrackIndex != nil ||
+		encoder.normalizedKind() == videoEncoderSoftware || asset.Decision == nil || asset.Decision.Source == nil {
+		return false
+	}
+	switch normalizedCodec(asset.Decision.Source.VideoCodec) {
+	case "h264", "h265":
+	default:
+		return false
+	}
+	if asset.ToneMap && (encoder.normalizedKind() != videoEncoderVAAPI || !encoder.hardwareToneMap) {
+		return false
+	}
+	needsScale := asset.TargetHeight > 0 && asset.Decision.Source.Height > asset.TargetHeight
+	return !needsScale || encoder.normalizedKind() == videoEncoderVAAPI || encoder.normalizedKind() == videoEncoderQSV
+}
+
+func (encoder videoEncoder) hardwareDecodeArguments(asset storedAsset) []string {
+	if !encoder.hardwareFramesSafe(asset) {
+		return nil
+	}
+	switch encoder.normalizedKind() {
+	case videoEncoderVAAPI:
+		return []string{"-hwaccel", "vaapi", "-hwaccel_device", "hw", "-hwaccel_output_format", "vaapi"}
+	case videoEncoderQSV:
+		return []string{"-hwaccel", "qsv", "-hwaccel_device", "hw", "-hwaccel_output_format", "qsv"}
+	case videoEncoderNVENC:
+		return []string{"-hwaccel", "cuda", "-hwaccel_output_format", "cuda"}
+	default:
+		return nil
+	}
+}
+
+func (encoder videoEncoder) hardwareFilter(asset storedAsset) string {
+	if !encoder.hardwareFramesSafe(asset) {
+		return ""
+	}
+	filters := make([]string, 0, 2)
+	if asset.ToneMap {
+		filters = append(filters, "tonemap_vaapi=format=nv12:matrix=bt709:primaries=bt709:transfer=bt709")
+	}
+	if asset.TargetHeight > 0 && asset.Decision.Source.Height > asset.TargetHeight {
+		height := strconv.Itoa(asset.TargetHeight)
+		switch encoder.normalizedKind() {
+		case videoEncoderVAAPI:
+			filters = append(filters, "scale_vaapi=w=-2:h="+height+":format=nv12")
+		case videoEncoderQSV:
+			filters = append(filters, "scale_qsv=w=-2:h="+height+":format=nv12")
+		}
+	}
+	return strings.Join(filters, ",")
 }
 
 func (encoder videoEncoder) filter(toneMap bool) string {

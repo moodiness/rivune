@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/netguard"
 	"github.com/moodiness/rivune/server/internal/playback"
 )
 
@@ -215,21 +216,34 @@ func (a *API) playbackAsset(w http.ResponseWriter, r *http.Request) {
 		w, r, r.PathValue("sessionId"), r.PathValue("assetId"),
 		r.URL.Query().Get("token"), r.URL.Query().Get("target"), r.URL.Query().Get("signature"),
 	)
+	if err != nil && responseCommitted(w) {
+		a.logger.Error("proxy playback asset failed after response committed", "error", netguard.SanitizeURLError(err))
+		return
+	}
 	switch {
 	case errors.Is(err, playback.ErrSessionNotFound):
-		writeError(w, http.StatusNotFound, "playback_session_not_found", "The playback session is invalid or expired")
+		writePlaybackAssetError(w, r, http.StatusNotFound, "playback_session_not_found", "The playback session is invalid or expired")
 	case errors.Is(err, playback.ErrClientCapabilityMissing):
-		writeError(w, http.StatusUnprocessableEntity, "playback_client_capability_missing", "This source requires a server output mode that this client did not announce")
+		writePlaybackAssetError(w, r, http.StatusUnprocessableEntity, "playback_client_capability_missing", "This source requires a server output mode that this client did not announce")
 	case errors.Is(err, playback.ErrMediaSourceFailed):
-		writeError(w, http.StatusBadGateway, "playback_source_failed", "The selected media source stopped responding")
+		writePlaybackAssetError(w, r, http.StatusBadGateway, "playback_source_failed", "The selected media source stopped responding")
 	case errors.Is(err, playback.ErrMediaCapacityReached):
 		w.Header().Set("Retry-After", "10")
-		writeError(w, http.StatusServiceUnavailable, "playback_capacity_reached", "All media processing slots are currently in use")
+		writePlaybackAssetError(w, r, http.StatusServiceUnavailable, "playback_capacity_reached", "All media processing slots are currently in use")
 	case errors.Is(err, playback.ErrMediaStorageLimit):
-		writeError(w, http.StatusInsufficientStorage, "playback_storage_limit", "The media workspace storage limit was reached")
+		writePlaybackAssetError(w, r, http.StatusInsufficientStorage, "playback_storage_limit", "The media workspace storage limit was reached")
 	case errors.Is(err, playback.ErrMediaProcessingFailed):
-		writeError(w, http.StatusBadGateway, "playback_processing_failed", "The server could not prepare this source for playback")
+		writePlaybackAssetError(w, r, http.StatusBadGateway, "playback_processing_failed", "The server could not prepare this source for playback")
 	case err != nil:
 		a.internalError(w, "proxy playback asset", err)
 	}
+}
+
+func writePlaybackAssetError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(status)
+		return
+	}
+	writeError(w, status, code, message)
 }

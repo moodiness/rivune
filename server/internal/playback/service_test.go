@@ -97,25 +97,141 @@ func TestPlaybackRedirectPolicyStripsProviderHeadersAcrossHosts(t *testing.T) {
 	redirected.Header.Set("Authorization", "Bearer provider-secret")
 	redirected.Header.Set("Cookie", "provider_session=secret")
 	redirected.Header.Set("X-Provider-Key", "secret")
-	redirected.Header.Set("Range", "bytes=0-1023")
+	safeHeaders := map[string]string{
+		"Range":             "bytes=0-1023",
+		"If-Range":          `"range-version"`,
+		"If-None-Match":     `"cache-version"`,
+		"If-Modified-Since": "Tue, 15 Nov 1994 12:45:26 GMT",
+	}
+	for name, value := range safeHeaders {
+		redirected.Header.Set(name, value)
+	}
 
 	if err := playbackRedirectPolicy(redirected, []*http.Request{original}); err != nil {
 		t.Fatalf("cross-host redirect policy error: %v", err)
 	}
-	if got := redirected.Header.Get("Authorization"); got != "" {
-		t.Fatalf("cross-host redirect retained Authorization: %q", got)
+	for _, name := range []string{"Authorization", "Cookie", "X-Provider-Key"} {
+		if got := redirected.Header.Get(name); got != "" {
+			t.Fatalf("cross-host redirect retained %s: %q", name, got)
+		}
 	}
-	if got := redirected.Header.Get("Cookie"); got != "" {
-		t.Fatalf("cross-host redirect retained Cookie: %q", got)
-	}
-	if got := redirected.Header.Get("X-Provider-Key"); got != "" {
-		t.Fatalf("cross-host redirect retained provider key: %q", got)
-	}
-	if got := redirected.Header.Get("Range"); got != "" {
-		t.Fatalf("cross-host redirect retained client range: %q", got)
+	for name, want := range safeHeaders {
+		if got := redirected.Header.Get(name); got != want {
+			t.Fatalf("cross-host redirect %s = %q, want %q", name, got, want)
+		}
 	}
 	if got := redirected.Header.Get("User-Agent"); got != "Rivune-Playback/1" {
 		t.Fatalf("cross-host redirect User-Agent = %q", got)
+	}
+}
+
+func TestPlaybackRedirectPolicyUsesCanonicalMediaOrigins(t *testing.T) {
+	tests := []struct {
+		name       string
+		from       string
+		to         string
+		wantSecret bool
+	}{
+		{name: "default HTTPS port", from: "https://media.example:443/master.m3u8", to: "https://media.example/segment.ts", wantSecret: true},
+		{name: "terminal hostname point", from: "https://media.example./master.m3u8", to: "https://MEDIA.EXAMPLE/segment.ts", wantSecret: true},
+		{name: "different port", from: "https://media.example/master.m3u8", to: "https://media.example:444/segment.ts"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			original := httptest.NewRequest(http.MethodGet, test.from, nil)
+			redirected := httptest.NewRequest(http.MethodGet, test.to, nil)
+			redirected.Header.Set("Authorization", "Bearer provider-secret")
+			if err := playbackRedirectPolicy(redirected, []*http.Request{original}); err != nil {
+				t.Fatal(err)
+			}
+			if got := redirected.Header.Get("Authorization"); (got != "") != test.wantSecret {
+				t.Fatalf("redirect Authorization = %q, want present=%t", got, test.wantSecret)
+			}
+		})
+	}
+}
+
+func TestFetchAssetPreservesRangeAcrossCrossOriginRedirect(t *testing.T) {
+	type observedRequest struct {
+		method string
+		header http.Header
+	}
+	originRequests := make(chan observedRequest, 1)
+	redirectedRequests := make(chan observedRequest, 1)
+	contents := []byte("cross-origin-direct-play-media")
+	wantBytes := contents[7:13]
+	wantRange := "bytes=7-12"
+	safeHeaders := map[string]string{
+		"Range":             wantRange,
+		"If-Range":          `"range-version"`,
+		"If-None-Match":     `"cache-version"`,
+		"If-Modified-Since": "Tue, 15 Nov 1994 12:45:26 GMT",
+	}
+
+	cdn := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		redirectedRequests <- observedRequest{method: request.Method, header: request.Header.Clone()}
+		if request.Header.Get("Range") != wantRange {
+			response.WriteHeader(http.StatusOK)
+			_, _ = response.Write(contents)
+			return
+		}
+		response.Header().Set("Content-Range", fmt.Sprintf("bytes 7-12/%d", len(contents)))
+		response.WriteHeader(http.StatusPartialContent)
+		_, _ = response.Write(wantBytes)
+	}))
+	defer cdn.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		originRequests <- observedRequest{method: request.Method, header: request.Header.Clone()}
+		http.Redirect(response, request, cdn.URL+"/media.mp4", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	service := &Service{client: &http.Client{CheckRedirect: playbackRedirectPolicy}}
+	incoming := httptest.NewRequest(http.MethodGet, "http://rivune.test/direct.mp4", nil)
+	for name, value := range safeHeaders {
+		incoming.Header.Set(name, value)
+	}
+	asset := storedAsset{
+		URL: origin.URL + "/media.mp4",
+		Headers: map[string]string{
+			"Authorization":  "Bearer provider-secret",
+			"Cookie":         "provider_session=secret",
+			"X-Provider-Key": "provider-secret",
+		},
+	}
+	upstream, err := service.fetchAsset(incoming.Context(), incoming, asset, asset.URL)
+	if err != nil {
+		t.Fatalf("fetch cross-origin ranged asset: %v", err)
+	}
+	defer upstream.Body.Close()
+	body, err := io.ReadAll(upstream.Body)
+	if err != nil {
+		t.Fatalf("read cross-origin ranged asset: %v", err)
+	}
+	if upstream.StatusCode != http.StatusPartialContent || upstream.Request.Method != http.MethodGet ||
+		upstream.Header.Get("Content-Range") != fmt.Sprintf("bytes 7-12/%d", len(contents)) || string(body) != string(wantBytes) {
+		t.Fatalf("redirected range response status=%d method=%s content-range=%q body=%q", upstream.StatusCode, upstream.Request.Method, upstream.Header.Get("Content-Range"), body)
+	}
+
+	originRequest := <-originRequests
+	if originRequest.method != http.MethodGet || originRequest.header.Get("Range") != wantRange ||
+		originRequest.header.Get("Authorization") == "" || originRequest.header.Get("Cookie") == "" || originRequest.header.Get("X-Provider-Key") == "" {
+		t.Fatalf("origin request method=%s headers=%v", originRequest.method, originRequest.header)
+	}
+	redirectedRequest := <-redirectedRequests
+	if redirectedRequest.method != http.MethodGet {
+		t.Fatalf("redirected request method = %s", redirectedRequest.method)
+	}
+	for name, want := range safeHeaders {
+		if got := redirectedRequest.header.Get(name); got != want {
+			t.Fatalf("redirected request %s = %q, want %q", name, got, want)
+		}
+	}
+	for _, name := range []string{"Authorization", "Cookie", "X-Provider-Key"} {
+		if got := redirectedRequest.header.Get(name); got != "" {
+			t.Fatalf("redirected request leaked %s: %q", name, got)
+		}
 	}
 }
 
@@ -251,6 +367,50 @@ func TestFetchHLSChildDoesNotForwardProviderHeadersCrossOrigin(t *testing.T) {
 	}
 }
 
+func TestFetchAssetScopesCredentialsToCanonicalMediaOrigin(t *testing.T) {
+	tests := []struct {
+		name        string
+		assetURL    string
+		upstreamURL string
+		wantSecret  bool
+	}{
+		{name: "default HTTPS port", assetURL: "https://media.example:443/master.m3u8", upstreamURL: "https://media.example/segment.ts", wantSecret: true},
+		{name: "terminal hostname point", assetURL: "https://media.example./master.m3u8", upstreamURL: "https://MEDIA.EXAMPLE/segment.ts", wantSecret: true},
+		{name: "different port", assetURL: "https://media.example/master.m3u8", upstreamURL: "https://media.example:444/segment.ts"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var captured http.Header
+			service := &Service{client: &http.Client{Transport: playbackRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				captured = request.Header.Clone()
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("media")), Request: request}, nil
+			})}}
+			incoming := httptest.NewRequest(http.MethodGet, "http://rivune.test/asset", nil)
+			response, err := service.fetchAsset(context.Background(), incoming, storedAsset{
+				URL: test.assetURL,
+				Headers: map[string]string{
+					"Authorization":        "Bearer provider-secret",
+					"Proxy-Authorization":  "Basic proxy-secret",
+					"X-Injected\r\nHeader": "injected-name",
+					"X-Injected":           "value\r\ninjected-value",
+				},
+			}, test.upstreamURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if got := captured.Get("Authorization"); (got != "") != test.wantSecret {
+				t.Fatalf("Authorization = %q, want present=%t", got, test.wantSecret)
+			}
+			for _, forbidden := range []string{"Proxy-Authorization", "X-Injected", "X-Injected\r\nHeader"} {
+				if got := captured.Get(forbidden); got != "" {
+					t.Fatalf("malformed or proxy header %q forwarded as %q", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
 func TestFetchProxyAssetRetriesPartialHLSWithoutRange(t *testing.T) {
 	requests := make([]http.Header, 0, 2)
 	service := &Service{client: &http.Client{Transport: playbackRoundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -270,7 +430,7 @@ func TestFetchProxyAssetRetriesPartialHLSWithoutRange(t *testing.T) {
 	incoming.Header.Set("If-Range", `"playlist-etag"`)
 	asset := storedAsset{URL: "https://provider.example/master.m3u8", Headers: map[string]string{"If-Range": `"provider-etag"`}}
 
-	response, err := service.fetchProxyAsset(context.Background(), incoming, asset, asset.URL)
+	response, err := service.fetchProxyAsset(context.Background(), incoming, asset, asset.URL, "session-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,6 +798,40 @@ func TestDecidePlaybackSourceAllowsDirectPassthroughWithoutCodecCapabilities(t *
 	}
 }
 
+func TestDecidePlaybackSourceRejectsMissingCodecCapabilities(t *testing.T) {
+	inspection := MediaInspection{
+		Container:   "mp4",
+		VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1280, Height: 720}},
+		AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
+	}
+	for _, test := range []struct {
+		name        string
+		videoCodecs []string
+		audioCodecs []string
+	}{
+		{name: "video codecs absent", audioCodecs: []string{"aac"}},
+		{name: "audio codecs absent", videoCodecs: []string{"h264"}},
+		{name: "all codecs absent"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sources := []Source{{
+				ID: "stream-1", Mode: "direct", URL: "https://media.example/movie.mp4", Protocol: "http", Container: "mp4",
+			}}
+			assets := []storedAsset{{ID: "stream-1", Kind: "stream", URL: sources[0].URL}}
+			service := &Service{processor: fakeMediaProcessor{info: inspection}, probes: newMediaProbeCache(time.Now)}
+
+			err := service.decidePlaybackSource(context.Background(), sources, assets, Capabilities{
+				StreamingProtocols: []string{"http"}, Containers: []string{"mp4"},
+				VideoCodecs: test.videoCodecs, AudioCodecs: test.audioCodecs,
+			})
+
+			if !errors.Is(err, ErrClientCapabilityMissing) || sources[0].Compatible || assets[0].Kind != "stream" {
+				t.Fatalf("missing codec capability was not rejected: err=%v source=%+v asset=%+v", err, sources[0], assets[0])
+			}
+		})
+	}
+}
+
 func TestDecidePlaybackSourceRemuxesHLSWithPlayableAlternateAudio(t *testing.T) {
 	sources := []Source{{
 		ID: "stream-1", Mode: "direct", URL: "https://media.example/movie.m3u8",
@@ -710,6 +904,164 @@ func TestDecidePlaybackSourceSkipsMislabeledLowResolution(t *testing.T) {
 	}
 	if sources[1].Mode != processingRemux || sources[1].Media == nil || sources[1].Media.VideoTracks[0].Height != 2160 {
 		t.Fatalf("expected the verified 2160p source, got source=%+v asset=%+v", sources[1], assets[1])
+	}
+}
+
+func TestDecidePlaybackSourceKeepsBestMislabeledFallback(t *testing.T) {
+	sources := []Source{
+		{ID: "low", Hint: "2160p", Mode: "direct", URL: "https://media.example/low.mkv", Protocol: "http", Container: "mkv"},
+		{ID: "high", Hint: "2160p", Mode: "direct", URL: "https://media.example/high.mkv", Protocol: "http", Container: "mkv"},
+		{ID: "encoding", Hint: "1080p", Mode: "direct", URL: "https://media.example/encoding.mkv", Protocol: "http", Container: "mkv"},
+	}
+	assets := []storedAsset{
+		{ID: "low", Kind: "stream", URL: sources[0].URL},
+		{ID: "high", Kind: "stream", URL: sources[1].URL},
+		{ID: "encoding", Kind: "stream", URL: sources[2].URL},
+	}
+	inspection := func(height int) MediaInspection {
+		return MediaInspection{
+			Container: "mkv", VideoTracks: []MediaTrack{{Codec: "h264", Height: height}},
+			AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+		}
+	}
+	service := &Service{
+		processor: sourceMediaProcessor{
+			sources[0].URL: inspection(720),
+			sources[1].URL: inspection(1080),
+			sources[2].URL: {
+				Container: "mkv", VideoTracks: []MediaTrack{{Codec: "vp9", Height: 1080}},
+				AudioTracks: []MediaTrack{{Codec: "dts", Channels: 6}},
+			},
+		},
+		probes: newMediaProbeCache(time.Now),
+	}
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingRemux, processingTranscode},
+	}
+
+	if err := service.decidePlaybackSource(context.Background(), sources, assets, capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if sources[0].Compatible || !sources[1].Compatible || sources[1].Mode != processingRemux ||
+		sources[2].Compatible || assets[2].Kind != "stream" {
+		t.Fatalf("best lossless fallback was not selected ahead of encoding: sources=%+v assets=%+v", sources, assets)
+	}
+}
+
+func TestDecidePlaybackSourceDefersEncodingForDirectOrRemuxSource(t *testing.T) {
+	preferQuality := false
+	for _, test := range []struct {
+		name, container, wantMode string
+	}{
+		{name: "direct", container: "mp4", wantMode: "direct"},
+		{name: "remux", container: "mkv", wantMode: processingRemux},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sources := []Source{
+				{ID: "uhd", Hint: "2160p", Mode: "direct", URL: "https://media.example/uhd.mkv", Protocol: "http", Container: "mkv"},
+				{ID: "hd", Hint: "1080p", Mode: "direct", URL: "https://media.example/hd." + test.container, Protocol: "http", Container: test.container},
+			}
+			assets := []storedAsset{
+				{ID: "uhd", Kind: "stream", URL: sources[0].URL},
+				{ID: "hd", Kind: "stream", URL: sources[1].URL},
+			}
+			service := &Service{
+				processor: sourceMediaProcessor{
+					sources[0].URL: {
+						Container: "mkv", VideoTracks: []MediaTrack{{Codec: "vp9", Height: 2160}},
+						AudioTracks: []MediaTrack{{Codec: "dts", Channels: 6}},
+					},
+					sources[1].URL: {
+						Container: test.container, VideoTracks: []MediaTrack{{Codec: "h264", Height: 1080}},
+						AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+					},
+				},
+				probes: newMediaProbeCache(time.Now),
+			}
+			capabilities := Capabilities{
+				StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"},
+				VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+				ProcessingModes:  []string{processingRemux, processingTranscodeAudio, processingTranscode},
+				PreferDirectPlay: &preferQuality,
+			}
+
+			if err := service.decidePlaybackSource(context.Background(), sources, assets, capabilities); err != nil {
+				t.Fatal(err)
+			}
+			if sources[0].Compatible || assets[0].Kind != "stream" || !sources[1].Compatible || sources[1].Mode != test.wantMode {
+				t.Fatalf("encoding beat a playable source: sources=%+v assets=%+v", sources, assets)
+			}
+			if test.wantMode == processingRemux && assets[1].Kind != processingRemux {
+				t.Fatalf("remux plan was not persisted: source=%+v asset=%+v", sources[1], assets[1])
+			}
+		})
+	}
+}
+
+func TestDecidePlaybackSourceUsesDirectPreferenceAtEqualQuality(t *testing.T) {
+	preferDirect := true
+	preferQuality := false
+	for _, test := range []struct {
+		name                  string
+		preference            *bool
+		remuxHint, directHint string
+		remuxHeight           int
+		wantIndex             int
+	}{
+		{name: "nil prefers direct", remuxHint: "1080p", directHint: "1080p", wantIndex: 1},
+		{name: "true prefers direct", preference: &preferDirect, remuxHint: "1080p", directHint: "1080p", wantIndex: 1},
+		{name: "false preserves equal-quality order", preference: &preferQuality, remuxHint: "1080p", directHint: "1080p", wantIndex: 0},
+		{name: "false preserves quality priority", preference: &preferQuality, remuxHint: "2160p", directHint: "1080p", wantIndex: 0},
+		{name: "true preserves quality priority", preference: &preferDirect, remuxHint: "2160p", directHint: "1080p", wantIndex: 0},
+		{name: "nil preserves inspected quality without hints", remuxHeight: 2160, wantIndex: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sources := []Source{
+				{ID: "remux", Hint: test.remuxHint, Mode: "direct", URL: "https://media.example/remux.mkv", Protocol: "http", Container: "mkv"},
+				{ID: "direct", Hint: test.directHint, Mode: "direct", URL: "https://media.example/direct.mp4", Protocol: "http", Container: "mp4"},
+			}
+			assets := []storedAsset{
+				{ID: "remux", Kind: "stream", URL: sources[0].URL},
+				{ID: "direct", Kind: "stream", URL: sources[1].URL},
+			}
+			remuxHeight := test.remuxHeight
+			if remuxHeight == 0 {
+				remuxHeight = 1080
+				if test.remuxHint == "2160p" {
+					remuxHeight = 2160
+				}
+			}
+			service := &Service{
+				processor: sourceMediaProcessor{
+					sources[0].URL: {
+						Container: "mkv", VideoTracks: []MediaTrack{{Codec: "h264", Height: remuxHeight}},
+						AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+					},
+					sources[1].URL: {
+						Container: "mp4", VideoTracks: []MediaTrack{{Codec: "h264", Height: 1080}},
+						AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+					},
+				},
+				probes: newMediaProbeCache(time.Now),
+			}
+			capabilities := Capabilities{
+				StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"},
+				VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+				ProcessingModes: []string{processingRemux}, PreferDirectPlay: test.preference,
+			}
+
+			if err := service.decidePlaybackSource(context.Background(), sources, assets, capabilities); err != nil {
+				t.Fatal(err)
+			}
+			if !sources[test.wantIndex].Compatible || sources[1-test.wantIndex].Compatible {
+				t.Fatalf("unexpected source preference: sources=%+v", sources)
+			}
+			if (test.wantIndex == 0 && sources[0].Mode != processingRemux) || (test.wantIndex == 1 && sources[1].Mode != "direct") {
+				t.Fatalf("unexpected preferred mode: sources=%+v assets=%+v", sources, assets)
+			}
+		})
 	}
 }
 
@@ -856,7 +1208,8 @@ func TestMediaProfilesDoNotCrossContainerCodecPairs(t *testing.T) {
 func TestContainerProfileConditionsChangeDirectEligibilityAndTargetSelection(t *testing.T) {
 	capabilities := Capabilities{
 		StreamingProtocols: []string{"http", "hls"},
-		ProcessingModes:    []string{processingTranscode},
+		VideoCodecs:        []string{"h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingTranscode},
 		MediaProfiles: []MediaProfile{
 			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", DirectPlay: true},
 			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true},
@@ -1028,14 +1381,10 @@ func TestInspectedContainerUsesSourceHintForMatroskaFamily(t *testing.T) {
 }
 
 func TestInspectedVideoRangeTypeUsesOnlyFFprobeEvidence(t *testing.T) {
-	dovi := []struct {
-		Type string `json:"side_data_type"`
-	}{{Type: "DOVI configuration record"}}
+	dovi := []ffprobeSideData{{Type: "DOVI configuration record"}}
 	for _, test := range []struct {
 		name, tag, transfer, wantRange, wantHDR string
-		sideData                                []struct {
-			Type string `json:"side_data_type"`
-		}
+		sideData                                []ffprobeSideData
 	}{
 		{name: "Dolby Vision tag", tag: "dvh1", wantRange: "DOVI", wantHDR: "dolby_vision"},
 		{name: "Dolby Vision side data", sideData: dovi, wantRange: "DOVI", wantHDR: "dolby_vision"},
@@ -1108,6 +1457,8 @@ func TestCodecProfileConditionsSelectDirectOrHLSFromInspectedMedia(t *testing.T)
 		name, codec, videoRange, hdr     string
 		level, channels, maximumChannels int
 		requiredConditionUnknown         bool
+		dolbyVisionBLPresent             bool
+		dolbyVisionCompatibilityID       int
 		want                             string
 	}{
 		{name: "HEVC level boundary", codec: "hevc", videoRange: "SDR", level: 153, channels: 6, maximumChannels: 6, want: "direct"},
@@ -1115,7 +1466,7 @@ func TestCodecProfileConditionsSelectDirectOrHLSFromInspectedMedia(t *testing.T)
 		{name: "optional unknown level", codec: "hevc", videoRange: "SDR", channels: 6, maximumChannels: 6, want: "direct"},
 		{name: "required unknown range", codec: "hevc", level: 153, channels: 6, maximumChannels: 6, want: processingTranscode},
 		{name: "required unknown condition", codec: "hevc", videoRange: "SDR", level: 153, channels: 6, maximumChannels: 6, requiredConditionUnknown: true, want: processingTranscode},
-		{name: "Dolby Vision", codec: "hevc", videoRange: "DOVI", hdr: "dolby_vision", level: 153, channels: 6, maximumChannels: 6, want: processingTranscode},
+		{name: "Dolby Vision", codec: "hevc", videoRange: "DOVI", hdr: "dolby_vision", level: 153, channels: 6, maximumChannels: 6, dolbyVisionBLPresent: true, dolbyVisionCompatibilityID: 1, want: processingTranscode},
 		{name: "HDR10 HEVC", codec: "hevc", videoRange: "HDR10", hdr: "hdr10", level: 153, channels: 6, maximumChannels: 6, want: "direct"},
 		{name: "HDR10 unrelated codec", codec: "h264", videoRange: "HDR10", hdr: "hdr10", channels: 2, maximumChannels: 2, want: processingTranscode},
 		{name: "AV1", codec: "av1", channels: 2, maximumChannels: 2, want: "direct"},
@@ -1133,7 +1484,7 @@ func TestCodecProfileConditionsSelectDirectOrHLSFromInspectedMedia(t *testing.T)
 			}
 			mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mp4"}, MediaInspection{
 				Container: "mp4", HDRFormat: test.hdr,
-				VideoTracks: []MediaTrack{{Codec: test.codec, Level: test.level, VideoRangeType: test.videoRange, Height: 1080}},
+				VideoTracks: []MediaTrack{{Codec: test.codec, Level: test.level, VideoRangeType: test.videoRange, Height: 1080, DolbyVisionBLPresent: test.dolbyVisionBLPresent, DolbyVisionCompatibilityID: test.dolbyVisionCompatibilityID}},
 				AudioTracks: []MediaTrack{{Codec: "aac", Channels: test.channels}},
 			}, capabilities)
 			if mode != test.want || decision == nil {
@@ -1231,6 +1582,69 @@ func TestFullTranscodeDecisionAppliesResolutionHDRAndBitrateLimits(t *testing.T)
 		t.Fatalf("server bitrate limit was not applied to full transcode: mode=%q decision=%+v", mode, decision)
 	}
 }
+
+func TestFullTranscodeToneMappingUsesVideoHDRProfileSupport(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h265", "h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingTranscode},
+		MediaProfiles: []MediaProfile{
+			{Container: "mp4", VideoCodec: "h265", AudioCodec: "aac", DirectPlay: true, SupportsNonDolbyVisionHDR: true},
+			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true},
+		},
+	}
+	for _, test := range []struct {
+		name, hdr                  string
+		dolbyVisionBLPresent       bool
+		dolbyVisionCompatibilityID int
+		wantTone                   bool
+	}{
+		{name: "HDR10 profile support", hdr: "hdr10"},
+		{name: "HLG profile support", hdr: "hlg"},
+		{name: "Dolby Vision with compatible base layer tone maps", hdr: "dolby_vision", dolbyVisionBLPresent: true, dolbyVisionCompatibilityID: 1, wantTone: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, MediaInspection{
+				Container: "mkv", HDRFormat: test.hdr,
+				VideoTracks: []MediaTrack{{
+					Codec: "h265", Height: 1080, DolbyVisionBLPresent: test.dolbyVisionBLPresent,
+					DolbyVisionCompatibilityID: test.dolbyVisionCompatibilityID,
+				}},
+				AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+			}, capabilities)
+			if mode != processingTranscode || decision == nil || decision.ToneMapping != test.wantTone {
+				t.Fatalf("mode=%q decision=%+v want tone-map=%t", mode, decision, test.wantTone)
+			}
+		})
+	}
+}
+
+func TestDolbyVisionDirectPlayAndProfile5FailClosed(t *testing.T) {
+	inspection := MediaInspection{
+		Container: "mp4", HDRFormat: "dolby_vision",
+		VideoTracks: []MediaTrack{{Codec: "h265", Height: 1080, DolbyVisionProfile: 5, DolbyVisionBLPresent: true}},
+		AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+	}
+	compatible := Capabilities{
+		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h265", "h264"}, AudioCodecs: []string{"aac"},
+		HDRFormats: []string{"dolby_vision"}, ProcessingModes: []string{processingTranscode},
+		MediaProfiles: []MediaProfile{
+			{Container: "mp4", VideoCodec: "h265", AudioCodec: "aac", DirectPlay: true},
+			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true},
+		},
+	}
+	mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mp4"}, inspection, compatible)
+	if mode != "direct" || decision == nil || decision.ToneMapping {
+		t.Fatalf("compatible Dolby Vision client did not direct play: mode=%q decision=%+v", mode, decision)
+	}
+	incompatible := compatible
+	incompatible.HDRFormats = nil
+	mode, decision = playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mp4"}, inspection, incompatible)
+	if mode != "" || decision != nil {
+		t.Fatalf("profile 5 without HDR-compatible base promised generic transcode: mode=%q decision=%+v", mode, decision)
+	}
+}
+
 func TestPlaybackCapabilitiesDoNotTreatMissingFormatsAsWildcards(t *testing.T) {
 	inspection := MediaInspection{
 		Container:   "mp4",
@@ -1292,7 +1706,8 @@ func TestTranscodeArgumentsApplyScaleBitrateChannelsAndBitmapBurnSafely(t *testi
 	processor := &FFmpegProcessor{threads: 4, encoder: videoEncoder{kind: videoEncoderSoftware}}
 	arguments, err := processor.processingArguments(storedAsset{
 		Kind: processingTranscode, URL: "https://media.example/movie.mkv",
-		SubtitleTrackIndex: &subtitleIndex, TargetHeight: 720, VideoBitrateKbps: 4500, MaximumAudioChannels: 1,
+		SubtitleTrackIndex: &subtitleIndex, SubtitleTrackType: subtitleBurnBitmap, SubtitleTrackOrdinal: 2,
+		TargetHeight: 720, VideoBitrateKbps: 4500, MaximumAudioChannels: 1,
 		Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{Height: 2160}},
 	})
 	if err != nil {
@@ -1300,7 +1715,7 @@ func TestTranscodeArgumentsApplyScaleBitrateChannelsAndBitmapBurnSafely(t *testi
 	}
 	joined := strings.Join(arguments, " ")
 	for _, expected := range []string{
-		"-filter_complex [0:v:0][0:7]overlay,scale=-2:720[vout]",
+		"-filter_complex [0:v:0][0:s:2]overlay=eof_action=pass:repeatlast=0,scale=-2:720[vout]",
 		"-map [vout]", "-b:v 4500k", "-maxrate 4500k", "-bufsize 9000k", "-ac 1",
 	} {
 		if !strings.Contains(joined, expected) {
@@ -1309,6 +1724,72 @@ func TestTranscodeArgumentsApplyScaleBitrateChannelsAndBitmapBurnSafely(t *testi
 	}
 	if strings.Contains(joined, "sh -c") || strings.Contains(joined, "bash -c") {
 		t.Fatalf("subtitle burn escaped the argument-array runner: %v", arguments)
+	}
+}
+
+func TestSubtitleBurnArgumentsDistinguishTextBitmapAndRejectInjection(t *testing.T) {
+	index := 9
+	processor := &FFmpegProcessor{threads: 2, encoder: videoEncoder{kind: videoEncoderSoftware}}
+	for _, test := range []struct {
+		name, burnType, want string
+	}{
+		{name: "ASS or SRT text", burnType: subtitleBurnText, want: `[0:v:0]subtitles=filename='https\://media.example/movie.mkv':si=1[vout]`},
+		{name: "PGS DVB or XSub bitmap", burnType: subtitleBurnBitmap, want: "[0:v:0][0:s:1]overlay=eof_action=pass:repeatlast=0[vout]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			arguments, err := processor.processingArguments(storedAsset{
+				Kind: processingTranscode, URL: "https://media.example/movie.mkv", SubtitleTrackIndex: &index,
+				SubtitleTrackType: test.burnType, SubtitleTrackOrdinal: 1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			filterIndex := argumentIndex(arguments, "-filter_complex")
+			if filterIndex < 0 || filterIndex+1 >= len(arguments) || arguments[filterIndex+1] != test.want {
+				t.Fatalf("filter graph = %v, want %q", arguments, test.want)
+			}
+		})
+	}
+	seekArguments, err := processor.processingArguments(storedAsset{
+		Kind: processingTranscode, URL: "https://media.example/movie.mkv", StartSeconds: 300,
+		SubtitleTrackIndex: &index, SubtitleTrackType: subtitleBurnText, SubtitleTrackOrdinal: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seekFilter := argumentIndex(seekArguments, "-filter_complex")
+	wantSeekFilter := `[0:v:0]setpts=PTS+300/TB,subtitles=filename='https\://media.example/movie.mkv':si=1,setpts=PTS-300/TB[vout]`
+	if seekFilter < 0 || seekFilter+1 >= len(seekArguments) || seekArguments[seekFilter+1] != wantSeekFilter {
+		t.Fatalf("seeked text burn graph = %v, want %q", seekArguments, wantSeekFilter)
+	}
+	_, err = processor.processingArguments(storedAsset{
+		Kind: processingTranscode, URL: "https://media.example/movie.mkv", SubtitleTrackIndex: &index,
+		SubtitleTrackType: "text,scale=1:1", SubtitleTrackOrdinal: 1,
+	})
+	if !errors.Is(err, ErrMediaProcessingFailed) {
+		t.Fatalf("injected subtitle type error = %v", err)
+	}
+	_, err = processor.processingArguments(storedAsset{
+		Kind: processingTranscode, URL: "https://media.example/movie.mkv;scale=1:1", SubtitleTrackIndex: &index,
+		SubtitleTrackType: subtitleBurnText, SubtitleTrackOrdinal: 1,
+	})
+	if !errors.Is(err, ErrMediaProcessingFailed) {
+		t.Fatalf("injected subtitle source error = %v", err)
+	}
+}
+
+func TestTranscodeArgumentsRejectUnprovenDolbyVisionToneMap(t *testing.T) {
+	processor := &FFmpegProcessor{threads: 2, encoder: videoEncoder{kind: videoEncoderSoftware}}
+	asset := storedAsset{
+		Kind: processingTranscode, URL: "https://media.example/movie.mp4", ToneMap: true,
+		Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{VideoCodec: "h265", HDRFormat: "dolby_vision"}},
+	}
+	if _, err := processor.processingArguments(asset); !errors.Is(err, ErrMediaProcessingFailed) {
+		t.Fatalf("unproven Dolby Vision tone-map error = %v", err)
+	}
+	asset.DolbyVisionToneMapSafe = true
+	if _, err := processor.processingArguments(asset); err != nil {
+		t.Fatalf("proven Dolby Vision compatible base rejected: %v", err)
 	}
 }
 
@@ -1352,12 +1833,32 @@ func (row playbackSessionIDRow) Scan(destinations ...any) error {
 	return nil
 }
 
+type playbackSessionCountsRow struct {
+	global, authSession, profile int
+}
+
+func (row playbackSessionCountsRow) Scan(destinations ...any) error {
+	if len(destinations) != 3 {
+		return errors.New("unexpected playback session count destination count")
+	}
+	values := []int{row.global, row.authSession, row.profile}
+	for index, destination := range destinations {
+		value, ok := destination.(*int)
+		if !ok {
+			return errors.New("unexpected playback session count destination")
+		}
+		*value = values[index]
+	}
+	return nil
+}
+
 type playbackTransactionStub struct {
 	testPlaybackProfileTransaction
 	commitCalled   bool
 	commitErr      error
 	exec           func(string, ...any) (pgconn.CommandTag, error)
 	query          func(string, ...any) (pgx.Rows, error)
+	queryRow       func(string, ...any) pgx.Row
 	row            pgx.Row
 	queryRowCalled bool
 }
@@ -1370,10 +1871,13 @@ func (transaction *playbackTransactionStub) Commit(context.Context) error {
 func (*playbackTransactionStub) Rollback(context.Context) error { return nil }
 
 func (transaction *playbackTransactionStub) Exec(_ context.Context, query string, arguments ...any) (pgconn.CommandTag, error) {
-	if transaction.exec == nil {
-		return pgconn.CommandTag{}, errors.New("unexpected playback transaction exec")
+	if transaction.exec != nil {
+		return transaction.exec(query, arguments...)
 	}
-	return transaction.exec(query, arguments...)
+	if strings.Contains(query, "pg_advisory_xact_lock") {
+		return pgconn.NewCommandTag("SELECT 1"), nil
+	}
+	return pgconn.CommandTag{}, errors.New("unexpected playback transaction exec")
 }
 
 func (transaction *playbackTransactionStub) Query(_ context.Context, query string, arguments ...any) (pgx.Rows, error) {
@@ -1383,8 +1887,14 @@ func (transaction *playbackTransactionStub) Query(_ context.Context, query strin
 	return transaction.query(query, arguments...)
 }
 
-func (transaction *playbackTransactionStub) QueryRow(context.Context, string, ...any) pgx.Row {
+func (transaction *playbackTransactionStub) QueryRow(_ context.Context, query string, arguments ...any) pgx.Row {
 	transaction.queryRowCalled = true
+	if transaction.queryRow != nil {
+		return transaction.queryRow(query, arguments...)
+	}
+	if strings.Contains(query, "count(*) FILTER") {
+		return playbackSessionCountsRow{}
+	}
 	if transaction.row == nil {
 		return testPlaybackProfileRow{}
 	}
@@ -1600,7 +2110,7 @@ func TestCloseDeliverySessionUsesOpaqueHandleAfterLinkedLoginRevocation(t *testi
 	}
 }
 
-func TestCreateSessionPreservesAuthorizationErrorWhenCleanupFails(t *testing.T) {
+func TestCreateSessionJoinsAuthorizationAndCleanupErrors(t *testing.T) {
 	now := time.Now().UTC()
 	profileID := "profile-id"
 	grantExpiresAt := now.Add(time.Hour)
@@ -1633,7 +2143,59 @@ func TestCreateSessionPreservesAuthorizationErrorWhenCleanupFails(t *testing.T) 
 	if !errors.Is(err, ErrActiveProfileRequired) {
 		t.Fatalf("createSession error = %v, want original authorization denial", err)
 	}
-	if errors.Is(err, cleanupErr) {
-		t.Fatalf("cleanup failure replaced original authorization error: %v", err)
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("createSession error = %v, want joined cleanup failure", err)
+	}
+}
+
+func TestCreateSessionJoinsHLSAndCleanupErrors(t *testing.T) {
+	now := time.Now().UTC()
+	profileID := "profile-id"
+	grantExpiresAt := now.Add(time.Hour)
+	hlsErr := errors.New("HLS startup unavailable")
+	cleanupErr := errors.New("cleanup storage unavailable")
+	createTransaction := &playbackTransactionStub{
+		query: func(string, ...any) (pgx.Rows, error) { return emptyPlaybackRows{}, nil },
+		row:   playbackSessionIDRow{id: "created-playback-session-id"},
+	}
+	service := &Service{
+		now: func() time.Time { return now }, processor: &failingHLSProcessor{err: hlsErr},
+		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1 << 20, IdleTTL: time.Minute},
+		hlsJobs:      make(map[string]*hlsJob),
+		profileTxFactory: func(context.Context, auth.Principal) (playbackProfileTransaction, error) {
+			return createTransaction, nil
+		},
+		sessionCleanupTxFactory: func(context.Context) (playbackProfileTransaction, error) {
+			return nil, cleanupErr
+		},
+	}
+	principal := auth.Principal{SessionID: "auth-session-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt}
+	asset := storedAsset{ID: "stream", Kind: processingTranscode, URL: "https://media.example/movie.mkv"}
+	source := Source{ID: asset.ID, Compatible: true, Protocol: "hls", Mode: processingTranscode}
+	_, err := service.createSession(context.Background(), principal, sourceReference{MediaType: "movie", ResourceID: "resource-id"}, "", []Source{source}, nil, []storedAsset{asset}, nil, nil, nil)
+	if !errors.Is(err, hlsErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("createSession HLS compensation error = %v, want both causes", err)
+	}
+	if len(service.hlsJobs) != 0 || directorySize(service.mediaOptions.TempDirectory) != 0 {
+		t.Fatalf("failed HLS compensation left jobs=%d bytes=%d", len(service.hlsJobs), directorySize(service.mediaOptions.TempDirectory))
+	}
+}
+
+func TestPlaybackMaximumHeightAcceptsOnlyUnsetOrSupportedRange(t *testing.T) {
+	for _, height := range []int{-1, 1, 143, 4321} {
+		if validPlaybackMaximumHeight(height) {
+			t.Fatalf("invalid maximum height %d was accepted", height)
+		}
+		if err := validateResolveInput(ResolveInput{SourceRef: "1234567890abcdef", MaximumHeight: height}); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("resolve maximum height %d error = %v, want invalid input", height, err)
+		}
+	}
+	for _, height := range []int{0, 144, 4320} {
+		if !validPlaybackMaximumHeight(height) {
+			t.Fatalf("valid maximum height %d was rejected", height)
+		}
+		if err := validateResolveInput(ResolveInput{SourceRef: "1234567890abcdef", MaximumHeight: height}); err != nil {
+			t.Fatalf("resolve maximum height %d error = %v", height, err)
+		}
 	}
 }

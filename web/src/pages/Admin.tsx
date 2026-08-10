@@ -2521,12 +2521,12 @@ function ActivityAdmin() {
     {error && <Notice>{error}</Notice>}
     <div className="activity-overview" aria-label={translate("admin.activity.overview.label")} aria-live="polite">
       <ActivityMetric icon={<Radio />} label={translate("admin.activity.overview.sessions")} value={String(summary?.activeSessions ?? 0)} detail={translate((summary?.activeJobs ?? 0) === 1 ? "admin.activity.overview.mediaJobsOne" : "admin.activity.overview.mediaJobsMany", { count: summary?.activeJobs ?? 0 })} />
-      <ActivityMetric icon={<Cpu />} label={translate("admin.activity.overview.processing")} value={`${summary?.processingSlots ?? 0} / ${summary?.processingLimit ?? 0}`} detail={translate("admin.activity.overview.ffmpegSlots")} />
+      <ActivityMetric icon={<Cpu />} label={translate("admin.activity.overview.processing")} value={`${summary?.processingSlots ?? 0} / ${summary?.processingLimit ?? 0}`} detail={activity ? `${translate("admin.activity.overview.ffmpegSlots")} · probe ${activity.diagnostics.pools?.probe?.active ?? 0}/${activity.diagnostics.pools?.probe?.limit ?? 0} · subtitle ${activity.diagnostics.pools?.subtitle?.active ?? 0}/${activity.diagnostics.pools?.subtitle?.limit ?? 0} · trickplay ${activity.diagnostics.pools?.trickplay?.active ?? 0}/${activity.diagnostics.pools?.trickplay?.limit ?? 0} · total ${activity.diagnostics.totals.started}/${activity.diagnostics.totals.succeeded}/${activity.diagnostics.totals.failed} · fallback ${activity.diagnostics.totals.softwareFallbacks}` : translate("admin.activity.overview.ffmpegSlots")} />
       <ActivityMetric icon={<HardDrive />} label={translate("admin.activity.overview.temporaryMedia")} value={formatBytes(summary?.storageBytes ?? 0)} detail={translate("admin.activity.overview.storageLimit", { limit: formatBytes(summary?.storageLimitBytes ?? 0) })} />
-      <ActivityMetric icon={<Server />} label={translate("admin.activity.overview.encoder")} value={activity?.diagnostics.videoEncoder.toUpperCase() ?? translate("admin.activity.overview.unknownEncoder")} detail={translate(activity?.diagnostics.hardwareToneMap ? "admin.activity.overview.hardwareToneMapping" : "admin.activity.overview.softwareToneMapping")} />
+      <ActivityMetric icon={<Server />} label={translate("admin.activity.overview.encoder")} value={activity?.diagnostics.videoEncoder.toUpperCase() ?? translate("admin.activity.overview.unknownEncoder")} detail={activity ? `FFmpeg ${activity.diagnostics.ffmpegVersion || "unknown"} · ffprobe ${activity.diagnostics.ffprobeVersion || "unknown"} · ${activity.diagnostics.hardwareAcceleration || "unknown"} · ${activity.diagnostics.transcodeThreads || 0} threads · ${activity.diagnostics.maximumReadRate.toFixed(2)}× max · ${translate(activity.diagnostics.hardwareToneMap ? "admin.activity.overview.hardwareToneMapping" : "admin.activity.overview.softwareToneMapping")}` : ""} />
     </div>
     <section className="activity-panel">
-      <header><div><span>{translate("admin.activity.sessions.eyebrow")}</span><h3>{translate("admin.activity.sessions.title")}</h3></div><small>{translate((activity?.sessions.length ?? 0) === 1 ? "admin.activity.sessions.activeCountOne" : "admin.activity.sessions.activeCountMany", { count: activity?.sessions.length ?? 0 })}</small></header>
+      <header><div><span>{translate("admin.activity.sessions.eyebrow")}</span><h3>{translate("admin.activity.sessions.title")}</h3></div><small>{translate((summary?.activeSessions ?? 0) === 1 ? "admin.activity.sessions.activeCountOne" : "admin.activity.sessions.activeCountMany", { count: summary?.activeSessions ?? 0 })}</small></header>
       {activity?.sessions.length
         ? <div className="activity-session-list">{activity.sessions.map((session) => <article className="activity-session" key={session.id}>
           <ActivitySessionArtwork session={session} />
@@ -2551,9 +2551,9 @@ function ActivityAdmin() {
         : <EmptyState icon={<Radio />} title={translate("admin.activity.sessions.emptyTitle")} description={translate("admin.activity.sessions.emptyDescription")} />}
     </section>
     <section className="activity-panel">
-      <header><div><span>{translate("admin.activity.jobs.eyebrow")}</span><h3>{translate("admin.activity.jobs.title")}</h3></div><small>{translate((activity?.jobs.length ?? 0) === 1 ? "admin.activity.jobs.countOne" : "admin.activity.jobs.countMany", { count: activity?.jobs.length ?? 0 })}</small></header>
+      <header><div><span>{translate("admin.activity.jobs.eyebrow")}</span><h3>{translate("admin.activity.jobs.title")}</h3></div><small>{translate((summary?.activeJobs ?? 0) === 1 ? "admin.activity.jobs.countOne" : "admin.activity.jobs.countMany", { count: summary?.activeJobs ?? 0 })}</small></header>
       {activity?.jobs.length
-        ? <div className="activity-job-list">{activity.jobs.map((job, index) => <article className="activity-job" key={`${job.sessionId ?? "prewarm"}-${job.assetId}-${index}`}><span className={`activity-job__dot is-${job.state}`} aria-hidden="true" /><div><strong>{job.prewarming ? translate("admin.activity.jobs.preparingSource") : activityModeLabel(job.mode)}</strong><small>{job.assetId} · {translate("admin.activity.jobs.lastRequest", { age: activityAge(job.lastSeenAt) })}</small></div><ActivityJobProgress job={job} /></article>)}</div>
+        ? <div className="activity-job-list">{activity.jobs.map((job, index) => <article className="activity-job" key={`${job.sessionId ?? "prewarm"}-${job.assetId}-${index}`}><span className={`activity-job__dot is-${job.state}`} aria-hidden="true" /><div><strong>{job.prewarming ? translate("admin.activity.jobs.preparingSource") : activityModeLabel(job.mode)}</strong><small>{job.assetId}{job.errorClass ? ` · ${job.errorClass}` : ""} · {translate("admin.activity.jobs.lastRequest", { age: activityAge(job.lastSeenAt) })}</small></div><ActivityJobProgress job={job} /></article>)}</div>
         : <EmptyState icon={<Cpu />} title={translate("admin.activity.jobs.emptyTitle")} description={translate("admin.activity.jobs.emptyDescription")} />}
     </section>
     {selectedSession && <ConfirmDialog title={translate("admin.activity.stop.title", { title: selectedSession.title })} description={translate("admin.activity.stop.description", { device: selectedSession.device })} confirmLabel={translate("admin.activity.stop.confirm")} loading={stopping} onConfirm={() => void stopSession()} onCancel={closeSessionDialog} />}
@@ -2608,7 +2608,9 @@ function ActivityJobProgress({ job }: { job?: PlaybackActivity["jobs"][number] }
   const speed = job?.speed;
   if (typeof progressPercent !== "number" || !Number.isFinite(progressPercent) || progressPercent < 0
     || typeof speed !== "number" || !Number.isFinite(speed) || speed < 0) return null;
-  return <span className="activity-progress-status" role="status">{Math.round(progressPercent)}% · {speed.toFixed(2)}×</span>;
+  const startup = job?.startupDurationSeconds;
+  const startupDetail = typeof startup === "number" && Number.isFinite(startup) && startup >= 0 ? ` · start ${startup.toFixed(2)}s` : "";
+  return <span className="activity-progress-status" role="status">{Math.round(progressPercent)}% · {speed.toFixed(2)}×{startupDetail}</span>;
 }
 
 function ActivitySessionDecision({ decision }: { decision: NonNullable<PlaybackActivitySession["decision"]> }) {

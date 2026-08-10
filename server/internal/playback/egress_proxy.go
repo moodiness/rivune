@@ -177,7 +177,11 @@ func startFFmpegEgressProxyWithDialAndSource(ctx context.Context, dial egressDia
 			return proxyContext
 		},
 	}
-	proxy.setSourceCredentials(asset)
+	if !proxy.setSourceCredentials(asset) {
+		cancel()
+		_ = listener.Close()
+		return nil, errors.New("invalid guarded media source headers")
+	}
 	if asset.URL != "" {
 		inputURL, valid := proxy.registerTarget(asset.URL)
 		if !valid {
@@ -238,19 +242,18 @@ func (proxy *ffmpegEgressProxy) target(token string) (*url.URL, bool) {
 	return &clone, true
 }
 
-func (proxy *ffmpegEgressProxy) setSourceCredentials(asset storedAsset) {
+func (proxy *ffmpegEgressProxy) setSourceCredentials(asset storedAsset) bool {
+	headers, validHeaders := canonicalStoredRequestHeaders(asset.Headers)
+	if !validHeaders {
+		return false
+	}
 	origin, validOrigin := canonicalMediaOrigin(asset.URL)
 	if !validOrigin {
-		return
+		return true
 	}
 	proxy.sourceOrigin = origin
-	headers := make(http.Header)
-	for name, value := range asset.Headers {
-		if validFFmpegStoredHeader(name, value) {
-			headers.Set(name, value)
-		}
-	}
 	proxy.sourceHeaders = headers
+	return true
 }
 
 func (proxy *ffmpegEgressProxy) Close() error {
@@ -477,6 +480,9 @@ func (proxy *ffmpegEgressProxy) fetchTarget(ctx context.Context, method string, 
 		_ = upstream.Body.Close()
 		if err != nil || !validMediaURL(redirected.String()) {
 			return nil, errors.New("invalid media redirect")
+		}
+		if strings.EqualFold(current.Scheme, "https") && !strings.EqualFold(redirected.Scheme, "https") {
+			return nil, errors.New("media HTTPS redirect downgrade refused")
 		}
 		current = redirected
 	}

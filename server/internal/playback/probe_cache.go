@@ -125,9 +125,16 @@ func (cache *mediaProbeCache) removeEarliestLocked() {
 }
 
 func mediaProbeKey(asset storedAsset) string {
+	headers, validHeaders := canonicalStoredRequestHeaders(asset.Headers)
 	names := make([]string, 0, len(asset.Headers))
-	for name := range asset.Headers {
-		names = append(names, strings.ToLower(strings.TrimSpace(name)))
+	if validHeaders {
+		for name := range headers {
+			names = append(names, name)
+		}
+	} else {
+		for name := range asset.Headers {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 	var value strings.Builder
@@ -135,15 +142,17 @@ func mediaProbeKey(asset storedAsset) string {
 	value.WriteString(asset.URL)
 	value.WriteByte('\n')
 	value.WriteString(asset.Container)
+	if !validHeaders {
+		value.WriteString("\n!invalid-headers")
+	}
 	for _, name := range names {
 		value.WriteByte('\n')
 		value.WriteString(name)
 		value.WriteByte(':')
-		for originalName, headerValue := range asset.Headers {
-			if strings.EqualFold(strings.TrimSpace(originalName), name) {
-				value.WriteString(headerValue)
-				break
-			}
+		if validHeaders {
+			value.WriteString(headers.Get(name))
+		} else {
+			value.WriteString(asset.Headers[name])
 		}
 	}
 	digest := sha256.Sum256([]byte(value.String()))

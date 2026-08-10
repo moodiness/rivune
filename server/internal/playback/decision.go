@@ -28,6 +28,13 @@ type sourceCandidate struct {
 	resolutionHint int
 }
 
+type sourcePlan struct {
+	candidate  sourceCandidate
+	inspection MediaInspection
+	mode       string
+	decision   *PlaybackDecision
+}
+
 func sourceResolutionHint(source Source) int {
 	value := strings.ToLower(source.Hint)
 	switch {
@@ -91,13 +98,13 @@ func (service *Service) decidePlaybackSource(ctx context.Context, sources []Sour
 		return remuxHintRank(sources[candidates[left].sourceIndex].Hint) < remuxHintRank(sources[candidates[right].sourceIndex].Hint)
 	})
 
+	preferDirect := capabilities.PreferDirectPlay == nil || *capabilities.PreferDirectPlay
 	conversionDenied := false
 	capabilityMissing := false
-	fallbackHeight := 0
-	var fallbackCandidate sourceCandidate
-	var fallbackInspection MediaInspection
-	var fallbackMode string
-	var fallbackDecision *PlaybackDecision
+	var copyPlan sourcePlan
+	var transcodePlan sourcePlan
+	var fallbackCopyPlan sourcePlan
+	var fallbackTranscodePlan sourcePlan
 	for _, candidate := range candidates {
 		inspection, err := service.probeMedia(ctx, assets[candidate.assetIndex])
 		if err != nil {
@@ -109,44 +116,59 @@ func (service *Service) decidePlaybackSource(ctx context.Context, sources []Sour
 			source.Container = inspection.Container
 		}
 		mode, decision := playbackMode(*source, inspection, capabilities)
-		video := primaryTrack(inspection.VideoTracks)
-		if mode != "" && candidate.resolutionHint > 0 && video != nil && video.Height < candidate.resolutionHint*9/10 {
-			if mode == processingTranscodeAudio || mode == processingTranscode {
-				if !allowTranscoding {
-					conversionDenied = true
-					continue
-				}
-			}
-			if video.Height > fallbackHeight {
-				fallbackHeight = video.Height
-				fallbackCandidate = candidate
-				fallbackInspection = inspection
-				fallbackMode = mode
-				fallbackDecision = decision
-			}
-			continue
-		}
-		switch mode {
-		case "direct", processingRemux:
-			applyPlaybackDecision(sources, assets, candidate, inspection, mode, decision, capabilities)
-			return nil
-		case processingTranscodeAudio, processingTranscode:
-			if !allowTranscoding {
-				conversionDenied = true
-				continue
-			}
-			applyPlaybackDecision(sources, assets, candidate, inspection, mode, decision, capabilities)
-			return nil
-		default:
+		if mode == "" {
 			if !allowTranscoding && transcodingRequired(inspection, capabilities) {
 				conversionDenied = true
 			} else {
 				capabilityMissing = true
 			}
+			continue
+		}
+		if mode == processingTranscodeAudio || mode == processingTranscode {
+			if !allowTranscoding {
+				conversionDenied = true
+				continue
+			}
+		}
+
+		plan := sourcePlan{candidate: candidate, inspection: inspection, mode: mode, decision: decision}
+		video := primaryTrack(inspection.VideoTracks)
+		mislabeled := candidate.resolutionHint > 0 && video != nil && video.Height < candidate.resolutionHint*9/10
+		if mislabeled {
+			if video.Height <= 0 {
+				continue
+			}
+			if mode == "direct" || mode == processingRemux {
+				if betterCopyPlan(plan, fallbackCopyPlan, preferDirect, true) {
+					fallbackCopyPlan = plan
+				}
+			} else if fallbackTranscodePlan.mode == "" || video.Height > planVideoHeight(fallbackTranscodePlan) {
+				fallbackTranscodePlan = plan
+			}
+			continue
+		}
+
+		if mode == "direct" || mode == processingRemux {
+			if betterCopyPlan(plan, copyPlan, preferDirect, false) {
+				copyPlan = plan
+			}
+		} else if transcodePlan.mode == "" {
+			transcodePlan = plan
 		}
 	}
-	if fallbackHeight > 0 {
-		applyPlaybackDecision(sources, assets, fallbackCandidate, fallbackInspection, fallbackMode, fallbackDecision, capabilities)
+
+	selected := copyPlan
+	if selected.mode == "" {
+		selected = fallbackCopyPlan
+	}
+	if selected.mode == "" {
+		selected = transcodePlan
+	}
+	if selected.mode == "" {
+		selected = fallbackTranscodePlan
+	}
+	if selected.mode != "" {
+		applyPlaybackDecision(sources, assets, selected.candidate, selected.inspection, selected.mode, selected.decision, capabilities)
 		return nil
 	}
 	if conversionDenied {
@@ -156,6 +178,29 @@ func (service *Service) decidePlaybackSource(ctx context.Context, sources []Sour
 		return ErrClientCapabilityMissing
 	}
 	return nil
+}
+
+func betterCopyPlan(candidate, current sourcePlan, preferDirect, useInspectedHeight bool) bool {
+	if current.mode == "" {
+		return true
+	}
+	candidateQuality := candidate.candidate.resolutionHint
+	currentQuality := current.candidate.resolutionHint
+	if useInspectedHeight || candidateQuality == currentQuality {
+		candidateQuality = planVideoHeight(candidate)
+		currentQuality = planVideoHeight(current)
+	}
+	if candidateQuality != currentQuality {
+		return candidateQuality > currentQuality
+	}
+	return preferDirect && candidate.mode == "direct" && current.mode == processingRemux
+}
+
+func planVideoHeight(plan sourcePlan) int {
+	if video := primaryTrack(plan.inspection.VideoTracks); video != nil {
+		return video.Height
+	}
+	return 0
 }
 
 func directDecision(inspection MediaInspection) *PlaybackDecision {
@@ -176,6 +221,8 @@ func decisionSource(inspection MediaInspection) *PlaybackDecisionSource {
 		source.VideoCodec = normalizedCodec(video.Codec)
 		source.Height = video.Height
 		source.VideoBitrateKbps = video.BitrateKbps
+		source.DolbyVisionBLPresent = video.DolbyVisionBLPresent
+		source.DolbyVisionCompatibilityID = video.DolbyVisionCompatibilityID
 	}
 	if audio != nil {
 		source.AudioCodec = normalizedCodec(audio.Codec)
@@ -200,6 +247,9 @@ func applyPlaybackDecision(sources []Source, assets []storedAsset, candidate sou
 	asset.Kind = mode
 	if decision != nil {
 		asset.ToneMap = decision.ToneMapping
+		asset.DolbyVisionToneMapSafe = decision.Source == nil ||
+			!strings.EqualFold(strings.TrimSpace(decision.Source.HDRFormat), "dolby_vision") ||
+			decision.Source.DolbyVisionBLPresent && decision.Source.DolbyVisionCompatibilityID > 0
 		if decision.Target != nil {
 			asset.TargetHeight = decision.Target.Height
 			asset.VideoBitrateKbps = decision.Target.VideoBitrateKbps
@@ -224,7 +274,10 @@ func playbackMode(source Source, inspection MediaInspection, capabilities Capabi
 		return processingTranscodeAudio, processingDecision(decisionAudioTranscodeRequired, "copy", "transcode", inspection, capabilities, false)
 	}
 	if fullTranscodeSupported(capabilities) {
-		toneMap := !clientSupportsHDR(inspection.HDRFormat, capabilities)
+		toneMap := videoNeedsToneMapping(inspection, capabilities)
+		if toneMap && !genericToneMappingSupported(inspection) {
+			return "", nil
+		}
 		return processingTranscode, processingDecision(decisionVideoTranscodeRequired, "transcode", "transcode", inspection, capabilities, toneMap)
 	}
 	return "", nil
@@ -364,6 +417,10 @@ func clientSupportsVideoHDR(video *MediaTrack, format string, capabilities Capab
 		}
 	}
 	return false
+}
+
+func videoNeedsToneMapping(inspection MediaInspection, capabilities Capabilities) bool {
+	return !clientSupportsVideoHDR(primaryTrack(inspection.VideoTracks), inspection.HDRFormat, capabilities)
 }
 
 func videoCodecConditionsSupported(video *MediaTrack, capabilities Capabilities) bool {
@@ -661,7 +718,7 @@ func primaryTrack(tracks []MediaTrack) *MediaTrack {
 func supportsCodec(values []string, codec string) bool {
 	codec = normalizedCodec(codec)
 	if len(values) == 0 {
-		return true
+		return false
 	}
 	for _, value := range values {
 		if normalizedCodec(value) == codec {

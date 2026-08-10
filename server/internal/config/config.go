@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"net/url"
@@ -26,9 +27,11 @@ const (
 	defaultRefreshTokenTTL         = 30 * 24 * time.Hour
 	defaultProfileGrantTTL         = 12 * time.Hour
 	defaultMetadataCacheTTL        = 24 * time.Hour
-	defaultRemuxConcurrency        = 2
+	defaultRemuxConcurrency        = 4
 	defaultTranscodeThreads        = 4
 	defaultTranscodeMaxBitrateKbps = 12000
+	defaultTranscodeMaxReadRate    = 1.5
+	defaultHLSInitialBufferSeconds = 6
 	defaultMediaStorageMB          = 20480
 	defaultArtworkStorageMB        = 20480
 	defaultHardwareAcceleration    = "auto"
@@ -63,6 +66,8 @@ type Config struct {
 	RemuxConcurrency        int
 	TranscodeThreads        int
 	TranscodeMaxBitrateKbps int
+	TranscodeMaxReadRate    float64
+	HLSInitialBufferSeconds int
 	HardwareAcceleration    string
 	VideoDevice             string
 	MediaTempDir            string
@@ -158,6 +163,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.TranscodeMaxBitrateKbps, err = loadInteger("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", defaultTranscodeMaxBitrateKbps, 64, 200000)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TranscodeMaxReadRate, err = loadFloat("RIVUNE_TRANSCODE_MAX_READ_RATE", defaultTranscodeMaxReadRate, 1, 4)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.HLSInitialBufferSeconds, err = loadInteger("RIVUNE_HLS_INITIAL_BUFFER_SECONDS", defaultHLSInitialBufferSeconds, 3, 30)
 	if err != nil {
 		return Config{}, err
 	}
@@ -277,6 +290,18 @@ func loadInteger(name string, fallback, minimum, maximum int) (int, error) {
 	number, err := strconv.Atoi(value)
 	if err != nil || number < minimum || number > maximum {
 		return 0, fmt.Errorf("%s must be an integer between %d and %d", name, minimum, maximum)
+	}
+	return number, nil
+}
+
+func loadFloat(name string, fallback, minimum, maximum float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	number, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(number) || math.IsInf(number, 0) || number < minimum || number > maximum {
+		return 0, fmt.Errorf("%s must be a number between %g and %g", name, minimum, maximum)
 	}
 	return number, nil
 }

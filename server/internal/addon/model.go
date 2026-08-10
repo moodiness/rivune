@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/net/http/httpguts"
 )
 
 var (
@@ -349,10 +351,16 @@ func validateProviderStream(stream ProviderStream) error {
 		return fmt.Errorf("%w: provider stream request headers exceed 64 entries", ErrInvalidResponse)
 	}
 	totalHeaderBytes := 0
+	canonicalHeaderNames := make(map[string]struct{}, len(headers))
 	for name, value := range headers {
-		if invalidToken(name, 256) || invalidValue(value, 8192) {
+		if invalidToken(name, 256) || !httpguts.ValidHeaderFieldName(name) || invalidValue(value, 8192) {
 			return fmt.Errorf("%w: invalid provider stream request header", ErrInvalidResponse)
 		}
+		canonicalName := strings.ToLower(name)
+		if _, duplicate := canonicalHeaderNames[canonicalName]; duplicate {
+			return fmt.Errorf("%w: duplicate provider stream request header", ErrInvalidResponse)
+		}
+		canonicalHeaderNames[canonicalName] = struct{}{}
 		if len(name) > 32<<10-totalHeaderBytes || len(value) > 32<<10-totalHeaderBytes-len(name) {
 			return fmt.Errorf("%w: provider stream request headers exceed 32768 bytes", ErrInvalidResponse)
 		}

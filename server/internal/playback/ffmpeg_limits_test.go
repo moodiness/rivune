@@ -3,10 +3,12 @@ package playback
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +32,52 @@ func TestDiagnosticBufferRetainsOnlyLatestBoundedOutput(t *testing.T) {
 	}
 	if len(buffer.data) != maximumMediaDiagnosticBytes || !strings.HasSuffix(buffer.String(), "tail") {
 		t.Fatalf("diagnostic size=%d suffix=%q", len(buffer.data), buffer.String()[len(buffer.String())-4:])
+	}
+}
+
+func TestMediaVersionDiagnosticIsBoundedAndScrubbed(t *testing.T) {
+	tests := []struct {
+		name    string
+		output  string
+		product string
+		want    string
+	}{
+		{name: "ffmpeg", output: "ffmpeg version 7.1.2-1+deb12u1 Copyright private build path", product: "ffmpeg", want: "7.1.2-1+deb12u1"},
+		{name: "ffprobe", output: "ffprobe version N-117000-gabc123\nconfiguration: --extra-secret", product: "ffprobe", want: "N-117000-gabc123"},
+		{name: "wrong product", output: "ffmpeg version 7.1", product: "ffprobe", want: "unknown"},
+		{name: "path token", output: "ffmpeg version /private/build/token", product: "ffmpeg", want: "unknown"},
+		{name: "oversized", output: "ffmpeg version " + strings.Repeat("a", maximumMediaVersionBytes+1), product: "ffmpeg", want: "unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := scrubMediaVersion(test.output, test.product); got != test.want {
+				t.Fatalf("scrubbed version = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestFFmpegDiagnosticsReportEveryIndependentPool(t *testing.T) {
+	processor := &FFmpegProcessor{
+		ffmpegVersion: "7.1", ffprobeVersion: "7.1", hardwareAcceleration: "auto", threads: 6,
+		encoder: videoEncoder{kind: videoEncoderVAAPI, hardwareToneMap: true},
+		slots:   make(chan struct{}, 4), probeSlots: make(chan struct{}, 3),
+		subtitleSlots: make(chan struct{}, 2), trickplaySlots: make(chan struct{}, 1),
+	}
+	processor.slots <- struct{}{}
+	processor.probeSlots <- struct{}{}
+	processor.probeSlots <- struct{}{}
+	processor.subtitleSlots <- struct{}{}
+	processor.trickplaySlots <- struct{}{}
+	diagnostics := processor.PlaybackDiagnostics()
+	if diagnostics.FFmpegVersion != "7.1" || diagnostics.FFprobeVersion != "7.1" ||
+		diagnostics.HardwareAcceleration != "auto" || diagnostics.VideoEncoder != "vaapi" ||
+		!diagnostics.HardwareToneMap || diagnostics.TranscodeThreads != 6 ||
+		diagnostics.Pools.Process != (MediaDiagnosticPool{Active: 1, Limit: 4}) ||
+		diagnostics.Pools.Probe != (MediaDiagnosticPool{Active: 2, Limit: 3}) ||
+		diagnostics.Pools.Subtitle != (MediaDiagnosticPool{Active: 1, Limit: 2}) ||
+		diagnostics.Pools.Trickplay != (MediaDiagnosticPool{Active: 1, Limit: 1}) {
+		t.Fatalf("media diagnostics = %+v", diagnostics)
 	}
 }
 
@@ -62,7 +110,16 @@ func TestFFmpegSubprocessHelper(t *testing.T) {
 		_, _ = io.WriteString(os.Stdout, `{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"}],"format":{"format_name":"mov","duration":"1"}}`)
 		os.Exit(0)
 	case "probe-profile":
-		_, _ = io.WriteString(os.Stdout, `{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","level":153,"color_transfer":"bt709"}],"format":{"format_name":"mov","duration":"1"}}`)
+		_, _ = io.WriteString(os.Stdout, `{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","level":153,"color_transfer":"bt709"}],"format":{"format_name":"mov","duration":"1","bit_rate":"2000000"}}`)
+		os.Exit(0)
+	case "probe-rich":
+		_, _ = io.WriteString(os.Stdout, `{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","profile":"Main 10","level":153,"width":3840,"height":2160,"pix_fmt":"yuv420p10le","avg_frame_rate":"24000/1001","r_frame_rate":"24/1","color_range":"tv","color_space":"bt2020nc","color_transfer":"smpte2084","color_primaries":"bt2020","bit_rate":"12000000","codec_tag_string":"hvc1","tags":{"language":"eng","title":"Feature"},"disposition":{"attached_pic":0,"forced":0,"default":1}},{"index":1,"codec_type":"audio","codec_name":"aac","channels":6,"channel_layout":"5.1","sample_rate":"48000","bit_rate":"640000","disposition":{"default":1}},{"index":2,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"fra"},"disposition":{"forced":1,"default":0}}],"format":{"format_name":"matroska,webm","duration":"120.5","bit_rate":"12640000","size":"189600000"}}`)
+		os.Exit(0)
+	case "probe-dovi":
+		_, _ = io.WriteString(os.Stdout, `{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","codec_tag_string":"dvh1","side_data_list":[{"side_data_type":"DOVI configuration record","dv_profile":8,"dv_level":6,"rpu_present_flag":1,"el_present_flag":0,"bl_present_flag":1,"dv_bl_signal_compatibility_id":1}]}],"format":{"format_name":"mov","duration":"1"}}`)
+		os.Exit(0)
+	case "probe-malformed-optional":
+		_, _ = io.WriteString(os.Stdout, `{"streams":[{"index":-2,"codec_type":"video","codec_name":"h264","profile":{},"level":"bad","width":-1920,"height":"bad","pix_fmt":"unknown","bits_per_raw_sample":"NaN","avg_frame_rate":"1/0","r_frame_rate":"-25/1","color_range":"unknown","color_space":{},"color_transfer":"n/a","color_primaries":"-Inf","bit_rate":"-1000","tags":[],"disposition":{"attached_pic":-1,"forced":"bad","default":-1},"side_data_list":{}}],"format":{"format_name":"mov,mp4","duration":"NaN","bit_rate":"-1","size":"Inf"}}`)
 		os.Exit(0)
 	case "subtitle-output":
 		chunk := bytes.Repeat([]byte("x"), 64<<10)
@@ -72,6 +129,9 @@ func TestFFmpegSubprocessHelper(t *testing.T) {
 			}
 		}
 		os.Exit(0)
+	case "source-fail":
+		_, _ = io.WriteString(os.Stderr, "Invalid data found when processing input")
+		os.Exit(2)
 	case "sleep":
 		time.Sleep(time.Hour)
 		os.Exit(0)
@@ -187,8 +247,104 @@ func TestProbeCarriesInspectedVideoLevelAndRange(t *testing.T) {
 	}
 	inspection, err := processor.Probe(context.Background(), storedAsset{URL: "https://1.1.1.1/video.mp4"})
 	if err != nil || len(inspection.VideoTracks) != 1 || inspection.VideoTracks[0].Level != 153 || inspection.VideoTracks[0].VideoRangeType != "SDR" ||
-		!strings.Contains(strings.Join(captured, " "), "profile,level,width") {
+		inspection.BitrateKbps != 2000 || inspection.VideoTracks[0].BitrateKbps != 2000 || !strings.Contains(strings.Join(captured, " "), "profile,level,width") {
 		t.Fatalf("inspection=%+v err=%v", inspection, err)
+	}
+}
+
+func TestProbePopulatesRichInternalMetadata(t *testing.T) {
+	t.Setenv("RIVUNE_FFMPEG_HELPER_MODE", "probe-rich")
+	processor := testFFmpegProcessor()
+	var captured []string
+	processor.commandContext = func(ctx context.Context, path string, arguments ...string) *exec.Cmd {
+		captured = append([]string(nil), arguments...)
+		return ffmpegHelperCommand(ctx, path, arguments...)
+	}
+	inspection, err := processor.Probe(context.Background(), storedAsset{URL: "https://1.1.1.1/movie.mkv", Container: "mkv"})
+	if err != nil {
+		t.Fatalf("probe rich metadata: %v", err)
+	}
+	if inspection.Container != "mkv" || inspection.DurationSeconds != 120.5 || inspection.BitrateKbps != 12640 || inspection.SizeBytes != 189600000 || inspection.HDRFormat != "hdr10" {
+		t.Fatalf("format inspection = %+v", inspection)
+	}
+	if len(inspection.VideoTracks) != 1 {
+		t.Fatalf("video tracks = %+v", inspection.VideoTracks)
+	}
+	video := inspection.VideoTracks[0]
+	if video.PixelFormat != "yuv420p10le" || video.BitDepth != 10 || video.FrameRate < 23.975 || video.FrameRate > 23.977 ||
+		video.ColorRange != "tv" || video.ColorSpace != "bt2020nc" || video.ColorTransfer != "smpte2084" || video.ColorPrimaries != "bt2020" ||
+		video.BitrateKbps != 12000 || video.VideoRangeType != "HDR10" || !video.Default {
+		t.Fatalf("video track = %+v", video)
+	}
+	if len(inspection.AudioTracks) != 1 || inspection.AudioTracks[0].ChannelLayout != "5.1" || inspection.AudioTracks[0].SampleRate != 48000 || !inspection.AudioTracks[0].Default {
+		t.Fatalf("audio tracks = %+v", inspection.AudioTracks)
+	}
+	if len(inspection.SubtitleTracks) != 1 || !inspection.SubtitleTracks[0].Forced || inspection.SubtitleTracks[0].Default {
+		t.Fatalf("subtitle tracks = %+v", inspection.SubtitleTracks)
+	}
+	joined := strings.Join(captured, " ")
+	if !strings.Contains(joined, "pix_fmt,bits_per_raw_sample,avg_frame_rate,r_frame_rate") ||
+		!strings.Contains(joined, "stream_disposition=attached_pic,forced,default") ||
+		!strings.Contains(joined, "format=format_name,duration,bit_rate,size") {
+		t.Fatalf("probe arguments omitted rich metadata: %v", captured)
+	}
+	encoded, err := json.Marshal(inspection)
+	if err != nil {
+		t.Fatalf("marshal inspection: %v", err)
+	}
+	for _, internalValue := range []string{"yuv420p10le", "bt2020nc", "189600000", "12640", "5.1", "48000"} {
+		if strings.Contains(string(encoded), internalValue) {
+			t.Fatalf("public inspection JSON exposed internal value %q: %s", internalValue, encoded)
+		}
+	}
+}
+
+func TestProbeCollectsDolbyVisionEvidenceWithoutPublicExposure(t *testing.T) {
+	t.Setenv("RIVUNE_FFMPEG_HELPER_MODE", "probe-dovi")
+	processor := testFFmpegProcessor()
+	var captured []string
+	processor.commandContext = func(ctx context.Context, path string, arguments ...string) *exec.Cmd {
+		captured = append([]string(nil), arguments...)
+		return ffmpegHelperCommand(ctx, path, arguments...)
+	}
+	inspection, err := processor.Probe(context.Background(), storedAsset{URL: "https://1.1.1.1/movie.mp4"})
+	if err != nil || inspection.HDRFormat != "dolby_vision" || len(inspection.VideoTracks) != 1 {
+		t.Fatalf("DOVI inspection=%+v err=%v", inspection, err)
+	}
+	video := inspection.VideoTracks[0]
+	if video.DolbyVisionProfile != 8 || video.DolbyVisionLevel != 6 || !video.DolbyVisionRPUPresent ||
+		video.DolbyVisionELPresent || !video.DolbyVisionBLPresent || video.DolbyVisionCompatibilityID != 1 {
+		t.Fatalf("DOVI evidence = %+v", video)
+	}
+	if !strings.Contains(strings.Join(captured, " "), "dv_profile,dv_level,rpu_present_flag,el_present_flag,bl_present_flag,dv_bl_signal_compatibility_id") {
+		t.Fatalf("probe arguments omitted DOVI evidence: %v", captured)
+	}
+	encoded, err := json.Marshal(inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{"DolbyVision", "dv_profile", "compatibility"} {
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("public inspection exposed %q: %s", private, encoded)
+		}
+	}
+}
+
+func TestProbeIgnoresMalformedOptionalMetadata(t *testing.T) {
+	t.Setenv("RIVUNE_FFMPEG_HELPER_MODE", "probe-malformed-optional")
+	inspection, err := testFFmpegProcessor().Probe(context.Background(), storedAsset{URL: "https://1.1.1.1/movie.mp4"})
+	if err != nil {
+		t.Fatalf("probe with malformed optional metadata: %v", err)
+	}
+	if len(inspection.VideoTracks) != 1 {
+		t.Fatalf("video tracks = %+v", inspection.VideoTracks)
+	}
+	video := inspection.VideoTracks[0]
+	if inspection.DurationSeconds != 0 || inspection.BitrateKbps != 0 || inspection.SizeBytes != 0 ||
+		video.Index != 0 || video.Level != 0 || video.Width != 0 || video.Height != 0 || video.BitrateKbps != 0 ||
+		video.BitDepth != 0 || video.FrameRate != 0 || video.PixelFormat != "" || video.ColorRange != "" || video.ColorSpace != "" ||
+		video.ColorTransfer != "" || video.ColorPrimaries != "" || video.Forced || video.Default {
+		t.Fatalf("malformed optional metadata was not normalized: inspection=%+v video=%+v", inspection, video)
 	}
 }
 
@@ -208,6 +364,68 @@ func TestProcessHLSAppliesReadRate(t *testing.T) {
 	}
 	if _, readRate := argumentValue(captured, "-readrate"); readRate != "1.50" {
 		t.Fatalf("HLS read rate = %q, want 1.50; arguments=%v", readRate, captured)
+	}
+	captured = nil
+	if err := processor.ProcessHLS(
+		context.Background(),
+		storedAsset{
+			URL: os.Args[0], Kind: processingTranscode, HLSSegmentContainer: "ts", DurationSeconds: 120,
+		},
+		t.TempDir(),
+	); err != nil {
+		t.Fatalf("process seekable HLS: %v", err)
+	}
+	if _, readRate := argumentValue(captured, "-readrate"); readRate != "1.00" {
+		t.Fatalf("seekable HLS read rate = %q, want 1.00; arguments=%v", readRate, captured)
+	}
+}
+
+func TestProcessHLSFallsBackToSoftwareOnlyBeforePlaylistPublication(t *testing.T) {
+	tests := []struct {
+		name             string
+		publishOnFailure bool
+		wantCalls        int
+		wantError        bool
+	}{
+		{name: "startup failure retries software", wantCalls: 2},
+		{name: "published playlist forbids encoder switch", publishOnFailure: true, wantCalls: 1, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			processor := testFFmpegProcessor()
+			processor.encoder = videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"}
+			var calls [][]string
+			processor.commandContext = func(ctx context.Context, path string, arguments ...string) *exec.Cmd {
+				calls = append(calls, append([]string(nil), arguments...))
+				command := ffmpegHelperCommand(ctx, path, arguments...)
+				if len(calls) == 1 {
+					if test.publishOnFailure {
+						if err := os.WriteFile(filepath.Join(directory, "index.m3u8"), []byte("#EXTM3U\n"), 0o600); err != nil {
+							t.Fatalf("publish fixture playlist: %v", err)
+						}
+					}
+					command.Env = append(os.Environ(), "RIVUNE_FFMPEG_HELPER_MODE=fail")
+				}
+				return command
+			}
+			err := processor.ProcessHLS(context.Background(), storedAsset{
+				Kind: processingTranscode, URL: os.Args[0], HLSSegmentContainer: "ts",
+				Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{VideoCodec: "h264", Height: 1080}},
+			}, directory)
+			if (err != nil) != test.wantError || len(calls) != test.wantCalls {
+				t.Fatalf("ProcessHLS err=%v calls=%d want error=%t calls=%d", err, len(calls), test.wantError, test.wantCalls)
+			}
+			if !strings.Contains(strings.Join(calls[0], " "), "-c:v h264_vaapi") {
+				t.Fatalf("first attempt was not hardware: %v", calls[0])
+			}
+			if len(calls) == 2 {
+				fallback := strings.Join(calls[1], " ")
+				if !strings.Contains(fallback, "-c:v libx264") || strings.Contains(fallback, "h264_vaapi") || strings.Contains(fallback, "-hwaccel") {
+					t.Fatalf("fallback was not clean software argv: %v", calls[1])
+				}
+			}
+		})
 	}
 }
 

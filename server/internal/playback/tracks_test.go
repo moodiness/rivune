@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -123,6 +124,41 @@ func TestApplyPlaybackPreferencesRejectsUnknownExplicitTrack(t *testing.T) {
 	}
 }
 
+func TestAudioTrackFullTranscodeUsesVideoHDRProfileEvidence(t *testing.T) {
+	selected := 2
+	for _, test := range []struct {
+		name, hdr string
+		video     MediaTrack
+		wantTone  bool
+	}{
+		{name: "HDR10 profile support", hdr: "hdr10", video: MediaTrack{Index: 0, Type: "video", Codec: "h265", Height: 1080}},
+		{name: "Dolby Vision compatible base", hdr: "dolby_vision", video: MediaTrack{Index: 0, Type: "video", Codec: "h265", Height: 1080, DolbyVisionBLPresent: true, DolbyVisionCompatibilityID: 1}, wantTone: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inspection := &MediaInspection{
+				Container: "mkv", HDRFormat: test.hdr, VideoTracks: []MediaTrack{test.video},
+				AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}, {Index: selected, Type: "audio", Codec: "dts", Channels: 6}},
+			}
+			sources := []Source{{ID: "stream-1", Mode: "direct", Protocol: "http", Container: "mkv", Compatible: true, Media: inspection}}
+			assets := []storedAsset{{ID: "stream-1", Kind: "stream"}}
+			err := applyPlaybackPreferences(sources, assets, ResolveInput{
+				PreferredAudioTrack: &selected, AllowTranscoding: true,
+				Capabilities: Capabilities{
+					StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+					ProcessingModes: []string{processingTranscode},
+					MediaProfiles: []MediaProfile{
+						{Container: "mp4", VideoCodec: "h265", AudioCodec: "aac", DirectPlay: true, SupportsNonDolbyVisionHDR: true},
+						{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true},
+					},
+				},
+			})
+			if err != nil || assets[0].Kind != processingTranscode || assets[0].ToneMap != test.wantTone {
+				t.Fatalf("audio selection err=%v asset=%+v want tone-map=%t", err, assets[0], test.wantTone)
+			}
+		})
+	}
+}
+
 func TestSubtitlePreferencesSupportLanguageExplicitAndOff(t *testing.T) {
 	subtitles := []Subtitle{{ID: "en", Language: "en-US"}, {ID: "fr", Language: "fr"}}
 	if err := applySubtitlePreference(subtitles, "", "", "fr-FR"); err != nil {
@@ -240,6 +276,79 @@ func TestBitmapSubtitleBurnRequiresAnnouncementAndPolicy(t *testing.T) {
 	}
 }
 
+func TestBurnOnlySubtitleCodecsRetainSafeTypeAndOrdinal(t *testing.T) {
+	tracks := []MediaTrack{
+		{Index: 3, Type: "subtitle", Codec: "ass"},
+		{Index: 5, Type: "subtitle", Codec: "srt"},
+		{Index: 7, Type: "subtitle", Codec: "hdmv_pgs_subtitle"},
+		{Index: 9, Type: "subtitle", Codec: "dvb_subtitle"},
+		{Index: 11, Type: "subtitle", Codec: "xsub"},
+	}
+	sources := []Source{{ID: "stream-1", Compatible: true, Media: &MediaInspection{SubtitleTracks: tracks}}}
+	assets := []storedAsset{{ID: "stream-1", URL: "https://media.example/movie.mkv"}}
+	subtitles, subtitleAssets := embeddedSubtitles(sources, assets, Capabilities{SubtitleModes: []string{"burn"}})
+	if len(subtitles) != len(tracks) || len(subtitleAssets) != len(tracks) {
+		t.Fatalf("burn-only tracks omitted: subtitles=%+v assets=%+v", subtitles, subtitleAssets)
+	}
+	for index, asset := range subtitleAssets {
+		wantType := subtitleBurnBitmap
+		if index < 2 {
+			wantType = subtitleBurnText
+		}
+		if subtitles[index].Delivery != "burn" || asset.SubtitleTrackType != wantType || asset.SubtitleTrackOrdinal != index {
+			t.Fatalf("track %d burn metadata = subtitle=%+v asset=%+v", index, subtitles[index], asset)
+		}
+	}
+	encoded, err := json.Marshal(subtitleAssets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored []storedAsset
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if len(restored) != len(subtitleAssets) || restored[0].SubtitleTrackType != subtitleBurnText || restored[4].SubtitleTrackOrdinal != 4 {
+		t.Fatalf("private session payload lost burn metadata: %+v", restored)
+	}
+}
+
+func TestSubtitleBurnRejectsDolbyVisionWithoutCompatibleBase(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingTranscode}, SubtitleModes: []string{"burn"},
+		MediaProfiles: []MediaProfile{
+			{Container: "mp4", VideoCodec: "h265", AudioCodec: "aac", DirectPlay: true, SupportsNonDolbyVisionHDR: true},
+			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true},
+		},
+	}
+	newState := func(video MediaTrack, hdr string) ([]Source, []storedAsset, []Subtitle, []storedAsset) {
+		inspection := &MediaInspection{
+			Container: "mkv", HDRFormat: hdr, VideoTracks: []MediaTrack{video},
+			AudioTracks:    []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
+			SubtitleTracks: []MediaTrack{{Index: 2, Type: "subtitle", Codec: "ass"}},
+		}
+		sources := []Source{{ID: "stream-1", Mode: "direct", Compatible: true, Media: inspection, Decision: directDecision(*inspection)}}
+		assets := []storedAsset{{ID: "stream-1", URL: "https://media.example/movie.mkv"}}
+		subtitles, subtitleAssets := embeddedSubtitles(sources, assets, capabilities)
+		subtitles[0].Default = true
+		return sources, assets, subtitles, subtitleAssets
+	}
+	sources, assets, subtitles, subtitleAssets := newState(MediaTrack{Index: 0, Type: "video", Codec: "h265", Height: 1080}, "dolby_vision")
+	if err := applySubtitleDecision(sources, assets, subtitles, subtitleAssets, capabilities, true); !errors.Is(err, ErrUnsupportedSource) {
+		t.Fatalf("Dolby Vision profile 5/unknown base burn error = %v", err)
+	}
+	sources, assets, subtitles, subtitleAssets = newState(MediaTrack{
+		Index: 0, Type: "video", Codec: "h265", Height: 1080,
+		DolbyVisionBLPresent: true, DolbyVisionCompatibilityID: 1,
+	}, "dolby_vision")
+	if err := applySubtitleDecision(sources, assets, subtitles, subtitleAssets, capabilities, true); err != nil || !assets[0].ToneMap || !assets[0].DolbyVisionToneMapSafe {
+		t.Fatalf("Dolby Vision compatible-base burn failed: err=%v asset=%+v", err, assets[0])
+	}
+	sources, assets, subtitles, subtitleAssets = newState(MediaTrack{Index: 0, Type: "video", Codec: "h265", Height: 1080}, "hdr10")
+	if err := applySubtitleDecision(sources, assets, subtitles, subtitleAssets, capabilities, true); err != nil || assets[0].ToneMap {
+		t.Fatalf("HDR10 profile-supported burn regressed: err=%v asset=%+v", err, assets[0])
+	}
+}
 func cloneMediaInspectionPointer(value *MediaInspection) *MediaInspection {
 	cloned := cloneMediaInspection(*value)
 	return &cloned

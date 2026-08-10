@@ -93,14 +93,21 @@ func externalMediaTestContext(t *testing.T) context.Context {
 	return ctx
 }
 
+type externalProbeStream struct {
+	Index          int    `json:"index"`
+	CodecType      string `json:"codec_type"`
+	CodecName      string `json:"codec_name"`
+	Width          int    `json:"width"`
+	Height         int    `json:"height"`
+	Channels       int    `json:"channels"`
+	PixelFormat    string `json:"pix_fmt"`
+	ColorTransfer  string `json:"color_transfer"`
+	ColorPrimaries string `json:"color_primaries"`
+	ColorSpace     string `json:"color_space"`
+}
+
 type externalProbeResult struct {
-	Streams []struct {
-		Index     int    `json:"index"`
-		CodecType string `json:"codec_type"`
-		CodecName string `json:"codec_name"`
-		Width     int    `json:"width"`
-		Height    int    `json:"height"`
-	} `json:"streams"`
+	Streams []externalProbeStream `json:"streams"`
 	Format struct {
 		Name string `json:"format_name"`
 	} `json:"format"`
@@ -109,7 +116,7 @@ type externalProbeResult struct {
 func probeExternalMedia(t *testing.T, fixture externalMediaFixture, input string) externalProbeResult {
 	t.Helper()
 	output := runExternalMediaCommand(t, fixture.processor.ffprobePath,
-		"-v", "error", "-show_entries", "stream=index,codec_type,codec_name,width,height:format=format_name", "-of", "json", input,
+		"-v", "error", "-show_entries", "stream=index,codec_type,codec_name,width,height,channels,pix_fmt,color_transfer,color_primaries,color_space:format=format_name", "-of", "json", input,
 	)
 	var result externalProbeResult
 	if err := json.Unmarshal(output, &result); err != nil {
@@ -176,6 +183,19 @@ func TestExternalMediaDirectMP4ProbeAndRangeBytePath(t *testing.T) {
 			}
 		})
 	}
+
+	headProbe := httptest.NewRequest(http.MethodHead, "http://rivune.test/direct.mp4", nil)
+	headProbe.Header.Set("Range", "bytes=0-63")
+	headUpstream, fetchErr := service.fetchAsset(headProbe.Context(), headProbe, storedAsset{URL: origin.URL + "/direct.mp4", Container: "mp4"}, origin.URL+"/direct.mp4")
+	if fetchErr != nil {
+		t.Fatalf("fetch HEAD playback probe: %v", fetchErr)
+	}
+	defer headUpstream.Body.Close()
+	if headUpstream.Request.Method != http.MethodGet || headUpstream.StatusCode != http.StatusPartialContent ||
+		headUpstream.Header.Get("Content-Range") != fmt.Sprintf("bytes 0-63/%d", len(contents)) ||
+		headUpstream.Header.Get("Accept-Ranges") != "bytes" || headUpstream.Header.Get("Content-Length") != "64" {
+		t.Fatalf("HEAD probe method=%s status=%d headers=%v", headUpstream.Request.Method, headUpstream.StatusCode, headUpstream.Header)
+	}
 }
 
 func TestExternalMediaHLSRemuxAndVideoTranscodeProducePlayableChildren(t *testing.T) {
@@ -234,6 +254,50 @@ func TestExternalMediaHLSRemuxAndVideoTranscodeProducePlayableChildren(t *testin
 	}
 }
 
+func TestExternalMediaEmbeddedASSBurnProducesPlayableHLS(t *testing.T) {
+	fixture := newExternalMediaFixture(t)
+	source := filepath.Join(t.TempDir(), "embedded-ass.mkv")
+	runExternalMediaCommand(t, fixture.processor.ffmpegPath,
+		"-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+		"-i", fixture.video, "-i", filepath.Join("testdata", "sample.ass"),
+		"-map", "0:v:0", "-map", "0:a:0", "-map", "1:s:0",
+		"-c:v", "copy", "-c:a", "copy", "-c:s", "ass", source,
+	)
+	subtitleIndex := 2
+	directory := t.TempDir()
+	err := fixture.processor.ProcessHLS(externalMediaTestContext(t), storedAsset{
+		ID: "ass-burn", Kind: processingTranscode, URL: source, Container: "mkv", HLSSegmentContainer: "ts",
+		SubtitleTrackIndex: &subtitleIndex, SubtitleTrackType: subtitleBurnText, SubtitleTrackOrdinal: 0,
+		Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{VideoCodec: "h264", Height: 90}},
+	}, directory)
+	if err != nil {
+		t.Fatalf("burn embedded ASS: %v", err)
+	}
+	controlDirectory := t.TempDir()
+	if err := fixture.processor.ProcessHLS(externalMediaTestContext(t), storedAsset{
+		ID: "ass-control", Kind: processingTranscode, URL: source, Container: "mkv", HLSSegmentContainer: "ts",
+		Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{VideoCodec: "h264", Height: 90}},
+	}, controlDirectory); err != nil {
+		t.Fatalf("create ASS control HLS: %v", err)
+	}
+	playlist := filepath.Join(directory, "index.m3u8")
+	probe := probeExternalMedia(t, fixture, playlist)
+	if len(probe.Streams) == 0 || probe.Streams[0].CodecType != "video" || probe.Streams[0].CodecName != "h264" {
+		t.Fatalf("ASS burn output is not playable H.264 HLS: %+v", probe)
+	}
+	decodeFrame := func(input string) []byte {
+		return runExternalMediaCommand(t, fixture.processor.ffmpegPath,
+			"-nostdin", "-hide_banner", "-loglevel", "error", "-ss", "1.5", "-i", input,
+			"-map", "0:v:0", "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+		)
+	}
+	burnedFrame := decodeFrame(playlist)
+	controlFrame := decodeFrame(filepath.Join(controlDirectory, "index.m3u8"))
+	if len(burnedFrame) == 0 || bytes.Equal(burnedFrame, controlFrame) {
+		t.Fatal("ASS cue did not change the decoded video frame")
+	}
+}
+
 func TestExternalMediaAudioTranscodeSelectsEachOverlappingTrack(t *testing.T) {
 	fixture := newExternalMediaFixture(t)
 	inspection, err := fixture.processor.Probe(externalMediaTestContext(t), storedAsset{URL: fixture.video, Container: "mkv"})
@@ -267,6 +331,45 @@ func TestExternalMediaAudioTranscodeSelectsEachOverlappingTrack(t *testing.T) {
 	}
 	if len(frequencies) != 2 || frequencies[0] < 400 || frequencies[0] > 480 || frequencies[1] < 820 || frequencies[1] > 940 {
 		t.Fatalf("selected audio payload frequencies=%v, want approximately [440 880]", frequencies)
+	}
+}
+
+func TestExternalMediaMultichannelAACDownmixesToStereo(t *testing.T) {
+	fixture := newExternalMediaFixture(t)
+	source := filepath.Join(t.TempDir(), "multichannel.mkv")
+	runExternalMediaCommand(t, fixture.processor.ffmpegPath,
+		"-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10:duration=3",
+		"-f", "lavfi", "-i", "aevalsrc=0.1*sin(2*PI*220*t)|0.1*sin(2*PI*330*t)|0.1*sin(2*PI*440*t)|0.1*sin(2*PI*550*t)|0.1*sin(2*PI*660*t)|0.1*sin(2*PI*770*t):s=48000:d=3:c=5.1",
+		"-map", "0:v:0", "-map", "1:a:0",
+		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "10",
+		"-c:a", "aac", "-b:a", "384k", "-shortest", source,
+	)
+	directory := t.TempDir()
+	if err := fixture.processor.ProcessHLS(externalMediaTestContext(t), storedAsset{
+		ID: "downmix", Kind: processingTranscodeAudio, URL: source, Container: "mkv",
+		HLSSegmentContainer: "ts", MaximumAudioChannels: 2,
+	}, directory); err != nil {
+		t.Fatalf("downmix multichannel AAC: %v", err)
+	}
+	playlist := filepath.Join(directory, "index.m3u8")
+	probe := probeExternalMedia(t, fixture, playlist)
+	var audio *externalProbeStream
+	for index := range probe.Streams {
+		if probe.Streams[index].CodecType == "audio" {
+			audio = &probe.Streams[index]
+			break
+		}
+	}
+	if audio == nil || audio.CodecName != "aac" || audio.Channels != 2 {
+		t.Fatalf("downmix output audio = %+v, streams=%+v", audio, probe.Streams)
+	}
+	pcm := runExternalMediaCommand(t, fixture.processor.ffmpegPath,
+		"-nostdin", "-hide_banner", "-loglevel", "error", "-i", playlist,
+		"-map", "0:a:0", "-ac", "2", "-ar", "8000", "-f", "s16le", "pipe:1",
+	)
+	if len(pcm) < 2*2*8000 {
+		t.Fatalf("downmixed stereo payload is too short: %d bytes", len(pcm))
 	}
 }
 

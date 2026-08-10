@@ -636,12 +636,16 @@ export type PlaybackMediaJob = {
   assetId: string;
   mode: string;
   state: "processing" | "complete" | "failed";
+  errorClass?: "capacity" | "source" | "processing" | "storage" | "timeout" | "cancelled" | "unknown";
   prewarming: boolean;
   createdAt: string;
   lastSeenAt: string;
   progressPercent?: number;
   speed?: number;
+  startupDurationSeconds?: number;
 };
+export type PlaybackMediaPool = { active: number; limit: number };
+export type PlaybackMediaProcessTotals = { started: number; succeeded: number; failed: number; softwareFallbacks: number };
 export type PlaybackActivity = {
   summary: {
     activeSessions: number;
@@ -651,9 +655,21 @@ export type PlaybackActivity = {
     storageBytes: number;
     storageLimitBytes: number;
   };
-  diagnostics: { videoEncoder: string; hardwareToneMap: boolean };
+  diagnostics: {
+    ffmpegVersion: string;
+    ffprobeVersion: string;
+    hardwareAcceleration: "unknown" | "auto" | "software" | "vaapi" | "qsv" | "nvenc";
+    videoEncoder: string;
+    hardwareToneMap: boolean;
+    transcodeThreads: number;
+    maximumReadRate: number;
+    totals: PlaybackMediaProcessTotals;
+    pools: { process: PlaybackMediaPool; probe: PlaybackMediaPool; subtitle: PlaybackMediaPool; trickplay: PlaybackMediaPool };
+  };
   sessions: PlaybackActivitySession[];
   jobs: PlaybackMediaJob[];
+  sessionsTruncated: boolean;
+  jobsTruncated: boolean;
 };
 export type PlaybackPurgeResult = { sessionsRemoved: number; jobsStopped: number; storageBytes: number };
 export type OperationAction = "fetch-missing-metadata" | "run-housekeeping" | "clear-metadata-cache" | "clear-stream-cache";

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,10 +26,13 @@ const (
 	defaultMediaIdleTTL              = 2 * time.Minute
 	defaultTranscodeVideoBitrateKbps = 12000
 	hlsReadyTimeout                  = 45 * time.Second
-	hlsInitialBufferSeconds          = 12
+	hlsInitialBufferSeconds          = 6
 	hlsSegmentDurationSeconds        = 3
 	hlsRetainedSegments              = 120
 	hlsDeleteThreshold               = 1
+	hlsSharedWorkerSafetySegments    = 10
+	hlsSeekAheadToleranceSegments    = 2
+	hlsSeekableSegmentPrefix         = "seek-"
 )
 
 var localMediaName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -38,6 +42,7 @@ type MediaOptions struct {
 	MaxStorageBytes           int64
 	IdleTTL                   time.Duration
 	TranscodeVideoBitrateKbps int
+	InitialBufferSeconds      int
 }
 
 type HLSProcessor interface {
@@ -46,22 +51,46 @@ type HLSProcessor interface {
 }
 
 type hlsJob struct {
-	directory             string
-	fingerprint           string
-	sessionID             string
-	assetID               string
-	mode                  string
-	segmentContainer      string
-	prewarming            bool
-	sourceDurationSeconds float64
-	startOffsetSeconds    float64
-	createdAt             time.Time
-	lastAccessed          time.Time
-	cancel                context.CancelFunc
-	done                  chan struct{}
-	timer                 *time.Timer
-	mu                    sync.RWMutex
-	err                   error
+	directory              string
+	fingerprint            string
+	sessionID              string
+	assetID                string
+	mode                   string
+	segmentContainer       string
+	prewarming             bool
+	sourceDurationSeconds  float64
+	startOffsetSeconds     float64
+	createdAt              time.Time
+	lastAccessed           time.Time
+	cancel                 context.CancelFunc
+	done                   chan struct{}
+	timer                  *time.Timer
+	bindings               map[string]*hlsJobBinding
+	stopOnce               sync.Once
+	activeRequests         int
+	activeRequestsDone     chan struct{}
+	stopWhenIdle           bool
+	activePreparations     int
+	activePreparationsDone chan struct{}
+	mu                     sync.RWMutex
+	err                    error
+}
+
+type hlsJobBinding struct {
+	prewarming bool
+	timer      *time.Timer
+}
+
+type hlsSeekGate struct {
+	token chan struct{}
+	users int
+}
+
+type hlsJobRequest struct {
+	service  *Service
+	job      *hlsJob
+	promoted bool
+	released bool
 }
 
 func normalizeMediaOptions(options MediaOptions) MediaOptions {
@@ -74,6 +103,9 @@ func normalizeMediaOptions(options MediaOptions) MediaOptions {
 	}
 	if options.TranscodeVideoBitrateKbps <= 0 {
 		options.TranscodeVideoBitrateKbps = defaultTranscodeVideoBitrateKbps
+	}
+	if options.InitialBufferSeconds < 3 || options.InitialBufferSeconds > 30 {
+		options.InitialBufferSeconds = hlsInitialBufferSeconds
 	}
 	if options.IdleTTL <= 0 {
 		options.IdleTTL = defaultMediaIdleTTL
@@ -131,12 +163,34 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 	if !localMediaName.MatchString(name) {
 		return ErrSessionNotFound
 	}
+	seekableSegments, seekable := seekableHLSSegmentCount(asset)
+	if strings.HasPrefix(name, hlsSeekableSegmentPrefix) {
+		index, valid := seekableHLSSegmentIndex(name, seekableSegments)
+		if !seekable || !valid {
+			return ErrSessionNotFound
+		}
+		return service.serveSeekableHLSSegment(w, r, sessionID, asset, processor, index)
+	}
+
 	isMaster := name == "master.m3u8"
-	job, err := service.hlsJob(sessionID, asset, processor, isMaster || name == "index.m3u8")
+	var job *hlsJob
+	var jobRequest *hlsJobRequest
+	var err error
+	if seekable && (isMaster || name == "index.m3u8") {
+		job, jobRequest, err = service.hlsPlaylistJob(r.Context(), sessionID, asset, processor)
+	} else {
+		job, err = service.hlsJob(r.Context(), sessionID, asset, processor, isMaster || name == "index.m3u8")
+	}
 	if err != nil {
 		return err
 	}
-	service.touchHLSJob(job)
+	if jobRequest == nil {
+		jobRequest = service.retainHLSJobRequest(hlsJobKey(sessionID, asset), job)
+		if jobRequest == nil {
+			return ErrSessionNotFound
+		}
+	}
+	defer jobRequest.release()
 	path := filepath.Join(job.directory, name)
 	if isMaster {
 		path = filepath.Join(job.directory, "index.m3u8")
@@ -145,13 +199,14 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 		return err
 	}
 	if (isMaster || name == "index.m3u8") && r.Method == http.MethodGet {
-		if err := waitForHLSBuffer(r.Context(), job, hlsInitialBufferSeconds); err != nil {
+		if err := waitForHLSBuffer(r.Context(), job, float64(service.mediaOptions.InitialBufferSeconds)); err != nil {
 			return err
 		}
 	}
 	if isMaster {
 		childURL := hlsAssetURLAt(sessionID, asset.ID, token, "index.m3u8", asset.StartSeconds)
 		if buildChildURL != nil {
+			var err error
 			childURL, err = buildChildURL(deliveryChildState{
 				assetID: asset.ID, file: "index.m3u8", start: hlsStartKey(asset.StartSeconds), retainWhileActive: true,
 			})
@@ -164,7 +219,9 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 			version = 7
 		}
 		bandwidth := asset.VideoBitrateKbps*1000 + 256000
-		if bandwidth <= 256000 {
+		audioOnly := asset.Decision != nil && asset.Decision.Target != nil &&
+			normalizedCodec(asset.Decision.Target.VideoCodec) == "" && normalizedCodec(asset.Decision.Target.AudioCodec) != ""
+		if bandwidth <= 256000 && !audioOnly {
 			bandwidth = defaultTranscodeVideoBitrateKbps*1000 + 256000
 		}
 		streamInformation := fmt.Sprintf("BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d", bandwidth, bandwidth)
@@ -176,22 +233,37 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 	}
 
 	if strings.HasSuffix(name, ".m3u8") {
-		contents, err := os.ReadFile(path)
+		var contents []byte
+		var err error
+		if seekable && name == "index.m3u8" {
+			contents, err = seekableHLSPlaylist(asset, seekableSegments)
+		} else {
+			contents, err = os.ReadFile(path)
+		}
 		if err != nil {
 			return fmt.Errorf("%w: read playlist: %v", ErrMediaProcessingFailed, err)
 		}
 		retainMediaSegments := playlistChildrenRetainWhileActive(contents)
 		var childErr error
 		rewritten, err := rewriteLocalPlaylistWithReferencePolicy(contents, buildChildURL != nil, func(reference string, mediaSegment bool) string {
-			if buildChildURL == nil {
-				return hlsAssetURLAt(sessionID, asset.ID, token, reference, asset.StartSeconds)
-			}
 			if childErr != nil {
 				return ""
 			}
+			startSeconds := asset.StartSeconds
+			if seekable && name == "index.m3u8" {
+				index, valid := seekableHLSSegmentIndex(reference, seekableSegments)
+				if !valid {
+					childErr = ErrMediaProcessingFailed
+					return ""
+				}
+				startSeconds = float64(index * hlsSegmentDurationSeconds)
+			}
+			if buildChildURL == nil {
+				return hlsAssetURLAt(sessionID, asset.ID, token, reference, startSeconds)
+			}
 			var childURL string
 			childURL, childErr = buildChildURL(deliveryChildState{
-				assetID: asset.ID, file: reference, start: hlsStartKey(asset.StartSeconds),
+				assetID: asset.ID, file: reference, start: hlsStartKey(startSeconds),
 				retainWhileActive: !mediaSegment || retainMediaSegments,
 			})
 			return childURL
@@ -204,6 +276,10 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 		}
 		return writeHLSPlaylist(w, r, rewritten)
 	}
+	return serveLocalHLSFile(w, r, path, name, true, jobRequest.promote)
+}
+
+func serveLocalHLSFile(w http.ResponseWriter, r *http.Request, path, name string, immutable bool, afterOpen func()) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("%w: open media segment: %v", ErrMediaProcessingFailed, err)
@@ -213,6 +289,9 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 	if err != nil {
 		return fmt.Errorf("%w: stat media segment: %v", ErrMediaProcessingFailed, err)
 	}
+	if afterOpen != nil {
+		afterOpen()
+	}
 	contentType := mime.TypeByExtension(filepath.Ext(name))
 	if strings.HasSuffix(name, ".ts") {
 		contentType = "video/mp2t"
@@ -221,19 +300,308 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 	} else if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	w.Header().Set("Cache-Control", "private, max-age=3600, immutable")
+	if immutable {
+		w.Header().Set("Cache-Control", "private, max-age=3600, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "private, no-store")
+	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, name, info.ModTime(), file)
 	return nil
 }
 
+func hlsGenerationStart(asset storedAsset, requested float64) float64 {
+	if _, seekable := seekableHLSSegmentCount(asset); !seekable || requested <= 0 {
+		return requested
+	}
+	return math.Floor(requested/float64(hlsSegmentDurationSeconds)) * float64(hlsSegmentDurationSeconds)
+}
+
+func seekableHLSSegmentCount(asset storedAsset) (int, bool) {
+	if asset.Kind != processingTranscode || normalizedHLSSegmentContainer(asset.HLSSegmentContainer) != "ts" ||
+		asset.DurationSeconds <= 0 || math.IsNaN(asset.DurationSeconds) || math.IsInf(asset.DurationSeconds, 0) {
+		return 0, false
+	}
+	count := int(math.Ceil(asset.DurationSeconds / float64(hlsSegmentDurationSeconds)))
+	return count, count > 0 && count <= maximumPlaylistReferences
+}
+
+func seekableHLSPlaylist(asset storedAsset, segments int) ([]byte, error) {
+	if expected, ok := seekableHLSSegmentCount(asset); !ok || expected != segments {
+		return nil, ErrMediaProcessingFailed
+	}
+	var playlist strings.Builder
+	playlist.Grow(segments*48 + 128)
+	playlist.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:3\n#EXT-X-MEDIA-SEQUENCE:0\n")
+	if asset.StartSeconds > 0 && asset.StartSeconds < asset.DurationSeconds {
+		_, _ = fmt.Fprintf(&playlist, "#EXT-X-START:TIME-OFFSET=%.6f,PRECISE=YES\n", asset.StartSeconds)
+	}
+	for index := range segments {
+		duration := math.Min(float64(hlsSegmentDurationSeconds), asset.DurationSeconds-float64(index*hlsSegmentDurationSeconds))
+		if duration <= 0 {
+			return nil, ErrMediaProcessingFailed
+		}
+		_, _ = fmt.Fprintf(&playlist, "#EXTINF:%.6f,\n%s%06d.ts\n", duration, hlsSeekableSegmentPrefix, index)
+	}
+	playlist.WriteString("#EXT-X-ENDLIST\n")
+	return []byte(playlist.String()), nil
+}
+
+func seekableHLSSegmentIndex(name string, segments int) (int, bool) {
+	if segments <= 0 || !strings.HasPrefix(name, hlsSeekableSegmentPrefix) || !strings.HasSuffix(name, ".ts") {
+		return 0, false
+	}
+	raw := strings.TrimSuffix(strings.TrimPrefix(name, hlsSeekableSegmentPrefix), ".ts")
+	index, err := strconv.Atoi(raw)
+	if err != nil || index < 0 || index >= segments || name != fmt.Sprintf("%s%06d.ts", hlsSeekableSegmentPrefix, index) {
+		return 0, false
+	}
+	return index, true
+}
+
+func (service *Service) activeHLSJobRequest(sessionID, assetID string) (*hlsJob, *hlsJobRequest) {
+	service.hlsResetMu.RLock()
+	defer service.hlsResetMu.RUnlock()
+	prefix := hlsJobPrefix(sessionID, assetID)
+	service.hlsMu.Lock()
+	defer service.hlsMu.Unlock()
+	var selected *hlsJob
+	selectedKey := ""
+	for key, job := range service.hlsJobs {
+		if strings.HasPrefix(key, prefix) && (selected == nil || job.createdAt.After(selected.createdAt)) {
+			selected = job
+			selectedKey = key
+		}
+	}
+	if selected == nil {
+		return nil, nil
+	}
+	return selected, service.retainHLSJobRequestLocked(selectedKey, selected)
+}
+
+func (service *Service) hlsPlaylistJob(ctx context.Context, sessionID string, asset storedAsset, processor HLSProcessor) (*hlsJob, *hlsJobRequest, error) {
+	release, err := service.acquireHLSSeekGate(ctx, hlsJobPrefix(sessionID, asset.ID))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer release()
+	for {
+		if job, request := service.activeHLSJobRequest(sessionID, asset.ID); job != nil {
+			return job, request, nil
+		}
+		asset.StartSeconds = hlsGenerationStart(asset, asset.StartSeconds)
+		job, jobErr := service.hlsJob(ctx, sessionID, asset, processor, true)
+		if jobErr != nil {
+			return nil, nil, jobErr
+		}
+		if request := service.retainHLSJobRequest(hlsJobKey(sessionID, asset), job); request != nil {
+			return job, request, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+	}
+}
+
+func (service *Service) serveSeekableHLSSegment(w http.ResponseWriter, r *http.Request, sessionID string, asset storedAsset, processor HLSProcessor, index int) error {
+	targetSeconds := float64(index * hlsSegmentDurationSeconds)
+	job, localIndex, jobRequest, err := service.hlsJobForSeekTarget(r.Context(), sessionID, asset, processor, targetSeconds)
+	if err != nil {
+		return err
+	}
+	defer jobRequest.release()
+	name := fmt.Sprintf("segment-%06d.ts", localIndex)
+	path := filepath.Join(job.directory, name)
+	if err := waitForMediaFile(r.Context(), job, path); err != nil {
+		return err
+	}
+	return serveLocalHLSFile(w, r, path, name, false, jobRequest.promote)
+}
+
+func (service *Service) hlsJobForSeekTarget(ctx context.Context, sessionID string, asset storedAsset, processor HLSProcessor, targetSeconds float64) (*hlsJob, int, *hlsJobRequest, error) {
+	gateKey := hlsJobPrefix(sessionID, asset.ID)
+	release, err := service.acquireHLSSeekGate(ctx, gateKey)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer release()
+selectGeneration:
+
+	type registeredHLSJob struct {
+		key string
+		job *hlsJob
+	}
+	service.hlsMu.Lock()
+	jobs := make([]registeredHLSJob, 0, 1)
+	for key, job := range service.hlsJobs {
+		if strings.HasPrefix(key, gateKey) {
+			jobs = append(jobs, registeredHLSJob{key: key, job: job})
+		}
+	}
+	service.hlsMu.Unlock()
+
+	var selected *hlsJob
+	selectedKey := ""
+	selectedIndex := 0
+	for _, registered := range jobs {
+		job := registered.job
+		job.mu.RLock()
+		startSeconds := job.startOffsetSeconds
+		directory := job.directory
+		done := job.done
+		job.mu.RUnlock()
+		delta := targetSeconds - startSeconds
+		if delta < 0 {
+			continue
+		}
+		indexValue := delta / float64(hlsSegmentDurationSeconds)
+		localIndex := int(math.Round(indexValue))
+		if math.Abs(indexValue-float64(localIndex)) > 0.001 {
+			continue
+		}
+		first, last, bounded := hlsPlaylistSegmentBounds(directory)
+		finished := false
+		select {
+		case <-done:
+			finished = true
+		default:
+		}
+		if bounded {
+			if localIndex < first || localIndex > last+hlsSeekAheadToleranceSegments || finished && localIndex > last {
+				continue
+			}
+		} else if localIndex > hlsSeekAheadToleranceSegments || finished {
+			continue
+		}
+		if selected == nil || startSeconds > selected.startOffsetSeconds {
+			selected = job
+			selectedIndex = localIndex
+			selectedKey = registered.key
+		}
+	}
+	if selected != nil {
+		if request := service.retainHLSJobRequest(selectedKey, selected); request != nil {
+			return selected, selectedIndex, request, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, 0, nil, err
+		}
+		goto selectGeneration
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, nil, err
+	}
+
+	seekAsset := asset
+	seekAsset.StartSeconds = targetSeconds
+	replacementKey := hlsJobKey(sessionID, seekAsset)
+	// A same-start generation may have permanently deleted the requested segment.
+	if err := service.stopHLSJobAfterPreparations(ctx, replacementKey); err != nil {
+		return nil, 0, nil, err
+	}
+	job, err := service.hlsJob(ctx, sessionID, seekAsset, processor, true)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		service.stopHLSJob(hlsJobKey(sessionID, seekAsset))
+		return nil, 0, nil, err
+	}
+	if request := service.retainHLSJobRequest(hlsJobKey(sessionID, seekAsset), job); request != nil {
+		return job, 0, request, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, nil, err
+	}
+	goto selectGeneration
+}
+
+func (service *Service) acquireHLSSeekGate(ctx context.Context, key string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	service.hlsSeekMu.Lock()
+	if service.hlsSeekGates == nil {
+		service.hlsSeekGates = make(map[string]*hlsSeekGate)
+	}
+	gate := service.hlsSeekGates[key]
+	if gate == nil {
+		gate = &hlsSeekGate{token: make(chan struct{}, 1)}
+		service.hlsSeekGates[key] = gate
+	}
+	gate.users++
+	service.hlsSeekMu.Unlock()
+
+	select {
+	case gate.token <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-gate.token
+			service.releaseHLSSeekGate(key, gate)
+			return nil, err
+		}
+	case <-ctx.Done():
+		service.releaseHLSSeekGate(key, gate)
+		return nil, ctx.Err()
+	}
+	return func() {
+		<-gate.token
+		service.releaseHLSSeekGate(key, gate)
+	}, nil
+}
+
+func (service *Service) releaseHLSSeekGate(key string, gate *hlsSeekGate) {
+	service.hlsSeekMu.Lock()
+	if current := service.hlsSeekGates[key]; current == gate {
+		gate.users--
+		if gate.users == 0 {
+			delete(service.hlsSeekGates, key)
+		}
+	}
+	service.hlsSeekMu.Unlock()
+}
+func hlsPlaylistSegmentBounds(directory string) (int, int, bool) {
+	file, err := os.Open(filepath.Join(directory, "index.m3u8"))
+	if err != nil {
+		return 0, 0, false
+	}
+	defer file.Close()
+	first, last := 0, 0
+	found := false
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		name := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(name, "segment-") || !strings.HasSuffix(name, ".ts") {
+			continue
+		}
+		raw := strings.TrimSuffix(strings.TrimPrefix(name, "segment-"), ".ts")
+		index, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || index < 0 || name != fmt.Sprintf("segment-%06d.ts", index) {
+			continue
+		}
+		if !found || index < first {
+			first = index
+		}
+		if !found || index > last {
+			last = index
+		}
+		found = true
+	}
+	if scanner.Err() != nil {
+		return 0, 0, false
+	}
+	return first, last, found
+}
+
 func localHLSRFC6381Codecs(decision *PlaybackDecision) (string, bool) {
 	if decision == nil || decision.Target == nil {
 		return "", false
 	}
-	video, videoKnown := localHLSRFC6381VideoCodec(decision.Target.VideoCodec)
 	audio, audioKnown := localHLSRFC6381AudioCodec(decision.Target.AudioCodec)
+	if normalizedCodec(decision.Target.VideoCodec) == "" {
+		return audio, audioKnown
+	}
+	video, videoKnown := localHLSRFC6381VideoCodec(decision.Target.VideoCodec)
 	if !videoKnown || !audioKnown {
 		return "", false
 	}
@@ -271,44 +639,164 @@ func writeHLSPlaylist(w http.ResponseWriter, r *http.Request, contents []byte) e
 	return err
 }
 
-func (service *Service) hlsJob(sessionID string, asset storedAsset, processor HLSProcessor, mayStart bool) (*hlsJob, error) {
+func (service *Service) hlsJob(ctx context.Context, sessionID string, asset storedAsset, processor HLSProcessor, mayStart bool) (*hlsJob, error) {
+	service.hlsResetMu.RLock()
+	defer service.hlsResetMu.RUnlock()
+	if _, validHeaders := canonicalStoredRequestHeaders(asset.Headers); !validHeaders {
+		return nil, ErrMediaSourceFailed
+	}
 	key := hlsJobKey(sessionID, asset)
+	fingerprint := hlsAssetFingerprint(asset)
 	if mayStart {
-		service.stopOtherHLSGenerations(hlsJobPrefix(sessionID, asset.ID), key)
+		if err := service.stopOtherHLSGenerations(ctx, hlsJobPrefix(sessionID, asset.ID), key); err != nil {
+			return nil, err
+		}
 	}
-	service.hlsMu.Lock()
-	if existing := service.hlsJobs[key]; existing != nil {
+	for {
+		service.hlsMu.Lock()
+		if existing := service.hlsJobs[key]; existing != nil {
+			reusable := existing.fingerprint == fingerprint && hlsJobReusable(existing)
+			service.hlsMu.Unlock()
+			if reusable {
+				return existing, nil
+			}
+			if !mayStart {
+				return nil, ErrSessionNotFound
+			}
+			if err := service.stopHLSJobAfterPreparations(ctx, key); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if !mayStart {
+			service.hlsMu.Unlock()
+			return nil, ErrSessionNotFound
+		}
+		if shared := service.sharedHLSJobLocked(fingerprint, asset.Kind); shared != nil {
+			service.addHLSJobBindingLocked(key, shared, strings.HasPrefix(sessionID, "prewarm-"))
+			service.hlsMu.Unlock()
+			return shared, nil
+		}
 		service.hlsMu.Unlock()
-		return existing, nil
-	}
-	if !mayStart {
+
+		if !service.reclaimHLSStorage(true) {
+			return nil, ErrMediaStorageLimit
+		}
+		service.hlsMu.Lock()
+		if existing := service.hlsJobs[key]; existing != nil {
+			service.hlsMu.Unlock()
+			continue
+		}
+		if shared := service.sharedHLSJobLocked(fingerprint, asset.Kind); shared != nil {
+			service.addHLSJobBindingLocked(key, shared, strings.HasPrefix(sessionID, "prewarm-"))
+			service.hlsMu.Unlock()
+			return shared, nil
+		}
+		if directorySize(service.mediaOptions.TempDirectory) >= service.mediaOptions.MaxStorageBytes {
+			service.hlsMu.Unlock()
+			return nil, ErrMediaStorageLimit
+		}
+		directory := filepath.Join(
+			service.mediaOptions.TempDirectory, sessionID, asset.ID,
+			"start-"+hlsStartKey(asset.StartSeconds)+"-"+strconv.FormatUint(service.hlsWorkspaceGeneration.Add(1), 10),
+		)
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			service.hlsMu.Unlock()
+			return nil, fmt.Errorf("%w: create media workspace: %v", ErrMediaProcessingFailed, err)
+		}
+		jobContext, cancel := context.WithCancel(context.Background())
+		now := service.currentTime()
+		job := &hlsJob{
+			directory: directory, fingerprint: fingerprint, sessionID: sessionID, assetID: asset.ID,
+			mode: asset.Kind, segmentContainer: normalizedHLSSegmentContainer(asset.HLSSegmentContainer), prewarming: strings.HasPrefix(sessionID, "prewarm-"),
+			sourceDurationSeconds: asset.DurationSeconds, startOffsetSeconds: asset.StartSeconds,
+			createdAt: now, lastAccessed: now, cancel: cancel, done: make(chan struct{}),
+		}
+		service.addHLSJobBindingLocked(key, job, job.prewarming)
 		service.hlsMu.Unlock()
-		return nil, ErrSessionNotFound
+		go service.runHLSJob(jobContext, job, asset, processor)
+		go service.monitorHLSStorage(jobContext, job)
+		return job, nil
 	}
-	if directorySize(service.mediaOptions.TempDirectory) >= service.mediaOptions.MaxStorageBytes {
-		service.hlsMu.Unlock()
-		return nil, ErrMediaStorageLimit
+}
+
+func hlsJobReusable(job *hlsJob) bool {
+	job.mu.RLock()
+	reusable := job.err == nil
+	job.mu.RUnlock()
+	return reusable
+}
+
+func hlsJobShareable(job *hlsJob) bool {
+	if !hlsJobReusable(job) {
+		return false
 	}
-	directory := filepath.Join(service.mediaOptions.TempDirectory, sessionID, asset.ID, "start-"+hlsStartKey(asset.StartSeconds))
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		service.hlsMu.Unlock()
-		return nil, fmt.Errorf("%w: create media workspace: %v", ErrMediaProcessingFailed, err)
+	playlistPath := filepath.Join(job.directory, "index.m3u8")
+	if _, err := os.Stat(playlistPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+		if job.done == nil {
+			return false
+		}
+		select {
+		case <-job.done:
+			return false
+		default:
+			return true
+		}
 	}
-	jobContext, cancel := context.WithCancel(context.Background())
-	now := service.currentTime()
-	job := &hlsJob{
-		directory: directory, fingerprint: hlsAssetFingerprint(asset), sessionID: sessionID, assetID: asset.ID,
-		mode: asset.Kind, segmentContainer: normalizedHLSSegmentContainer(asset.HLSSegmentContainer), prewarming: strings.HasPrefix(sessionID, "prewarm-"),
-		sourceDurationSeconds: asset.DurationSeconds, startOffsetSeconds: asset.StartSeconds,
-		createdAt: now, lastAccessed: now, cancel: cancel, done: make(chan struct{}),
+	extension := ".ts"
+	if job.segmentContainer == "mp4" {
+		extension = ".m4s"
+	}
+	initial, err := os.Stat(filepath.Join(job.directory, "segment-000000"+extension))
+	if err != nil || initial.Size() <= 0 {
+		return false
+	}
+	encodedSeconds, ok := hlsPlaylistEncodedSeconds(job.directory)
+	if !ok {
+		return false
+	}
+	shareableSegments := hlsRetainedSegments - hlsDeleteThreshold - hlsSharedWorkerSafetySegments
+	return shareableSegments > 0 && encodedSeconds <= float64(shareableSegments*hlsSegmentDurationSeconds)
+}
+
+func shareableHLSMode(mode string) bool {
+	switch mode {
+	case processingRemux, processingTranscodeAudio, processingTranscode:
+		return true
+	default:
+		return false
+	}
+}
+
+// sharedHLSJobLocked returns one physical worker for an exact processing fingerprint.
+// Session authorization remains represented by a distinct hlsJobs binding.
+func (service *Service) sharedHLSJobLocked(fingerprint, mode string) *hlsJob {
+	if !shareableHLSMode(mode) {
+		return nil
+	}
+	for _, job := range service.hlsJobs {
+		if job.fingerprint == fingerprint && hlsJobShareable(job) {
+			return job
+		}
+	}
+	return nil
+}
+
+// addHLSJobBindingLocked publishes a session-specific authorization binding.
+func (service *Service) addHLSJobBindingLocked(key string, job *hlsJob, prewarming bool) {
+	if job.bindings == nil {
+		job.bindings = make(map[string]*hlsJobBinding)
+	}
+	binding := &hlsJobBinding{prewarming: prewarming}
+	binding.timer = time.AfterFunc(service.mediaOptions.IdleTTL, func() { service.stopHLSJobInstance(key, job) })
+	job.bindings[key] = binding
+	if job.timer == nil {
+		job.timer = binding.timer
 	}
 	service.hlsJobs[key] = job
-	service.hlsMu.Unlock()
-
-	job.timer = time.AfterFunc(service.mediaOptions.IdleTTL, func() { service.stopHLSJob(key) })
-	go service.runHLSJob(jobContext, job, asset, processor)
-	go service.monitorHLSStorage(jobContext, job)
-	return job, nil
 }
 
 func hlsPlaylistEncodedSeconds(directory string) (float64, bool) {
@@ -318,22 +806,35 @@ func hlsPlaylistEncodedSeconds(directory string) (float64, bool) {
 	}
 	defer file.Close()
 
-	const prefix = "#EXTINF:"
+	const (
+		durationPrefix = "#EXTINF:"
+		sequencePrefix = "#EXT-X-MEDIA-SEQUENCE:"
+	)
 	var total float64
+	var mediaSequence uint64
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		if !bytes.HasPrefix(line, []byte(prefix)) {
+		if bytes.HasPrefix(line, []byte(sequencePrefix)) {
+			value := bytes.TrimSpace(line[len(sequencePrefix):])
+			sequence, parseErr := strconv.ParseUint(string(value), 10, 63)
+			if parseErr != nil {
+				return 0, false
+			}
+			mediaSequence = sequence
 			continue
 		}
-		value := line[len(prefix):]
+		if !bytes.HasPrefix(line, []byte(durationPrefix)) {
+			continue
+		}
+		value := line[len(durationPrefix):]
 		comma := bytes.IndexByte(value, ',')
 		if comma < 0 {
 			continue
 		}
 		value = value[:comma]
-		seconds, err := strconv.ParseFloat(string(bytes.TrimSpace(value)), 64)
-		if err != nil || seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		seconds, parseErr := strconv.ParseFloat(string(bytes.TrimSpace(value)), 64)
+		if parseErr != nil || seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
 			continue
 		}
 		total += seconds
@@ -342,6 +843,13 @@ func hlsPlaylistEncodedSeconds(directory string) (float64, bool) {
 		}
 	}
 	if scanner.Err() != nil {
+		return 0, false
+	}
+	if mediaSequence > ^uint64(0)/uint64(hlsSegmentDurationSeconds) {
+		return 0, false
+	}
+	total += float64(mediaSequence * uint64(hlsSegmentDurationSeconds))
+	if math.IsInf(total, 0) {
 		return 0, false
 	}
 	return total, true
@@ -355,16 +863,20 @@ func (service *Service) prewarmHLS(ctx context.Context, prewarmSessionID string,
 	if !ok {
 		return ErrMediaProcessingFailed
 	}
-	service.stopOtherHLSGenerations(prewarmSessionID+"/", hlsJobKey(prewarmSessionID, *asset))
-	job, err := service.hlsJob(prewarmSessionID, *asset, processor, true)
+	generation := *asset
+	generation.StartSeconds = hlsGenerationStart(generation, generation.StartSeconds)
+	if err := service.stopOtherHLSGenerations(ctx, prewarmSessionID+"/", hlsJobKey(prewarmSessionID, generation)); err != nil {
+		return err
+	}
+	job, err := service.hlsJob(ctx, prewarmSessionID, generation, processor, true)
 	if err != nil {
 		return err
 	}
 	if err := waitForMediaFile(ctx, job, filepath.Join(job.directory, "index.m3u8")); err != nil {
-		service.stopHLSJob(hlsJobKey(prewarmSessionID, *asset))
+		service.stopHLSJob(hlsJobKey(prewarmSessionID, generation))
 		return err
 	}
-	service.touchHLSJob(job)
+	service.touchHLSJob(hlsJobKey(prewarmSessionID, generation), job)
 	return nil
 }
 
@@ -378,6 +890,7 @@ func (service *Service) startSessionHLS(ctx context.Context, prewarmSessionID, s
 			return ErrMediaProcessingFailed
 		}
 		asset := assets[assetIndex]
+		asset.StartSeconds = hlsGenerationStart(asset, asset.StartSeconds)
 		if service.adoptHLSJob(prewarmSessionID, sessionID, asset) {
 			return nil
 		}
@@ -385,44 +898,62 @@ func (service *Service) startSessionHLS(ctx context.Context, prewarmSessionID, s
 		if !ok {
 			return ErrMediaProcessingFailed
 		}
-		job, err := service.hlsJob(sessionID, asset, processor, true)
-		if err != nil {
-			return err
+		start := func() error {
+			job, err := service.hlsJob(ctx, sessionID, asset, processor, true)
+			if err != nil {
+				return err
+			}
+			if err := waitForMediaFile(ctx, job, filepath.Join(job.directory, "index.m3u8")); err != nil {
+				service.stopHLSJob(hlsJobKey(sessionID, asset))
+				return err
+			}
+			service.touchHLSJob(hlsJobKey(sessionID, asset), job)
+			return nil
 		}
-		if err := waitForMediaFile(ctx, job, filepath.Join(job.directory, "index.m3u8")); err != nil {
-			service.stopHLSJob(hlsJobKey(sessionID, asset))
-			return err
+		if err := start(); err != nil {
+			if !errors.Is(err, ErrMediaCapacityReached) || prewarmSessionID == "" {
+				return err
+			}
+			service.stopHLSSession(prewarmSessionID)
+			if err := start(); err != nil {
+				return err
+			}
 		}
-		service.touchHLSJob(job)
 		return nil
 	}
 	return nil
 }
 
 func (service *Service) adoptHLSJob(fromSessionID, toSessionID string, asset storedAsset) bool {
+	service.hlsResetMu.RLock()
+	defer service.hlsResetMu.RUnlock()
 	fromKey := hlsJobKey(fromSessionID, asset)
 	toKey := hlsJobKey(toSessionID, asset)
 	service.hlsMu.Lock()
 	defer service.hlsMu.Unlock()
 	job := service.hlsJobs[fromKey]
-	if job == nil || job.fingerprint != hlsAssetFingerprint(asset) || service.hlsJobs[toKey] != nil {
+	if job == nil || job.fingerprint != hlsAssetFingerprint(asset) || !hlsJobReusable(job) || service.hlsJobs[toKey] != nil {
 		return false
 	}
-	job.mu.Lock()
-	if job.timer != nil {
+	if binding := job.bindings[fromKey]; binding != nil {
+		if binding.timer != nil {
+			binding.timer.Stop()
+		}
+		delete(job.bindings, fromKey)
+	} else if job.timer != nil {
 		job.timer.Stop()
 	}
+	delete(service.hlsJobs, fromKey)
+	service.addHLSJobBindingLocked(toKey, job, false)
+	job.mu.Lock()
 	job.sessionID = toSessionID
 	job.prewarming = false
 	job.lastAccessed = service.currentTime()
-	delete(service.hlsJobs, fromKey)
-	service.hlsJobs[toKey] = job
-	job.timer = time.AfterFunc(service.mediaOptions.IdleTTL, func() { service.stopHLSJob(toKey) })
 	job.mu.Unlock()
 	return true
 }
 
-func (service *Service) stopOtherHLSGenerations(prefix, keep string) {
+func (service *Service) stopOtherHLSGenerations(ctx context.Context, prefix, keep string) error {
 	service.hlsMu.Lock()
 	keys := make([]string, 0)
 	for key := range service.hlsJobs {
@@ -432,8 +963,11 @@ func (service *Service) stopOtherHLSGenerations(prefix, keep string) {
 	}
 	service.hlsMu.Unlock()
 	for _, key := range keys {
-		service.stopHLSJob(key)
+		if err := service.stopHLSJobAfterPreparations(ctx, key); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func prewarmHLSSession(authSessionID, profileID string) string {
@@ -453,6 +987,7 @@ func hlsStartKey(startSeconds float64) string {
 }
 
 func hlsAssetFingerprint(asset storedAsset) string {
+	decision, _ := json.Marshal(asset.Decision)
 	audioTrack := -1
 	if asset.AudioTrackIndex != nil {
 		audioTrack = *asset.AudioTrackIndex
@@ -462,9 +997,11 @@ func hlsAssetFingerprint(asset storedAsset) string {
 		subtitleTrack = *asset.SubtitleTrackIndex
 	}
 	return fmt.Sprintf(
-		"%s|%s|%s|%t|%d|%d|%d|%d|%d|%s",
-		mediaProbeKey(asset), asset.Kind, normalizedHLSSegmentContainer(asset.HLSSegmentContainer), asset.ToneMap, audioTrack, subtitleTrack,
-		asset.TargetHeight, asset.VideoBitrateKbps, asset.MaximumAudioChannels, hlsStartKey(asset.StartSeconds),
+		"%s|%s|%s|%s|%t|%t|%d|%d|%s|%d|%x|%x|%d|%d|%d|%s|%s",
+		mediaProbeKey(asset), asset.ID, asset.Kind, normalizedHLSSegmentContainer(asset.HLSSegmentContainer), asset.ToneMap,
+		asset.DolbyVisionToneMapSafe, audioTrack, subtitleTrack, asset.SubtitleTrackType, asset.SubtitleTrackOrdinal,
+		math.Float64bits(asset.DurationSeconds), math.Float64bits(asset.ReadRate), asset.TargetHeight, asset.VideoBitrateKbps,
+		asset.MaximumAudioChannels, hlsStartKey(asset.StartSeconds), decision,
 	)
 }
 
@@ -488,49 +1025,317 @@ func (service *Service) monitorHLSStorage(ctx context.Context, job *hlsJob) {
 		case <-job.done:
 			return
 		case <-ticker.C:
-			if directorySize(service.mediaOptions.TempDirectory) <= service.mediaOptions.MaxStorageBytes {
-				continue
-			}
-			job.mu.Lock()
-			job.err = ErrMediaStorageLimit
-			job.mu.Unlock()
-			job.cancel()
-			return
+			service.reclaimHLSStorage(false)
 		}
 	}
 }
 
-func (service *Service) touchHLSJob(job *hlsJob) {
+func (service *Service) reclaimHLSStorage(admission bool) bool {
+	service.hlsStorageMu.Lock()
+	defer service.hlsStorageMu.Unlock()
+	for {
+		size := directorySize(service.mediaOptions.TempDirectory)
+		if size < service.mediaOptions.MaxStorageBytes || !admission && size == service.mediaOptions.MaxStorageBytes {
+			return true
+		}
+		_, job := service.hlsStorageVictim()
+		if job == nil {
+			return false
+		}
+		job.mu.Lock()
+		job.err = ErrMediaStorageLimit
+		job.mu.Unlock()
+		service.stopDetachedHLSJob(job)
+	}
+}
+
+func (service *Service) hlsStorageVictim() (string, *hlsJob) {
+	service.hlsMu.Lock()
+	defer service.hlsMu.Unlock()
+	selectedKey := ""
+	var selected *hlsJob
+	var selectedActive, selectedPrewarming bool
+	var selectedLastAccessed, selectedCreatedAt time.Time
+	keysByJob := make(map[*hlsJob]string, len(service.hlsJobs))
+	for key, job := range service.hlsJobs {
+		if existing, found := keysByJob[job]; !found || key < existing {
+			keysByJob[job] = key
+		}
+	}
+	// Prefer inactive work, but fall back to an active job so an over-limit writer cannot grow unchecked.
+	for job, key := range keysByJob {
+		job.mu.RLock()
+		active := job.activeRequests > 0
+		lastAccessed := job.lastAccessed
+		createdAt := job.createdAt
+		job.mu.RUnlock()
+		prewarming := hlsJobOnlyPrewarming(job)
+		if selected == nil {
+			selectedKey, selected = key, job
+			selectedActive, selectedPrewarming = active, prewarming
+			selectedLastAccessed, selectedCreatedAt = lastAccessed, createdAt
+			continue
+		}
+		if active != selectedActive {
+			if !active {
+				selectedKey, selected = key, job
+				selectedActive, selectedPrewarming = active, prewarming
+				selectedLastAccessed, selectedCreatedAt = lastAccessed, createdAt
+			}
+			continue
+		}
+		if prewarming != selectedPrewarming {
+			if prewarming {
+				selectedKey, selected = key, job
+				selectedActive, selectedPrewarming = active, prewarming
+				selectedLastAccessed, selectedCreatedAt = lastAccessed, createdAt
+			}
+			continue
+		}
+		if lastAccessed.Before(selectedLastAccessed) || lastAccessed.Equal(selectedLastAccessed) &&
+			(createdAt.Before(selectedCreatedAt) || createdAt.Equal(selectedCreatedAt) && key < selectedKey) {
+			selectedKey, selected = key, job
+			selectedActive, selectedPrewarming = active, prewarming
+			selectedLastAccessed, selectedCreatedAt = lastAccessed, createdAt
+		}
+	}
+	if selected != nil {
+		for key, job := range service.hlsJobs {
+			if job != selected {
+				continue
+			}
+			if binding := selected.bindings[key]; binding != nil && binding.timer != nil {
+				binding.timer.Stop()
+			}
+			delete(selected.bindings, key)
+			delete(service.hlsJobs, key)
+		}
+		if len(selected.bindings) == 0 && selected.timer != nil {
+			selected.timer.Stop()
+		}
+	}
+	return selectedKey, selected
+}
+
+func hlsJobOnlyPrewarming(job *hlsJob) bool {
+	if len(job.bindings) == 0 {
+		return job.prewarming
+	}
+	for _, binding := range job.bindings {
+		if !binding.prewarming {
+			return false
+		}
+	}
+	return true
+}
+
+func (service *Service) touchHLSJob(key string, job *hlsJob) {
+	service.hlsMu.Lock()
+	defer service.hlsMu.Unlock()
+	if service.hlsJobs[key] != job {
+		return
+	}
 	job.mu.Lock()
-	defer job.mu.Unlock()
 	job.lastAccessed = service.currentTime()
-	if job.timer != nil {
+	job.mu.Unlock()
+	if binding := job.bindings[key]; binding != nil && binding.timer != nil {
+		binding.timer.Reset(service.mediaOptions.IdleTTL)
+	} else if job.timer != nil {
 		job.timer.Reset(service.mediaOptions.IdleTTL)
 	}
 }
 
-func (service *Service) stopHLSJob(key string) {
+func (service *Service) retainHLSJobRequest(key string, job *hlsJob) *hlsJobRequest {
+	service.hlsResetMu.RLock()
+	defer service.hlsResetMu.RUnlock()
+	service.hlsMu.Lock()
+	defer service.hlsMu.Unlock()
+	if service.hlsJobs[key] != job {
+		return nil
+	}
+	return service.retainHLSJobRequestLocked(key, job)
+}
+
+// retainHLSJobRequestLocked requires hlsMu to keep registry membership and
+// request admission atomic with stopHLSJobInstance.
+func (service *Service) retainHLSJobRequestLocked(key string, job *hlsJob) *hlsJobRequest {
+	job.mu.Lock()
+	if job.activeRequests == 0 {
+		job.activeRequestsDone = make(chan struct{})
+	}
+	if job.activePreparations == 0 {
+		job.activePreparationsDone = make(chan struct{})
+	}
+	job.activeRequests++
+	job.activePreparations++
+	job.lastAccessed = service.currentTime()
+	job.mu.Unlock()
+	if binding := job.bindings[key]; binding != nil && binding.timer != nil {
+		binding.timer.Reset(service.mediaOptions.IdleTTL)
+	} else if job.timer != nil {
+		job.timer.Reset(service.mediaOptions.IdleTTL)
+	}
+	return &hlsJobRequest{service: service, job: job}
+}
+
+func (request *hlsJobRequest) promote() {
+	if request == nil || request.released || request.promoted {
+		return
+	}
+	request.promoted = true
+	request.job.mu.Lock()
+	request.job.activePreparations--
+	if request.job.activePreparations == 0 {
+		close(request.job.activePreparationsDone)
+		request.job.activePreparationsDone = nil
+	}
+	request.job.mu.Unlock()
+}
+
+func (request *hlsJobRequest) release() {
+	if request == nil || request.released {
+		return
+	}
+	request.released = true
+	stopWhenIdle := false
+	request.job.mu.Lock()
+	if !request.promoted {
+		request.job.activePreparations--
+		if request.job.activePreparations == 0 {
+			close(request.job.activePreparationsDone)
+			request.job.activePreparationsDone = nil
+		}
+	}
+	request.job.activeRequests--
+	if request.job.activeRequests == 0 {
+		close(request.job.activeRequestsDone)
+		request.job.activeRequestsDone = nil
+		stopWhenIdle = request.job.stopWhenIdle
+		request.job.stopWhenIdle = false
+	}
+	request.job.mu.Unlock()
+	if stopWhenIdle {
+		request.service.stopDetachedHLSJob(request.job)
+	}
+	request.service.reclaimHLSStorage(false)
+}
+
+func (service *Service) stopHLSJobAfterPreparations(ctx context.Context, key string) error {
 	service.hlsMu.Lock()
 	job := service.hlsJobs[key]
 	if job != nil {
-		delete(service.hlsJobs, key)
+		if binding := job.bindings[key]; binding != nil && binding.timer != nil {
+			binding.timer.Stop()
+		} else if job.timer != nil {
+			job.timer.Stop()
+		}
 	}
 	service.hlsMu.Unlock()
 	if job == nil {
-		return
+		return nil
 	}
 	job.mu.Lock()
-	if job.timer != nil {
-		job.timer.Stop()
+	preparationsDone := job.activePreparationsDone
+	job.mu.Unlock()
+	if preparationsDone != nil {
+		select {
+		case <-preparationsDone:
+		case <-ctx.Done():
+			service.hlsMu.Lock()
+			if service.hlsJobs[key] == job {
+				if binding := job.bindings[key]; binding != nil && binding.timer != nil {
+					binding.timer.Reset(service.mediaOptions.IdleTTL)
+				} else if job.timer != nil {
+					job.timer.Reset(service.mediaOptions.IdleTTL)
+				}
+			}
+			service.hlsMu.Unlock()
+			return ctx.Err()
+		}
+	}
+	service.stopHLSJobInstance(key, job)
+	return nil
+}
+
+func (service *Service) stopHLSJob(key string) {
+	service.stopHLSJobInstance(key, nil)
+}
+
+func (service *Service) stopHLSJobInstance(key string, expected *hlsJob) {
+	service.hlsMu.Lock()
+	job := service.hlsJobs[key]
+	if expected != nil && job != expected {
+		job = nil
+	}
+	lastBinding := false
+	if job != nil {
+		if binding := job.bindings[key]; binding != nil {
+			if binding.timer != nil {
+				binding.timer.Stop()
+			}
+			delete(job.bindings, key)
+		} else if job.timer != nil {
+			job.timer.Stop()
+		}
+		delete(service.hlsJobs, key)
+		lastBinding = true
+		for _, registered := range service.hlsJobs {
+			if registered == job {
+				lastBinding = false
+				break
+			}
+		}
+	}
+	service.hlsMu.Unlock()
+	if lastBinding {
+		service.stopDetachedHLSJobWhenIdle(job)
+	}
+}
+
+// stopDetachedHLSJobWhenIdle is used for ordinary session/timer detach. A
+// retained response keeps the worker and workspace alive through its release.
+func (service *Service) stopDetachedHLSJobWhenIdle(job *hlsJob) {
+	job.mu.Lock()
+	if job.activeRequestsDone != nil {
+		job.stopWhenIdle = true
+		job.mu.Unlock()
+		return
 	}
 	job.mu.Unlock()
-	job.cancel()
-	select {
-	case <-job.done:
-	case <-time.After(5 * time.Second):
-	}
-	_ = os.RemoveAll(job.directory)
-	_ = removeEmptyParents(filepath.Dir(job.directory), service.mediaOptions.TempDirectory)
+	service.stopDetachedHLSJob(job)
+}
+
+// stopDetachedHLSJob force-stops a worker selected for storage reclamation.
+// It is idempotent because aliases may have raced with victim selection.
+func (service *Service) stopDetachedHLSJob(job *hlsJob) {
+	job.stopOnce.Do(func() {
+		job.mu.Lock()
+		requestsDone := job.activeRequestsDone
+		job.mu.Unlock()
+		if job.cancel != nil {
+			job.cancel()
+		}
+		if job.done != nil {
+			select {
+			case <-job.done:
+			case <-time.After(5 * time.Second):
+			}
+		}
+		cleanup := func() {
+			service.hlsMu.Lock()
+			defer service.hlsMu.Unlock()
+			_ = os.RemoveAll(job.directory)
+			_ = removeEmptyParents(filepath.Dir(job.directory), service.mediaOptions.TempDirectory)
+		}
+		if requestsDone == nil {
+			cleanup()
+			return
+		}
+		go func() {
+			<-requestsDone
+			cleanup()
+		}()
+	})
 }
 
 func (service *Service) stopHLSSession(sessionID string) {
@@ -637,6 +1442,7 @@ func rewriteLocalPlaylistWithReferencePolicy(contents []byte, rejectUnresolved b
 		return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
 	}
 	output := newBoundedPlaylistOutput(len(contents))
+	hasStartDirective := bytes.HasPrefix(contents, []byte("#EXT-X-START:")) || bytes.Contains(contents, []byte("\n#EXT-X-START:"))
 	scanner := playlistScanner(contents)
 	mediaSegmentPending := false
 	for scanner.Scan() {
@@ -674,7 +1480,7 @@ func rewriteLocalPlaylistWithReferencePolicy(contents []byte, rejectUnresolved b
 		if err := output.writeByte('\n'); err != nil {
 			return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
 		}
-		if line == "#EXTM3U" {
+		if line == "#EXTM3U" && !hasStartDirective {
 			if err := output.writeString("#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n"); err != nil {
 				return nil, fmt.Errorf("%w: invalid local HLS playlist: %w", ErrMediaProcessingFailed, err)
 			}

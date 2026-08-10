@@ -33,6 +33,7 @@ func TestDeliverySessionAndHandleSerializationExposeNoNativeSecrets(t *testing.T
 		}},
 	}
 	handle := deliveryHandleForSession(session.ID, sessionToken, session.Sources, []storedAsset{{
+
 		ID: "stream-1", URL: providerURL, Headers: map[string]string{"Authorization": "Bearer provider-secret"},
 	}})
 	if !handle.Valid() {
@@ -97,6 +98,92 @@ func TestDeliveryRequestPreservesHEADRangeAndSanitizesNativeRouting(t *testing.T
 	}
 	if request.URL.Query().Get("file") != "" || request.URL.Query().Get("start") != "" {
 		t.Fatal("delivery adaptation mutated the adapter request")
+	}
+}
+
+func TestSeekableDeliveryChildrenAreSignedWithoutSegmentTableAllocation(t *testing.T) {
+	handle := DeliveryHandle{
+		sessionID: "session-id", assetID: "stream-1", token: "native-token", children: newDeliveryChildTable(),
+		childSigningKey: [32]byte{1},
+	}
+	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	handle.children.now = func() time.Time { return now }
+	playlistID, err := handle.children.register(deliveryChildState{
+		assetID: "stream-1", file: "index.m3u8", retainWhileActive: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := deliveryChildState{
+		assetID: "stream-1", file: "seek-009999.ts", start: "29997", retainWhileActive: true,
+	}
+	childID, ok := seekableDeliveryChildID(state, handle)
+	if !ok || !strings.HasPrefix(childID, "hlsseek-009999-") {
+		t.Fatalf("boundary seek child=%q valid=%v", childID, ok)
+	}
+	template, err := newDeliveryLinkTemplate(httptest.NewRequest(http.MethodGet, "/Videos/item/stream.m3u8?PlaySessionId=compat-play-session&MediaSourceId=compat-media-source", nil).URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(4 * time.Minute)
+	request := httptest.NewRequest(http.MethodGet, template.childURL(childID, state), nil)
+	resolved, err := requestForDelivery(request, handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.child || resolved.assetID != "stream-1" || resolved.request.URL.Query().Get("file") != "seek-009999.ts" || resolved.request.URL.Query().Get("start") != "29997" {
+		t.Fatalf("resolved deterministic child=%+v query=%s", resolved, resolved.request.URL.RawQuery)
+	}
+	var dashedID string
+	for index := range maximumPlaylistReferences {
+		candidateState := deliveryChildState{
+			assetID: "stream-1", file: fmt.Sprintf("seek-%06d.ts", index),
+			start: hlsStartKey(float64(index * hlsSegmentDurationSeconds)), retainWhileActive: true,
+		}
+		candidate, valid := seekableDeliveryChildID(candidateState, handle)
+		if valid && strings.Count(candidate, "-") > 2 {
+			dashedID = candidate
+			break
+		}
+	}
+	if dashedID == "" {
+		t.Fatal("fixture produced no URL-safe HMAC containing a hyphen")
+	}
+	if dashed, valid := seekableDeliveryChildState(dashedID, handle); !valid || dashed.file == "" {
+		t.Fatalf("URL-safe HMAC hyphen child=%q valid=%v state=%+v", dashedID, valid, dashed)
+	}
+	handle.children.mu.Lock()
+	allocated := len(handle.children.entries)
+	handle.children.mu.Unlock()
+	if allocated != 1 {
+		t.Fatalf("deterministic seek changed child table size to %d, want retained playlist only", allocated)
+	}
+	now = now.Add(4 * time.Minute)
+	handle.children.prune()
+	if _, ok := handle.children.resolve(playlistID); !ok {
+		t.Fatal("stateless segment activity did not retain the media-playlist capability")
+	}
+	foreign := handle
+	foreign.childSigningKey[0] = 2
+	if _, err := requestForDelivery(request, foreign); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("cross-handle deterministic child error=%v", err)
+	}
+	tamperedID := childID[:len(childID)-1] + "A"
+	if tamperedID == childID {
+		tamperedID = childID[:len(childID)-1] + "B"
+	}
+	tampered := httptest.NewRequest(http.MethodGet, template.childURL(tamperedID, state), nil)
+	if _, err := requestForDelivery(tampered, handle); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("tampered deterministic child error=%v", err)
+	}
+	outOfRange := "hlsseek-010000-" + strings.Repeat("A", 22)
+	invalid := httptest.NewRequest(http.MethodGet, template.childURL(outOfRange, state), nil)
+	if _, err := requestForDelivery(invalid, handle); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("out-of-range deterministic child error=%v", err)
+	}
+	handle.children.clear()
+	if _, err := requestForDelivery(request, handle); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("closed handle accepted deterministic child: %v", err)
 	}
 }
 

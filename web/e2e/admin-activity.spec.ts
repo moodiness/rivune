@@ -4,7 +4,7 @@ const now = "2026-07-31T12:00:00Z";
 
 const activity = {
   summary: { activeSessions: 3, activeJobs: 2, processingSlots: 1, processingLimit: 2, storageBytes: 0, storageLimitBytes: 1_073_741_824 },
-  diagnostics: { videoEncoder: "h264", hardwareToneMap: false },
+  diagnostics: { ffmpegVersion: "7.1", ffprobeVersion: "7.1", hardwareAcceleration: "software", videoEncoder: "h264", hardwareToneMap: false, transcodeThreads: 4, maximumReadRate: 1.5, totals: { started: 7, succeeded: 5, failed: 1, softwareFallbacks: 1 }, pools: { process: { active: 1, limit: 2 }, probe: { active: 0, limit: 2 }, subtitle: { active: 0, limit: 2 }, trickplay: { active: 0, limit: 1 } } },
   sessions: [
     {
       id: "11111111-1111-4111-8111-111111111111",
@@ -85,6 +85,7 @@ const activity = {
       lastSeenAt: now,
       progressPercent: 42.4,
       speed: 1.037,
+      startupDurationSeconds: 3.25,
     },
     {
       assetId: "queued-movie-source",
@@ -131,7 +132,7 @@ test("now-playing sessions render artwork, provider badges, transcoding progress
   const playbackProgress = artworkSession.getByRole("progressbar", { name: "10m 5s / 22m" });
   await expect(playbackProgress).toBeVisible();
   expect(await playbackProgress.evaluate((progress: HTMLProgressElement) => progress.value / progress.max)).toBeCloseTo(605 / 1320, 4);
-  await expect(artworkSession.locator(".activity-progress-status")).toHaveText("42% · 1.04×");
+  await expect(artworkSession.locator(".activity-progress-status")).toHaveText("42% · 1.04× · start 3.25s");
   await expect(artworkSession.getByText("Video conversion required")).toBeVisible();
   await expect(artworkSession.getByText("Video H265 → H264")).toBeVisible();
   await expect(artworkSession.getByText("Audio DTS → AAC")).toBeVisible();
@@ -140,6 +141,8 @@ test("now-playing sessions render artwork, provider badges, transcoding progress
   await expect(artworkSession.getByText("Burn-in subtitles")).toBeVisible();
   await expect(artworkSession.getByText("Tone mapping")).toBeVisible();
   await expect(artworkSession.getByText("Transcode", { exact: true })).toHaveCount(2);
+  await expect(page.locator(".activity-overview")).toContainText("1.50× max");
+  await expect(page.locator(".activity-overview")).toContainText("total 7/5/1 · fallback 1");
 
   const longSession = page.locator(".activity-session").filter({ hasText: "Long feature" });
   await expect(longSession.getByRole("progressbar", { name: "10m 5s / 2h 49m" })).toBeVisible();
@@ -171,7 +174,7 @@ test("now-playing sessions render artwork, provider badges, transcoding progress
   await expect(missingSession.getByRole("progressbar")).toHaveCount(0);
 
   const transcodingJob = page.locator(".activity-job").filter({ hasText: "episode-1-source" });
-  await expect(transcodingJob.getByRole("status")).toHaveText("42% · 1.04×");
+  await expect(transcodingJob.getByRole("status")).toHaveText("42% · 1.04× · start 3.25s");
   const invalidJob = page.locator(".activity-job").filter({ hasText: "queued-movie-source" });
   await expect(invalidJob.getByRole("status")).toHaveCount(0);
 

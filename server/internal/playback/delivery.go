@@ -2,7 +2,9 @@ package playback
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -96,13 +98,14 @@ type Delivery struct {
 // deliberately private so transport adapters cannot inspect or expose native
 // playback credentials.
 type DeliveryHandle struct {
-	sessionID    string
-	assetID      string
-	token        string
-	defaultFile  string
-	defaultStart string
-	children     *deliveryChildTable
-	assets       *deliveryAssetTable
+	sessionID       string
+	assetID         string
+	token           string
+	defaultFile     string
+	defaultStart    string
+	children        *deliveryChildTable
+	assets          *deliveryAssetTable
+	childSigningKey [32]byte
 }
 
 type deliveryAssetTable struct {
@@ -182,6 +185,9 @@ func (service *Service) Serve(w http.ResponseWriter, r *http.Request, handle Del
 		return &deliveryRequestError{cause: err}
 	}
 	buildChildURL := func(state deliveryChildState) (string, error) {
+		if childID, ok := seekableDeliveryChildID(state, handle); ok {
+			return delivery.template.childURL(childID, state), nil
+		}
 		childID, registerErr := handle.children.register(state)
 		if registerErr != nil {
 			return "", registerErr
@@ -244,14 +250,19 @@ func requestForDelivery(request *http.Request, handle DeliveryHandle) (deliveryR
 	if childID, found, childErr := deliveryQueryScalar(request.URL.Query(), deliveryChildQueryName); childErr != nil {
 		return deliveryRequest{}, ErrSessionNotFound
 	} else if found {
-		if handle.children == nil || len(childID) == 0 || len(childID) > maximumDeliveryChildIDLength {
-			return deliveryRequest{}, ErrSessionNotFound
+		resolved, stateless := seekableDeliveryChildState(childID, handle)
+		if stateless {
+			if !handle.children.touchActivity() {
+				return deliveryRequest{}, ErrSessionNotFound
+			}
+		} else {
+			var ok bool
+			resolved, ok = handle.children.resolve(childID)
+			if !ok {
+				return deliveryRequest{}, ErrSessionNotFound
+			}
 		}
-		resolved, ok := handle.children.resolve(childID)
 		state = resolved
-		if !ok {
-			return deliveryRequest{}, ErrSessionNotFound
-		}
 		isChild = true
 	}
 	cloned := request.Clone(request.Context())
@@ -268,6 +279,47 @@ func requestForDelivery(request *http.Request, handle DeliveryHandle) (deliveryR
 		request: cloned, assetID: state.assetID, target: state.target,
 		signature: state.signature, template: template, child: isChild,
 	}, nil
+}
+
+func seekableDeliveryChildID(state deliveryChildState, handle DeliveryHandle) (string, bool) {
+	index, ok := seekableHLSSegmentIndex(state.file, maximumPlaylistReferences)
+	if !ok || state.assetID != handle.assetID || state.target != "" || state.signature != "" ||
+		state.start != hlsStartKey(float64(index*hlsSegmentDurationSeconds)) || handle.childSigningKey == ([32]byte{}) {
+		return "", false
+	}
+	signature := seekableDeliveryChildSignature(handle, index)
+	return fmt.Sprintf("hlsseek-%06d-%s", index, base64.RawURLEncoding.EncodeToString(signature)), true
+}
+
+func seekableDeliveryChildState(childID string, handle DeliveryHandle) (deliveryChildState, bool) {
+	parts := strings.SplitN(childID, "-", 3)
+	if len(parts) != 3 || parts[0] != "hlsseek" || len(parts[1]) != 6 || handle.childSigningKey == ([32]byte{}) {
+		return deliveryChildState{}, false
+	}
+	index, err := strconv.Atoi(parts[1])
+	if err != nil || index < 0 || index >= maximumPlaylistReferences || parts[1] != fmt.Sprintf("%06d", index) {
+		return deliveryChildState{}, false
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || len(signature) != 16 || base64.RawURLEncoding.EncodeToString(signature) != parts[2] ||
+		!hmac.Equal(signature, seekableDeliveryChildSignature(handle, index)) {
+		return deliveryChildState{}, false
+	}
+	return deliveryChildState{
+		assetID: handle.assetID, file: fmt.Sprintf("%s%06d.ts", hlsSeekableSegmentPrefix, index),
+		start: hlsStartKey(float64(index * hlsSegmentDurationSeconds)), retainWhileActive: true,
+	}, true
+}
+
+func seekableDeliveryChildSignature(handle DeliveryHandle, index int) []byte {
+	signer := hmac.New(sha256.New, handle.childSigningKey[:])
+	_, _ = signer.Write([]byte("rivune:hls-seek:v1\x00"))
+	_, _ = signer.Write([]byte(handle.sessionID))
+	_, _ = signer.Write([]byte{'\x00'})
+	_, _ = signer.Write([]byte(handle.assetID))
+	_, _ = signer.Write([]byte{'\x00'})
+	_, _ = signer.Write(strconv.AppendInt(nil, int64(index), 10))
+	return signer.Sum(nil)[:16]
 }
 
 // Close terminates a delivery through the same profile-bound Stop path used by
@@ -479,6 +531,21 @@ func (table *deliveryChildTable) resolve(childID string) (deliveryChildState, bo
 	table.activeAt = now
 	table.entries[childID] = entry
 	return entry.state, true
+}
+
+func (table *deliveryChildTable) touchActivity() bool {
+	if table == nil {
+		return false
+	}
+	table.mu.Lock()
+	defer table.mu.Unlock()
+	if table.closed {
+		return false
+	}
+	now := table.now()
+	table.expireLocked(now)
+	table.activeAt = now
+	return true
 }
 
 func (table *deliveryChildTable) clear() {
@@ -703,6 +770,9 @@ func deliveryHandleForSession(sessionID, token string, sources []Source, assets 
 	handle := DeliveryHandle{
 		sessionID: sessionID, assetID: selectedID, token: token,
 		children: newDeliveryChildTable(), assets: &deliveryAssetTable{ids: assetIDs},
+	}
+	if _, err := rand.Read(handle.childSigningKey[:]); err != nil {
+		return DeliveryHandle{}
 	}
 	for index := range sources {
 		source := sources[index]

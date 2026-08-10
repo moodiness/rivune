@@ -28,6 +28,7 @@ type preparationResourceFetcher struct {
 	subtitleBatch     addon.ResourceBatch
 	validation        func([]string) error
 	sourceValidation  func(string) error
+	streamResponse    func(int32) (addon.ResourceBatch, error)
 }
 
 func (fetcher *preparationResourceFetcher) FetchPlaybackResource(ctx context.Context, principal auth.Principal, _ string, resource addon.ResourcePath) (addon.ResourceResult, error) {
@@ -72,7 +73,10 @@ func (fetcher *preparationResourceFetcher) validatePlaybackAccesses(addonIDs []s
 func (fetcher *preparationResourceFetcher) FetchAllPlaybackResources(_ context.Context, _ auth.Principal, resource addon.ResourcePath) (addon.ResourceBatch, error) {
 	switch resource.Resource {
 	case "stream":
-		fetcher.streamCalls.Add(1)
+		call := fetcher.streamCalls.Add(1)
+		if fetcher.streamResponse != nil {
+			return fetcher.streamResponse(call)
+		}
 		return addon.ResourceBatch{Results: []addon.ResourceResult{{
 			AddonID: "addon-id", ManifestID: "manifest-id",
 			Payload: []byte(`{"streams":[
@@ -86,6 +90,44 @@ func (fetcher *preparationResourceFetcher) FetchAllPlaybackResources(_ context.C
 	default:
 		return addon.ResourceBatch{}, nil
 	}
+}
+
+type concurrentRefreshFetcher struct {
+	calls      atomic.Int32
+	firstReady chan struct{}
+	release    chan struct{}
+	first      addon.ResourceResult
+	second     addon.ResourceResult
+	firstErr   error
+}
+
+func (fetcher *concurrentRefreshFetcher) FetchPlaybackResource(ctx context.Context, _ auth.Principal, _ string, _ addon.ResourcePath) (addon.ResourceResult, error) {
+	if fetcher.calls.Add(1) == 1 {
+		close(fetcher.firstReady)
+		select {
+		case <-ctx.Done():
+			return addon.ResourceResult{}, ctx.Err()
+		case <-fetcher.release:
+		}
+		return fetcher.first, fetcher.firstErr
+	}
+	return fetcher.second, nil
+}
+
+func (fetcher *concurrentRefreshFetcher) FetchAllPlaybackResources(context.Context, auth.Principal, addon.ResourcePath) (addon.ResourceBatch, error) {
+	return addon.ResourceBatch{}, nil
+}
+
+func (fetcher *concurrentRefreshFetcher) ValidatePlaybackAccess(context.Context, auth.Principal, string) error {
+	return nil
+}
+
+func (fetcher *concurrentRefreshFetcher) ValidatePlaybackAccesses(context.Context, auth.Principal, []string) error {
+	return nil
+}
+
+func (fetcher *concurrentRefreshFetcher) ValidatePlaybackAccessesTx(context.Context, pgx.Tx, auth.Principal, []string) error {
+	return nil
 }
 
 type countingProbeProcessor struct {
@@ -193,7 +235,7 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 		t.Fatalf("unexpected preparation: preparation=%+v probes=%d", prepared, processor.calls.Load())
 	}
 	service.preparations.mu.Lock()
-	cachedPlayback := service.preparations.entries[playbackPreparationCacheKey(selected.SourceRef, playbackPolicy{})].playback
+	cachedPlayback := service.preparations.entries[playbackPreparationCacheKey(selected.SourceRef, 1, playbackPolicy{})].playback
 	service.preparations.mu.Unlock()
 	if cachedPlayback.asset == nil {
 		t.Fatal("prepared playback did not retain its stream asset")
@@ -215,8 +257,258 @@ func TestSourcesAndPrepareKeepProviderURLsOpaqueAndInspectOnlySelection(t *testi
 	if _, err := service.Prepare(context.Background(), principal, PrepareInput{SourceRef: selected.SourceRef}); err != nil {
 		t.Fatal(err)
 	}
-	if processor.calls.Load() != 1 || fetcher.streamCalls.Load() != 2 || fetcher.subtitleCalls.Load() != 1 || fetcher.validationCalls.Load() != 4 || fetcher.validationAddonID != "addon-id" {
-		t.Fatalf("cached preparation repeated remote work or validated the wrong addon: probes=%d streams=%d subtitles=%d validations=%d addon=%q", processor.calls.Load(), fetcher.streamCalls.Load(), fetcher.subtitleCalls.Load(), fetcher.validationCalls.Load(), fetcher.validationAddonID)
+	if processor.calls.Load() != 1 || fetcher.streamCalls.Load() != 4 || fetcher.subtitleCalls.Load() != 1 || fetcher.validationCalls.Load() != 4 || fetcher.validationAddonID != "addon-id" {
+		t.Fatalf("cached preparation skipped refresh or repeated probe work: probes=%d streams=%d subtitles=%d validations=%d addon=%q", processor.calls.Load(), fetcher.streamCalls.Load(), fetcher.subtitleCalls.Load(), fetcher.validationCalls.Load(), fetcher.validationAddonID)
+	}
+}
+
+func TestResolveRefreshesSelectedProviderTransportAndFailsClosedWhenItDisappears(t *testing.T) {
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	profileID := "profile-id"
+	grantExpiresAt := now.Add(time.Hour)
+	principal := auth.Principal{
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+		SessionID: "auth-session-id", UserID: "user-id", DeviceID: "device-id",
+		ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
+	}
+	oldURL := "https://media.example/old.mkv?token=old-url-secret"
+	rotatedURL := "https://media.example/new.mp4?token=rotated-url-secret"
+	missingURL := "https://media.example/missing.mp4?token=missing-url-secret"
+	streamBatch := func(rawURL, authorization, filename string) addon.ResourceBatch {
+		payload := fmt.Sprintf(`{"streams":[{"name":"Stable source","url":%q,"behaviorHints":{"filename":%q,"proxyHeaders":{"request":{"Authorization":%q}}}}]}`, rawURL, filename, authorization)
+		return addon.ResourceBatch{Results: []addon.ResourceResult{{
+			AddonID: "addon-id", ManifestID: "manifest-id", Payload: []byte(payload),
+		}}}
+	}
+	fetcher := &preparationResourceFetcher{streamResponse: func(call int32) (addon.ResourceBatch, error) {
+		switch call {
+		case 1:
+			return streamBatch(oldURL, "Bearer old-authorization-secret", "stable-source"), nil
+		case 2:
+			return streamBatch(rotatedURL, "Bearer rotated-authorization-secret", "stable-source"), nil
+		default:
+			return streamBatch(missingURL, "Bearer missing-authorization-secret", "different-source"), nil
+		}
+	}}
+	processor := &countingProbeProcessor{inspection: MediaInspection{
+		Container: "mp4", VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1280, Height: 720}},
+		AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
+	}}
+	sessionTransaction := &playbackTransactionStub{
+		query: func(string, ...any) (pgx.Rows, error) { return emptyPlaybackRows{}, nil },
+		row:   playbackSessionIDRow{id: "playback-session-id"},
+	}
+	transactionCalls := 0
+	service := &Service{
+		addons: fetcher, processor: processor, now: func() time.Time { return now },
+		references: newSourceReferenceStore(func() time.Time { return now }),
+		probes:     newMediaProbeCache(func() time.Time { return now }), preparations: newPlaybackPreparationCache(func() time.Time { return now }),
+		hlsJobs: make(map[string]*hlsJob),
+		profileTxFactory: func(context.Context, auth.Principal) (playbackProfileTransaction, error) {
+			transactionCalls++
+			if transactionCalls == 4 {
+				return sessionTransaction, nil
+			}
+			return testPlaybackProfileTransaction{}, nil
+		},
+	}
+	listed, err := service.Sources(context.Background(), principal, SourcesInput{
+		MediaType: "movie", ResourceID: "resource-id",
+		Capabilities: Capabilities{
+			StreamingProtocols: []string{"http"}, Containers: []string{"mkv", "mp4"},
+			VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+		},
+	})
+	if err != nil || len(listed.Sources) != 1 {
+		t.Fatalf("list source: sources=%d err=%v", len(listed.Sources), err)
+	}
+	option := listed.Sources[0]
+	staleReference, err := service.references.get(option.SourceRef, principal)
+	if err != nil || staleReference.Asset == nil {
+		t.Fatalf("load listed source capability: asset=%+v err=%v", staleReference.Asset, err)
+	}
+	staleAsset := cloneStoredAsset(*staleReference.Asset)
+	stalePlayback := preparedPlayback{source: cloneSource(staleReference.Source), asset: &staleAsset, addonIDs: []string{"addon-id"}}
+	service.preparations.entries[playbackPreparationCacheKey(option.SourceRef, staleReference.TransportRevision, playbackPolicy{})] = playbackPreparationEntry{
+		playback: stalePlayback, expiresAt: staleReference.ExpiresAt,
+	}
+	staleProbeKey := mediaProbeKey(staleAsset)
+	service.probes.entries[staleProbeKey] = mediaProbeCacheEntry{inspection: MediaInspection{Container: "stale"}, expiresAt: now.Add(time.Hour)}
+	if _, err := service.Resolve(context.Background(), principal, ResolveInput{SourceRef: option.SourceRef}); err != nil {
+		t.Fatalf("resolve refreshed source: %v", err)
+	}
+	refreshed, err := service.references.get(option.SourceRef, principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.Owner.UserID != principal.UserID || refreshed.Owner.DeviceID != principal.DeviceID || refreshed.Source.ID != option.ID ||
+		refreshed.Source.URL != rotatedURL || refreshed.Source.Container != "mp4" || refreshed.Asset == nil ||
+		refreshed.Asset.URL != rotatedURL || refreshed.Asset.Headers["Authorization"] != "Bearer rotated-authorization-secret" {
+		t.Fatalf("refreshed capability changed owner or retained stale transport: %+v asset=%+v", refreshed.Source, refreshed.Asset)
+	}
+	processor.mu.Lock()
+	probedURL := processor.lastURL
+	processor.mu.Unlock()
+	if probedURL != rotatedURL {
+		t.Fatalf("probe used stale provider URL %q", probedURL)
+	}
+	if _, exists := service.probes.entries[staleProbeKey]; exists {
+		t.Fatal("rotated source retained stale probe cache entry")
+	}
+	_, err = service.Resolve(context.Background(), principal, ResolveInput{SourceRef: option.SourceRef})
+	if err != ErrSourceReferenceExpired {
+		t.Fatalf("disappeared selection error = %v, want opaque expiry", err)
+	}
+	if _, lookupErr := service.references.get(option.SourceRef, principal); lookupErr != ErrSourceReferenceExpired {
+		t.Fatalf("disappeared selection capability remained stored: %v", lookupErr)
+	}
+	for _, secret := range []string{oldURL, rotatedURL, missingURL, "missing-url-secret"} {
+		if strings.Contains(fmt.Sprint(err), secret) {
+			t.Fatalf("disappearance error leaked provider transport %q: %v", secret, err)
+		}
+	}
+}
+
+func TestConcurrentRefreshCASCannotEvictOrCacheOverNewerTransport(t *testing.T) {
+	now := time.Date(2026, time.August, 10, 14, 0, 0, 0, time.UTC)
+	profileID := "profile-id"
+	principal := auth.Principal{
+		SessionID: "auth-session-id", UserID: "user-id", DeviceID: "device-id", ActiveProfileID: &profileID,
+	}
+	resource := func(rawURL, authorization string) addon.ResourceResult {
+		payload := fmt.Sprintf(`{"streams":[{"name":"Stable source","url":%q,"behaviorHints":{"filename":"stable-source.mp4","proxyHeaders":{"request":{"Authorization":%q}}}}]}`, rawURL, authorization)
+		return addon.ResourceResult{AddonID: "addon-id", ManifestID: "manifest-id", Payload: []byte(payload)}
+	}
+	oldResult := resource("https://media.example/old.mp4?token=old", "Bearer old")
+	firstResult := resource("https://media.example/u1.mp4?token=u1", "Bearer u1")
+	secondResult := resource("https://media.example/u2.mp4?token=u2", "Bearer u2")
+	capabilities := Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}}
+	sources, assets, err := normalizeStreams(addon.ResourceBatch{Results: []addon.ResourceResult{oldResult}}, capabilities)
+	if err != nil || len(sources) != 1 || len(assets) != 1 {
+		t.Fatalf("normalize initial selection: sources=%d assets=%d err=%v", len(sources), len(assets), err)
+	}
+	oldAsset := cloneStoredAsset(assets[0])
+	store := newSourceReferenceStore(func() time.Time { return now })
+	initial, err := store.put(principal, sourceReference{
+		MediaType: "movie", AddonMediaType: "movie", ResourceID: "resource-id",
+		Source: sources[0], Asset: &oldAsset, Capabilities: capabilities,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetcher := &concurrentRefreshFetcher{
+		firstReady: make(chan struct{}), release: make(chan struct{}), first: firstResult, second: secondResult,
+	}
+	service := &Service{
+		addons: fetcher, now: func() time.Time { return now }, references: store,
+		preparations: newPlaybackPreparationCache(func() time.Time { return now }),
+		probes:       newMediaProbeCache(func() time.Time { return now }),
+	}
+	type refreshResult struct {
+		reference sourceReference
+		err       error
+	}
+	firstDone := make(chan refreshResult, 1)
+	go func() {
+		reference, refreshErr := service.refreshSourceReference(context.Background(), principal, initial)
+		firstDone <- refreshResult{reference: reference, err: refreshErr}
+	}()
+	select {
+	case <-fetcher.firstReady:
+	case <-time.After(time.Second):
+		t.Fatal("first refresh did not reach its provider fetch")
+	}
+
+	oldKey := playbackPreparationCacheKey(initial.ID, initial.TransportRevision, playbackPolicy{})
+	staleCall := &playbackPreparationCall{done: make(chan struct{})}
+	service.preparations.inFlight[oldKey] = staleCall
+	newer, err := service.refreshSourceReference(context.Background(), principal, initial)
+	if err != nil {
+		t.Fatalf("newer refresh: %v", err)
+	}
+	if newer.SelectionRevision != initial.SelectionRevision+1 || newer.TransportRevision != initial.TransportRevision+1 || newer.Asset == nil || newer.Asset.URL != "https://media.example/u2.mp4?token=u2" {
+		t.Fatalf("newer refresh did not install U2: selectionRevision=%d transportRevision=%d asset=%+v", newer.SelectionRevision, newer.TransportRevision, newer.Asset)
+	}
+	newerAsset := cloneStoredAsset(*newer.Asset)
+	newerPlayback := preparedPlayback{source: cloneSource(newer.Source), asset: &newerAsset}
+	newerKey := playbackPreparationCacheKey(newer.ID, newer.TransportRevision, playbackPolicy{})
+	service.preparations.entries[newerKey] = playbackPreparationEntry{playback: newerPlayback, expiresAt: newer.ExpiresAt}
+	newerProbeKey := mediaProbeKey(newerAsset)
+	service.probes.entries[newerProbeKey] = mediaProbeCacheEntry{inspection: MediaInspection{Container: "u2"}, expiresAt: newer.ExpiresAt}
+
+	close(fetcher.release)
+	var first refreshResult
+	select {
+	case first = <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first refresh did not finish after release")
+	}
+	if first.err != nil || first.reference.SelectionRevision != newer.SelectionRevision || first.reference.TransportRevision != newer.TransportRevision || first.reference.Asset == nil || first.reference.Asset.URL != newerAsset.URL || first.reference.Asset.Headers["Authorization"] != "Bearer u2" {
+		t.Fatalf("lost CAS did not converge on U2: reference=%+v asset=%+v err=%v", first.reference, first.reference.Asset, first.err)
+	}
+	staleAsset := cloneStoredAsset(oldAsset)
+	staleAsset.URL = "https://media.example/u1.mp4?token=u1"
+	staleAsset.Headers = map[string]string{"Authorization": "Bearer u1"}
+	staleSource := cloneSource(initial.Source)
+	staleSource.URL = staleAsset.URL
+	service.preparations.complete(oldKey, staleCall, service.preparations.generation, preparedPlayback{
+		source: staleSource, asset: &staleAsset,
+	}, nil, initial.ExpiresAt)
+
+	service.preparations.mu.Lock()
+	cachedNewer, newerCached := service.preparations.entries[newerKey]
+	_, staleCached := service.preparations.entries[oldKey]
+	service.preparations.mu.Unlock()
+	if !newerCached || cachedNewer.playback.asset == nil || cachedNewer.playback.asset.URL != newerAsset.URL || cachedNewer.playback.asset.Headers["Authorization"] != "Bearer u2" || staleCached {
+		t.Fatalf("stale completion changed revisioned cache: newer=%+v newerCached=%v staleCached=%v", cachedNewer.playback.asset, newerCached, staleCached)
+	}
+	service.probes.mu.Lock()
+	_, newerProbeCached := service.probes.entries[newerProbeKey]
+	service.probes.mu.Unlock()
+	if !newerProbeCached {
+		t.Fatal("lost CAS evicted U2 probe cache entry")
+	}
+	stored, err := store.get(initial.ID, principal)
+	if err != nil || stored.SelectionRevision != newer.SelectionRevision || stored.TransportRevision != newer.TransportRevision || stored.Asset == nil || stored.Asset.URL != newerAsset.URL || stored.Asset.Headers["Authorization"] != "Bearer u2" {
+		t.Fatalf("lost CAS restored U1 in the store: selectionRevision=%d transportRevision=%d asset=%+v err=%v", stored.SelectionRevision, stored.TransportRevision, stored.Asset, err)
+	}
+
+	fetcher.calls.Store(0)
+	fetcher.firstReady = make(chan struct{})
+	fetcher.release = make(chan struct{})
+	fetcher.firstErr = addon.ErrNotFound
+	terminalDone := make(chan refreshResult, 1)
+	go func() {
+		reference, refreshErr := service.refreshSourceReference(context.Background(), principal, newer)
+		terminalDone <- refreshResult{reference: reference, err: refreshErr}
+	}()
+	select {
+	case <-fetcher.firstReady:
+	case <-time.After(time.Second):
+		t.Fatal("terminal refresh did not reach its provider fetch")
+	}
+	latest, err := service.refreshSourceReference(context.Background(), principal, newer)
+	if err != nil || latest.SelectionRevision != newer.SelectionRevision+1 || latest.TransportRevision != newer.TransportRevision {
+		t.Fatalf("same-transport winner: selectionRevision=%d transportRevision=%d err=%v", latest.SelectionRevision, latest.TransportRevision, err)
+	}
+	close(fetcher.release)
+	var terminal refreshResult
+	select {
+	case terminal = <-terminalDone:
+	case <-time.After(time.Second):
+		t.Fatal("terminal refresh did not finish after release")
+	}
+	if terminal.err != nil || terminal.reference.SelectionRevision != latest.SelectionRevision || terminal.reference.TransportRevision != latest.TransportRevision || terminal.reference.Asset == nil || terminal.reference.Asset.URL != newerAsset.URL {
+		t.Fatalf("stale terminal refresh did not converge: reference=%+v asset=%+v err=%v", terminal.reference, terminal.reference.Asset, terminal.err)
+	}
+	service.preparations.mu.Lock()
+	_, newerCached = service.preparations.entries[newerKey]
+	service.preparations.mu.Unlock()
+	service.probes.mu.Lock()
+	_, newerProbeCached = service.probes.entries[newerProbeKey]
+	service.probes.mu.Unlock()
+	if !newerCached || !newerProbeCached {
+		t.Fatalf("stale terminal refresh evicted U2 caches: preparation=%v probe=%v", newerCached, newerProbeCached)
 	}
 }
 
@@ -300,6 +592,12 @@ func TestCachedSubtitleProviderRevocationBlocksResolveBeforeSessionCreation(t *t
 			AddonID: "subtitle-addon", ManifestID: "subtitle-manifest",
 			Payload: []byte(`{"subtitles":[{"id":"english","url":"https://subtitles.example/english.srt","lang":"en"}]}`),
 		}}},
+		streamResponse: func(int32) (addon.ResourceBatch, error) {
+			return addon.ResourceBatch{Results: []addon.ResourceResult{{
+				AddonID: "source-addon", ManifestID: "source-manifest",
+				Payload: []byte(`{"streams":[{"url":"https://media.example/movie.mp4"}]}`),
+			}}}, nil
+		},
 		validation: func(addonIDs []string) error {
 			if revoked && strings.Join(addonIDs, ",") == "source-addon,subtitle-addon" {
 				return addon.ErrNotFound
@@ -387,7 +685,7 @@ func TestLateSourceRevocationBlocksPreparedPlaybackAtFinalBoundary(t *testing.T)
 			references := newSourceReferenceStore(func() time.Time { return now })
 			reference, err := references.put(principal, sourceReference{
 				MediaType: "movie", AddonMediaType: "movie", ResourceID: "resource-id",
-				Source:       Source{ID: "source-id", AddonID: "source-addon", Mode: "direct", URL: "https://media.example/movie.mp4", Protocol: "http", Container: "mp4", Compatible: true},
+				Source:       Source{ID: "source-id", AddonID: "addon-id", ManifestID: "manifest-id", Mode: "direct", URL: "https://media.example/movie.mp4", Protocol: "http", Container: "mp4", Compatible: true},
 				Asset:        &storedAsset{ID: "source-id", Kind: "stream", URL: "https://media.example/movie.mp4", Container: "mp4"},
 				Capabilities: Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}},
 			})
@@ -447,8 +745,8 @@ func TestPrepareAllowsPlaybackWithoutAddonProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare local playback: %v", err)
 	}
-	if prepared.Mode != "youtube" || len(fetcher.validationBatches) != 1 || len(fetcher.validationBatches[0]) != 0 {
-		t.Fatalf("local preparation or provider validation = %+v, batches=%#v", prepared, fetcher.validationBatches)
+	if prepared.Mode != "youtube" || fetcher.streamCalls.Load() != 0 || len(fetcher.validationBatches) != 1 || len(fetcher.validationBatches[0]) != 0 {
+		t.Fatalf("local preparation refetched provider or changed validation: preparation=%+v streamCalls=%d batches=%#v", prepared, fetcher.streamCalls.Load(), fetcher.validationBatches)
 	}
 }
 
@@ -608,12 +906,13 @@ func TestPreparedPlaybackAddonIDsAreDistinctAndOmitLocalAssets(t *testing.T) {
 	}
 }
 
-func TestPreparationCacheIdentityIncludesEffectiveTranscodingPolicy(t *testing.T) {
-	allowed := playbackPreparationCacheKey("source-reference", playbackPolicy{allowTranscoding: true, maximumHeight: 1080})
-	disabled := playbackPreparationCacheKey("source-reference", playbackPolicy{allowTranscoding: false, maximumHeight: 1080})
-	lowerResolution := playbackPreparationCacheKey("source-reference", playbackPolicy{allowTranscoding: true, maximumHeight: 720})
-	if allowed == disabled || allowed == lowerResolution || disabled == lowerResolution {
-		t.Fatalf("policy-sensitive cache identities collided: allowed=%q disabled=%q lower=%q", allowed, disabled, lowerResolution)
+func TestPreparationCacheIdentityIncludesTransportRevisionAndPolicy(t *testing.T) {
+	allowed := playbackPreparationCacheKey("source-reference", 1, playbackPolicy{allowTranscoding: true, maximumHeight: 1080})
+	disabled := playbackPreparationCacheKey("source-reference", 1, playbackPolicy{allowTranscoding: false, maximumHeight: 1080})
+	lowerResolution := playbackPreparationCacheKey("source-reference", 1, playbackPolicy{allowTranscoding: true, maximumHeight: 720})
+	newerRevision := playbackPreparationCacheKey("source-reference", 2, playbackPolicy{allowTranscoding: true, maximumHeight: 1080})
+	if allowed == disabled || allowed == lowerResolution || allowed == newerRevision || disabled == lowerResolution {
+		t.Fatalf("revision/policy-sensitive cache identities collided: allowed=%q disabled=%q lower=%q newer=%q", allowed, disabled, lowerResolution, newerRevision)
 	}
 }
 
@@ -636,5 +935,61 @@ func TestCloneCapabilitiesIsolatesAdditiveModeAndContainerProfileSlices(t *testi
 	}
 	if cloned.HLSSegmentContainer != "mp4" || cloned.MaximumVideoBitrateKbps != 8000 || cloned.MaximumAudioChannels != 2 || cloned.MaximumHeight != 1080 || cloned.TranscodeVideoBitrateKbps != 12000 {
 		t.Fatalf("capability clone lost additive limits: %+v", cloned)
+	}
+}
+
+func TestPlaybackPreparationCacheBoundEvictsDeterministically(t *testing.T) {
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	cache := newPlaybackPreparationCache(func() time.Time { return now })
+	expiresAt := now.Add(time.Hour)
+	for index := range maximumPlaybackPreparations {
+		key := fmt.Sprintf("reference-%04d", index)
+		call := &playbackPreparationCall{done: make(chan struct{})}
+		cache.inFlight[key] = call
+		cache.complete(key, call, cache.generation, preparedPlayback{}, nil, expiresAt)
+	}
+	newKey := "reference-new"
+	call := &playbackPreparationCall{done: make(chan struct{})}
+	cache.inFlight[newKey] = call
+	cache.complete(newKey, call, cache.generation, preparedPlayback{}, nil, expiresAt)
+	if len(cache.entries) != maximumPlaybackPreparations {
+		t.Fatalf("preparation cache size = %d, want %d", len(cache.entries), maximumPlaybackPreparations)
+	}
+	if _, exists := cache.entries["reference-0000"]; exists {
+		t.Fatal("deterministic earliest preparation survived overflow")
+	}
+	if _, exists := cache.entries[newKey]; !exists {
+		t.Fatal("new preparation was not admitted after deterministic eviction")
+	}
+}
+
+func TestPlaybackPreparationCacheClearDetachesInFlightGeneration(t *testing.T) {
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	cache := newPlaybackPreparationCache(func() time.Time { return now })
+	key := "reference|true|1080"
+	oldCall := &playbackPreparationCall{done: make(chan struct{})}
+	oldGeneration := cache.generation
+	cache.inFlight[key] = oldCall
+
+	cache.clear()
+	newCall := &playbackPreparationCall{done: make(chan struct{})}
+	newGeneration := cache.generation
+	cache.inFlight[key] = newCall
+	cache.complete(key, oldCall, oldGeneration, preparedPlayback{}, nil, now.Add(time.Hour))
+	if cache.inFlight[key] != newCall {
+		t.Fatal("detached old preparation removed the replacement in-flight call")
+	}
+	if len(cache.entries) != 0 {
+		t.Fatal("detached old preparation repopulated a cleared cache")
+	}
+	select {
+	case <-oldCall.done:
+	default:
+		t.Fatal("detached old preparation did not notify its original waiter")
+	}
+
+	cache.complete(key, newCall, newGeneration, preparedPlayback{}, nil, now.Add(time.Hour))
+	if len(cache.inFlight) != 0 || len(cache.entries) != 1 {
+		t.Fatalf("replacement completion state: inFlight=%d entries=%d", len(cache.inFlight), len(cache.entries))
 	}
 }

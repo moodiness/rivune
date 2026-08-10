@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -41,6 +42,10 @@ type Service struct {
 	pool                    *pgxpool.Pool
 	addons                  ResourceFetcher
 	client                  *http.Client
+	directStreams           directStreamAdmission
+	directStreamGlobalLimit int
+	directStreamOwnerLimit  int
+	directStreamIdleTimeout time.Duration
 	introDBClient           *http.Client
 	introDBBaseURL          string
 	processor               MediaProcessor
@@ -50,7 +55,12 @@ type Service struct {
 	probes                  *mediaProbeCache
 	preparations            *playbackPreparationCache
 	targetSigningKey        [32]byte
+	hlsResetMu              sync.RWMutex
 	hlsMu                   sync.Mutex
+	hlsStorageMu            sync.Mutex
+	hlsWorkspaceGeneration  atomic.Uint64
+	hlsSeekMu               sync.Mutex
+	hlsSeekGates            map[string]*hlsSeekGate
 	introDBCacheStores      atomic.Uint64
 	deliveryChildrenMu      sync.Mutex
 	deliveryChildren        *deliveryChildBudget
@@ -62,8 +72,15 @@ type Service struct {
 }
 
 const (
-	maximumAggregateProviderStreams   = 512
-	maximumAggregateProviderSubtitles = 1024
+	maximumAggregateProviderStreams       = 512
+	maximumAggregateProviderSubtitles     = 1024
+	maximumPlaybackSessionsPerAuthSession = 8
+	maximumPlaybackSessionsPerProfile     = 64
+	maximumPlaybackSessionsGlobal         = 256
+	// One selected 8 KiB stream URL plus 1,024 8 KiB subtitle URLs remains below
+	// this bound even when every URL byte needs JSON escaping, with room for headers and probe metadata.
+	maximumPlaybackSessionAssetBytes       = 24 << 20
+	playbackSessionAdmissionLockID   int64 = 0x524956504c415953
 )
 
 type fetchedResources struct {
@@ -77,7 +94,10 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 	transport.DialContext = netguard.DialContextPublic
 	transport.MaxResponseHeaderBytes = 64 << 10
 	transport.ResponseHeaderTimeout = 15 * time.Second
-	transport.MaxIdleConnsPerHost = 8
+	transport.MaxIdleConns = maximumDirectStreamsGlobal
+	transport.MaxIdleConnsPerHost = maximumDirectStreamsPerHost
+	transport.MaxConnsPerHost = maximumDirectStreamsPerHost
+	transport.IdleConnTimeout = 90 * time.Second
 	options = normalizeMediaOptions(options)
 	if err := os.RemoveAll(options.TempDirectory); err != nil {
 		return nil, fmt.Errorf("clear media workspace: %w", err)
@@ -92,7 +112,9 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 	now := func() time.Time { return time.Now().UTC() }
 	return &Service{
 		pool: pool, addons: addons, client: &http.Client{Transport: transport, CheckRedirect: playbackRedirectPolicy}, processor: processor,
-		introDBClient: &http.Client{Transport: transport.Clone(), Timeout: 8 * time.Second}, introDBBaseURL: introDBDefaultBaseURL,
+		directStreamGlobalLimit: maximumDirectStreamsGlobal, directStreamOwnerLimit: maximumDirectStreamsPerOwner,
+		directStreamIdleTimeout: directStreamReadIdleTimeout,
+		introDBClient:           &http.Client{Transport: transport.Clone(), Timeout: 8 * time.Second}, introDBBaseURL: introDBDefaultBaseURL,
 		now: now, mediaOptions: options, hlsJobs: make(map[string]*hlsJob), targetSigningKey: targetSigningKey,
 		deliveryChildren: newDeliveryChildBudget(maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerProfile),
 		references:       newSourceReferenceStore(now), probes: newMediaProbeCache(now), preparations: newPlaybackPreparationCache(now),
@@ -110,9 +132,17 @@ func playbackRedirectPolicy(request *http.Request, via []*http.Request) error {
 	if previous.URL.Scheme == "https" && request.URL.Scheme != "https" {
 		return errors.New("playback HTTPS redirect downgrade refused")
 	}
-	if !strings.EqualFold(previous.URL.Host, request.URL.Host) {
-		request.Header = make(http.Header)
-		request.Header.Set("User-Agent", "Rivune-Playback/1")
+	previousOrigin, previousOriginValid := canonicalURLOrigin(previous.URL)
+	requestOrigin, requestOriginValid := canonicalURLOrigin(request.URL)
+	if !previousOriginValid || !requestOriginValid || previousOrigin != requestOrigin {
+		redirectHeaders := make(http.Header)
+		for _, name := range []string{"Range", "If-Range", "If-None-Match", "If-Modified-Since"} {
+			for _, value := range request.Header.Values(name) {
+				redirectHeaders.Add(name, value)
+			}
+		}
+		redirectHeaders.Set("User-Agent", "Rivune-Playback/1")
+		request.Header = redirectHeaders
 	}
 	return nil
 }
@@ -252,7 +282,7 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 		return Preparation{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if len(input.SourceRef) < 16 || len(input.SourceRef) > 128 || !validPlaybackStart(input.StartSeconds) {
+	if len(input.SourceRef) < 16 || len(input.SourceRef) > 128 || !validPlaybackStart(input.StartSeconds) || !validPlaybackMaximumHeight(input.MaximumHeight) {
 		return Preparation{}, ErrInvalidInput
 	}
 	reference, err := service.references.get(input.SourceRef, principal)
@@ -262,10 +292,9 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 	if err := tx.Commit(ctx); err != nil {
 		return Preparation{}, fmt.Errorf("commit active playback profile authorization: %w", err)
 	}
-	if strings.TrimSpace(reference.Source.AddonID) != "" {
-		if err := service.validateSourceReferenceAccess(ctx, principal, reference); err != nil {
-			return Preparation{}, err
-		}
+	reference, err = service.refreshSourceReference(ctx, principal, reference)
+	if err != nil {
+		return Preparation{}, err
 	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
 	policy := playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight}
@@ -312,7 +341,7 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 		return Preparation{}, err
 	}
 	if err := service.validatePreparedPlaybackAccess(ctx, principal, prepared.addonIDs); err != nil {
-		service.preparations.evict(reference.ID, policy)
+		service.preparations.evict(reference, policy)
 		service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
 		return Preparation{}, err
 	}
@@ -342,10 +371,9 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 	if err := tx.Commit(ctx); err != nil {
 		return Session{}, fmt.Errorf("commit active playback profile authorization: %w", err)
 	}
-	if strings.TrimSpace(reference.Source.AddonID) != "" {
-		if err := service.validateSourceReferenceAccess(ctx, principal, reference); err != nil {
-			return Session{}, err
-		}
+	reference, err = service.refreshSourceReference(ctx, principal, reference)
+	if err != nil {
+		return Session{}, err
 	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
 	policy := playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight}
@@ -391,9 +419,122 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 	assets := append(streamAssets, subtitleAssets...)
 	session, err := service.createSession(ctx, principal, reference, input.TitleID, sources, subtitles, assets, prepared.addonIDs, prepared.providerErrors, deliveryHandle)
 	if err == ErrSourceReferenceExpired {
-		service.preparations.evict(reference.ID, policy)
+		service.preparations.evict(reference, policy)
 	}
 	return session, err
+}
+
+func (service *Service) refreshSourceReference(ctx context.Context, principal auth.Principal, reference sourceReference) (sourceReference, error) {
+	addonID := strings.TrimSpace(reference.Source.AddonID)
+	if addonID == "" {
+		return reference, nil
+	}
+	if err := service.validateSourceReferenceAccess(ctx, principal, reference); err != nil {
+		return sourceReference{}, err
+	}
+	result, err := service.addons.FetchPlaybackResource(ctx, principal, addonID, addon.ResourcePath{
+		Resource: "stream", Type: reference.AddonMediaType, ID: reference.ResourceID,
+	})
+	if err != nil {
+		if errors.Is(err, addon.ErrNotFound) || errors.Is(err, addon.ErrForbidden) ||
+			errors.Is(err, addon.ErrActiveProfileRequired) || errors.Is(err, addon.ErrInvalidInput) {
+			return service.expireSourceReference(principal, reference)
+		}
+		return sourceReference{}, ErrProviderUnavailable
+	}
+	candidates, assets, err := normalizeStreams(addon.ResourceBatch{Results: []addon.ResourceResult{result}}, reference.Capabilities)
+	if err != nil {
+		return sourceReference{}, ErrProviderUnavailable
+	}
+	snapshotIdentity := stableSourceIdentity(reference.Source)
+	selectedIndex := -1
+	for index := range candidates {
+		candidate := candidates[index]
+		matches := snapshotIdentity != "" && stableSourceIdentity(candidate) == snapshotIdentity
+		if snapshotIdentity == "" {
+			matches = strings.TrimSpace(reference.Source.ManifestID) != "" &&
+				strings.TrimSpace(candidate.AddonID) == addonID &&
+				strings.TrimSpace(candidate.ManifestID) == strings.TrimSpace(reference.Source.ManifestID) &&
+				candidate.StreamIndex == reference.Source.StreamIndex
+		}
+		if !matches {
+			continue
+		}
+		if selectedIndex >= 0 {
+			return service.expireSourceReference(principal, reference)
+		}
+		selectedIndex = index
+	}
+	if selectedIndex < 0 {
+		return service.expireSourceReference(principal, reference)
+	}
+	selected := cloneSource(candidates[selectedIndex])
+	freshAssetIndex := storedAssetIndex(assets, selected.ID)
+	selected.ID = reference.Source.ID
+	var selectedAsset *storedAsset
+	if freshAssetIndex >= 0 {
+		asset := cloneStoredAsset(assets[freshAssetIndex])
+		asset.ID = selected.ID
+		selectedAsset = &asset
+	}
+	changed := sourceTransportChanged(reference.Source, reference.Asset, selected, selectedAsset)
+	updated, replaced, err := service.references.replaceSelection(reference.ID, principal, reference.SelectionRevision, selected, selectedAsset)
+	if err != nil {
+		return sourceReference{}, err
+	}
+	if replaced && changed {
+		service.evictStaleSourcePreparation(reference)
+	}
+	return updated, nil
+}
+
+func sourceTransportChanged(previousSource Source, previousAsset *storedAsset, source Source, asset *storedAsset) bool {
+	if previousSource.Mode != source.Mode || previousSource.URL != source.URL || previousSource.YTID != source.YTID ||
+		previousSource.InfoHash != source.InfoHash || previousSource.Protocol != source.Protocol || previousSource.Container != source.Container {
+		return true
+	}
+	if (previousAsset == nil) != (asset == nil) {
+		return true
+	}
+	if previousAsset == nil {
+		return false
+	}
+	if previousAsset.URL != asset.URL || previousAsset.Container != asset.Container || len(previousAsset.Headers) != len(asset.Headers) {
+		return true
+	}
+	for name, value := range previousAsset.Headers {
+		candidateValue, exists := asset.Headers[name]
+		if !exists || candidateValue != value {
+			return true
+		}
+	}
+	return false
+}
+
+func (service *Service) expireSourceReference(principal auth.Principal, reference sourceReference) (sourceReference, error) {
+	current, expired, err := service.references.expireSelection(reference.ID, principal, reference.SelectionRevision)
+	if err != nil {
+		return sourceReference{}, err
+	}
+	if !expired {
+		return current, nil
+	}
+	service.evictStaleSourcePreparation(reference)
+	return sourceReference{}, ErrSourceReferenceExpired
+}
+
+func (service *Service) evictStaleSourcePreparation(reference sourceReference) {
+	if service.preparations != nil {
+		service.preparations.evictRevision(reference.ID, reference.TransportRevision)
+	}
+	if service.probes == nil || reference.Asset == nil {
+		return
+	}
+	key := mediaProbeKey(*reference.Asset)
+	service.probes.mu.Lock()
+	service.probes.generation++
+	delete(service.probes.entries, key)
+	service.probes.mu.Unlock()
 }
 
 func (service *Service) validateSourceReferenceAccess(ctx context.Context, principal auth.Principal, reference sourceReference) error {
@@ -436,14 +577,53 @@ func (service *Service) validatePreparedPlaybackAccessTx(ctx context.Context, tx
 	return nil
 }
 
+type playbackSessionLimits struct {
+	perAuthSession int
+	perProfile     int
+	global         int
+}
+
+func playbackSessionDefaultLimits() playbackSessionLimits {
+	return playbackSessionLimits{
+		perAuthSession: maximumPlaybackSessionsPerAuthSession,
+		perProfile:     maximumPlaybackSessionsPerProfile,
+		global:         maximumPlaybackSessionsGlobal,
+	}
+}
+
+func encodePlaybackSessionAssets(assets []storedAsset) ([]byte, error) {
+	if assets == nil {
+		assets = []storedAsset{}
+	}
+	var encoded bytes.Buffer
+	output := &maximumWriter{destination: &encoded, remaining: maximumPlaybackSessionAssetBytes + 1}
+	encoder := json.NewEncoder(output)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(assets); err != nil {
+		if output.exceeded || errors.Is(err, errMediaOutputLimit) {
+			return nil, fmt.Errorf("%w: playback session assets exceed %d bytes", ErrMediaCapacityReached, maximumPlaybackSessionAssetBytes)
+		}
+		return nil, fmt.Errorf("encode playback assets: %w", err)
+	}
+	payload := bytes.TrimSuffix(encoded.Bytes(), []byte{'\n'})
+	if len(payload) > maximumPlaybackSessionAssetBytes {
+		return nil, fmt.Errorf("%w: playback session assets exceed %d bytes", ErrMediaCapacityReached, maximumPlaybackSessionAssetBytes)
+	}
+	return payload, nil
+}
+
 func (service *Service) createSession(ctx context.Context, principal auth.Principal, reference sourceReference, titleID string, sources []Source, subtitles []Subtitle, assets []storedAsset, addonIDs []string, providerErrors []ProviderFailure, deliveryHandle *DeliveryHandle) (Session, error) {
+	return service.createSessionWithLimits(ctx, principal, reference, titleID, sources, subtitles, assets, addonIDs, providerErrors, deliveryHandle, playbackSessionDefaultLimits())
+}
+
+func (service *Service) createSessionWithLimits(ctx context.Context, principal auth.Principal, reference sourceReference, titleID string, sources []Source, subtitles []Subtitle, assets []storedAsset, addonIDs []string, providerErrors []ProviderFailure, deliveryHandle *DeliveryHandle, limits playbackSessionLimits) (Session, error) {
 	token, tokenHash, err := newSessionToken()
 	if err != nil {
 		return Session{}, fmt.Errorf("create playback token: %w", err)
 	}
-	assetsJSON, err := json.Marshal(assets)
+	assetsJSON, err := encodePlaybackSessionAssets(assets)
 	if err != nil {
-		return Session{}, fmt.Errorf("encode playback assets: %w", err)
+		return Session{}, err
 	}
 	now := service.now()
 	expiresAt := now.Add(sessionTTL)
@@ -456,12 +636,10 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 	if err := service.validatePreparedPlaybackAccessTx(ctx, tx, principal, addonIDs); err != nil {
 		return Session{}, err
 	}
-	rows, err := tx.Query(ctx, `
-		DELETE FROM playback_sessions
-		WHERE profile_id = $1::uuid
-		  AND (expires_at <= now() OR last_seen_at <= now() - $2::interval)
-		RETURNING id::text
-	`, *principal.ActiveProfileID, intervalLiteral(playbackSessionIdleTTL))
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", playbackSessionAdmissionLockID); err != nil {
+		return Session{}, fmt.Errorf("lock playback session admission: %w", err)
+	}
+	rows, err := tx.Query(ctx, cleanupInactiveSessionsSQL, intervalLiteral(playbackSessionIdleTTL))
 	if err != nil {
 		return Session{}, fmt.Errorf("clean inactive playback sessions: %w", err)
 	}
@@ -478,6 +656,27 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 		return Session{}, fmt.Errorf("iterate inactive playback sessions: %w", err)
 	}
 	rows.Close()
+	var globalCount, authSessionCount, profileCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			count(*),
+			count(*) FILTER (WHERE auth_session_id = $1::uuid),
+			count(*) FILTER (WHERE profile_id = $2::uuid)
+		FROM playback_sessions
+		WHERE expires_at > now() AND last_seen_at > now() - $3::interval
+	`, principal.SessionID, *principal.ActiveProfileID, intervalLiteral(playbackSessionIdleTTL)).Scan(&globalCount, &authSessionCount, &profileCount); err != nil {
+		return Session{}, fmt.Errorf("count active playback sessions: %w", err)
+	}
+	if globalCount >= limits.global || authSessionCount >= limits.perAuthSession || profileCount >= limits.perProfile {
+		if err := tx.Commit(ctx); err != nil {
+			return Session{}, fmt.Errorf("commit inactive playback session cleanup: %w", err)
+		}
+		sort.Strings(inactiveSessionIDs)
+		for _, identifier := range inactiveSessionIDs {
+			service.stopHLSSession(identifier)
+		}
+		return Session{}, ErrMediaCapacityReached
+	}
 	var sessionID string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO playback_sessions (
@@ -503,17 +702,17 @@ func (service *Service) createSession(ctx context.Context, principal auth.Princi
 	if err := tx.Commit(ctx); err != nil {
 		return Session{}, fmt.Errorf("commit playback session: %w", err)
 	}
+	sort.Strings(inactiveSessionIDs)
 	for _, identifier := range inactiveSessionIDs {
 		service.stopHLSSession(identifier)
 	}
 	if err := service.startSessionHLS(ctx, prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID), sessionID, sources, assets); err != nil {
-		_ = service.deleteCreatedSession(ctx, principal.SessionID, sessionID)
-		return Session{}, err
+		service.stopHLSSession(sessionID)
+		return Session{}, errors.Join(err, service.deleteCreatedSession(ctx, principal.SessionID, sessionID))
 	}
 	if err := service.commitAuthorizedProfileBoundary(ctx, principal); err != nil {
 		service.stopHLSSession(sessionID)
-		_ = service.deleteCreatedSession(ctx, principal.SessionID, sessionID)
-		return Session{}, err
+		return Session{}, errors.Join(err, service.deleteCreatedSession(ctx, principal.SessionID, sessionID))
 	}
 	if deliveryHandle != nil {
 		*deliveryHandle = deliveryHandleForSession(sessionID, token, sources, assets)
@@ -579,7 +778,7 @@ func validateSourcesInput(input SourcesInput) error {
 }
 
 func validateResolveInput(input ResolveInput) error {
-	if len(input.SourceRef) < 16 || len(input.SourceRef) > 128 || len(input.TitleID) > 128 || len(input.PreferredSubtitleID) > 128 {
+	if len(input.SourceRef) < 16 || len(input.SourceRef) > 128 || len(input.TitleID) > 128 || len(input.PreferredSubtitleID) > 128 || !validPlaybackMaximumHeight(input.MaximumHeight) {
 		return ErrInvalidInput
 	}
 	if input.PreferredAudioTrack != nil && (*input.PreferredAudioTrack < 0 || *input.PreferredAudioTrack > 10000) {
@@ -589,6 +788,10 @@ func validateResolveInput(input ResolveInput) error {
 		return ErrInvalidInput
 	}
 	return nil
+}
+
+func validPlaybackMaximumHeight(height int) bool {
+	return height == 0 || height >= 144 && height <= 4320
 }
 
 func validPlaybackStart(seconds float64) bool {

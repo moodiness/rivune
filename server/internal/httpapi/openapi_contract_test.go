@@ -560,7 +560,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 					ActiveSessions: 1, ActiveJobs: 1, ProcessingSlots: 1, ProcessingLimit: 2,
 					StorageBytes: 4096, StorageLimitBytes: 1024 * 1024,
 				},
-				Diagnostics: playback.MediaDiagnostics{VideoEncoder: "libx264", HardwareToneMap: false},
+				Diagnostics: playback.MediaDiagnostics{FFmpegVersion: "7.1", FFprobeVersion: "7.1", HardwareAcceleration: "software", VideoEncoder: "libx264", HardwareToneMap: false, TranscodeThreads: 4, MaximumReadRate: 1.5},
 				Sessions: []playback.ActivitySession{{
 					ID: contractSessionID, Title: "Contract Movie", MediaType: "movie", Mode: "transcode",
 					Decision: decision, Username: "admin", ProfileID: contractProfileID, Profile: "Admin",
@@ -569,7 +569,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 					ExpiresAt: expiresAt,
 				}},
 				Jobs: []playback.MediaActivityJob{{
-					SessionID: contractSessionID, AssetID: "source-1", Mode: "transcode", State: "processing",
+					SessionID: contractSessionID, AssetID: "source-1", Mode: "transcode", State: "failed", ErrorClass: "processing",
 					CreatedAt: expiresAt.Add(-time.Hour), LastSeenAt: expiresAt.Add(-time.Minute),
 				}},
 			},

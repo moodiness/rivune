@@ -3355,6 +3355,10 @@ paths:
           $ref: '#/components/responses/PlaybackUnprocessable'
         '502':
           $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/PlaybackCapacity'
+        '507':
+          $ref: '#/components/responses/Error'
     head:
       summary: Inspect a playback asset
       operationId: inspectPlaybackAsset
@@ -3370,6 +3374,10 @@ paths:
         '422':
           $ref: '#/components/responses/PlaybackUnprocessable'
         '502':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/PlaybackCapacity'
+        '507':
           $ref: '#/components/responses/Error'
   /calendar:
     get:
@@ -9318,6 +9326,8 @@ components:
         - diagnostics
         - sessions
         - jobs
+        - sessionsTruncated
+        - jobsTruncated
       properties:
         summary:
           $ref: '#/components/schemas/PlaybackActivitySummary'
@@ -9325,12 +9335,18 @@ components:
           $ref: '#/components/schemas/PlaybackMediaDiagnostics'
         sessions:
           type: array
+          maxItems: 200
           items:
             $ref: '#/components/schemas/PlaybackActivitySession'
         jobs:
           type: array
+          maxItems: 200
           items:
             $ref: '#/components/schemas/PlaybackMediaJob'
+        sessionsTruncated:
+          type: boolean
+        jobsTruncated:
+          type: boolean
     PlaybackActivitySummary:
       type: object
       additionalProperties: false
@@ -9366,13 +9382,107 @@ components:
       type: object
       additionalProperties: false
       required:
+        - ffmpegVersion
+        - ffprobeVersion
+        - hardwareAcceleration
         - videoEncoder
         - hardwareToneMap
+        - transcodeThreads
+        - maximumReadRate
+        - totals
+        - pools
       properties:
+        ffmpegVersion:
+          type: string
+          minLength: 1
+          maxLength: 64
+        ffprobeVersion:
+          type: string
+          minLength: 1
+          maxLength: 64
+        hardwareAcceleration:
+          type: string
+          enum:
+            - unknown
+            - auto
+            - software
+            - vaapi
+            - qsv
+            - nvenc
         videoEncoder:
           type: string
+          minLength: 1
+          maxLength: 64
         hardwareToneMap:
           type: boolean
+        transcodeThreads:
+          type: integer
+          minimum: 0
+          maximum: 32
+        maximumReadRate:
+          type: number
+          format: double
+          minimum: 1
+          maximum: 4
+        totals:
+          $ref: '#/components/schemas/PlaybackMediaProcessTotals'
+        pools:
+          $ref: '#/components/schemas/PlaybackMediaDiagnosticPools'
+    PlaybackMediaDiagnosticPools:
+      type: object
+      additionalProperties: false
+      required:
+        - process
+        - probe
+        - subtitle
+        - trickplay
+      properties:
+        process:
+          $ref: '#/components/schemas/PlaybackMediaDiagnosticPool'
+        probe:
+          $ref: '#/components/schemas/PlaybackMediaDiagnosticPool'
+        subtitle:
+          $ref: '#/components/schemas/PlaybackMediaDiagnosticPool'
+        trickplay:
+          $ref: '#/components/schemas/PlaybackMediaDiagnosticPool'
+    PlaybackMediaDiagnosticPool:
+      type: object
+      additionalProperties: false
+      required:
+        - active
+        - limit
+      properties:
+        active:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 0
+    PlaybackMediaProcessTotals:
+      type: object
+      additionalProperties: false
+      required:
+        - started
+        - succeeded
+        - failed
+        - softwareFallbacks
+      properties:
+        started:
+          type: integer
+          format: int64
+          minimum: 0
+        succeeded:
+          type: integer
+          format: int64
+          minimum: 0
+        failed:
+          type: integer
+          format: int64
+          minimum: 0
+        softwareFallbacks:
+          type: integer
+          format: int64
+          minimum: 0
     PlaybackActivitySession:
       type: object
       additionalProperties: false
@@ -9513,6 +9623,16 @@ components:
             - processing
             - complete
             - failed
+        errorClass:
+          type: string
+          enum:
+            - capacity
+            - source
+            - processing
+            - storage
+            - timeout
+            - cancelled
+            - unknown
         prewarming:
           type: boolean
         progressPercent:
@@ -9524,6 +9644,11 @@ components:
           type: number
           format: double
           minimum: 0
+        startupDurationSeconds:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 604800
         createdAt:
           type: string
           format: date-time

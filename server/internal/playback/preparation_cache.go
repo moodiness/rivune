@@ -11,7 +11,10 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 )
 
-const playbackPreparationTimeout = 30 * time.Second
+const (
+	playbackPreparationTimeout  = 30 * time.Second
+	maximumPlaybackPreparations = 512
+)
 
 type preparedPlayback struct {
 	source         Source
@@ -56,17 +59,36 @@ func (cache *playbackPreparationCache) clear() {
 	cache.mu.Lock()
 	cache.generation++
 	clear(cache.entries)
+	cache.inFlight = make(map[string]*playbackPreparationCall)
 	cache.mu.Unlock()
 }
 
-func (cache *playbackPreparationCache) evict(referenceID string, policy playbackPolicy) {
+func (cache *playbackPreparationCache) evict(reference sourceReference, policy playbackPolicy) {
+	cacheKey := playbackPreparationCacheKey(reference.ID, reference.TransportRevision, policy)
 	cache.mu.Lock()
-	delete(cache.entries, playbackPreparationCacheKey(referenceID, policy))
+	delete(cache.entries, cacheKey)
+	delete(cache.inFlight, cacheKey)
 	cache.mu.Unlock()
 }
 
-func playbackPreparationCacheKey(referenceID string, policy playbackPolicy) string {
-	return referenceID + "|" + strconv.FormatBool(policy.allowTranscoding) + "|" + strconv.Itoa(policy.maximumHeight)
+func (cache *playbackPreparationCache) evictRevision(referenceID string, revision uint64) {
+	prefix := referenceID + "|" + strconv.FormatUint(revision, 10) + "|"
+	cache.mu.Lock()
+	for key := range cache.entries {
+		if strings.HasPrefix(key, prefix) {
+			delete(cache.entries, key)
+		}
+	}
+	for key := range cache.inFlight {
+		if strings.HasPrefix(key, prefix) {
+			delete(cache.inFlight, key)
+		}
+	}
+	cache.mu.Unlock()
+}
+
+func playbackPreparationCacheKey(referenceID string, revision uint64, policy playbackPolicy) string {
+	return referenceID + "|" + strconv.FormatUint(revision, 10) + "|" + strconv.FormatBool(policy.allowTranscoding) + "|" + strconv.Itoa(policy.maximumHeight)
 }
 
 func (service *Service) preparedPlayback(ctx context.Context, principal auth.Principal, reference sourceReference, policies ...playbackPolicy) (preparedPlayback, error) {
@@ -74,7 +96,7 @@ func (service *Service) preparedPlayback(ctx context.Context, principal auth.Pri
 	if len(policies) > 0 {
 		policy = policies[0]
 	}
-	cacheKey := playbackPreparationCacheKey(reference.ID, policy)
+	cacheKey := playbackPreparationCacheKey(reference.ID, reference.TransportRevision, policy)
 	cache := service.preparations
 	cache.mu.Lock()
 	cache.removeExpiredLocked()
@@ -101,15 +123,7 @@ func (service *Service) preparedPlayback(ctx context.Context, principal auth.Pri
 		preparationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), playbackPreparationTimeout)
 		defer cancel()
 		playback, err := service.buildPreparedPlayback(preparationContext, principal, reference, policy)
-		cache.mu.Lock()
-		call.playback = clonePreparedPlayback(playback)
-		call.err = err
-		if err == nil && cache.generation == generation {
-			cache.entries[cacheKey] = playbackPreparationEntry{playback: clonePreparedPlayback(playback), expiresAt: reference.ExpiresAt}
-		}
-		delete(cache.inFlight, cacheKey)
-		close(call.done)
-		cache.mu.Unlock()
+		cache.complete(cacheKey, call, generation, playback, err, reference.ExpiresAt)
 	}()
 
 	select {
@@ -118,6 +132,23 @@ func (service *Service) preparedPlayback(ctx context.Context, principal auth.Pri
 	case <-call.done:
 		return clonePreparedPlayback(call.playback), call.err
 	}
+}
+
+func (cache *playbackPreparationCache) complete(cacheKey string, call *playbackPreparationCall, generation uint64, playback preparedPlayback, err error, expiresAt time.Time) {
+	cache.mu.Lock()
+	call.playback = clonePreparedPlayback(playback)
+	call.err = err
+	if err == nil && cache.generation == generation && cache.inFlight[cacheKey] == call {
+		for len(cache.entries) >= maximumPlaybackPreparations {
+			cache.removeEarliestLocked()
+		}
+		cache.entries[cacheKey] = playbackPreparationEntry{playback: clonePreparedPlayback(playback), expiresAt: expiresAt}
+	}
+	if cache.inFlight[cacheKey] == call {
+		delete(cache.inFlight, cacheKey)
+	}
+	close(call.done)
+	cache.mu.Unlock()
 }
 
 func (service *Service) buildPreparedPlayback(ctx context.Context, principal auth.Principal, reference sourceReference, policies ...playbackPolicy) (preparedPlayback, error) {
@@ -190,6 +221,20 @@ func (cache *playbackPreparationCache) removeExpiredLocked() {
 		if !entry.expiresAt.After(now) {
 			delete(cache.entries, identifier)
 		}
+	}
+}
+
+func (cache *playbackPreparationCache) removeEarliestLocked() {
+	earliestKey := ""
+	var earliest time.Time
+	for key, entry := range cache.entries {
+		if earliestKey == "" || entry.expiresAt.Before(earliest) || entry.expiresAt.Equal(earliest) && key < earliestKey {
+			earliestKey = key
+			earliest = entry.expiresAt
+		}
+	}
+	if earliestKey != "" {
+		delete(cache.entries, earliestKey)
 	}
 }
 

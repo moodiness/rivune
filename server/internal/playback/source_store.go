@@ -33,6 +33,8 @@ type sourceReference struct {
 	AddonMediaType                  string
 	ResourceID                      string
 	Source                          Source
+	SelectionRevision               uint64
+	TransportRevision               uint64
 	Asset                           *storedAsset
 	Capabilities                    Capabilities
 	PreferredAudioLanguage          string
@@ -142,6 +144,8 @@ func (store *sourceReferenceStore) putAllReserved(principal auth.Principal, refe
 		reference.ProfileID = profileID
 		reference.Owner = owner
 		reference.ExpiresAt = expiresAt
+		reference.SelectionRevision = 1
+		reference.TransportRevision = 1
 		store.entries[reference.ID] = cloneSourceReference(reference)
 		if pin {
 			store.pins[reference.ID]++
@@ -156,10 +160,56 @@ func (store *sourceReferenceStore) get(identifier string, principal auth.Princip
 	defer store.mu.Unlock()
 	store.removeExpiredLocked()
 	reference, exists := store.entries[identifier]
-	if !exists || !sourceReferenceOwnedBy(reference, principal) {
+	if !exists || !sourceReferenceOwnedBy(reference, principal) || !reference.ExpiresAt.After(store.now()) {
 		return sourceReference{}, ErrSourceReferenceExpired
 	}
 	return cloneSourceReference(reference), nil
+}
+
+func (store *sourceReferenceStore) replaceSelection(identifier string, principal auth.Principal, expectedRevision uint64, source Source, asset *storedAsset) (sourceReference, bool, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.removeExpiredLocked()
+	reference, exists := store.entries[identifier]
+	if !exists || !sourceReferenceOwnedBy(reference, principal) || !reference.ExpiresAt.After(store.now()) {
+		return sourceReference{}, false, ErrSourceReferenceExpired
+	}
+	if reference.SelectionRevision != expectedRevision {
+		return cloneSourceReference(reference), false, nil
+	}
+	transportChanged := sourceTransportChanged(reference.Source, reference.Asset, source, asset)
+	if reference.SelectionRevision == ^uint64(0) || transportChanged && reference.TransportRevision == ^uint64(0) {
+		return sourceReference{}, false, errors.New("source selection revision exhausted")
+	}
+	reference.Source = cloneSource(source)
+	if asset == nil {
+		reference.Asset = nil
+	} else {
+		cloned := cloneStoredAsset(*asset)
+		reference.Asset = &cloned
+	}
+	reference.SelectionRevision++
+	if transportChanged {
+		reference.TransportRevision++
+	}
+	store.entries[identifier] = cloneSourceReference(reference)
+	return cloneSourceReference(reference), true, nil
+}
+
+func (store *sourceReferenceStore) expireSelection(identifier string, principal auth.Principal, expectedRevision uint64) (sourceReference, bool, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.removeExpiredLocked()
+	reference, exists := store.entries[identifier]
+	if !exists || !sourceReferenceOwnedBy(reference, principal) || !reference.ExpiresAt.After(store.now()) {
+		return sourceReference{}, false, ErrSourceReferenceExpired
+	}
+	if reference.SelectionRevision != expectedRevision {
+		return cloneSourceReference(reference), false, nil
+	}
+	delete(store.entries, identifier)
+	delete(store.pins, identifier)
+	return sourceReference{}, true, nil
 }
 
 func (store *sourceReferenceStore) pin(principal auth.Principal, identifiers []string) error {

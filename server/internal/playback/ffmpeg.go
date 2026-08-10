@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/netguard"
+	"golang.org/x/net/http/httpguts"
 )
 
 const (
@@ -23,6 +25,9 @@ const (
 	maximumMediaProbeOutputBytes        = 4 << 20
 	maximumConvertedSubtitleBytes       = 16 << 20
 	maximumMediaDiagnosticBytes         = 2048
+	maximumMediaVersionOutputBytes      = 4 << 10
+	maximumMediaVersionBytes            = 64
+	mediaVersionTimeout                 = 2 * time.Second
 	ffmpegNetworkInputProtocolWhitelist = "crypto,http,tcp"
 	ffmpegLocalInputProtocolWhitelist   = "file"
 )
@@ -37,16 +42,22 @@ type MediaProcessor interface {
 }
 
 type FFmpegProcessor struct {
-	ffmpegPath      string
-	ffprobePath     string
-	slots           chan struct{}
-	probeSlots      chan struct{}
-	subtitleSlots   chan struct{}
-	threads         int
-	encoder         videoEncoder
-	subtitleTimeout time.Duration
-	commandContext  func(context.Context, string, ...string) *exec.Cmd
-	egressProxy     func(context.Context, storedAsset) (*ffmpegEgressProxy, error)
+	ffmpegPath           string
+	ffprobePath          string
+	ffmpegVersion        string
+	ffprobeVersion       string
+	hardwareAcceleration string
+	slots                chan struct{}
+	probeSlots           chan struct{}
+	subtitleSlots        chan struct{}
+	trickplaySlots       chan struct{}
+	threads              int
+	encoder              videoEncoder
+	maximumReadRate      float64
+	metrics              ffmpegProcessMetrics
+	subtitleTimeout      time.Duration
+	commandContext       func(context.Context, string, ...string) *exec.Cmd
+	egressProxy          func(context.Context, storedAsset) (*ffmpegEgressProxy, error)
 }
 
 func NewFFmpegProcessor(ffmpegPath, ffprobePath string, maximumConcurrent, threads int, options FFmpegOptions) (*FFmpegProcessor, error) {
@@ -67,11 +78,54 @@ func NewFFmpegProcessor(ffmpegPath, ffprobePath string, maximumConcurrent, threa
 	if err != nil {
 		return nil, err
 	}
+	hardwareAcceleration := strings.ToLower(strings.TrimSpace(options.HardwareAcceleration))
+	if hardwareAcceleration == "" {
+		hardwareAcceleration = "auto"
+	}
 	return &FFmpegProcessor{
-		ffmpegPath: resolvedFFmpeg, ffprobePath: resolvedFFprobe, encoder: encoder, threads: threads,
-		slots: make(chan struct{}, maximumConcurrent), probeSlots: make(chan struct{}, maximumConcurrent),
-		subtitleSlots: make(chan struct{}, maximumConcurrent), subtitleTimeout: subtitleConversionTimeout,
+		ffmpegPath: resolvedFFmpeg, ffprobePath: resolvedFFprobe,
+		ffmpegVersion: executableMediaVersion(resolvedFFmpeg, "ffmpeg"), ffprobeVersion: executableMediaVersion(resolvedFFprobe, "ffprobe"),
+		hardwareAcceleration: hardwareAcceleration, encoder: encoder, threads: threads,
+		maximumReadRate: options.MaximumReadRate,
+		slots:           make(chan struct{}, maximumConcurrent), probeSlots: make(chan struct{}, maximumConcurrent),
+		subtitleSlots: make(chan struct{}, maximumConcurrent), trickplaySlots: make(chan struct{}, 1), subtitleTimeout: subtitleConversionTimeout,
 	}, nil
+}
+
+func executableMediaVersion(path, product string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), mediaVersionTimeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, path, "-version")
+	output := newCappedBuffer(maximumMediaVersionOutputBytes)
+	command.Stdout = output
+	if err := command.Run(); err != nil || output.exceeded {
+		return "unknown"
+	}
+	return scrubMediaVersion(string(output.Bytes()), product)
+}
+
+func scrubMediaVersion(output, product string) string {
+	line, _, _ := strings.Cut(output, "\n")
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) < 3 || !strings.EqualFold(fields[0], product) || !strings.EqualFold(fields[1], "version") {
+		return "unknown"
+	}
+	return boundedMediaVersion(fields[2])
+}
+
+func boundedMediaVersion(version string) string {
+	if len(version) == 0 || len(version) > maximumMediaVersionBytes {
+		return "unknown"
+	}
+	for index := range len(version) {
+		character := version[index]
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("._+-", rune(character)) {
+			continue
+		}
+		return "unknown"
+	}
+	return version
 }
 
 func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) (MediaInspection, error) {
@@ -99,7 +153,7 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 	arguments := []string{"-v", "error", "-protocol_whitelist", inputProtocolWhitelist(commandAsset.URL), "-analyzeduration", "1000000", "-probesize", "1000000"}
 	arguments = append(arguments, ffmpegInputArguments(commandAsset)...)
 	arguments = append(arguments,
-		"-show_entries", "stream=index,codec_type,codec_name,profile,level,width,height,channels,bit_rate,color_transfer,codec_tag_string:stream_tags=language,title:stream_disposition=attached_pic,forced:stream_side_data=side_data_type:format=format_name,duration,bit_rate",
+		"-show_entries", "stream=index,codec_type,codec_name,profile,level,width,height,pix_fmt,bits_per_raw_sample,avg_frame_rate,r_frame_rate,color_range,color_space,color_transfer,color_primaries,channels,channel_layout,sample_rate,bit_rate,codec_tag_string:stream_tags=language,title:stream_disposition=attached_pic,forced,default:stream_side_data=side_data_type,dv_profile,dv_level,rpu_present_flag,el_present_flag,bl_present_flag,dv_bl_signal_compatibility_id:format=format_name,duration,bit_rate,size",
 		"-of", "json",
 		commandAsset.URL,
 	)
@@ -118,62 +172,143 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 		}
 		return MediaInspection{}, fmt.Errorf("probe media: %w: %s", runErr, diagnostic.String())
 	}
-	var result struct {
-		Streams []struct {
-			Index          int    `json:"index"`
-			CodecType      string `json:"codec_type"`
-			CodecName      string `json:"codec_name"`
-			Profile        string `json:"profile"`
-			Level          int    `json:"level"`
-			Width          int    `json:"width"`
-			Height         int    `json:"height"`
-			Channels       int    `json:"channels"`
-			BitRate        string `json:"bit_rate"`
-			ColorTransfer  string `json:"color_transfer"`
-			CodecTagString string `json:"codec_tag_string"`
-			Tags           struct {
-				Language string `json:"language"`
-				Title    string `json:"title"`
-			} `json:"tags"`
-			Disposition struct {
-				AttachedPicture int `json:"attached_pic"`
-				Forced          int `json:"forced"`
-			} `json:"disposition"`
-			SideData []struct {
-				Type string `json:"side_data_type"`
-			} `json:"side_data_list"`
-		} `json:"streams"`
-		Format struct {
-			Name     string `json:"format_name"`
-			Duration string `json:"duration"`
-			BitRate  string `json:"bit_rate"`
-		} `json:"format"`
+	return parseFFprobeInspection(output.Bytes(), asset.Container)
+}
+
+type ffprobeValue string
+
+func (value *ffprobeValue) UnmarshalJSON(data []byte) error {
+	*value = ""
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*value = ffprobeValue(text)
+		return nil
 	}
-	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+	text = strings.TrimSpace(string(data))
+	if _, err := strconv.ParseFloat(text, 64); err == nil {
+		*value = ffprobeValue(text)
+	}
+	return nil
+}
+
+type ffprobeText string
+
+func (value *ffprobeText) UnmarshalJSON(data []byte) error {
+	*value = ""
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*value = ffprobeText(text)
+	}
+	return nil
+}
+
+type ffprobeStream struct {
+	Index            ffprobeValue    `json:"index"`
+	CodecType        ffprobeText     `json:"codec_type"`
+	CodecName        ffprobeText     `json:"codec_name"`
+	Profile          ffprobeText     `json:"profile"`
+	Level            ffprobeValue    `json:"level"`
+	Width            ffprobeValue    `json:"width"`
+	Height           ffprobeValue    `json:"height"`
+	PixelFormat      ffprobeText     `json:"pix_fmt"`
+	BitsPerRawSample ffprobeValue    `json:"bits_per_raw_sample"`
+	AverageFrameRate ffprobeValue    `json:"avg_frame_rate"`
+	RealFrameRate    ffprobeValue    `json:"r_frame_rate"`
+	ColorRange       ffprobeText     `json:"color_range"`
+	ColorSpace       ffprobeText     `json:"color_space"`
+	ColorTransfer    ffprobeText     `json:"color_transfer"`
+	ColorPrimaries   ffprobeText     `json:"color_primaries"`
+	Channels         ffprobeValue    `json:"channels"`
+	ChannelLayout    ffprobeText     `json:"channel_layout"`
+	SampleRate       ffprobeValue    `json:"sample_rate"`
+	BitRate          ffprobeValue    `json:"bit_rate"`
+	CodecTagString   ffprobeText     `json:"codec_tag_string"`
+	Tags             json.RawMessage `json:"tags"`
+	Disposition      json.RawMessage `json:"disposition"`
+	SideData         json.RawMessage `json:"side_data_list"`
+}
+
+type ffprobeSideData struct {
+	Type                    string       `json:"side_data_type"`
+	DolbyVisionProfile      ffprobeValue `json:"dv_profile"`
+	DolbyVisionLevel        ffprobeValue `json:"dv_level"`
+	RPUPresent              ffprobeValue `json:"rpu_present_flag"`
+	ELPresent               ffprobeValue `json:"el_present_flag"`
+	BLPresent               ffprobeValue `json:"bl_present_flag"`
+	BLSignalCompatibilityID ffprobeValue `json:"dv_bl_signal_compatibility_id"`
+}
+
+type ffprobeFormat struct {
+	Name     ffprobeText  `json:"format_name"`
+	Duration ffprobeValue `json:"duration"`
+	BitRate  ffprobeValue `json:"bit_rate"`
+	Size     ffprobeValue `json:"size"`
+}
+
+func parseFFprobeInspection(data []byte, containerHint string) (MediaInspection, error) {
+	var response struct {
+		Streams []json.RawMessage `json:"streams"`
+		Format  json.RawMessage   `json:"format"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
 		return MediaInspection{}, fmt.Errorf("decode FFprobe response: %w", err)
 	}
+	var format ffprobeFormat
+	_ = json.Unmarshal(response.Format, &format)
 	inspection := MediaInspection{
-		Container:      inspectedContainer(result.Format.Name, asset.Container),
-		VideoTracks:    make([]MediaTrack, 0),
-		AudioTracks:    make([]MediaTrack, 0),
-		SubtitleTracks: make([]MediaTrack, 0),
+		Container:       inspectedContainer(string(format.Name), containerHint),
+		DurationSeconds: ffprobeNonNegativeFloat(format.Duration),
+		BitrateKbps:     ffprobeKbps(format.BitRate),
+		SizeBytes:       ffprobeNonNegativeInt64(format.Size),
+		VideoTracks:     make([]MediaTrack, 0),
+		AudioTracks:     make([]MediaTrack, 0),
+		SubtitleTracks:  make([]MediaTrack, 0),
 	}
-	inspection.DurationSeconds, _ = strconv.ParseFloat(result.Format.Duration, 64)
-	for _, stream := range result.Streams {
-		bitRate, _ := strconv.ParseInt(stream.BitRate, 10, 64)
-		track := MediaTrack{
-			Index: stream.Index, Type: strings.ToLower(stream.CodecType),
-			Codec: normalizedCodec(stream.CodecName), Profile: strings.TrimSpace(stream.Profile), Level: stream.Level,
-			Language: strings.TrimSpace(stream.Tags.Language), Title: strings.TrimSpace(stream.Tags.Title),
-			Width: stream.Width, Height: stream.Height, Channels: stream.Channels, BitrateKbps: int(bitRate / 1000),
-			Forced: stream.Disposition.Forced != 0,
+	for _, encodedStream := range response.Streams {
+		var stream ffprobeStream
+		if err := json.Unmarshal(encodedStream, &stream); err != nil {
+			continue
 		}
+		language, title := ffprobeStreamTags(stream.Tags)
+		attachedPicture, forced, defaultStream := ffprobeStreamDisposition(stream.Disposition)
+		pixelFormat := strings.ToLower(ffprobeMetadata(stream.PixelFormat))
+		bitDepth := ffprobeNonNegativeInt(stream.BitsPerRawSample)
+		if strings.TrimSpace(string(stream.BitsPerRawSample)) == "" {
+			bitDepth = knownPixelFormatBitDepth(pixelFormat)
+		}
+		frameRate := ffprobeFrameRate(stream.AverageFrameRate)
+		if frameRate == 0 {
+			frameRate = ffprobeFrameRate(stream.RealFrameRate)
+		}
+		track := MediaTrack{
+			Index: ffprobeNonNegativeInt(stream.Index), Type: strings.ToLower(strings.TrimSpace(string(stream.CodecType))),
+			Codec: normalizedCodec(string(stream.CodecName)), Profile: strings.TrimSpace(string(stream.Profile)), Level: ffprobeNonNegativeInt(stream.Level),
+			Language: language, Title: title, Forced: forced, Default: defaultStream,
+			Width: ffprobeNonNegativeInt(stream.Width), Height: ffprobeNonNegativeInt(stream.Height), Channels: ffprobeNonNegativeInt(stream.Channels),
+			BitrateKbps: ffprobeKbps(stream.BitRate), PixelFormat: pixelFormat, BitDepth: bitDepth, FrameRate: frameRate,
+			ColorRange: ffprobeMetadata(stream.ColorRange), ColorSpace: ffprobeMetadata(stream.ColorSpace),
+			ColorTransfer: ffprobeMetadata(stream.ColorTransfer), ColorPrimaries: ffprobeMetadata(stream.ColorPrimaries),
+			ChannelLayout: ffprobeMetadata(stream.ChannelLayout), SampleRate: ffprobeNonNegativeInt(stream.SampleRate),
+		}
+		sideData := ffprobeStreamSideData(stream.SideData)
 		switch track.Type {
 		case "video":
-			if stream.Disposition.AttachedPicture != 0 {
+			if attachedPicture {
 				continue
 			}
-			track.VideoRangeType = inspectedVideoRangeType(stream.CodecTagString, stream.ColorTransfer, stream.SideData)
+			track.VideoRangeType = inspectedVideoRangeType(string(stream.CodecTagString), track.ColorTransfer, sideData)
+			for _, data := range sideData {
+				if !strings.Contains(strings.ToLower(data.Type), "dovi") {
+					continue
+				}
+				track.DolbyVisionProfile = ffprobeNonNegativeInt(data.DolbyVisionProfile)
+				track.DolbyVisionLevel = ffprobeNonNegativeInt(data.DolbyVisionLevel)
+				track.DolbyVisionRPUPresent = ffprobeNonNegativeInt(data.RPUPresent) == 1
+				track.DolbyVisionELPresent = ffprobeNonNegativeInt(data.ELPresent) == 1
+				track.DolbyVisionBLPresent = ffprobeNonNegativeInt(data.BLPresent) == 1
+				track.DolbyVisionCompatibilityID = ffprobeNonNegativeInt(data.BLSignalCompatibilityID)
+				break
+			}
 			inspection.VideoTracks = append(inspection.VideoTracks, track)
 			if inspection.HDRFormat == "" {
 				inspection.HDRFormat = hdrFormatForVideoRange(track.VideoRangeType)
@@ -185,8 +320,7 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 		}
 	}
 	if len(inspection.VideoTracks) > 0 && inspection.VideoTracks[0].BitrateKbps == 0 {
-		bitRate, _ := strconv.ParseInt(result.Format.BitRate, 10, 64)
-		inspection.VideoTracks[0].BitrateKbps = int(bitRate / 1000)
+		inspection.VideoTracks[0].BitrateKbps = inspection.BitrateKbps
 	}
 	if len(inspection.VideoTracks) == 0 {
 		return MediaInspection{}, errors.New("FFprobe returned no video stream")
@@ -194,21 +328,157 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 	return inspection, nil
 }
 
-func (processor *FFmpegProcessor) ProcessHLS(ctx context.Context, asset storedAsset, directory string) error {
+func ffprobeStreamTags(data json.RawMessage) (string, string) {
+	var tags struct {
+		Language ffprobeText `json:"language"`
+		Title    ffprobeText `json:"title"`
+	}
+	_ = json.Unmarshal(data, &tags)
+	return strings.TrimSpace(string(tags.Language)), strings.TrimSpace(string(tags.Title))
+}
+
+func ffprobeStreamDisposition(data json.RawMessage) (bool, bool, bool) {
+	var disposition struct {
+		AttachedPicture ffprobeValue `json:"attached_pic"`
+		Forced          ffprobeValue `json:"forced"`
+		Default         ffprobeValue `json:"default"`
+	}
+	_ = json.Unmarshal(data, &disposition)
+	return ffprobeNonNegativeInt(disposition.AttachedPicture) != 0,
+		ffprobeNonNegativeInt(disposition.Forced) != 0,
+		ffprobeNonNegativeInt(disposition.Default) != 0
+}
+
+func ffprobeStreamSideData(data json.RawMessage) []ffprobeSideData {
+	var encoded []ffprobeSideData
+	if err := json.Unmarshal(data, &encoded); err != nil {
+		return nil
+	}
+	for index := range encoded {
+		encoded[index].Type = strings.TrimSpace(encoded[index].Type)
+	}
+	return encoded
+}
+
+func ffprobeNonNegativeInt(value ffprobeValue) int {
+	number := ffprobeNonNegativeInt64(value)
+	if uint64(number) > uint64(^uint(0)>>1) {
+		return 0
+	}
+	return int(number)
+}
+
+func ffprobeNonNegativeInt64(value ffprobeValue) int64 {
+	number, err := strconv.ParseInt(strings.TrimSpace(string(value)), 10, 64)
+	if err != nil || number < 0 {
+		return 0
+	}
+	return number
+}
+
+func ffprobeKbps(value ffprobeValue) int {
+	number := ffprobeNonNegativeInt64(value) / 1000
+	if uint64(number) > uint64(^uint(0)>>1) {
+		return 0
+	}
+	return int(number)
+}
+
+func ffprobeNonNegativeFloat(value ffprobeValue) float64 {
+	number, err := strconv.ParseFloat(strings.TrimSpace(string(value)), 64)
+	if err != nil || math.IsNaN(number) || math.IsInf(number, 0) || number < 0 {
+		return 0
+	}
+	return number
+}
+
+func ffprobeFrameRate(value ffprobeValue) float64 {
+	text := strings.TrimSpace(string(value))
+	numeratorText, denominatorText, rational := strings.Cut(text, "/")
+	if !rational {
+		return ffprobeNonNegativeFloat(value)
+	}
+	if strings.Contains(denominatorText, "/") {
+		return 0
+	}
+	numerator := ffprobeNonNegativeFloat(ffprobeValue(numeratorText))
+	denominator := ffprobeNonNegativeFloat(ffprobeValue(denominatorText))
+	if denominator == 0 {
+		return 0
+	}
+	rate := numerator / denominator
+	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
+		return 0
+	}
+	return rate
+}
+
+func ffprobeMetadata(value ffprobeText) string {
+	text := strings.TrimSpace(string(value))
+	switch strings.ToLower(text) {
+	case "", "unknown", "unspecified", "none", "n/a", "nan", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity":
+		return ""
+	default:
+		return text
+	}
+}
+
+func knownPixelFormatBitDepth(value string) int {
+	format := strings.ToLower(strings.TrimSpace(value))
+	format = strings.TrimSuffix(strings.TrimSuffix(format, "le"), "be")
+	switch format {
+	case "yuv410p", "yuv411p", "yuv420p", "yuv422p", "yuv440p", "yuv444p",
+		"yuvj420p", "yuvj422p", "yuvj440p", "yuvj444p", "yuva420p", "yuva422p", "yuva444p",
+		"nv12", "nv21", "rgb24", "bgr24", "rgba", "bgra", "argb", "abgr", "gbrp", "gbrap", "gray", "gray8", "ya8":
+		return 8
+	case "p010", "x2rgb10", "x2bgr10", "y210":
+		return 10
+	case "p012":
+		return 12
+	case "p016":
+		return 16
+	}
+	for _, bits := range []int{9, 10, 12, 14, 16} {
+		suffix := strconv.Itoa(bits)
+		if (strings.HasPrefix(format, "yuv") || strings.HasPrefix(format, "gbrp")) && strings.HasSuffix(format, "p"+suffix) {
+			return bits
+		}
+		if (strings.HasPrefix(format, "gray") || strings.HasPrefix(format, "ya")) && strings.HasSuffix(format, suffix) {
+			return bits
+		}
+	}
+	return 0
+}
+
+func (processor *FFmpegProcessor) ProcessHLS(ctx context.Context, asset storedAsset, directory string) (resultErr error) {
 	if err := processor.acquire(ctx); err != nil {
 		return err
 	}
-	defer processor.release()
-	asset.ReadRate = 1.50
-	err := processor.processHLS(ctx, asset, directory, processor.encoder)
-	if err == nil || asset.Kind != processingTranscode || processor.encoder.normalizedKind() == videoEncoderSoftware || hlsOutputStarted(directory) {
-		return err
+	processor.metrics.started.Add(1)
+	defer func() {
+		processor.release()
+		switch {
+		case resultErr == nil:
+			processor.metrics.succeeded.Add(1)
+		case !errors.Is(resultErr, context.Canceled):
+			processor.metrics.failed.Add(1)
+		}
+	}()
+	_, seekable := seekableHLSSegmentCount(asset)
+	asset.ReadRate = adaptiveTranscodeReadRate(processor.maximumReadRate, len(processor.slots), cap(processor.slots), seekable)
+	resultErr = processor.processHLS(ctx, asset, directory, processor.encoder)
+	if resultErr == nil || asset.Kind != processingTranscode || processor.encoder.normalizedKind() == videoEncoderSoftware || hlsOutputStarted(directory) {
+		return resultErr
+	}
+	if errors.Is(resultErr, ErrMediaSourceFailed) || errors.Is(resultErr, context.Canceled) || errors.Is(resultErr, context.DeadlineExceeded) {
+		return resultErr
 	}
 	if resetErr := resetHLSDirectory(directory); resetErr != nil {
 		return fmt.Errorf("reset HLS output for software fallback: %w", resetErr)
 	}
+	processor.metrics.softwareFallbacks.Add(1)
 	if fallbackErr := processor.processHLS(ctx, asset, directory, videoEncoder{kind: videoEncoderSoftware}); fallbackErr != nil {
-		return fmt.Errorf("hardware encoding failed: %v; software fallback failed: %w", err, fallbackErr)
+		return fmt.Errorf("hardware encoding failed: %v; software fallback failed: %w", resultErr, fallbackErr)
 	}
 	return nil
 }
@@ -235,6 +505,7 @@ func (processor *FFmpegProcessor) processHLS(ctx context.Context, asset storedAs
 	if asset.Kind == processingTranscode {
 		arguments = append(arguments, "-force_key_frames", "expr:gte(t,n_forced*"+strconv.Itoa(hlsSegmentDurationSeconds)+")")
 	}
+	arguments = append(arguments, "-progress", ffmpegProgressFilename)
 	hlsFlags := "independent_segments+temp_file"
 	if asset.Kind != processingTranscode {
 		hlsFlags = "split_by_time+temp_file"
@@ -335,6 +606,9 @@ func (processor *FFmpegProcessor) processingArguments(asset storedAsset) ([]stri
 }
 
 func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAsset, encoder videoEncoder) ([]string, error) {
+	if asset.Kind == processingTranscode && asset.ToneMap && !assetToneMappingSupported(asset) {
+		return nil, fmt.Errorf("%w: Dolby Vision source has no proven HDR-compatible base layer", ErrMediaProcessingFailed)
+	}
 	arguments := []string{
 		"-nostdin", "-hide_banner", "-loglevel", "error",
 		"-protocol_whitelist", inputProtocolWhitelist(asset.URL),
@@ -342,6 +616,7 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 	}
 	if asset.Kind == processingTranscode {
 		arguments = append(arguments, encoder.globalArguments()...)
+		arguments = append(arguments, encoder.hardwareDecodeArguments(asset)...)
 	}
 	arguments = append(arguments, ffmpegInputArguments(asset)...)
 	if asset.ReadRate > 0 {
@@ -352,9 +627,11 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 	}
 	arguments = append(arguments, "-i", asset.URL)
 	if asset.Kind == processingTranscode && asset.SubtitleTrackIndex != nil {
-		filter := processingVideoFilter(asset, encoder)
-		complexFilter := fmt.Sprintf("[0:v:0][0:%d]overlay", *asset.SubtitleTrackIndex)
-		if filter != "" {
+		complexFilter, err := subtitleBurnFilter(asset)
+		if err != nil {
+			return nil, err
+		}
+		if filter := processingVideoFilter(asset, encoder); filter != "" {
 			complexFilter += "," + filter
 		}
 		complexFilter += "[vout]"
@@ -393,6 +670,9 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 }
 
 func processingVideoFilter(asset storedAsset, encoder videoEncoder) string {
+	if filter := encoder.hardwareFilter(asset); filter != "" || encoder.hardwareFramesSafe(asset) {
+		return filter
+	}
 	filters := make([]string, 0, 3)
 	if asset.TargetHeight > 0 && asset.Decision != nil && asset.Decision.Source != nil &&
 		asset.Decision.Source.Height > asset.TargetHeight {
@@ -402,6 +682,48 @@ func processingVideoFilter(asset storedAsset, encoder videoEncoder) string {
 		filters = append(filters, filter)
 	}
 	return strings.Join(filters, ",")
+}
+
+func subtitleBurnFilter(asset storedAsset) (string, error) {
+	if asset.SubtitleTrackIndex == nil || asset.SubtitleTrackOrdinal < 0 {
+		return "", fmt.Errorf("%w: invalid subtitle burn selection", ErrMediaProcessingFailed)
+	}
+	switch asset.SubtitleTrackType {
+	case subtitleBurnText:
+		filename, err := subtitleFilterFilename(asset.URL)
+		if err != nil {
+			return "", err
+		}
+		filter := fmt.Sprintf("subtitles=filename='%s':si=%d", filename, asset.SubtitleTrackOrdinal)
+		if asset.StartSeconds <= 0 {
+			return "[0:v:0]" + filter, nil
+		}
+		start := strconv.FormatFloat(asset.StartSeconds, 'f', -1, 64)
+		return "[0:v:0]setpts=PTS+" + start + "/TB," + filter + ",setpts=PTS-" + start + "/TB", nil
+	case subtitleBurnBitmap:
+		return fmt.Sprintf("[0:v:0][0:s:%d]overlay=eof_action=pass:repeatlast=0", asset.SubtitleTrackOrdinal), nil
+	default:
+		return "", fmt.Errorf("%w: unsupported subtitle burn type", ErrMediaProcessingFailed)
+	}
+}
+
+func subtitleFilterFilename(value string) (string, error) {
+	value = filepath.ToSlash(value)
+	if value == "" || strings.ContainsAny(value, "\x00\r\n'[],;=") {
+		return "", fmt.Errorf("%w: unsafe subtitle filter source", ErrMediaProcessingFailed)
+	}
+	// FFmpeg receives the filter graph as a direct argv value. Escape the colon
+	// once for its option parser; forward slashes keep Windows separators inert.
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	return strings.ReplaceAll(value, ":", `\:`), nil
+}
+
+func assetToneMappingSupported(asset storedAsset) bool {
+	if asset.Decision == nil || asset.Decision.Source == nil ||
+		!strings.EqualFold(strings.TrimSpace(asset.Decision.Source.HDRFormat), "dolby_vision") {
+		return true
+	}
+	return asset.DolbyVisionToneMapSafe
 }
 
 func outputAudioChannels(asset storedAsset) int {
@@ -425,6 +747,44 @@ func (processor *FFmpegProcessor) ActiveProcesses() int {
 
 func (processor *FFmpegProcessor) ProcessLimit() int {
 	return cap(processor.slots)
+}
+
+func (processor *FFmpegProcessor) PlaybackDiagnostics() MediaDiagnostics {
+	if processor == nil {
+		return MediaDiagnostics{
+			FFmpegVersion: "unknown", FFprobeVersion: "unknown", HardwareAcceleration: "unknown", VideoEncoder: "unknown",
+			MaximumReadRate: defaultTranscodeMaximumReadRate,
+		}
+	}
+	hardwareAcceleration := processor.hardwareAcceleration
+	switch hardwareAcceleration {
+	case "auto", "software", "vaapi", "qsv", "nvenc":
+	default:
+		hardwareAcceleration = "unknown"
+	}
+	videoEncoder := processor.VideoEncoder()
+	if videoEncoder == "" {
+		videoEncoder = "unknown"
+	}
+	threads := processor.threads
+	if threads < 0 || threads > 32 {
+		threads = 0
+	}
+	return MediaDiagnostics{
+		FFmpegVersion: boundedMediaVersion(processor.ffmpegVersion), FFprobeVersion: boundedMediaVersion(processor.ffprobeVersion),
+		HardwareAcceleration: hardwareAcceleration, VideoEncoder: videoEncoder,
+		MaximumReadRate: adaptiveTranscodeReadRate(processor.maximumReadRate, 1, 1, false),
+		HardwareToneMap: processor.HardwareToneMap(), TranscodeThreads: threads,
+		Pools: MediaDiagnosticPools{
+			Process: mediaDiagnosticPool(processor.slots), Probe: mediaDiagnosticPool(processor.probeSlots),
+			Subtitle: mediaDiagnosticPool(processor.subtitleSlots), Trickplay: mediaDiagnosticPool(processor.trickplaySlots),
+		},
+		Totals: processor.metrics.snapshot(),
+	}
+}
+
+func mediaDiagnosticPool(slots chan struct{}) MediaDiagnosticPool {
+	return MediaDiagnosticPool{Active: len(slots), Limit: cap(slots)}
 }
 
 func (processor *FFmpegProcessor) acquire(ctx context.Context) error {
@@ -574,15 +934,11 @@ func inspectedContainer(formatName, hint string) string {
 	}
 }
 
-func inspectedHDRFormat(codecTag, colorTransfer string, sideData []struct {
-	Type string `json:"side_data_type"`
-}) string {
+func inspectedHDRFormat(codecTag, colorTransfer string, sideData []ffprobeSideData) string {
 	return hdrFormatForVideoRange(inspectedVideoRangeType(codecTag, colorTransfer, sideData))
 }
 
-func inspectedVideoRangeType(codecTag, colorTransfer string, sideData []struct {
-	Type string `json:"side_data_type"`
-}) string {
+func inspectedVideoRangeType(codecTag, colorTransfer string, sideData []ffprobeSideData) string {
 	tag := strings.ToLower(strings.TrimSpace(codecTag))
 	if strings.HasPrefix(tag, "dvh") || strings.HasPrefix(tag, "dva") {
 		return "DOVI"
@@ -628,8 +984,9 @@ func ffmpegInputArguments(asset storedAsset) []string {
 	return arguments
 }
 
-func ffmpegHeaders(headers map[string]string) string {
-	if len(headers) == 0 {
+func ffmpegHeaders(values map[string]string) string {
+	headers, validHeaders := canonicalStoredRequestHeaders(values)
+	if !validHeaders || len(headers) == 0 {
 		return ""
 	}
 	names := make([]string, 0, len(headers))
@@ -639,22 +996,17 @@ func ffmpegHeaders(headers map[string]string) string {
 	sort.Strings(names)
 	var result strings.Builder
 	for _, name := range names {
-		value := headers[name]
-		if !validFFmpegStoredHeader(name, value) {
-			continue
-		}
 		result.WriteString(name)
 		result.WriteString(": ")
-		result.WriteString(value)
+		result.WriteString(headers.Get(name))
 		result.WriteString("\r\n")
 	}
 	return result.String()
 }
 
 func validFFmpegStoredHeader(name, value string) bool {
-	return allowedStoredRequestHeader(name) &&
+	return httpguts.ValidHeaderFieldName(name) && allowedStoredRequestHeader(name) &&
 		!strings.EqualFold(strings.TrimSpace(name), "Proxy-Authorization") &&
-		!strings.ContainsAny(name, "\r\n:") &&
 		!strings.ContainsAny(value, "\r\n")
 }
 

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,26 +16,30 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/playback"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 	"github.com/moodiness/rivune/server/internal/settings"
 )
 
 type fakePlaybackService struct {
-	sourcesInput playback.SourcesInput
-	markersInput playback.MarkerInput
-	prepareInput playback.PrepareInput
-	resolveInput playback.ResolveInput
-	sources      playback.SourceList
-	markers      playback.MarkerList
-	preparation  playback.Preparation
-	session      playback.Session
-	activity     playback.Activity
-	sourcesErr   error
-	markersErr   error
-	prepareErr   error
-	resolveErr   error
-	proxyErr     error
-	proxyCalls   int
-	activityErr  error
+	sourcesInput     playback.SourcesInput
+	markersInput     playback.MarkerInput
+	prepareInput     playback.PrepareInput
+	resolveInput     playback.ResolveInput
+	sources          playback.SourceList
+	markers          playback.MarkerList
+	preparation      playback.Preparation
+	session          playback.Session
+	activity         playback.Activity
+	sourcesErr       error
+	markersErr       error
+	prepareErr       error
+	resolveErr       error
+	proxyErr         error
+	proxy            func(http.ResponseWriter, *http.Request) error
+	proxyCalls       int
+	activityErr      error
+	stopActivityErr  error
+	purgeActivityErr error
 }
 
 func (fake *fakePlaybackService) Sources(_ context.Context, _ auth.Principal, input playback.SourcesInput) (playback.SourceList, error) {
@@ -64,16 +69,19 @@ func (fake *fakePlaybackService) Activity(context.Context, auth.Principal) (play
 	return fake.activity, fake.activityErr
 }
 
-func (*fakePlaybackService) StopActivitySession(context.Context, auth.Principal, string) error {
-	return nil
+func (fake *fakePlaybackService) StopActivitySession(context.Context, auth.Principal, string) error {
+	return fake.stopActivityErr
 }
 
-func (*fakePlaybackService) PurgeActivity(context.Context, auth.Principal) (playback.PurgeResult, error) {
-	return playback.PurgeResult{}, nil
+func (fake *fakePlaybackService) PurgeActivity(context.Context, auth.Principal) (playback.PurgeResult, error) {
+	return playback.PurgeResult{}, fake.purgeActivityErr
 }
 
-func (fake *fakePlaybackService) ProxyAsset(http.ResponseWriter, *http.Request, string, string, string, string, string) error {
+func (fake *fakePlaybackService) ProxyAsset(w http.ResponseWriter, r *http.Request, _ string, _ string, _ string, _ string, _ string) error {
 	fake.proxyCalls++
+	if fake.proxy != nil {
+		return fake.proxy(w, r)
+	}
 	return fake.proxyErr
 }
 
@@ -183,7 +191,7 @@ func TestPlaybackActivityIncludesArtworkAndCanonicalProviderIDs(t *testing.T) {
 			ActiveSessions: 1, ActiveJobs: 0, ProcessingSlots: 0, ProcessingLimit: 2,
 			StorageBytes: 0, StorageLimitBytes: 1 << 30,
 		},
-		Diagnostics: playback.MediaDiagnostics{VideoEncoder: "h264"},
+		Diagnostics: playback.MediaDiagnostics{FFmpegVersion: "7.1", FFprobeVersion: "7.1", HardwareAcceleration: "software", VideoEncoder: "h264", TranscodeThreads: 4, MaximumReadRate: 1.5},
 		Sessions: []playback.ActivitySession{{
 			ID: "11111111-1111-4111-8111-111111111111", TitleID: "episode-1",
 			ArtworkURL: "https://images.example.test/episode-still.jpg",
@@ -221,31 +229,145 @@ func TestPlaybackActivityIncludesArtworkAndCanonicalProviderIDs(t *testing.T) {
 func TestPlaybackAssetReturnsStableMediaErrors(t *testing.T) {
 	tests := []struct {
 		name       string
+		method     string
 		err        error
 		status     int
 		code       string
 		retryAfter string
 	}{
-		{name: "source", err: playback.ErrMediaSourceFailed, status: http.StatusBadGateway, code: "playback_source_failed"},
-		{name: "capability", err: playback.ErrClientCapabilityMissing, status: http.StatusUnprocessableEntity, code: "playback_client_capability_missing"},
-		{name: "capacity", err: playback.ErrMediaCapacityReached, status: http.StatusServiceUnavailable, code: "playback_capacity_reached", retryAfter: "10"},
-		{name: "storage", err: playback.ErrMediaStorageLimit, status: http.StatusInsufficientStorage, code: "playback_storage_limit"},
-		{name: "processing", err: playback.ErrMediaProcessingFailed, status: http.StatusBadGateway, code: "playback_processing_failed"},
+		{name: "source", method: http.MethodGet, err: playback.ErrMediaSourceFailed, status: http.StatusBadGateway, code: "playback_source_failed"},
+		{name: "capability", method: http.MethodGet, err: playback.ErrClientCapabilityMissing, status: http.StatusUnprocessableEntity, code: "playback_client_capability_missing"},
+		{name: "capacity GET", method: http.MethodGet, err: playback.ErrMediaCapacityReached, status: http.StatusServiceUnavailable, code: "playback_capacity_reached", retryAfter: "10"},
+		{name: "capacity HEAD", method: http.MethodHead, err: playback.ErrMediaCapacityReached, status: http.StatusServiceUnavailable, code: "playback_capacity_reached", retryAfter: "10"},
+		{name: "storage GET", method: http.MethodGet, err: playback.ErrMediaStorageLimit, status: http.StatusInsufficientStorage, code: "playback_storage_limit"},
+		{name: "storage HEAD", method: http.MethodHead, err: playback.ErrMediaStorageLimit, status: http.StatusInsufficientStorage, code: "playback_storage_limit"},
+		{name: "processing", method: http.MethodGet, err: playback.ErrMediaProcessingFailed, status: http.StatusBadGateway, code: "playback_processing_failed"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			api := testAPI(&fakeInstanceService{})
 			api.playback = &fakePlaybackService{proxyErr: test.err}
-			request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/sessions/session-id/assets/asset-id?token=token", nil)
+			request := httptest.NewRequest(test.method, "/api/v1/playback/sessions/11111111-1111-4111-8111-111111111111/assets/asset-id?token=token", nil)
 			response := httptest.NewRecorder()
 
 			api.Handler().ServeHTTP(response, request)
 
-			if response.Code != test.status || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
-				t.Fatalf("unexpected error response: status=%d body=%s", response.Code, response.Body.String())
+			if response.Code != test.status {
+				t.Fatalf("unexpected error status=%d body=%s", response.Code, response.Body.String())
+			}
+			if test.method == http.MethodHead {
+				if response.Body.Len() != 0 {
+					t.Fatalf("HEAD error returned a body: %s", response.Body.String())
+				}
+			} else if !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("unexpected error body: %s", response.Body.String())
 			}
 			if response.Header().Get("Retry-After") != test.retryAfter {
 				t.Fatalf("unexpected Retry-After header %q", response.Header().Get("Retry-After"))
+			}
+			if test.status == http.StatusServiceUnavailable || test.status == http.StatusInsufficientStorage {
+				validateContractResponse(t, loadOpenAPIContract(t), "/playback/sessions/{sessionId}/assets/{assetId}", map[string]string{"sessionId": "11111111-1111-4111-8111-111111111111", "assetId": "asset-id"}, request, response)
+			}
+		})
+	}
+}
+
+func TestPlaybackAssetDoesNotAppendJSONAfterStreamCommit(t *testing.T) {
+	service := &fakePlaybackService{proxy: func(response http.ResponseWriter, _ *http.Request) error {
+		response.Header().Set("Content-Type", "video/mp4")
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write([]byte("media-bytes"))
+		return errors.New("copy failed")
+	}}
+	api := testAPI(&fakeInstanceService{})
+	var logs bytes.Buffer
+	api.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	api.playback = service
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/sessions/session-secret/assets/asset-secret?token=query-secret", nil)
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "media-bytes" {
+		t.Fatalf("committed stream response = %d %q", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "internal_error") || !strings.Contains(logs.String(), "failed after response committed") {
+		t.Fatalf("committed stream error handling body=%q logs=%s", response.Body.String(), logs.String())
+	}
+	for _, secret := range []string{"session-secret", "asset-secret", "query-secret"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("committed stream log exposed %q: %s", secret, logs.String())
+		}
+	}
+}
+
+func TestNativeTracingUsesNormalizedRouteAndFixedWorkCounters(t *testing.T) {
+	var logs bytes.Buffer
+	service := &fakePlaybackService{proxy: func(response http.ResponseWriter, request *http.Request) error {
+		requestwork.BeginDB(request.Context(), 10)
+		requestwork.EndDB(request.Context(), 40)
+		requestwork.BeginOutbound(request.Context(), 20)
+		requestwork.EndOutbound(request.Context(), 70, 321)
+		response.WriteHeader(http.StatusPartialContent)
+		_, _ = response.Write([]byte("asset"))
+		return nil
+	}}
+	api := testAPI(&fakeInstanceService{})
+	api.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	api.playback = service
+	for _, identifier := range []string{"first-secret-id", "second-secret-id"} {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/sessions/"+identifier+"/assets/media?token=query-secret", nil)
+		api.Handler().ServeHTTP(httptest.NewRecorder(), request)
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("completion events = %d, want 2: %s", len(lines), logs.String())
+	}
+	for _, line := range lines {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode completion event: %v", err)
+		}
+		if event["route"] != "GET /api/v1/playback/sessions/{sessionId}/assets/{assetId}" ||
+			event["status"] != float64(http.StatusPartialContent) || event["bytes"] != float64(5) ||
+			event["db_call_count"] != float64(1) || event["db_duration"] != float64(30) ||
+			event["outbound_call_count"] != float64(1) || event["outbound_duration"] != float64(50) ||
+			event["upstream_bytes"] != float64(321) {
+			t.Fatalf("completion event = %#v", event)
+		}
+		for _, forbidden := range []string{"first-secret-id", "second-secret-id", "query-secret", "path", "query"} {
+			if strings.Contains(line, forbidden) {
+				t.Fatalf("completion event exposed %q: %s", forbidden, line)
+			}
+		}
+	}
+}
+
+func TestPlaybackActivityManagementMapsAuthorizationAndMissingSession(t *testing.T) {
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		service *fakePlaybackService
+		status  int
+		code    string
+	}{
+		{name: "activity admin required", method: http.MethodGet, path: "/api/v1/playback/activity", service: &fakePlaybackService{activityErr: playback.ErrForbidden}, status: http.StatusForbidden, code: "admin_required"},
+		{name: "stop admin required", method: http.MethodDelete, path: "/api/v1/playback/activity/sessions/session-id", service: &fakePlaybackService{stopActivityErr: playback.ErrForbidden}, status: http.StatusForbidden, code: "admin_required"},
+		{name: "purge admin required", method: http.MethodPost, path: "/api/v1/playback/activity/purge", service: &fakePlaybackService{purgeActivityErr: playback.ErrForbidden}, status: http.StatusForbidden, code: "admin_required"},
+		{name: "stop missing", method: http.MethodDelete, path: "/api/v1/playback/activity/sessions/session-id", service: &fakePlaybackService{stopActivityErr: playback.ErrSessionNotFound}, status: http.StatusNotFound, code: "playback_session_not_found"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := testAPI(&fakeInstanceService{})
+			api.auth = &fakeAuthService{principal: auth.Principal{Role: "member"}}
+			api.playback = test.service
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request.Header.Set("Authorization", "Bearer access")
+			response := httptest.NewRecorder()
+			api.Handler().ServeHTTP(response, request)
+			if response.Code != test.status || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("management response status=%d body=%s", response.Code, response.Body.String())
 			}
 		})
 	}

@@ -96,6 +96,16 @@ func TestProviderStreamResponseRejectsInvalidNestedHeadersAtomically(t *testing.
 	}
 }
 
+func TestProviderStreamResponseRejectsCaseDuplicateRequestHeaders(t *testing.T) {
+	response, err := ParseProviderStreamResponse([]byte(`{"streams":[{"url":"https://media.example/movie.mp4","behaviorHints":{"proxyHeaders":{"request":{"Authorization":"Bearer first","authorization":"Bearer second"}}}}]}`))
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("case-duplicate header response error = %v", err)
+	}
+	if len(response.Streams) != 0 {
+		t.Fatalf("case-duplicate response retained %d partial streams", len(response.Streams))
+	}
+}
+
 func TestProviderStreamResponseAllowsMultilineDisplayText(t *testing.T) {
 	payload := []byte(`{"streams":[{"name":"Provider\n1080p","title":"Release\tHDR","description":"Line one\nLine two\r\nLine three","url":"https://media.example/movie.mp4"}]}`)
 	response, err := ParseProviderStreamResponse(payload)

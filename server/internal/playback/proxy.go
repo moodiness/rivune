@@ -17,6 +17,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -26,10 +28,156 @@ import (
 
 const (
 	maximumPlaylistBytes          = 8 * 1024 * 1024
-	maximumPlaylistLines          = 20_000
+	maximumPlaylistLines          = 2*maximumPlaylistReferences + 16
 	maximumPlaylistReferences     = 10_000
 	maximumRewrittenPlaylistBytes = 16 * 1024 * 1024
+	maximumDirectStreamsGlobal    = 64
+	maximumDirectStreamsPerOwner  = 4
+	maximumDirectStreamsPerHost   = 16
+	directStreamReadIdleTimeout   = 45 * time.Second
 )
+
+type directStreamAdmission struct {
+	mu      sync.Mutex
+	active  int
+	byOwner map[string]int
+}
+
+func (admission *directStreamAdmission) acquire(owner string, globalLimit, ownerLimit int) (func(), error) {
+	admission.mu.Lock()
+	defer admission.mu.Unlock()
+	if admission.active >= globalLimit || admission.byOwner[owner] >= ownerLimit {
+		return nil, ErrMediaCapacityReached
+	}
+	if admission.byOwner == nil {
+		admission.byOwner = make(map[string]int)
+	}
+	admission.active++
+	admission.byOwner[owner]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			admission.mu.Lock()
+			defer admission.mu.Unlock()
+			admission.active--
+			admission.byOwner[owner]--
+			if admission.byOwner[owner] == 0 {
+				delete(admission.byOwner, owner)
+			}
+		})
+	}, nil
+}
+
+type directStreamBody struct {
+	body         io.ReadCloser
+	cancel       context.CancelFunc
+	release      func()
+	idleTimeout  time.Duration
+	parentDone   <-chan struct{}
+	readStarted  chan struct{}
+	readProgress chan struct{}
+	done         chan struct{}
+	finishOnce   sync.Once
+	closeOnce    sync.Once
+	closeErr     error
+}
+
+func newDirectStreamBody(parent context.Context, body io.ReadCloser, cancel context.CancelFunc, release func(), idleTimeout time.Duration) io.ReadCloser {
+	stream := &directStreamBody{
+		body: body, cancel: cancel, release: release, idleTimeout: idleTimeout,
+		parentDone: parent.Done(), readStarted: make(chan struct{}), readProgress: make(chan struct{}), done: make(chan struct{}),
+	}
+	go stream.watch()
+	return stream
+}
+
+func (stream *directStreamBody) Read(destination []byte) (int, error) {
+	select {
+	case stream.readStarted <- struct{}{}:
+	case <-stream.done:
+		return 0, io.ErrClosedPipe
+	}
+	read, err := stream.body.Read(destination)
+	if read > 0 {
+		select {
+		case stream.readProgress <- struct{}{}:
+		case <-stream.done:
+		}
+	}
+	if err != nil {
+		stream.finish()
+	}
+	return read, err
+}
+
+func (stream *directStreamBody) Close() error {
+	err := stream.closeBody()
+	stream.finish()
+	return err
+}
+
+func (stream *directStreamBody) watch() {
+	timer := time.NewTimer(stream.idleTimeout)
+	stopDirectStreamTimer(timer)
+	defer timer.Stop()
+	armed := false
+	for {
+		select {
+		case <-stream.parentDone:
+			stream.expire()
+			return
+		case <-stream.done:
+			return
+		case <-stream.readStarted:
+			if !armed {
+				timer.Reset(stream.idleTimeout)
+				armed = true
+			}
+		case <-stream.readProgress:
+			if armed {
+				stopDirectStreamTimer(timer)
+				armed = false
+			}
+		case <-timer.C:
+			select {
+			case <-stream.readProgress:
+				armed = false
+				continue
+			default:
+			}
+			stream.expire()
+			return
+		}
+	}
+}
+
+func stopDirectStreamTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+func (stream *directStreamBody) expire() {
+	stream.cancel()
+	_ = stream.closeBody()
+	stream.finish()
+}
+
+func (stream *directStreamBody) closeBody() error {
+	stream.closeOnce.Do(func() { stream.closeErr = stream.body.Close() })
+	return stream.closeErr
+}
+
+func (stream *directStreamBody) finish() {
+	stream.finishOnce.Do(func() {
+		close(stream.done)
+		stream.cancel()
+		stream.release()
+	})
+}
 
 var playlistURIAttribute = regexp.MustCompile(`[,:][ \t]*[A-Z0-9-]*URI="([^"]+)"`)
 
@@ -113,7 +261,7 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 		}
 		upstreamURL = target
 	}
-	response, err := service.fetchProxyAsset(r.Context(), r, *asset, upstreamURL)
+	response, err := service.fetchProxyAsset(r.Context(), r, *asset, upstreamURL, sessionID)
 	if err != nil {
 		return err
 	}
@@ -187,8 +335,8 @@ func (service *Service) proxyProcessingAsset(w http.ResponseWriter, r *http.Requ
 	return service.proxyProcessingAssetWithLinks(w, r, sessionID, token, target, signature, asset, nil)
 }
 
-func (service *Service) fetchProxyAsset(ctx context.Context, incoming *http.Request, asset storedAsset, upstreamURL string) (*http.Response, error) {
-	response, err := service.fetchAsset(ctx, incoming, asset, upstreamURL)
+func (service *Service) fetchProxyAsset(ctx context.Context, incoming *http.Request, asset storedAsset, upstreamURL, owner string) (*http.Response, error) {
+	response, err := service.fetchAdmittedAsset(ctx, incoming, asset, upstreamURL, owner)
 	if err != nil {
 		return nil, fmt.Errorf("fetch playback asset: %w", err)
 	}
@@ -200,7 +348,7 @@ func (service *Service) fetchProxyAsset(ctx context.Context, incoming *http.Requ
 	fullRequest.Header = incoming.Header.Clone()
 	fullRequest.Header.Del("Range")
 	fullRequest.Header.Del("If-Range")
-	response, err = service.fetchAsset(ctx, fullRequest, asset, upstreamURL)
+	response, err = service.fetchAdmittedAsset(ctx, fullRequest, asset, upstreamURL, owner)
 	if err != nil {
 		return nil, fmt.Errorf("refetch complete HLS playlist: %w", err)
 	}
@@ -208,6 +356,39 @@ func (service *Service) fetchProxyAsset(ctx context.Context, incoming *http.Requ
 		_ = response.Body.Close()
 		return nil, fmt.Errorf("%w: upstream returned a partial HLS playlist", ErrMediaSourceFailed)
 	}
+	return response, nil
+}
+
+func (service *Service) fetchAdmittedAsset(ctx context.Context, incoming *http.Request, asset storedAsset, upstreamURL, owner string) (*http.Response, error) {
+	globalLimit := service.directStreamGlobalLimit
+	if globalLimit <= 0 {
+		globalLimit = maximumDirectStreamsGlobal
+	}
+	ownerLimit := service.directStreamOwnerLimit
+	if ownerLimit <= 0 {
+		ownerLimit = maximumDirectStreamsPerOwner
+	}
+	release, err := service.directStreams.acquire(owner, globalLimit, ownerLimit)
+	if err != nil {
+		return nil, err
+	}
+	requestContext, cancel := context.WithCancel(ctx)
+	response, err := service.fetchAsset(requestContext, incoming, asset, upstreamURL)
+	if err != nil {
+		cancel()
+		release()
+		return nil, err
+	}
+	if response.Body == nil {
+		cancel()
+		release()
+		return response, nil
+	}
+	idleTimeout := service.directStreamIdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = directStreamReadIdleTimeout
+	}
+	response.Body = newDirectStreamBody(ctx, response.Body, cancel, release, idleTimeout)
 	return response, nil
 }
 
@@ -227,14 +408,25 @@ func (service *Service) proxyProcessingAssetWithLinks(w http.ResponseWriter, r *
 }
 
 func (service *Service) fetchAsset(ctx context.Context, incoming *http.Request, asset storedAsset, upstreamURL string) (*http.Response, error) {
-	request, err := http.NewRequestWithContext(ctx, incoming.Method, upstreamURL, nil)
+	method := incoming.Method
+	if method == http.MethodHead && !strings.EqualFold(asset.Container, "hls") {
+		parsed, parseErr := url.Parse(upstreamURL)
+		if parseErr == nil && !strings.EqualFold(pathExtension(parsed.Path), ".m3u8") {
+			method = http.MethodGet
+		}
+	}
+	request, err := http.NewRequestWithContext(ctx, method, upstreamURL, nil)
 	if err != nil {
 		return nil, netguard.SanitizeURLError(err)
 	}
 	if sameMediaOrigin(asset.URL, upstreamURL) {
-		for name, value := range asset.Headers {
-			if allowedStoredRequestHeader(name) {
-				request.Header.Set(name, value)
+		headers, validHeaders := canonicalStoredRequestHeaders(asset.Headers)
+		if !validHeaders {
+			return nil, ErrMediaSourceFailed
+		}
+		for name, values := range headers {
+			for _, value := range values {
+				request.Header.Add(name, value)
 			}
 		}
 	}
@@ -260,11 +452,9 @@ func (service *Service) fetchAsset(ctx context.Context, incoming *http.Request, 
 }
 
 func sameMediaOrigin(left, right string) bool {
-	leftURL, leftErr := url.Parse(left)
-	rightURL, rightErr := url.Parse(right)
-	return leftErr == nil && rightErr == nil &&
-		strings.EqualFold(leftURL.Scheme, rightURL.Scheme) &&
-		strings.EqualFold(leftURL.Host, rightURL.Host)
+	leftOrigin, leftValid := canonicalMediaOrigin(left)
+	rightOrigin, rightValid := canonicalMediaOrigin(right)
+	return leftValid && rightValid && leftOrigin == rightOrigin
 }
 
 func allowedStoredRequestHeader(name string) bool {

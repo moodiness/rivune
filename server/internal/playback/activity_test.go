@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,6 +39,45 @@ func TestActivityModeUsesActualProcessingContract(t *testing.T) {
 	}
 }
 
+func TestActivityArraysAreBoundedAndReportTruncation(t *testing.T) {
+	sessions := make([]ActivitySession, maximumActivitySessions+1)
+	boundedSessions, sessionsTruncated := boundedActivitySessions(sessions)
+	if len(boundedSessions) != maximumActivitySessions || !sessionsTruncated {
+		t.Fatalf("bounded sessions = %d truncated=%t", len(boundedSessions), sessionsTruncated)
+	}
+	jobs := make([]MediaActivityJob, maximumActivityJobs+1)
+	boundedJobs, jobsTruncated := boundedActivityJobs(jobs)
+	if len(boundedJobs) != maximumActivityJobs || !jobsTruncated {
+		t.Fatalf("bounded jobs = %d truncated=%t", len(boundedJobs), jobsTruncated)
+	}
+	if _, truncated := boundedActivitySessions(sessions[:maximumActivitySessions]); truncated {
+		t.Fatal("sessions at the limit were marked truncated")
+	}
+	if _, truncated := boundedActivityJobs(jobs[:maximumActivityJobs]); truncated {
+		t.Fatal("jobs at the limit were marked truncated")
+	}
+}
+
+func TestMediaJobErrorClassIsClosed(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{err: ErrMediaCapacityReached, want: "capacity"},
+		{err: ErrMediaSourceFailed, want: "source"},
+		{err: ErrMediaProcessingFailed, want: "processing"},
+		{err: ErrMediaStorageLimit, want: "storage"},
+		{err: context.DeadlineExceeded, want: "timeout"},
+		{err: context.Canceled, want: "cancelled"},
+		{err: errors.New("private provider URL https://secret.invalid?token=value"), want: "unknown"},
+	}
+	for _, test := range tests {
+		if got := mediaJobErrorClass(test.err); got != test.want {
+			t.Fatalf("error class for %v = %q, want %q", test.err, got, test.want)
+		}
+	}
+}
+
 func TestActivityJobsReportPlaylistProgressAndSpeed(t *testing.T) {
 	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
 	directory := t.TempDir()
@@ -64,6 +104,29 @@ func TestActivityJobsReportPlaylistProgressAndSpeed(t *testing.T) {
 	}
 	if jobs[0].Speed == nil || *jobs[0].Speed != 2 {
 		t.Fatalf("speed = %v, want 2", jobs[0].Speed)
+	}
+}
+
+func TestActivityProcessingSessionIDsIncludesEverySharedBinding(t *testing.T) {
+	job := &hlsJob{bindings: map[string]*hlsJobBinding{
+		"session-a/asset/0":            {prewarming: false},
+		"session-b/asset/0":            {prewarming: false},
+		"prewarm-auth-profile/asset/0": {prewarming: true},
+	}}
+	service := &Service{hlsJobs: map[string]*hlsJob{
+		"session-a/asset/0":            job,
+		"session-b/asset/0":            job,
+		"prewarm-auth-profile/asset/0": job,
+	}}
+	sessions := service.activityProcessingSessionIDs()
+	if _, found := sessions["session-a"]; !found {
+		t.Fatal("first shared session was not marked processing")
+	}
+	if _, found := sessions["session-b"]; !found {
+		t.Fatal("second shared session was not marked processing")
+	}
+	if _, found := sessions["prewarm-auth-profile"]; found || len(sessions) != 2 {
+		t.Fatalf("processing sessions = %v, want only shared playback sessions", sessions)
 	}
 }
 
