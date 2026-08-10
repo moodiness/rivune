@@ -163,12 +163,19 @@ jobs:
           RIVUNE_POSTGRES_SUPERUSER_PASSWORD: compose-validation-superuser-password
           RIVUNE_RESTORE_PASSWORD: compose-validation-restore-password
           RIVUNE_SETUP_TOKEN: compose-validation-setup-token
+          RIVUNE_ENCRYPTION_KEYS: 1:1212121212121212121212121212121212121212121212121212121212121212
           RIVUNE_HOST: rivune.invalid
+          RIVUNE_VIDEO_GROUP_ID: 109
+          RIVUNE_VIDEO_DEVICE: /dev/dri/renderD129
         run: |
-          docker compose -f compose.yaml config --quiet
-          docker compose -f compose.yaml -f compose.vaapi.yaml config --quiet
-          docker compose -f compose.yaml -f compose.nvidia.yaml config --quiet
-          docker compose -f deploy/caddy/compose.yaml config --quiet
+          for manifest in compose.yaml deploy/caddy/compose.yaml; do
+            docker compose -f "${manifest}" config --quiet
+            docker compose -f "${manifest}" config --format json | jq -e '
+              (.services.rivune.environment | has("RIVUNE_ALLOW_TRANSCODING")) and
+              .services.rivune.environment.RIVUNE_VIDEO_GROUP_ID == "109" and
+              .services.rivune.devices == [{"source":"/dev/dri/renderD129","target":"/dev/dri/renderD128","permissions":"rwm"}]
+            ' >/dev/null
+          done
       - name: Test PostgreSQL backup hardening
         run: bash scripts/postgres-backup_test.sh
       - name: Set up Docker Buildx
@@ -184,6 +191,12 @@ jobs:
           tags: rivune-ci:current
           build-args: |
             VERSION=ci-${{ github.sha }}
+      - name: Test container identity and video group
+        run: |
+          test "$(docker run --rm -e PUID=10001 -e PGID=10002 -e RIVUNE_VIDEO_GROUP_ID=109 rivune-ci:current id -u)" = 10001
+          test "$(docker run --rm -e PUID=10001 -e PGID=10002 -e RIVUNE_VIDEO_GROUP_ID=109 rivune-ci:current id -g)" = 10002
+          docker run --rm -e PUID=10001 -e PGID=10002 -e RIVUNE_VIDEO_GROUP_ID=109 rivune-ci:current id -G |
+            tr ' ' '\n' | grep -qx 109
       - name: Test clean-install and upgrade migrations
         env:
           RIVUNE_IMAGE: rivune-ci:current

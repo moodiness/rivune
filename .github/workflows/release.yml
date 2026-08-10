@@ -44,7 +44,7 @@ jobs:
           set -euo pipefail
 
           candidate_metadata_is_valid() {
-            local tag="$1" title="$2" event="$3" conclusion="$4" path="$5" head_repository="$6" repository="$7" sha="$8"
+            local tag="$1" title="$2" event="$3" conclusion="$4" path="$5" head_repository="$6" expected_repository="$7" sha="$8"
             local numeric='0|[1-9][0-9]*'
             local prerelease_identifier='0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*'
             local semver="^v(${numeric})\.(${numeric})\.(${numeric})(-(${prerelease_identifier})(\.(${prerelease_identifier}))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"
@@ -52,7 +52,7 @@ jobs:
               [[ "${event}" == push || "${event}" == workflow_dispatch ]] &&
               [[ "${conclusion}" == success ]] &&
               [[ "${path}" == .github/workflows/release-candidate.yml ]] &&
-              [[ "${head_repository}" == "${repository}" ]] &&
+              [[ "${head_repository}" == "${expected_repository}" ]] &&
               [[ "${tag}" =~ ${semver} ]] &&
               [[ "${sha}" =~ ^[0-9a-f]{40}$ ]]
           }
@@ -261,3 +261,4 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ needs.authorize.outputs.stable != 'true' }}
           name: ${{ needs.authorize.outputs.tag }}
+          make_latest: ${{ needs.authorize.outputs.stable == 'true' }}
