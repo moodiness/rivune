@@ -77,6 +77,18 @@ func (fake *discoveryAuthenticationFake) Logout(_ context.Context, _ Authenticat
 	return nil
 }
 
+type discoveryLoginRetryError struct {
+	retryAfter time.Duration
+}
+
+func (err *discoveryLoginRetryError) Error() string {
+	return "login admission denied"
+}
+
+func (err *discoveryLoginRetryError) RetryAfter() time.Duration {
+	return err.retryAfter
+}
+
 type authenticatedRequestPolicyFake struct {
 	result     AuthenticatedRequestPolicyResult
 	err        error
@@ -142,6 +154,25 @@ func TestCompatibilityAuthenticationSaturationIsServiceUnavailable(t *testing.T)
 	}
 	if challenge := response.Header().Get("WWW-Authenticate"); challenge != "" {
 		t.Fatalf("saturated authentication advertised credential challenge %q", challenge)
+	}
+}
+
+func TestAuthenticateByNamePreservesRetryableAdmissionFailure(t *testing.T) {
+	fake, mux := newDiscoveryHTTPTestServer(t)
+	fake.loginErr = fmt.Errorf("wrapped admission: %w", &discoveryLoginRetryError{retryAfter: 2500 * time.Millisecond})
+	request := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", strings.NewReader(`{"Username":"c3000000-0000-4000-8000-000000000003","Pw":"correct horse"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="Apple TV", DeviceId="infuse-device", Version="8.1"`)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+
+	var body CompatErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode admission response: %v", err)
+	}
+	if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") != "3" ||
+		body.ResponseStatus.ErrorCode != "ResourceLimitExceeded" || fake.loginCalls != 1 {
+		t.Fatalf("admission response status=%d retry=%q body=%+v calls=%d", response.Code, response.Header().Get("Retry-After"), body, fake.loginCalls)
 	}
 }
 func TestAuthenticatedMaintenancePolicyCoversApplicationStateArtworkAndStreams(t *testing.T) {

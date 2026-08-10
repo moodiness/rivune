@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -360,7 +359,7 @@ func TestPlaybackInfoCanonicalizesCompactPathQueryAndBodyIDs(t *testing.T) {
 	}
 }
 
-func TestPlaybackInfoReconcilesResolvedDeliveryModeAndRedirectsLegacyStreamURL(t *testing.T) {
+func TestPlaybackInfoReconcilesResolvedDeliveryModeAndServesLegacyStreamInProcess(t *testing.T) {
 	profile := `{"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mkv","VideoCodec":"h264","AudioCodec":"aac","Type":"Video"}],"TranscodingProfiles":[{"Container":"ts","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","Context":"Streaming","Type":"Video"}]}}`
 	for _, test := range []struct {
 		name                    string
@@ -372,13 +371,13 @@ func TestPlaybackInfoReconcilesResolvedDeliveryModeAndRedirectsLegacyStreamURL(t
 		wantTranscoding         bool
 		wantDirectURL           string
 		wantTranscodingURL      string
-		verifyLegacyRedirect    bool
+		verifyLegacyProcessing  bool
 		verifyDirectMediaStream bool
 	}{
 		{name: "direct", mode: "direct", protocol: "http", container: "mkv", wantDirectPlay: true, wantDirectStream: true, wantDirectURL: "/stream.mkv?", verifyDirectMediaStream: true},
-		{name: "remux", mode: "remux", protocol: "hls", container: "hls", wantDirectStream: true, wantDirectURL: "/master.m3u8?", verifyLegacyRedirect: true},
-		{name: "transcode audio", mode: "transcode_audio", protocol: "hls", container: "hls", wantTranscoding: true, wantTranscodingURL: "/master.m3u8?", verifyLegacyRedirect: true},
-		{name: "transcode", mode: "transcode", protocol: "hls", container: "hls", wantTranscoding: true, wantTranscodingURL: "/master.m3u8?", verifyLegacyRedirect: true},
+		{name: "remux", mode: "remux", protocol: "hls", container: "hls", wantDirectStream: true, wantDirectURL: "/master.m3u8?", verifyLegacyProcessing: true},
+		{name: "transcode audio", mode: "transcode_audio", protocol: "hls", container: "hls", wantTranscoding: true, wantTranscodingURL: "/master.m3u8?", verifyLegacyProcessing: true},
+		{name: "transcode", mode: "transcode", protocol: "hls", container: "hls", wantTranscoding: true, wantTranscodingURL: "/master.m3u8?", verifyLegacyProcessing: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newPlaybackFixture(t)
@@ -388,9 +387,11 @@ func TestPlaybackInfoReconcilesResolvedDeliveryModeAndRedirectsLegacyStreamURL(t
 				Sources: []playback.Source{{
 					ID: "native-selected", Mode: test.mode, Protocol: test.protocol, Container: test.container,
 					Media: &playback.MediaInspection{Container: "mkv", DurationSeconds: 3600,
-						VideoTracks: []playback.MediaTrack{{Index: 0, Codec: "h264", Width: 1920, Height: 1080}},
-						AudioTracks: []playback.MediaTrack{{Index: 1, Codec: "aac", Channels: 2}}},
+						VideoTracks:    []playback.MediaTrack{{Index: 0, Codec: "h264", Width: 1920, Height: 1080}},
+						AudioTracks:    []playback.MediaTrack{{Index: 1, Codec: "aac", Channels: 2}},
+						SubtitleTracks: []playback.MediaTrack{{Index: 3, Codec: "srt", Language: "fr"}}},
 				}},
+				Subtitles: []playback.Subtitle{{ID: "embedded-subtitle-3", Delivery: "external"}},
 			}
 			response := fixture.playbackInfo(http.MethodPost, profile)
 			var info PlaybackInfoResponse
@@ -405,6 +406,19 @@ func TestPlaybackInfoReconcilesResolvedDeliveryModeAndRedirectsLegacyStreamURL(t
 				(test.wantTranscoding && (source.TranscodingSubProtocol != "hls" || source.TranscodingContainer != "ts")) {
 				t.Fatalf("resolved mode %q advertised incoherent source: %+v", test.mode, source)
 			}
+			if source.Container != "mkv" || !strings.HasSuffix(source.Path, ".mkv") {
+				t.Fatalf("resolved mode %q replaced source identity with output transport: %+v", test.mode, source)
+			}
+			var embeddedSubtitle *MediaStreamInfo
+			for streamIndex := range source.MediaStreams {
+				if source.MediaStreams[streamIndex].Type == "Subtitle" && source.MediaStreams[streamIndex].Index == 3 {
+					embeddedSubtitle = &source.MediaStreams[streamIndex]
+					break
+				}
+			}
+			if embeddedSubtitle == nil || embeddedSubtitle.IsExternal || embeddedSubtitle.DeliveryMethod != "Embed" || embeddedSubtitle.DeliveryUrl != "" {
+				t.Fatalf("resolved mode %q did not retain Jellyfin embedded subtitle metadata: %+v", test.mode, source.MediaStreams)
+			}
 			if test.verifyDirectMediaStream {
 				if strings.Contains(source.DirectStreamUrl, "/master.m3u8") {
 					t.Fatalf("resolved direct source retained master URL: %+v", source)
@@ -417,7 +431,7 @@ func TestPlaybackInfoReconcilesResolvedDeliveryModeAndRedirectsLegacyStreamURL(t
 					t.Fatalf("resolved direct transport status=%d path=%q serves=%d", streamResponse.Code, fixture.delivery.servedPath, fixture.delivery.serveCalls)
 				}
 			}
-			if !test.verifyLegacyRedirect {
+			if !test.verifyLegacyProcessing {
 				return
 			}
 			clientPlayID := strings.Repeat("c", 32)
@@ -427,35 +441,64 @@ func TestPlaybackInfoReconcilesResolvedDeliveryModeAndRedirectsLegacyStreamURL(t
 				"api_key":       {fixture.token},
 			}
 			legacyURL := "/videos/" + fixture.item.ID + "/stream.mkv?" + legacyValues.Encode()
+			opensBeforeStream, servesBeforeStream := fixture.delivery.openCalls, fixture.delivery.serveCalls
 			streamRequest := httptest.NewRequest(http.MethodGet, legacyURL, nil)
 			streamRequest.SetPathValue("id", fixture.item.ID)
+			streamRequest.Header.Set("Range", "bytes=0-1023")
 			streamResponse := httptest.NewRecorder()
 			fixture.handler.handleStream(streamResponse, streamRequest)
-			location := streamResponse.Header().Get("Location")
-			redirectURL, parseErr := url.Parse(location)
-			redirectPlayID := redirectURL.Query().Get("PlaySessionId")
-			if streamResponse.Code != http.StatusFound || streamResponse.Header().Get("Cache-Control") != "no-store" || parseErr != nil || !strings.HasSuffix(redirectURL.Path, "/master.m3u8") ||
-				!isRivunePlaySessionID(redirectPlayID) || redirectPlayID == clientPlayID || redirectURL.Query().Get("api_key") != redirectPlayID ||
-				redirectURL.Query().Get("X-Emby-Token") != "" || strings.Contains(location, fixture.token) || fixture.delivery.serveCalls != 0 {
-				t.Fatalf("legacy transport status=%d location=%q parseErr=%v serves=%d", streamResponse.Code, location, parseErr, fixture.delivery.serveCalls)
+			if streamResponse.Code != http.StatusNoContent || streamResponse.Header().Get("Location") != "" ||
+				fixture.delivery.openCalls != opensBeforeStream || fixture.delivery.serveCalls != servesBeforeStream+1 ||
+				!strings.HasSuffix(fixture.delivery.servedPath, "/master.m3u8") || fixture.delivery.servedRange != "" {
+				t.Fatalf("legacy transport status=%d location=%q path=%q range=%q opens=%d/%d serves=%d/%d", streamResponse.Code, streamResponse.Header().Get("Location"), fixture.delivery.servedPath, fixture.delivery.servedRange, fixture.delivery.openCalls, opensBeforeStream, fixture.delivery.serveCalls, servesBeforeStream+1)
 			}
-			opensBeforeRetry := fixture.delivery.openCalls
 			retryRequest := httptest.NewRequest(http.MethodHead, legacyURL, nil)
 			retryRequest.SetPathValue("id", fixture.item.ID)
 			retryResponse := httptest.NewRecorder()
 			fixture.handler.handleStream(retryResponse, retryRequest)
-			if retryResponse.Code != http.StatusFound || retryResponse.Header().Get("Location") != location || fixture.delivery.openCalls != opensBeforeRetry || fixture.delivery.serveCalls != 0 {
-				t.Fatalf("cached legacy retry status=%d location=%q opens=%d want=%d serves=%d", retryResponse.Code, retryResponse.Header().Get("Location"), fixture.delivery.openCalls, opensBeforeRetry, fixture.delivery.serveCalls)
-			}
-			opensBeforeMaster := fixture.delivery.openCalls
-			masterRequest := httptest.NewRequest(http.MethodGet, location, nil)
-			masterRequest.SetPathValue("id", fixture.item.ID)
-			masterResponse := httptest.NewRecorder()
-			fixture.handler.handleStream(masterResponse, masterRequest)
-			if masterResponse.Code != http.StatusNoContent || fixture.delivery.serveCalls != 1 || fixture.delivery.openCalls != opensBeforeMaster {
-				t.Fatalf("redirected master status=%d opens=%d want=%d serves=%d", masterResponse.Code, fixture.delivery.openCalls, opensBeforeMaster, fixture.delivery.serveCalls)
+			if retryResponse.Code != http.StatusNoContent || retryResponse.Header().Get("Location") != "" ||
+				fixture.delivery.openCalls != opensBeforeStream || fixture.delivery.serveCalls != servesBeforeStream+2 {
+				t.Fatalf("cached legacy retry status=%d location=%q opens=%d/%d serves=%d/%d", retryResponse.Code, retryResponse.Header().Get("Location"), fixture.delivery.openCalls, opensBeforeStream, fixture.delivery.serveCalls, servesBeforeStream+2)
 			}
 		})
+	}
+}
+
+func TestLegacyStaticStreamRetriesAlternateMediaSources(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.authentication.sessions = map[string]AuthenticatedSession{fixture.token: fixture.authentication.session}
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{
+		{SourceRef: "unavailable-source", StableIdentity: "unavailable", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
+		{SourceRef: "playable-source", StableIdentity: "playable", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
+	}}
+	fixture.delivery.openErrors = []error{playback.ErrUnsupportedSource}
+	request := httptest.NewRequest(http.MethodGet, "/Videos/"+fixture.item.ID+"/stream?MediaSourceId="+fixture.item.ID+"&Static=true", nil)
+	request.SetPathValue("id", fixture.item.ID)
+	request.Header.Set("X-Emby-Token", fixture.token)
+	request.Header.Set("Range", "bytes=0-1023")
+	response := httptest.NewRecorder()
+	fixture.handler.handleStream(response, request)
+	if response.Code != http.StatusNoContent || fixture.delivery.openCalls != 2 || fixture.delivery.serveCalls != 1 || len(fixture.delivery.inputs) != 2 || len(fixture.delivery.sourceInputs) != 1 ||
+		fixture.delivery.inputs[0].SourceRef != "unavailable-source" || fixture.delivery.inputs[1].SourceRef != "playable-source" || fixture.delivery.inputs[0].AllowTranscoding || fixture.delivery.inputs[1].AllowTranscoding ||
+		!fixture.delivery.sourceInputs[0].Capabilities.AllowDirectPassthrough || !containsFold(fixture.delivery.sourceInputs[0].Capabilities.StreamingProtocols, "hls") || fixture.delivery.servedAPIKey == fixture.token {
+		t.Fatalf("alternate fallback status=%d opens=%d serves=%d sourceInputs=%+v inputs=%+v key=%q body=%s", response.Code, fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.delivery.sourceInputs, fixture.delivery.inputs, fixture.delivery.servedAPIKey, response.Body.String())
+	}
+}
+
+func TestLegacyStaticStreamMapsUnsupportedSourceLikeJellyfin(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.authentication.sessions = map[string]AuthenticatedSession{fixture.token: fixture.authentication.session}
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{
+		SourceRef: "unsupported-source", StableIdentity: "unsupported", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour),
+	}}}
+	fixture.delivery.openErrors = []error{playback.ErrUnsupportedSource}
+	request := httptest.NewRequest(http.MethodGet, "/Videos/"+fixture.item.ID+"/stream?MediaSourceId="+fixture.item.ID+"&Static=true", nil)
+	request.SetPathValue("id", fixture.item.ID)
+	request.Header.Set("X-Emby-Token", fixture.token)
+	response := httptest.NewRecorder()
+	fixture.handler.handleStream(response, request)
+	if response.Code != http.StatusBadRequest || response.Code == http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), `"ErrorCode":"InvalidRequest"`) {
+		t.Fatalf("unsupported static stream status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -727,6 +770,140 @@ func TestPlaybackInfoRetriesSourceFailureAndPromotesOpenedAlternative(t *testing
 		fixture.delivery.inputs[0].SourceRef != "incompatible-source" || fixture.delivery.inputs[1].SourceRef != "compatible-source" ||
 		result.MediaSources[0].Id == fixture.item.ID || result.MediaSources[1].Id != fixture.item.ID {
 		t.Fatalf("source fallback opens=%d inputs=%+v sources=%+v", fixture.delivery.openCalls, fixture.delivery.inputs, result.MediaSources)
+	}
+}
+
+func TestLegacyStaticStreamReusesPlaybackInfoFallback(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.authentication.sessions = map[string]AuthenticatedSession{fixture.token: fixture.authentication.session}
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{
+		{SourceRef: "unavailable-source", StableIdentity: "unavailable", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
+		{SourceRef: "playable-source", StableIdentity: "playable", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)},
+	}}
+	fixture.delivery.openErrors = []error{playback.ErrUnsupportedSource, nil}
+	playbackResponse := fixture.playbackInfo(http.MethodPost, `{"StartTimeTicks":900000000,"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","AudioCodec":"aac","Type":"Video"}]}}`)
+	var info PlaybackInfoResponse
+	if err := json.Unmarshal(playbackResponse.Body.Bytes(), &info); err != nil || playbackResponse.Code != http.StatusOK || len(info.MediaSources) != 2 || info.MediaSources[0].Id == fixture.item.ID {
+		t.Fatalf("fallback PlaybackInfo status=%d result=%+v err=%v body=%s", playbackResponse.Code, info, err, playbackResponse.Body.String())
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/Videos/"+fixture.item.ID+"/stream.mp4?MediaSourceId="+url.QueryEscape(fixture.item.ID)+"&Static=true", nil)
+	request.SetPathValue("id", fixture.item.ID)
+	request.Header.Set("X-Emby-Token", fixture.token)
+	request.Header.Set("Range", "bytes=0-1023")
+	response := httptest.NewRecorder()
+	fixture.handler.handleStream(response, request)
+	if response.Code != http.StatusNoContent || fixture.delivery.openCalls != 2 || fixture.delivery.serveCalls != 1 || len(fixture.delivery.inputs) != 2 ||
+		fixture.delivery.inputs[1].SourceRef != "playable-source" || fixture.delivery.servedRange != "bytes=0-1023" || !strings.HasSuffix(fixture.delivery.servedPath, "/stream.mp4") {
+		t.Fatalf("legacy fallback stream status=%d opens=%d inputs=%+v serves=%d path=%q range=%q body=%s", response.Code, fixture.delivery.openCalls, fixture.delivery.inputs, fixture.delivery.serveCalls, fixture.delivery.servedPath, fixture.delivery.servedRange, response.Body.String())
+	}
+
+	explicitRequest := httptest.NewRequest(http.MethodGet, "/Videos/"+fixture.item.ID+"/stream.mp4?MediaSourceId="+url.QueryEscape(fixture.item.ID)+"&StartTimeTicks=0&Static=true", nil)
+	explicitRequest.SetPathValue("id", fixture.item.ID)
+	explicitRequest.Header.Set("X-Emby-Token", fixture.token)
+	explicitResponse := httptest.NewRecorder()
+	fixture.handler.handleStream(explicitResponse, explicitRequest)
+	if explicitResponse.Code != http.StatusNoContent || fixture.delivery.openCalls != 3 || len(fixture.delivery.inputs) != 3 || fixture.delivery.inputs[2].StartSeconds != 0 {
+		t.Fatalf("explicit zero start stream status=%d opens=%d inputs=%+v body=%s", explicitResponse.Code, fixture.delivery.openCalls, fixture.delivery.inputs, explicitResponse.Body.String())
+	}
+}
+
+func TestLegacyProcessingStreamCarriesNegotiatedStartWhenRequestOmitsIt(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.authentication.sessions = map[string]AuthenticatedSession{fixture.token: fixture.authentication.session}
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{
+		SourceRef: "processing-source", StableIdentity: "processing", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour),
+	}}}
+	fixture.delivery.resolvedSession = playback.Session{SelectedSourceID: "native-selected", Sources: []playback.Source{{
+		ID: "native-selected", Mode: "transcode", Protocol: "hls", Container: "hls",
+		Media: &playback.MediaInspection{
+			Container: "mkv", DurationSeconds: 3600,
+			VideoTracks: []playback.MediaTrack{{Index: 0, Codec: "h264", Width: 1920, Height: 1080}},
+			AudioTracks: []playback.MediaTrack{{Index: 1, Codec: "aac", Channels: 2}},
+		},
+	}}}
+	playbackResponse := fixture.playbackInfo(http.MethodPost, `{"StartTimeTicks":900000000,"DeviceProfile":{"TranscodingProfiles":[{"Container":"ts","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","Type":"Video"}]}}`)
+	var info PlaybackInfoResponse
+	if err := json.Unmarshal(playbackResponse.Body.Bytes(), &info); err != nil || playbackResponse.Code != http.StatusOK || len(info.MediaSources) != 1 || info.MediaSources[0].TranscodingUrl == "" {
+		t.Fatalf("processing PlaybackInfo status=%d result=%+v err=%v body=%s", playbackResponse.Code, info, err, playbackResponse.Body.String())
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/Videos/"+fixture.item.ID+"/stream.mkv?MediaSourceId="+url.QueryEscape(info.MediaSources[0].Id), nil)
+	request.SetPathValue("id", fixture.item.ID)
+	request.Header.Set("X-Emby-Token", fixture.token)
+	request.Header.Set("Range", "bytes=0-1023")
+	response := httptest.NewRecorder()
+	fixture.handler.handleStream(response, request)
+	if response.Code != http.StatusNoContent || fixture.delivery.openCalls != 1 || fixture.delivery.serveCalls != 1 ||
+		!strings.HasSuffix(fixture.delivery.servedPath, "/master.m3u8") || fixture.delivery.servedRange != "" || fixture.delivery.servedStartTicks != "900000000" {
+		t.Fatalf("processing stream status=%d opens=%d serves=%d path=%q range=%q start=%q body=%s", response.Code, fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.delivery.servedPath, fixture.delivery.servedRange, fixture.delivery.servedStartTicks, response.Body.String())
+	}
+}
+
+func TestLegacyStaticStreamReopensProcessingNegotiationWithoutTranscoding(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.authentication.sessions = map[string]AuthenticatedSession{fixture.token: fixture.authentication.session}
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{
+		SourceRef: "static-source", StableIdentity: "static-source", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour),
+	}}}
+	media := &playback.MediaInspection{
+		Container: "mkv", DurationSeconds: 3600,
+		VideoTracks: []playback.MediaTrack{{Index: 0, Codec: "h264", Width: 1920, Height: 1080}},
+		AudioTracks: []playback.MediaTrack{{Index: 1, Codec: "aac", Channels: 2}},
+	}
+	fixture.delivery.resolvedSessions = []playback.Session{
+		{SelectedSourceID: "processing", Sources: []playback.Source{{ID: "processing", Mode: "transcode", Protocol: "hls", Container: "hls", Media: media}}},
+		{SelectedSourceID: "direct", Sources: []playback.Source{{ID: "direct", Mode: "direct", Protocol: "http", Container: "mkv", Media: media}}},
+	}
+	fixture.delivery.handles = []playback.DeliveryHandle{opaquePlaybackHandleNamed(t, "processing"), opaquePlaybackHandleNamed(t, "direct")}
+	playbackResponse := fixture.playbackInfo(http.MethodPost, `{"StartTimeTicks":900000000,"DeviceProfile":{"TranscodingProfiles":[{"Container":"ts","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","Type":"Video"}]}}`)
+	var info PlaybackInfoResponse
+	if err := json.Unmarshal(playbackResponse.Body.Bytes(), &info); err != nil || playbackResponse.Code != http.StatusOK || len(info.MediaSources) != 1 || info.MediaSources[0].TranscodingUrl == "" {
+		t.Fatalf("processing PlaybackInfo status=%d result=%+v err=%v body=%s", playbackResponse.Code, info, err, playbackResponse.Body.String())
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/Videos/"+fixture.item.ID+"/stream.mkv?MediaSourceId="+url.QueryEscape(info.MediaSources[0].Id)+"&Static=true", nil)
+	request.SetPathValue("id", fixture.item.ID)
+	request.Header.Set("X-Emby-Token", fixture.token)
+	request.Header.Set("Range", "bytes=0-1023")
+	response := httptest.NewRecorder()
+	fixture.handler.handleStream(response, request)
+	if response.Code != http.StatusNoContent || fixture.delivery.openCalls != 2 || len(fixture.delivery.inputs) != 2 ||
+		fixture.delivery.inputs[1].AllowTranscoding || fixture.delivery.serveCalls != 1 || strings.HasSuffix(fixture.delivery.servedPath, "/master.m3u8") ||
+		fixture.delivery.servedRange != "bytes=0-1023" || fixture.delivery.servedStartTicks != "900000000" {
+		t.Fatalf("static stream status=%d opens=%d inputs=%+v serves=%d path=%q range=%q start=%q body=%s", response.Code, fixture.delivery.openCalls, fixture.delivery.inputs, fixture.delivery.serveCalls, fixture.delivery.servedPath, fixture.delivery.servedRange, fixture.delivery.servedStartTicks, response.Body.String())
+	}
+}
+
+func TestScopedContainerStreamFallsBackToNegotiatedProcessingTransport(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{
+		{SourceRef: "direct-source", StableIdentity: "direct-source", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour)},
+		{SourceRef: "processing-source", StableIdentity: "processing-source", Protocol: "http", Container: "mkv", ExpiresAt: fixture.now.Add(time.Hour)},
+	}}
+	media := &playback.MediaInspection{
+		Container: "mkv", DurationSeconds: 3600,
+		VideoTracks: []playback.MediaTrack{{Index: 0, Codec: "h264", Width: 1920, Height: 1080}},
+		AudioTracks: []playback.MediaTrack{{Index: 1, Codec: "aac", Channels: 2}},
+	}
+	fixture.delivery.resolvedSessions = []playback.Session{
+		{SelectedSourceID: "direct", Sources: []playback.Source{{ID: "direct", Mode: "direct", Protocol: "http", Container: "mkv", Media: media}}},
+		{SelectedSourceID: "processing", Sources: []playback.Source{{ID: "processing", Mode: "transcode", Protocol: "hls", Container: "hls", Media: media}}},
+	}
+	fixture.delivery.handles = []playback.DeliveryHandle{opaquePlaybackHandleNamed(t, "direct"), opaquePlaybackHandleNamed(t, "processing")}
+	playbackResponse := fixture.playbackInfo(http.MethodPost, `{"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mkv","VideoCodec":"h264","AudioCodec":"aac","Type":"Video"}],"TranscodingProfiles":[{"Container":"ts","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","Type":"Video"}]}}`)
+	var info PlaybackInfoResponse
+	if err := json.Unmarshal(playbackResponse.Body.Bytes(), &info); err != nil || playbackResponse.Code != http.StatusOK || len(info.MediaSources) != 2 || !strings.Contains(info.MediaSources[1].DirectStreamUrl, "/stream.mkv?") {
+		t.Fatalf("scoped PlaybackInfo status=%d result=%+v err=%v body=%s", playbackResponse.Code, info, err, playbackResponse.Body.String())
+	}
+
+	request := httptest.NewRequest(http.MethodGet, info.MediaSources[1].DirectStreamUrl, nil)
+	request.SetPathValue("id", fixture.item.ID)
+	response := httptest.NewRecorder()
+	fixture.handler.handleStream(response, request)
+	if response.Code != http.StatusNoContent || fixture.delivery.openCalls != 2 || fixture.delivery.serveCalls != 1 ||
+		!strings.HasSuffix(fixture.delivery.servedPath, "/master.m3u8") || fixture.delivery.servedRange != "" || fixture.delivery.servedAPIKey != info.PlaySessionId {
+		t.Fatalf("scoped processing stream status=%d opens=%d serves=%d path=%q range=%q key=%q body=%s", response.Code, fixture.delivery.openCalls, fixture.delivery.serveCalls, fixture.delivery.servedPath, fixture.delivery.servedRange, fixture.delivery.servedAPIKey, response.Body.String())
 	}
 }
 
@@ -1005,20 +1182,16 @@ func TestPlaybackInfoSelectedSourceOpensOnlyThatSource(t *testing.T) {
 		result.MediaSources[0].MediaStreams[0].Type != "Video" || result.MediaSources[0].MediaStreams[0].Height != 1080 ||
 		result.MediaSources[0].MediaStreams[1].Type != "Audio" || result.MediaSources[0].MediaStreams[1].IsDefault ||
 		result.MediaSources[0].MediaStreams[2].Codec != "eac3" || !result.MediaSources[0].MediaStreams[2].IsDefault ||
-		result.MediaSources[0].MediaStreams[3].Type != "Subtitle" || result.MediaSources[0].MediaStreams[3].Index != 3 || !result.MediaSources[0].MediaStreams[3].IsExternal ||
-		result.MediaSources[0].MediaStreams[3].DeliveryMethod != "External" || result.MediaSources[0].MediaStreams[3].Codec != "webvtt" ||
-		!result.MediaSources[0].MediaStreams[3].IsTextSubtitleStream || !result.MediaSources[0].MediaStreams[3].SupportsExternalStream ||
-		result.MediaSources[0].MediaStreams[4].Index != 4 || result.MediaSources[0].MediaStreams[4].Language != "en" || !result.MediaSources[0].MediaStreams[4].IsForced ||
+		result.MediaSources[0].MediaStreams[3].Index != 3 || result.MediaSources[0].MediaStreams[3].IsExternal || !result.MediaSources[0].MediaStreams[3].IsTextSubtitleStream || result.MediaSources[0].MediaStreams[3].DeliveryMethod != "Embed" || result.MediaSources[0].MediaStreams[3].DeliveryUrl != "" ||
+		result.MediaSources[0].MediaStreams[4].Index != 4 || result.MediaSources[0].MediaStreams[4].Language != "en" || !result.MediaSources[0].MediaStreams[4].IsForced || !result.MediaSources[0].MediaStreams[4].IsExternal || result.MediaSources[0].MediaStreams[4].DeliveryMethod != "External" ||
 		result.MediaSources[0].DefaultAudioStreamIndex == nil || *result.MediaSources[0].DefaultAudioStreamIndex != 2 {
 		t.Fatalf("resolved media metadata=%#v", result.MediaSources[0])
 	}
-	for streamIndex, assetIndex := range map[int]int{3: 3, 4: 4} {
-		deliveryURL, err := url.Parse(result.MediaSources[0].MediaStreams[streamIndex].DeliveryUrl)
-		if err != nil || deliveryURL.Path != "/Videos/"+fixture.item.ID+"/"+result.MediaSources[0].Id+"/Subtitles/"+strconv.Itoa(assetIndex)+"/Stream.vtt" ||
-			len(deliveryURL.Query()) != 4 || deliveryURL.Query().Get("PlaySessionId") != result.PlaySessionId || deliveryURL.Query().Get("api_key") != result.PlaySessionId ||
-			deliveryURL.Query().Get("MediaSourceId") != result.MediaSources[0].Id || deliveryURL.Query().Get("StartTimeTicks") != "1200000000" {
-			t.Fatalf("subtitle DeliveryUrl=%q parsed=%v err=%v", result.MediaSources[0].MediaStreams[streamIndex].DeliveryUrl, deliveryURL, err)
-		}
+	deliveryURL, err := url.Parse(result.MediaSources[0].MediaStreams[4].DeliveryUrl)
+	if err != nil || deliveryURL.Path != "/Videos/"+fixture.item.ID+"/"+result.MediaSources[0].Id+"/Subtitles/4/Stream.vtt" ||
+		len(deliveryURL.Query()) != 4 || deliveryURL.Query().Get("PlaySessionId") != result.PlaySessionId || deliveryURL.Query().Get("api_key") != result.PlaySessionId ||
+		deliveryURL.Query().Get("MediaSourceId") != result.MediaSources[0].Id || deliveryURL.Query().Get("StartTimeTicks") != "1200000000" {
+		t.Fatalf("provider subtitle DeliveryUrl=%q parsed=%v err=%v", result.MediaSources[0].MediaStreams[4].DeliveryUrl, deliveryURL, err)
 	}
 	if strings.Contains(response.Body.String(), "provider-secret") || strings.Contains(response.Body.String(), "source-reference") || strings.Contains(response.Body.String(), fixture.token) {
 		t.Fatalf("selected playback response disclosed native data: %s", response.Body.String())
@@ -1133,7 +1306,7 @@ func TestSubtitleStreamServesCapabilityBoundAssetForGETHEADAndStartVariant(t *te
 			fixture.handler.handleSubtitleStream(response, request)
 			if response.Code != http.StatusNoContent || fixture.delivery.serveAssetCalls != 1 || fixture.delivery.servedAssetID != "subtitle-1" ||
 				fixture.delivery.servedMethod != test.method || fixture.delivery.servedRange != "bytes=10-19" || fixture.delivery.servedAPIKey != "" || fixture.delivery.servedStartTicks != "" ||
-				fixture.delivery.openCalls != 1 || fixture.authentication.revalidateCalls != 1 {
+				fixture.delivery.openCalls != 1 || fixture.authentication.revalidateCalls != 0 {
 				t.Fatalf("subtitle response=%d assetCalls=%d asset=%q method=%q range=%q key=%q ticks=%q opens=%d revalidations=%d", response.Code,
 					fixture.delivery.serveAssetCalls, fixture.delivery.servedAssetID, fixture.delivery.servedMethod, fixture.delivery.servedRange,
 					fixture.delivery.servedAPIKey, fixture.delivery.servedStartTicks, fixture.delivery.openCalls, fixture.authentication.revalidateCalls)
@@ -1307,6 +1480,11 @@ func TestPlaybackInfoReusesSecondAndThirdCandidateAcrossRequests(t *testing.T) {
 	if fixture.delivery.sourceCalls != 1 || fixture.delivery.openCalls != 3 ||
 		fixture.delivery.inputs[0].SourceRef != "source-reference-000000000001" || fixture.delivery.inputs[1].SourceRef != "source-reference-000000000002" || fixture.delivery.inputs[2].SourceRef != "source-reference-000000000003" {
 		t.Fatalf("eager and later selections did not use issued candidates: source calls=%d opens=%d inputs=%#v", fixture.delivery.sourceCalls, fixture.delivery.openCalls, fixture.delivery.inputs)
+	}
+	if _, _, _, _, reused := fixture.handler.playSessions.reuseNegotiatedCandidate(
+		fixture.authentication.session, fixture.item.ID, "", 0, true,
+	); reused {
+		t.Fatal("source-less reuse selected one of multiple opened candidates")
 	}
 	for _, source := range initial.MediaSources[1:] {
 		if source.Id == "" || strings.Contains(source.Id, "source-reference") {
@@ -1515,12 +1693,16 @@ func TestMasterPlaylistUsesNegotiatedCapabilityAndDownloadUsesGeneralCredential(
 		t.Fatalf("master DTO=%+v", info.MediaSources[0])
 	}
 	fixture.authentication.sessions = map[string]AuthenticatedSession{fixture.token: fixture.authentication.session}
+	authenticateCalls := fixture.authentication.authenticateCalls
+	catalog := fixture.handler.catalog.(*fakeCompatPlaybackCatalog)
+	catalogCalls := catalog.calls
 	master := httptest.NewRequest(http.MethodGet, info.MediaSources[0].TranscodingUrl, nil)
 	master.SetPathValue("id", fixture.item.ID)
 	masterResponse := httptest.NewRecorder()
 	fixture.handler.handleStream(masterResponse, master)
-	if masterResponse.Code != http.StatusNoContent || fixture.delivery.servedPath != "/Videos/"+fixture.item.ID+"/master.m3u8" || fixture.authentication.revalidateCalls != 1 {
-		t.Fatalf("master status=%d path=%q revalidations=%d", masterResponse.Code, fixture.delivery.servedPath, fixture.authentication.revalidateCalls)
+	if masterResponse.Code != http.StatusNoContent || fixture.delivery.servedPath != "/Videos/"+fixture.item.ID+"/master.m3u8" || fixture.authentication.revalidateCalls != 0 ||
+		fixture.authentication.authenticateCalls != authenticateCalls || catalog.calls != catalogCalls {
+		t.Fatalf("master status=%d path=%q authentications=%d revalidations=%d catalog=%d", masterResponse.Code, fixture.delivery.servedPath, fixture.authentication.authenticateCalls-authenticateCalls, fixture.authentication.revalidateCalls, catalog.calls-catalogCalls)
 	}
 	childID := strings.Repeat("c", 32)
 	childValues := url.Values{"MediaSourceId": {info.MediaSources[0].Id}}
@@ -1529,10 +1711,12 @@ func TestMasterPlaylistUsesNegotiatedCapabilityAndDownloadUsesGeneralCredential(
 	child.SetPathValue("playlistId", info.PlaySessionId)
 	child.SetPathValue("segmentId", childID)
 	child.SetPathValue("container", "ts")
+	child.Header.Set("X-Emby-Token", fixture.token)
 	childResponse := httptest.NewRecorder()
 	fixture.handler.handleStream(childResponse, child)
-	if childResponse.Code != http.StatusNoContent || fixture.delivery.servedChildID != childID || fixture.authentication.revalidateCalls != 2 {
-		t.Fatalf("child status=%d id=%q revalidations=%d", childResponse.Code, fixture.delivery.servedChildID, fixture.authentication.revalidateCalls)
+	if childResponse.Code != http.StatusNoContent || fixture.delivery.servedChildID != childID || fixture.authentication.revalidateCalls != 0 ||
+		fixture.authentication.authenticateCalls != authenticateCalls || catalog.calls != catalogCalls {
+		t.Fatalf("child status=%d id=%q authentications=%d revalidations=%d catalog=%d", childResponse.Code, fixture.delivery.servedChildID, fixture.authentication.authenticateCalls-authenticateCalls, fixture.authentication.revalidateCalls, catalog.calls-catalogCalls)
 	}
 
 	downloadFixture := newPlaybackFixture(t)
@@ -1557,11 +1741,11 @@ func TestPlaybackInfoAdvertisesScopedCapabilityAndStreamFallsBackToNegotiatedSes
 		wantStatus             int
 		wantRevalidation       int
 	}{
-		{name: "scoped query capability", wantStatus: http.StatusNoContent, wantRevalidation: 1},
+		{name: "scoped query capability", wantStatus: http.StatusNoContent},
 		{name: "profile query credential", profileQueryCredential: true, wantStatus: http.StatusNoContent},
-		{name: "credential dropped by player", removeCredential: true, wantStatus: http.StatusNoContent, wantRevalidation: 1},
-		{name: "play session copied into header", headerKind: "play", wantStatus: http.StatusNoContent, wantRevalidation: 1},
-		{name: "stale player header masks query", profileQueryCredential: true, headerKind: "stale", wantStatus: http.StatusNoContent, wantRevalidation: 1},
+		{name: "credential dropped by player", removeCredential: true, wantStatus: http.StatusNoContent},
+		{name: "play session copied into header", headerKind: "play", wantStatus: http.StatusNoContent},
+		{name: "stale player header masks query", profileQueryCredential: true, headerKind: "stale", wantStatus: http.StatusNoContent},
 		{name: "active foreign credential never falls back", headerKind: "foreign", wantStatus: http.StatusNotFound},
 		{name: "unknown play session without credential", removeCredential: true, unknownSession: true, wantStatus: http.StatusUnauthorized},
 	} {
@@ -1656,6 +1840,9 @@ func TestRevokedBackingSessionRejectsScopedStreamBeforeAdditionalOpen(t *testing
 	if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil || len(info.MediaSources) != 1 {
 		t.Fatalf("playback info=%+v err=%v", info, err)
 	}
+	if !fixture.handler.playSessions.refreshStreamAuthorizationAt(fixture.authentication.session, fixture.item.ID, info.PlaySessionId, fixture.token, fixture.now.Add(-2*defaultPlaySessionStreamRevalidatePeriod)) {
+		t.Fatal("failed to install expired stream authorization")
+	}
 	fixture.authentication.revalidateErr = ErrInvalidCompatCredential
 	streamURL, err := url.Parse(info.MediaSources[0].DirectStreamUrl)
 	if err != nil {
@@ -1681,6 +1868,7 @@ func TestTransientStreamRevalidationFailurePreservesScopedSession(t *testing.T) 
 	if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil || len(info.MediaSources) != 1 {
 		t.Fatalf("playback info=%+v err=%v", info, err)
 	}
+	fixture.handler.playSessions.entries[info.PlaySessionId].streamValidatedAt = fixture.now.Add(-2 * defaultPlaySessionStreamRevalidatePeriod)
 	fixture.authentication.revalidateErr = errors.New("database temporarily unavailable")
 	streamURL, err := url.Parse(info.MediaSources[0].DirectStreamUrl)
 	if err != nil {
@@ -1706,6 +1894,7 @@ func TestSaturatedStreamRevalidationPreservesScopedSession(t *testing.T) {
 	if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil || len(info.MediaSources) != 1 {
 		t.Fatalf("playback info=%+v err=%v", info, err)
 	}
+	fixture.handler.playSessions.entries[info.PlaySessionId].streamValidatedAt = fixture.now.Add(-2 * defaultPlaySessionStreamRevalidatePeriod)
 	fixture.authentication.revalidateErr = ErrCompatAuthenticationSaturated
 	streamURL, err := url.Parse(info.MediaSources[0].DirectStreamUrl)
 	if err != nil {
@@ -1731,6 +1920,7 @@ func TestStreamRejectsSourceMismatchAndCrossSessionOrProfileReplay(t *testing.T)
 	if err := json.Unmarshal(listed.Body.Bytes(), &info); err != nil {
 		t.Fatal(err)
 	}
+	fixture.handler.playSessions.entries[info.PlaySessionId].streamValidatedAt = fixture.now.Add(-2 * defaultPlaySessionStreamRevalidatePeriod)
 	tests := []struct {
 		name, mediaID string
 		mutate        func(*AuthenticatedSession)
@@ -1803,6 +1993,24 @@ func TestTerminalStreamFailureClosesDelivery(t *testing.T) {
 	fixture.handler.handleStream(httptest.NewRecorder(), request)
 	if fixture.delivery.serveCalls != 1 || fixture.delivery.closeCalls != 1 || fixture.handler.playSessions.entries[info.PlaySessionId] != nil {
 		t.Fatalf("terminal stream cleanup: serve=%d close=%d preserved=%t", fixture.delivery.serveCalls, fixture.delivery.closeCalls, fixture.handler.playSessions.entries[info.PlaySessionId] != nil)
+	}
+}
+
+func TestPlaySessionRegistryRejectsRegistrationAfterSessionClosed(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	registry := fixture.handler.playSessions
+	if err := registry.closeSession(context.Background(), fixture.authentication.session); err != nil {
+		t.Fatal(err)
+	}
+	option := playback.SourceOption{SourceRef: "late-logout-source", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour)}
+	if _, _, err := registry.register(context.Background(), fixture.authentication.session, fixture.item.ID, playback.Capabilities{}, false, []playback.SourceOption{option}); !errors.Is(err, errPlaySessionNotFound) {
+		t.Fatalf("late registration error=%v", err)
+	}
+	if len(registry.entries) != 0 || fixture.delivery.pinCalls != 1 || fixture.delivery.unpinCalls != 1 || len(fixture.delivery.pinned) != 0 {
+		t.Fatalf("late registration entries=%d pins=%d unpins=%d retained=%#v", len(registry.entries), fixture.delivery.pinCalls, fixture.delivery.unpinCalls, fixture.delivery.pinned)
+	}
+	if _, revoked := registry.revokedSessions[fixture.authentication.session.ID]; !revoked {
+		t.Fatal("closed compatibility session lacks registration tombstone")
 	}
 }
 
@@ -2224,6 +2432,68 @@ func TestPlaySessionRegistryRefreshMatchesReorderedCandidatesByIdentity(t *testi
 	}
 	if fixture.delivery.openCalls != 1 || fixture.delivery.inputs[0].SourceRef != "new-b" {
 		t.Fatalf("reordered selection opened wrong candidate: %#v", fixture.delivery.inputs)
+	}
+}
+
+func TestPlaybackInfoRefreshesSingletonWithoutStableIdentity(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{
+		SourceRef: "source-before-quality-change", Name: "Only source", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour),
+	}}}
+	initialProfile := `"MaxStreamingBitrate":8000000,"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}`
+	listed := fixture.playbackInfo(http.MethodPost, `{`+initialProfile+`}`)
+	var initial PlaybackInfoResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &initial); err != nil || listed.Code != http.StatusOK || len(initial.MediaSources) != 1 {
+		t.Fatalf("initial singleton status=%d response=%#v err=%v body=%s", listed.Code, initial, err, listed.Body.String())
+	}
+
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{
+		SourceRef: "source-after-quality-change", Name: "Only source", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour),
+	}}}
+	restrictedProfile := `"MaxStreamingBitrate":4000000,"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}`
+	selected := fixture.playbackInfo(http.MethodPost, fmt.Sprintf(`{"MediaSourceId":%q,%s}`, initial.MediaSources[0].Id, restrictedProfile))
+	var refreshed PlaybackInfoResponse
+	if err := json.Unmarshal(selected.Body.Bytes(), &refreshed); err != nil || selected.Code != http.StatusOK || refreshed.PlaySessionId != initial.PlaySessionId ||
+		len(refreshed.MediaSources) != 1 || refreshed.MediaSources[0].Id != initial.MediaSources[0].Id {
+		t.Fatalf("refreshed singleton status=%d response=%#v err=%v body=%s", selected.Code, refreshed, err, selected.Body.String())
+	}
+	if fixture.delivery.openCalls != 2 || fixture.delivery.closeCalls != 1 || len(fixture.delivery.inputs) != 2 ||
+		fixture.delivery.inputs[1].SourceRef != "source-after-quality-change" || fixture.delivery.inputs[1].Capabilities.MaximumVideoBitrateKbps != 4000 {
+		t.Fatalf("quality refresh opens=%d closes=%d inputs=%#v", fixture.delivery.openCalls, fixture.delivery.closeCalls, fixture.delivery.inputs)
+	}
+}
+
+func TestPlaybackInfoRejectsAmbiguousSingletonRefreshWithoutStableIdentity(t *testing.T) {
+	fixture := newPlaybackFixture(t)
+	profile := `"MaxStreamingBitrate":8000000,"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}`
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{
+		SourceRef: "first-singleton", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour),
+	}}}
+	firstResponse := fixture.playbackInfo(http.MethodPost, `{`+profile+`}`)
+	var first PlaybackInfoResponse
+	if err := json.Unmarshal(firstResponse.Body.Bytes(), &first); err != nil || firstResponse.Code != http.StatusOK || len(first.MediaSources) != 1 {
+		t.Fatalf("first singleton status=%d response=%#v err=%v", firstResponse.Code, first, err)
+	}
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{
+		SourceRef: "second-singleton", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour),
+	}}}
+	secondResponse := fixture.playbackInfo(http.MethodPost, `{`+profile+`}`)
+	var second PlaybackInfoResponse
+	if err := json.Unmarshal(secondResponse.Body.Bytes(), &second); err != nil || secondResponse.Code != http.StatusOK || len(second.MediaSources) != 1 ||
+		second.PlaySessionId == first.PlaySessionId || second.MediaSources[0].Id != first.MediaSources[0].Id {
+		t.Fatalf("second singleton status=%d response=%#v err=%v", secondResponse.Code, second, err)
+	}
+
+	fixture.delivery.sources = playback.SourceList{Sources: []playback.SourceOption{{
+		SourceRef: "ambiguous-refresh", Protocol: "http", Container: "mp4", ExpiresAt: fixture.now.Add(time.Hour),
+	}}}
+	restricted := `"MaxStreamingBitrate":4000000,"DeviceProfile":{"DirectPlayProfiles":[{"Container":"mp4","VideoCodec":"h264","Type":"Video"}]}`
+	selected := fixture.playbackInfo(http.MethodPost, fmt.Sprintf(`{"MediaSourceId":%q,%s}`, first.MediaSources[0].Id, restricted))
+	firstEntry := fixture.handler.playSessions.entries[first.PlaySessionId]
+	secondEntry := fixture.handler.playSessions.entries[second.PlaySessionId]
+	if selected.Code != http.StatusNotFound || fixture.delivery.openCalls != 2 || firstEntry == nil || secondEntry == nil ||
+		firstEntry.sources[first.MediaSources[0].Id].sourceRef != "first-singleton" || secondEntry.sources[second.MediaSources[0].Id].sourceRef != "second-singleton" {
+		t.Fatalf("ambiguous singleton refresh status=%d opens=%d first=%+v second=%+v body=%s", selected.Code, fixture.delivery.openCalls, firstEntry, secondEntry, selected.Body.String())
 	}
 }
 
@@ -3126,6 +3396,7 @@ type fakeCompatPlaybackDelivery struct {
 	now                           time.Time
 	sources                       playback.SourceList
 	resolvedSession               playback.Session
+	resolvedSessions              []playback.Session
 	handle                        playback.DeliveryHandle
 	handles                       []playback.DeliveryHandle
 	openErrors                    []error
@@ -3221,6 +3492,9 @@ func (delivery *fakeCompatPlaybackDelivery) Open(ctx context.Context, _ auth.Pri
 	ignoreContext := delivery.openIgnoreContext
 	handle := delivery.handle
 	resolvedSession := delivery.resolvedSession
+	if call < len(delivery.resolvedSessions) {
+		resolvedSession = delivery.resolvedSessions[call]
+	}
 	if call < len(delivery.handles) {
 		handle = delivery.handles[call]
 	}

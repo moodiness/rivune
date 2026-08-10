@@ -106,7 +106,7 @@ func (handler *Handler) handlePlaybackEvent(response http.ResponseWriter, reques
 		input.PositionTicks < 0 || input.PlaybackStartTimeTicks < 0 ||
 		!boundedStateSelector(input.ItemId) || !boundedStateSelector(input.PlaySessionId) ||
 		input.MediaSourceId != "" && !boundedStateSelector(input.MediaSourceId) ||
-		!validPlaybackStreamIndex(input.AudioStreamIndex, false) || !validPlaybackStreamIndex(input.SubtitleStreamIndex, true) ||
+		!validPlaybackStreamIndex(input.AudioStreamIndex) || !validPlaybackStreamIndex(input.SubtitleStreamIndex) ||
 		!validCompatPlayMethod(input.PlayMethod) {
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The playback event is invalid")
 		return
@@ -424,16 +424,16 @@ func (handler *Handler) handleResume(response http.ResponseWriter, request *http
 		http.NotFound(response, request)
 		return
 	}
-	if !validateCompatQueryNames(request.URL.Query(), "UserId", "StartIndex", "Limit", "EnableUserData", "MediaTypes", "Fields", "EnableImages", "EnableImageTypes", "ImageTypeLimit") {
-		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
-		return
-	}
 	query, err := ParseItemQuery(request.URL.Query())
 	if err != nil {
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
 		return
 	}
 	if query.Limit < 1 || query.Limit > maximumContinuationPageSize {
+		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
+		return
+	}
+	if _, err := booleanValue(request.URL.Query(), "ExcludeActiveSessions", false); err != nil {
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
 		return
 	}
@@ -467,16 +467,29 @@ func (handler *Handler) handleNextUp(response http.ResponseWriter, request *http
 	if !ok || !handler.requireOptionalQueryUser(response, request, session) {
 		return
 	}
-	if !validateCompatQueryNames(request.URL.Query(), "UserId", "SeriesId", "StartIndex", "Limit", "EnableUserData", "Fields", "EnableImages", "EnableImageTypes", "ImageTypeLimit") {
-		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
-		return
-	}
 	query, err := ParseItemQuery(request.URL.Query())
 	if err != nil {
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
 		return
 	}
 	if query.Limit < 1 || query.Limit > maximumContinuationPageSize {
+		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
+		return
+	}
+	for _, option := range []struct {
+		name     string
+		fallback bool
+	}{
+		{name: "DisableFirstEpisode", fallback: false},
+		{name: "EnableResumable", fallback: true},
+		{name: "EnableRewatching", fallback: false},
+	} {
+		if _, err := booleanValue(request.URL.Query(), option.name, option.fallback); err != nil {
+			handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
+			return
+		}
+	}
+	if _, err := boundedString(request.URL.Query(), "NextUpDateCutoff", MaximumQueryValueBytes); err != nil {
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The item query is invalid")
 		return
 	}
@@ -569,7 +582,7 @@ func (handler *Handler) writeContinueItems(response http.ResponseWriter, request
 		items = append(items, item)
 	}
 	handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{
-		Items: items, TotalRecordCount: page.Total, StartIndex: page.Offset,
+		Items: items, TotalRecordCount: itemQueryTotal(query, page.Total), StartIndex: page.Offset,
 	})
 }
 

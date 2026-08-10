@@ -465,7 +465,7 @@ func (reader *catalogReader) SearchCatalog(ctx context.Context, principal auth.P
 	}
 	items := deduplicateCatalogSearch(candidates, query.IDs)
 	if query.SortBy != "" {
-		sortCatalogSearch(items, query.SortOrder)
+		sortCatalogTitles(items, query.SortBy, query.SortOrder)
 	}
 	if len(items) > maximumCatalogSearchCandidates {
 		items = items[:maximumCatalogSearchCandidates]
@@ -815,6 +815,12 @@ func mergeCatalogSearchTitle(current, incoming watchstate.CatalogTitle) watchsta
 	if current.ReleaseInfo == "" {
 		current.ReleaseInfo = incoming.ReleaseInfo
 	}
+	if current.CreatedAt.IsZero() {
+		current.CreatedAt = incoming.CreatedAt
+	}
+	if current.LastContentAddedAt.IsZero() {
+		current.LastContentAddedAt = incoming.LastContentAddedAt
+	}
 	if current.RuntimeMinutes == nil {
 		current.RuntimeMinutes = incoming.RuntimeMinutes
 	}
@@ -836,18 +842,81 @@ func mergeCatalogSearchTitle(current, incoming watchstate.CatalogTitle) watchsta
 }
 
 func sortCatalogSearch(items []watchstate.CatalogTitle, order string) {
+	sortCatalogTitles(items, "sortname", order)
+}
+
+func sortCatalogTitles(items []watchstate.CatalogTitle, sortBy, order string) {
+	keys := strings.Split(strings.ToLower(strings.TrimSpace(sortBy)), ",")
 	descending := strings.EqualFold(order, "Descending")
 	sort.SliceStable(items, func(left, right int) bool {
-		leftName := strings.ToLower(items[left].Title)
-		rightName := strings.ToLower(items[right].Title)
-		if leftName == rightName {
-			return strings.ToLower(items[left].ID) < strings.ToLower(items[right].ID)
+		for _, key := range keys {
+			comparison, leftMissing, rightMissing := compareCatalogTitleSortKey(items[left], items[right], key)
+			if leftMissing != rightMissing {
+				return !leftMissing
+			}
+			if comparison == 0 {
+				continue
+			}
+			if descending {
+				return comparison > 0
+			}
+			return comparison < 0
 		}
-		if descending {
-			return leftName > rightName
-		}
-		return leftName < rightName
+		return strings.ToLower(items[left].ID) < strings.ToLower(items[right].ID)
 	})
+}
+
+func compareCatalogTitleSortKey(left, right watchstate.CatalogTitle, key string) (comparison int, leftMissing, rightMissing bool) {
+	switch key {
+	case "sortname":
+		return strings.Compare(strings.ToLower(left.Title), strings.ToLower(right.Title)), left.Title == "", right.Title == ""
+	case "datecreated":
+		return compareCatalogTimes(left.CreatedAt, right.CreatedAt)
+	case "datelastcontentadded":
+		return compareCatalogTimes(left.LastContentAddedAt, right.LastContentAddedAt)
+	case "productionyear":
+		leftYear, rightYear := catalogTitleProductionYear(left), catalogTitleProductionYear(right)
+		switch {
+		case leftYear < rightYear:
+			comparison = -1
+		case leftYear > rightYear:
+			comparison = 1
+		}
+		return comparison, leftYear == 0, rightYear == 0
+	default:
+		return 0, true, true
+	}
+}
+
+func compareCatalogTimes(left, right time.Time) (comparison int, leftMissing, rightMissing bool) {
+	switch {
+	case left.Before(right):
+		comparison = -1
+	case left.After(right):
+		comparison = 1
+	}
+	return comparison, left.IsZero(), right.IsZero()
+}
+
+func catalogTitleProductionYear(title watchstate.CatalogTitle) int {
+	for _, value := range [...]string{title.Released, title.ReleaseInfo} {
+		if len(value) < 4 {
+			continue
+		}
+		year := 0
+		valid := true
+		for index := 0; index < 4; index++ {
+			if value[index] < '0' || value[index] > '9' {
+				valid = false
+				break
+			}
+			year = year*10 + int(value[index]-'0')
+		}
+		if valid && year > 0 {
+			return year
+		}
+	}
+	return 0
 }
 
 var (

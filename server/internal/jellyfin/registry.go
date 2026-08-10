@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -20,19 +21,20 @@ import (
 var errPlaySessionNotFound = errors.New("compatibility play session not found")
 
 const (
-	defaultPlaySessionLimit             = 256
-	defaultPlaySessionUserLimit         = 64
-	defaultPlaySessionOwnerLimit        = 8
-	defaultPlaySessionIdleTTL           = 30 * time.Minute
-	defaultPlaySessionAbsoluteTTL       = 2 * time.Hour
-	defaultPlaySessionReapPeriod        = time.Minute
-	playSessionIDPrefix                 = "rvp_"
-	defaultPlaySessionCleanupTimeout    = 5 * time.Second
-	defaultPlaySessionCleanupWorkers    = 4
-	defaultPlaySessionCleanupRetryBase  = 100 * time.Millisecond
-	defaultPlaySessionCleanupRetryMax   = 30 * time.Second
-	defaultPlaySessionCleanupRetryTTL   = 10 * time.Minute
-	defaultPlaySessionCleanupQueueLimit = 4096
+	defaultPlaySessionLimit                  = 256
+	defaultPlaySessionUserLimit              = 64
+	defaultPlaySessionOwnerLimit             = 8
+	defaultPlaySessionIdleTTL                = 30 * time.Minute
+	defaultPlaySessionAbsoluteTTL            = 2 * time.Hour
+	defaultPlaySessionReapPeriod             = time.Minute
+	defaultPlaySessionStreamRevalidatePeriod = time.Minute
+	playSessionIDPrefix                      = "rvp_"
+	defaultPlaySessionCleanupTimeout         = 5 * time.Second
+	defaultPlaySessionCleanupWorkers         = 4
+	defaultPlaySessionCleanupRetryBase       = 100 * time.Millisecond
+	defaultPlaySessionCleanupRetryMax        = 30 * time.Second
+	defaultPlaySessionCleanupRetryTTL        = 10 * time.Minute
+	defaultPlaySessionCleanupQueueLimit      = 4096
 )
 
 type playSessionBinding struct {
@@ -99,26 +101,29 @@ func (lease playbackEventLease) release() {
 }
 
 type playSessionEntry struct {
-	compatSessionID     string
-	nativeSessionID     string
-	profileID           string
-	deviceID            string
-	itemID              string
-	playSessionID       string
-	principal           auth.Principal
-	capabilities        playback.Capabilities
-	allowTranscode      bool
-	capabilityRevision  uint64
-	preferredAudioTrack *int
-	preferredSubtitleID string
-	createdAt           time.Time
-	sequence            uint64
-	lastSeenAt          time.Time
-	expiresAt           time.Time
-	sourceOrder         []string
-	sources             map[string]*playSessionSource
-	referencesPinned    bool
-	eventLease          chan struct{}
+	compatSessionID        string
+	nativeSessionID        string
+	profileID              string
+	deviceID               string
+	itemID                 string
+	playSessionID          string
+	principal              auth.Principal
+	capabilities           playback.Capabilities
+	allowTranscode         bool
+	capabilityRevision     uint64
+	preferredAudioTrack    *int
+	preferredSubtitleID    string
+	createdAt              time.Time
+	sequence               uint64
+	lastSeenAt             time.Time
+	streamCredentialDigest [sha256.Size]byte
+	streamCredentialBound  bool
+	streamValidatedAt      time.Time
+	expiresAt              time.Time
+	sourceOrder            []string
+	sources                map[string]*playSessionSource
+	referencesPinned       bool
+	eventLease             chan struct{}
 }
 type registeredDeviceProfile struct {
 	session    AuthenticatedSession
@@ -128,20 +133,22 @@ type registeredDeviceProfile struct {
 }
 
 type playSessionRegistry struct {
-	mu             sync.Mutex
-	playback       PlaybackDelivery
-	entries        map[string]*playSessionEntry
-	deviceProfiles map[string]*registeredDeviceProfile
-	nextSequence   uint64
-	limit          int
-	userLimit      int
-	ownerLimit     int
-	idleTTL        time.Duration
-	absoluteTTL    time.Duration
-	reapPeriod     time.Duration
-	cleanupTimeout time.Duration
-	cleanupWorkers int
-	cleanupSlots   chan struct{}
+	mu                     sync.Mutex
+	playback               PlaybackDelivery
+	entries                map[string]*playSessionEntry
+	deviceProfiles         map[string]*registeredDeviceProfile
+	revokedSessions        map[string]time.Time
+	nextSequence           uint64
+	limit                  int
+	userLimit              int
+	ownerLimit             int
+	idleTTL                time.Duration
+	absoluteTTL            time.Duration
+	streamRevalidatePeriod time.Duration
+	reapPeriod             time.Duration
+	cleanupTimeout         time.Duration
+	cleanupWorkers         int
+	cleanupSlots           chan struct{}
 
 	cleanupMu           sync.Mutex
 	cleanupPending      map[playback.DeliveryHandle]*pendingPlaySessionClose
@@ -162,10 +169,11 @@ func newPlaySessionRegistry(delivery PlaybackDelivery) *playSessionRegistry {
 		return nil
 	}
 	return &playSessionRegistry{
-		playback: delivery, entries: make(map[string]*playSessionEntry), deviceProfiles: make(map[string]*registeredDeviceProfile), limit: defaultPlaySessionLimit,
+		playback: delivery, entries: make(map[string]*playSessionEntry), deviceProfiles: make(map[string]*registeredDeviceProfile),
+		revokedSessions: make(map[string]time.Time), limit: defaultPlaySessionLimit,
 		userLimit: defaultPlaySessionUserLimit, ownerLimit: defaultPlaySessionOwnerLimit,
 		idleTTL: defaultPlaySessionIdleTTL, absoluteTTL: defaultPlaySessionAbsoluteTTL,
-		reapPeriod: defaultPlaySessionReapPeriod, cleanupTimeout: defaultPlaySessionCleanupTimeout,
+		streamRevalidatePeriod: defaultPlaySessionStreamRevalidatePeriod, reapPeriod: defaultPlaySessionReapPeriod, cleanupTimeout: defaultPlaySessionCleanupTimeout,
 		cleanupWorkers: defaultPlaySessionCleanupWorkers,
 		cleanupSlots:   make(chan struct{}, defaultPlaySessionCleanupWorkers),
 		cleanupPending: make(map[playback.DeliveryHandle]*pendingPlaySessionClose), cleanupOwned: make(map[playback.DeliveryHandle]struct{}),
@@ -229,6 +237,15 @@ func (registry *playSessionRegistry) register(ctx context.Context, session Authe
 	registry.nextSequence++
 	entry.sequence = registry.nextSequence
 	stale := registry.removeExpiredLocked(now)
+	if registry.sessionRevokedLocked(session, now) {
+		registry.mu.Unlock()
+		if entry.referencesPinned {
+			pinner.UnpinSourceReferences(entry.principal, references)
+			entry.referencesPinned = false
+		}
+		registry.closeEntries(context.WithoutCancel(ctx), stale)
+		return "", nil, errPlaySessionNotFound
+	}
 	ownerLimit := registry.ownerLimit
 	if ownerLimit <= 0 {
 		ownerLimit = defaultPlaySessionOwnerLimit
@@ -278,8 +295,8 @@ func (registry *playSessionRegistry) register(ctx context.Context, session Authe
 }
 
 // reuseCandidate keeps an emitted MediaSourceId bound to its original source
-// reference. A capability refresh may transfer that binding only when every
-// candidate has a unique, URL-free stable identity.
+// reference. A capability refresh may transfer that binding when every candidate
+// has a unique, URL-free stable identity or both candidate sets are singletons.
 func (registry *playSessionRegistry) reuseCandidate(session AuthenticatedSession, itemID, mediaID string, capabilities playback.Capabilities, allowTranscode bool, options []playback.SourceOption) (string, []playSourceDescriptor, bool) {
 	if registry == nil || !validPlaySessionOwner(session) || itemID == "" || mediaID == "" {
 		return "", nil, false
@@ -289,9 +306,12 @@ func (registry *playSessionRegistry) reuseCandidate(session AuthenticatedSession
 	uniqueFresh := len(options) > 0
 	for _, option := range options {
 		key := playSourceKeyFor(option)
-		if option.SourceRef == "" || option.ExpiresAt.IsZero() || !option.ExpiresAt.After(now) || key.StableIdentity == "" {
+		if option.SourceRef == "" || option.ExpiresAt.IsZero() || !option.ExpiresAt.After(now) {
 			uniqueFresh = false
 			continue
+		}
+		if key.StableIdentity == "" && len(options) != 1 {
+			uniqueFresh = false
 		}
 		if _, exists := freshByKey[key]; exists {
 			uniqueFresh = false
@@ -301,17 +321,33 @@ func (registry *playSessionRegistry) reuseCandidate(session AuthenticatedSession
 	registry.mu.Lock()
 	stale := registry.removeExpiredLocked(now)
 	var selected *playSessionEntry
+	selectedBySingleton := false
+	singletonMatches := 0
 	for _, entry := range registry.entries {
 		if !ownerMatches(entry, session) || entry.itemID != itemID || entry.sources[mediaID] == nil {
 			continue
 		}
 		capabilitiesChanged := !playbackCapabilitiesEqual(entry.capabilities, capabilities) || entry.allowTranscode != allowTranscode
-		if capabilitiesChanged && (!uniqueFresh || !candidateSelectionMatches(entry, mediaID, freshByKey)) {
-			continue
+		matchedBySingleton := false
+		if capabilitiesChanged {
+			if !uniqueFresh {
+				continue
+			}
+			if !candidateSelectionMatches(entry, mediaID, freshByKey) {
+				if !singletonCandidateSelectionMatches(entry, mediaID, freshByKey) {
+					continue
+				}
+				matchedBySingleton = true
+				singletonMatches++
+			}
 		}
 		if selected == nil || entry.sequence > selected.sequence {
 			selected = entry
+			selectedBySingleton = matchedBySingleton
 		}
+	}
+	if selectedBySingleton && singletonMatches != 1 {
+		selected = nil
 	}
 	var descriptors []playSourceDescriptor
 	var releasePrincipal auth.Principal
@@ -361,6 +397,7 @@ func (registry *playSessionRegistry) reuseCandidate(session AuthenticatedSession
 		if selected != nil {
 			descriptors = descriptorsFor(selected)
 			selected.lastSeenAt = now
+			selected.principal = clonePrincipal(session.Principal)
 		}
 	}
 	registry.mu.Unlock()
@@ -388,6 +425,11 @@ func (registry *playSessionRegistry) setDeviceProfile(session AuthenticatedSessi
 	stored := &registeredDeviceProfile{session: storedSession, profile: cloneDeviceProfile(profile), lastSeenAt: now, expiresAt: expiresAt}
 	registry.mu.Lock()
 	stale := registry.removeExpiredLocked(now)
+	if registry.sessionRevokedLocked(session, now) {
+		registry.mu.Unlock()
+		registry.closeEntries(context.Background(), stale)
+		return false
+	}
 	if registry.deviceProfiles[session.ID] == nil {
 		ownerLimit := registry.ownerLimit
 		if ownerLimit <= 0 {
@@ -456,27 +498,78 @@ func (registry *playSessionRegistry) deviceProfile(session AuthenticatedSession)
 	return profile, ok
 }
 
-func (registry *playSessionRegistry) streamSession(playID, itemID, mediaID string) (AuthenticatedSession, bool) {
+type streamAuthorizationSnapshot struct {
+	session             AuthenticatedSession
+	credentialMatches   bool
+	recentlyRevalidated bool
+}
+
+func (registry *playSessionRegistry) streamAuthorization(playID, itemID, mediaID, token string) (streamAuthorizationSnapshot, bool) {
 	if registry == nil || playID == "" || itemID == "" || mediaID == "" {
-		return AuthenticatedSession{}, false
+		return streamAuthorizationSnapshot{}, false
 	}
+	digest, hasCredential := compatCredentialDigest(token)
 	now := registry.now().UTC()
 	registry.mu.Lock()
 	stale := registry.removeExpiredLocked(now)
 	entry := registry.entries[playID]
-	var session AuthenticatedSession
 	ok := entry != nil && entry.itemID == itemID && entry.sources[mediaID] != nil && entry.expiresAt.After(now) && entry.lastSeenAt.Add(registry.idleTTL).After(now)
+	var snapshot streamAuthorizationSnapshot
 	if ok {
 		entry.lastSeenAt = now
-		session = AuthenticatedSession{
-			ID: entry.compatSessionID, ProfileID: entry.profileID, Client: ClientIdentity{DeviceID: entry.deviceID},
-			ExpiresAt: entry.expiresAt, Principal: clonePrincipal(entry.principal),
+		period := registry.streamRevalidatePeriod
+		if period <= 0 {
+			period = defaultPlaySessionStreamRevalidatePeriod
 		}
-		ok = validPlaySessionOwner(session)
+		snapshot = streamAuthorizationSnapshot{
+			session: AuthenticatedSession{
+				ID: entry.compatSessionID, ProfileID: entry.profileID, Client: ClientIdentity{DeviceID: entry.deviceID},
+				ExpiresAt: entry.expiresAt, Principal: clonePrincipal(entry.principal),
+			},
+			credentialMatches:   hasCredential && entry.streamCredentialBound && subtle.ConstantTimeCompare(digest[:], entry.streamCredentialDigest[:]) == 1,
+			recentlyRevalidated: !entry.streamValidatedAt.IsZero() && entry.streamValidatedAt.Add(period).After(now),
+		}
+		ok = validPlaySessionOwner(snapshot.session)
 	}
 	registry.mu.Unlock()
 	registry.closeEntries(context.Background(), stale)
-	return session, ok
+	return snapshot, ok
+}
+
+func (registry *playSessionRegistry) refreshStreamAuthorization(session AuthenticatedSession, itemID, playID, token string) bool {
+	if registry == nil {
+		return false
+	}
+	return registry.refreshStreamAuthorizationAt(session, itemID, playID, token, registry.now().UTC())
+}
+
+func (registry *playSessionRegistry) refreshStreamAuthorizationAt(session AuthenticatedSession, itemID, playID, token string, authorizedAt time.Time) bool {
+	if registry == nil || !validPlaySessionOwner(session) || itemID == "" || playID == "" {
+		return false
+	}
+	digest, hasCredential := compatCredentialDigest(token)
+	now := registry.now().UTC()
+	if authorizedAt.IsZero() || authorizedAt.After(now) {
+		authorizedAt = now
+	} else {
+		authorizedAt = authorizedAt.UTC()
+	}
+	registry.mu.Lock()
+	stale := registry.removeExpiredLocked(now)
+	entry := registry.entries[playID]
+	valid := !registry.sessionRevokedLocked(session, now) && entry != nil && ownerMatches(entry, session) && entry.itemID == itemID && entry.expiresAt.After(now) && entry.lastSeenAt.Add(registry.idleTTL).After(now)
+	if valid {
+		entry.principal = clonePrincipal(session.Principal)
+		entry.lastSeenAt = now
+		entry.streamValidatedAt = authorizedAt
+		if hasCredential {
+			entry.streamCredentialDigest = digest
+			entry.streamCredentialBound = true
+		}
+	}
+	registry.mu.Unlock()
+	registry.closeEntries(context.Background(), stale)
+	return valid
 }
 
 func (registry *playSessionRegistry) candidateExists(session AuthenticatedSession, itemID, mediaID string) bool {
@@ -499,12 +592,16 @@ func (registry *playSessionRegistry) candidateExists(session AuthenticatedSessio
 }
 
 func (registry *playSessionRegistry) setPlaybackPreferences(session AuthenticatedSession, itemID, playID, mediaID string, audioIndex, subtitleIndex *int) error {
+	return registry.updatePlaybackPreferences(session, itemID, playID, mediaID, audioIndex, subtitleIndex, false)
+}
+
+func (registry *playSessionRegistry) mergePlaybackPreferences(session AuthenticatedSession, itemID, playID, mediaID string, audioIndex, subtitleIndex *int) error {
+	return registry.updatePlaybackPreferences(session, itemID, playID, mediaID, audioIndex, subtitleIndex, true)
+}
+
+func (registry *playSessionRegistry) updatePlaybackPreferences(session AuthenticatedSession, itemID, playID, mediaID string, audioIndex, subtitleIndex *int, preserveMissing bool) error {
 	if registry == nil || !validPlaySessionOwner(session) || itemID == "" || playID == "" {
 		return errPlaySessionNotFound
-	}
-	var preferredAudio *int
-	if audioIndex != nil && *audioIndex >= 0 {
-		preferredAudio = cloneIntPointer(audioIndex)
 	}
 	now := registry.now().UTC()
 	registry.mu.Lock()
@@ -512,7 +609,20 @@ func (registry *playSessionRegistry) setPlaybackPreferences(session Authenticate
 	entry := registry.entries[playID]
 	valid := entry != nil && ownerMatches(entry, session) && entry.itemID == itemID && entry.expiresAt.After(now) && entry.lastSeenAt.Add(registry.idleTTL).After(now)
 	if valid {
+		var preferredAudio *int
+		if preserveMissing {
+			preferredAudio = entry.preferredAudioTrack
+		}
+		if audioIndex != nil {
+			preferredAudio = nil
+			if *audioIndex >= 0 {
+				preferredAudio = cloneIntPointer(audioIndex)
+			}
+		}
 		preferredSubtitle := ""
+		if preserveMissing {
+			preferredSubtitle = entry.preferredSubtitleID
+		}
 		if subtitleIndex != nil {
 			if *subtitleIndex < 0 {
 				preferredSubtitle = "none"
@@ -822,7 +932,21 @@ func (registry *playSessionRegistry) closeSession(ctx context.Context, session A
 	if registry == nil {
 		return nil
 	}
+	now := registry.now().UTC()
+	revokedUntil := session.ExpiresAt.UTC()
+	if !revokedUntil.After(now) {
+		ttl := registry.absoluteTTL
+		if ttl <= 0 {
+			ttl = defaultPlaySessionAbsoluteTTL
+		}
+		revokedUntil = now.Add(ttl)
+	}
 	registry.mu.Lock()
+	if session.ID != "" {
+		if current := registry.revokedSessions[session.ID]; !current.After(revokedUntil) {
+			registry.revokedSessions[session.ID] = revokedUntil
+		}
+	}
 	entries := make([]*playSessionEntry, 0)
 	for id, entry := range registry.entries {
 		if ownerMatches(entry, session) {
@@ -1028,7 +1152,24 @@ func (registry *playSessionRegistry) removeExpiredLocked(now time.Time) []*playS
 			delete(registry.deviceProfiles, id)
 		}
 	}
+	for id, expiresAt := range registry.revokedSessions {
+		if !expiresAt.After(now) {
+			delete(registry.revokedSessions, id)
+		}
+	}
 	return removed
+}
+
+func (registry *playSessionRegistry) sessionRevokedLocked(session AuthenticatedSession, now time.Time) bool {
+	if session.ID == "" {
+		return false
+	}
+	expiresAt, revoked := registry.revokedSessions[session.ID]
+	if revoked && !expiresAt.After(now) {
+		delete(registry.revokedSessions, session.ID)
+		return false
+	}
+	return revoked
 }
 
 func (registry *playSessionRegistry) ownerCountLocked(session AuthenticatedSession) int {
@@ -1611,7 +1752,10 @@ func candidateSelectionMatches(entry *playSessionEntry, mediaID string, fresh ma
 		return false
 	}
 	selected := entry.sources[mediaID]
-	if selected == nil || selected.key.StableIdentity == "" {
+	if selected == nil {
+		return false
+	}
+	if selected.key.StableIdentity == "" {
 		return false
 	}
 	if _, exists := fresh[selected.key]; !exists {
@@ -1629,6 +1773,18 @@ func candidateSelectionMatches(entry *playSessionEntry, mediaID string, fresh ma
 		seen[source.key] = struct{}{}
 	}
 	return true
+}
+
+func singletonCandidateSelectionMatches(entry *playSessionEntry, mediaID string, fresh map[playSourceKey]playback.SourceOption) bool {
+	if entry == nil || len(entry.sourceOrder) != 1 || entry.sourceOrder[0] != mediaID || len(fresh) != 1 {
+		return false
+	}
+	selected := entry.sources[mediaID]
+	if selected == nil || selected.key.StableIdentity != "" {
+		return false
+	}
+	_, exists := fresh[selected.key]
+	return exists
 }
 
 func sourceReferences(entry *playSessionEntry) []string {

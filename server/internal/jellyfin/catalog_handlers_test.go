@@ -26,6 +26,7 @@ const (
 
 type catalogHTTPAuthentication struct {
 	session AuthenticatedSession
+	err     error
 }
 
 func (authentication *catalogHTTPAuthentication) Login(context.Context, CompatLoginInput) (LoginResult, error) {
@@ -33,6 +34,9 @@ func (authentication *catalogHTTPAuthentication) Login(context.Context, CompatLo
 }
 
 func (authentication *catalogHTTPAuthentication) Authenticate(context.Context, string) (AuthenticatedSession, error) {
+	if authentication.err != nil {
+		return AuthenticatedSession{}, authentication.err
+	}
 	return authentication.session, nil
 }
 func (authentication *catalogHTTPAuthentication) Revalidate(context.Context, AuthenticatedSession) (AuthenticatedSession, error) {
@@ -325,6 +329,48 @@ func TestUserDataIsFieldForFieldEqualAcrossCatalogAndContinuationSurfaces(t *tes
 	if want.PlayedPercentage == nil || *want.PlayedPercentage != percentage || want.PlayCount != 0 ||
 		want.LastPlayedDate != "2026-08-02T03:04:05.6000000Z" {
 		t.Fatalf("persisted UserData was not authoritative: %+v", want)
+	}
+}
+
+func TestInfuseCatalogBootstrapAcceptsOfficialAndLegacyJellyfinQueryVocabulary(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	itemID := "00000000-0000-4000-8000-000000000111"
+	title := watchstate.CatalogTitle{ID: itemID, MediaType: "movie", Title: "Infuse bootstrap"}
+	reader.title = title
+	reader.titles = map[string]watchstate.CatalogTitle{itemID: title}
+	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{title}, Limit: 1, Total: 1}
+	state := newMemoryWatchstate()
+	state.resumePage = watchstate.ContinueItemsPage{Items: []watchstate.ContinueItem{{TitleID: itemID}}, Limit: 1, Total: 1}
+	state.nextPage = watchstate.ContinueItemsPage{Items: []watchstate.ContinueItem{{TitleID: itemID}}, Limit: 1, Total: 1}
+	handler.watchstate = state
+
+	fields := "BasicSyncInfo,CanDownload,Chapters,ChildCount,PrimaryImageAspectRatio,FutureSdkField"
+	parentID := "00000000-0000-4000-8000-000000000222"
+	requests := []struct {
+		name    string
+		target  string
+		prepare func(*http.Request)
+		handle  func(http.ResponseWriter, *http.Request)
+	}{
+		{name: "latest", target: "/Items/Latest?UserId=" + catalogTestProfileID + "&Fields=" + fields + "&IncludeItemTypes=Movie&Limit=1&GroupItems=true", handle: handler.handleLatestItems},
+		{name: "legacy latest", target: "/Users/" + catalogTestProfileID + "/Items/Latest?Fields=" + fields + "&IncludeItemTypes=Movie&Limit=1&GroupItems=true", prepare: func(request *http.Request) { request.SetPathValue("id", catalogTestProfileID) }, handle: handler.handleUserLatestItems},
+		{name: "detail", target: "/Items/" + itemID + "?UserId=" + catalogTestProfileID + "&Fields=" + fields, prepare: func(request *http.Request) { request.SetPathValue("id", itemID) }, handle: handler.handleItem},
+		{name: "resume", target: "/UserItems/Resume?UserId=" + catalogTestProfileID + "&StartIndex=0&Limit=1&SearchTerm=Infuse&ParentId=" + parentID + "&Fields=" + fields + "&MediaTypes=Video&IncludeItemTypes=Movie,Episode&ExcludeItemTypes=Audio&EnableTotalRecordCount=false&EnableImages=true&ExcludeActiveSessions=false&Recursive=true", handle: handler.handleUserResumeItems},
+		{name: "legacy resume", target: "/Users/" + catalogTestProfileID + "/Items/Resume?StartIndex=0&Limit=1&SearchTerm=Infuse&ParentId=" + parentID + "&Fields=" + fields + "&MediaTypes=Video&IncludeItemTypes=Movie,Episode&ExcludeItemTypes=Audio&EnableTotalRecordCount=false&EnableImages=true&ExcludeActiveSessions=false&Recursive=true", prepare: func(request *http.Request) { request.SetPathValue("id", catalogTestProfileID) }, handle: handler.handleResumeItems},
+		{name: "next up", target: "/Shows/NextUp?UserId=" + catalogTestProfileID + "&ParentId=" + parentID + "&StartIndex=0&Limit=1&Fields=" + fields + "&MediaTypes=Video&NextUpDateCutoff=2026-01-01T00:00:00Z&EnableTotalRecordCount=false&DisableFirstEpisode=false&EnableResumable=true&EnableRewatching=false", handle: handler.handleNextUp},
+	}
+	for _, test := range requests {
+		t.Run(test.name, func(t *testing.T) {
+			request := authenticatedCatalogRequest(t, token, test.target)
+			if test.prepare != nil {
+				test.prepare(request)
+			}
+			response := httptest.NewRecorder()
+			test.handle(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 
@@ -625,16 +671,21 @@ func TestCatalogSearchIsRecursivePaginatedAndProfileBound(t *testing.T) {
 	}
 }
 
-func TestCatalogSortIsForwardedOrRejected(t *testing.T) {
+func TestCatalogSortForwardsSupportedKeysAndIgnoresUnknownHints(t *testing.T) {
 	handler, reader, token := newCatalogHTTPHandler(t)
 	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{}, Limit: 10}
-	for index, test := range []struct {
+	tests := []struct {
 		key   string
 		order string
+		want  string
 	}{
-		{key: "SortName", order: "Descending"},
-		{key: "Name", order: "Ascending"},
-	} {
+		{key: "SortName", order: "Descending", want: "sortname"},
+		{key: "Name", order: "Ascending", want: "sortname"},
+		{key: "SortName,SortName,ProductionYear", order: "Ascending", want: "sortname,sortname,productionyear"},
+		{key: "DateCreated,SortName,ProductionYear", order: "Descending", want: "datecreated,sortname,productionyear"},
+		{key: "DateLastContentAdded,DateCreated,SortName", order: "Descending", want: "datelastcontentadded,datecreated,sortname"},
+	}
+	for index, test := range tests {
 		request := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&Limit=10&SortBy="+test.key+"&SortOrder="+test.order)
 		response := httptest.NewRecorder()
 		handler.handleItems(response, request)
@@ -642,19 +693,20 @@ func TestCatalogSortIsForwardedOrRejected(t *testing.T) {
 			t.Fatalf("supported sort %s status=%d queries=%+v body=%s", test.key, response.Code, reader.queries, response.Body.String())
 		}
 		query := reader.queries[index]
-		if query.SortBy != "sortname" || query.SortOrder != strings.ToLower(test.order) {
+		if query.SortBy != test.want || query.SortOrder != strings.ToLower(test.order) {
 			t.Fatalf("supported sort %s status=%d query=%+v body=%s", test.key, response.Code, query, response.Body.String())
 		}
 	}
-
+	supported := len(tests)
 	reader.page.Offset = 4
+
 	videoOnly := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Video,MusicVideo&StartIndex=4")
 	videoOnlyResponse := httptest.NewRecorder()
 	handler.handleItems(videoOnlyResponse, videoOnly)
 	var videoResult QueryResult[BaseItemDto]
 	decodeCatalogResponse(t, videoOnlyResponse, &videoResult)
-	if videoOnlyResponse.Code != http.StatusOK || len(reader.queries) != 3 ||
-		!reflect.DeepEqual(reader.queries[2].MediaTypes, []string{"video"}) ||
+	if videoOnlyResponse.Code != http.StatusOK || len(reader.queries) != supported+1 ||
+		!reflect.DeepEqual(reader.queries[supported].MediaTypes, []string{"video"}) ||
 		videoResult.Items == nil || len(videoResult.Items) != 0 || videoResult.TotalRecordCount != 0 || videoResult.StartIndex != 4 {
 		t.Fatalf("typed-empty Video projection status=%d queries=%+v result=%+v body=%s", videoOnlyResponse.Code, reader.queries, videoResult, videoOnlyResponse.Body.String())
 	}
@@ -662,23 +714,28 @@ func TestCatalogSortIsForwardedOrRejected(t *testing.T) {
 	standardKinds := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&IncludeItemTypes=Movie,Audio,Folder,Trailer")
 	standardKindsResponse := httptest.NewRecorder()
 	handler.handleItems(standardKindsResponse, standardKinds)
-	if standardKindsResponse.Code != http.StatusOK || len(reader.queries) != 4 ||
-		!reflect.DeepEqual(reader.queries[3].MediaTypes, []string{"movie"}) {
+	if standardKindsResponse.Code != http.StatusOK || len(reader.queries) != supported+2 ||
+		!reflect.DeepEqual(reader.queries[supported+1].MediaTypes, []string{"movie"}) {
 		t.Fatalf("standard unprojected kinds status=%d queries=%+v body=%s", standardKindsResponse.Code, reader.queries, standardKindsResponse.Body.String())
 	}
 
-	for _, query := range []string{
-		"&SortBy=CommunityRating&SortOrder=Ascending",
-		"&SortBy=DateLastContentAdded,DateCreated,SortName&SortOrder=Descending",
-		"&SortOrder=Descending",
-		"&SortBy=Default,AiredEpisodeOrder,DigitalReleaseDate",
-		"&SortBy=PrivateProviderURL",
-	} {
-		request := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222"+query)
+	fallbacks := []struct {
+		query string
+		want  string
+	}{
+		{query: "&SortBy=CommunityRating&SortOrder=Ascending"},
+		{query: "&SortOrder=Descending"},
+		{query: "&SortBy=Default,AiredEpisodeOrder,DigitalReleaseDate"},
+		{query: "&SortBy=PrivateProviderURL"},
+		{query: "&SortBy=SortName,ProductionYear,DateCreated,Name&SortOrder=Ascending", want: "sortname,productionyear,datecreated"},
+	}
+	for index, test := range fallbacks {
+		request := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222"+test.query)
 		response := httptest.NewRecorder()
 		handler.handleItems(response, request)
-		if response.Code != http.StatusBadRequest || len(reader.queries) != 4 {
-			t.Fatalf("unsupported sort %q status=%d queries=%+v body=%s", query, response.Code, reader.queries, response.Body.String())
+		queryIndex := supported + 2 + index
+		if response.Code != http.StatusOK || len(reader.queries) != queryIndex+1 || reader.queries[queryIndex].SortBy != test.want {
+			t.Fatalf("fallback sort %q status=%d queries=%+v body=%s", test.query, response.Code, reader.queries, response.Body.String())
 		}
 	}
 }
@@ -802,29 +859,62 @@ func TestEpisodesRejectsMissingOrNonSeriesRootBeforeListing(t *testing.T) {
 	}
 }
 
-func TestHierarchyRoutesRejectUndocumentedQueryParametersBeforeCatalogAccess(t *testing.T) {
+func TestHierarchyRoutesIgnoreUnusedQueryParametersLikeJellyfin(t *testing.T) {
 	seriesID := "00000000-0000-4000-8000-000000000200"
 	for _, target := range []struct {
 		name   string
 		path   string
 		handle func(*Handler, http.ResponseWriter, *http.Request)
 	}{
-		{name: "seasons", path: "/Shows/" + seriesID + "/Seasons?ParentId=" + seriesID, handle: (*Handler).handleSeasons},
+		{name: "seasons", path: "/Shows/" + seriesID + "/Seasons?excludeLocationTypes=Virtual&fields=Overview,FutureSdkField&limit=100&startIndex=0", handle: (*Handler).handleSeasons},
 		{name: "episodes", path: "/Shows/" + seriesID + "/Episodes?Recursive=true", handle: (*Handler).handleEpisodes},
 	} {
 		t.Run(target.name, func(t *testing.T) {
 			handler, reader, token := newCatalogHTTPHandler(t)
+			reader.title = watchstate.CatalogTitle{ID: seriesID, MediaType: "series"}
+			reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{}, Offset: 0, Limit: 100, Total: 0}
 			request := authenticatedCatalogRequest(t, token, target.path)
 			request.SetPathValue("seriesId", seriesID)
 			response := httptest.NewRecorder()
 			target.handle(handler, response, request)
-			if response.Code != http.StatusBadRequest || len(reader.titleIDs) != 0 || len(reader.queries) != 0 {
+			if response.Code != http.StatusOK || len(reader.titleIDs) != 1 || len(reader.queries) != 1 {
 				t.Fatalf("status=%d titles=%v queries=%v body=%s", response.Code, reader.titleIDs, reader.queries, response.Body.String())
 			}
 		})
 	}
 }
 
+func TestSeasonsDoesNotWriteServerErrorAfterClientCancellation(t *testing.T) {
+	seriesID := "00000000-0000-4000-8000-000000000200"
+	handler, reader, token := newCatalogHTTPHandler(t)
+	reader.titleErr = context.Canceled
+	request := authenticatedCatalogRequest(t, token, "/Shows/"+seriesID+"/Seasons?excludeLocationTypes=Virtual")
+	canceledContext, cancel := context.WithCancel(request.Context())
+	cancel()
+	request = request.WithContext(canceledContext)
+	request.SetPathValue("seriesId", seriesID)
+	response := httptest.NewRecorder()
+	handler.handleSeasons(response, request)
+	if response.Body.Len() != 0 || response.Header().Get("Content-Type") != "" || strings.Contains(response.Body.String(), "InternalServerError") {
+		t.Fatalf("canceled Seasons wrote an error response: status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+}
+
+func TestSeasonsDoesNotWriteServerErrorWhenAuthenticationIsCanceled(t *testing.T) {
+	seriesID := "00000000-0000-4000-8000-000000000200"
+	handler, _, token := newCatalogHTTPHandler(t)
+	handler.authentication.(*catalogHTTPAuthentication).err = context.Canceled
+	request := authenticatedCatalogRequest(t, token, "/Shows/"+seriesID+"/Seasons?excludeLocationTypes=Virtual")
+	canceledContext, cancel := context.WithCancel(request.Context())
+	cancel()
+	request = request.WithContext(canceledContext)
+	request.SetPathValue("seriesId", seriesID)
+	response := httptest.NewRecorder()
+	handler.handleSeasons(response, request)
+	if response.Body.Len() != 0 || response.Header().Get("Content-Type") != "" || strings.Contains(response.Body.String(), "InternalError") {
+		t.Fatalf("canceled Seasons authentication wrote an error response: status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+}
 func TestCatalogInaccessibleParentIsAnEmptyExactPage(t *testing.T) {
 	handler, reader, token := newCatalogHTTPHandler(t)
 	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{}, Offset: 0, Limit: 20, Total: 0}
@@ -1086,17 +1176,32 @@ func TestCatalogLightIDSelectionDoesNotEnrichMetadataByDefault(t *testing.T) {
 	}
 }
 
-func TestCatalogItemsRejectUnsupportedProjectedValuesBeforeReading(t *testing.T) {
+func TestCatalogItemsIgnoreUnsupportedProjectedValuesLikeJellyfinBinder(t *testing.T) {
 	for _, target := range []string{
-		"/Items?Fields=Overview,DateCreated",
-		"/Items?EnableImageTypes=Primary,Disc",
+		"/Items?Fields=FutureSdkField&EnableImageTypes=Primary,Unknown",
 	} {
 		handler, reader, token := newCatalogHTTPHandler(t)
 		response := httptest.NewRecorder()
 		handler.handleItems(response, authenticatedCatalogRequest(t, token, target))
-		if response.Code != http.StatusBadRequest || len(reader.queries) != 0 || len(reader.titleIDs) != 0 {
+		if response.Code != http.StatusOK || len(reader.queries) != 0 || len(reader.titleIDs) != 0 {
 			t.Fatalf("target=%q status=%d queries=%+v titles=%v body=%s", target, response.Code, reader.queries, reader.titleIDs, response.Body.String())
 		}
+	}
+}
+
+func TestCatalogItemsAcceptClientDateAndMediaSourceCountFields(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	created := time.Date(2026, 8, 9, 12, 34, 56, 700_000_000, time.UTC)
+	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{{
+		ID: "00000000-0000-4000-8000-000000000100", MediaType: "movie", Title: "Dated Movie",
+		CreatedAt: created, Genres: []string{}, ProviderIDs: map[string]string{},
+	}}, Total: 1, Limit: 20}
+	response := httptest.NewRecorder()
+	handler.handleItems(response, authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Movie&Fields=DateCreated,MediaSourceCount&Limit=20"))
+	var result QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, response, &result)
+	if response.Code != http.StatusOK || len(result.Items) != 1 || result.Items[0].DateCreated != "2026-08-09T12:34:56.7000000Z" {
+		t.Fatalf("standard client fields status=%d result=%+v body=%s", response.Code, result, response.Body.String())
 	}
 }
 

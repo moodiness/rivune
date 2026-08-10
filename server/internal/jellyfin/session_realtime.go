@@ -451,15 +451,11 @@ func parseCompatSessionSubscription(value json.RawMessage) (time.Duration, time.
 	return time.Duration(delayMilliseconds) * time.Millisecond, time.Duration(intervalMilliseconds) * time.Millisecond, nil
 }
 
-func validPlaybackStreamIndex(value *int, allowDisabled bool) bool {
+func validPlaybackStreamIndex(value *int) bool {
 	if value == nil {
 		return true
 	}
-	minimum := 0
-	if allowDisabled {
-		minimum = -1
-	}
-	return *value >= minimum && *value <= maximumCompatibilitySubtitleIndex
+	return *value >= -maximumCompatibilitySubtitleIndex && *value <= maximumCompatibilitySubtitleIndex
 }
 
 func validCompatPlayMethod(value string) bool {

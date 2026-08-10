@@ -49,6 +49,21 @@ func (*runtimeGoldenAuthentication) Logout(context.Context, AuthenticatedSession
 	return errors.New("logout is not used by runtime golden tests")
 }
 
+type runtimeGoldenPlaybackDelivery struct {
+	*fakeCompatPlaybackDelivery
+}
+
+func (delivery *runtimeGoldenPlaybackDelivery) Open(ctx context.Context, principal auth.Principal, input playback.ResolveInput) (playback.Delivery, error) {
+	result, err := delivery.fakeCompatPlaybackDelivery.Open(ctx, principal, input)
+	if err != nil || !input.AllowTranscoding {
+		return result, err
+	}
+	result.Session = playback.Session{SelectedSourceID: "native-transcode", Sources: []playback.Source{{
+		ID: "native-transcode", Mode: "transcode", Protocol: "hls", Container: "hls",
+	}}}
+	return result, nil
+}
+
 type runtimeGoldenCatalog struct {
 	item watchstate.CatalogTitle
 	page watchstate.CatalogPage
@@ -129,6 +144,18 @@ func TestRuntimeHTTPGoldenContracts(t *testing.T) {
 			token:  true, headers: runtimeGoldenJSONHeaders, normalize: normalizeRuntimeGoldenPlayback,
 		},
 		{
+			name: "playback_info_transcode_ts", method: http.MethodPost,
+			target: "/Items/" + runtimeGoldenItemID + "/PlaybackInfo",
+			body:   `{"StartTimeTicks":30000000,"EnableDirectPlay":false,"EnableDirectStream":false,"EnableTranscoding":true,"DeviceProfile":{"TranscodingProfiles":[{"Container":"ts","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","Context":"Streaming","Type":"Video"}]}}`,
+			token:  true, headers: runtimeGoldenJSONHeaders, normalize: normalizeRuntimeGoldenPlayback,
+		},
+		{
+			name: "playback_info_transcode_fmp4", method: http.MethodPost,
+			target: "/Items/" + runtimeGoldenItemID + "/PlaybackInfo",
+			body:   `{"StartTimeTicks":30000000,"EnableDirectPlay":false,"EnableDirectStream":false,"EnableTranscoding":true,"DeviceProfile":{"TranscodingProfiles":[{"Container":"mp4","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","Context":"Streaming","Type":"Video"}]}}`,
+			token:  true, headers: runtimeGoldenJSONHeaders, normalize: normalizeRuntimeGoldenPlayback,
+		},
+		{
 			name: "image_infos", method: http.MethodGet,
 			target: "/Items/" + runtimeGoldenItemID + "/Images",
 			token:  true, headers: runtimeGoldenJSONHeaders,
@@ -196,7 +223,7 @@ func newRuntimeGoldenHandler(t *testing.T) *Handler {
 	catalog := &runtimeGoldenCatalog{item: item, page: watchstate.CatalogPage{
 		Items: []watchstate.CatalogTitle{item}, Offset: 1, Limit: 1, Total: 3,
 	}}
-	delivery := &fakeCompatPlaybackDelivery{
+	baseDelivery := &fakeCompatPlaybackDelivery{
 		now: now, handle: opaquePlaybackHandleNamed(t, "runtime-golden"),
 		sources: playback.SourceList{Sources: []playback.SourceOption{{
 			SourceRef: "fixture-source", Protocol: "http", Container: "mp4", ExpiresAt: now.Add(time.Hour),
@@ -206,6 +233,7 @@ func newRuntimeGoldenHandler(t *testing.T) *Handler {
 			Sources:          []playback.Source{{ID: "native-direct", Mode: "direct", Protocol: "http", Container: "mp4"}},
 		},
 	}
+	delivery := &runtimeGoldenPlaybackDelivery{fakeCompatPlaybackDelivery: baseDelivery}
 	handler, err := New(Dependencies{
 		ServerInfo:     ServerInfo{ID: serverID, Name: "Rivune", RuntimeVersion: "10.11.11-golden"},
 		Authentication: &runtimeGoldenAuthentication{session: session}, Catalog: catalog,

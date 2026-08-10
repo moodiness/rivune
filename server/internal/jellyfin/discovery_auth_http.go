@@ -40,6 +40,10 @@ type authenticateByNameRequest struct {
 	Password *string `json:"Password"`
 }
 
+type compatLoginRetryAfter interface {
+	RetryAfter() time.Duration
+}
+
 func (handler *Handler) handlePublicSystemInfo(response http.ResponseWriter, _ *http.Request) {
 	info, ok := handler.publicSystemInfo()
 	if !ok {
@@ -119,10 +123,24 @@ func (handler *Handler) handleAuthenticateByName(response http.ResponseWriter, r
 		Username: username, Password: password, Client: client,
 	})
 	if err != nil {
-		if errors.Is(err, ErrInvalidCompatLogin) || errors.Is(err, ErrInvalidCompatCredential) || errors.Is(err, ErrInvalidCompatAuthorization) {
+		var retryable compatLoginRetryAfter
+		switch {
+		case errors.As(err, &retryable):
+			retryAfter := retryable.RetryAfter()
+			seconds := int64(retryAfter / time.Second)
+			if retryAfter%time.Second != 0 {
+				seconds++
+			}
+			if seconds < 1 {
+				seconds = 1
+			}
+			response.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+			handler.logCompatLoginRejection(compatLoginStageCredentialPolicy)
+			writeCompatError(response, http.StatusTooManyRequests, "ResourceLimitExceeded", "Too many authentication attempts; retry later")
+		case errors.Is(err, ErrInvalidCompatLogin) || errors.Is(err, ErrInvalidCompatCredential) || errors.Is(err, ErrInvalidCompatAuthorization):
 			handler.logCompatLoginRejection(compatLoginStageCredentialPolicy)
 			writeCompatLoginFailure(response)
-		} else {
+		default:
 			writeCompatError(response, http.StatusInternalServerError, "InternalError", "The request could not be completed")
 		}
 		return

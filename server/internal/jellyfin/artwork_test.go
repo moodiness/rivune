@@ -87,11 +87,12 @@ func (catalog *enrichedArtworkCatalog) EnrichCatalogTitle(_ context.Context, _ a
 }
 
 type artworkDelivery struct {
-	keys       map[string]string
-	body       []byte
-	lookup     []string
-	servedKeys []string
-	metadata   map[string]artworkdomain.ImageMetadata
+	keys          map[string]string
+	body          []byte
+	lookup        []string
+	servedKeys    []string
+	servedQueries []string
+	metadata      map[string]artworkdomain.ImageMetadata
 }
 
 func (delivery *artworkDelivery) LookupKey(_ context.Context, materialized string) (string, bool) {
@@ -107,6 +108,7 @@ func (delivery *artworkDelivery) DescribeKey(_ context.Context, key string) (art
 
 func (delivery *artworkDelivery) ServeKey(response http.ResponseWriter, request *http.Request, key string) {
 	delivery.servedKeys = append(delivery.servedKeys, key)
+	delivery.servedQueries = append(delivery.servedQueries, request.URL.RawQuery)
 	response.Header().Set("Content-Type", "image/png")
 	response.Header().Set("Content-Length", "8")
 	response.Header().Set("ETag", `"`+key+`"`)
@@ -468,7 +470,7 @@ func TestArtworkTaggedGETHEADShareAuthorizedDeliveryContract(t *testing.T) {
 	}
 }
 
-func TestArtworkTagIsOnlyAnAuthenticatedItemBoundCacheSelector(t *testing.T) {
+func TestArtworkTagAllowsAnonymousBearerDeliveryWithoutWeakeningAuthenticatedBinding(t *testing.T) {
 	privateURL := "https://provider.invalid/private/poster.png?token=provider-secret"
 	otherPrivateURL := "https://provider.invalid/private/other.png?token=other-secret"
 	key := fmt.Sprintf("%x", sha256.Sum256([]byte(privateURL)))
@@ -479,7 +481,7 @@ func TestArtworkTagIsOnlyAnAuthenticatedItemBoundCacheSelector(t *testing.T) {
 			artworkItemStale: {ID: artworkItemStale, MediaType: "movie", PosterURL: otherPrivateURL},
 		},
 		artworkProfileTwo: {},
-	}, map[string]string{privateURL: key, otherPrivateURL: otherKey})
+	}, map[string]string{privateURL: key, otherPrivateURL: otherKey, localizedArtworkPrefix + key: key, localizedArtworkPrefix + otherKey: otherKey})
 
 	request := func(target, tokenHeader string) *httptest.ResponseRecorder {
 		imageRequest := httptest.NewRequest(http.MethodGet, target, nil)
@@ -500,33 +502,34 @@ func TestArtworkTagIsOnlyAnAuthenticatedItemBoundCacheSelector(t *testing.T) {
 	}
 
 	anonymous := request("/Items/"+artworkItemOne+"/Images/Primary?tag="+key+"&maxWidth=500&quality=90", "")
-	if anonymous.Code != http.StatusUnauthorized || catalog.calls != 0 || len(delivery.lookup) != 0 || len(delivery.servedKeys) != 0 {
-		t.Fatalf("anonymous recomputed tag status=%d catalog=%d lookup=%v served=%v", anonymous.Code, catalog.calls, delivery.lookup, delivery.servedKeys)
+	if anonymous.Code != http.StatusOK || anonymous.Header().Get("ETag") != `"`+key+`"` || anonymous.Body.String() != "pngbytes" ||
+		catalog.calls != 0 || len(delivery.lookup) != 1 || delivery.lookup[0] != localizedArtworkPrefix+key || len(delivery.servedKeys) != 1 || delivery.servedKeys[0] != key || len(delivery.servedQueries) != 1 || delivery.servedQueries[0] != "tag="+key {
+		t.Fatalf("anonymous tagged artwork status=%d catalog=%d lookup=%v served=%v", anonymous.Code, catalog.calls, delivery.lookup, delivery.servedKeys)
 	}
 	crossProfile := request("/Items/"+artworkItemOne+"/Images/Primary?tag="+key, artworkTokenTwo)
-	if crossProfile.Code != http.StatusNotFound || catalog.calls != 1 || len(delivery.lookup) != 0 || len(delivery.servedKeys) != 0 {
+	if crossProfile.Code != http.StatusNotFound || catalog.calls != 1 || len(delivery.lookup) != 1 || len(delivery.servedKeys) != 1 {
 		t.Fatalf("cross-profile tag status=%d catalog=%d lookup=%v served=%v", crossProfile.Code, catalog.calls, delivery.lookup, delivery.servedKeys)
 	}
 	wrongItem := request("/Items/"+artworkItemStale+"/Images/Primary?tag="+key, artworkTokenOne)
-	if wrongItem.Code != http.StatusNotFound || catalog.calls != 2 || len(delivery.lookup) != 1 || len(delivery.servedKeys) != 0 {
+	if wrongItem.Code != http.StatusNotFound || catalog.calls != 2 || len(delivery.lookup) != 2 || len(delivery.servedKeys) != 1 {
 		t.Fatalf("wrong-item tag status=%d catalog=%d lookup=%v served=%v", wrongItem.Code, catalog.calls, delivery.lookup, delivery.servedKeys)
 	}
 	wrongType := request("/Items/"+artworkItemOne+"/Images/Backdrop?tag="+key, artworkTokenOne)
-	if wrongType.Code != http.StatusNotFound || catalog.calls != 3 || len(delivery.lookup) != 1 || len(delivery.servedKeys) != 0 {
+	if wrongType.Code != http.StatusNotFound || catalog.calls != 3 || len(delivery.lookup) != 2 || len(delivery.servedKeys) != 1 {
 		t.Fatalf("wrong-type tag status=%d catalog=%d lookup=%v served=%v", wrongType.Code, catalog.calls, delivery.lookup, delivery.servedKeys)
 	}
 	mismatched := request("/Items/"+artworkItemOne+"/Images/Primary?tag="+otherKey, artworkTokenOne)
-	if mismatched.Code != http.StatusNotFound || catalog.calls != 4 || len(delivery.lookup) != 2 || len(delivery.servedKeys) != 0 {
+	if mismatched.Code != http.StatusNotFound || catalog.calls != 4 || len(delivery.lookup) != 3 || len(delivery.servedKeys) != 1 {
 		t.Fatalf("mismatched tag status=%d catalog=%d lookup=%v served=%v", mismatched.Code, catalog.calls, delivery.lookup, delivery.servedKeys)
 	}
 	queryCredential := request("/Items/"+artworkItemOne+"/Images/Primary?tag="+key+"&api_key="+artworkTokenOne, "")
 	if queryCredential.Code != http.StatusOK || queryCredential.Header().Get("ETag") != `"`+key+`"` || queryCredential.Body.String() != "pngbytes" ||
-		catalog.calls != 5 || len(delivery.lookup) != 3 || len(delivery.servedKeys) != 1 || delivery.servedKeys[0] != key {
+		catalog.calls != 5 || len(delivery.lookup) != 4 || len(delivery.servedKeys) != 2 || delivery.servedKeys[1] != key {
 		t.Fatalf("query-bound tag status=%d catalog=%d lookup=%v served=%v", queryCredential.Code, catalog.calls, delivery.lookup, delivery.servedKeys)
 	}
 	headerCredential := request("/Items/"+artworkItemOne+"/Images/Primary?tag="+key, artworkTokenOne)
 	if headerCredential.Code != http.StatusOK || headerCredential.Header().Get("ETag") != `"`+key+`"` || headerCredential.Body.String() != "pngbytes" ||
-		catalog.calls != 6 || len(delivery.lookup) != 4 || len(delivery.servedKeys) != 2 || delivery.servedKeys[1] != key {
+		catalog.calls != 6 || len(delivery.lookup) != 5 || len(delivery.servedKeys) != 3 || delivery.servedKeys[2] != key {
 		t.Fatalf("header-bound tag status=%d catalog=%d lookup=%v served=%v", headerCredential.Code, catalog.calls, delivery.lookup, delivery.servedKeys)
 	}
 
@@ -553,7 +556,7 @@ func TestArtworkTagIsOnlyAnAuthenticatedItemBoundCacheSelector(t *testing.T) {
 			}
 			invalidResponse := httptest.NewRecorder()
 			handler.handleImage(invalidResponse, invalidCredential)
-			if invalidResponse.Code != test.wantStatus || len(delivery.servedKeys) != 2 {
+			if invalidResponse.Code != test.wantStatus || len(delivery.servedKeys) != 3 {
 				t.Fatalf("invalid credential fallback status=%d want=%d served=%v", invalidResponse.Code, test.wantStatus, delivery.servedKeys)
 			}
 		})

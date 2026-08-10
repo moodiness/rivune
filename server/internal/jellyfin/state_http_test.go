@@ -63,6 +63,22 @@ func (catalog *stateCatalog) GetCatalogTitles(_ context.Context, _ auth.Principa
 	return items, nil
 }
 
+type countingContinuationWatchstate struct {
+	*memoryWatchstate
+	resumeCalls int
+	nextCalls   int
+}
+
+func (service *countingContinuationWatchstate) ListResume(ctx context.Context, principal auth.Principal, offset, limit int) (watchstate.ContinueItemsPage, error) {
+	service.resumeCalls++
+	return service.memoryWatchstate.ListResume(ctx, principal, offset, limit)
+}
+
+func (service *countingContinuationWatchstate) ListNextUp(ctx context.Context, principal auth.Principal, seriesID string, offset, limit int) (watchstate.ContinueItemsPage, error) {
+	service.nextCalls++
+	return service.memoryWatchstate.ListNextUp(ctx, principal, seriesID, offset, limit)
+}
+
 type statePlaybackDelivery struct {
 	onClose func()
 }
@@ -141,6 +157,22 @@ func TestProgressFallsBackToUniqueNegotiatedItemAndSource(t *testing.T) {
 	progress := service.progress[itemID]
 	if response.Code != http.StatusNoContent || progress.PositionSeconds != 25 || progress.Version != 1 || registry.entries[playID] == nil {
 		t.Fatalf("fallback progress status=%d progress=%+v sessionPreserved=%t", response.Code, progress, registry.entries[playID] != nil)
+	}
+}
+
+func TestPlaybackEventsAcceptBoundedClientLocalTrackIndices(t *testing.T) {
+	handler, _, service, _, token, itemID, playID, mediaID := stateHTTPFixture(t)
+	body := fmt.Sprintf(`{"ItemId":%q,"PlaySessionId":%q,"MediaSourceId":%q,"PositionTicks":250000000,"AudioStreamIndex":-1,"SubtitleStreamIndex":-100}`, itemID, playID, mediaID)
+	response := serveStateRequest(handler.handlePlaying, token, body)
+	if progress := service.progress[itemID]; response.Code != http.StatusNoContent || progress.PositionSeconds != 25 || progress.Version != 1 {
+		t.Fatalf("client-local track indices status=%d progress=%+v body=%s", response.Code, progress, response.Body.String())
+	}
+
+	handler, _, service, _, token, itemID, playID, mediaID = stateHTTPFixture(t)
+	body = fmt.Sprintf(`{"ItemId":%q,"PlaySessionId":%q,"MediaSourceId":%q,"AudioStreamIndex":%d}`, itemID, playID, mediaID, -maximumCompatibilitySubtitleIndex-1)
+	response = serveStateRequest(handler.handlePlaying, token, body)
+	if response.Code != http.StatusBadRequest || len(service.progress) != 0 {
+		t.Fatalf("unbounded negative track index status=%d progress=%+v body=%s", response.Code, service.progress, response.Body.String())
 	}
 }
 
@@ -790,6 +822,83 @@ func TestResumePaginationAndNextUpProjectionAreDeterministic(t *testing.T) {
 	}
 }
 
+func TestStreamyfinContinuationQueriesPreserveCurrentFeeds(t *testing.T) {
+	handler, authentication, service, _, token, movieID, _, _ := stateHTTPFixture(t)
+	episodeID := "00000000-0000-4000-8000-000000000111"
+	catalog := handler.catalog.(*stateCatalog)
+	movie := catalog.items[movieID]
+	movie.Overview = "Resume overview"
+	catalog.items[movieID] = movie
+	catalog.items[episodeID] = watchstate.CatalogTitle{ID: episodeID, MediaType: "episode", Title: "Next", Overview: "Next-up overview"}
+	service.resumePage = watchstate.ContinueItemsPage{Items: []watchstate.ContinueItem{{TitleID: movieID}}, Limit: 10, Total: 1}
+	service.nextPage = watchstate.ContinueItemsPage{Items: []watchstate.ContinueItem{{TitleID: episodeID}}, Limit: 10, Total: 1}
+	counting := &countingContinuationWatchstate{memoryWatchstate: service}
+	handler.watchstate = counting
+
+	resumePath := "/UserItems/Resume?userId=" + authentication.session.ProfileID + "&enableImageTypes=Primary&enableImageTypes=Backdrop&enableImageTypes=Thumb&includeItemTypes=Movie&includeItemTypes=Series&includeItemTypes=Episode&startIndex=0&limit=10&fields=Overview"
+	request := httptest.NewRequest(http.MethodGet, resumePath, nil)
+	request.Header.Set("X-Emby-Token", token)
+	response := httptest.NewRecorder()
+	handler.handleUserResumeItems(response, request)
+	if response.Code != http.StatusOK || counting.resumeCalls != 1 || counting.nextCalls != 0 || service.resumeOffset != 0 || service.resumeLimit != 10 ||
+		!strings.Contains(response.Body.String(), `"Overview":"Resume overview"`) {
+		t.Fatalf("resume status=%d calls=%d nextCalls=%d offset=%d limit=%d body=%s", response.Code, counting.resumeCalls, counting.nextCalls, service.resumeOffset, service.resumeLimit, response.Body.String())
+	}
+
+	nextUpPath := "/Shows/NextUp?userId=" + authentication.session.ProfileID + "&startIndex=0&limit=10&enableImageTypes=Primary&enableImageTypes=Backdrop&enableImageTypes=Thumb&enableResumable=false&fields=Overview"
+	request = httptest.NewRequest(http.MethodGet, nextUpPath, nil)
+	request.Header.Set("X-Emby-Token", token)
+	response = httptest.NewRecorder()
+	handler.handleNextUp(response, request)
+	if response.Code != http.StatusOK || counting.resumeCalls != 1 || counting.nextCalls != 1 || service.nextOffset != 0 || service.nextLimit != 10 ||
+		!strings.Contains(response.Body.String(), `"Overview":"Next-up overview"`) {
+		t.Fatalf("next-up status=%d resumeCalls=%d calls=%d offset=%d limit=%d body=%s", response.Code, counting.resumeCalls, counting.nextCalls, service.nextOffset, service.nextLimit, response.Body.String())
+	}
+}
+
+func TestContinuationAcceptsOfficialFlagsAndRejectsInvalidBooleans(t *testing.T) {
+	handler, _, service, _, token, _, _, _ := stateHTTPFixture(t)
+	counting := &countingContinuationWatchstate{memoryWatchstate: service}
+	handler.watchstate = counting
+	for _, target := range []struct {
+		name       string
+		path       string
+		handle     func(http.ResponseWriter, *http.Request)
+		wantStatus int
+	}{
+		{name: "official resume types", path: "/UserItems/Resume?includeItemTypes=Movie&includeItemTypes=Audio&mediaTypes=Video&recursive=true&FutureSdkParameter=ignored&limit=10", handle: handler.handleUserResumeItems, wantStatus: http.StatusOK},
+		{name: "resumable next up", path: "/Shows/NextUp?enableResumable=true&mediaTypes=Video&recursive=true&FutureSdkParameter=ignored&limit=10", handle: handler.handleNextUp, wantStatus: http.StatusOK},
+		{name: "invalid resumable value", path: "/Shows/NextUp?enableResumable=not-a-bool&limit=10", handle: handler.handleNextUp, wantStatus: http.StatusBadRequest},
+		{name: "rewatching default", path: "/Shows/NextUp?enableRewatching=false&limit=10", handle: handler.handleNextUp, wantStatus: http.StatusOK},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, target.path, nil)
+			request.Header.Set("X-Emby-Token", token)
+			response := httptest.NewRecorder()
+			target.handle(response, request)
+			if response.Code != target.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", response.Code, target.wantStatus, response.Body.String())
+			}
+		})
+	}
+	if counting.resumeCalls != 1 || counting.nextCalls != 2 {
+		t.Fatalf("state calls after official and invalid filters: resume=%d next=%d", counting.resumeCalls, counting.nextCalls)
+	}
+}
+
+func TestResumeItemTypesAreCaseInsensitive(t *testing.T) {
+	handler, _, service, _, token, _, _, _ := stateHTTPFixture(t)
+	counting := &countingContinuationWatchstate{memoryWatchstate: service}
+	handler.watchstate = counting
+	request := httptest.NewRequest(http.MethodGet, "/UserItems/Resume?includeItemTypes=mOvIe&includeItemTypes=sErIeS&includeItemTypes=ePiSoDe&limit=10", nil)
+	request.Header.Set("X-Emby-Token", token)
+	response := httptest.NewRecorder()
+	handler.handleUserResumeItems(response, request)
+	if response.Code != http.StatusOK || counting.resumeCalls != 1 || service.resumeLimit != 10 {
+		t.Fatalf("status=%d calls=%d limit=%d body=%s", response.Code, counting.resumeCalls, service.resumeLimit, response.Body.String())
+	}
+}
+
 func TestResumeAndNextUpBindOptionalUserAndHonorFieldProjection(t *testing.T) {
 	handler, authentication, service, _, token, itemID, _, _ := stateHTTPFixture(t)
 	catalog := handler.catalog.(*stateCatalog)
@@ -831,15 +940,13 @@ func TestResumeAndNextUpBindOptionalUserAndHonorFieldProjection(t *testing.T) {
 	}
 }
 
-func TestResumeAndNextUpRejectUndocumentedQueryParameters(t *testing.T) {
+func TestResumeAndNextUpRejectInvalidLimits(t *testing.T) {
 	handler, _, service, _, token, _, _, _ := stateHTTPFixture(t)
 	for _, target := range []struct {
 		name   string
 		path   string
 		handle func(http.ResponseWriter, *http.Request)
 	}{
-		{name: "resume", path: "/UserItems/Resume?SearchTerm=ignored", handle: handler.handleUserResumeItems},
-		{name: "next up", path: "/Shows/NextUp?Recursive=true", handle: handler.handleNextUp},
 		{name: "resume zero limit", path: "/UserItems/Resume?Limit=0", handle: handler.handleUserResumeItems},
 		{name: "next up excessive limit", path: "/Shows/NextUp?Limit=101", handle: handler.handleNextUp},
 	} {

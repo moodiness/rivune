@@ -1,0 +1,38 @@
+{
+  "status": 200,
+  "headers": {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+    "X-Content-Type-Options": "nosniff"
+  },
+  "body": {
+    "MediaSources": [
+      {
+        "Id": "22222222-2222-4222-8222-222222222222",
+        "Name": "Source 1",
+        "Path": "/rivune/22222222-2222-4222-8222-222222222222/22222222-2222-4222-8222-222222222222.mp4",
+        "Container": "mp4",
+        "Protocol": "File",
+        "Type": "Default",
+        "IsRemote": false,
+        "SupportsDirectPlay": false,
+        "SupportsDirectStream": false,
+        "SupportsTranscoding": true,
+        "SupportsProbing": true,
+        "VideoType": "VideoFile",
+        "RunTimeTicks": 57000000000,
+        "ETag": "22222222-2222-4222-8222-222222222222",
+        "Formats": [
+          "mp4"
+        ],
+        "RequiredHttpHeaders": {},
+        "MediaAttachments": [],
+        "MediaStreams": [],
+        "TranscodingUrl": "/Videos/22222222-2222-4222-8222-222222222222/master.m3u8?MediaSourceId=22222222-2222-4222-8222-222222222222\u0026PlaySessionId=PLAY_SESSION_ID\u0026StartTimeTicks=30000000\u0026Static=true\u0026api_key=PLAY_SESSION_ID",
+        "TranscodingSubProtocol": "hls",
+        "TranscodingContainer": "mp4"
+      }
+    ],
+    "PlaySessionId": "PLAY_SESSION_ID"
+  }
+}

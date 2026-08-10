@@ -248,7 +248,7 @@ func (handler *Handler) handleSeasons(response http.ResponseWriter, request *htt
 	if !ok || !handler.requireOptionalQueryUser(response, request, session) {
 		return
 	}
-	if !validateCompatQueryNames(request.URL.Query(), "UserId", "StartIndex", "Limit", "Fields", "SortBy", "SortOrder", "EnableUserData", "EnableImages", "EnableImageTypes", "ImageTypeLimit") {
+	if err := validateQueryBudget(request.URL.Query()); err != nil {
 		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
 		return
 	}
@@ -259,6 +259,9 @@ func (handler *Handler) handleSeasons(response http.ResponseWriter, request *htt
 	}
 	series, err := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, seriesID.String())
 	if err != nil {
+		if request.Context().Err() != nil {
+			return
+		}
 		handler.writeCatalogError(response, err)
 		return
 	}
@@ -280,7 +283,7 @@ func (handler *Handler) handleEpisodes(response http.ResponseWriter, request *ht
 	if !ok || !handler.requireOptionalQueryUser(response, request, session) {
 		return
 	}
-	if !validateCompatQueryNames(request.URL.Query(), "UserId", "SeasonId", "StartIndex", "Limit", "Fields", "SortBy", "SortOrder", "EnableUserData", "EnableImages", "EnableImageTypes", "ImageTypeLimit") {
+	if err := validateQueryBudget(request.URL.Query()); err != nil {
 		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
 		return
 	}
@@ -291,6 +294,9 @@ func (handler *Handler) handleEpisodes(response http.ResponseWriter, request *ht
 	}
 	series, err := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, seriesID.String())
 	if err != nil {
+		if request.Context().Err() != nil {
+			return
+		}
 		handler.writeCatalogError(response, err)
 		return
 	}
@@ -312,6 +318,9 @@ func (handler *Handler) handleEpisodes(response http.ResponseWriter, request *ht
 		}
 		season, readErr := handler.catalog.GetCatalogTitle(request.Context(), session.Principal, parsedSeason.String())
 		if readErr != nil {
+			if request.Context().Err() != nil {
+				return
+			}
 			handler.writeCatalogError(response, readErr)
 			return
 		}
@@ -627,8 +636,8 @@ func (handler *Handler) writeCatalogIDSelection(response http.ResponseWriter, re
 		}
 		titles = append(titles, title)
 	}
-	if sortBy == "sortname" {
-		sortCatalogSearch(titles, sortOrder)
+	if sortBy != "" {
+		sortCatalogTitles(titles, sortBy, sortOrder)
 	}
 	total := len(titles)
 	start := min(query.StartIndex, total)
@@ -782,10 +791,6 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 			handler.writeSessionViewRoot(response, request.Context(), session.Principal, parsed, sortBy, sortOrder)
 			return
 		}
-		if parentID == "" && len(parsed.IncludeItemTypes) != 0 && !containsItemType(parsed.IncludeItemTypes, "Video") && !itemQueryHasCatalogFilters(parsed) {
-			handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: parsed.StartIndex})
-			return
-		}
 		if strings.EqualFold(parentID, views[2].Id) {
 			handler.writeCollectionRoot(response, request, session, parsed, mediaTypes, sortBy, sortOrder)
 			return
@@ -808,6 +813,9 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 				return
 			}
 			if !errors.Is(collectionErr, collection.ErrNotFound) {
+				if request.Context().Err() != nil {
+					return
+				}
 				handler.logCompatCatalogEvent(compatCatalogFailedMessage, "collection_lookup:"+compatCatalogErrorClass(collectionErr))
 				handler.writeCollectionError(response, collectionErr)
 				return
@@ -819,6 +827,9 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 				return
 			}
 			if !errors.Is(folderErr, collection.ErrNotFound) {
+				if request.Context().Err() != nil {
+					return
+				}
 				handler.logCompatCatalogEvent(compatCatalogFailedMessage, "collection_folder_lookup:"+compatCatalogErrorClass(folderErr))
 				handler.writeCollectionError(response, folderErr)
 				return
@@ -862,12 +873,18 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 	catalogQuery.Recursive, catalogQuery.Offset, catalogQuery.Limit = recursive || len(parsed.Ids) != 0, parsed.StartIndex, catalogLimit
 	catalogQuery.SortBy, catalogQuery.SortOrder = sortBy, sortOrder
 	if err := handler.resolveCatalogFacetFilters(request.Context(), session.Principal, parentID, mediaTypes, &catalogQuery); err != nil {
+		if request.Context().Err() != nil {
+			return
+		}
 		handler.logCompatCatalogEvent(compatCatalogFailedMessage, "facet_filters:"+compatCatalogErrorClass(err))
 		handler.writeCatalogError(response, err)
 		return
 	}
 	page, err := handler.catalog.ListCatalogItems(request.Context(), session.Principal, catalogQuery)
 	if err != nil {
+		if request.Context().Err() != nil {
+			return
+		}
 		handler.logCompatCatalogEvent(compatCatalogFailedMessage, "ordinary_catalog:"+compatCatalogErrorClass(err))
 		handler.writeCatalogError(response, err)
 		return
@@ -1231,17 +1248,21 @@ func (handler *Handler) virtualCollectionPage(ctx context.Context, principal aut
 		values = values[:maximumCollectionResolveLimit]
 	}
 	target := query.StartIndex + query.Limit + 1
-	if target > maximumCollectionResolveLimit {
-		target = maximumCollectionResolveLimit
+	if target > maximumCollectionWindowLimit {
+		target = maximumCollectionWindowLimit
 	}
 	scan := query
 	scan.StartIndex = 0
 	scan.Limit = target - 1
-	seen := make(map[string]struct{}, target)
-	titles := make([]watchstate.CatalogTitle, 0, target)
+	capacity := target
+	if sortBy != "" {
+		capacity = maximumCollectionWindowLimit
+	}
+	seen := make(map[string]struct{}, capacity)
+	titles := make([]watchstate.CatalogTitle, 0, capacity)
 	more := false
 	for _, value := range values {
-		resolved, resolvedMore, resolveErr := handler.resolveCollectionWindow(ctx, principal, resolver, value, []string{mediaType}, scan, "", "")
+		resolved, resolvedMore, resolveErr := handler.resolveCollectionWindow(ctx, principal, resolver, value, []string{mediaType}, scan, sortBy, sortOrder)
 		if resolveErr != nil {
 			return QueryResult[BaseItemDto]{}, false
 		}
@@ -1253,20 +1274,20 @@ func (handler *Handler) virtualCollectionPage(ctx context.Context, principal aut
 			}
 			seen[canonicalID] = struct{}{}
 			titles = append(titles, title)
-			if len(titles) >= target {
+			if len(titles) >= maximumCollectionWindowLimit || sortBy == "" && len(titles) >= target {
 				more = true
 				break
 			}
 		}
-		if len(titles) >= target {
+		if len(titles) >= maximumCollectionWindowLimit || sortBy == "" && len(titles) >= target {
 			break
 		}
 	}
 	if len(titles) == 0 {
 		return QueryResult[BaseItemDto]{}, false
 	}
-	if sortBy == "sortname" {
-		sortCatalogSearch(titles, sortOrder)
+	if sortBy != "" {
+		sortCatalogTitles(titles, sortBy, sortOrder)
 	}
 	start := min(query.StartIndex, len(titles))
 	end := min(start+query.Limit, len(titles))
@@ -1362,7 +1383,10 @@ func (handler *Handler) resolveCollectionWindow(ctx context.Context, principal a
 						continue
 					}
 					titles = append(titles, outcome.title)
-					if len(titles) >= maximumCollectionWindowLimit || sortBy != "sortname" && len(titles) >= target {
+					if len(titles) >= target {
+						if sortBy != "" {
+							sortCatalogTitles(titles, sortBy, sortOrder)
+						}
 						return titles, true, nil
 					}
 				}
@@ -1378,8 +1402,8 @@ func (handler *Handler) resolveCollectionWindow(ctx context.Context, principal a
 	if len(titles) == 0 && providerFailed {
 		return nil, false, collection.ErrProviderUnavailable
 	}
-	if sortBy == "sortname" {
-		sortCatalogSearch(titles, sortOrder)
+	if sortBy != "" {
+		sortCatalogTitles(titles, sortBy, sortOrder)
 	}
 	return titles, false, nil
 }
@@ -2042,6 +2066,9 @@ func applyItemQueryProjection(item *BaseItemDto, query ItemQuery, detail bool) {
 	if !query.EnableUserData {
 		item.UserData = nil
 	}
+	if !itemQueryRequestsField(query, "DateCreated", detail) {
+		item.DateCreated = ""
+	}
 	if !itemQueryRequestsField(query, "DisplayPreferencesId", detail) {
 		item.DisplayPreferencesId = ""
 	}
@@ -2074,6 +2101,9 @@ func applyItemQueryProjection(item *BaseItemDto, query ItemQuery, detail bool) {
 	}
 	if !itemQueryRequestsField(query, "Studios", detail) {
 		item.Studios = nil
+	}
+	if !itemQueryRequestsField(query, "MediaSourceCount", detail) {
+		item.MediaSourceCount = nil
 	}
 	if !itemQueryRequestsField(query, "SortName", detail) {
 		item.SortName = ""
@@ -2122,20 +2152,31 @@ func applyItemQueryProjection(item *BaseItemDto, query ItemQuery, detail bool) {
 	}
 }
 
-func catalogSort(query ItemQuery, request *http.Request) (string, string, error) {
-	if len(query.SortBy) == 0 {
-		_, supplied, err := queryScalar(request.URL.Query(), "SortOrder")
-		if err != nil || supplied {
-			return "", "", ErrInvalidQuery
+func catalogSort(query ItemQuery, _ *http.Request) (string, string, error) {
+	keys := make([]string, 0, min(len(query.SortBy), 3))
+	for _, value := range query.SortBy {
+		var key string
+		switch {
+		case strings.EqualFold(value, "Name"), strings.EqualFold(value, "SortName"):
+			key = "sortname"
+		case strings.EqualFold(value, "DateCreated"):
+			key = "datecreated"
+		case strings.EqualFold(value, "DateLastContentAdded"):
+			key = "datelastcontentadded"
+		case strings.EqualFold(value, "ProductionYear"):
+			key = "productionyear"
+		default:
+			continue
 		}
+		keys = append(keys, key)
+		if len(keys) == 3 {
+			break
+		}
+	}
+	if len(keys) == 0 {
 		return "", "", nil
 	}
-	for _, value := range query.SortBy {
-		if !strings.EqualFold(value, "SortName") && !strings.EqualFold(value, "Name") {
-			return "", "", ErrInvalidQuery
-		}
-	}
-	return "sortname", strings.ToLower(query.SortOrder), nil
+	return strings.Join(keys, ","), strings.ToLower(query.SortOrder), nil
 }
 
 func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserData bool) BaseItemDto {
@@ -2148,6 +2189,9 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 		Status: title.Status, Genres: append([]string(nil), title.Genres[:min(len(title.Genres), MaximumQueryListValues)]...), CommunityRating: title.CommunityRating,
 		ProviderIds: jellyfinProviderIDs(title.ProviderIDs), ImageTags: make(map[string]string),
 		BackdropImageTags: make([]string, 0),
+	}
+	if !title.CreatedAt.IsZero() {
+		item.DateCreated = title.CreatedAt.UTC().Format("2006-01-02T15:04:05.0000000Z")
 	}
 	if item.Genres == nil {
 		item.Genres = make([]string, 0)
@@ -2236,6 +2280,8 @@ func (handler *Handler) baseItemDTO(title watchstate.CatalogTitle, includeUserDa
 			RunTimeTicks: item.RunTimeTicks, ETag: item.Id, Formats: []string{"strm"}, RequiredHttpHeaders: map[string]string{}, MediaAttachments: []any{}, MediaStreams: []MediaStreamInfo{},
 		}}
 	}
+	mediaSourceCount := len(item.MediaSources)
+	item.MediaSourceCount = &mediaSourceCount
 
 	return item
 }

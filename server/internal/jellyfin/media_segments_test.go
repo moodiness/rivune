@@ -79,6 +79,28 @@ func TestMediaSegmentsProjectsAuthorizedRealMarkersWithTicksAndStableIDs(t *test
 	}
 }
 
+func TestMediaSegmentsAcceptsRepeatedBracketedArrayQuery(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	markers := &mediaSegmentReaderStub{result: playback.MarkerList{Markers: []playback.Marker{
+		{Type: playback.MarkerTypeIntro, StartSeconds: 10, EndSeconds: 20},
+		{Type: playback.MarkerTypeRecap, StartSeconds: 1, EndSeconds: 5},
+		{Type: playback.MarkerTypeOutro, StartSeconds: 90, EndSeconds: 100},
+	}}}
+	handler.mediaSegments = markers
+	setSegmentEpisodeCatalog(reader)
+
+	request := authenticatedCatalogRequest(t, token, "/MediaSegments/"+segmentEpisodeID+"?includeSegmentTypes%5B%5D=Intro&includeSegmentTypes%5B%5D=Outro")
+	request.SetPathValue("itemId", segmentEpisodeID)
+	response := httptest.NewRecorder()
+	handler.handleMediaSegments(response, request)
+
+	var result QueryResult[MediaSegmentDto]
+	decodeCatalogResponse(t, response, &result)
+	if response.Code != http.StatusOK || result.TotalRecordCount != 2 || len(result.Items) != 2 || result.Items[0].Type != "Intro" || result.Items[1].Type != "Outro" || markers.calls != 1 {
+		t.Fatalf("bracketed media segment query status=%d result=%+v calls=%d", response.Code, result, markers.calls)
+	}
+}
+
 func TestMediaSegmentsDistinguishesKnownEmptyFilterFromUnavailableData(t *testing.T) {
 	handler, reader, token := newCatalogHTTPHandler(t)
 	markerReader := &mediaSegmentReaderStub{result: playback.MarkerList{Markers: []playback.Marker{{Type: playback.MarkerTypeIntro, StartSeconds: 4, EndSeconds: 12}}}}

@@ -142,6 +142,37 @@ func TestRouteTracingEmitsOneBoundedRedactedEventForRootAndEmby(t *testing.T) {
 	}
 }
 
+func TestRouteErrorTracingIncludesOnlySafeRequestShapeWithoutDebug(t *testing.T) {
+	const querySecret = "query-value-SENTINEL"
+	var logs bytes.Buffer
+	handler := tracedHandler(t, slog.New(slog.NewJSONHandler(&logs, nil)), RouteLatestItems,
+		http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			response.Header().Set("Content-Type", "application/json")
+			response.WriteHeader(http.StatusBadRequest)
+			_, _ = response.Write([]byte(`{"ResponseStatus":{"ErrorCode":"BadRequest"}}`))
+		}))
+	request := httptest.NewRequest(http.MethodGet, "/Items/Latest?Fields=Chapters&api_key="+querySecret, nil)
+	request.Header.Set("X-Emby-Authorization", `MediaBrowser Client="Infuse", Device="private-device-SENTINEL", DeviceId="device-id-SENTINEL", Version="8.1", Token="token-SENTINEL"`)
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	rawLog := strings.TrimSpace(logs.String())
+	for _, forbidden := range []string{querySecret, "Chapters", "private-device-SENTINEL", "device-id-SENTINEL", "token-SENTINEL"} {
+		if strings.Contains(rawLog, forbidden) {
+			t.Fatalf("error trace contains forbidden value %q: %s", forbidden, rawLog)
+		}
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(rawLog), &event); err != nil {
+		t.Fatalf("decode error trace: %v", err)
+	}
+	if event["status"] != float64(http.StatusBadRequest) || event["client_family"] != "infuse" ||
+		event["client_version_major"] != "8" || event["client_metadata_present"] != true ||
+		!equalJSONStrings(event["query_names"], []string{"Fields", "api_key"}) ||
+		!equalJSONNumbers(event["query_cardinalities"], []float64{1, 1}) {
+		t.Fatalf("unexpected error trace metadata: %#v", event)
+	}
+}
+
 func TestRouteTracingEmitsZeroWorkWithoutInstrumentation(t *testing.T) {
 	var logs bytes.Buffer
 	handler := tracedHandler(t, slog.New(slog.NewJSONHandler(&logs, nil)), RouteSystemPing,

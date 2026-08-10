@@ -165,24 +165,28 @@ func ParseItemQuery(values url.Values) (ItemQuery, error) {
 	if query.HasSubtitles, err = optionalBooleanValue(values, "HasSubtitles"); err != nil {
 		return ItemQuery{}, err
 	}
-	for index, filter := range query.Filters {
+	filters := query.Filters[:0]
+	for _, filter := range query.Filters {
 		switch strings.ToLower(filter) {
 		case "isplayed", "isunplayed", "isfavorite", "isresumable", "isfolder", "isnotfolder":
-			query.Filters[index] = strings.ToLower(filter)
-		default:
-			return ItemQuery{}, invalidQuery("Filters contains an unsupported value")
+			filters = append(filters, strings.ToLower(filter))
 		}
 	}
+	query.Filters = filters
+	fields := query.Fields[:0]
 	for _, field := range query.Fields {
-		if !supportedItemField(field) {
-			return ItemQuery{}, invalidQuery("Fields contains an unsupported value")
+		if supportedItemField(field) {
+			fields = append(fields, field)
 		}
 	}
+	query.Fields = fields
+	imageTypes := query.EnableImageTypes[:0]
 	for _, imageType := range query.EnableImageTypes {
-		if !supportedItemImageType(imageType) {
-			return ItemQuery{}, invalidQuery("EnableImageTypes contains an unsupported value")
+		if supportedItemImageType(imageType) {
+			imageTypes = append(imageTypes, imageType)
 		}
 	}
+	query.EnableImageTypes = imageTypes
 
 	rawSortOrder, err := boundedString(values, "SortOrder", MaximumQueryValueBytes)
 	if err != nil {
@@ -346,13 +350,37 @@ func validQueryText(value string) bool {
 
 func supportedItemField(value string) bool {
 	switch {
-	case strings.EqualFold(value, "DisplayPreferencesId"), strings.EqualFold(value, "Etag"),
-		strings.EqualFold(value, "Genres"), strings.EqualFold(value, "MediaSources"),
+	case strings.EqualFold(value, "AirTime"), strings.EqualFold(value, "BasicSyncInfo"),
+		strings.EqualFold(value, "CanDelete"), strings.EqualFold(value, "CanDownload"),
+		strings.EqualFold(value, "ChannelImage"), strings.EqualFold(value, "ChannelInfo"),
+		strings.EqualFold(value, "Chapters"), strings.EqualFold(value, "ChildCount"),
+		strings.EqualFold(value, "CumulativeRunTimeTicks"), strings.EqualFold(value, "CustomRating"),
+		strings.EqualFold(value, "DateCreated"), strings.EqualFold(value, "DateLastMediaAdded"),
+		strings.EqualFold(value, "DateLastRefreshed"), strings.EqualFold(value, "DateLastSaved"),
+		strings.EqualFold(value, "DisplayPreferencesId"), strings.EqualFold(value, "EnableMediaSourceDisplay"),
+		strings.EqualFold(value, "Etag"), strings.EqualFold(value, "ExternalEtag"),
+		strings.EqualFold(value, "ExternalSeriesId"), strings.EqualFold(value, "ExternalUrls"),
+		strings.EqualFold(value, "ExtraIds"), strings.EqualFold(value, "Genres"),
+		strings.EqualFold(value, "Height"), strings.EqualFold(value, "HomePageUrl"),
+		strings.EqualFold(value, "InheritedParentalRatingValue"), strings.EqualFold(value, "IsHD"),
+		strings.EqualFold(value, "ItemCounts"), strings.EqualFold(value, "LocalTrailerCount"),
+		strings.EqualFold(value, "MediaSourceCount"), strings.EqualFold(value, "MediaSources"),
 		strings.EqualFold(value, "MediaStreams"), strings.EqualFold(value, "OriginalTitle"),
 		strings.EqualFold(value, "Overview"), strings.EqualFold(value, "ParentId"),
-		strings.EqualFold(value, "Path"), strings.EqualFold(value, "People"), strings.EqualFold(value, "Studios"),
-		strings.EqualFold(value, "PrimaryImageAspectRatio"), strings.EqualFold(value, "ProviderIds"),
-		strings.EqualFold(value, "SortName"), strings.EqualFold(value, "Taglines"), strings.EqualFold(value, "Trickplay"):
+		strings.EqualFold(value, "Path"), strings.EqualFold(value, "People"),
+		strings.EqualFold(value, "PlayAccess"), strings.EqualFold(value, "PresentationUniqueKey"),
+		strings.EqualFold(value, "ProductionLocations"), strings.EqualFold(value, "ProviderIds"),
+		strings.EqualFold(value, "PrimaryImageAspectRatio"), strings.EqualFold(value, "RecursiveItemCount"),
+		strings.EqualFold(value, "RefreshState"), strings.EqualFold(value, "RemoteTrailers"),
+		strings.EqualFold(value, "ScreenshotImageTags"), strings.EqualFold(value, "SeasonUserData"),
+		strings.EqualFold(value, "SeriesPresentationUniqueKey"), strings.EqualFold(value, "SeriesPrimaryImage"),
+		strings.EqualFold(value, "SeriesStudio"), strings.EqualFold(value, "ServiceName"),
+		strings.EqualFold(value, "Settings"), strings.EqualFold(value, "SortName"),
+		strings.EqualFold(value, "SpecialEpisodeNumbers"), strings.EqualFold(value, "SpecialFeatureCount"),
+		strings.EqualFold(value, "Studios"), strings.EqualFold(value, "SyncInfo"),
+		strings.EqualFold(value, "Taglines"), strings.EqualFold(value, "Tags"),
+		strings.EqualFold(value, "ThemeSongIds"), strings.EqualFold(value, "ThemeVideoIds"),
+		strings.EqualFold(value, "Trickplay"), strings.EqualFold(value, "Width"):
 		return true
 	default:
 		return false

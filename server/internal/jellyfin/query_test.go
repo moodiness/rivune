@@ -182,9 +182,6 @@ func TestParseItemQueryRejectsAmbiguousNewScalars(t *testing.T) {
 		{"MinCommunityRating": {"10.1"}},
 		{"HasSubtitles": {"true", "true"}},
 		{"HasSubtitles": {"sometimes"}},
-		{"Filters": {"HasTrailer"}},
-		{"Fields": {"DateCreated"}},
-		{"EnableImageTypes": {"Primary,Disc"}},
 		{"SearchTerm": {"valid\x00suffix"}},
 		{"Genres": {string([]byte{0xff})}},
 		{"Genres": {strings.Repeat("x|", MaximumQueryListValues) + "x"}},
@@ -193,6 +190,46 @@ func TestParseItemQueryRejectsAmbiguousNewScalars(t *testing.T) {
 		if _, err := ParseItemQuery(values); !errors.Is(err, ErrInvalidQuery) {
 			t.Fatalf("ParseItemQuery(%v) error = %v, want ErrInvalidQuery", values, err)
 		}
+	}
+}
+
+func TestParseItemQueryAcceptsObservedClientFields(t *testing.T) {
+	query, err := ParseItemQuery(url.Values{"Fields": {"DateCreated,MediaSourceCount,PrimaryImageAspectRatio"}})
+	if err != nil || !reflect.DeepEqual(query.Fields, []string{"DateCreated", "MediaSourceCount", "PrimaryImageAspectRatio"}) {
+		t.Fatalf("observed client fields query=%#v error=%v", query, err)
+	}
+}
+
+func TestParseItemQueryAcceptsCurrentAndLegacyJellyfinFieldsUsedByNativeClients(t *testing.T) {
+	fields := []string{
+		"AirTime", "BasicSyncInfo", "CanDownload", "Chapters", "ChildCount", "DateLastMediaAdded",
+		"ExternalUrls", "HomePageUrl", "MediaSources", "MediaStreams", "PlayAccess", "PresentationUniqueKey",
+		"RemoteTrailers", "SeasonUserData", "ServiceName", "SyncInfo", "Tags", "ThemeSongIds", "Trickplay", "Width",
+	}
+	query, err := ParseItemQuery(url.Values{"Fields": {strings.Join(fields, ",")}})
+	if err != nil || !reflect.DeepEqual(query.Fields, fields) {
+		t.Fatalf("native client fields query=%#v error=%v", query, err)
+	}
+}
+
+func TestParseItemQueryAcceptsEveryOfficialJellyfinImageType(t *testing.T) {
+	imageTypes := []string{"Primary", "Art", "Backdrop", "Banner", "Logo", "Thumb", "Disc", "Box", "Screenshot", "Menu", "Chapter", "BoxRear", "Profile"}
+	query, err := ParseItemQuery(url.Values{"EnableImageTypes": {strings.Join(imageTypes, ",")}})
+	if err != nil || !reflect.DeepEqual(query.EnableImageTypes, imageTypes) {
+		t.Fatalf("official image types query=%#v error=%v", query, err)
+	}
+}
+
+func TestParseItemQueryIgnoresUnknownEnumMembersLikeJellyfinBinder(t *testing.T) {
+	query, err := ParseItemQuery(url.Values{
+		"Fields":           {"Overview,FutureSdkField"},
+		"Filters":          {"IsFavorite,FutureSdkFilter"},
+		"EnableImageTypes": {"Primary,FutureSdkImage"},
+	})
+	if err != nil || !reflect.DeepEqual(query.Fields, []string{"Overview"}) ||
+		!reflect.DeepEqual(query.Filters, []string{"isfavorite"}) ||
+		!reflect.DeepEqual(query.EnableImageTypes, []string{"Primary"}) {
+		t.Fatalf("unknown enum members were not ignored: query=%#v error=%v", query, err)
 	}
 }
 

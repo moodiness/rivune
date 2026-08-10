@@ -82,47 +82,49 @@ type CatalogPerson struct {
 // Resource and source fields are internal provenance snapshots and must not be
 // projected into untrusted protocol responses as URLs, headers, or credentials.
 type CatalogTitle struct {
-	ID               string            `json:"id"`
-	MediaType        string            `json:"mediaType"`
-	ParentID         string            `json:"parentId,omitempty"`
-	SeriesID         string            `json:"seriesId,omitempty"`
-	SeasonID         string            `json:"seasonId,omitempty"`
-	Ordinal          *int              `json:"ordinal,omitempty"`
-	ParentOrdinal    *int              `json:"parentOrdinal,omitempty"`
-	Title            string            `json:"title,omitempty"`
-	OriginalTitle    string            `json:"originalTitle,omitempty"`
-	SeriesTitle      string            `json:"seriesTitle,omitempty"`
-	SeasonTitle      string            `json:"seasonTitle,omitempty"`
-	PosterURL        string            `json:"posterUrl,omitempty"`
-	BackgroundURL    string            `json:"backgroundUrl,omitempty"`
-	LogoURL          string            `json:"logoUrl,omitempty"`
-	BannerURL        string            `json:"bannerUrl,omitempty"`
-	ArtURL           string            `json:"artUrl,omitempty"`
-	ReleaseInfo      string            `json:"releaseInfo,omitempty"`
-	Released         string            `json:"released,omitempty"`
-	Overview         string            `json:"overview,omitempty"`
-	RuntimeMinutes   *int              `json:"runtimeMinutes,omitempty"`
-	Genres           []string          `json:"genres"`
-	Studios          []string          `json:"studios"`
-	HasSubtitles     bool              `json:"hasSubtitles"`
-	CommunityRating  *float32          `json:"communityRating,omitempty"`
-	Tagline          string            `json:"tagline,omitempty"`
-	Status           string            `json:"status,omitempty"`
-	EndDate          string            `json:"endDate,omitempty"`
-	People           []CatalogPerson   `json:"people,omitempty"`
-	InLibrary        bool              `json:"inLibrary"`
-	Favorite         bool              `json:"favorite"`
-	Progress         *CatalogProgress  `json:"progress,omitempty"`
-	UserData         *UserDataValues   `json:"userData,omitempty"`
-	ResourceID       string            `json:"resourceId,omitempty"`
-	ResourceProvider string            `json:"resourceProvider,omitempty"`
-	SourceAddonID    string            `json:"sourceAddonId,omitempty"`
-	SourceCatalogID  string            `json:"sourceCatalogId,omitempty"`
-	SourceName       string            `json:"sourceName,omitempty"`
-	Country          string            `json:"country,omitempty"`
-	Language         string            `json:"language,omitempty"`
-	Category         string            `json:"category,omitempty"`
-	ProviderIDs      map[string]string `json:"providerIds"`
+	ID                 string            `json:"id"`
+	MediaType          string            `json:"mediaType"`
+	ParentID           string            `json:"parentId,omitempty"`
+	SeriesID           string            `json:"seriesId,omitempty"`
+	SeasonID           string            `json:"seasonId,omitempty"`
+	Ordinal            *int              `json:"ordinal,omitempty"`
+	ParentOrdinal      *int              `json:"parentOrdinal,omitempty"`
+	Title              string            `json:"title,omitempty"`
+	OriginalTitle      string            `json:"originalTitle,omitempty"`
+	SeriesTitle        string            `json:"seriesTitle,omitempty"`
+	SeasonTitle        string            `json:"seasonTitle,omitempty"`
+	PosterURL          string            `json:"posterUrl,omitempty"`
+	BackgroundURL      string            `json:"backgroundUrl,omitempty"`
+	LogoURL            string            `json:"logoUrl,omitempty"`
+	BannerURL          string            `json:"bannerUrl,omitempty"`
+	ArtURL             string            `json:"artUrl,omitempty"`
+	ReleaseInfo        string            `json:"releaseInfo,omitempty"`
+	Released           string            `json:"released,omitempty"`
+	CreatedAt          time.Time         `json:"-"`
+	LastContentAddedAt time.Time         `json:"-"`
+	Overview           string            `json:"overview,omitempty"`
+	RuntimeMinutes     *int              `json:"runtimeMinutes,omitempty"`
+	Genres             []string          `json:"genres"`
+	Studios            []string          `json:"studios"`
+	HasSubtitles       bool              `json:"hasSubtitles"`
+	CommunityRating    *float32          `json:"communityRating,omitempty"`
+	Tagline            string            `json:"tagline,omitempty"`
+	Status             string            `json:"status,omitempty"`
+	EndDate            string            `json:"endDate,omitempty"`
+	People             []CatalogPerson   `json:"people,omitempty"`
+	InLibrary          bool              `json:"inLibrary"`
+	Favorite           bool              `json:"favorite"`
+	Progress           *CatalogProgress  `json:"progress,omitempty"`
+	UserData           *UserDataValues   `json:"userData,omitempty"`
+	ResourceID         string            `json:"resourceId,omitempty"`
+	ResourceProvider   string            `json:"resourceProvider,omitempty"`
+	SourceAddonID      string            `json:"sourceAddonId,omitempty"`
+	SourceCatalogID    string            `json:"sourceCatalogId,omitempty"`
+	SourceName         string            `json:"sourceName,omitempty"`
+	Country            string            `json:"country,omitempty"`
+	Language           string            `json:"language,omitempty"`
+	Category           string            `json:"category,omitempty"`
+	ProviderIDs        map[string]string `json:"providerIds"`
 }
 
 // CatalogPage is an exact offset/limit window and its total before pagination.
@@ -214,6 +216,24 @@ func (s *Service) GetCatalogTitles(ctx context.Context, principal auth.Principal
 		       COALESCE(CASE title.media_type WHEN 'episode' THEN parent.display_title END, ''),
 		       COALESCE(title.poster_url, ''), COALESCE(title.background_url, ''),
 		       COALESCE(title.release_info, ''), COALESCE(title.release_date::text, ''),
+		       title.created_at,
+		       GREATEST(
+		           title.updated_at,
+		           COALESCE((
+		               SELECT max(child.updated_at)
+		               FROM titles child
+		               JOIN accessible_titles accessible_child ON accessible_child.id = child.id
+		               WHERE child.parent_id = title.id
+		           ), title.updated_at),
+		           COALESCE((
+		               SELECT max(grandchild.updated_at)
+		               FROM titles child
+		               JOIN accessible_titles accessible_child ON accessible_child.id = child.id
+		               JOIN titles grandchild ON grandchild.parent_id = child.id
+		               JOIN accessible_titles accessible_grandchild ON accessible_grandchild.id = grandchild.id
+		               WHERE child.parent_id = title.id
+		           ), title.updated_at)
+		       ),
 		       COALESCE(metadata.overview, ''), metadata.runtime_minutes, COALESCE(metadata.genres, ARRAY[]::text[]),
 		       COALESCE(metadata.studios, ARRAY[]::text[]), metadata.community_rating, COALESCE(metadata.has_subtitles, false), COALESCE(metadata.people, '[]'::jsonb),
 		       library.title_id IS NOT NULL, favorite.title_id IS NOT NULL, progress.title_id IS NOT NULL,
@@ -356,7 +376,24 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			FROM profile_catalog child
 			JOIN selected_descendants parent ON parent.id = child.parent_id
 		), catalog_state AS MATERIALIZED (
-			SELECT title.*, favorite.title_id IS NOT NULL AS state_favorite,
+			SELECT title.*,
+			       lower(COALESCE(title.display_title, '')) AS catalog_sort_name,
+			       to_char(title.created_at AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US') AS catalog_date_created_sort,
+			       GREATEST(
+			           title.updated_at,
+			           COALESCE((SELECT max(child.updated_at) FROM profile_catalog child WHERE child.parent_id = title.id), title.updated_at),
+			           COALESCE((
+			               SELECT max(grandchild.updated_at)
+			               FROM profile_catalog child
+			               JOIN profile_catalog grandchild ON grandchild.parent_id = child.id
+			               WHERE child.parent_id = title.id
+			           ), title.updated_at)
+			       ) AS catalog_last_content_added,
+			       COALESCE(
+			           to_char(title.release_date, 'YYYY'),
+			           CASE WHEN left(COALESCE(title.release_info, ''), 4) ~ '^[0-9]{4}$' THEN left(title.release_info, 4) END
+			       ) AS catalog_production_year_sort,
+			       favorite.title_id IS NOT NULL AS state_favorite,
 			       progress.completed AS state_played,
 			       (progress.title_id IS NOT NULL AND progress.position_seconds > 0 AND NOT progress.completed) AS state_resumable,
 			       metadata.payload AS metadata_payload
@@ -429,11 +466,39 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		), catalog_page AS MATERIALIZED (
 			SELECT * FROM catalog_candidates
 			ORDER BY
-			  CASE WHEN $9 = 'sortname' AND $10 = 'ascending' THEN lower(COALESCE(display_title, '')) END COLLATE "C" ASC NULLS LAST,
-			  CASE WHEN $9 = 'sortname' AND $10 = 'descending' THEN lower(COALESCE(display_title, '')) END COLLATE "C" DESC NULLS LAST,
+			  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[1]
+			      WHEN 'sortname' THEN catalog_sort_name
+			      WHEN 'datecreated' THEN catalog_date_created_sort
+			      WHEN 'datelastcontentadded' THEN to_char(catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+			      WHEN 'productionyear' THEN catalog_production_year_sort END END COLLATE "C" ASC NULLS LAST,
+			  CASE WHEN $10 = 'descending' THEN CASE (string_to_array($9, ','))[1]
+			      WHEN 'sortname' THEN catalog_sort_name
+			      WHEN 'datecreated' THEN catalog_date_created_sort
+			      WHEN 'datelastcontentadded' THEN to_char(catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+			      WHEN 'productionyear' THEN catalog_production_year_sort END END COLLATE "C" DESC NULLS LAST,
+			  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[2]
+			      WHEN 'sortname' THEN catalog_sort_name
+			      WHEN 'datecreated' THEN catalog_date_created_sort
+			      WHEN 'datelastcontentadded' THEN to_char(catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+			      WHEN 'productionyear' THEN catalog_production_year_sort END END COLLATE "C" ASC NULLS LAST,
+			  CASE WHEN $10 = 'descending' THEN CASE (string_to_array($9, ','))[2]
+			      WHEN 'sortname' THEN catalog_sort_name
+			      WHEN 'datecreated' THEN catalog_date_created_sort
+			      WHEN 'datelastcontentadded' THEN to_char(catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+			      WHEN 'productionyear' THEN catalog_production_year_sort END END COLLATE "C" DESC NULLS LAST,
+			  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[3]
+			      WHEN 'sortname' THEN catalog_sort_name
+			      WHEN 'datecreated' THEN catalog_date_created_sort
+			      WHEN 'datelastcontentadded' THEN to_char(catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+			      WHEN 'productionyear' THEN catalog_production_year_sort END END COLLATE "C" ASC NULLS LAST,
+			  CASE WHEN $10 = 'descending' THEN CASE (string_to_array($9, ','))[3]
+			      WHEN 'sortname' THEN catalog_sort_name
+			      WHEN 'datecreated' THEN catalog_date_created_sort
+			      WHEN 'datelastcontentadded' THEN to_char(catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+			      WHEN 'productionyear' THEN catalog_production_year_sort END END COLLATE "C" DESC NULLS LAST,
 			  CASE WHEN $9 = '' AND $6 = '' AND $2::uuid IS NULL AND NOT $7 THEN catalog_added_at END DESC NULLS LAST,
 			  CASE WHEN $9 = '' AND $6 = '' AND $2::uuid IS NOT NULL AND NOT $7 THEN ordinal END ASC NULLS LAST,
-			  CASE WHEN $9 = '' AND ($6 <> '' OR $7) THEN lower(COALESCE(display_title, '')) END COLLATE "C" ASC NULLS LAST,
+			  CASE WHEN $9 = '' AND ($6 <> '' OR $7) THEN catalog_sort_name END COLLATE "C" ASC NULLS LAST,
 			  id
 			LIMIT $4 OFFSET $5
 		), raw_provider_ids AS (
@@ -462,6 +527,7 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		       COALESCE(CASE title.media_type WHEN 'episode' THEN parent.display_title END, ''),
 		       COALESCE(title.poster_url, ''), COALESCE(title.background_url, ''),
 		       COALESCE(title.release_info, ''), COALESCE(title.release_date::text, ''),
+		       title.created_at, title.catalog_last_content_added,
 		       COALESCE(metadata.overview, ''), metadata.runtime_minutes, COALESCE(metadata.genres, ARRAY[]::text[]),
 		       COALESCE(metadata.studios, ARRAY[]::text[]), metadata.community_rating, COALESCE(metadata.has_subtitles, false), COALESCE(metadata.people, '[]'::jsonb),
 		       library.title_id IS NOT NULL, favorite.title_id IS NOT NULL, progress.title_id IS NOT NULL,
@@ -527,11 +593,39 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		) metadata ON true
 		LEFT JOIN provider_ids ON provider_ids.title_id = title.id
 		ORDER BY
-		  CASE WHEN $9 = 'sortname' AND $10 = 'ascending' THEN lower(COALESCE(title.display_title, '')) END COLLATE "C" ASC NULLS LAST,
-		  CASE WHEN $9 = 'sortname' AND $10 = 'descending' THEN lower(COALESCE(title.display_title, '')) END COLLATE "C" DESC NULLS LAST,
+		  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[1]
+		      WHEN 'sortname' THEN title.catalog_sort_name
+		      WHEN 'datecreated' THEN title.catalog_date_created_sort
+		      WHEN 'datelastcontentadded' THEN to_char(title.catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+		      WHEN 'productionyear' THEN title.catalog_production_year_sort END END COLLATE "C" ASC NULLS LAST,
+		  CASE WHEN $10 = 'descending' THEN CASE (string_to_array($9, ','))[1]
+		      WHEN 'sortname' THEN title.catalog_sort_name
+		      WHEN 'datecreated' THEN title.catalog_date_created_sort
+		      WHEN 'datelastcontentadded' THEN to_char(title.catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+		      WHEN 'productionyear' THEN title.catalog_production_year_sort END END COLLATE "C" DESC NULLS LAST,
+		  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[2]
+		      WHEN 'sortname' THEN title.catalog_sort_name
+		      WHEN 'datecreated' THEN title.catalog_date_created_sort
+		      WHEN 'datelastcontentadded' THEN to_char(title.catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+		      WHEN 'productionyear' THEN title.catalog_production_year_sort END END COLLATE "C" ASC NULLS LAST,
+		  CASE WHEN $10 = 'descending' THEN CASE (string_to_array($9, ','))[2]
+		      WHEN 'sortname' THEN title.catalog_sort_name
+		      WHEN 'datecreated' THEN title.catalog_date_created_sort
+		      WHEN 'datelastcontentadded' THEN to_char(title.catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+		      WHEN 'productionyear' THEN title.catalog_production_year_sort END END COLLATE "C" DESC NULLS LAST,
+		  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[3]
+		      WHEN 'sortname' THEN title.catalog_sort_name
+		      WHEN 'datecreated' THEN title.catalog_date_created_sort
+		      WHEN 'datelastcontentadded' THEN to_char(title.catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+		      WHEN 'productionyear' THEN title.catalog_production_year_sort END END COLLATE "C" ASC NULLS LAST,
+		  CASE WHEN $10 = 'descending' THEN CASE (string_to_array($9, ','))[3]
+		      WHEN 'sortname' THEN title.catalog_sort_name
+		      WHEN 'datecreated' THEN title.catalog_date_created_sort
+		      WHEN 'datelastcontentadded' THEN to_char(title.catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
+		      WHEN 'productionyear' THEN title.catalog_production_year_sort END END COLLATE "C" DESC NULLS LAST,
 		  CASE WHEN $9 = '' AND $6 = '' AND $2::uuid IS NULL AND NOT $7 THEN title.catalog_added_at END DESC NULLS LAST,
 		  CASE WHEN $9 = '' AND $6 = '' AND $2::uuid IS NOT NULL AND NOT $7 THEN title.ordinal END ASC NULLS LAST,
-		  CASE WHEN $9 = '' AND ($6 <> '' OR $7) THEN lower(COALESCE(title.display_title, '')) END COLLATE "C" ASC NULLS LAST,
+		  CASE WHEN $9 = '' AND ($6 <> '' OR $7) THEN title.catalog_sort_name END COLLATE "C" ASC NULLS LAST,
 		  title.id
 	`, profileID, parentID, query.MediaTypes, query.Limit, query.Offset, query.SearchTerm, query.Recursive, query.IDs, query.SortBy, query.SortOrder,
 		query.Played, query.Favorite, query.Resumable, query.Genres, query.GenreIDs, query.Years, query.OfficialRatings, query.Tags, query.PersonIDs,
@@ -583,6 +677,7 @@ func scanCatalogTitleDestinations(row catalogScanner, total *int) (CatalogTitle,
 	var position, duration *int
 	var completed *bool
 	var lastWatchedAt *time.Time
+	var createdAt, lastContentAddedAt *time.Time
 	var hasUserData bool
 	var rating, playedPercentage *float64
 	var unplayedItemCount, playCount *int
@@ -591,7 +686,7 @@ func scanCatalogTitleDestinations(row catalogScanner, total *int) (CatalogTitle,
 	var lastPlayedDateSubmicrosecond *int
 	var ratingSet, playedPercentageSet, unplayedItemCountSet bool
 	var playCountSet, likesSet, lastPlayedDateSet bool
-	destinations := make([]any, 0, 53)
+	destinations := make([]any, 0, 55)
 	if total != nil {
 		destinations = append(destinations, total)
 	}
@@ -599,6 +694,7 @@ func scanCatalogTitleDestinations(row catalogScanner, total *int) (CatalogTitle,
 		&item.ID, &item.MediaType, &item.ParentID, &item.SeriesID, &item.SeasonID,
 		&item.Ordinal, &item.ParentOrdinal, &item.Title, &item.SeriesTitle, &item.SeasonTitle,
 		&item.PosterURL, &item.BackgroundURL, &item.ReleaseInfo, &item.Released,
+		&createdAt, &lastContentAddedAt,
 		&item.Overview, &item.RuntimeMinutes, &item.Genres, &item.Studios, &item.CommunityRating, &item.HasSubtitles, &people,
 		&item.InLibrary, &item.Favorite, &hasProgress, &position, &duration, &completed, &lastWatchedAt,
 		&hasUserData,
@@ -610,6 +706,12 @@ func scanCatalogTitleDestinations(row catalogScanner, total *int) (CatalogTitle,
 	)
 	if err := row.Scan(destinations...); err != nil {
 		return CatalogTitle{}, err
+	}
+	if createdAt != nil {
+		item.CreatedAt = *createdAt
+	}
+	if lastContentAddedAt != nil {
+		item.LastContentAddedAt = *lastContentAddedAt
 	}
 	if item.Genres == nil {
 		item.Genres = make([]string, 0)
@@ -686,10 +788,25 @@ func normalizeCatalogQuery(query CatalogQuery) (CatalogQuery, error) {
 		ids = append(ids, id)
 	}
 	query.IDs = ids
-	query.SortBy = strings.ToLower(strings.TrimSpace(query.SortBy))
-	if query.SortBy != "" && query.SortBy != "sortname" {
-		return CatalogQuery{}, fmt.Errorf("%w: unsupported catalog sort", ErrInvalidInput)
+	trimmedSort := strings.ToLower(strings.TrimSpace(query.SortBy))
+	rawSortKeys := strings.Split(trimmedSort, ",")
+	if trimmedSort == "" {
+		rawSortKeys = nil
 	}
+	if len(rawSortKeys) > 3 {
+		return CatalogQuery{}, fmt.Errorf("%w: too many catalog sort keys", ErrInvalidInput)
+	}
+	sortKeys := make([]string, 0, len(rawSortKeys))
+	for _, rawKey := range rawSortKeys {
+		key := strings.TrimSpace(rawKey)
+		switch key {
+		case "sortname", "datecreated", "datelastcontentadded", "productionyear":
+			sortKeys = append(sortKeys, key)
+		default:
+			return CatalogQuery{}, fmt.Errorf("%w: unsupported catalog sort", ErrInvalidInput)
+		}
+	}
+	query.SortBy = strings.Join(sortKeys, ",")
 	query.SortOrder = strings.ToLower(strings.TrimSpace(query.SortOrder))
 	if query.SortBy == "" {
 		if query.SortOrder != "" {

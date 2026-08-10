@@ -54,6 +54,13 @@ func (err *credentialLoginAdmissionError) Error() string {
 	return "credential login admission denied"
 }
 
+func (err *credentialLoginAdmissionError) RetryAfter() time.Duration {
+	if err == nil {
+		return 0
+	}
+	return err.retryAfter
+}
+
 func (a *API) loginCredentials(ctx context.Context, input auth.LoginInput) (auth.TokenPair, error) {
 	release, retryAfter, admitted := a.credentialAdmission.acquire(auth.ClientIP(ctx))
 	if !admitted {
@@ -145,14 +152,7 @@ func (a *API) buildJellyfinCompatibility(
 		return nil, false, fmt.Errorf("initialize Jellyfin compatibility sessions: %w", err)
 	}
 	compatAuthentication, err := jellyfin.NewAuthenticationService(
-		func(ctx context.Context, input auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error) {
-			result, loginErr := a.loginJellyfinProfile(ctx, input)
-			var admissionErr *credentialLoginAdmissionError
-			if errors.As(loginErr, &admissionErr) {
-				return auth.JellyfinProfileLoginResult{}, auth.ErrInvalidCredentials
-			}
-			return result, loginErr
-		},
+		a.loginJellyfinProfile,
 		nativeAuthentication,
 		sessions,
 	)

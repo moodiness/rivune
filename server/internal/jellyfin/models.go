@@ -270,6 +270,8 @@ type BaseItemDto struct {
 	EndDate                 string                              `json:"EndDate,omitempty"`
 	PremiereDate            string                              `json:"PremiereDate,omitempty"`
 	ProductionYear          *int                                `json:"ProductionYear,omitempty"`
+	DateCreated             string                              `json:"DateCreated,omitempty"`
+	MediaSourceCount        *int                                `json:"MediaSourceCount,omitempty"`
 	RunTimeTicks            *int64                              `json:"RunTimeTicks,omitempty"`
 	Genres                  []string                            `json:"Genres,omitempty"`
 	Studios                 []NameGuidPair                      `json:"Studios,omitempty"`

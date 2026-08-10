@@ -17,7 +17,7 @@ import (
 
 const compatImageAuthenticationRejectedMessage = "jellyfin compatibility image authentication rejected"
 
-var compatImageTypes = [...]string{"Primary", "Backdrop", "Logo", "Thumb", "Banner", "Art"}
+var compatImageTypes = [...]string{"Primary", "Backdrop", "Logo", "Thumb", "Banner", "Art", "Disc", "Box", "Screenshot", "Menu", "Chapter", "BoxRear", "Profile"}
 
 func (handler *Handler) handleImage(response http.ResponseWriter, request *http.Request) {
 	handler.serveImage(response, request, false)
@@ -251,6 +251,9 @@ func (handler *Handler) serveImage(response http.ResponseWriter, request *http.R
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The image query is invalid")
 		return
 	}
+	if handler.serveAnonymousTaggedImage(response, request, userSelectorPresent) {
+		return
+	}
 
 	session, ok := handler.authenticateRequest(response, request, true)
 	if !ok {
@@ -343,6 +346,40 @@ func (handler *Handler) serveImage(response http.ResponseWriter, request *http.R
 		return
 	}
 	serveResolvedKey(key)
+}
+
+func (handler *Handler) serveAnonymousTaggedImage(response http.ResponseWriter, request *http.Request, userSelectorPresent bool) bool {
+	if userSelectorPresent || compatCredentialTransportPresent(request) {
+		return false
+	}
+	requestedKey, tagProvided := artworkTagKey(request)
+	if !tagProvided {
+		return false
+	}
+	if _, validID := canonicalCompatUUID(request.PathValue("id")); !validID {
+		http.NotFound(response, request)
+		return true
+	}
+	registeredKey, registered := handler.artwork.LookupKey(request.Context(), localizedArtworkPrefix+requestedKey)
+	if !registered || registeredKey != requestedKey {
+		http.NotFound(response, request)
+		return true
+	}
+	handler.artwork.ServeKey(response, withoutCompatImageTransform(request), registeredKey)
+	return true
+}
+
+func withoutCompatImageTransform(request *http.Request) *http.Request {
+	cloned := request.Clone(request.Context())
+	query := cloned.URL.Query()
+	for name := range query {
+		switch strings.ToLower(name) {
+		case "width", "maxwidth", "maxheight", "fillwidth", "fillheight", "quality":
+			query.Del(name)
+		}
+	}
+	cloned.URL.RawQuery = query.Encode()
+	return cloned
 }
 
 func collectionItemArtworkKey(item BaseItemDto, imageType string) string {

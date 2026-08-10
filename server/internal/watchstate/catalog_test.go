@@ -44,6 +44,7 @@ func TestNormalizeCatalogQueryBoundsAndTypes(t *testing.T) {
 			"11111111-1111-4111-8111-111111111111",
 		},
 		Recursive: true, Offset: 7, Limit: MaximumCatalogPageSize,
+		SortBy: " DateCreated, SortName, ProductionYear ", SortOrder: "Descending",
 	})
 	if err != nil {
 		t.Fatalf("normalize catalog query: %v", err)
@@ -51,7 +52,8 @@ func TestNormalizeCatalogQueryBoundsAndTypes(t *testing.T) {
 	if query.ParentID != "550e8400-e29b-41d4-a716-446655440000" || query.SearchTerm != "Éclair" || !query.Recursive ||
 		!reflect.DeepEqual(query.MediaTypes, []string{"episode", "series"}) ||
 		!reflect.DeepEqual(query.IDs, []string{"11111111-1111-4111-8111-111111111111"}) ||
-		query.Offset != 7 || query.Limit != MaximumCatalogPageSize {
+		query.Offset != 7 || query.Limit != MaximumCatalogPageSize ||
+		query.SortBy != "datecreated,sortname,productionyear" || query.SortOrder != "descending" {
 		t.Fatalf("unexpected normalized query: %+v", query)
 	}
 	defaults, err := normalizeCatalogQuery(CatalogQuery{Limit: 20})
@@ -67,6 +69,8 @@ func TestNormalizeCatalogQueryBoundsAndTypes(t *testing.T) {
 		{MediaTypes: []string{"tv"}, Limit: 20},
 		{MinCommunityRating: float64Pointer(-0.1), Limit: 20},
 		{MinCommunityRating: float64Pointer(10.1), Limit: 20},
+		{SortBy: "communityrating", SortOrder: "ascending", Limit: 20},
+		{SortBy: "sortname,productionyear,datecreated,sortname", SortOrder: "ascending", Limit: 20},
 	} {
 		if _, err := normalizeCatalogQuery(invalid); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("expected invalid catalog query %+v, got %v", invalid, err)
@@ -215,6 +219,19 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 			('00000000-0000-4000-8000-000000000320', 'series', NULL, NULL, 'Profile One Search Result', NULL, NULL, 'Custom', NULL, 'custom-series-search', 'addon', '99999999-9999-4999-8999-999999999999', 'search', 'Addon One', 'US', 'en', 'Drama'),
 			('00000000-0000-4000-8000-000000000321', 'season', '00000000-0000-4000-8000-000000000320', 1, 'One', NULL, NULL, NULL, NULL, NULL, NULL, '99999999-9999-4999-8999-999999999999', NULL, NULL, NULL, NULL, NULL),
 			('00000000-0000-4000-8000-000000000400', 'series', NULL, NULL, 'Éclair Hidden', NULL, NULL, 'Custom', NULL, 'custom-series-two', 'addon', '99999999-9999-4999-8999-999999999999', 'custom', 'Addon Two', 'GB', 'en', 'Comedy');
+		UPDATE titles
+		SET created_at = CASE id
+		        WHEN '00000000-0000-4000-8000-000000000100'::uuid THEN '2026-08-06T12:03:00Z'::timestamptz
+		        WHEN '00000000-0000-4000-8000-000000000200'::uuid THEN '2026-08-06T12:01:00Z'::timestamptz
+		        WHEN '00000000-0000-4000-8000-000000000300'::uuid THEN '2026-08-06T12:02:00Z'::timestamptz
+		        ELSE '2026-08-06T12:00:00Z'::timestamptz
+		    END,
+		    updated_at = CASE id
+		        WHEN '00000000-0000-4000-8000-000000000100'::uuid THEN '2026-08-06T12:03:00Z'::timestamptz
+		        WHEN '00000000-0000-4000-8000-000000000221'::uuid THEN '2026-08-06T12:05:00Z'::timestamptz
+		        WHEN '00000000-0000-4000-8000-000000000311'::uuid THEN '2026-08-06T12:04:00Z'::timestamptz
+		        ELSE '2026-08-06T12:00:00Z'::timestamptz
+		    END;
 
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
 			('00000000-0000-4000-8000-000000000100', 'tmdb', 'movie', '100'),
@@ -461,6 +478,25 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 	})
 	if err != nil || linkedSeasons.Total != 1 || len(linkedSeasons.Items) != 1 || linkedSeasons.Items[0].ID != "00000000-0000-4000-8000-000000000321" {
 		t.Fatalf("accessible non-library series lost materialized seasons: %+v error %v", linkedSeasons, err)
+	}
+	dateCreated, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{
+		SortBy: "datecreated,sortname,productionyear", SortOrder: "descending", Limit: 20,
+	})
+	if err != nil || len(dateCreated.Items) != 3 ||
+		dateCreated.Items[0].ID != "00000000-0000-4000-8000-000000000100" ||
+		dateCreated.Items[1].ID != "00000000-0000-4000-8000-000000000300" ||
+		dateCreated.Items[2].ID != "00000000-0000-4000-8000-000000000200" ||
+		dateCreated.Items[0].CreatedAt.IsZero() || dateCreated.Items[0].LastContentAddedAt.IsZero() {
+		t.Fatalf("DateCreated ordering or projection = %+v error %v", dateCreated, err)
+	}
+	lastContent, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{
+		SortBy: "datelastcontentadded,datecreated,sortname", SortOrder: "descending", Limit: 20,
+	})
+	if err != nil || len(lastContent.Items) != 3 ||
+		lastContent.Items[0].ID != "00000000-0000-4000-8000-000000000200" ||
+		lastContent.Items[1].ID != "00000000-0000-4000-8000-000000000300" ||
+		lastContent.Items[2].ID != "00000000-0000-4000-8000-000000000100" {
+		t.Fatalf("DateLastContentAdded ordering = %+v error %v", lastContent, err)
 	}
 
 	expiredAt := time.Now().UTC().Add(-time.Minute)

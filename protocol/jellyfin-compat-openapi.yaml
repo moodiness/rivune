@@ -764,9 +764,10 @@ paths:
     get:
       tags: [Artwork]
       summary: Get cached or derived artwork bytes
-      description: Serves registered local bytes without redirecting upstream. Width/fill/max/quality transforms are bounded, deterministic, and represented by a distinct strong ETag. Authentication and profile-scoped item authorization are always required; a supplied tag must match the selected item and image type.
+      description: Serves registered local bytes without redirecting upstream. A valid opaque tag may be used as an anonymous bearer capability so Jellyfin clients that omit credentials on image requests can load projected artwork; tagless requests and requests carrying invalid credentials remain unauthorized. Anonymous tagged delivery intentionally proxies the registered original bytes and ignores transform hints, matching compatible servers for remote artwork, including WebP. Authenticated width/fill/max/quality transforms remain bounded and deterministic.
       operationId: getJellyfinImage
       security:
+        - {}
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
@@ -800,6 +801,7 @@ paths:
       summary: Inspect original artwork
       operationId: headJellyfinImage
       security:
+        - {}
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
@@ -836,8 +838,10 @@ paths:
     get:
       tags: [Artwork]
       summary: Get indexed original artwork
+      description: Index zero follows the same authenticated-or-opaque-tag bearer contract as the non-indexed image route.
       operationId: getJellyfinIndexedImage
       security:
+        - {}
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
@@ -869,8 +873,10 @@ paths:
     head:
       tags: [Artwork]
       summary: Inspect indexed original artwork
+      description: Index zero follows the same authenticated-or-opaque-tag bearer contract as the non-indexed image route.
       operationId: headJellyfinIndexedImage
       security:
+        - {}
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
@@ -1042,14 +1048,12 @@ paths:
         - { $ref: "#/components/parameters/AllowAudioStreamCopy" }
         - { $ref: "#/components/parameters/SegmentContainer" }
       responses:
-        "302": { $ref: "#/components/responses/HLSStreamRedirect" }
         "200": { $ref: "#/components/responses/Stream" }
         "206": { $ref: "#/components/responses/PartialStream" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "416": { $ref: "#/components/responses/RangeNotSatisfiable" }
-        "422": { $ref: "#/components/responses/UnprocessableEntity" }
         "502": { $ref: "#/components/responses/BadGateway" }
         "503": { $ref: "#/components/responses/PlaybackUnavailable" }
         "507": { $ref: "#/components/responses/InsufficientStorage" }
@@ -1088,14 +1092,12 @@ paths:
         - { $ref: "#/components/parameters/AllowAudioStreamCopy" }
         - { $ref: "#/components/parameters/SegmentContainer" }
       responses:
-        "302": { $ref: "#/components/responses/HLSStreamRedirect" }
         "200": { $ref: "#/components/responses/StreamHead" }
         "206": { $ref: "#/components/responses/PartialStreamHead" }
         "400": { $ref: "#/components/responses/HeadError" }
         "401": { $ref: "#/components/responses/HeadUnauthorized" }
         "404": { $ref: "#/components/responses/HeadError" }
         "416": { $ref: "#/components/responses/RangeNotSatisfiable" }
-        "422": { $ref: "#/components/responses/HeadError" }
         "502": { $ref: "#/components/responses/HeadError" }
         "503": { $ref: "#/components/responses/HeadPlaybackUnavailable" }
         "507": { $ref: "#/components/responses/HeadError" }
@@ -1138,14 +1140,12 @@ paths:
         - { $ref: "#/components/parameters/AllowAudioStreamCopy" }
         - { $ref: "#/components/parameters/SegmentContainer" }
       responses:
-        "302": { $ref: "#/components/responses/HLSStreamRedirect" }
         "200": { $ref: "#/components/responses/Stream" }
         "206": { $ref: "#/components/responses/PartialStream" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "416": { $ref: "#/components/responses/RangeNotSatisfiable" }
-        "422": { $ref: "#/components/responses/UnprocessableEntity" }
         "502": { $ref: "#/components/responses/BadGateway" }
         "503": { $ref: "#/components/responses/PlaybackUnavailable" }
         "507": { $ref: "#/components/responses/InsufficientStorage" }
@@ -1184,14 +1184,12 @@ paths:
         - { $ref: "#/components/parameters/AllowAudioStreamCopy" }
         - { $ref: "#/components/parameters/SegmentContainer" }
       responses:
-        "302": { $ref: "#/components/responses/HLSStreamRedirect" }
         "200": { $ref: "#/components/responses/StreamHead" }
         "206": { $ref: "#/components/responses/PartialStreamHead" }
         "400": { $ref: "#/components/responses/HeadError" }
         "401": { $ref: "#/components/responses/HeadUnauthorized" }
         "404": { $ref: "#/components/responses/HeadError" }
         "416": { $ref: "#/components/responses/RangeNotSatisfiable" }
-        "422": { $ref: "#/components/responses/HeadError" }
         "502": { $ref: "#/components/responses/HeadError" }
         "503": { $ref: "#/components/responses/HeadPlaybackUnavailable" }
         "507": { $ref: "#/components/responses/HeadError" }
@@ -2323,29 +2321,29 @@ components:
       name: Fields
       in: query
       required: false
-      description: Bounded comma-separated projected fields. Unsupported values are rejected rather than silently ignored.
+      description: Bounded comma-separated projection hints. DateCreated and MediaSourceCount expose canonical catalogue metadata used by standard clients. Unknown Jellyfin field names are accepted and ignored so newer clients can negotiate against this compatibility surface.
       schema:
         type: array
         maxItems: 100
-        items: { type: string, enum: [DisplayPreferencesId, Etag, Genres, MediaSources, MediaStreams, OriginalTitle, Overview, ParentId, Path, People, PrimaryImageAspectRatio, ProviderIds, SortName, Studios, Taglines] }
+        items: { type: string, enum: [DateCreated, DisplayPreferencesId, Etag, Genres, MediaSourceCount, MediaSources, MediaStreams, OriginalTitle, Overview, ParentId, Path, People, PrimaryImageAspectRatio, ProviderIds, SortName, Studios, Taglines] }
       style: form
       explode: false
     SortBy:
       name: SortBy
       in: query
       required: false
-      description: Comma-separated Name or SortName keys select case-insensitive title order with canonical item ID as a stable final tie-breaker.
+      description: Bounded comma-separated Jellyfin sort hints. The first three supported Name, SortName, ProductionYear, DateCreated, or DateLastContentAdded keys are applied in order; unknown keys are ignored and canonical item ID remains the stable final tie-breaker.
       schema:
         type: array
         maxItems: 100
-        items: { type: string, enum: [Name, SortName] }
+        items: { type: string, enum: [Name, SortName, ProductionYear, DateCreated, DateLastContentAdded] }
       style: form
       explode: false
     SortOrder:
       name: SortOrder
       in: query
       required: false
-      description: Valid only when SortBy is supplied.
+      description: Applied when at least one supported SortBy key remains; otherwise accepted and ignored.
       schema: { type: string, enum: [Ascending, Descending] }
     EnableUserData:
       name: EnableUserData
@@ -2778,9 +2776,6 @@ components:
     ContentDisposition:
       description: Attachment disposition with a bounded catalog-derived filename; provider metadata and path/control characters are excluded.
       schema: { type: string, pattern: '^attachment;' }
-    Location:
-      description: Same-origin capability-scoped HLS master playlist target; it never carries a global profile credential.
-      schema: { type: string, minLength: 1, maxLength: 2048 }
     ETag:
       description: Validator generated by the existing bounded delivery service.
       schema: { type: string }
@@ -2975,11 +2970,6 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/PlaybackInfoResponse" }
-    HLSStreamRedirect:
-      description: Legacy stream transport resolved to HLS remux or transcode; follow the capability-scoped master playlist with GET or HEAD as appropriate.
-      headers:
-        Location: { $ref: "#/components/headers/Location" }
-        Cache-Control: { $ref: "#/components/headers/CacheControlNoStore" }
     Stream:
       description: Complete stream bytes from the existing Rivune delivery pipeline.
       headers:
@@ -3591,6 +3581,7 @@ components:
         EndDate: { type: string, format: date-time }
         PremiereDate: { type: string, format: date-time }
         ProductionYear: { type: integer, minimum: 1, maximum: 9999 }
+        DateCreated: { type: string, format: date-time }
         RunTimeTicks:
           type: integer
           format: int64
@@ -3604,6 +3595,7 @@ components:
           maxItems: 100
           items: { $ref: "#/components/schemas/NameGuidPair" }
         CommunityRating: { type: number, format: float }
+        MediaSourceCount: { type: integer, minimum: 0 }
         PrimaryImageAspectRatio:
           type: number
           format: double

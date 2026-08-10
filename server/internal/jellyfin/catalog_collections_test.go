@@ -25,10 +25,12 @@ const (
 )
 
 type collectionCompatStore struct {
-	mu      sync.Mutex
-	titles  map[string]watchstate.CatalogTitle
-	resolve []watchstate.ResolveTitleInput
-	reads   []string
+	mu          sync.Mutex
+	titles      map[string]watchstate.CatalogTitle
+	resolve     []watchstate.ResolveTitleInput
+	reads       []string
+	listPage    *watchstate.CatalogPage
+	listQueries []watchstate.CatalogQuery
 }
 
 func (store *collectionCompatStore) GetCatalogTitle(_ context.Context, _ auth.Principal, id string) (watchstate.CatalogTitle, error) {
@@ -46,7 +48,11 @@ func (*collectionCompatStore) GetCatalogTitles(context.Context, auth.Principal, 
 	return nil, errors.New("unexpected batch read")
 }
 
-func (*collectionCompatStore) ListCatalogItems(context.Context, auth.Principal, watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
+func (store *collectionCompatStore) ListCatalogItems(_ context.Context, _ auth.Principal, query watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
+	store.listQueries = append(store.listQueries, query)
+	if store.listPage != nil {
+		return *store.listPage, nil
+	}
 	return watchstate.CatalogPage{}, errors.New("unexpected ordinary catalog list")
 }
 
@@ -205,13 +211,13 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 			t.Fatalf("view logo projection is incomplete: %+v", view.ImageTags)
 		}
 	}
-	for _, imageType := range []string{"Primary", "Thumb", "Backdrop", "Logo"} {
+	for index, imageType := range []string{"Primary", "Thumb", "Backdrop", "Logo"} {
 		wantTag := coverTag
 		if imageType == "Logo" {
 			wantTag = logoTag
 		}
 		response := anonymousImage(promotedID, imageType, wantTag)
-		if response.Code != http.StatusUnauthorized || len(presenter.served) != 0 {
+		if response.Code != http.StatusOK || len(presenter.served) != index+1 || presenter.served[index] != wantTag {
 			t.Fatalf("anonymous projected collection view %s artwork status=%d served=%v", imageType, response.Code, presenter.served)
 		}
 	}
@@ -321,9 +327,9 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 		latest[0].UserData.ItemId != latest[0].Id || latest[1].ImageTags["Primary"] != hydratedTag || latest[1].ImageTags["Thumb"] != hydratedTag {
 		t.Fatalf("collection latest folders status=%d result=%+v", latestResponse.Code, latest)
 	}
-	for _, imageType := range []string{"Primary", "Thumb", "Backdrop"} {
+	for index, imageType := range []string{"Primary", "Thumb", "Backdrop"} {
 		response := anonymousImage(latest[0].Id, imageType, coverTag)
-		if response.Code != http.StatusUnauthorized || len(presenter.served) != 0 {
+		if response.Code != http.StatusOK || len(presenter.served) != index+1 || presenter.served[index] != coverTag {
 			t.Fatalf("anonymous projected collection folder %s artwork status=%d served=%v", imageType, response.Code, presenter.served)
 		}
 	}
@@ -436,7 +442,7 @@ func TestCollectionsExposeRootFoldersAndCanonicalItems(t *testing.T) {
 }
 
 func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
-	handler, service, _, token := newCollectionCompatHandler(t)
+	handler, service, store, token := newCollectionCompatHandler(t)
 	promotedID, err := handler.collectionViewID(collectionCompatID)
 	if err != nil {
 		t.Fatal(err)
@@ -524,6 +530,8 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 	if filteredRootResponse.Code != http.StatusOK || filteredRoot.TotalRecordCount != 1 || len(filteredRoot.Items) != 1 || filteredRoot.Items[0].Id != promotedID {
 		t.Fatalf("filtered standard root status=%d result=%+v", filteredRootResponse.Code, filteredRoot)
 	}
+	emptyCatalogPage := watchstate.CatalogPage{Items: []watchstate.CatalogTitle{}, Total: 0, Limit: 20}
+	store.listPage = &emptyCatalogPage
 	emptyRootRequest := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Movie,Series")
 	emptyRootResponse := httptest.NewRecorder()
 	handler.handleItems(emptyRootResponse, emptyRootRequest)
@@ -531,6 +539,9 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 	decodeCatalogResponse(t, emptyRootResponse, &emptyRoot)
 	if emptyRootResponse.Code != http.StatusOK || emptyRoot.TotalRecordCount != 0 || len(emptyRoot.Items) != 0 {
 		t.Fatalf("movie/series leaked at standard root: status=%d result=%+v", emptyRootResponse.Code, emptyRoot)
+	}
+	if len(store.listQueries) != 1 {
+		t.Fatalf("global typed query bypassed canonical catalogue: %+v", store.listQueries)
 	}
 	boxSetRequest := authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=BoxSet")
 	boxSetResponse := httptest.NewRecorder()
@@ -648,6 +659,45 @@ func TestCollectionsArePromotedAsDirectHomeViews(t *testing.T) {
 	decodeCatalogResponse(t, itemsResponse, &items)
 	if itemsResponse.Code != http.StatusOK || len(items.Items) != 2 || items.Items[0].Type == "Folder" || items.Items[1].Type == "Folder" {
 		t.Fatalf("direct collection view status=%d result=%+v", itemsResponse.Code, items)
+	}
+}
+
+func TestGlobalTypedItemsUseCanonicalCatalogWithoutResolvingCollections(t *testing.T) {
+	base, reader, token := newCatalogHTTPHandler(t)
+	service := &collectionCompatService{authorized: collection.Collection{
+		ID: collectionCompatID, Title: "Authorized Collection",
+		Folders: []collection.Folder{{
+			ID: "11111111-1111-4111-8111-111111111110", Title: "First",
+			Sources: []collection.Source{{Kind: collection.SourceKindAddonCatalog, AddonCatalog: &collection.AddonCatalogSource{Type: collection.MediaTypeMovie}}},
+		}},
+	}}
+	created := time.Date(2026, 8, 9, 12, 34, 56, 700_000_000, time.UTC)
+	reader.page = watchstate.CatalogPage{Items: []watchstate.CatalogTitle{{
+		ID: collectionMovieID, MediaType: collection.MediaTypeMovie, Title: "Canonical movie", CreatedAt: created,
+		Genres: []string{}, ProviderIDs: map[string]string{},
+	}}, Total: 1, Limit: 10}
+	handler, err := New(Dependencies{
+		ServerInfo: base.serverInfo, Authentication: base.authentication, Catalog: reader, Collections: service,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target := "/Items?UserId=" + catalogTestProfileID +
+		"&Recursive=true&IncludeItemTypes=Movie&Fields=DateCreated,MediaSourceCount" +
+		"&SortBy=DateCreated,SortName,ProductionYear&SortOrder=Descending&StartIndex=0&Limit=10"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, authenticatedCatalogRequest(t, token, target))
+	var result QueryResult[BaseItemDto]
+	decodeCatalogResponse(t, response, &result)
+	if response.Code != http.StatusOK || result.TotalRecordCount != 1 || len(result.Items) != 1 ||
+		result.Items[0].Id != collectionMovieID || result.Items[0].DateCreated != "2026-08-09T12:34:56.7000000Z" ||
+		result.Items[0].MediaSourceCount == nil || *result.Items[0].MediaSourceCount != 1 {
+		t.Fatalf("canonical global catalogue status=%d result=%+v body=%s", response.Code, result, response.Body.String())
+	}
+	if len(reader.queries) != 1 || reader.queries[0].SortBy != "datecreated,sortname,productionyear" ||
+		reader.queries[0].SortOrder != "descending" || len(service.calls) != 0 {
+		t.Fatalf("global catalogue escaped canonical reader: queries=%+v collectionCalls=%+v", reader.queries, service.calls)
 	}
 }
 
@@ -866,12 +916,12 @@ func TestRecursiveCollectionBrowseSortsBeforePagination(t *testing.T) {
 
 	var result QueryResult[BaseItemDto]
 	decodeCatalogResponse(t, response, &result)
-	if response.Code != http.StatusOK || result.TotalRecordCount != 3 || len(result.Items) != 1 ||
+	if response.Code != http.StatusOK || result.TotalRecordCount != 2 || len(result.Items) != 1 ||
 		result.Items[0].Id != collectionSeriesID || result.Items[0].Name != "Add-on series" {
 		t.Fatalf("recursive collection was paginated before sorting: status=%d result=%+v", response.Code, result)
 	}
-	if len(service.calls) != 3 || service.calls[2].folderID != service.authorized.Folders[1].ID || service.calls[2].page != 2 {
-		t.Fatalf("sorted collection did not resolve the complete candidate set: %+v", service.calls)
+	if len(service.calls) != 2 || service.calls[1].folderID != service.authorized.Folders[1].ID || service.calls[1].page != 1 {
+		t.Fatalf("sorted collection resolved beyond the requested window: %+v", service.calls)
 	}
 }
 

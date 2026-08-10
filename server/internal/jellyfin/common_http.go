@@ -193,6 +193,9 @@ func (handler *Handler) authenticateRequest(response http.ResponseWriter, reques
 	}
 	session, err := handler.authentication.Authenticate(request.Context(), token)
 	if err != nil {
+		if request.Context().Err() != nil {
+			return AuthenticatedSession{}, false
+		}
 		if writeCompatRequestPolicyError(response, err) {
 			return AuthenticatedSession{}, false
 		}

@@ -64,10 +64,7 @@ func (tracer *routeTracer) ServeHTTP(response http.ResponseWriter, request *http
 	}
 	work := counters.Snapshot()
 	if !tracer.debug {
-		tracer.logger.LogAttrs(
-			logContext,
-			slog.LevelInfo,
-			compatRequestCompletedMessage,
+		attrs := []slog.Attr{
 			slog.String("route", string(tracer.route)),
 			slog.String("method", tracer.method),
 			slog.Int("status", status),
@@ -80,7 +77,19 @@ func (tracer *routeTracer) ServeHTTP(response http.ResponseWriter, request *http
 			slog.Int64("bytes", observed.bytes),
 			slog.Bool("range_request", request.Header.Get("Range") != ""),
 			slog.String("content_type", compatTraceContentType(observed.Header().Get("Content-Type"))),
-		)
+		}
+		if status >= http.StatusBadRequest {
+			queryNames, queryCardinalities := compatTraceQueryShape(request)
+			clientFamily, clientVersion, clientMetadata := compatTraceClientIdentity(request)
+			attrs = append(attrs,
+				slog.String("client_family", clientFamily),
+				slog.String("client_version_major", clientVersion),
+				slog.Bool("client_metadata_present", clientMetadata),
+				slog.Any("query_names", queryNames),
+				slog.Any("query_cardinalities", queryCardinalities),
+			)
+		}
+		tracer.logger.LogAttrs(logContext, slog.LevelInfo, compatRequestCompletedMessage, attrs...)
 		return
 	}
 	contentType := compatTraceContentType(observed.Header().Get("Content-Type"))

@@ -1,65 +1,65 @@
-# Harness différentiel Jellyfin 10.11.11
+# Jellyfin 10.11.11 Differential Harness
 
-Ce répertoire exécute un même manifeste HTTP contre l'oracle stable Jellyfin
-10.11.11 et une instance Rivune. Il produit des observations reproductibles; il
-ne certifie ni ne promet une compatibilité Jellyfin générale.
+This directory runs the same HTTP manifest against the stable Jellyfin 10.11.11
+oracle and a Rivune instance. It produces reproducible observations; it neither
+certifies nor promises general Jellyfin compatibility.
 
-## Prérequis
+## Prerequisites
 
-- Bash, `curl`, `jq`, Go et `sha256sum` (ou `shasum`);
-- Docker avec Compose v2;
-- une instance Rivune déjà démarrée, avec un profil compatible et un film nommé
-  `Rivune Demo` dans sa bibliothèque.
+- Bash, `curl`, `jq`, Go, and `sha256sum` (or `shasum`);
+- Docker with Compose v2;
+- an already-running Rivune instance with a compatible profile and a movie named
+  `Rivune Demo` in its library.
 
-L'oracle est exactement
+The oracle is exactly
 `jellyfin/jellyfin:10.11.11@sha256:aefb67e6a7ff1debdd154a78a7bbb780fd0c873d8639210a7f6a2016ad2b35db`.
-Compose ne le publie que sur `127.0.0.1:18096`. Ses volumes de configuration et
-de cache sont jetables; `run.sh` les supprime avec `docker compose down
---volumes` à la sortie. Le média synthétique est monté en lecture seule.
+Compose exposes it only on `127.0.0.1:18096`. Its configuration and cache
+volumes are disposable; `run.sh` removes them with `docker compose down
+--volumes` on exit. The synthetic media is mounted read-only.
 
-## Configuration privée
+## Private Configuration
 
-Depuis la racine du dépôt:
+From the repository root:
 
 ```sh
 cp scripts/jellyfin-compat/targets.env.example scripts/jellyfin-compat/targets.env
 chmod 600 scripts/jellyfin-compat/targets.env
 ```
 
-Remplacer tous les exemples. `targets.env` est ignoré par Git et chargé comme du
-Bash de confiance. `run.sh` refuse un lien symbolique et tout mode POSIX donnant
-un droit au groupe ou aux autres. Les secrets restent dans l'environnement ou
-des fichiers temporaires privés: ils ne sont ni placés dans les arguments, ni
-écrits dans les snapshots, erreurs ou logs. Pour choisir un autre fichier privé,
-définir `JFCOMPAT_ENV_FILE`; les mêmes contrôles s'appliquent.
+Replace every example value. Git ignores `targets.env`, and the harness loads it
+as trusted Bash. `run.sh` rejects symbolic links and any POSIX mode that grants
+permissions to the group or others. Secrets remain in the environment or in
+private temporary files: they are neither placed in arguments nor written to
+snapshots, errors, or logs. To select another private file, set
+`JFCOMPAT_ENV_FILE`; the same checks apply.
 
-Les secrets de manifeste `{{secret:name}}` sont résolus séparément par cible:
-`JFCOMPAT_UPSTREAM_NAME` et `JFCOMPAT_RIVUNE_NAME`. Les captures, dont le jeton
-d'accès, sont également isolées par cible. Une capture marquée `secret` est
-expurgée avant écriture des artefacts.
+Manifest secrets in the form `{{secret:name}}` are resolved independently for
+each target: `JFCOMPAT_UPSTREAM_NAME` and `JFCOMPAT_RIVUNE_NAME`. Captures,
+including the access token, are also isolated by target. A capture marked
+`secret` is redacted before artifacts are written.
 
-## Exécution
+## Running the Harness
 
 ```sh
 scripts/jellyfin-compat/run.sh
 ```
 
-Le script:
+The script:
 
-1. vérifie les cinq SHA-256 inscrits dans `NOTICE`, puis copie uniquement les
-   médias synthétiques Rivune dans `work/media`;
-2. démarre l'oracle épinglé et attend son healthcheck;
-3. vérifie que l'oracle est neuf, termine les Startup APIs, crée la bibliothèque
-   `movies`, s'authentifie et sonde la tâche `RefreshLibrary` jusqu'à une nouvelle
-   exécution réussie (backoff borné, aucune durée de scan supposée);
-4. valide le manifeste, exécute les deux cibles et compare leurs artefacts;
-5. arrête l'oracle et détruit ses volumes, même en cas d'échec.
+1. verifies the five SHA-256 values recorded in `NOTICE`, then copies only the
+   synthetic Rivune media into `work/media`;
+2. starts the pinned oracle and waits for its health check;
+3. verifies that the oracle is fresh, completes the Startup APIs, creates the
+   `movies` library, authenticates, and polls the `RefreshLibrary` task until a
+   new successful run completes (bounded backoff, with no assumed scan duration);
+4. validates the manifest, runs both targets, and compares their artifacts;
+5. stops the oracle and destroys its volumes, even if the run fails.
 
-Le résultat va par défaut dans un répertoire horodaté sous `work/runs/`. Une
-valeur privée `JFCOMPAT_OUT_DIR` peut choisir un autre chemin; un chemin existant
-n'est jamais écrasé.
+By default, results are written to a timestamped directory under `work/runs/`.
+The private value `JFCOMPAT_OUT_DIR` can select another path; an existing path
+is never overwritten.
 
-Les trois commandes du cœur peuvent aussi être lancées depuis `server/`:
+The three core commands can also be run from `server/`:
 
 ```sh
 go run ./cmd/jellyfin-compat validate -manifest ../scripts/jellyfin-compat/requests.json
@@ -67,36 +67,62 @@ go run ./cmd/jellyfin-compat run -manifest ../scripts/jellyfin-compat/requests.j
 go run ./cmd/jellyfin-compat compare -left ../scripts/jellyfin-compat/work/manual/upstream -right ../scripts/jellyfin-compat/work/manual/rivune -out ../scripts/jellyfin-compat/work/manual/diff
 ```
 
-Pour ces commandes manuelles, exporter d'abord les quatre variables privées du
-fichier d'environnement et démarrer/bootstrapper l'oracle. Éviter d'inscrire des
-secrets dans l'historique du shell.
+For these manual commands, first export the four private variables from the
+environment file and start and bootstrap the oracle. Avoid placing secrets in
+the shell history.
 
-## Portée des observations
+## Observation Scope
 
-Le manifeste couvre ping, informations système publiques, endpoint réseau,
-authentification, utilisateur courant, vues, items, recherche, `HEAD` artwork,
-`PlaybackInfo` et logout. Chaque étape borne statut, type ou taille de réponse.
-Les identifiants, jetons, sessions, chemins, URL de lecture et horodatages sont
-capturés ou canonisés avec une justification locale.
+The manifest covers ping, public system information, the network endpoint,
+authentication, the current user, views, items, search, `HEAD` artwork,
+`PlaybackInfo`, and logout. Each step bounds the response status, type, or size.
+Identifiers, tokens, sessions, paths, playback URLs, and timestamps are captured
+or canonicalized with a local justification.
 
-`compare: per-target` est volontaire lorsque les identités, bibliothèques,
-providers de métadonnées ou topologies diffèrent. Les cas `observed-gap`
-explicitent notamment la détection réseau et la disponibilité de l'artwork. Ces
-snapshots restent inspectables, mais leur différence n'est pas transformée en
-fausse équivalence. Seul le contrat sans contenu du logout est comparé
-exactement.
+`compare: per-target` is intentional when identities, libraries, metadata
+providers, or topologies differ. In particular, the `observed-gap` cases make
+network detection and artwork availability explicit. These snapshots remain
+inspectable, but their differences are not turned into a false equivalence.
+Only the content-free logout contract is compared exactly.
 
-Le bootstrap ne configure que l'oracle. Rivune doit donc déjà exposer un profil
-et le titre synthétique attendus; le harness ne crée aucun compte natif Rivune et
-ne modifie pas sa bibliothèque. Les différences de transcodage, de provider et
-de codecs restent dépendantes du déploiement.
+The bootstrap process configures only the oracle. Rivune must therefore already
+expose the expected profile and synthetic title; the harness neither creates a
+native Rivune account nor modifies its library. Transcoding, provider, and codec
+differences remain deployment-dependent.
 
-## Provenance et licences
+### Why the Manifest Does Not Certify Playback
 
-Les MP4, VTT et SVG viennent exclusivement de
-`server/internal/demo/assets`. Leur création, copyright, licence Apache-2.0 et
-SHA-256 sont documentés dans le `NOTICE` racine. Le harness ne télécharge aucun
-média et ne copie aucun code Jellyfin. Docker peut tirer l'image oracle épinglée
-si elle n'est pas déjà locale; Jellyfin reste un logiciel GPL-2.0-or-later séparé
-exécuté uniquement comme oracle. Les scripts et le manifeste originaux de ce
-dépôt restent sous Apache-2.0.
+The manifest intentionally stops at `PlaybackInfo`. The oracle and Rivune share
+neither source identifiers, delivery URL shapes, nor transcoding decisions;
+capturing a URL and then accepting a different `2xx` response for each target
+would prove neither the bytes, decoding, nor seeking. Such a step would be a
+false certification and is therefore not added to `requests.json`.
+
+The bounded media smoke tests live in the playback tests. They use only a local
+server, lavfi bytes, and text files generated in `t.TempDir`:
+
+```sh
+cd server
+RIVUNE_TEST_EXTERNAL_MEDIA=1 go test ./internal/playback \
+  -run '^TestExternalMedia' -count=1
+RIVUNE_TEST_EXTERNAL_MEDIA=1 go test ./internal/jellyfin \
+  -run '^TestPlaybackGatewayReadsPlaylistAndChildBytesAndRejectsOutOfOrderChild$' -count=1
+```
+
+These optional commands require `ffmpeg`/`ffprobe`; a skipped run remains
+`ABSENT`, never `PASSED`. They cover synthetic MP4/MKV, byte ranges, TS/fMP4 HLS,
+AAC track selection, synthetic 5.1-to-stereo downmix, WebVTT/seeking, and embedded
+ASS burn-in verified against a decoded frame. They provide no pixel-level Dolby
+Vision/HDR evidence, third-party audio codec evidence, bitmap subtitle evidence,
+or playback evidence for Infuse, Streamyfin, or VidHub. The protocol for
+real-device validation and scrubbed traces is in `docs/operations.md`.
+
+## Provenance and Licenses
+
+The MP4, VTT, and SVG files come exclusively from
+`server/internal/demo/assets`. Their creation, copyright, Apache-2.0 license,
+and SHA-256 values are documented in the root `NOTICE`. The harness downloads no
+media and copies no Jellyfin code. Docker may pull the pinned oracle image if it
+is not already available locally; Jellyfin remains separate GPL-2.0-or-later
+software run only as an oracle. This repository's original scripts and manifest
+remain under Apache-2.0.

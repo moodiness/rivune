@@ -224,15 +224,17 @@ func jellyfinTrickplayMetadata(item BaseItemDto, mediaSourceID string) map[strin
 }
 
 func (handler *Handler) parseMediaSegmentQuery(response http.ResponseWriter, values url.Values) (map[string]bool, bool) {
-	if !validateCompatQueryNames(values, "includeSegmentTypes") {
+	if !validateCompatQueryNames(values, "includeSegmentTypes", "includeSegmentTypes[]") {
 		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
 		return nil, false
 	}
 	rawTypes, err := commaSeparated(values, "includeSegmentTypes")
-	if err != nil || len(rawTypes) > len(jellyfinMediaSegmentTypes) {
+	arrayTypes, arrayErr := commaSeparated(values, "includeSegmentTypes[]")
+	if err != nil || arrayErr != nil || len(rawTypes)+len(arrayTypes) > len(jellyfinMediaSegmentTypes) {
 		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
 		return nil, false
 	}
+	rawTypes = append(rawTypes, arrayTypes...)
 	requested := make(map[string]bool, len(rawTypes))
 	for _, rawType := range rawTypes {
 		segmentType, valid := jellyfinMediaSegmentTypes[strings.ToLower(rawType)]
