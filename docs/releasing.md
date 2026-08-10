@@ -110,8 +110,8 @@ Verify the release and its OCI attestations after the workflow completes:
 image=ghcr.io/moodiness/rivune:1.5.0
 docker buildx imagetools inspect "${image}"
 docker buildx imagetools inspect "${image}" --raw > rivune-manifest.json
-jq -e '[.manifests[] | select(.annotations["vnd.docker.reference.type"] != "attestation-manifest") | [.platform.os, .platform.architecture]] | sort == [["linux", "amd64"], ["linux", "arm64"]]' rivune-manifest.json
-jq -e '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")] | length == 2' rivune-manifest.json
+jq -e '[.manifests[] | select((.annotations // {})["vnd.docker.reference.type"] != "attestation-manifest") | [.platform.os, .platform.architecture]] | sort == [["linux", "amd64"], ["linux", "arm64"]]' rivune-manifest.json
+jq -e '[.manifests[] | select((.annotations // {})["vnd.docker.reference.type"] == "attestation-manifest")] | length == 2' rivune-manifest.json
 docker pull "${image}"
 docker image inspect "${image}" --format '{{json .RepoDigests}}'
 ```
