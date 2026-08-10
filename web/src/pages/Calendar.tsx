@@ -181,6 +181,7 @@ function CalendarSubscriptionModal({ profileId, onClose }: { profileId: string; 
   const urlInputId = useId();
   const urlInputRef = useRef<HTMLInputElement>(null);
   const inactiveActionsRef = useRef<HTMLDivElement>(null);
+  const pendingFocusRef = useRef<"url" | "inactive" | null>(null);
   const headingId = useId();
   const descriptionId = useId();
 
@@ -197,6 +198,22 @@ function CalendarSubscriptionModal({ profileId, onClose }: { profileId: string; 
     });
     return () => { active = false; };
   }, [loadRevision, profileId]);
+  useEffect(() => {
+    if (mutation !== null || confirmation !== null) return;
+    if (pendingFocusRef.current === "url" && subscription?.url) {
+      const input = urlInputRef.current;
+      if (!input) return;
+      pendingFocusRef.current = null;
+      input.focus();
+      return;
+    }
+    if (pendingFocusRef.current === "inactive" && subscription?.active === false) {
+      const button = inactiveActionsRef.current?.querySelector<HTMLButtonElement>("button");
+      if (!button) return;
+      pendingFocusRef.current = null;
+      button.focus();
+    }
+  }, [confirmation, mutation, subscription?.active, subscription?.url]);
 
   async function createSubscription(): Promise<void> {
     setMutation("create");
@@ -204,8 +221,8 @@ function CalendarSubscriptionModal({ profileId, onClose }: { profileId: string; 
     setCopyFeedback("");
     try {
       const next = await api.createCalendarSubscription(profileId);
+      pendingFocusRef.current = "url";
       setSubscription(next);
-      window.requestAnimationFrame(() => urlInputRef.current?.focus());
     } catch {
       setError(t("calendar.subscription.error.create"));
     } finally {
@@ -219,8 +236,8 @@ function CalendarSubscriptionModal({ profileId, onClose }: { profileId: string; 
     setCopyFeedback("");
     try {
       const next = await api.rotateCalendarSubscription(profileId);
+      pendingFocusRef.current = "url";
       setSubscription(next);
-      window.requestAnimationFrame(() => urlInputRef.current?.focus());
     } catch {
       setError(t("calendar.subscription.error.rotate"));
     } finally {
@@ -235,8 +252,8 @@ function CalendarSubscriptionModal({ profileId, onClose }: { profileId: string; 
     setCopyFeedback("");
     try {
       await api.deleteCalendarSubscription(profileId);
+      pendingFocusRef.current = "inactive";
       setSubscription({ active: false });
-      window.requestAnimationFrame(() => inactiveActionsRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
     } catch {
       setError(t("calendar.subscription.error.disable"));
     } finally {
