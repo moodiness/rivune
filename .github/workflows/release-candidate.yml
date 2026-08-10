@@ -22,6 +22,22 @@ jobs:
     outputs:
       authorized: ${{ steps.authorize.outputs.authorized }}
     steps:
+      - name: Check out candidate release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate curated release notes
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS= read -r heading < .github/release-notes.md
+          if [[ "${heading}" != "# Rivune ${RELEASE_TAG}" ]]; then
+            echo ".github/release-notes.md must start with: # Rivune ${RELEASE_TAG}" >&2
+            exit 1
+          fi
       - name: Validate candidate before running the release gate
         id: authorize
         env:
