@@ -17,6 +17,10 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 )
 
+func newProviderTestService(pool *pgxpool.Pool, providers ProviderSet, cacheTTL time.Duration, logger *slog.Logger) *Service {
+	return NewServiceWithProviderSource(pool, staticProviderSource{providers: providers}, cacheTTL, logger)
+}
+
 func TestNormalizeQueryOptionsDefaultsAndCanonicalizes(t *testing.T) {
 	options, err := normalizeQueryOptions(QueryOptions{Language: "FR-fr", Region: "fr"})
 	if err != nil {
@@ -120,7 +124,7 @@ func TestRefreshMissingSkipsTitlesWithoutResolvableTMDBIdentity(t *testing.T) {
 		t.Fatalf("seed addon-only title: %v", err)
 	}
 
-	service := &Service{pool: pool}
+	service := NewService(pool, nil, nil, nil, 0, nil)
 	result, err := service.RefreshMissing(context.Background(), RefreshMissingOptions{Language: "fr-FR", BatchSize: 1})
 	if err != nil {
 		t.Fatalf("refresh missing metadata: %v", err)
@@ -220,7 +224,7 @@ func TestTrailersUsesSeriesIdentityForSeasonAndRejectsMovieSeason(t *testing.T) 
 		"series:92001:en-US:3": {{YouTubeID: "season-video", Name: "Season 3 Trailer", Site: "YouTube", Type: "Trailer"}},
 		"movie:900101:en-US":   {{YouTubeID: "movie-video", Site: "YouTube", Type: "Trailer"}},
 	}}
-	service := &Service{pool: pool, trailerProvider: provider}
+	service := newProviderTestService(pool, ProviderSet{Trailer: provider}, 0, nil)
 	seasonNumber := 3
 	result, err := service.Trailers(ctx, canonicalMergePrincipal(), seriesID, "en-US", "", &seasonNumber)
 	if err != nil || len(result.Trailers) != 1 || result.Trailers[0].YouTubeID != "season-video" {
@@ -243,7 +247,7 @@ func TestTrailersUsesSeriesIdentityForSeasonAndRejectsMovieSeason(t *testing.T) 
 }
 
 func TestTrailersRejectsNegativeSeasonNumber(t *testing.T) {
-	service := &Service{}
+	service := NewService(nil, nil, nil, nil, 0, nil)
 	seasonNumber := -1
 	_, err := service.Trailers(context.Background(), canonicalMergePrincipal(), "title-id", "en-US", "", &seasonNumber)
 	if !errors.Is(err, ErrInvalidInput) {
@@ -252,7 +256,7 @@ func TestTrailersRejectsNegativeSeasonNumber(t *testing.T) {
 }
 
 func TestTrailersRejectInvalidCaptionLanguage(t *testing.T) {
-	service := &Service{}
+	service := NewService(nil, nil, nil, nil, 0, nil)
 	_, err := service.Trailers(context.Background(), canonicalMergePrincipal(), "title-id", "en-US", "not a language", nil)
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected invalid caption language, got %v", err)
@@ -523,7 +527,7 @@ func TestCachedSeriesMetadataBackfillsCalendarDatesAndSeasonSnapshots(t *testing
 	profileID := "44444444-4444-4444-8444-444444444444"
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
-	service := &Service{pool: pool}
+	service := NewService(pool, nil, nil, nil, 0, nil)
 	if _, err := service.SeasonDetails(ctx, principal, seasonID, "fr-FR", "tmdb"); err != nil {
 		t.Fatalf("load cached season details: %v", err)
 	}
@@ -615,7 +619,7 @@ func TestCachedMovieMetadataRestoresCanonicalSnapshot(t *testing.T) {
 	profileID := "44444444-4444-4444-8444-444444444444"
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
-	service := &Service{pool: pool}
+	service := NewService(pool, nil, nil, nil, 0, nil)
 	if _, err := service.MovieDetails(ctx, principal, movieID, "fr-FR"); err != nil {
 		t.Fatalf("load cached movie details: %v", err)
 	}
@@ -728,10 +732,12 @@ func TestMappedSpecialsIgnoreUnrelatedCanonicalSeasonFailure(t *testing.T) {
 		}},
 	}}
 	var logs bytes.Buffer
-	service := &Service{
-		pool: pool, mapper: mapper, cacheTTL: time.Hour,
-		logger: slog.New(slog.NewTextHandler(&logs, nil)),
-	}
+	service := newProviderTestService(
+		pool,
+		ProviderSet{Mapper: mapper},
+		time.Hour,
+		slog.New(slog.NewTextHandler(&logs, nil)),
+	)
 
 	season, err := service.SeasonDetails(
 		context.Background(),
@@ -777,7 +783,7 @@ func TestMappedSpecialsPersistTVDBOnlyEpisodesWithoutTMDBSeason(t *testing.T) {
 			{ExternalID: "940104", Name: "Fixture Episode 4", SeasonNumber: 0, EpisodeNumber: 4, AirDate: "2024-11-15"},
 		},
 	}}
-	service := &Service{pool: pool, mapper: mapper, cacheTTL: time.Hour}
+	service := newProviderTestService(pool, ProviderSet{Mapper: mapper}, time.Hour, nil)
 	mappedID := mappedSeasonID(seriesID, mapper.season.ExternalID)
 
 	first, err := service.SeasonDetails(context.Background(), canonicalMergePrincipal(), mappedID, "en-US", "tvdb")
@@ -845,7 +851,7 @@ func TestMappedSeasonPersistsTVDBOnlyEpisodeBeforeTMDBPublishesIt(t *testing.T) 
 			ExternalID: "11888797", Name: "TBA", SeasonNumber: 2, EpisodeNumber: 1,
 		}},
 	}}
-	service := &Service{pool: pool, mapper: mapper, cacheTTL: time.Hour}
+	service := newProviderTestService(pool, ProviderSet{Mapper: mapper}, time.Hour, nil)
 	mappedID := mappedSeasonID(seriesID, mapper.season.ExternalID)
 
 	season, err := service.SeasonDetails(context.Background(), canonicalMergePrincipal(), mappedID, "en-US", "tvdb")
@@ -892,7 +898,7 @@ func TestMappedEmptySpecialsReturnValidEmptySeason(t *testing.T) {
 	mapper := &specialsMapper{season: ProviderSeason{
 		ExternalID: "1000", Name: "Specials", SeasonNumber: 0, Episodes: []ProviderEpisode{},
 	}}
-	service := &Service{pool: pool, mapper: mapper, cacheTTL: time.Hour}
+	service := newProviderTestService(pool, ProviderSet{Mapper: mapper}, time.Hour, nil)
 
 	season, err := service.SeasonDetails(
 		context.Background(),
@@ -1077,7 +1083,7 @@ func TestDefaultTVDBMappingFallsBackToTMDBWhenTVDBIsUnavailable(t *testing.T) {
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
 
-	withoutTVDB, err := (&Service{pool: pool}).SeriesDetails(ctx, principal, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb"})
+	withoutTVDB, err := NewService(pool, nil, nil, nil, 0, nil).SeriesDetails(ctx, principal, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb"})
 	if err != nil {
 		t.Fatalf("fallback without TVDB configuration: %v", err)
 	}
@@ -1086,7 +1092,7 @@ func TestDefaultTVDBMappingFallsBackToTMDBWhenTVDBIsUnavailable(t *testing.T) {
 	}
 
 	mapper := &failingTelevisionMapper{err: ErrProviderUnauthorized}
-	withExpiredTVDB, err := (&Service{pool: pool, mapper: mapper}).SeriesDetails(ctx, principal, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb"})
+	withExpiredTVDB, err := newProviderTestService(pool, ProviderSet{Mapper: mapper}, 0, nil).SeriesDetails(ctx, principal, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb"})
 	if err != nil {
 		t.Fatalf("fallback with expired TVDB credentials: %v", err)
 	}
@@ -1123,7 +1129,7 @@ func TestExplicitTVDBEpisodeOrderDoesNotFallBackToTMDB(t *testing.T) {
 	profileID := "44444444-4444-4444-8444-444444444444"
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	mapper := &failingTelevisionMapper{err: ErrProviderUnauthorized}
-	_, err = (&Service{pool: pool, mapper: mapper}).SeriesDetails(
+	_, err = newProviderTestService(pool, ProviderSet{Mapper: mapper}, 0, nil).SeriesDetails(
 		ctx,
 		auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt},
 		seriesID,
@@ -1174,7 +1180,7 @@ func TestCachedTVDBSeriesMappingUsesCanonicalCast(t *testing.T) {
 	}
 	profileID := "44444444-4444-4444-8444-444444444444"
 	expiresAt := time.Now().UTC().Add(time.Hour)
-	service := &Service{pool: pool, mapper: cacheOnlyTelevisionMapper{}}
+	service := newProviderTestService(pool, ProviderSet{Mapper: cacheOnlyTelevisionMapper{}}, 0, nil)
 	resolved, err := service.SeriesDetails(ctx, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}, seriesID, SeriesDetailsOptions{Language: "fr-FR", MappingProvider: "tvdb"})
 	if err != nil {
 		t.Fatalf("load cached TVDB mapping: %v", err)
@@ -1187,7 +1193,7 @@ func TestCachedTVDBSeriesMappingUsesCanonicalCast(t *testing.T) {
 func TestSeriesDetailsValidatesEpisodeOrderSelection(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	principal := canonicalMergePrincipal()
-	service := &Service{pool: pool}
+	service := NewService(pool, nil, nil, nil, 0, nil)
 
 	_, err := service.SeriesDetails(context.Background(), principal, "series-id", SeriesDetailsOptions{
 		MappingProvider: "tmdb",

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -49,21 +50,66 @@ type FanartEnricher interface {
 	EnrichSeries(context.Context, metadata.ProviderSeries, string) (metadata.ProviderSeries, error)
 }
 
+type ProviderSet struct {
+	Generation       int64
+	TMDB             TMDBProvider
+	Trakt            TraktProvider
+	MDBList          MDBListProvider
+	ArtworkMetadata  ArtworkMetadataProvider
+	ExternalResolver metadata.ExternalIDResolver
+	Fanart           FanartEnricher
+}
+
+func NewProviderSet(generation int64, tmdbProvider TMDBProvider, traktProvider TraktProvider, mdblistProvider MDBListProvider, artworkMetadata ArtworkMetadataProvider, resolver metadata.ExternalIDResolver, fanart FanartEnricher) ProviderSet {
+	return ProviderSet{Generation: generation, TMDB: tmdbProvider, Trakt: traktProvider, MDBList: mdblistProvider, ArtworkMetadata: artworkMetadata, ExternalResolver: resolver, Fanart: fanart}
+}
+
+type ProviderSource interface {
+	CollectionProviders() ProviderSet
+}
+
+type staticProviderSource struct {
+	mu        sync.RWMutex
+	providers ProviderSet
+}
+
+func (source *staticProviderSource) CollectionProviders() ProviderSet {
+	source.mu.RLock()
+	defer source.mu.RUnlock()
+	return source.providers
+}
+
+type collectionProviderContextKey struct{}
+
 type Service struct {
-	pool             *pgxpool.Pool
-	addon            AddonProvider
-	tmdb             TMDBProvider
-	trakt            TraktProvider
-	mdblist          MDBListProvider
-	artwork          ArtworkPresenter
-	artworkMetadata  ArtworkMetadataProvider
-	externalResolver metadata.ExternalIDResolver
-	fanart           FanartEnricher
-	logger           *slog.Logger
+	pool           *pgxpool.Pool
+	addon          AddonProvider
+	providerSource ProviderSource
+	artwork        ArtworkPresenter
+	logger         *slog.Logger
+}
+
+func NewServiceWithProviderSource(pool *pgxpool.Pool, addonProvider AddonProvider, source ProviderSource) *Service {
+	if source == nil {
+		source = &staticProviderSource{}
+	}
+	return &Service{pool: pool, addon: addonProvider, providerSource: source}
 }
 
 func NewService(pool *pgxpool.Pool, addonProvider AddonProvider, tmdbProvider TMDBProvider, traktProvider TraktProvider, mdblistProvider MDBListProvider) *Service {
-	return &Service{pool: pool, addon: addonProvider, tmdb: tmdbProvider, trakt: traktProvider, mdblist: mdblistProvider}
+	return NewServiceWithProviderSource(pool, addonProvider, &staticProviderSource{providers: NewProviderSet(0, tmdbProvider, traktProvider, mdblistProvider, nil, nil, nil)})
+}
+
+func (service *Service) pinProviders(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(collectionProviderContextKey{}).(ProviderSet); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, collectionProviderContextKey{}, service.providerSource.CollectionProviders())
+}
+
+func collectionProviders(ctx context.Context) ProviderSet {
+	providers, _ := ctx.Value(collectionProviderContextKey{}).(ProviderSet)
+	return providers
 }
 
 func (service *Service) SetArtworkPresenter(presenter ArtworkPresenter) {
@@ -71,9 +117,15 @@ func (service *Service) SetArtworkPresenter(presenter ArtworkPresenter) {
 }
 
 func (service *Service) SetFanartEnricher(provider ArtworkMetadataProvider, resolver metadata.ExternalIDResolver, enricher FanartEnricher, logger *slog.Logger) {
-	service.artworkMetadata = provider
-	service.externalResolver = resolver
-	service.fanart = enricher
+	if source, ok := service.providerSource.(*staticProviderSource); ok {
+		source.mu.Lock()
+		providers := source.providers
+		providers.ArtworkMetadata = provider
+		providers.ExternalResolver = resolver
+		providers.Fanart = enricher
+		source.providers = providers
+		source.mu.Unlock()
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}

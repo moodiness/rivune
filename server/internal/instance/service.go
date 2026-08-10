@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/password"
+	"github.com/moodiness/rivune/server/internal/runtimesettings"
 )
 
 var (
@@ -36,6 +37,7 @@ type Service struct {
 	setupToken      string
 	timezone        string
 	jellyfinEnabled bool
+	runtimeSettings *runtimesettings.Source
 }
 
 type Info struct {
@@ -59,6 +61,25 @@ type SetupResult struct {
 
 func NewService(pool *pgxpool.Pool, setupToken, timezone string, jellyfinEnabled bool) *Service {
 	return &Service{pool: pool, setupToken: setupToken, timezone: timezone, jellyfinEnabled: jellyfinEnabled}
+}
+
+func NewServiceWithRuntimeSettings(pool *pgxpool.Pool, setupToken string, runtimeSettings *runtimesettings.Source) *Service {
+	return &Service{pool: pool, setupToken: setupToken, runtimeSettings: runtimeSettings}
+}
+
+func (s *Service) setupRuntimeSnapshot(ctx context.Context) runtimesettings.Snapshot {
+	if s.runtimeSettings != nil {
+		return runtimesettings.Load(ctx, s.runtimeSettings)
+	}
+	return runtimesettings.Snapshot{
+		Timezone: s.timezone, JellyfinEnabled: s.jellyfinEnabled,
+		HardwareAcceleration:          runtimesettings.DefaultHardwareAcceleration,
+		RequestedHardwareAcceleration: runtimesettings.DefaultHardwareAcceleration,
+		TranscodeMaxBitrateKbps:       runtimesettings.DefaultTranscodeMaxBitrateKbps,
+		MediaMaxStorageBytes:          int64(runtimesettings.DefaultMediaMaxStorageMB) << 20,
+		ArtworkMaxStorageBytes:        int64(runtimesettings.DefaultArtworkMaxStorageMB) << 20,
+		AllowTranscoding:              true,
+	}
 }
 
 func (s *Service) Info(ctx context.Context) (Info, error) {
@@ -246,6 +267,7 @@ func (s *Service) Setup(ctx context.Context, token string, input SetupInput) (Se
 	if err := validateInput(input); err != nil {
 		return SetupResult{}, err
 	}
+	runtime := s.setupRuntimeSnapshot(ctx)
 
 	passwordHash, err := password.Hash(input.Password)
 	if err != nil {
@@ -275,7 +297,7 @@ func (s *Service) Setup(ctx context.Context, token string, input SetupInput) (Se
 	}
 	var result SetupResult
 	if err := tx.QueryRow(ctx,
-		"INSERT INTO instances (id, name) VALUES (1, $1) RETURNING public_id::text",
+		"INSERT INTO instances (id, name, legacy_environment_imported_at) VALUES (1, $1, now()) RETURNING public_id::text",
 		input.InstanceName,
 	).Scan(&result.InstanceID); err != nil {
 		return SetupResult{}, fmt.Errorf("create instance: %w", err)
@@ -290,7 +312,7 @@ func (s *Service) Setup(ctx context.Context, token string, input SetupInput) (Se
 	if err := tx.QueryRow(ctx,
 		"INSERT INTO profiles (name, access_timezone) VALUES ($1, $2) RETURNING id::text",
 		input.ProfileName,
-		s.timezone,
+		runtime.Timezone,
 	).Scan(&result.ProfileID); err != nil {
 		return SetupResult{}, fmt.Errorf("create profile: %w", err)
 	}
@@ -301,10 +323,22 @@ func (s *Service) Setup(ctx context.Context, token string, input SetupInput) (Se
 	); err != nil {
 		return SetupResult{}, fmt.Errorf("grant profile access: %w", err)
 	}
-	if _, err := tx.Exec(ctx,
-		"INSERT INTO instance_settings (instance_id, settings) VALUES (1, jsonb_build_object('jellyfinEnabled', $1::boolean))",
-		s.jellyfinEnabled,
-	); err != nil {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO instance_settings (instance_id, schema_version, settings)
+		VALUES (1, 2, jsonb_build_object(
+			'timezone', $1::text,
+			'jellyfinEnabled', $2::boolean,
+			'jellyfinDebug', $3::boolean,
+			'hardwareAcceleration', $4::text,
+			'transcodeMaxBitrateKbps', $5::integer,
+			'mediaMaxStorageMB', $6::integer,
+			'artworkMaxStorageMB', $7::integer,
+			'allowTranscoding', $8::boolean
+		))
+	`, runtime.Timezone, runtime.JellyfinEnabled, runtime.JellyfinDebug,
+		runtime.RequestedHardwareAcceleration, runtime.TranscodeMaxBitrateKbps,
+		runtime.MediaMaxStorageBytes>>20, runtime.ArtworkMaxStorageBytes>>20,
+		runtime.AllowTranscoding); err != nil {
 		return SetupResult{}, fmt.Errorf("create instance settings: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "INSERT INTO profile_settings (profile_id) VALUES ($1)", result.ProfileID); err != nil {

@@ -1266,7 +1266,11 @@ paths:
         - bearerAuth: []
       responses:
         "200":
-          description: Instance-level setting overrides.
+          description: Materialized schema-v2 instance settings and their runtime application state.
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
           content:
             application/json:
               schema:
@@ -1275,7 +1279,7 @@ paths:
           $ref: "#/components/responses/Error"
     patch:
       summary: Update instance settings
-      description: Instance-wide `jellyfinEnabled`, `allowTranscoding`, and notification settings are accepted only here and require a global administrator; profile `transcoding` choices belong to the profile settings route. Every profile inherits notification behavior from this layer. `jellyfinEnabled` must be a non-null boolean.
+      description: Global-administrator-only partial update of instance and runtime settings. Runtime fields are materialized and non-null; `hardwareAcceleration` is applied after restart while the other runtime fields apply live. Profile `transcoding` choices remain on the profile settings route.
       operationId: updateInstanceSettings
       security:
         - bearerAuth: []
@@ -1287,7 +1291,11 @@ paths:
               $ref: "#/components/schemas/InstanceSettingsPatch"
       responses:
         "200":
-          description: Instance settings were updated.
+          description: Instance settings were updated and the configuration revision was incremented once.
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
           content:
             application/json:
               schema:
@@ -1301,6 +1309,100 @@ paths:
         "415":
           $ref: "#/components/responses/Error"
         "422":
+          $ref: "#/components/responses/Error"
+  /settings/integrations:
+    get:
+      summary: Get integration credential status
+      description: Returns only redacted credential status and derived provider availability. Credential material is never returned.
+      operationId: getIntegrationSettings
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Redacted integration configuration status.
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntegrationSettingsStatus"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+    patch:
+      summary: Update integration credentials
+      description: Omitted credentials are retained, null clears a credential, and a nonempty string replaces it. Empty strings are rejected. TVDB PIN requires a TVDB API key, and a Trakt client secret requires a Trakt client ID.
+      operationId: updateIntegrationSettings
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IntegrationCredentialsPatch"
+      responses:
+        "200":
+          description: Credentials were updated and the configuration revision was incremented once.
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntegrationSettingsStatus"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /settings/audit:
+    get:
+      summary: List configuration audit events
+      description: Returns a newest-first keyset page of redacted instance-settings and integration-credential changes.
+      operationId: listConfigurationAuditEvents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: cursor
+          in: query
+          description: Audit event ID strictly older than the last event in the preceding page.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Redacted configuration audit events in descending event-ID order.
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationAuditPage"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
           $ref: "#/components/responses/Error"
   /settings/maintenance:
     get:
@@ -6107,9 +6209,27 @@ components:
         - $ref: "#/components/schemas/CommonSettingsPatch"
         - type: object
           properties:
+            timezone:
+              $ref: "#/components/schemas/IANATimezone"
             jellyfinEnabled:
               description: Global-administrator-controlled, instance-only Jellyfin compatibility switch. Null is not accepted.
               type: boolean
+            jellyfinDebug:
+              type: boolean
+            hardwareAcceleration:
+              $ref: "#/components/schemas/HardwareAccelerationMode"
+            transcodeMaxBitrateKbps:
+              type: integer
+              minimum: 64
+              maximum: 200000
+            mediaMaxStorageMB:
+              type: integer
+              minimum: 512
+              maximum: 102400
+            artworkMaxStorageMB:
+              type: integer
+              minimum: 256
+              maximum: 102400
       unevaluatedProperties: false
     InterfaceLanguage:
       type: string
@@ -6127,6 +6247,15 @@ components:
       type: string
       description: The value auto or an uppercase ISO 3166-1 alpha-2 region code.
       pattern: "^(auto|[A-Z]{2})$"
+    IANATimezone:
+      type: string
+      description: IANA time-zone identifier, including UTC.
+      minLength: 1
+      maxLength: 255
+      pattern: "^[A-Za-z_+-]+(?:/[A-Za-z0-9._+-]+)*$"
+    HardwareAccelerationMode:
+      type: string
+      enum: [auto, software, vaapi, qsv, nvenc]
     CommonSettingsValues:
       type: object
       properties:
@@ -6220,12 +6349,339 @@ components:
       allOf:
         - $ref: "#/components/schemas/CommonSettingsValues"
         - type: object
-          required: [jellyfinEnabled]
+          required: [timezone, jellyfinEnabled, jellyfinDebug, hardwareAcceleration, transcodeMaxBitrateKbps, mediaMaxStorageMB, artworkMaxStorageMB, allowTranscoding]
           properties:
+            timezone:
+              $ref: "#/components/schemas/IANATimezone"
+              default: UTC
             jellyfinEnabled:
               description: Persisted, non-null instance-only Jellyfin compatibility switch.
               type: boolean
+              default: false
+            jellyfinDebug:
+              type: boolean
+              default: false
+            hardwareAcceleration:
+              $ref: "#/components/schemas/HardwareAccelerationMode"
+              default: auto
+            transcodeMaxBitrateKbps:
+              type: integer
+              minimum: 64
+              maximum: 200000
+              default: 12000
+            mediaMaxStorageMB:
+              type: integer
+              minimum: 512
+              maximum: 102400
+              default: 20480
+            artworkMaxStorageMB:
+              type: integer
+              minimum: 256
+              maximum: 102400
+              default: 20480
+            allowTranscoding:
+              type: boolean
+              default: true
       unevaluatedProperties: false
+    RuntimeSettingsValues:
+      type: object
+      additionalProperties: false
+      required: [timezone, jellyfinEnabled, jellyfinDebug, hardwareAcceleration, transcodeMaxBitrateKbps, mediaMaxStorageMB, artworkMaxStorageMB, allowTranscoding]
+      properties:
+        timezone:
+          $ref: "#/components/schemas/IANATimezone"
+          default: UTC
+        jellyfinEnabled:
+          description: Persisted, non-null instance-only Jellyfin compatibility switch.
+          type: boolean
+          default: false
+        jellyfinDebug:
+          type: boolean
+          default: false
+        hardwareAcceleration:
+          $ref: "#/components/schemas/HardwareAccelerationMode"
+          default: auto
+        transcodeMaxBitrateKbps:
+          type: integer
+          minimum: 64
+          maximum: 200000
+          default: 12000
+        mediaMaxStorageMB:
+          type: integer
+          minimum: 512
+          maximum: 102400
+          default: 20480
+        artworkMaxStorageMB:
+          type: integer
+          minimum: 256
+          maximum: 102400
+          default: 20480
+        allowTranscoding:
+          type: boolean
+          default: true
+    RuntimeSettingsApplication:
+      type: object
+      additionalProperties: false
+      required: [active, pendingRestart]
+      properties:
+        active:
+          $ref: "#/components/schemas/RuntimeSettingsValues"
+        pendingRestart:
+          type: array
+          description: Sorted runtime fields whose requested values differ from the active process. Only hardwareAcceleration can require restart.
+          maxItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            const: hardwareAcceleration
+    IntegrationCredentialsPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        tmdbAccessToken:
+          writeOnly: true
+          anyOf:
+            - type: string
+              minLength: 1
+              maxLength: 4096
+              pattern: ".*\\S.*"
+            - type: "null"
+        fanartApiKey:
+          writeOnly: true
+          anyOf:
+            - type: string
+              minLength: 1
+              maxLength: 4096
+              pattern: ".*\\S.*"
+            - type: "null"
+        mdblistApiKey:
+          writeOnly: true
+          anyOf:
+            - type: string
+              minLength: 1
+              maxLength: 4096
+              pattern: ".*\\S.*"
+            - type: "null"
+        tvdbApiKey:
+          writeOnly: true
+          anyOf:
+            - type: string
+              minLength: 1
+              maxLength: 4096
+              pattern: ".*\\S.*"
+            - type: "null"
+        tvdbPin:
+          writeOnly: true
+          anyOf:
+            - type: string
+              minLength: 1
+              maxLength: 256
+              pattern: ".*\\S.*"
+            - type: "null"
+        traktClientId:
+          writeOnly: true
+          anyOf:
+            - type: string
+              minLength: 1
+              maxLength: 512
+              pattern: ".*\\S.*"
+            - type: "null"
+        traktClientSecret:
+          writeOnly: true
+          anyOf:
+            - type: string
+              minLength: 1
+              maxLength: 4096
+              pattern: ".*\\S.*"
+            - type: "null"
+        simklClientId:
+          writeOnly: true
+          anyOf:
+            - type: string
+              minLength: 1
+              maxLength: 512
+              pattern: ".*\\S.*"
+            - type: "null"
+    IntegrationCredentialStatus:
+      type: object
+      additionalProperties: false
+      required: [configured, updatedAt]
+      properties:
+        configured:
+          type: boolean
+        updatedAt:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    IntegrationCredentialStatuses:
+      type: object
+      additionalProperties: false
+      required: [tmdbAccessToken, fanartApiKey, mdblistApiKey, tvdbApiKey, tvdbPin, traktClientId, traktClientSecret, simklClientId]
+      properties:
+        tmdbAccessToken:
+          $ref: "#/components/schemas/IntegrationCredentialStatus"
+        fanartApiKey:
+          $ref: "#/components/schemas/IntegrationCredentialStatus"
+        mdblistApiKey:
+          $ref: "#/components/schemas/IntegrationCredentialStatus"
+        tvdbApiKey:
+          $ref: "#/components/schemas/IntegrationCredentialStatus"
+        tvdbPin:
+          $ref: "#/components/schemas/IntegrationCredentialStatus"
+        traktClientId:
+          $ref: "#/components/schemas/IntegrationCredentialStatus"
+        traktClientSecret:
+          $ref: "#/components/schemas/IntegrationCredentialStatus"
+        simklClientId:
+          $ref: "#/components/schemas/IntegrationCredentialStatus"
+    IntegrationProviderStatuses:
+      type: object
+      additionalProperties: false
+      required: [tmdb, tvdb, fanart, mdblist, trakt, simkl]
+      properties:
+        tmdb:
+          type: boolean
+        tvdb:
+          type: boolean
+        fanart:
+          type: boolean
+        mdblist:
+          type: boolean
+        trakt:
+          type: boolean
+        simkl:
+          type: boolean
+    IntegrationSettingsStatus:
+      type: object
+      additionalProperties: false
+      required: [revision, credentials, providers]
+      properties:
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        credentials:
+          $ref: "#/components/schemas/IntegrationCredentialStatuses"
+        providers:
+          $ref: "#/components/schemas/IntegrationProviderStatuses"
+    IntegrationConfigurationSnapshot:
+      type: object
+      additionalProperties: false
+      required: [tmdbAccessToken, fanartApiKey, mdblistApiKey, tvdbApiKey, tvdbPin, traktClientId, traktClientSecret, simklClientId]
+      properties:
+        tmdbAccessToken:
+          type: boolean
+        fanartApiKey:
+          type: boolean
+        mdblistApiKey:
+          type: boolean
+        tvdbApiKey:
+          type: boolean
+        tvdbPin:
+          type: boolean
+        traktClientId:
+          type: boolean
+        traktClientSecret:
+          type: boolean
+        simklClientId:
+          type: boolean
+    SettingsConfigurationAuditEvent:
+      type: object
+      additionalProperties: false
+      required: [id, revision, actorUserId, action, changedKeys, snapshot, createdAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        actorUserId:
+          anyOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        action:
+          type: string
+          const: settings.updated
+        changedKeys:
+          description: Sorted names of persisted settings changed by the mutation.
+          type: array
+          maxItems: 33
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [interfaceLanguage, theme, maximumResolution, maximumCastMembers, maximumDirectTitles, allowTranscoding, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds, timezone, jellyfinEnabled, jellyfinDebug, hardwareAcceleration, transcodeMaxBitrateKbps, mediaMaxStorageMB, artworkMaxStorageMB]
+        snapshot:
+          $ref: "#/components/schemas/InstanceSettingsValues"
+        createdAt:
+          type: string
+          format: date-time
+    IntegrationsConfigurationAuditEvent:
+      type: object
+      additionalProperties: false
+      required: [id, revision, actorUserId, action, changedKeys, snapshot, createdAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        actorUserId:
+          anyOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        action:
+          type: string
+          const: integrations.updated
+        changedKeys:
+          description: Sorted credential names changed by the mutation.
+          type: array
+          minItems: 1
+          maxItems: 8
+          uniqueItems: true
+          items:
+            type: string
+            enum: [tmdbAccessToken, fanartApiKey, mdblistApiKey, tvdbApiKey, tvdbPin, traktClientId, traktClientSecret, simklClientId]
+        snapshot:
+          $ref: "#/components/schemas/IntegrationConfigurationSnapshot"
+        createdAt:
+          type: string
+          format: date-time
+    ConfigurationAuditEvent:
+      oneOf:
+        - $ref: "#/components/schemas/SettingsConfigurationAuditEvent"
+        - $ref: "#/components/schemas/IntegrationsConfigurationAuditEvent"
+      discriminator:
+        propertyName: action
+        mapping:
+          settings.updated: "#/components/schemas/SettingsConfigurationAuditEvent"
+          integrations.updated: "#/components/schemas/IntegrationsConfigurationAuditEvent"
+    ConfigurationAuditPage:
+      type: object
+      additionalProperties: false
+      required: [events, nextCursor]
+      properties:
+        events:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ConfigurationAuditEvent"
+        nextCursor:
+          anyOf:
+            - type: integer
+              format: int64
+              minimum: 1
+            - type: "null"
     TrackingPreferences:
       type: object
       additionalProperties: false
@@ -6305,13 +6761,21 @@ components:
           maximum: 300
     InstanceSettingsLayer:
       type: object
-      required: [schemaVersion, settings, updatedAt]
+      additionalProperties: false
+      required: [schemaVersion, revision, settings, runtime, updatedAt]
       properties:
         schemaVersion:
           type: integer
-          const: 1
+          const: 2
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
         settings:
+          description: Requested persisted schema-v2 values. Existing instance-setting fields retain their meanings.
           $ref: "#/components/schemas/InstanceSettingsValues"
+        runtime:
+          $ref: "#/components/schemas/RuntimeSettingsApplication"
         updatedAt:
           anyOf:
             - type: string

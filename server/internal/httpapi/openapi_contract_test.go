@@ -442,10 +442,20 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		instanceAllowed := false
 		jellyfinEnabled := false
 		profileMode := settings.TranscodingModeEnabled
+		timezone := settings.DefaultTimezone
+		jellyfinDebug := false
+		hardwareAcceleration := settings.DefaultHardwareAcceleration
+		transcodeMaxBitrateKbps := settings.DefaultTranscodeMaxBitrateKbps
+		mediaMaxStorageMB := settings.DefaultMediaMaxStorageMB
+		artworkMaxStorageMB := settings.DefaultArtworkMaxStorageMB
 		settingService := &fakeSettingsService{
 			instance: settings.Layer{
-				SchemaVersion: 1,
-				Values:        settings.Values{AllowTranscoding: &instanceAllowed, JellyfinEnabled: &jellyfinEnabled},
+				SchemaVersion: 2,
+				Values: settings.Values{
+					AllowTranscoding: &instanceAllowed, JellyfinEnabled: &jellyfinEnabled,
+					Timezone: &timezone, JellyfinDebug: &jellyfinDebug, HardwareAcceleration: &hardwareAcceleration,
+					TranscodeMaxBitrateKbps: &transcodeMaxBitrateKbps, MediaMaxStorageMB: &mediaMaxStorageMB, ArtworkMaxStorageMB: &artworkMaxStorageMB,
+				},
 			},
 			profile: settings.Layer{
 				SchemaVersion: 1,

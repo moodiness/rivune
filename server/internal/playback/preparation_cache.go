@@ -28,6 +28,7 @@ type preparedPlayback struct {
 type playbackPolicy struct {
 	allowTranscoding bool
 	maximumHeight    int
+	bitrateKbps      int
 }
 
 type playbackPreparationEntry struct {
@@ -88,11 +89,11 @@ func (cache *playbackPreparationCache) evictRevision(referenceID string, revisio
 }
 
 func playbackPreparationCacheKey(referenceID string, revision uint64, policy playbackPolicy) string {
-	return referenceID + "|" + strconv.FormatUint(revision, 10) + "|" + strconv.FormatBool(policy.allowTranscoding) + "|" + strconv.Itoa(policy.maximumHeight)
+	return referenceID + "|" + strconv.FormatUint(revision, 10) + "|" + strconv.FormatBool(policy.allowTranscoding) + "|" + strconv.Itoa(policy.maximumHeight) + "|" + strconv.Itoa(policy.bitrateKbps)
 }
 
 func (service *Service) preparedPlayback(ctx context.Context, principal auth.Principal, reference sourceReference, policies ...playbackPolicy) (preparedPlayback, error) {
-	policy := playbackPolicy{allowTranscoding: true, maximumHeight: reference.Capabilities.MaximumHeight}
+	policy := playbackPolicy{allowTranscoding: true, maximumHeight: reference.Capabilities.MaximumHeight, bitrateKbps: service.mediaOptions.TranscodeVideoBitrateKbps}
 	if len(policies) > 0 {
 		policy = policies[0]
 	}
@@ -162,11 +163,11 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 		subtitlesChannel <- subtitleResult{batch: batch, err: err}
 	}()
 
-	policy := playbackPolicy{allowTranscoding: true, maximumHeight: reference.Capabilities.MaximumHeight}
+	policy := playbackPolicy{allowTranscoding: true, maximumHeight: reference.Capabilities.MaximumHeight, bitrateKbps: service.mediaOptions.TranscodeVideoBitrateKbps}
 	if len(policies) > 0 {
 		policy = policies[0]
 	}
-	capabilities := service.playbackCapabilities(reference.Capabilities, policy.maximumHeight)
+	capabilities := service.playbackCapabilities(reference.Capabilities, policy.maximumHeight, policy.bitrateKbps)
 	sources := []Source{cloneSource(reference.Source)}
 	assets := make([]storedAsset, 0, 1)
 	if reference.Asset != nil {

@@ -33,12 +33,6 @@ type fakeSettingsService struct {
 func (f *fakeSettingsService) Instance(context.Context) (settings.Layer, error) {
 	return f.instance, f.instanceErr
 }
-func (f *fakeSettingsService) InitializeJellyfinEnabled(context.Context, bool) (bool, error) {
-	if f.instance.Values.JellyfinEnabled == nil {
-		return false, f.instanceErr
-	}
-	return *f.instance.Values.JellyfinEnabled, f.instanceErr
-}
 
 func (f *fakeSettingsService) Maintenance(context.Context) (settings.Maintenance, error) {
 	return f.maintenance, f.maintenanceErr

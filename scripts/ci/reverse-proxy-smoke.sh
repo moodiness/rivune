@@ -13,6 +13,7 @@ CADDY="rivune-proxy-caddy-${RUN_ID}"
 PROBE="rivune-proxy-probe-${RUN_ID}"
 CADDY_DATA="rivune-proxy-caddy-data-${RUN_ID}"
 PASSWORD="proxy-test-password"
+ENCRYPTION_KEYS="1:1212121212121212121212121212121212121212121212121212121212121212"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 cleanup() {
@@ -81,6 +82,7 @@ wait_for_postgres
 docker run -d --name "${RIVUNE}" --network "${NETWORK}" --network-alias rivune \
   -e RIVUNE_DATABASE_URL="postgres://rivune:${PASSWORD}@postgres:5432/rivune?sslmode=disable" \
   -e RIVUNE_SETUP_TOKEN=proxy-test-setup-token \
+  -e RIVUNE_ENCRYPTION_KEYS="${ENCRYPTION_KEYS}" \
   -e RIVUNE_PUBLIC_URL=https://localhost \
   -e RIVUNE_TRUSTED_PROXIES=172.16.0.0/12 \
   "${IMAGE}" >/dev/null

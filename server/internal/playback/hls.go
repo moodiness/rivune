@@ -120,6 +120,29 @@ func (service *Service) currentTime() time.Time {
 	return time.Now().UTC()
 }
 
+// ApplyMediaStorageLimit synchronously reclaims existing HLS victims before
+// publishing a lower active ceiling. A failed reclaim leaves the previous
+// ceiling active; reclaimed jobs are intentionally not resurrected.
+func (service *Service) ApplyMediaStorageLimit(ctx context.Context, limit int64) error {
+	if service == nil || limit <= 0 {
+		return errors.New("media storage limit must be positive")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	service.hlsResetMu.Lock()
+	defer service.hlsResetMu.Unlock()
+	service.hlsStorageMu.Lock()
+	defer service.hlsStorageMu.Unlock()
+	current := service.mediaStorageLimit()
+	if limit < current && !service.reclaimHLSStorageLocked(limit, false) {
+		return ErrMediaStorageLimit
+	}
+	service.resizeTrickplayCache(limit)
+	service.mediaStorageBytes.Store(limit)
+	return nil
+}
+
 func (service *Service) proxyConvertedSubtitle(w http.ResponseWriter, r *http.Request, asset storedAsset) error {
 	processor, ok := service.processor.(HLSProcessor)
 	if !ok {
@@ -642,6 +665,7 @@ func writeHLSPlaylist(w http.ResponseWriter, r *http.Request, contents []byte) e
 func (service *Service) hlsJob(ctx context.Context, sessionID string, asset storedAsset, processor HLSProcessor, mayStart bool) (*hlsJob, error) {
 	service.hlsResetMu.RLock()
 	defer service.hlsResetMu.RUnlock()
+	storageLimit := service.mediaStorageLimit()
 	if _, validHeaders := canonicalStoredRequestHeaders(asset.Headers); !validHeaders {
 		return nil, ErrMediaSourceFailed
 	}
@@ -679,7 +703,7 @@ func (service *Service) hlsJob(ctx context.Context, sessionID string, asset stor
 		}
 		service.hlsMu.Unlock()
 
-		if !service.reclaimHLSStorage(true) {
+		if !service.reclaimHLSStorageTo(storageLimit, true) {
 			return nil, ErrMediaStorageLimit
 		}
 		service.hlsMu.Lock()
@@ -692,7 +716,7 @@ func (service *Service) hlsJob(ctx context.Context, sessionID string, asset stor
 			service.hlsMu.Unlock()
 			return shared, nil
 		}
-		if directorySize(service.mediaOptions.TempDirectory) >= service.mediaOptions.MaxStorageBytes {
+		if directorySize(service.mediaOptions.TempDirectory) >= storageLimit {
 			service.hlsMu.Unlock()
 			return nil, ErrMediaStorageLimit
 		}
@@ -1031,11 +1055,19 @@ func (service *Service) monitorHLSStorage(ctx context.Context, job *hlsJob) {
 }
 
 func (service *Service) reclaimHLSStorage(admission bool) bool {
+	return service.reclaimHLSStorageTo(service.mediaStorageLimit(), admission)
+}
+
+func (service *Service) reclaimHLSStorageTo(limit int64, admission bool) bool {
 	service.hlsStorageMu.Lock()
 	defer service.hlsStorageMu.Unlock()
+	return service.reclaimHLSStorageLocked(limit, admission)
+}
+
+func (service *Service) reclaimHLSStorageLocked(limit int64, admission bool) bool {
 	for {
 		size := directorySize(service.mediaOptions.TempDirectory)
-		if size < service.mediaOptions.MaxStorageBytes || !admission && size == service.mediaOptions.MaxStorageBytes {
+		if size < limit || !admission && size == limit {
 			return true
 		}
 		_, job := service.hlsStorageVictim()

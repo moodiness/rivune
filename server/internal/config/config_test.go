@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"encoding/xml"
 	"net/netip"
 	"net/url"
@@ -12,132 +11,20 @@ import (
 	"time"
 )
 
-func TestLoadUsesSecureTokenTTLsByDefault(t *testing.T) {
+func TestLoadUsesBootstrapAndCompiledDefaults(t *testing.T) {
 	setRequiredEnvironment(t)
-
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if cfg.Timezone != "UTC" {
-		t.Fatalf("expected UTC default timezone, got %q", cfg.Timezone)
+	if cfg.AccessTokenTTL != 15*time.Minute || cfg.RefreshTokenTTL != 30*24*time.Hour || cfg.ProfileGrantTTL != 12*time.Hour {
+		t.Fatalf("unexpected fixed token lifetimes: access=%s refresh=%s profile=%s", cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.ProfileGrantTTL)
 	}
-	if cfg.AccessTokenTTL != 15*time.Minute {
-		t.Fatalf("expected 15 minute access token TTL, got %s", cfg.AccessTokenTTL)
+	if cfg.FFmpegPath != "ffmpeg" || cfg.FFprobePath != "ffprobe" || cfg.RemuxConcurrency != 4 || cfg.TranscodeThreads != 4 || cfg.TranscodeMaxReadRate != 1.5 || cfg.HLSInitialBufferSeconds != 6 {
+		t.Fatalf("unexpected compiled media defaults: %+v", cfg)
 	}
-	if cfg.RefreshTokenTTL != 30*24*time.Hour {
-		t.Fatalf("expected 30 day refresh token TTL, got %s", cfg.RefreshTokenTTL)
-	}
-	if cfg.ProfileGrantTTL != 12*time.Hour {
-		t.Fatalf("expected 12 hour profile grant TTL, got %s", cfg.ProfileGrantTTL)
-	}
-	if cfg.MetadataCacheTTL != 24*time.Hour {
-		t.Fatalf("expected 24 hour metadata cache TTL, got %s", cfg.MetadataCacheTTL)
-	}
-	if cfg.RemuxConcurrency != 4 || cfg.TranscodeThreads != 4 || cfg.TranscodeMaxBitrateKbps != 12000 ||
-		cfg.TranscodeMaxReadRate != 1.5 || cfg.HLSInitialBufferSeconds != 6 ||
-		cfg.FFmpegPath != "ffmpeg" || cfg.FFprobePath != "ffprobe" || cfg.MediaTempDir != "" ||
-		cfg.MediaStorageBytes != 20480*1024*1024 {
-		t.Fatalf("unexpected media defaults: ffmpeg=%q ffprobe=%q concurrency=%d threads=%d bitrate=%d temp=%q storage=%d", cfg.FFmpegPath, cfg.FFprobePath, cfg.RemuxConcurrency, cfg.TranscodeThreads, cfg.TranscodeMaxBitrateKbps, cfg.MediaTempDir, cfg.MediaStorageBytes)
-	}
-	if cfg.HardwareAcceleration != "auto" || cfg.VideoDevice != "/dev/dri/renderD128" {
-		t.Fatalf("unexpected hardware defaults: acceleration=%q device=%q", cfg.HardwareAcceleration, cfg.VideoDevice)
-	}
-	if cfg.ArtworkCacheDir != "/var/lib/rivune/artwork" || cfg.ArtworkStorageBytes != 20480*1024*1024 {
-		t.Fatalf("unexpected artwork cache defaults: directory=%q bytes=%d", cfg.ArtworkCacheDir, cfg.ArtworkStorageBytes)
-	}
-	if len(cfg.LANArtworkOrigins) != 0 {
-		t.Fatalf("unexpected default LAN artwork origins: %v", cfg.LANArtworkOrigins)
-	}
-	if cfg.JellyfinEnabled || cfg.JellyfinDebug {
-		t.Fatalf("expected Jellyfin and its debug tracing to default to disabled: enabled=%t debug=%t", cfg.JellyfinEnabled, cfg.JellyfinDebug)
-	}
-}
-
-func TestLoadParsesJellyfinFlag(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		value string
-		want  bool
-	}{
-		{name: "true", value: "true", want: true},
-		{name: "normalized true", value: "  TrUe  ", want: true},
-		{name: "false", value: "false", want: false},
-		{name: "normalized false", value: "  FaLsE  ", want: false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			setRequiredEnvironment(t)
-			t.Setenv("RIVUNE_JELLYFIN_ENABLED", test.value)
-
-			cfg, err := Load()
-			if err != nil {
-				t.Fatalf("load config: %v", err)
-			}
-			if cfg.JellyfinEnabled != test.want {
-				t.Fatalf("JellyfinEnabled = %t, want %t", cfg.JellyfinEnabled, test.want)
-			}
-		})
-	}
-}
-
-func TestLoadDefaultsJellyfinToDisabledWhenAbsent(t *testing.T) {
-	setRequiredEnvironment(t)
-	if err := os.Unsetenv("RIVUNE_JELLYFIN_ENABLED"); err != nil {
-		t.Fatalf("unset RIVUNE_JELLYFIN_ENABLED: %v", err)
-	}
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	if cfg.JellyfinEnabled {
-		t.Fatal("expected absent Jellyfin flag to disable Jellyfin")
-	}
-}
-
-func TestLoadRejectsInvalidJellyfinFlag(t *testing.T) {
-	for _, value := range []string{"1", "yes", "on", "garbage"} {
-		t.Run(value, func(t *testing.T) {
-			setRequiredEnvironment(t)
-			t.Setenv("RIVUNE_JELLYFIN_ENABLED", value)
-
-			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RIVUNE_JELLYFIN_ENABLED must be true or false") {
-				t.Fatalf("Load() error = %v, want strict boolean error", err)
-			}
-		})
-	}
-}
-
-func TestLoadParsesStrictJellyfinDebugFlag(t *testing.T) {
-	for _, test := range []struct {
-		value string
-		want  bool
-	}{
-		{value: "true", want: true},
-		{value: "  TrUe  ", want: true},
-		{value: "false", want: false},
-		{value: "  FaLsE  ", want: false},
-	} {
-		t.Run(strings.TrimSpace(test.value), func(t *testing.T) {
-			setRequiredEnvironment(t)
-			t.Setenv("RIVUNE_JELLYFIN_DEBUG", test.value)
-			cfg, err := Load()
-			if err != nil {
-				t.Fatalf("load config: %v", err)
-			}
-			if cfg.JellyfinDebug != test.want {
-				t.Fatalf("JellyfinDebug = %t, want %t", cfg.JellyfinDebug, test.want)
-			}
-		})
-	}
-	for _, value := range []string{"1", "yes", "on", "garbage"} {
-		t.Run("invalid "+value, func(t *testing.T) {
-			setRequiredEnvironment(t)
-			t.Setenv("RIVUNE_JELLYFIN_DEBUG", value)
-			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RIVUNE_JELLYFIN_DEBUG must be true or false") {
-				t.Fatalf("Load() error = %v, want strict boolean error", err)
-			}
-		})
+	if cfg.EncryptionKeys == nil || cfg.EncryptionKeys.ActiveVersion() != 2 || cfg.EncryptionKeysFromLegacy {
+		t.Fatal("versioned encryption keyring was not loaded")
 	}
 }
 
@@ -183,43 +70,50 @@ func TestLoadRejectsUnsafeLANArtworkOrigins(t *testing.T) {
 	}
 }
 
-func TestLoadUsesEnvironmentCredentials(t *testing.T) {
+func TestLoadLegacyEnvironmentSeparatesMigrationInput(t *testing.T) {
 	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_DATABASE_URL", "")
-	t.Setenv("RIVUNE_DATABASE_PASSWORD", "database-secret")
-	t.Setenv("RIVUNE_DATABASE_SSLMODE", "disable")
+	t.Setenv("TZ", "Europe/Paris")
+	t.Setenv("RIVUNE_JELLYFIN_ENABLED", "true")
+	t.Setenv("RIVUNE_ALLOW_TRANSCODING", "false")
+	t.Setenv("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", "18000")
 	t.Setenv("RIVUNE_TMDB_ACCESS_TOKEN", "tmdb-token")
-	t.Setenv("RIVUNE_FANART_API_KEY", "fanart-project")
-	t.Setenv("RIVUNE_MDBLIST_API_KEY", "mdblist-key")
 	t.Setenv("RIVUNE_TVDB_API_KEY", "tvdb-key")
 	t.Setenv("RIVUNE_TVDB_PIN", "tvdb-pin")
 	t.Setenv("RIVUNE_TRAKT_CLIENT_ID", "trakt-client")
 	t.Setenv("RIVUNE_TRAKT_CLIENT_SECRET", "trakt-secret")
-	t.Setenv("RIVUNE_SIMKL_CLIENT_ID", "simkl-client")
-	t.Setenv("RIVUNE_TRACKING_ENCRYPTION_KEY", "0000000000000000000000000000000000000000000000000000000000000000")
-	t.Setenv("TZ", "Europe/Paris")
-
-	cfg, err := Load()
+	legacy, err := LoadLegacyEnvironment()
 	if err != nil {
-		t.Fatalf("load config: %v", err)
+		t.Fatalf("load legacy environment: %v", err)
 	}
-	if cfg.DatabaseURL != "postgres://rivune:database-secret@localhost:5432/rivune?sslmode=disable" {
-		t.Fatal("unexpected database URL")
+	if legacy.Timezone == nil || *legacy.Timezone != "Europe/Paris" || legacy.JellyfinEnabled == nil || !*legacy.JellyfinEnabled || legacy.AllowTranscoding == nil || *legacy.AllowTranscoding || legacy.TranscodeMaxBitrateKbps == nil || *legacy.TranscodeMaxBitrateKbps != 18000 {
+		t.Fatalf("legacy runtime migration input = %+v", legacy)
 	}
-	if cfg.SetupToken != "setup-secret" || cfg.TMDBAccessToken != "tmdb-token" ||
-		cfg.FanartAPIKey != "fanart-project" || cfg.MDBListAPIKey != "mdblist-key" ||
-		cfg.TVDBAPIKey != "tvdb-key" || cfg.TVDBPIN != "tvdb-pin" || cfg.TraktClientID != "trakt-client" ||
-		cfg.TraktClientSecret != "trakt-secret" || cfg.SimklClientID != "simkl-client" ||
-		!bytes.Equal(cfg.TrackingEncryptionKey, make([]byte, 32)) || cfg.Timezone != "Europe/Paris" {
-		t.Fatal("environment configuration was not loaded")
+	if legacy.TMDBAccessToken != "tmdb-token" || legacy.TVDBPIN != "tvdb-pin" || legacy.TraktClientSecret != "trakt-secret" {
+		t.Fatal("legacy credential migration input was not loaded")
 	}
 }
 
-func TestLoadRejectsNonHexTrackingEncryptionKey(t *testing.T) {
+func TestLoadRequiresStrictVersionedEncryptionKeys(t *testing.T) {
 	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_TRACKING_ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected non-hexadecimal tracking key to be rejected")
+	for _, value := range []string{"", "2:" + strings.Repeat("0", 64), "2:" + strings.Repeat("AA", 32), "2:" + strings.Repeat("12", 32) + ",2:" + strings.Repeat("34", 32)} {
+		t.Setenv("RIVUNE_ENCRYPTION_KEYS", value)
+		t.Setenv("RIVUNE_TRACKING_ENCRYPTION_KEY", "")
+		if _, err := Load(); err == nil {
+			t.Fatalf("unsafe keyring %q was accepted", value)
+		}
+	}
+}
+
+func TestLoadUsesLegacyTrackingKeyOnlyAsVersionOneKeyring(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("RIVUNE_ENCRYPTION_KEYS", "")
+	t.Setenv("RIVUNE_TRACKING_ENCRYPTION_KEY", strings.Repeat("42", 32))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.EncryptionKeysFromLegacy || cfg.EncryptionKeys.ActiveVersion() != 1 {
+		t.Fatal("legacy key did not initialize version one keyring")
 	}
 }
 
@@ -363,12 +257,12 @@ func TestUnraidTemplateRequiresVerifiedPostgreSQLTLS(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsInvalidTimezone(t *testing.T) {
+func TestLoadLegacyEnvironmentCapturesInvalidTimezone(t *testing.T) {
 	setRequiredEnvironment(t)
 	t.Setenv("TZ", "Mars/Olympus_Mons")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("expected invalid TZ configuration to fail")
+	legacy, err := LoadLegacyEnvironment()
+	if err != nil || legacy.ValidationError("timezone") == nil {
+		t.Fatal("invalid legacy timezone was not captured")
 	}
 }
 
@@ -416,171 +310,39 @@ func TestLoadRejectsNonLoopbackHTTPPublicURLs(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsUnsafeTokenTTLs(t *testing.T) {
-	tests := []struct {
-		name       string
-		accessTTL  string
-		refreshTTL string
-	}{
-		{name: "access token too short", accessTTL: "30s", refreshTTL: "720h"},
-		{name: "access token too long", accessTTL: "2h", refreshTTL: "720h"},
-		{name: "refresh token not longer than access token", accessTTL: "1h", refreshTTL: "1h"},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			setRequiredEnvironment(t)
-			t.Setenv("RIVUNE_ACCESS_TOKEN_TTL", test.accessTTL)
-			t.Setenv("RIVUNE_REFRESH_TOKEN_TTL", test.refreshTTL)
-
-			if _, err := Load(); err == nil {
-				t.Fatal("expected invalid token TTL configuration to fail")
-			}
-		})
-	}
-}
-
-func TestLoadRejectsUnsafeProfileGrantTTL(t *testing.T) {
+func TestLoadIgnoresLegacyMediaRuntimeEnvironment(t *testing.T) {
 	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_PROFILE_GRANT_TTL", "1m")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("expected invalid profile grant TTL configuration to fail")
-	}
-}
-
-func TestLoadRejectsUnsafeRemuxConcurrency(t *testing.T) {
-	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_REMUX_CONCURRENCY", "17")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("expected invalid remux concurrency to fail")
-	}
-}
-
-func TestLoadParsesMediaProcessorConfiguration(t *testing.T) {
-	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_FFMPEG_PATH", "/opt/media/ffmpeg")
-	t.Setenv("RIVUNE_FFPROBE_PATH", "/opt/media/ffprobe")
-	t.Setenv("RIVUNE_REMUX_CONCURRENCY", "7")
-	t.Setenv("RIVUNE_TRANSCODE_THREADS", "12")
-	t.Setenv("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", "24000")
-	t.Setenv("RIVUNE_TRANSCODE_MAX_READ_RATE", "2.25")
-	t.Setenv("RIVUNE_HLS_INITIAL_BUFFER_SECONDS", "9")
-	t.Setenv("RIVUNE_MEDIA_TEMP_DIR", "/var/cache/rivune")
-	t.Setenv("RIVUNE_MEDIA_MAX_STORAGE_MB", "4096")
-
+	t.Setenv("RIVUNE_FFMPEG_PATH", "/untrusted/ffmpeg")
+	t.Setenv("RIVUNE_REMUX_CONCURRENCY", "99")
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("load custom media configuration: %v", err)
+		t.Fatalf("load config: %v", err)
 	}
-	if cfg.FFmpegPath != "/opt/media/ffmpeg" || cfg.FFprobePath != "/opt/media/ffprobe" ||
-		cfg.RemuxConcurrency != 7 || cfg.TranscodeThreads != 12 || cfg.TranscodeMaxBitrateKbps != 24000 ||
-		cfg.TranscodeMaxReadRate != 2.25 || cfg.HLSInitialBufferSeconds != 9 ||
-		cfg.MediaTempDir != "/var/cache/rivune" || cfg.MediaStorageBytes != 4096*1024*1024 {
-		t.Fatalf("custom media configuration = %+v", cfg)
+	if cfg.FFmpegPath != "ffmpeg" || cfg.RemuxConcurrency != 4 {
+		t.Fatalf("legacy runtime environment affected bootstrap config: %+v", cfg)
 	}
 }
 
-func TestLoadRejectsUnsafeMediaProcessorLimits(t *testing.T) {
-	tests := []struct {
-		name  string
-		key   string
-		value string
-	}{
-		{name: "threads below minimum", key: "RIVUNE_TRANSCODE_THREADS", value: "0"},
-		{name: "threads above maximum", key: "RIVUNE_TRANSCODE_THREADS", value: "33"},
-		{name: "storage below minimum", key: "RIVUNE_MEDIA_MAX_STORAGE_MB", value: "511"},
-		{name: "storage above maximum", key: "RIVUNE_MEDIA_MAX_STORAGE_MB", value: "102401"},
-		{name: "bitrate above maximum", key: "RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", value: "200001"},
-		{name: "read rate below minimum", key: "RIVUNE_TRANSCODE_MAX_READ_RATE", value: "0.99"},
-		{name: "read rate above maximum", key: "RIVUNE_TRANSCODE_MAX_READ_RATE", value: "4.01"},
-		{name: "read rate non-finite", key: "RIVUNE_TRANSCODE_MAX_READ_RATE", value: "NaN"},
-		{name: "HLS buffer below minimum", key: "RIVUNE_HLS_INITIAL_BUFFER_SECONDS", value: "2"},
-		{name: "HLS buffer above maximum", key: "RIVUNE_HLS_INITIAL_BUFFER_SECONDS", value: "31"},
-		{name: "concurrency below minimum", key: "RIVUNE_REMUX_CONCURRENCY", value: "0"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+func TestLoadLegacyEnvironmentCapturesUnsafeRuntimeValues(t *testing.T) {
+	for environment, setting := range map[string]string{"RIVUNE_TRANSCODE_MAX_BITRATE_KBPS": "transcodeMaxBitrateKbps", "RIVUNE_ARTWORK_MAX_STORAGE_MB": "artworkMaxStorageMB", "RIVUNE_HARDWARE_ACCELERATION": "hardwareAcceleration"} {
+		t.Run(environment, func(t *testing.T) {
 			setRequiredEnvironment(t)
-			t.Setenv(test.key, test.value)
-			if _, err := Load(); err == nil {
-				t.Fatalf("expected %s=%s to fail", test.key, test.value)
+			value := map[string]string{"RIVUNE_TRANSCODE_MAX_BITRATE_KBPS": "63", "RIVUNE_ARTWORK_MAX_STORAGE_MB": "255", "RIVUNE_HARDWARE_ACCELERATION": "amf"}[environment]
+			t.Setenv(environment, value)
+			legacy, err := LoadLegacyEnvironment()
+			if err != nil || legacy.ValidationError(setting) == nil {
+				t.Fatal("unsafe legacy runtime value was not captured")
 			}
 		})
 	}
 }
 
-func TestLoadAcceptsMediaProcessorLimitBoundaries(t *testing.T) {
-	tests := []struct {
-		name        string
-		concurrency string
-		threads     string
-		bitrate     string
-		storage     string
-		readRate    string
-		buffer      string
-	}{
-		{name: "minimum", concurrency: "1", threads: "1", bitrate: "64", storage: "512", readRate: "1", buffer: "3"},
-		{name: "maximum", concurrency: "16", threads: "32", bitrate: "200000", storage: "102400", readRate: "4", buffer: "30"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			setRequiredEnvironment(t)
-			t.Setenv("RIVUNE_REMUX_CONCURRENCY", test.concurrency)
-			t.Setenv("RIVUNE_TRANSCODE_THREADS", test.threads)
-			t.Setenv("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", test.bitrate)
-			t.Setenv("RIVUNE_MEDIA_MAX_STORAGE_MB", test.storage)
-			t.Setenv("RIVUNE_TRANSCODE_MAX_READ_RATE", test.readRate)
-			t.Setenv("RIVUNE_HLS_INITIAL_BUFFER_SECONDS", test.buffer)
-			if _, err := Load(); err != nil {
-				t.Fatalf("load boundary media configuration: %v", err)
-			}
-		})
-	}
-}
-func TestLoadRejectsUnsafeTranscodeBitrate(t *testing.T) {
-	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", "63")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("expected invalid transcoding bitrate to fail")
-	}
-}
-
-func TestLoadRejectsUnsafeArtworkStorageLimit(t *testing.T) {
-	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_ARTWORK_MAX_STORAGE_MB", "255")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("expected invalid artwork storage limit to fail")
-	}
-}
-
-func TestLoadRejectsInvalidHardwareAcceleration(t *testing.T) {
-	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_HARDWARE_ACCELERATION", "amf")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("expected invalid hardware acceleration mode to fail")
-	}
-}
-
-func TestLoadRejectsRelativeVideoDevice(t *testing.T) {
-	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_VIDEO_DEVICE", "renderD128")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("expected relative video device path to fail")
-	}
-}
-
-func TestLoadRejectsTVDBPINWithoutAPIKey(t *testing.T) {
+func TestLoadLegacyEnvironmentDefersCredentialDependenciesToPersistence(t *testing.T) {
 	setRequiredEnvironment(t)
 	t.Setenv("RIVUNE_TVDB_PIN", "subscriber-pin")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("expected a TVDB PIN without an API key to fail")
+	legacy, err := LoadLegacyEnvironment()
+	if err != nil || legacy.TVDBPIN != "subscriber-pin" {
+		t.Fatalf("isolated migration input = %s, %v", legacy, err)
 	}
 }
 
@@ -670,6 +432,7 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("RIVUNE_TRAKT_CLIENT_SECRET", "")
 	t.Setenv("RIVUNE_SIMKL_CLIENT_ID", "")
 	t.Setenv("RIVUNE_TRACKING_ENCRYPTION_KEY", "")
+	t.Setenv("RIVUNE_ENCRYPTION_KEYS", "2:"+strings.Repeat("12", 32)+",1:"+strings.Repeat("34", 32))
 	t.Setenv("RIVUNE_METADATA_CACHE_TTL", "")
 	t.Setenv("RIVUNE_FFMPEG_PATH", "")
 	t.Setenv("RIVUNE_FFPROBE_PATH", "")
@@ -680,30 +443,11 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("RIVUNE_HLS_INITIAL_BUFFER_SECONDS", "")
 	t.Setenv("RIVUNE_MEDIA_TEMP_DIR", "")
 	t.Setenv("RIVUNE_MEDIA_MAX_STORAGE_MB", "")
+	t.Setenv("RIVUNE_ARTWORK_MAX_STORAGE_MB", "")
 	t.Setenv("RIVUNE_HARDWARE_ACCELERATION", "")
 	t.Setenv("RIVUNE_VIDEO_DEVICE", "")
 	t.Setenv("RIVUNE_LAN_ARTWORK_ORIGINS", "")
 	t.Setenv("RIVUNE_JELLYFIN_ENABLED", "")
 	t.Setenv("RIVUNE_JELLYFIN_DEBUG", "")
-}
-
-func TestLoadAllowsCollectionOnlyTraktClientID(t *testing.T) {
-	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_TRAKT_CLIENT_ID", "client-id")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("load collection-only Trakt config: %v", err)
-	}
-	if cfg.TraktClientID != "client-id" || cfg.TraktClientSecret != "" {
-		t.Fatal("unexpected collection-only Trakt config")
-	}
-}
-
-func TestLoadRejectsTraktSecretWithoutClientID(t *testing.T) {
-	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_TRAKT_CLIENT_SECRET", "client-secret")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected Trakt secret without a client ID to be rejected")
-	}
+	t.Setenv("RIVUNE_ALLOW_TRANSCODING", "")
 }

@@ -108,7 +108,7 @@ type externalProbeStream struct {
 
 type externalProbeResult struct {
 	Streams []externalProbeStream `json:"streams"`
-	Format struct {
+	Format  struct {
 		Name string `json:"format_name"`
 	} `json:"format"`
 }

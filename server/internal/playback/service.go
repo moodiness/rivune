@@ -25,6 +25,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/netguard"
+	"github.com/moodiness/rivune/server/internal/runtimesettings"
 )
 
 type ResourceFetcher interface {
@@ -51,6 +52,8 @@ type Service struct {
 	processor               MediaProcessor
 	now                     func() time.Time
 	mediaOptions            MediaOptions
+	runtimeSettings         *runtimesettings.Source
+	mediaStorageBytes       atomic.Int64
 	references              *sourceReferenceStore
 	probes                  *mediaProbeCache
 	preparations            *playbackPreparationCache
@@ -110,7 +113,7 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 		return nil, fmt.Errorf("create HLS target signing key: %w", err)
 	}
 	now := func() time.Time { return time.Now().UTC() }
-	return &Service{
+	service := &Service{
 		pool: pool, addons: addons, client: &http.Client{Transport: transport, CheckRedirect: playbackRedirectPolicy}, processor: processor,
 		directStreamGlobalLimit: maximumDirectStreamsGlobal, directStreamOwnerLimit: maximumDirectStreamsPerOwner,
 		directStreamIdleTimeout: directStreamReadIdleTimeout,
@@ -118,7 +121,42 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 		now: now, mediaOptions: options, hlsJobs: make(map[string]*hlsJob), targetSigningKey: targetSigningKey,
 		deliveryChildren: newDeliveryChildBudget(maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerProfile),
 		references:       newSourceReferenceStore(now), probes: newMediaProbeCache(now), preparations: newPlaybackPreparationCache(now),
-	}, nil
+	}
+	service.mediaStorageBytes.Store(options.MaxStorageBytes)
+	return service, nil
+}
+
+func NewServiceWithRuntimeSettings(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProcessor, options MediaOptions, runtimeSettings *runtimesettings.Source) (*Service, error) {
+	if runtimeSettings == nil {
+		return nil, errors.New("playback runtime settings are required")
+	}
+	snapshot := runtimeSettings.Load()
+	options.MaxStorageBytes = snapshot.MediaMaxStorageBytes
+	options.TranscodeVideoBitrateKbps = snapshot.TranscodeMaxBitrateKbps
+	service, err := NewService(pool, addons, processor, options)
+	if err != nil {
+		return nil, err
+	}
+	service.runtimeSettings = runtimeSettings
+	return service, nil
+}
+
+func (service *Service) runtimePlaybackDecision(ctx context.Context) (int, bool) {
+	if service.runtimeSettings != nil {
+		snapshot := runtimesettings.Load(ctx, service.runtimeSettings)
+		return snapshot.TranscodeMaxBitrateKbps, snapshot.AllowTranscoding
+	}
+	return service.mediaOptions.TranscodeVideoBitrateKbps, true
+}
+
+func (service *Service) mediaStorageLimit() int64 {
+	if limit := service.mediaStorageBytes.Load(); limit > 0 {
+		return limit
+	}
+	if service.mediaOptions.MaxStorageBytes > 0 {
+		return service.mediaOptions.MaxStorageBytes
+	}
+	return defaultMediaStorageBytes
 }
 
 func playbackRedirectPolicy(request *http.Request, via []*http.Request) error {
@@ -278,6 +316,8 @@ func (service *Service) UnpinSourceReferences(principal auth.Principal, identifi
 func (service *Service) Prepare(ctx context.Context, principal auth.Principal, input PrepareInput) (Preparation, error) {
 	input.SourceRef = strings.TrimSpace(input.SourceRef)
 	tx, err := service.beginAuthorizedProfileTx(ctx, principal)
+	bitrate, runtimeAllowsTranscoding := service.runtimePlaybackDecision(ctx)
+	allowTranscoding := input.AllowTranscoding && runtimeAllowsTranscoding
 	if err != nil {
 		return Preparation{}, err
 	}
@@ -297,7 +337,7 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 		return Preparation{}, err
 	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
-	policy := playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight}
+	policy := playbackPolicy{allowTranscoding: allowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate}
 	prepared, err := service.preparedPlayback(ctx, principal, reference, policy)
 	if err != nil {
 		if err == ErrTranscodingDisabled {
@@ -312,9 +352,9 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 		assets[len(assets)-1].StartSeconds = input.StartSeconds
 		assets[len(assets)-1].HLSSegmentContainer = normalizedHLSSegmentContainer(reference.Capabilities.HLSSegmentContainer)
 	}
-	capabilities := service.playbackCapabilities(reference.Capabilities, maximumHeight)
+	capabilities := service.playbackCapabilities(reference.Capabilities, maximumHeight, bitrate)
 	preferences := ResolveInput{
-		Capabilities: capabilities, AllowTranscoding: input.AllowTranscoding, MaximumHeight: input.MaximumHeight,
+		Capabilities: capabilities, AllowTranscoding: allowTranscoding, MaximumHeight: input.MaximumHeight,
 		PreferredAudioLanguage:          reference.PreferredAudioLanguage,
 		PreferredSubtitleLanguage:       reference.PreferredSubtitleLanguage,
 		PreferredForcedSubtitleLanguage: reference.PreferredForcedSubtitleLanguage,
@@ -356,6 +396,8 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 	input.SourceRef = strings.TrimSpace(input.SourceRef)
 	input.TitleID = strings.TrimSpace(input.TitleID)
 	input.PreferredSubtitleID = strings.TrimSpace(input.PreferredSubtitleID)
+	bitrate, runtimeAllowsTranscoding := service.runtimePlaybackDecision(ctx)
+	input.AllowTranscoding = input.AllowTranscoding && runtimeAllowsTranscoding
 	tx, err := service.beginAuthorizedProfileTx(ctx, principal)
 	if err != nil {
 		return Session{}, err
@@ -376,7 +418,7 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 		return Session{}, err
 	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
-	policy := playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight}
+	policy := playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate}
 	prepared, err := service.preparedPlayback(ctx, principal, reference, policy)
 	if err != nil {
 		if err == ErrTranscodingDisabled {
@@ -391,7 +433,7 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 		streamAssets[len(streamAssets)-1].StartSeconds = input.StartSeconds
 		streamAssets[len(streamAssets)-1].HLSSegmentContainer = normalizedHLSSegmentContainer(reference.Capabilities.HLSSegmentContainer)
 	}
-	input.Capabilities = service.playbackCapabilities(reference.Capabilities, maximumHeight)
+	input.Capabilities = service.playbackCapabilities(reference.Capabilities, maximumHeight, bitrate)
 	input.PreferredAudioLanguage = reference.PreferredAudioLanguage
 	input.PreferredSubtitleLanguage = reference.PreferredSubtitleLanguage
 	input.PreferredForcedSubtitleLanguage = reference.PreferredForcedSubtitleLanguage
@@ -1039,13 +1081,12 @@ func effectivePlaybackMaximumHeight(clientMaximum, settingsMaximum int) int {
 	}
 	return settingsMaximum
 }
-func (service *Service) playbackCapabilities(client Capabilities, maximumHeight int) Capabilities {
+func (service *Service) playbackCapabilities(client Capabilities, maximumHeight, bitrateKbps int) Capabilities {
 	capabilities := cloneCapabilities(client)
 	capabilities.MaximumHeight = maximumHeight
-	capabilities.TranscodeVideoBitrateKbps = service.mediaOptions.TranscodeVideoBitrateKbps
+	capabilities.TranscodeVideoBitrateKbps = bitrateKbps
 	return capabilities
 }
-
 func normalizedHLSSegmentContainer(container string) string {
 	if container == "mp4" {
 		return "mp4"

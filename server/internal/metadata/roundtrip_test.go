@@ -144,7 +144,7 @@ func measureCachedSeasonDetailsQueries(t *testing.T, episodeCount int) int64 {
 	}
 
 	counter.count.Store(0)
-	season, err := (&Service{pool: pool}).SeasonDetails(ctx, canonicalMergePrincipal(), seasonID, "en-US", "tmdb")
+	season, err := NewService(pool, nil, nil, nil, 0, nil).SeasonDetails(ctx, canonicalMergePrincipal(), seasonID, "en-US", "tmdb")
 	if err != nil {
 		t.Fatalf("load cached season: %v", err)
 	}
@@ -212,7 +212,7 @@ func measureCachedSeriesDetailsQueries(t *testing.T, seasonCount int) int64 {
 	}
 
 	counter.count.Store(0)
-	series, err := (&Service{pool: pool}).SeriesDetails(ctx, canonicalMergePrincipal(), seriesID, SeriesDetailsOptions{Language: "en-US", MappingProvider: "tmdb"})
+	series, err := NewService(pool, nil, nil, nil, 0, nil).SeriesDetails(ctx, canonicalMergePrincipal(), seriesID, SeriesDetailsOptions{Language: "en-US", MappingProvider: "tmdb"})
 	if err != nil {
 		t.Fatalf("load cached series: %v", err)
 	}

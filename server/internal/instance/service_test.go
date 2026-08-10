@@ -294,15 +294,21 @@ func TestSetupPersistsInitialJellyfinEnabled(t *testing.T) {
 	})
 
 	var enabled bool
+	var legacyEnvironmentImported bool
 	if err := pool.QueryRow(ctx, `
-		SELECT (settings ->> 'jellyfinEnabled')::boolean
-		FROM instance_settings
-		WHERE instance_id = 1
-	`).Scan(&enabled); err != nil {
-		t.Fatalf("read initial Jellyfin setting: %v", err)
+		SELECT (settings.settings ->> 'jellyfinEnabled')::boolean,
+			instances.legacy_environment_imported_at IS NOT NULL
+		FROM instance_settings AS settings
+		JOIN instances ON instances.id = settings.instance_id
+		WHERE settings.instance_id = 1
+	`).Scan(&enabled, &legacyEnvironmentImported); err != nil {
+		t.Fatalf("read initial instance settings: %v", err)
 	}
 	if !enabled {
 		t.Fatal("setup did not persist enabled Jellyfin setting")
+	}
+	if !legacyEnvironmentImported {
+		t.Fatal("setup did not mark legacy environment import complete")
 	}
 }
 

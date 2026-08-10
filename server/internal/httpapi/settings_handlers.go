@@ -58,6 +58,12 @@ type settingsPatchRequest struct {
 	PreferDirectPlay                 nullableBool   `json:"preferDirectPlay,omitempty"`
 	AllowTranscoding                 nullableBool   `json:"allowTranscoding,omitempty"`
 	JellyfinEnabled                  nullableBool   `json:"jellyfinEnabled,omitempty"`
+	Timezone                         nullableString `json:"timezone,omitempty"`
+	JellyfinDebug                    nullableBool   `json:"jellyfinDebug,omitempty"`
+	HardwareAcceleration             nullableString `json:"hardwareAcceleration,omitempty"`
+	TranscodeMaxBitrateKbps          nullableInt    `json:"transcodeMaxBitrateKbps,omitempty"`
+	MediaMaxStorageMB                nullableInt    `json:"mediaMaxStorageMB,omitempty"`
+	ArtworkMaxStorageMB              nullableInt    `json:"artworkMaxStorageMB,omitempty"`
 	Transcoding                      nullableString `json:"transcoding,omitempty"`
 	HideUnreleased                   nullableBool   `json:"hideUnreleased,omitempty"`
 	MetadataLanguage                 nullableString `json:"metadataLanguage,omitempty"`
@@ -86,7 +92,7 @@ func (a *API) instanceSettings(w http.ResponseWriter, r *http.Request, _ auth.Pr
 		a.internalError(w, "read instance settings", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newSettingsLayerResponse(layer))
+	writeJSON(w, http.StatusOK, a.newInstanceSettingsResponse(layer))
 }
 
 func (a *API) updateInstanceSettings(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
@@ -94,7 +100,7 @@ func (a *API) updateInstanceSettings(w http.ResponseWriter, r *http.Request, pri
 	if !ok {
 		return
 	}
-	if patch.JellyfinEnabled.Set {
+	if patch.JellyfinEnabled.Set || patch.JellyfinDebug.Set {
 		a.jellyfinCompatibilitySettingsMu.Lock()
 		defer a.jellyfinCompatibilitySettingsMu.Unlock()
 	}
@@ -115,23 +121,45 @@ func (a *API) updateInstanceSettings(w http.ResponseWriter, r *http.Request, pri
 		}
 	}
 	layer, err := a.settings.UpdateInstance(r.Context(), principal, patch)
-	if patch.JellyfinEnabled.Set && err != nil {
-		a.requestJellyfinCompatibilityReconciliation()
+	if err != nil {
+		if a.runtimeSettings != nil {
+			if reconcileErr := a.runtimeSettings.reconcile(r.Context()); reconcileErr != nil {
+				a.logger.Error("reconcile runtime settings after update error", "error", reconcileErr)
+				a.runtimeSettings.scheduleReconciliation()
+			}
+		}
+		if patch.JellyfinEnabled.Set || patch.JellyfinDebug.Set {
+			a.requestJellyfinCompatibilityReconciliation()
+		}
 	}
 	if writeSettingsError(a, w, err, "update instance settings") {
 		return
 	}
-	if patch.JellyfinEnabled.Set {
-		if requestedJellyfinEnabled {
-			if !wasJellyfinEnabled {
-				a.setJellyfinCompatibilityDesired(true)
-			}
-		} else if err := a.applyCanonicalJellyfinCompatibilityDesired(r.Context(), false); err != nil {
-			a.internalError(w, "disable Jellyfin compatibility", err)
+	if a.runtimeSettings != nil {
+		if err := a.runtimeSettings.publish(r.Context(), layer); err != nil {
+			a.requestJellyfinCompatibilityReconciliation()
+			a.runtimeSettings.scheduleReconciliation()
+			a.internalError(w, "publish runtime settings", err)
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, newSettingsLayerResponse(layer))
+	if a.runtimeSettings == nil {
+		if patch.JellyfinEnabled.Set {
+			if requestedJellyfinEnabled {
+				if !wasJellyfinEnabled {
+					a.setJellyfinCompatibilityDesired(true)
+				} else if patch.JellyfinDebug.Set {
+					a.RequestJellyfinCompatibilityReplacement()
+				}
+			} else if err := a.applyCanonicalJellyfinCompatibilityDesired(r.Context(), false); err != nil {
+				a.internalError(w, "disable Jellyfin compatibility", err)
+				return
+			}
+		} else if patch.JellyfinDebug.Set {
+			a.RequestJellyfinCompatibilityReplacement()
+		}
+	}
+	writeJSON(w, http.StatusOK, a.newInstanceSettingsResponse(layer))
 }
 func (a *API) maintenanceSettings(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	if !principal.IsGlobalAdministrator() {
@@ -217,6 +245,30 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		writeError(w, http.StatusBadRequest, "invalid_request", "jellyfinEnabled must be a boolean")
 		return settings.Patch{}, false
 	}
+	if request.Timezone.Set && request.Timezone.Value == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "timezone must be a string")
+		return settings.Patch{}, false
+	}
+	if request.JellyfinDebug.Set && request.JellyfinDebug.Value == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "jellyfinDebug must be a boolean")
+		return settings.Patch{}, false
+	}
+	if request.HardwareAcceleration.Set && request.HardwareAcceleration.Value == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "hardwareAcceleration must be a string")
+		return settings.Patch{}, false
+	}
+	if request.TranscodeMaxBitrateKbps.Set && request.TranscodeMaxBitrateKbps.Value == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "transcodeMaxBitrateKbps must be an integer")
+		return settings.Patch{}, false
+	}
+	if request.MediaMaxStorageMB.Set && request.MediaMaxStorageMB.Value == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "mediaMaxStorageMB must be an integer")
+		return settings.Patch{}, false
+	}
+	if request.ArtworkMaxStorageMB.Set && request.ArtworkMaxStorageMB.Value == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "artworkMaxStorageMB must be an integer")
+		return settings.Patch{}, false
+	}
 	return settings.Patch{
 		InterfaceLanguage:                settings.OptionalString{Set: request.InterfaceLanguage.Set, Value: request.InterfaceLanguage.Value},
 		Theme:                            settings.OptionalString{Set: request.Theme.Set, Value: request.Theme.Value},
@@ -226,6 +278,12 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		PreferDirectPlay:                 settings.OptionalBool{Set: request.PreferDirectPlay.Set, Value: request.PreferDirectPlay.Value},
 		AllowTranscoding:                 settings.OptionalBool{Set: request.AllowTranscoding.Set, Value: request.AllowTranscoding.Value},
 		JellyfinEnabled:                  settings.OptionalBool{Set: request.JellyfinEnabled.Set, Value: request.JellyfinEnabled.Value},
+		Timezone:                         settings.OptionalString{Set: request.Timezone.Set, Value: request.Timezone.Value},
+		JellyfinDebug:                    settings.OptionalBool{Set: request.JellyfinDebug.Set, Value: request.JellyfinDebug.Value},
+		HardwareAcceleration:             settings.OptionalString{Set: request.HardwareAcceleration.Set, Value: request.HardwareAcceleration.Value},
+		TranscodeMaxBitrateKbps:          settings.OptionalInt{Set: request.TranscodeMaxBitrateKbps.Set, Value: request.TranscodeMaxBitrateKbps.Value},
+		MediaMaxStorageMB:                settings.OptionalInt{Set: request.MediaMaxStorageMB.Set, Value: request.MediaMaxStorageMB.Value},
+		ArtworkMaxStorageMB:              settings.OptionalInt{Set: request.ArtworkMaxStorageMB.Set, Value: request.ArtworkMaxStorageMB.Value},
 		Transcoding:                      settings.OptionalString{Set: request.Transcoding.Set, Value: request.Transcoding.Value},
 		HideUnreleased:                   settings.OptionalBool{Set: request.HideUnreleased.Set, Value: request.HideUnreleased.Value},
 		MetadataLanguage:                 settings.OptionalString{Set: request.MetadataLanguage.Set, Value: request.MetadataLanguage.Value},
@@ -281,6 +339,23 @@ func newSettingsLayerResponse(layer settings.Layer) map[string]any {
 	return map[string]any{
 		"schemaVersion": layer.SchemaVersion,
 		"settings":      layer.Values,
+		"updatedAt":     layer.UpdatedAt,
+	}
+}
+func (a *API) newInstanceSettingsResponse(layer settings.Layer) map[string]any {
+	layer.Values.MaintenanceEnabled = nil
+	layer.Values.MaintenanceMessage = nil
+	var application map[string]any
+	if a.runtimeSettings == nil {
+		application = runtimeSettingsApplication(nil)
+	} else {
+		application = runtimeSettingsApplication(a.runtimeSettings.source)
+	}
+	return map[string]any{
+		"schemaVersion": layer.SchemaVersion,
+		"revision":      layer.Revision,
+		"settings":      layer.Values,
+		"runtime":       application,
 		"updatedAt":     layer.UpdatedAt,
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/password"
+	"github.com/moodiness/rivune/server/internal/runtimesettings"
 )
 
 var (
@@ -37,6 +38,7 @@ type Service struct {
 	pool            *pgxpool.Pool
 	grantTTL        time.Duration
 	defaultTimezone string
+	runtimeSettings *runtimesettings.Source
 }
 
 type Profile struct {
@@ -103,7 +105,18 @@ func NewService(pool *pgxpool.Pool, grantTTL time.Duration, defaultTimezone stri
 	return &Service{pool: pool, grantTTL: grantTTL, defaultTimezone: defaultTimezone}
 }
 
+func NewServiceWithRuntimeSettings(pool *pgxpool.Pool, grantTTL time.Duration, runtimeSettings *runtimesettings.Source) *Service {
+	return &Service{pool: pool, grantTTL: grantTTL, runtimeSettings: runtimeSettings}
+}
+func (s *Service) runtimeTimezone(ctx context.Context) string {
+	if s.runtimeSettings != nil {
+		return runtimesettings.Load(ctx, s.runtimeSettings).Timezone
+	}
+	return s.defaultTimezone
+}
+
 func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Profile, error) {
+	timezone := s.runtimeTimezone(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin profile list: %w", err)
@@ -231,7 +244,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Profile
 			rows.Close()
 			return nil, fmt.Errorf("scan profile: %w", err)
 		}
-		profile.AccessTimezone = s.defaultTimezone
+		profile.AccessTimezone = timezone
 		profile.Accessible = profileAccessible(profile, time.Now().UTC())
 		profile.AvatarKind = "preset"
 		if customAvatar {
@@ -278,7 +291,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 	if input.Enabled != nil {
 		enabled = *input.Enabled
 	}
-	timezone := s.defaultTimezone
+	timezone := s.runtimeTimezone(ctx)
 	profile := Profile{
 		CategoryID: input.CategoryID,
 		Name:       input.Name, Description: description, IsChild: input.IsChild, HasPIN: pinHash != nil, CanManage: !globalAdministrator,
@@ -461,7 +474,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 	if currentAvatarCustom {
 		current.AvatarKind = "custom"
 	}
-	current.AccessTimezone = s.defaultTimezone
+	current.AccessTimezone = s.runtimeTimezone(ctx)
 	current.CanManage = true
 	oldCategoryID := current.CategoryID
 	wasEnabled := current.Enabled
@@ -861,7 +874,7 @@ func (s *Service) selectProfile(ctx context.Context, principal auth.Principal, p
 		selected.AvatarKind = "custom"
 	}
 	now := time.Now().UTC()
-	selected.AccessTimezone = s.defaultTimezone
+	selected.AccessTimezone = s.runtimeTimezone(ctx)
 	selected.Accessible = profileAccessible(selected, now)
 	if requireManagement && !selected.CanManage {
 		return Selection{}, ErrManagementRequired

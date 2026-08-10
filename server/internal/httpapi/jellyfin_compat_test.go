@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
-	"github.com/moodiness/rivune/server/internal/config"
 	"github.com/moodiness/rivune/server/internal/instance"
 	"github.com/moodiness/rivune/server/internal/jellyfin"
 	"github.com/moodiness/rivune/server/internal/playback"
@@ -26,7 +25,7 @@ func TestJellyfinCompatibilityDisabledSkipsConstructionAndReservesRoutes(t *test
 		PublicID: "11111111-1111-4111-8111-111111111111",
 		Name:     "Rivune",
 	}}
-	api := &API{config: config.Config{JellyfinEnabled: false}}
+	api := &API{}
 	collections := &fakeCollectionService{}
 	api.initializeJellyfinCompatibility(nil, nil, nil, collections, nil, nil, instances)
 	if instances.infoCalls != 0 || api.jellyfinCompatibility != nil {
@@ -74,7 +73,7 @@ func TestJellyfinCompatibilityEnabledRoutesRootAndEmbyAliasesBeforeSPA(t *testin
 	if err != nil {
 		t.Fatalf("construct injected compatibility handler: %v", err)
 	}
-	api := &API{config: config.Config{JellyfinEnabled: true}, jellyfinCompatibility: compat}
+	api := &API{jellyfinCompatibility: compat}
 	nativeCalls := 0
 	handler := api.routeJellyfinCompatibility(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		nativeCalls++

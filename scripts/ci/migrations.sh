@@ -11,6 +11,8 @@ UPGRADE_APP="rivune-migrations-upgrade-${RUN_ID}"
 PASSWORD="migration-test-password"
 SETUP_TOKEN="migration-test-setup-token"
 DATABASE_URL="postgres://rivune:${PASSWORD}@postgres:5432/rivune?sslmode=disable"
+ENCRYPTION_KEYS="1:1212121212121212121212121212121212121212121212121212121212121212"
+LEGACY_ENCRYPTION_KEY="${ENCRYPTION_KEYS#1:}"
 
 cleanup() {
   docker rm -f "${CLEAN_APP}" "${UPGRADE_APP}" "${POSTGRES}" >/dev/null 2>&1 || true
@@ -51,9 +53,16 @@ wait_for_rivune() {
 
 start_rivune() {
   local container="$1"
+  local key_name="RIVUNE_ENCRYPTION_KEYS"
+  local key_value="${ENCRYPTION_KEYS}"
+  if [[ "${2:-versioned}" == "legacy" ]]; then
+    key_name="RIVUNE_TRACKING_ENCRYPTION_KEY"
+    key_value="${LEGACY_ENCRYPTION_KEY}"
+  fi
   docker run -d --name "${container}" --network "${NETWORK}" \
     -e RIVUNE_DATABASE_URL="${DATABASE_URL}" \
     -e RIVUNE_SETUP_TOKEN="${SETUP_TOKEN}" \
+    -e "${key_name}=${key_value}" \
     -e RIVUNE_PUBLIC_URL="http://127.0.0.1:8080" \
     "${IMAGE}" >/dev/null
   wait_for_rivune "${container}"
@@ -115,7 +124,7 @@ for migration in "${MIGRATIONS[@]:0:$((EXPECTED_COUNT - 1))}"; do
 done
 
 [[ "$(migration_count)" == "$((EXPECTED_COUNT - 1))" ]]
-start_rivune "${UPGRADE_APP}"
+start_rivune "${UPGRADE_APP}" legacy
 [[ "$(migration_count)" == "${EXPECTED_COUNT}" ]]
 [[ "$(migration_max)" == "${LATEST_VERSION}" ]]
 docker rm -f "${UPGRADE_APP}" >/dev/null

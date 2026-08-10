@@ -316,7 +316,7 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 		Summary: ActivitySummary{
 			ActiveSessions: int(activeSessionCount), ActiveJobs: activeJobCount, ProcessingSlots: processingSlots,
 			ProcessingLimit: processingLimit, StorageBytes: directorySize(service.mediaOptions.TempDirectory),
-			StorageLimitBytes: service.mediaOptions.MaxStorageBytes,
+			StorageLimitBytes: service.mediaStorageLimit(),
 		},
 		Diagnostics:       diagnostics,
 		Sessions:          sessions,

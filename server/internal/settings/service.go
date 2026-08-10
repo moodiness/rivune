@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -14,10 +16,24 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/secretcrypto"
 )
 
 const (
-	schemaVersion                          = 1
+	schemaVersion                          = 2
+	profileSchemaVersion                   = 1
+	DefaultAllowTranscoding                = true
+	DefaultTimezone                        = "UTC"
+	DefaultHardwareAcceleration            = "auto"
+	DefaultTranscodeMaxBitrateKbps         = 12000
+	MinimumTranscodeMaxBitrateKbps         = 64
+	MaximumTranscodeMaxBitrateKbps         = 200000
+	DefaultMediaMaxStorageMB               = 20480
+	MinimumMediaMaxStorageMB               = 512
+	MaximumMediaMaxStorageMB               = 102400
+	DefaultArtworkMaxStorageMB             = 20480
+	MinimumArtworkMaxStorageMB             = 256
+	MaximumArtworkMaxStorageMB             = 102400
 	DefaultInterfaceLanguage               = "en"
 	DefaultMaximumCastMembers              = 20
 	MinimumMaximumCastMembers              = 1
@@ -46,7 +62,11 @@ var (
 )
 
 type Service struct {
-	pool *pgxpool.Pool
+	pool        *pgxpool.Pool
+	keyring     *secretcrypto.Keyring
+	publisherMu sync.RWMutex
+	publisher   IntegrationPublisher
+	reconciling atomic.Bool
 }
 type Maintenance struct {
 	Enabled bool
@@ -79,6 +99,12 @@ type Patch struct {
 	PreferDirectPlay                 OptionalBool
 	AllowTranscoding                 OptionalBool
 	JellyfinEnabled                  OptionalBool
+	Timezone                         OptionalString
+	JellyfinDebug                    OptionalBool
+	HardwareAcceleration             OptionalString
+	TranscodeMaxBitrateKbps          OptionalInt
+	MediaMaxStorageMB                OptionalInt
+	ArtworkMaxStorageMB              OptionalInt
 	Transcoding                      OptionalString
 	HideUnreleased                   OptionalBool
 	MetadataLanguage                 OptionalString
@@ -110,6 +136,12 @@ type Values struct {
 	PreferDirectPlay                 *bool            `json:"preferDirectPlay,omitempty"`
 	AllowTranscoding                 *bool            `json:"allowTranscoding,omitempty"`
 	JellyfinEnabled                  *bool            `json:"jellyfinEnabled,omitempty"`
+	Timezone                         *string          `json:"timezone,omitempty"`
+	JellyfinDebug                    *bool            `json:"jellyfinDebug,omitempty"`
+	HardwareAcceleration             *string          `json:"hardwareAcceleration,omitempty"`
+	TranscodeMaxBitrateKbps          *int             `json:"transcodeMaxBitrateKbps,omitempty"`
+	MediaMaxStorageMB                *int             `json:"mediaMaxStorageMB,omitempty"`
+	ArtworkMaxStorageMB              *int             `json:"artworkMaxStorageMB,omitempty"`
 	Transcoding                      *TranscodingMode `json:"transcoding,omitempty"`
 	HideUnreleased                   *bool            `json:"hideUnreleased,omitempty"`
 	MetadataLanguage                 *string          `json:"metadataLanguage,omitempty"`
@@ -138,6 +170,7 @@ type Layer struct {
 	SchemaVersion int
 	Values        Values
 	UpdatedAt     *time.Time
+	Revision      int64
 }
 
 type EffectiveValues struct {
@@ -176,56 +209,24 @@ type Effective struct {
 	Sources       map[string]string
 }
 
-func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool}
+func NewService(pool *pgxpool.Pool, keyrings ...*secretcrypto.Keyring) *Service {
+	service := &Service{pool: pool}
+	if len(keyrings) > 0 {
+		service.keyring = keyrings[0]
+	}
+	return service
+}
+
+func (s *Service) SetIntegrationPublisher(publisher IntegrationPublisher) {
+	s.publisherMu.Lock()
+	s.publisher = publisher
+	s.publisherMu.Unlock()
 }
 
 func (s *Service) Instance(ctx context.Context) (Layer, error) {
-	return queryLayer(ctx, s.pool, "SELECT schema_version, settings, updated_at FROM instance_settings WHERE instance_id = 1")
+	return queryInstanceLayer(ctx, s.pool, false)
 }
 
-// InitializeJellyfinEnabled persists initial exactly once for legacy instance
-// rows. The row lock makes concurrent server starts converge on the first
-// committed value; an existing database value always wins.
-func (s *Service) InitializeJellyfinEnabled(ctx context.Context, initial bool) (bool, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("begin Jellyfin setting initialization: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	current, err := queryLayer(ctx, tx, "SELECT schema_version, settings, updated_at FROM instance_settings WHERE instance_id = 1 FOR UPDATE")
-	if errors.Is(err, pgx.ErrNoRows) {
-		return initial, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("query Jellyfin setting: %w", err)
-	}
-	if current.Values.JellyfinEnabled != nil {
-		value := *current.Values.JellyfinEnabled
-		if err := tx.Commit(ctx); err != nil {
-			return false, fmt.Errorf("commit Jellyfin setting read: %w", err)
-		}
-		return value, nil
-	}
-
-	current.Values.JellyfinEnabled = &initial
-	encoded, err := json.Marshal(current.Values)
-	if err != nil {
-		return false, fmt.Errorf("encode initial Jellyfin setting: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE instance_settings
-		SET schema_version = $1, settings = $2, updated_at = now()
-		WHERE instance_id = 1
-	`, schemaVersion, encoded); err != nil {
-		return false, fmt.Errorf("initialize Jellyfin setting: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit Jellyfin setting initialization: %w", err)
-	}
-	return initial, nil
-}
 func (s *Service) Maintenance(ctx context.Context) (Maintenance, error) {
 	var state Maintenance
 	if err := s.pool.QueryRow(ctx, `
@@ -260,16 +261,19 @@ func (s *Service) UpdateMaintenance(ctx context.Context, principal auth.Principa
 		return Maintenance{}, fmt.Errorf("begin maintenance settings update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeGlobalAdministrator(ctx, tx, principal); err != nil {
+		return Maintenance{}, err
+	}
 
-	current, err := queryLayer(ctx, tx, "SELECT schema_version, settings, updated_at FROM instance_settings WHERE instance_id = 1 FOR UPDATE")
+	current, err := queryInstanceLayer(ctx, tx, true)
 	if err != nil {
 		return Maintenance{}, err
 	}
 	current.Values.MaintenanceEnabled = &state.Enabled
 	current.Values.MaintenanceMessage = state.Message
-	encoded, err := json.Marshal(current.Values)
+	encoded, err := marshalSettings(current.Values)
 	if err != nil {
-		return Maintenance{}, fmt.Errorf("encode maintenance settings: %w", err)
+		return Maintenance{}, err
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE instance_settings
@@ -277,6 +281,13 @@ func (s *Service) UpdateMaintenance(ctx context.Context, principal auth.Principa
 		WHERE instance_id = 1
 	`, schemaVersion, encoded); err != nil {
 		return Maintenance{}, fmt.Errorf("update maintenance settings: %w", err)
+	}
+	revision, err := incrementConfigurationRevision(ctx, tx)
+	if err != nil {
+		return Maintenance{}, err
+	}
+	if err := insertAuditEvent(ctx, tx, revision, principal.UserID, "settings.updated", []string{"maintenanceEnabled", "maintenanceMessage"}, encoded); err != nil {
+		return Maintenance{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Maintenance{}, fmt.Errorf("commit maintenance settings: %w", err)
@@ -296,15 +307,18 @@ func (s *Service) UpdateInstance(ctx context.Context, principal auth.Principal, 
 		return Layer{}, fmt.Errorf("begin instance settings update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := authorizeGlobalAdministrator(ctx, tx, principal); err != nil {
+		return Layer{}, err
+	}
 
-	current, err := queryLayer(ctx, tx, "SELECT schema_version, settings, updated_at FROM instance_settings WHERE instance_id = 1 FOR UPDATE")
+	current, err := queryInstanceLayer(ctx, tx, true)
 	if err != nil {
 		return Layer{}, err
 	}
-	current.Values = applyPatch(current.Values, patch)
-	encoded, err := json.Marshal(current.Values)
+	current.Values = materializeInstanceValues(applyPatch(current.Values, patch))
+	encoded, err := marshalSettings(current.Values)
 	if err != nil {
-		return Layer{}, fmt.Errorf("encode instance settings: %w", err)
+		return Layer{}, err
 	}
 	if err := tx.QueryRow(ctx, `
 		UPDATE instance_settings
@@ -313,6 +327,14 @@ func (s *Service) UpdateInstance(ctx context.Context, principal auth.Principal, 
 		RETURNING updated_at
 	`, schemaVersion, encoded).Scan(&current.UpdatedAt); err != nil {
 		return Layer{}, fmt.Errorf("update instance settings: %w", err)
+	}
+	current.Revision, err = incrementConfigurationRevision(ctx, tx)
+	if err != nil {
+		return Layer{}, err
+	}
+	changedKeys := instancePatchKeys(patch)
+	if err := insertAuditEvent(ctx, tx, current.Revision, principal.UserID, "settings.updated", changedKeys, encoded); err != nil {
+		return Layer{}, err
 	}
 	current.SchemaVersion = schemaVersion
 	if err := tx.Commit(ctx); err != nil {
@@ -355,7 +377,7 @@ func (s *Service) UpdateProfile(ctx context.Context, principal auth.Principal, p
 	if err != nil {
 		return Layer{}, err
 	}
-	instance, err := queryLayer(ctx, tx, "SELECT schema_version, settings, updated_at FROM instance_settings WHERE instance_id = 1 FOR SHARE")
+	instance, err := queryLayer(ctx, tx, schemaVersion, "SELECT schema_version, settings, updated_at FROM instance_settings WHERE instance_id = 1 FOR SHARE")
 	if err != nil {
 		return Layer{}, fmt.Errorf("query instance settings for profile update: %w", err)
 	}
@@ -375,10 +397,10 @@ func (s *Service) UpdateProfile(ctx context.Context, principal auth.Principal, p
 		SET schema_version = $2, settings = $3, updated_at = now()
 		WHERE profile_id::text = $1
 		RETURNING updated_at
-	`, strings.TrimSpace(profileID), schemaVersion, encoded).Scan(&current.UpdatedAt); err != nil {
+	`, strings.TrimSpace(profileID), profileSchemaVersion, encoded).Scan(&current.UpdatedAt); err != nil {
 		return Layer{}, fmt.Errorf("update profile settings: %w", err)
 	}
-	current.SchemaVersion = schemaVersion
+	current.SchemaVersion = profileSchemaVersion
 	if err := tx.Commit(ctx); err != nil {
 		return Layer{}, fmt.Errorf("commit profile settings: %w", err)
 	}
@@ -424,11 +446,14 @@ func (s *Service) Effective(ctx context.Context, principal auth.Principal, profi
 	if err != nil {
 		return Effective{}, fmt.Errorf("query effective settings layers: %w", err)
 	}
-	if instanceVersion != schemaVersion || profileVersion != schemaVersion {
+	if instanceVersion != schemaVersion || profileVersion != profileSchemaVersion {
 		return Effective{}, fmt.Errorf(
 			"unsupported settings schema versions instance=%d profile=%d",
 			instanceVersion, profileVersion,
 		)
+	}
+	if err := ensureNoSecretSettings(instanceRaw); err != nil {
+		return Effective{}, err
 	}
 	var instanceValues, profileValues Values
 	if err := json.Unmarshal(instanceRaw, &instanceValues); err != nil {
@@ -495,7 +520,7 @@ func (s *Service) queryProfileLayer(
 		FROM profile_settings ps
 		JOIN profiles p ON p.id = ps.profile_id
 		WHERE p.id::text = $1` + lockClause
-	layer, err := queryLayer(ctx, tx, query, profileID)
+	layer, err := queryLayer(ctx, tx, profileSchemaVersion, query, profileID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Layer{}, ErrProfileNotFound
 	}
@@ -504,14 +529,46 @@ func (s *Service) queryProfileLayer(
 
 func queryLayer(ctx context.Context, querier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
-}, query string, arguments ...any) (Layer, error) {
+}, expectedVersion int, query string, arguments ...any) (Layer, error) {
 	var layer Layer
 	var raw json.RawMessage
 	if err := querier.QueryRow(ctx, query, arguments...).Scan(&layer.SchemaVersion, &raw, &layer.UpdatedAt); err != nil {
 		return Layer{}, err
 	}
+	if layer.SchemaVersion != expectedVersion {
+		return Layer{}, fmt.Errorf("unsupported settings schema version %d", layer.SchemaVersion)
+	}
+	if err := ensureNoSecretSettings(raw); err != nil {
+		return Layer{}, err
+	}
+	if err := json.Unmarshal(raw, &layer.Values); err != nil {
+		return Layer{}, fmt.Errorf("decode settings: %w", err)
+	}
+	return layer, nil
+}
+
+func queryInstanceLayer(ctx context.Context, querier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, forUpdate bool) (Layer, error) {
+	lock := ""
+	if forUpdate {
+		lock = " FOR UPDATE OF s, i"
+	}
+	var layer Layer
+	var raw json.RawMessage
+	err := querier.QueryRow(ctx, `
+		SELECT s.schema_version, s.settings, s.updated_at, i.configuration_revision
+		FROM instance_settings s
+		JOIN instances i ON i.id = s.instance_id
+		WHERE s.instance_id = 1`+lock).Scan(&layer.SchemaVersion, &raw, &layer.UpdatedAt, &layer.Revision)
+	if err != nil {
+		return Layer{}, err
+	}
 	if layer.SchemaVersion != schemaVersion {
 		return Layer{}, fmt.Errorf("unsupported settings schema version %d", layer.SchemaVersion)
+	}
+	if err := ensureNoSecretSettings(raw); err != nil {
+		return Layer{}, err
 	}
 	if err := json.Unmarshal(raw, &layer.Values); err != nil {
 		return Layer{}, fmt.Errorf("decode settings: %w", err)
@@ -521,7 +578,7 @@ func queryLayer(ctx context.Context, querier interface {
 
 func defaultEffective() Effective {
 	return Effective{
-		SchemaVersion: schemaVersion,
+		SchemaVersion: profileSchemaVersion,
 		Values: EffectiveValues{
 			InterfaceLanguage: DefaultInterfaceLanguage,
 			Theme:             "system", MaximumResolution: "auto", MaximumCastMembers: DefaultMaximumCastMembers, MaximumDirectTitles: DefaultMaximumDirectTitles, PreferDirectPlay: true,
@@ -549,7 +606,7 @@ func defaultEffective() Effective {
 }
 
 func validatePatch(patch Patch) error {
-	if !patch.InterfaceLanguage.Set && !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.MaximumCastMembers.Set && !patch.MaximumDirectTitles.Set && !patch.PreferDirectPlay.Set && !patch.AllowTranscoding.Set && !patch.JellyfinEnabled.Set && !patch.Transcoding.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
+	if !patch.InterfaceLanguage.Set && !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.MaximumCastMembers.Set && !patch.MaximumDirectTitles.Set && !patch.PreferDirectPlay.Set && !patch.AllowTranscoding.Set && !patch.JellyfinEnabled.Set && !patch.Timezone.Set && !patch.JellyfinDebug.Set && !patch.HardwareAcceleration.Set && !patch.TranscodeMaxBitrateKbps.Set && !patch.MediaMaxStorageMB.Set && !patch.ArtworkMaxStorageMB.Set && !patch.Transcoding.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
 		!patch.AutoplayNextEpisode.Set && !patch.SkipIntroEnabled.Set && !patch.SkipRecapEnabled.Set && !patch.SkipOutroEnabled.Set &&
 		!patch.CardDensity.Set && !patch.AnimationsEnabled.Set && !patch.SubtitleSizePercent.Set && !patch.SubtitleTextColor.Set && !patch.SubtitleBackgroundOpacityPercent.Set &&
 		!patch.NotificationsEnabled.Set && !patch.NotificationDurationSeconds.Set && !patch.NotificationPollIntervalSeconds.Set {
@@ -576,6 +633,30 @@ func validatePatch(patch Patch) error {
 		return err
 	}
 	if err := validateIntRange("maximumDirectTitles", patch.MaximumDirectTitles, MinimumMaximumDirectTitles, MaximumMaximumDirectTitles); err != nil {
+		return err
+	}
+	if value := patch.Timezone.Value; patch.Timezone.Set && value != nil {
+		if strings.TrimSpace(*value) != *value || *value == "" {
+			return fmt.Errorf("%w: timezone must be a nonempty IANA timezone", ErrInvalidInput)
+		}
+		if _, err := time.LoadLocation(*value); err != nil {
+			return fmt.Errorf("%w: timezone must be a valid IANA timezone", ErrInvalidInput)
+		}
+	}
+	if value := patch.HardwareAcceleration.Value; patch.HardwareAcceleration.Set && value != nil {
+		switch *value {
+		case "auto", "software", "vaapi", "qsv", "nvenc":
+		default:
+			return fmt.Errorf("%w: hardwareAcceleration must be auto, software, vaapi, qsv, or nvenc", ErrInvalidInput)
+		}
+	}
+	if err := validateIntRange("transcodeMaxBitrateKbps", patch.TranscodeMaxBitrateKbps, MinimumTranscodeMaxBitrateKbps, MaximumTranscodeMaxBitrateKbps); err != nil {
+		return err
+	}
+	if err := validateIntRange("mediaMaxStorageMB", patch.MediaMaxStorageMB, MinimumMediaMaxStorageMB, MaximumMediaMaxStorageMB); err != nil {
+		return err
+	}
+	if err := validateIntRange("artworkMaxStorageMB", patch.ArtworkMaxStorageMB, MinimumArtworkMaxStorageMB, MaximumArtworkMaxStorageMB); err != nil {
 		return err
 	}
 	if value := patch.Transcoding.Value; patch.Transcoding.Set && value != nil {
@@ -635,8 +716,18 @@ func validateInstancePatch(patch Patch) error {
 	if err := validatePatch(patch); err != nil {
 		return err
 	}
-	if patch.JellyfinEnabled.Set && patch.JellyfinEnabled.Value == nil {
-		return fmt.Errorf("%w: jellyfinEnabled must be a boolean", ErrInvalidInput)
+	for name, valueSet := range map[string]bool{
+		"jellyfinEnabled":         patch.JellyfinEnabled.Set && patch.JellyfinEnabled.Value == nil,
+		"timezone":                patch.Timezone.Set && patch.Timezone.Value == nil,
+		"jellyfinDebug":           patch.JellyfinDebug.Set && patch.JellyfinDebug.Value == nil,
+		"hardwareAcceleration":    patch.HardwareAcceleration.Set && patch.HardwareAcceleration.Value == nil,
+		"transcodeMaxBitrateKbps": patch.TranscodeMaxBitrateKbps.Set && patch.TranscodeMaxBitrateKbps.Value == nil,
+		"mediaMaxStorageMB":       patch.MediaMaxStorageMB.Set && patch.MediaMaxStorageMB.Value == nil,
+		"artworkMaxStorageMB":     patch.ArtworkMaxStorageMB.Set && patch.ArtworkMaxStorageMB.Value == nil,
+	} {
+		if valueSet {
+			return fmt.Errorf("%w: %s must not be null", ErrInvalidInput, name)
+		}
 	}
 	if patch.Transcoding.Set {
 		return fmt.Errorf("%w: transcoding is only valid for profile settings", ErrInvalidInput)
@@ -644,6 +735,13 @@ func validateInstancePatch(patch Patch) error {
 	return nil
 }
 
+func materializeInstanceValues(values Values) Values {
+	if values.AllowTranscoding == nil {
+		value := DefaultAllowTranscoding
+		values.AllowTranscoding = &value
+	}
+	return values
+}
 func validateProfilePatch(patch Patch) error {
 	if err := validatePatch(patch); err != nil {
 		return err
@@ -653,6 +751,9 @@ func validateProfilePatch(patch Patch) error {
 	}
 	if patch.JellyfinEnabled.Set {
 		return fmt.Errorf("%w: jellyfinEnabled is only valid for instance settings", ErrInvalidInput)
+	}
+	if patch.Timezone.Set || patch.JellyfinDebug.Set || patch.HardwareAcceleration.Set || patch.TranscodeMaxBitrateKbps.Set || patch.MediaMaxStorageMB.Set || patch.ArtworkMaxStorageMB.Set {
+		return fmt.Errorf("%w: runtime settings are only valid for instance settings", ErrInvalidInput)
 	}
 	if patch.NotificationsEnabled.Set || patch.NotificationDurationSeconds.Set || patch.NotificationPollIntervalSeconds.Set {
 		return fmt.Errorf("%w: notification settings are only valid for instance settings", ErrInvalidInput)
@@ -737,6 +838,24 @@ func applyPatch(values Values, patch Patch) Values {
 	}
 	if patch.JellyfinEnabled.Set {
 		values.JellyfinEnabled = patch.JellyfinEnabled.Value
+	}
+	if patch.Timezone.Set {
+		values.Timezone = patch.Timezone.Value
+	}
+	if patch.JellyfinDebug.Set {
+		values.JellyfinDebug = patch.JellyfinDebug.Value
+	}
+	if patch.HardwareAcceleration.Set {
+		values.HardwareAcceleration = patch.HardwareAcceleration.Value
+	}
+	if patch.TranscodeMaxBitrateKbps.Set {
+		values.TranscodeMaxBitrateKbps = patch.TranscodeMaxBitrateKbps.Value
+	}
+	if patch.MediaMaxStorageMB.Set {
+		values.MediaMaxStorageMB = patch.MediaMaxStorageMB.Value
+	}
+	if patch.ArtworkMaxStorageMB.Set {
+		values.ArtworkMaxStorageMB = patch.ArtworkMaxStorageMB.Value
 	}
 	if patch.Transcoding.Set {
 		if patch.Transcoding.Value == nil {

@@ -10,12 +10,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/secretcrypto"
 )
 
 var (
@@ -35,13 +37,48 @@ type Service struct {
 	pool                       *pgxpool.Pool
 	cipher                     *tokenCipher
 	client                     *providerClient
+	providerSource             atomic.Pointer[providerSourceHolder]
 	logger                     *slog.Logger
 	profileProviderOutboxLimit int
 	globalOutboxLimit          int
 }
 
-func NewService(pool *pgxpool.Pool, encryptionKey []byte, traktClientID, traktClientSecret, simklClientID string, httpClient *http.Client, logger *slog.Logger) (*Service, error) {
-	cipher, err := newTokenCipher(encryptionKey)
+type staticProviderSource struct{ providers ProviderSet }
+
+func (source staticProviderSource) TrackingProviders() ProviderSet { return source.providers }
+
+type providerSourceHolder struct{ source ProviderSource }
+
+type trackingProviderContextKey struct{}
+
+func (s *Service) pinProviders(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(trackingProviderContextKey{}).(ProviderSet); ok {
+		return ctx
+	}
+	providers := ProviderSet{}
+	if holder := s.providerSource.Load(); holder != nil && holder.source != nil {
+		providers = holder.source.TrackingProviders()
+	} else if s.client != nil {
+		providers = NewProviderSet(0, &Runtime{client: s.client})
+	}
+	return context.WithValue(ctx, trackingProviderContextKey{}, providers)
+}
+
+func trackingProviders(ctx context.Context) ProviderSet {
+	providers, _ := ctx.Value(trackingProviderContextKey{}).(ProviderSet)
+	return providers
+}
+
+func trackingRuntime(ctx context.Context, provider string) (*Runtime, error) {
+	runtime := trackingProviders(ctx).Runtime
+	if !runtime.configured(provider) {
+		return nil, ErrProviderUnavailable
+	}
+	return runtime, nil
+}
+
+func NewService(pool *pgxpool.Pool, encryptionKeys *secretcrypto.Keyring, traktClientID, traktClientSecret, simklClientID string, httpClient *http.Client, logger *slog.Logger) (*Service, error) {
+	cipher, err := newTokenCipher(encryptionKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -49,6 +86,26 @@ func NewService(pool *pgxpool.Pool, encryptionKey []byte, traktClientID, traktCl
 		logger = slog.Default()
 	}
 	return &Service{pool: pool, cipher: cipher, client: newProviderClient(traktClientID, traktClientSecret, simklClientID, httpClient), logger: logger}, nil
+}
+
+func NewServiceWithProviderSource(pool *pgxpool.Pool, encryptionKeys *secretcrypto.Keyring, source ProviderSource, logger *slog.Logger) (*Service, error) {
+	service, err := NewService(pool, encryptionKeys, "", "", "", nil, logger)
+	if err != nil {
+		return nil, err
+	}
+	service.client = nil
+	service.SetProviderSource(source)
+	return service, nil
+}
+
+// SetProviderSource atomically installs the immutable provider registry. Live
+// credential replacements occur within the source itself.
+func (s *Service) SetProviderSource(source ProviderSource) {
+	if source == nil {
+		s.providerSource.Store(nil)
+		return
+	}
+	s.providerSource.Store(&providerSourceHolder{source: source})
 }
 
 func normalizeProvider(provider string) (string, error) {
@@ -85,6 +142,7 @@ func (s *Service) authorizeProfile(ctx context.Context, tx pgx.Tx, principal aut
 }
 
 func (s *Service) Statuses(ctx context.Context, principal auth.Principal, profileID string) ([]Status, error) {
+	ctx = s.pinProviders(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tracking statuses query: %w", err)
@@ -106,7 +164,9 @@ func (s *Service) Statuses(ctx context.Context, principal auth.Principal, profil
 }
 
 func (s *Service) statuses(ctx context.Context, tx pgx.Tx, profileID string) ([]Status, error) {
-	statuses := []Status{{Provider: "trakt", Configured: s.client.configured("trakt")}, {Provider: "simkl", Configured: s.client.configured("simkl")}}
+	ctx = s.pinProviders(ctx)
+	runtime := trackingProviders(ctx).Runtime
+	statuses := []Status{{Provider: "trakt", Configured: runtime.configured("trakt")}, {Provider: "simkl", Configured: runtime.configured("simkl")}}
 	rows, err := tx.Query(ctx, `
 		SELECT account.provider, account.sync_watched, account.sync_progress, account.sync_library,
 		       account.connected_at, account.last_success_at, COALESCE(account.last_error, ''), count(outbox.id)
@@ -149,6 +209,7 @@ func (s *Service) statuses(ctx context.Context, tx pgx.Tx, profileID string) ([]
 }
 
 func (s *Service) BeginDeviceAuthorization(ctx context.Context, principal auth.Principal, profileID, provider string) (DeviceAuthorization, error) {
+	ctx = s.pinProviders(ctx)
 	authorizationTx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return DeviceAuthorization{}, fmt.Errorf("begin tracking authorization check: %w", err)
@@ -166,7 +227,11 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, principal auth.P
 	if err != nil {
 		return DeviceAuthorization{}, err
 	}
-	code, err := s.client.beginDeviceAuthorization(ctx, provider)
+	runtime, err := trackingRuntime(ctx, provider)
+	if err != nil {
+		return DeviceAuthorization{}, err
+	}
+	code, err := runtime.client.beginDeviceAuthorization(ctx, provider)
 	if err != nil {
 		return DeviceAuthorization{}, providerFacingError(err)
 	}
@@ -191,14 +256,15 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, principal auth.P
 	}
 	var result DeviceAuthorization
 	err = storeTx.QueryRow(ctx, `
-		INSERT INTO profile_tracking_authorizations (profile_id, provider, provider_code_encrypted, user_code, verification_url, interval_seconds, expires_at)
-		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
+		INSERT INTO profile_tracking_authorizations (profile_id, provider, provider_code_encrypted, cipher_version, encryption_key_version, user_code, verification_url, interval_seconds, expires_at)
+		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (profile_id, provider) DO UPDATE SET provider_code_encrypted = EXCLUDED.provider_code_encrypted,
+			cipher_version = EXCLUDED.cipher_version, encryption_key_version = EXCLUDED.encryption_key_version,
 			user_code = EXCLUDED.user_code, verification_url = EXCLUDED.verification_url,
 			interval_seconds = EXCLUDED.interval_seconds, expires_at = EXCLUDED.expires_at,
 			last_polled_at = NULL, created_at = now()
 		RETURNING id::text, provider, user_code, verification_url, expires_at, interval_seconds
-	`, profileID, provider, encrypted, code.UserCode, code.VerificationURL, code.Interval, expiresAt).Scan(&result.ID, &result.Provider, &result.UserCode, &result.VerificationURL, &result.ExpiresAt, &result.IntervalSeconds)
+	`, profileID, provider, encrypted, s.cipher.cipherVersion(), s.cipher.keyVersion(), code.UserCode, code.VerificationURL, code.Interval, expiresAt).Scan(&result.ID, &result.Provider, &result.UserCode, &result.VerificationURL, &result.ExpiresAt, &result.IntervalSeconds)
 	if err != nil {
 		return DeviceAuthorization{}, fmt.Errorf("store tracking authorization: %w", err)
 	}
@@ -209,6 +275,7 @@ func (s *Service) BeginDeviceAuthorization(ctx context.Context, principal auth.P
 }
 
 func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal auth.Principal, profileID, provider, authorizationID string) (Status, error) {
+	ctx = s.pinProviders(ctx)
 	pollTx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Status{}, fmt.Errorf("begin tracking authorization poll: %w", err)
@@ -223,6 +290,7 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 		return Status{}, err
 	}
 	var encrypted []byte
+	var cipherVersion, keyVersion int
 	err = pollTx.QueryRow(ctx, `
 		UPDATE profile_tracking_authorizations
 		SET last_polled_at = now()
@@ -231,8 +299,8 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 		  AND provider = $3
 		  AND expires_at > now()
 		  AND (last_polled_at IS NULL OR last_polled_at <= now() - interval_seconds * interval '1 second')
-		RETURNING provider_code_encrypted
-	`, strings.TrimSpace(authorizationID), profileID, provider).Scan(&encrypted)
+		RETURNING provider_code_encrypted, cipher_version, encryption_key_version
+	`, strings.TrimSpace(authorizationID), profileID, provider).Scan(&encrypted, &cipherVersion, &keyVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var active bool
 		err = pollTx.QueryRow(ctx, `
@@ -255,11 +323,15 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 		return Status{}, fmt.Errorf("commit tracking authorization poll claim: %w", err)
 	}
 
-	code, err := s.cipher.decrypt(encrypted, profileID+":"+provider+":authorization")
+	code, err := s.cipher.decrypt(encrypted, profileID+":"+provider+":authorization", cipherVersion, keyVersion)
 	if err != nil {
 		return Status{}, err
 	}
-	token, err := s.client.pollDeviceAuthorization(ctx, provider, code)
+	runtime, err := trackingRuntime(ctx, provider)
+	if err != nil {
+		return Status{}, err
+	}
+	token, err := runtime.client.pollDeviceAuthorization(ctx, provider, code)
 	if err != nil {
 		return Status{}, providerFacingError(err)
 	}
@@ -288,12 +360,13 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 		return Status{}, fmt.Errorf("lock tracking outbox connection: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO profile_tracking_accounts (profile_id, provider, access_token_encrypted, refresh_token_encrypted, token_expires_at)
-		VALUES ($1::uuid, $2, $3, NULLIF($4, ''::bytea), $5)
+		INSERT INTO profile_tracking_accounts (profile_id, provider, access_token_encrypted, refresh_token_encrypted, cipher_version, encryption_key_version, token_expires_at)
+		VALUES ($1::uuid, $2, $3, NULLIF($4, ''::bytea), $5, $6, $7)
 		ON CONFLICT (profile_id, provider) DO UPDATE SET access_token_encrypted = EXCLUDED.access_token_encrypted,
-			refresh_token_encrypted = EXCLUDED.refresh_token_encrypted, token_expires_at = EXCLUDED.token_expires_at,
+			refresh_token_encrypted = EXCLUDED.refresh_token_encrypted, cipher_version = EXCLUDED.cipher_version,
+			encryption_key_version = EXCLUDED.encryption_key_version, token_expires_at = EXCLUDED.token_expires_at,
 			connected_at = now(), updated_at = now(), last_error = NULL
-	`, profileID, provider, accessEncrypted, refreshEncrypted, token.ExpiresAt); err != nil {
+	`, profileID, provider, accessEncrypted, refreshEncrypted, s.cipher.cipherVersion(), s.cipher.keyVersion(), token.ExpiresAt); err != nil {
 		return Status{}, fmt.Errorf("store tracking connection: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM profile_tracking_authorizations WHERE profile_id = $1::uuid AND provider = $2`, profileID, provider); err != nil {
@@ -397,6 +470,7 @@ func (s *Service) seedProfileState(ctx context.Context, tx pgx.Tx, profileID, pr
 }
 
 func (s *Service) UpdatePreferences(ctx context.Context, principal auth.Principal, profileID, provider string, input PreferencesInput) (Status, error) {
+	ctx = s.pinProviders(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Status{}, fmt.Errorf("begin tracking preferences update: %w", err)
@@ -470,6 +544,7 @@ func (s *Service) UpdatePreferences(ctx context.Context, principal auth.Principa
 }
 
 func (s *Service) Disconnect(ctx context.Context, principal auth.Principal, profileID, provider string) error {
+	ctx = s.pinProviders(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tracking disconnect: %w", err)
@@ -487,17 +562,18 @@ func (s *Service) Disconnect(ctx context.Context, principal auth.Principal, prof
 		return fmt.Errorf("lock tracking outbox disconnect: %w", err)
 	}
 	var encrypted []byte
+	var cipherVersion, keyVersion int
 	err = tx.QueryRow(ctx, `
 		WITH deleted_account AS (
 			DELETE FROM profile_tracking_accounts
 			WHERE profile_id = $1::uuid AND provider = $2
-			RETURNING access_token_encrypted
+			RETURNING access_token_encrypted, cipher_version, encryption_key_version
 		), deleted_authorization AS (
 			DELETE FROM profile_tracking_authorizations
 			WHERE profile_id = $1::uuid AND provider = $2
 		)
-		SELECT access_token_encrypted FROM deleted_account
-	`, profileID, provider).Scan(&encrypted)
+		SELECT access_token_encrypted, cipher_version, encryption_key_version FROM deleted_account
+	`, profileID, provider).Scan(&encrypted, &cipherVersion, &keyVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit tracking disconnect: %w", err)
@@ -507,14 +583,14 @@ func (s *Service) Disconnect(ctx context.Context, principal auth.Principal, prof
 	if err != nil {
 		return fmt.Errorf("disconnect tracking account: %w", err)
 	}
-	accessToken, decryptErr := s.cipher.decrypt(encrypted, profileID+":"+provider+":access")
+	accessToken, decryptErr := s.cipher.decrypt(encrypted, profileID+":"+provider+":access", cipherVersion, keyVersion)
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit tracking disconnect: %w", err)
 	}
-	if decryptErr == nil {
+	if runtime, runtimeErr := trackingRuntime(ctx, provider); decryptErr == nil && runtimeErr == nil {
 		revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		_ = s.client.revoke(revokeCtx, provider, accessToken)
+		_ = runtime.client.revoke(revokeCtx, provider, accessToken)
 	}
 	return nil
 }
@@ -807,6 +883,7 @@ func (s *Service) claim(ctx context.Context) (queuedWork, bool, error) {
 }
 
 func (s *Service) process(ctx context.Context, work queuedWork) error {
+	ctx = s.pinProviders(ctx)
 	var latest bool
 	if err := s.pool.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -839,7 +916,11 @@ func (s *Service) process(ctx context.Context, work queuedWork) error {
 	if err != nil {
 		return err
 	}
-	err = s.client.send(ctx, work.Provider, access, work.EventType, event, item)
+	runtime, runtimeErr := trackingRuntime(ctx, work.Provider)
+	if runtimeErr != nil {
+		return runtimeErr
+	}
+	err = runtime.client.send(ctx, work.Provider, access, work.EventType, event, item)
 	if upstream, ok := err.(*upstreamError); ok && upstream.status == http.StatusUnauthorized && work.Provider == "trakt" {
 		if _, refreshErr := s.refreshAccessToken(ctx, work.ProfileID); refreshErr != nil {
 			return refreshErr
@@ -848,15 +929,17 @@ func (s *Service) process(ctx context.Context, work queuedWork) error {
 		if refreshErr != nil {
 			return refreshErr
 		}
-		return s.client.send(ctx, work.Provider, access, work.EventType, event, item)
+		return runtime.client.send(ctx, work.Provider, access, work.EventType, event, item)
 	}
 	return err
 }
 
 func (s *Service) accessToken(ctx context.Context, profileID, provider string) (string, error) {
+	ctx = s.pinProviders(ctx)
 	var encrypted, refreshEncrypted []byte
+	var cipherVersion, keyVersion int
 	var expiresAt *time.Time
-	if err := s.pool.QueryRow(ctx, `SELECT access_token_encrypted, refresh_token_encrypted, token_expires_at FROM profile_tracking_accounts WHERE profile_id = $1::uuid AND provider = $2`, profileID, provider).Scan(&encrypted, &refreshEncrypted, &expiresAt); errors.Is(err, pgx.ErrNoRows) {
+	if err := s.pool.QueryRow(ctx, `SELECT access_token_encrypted, refresh_token_encrypted, cipher_version, encryption_key_version, token_expires_at FROM profile_tracking_accounts WHERE profile_id = $1::uuid AND provider = $2`, profileID, provider).Scan(&encrypted, &refreshEncrypted, &cipherVersion, &keyVersion, &expiresAt); errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotConnected
 	} else if err != nil {
 		return "", fmt.Errorf("query tracking token: %w", err)
@@ -867,19 +950,25 @@ func (s *Service) accessToken(ctx context.Context, profileID, provider string) (
 		}
 		return s.accessToken(ctx, profileID, provider)
 	}
-	return s.cipher.decrypt(encrypted, profileID+":"+provider+":access")
+	return s.cipher.decrypt(encrypted, profileID+":"+provider+":access", cipherVersion, keyVersion)
 }
 
 func (s *Service) refreshAccessToken(ctx context.Context, profileID string) (providerToken, error) {
+	ctx = s.pinProviders(ctx)
 	var encrypted []byte
-	if err := s.pool.QueryRow(ctx, `SELECT refresh_token_encrypted FROM profile_tracking_accounts WHERE profile_id = $1::uuid AND provider = 'trakt'`, profileID).Scan(&encrypted); err != nil {
+	var cipherVersion, keyVersion int
+	if err := s.pool.QueryRow(ctx, `SELECT refresh_token_encrypted, cipher_version, encryption_key_version FROM profile_tracking_accounts WHERE profile_id = $1::uuid AND provider = 'trakt'`, profileID).Scan(&encrypted, &cipherVersion, &keyVersion); err != nil {
 		return providerToken{}, fmt.Errorf("query Trakt refresh token: %w", err)
 	}
-	refresh, err := s.cipher.decrypt(encrypted, profileID+":trakt:refresh")
+	refresh, err := s.cipher.decrypt(encrypted, profileID+":trakt:refresh", cipherVersion, keyVersion)
 	if err != nil {
 		return providerToken{}, err
 	}
-	token, err := s.client.refreshTrakt(ctx, refresh)
+	runtime, err := trackingRuntime(ctx, "trakt")
+	if err != nil {
+		return providerToken{}, err
+	}
+	token, err := runtime.client.refreshTrakt(ctx, refresh)
 	if err != nil {
 		return providerToken{}, err
 	}
@@ -891,7 +980,7 @@ func (s *Service) refreshAccessToken(ctx context.Context, profileID string) (pro
 	if err != nil {
 		return providerToken{}, err
 	}
-	_, err = s.pool.Exec(ctx, `UPDATE profile_tracking_accounts SET access_token_encrypted = $2, refresh_token_encrypted = $3, token_expires_at = $4, updated_at = now(), last_error = NULL WHERE profile_id = $1::uuid AND provider = 'trakt'`, profileID, accessEncrypted, refreshEncrypted, token.ExpiresAt)
+	_, err = s.pool.Exec(ctx, `UPDATE profile_tracking_accounts SET access_token_encrypted = $2, refresh_token_encrypted = $3, cipher_version = $4, encryption_key_version = $5, token_expires_at = $6, updated_at = now(), last_error = NULL WHERE profile_id = $1::uuid AND provider = 'trakt'`, profileID, accessEncrypted, refreshEncrypted, s.cipher.cipherVersion(), s.cipher.keyVersion(), token.ExpiresAt)
 	if err != nil {
 		return providerToken{}, fmt.Errorf("store refreshed Trakt token: %w", err)
 	}

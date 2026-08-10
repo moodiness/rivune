@@ -451,7 +451,7 @@ func (s *Service) updateAvatar(
 		return Profile{}, fmt.Errorf("query profile avatar update: %w", err)
 	}
 	profile.CanManage = true
-	profile.AccessTimezone = s.defaultTimezone
+	profile.AccessTimezone = s.runtimeTimezone(ctx)
 	profile.Accessible = profileAccessible(profile, time.Now().UTC())
 	profile.AvatarKind = "preset"
 	if custom {

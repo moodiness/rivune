@@ -15,6 +15,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/config"
 	"github.com/moodiness/rivune/server/internal/demo"
 	"github.com/moodiness/rivune/server/internal/instance"
+	"github.com/moodiness/rivune/server/internal/runtimesettings"
 	"github.com/moodiness/rivune/server/internal/settings"
 	"github.com/moodiness/rivune/server/internal/tracking"
 )
@@ -85,6 +86,19 @@ func (f *fakeInstanceService) ReleaseDemoSession(context.Context, string) (func(
 func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
 	service := &fakeInstanceService{info: instance.Info{Name: "Rivune", SetupRequired: true}}
 	api := testAPI(service)
+	runtimeSource, err := runtimesettings.New(runtimesettings.Values{
+		Revision:                1,
+		Timezone:                "Europe/Paris",
+		HardwareAcceleration:    runtimesettings.DefaultHardwareAcceleration,
+		TranscodeMaxBitrateKbps: runtimesettings.DefaultTranscodeMaxBitrateKbps,
+		MediaMaxStorageMB:       runtimesettings.DefaultMediaMaxStorageMB,
+		ArtworkMaxStorageMB:     runtimesettings.DefaultArtworkMaxStorageMB,
+		AllowTranscoding:        true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.runtimeSettings = &runtimeSettingsCoordinator{source: runtimeSource}
 	request := httptest.NewRequest(http.MethodGet, "/.well-known/rivune", nil)
 	response := httptest.NewRecorder()
 
@@ -299,7 +313,7 @@ func startDemoSession(t *testing.T, handler http.Handler) *http.Cookie {
 
 func testAPI(service instanceService) *API {
 	api := &API{
-		config:                config.Config{PublicURL: "https://media.example", Timezone: "Europe/Paris"},
+		config:                config.Config{PublicURL: "https://media.example"},
 		instances:             service,
 		settings:              &fakeSettingsService{instance: settings.Layer{SchemaVersion: 1}},
 		logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),

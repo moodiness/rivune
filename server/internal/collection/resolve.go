@@ -24,6 +24,7 @@ const (
 )
 
 func (service *Service) ResolveFolder(ctx context.Context, principal auth.Principal, collectionID, folderID string, page, limit int, language, region string) (ResolvedFolder, error) {
+	ctx = service.pinProviders(ctx)
 	value, err := service.Get(ctx, principal, collectionID)
 	if err != nil {
 		return ResolvedFolder{}, err
@@ -48,10 +49,12 @@ func (service *Service) ResolveFolder(ctx context.Context, principal auth.Princi
 }
 
 func (service *Service) LookupTMDB(ctx context.Context, principal auth.Principal, kind, query, language string, page int) ([]LookupResult, error) {
+	ctx = service.pinProviders(ctx)
 	if _, err := service.validateActiveProfile(ctx, principal); err != nil {
 		return nil, err
 	}
-	if service.tmdb == nil {
+	providers := collectionProviders(ctx)
+	if providers.TMDB == nil {
 		return nil, ErrProviderUnavailable
 	}
 	kind = strings.ToLower(strings.TrimSpace(kind))
@@ -60,7 +63,7 @@ func (service *Service) LookupTMDB(ctx context.Context, principal auth.Principal
 	if err != nil || !map[string]bool{"company": true, "collection": true, "person": true, "keyword": true}[kind] || !validText(query, 1, 200) || page < 1 || page > 1000 {
 		return nil, ErrInvalidInput
 	}
-	results, err := service.tmdb.LookupCollectionSource(ctx, kind, query, language, page)
+	results, err := providers.TMDB.LookupCollectionSource(ctx, kind, query, language, page)
 	if _, err := service.validateActiveProfile(ctx, principal); err != nil {
 		return nil, err
 	}
@@ -71,10 +74,12 @@ func (service *Service) LookupTMDB(ctx context.Context, principal auth.Principal
 }
 
 func (service *Service) TMDBGenres(ctx context.Context, principal auth.Principal, mediaType, language string) ([]Genre, error) {
+	ctx = service.pinProviders(ctx)
 	if _, err := service.validateActiveProfile(ctx, principal); err != nil {
 		return nil, err
 	}
-	if service.tmdb == nil {
+	providers := collectionProviders(ctx)
+	if providers.TMDB == nil {
 		return nil, ErrProviderUnavailable
 	}
 	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
@@ -82,7 +87,7 @@ func (service *Service) TMDBGenres(ctx context.Context, principal auth.Principal
 	if err != nil || mediaType != MediaTypeMovie && mediaType != MediaTypeSeries {
 		return nil, ErrInvalidInput
 	}
-	genres, err := service.tmdb.CollectionGenres(ctx, mediaType, language)
+	genres, err := providers.TMDB.CollectionGenres(ctx, mediaType, language)
 	if _, err := service.validateActiveProfile(ctx, principal); err != nil {
 		return nil, err
 	}
@@ -93,6 +98,7 @@ func (service *Service) TMDBGenres(ctx context.Context, principal auth.Principal
 }
 
 func (service *Service) resolve(ctx context.Context, principal auth.Principal, collectionID string, folder Folder, page, limit int, language, region string) (ResolvedFolder, error) {
+	ctx = service.pinProviders(ctx)
 	language, region, err := normalizeResolutionOptions(language, region)
 	if err != nil || page < 1 || page > 1000 || limit < 1 || limit > 200 {
 		return ResolvedFolder{}, ErrInvalidInput
@@ -205,6 +211,8 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, c
 }
 
 func (service *Service) resolveSource(ctx context.Context, principal auth.Principal, source Source, page int, language, region string) (SourcePage, error) {
+	ctx = service.pinProviders(ctx)
+	providers := collectionProviders(ctx)
 	switch source.Kind {
 	case SourceKindAddonCatalog:
 		if service.addon == nil {
@@ -244,22 +252,22 @@ func (service *Service) resolveSource(ctx context.Context, principal auth.Princi
 		}
 		return parseAddonCatalog(ctx, result.Payload, page)
 	case SourceKindTMDB:
-		if service.tmdb == nil {
+		if providers.TMDB == nil {
 			return SourcePage{}, ErrProviderUnavailable
 		}
-		result, err := service.tmdb.ResolveCollectionSource(ctx, *source.TMDB, page, language, region)
+		result, err := providers.TMDB.ResolveCollectionSource(ctx, *source.TMDB, page, language, region)
 		return accountSourcePage(ctx, result, err)
 	case SourceKindTrakt:
-		if service.trakt == nil {
+		if providers.Trakt == nil {
 			return SourcePage{}, ErrProviderUnavailable
 		}
-		result, err := service.trakt.ResolveCollectionSource(ctx, *source.Trakt, page)
+		result, err := providers.Trakt.ResolveCollectionSource(ctx, *source.Trakt, page)
 		return accountSourcePage(ctx, result, err)
 	case SourceKindMDBList:
-		if service.mdblist == nil {
+		if providers.MDBList == nil {
 			return SourcePage{}, ErrProviderUnavailable
 		}
-		result, err := service.mdblist.ResolveCollectionSource(ctx, *source.MDBList, page)
+		result, err := providers.MDBList.ResolveCollectionSource(ctx, *source.MDBList, page)
 		return accountSourcePage(ctx, result, err)
 	default:
 		return SourcePage{}, ErrInvalidInput
@@ -474,7 +482,9 @@ func (value fanartArtwork) available() bool {
 }
 
 func (service *Service) enrichFanartArtwork(ctx context.Context, sources []Source, items []Item, language string) ([]fanartArtwork, fanartArtwork, map[string]string) {
-	if service.fanart == nil || liveTVOnlySources(sources) {
+	ctx = service.pinProviders(ctx)
+	providers := collectionProviders(ctx)
+	if providers.Fanart == nil || liveTVOnlySources(sources) {
 		return nil, fanartArtwork{}, nil
 	}
 	collectionIDs := fanartCollectionTMDBIDs(sources)
@@ -499,7 +509,7 @@ func (service *Service) enrichFanartArtwork(ctx context.Context, sources []Sourc
 				collectionErrors[index] = ctx.Err()
 				return
 			}
-			value, err := service.fanart.EnrichCollection(ctx, metadata.ProviderCollection{ExternalID: tmdbID}, language)
+			value, err := providers.Fanart.EnrichCollection(ctx, metadata.ProviderCollection{ExternalID: tmdbID}, language)
 			collectionErrors[index] = err
 			collectionArtwork[index] = fanartArtwork{
 				poster:     value.PosterURL,
@@ -620,13 +630,15 @@ func fanartCollectionTMDBID(source Source) (string, bool) {
 }
 
 func (service *Service) fanartArtwork(ctx context.Context, item Item, language string) (fanartArtwork, error) {
+	ctx = service.pinProviders(ctx)
+	providers := collectionProviders(ctx)
 	switch normalizeMediaType(item.MediaType) {
 	case MediaTypeMovie:
 		tmdbID, err := service.resolveTMDBArtworkID(ctx, item)
 		if err != nil || tmdbID == "" {
 			return fanartArtwork{}, err
 		}
-		enriched, err := service.fanart.EnrichMovie(ctx, metadata.ProviderMovie{
+		enriched, err := providers.Fanart.EnrichMovie(ctx, metadata.ProviderMovie{
 			ExternalID: tmdbID, PosterURL: item.PosterURL, BackdropURL: item.BackgroundURL, LogoURL: item.LogoURL,
 			AdditionalIDs: map[string]string{"tmdb": tmdbID},
 		}, language)
@@ -638,10 +650,10 @@ func (service *Service) fanartArtwork(ctx context.Context, item Item, language s
 		tvdbID := strings.TrimSpace(item.ExternalIDs["tvdb"])
 		if tvdbID == "" {
 			tmdbID, err := service.resolveTMDBArtworkID(ctx, item)
-			if err != nil || tmdbID == "" || service.artworkMetadata == nil {
+			if err != nil || tmdbID == "" || providers.ArtworkMetadata == nil {
 				return fanartArtwork{}, err
 			}
-			series, detailsErr := service.artworkMetadata.SeriesDetails(ctx, tmdbID, language)
+			series, detailsErr := providers.ArtworkMetadata.SeriesDetails(ctx, tmdbID, language)
 			if detailsErr != nil {
 				return fanartArtwork{}, detailsErr
 			}
@@ -650,7 +662,7 @@ func (service *Service) fanartArtwork(ctx context.Context, item Item, language s
 		if tvdbID == "" {
 			return fanartArtwork{}, nil
 		}
-		enriched, err := service.fanart.EnrichSeries(ctx, metadata.ProviderSeries{
+		enriched, err := providers.Fanart.EnrichSeries(ctx, metadata.ProviderSeries{
 			PosterURL: item.PosterURL, BackdropURL: item.BackgroundURL, LogoURL: item.LogoURL,
 			AdditionalIDs: map[string]string{"tvdb": tvdbID},
 		}, language)
@@ -678,10 +690,12 @@ func fanartOverlay(item Item, poster, background, logo string) fanartArtwork {
 }
 
 func (service *Service) resolveTMDBArtworkID(ctx context.Context, item Item) (string, error) {
+	ctx = service.pinProviders(ctx)
 	if tmdbID := strings.TrimSpace(item.ExternalIDs["tmdb"]); tmdbID != "" {
 		return tmdbID, nil
 	}
-	if service.externalResolver == nil {
+	providers := collectionProviders(ctx)
+	if providers.ExternalResolver == nil {
 		return "", nil
 	}
 	for _, provider := range []string{"imdb", "tvdb"} {
@@ -689,7 +703,7 @@ func (service *Service) resolveTMDBArtworkID(ctx context.Context, item Item) (st
 		if externalID == "" {
 			continue
 		}
-		tmdbID, err := service.externalResolver.ResolveExternalID(ctx, normalizeMediaType(item.MediaType), provider, externalID)
+		tmdbID, err := providers.ExternalResolver.ResolveExternalID(ctx, normalizeMediaType(item.MediaType), provider, externalID)
 		if err != nil {
 			return "", err
 		}

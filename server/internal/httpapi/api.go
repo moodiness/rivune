@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/addon"
@@ -26,22 +27,19 @@ import (
 	"github.com/moodiness/rivune/server/internal/calendar"
 	"github.com/moodiness/rivune/server/internal/category"
 	"github.com/moodiness/rivune/server/internal/collection"
-	collectionmdblist "github.com/moodiness/rivune/server/internal/collection/mdblist"
-	collectiontrakt "github.com/moodiness/rivune/server/internal/collection/trakt"
 
 	"github.com/moodiness/rivune/server/internal/config"
 	"github.com/moodiness/rivune/server/internal/demo"
 	"github.com/moodiness/rivune/server/internal/instance"
 	"github.com/moodiness/rivune/server/internal/jellyfin"
 	"github.com/moodiness/rivune/server/internal/metadata"
-	"github.com/moodiness/rivune/server/internal/metadata/fanart"
-	"github.com/moodiness/rivune/server/internal/metadata/tmdb"
-	"github.com/moodiness/rivune/server/internal/metadata/tvdb"
 	"github.com/moodiness/rivune/server/internal/netguard"
 	"github.com/moodiness/rivune/server/internal/operations"
 	"github.com/moodiness/rivune/server/internal/playback"
 	"github.com/moodiness/rivune/server/internal/profile"
+	"github.com/moodiness/rivune/server/internal/providers"
 	"github.com/moodiness/rivune/server/internal/requestwork"
+	"github.com/moodiness/rivune/server/internal/runtimesettings"
 	"github.com/moodiness/rivune/server/internal/settings"
 	"github.com/moodiness/rivune/server/internal/tracking"
 	"github.com/moodiness/rivune/server/internal/user"
@@ -109,13 +107,18 @@ type categoryService interface {
 
 type settingsService interface {
 	Instance(context.Context) (settings.Layer, error)
-	InitializeJellyfinEnabled(context.Context, bool) (bool, error)
 	Maintenance(context.Context) (settings.Maintenance, error)
 	UpdateMaintenance(context.Context, auth.Principal, settings.Maintenance) (settings.Maintenance, error)
 	UpdateInstance(context.Context, auth.Principal, settings.Patch) (settings.Layer, error)
 	Profile(context.Context, auth.Principal, string) (settings.Layer, error)
 	UpdateProfile(context.Context, auth.Principal, string, settings.Patch) (settings.Layer, error)
 	Effective(context.Context, auth.Principal, string) (settings.Effective, error)
+}
+
+type integrationSettingsService interface {
+	IntegrationStatus(context.Context, auth.Principal) (settings.IntegrationStatus, error)
+	UpdateIntegrationCredentials(context.Context, auth.Principal, settings.IntegrationCredentialsPatch) (settings.IntegrationStatus, error)
+	ListAuditEvents(context.Context, auth.Principal, *int64, int) (settings.AuditPage, error)
 }
 
 type userService interface {
@@ -285,6 +288,8 @@ type API struct {
 	playbackMaintenance                     playbackMaintenanceService
 	operations                              operationsService
 	settings                                settingsService
+	integrationConfiguration                integrationSettingsService
+	runtimeSettings                         *runtimeSettingsCoordinator
 	users                                   userService
 	metadata                                metadataService
 	logger                                  *slog.Logger
@@ -311,49 +316,45 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	configuredLocation, err := time.LoadLocation(cfg.Timezone)
+	if cfg.EncryptionKeys == nil {
+		return nil, errors.New("RIVUNE_ENCRYPTION_KEYS is required")
+	}
+	settingsManager := settings.NewService(pool, cfg.EncryptionKeys)
+	legacyEnvironment, err := config.LoadLegacyEnvironment()
 	if err != nil {
-		return nil, fmt.Errorf("load configured timezone %q: %w", cfg.Timezone, err)
+		return nil, fmt.Errorf("load legacy environment import: %w", err)
 	}
-	authService, err := auth.NewService(pool, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.Timezone)
+	if _, err := settingsManager.ImportLegacyEnvironment(ctx, legacyEnvironment); err != nil {
+		return nil, fmt.Errorf("import legacy environment: %w", err)
+	}
+	instanceLayer, err := settingsManager.Instance(ctx)
+	var runtimeValues runtimesettings.Values
+	if errors.Is(err, pgx.ErrNoRows) {
+		runtimeValues = defaultRuntimeValues()
+	} else if err != nil {
+		return nil, fmt.Errorf("load canonical instance settings: %w", err)
+	} else {
+		runtimeValues, err = runtimeValuesFromLayer(instanceLayer)
+		if err != nil {
+			return nil, fmt.Errorf("load canonical runtime settings: %w", err)
+		}
+	}
+	integrationCredentials, err := settingsManager.LoadIntegrationCredentials(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load integration credentials: %w", err)
 	}
-	var metadataProvider metadata.Provider
-	var collectionTMDB collection.TMDBProvider
-	if cfg.TMDBAccessToken != "" {
-		tmdbClient := tmdb.New(cfg.TMDBAccessToken, nil)
-		metadataProvider = tmdbClient
-		collectionTMDB = tmdbClient
-	}
-	var televisionEnricher metadata.TelevisionEnricher
-	if cfg.TVDBAPIKey != "" {
-		televisionEnricher = tvdb.New(cfg.TVDBAPIKey, cfg.TVDBPIN, nil)
-	}
-	var artworkEnricher metadata.ArtworkEnricher
-	if cfg.FanartAPIKey != "" {
-		artworkEnricher = fanart.NewCached(cfg.FanartAPIKey, nil, pool, cfg.MetadataCacheTTL, logger)
-	}
-	artworkService, err := artworkcache.New(pool, artworkcache.Options{
-		Directory:         cfg.ArtworkCacheDir,
-		MaxBytes:          cfg.ArtworkStorageBytes,
-		LANArtworkOrigins: cfg.LANArtworkOrigins,
-		Logger:            logger,
-	})
+	const metadataCacheTTL = 24 * time.Hour
+	providerOptions := providers.BuildOptions{Pool: pool, MetadataCacheTTL: metadataCacheTTL, Logger: logger}
+	initialProviders, err := providers.Build(providerCredentials(integrationCredentials), providerOptions)
 	if err != nil {
-		return nil, fmt.Errorf("initialize artwork cache: %w", err)
+		return nil, fmt.Errorf("build integration providers: %w", err)
 	}
-	addonService := addon.NewService(pool, nil, logger)
-	var collectionTrakt collection.TraktProvider
-	if cfg.TraktClientID != "" {
-		collectionTrakt = collectiontrakt.New(cfg.TraktClientID, nil)
-	}
-	var collectionMDBList collection.MDBListProvider
-	if cfg.MDBListAPIKey != "" {
-		collectionMDBList = collectionmdblist.New(cfg.MDBListAPIKey, nil)
-	}
+	integrationCredentials = settings.IntegrationCredentials{}
+	providerRuntime := providers.NewRuntime(initialProviders, providerOptions)
+	settingsManager.SetIntegrationPublisher(newIntegrationRuntimeCoordinator(providerRuntime))
+
 	mediaProcessor, err := playback.NewFFmpegProcessor(cfg.FFmpegPath, cfg.FFprobePath, cfg.RemuxConcurrency, cfg.TranscodeThreads, playback.FFmpegOptions{
-		HardwareAcceleration: cfg.HardwareAcceleration,
+		HardwareAcceleration: runtimeValues.HardwareAcceleration,
 		VideoDevice:          cfg.VideoDevice,
 		MaximumReadRate:      cfg.TranscodeMaxReadRate,
 	})
@@ -361,6 +362,12 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		return nil, fmt.Errorf("initialize media processor: %w", err)
 	}
 	mediaDiagnostics := mediaProcessor.PlaybackDiagnostics()
+	runtimeValues.HardwareAcceleration = mediaDiagnostics.HardwareAcceleration
+	runtimeSource, err := runtimesettings.New(runtimeValues)
+	if err != nil {
+		return nil, fmt.Errorf("initialize runtime settings: %w", err)
+	}
+	runtimeSnapshot := runtimeSource.Load()
 	logger.Info("media processor initialized",
 		"ffmpegVersion", mediaDiagnostics.FFmpegVersion,
 		"ffprobeVersion", mediaDiagnostics.FFprobeVersion,
@@ -372,82 +379,92 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		"probeLimit", mediaDiagnostics.Pools.Probe.Limit,
 		"subtitleLimit", mediaDiagnostics.Pools.Subtitle.Limit,
 		"trickplayLimit", mediaDiagnostics.Pools.Trickplay.Limit,
-		"maximumVideoBitrateKbps", cfg.TranscodeMaxBitrateKbps,
+		"maximumVideoBitrateKbps", runtimeSnapshot.TranscodeMaxBitrateKbps,
 		"maximumReadRate", cfg.TranscodeMaxReadRate,
 		"initialHLSBufferSeconds", cfg.HLSInitialBufferSeconds,
-		"maximumMediaStorageBytes", cfg.MediaStorageBytes,
+		"maximumMediaStorageBytes", runtimeSnapshot.MediaMaxStorageBytes,
 	)
-	playbackService, err := playback.NewService(pool, addonService, mediaProcessor, playback.MediaOptions{
-		TempDirectory:             cfg.MediaTempDir,
-		MaxStorageBytes:           cfg.MediaStorageBytes,
-		TranscodeVideoBitrateKbps: cfg.TranscodeMaxBitrateKbps,
-		InitialBufferSeconds:      cfg.HLSInitialBufferSeconds,
+
+	addonService := addon.NewService(pool, nil, logger)
+	artworkService, err := artworkcache.New(pool, artworkcache.Options{
+		Directory:         cfg.ArtworkCacheDir,
+		MaxBytes:          runtimeSnapshot.ArtworkMaxStorageBytes,
+		LANArtworkOrigins: cfg.LANArtworkOrigins,
+		Logger:            logger,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("initialize artwork cache: %w", err)
+	}
+	playbackService, err := playback.NewServiceWithRuntimeSettings(pool, addonService, mediaProcessor, playback.MediaOptions{
+		TempDirectory:             cfg.MediaTempDir,
+		MaxStorageBytes:           runtimeSnapshot.MediaMaxStorageBytes,
+		TranscodeVideoBitrateKbps: runtimeSnapshot.TranscodeMaxBitrateKbps,
+		InitialBufferSeconds:      cfg.HLSInitialBufferSeconds,
+	}, runtimeSource)
 	if err != nil {
 		return nil, fmt.Errorf("initialize playback service: %w", err)
 	}
-	trackingService, err := tracking.NewService(pool, cfg.TrackingEncryptionKey, cfg.TraktClientID, cfg.TraktClientSecret, cfg.SimklClientID, nil, logger)
+	trackingService, err := tracking.NewServiceWithProviderSource(pool, cfg.EncryptionKeys, providerRuntime, logger)
 	if err != nil {
 		return nil, fmt.Errorf("initialize tracking integrations: %w", err)
 	}
-	metadataService := metadata.NewService(pool, metadataProvider, televisionEnricher, artworkEnricher, cfg.MetadataCacheTTL, logger, configuredLocation)
-	calendarService, err := calendar.NewService(pool, metadataService, cfg.Timezone, logger)
+	metadataService := metadata.NewServiceWithRuntimeSettings(pool, providerRuntime, metadataCacheTTL, logger, runtimeSource)
+	authService, err := auth.NewServiceWithRuntimeSettings(pool, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, runtimeSource)
+	if err != nil {
+		return nil, err
+	}
+	calendarService, err := calendar.NewServiceWithRuntimeSettings(pool, metadataService, runtimeSource, logger)
 	if err != nil {
 		return nil, fmt.Errorf("initialize calendar service: %w", err)
 	}
+	collectionService := collection.NewServiceWithProviderSource(pool, addonService, providerRuntime)
+	collectionService.SetArtworkPresenter(artworkService)
+	watchstateService := watchstate.NewServiceWithRuntimeSettings(pool, runtimeSource, providerRuntime, trackingService)
+	profileManager := profile.NewServiceWithRuntimeSettings(pool, cfg.ProfileGrantTTL, runtimeSource)
+	instanceManager := instance.NewServiceWithRuntimeSettings(pool, cfg.SetupToken, runtimeSource)
+	runtimeCoordinator := newRuntimeSettingsCoordinator(runtimeSource, settingsManager, artworkService, playbackService)
 	operationsService := operations.NewService(
 		pool, metadataService, authService, playbackService, maintenanceInterval, logger,
 	)
-	collectionService := collection.NewService(pool, addonService, collectionTMDB, collectionTrakt, collectionMDBList)
-	externalIDResolver, _ := metadataProvider.(metadata.ExternalIDResolver)
-	collectionService.SetFanartEnricher(metadataProvider, externalIDResolver, artworkEnricher, logger)
-	watchstateService := watchstate.NewService(pool, configuredLocation, trackingService)
-	watchstateService.SetCanonicalProvider(metadataProvider, externalIDResolver)
-	collectionService.SetArtworkPresenter(artworkService)
-	profileManager := profile.NewService(pool, cfg.ProfileGrantTTL, cfg.Timezone)
-	settingsManager := settings.NewService(pool)
-	jellyfinEnabled, err := settingsManager.InitializeJellyfinEnabled(ctx, cfg.JellyfinEnabled)
-	if err != nil {
-		return nil, fmt.Errorf("initialize Jellyfin setting: %w", err)
-	}
 	jellyfinCredentials, err := jellyfin.NewCredentialStore(pool)
 	if err != nil {
 		return nil, fmt.Errorf("initialize Jellyfin profile credentials: %w", err)
 	}
-	instanceManager := instance.NewService(pool, cfg.SetupToken, cfg.Timezone, cfg.JellyfinEnabled)
 	api := &API{
-		artwork:               artworkService,
-		catalogArtwork:        artworkService,
-		collectionArtwork:     artworkService,
-		addons:                addonService,
-		config:                cfg,
-		calendar:              calendarService,
-		calendarRefresh:       calendarService,
-		categories:            category.NewService(pool),
-		collections:           collectionService,
-		pool:                  pool,
-		instances:             instanceManager,
-		demo:                  demo.New(instanceManager, demo.Options{}),
-		jellyfinCredentials:   jellyfinCredentials,
-		auth:                  authService,
-		authMaintenance:       authService,
-		profiles:              profileManager,
-		playback:              playbackService,
-		playbackMaintenance:   playbackService,
-		logger:                logger,
-		settings:              settingsManager,
-		users:                 user.NewService(pool),
-		metadata:              metadataService,
-		operations:            operationsService,
-		version:               version,
-		tracking:              trackingService,
-		watchstate:            watchstateService,
-		credentialAdmission:   newCredentialAdmission(),
-		usernameAdmission:     newCredentialUsernameAdmission(),
-		deviceCodeAdmission:   newDeviceCodeAdmission(),
-		calendarFeedAdmission: newCalendarFeedAdmission(),
+		artwork:                  artworkService,
+		catalogArtwork:           artworkService,
+		collectionArtwork:        artworkService,
+		addons:                   addonService,
+		config:                   cfg,
+		calendar:                 calendarService,
+		calendarRefresh:          calendarService,
+		categories:               category.NewService(pool),
+		collections:              collectionService,
+		pool:                     pool,
+		instances:                instanceManager,
+		demo:                     demo.New(instanceManager, demo.Options{}),
+		jellyfinCredentials:      jellyfinCredentials,
+		auth:                     authService,
+		authMaintenance:          authService,
+		profiles:                 profileManager,
+		playback:                 playbackService,
+		playbackMaintenance:      playbackService,
+		logger:                   logger,
+		settings:                 settingsManager,
+		integrationConfiguration: settingsManager,
+		runtimeSettings:          runtimeCoordinator,
+		users:                    user.NewService(pool),
+		metadata:                 metadataService,
+		operations:               operationsService,
+		version:                  version,
+		tracking:                 trackingService,
+		watchstate:               watchstateService,
+		credentialAdmission:      newCredentialAdmission(),
+		usernameAdmission:        newCredentialUsernameAdmission(),
+		deviceCodeAdmission:      newDeviceCodeAdmission(),
+		calendarFeedAdmission:    newCalendarFeedAdmission(),
 	}
-	api.jellyfinCompatibilityDesired = jellyfinEnabled
+	api.jellyfinCompatibilityDesired = runtimeSnapshot.JellyfinEnabled
 	api.jellyfinCompatibilityReconciler = func(reconcileContext context.Context) (bool, error) {
 		layer, readErr := settingsManager.Instance(reconcileContext)
 		if readErr != nil {
@@ -458,7 +475,23 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		}
 		return *layer.Values.JellyfinEnabled, nil
 	}
-	api.initializeJellyfinCompatibility(pool, authService, watchstateService, collectionService, artworkService, playbackService, instanceManager, metadataService, addonService)
+	api.initializeJellyfinCompatibility(pool, authService, watchstateService, collectionService, artworkService, playbackService, instanceManager, metadataService, addonService, runtimeSource)
+	runtimeCoordinator.onReconciled = func(previous, current runtimesettings.Snapshot) {
+		if previous.JellyfinEnabled != current.JellyfinEnabled {
+			if current.JellyfinEnabled {
+				api.setJellyfinCompatibilityDesired(true)
+				return
+			}
+			if err := api.applyCanonicalJellyfinCompatibilityDesired(context.Background(), false); err != nil {
+				api.logger.Error("reconcile Jellyfin compatibility after runtime publication", "error", err)
+				api.requestJellyfinCompatibilityReconciliation()
+			}
+			return
+		}
+		if previous.JellyfinDebug != current.JellyfinDebug {
+			api.RequestJellyfinCompatibilityReplacement()
+		}
+	}
 	return api, nil
 }
 
@@ -510,6 +543,9 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/profiles/{profileId}/avatar/preset", a.requireAuthentication(a.setProfileAvatarPreset))
 	mux.Handle("GET /api/v1/settings", a.requireAuthentication(a.instanceSettings))
 	mux.Handle("PATCH /api/v1/settings", a.requireAuthentication(a.updateInstanceSettings))
+	mux.Handle("GET /api/v1/settings/integrations", a.requireAuthentication(a.integrationSettings))
+	mux.Handle("PATCH /api/v1/settings/integrations", a.requireAuthentication(a.updateIntegrationSettings))
+	mux.Handle("GET /api/v1/settings/audit", a.requireAuthentication(a.configurationAudit))
 	mux.Handle("GET /api/v1/settings/maintenance", a.requireAuthentication(a.maintenanceSettings))
 	mux.Handle("PUT /api/v1/settings/maintenance", a.requireAuthentication(a.updateMaintenanceSettings))
 	mux.Handle("GET /api/v1/operations", a.requireAuthentication(a.operationsOverview))
@@ -599,7 +635,14 @@ func (a *API) Handler() http.Handler {
 	if a.demo != nil {
 		nativeHandler = a.demo.Handler(nativeHandler)
 	}
-	return a.routeJellyfinCompatibility(a.middleware(nativeHandler))
+	routed := a.routeJellyfinCompatibility(a.middleware(nativeHandler))
+	if a.runtimeSettings == nil {
+		return routed
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := runtimesettings.Pin(r.Context(), a.runtimeSettings.source)
+		routed.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
@@ -629,6 +672,10 @@ func (a *API) discovery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	interfaceLanguage := settings.DefaultInterfaceLanguage
+	timezone := settings.DefaultTimezone
+	if a.runtimeSettings != nil {
+		timezone = a.runtimeSettings.source.Load().Timezone
+	}
 	if !info.SetupRequired {
 		instanceSettings, err := a.settings.Instance(r.Context())
 		if err != nil {
@@ -637,6 +684,9 @@ func (a *API) discovery(w http.ResponseWriter, r *http.Request) {
 		}
 		if instanceSettings.Values.InterfaceLanguage != nil {
 			interfaceLanguage = *instanceSettings.Values.InterfaceLanguage
+		}
+		if a.runtimeSettings == nil && instanceSettings.Values.Timezone != nil {
+			timezone = *instanceSettings.Values.Timezone
 		}
 	}
 
@@ -652,7 +702,7 @@ func (a *API) discovery(w http.ResponseWriter, r *http.Request) {
 		"setupRequired":     info.SetupRequired,
 		"setupCompleted":    !info.SetupRequired,
 		"demoAvailable":     info.SetupRequired,
-		"timezone":          a.config.Timezone,
+		"timezone":          timezone,
 		"interfaceLanguage": interfaceLanguage,
 	})
 }
@@ -726,9 +776,11 @@ func (a *API) setup(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestContext, counters := requestwork.WithCounters(
-			auth.WithClientIP(r.Context(), requestClientIP(r, a.config.TrustedProxies)),
-		)
+		requestContext := auth.WithClientIP(r.Context(), requestClientIP(r, a.config.TrustedProxies))
+		if a.runtimeSettings != nil {
+			requestContext = runtimesettings.Pin(requestContext, a.runtimeSettings.source)
+		}
+		requestContext, counters := requestwork.WithCounters(requestContext)
 		r = r.WithContext(requestContext)
 		started := time.Now()
 		observed := &nativeObservedResponseWriter{ResponseWriter: w}

@@ -28,6 +28,32 @@ type providerClient struct {
 	simkl providerConfig
 }
 
+// Runtime is an immutable tracking provider client generation.
+type Runtime struct {
+	client *providerClient
+}
+
+func NewRuntime(traktClientID, traktClientSecret, simklClientID string, httpClient *http.Client) *Runtime {
+	return &Runtime{client: newProviderClient(traktClientID, traktClientSecret, simklClientID, httpClient)}
+}
+
+func (runtime *Runtime) configured(provider string) bool {
+	return runtime != nil && runtime.client != nil && runtime.client.configured(provider)
+}
+
+type ProviderSet struct {
+	Generation int64
+	Runtime    *Runtime
+}
+
+func NewProviderSet(generation int64, runtime *Runtime) ProviderSet {
+	return ProviderSet{Generation: generation, Runtime: runtime}
+}
+
+type ProviderSource interface {
+	TrackingProviders() ProviderSet
+}
+
 type deviceCode struct {
 	Provider        string
 	ProviderCode    string

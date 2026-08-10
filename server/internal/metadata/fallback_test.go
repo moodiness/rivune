@@ -39,7 +39,7 @@ func TestEnglishOverviewFallbackFillsBlankMovieWithoutReplacingLocalizedFields(t
 		}
 		return ProviderMovie{ExternalID: "42", Title: "Titre français", Overview: "  ", Tagline: "Accroche française"}, nil
 	}}, nil, nil, 0, nil)
-	provider := service.provider
+	provider := service.providerSource.MetadataProviders().Primary
 
 	movie, err := provider.MovieDetails(context.Background(), "42", "fr-FR")
 	if err != nil {

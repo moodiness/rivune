@@ -17,6 +17,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/category"
 	"github.com/moodiness/rivune/server/internal/password"
+	"github.com/moodiness/rivune/server/internal/runtimesettings"
 )
 
 var (
@@ -52,6 +53,7 @@ type Service struct {
 	accessTTL                         time.Duration
 	refreshTTL                        time.Duration
 	timezone                          string
+	runtimeSettings                   *runtimesettings.Source
 	dummyHash                         string
 	deviceAuthorizationCapacity       int
 	deviceAuthorizationSourceCapacity int
@@ -175,6 +177,25 @@ func NewService(pool *pgxpool.Pool, accessTTL, refreshTTL time.Duration, timezon
 		deviceAuthorizationCapacity:       maximumOutstandingDeviceAuthorizations,
 		deviceAuthorizationSourceCapacity: maximumOutstandingDeviceAuthorizationsPerSource,
 	}, nil
+}
+
+func NewServiceWithRuntimeSettings(pool *pgxpool.Pool, accessTTL, refreshTTL time.Duration, runtimeSettings *runtimesettings.Source) (*Service, error) {
+	if runtimeSettings == nil {
+		return nil, errors.New("authentication runtime settings are required")
+	}
+	service, err := NewService(pool, accessTTL, refreshTTL, runtimeSettings.Load().Timezone)
+	if err != nil {
+		return nil, err
+	}
+	service.runtimeSettings = runtimeSettings
+	return service, nil
+}
+
+func (s *Service) runtimeTimezone(ctx context.Context) string {
+	if s.runtimeSettings != nil {
+		return runtimesettings.Load(ctx, s.runtimeSettings).Timezone
+	}
+	return s.timezone
 }
 
 func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error) {
@@ -368,7 +389,7 @@ func (s *Service) LoginJellyfinProfile(ctx context.Context, input JellyfinProfil
 	}
 
 	now := time.Now().UTC()
-	access.AccessTimezone = s.timezone
+	access.AccessTimezone = s.runtimeTimezone(ctx)
 	if !grantExists || !ProfileAccessibleAt(access, now) {
 		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
 	}
@@ -720,7 +741,7 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 		principal.ProfileContextHash = nil
 	}
 	principal.Category = newCategoryRef(principal.CategoryID, categoryName, categoryColor, categoryIcon)
-	access.AccessTimezone = s.timezone
+	access.AccessTimezone = s.runtimeTimezone(ctx)
 	activeProfileID := principal.ActiveProfileID
 	if reconcileProfileGrant(&principal, access, time.Now().UTC()) {
 		if _, err := s.pool.Exec(ctx, `
@@ -792,6 +813,7 @@ func (s *Service) Account(ctx context.Context, principal Principal) (Account, er
 	profiles := make([]Profile, 0)
 	activeProfileVisible := principal.ActiveProfileID == nil
 	now := time.Now().UTC()
+	timezone := s.runtimeTimezone(ctx)
 	for rows.Next() {
 		var profile Profile
 		var customAvatar bool
@@ -804,7 +826,7 @@ func (s *Service) Account(ctx context.Context, principal Principal) (Account, er
 			rows.Close()
 			return Account{}, fmt.Errorf("scan account profile: %w", err)
 		}
-		profile.AccessTimezone = s.timezone
+		profile.AccessTimezone = timezone
 		profile.Accessible = ProfileAccessibleAt(ProfileAccess{
 			Enabled: profile.Enabled, AvailableFrom: profile.AvailableFrom, AvailableUntil: profile.AvailableUntil,
 			AccessStartTime: profile.AccessStartTime, AccessEndTime: profile.AccessEndTime, AccessTimezone: profile.AccessTimezone,

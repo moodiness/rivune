@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/secretcrypto"
 )
 
 const (
@@ -95,6 +96,8 @@ func TestCompleteDeviceAuthorizationReportsMissingAndExpiredAsGone(t *testing.T)
 			profile_id uuid NOT NULL,
 			provider text NOT NULL,
 			provider_code_encrypted bytea NOT NULL,
+			cipher_version smallint NOT NULL DEFAULT 1,
+			encryption_key_version integer NOT NULL DEFAULT 1,
 			interval_seconds integer NOT NULL,
 			expires_at timestamptz NOT NULL,
 			last_polled_at timestamptz
@@ -145,7 +148,10 @@ func TestCompleteDeviceAuthorizationClaimsPollBeforeProviderCall(t *testing.T) {
 	defer provider.Close()
 	defer release()
 
-	encryptionKey := bytes.Repeat([]byte{0x42}, 32)
+	encryptionKey, err := secretcrypto.NewKeyring([]secretcrypto.Key{{Version: 1, Bytes: bytes.Repeat([]byte{0x42}, 32)}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	firstService, err := NewService(pool, encryptionKey, "trakt-client", "trakt-secret", "", provider.Client(), nil)
 	if err != nil {
 		t.Fatalf("create first tracking service: %v", err)
@@ -387,6 +393,8 @@ func openTrackingConcurrencyTestPool(t *testing.T) *pgxpool.Pool {
 			profile_id uuid NOT NULL,
 			provider text NOT NULL,
 			provider_code_encrypted bytea NOT NULL,
+			cipher_version smallint NOT NULL DEFAULT 1,
+			encryption_key_version integer NOT NULL DEFAULT 1,
 			interval_seconds integer NOT NULL,
 			expires_at timestamptz NOT NULL,
 			last_polled_at timestamptz

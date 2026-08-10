@@ -4,7 +4,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"net/netip"
 	"net/url"
@@ -14,11 +13,11 @@ import (
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/netguard"
+	"github.com/moodiness/rivune/server/internal/secretcrypto"
 )
 
 const (
 	defaultListenAddress           = ":8080"
-	defaultTimezone                = "UTC"
 	defaultDatabaseHost            = "localhost"
 	defaultDatabasePort            = 5432
 	defaultDatabaseName            = "rivune"
@@ -26,172 +25,105 @@ const (
 	defaultAccessTokenTTL          = 15 * time.Minute
 	defaultRefreshTokenTTL         = 30 * 24 * time.Hour
 	defaultProfileGrantTTL         = 12 * time.Hour
-	defaultMetadataCacheTTL        = 24 * time.Hour
 	defaultRemuxConcurrency        = 4
 	defaultTranscodeThreads        = 4
-	defaultTranscodeMaxBitrateKbps = 12000
 	defaultTranscodeMaxReadRate    = 1.5
 	defaultHLSInitialBufferSeconds = 6
-	defaultMediaStorageMB          = 20480
-	defaultArtworkStorageMB        = 20480
-	defaultHardwareAcceleration    = "auto"
 	defaultVideoDevice             = "/dev/dri/renderD128"
 )
 
 type Config struct {
-	ListenAddress           string
-	PublicURL               string
-	DatabaseURL             string
-	Timezone                string
-	SetupToken              string
-	JellyfinEnabled         bool
-	JellyfinDebug           bool
-	AccessTokenTTL          time.Duration
-	RefreshTokenTTL         time.Duration
-	ProfileGrantTTL         time.Duration
+	ListenAddress            string
+	PublicURL                string
+	DatabaseURL              string
+	SetupToken               string
+	EncryptionKeys           *secretcrypto.Keyring
+	EncryptionKeysFromLegacy bool
+	AccessTokenTTL           time.Duration
+	RefreshTokenTTL          time.Duration
+	ProfileGrantTTL          time.Duration
+	TrustedProxies           []netip.Prefix
+	NAT64Prefixes            []netip.Prefix
+	FFmpegPath               string
+	FFprobePath              string
+	RemuxConcurrency         int
+	TranscodeThreads         int
+	TranscodeMaxReadRate     float64
+	HLSInitialBufferSeconds  int
+	VideoDevice              string
+	MediaTempDir             string
+	ArtworkCacheDir          string
+	LANArtworkOrigins        []string
+}
+
+func (Config) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("bootstrap configuration cannot be serialized")
+}
+
+func (Config) String() string   { return "[REDACTED bootstrap configuration]" }
+func (Config) GoString() string { return "[REDACTED bootstrap configuration]" }
+
+// LegacyEnvironment is startup migration input only. Callers must never use it
+// as a runtime fallback after ImportLegacyEnvironment has completed.
+type LegacyEnvironment struct {
+	Timezone                *string
+	JellyfinEnabled         *bool
+	JellyfinDebug           *bool
+	HardwareAcceleration    *string
+	TranscodeMaxBitrateKbps *int
+	MediaMaxStorageMB       *int
+	ArtworkMaxStorageMB     *int
+	AllowTranscoding        *bool
 	TMDBAccessToken         string
 	FanartAPIKey            string
 	MDBListAPIKey           string
-	MetadataCacheTTL        time.Duration
 	TVDBAPIKey              string
 	TVDBPIN                 string
 	TraktClientID           string
 	TraktClientSecret       string
 	SimklClientID           string
-	TrackingEncryptionKey   []byte
-	TrustedProxies          []netip.Prefix
-	NAT64Prefixes           []netip.Prefix
-	FFmpegPath              string
-	FFprobePath             string
-	RemuxConcurrency        int
-	TranscodeThreads        int
-	TranscodeMaxBitrateKbps int
-	TranscodeMaxReadRate    float64
-	HLSInitialBufferSeconds int
-	HardwareAcceleration    string
-	VideoDevice             string
-	MediaTempDir            string
-	ArtworkCacheDir         string
-	MediaStorageBytes       int64
-	ArtworkStorageBytes     int64
-	LANArtworkOrigins       []string
+	invalid                 map[string]error
+}
+
+func (LegacyEnvironment) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("legacy environment migration input cannot be serialized")
+}
+
+func (LegacyEnvironment) String() string   { return "[REDACTED legacy environment]" }
+func (LegacyEnvironment) GoString() string { return "[REDACTED legacy environment]" }
+
+func (legacy LegacyEnvironment) ValidationError(setting string) error {
+	return legacy.invalid[setting]
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		ListenAddress:        envOrDefault("RIVUNE_LISTEN_ADDRESS", defaultListenAddress),
-		PublicURL:            strings.TrimRight(strings.TrimSpace(os.Getenv("RIVUNE_PUBLIC_URL")), "/"),
-		Timezone:             envOrDefault("TZ", defaultTimezone),
-		SetupToken:           strings.TrimSpace(os.Getenv("RIVUNE_SETUP_TOKEN")),
-		TMDBAccessToken:      strings.TrimSpace(os.Getenv("RIVUNE_TMDB_ACCESS_TOKEN")),
-		FanartAPIKey:         strings.TrimSpace(os.Getenv("RIVUNE_FANART_API_KEY")),
-		MDBListAPIKey:        strings.TrimSpace(os.Getenv("RIVUNE_MDBLIST_API_KEY")),
-		TVDBAPIKey:           strings.TrimSpace(os.Getenv("RIVUNE_TVDB_API_KEY")),
-		TVDBPIN:              strings.TrimSpace(os.Getenv("RIVUNE_TVDB_PIN")),
-		TraktClientID:        strings.TrimSpace(os.Getenv("RIVUNE_TRAKT_CLIENT_ID")),
-		TraktClientSecret:    strings.TrimSpace(os.Getenv("RIVUNE_TRAKT_CLIENT_SECRET")),
-		SimklClientID:        strings.TrimSpace(os.Getenv("RIVUNE_SIMKL_CLIENT_ID")),
-		FFmpegPath:           envOrDefault("RIVUNE_FFMPEG_PATH", "ffmpeg"),
-		FFprobePath:          envOrDefault("RIVUNE_FFPROBE_PATH", "ffprobe"),
-		MediaTempDir:         strings.TrimSpace(os.Getenv("RIVUNE_MEDIA_TEMP_DIR")),
-		ArtworkCacheDir:      envOrDefault("RIVUNE_ARTWORK_CACHE_DIR", "/var/lib/rivune/artwork"),
-		HardwareAcceleration: strings.ToLower(envOrDefault("RIVUNE_HARDWARE_ACCELERATION", defaultHardwareAcceleration)),
-		VideoDevice:          envOrDefault("RIVUNE_VIDEO_DEVICE", defaultVideoDevice),
+		ListenAddress:           envOrDefault("RIVUNE_LISTEN_ADDRESS", defaultListenAddress),
+		PublicURL:               strings.TrimRight(strings.TrimSpace(os.Getenv("RIVUNE_PUBLIC_URL")), "/"),
+		SetupToken:              strings.TrimSpace(os.Getenv("RIVUNE_SETUP_TOKEN")),
+		FFmpegPath:              "ffmpeg",
+		FFprobePath:             "ffprobe",
+		RemuxConcurrency:        defaultRemuxConcurrency,
+		TranscodeThreads:        defaultTranscodeThreads,
+		TranscodeMaxReadRate:    defaultTranscodeMaxReadRate,
+		HLSInitialBufferSeconds: defaultHLSInitialBufferSeconds,
+		VideoDevice:             defaultVideoDevice,
+		ArtworkCacheDir:         envOrDefault("RIVUNE_ARTWORK_CACHE_DIR", "/var/lib/rivune/artwork"),
+		MediaTempDir:            strings.TrimSpace(os.Getenv("RIVUNE_MEDIA_TEMP_DIR")),
 	}
-
-	trackingKey := strings.TrimSpace(os.Getenv("RIVUNE_TRACKING_ENCRYPTION_KEY"))
 
 	var err error
-	cfg.JellyfinEnabled, err = loadStrictBoolean("RIVUNE_JELLYFIN_ENABLED")
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.JellyfinDebug, err = loadStrictBoolean("RIVUNE_JELLYFIN_DEBUG")
-	if err != nil {
-		return Config{}, err
-	}
 	cfg.DatabaseURL, err = loadDatabaseURL()
 	if err != nil {
 		return Config{}, err
 	}
-	if _, err := time.LoadLocation(cfg.Timezone); err != nil {
-		return Config{}, fmt.Errorf("TZ must be a valid IANA timezone: %w", err)
-	}
-
-	cfg.AccessTokenTTL, err = loadDuration("RIVUNE_ACCESS_TOKEN_TTL", defaultAccessTokenTTL, time.Minute, time.Hour)
+	cfg.EncryptionKeys, cfg.EncryptionKeysFromLegacy, err = loadEncryptionKeys()
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.RefreshTokenTTL, err = loadDuration("RIVUNE_REFRESH_TOKEN_TTL", defaultRefreshTokenTTL, time.Hour, 365*24*time.Hour)
-	if err != nil {
-		return Config{}, err
-	}
-	if cfg.RefreshTokenTTL <= cfg.AccessTokenTTL {
-		return Config{}, errors.New("RIVUNE_REFRESH_TOKEN_TTL must be longer than RIVUNE_ACCESS_TOKEN_TTL")
-	}
-	cfg.ProfileGrantTTL, err = loadDuration("RIVUNE_PROFILE_GRANT_TTL", defaultProfileGrantTTL, 5*time.Minute, 7*24*time.Hour)
-	if err != nil {
-		return Config{}, err
-	}
-	if cfg.TVDBPIN != "" && cfg.TVDBAPIKey == "" {
-		return Config{}, errors.New("RIVUNE_TVDB_PIN requires RIVUNE_TVDB_API_KEY")
-	}
-	if cfg.TraktClientSecret != "" && cfg.TraktClientID == "" {
-		return Config{}, errors.New("RIVUNE_TRAKT_CLIENT_SECRET requires RIVUNE_TRAKT_CLIENT_ID")
-	}
-	if trackingKey != "" {
-		cfg.TrackingEncryptionKey, err = hex.DecodeString(trackingKey)
-		if err != nil || len(cfg.TrackingEncryptionKey) != 32 {
-			return Config{}, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY must be 64 hexadecimal characters encoding exactly 32 bytes")
-		}
-	} else {
-		cfg.TrackingEncryptionKey = make([]byte, 32)
-		if cfg.TraktClientID != "" && cfg.TraktClientSecret != "" || cfg.SimklClientID != "" {
-			return Config{}, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY is required when account tracking is configured")
-		}
-	}
-	cfg.MetadataCacheTTL, err = loadDuration("RIVUNE_METADATA_CACHE_TTL", defaultMetadataCacheTTL, time.Hour, 30*24*time.Hour)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.RemuxConcurrency, err = loadInteger("RIVUNE_REMUX_CONCURRENCY", defaultRemuxConcurrency, 1, 16)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.TranscodeThreads, err = loadInteger("RIVUNE_TRANSCODE_THREADS", defaultTranscodeThreads, 1, 32)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.TranscodeMaxBitrateKbps, err = loadInteger("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", defaultTranscodeMaxBitrateKbps, 64, 200000)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.TranscodeMaxReadRate, err = loadFloat("RIVUNE_TRANSCODE_MAX_READ_RATE", defaultTranscodeMaxReadRate, 1, 4)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.HLSInitialBufferSeconds, err = loadInteger("RIVUNE_HLS_INITIAL_BUFFER_SECONDS", defaultHLSInitialBufferSeconds, 3, 30)
-	if err != nil {
-		return Config{}, err
-	}
-	switch cfg.HardwareAcceleration {
-	case "auto", "software", "vaapi", "qsv", "nvenc":
-	default:
-		return Config{}, errors.New("RIVUNE_HARDWARE_ACCELERATION must be auto, software, vaapi, qsv, or nvenc")
-	}
-	if !strings.HasPrefix(cfg.VideoDevice, "/") {
-		return Config{}, errors.New("RIVUNE_VIDEO_DEVICE must be an absolute container path")
-	}
-	mediaStorageMB, err := loadInteger("RIVUNE_MEDIA_MAX_STORAGE_MB", defaultMediaStorageMB, 512, 102400)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.MediaStorageBytes = int64(mediaStorageMB) * 1024 * 1024
-	artworkStorageMB, err := loadInteger("RIVUNE_ARTWORK_MAX_STORAGE_MB", defaultArtworkStorageMB, 256, 102400)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.ArtworkStorageBytes = int64(artworkStorageMB) * 1024 * 1024
+	cfg.AccessTokenTTL = defaultAccessTokenTTL
+	cfg.RefreshTokenTTL = defaultRefreshTokenTTL
+	cfg.ProfileGrantTTL = defaultProfileGrantTTL
 	cfg.TrustedProxies, err = loadTrustedProxies(os.Getenv("RIVUNE_TRUSTED_PROXIES"))
 	if err != nil {
 		return Config{}, err
@@ -219,6 +151,69 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadEncryptionKeys() (*secretcrypto.Keyring, bool, error) {
+	if configured := os.Getenv("RIVUNE_ENCRYPTION_KEYS"); configured != "" {
+		keyring, err := secretcrypto.ParseKeyring(configured)
+		return keyring, false, err
+	}
+	legacy := strings.TrimSpace(os.Getenv("RIVUNE_TRACKING_ENCRYPTION_KEY"))
+	if legacy == "" {
+		return nil, false, errors.New("RIVUNE_ENCRYPTION_KEYS is required")
+	}
+	if len(legacy) != 64 {
+		return nil, false, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY must encode exactly 32 bytes")
+	}
+	decoded, err := hex.DecodeString(legacy)
+	if err != nil {
+		return nil, false, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY must encode exactly 32 bytes")
+	}
+	keyring, err := secretcrypto.NewKeyring([]secretcrypto.Key{{Version: 1, Bytes: decoded}})
+	if err != nil {
+		return nil, false, fmt.Errorf("initialize legacy tracking encryption key: %w", err)
+	}
+	return keyring, true, nil
+}
+
+func LoadLegacyEnvironment() (LegacyEnvironment, error) {
+	legacy := LegacyEnvironment{
+		TMDBAccessToken:   strings.TrimSpace(os.Getenv("RIVUNE_TMDB_ACCESS_TOKEN")),
+		FanartAPIKey:      strings.TrimSpace(os.Getenv("RIVUNE_FANART_API_KEY")),
+		MDBListAPIKey:     strings.TrimSpace(os.Getenv("RIVUNE_MDBLIST_API_KEY")),
+		TVDBAPIKey:        strings.TrimSpace(os.Getenv("RIVUNE_TVDB_API_KEY")),
+		TVDBPIN:           strings.TrimSpace(os.Getenv("RIVUNE_TVDB_PIN")),
+		TraktClientID:     strings.TrimSpace(os.Getenv("RIVUNE_TRAKT_CLIENT_ID")),
+		TraktClientSecret: strings.TrimSpace(os.Getenv("RIVUNE_TRAKT_CLIENT_SECRET")),
+		SimklClientID:     strings.TrimSpace(os.Getenv("RIVUNE_SIMKL_CLIENT_ID")),
+	}
+	legacy.invalid = make(map[string]error)
+	var err error
+	if legacy.Timezone, err = loadOptionalTimezone("TZ"); err != nil {
+		legacy.invalid["timezone"] = err
+	}
+	if legacy.JellyfinEnabled, err = loadOptionalBoolean("RIVUNE_JELLYFIN_ENABLED"); err != nil {
+		legacy.invalid["jellyfinEnabled"] = err
+	}
+	if legacy.JellyfinDebug, err = loadOptionalBoolean("RIVUNE_JELLYFIN_DEBUG"); err != nil {
+		legacy.invalid["jellyfinDebug"] = err
+	}
+	if legacy.AllowTranscoding, err = loadOptionalBoolean("RIVUNE_ALLOW_TRANSCODING"); err != nil {
+		legacy.invalid["allowTranscoding"] = err
+	}
+	if legacy.HardwareAcceleration, err = loadOptionalHardwareAcceleration(); err != nil {
+		legacy.invalid["hardwareAcceleration"] = err
+	}
+	if legacy.TranscodeMaxBitrateKbps, err = loadOptionalInteger("RIVUNE_TRANSCODE_MAX_BITRATE_KBPS", 64, 200000); err != nil {
+		legacy.invalid["transcodeMaxBitrateKbps"] = err
+	}
+	if legacy.MediaMaxStorageMB, err = loadOptionalInteger("RIVUNE_MEDIA_MAX_STORAGE_MB", 512, 102400); err != nil {
+		legacy.invalid["mediaMaxStorageMB"] = err
+	}
+	if legacy.ArtworkMaxStorageMB, err = loadOptionalInteger("RIVUNE_ARTWORK_MAX_STORAGE_MB", 256, 102400); err != nil {
+		legacy.invalid["artworkMaxStorageMB"] = err
+	}
+	return legacy, nil
 }
 
 func isLoopbackHost(host string) bool {
@@ -268,42 +263,6 @@ func loadDatabaseURL() (string, error) {
 		RawQuery: query.Encode(),
 	}
 	return databaseURL.String(), nil
-}
-
-func loadDuration(name string, fallback, minimum, maximum time.Duration) (time.Duration, error) {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback, nil
-	}
-	duration, err := time.ParseDuration(value)
-	if err != nil || duration < minimum || duration > maximum {
-		return 0, fmt.Errorf("%s must be a duration between %s and %s", name, minimum, maximum)
-	}
-	return duration, nil
-}
-
-func loadInteger(name string, fallback, minimum, maximum int) (int, error) {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback, nil
-	}
-	number, err := strconv.Atoi(value)
-	if err != nil || number < minimum || number > maximum {
-		return 0, fmt.Errorf("%s must be an integer between %d and %d", name, minimum, maximum)
-	}
-	return number, nil
-}
-
-func loadFloat(name string, fallback, minimum, maximum float64) (float64, error) {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback, nil
-	}
-	number, err := strconv.ParseFloat(value, 64)
-	if err != nil || math.IsNaN(number) || math.IsInf(number, 0) || number < minimum || number > maximum {
-		return 0, fmt.Errorf("%s must be a number between %g and %g", name, minimum, maximum)
-	}
-	return number, nil
 }
 
 func loadTrustedProxies(value string) ([]netip.Prefix, error) {
@@ -403,16 +362,60 @@ func validNAT64PrefixLength(bits int) bool {
 		return false
 	}
 }
-func loadStrictBoolean(name string) (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
-	case "":
-		return false, nil
+
+func loadOptionalBoolean(name string) (*bool, error) {
+	raw, present := os.LookupEnv(name)
+	if !present || strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
 	case "true":
-		return true, nil
+		result := true
+		return &result, nil
 	case "false":
-		return false, nil
+		result := false
+		return &result, nil
 	default:
-		return false, fmt.Errorf("%s must be true or false", name)
+		return nil, fmt.Errorf("%s must be true or false", name)
+	}
+}
+
+func loadOptionalInteger(name string, minimum, maximum int) (*int, error) {
+	raw, present := os.LookupEnv(name)
+	if !present || strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value < minimum || value > maximum {
+		return nil, fmt.Errorf("%s must be an integer between %d and %d", name, minimum, maximum)
+	}
+	return &value, nil
+}
+
+func loadOptionalTimezone(name string) (*string, error) {
+	raw, present := os.LookupEnv(name)
+	if !present || strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	value := strings.TrimSpace(raw)
+	if _, err := time.LoadLocation(value); err != nil {
+		return nil, fmt.Errorf("%s must be a valid IANA timezone", name)
+	}
+	return &value, nil
+}
+
+func loadOptionalHardwareAcceleration() (*string, error) {
+	raw, present := os.LookupEnv("RIVUNE_HARDWARE_ACCELERATION")
+	if !present || strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "auto", "software", "vaapi", "qsv", "nvenc":
+		return &value, nil
+	default:
+		return nil, errors.New("RIVUNE_HARDWARE_ACCELERATION must be auto, software, vaapi, qsv, or nvenc")
 	}
 }
 

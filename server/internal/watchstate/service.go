@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/runtimesettings"
 	"github.com/moodiness/rivune/server/internal/tracking"
 )
 
@@ -122,25 +124,87 @@ type canonicalExternalIDResolver interface {
 	ResolveExternalID(context.Context, string, string, string) (string, error)
 }
 
-type Service struct {
-	pool              *pgxpool.Pool
-	location          *time.Location
-	tracking          trackingSink
-	canonicalProvider canonicalTitleProvider
-	canonicalResolver canonicalExternalIDResolver
+type ProviderSet struct {
+	Generation int64
+	Canonical  canonicalTitleProvider
+	Resolver   canonicalExternalIDResolver
 }
 
-func NewService(pool *pgxpool.Pool, location *time.Location, sinks ...trackingSink) *Service {
-	service := &Service{pool: pool, location: location}
+func NewProviderSet(generation int64, provider canonicalTitleProvider, resolver canonicalExternalIDResolver) ProviderSet {
+	return ProviderSet{Generation: generation, Canonical: provider, Resolver: resolver}
+}
+
+type ProviderSource interface {
+	WatchstateProviders() ProviderSet
+}
+
+type staticProviderSource struct {
+	mu        sync.RWMutex
+	providers ProviderSet
+}
+
+func (source *staticProviderSource) WatchstateProviders() ProviderSet {
+	source.mu.RLock()
+	defer source.mu.RUnlock()
+	return source.providers
+}
+
+type watchstateProviderContextKey struct{}
+
+type Service struct {
+	pool            *pgxpool.Pool
+	location        *time.Location
+	tracking        trackingSink
+	providerSource  ProviderSource
+	runtimeSettings *runtimesettings.Source
+}
+
+func NewServiceWithProviderSource(pool *pgxpool.Pool, location *time.Location, source ProviderSource, sinks ...trackingSink) *Service {
+	if source == nil {
+		source = &staticProviderSource{}
+	}
+	service := &Service{pool: pool, location: location, providerSource: source}
 	if len(sinks) > 0 {
 		service.tracking = sinks[0]
 	}
 	return service
 }
 
+func NewService(pool *pgxpool.Pool, location *time.Location, sinks ...trackingSink) *Service {
+	return NewServiceWithProviderSource(pool, location, &staticProviderSource{}, sinks...)
+}
+
+func NewServiceWithRuntimeSettings(pool *pgxpool.Pool, runtimeSettings *runtimesettings.Source, source ProviderSource, sinks ...trackingSink) *Service {
+	service := NewServiceWithProviderSource(pool, nil, source, sinks...)
+	service.runtimeSettings = runtimeSettings
+	return service
+}
+
+func (s *Service) runtimeLocation(ctx context.Context) *time.Location {
+	if s.runtimeSettings != nil {
+		return runtimesettings.Load(ctx, s.runtimeSettings).Location
+	}
+	return s.location
+}
+
+func (s *Service) pinProviders(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(watchstateProviderContextKey{}).(ProviderSet); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, watchstateProviderContextKey{}, s.providerSource.WatchstateProviders())
+}
+
+func watchstateProviders(ctx context.Context) ProviderSet {
+	providers, _ := ctx.Value(watchstateProviderContextKey{}).(ProviderSet)
+	return providers
+}
+
 func (s *Service) SetCanonicalProvider(provider canonicalTitleProvider, resolver canonicalExternalIDResolver) {
-	s.canonicalProvider = provider
-	s.canonicalResolver = resolver
+	if source, ok := s.providerSource.(*staticProviderSource); ok {
+		source.mu.Lock()
+		source.providers = NewProviderSet(0, provider, resolver)
+		source.mu.Unlock()
+	}
 }
 
 func watchstateTrackingError(err error) error {
@@ -174,6 +238,8 @@ func (s *Service) ResolveLinkedCatalogTitle(ctx context.Context, principal auth.
 }
 
 func (s *Service) resolveTitle(ctx context.Context, principal auth.Principal, input ResolveTitleInput, requireManagement, linked bool) (TitleReference, error) {
+	ctx = s.pinProviders(ctx)
+	ctx = runtimesettings.Pin(ctx, s.runtimeSettings)
 	input.MediaType = strings.ToLower(strings.TrimSpace(input.MediaType))
 	input.Provider = strings.ToLower(strings.TrimSpace(input.Provider))
 	input.ExternalID = strings.TrimSpace(input.ExternalID)
@@ -241,7 +307,7 @@ func (s *Service) resolveTitle(ctx context.Context, principal auth.Principal, in
 	input.Language = ""
 	input.Category = ""
 
-	if s.usesProfileScopedTitleIdentity(input) {
+	if s.usesProfileScopedTitleIdentity(ctx, input) {
 		return s.persistProfileScopedTitle(ctx, principal, input, requireManagement, linked)
 	}
 	if err := s.authorizeCanonicalTitleResolution(ctx, principal, linked); err != nil {
@@ -685,14 +751,16 @@ type canonicalTitleSnapshot struct {
 	resource      string
 }
 
-func (s *Service) usesProfileScopedTitleIdentity(input ResolveTitleInput) bool {
-	if s.canonicalProvider == nil || input.Provider == "addon" {
+func (s *Service) usesProfileScopedTitleIdentity(ctx context.Context, input ResolveTitleInput) bool {
+	ctx = s.pinProviders(ctx)
+	providers := watchstateProviders(ctx)
+	if providers.Canonical == nil || input.Provider == "addon" {
 		return true
 	}
 	if input.Provider == "tmdb" {
 		return false
 	}
-	if s.canonicalResolver == nil {
+	if providers.Resolver == nil {
 		return true
 	}
 	switch input.Provider {
@@ -704,15 +772,17 @@ func (s *Service) usesProfileScopedTitleIdentity(input ResolveTitleInput) bool {
 }
 
 func (s *Service) resolveCanonicalTitle(ctx context.Context, input ResolveTitleInput) (canonicalTitleSnapshot, error) {
-	if s.canonicalProvider == nil {
+	ctx = s.pinProviders(ctx)
+	providers := watchstateProviders(ctx)
+	if providers.Canonical == nil {
 		return canonicalTitleSnapshot{}, errors.New("canonical title provider unavailable")
 	}
 	canonicalID := input.ExternalID
 	if input.Provider != "tmdb" {
-		if s.canonicalResolver == nil {
+		if providers.Resolver == nil {
 			return canonicalTitleSnapshot{}, fmt.Errorf("%w: title provider identity cannot be verified", ErrInvalidInput)
 		}
-		resolvedID, err := s.canonicalResolver.ResolveExternalID(ctx, input.MediaType, input.Provider, input.ExternalID)
+		resolvedID, err := providers.Resolver.ResolveExternalID(ctx, input.MediaType, input.Provider, input.ExternalID)
 		if err != nil {
 			if errors.Is(err, metadata.ErrProviderNotFound) {
 				return canonicalTitleSnapshot{}, fmt.Errorf("%w: title provider identity cannot be verified", ErrInvalidInput)
@@ -729,7 +799,7 @@ func (s *Service) resolveCanonicalTitle(ctx context.Context, input ResolveTitleI
 	additionalIDs := map[string]string{}
 	switch input.MediaType {
 	case "movie":
-		provided, err := s.canonicalProvider.MovieDetails(ctx, canonicalID, "en-US")
+		provided, err := providers.Canonical.MovieDetails(ctx, canonicalID, "en-US")
 		if err != nil {
 			if errors.Is(err, metadata.ErrProviderNotFound) {
 				return canonicalTitleSnapshot{}, fmt.Errorf("%w: title provider identity cannot be verified", ErrInvalidInput)
@@ -745,7 +815,7 @@ func (s *Service) resolveCanonicalTitle(ctx context.Context, input ResolveTitleI
 		snapshot.released = strings.TrimSpace(provided.ReleaseDate)
 		additionalIDs = provided.AdditionalIDs
 	case "series":
-		provided, err := s.canonicalProvider.SeriesDetails(ctx, canonicalID, "en-US")
+		provided, err := providers.Canonical.SeriesDetails(ctx, canonicalID, "en-US")
 		if err != nil {
 			if errors.Is(err, metadata.ErrProviderNotFound) {
 				return canonicalTitleSnapshot{}, fmt.Errorf("%w: title provider identity cannot be verified", ErrInvalidInput)
@@ -788,13 +858,13 @@ func (s *Service) resolveCanonicalTitle(ctx context.Context, input ResolveTitleI
 	if resolvedIDs[input.Provider] != input.ExternalID {
 		return canonicalTitleSnapshot{}, fmt.Errorf("%w: canonical title identity conflicts with provider metadata", ErrInvalidInput)
 	}
-	providers := make([]string, 0, len(resolvedIDs))
+	providerNames := make([]string, 0, len(resolvedIDs))
 	for provider := range resolvedIDs {
-		providers = append(providers, provider)
+		providerNames = append(providerNames, provider)
 	}
-	sort.Strings(providers)
-	snapshot.identities = make([]canonicalTitleIdentity, 0, len(providers))
-	for _, provider := range providers {
+	sort.Strings(providerNames)
+	snapshot.identities = make([]canonicalTitleIdentity, 0, len(providerNames))
+	for _, provider := range providerNames {
 		externalID := resolvedIDs[provider]
 		snapshot.identities = append(snapshot.identities, canonicalTitleIdentity{
 			provider: provider, externalID: externalID, storedID: storedTitleExternalID(externalID),
@@ -2351,7 +2421,8 @@ func (s *Service) mutationProfileID(ctx context.Context, tx pgx.Tx, principal au
 	if !linked {
 		return authorizedActiveProfileID(ctx, tx, principal)
 	}
-	reloaded, valid, err := auth.ReloadAndLockLinkedPrincipal(ctx, tx, principal, time.Now().UTC(), s.location)
+	location := s.runtimeLocation(ctx)
+	reloaded, valid, err := auth.ReloadAndLockLinkedPrincipal(ctx, tx, principal, time.Now().UTC(), location)
 	if err != nil {
 		return "", fmt.Errorf("revalidate linked watchstate authority: %w", err)
 	}

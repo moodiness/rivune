@@ -29,6 +29,7 @@ var trailerSeasonPatterns = []*regexp.Regexp{
 }
 
 func (s *Service) Trailers(ctx context.Context, principal auth.Principal, titleID, language, captionLanguage string, seasonNumber *int) (TrailerList, error) {
+	ctx = s.pinProviders(ctx)
 	normalizedLanguage, err := normalizeLanguage(language)
 	if err != nil {
 		return TrailerList{}, err
@@ -74,7 +75,8 @@ func (s *Service) Trailers(ctx context.Context, principal auth.Principal, titleI
 	if err := tx.Commit(ctx); err != nil {
 		return TrailerList{}, fmt.Errorf("commit trailer title identity read: %w", err)
 	}
-	if s.trailerProvider == nil {
+	providers := metadataProviders(ctx)
+	if providers.Trailer == nil {
 		return TrailerList{}, ErrProviderUnavailable
 	}
 
@@ -88,7 +90,7 @@ func (s *Service) Trailers(ctx context.Context, principal auth.Principal, titleI
 			return TrailerList{}, err
 		}
 	}
-	result, err := chooseTrailers(ctx, s.trailerProvider, mediaType, resolvedExternalID, normalizedLanguage, normalizedCaptionLanguage, seasonNumber)
+	result, err := chooseTrailers(ctx, providers.Trailer, mediaType, resolvedExternalID, normalizedLanguage, normalizedCaptionLanguage, seasonNumber)
 	if err != nil {
 		return TrailerList{}, err
 	}

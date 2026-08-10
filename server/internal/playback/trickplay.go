@@ -112,6 +112,8 @@ func (service *Service) Trickplay(ctx context.Context, principal auth.Principal,
 		return TrickplayImage{}, ErrUnsupportedSource
 	}
 
+	service.hlsResetMu.RLock()
+	defer service.hlsResetMu.RUnlock()
 	now := service.trickplayNow()
 	key := trickplayKey(reference, input)
 	cache := service.trickplayCache()
@@ -194,11 +196,26 @@ func (service *Service) pruneTrickplayImages(clearAll bool) {
 }
 
 func (service *Service) trickplayCacheLimit() int64 {
-	limit := service.mediaOptions.MaxStorageBytes
-	if limit <= 0 || limit > maximumTrickplayCacheBytes {
+	limit := service.mediaStorageLimit()
+	if limit > maximumTrickplayCacheBytes {
 		limit = maximumTrickplayCacheBytes
 	}
 	return limit
+}
+
+func (service *Service) resizeTrickplayCache(limit int64) {
+	service.trickplayMu.Lock()
+	cache := service.trickplayImages
+	service.trickplayMu.Unlock()
+	if cache == nil {
+		return
+	}
+	if limit > maximumTrickplayCacheBytes {
+		limit = maximumTrickplayCacheBytes
+	}
+	cache.mu.Lock()
+	cache.evictLocked([32]byte{}, 0, limit)
+	cache.mu.Unlock()
 }
 
 func (cache *trickplayCache) load(ctx context.Context, now time.Time, ttl time.Duration, limit int64, key [32]byte, tileWidth int, generate func(context.Context) ([]byte, error)) ([]byte, time.Time, error) {

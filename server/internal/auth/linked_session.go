@@ -20,6 +20,7 @@ func (s *Service) ReloadLinkedPrincipal(ctx context.Context, sessionID, profileI
 	if sessionID == "" || profileID == "" {
 		return Principal{}, ErrInvalidToken
 	}
+	timezone := s.runtimeTimezone(ctx)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -149,7 +150,7 @@ func (s *Service) ReloadLinkedPrincipal(ctx context.Context, sessionID, profileI
 		return Principal{}, ErrInvalidToken
 	}
 
-	access.AccessTimezone = s.timezone
+	access.AccessTimezone = timezone
 	if !ProfileAccessibleAt(access, time.Now().UTC()) {
 		return Principal{}, ErrInvalidToken
 	}

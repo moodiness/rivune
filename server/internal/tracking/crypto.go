@@ -1,52 +1,54 @@
 package tracking
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
+	"errors"
 	"fmt"
-	"io"
+
+	"github.com/moodiness/rivune/server/internal/secretcrypto"
 )
 
-type tokenCipher struct {
-	aead cipher.AEAD
-}
+type tokenCipher struct{ keyring *secretcrypto.Keyring }
 
-func newTokenCipher(key []byte) (*tokenCipher, error) {
-	if len(key) != 32 {
-		return nil, fmt.Errorf("tracking encryption key must contain exactly 32 bytes")
+func newTokenCipher(key any) (*tokenCipher, error) {
+	switch value := key.(type) {
+	case *secretcrypto.Keyring:
+		if value == nil {
+			return nil, errors.New("tracking encryption keyring is required")
+		}
+		return &tokenCipher{keyring: value}, nil
+	case []byte:
+		keyring, err := secretcrypto.NewKeyring([]secretcrypto.Key{{Version: 1, Bytes: value}})
+		if err != nil {
+			return nil, fmt.Errorf("initialize tracking token cipher: %w", err)
+		}
+		return &tokenCipher{keyring: keyring}, nil
+	default:
+		return nil, errors.New("tracking encryption keyring is required")
 	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, fmt.Errorf("initialize tracking token cipher: %w", err)
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("initialize tracking token AEAD: %w", err)
-	}
-	return &tokenCipher{aead: aead}, nil
 }
 
 func (c *tokenCipher) encrypt(plaintext, associatedData string) ([]byte, error) {
-	nonce := make([]byte, c.aead.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, fmt.Errorf("generate tracking token nonce: %w", err)
+	envelope, err := c.keyring.Encrypt([]byte(plaintext), []byte(associatedData))
+	if err != nil {
+		return nil, fmt.Errorf("encrypt tracking token: %w", err)
 	}
-	return c.aead.Seal(nonce, nonce, []byte(plaintext), []byte(associatedData)), nil
+	return envelope.Ciphertext, nil
 }
 
-func (c *tokenCipher) decrypt(ciphertext []byte, associatedData string) (string, error) {
-	nonceSize := c.aead.NonceSize()
-	if len(ciphertext) < nonceSize+c.aead.Overhead() {
-		return "", errorsNewCiphertext()
+func (c *tokenCipher) decrypt(ciphertext []byte, associatedData string, versions ...int) (string, error) {
+	cipherVersion := secretcrypto.CipherVersionAES256GCM
+	keyVersion := 1
+	if len(versions) == 2 {
+		cipherVersion, keyVersion = versions[0], versions[1]
 	}
-	plaintext, err := c.aead.Open(nil, ciphertext[:nonceSize], ciphertext[nonceSize:], []byte(associatedData))
+	plaintext, err := c.keyring.Decrypt(secretcrypto.Envelope{Ciphertext: ciphertext, CipherVersion: cipherVersion, KeyVersion: keyVersion}, []byte(associatedData))
 	if err != nil {
-		return "", fmt.Errorf("decrypt tracking token: %w", err)
+		return "", errorsNewCiphertext()
 	}
 	return string(plaintext), nil
 }
 
-func errorsNewCiphertext() error {
-	return fmt.Errorf("invalid tracking token ciphertext")
-}
+func (c *tokenCipher) cipherVersion() int { return secretcrypto.CipherVersionAES256GCM }
+func (c *tokenCipher) keyVersion() int    { return c.keyring.ActiveVersion() }
+
+func errorsNewCiphertext() error { return fmt.Errorf("invalid tracking token ciphertext") }

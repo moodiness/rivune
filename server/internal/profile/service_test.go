@@ -17,6 +17,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 	profilecollection "github.com/moodiness/rivune/server/internal/collection"
 	"github.com/moodiness/rivune/server/internal/password"
+	"github.com/moodiness/rivune/server/internal/secretcrypto"
 	"github.com/moodiness/rivune/server/internal/settings"
 	"github.com/moodiness/rivune/server/internal/tracking"
 	"github.com/moodiness/rivune/server/internal/watchstate"
@@ -430,8 +431,12 @@ func TestCategoryBoundariesRejectDirectAndBatchProfileTampering(t *testing.T) {
 	if _, err := settings.NewService(pool).Profile(ctx, principal, profileBID); !errors.Is(err, settings.ErrProfileNotFound) {
 		t.Fatalf("cross-category settings error = %v, want opaque %v", err, settings.ErrProfileNotFound)
 	}
+	trackingKeys, err := secretcrypto.NewKeyring([]secretcrypto.Key{{Version: 1, Bytes: bytes.Repeat([]byte{1}, 32)}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	trackingService, err := tracking.NewService(
-		pool, bytes.Repeat([]byte{1}, 32), "", "", "", nil,
+		pool, trackingKeys, "", "", "", nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 	if err != nil {

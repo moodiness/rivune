@@ -15,6 +15,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/jellyfin"
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/playback"
+	"github.com/moodiness/rivune/server/internal/runtimesettings"
 	"github.com/moodiness/rivune/server/internal/watchstate"
 )
 
@@ -169,12 +170,15 @@ func (a *API) buildJellyfinCompatibility(
 	}
 	var metadataSearch *metadata.Service
 	var addonSearch *addon.Service
+	var runtimeSettings *runtimesettings.Source
 	for _, dependency := range searchDependencies {
 		switch typed := dependency.(type) {
 		case *metadata.Service:
 			metadataSearch = typed
 		case *addon.Service:
 			addonSearch = typed
+		case *runtimesettings.Source:
+			runtimeSettings = typed
 		}
 	}
 	var catalogArtwork jellyfin.CatalogArtworkPresenter
@@ -200,10 +204,14 @@ func (a *API) buildJellyfinCompatibility(
 		compatMediaSegments = playbackDelivery
 	}
 
+	debug := false
+	if runtimeSettings != nil {
+		debug = runtimeSettings.Load().JellyfinDebug
+	}
 	compatHandler, err := jellyfin.New(jellyfin.Dependencies{
 		ServerInfo: serverInfo, Authentication: compatAuthentication, AuthenticatedPolicy: jellyfinMaintenancePolicy{settings: a.settings},
 		Catalog: compatCatalog, Collections: collections, Artwork: artwork, Playback: playbackDelivery, MediaSegments: compatMediaSegments,
-		Watchstate: catalog, DisplayPreferences: displayPreferences, Logger: a.logger, Debug: a.config.JellyfinDebug,
+		Watchstate: catalog, DisplayPreferences: displayPreferences, Logger: a.logger, Debug: debug,
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("initialize Jellyfin compatibility HTTP adapter: %w", err)
@@ -237,6 +245,9 @@ func (a *API) routeJellyfinCompatibility(native http.Handler) http.Handler {
 			return
 		}
 		ctx := auth.WithClientIP(request.Context(), requestClientIP(request, a.config.TrustedProxies))
+		if a.runtimeSettings != nil {
+			ctx = runtimesettings.Pin(ctx, a.runtimeSettings.source)
+		}
 		compatHTTP.ServeHTTP(response, request.WithContext(ctx))
 	})
 }
@@ -268,6 +279,36 @@ func (a *API) setJellyfinCompatibilityDesired(enabled bool) {
 		a.jellyfinCompatibility = nil
 		cancel = a.jellyfinCompatibilityCancel
 	}
+	a.jellyfinCompatibilityMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	select {
+	case signal <- struct{}{}:
+	default:
+	}
+}
+
+// RequestJellyfinCompatibilityReplacement retires the active handler
+// generation and builds a replacement without revoking compatibility or
+// native sessions. It is used for live handler-scoped settings such as debug
+// route tracing.
+func (a *API) RequestJellyfinCompatibilityReplacement() {
+	if a == nil {
+		return
+	}
+	a.jellyfinCompatibilityMu.Lock()
+	if !a.jellyfinCompatibilityDesired {
+		a.jellyfinCompatibilityMu.Unlock()
+		return
+	}
+	a.jellyfinCompatibilityRevision++
+	a.jellyfinCompatibility = nil
+	cancel := a.jellyfinCompatibilityCancel
+	if a.jellyfinCompatibilitySignal == nil {
+		a.jellyfinCompatibilitySignal = make(chan struct{}, 1)
+	}
+	signal := a.jellyfinCompatibilitySignal
 	a.jellyfinCompatibilityMu.Unlock()
 	if cancel != nil {
 		cancel()

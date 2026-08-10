@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/runtimesettings"
 )
 
 const providerName = "tmdb"
@@ -31,34 +32,88 @@ var (
 	episodeOrderPattern     = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 )
 
-type Service struct {
-	pool            *pgxpool.Pool
-	provider        Provider
-	resolver        ExternalIDResolver
-	trailerProvider TrailerProvider
-	cacheTTL        time.Duration
-	enricher        TelevisionEnricher
-	mapper          TelevisionMapper
-	artwork         ArtworkEnricher
-	logger          *slog.Logger
-	location        *time.Location
+type ProviderSet struct {
+	Generation int64
+	Primary    Provider
+	Resolver   ExternalIDResolver
+	Trailer    TrailerProvider
+	Television TelevisionEnricher
+	Mapper     TelevisionMapper
+	Artwork    ArtworkEnricher
 }
 
-func NewService(pool *pgxpool.Pool, provider Provider, enricher TelevisionEnricher, artwork ArtworkEnricher, cacheTTL time.Duration, logger *slog.Logger, configuredLocations ...*time.Location) *Service {
-	trailerProvider, _ := provider.(TrailerProvider)
-	resolver, _ := provider.(ExternalIDResolver)
-	mapper, _ := enricher.(TelevisionMapper)
-	service := &Service{
-		pool: pool, provider: withEnglishOverviewFallback(provider), resolver: resolver, trailerProvider: trailerProvider,
-		enricher: enricher, mapper: mapper, artwork: artwork, cacheTTL: cacheTTL, logger: logger,
+func NewProviderSet(generation int64, primary Provider, television TelevisionEnricher, artwork ArtworkEnricher) ProviderSet {
+	trailer, _ := primary.(TrailerProvider)
+	resolver, _ := primary.(ExternalIDResolver)
+	mapper, _ := television.(TelevisionMapper)
+	return ProviderSet{Generation: generation, Primary: withEnglishOverviewFallback(primary), Resolver: resolver, Trailer: trailer, Television: television, Mapper: mapper, Artwork: artwork}
+}
+
+type ProviderSource interface {
+	MetadataProviders() ProviderSet
+}
+
+type staticProviderSource struct{ providers ProviderSet }
+
+func (source staticProviderSource) MetadataProviders() ProviderSet { return source.providers }
+
+type metadataProviderContextKey struct{}
+
+type Service struct {
+	pool            *pgxpool.Pool
+	providerSource  ProviderSource
+	cacheTTL        time.Duration
+	logger          *slog.Logger
+	location        *time.Location
+	runtimeSettings *runtimesettings.Source
+}
+
+func NewServiceWithProviderSource(pool *pgxpool.Pool, source ProviderSource, cacheTTL time.Duration, logger *slog.Logger, configuredLocations ...*time.Location) *Service {
+	if source == nil {
+		source = staticProviderSource{}
 	}
+	service := &Service{pool: pool, providerSource: source, cacheTTL: cacheTTL, logger: logger}
 	if len(configuredLocations) > 0 {
 		service.location = configuredLocations[0]
 	}
 	return service
 }
 
+func NewService(pool *pgxpool.Pool, provider Provider, enricher TelevisionEnricher, artwork ArtworkEnricher, cacheTTL time.Duration, logger *slog.Logger, configuredLocations ...*time.Location) *Service {
+	return NewServiceWithProviderSource(pool, staticProviderSource{providers: NewProviderSet(0, provider, enricher, artwork)}, cacheTTL, logger, configuredLocations...)
+}
+
+func NewServiceWithRuntimeSettings(pool *pgxpool.Pool, source ProviderSource, cacheTTL time.Duration, logger *slog.Logger, runtimeSettings *runtimesettings.Source) *Service {
+	service := NewServiceWithProviderSource(pool, source, cacheTTL, logger)
+	service.runtimeSettings = runtimeSettings
+	return service
+}
+
+func (s *Service) runtimeLocation(ctx context.Context) *time.Location {
+	if s.runtimeSettings != nil {
+		return runtimesettings.Load(ctx, s.runtimeSettings).Location
+	}
+	return s.location
+}
+
+func (s *Service) pinRuntimeLocation(ctx context.Context) context.Context {
+	return runtimesettings.Pin(ctx, s.runtimeSettings)
+}
+
+func (s *Service) pinProviders(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(metadataProviderContextKey{}).(ProviderSet); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, metadataProviderContextKey{}, s.providerSource.MetadataProviders())
+}
+
+func metadataProviders(ctx context.Context) ProviderSet {
+	providers, _ := ctx.Value(metadataProviderContextKey{}).(ProviderSet)
+	return providers
+}
+
 func (s *Service) DiscoverMovies(ctx context.Context, principal auth.Principal, options QueryOptions) (MoviePage, error) {
+	ctx = s.pinProviders(ctx)
 	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return MoviePage{}, err
 	}
@@ -66,10 +121,11 @@ func (s *Service) DiscoverMovies(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return MoviePage{}, err
 	}
-	if s.provider == nil {
+	providers := metadataProviders(ctx)
+	if providers.Primary == nil {
 		return MoviePage{}, ErrProviderUnavailable
 	}
-	page, err := s.provider.DiscoverMovies(ctx, normalized)
+	page, err := providers.Primary.DiscoverMovies(ctx, normalized)
 	if err != nil {
 		return MoviePage{}, err
 	}
@@ -77,6 +133,7 @@ func (s *Service) DiscoverMovies(ctx context.Context, principal auth.Principal, 
 }
 
 func (s *Service) SearchMovies(ctx context.Context, principal auth.Principal, options SearchOptions) (MoviePage, error) {
+	ctx = s.pinProviders(ctx)
 	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return MoviePage{}, err
 	}
@@ -88,10 +145,11 @@ func (s *Service) SearchMovies(ctx context.Context, principal auth.Principal, op
 	if !utf8.ValidString(query) || utf8.RuneCountInString(query) < 1 || utf8.RuneCountInString(query) > 200 {
 		return MoviePage{}, fmt.Errorf("%w: query must contain 1 to 200 characters", ErrInvalidInput)
 	}
-	if s.provider == nil {
+	providers := metadataProviders(ctx)
+	if providers.Primary == nil {
 		return MoviePage{}, ErrProviderUnavailable
 	}
-	page, err := s.provider.SearchMovies(ctx, SearchOptions{QueryOptions: normalized, Query: query})
+	page, err := providers.Primary.SearchMovies(ctx, SearchOptions{QueryOptions: normalized, Query: query})
 	if err != nil {
 		return MoviePage{}, err
 	}
@@ -102,6 +160,8 @@ func (s *Service) SearchMovies(ctx context.Context, principal auth.Principal, op
 // Provider I/O remains outside database transactions; the linked credential is
 // reloaded and locked again in the transaction that persists and returns the page.
 func (s *Service) SearchLinkedMovies(ctx context.Context, principal auth.Principal, options SearchOptions) (MoviePage, error) {
+	ctx = s.pinProviders(ctx)
+	ctx = s.pinRuntimeLocation(ctx)
 	if err := s.requireLinkedProfile(ctx, principal); err != nil {
 		return MoviePage{}, err
 	}
@@ -113,10 +173,11 @@ func (s *Service) SearchLinkedMovies(ctx context.Context, principal auth.Princip
 	if !utf8.ValidString(query) || utf8.RuneCountInString(query) < 1 || utf8.RuneCountInString(query) > 200 {
 		return MoviePage{}, fmt.Errorf("%w: query must contain 1 to 200 characters", ErrInvalidInput)
 	}
-	if s.provider == nil {
+	providers := metadataProviders(ctx)
+	if providers.Primary == nil {
 		return MoviePage{}, ErrProviderUnavailable
 	}
-	page, err := s.provider.SearchMovies(ctx, SearchOptions{QueryOptions: normalized, Query: query})
+	page, err := providers.Primary.SearchMovies(ctx, SearchOptions{QueryOptions: normalized, Query: query})
 	if err != nil {
 		return MoviePage{}, err
 	}
@@ -124,6 +185,7 @@ func (s *Service) SearchLinkedMovies(ctx context.Context, principal auth.Princip
 }
 
 func (s *Service) MovieDetails(ctx context.Context, principal auth.Principal, titleID, language string) (Movie, error) {
+	ctx = s.pinProviders(ctx)
 	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return Movie{}, err
 	}
@@ -131,6 +193,7 @@ func (s *Service) MovieDetails(ctx context.Context, principal auth.Principal, ti
 }
 
 func (s *Service) movieDetails(ctx context.Context, titleID, language string, principals ...*auth.Principal) (Movie, error) {
+	ctx = s.pinProviders(ctx)
 	normalizedLanguage, err := normalizeLanguage(language)
 	if err != nil {
 		return Movie{}, err
@@ -171,19 +234,20 @@ func (s *Service) movieDetails(ctx context.Context, titleID, language string, pr
 			return Movie{}, fmt.Errorf("commit movie metadata read: %w", err)
 		}
 	}
-	if s.provider == nil {
+	providers := metadataProviders(ctx)
+	if providers.Primary == nil {
 		return Movie{}, ErrProviderUnavailable
 	}
 
-	provided, err := s.provider.MovieDetails(ctx, externalID, normalizedLanguage)
+	provided, err := providers.Primary.MovieDetails(ctx, externalID, normalizedLanguage)
 	if err != nil {
 		if errors.Is(err, ErrProviderNotFound) {
 			return Movie{}, fmt.Errorf("%w: %w", ErrNotFound, err)
 		}
 		return Movie{}, err
 	}
-	if s.artwork != nil {
-		enriched, enrichErr := s.artwork.EnrichMovie(ctx, provided, normalizedLanguage)
+	if providers.Artwork != nil {
+		enriched, enrichErr := providers.Artwork.EnrichMovie(ctx, provided, normalizedLanguage)
 		if enrichErr != nil {
 			if !errors.Is(enrichErr, ErrProviderNotFound) {
 				s.logEnrichmentFailure("fanart", "movie", titleID, enrichErr)
@@ -233,6 +297,7 @@ func (s *Service) movieDetails(ctx context.Context, titleID, language string, pr
 }
 
 func (s *Service) DiscoverSeries(ctx context.Context, principal auth.Principal, options QueryOptions) (SeriesPage, error) {
+	ctx = s.pinProviders(ctx)
 	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return SeriesPage{}, err
 	}
@@ -240,10 +305,11 @@ func (s *Service) DiscoverSeries(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return SeriesPage{}, err
 	}
-	if s.provider == nil {
+	providers := metadataProviders(ctx)
+	if providers.Primary == nil {
 		return SeriesPage{}, ErrProviderUnavailable
 	}
-	page, err := s.provider.DiscoverSeries(ctx, normalized)
+	page, err := providers.Primary.DiscoverSeries(ctx, normalized)
 	if err != nil {
 		return SeriesPage{}, err
 	}
@@ -251,6 +317,7 @@ func (s *Service) DiscoverSeries(ctx context.Context, principal auth.Principal, 
 }
 
 func (s *Service) SearchSeries(ctx context.Context, principal auth.Principal, options SearchOptions) (SeriesPage, error) {
+	ctx = s.pinProviders(ctx)
 	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return SeriesPage{}, err
 	}
@@ -262,10 +329,11 @@ func (s *Service) SearchSeries(ctx context.Context, principal auth.Principal, op
 	if !utf8.ValidString(query) || utf8.RuneCountInString(query) < 1 || utf8.RuneCountInString(query) > 200 {
 		return SeriesPage{}, fmt.Errorf("%w: query must contain 1 to 200 characters", ErrInvalidInput)
 	}
-	if s.provider == nil {
+	providers := metadataProviders(ctx)
+	if providers.Primary == nil {
 		return SeriesPage{}, ErrProviderUnavailable
 	}
-	page, err := s.provider.SearchSeries(ctx, SearchOptions{QueryOptions: normalized, Query: query})
+	page, err := providers.Primary.SearchSeries(ctx, SearchOptions{QueryOptions: normalized, Query: query})
 	if err != nil {
 		return SeriesPage{}, err
 	}
@@ -276,6 +344,8 @@ func (s *Service) SearchSeries(ctx context.Context, principal auth.Principal, op
 // Its post-provider transaction revalidates the exact linked credential before
 // any title row is persisted or any provider result is returned.
 func (s *Service) SearchLinkedSeries(ctx context.Context, principal auth.Principal, options SearchOptions) (SeriesPage, error) {
+	ctx = s.pinProviders(ctx)
+	ctx = s.pinRuntimeLocation(ctx)
 	if err := s.requireLinkedProfile(ctx, principal); err != nil {
 		return SeriesPage{}, err
 	}
@@ -287,10 +357,11 @@ func (s *Service) SearchLinkedSeries(ctx context.Context, principal auth.Princip
 	if !utf8.ValidString(query) || utf8.RuneCountInString(query) < 1 || utf8.RuneCountInString(query) > 200 {
 		return SeriesPage{}, fmt.Errorf("%w: query must contain 1 to 200 characters", ErrInvalidInput)
 	}
-	if s.provider == nil {
+	providers := metadataProviders(ctx)
+	if providers.Primary == nil {
 		return SeriesPage{}, ErrProviderUnavailable
 	}
-	page, err := s.provider.SearchSeries(ctx, SearchOptions{QueryOptions: normalized, Query: query})
+	page, err := providers.Primary.SearchSeries(ctx, SearchOptions{QueryOptions: normalized, Query: query})
 	if err != nil {
 		return SeriesPage{}, err
 	}
@@ -298,6 +369,7 @@ func (s *Service) SearchLinkedSeries(ctx context.Context, principal auth.Princip
 }
 
 func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, titleID string, options SeriesDetailsOptions) (Series, error) {
+	ctx = s.pinProviders(ctx)
 	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return Series{}, err
 	}
@@ -321,6 +393,7 @@ func (s *Service) SeriesDetails(ctx context.Context, principal auth.Principal, t
 }
 
 func (s *Service) seriesDetails(ctx context.Context, titleID string, options SeriesDetailsOptions, principals ...*auth.Principal) (Series, error) {
+	ctx = s.pinProviders(ctx)
 	normalizedLanguage, err := normalizeLanguage(options.Language)
 	if err != nil {
 		return Series{}, err
@@ -365,10 +438,11 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 			return Series{}, fmt.Errorf("commit series metadata read: %w", err)
 		}
 	}
-	if s.provider == nil {
+	providers := metadataProviders(ctx)
+	if providers.Primary == nil {
 		return Series{}, ErrProviderUnavailable
 	}
-	provided, err := s.provider.SeriesDetails(ctx, externalID, normalizedLanguage)
+	provided, err := providers.Primary.SeriesDetails(ctx, externalID, normalizedLanguage)
 	if err != nil {
 		if errors.Is(err, ErrProviderNotFound) {
 			return Series{}, fmt.Errorf("%w: %w", ErrNotFound, err)
@@ -376,16 +450,16 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 		return Series{}, err
 	}
 
-	if s.enricher != nil {
-		enriched, enrichErr := s.enricher.EnrichSeries(ctx, provided)
+	if providers.Television != nil {
+		enriched, enrichErr := providers.Television.EnrichSeries(ctx, provided)
 		if enrichErr != nil {
 			s.logEnrichmentFailure("tvdb", "series", titleID, enrichErr)
 		} else {
 			provided = enriched
 		}
 	}
-	if s.artwork != nil {
-		enriched, enrichErr := s.artwork.EnrichSeries(ctx, provided, normalizedLanguage)
+	if providers.Artwork != nil {
+		enriched, enrichErr := providers.Artwork.EnrichSeries(ctx, provided, normalizedLanguage)
 		if enrichErr != nil {
 			if !errors.Is(enrichErr, ErrProviderNotFound) {
 				s.logEnrichmentFailure("fanart", "series", titleID, enrichErr)
@@ -455,6 +529,7 @@ func (s *Service) seriesDetails(ctx context.Context, titleID string, options Ser
 // batches until every existing or newly discovered payload has been attempted
 // once.
 func (s *Service) RefreshMissing(ctx context.Context, options RefreshMissingOptions) (RefreshResult, error) {
+	ctx = s.pinProviders(ctx)
 	language, err := normalizeLanguage(options.Language)
 	if err != nil {
 		return RefreshResult{}, err
@@ -762,6 +837,7 @@ func appendFailedTitle(result *RefreshResult, seen map[string]struct{}, title st
 }
 
 func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, seasonID, language, mappingProvider string) (Season, error) {
+	ctx = s.pinProviders(ctx)
 	if err := s.requireActiveProfile(ctx, principal); err != nil {
 		return Season{}, err
 	}
@@ -776,6 +852,7 @@ func (s *Service) SeasonDetails(ctx context.Context, principal auth.Principal, s
 }
 
 func (s *Service) seasonDetails(ctx context.Context, seasonID, language string, principals ...*auth.Principal) (Season, error) {
+	ctx = s.pinProviders(ctx)
 	normalizedLanguage, err := normalizeLanguage(language)
 	if err != nil {
 		return Season{}, err
@@ -845,10 +922,11 @@ func (s *Service) seasonDetails(ctx context.Context, seasonID, language string, 
 	if err := readTx.Commit(ctx); err != nil {
 		return Season{}, fmt.Errorf("commit season metadata read: %w", err)
 	}
-	if s.provider == nil {
+	providers := metadataProviders(ctx)
+	if providers.Primary == nil {
 		return Season{}, ErrProviderUnavailable
 	}
-	provided, err := s.provider.SeasonDetails(ctx, seriesExternalID, seasonNumber, normalizedLanguage)
+	provided, err := providers.Primary.SeasonDetails(ctx, seriesExternalID, seasonNumber, normalizedLanguage)
 	if err != nil {
 		if errors.Is(err, ErrProviderNotFound) {
 			return Season{}, fmt.Errorf("%w: %w", ErrNotFound, err)
@@ -858,8 +936,8 @@ func (s *Service) seasonDetails(ctx context.Context, seasonID, language string, 
 	if err := validateProviderSeasonHierarchy(provided, seasonExternalID, seasonNumber); err != nil {
 		return Season{}, err
 	}
-	if s.enricher != nil && seriesTVDBID != nil {
-		enriched, enrichErr := s.enricher.EnrichSeason(ctx, *seriesTVDBID, provided)
+	if providers.Television != nil && seriesTVDBID != nil {
+		enriched, enrichErr := providers.Television.EnrichSeason(ctx, *seriesTVDBID, provided)
 		if enrichErr != nil {
 			s.logEnrichmentFailure("tvdb", "season", seasonID, enrichErr)
 		} else if hierarchyErr := validateProviderSeasonHierarchy(enriched, seasonExternalID, seasonNumber); hierarchyErr != nil {
@@ -868,8 +946,8 @@ func (s *Service) seasonDetails(ctx context.Context, seasonID, language string, 
 			provided = enriched
 		}
 	}
-	if s.artwork != nil && seriesTVDBID != nil {
-		enriched, enrichErr := s.artwork.EnrichSeason(ctx, *seriesTVDBID, provided, normalizedLanguage)
+	if providers.Artwork != nil && seriesTVDBID != nil {
+		enriched, enrichErr := providers.Artwork.EnrichSeason(ctx, *seriesTVDBID, provided, normalizedLanguage)
 		if enrichErr != nil {
 			if !errors.Is(enrichErr, ErrProviderNotFound) {
 				s.logEnrichmentFailure("fanart", "season", seasonID, enrichErr)
@@ -922,6 +1000,7 @@ func (s *Service) seasonDetails(ctx context.Context, seasonID, language string, 
 }
 
 func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Principal, titleID string, options SeriesDetailsOptions) (Series, error) {
+	ctx = s.pinProviders(ctx)
 	base, err := s.SeriesDetails(ctx, principal, titleID, SeriesDetailsOptions{
 		Language:        options.Language,
 		MappingProvider: providerName,
@@ -929,7 +1008,8 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 	if err != nil {
 		return Series{}, err
 	}
-	if s.mapper == nil {
+	providers := metadataProviders(ctx)
+	if providers.Mapper == nil {
 		if options.EpisodeOrderID == "" {
 			s.logTVDBMappingFallback(base.ID, ErrProviderUnavailable)
 			return base, s.requireActiveProfile(ctx, principal)
@@ -979,7 +1059,7 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 		}
 		return Series{}, ErrProviderNotFound
 	}
-	providedSeasons, err := s.mapper.SeriesSeasons(ctx, seriesTVDBID, options.EpisodeOrderID)
+	providedSeasons, err := providers.Mapper.SeriesSeasons(ctx, seriesTVDBID, options.EpisodeOrderID)
 	if err != nil {
 		if options.EpisodeOrderID == "" && isProviderMappingUnavailable(err) {
 			s.logTVDBMappingFallback(base.ID, err)
@@ -987,8 +1067,8 @@ func (s *Service) mappedSeriesDetails(ctx context.Context, principal auth.Princi
 		}
 		return Series{}, err
 	}
-	if s.artwork != nil {
-		enriched, enrichErr := s.artwork.EnrichSeries(ctx, ProviderSeries{
+	if providers.Artwork != nil {
+		enriched, enrichErr := providers.Artwork.EnrichSeries(ctx, ProviderSeries{
 			AdditionalIDs: map[string]string{"tvdb": seriesTVDBID},
 			Seasons:       providedSeasons,
 		}, normalizedLanguage)
@@ -1066,7 +1146,9 @@ func (s *Service) logTVDBMappingFallback(titleID string, err error) {
 }
 
 func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Principal, seasonID, language string) (Season, error) {
-	if s.mapper == nil {
+	ctx = s.pinProviders(ctx)
+	providers := metadataProviders(ctx)
+	if providers.Mapper == nil {
 		return Season{}, ErrProviderUnavailable
 	}
 	normalizedLanguage, err := normalizeLanguage(language)
@@ -1087,12 +1169,12 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 	if seriesTVDBID == "" {
 		return Season{}, ErrProviderNotFound
 	}
-	provided, err := s.mapper.SeriesSeason(ctx, seriesTVDBID, seasonTVDBID)
+	provided, err := providers.Mapper.SeriesSeason(ctx, seriesTVDBID, seasonTVDBID)
 	if err != nil {
 		return Season{}, err
 	}
-	if s.artwork != nil {
-		enriched, enrichErr := s.artwork.EnrichSeason(ctx, seriesTVDBID, provided, normalizedLanguage)
+	if providers.Artwork != nil {
+		enriched, enrichErr := providers.Artwork.EnrichSeason(ctx, seriesTVDBID, provided, normalizedLanguage)
 		if enrichErr != nil {
 			if !errors.Is(enrichErr, ErrProviderNotFound) {
 				s.logEnrichmentFailure("fanart", "season", seasonID, enrichErr)
@@ -1477,7 +1559,9 @@ func (s *Service) loadCachedTitleMetadata(ctx context.Context, tx pgx.Tx, titleI
 }
 
 func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaType string, principals ...*auth.Principal) (string, error) {
-	if s.resolver == nil {
+	ctx = s.pinProviders(ctx)
+	providers := metadataProviders(ctx)
+	if providers.Resolver == nil {
 		return "", ErrNotFound
 	}
 	tx, err := s.beginMetadataWorkTx(ctx, firstPrincipal(principals))
@@ -1522,7 +1606,7 @@ func (s *Service) resolveProviderExternalID(ctx context.Context, titleID, mediaT
 	}
 	var lastNotFound error
 	for _, identity := range identities {
-		resolved, resolveErr := s.resolver.ResolveExternalID(ctx, mediaType, identity.provider, identity.externalID)
+		resolved, resolveErr := providers.Resolver.ResolveExternalID(ctx, mediaType, identity.provider, identity.externalID)
 		if resolveErr == nil {
 			return resolved, nil
 		}
@@ -2592,14 +2676,15 @@ func (s *Service) beginAuthorizedProfileTx(ctx context.Context, principal auth.P
 }
 
 func (s *Service) beginLinkedAuthorizedProfileTx(ctx context.Context, principal auth.Principal) (pgx.Tx, error) {
-	if s.pool == nil || s.location == nil {
+	location := s.runtimeLocation(ctx)
+	if s.pool == nil || location == nil {
 		return nil, ErrProfileRequired
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin linked metadata profile authorization: %w", err)
 	}
-	_, valid, err := auth.ReloadAndLockLinkedPrincipal(ctx, tx, principal, time.Now().UTC(), s.location)
+	_, valid, err := auth.ReloadAndLockLinkedPrincipal(ctx, tx, principal, time.Now().UTC(), location)
 	if err != nil {
 		_ = tx.Rollback(ctx)
 		return nil, fmt.Errorf("authorize linked metadata profile: %w", err)

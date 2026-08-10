@@ -19,6 +19,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/runtimesettings"
 )
 
 var (
@@ -117,6 +118,7 @@ type Service struct {
 	metadata               metadataReader
 	logger                 *slog.Logger
 	location               *time.Location
+	runtimeSettings        *runtimesettings.Source
 	now                    func() time.Time
 	refreshMinimumInterval time.Duration
 	refreshClaimLease      time.Duration
@@ -137,6 +139,7 @@ type refreshRequest struct {
 	from      time.Time
 	to        time.Time
 	language  string
+	location  *time.Location
 	notBefore time.Time
 }
 
@@ -167,6 +170,26 @@ func NewService(pool *pgxpool.Pool, metadataService metadataReader, timezone str
 		pendingRefreshes:       make(map[string]refreshRequest),
 		runningRefreshes:       make(map[string]struct{}),
 	}, nil
+}
+
+func NewServiceWithRuntimeSettings(pool *pgxpool.Pool, metadataService metadataReader, runtimeSettings *runtimesettings.Source, logger *slog.Logger) (*Service, error) {
+	if runtimeSettings == nil {
+		return nil, fmt.Errorf("calendar runtime settings are required")
+	}
+	snapshot := runtimeSettings.Load()
+	service, err := NewService(pool, metadataService, snapshot.Timezone, logger)
+	if err != nil {
+		return nil, err
+	}
+	service.runtimeSettings = runtimeSettings
+	return service, nil
+}
+
+func (s *Service) runtimeLocation(ctx context.Context) *time.Location {
+	if s.runtimeSettings != nil {
+		return runtimesettings.Load(ctx, s.runtimeSettings).Location
+	}
+	return s.location
 }
 
 func (s *Service) List(ctx context.Context, principal auth.Principal, fromValue, toValue, language string) (Result, error) {
@@ -329,6 +352,7 @@ func (s *Service) Feed(ctx context.Context, token string, includePayload bool) (
 	if !valid || s.pool == nil {
 		return nil, ErrNotFound
 	}
+	location := s.runtimeLocation(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin calendar feed: %w", err)
@@ -382,7 +406,7 @@ func (s *Service) Feed(ctx context.Context, token string, includePayload bool) (
 	}
 
 	now := s.now()
-	access.AccessTimezone = s.location.String()
+	access.AccessTimezone = location.String()
 	if !auth.ProfileAccessibleAt(access, now) {
 		return nil, ErrNotFound
 	}
@@ -392,7 +416,7 @@ func (s *Service) Feed(ctx context.Context, token string, includePayload bool) (
 		}
 		return nil, nil
 	}
-	from, to := calendarFeedRange(now, s.location)
+	from, to := calendarFeedRange(now, location)
 	events, err := s.repository.List(ctx, tx, profileID, from, to)
 	if err != nil {
 		return nil, err
@@ -412,11 +436,12 @@ func (s *Service) beginManagedProfile(ctx context.Context, principal auth.Princi
 	if profileID == "" || principal.ActiveProfileID == nil || *principal.ActiveProfileID != profileID || s.pool == nil {
 		return nil, ErrNotFound
 	}
+	location := s.runtimeLocation(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin calendar link management: %w", err)
 	}
-	reloaded, valid, err := auth.ReloadAndLockPrincipal(ctx, tx, principal, s.now().UTC(), s.location)
+	reloaded, valid, err := auth.ReloadAndLockPrincipal(ctx, tx, principal, s.now().UTC(), location)
 	if err != nil {
 		_ = tx.Rollback(ctx)
 		return nil, fmt.Errorf("reload calendar link principal: %w", err)
@@ -632,6 +657,8 @@ func (s *Service) initializeRefreshState() {
 }
 
 func (s *Service) refresh(ctx context.Context, request refreshRequest) (refreshTurnResult, error) {
+	ctx = runtimesettings.Pin(ctx, s.runtimeSettings)
+	request.location = s.runtimeLocation(ctx)
 	if _, err := activeProfileID(request.principal, s.now().UTC()); err != nil {
 		return refreshTurnResult{}, err
 	}
@@ -698,7 +725,7 @@ func (s *Service) claimRefreshPage(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	now := s.now().UTC()
-	principal, valid, err := auth.ReloadAndLockPrincipal(ctx, tx, request.principal, now, s.location)
+	principal, valid, err := auth.ReloadAndLockPrincipal(ctx, tx, request.principal, now, request.location)
 	if err != nil {
 		return refreshCursor{}, nil, auth.Principal{}, false, time.Time{}, fmt.Errorf("reload calendar refresh principal: %w", err)
 	}
