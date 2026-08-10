@@ -245,6 +245,9 @@ func applyPlaybackDecision(sources []Source, assets []storedAsset, candidate sou
 	source.Protocol = protocol
 	source.Container = container
 	asset.Kind = mode
+	if video := primaryTrack(inspection.VideoTracks); video != nil {
+		asset.VideoBitDepth = video.BitDepth
+	}
 	if decision != nil {
 		asset.ToneMap = decision.ToneMapping
 		asset.DolbyVisionToneMapSafe = decision.Source == nil ||
@@ -354,8 +357,12 @@ func processingDecision(reason, videoAction, audioAction string, inspection Medi
 		if video != nil {
 			target.Height = video.Height
 		}
-		if capabilities.MaximumHeight > 0 && (target.Height == 0 || target.Height > capabilities.MaximumHeight) {
-			target.Height = capabilities.MaximumHeight
+		maximumHeight := capabilities.MaximumHeight
+		if toneMap && capabilities.ToneMapMaximumHeight > 0 && (maximumHeight == 0 || capabilities.ToneMapMaximumHeight < maximumHeight) {
+			maximumHeight = capabilities.ToneMapMaximumHeight
+		}
+		if maximumHeight > 0 && (target.Height == 0 || target.Height > maximumHeight) {
+			target.Height = maximumHeight
 		}
 		target.VideoBitrateKbps = transcodeVideoBitrateKbps(capabilities)
 	}

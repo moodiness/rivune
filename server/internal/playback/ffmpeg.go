@@ -465,7 +465,11 @@ func (processor *FFmpegProcessor) ProcessHLS(ctx context.Context, asset storedAs
 		}
 	}()
 	_, seekable := seekableHLSSegmentCount(asset)
-	asset.ReadRate = adaptiveTranscodeReadRate(processor.maximumReadRate, len(processor.slots), cap(processor.slots), seekable)
+	readRate := adaptiveTranscodeReadRate(processor.maximumReadRate, len(processor.slots), cap(processor.slots))
+	if seekable {
+		readRate = seekableTranscodeReadRate(readRate, asset.DurationSeconds-asset.StartSeconds)
+	}
+	asset.ReadRate = readRate
 	resultErr = processor.processHLS(ctx, asset, directory, processor.encoder)
 	if resultErr == nil || asset.Kind != processingTranscode || processor.encoder.normalizedKind() == videoEncoderSoftware || hlsOutputStarted(directory) {
 		return resultErr
@@ -477,7 +481,11 @@ func (processor *FFmpegProcessor) ProcessHLS(ctx context.Context, asset storedAs
 		return fmt.Errorf("reset HLS output for software fallback: %w", resetErr)
 	}
 	processor.metrics.softwareFallbacks.Add(1)
-	if fallbackErr := processor.processHLS(ctx, asset, directory, videoEncoder{kind: videoEncoderSoftware}); fallbackErr != nil {
+	fallbackAsset := asset
+	if fallbackAsset.ToneMap && (fallbackAsset.TargetHeight == 0 || fallbackAsset.TargetHeight > softwareToneMapMaximumHeight) {
+		fallbackAsset.TargetHeight = softwareToneMapMaximumHeight
+	}
+	if fallbackErr := processor.processHLS(ctx, fallbackAsset, directory, videoEncoder{kind: videoEncoderSoftware}); fallbackErr != nil {
 		return fmt.Errorf("hardware encoding failed: %v; software fallback failed: %w", resultErr, fallbackErr)
 	}
 	return nil
@@ -620,7 +628,7 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 	}
 	arguments = append(arguments, ffmpegInputArguments(asset)...)
 	if asset.ReadRate > 0 {
-		arguments = append(arguments, "-readrate", strconv.FormatFloat(asset.ReadRate, 'f', 2, 64))
+		arguments = append(arguments, "-readrate", strconv.FormatFloat(asset.ReadRate, 'f', -1, 64))
 	}
 	if asset.StartSeconds > 0 {
 		arguments = append(arguments, "-ss", strconv.FormatFloat(asset.StartSeconds, 'f', -1, 64))
@@ -670,6 +678,9 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 }
 
 func processingVideoFilter(asset storedAsset, encoder videoEncoder) string {
+	if filter := encoder.hybridToneMapFilter(asset); filter != "" {
+		return filter
+	}
 	if filter := encoder.hardwareFilter(asset); filter != "" || encoder.hardwareFramesSafe(asset) {
 		return filter
 	}
@@ -738,7 +749,7 @@ func (processor *FFmpegProcessor) VideoEncoder() string {
 }
 
 func (processor *FFmpegProcessor) HardwareToneMap() bool {
-	return processor.encoder.hardwareToneMap
+	return processor.encoder.usesHardwareToneMap()
 }
 
 func (processor *FFmpegProcessor) ActiveProcesses() int {
@@ -773,7 +784,7 @@ func (processor *FFmpegProcessor) PlaybackDiagnostics() MediaDiagnostics {
 	return MediaDiagnostics{
 		FFmpegVersion: boundedMediaVersion(processor.ffmpegVersion), FFprobeVersion: boundedMediaVersion(processor.ffprobeVersion),
 		HardwareAcceleration: hardwareAcceleration, VideoEncoder: videoEncoder,
-		MaximumReadRate: adaptiveTranscodeReadRate(processor.maximumReadRate, 1, 1, false),
+		MaximumReadRate: adaptiveTranscodeReadRate(processor.maximumReadRate, 1, 1),
 		HardwareToneMap: processor.HardwareToneMap(), TranscodeThreads: threads,
 		Pools: MediaDiagnosticPools{
 			Process: mediaDiagnosticPool(processor.slots), Probe: mediaDiagnosticPool(processor.probeSlots),

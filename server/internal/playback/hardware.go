@@ -12,9 +12,11 @@ import (
 	"time"
 )
 
-const hardwareProbeTimeout = 10 * time.Second
-
-const softwareToneMapFilter = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+const (
+	hardwareProbeTimeout         = 10 * time.Second
+	softwareToneMapMaximumHeight = 1080
+	softwareToneMapFilter        = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+)
 
 type FFmpegOptions struct {
 	HardwareAcceleration string
@@ -24,17 +26,22 @@ type FFmpegOptions struct {
 
 type videoEncoderKind string
 
+type videoToneMapBackend string
+
 const (
 	videoEncoderSoftware videoEncoderKind = "software"
 	videoEncoderVAAPI    videoEncoderKind = "vaapi"
 	videoEncoderQSV      videoEncoderKind = "qsv"
 	videoEncoderNVENC    videoEncoderKind = "nvenc"
+
+	videoToneMapVAAPI  videoToneMapBackend = "vaapi"
+	videoToneMapVulkan videoToneMapBackend = "vulkan"
 )
 
 type videoEncoder struct {
-	kind            videoEncoderKind
-	device          string
-	hardwareToneMap bool
+	kind           videoEncoderKind
+	device         string
+	toneMapBackend videoToneMapBackend
 }
 
 func detectVideoEncoder(ffmpegPath string, options FFmpegOptions) (videoEncoder, error) {
@@ -142,10 +149,12 @@ func detectHardwareToneMap(ffmpegPath string, encoder videoEncoder) videoEncoder
 	if encoder.normalizedKind() != videoEncoderVAAPI {
 		return encoder
 	}
-	candidate := encoder
-	candidate.hardwareToneMap = true
-	if err := probeVideoEncoder(ffmpegPath, candidate, true); err == nil {
-		return candidate
+	for _, backend := range []videoToneMapBackend{videoToneMapVAAPI, videoToneMapVulkan} {
+		candidate := encoder
+		candidate.toneMapBackend = backend
+		if err := probeVideoEncoder(ffmpegPath, candidate, true); err == nil {
+			return candidate
+		}
 	}
 	return encoder
 }
@@ -160,6 +169,14 @@ func (encoder videoEncoder) normalizedKind() videoEncoderKind {
 func (encoder videoEncoder) globalArguments() []string {
 	switch encoder.normalizedKind() {
 	case videoEncoderVAAPI:
+		if encoder.toneMapBackend == videoToneMapVulkan {
+			return []string{
+				"-init_hw_device", "drm=dr:" + encoder.device,
+				"-init_hw_device", "vaapi=hw@dr",
+				"-init_hw_device", "vulkan=vk@dr",
+				"-filter_hw_device", "hw",
+			}
+		}
 		return []string{"-init_hw_device", "vaapi=hw:" + encoder.device, "-filter_hw_device", "hw"}
 	case videoEncoderQSV:
 		return []string{"-init_hw_device", "vaapi=va:" + encoder.device, "-init_hw_device", "qsv=hw@va", "-filter_hw_device", "hw"}
@@ -168,29 +185,37 @@ func (encoder videoEncoder) globalArguments() []string {
 	}
 }
 
-// hardwareFramesSafe is deliberately conservative: these decoder/encoder pairs
-// share a documented hardware frame type, while subtitle composition and
-// software tone mapping require CPU frames. A startup failure still falls back
-// to software before an HLS playlist is published.
-func (encoder videoEncoder) hardwareFramesSafe(asset storedAsset) bool {
+func (encoder videoEncoder) usesHardwareToneMap() bool {
+	return encoder.toneMapBackend == videoToneMapVAAPI || encoder.toneMapBackend == videoToneMapVulkan
+}
+
+func (encoder videoEncoder) hardwareDecodeSafe(asset storedAsset) bool {
 	if asset.Kind != processingTranscode || asset.SubtitleTrackIndex != nil ||
 		encoder.normalizedKind() == videoEncoderSoftware || asset.Decision == nil || asset.Decision.Source == nil {
 		return false
 	}
-	switch normalizedCodec(asset.Decision.Source.VideoCodec) {
+	codec := normalizedCodec(asset.Decision.Source.VideoCodec)
+	switch codec {
 	case "h264", "h265":
 	default:
 		return false
 	}
-	if asset.ToneMap && (encoder.normalizedKind() != videoEncoderVAAPI || !encoder.hardwareToneMap) {
-		return false
+	if asset.ToneMap && !encoder.usesHardwareToneMap() {
+		return encoder.normalizedKind() == videoEncoderVAAPI && codec == "h265" && asset.VideoBitDepth == 10
 	}
 	needsScale := asset.TargetHeight > 0 && asset.Decision.Source.Height > asset.TargetHeight
 	return !needsScale || encoder.normalizedKind() == videoEncoderVAAPI || encoder.normalizedKind() == videoEncoderQSV
 }
 
+// hardwareFramesSafe is deliberately conservative: these decoder, filter,
+// and encoder paths share a documented hardware frame type. Subtitle
+// composition and software tone mapping require CPU frames.
+func (encoder videoEncoder) hardwareFramesSafe(asset storedAsset) bool {
+	return encoder.hardwareDecodeSafe(asset) && (!asset.ToneMap || encoder.usesHardwareToneMap())
+}
+
 func (encoder videoEncoder) hardwareDecodeArguments(asset storedAsset) []string {
-	if !encoder.hardwareFramesSafe(asset) {
+	if !encoder.hardwareDecodeSafe(asset) {
 		return nil
 	}
 	switch encoder.normalizedKind() {
@@ -205,9 +230,28 @@ func (encoder videoEncoder) hardwareDecodeArguments(asset storedAsset) []string 
 	}
 }
 
+func (encoder videoEncoder) hybridToneMapFilter(asset storedAsset) string {
+	if !asset.ToneMap || encoder.hardwareFramesSafe(asset) || !encoder.hardwareDecodeSafe(asset) {
+		return ""
+	}
+	filters := []string{"hwdownload", "format=p010le"}
+	if asset.TargetHeight > 0 && asset.Decision != nil && asset.Decision.Source != nil && asset.Decision.Source.Height > asset.TargetHeight {
+		filters = append(filters, "scale=-2:"+strconv.Itoa(asset.TargetHeight))
+	}
+	filters = append(filters, softwareToneMapFilter, "format=nv12", "hwupload")
+	return strings.Join(filters, ",")
+}
+
 func (encoder videoEncoder) hardwareFilter(asset storedAsset) string {
 	if !encoder.hardwareFramesSafe(asset) {
 		return ""
+	}
+	if asset.ToneMap && encoder.toneMapBackend == videoToneMapVulkan {
+		height := 0
+		if asset.TargetHeight > 0 && asset.Decision.Source.Height > asset.TargetHeight {
+			height = asset.TargetHeight
+		}
+		return vulkanToneMapFilter(height)
 	}
 	filters := make([]string, 0, 2)
 	if asset.ToneMap {
@@ -225,9 +269,29 @@ func (encoder videoEncoder) hardwareFilter(asset storedAsset) string {
 	return strings.Join(filters, ",")
 }
 
+func vulkanToneMapFilter(targetHeight int) string {
+	filters := []string{
+		"hwmap=derive_device=vulkan",
+		"format=vulkan",
+		"libplacebo=upscaler=none:downscaler=none:format=bgra:tonemapping=bt.2390:peak_detect=false:color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv",
+		"hwmap=derive_device=vaapi",
+		"format=vaapi",
+	}
+	scale := "scale_vaapi=format=nv12"
+	if targetHeight > 0 {
+		scale = "scale_vaapi=w=-2:h=" + strconv.Itoa(targetHeight) + ":format=nv12"
+	}
+	return strings.Join(append(filters, scale), ",")
+}
+
 func (encoder videoEncoder) filter(toneMap bool) string {
-	if toneMap && encoder.normalizedKind() == videoEncoderVAAPI && encoder.hardwareToneMap {
-		return "format=p010,hwupload,tonemap_vaapi=format=nv12:matrix=bt709:primaries=bt709:transfer=bt709"
+	if toneMap && encoder.normalizedKind() == videoEncoderVAAPI {
+		switch encoder.toneMapBackend {
+		case videoToneMapVAAPI:
+			return "format=p010,hwupload,tonemap_vaapi=format=nv12:matrix=bt709:primaries=bt709:transfer=bt709"
+		case videoToneMapVulkan:
+			return "format=p010,setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,hwupload," + vulkanToneMapFilter(0)
+		}
 	}
 	filter := ""
 	if toneMap {

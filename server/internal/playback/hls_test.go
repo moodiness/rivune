@@ -828,6 +828,29 @@ func TestFFmpegHLSOutputArgumentsUseBoundedSlidingPlaylist(t *testing.T) {
 	}
 }
 
+func TestHLSShareableWindowReservesProductionLead(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "segment-000000.ts"), []byte{1}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	job := &hlsJob{directory: directory, segmentContainer: "ts", done: make(chan struct{})}
+	writeSequence := func(sequence int) {
+		t.Helper()
+		contents := fmt.Sprintf("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:%d\n", sequence)
+		if err := os.WriteFile(filepath.Join(directory, "index.m3u8"), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSequence(hlsSharedJoinSegments)
+	if !hlsJobShareable(job) {
+		t.Fatalf("worker at shared join boundary %d was rejected", hlsSharedJoinSegments)
+	}
+	writeSequence(hlsSharedJoinSegments + 1)
+	if hlsJobShareable(job) {
+		t.Fatalf("worker beyond shared join boundary %d remained shareable", hlsSharedJoinSegments)
+	}
+}
+
 func TestHLSMasterPlaylistPointsToOpaqueMediaCapability(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1988,7 +2011,7 @@ func TestHLSJobFingerprintDifferencesNeverShare(t *testing.T) {
 		ID: "asset", Kind: processingTranscode, URL: "https://media.example/movie.mkv", Container: "mkv",
 		HLSSegmentContainer: "mp4", Headers: map[string]string{"Authorization": "Bearer first"}, ToneMap: true,
 		SubtitleTrackType: subtitleBurnText, SubtitleTrackOrdinal: 1, DurationSeconds: 90, ReadRate: 1.25,
-		TargetHeight: 720, VideoBitrateKbps: 4000, MaximumAudioChannels: 2, StartSeconds: 3,
+		VideoBitDepth: 10, TargetHeight: 720, VideoBitrateKbps: 4000, MaximumAudioChannels: 2, StartSeconds: 3,
 		Decision: &PlaybackDecision{Target: &PlaybackDecisionTarget{VideoCodec: "h264", AudioCodec: "aac"}},
 	}
 	audio, subtitle := 1, 2
@@ -2011,6 +2034,7 @@ func TestHLSJobFingerprintDifferencesNeverShare(t *testing.T) {
 		{name: "tone map safety", mutate: func(asset *storedAsset) { asset.DolbyVisionToneMapSafe = true }},
 		{name: "duration", mutate: func(asset *storedAsset) { asset.DurationSeconds++ }},
 		{name: "read rate", mutate: func(asset *storedAsset) { asset.ReadRate = 1 }},
+		{name: "video bit depth", mutate: func(asset *storedAsset) { asset.VideoBitDepth = 8 }},
 		{name: "target height", mutate: func(asset *storedAsset) { asset.TargetHeight = 1080 }},
 		{name: "video bitrate", mutate: func(asset *storedAsset) { asset.VideoBitrateKbps++ }},
 		{name: "audio channels", mutate: func(asset *storedAsset) { asset.MaximumAudioChannels = 1 }},

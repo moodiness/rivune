@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1580,6 +1581,54 @@ func TestFullTranscodeDecisionAppliesResolutionHDRAndBitrateLimits(t *testing.T)
 	})
 	if mode != processingTranscode || decision == nil || decision.Target == nil || decision.Target.VideoBitrateKbps != 12000 {
 		t.Fatalf("server bitrate limit was not applied to full transcode: mode=%q decision=%+v", mode, decision)
+	}
+}
+
+func TestSoftwareToneMapTargetHeightIsBounded(t *testing.T) {
+	inspection := MediaInspection{VideoTracks: []MediaTrack{{Codec: "h265", Height: 2160}}}
+	capabilities := Capabilities{MaximumHeight: 2160, ToneMapMaximumHeight: softwareToneMapMaximumHeight, TranscodeVideoBitrateKbps: 12000}
+	decision := processingDecision(decisionVideoTranscodeRequired, "transcode", "transcode", inspection, capabilities, true)
+	if decision.Target == nil || decision.Target.Height != softwareToneMapMaximumHeight {
+		t.Fatalf("software tone-map target = %+v, want %dp", decision.Target, softwareToneMapMaximumHeight)
+	}
+	decision = processingDecision(decisionVideoTranscodeRequired, "transcode", "transcode", inspection, capabilities, false)
+	if decision.Target == nil || decision.Target.Height != 2160 {
+		t.Fatalf("SDR transcode target was capped by tone-map limit: %+v", decision.Target)
+	}
+	capabilities.MaximumHeight = 720
+	decision = processingDecision(decisionVideoTranscodeRequired, "transcode", "transcode", inspection, capabilities, true)
+	if decision.Target == nil || decision.Target.Height != 720 {
+		t.Fatalf("client height limit lost precedence: %+v", decision.Target)
+	}
+}
+
+func TestPlaybackCapabilitiesOnlyApplySoftwareToneMapLimit(t *testing.T) {
+	software := (&Service{processor: &FFmpegProcessor{encoder: videoEncoder{kind: videoEncoderVAAPI}}}).playbackCapabilities(Capabilities{}, 2160, 12000)
+	if software.ToneMapMaximumHeight != softwareToneMapMaximumHeight {
+		t.Fatalf("software tone-map maximum height = %d", software.ToneMapMaximumHeight)
+	}
+	hardware := (&Service{processor: &FFmpegProcessor{encoder: videoEncoder{kind: videoEncoderVAAPI, toneMapBackend: videoToneMapVulkan}}}).playbackCapabilities(Capabilities{}, 2160, 12000)
+	if hardware.ToneMapMaximumHeight != 0 {
+		t.Fatalf("hardware tone mapping was capped at %dp", hardware.ToneMapMaximumHeight)
+	}
+}
+
+func TestApplyPlaybackDecisionPersistsPrivateVideoBitDepth(t *testing.T) {
+	sources := []Source{{ID: "source"}}
+	assets := []storedAsset{{ID: "source"}}
+	inspection := MediaInspection{VideoTracks: []MediaTrack{{Codec: "h265", Height: 2160, BitDepth: 10}}}
+	decision := processingDecision(decisionVideoTranscodeRequired, "transcode", "transcode", inspection, Capabilities{}, true)
+	applyPlaybackDecision(sources, assets, sourceCandidate{}, inspection, processingTranscode, decision, Capabilities{})
+	encoded, err := json.Marshal(assets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored storedAsset
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.VideoBitDepth != 10 {
+		t.Fatalf("restored private video bit depth = %d", restored.VideoBitDepth)
 	}
 }
 
