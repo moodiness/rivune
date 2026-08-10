@@ -10,8 +10,12 @@ services:
     cap_add:
       - NET_BIND_SERVICE
     pids_limit: 128
-    cpus: ${RIVUNE_CADDY_CPU_LIMIT:-1.0}
-    mem_limit: ${RIVUNE_CADDY_MEMORY_LIMIT:-256m}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+          pids: 128
     read_only: true
     depends_on:
       rivune:
@@ -44,8 +48,12 @@ services:
       - SETGID
       - SETUID
     pids_limit: 512
-    cpus: ${RIVUNE_CPU_LIMIT:-8.0}
-    mem_limit: ${RIVUNE_MEMORY_LIMIT:-6g}
+    deploy:
+      resources:
+        limits:
+          cpus: "8.0"
+          memory: 6G
+          pids: 512
     read_only: true
     depends_on:
       postgres:
@@ -54,14 +62,33 @@ services:
       RIVUNE_LISTEN_ADDRESS: ":8080"
       RIVUNE_PUBLIC_URL: https://${RIVUNE_HOST:?Set RIVUNE_HOST to the public DNS name}
       RIVUNE_TRUSTED_PROXIES: 172.30.0.0/24
-      RIVUNE_JELLYFIN_ENABLED: ${RIVUNE_JELLYFIN_ENABLED:-false}
-      RIVUNE_DATABASE_HOST: postgres
-      RIVUNE_DATABASE_PORT: "5432"
-      RIVUNE_DATABASE_NAME: rivune
-      RIVUNE_DATABASE_USER: rivune
+      RIVUNE_NAT64_PREFIXES: ${RIVUNE_NAT64_PREFIXES:-}
+      RIVUNE_LAN_ARTWORK_ORIGINS: ${RIVUNE_LAN_ARTWORK_ORIGINS:-}
+      RIVUNE_DATABASE_URL: ${RIVUNE_DATABASE_URL:-}
+      RIVUNE_DATABASE_HOST: ${RIVUNE_DATABASE_HOST:-postgres}
+      RIVUNE_DATABASE_PORT: ${RIVUNE_DATABASE_PORT:-5432}
+      RIVUNE_DATABASE_NAME: ${RIVUNE_DATABASE_NAME:-rivune}
+      RIVUNE_DATABASE_USER: ${RIVUNE_DATABASE_USER:-rivune}
       RIVUNE_DATABASE_PASSWORD: ${RIVUNE_DATABASE_PASSWORD:?Set RIVUNE_DATABASE_PASSWORD}
-      RIVUNE_DATABASE_SSLMODE: disable
+      RIVUNE_DATABASE_SSLMODE: ${RIVUNE_DATABASE_SSLMODE:-disable}
+      RIVUNE_DATABASE_SSLROOTCERT: ${RIVUNE_DATABASE_SSLROOTCERT:-}
       RIVUNE_SETUP_TOKEN: ${RIVUNE_SETUP_TOKEN:?Set RIVUNE_SETUP_TOKEN}
+      RIVUNE_ENCRYPTION_KEYS: ${RIVUNE_ENCRYPTION_KEYS:-}
+      PUID: ${PUID:-65532}
+      PGID: ${PGID:-65532}
+      RIVUNE_VIDEO_GROUP_ID: ${RIVUNE_VIDEO_GROUP_ID:?Set RIVUNE_VIDEO_GROUP_ID to the numeric group owning RIVUNE_VIDEO_DEVICE}
+
+      # One-shot upgrade import only. The database always wins, and Rivune marks
+      # the import complete even when these legacy inputs are empty. They are
+      # never fallback runtime configuration; remove them from .env after upgrade.
+      TZ: ${TZ:-}
+      RIVUNE_JELLYFIN_ENABLED: ${RIVUNE_JELLYFIN_ENABLED:-}
+      RIVUNE_JELLYFIN_DEBUG: ${RIVUNE_JELLYFIN_DEBUG:-}
+      RIVUNE_ALLOW_TRANSCODING: ${RIVUNE_ALLOW_TRANSCODING:-}
+      RIVUNE_HARDWARE_ACCELERATION: ${RIVUNE_HARDWARE_ACCELERATION:-}
+      RIVUNE_TRANSCODE_MAX_BITRATE_KBPS: ${RIVUNE_TRANSCODE_MAX_BITRATE_KBPS:-}
+      RIVUNE_MEDIA_MAX_STORAGE_MB: ${RIVUNE_MEDIA_MAX_STORAGE_MB:-}
+      RIVUNE_ARTWORK_MAX_STORAGE_MB: ${RIVUNE_ARTWORK_MAX_STORAGE_MB:-}
       RIVUNE_TMDB_ACCESS_TOKEN: ${RIVUNE_TMDB_ACCESS_TOKEN:-}
       RIVUNE_FANART_API_KEY: ${RIVUNE_FANART_API_KEY:-}
       RIVUNE_MDBLIST_API_KEY: ${RIVUNE_MDBLIST_API_KEY:-}
@@ -71,25 +98,14 @@ services:
       RIVUNE_TRAKT_CLIENT_SECRET: ${RIVUNE_TRAKT_CLIENT_SECRET:-}
       RIVUNE_SIMKL_CLIENT_ID: ${RIVUNE_SIMKL_CLIENT_ID:-}
       RIVUNE_TRACKING_ENCRYPTION_KEY: ${RIVUNE_TRACKING_ENCRYPTION_KEY:-}
-      RIVUNE_REMUX_CONCURRENCY: ${RIVUNE_REMUX_CONCURRENCY:-4}
-      RIVUNE_TRANSCODE_THREADS: ${RIVUNE_TRANSCODE_THREADS:-4}
-      RIVUNE_TRANSCODE_MAX_BITRATE_KBPS: ${RIVUNE_TRANSCODE_MAX_BITRATE_KBPS:-12000}
-      RIVUNE_TRANSCODE_MAX_READ_RATE: ${RIVUNE_TRANSCODE_MAX_READ_RATE:-1.5}
-      RIVUNE_HLS_INITIAL_BUFFER_SECONDS: ${RIVUNE_HLS_INITIAL_BUFFER_SECONDS:-6}
-      RIVUNE_HARDWARE_ACCELERATION: ${RIVUNE_HARDWARE_ACCELERATION:-auto}
-      RIVUNE_VIDEO_DEVICE: ${RIVUNE_VIDEO_DEVICE:-/dev/dri/renderD128}
-      RIVUNE_MEDIA_TEMP_DIR: ${RIVUNE_MEDIA_TEMP_DIR:-/tmp}
-      RIVUNE_MEDIA_MAX_STORAGE_MB: ${RIVUNE_MEDIA_MAX_STORAGE_MB:-4096}
-      RIVUNE_ARTWORK_CACHE_DIR: /var/lib/rivune/artwork
-      RIVUNE_ARTWORK_MAX_STORAGE_MB: ${RIVUNE_ARTWORK_MAX_STORAGE_MB:-20480}
-      RIVUNE_LAN_ARTWORK_ORIGINS: ${RIVUNE_LAN_ARTWORK_ORIGINS:-}
-      TZ: ${TZ:-UTC}
-      PUID: ${PUID:-65532}
-      PGID: ${PGID:-65532}
+    devices:
+      - "${RIVUNE_VIDEO_DEVICE:-/dev/dri/renderD128}:/dev/dri/renderD128"
+    group_add:
+      - "${RIVUNE_VIDEO_GROUP_ID:?Set RIVUNE_VIDEO_GROUP_ID to the numeric group owning RIVUNE_VIDEO_DEVICE}"
     volumes:
       - artwork_cache:/var/lib/rivune/artwork
     tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=${RIVUNE_MEDIA_TMPFS_SIZE_MB:-4096}m
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=4096m
     healthcheck:
       test: ["CMD", "/usr/local/bin/rivune", "healthcheck"]
       interval: 10s
@@ -115,8 +131,12 @@ services:
       - SETGID
       - SETUID
     pids_limit: 256
-    cpus: ${RIVUNE_POSTGRES_CPU_LIMIT:-2.0}
-    mem_limit: ${RIVUNE_POSTGRES_MEMORY_LIMIT:-1g}
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+          pids: 256
     read_only: true
     environment:
       POSTGRES_DB: postgres

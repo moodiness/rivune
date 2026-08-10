@@ -1,6 +1,0 @@
-services:
-  server:
-    devices:
-      - "${RIVUNE_VIDEO_DEVICE:-/dev/dri/renderD128}:${RIVUNE_VIDEO_DEVICE:-/dev/dri/renderD128}"
-    group_add:
-      - "${RIVUNE_VIDEO_GROUP_ID:-109}"
