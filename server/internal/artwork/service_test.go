@@ -403,7 +403,7 @@ func TestServeKeyTransformsClientImageQueriesWithStableConditionalHeaders(t *tes
 	}
 }
 
-func TestServeKeyBoundsTransformationsAndReportsSaturation(t *testing.T) {
+func TestServeKeyBoundsTransformationsAndQueuesBurst(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	imageBytes := testSizedPNG(t, 4, 2)
 	fixture := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
@@ -412,13 +412,14 @@ func TestServeKeyBoundsTransformationsAndReportsSaturation(t *testing.T) {
 	}))
 	defer fixture.Close()
 	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+	service.transformMaxWaiters = 1
 	localURL := service.LocalURL(context.Background(), fixture.URL+"/bounded-transform")
 	key := strings.TrimPrefix(localURL, publicPrefix)
 	assertArtworkResponse(t, serveArtwork(service, http.MethodGet, localURL), imageBytes, true)
 
 	var active atomic.Int32
 	var maximum atomic.Int32
-	var calls [5]atomic.Int32
+	var calls [6]atomic.Int32
 	started := make(chan int, maximumConcurrentImageTransforms)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -443,7 +444,7 @@ func TestServeKeyBoundsTransformationsAndReportsSaturation(t *testing.T) {
 		width    int
 		response *httptest.ResponseRecorder
 	}
-	responses := make(chan served, maximumConcurrentImageTransforms)
+	responses := make(chan served, maximumConcurrentImageTransforms+1)
 	serveTransform := func(method string, width int) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(method, localURL+"?width="+strconv.Itoa(width), nil)
 		response := httptest.NewRecorder()
@@ -463,19 +464,28 @@ func TestServeKeyBoundsTransformationsAndReportsSaturation(t *testing.T) {
 			t.Fatal("timed out waiting for bounded HTTP transformations")
 		}
 	}
-	saturatedResult := make(chan *httptest.ResponseRecorder, 1)
-	go func() { saturatedResult <- serveTransform(http.MethodGet, 4) }()
-	var saturated *httptest.ResponseRecorder
-	select {
-	case saturated = <-saturatedResult:
-	case <-time.After(time.Second):
-		t.Fatal("saturated HTTP transformation did not fail promptly")
+	go func() {
+		responses <- served{method: http.MethodGet, width: 4, response: serveTransform(http.MethodGet, 4)}
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		service.transformMu.Lock()
+		waiters := service.transformWaiters
+		service.transformMu.Unlock()
+		if waiters == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("HTTP transformation did not enter the bounded queue")
+		}
+		time.Sleep(time.Millisecond)
 	}
-	if saturated.Code != http.StatusServiceUnavailable || saturated.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("saturated transform status=%d headers=%v body=%q", saturated.Code, saturated.Header(), saturated.Body.String())
+	overloaded := serveTransform(http.MethodGet, 5)
+	if overloaded.Code != http.StatusServiceUnavailable || overloaded.Header().Get("Cache-Control") != "no-store" || overloaded.Header().Get("Retry-After") != "1" {
+		t.Fatalf("overloaded transform status=%d headers=%v body=%q", overloaded.Code, overloaded.Header(), overloaded.Body.String())
 	}
 	releaseTransforms()
-	for range maximumConcurrentImageTransforms {
+	for range maximumConcurrentImageTransforms + 1 {
 		select {
 		case result := <-responses:
 			wantLength := strconv.Itoa(result.width)
@@ -489,28 +499,29 @@ func TestServeKeyBoundsTransformationsAndReportsSaturation(t *testing.T) {
 				t.Fatalf("transformed GET wrote %d bytes, want %d", result.response.Body.Len(), result.width)
 			}
 		case <-time.After(time.Second):
-			t.Fatal("timed out waiting for HTTP transformations")
+			t.Fatal("timed out waiting for queued HTTP transformations")
 		}
 	}
-	if maximum.Load() != maximumConcurrentImageTransforms || calls[2].Load() != 1 || calls[3].Load() != 1 || calls[4].Load() != 0 {
-		t.Fatalf("transform maximum=%d calls=[width2:%d width3:%d width4:%d]", maximum.Load(), calls[2].Load(), calls[3].Load(), calls[4].Load())
+	if maximum.Load() != maximumConcurrentImageTransforms || calls[2].Load() != 1 || calls[3].Load() != 1 || calls[4].Load() != 1 || calls[5].Load() != 0 {
+		t.Fatalf("transform maximum=%d calls=[width2:%d width3:%d width4:%d width5:%d]", maximum.Load(), calls[2].Load(), calls[3].Load(), calls[4].Load(), calls[5].Load())
 	}
 	service.transformMu.Lock()
-	remainingFlights := len(service.transformFlights)
+	remainingFlights, remainingWaiters := len(service.transformFlights), service.transformWaiters
 	service.transformMu.Unlock()
-	if remainingFlights != 0 || len(service.transformSlots) != 0 {
-		t.Fatalf("HTTP transform cleanup flights=%d slots=%d", remainingFlights, len(service.transformSlots))
+	if remainingFlights != 0 || remainingWaiters != 0 || len(service.transformSlots) != 0 {
+		t.Fatalf("HTTP transform cleanup flights=%d waiters=%d slots=%d", remainingFlights, remainingWaiters, len(service.transformSlots))
 	}
 }
 
-func TestTransformCoalescedBoundsSharesCancelsAndCleansUp(t *testing.T) {
+func TestTransformCoalescedBoundsSharesQueuesCancelsAndCleansUp(t *testing.T) {
 	service := &Service{
-		transformFlights: make(map[string]*imageTransformFlight),
-		transformSlots:   make(chan struct{}, maximumConcurrentImageTransforms),
+		transformFlights:    make(map[string]*imageTransformFlight),
+		transformSlots:      make(chan struct{}, maximumConcurrentImageTransforms),
+		transformMaxWaiters: 2,
 	}
 	var active atomic.Int32
 	var maximum atomic.Int32
-	var calls [4]atomic.Int32
+	var calls [6]atomic.Int32
 	started := make(chan int, maximumConcurrentImageTransforms)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -536,97 +547,102 @@ func TestTransformCoalescedBoundsSharesCancelsAndCleansUp(t *testing.T) {
 		contentType string
 		err         error
 	}
-	results := make(chan outcome, maximumConcurrentImageTransforms)
-	run := func(etag string, width int) {
-		content, _, err := service.transformCoalesced(context.Background(), etag, nil, "image/png", imageTransform{width: width, requested: true})
-		results <- outcome{content: content, err: err}
+	results := make(chan outcome, 5)
+	run := func(ctx context.Context, etag string, width int) {
+		content, contentType, err := service.transformCoalesced(ctx, etag, nil, "image/png", imageTransform{width: width, requested: true})
+		results <- outcome{content: content, contentType: contentType, err: err}
 	}
-	go run(`"first"`, 1)
-	go run(`"second"`, 2)
-	seen := make(map[int]bool)
+	go run(context.Background(), `"first"`, 1)
+	go run(context.Background(), `"second"`, 2)
 	for range maximumConcurrentImageTransforms {
 		select {
-		case width := <-started:
-			seen[width] = true
+		case <-started:
 		case <-time.After(time.Second):
 			t.Fatal("timed out waiting for admitted transformations")
 		}
 	}
-	if !seen[1] || !seen[2] || maximum.Load() != maximumConcurrentImageTransforms {
-		t.Fatalf("active transformations=%d started=%v", maximum.Load(), seen)
-	}
-
-	saturatedResult := make(chan error, 1)
-	go func() {
-		_, _, err := service.transformCoalesced(context.Background(), `"third"`, nil, "image/png", imageTransform{width: 3, requested: true})
-		saturatedResult <- err
-	}()
-	select {
-	case err := <-saturatedResult:
-		if !errors.Is(err, errImageTransformSaturated) {
-			t.Fatalf("third distinct transformation error = %v, want saturation", err)
+	waitForWaiters := func(want int) {
+		deadline := time.Now().Add(time.Second)
+		for {
+			service.transformMu.Lock()
+			got := service.transformWaiters
+			service.transformMu.Unlock()
+			if got == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("transform waiters=%d want=%d", got, want)
+			}
+			time.Sleep(time.Millisecond)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("saturated transformation did not fail promptly")
 	}
-	waitingContext, cancelWaiting := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	defer cancelWaiting()
-	canceledResult := make(chan error, 1)
+	queuedOwnerContext, cancelQueuedOwner := context.WithCancel(context.Background())
+	queuedOwnerResult := make(chan error, 1)
 	go func() {
-		_, _, err := service.transformCoalesced(waitingContext, `"first"`, nil, "image/png", imageTransform{width: 1, requested: true})
-		canceledResult <- err
+		_, _, err := service.transformCoalesced(queuedOwnerContext, `"third"`, nil, "image/png", imageTransform{width: 3, requested: true})
+		queuedOwnerResult <- err
 	}()
-	select {
-	case err := <-canceledResult:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("canceled coalesced transformation error = %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("canceled coalesced transformation did not return")
-	}
-	if calls[1].Load() != 1 {
-		t.Fatalf("canceled waiter started %d first-key transformations, want 1", calls[1].Load())
-	}
-
+	waitForWaiters(1)
 	sharedContext := &observedDoneContext{Context: context.Background(), entered: make(chan struct{})}
-	sharedResult := make(chan outcome, 1)
-	go func() {
-		content, contentType, err := service.transformCoalesced(sharedContext, `"first"`, nil, "image/png", imageTransform{width: 1, requested: true})
-		sharedResult <- outcome{content: content, contentType: contentType, err: err}
-	}()
+	go run(sharedContext, `"third"`, 3)
 	select {
 	case <-sharedContext.entered:
 	case <-time.After(time.Second):
-		t.Fatal("same-key request did not join the active transformation")
+		t.Fatal("same-key transformation did not join the queued flight")
 	}
-	releaseTransforms()
-	var shared outcome
+	cancelQueuedOwner()
 	select {
-	case shared = <-sharedResult:
+	case err := <-queuedOwnerResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled queued owner error=%v", err)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("coalesced transformation did not receive the shared result")
+		t.Fatal("canceled queued owner did not return")
 	}
-	if shared.err != nil || shared.contentType != "image/png" || !bytes.Equal(shared.content, []byte{1}) {
-		t.Fatalf("shared transformation content=%v type=%q error=%v", shared.content, shared.contentType, shared.err)
+	waitForWaiters(1)
+
+	canceledContext, cancel := context.WithCancel(context.Background())
+	canceledResult := make(chan error, 1)
+	go func() {
+		_, _, err := service.transformCoalesced(canceledContext, `"canceled"`, nil, "image/png", imageTransform{width: 4, requested: true})
+		canceledResult <- err
+	}()
+	waitForWaiters(2)
+	cancel()
+	select {
+	case err := <-canceledResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled queued transformation error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled queued transformation did not return")
 	}
-	if calls[1].Load() != 1 {
-		t.Fatalf("simultaneous first-key transformations = %d, want 1", calls[1].Load())
+	waitForWaiters(1)
+	go run(context.Background(), `"fourth"`, 4)
+	waitForWaiters(2)
+	if _, _, err := service.transformCoalesced(context.Background(), `"overload"`, nil, "image/png", imageTransform{width: 5, requested: true}); !errors.Is(err, errImageTransformSaturated) {
+		t.Fatalf("beyond-cap transformation error=%v", err)
 	}
-	for range maximumConcurrentImageTransforms {
+
+	releaseTransforms()
+	for range 4 {
 		select {
 		case result := <-results:
-			if result.err != nil || len(result.content) == 0 {
-				t.Fatalf("admitted transformation result=%v error=%v", result.content, result.err)
+			if result.err != nil || result.contentType != "image/png" || len(result.content) == 0 {
+				t.Fatalf("transformation result=%v type=%q error=%v", result.content, result.contentType, result.err)
 			}
 		case <-time.After(time.Second):
-			t.Fatal("timed out waiting for admitted transformations to finish")
+			t.Fatal("timed out waiting for queued transformations")
 		}
 	}
+	if maximum.Load() != maximumConcurrentImageTransforms || calls[1].Load() != 1 || calls[2].Load() != 1 || calls[3].Load() != 1 || calls[4].Load() != 1 || calls[5].Load() != 0 {
+		t.Fatalf("transform maximum=%d calls=%d,%d,%d,%d,%d", maximum.Load(), calls[1].Load(), calls[2].Load(), calls[3].Load(), calls[4].Load(), calls[5].Load())
+	}
 	service.transformMu.Lock()
-	remainingFlights := len(service.transformFlights)
+	remainingFlights, remainingWaiters := len(service.transformFlights), service.transformWaiters
 	service.transformMu.Unlock()
-	if remainingFlights != 0 || len(service.transformSlots) != 0 || active.Load() != 0 {
-		t.Fatalf("transform cleanup flights=%d slots=%d active=%d", remainingFlights, len(service.transformSlots), active.Load())
+	if remainingFlights != 0 || remainingWaiters != 0 || len(service.transformSlots) != 0 || active.Load() != 0 {
+		t.Fatalf("transform cleanup flights=%d waiters=%d slots=%d active=%d", remainingFlights, remainingWaiters, len(service.transformSlots), active.Load())
 	}
 }
 
@@ -1004,13 +1020,14 @@ func TestImageTransformParserAndNegativeCacheAreBounded(t *testing.T) {
 	}
 }
 
-func TestFetchAdmissionCoalescesBeforeNonBlockingGlobalAdmission(t *testing.T) {
+func TestFetchAdmissionCoalescesBeforeBoundedGlobalQueue(t *testing.T) {
 	service := &Service{
 		flights: make(map[string]*flight),
 		fetchAdmission: fetchAdmission{
 			maxInFlight:       maximumConcurrentArtworkFetches,
 			maxTemporaryFiles: maximumReservedArtworkTemporaryFiles,
 			maxTemporaryBytes: maximumReservedArtworkTemporaryBytes,
+			maxWaiters:        1,
 		},
 		negative:    make(map[string]time.Time),
 		negativeNow: time.Now,
@@ -1029,26 +1046,49 @@ func TestFetchAdmissionCoalescesBeforeNonBlockingGlobalAdmission(t *testing.T) {
 		t.Fatalf("same-key saturated join error=%v want=%v", err, sharedErr)
 	}
 
-	const distinctKey = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	if err := service.fetchCoalesced(context.Background(), cacheRecord{key: distinctKey}); !errors.Is(err, errArtworkFetchSaturated) {
-		t.Fatalf("distinct saturated fetch error=%v", err)
+	const queuedKey = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	queuedContext, cancelQueued := context.WithCancel(context.Background())
+	queuedResult := make(chan error, 1)
+	go func() { queuedResult <- service.fetchCoalesced(queuedContext, cacheRecord{key: queuedKey}) }()
+	deadline := time.Now().Add(time.Second)
+	for service.fetchAdmission.waiting() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("distinct fetch did not enter bounded queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	const overloadKey = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	if err := service.fetchCoalesced(context.Background(), cacheRecord{key: overloadKey}); !errors.Is(err, errArtworkFetchSaturated) {
+		t.Fatalf("beyond-cap fetch error=%v", err)
+	}
+	if service.flights[overloadKey] != nil {
+		t.Fatal("beyond-cap fetch leaked a flight")
+	}
+	cancelQueued()
+	select {
+	case err := <-queuedResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled queued fetch error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled queued fetch did not return")
 	}
 	inFlight, temporaryFiles, temporaryBytes := service.fetchAdmission.usage()
 	if inFlight != maximumConcurrentArtworkFetches || temporaryFiles != maximumReservedArtworkTemporaryFiles ||
-		temporaryBytes != maximumReservedArtworkTemporaryBytes || service.flights[distinctKey] != nil {
-		t.Fatalf("saturated admission usage=(%d,%d,%d) flight-created=%t", inFlight, temporaryFiles, temporaryBytes, service.flights[distinctKey] != nil)
+		temporaryBytes != maximumReservedArtworkTemporaryBytes || service.fetchAdmission.waiting() != 0 || service.flights[queuedKey] != nil {
+		t.Fatalf("queued cancellation usage=(%d,%d,%d) waiters=%d flight-created=%t", inFlight, temporaryFiles, temporaryBytes, service.fetchAdmission.waiting(), service.flights[queuedKey] != nil)
 	}
 
 	service.fetchAdmission.release()
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := service.fetchCoalesced(canceled, cacheRecord{key: distinctKey}); !errors.Is(err, context.Canceled) {
+	if err := service.fetchCoalesced(canceled, cacheRecord{key: queuedKey}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("pre-canceled fetch error=%v", err)
 	}
 	inFlight, temporaryFiles, temporaryBytes = service.fetchAdmission.usage()
 	if inFlight != maximumConcurrentArtworkFetches-1 || temporaryFiles != maximumReservedArtworkTemporaryFiles-1 ||
-		temporaryBytes != maximumReservedArtworkTemporaryBytes-maxObjectBytes || service.flights[distinctKey] != nil {
-		t.Fatalf("pre-canceled admission usage=(%d,%d,%d) flight-created=%t", inFlight, temporaryFiles, temporaryBytes, service.flights[distinctKey] != nil)
+		temporaryBytes != maximumReservedArtworkTemporaryBytes-maxObjectBytes || service.fetchAdmission.waiting() != 0 || service.flights[queuedKey] != nil {
+		t.Fatalf("pre-canceled admission usage=(%d,%d,%d) waiters=%d flight-created=%t", inFlight, temporaryFiles, temporaryBytes, service.fetchAdmission.waiting(), service.flights[queuedKey] != nil)
 	}
 }
 
@@ -1115,7 +1155,7 @@ func TestFetchAdmissionEnforcesEveryConfiguredCeilingAndRecovers(t *testing.T) {
 	}
 }
 
-func TestFetchAdmissionBoundsDistinctFlightsAndAlwaysReleases(t *testing.T) {
+func TestFetchAdmissionBoundsQueuesAndAlwaysReleases(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	imageBytes := testPNG(t, color.NRGBA{R: 45, G: 92, B: 138, A: 255})
 	started := make(chan string, maximumConcurrentArtworkFetches)
@@ -1149,15 +1189,16 @@ func TestFetchAdmissionBoundsDistinctFlightsAndAlwaysReleases(t *testing.T) {
 		fixture.Close()
 	}()
 	service := newArtworkTestService(t, pool, fixture.Client(), int64(maximumConcurrentArtworkFetches)*(maxObjectBytes+1))
+	service.fetchAdmission.maxWaiters = 4
 
-	localURLs := make([]string, maximumConcurrentArtworkFetches+2)
+	localURLs := make([]string, maximumConcurrentArtworkFetches+6)
 	for index := range localURLs {
 		localURLs[index] = service.LocalURL(context.Background(), fmt.Sprintf("%s/distinct-%d", fixture.URL, index))
 		if localURLs[index] == "" {
 			t.Fatalf("register distinct artwork %d", index)
 		}
 	}
-	responses := make(chan *httptest.ResponseRecorder, maximumConcurrentArtworkFetches+1)
+	responses := make(chan *httptest.ResponseRecorder, maximumConcurrentArtworkFetches+4)
 	for index := range maximumConcurrentArtworkFetches {
 		localURL := localURLs[index]
 		go func() { responses <- serveArtwork(service, http.MethodGet, localURL) }()
@@ -1191,67 +1232,128 @@ func TestFetchAdmissionBoundsDistinctFlightsAndAlwaysReleases(t *testing.T) {
 		t.Fatalf("live temporary files=%d want=%d", temporary, maximumConcurrentArtworkFetches)
 	}
 
-	sharedContext := &observedDoneContext{Context: context.Background(), entered: make(chan struct{})}
-	sharedRequest := httptest.NewRequest(http.MethodHead, localURLs[0], nil).WithContext(sharedContext)
-	sharedRequest.SetPathValue("key", strings.TrimPrefix(localURLs[0], publicPrefix))
-	sharedResponse := httptest.NewRecorder()
+	waitForFetchWaiters := func(want int) {
+		deadline := time.Now().Add(time.Second)
+		for {
+			if got := service.fetchAdmission.waiting(); got == want {
+				return
+			} else if time.Now().After(deadline) {
+				t.Fatalf("fetch waiters=%d want=%d", got, want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	queuedOwnerContext, cancelQueuedOwner := context.WithCancel(context.Background())
+	queuedOwnerRequest := httptest.NewRequest(http.MethodGet, localURLs[4], nil).WithContext(queuedOwnerContext)
+	queuedOwnerRequest.SetPathValue("key", strings.TrimPrefix(localURLs[4], publicPrefix))
+	queuedOwnerDone := make(chan struct{})
 	go func() {
-		service.ServeHTTP(sharedResponse, sharedRequest)
-		responses <- sharedResponse
+		service.ServeHTTP(httptest.NewRecorder(), queuedOwnerRequest)
+		close(queuedOwnerDone)
 	}()
+	for _, index := range []int{5, 6} {
+		localURL := localURLs[index]
+		go func() { responses <- serveArtwork(service, http.MethodGet, localURL) }()
+	}
+	waitForFetchWaiters(3)
+	queuedKey := strings.TrimPrefix(localURLs[4], publicPrefix)
+	queuedRecord, found, err := service.lookup(context.Background(), queuedKey)
+	if err != nil || !found {
+		t.Fatalf("lookup queued record found=%t error=%v", found, err)
+	}
+	sharedContext := &observedDoneContext{Context: context.Background(), entered: make(chan struct{})}
+	sharedResult := make(chan error, 1)
+	go func() { sharedResult <- service.fetchCoalesced(sharedContext, queuedRecord) }()
 	select {
 	case <-sharedContext.entered:
 	case <-time.After(time.Second):
-		t.Fatal("same-key request did not join the admitted flight")
+		t.Fatal("same-key request did not join the queued flight")
 	}
-	inFlight, reservedFiles, reservedBytes := service.fetchAdmission.usage()
-	if upstreamRequests.Load() != maximumConcurrentArtworkFetches || inFlight != maximumConcurrentArtworkFetches ||
-		reservedFiles != maximumReservedArtworkTemporaryFiles || reservedBytes != maximumReservedArtworkTemporaryBytes {
-		t.Fatalf("same-key coalescence requests=%d admission=(%d,%d,%d)", upstreamRequests.Load(), inFlight, reservedFiles, reservedBytes)
+	if got := service.fetchAdmission.waiting(); got != 3 {
+		t.Fatalf("same-key queued join changed waiters=%d", got)
+	}
+	cancelQueuedOwner()
+	select {
+	case <-queuedOwnerDone:
+	case <-time.After(time.Second):
+		t.Fatal("canceled queued fetch owner did not return")
+	}
+	waitForFetchWaiters(3)
+
+	canceledContext, cancelQueued := context.WithCancel(context.Background())
+	canceledRequest := httptest.NewRequest(http.MethodGet, localURLs[7], nil).WithContext(canceledContext)
+	canceledRequest.SetPathValue("key", strings.TrimPrefix(localURLs[7], publicPrefix))
+	canceledResponse := httptest.NewRecorder()
+	canceledDone := make(chan struct{})
+	go func() {
+		service.ServeHTTP(canceledResponse, canceledRequest)
+		close(canceledDone)
+	}()
+	waitForFetchWaiters(4)
+	cancelQueued()
+	select {
+	case <-canceledDone:
+	case <-time.After(time.Second):
+		t.Fatal("canceled queued fetch did not return")
+	}
+	waitForFetchWaiters(3)
+	canceledKey := strings.TrimPrefix(localURLs[7], publicPrefix)
+	service.flightsMu.Lock()
+	canceledFlight := service.flights[canceledKey]
+	service.flightsMu.Unlock()
+	if canceledFlight != nil {
+		t.Fatal("canceled queued fetch leaked its flight")
 	}
 
-	for index, method := range []string{http.MethodGet, http.MethodHead} {
-		result := make(chan *httptest.ResponseRecorder, 1)
-		go func(localURL string) { result <- serveArtwork(service, method, localURL) }(localURLs[maximumConcurrentArtworkFetches+index])
-		select {
-		case response := <-result:
-			if response.Code != http.StatusServiceUnavailable || response.Header().Get("Cache-Control") != "no-store" ||
-				response.Header().Get("Retry-After") != "1" || response.Header().Get("Location") != "" {
-				t.Fatalf("saturated %s response status=%d headers=%v body=%q", method, response.Code, response.Header(), response.Body.String())
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("saturated %s did not fail promptly", method)
+	go func() { responses <- serveArtwork(service, http.MethodGet, localURLs[8]) }()
+	waitForFetchWaiters(4)
+	overloadResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() { overloadResult <- serveArtwork(service, http.MethodHead, localURLs[9]) }()
+	select {
+	case response := <-overloadResult:
+		if response.Code != http.StatusServiceUnavailable || response.Header().Get("Cache-Control") != "no-store" ||
+			response.Header().Get("Retry-After") != "1" || response.Header().Get("Location") != "" {
+			t.Fatalf("beyond-cap response status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
 		}
+	case <-time.After(time.Second):
+		t.Fatal("beyond-cap fetch did not fail promptly")
 	}
 	if upstreamRequests.Load() != maximumConcurrentArtworkFetches || countTemporary() != maximumConcurrentArtworkFetches {
-		t.Fatalf("saturation created work: upstream=%d temporary=%d", upstreamRequests.Load(), countTemporary())
+		t.Fatalf("queued burst created work early: upstream=%d temporary=%d", upstreamRequests.Load(), countTemporary())
 	}
 
+	durableKey := strings.TrimPrefix(localURLs[6], publicPrefix)
+	if err := os.WriteFile(service.path(durableKey), imageBytes, 0o600); err != nil {
+		t.Fatalf("materialize queued cache file: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE artwork_cache SET content_type = 'image/png', byte_size = $2, cached_at = now(), last_accessed_at = now() WHERE key = $1
+	`, durableKey, len(imageBytes)); err != nil {
+		t.Fatalf("materialize queued cache row: %v", err)
+	}
 	releaseFetches()
-	for range maximumConcurrentArtworkFetches + 1 {
+	for range maximumConcurrentArtworkFetches + 3 {
 		select {
 		case response := <-responses:
-			assertArtworkResponse(t, response, imageBytes, response != sharedResponse)
+			assertArtworkResponse(t, response, imageBytes, true)
 		case <-time.After(time.Second):
-			t.Fatal("admitted artwork fetch did not finish")
+			t.Fatal("queued artwork fetch did not finish")
 		}
 	}
-	inFlight, reservedFiles, reservedBytes = service.fetchAdmission.usage()
-	if inFlight != 0 || reservedFiles != 0 || reservedBytes != 0 || len(service.flights) != 0 || countTemporary() != 0 {
-		t.Fatalf("successful cleanup admission=(%d,%d,%d) flights=%d temporary=%d", inFlight, reservedFiles, reservedBytes, len(service.flights), countTemporary())
+	select {
+	case err := <-sharedResult:
+		if err != nil {
+			t.Fatalf("same-key queued join error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("same-key queued join did not finish")
 	}
-
-	raceKey := strings.TrimPrefix(localURLs[0], publicPrefix)
-	raceRecord, found, err := service.lookup(context.Background(), raceKey)
-	if err != nil || !found {
-		t.Fatalf("lookup cached race record found=%t error=%v", found, err)
+	inFlight, reservedFiles, reservedBytes := service.fetchAdmission.usage()
+	if inFlight != 0 || reservedFiles != 0 || reservedBytes != 0 || service.fetchAdmission.waiting() != 0 || len(service.flights) != 0 || countTemporary() != 0 {
+		t.Fatalf("successful cleanup admission=(%d,%d,%d) waiters=%d flights=%d temporary=%d", inFlight, reservedFiles, reservedBytes, service.fetchAdmission.waiting(), len(service.flights), countTemporary())
 	}
-	if err := service.fetchCoalesced(context.Background(), raceRecord); err != nil {
-		t.Fatalf("cache-race fetch: %v", err)
-	}
-	inFlight, reservedFiles, reservedBytes = service.fetchAdmission.usage()
-	if inFlight != 0 || reservedFiles != 0 || reservedBytes != 0 || upstreamRequests.Load() != maximumConcurrentArtworkFetches {
-		t.Fatalf("cache-race cleanup admission=(%d,%d,%d) upstream=%d", inFlight, reservedFiles, reservedBytes, upstreamRequests.Load())
+	if upstreamRequests.Load() != maximumConcurrentArtworkFetches+3 {
+		t.Fatalf("durable-cache recheck upstream=%d want=%d", upstreamRequests.Load(), maximumConcurrentArtworkFetches+3)
 	}
 
 	invalidURL := service.LocalURL(context.Background(), fixture.URL+"/invalid")
@@ -1259,8 +1361,8 @@ func TestFetchAdmissionBoundsDistinctFlightsAndAlwaysReleases(t *testing.T) {
 		t.Fatalf("invalid upstream status=%d body=%q", response.Code, response.Body.String())
 	}
 	inFlight, reservedFiles, reservedBytes = service.fetchAdmission.usage()
-	if inFlight != 0 || reservedFiles != 0 || reservedBytes != 0 || len(service.flights) != 0 || countTemporary() != 0 {
-		t.Fatalf("error cleanup admission=(%d,%d,%d) flights=%d temporary=%d", inFlight, reservedFiles, reservedBytes, len(service.flights), countTemporary())
+	if inFlight != 0 || reservedFiles != 0 || reservedBytes != 0 || service.fetchAdmission.waiting() != 0 || len(service.flights) != 0 || countTemporary() != 0 {
+		t.Fatalf("error cleanup admission=(%d,%d,%d) waiters=%d flights=%d temporary=%d", inFlight, reservedFiles, reservedBytes, service.fetchAdmission.waiting(), len(service.flights), countTemporary())
 	}
 
 	cancelURL := service.LocalURL(context.Background(), fixture.URL+"/cancel")
@@ -1285,8 +1387,8 @@ func TestFetchAdmissionBoundsDistinctFlightsAndAlwaysReleases(t *testing.T) {
 		t.Fatal("canceled artwork fetch did not return")
 	}
 	inFlight, reservedFiles, reservedBytes = service.fetchAdmission.usage()
-	if inFlight != 0 || reservedFiles != 0 || reservedBytes != 0 || len(service.flights) != 0 || countTemporary() != 0 {
-		t.Fatalf("canceled cleanup admission=(%d,%d,%d) flights=%d temporary=%d", inFlight, reservedFiles, reservedBytes, len(service.flights), countTemporary())
+	if inFlight != 0 || reservedFiles != 0 || reservedBytes != 0 || service.fetchAdmission.waiting() != 0 || len(service.flights) != 0 || countTemporary() != 0 {
+		t.Fatalf("canceled cleanup admission=(%d,%d,%d) waiters=%d flights=%d temporary=%d", inFlight, reservedFiles, reservedBytes, service.fetchAdmission.waiting(), len(service.flights), countTemporary())
 	}
 }
 
@@ -1523,7 +1625,7 @@ func TestPruneEnforcesLRUByteCeiling(t *testing.T) {
 	`, firstKey, secondKey); err != nil {
 		t.Fatalf("order artwork LRU: %v", err)
 	}
-	service.maxBytes = int64(len(secondImage))
+	service.maxBytes.Store(int64(len(secondImage)))
 	if err := service.Prune(context.Background()); err != nil {
 		t.Fatalf("prune artwork: %v", err)
 	}

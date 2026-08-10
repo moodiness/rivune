@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -44,12 +45,14 @@ const (
 	maxIfNoneMatchBytes                        = 2048
 	negativeCacheTTL                           = 30 * time.Second
 	maximumConcurrentArtworkFetches            = 4
+	maximumQueuedArtworkFetches                = 64
 	maximumReservedArtworkTemporaryFiles       = 4
 	maximumReservedArtworkTemporaryBytes int64 = maximumReservedArtworkTemporaryFiles * maxObjectBytes
 	maximumNegativeCacheEntries                = 4096
 	maximumImageTransformDimension             = 16384
 	maximumImageTransformPixels          int64 = 40_000_000
 	maximumConcurrentImageTransforms           = 2
+	maximumQueuedImageTransforms               = 32
 	maximumTransformedImageCacheBytes    int64 = 8 << 20
 	maximumTransformedImageCacheEntries        = 64
 )
@@ -75,12 +78,13 @@ type Options struct {
 type Service struct {
 	pool            *pgxpool.Pool
 	directory       string
-	maxBytes        int64
+	maxBytes        atomic.Int64
 	httpClient      *http.Client
 	logger          *slog.Logger
 	allowLocal      bool
 	transportPolicy transportPolicy
 
+	quotaMu           sync.RWMutex
 	registrationLimit int
 	registrationTTL   time.Duration
 
@@ -91,6 +95,8 @@ type Service struct {
 	transformMu              sync.Mutex
 	transformFlights         map[string]*imageTransformFlight
 	transformSlots           chan struct{}
+	transformWaiters         int
+	transformMaxWaiters      int
 	transformCache           map[string]*list.Element
 	transformCacheLRU        list.List
 	transformCacheBytes      int64
@@ -109,31 +115,117 @@ type fetchAdmission struct {
 	maxInFlight       int
 	maxTemporaryFiles int
 	maxTemporaryBytes int64
+	maxWaiters        int
 
 	inFlight       int
 	temporaryFiles int
 	temporaryBytes int64
+	waiters        []*fetchWaiter
+}
+
+type fetchWaiter struct {
+	ready   chan struct{}
+	granted bool
+}
+
+func (admission *fetchAdmission) canReserveLocked() bool {
+	return admission.inFlight < admission.maxInFlight &&
+		admission.temporaryFiles < admission.maxTemporaryFiles &&
+		admission.temporaryBytes <= admission.maxTemporaryBytes-maxObjectBytes
+}
+
+func (admission *fetchAdmission) reserveLocked() {
+	admission.inFlight++
+	admission.temporaryFiles++
+	admission.temporaryBytes += maxObjectBytes
 }
 
 func (admission *fetchAdmission) tryReserve() bool {
 	admission.mu.Lock()
 	defer admission.mu.Unlock()
-	if admission.inFlight >= admission.maxInFlight ||
-		admission.temporaryFiles >= admission.maxTemporaryFiles ||
-		admission.temporaryBytes > admission.maxTemporaryBytes-maxObjectBytes {
+	if len(admission.waiters) != 0 || !admission.canReserveLocked() {
 		return false
 	}
-	admission.inFlight++
-	admission.temporaryFiles++
-	admission.temporaryBytes += maxObjectBytes
+	admission.reserveLocked()
 	return true
+}
+
+func (admission *fetchAdmission) reserve(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	admission.mu.Lock()
+	if len(admission.waiters) == 0 && admission.canReserveLocked() {
+		admission.reserveLocked()
+		admission.mu.Unlock()
+		return nil
+	}
+	if admission.maxInFlight < 1 || admission.maxTemporaryFiles < 1 || admission.maxTemporaryBytes < maxObjectBytes {
+		admission.mu.Unlock()
+		return errArtworkFetchSaturated
+	}
+	if len(admission.waiters) >= admission.maxWaiters {
+		admission.mu.Unlock()
+		return errArtworkFetchSaturated
+	}
+	waiter := &fetchWaiter{ready: make(chan struct{})}
+	admission.waiters = append(admission.waiters, waiter)
+	admission.mu.Unlock()
+
+	select {
+	case <-waiter.ready:
+		return nil
+	case <-ctx.Done():
+		admission.mu.Lock()
+		if waiter.granted {
+			admission.releaseLocked()
+			admission.admitNextLocked()
+		} else {
+			for index, queued := range admission.waiters {
+				if queued == waiter {
+					copy(admission.waiters[index:], admission.waiters[index+1:])
+					last := len(admission.waiters) - 1
+					admission.waiters[last] = nil
+					admission.waiters = admission.waiters[:last]
+					if len(admission.waiters) == 0 {
+						admission.waiters = nil
+					}
+					break
+				}
+			}
+		}
+		admission.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (admission *fetchAdmission) releaseLocked() {
+	admission.inFlight--
+	admission.temporaryFiles--
+	admission.temporaryBytes -= maxObjectBytes
+}
+
+func (admission *fetchAdmission) admitNextLocked() {
+	if len(admission.waiters) == 0 || !admission.canReserveLocked() {
+		return
+	}
+	waiter := admission.waiters[0]
+	copy(admission.waiters, admission.waiters[1:])
+	last := len(admission.waiters) - 1
+	admission.waiters[last] = nil
+	admission.waiters = admission.waiters[:last]
+	if len(admission.waiters) == 0 {
+		admission.waiters = nil
+	}
+	admission.reserveLocked()
+	waiter.granted = true
+	close(waiter.ready)
 }
 
 func (admission *fetchAdmission) release() {
 	admission.mu.Lock()
-	admission.inFlight--
-	admission.temporaryFiles--
-	admission.temporaryBytes -= maxObjectBytes
+	admission.releaseLocked()
+	admission.admitNextLocked()
 	admission.mu.Unlock()
 }
 
@@ -143,9 +235,19 @@ func (admission *fetchAdmission) usage() (int, int, int64) {
 	return admission.inFlight, admission.temporaryFiles, admission.temporaryBytes
 }
 
+func (admission *fetchAdmission) waiting() int {
+	admission.mu.Lock()
+	defer admission.mu.Unlock()
+	return len(admission.waiters)
+}
+
 type flight struct {
-	done chan struct{}
-	err  error
+	done         chan struct{}
+	changed      chan struct{}
+	err          error
+	queued       bool
+	owner        bool
+	participants int
 }
 
 type byteCountingReader struct {
@@ -160,10 +262,14 @@ func (reader *byteCountingReader) Read(buffer []byte) (int, error) {
 }
 
 type imageTransformFlight struct {
-	done        chan struct{}
-	content     []byte
-	contentType string
-	err         error
+	done         chan struct{}
+	changed      chan struct{}
+	content      []byte
+	contentType  string
+	err          error
+	queued       bool
+	owner        bool
+	participants int
 }
 
 type imageTransformCacheEntry struct {
@@ -249,7 +355,7 @@ func New(pool *pgxpool.Pool, options Options) (*Service, error) {
 		maxTemporaryBytes = maximumReservedArtworkTemporaryBytes
 	}
 	service := &Service{
-		pool: pool, directory: absoluteDirectory, maxBytes: options.MaxBytes,
+		pool: pool, directory: absoluteDirectory,
 		httpClient: client, logger: logger, allowLocal: allowLocal, transportPolicy: policy,
 		registrationLimit: maxArtworkRegistrations,
 		registrationTTL:   uncachedRegistrationTTL,
@@ -258,16 +364,19 @@ func New(pool *pgxpool.Pool, options Options) (*Service, error) {
 			maxInFlight:       maxConcurrentFetches,
 			maxTemporaryFiles: maxTemporaryFiles,
 			maxTemporaryBytes: maxTemporaryBytes,
+			maxWaiters:        maximumQueuedArtworkFetches,
 		},
 		transformFlights:         make(map[string]*imageTransformFlight),
 		transformSlots:           make(chan struct{}, maximumConcurrentImageTransforms),
 		transformCache:           make(map[string]*list.Element),
+		transformMaxWaiters:      maximumQueuedImageTransforms,
 		transformCacheMaxBytes:   maximumTransformedImageCacheBytes,
 		transformCacheMaxEntries: maximumTransformedImageCacheEntries,
 		imageTransformer:         transformImage,
 		negative:                 make(map[string]time.Time),
 		negativeNow:              time.Now,
 	}
+	service.maxBytes.Store(options.MaxBytes)
 	if err := service.pruneRegistrationBacklog(context.Background()); err != nil {
 		return nil, fmt.Errorf("bound artwork registrations during initialization: %w", err)
 	}
@@ -562,6 +671,7 @@ func (service *Service) ServeKey(response http.ResponseWriter, request *http.Req
 			transformed, contentType, err = service.transformCoalesced(request.Context(), etag, file, record.contentType, transform)
 			if errors.Is(err, errImageTransformSaturated) {
 				response.Header().Set("Cache-Control", "no-store")
+				response.Header().Set("Retry-After", "1")
 				http.Error(response, "image transformation unavailable", http.StatusServiceUnavailable)
 				return
 			}
@@ -710,22 +820,97 @@ func (service *Service) transformCoalesced(ctx context.Context, etag string, fil
 		}
 	}
 	if current := service.transformFlights[etag]; current != nil {
+		current.participants++
+		service.transformMu.Unlock()
+		return service.waitImageTransformFlight(ctx, etag, file, contentType, transform, current)
+	}
+	current := &imageTransformFlight{
+		done: make(chan struct{}), changed: make(chan struct{}),
+		queued: true, owner: true, participants: 1,
+	}
+	service.transformFlights[etag] = current
+	service.transformMu.Unlock()
+	return service.runQueuedImageTransform(ctx, etag, file, contentType, transform, current)
+}
+
+func (service *Service) waitImageTransformFlight(ctx context.Context, etag string, file *os.File, contentType string, transform imageTransform, current *imageTransformFlight) ([]byte, string, error) {
+	for {
+		service.transformMu.Lock()
+		if service.transformFlights[etag] == current && current.queued && !current.owner {
+			current.owner = true
+			service.transformMu.Unlock()
+			return service.runQueuedImageTransform(ctx, etag, file, contentType, transform, current)
+		}
+		done, changed := current.done, current.changed
 		service.transformMu.Unlock()
 		select {
-		case <-current.done:
+		case <-done:
 			return current.content, current.contentType, current.err
+		case <-changed:
 		case <-ctx.Done():
+			service.transformMu.Lock()
+			if service.transformFlights[etag] == current && current.queued {
+				current.participants--
+				if current.participants == 0 && !current.owner {
+					service.finishQueuedImageTransformLocked(etag, current, ctx.Err())
+				}
+			}
+			service.transformMu.Unlock()
 			return nil, "", ctx.Err()
 		}
 	}
+}
+
+func (service *Service) runQueuedImageTransform(ctx context.Context, etag string, file *os.File, contentType string, transform imageTransform, current *imageTransformFlight) ([]byte, string, error) {
+	service.transformMu.Lock()
 	select {
 	case service.transformSlots <- struct{}{}:
-	default:
 		service.transformMu.Unlock()
-		return nil, "", errImageTransformSaturated
+	default:
+		if service.transformWaiters >= service.transformMaxWaiters {
+			service.finishQueuedImageTransformLocked(etag, current, errImageTransformSaturated)
+			service.transformMu.Unlock()
+			return nil, "", errImageTransformSaturated
+		}
+		service.transformWaiters++
+		service.transformMu.Unlock()
+		select {
+		case service.transformSlots <- struct{}{}:
+			service.transformMu.Lock()
+			service.transformWaiters--
+			service.transformMu.Unlock()
+		case <-ctx.Done():
+			service.transformMu.Lock()
+			service.transformWaiters--
+			if service.transformFlights[etag] == current && current.queued {
+				current.participants--
+				if current.participants > 0 {
+					current.owner = false
+					service.signalImageTransformFlightLocked(current)
+					service.transformMu.Unlock()
+					return nil, "", ctx.Err()
+				}
+				service.finishQueuedImageTransformLocked(etag, current, ctx.Err())
+			}
+			service.transformMu.Unlock()
+			return nil, "", ctx.Err()
+		}
 	}
-	current := &imageTransformFlight{done: make(chan struct{})}
-	service.transformFlights[etag] = current
+
+	service.transformMu.Lock()
+	if err := ctx.Err(); err != nil {
+		<-service.transformSlots
+		current.participants--
+		if current.participants > 0 {
+			current.owner = false
+			service.signalImageTransformFlightLocked(current)
+		} else {
+			service.finishQueuedImageTransformLocked(etag, current, err)
+		}
+		service.transformMu.Unlock()
+		return nil, "", err
+	}
+	current.queued = false
 	service.transformMu.Unlock()
 
 	var transformContextErr error
@@ -737,9 +922,9 @@ func (service *Service) transformCoalesced(ctx context.Context, etag string, fil
 		if transform.requested && current.err == nil && transformContextErr == nil {
 			service.cacheImageTransformLocked(etag, current.content, current.contentType)
 		}
-		<-service.transformSlots
 		close(current.done)
 		service.transformMu.Unlock()
+		<-service.transformSlots
 	}()
 	current.content, current.contentType, current.err = service.imageTransformer(file, contentType, transform)
 	transformContextErr = ctx.Err()
@@ -747,6 +932,19 @@ func (service *Service) transformCoalesced(ctx context.Context, etag string, fil
 		return nil, "", transformContextErr
 	}
 	return current.content, current.contentType, current.err
+}
+
+func (service *Service) signalImageTransformFlightLocked(current *imageTransformFlight) {
+	close(current.changed)
+	current.changed = make(chan struct{})
+}
+
+func (service *Service) finishQueuedImageTransformLocked(etag string, current *imageTransformFlight, err error) {
+	if service.transformFlights[etag] == current {
+		delete(service.transformFlights, etag)
+	}
+	current.err = err
+	close(current.done)
 }
 
 func transformImage(file *os.File, contentType string, transform imageTransform) ([]byte, string, error) {
@@ -912,7 +1110,35 @@ func respondArtworkUnavailable(response http.ResponseWriter) {
 	http.Error(response, "artwork unavailable", http.StatusBadGateway)
 }
 
+// ApplyStorageLimit prunes synchronously under the same local and database
+// locks used by publication. The active limit is published only after the
+// pruning transaction commits successfully.
+func (service *Service) ApplyStorageLimit(ctx context.Context, limit int64) error {
+	if service == nil || limit <= 0 {
+		return errors.New("artwork cache byte limit must be positive")
+	}
+	service.quotaMu.Lock()
+	defer service.quotaMu.Unlock()
+	transaction, err := service.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin artwork limit application: %w", err)
+	}
+	defer transaction.Rollback(ctx)
+	if err := lockArtworkCache(ctx, transaction); err != nil {
+		return err
+	}
+	if _, err := service.pruneTransactionTo(ctx, transaction, limit); err != nil {
+		return err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit artwork limit application: %w", err)
+	}
+	service.maxBytes.Store(limit)
+	return nil
+}
 func (service *Service) Prune(ctx context.Context) error {
+	service.quotaMu.RLock()
+	defer service.quotaMu.RUnlock()
 	transaction, err := service.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin artwork pruning: %w", err)
@@ -1092,13 +1318,9 @@ func (service *Service) openCached(record cacheRecord) (*os.File, bool) {
 func (service *Service) fetchCoalesced(ctx context.Context, record cacheRecord) error {
 	service.flightsMu.Lock()
 	if existing := service.flights[record.key]; existing != nil {
+		existing.participants++
 		service.flightsMu.Unlock()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-existing.done:
-			return existing.err
-		}
+		return service.waitFetchFlight(ctx, record, existing)
 	}
 	if service.negativeCached(record.key) {
 		service.flightsMu.Unlock()
@@ -1108,20 +1330,87 @@ func (service *Service) fetchCoalesced(ctx context.Context, record cacheRecord) 
 		service.flightsMu.Unlock()
 		return err
 	}
-	if !service.fetchAdmission.tryReserve() {
-		service.flightsMu.Unlock()
-		return errArtworkFetchSaturated
+	current := &flight{
+		done: make(chan struct{}), changed: make(chan struct{}),
+		queued: true, owner: true, participants: 1,
 	}
-	current := &flight{done: make(chan struct{})}
 	service.flights[record.key] = current
+	service.flightsMu.Unlock()
+	return service.runQueuedFetch(ctx, record, current)
+}
+
+func (service *Service) waitFetchFlight(ctx context.Context, record cacheRecord, current *flight) error {
+	for {
+		service.flightsMu.Lock()
+		if service.flights[record.key] == current && current.queued && !current.owner {
+			current.owner = true
+			service.flightsMu.Unlock()
+			return service.runQueuedFetch(ctx, record, current)
+		}
+		done, changed := current.done, current.changed
+		service.flightsMu.Unlock()
+		select {
+		case <-done:
+			return current.err
+		case <-changed:
+		case <-ctx.Done():
+			service.flightsMu.Lock()
+			if service.flights[record.key] == current && current.queued {
+				current.participants--
+				if current.participants == 0 && !current.owner {
+					delete(service.flights, record.key)
+					current.err = ctx.Err()
+					close(current.done)
+				}
+			}
+			service.flightsMu.Unlock()
+			return ctx.Err()
+		}
+	}
+}
+
+func (service *Service) runQueuedFetch(ctx context.Context, record cacheRecord, current *flight) error {
+	if err := service.fetchAdmission.reserve(ctx); err != nil {
+		service.flightsMu.Lock()
+		if service.flights[record.key] == current && current.queued {
+			current.participants--
+			if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && current.participants > 0 {
+				current.owner = false
+				service.signalFetchFlightLocked(current)
+				service.flightsMu.Unlock()
+				return err
+			}
+			delete(service.flights, record.key)
+			current.err = err
+			close(current.done)
+		}
+		service.flightsMu.Unlock()
+		return err
+	}
+	service.flightsMu.Lock()
+	if err := ctx.Err(); err != nil {
+		current.participants--
+		if current.participants > 0 {
+			current.owner = false
+			service.signalFetchFlightLocked(current)
+		} else {
+			delete(service.flights, record.key)
+			current.err = err
+			close(current.done)
+		}
+		service.flightsMu.Unlock()
+		service.fetchAdmission.release()
+		return err
+	}
+	current.queued = false
 	service.flightsMu.Unlock()
 
 	defer func() {
+		service.fetchAdmission.release()
 		service.flightsMu.Lock()
 		if service.flights[record.key] == current {
 			delete(service.flights, record.key)
 		}
-		service.fetchAdmission.release()
 		close(current.done)
 		service.flightsMu.Unlock()
 	}()
@@ -1132,6 +1421,11 @@ func (service *Service) fetchCoalesced(ctx context.Context, record cacheRecord) 
 		service.markNegative(record.key)
 	}
 	return current.err
+}
+
+func (service *Service) signalFetchFlightLocked(current *flight) {
+	close(current.changed)
+	current.changed = make(chan struct{})
 }
 
 func (service *Service) fetch(ctx context.Context, record cacheRecord) error {
@@ -1240,6 +1534,8 @@ func (service *Service) fetch(ctx context.Context, record cacheRecord) error {
 }
 
 func (service *Service) publish(ctx context.Context, key, temporaryPath, contentType string, byteSize int64) error {
+	service.quotaMu.RLock()
+	defer service.quotaMu.RUnlock()
 	transaction, err := service.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin artwork publication: %w", err)
@@ -1411,6 +1707,10 @@ func (service *Service) deleteRegistrations(ctx context.Context, transaction pgx
 }
 
 func (service *Service) pruneTransaction(ctx context.Context, transaction pgx.Tx) ([]string, error) {
+	return service.pruneTransactionTo(ctx, transaction, service.maxBytes.Load())
+}
+
+func (service *Service) pruneTransactionTo(ctx context.Context, transaction pgx.Tx, limit int64) ([]string, error) {
 	evicted, err := service.pruneRegistrations(ctx, transaction)
 	if err != nil {
 		return nil, err
@@ -1448,7 +1748,7 @@ func (service *Service) pruneTransaction(ctx context.Context, transaction pgx.Tx
 
 	var lruEvicted []string
 	for _, entry := range candidates {
-		if total <= service.maxBytes {
+		if total <= limit {
 			break
 		}
 		if err := removeIfPresent(service.path(entry.key)); err != nil {
