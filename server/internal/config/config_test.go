@@ -20,7 +20,7 @@ func TestLoadUsesBootstrapAndCompiledDefaults(t *testing.T) {
 	if cfg.AccessTokenTTL != 15*time.Minute || cfg.RefreshTokenTTL != 30*24*time.Hour || cfg.ProfileGrantTTL != 12*time.Hour {
 		t.Fatalf("unexpected fixed token lifetimes: access=%s refresh=%s profile=%s", cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.ProfileGrantTTL)
 	}
-	if cfg.FFmpegPath != "ffmpeg" || cfg.FFprobePath != "ffprobe" || cfg.RemuxConcurrency != 4 || cfg.TranscodeThreads != 4 || cfg.TranscodeMaxReadRate != 1.5 || cfg.HLSInitialBufferSeconds != 6 {
+	if cfg.FFmpegPath != "ffmpeg" || cfg.FFprobePath != "ffprobe" || cfg.RemuxConcurrency != 4 || cfg.TranscodeThreads != 4 || cfg.TranscodeMaxReadRate != 1.5 || cfg.HLSInitialBufferSeconds != 12 {
 		t.Fatalf("unexpected compiled media defaults: %+v", cfg)
 	}
 	if cfg.EncryptionKeys == nil || cfg.EncryptionKeys.ActiveVersion() != 2 || cfg.EncryptionKeysFromLegacy {

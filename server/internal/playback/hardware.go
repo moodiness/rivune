@@ -34,8 +34,9 @@ const (
 	videoEncoderQSV      videoEncoderKind = "qsv"
 	videoEncoderNVENC    videoEncoderKind = "nvenc"
 
-	videoToneMapVAAPI  videoToneMapBackend = "vaapi"
-	videoToneMapVulkan videoToneMapBackend = "vulkan"
+	videoToneMapSoftware videoToneMapBackend = "software"
+	videoToneMapVAAPI    videoToneMapBackend = "vaapi"
+	videoToneMapVulkan   videoToneMapBackend = "vulkan"
 )
 
 type videoEncoder struct {
@@ -146,13 +147,23 @@ func probeVideoEncoder(ffmpegPath string, encoder videoEncoder, toneMap bool) er
 }
 
 func detectHardwareToneMap(ffmpegPath string, encoder videoEncoder) videoEncoder {
+	return detectHardwareToneMapWithProbe(encoder, videoDeviceVendor(encoder.device), func(candidate videoEncoder) error {
+		return probeVideoEncoder(ffmpegPath, candidate, true)
+	})
+}
+
+func detectHardwareToneMapWithProbe(encoder videoEncoder, vendor string, probe func(videoEncoder) error) videoEncoder {
 	if encoder.normalizedKind() != videoEncoderVAAPI {
 		return encoder
 	}
-	for _, backend := range []videoToneMapBackend{videoToneMapVAAPI, videoToneMapVulkan} {
+	backends := [...]videoToneMapBackend{videoToneMapVAAPI, videoToneMapVulkan}
+	if strings.EqualFold(strings.TrimSpace(vendor), "0x1002") {
+		backends[0], backends[1] = backends[1], backends[0]
+	}
+	for _, backend := range backends {
 		candidate := encoder
 		candidate.toneMapBackend = backend
-		if err := probeVideoEncoder(ffmpegPath, candidate, true); err == nil {
+		if err := probe(candidate); err == nil {
 			return candidate
 		}
 	}
@@ -187,6 +198,13 @@ func (encoder videoEncoder) globalArguments() []string {
 
 func (encoder videoEncoder) usesHardwareToneMap() bool {
 	return encoder.toneMapBackend == videoToneMapVAAPI || encoder.toneMapBackend == videoToneMapVulkan
+}
+
+func (encoder videoEncoder) normalizedToneMapBackend() videoToneMapBackend {
+	if encoder.usesHardwareToneMap() {
+		return encoder.toneMapBackend
+	}
+	return videoToneMapSoftware
 }
 
 func (encoder videoEncoder) hardwareDecodeSafe(asset storedAsset) bool {

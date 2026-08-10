@@ -586,6 +586,7 @@ export type PlaybackSource = {
   fileIndex?: number;
   protocol: string;
   container?: string;
+  mediaTimeline?: "absolute" | "relative";
   compatible: boolean;
   media?: PlaybackMediaInspection;
   decision?: PlaybackDecision;
@@ -661,6 +662,7 @@ export type PlaybackActivity = {
     hardwareAcceleration: "unknown" | "auto" | "software" | "vaapi" | "qsv" | "nvenc";
     videoEncoder: string;
     hardwareToneMap: boolean;
+    toneMapBackend: "vulkan" | "vaapi" | "software";
     transcodeThreads: number;
     maximumReadRate: number;
     totals: PlaybackMediaProcessTotals;

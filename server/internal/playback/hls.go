@@ -26,7 +26,7 @@ const (
 	defaultMediaIdleTTL              = 2 * time.Minute
 	defaultTranscodeVideoBitrateKbps = 12000
 	hlsReadyTimeout                  = 45 * time.Second
-	hlsInitialBufferSeconds          = 6
+	hlsInitialBufferSeconds          = 12
 	hlsSegmentDurationSeconds        = 3
 	hlsRetainedSegments              = 120
 	hlsDeleteThreshold               = 1
@@ -34,7 +34,8 @@ const (
 	hlsUsableWindowSegments          = hlsRetainedSegments - hlsDeleteThreshold - hlsSharedWorkerSafetySegments
 	hlsProductionLeadSegments        = hlsUsableWindowSegments / 2
 	hlsSharedJoinSegments            = hlsUsableWindowSegments - hlsProductionLeadSegments
-	hlsSeekAheadToleranceSegments    = 2
+	hlsPreloadWindowSegments         = 10
+	hlsSeekAheadToleranceSegments    = hlsPreloadWindowSegments - 1
 	hlsSeekableSegmentPrefix         = "seek-"
 )
 

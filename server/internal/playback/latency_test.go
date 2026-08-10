@@ -8,11 +8,11 @@ func TestNormalizeMediaOptionsBoundsInitialBuffer(t *testing.T) {
 		input int
 		want  int
 	}{
-		{name: "default", want: hlsInitialBufferSeconds},
+		{name: "default", want: 12},
 		{name: "minimum", input: 3, want: 3},
 		{name: "maximum", input: 30, want: 30},
-		{name: "below minimum", input: 2, want: hlsInitialBufferSeconds},
-		{name: "above maximum", input: 31, want: hlsInitialBufferSeconds},
+		{name: "below minimum", input: 2, want: 12},
+		{name: "above maximum", input: 31, want: 12},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got := normalizeMediaOptions(MediaOptions{TempDirectory: t.TempDir(), InitialBufferSeconds: test.input})

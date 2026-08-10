@@ -9857,6 +9857,7 @@ components:
         - hardwareAcceleration
         - videoEncoder
         - hardwareToneMap
+        - toneMapBackend
         - transcodeThreads
         - maximumReadRate
         - totals
@@ -9885,6 +9886,12 @@ components:
           maxLength: 64
         hardwareToneMap:
           type: boolean
+        toneMapBackend:
+          type: string
+          enum:
+            - vulkan
+            - vaapi
+            - software
         transcodeThreads:
           type: integer
           minimum: 0
@@ -10190,6 +10197,12 @@ components:
           type: string
         container:
           type: string
+        mediaTimeline:
+          type: string
+          enum:
+            - absolute
+            - relative
+          description: Timeline exposed by processed HLS output. Absolute playlists use media timestamps; relative playlists begin at the requested server-side start.
         compatible:
           type: boolean
         media:

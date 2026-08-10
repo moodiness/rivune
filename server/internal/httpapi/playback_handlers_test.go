@@ -191,7 +191,7 @@ func TestPlaybackActivityIncludesArtworkAndCanonicalProviderIDs(t *testing.T) {
 			ActiveSessions: 1, ActiveJobs: 0, ProcessingSlots: 0, ProcessingLimit: 2,
 			StorageBytes: 0, StorageLimitBytes: 1 << 30,
 		},
-		Diagnostics: playback.MediaDiagnostics{FFmpegVersion: "7.1", FFprobeVersion: "7.1", HardwareAcceleration: "software", VideoEncoder: "h264", TranscodeThreads: 4, MaximumReadRate: 1.5},
+		Diagnostics: playback.MediaDiagnostics{FFmpegVersion: "7.1", FFprobeVersion: "7.1", HardwareAcceleration: "software", VideoEncoder: "h264", HardwareToneMap: false, ToneMapBackend: "software", TranscodeThreads: 4, MaximumReadRate: 1.5},
 		Sessions: []playback.ActivitySession{{
 			ID: "11111111-1111-4111-8111-111111111111", TitleID: "episode-1",
 			ArtworkURL: "https://images.example.test/episode-still.jpg",
@@ -219,6 +219,7 @@ func TestPlaybackActivityIncludesArtworkAndCanonicalProviderIDs(t *testing.T) {
 	if response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), `"artworkUrl":"https://images.example.test/episode-still.jpg"`) ||
 		!strings.Contains(response.Body.String(), `"externalIds":{"imdb":"tt9000001","tmdb":"900001","tvdb":"9000006"}`) ||
+		!strings.Contains(response.Body.String(), `"toneMapBackend":"software"`) ||
 		!strings.Contains(response.Body.String(), `"externalIdMediaTypes":{"imdb":"series","tmdb":"series","tvdb":"episode"}`) ||
 		!strings.Contains(response.Body.String(), `"positionSeconds":605,"durationSeconds":1320`) {
 		t.Fatalf("unexpected activity response: status=%d body=%s", response.Code, response.Body.String())

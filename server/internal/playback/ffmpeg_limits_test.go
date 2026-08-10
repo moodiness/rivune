@@ -73,12 +73,20 @@ func TestFFmpegDiagnosticsReportEveryIndependentPool(t *testing.T) {
 	diagnostics := processor.PlaybackDiagnostics()
 	if diagnostics.FFmpegVersion != "7.1" || diagnostics.FFprobeVersion != "7.1" ||
 		diagnostics.HardwareAcceleration != "auto" || diagnostics.VideoEncoder != "vaapi" ||
-		!diagnostics.HardwareToneMap || diagnostics.TranscodeThreads != 6 ||
+		!diagnostics.HardwareToneMap || diagnostics.ToneMapBackend != "vaapi" || diagnostics.TranscodeThreads != 6 ||
 		diagnostics.Pools.Process != (MediaDiagnosticPool{Active: 1, Limit: 4}) ||
 		diagnostics.Pools.Probe != (MediaDiagnosticPool{Active: 2, Limit: 3}) ||
 		diagnostics.Pools.Subtitle != (MediaDiagnosticPool{Active: 1, Limit: 2}) ||
 		diagnostics.Pools.Trickplay != (MediaDiagnosticPool{Active: 1, Limit: 1}) {
 		t.Fatalf("media diagnostics = %+v", diagnostics)
+	}
+	encoded, err := json.Marshal(diagnostics)
+	if err != nil || !strings.Contains(string(encoded), `"hardwareToneMap":true,"toneMapBackend":"vaapi"`) {
+		t.Fatalf("serialized media diagnostics = %s, %v", encoded, err)
+	}
+	software := (&FFmpegProcessor{}).PlaybackDiagnostics()
+	if software.HardwareToneMap || software.ToneMapBackend != "software" {
+		t.Fatalf("software tone-map diagnostics = %+v", software)
 	}
 }
 

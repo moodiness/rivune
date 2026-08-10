@@ -4,7 +4,7 @@ const now = "2026-07-31T12:00:00Z";
 
 const activity = {
   summary: { activeSessions: 3, activeJobs: 2, processingSlots: 1, processingLimit: 2, storageBytes: 0, storageLimitBytes: 1_073_741_824 },
-  diagnostics: { ffmpegVersion: "7.1", ffprobeVersion: "7.1", hardwareAcceleration: "software", videoEncoder: "h264", hardwareToneMap: false, transcodeThreads: 4, maximumReadRate: 1.5, totals: { started: 7, succeeded: 5, failed: 1, softwareFallbacks: 1 }, pools: { process: { active: 1, limit: 2 }, probe: { active: 0, limit: 2 }, subtitle: { active: 0, limit: 2 }, trickplay: { active: 0, limit: 1 } } },
+  diagnostics: { ffmpegVersion: "7.1", ffprobeVersion: "7.1", hardwareAcceleration: "auto", videoEncoder: "vaapi", hardwareToneMap: true, toneMapBackend: "vulkan", transcodeThreads: 4, maximumReadRate: 1.5, totals: { started: 7, succeeded: 5, failed: 1, softwareFallbacks: 1 }, pools: { process: { active: 1, limit: 2 }, probe: { active: 0, limit: 2 }, subtitle: { active: 0, limit: 2 }, trickplay: { active: 0, limit: 1 } } },
   sessions: [
     {
       id: "11111111-1111-4111-8111-111111111111",
@@ -143,6 +143,7 @@ test("now-playing sessions render artwork, provider badges, transcoding progress
   await expect(artworkSession.getByText("Transcode", { exact: true })).toHaveCount(2);
   await expect(page.locator(".activity-overview")).toContainText("1.50× max");
   await expect(page.locator(".activity-overview")).toContainText("total 7/5/1 · fallback 1");
+  await expect(page.locator(".activity-overview")).toContainText("Hardware tone mapping (VULKAN)");
 
   const longSession = page.locator(".activity-session").filter({ hasText: "Long feature" });
   await expect(longSession.getByRole("progressbar", { name: "10m 5s / 2h 49m" })).toBeVisible();

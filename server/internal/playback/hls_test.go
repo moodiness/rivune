@@ -296,6 +296,63 @@ func TestTranscodedHLSVODPlaylistRestartsGenerationAtRequestedSeek(t *testing.T)
 	service.stopHLSSession("session-1")
 }
 
+func TestSeekableHLSPreloadTenSegmentsWaitsForCurrentGeneration(t *testing.T) {
+	if hlsPreloadWindowSegments != 10 || (hlsSeekAheadToleranceSegments+1)*hlsSegmentDurationSeconds != 30 {
+		t.Fatalf("preload window = %d segments (%d seconds), want 10 segments (30 seconds)", hlsPreloadWindowSegments, (hlsSeekAheadToleranceSegments+1)*hlsSegmentDurationSeconds)
+	}
+	directory := t.TempDir()
+	playlist := "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:3.000000,\nsegment-000000.ts\n"
+	if err := os.WriteFile(filepath.Join(directory, "index.m3u8"), []byte(playlist), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asset := storedAsset{ID: "stream-1", Kind: processingTranscode, URL: "https://media.example/movie.mkv", HLSSegmentContainer: "ts", DurationSeconds: 120}
+	done := make(chan struct{})
+	job := &hlsJob{directory: directory, startOffsetSeconds: 0, done: done, cancel: func() { close(done) }}
+	key := hlsJobKey("session-1", asset)
+	processor := &seekableFixtureHLSProcessor{starts: make(chan float64, 1)}
+	service := &Service{
+		mediaOptions: MediaOptions{TempDirectory: directory, MaxStorageBytes: 1024 * 1024, IdleTTL: time.Minute},
+		hlsJobs:      map[string]*hlsJob{key: job}, processor: processor,
+	}
+	t.Cleanup(func() { service.stopHLSSession("session-1") })
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/asset?file=seek-000009.ts", nil)
+	result := make(chan error, 1)
+	go func() {
+		result <- service.serveSeekableHLSSegment(response, request, "session-1", asset, processor, 9)
+	}()
+	select {
+	case err := <-result:
+		t.Fatalf("30-second preload did not wait for the current worker: %v", err)
+	case start := <-processor.starts:
+		t.Fatalf("30-second preload started replacement generation at %.0f", start)
+	case <-time.After(50 * time.Millisecond):
+	}
+	service.hlsMu.Lock()
+	registered, jobCount := service.hlsJobs[key], len(service.hlsJobs)
+	service.hlsMu.Unlock()
+	if registered != job || jobCount != 1 {
+		t.Fatalf("30-second preload replaced current generation: registered=%p current=%p jobs=%d", registered, job, jobCount)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "segment-000009.ts"), []byte("current-generation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err != nil || response.Code != http.StatusOK || response.Body.String() != "current-generation" {
+			t.Fatalf("preloaded segment response = %d/%q, %v", response.Code, response.Body.String(), err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("30-second preload did not resume when the current worker produced the segment")
+	}
+	select {
+	case start := <-processor.starts:
+		t.Fatalf("30-second preload unexpectedly started generation at %.0f", start)
+	default:
+	}
+}
+
 func TestSeekableHLSConcurrentOutOfOrderSegmentsKeepInFlightGeneration(t *testing.T) {
 	releaseLater := make(chan struct{}, 1)
 	releaseEarlier := make(chan struct{}, 1)

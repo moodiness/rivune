@@ -729,6 +729,7 @@ func (service *Service) createSessionWithLimits(ctx context.Context, principal a
 		return Session{}, fmt.Errorf("store playback session: %w", err)
 	}
 	for index := range sources {
+		sources[index].MediaTimeline = sessionSourceMediaTimeline(sources[index], assets)
 		sources[index].URL = sessionSourceURL(sources[index], assets, sessionID, token)
 	}
 	for index := range subtitles {
@@ -763,6 +764,18 @@ func (service *Service) createSessionWithLimits(ctx context.Context, principal a
 		}
 	}
 	return result, nil
+}
+
+func sessionSourceMediaTimeline(source Source, assets []storedAsset) string {
+	if source.Protocol != "hls" || source.Mode != processingRemux && source.Mode != processingTranscodeAudio && source.Mode != processingTranscode {
+		return ""
+	}
+	if assetIndex := storedAssetIndex(assets, source.ID); source.Mode == processingTranscode && assetIndex >= 0 {
+		if _, seekable := seekableHLSSegmentCount(assets[assetIndex]); seekable {
+			return "absolute"
+		}
+	}
+	return "relative"
 }
 
 func sessionSourceURL(source Source, assets []storedAsset, sessionID, token string) string {

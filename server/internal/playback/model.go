@@ -188,26 +188,27 @@ type MediaInspection struct {
 }
 
 type Source struct {
-	ID          string            `json:"id"`
-	AddonID     string            `json:"addonId"`
-	ManifestID  string            `json:"manifestId"`
-	AddonName   string            `json:"-"`
-	Name        string            `json:"name,omitempty"`
-	Title       string            `json:"title,omitempty"`
-	Description string            `json:"-"`
-	Hint        string            `json:"-"`
-	Filename    string            `json:"-"`
-	StreamIndex int               `json:"-"`
-	Mode        string            `json:"mode"`
-	URL         string            `json:"url,omitempty"`
-	YTID        string            `json:"ytId,omitempty"`
-	InfoHash    string            `json:"infoHash,omitempty"`
-	FileIndex   *int              `json:"fileIndex,omitempty"`
-	Protocol    string            `json:"protocol"`
-	Container   string            `json:"container,omitempty"`
-	Compatible  bool              `json:"compatible"`
-	Media       *MediaInspection  `json:"media,omitempty"`
-	Decision    *PlaybackDecision `json:"decision,omitempty"`
+	ID            string            `json:"id"`
+	AddonID       string            `json:"addonId"`
+	ManifestID    string            `json:"manifestId"`
+	AddonName     string            `json:"-"`
+	Name          string            `json:"name,omitempty"`
+	Title         string            `json:"title,omitempty"`
+	Description   string            `json:"-"`
+	Hint          string            `json:"-"`
+	Filename      string            `json:"-"`
+	StreamIndex   int               `json:"-"`
+	Mode          string            `json:"mode"`
+	URL           string            `json:"url,omitempty"`
+	YTID          string            `json:"ytId,omitempty"`
+	InfoHash      string            `json:"infoHash,omitempty"`
+	FileIndex     *int              `json:"fileIndex,omitempty"`
+	Protocol      string            `json:"protocol"`
+	Container     string            `json:"container,omitempty"`
+	MediaTimeline string            `json:"mediaTimeline,omitempty"`
+	Compatible    bool              `json:"compatible"`
+	Media         *MediaInspection  `json:"media,omitempty"`
+	Decision      *PlaybackDecision `json:"decision,omitempty"`
 }
 
 type Subtitle struct {

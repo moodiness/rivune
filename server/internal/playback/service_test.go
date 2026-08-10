@@ -1267,6 +1267,40 @@ func TestSessionSourceURLPreservesAuthorizedExternalHandoff(t *testing.T) {
 	}
 }
 
+func TestSessionSourceMediaTimelineMatchesProcessedHLSPlaylist(t *testing.T) {
+	tests := []struct {
+		name   string
+		source Source
+		asset  storedAsset
+		want   string
+	}{
+		{name: "seekable transcode TS", source: Source{ID: "absolute", Mode: processingTranscode, Protocol: "hls"}, asset: storedAsset{ID: "absolute", Kind: processingTranscode, HLSSegmentContainer: "ts", DurationSeconds: 3600}, want: "absolute"},
+		{name: "transcode fMP4", source: Source{ID: "relative", Mode: processingTranscode, Protocol: "hls"}, asset: storedAsset{ID: "relative", Kind: processingTranscode, HLSSegmentContainer: "mp4", DurationSeconds: 3600}, want: "relative"},
+		{name: "remux TS", source: Source{ID: "remux", Mode: processingRemux, Protocol: "hls"}, asset: storedAsset{ID: "remux", Kind: processingRemux, HLSSegmentContainer: "ts", DurationSeconds: 3600}, want: "relative"},
+		{name: "direct HLS", source: Source{ID: "direct", Mode: "direct", Protocol: "hls"}, asset: storedAsset{ID: "direct", Kind: "stream"}},
+		{name: "external", source: Source{ID: "external", Mode: "external", Protocol: "external"}, asset: storedAsset{ID: "external", Kind: "stream"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.source.MediaTimeline = sessionSourceMediaTimeline(test.source, []storedAsset{test.asset})
+			if test.source.MediaTimeline != test.want {
+				t.Fatalf("media timeline = %q, want %q", test.source.MediaTimeline, test.want)
+			}
+			encoded, err := json.Marshal(test.source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			field := `"mediaTimeline":"` + test.want + `"`
+			if test.want != "" && !strings.Contains(string(encoded), field) {
+				t.Fatalf("source JSON = %s, want %s", encoded, field)
+			}
+			if test.want == "" && strings.Contains(string(encoded), `"mediaTimeline"`) {
+				t.Fatalf("source JSON unexpectedly exposes a timeline: %s", encoded)
+			}
+		})
+	}
+}
+
 type commitTrackingResponseWriter struct {
 	header http.Header
 	status int
