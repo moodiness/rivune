@@ -96,6 +96,30 @@ type MetadataOperationResponse = {
   technicalPayload?: Record<string, unknown>;
 };
 
+type RuntimeSettingsFixture = {
+  timezone: string;
+  jellyfinEnabled: boolean;
+  jellyfinDebug: boolean;
+  hardwareAcceleration: "auto" | "software" | "vaapi" | "qsv" | "nvenc";
+  transcodeMaxBitrateKbps: number;
+  mediaMaxStorageMB: number;
+  artworkMaxStorageMB: number;
+  allowTranscoding: boolean;
+};
+
+const integrationCredentialNames = ["tmdbAccessToken", "fanartApiKey", "mdblistApiKey", "tvdbApiKey", "tvdbPin", "traktClientId", "traktClientSecret", "simklClientId"] as const;
+type IntegrationCredentialName = typeof integrationCredentialNames[number];
+type IntegrationCredentialFixture = { configured: boolean; updatedAt: string | null };
+type ConfigurationAuditFixture = {
+  id: number;
+  revision: number;
+  actorUserId: string | null;
+  action: "settings.updated" | "integrations.updated";
+  changedKeys: string[];
+  snapshot: Record<string, unknown>;
+  createdAt: string;
+};
+
 const expiresAt = "2099-01-01T00:00:00Z";
 const createdAt = "2024-01-01T00:00:00Z";
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="100%" height="100%" fill="#241f35"/></svg>`;
@@ -295,6 +319,10 @@ function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 }
 
+function configurationJSON(route: Route, body: unknown, status = 200) {
+  return route.fulfill({ status, contentType: "application/json", headers: { "cache-control": "no-store" }, body: JSON.stringify(body) });
+}
+
 function collection(profileId: string) {
   const name = profileId === "bob" ? "Bob's Fresh Picks" : "Alice's Slow Shelf";
   return {
@@ -336,7 +364,56 @@ export class RivuneHarness {
   };
   private deviceAuthorizationFailure: { code: string; status: number } | null = null;
   private maintenance: { enabled: boolean; message: string | null } = { enabled: false, message: null };
-  private instanceSettings: Record<string, unknown> = { allowTranscoding: true, jellyfinEnabled: false, maximumCastMembers: 20, maximumDirectTitles: 20 };
+  private instanceSettings: Record<string, unknown> = {
+    allowTranscoding: true,
+    jellyfinEnabled: false,
+    jellyfinDebug: true,
+    timezone: "America/Toronto",
+    hardwareAcceleration: "software",
+    transcodeMaxBitrateKbps: 18_000,
+    mediaMaxStorageMB: 24_576,
+    artworkMaxStorageMB: 8_192,
+    maximumCastMembers: 20,
+    maximumDirectTitles: 20,
+  };
+  private runtimeActive: RuntimeSettingsFixture = {
+    timezone: "America/Toronto",
+    jellyfinEnabled: false,
+    jellyfinDebug: true,
+    hardwareAcceleration: "software",
+    transcodeMaxBitrateKbps: 18_000,
+    mediaMaxStorageMB: 24_576,
+    artworkMaxStorageMB: 8_192,
+    allowTranscoding: true,
+  };
+  private configurationRevision = 12;
+  private integrationCredentials: Record<IntegrationCredentialName, IntegrationCredentialFixture> = {
+    tmdbAccessToken: { configured: true, updatedAt: "2026-08-08T14:30:00Z" },
+    fanartApiKey: { configured: false, updatedAt: null },
+    mdblistApiKey: { configured: false, updatedAt: null },
+    tvdbApiKey: { configured: true, updatedAt: "2026-08-07T09:15:00Z" },
+    tvdbPin: { configured: true, updatedAt: "2026-08-07T09:15:00Z" },
+    traktClientId: { configured: false, updatedAt: null },
+    traktClientSecret: { configured: false, updatedAt: null },
+    simklClientId: { configured: false, updatedAt: null },
+  };
+  private configurationAuditEvents: ConfigurationAuditFixture[] = [{
+    id: 120,
+    revision: 12,
+    actorUserId: "user-1",
+    action: "settings.updated",
+    changedKeys: ["hardwareAcceleration"],
+    snapshot: { ...this.instanceSettings },
+    createdAt: "2026-08-09T18:45:00Z",
+  }, {
+    id: 110,
+    revision: 11,
+    actorUserId: "user-1",
+    action: "integrations.updated",
+    changedKeys: ["tmdbAccessToken", "tvdbApiKey", "tvdbPin"],
+    snapshot: { tmdbAccessToken: true, fanartApiKey: false, mdblistApiKey: false, tvdbApiKey: true, tvdbPin: true, traktClientId: false, traktClientSecret: false, simklClientId: false },
+    createdAt: "2026-08-08T14:30:00Z",
+  }];
   private readonly profileSettings = new Map<string, Record<string, unknown>>([
     ["alice", { transcoding: "inherit" }],
     ["bob", { transcoding: "inherit" }],
@@ -533,6 +610,17 @@ export class RivuneHarness {
   }
   setJellyfinEnabled(enabled: boolean) {
     this.instanceSettings = { ...this.instanceSettings, jellyfinEnabled: enabled };
+    this.runtimeActive = { ...this.runtimeActive, jellyfinEnabled: enabled };
+  }
+  setHardwareRestartPending(requested: RuntimeSettingsFixture["hardwareAcceleration"], active: RuntimeSettingsFixture["hardwareAcceleration"]) {
+    this.instanceSettings = { ...this.instanceSettings, hardwareAcceleration: requested };
+    this.runtimeActive = { ...this.runtimeActive, hardwareAcceleration: active };
+  }
+  setIntegrationConfigured(name: IntegrationCredentialName, configured: boolean) {
+    this.integrationCredentials = {
+      ...this.integrationCredentials,
+      [name]: { configured, updatedAt: configured ? "2026-08-08T14:30:00Z" : null },
+    };
   }
   failNextJellyfinCredentialCreateAfterCommit() {
     this.failNextJellyfinCredentialCreateResponse = true;
@@ -729,6 +817,62 @@ export class RivuneHarness {
     bytes[0] = 0xfb;
     bytes[1] = 0xf0;
     return `rivune_cal_${Buffer.from(bytes).toString("base64url")}`;
+  }
+
+  private requestedRuntimeSettings(): RuntimeSettingsFixture {
+    return {
+      timezone: this.instanceSettings.timezone as string,
+      jellyfinEnabled: this.instanceSettings.jellyfinEnabled as boolean,
+      jellyfinDebug: this.instanceSettings.jellyfinDebug as boolean,
+      hardwareAcceleration: this.instanceSettings.hardwareAcceleration as RuntimeSettingsFixture["hardwareAcceleration"],
+      transcodeMaxBitrateKbps: this.instanceSettings.transcodeMaxBitrateKbps as number,
+      mediaMaxStorageMB: this.instanceSettings.mediaMaxStorageMB as number,
+      artworkMaxStorageMB: this.instanceSettings.artworkMaxStorageMB as number,
+      allowTranscoding: this.instanceSettings.allowTranscoding as boolean,
+    };
+  }
+
+  private instanceSettingsResponse() {
+    const requested = this.requestedRuntimeSettings();
+    return {
+      schemaVersion: 2,
+      revision: this.configurationRevision,
+      settings: this.instanceSettings,
+      runtime: {
+        active: this.runtimeActive,
+        pendingRestart: requested.hardwareAcceleration === this.runtimeActive.hardwareAcceleration ? [] : ["hardwareAcceleration"],
+      },
+      updatedAt: createdAt,
+    };
+  }
+
+  private integrationsResponse() {
+    const configured = (name: IntegrationCredentialName) => this.integrationCredentials[name].configured;
+    return {
+      revision: this.configurationRevision,
+      credentials: this.integrationCredentials,
+      providers: {
+        tmdb: configured("tmdbAccessToken"),
+        fanart: configured("fanartApiKey"),
+        mdblist: configured("mdblistApiKey"),
+        tvdb: configured("tvdbApiKey"),
+        trakt: configured("traktClientId") && configured("traktClientSecret"),
+        simkl: configured("simklClientId"),
+      },
+    };
+  }
+
+  private recordConfigurationAudit(action: ConfigurationAuditFixture["action"], changedKeys: string[], snapshot: Record<string, unknown>) {
+    this.configurationRevision += 1;
+    this.configurationAuditEvents.unshift({
+      id: this.configurationRevision * 10,
+      revision: this.configurationRevision,
+      actorUserId: "user-1",
+      action,
+      changedKeys: [...changedKeys].sort(),
+      snapshot,
+      createdAt,
+    });
   }
 
   private account() {
@@ -1251,10 +1395,49 @@ export class RivuneHarness {
       await route.fulfill({ status: 204 });
       return;
     }
-    if (path === "/settings" && request.method() === "GET") { await json(route, { schemaVersion: 1, settings: this.instanceSettings, updatedAt: createdAt }); return; }
+    if ((path === "/settings/integrations" || path === "/settings/audit" || path === "/settings" && request.method() === "PATCH") && this.authorizationScope !== "global_admin") {
+      await configurationJSON(route, { error: { code: "forbidden", message: "A global administrator is required" } }, 403);
+      return;
+    }
+    if (path === "/settings" && request.method() === "GET") { await configurationJSON(route, this.instanceSettingsResponse()); return; }
     if (path === "/settings" && request.method() === "PATCH") {
-      this.instanceSettings = { ...this.instanceSettings, ...(body as Record<string, unknown>) };
-      await json(route, { schemaVersion: 1, settings: this.instanceSettings, updatedAt: createdAt });
+      const patch = body as Record<string, unknown>;
+      const changedKeys = Object.keys(patch);
+      this.instanceSettings = { ...this.instanceSettings, ...patch };
+      const requested = this.requestedRuntimeSettings();
+      this.runtimeActive = { ...requested, hardwareAcceleration: this.runtimeActive.hardwareAcceleration };
+      this.recordConfigurationAudit("settings.updated", changedKeys, { ...this.instanceSettings });
+      await configurationJSON(route, this.instanceSettingsResponse());
+      return;
+    }
+    if (path === "/settings/integrations" && request.method() === "GET") {
+      await configurationJSON(route, this.integrationsResponse());
+      return;
+    }
+    if (path === "/settings/integrations" && request.method() === "PATCH") {
+      const patch = body as Partial<Record<IntegrationCredentialName, string | null>>;
+      const changedKeys = integrationCredentialNames.filter((name) => Object.prototype.hasOwnProperty.call(patch, name));
+      for (const name of changedKeys) {
+        this.integrationCredentials = {
+          ...this.integrationCredentials,
+          [name]: { configured: patch[name] !== null, updatedAt: patch[name] === null ? null : createdAt },
+        };
+      }
+      const snapshot = Object.fromEntries(integrationCredentialNames.map((name) => [name, this.integrationCredentials[name].configured]));
+      this.recordConfigurationAudit("integrations.updated", changedKeys, snapshot);
+      await configurationJSON(route, this.integrationsResponse());
+      return;
+    }
+    if (path === "/settings/audit" && request.method() === "GET") {
+      const requestedLimit = Number(url.searchParams.get("limit") ?? "50");
+      const limit = Number.isInteger(requestedLimit) ? Math.min(100, Math.max(1, requestedLimit)) : 50;
+      const cursor = url.searchParams.has("cursor") ? Number(url.searchParams.get("cursor")) : null;
+      const eligible = cursor === null || !Number.isInteger(cursor)
+        ? this.configurationAuditEvents
+        : this.configurationAuditEvents.filter((event) => event.id < cursor);
+      const events = eligible.slice(0, limit);
+      const nextCursor = eligible.length > events.length ? events.at(-1)?.id ?? null : null;
+      await configurationJSON(route, { events, nextCursor });
       return;
     }
     const profileSettings = path.match(/^\/profiles\/([^/]+)\/settings$/);

@@ -842,6 +842,8 @@ export type JellyfinCredentialSecret = JellyfinCredentialStatus & {
   password: string;
 };
 
+export type HardwareAccelerationMode = "auto" | "software" | "vaapi" | "qsv" | "nvenc";
+
 export type SettingsValues = {
   interfaceLanguage?: InterfaceLanguage | null;
   theme?: string | null;
@@ -850,6 +852,13 @@ export type SettingsValues = {
   maximumDirectTitles?: number | null;
   allowTranscoding?: boolean | null;
   jellyfinEnabled?: boolean | null;
+  jellyfinDebug?: boolean | null;
+  timezone?: string | null;
+  hardwareAcceleration?: HardwareAccelerationMode | null;
+  transcodeMaxBitrateKbps?: number | null;
+  mediaMaxStorageMB?: number | null;
+  artworkMaxStorageMB?: number | null;
+
   transcoding?: "inherit" | "enabled" | "disabled" | null;
   preferDirectPlay?: boolean | null;
   hideUnreleased?: boolean | null;
@@ -873,5 +882,52 @@ export type SettingsValues = {
   notificationPollIntervalSeconds?: number | null;
 };
 export type MaintenanceSettings = { enabled: boolean; message: string | null };
-export type SettingsLayer = { schemaVersion: number; settings: SettingsValues; updatedAt?: string };
+export type RuntimeSettingsValues = {
+  timezone: string;
+  jellyfinEnabled: boolean;
+  jellyfinDebug: boolean;
+  hardwareAcceleration: HardwareAccelerationMode;
+  transcodeMaxBitrateKbps: number;
+  mediaMaxStorageMB: number;
+  artworkMaxStorageMB: number;
+  allowTranscoding: boolean;
+};
+export type RuntimeApplication = {
+  active: RuntimeSettingsValues;
+  pendingRestart: Array<"hardwareAcceleration">;
+};
+export type SettingsLayer = { schemaVersion: number; revision: number; settings: SettingsValues; runtime?: RuntimeApplication; updatedAt: string | null };
+
+export const integrationCredentialNames = ["tmdbAccessToken", "fanartApiKey", "mdblistApiKey", "tvdbApiKey", "tvdbPin", "traktClientId", "traktClientSecret", "simklClientId"] as const;
+export type IntegrationCredentialName = typeof integrationCredentialNames[number];
+export type IntegrationCredentialStatus = { configured: boolean; updatedAt: string | null };
+export type IntegrationProviderStatuses = {
+  tmdb: boolean;
+  fanart: boolean;
+  mdblist: boolean;
+  tvdb: boolean;
+  trakt: boolean;
+  simkl: boolean;
+};
+export type SettingsIntegrations = {
+  revision: number;
+  credentials: Record<IntegrationCredentialName, IntegrationCredentialStatus>;
+  providers: IntegrationProviderStatuses;
+};
+export type SettingsIntegrationsPatch = Partial<Record<IntegrationCredentialName, string | null>>;
+type ConfigurationAuditEventBase = {
+  id: number;
+  revision: number;
+  actorUserId: string | null;
+  changedKeys: string[];
+  createdAt: string;
+};
+export type ConfigurationAuditEvent = ConfigurationAuditEventBase & (
+  | { action: "settings.updated"; snapshot: SettingsValues }
+  | { action: "integrations.updated"; snapshot: Record<IntegrationCredentialName, boolean> }
+);
+export type ConfigurationAuditPage = {
+  events: ConfigurationAuditEvent[];
+  nextCursor: number | null;
+};
 export type AvatarPreset = { id: string; name: string; url: string };

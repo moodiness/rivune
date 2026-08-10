@@ -1306,6 +1306,55 @@
   .maintenance-settings__body { display: grid; grid-template-columns: minmax(240px, .8fr) minmax(0, 1.4fr); align-items: start; gap: var(--space-4); padding: var(--space-5); border: 1px solid color-mix(in srgb, var(--danger) 25%, var(--line)); border-radius: var(--radius-md); }
   .maintenance-settings textarea { min-height: 96px; padding-block: 8px; line-height: 1.45; resize: vertical; }
   .maintenance-settings__actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: var(--space-2); }
+  .runtime-setting { min-width: 0; display: grid; grid-template-columns: minmax(calc(var(--space-8) * 4), .9fr) minmax(calc(var(--space-8) * 4), 1.1fr); align-items: center; gap: var(--space-5); padding-block: var(--space-4); border-block-end: 1px solid var(--line); }
+  .runtime-setting:last-child { border-block-end: 0; }
+  .runtime-setting__copy { min-width: 0; display: grid; gap: var(--space-1); }
+  .runtime-setting__copy > strong { font-size: var(--font-size-md); }
+  .runtime-setting__copy > small { color: var(--text-soft); font-size: var(--font-size-sm); line-height: 1.45; }
+  .runtime-setting-state { min-width: 0; display: flex; flex-wrap: wrap; gap: var(--space-1); margin-block-start: var(--space-1); }
+  .runtime-setting-state > span { min-height: calc(var(--space-4) + var(--space-1)); display: inline-flex; align-items: center; gap: var(--space-1); padding-inline: var(--space-2); border-radius: var(--radius-xl); color: var(--text-muted); background: var(--surface-interactive); font-size: var(--font-size-xs); font-weight: 700; }
+  .runtime-setting-state > span:nth-child(2) { color: var(--success); background: var(--surface-success); }
+  .runtime-setting-state > .is-pending { color: var(--warning); background: var(--surface-warning); }
+  .runtime-setting__control { min-width: 0; display: flex; align-items: center; justify-content: flex-end; }
+  .runtime-setting__control > .setting-text-input { min-height: var(--space-7); padding-inline: var(--space-3); }
+  .configuration-integrations__form { min-width: 0; display: grid; gap: var(--space-4); }
+  .runtime-setting__control > .select__trigger { width: min(100%, calc(var(--space-8) * 6)); }
+  .configuration-provider-status { min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(calc(var(--space-8) * 3), 1fr)); gap: var(--space-2); }
+  .configuration-provider-status > span { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--text-muted); background: var(--surface-subtle); font-size: var(--font-size-sm); font-weight: 760; }
+  .configuration-provider-status > span > i { width: var(--space-2); height: var(--space-2); border-radius: 50%; background: var(--text-muted); }
+  .configuration-provider-status > span > small { grid-column: 2; color: inherit; font-size: var(--font-size-xs); font-weight: 620; }
+  .configuration-provider-status > span.is-configured { color: var(--success); border-color: color-mix(in srgb, var(--success) 25%, var(--line)); background: var(--surface-success); }
+  .configuration-provider-status > span.is-configured > i { background: var(--success); }
+  .configuration-secret-note { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: var(--space-3); padding: var(--space-3); border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--line)); border-radius: var(--radius-sm); color: var(--text-soft); background: color-mix(in srgb, var(--blue) 7%, transparent); }
+  .configuration-secret-note > svg { color: var(--blue); }
+  .configuration-secret-note > span { display: grid; gap: var(--space-1); }
+  .configuration-secret-note strong { color: var(--text); font-size: var(--font-size-sm); }
+  .configuration-credential-list { min-width: 0; display: grid; }
+  .configuration-credential { min-width: 0; display: grid; grid-template-columns: minmax(calc(var(--space-8) * 3), .8fr) minmax(calc(var(--space-8) * 4), 1.2fr); align-items: center; gap: var(--space-4); padding-block: var(--space-4); border-block-end: 1px solid var(--line); }
+  .configuration-credential.is-removing { color: var(--danger); }
+  .configuration-credential__copy { min-width: 0; display: grid; justify-items: start; gap: var(--space-1); }
+  .configuration-credential__copy > label { color: var(--text); font-size: var(--font-size-md); font-weight: 690; }
+  .configuration-credential__copy > span { padding: var(--space-1) var(--space-2); border-radius: var(--radius-xl); color: var(--text-muted); background: var(--surface-interactive); font-size: var(--font-size-xs); font-weight: 700; }
+  .configuration-credential__copy > span.is-configured { color: var(--success); background: var(--surface-success); }
+  .configuration-credential__copy > small { color: var(--text-muted); font-size: var(--font-size-xs); }
+  .configuration-credential__control { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); }
+  .configuration-credential__control > input { min-width: 0; min-height: var(--space-7); padding-inline: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--text); background: var(--surface-subtle); }
+  .configuration-credential > p { grid-column: 2; margin: calc(0px - var(--space-2)) 0 0; color: var(--danger); font-size: var(--font-size-xs); }
+  .configuration-audit { align-content: start; }
+  .configuration-audit__events { min-width: 0; display: grid; margin: 0; padding: 0; list-style: none; }
+  .configuration-audit__events > li { min-width: 0; display: grid; grid-template-columns: var(--space-7) minmax(0, 1fr); align-items: start; gap: var(--space-3); padding-block: var(--space-4); border-block-end: 1px solid var(--line); }
+  .configuration-audit__icon { width: var(--space-7); height: var(--space-7); display: grid; place-items: center; border-radius: var(--radius-sm); color: var(--accent); background: var(--surface-accent); }
+  .configuration-audit__icon > svg { width: var(--space-4); }
+  .configuration-audit__events > li > div { min-width: 0; display: grid; gap: var(--space-1); }
+  .configuration-audit__heading { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
+  .configuration-audit__heading strong { font-size: var(--font-size-md); }
+  .configuration-audit__heading time, .configuration-audit__events small { color: var(--text-muted); font-size: var(--font-size-xs); }
+  .configuration-audit__events p { overflow-wrap: anywhere; color: var(--text-soft); }
+  .configuration-audit__changes { min-width: 0; display: flex; flex-wrap: wrap; gap: var(--space-1); margin: var(--space-1) 0; padding: 0; list-style: none; }
+  .configuration-audit__changes > li { display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border-radius: var(--radius-xl); color: var(--text-soft); background: var(--surface-interactive); font-size: var(--font-size-xs); }
+  .configuration-audit__changes strong { color: var(--text-muted); font-size: var(--font-size-xs); }
+  .configuration-audit__changes strong.is-configured { color: var(--success); }
+  .configuration-audit > .button { justify-self: start; }
   .tracking-settings { min-width: 0; display: grid; gap: var(--space-4); }
   .settings-connections { min-width: 0; display: grid; gap: var(--space-6); }
   .settings-connections__tracking { min-width: 0; display: grid; gap: var(--space-4); }
@@ -2467,7 +2516,13 @@
     .settings-navigation__item-description { display: none; }
     .jellyfin-access { padding: var(--space-4); }
     .jellyfin-access__header, .jellyfin-access__server, .jellyfin-access__credential, .jellyfin-access--disabled { grid-template-columns: minmax(0, 1fr); }
-    .jellyfin-access__server > .button, .jellyfin-access__credential > .button { width: 100%; }
+    .runtime-setting__control > :where(.select__trigger, .setting-text-input, .setting-number-input) { width: 100%; max-width: none; }
+    .runtime-setting, .configuration-credential { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
+    .runtime-setting__control { justify-content: stretch; }
+    .configuration-credential__control { grid-template-columns: minmax(0, 1fr); }
+    .configuration-credential > p { grid-column: 1; margin-block-start: calc(0px - var(--space-2)); }
+    .configuration-integrations > header, .configuration-audit > header { grid-template-columns: auto minmax(0, 1fr); }
+    .configuration-integrations > header > .settings-save-state { grid-column: 1 / -1; justify-self: start; }
     .settings-save-bar {
       display: grid;
       grid-template-columns: minmax(0, 1fr);
@@ -2502,6 +2557,7 @@
     .settings-navigation__search, .settings-content .field > div, .settings-content .toggle-field > span {
       min-height: 64px;
     }
+    .runtime-setting__control > :where(input, .select__trigger), .configuration-credential__control > input { min-height: calc(var(--space-8) + var(--space-4)); }
     .settings-content .button, .settings-save-bar .button {
       min-height: 64px;
     }

@@ -7,7 +7,7 @@ import { interfaceLanguages, locale, translate, type TranslationKey } from "../i
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
 import { acquireOneShotNavigationGuard } from "../oneShotNavigationGuard";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
-import type { AccessCategory, AddonDiagnostic, AddonDiagnosticErrorCode, AddonDiagnosticState, AddonDiagnosticsResponse, AddonManifest, AddonPreviewResponse, AvatarPreset, CategoryInput, Collection, CollectionFolder, CollectionSaveInput, CollectionSource, DeviceUpdateInput, InstallAddonInput, InstalledAddon, InterfaceLanguage, JellyfinCredentialSecret, JellyfinCredentialStatus, MaintenanceSettings, ManagedAddon, ManagedDevice, MetadataRefreshScheduleInput, OperationAction, OperationRun, OperationsOverview, PlaybackActivity, PlaybackActivitySession, Profile, ProfileSession, SettingsValues, TrackingDeviceAuthorization, TrackingProvider, TrackingStatus, UpdateAddonInput } from "../types";
+import { integrationCredentialNames, type AccessCategory, type AddonDiagnostic, type AddonDiagnosticErrorCode, type AddonDiagnosticState, type AddonDiagnosticsResponse, type AddonManifest, type AddonPreviewResponse, type AvatarPreset, type CategoryInput, type Collection, type CollectionFolder, type CollectionSaveInput, type CollectionSource, type ConfigurationAuditPage, type DeviceUpdateInput, type HardwareAccelerationMode, type InstallAddonInput, type InstalledAddon, type IntegrationCredentialName, type InterfaceLanguage, type JellyfinCredentialSecret, type JellyfinCredentialStatus, type MaintenanceSettings, type ManagedAddon, type ManagedDevice, type MetadataRefreshScheduleInput, type OperationAction, type OperationRun, type OperationsOverview, type PlaybackActivity, type PlaybackActivitySession, type Profile, type ProfileSession, type RuntimeApplication, type RuntimeSettingsValues, type SettingsIntegrations, type SettingsIntegrationsPatch, type SettingsValues, type TrackingDeviceAuthorization, type TrackingProvider, type TrackingStatus, type UpdateAddonInput } from "../types";
 
 type AdminTab = "categories" | "profiles" | "devices" | "addons" | "collections" | "activity" | "operations" | "settings";
 type AdminTabGroup = "access" | "catalog" | "supervision" | "preferences";
@@ -30,9 +30,10 @@ const tabs: Array<{ id: AdminTab; group: AdminTabGroup; labelKey: TranslationKey
   { id: "settings", group: "preferences", labelKey: "admin.tabs.settings.label", descriptionKey: "admin.tabs.settings.description", icon: Settings2 },
 ];
 
-type SettingsSection = "appearance" | "playback" | "transcoding" | "language" | "subtitles" | "connections";
+type SettingsSection = "appearance" | "playback" | "runtime" | "transcoding" | "language" | "subtitles" | "connections" | "integrations" | "audit";
 
-const settingsSections: Record<SettingsSection, true> = { appearance: true, playback: true, transcoding: true, language: true, subtitles: true, connections: true };
+const settingsSections: Record<SettingsSection, true> = { appearance: true, playback: true, runtime: true, transcoding: true, language: true, subtitles: true, connections: true, integrations: true, audit: true };
+const serverOnlySettingsSections: Partial<Record<SettingsSection, true>> = { runtime: true, transcoding: true, integrations: true, audit: true };
 
 function adminRouteParameters() {
   const [route, query = ""] = window.location.hash.slice(1).split("?", 2);
@@ -2706,6 +2707,12 @@ const rivuneSettingDefaults = {
   preferDirectPlay: true,
   allowTranscoding: true,
   jellyfinEnabled: false,
+  jellyfinDebug: false,
+  timezone: "UTC",
+  hardwareAcceleration: "auto",
+  transcodeMaxBitrateKbps: 12000,
+  mediaMaxStorageMB: 20480,
+  artworkMaxStorageMB: 20480,
   transcoding: "inherit",
   hideUnreleased: false,
   metadataLanguage: "auto",
@@ -2845,6 +2852,7 @@ const settingOptions = {
   resolution: [{ value: "auto", labelKey: "settings.resolution.auto" }, { value: "2160p", labelKey: "settings.resolution.2160p" }, { value: "1080p", labelKey: "settings.resolution.1080p" }, { value: "720p", labelKey: "settings.resolution.720p" }, { value: "480p", labelKey: "settings.resolution.480p" }],
   density: [{ value: "comfortable", labelKey: "settings.density.comfortable" }, { value: "compact", labelKey: "settings.density.compact" }],
   transcoding: [{ value: "inherit", labelKey: "settings.options.transcodingInherit" }, { value: "enabled", labelKey: "settings.options.transcodingEnabled" }, { value: "disabled", labelKey: "settings.options.transcodingDisabled" }],
+  hardwareAcceleration: [{ value: "auto", labelKey: "settings.runtime.hardware.auto" }, { value: "software", labelKey: "settings.runtime.hardware.software" }, { value: "vaapi", labelKey: "settings.runtime.hardware.vaapi" }, { value: "qsv", labelKey: "settings.runtime.hardware.qsv" }, { value: "nvenc", labelKey: "settings.runtime.hardware.nvenc" }],
   language: [{ value: "auto", labelKey: "settings.language.auto" }, { value: "fr-FR", label: "Français" }, { value: "en-US", labelKey: "languages.english" }, { value: "es-ES", label: "Español" }, { value: "de-DE", label: "Deutsch" }, { value: "it-IT", label: "Italiano" }, { value: "pt-BR", label: "Português" }, { value: "ja-JP", label: "日本語" }],
   region: [{ value: "auto", labelKey: "settings.region.auto" }, { value: "FR", labelKey: "regions.france" }, { value: "BE", labelKey: "regions.belgium" }, { value: "CA", labelKey: "regions.canada" }, { value: "CH", labelKey: "regions.switzerland" }, { value: "US", labelKey: "regions.unitedStates" }, { value: "GB", labelKey: "regions.unitedKingdom" }, { value: "DE", labelKey: "regions.germany" }, { value: "ES", labelKey: "regions.spain" }, { value: "IT", labelKey: "regions.italy" }, { value: "JP", labelKey: "regions.japan" }],
   mapping: [{ value: "tmdb", labelKey: "settings.seriesMapping.tmdb" }, { value: "tvdb", labelKey: "settings.seriesMapping.tvdb" }],
@@ -2910,6 +2918,14 @@ function settingsSectionDefinitions(serverScope: boolean): SettingsSectionDefini
     translate("settings.fields.subtitleBackgroundOpacity"),
   ]);
   if (serverScope) {
+    const runtime = definition("runtime", translate("settings.runtime.title"), translate("settings.runtime.description"), <Server />, [
+      translate("settings.runtime.timezone"),
+      translate("settings.runtime.jellyfinDebug"),
+      translate("settings.runtime.hardwareAcceleration"),
+      translate("settings.runtime.transcodeMaxBitrate"),
+      translate("settings.runtime.mediaQuota"),
+      translate("settings.runtime.artworkQuota"),
+    ]);
     const transcoding = definition("transcoding", translate("settings.fields.transcoding"), translate("settings.fields.allowTranscodingDescription"), <Cpu />, [
       translate("settings.fields.allowTranscoding"),
       translate("settings.fields.allowTranscodingDescription"),
@@ -2918,7 +2934,9 @@ function settingsSectionDefinitions(serverScope: boolean): SettingsSectionDefini
       translate("settings.fields.jellyfinEnabled"),
       translate("settings.fields.jellyfinEnabledDescription"),
     ]);
-    return [appearance, playback, transcoding, language, subtitles, connections];
+    const integrations = definition("integrations", translate("settings.integrations.title"), translate("settings.integrations.description"), <KeyRound />, integrationCredentialNames.map((name) => translate(`settings.integrations.fields.${name}` as TranslationKey)));
+    const audit = definition("audit", translate("settings.audit.title"), translate("settings.audit.description"), <Clock3 />, [translate("settings.audit.changedKeys"), translate("settings.audit.revision")]);
+    return [appearance, playback, runtime, transcoding, language, subtitles, connections, integrations, audit];
   }
   const connections = definition("connections", translate("settings.connectionsTitle"), translate("settings.trackingDescription"), <Radio />, [
     translate("settings.fields.jellyfinApi"),
@@ -2942,6 +2960,8 @@ function SettingsAdmin() {
   const [profile, setProfile] = useState<SettingsValues>({});
   const [savedProfile, setSavedProfile] = useState<SettingsValues>({});
   const [inherited, setInherited] = useState<SettingsValues>({});
+  const [runtimeApplication, setRuntimeApplication] = useState<RuntimeApplication | undefined>();
+  const [integrationDirty, setIntegrationDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [checkingTranscodingDisable, setCheckingTranscodingDisable] = useState(false);
   const [transcodingDisableCount, setTranscodingDisableCount] = useState<number | null>(null);
@@ -2950,8 +2970,8 @@ function SettingsAdmin() {
   const [activeSection, setActiveSection] = useState<SettingsSection>(() => requestedSettingsSection() ?? "appearance");
   const [sectionSearch, setSectionSearch] = useState("");
   const initialSection = requestedSettingsSection() ?? "appearance";
-  const lastProfileSection = useRef<SettingsSection>(initialSection === "transcoding" ? "appearance" : initialSection);
-  const lastServerSection = useRef<SettingsSection>(initialSection === "connections" ? "appearance" : initialSection);
+  const lastProfileSection = useRef<SettingsSection>(serverOnlySettingsSections[initialSection] ? "appearance" : initialSection);
+  const lastServerSection = useRef<SettingsSection>(initialSection);
   const settingsTargetRef = useRef(settingsTarget);
   settingsTargetRef.current = settingsTarget;
   const canManageProfiles = Boolean(activeProfile?.canManage);
@@ -2959,19 +2979,19 @@ function SettingsAdmin() {
   const serverSelected = settingsTarget === "server";
   const targetProfile = administrationProfiles.find((candidate) => candidate.id === settingsTarget) ?? activeProfile;
   const settingsDirty = serverSelected ? JSON.stringify(instance) !== JSON.stringify(savedInstance) : JSON.stringify(profile) !== JSON.stringify(savedProfile);
-  const hasUnsavedChanges = settingsDirty;
+  const hasUnsavedChanges = settingsDirty || integrationDirty;
   const overrideCount = Object.entries(serverSelected ? instance : profile).filter(([key, value]) => !isDeviceNotificationSetting(key) && value !== null && value !== undefined && !(key === "transcoding" && value === "inherit")).length;
   const sectionDefinitions = settingsSectionDefinitions(serverSelected);
   const normalizedSearch = sectionSearch.trim().toLocaleLowerCase();
   const filteredSections = normalizedSearch ? sectionDefinitions.filter((section) => section.searchText.includes(normalizedSearch)) : sectionDefinitions;
 
   function sectionAllowed(section: SettingsSection) {
-    return serverSelected || section !== "transcoding";
+    return serverSelected || !serverOnlySettingsSections[section];
   }
   const visibleSection = sectionAllowed(activeSection) ? activeSection : "appearance";
 
   function navigateSettingsSection(section: SettingsSection, replace = false) {
-    if (!sectionAllowed(section)) return;
+    if (!sectionAllowed(section) || integrationDirty) return;
     if (serverSelected) lastServerSection.current = section;
     else lastProfileSection.current = section;
     setActiveSection(section);
@@ -2988,7 +3008,7 @@ function SettingsAdmin() {
 
   function handleSectionKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
     if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    const buttons = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[data-settings-section]") ?? []);
+    const buttons = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[data-settings-section]:not(:disabled)") ?? []);
     const currentIndex = buttons.indexOf(event.currentTarget);
     if (currentIndex < 0 || buttons.length === 0) return;
     event.preventDefault();
@@ -3009,6 +3029,10 @@ function SettingsAdmin() {
 
   useEffect(() => {
     const syncSection = () => {
+      if (integrationDirty) {
+        updateAdminRoute("settings", "integrations", true);
+        return;
+      }
       const requestedTab = requestedAdminTab();
       if (requestedTab && requestedTab !== "settings") return;
       const requested = requestedSettingsSection();
@@ -3025,7 +3049,7 @@ function SettingsAdmin() {
       window.removeEventListener("hashchange", syncSection);
       window.removeEventListener("popstate", syncSection);
     };
-  }, [serverSelected]);
+  }, [integrationDirty, serverSelected]);
 
   useEffect(() => {
     setSettingsTarget(activeProfile?.id ?? "");
@@ -3043,6 +3067,7 @@ function SettingsAdmin() {
         if (!current) return;
         setInstance(layer.settings);
         setSavedInstance(layer.settings);
+        setRuntimeApplication(layer.runtime);
         setInherited({});
         return;
       }
@@ -3051,6 +3076,7 @@ function SettingsAdmin() {
       setProfile(layer.settings);
       setSavedProfile(layer.settings);
       setInherited(serverDefaults.settings);
+      setRuntimeApplication(serverDefaults.runtime);
     })()
       .catch((cause) => {
         if (current) setError(notifyError(cause, translate("settings.errors.load"), translate("settings.errors.unavailableTitle")));
@@ -3095,6 +3121,7 @@ function SettingsAdmin() {
         if (settingsTargetRef.current === target) {
           setInstance(updated.settings);
           setSavedInstance(updated.settings);
+          setRuntimeApplication(updated.runtime);
         }
         await updateServerInterfaceLanguage(updated.settings.interfaceLanguage ?? "en");
         if (confirmedTranscodingSessions !== undefined) {
@@ -3163,6 +3190,7 @@ function SettingsAdmin() {
           key={section.id}
           data-settings-section={section.id}
           className={visibleSection === section.id ? "is-active" : ""}
+          disabled={integrationDirty && visibleSection !== section.id}
           aria-current={visibleSection === section.id ? "page" : undefined}
           aria-label={section.label}
           aria-describedby={`settings-navigation-description-${section.id}`}
@@ -3195,9 +3223,13 @@ function SettingsAdmin() {
             <TrackingSettings profileId={settingsTarget} />
           </section>
         </div>
-        : serverSelected
-          ? <SettingsCard activeSection={visibleSection} serverScope title={translate("settings.server.title")} description={translate("settings.server.description")} icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void requestSave()} onReset={() => setInstance(savedInstance)} saving={saving || checkingTranscodingDisable} dirty={settingsDirty} emptyLabel={translate("settings.defaults.rivune")} />
-          : <SettingsCard activeSection={visibleSection} canConfigureTranscoding={canManageServer} title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void requestSave()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />}
+        : serverSelected && visibleSection === "integrations"
+          ? <IntegrationSettings onDirtyChange={setIntegrationDirty} />
+          : serverSelected && visibleSection === "audit"
+            ? <ConfigurationAudit />
+            : serverSelected
+              ? <SettingsCard activeSection={visibleSection} serverScope runtimeApplication={runtimeApplication} title={translate("settings.server.title")} description={translate("settings.server.description")} icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void requestSave()} onReset={() => setInstance(savedInstance)} saving={saving || checkingTranscodingDisable} dirty={settingsDirty} emptyLabel={translate("settings.defaults.rivune")} />
+              : <SettingsCard activeSection={visibleSection} canConfigureTranscoding={canManageServer} title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void requestSave()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />}
     </main>
     {transcodingDisableCount !== null && <ConfirmDialog
       title={translate("settings.transcoding.disableConfirmTitle")}
@@ -3618,7 +3650,185 @@ function MaintenanceCard({ values, onChange, onSave, onReset, saving, dirty }: {
   </section>;
 }
 
-function SettingsCard({ activeSection, serverScope = false, canConfigureTranscoding = false, values, defaults = {}, onChange, onSave, onReset, saving, dirty, emptyLabel = translate("settings.defaults.server") }: { activeSection: SettingsSection; serverScope?: boolean; canConfigureTranscoding?: boolean; title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean; emptyLabel?: string }) {
+const integrationProviders = ["tmdb", "tvdb", "fanart", "mdblist", "trakt", "simkl"] as const;
+const integrationProviderLabels: Record<typeof integrationProviders[number], string> = { tmdb: "TMDB", tvdb: "TVDB", fanart: "Fanart", mdblist: "MDBList", trakt: "Trakt", simkl: "Simkl" };
+
+function formatConfigurationDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? translate("settings.audit.unknownDate") : new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
+function IntegrationSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void }) {
+  const [integrations, setIntegrations] = useState<SettingsIntegrations | null>(null);
+  const [draft, setDraft] = useState<Record<IntegrationCredentialName, string>>({ tmdbAccessToken: "", fanartApiKey: "", mdblistApiKey: "", tvdbApiKey: "", tvdbPin: "", traktClientId: "", traktClientSecret: "", simklClientId: "" });
+  const [removals, setRemovals] = useState<Partial<Record<IntegrationCredentialName, true>>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const dirty = integrationCredentialNames.some((name) => draft[name].length > 0 || removals[name]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setIntegrations(await api.settingsIntegrations());
+    } catch (cause) {
+      setError(notifyError(cause, translate("settings.integrations.errors.load"), translate("settings.integrations.errors.loadTitle")));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { onDirtyChange(Boolean(dirty)); }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
+
+  function reset() {
+    setDraft({ tmdbAccessToken: "", fanartApiKey: "", mdblistApiKey: "", tvdbApiKey: "", tvdbPin: "", traktClientId: "", traktClientSecret: "", simklClientId: "" });
+    setRemovals({});
+  }
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (!dirty) return;
+    const patch: SettingsIntegrationsPatch = {};
+    for (const name of integrationCredentialNames) {
+      if (removals[name]) patch[name] = null;
+      else if (draft[name].length > 0) patch[name] = draft[name];
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const updated = await api.updateSettingsIntegrations(patch);
+      setIntegrations(updated);
+      reset();
+      notifySuccess(translate("settings.integrations.notifications.saved"), translate("settings.integrations.notifications.savedTitle"));
+    } catch (cause) {
+      setError(notifyError(cause, translate("settings.integrations.errors.save"), translate("settings.integrations.errors.saveTitle")));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <section id="settings-section-integrations" className="settings-card configuration-integrations" aria-labelledby="settings-integrations-title">
+    <header><span><KeyRound aria-hidden="true" /></span><div><small>{translate("settings.integrations.eyebrow")}</small><h3 id="settings-integrations-title">{translate("settings.integrations.title")}</h3><p>{translate("settings.integrations.description")}</p></div>{integrations && <span className="settings-save-state is-saved">{translate("settings.integrations.revision", { revision: integrations.revision })}</span>}</header>
+    {error && <Notice>{error}</Notice>}
+    {loading && <Skeleton className="settings-skeleton" />}
+    {!loading && !integrations && <EmptyState icon={<KeyRound aria-hidden="true" />} title={translate("settings.integrations.emptyTitle")} description={translate("settings.integrations.emptyDescription")} action={<Button variant="secondary" onClick={() => void load()}>{translate("common.actions.tryAgain")}</Button>} />}
+    {integrations && <form className="configuration-integrations__form" onSubmit={(event) => void save(event)}>
+      <div className="configuration-provider-status" aria-label={translate("settings.integrations.providerStatus")}>
+        {integrationProviders.map((provider) => <span key={provider} className={integrations.providers[provider] ? "is-configured" : ""}><i aria-hidden="true" />{integrationProviderLabels[provider]}<small>{translate(integrations.providers[provider] ? "settings.integrations.configured" : "settings.integrations.notConfigured")}</small></span>)}
+      </div>
+      <p className="configuration-secret-note" role="note"><Shield size={18} aria-hidden="true" /> <span><strong>{translate("settings.integrations.writeOnlyTitle")}</strong>{translate("settings.integrations.writeOnlyDescription")}</span></p>
+      <div className="configuration-credential-list">{integrationCredentialNames.map((name) => {
+        const status = integrations.credentials[name];
+        const removing = Boolean(removals[name]);
+        const label = translate(`settings.integrations.fields.${name}` as TranslationKey);
+        return <div className={`configuration-credential ${removing ? "is-removing" : ""}`} key={name}>
+          <div className="configuration-credential__copy"><label htmlFor={`integration-${name}`}>{label}</label><span id={`integration-${name}-status`} className={status.configured ? "is-configured" : ""}>{translate(status.configured ? "settings.integrations.configured" : "settings.integrations.notConfigured")}</span>{status.updatedAt && <small>{translate("settings.integrations.updatedAt", { date: formatConfigurationDate(status.updatedAt) })}</small>}</div>
+          <div className="configuration-credential__control">
+            <input id={`integration-${name}`} name={name} type="password" autoComplete="new-password" spellCheck={false} value={draft[name]} disabled={saving || removing} aria-label={translate("settings.integrations.replaceLabel", { name: label })} aria-describedby={`integration-${name}-status`} placeholder={translate("settings.integrations.replacementPlaceholder")} onChange={(event) => setDraft((current) => ({ ...current, [name]: event.target.value }))} />
+            <Button type="button" variant={removing ? "secondary" : "danger"} disabled={saving || (!status.configured && !removing)} aria-label={translate(removing ? "settings.integrations.undoRemoveLabel" : "settings.integrations.removeLabel", { name: label })} onClick={() => {
+              setDraft((current) => ({ ...current, [name]: "" }));
+              setRemovals((current) => {
+                if (!removing) return { ...current, [name]: true };
+                const next = { ...current };
+                delete next[name];
+                return next;
+              });
+            }}>{removing ? translate("settings.integrations.undoRemove") : translate("common.actions.remove")}</Button>
+          </div>
+          {removing && <p role="status">{translate("settings.integrations.pendingRemoval")}</p>}
+        </div>;
+      })}</div>
+      {(dirty || saving) && <footer className={`settings-save-bar ${dirty ? "is-dirty" : ""}`}>
+        <span className={`settings-save-state ${dirty ? "is-dirty" : "is-saved"}`} role="status" aria-live="polite">{saving ? <><LoaderCircle size={14} className="spin" /> {translate("common.status.saving")}</> : <><Save size={14} /> {translate("common.status.unsavedChanges")}</>}</span>
+        <div><Button type="button" variant="secondary" disabled={saving} onClick={reset}>{translate("common.actions.discardChanges")}</Button><Button type="submit" loading={saving} disabled={!dirty}><Check size={18} aria-hidden="true" /> {translate("settings.integrations.save")}</Button></div>
+      </footer>}
+    </form>}
+  </section>;
+}
+
+function ConfigurationAudit() {
+  const [page, setPage] = useState<ConfigurationAuditPage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async (cursor?: number) => {
+    cursor === undefined ? setLoading(true) : setLoadingMore(true);
+    setError("");
+    try {
+      const next = await api.settingsAudit(cursor);
+      setPage((current) => cursor === undefined || !current ? next : { events: [...current.events, ...next.events], nextCursor: next.nextCursor });
+    } catch (cause) {
+      setError(notifyError(cause, translate("settings.audit.errors.load"), translate("settings.audit.errors.loadTitle")));
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  return <section id="settings-section-audit" className="settings-card configuration-audit" aria-labelledby="settings-audit-title">
+    <header><span><Clock3 aria-hidden="true" /></span><div><small>{translate("settings.audit.eyebrow")}</small><h3 id="settings-audit-title">{translate("settings.audit.title")}</h3><p>{translate("settings.audit.description")}</p></div></header>
+    {error && <Notice>{error}</Notice>}
+    {loading && <Skeleton className="settings-skeleton" />}
+    {!loading && page?.events.length === 0 && <EmptyState icon={<Clock3 aria-hidden="true" />} title={translate("settings.audit.emptyTitle")} description={translate("settings.audit.emptyDescription")} />}
+    {page && page.events.length > 0 && <ol className="configuration-audit__events">{page.events.map((event) => <li key={event.id}>
+      <span className="configuration-audit__icon" aria-hidden="true">{event.action === "settings.updated" ? <Settings2 /> : <KeyRound />}</span>
+      <div>
+        <div className="configuration-audit__heading"><strong>{translate(event.action === "settings.updated" ? "settings.audit.actions.settingsUpdated" : "settings.audit.actions.integrationsUpdated")}</strong><time dateTime={event.createdAt}>{formatConfigurationDate(event.createdAt)}</time></div>
+        {event.action === "integrations.updated"
+          ? <ul className="configuration-audit__changes">{event.changedKeys.map((key) => {
+            const name = key as IntegrationCredentialName;
+            return <li key={key}><span>{translate(`settings.integrations.fields.${name}` as TranslationKey)}</span><strong className={event.snapshot[name] ? "is-configured" : ""}>{translate(event.snapshot[name] ? "settings.integrations.configured" : "settings.integrations.notConfigured")}</strong></li>;
+          })}</ul>
+          : <p>{translate("settings.audit.changedKeys")}: {event.changedKeys.join(", ")}</p>}
+        <small>{translate("settings.audit.actor", { actor: translate(event.actorUserId ? "settings.audit.administrator" : "settings.audit.system") })} · {translate("settings.audit.revision", { revision: event.revision })}</small>
+      </div>
+    </li>)}</ol>}
+    {page?.nextCursor !== null && page?.nextCursor !== undefined && <Button variant="secondary" loading={loadingMore} disabled={loadingMore} onClick={() => void load(page.nextCursor ?? undefined)}>{translate("settings.audit.loadMore")}</Button>}
+  </section>;
+}
+
+function RuntimeControl({ id, label, description, requested, active, pending, children }: { id: string; label: string; description: string; requested: string; active: string; pending: boolean; children: React.ReactNode }) {
+  return <div className="runtime-setting"><div className="runtime-setting__copy"><strong>{label}</strong><small id={`${id}-description`}>{description}</small><div id={`${id}-state`} className="runtime-setting-state" role="status"><span>{translate("settings.runtime.requested", { value: requested })}</span><span>{translate("settings.runtime.active", { value: active })}</span>{pending && <span className="is-pending"><RefreshCw size={12} aria-hidden="true" />{translate("settings.runtime.restartRequired")}</span>}</div></div><div className="runtime-setting__control">{children}</div></div>;
+}
+
+function RuntimeSettingsPanel({ values, application, onChange }: { values: SettingsValues; application?: RuntimeApplication; onChange: <K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) => void }) {
+  const requested: RuntimeSettingsValues = {
+    timezone: values.timezone ?? rivuneSettingDefaults.timezone,
+    jellyfinEnabled: values.jellyfinEnabled ?? rivuneSettingDefaults.jellyfinEnabled,
+    jellyfinDebug: values.jellyfinDebug ?? rivuneSettingDefaults.jellyfinDebug,
+    hardwareAcceleration: values.hardwareAcceleration ?? rivuneSettingDefaults.hardwareAcceleration,
+    transcodeMaxBitrateKbps: values.transcodeMaxBitrateKbps ?? rivuneSettingDefaults.transcodeMaxBitrateKbps,
+    mediaMaxStorageMB: values.mediaMaxStorageMB ?? rivuneSettingDefaults.mediaMaxStorageMB,
+    artworkMaxStorageMB: values.artworkMaxStorageMB ?? rivuneSettingDefaults.artworkMaxStorageMB,
+    allowTranscoding: values.allowTranscoding ?? rivuneSettingDefaults.allowTranscoding,
+  };
+  const active = application?.active ?? requested;
+  const pending = application?.pendingRestart ?? [];
+  const hardwareLabel = (value: HardwareAccelerationMode) => {
+    const option = settingOptions.hardwareAcceleration.find((candidate) => candidate.value === value);
+    return option ? translate(option.labelKey) : value;
+  };
+  const numberLabel = (value: number, suffix: string) => `${new Intl.NumberFormat(locale).format(value)}${suffix}`;
+
+  return <SettingsGroup sectionId="runtime" icon={<Server />} title={translate("settings.runtime.title")} description={translate("settings.runtime.description")}>
+    <RuntimeControl id="runtime-timezone" label={translate("settings.runtime.timezone")} description={translate("settings.runtime.timezoneDescription")} requested={requested.timezone} active={active.timezone} pending={false}><input className="setting-text-input" name="timezone" value={requested.timezone} aria-label={translate("settings.runtime.timezone")} aria-describedby="runtime-timezone-description runtime-timezone-state" list="runtime-timezones" onChange={(event) => onChange("timezone", event.target.value)} /><datalist id="runtime-timezones"><option value="UTC" /><option value="America/New_York" /><option value="Europe/London" /><option value="Europe/Paris" /><option value="Asia/Tokyo" /></datalist></RuntimeControl>
+    <RuntimeControl id="runtime-jellyfin-debug" label={translate("settings.runtime.jellyfinDebug")} description={translate("settings.runtime.jellyfinDebugDescription")} requested={translate(requested.jellyfinDebug ? "common.status.on" : "common.status.off")} active={translate(active.jellyfinDebug ? "common.status.on" : "common.status.off")} pending={false}><label className="setting-toggle"><input type="checkbox" aria-label={translate("settings.runtime.jellyfinDebug")} aria-describedby="runtime-jellyfin-debug-description runtime-jellyfin-debug-state" checked={requested.jellyfinDebug} onChange={(event) => onChange("jellyfinDebug", event.target.checked)} /><span aria-hidden="true"><i /></span></label></RuntimeControl>
+    <RuntimeControl id="runtime-hardware-acceleration" label={translate("settings.runtime.hardwareAcceleration")} description={translate("settings.runtime.hardwareAccelerationDescription")} requested={hardwareLabel(requested.hardwareAcceleration)} active={hardwareLabel(active.hardwareAcceleration)} pending={pending.includes("hardwareAcceleration")}><Select name="hardwareAcceleration" aria-label={translate("settings.runtime.hardwareAcceleration")} aria-describedby="runtime-hardware-acceleration-description runtime-hardware-acceleration-state" value={requested.hardwareAcceleration} onChange={(value) => onChange("hardwareAcceleration", value as HardwareAccelerationMode)} options={settingOptions.hardwareAcceleration.map((option) => ({ value: option.value, label: translate(option.labelKey) }))} /></RuntimeControl>
+    {([
+      ["transcodeMaxBitrateKbps", "settings.runtime.transcodeMaxBitrate", "settings.runtime.transcodeMaxBitrateDescription", 64, 200000, translate("settings.units.kbpsSuffix")],
+      ["mediaMaxStorageMB", "settings.runtime.mediaQuota", "settings.runtime.mediaQuotaDescription", 512, 102400, translate("settings.units.megabytesSuffix")],
+      ["artworkMaxStorageMB", "settings.runtime.artworkQuota", "settings.runtime.artworkQuotaDescription", 256, 102400, translate("settings.units.megabytesSuffix")],
+    ] as const).map(([key, labelKey, descriptionKey, minimum, maximum, suffix]) => <RuntimeControl id={`runtime-${key}`} key={key} label={translate(labelKey)} description={translate(descriptionKey)} requested={numberLabel(requested[key], suffix)} active={numberLabel(active[key], suffix)} pending={false}><input className="setting-number-input" name={key} type="number" min={minimum} max={maximum} step={1} required aria-label={translate(labelKey)} aria-describedby={`runtime-${key}-description runtime-${key}-state`} value={requested[key]} onChange={(event) => { const next = event.currentTarget.valueAsNumber; if (Number.isInteger(next) && next >= minimum && next <= maximum) onChange(key, next); }} /></RuntimeControl>)}
+  </SettingsGroup>;
+}
+
+function SettingsCard({ activeSection, serverScope = false, canConfigureTranscoding = false, runtimeApplication, values, defaults = {}, onChange, onSave, onReset, saving, dirty, emptyLabel = translate("settings.defaults.server") }: { activeSection: SettingsSection; serverScope?: boolean; canConfigureTranscoding?: boolean; runtimeApplication?: RuntimeApplication; title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean; emptyLabel?: string }) {
   const effective = {
     interfaceLanguage: defaults.interfaceLanguage ?? rivuneSettingDefaults.interfaceLanguage,
     theme: defaults.theme ?? rivuneSettingDefaults.theme,
@@ -3685,6 +3895,8 @@ function SettingsCard({ activeSection, serverScope = false, canConfigureTranscod
         <InheritedToggle label={translate("settings.skipRecap")} description={translate("settings.skipRecapDescription")} value={values.skipRecapEnabled} defaultValue={effective.skipRecapEnabled} onChange={(value) => change("skipRecapEnabled", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label={translate("settings.skipOutro")} description={translate("settings.skipOutroDescription")} value={values.skipOutroEnabled} defaultValue={effective.skipOutroEnabled} onChange={(value) => change("skipOutroEnabled", value)} emptyLabel={emptyLabel} />
       </SettingsGroup>}
+
+      {activeSection === "runtime" && serverScope && <RuntimeSettingsPanel values={values} application={runtimeApplication} onChange={change} />}
 
       {activeSection === "transcoding" && serverScope && <SettingsGroup sectionId="transcoding" icon={<Cpu />} title={translate("settings.fields.transcoding")} description={translate("settings.fields.allowTranscodingDescription")}>
         <div className="setting-control setting-control--toggle settings-transcoding-control">

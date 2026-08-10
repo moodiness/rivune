@@ -4,7 +4,7 @@ import { CATEGORY_IDS, expect, test } from "./fixtures/rivune";
 import { selectOption } from "./helpers/select";
 
 const profileSections = ["appearance", "playback", "language", "subtitles", "connections"];
-const serverSections = ["appearance", "playback", "transcoding", "language", "subtitles", "connections"];
+const serverSections = ["appearance", "playback", "runtime", "transcoding", "language", "subtitles", "connections", "integrations", "audit"];
 
 const profileSectionCopy = [
   { id: "appearance", title: "Appearance", description: "Theme, motion, and content density." },
@@ -194,11 +194,17 @@ test("Jellyfin app credential is profile-scoped, copyable once, rotatable, and r
     if (route.request().method() === "POST") await createGate;
     await route.fallback();
   });
+  const guardedURL = page.url();
+  await page.evaluate((currentURL) => {
+    const state = window.history.state;
+    window.history.replaceState(state, "", "/#admin?tab=settings&section=appearance");
+    window.history.pushState(state, "", currentURL);
+  }, guardedURL);
   await panel.getByRole("button", { name: "Add" }).click();
   const secretDialog = page.getByRole("dialog");
   await expect(secretDialog.locator(".settings-skeleton")).toBeVisible();
   await expect(secretDialog.getByRole("button", { name: "Close" })).toHaveCount(0);
-  const guardedURL = page.url();
+  await expect(page).toHaveURL(guardedURL);
   await page.goBack();
   await expect(page).toHaveURL(guardedURL);
   await expect(secretDialog.locator(".settings-skeleton")).toBeVisible();
@@ -369,6 +375,183 @@ test("subtitle controls update the preview before preferences are saved", async 
   await expect.poll(() => preview.evaluate((element) => getComputedStyle(element).getPropertyValue("--subtitle-preview-color").trim())).toBe("#00FF00");
   await expect.poll(() => preview.evaluate((element) => getComputedStyle(element).getPropertyValue("--subtitle-preview-opacity").trim())).toBe("75");
   await expect(page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" })).toBeEnabled();
+});
+
+test("runtime settings render requested and active values and save through the dirty action flow", async ({ page, rivune }) => {
+  rivune.setHardwareRestartPending("nvenc", "software");
+  await openSettings(page);
+  await selectOption(page.getByRole("combobox", { name: "Switch scope" }), "server");
+  await page.locator('[data-settings-section="runtime"]').click();
+
+  const runtime = page.locator("#settings-section-runtime");
+  await expect(runtime.getByLabel("Timezone")).toHaveValue("America/Toronto");
+  await expect(runtime.getByLabel("Jellyfin debug logging")).toBeChecked();
+  await expect(runtime.getByRole("combobox", { name: "Hardware acceleration" })).toHaveAttribute("data-value", "nvenc");
+  await expect(runtime.getByLabel("Maximum transcode bitrate")).toHaveValue("18000");
+  await expect(runtime.getByLabel("Temporary media quota")).toHaveValue("24576");
+  await expect(runtime.getByLabel("Artwork quota")).toHaveValue("8192");
+
+  const pendingRows = runtime.locator(".runtime-setting").filter({ has: page.locator(".is-pending") });
+  await expect(pendingRows).toHaveCount(1);
+  await expect(pendingRows).toContainText("Hardware acceleration");
+  await expect(pendingRows.locator(".runtime-setting-state")).toContainText("Requested · NVIDIA NVENC");
+  await expect(pendingRows.locator(".runtime-setting-state")).toContainText("Active · Software");
+  await expect(pendingRows.locator(".is-pending")).toHaveText("Restart required");
+  await expect(runtime.locator(".runtime-setting:not(:has(.is-pending)) .runtime-setting-state")).toHaveCount(5);
+
+  await runtime.getByLabel("Maximum transcode bitrate").fill("20000");
+  const saveBar = page.locator(".settings-save-bar");
+  await expect(saveBar.getByRole("status")).toContainText("Unsaved changes");
+  await saveBar.getByRole("button", { name: "Save preferences" }).click();
+  const request = await rivune.waitForRequest("/api/v1/settings", "PATCH");
+  expect(request.body).toEqual({ transcodeMaxBitrateKbps: 20000 });
+  await expect(runtime.getByLabel("Maximum transcode bitrate")).toHaveValue("20000");
+  await expect(runtime.locator(".is-pending")).toHaveCount(1);
+  await expect(pendingRows.locator(".is-pending")).toHaveText("Restart required");
+});
+
+test("integration credentials stay write-only and preserve omission versus null", async ({ page, rivune }) => {
+  await openSettings(page);
+  await selectOption(page.getByRole("combobox", { name: "Switch scope" }), "server");
+  const loadResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/settings/integrations" && response.request().method() === "GET");
+  await page.locator('[data-settings-section="integrations"]').click();
+  const loadedIntegrations = await loadResponse;
+  expect(loadedIntegrations.headers()["cache-control"]).toBe("no-store");
+  const loadedBody = await loadedIntegrations.json() as { credentials: Record<string, Record<string, unknown>> };
+  for (const status of Object.values(loadedBody.credentials)) expect(Object.keys(status).sort()).toEqual(["configured", "updatedAt"]);
+
+  const integrations = page.locator("#settings-section-integrations");
+  await expect(integrations.getByRole("heading", { name: "Integrations" })).toBeVisible();
+  const credentialNames = ["tmdbAccessToken", "fanartApiKey", "mdblistApiKey", "tvdbApiKey", "tvdbPin", "traktClientId", "traktClientSecret", "simklClientId"];
+  for (const name of credentialNames) {
+    await expect(integrations.locator(`#integration-${name}`)).toHaveValue("");
+    await expect(integrations.locator(`#integration-${name}`)).toHaveAttribute("type", "password");
+    await expect(integrations.locator(`#integration-${name}`)).toHaveAttribute("autocomplete", "new-password");
+  }
+  const tmdbRow = integrations.locator(".configuration-credential").filter({ has: page.locator("#integration-tmdbAccessToken") });
+  await expect(tmdbRow).toContainText("Configured");
+
+  const submittedSecret = "fixture-submitted-secret-never-returned";
+  await integrations.locator("#integration-tmdbAccessToken").fill(submittedSecret);
+  const saveResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/settings/integrations" && response.request().method() === "PATCH");
+  await integrations.getByRole("button", { name: "Save integration changes" }).click();
+  const firstRequest = await rivune.waitForRequest("/api/v1/settings/integrations", "PATCH");
+  expect(firstRequest.body).toEqual({ tmdbAccessToken: submittedSecret });
+  const firstResponse = await saveResponse;
+  expect(firstResponse.headers()["cache-control"]).toBe("no-store");
+  expect(await firstResponse.text()).not.toContain(submittedSecret);
+  for (const name of credentialNames) await expect(integrations.locator(`#integration-${name}`)).toHaveValue("");
+  expect(await page.content()).not.toContain(submittedSecret);
+  expect(await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }))).not.toContain(submittedSecret);
+
+  await tmdbRow.getByRole("button", { name: "Remove TMDB access token" }).click();
+  await expect(tmdbRow.getByRole("status")).toContainText("will be removed");
+  await expect(tmdbRow.getByRole("button", { name: "Undo removal of TMDB access token" })).toBeVisible();
+  const removeResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/settings/integrations" && response.request().method() === "PATCH");
+  await integrations.getByRole("button", { name: "Save integration changes" }).click();
+  const clearedResponse = await removeResponse;
+  expect(clearedResponse.headers()["cache-control"]).toBe("no-store");
+  expect(await clearedResponse.text()).not.toContain(submittedSecret);
+  await expect.poll(() => rivune.matching("/api/v1/settings/integrations", "PATCH").length).toBe(2);
+  expect(rivune.matching("/api/v1/settings/integrations", "PATCH").at(-1)?.body).toEqual({ tmdbAccessToken: null });
+  await expect(tmdbRow).toContainText("Not configured");
+  await expect(integrations.locator("#integration-tmdbAccessToken")).toHaveValue("");
+  expect(await page.content()).not.toContain(submittedSecret);
+});
+
+test("configuration history renders change metadata without snapshot values and fixtures paginate by key", async ({ page, rivune: _rivune }) => {
+  await openSettings(page);
+  await selectOption(page.getByRole("combobox", { name: "Switch scope" }), "server");
+  await page.locator('[data-settings-section="audit"]').click();
+
+  const audit = page.locator("#settings-section-audit");
+  await expect(audit.getByRole("heading", { name: "Configuration history" })).toBeVisible();
+  const events = audit.locator(".configuration-audit__events > li");
+  await expect(events).toHaveCount(2);
+  await expect(events.nth(0)).toContainText("Server settings updated");
+  await expect(events.nth(0)).toContainText("Changed fields: hardwareAcceleration");
+  await expect(events.nth(0)).toContainText("Changed by Administrator · Revision 12");
+  await expect(events.nth(1)).toContainText("Integrations updated");
+  const integrationChanges = events.nth(1).locator(".configuration-audit__changes > li");
+  await expect(integrationChanges).toHaveCount(3);
+  await expect(integrationChanges.nth(0)).toContainText("TMDB access token");
+  await expect(integrationChanges.nth(0)).toContainText("Configured");
+  await expect(integrationChanges.nth(1)).toContainText("TVDB API key");
+  await expect(integrationChanges.nth(1)).toContainText("Configured");
+  await expect(integrationChanges.nth(2)).toContainText("TVDB PIN");
+  await expect(integrationChanges.nth(2)).toContainText("Configured");
+  const renderedAudit = await audit.innerText();
+  expect(renderedAudit).not.toContain("software");
+  expect(renderedAudit).not.toContain("true");
+  expect(renderedAudit).not.toContain("false");
+
+  const pageOne = await page.evaluate(async () => {
+    const profileContext = sessionStorage.getItem("rivune.profile.context") ?? "";
+    const response = await fetch("/api/v1/settings/audit?limit=1", { headers: { Authorization: "Bearer fixture-access", "X-Rivune-Profile-Context": profileContext } });
+    return { status: response.status, cacheControl: response.headers.get("cache-control"), body: await response.json() as { events: Array<{ id: number }>; nextCursor: number | null } };
+  });
+  expect(pageOne.status).toBe(200);
+  expect(pageOne.cacheControl).toBe("no-store");
+  expect(pageOne.body.events.map((event) => event.id)).toEqual([120]);
+  expect(pageOne.body.nextCursor).toBe(120);
+
+  const pageTwo = await page.evaluate(async (cursor) => {
+    const profileContext = sessionStorage.getItem("rivune.profile.context") ?? "";
+    const response = await fetch(`/api/v1/settings/audit?limit=1&cursor=${cursor}`, { headers: { Authorization: "Bearer fixture-access", "X-Rivune-Profile-Context": profileContext } });
+    return await response.json() as { events: Array<{ id: number }>; nextCursor: number | null };
+  }, pageOne.body.nextCursor);
+  expect(pageTwo.events.map((event) => event.id)).toEqual([110]);
+  expect(pageTwo.nextCursor).toBeNull();
+});
+
+test("category-scoped administrators cannot see or call integration and audit management", async ({ page, rivune }) => {
+  await rivune.configureCategoryScope(page, CATEGORY_IDS.household);
+  await openSettings(page);
+
+  await expect(page.locator('[data-settings-section="integrations"]')).toHaveCount(0);
+  await expect(page.locator('[data-settings-section="audit"]')).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Integrations" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Configuration history" })).toHaveCount(0);
+  expect(rivune.matching("/api/v1/settings/integrations", "GET")).toHaveLength(0);
+  expect(rivune.matching("/api/v1/settings/audit", "GET")).toHaveLength(0);
+
+  const statuses = await page.evaluate(async () => {
+    const profileContext = sessionStorage.getItem("rivune.profile.context") ?? "";
+    const headers = { Authorization: "Bearer fixture-access", "X-Rivune-Profile-Context": profileContext };
+    return Promise.all([fetch("/api/v1/settings/integrations", { headers }), fetch("/api/v1/settings/audit", { headers })]).then((responses) => responses.map((response) => response.status));
+  });
+  expect(statuses).toEqual([403, 403]);
+});
+
+test("mobile configuration panels stay within the viewport with keyboard-accessible labels", async ({ page, rivune: _rivune }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openSettings(page);
+  await selectOption(page.getByRole("combobox", { name: "Switch scope" }), "server");
+  const navigation = page.locator(".settings-navigation");
+
+  await navigation.locator('[data-settings-section="runtime"]').click();
+  const runtime = page.locator("#settings-section-runtime");
+  await expect(runtime.getByLabel("Timezone")).toBeVisible();
+  await expect(runtime.getByRole("combobox", { name: "Hardware acceleration" })).toHaveAccessibleName("Hardware acceleration");
+  expect(await runtime.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  await navigation.locator('[data-settings-section="integrations"]').click();
+  const integrations = page.locator("#settings-section-integrations");
+  const tmdbInput = integrations.locator("#integration-tmdbAccessToken");
+  const tmdbRemove = integrations.getByRole("button", { name: "Remove TMDB access token" });
+  await expect(tmdbInput).toHaveAccessibleName("Replace TMDB access token");
+  await tmdbInput.focus();
+  await tmdbInput.press("Tab");
+  await expect(tmdbRemove).toBeFocused();
+  expect(await integrations.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  await navigation.locator('[data-settings-section="audit"]').click();
+  const audit = page.locator("#settings-section-audit");
+  await expect(audit.getByRole("heading", { name: "Configuration history" })).toBeVisible();
+  expect(await audit.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 test("mobile settings contain horizontal category overflow without widening the page", async ({ page, rivune: _rivune }) => {

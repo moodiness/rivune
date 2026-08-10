@@ -17,6 +17,7 @@ import type {
   CollectionExportDocument,
   CollectionImportResult,
   ContinueWatching,
+  ConfigurationAuditPage,
   Discovery,
   CustomSeriesResolveInput,
   CustomSeriesResolveResult,
@@ -52,6 +53,8 @@ import type {
   ResourceResult,
   SettingsLayer,
   SessionNotification,
+  SettingsIntegrations,
+  SettingsIntegrationsPatch,
   SeasonMetadata,
   SeriesMetadata,
   SettingsValues,
@@ -520,6 +523,9 @@ export const api = {
   effectiveSettings: (id: string) => request<{ schemaVersion: number; settings: SettingsValues; sources: Record<string, string> }>(`/profiles/${id}/settings/effective`),
   updateInstanceSettings: (settings: SettingsValues) => request<SettingsLayer>("/settings", { method: "PATCH", body: JSON.stringify(settings) }),
   updateProfileSettings: (id: string, settings: SettingsValues) => request<SettingsLayer>(`/profiles/${id}/settings`, { method: "PATCH", body: JSON.stringify(settings) }),
+  settingsIntegrations: () => request<SettingsIntegrations>("/settings/integrations"),
+  updateSettingsIntegrations: (settings: SettingsIntegrationsPatch) => request<SettingsIntegrations>("/settings/integrations", { method: "PATCH", body: JSON.stringify(settings) }),
+  settingsAudit: (cursor?: number, limit = 50) => request<ConfigurationAuditPage>(`/settings/audit${query({ cursor, limit })}`),
   jellyfinCredential: (profileId: string) =>
     request<JellyfinCredentialStatus>(`/profiles/${encodeURIComponent(profileId)}/jellyfin-credential`),
   createJellyfinCredential: (profileId: string) =>
