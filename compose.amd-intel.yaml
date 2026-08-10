@@ -1,0 +1,8 @@
+services:
+  rivune:
+    environment:
+      RIVUNE_VIDEO_GROUP_ID: ${RIVUNE_VIDEO_GROUP_ID:?Set RIVUNE_VIDEO_GROUP_ID to the numeric group owning RIVUNE_VIDEO_DEVICE}
+    devices:
+      - "${RIVUNE_VIDEO_DEVICE:-/dev/dri/renderD128}:/dev/dri/renderD128"
+    group_add:
+      - "${RIVUNE_VIDEO_GROUP_ID:?Set RIVUNE_VIDEO_GROUP_ID to the numeric group owning RIVUNE_VIDEO_DEVICE}"

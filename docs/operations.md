@@ -13,11 +13,10 @@ Create the private `.env` file before entering any secrets:
 The helper refuses to overwrite an existing file or link and creates `.env`
 with mode `0600`. For an existing deployment, run `chmod 600 .env` and stop if
 it fails before continuing. Set three independent database secrets, a separate
-setup token, a versioned encryption key, the public DNS name, a pinned Rivune
-version, the host render node, and its numeric owning group. `postgres` is
-bootstrap-only, `rivune` is the application login, `rivune_owner` is a non-login
-owner, and `rivune_restore` is a non-superuser login used only by the restore
-scripts.
+setup token, a versioned encryption key, the public DNS name, and a pinned
+Rivune version. `postgres` is bootstrap-only, `rivune` is the application login,
+`rivune_owner` is a non-login owner, and `rivune_restore` is a non-superuser
+login used only by the restore scripts.
 
 ```dotenv
 RIVUNE_HOST=media.example.com
@@ -27,8 +26,6 @@ RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_SETUP_TOKEN=<different output of: openssl rand -hex 32>
 RIVUNE_ENCRYPTION_KEYS=1:<different output of: openssl rand -hex 32>
-RIVUNE_VIDEO_DEVICE=/dev/dri/renderD128
-RIVUNE_VIDEO_GROUP_ID=<output of: stat -c '%g' /dev/dri/renderD128>
 ```
 
 `RIVUNE_ENCRYPTION_KEYS` is active-first. Every entry is a unique positive
@@ -57,6 +54,75 @@ Caddy obtains and renews a publicly trusted certificate automatically. [`deploy/
 
 Rivune is not published directly to the host in this configuration. PostgreSQL is isolated on the private database network. Caddy is the only externally reachable service.
 
+## HTTPS with Pangolin/Newt
+
+The root [`compose.yaml`](../compose.yaml) is a complete CPU-only Rivune and
+PostgreSQL 18 stack. PostgreSQL is reachable only on an internal database
+network. Rivune also joins the named `rivune-edge` bridge, whose default subnet
+is `172.31.0.0/24`; PostgreSQL never joins that edge network. Set the public
+origin before starting the stack:
+
+```dotenv
+RIVUNE_PUBLIC_URL=https://rivune.example.com
+RIVUNE_EDGE_NETWORK=rivune-edge
+RIVUNE_EDGE_SUBNET=172.31.0.0/24
+# Leave blank to use the same default edge CIDR, or set the exact custom CIDR.
+RIVUNE_TRUSTED_PROXIES=
+```
+
+```sh
+docker compose pull
+docker compose up -d
+docker compose ps
+```
+
+Configure Newt to join the existing edge network in its own Compose definition;
+this persists across Newt recreation:
+
+```yaml
+services:
+  newt:
+    networks:
+      - rivune-edge
+
+networks:
+  rivune-edge:
+    external: true
+    name: rivune-edge
+```
+
+In Pangolin, configure the public resource target exactly as HTTP to Rivune's
+container port, while the public origin remains HTTPS:
+
+```yaml
+targets:
+  - hostname: rivune
+    port: 8080
+    method: http
+```
+
+These fields follow Pangolin's [public target](https://docs.pangolin.net/manage/resources/public/targets) and [Docker networking](https://docs.pangolin.net/self-host/dns-and-networking) contracts.
+
+Do not use `localhost` from Newt; it refers to Newt itself. Do not publish a
+host port when the dedicated edge network is available, and never attach Newt
+to the database network. Rivune trusts forwarded network headers only from
+`RIVUNE_TRUSTED_PROXIES`; use Newt's fixed IP or the dedicated edge CIDR, never
+the LAN, database network, all private ranges, or `0.0.0.0/0`.
+
+The Unraid XML template targets the same topology but expects an existing
+PostgreSQL 18 container. Standard PostgreSQL on a database-only custom network
+uses `RIVUNE_DATABASE_SSLMODE=disable`, an empty CA mount, and an empty CA path.
+Connect Rivune and Newt to a separate dedicated edge network, then use hostname
+`Rivune`, port `8080`, and method `http` in Pangolin. If sharing that network is
+impossible, manually add an Unraid TCP Port mapping from container port `8080`
+to an unused host port such as `18080`, target the Unraid LAN address and that
+host port from Newt, and never forward it on the router.
+
+For a new installation, generate the masked Unraid keyring field once with
+`printf '1:'; openssl rand -hex 32`. For a legacy upgrade, use `1:` followed by
+the existing `RIVUNE_TRACKING_ENCRYPTION_KEY`; generating a replacement makes
+existing encrypted credentials unrecoverable.
+
 ### Advanced host topology
 
 Keep deployment topology out of product Settings. The Compose files accept
@@ -69,10 +135,11 @@ not a committed override file.
 
 External PostgreSQL, private certificate mounts, a different edge subnet, or
 different CPU/memory/workspace resources should be expressed in a private
-Compose override. When changing the Caddy edge subnet, change Rivune's trusted
-proxy CIDR to exactly the same dedicated network. Do not expose the raw Rivune
-listener, attach Caddy to the database network, or add these host controls to the
-persisted instance-settings schema.
+Compose override. When changing an edge subnet, change Rivune's trusted proxy
+CIDR to exactly the same dedicated network. Do not attach a reverse proxy to the
+database network. Publish the raw Rivune listener only for the documented
+Pangolin fallback, bind it to the intended Unraid address, and never forward it
+from the router or treat it as the public origin.
 
 ## Persisted settings and encrypted credentials
 
@@ -241,14 +308,21 @@ defaults. Administrators set the transcoding permission, video bitrate, media
 quota, artwork quota, and requested encoder mode in Administration. Do not add
 the removed FFmpeg/runtime variables to `.env` or a Compose override.
 
-Both provided Compose manifests map the host render node selected by
-`RIVUNE_VIDEO_DEVICE` to the fixed `/dev/dri/renderD128` container path. They
-also require `RIVUNE_VIDEO_GROUP_ID`, the numeric group owning that host node;
-determine it with `stat -c '%g' /dev/dri/renderD128` after substituting any
-configured host path. These are deployment
-topology controls rather than product settings. For NVIDIA, configure NVIDIA
-Container Toolkit in a private Compose override and grant only the compute,
-video, and utility capabilities required by FFmpeg.
+Both provided Compose manifests are CPU-only by default. For AMD/Intel, set
+`RIVUNE_VIDEO_DEVICE` and `RIVUNE_VIDEO_GROUP_ID`, determine the group with
+`stat -c '%g' /dev/dri/renderD128`, and add the supported overlay:
+
+```sh
+docker compose -f compose.yaml -f compose.amd-intel.yaml up -d
+# Or: docker compose -f deploy/caddy/compose.yaml -f compose.amd-intel.yaml up -d
+```
+
+On Unraid, manually add a Device mapping from host `/dev/dri/renderD128` to the
+same container path, then set the optional render group field. Add neither on a
+host without that node. These are deployment topology controls rather than
+product settings. For NVIDIA, configure NVIDIA Container Toolkit in a private
+Compose override and grant only the compute, video, and utility capabilities
+required by FFmpeg.
 
 After changing the hardware-acceleration setting, restart the service and verify
 the active value as described above. `auto` probes only the devices exposed by
@@ -341,16 +415,18 @@ For Infuse, Streamyfin or VidHub, use this protocol for each exact released clie
 
 Current evidence must be summarized narrowly: Infuse 8 has a partially observed hierarchy scan but no validated player playback; Streamyfin 0.31.0 has a reported HTTP-level HLS profile replay on NAS but no validated application rendering; VidHub has no audited trace or validation. None may be advertised as generally compatible until the versioned, scrubbed real-client bundle above exists.
 
-## Unraid PostgreSQL TLS
+## Optional Unraid PostgreSQL TLS
 
-The Unraid template has no plaintext database mode: it supplies
-`sslmode=verify-full` and a read-only `ca.crt`. PostgreSQL must be ready before
-Rivune starts. Use two user-defined Docker networks: connect Rivune to both the
-edge and database networks, the reverse proxy only to edge, and PostgreSQL only
-to database. Do not attach the proxy to the database network.
+The common Unraid mode uses `sslmode=disable` only while PostgreSQL is confined
+to its database-only custom Docker network. Leave both PostgreSQL CA fields
+empty in that mode. Never publish PostgreSQL on the Unraid host, attach Newt or
+another reverse proxy to the database network, or use plaintext across a shared
+or untrusted network.
 
-Create the private CA and server key on a protected administration machine, not
-in a container or repository. Set `DB_HOST` to the exact value entered as
+For encrypted database transport, select `verify-full`, mount the public
+`ca.crt` read-only, and set the container CA path. Create the private CA and
+server key on a protected administration machine, not in a container or
+repository. Set `DB_HOST` to the exact value entered as
 `RIVUNE_DATABASE_HOST`. Use `DNS:` for a hostname and `IP:` for a literal
 address; `verify-full` rejects a certificate whose SAN does not match.
 
@@ -427,8 +503,8 @@ template separately mounts only the public CA at
 `RIVUNE_DATABASE_SSLROOTCERT` to that path. Leave
 `RIVUNE_DATABASE_SSLMODE=verify-full`.
 
-For an existing plaintext Unraid installation, use a planned maintenance
-window and migrate without any permissive fallback:
+To migrate an existing plaintext Unraid installation to TLS, use a planned
+maintenance window:
 
 1. Provision the CA and server certificate, enable PostgreSQL TLS, and confirm
    `SHOW ssl` before changing Rivune.
@@ -447,10 +523,10 @@ window and migrate without any permissive fallback:
    unset PGPASSWORD
    ```
 
-3. Apply the current Rivune template, including the required CA mount,
-   `RIVUNE_DATABASE_SSLROOTCERT`, and `verify-full`, then restart Rivune. Do
-   not temporarily select `require`, `prefer`, `allow`, or `disable`: a bad
-   chain, SAN, path, or expired certificate must make startup fail closed.
+3. In the Rivune template, select `verify-full`, add the CA mount, and set
+   `RIVUNE_DATABASE_SSLROOTCERT=/run/rivune-postgres-tls/ca.crt`, then restart
+   Rivune. Do not use `allow`, `prefer`, `require`, or `verify-ca` as a partial
+   substitute for hostname-verifying TLS.
 4. As the PostgreSQL administrator, prove that the application session is
    encrypted and inspect the negotiated protocol and cipher:
 

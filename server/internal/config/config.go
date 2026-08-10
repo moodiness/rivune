@@ -160,14 +160,21 @@ func loadEncryptionKeys() (*secretcrypto.Keyring, bool, error) {
 	}
 	legacy := strings.TrimSpace(os.Getenv("RIVUNE_TRACKING_ENCRYPTION_KEY"))
 	if legacy == "" {
-		return nil, false, errors.New("RIVUNE_ENCRYPTION_KEYS is required")
+		return nil, false, errors.New("RIVUNE_ENCRYPTION_KEYS is required; for a new installation set it to 1:<64-lowercase-hex> using a newly generated 32-byte key; for a legacy upgrade restore the existing RIVUNE_TRACKING_ENCRYPTION_KEY instead")
 	}
 	if len(legacy) != 64 {
-		return nil, false, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY must encode exactly 32 bytes")
+		return nil, false, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY must be exactly 64 hexadecimal characters (32 bytes); restore the existing key from backup and do not generate a replacement for an existing database")
 	}
 	decoded, err := hex.DecodeString(legacy)
 	if err != nil {
-		return nil, false, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY must encode exactly 32 bytes")
+		return nil, false, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY must be exactly 64 hexadecimal characters (32 bytes); restore the existing key from backup and do not generate a replacement for an existing database")
+	}
+	allZero := true
+	for _, b := range decoded {
+		allZero = allZero && b == 0
+	}
+	if allZero {
+		return nil, false, errors.New("RIVUNE_TRACKING_ENCRYPTION_KEY must not be all zero; restore the existing key from backup and do not generate a replacement")
 	}
 	keyring, err := secretcrypto.NewKeyring([]secretcrypto.Key{{Version: 1, Bytes: decoded}})
 	if err != nil {

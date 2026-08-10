@@ -25,7 +25,7 @@ services:
     environment:
       RIVUNE_LISTEN_ADDRESS: ":8080"
       RIVUNE_PUBLIC_URL: ${RIVUNE_PUBLIC_URL:-http://localhost:8080}
-      RIVUNE_TRUSTED_PROXIES: ${RIVUNE_TRUSTED_PROXIES:-}
+      RIVUNE_TRUSTED_PROXIES: ${RIVUNE_TRUSTED_PROXIES:-172.31.0.0/24}
       RIVUNE_NAT64_PREFIXES: ${RIVUNE_NAT64_PREFIXES:-}
       RIVUNE_LAN_ARTWORK_ORIGINS: ${RIVUNE_LAN_ARTWORK_ORIGINS:-}
       RIVUNE_DATABASE_URL: ${RIVUNE_DATABASE_URL:-}
@@ -40,7 +40,6 @@ services:
       RIVUNE_ENCRYPTION_KEYS: ${RIVUNE_ENCRYPTION_KEYS:-}
       PUID: ${PUID:-65532}
       PGID: ${PGID:-65532}
-      RIVUNE_VIDEO_GROUP_ID: ${RIVUNE_VIDEO_GROUP_ID:?Set RIVUNE_VIDEO_GROUP_ID to the numeric group owning RIVUNE_VIDEO_DEVICE}
 
       # One-shot upgrade import only. The database always wins, and Rivune marks
       # the import complete even when these legacy inputs are empty. They are
@@ -62,10 +61,9 @@ services:
       RIVUNE_TRAKT_CLIENT_SECRET: ${RIVUNE_TRAKT_CLIENT_SECRET:-}
       RIVUNE_SIMKL_CLIENT_ID: ${RIVUNE_SIMKL_CLIENT_ID:-}
       RIVUNE_TRACKING_ENCRYPTION_KEY: ${RIVUNE_TRACKING_ENCRYPTION_KEY:-}
-    devices:
-      - "${RIVUNE_VIDEO_DEVICE:-/dev/dri/renderD128}:/dev/dri/renderD128"
-    group_add:
-      - "${RIVUNE_VIDEO_GROUP_ID:?Set RIVUNE_VIDEO_GROUP_ID to the numeric group owning RIVUNE_VIDEO_DEVICE}"
+    networks:
+      - edge
+      - database
     ports:
       - "127.0.0.1:${RIVUNE_PORT:-8080}:8080"
     volumes:
@@ -121,7 +119,18 @@ services:
       timeout: 5s
       retries: 20
       start_period: 10s
+    networks:
+      - database
 
 volumes:
   postgres_data:
   artwork_cache:
+
+networks:
+  edge:
+    name: ${RIVUNE_EDGE_NETWORK:-rivune-edge}
+    ipam:
+      config:
+        - subnet: ${RIVUNE_EDGE_SUBNET:-172.31.0.0/24}
+  database:
+    internal: true

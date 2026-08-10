@@ -43,38 +43,38 @@ func (*Keyring) GoString() string { return "[REDACTED encryption keyring]" }
 
 func ParseKeyring(value string) (*Keyring, error) {
 	if value == "" {
-		return nil, errors.New("RIVUNE_ENCRYPTION_KEYS is required")
+		return nil, errors.New("RIVUNE_ENCRYPTION_KEYS is required; for a new installation set it to 1:<64-lowercase-hex> using a newly generated 32-byte key; for a legacy upgrade restore the existing RIVUNE_TRACKING_ENCRYPTION_KEY instead")
 	}
 	if strings.TrimSpace(value) != value {
-		return nil, errors.New("RIVUNE_ENCRYPTION_KEYS must not contain whitespace")
+		return nil, errors.New("RIVUNE_ENCRYPTION_KEYS must not contain whitespace; use comma-separated version:64-lowercase-hex entries")
 	}
 	parts := strings.Split(value, ",")
 	keys := make([]Key, 0, len(parts))
 	for _, part := range parts {
 		if part == "" {
-			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS contains an empty entry")
+			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS contains an empty entry; remove leading, trailing, or repeated commas")
 		}
 		versionText, encoded, ok := strings.Cut(part, ":")
 		if !ok || versionText == "" || encoded == "" || strings.Contains(encoded, ":") {
-			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS entries must use version:64-lowercase-hex")
+			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS entries must use comma-separated version:64-lowercase-hex pairs; for example 1:<64 lowercase hexadecimal characters>")
 		}
 		version, err := strconv.Atoi(versionText)
 		if err != nil || version <= 0 || version > 2147483647 || strconv.Itoa(version) != versionText {
-			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS contains an invalid key version")
+			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS versions must be canonical integers from 1 to 2147483647")
 		}
 		if len(encoded) != 64 || strings.ToLower(encoded) != encoded {
-			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS keys must be exactly 64 lowercase hexadecimal characters")
+			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS keys must be exactly 64 lowercase hexadecimal characters (32 bytes)")
 		}
 		decoded, err := hex.DecodeString(encoded)
 		if err != nil {
-			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS keys must be exactly 64 lowercase hexadecimal characters")
+			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS keys must be exactly 64 lowercase hexadecimal characters (32 bytes)")
 		}
 		allZero := true
 		for _, b := range decoded {
 			allZero = allZero && b == 0
 		}
 		if allZero {
-			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS keys must not be all zero")
+			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS keys must be independently generated and must not be all zero")
 		}
 		keys = append(keys, Key{Version: version, Bytes: decoded})
 	}
@@ -92,7 +92,7 @@ func NewKeyring(keys []Key) (*Keyring, error) {
 			return nil, errors.New("encryption key version must be positive")
 		}
 		if _, duplicate := keyring.aeads[key.Version]; duplicate {
-			return nil, fmt.Errorf("encryption key version %d is duplicated", key.Version)
+			return nil, fmt.Errorf("RIVUNE_ENCRYPTION_KEYS key version %d is duplicated; include each version only once", key.Version)
 		}
 		if len(key.Bytes) != 32 {
 			return nil, fmt.Errorf("encryption key version %d must contain exactly 32 bytes", key.Version)
@@ -102,11 +102,11 @@ func NewKeyring(keys []Key) (*Keyring, error) {
 			allZero = allZero && b == 0
 		}
 		if allZero {
-			return nil, fmt.Errorf("encryption key version %d must not be all zero", key.Version)
+			return nil, fmt.Errorf("encryption key version %d must be independently generated and must not be all zero", key.Version)
 		}
 		material := string(key.Bytes)
 		if _, duplicate := keyMaterial[material]; duplicate {
-			return nil, errors.New("encryption key material is duplicated")
+			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS must use different key material for each version")
 		}
 		keyMaterial[material] = struct{}{}
 		block, err := aes.NewCipher(key.Bytes)
