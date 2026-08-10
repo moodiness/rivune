@@ -157,6 +157,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Test private POSIX environment-file creation
         run: bash scripts/create-env_test.sh
+      - name: Validate deployment Compose manifests
+        env:
+          RIVUNE_DATABASE_PASSWORD: compose-validation-database-password
+          RIVUNE_POSTGRES_SUPERUSER_PASSWORD: compose-validation-superuser-password
+          RIVUNE_RESTORE_PASSWORD: compose-validation-restore-password
+          RIVUNE_SETUP_TOKEN: compose-validation-setup-token
+          RIVUNE_HOST: rivune.invalid
+        run: |
+          docker compose -f compose.yaml config --quiet
+          docker compose -f compose.yaml -f compose.vaapi.yaml config --quiet
+          docker compose -f compose.yaml -f compose.nvidia.yaml config --quiet
+          docker compose -f deploy/caddy/compose.yaml config --quiet
       - name: Test PostgreSQL backup hardening
         run: bash scripts/postgres-backup_test.sh
       - name: Set up Docker Buildx

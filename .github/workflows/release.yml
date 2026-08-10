@@ -61,18 +61,33 @@ jobs:
             local run_sha="$1" tag_sha="$2" main_sha="$3"
             [[ "${run_sha}" == "${tag_sha}" && "${run_sha}" == "${main_sha}" ]]
           }
+          annotated_tag_ref_is_valid() {
+            jq -e '.object.type == "tag" and (.object.sha | strings | test("^[0-9a-f]{40}$"))' >/dev/null <<<"$1"
+          }
+          expect_rejection() {
+            local label="$1"
+            shift
+            if "$@"; then
+              echo "Negative policy fixture unexpectedly passed: ${label}" >&2
+              return 1
+            fi
+          }
 
           # Behavioral policy checks use the same predicates as live authorization.
           fixture_sha=0123456789abcdef0123456789abcdef01234567
           candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" push success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
-          ! candidate_metadata_is_valid release-1 "Release candidate release-1" push success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
-          ! candidate_metadata_is_valid v1.2.3 "Release candidate v9.9.9" push success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
-          ! candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" pull_request success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
+          expect_rejection malformed-tag candidate_metadata_is_valid release-1 "Release candidate release-1" push success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
+          expect_rejection mismatched-title candidate_metadata_is_valid v1.2.3 "Release candidate v9.9.9" push success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
+          expect_rejection pull-request-event candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" pull_request success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
           candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" workflow_dispatch success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
-          ! candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" schedule success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
-          ! candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" push success .github/workflows/other.yml owner/repo owner/repo "${fixture_sha}"
+          expect_rejection scheduled-event candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" schedule success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
+          expect_rejection wrong-workflow candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" push success .github/workflows/other.yml owner/repo owner/repo "${fixture_sha}"
           same_approved_commit "${fixture_sha}" "${fixture_sha}" "${fixture_sha}"
-          ! same_approved_commit "${fixture_sha}" ffffffffffffffffffffffffffffffffffffffff "${fixture_sha}"
+          expect_rejection mismatched-commit same_approved_commit "${fixture_sha}" ffffffffffffffffffffffffffffffffffffffff "${fixture_sha}"
+          fixture_tag_object=89abcdef0123456789abcdef0123456789abcdef
+          annotated_tag_ref_is_valid "{\"object\":{\"type\":\"tag\",\"sha\":\"${fixture_tag_object}\"}}"
+          expect_rejection lightweight-tag-ref annotated_tag_ref_is_valid "{\"object\":{\"type\":\"commit\",\"sha\":\"${fixture_tag_object}\"}}"
+          expect_rejection absent-tag-ref annotated_tag_ref_is_valid '{}'
 
           release_prefix='Release candidate '
           RELEASE_TAG="${RELEASE_TITLE#"${release_prefix}"}"
@@ -90,7 +105,15 @@ jobs:
           }
 
           main_sha="$(api git/ref/heads/main | jq -er '.object.sha')"
-          tag_sha="$(api "commits/${RELEASE_TAG}" | jq -er '.sha')"
+          if ! tag_ref="$(api "git/ref/tags/${RELEASE_TAG}")" || ! annotated_tag_ref_is_valid "${tag_ref}"; then
+            echo "Release tag must exist as an annotated Git tag object." >&2
+            exit 1
+          fi
+          tag_object_sha="$(jq -er '.object.sha' <<<"${tag_ref}")"
+          if ! tag_sha="$(api "git/tags/${tag_object_sha}" | jq -er 'select(.object.type == "commit") | .object.sha | select(test("^[0-9a-f]{40}$"))')"; then
+            echo "Annotated release tag must target a commit." >&2
+            exit 1
+          fi
           if ! same_approved_commit "${RELEASE_SHA}" "${tag_sha}" "${main_sha}"; then
             echo "Release tag, successful CI run, and current main HEAD must resolve to the same commit." >&2
             exit 1
@@ -102,11 +125,13 @@ jobs:
             stable=false
           fi
 
-          echo "authorized=true" >> "${GITHUB_OUTPUT}"
-          echo "sha=${RELEASE_SHA}" >> "${GITHUB_OUTPUT}"
-          echo "short_sha=${RELEASE_SHA:0:7}" >> "${GITHUB_OUTPUT}"
-          echo "stable=${stable}" >> "${GITHUB_OUTPUT}"
-          echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "authorized=true"
+            echo "sha=${RELEASE_SHA}"
+            echo "short_sha=${RELEASE_SHA:0:7}"
+            echo "stable=${stable}"
+            echo "tag=${RELEASE_TAG}"
+          } >> "${GITHUB_OUTPUT}"
 
   publish:
     name: Publish multi-architecture image
@@ -162,8 +187,15 @@ jobs:
               "https://api.github.com/repos/${REPOSITORY}/$1"
           }
           main_sha="$(api git/ref/heads/main | jq -er '.object.sha')"
-          tag_sha="$(api "commits/${RELEASE_TAG}" | jq -er '.sha')"
-          if [[ "${APPROVED_SHA}" != "${main_sha}" || "${APPROVED_SHA}" != "${tag_sha}" ]]; then
+          if ! tag_ref="$(api "git/ref/tags/${RELEASE_TAG}")" ||
+             ! tag_object_sha="$(jq -er 'select(.object.type == "tag") | .object.sha | select(test("^[0-9a-f]{40}$"))' <<<"${tag_ref}")" ||
+             ! tag_sha="$(api "git/tags/${tag_object_sha}" | jq -er 'select(.object.type == "commit") | .object.sha | select(test("^[0-9a-f]{40}$"))')"; then
+            echo "Release authorization expired because the annotated tag ref is absent or invalid." >&2
+            exit 1
+          fi
+          if [[ "${APPROVED_SHA}" == "${main_sha}" && "${APPROVED_SHA}" == "${tag_sha}" ]]; then
+            :
+          else
             echo "Release authorization expired because main or the tag moved." >&2
             exit 1
           fi
@@ -209,8 +241,15 @@ jobs:
               "https://api.github.com/repos/${REPOSITORY}/$1"
           }
           main_sha="$(api git/ref/heads/main | jq -er '.object.sha')"
-          tag_sha="$(api "commits/${RELEASE_TAG}" | jq -er '.sha')"
-          if [[ "${APPROVED_SHA}" != "${main_sha}" || "${APPROVED_SHA}" != "${tag_sha}" ]]; then
+          if ! tag_ref="$(api "git/ref/tags/${RELEASE_TAG}")" ||
+             ! tag_object_sha="$(jq -er 'select(.object.type == "tag") | .object.sha | select(test("^[0-9a-f]{40}$"))' <<<"${tag_ref}")" ||
+             ! tag_sha="$(api "git/tags/${tag_object_sha}" | jq -er 'select(.object.type == "commit") | .object.sha | select(test("^[0-9a-f]{40}$"))')"; then
+            echo "Release authorization expired because the annotated tag ref is absent or invalid." >&2
+            exit 1
+          fi
+          if [[ "${APPROVED_SHA}" == "${main_sha}" && "${APPROVED_SHA}" == "${tag_sha}" ]]; then
+            :
+          else
             echo "Release authorization expired because main or the tag moved." >&2
             exit 1
           fi
