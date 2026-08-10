@@ -2,19 +2,32 @@ services:
   caddy:
     image: caddy:2.10.2-alpine
     restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    pids_limit: 128
+    cpus: ${RIVUNE_CADDY_CPU_LIMIT:-1.0}
+    mem_limit: ${RIVUNE_CADDY_MEMORY_LIMIT:-256m}
+    read_only: true
     depends_on:
       rivune:
-        condition: service_started
+        condition: service_healthy
     environment:
       RIVUNE_HOST: ${RIVUNE_HOST:?Set RIVUNE_HOST to the public DNS name}
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+      - "${RIVUNE_HTTP_PORT:-80}:80"
+      - "${RIVUNE_HTTPS_PORT:-443}:443"
+      - "${RIVUNE_HTTPS_PORT:-443}:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=64m
     networks:
       - edge
 
@@ -31,6 +44,9 @@ services:
       - SETGID
       - SETUID
     pids_limit: 512
+    cpus: ${RIVUNE_CPU_LIMIT:-8.0}
+    mem_limit: ${RIVUNE_MEMORY_LIMIT:-6g}
+    read_only: true
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,6 +71,15 @@ services:
       RIVUNE_TRAKT_CLIENT_SECRET: ${RIVUNE_TRAKT_CLIENT_SECRET:-}
       RIVUNE_SIMKL_CLIENT_ID: ${RIVUNE_SIMKL_CLIENT_ID:-}
       RIVUNE_TRACKING_ENCRYPTION_KEY: ${RIVUNE_TRACKING_ENCRYPTION_KEY:-}
+      RIVUNE_REMUX_CONCURRENCY: ${RIVUNE_REMUX_CONCURRENCY:-4}
+      RIVUNE_TRANSCODE_THREADS: ${RIVUNE_TRANSCODE_THREADS:-4}
+      RIVUNE_TRANSCODE_MAX_BITRATE_KBPS: ${RIVUNE_TRANSCODE_MAX_BITRATE_KBPS:-12000}
+      RIVUNE_TRANSCODE_MAX_READ_RATE: ${RIVUNE_TRANSCODE_MAX_READ_RATE:-1.5}
+      RIVUNE_HLS_INITIAL_BUFFER_SECONDS: ${RIVUNE_HLS_INITIAL_BUFFER_SECONDS:-6}
+      RIVUNE_HARDWARE_ACCELERATION: ${RIVUNE_HARDWARE_ACCELERATION:-auto}
+      RIVUNE_VIDEO_DEVICE: ${RIVUNE_VIDEO_DEVICE:-/dev/dri/renderD128}
+      RIVUNE_MEDIA_TEMP_DIR: ${RIVUNE_MEDIA_TEMP_DIR:-/tmp}
+      RIVUNE_MEDIA_MAX_STORAGE_MB: ${RIVUNE_MEDIA_MAX_STORAGE_MB:-4096}
       RIVUNE_ARTWORK_CACHE_DIR: /var/lib/rivune/artwork
       RIVUNE_ARTWORK_MAX_STORAGE_MB: ${RIVUNE_ARTWORK_MAX_STORAGE_MB:-20480}
       RIVUNE_LAN_ARTWORK_ORIGINS: ${RIVUNE_LAN_ARTWORK_ORIGINS:-}
@@ -63,6 +88,14 @@ services:
       PGID: ${PGID:-65532}
     volumes:
       - artwork_cache:/var/lib/rivune/artwork
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=${RIVUNE_MEDIA_TMPFS_SIZE_MB:-4096}m
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/rivune", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
     networks:
       - edge
       - database
@@ -82,6 +115,8 @@ services:
       - SETGID
       - SETUID
     pids_limit: 256
+    cpus: ${RIVUNE_POSTGRES_CPU_LIMIT:-2.0}
+    mem_limit: ${RIVUNE_POSTGRES_MEMORY_LIMIT:-1g}
     read_only: true
     environment:
       POSTGRES_DB: postgres

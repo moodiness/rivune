@@ -12,6 +12,9 @@ services:
       - SETGID
       - SETUID
     pids_limit: 512
+    cpus: ${RIVUNE_CPU_LIMIT:-8.0}
+    mem_limit: ${RIVUNE_MEMORY_LIMIT:-6g}
+    read_only: true
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,13 +51,15 @@ services:
       RIVUNE_METADATA_CACHE_TTL: ${RIVUNE_METADATA_CACHE_TTL:-24h}
       RIVUNE_FFMPEG_PATH: ${RIVUNE_FFMPEG_PATH:-ffmpeg}
       RIVUNE_FFPROBE_PATH: ${RIVUNE_FFPROBE_PATH:-ffprobe}
-      RIVUNE_REMUX_CONCURRENCY: ${RIVUNE_REMUX_CONCURRENCY:-2}
+      RIVUNE_REMUX_CONCURRENCY: ${RIVUNE_REMUX_CONCURRENCY:-4}
       RIVUNE_TRANSCODE_THREADS: ${RIVUNE_TRANSCODE_THREADS:-4}
       RIVUNE_TRANSCODE_MAX_BITRATE_KBPS: ${RIVUNE_TRANSCODE_MAX_BITRATE_KBPS:-12000}
+      RIVUNE_TRANSCODE_MAX_READ_RATE: ${RIVUNE_TRANSCODE_MAX_READ_RATE:-1.5}
+      RIVUNE_HLS_INITIAL_BUFFER_SECONDS: ${RIVUNE_HLS_INITIAL_BUFFER_SECONDS:-6}
       RIVUNE_HARDWARE_ACCELERATION: ${RIVUNE_HARDWARE_ACCELERATION:-auto}
       RIVUNE_VIDEO_DEVICE: ${RIVUNE_VIDEO_DEVICE:-/dev/dri/renderD128}
       RIVUNE_MEDIA_TEMP_DIR: ${RIVUNE_MEDIA_TEMP_DIR:-/tmp}
-      RIVUNE_MEDIA_MAX_STORAGE_MB: ${RIVUNE_MEDIA_MAX_STORAGE_MB:-20480}
+      RIVUNE_MEDIA_MAX_STORAGE_MB: ${RIVUNE_MEDIA_MAX_STORAGE_MB:-4096}
       RIVUNE_ARTWORK_CACHE_DIR: /var/lib/rivune/artwork
       RIVUNE_ARTWORK_MAX_STORAGE_MB: ${RIVUNE_ARTWORK_MAX_STORAGE_MB:-20480}
       RIVUNE_LAN_ARTWORK_ORIGINS: ${RIVUNE_LAN_ARTWORK_ORIGINS:-}
@@ -62,6 +67,14 @@ services:
       - "127.0.0.1:${RIVUNE_PORT:-8080}:8080"
     volumes:
       - artwork_cache:/var/lib/rivune/artwork
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=${RIVUNE_MEDIA_TMPFS_SIZE_MB:-4096}m
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/rivune", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
     stop_grace_period: 15s
 
   postgres:
@@ -79,6 +92,8 @@ services:
       - SETGID
       - SETUID
     pids_limit: 256
+    cpus: ${RIVUNE_POSTGRES_CPU_LIMIT:-2.0}
+    mem_limit: ${RIVUNE_POSTGRES_MEMORY_LIMIT:-1g}
     read_only: true
     environment:
       POSTGRES_DB: postgres

@@ -128,6 +128,40 @@ docker compose --env-file .env -f deploy/caddy/compose.yaml up -d rivune
 curl --fail --show-error https://media.example.com/health
 ```
 
+## Playback processing and diagnostics
+
+Rivune resolves `RIVUNE_FFMPEG_PATH` and `RIVUNE_FFPROBE_PATH` at startup. The defaults are `ffmpeg` and `ffprobe`. `RIVUNE_HARDWARE_ACCELERATION` accepts `auto`, `software`, `vaapi`, `qsv`, or `nvenc`; `RIVUNE_VIDEO_DEVICE` must be an absolute container path. `auto` probes the supported hardware encoders and falls back to software. The following existing limits are startup-validated:
+
+The base Compose target exposes no GPU. Opt in with `compose.vaapi.yaml` for `/dev/dri/renderD128` or `compose.nvidia.yaml` for the NVIDIA runtime; do not combine overlays unless the host intentionally exposes both device families. In `auto` mode Rivune tests viable encoders in deterministic order (NVENC, then Intel QSV/VAAPI, or AMD VAAPI) and uses software when no probe succeeds. A hardware job that fails before publishing HLS output is retried once with a clean software command; published output is never mixed across encoders.
+
+The startup log emits the same bounded executable versions, requested acceleration mode, selected encoder, tone-map capability, thread and pool limits, maximum video bitrate, and media-storage ceiling. It never emits executable paths, source URLs, provider data, or command output.
+
+| Variable | Range | Default |
+| --- | ---: | ---: |
+| `RIVUNE_REMUX_CONCURRENCY` | `1`–`16` slots in each process, probe, and subtitle pool | `4` |
+| `RIVUNE_TRANSCODE_THREADS` | `1`–`32` threads per transcode | `4` |
+| `RIVUNE_TRANSCODE_MAX_BITRATE_KBPS` | `64`–`200000` kb/s | `12000` |
+| `RIVUNE_TRANSCODE_MAX_READ_RATE` | `1.0`–`4.0` × real time; reduced automatically as the process pool fills | `1.5` |
+| `RIVUNE_HLS_INITIAL_BUFFER_SECONDS` | `3`–`30` seconds, in whole seconds | `6` |
+| `RIVUNE_MEDIA_MAX_STORAGE_MB` | `512`–`102400` MiB | `20480` for the binary; `4096` in Compose |
+
+`RIVUNE_MEDIA_TEMP_DIR` selects the workspace parent; Rivune creates a private `rivune-media` child there. If it is empty, the system temporary directory is used. Keep this workspace on local storage with enough capacity for the configured limit. Reaching the processing pools returns a retryable `503`; reaching the workspace limit returns `507`. Increasing concurrency also increases CPU, memory, network, and temporary-storage pressure.
+
+Both Compose targets mount `/tmp` as a `noexec,nosuid,nodev` tmpfs, defaulting to `4096` MiB, and set Rivune's media limit to the same value. Keep `RIVUNE_MEDIA_TMPFS_SIZE_MB` and `RIVUNE_MEDIA_MAX_STORAGE_MB` aligned. Rivune defaults to `8` CPUs / `6g`, PostgreSQL to `2` CPUs / `1g`, and Caddy to `1` CPU / `256m`; override these with the corresponding `RIVUNE_*_LIMIT` variables from `.env.example`. Root filesystems are read-only, capabilities are minimized, PID ceilings are enforced, the Rivune process drops to `PUID:PGID`, and Compose waits for Rivune's native `/health` check before starting Caddy.
+
+A global administrator can inspect **Administration → Activity**. The response reports scrubbed, bounded FFmpeg and ffprobe versions, requested acceleration, selected encoder, thread/read-rate ceilings, exact active/limit values for each bounded pool, and cumulative started/succeeded/failed/software-fallback process totals. Active jobs expose bounded progress, speed, and estimated startup duration only when valid; no raw FFmpeg progress text is returned. Failed jobs expose one bounded class (`capacity`, `source`, `processing`, `storage`, `timeout`, `cancelled`, or `unknown`), never command output, source URLs, tokens, codec strings, or provider details. Activity returns at most 200 sessions and 200 physical jobs, deduplicating shared workers, and marks truncated arrays explicitly while preserving total counts.
+
+The media safety limits below are fixed rather than environment settings:
+
+- probe deadline/output: 15 seconds and 4 MiB; retained process diagnostic output: 2 KiB;
+- subtitle conversion deadline/output: 30 seconds and 16 MiB;
+- HLS readiness: 45 seconds; segment duration: 3 seconds; retained window: 120 segments;
+- upstream playlist input: 8 MiB, 20,016 lines, and 10,000 references; rewritten output: 16 MiB;
+- playback-session inactivity: 30 minutes; source references: 4 hours; media-job idle cleanup: 2 minutes;
+- opaque child delivery capabilities: 5 minutes, 10,000 per profile and 40,000 globally.
+
+Do not make these safety limits configurable to work around a failing source. Use the bounded activity diagnostic to distinguish capacity, storage, source, and processing failures, then adjust only the documented startup settings when appropriate.
+
 ## Jellyfin-compatible client access
 
 Rivune includes a limited Jellyfin-compatible API adapter. It is not a complete Jellyfin server, does not implement every Jellyfin endpoint or client feature, and provides no LAN UDP discovery. Configure it manually with Rivune's public URL.
@@ -161,6 +195,44 @@ Private provider URLs, headers, native playback tokens, and source references re
 Jellyfin Media Player/Desktop is incompatible with this adapter because it loads the server-hosted Jellyfin Web application from `/` after discovery, while Rivune intentionally serves its own web application there. A successful API probe in that desktop shell therefore does not validate the standalone application flows covered by the adapter.
 
 To roll back, disable Jellyfin from the administrator settings page. Confirm normal Rivune access through the HTTPS origin afterward.
+
+### Playback evidence and real-client validation
+
+The compatibility route smoke is not a media certification. A route match, discovery response, `PlaybackInfo` response, or successful `2xx` proves only that exchange. Claiming a playback workflow requires the emitted URL to be consumed, media bytes to be decoded/rendered, seek and selected tracks to be observed, and the session to stop cleanly.
+
+The optional FFmpeg byte-path tests create only short lavfi video/audio and local text in temporary directories. They do not download or retain media. Run them on a host with `ffmpeg` and `ffprobe` on `PATH`, or set `RIVUNE_FFMPEG_PATH` and `RIVUNE_FFPROBE_PATH` to trusted local binaries:
+
+```sh
+cd server
+RIVUNE_TEST_EXTERNAL_MEDIA=1 go test ./internal/playback \
+  -run '^TestExternalMedia' -count=1
+RIVUNE_TEST_EXTERNAL_MEDIA=1 go test ./internal/jellyfin \
+  -run '^TestPlaybackGatewayReadsPlaylistAndChildBytesAndRejectsOutOfOrderChild$' -count=1
+```
+
+The first command covers generated MP4/MKV, direct ranges, TS/fMP4 HLS remux/transcode, overlapping AAC track selection, synthetic 5.1 AAC downmix to decoded stereo, UTF-8 subtitle conversion/seek, embedded ASS burn-in verified on a decoded frame, and HLS child delivery. The second generates a one-second H.264/AAC MPEG-TS child and exercises the Jellyfin adapter gateway. A skip is not a pass: record it as `ABSENT` when FFmpeg is unavailable. Dolby Vision, HDR pixels, bitmap subtitles, DTS bytes, and named-client rendering are not supplied by these tests.
+
+Targeted microbenchmarks are deliberately finite and carry no release budget:
+
+```sh
+cd server
+go test ./internal/playback -run '^$' \
+  -bench '^(BenchmarkRewritePlaylist|BenchmarkDirectorySize|BenchmarkPlaybackDecision)$' \
+  -benchmem -count=5
+```
+
+Record the CPU model, OS, Go version, revision and complete benchmark output when comparing runs. The cases use fixed playlists of 8/120 references, a fixed 32-file directory and the four planner outcomes. Do not turn one machine's measurements into an invented p95, concurrency capacity or pass/fail threshold.
+
+For Infuse, Streamyfin or VidHub, use this protocol for each exact released client version:
+
+1. Record the client name/version/build, device OS/version, Rivune revision or image digest, FFmpeg version, hardware-acceleration mode and UTC interval. Use a fresh compatibility credential dedicated to the validation device; never put it in a command argument or artefact.
+2. Enable `RIVUNE_JELLYFIN_DEBUG=true`, restart, and confirm logs expose only normalized client family/version, route/method, query **names and cardinalities**, selected-header presence, bounded response metadata and bounded JSON shape. Stop if any value, ID, URL, query, token, provider name or codec appears as a label.
+3. In the actual client UI, perform discovery/manual connection, login, catalogue navigation, item detail and artwork. Then play long enough to observe rendered video and audible audio; select another audio track and subtitle where the licensed local fixture permits it; seek forward and backward; pause/resume; and stop. Record unsupported steps as `ABSENT`, not skipped success.
+4. Correlate the bounded server trace with `PlaybackInfo`, the chosen mode (`direct`, `remux`, `transcode_audio`, or `transcode`), the exact same-origin stream/master/child sequence, byte ranges or decoded segments, Playing/Progress/Stopped, and FFmpeg teardown. Status codes alone are insufficient: retain a human observation of rendering and client controls plus bounded server-side media/lifecycle evidence.
+5. Scrub a copy of the trace before it leaves the validation host. Remove or replace all credentials, cookies, authorization headers, user/profile/item/session/source/device IDs, IPs/hostnames, full URLs, query values, provider data, filesystem paths and media titles. Preserve the ordered methods, normalized route templates, status, content type, range presence, byte counts, timing buckets, decision mode and failure enum. Review the scrubbed copy manually; never publish the raw trace.
+6. Store the scrubbed trace, environment manifest, command outputs and a result sheet together in the controlled release evidence store under client/version/date. Give each step `PASSED`, `ABSENT` or `BLOCKED` and link its artefact. Revoke the temporary credential, disable debug, restart, and verify no playback process remains.
+
+Current evidence must be summarized narrowly: Infuse 8 has a partially observed hierarchy scan but no validated player playback; Streamyfin 0.31.0 has a reported HTTP-level HLS profile replay on NAS but no validated application rendering; VidHub has no audited trace or validation. None may be advertised as generally compatible until the versioned, scrubbed real-client bundle above exists.
 
 ## Unraid PostgreSQL TLS
 

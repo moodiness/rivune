@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -54,5 +57,27 @@ func TestShutdownDrainsHTTPRequestBeforeCancelingJellyfinGeneration(t *testing.T
 	case <-compatibilityDone:
 	default:
 		t.Fatal("Jellyfin generation cleanup was not awaited")
+	}
+}
+
+func TestCheckHealthRequiresSuccessfulEndpoint(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		statusCode int
+		wantError  bool
+	}{
+		{name: "healthy", statusCode: http.StatusOK},
+		{name: "unhealthy", statusCode: http.StatusServiceUnavailable, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.WriteHeader(test.statusCode)
+			}))
+			defer server.Close()
+			err := checkHealth(context.Background(), server.URL)
+			if (err != nil) != test.wantError {
+				t.Fatalf("check health error = %v, wantError=%t", err, test.wantError)
+			}
+		})
 	}
 }

@@ -19,12 +19,42 @@ import (
 
 var version = "dev"
 
+const defaultHealthCheckURL = "http://127.0.0.1:8080/health"
+
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
+		target := os.Getenv("RIVUNE_HEALTHCHECK_URL")
+		if target == "" {
+			target = defaultHealthCheckURL
+		}
+		if err := checkHealth(context.Background(), target); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := run(logger); err != nil {
 		logger.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+func checkHealth(ctx context.Context, target string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return fmt.Errorf("create health request: %w", err)
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 2 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("request health endpoint: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("health endpoint returned %s", response.Status)
+	}
+	return nil
 }
 
 func run(logger *slog.Logger) error {

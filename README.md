@@ -172,12 +172,23 @@ Set-Acl -LiteralPath .env -AclObject $acl
 | `RIVUNE_LAN_ARTWORK_ORIGINS` | Optional comma-separated exact origins for trusted private-IP LAN artwork servers; explicit ports are required and paths, queries, credentials, DNS names, and special-use addresses are rejected | empty |
 | `TZ` | IANA timezone used by profile access dates and daily hours | `UTC` |
 | `PUID` / `PGID` | Non-root identity used inside the container | `65532` |
-| `RIVUNE_HARDWARE_ACCELERATION` | Video encoder selection: `auto`, a supported encoder, or software | `auto` |
-| `RIVUNE_VIDEO_DEVICE` | Linux render device used for hardware acceleration | `/dev/dri/renderD128` |
+| `RIVUNE_FFMPEG_PATH` | FFmpeg executable name or path | `ffmpeg` |
+| `RIVUNE_FFPROBE_PATH` | ffprobe executable name or path | `ffprobe` |
+| `RIVUNE_HARDWARE_ACCELERATION` | Video encoder selection: `auto`, `software`, `vaapi`, `qsv`, or `nvenc` | `auto` |
+| `RIVUNE_VIDEO_DEVICE` | Absolute Linux render-device path used for hardware acceleration | `/dev/dri/renderD128` |
 | `RIVUNE_VIDEO_GROUP_ID` | GID that owns `/dev/dri/renderD128`; verify with `stat -c '%g' /dev/dri/renderD128` | host-dependent (`109` in Compose, usually `18` on Unraid) |
-| `RIVUNE_REMUX_CONCURRENCY` | Concurrent remux jobs | `2` |
-| `RIVUNE_TRANSCODE_THREADS` | FFmpeg threads per transcode | `4` |
-| `RIVUNE_MEDIA_MAX_STORAGE_MB` | Temporary media workspace limit | `20480` |
+| `RIVUNE_REMUX_CONCURRENCY` | Capacity of each FFmpeg process, probe, and subtitle pool (`1`–`16`); trickplay has one independent slot | `4` |
+| `RIVUNE_TRANSCODE_THREADS` | FFmpeg threads per transcode (`1`–`32`) | `4` |
+| `RIVUNE_TRANSCODE_MAX_BITRATE_KBPS` | Server transcode video bitrate ceiling (`64`–`200000` kb/s) | `12000` |
+| `RIVUNE_TRANSCODE_MAX_READ_RATE` | Maximum FFmpeg input burst rate (`1.0`–`4.0` × real time); automatically reduced under process-pool pressure | `1.5` |
+| `RIVUNE_HLS_INITIAL_BUFFER_SECONDS` | Complete HLS media buffered before the first playlist response (`3`–`30` seconds) | `6` |
+| `RIVUNE_MEDIA_TEMP_DIR` | Parent directory for the private `rivune-media` workspace | system temporary directory |
+| `RIVUNE_MEDIA_MAX_STORAGE_MB` | Temporary media workspace limit (`512`–`102400` MiB) | `20480` for the binary; `4096` in Compose |
+
+The Compose targets run Rivune with a read-only root filesystem, a bounded `/tmp` tmpfs, dropped capabilities, `no-new-privileges`, PID/CPU/memory ceilings, a non-root application process, and a native `/health` container check. `RIVUNE_MEDIA_TMPFS_SIZE_MB` and `RIVUNE_MEDIA_MAX_STORAGE_MB` both default to `4096` in Compose and should remain aligned. Container ceilings are overridable with `RIVUNE_CPU_LIMIT`, `RIVUNE_MEMORY_LIMIT`, `RIVUNE_POSTGRES_CPU_LIMIT`, `RIVUNE_POSTGRES_MEMORY_LIMIT`, and, for the Caddy target, `RIVUNE_CADDY_CPU_LIMIT` / `RIVUNE_CADDY_MEMORY_LIMIT`.
+
+The base Compose file exposes no host GPU device. Add exactly one explicit overlay when hardware encoding is intended: `docker compose -f compose.yaml -f compose.vaapi.yaml up -d` for AMD/Intel render nodes, or `docker compose -f compose.yaml -f compose.nvidia.yaml up -d` for NVIDIA. `auto` probes only devices made visible by that overlay and falls back cleanly to software; never grant the container broad host-device access.
+
 
 The Trakt and Simkl credentials identify the Rivune server application; they do not connect a global user account. Each Rivune profile links and controls its own Trakt and/or Simkl account from profile settings, and Rivune stores that profile's provider tokens encrypted with `RIVUNE_TRACKING_ENCRYPTION_KEY`.
 
