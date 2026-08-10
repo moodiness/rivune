@@ -26,22 +26,37 @@ git tag -a v1.5.0 -m "Rivune v1.5.0"
 git push origin v1.5.0
 ```
 
-The tag push runs `Release candidate CI`. Its read-only `authorize` job resolves `git/ref/tags/<tag>`, rejects an absent ref or a lightweight tag, requires the annotated tag object to target a commit, and requires that commit, the run SHA, and current `main` HEAD to be identical. The reusable `Release gate` then runs these exact jobs: `Backend tests`, `Frontend build and E2E`, `OpenAPI lint and contract resolution`, `Swift API client`, `Kotlin API client`, `Windows API client`, and `Container, migrations, and HTTPS proxy`. The container job also runs `docker compose config --quiet` for `compose.yaml`, its VAAPI and NVIDIA overrides, and `deploy/caddy/compose.yaml`, using non-secret validation placeholders for required interpolation values.
+The tag push runs `Release candidate CI`. Its read-only `authorize` job resolves
+`git/ref/tags/<tag>`, rejects an absent ref or a lightweight tag, requires the
+annotated tag object to target a commit, and requires that commit, the run SHA,
+and current `main` HEAD to be identical. The reusable `Release gate` then runs
+these exact jobs: `Backend tests`, `Frontend build and E2E`, `OpenAPI lint and
+contract resolution`, `Swift API client`, `Kotlin API client`, `Windows API
+client`, and `Container, migrations, and HTTPS proxy`. The container job also
+validates the two supported manifests, `compose.yaml` and
+`deploy/caddy/compose.yaml`, with non-secret placeholders for required values.
 
 Only a successful candidate run is authorized to proceed in `Publish release`, whose top-level permission remains `contents: read`. Its `Authorize tested release candidate` job repeats the annotated-tag and same-commit checks without write permission. Immediately before each existing write-capable job acts, the workflow resolves the annotated tag object and target commit again. `Publish multi-architecture image` alone receives `packages: write`; after it succeeds, `Create GitHub release notes` alone receives `contents: write`.
 
-To reproduce the four Compose policy checks locally with disposable, non-production values, run exactly:
+To reproduce the two Compose policy checks locally with disposable, non-production values, run exactly:
 
 ```sh
 export RIVUNE_DATABASE_PASSWORD=compose-validation-database-password
 export RIVUNE_POSTGRES_SUPERUSER_PASSWORD=compose-validation-superuser-password
 export RIVUNE_RESTORE_PASSWORD=compose-validation-restore-password
 export RIVUNE_SETUP_TOKEN=compose-validation-setup-token
+export RIVUNE_ENCRYPTION_KEYS=1:1212121212121212121212121212121212121212121212121212121212121212
 export RIVUNE_HOST=rivune.invalid
-docker compose -f compose.yaml config --quiet
-docker compose -f compose.yaml -f compose.vaapi.yaml config --quiet
-docker compose -f compose.yaml -f compose.nvidia.yaml config --quiet
-docker compose -f deploy/caddy/compose.yaml config --quiet
+export RIVUNE_VIDEO_GROUP_ID=109
+export RIVUNE_VIDEO_DEVICE=/dev/dri/renderD129
+for manifest in compose.yaml deploy/caddy/compose.yaml; do
+  docker compose -f "${manifest}" config --quiet
+  docker compose -f "${manifest}" config --format json | jq -e '
+    (.services.rivune.environment | has("RIVUNE_ALLOW_TRANSCODING")) and
+    .services.rivune.environment.RIVUNE_VIDEO_GROUP_ID == "109" and
+    .services.rivune.devices == [{"source":"/dev/dri/renderD129","target":"/dev/dri/renderD128","permissions":"rwm"}]
+  ' >/dev/null
+done
 ```
 
 If GitHub does not create the release-candidate run for an otherwise valid tag push, dispatch the same read-only gate without moving the tag:
@@ -87,7 +102,7 @@ sha-<short-commit>
 latest
 ```
 
-A prerelease such as `v2.0.0-rc.1` receives its full SemVer and SHA tags, but does not move the stable major, minor, or `latest` aliases. The workflow then creates the matching GitHub Release and automatically generated release notes. If image publication fails, no GitHub Release is created.
+A prerelease such as `v2.0.0-rc.1` receives its full SemVer and SHA tags, but does not move the stable major, minor, or `latest` aliases. The workflow then creates the matching GitHub Release with automatically generated notes. A stable release is explicitly marked as GitHub's latest release; a prerelease is not. If image publication fails, no GitHub Release is created.
 
 Verify the release and its OCI attestations after the workflow completes:
 

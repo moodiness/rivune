@@ -12,11 +12,12 @@ Create the private `.env` file before entering any secrets:
 
 The helper refuses to overwrite an existing file or link and creates `.env`
 with mode `0600`. For an existing deployment, run `chmod 600 .env` and stop if
-it fails before continuing. Then set three independent random database secrets,
-a separate setup secret, a public DNS name, and a pinned Rivune version.
-`postgres` is bootstrap-only, `rivune` is the application login,
-`rivune_owner` is a non-login owner, and `rivune_restore` is a non-superuser
-login used only by the restore scripts.
+it fails before continuing. Set three independent database secrets, a separate
+setup token, a versioned encryption key, the public DNS name, a pinned Rivune
+version, the host render node, and its numeric owning group. `postgres` is
+bootstrap-only, `rivune` is the application login, `rivune_owner` is a non-login
+owner, and `rivune_restore` is a non-superuser login used only by the restore
+scripts.
 
 ```dotenv
 RIVUNE_HOST=media.example.com
@@ -25,12 +26,23 @@ RIVUNE_POSTGRES_SUPERUSER_PASSWORD=<output of: openssl rand -hex 32>
 RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_SETUP_TOKEN=<different output of: openssl rand -hex 32>
-TZ=UTC
+RIVUNE_ENCRYPTION_KEYS=1:<different output of: openssl rand -hex 32>
+RIVUNE_VIDEO_DEVICE=/dev/dri/renderD128
+RIVUNE_VIDEO_GROUP_ID=<output of: stat -c '%g' /dev/dri/renderD128>
 ```
 
-Set optional TMDB, TVDB, Fanart.tv API-key, MDBList, Trakt, Simkl, and tracking-encryption credentials directly in the private `.env` file. Leave credentials for unused providers empty.
+`RIVUNE_ENCRYPTION_KEYS` is active-first. Every entry is a unique positive
+integer version, a colon, and exactly 64 lowercase hexadecimal characters. Keys
+must also be unique and non-zero. Product settings and provider credentials do
+not belong in `.env`; configure them in Rivune Administration after setup.
 
-Collection and addon artwork is fetched through Rivune's same-origin artwork cache. Public artwork remains restricted to HTTPS on port 443 with public DNS results. If artwork is intentionally hosted on a trusted LAN server, set `RIVUNE_LAN_ARTWORK_ORIGINS` to a comma-separated list of exact origins such as `http://192.168.1.20:8080`. Entries require a private IP literal and explicit port; do not include a hostname, path, query, fragment, credential, loopback, link-local, metadata, documentation, or reserved address. Rivune revalidates redirects and does not expose source URLs or query credentials to browsers.
+Collection and addon artwork is fetched through Rivune's same-origin artwork
+cache. Public artwork remains restricted to HTTPS on port 443 with public DNS
+results. An advanced private Compose override may pass
+`RIVUNE_LAN_ARTWORK_ORIGINS` for intentional trusted-LAN artwork hosting. Use
+only comma-separated exact private-IP origins with explicit ports; never include
+hostnames, paths, queries, fragments, credentials, loopback, or link-local
+addresses.
 
 Point the `A`/`AAAA` records for `RIVUNE_HOST` at the host, allow inbound TCP 80 and TCP/UDP 443, then start the supported configuration:
 
@@ -44,6 +56,100 @@ curl --fail --show-error https://media.example.com/health
 Caddy obtains and renews a publicly trusted certificate automatically. [`deploy/caddy/Caddyfile`](../deploy/caddy/Caddyfile) replaces inbound `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`, and `X-Forwarded-Host`; clients therefore cannot inject a trusted chain. The Compose network has the fixed `172.30.0.0/24` edge subnet, and Rivune trusts only that subnet through `RIVUNE_TRUSTED_PROXIES`. Do not change it to `0.0.0.0/0`, a host LAN, or another client-reachable range. If the edge subnet must change, update both the network subnet and `RIVUNE_TRUSTED_PROXIES` to the same dedicated range.
 
 Rivune is not published directly to the host in this configuration. PostgreSQL is isolated on the private database network. Caddy is the only externally reachable service.
+
+### Advanced host topology
+
+Keep deployment topology out of product Settings. The Compose files accept
+host-only overrides for the public origin, trusted proxy/NAT64 networks, LAN
+artwork origins, container identity, host ports, and component database
+coordinates. `RIVUNE_DATABASE_URL` is the direct-DSN escape hatch and takes
+precedence over component database fields. Because it normally contains a
+password, supply it through a protected operator environment or secret manager,
+not a committed override file.
+
+External PostgreSQL, private certificate mounts, a different edge subnet, or
+different CPU/memory/workspace resources should be expressed in a private
+Compose override. When changing the Caddy edge subnet, change Rivune's trusted
+proxy CIDR to exactly the same dedicated network. Do not expose the raw Rivune
+listener, attach Caddy to the database network, or add these host controls to the
+persisted instance-settings schema.
+
+## Persisted settings and encrypted credentials
+
+Timezone, Jellyfin compatibility and diagnostics, transcoding policy, hardware
+acceleration, bitrate, and media/artwork quotas are database-backed instance
+settings. Provider credentials are stored in separate encrypted database rows.
+Administrators manage both from the web application; integration responses show
+only whether a credential is configured and when it changed. Secret values are
+never returned through settings, audit, activity, or integration responses.
+
+Most setting changes and every provider update apply live. Hardware acceleration
+is the exception: saving it records the requested mode, while the active mode
+remains unchanged and the field stays `pending restart`. Restart or recreate the
+`rivune` service, then wait for the active value to match the request and for the
+pending marker to clear. A persisted request is not proof that the GPU is active.
+
+### Keyring backup and rotation
+
+The database archive and `RIVUNE_ENCRYPTION_KEYS` are one recovery set. Back up
+the keyring through a protected secret store separate from the database archive,
+but retain every key version needed by every retained archive. A database-only
+restore cannot decrypt integration credentials, Trakt/Simkl profile tokens, or
+in-flight tracking authorizations without the matching key versions. There is no
+recovery bypass and no provider-secret export endpoint.
+
+Rotate keys in this order:
+
+1. Generate a new independent 32-byte key and prepend a new version, for example
+   `RIVUNE_ENCRYPTION_KEYS=2:<new>,1:<old>`. Keep the old entry.
+2. Restart Rivune and confirm it starts with the complete keyring. New or replaced
+   ciphertext uses the first version.
+3. Re-enter each configured integration credential in Administration so its row
+   is encrypted with the active key. Disconnect and reconnect Trakt/Simkl profile
+   accounts that still use the retired version; allow or remove old pending
+   authorization rows according to the account workflow.
+4. Inspect version references without selecting ciphertext or secret columns:
+
+   ```sql
+   SELECT 'integration' AS source, encryption_key_version, count(*)
+   FROM instance_integration_credentials GROUP BY encryption_key_version
+   UNION ALL
+   SELECT 'tracking_account', encryption_key_version, count(*)
+   FROM profile_tracking_accounts GROUP BY encryption_key_version
+   UNION ALL
+   SELECT 'tracking_authorization', encryption_key_version, count(*)
+   FROM profile_tracking_authorizations GROUP BY encryption_key_version
+   ORDER BY source, encryption_key_version;
+   ```
+
+5. Remove an old key from `.env` only after no live row and no retained backup
+   requires it. Restart again. Existing rows are not re-encrypted merely because
+   a new version is first in the list.
+
+### One-shot legacy environment import
+
+On the first release containing persisted configuration, Compose forwards old
+values only to perform one transactional startup import. Existing database
+values always win. The import writes only redacted audit metadata and never logs
+or returns imported secrets. It is marked complete even when every legacy input
+is empty, so these names never become runtime fallbacks on later starts:
+
+- `TZ`, `RIVUNE_JELLYFIN_ENABLED`, `RIVUNE_JELLYFIN_DEBUG`,
+  `RIVUNE_ALLOW_TRANSCODING`, `RIVUNE_HARDWARE_ACCELERATION`,
+  `RIVUNE_TRANSCODE_MAX_BITRATE_KBPS`, `RIVUNE_MEDIA_MAX_STORAGE_MB`, and
+  `RIVUNE_ARTWORK_MAX_STORAGE_MB`;
+- `RIVUNE_TMDB_ACCESS_TOKEN`, `RIVUNE_FANART_API_KEY`,
+  `RIVUNE_MDBLIST_API_KEY`, `RIVUNE_TVDB_API_KEY`, `RIVUNE_TVDB_PIN`,
+  `RIVUNE_TRAKT_CLIENT_ID`, `RIVUNE_TRAKT_CLIENT_SECRET`, and
+  `RIVUNE_SIMKL_CLIENT_ID`;
+- `RIVUNE_TRACKING_ENCRYPTION_KEY`, which is accepted only as the version-1
+  keyring migration input when `RIVUNE_ENCRYPTION_KEYS` is absent.
+
+Before upgrading, take an authenticated database backup and preserve the old
+private `.env`. Start the new image once, sign in, verify requested/active
+settings and configured integration statuses, then replace the old encryption
+input with `RIVUNE_ENCRYPTION_KEYS` and remove every legacy name from `.env`.
+Never leave old values expecting them to override or repair database state.
 
 ### Existing-volume role migration
 
@@ -128,55 +234,56 @@ docker compose --env-file .env -f deploy/caddy/compose.yaml up -d rivune
 curl --fail --show-error https://media.example.com/health
 ```
 
-## Playback processing and diagnostics
+## Playback processing and hardware
 
-Rivune resolves `RIVUNE_FFMPEG_PATH` and `RIVUNE_FFPROBE_PATH` at startup. The defaults are `ffmpeg` and `ffprobe`. `RIVUNE_HARDWARE_ACCELERATION` accepts `auto`, `software`, `vaapi`, `qsv`, or `nvenc`; `RIVUNE_VIDEO_DEVICE` must be an absolute container path. `auto` probes the supported hardware encoders and falls back to software. The following existing limits are startup-validated:
+Rivune uses fixed safe executable, pool, thread, read-rate, and HLS-buffer
+defaults. Administrators set the transcoding permission, video bitrate, media
+quota, artwork quota, and requested encoder mode in Administration. Do not add
+the removed FFmpeg/runtime variables to `.env` or a Compose override.
 
-The base Compose target exposes no GPU. Opt in with `compose.vaapi.yaml` for `/dev/dri/renderD128` or `compose.nvidia.yaml` for the NVIDIA runtime; do not combine overlays unless the host intentionally exposes both device families. In `auto` mode Rivune tests viable encoders in deterministic order (NVENC, then Intel QSV/VAAPI, or AMD VAAPI) and uses software when no probe succeeds. A hardware job that fails before publishing HLS output is retried once with a clean software command; published output is never mixed across encoders.
+Both provided Compose manifests map the host render node selected by
+`RIVUNE_VIDEO_DEVICE` to the fixed `/dev/dri/renderD128` container path. They
+also require `RIVUNE_VIDEO_GROUP_ID`, the numeric group owning that host node;
+determine it with `stat -c '%g' /dev/dri/renderD128` after substituting any
+configured host path. These are deployment
+topology controls rather than product settings. For NVIDIA, configure NVIDIA
+Container Toolkit in a private Compose override and grant only the compute,
+video, and utility capabilities required by FFmpeg.
 
-The startup log emits the same bounded executable versions, requested acceleration mode, selected encoder, tone-map capability, thread and pool limits, maximum video bitrate, and media-storage ceiling. It never emits executable paths, source URLs, provider data, or command output.
+After changing the hardware-acceleration setting, restart the service and verify
+the active value as described above. `auto` probes only the devices exposed by
+the deployment and falls back to software. A failed hardware job can fall back
+before output publication; neither a saved request nor a visible device alone
+proves that hardware encoding is active.
 
-| Variable | Range | Default |
-| --- | ---: | ---: |
-| `RIVUNE_REMUX_CONCURRENCY` | `1`–`16` slots in each process, probe, and subtitle pool | `4` |
-| `RIVUNE_TRANSCODE_THREADS` | `1`–`32` threads per transcode | `4` |
-| `RIVUNE_TRANSCODE_MAX_BITRATE_KBPS` | `64`–`200000` kb/s | `12000` |
-| `RIVUNE_TRANSCODE_MAX_READ_RATE` | `1.0`–`4.0` × real time; reduced automatically as the process pool fills | `1.5` |
-| `RIVUNE_HLS_INITIAL_BUFFER_SECONDS` | `3`–`30` seconds, in whole seconds | `6` |
-| `RIVUNE_MEDIA_MAX_STORAGE_MB` | `512`–`102400` MiB | `20480` for the binary; `4096` in Compose |
+Both Compose targets use read-only root filesystems, a fixed 4096 MiB
+`noexec,nosuid,nodev` `/tmp` tmpfs, fixed CPU/memory limits, minimized
+capabilities, and PID ceilings. The storage filesystem can therefore impose a
+lower practical ceiling than the persisted media quota. Advanced operators who
+replace the workspace or resource declarations should do so in a private
+Compose override and keep host capacity consistent with the requested quota.
 
-`RIVUNE_MEDIA_TEMP_DIR` selects the workspace parent; Rivune creates a private `rivune-media` child there. If it is empty, the system temporary directory is used. Keep this workspace on local storage with enough capacity for the configured limit. Reaching the processing pools returns a retryable `503`; reaching the workspace limit returns `507`. Increasing concurrency also increases CPU, memory, network, and temporary-storage pressure.
-
-Both Compose targets mount `/tmp` as a `noexec,nosuid,nodev` tmpfs, defaulting to `4096` MiB, and set Rivune's media limit to the same value. Keep `RIVUNE_MEDIA_TMPFS_SIZE_MB` and `RIVUNE_MEDIA_MAX_STORAGE_MB` aligned. Rivune defaults to `8` CPUs / `6g`, PostgreSQL to `2` CPUs / `1g`, and Caddy to `1` CPU / `256m`; override these with the corresponding `RIVUNE_*_LIMIT` variables from `.env.example`. Root filesystems are read-only, capabilities are minimized, PID ceilings are enforced, the Rivune process drops to `PUID:PGID`, and Compose waits for Rivune's native `/health` check before starting Caddy.
-
-A global administrator can inspect **Administration → Activity**. The response reports scrubbed, bounded FFmpeg and ffprobe versions, requested acceleration, selected encoder, thread/read-rate ceilings, exact active/limit values for each bounded pool, and cumulative started/succeeded/failed/software-fallback process totals. Active jobs expose bounded progress, speed, and estimated startup duration only when valid; no raw FFmpeg progress text is returned. Failed jobs expose one bounded class (`capacity`, `source`, `processing`, `storage`, `timeout`, `cancelled`, or `unknown`), never command output, source URLs, tokens, codec strings, or provider details. Activity returns at most 200 sessions and 200 physical jobs, deduplicating shared workers, and marks truncated arrays explicitly while preserving total counts.
-
-The media safety limits below are fixed rather than environment settings:
-
-- probe deadline/output: 15 seconds and 4 MiB; retained process diagnostic output: 2 KiB;
-- subtitle conversion deadline/output: 30 seconds and 16 MiB;
-- HLS readiness: 45 seconds; segment duration: 3 seconds; retained window: 120 segments;
-- upstream playlist input: 8 MiB, 20,016 lines, and 10,000 references; rewritten output: 16 MiB;
-- playback-session inactivity: 30 minutes; source references: 4 hours; media-job idle cleanup: 2 minutes;
-- opaque child delivery capabilities: 5 minutes, 10,000 per profile and 40,000 globally.
-
-Do not make these safety limits configurable to work around a failing source. Use the bounded activity diagnostic to distinguish capacity, storage, source, and processing failures, then adjust only the documented startup settings when appropriate.
+Administration Activity reports bounded selected-encoder, pool, quota, and job
+diagnostics. It never returns command output, source URLs, tokens, provider
+credentials, or private provider details. Fixed safety limits are not exposed as
+environment settings; diagnose capacity, storage, source, or processing failures
+instead of making those guardrails configurable.
 
 ## Jellyfin-compatible client access
 
 Rivune includes a limited Jellyfin-compatible API adapter. It is not a complete Jellyfin server, does not implement every Jellyfin endpoint or client feature, and provides no LAN UDP discovery. Configure it manually with Rivune's public URL.
 
-The adapter is off by default. An administrator can enable or disable it from Rivune's settings page without restarting the service. For unattended initial provisioning, set this non-secret default before first setup:
+The adapter is off by default. A global administrator enables it with the
+`jellyfinEnabled` setting in Administration; `jellyfinDebug` enables bounded
+compatibility-route diagnostics when temporarily needed. Both apply live and do
+not require environment variables or a service restart.
 
-```dotenv
-RIVUNE_JELLYFIN_ENABLED=true
-```
-
-Only `true` or `false` is accepted, after surrounding whitespace is trimmed and letter case is normalized. Any other non-empty value prevents Rivune from starting. Once an administrator saves the Jellyfin setting, that persisted value is authoritative over the environment default.
-
-For temporary compatibility diagnostics, `RIVUNE_JELLYFIN_DEBUG=true` adds bounded route metadata to the existing completion log. It records a normalized client family, route and method, query parameter names with their cardinalities, selected-header presence, response status/duration/byte count/content type/range presence, and bounded top-level JSON shape when available. It does not buffer media and never records query or header values, body values or payload bytes, credentials, cookies, provider URLs, or item/session identifiers. The flag is strictly opt-in, defaults to `false`, accepts only `true` or `false` under the same normalization rules, and requires a service restart to change. Disable it after collecting the needed diagnostics.
-
-On Unraid, **Jellyfin initial default** controls only the value used before the administrator setting is first saved. For every non-loopback deployment, keep Rivune behind the documented HTTPS reverse proxy, give the client the same `https://` origin configured by `RIVUNE_PUBLIC_URL`, and never publish Rivune's raw port `8080` to the LAN or internet.
+Diagnostics record normalized route metadata and bounded response shape, never
+query/header/body values, credentials, cookies, provider URLs, payload bytes, or
+item/session identifiers. Disable the setting after collecting the required
+evidence. For every non-loopback deployment, keep Rivune behind the documented
+HTTPS reverse proxy and give clients the same HTTPS origin configured as the
+public URL. Never publish raw port 8080 to a LAN or the internet.
 
 Open the profile's **Preferences → Connections** page and generate its Jellyfin credential. Enter the displayed UUID as the client username and the generated profile-only application password as the password. The password is shown once; copy it before closing the dialog, or rotate it to issue a replacement. Rivune account passwords, administrator credentials, profile names, and profile PINs are never accepted by the compatibility login.
 
@@ -200,7 +307,7 @@ To roll back, disable Jellyfin from the administrator settings page. Confirm nor
 
 The compatibility route smoke is not a media certification. A route match, discovery response, `PlaybackInfo` response, or successful `2xx` proves only that exchange. Claiming a playback workflow requires the emitted URL to be consumed, media bytes to be decoded/rendered, seek and selected tracks to be observed, and the session to stop cleanly.
 
-The optional FFmpeg byte-path tests create only short lavfi video/audio and local text in temporary directories. They do not download or retain media. Run them on a host with `ffmpeg` and `ffprobe` on `PATH`, or set `RIVUNE_FFMPEG_PATH` and `RIVUNE_FFPROBE_PATH` to trusted local binaries:
+The optional FFmpeg byte-path tests create only short lavfi video/audio and local text in temporary directories. They do not download or retain media. Run them only on a development host with `ffmpeg` and `ffprobe` on `PATH`:
 
 ```sh
 cd server
@@ -226,11 +333,11 @@ Record the CPU model, OS, Go version, revision and complete benchmark output whe
 For Infuse, Streamyfin or VidHub, use this protocol for each exact released client version:
 
 1. Record the client name/version/build, device OS/version, Rivune revision or image digest, FFmpeg version, hardware-acceleration mode and UTC interval. Use a fresh compatibility credential dedicated to the validation device; never put it in a command argument or artefact.
-2. Enable `RIVUNE_JELLYFIN_DEBUG=true`, restart, and confirm logs expose only normalized client family/version, route/method, query **names and cardinalities**, selected-header presence, bounded response metadata and bounded JSON shape. Stop if any value, ID, URL, query, token, provider name or codec appears as a label.
+2. Enable `jellyfinDebug` in Administration and confirm logs expose only normalized client family/version, route/method, query **names and cardinalities**, selected-header presence, bounded response metadata and bounded JSON shape. Stop if any value, ID, URL, query, token, provider name or codec appears as a label.
 3. In the actual client UI, perform discovery/manual connection, login, catalogue navigation, item detail and artwork. Then play long enough to observe rendered video and audible audio; select another audio track and subtitle where the licensed local fixture permits it; seek forward and backward; pause/resume; and stop. Record unsupported steps as `ABSENT`, not skipped success.
 4. Correlate the bounded server trace with `PlaybackInfo`, the chosen mode (`direct`, `remux`, `transcode_audio`, or `transcode`), the exact same-origin stream/master/child sequence, byte ranges or decoded segments, Playing/Progress/Stopped, and FFmpeg teardown. Status codes alone are insufficient: retain a human observation of rendering and client controls plus bounded server-side media/lifecycle evidence.
 5. Scrub a copy of the trace before it leaves the validation host. Remove or replace all credentials, cookies, authorization headers, user/profile/item/session/source/device IDs, IPs/hostnames, full URLs, query values, provider data, filesystem paths and media titles. Preserve the ordered methods, normalized route templates, status, content type, range presence, byte counts, timing buckets, decision mode and failure enum. Review the scrubbed copy manually; never publish the raw trace.
-6. Store the scrubbed trace, environment manifest, command outputs and a result sheet together in the controlled release evidence store under client/version/date. Give each step `PASSED`, `ABSENT` or `BLOCKED` and link its artefact. Revoke the temporary credential, disable debug, restart, and verify no playback process remains.
+6. Store the scrubbed trace, environment manifest, command outputs and a result sheet together in the controlled release evidence store under client/version/date. Give each step `PASSED`, `ABSENT` or `BLOCKED` and link its artefact. Revoke the temporary credential, disable `jellyfinDebug`, and verify no playback process remains.
 
 Current evidence must be summarized narrowly: Infuse 8 has a partially observed hierarchy scan but no validated player playback; Streamyfin 0.31.0 has a reported HTTP-level HLS profile replay on NAS but no validated application rendering; VidHub has no audited trace or validation. None may be advertised as generally compatible until the versioned, scrubbed real-client bundle above exists.
 
@@ -498,8 +605,12 @@ A restore is destructive: it replaces the current `rivune` database. Take and
 verify a new authenticated backup of the current database first. Export the
 restore password from the protected deployment secret; it is independent from
 the application and bootstrap passwords. Keep the signing/verification key,
-lineage, and state exports from the backup section. Select the backup ID from the
-separate operator-controlled record, never from the adjacent manifest:
+lineage, and state exports from the backup section. Before running the restore,
+put a protected `RIVUNE_ENCRYPTION_KEYS` recovery copy containing every version
+referenced by the selected database into `.env`; the script may restart Rivune
+after the ledger check, and encrypted rows cannot be recovered with a newer key
+alone. Select the backup ID from the separate operator-controlled record, never
+from the adjacent manifest:
 
 ```sh
 export COMPOSE_FILE=deploy/caddy/compose.yaml
@@ -555,6 +666,11 @@ the ledger check in `${RIVUNE_BACKUP_STATE_FILE}.audit`, and never lowers the
 trusted high-water mark. Any later restore of that generation therefore requires
 another explicit rollback authorization. Protect and retain the audit file with
 the state file.
+
+The rollback database can reference encryption-key versions no longer used by
+the current database. Restore the selected archive's matching keyring versions
+to `.env` before invoking `--allow-rollback`; do not wait for startup decryption
+failures to discover that recovery material was discarded.
 
 Archives created with a v1 manifest or the previous detached-archive-signature
 format have no signed size. They are rejected unless the operator supplies
@@ -616,8 +732,10 @@ unset COMPOSE_FILE RIVUNE_SERVICE
 ```
 
 Keep the original archive, manifest, signature, applicable trusted public key,
-external ID record, protected generation state, and audit log until application
-login, profiles, collections, and playback history have been checked.
+matching Rivune encryption-key versions, external ID record, protected
+generation state, and audit log until application login, integration statuses,
+profiles, collections, tracking connections, and playback history have been
+checked.
 
 ## Migration and proxy validation
 
