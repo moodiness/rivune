@@ -157,7 +157,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Test private POSIX environment-file creation
         run: bash scripts/create-env_test.sh
-      - name: Validate deployment Compose manifests
+      - name: Validate CPU-only and optional AMD/Intel Compose modes
         env:
           RIVUNE_DATABASE_PASSWORD: compose-validation-database-password
           RIVUNE_POSTGRES_SUPERUSER_PASSWORD: compose-validation-superuser-password
@@ -172,10 +172,25 @@ jobs:
             docker compose -f "${manifest}" config --quiet
             docker compose -f "${manifest}" config --format json | jq -e '
               (.services.rivune.environment | has("RIVUNE_ALLOW_TRANSCODING")) and
+              (.services.rivune.environment | has("RIVUNE_VIDEO_GROUP_ID") | not) and
+              (.services.rivune | has("devices") | not) and
+              (.services.rivune | has("group_add") | not)
+            ' >/dev/null
+
+            docker compose -f "${manifest}" -f compose.amd-intel.yaml config --quiet
+            docker compose -f "${manifest}" -f compose.amd-intel.yaml config --format json | jq -e '
               .services.rivune.environment.RIVUNE_VIDEO_GROUP_ID == "109" and
-              .services.rivune.devices == [{"source":"/dev/dri/renderD129","target":"/dev/dri/renderD128","permissions":"rwm"}]
+              .services.rivune.devices == [{"source":"/dev/dri/renderD129","target":"/dev/dri/renderD128","permissions":"rwm"}] and
+              .services.rivune.group_add == ["109"]
             ' >/dev/null
           done
+
+          docker compose -f compose.yaml config --format json | jq -e '
+            (.services.rivune.networks | keys | sort) == ["database", "edge"] and
+            (.services.postgres.networks | keys) == ["database"] and
+            .networks.database.internal == true and
+            .networks.edge.name == "rivune-edge"
+          ' >/dev/null
       - name: Test PostgreSQL backup hardening
         run: bash scripts/postgres-backup_test.sh
       - name: Set up Docker Buildx
@@ -193,10 +208,15 @@ jobs:
             VERSION=ci-${{ github.sha }}
       - name: Test container identity and video group
         run: |
+          test "$(docker run --rm -e PUID=10001 -e PGID=10002 rivune-ci:current id -G)" = 10002
           test "$(docker run --rm -e PUID=10001 -e PGID=10002 -e RIVUNE_VIDEO_GROUP_ID=109 rivune-ci:current id -u)" = 10001
           test "$(docker run --rm -e PUID=10001 -e PGID=10002 -e RIVUNE_VIDEO_GROUP_ID=109 rivune-ci:current id -g)" = 10002
           docker run --rm -e PUID=10001 -e PGID=10002 -e RIVUNE_VIDEO_GROUP_ID=109 rivune-ci:current id -G |
             tr ' ' '\n' | grep -qx 109
+      - name: Test Unraid and Pangolin CPU-only startup
+        env:
+          RIVUNE_IMAGE: rivune-ci:current
+        run: bash scripts/ci/unraid-smoke.sh
       - name: Test clean-install and upgrade migrations
         env:
           RIVUNE_IMAGE: rivune-ci:current

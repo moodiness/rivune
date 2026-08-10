@@ -117,6 +117,32 @@ func TestLoadUsesLegacyTrackingKeyOnlyAsVersionOneKeyring(t *testing.T) {
 	}
 }
 
+func TestLoadExplainsLegacyTrackingKeyRecovery(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "missing", want: "for a legacy upgrade restore the existing RIVUNE_TRACKING_ENCRYPTION_KEY"},
+		{name: "invalid", value: strings.Repeat("z", 64), want: "restore the existing key from backup"},
+		{name: "all zero", value: strings.Repeat("0", 64), want: "must not be all zero"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv("RIVUNE_ENCRYPTION_KEYS", "")
+			t.Setenv("RIVUNE_TRACKING_ENCRYPTION_KEY", test.value)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load error = %v, want text %q", err, test.want)
+			}
+			if test.value != "" && strings.Contains(err.Error(), test.value) {
+				t.Fatal("Load error exposed legacy key material")
+			}
+		})
+	}
+}
+
 func TestLoadDatabaseURLAddsEncodedRootCertificate(t *testing.T) {
 	setRequiredEnvironment(t)
 	t.Setenv("RIVUNE_DATABASE_URL", "")
@@ -172,87 +198,117 @@ func TestLoadRequiresExplicitDatabaseSSLModeForComponentConfiguration(t *testing
 	}
 }
 
-func TestUnraidTemplateRequiresVerifiedPostgreSQLTLS(t *testing.T) {
+func TestUnraidTemplateSupportsCommonAndHardenedDeploymentModes(t *testing.T) {
 	templatePath := filepath.Join("..", "..", "..", "templates", "unraid", "rivune.xml")
 	content, err := os.ReadFile(templatePath)
 	if err != nil {
 		t.Fatalf("read Unraid template: %v", err)
 	}
 
+	type configSpec struct {
+		Name        string
+		Description string
+		Default     string
+		Display     string
+		Mode        string
+		Type        string
+		Required    string
+		Value       string
+	}
 	var template struct {
 		Overview string `xml:"Overview"`
 		Requires string `xml:"Requires"`
 		Configs  []struct {
-			Name     string `xml:"Name,attr"`
-			Target   string `xml:"Target,attr"`
-			Default  string `xml:"Default,attr"`
-			Mode     string `xml:"Mode,attr"`
-			Type     string `xml:"Type,attr"`
-			Required string `xml:"Required,attr"`
-			Value    string `xml:",chardata"`
+			Name        string `xml:"Name,attr"`
+			Target      string `xml:"Target,attr"`
+			Description string `xml:"Description,attr"`
+			Default     string `xml:"Default,attr"`
+			Display     string `xml:"Display,attr"`
+			Mode        string `xml:"Mode,attr"`
+			Type        string `xml:"Type,attr"`
+			Required    string `xml:"Required,attr"`
+			Value       string `xml:",chardata"`
 		} `xml:"Config"`
 	}
 	if err := xml.Unmarshal(content, &template); err != nil {
 		t.Fatalf("parse Unraid template XML: %v", err)
 	}
 
-	configs := make(map[string]struct {
-		Name     string
-		Default  string
-		Mode     string
-		Type     string
-		Required string
-		Value    string
-	}, len(template.Configs))
+	configs := make(map[string]configSpec, len(template.Configs))
 	for _, config := range template.Configs {
 		if _, exists := configs[config.Target]; exists {
 			t.Fatalf("duplicate Unraid config target %q", config.Target)
 		}
-		configs[config.Target] = struct {
-			Name     string
-			Default  string
-			Mode     string
-			Type     string
-			Required string
-			Value    string
-		}{config.Name, config.Default, config.Mode, config.Type, config.Required, strings.TrimSpace(config.Value)}
+		configs[config.Target] = configSpec{
+			Name:        config.Name,
+			Description: config.Description,
+			Default:     config.Default,
+			Display:     config.Display,
+			Mode:        config.Mode,
+			Type:        config.Type,
+			Required:    config.Required,
+			Value:       strings.TrimSpace(config.Value),
+		}
 	}
 
-	sslMode, ok := configs["RIVUNE_DATABASE_SSLMODE"]
-	if !ok {
-		t.Fatal("Unraid template is missing RIVUNE_DATABASE_SSLMODE")
+	sslMode := configs["RIVUNE_DATABASE_SSLMODE"]
+	if sslMode.Default != "disable|verify-full" || sslMode.Value != "disable" || sslMode.Type != "Variable" || sslMode.Required != "true" || !strings.Contains(sslMode.Description, "verify-full") {
+		t.Fatalf("unexpected Unraid PostgreSQL SSL mode config: %+v", sslMode)
 	}
-	if sslMode.Default != "verify-full" || sslMode.Value != "verify-full" || sslMode.Type != "Variable" || sslMode.Required != "true" {
-		t.Fatalf("unsafe Unraid PostgreSQL SSL mode config: %+v", sslMode)
+	databasePort := configs["RIVUNE_DATABASE_PORT"]
+	if databasePort.Type != "Variable" || databasePort.Required != "false" || databasePort.Default != "" || databasePort.Value != "" {
+		t.Fatalf("PostgreSQL port does not use its safe default: %+v", databasePort)
 	}
 
 	const containerCAPath = "/run/rivune-postgres-tls/ca.crt"
-	caMount, ok := configs[containerCAPath]
-	if !ok {
-		t.Fatalf("Unraid template is missing CA mount %q", containerCAPath)
+	caMount := configs[containerCAPath]
+	if caMount.Type != "Path" || caMount.Mode != "ro" || caMount.Required != "false" || caMount.Default != "" || caMount.Value != "" {
+		t.Fatalf("PostgreSQL CA mount is not optional: %+v", caMount)
 	}
-	if caMount.Type != "Path" || caMount.Mode != "ro" || caMount.Required != "true" || caMount.Default == "" || caMount.Value != caMount.Default {
-		t.Fatalf("unsafe Unraid PostgreSQL CA mount config: %+v", caMount)
+	rootCertificate := configs["RIVUNE_DATABASE_SSLROOTCERT"]
+	if rootCertificate.Type != "Variable" || rootCertificate.Required != "false" || rootCertificate.Default != "" || rootCertificate.Value != "" || !strings.Contains(rootCertificate.Description, containerCAPath) {
+		t.Fatalf("PostgreSQL root certificate is not optional: %+v", rootCertificate)
 	}
 
-	rootCertificate, ok := configs["RIVUNE_DATABASE_SSLROOTCERT"]
-	if !ok {
-		t.Fatal("Unraid template is missing RIVUNE_DATABASE_SSLROOTCERT")
+	if _, exists := configs["8080"]; exists {
+		t.Fatal("an empty optional Unraid Port would publish a random host port")
 	}
-	if rootCertificate.Default != containerCAPath || rootCertificate.Value != containerCAPath ||
-		rootCertificate.Type != "Variable" || rootCertificate.Required != "true" {
-		t.Fatalf("unsafe Unraid PostgreSQL root certificate config: %+v", rootCertificate)
+	if !strings.Contains(template.Overview, "manually add a TCP Port mapping") {
+		t.Fatal("Unraid Pangolin fallback does not explain manual host port mapping")
+	}
+
+	if _, exists := configs["/dev/dri/renderD128"]; exists {
+		t.Fatal("an empty optional Unraid Device would produce an invalid Docker argument")
+	}
+	videoGroup := configs["RIVUNE_VIDEO_GROUP_ID"]
+	if videoGroup.Type != "Variable" || videoGroup.Required != "false" || videoGroup.Default != "" || videoGroup.Value != "" {
+		t.Fatalf("AMD/Intel render group is not optional: %+v", videoGroup)
+	}
+
+	keyring := configs["RIVUNE_ENCRYPTION_KEYS"]
+	for _, guidance := range []string{"openssl rand -hex 32", "Legacy upgrade", "never generate a replacement"} {
+		if !strings.Contains(keyring.Description, guidance) {
+			t.Fatalf("Unraid keyring guidance does not mention %q", guidance)
+		}
+	}
+	if keyring.Required != "true" || keyring.Type != "Variable" {
+		t.Fatalf("unexpected Unraid keyring config: %+v", keyring)
+	}
+
+	trustedProxies := configs["RIVUNE_TRUSTED_PROXIES"]
+	if trustedProxies.Required != "false" || !strings.Contains(trustedProxies.Description, "Newt") {
+		t.Fatalf("unexpected trusted proxy config: %+v", trustedProxies)
 	}
 
 	networkGuidance := strings.ToLower(template.Overview + " " + template.Requires)
-	for _, required := range []string{"separate", "edge", "database"} {
+	for _, required := range []string{"database-only", "pangolin", "optional", "verify-full"} {
 		if !strings.Contains(networkGuidance, required) {
-			t.Fatalf("Unraid network guidance does not mention %q", required)
+			t.Fatalf("Unraid guidance does not mention %q", required)
 		}
 	}
-	for _, unsafe := range []string{"same custom docker network", "shared custom docker network"} {
+	for _, unsafe := range []string{"same custom docker network", "shared custom docker network", "0.0.0.0/0"} {
 		if strings.Contains(networkGuidance, unsafe) {
-			t.Fatalf("Unraid network guidance recommends unsafe shared network wording %q", unsafe)
+			t.Fatalf("Unraid guidance contains unsafe network wording %q", unsafe)
 		}
 	}
 }

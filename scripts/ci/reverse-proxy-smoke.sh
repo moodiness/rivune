@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+  export MSYS2_ARG_CONV_EXCL='/data;/probe.py'
+fi
+
 IMAGE="${RIVUNE_IMAGE:-rivune-ci:current}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:18-trixie}"
 CADDY_IMAGE="${CADDY_IMAGE:-caddy:2.10.2-alpine}"
@@ -86,6 +90,8 @@ docker run -d --name "${RIVUNE}" --network "${NETWORK}" --network-alias rivune \
   -e RIVUNE_PUBLIC_URL=https://localhost \
   -e RIVUNE_TRUSTED_PROXIES=172.16.0.0/12 \
   "${IMAGE}" >/dev/null
+wait_for_internal_health
+docker restart "${RIVUNE}" >/dev/null
 wait_for_internal_health
 start_caddy
 

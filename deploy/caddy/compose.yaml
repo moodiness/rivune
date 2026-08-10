@@ -76,7 +76,6 @@ services:
       RIVUNE_ENCRYPTION_KEYS: ${RIVUNE_ENCRYPTION_KEYS:-}
       PUID: ${PUID:-65532}
       PGID: ${PGID:-65532}
-      RIVUNE_VIDEO_GROUP_ID: ${RIVUNE_VIDEO_GROUP_ID:?Set RIVUNE_VIDEO_GROUP_ID to the numeric group owning RIVUNE_VIDEO_DEVICE}
 
       # One-shot upgrade import only. The database always wins, and Rivune marks
       # the import complete even when these legacy inputs are empty. They are
@@ -98,10 +97,6 @@ services:
       RIVUNE_TRAKT_CLIENT_SECRET: ${RIVUNE_TRAKT_CLIENT_SECRET:-}
       RIVUNE_SIMKL_CLIENT_ID: ${RIVUNE_SIMKL_CLIENT_ID:-}
       RIVUNE_TRACKING_ENCRYPTION_KEY: ${RIVUNE_TRACKING_ENCRYPTION_KEY:-}
-    devices:
-      - "${RIVUNE_VIDEO_DEVICE:-/dev/dri/renderD128}:/dev/dri/renderD128"
-    group_add:
-      - "${RIVUNE_VIDEO_GROUP_ID:?Set RIVUNE_VIDEO_GROUP_ID to the numeric group owning RIVUNE_VIDEO_DEVICE}"
     volumes:
       - artwork_cache:/var/lib/rivune/artwork
     tmpfs:
