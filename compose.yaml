@@ -128,9 +128,9 @@ volumes:
 
 networks:
   edge:
-    name: ${RIVUNE_EDGE_NETWORK:-rivune-edge}
+    name: rivune-edge
     ipam:
       config:
-        - subnet: ${RIVUNE_EDGE_SUBNET:-172.31.0.0/24}
+        - subnet: 172.31.0.0/24
   database:
     internal: true

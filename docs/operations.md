@@ -58,15 +58,12 @@ Rivune is not published directly to the host in this configuration. PostgreSQL i
 
 The root [`compose.yaml`](../compose.yaml) is a complete CPU-only Rivune and
 PostgreSQL 18 stack. PostgreSQL is reachable only on an internal database
-network. Rivune also joins the named `rivune-edge` bridge, whose default subnet
-is `172.31.0.0/24`; PostgreSQL never joins that edge network. Set the public
+network. Rivune also joins the fixed `rivune-edge` bridge on
+`172.31.0.0/24`; PostgreSQL never joins that edge network. Set the public
 origin before starting the stack:
 
 ```dotenv
 RIVUNE_PUBLIC_URL=https://rivune.example.com
-RIVUNE_EDGE_NETWORK=rivune-edge
-RIVUNE_EDGE_SUBNET=172.31.0.0/24
-# Leave blank to use the same default edge CIDR, or set the exact custom CIDR.
 RIVUNE_TRUSTED_PROXIES=
 ```
 
@@ -105,8 +102,9 @@ These fields follow Pangolin's [public target](https://docs.pangolin.net/manage/
 
 Do not use `localhost` from Newt; it refers to Newt itself. Do not publish a
 host port when the dedicated edge network is available, and never attach Newt
-to the database network. Rivune trusts forwarded network headers only from
-`RIVUNE_TRUSTED_PROXIES`; use Newt's fixed IP or the dedicated edge CIDR, never
+to the database network. The base stack trusts forwarded network headers only
+from its fixed `172.31.0.0/24` edge CIDR. A private topology override must set
+`RIVUNE_TRUSTED_PROXIES` to Newt's exact IP or its dedicated edge CIDR, never
 the LAN, database network, all private ranges, or `0.0.0.0/0`.
 
 The Unraid XML template targets the same topology but expects an existing
