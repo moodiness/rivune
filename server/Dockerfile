@@ -24,7 +24,7 @@ RUN CGO_ENABLED=0 go build \
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg mesa-va-drivers tzdata \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg mesa-va-drivers mesa-vulkan-drivers tzdata \
     && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install -y --no-install-recommends intel-media-va-driver; \
     fi \

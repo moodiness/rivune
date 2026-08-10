@@ -68,6 +68,7 @@ type Capabilities struct {
 	MaximumHeight             int                `json:"maximumHeight,omitempty"`
 	PreferDirectPlay          *bool              `json:"-"`
 	TranscodeVideoBitrateKbps int                `json:"-"`
+	ToneMapMaximumHeight      int                `json:"-"`
 	AllowDirectPassthrough    bool               `json:"-"`
 }
 
@@ -286,6 +287,7 @@ type storedAsset struct {
 	DurationSeconds        float64           `json:"durationSeconds,omitempty"`
 	Decision               *PlaybackDecision `json:"decision,omitempty"`
 	TargetHeight           int               `json:"targetHeight,omitempty"`
+	VideoBitDepth          int               `json:"videoBitDepth,omitempty"`
 	VideoBitrateKbps       int               `json:"videoBitrateKbps,omitempty"`
 	MaximumAudioChannels   int               `json:"maximumAudioChannels,omitempty"`
 	StartSeconds           float64           `json:"-"`

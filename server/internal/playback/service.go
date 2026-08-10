@@ -1085,6 +1085,9 @@ func (service *Service) playbackCapabilities(client Capabilities, maximumHeight,
 	capabilities := cloneCapabilities(client)
 	capabilities.MaximumHeight = maximumHeight
 	capabilities.TranscodeVideoBitrateKbps = bitrateKbps
+	if processor, ok := service.processor.(interface{ HardwareToneMap() bool }); !ok || !processor.HardwareToneMap() {
+		capabilities.ToneMapMaximumHeight = softwareToneMapMaximumHeight
+	}
 	return capabilities
 }
 func normalizedHLSSegmentContainer(container string) string {

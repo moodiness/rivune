@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -60,7 +61,7 @@ func TestMediaVersionDiagnosticIsBoundedAndScrubbed(t *testing.T) {
 func TestFFmpegDiagnosticsReportEveryIndependentPool(t *testing.T) {
 	processor := &FFmpegProcessor{
 		ffmpegVersion: "7.1", ffprobeVersion: "7.1", hardwareAcceleration: "auto", threads: 6,
-		encoder: videoEncoder{kind: videoEncoderVAAPI, hardwareToneMap: true},
+		encoder: videoEncoder{kind: videoEncoderVAAPI, toneMapBackend: videoToneMapVAAPI},
 		slots:   make(chan struct{}, 4), probeSlots: make(chan struct{}, 3),
 		subtitleSlots: make(chan struct{}, 2), trickplaySlots: make(chan struct{}, 1),
 	}
@@ -362,21 +363,41 @@ func TestProcessHLSAppliesReadRate(t *testing.T) {
 	); err != nil {
 		t.Fatalf("process HLS: %v", err)
 	}
-	if _, readRate := argumentValue(captured, "-readrate"); readRate != "1.50" {
-		t.Fatalf("HLS read rate = %q, want 1.50; arguments=%v", readRate, captured)
+	if _, readRate := argumentValue(captured, "-readrate"); readRate != "1.5" {
+		t.Fatalf("HLS read rate = %q, want 1.5; arguments=%v", readRate, captured)
 	}
 	captured = nil
 	if err := processor.ProcessHLS(
 		context.Background(),
 		storedAsset{
-			URL: os.Args[0], Kind: processingTranscode, HLSSegmentContainer: "ts", DurationSeconds: 120,
+			URL: os.Args[0], Kind: processingTranscode, HLSSegmentContainer: "ts", DurationSeconds: 2 * 60 * 60,
 		},
 		t.TempDir(),
 	); err != nil {
 		t.Fatalf("process seekable HLS: %v", err)
 	}
-	if _, readRate := argumentValue(captured, "-readrate"); readRate != "1.00" {
-		t.Fatalf("seekable HLS read rate = %q, want 1.00; arguments=%v", readRate, captured)
+	wantReadRate := strconv.FormatFloat(seekableTranscodeReadRate(defaultTranscodeMaximumReadRate, 2*60*60), 'f', -1, 64)
+	if _, readRate := argumentValue(captured, "-readrate"); readRate != wantReadRate {
+		t.Fatalf("seekable HLS read rate = %q, want %s; arguments=%v", readRate, wantReadRate, captured)
+	}
+	captured = nil
+	remainingSeconds := float64(6 * 60 * 60)
+	if err := processor.ProcessHLS(
+		context.Background(),
+		storedAsset{URL: os.Args[0], Kind: processingTranscode, HLSSegmentContainer: "ts", DurationSeconds: remainingSeconds},
+		t.TempDir(),
+	); err != nil {
+		t.Fatalf("process long seekable HLS: %v", err)
+	}
+	_, serializedReadRate := argumentValue(captured, "-readrate")
+	parsedReadRate, err := strconv.ParseFloat(serializedReadRate, 64)
+	if err != nil {
+		t.Fatalf("parse serialized read rate %q: %v", serializedReadRate, err)
+	}
+	leadAtCompletion := remainingSeconds - remainingSeconds/parsedReadRate
+	windowBudgetSeconds := float64(hlsProductionLeadSegments * hlsSegmentDurationSeconds)
+	if parsedReadRate <= 1 || leadAtCompletion > windowBudgetSeconds {
+		t.Fatalf("serialized read rate %q leads by %.3fs, budget %.3fs", serializedReadRate, leadAtCompletion, windowBudgetSeconds)
 	}
 }
 
@@ -410,19 +431,24 @@ func TestProcessHLSFallsBackToSoftwareOnlyBeforePlaylistPublication(t *testing.T
 				return command
 			}
 			err := processor.ProcessHLS(context.Background(), storedAsset{
-				Kind: processingTranscode, URL: os.Args[0], HLSSegmentContainer: "ts",
-				Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{VideoCodec: "h264", Height: 1080}},
+				Kind: processingTranscode, URL: os.Args[0], HLSSegmentContainer: "ts", ToneMap: true, VideoBitDepth: 10, TargetHeight: 2160,
+				Decision: &PlaybackDecision{
+					Source: &PlaybackDecisionSource{VideoCodec: "h265", Height: 2160},
+					Target: &PlaybackDecisionTarget{VideoCodec: "h264", Height: 2160},
+				},
 			}, directory)
 			if (err != nil) != test.wantError || len(calls) != test.wantCalls {
 				t.Fatalf("ProcessHLS err=%v calls=%d want error=%t calls=%d", err, len(calls), test.wantError, test.wantCalls)
 			}
-			if !strings.Contains(strings.Join(calls[0], " "), "-c:v h264_vaapi") {
-				t.Fatalf("first attempt was not hardware: %v", calls[0])
+			first := strings.Join(calls[0], " ")
+			if !strings.Contains(first, "-c:v h264_vaapi") || !strings.Contains(first, "hwdownload,format=p010le") {
+				t.Fatalf("first attempt was not hybrid VAAPI: %v", calls[0])
 			}
 			if len(calls) == 2 {
 				fallback := strings.Join(calls[1], " ")
-				if !strings.Contains(fallback, "-c:v libx264") || strings.Contains(fallback, "h264_vaapi") || strings.Contains(fallback, "-hwaccel") {
-					t.Fatalf("fallback was not clean software argv: %v", calls[1])
+				if !strings.Contains(fallback, "-c:v libx264") || !strings.Contains(fallback, "scale=-2:1080,"+softwareToneMapFilter) ||
+					strings.Contains(fallback, "h264_vaapi") || strings.Contains(fallback, "-hwaccel") || strings.Contains(fallback, "hwdownload") {
+					t.Fatalf("fallback was not capped clean software argv: %v", calls[1])
 				}
 			}
 		})

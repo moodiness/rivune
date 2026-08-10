@@ -31,6 +31,9 @@ const (
 	hlsRetainedSegments              = 120
 	hlsDeleteThreshold               = 1
 	hlsSharedWorkerSafetySegments    = 10
+	hlsUsableWindowSegments          = hlsRetainedSegments - hlsDeleteThreshold - hlsSharedWorkerSafetySegments
+	hlsProductionLeadSegments        = hlsUsableWindowSegments / 2
+	hlsSharedJoinSegments            = hlsUsableWindowSegments - hlsProductionLeadSegments
 	hlsSeekAheadToleranceSegments    = 2
 	hlsSeekableSegmentPrefix         = "seek-"
 )
@@ -782,8 +785,7 @@ func hlsJobShareable(job *hlsJob) bool {
 	if !ok {
 		return false
 	}
-	shareableSegments := hlsRetainedSegments - hlsDeleteThreshold - hlsSharedWorkerSafetySegments
-	return shareableSegments > 0 && encodedSeconds <= float64(shareableSegments*hlsSegmentDurationSeconds)
+	return hlsSharedJoinSegments > 0 && encodedSeconds <= float64(hlsSharedJoinSegments*hlsSegmentDurationSeconds)
 }
 
 func shareableHLSMode(mode string) bool {
@@ -1021,11 +1023,11 @@ func hlsAssetFingerprint(asset storedAsset) string {
 		subtitleTrack = *asset.SubtitleTrackIndex
 	}
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%t|%t|%d|%d|%s|%d|%x|%x|%d|%d|%d|%s|%s",
+		"%s|%s|%s|%s|%t|%t|%d|%d|%s|%d|%x|%x|%d|%d|%d|%d|%s|%s",
 		mediaProbeKey(asset), asset.ID, asset.Kind, normalizedHLSSegmentContainer(asset.HLSSegmentContainer), asset.ToneMap,
 		asset.DolbyVisionToneMapSafe, audioTrack, subtitleTrack, asset.SubtitleTrackType, asset.SubtitleTrackOrdinal,
-		math.Float64bits(asset.DurationSeconds), math.Float64bits(asset.ReadRate), asset.TargetHeight, asset.VideoBitrateKbps,
-		asset.MaximumAudioChannels, hlsStartKey(asset.StartSeconds), decision,
+		math.Float64bits(asset.DurationSeconds), math.Float64bits(asset.ReadRate), asset.VideoBitDepth, asset.TargetHeight,
+		asset.VideoBitrateKbps, asset.MaximumAudioChannels, hlsStartKey(asset.StartSeconds), decision,
 	)
 }
 

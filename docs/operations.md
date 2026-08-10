@@ -328,6 +328,21 @@ the deployment and falls back to software. A failed hardware job can fall back
 before output publication; neither a saved request nor a visible device alone
 proves that hardware encoding is active.
 
+For HDR-to-SDR playback, Rivune probes the complete hardware filter path rather
+than trusting the selected encoder name. AMD deployments first try
+VAAPI-to-Vulkan `libplacebo` tone mapping; the container image includes the
+Mesa Vulkan runtime for that path. If hardware tone mapping is unavailable,
+HEVC Main 10 sources retain VAAPI decode and encode around the software tone
+mapper when the frame format is known, and new tone-mapped sessions are capped
+at 1080p to preserve real-time playback. Administration Activity reports
+`hardware tone mapping` only after the probe succeeds. A sustained job speed
+below `1.00x` still means the active pipeline cannot feed continuous playback.
+
+Seekable transcoding keeps a duration-aware production margin instead of
+running at exactly real time. The margin is bounded by the retained HLS window,
+so transient processing or network stalls can recover without evicting the
+next segment required by a continuously playing client.
+
 Both Compose targets use read-only root filesystems, a fixed 4096 MiB
 `noexec,nosuid,nodev` `/tmp` tmpfs, fixed CPU/memory limits, minimized
 capabilities, and PID ceilings. The storage filesystem can therefore impose a
