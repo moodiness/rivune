@@ -16,6 +16,7 @@ Every release tag must be an annotated `vMAJOR.MINOR.PATCH` Semantic Version poi
 3. For protocol changes, confirm the protocol version and [`protocol/openapi.yaml`](../protocol/openapi.yaml) describe the shipped behavior and supported native clients have been updated.
 4. For database changes, run the disposable clean-install and immediately-previous-version upgrade checks documented in [Production operations](operations.md#migration-and-proxy-validation).
 5. Choose the next version according to the rules above.
+6. Rewrite [`.github/release-notes.md`](../.github/release-notes.md) as product-facing notes and start it with `# Rivune vMAJOR.MINOR.PATCH` matching the chosen tag. The release gate rejects stale or mismatched notes; GitHub-generated contributor summaries are not used.
 
 Create and push one annotated tag:
 
@@ -36,7 +37,7 @@ client`, and `Container, migrations, and HTTPS proxy`. The container job also
 validates the two supported manifests, `compose.yaml` and
 `deploy/caddy/compose.yaml`, with non-secret placeholders for required values.
 
-Only a successful candidate run is authorized to proceed in `Publish release`, whose top-level permission remains `contents: read`. Its `Authorize tested release candidate` job repeats the annotated-tag and same-commit checks without write permission. Immediately before each existing write-capable job acts, the workflow resolves the annotated tag object and target commit again. `Publish multi-architecture image` alone receives `packages: write`; after it succeeds, `Create GitHub release notes` alone receives `contents: write`.
+Only a successful candidate run is authorized to proceed in `Publish release`, whose top-level permission remains `contents: read`. Its `Authorize tested release candidate` job repeats the annotated-tag and same-commit checks without write permission. Immediately before each existing write-capable job acts, the workflow resolves the annotated tag object and target commit again. `Publish multi-architecture image` alone receives `packages: write`; after it succeeds, `Create GitHub release notes` alone receives `contents: write` and publishes the curated file from the tested commit.
 
 To reproduce the two Compose policy checks locally with disposable, non-production values, run exactly:
 
@@ -102,7 +103,7 @@ sha-<short-commit>
 latest
 ```
 
-A prerelease such as `v2.0.0-rc.1` receives its full SemVer and SHA tags, but does not move the stable major, minor, or `latest` aliases. The workflow then creates the matching GitHub Release with automatically generated notes. A stable release is explicitly marked as GitHub's latest release; a prerelease is not. If image publication fails, no GitHub Release is created.
+A prerelease such as `v2.0.0-rc.1` receives its full SemVer and SHA tags, but does not move the stable major, minor, or `latest` aliases. The workflow then creates the matching GitHub Release from the curated notes committed at the tested tag. A stable release is explicitly marked as GitHub's latest release; a prerelease is not. If image publication fails, no GitHub Release is created.
 
 Verify the release and its OCI attestations after the workflow completes:
 
