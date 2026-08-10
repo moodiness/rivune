@@ -39,7 +39,7 @@ if [[ "$1" == "run" || "$1" == "cp" || "$1" == "rm" ]]; then
   exit 0
 fi
 if [[ "$1" == "compose" && "$2" == "ps" ]]; then
-  [[ "${FAKE_SERVER_RUNNING:-0}" != "1" ]] || printf 'server\n'
+  [[ "${FAKE_SERVER_RUNNING:-0}" != "1" ]] || printf 'rivune\n'
   exit 0
 fi
 if [[ "$1" == "compose" && ( "$2" == "stop" || "$2" == "up" ) ]]; then
@@ -377,8 +377,8 @@ if PATH="${TEST_DIR}/bin:${PATH}" \
   echo "production restore ignored a controlled pg_restore failure" >&2
   exit 1
 fi
-if ! grep -q -- 'compose stop server' "${DOCKER_LOG}" || \
-   grep -q -- 'compose up -d server' "${DOCKER_LOG}"; then
+if ! grep -q -- 'compose stop rivune' "${DOCKER_LOG}" || \
+   grep -q -- 'compose up -d rivune' "${DOCKER_LOG}"; then
   echo "failed destructive restore did not leave Rivune stopped" >&2
   exit 1
 fi

@@ -50,7 +50,7 @@ cleanup() {
     STATE_LOCKED=false
   fi
   if [[ "${server_was_running}" == true && "${restore_started}" == false ]]; then
-    docker compose up -d "${RIVUNE_SERVICE:-server}" >/dev/null
+    docker compose up -d "${RIVUNE_SERVICE:-rivune}" >/dev/null
   elif [[ "${server_was_running}" == true ]]; then
     echo "Restore failed after the database replacement began; Rivune remains stopped" >&2
   fi
@@ -136,7 +136,7 @@ else
   fi
 fi
 
-RIVUNE_SERVICE="${RIVUNE_SERVICE:-server}"
+RIVUNE_SERVICE="${RIVUNE_SERVICE:-rivune}"
 if docker compose ps --status running --services | grep -qx "${RIVUNE_SERVICE}"; then
   server_was_running=true
 fi
