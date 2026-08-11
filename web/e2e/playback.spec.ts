@@ -70,6 +70,13 @@ async function installDeterministicMedia(page: Page, duration = 1800) {
 
 test("player resumes, selects tracks, and autoplays the next episode", async ({ page, rivune }) => {
   await installDeterministicMedia(page);
+  await page.addInitScript(() => {
+    const nativeCanPlayType = HTMLMediaElement.prototype.canPlayType;
+    HTMLMediaElement.prototype.canPlayType = function (mediaType: string) {
+      if (mediaType.includes("hvc1.2.4.L153.B0")) return "probably";
+      return nativeCanPlayType.call(this, mediaType);
+    };
+  });
   await page.goto("/");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
 
@@ -108,10 +115,13 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   });
   expect(sourceRequest.body.capabilities).not.toHaveProperty("maximumHeight");
   expect(sourceRequest.body.capabilities).not.toHaveProperty("maximumVideoBitrateKbps");
-  const mediaProfiles = sourceRequest.body.capabilities.mediaProfiles as Array<{ videoCodec: string; maximumVideoBitDepth?: number }>;
+  const mediaProfiles = sourceRequest.body.capabilities.mediaProfiles as Array<{ videoCodec: string; audioCodec?: string; maximumVideoBitDepth?: number }>;
   expect(mediaProfiles.every((profile) => profile.maximumVideoBitDepth === 8 || profile.maximumVideoBitDepth === 10)).toBe(true);
   const supportsHEVCMain10 = await page.evaluate(() => Boolean(document.createElement("video").canPlayType('video/mp4; codecs="hvc1.2.4.L153.B0"')));
   expect(mediaProfiles.some((profile) => profile.videoCodec === "h265" && profile.maximumVideoBitDepth === 10)).toBe(supportsHEVCMain10);
+  expect(mediaProfiles.some((profile) => profile.videoCodec === "h265" && profile.audioCodec === "aac" && profile.maximumVideoBitDepth === 10)).toBe(true);
+  expect(await page.evaluate(() => window.matchMedia("(dynamic-range: high)").matches)).toBe(false);
+  expect(sourceRequest.body.capabilities.hdrFormats).toEqual(expect.arrayContaining(["hdr10", "hlg"]));
   await expect(page.getByRole("button", { name: "Play episode" })).toBeEnabled();
 
   const preparation = await rivune.waitForRequest("/api/v1/playback/prepare", "POST");
