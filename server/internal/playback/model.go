@@ -262,6 +262,7 @@ type PlaybackDecisionSource struct {
 	Height                     int    `json:"height,omitempty"`
 	VideoBitrateKbps           int    `json:"videoBitrateKbps,omitempty"`
 	HDRFormat                  string `json:"hdrFormat,omitempty"`
+	DolbyVisionProfile         int    `json:"-"`
 	DolbyVisionBLPresent       bool   `json:"-"`
 	DolbyVisionCompatibilityID int    `json:"-"`
 }

@@ -230,6 +230,7 @@ func decisionSource(inspection MediaInspection) *PlaybackDecisionSource {
 		source.VideoCodec = normalizedCodec(video.Codec)
 		source.Height = video.Height
 		source.VideoBitrateKbps = video.BitrateKbps
+		source.DolbyVisionProfile = video.DolbyVisionProfile
 		source.DolbyVisionBLPresent = video.DolbyVisionBLPresent
 		source.DolbyVisionCompatibilityID = video.DolbyVisionCompatibilityID
 	}
@@ -261,7 +262,7 @@ func applyPlaybackDecision(sources []Source, assets []storedAsset, candidate sou
 		asset.ToneMap = decision.ToneMapping
 		asset.DolbyVisionToneMapSafe = decision.Source == nil ||
 			!strings.EqualFold(strings.TrimSpace(decision.Source.HDRFormat), "dolby_vision") ||
-			decision.Source.DolbyVisionBLPresent && decision.Source.DolbyVisionCompatibilityID > 0
+			dolbyVisionBaseHDRFormat(decision.Source.DolbyVisionProfile, decision.Source.DolbyVisionBLPresent, decision.Source.DolbyVisionCompatibilityID) != ""
 		if decision.Target != nil {
 			asset.TargetHeight = decision.Target.Height
 			asset.VideoBitrateKbps = decision.Target.VideoBitrateKbps
@@ -482,6 +483,13 @@ func transcodeMediaProfileSupportsBitDepth(profile MediaProfile, codec string, a
 
 func sourceHDRNeedsBitDepthToneMap(inspection MediaInspection, targetBitDepth int) bool {
 	format := strings.ToLower(strings.TrimSpace(inspection.HDRFormat))
+	if format == "dolby_vision" {
+		if video := primaryTrack(inspection.VideoTracks); video != nil {
+			if baseFormat := dolbyVisionBaseHDRFormat(video.DolbyVisionProfile, video.DolbyVisionBLPresent, video.DolbyVisionCompatibilityID); baseFormat != "" {
+				format = baseFormat
+			}
+		}
+	}
 	return targetBitDepth <= 8 && format != "" && format != "sdr"
 }
 func videoTranscodeNeedsToneMapping(inspection MediaInspection, capabilities Capabilities, audio *MediaTrack) bool {
@@ -726,14 +734,44 @@ func videoWithinClientLimits(video *MediaTrack, hdrFormat string, capabilities C
 }
 
 func clientSupportsHDR(format string, capabilities Capabilities) bool {
-	return format == "" || len(capabilities.HDRFormats) > 0 && supports(capabilities.HDRFormats, format)
+	format = strings.ToLower(strings.TrimSpace(format))
+	return format == "" || format == "sdr" || len(capabilities.HDRFormats) > 0 && supports(capabilities.HDRFormats, format)
+}
+
+func dolbyVisionBaseHDRFormat(profile int, baseLayerPresent bool, compatibilityID int) string {
+	if profile == 5 || !baseLayerPresent {
+		return ""
+	}
+	switch compatibilityID {
+	case 1:
+		return "hdr10"
+	case 2:
+		return "sdr"
+	case 4:
+		return "hlg"
+	default:
+		return ""
+	}
 }
 
 func clientSupportsVideoHDR(video *MediaTrack, format string, capabilities Capabilities) bool {
+	format = strings.ToLower(strings.TrimSpace(format))
 	if clientSupportsHDR(format, capabilities) {
 		return true
 	}
-	switch strings.ToLower(strings.TrimSpace(format)) {
+	if format == "dolby_vision" {
+		if video == nil {
+			return false
+		}
+		format = dolbyVisionBaseHDRFormat(video.DolbyVisionProfile, video.DolbyVisionBLPresent, video.DolbyVisionCompatibilityID)
+		if format == "" {
+			return false
+		}
+		if clientSupportsHDR(format, capabilities) {
+			return true
+		}
+	}
+	switch format {
 	case "hdr10", "hlg":
 		for _, profile := range capabilities.MediaProfiles {
 			if profile.DirectPlay && profile.SupportsNonDolbyVisionHDR && video != nil && normalizedCodec(profile.VideoCodec) == normalizedCodec(video.Codec) {
