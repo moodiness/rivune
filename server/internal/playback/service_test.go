@@ -1509,6 +1509,58 @@ func TestHighBitrateHEVCUsesAudioOnlyTranscodeWhenClientDeclaresDecode(t *testin
 	}
 }
 
+func TestDolbyVisionHDR10BaseUsesAudioOnlyTranscode(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h265", "h264"}, AudioCodecs: []string{"aac"},
+		HDRFormats: []string{"sdr", "hdr10", "hlg"}, ProcessingModes: []string{processingTranscodeAudio, processingTranscode},
+		MediaProfiles: []MediaProfile{
+			{Container: "mp4", VideoCodec: "h265", AudioCodec: "aac", Transcoding: true, MaximumVideoBitDepth: 10},
+			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true, MaximumVideoBitDepth: 8},
+		},
+		transcodeCapabilities: TranscodeCapabilities{EncodeCodecs: []string{"h264"}},
+	}
+	inspection := MediaInspection{
+		Container: "mkv", HDRFormat: "dolby_vision", BitrateKbps: 60_000,
+		VideoTracks: []MediaTrack{{
+			Codec: "h265", Height: 2160, BitDepth: 10, BitrateKbps: 60_000,
+			DolbyVisionProfile: 8, DolbyVisionBLPresent: true, DolbyVisionCompatibilityID: 1,
+		}},
+		AudioTracks: []MediaTrack{{Codec: "truehd", Channels: 8}},
+	}
+	mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, inspection, capabilities)
+	if mode != processingTranscodeAudio || decision == nil || decision.VideoAction != "copy" || decision.AudioAction != "transcode" || decision.ToneMapping ||
+		decision.Target == nil || decision.Target.VideoCodec != "h265" || decision.Target.VideoBitDepth != 10 || decision.Target.AudioCodec != "aac" {
+		t.Fatalf("HDR10-compatible Dolby Vision base was not copied: mode=%q decision=%+v", mode, decision)
+	}
+	inspection.VideoTracks[0].DolbyVisionProfile = 5
+	inspection.VideoTracks[0].DolbyVisionCompatibilityID = 1
+	if mode, decision = playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, inspection, capabilities); mode != "" || decision != nil {
+		t.Fatalf("Dolby Vision profile 5 without compatible base was accepted: mode=%q decision=%+v", mode, decision)
+	}
+}
+
+func TestDolbyVisionBaseHDRFormatRecognizesKnownCompatibilityIDs(t *testing.T) {
+	tests := []struct {
+		profile          int
+		baseLayerPresent bool
+		compatibilityID  int
+		want             string
+	}{
+		{profile: 8, baseLayerPresent: false, compatibilityID: 1},
+		{profile: 8, baseLayerPresent: true, compatibilityID: 0},
+		{profile: 8, baseLayerPresent: true, compatibilityID: 1, want: "hdr10"},
+		{profile: 8, baseLayerPresent: true, compatibilityID: 2, want: "sdr"},
+		{profile: 8, baseLayerPresent: true, compatibilityID: 4, want: "hlg"},
+		{profile: 8, baseLayerPresent: true, compatibilityID: 3},
+		{profile: 5, baseLayerPresent: true, compatibilityID: 1},
+	}
+	for _, test := range tests {
+		if got := dolbyVisionBaseHDRFormat(test.profile, test.baseLayerPresent, test.compatibilityID); got != test.want {
+			t.Errorf("profile=%d base=%t compatibility=%d format=%q want=%q", test.profile, test.baseLayerPresent, test.compatibilityID, got, test.want)
+		}
+	}
+}
+
 func TestCodecProfileConditionsSelectDirectOrHLSFromInspectedMedia(t *testing.T) {
 	base := Capabilities{
 		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"},
@@ -1752,19 +1804,21 @@ func TestFullTranscodeToneMappingUsesVideoHDRProfileSupport(t *testing.T) {
 	}
 	for _, test := range []struct {
 		name, hdr                  string
+		dolbyVisionProfile         int
 		dolbyVisionBLPresent       bool
 		dolbyVisionCompatibilityID int
 		wantTone                   bool
 	}{
 		{name: "HDR10 profile support still tone maps to Main 8", hdr: "hdr10", wantTone: true},
 		{name: "HLG profile support still tone maps to Main 8", hdr: "hlg", wantTone: true},
-		{name: "Dolby Vision with compatible base layer tone maps", hdr: "dolby_vision", dolbyVisionBLPresent: true, dolbyVisionCompatibilityID: 1, wantTone: true},
+		{name: "Dolby Vision HDR10 base tone maps to Main 8", hdr: "dolby_vision", dolbyVisionProfile: 8, dolbyVisionBLPresent: true, dolbyVisionCompatibilityID: 1, wantTone: true},
+		{name: "Dolby Vision SDR base stays SDR", hdr: "dolby_vision", dolbyVisionProfile: 8, dolbyVisionBLPresent: true, dolbyVisionCompatibilityID: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, MediaInspection{
 				Container: "mkv", HDRFormat: test.hdr,
 				VideoTracks: []MediaTrack{{
-					Codec: "h265", Height: 1080, DolbyVisionBLPresent: test.dolbyVisionBLPresent,
+					Codec: "h265", Height: 1080, DolbyVisionProfile: test.dolbyVisionProfile, DolbyVisionBLPresent: test.dolbyVisionBLPresent,
 					DolbyVisionCompatibilityID: test.dolbyVisionCompatibilityID,
 				}},
 				AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},

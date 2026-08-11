@@ -366,15 +366,14 @@ func hlsSegmentAudioCopySupported(codec, segmentContainer string) bool {
 	}
 }
 
-// Generic FFmpeg tone mapping can consume HDR10/HLG. Dolby Vision is different:
-// a profile-5 BL is not HDR10, so a usable base is proven only when FFprobe
-// reports both the BL and a non-zero BL signal compatibility identifier.
+// Generic FFmpeg tone mapping can consume only recognized HDR10, HLG, or SDR
+// Dolby Vision base layers. Profile 5 and unknown compatibility IDs fail closed.
 func genericToneMappingSupported(inspection MediaInspection) bool {
 	if !strings.EqualFold(strings.TrimSpace(inspection.HDRFormat), "dolby_vision") {
 		return true
 	}
 	video := primaryTrack(inspection.VideoTracks)
-	return video != nil && video.DolbyVisionBLPresent && video.DolbyVisionCompatibilityID > 0
+	return video != nil && dolbyVisionBaseHDRFormat(video.DolbyVisionProfile, video.DolbyVisionBLPresent, video.DolbyVisionCompatibilityID) != ""
 }
 
 func setSubtitleAction(sources []Source, assets []storedAsset, action string) {
