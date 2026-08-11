@@ -12,7 +12,7 @@ func TestDecodeSettingsPatchPreservesAllRuntimeAssignments(t *testing.T) {
 		"timezone":"Europe/Paris",
 		"jellyfinEnabled":true,
 		"jellyfinDebug":true,
-		"hardwareAcceleration":"qsv",
+		"hardwareAcceleration":"hybrid",
 		"transcodeMaxBitrateKbps":18000,
 		"mediaMaxStorageMB":4096,
 		"artworkMaxStorageMB":2048,
@@ -27,7 +27,7 @@ func TestDecodeSettingsPatchPreservesAllRuntimeAssignments(t *testing.T) {
 	if !patch.Timezone.Set || patch.Timezone.Value == nil || *patch.Timezone.Value != "Europe/Paris" ||
 		!patch.JellyfinEnabled.Set || patch.JellyfinEnabled.Value == nil || !*patch.JellyfinEnabled.Value ||
 		!patch.JellyfinDebug.Set || patch.JellyfinDebug.Value == nil || !*patch.JellyfinDebug.Value ||
-		!patch.HardwareAcceleration.Set || patch.HardwareAcceleration.Value == nil || *patch.HardwareAcceleration.Value != "qsv" ||
+		!patch.HardwareAcceleration.Set || patch.HardwareAcceleration.Value == nil || *patch.HardwareAcceleration.Value != "hybrid" ||
 		!patch.TranscodeMaxBitrateKbps.Set || patch.TranscodeMaxBitrateKbps.Value == nil || *patch.TranscodeMaxBitrateKbps.Value != 18000 ||
 		!patch.MediaMaxStorageMB.Set || patch.MediaMaxStorageMB.Value == nil || *patch.MediaMaxStorageMB.Value != 4096 ||
 		!patch.ArtworkMaxStorageMB.Set || patch.ArtworkMaxStorageMB.Value == nil || *patch.ArtworkMaxStorageMB.Value != 2048 ||

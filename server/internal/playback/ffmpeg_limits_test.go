@@ -88,6 +88,13 @@ func TestFFmpegDiagnosticsReportEveryIndependentPool(t *testing.T) {
 	if software.HardwareToneMap || software.ToneMapBackend != "software" {
 		t.Fatalf("software tone-map diagnostics = %+v", software)
 	}
+	hybrid := (&FFmpegProcessor{
+		hardwareAcceleration: "hybrid",
+		encoder:              videoEncoder{kind: videoEncoderVAAPI, toneMapBackend: videoToneMapHybrid},
+	}).PlaybackDiagnostics()
+	if hybrid.HardwareAcceleration != "hybrid" || hybrid.VideoEncoder != "vaapi" || hybrid.HardwareToneMap || hybrid.ToneMapBackend != "hybrid" {
+		t.Fatalf("hybrid diagnostics = %+v", hybrid)
+	}
 }
 
 func TestMaximumWriterStopsConvertedSubtitleAtLimit(t *testing.T) {

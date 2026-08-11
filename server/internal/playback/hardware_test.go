@@ -106,8 +106,9 @@ func TestVAAPIUsesHardwareToneMappingOnlyAfterSuccessfulProbe(t *testing.T) {
 		t.Fatalf("VAAPI tone-map capability should use the hardware filter: %q", hardwareFilter)
 	}
 	vulkanFilter := videoEncoder{kind: videoEncoderVAAPI, toneMapBackend: videoToneMapVulkan}.filter(true)
-	if !strings.Contains(vulkanFilter, "libplacebo=") || !strings.Contains(vulkanFilter, "hwmap=derive_device=vulkan") || strings.Contains(vulkanFilter, "zscale") {
-		t.Fatalf("Vulkan tone-map capability should use libplacebo surfaces: %q", vulkanFilter)
+	wantVulkanFilter := "format=p010,setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,hwupload,hwmap=derive_device=vulkan:mode=read+direct,format=vulkan,libplacebo=upscaler=none:downscaler=none:format=nv12:tonemapping=bt.2390:peak_detect=false:color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,hwmap=derive_device=vaapi:mode=read+direct,format=vaapi"
+	if vulkanFilter != wantVulkanFilter {
+		t.Fatalf("Vulkan tone-map capability filter = %q, want %q", vulkanFilter, wantVulkanFilter)
 	}
 }
 
@@ -148,6 +149,65 @@ func TestDetectVideoEncoderRejectsUnknownModeBeforeProbe(t *testing.T) {
 	}
 }
 
+func TestHybridVideoEncoderRequiresVAAPIProbeWithoutHardwareToneMapDetection(t *testing.T) {
+	var probed videoEncoder
+	var probedToneMap bool
+	detectedHardwareToneMap := false
+	encoder, err := detectExplicitVideoEncoder("hybrid", "/dev/dri/renderD128", func(candidate videoEncoder, toneMap bool) error {
+		probed = candidate
+		probedToneMap = toneMap
+		return nil
+	}, func(candidate videoEncoder) videoEncoder {
+		detectedHardwareToneMap = true
+		return candidate
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probed.kind != videoEncoderVAAPI || probed.device != "/dev/dri/renderD128" || probed.toneMapBackend != videoToneMapHybrid || !probedToneMap {
+		t.Fatalf("hybrid probe = %+v toneMap=%t", probed, probedToneMap)
+	}
+	if encoder.kind != videoEncoderVAAPI || encoder.toneMapBackend != videoToneMapHybrid || encoder.usesHardwareToneMap() || encoder.normalizedToneMapBackend() != videoToneMapHybrid || detectedHardwareToneMap {
+		t.Fatalf("hybrid encoder = %+v hardwareToneMap=%t detected=%t", encoder, encoder.usesHardwareToneMap(), detectedHardwareToneMap)
+	}
+
+	_, err = detectExplicitVideoEncoder("hybrid", "/dev/dri/renderD128", func(videoEncoder, bool) error {
+		return errors.New("VAAPI unavailable")
+	}, func(candidate videoEncoder) videoEncoder {
+		detectedHardwareToneMap = true
+		return candidate
+	})
+	if err == nil || !strings.Contains(err.Error(), "initialize hybrid video encoder") || detectedHardwareToneMap {
+		t.Fatalf("missing VAAPI hybrid probe error = %v hardware detection=%t", err, detectedHardwareToneMap)
+	}
+}
+
+func TestHybridVideoEncoderProbeExercisesMain10DecodeAndReadback(t *testing.T) {
+	encoder := videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", toneMapBackend: videoToneMapHybrid}
+	arguments, input, err := videoEncoderProbeArguments(encoder, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(arguments, " ")
+	for _, expected := range []string{
+		"-init_hw_device vaapi=hw:/dev/dri/renderD128",
+		"-hwaccel vaapi -hwaccel_device hw -hwaccel_output_format vaapi",
+		"-f hevc -i pipe:0",
+		"-vf hwdownload,format=p010le," + softwareToneMapFilter + ",format=nv12,hwupload",
+		"-c:v h264_vaapi",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("hybrid probe arguments missing %q: %v", expected, arguments)
+		}
+	}
+	if strings.Contains(joined, "-f lavfi") {
+		t.Fatalf("hybrid probe used a software source instead of HEVC Main10: %v", arguments)
+	}
+	if len(input) < 5 || input[0] != 0 || input[1] != 0 || input[2] != 0 || input[3] != 1 {
+		t.Fatalf("hybrid probe input is not an Annex B HEVC stream: %x", input)
+	}
+}
+
 func TestHardwareDecodeAndFiltersUseZeroCopyOnlyWhenSafe(t *testing.T) {
 	baseAsset := storedAsset{
 		Kind: processingTranscode, URL: "https://media.example/movie.mkv",
@@ -170,12 +230,12 @@ func TestHardwareDecodeAndFiltersUseZeroCopyOnlyWhenSafe(t *testing.T) {
 			asset.VideoBitDepth = 10
 		}, expected: []string{"-hwaccel vaapi -hwaccel_device hw -hwaccel_output_format vaapi", "-vf hwdownload,format=p010le," + softwareToneMapFilter + ",format=nv12,hwupload"}, unexpected: []string{"tonemap_vaapi", "libplacebo"}},
 		{name: "unknown tone-map bit depth stays on CPU", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"}, mutate: func(asset *storedAsset) { asset.Decision.Source.VideoCodec = "h265"; asset.ToneMap = true }, expected: []string{softwareToneMapFilter + ",format=nv12,hwupload"}, unexpected: []string{"-hwaccel vaapi", "hwdownload", "tonemap_vaapi"}},
-		{name: "hybrid tone map scales after download", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"}, mutate: func(asset *storedAsset) {
+		{name: "explicit hybrid tone map preserves requested 4K height", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", toneMapBackend: videoToneMapHybrid}, mutate: func(asset *storedAsset) {
 			asset.Decision.Source.VideoCodec = "h265"
 			asset.ToneMap = true
 			asset.VideoBitDepth = 10
-			asset.TargetHeight = 1080
-		}, expected: []string{"hwdownload,format=p010le,scale=-2:1080," + softwareToneMapFilter + ",format=nv12,hwupload"}, unexpected: []string{"scale_vaapi", "tonemap_vaapi"}},
+			asset.TargetHeight = 2160
+		}, expected: []string{"-hwaccel vaapi -hwaccel_device hw -hwaccel_output_format vaapi", "-vf hwdownload,format=p010le," + softwareToneMapFilter + ",format=nv12,hwupload", "-c:v h264_vaapi"}, unexpected: []string{"scale=-2:1080", "scale_vaapi", "tonemap_vaapi", "libplacebo"}},
 		{name: "subtitle burn stays CPU then uploads", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"}, mutate: func(asset *storedAsset) {
 			index := 3
 			asset.SubtitleTrackIndex = &index
@@ -183,7 +243,7 @@ func TestHardwareDecodeAndFiltersUseZeroCopyOnlyWhenSafe(t *testing.T) {
 			asset.SubtitleTrackOrdinal = 0
 		}, expected: []string{"overlay=eof_action=pass:repeatlast=0,format=nv12,hwupload"}, unexpected: []string{"-hwaccel vaapi"}},
 		{name: "probed VAAPI tone map stays on surfaces", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", toneMapBackend: videoToneMapVAAPI}, mutate: func(asset *storedAsset) { asset.ToneMap = true; asset.TargetHeight = 1080 }, expected: []string{"-hwaccel vaapi", "-vf tonemap_vaapi=format=nv12:matrix=bt709:primaries=bt709:transfer=bt709,scale_vaapi=w=-2:h=1080:format=nv12"}, unexpected: []string{"hwupload", "zscale"}},
-		{name: "probed Vulkan tone map crosses shared DRM surfaces", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", toneMapBackend: videoToneMapVulkan}, mutate: func(asset *storedAsset) { asset.ToneMap = true; asset.TargetHeight = 1080 }, expected: []string{"-init_hw_device drm=dr:/dev/dri/renderD128", "-init_hw_device vaapi=hw@dr", "-init_hw_device vulkan=vk@dr", "-hwaccel vaapi", "hwmap=derive_device=vulkan", "libplacebo=", "hwmap=derive_device=vaapi", "scale_vaapi=w=-2:h=1080:format=nv12"}, unexpected: []string{"hwdownload", "zscale"}},
+		{name: "probed Vulkan tone map crosses shared DRM surfaces", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", toneMapBackend: videoToneMapVulkan}, mutate: func(asset *storedAsset) { asset.ToneMap = true; asset.TargetHeight = 1080 }, expected: []string{"-init_hw_device drm=dr:/dev/dri/renderD128", "-init_hw_device vaapi=hw@dr", "-init_hw_device vulkan=vk@dr", "-hwaccel vaapi", "-vf hwmap=derive_device=vulkan:mode=read+direct,format=vulkan,libplacebo=upscaler=none:downscaler=none:format=nv12:tonemapping=bt.2390:peak_detect=false:color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv:w=-2:h=1080,hwmap=derive_device=vaapi:mode=read+direct,format=vaapi"}, unexpected: []string{"hwdownload", "zscale", "bgra", "scale_vaapi"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

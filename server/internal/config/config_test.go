@@ -393,6 +393,18 @@ func TestLoadLegacyEnvironmentCapturesUnsafeRuntimeValues(t *testing.T) {
 	}
 }
 
+func TestLoadLegacyEnvironmentAcceptsHybridHardwareAcceleration(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("RIVUNE_HARDWARE_ACCELERATION", " HYBRID ")
+	legacy, err := LoadLegacyEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.ValidationError("hardwareAcceleration") != nil || legacy.HardwareAcceleration == nil || *legacy.HardwareAcceleration != "hybrid" {
+		t.Fatalf("legacy hybrid hardware acceleration = %+v error=%v", legacy.HardwareAcceleration, legacy.ValidationError("hardwareAcceleration"))
+	}
+}
+
 func TestLoadLegacyEnvironmentDefersCredentialDependenciesToPersistence(t *testing.T) {
 	setRequiredEnvironment(t)
 	t.Setenv("RIVUNE_TVDB_PIN", "subscriber-pin")

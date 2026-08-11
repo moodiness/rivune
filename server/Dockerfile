@@ -22,7 +22,7 @@ RUN CGO_ENABLED=0 go build \
     -o /out/rivune \
     ./cmd/rivune
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates ffmpeg mesa-va-drivers mesa-vulkan-drivers tzdata \
     && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \

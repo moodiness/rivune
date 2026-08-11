@@ -868,6 +868,7 @@ const catalog = {
   "settings.runtime.hardware.auto": "Automaattinen",
   "settings.runtime.hardware.software": "Ohjelmisto",
   "settings.runtime.hardware.vaapi": "VA-API",
+  "settings.runtime.hardware.hybrid": "Hybrid (VA-API + CPU)",
   "settings.runtime.hardware.qsv": "Intel Quick Sync",
   "settings.runtime.hardware.nvenc": "NVIDIA NVENC",
   "settings.units.kbpsSuffix": " kbps",

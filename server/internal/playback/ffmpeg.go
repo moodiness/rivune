@@ -756,6 +756,13 @@ func (processor *FFmpegProcessor) ToneMapBackend() string {
 	return string(processor.encoder.normalizedToneMapBackend())
 }
 
+func (processor *FFmpegProcessor) ToneMapMaximumHeight() int {
+	if processor != nil && processor.encoder.normalizedToneMapBackend() != videoToneMapSoftware {
+		return 0
+	}
+	return softwareToneMapMaximumHeight
+}
+
 func (processor *FFmpegProcessor) ActiveProcesses() int {
 	return len(processor.slots)
 }
@@ -773,7 +780,7 @@ func (processor *FFmpegProcessor) PlaybackDiagnostics() MediaDiagnostics {
 	}
 	hardwareAcceleration := processor.hardwareAcceleration
 	switch hardwareAcceleration {
-	case "auto", "software", "vaapi", "qsv", "nvenc":
+	case "auto", "software", "hybrid", "vaapi", "qsv", "nvenc":
 	default:
 		hardwareAcceleration = "unknown"
 	}

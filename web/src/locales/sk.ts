@@ -874,6 +874,7 @@ const catalog = {
   "settings.runtime.hardware.auto": "Automaticky",
   "settings.runtime.hardware.software": "Softvér",
   "settings.runtime.hardware.vaapi": "VA-API",
+  "settings.runtime.hardware.hybrid": "Hybrid (VA-API + CPU)",
   "settings.runtime.hardware.qsv": "Intel Quick Sync",
   "settings.runtime.hardware.nvenc": "NVIDIA NVENC",
   "settings.units.kbpsSuffix": " kbps",
