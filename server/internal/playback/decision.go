@@ -335,7 +335,7 @@ func remuxSupported(inspection MediaInspection, capabilities Capabilities) bool 
 		return false
 	}
 	if len(inspection.AudioTracks) == 0 {
-		return processingMediaProfileSupported("mp4", video, nil, capabilities)
+		return processingCopyMediaProfileSupported("mp4", video, nil, capabilities)
 	}
 	return compatibleRemuxAudioTrack(*video, inspection.AudioTracks, capabilities) != nil
 }
@@ -349,7 +349,7 @@ func audioTranscodeSupported(inspection MediaInspection, capabilities Capabiliti
 		return false
 	}
 	targetAudio := &MediaTrack{Codec: "aac", Channels: targetAudioChannels(capabilities)}
-	return processingMediaProfileSupported("mp4", video, targetAudio, capabilities)
+	return processingCopyMediaProfileSupported("mp4", video, targetAudio, capabilities)
 }
 
 func fullTranscodeSupported(capabilities Capabilities) bool {
@@ -933,6 +933,10 @@ func processingMediaProfileSupported(container string, video, audio *MediaTrack,
 	return mediaProfileSupportedFor(container, video, audio, capabilities, mediaProfileTranscoding, false)
 }
 
+func processingCopyMediaProfileSupported(container string, video, audio *MediaTrack, capabilities Capabilities) bool {
+	return mediaProfileSupportedFor(container, video, audio, capabilities, mediaProfileTranscoding, true)
+}
+
 func mediaProfileSupportedFor(container string, video, audio *MediaTrack, capabilities Capabilities, profileUse int, applyConditions bool) bool {
 	container = strings.ToLower(strings.TrimSpace(container))
 	if container == "" {
@@ -1033,7 +1037,7 @@ func mediaProfileCodecMatches(profile, candidate string) bool {
 func compatibleRemuxAudioTrack(video MediaTrack, tracks []MediaTrack, capabilities Capabilities) *MediaTrack {
 	for index := range tracks {
 		if mp4RemuxableAudio(tracks[index].Codec) && audioWithinClientLimits(&tracks[index], capabilities) &&
-			processingMediaProfileSupported("mp4", &video, &tracks[index], capabilities) {
+			processingCopyMediaProfileSupported("mp4", &video, &tracks[index], capabilities) {
 			return &tracks[index]
 		}
 	}

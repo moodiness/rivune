@@ -456,19 +456,13 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
   if (videoCodecs.length === 0) videoCodecs.push("none");
   if (audioCodecs.length === 0) audioCodecs.push("none");
   const streamingProtocols = ["http", "youtube"];
-  const displayHeight = Math.floor(Math.min(window.screen.width, window.screen.height) * window.devicePixelRatio / 2) * 2;
-  const maximumHeight = Math.max(144, Math.min(4320, displayHeight));
-  const displayBitrateKbps = maximumHeight >= 2160 ? 25_000 : maximumHeight >= 1440 ? 16_000 : maximumHeight >= 1080 ? 12_000 : maximumHeight >= 720 ? 6_000 : 3_000;
-  const connection = (navigator as Navigator & { connection?: { downlink?: number } }).connection;
-  const networkBitrateKbps = connection?.downlink && connection.downlink > 0 ? Math.floor(connection.downlink * 800) : displayBitrateKbps;
-  const maximumVideoBitrateKbps = Math.max(64, Math.min(displayBitrateKbps, networkBitrateKbps));
   const hdrFormats = ["sdr"];
   if (window.matchMedia?.("(dynamic-range: high)").matches && mediaProfiles.some((profile) => (profile.maximumVideoBitDepth ?? 0) >= 10)) {
     hdrFormats.push("hdr10", "hlg");
   }
   if (window.matchMedia?.("(dynamic-range: high)").matches &&
     (video.canPlayType('video/mp4; codecs="dvh1.05.06"') || video.canPlayType('video/mp4; codecs="dvhe.05.06"'))) {
-    hdrFormats.push("dolbyvision");
+    hdrFormats.push("dolby_vision");
   }
   if (video.canPlayType("application/vnd.apple.mpegurl") || "MediaSource" in window) streamingProtocols.push("hls");
   return {
@@ -479,8 +473,6 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
     hdrFormats,
     processingModes: ["remux", "transcode_audio", "transcode"],
     subtitleModes: ["external", "burn"],
-    maximumHeight,
-    maximumVideoBitrateKbps,
     maximumAudioChannels: 2,
     mediaProfiles,
     externalPlayers: ["system"],

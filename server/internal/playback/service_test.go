@@ -1474,6 +1474,41 @@ func TestPlaybackDecisionOrdersDirectPlayHLSDirectStreamAndTranscodes(t *testing
 	}
 }
 
+func TestHighBitrateHEVCUsesAudioOnlyTranscodeWhenClientDeclaresDecode(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h265", "h264"}, AudioCodecs: []string{"aac"},
+		HDRFormats: []string{"hdr10"}, ProcessingModes: []string{processingTranscodeAudio, processingTranscode},
+		MediaProfiles: []MediaProfile{
+			{Container: "mp4", VideoCodec: "h265", AudioCodec: "aac", Transcoding: true, MaximumVideoBitDepth: 10},
+			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true, MaximumVideoBitDepth: 8},
+		},
+		transcodeCapabilities: TranscodeCapabilities{EncodeCodecs: []string{"h264"}},
+	}
+	inspection := MediaInspection{
+		Container: "mkv", HDRFormat: "hdr10", BitrateKbps: 60_000,
+		VideoTracks: []MediaTrack{{Codec: "h265", Height: 2160, BitDepth: 10, BitrateKbps: 60_000}},
+		AudioTracks: []MediaTrack{{Codec: "truehd", Channels: 8}},
+	}
+	mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, inspection, capabilities)
+	if mode != processingTranscodeAudio || decision == nil || decision.VideoAction != "copy" || decision.AudioAction != "transcode" || decision.ToneMapping ||
+		decision.Target == nil || decision.Target.VideoCodec != "h265" || decision.Target.VideoBitDepth != 10 || decision.Target.AudioCodec != "aac" {
+		t.Fatalf("capable client received unnecessary video conversion: mode=%q decision=%+v", mode, decision)
+	}
+	inspection.HDRFormat = ""
+	capabilities.HDRFormats = nil
+	capabilities.MediaProfiles[0].MaximumVideoBitDepth = 8
+	if mode, _ = playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, inspection, capabilities); mode != processingTranscode {
+		t.Fatalf("Main10 SDR was copied to a Main-only client: mode=%q", mode)
+	}
+	inspection.HDRFormat = "hdr10"
+	capabilities.HDRFormats = []string{"hdr10"}
+	capabilities.MediaProfiles[0].MaximumVideoBitDepth = 10
+	capabilities.MaximumVideoBitrateKbps = 25_000
+	if mode, _ = playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, inspection, capabilities); mode != processingTranscode {
+		t.Fatalf("declared client bitrate cap did not force video conversion: mode=%q", mode)
+	}
+}
+
 func TestCodecProfileConditionsSelectDirectOrHLSFromInspectedMedia(t *testing.T) {
 	base := Capabilities{
 		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"},
