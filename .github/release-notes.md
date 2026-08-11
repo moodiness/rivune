@@ -1,29 +1,28 @@
-# Rivune v1.1.1
+# Rivune v1.1.2
 
 ## Highlights
 
-- The Unraid template now supports standard PostgreSQL on an isolated database network without requiring TLS certificates. `verify-full` with a private CA remains available as the hardened option.
-- Both supported Compose deployments are CPU-only by default. AMD/Intel acceleration is enabled explicitly with `compose.amd-intel.yaml`; Unraid GPU mapping is opt-in.
-- Pangolin/Newt deployment now has a dedicated `rivune-edge` network, an internal `rivune:8080` target, narrow trusted-proxy guidance, and a documented host-port fallback.
-- The root Compose deployment is a complete PostgreSQL 18 stack with PostgreSQL isolated from the edge network.
+- Resumed seekable HLS playback now starts at the saved scene instead of displaying the saved timestamp over content from the beginning.
+- AMD HDR-to-SDR conversion now prefers the VAAPI-to-Vulkan `libplacebo` path, while retaining `tonemap_vaapi` and bounded software fallbacks.
+- Administration Activity and startup logs identify the active `vulkan`, `vaapi`, or `software` tone-map backend.
 
-## Reliability and operations
+## Playback reliability
 
-- Encryption-key validation now explains the exact `version:64-lowercase-hex` format and distinguishes new installations from legacy-key recovery without exposing key material.
-- The release gate exercises CPU-only startup, optional GPU configuration, plaintext PostgreSQL on an isolated network, `verify-full` PostgreSQL, Pangolin-compatible edge routing, restart, migration, backup, and proxy behavior.
-- Git Bash path handling is covered by the deployment smoke tests used during Windows-hosted development.
+- The initial HLS buffer now defaults to 12 seconds, and the ten-segment client preload window waits for the active generation instead of being mistaken for a seek.
+- Seekable transcoding keeps a bounded production margin without letting generated media evict the next segment required by a continuously playing client.
+- HEVC Main 10 software tone mapping retains hardware decode and encode when possible and caps new software-fallback sessions at 1080p.
+- The container image includes the Mesa Vulkan runtime on both supported architectures.
 
 ## Upgrade notes
 
-- `RIVUNE_EDGE_NETWORK` and `RIVUNE_EDGE_SUBNET` were removed. The supported base stack uses the fixed `rivune-edge` network and `172.31.0.0/24` subnet.
-- For Unraid without PostgreSQL TLS, select `RIVUNE_DATABASE_SSLMODE=disable` and leave both PostgreSQL CA fields empty. Keep PostgreSQL confined to its database-only network.
-- Existing installations must reuse their original encryption key as version 1. Never generate a replacement key for an existing encrypted database.
-- When Newt shares the edge network, target hostname `Rivune`, port `8080`, method `http`. Add a host port only when a shared edge network is impossible, and never forward that port on the router.
+- No database migration, protocol-version change, or new environment variable is required.
+- AMD and Intel containers still require the existing `compose.amd-intel.yaml` overlay or equivalent Unraid `/dev/dri/renderD128` device mapping.
+- A selected hardware backend does not guarantee real-time throughput. If Activity reports a sustained speed below `1.00x`, lower the effective **Maximum resolution**, close the existing player session, and reopen the title. Integrated AMD hardware may require 1080p for 4K HDR input.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.1.1`
+- `ghcr.io/moodiness/rivune:1.1.2`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.1.0...v1.1.1
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.1.1...v1.1.2
