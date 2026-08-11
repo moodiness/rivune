@@ -341,6 +341,13 @@ playback. Administration Activity and the initialization log report the selected
 capability indicator. A sustained job speed below `1.00x` still means the active
 pipeline cannot feed continuous playback.
 
+The backend label proves filter selection, not real-time throughput. No finite
+buffer can compensate for a job that remains below `1.00x`: lower the effective
+profile or server **Maximum resolution**, close the existing player session,
+and reopen the title so Rivune creates a new decision. Use the highest target
+that stays above real time without draining its buffer; integrated AMD hardware
+may require 1080p for 4K HDR input even when the Vulkan probe succeeds.
+
 Seekable transcoding keeps a duration-aware production margin instead of
 running at exactly real time. The initial HLS buffer defaults to 12 seconds, and
 requests up to 10 three-second segments (30 seconds) ahead reuse and wait for
