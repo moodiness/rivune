@@ -203,8 +203,11 @@ func TestHybridVideoEncoderProbeExercisesMain10DecodeAndReadback(t *testing.T) {
 	if strings.Contains(joined, "-f lavfi") {
 		t.Fatalf("hybrid probe used a software source instead of HEVC Main10: %v", arguments)
 	}
-	if len(input) < 5 || input[0] != 0 || input[1] != 0 || input[2] != 0 || input[3] != 1 {
+	if len(input) < 11 || input[0] != 0 || input[1] != 0 || input[2] != 0 || input[3] != 1 {
 		t.Fatalf("hybrid probe input is not an Annex B HEVC stream: %x", input)
+	}
+	if profileIDC := input[10] & 0x1f; profileIDC != 2 {
+		t.Fatalf("hybrid probe HEVC profile_idc = %d, want Main 10 (2)", profileIDC)
 	}
 }
 

@@ -18,7 +18,7 @@ const (
 	hardwareProbeTimeout         = 10 * time.Second
 	softwareToneMapMaximumHeight = 1080
 	softwareToneMapFilter        = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
-	hybridProbeHEVCBase64        = "AAAAAUABDAH//wQIAAADAJ2oAAADAAAeugJAAAAAAUIBAQQIAAADAJ2oAAADAAAeoBAgIE2W6SkwvAWoSIBIIAAAAwAgAAADACEAAAABRAHAcYMSAAABKAGtyElUgMen/8nKmru0w6AS2YZeAoAH4XzEgAqmgfg="
+	hybridProbeHEVCBase64        = "AAAAAUABDAH//wIgAAADAJAAAAMAAAMAHpWUCQAAAAFCAQECIAAAAwCQAAADAAADAB6gECAgTZZWVKTC8BahIgEggAAAAwCAAAADAIQAAAABRAHAc8GJAAABKAGsTISUSMr///vIFv4S4tBWpZBLiAR6ZJpAB8tP3AAAAAECAdAJeIJkSsCfqwloDDgPuA=="
 )
 
 type FFmpegOptions struct {
