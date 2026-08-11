@@ -359,6 +359,12 @@ on VA-API but runs HDR tone mapping and scaling on the CPU. It does not guarante
 real-time 4K output: retain it only when Activity stays above `1.00x` without
 draining the buffer; otherwise lower **Maximum resolution** or return to `auto`.
 
+To remove the GPU from the media path entirely, select **Software**, save, and
+restart. An explicitly selected software backend honors **Maximum resolution**
+and uses CPU decode, tone mapping, scaling, and H.264 encode; automatic software
+fallbacks remain capped at 1080p. Full software 2160p has the highest CPU and
+power cost, so keep it only when Activity proves sustained real-time throughput.
+
 Seekable transcoding keeps a duration-aware production margin instead of
 running at exactly real time. The initial HLS buffer defaults to 12 seconds, and
 requests up to 10 three-second segments (30 seconds) ahead reuse and wait for
