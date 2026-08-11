@@ -655,12 +655,12 @@ func TestHardwareDecodeAndFiltersUseZeroCopyOnlyWhenSafe(t *testing.T) {
 			asset.VideoBitDepth = 10
 		}, expected: []string{"-hwaccel vaapi -hwaccel_device hw -hwaccel_output_format vaapi", "-vf hwdownload,format=p010le," + softwareToneMapFilter + ",format=nv12,hwupload"}, unexpected: []string{"tonemap_vaapi", "libplacebo"}},
 		{name: "unknown tone-map bit depth stays on CPU", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"}, mutate: func(asset *storedAsset) { asset.Decision.Source.VideoCodec = "h265"; asset.ToneMap = true }, expected: []string{softwareToneMapFilter + ",format=nv12,hwupload"}, unexpected: []string{"-hwaccel vaapi", "hwdownload", "tonemap_vaapi"}},
-		{name: "explicit hybrid tone map preserves requested 4K height", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", toneMapBackend: videoToneMapHybrid}, mutate: func(asset *storedAsset) {
+		{name: "hybrid tone map scales before CPU filter", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", toneMapBackend: videoToneMapHybrid}, mutate: func(asset *storedAsset) {
 			asset.Decision.Source.VideoCodec = "h265"
 			asset.ToneMap = true
 			asset.VideoBitDepth = 10
-			asset.TargetHeight = 2160
-		}, expected: []string{"-hwaccel vaapi -hwaccel_device hw -hwaccel_output_format vaapi", "-vf hwdownload,format=p010le," + softwareToneMapFilter + ",format=nv12,hwupload", "-c:v h264_vaapi"}, unexpected: []string{"scale=-2:1080", "scale_vaapi", "tonemap_vaapi", "libplacebo"}},
+			asset.TargetHeight = softwareToneMapMaximumHeight
+		}, expected: []string{"-hwaccel vaapi -hwaccel_device hw -hwaccel_output_format vaapi", "-vf hwdownload,format=p010le,scale=-2:1080," + softwareToneMapFilter + ",format=nv12,hwupload", "-c:v h264_vaapi"}, unexpected: []string{"scale_vaapi", "tonemap_vaapi", "libplacebo"}},
 		{name: "subtitle burn stays CPU then uploads", encoder: videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"}, mutate: func(asset *storedAsset) {
 			index := 3
 			asset.SubtitleTrackIndex = &index

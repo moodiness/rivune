@@ -1647,8 +1647,8 @@ func TestPlaybackCapabilitiesOnlyApplySoftwareToneMapLimit(t *testing.T) {
 	}
 	hybridProcessor := &FFmpegProcessor{encoder: videoEncoder{kind: videoEncoderVAAPI, toneMapBackend: videoToneMapHybrid}}
 	hybrid := (&Service{processor: hybridProcessor}).playbackCapabilities(Capabilities{}, 2160, 12000)
-	if hybridProcessor.HardwareToneMap() || hybrid.ToneMapMaximumHeight != 0 {
-		t.Fatalf("hybrid CPU tone mapping reported hardware=%t or cap=%dp", hybridProcessor.HardwareToneMap(), hybrid.ToneMapMaximumHeight)
+	if hybridProcessor.HardwareToneMap() || hybrid.ToneMapMaximumHeight != softwareToneMapMaximumHeight {
+		t.Fatalf("hybrid CPU tone mapping reported hardware=%t or cap=%dp, want %dp", hybridProcessor.HardwareToneMap(), hybrid.ToneMapMaximumHeight, softwareToneMapMaximumHeight)
 	}
 	decision := processingDecision(
 		decisionVideoTranscodeRequired,
@@ -1658,8 +1658,8 @@ func TestPlaybackCapabilitiesOnlyApplySoftwareToneMapLimit(t *testing.T) {
 		hybrid,
 		true,
 	)
-	if decision == nil || decision.Target == nil || decision.Target.Height != 2160 {
-		t.Fatalf("hybrid tone-map decision = %+v, want requested 2160p", decision)
+	if decision == nil || decision.Target == nil || decision.Target.Height != softwareToneMapMaximumHeight {
+		t.Fatalf("hybrid tone-map decision = %+v, want realtime cap %dp", decision, softwareToneMapMaximumHeight)
 	}
 	explicitSoftwareProcessor := &FFmpegProcessor{
 		hardwareAcceleration: "software",
