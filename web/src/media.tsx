@@ -457,11 +457,10 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
   if (audioCodecs.length === 0) audioCodecs.push("none");
   const streamingProtocols = ["http", "youtube"];
   const hdrFormats = ["sdr"];
-  if (window.matchMedia?.("(dynamic-range: high)").matches && mediaProfiles.some((profile) => (profile.maximumVideoBitDepth ?? 0) >= 10)) {
+  if (mediaProfiles.some((profile) => (profile.maximumVideoBitDepth ?? 0) >= 10)) {
     hdrFormats.push("hdr10", "hlg");
   }
-  if (window.matchMedia?.("(dynamic-range: high)").matches &&
-    (video.canPlayType('video/mp4; codecs="dvh1.05.06"') || video.canPlayType('video/mp4; codecs="dvhe.05.06"'))) {
+  if (video.canPlayType('video/mp4; codecs="dvh1.05.06"') || video.canPlayType('video/mp4; codecs="dvhe.05.06"')) {
     hdrFormats.push("dolby_vision");
   }
   if (video.canPlayType("application/vnd.apple.mpegurl") || "MediaSource" in window) streamingProtocols.push("hls");
