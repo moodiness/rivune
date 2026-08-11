@@ -125,14 +125,22 @@ func detectExplicitVideoEncoder(mode, device string, encodeProbe videoEncoderPro
 		return videoEncoder{}, fmt.Errorf("unsupported hardware acceleration mode %q", mode)
 	}
 
+	hybridH264Ready := false
 	if mode == string(videoToneMapHybrid) {
 		probeCandidate := candidate.withEncodeCodec("h264").withDecodeCodec("hevc")
 		if err := encodeProbe(probeCandidate, "h264", true); err != nil {
 			return videoEncoder{}, fmt.Errorf("initialize %s video encoder: %w", mode, err)
 		}
+		hybridH264Ready = true
 	}
 	var lastProbeError error
 	candidate = detectVideoEncoderCapabilities(candidate, func(candidate videoEncoder, codec string, toneMap bool) error {
+		// The required hybrid probe already encoded H264 after Main10 decode,
+		// CPU readback/tone mapping, and VAAPI upload. Reuse that stronger proof:
+		// the generic lavfi upload probe fails on some AMD drivers.
+		if hybridH264Ready && normalizedTranscodeCodec(codec) == "h264" {
+			return nil
+		}
 		err := encodeProbe(candidate, codec, toneMap)
 		if err != nil {
 			lastProbeError = err
