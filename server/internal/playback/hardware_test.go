@@ -584,6 +584,26 @@ func TestHybridVideoEncoderRequiresVAAPIProbeWithoutHardwareToneMapDetection(t *
 	}
 }
 
+func TestHybridInitializationKeepsRequiredH264WhenOptionalCodecProbesFail(t *testing.T) {
+	encoder, err := detectExplicitVideoEncoder("hybrid", "/dev/dri/renderD128", func(_ videoEncoder, codec string, toneMap bool) error {
+		if codec == "h264" && toneMap {
+			return nil
+		}
+		return errors.New(codec + " unavailable")
+	}, func(videoEncoder, string) error {
+		return nil
+	}, func(candidate videoEncoder) videoEncoder {
+		t.Fatal("hybrid mode must not run hardware tone-map backend detection")
+		return candidate
+	})
+	if err != nil {
+		t.Fatalf("optional HEVC/AV1 encoder probes made a proven H264 hybrid path fatal: %v", err)
+	}
+	if !encoder.supportsEncode("h264") || encoder.supportsEncode("hevc") || encoder.supportsEncode("av1") {
+		t.Fatalf("hybrid encoder inventory = %v, want only proven H264", encoder.supportedEncodeCodecs())
+	}
+}
+
 func TestHybridVideoEncoderProbeExercisesMain10DecodeAndReadback(t *testing.T) {
 	encoder := videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", toneMapBackend: videoToneMapHybrid, decodeCodecs: map[string]bool{"hevc": true}}
 	arguments, input, err := videoEncoderProbeArguments(encoder, "h264", "balanced", true)
