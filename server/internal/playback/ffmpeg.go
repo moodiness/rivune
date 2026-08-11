@@ -1029,7 +1029,7 @@ func (processor *FFmpegProcessor) ToneMapBackend() string {
 }
 
 func (processor *FFmpegProcessor) ToneMapMaximumHeight() int {
-	if processor != nil && (processor.hardwareAcceleration == "software" || processor.encoder.normalizedToneMapBackend() != videoToneMapSoftware) {
+	if processor != nil && (processor.hardwareAcceleration == "software" || processor.encoder.usesHardwareToneMap()) {
 		return 0
 	}
 	return softwareToneMapMaximumHeight
