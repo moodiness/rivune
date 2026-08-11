@@ -73,7 +73,8 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   await page.addInitScript(() => {
     const nativeCanPlayType = HTMLMediaElement.prototype.canPlayType;
     HTMLMediaElement.prototype.canPlayType = function (mediaType: string) {
-      if (mediaType.includes("hvc1.2.4.L153.B0")) return "probably";
+      if (mediaType === 'video/mp4; codecs="hvc1.2.4.L153.B0"') return "probably";
+      if (mediaType.includes("hvc1.2.4.L153.B0")) return "";
       return nativeCanPlayType.call(this, mediaType);
     };
   });

@@ -416,9 +416,7 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
   if (audio.canPlayType("audio/mpeg")) add(audioCodecs, "mp3");
   if (audio.canPlayType('audio/mp4; codecs="ac-3"')) add(audioCodecs, "ac3");
   if (audio.canPlayType('audio/mp4; codecs="ec-3"')) add(audioCodecs, "eac3");
-  const addProfile = (container: string, videoCodec: string, codecString: string, maximumVideoBitDepth: number, audioCodec?: string) => {
-    const mime = container === "webm" ? "video/webm" : "video/mp4";
-    if (!video.canPlayType(`${mime}; codecs="${codecString}"`)) return;
+  const addProfile = (container: string, videoCodec: string, maximumVideoBitDepth: number, audioCodec?: string) => {
     if (!mediaProfiles.some((profile) => profile.container === container && profile.videoCodec === videoCodec && profile.audioCodec === audioCodec && profile.maximumVideoBitDepth === maximumVideoBitDepth)) {
       mediaProfiles.push({ container, videoCodec, maximumVideoBitDepth, ...(audioCodec ? { audioCodec } : {}) });
     }
@@ -444,11 +442,14 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
     { container: "webm", audioCodec: "vorbis", identifier: "vorbis" },
   ];
   for (const videoProfile of profileVideoCandidates) {
+    const videoMime = videoProfile.container === "webm" ? "video/webm" : "video/mp4";
+    const audioMime = videoProfile.container === "webm" ? "audio/webm" : "audio/mp4";
     for (const videoIdentifier of videoProfile.identifiers) {
-      addProfile(videoProfile.container, videoProfile.videoCodec, videoIdentifier, videoProfile.maximumVideoBitDepth);
+      if (!video.canPlayType(`${videoMime}; codecs="${videoIdentifier}"`)) continue;
+      addProfile(videoProfile.container, videoProfile.videoCodec, videoProfile.maximumVideoBitDepth);
       for (const audioProfile of profileAudioCandidates) {
-        if (audioProfile.container !== videoProfile.container) continue;
-        addProfile(videoProfile.container, videoProfile.videoCodec, `${videoIdentifier}, ${audioProfile.identifier}`, videoProfile.maximumVideoBitDepth, audioProfile.audioCodec);
+        if (audioProfile.container !== videoProfile.container || !audio.canPlayType(`${audioMime}; codecs="${audioProfile.identifier}"`)) continue;
+        addProfile(videoProfile.container, videoProfile.videoCodec, videoProfile.maximumVideoBitDepth, audioProfile.audioCodec);
       }
     }
   }
