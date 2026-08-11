@@ -101,13 +101,13 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
     capabilities: {
       processingModes: ["remux", "transcode_audio", "transcode"],
       subtitleModes: ["external", "burn"],
-      maximumHeight: expect.any(Number),
-      maximumVideoBitrateKbps: expect.any(Number),
       maximumAudioChannels: 2,
       mediaProfiles: expect.any(Array),
       externalPlayers: ["system"],
     },
   });
+  expect(sourceRequest.body.capabilities).not.toHaveProperty("maximumHeight");
+  expect(sourceRequest.body.capabilities).not.toHaveProperty("maximumVideoBitrateKbps");
   const mediaProfiles = sourceRequest.body.capabilities.mediaProfiles as Array<{ videoCodec: string; maximumVideoBitDepth?: number }>;
   expect(mediaProfiles.every((profile) => profile.maximumVideoBitDepth === 8 || profile.maximumVideoBitDepth === 10)).toBe(true);
   const supportsHEVCMain10 = await page.evaluate(() => Boolean(document.createElement("video").canPlayType('video/mp4; codecs="hvc1.2.4.L153.B0"')));
@@ -426,10 +426,10 @@ test("server transcodes remain in the existing web video and HLS source pipeline
   expect(announcedCapabilities).toMatchObject({
     processingModes: ["remux", "transcode_audio", "transcode"],
     subtitleModes: ["external", "burn"],
-    maximumHeight: expect.any(Number),
-    maximumVideoBitrateKbps: expect.any(Number),
     maximumAudioChannels: 2,
   });
+  expect(announcedCapabilities).not.toHaveProperty("maximumHeight");
+  expect(announcedCapabilities).not.toHaveProperty("maximumVideoBitrateKbps");
 });
 
 for (const scenario of [
