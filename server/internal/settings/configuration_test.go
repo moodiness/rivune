@@ -17,6 +17,22 @@ func TestSchemaV2RuntimeSettingsDefaultsAndValidation(t *testing.T) {
 	if err := validateMaterializedRuntimeValues(values); err != nil {
 		t.Fatalf("defaults rejected: %v", err)
 	}
+	hybrid := "hybrid"
+	hybridPatch := Patch{HardwareAcceleration: OptionalString{Set: true, Value: &hybrid}}
+	if err := validateInstancePatch(hybridPatch); err != nil {
+		t.Fatalf("hybrid hardware acceleration rejected: %v", err)
+	}
+	persisted, err := json.Marshal(applyPatch(Values{}, hybridPatch))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored Values
+	if err := json.Unmarshal(persisted, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.HardwareAcceleration == nil || *restored.HardwareAcceleration != hybrid {
+		t.Fatalf("hybrid hardware acceleration did not survive persistence: %s", persisted)
+	}
 	for _, patch := range []Patch{
 		{Timezone: OptionalString{Set: true}},
 		{HardwareAcceleration: OptionalString{Set: true}},

@@ -659,10 +659,10 @@ export type PlaybackActivity = {
   diagnostics: {
     ffmpegVersion: string;
     ffprobeVersion: string;
-    hardwareAcceleration: "unknown" | "auto" | "software" | "vaapi" | "qsv" | "nvenc";
+    hardwareAcceleration: "unknown" | "auto" | "software" | "vaapi" | "hybrid" | "qsv" | "nvenc";
     videoEncoder: string;
     hardwareToneMap: boolean;
-    toneMapBackend: "vulkan" | "vaapi" | "software";
+    toneMapBackend: "vulkan" | "vaapi" | "hybrid" | "software";
     transcodeThreads: number;
     maximumReadRate: number;
     totals: PlaybackMediaProcessTotals;
@@ -844,7 +844,7 @@ export type JellyfinCredentialSecret = JellyfinCredentialStatus & {
   password: string;
 };
 
-export type HardwareAccelerationMode = "auto" | "software" | "vaapi" | "qsv" | "nvenc";
+export type HardwareAccelerationMode = "auto" | "software" | "vaapi" | "hybrid" | "qsv" | "nvenc";
 
 export type SettingsValues = {
   interfaceLanguage?: InterfaceLanguage | null;

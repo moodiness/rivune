@@ -1,7 +1,9 @@
 package playback
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +18,7 @@ const (
 	hardwareProbeTimeout         = 10 * time.Second
 	softwareToneMapMaximumHeight = 1080
 	softwareToneMapFilter        = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+	hybridProbeHEVCBase64        = "AAAAAUABDAH//wQIAAADAJ2oAAADAAAeugJAAAAAAUIBAQQIAAADAJ2oAAADAAAeoBAgIE2W6SkwvAWoSIBIIAAAAwAgAAADACEAAAABRAHAcYMSAAABKAGtyElUgMen/8nKmru0w6AS2YZeAoAH4XzEgAqmgfg="
 )
 
 type FFmpegOptions struct {
@@ -35,6 +38,7 @@ const (
 	videoEncoderNVENC    videoEncoderKind = "nvenc"
 
 	videoToneMapSoftware videoToneMapBackend = "software"
+	videoToneMapHybrid   videoToneMapBackend = "hybrid"
 	videoToneMapVAAPI    videoToneMapBackend = "vaapi"
 	videoToneMapVulkan   videoToneMapBackend = "vulkan"
 )
@@ -46,7 +50,7 @@ type videoEncoder struct {
 }
 
 func detectVideoEncoder(ffmpegPath string, options FFmpegOptions) (videoEncoder, error) {
-	mode := videoEncoderKind(strings.ToLower(strings.TrimSpace(options.HardwareAcceleration)))
+	mode := strings.ToLower(strings.TrimSpace(options.HardwareAcceleration))
 	if mode == "" || mode == "auto" {
 		for _, candidate := range automaticVideoEncoders(options.VideoDevice) {
 			if err := probeVideoEncoder(ffmpegPath, candidate, false); err == nil {
@@ -55,22 +59,39 @@ func detectVideoEncoder(ffmpegPath string, options FFmpegOptions) (videoEncoder,
 		}
 		return videoEncoder{kind: videoEncoderSoftware}, nil
 	}
-	if mode == videoEncoderSoftware {
+	return detectExplicitVideoEncoder(mode, options.VideoDevice, func(candidate videoEncoder, toneMap bool) error {
+		return probeVideoEncoder(ffmpegPath, candidate, toneMap)
+	}, func(candidate videoEncoder) videoEncoder {
+		return detectHardwareToneMap(ffmpegPath, candidate)
+	})
+}
+
+func detectExplicitVideoEncoder(mode, device string, probe func(videoEncoder, bool) error, detectToneMap func(videoEncoder) videoEncoder) (videoEncoder, error) {
+	if mode == string(videoEncoderSoftware) {
 		return videoEncoder{kind: videoEncoderSoftware}, nil
 	}
+	candidate := videoEncoder{device: device}
 	switch mode {
-	case videoEncoderVAAPI, videoEncoderQSV, videoEncoderNVENC:
+	case string(videoToneMapHybrid):
+		candidate.kind = videoEncoderVAAPI
+		candidate.toneMapBackend = videoToneMapHybrid
+	case string(videoEncoderVAAPI):
+		candidate.kind = videoEncoderVAAPI
+	case string(videoEncoderQSV):
+		candidate.kind = videoEncoderQSV
+	case string(videoEncoderNVENC):
+		candidate.kind = videoEncoderNVENC
+		candidate.device = ""
 	default:
 		return videoEncoder{}, fmt.Errorf("unsupported hardware acceleration mode %q", mode)
 	}
-	candidate := videoEncoder{kind: mode, device: options.VideoDevice}
-	if mode == videoEncoderNVENC {
-		candidate.device = ""
-	}
-	if err := probeVideoEncoder(ffmpegPath, candidate, false); err != nil {
+	if err := probe(candidate, mode == string(videoToneMapHybrid)); err != nil {
 		return videoEncoder{}, fmt.Errorf("initialize %s video encoder: %w", mode, err)
 	}
-	return detectHardwareToneMap(ffmpegPath, candidate), nil
+	if mode == string(videoToneMapHybrid) {
+		return candidate, nil
+	}
+	return detectToneMap(candidate), nil
 }
 
 func automaticVideoEncoders(device string) []videoEncoder {
@@ -123,17 +144,16 @@ func probeVideoEncoder(ffmpegPath string, encoder videoEncoder, toneMap bool) er
 	if encoder.normalizedKind() == videoEncoderSoftware {
 		return nil
 	}
+	arguments, input, err := videoEncoderProbeArguments(encoder, toneMap)
+	if err != nil {
+		return err
+	}
 	probeContext, cancel := context.WithTimeout(context.Background(), hardwareProbeTimeout)
 	defer cancel()
-	arguments := []string{"-nostdin", "-hide_banner", "-loglevel", "error"}
-	arguments = append(arguments, encoder.globalArguments()...)
-	arguments = append(arguments, "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1")
-	if filter := encoder.filter(toneMap); filter != "" {
-		arguments = append(arguments, "-vf", filter)
-	}
-	arguments = append(arguments, encoder.codecArguments(1)...)
-	arguments = append(arguments, "-frames:v", "1", "-an", "-f", "null", "-")
 	command := exec.CommandContext(probeContext, ffmpegPath, arguments...)
+	if len(input) > 0 {
+		command.Stdin = bytes.NewReader(input)
+	}
 	diagnostic := newDiagnosticBuffer()
 	command.Stdout = nil
 	command.Stderr = diagnostic
@@ -144,6 +164,38 @@ func probeVideoEncoder(ffmpegPath string, encoder videoEncoder, toneMap bool) er
 		return fmt.Errorf("hardware encoder probe: %w: %s", err, diagnostic.String())
 	}
 	return nil
+}
+
+func videoEncoderProbeArguments(encoder videoEncoder, toneMap bool) ([]string, []byte, error) {
+	arguments := []string{"-nostdin", "-hide_banner", "-loglevel", "error"}
+	arguments = append(arguments, encoder.globalArguments()...)
+	var input []byte
+	if toneMap && encoder.toneMapBackend == videoToneMapHybrid {
+		var err error
+		input, err = base64.StdEncoding.DecodeString(hybridProbeHEVCBase64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("decode hybrid video probe: %w", err)
+		}
+		asset := storedAsset{
+			Kind:          processingTranscode,
+			ToneMap:       true,
+			VideoBitDepth: 10,
+			Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{
+				VideoCodec: "h265",
+				Height:     128,
+			}},
+		}
+		arguments = append(arguments, encoder.hardwareDecodeArguments(asset)...)
+		arguments = append(arguments, "-f", "hevc", "-i", "pipe:0", "-vf", encoder.hybridToneMapFilter(asset))
+	} else {
+		arguments = append(arguments, "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1")
+		if filter := encoder.filter(toneMap); filter != "" {
+			arguments = append(arguments, "-vf", filter)
+		}
+	}
+	arguments = append(arguments, encoder.codecArguments(1)...)
+	arguments = append(arguments, "-frames:v", "1", "-an", "-f", "null", "-")
+	return arguments, input, nil
 }
 
 func detectHardwareToneMap(ffmpegPath string, encoder videoEncoder) videoEncoder {
@@ -201,7 +253,7 @@ func (encoder videoEncoder) usesHardwareToneMap() bool {
 }
 
 func (encoder videoEncoder) normalizedToneMapBackend() videoToneMapBackend {
-	if encoder.usesHardwareToneMap() {
+	if encoder.toneMapBackend == videoToneMapHybrid || encoder.usesHardwareToneMap() {
 		return encoder.toneMapBackend
 	}
 	return videoToneMapSoftware
@@ -288,18 +340,17 @@ func (encoder videoEncoder) hardwareFilter(asset storedAsset) string {
 }
 
 func vulkanToneMapFilter(targetHeight int) string {
-	filters := []string{
-		"hwmap=derive_device=vulkan",
-		"format=vulkan",
-		"libplacebo=upscaler=none:downscaler=none:format=bgra:tonemapping=bt.2390:peak_detect=false:color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv",
-		"hwmap=derive_device=vaapi",
-		"format=vaapi",
-	}
-	scale := "scale_vaapi=format=nv12"
+	libplacebo := "libplacebo=upscaler=none:downscaler=none:format=nv12:tonemapping=bt.2390:peak_detect=false:color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
 	if targetHeight > 0 {
-		scale = "scale_vaapi=w=-2:h=" + strconv.Itoa(targetHeight) + ":format=nv12"
+		libplacebo += ":w=-2:h=" + strconv.Itoa(targetHeight)
 	}
-	return strings.Join(append(filters, scale), ",")
+	return strings.Join([]string{
+		"hwmap=derive_device=vulkan:mode=read+direct",
+		"format=vulkan",
+		libplacebo,
+		"hwmap=derive_device=vaapi:mode=read+direct",
+		"format=vaapi",
+	}, ",")
 }
 
 func (encoder videoEncoder) filter(toneMap bool) string {

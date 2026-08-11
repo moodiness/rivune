@@ -100,7 +100,7 @@ type RuntimeSettingsFixture = {
   timezone: string;
   jellyfinEnabled: boolean;
   jellyfinDebug: boolean;
-  hardwareAcceleration: "auto" | "software" | "vaapi" | "qsv" | "nvenc";
+  hardwareAcceleration: "auto" | "software" | "vaapi" | "hybrid" | "qsv" | "nvenc";
   transcodeMaxBitrateKbps: number;
   mediaMaxStorageMB: number;
   artworkMaxStorageMB: number;

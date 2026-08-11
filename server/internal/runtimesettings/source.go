@@ -145,7 +145,7 @@ func (source *Source) build(values Values, bootHardwareAcceleration string) (*Sn
 	}
 	requestedHardwareAcceleration := strings.ToLower(strings.TrimSpace(values.HardwareAcceleration))
 	switch requestedHardwareAcceleration {
-	case "auto", "software", "vaapi", "qsv", "nvenc":
+	case "auto", "software", "hybrid", "vaapi", "qsv", "nvenc":
 	default:
 		return nil, ErrInvalidValues
 	}

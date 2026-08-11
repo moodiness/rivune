@@ -410,6 +410,24 @@ test("runtime settings render requested and active values and save through the d
   await expect(pendingRows.locator(".is-pending")).toHaveText("Restart required");
 });
 
+test("runtime hardware selector persists the VA-API and CPU hybrid mode", async ({ page, rivune }) => {
+  await openSettings(page);
+  await selectOption(page.getByRole("combobox", { name: "Switch scope" }), "server");
+  await page.locator('[data-settings-section="runtime"]').click();
+
+  const runtime = page.locator("#settings-section-runtime");
+  const hardware = runtime.getByRole("combobox", { name: "Hardware acceleration" });
+  await selectOption(hardware, "hybrid");
+  await expect(hardware).toHaveAttribute("data-value", "hybrid");
+
+  await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
+  const request = await rivune.waitForRequest("/api/v1/settings", "PATCH");
+  expect(request.body).toEqual({ hardwareAcceleration: "hybrid" });
+  const pending = runtime.locator(".runtime-setting").filter({ hasText: "Hardware acceleration" });
+  await expect(pending.locator(".runtime-setting-state")).toContainText("Requested · Hybrid (VA-API + CPU)");
+  await expect(pending.locator(".is-pending")).toHaveText("Restart required");
+});
+
 test("integration credentials stay write-only and preserve omission versus null", async ({ page, rivune }) => {
   await openSettings(page);
   await selectOption(page.getByRole("combobox", { name: "Switch scope" }), "server");

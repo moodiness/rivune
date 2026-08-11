@@ -1098,7 +1098,9 @@ func (service *Service) playbackCapabilities(client Capabilities, maximumHeight,
 	capabilities := cloneCapabilities(client)
 	capabilities.MaximumHeight = maximumHeight
 	capabilities.TranscodeVideoBitrateKbps = bitrateKbps
-	if processor, ok := service.processor.(interface{ HardwareToneMap() bool }); !ok || !processor.HardwareToneMap() {
+	if processor, ok := service.processor.(interface{ ToneMapMaximumHeight() int }); ok {
+		capabilities.ToneMapMaximumHeight = processor.ToneMapMaximumHeight()
+	} else {
 		capabilities.ToneMapMaximumHeight = softwareToneMapMaximumHeight
 	}
 	return capabilities

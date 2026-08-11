@@ -645,9 +645,9 @@ func validatePatch(patch Patch) error {
 	}
 	if value := patch.HardwareAcceleration.Value; patch.HardwareAcceleration.Set && value != nil {
 		switch *value {
-		case "auto", "software", "vaapi", "qsv", "nvenc":
+		case "auto", "software", "hybrid", "vaapi", "qsv", "nvenc":
 		default:
-			return fmt.Errorf("%w: hardwareAcceleration must be auto, software, vaapi, qsv, or nvenc", ErrInvalidInput)
+			return fmt.Errorf("%w: hardwareAcceleration must be auto, software, hybrid, vaapi, qsv, or nvenc", ErrInvalidInput)
 		}
 	}
 	if err := validateIntRange("transcodeMaxBitrateKbps", patch.TranscodeMaxBitrateKbps, MinimumTranscodeMaxBitrateKbps, MaximumTranscodeMaxBitrateKbps); err != nil {

@@ -27,3 +27,25 @@ func TestInstanceConfigurationMigrationContract(t *testing.T) {
 		}
 	}
 }
+
+func TestHybridHardwareAccelerationMigrationOnlyWidensSchemaV2Check(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000071_hybrid_hardware_acceleration.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"DROP CONSTRAINT IF EXISTS instance_settings_schema_v2_runtime_values",
+		"ADD CONSTRAINT instance_settings_schema_v2_runtime_values CHECK",
+		"'auto', 'software', 'hybrid', 'vaapi', 'qsv', 'nvenc'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("hybrid migration missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"UPDATE instance_settings", "ALTER COLUMN", "jsonb_build_object", "COMMIT;", "BEGIN;"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("hybrid migration changes persisted JSON or transaction control with %q", forbidden)
+		}
+	}
+}

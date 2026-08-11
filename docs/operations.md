@@ -333,13 +333,17 @@ than trusting the selected encoder name. AMD render devices (`0x1002`) try the
 VAAPI-to-Vulkan `libplacebo` path before `tonemap_vaapi`, while other vendors
 retain VAAPI-first probing; each path falls through to the next backend on probe
 failure. The container image includes the Mesa Vulkan runtime for the AMD path.
-If hardware tone mapping is unavailable, HEVC Main 10 sources retain VAAPI
-decode and encode around the software tone mapper when the frame format is
-known, and new tone-mapped sessions are capped at 1080p to preserve real-time
-playback. Administration Activity and the initialization log report the selected
-`vulkan`, `vaapi`, or `software` tone-map backend while retaining the hardware
-capability indicator. A sustained job speed below `1.00x` still means the active
-pipeline cannot feed continuous playback.
+If hardware tone mapping is unavailable in automatic mode, HEVC Main 10 sources
+retain VAAPI decode and encode around the software tone mapper when the frame
+format is known, and new tone-mapped sessions are capped at 1080p to preserve
+real-time playback. The explicit `hybrid` mode instead probes HEVC Main 10 VAAPI
+decode, P010 readback, CPU tone mapping, NV12 upload, and VAAPI encode at startup.
+It leaves the requested maximum resolution in force so an operator with a strong
+CPU and a small integrated GPU can measure that path directly. Administration
+Activity and the initialization log report the selected `vulkan`, `vaapi`,
+`hybrid`, or `software` tone-map backend while retaining the hardware capability
+indicator. A sustained job speed below `1.00x` still means the active pipeline
+cannot feed continuous playback.
 
 The backend label proves filter selection, not real-time throughput. No finite
 buffer can compensate for a job that remains below `1.00x`: lower the effective
@@ -347,6 +351,13 @@ profile or server **Maximum resolution**, close the existing player session,
 and reopen the title so Rivune creates a new decision. Use the highest target
 that stays above real time without draining its buffer; integrated AMD hardware
 may require 1080p for 4K HDR input even when the Vulkan probe succeeds.
+
+To compare the CPU-assisted path, select **Hybrid (VA-API + CPU)** under the
+server hardware-acceleration setting, save, restart the service, close the old
+player session, and reopen the same title. Hybrid keeps codec decode and encode
+on VA-API but runs HDR tone mapping and scaling on the CPU. It does not guarantee
+real-time 4K output: retain it only when Activity stays above `1.00x` without
+draining the buffer; otherwise lower **Maximum resolution** or return to `auto`.
 
 Seekable transcoding keeps a duration-aware production margin instead of
 running at exactly real time. The initial HLS buffer defaults to 12 seconds, and

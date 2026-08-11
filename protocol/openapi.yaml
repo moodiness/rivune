@@ -6255,7 +6255,7 @@ components:
       pattern: "^[A-Za-z_+-]+(?:/[A-Za-z0-9._+-]+)*$"
     HardwareAccelerationMode:
       type: string
-      enum: [auto, software, vaapi, qsv, nvenc]
+      enum: [auto, software, hybrid, vaapi, qsv, nvenc]
     CommonSettingsValues:
       type: object
       properties:
@@ -8947,7 +8947,7 @@ components:
           maxLength: 64
         hardwareAcceleration:
           type: string
-          enum: [unknown, auto, software, vaapi, qsv, nvenc]
+          enum: [unknown, auto, software, hybrid, vaapi, qsv, nvenc]
         videoEncoder:
           type: string
           minLength: 1
@@ -8956,7 +8956,7 @@ components:
           type: boolean
         toneMapBackend:
           type: string
-          enum: [vulkan, vaapi, software]
+          enum: [vulkan, vaapi, hybrid, software]
         transcodeThreads:
           type: integer
           minimum: 0

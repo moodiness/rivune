@@ -1645,6 +1645,22 @@ func TestPlaybackCapabilitiesOnlyApplySoftwareToneMapLimit(t *testing.T) {
 	if hardware.ToneMapMaximumHeight != 0 {
 		t.Fatalf("hardware tone mapping was capped at %dp", hardware.ToneMapMaximumHeight)
 	}
+	hybridProcessor := &FFmpegProcessor{encoder: videoEncoder{kind: videoEncoderVAAPI, toneMapBackend: videoToneMapHybrid}}
+	hybrid := (&Service{processor: hybridProcessor}).playbackCapabilities(Capabilities{}, 2160, 12000)
+	if hybridProcessor.HardwareToneMap() || hybrid.ToneMapMaximumHeight != 0 {
+		t.Fatalf("hybrid CPU tone mapping reported hardware=%t or cap=%dp", hybridProcessor.HardwareToneMap(), hybrid.ToneMapMaximumHeight)
+	}
+	decision := processingDecision(
+		decisionVideoTranscodeRequired,
+		"transcode",
+		"transcode",
+		MediaInspection{VideoTracks: []MediaTrack{{Codec: "h265", Height: 2160}}},
+		hybrid,
+		true,
+	)
+	if decision == nil || decision.Target == nil || decision.Target.Height != 2160 {
+		t.Fatalf("hybrid tone-map decision = %+v, want requested 2160p", decision)
+	}
 }
 
 func TestApplyPlaybackDecisionPersistsPrivateVideoBitDepth(t *testing.T) {
