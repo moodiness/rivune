@@ -29,6 +29,7 @@ RUN apt-get update \
         apt-get install -y --no-install-recommends intel-media-va-driver; \
     fi \
     && rm -rf /var/lib/apt/lists/*
+ENV XDG_CACHE_HOME=/tmp/.cache
 
 COPY --from=build /out/rivune /usr/local/bin/rivune
 COPY --chmod=755 server/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
