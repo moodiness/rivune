@@ -419,10 +419,10 @@ func loadOptionalHardwareAcceleration() (*string, error) {
 	}
 	value := strings.ToLower(strings.TrimSpace(raw))
 	switch value {
-	case "auto", "software", "hybrid", "vaapi", "qsv", "nvenc":
+	case "auto", "software", "hybrid", "vaapi", "qsv", "nvenc", "amf":
 		return &value, nil
 	default:
-		return nil, errors.New("RIVUNE_HARDWARE_ACCELERATION must be auto, software, hybrid, vaapi, qsv, or nvenc")
+		return nil, errors.New("RIVUNE_HARDWARE_ACCELERATION must be auto, software, hybrid, vaapi, qsv, nvenc, or amf")
 	}
 }
 

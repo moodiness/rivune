@@ -61,6 +61,9 @@ type settingsPatchRequest struct {
 	Timezone                         nullableString `json:"timezone,omitempty"`
 	JellyfinDebug                    nullableBool   `json:"jellyfinDebug,omitempty"`
 	HardwareAcceleration             nullableString `json:"hardwareAcceleration,omitempty"`
+	PreferredTranscodeVideoCodec     nullableString `json:"preferredTranscodeVideoCodec,omitempty"`
+	TranscodeQualityPreset           nullableString `json:"transcodeQualityPreset,omitempty"`
+	TranscodeConcurrency             nullableInt    `json:"transcodeConcurrency,omitempty"`
 	TranscodeMaxBitrateKbps          nullableInt    `json:"transcodeMaxBitrateKbps,omitempty"`
 	MediaMaxStorageMB                nullableInt    `json:"mediaMaxStorageMB,omitempty"`
 	ArtworkMaxStorageMB              nullableInt    `json:"artworkMaxStorageMB,omitempty"`
@@ -257,6 +260,18 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		writeError(w, http.StatusBadRequest, "invalid_request", "hardwareAcceleration must be a string")
 		return settings.Patch{}, false
 	}
+	if request.PreferredTranscodeVideoCodec.Set && request.PreferredTranscodeVideoCodec.Value == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "preferredTranscodeVideoCodec must be a string")
+		return settings.Patch{}, false
+	}
+	if request.TranscodeQualityPreset.Set && request.TranscodeQualityPreset.Value == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "transcodeQualityPreset must be a string")
+		return settings.Patch{}, false
+	}
+	if request.TranscodeConcurrency.Set && request.TranscodeConcurrency.Value == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "transcodeConcurrency must be an integer")
+		return settings.Patch{}, false
+	}
 	if request.TranscodeMaxBitrateKbps.Set && request.TranscodeMaxBitrateKbps.Value == nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "transcodeMaxBitrateKbps must be an integer")
 		return settings.Patch{}, false
@@ -281,6 +296,9 @@ func decodeSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.Patch
 		Timezone:                         settings.OptionalString{Set: request.Timezone.Set, Value: request.Timezone.Value},
 		JellyfinDebug:                    settings.OptionalBool{Set: request.JellyfinDebug.Set, Value: request.JellyfinDebug.Value},
 		HardwareAcceleration:             settings.OptionalString{Set: request.HardwareAcceleration.Set, Value: request.HardwareAcceleration.Value},
+		PreferredTranscodeVideoCodec:     settings.OptionalString{Set: request.PreferredTranscodeVideoCodec.Set, Value: request.PreferredTranscodeVideoCodec.Value},
+		TranscodeQualityPreset:           settings.OptionalString{Set: request.TranscodeQualityPreset.Set, Value: request.TranscodeQualityPreset.Value},
+		TranscodeConcurrency:             settings.OptionalInt{Set: request.TranscodeConcurrency.Set, Value: request.TranscodeConcurrency.Value},
 		TranscodeMaxBitrateKbps:          settings.OptionalInt{Set: request.TranscodeMaxBitrateKbps.Set, Value: request.TranscodeMaxBitrateKbps.Value},
 		MediaMaxStorageMB:                settings.OptionalInt{Set: request.MediaMaxStorageMB.Set, Value: request.MediaMaxStorageMB.Value},
 		ArtworkMaxStorageMB:              settings.OptionalInt{Set: request.ArtworkMaxStorageMB.Set, Value: request.ArtworkMaxStorageMB.Value},

@@ -49,3 +49,26 @@ func TestHybridHardwareAccelerationMigrationOnlyWidensSchemaV2Check(t *testing.T
 		}
 	}
 }
+
+func TestTranscodePlanningSettingsMigrationUpgradesV2AndMaterializesDefaults(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000072_transcode_planning_settings.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"WHERE schema_version = 2", "SET schema_version = 3", "SET DEFAULT 3",
+		"'preferredTranscodeVideoCodec', 'auto'", "'transcodeQualityPreset', 'balanced'", "'transcodeConcurrency', 4",
+		"instance_settings_schema_v3_runtime_values", "'auto', 'h264', 'hevc', 'av1'",
+		"'speed', 'balanced', 'quality'", "BETWEEN 1 AND 32", "'amf'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("transcode planning migration missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"COALESCE(settings -> 'preferredTranscodeVideoCodec'", "COMMIT;", "BEGIN;"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("transcode planning migration contains unsafe statement %q", forbidden)
+		}
+	}
+}

@@ -25,7 +25,7 @@ public sealed class TranscodingModelsTests
             MaximumVideoBitrateKbps = 12_000,
             MaximumAudioChannels = 6,
             SubtitleModes = ["external", "burn"],
-            MediaProfiles = [new PlaybackMediaProfile { Container = "mp4", VideoCodec = "h264", AudioCodec = "aac" }],
+            MediaProfiles = [new PlaybackMediaProfile { Container = "mp4", VideoCodec = "h265", AudioCodec = "aac", MaximumVideoBitDepth = 10 }],
         };
 
         using var encoded = JsonDocument.Parse(JsonSerializer.Serialize(capabilities, JsonOptions));
@@ -34,6 +34,7 @@ public sealed class TranscodingModelsTests
         Assert.Equal(12_000, encoded.RootElement.GetProperty("maximumVideoBitrateKbps").GetInt32());
         Assert.Equal(6, encoded.RootElement.GetProperty("maximumAudioChannels").GetInt32());
         Assert.Equal(new[] { "external", "burn" }, encoded.RootElement.GetProperty("subtitleModes").EnumerateArray().Select(item => item.GetString()).ToArray());
+        Assert.Equal(10, encoded.RootElement.GetProperty("mediaProfiles")[0].GetProperty("maximumVideoBitDepth").GetInt32());
     }
 
     [Fact]
@@ -67,7 +68,7 @@ public sealed class TranscodingModelsTests
         {
           "id":"22222222-2222-4222-8222-222222222222",
           "selectedSourceId":"source-1","selectedAudioTrack":2,"selectedSubtitleId":"subtitle-1",
-          "sources":[{"id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","mode":"transcode","protocol":"hls","compatible":true,"decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitrateKbps":12000},"futureDecisionField":true}}],
+          "sources":[{"id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","mode":"transcode","protocol":"hls","compatible":true,"decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}}],
           "subtitles":[{"id":"subtitle-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","default":true,"delivery":"burn","futureSubtitleField":"ignored"}],
           "providerErrors":[{"addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","code":"future_provider_code","message":"future"}],
           "expiresAt":"2026-08-03T12:00:00Z","futureSessionField":"ignored"
@@ -80,6 +81,7 @@ public sealed class TranscodingModelsTests
         Assert.Equal("subtitle_burn_required", session.Sources[0].Decision?.Reason);
         Assert.Equal("dolby_vision", session.Sources[0].Decision?.Source?.HdrFormat);
         Assert.Equal(12_000, session.Sources[0].Decision?.Target?.VideoBitrateKbps);
+        Assert.Equal(8, session.Sources[0].Decision?.Target?.VideoBitDepth);
         Assert.Equal("burn", session.Subtitles[0].Delivery);
         Assert.Null(session.Subtitles[0].Url);
         Assert.Equal("future_provider_code", session.ProviderErrors[0].Code);

@@ -226,6 +226,35 @@ func TestCodecProfilesOnlyNarrowDirectPlayAndUnknownRequiredConditionsFailClosed
 	}
 }
 
+func TestCodecProfileVideoBitDepthAppliesToDirectAndTranscodingProfiles(t *testing.T) {
+	profile := DeviceProfile{
+		CodecProfiles: []CodecProfile{{
+			Type: "Video", Codec: "hevc", Conditions: []ProfileCondition{{Condition: "LessThanEqual", Property: "VideoBitDepth", Value: "10", IsRequired: true}},
+		}},
+		DirectPlayProfiles:  []DirectPlayProfile{{Type: "Video", Container: "mp4", VideoCodec: "hevc", AudioCodec: "aac"}},
+		TranscodingProfiles: []TranscodingProfile{{Type: "Video", Context: "Streaming", Protocol: "hls", Container: "mp4", VideoCodec: "hevc", AudioCodec: "aac"}},
+	}
+	capabilities, _, err := playbackCapabilities(PlaybackInfoRequest{DeviceProfile: profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directDepth, transcodeDepth := 0, 0
+	for _, mediaProfile := range capabilities.MediaProfiles {
+		if !strings.EqualFold(mediaProfile.VideoCodec, "hevc") {
+			continue
+		}
+		if mediaProfile.DirectPlay {
+			directDepth = mediaProfile.MaximumVideoBitDepth
+		}
+		if mediaProfile.Transcoding {
+			transcodeDepth = mediaProfile.MaximumVideoBitDepth
+		}
+	}
+	if directDepth != 10 || transcodeDepth != 10 {
+		t.Fatalf("VideoBitDepth condition was not applied to both profile uses: direct=%d transcode=%d profiles=%+v", directDepth, transcodeDepth, capabilities.MediaProfiles)
+	}
+}
+
 func TestCodecProfileJSONNormalizesCSVWhitespaceAndCase(t *testing.T) {
 	payload := `{"Name":"Native JSON","CodecProfiles":[{"Type":"video","Codec":" HEVC, h265 ","Conditions":[{"Condition":"lessthanequal","Property":"videolevel","Value":"153","IsRequired":false},{"Condition":"notequals","Property":"videorangetype","Value":"dovi","IsRequired":true}]}],"ContainerProfiles":[],"DirectPlayProfiles":[{"Type":"video","Container":" MP4 ","VideoCodec":" h264, HEVC ","AudioCodec":" AAC "}],"TranscodingProfiles":[{"Type":"video","Context":"streaming","Protocol":"HLS","Container":"ts","VideoCodec":"h264, hevc","AudioCodec":"aac","MaxAudioChannels":"2"}]}`
 	var profile DeviceProfile

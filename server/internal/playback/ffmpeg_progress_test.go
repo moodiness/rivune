@@ -118,7 +118,8 @@ func TestProcessHLSAddsControlledProgressDestination(t *testing.T) {
 func TestProcessHLSSoftwareRetryResetsProgressBetweenAttempts(t *testing.T) {
 	directory := t.TempDir()
 	processor := testFFmpegProcessor()
-	processor.encoder = videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"}
+	processor.encoder = videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", encodeCodecs: map[string]bool{"av1": true}, decodeCodecs: map[string]bool{"h264": true}}
+	processor.softwareEncoder = videoEncoder{kind: videoEncoderSoftware, encodeCodecs: map[string]bool{"av1": true}}
 	calls := 0
 	firstReported := false
 	staleRemoved := false
@@ -130,6 +131,9 @@ func TestProcessHLSSoftwareRetryResetsProgressBetweenAttempts(t *testing.T) {
 		command := ffmpegHelperCommand(ctx, path, arguments...)
 		switch calls {
 		case 1:
+			if _, encoder := argumentValue(arguments, "-c:v"); encoder != "av1_vaapi" {
+				t.Fatalf("hardware progress attempt encoder = %q", encoder)
+			}
 			if err := os.WriteFile(filepath.Join(directory, ffmpegProgressFilename), []byte("out_time_us=11000000\nspeed=1x\nprogress=continue\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -137,6 +141,9 @@ func TestProcessHLSSoftwareRetryResetsProgressBetweenAttempts(t *testing.T) {
 			firstReported = ok && first.encodedSeconds == 11
 			command.Env = append(os.Environ(), "RIVUNE_FFMPEG_HELPER_MODE=fail")
 		case 2:
+			if _, encoder := argumentValue(arguments, "-c:v"); encoder != "libsvtav1" {
+				t.Fatalf("software progress attempt encoder = %q", encoder)
+			}
 			_, err := os.Stat(filepath.Join(directory, ffmpegProgressFilename))
 			staleRemoved = os.IsNotExist(err)
 			if err := os.WriteFile(filepath.Join(directory, ffmpegProgressFilename), []byte("out_time_us=22000000\nspeed=2x\nprogress=end\n"), 0o600); err != nil {
@@ -146,8 +153,8 @@ func TestProcessHLSSoftwareRetryResetsProgressBetweenAttempts(t *testing.T) {
 		return command
 	}
 	err := processor.ProcessHLS(context.Background(), storedAsset{
-		Kind: processingTranscode, URL: os.Args[0], HLSSegmentContainer: "ts",
-		Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{VideoCodec: "h264", Height: 1080}},
+		Kind: processingTranscode, URL: os.Args[0], HLSSegmentContainer: "mp4", TargetVideoCodec: "av1", QualityPreset: "speed",
+		Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{VideoCodec: "h264", Height: 1080}, Target: &PlaybackDecisionTarget{VideoCodec: "av1", Height: 1080}},
 	}, directory)
 	if err != nil || calls != 2 || !firstReported || !staleRemoved {
 		t.Fatalf("software retry err=%v calls=%d firstReported=%t staleRemoved=%t", err, calls, firstReported, staleRemoved)

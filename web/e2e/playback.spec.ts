@@ -108,6 +108,10 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
       externalPlayers: ["system"],
     },
   });
+  const mediaProfiles = sourceRequest.body.capabilities.mediaProfiles as Array<{ videoCodec: string; maximumVideoBitDepth?: number }>;
+  expect(mediaProfiles.every((profile) => profile.maximumVideoBitDepth === 8 || profile.maximumVideoBitDepth === 10)).toBe(true);
+  const supportsHEVCMain10 = await page.evaluate(() => Boolean(document.createElement("video").canPlayType('video/mp4; codecs="hvc1.2.4.L153.B0"')));
+  expect(mediaProfiles.some((profile) => profile.videoCodec === "h265" && profile.maximumVideoBitDepth === 10)).toBe(supportsHEVCMain10);
   await expect(page.getByRole("button", { name: "Play episode" })).toBeEnabled();
 
   const preparation = await rivune.waitForRequest("/api/v1/playback/prepare", "POST");

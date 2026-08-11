@@ -87,13 +87,16 @@ func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
 	service := &fakeInstanceService{info: instance.Info{Name: "Rivune", SetupRequired: true}}
 	api := testAPI(service)
 	runtimeSource, err := runtimesettings.New(runtimesettings.Values{
-		Revision:                1,
-		Timezone:                "Europe/Paris",
-		HardwareAcceleration:    runtimesettings.DefaultHardwareAcceleration,
-		TranscodeMaxBitrateKbps: runtimesettings.DefaultTranscodeMaxBitrateKbps,
-		MediaMaxStorageMB:       runtimesettings.DefaultMediaMaxStorageMB,
-		ArtworkMaxStorageMB:     runtimesettings.DefaultArtworkMaxStorageMB,
-		AllowTranscoding:        true,
+		Revision:                     1,
+		Timezone:                     "Europe/Paris",
+		HardwareAcceleration:         runtimesettings.DefaultHardwareAcceleration,
+		PreferredTranscodeVideoCodec: runtimesettings.DefaultPreferredTranscodeVideoCodec,
+		TranscodeQualityPreset:       runtimesettings.DefaultTranscodeQualityPreset,
+		TranscodeConcurrency:         runtimesettings.DefaultTranscodeConcurrency,
+		TranscodeMaxBitrateKbps:      runtimesettings.DefaultTranscodeMaxBitrateKbps,
+		MediaMaxStorageMB:            runtimesettings.DefaultMediaMaxStorageMB,
+		ArtworkMaxStorageMB:          runtimesettings.DefaultArtworkMaxStorageMB,
+		AllowTranscoding:             true,
 	})
 	if err != nil {
 		t.Fatal(err)

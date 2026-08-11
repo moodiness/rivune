@@ -21,6 +21,15 @@ const (
 	decisionSubtitleBurnRequired   = "subtitle_burn_required"
 )
 
+const (
+	reasonContainerNotSupported  = "container_not_supported"
+	reasonVideoCodecNotSupported = "video_codec_not_supported"
+	reasonAudioCodecNotSupported = "audio_codec_not_supported"
+	reasonResolutionLimit        = "resolution_limit"
+	reasonBitrateLimit           = "bitrate_limit"
+	reasonHDRNotSupported        = "hdr_not_supported"
+)
+
 type sourceCandidate struct {
 	sourceIndex    int
 	assetIndex     int
@@ -256,6 +265,13 @@ func applyPlaybackDecision(sources []Source, assets []storedAsset, candidate sou
 		if decision.Target != nil {
 			asset.TargetHeight = decision.Target.Height
 			asset.VideoBitrateKbps = decision.Target.VideoBitrateKbps
+			if decision.VideoAction == "transcode" {
+				asset.TargetVideoCodec = canonicalTargetVideoCodec(decision.Target.VideoCodec)
+				asset.QualityPreset = transcodeQualityPreset(capabilities)
+				if asset.TargetVideoCodec == "hevc" || asset.TargetVideoCodec == "av1" {
+					asset.HLSSegmentContainer = "mp4"
+				}
+			}
 		}
 	}
 	asset.MaximumAudioChannels = capabilities.MaximumAudioChannels
@@ -270,18 +286,20 @@ func playbackMode(source Source, inspection MediaInspection, capabilities Capabi
 	if directPlaybackSupported(source, inspection, video, audio, capabilities) {
 		return "direct", directDecision(inspection)
 	}
+	reasons := directIncompatibilityReasons(source, inspection, capabilities)
 	if remuxSupported(inspection, capabilities) {
-		return processingRemux, processingDecision(decisionRemuxRequired, "copy", "copy", inspection, capabilities, false)
+		return processingRemux, processingDecisionWithReasons(decisionRemuxRequired, reasons, "copy", "copy", inspection, capabilities, false)
 	}
 	if audioTranscodeSupported(inspection, capabilities) {
-		return processingTranscodeAudio, processingDecision(decisionAudioTranscodeRequired, "copy", "transcode", inspection, capabilities, false)
+		return processingTranscodeAudio, processingDecisionWithReasons(decisionAudioTranscodeRequired, reasons, "copy", "transcode", inspection, capabilities, false)
 	}
 	if fullTranscodeSupported(capabilities) {
-		toneMap := videoNeedsToneMapping(inspection, capabilities)
+		targetAudio := &MediaTrack{Codec: "aac", Channels: targetAudioChannels(capabilities)}
+		toneMap := videoTranscodeNeedsToneMapping(inspection, capabilities, targetAudio)
 		if toneMap && !genericToneMappingSupported(inspection) {
 			return "", nil
 		}
-		return processingTranscode, processingDecision(decisionVideoTranscodeRequired, "transcode", "transcode", inspection, capabilities, toneMap)
+		return processingTranscode, processingDecisionWithReasons(decisionVideoTranscodeRequired, reasons, "transcode", "transcode", inspection, capabilities, toneMap)
 	}
 	return "", nil
 }
@@ -338,24 +356,40 @@ func fullTranscodeSupported(capabilities Capabilities) bool {
 	if !requestedProcessingMode(capabilities.ProcessingModes, processingTranscode) || !processingOutputSupported(capabilities) {
 		return false
 	}
-	video := &MediaTrack{Codec: "h264"}
-	audio := &MediaTrack{Codec: "aac", Channels: targetAudioChannels(capabilities)}
-	return processingMediaProfileSupported("mp4", video, audio, capabilities)
+	return selectedTranscodeVideoCodec(capabilities) != ""
 }
 
 func processingDecision(reason, videoAction, audioAction string, inspection MediaInspection, capabilities Capabilities, toneMap bool) *PlaybackDecision {
+	return processingDecisionWithReasons(reason, nil, videoAction, audioAction, inspection, capabilities, toneMap)
+}
+
+func processingDecisionWithReasons(reason string, reasons []string, videoAction, audioAction string, inspection MediaInspection, capabilities Capabilities, toneMap bool) *PlaybackDecision {
 	protocol, container := processingOutput()
 	target := &PlaybackDecisionTarget{Protocol: protocol, Container: container}
 	video := primaryTrack(inspection.VideoTracks)
 	audio := primaryTrack(inspection.AudioTracks)
+	var targetAudio *MediaTrack
+	if audioAction == "copy" {
+		targetAudio = audio
+	} else if audio != nil {
+		targetAudio = &MediaTrack{Codec: "aac", Channels: targetAudioChannels(capabilities)}
+	}
 	if videoAction == "copy" && video != nil {
 		target.VideoCodec = normalizedCodec(video.Codec)
 		target.Height = video.Height
+		target.VideoBitDepth = video.BitDepth
 		target.VideoBitrateKbps = video.BitrateKbps
 	} else {
-		target.VideoCodec = "h264"
+		target.VideoCodec, target.VideoBitDepth = selectedTranscodeVideoTarget(capabilities, inspection, targetAudio)
+		if target.VideoCodec == "" {
+			target.VideoCodec = "h264"
+			target.VideoBitDepth = 8
+		}
 		if video != nil {
 			target.Height = video.Height
+		}
+		if sourceHDRNeedsBitDepthToneMap(inspection, target.VideoBitDepth) {
+			toneMap = true
 		}
 		maximumHeight := capabilities.MaximumHeight
 		if toneMap && capabilities.ToneMapMaximumHeight > 0 && (maximumHeight == 0 || capabilities.ToneMapMaximumHeight < maximumHeight) {
@@ -366,15 +400,299 @@ func processingDecision(reason, videoAction, audioAction string, inspection Medi
 		}
 		target.VideoBitrateKbps = transcodeVideoBitrateKbps(capabilities)
 	}
-	if audioAction == "copy" && audio != nil {
-		target.AudioCodec = normalizedCodec(audio.Codec)
-	} else if audio != nil {
-		target.AudioCodec = "aac"
+	if targetAudio != nil {
+		target.AudioCodec = normalizedCodec(targetAudio.Codec)
 	}
-	return &PlaybackDecision{
-		Reason: reason, VideoAction: videoAction, AudioAction: audioAction,
+	decision := &PlaybackDecision{
+		Reason: reason, Reasons: append([]string(nil), reasons...), VideoAction: videoAction, AudioAction: audioAction,
 		SubtitleAction: "none", ToneMapping: toneMap, Source: decisionSource(inspection), Target: target,
 	}
+	if videoAction == "transcode" {
+		decision.Pipeline = plannedPlaybackPipeline(inspection, capabilities, target, toneMap, false)
+	}
+	return decision
+}
+
+func selectedTranscodeVideoCodec(capabilities Capabilities) string {
+	return selectedTranscodeVideoCodecForAudio(capabilities, &MediaTrack{Codec: "aac", Channels: targetAudioChannels(capabilities)})
+}
+
+func selectedTranscodeVideoCodecForAudio(capabilities Capabilities, audio *MediaTrack) string {
+	preferred := canonicalTargetVideoCodec(capabilities.transcodeCapabilities.PreferredVideoCodec)
+	candidates := [...]string{preferred, "h264", "hevc", "av1"}
+	for index, codec := range candidates {
+		codec = canonicalTargetVideoCodec(codec)
+		if codec == "" || codec == "auto" {
+			continue
+		}
+		duplicate := false
+		for prior := range index {
+			if canonicalTargetVideoCodec(candidates[prior]) == codec {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate || (codec == "hevc" || codec == "av1") && normalizedHLSSegmentContainer(capabilities.HLSSegmentContainer) != "mp4" {
+			continue
+		}
+		if !engineCanEncode(capabilities.transcodeCapabilities.EncodeCodecs, codec) {
+			continue
+		}
+		if processingMediaProfileSupported("mp4", &MediaTrack{Codec: codec}, audio, capabilities) {
+			return codec
+		}
+	}
+	return ""
+}
+
+func selectedTranscodeVideoTarget(capabilities Capabilities, inspection MediaInspection, audio *MediaTrack) (string, int) {
+	codec := selectedTranscodeVideoCodecForAudio(capabilities, audio)
+	video := primaryTrack(inspection.VideoTracks)
+	needsScale := video != nil && capabilities.MaximumHeight > 0 && video.Height > capabilities.MaximumHeight
+	if codec != "hevc" || video == nil || video.BitDepth <= 8 || needsScale || videoNeedsToneMapping(inspection, capabilities) || !capabilities.transcodeCapabilities.HEVCMain10 {
+		return codec, 8
+	}
+	for _, profile := range capabilities.MediaProfiles {
+		if transcodeMediaProfileSupportsBitDepth(profile, codec, audio, 10) {
+			return codec, 10
+		}
+	}
+	return codec, 8
+}
+
+func transcodeMediaProfileSupportsBitDepth(profile MediaProfile, codec string, audio *MediaTrack, bitDepth int) bool {
+	containers := profile.Container
+	if profile.ContainersCSV != "" {
+		containers = profile.ContainersCSV
+	}
+	maximumBitDepth := profile.MaximumVideoBitDepth
+	if maximumBitDepth == 0 {
+		maximumBitDepth = 8
+	}
+	if maximumBitDepth < bitDepth || profile.DirectPlay && !profile.Transcoding ||
+		!mediaProfileContainerMatches(containers, "mp4") || normalizedCodec(profile.VideoCodec) != normalizedCodec(codec) {
+		return false
+	}
+	audioCodecs := profile.AudioCodec
+	if profile.AudioCodecsCSV != "" {
+		audioCodecs = profile.AudioCodecsCSV
+	}
+	return audio == nil || mediaProfileCodecMatches(audioCodecs, audio.Codec)
+}
+
+func sourceHDRNeedsBitDepthToneMap(inspection MediaInspection, targetBitDepth int) bool {
+	format := strings.ToLower(strings.TrimSpace(inspection.HDRFormat))
+	return targetBitDepth <= 8 && format != "" && format != "sdr"
+}
+func videoTranscodeNeedsToneMapping(inspection MediaInspection, capabilities Capabilities, audio *MediaTrack) bool {
+	_, targetBitDepth := selectedTranscodeVideoTarget(capabilities, inspection, audio)
+	return videoNeedsToneMapping(inspection, capabilities) || sourceHDRNeedsBitDepthToneMap(inspection, targetBitDepth)
+}
+
+func canonicalTargetVideoCodec(codec string) string {
+	switch normalizedCodec(codec) {
+	case "h264":
+		return "h264"
+	case "h265":
+		return "hevc"
+	case "av1":
+		return "av1"
+	case "auto":
+		return "auto"
+	default:
+		return ""
+	}
+}
+
+func engineCanEncode(codecs []string, codec string) bool {
+	if len(codecs) == 0 {
+		return codec == "h264"
+	}
+	for _, candidate := range codecs {
+		if canonicalTargetVideoCodec(candidate) == codec {
+			return true
+		}
+	}
+	return false
+}
+
+func directIncompatibilityReasons(source Source, inspection MediaInspection, capabilities Capabilities) []string {
+	video := primaryTrack(inspection.VideoTracks)
+	audio := primaryTrack(inspection.AudioTracks)
+	container := inspection.Container
+	if container == "" {
+		container = source.Container
+	}
+	reasons := make([]string, 0, 6)
+	add := func(reason string) {
+		for _, existing := range reasons {
+			if existing == reason {
+				return
+			}
+		}
+		reasons = append(reasons, reason)
+	}
+	if !supports(capabilities.StreamingProtocols, source.Protocol) || (len(capabilities.MediaProfiles) == 0 && !supportsContainer(capabilities.Containers, container)) {
+		add(reasonContainerNotSupported)
+	}
+	if video != nil {
+		if (len(capabilities.MediaProfiles) == 0 && !supportsCodec(capabilities.VideoCodecs, video.Codec)) || !videoCodecConditionsSupported(video, capabilities) {
+			add(reasonVideoCodecNotSupported)
+		}
+		if capabilities.MaximumHeight > 0 && (video.Height <= 0 || video.Height > capabilities.MaximumHeight) {
+			add(reasonResolutionLimit)
+		}
+		if capabilities.MaximumVideoBitrateKbps > 0 && (video.BitrateKbps <= 0 || video.BitrateKbps > capabilities.MaximumVideoBitrateKbps) {
+			add(reasonBitrateLimit)
+		}
+		if !clientSupportsVideoHDR(video, inspection.HDRFormat, capabilities) {
+			add(reasonHDRNotSupported)
+		}
+	}
+	if audio != nil && len(capabilities.MediaProfiles) == 0 && (!supportsCodec(capabilities.AudioCodecs, audio.Codec) || !audioWithinClientLimits(audio, capabilities)) {
+		add(reasonAudioCodecNotSupported)
+	}
+	if video != nil && len(capabilities.MediaProfiles) > 0 {
+		containerSupported, videoSupported, audioSupported := directProfileCompatibility(container, video, audio, capabilities)
+		if !containerSupported {
+			add(reasonContainerNotSupported)
+		}
+		if !videoSupported {
+			add(reasonVideoCodecNotSupported)
+		}
+		if !audioSupported {
+			add(reasonAudioCodecNotSupported)
+		}
+	}
+	return reasons
+}
+
+func directProfileCompatibility(container string, video, audio *MediaTrack, capabilities Capabilities) (bool, bool, bool) {
+	containerSupported := false
+	videoSupported := false
+	audioSupported := audio == nil
+	for _, profile := range capabilities.MediaProfiles {
+		if (profile.DirectPlay || profile.Transcoding) && !profile.DirectPlay {
+			continue
+		}
+		containers := profile.Container
+		if profile.ContainersCSV != "" {
+			containers = profile.ContainersCSV
+		}
+		if !mediaProfileContainerMatches(containers, container) {
+			continue
+		}
+		containerSupported = true
+		videoMatches := video == nil || normalizedCodec(profile.VideoCodec) == normalizedCodec(video.Codec) && mediaProfileVideoConditionsSupported(profile, video)
+		audioCodecs := profile.AudioCodec
+		if profile.AudioCodecsCSV != "" {
+			audioCodecs = profile.AudioCodecsCSV
+		}
+		audioMatches := audio == nil || mediaProfileCodecMatches(audioCodecs, audio.Codec)
+		if videoMatches && audioMatches {
+			videoSupported = true
+			audioSupported = true
+		}
+	}
+	return containerSupported, videoSupported, audioSupported
+}
+
+func plannedPlaybackPipeline(inspection MediaInspection, capabilities Capabilities, target *PlaybackDecisionTarget, toneMap, subtitleBurn bool) *PlaybackPipeline {
+	backend := strings.ToLower(strings.TrimSpace(capabilities.transcodeCapabilities.HardwareAcceleration))
+	if backend == "" || backend == "auto" {
+		backend = "software"
+	}
+	executionBackend := backend
+	if executionBackend == "hybrid" {
+		executionBackend = "vaapi"
+	}
+	targetCodec := "h264"
+	if target != nil && target.VideoCodec != "" {
+		targetCodec = target.VideoCodec
+	}
+	pipeline := &PlaybackPipeline{
+		HardwareAcceleration: backend,
+		Decoder:              "software",
+		Encoder:              targetVideoEncoder(targetCodec, executionBackend),
+	}
+	video := primaryTrack(inspection.VideoTracks)
+	hardwareDecode := executionBackend != "software" && !subtitleBurn && video != nil &&
+		(supportsCodec(capabilities.transcodeCapabilities.DecodeCodecs, video.Codec) ||
+			canonicalTargetVideoCodec(video.Codec) == "hevc" && video.BitDepth > 8 && target != nil && target.VideoBitDepth >= 10 && capabilities.transcodeCapabilities.HEVCMain10)
+	needsScale := target != nil && target.Height > 0 && video != nil && video.Height > target.Height
+	if needsScale && executionBackend != "vaapi" && executionBackend != "qsv" {
+		hardwareDecode = false
+	}
+	if toneMap {
+		pipeline.ToneMapBackend = strings.ToLower(strings.TrimSpace(capabilities.toneMapBackend))
+		if pipeline.ToneMapBackend == "" {
+			pipeline.ToneMapBackend = "software"
+		}
+		if (pipeline.ToneMapBackend == "software" || pipeline.ToneMapBackend == "hybrid") &&
+			(executionBackend != "vaapi" || video == nil || canonicalTargetVideoCodec(video.Codec) != "hevc" || video.BitDepth != 10) {
+			hardwareDecode = false
+		}
+	}
+	if hardwareDecode {
+		switch executionBackend {
+		case "amf":
+			pipeline.Decoder = "d3d11va"
+		case "nvenc":
+			pipeline.Decoder = "cuda"
+		default:
+			pipeline.Decoder = executionBackend
+		}
+	}
+	pipeline.ZeroCopy = hardwareDecode && (!toneMap || pipeline.ToneMapBackend != "software" && pipeline.ToneMapBackend != "hybrid")
+	return pipeline
+}
+
+func targetVideoEncoder(codec, backend string) string {
+	codec = canonicalTargetVideoCodec(codec)
+	if backend == "" || backend == "auto" || backend == "software" {
+		switch codec {
+		case "hevc":
+			return "libx265"
+		case "av1":
+			return "libsvtav1"
+		default:
+			return "libx264"
+		}
+	}
+	if backend == "nvenc" {
+		switch codec {
+		case "hevc":
+			return "hevc_nvenc"
+		case "av1":
+			return "av1_nvenc"
+		default:
+			return "h264_nvenc"
+		}
+	}
+	return codec + "_" + backend
+}
+
+func transcodeQualityPreset(capabilities Capabilities) string {
+	switch strings.ToLower(strings.TrimSpace(capabilities.transcodeCapabilities.QualityPreset)) {
+	case "speed":
+		return "speed"
+	case "quality":
+		return "quality"
+	default:
+		return "balanced"
+	}
+}
+
+func appendDecisionReason(decision *PlaybackDecision, reason string) {
+	if decision == nil || reason == "" {
+		return
+	}
+	for _, existing := range decision.Reasons {
+		if existing == reason {
+			return
+		}
+	}
+	decision.Reasons = append(decision.Reasons, reason)
 }
 func transcodeVideoBitrateKbps(capabilities Capabilities) int {
 	serverMaximum := capabilities.TranscodeVideoBitrateKbps
@@ -666,6 +984,13 @@ func mediaProfileVideoConditionsSupported(profile MediaProfile, video *MediaTrac
 		} else if video.Level > profile.MaximumVideoLevel {
 			return false
 		}
+	}
+	maximumBitDepth := profile.MaximumVideoBitDepth
+	if maximumBitDepth == 0 {
+		maximumBitDepth = 8
+	}
+	if video.BitDepth > maximumBitDepth || profile.MaximumVideoBitDepth > 0 && video.BitDepth <= 0 {
+		return false
 	}
 	if profile.ExcludedVideoRange != "" {
 		videoRange := strings.TrimSpace(video.VideoRangeType)

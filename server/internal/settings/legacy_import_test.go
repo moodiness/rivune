@@ -56,7 +56,7 @@ func TestLegacyEnvironmentImportIsOneShotDatabaseFirstAndRedacted(t *testing.T) 
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO instances(id,public_id,legacy_instance_setting_keys) VALUES (1,'30000000-0000-4000-8000-000000000003',ARRAY['timezone']);
-		INSERT INTO instance_settings(instance_id,schema_version,settings) VALUES (1,2,'{"timezone":"UTC","jellyfinEnabled":false,"jellyfinDebug":false,"hardwareAcceleration":"auto","transcodeMaxBitrateKbps":12000,"mediaMaxStorageMB":20480,"artworkMaxStorageMB":20480,"allowTranscoding":true}');
+		INSERT INTO instance_settings(instance_id,schema_version,settings) VALUES (1,3,'{"timezone":"UTC","jellyfinEnabled":false,"jellyfinDebug":false,"hardwareAcceleration":"auto","preferredTranscodeVideoCodec":"auto","transcodeQualityPreset":"balanced","transcodeConcurrency":4,"transcodeMaxBitrateKbps":12000,"mediaMaxStorageMB":20480,"artworkMaxStorageMB":20480,"allowTranscoding":true}');
 	`); err != nil {
 		t.Fatal(err)
 	}

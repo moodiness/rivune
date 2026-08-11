@@ -100,7 +100,10 @@ type RuntimeSettingsFixture = {
   timezone: string;
   jellyfinEnabled: boolean;
   jellyfinDebug: boolean;
-  hardwareAcceleration: "auto" | "software" | "vaapi" | "hybrid" | "qsv" | "nvenc";
+  hardwareAcceleration: "auto" | "software" | "vaapi" | "hybrid" | "qsv" | "nvenc" | "amf";
+  preferredTranscodeVideoCodec: "auto" | "h264" | "hevc" | "av1";
+  transcodeQualityPreset: "speed" | "balanced" | "quality";
+  transcodeConcurrency: number;
   transcodeMaxBitrateKbps: number;
   mediaMaxStorageMB: number;
   artworkMaxStorageMB: number;
@@ -371,6 +374,9 @@ export class RivuneHarness {
     timezone: "America/Toronto",
     hardwareAcceleration: "software",
     transcodeMaxBitrateKbps: 18_000,
+    preferredTranscodeVideoCodec: "auto",
+    transcodeQualityPreset: "balanced",
+    transcodeConcurrency: 4,
     mediaMaxStorageMB: 24_576,
     artworkMaxStorageMB: 8_192,
     maximumCastMembers: 20,
@@ -382,6 +388,9 @@ export class RivuneHarness {
     jellyfinDebug: true,
     hardwareAcceleration: "software",
     transcodeMaxBitrateKbps: 18_000,
+    preferredTranscodeVideoCodec: "auto",
+    transcodeQualityPreset: "balanced",
+    transcodeConcurrency: 4,
     mediaMaxStorageMB: 24_576,
     artworkMaxStorageMB: 8_192,
     allowTranscoding: true,
@@ -480,7 +489,7 @@ export class RivuneHarness {
       storageBytes: 12_582_912,
       storageLimitBytes: 1_073_741_824,
     },
-    diagnostics: { ffmpegVersion: "7.1", ffprobeVersion: "7.1", hardwareAcceleration: "software", videoEncoder: "h264", hardwareToneMap: false, toneMapBackend: "software", transcodeThreads: 4, maximumReadRate: 1.5, totals: { started: 1, succeeded: 0, failed: 0, softwareFallbacks: 0 }, pools: { process: { active: 1, limit: 3 }, probe: { active: 0, limit: 3 }, subtitle: { active: 0, limit: 3 }, trickplay: { active: 0, limit: 1 } } },
+    diagnostics: { ffmpegVersion: "7.1", ffprobeVersion: "7.1", hardwareAcceleration: "software", videoEncoder: "h264", preferredVideoCodec: "auto", encodeCodecs: ["h264", "hevc", "av1"], decodeCodecs: ["h264", "hevc"], qualityPreset: "balanced", hardwareToneMap: false, toneMapBackend: "software", transcodeThreads: 4, maximumReadRate: 1.5, totals: { started: 1, succeeded: 0, failed: 0, softwareFallbacks: 0 }, pools: { process: { active: 1, limit: 3 }, probe: { active: 0, limit: 3 }, subtitle: { active: 0, limit: 3 }, trickplay: { active: 0, limit: 1 } } },
     sessions: [],
     jobs: [],
   };
@@ -615,6 +624,10 @@ export class RivuneHarness {
   setHardwareRestartPending(requested: RuntimeSettingsFixture["hardwareAcceleration"], active: RuntimeSettingsFixture["hardwareAcceleration"]) {
     this.instanceSettings = { ...this.instanceSettings, hardwareAcceleration: requested };
     this.runtimeActive = { ...this.runtimeActive, hardwareAcceleration: active };
+  }
+  setTranscodeRestartPending(requested: Partial<RuntimeSettingsFixture>, active: Partial<RuntimeSettingsFixture>) {
+    this.instanceSettings = { ...this.instanceSettings, ...requested };
+    this.runtimeActive = { ...this.runtimeActive, ...active };
   }
   setIntegrationConfigured(name: IntegrationCredentialName, configured: boolean) {
     this.integrationCredentials = {
@@ -826,6 +839,9 @@ export class RivuneHarness {
       jellyfinDebug: this.instanceSettings.jellyfinDebug as boolean,
       hardwareAcceleration: this.instanceSettings.hardwareAcceleration as RuntimeSettingsFixture["hardwareAcceleration"],
       transcodeMaxBitrateKbps: this.instanceSettings.transcodeMaxBitrateKbps as number,
+      preferredTranscodeVideoCodec: this.instanceSettings.preferredTranscodeVideoCodec as RuntimeSettingsFixture["preferredTranscodeVideoCodec"],
+      transcodeQualityPreset: this.instanceSettings.transcodeQualityPreset as RuntimeSettingsFixture["transcodeQualityPreset"],
+      transcodeConcurrency: this.instanceSettings.transcodeConcurrency as number,
       mediaMaxStorageMB: this.instanceSettings.mediaMaxStorageMB as number,
       artworkMaxStorageMB: this.instanceSettings.artworkMaxStorageMB as number,
       allowTranscoding: this.instanceSettings.allowTranscoding as boolean,
@@ -835,12 +851,13 @@ export class RivuneHarness {
   private instanceSettingsResponse() {
     const requested = this.requestedRuntimeSettings();
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       revision: this.configurationRevision,
       settings: this.instanceSettings,
       runtime: {
         active: this.runtimeActive,
-        pendingRestart: requested.hardwareAcceleration === this.runtimeActive.hardwareAcceleration ? [] : ["hardwareAcceleration"],
+        requested,
+        pendingRestart: (["hardwareAcceleration", "preferredTranscodeVideoCodec", "transcodeQualityPreset", "transcodeConcurrency"] as const).filter((key) => requested[key] !== this.runtimeActive[key]),
       },
       updatedAt: createdAt,
     };
@@ -1405,7 +1422,13 @@ export class RivuneHarness {
       const changedKeys = Object.keys(patch);
       this.instanceSettings = { ...this.instanceSettings, ...patch };
       const requested = this.requestedRuntimeSettings();
-      this.runtimeActive = { ...requested, hardwareAcceleration: this.runtimeActive.hardwareAcceleration };
+      this.runtimeActive = {
+        ...requested,
+        hardwareAcceleration: this.runtimeActive.hardwareAcceleration,
+        preferredTranscodeVideoCodec: this.runtimeActive.preferredTranscodeVideoCodec,
+        transcodeQualityPreset: this.runtimeActive.transcodeQualityPreset,
+        transcodeConcurrency: this.runtimeActive.transcodeConcurrency,
+      };
       this.recordConfigurationAudit("settings.updated", changedKeys, { ...this.instanceSettings });
       await configurationJSON(route, this.instanceSettingsResponse());
       return;

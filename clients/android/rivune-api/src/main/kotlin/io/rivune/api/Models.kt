@@ -466,6 +466,7 @@ data class PlaybackMediaProfile(
     val container: String,
     val videoCodec: String,
     val audioCodec: String? = null,
+    val maximumVideoBitDepth: Int? = null,
 )
 
 @Serializable
@@ -597,6 +598,7 @@ data class PlaybackDecisionTarget(
     val videoCodec: String? = null,
     val audioCodec: String? = null,
     val height: Int? = null,
+    val videoBitDepth: Int? = null,
     val videoBitrateKbps: Int? = null,
 )
 
@@ -655,6 +657,7 @@ data class PlaybackActivitySummary(
 @Serializable
 data class PlaybackMediaDiagnostics(
     val videoEncoder: String,
+    val hevcMain10: Boolean? = null,
     val hardwareToneMap: Boolean,
 )
 

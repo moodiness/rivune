@@ -73,12 +73,18 @@ func (s *Service) setupRuntimeSnapshot(ctx context.Context) runtimesettings.Snap
 	}
 	return runtimesettings.Snapshot{
 		Timezone: s.timezone, JellyfinEnabled: s.jellyfinEnabled,
-		HardwareAcceleration:          runtimesettings.DefaultHardwareAcceleration,
-		RequestedHardwareAcceleration: runtimesettings.DefaultHardwareAcceleration,
-		TranscodeMaxBitrateKbps:       runtimesettings.DefaultTranscodeMaxBitrateKbps,
-		MediaMaxStorageBytes:          int64(runtimesettings.DefaultMediaMaxStorageMB) << 20,
-		ArtworkMaxStorageBytes:        int64(runtimesettings.DefaultArtworkMaxStorageMB) << 20,
-		AllowTranscoding:              true,
+		HardwareAcceleration:                  runtimesettings.DefaultHardwareAcceleration,
+		RequestedHardwareAcceleration:         runtimesettings.DefaultHardwareAcceleration,
+		PreferredTranscodeVideoCodec:          runtimesettings.DefaultPreferredTranscodeVideoCodec,
+		RequestedPreferredTranscodeVideoCodec: runtimesettings.DefaultPreferredTranscodeVideoCodec,
+		TranscodeQualityPreset:                runtimesettings.DefaultTranscodeQualityPreset,
+		RequestedTranscodeQualityPreset:       runtimesettings.DefaultTranscodeQualityPreset,
+		TranscodeConcurrency:                  runtimesettings.DefaultTranscodeConcurrency,
+		RequestedTranscodeConcurrency:         runtimesettings.DefaultTranscodeConcurrency,
+		TranscodeMaxBitrateKbps:               runtimesettings.DefaultTranscodeMaxBitrateKbps,
+		MediaMaxStorageBytes:                  int64(runtimesettings.DefaultMediaMaxStorageMB) << 20,
+		ArtworkMaxStorageBytes:                int64(runtimesettings.DefaultArtworkMaxStorageMB) << 20,
+		AllowTranscoding:                      true,
 	}
 }
 
@@ -325,20 +331,24 @@ func (s *Service) Setup(ctx context.Context, token string, input SetupInput) (Se
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO instance_settings (instance_id, schema_version, settings)
-		VALUES (1, 2, jsonb_build_object(
+		VALUES (1, 3, jsonb_build_object(
 			'timezone', $1::text,
 			'jellyfinEnabled', $2::boolean,
 			'jellyfinDebug', $3::boolean,
 			'hardwareAcceleration', $4::text,
-			'transcodeMaxBitrateKbps', $5::integer,
-			'mediaMaxStorageMB', $6::integer,
-			'artworkMaxStorageMB', $7::integer,
-			'allowTranscoding', $8::boolean
+			'preferredTranscodeVideoCodec', $5::text,
+			'transcodeQualityPreset', $6::text,
+			'transcodeConcurrency', $7::integer,
+			'transcodeMaxBitrateKbps', $8::integer,
+			'mediaMaxStorageMB', $9::integer,
+			'artworkMaxStorageMB', $10::integer,
+			'allowTranscoding', $11::boolean
 		))
 	`, runtime.Timezone, runtime.JellyfinEnabled, runtime.JellyfinDebug,
-		runtime.RequestedHardwareAcceleration, runtime.TranscodeMaxBitrateKbps,
-		runtime.MediaMaxStorageBytes>>20, runtime.ArtworkMaxStorageBytes>>20,
-		runtime.AllowTranscoding); err != nil {
+		runtime.RequestedHardwareAcceleration, runtime.RequestedPreferredTranscodeVideoCodec,
+		runtime.RequestedTranscodeQualityPreset, runtime.RequestedTranscodeConcurrency,
+		runtime.TranscodeMaxBitrateKbps, runtime.MediaMaxStorageBytes>>20,
+		runtime.ArtworkMaxStorageBytes>>20, runtime.AllowTranscoding); err != nil {
 		return SetupResult{}, fmt.Errorf("create instance settings: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "INSERT INTO profile_settings (profile_id) VALUES ($1)", result.ProfileID); err != nil {

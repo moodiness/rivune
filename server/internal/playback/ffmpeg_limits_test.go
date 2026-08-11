@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,8 +62,11 @@ func TestMediaVersionDiagnosticIsBoundedAndScrubbed(t *testing.T) {
 func TestFFmpegDiagnosticsReportEveryIndependentPool(t *testing.T) {
 	processor := &FFmpegProcessor{
 		ffmpegVersion: "7.1", ffprobeVersion: "7.1", hardwareAcceleration: "auto", threads: 6,
-		encoder: videoEncoder{kind: videoEncoderVAAPI, toneMapBackend: videoToneMapVAAPI},
-		slots:   make(chan struct{}, 4), probeSlots: make(chan struct{}, 3),
+		preferredVideoCodec: "hevc", qualityPreset: "quality",
+		encoder: videoEncoder{kind: videoEncoderVAAPI, toneMapBackend: videoToneMapVAAPI, hevcMain10: true,
+			encodeCodecs: map[string]bool{"h264": true, "hevc": true, "av1": true}, decodeCodecs: map[string]bool{"h264": true, "hevc": true}},
+		softwareEncoder: videoEncoder{kind: videoEncoderSoftware, hevcMain10: true, encodeCodecs: map[string]bool{"h264": true, "hevc": true}, decodeCodecs: map[string]bool{"hevc": true}},
+		slots:           make(chan struct{}, 4), probeSlots: make(chan struct{}, 3),
 		subtitleSlots: make(chan struct{}, 2), trickplaySlots: make(chan struct{}, 1),
 	}
 	processor.slots <- struct{}{}
@@ -73,6 +77,8 @@ func TestFFmpegDiagnosticsReportEveryIndependentPool(t *testing.T) {
 	diagnostics := processor.PlaybackDiagnostics()
 	if diagnostics.FFmpegVersion != "7.1" || diagnostics.FFprobeVersion != "7.1" ||
 		diagnostics.HardwareAcceleration != "auto" || diagnostics.VideoEncoder != "vaapi" ||
+		diagnostics.PreferredVideoCodec != "hevc" || diagnostics.QualityPreset != "quality" || !diagnostics.HEVCMain10 ||
+		strings.Join(diagnostics.EncodeCodecs, ",") != "h264,hevc" || strings.Join(diagnostics.DecodeCodecs, ",") != "h264,hevc" ||
 		!diagnostics.HardwareToneMap || diagnostics.ToneMapBackend != "vaapi" || diagnostics.TranscodeThreads != 6 ||
 		diagnostics.Pools.Process != (MediaDiagnosticPool{Active: 1, Limit: 4}) ||
 		diagnostics.Pools.Probe != (MediaDiagnosticPool{Active: 2, Limit: 3}) ||
@@ -94,6 +100,119 @@ func TestFFmpegDiagnosticsReportEveryIndependentPool(t *testing.T) {
 	}).PlaybackDiagnostics()
 	if hybrid.HardwareAcceleration != "hybrid" || hybrid.VideoEncoder != "vaapi" || hybrid.HardwareToneMap || hybrid.ToneMapBackend != "hybrid" {
 		t.Fatalf("hybrid diagnostics = %+v", hybrid)
+	}
+}
+
+func TestTranscodeCapabilitiesReturnsDefensiveCodecInventory(t *testing.T) {
+	processor := &FFmpegProcessor{
+		preferredVideoCodec: "av1", qualityPreset: "speed",
+		encoder: videoEncoder{kind: videoEncoderNVENC, hevcMain10: true,
+			encodeCodecs: map[string]bool{"h264": true, "hevc": true, "av1": true}, decodeCodecs: map[string]bool{"h264": true, "av1": true}},
+		softwareEncoder: videoEncoder{kind: videoEncoderSoftware, encodeCodecs: map[string]bool{"h264": true, "av1": true}},
+	}
+	capabilities := processor.TranscodeCapabilities()
+	if capabilities.HardwareAcceleration != "nvenc" || capabilities.PreferredVideoCodec != "av1" || capabilities.QualityPreset != "speed" || capabilities.HEVCMain10 ||
+		strings.Join(capabilities.EncodeCodecs, ",") != "h264,av1" || strings.Join(capabilities.DecodeCodecs, ",") != "h264,av1" {
+		t.Fatalf("transcode capabilities = %+v", capabilities)
+	}
+	capabilities.EncodeCodecs[0] = "mutated"
+	capabilities.DecodeCodecs[0] = "mutated"
+	again := processor.TranscodeCapabilities()
+	if again.EncodeCodecs[0] != "h264" || again.DecodeCodecs[0] != "h264" {
+		t.Fatalf("codec inventory was not defensive: %+v", again)
+	}
+}
+
+func TestProcessingArgumentsHonorTargetCodecAndQuality(t *testing.T) {
+	processor := &FFmpegProcessor{
+		threads: 4, qualityPreset: "balanced",
+		encoder: videoEncoder{kind: videoEncoderSoftware, encodeCodecs: map[string]bool{"h264": true, "hevc": true, "av1": true}},
+	}
+	tests := []struct {
+		name, codec, quality, encoder, preset, crf string
+	}{
+		{name: "H264 speed", codec: "h264", quality: "speed", encoder: "libx264", preset: "ultrafast", crf: "23"},
+		{name: "HEVC balanced", codec: "hevc", quality: "balanced", encoder: "libx265", preset: "superfast", crf: "23"},
+		{name: "AV1 quality", codec: "av1", quality: "quality", encoder: "libsvtav1", preset: "6", crf: "25"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			arguments, err := processor.processingArguments(storedAsset{
+				Kind: processingTranscode, URL: "https://media.example/movie.mkv", HLSSegmentContainer: "mp4",
+				TargetVideoCodec: test.codec, QualityPreset: test.quality, TargetHeight: 2160, VideoBitrateKbps: 12000,
+				Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{VideoCodec: "hevc", Height: 2160}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, got := argumentValue(arguments, "-c:v"); got != test.encoder {
+				t.Fatalf("video encoder = %q, want %q; arguments=%v", got, test.encoder, arguments)
+			}
+			if _, got := argumentValue(arguments, "-preset"); got != test.preset {
+				t.Fatalf("preset = %q, want %q; arguments=%v", got, test.preset, arguments)
+			}
+			if _, got := argumentValue(arguments, "-crf"); got != test.crf {
+				t.Fatalf("CRF = %q, want %q; arguments=%v", got, test.crf, arguments)
+			}
+			joined := strings.Join(arguments, " ")
+			if !strings.Contains(joined, "-pix_fmt yuv420p") || !strings.Contains(joined, "-maxrate 12000k -bufsize 24000k") ||
+				strings.Contains(joined, "-b:v") || strings.Contains(joined, "scale=") {
+				t.Fatalf("4K capped-CRF target arguments lost pixel/bitrate/height contract: %v", arguments)
+			}
+		})
+	}
+}
+
+func TestHEVCAndAV1TranscodeRequireFragmentedMP4HLS(t *testing.T) {
+	processor := &FFmpegProcessor{threads: 1, encoder: videoEncoder{kind: videoEncoderSoftware, encodeCodecs: map[string]bool{"hevc": true, "av1": true}}}
+	for _, codec := range []string{"hevc", "av1"} {
+		_, err := processor.processingArguments(storedAsset{Kind: processingTranscode, URL: "https://media.example/movie.mkv", HLSSegmentContainer: "ts", TargetVideoCodec: codec})
+		if !errors.Is(err, ErrMediaProcessingFailed) || !strings.Contains(err.Error(), "fragmented MP4 HLS") {
+			t.Fatalf("%s TS transcode error = %v", codec, err)
+		}
+	}
+}
+
+func TestProcessHLSLogsSafeStructuredFallbackLifecycle(t *testing.T) {
+	var logs bytes.Buffer
+	processor := testFFmpegProcessor()
+	processor.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	processor.encoder = videoEncoder{
+		kind: videoEncoderVAAPI, device: "/dev/dri/renderD128",
+		encodeCodecs: map[string]bool{"h264": true}, decodeCodecs: map[string]bool{"h264": true},
+	}
+	processor.softwareEncoder = videoEncoder{kind: videoEncoderSoftware, encodeCodecs: map[string]bool{"h264": true}}
+	calls := 0
+	processor.commandContext = func(ctx context.Context, path string, arguments ...string) *exec.Cmd {
+		calls++
+		command := ffmpegHelperCommand(ctx, path, arguments...)
+		if calls == 1 {
+			command.Env = append(os.Environ(), "RIVUNE_FFMPEG_HELPER_MODE=fail")
+		}
+		return command
+	}
+	secretSource := filepath.Join(t.TempDir(), "media-provider-token.mkv")
+	err := processor.ProcessHLS(context.Background(), storedAsset{
+		ID: "asset-secret", Kind: processingTranscode, URL: secretSource, HLSSegmentContainer: "ts", TargetVideoCodec: "h264", QualityPreset: "quality",
+		Headers: map[string]string{"Authorization": "Bearer header-secret"}, TargetHeight: 1080, VideoBitrateKbps: 8000,
+		Decision: &PlaybackDecision{
+			Reason: decisionVideoTranscodeRequired, Reasons: []string{"resolution_limit", "https://provider.example/?token=reason-secret"},
+			Source: &PlaybackDecisionSource{VideoCodec: "h264", Height: 2160}, Target: &PlaybackDecisionTarget{VideoCodec: "h264", Height: 1080},
+		},
+	}, t.TempDir())
+	if err != nil || calls != 2 {
+		t.Fatalf("fallback execution err=%v calls=%d", err, calls)
+	}
+	output := logs.String()
+	for _, expected := range []string{`"event":"start"`, `"event":"fallback"`, `"event":"success"`, `"stage":"fallback"`, `"backend":"software"`, `"targetCodec":"h264"`, `"qualityPreset":"quality"`, `"errorClass":"processing"`} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("structured lifecycle log omitted %s: %s", expected, output)
+		}
+	}
+	for _, secret := range []string{"media-provider-token", "asset-secret", "Bearer", "header-secret", "provider.example", "reason-secret"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("structured lifecycle log exposed %q: %s", secret, output)
+		}
 	}
 }
 
@@ -315,6 +434,18 @@ func TestProbePopulatesRichInternalMetadata(t *testing.T) {
 	}
 }
 
+func TestProbeInfersBitDepthWhenRawSampleDepthIsUnusable(t *testing.T) {
+	for _, data := range [][]byte{
+		[]byte(`{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p10le","bits_per_raw_sample":"0"}]}`),
+		[]byte(`{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p10le","bits_per_raw_sample":"N/A"}]}`),
+	} {
+		inspection, err := parseFFprobeInspection(data, "mkv")
+		if err != nil || len(inspection.VideoTracks) != 1 || inspection.VideoTracks[0].BitDepth != 10 {
+			t.Fatalf("inspection=%+v err=%v for %s", inspection, err, data)
+		}
+	}
+}
+
 func TestProbeCollectsDolbyVisionEvidenceWithoutPublicExposure(t *testing.T) {
 	t.Setenv("RIVUNE_FFMPEG_HELPER_MODE", "probe-dovi")
 	processor := testFFmpegProcessor()
@@ -430,7 +561,7 @@ func TestProcessHLSFallsBackToSoftwareOnlyBeforePlaylistPublication(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			directory := t.TempDir()
 			processor := testFFmpegProcessor()
-			processor.encoder = videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128"}
+			processor.encoder = videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", decodeCodecs: map[string]bool{"hevc": true}}
 			var calls [][]string
 			processor.commandContext = func(ctx context.Context, path string, arguments ...string) *exec.Cmd {
 				calls = append(calls, append([]string(nil), arguments...))
@@ -455,6 +586,9 @@ func TestProcessHLSFallsBackToSoftwareOnlyBeforePlaylistPublication(t *testing.T
 			if (err != nil) != test.wantError || len(calls) != test.wantCalls {
 				t.Fatalf("ProcessHLS err=%v calls=%d want error=%t calls=%d", err, len(calls), test.wantError, test.wantCalls)
 			}
+			if test.wantError && (!errors.Is(err, ErrMediaProcessingFailed) || !strings.Contains(err.Error(), "stage=execute backend=vaapi")) {
+				t.Fatalf("published failure lost classification/stage/backend: %v", err)
+			}
 			first := strings.Join(calls[0], " ")
 			if !strings.Contains(first, "-c:v h264_vaapi") || !strings.Contains(first, "hwdownload,format=p010le") {
 				t.Fatalf("first attempt was not hybrid VAAPI: %v", calls[0])
@@ -465,6 +599,46 @@ func TestProcessHLSFallsBackToSoftwareOnlyBeforePlaylistPublication(t *testing.T
 					strings.Contains(fallback, "h264_vaapi") || strings.Contains(fallback, "-hwaccel") || strings.Contains(fallback, "hwdownload") {
 					t.Fatalf("fallback was not capped clean software argv: %v", calls[1])
 				}
+			}
+		})
+	}
+}
+
+func TestProcessHLSSoftwareFallbackRetainsTargetCodecAndQuality(t *testing.T) {
+	tests := []struct {
+		codec, segment, hardwareEncoder, softwareEncoder, softwarePreset, softwareCRF string
+	}{
+		{codec: "h264", segment: "ts", hardwareEncoder: "h264_vaapi", softwareEncoder: "libx264", softwarePreset: "medium", softwareCRF: "16"},
+		{codec: "hevc", segment: "mp4", hardwareEncoder: "hevc_vaapi", softwareEncoder: "libx265", softwarePreset: "medium", softwareCRF: "19"},
+		{codec: "av1", segment: "mp4", hardwareEncoder: "av1_vaapi", softwareEncoder: "libsvtav1", softwarePreset: "6", softwareCRF: "25"},
+	}
+	for _, test := range tests {
+		t.Run(test.codec, func(t *testing.T) {
+			processor := testFFmpegProcessor()
+			processor.encoder = videoEncoder{kind: videoEncoderVAAPI, device: "/dev/dri/renderD128", encodeCodecs: map[string]bool{test.codec: true}}
+			processor.softwareEncoder = videoEncoder{kind: videoEncoderSoftware, encodeCodecs: map[string]bool{test.codec: true}}
+			var calls [][]string
+			processor.commandContext = func(ctx context.Context, path string, arguments ...string) *exec.Cmd {
+				calls = append(calls, append([]string(nil), arguments...))
+				command := ffmpegHelperCommand(ctx, path, arguments...)
+				if len(calls) == 1 {
+					command.Env = append(os.Environ(), "RIVUNE_FFMPEG_HELPER_MODE=fail")
+				}
+				return command
+			}
+			err := processor.ProcessHLS(context.Background(), storedAsset{
+				Kind: processingTranscode, URL: os.Args[0], HLSSegmentContainer: test.segment,
+				TargetVideoCodec: test.codec, QualityPreset: "quality",
+				Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{VideoCodec: "h264", Height: 1080}, Target: &PlaybackDecisionTarget{VideoCodec: test.codec, Height: 1080}},
+			}, t.TempDir())
+			if err != nil || len(calls) != 2 {
+				t.Fatalf("fallback err=%v calls=%d", err, len(calls))
+			}
+			first, fallback := strings.Join(calls[0], " "), strings.Join(calls[1], " ")
+			if !strings.Contains(first, "-c:v "+test.hardwareEncoder) || !strings.Contains(fallback, "-c:v "+test.softwareEncoder) ||
+				!strings.Contains(fallback, "-preset "+test.softwarePreset) || !strings.Contains(fallback, "-crf "+test.softwareCRF) ||
+				strings.Contains(fallback, "_vaapi") || strings.Contains(fallback, "-hwaccel") {
+				t.Fatalf("same-codec quality fallback mismatch: first=%v fallback=%v", calls[0], calls[1])
 			}
 		})
 	}

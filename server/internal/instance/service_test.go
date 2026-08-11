@@ -264,7 +264,7 @@ func TestDemoAdmissionCleanupIsBounded(t *testing.T) {
 	}
 }
 
-func TestSetupPersistsInitialJellyfinEnabled(t *testing.T) {
+func TestSetupPersistsInitialSchemaV3RuntimeSettings(t *testing.T) {
 	pool := openInstanceTestPool(t)
 	ctx := context.Background()
 	if err := database.Migrate(ctx, pool); err != nil {
@@ -294,18 +294,27 @@ func TestSetupPersistsInitialJellyfinEnabled(t *testing.T) {
 	})
 
 	var enabled bool
+	var schemaVersion, transcodeConcurrency int
+	var preferredCodec, qualityPreset string
 	var legacyEnvironmentImported bool
 	if err := pool.QueryRow(ctx, `
-		SELECT (settings.settings ->> 'jellyfinEnabled')::boolean,
+		SELECT settings.schema_version,
+			(settings.settings ->> 'jellyfinEnabled')::boolean,
+			settings.settings ->> 'preferredTranscodeVideoCodec',
+			settings.settings ->> 'transcodeQualityPreset',
+			(settings.settings ->> 'transcodeConcurrency')::integer,
 			instances.legacy_environment_imported_at IS NOT NULL
 		FROM instance_settings AS settings
 		JOIN instances ON instances.id = settings.instance_id
 		WHERE settings.instance_id = 1
-	`).Scan(&enabled, &legacyEnvironmentImported); err != nil {
+	`).Scan(&schemaVersion, &enabled, &preferredCodec, &qualityPreset, &transcodeConcurrency, &legacyEnvironmentImported); err != nil {
 		t.Fatalf("read initial instance settings: %v", err)
 	}
 	if !enabled {
 		t.Fatal("setup did not persist enabled Jellyfin setting")
+	}
+	if schemaVersion != 3 || preferredCodec != "auto" || qualityPreset != "balanced" || transcodeConcurrency != 4 {
+		t.Fatalf("setup schema/planner settings = %d %q %q %d", schemaVersion, preferredCodec, qualityPreset, transcodeConcurrency)
 	}
 	if !legacyEnvironmentImported {
 		t.Fatal("setup did not mark legacy environment import complete")

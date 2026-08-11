@@ -353,10 +353,13 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 	providerRuntime := providers.NewRuntime(initialProviders, providerOptions)
 	settingsManager.SetIntegrationPublisher(newIntegrationRuntimeCoordinator(providerRuntime))
 
-	mediaProcessor, err := playback.NewFFmpegProcessor(cfg.FFmpegPath, cfg.FFprobePath, cfg.RemuxConcurrency, cfg.TranscodeThreads, playback.FFmpegOptions{
+	mediaProcessor, err := playback.NewFFmpegProcessor(cfg.FFmpegPath, cfg.FFprobePath, runtimeValues.TranscodeConcurrency, cfg.TranscodeThreads, playback.FFmpegOptions{
 		HardwareAcceleration: runtimeValues.HardwareAcceleration,
+		PreferredVideoCodec:  runtimeValues.PreferredTranscodeVideoCodec,
+		QualityPreset:        runtimeValues.TranscodeQualityPreset,
 		VideoDevice:          cfg.VideoDevice,
 		MaximumReadRate:      cfg.TranscodeMaxReadRate,
+		Logger:               logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize media processor: %w", err)
@@ -373,9 +376,15 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		"ffprobeVersion", mediaDiagnostics.FFprobeVersion,
 		"hardwareAcceleration", mediaDiagnostics.HardwareAcceleration,
 		"videoEncoder", mediaDiagnostics.VideoEncoder,
+		"preferredVideoCodec", mediaDiagnostics.PreferredVideoCodec,
+		"encodeCodecs", mediaDiagnostics.EncodeCodecs,
+		"decodeCodecs", mediaDiagnostics.DecodeCodecs,
+		"hevcMain10", mediaDiagnostics.HEVCMain10,
+		"qualityPreset", mediaDiagnostics.QualityPreset,
 		"hardwareToneMap", mediaDiagnostics.HardwareToneMap,
 		"toneMapBackend", mediaDiagnostics.ToneMapBackend,
 		"transcodeThreads", mediaDiagnostics.TranscodeThreads,
+		"transcodeConcurrency", runtimeSnapshot.TranscodeConcurrency,
 		"processLimit", mediaDiagnostics.Pools.Process.Limit,
 		"probeLimit", mediaDiagnostics.Pools.Probe.Limit,
 		"subtitleLimit", mediaDiagnostics.Pools.Subtitle.Limit,

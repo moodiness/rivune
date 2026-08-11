@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,32 +41,40 @@ func newRuntimeSettingsCoordinator(source *runtimesettings.Source, service runti
 
 func defaultRuntimeValues() runtimesettings.Values {
 	return runtimesettings.Values{
-		Timezone:                settings.DefaultTimezone,
-		HardwareAcceleration:    settings.DefaultHardwareAcceleration,
-		TranscodeMaxBitrateKbps: settings.DefaultTranscodeMaxBitrateKbps,
-		MediaMaxStorageMB:       settings.DefaultMediaMaxStorageMB,
-		ArtworkMaxStorageMB:     settings.DefaultArtworkMaxStorageMB,
-		AllowTranscoding:        settings.DefaultAllowTranscoding,
+		Timezone:                     settings.DefaultTimezone,
+		HardwareAcceleration:         settings.DefaultHardwareAcceleration,
+		PreferredTranscodeVideoCodec: settings.DefaultPreferredTranscodeVideoCodec,
+		TranscodeQualityPreset:       settings.DefaultTranscodeQualityPreset,
+		TranscodeConcurrency:         settings.DefaultTranscodeConcurrency,
+		TranscodeMaxBitrateKbps:      settings.DefaultTranscodeMaxBitrateKbps,
+		MediaMaxStorageMB:            settings.DefaultMediaMaxStorageMB,
+		ArtworkMaxStorageMB:          settings.DefaultArtworkMaxStorageMB,
+		AllowTranscoding:             settings.DefaultAllowTranscoding,
 	}
 }
 
 func runtimeValuesFromLayer(layer settings.Layer) (runtimesettings.Values, error) {
 	values := layer.Values
 	if values.Timezone == nil || values.JellyfinEnabled == nil || values.JellyfinDebug == nil ||
-		values.HardwareAcceleration == nil || values.TranscodeMaxBitrateKbps == nil ||
-		values.MediaMaxStorageMB == nil || values.ArtworkMaxStorageMB == nil || values.AllowTranscoding == nil {
+		values.HardwareAcceleration == nil || values.PreferredTranscodeVideoCodec == nil ||
+		values.TranscodeQualityPreset == nil || values.TranscodeConcurrency == nil ||
+		values.TranscodeMaxBitrateKbps == nil || values.MediaMaxStorageMB == nil ||
+		values.ArtworkMaxStorageMB == nil || values.AllowTranscoding == nil {
 		return runtimesettings.Values{}, errors.New("instance runtime settings are not materialized")
 	}
 	return runtimesettings.Values{
-		Revision:                layer.Revision,
-		Timezone:                *values.Timezone,
-		JellyfinEnabled:         *values.JellyfinEnabled,
-		JellyfinDebug:           *values.JellyfinDebug,
-		HardwareAcceleration:    *values.HardwareAcceleration,
-		TranscodeMaxBitrateKbps: *values.TranscodeMaxBitrateKbps,
-		MediaMaxStorageMB:       *values.MediaMaxStorageMB,
-		ArtworkMaxStorageMB:     *values.ArtworkMaxStorageMB,
-		AllowTranscoding:        *values.AllowTranscoding,
+		Revision:                     layer.Revision,
+		Timezone:                     *values.Timezone,
+		JellyfinEnabled:              *values.JellyfinEnabled,
+		JellyfinDebug:                *values.JellyfinDebug,
+		HardwareAcceleration:         *values.HardwareAcceleration,
+		PreferredTranscodeVideoCodec: *values.PreferredTranscodeVideoCodec,
+		TranscodeQualityPreset:       *values.TranscodeQualityPreset,
+		TranscodeConcurrency:         *values.TranscodeConcurrency,
+		TranscodeMaxBitrateKbps:      *values.TranscodeMaxBitrateKbps,
+		MediaMaxStorageMB:            *values.MediaMaxStorageMB,
+		ArtworkMaxStorageMB:          *values.ArtworkMaxStorageMB,
+		AllowTranscoding:             *values.AllowTranscoding,
 	}, nil
 }
 
@@ -141,40 +150,64 @@ func (coordinator *runtimeSettingsCoordinator) scheduleReconciliation() {
 }
 
 type runtimeSettingsResponseValues struct {
-	Timezone                string `json:"timezone"`
-	JellyfinEnabled         bool   `json:"jellyfinEnabled"`
-	JellyfinDebug           bool   `json:"jellyfinDebug"`
-	HardwareAcceleration    string `json:"hardwareAcceleration"`
-	TranscodeMaxBitrateKbps int    `json:"transcodeMaxBitrateKbps"`
-	MediaMaxStorageMB       int64  `json:"mediaMaxStorageMB"`
-	ArtworkMaxStorageMB     int64  `json:"artworkMaxStorageMB"`
-	AllowTranscoding        bool   `json:"allowTranscoding"`
+	Timezone                     string `json:"timezone"`
+	JellyfinEnabled              bool   `json:"jellyfinEnabled"`
+	JellyfinDebug                bool   `json:"jellyfinDebug"`
+	HardwareAcceleration         string `json:"hardwareAcceleration"`
+	PreferredTranscodeVideoCodec string `json:"preferredTranscodeVideoCodec"`
+	TranscodeQualityPreset       string `json:"transcodeQualityPreset"`
+	TranscodeConcurrency         int    `json:"transcodeConcurrency"`
+	TranscodeMaxBitrateKbps      int    `json:"transcodeMaxBitrateKbps"`
+	MediaMaxStorageMB            int64  `json:"mediaMaxStorageMB"`
+	ArtworkMaxStorageMB          int64  `json:"artworkMaxStorageMB"`
+	AllowTranscoding             bool   `json:"allowTranscoding"`
 }
 
 func runtimeSettingsApplication(source *runtimesettings.Source) map[string]any {
 	snapshot := runtimesettings.Snapshot{
 		Timezone: "UTC", HardwareAcceleration: "auto", RequestedHardwareAcceleration: "auto",
+		PreferredTranscodeVideoCodec: "auto", RequestedPreferredTranscodeVideoCodec: "auto",
+		TranscodeQualityPreset: "balanced", RequestedTranscodeQualityPreset: "balanced",
+		TranscodeConcurrency: 4, RequestedTranscodeConcurrency: 4,
 		TranscodeMaxBitrateKbps: 12000, MediaMaxStorageBytes: 20480 << 20,
 		ArtworkMaxStorageBytes: 20480 << 20, AllowTranscoding: true,
 	}
 	if source != nil {
 		snapshot = source.Load()
 	}
-	pendingRestart := make([]string, 0, 1)
+	pendingRestart := make([]string, 0, 4)
 	if snapshot.HardwareAcceleration != snapshot.RequestedHardwareAcceleration {
 		pendingRestart = append(pendingRestart, "hardwareAcceleration")
 	}
+	if snapshot.PreferredTranscodeVideoCodec != snapshot.RequestedPreferredTranscodeVideoCodec {
+		pendingRestart = append(pendingRestart, "preferredTranscodeVideoCodec")
+	}
+	if snapshot.TranscodeConcurrency != snapshot.RequestedTranscodeConcurrency {
+		pendingRestart = append(pendingRestart, "transcodeConcurrency")
+	}
+	if snapshot.TranscodeQualityPreset != snapshot.RequestedTranscodeQualityPreset {
+		pendingRestart = append(pendingRestart, "transcodeQualityPreset")
+	}
+	sort.Strings(pendingRestart)
+	active := runtimeSettingsResponseValues{
+		Timezone: snapshot.Timezone, JellyfinEnabled: snapshot.JellyfinEnabled, JellyfinDebug: snapshot.JellyfinDebug,
+		HardwareAcceleration:         snapshot.HardwareAcceleration,
+		PreferredTranscodeVideoCodec: snapshot.PreferredTranscodeVideoCodec,
+		TranscodeQualityPreset:       snapshot.TranscodeQualityPreset,
+		TranscodeConcurrency:         snapshot.TranscodeConcurrency,
+		TranscodeMaxBitrateKbps:      snapshot.TranscodeMaxBitrateKbps,
+		MediaMaxStorageMB:            snapshot.MediaMaxStorageBytes >> 20,
+		ArtworkMaxStorageMB:          snapshot.ArtworkMaxStorageBytes >> 20,
+		AllowTranscoding:             snapshot.AllowTranscoding,
+	}
+	requested := active
+	requested.HardwareAcceleration = snapshot.RequestedHardwareAcceleration
+	requested.PreferredTranscodeVideoCodec = snapshot.RequestedPreferredTranscodeVideoCodec
+	requested.TranscodeQualityPreset = snapshot.RequestedTranscodeQualityPreset
+	requested.TranscodeConcurrency = snapshot.RequestedTranscodeConcurrency
 	return map[string]any{
-		"active": runtimeSettingsResponseValues{
-			Timezone:                snapshot.Timezone,
-			JellyfinEnabled:         snapshot.JellyfinEnabled,
-			JellyfinDebug:           snapshot.JellyfinDebug,
-			HardwareAcceleration:    snapshot.HardwareAcceleration,
-			TranscodeMaxBitrateKbps: snapshot.TranscodeMaxBitrateKbps,
-			MediaMaxStorageMB:       snapshot.MediaMaxStorageBytes >> 20,
-			ArtworkMaxStorageMB:     snapshot.ArtworkMaxStorageBytes >> 20,
-			AllowTranscoding:        snapshot.AllowTranscoding,
-		},
+		"active":         active,
+		"requested":      requested,
 		"pendingRestart": pendingRestart,
 	}
 }

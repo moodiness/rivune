@@ -378,7 +378,10 @@ test("subtitle controls update the preview before preferences are saved", async 
 });
 
 test("runtime settings render requested and active values and save through the dirty action flow", async ({ page, rivune }) => {
-  rivune.setHardwareRestartPending("nvenc", "software");
+  rivune.setTranscodeRestartPending(
+    { hardwareAcceleration: "nvenc", preferredTranscodeVideoCodec: "hevc", transcodeQualityPreset: "quality", transcodeConcurrency: 8 },
+    { hardwareAcceleration: "software", preferredTranscodeVideoCodec: "auto", transcodeQualityPreset: "balanced", transcodeConcurrency: 4 },
+  );
   await openSettings(page);
   await selectOption(page.getByRole("combobox", { name: "Switch scope" }), "server");
   await page.locator('[data-settings-section="runtime"]').click();
@@ -387,16 +390,24 @@ test("runtime settings render requested and active values and save through the d
   await expect(runtime.getByLabel("Timezone")).toHaveValue("America/Toronto");
   await expect(runtime.getByLabel("Jellyfin debug logging")).toBeChecked();
   await expect(runtime.getByRole("combobox", { name: "Hardware acceleration" })).toHaveAttribute("data-value", "nvenc");
+  await expect(runtime.getByRole("combobox", { name: "Preferred video codec" })).toHaveAttribute("data-value", "hevc");
+  await expect(runtime.getByRole("combobox", { name: "Transcode quality" })).toHaveAttribute("data-value", "quality");
+  await expect(runtime.getByLabel("Concurrent transcodes")).toHaveValue("8");
   await expect(runtime.getByLabel("Maximum transcode bitrate")).toHaveValue("18000");
   await expect(runtime.getByLabel("Temporary media quota")).toHaveValue("24576");
   await expect(runtime.getByLabel("Artwork quota")).toHaveValue("8192");
 
   const pendingRows = runtime.locator(".runtime-setting").filter({ has: page.locator(".is-pending") });
-  await expect(pendingRows).toHaveCount(1);
-  await expect(pendingRows).toContainText("Hardware acceleration");
-  await expect(pendingRows.locator(".runtime-setting-state")).toContainText("Requested · NVIDIA NVENC");
-  await expect(pendingRows.locator(".runtime-setting-state")).toContainText("Active · Software");
-  await expect(pendingRows.locator(".is-pending")).toHaveText("Restart required");
+  await expect(pendingRows).toHaveCount(4);
+  await expect(pendingRows.filter({ hasText: "Hardware acceleration" }).locator(".runtime-setting-state")).toContainText("Requested · NVIDIA NVENC");
+  await expect(pendingRows.filter({ hasText: "Hardware acceleration" }).locator(".runtime-setting-state")).toContainText("Active · Software");
+  await expect(pendingRows.filter({ hasText: "Preferred video codec" }).locator(".runtime-setting-state")).toContainText("Requested · HEVC");
+  await expect(pendingRows.filter({ hasText: "Preferred video codec" }).locator(".runtime-setting-state")).toContainText("Active · Automatic");
+  await expect(pendingRows.filter({ hasText: "Transcode quality" }).locator(".runtime-setting-state")).toContainText("Requested · Quality");
+  await expect(pendingRows.filter({ hasText: "Transcode quality" }).locator(".runtime-setting-state")).toContainText("Active · Balanced");
+  await expect(pendingRows.filter({ hasText: "Concurrent transcodes" }).locator(".runtime-setting-state")).toContainText("Requested · 8");
+  await expect(pendingRows.filter({ hasText: "Concurrent transcodes" }).locator(".runtime-setting-state")).toContainText("Active · 4");
+  await expect(pendingRows.locator(".is-pending")).toHaveText(["Restart required", "Restart required", "Restart required", "Restart required"]);
   await expect(runtime.locator(".runtime-setting:not(:has(.is-pending)) .runtime-setting-state")).toHaveCount(5);
 
   await runtime.getByLabel("Maximum transcode bitrate").fill("20000");
@@ -406,26 +417,45 @@ test("runtime settings render requested and active values and save through the d
   const request = await rivune.waitForRequest("/api/v1/settings", "PATCH");
   expect(request.body).toEqual({ transcodeMaxBitrateKbps: 20000 });
   await expect(runtime.getByLabel("Maximum transcode bitrate")).toHaveValue("20000");
-  await expect(runtime.locator(".is-pending")).toHaveCount(1);
-  await expect(pendingRows.locator(".is-pending")).toHaveText("Restart required");
+  await expect(runtime.locator(".is-pending")).toHaveCount(4);
 });
 
-test("runtime hardware selector persists the VA-API and CPU hybrid mode", async ({ page, rivune }) => {
+test("runtime hardware selector persists AMD AMF", async ({ page, rivune }) => {
   await openSettings(page);
   await selectOption(page.getByRole("combobox", { name: "Switch scope" }), "server");
   await page.locator('[data-settings-section="runtime"]').click();
 
   const runtime = page.locator("#settings-section-runtime");
   const hardware = runtime.getByRole("combobox", { name: "Hardware acceleration" });
-  await selectOption(hardware, "hybrid");
-  await expect(hardware).toHaveAttribute("data-value", "hybrid");
+  await selectOption(hardware, "amf");
+  await expect(hardware).toHaveAttribute("data-value", "amf");
 
   await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
   const request = await rivune.waitForRequest("/api/v1/settings", "PATCH");
-  expect(request.body).toEqual({ hardwareAcceleration: "hybrid" });
+  expect(request.body).toEqual({ hardwareAcceleration: "amf" });
   const pending = runtime.locator(".runtime-setting").filter({ hasText: "Hardware acceleration" });
-  await expect(pending.locator(".runtime-setting-state")).toContainText("Requested · Hybrid (VA-API + CPU)");
+  await expect(pending.locator(".runtime-setting-state")).toContainText("Requested · AMD AMF");
   await expect(pending.locator(".is-pending")).toHaveText("Restart required");
+});
+test("runtime transcode planning controls PATCH exact values and expose pending restart", async ({ page, rivune }) => {
+  await openSettings(page);
+  await selectOption(page.getByRole("combobox", { name: "Switch scope" }), "server");
+  await page.locator('[data-settings-section="runtime"]').click();
+
+  const runtime = page.locator("#settings-section-runtime");
+  await selectOption(runtime.getByRole("combobox", { name: "Preferred video codec" }), "av1");
+  await selectOption(runtime.getByRole("combobox", { name: "Transcode quality" }), "speed");
+  await runtime.getByLabel("Concurrent transcodes").fill("12");
+  await page.locator(".settings-save-bar").getByRole("button", { name: "Save preferences" }).click();
+
+  const request = await rivune.waitForRequest("/api/v1/settings", "PATCH");
+  expect(request.body).toEqual({ preferredTranscodeVideoCodec: "av1", transcodeQualityPreset: "speed", transcodeConcurrency: 12 });
+  for (const label of ["Preferred video codec", "Transcode quality", "Concurrent transcodes"]) {
+    const row = runtime.locator(".runtime-setting").filter({ hasText: label });
+    await expect(row.locator(".is-pending")).toHaveText("Restart required");
+  }
+  await expect(runtime.locator(".runtime-setting").filter({ hasText: "Preferred video codec" }).locator(".runtime-setting-state")).toContainText("Requested · AV1");
+  await expect(runtime.locator(".runtime-setting").filter({ hasText: "Preferred video codec" }).locator(".runtime-setting-state")).toContainText("Active · Automatic");
 });
 
 test("integration credentials stay write-only and preserve omission versus null", async ({ page, rivune }) => {

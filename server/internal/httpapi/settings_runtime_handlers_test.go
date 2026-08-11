@@ -13,6 +13,9 @@ func TestDecodeSettingsPatchPreservesAllRuntimeAssignments(t *testing.T) {
 		"jellyfinEnabled":true,
 		"jellyfinDebug":true,
 		"hardwareAcceleration":"hybrid",
+		"preferredTranscodeVideoCodec":"hevc",
+		"transcodeQualityPreset":"quality",
+		"transcodeConcurrency":12,
 		"transcodeMaxBitrateKbps":18000,
 		"mediaMaxStorageMB":4096,
 		"artworkMaxStorageMB":2048,
@@ -28,6 +31,9 @@ func TestDecodeSettingsPatchPreservesAllRuntimeAssignments(t *testing.T) {
 		!patch.JellyfinEnabled.Set || patch.JellyfinEnabled.Value == nil || !*patch.JellyfinEnabled.Value ||
 		!patch.JellyfinDebug.Set || patch.JellyfinDebug.Value == nil || !*patch.JellyfinDebug.Value ||
 		!patch.HardwareAcceleration.Set || patch.HardwareAcceleration.Value == nil || *patch.HardwareAcceleration.Value != "hybrid" ||
+		!patch.PreferredTranscodeVideoCodec.Set || patch.PreferredTranscodeVideoCodec.Value == nil || *patch.PreferredTranscodeVideoCodec.Value != "hevc" ||
+		!patch.TranscodeQualityPreset.Set || patch.TranscodeQualityPreset.Value == nil || *patch.TranscodeQualityPreset.Value != "quality" ||
+		!patch.TranscodeConcurrency.Set || patch.TranscodeConcurrency.Value == nil || *patch.TranscodeConcurrency.Value != 12 ||
 		!patch.TranscodeMaxBitrateKbps.Set || patch.TranscodeMaxBitrateKbps.Value == nil || *patch.TranscodeMaxBitrateKbps.Value != 18000 ||
 		!patch.MediaMaxStorageMB.Set || patch.MediaMaxStorageMB.Value == nil || *patch.MediaMaxStorageMB.Value != 4096 ||
 		!patch.ArtworkMaxStorageMB.Set || patch.ArtworkMaxStorageMB.Value == nil || *patch.ArtworkMaxStorageMB.Value != 2048 ||
@@ -37,11 +43,13 @@ func TestDecodeSettingsPatchPreservesAllRuntimeAssignments(t *testing.T) {
 }
 
 func TestDecodeSettingsPatchRejectsNullRuntimeButPreservesNullableAllowTranscoding(t *testing.T) {
-	invalid := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"timezone":null}`))
-	invalid.Header.Set("Content-Type", "application/json")
-	invalidResponse := httptest.NewRecorder()
-	if _, ok := decodeSettingsPatch(invalidResponse, invalid); ok || invalidResponse.Code != http.StatusBadRequest {
-		t.Fatalf("null runtime status=%d accepted=%t", invalidResponse.Code, ok)
+	for _, field := range []string{"timezone", "hardwareAcceleration", "preferredTranscodeVideoCodec", "transcodeQualityPreset", "transcodeConcurrency"} {
+		invalid := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"`+field+`":null}`))
+		invalid.Header.Set("Content-Type", "application/json")
+		invalidResponse := httptest.NewRecorder()
+		if _, ok := decodeSettingsPatch(invalidResponse, invalid); ok || invalidResponse.Code != http.StatusBadRequest {
+			t.Fatalf("null %s status=%d accepted=%t", field, invalidResponse.Code, ok)
+		}
 	}
 
 	nullable := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"allowTranscoding":null}`))

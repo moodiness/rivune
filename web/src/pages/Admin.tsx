@@ -2525,6 +2525,7 @@ function ActivityAdmin() {
       <ActivityMetric icon={<Cpu />} label={translate("admin.activity.overview.processing")} value={`${summary?.processingSlots ?? 0} / ${summary?.processingLimit ?? 0}`} detail={activity ? `${translate("admin.activity.overview.ffmpegSlots")} · probe ${activity.diagnostics.pools?.probe?.active ?? 0}/${activity.diagnostics.pools?.probe?.limit ?? 0} · subtitle ${activity.diagnostics.pools?.subtitle?.active ?? 0}/${activity.diagnostics.pools?.subtitle?.limit ?? 0} · trickplay ${activity.diagnostics.pools?.trickplay?.active ?? 0}/${activity.diagnostics.pools?.trickplay?.limit ?? 0} · total ${activity.diagnostics.totals.started}/${activity.diagnostics.totals.succeeded}/${activity.diagnostics.totals.failed} · fallback ${activity.diagnostics.totals.softwareFallbacks}` : translate("admin.activity.overview.ffmpegSlots")} />
       <ActivityMetric icon={<HardDrive />} label={translate("admin.activity.overview.temporaryMedia")} value={formatBytes(summary?.storageBytes ?? 0)} detail={translate("admin.activity.overview.storageLimit", { limit: formatBytes(summary?.storageLimitBytes ?? 0) })} />
       <ActivityMetric icon={<Server />} label={translate("admin.activity.overview.encoder")} value={activity?.diagnostics.videoEncoder.toUpperCase() ?? translate("admin.activity.overview.unknownEncoder")} detail={activity ? `FFmpeg ${activity.diagnostics.ffmpegVersion || "unknown"} · ffprobe ${activity.diagnostics.ffprobeVersion || "unknown"} · ${activity.diagnostics.hardwareAcceleration || "unknown"} · ${activity.diagnostics.transcodeThreads || 0} threads · ${activity.diagnostics.maximumReadRate.toFixed(2)}× max · ${translate(activity.diagnostics.hardwareToneMap ? "admin.activity.overview.hardwareToneMapping" : "admin.activity.overview.softwareToneMapping")} (${activity.diagnostics.toneMapBackend.toUpperCase()})` : ""} />
+      <ActivityMetric wide icon={<Film />} label={translate("admin.activity.overview.codecs")} value={translate("admin.activity.overview.preferredCodec", { codec: activity?.diagnostics.preferredVideoCodec.toUpperCase() ?? "AUTO" })} detail={activity ? `${translate("admin.activity.overview.encodeCodecs", { codecs: activity.diagnostics.encodeCodecs.length ? activity.diagnostics.encodeCodecs.map((codec) => codec.toUpperCase()).join(", ") : translate("admin.activity.overview.none") })} · ${translate("admin.activity.overview.decodeCodecs", { codecs: activity.diagnostics.decodeCodecs.length ? activity.diagnostics.decodeCodecs.map((codec) => codec.toUpperCase()).join(", ") : translate("admin.activity.overview.none") })} · ${translate("admin.activity.overview.qualityPreset", { preset: activity.diagnostics.qualityPreset.toUpperCase() })}` : ""} />
     </div>
     <section className="activity-panel">
       <header><div><span>{translate("admin.activity.sessions.eyebrow")}</span><h3>{translate("admin.activity.sessions.title")}</h3></div><small>{translate((summary?.activeSessions ?? 0) === 1 ? "admin.activity.sessions.activeCountOne" : "admin.activity.sessions.activeCountMany", { count: summary?.activeSessions ?? 0 })}</small></header>
@@ -2601,8 +2602,8 @@ function ActivitySessionProviders({ session }: { session: PlaybackActivitySessio
   </span>;
 }
 
-function ActivityMetric({ icon, label, value, detail }: { icon: React.ReactNode; label: string; value: string; detail: string }) {
-  return <article className="activity-metric"><span aria-hidden="true">{icon}</span><div><small>{label}</small><strong>{value}</strong><span>{detail}</span></div></article>;
+function ActivityMetric({ icon, label, value, detail, wide = false }: { icon: React.ReactNode; label: string; value: string; detail: string; wide?: boolean }) {
+  return <article className={`activity-metric${wide ? " activity-metric--wide" : ""}`}><span aria-hidden="true">{icon}</span><div><small>{label}</small><strong>{value}</strong><span>{detail}</span></div></article>;
 }
 function ActivityJobProgress({ job }: { job?: PlaybackActivity["jobs"][number] }) {
   const progressPercent = job?.progressPercent;
@@ -2711,6 +2712,9 @@ const rivuneSettingDefaults = {
   timezone: "UTC",
   hardwareAcceleration: "auto",
   transcodeMaxBitrateKbps: 12000,
+  preferredTranscodeVideoCodec: "auto",
+  transcodeQualityPreset: "balanced",
+  transcodeConcurrency: 4,
   mediaMaxStorageMB: 20480,
   artworkMaxStorageMB: 20480,
   transcoding: "inherit",
@@ -2852,7 +2856,9 @@ const settingOptions = {
   resolution: [{ value: "auto", labelKey: "settings.resolution.auto" }, { value: "2160p", labelKey: "settings.resolution.2160p" }, { value: "1080p", labelKey: "settings.resolution.1080p" }, { value: "720p", labelKey: "settings.resolution.720p" }, { value: "480p", labelKey: "settings.resolution.480p" }],
   density: [{ value: "comfortable", labelKey: "settings.density.comfortable" }, { value: "compact", labelKey: "settings.density.compact" }],
   transcoding: [{ value: "inherit", labelKey: "settings.options.transcodingInherit" }, { value: "enabled", labelKey: "settings.options.transcodingEnabled" }, { value: "disabled", labelKey: "settings.options.transcodingDisabled" }],
-  hardwareAcceleration: [{ value: "auto", labelKey: "settings.runtime.hardware.auto" }, { value: "software", labelKey: "settings.runtime.hardware.software" }, { value: "vaapi", labelKey: "settings.runtime.hardware.vaapi" }, { value: "hybrid", labelKey: "settings.runtime.hardware.hybrid" }, { value: "qsv", labelKey: "settings.runtime.hardware.qsv" }, { value: "nvenc", labelKey: "settings.runtime.hardware.nvenc" }],
+  hardwareAcceleration: [{ value: "auto", labelKey: "settings.runtime.hardware.auto" }, { value: "software", labelKey: "settings.runtime.hardware.software" }, { value: "vaapi", labelKey: "settings.runtime.hardware.vaapi" }, { value: "hybrid", labelKey: "settings.runtime.hardware.hybrid" }, { value: "qsv", labelKey: "settings.runtime.hardware.qsv" }, { value: "nvenc", labelKey: "settings.runtime.hardware.nvenc" }, { value: "amf", labelKey: "settings.runtime.hardware.amf" }],
+  preferredTranscodeVideoCodec: [{ value: "auto", labelKey: "settings.runtime.codec.auto" }, { value: "h264", labelKey: "settings.runtime.codec.h264" }, { value: "hevc", labelKey: "settings.runtime.codec.hevc" }, { value: "av1", labelKey: "settings.runtime.codec.av1" }],
+  transcodeQualityPreset: [{ value: "speed", labelKey: "settings.runtime.quality.speed" }, { value: "balanced", labelKey: "settings.runtime.quality.balanced" }, { value: "quality", labelKey: "settings.runtime.quality.quality" }],
   language: [{ value: "auto", labelKey: "settings.language.auto" }, { value: "fr-FR", label: "Français" }, { value: "en-US", labelKey: "languages.english" }, { value: "es-ES", label: "Español" }, { value: "de-DE", label: "Deutsch" }, { value: "it-IT", label: "Italiano" }, { value: "pt-BR", label: "Português" }, { value: "ja-JP", label: "日本語" }],
   region: [{ value: "auto", labelKey: "settings.region.auto" }, { value: "FR", labelKey: "regions.france" }, { value: "BE", labelKey: "regions.belgium" }, { value: "CA", labelKey: "regions.canada" }, { value: "CH", labelKey: "regions.switzerland" }, { value: "US", labelKey: "regions.unitedStates" }, { value: "GB", labelKey: "regions.unitedKingdom" }, { value: "DE", labelKey: "regions.germany" }, { value: "ES", labelKey: "regions.spain" }, { value: "IT", labelKey: "regions.italy" }, { value: "JP", labelKey: "regions.japan" }],
   mapping: [{ value: "tmdb", labelKey: "settings.seriesMapping.tmdb" }, { value: "tvdb", labelKey: "settings.seriesMapping.tvdb" }],
@@ -2923,6 +2929,9 @@ function settingsSectionDefinitions(serverScope: boolean): SettingsSectionDefini
       translate("settings.runtime.jellyfinDebug"),
       translate("settings.runtime.hardwareAcceleration"),
       translate("settings.runtime.transcodeMaxBitrate"),
+      translate("settings.runtime.preferredTranscodeVideoCodec"),
+      translate("settings.runtime.transcodeQualityPreset"),
+      translate("settings.runtime.transcodeConcurrency"),
       translate("settings.runtime.mediaQuota"),
       translate("settings.runtime.artworkQuota"),
     ]);
@@ -3799,19 +3808,30 @@ function RuntimeControl({ id, label, description, requested, active, pending, ch
 
 function RuntimeSettingsPanel({ values, application, onChange }: { values: SettingsValues; application?: RuntimeApplication; onChange: <K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) => void }) {
   const requested: RuntimeSettingsValues = {
-    timezone: values.timezone ?? rivuneSettingDefaults.timezone,
-    jellyfinEnabled: values.jellyfinEnabled ?? rivuneSettingDefaults.jellyfinEnabled,
-    jellyfinDebug: values.jellyfinDebug ?? rivuneSettingDefaults.jellyfinDebug,
-    hardwareAcceleration: values.hardwareAcceleration ?? rivuneSettingDefaults.hardwareAcceleration,
-    transcodeMaxBitrateKbps: values.transcodeMaxBitrateKbps ?? rivuneSettingDefaults.transcodeMaxBitrateKbps,
-    mediaMaxStorageMB: values.mediaMaxStorageMB ?? rivuneSettingDefaults.mediaMaxStorageMB,
-    artworkMaxStorageMB: values.artworkMaxStorageMB ?? rivuneSettingDefaults.artworkMaxStorageMB,
-    allowTranscoding: values.allowTranscoding ?? rivuneSettingDefaults.allowTranscoding,
+    timezone: values.timezone ?? application?.requested?.timezone ?? rivuneSettingDefaults.timezone,
+    jellyfinEnabled: values.jellyfinEnabled ?? application?.requested?.jellyfinEnabled ?? rivuneSettingDefaults.jellyfinEnabled,
+    jellyfinDebug: values.jellyfinDebug ?? application?.requested?.jellyfinDebug ?? rivuneSettingDefaults.jellyfinDebug,
+    hardwareAcceleration: values.hardwareAcceleration ?? application?.requested?.hardwareAcceleration ?? rivuneSettingDefaults.hardwareAcceleration,
+    transcodeMaxBitrateKbps: values.transcodeMaxBitrateKbps ?? application?.requested?.transcodeMaxBitrateKbps ?? rivuneSettingDefaults.transcodeMaxBitrateKbps,
+    preferredTranscodeVideoCodec: values.preferredTranscodeVideoCodec ?? application?.requested?.preferredTranscodeVideoCodec ?? rivuneSettingDefaults.preferredTranscodeVideoCodec,
+    transcodeQualityPreset: values.transcodeQualityPreset ?? application?.requested?.transcodeQualityPreset ?? rivuneSettingDefaults.transcodeQualityPreset,
+    transcodeConcurrency: values.transcodeConcurrency ?? application?.requested?.transcodeConcurrency ?? rivuneSettingDefaults.transcodeConcurrency,
+    mediaMaxStorageMB: values.mediaMaxStorageMB ?? application?.requested?.mediaMaxStorageMB ?? rivuneSettingDefaults.mediaMaxStorageMB,
+    artworkMaxStorageMB: values.artworkMaxStorageMB ?? application?.requested?.artworkMaxStorageMB ?? rivuneSettingDefaults.artworkMaxStorageMB,
+    allowTranscoding: values.allowTranscoding ?? application?.requested?.allowTranscoding ?? rivuneSettingDefaults.allowTranscoding,
   };
   const active = application?.active ?? requested;
   const pending = application?.pendingRestart ?? [];
   const hardwareLabel = (value: HardwareAccelerationMode) => {
     const option = settingOptions.hardwareAcceleration.find((candidate) => candidate.value === value);
+    return option ? translate(option.labelKey) : value;
+  };
+  const codecLabel = (value: RuntimeSettingsValues["preferredTranscodeVideoCodec"]) => {
+    const option = settingOptions.preferredTranscodeVideoCodec.find((candidate) => candidate.value === value);
+    return option ? translate(option.labelKey) : value;
+  };
+  const qualityLabel = (value: RuntimeSettingsValues["transcodeQualityPreset"]) => {
+    const option = settingOptions.transcodeQualityPreset.find((candidate) => candidate.value === value);
     return option ? translate(option.labelKey) : value;
   };
   const numberLabel = (value: number, suffix: string) => `${new Intl.NumberFormat(locale).format(value)}${suffix}`;
@@ -3820,11 +3840,14 @@ function RuntimeSettingsPanel({ values, application, onChange }: { values: Setti
     <RuntimeControl id="runtime-timezone" label={translate("settings.runtime.timezone")} description={translate("settings.runtime.timezoneDescription")} requested={requested.timezone} active={active.timezone} pending={false}><input className="setting-text-input" name="timezone" value={requested.timezone} aria-label={translate("settings.runtime.timezone")} aria-describedby="runtime-timezone-description runtime-timezone-state" list="runtime-timezones" onChange={(event) => onChange("timezone", event.target.value)} /><datalist id="runtime-timezones"><option value="UTC" /><option value="America/New_York" /><option value="Europe/London" /><option value="Europe/Paris" /><option value="Asia/Tokyo" /></datalist></RuntimeControl>
     <RuntimeControl id="runtime-jellyfin-debug" label={translate("settings.runtime.jellyfinDebug")} description={translate("settings.runtime.jellyfinDebugDescription")} requested={translate(requested.jellyfinDebug ? "common.status.on" : "common.status.off")} active={translate(active.jellyfinDebug ? "common.status.on" : "common.status.off")} pending={false}><label className="setting-toggle"><input type="checkbox" aria-label={translate("settings.runtime.jellyfinDebug")} aria-describedby="runtime-jellyfin-debug-description runtime-jellyfin-debug-state" checked={requested.jellyfinDebug} onChange={(event) => onChange("jellyfinDebug", event.target.checked)} /><span aria-hidden="true"><i /></span></label></RuntimeControl>
     <RuntimeControl id="runtime-hardware-acceleration" label={translate("settings.runtime.hardwareAcceleration")} description={translate("settings.runtime.hardwareAccelerationDescription")} requested={hardwareLabel(requested.hardwareAcceleration)} active={hardwareLabel(active.hardwareAcceleration)} pending={pending.includes("hardwareAcceleration")}><Select name="hardwareAcceleration" aria-label={translate("settings.runtime.hardwareAcceleration")} aria-describedby="runtime-hardware-acceleration-description runtime-hardware-acceleration-state" value={requested.hardwareAcceleration} onChange={(value) => onChange("hardwareAcceleration", value as HardwareAccelerationMode)} options={settingOptions.hardwareAcceleration.map((option) => ({ value: option.value, label: translate(option.labelKey) }))} /></RuntimeControl>
+    <RuntimeControl id="runtime-preferred-codec" label={translate("settings.runtime.preferredTranscodeVideoCodec")} description={translate("settings.runtime.preferredTranscodeVideoCodecDescription")} requested={codecLabel(requested.preferredTranscodeVideoCodec)} active={codecLabel(active.preferredTranscodeVideoCodec)} pending={pending.includes("preferredTranscodeVideoCodec")}><Select name="preferredTranscodeVideoCodec" aria-label={translate("settings.runtime.preferredTranscodeVideoCodec")} aria-describedby="runtime-preferred-codec-description runtime-preferred-codec-state" value={requested.preferredTranscodeVideoCodec} onChange={(value) => onChange("preferredTranscodeVideoCodec", value as RuntimeSettingsValues["preferredTranscodeVideoCodec"])} options={settingOptions.preferredTranscodeVideoCodec.map((option) => ({ value: option.value, label: translate(option.labelKey) }))} /></RuntimeControl>
+    <RuntimeControl id="runtime-quality-preset" label={translate("settings.runtime.transcodeQualityPreset")} description={translate("settings.runtime.transcodeQualityPresetDescription")} requested={qualityLabel(requested.transcodeQualityPreset)} active={qualityLabel(active.transcodeQualityPreset)} pending={pending.includes("transcodeQualityPreset")}><Select name="transcodeQualityPreset" aria-label={translate("settings.runtime.transcodeQualityPreset")} aria-describedby="runtime-quality-preset-description runtime-quality-preset-state" value={requested.transcodeQualityPreset} onChange={(value) => onChange("transcodeQualityPreset", value as RuntimeSettingsValues["transcodeQualityPreset"])} options={settingOptions.transcodeQualityPreset.map((option) => ({ value: option.value, label: translate(option.labelKey) }))} /></RuntimeControl>
     {([
+      ["transcodeConcurrency", "settings.runtime.transcodeConcurrency", "settings.runtime.transcodeConcurrencyDescription", 1, 32, ""],
       ["transcodeMaxBitrateKbps", "settings.runtime.transcodeMaxBitrate", "settings.runtime.transcodeMaxBitrateDescription", 64, 200000, translate("settings.units.kbpsSuffix")],
       ["mediaMaxStorageMB", "settings.runtime.mediaQuota", "settings.runtime.mediaQuotaDescription", 512, 102400, translate("settings.units.megabytesSuffix")],
       ["artworkMaxStorageMB", "settings.runtime.artworkQuota", "settings.runtime.artworkQuotaDescription", 256, 102400, translate("settings.units.megabytesSuffix")],
-    ] as const).map(([key, labelKey, descriptionKey, minimum, maximum, suffix]) => <RuntimeControl id={`runtime-${key}`} key={key} label={translate(labelKey)} description={translate(descriptionKey)} requested={numberLabel(requested[key], suffix)} active={numberLabel(active[key], suffix)} pending={false}><input className="setting-number-input" name={key} type="number" min={minimum} max={maximum} step={1} required aria-label={translate(labelKey)} aria-describedby={`runtime-${key}-description runtime-${key}-state`} value={requested[key]} onChange={(event) => { const next = event.currentTarget.valueAsNumber; if (Number.isInteger(next) && next >= minimum && next <= maximum) onChange(key, next); }} /></RuntimeControl>)}
+    ] as const).map(([key, labelKey, descriptionKey, minimum, maximum, suffix]) => <RuntimeControl id={`runtime-${key}`} key={key} label={translate(labelKey)} description={translate(descriptionKey)} requested={numberLabel(requested[key], suffix)} active={numberLabel(active[key], suffix)} pending={key === "transcodeConcurrency" && pending.includes("transcodeConcurrency")}><input className="setting-number-input" name={key} type="number" min={minimum} max={maximum} step={1} required aria-label={translate(labelKey)} aria-describedby={`runtime-${key}-description runtime-${key}-state`} value={requested[key]} onChange={(event) => { const next = event.currentTarget.valueAsNumber; if (Number.isInteger(next) && next >= minimum && next <= maximum) onChange(key, next); }} /></RuntimeControl>)}
   </SettingsGroup>;
 }
 

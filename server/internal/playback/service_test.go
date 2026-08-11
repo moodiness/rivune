@@ -1380,7 +1380,7 @@ func TestProcessingArgumentsSeekBeforeOpeningInput(t *testing.T) {
 	if !strings.Contains(joined, "-user_agent Rivune-Playback/1 -ss 300 -i https://media.example/movie.mkv") {
 		t.Fatalf("input offset was not applied before the remote input: %v", arguments)
 	}
-	if !strings.Contains(joined, "-preset superfast -tune zerolatency") {
+	if !strings.Contains(joined, "-preset superfast") || !strings.Contains(joined, "-tune zerolatency") {
 		t.Fatalf("low-latency video settings are missing: %v", arguments)
 	}
 }
@@ -1721,8 +1721,8 @@ func TestFullTranscodeToneMappingUsesVideoHDRProfileSupport(t *testing.T) {
 		dolbyVisionCompatibilityID int
 		wantTone                   bool
 	}{
-		{name: "HDR10 profile support", hdr: "hdr10"},
-		{name: "HLG profile support", hdr: "hlg"},
+		{name: "HDR10 profile support still tone maps to Main 8", hdr: "hdr10", wantTone: true},
+		{name: "HLG profile support still tone maps to Main 8", hdr: "hlg", wantTone: true},
 		{name: "Dolby Vision with compatible base layer tone maps", hdr: "dolby_vision", dolbyVisionBLPresent: true, dolbyVisionCompatibilityID: 1, wantTone: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1838,11 +1838,14 @@ func TestTranscodeArgumentsApplyScaleBitrateChannelsAndBitmapBurnSafely(t *testi
 	joined := strings.Join(arguments, " ")
 	for _, expected := range []string{
 		"-filter_complex [0:v:0][0:s:2]overlay=eof_action=pass:repeatlast=0,scale=-2:720[vout]",
-		"-map [vout]", "-b:v 4500k", "-maxrate 4500k", "-bufsize 9000k", "-ac 1",
+		"-map [vout]", "-maxrate 4500k", "-bufsize 9000k", "-ac 1",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("arguments missing %q: %v", expected, arguments)
 		}
+	}
+	if strings.Contains(joined, "-b:v") {
+		t.Fatalf("software capped CRF unexpectedly selected target-bitrate mode: %v", arguments)
 	}
 	if strings.Contains(joined, "sh -c") || strings.Contains(joined, "bash -c") {
 		t.Fatalf("subtitle burn escaped the argument-array runner: %v", arguments)
@@ -2319,5 +2322,223 @@ func TestPlaybackMaximumHeightAcceptsOnlyUnsetOrSupportedRange(t *testing.T) {
 		if err := validateResolveInput(ResolveInput{SourceRef: "1234567890abcdef", MaximumHeight: height}); err != nil {
 			t.Fatalf("resolve maximum height %d error = %v", height, err)
 		}
+	}
+}
+
+type capabilityMediaProcessor struct {
+	capabilities TranscodeCapabilities
+}
+
+func (processor capabilityMediaProcessor) Probe(context.Context, storedAsset) (MediaInspection, error) {
+	return MediaInspection{}, nil
+}
+
+func (processor capabilityMediaProcessor) TranscodeCapabilities() TranscodeCapabilities {
+	return processor.capabilities
+}
+
+func TestPlaybackCapabilitiesInjectEngineTranscodeCapabilities(t *testing.T) {
+	processor := capabilityMediaProcessor{capabilities: TranscodeCapabilities{
+		HardwareAcceleration: "vaapi", DecodeCodecs: []string{"h264", "hevc"}, EncodeCodecs: []string{"h264", "hevc"}, HEVCMain10: true,
+		PreferredVideoCodec: "hevc", QualityPreset: "quality",
+	}}
+	capabilities := (&Service{processor: processor}).playbackCapabilities(Capabilities{}, 2160, 12000)
+	if capabilities.transcodeCapabilities.HardwareAcceleration != "vaapi" ||
+		capabilities.transcodeCapabilities.PreferredVideoCodec != "hevc" ||
+		capabilities.transcodeCapabilities.QualityPreset != "quality" ||
+		!capabilities.transcodeCapabilities.HEVCMain10 ||
+		!supportsCodec(capabilities.transcodeCapabilities.DecodeCodecs, "hevc") ||
+		!supportsCodec(capabilities.transcodeCapabilities.EncodeCodecs, "hevc") {
+		t.Fatalf("engine capabilities were not injected: %+v", capabilities.transcodeCapabilities)
+	}
+}
+
+func TestTranscodeTargetSelectionRequiresClientEngineAndContainerAgreement(t *testing.T) {
+	profiles := []MediaProfile{
+		{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true},
+		{Container: "mp4", VideoCodec: "hevc", AudioCodec: "aac", Transcoding: true},
+		{Container: "mp4", VideoCodec: "av1", AudioCodec: "aac", Transcoding: true},
+	}
+	for _, test := range []struct {
+		name, preferred, segment string
+		client, engine           []string
+		want                     string
+	}{
+		{name: "legacy H264", client: []string{"h264"}, want: "h264"},
+		{name: "preferred H264", preferred: "h264", segment: "mp4", client: []string{"h264", "hevc", "av1"}, engine: []string{"h264", "hevc", "av1"}, want: "h264"},
+		{name: "preferred HEVC fMP4", preferred: "hevc", segment: "mp4", client: []string{"h264", "hevc"}, engine: []string{"h264", "hevc"}, want: "hevc"},
+		{name: "preferred AV1 fMP4", preferred: "av1", segment: "mp4", client: []string{"h264", "av1"}, engine: []string{"h264", "av1"}, want: "av1"},
+		{name: "HEVC requires fMP4", preferred: "hevc", segment: "ts", client: []string{"h264", "hevc"}, engine: []string{"h264", "hevc"}, want: "h264"},
+		{name: "AV1 requires engine", preferred: "av1", segment: "mp4", client: []string{"h264", "av1"}, engine: []string{"h264"}, want: "h264"},
+		{name: "HEVC requires client profile", preferred: "hevc", segment: "mp4", client: []string{"h264"}, engine: []string{"h264", "hevc"}, want: "h264"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capabilities := Capabilities{
+				StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"}, VideoCodecs: test.client, AudioCodecs: []string{"aac"},
+				ProcessingModes: []string{processingTranscode}, MediaProfiles: profiles, HLSSegmentContainer: test.segment,
+				transcodeCapabilities: TranscodeCapabilities{EncodeCodecs: test.engine, PreferredVideoCodec: test.preferred, QualityPreset: "quality"},
+			}
+			if len(test.engine) == 0 {
+				capabilities.MediaProfiles = []MediaProfile{{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true}}
+			}
+			if len(test.client) == 1 && test.client[0] == "h264" {
+				capabilities.MediaProfiles = []MediaProfile{{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true}}
+			}
+			mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, MediaInspection{
+				Container: "mkv", VideoTracks: []MediaTrack{{Codec: "vp9", Height: 2160}}, AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+			}, capabilities)
+			if mode != processingTranscode || decision == nil || decision.Target == nil || decision.Target.VideoCodec != test.want {
+				t.Fatalf("mode=%q decision=%+v, want codec %q", mode, decision, test.want)
+			}
+			sources := []Source{{ID: "source"}}
+			assets := []storedAsset{{ID: "source", HLSSegmentContainer: normalizedHLSSegmentContainer(test.segment)}}
+			applyPlaybackDecision(sources, assets, sourceCandidate{}, MediaInspection{VideoTracks: []MediaTrack{{Codec: "vp9", Height: 2160}}}, mode, decision, capabilities)
+			if assets[0].TargetVideoCodec != test.want || assets[0].QualityPreset != "quality" {
+				t.Fatalf("private plan was not persisted: %+v", assets[0])
+			}
+			encoded, err := json.Marshal(assets[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restored storedAsset
+			if err := json.Unmarshal(encoded, &restored); err != nil {
+				t.Fatal(err)
+			}
+			if restored.TargetVideoCodec != test.want || restored.QualityPreset != "quality" {
+				t.Fatalf("persisted private plan = %+v", restored)
+			}
+			if (test.want == "hevc" || test.want == "av1") && assets[0].HLSSegmentContainer != "mp4" {
+				t.Fatalf("%s target did not retain fMP4: %+v", test.want, assets[0])
+			}
+		})
+	}
+}
+func TestHEVCMain10TargetRequiresBackendAndMatchingClientProfile(t *testing.T) {
+	inspection := MediaInspection{
+		Container: "mkv", HDRFormat: "hdr10",
+		VideoTracks: []MediaTrack{{Codec: "hevc", Height: 2160, BitDepth: 10}},
+		AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+	}
+	for _, test := range []struct {
+		name          string
+		backendMain10 bool
+		clientDepth   int
+		wantDepth     int
+		wantToneMap   bool
+	}{
+		{name: "Main-only backend and Main10 client", clientDepth: 10, wantDepth: 8, wantToneMap: true},
+		{name: "Main10 backend and Main-only client", backendMain10: true, clientDepth: 8, wantDepth: 8, wantToneMap: true},
+		{name: "Main10 backend and Main10 client", backendMain10: true, clientDepth: 10, wantDepth: 10},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capabilities := Capabilities{
+				StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264", "hevc"}, AudioCodecs: []string{"aac"},
+				HDRFormats: []string{"hdr10"}, ProcessingModes: []string{processingTranscode}, HLSSegmentContainer: "mp4",
+				MediaProfiles: []MediaProfile{
+					{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true, MaximumVideoBitDepth: 8},
+					{Container: "mp4", VideoCodec: "hevc", AudioCodec: "aac", Transcoding: true, MaximumVideoBitDepth: test.clientDepth},
+				},
+				transcodeCapabilities: TranscodeCapabilities{HardwareAcceleration: "vaapi", DecodeCodecs: []string{"hevc"}, EncodeCodecs: []string{"h264", "hevc"}, HEVCMain10: test.backendMain10, PreferredVideoCodec: "hevc"},
+			}
+			mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, inspection, capabilities)
+			if mode != processingTranscode || decision == nil || decision.Target == nil {
+				t.Fatalf("mode=%q decision=%+v", mode, decision)
+			}
+			if decision.Target.VideoCodec != "hevc" || decision.Target.VideoBitDepth != test.wantDepth || decision.ToneMapping != test.wantToneMap {
+				t.Fatalf("decision=%+v target=%+v, want depth=%d toneMap=%t", decision, decision.Target, test.wantDepth, test.wantToneMap)
+			}
+			if test.wantDepth == 10 && (decision.Pipeline == nil || !decision.Pipeline.ZeroCopy) {
+				t.Fatalf("probed Main10 plan did not retain hardware frames: %+v", decision.Pipeline)
+			}
+		})
+	}
+}
+
+func TestValidateCapabilitiesBoundsMaximumVideoBitDepth(t *testing.T) {
+	base := Capabilities{MediaProfiles: []MediaProfile{{Container: "mp4", VideoCodec: "hevc", MaximumVideoBitDepth: 10}}}
+	if err := validateCapabilities(base); err != nil {
+		t.Fatalf("valid maximum video bit depth rejected: %v", err)
+	}
+	for _, invalid := range []int{1, 7, 17, 1000} {
+		capabilities := cloneCapabilities(base)
+		capabilities.MediaProfiles[0].MaximumVideoBitDepth = invalid
+		if !errors.Is(validateCapabilities(capabilities), ErrInvalidInput) {
+			t.Fatalf("invalid maximum video bit depth %d accepted", invalid)
+		}
+	}
+}
+
+func TestPlaybackDecisionReasonsAndPipelineStayModeAccurate(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingRemux, processingTranscode}, MaximumHeight: 1080, MaximumVideoBitrateKbps: 8000,
+		MediaProfiles:         []MediaProfile{{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", DirectPlay: true, Transcoding: true}},
+		transcodeCapabilities: TranscodeCapabilities{HardwareAcceleration: "vaapi", DecodeCodecs: []string{"hevc"}, EncodeCodecs: []string{"h264"}},
+	}
+	directMode, direct := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mp4"}, MediaInspection{
+		Container: "mp4", VideoTracks: []MediaTrack{{Codec: "h264", Height: 1080, BitrateKbps: 4000}}, AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+	}, capabilities)
+	remuxMode, remux := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, MediaInspection{
+		Container: "mkv", VideoTracks: []MediaTrack{{Codec: "h264", Height: 1080, BitrateKbps: 4000}}, AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+	}, capabilities)
+	transcodeMode, transcode := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, MediaInspection{
+		Container: "mkv", HDRFormat: "hdr10", VideoTracks: []MediaTrack{{Codec: "hevc", Height: 2160, BitrateKbps: 24000}}, AudioTracks: []MediaTrack{{Codec: "dts", Channels: 6}},
+	}, capabilities)
+	if directMode != "direct" || direct.Pipeline != nil || len(direct.Reasons) != 0 {
+		t.Fatalf("direct play received a false pipeline: %+v", direct)
+	}
+	if remuxMode != processingRemux || remux.Pipeline != nil || !supports(remux.Reasons, reasonContainerNotSupported) {
+		t.Fatalf("remux plan/reasons are incoherent: %+v", remux)
+	}
+	for _, reason := range []string{reasonContainerNotSupported, reasonVideoCodecNotSupported, reasonAudioCodecNotSupported, reasonResolutionLimit, reasonBitrateLimit, reasonHDRNotSupported} {
+		if transcodeMode != processingTranscode || transcode.Pipeline == nil || !supports(transcode.Reasons, reason) {
+			t.Fatalf("transcode missing %q or pipeline: mode=%q decision=%+v", reason, transcodeMode, transcode)
+		}
+	}
+}
+
+func TestDirectProfileCompatibilityDoesNotCombineDifferentProfiles(t *testing.T) {
+	capabilities := Capabilities{StreamingProtocols: []string{"http"}, MediaProfiles: []MediaProfile{
+		{Container: "mkv", VideoCodec: "hevc", AudioCodec: "ac3", DirectPlay: true},
+		{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", DirectPlay: true},
+	}}
+	video := &MediaTrack{Codec: "h264"}
+	audio := &MediaTrack{Codec: "aac", Channels: 2}
+	containerSupported, videoSupported, audioSupported := directProfileCompatibility("mkv", video, audio, capabilities)
+	if !containerSupported || videoSupported || audioSupported {
+		t.Fatalf("cross-container profiles were combined: container=%t video=%t audio=%t", containerSupported, videoSupported, audioSupported)
+	}
+	reasons := directIncompatibilityReasons(Source{Protocol: "http", Container: "mkv"}, MediaInspection{
+		Container: "mkv", VideoTracks: []MediaTrack{*video}, AudioTracks: []MediaTrack{*audio},
+	}, capabilities)
+	if supports(reasons, reasonContainerNotSupported) || !supports(reasons, reasonVideoCodecNotSupported) || !supports(reasons, reasonAudioCodecNotSupported) {
+		t.Fatalf("cross-container incompatibility reasons = %v", reasons)
+	}
+}
+
+func TestOmittedDirectProfileBitDepthDefaultsToMain8(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"http", "hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h265", "h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingTranscode},
+		MediaProfiles: []MediaProfile{
+			{Container: "mp4", VideoCodec: "h265", AudioCodec: "aac", DirectPlay: true},
+			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true},
+		},
+		transcodeCapabilities: TranscodeCapabilities{EncodeCodecs: []string{"h264"}},
+	}
+	inspection := MediaInspection{
+		Container: "mp4", VideoTracks: []MediaTrack{{Codec: "h265", Height: 1080, BitDepth: 10}}, AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+	}
+	mode, decision := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mp4"}, inspection, capabilities)
+	if mode != processingTranscode || decision == nil || decision.Target == nil || decision.Target.VideoBitDepth != 8 {
+		t.Fatalf("omitted profile depth accepted Main10 direct play: mode=%q decision=%+v", mode, decision)
+	}
+	inspection.VideoTracks[0].BitDepth = 8
+	if mode, decision = playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mp4"}, inspection, capabilities); mode != "direct" || decision == nil {
+		t.Fatalf("omitted profile depth rejected Main 8 direct play: mode=%q decision=%+v", mode, decision)
+	}
+	inspection.VideoTracks[0].BitDepth = 0
+	if mode, decision = playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mp4"}, inspection, capabilities); mode != "direct" || decision == nil {
+		t.Fatalf("legacy unknown depth lost backward-compatible direct play: mode=%q decision=%+v", mode, decision)
 	}
 }

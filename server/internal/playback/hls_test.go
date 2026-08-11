@@ -885,6 +885,22 @@ func TestFFmpegHLSOutputArgumentsUseBoundedSlidingPlaylist(t *testing.T) {
 	}
 }
 
+func TestHLSPlaylistSegmentBoundsAcceptTransportStreamAndFragmentedMP4(t *testing.T) {
+	for _, suffix := range []string{".ts", ".m4s"} {
+		t.Run(suffix, func(t *testing.T) {
+			directory := t.TempDir()
+			playlist := "#EXTM3U\nsegment-000003" + suffix + "\nsegment-bad" + suffix + "\nsegment-000007" + suffix + "\n"
+			if err := os.WriteFile(filepath.Join(directory, "index.m3u8"), []byte(playlist), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			first, last, ok := hlsPlaylistSegmentBounds(directory)
+			if !ok || first != 3 || last != 7 {
+				t.Fatalf("%s segment bounds = %d..%d found=%t", suffix, first, last, ok)
+			}
+		})
+	}
+}
+
 func TestHLSShareableWindowReservesProductionLead(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.WriteFile(filepath.Join(directory, "segment-000000.ts"), []byte{1}, 0o600); err != nil {
@@ -916,7 +932,9 @@ func TestHLSMasterPlaylistPointsToOpaqueMediaCapability(t *testing.T) {
 		wantBandwidth int
 		wantCodecs    string
 	}{
-		{name: "known target codecs", target: &PlaybackDecisionTarget{VideoCodec: "h264", AudioCodec: "aac"}, videoBitrate: 4500, wantBandwidth: 4756000, wantCodecs: "avc1,mp4a"},
+		{name: "H264 target", target: &PlaybackDecisionTarget{VideoCodec: "h264", AudioCodec: "aac"}, videoBitrate: 4500, wantBandwidth: 4756000, wantCodecs: "avc1,mp4a"},
+		{name: "HEVC target", target: &PlaybackDecisionTarget{VideoCodec: "hevc", AudioCodec: "aac"}, videoBitrate: 4500, wantBandwidth: 4756000, wantCodecs: "hvc1,mp4a"},
+		{name: "AV1 target", target: &PlaybackDecisionTarget{VideoCodec: "av1", AudioCodec: "aac"}, videoBitrate: 4500, wantBandwidth: 4756000, wantCodecs: "av01,mp4a"},
 		{name: "unknown target codec", target: &PlaybackDecisionTarget{VideoCodec: "unknown-video", AudioCodec: "aac"}, videoBitrate: 4500, wantBandwidth: 4756000},
 		{name: "audio-only target", target: &PlaybackDecisionTarget{AudioCodec: "aac"}, wantBandwidth: 256000, wantCodecs: "mp4a"},
 	}
@@ -2068,7 +2086,8 @@ func TestHLSJobFingerprintDifferencesNeverShare(t *testing.T) {
 		ID: "asset", Kind: processingTranscode, URL: "https://media.example/movie.mkv", Container: "mkv",
 		HLSSegmentContainer: "mp4", Headers: map[string]string{"Authorization": "Bearer first"}, ToneMap: true,
 		SubtitleTrackType: subtitleBurnText, SubtitleTrackOrdinal: 1, DurationSeconds: 90, ReadRate: 1.25,
-		VideoBitDepth: 10, TargetHeight: 720, VideoBitrateKbps: 4000, MaximumAudioChannels: 2, StartSeconds: 3,
+		VideoBitDepth: 10, TargetHeight: 720, VideoBitrateKbps: 4000, MaximumAudioChannels: 2,
+		TargetVideoCodec: "h264", QualityPreset: "balanced", StartSeconds: 3,
 		Decision: &PlaybackDecision{Target: &PlaybackDecisionTarget{VideoCodec: "h264", AudioCodec: "aac"}},
 	}
 	audio, subtitle := 1, 2
@@ -2095,6 +2114,8 @@ func TestHLSJobFingerprintDifferencesNeverShare(t *testing.T) {
 		{name: "target height", mutate: func(asset *storedAsset) { asset.TargetHeight = 1080 }},
 		{name: "video bitrate", mutate: func(asset *storedAsset) { asset.VideoBitrateKbps++ }},
 		{name: "audio channels", mutate: func(asset *storedAsset) { asset.MaximumAudioChannels = 1 }},
+		{name: "target video codec", mutate: func(asset *storedAsset) { asset.TargetVideoCodec = "hevc" }},
+		{name: "quality preset", mutate: func(asset *storedAsset) { asset.QualityPreset = "quality" }},
 		{name: "seek start", mutate: func(asset *storedAsset) { asset.StartSeconds = 6 }},
 		{name: "decision", mutate: func(asset *storedAsset) { asset.Decision.Target.AudioCodec = "opus" }},
 	}

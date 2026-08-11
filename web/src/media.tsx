@@ -392,7 +392,9 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
     add(containers, "mp4", "m4v", "mov");
     add(videoCodecs, "h264");
   }
-  if (video.canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"') || video.canPlayType('video/mp4; codecs="hev1.1.6.L93.B0"')) {
+  const supportsHEVCMain = Boolean(video.canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"') || video.canPlayType('video/mp4; codecs="hev1.1.6.L93.B0"'));
+  const supportsHEVCMain10 = Boolean(video.canPlayType('video/mp4; codecs="hvc1.2.4.L153.B0"'));
+  if (supportsHEVCMain || supportsHEVCMain10) {
     add(containers, "mp4", "m4v", "mov");
     add(videoCodecs, "h265");
   }
@@ -414,22 +416,23 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
   if (audio.canPlayType("audio/mpeg")) add(audioCodecs, "mp3");
   if (audio.canPlayType('audio/mp4; codecs="ac-3"')) add(audioCodecs, "ac3");
   if (audio.canPlayType('audio/mp4; codecs="ec-3"')) add(audioCodecs, "eac3");
-  const addProfile = (container: string, videoCodec: string, codecString: string, audioCodec?: string) => {
+  const addProfile = (container: string, videoCodec: string, codecString: string, maximumVideoBitDepth: number, audioCodec?: string) => {
     const mime = container === "webm" ? "video/webm" : "video/mp4";
     if (!video.canPlayType(`${mime}; codecs="${codecString}"`)) return;
-    if (!mediaProfiles.some((profile) => profile.container === container && profile.videoCodec === videoCodec && profile.audioCodec === audioCodec)) {
-      mediaProfiles.push({ container, videoCodec, ...(audioCodec ? { audioCodec } : {}) });
+    if (!mediaProfiles.some((profile) => profile.container === container && profile.videoCodec === videoCodec && profile.audioCodec === audioCodec && profile.maximumVideoBitDepth === maximumVideoBitDepth)) {
+      mediaProfiles.push({ container, videoCodec, maximumVideoBitDepth, ...(audioCodec ? { audioCodec } : {}) });
     }
     add(containers, container, ...(container === "mp4" ? ["m4v", "mov"] : []));
     add(videoCodecs, videoCodec);
     if (audioCodec) add(audioCodecs, audioCodec);
   };
   const profileVideoCandidates = [
-    { container: "mp4", videoCodec: "h264", identifiers: ["avc1.42E01E"] },
-    { container: "mp4", videoCodec: "h265", identifiers: ["hvc1.1.6.L93.B0", "hev1.1.6.L93.B0"] },
-    { container: "mp4", videoCodec: "av1", identifiers: ["av01.0.05M.08"] },
-    { container: "webm", videoCodec: "vp9", identifiers: ["vp9", "vp09.00.10.08"] },
-    { container: "webm", videoCodec: "av1", identifiers: ["av01.0.05M.08"] },
+    { container: "mp4", videoCodec: "h264", identifiers: ["avc1.42E01E"], maximumVideoBitDepth: 8 },
+    { container: "mp4", videoCodec: "h265", identifiers: ["hvc1.1.6.L93.B0", "hev1.1.6.L93.B0"], maximumVideoBitDepth: 8 },
+    { container: "mp4", videoCodec: "h265", identifiers: ["hvc1.2.4.L153.B0"], maximumVideoBitDepth: 10 },
+    { container: "mp4", videoCodec: "av1", identifiers: ["av01.0.05M.08"], maximumVideoBitDepth: 8 },
+    { container: "webm", videoCodec: "vp9", identifiers: ["vp9", "vp09.00.10.08"], maximumVideoBitDepth: 8 },
+    { container: "webm", videoCodec: "av1", identifiers: ["av01.0.05M.08"], maximumVideoBitDepth: 8 },
   ];
   const profileAudioCandidates = [
     { container: "mp4", audioCodec: "aac", identifier: "mp4a.40.2" },
@@ -442,10 +445,10 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
   ];
   for (const videoProfile of profileVideoCandidates) {
     for (const videoIdentifier of videoProfile.identifiers) {
-      addProfile(videoProfile.container, videoProfile.videoCodec, videoIdentifier);
+      addProfile(videoProfile.container, videoProfile.videoCodec, videoIdentifier, videoProfile.maximumVideoBitDepth);
       for (const audioProfile of profileAudioCandidates) {
         if (audioProfile.container !== videoProfile.container) continue;
-        addProfile(videoProfile.container, videoProfile.videoCodec, `${videoIdentifier}, ${audioProfile.identifier}`, audioProfile.audioCodec);
+        addProfile(videoProfile.container, videoProfile.videoCodec, `${videoIdentifier}, ${audioProfile.identifier}`, videoProfile.maximumVideoBitDepth, audioProfile.audioCodec);
       }
     }
   }
@@ -460,7 +463,7 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
   const networkBitrateKbps = connection?.downlink && connection.downlink > 0 ? Math.floor(connection.downlink * 800) : displayBitrateKbps;
   const maximumVideoBitrateKbps = Math.max(64, Math.min(displayBitrateKbps, networkBitrateKbps));
   const hdrFormats = ["sdr"];
-  if (window.matchMedia?.("(dynamic-range: high)").matches && videoCodecs.some((codec) => codec === "h265" || codec === "vp9" || codec === "av1")) {
+  if (window.matchMedia?.("(dynamic-range: high)").matches && mediaProfiles.some((profile) => (profile.maximumVideoBitDepth ?? 0) >= 10)) {
     hdrFormats.push("hdr10", "hlg");
   }
   if (window.matchMedia?.("(dynamic-range: high)").matches &&

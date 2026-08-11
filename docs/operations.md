@@ -141,18 +141,21 @@ from the router or treat it as the public origin.
 
 ## Persisted settings and encrypted credentials
 
-Timezone, Jellyfin compatibility and diagnostics, transcoding policy, hardware
-acceleration, bitrate, and media/artwork quotas are database-backed instance
-settings. Provider credentials are stored in separate encrypted database rows.
+Timezone, Jellyfin compatibility and diagnostics, transcoding policy, preferred
+video codec, quality preset, concurrency, hardware acceleration, bitrate, and
+media/artwork quotas are database-backed instance settings. Provider credentials
+are stored in separate encrypted database rows.
 Administrators manage both from the web application; integration responses show
 only whether a credential is configured and when it changed. Secret values are
 never returned through settings, audit, activity, or integration responses.
 
-Most setting changes and every provider update apply live. Hardware acceleration
-is the exception: saving it records the requested mode, while the active mode
-remains unchanged and the field stays `pending restart`. Restart or recreate the
-`rivune` service, then wait for the active value to match the request and for the
-pending marker to clear. A persisted request is not proof that the GPU is active.
+Most setting changes and every provider update apply live. Hardware acceleration,
+`preferredTranscodeVideoCodec`, `transcodeQualityPreset`, and
+`transcodeConcurrency` are restart-bound: saving records the requested values,
+while the active values remain unchanged and the fields stay `pending restart`.
+Restart or recreate the `rivune` service, then wait for the active values to
+match the requests and for the pending markers to clear. Persisted requests are
+not proof that a GPU or codec path is functional.
 
 ### Keyring backup and rotation
 
@@ -301,10 +304,11 @@ curl --fail --show-error https://media.example.com/health
 
 ## Playback processing and hardware
 
-Rivune uses fixed safe executable, pool, thread, read-rate, and HLS-buffer
-defaults. Administrators set the transcoding permission, video bitrate, media
-quota, artwork quota, and requested encoder mode in Administration. Do not add
-the removed FFmpeg/runtime variables to `.env` or a Compose override.
+Rivune fixes the executable, input-validation, read-rate, thread, and HLS safety
+boundaries. Administrators set transcoding permission, bitrate, preferred video
+codec, quality preset, concurrency, media/artwork quotas, and the requested
+encoder mode in Administration. Do not add removed FFmpeg/runtime variables or
+the new database-backed settings to `.env` or a Compose override.
 
 Both provided Compose manifests are CPU-only by default. For AMD/Intel, set
 `RIVUNE_VIDEO_DEVICE` and `RIVUNE_VIDEO_GROUP_ID`, determine the group with
@@ -322,11 +326,202 @@ product settings. For NVIDIA, configure NVIDIA Container Toolkit in a private
 Compose override and grant only the compute, video, and utility capabilities
 required by FFmpeg.
 
-After changing the hardware-acceleration setting, restart the service and verify
-the active value as described above. `auto` probes only the devices exposed by
-the deployment and falls back to software. A failed hardware job can fall back
-before output publication; neither a saved request nor a visible device alone
-proves that hardware encoding is active.
+After changing a restart-bound transcoding setting, restart the service and
+verify its active value as described above. `auto` probes only devices exposed
+by the deployment and falls back to software. A failed hardware job can fall
+back once before output publication; neither a saved request, an FFmpeg encoder
+listing, nor a visible device proves that hardware encoding is functional.
+
+### Planning, probes, and headless devices
+
+Playback planning preserves this order: Direct Play, remux, audio-only
+transcode, then video transcode. Direct Play returns the validated source without
+launching FFmpeg. Remux and audio-only transcode retain packet-copy video. A
+video transcode selects a target from the client profile, the active backend,
+and the functional software fallback; `auto` prefers H.264 for compatibility,
+while an explicit codec is tried before the remaining compatible codecs. HEVC
+and AV1 outputs always use fragmented MP4 HLS, and the decision target, encoder,
+RFC 6381 codec, MP4 sample entry, and segment container must agree.
+
+The restart-bound planning settings are:
+
+| Setting | Accepted values | Default | Effect |
+| --- | --- | --- | --- |
+| `preferredTranscodeVideoCodec` | `auto`, `h264`, `hevc`, `av1` | `auto` | Orders target-codec selection; it cannot force a codec absent from the client/backend/software intersection. |
+| `transcodeQualityPreset` | `speed`, `balanced`, `quality` | `balanced` | Selects backend-specific rate-control and preset arguments. It is not a portable FFmpeg preset name. |
+| `transcodeConcurrency` | integer `1..32` | `4` | Bounds concurrent FFmpeg HLS processing jobs; probe, subtitle and trick-play pools keep their separate safety limits. |
+| `hardwareAcceleration` | `auto`, `software`, `vaapi`, `hybrid`, `qsv`, `nvenc`, `amf` | `auto` | Selects a backend to probe. `hybrid` is Linux VA-API decode/encode with CPU filtering; `amf` is Windows-only. |
+
+FFmpeg can *list* an encoder, decoder, filter, or hardware API even when the
+driver, device permission, runtime library, pixel format, or complete filter
+graph is unusable. These read-only inventory commands are safe to run because
+they contain no media location or credential:
+
+```sh
+ffmpeg -hide_banner -encoders
+ffmpeg -hide_banner -decoders
+ffmpeg -hide_banner -filters
+ffmpeg -hide_banner -hwaccels
+```
+
+Rivune treats that inventory only as a candidate set. At startup it runs bounded
+one-frame functional probes for the selected encode/decode and, where needed,
+tone-map path. The normalized encode/decode codec lists and backend in
+Administration diagnostics describe the active probed capability, not GPU load,
+quality, or real-time throughput. A functional startup probe is stronger than a
+listing but still does not guarantee that a particular 4K source sustains
+`1.00x`; confirm the actual session in Activity.
+
+Linux VA-API and QSV require the mapped `/dev/dri/renderD128` (or explicitly
+configured render node), its supplementary render group, and matching userspace
+drivers. Linux QSV is derived from that VA-API render device. NVIDIA requires
+the headless driver device nodes and encode/decode libraries exposed by NVIDIA
+Container Toolkit; an X11 or Wayland display is not required. Vulkan tone
+mapping additionally requires a working Vulkan ICD and direct interop on the
+same DRM render device. Do not mount an entire host `/dev` tree to make a probe
+pass.
+
+On a native Windows server, `auto` tries AMF, QSV, then NVENC without inspecting
+Unix paths and stops at the first backend with a functional encoder. AMF hardware
+decode uses D3D11VA; QSV explicitly selects its D3D11VA hardware implementation
+rather than VA-API or the `auto_any` implementation. FFmpeg child windows are
+hidden, so an interactive desktop is not required; the service identity must
+still be able to open the adapter and
+the vendor driver/runtime must be installed. The release gate compiles the
+server and all Go test binaries on Windows but deliberately performs no GPU
+claim. The supplied Linux containers remain the supported Compose deployment
+and are CPU-only until the operator exposes a device as described above.
+
+Hardware decode is used only for a codec that the active backend successfully
+probed and only while decoder, filters and encoder share a safe frame type.
+Subtitle composition and software filters explicitly download frames to CPU;
+VA-API/QSV upload them again when hardware encode remains selected. This copy
+boundary is intentional and prevents an advertised decoder from being mistaken
+for a zero-copy path.
+
+### Representative generated FFmpeg argv
+
+The following are **redacted argv shapes**, not copy-and-paste operator commands.
+Rivune generates them from the media inspection, client profile, active settings
+and successful functional probes. `INPUT` replaces the validated private egress
+input; FFmpeg runs with the private workspace represented by `OUTPUT` as its
+working directory, so generated output names are relative. `THREADS` is the
+bounded server thread count; `...` and bracketed labels denote other bounded
+generated arguments. None is a literal shell value. Encoder examples below use
+the generated `balanced` quality mapping; `speed` and `quality` generate the
+backend-specific alternatives.
+Source URLs, headers, cookies, and tokens are intentionally absent and must never
+be added to tickets, logs, diagnostics, or command examples.
+
+Direct Play has no command at all:
+
+```text
+mode=direct   FFmpeg processes=0
+```
+
+A remux copies both packet streams; audio-only transcode changes only the audio
+arguments (`-c:a aac ...`) and still uses `-c:v copy`:
+
+```text
+ffmpeg ... -i INPUT -map 0:v:0 -map 0:a:0? -sn -dn \
+  -c:v copy -c:a copy -f hls -hls_segment_type mpegts \
+  -hls_flags split_by_time+temp_file+delete_segments index.m3u8
+```
+
+Software target selection changes the encoder and compatible pixel format. H.264
+may use MPEG-TS; HEVC and AV1 use fMP4 (`init.mp4` plus `.m4s` segments):
+
+```text
+# H.264, balanced
+ffmpeg ... -i INPUT ... -threads THREADS -c:v libx264 -preset superfast \
+  -crf 18 -pix_fmt yuv420p -tune zerolatency -c:a aac ... -f hls ... index.m3u8
+
+# HEVC, balanced
+ffmpeg ... -i INPUT ... -threads THREADS -c:v libx265 -preset superfast \
+  -crf 23 -pix_fmt yuv420p -tune zerolatency -tag:v hvc1 -c:a aac ... \
+  -f hls -hls_segment_type fmp4 -hls_fmp4_init_filename init.mp4 \
+  -hls_segment_filename segment-%06d.m4s index.m3u8
+
+# AV1, balanced
+ffmpeg ... -i INPUT ... -threads THREADS -c:v libsvtav1 -preset 8 \
+  -crf 30 -pix_fmt yuv420p -c:a aac ... \
+  -f hls -hls_segment_type fmp4 -hls_fmp4_init_filename init.mp4 \
+  -hls_segment_filename segment-%06d.m4s index.m3u8
+```
+
+Representative zero-copy Linux hardware paths follow. The codec suffix can be
+`h264`, `hevc`, or `av1` only when that exact decoder/encoder combination probed:
+
+```text
+# VA-API, HEVC balanced
+ffmpeg -init_hw_device vaapi=hw:/dev/dri/renderD128 -filter_hw_device hw \
+  -hwaccel vaapi -hwaccel_device hw -hwaccel_output_format vaapi ... -i INPUT \
+  -vf scale_vaapi=w=-2:h=1080:format=nv12 -c:v hevc_vaapi -profile:v main \
+  -quality 4 -tag:v hvc1 ... index.m3u8
+
+# Intel QSV on Linux, H.264 balanced
+ffmpeg -init_hw_device vaapi=va:/dev/dri/renderD128 \
+  -init_hw_device qsv=hw@va -filter_hw_device hw \
+  -hwaccel qsv -hwaccel_device hw -hwaccel_output_format qsv ... -i INPUT \
+  -vf scale_qsv=w=-2:h=1080:format=nv12 -c:v h264_qsv -profile:v high \
+  -preset medium -look_ahead 0 ... index.m3u8
+
+# NVIDIA NVENC, AV1 balanced
+ffmpeg -hwaccel cuda -hwaccel_output_format cuda ... -i INPUT \
+  -c:v av1_nvenc -profile:v main -preset p4 -tune ll -rc vbr \
+  -spatial_aq 1 -zerolatency 1 ... index.m3u8
+```
+
+On Windows, generated QSV arguments do not contain a VA-API device. AMF uses
+D3D11VA decoding only for a successfully probed codec and a GPU-safe filter
+graph; otherwise decode/filtering occurs on CPU before AMF encode:
+
+```text
+# Windows QSV, HEVC balanced (no /dev/dri and no vaapi=...)
+ffmpeg -init_hw_device qsv=hw:hw,child_device_type=d3d11va -filter_hw_device hw \
+  -hwaccel qsv -hwaccel_device hw -hwaccel_output_format qsv ... -i INPUT \
+  -c:v hevc_qsv -profile:v main -preset medium -look_ahead 0 -tag:v hvc1 ... index.m3u8
+
+# Windows AMF, H.264 balanced with D3D11VA decode
+ffmpeg -init_hw_device d3d11va=hw -filter_hw_device hw \
+  -hwaccel d3d11va -hwaccel_device hw -hwaccel_output_format d3d11 ... -i INPUT \
+  -c:v h264_amf -profile:v high -quality balanced ... index.m3u8
+```
+
+An HDR VA-API/Vulkan path is selected only after the complete DRM-to-Vulkan and
+back-to-VA-API graph probes. The shortened shape is:
+
+```text
+ffmpeg -init_hw_device drm=dr:/dev/dri/renderD128 \
+  -init_hw_device vaapi=hw@dr -init_hw_device vulkan=vk@dr -filter_hw_device hw \
+  ... -vf hwmap=derive_device=vulkan:mode=read+direct,format=vulkan,\
+libplacebo=...:tonemapping=bt.2390:color_primaries=bt709:color_trc=bt709,\
+hwmap=derive_device=vaapi:mode=read+direct,format=vaapi \
+  -c:v h264_vaapi -profile:v high -quality 4 ... index.m3u8
+```
+
+Text and bitmap subtitle burn-in require decoded frames and therefore break a
+zero-copy path. Rivune builds the filter graph as a direct argv value rather
+than shell text; the redacted shapes are:
+
+```text
+# Text subtitle from the selected embedded stream
+ffmpeg ... -i INPUT -filter_complex \
+  "[0:v:0]subtitles=filename='INPUT':si=N,[generated scale/tone-map/upload][vout]" \
+  -map "[vout]" ...
+
+# Bitmap subtitle
+ffmpeg ... -i INPUT -filter_complex \
+  "[0:v:0][0:s:N]overlay=eof_action=pass:repeatlast=0,[generated filters][vout]" \
+  -map "[vout]" ...
+```
+
+If a probed hardware job fails before HLS publication, Rivune deletes partial
+output and makes at most one retry with the software encoder for the **same**
+target codec. For example, `-c:v hevc_vaapi` becomes `-c:v libx265`; it does not
+silently become H.264. A target without a functional same-codec software
+fallback is not planned. Failure after publication is reported rather than
+starting a second timeline.
 
 For HDR-to-SDR playback, Rivune probes the complete hardware filter path rather
 than trusting the selected encoder name. AMD render devices (`0x1002`) try the
@@ -361,9 +556,10 @@ draining the buffer; otherwise lower **Maximum resolution** or return to `auto`.
 
 To remove the GPU from the media path entirely, select **Software**, save, and
 restart. An explicitly selected software backend honors **Maximum resolution**
-and uses CPU decode, tone mapping, scaling, and H.264 encode; automatic software
-fallbacks remain capped at 1080p. Full software 2160p has the highest CPU and
-power cost, so keep it only when Activity proves sustained real-time throughput.
+and uses CPU decode, tone mapping, scaling, and the selected compatible H.264,
+HEVC, or AV1 encoder; automatic software fallbacks remain capped at 1080p. Full
+software 2160p has the highest CPU and power cost, so keep it only when Activity
+proves sustained real-time throughput.
 
 Seekable transcoding keeps a duration-aware production margin instead of
 running at exactly real time. The initial HLS buffer defaults to 12 seconds, and
@@ -379,11 +575,12 @@ lower practical ceiling than the persisted media quota. Advanced operators who
 replace the workspace or resource declarations should do so in a private
 Compose override and keep host capacity consistent with the requested quota.
 
-Administration Activity reports bounded selected-encoder, pool, quota, and job
-diagnostics. It never returns command output, source URLs, tokens, provider
-credentials, or private provider details. Fixed safety limits are not exposed as
-environment settings; diagnose capacity, storage, source, or processing failures
-instead of making those guardrails configurable.
+Administration Activity reports bounded selected-encoder, target codec, quality,
+encode/decode capability, pool, quota, pipeline, and job diagnostics. It never
+returns a complete argv, command output, source URL, header, token, provider
+credential, or private provider detail. Fixed safety limits are not exposed as
+environment settings; diagnose capability, capacity, storage, source, or
+processing failures instead of making those guardrails configurable.
 
 ## Jellyfin-compatible client access
 
@@ -433,7 +630,15 @@ RIVUNE_TEST_EXTERNAL_MEDIA=1 go test ./internal/jellyfin \
   -run '^TestPlaybackGatewayReadsPlaylistAndChildBytesAndRejectsOutOfOrderChild$' -count=1
 ```
 
-The first command covers generated MP4/MKV, direct ranges, TS/fMP4 HLS remux/transcode, overlapping AAC track selection, synthetic 5.1 AAC downmix to decoded stereo, UTF-8 subtitle conversion/seek, embedded ASS burn-in verified on a decoded frame, and HLS child delivery. The second generates a one-second H.264/AAC MPEG-TS child and exercises the Jellyfin adapter gateway. A skip is not a pass: record it as `ABSENT` when FFmpeg is unavailable. Dolby Vision, HDR pixels, bitmap subtitles, DTS bytes, and named-client rendering are not supplied by these tests.
+The first command covers generated MP4/MKV/WebM/AVI/MPEG-PS inputs, direct
+ranges, TS/fMP4 HLS remux/transcode, H.264/HEVC/AV1 outputs, a real 4K-to-1080p
+scale, HDR10-to-SDR tone mapping with decoded colorimetry, overlapping AAC track
+selection, 5.1 downmix, AC-3/E-AC-3/TrueHD/DTS/FLAC/Opus conversion, UTF-8
+subtitle seek, embedded ASS burn-in, and HLS child delivery. The second generates
+a one-second H.264/AAC MPEG-TS child and exercises the Jellyfin adapter gateway.
+A skip is not a pass: record it as `ABSENT` when FFmpeg is unavailable. Dolby
+Vision, generated HLG pixels, bitmap-subtitle bytes, and named-client rendering
+are not supplied by these tests.
 
 Targeted microbenchmarks are deliberately finite and carry no release budget:
 

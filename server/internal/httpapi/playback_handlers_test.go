@@ -191,7 +191,11 @@ func TestPlaybackActivityIncludesArtworkAndCanonicalProviderIDs(t *testing.T) {
 			ActiveSessions: 1, ActiveJobs: 0, ProcessingSlots: 0, ProcessingLimit: 2,
 			StorageBytes: 0, StorageLimitBytes: 1 << 30,
 		},
-		Diagnostics: playback.MediaDiagnostics{FFmpegVersion: "7.1", FFprobeVersion: "7.1", HardwareAcceleration: "software", VideoEncoder: "h264", HardwareToneMap: false, ToneMapBackend: "software", TranscodeThreads: 4, MaximumReadRate: 1.5},
+		Diagnostics: playback.MediaDiagnostics{
+			FFmpegVersion: "7.1", FFprobeVersion: "7.1", HardwareAcceleration: "software", VideoEncoder: "h264",
+			PreferredVideoCodec: "auto", EncodeCodecs: []string{"h264"}, DecodeCodecs: []string{"h264", "hevc", "av1"}, QualityPreset: "balanced",
+			HardwareToneMap: false, ToneMapBackend: "software", TranscodeThreads: 4, MaximumReadRate: 1.5,
+		},
 		Sessions: []playback.ActivitySession{{
 			ID: "11111111-1111-4111-8111-111111111111", TitleID: "episode-1",
 			ArtworkURL: "https://images.example.test/episode-still.jpg",

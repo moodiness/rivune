@@ -23,42 +23,47 @@ func applyPlaybackPreferences(sources []Source, assets []storedAsset, input Reso
 		if assetIndex < 0 {
 			return nil
 		}
-		track, explicit := preferredAudioTrack(source.Media.AudioTracks, input.PreferredAudioTrack, input.PreferredAudioLanguage)
+		inspection := *source.Media
+		track, explicit := preferredAudioTrack(inspection.AudioTracks, input.PreferredAudioTrack, input.PreferredAudioLanguage)
 		if explicit && track == nil {
 			return ErrInvalidInput
 		}
 		if track == nil {
 			return nil
 		}
-		primary := primaryTrack(source.Media.AudioTracks)
-		video := primaryTrack(source.Media.VideoTracks)
+		primary := primaryTrack(inspection.AudioTracks)
+		video := primaryTrack(inspection.VideoTracks)
 		trackCopySupported := video != nil && mp4RemuxableAudio(track.Codec) &&
 			audioWithinClientLimits(track, input.Capabilities) &&
 			processingMediaProfileSupported("mp4", video, track, input.Capabilities)
 		requiresTrackSwitch := primary != nil && primary.Index != track.Index
 
 		if source.Mode == processingRemux && !trackCopySupported && !explicit && video != nil {
-			if compatible := compatibleRemuxAudioTrack(*video, source.Media.AudioTracks, input.Capabilities); compatible != nil {
+			if compatible := compatibleRemuxAudioTrack(*video, inspection.AudioTracks, input.Capabilities); compatible != nil {
 				track = compatible
 				trackCopySupported = true
+				requiresTrackSwitch = primary != nil && primary.Index != track.Index
 			}
 		}
+		selectedInspection := inspectionWithSelectedAudio(inspection, track)
+		reasons := selectedAudioDecisionReasons(source.Decision, selectedInspection, input.Capabilities)
 		if source.Mode == "direct" && requiresTrackSwitch && trackCopySupported &&
 			requestedProcessingMode(input.Capabilities.ProcessingModes, processingRemux) && processingOutputSupported(input.Capabilities) {
-			decision := processingDecision(decisionRemuxRequired, "copy", "copy", *source.Media, input.Capabilities, false)
-			applyPlaybackDecision(sources, assets, sourceCandidate{sourceIndex: sourceIndex, assetIndex: assetIndex}, *source.Media, processingRemux, decision, input.Capabilities)
+			decision := processingDecisionWithReasons(decisionRemuxRequired, reasons, "copy", "copy", selectedInspection, input.Capabilities, false)
+			applyPlaybackDecision(sources, assets, sourceCandidate{sourceIndex: sourceIndex, assetIndex: assetIndex}, inspection, processingRemux, decision, input.Capabilities)
 			source = &sources[sourceIndex]
 		} else if (source.Mode == "direct" && requiresTrackSwitch || source.Mode == processingRemux) && !trackCopySupported {
 			mode := ""
 			var decision *PlaybackDecision
 			switch {
-			case audioTranscodeSupported(*source.Media, input.Capabilities):
+			case audioTranscodeSupported(selectedInspection, input.Capabilities):
 				mode = processingTranscodeAudio
-				decision = processingDecision(decisionAudioTranscodeRequired, "copy", "transcode", *source.Media, input.Capabilities, false)
+				decision = processingDecisionWithReasons(decisionAudioTranscodeRequired, reasons, "copy", "transcode", selectedInspection, input.Capabilities, false)
 			case fullTranscodeSupported(input.Capabilities):
 				mode = processingTranscode
-				toneMap := videoNeedsToneMapping(*source.Media, input.Capabilities)
-				decision = processingDecision(decisionVideoTranscodeRequired, "transcode", "transcode", *source.Media, input.Capabilities, toneMap)
+				targetAudio := &MediaTrack{Codec: "aac", Channels: targetAudioChannels(input.Capabilities)}
+				toneMap := videoTranscodeNeedsToneMapping(selectedInspection, input.Capabilities, targetAudio)
+				decision = processingDecisionWithReasons(decisionVideoTranscodeRequired, reasons, "transcode", "transcode", selectedInspection, input.Capabilities, toneMap)
 			default:
 				if !input.AllowTranscoding {
 					return ErrTranscodingDisabled
@@ -68,18 +73,67 @@ func applyPlaybackPreferences(sources []Source, assets []storedAsset, input Reso
 			if !input.AllowTranscoding {
 				return ErrTranscodingDisabled
 			}
-			if decision != nil && decision.ToneMapping && !genericToneMappingSupported(*source.Media) {
+			if decision != nil && decision.ToneMapping && !genericToneMappingSupported(selectedInspection) {
 				return ErrUnsupportedSource
 			}
-			applyPlaybackDecision(sources, assets, sourceCandidate{sourceIndex: sourceIndex, assetIndex: assetIndex}, *source.Media, mode, decision, input.Capabilities)
+			applyPlaybackDecision(sources, assets, sourceCandidate{sourceIndex: sourceIndex, assetIndex: assetIndex}, inspection, mode, decision, input.Capabilities)
+			source = &sources[sourceIndex]
 		} else if source.Mode == "direct" && requiresTrackSwitch {
 			return ErrClientCapabilityMissing
 		}
 		index := track.Index
 		assets[assetIndex].AudioTrackIndex = &index
+		refreshSelectedAudioDecision(source, &assets[assetIndex], selectedInspection, input.Capabilities)
 		return nil
 	}
 	return nil
+}
+
+func selectedAudioDecisionReasons(decision *PlaybackDecision, inspection MediaInspection, capabilities Capabilities) []string {
+	var existing []string
+	if decision != nil {
+		existing = decision.Reasons
+	}
+	reasons := make([]string, 0, len(existing)+1)
+	for _, reason := range existing {
+		if reason != reasonAudioCodecNotSupported && !supports(reasons, reason) {
+			reasons = append(reasons, reason)
+		}
+	}
+	if !selectedAudioDirectlySupported(inspection, capabilities) {
+		reasons = append(reasons, reasonAudioCodecNotSupported)
+	}
+	return reasons
+}
+
+func selectedAudioDirectlySupported(inspection MediaInspection, capabilities Capabilities) bool {
+	audio := primaryTrack(inspection.AudioTracks)
+	if audio == nil {
+		return true
+	}
+	if len(capabilities.MediaProfiles) == 0 {
+		return audioWithinClientLimits(audio, capabilities)
+	}
+	_, _, audioSupported := directProfileCompatibility(inspection.Container, primaryTrack(inspection.VideoTracks), audio, capabilities)
+	return audioSupported
+}
+
+func refreshSelectedAudioDecision(source *Source, asset *storedAsset, inspection MediaInspection, capabilities Capabilities) {
+	if source == nil || asset == nil || source.Decision == nil {
+		return
+	}
+	decision := clonePlaybackDecision(source.Decision)
+	decision.Reasons = selectedAudioDecisionReasons(decision, inspection, capabilities)
+	decision.Source = decisionSource(inspection)
+	if decision.Target != nil && decision.AudioAction == "copy" {
+		if audio := primaryTrack(inspection.AudioTracks); audio != nil {
+			decision.Target.AudioCodec = normalizedCodec(audio.Codec)
+		} else {
+			decision.Target.AudioCodec = ""
+		}
+	}
+	source.Decision = decision
+	asset.Decision = clonePlaybackDecision(decision)
 }
 
 func preferredAudioTrack(tracks []MediaTrack, explicitIndex *int, language string) (*MediaTrack, bool) {
@@ -192,7 +246,8 @@ func applySubtitleDecision(sources []Source, streamAssets []storedAsset, subtitl
 	if !allowTranscoding {
 		return ErrTranscodingDisabled
 	}
-	if !requestedProcessingMode(capabilities.SubtitleModes, "burn") || !fullTranscodeSupported(capabilities) {
+	if !requestedProcessingMode(capabilities.SubtitleModes, "burn") ||
+		!requestedProcessingMode(capabilities.ProcessingModes, processingTranscode) || !processingOutputSupported(capabilities) {
 		return ErrClientCapabilityMissing
 	}
 	subtitleAssetIndex := storedAssetIndex(subtitleAssets, selected.ID)
@@ -208,12 +263,57 @@ func applySubtitleDecision(sources []Source, streamAssets []storedAsset, subtitl
 		if assetIndex < 0 {
 			continue
 		}
-		toneMap := videoNeedsToneMapping(*source.Media, capabilities)
-		if toneMap && !genericToneMappingSupported(*source.Media) {
+		audio := selectedInspectionAudioTrack(*source.Media, streamAssets[assetIndex].AudioTrackIndex)
+		decisionInspection := inspectionWithSelectedAudio(*source.Media, audio)
+		audioAction := "transcode"
+		targetAudio := &MediaTrack{Codec: "aac", Channels: targetAudioChannels(capabilities)}
+		targetCodec, targetBitDepth := "", 0
+		if audio == nil {
+			audioAction = "copy"
+			targetAudio = nil
+		} else if subtitleBurnAudioCopySupported(audio, capabilities) {
+			if codec, bitDepth := selectedTranscodeVideoTarget(capabilities, decisionInspection, audio); codec != "" {
+				audioAction = "copy"
+				targetAudio = audio
+				targetCodec, targetBitDepth = codec, bitDepth
+			}
+		}
+		if targetCodec == "" {
+			targetCodec, targetBitDepth = selectedTranscodeVideoTarget(capabilities, decisionInspection, targetAudio)
+		}
+		if targetCodec == "" {
+			return ErrClientCapabilityMissing
+		}
+		// Subtitle composition runs on CPU frames and has no probed Main 10 filter path.
+		targetBitDepth = 8
+		toneMap := videoTranscodeNeedsToneMapping(decisionInspection, capabilities, targetAudio)
+		hdrFormat := strings.TrimSpace(decisionInspection.HDRFormat)
+		if hdrFormat != "" && !strings.EqualFold(hdrFormat, "sdr") {
+			toneMap = true
+		}
+		if toneMap && !genericToneMappingSupported(decisionInspection) {
 			return ErrUnsupportedSource
 		}
-		decision := processingDecision(decisionSubtitleBurnRequired, "transcode", "transcode", *source.Media, capabilities, toneMap)
+		reasons := directIncompatibilityReasons(*source, decisionInspection, capabilities)
+		decision := processingDecisionWithReasons(decisionSubtitleBurnRequired, reasons, "transcode", audioAction, decisionInspection, capabilities, toneMap)
+		if decision.Target == nil {
+			return ErrClientCapabilityMissing
+		}
+		decision.Target.VideoCodec = targetCodec
+		decision.Target.VideoBitDepth = targetBitDepth
+		if source.Decision != nil {
+			for _, reason := range source.Decision.Reasons {
+				if reason != reasonAudioCodecNotSupported {
+					appendDecisionReason(decision, reason)
+				}
+			}
+		}
+		appendDecisionReason(decision, decisionSubtitleBurnRequired)
 		decision.SubtitleAction = "burn"
+		decision.Pipeline = plannedPlaybackPipeline(decisionInspection, capabilities, decision.Target, toneMap, true)
+		if audioAction == "copy" && audio != nil {
+			decision.Target.AudioCodec = normalizedCodec(audio.Codec)
+		}
 		candidate := sourceCandidate{sourceIndex: sourceIndex, assetIndex: assetIndex}
 		applyPlaybackDecision(sources, streamAssets, candidate, *source.Media, processingTranscode, decision, capabilities)
 		index := *subtitleAssets[subtitleAssetIndex].SubtitleTrackIndex
@@ -223,6 +323,47 @@ func applySubtitleDecision(sources []Source, streamAssets []storedAsset, subtitl
 		return nil
 	}
 	return ErrNoPlayableSource
+}
+
+func selectedInspectionAudioTrack(inspection MediaInspection, selectedIndex *int) *MediaTrack {
+	if selectedIndex != nil {
+		for index := range inspection.AudioTracks {
+			if inspection.AudioTracks[index].Index == *selectedIndex {
+				return &inspection.AudioTracks[index]
+			}
+		}
+	}
+	return primaryTrack(inspection.AudioTracks)
+}
+
+func inspectionWithSelectedAudio(inspection MediaInspection, audio *MediaTrack) MediaInspection {
+	selected := cloneMediaInspection(inspection)
+	if audio == nil {
+		selected.AudioTracks = nil
+	} else {
+		selected.AudioTracks = []MediaTrack{*audio}
+	}
+	return selected
+}
+
+func subtitleBurnAudioCopySupported(audio *MediaTrack, capabilities Capabilities) bool {
+	if audio == nil || !hlsSegmentAudioCopySupported(audio.Codec, capabilities.HLSSegmentContainer) ||
+		capabilities.MaximumAudioChannels > 0 && (audio.Channels <= 0 || audio.Channels > capabilities.MaximumAudioChannels) {
+		return false
+	}
+	return len(capabilities.MediaProfiles) > 0 || supportsCodec(capabilities.AudioCodecs, audio.Codec)
+}
+
+func hlsSegmentAudioCopySupported(codec, segmentContainer string) bool {
+	if normalizedHLSSegmentContainer(segmentContainer) == "mp4" {
+		return mp4RemuxableAudio(codec)
+	}
+	switch normalizedCodec(codec) {
+	case "aac", "ac3", "eac3", "mp3":
+		return true
+	default:
+		return false
+	}
 }
 
 // Generic FFmpeg tone mapping can consume HDR10/HLG. Dolby Vision is different:

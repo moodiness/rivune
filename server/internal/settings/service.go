@@ -20,11 +20,16 @@ import (
 )
 
 const (
-	schemaVersion                          = 2
+	schemaVersion                          = 3
 	profileSchemaVersion                   = 1
 	DefaultAllowTranscoding                = true
 	DefaultTimezone                        = "UTC"
 	DefaultHardwareAcceleration            = "auto"
+	DefaultPreferredTranscodeVideoCodec    = "auto"
+	DefaultTranscodeQualityPreset          = "balanced"
+	DefaultTranscodeConcurrency            = 4
+	MinimumTranscodeConcurrency            = 1
+	MaximumTranscodeConcurrency            = 32
 	DefaultTranscodeMaxBitrateKbps         = 12000
 	MinimumTranscodeMaxBitrateKbps         = 64
 	MaximumTranscodeMaxBitrateKbps         = 200000
@@ -102,6 +107,9 @@ type Patch struct {
 	Timezone                         OptionalString
 	JellyfinDebug                    OptionalBool
 	HardwareAcceleration             OptionalString
+	PreferredTranscodeVideoCodec     OptionalString
+	TranscodeQualityPreset           OptionalString
+	TranscodeConcurrency             OptionalInt
 	TranscodeMaxBitrateKbps          OptionalInt
 	MediaMaxStorageMB                OptionalInt
 	ArtworkMaxStorageMB              OptionalInt
@@ -139,6 +147,9 @@ type Values struct {
 	Timezone                         *string          `json:"timezone,omitempty"`
 	JellyfinDebug                    *bool            `json:"jellyfinDebug,omitempty"`
 	HardwareAcceleration             *string          `json:"hardwareAcceleration,omitempty"`
+	PreferredTranscodeVideoCodec     *string          `json:"preferredTranscodeVideoCodec,omitempty"`
+	TranscodeQualityPreset           *string          `json:"transcodeQualityPreset,omitempty"`
+	TranscodeConcurrency             *int             `json:"transcodeConcurrency,omitempty"`
 	TranscodeMaxBitrateKbps          *int             `json:"transcodeMaxBitrateKbps,omitempty"`
 	MediaMaxStorageMB                *int             `json:"mediaMaxStorageMB,omitempty"`
 	ArtworkMaxStorageMB              *int             `json:"artworkMaxStorageMB,omitempty"`
@@ -606,7 +617,7 @@ func defaultEffective() Effective {
 }
 
 func validatePatch(patch Patch) error {
-	if !patch.InterfaceLanguage.Set && !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.MaximumCastMembers.Set && !patch.MaximumDirectTitles.Set && !patch.PreferDirectPlay.Set && !patch.AllowTranscoding.Set && !patch.JellyfinEnabled.Set && !patch.Timezone.Set && !patch.JellyfinDebug.Set && !patch.HardwareAcceleration.Set && !patch.TranscodeMaxBitrateKbps.Set && !patch.MediaMaxStorageMB.Set && !patch.ArtworkMaxStorageMB.Set && !patch.Transcoding.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
+	if !patch.InterfaceLanguage.Set && !patch.Theme.Set && !patch.MaximumResolution.Set && !patch.MaximumCastMembers.Set && !patch.MaximumDirectTitles.Set && !patch.PreferDirectPlay.Set && !patch.AllowTranscoding.Set && !patch.JellyfinEnabled.Set && !patch.Timezone.Set && !patch.JellyfinDebug.Set && !patch.HardwareAcceleration.Set && !patch.PreferredTranscodeVideoCodec.Set && !patch.TranscodeQualityPreset.Set && !patch.TranscodeConcurrency.Set && !patch.TranscodeMaxBitrateKbps.Set && !patch.MediaMaxStorageMB.Set && !patch.ArtworkMaxStorageMB.Set && !patch.Transcoding.Set && !patch.HideUnreleased.Set && !patch.MetadataLanguage.Set && !patch.MetadataRegion.Set && !patch.SeriesMappingProvider.Set && !patch.AudioLanguage.Set && !patch.SubtitleLanguage.Set && !patch.ForcedSubtitleLanguage.Set &&
 		!patch.AutoplayNextEpisode.Set && !patch.SkipIntroEnabled.Set && !patch.SkipRecapEnabled.Set && !patch.SkipOutroEnabled.Set &&
 		!patch.CardDensity.Set && !patch.AnimationsEnabled.Set && !patch.SubtitleSizePercent.Set && !patch.SubtitleTextColor.Set && !patch.SubtitleBackgroundOpacityPercent.Set &&
 		!patch.NotificationsEnabled.Set && !patch.NotificationDurationSeconds.Set && !patch.NotificationPollIntervalSeconds.Set {
@@ -645,10 +656,27 @@ func validatePatch(patch Patch) error {
 	}
 	if value := patch.HardwareAcceleration.Value; patch.HardwareAcceleration.Set && value != nil {
 		switch *value {
-		case "auto", "software", "hybrid", "vaapi", "qsv", "nvenc":
+		case "auto", "software", "hybrid", "vaapi", "qsv", "nvenc", "amf":
 		default:
-			return fmt.Errorf("%w: hardwareAcceleration must be auto, software, hybrid, vaapi, qsv, or nvenc", ErrInvalidInput)
+			return fmt.Errorf("%w: hardwareAcceleration must be auto, software, hybrid, vaapi, qsv, nvenc, or amf", ErrInvalidInput)
 		}
+	}
+	if value := patch.PreferredTranscodeVideoCodec.Value; patch.PreferredTranscodeVideoCodec.Set && value != nil {
+		switch *value {
+		case "auto", "h264", "hevc", "av1":
+		default:
+			return fmt.Errorf("%w: preferredTranscodeVideoCodec must be auto, h264, hevc, or av1", ErrInvalidInput)
+		}
+	}
+	if value := patch.TranscodeQualityPreset.Value; patch.TranscodeQualityPreset.Set && value != nil {
+		switch *value {
+		case "speed", "balanced", "quality":
+		default:
+			return fmt.Errorf("%w: transcodeQualityPreset must be speed, balanced, or quality", ErrInvalidInput)
+		}
+	}
+	if err := validateIntRange("transcodeConcurrency", patch.TranscodeConcurrency, MinimumTranscodeConcurrency, MaximumTranscodeConcurrency); err != nil {
+		return err
 	}
 	if err := validateIntRange("transcodeMaxBitrateKbps", patch.TranscodeMaxBitrateKbps, MinimumTranscodeMaxBitrateKbps, MaximumTranscodeMaxBitrateKbps); err != nil {
 		return err
@@ -717,13 +745,16 @@ func validateInstancePatch(patch Patch) error {
 		return err
 	}
 	for name, valueSet := range map[string]bool{
-		"jellyfinEnabled":         patch.JellyfinEnabled.Set && patch.JellyfinEnabled.Value == nil,
-		"timezone":                patch.Timezone.Set && patch.Timezone.Value == nil,
-		"jellyfinDebug":           patch.JellyfinDebug.Set && patch.JellyfinDebug.Value == nil,
-		"hardwareAcceleration":    patch.HardwareAcceleration.Set && patch.HardwareAcceleration.Value == nil,
-		"transcodeMaxBitrateKbps": patch.TranscodeMaxBitrateKbps.Set && patch.TranscodeMaxBitrateKbps.Value == nil,
-		"mediaMaxStorageMB":       patch.MediaMaxStorageMB.Set && patch.MediaMaxStorageMB.Value == nil,
-		"artworkMaxStorageMB":     patch.ArtworkMaxStorageMB.Set && patch.ArtworkMaxStorageMB.Value == nil,
+		"jellyfinEnabled":              patch.JellyfinEnabled.Set && patch.JellyfinEnabled.Value == nil,
+		"timezone":                     patch.Timezone.Set && patch.Timezone.Value == nil,
+		"jellyfinDebug":                patch.JellyfinDebug.Set && patch.JellyfinDebug.Value == nil,
+		"hardwareAcceleration":         patch.HardwareAcceleration.Set && patch.HardwareAcceleration.Value == nil,
+		"preferredTranscodeVideoCodec": patch.PreferredTranscodeVideoCodec.Set && patch.PreferredTranscodeVideoCodec.Value == nil,
+		"transcodeQualityPreset":       patch.TranscodeQualityPreset.Set && patch.TranscodeQualityPreset.Value == nil,
+		"transcodeConcurrency":         patch.TranscodeConcurrency.Set && patch.TranscodeConcurrency.Value == nil,
+		"transcodeMaxBitrateKbps":      patch.TranscodeMaxBitrateKbps.Set && patch.TranscodeMaxBitrateKbps.Value == nil,
+		"mediaMaxStorageMB":            patch.MediaMaxStorageMB.Set && patch.MediaMaxStorageMB.Value == nil,
+		"artworkMaxStorageMB":          patch.ArtworkMaxStorageMB.Set && patch.ArtworkMaxStorageMB.Value == nil,
 	} {
 		if valueSet {
 			return fmt.Errorf("%w: %s must not be null", ErrInvalidInput, name)
@@ -740,6 +771,18 @@ func materializeInstanceValues(values Values) Values {
 		value := DefaultAllowTranscoding
 		values.AllowTranscoding = &value
 	}
+	if values.PreferredTranscodeVideoCodec == nil {
+		value := DefaultPreferredTranscodeVideoCodec
+		values.PreferredTranscodeVideoCodec = &value
+	}
+	if values.TranscodeQualityPreset == nil {
+		value := DefaultTranscodeQualityPreset
+		values.TranscodeQualityPreset = &value
+	}
+	if values.TranscodeConcurrency == nil {
+		value := DefaultTranscodeConcurrency
+		values.TranscodeConcurrency = &value
+	}
 	return values
 }
 func validateProfilePatch(patch Patch) error {
@@ -752,7 +795,7 @@ func validateProfilePatch(patch Patch) error {
 	if patch.JellyfinEnabled.Set {
 		return fmt.Errorf("%w: jellyfinEnabled is only valid for instance settings", ErrInvalidInput)
 	}
-	if patch.Timezone.Set || patch.JellyfinDebug.Set || patch.HardwareAcceleration.Set || patch.TranscodeMaxBitrateKbps.Set || patch.MediaMaxStorageMB.Set || patch.ArtworkMaxStorageMB.Set {
+	if patch.Timezone.Set || patch.JellyfinDebug.Set || patch.HardwareAcceleration.Set || patch.PreferredTranscodeVideoCodec.Set || patch.TranscodeQualityPreset.Set || patch.TranscodeConcurrency.Set || patch.TranscodeMaxBitrateKbps.Set || patch.MediaMaxStorageMB.Set || patch.ArtworkMaxStorageMB.Set {
 		return fmt.Errorf("%w: runtime settings are only valid for instance settings", ErrInvalidInput)
 	}
 	if patch.NotificationsEnabled.Set || patch.NotificationDurationSeconds.Set || patch.NotificationPollIntervalSeconds.Set {
@@ -847,6 +890,15 @@ func applyPatch(values Values, patch Patch) Values {
 	}
 	if patch.HardwareAcceleration.Set {
 		values.HardwareAcceleration = patch.HardwareAcceleration.Value
+	}
+	if patch.PreferredTranscodeVideoCodec.Set {
+		values.PreferredTranscodeVideoCodec = patch.PreferredTranscodeVideoCodec.Value
+	}
+	if patch.TranscodeQualityPreset.Set {
+		values.TranscodeQualityPreset = patch.TranscodeQualityPreset.Value
+	}
+	if patch.TranscodeConcurrency.Set {
+		values.TranscodeConcurrency = patch.TranscodeConcurrency.Value
 	}
 	if patch.TranscodeMaxBitrateKbps.Set {
 		values.TranscodeMaxBitrateKbps = patch.TranscodeMaxBitrateKbps.Value

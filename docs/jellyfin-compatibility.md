@@ -81,15 +81,18 @@ The statuses below apply only to the named evidence. **PASSED** means that the s
 | Container | Matroska/MKV | PASSED | Generated MKV with two AAC tracks; remux and transcodes exercised. |
 | Container | MPEG-TS HLS | PASSED | Generated TS child validated by sync byte, then served locally. |
 | Container | fMP4 HLS | PASSED | Transcoded playlist and fMP4 child, then probed. |
-| Container | WebM, AVI, MPEG-PS | ABSENT | No fixture bytes or acceptable smoke test. |
+| Container | WebM, AVI, MPEG-PS | PASSED | Synthetic VP9/Opus, MPEG-4/PCM, and MPEG-2/MP2 inputs are probed, transcoded to H.264/AAC HLS, and probed again by `TestExternalMediaTranscodesWebMAVIMPEGPSIntoPlayableHLS`. |
 | Video | H.264 | PASSED | Real lavfi encoding, playlist demux/probe, and decoding of one frame to verify ASS burn-in. |
-| Video | HEVC/H.265 | DECISION ONLY | Level/range conditions tested without a binary fixture. |
-| Video | VP9, AV1 | DECISION ONLY | Planner choices tested; no media generated/decoded in this evidence set. |
+| Video | HEVC/H.265 | PASSED | A synthetic Main 10 HDR10 HEVC input is tone-mapped and frame-decoded; a separate HEVC rendition is encoded to fMP4 HLS and probed with the required `hvc1` sample entry. |
+| Video | VP9 | PASSED | A synthetic VP9/Opus WebM input is probed and transcoded to playable H.264/AAC HLS. |
+| Video | AV1 | PASSED output | A synthetic source is encoded to AV1 fMP4 HLS and probed with an `av01` sample entry; generated AV1 input decode remains unverified. |
+| Resolution | 3840×2160 source | PASSED | A synthetic 4K MPEG-4 source is probed, transcoded through the real pipeline, and probed again as 1920×1080 H.264 HLS. |
 | Audio | AAC mono/stereo/multi-track/5.1 | PASSED | Two synthetic tracks verify selection and frequency content; synthetic 5.1 AAC is transcoded and decoded as stereo. |
-| Audio | DTS | DECISION ONLY | Triggers `transcode_audio`/`transcode` in planner tests; no DTS bytes. |
-| Audio | AC-3/E-AC-3, TrueHD, Opus, FLAC | ABSENT | No fixture bytes or decoding/transcoding assertion. |
+| Audio | DTS | PASSED | A synthetic DCA/DTS stream is probed and transcoded to playable AAC while video remains packet-copy. |
+| Audio | AC-3/E-AC-3, TrueHD, Opus, FLAC | PASSED | Each synthetic codec is probed and transcoded to playable AAC by `TestExternalMediaTranscodesCommonTheaterAudioCodecsToAAC`. |
 | HDR | Path without HDR metadata | PASSED | Synthetic `yuv420p` fixture without HDR signaling; color primaries, matrix, and transfer not probed. |
-| HDR | HDR10, HLG | DECISION ONLY | Unit metadata/conditions, without HDR pixels. |
+| HDR | HDR10 | PASSED metadata path | A synthetic 10-bit input carrying BT.2020/PQ metadata is software tone-mapped; output is probed for BT.709 colorimetry and one decoded frame is checked for the expected dimensions and byte length, not reference color accuracy. |
+| HDR | HLG | DECISION ONLY | Unit metadata and planner conditions exist, without generated HLG pixels. |
 | HDR | Dolby Vision | ABSENT | No authorized media or playback/tone-map evidence. |
 | Subtitles | External WebVTT | PASSED | Synthetic assets verified by hash and local delivery tested. |
 | Subtitles | SRT/ASS to WebVTT | PASSED | Local synthetic text files; optional FFmpeg conversion. |

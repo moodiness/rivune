@@ -57,6 +57,7 @@ func (s *Service) ImportLegacyEnvironment(ctx context.Context, legacy LegacyEnvi
 	if err != nil {
 		return false, fmt.Errorf("load settings for legacy environment import: %w", err)
 	}
+	current.Values = materializeInstanceValues(current.Values)
 	changed := make([]string, 0, 16)
 	applyString := func(name string, source *string, target **string) {
 		if source != nil && !legacyKeySet[name] {
@@ -169,13 +170,20 @@ func (s *Service) ImportLegacyEnvironment(ctx context.Context, legacy LegacyEnvi
 }
 
 func validateMaterializedRuntimeValues(values Values) error {
-	if values.Timezone == nil || values.JellyfinEnabled == nil || values.JellyfinDebug == nil || values.HardwareAcceleration == nil || values.TranscodeMaxBitrateKbps == nil || values.MediaMaxStorageMB == nil || values.ArtworkMaxStorageMB == nil || values.AllowTranscoding == nil {
-		return errors.New("instance settings schema v2 runtime values are incomplete")
+	if values.Timezone == nil || values.JellyfinEnabled == nil || values.JellyfinDebug == nil ||
+		values.HardwareAcceleration == nil || values.PreferredTranscodeVideoCodec == nil ||
+		values.TranscodeQualityPreset == nil || values.TranscodeConcurrency == nil ||
+		values.TranscodeMaxBitrateKbps == nil || values.MediaMaxStorageMB == nil ||
+		values.ArtworkMaxStorageMB == nil || values.AllowTranscoding == nil {
+		return errors.New("instance settings schema v3 runtime values are incomplete")
 	}
 	patch := Patch{
 		Timezone: OptionalString{Set: true, Value: values.Timezone}, JellyfinEnabled: OptionalBool{Set: true, Value: values.JellyfinEnabled},
 		JellyfinDebug: OptionalBool{Set: true, Value: values.JellyfinDebug}, HardwareAcceleration: OptionalString{Set: true, Value: values.HardwareAcceleration},
-		TranscodeMaxBitrateKbps: OptionalInt{Set: true, Value: values.TranscodeMaxBitrateKbps}, MediaMaxStorageMB: OptionalInt{Set: true, Value: values.MediaMaxStorageMB},
+		PreferredTranscodeVideoCodec: OptionalString{Set: true, Value: values.PreferredTranscodeVideoCodec},
+		TranscodeQualityPreset:       OptionalString{Set: true, Value: values.TranscodeQualityPreset},
+		TranscodeConcurrency:         OptionalInt{Set: true, Value: values.TranscodeConcurrency},
+		TranscodeMaxBitrateKbps:      OptionalInt{Set: true, Value: values.TranscodeMaxBitrateKbps}, MediaMaxStorageMB: OptionalInt{Set: true, Value: values.MediaMaxStorageMB},
 		ArtworkMaxStorageMB: OptionalInt{Set: true, Value: values.ArtworkMaxStorageMB}, AllowTranscoding: OptionalBool{Set: true, Value: values.AllowTranscoding},
 	}
 	return validateInstancePatch(patch)

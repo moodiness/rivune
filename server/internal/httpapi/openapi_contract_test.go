@@ -445,15 +445,19 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		timezone := settings.DefaultTimezone
 		jellyfinDebug := false
 		hardwareAcceleration := settings.DefaultHardwareAcceleration
+		preferredTranscodeVideoCodec := settings.DefaultPreferredTranscodeVideoCodec
+		transcodeQualityPreset := settings.DefaultTranscodeQualityPreset
+		transcodeConcurrency := settings.DefaultTranscodeConcurrency
 		transcodeMaxBitrateKbps := settings.DefaultTranscodeMaxBitrateKbps
 		mediaMaxStorageMB := settings.DefaultMediaMaxStorageMB
 		artworkMaxStorageMB := settings.DefaultArtworkMaxStorageMB
 		settingService := &fakeSettingsService{
 			instance: settings.Layer{
-				SchemaVersion: 2,
+				SchemaVersion: 3,
 				Values: settings.Values{
 					AllowTranscoding: &instanceAllowed, JellyfinEnabled: &jellyfinEnabled,
 					Timezone: &timezone, JellyfinDebug: &jellyfinDebug, HardwareAcceleration: &hardwareAcceleration,
+					PreferredTranscodeVideoCodec: &preferredTranscodeVideoCodec, TranscodeQualityPreset: &transcodeQualityPreset, TranscodeConcurrency: &transcodeConcurrency,
 					TranscodeMaxBitrateKbps: &transcodeMaxBitrateKbps, MediaMaxStorageMB: &mediaMaxStorageMB, ArtworkMaxStorageMB: &artworkMaxStorageMB,
 				},
 			},
@@ -500,6 +504,13 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"allowTranscoding":"false"}`, false)
 		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"jellyfinEnabled":true}`, true)
 		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"jellyfinEnabled":null}`, false)
+		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"preferredTranscodeVideoCodec":"av1","transcodeQualityPreset":"quality","transcodeConcurrency":32}`, true)
+		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"preferredTranscodeVideoCodec":null}`, false)
+		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"preferredTranscodeVideoCodec":"vp9"}`, false)
+		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"transcodeQualityPreset":"ultrafast"}`, false)
+		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"transcodeConcurrency":0}`, false)
+		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"transcodeConcurrency":33}`, false)
+		validateContractRequestBody(t, document, http.MethodPatch, "/api/v1/settings", `{"hardwareAcceleration":"amf"}`, true)
 		instancePatch := authenticatedContractRequest(http.MethodPatch, "/api/v1/settings", bytes.NewBufferString(`{"allowTranscoding":false}`))
 		instancePatch.Header.Set("Content-Type", "application/json")
 		instancePatchResponse := serveContractRequest(t, api, instancePatch, http.StatusOK)
@@ -513,6 +524,9 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		validateContractRequestBody(t, document, http.MethodPatch, profilePath, `{"transcoding":null}`, true)
 		validateContractRequestBody(t, document, http.MethodPatch, profilePath, `{"transcoding":"future"}`, false)
 		validateContractRequestBody(t, document, http.MethodPatch, profilePath, `{"jellyfinEnabled":true}`, false)
+		validateContractRequestBody(t, document, http.MethodPatch, profilePath, `{"preferredTranscodeVideoCodec":"av1"}`, false)
+		validateContractRequestBody(t, document, http.MethodPatch, profilePath, `{"transcodeQualityPreset":"quality"}`, false)
+		validateContractRequestBody(t, document, http.MethodPatch, profilePath, `{"transcodeConcurrency":8}`, false)
 		profilePatch := authenticatedContractRequest(http.MethodPatch, profilePath, bytes.NewBufferString(`{"transcoding":"enabled"}`))
 		profilePatch.Header.Set("Content-Type", "application/json")
 		profilePatchResponse := serveContractRequest(t, api, profilePatch, http.StatusOK)
@@ -570,7 +584,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 					ActiveSessions: 1, ActiveJobs: 1, ProcessingSlots: 1, ProcessingLimit: 2,
 					StorageBytes: 4096, StorageLimitBytes: 1024 * 1024,
 				},
-				Diagnostics: playback.MediaDiagnostics{FFmpegVersion: "7.1", FFprobeVersion: "7.1", HardwareAcceleration: "software", VideoEncoder: "libx264", HardwareToneMap: false, ToneMapBackend: "software", TranscodeThreads: 4, MaximumReadRate: 1.5},
+				Diagnostics: playback.MediaDiagnostics{FFmpegVersion: "7.1", FFprobeVersion: "7.1", HardwareAcceleration: "software", VideoEncoder: "libx264", PreferredVideoCodec: "auto", EncodeCodecs: []string{"h264", "hevc", "av1"}, DecodeCodecs: []string{"h264", "hevc", "av1"}, QualityPreset: "balanced", HardwareToneMap: false, ToneMapBackend: "software", TranscodeThreads: 4, MaximumReadRate: 1.5},
 				Sessions: []playback.ActivitySession{{
 					ID: contractSessionID, Title: "Contract Movie", MediaType: "movie", Mode: "transcode",
 					Decision: decision, Username: "admin", ProfileID: contractProfileID, Profile: "Admin",

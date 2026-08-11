@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"os/exec"
@@ -53,6 +54,10 @@ type FFmpegProcessor struct {
 	trickplaySlots       chan struct{}
 	threads              int
 	encoder              videoEncoder
+	softwareEncoder      videoEncoder
+	preferredVideoCodec  string
+	qualityPreset        string
+	logger               *slog.Logger
 	maximumReadRate      float64
 	metrics              ffmpegProcessMetrics
 	subtitleTimeout      time.Duration
@@ -78,6 +83,17 @@ func NewFFmpegProcessor(ffmpegPath, ffprobePath string, maximumConcurrent, threa
 	if err != nil {
 		return nil, err
 	}
+	softwareEncoder := encoder
+	if encoder.normalizedKind() != videoEncoderSoftware {
+		softwareEncoder = detectVideoEncoderCapabilities(videoEncoder{kind: videoEncoderSoftware}, func(candidate videoEncoder, codec string, toneMap bool) error {
+			return probeVideoEncoderCodec(resolvedFFmpeg, candidate, codec, toneMap)
+		}, func(candidate videoEncoder, codec string) error {
+			return probeVideoDecoderCodec(resolvedFFmpeg, candidate, codec)
+		})
+		softwareEncoder = detectVideoEncoderMain10(softwareEncoder, func(candidate videoEncoder) error {
+			return probeVideoEncoderMain10(resolvedFFmpeg, candidate)
+		})
+	}
 	hardwareAcceleration := strings.ToLower(strings.TrimSpace(options.HardwareAcceleration))
 	if hardwareAcceleration == "" {
 		hardwareAcceleration = "auto"
@@ -85,7 +101,9 @@ func NewFFmpegProcessor(ffmpegPath, ffprobePath string, maximumConcurrent, threa
 	return &FFmpegProcessor{
 		ffmpegPath: resolvedFFmpeg, ffprobePath: resolvedFFprobe,
 		ffmpegVersion: executableMediaVersion(resolvedFFmpeg, "ffmpeg"), ffprobeVersion: executableMediaVersion(resolvedFFprobe, "ffprobe"),
-		hardwareAcceleration: hardwareAcceleration, encoder: encoder, threads: threads,
+		hardwareAcceleration: hardwareAcceleration, encoder: encoder, softwareEncoder: softwareEncoder, threads: threads,
+		preferredVideoCodec: normalizedPreferredVideoCodec(options.PreferredVideoCodec),
+		qualityPreset:       normalizedTranscodeQuality(options.QualityPreset), logger: options.Logger,
 		maximumReadRate: options.MaximumReadRate,
 		slots:           make(chan struct{}, maximumConcurrent), probeSlots: make(chan struct{}, maximumConcurrent),
 		subtitleSlots: make(chan struct{}, maximumConcurrent), trickplaySlots: make(chan struct{}, 1), subtitleTimeout: subtitleConversionTimeout,
@@ -96,6 +114,7 @@ func executableMediaVersion(path, product string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), mediaVersionTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, path, "-version")
+	configureMediaCommand(command)
 	output := newCappedBuffer(maximumMediaVersionOutputBytes)
 	command.Stdout = output
 	if err := command.Run(); err != nil || output.exceeded {
@@ -126,6 +145,36 @@ func boundedMediaVersion(version string) string {
 		return "unknown"
 	}
 	return version
+}
+
+func normalizedPreferredVideoCodec(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "h264", "hevc", "av1":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "auto"
+	}
+}
+
+func transcodeTargetCodec(asset storedAsset) string {
+	switch normalizedCodec(asset.TargetVideoCodec) {
+	case "h265":
+		return "hevc"
+	case "av1":
+		return "av1"
+	default:
+		return "h264"
+	}
+}
+
+func (processor *FFmpegProcessor) transcodeQuality(asset storedAsset) string {
+	if strings.TrimSpace(asset.QualityPreset) != "" {
+		return normalizedTranscodeQuality(asset.QualityPreset)
+	}
+	if processor == nil {
+		return "balanced"
+	}
+	return normalizedTranscodeQuality(processor.qualityPreset)
 }
 
 func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) (MediaInspection, error) {
@@ -273,7 +322,7 @@ func parseFFprobeInspection(data []byte, containerHint string) (MediaInspection,
 		attachedPicture, forced, defaultStream := ffprobeStreamDisposition(stream.Disposition)
 		pixelFormat := strings.ToLower(ffprobeMetadata(stream.PixelFormat))
 		bitDepth := ffprobeNonNegativeInt(stream.BitsPerRawSample)
-		if strings.TrimSpace(string(stream.BitsPerRawSample)) == "" {
+		if bitDepth == 0 {
 			bitDepth = knownPixelFormatBitDepth(pixelFormat)
 		}
 		frameRate := ffprobeFrameRate(stream.AverageFrameRate)
@@ -451,17 +500,22 @@ func knownPixelFormatBitDepth(value string) int {
 }
 
 func (processor *FFmpegProcessor) ProcessHLS(ctx context.Context, asset storedAsset, directory string) (resultErr error) {
+	backend := processor.encoder
+	executionAsset := asset
 	if err := processor.acquire(ctx); err != nil {
-		return err
+		return mediaExecutionError("capacity", backend, err)
 	}
 	processor.metrics.started.Add(1)
+	processor.logMediaExecution(ctx, slog.LevelInfo, "start", asset, backend, nil)
 	defer func() {
 		processor.release()
 		switch {
 		case resultErr == nil:
 			processor.metrics.succeeded.Add(1)
+			processor.logMediaExecution(ctx, slog.LevelInfo, "success", executionAsset, backend, nil)
 		case !errors.Is(resultErr, context.Canceled):
 			processor.metrics.failed.Add(1)
+			processor.logMediaExecution(ctx, slog.LevelError, "failure", executionAsset, backend, resultErr)
 		}
 	}()
 	_, seekable := seekableHLSSegmentCount(asset)
@@ -471,22 +525,35 @@ func (processor *FFmpegProcessor) ProcessHLS(ctx context.Context, asset storedAs
 	}
 	asset.ReadRate = readRate
 	resultErr = processor.processHLS(ctx, asset, directory, processor.encoder)
-	if resultErr == nil || asset.Kind != processingTranscode || processor.encoder.normalizedKind() == videoEncoderSoftware || hlsOutputStarted(directory) {
-		return resultErr
+	if resultErr == nil {
+		return nil
 	}
-	if errors.Is(resultErr, ErrMediaSourceFailed) || errors.Is(resultErr, context.Canceled) || errors.Is(resultErr, context.DeadlineExceeded) {
-		return resultErr
+	if asset.Kind != processingTranscode || processor.encoder.normalizedKind() == videoEncoderSoftware || hlsOutputStarted(directory) ||
+		errors.Is(resultErr, ErrMediaSourceFailed) || errors.Is(resultErr, context.Canceled) || errors.Is(resultErr, context.DeadlineExceeded) {
+		return mediaExecutionError("execute", backend, resultErr)
 	}
-	if resetErr := resetHLSDirectory(directory); resetErr != nil {
-		return fmt.Errorf("reset HLS output for software fallback: %w", resetErr)
+	fallbackEncoder := processor.softwareEncoder
+	if fallbackEncoder.normalizedKind() != videoEncoderSoftware {
+		fallbackEncoder = videoEncoder{kind: videoEncoderSoftware}
 	}
-	processor.metrics.softwareFallbacks.Add(1)
+	targetCodec := transcodeTargetCodec(asset)
+	main10FallbackUnavailable := targetVideoBitDepth(asset) >= 10 && (targetCodec != "hevc" || !fallbackEncoder.hevcMain10)
+	if !fallbackEncoder.supportsEncode(targetCodec) || main10FallbackUnavailable {
+		return mediaExecutionError("fallback_unavailable", backend, resultErr)
+	}
 	fallbackAsset := asset
 	if fallbackAsset.ToneMap && (fallbackAsset.TargetHeight == 0 || fallbackAsset.TargetHeight > softwareToneMapMaximumHeight) {
 		fallbackAsset.TargetHeight = softwareToneMapMaximumHeight
 	}
-	if fallbackErr := processor.processHLS(ctx, fallbackAsset, directory, videoEncoder{kind: videoEncoderSoftware}); fallbackErr != nil {
-		return fmt.Errorf("hardware encoding failed: %v; software fallback failed: %w", resultErr, fallbackErr)
+	processor.logMediaExecution(ctx, slog.LevelWarn, "fallback", fallbackAsset, fallbackEncoder, resultErr)
+	if resetErr := resetHLSDirectory(directory); resetErr != nil {
+		return mediaExecutionError("fallback_reset", fallbackEncoder, fmt.Errorf("%w: reset HLS output: %v", ErrMediaProcessingFailed, resetErr))
+	}
+	processor.metrics.softwareFallbacks.Add(1)
+	backend = fallbackEncoder
+	executionAsset = fallbackAsset
+	if fallbackErr := processor.processHLS(ctx, fallbackAsset, directory, fallbackEncoder); fallbackErr != nil {
+		return mediaExecutionError("fallback", fallbackEncoder, fallbackErr)
 	}
 	return nil
 }
@@ -520,6 +587,164 @@ func (processor *FFmpegProcessor) processHLS(ctx context.Context, asset storedAs
 	}
 	arguments = append(arguments, hlsOutputArguments(asset, hlsFlags)...)
 	return processor.runInDirectory(ctx, arguments, nil, directory)
+}
+
+func mediaExecutionError(stage string, encoder videoEncoder, err error) error {
+	return fmt.Errorf("ffmpeg stage=%s backend=%s: %w", stage, encoder.normalizedKind(), err)
+}
+
+func (processor *FFmpegProcessor) logMediaExecution(ctx context.Context, level slog.Level, event string, asset storedAsset, encoder videoEncoder, executionErr error) {
+	if processor == nil || processor.logger == nil {
+		return
+	}
+	attributes := []slog.Attr{
+		slog.String("event", event),
+		slog.String("stage", mediaDiagnosticToken(event)),
+		slog.String("mode", mediaExecutionMode(asset.Kind)),
+		slog.String("sourceCodec", mediaSourceCodec(asset)),
+		slog.String("targetCodec", mediaTargetCodec(asset)),
+		slog.String("backend", string(encoder.normalizedKind())),
+		slog.String("decoder", mediaDecoderName(asset, encoder)),
+		slog.String("encoder", mediaEncoderName(asset, encoder)),
+		slog.String("toneMap", mediaToneMapName(asset, encoder)),
+		slog.String("copyBoundaries", mediaCopyBoundaries(asset)),
+		slog.Int("targetHeight", max(asset.TargetHeight, 0)),
+		slog.Int("targetBitrateKbps", max(asset.VideoBitrateKbps, 0)),
+		slog.String("qualityPreset", processor.transcodeQuality(asset)),
+	}
+	if reasons := mediaExecutionReasons(asset.Decision); len(reasons) > 0 {
+		attributes = append(attributes, slog.Any("reasons", reasons))
+	}
+	if executionErr != nil {
+		attributes = append(attributes, slog.String("errorClass", mediaJobErrorClass(executionErr)))
+	}
+	processor.logger.LogAttrs(ctx, level, "ffmpeg media execution", attributes...)
+}
+
+func mediaExecutionMode(value string) string {
+	switch value {
+	case processingRemux, processingTranscodeAudio, processingTranscode:
+		return value
+	default:
+		return "unknown"
+	}
+}
+
+func mediaSourceCodec(asset storedAsset) string {
+	if asset.Decision == nil || asset.Decision.Source == nil {
+		return "unknown"
+	}
+	if codec := normalizedTranscodeCodec(asset.Decision.Source.VideoCodec); codec != "" {
+		return codec
+	}
+	switch codec := normalizedCodec(asset.Decision.Source.VideoCodec); codec {
+	case "vp8", "vp9", "mpeg2video", "mpeg4", "vc1", "theora":
+		return codec
+	default:
+		return "unknown"
+	}
+}
+
+func mediaTargetCodec(asset storedAsset) string {
+	if asset.Kind == processingTranscode {
+		return transcodeTargetCodec(asset)
+	}
+	return "copy"
+}
+
+func mediaDecoderName(asset storedAsset, encoder videoEncoder) string {
+	if asset.Kind != processingTranscode {
+		return "copy"
+	}
+	if encoder.hardwareDecodeSafe(asset) {
+		return string(encoder.normalizedKind())
+	}
+	return "software"
+}
+
+func mediaEncoderName(asset storedAsset, encoder videoEncoder) string {
+	if asset.Kind != processingTranscode {
+		return "copy"
+	}
+	codec := transcodeTargetCodec(asset)
+	backend := encoder.normalizedKind()
+	if backend == videoEncoderSoftware {
+		switch codec {
+		case "hevc":
+			return "libx265"
+		case "av1":
+			return "libsvtav1"
+		default:
+			return "libx264"
+		}
+	}
+	return codec + "_" + string(backend)
+}
+
+func mediaToneMapName(asset storedAsset, encoder videoEncoder) string {
+	if !asset.ToneMap {
+		return "none"
+	}
+	return string(encoder.normalizedToneMapBackend())
+}
+
+func mediaCopyBoundaries(asset storedAsset) string {
+	switch asset.Kind {
+	case processingRemux:
+		return "video,audio"
+	case processingTranscodeAudio:
+		return "video"
+	case processingTranscode:
+		if plannedAudioCopy(asset) {
+			return "audio"
+		}
+	}
+	return "none"
+}
+
+func mediaExecutionReasons(decision *PlaybackDecision) []string {
+	if decision == nil {
+		return nil
+	}
+	values := make([]string, 0, min(len(decision.Reasons)+1, 16))
+	if reason := mediaDiagnosticReason(decision.Reason); reason != "" {
+		values = append(values, reason)
+	}
+	for _, reason := range decision.Reasons {
+		if len(values) == 16 {
+			break
+		}
+		if reason = mediaDiagnosticReason(reason); reason != "" {
+			values = append(values, reason)
+		}
+	}
+	return values
+}
+
+func mediaDiagnosticReason(value string) string {
+	switch value {
+	case decisionDirectSupported, decisionRemuxRequired, decisionAudioTranscodeRequired, decisionVideoTranscodeRequired,
+		decisionSubtitleBurnRequired, reasonContainerNotSupported, reasonVideoCodecNotSupported, reasonAudioCodecNotSupported,
+		reasonResolutionLimit, reasonBitrateLimit, reasonHDRNotSupported:
+		return value
+	default:
+		return ""
+	}
+}
+
+func mediaDiagnosticToken(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 64 {
+		return "unknown"
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("_.-", character) {
+			continue
+		}
+		return "unknown"
+	}
+	return value
 }
 
 func hlsOutputArguments(asset storedAsset, hlsFlags string) []string {
@@ -617,6 +842,12 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 	if asset.Kind == processingTranscode && asset.ToneMap && !assetToneMappingSupported(asset) {
 		return nil, fmt.Errorf("%w: Dolby Vision source has no proven HDR-compatible base layer", ErrMediaProcessingFailed)
 	}
+	if asset.Kind == processingTranscode {
+		targetCodec := transcodeTargetCodec(asset)
+		if (targetCodec == "hevc" || targetCodec == "av1") && normalizedHLSSegmentContainer(asset.HLSSegmentContainer) != "mp4" {
+			return nil, fmt.Errorf("%w: %s transcoding requires fragmented MP4 HLS", ErrMediaProcessingFailed, targetCodec)
+		}
+	}
 	arguments := []string{
 		"-nostdin", "-hide_banner", "-loglevel", "error",
 		"-protocol_whitelist", inputProtocolWhitelist(asset.URL),
@@ -665,16 +896,52 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 	case processingTranscodeAudio:
 		arguments = append(arguments, "-c:v", "copy", "-c:a", "aac", "-ac", strconv.Itoa(outputAudioChannels(asset)), "-b:a", "192k")
 	case processingTranscode:
-		arguments = append(arguments, encoder.codecArguments(processor.threads)...)
+		targetCodec := transcodeTargetCodec(asset)
+		codecArguments, err := encoder.codecArguments(targetCodec, processor.transcodeQuality(asset), processor.threads, retainsTenBitHEVCFrames(asset, encoder))
+		if err != nil {
+			return nil, fmt.Errorf("%w: configure %s encoder: %v", ErrMediaProcessingFailed, targetCodec, err)
+		}
+		arguments = append(arguments, codecArguments...)
+		if targetCodec == "hevc" {
+			arguments = append(arguments, "-tag:v", "hvc1")
+		}
 		if asset.VideoBitrateKbps > 0 {
 			bitrate := strconv.Itoa(asset.VideoBitrateKbps) + "k"
-			arguments = append(arguments, "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", strconv.Itoa(asset.VideoBitrateKbps*2)+"k")
+			if encoder.normalizedKind() != videoEncoderSoftware {
+				arguments = append(arguments, "-b:v", bitrate)
+			}
+			arguments = append(arguments, "-maxrate", bitrate, "-bufsize", strconv.Itoa(asset.VideoBitrateKbps*2)+"k")
 		}
-		arguments = append(arguments, "-c:a", "aac", "-ac", strconv.Itoa(outputAudioChannels(asset)), "-b:a", "256k")
+		if plannedAudioCopy(asset) {
+			arguments = append(arguments, "-c:a", "copy")
+		} else {
+			arguments = append(arguments, "-c:a", "aac", "-ac", strconv.Itoa(outputAudioChannels(asset)), "-b:a", "256k")
+		}
 	default:
 		return nil, fmt.Errorf("%w: unsupported mode %q", ErrMediaProcessingFailed, asset.Kind)
 	}
 	return arguments, nil
+}
+
+func plannedAudioCopy(asset storedAsset) bool {
+	return asset.Decision != nil && asset.Decision.AudioAction == "copy"
+}
+
+func retainsTenBitHEVCFrames(asset storedAsset, encoder videoEncoder) bool {
+	if transcodeTargetCodec(asset) != "hevc" || asset.VideoBitDepth <= 8 || targetVideoBitDepth(asset) < 10 || asset.ToneMap || !encoder.hevcMain10 {
+		return false
+	}
+	if encoder.normalizedKind() == videoEncoderSoftware {
+		return true
+	}
+	return encoder.hardwareFramesSafe(asset) && encoder.hardwareFilter(asset) == ""
+}
+
+func targetVideoBitDepth(asset storedAsset) int {
+	if asset.Decision != nil && asset.Decision.Target != nil && asset.Decision.Target.VideoBitDepth > 0 {
+		return asset.Decision.Target.VideoBitDepth
+	}
+	return 8
 }
 
 func processingVideoFilter(asset storedAsset, encoder videoEncoder) string {
@@ -689,10 +956,15 @@ func processingVideoFilter(asset storedAsset, encoder videoEncoder) string {
 		asset.Decision.Source.Height > asset.TargetHeight {
 		filters = append(filters, "scale=-2:"+strconv.Itoa(asset.TargetHeight))
 	}
-	if filter := encoder.filter(asset.ToneMap); filter != "" {
-		filters = append(filters, filter)
+	encoderFilter := encoder.filter(asset.ToneMap)
+	if asset.VideoBitDepth > 8 && targetVideoBitDepth(asset) <= 8 && !asset.ToneMap && encoderFilter == "" {
+		filters = append(filters, "format=yuv420p")
+	}
+	if encoderFilter != "" {
+		filters = append(filters, encoderFilter)
 	}
 	return strings.Join(filters, ",")
+
 }
 
 func subtitleBurnFilter(asset storedAsset) (string, error) {
@@ -771,16 +1043,45 @@ func (processor *FFmpegProcessor) ProcessLimit() int {
 	return cap(processor.slots)
 }
 
+func (processor *FFmpegProcessor) TranscodeCapabilities() TranscodeCapabilities {
+	if processor == nil {
+		return TranscodeCapabilities{
+			HardwareAcceleration: "unknown", DecodeCodecs: []string{}, EncodeCodecs: []string{},
+			PreferredVideoCodec: "auto", QualityPreset: "balanced",
+		}
+	}
+	capabilities := processor.encoder.transcodeCapabilities(
+		normalizedPreferredVideoCodec(processor.preferredVideoCodec),
+		normalizedTranscodeQuality(processor.qualityPreset),
+	)
+	softwareEncoder := processor.softwareEncoder
+	if softwareEncoder.normalizedKind() != videoEncoderSoftware {
+		softwareEncoder = videoEncoder{kind: videoEncoderSoftware}
+	}
+	encodeCodecs := capabilities.EncodeCodecs[:0]
+	for _, codec := range capabilities.EncodeCodecs {
+		if softwareEncoder.supportsEncode(codec) {
+			encodeCodecs = append(encodeCodecs, codec)
+		}
+	}
+	capabilities.EncodeCodecs = encodeCodecs
+	capabilities.HEVCMain10 = capabilities.HEVCMain10 && supportsCodec(capabilities.EncodeCodecs, "hevc") &&
+		supportsCodec(capabilities.DecodeCodecs, "hevc") && softwareEncoder.hevcMain10 &&
+		softwareEncoder.supportsEncode("hevc") && softwareEncoder.supportsDecode("hevc")
+	return capabilities
+}
+
 func (processor *FFmpegProcessor) PlaybackDiagnostics() MediaDiagnostics {
 	if processor == nil {
 		return MediaDiagnostics{
 			FFmpegVersion: "unknown", FFprobeVersion: "unknown", HardwareAcceleration: "unknown", VideoEncoder: "unknown",
+			PreferredVideoCodec: "auto", EncodeCodecs: []string{}, DecodeCodecs: []string{}, QualityPreset: "balanced",
 			HardwareToneMap: false, ToneMapBackend: string(videoToneMapSoftware), MaximumReadRate: defaultTranscodeMaximumReadRate,
 		}
 	}
 	hardwareAcceleration := processor.hardwareAcceleration
 	switch hardwareAcceleration {
-	case "auto", "software", "hybrid", "vaapi", "qsv", "nvenc":
+	case "auto", "software", "hybrid", "vaapi", "qsv", "nvenc", "amf":
 	default:
 		hardwareAcceleration = "unknown"
 	}
@@ -792,9 +1093,12 @@ func (processor *FFmpegProcessor) PlaybackDiagnostics() MediaDiagnostics {
 	if threads < 0 || threads > 32 {
 		threads = 0
 	}
+	capabilities := processor.TranscodeCapabilities()
 	return MediaDiagnostics{
 		FFmpegVersion: boundedMediaVersion(processor.ffmpegVersion), FFprobeVersion: boundedMediaVersion(processor.ffprobeVersion),
 		HardwareAcceleration: hardwareAcceleration, VideoEncoder: videoEncoder,
+		PreferredVideoCodec: capabilities.PreferredVideoCodec, EncodeCodecs: capabilities.EncodeCodecs,
+		DecodeCodecs: capabilities.DecodeCodecs, HEVCMain10: capabilities.HEVCMain10, QualityPreset: capabilities.QualityPreset,
 		MaximumReadRate: adaptiveTranscodeReadRate(processor.maximumReadRate, 1, 1),
 		HardwareToneMap: processor.HardwareToneMap(), ToneMapBackend: processor.ToneMapBackend(), TranscodeThreads: threads,
 		Pools: MediaDiagnosticPools{
@@ -869,6 +1173,7 @@ func (processor *FFmpegProcessor) newCommand(ctx context.Context, path string, a
 	} else {
 		command = exec.CommandContext(ctx, path, arguments...)
 	}
+	configureMediaCommand(command)
 	command.Env = environmentWithoutProxyBypass(command.Env)
 	return command
 }
