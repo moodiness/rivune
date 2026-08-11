@@ -1661,6 +1661,29 @@ func TestPlaybackCapabilitiesOnlyApplySoftwareToneMapLimit(t *testing.T) {
 	if decision == nil || decision.Target == nil || decision.Target.Height != 2160 {
 		t.Fatalf("hybrid tone-map decision = %+v, want requested 2160p", decision)
 	}
+	explicitSoftwareProcessor := &FFmpegProcessor{
+		hardwareAcceleration: "software",
+		encoder:              videoEncoder{kind: videoEncoderSoftware},
+	}
+	explicitSoftware := (&Service{processor: explicitSoftwareProcessor}).playbackCapabilities(Capabilities{}, 2160, 12000)
+	if explicitSoftware.ToneMapMaximumHeight != 0 {
+		t.Fatalf("explicit software tone mapping was capped at %dp", explicitSoftware.ToneMapMaximumHeight)
+	}
+	explicitSoftwareDecision := processingDecision(
+		decisionVideoTranscodeRequired,
+		"transcode",
+		"transcode",
+		MediaInspection{VideoTracks: []MediaTrack{{Codec: "h265", Height: 2160}}},
+		explicitSoftware,
+		true,
+	)
+	if explicitSoftwareDecision == nil || explicitSoftwareDecision.Target == nil || explicitSoftwareDecision.Target.Height != 2160 {
+		t.Fatalf("explicit software tone-map decision = %+v, want requested 2160p", explicitSoftwareDecision)
+	}
+	automaticSoftware := (&Service{processor: &FFmpegProcessor{hardwareAcceleration: "auto"}}).playbackCapabilities(Capabilities{}, 2160, 12000)
+	if automaticSoftware.ToneMapMaximumHeight != softwareToneMapMaximumHeight {
+		t.Fatalf("automatic software fallback maximum height = %dp, want %dp", automaticSoftware.ToneMapMaximumHeight, softwareToneMapMaximumHeight)
+	}
 }
 
 func TestApplyPlaybackDecisionPersistsPrivateVideoBitDepth(t *testing.T) {
