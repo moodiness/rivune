@@ -23,7 +23,7 @@ class TranscodingModelsTest {
             maximumVideoBitrateKbps = 12_000,
             maximumAudioChannels = 6,
             subtitleModes = listOf("external", "burn"),
-            mediaProfiles = listOf(PlaybackMediaProfile("mp4", "h264", "aac")),
+            mediaProfiles = listOf(PlaybackMediaProfile("mp4", "h265", "aac", 10)),
         ))).jsonObject
 
         assertEquals(listOf("remux", "transcode_audio", "transcode"), encoded.getValue("processingModes").jsonArray.map { it.jsonPrimitive.content })
@@ -31,6 +31,7 @@ class TranscodingModelsTest {
         assertEquals(12_000, encoded.getValue("maximumVideoBitrateKbps").jsonPrimitive.content.toInt())
         assertEquals(6, encoded.getValue("maximumAudioChannels").jsonPrimitive.content.toInt())
         assertEquals(listOf("external", "burn"), encoded.getValue("subtitleModes").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(10, encoded.getValue("mediaProfiles").jsonArray.first().jsonObject.getValue("maximumVideoBitDepth").jsonPrimitive.content.toInt())
     }
 
     @Test
@@ -61,7 +62,7 @@ class TranscodingModelsTest {
             {
               "id":"22222222-2222-4222-8222-222222222222",
               "selectedSourceId":"source-1","selectedAudioTrack":2,"selectedSubtitleId":"subtitle-1",
-              "sources":[{"id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","mode":"transcode","protocol":"hls","compatible":true,"decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitrateKbps":12000},"futureDecisionField":true}}],
+              "sources":[{"id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","mode":"transcode","protocol":"hls","compatible":true,"decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}}],
               "subtitles":[{"id":"subtitle-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","default":true,"delivery":"burn","futureSubtitleField":"ignored"}],
               "providerErrors":[{"addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","code":"future_provider_code","message":"future"}],
               "expiresAt":"2026-08-03T12:00:00Z","futureSessionField":"ignored"
@@ -73,6 +74,7 @@ class TranscodingModelsTest {
         assertEquals("subtitle_burn_required", session.sources.first().decision?.reason)
         assertEquals("dolby_vision", session.sources.first().decision?.source?.hdrFormat)
         assertEquals(12_000, session.sources.first().decision?.target?.videoBitrateKbps)
+        assertEquals(8, session.sources.first().decision?.target?.videoBitDepth)
         assertEquals("burn", session.subtitles.first().delivery)
         assertNull(session.subtitles.first().url)
         assertEquals("future_provider_code", session.providerErrors.first().code)

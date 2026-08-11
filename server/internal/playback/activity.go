@@ -53,6 +53,11 @@ type MediaDiagnostics struct {
 	FFprobeVersion       string               `json:"ffprobeVersion"`
 	HardwareAcceleration string               `json:"hardwareAcceleration"`
 	VideoEncoder         string               `json:"videoEncoder"`
+	PreferredVideoCodec  string               `json:"preferredVideoCodec"`
+	EncodeCodecs         []string             `json:"encodeCodecs"`
+	DecodeCodecs         []string             `json:"decodeCodecs"`
+	HEVCMain10           bool                 `json:"hevcMain10"`
+	QualityPreset        string               `json:"qualityPreset"`
 	HardwareToneMap      bool                 `json:"hardwareToneMap"`
 	ToneMapBackend       string               `json:"toneMapBackend"`
 	TranscodeThreads     int                  `json:"transcodeThreads"`
@@ -304,12 +309,13 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 
 	diagnostics := MediaDiagnostics{
 		FFmpegVersion: "unknown", FFprobeVersion: "unknown", HardwareAcceleration: "unknown", VideoEncoder: "unknown",
+		PreferredVideoCodec: "auto", EncodeCodecs: []string{}, DecodeCodecs: []string{}, QualityPreset: "balanced",
 		HardwareToneMap: false, ToneMapBackend: string(videoToneMapSoftware), MaximumReadRate: defaultTranscodeMaximumReadRate,
 	}
 	processingSlots := activeJobCount
 	processingLimit := 0
 	if provider, ok := service.processor.(mediaDiagnosticsProvider); ok {
-		diagnostics = provider.PlaybackDiagnostics()
+		diagnostics = normalizeMediaDiagnostics(provider.PlaybackDiagnostics())
 		processingSlots = diagnostics.Pools.Process.Active
 		processingLimit = diagnostics.Pools.Process.Limit
 	}
@@ -325,6 +331,26 @@ func (service *Service) Activity(ctx context.Context, principal auth.Principal) 
 		SessionsTruncated: sessionsTruncated,
 		JobsTruncated:     jobsTruncated,
 	}, nil
+}
+
+func normalizeMediaDiagnostics(value MediaDiagnostics) MediaDiagnostics {
+	switch value.PreferredVideoCodec {
+	case "auto", "h264", "hevc", "av1":
+	default:
+		value.PreferredVideoCodec = "auto"
+	}
+	switch value.QualityPreset {
+	case "speed", "balanced", "quality":
+	default:
+		value.QualityPreset = "balanced"
+	}
+	if value.EncodeCodecs == nil {
+		value.EncodeCodecs = []string{}
+	}
+	if value.DecodeCodecs == nil {
+		value.DecodeCodecs = []string{}
+	}
+	return value
 }
 func boundedActivitySessions(values []ActivitySession) ([]ActivitySession, bool) {
 	if len(values) <= maximumActivitySessions {

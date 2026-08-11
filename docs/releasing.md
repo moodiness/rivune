@@ -31,9 +31,10 @@ The tag push runs `Release candidate CI`. Its read-only `authorize` job resolves
 `git/ref/tags/<tag>`, rejects an absent ref or a lightweight tag, requires the
 annotated tag object to target a commit, and requires that commit, the run SHA,
 and current `main` HEAD to be identical. The reusable `Release gate` then runs
-these exact jobs: `Backend tests`, `Frontend build and E2E`, `OpenAPI lint and
-contract resolution`, `Swift API client`, `Kotlin API client`, `Windows API
-client`, and `Container, migrations, and HTTPS proxy`. The container job also
+these exact jobs: `Backend tests`, `Server Windows compile`, `Frontend build and
+E2E`, `OpenAPI lint and contract resolution`, `Swift API client`, `Kotlin API
+client`, `Windows API client`, and `Container, migrations, and HTTPS proxy`.
+The container job also
 validates the two supported CPU-only manifests, `compose.yaml` and
 `deploy/caddy/compose.yaml`, plus each manifest combined with the supported
 `compose.amd-intel.yaml` GPU overlay, using non-secret placeholders.

@@ -598,12 +598,21 @@ func hlsPlaylistSegmentBounds(directory string) (int, int, bool) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		name := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(name, "segment-") || !strings.HasSuffix(name, ".ts") {
+		if !strings.HasPrefix(name, "segment-") {
 			continue
 		}
-		raw := strings.TrimSuffix(strings.TrimPrefix(name, "segment-"), ".ts")
+		suffix := ""
+		switch {
+		case strings.HasSuffix(name, ".ts"):
+			suffix = ".ts"
+		case strings.HasSuffix(name, ".m4s"):
+			suffix = ".m4s"
+		default:
+			continue
+		}
+		raw := strings.TrimSuffix(strings.TrimPrefix(name, "segment-"), suffix)
 		index, parseErr := strconv.Atoi(raw)
-		if parseErr != nil || index < 0 || name != fmt.Sprintf("segment-%06d.ts", index) {
+		if parseErr != nil || index < 0 || name != fmt.Sprintf("segment-%06d%s", index, suffix) {
 			continue
 		}
 		if !found || index < first {
@@ -639,6 +648,10 @@ func localHLSRFC6381VideoCodec(codec string) (string, bool) {
 	switch normalizedCodec(codec) {
 	case "h264":
 		return "avc1", true
+	case "h265":
+		return "hvc1", true
+	case "av1":
+		return "av01", true
 	default:
 		return "", false
 	}
@@ -1024,11 +1037,12 @@ func hlsAssetFingerprint(asset storedAsset) string {
 		subtitleTrack = *asset.SubtitleTrackIndex
 	}
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%t|%t|%d|%d|%s|%d|%x|%x|%d|%d|%d|%d|%s|%s",
+		"%s|%s|%s|%s|%t|%t|%d|%d|%s|%d|%x|%x|%d|%d|%d|%d|%s|%s|%s|%s",
 		mediaProbeKey(asset), asset.ID, asset.Kind, normalizedHLSSegmentContainer(asset.HLSSegmentContainer), asset.ToneMap,
 		asset.DolbyVisionToneMapSafe, audioTrack, subtitleTrack, asset.SubtitleTrackType, asset.SubtitleTrackOrdinal,
 		math.Float64bits(asset.DurationSeconds), math.Float64bits(asset.ReadRate), asset.VideoBitDepth, asset.TargetHeight,
-		asset.VideoBitrateKbps, asset.MaximumAudioChannels, hlsStartKey(asset.StartSeconds), decision,
+		asset.VideoBitrateKbps, asset.MaximumAudioChannels, transcodeTargetCodec(asset), normalizedTranscodeQuality(asset.QualityPreset),
+		hlsStartKey(asset.StartSeconds), decision,
 	)
 }
 

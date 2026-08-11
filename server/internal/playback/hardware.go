@@ -6,9 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"os"
+	"log/slog"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -18,13 +17,21 @@ const (
 	hardwareProbeTimeout         = 10 * time.Second
 	softwareToneMapMaximumHeight = 1080
 	softwareToneMapFilter        = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
-	hybridProbeHEVCBase64        = "AAAAAUABDAH//wIgAAADAJAAAAMAAAMAHpWUCQAAAAFCAQECIAAAAwCQAAADAAADAB6gECAgTZZWVKTC8BahIgEggAAAAwCAAAADAIQAAAABRAHAc8GJAAABKAGsTISUSMr///vIFv4S4tBWpZBLiAR6ZJpAB8tP3AAAAAECAdAJeIJkSsCfqwloDDgPuA=="
+	// Each decode fixture contains one generated black intra frame. HEVC Main 10
+	// remains separate because the hybrid probe also verifies download/readback.
+	hybridProbeHEVCBase64     = "AAAAAUABDAH//wIgAAADAJAAAAMAAAMAHpWUCQAAAAFCAQECIAAAAwCQAAADAAADAB6gECAgTZZWVKTC8BahIgEggAAAAwCAAAADAIQAAAABRAHAc8GJAAABKAGsTISUSMr///vIFv4S4tBWpZBLiAR6ZJpAB8tP3AAAAAECAdAJeIJkSsCfqwloDDgPuA=="
+	decodeProbeH264Base64     = "AAAAAWdCwAraEJsBEAAAAwAQAAADACjxImoAAAABaM4PyAAAAWWIhDomKAAJAsnJyddddddddddddeA="
+	decodeProbeHEVCMainBase64 = "AAAAAUABDAH//wFgAAADAJAAAAMAAAMAHpWUCQAAAAFCAQEBYAAAAwCQAAADAAADAB6gIIEFllZUpMLwFoCAAAADAIAAAAMAhAAAAAFEAcBzwIkAAAEoAaxO1x//9d6cr+r4"
+	decodeProbeAV1Base64      = "REtJRgAAIABBVjAxQABAAAEAAAABAAAA/////wAAAAAYAAAAAAAAAAAAAAASAAoGGBV//aAIMgwYAAAAUAAACgV3ZIA="
 )
 
 type FFmpegOptions struct {
 	HardwareAcceleration string
 	VideoDevice          string
 	MaximumReadRate      float64
+	PreferredVideoCodec  string
+	QualityPreset        string
+	Logger               *slog.Logger
 }
 
 type videoEncoderKind string
@@ -36,6 +43,7 @@ const (
 	videoEncoderVAAPI    videoEncoderKind = "vaapi"
 	videoEncoderQSV      videoEncoderKind = "qsv"
 	videoEncoderNVENC    videoEncoderKind = "nvenc"
+	videoEncoderAMF      videoEncoderKind = "amf"
 
 	videoToneMapSoftware videoToneMapBackend = "software"
 	videoToneMapHybrid   videoToneMapBackend = "hybrid"
@@ -43,35 +51,63 @@ const (
 	videoToneMapVulkan   videoToneMapBackend = "vulkan"
 )
 
+var transcodeVideoCodecs = [...]string{"h264", "hevc", "av1"}
+
+type TranscodeCapabilities struct {
+	HardwareAcceleration string   `json:"hardwareAcceleration"`
+	DecodeCodecs         []string `json:"decodeCodecs"`
+	EncodeCodecs         []string `json:"encodeCodecs"`
+	HEVCMain10           bool     `json:"hevcMain10"`
+	PreferredVideoCodec  string   `json:"preferredVideoCodec"`
+	QualityPreset        string   `json:"qualityPreset"`
+}
+
 type videoEncoder struct {
 	kind           videoEncoderKind
 	device         string
 	toneMapBackend videoToneMapBackend
+	decodeCodecs   map[string]bool
+	hevcMain10     bool
+	encodeCodecs   map[string]bool
 }
 
 func detectVideoEncoder(ffmpegPath string, options FFmpegOptions) (videoEncoder, error) {
 	mode := strings.ToLower(strings.TrimSpace(options.HardwareAcceleration))
+	encodeProbe := func(candidate videoEncoder, codec string, toneMap bool) error {
+		return probeVideoEncoderCodec(ffmpegPath, candidate, codec, toneMap)
+	}
+	decodeProbe := func(candidate videoEncoder, codec string) error {
+		return probeVideoDecoderCodec(ffmpegPath, candidate, codec)
+	}
+	main10Probe := func(candidate videoEncoder) error {
+		return probeVideoEncoderMain10(ffmpegPath, candidate)
+	}
 	if mode == "" || mode == "auto" {
 		for _, candidate := range automaticVideoEncoders(options.VideoDevice) {
-			if err := probeVideoEncoder(ffmpegPath, candidate, false); err == nil {
+			candidate = detectVideoEncoderCapabilities(candidate, encodeProbe, decodeProbe)
+			candidate = detectVideoEncoderMain10(candidate, main10Probe)
+			if len(candidate.encodeCodecs) != 0 {
 				return detectHardwareToneMap(ffmpegPath, candidate), nil
 			}
 		}
-		return videoEncoder{kind: videoEncoderSoftware}, nil
+		software := detectVideoEncoderCapabilities(videoEncoder{kind: videoEncoderSoftware}, encodeProbe, decodeProbe)
+		return detectVideoEncoderMain10(software, main10Probe), nil
 	}
-	return detectExplicitVideoEncoder(mode, options.VideoDevice, func(candidate videoEncoder, toneMap bool) error {
-		return probeVideoEncoder(ffmpegPath, candidate, toneMap)
-	}, func(candidate videoEncoder) videoEncoder {
+	return detectExplicitVideoEncoder(mode, options.VideoDevice, encodeProbe, decodeProbe, func(candidate videoEncoder) videoEncoder {
 		return detectHardwareToneMap(ffmpegPath, candidate)
-	})
+	}, main10Probe)
 }
 
-func detectExplicitVideoEncoder(mode, device string, probe func(videoEncoder, bool) error, detectToneMap func(videoEncoder) videoEncoder) (videoEncoder, error) {
-	if mode == string(videoEncoderSoftware) {
-		return videoEncoder{kind: videoEncoderSoftware}, nil
-	}
+type videoEncoderProbe func(videoEncoder, string, bool) error
+type videoDecoderProbe func(videoEncoder, string) error
+type videoMain10Probe func(videoEncoder) error
+
+func detectExplicitVideoEncoder(mode, device string, encodeProbe videoEncoderProbe, decodeProbe videoDecoderProbe, detectToneMap func(videoEncoder) videoEncoder, main10Probes ...videoMain10Probe) (videoEncoder, error) {
 	candidate := videoEncoder{device: device}
 	switch mode {
+	case string(videoEncoderSoftware):
+		candidate.kind = videoEncoderSoftware
+		candidate.device = ""
 	case string(videoToneMapHybrid):
 		candidate.kind = videoEncoderVAAPI
 		candidate.toneMapBackend = videoToneMapHybrid
@@ -82,33 +118,83 @@ func detectExplicitVideoEncoder(mode, device string, probe func(videoEncoder, bo
 	case string(videoEncoderNVENC):
 		candidate.kind = videoEncoderNVENC
 		candidate.device = ""
+	case string(videoEncoderAMF):
+		candidate.kind = videoEncoderAMF
+		candidate.device = ""
 	default:
 		return videoEncoder{}, fmt.Errorf("unsupported hardware acceleration mode %q", mode)
 	}
-	if err := probe(candidate, mode == string(videoToneMapHybrid)); err != nil {
-		return videoEncoder{}, fmt.Errorf("initialize %s video encoder: %w", mode, err)
-	}
+
 	if mode == string(videoToneMapHybrid) {
+		probeCandidate := candidate.withEncodeCodec("h264").withDecodeCodec("hevc")
+		if err := encodeProbe(probeCandidate, "h264", true); err != nil {
+			return videoEncoder{}, fmt.Errorf("initialize %s video encoder: %w", mode, err)
+		}
+	}
+	var lastProbeError error
+	candidate = detectVideoEncoderCapabilities(candidate, func(candidate videoEncoder, codec string, toneMap bool) error {
+		err := encodeProbe(candidate, codec, toneMap)
+		if err != nil {
+			lastProbeError = err
+		}
+		return err
+	}, decodeProbe)
+	if len(main10Probes) > 0 {
+		candidate = detectVideoEncoderMain10(candidate, main10Probes[0])
+	}
+	if len(candidate.encodeCodecs) == 0 {
+		if lastProbeError != nil {
+			return videoEncoder{}, fmt.Errorf("initialize %s video encoder: %w", mode, lastProbeError)
+		}
+		return videoEncoder{}, fmt.Errorf("initialize %s video encoder: no functional H264, HEVC, or AV1 encoder", mode)
+	}
+	if mode == string(videoToneMapHybrid) || mode == string(videoEncoderSoftware) {
 		return candidate, nil
 	}
 	return detectToneMap(candidate), nil
 }
 
-func automaticVideoEncoders(device string) []videoEncoder {
-	_, nvidiaErr := os.Stat("/dev/nvidiactl")
-	_, videoErr := os.Stat(device)
-	kinds := automaticVideoEncoderKinds(videoDeviceVendor(device), nvidiaErr == nil, videoErr == nil)
-	encoders := make([]videoEncoder, 0, len(kinds))
-	for _, kind := range kinds {
-		encoder := videoEncoder{kind: kind, device: device}
-		if kind == videoEncoderNVENC {
-			encoder.device = ""
+func detectVideoEncoderCapabilities(candidate videoEncoder, encodeProbe videoEncoderProbe, decodeProbe videoDecoderProbe) videoEncoder {
+	candidate.encodeCodecs = make(map[string]bool, len(transcodeVideoCodecs))
+	candidate.decodeCodecs = make(map[string]bool, len(transcodeVideoCodecs))
+	for _, codec := range transcodeVideoCodecs {
+		probeCandidate := candidate.withEncodeCodec(codec)
+		if err := encodeProbe(probeCandidate, codec, false); err == nil {
+			candidate.encodeCodecs[codec] = true
 		}
-		encoders = append(encoders, encoder)
 	}
-	return encoders
+	for _, codec := range transcodeVideoCodecs {
+		probeCandidate := candidate.withDecodeCodec(codec)
+		if err := decodeProbe(probeCandidate, codec); err == nil {
+			candidate.decodeCodecs[codec] = true
+		}
+	}
+	return candidate
 }
 
+func detectVideoEncoderMain10(candidate videoEncoder, probe videoMain10Probe) videoEncoder {
+	candidate.hevcMain10 = false
+	if probe == nil {
+		return candidate
+	}
+	probeCandidate := candidate.withDecodeCodec("hevc").withEncodeCodec("hevc")
+	if err := probe(probeCandidate); err == nil {
+		candidate.hevcMain10 = true
+	}
+	return candidate
+}
+
+func (encoder videoEncoder) withEncodeCodec(codec string) videoEncoder {
+	codec = normalizedTranscodeCodec(codec)
+	encoder.encodeCodecs = map[string]bool{codec: true}
+	return encoder
+}
+
+func (encoder videoEncoder) withDecodeCodec(codec string) videoEncoder {
+	codec = normalizedTranscodeCodec(codec)
+	encoder.decodeCodecs = map[string]bool{codec: true}
+	return encoder
+}
 func automaticVideoEncoderKinds(vendor string, nvidiaAvailable, renderDeviceAvailable bool) []videoEncoderKind {
 	kinds := make([]videoEncoderKind, 0, 3)
 	if nvidiaAvailable {
@@ -128,29 +214,35 @@ func automaticVideoEncoderKinds(vendor string, nvidiaAvailable, renderDeviceAvai
 	return kinds
 }
 
-func videoDeviceVendor(device string) string {
-	name := filepath.Base(strings.TrimSpace(device))
-	if name == "." || name == string(filepath.Separator) || name == "" {
-		return ""
+func automaticWindowsVideoEncoderKinds() []videoEncoderKind {
+	return []videoEncoderKind{videoEncoderAMF, videoEncoderQSV, videoEncoderNVENC}
+}
+func videoEncoderPlatformProbeError(kind videoEncoderKind, windows bool) error {
+	if windows && kind == videoEncoderVAAPI {
+		return fmt.Errorf("VAAPI is not available on Windows")
 	}
-	value, err := os.ReadFile(filepath.Join("/sys/class/drm", name, "device/vendor"))
-	if err != nil {
-		return ""
+	if !windows && kind == videoEncoderAMF {
+		return fmt.Errorf("AMF is only available on Windows")
 	}
-	return strings.TrimSpace(string(value))
+	return nil
 }
 
 func probeVideoEncoder(ffmpegPath string, encoder videoEncoder, toneMap bool) error {
-	if encoder.normalizedKind() == videoEncoderSoftware {
-		return nil
+	return probeVideoEncoderCodec(ffmpegPath, encoder, "h264", toneMap)
+}
+
+func probeVideoEncoderCodec(ffmpegPath string, encoder videoEncoder, codec string, toneMap bool) error {
+	if err := platformVideoEncoderProbeError(encoder.normalizedKind()); err != nil {
+		return err
 	}
-	arguments, input, err := videoEncoderProbeArguments(encoder, toneMap)
+	arguments, input, err := videoEncoderProbeArguments(encoder, codec, "balanced", toneMap)
 	if err != nil {
 		return err
 	}
 	probeContext, cancel := context.WithTimeout(context.Background(), hardwareProbeTimeout)
 	defer cancel()
 	command := exec.CommandContext(probeContext, ffmpegPath, arguments...)
+	configureMediaCommand(command)
 	if len(input) > 0 {
 		command.Stdin = bytes.NewReader(input)
 	}
@@ -166,8 +258,128 @@ func probeVideoEncoder(ffmpegPath string, encoder videoEncoder, toneMap bool) er
 	return nil
 }
 
-func videoEncoderProbeArguments(encoder videoEncoder, toneMap bool) ([]string, []byte, error) {
+func probeVideoDecoderCodec(ffmpegPath string, encoder videoEncoder, codec string) error {
+	if err := platformVideoEncoderProbeError(encoder.normalizedKind()); err != nil {
+		return err
+	}
+	arguments, input, err := videoDecoderProbeArguments(encoder, codec)
+	if err != nil {
+		return err
+	}
+	probeContext, cancel := context.WithTimeout(context.Background(), hardwareProbeTimeout)
+	defer cancel()
+	command := exec.CommandContext(probeContext, ffmpegPath, arguments...)
+	configureMediaCommand(command)
+	command.Stdin = bytes.NewReader(input)
+	diagnostic := newDiagnosticBuffer()
+	command.Stdout = nil
+	command.Stderr = diagnostic
+	if err := command.Run(); err != nil {
+		if errors.Is(probeContext.Err(), context.DeadlineExceeded) {
+			return errors.New("video decoder probe timed out")
+		}
+		return fmt.Errorf("video decoder probe: %w: %s", err, diagnostic.String())
+	}
+	return nil
+}
+func probeVideoEncoderMain10(ffmpegPath string, encoder videoEncoder) error {
+	if err := platformVideoEncoderProbeError(encoder.normalizedKind()); err != nil {
+		return err
+	}
+	arguments, input, err := videoEncoderMain10ProbeArguments(encoder)
+	if err != nil {
+		return err
+	}
+	probeContext, cancel := context.WithTimeout(context.Background(), hardwareProbeTimeout)
+	defer cancel()
+	command := exec.CommandContext(probeContext, ffmpegPath, arguments...)
+	configureMediaCommand(command)
+	command.Stdin = bytes.NewReader(input)
+	diagnostic := newDiagnosticBuffer()
+	command.Stdout = nil
+	command.Stderr = diagnostic
+	if err := command.Run(); err != nil {
+		if errors.Is(probeContext.Err(), context.DeadlineExceeded) {
+			return errors.New("hardware HEVC Main10 probe timed out")
+		}
+		return fmt.Errorf("hardware HEVC Main10 probe: %w: %s", err, diagnostic.String())
+	}
+	return nil
+}
+
+func videoDecoderProbeArguments(encoder videoEncoder, codec string) ([]string, []byte, error) {
+	codec = normalizedTranscodeCodec(codec)
+	var format, fixture string
+	switch codec {
+	case "h264":
+		format, fixture = "h264", decodeProbeH264Base64
+	case "hevc":
+		format, fixture = "hevc", decodeProbeHEVCMainBase64
+	case "av1":
+		format, fixture = "ivf", decodeProbeAV1Base64
+	default:
+		return nil, nil, fmt.Errorf("unsupported decoder probe codec %q", codec)
+	}
+	input, err := base64.StdEncoding.DecodeString(fixture)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode %s decoder probe fixture: %w", codec, err)
+	}
+	asset := storedAsset{
+		Kind: processingTranscode,
+		Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{
+			VideoCodec: codec,
+			Height:     64,
+		}},
+	}
 	arguments := []string{"-nostdin", "-hide_banner", "-loglevel", "error"}
+	if encoder.normalizedKind() != videoEncoderSoftware {
+		arguments = append(arguments, encoder.globalArguments()...)
+		decodeArguments := encoder.hardwareDecodeArguments(asset)
+		if len(decodeArguments) == 0 {
+			return nil, nil, fmt.Errorf("%s decoder probe is unavailable for %s", encoder.normalizedKind(), codec)
+		}
+		arguments = append(arguments, decodeArguments...)
+	}
+	arguments = append(arguments, "-f", format, "-i", "pipe:0", "-map", "0:v:0", "-frames:v", "1", "-an", "-f", "null", "-")
+	return arguments, input, nil
+}
+func videoEncoderMain10ProbeArguments(encoder videoEncoder) ([]string, []byte, error) {
+	input, err := base64.StdEncoding.DecodeString(hybridProbeHEVCBase64)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode HEVC Main10 probe fixture: %w", err)
+	}
+	asset := storedAsset{
+		Kind:          processingTranscode,
+		VideoBitDepth: 10,
+		Decision: &PlaybackDecision{
+			Source: &PlaybackDecisionSource{VideoCodec: "hevc", Height: 128},
+			Target: &PlaybackDecisionTarget{VideoCodec: "hevc", Height: 128, VideoBitDepth: 10},
+		},
+	}
+	arguments := []string{"-nostdin", "-hide_banner", "-loglevel", "error"}
+	if encoder.normalizedKind() != videoEncoderSoftware {
+		arguments = append(arguments, encoder.globalArguments()...)
+		decodeArguments := encoder.hardwareDecodeArguments(asset)
+		if len(decodeArguments) == 0 {
+			return nil, nil, fmt.Errorf("%s HEVC Main10 hardware decoder path is unavailable", encoder.normalizedKind())
+		}
+		arguments = append(arguments, decodeArguments...)
+	}
+	arguments = append(arguments, "-f", "hevc", "-i", "pipe:0", "-map", "0:v:0")
+	codecArguments, err := encoder.codecArguments("hevc", "balanced", 1, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	arguments = append(arguments, codecArguments...)
+	arguments = append(arguments, "-frames:v", "1", "-an", "-f", "null", "-")
+	return arguments, input, nil
+}
+
+func videoEncoderProbeArguments(encoder videoEncoder, codec, quality string, toneMap bool) ([]string, []byte, error) {
+	arguments := []string{"-hide_banner", "-loglevel", "error"}
+	if !toneMap || encoder.toneMapBackend != videoToneMapHybrid {
+		arguments = append([]string{"-nostdin"}, arguments...)
+	}
 	arguments = append(arguments, encoder.globalArguments()...)
 	var input []byte
 	if toneMap && encoder.toneMapBackend == videoToneMapHybrid {
@@ -193,7 +405,11 @@ func videoEncoderProbeArguments(encoder videoEncoder, toneMap bool) ([]string, [
 			arguments = append(arguments, "-vf", filter)
 		}
 	}
-	arguments = append(arguments, encoder.codecArguments(1)...)
+	codecArguments, err := encoder.codecArguments(codec, quality, 1, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	arguments = append(arguments, codecArguments...)
 	arguments = append(arguments, "-frames:v", "1", "-an", "-f", "null", "-")
 	return arguments, input, nil
 }
@@ -228,8 +444,96 @@ func (encoder videoEncoder) normalizedKind() videoEncoderKind {
 	}
 	return encoder.kind
 }
+func normalizedTranscodeCodec(codec string) string {
+	codec = canonicalTargetVideoCodec(codec)
+	if codec == "auto" {
+		return ""
+	}
+	return codec
+}
+
+func (encoder videoEncoder) supportsEncode(codec string) bool {
+	codec = normalizedTranscodeCodec(codec)
+	if codec == "" {
+		return false
+	}
+	if encoder.encodeCodecs == nil {
+		return encoder.normalizedKind() == videoEncoderSoftware || codec == "h264"
+	}
+	return encoder.encodeCodecs[codec]
+}
+
+func (encoder videoEncoder) supportsDecode(codec string) bool {
+	codec = normalizedTranscodeCodec(codec)
+	if codec == "" {
+		return false
+	}
+	if encoder.decodeCodecs == nil {
+		return false
+	}
+	return encoder.decodeCodecs[codec]
+}
+
+func (encoder videoEncoder) supportedEncodeCodecs() []string {
+	return encoder.supportedCodecs(encoder.supportsEncode)
+}
+
+func (encoder videoEncoder) supportedDecodeCodecs() []string {
+	return encoder.supportedCodecs(encoder.supportsDecode)
+}
+
+func (encoder videoEncoder) supportedCodecs(supports func(string) bool) []string {
+	codecs := make([]string, 0, len(transcodeVideoCodecs))
+	for _, codec := range transcodeVideoCodecs {
+		if supports(codec) {
+			codecs = append(codecs, codec)
+		}
+	}
+	return codecs
+}
+
+func (encoder videoEncoder) transcodeCapabilities(preferred, quality string) TranscodeCapabilities {
+	preferred = strings.ToLower(strings.TrimSpace(preferred))
+	if preferred == "h265" {
+		preferred = "hevc"
+	}
+	if preferred != "auto" && normalizedTranscodeCodec(preferred) == "" {
+		preferred = "auto"
+	}
+	if preferred == "" {
+		preferred = "auto"
+	}
+	quality = normalizedTranscodeQuality(quality)
+	hardwareAcceleration := string(encoder.normalizedKind())
+	if encoder.toneMapBackend == videoToneMapHybrid {
+		hardwareAcceleration = string(videoToneMapHybrid)
+	}
+	return TranscodeCapabilities{
+		HardwareAcceleration: hardwareAcceleration,
+		DecodeCodecs:         encoder.supportedDecodeCodecs(),
+		EncodeCodecs:         encoder.supportedEncodeCodecs(),
+		HEVCMain10:           encoder.hevcMain10,
+		PreferredVideoCodec:  preferred,
+		QualityPreset:        quality,
+	}
+}
+
+func normalizedTranscodeQuality(quality string) string {
+	switch strings.ToLower(strings.TrimSpace(quality)) {
+	case "speed":
+		return "speed"
+	case "quality":
+		return "quality"
+	default:
+		return "balanced"
+	}
+}
 
 func (encoder videoEncoder) globalArguments() []string {
+	return videoEncoderGlobalArguments(encoder, windowsMediaPlatform)
+}
+
+func videoEncoderGlobalArguments(encoder videoEncoder, windows bool) []string {
 	switch encoder.normalizedKind() {
 	case videoEncoderVAAPI:
 		if encoder.toneMapBackend == videoToneMapVulkan {
@@ -242,10 +546,16 @@ func (encoder videoEncoder) globalArguments() []string {
 		}
 		return []string{"-init_hw_device", "vaapi=hw:" + encoder.device, "-filter_hw_device", "hw"}
 	case videoEncoderQSV:
+		if windows {
+			return []string{"-init_hw_device", "qsv=hw:hw,child_device_type=d3d11va", "-filter_hw_device", "hw"}
+		}
 		return []string{"-init_hw_device", "vaapi=va:" + encoder.device, "-init_hw_device", "qsv=hw@va", "-filter_hw_device", "hw"}
-	default:
-		return nil
+	case videoEncoderAMF:
+		if windows {
+			return []string{"-init_hw_device", "d3d11va=hw", "-filter_hw_device", "hw"}
+		}
 	}
+	return nil
 }
 
 func (encoder videoEncoder) usesHardwareToneMap() bool {
@@ -264,14 +574,16 @@ func (encoder videoEncoder) hardwareDecodeSafe(asset storedAsset) bool {
 		encoder.normalizedKind() == videoEncoderSoftware || asset.Decision == nil || asset.Decision.Source == nil {
 		return false
 	}
-	codec := normalizedCodec(asset.Decision.Source.VideoCodec)
-	switch codec {
-	case "h264", "h265":
-	default:
+	codec := normalizedTranscodeCodec(asset.Decision.Source.VideoCodec)
+	main10Path := codec == "hevc" && asset.VideoBitDepth > 8 && targetVideoBitDepth(asset) >= 10 && encoder.hevcMain10
+	if !encoder.supportsDecode(codec) && !main10Path {
+		return false
+	}
+	if asset.VideoBitDepth > 8 && targetVideoBitDepth(asset) <= 8 && !asset.ToneMap {
 		return false
 	}
 	if asset.ToneMap && !encoder.usesHardwareToneMap() {
-		return encoder.normalizedKind() == videoEncoderVAAPI && codec == "h265" && asset.VideoBitDepth == 10
+		return encoder.normalizedKind() == videoEncoderVAAPI && codec == "hevc" && asset.VideoBitDepth == 10
 	}
 	needsScale := asset.TargetHeight > 0 && asset.Decision.Source.Height > asset.TargetHeight
 	return !needsScale || encoder.normalizedKind() == videoEncoderVAAPI || encoder.normalizedKind() == videoEncoderQSV
@@ -295,6 +607,8 @@ func (encoder videoEncoder) hardwareDecodeArguments(asset storedAsset) []string 
 		return []string{"-hwaccel", "qsv", "-hwaccel_device", "hw", "-hwaccel_output_format", "qsv"}
 	case videoEncoderNVENC:
 		return []string{"-hwaccel", "cuda", "-hwaccel_output_format", "cuda"}
+	case videoEncoderAMF:
+		return []string{"-hwaccel", "d3d11va", "-hwaccel_device", "hw", "-hwaccel_output_format", "d3d11"}
 	default:
 		return nil
 	}
@@ -382,15 +696,95 @@ func (encoder videoEncoder) filter(toneMap bool) string {
 	}
 }
 
-func (encoder videoEncoder) codecArguments(threads int) []string {
+func (encoder videoEncoder) codecArguments(codec, quality string, threads int, main10 bool) ([]string, error) {
+	codec = normalizedTranscodeCodec(codec)
+	if codec == "" {
+		return nil, fmt.Errorf("unsupported transcode video codec")
+	}
+	if !encoder.supportsEncode(codec) {
+		return nil, fmt.Errorf("%s video encoder does not support %s", encoder.normalizedKind(), codec)
+	}
+	quality = normalizedTranscodeQuality(quality)
+	profile := "main"
+	if codec == "h264" {
+		profile = "high"
+	} else if codec == "hevc" && main10 {
+		profile = "main10"
+	}
+	encoderName := ""
 	switch encoder.normalizedKind() {
 	case videoEncoderVAAPI:
-		return []string{"-c:v", "h264_vaapi", "-profile:v", "high"}
+		encoderName = codec + "_vaapi"
+		qualityLevel := "4"
+		if quality == "speed" {
+			qualityLevel = "7"
+		} else if quality == "quality" {
+			qualityLevel = "1"
+		}
+		return []string{"-c:v", encoderName, "-profile:v", profile, "-quality", qualityLevel}, nil
 	case videoEncoderQSV:
-		return []string{"-c:v", "h264_qsv", "-profile:v", "high", "-preset", "veryfast", "-look_ahead", "0"}
+		encoderName = codec + "_qsv"
+		preset := "medium"
+		if quality == "speed" {
+			preset = "veryfast"
+		} else if quality == "quality" {
+			preset = "slow"
+		}
+		return []string{"-c:v", encoderName, "-profile:v", profile, "-preset", preset, "-look_ahead", "0"}, nil
 	case videoEncoderNVENC:
-		return []string{"-c:v", "h264_nvenc", "-profile:v", "high", "-preset", "p4", "-tune", "ll", "-rc", "vbr", "-cq", "18", "-b:v", "0", "-spatial_aq", "1", "-zerolatency", "1"}
+		encoderName = codec + "_nvenc"
+		preset := "p4"
+		if quality == "speed" {
+			preset = "p2"
+		} else if quality == "quality" {
+			preset = "p6"
+		}
+		return []string{"-c:v", encoderName, "-profile:v", profile, "-preset", preset, "-tune", "ll", "-rc", "vbr", "-spatial_aq", "1", "-zerolatency", "1"}, nil
+	case videoEncoderAMF:
+		encoderName = codec + "_amf"
+		return []string{"-c:v", encoderName, "-profile:v", profile, "-quality", quality}, nil
 	default:
-		return []string{"-threads", fmt.Sprintf("%d", threads), "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency", "-crf", "18", "-pix_fmt", "yuv420p"}
+		if threads < 1 {
+			return nil, fmt.Errorf("positive software transcode thread count is required")
+		}
+		preset, crf := "superfast", "18"
+		if quality == "speed" {
+			preset, crf = "ultrafast", "23"
+		} else if quality == "quality" {
+			preset, crf = "medium", "16"
+		}
+		switch codec {
+		case "h264":
+			encoderName = "libx264"
+		case "hevc":
+			encoderName = "libx265"
+			if quality == "speed" {
+				crf = "28"
+			} else if quality == "balanced" {
+				crf = "23"
+			} else {
+				crf = "19"
+			}
+		case "av1":
+			encoderName = "libsvtav1"
+			if quality == "speed" {
+				preset, crf = "10", "35"
+			} else if quality == "balanced" {
+				preset, crf = "8", "30"
+			} else {
+				preset, crf = "6", "25"
+			}
+		}
+		pixelFormat := "yuv420p"
+		arguments := []string{"-threads", strconv.Itoa(threads), "-c:v", encoderName}
+		if codec == "hevc" && main10 {
+			pixelFormat = "yuv420p10le"
+			arguments = append(arguments, "-profile:v", profile)
+		}
+		arguments = append(arguments, "-preset", preset, "-crf", crf, "-pix_fmt", pixelFormat)
+		if codec != "av1" {
+			arguments = append(arguments, "-tune", "zerolatency")
+		}
+		return arguments, nil
 	}
 }

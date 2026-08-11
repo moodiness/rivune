@@ -485,7 +485,7 @@ export type CustomSeriesResolveResult = {
   videos: Array<{ titleId: string; resourceId: string; seasonTitleId: string; seasonNumber: number; episodeNumber: number }>;
 };
 
-export type PlaybackMediaProfile = { container: string; videoCodec: string; audioCodec?: string };
+export type PlaybackMediaProfile = { container: string; videoCodec: string; audioCodec?: string; maximumVideoBitDepth?: number };
 export type PlaybackProcessingMode = "remux" | "transcode_audio" | "transcode";
 export type PlaybackSubtitleMode = "external" | "burn";
 export type PlaybackDecision = {
@@ -508,6 +508,7 @@ export type PlaybackDecision = {
     videoCodec?: string;
     audioCodec?: string;
     height?: number;
+    videoBitDepth?: number;
     videoBitrateKbps?: number;
   };
 };
@@ -647,6 +648,23 @@ export type PlaybackMediaJob = {
 };
 export type PlaybackMediaPool = { active: number; limit: number };
 export type PlaybackMediaProcessTotals = { started: number; succeeded: number; failed: number; softwareFallbacks: number };
+export type MediaDiagnostics = {
+  ffmpegVersion: string;
+  ffprobeVersion: string;
+  hardwareAcceleration: "unknown" | HardwareAccelerationMode;
+  videoEncoder: string;
+  preferredVideoCodec: PreferredTranscodeVideoCodec;
+  encodeCodecs: string[];
+  decodeCodecs: string[];
+  hevcMain10?: boolean;
+  qualityPreset: TranscodeQualityPreset;
+  hardwareToneMap: boolean;
+  toneMapBackend: "vulkan" | "vaapi" | "hybrid" | "software";
+  transcodeThreads: number;
+  maximumReadRate: number;
+  totals: PlaybackMediaProcessTotals;
+  pools: { process: PlaybackMediaPool; probe: PlaybackMediaPool; subtitle: PlaybackMediaPool; trickplay: PlaybackMediaPool };
+};
 export type PlaybackActivity = {
   summary: {
     activeSessions: number;
@@ -656,18 +674,7 @@ export type PlaybackActivity = {
     storageBytes: number;
     storageLimitBytes: number;
   };
-  diagnostics: {
-    ffmpegVersion: string;
-    ffprobeVersion: string;
-    hardwareAcceleration: "unknown" | "auto" | "software" | "vaapi" | "hybrid" | "qsv" | "nvenc";
-    videoEncoder: string;
-    hardwareToneMap: boolean;
-    toneMapBackend: "vulkan" | "vaapi" | "hybrid" | "software";
-    transcodeThreads: number;
-    maximumReadRate: number;
-    totals: PlaybackMediaProcessTotals;
-    pools: { process: PlaybackMediaPool; probe: PlaybackMediaPool; subtitle: PlaybackMediaPool; trickplay: PlaybackMediaPool };
-  };
+  diagnostics: MediaDiagnostics;
   sessions: PlaybackActivitySession[];
   jobs: PlaybackMediaJob[];
   sessionsTruncated: boolean;
@@ -844,7 +851,9 @@ export type JellyfinCredentialSecret = JellyfinCredentialStatus & {
   password: string;
 };
 
-export type HardwareAccelerationMode = "auto" | "software" | "vaapi" | "hybrid" | "qsv" | "nvenc";
+export type HardwareAccelerationMode = "auto" | "software" | "vaapi" | "hybrid" | "qsv" | "nvenc" | "amf";
+export type PreferredTranscodeVideoCodec = "auto" | "h264" | "hevc" | "av1";
+export type TranscodeQualityPreset = "speed" | "balanced" | "quality";
 
 export type SettingsValues = {
   interfaceLanguage?: InterfaceLanguage | null;
@@ -858,6 +867,9 @@ export type SettingsValues = {
   timezone?: string | null;
   hardwareAcceleration?: HardwareAccelerationMode | null;
   transcodeMaxBitrateKbps?: number | null;
+  preferredTranscodeVideoCodec?: PreferredTranscodeVideoCodec | null;
+  transcodeQualityPreset?: TranscodeQualityPreset | null;
+  transcodeConcurrency?: number | null;
   mediaMaxStorageMB?: number | null;
   artworkMaxStorageMB?: number | null;
 
@@ -890,13 +902,17 @@ export type RuntimeSettingsValues = {
   jellyfinDebug: boolean;
   hardwareAcceleration: HardwareAccelerationMode;
   transcodeMaxBitrateKbps: number;
+  preferredTranscodeVideoCodec: PreferredTranscodeVideoCodec;
+  transcodeQualityPreset: TranscodeQualityPreset;
+  transcodeConcurrency: number;
   mediaMaxStorageMB: number;
   artworkMaxStorageMB: number;
   allowTranscoding: boolean;
 };
 export type RuntimeApplication = {
   active: RuntimeSettingsValues;
-  pendingRestart: Array<"hardwareAcceleration">;
+  requested: RuntimeSettingsValues;
+  pendingRestart: Array<"hardwareAcceleration" | "preferredTranscodeVideoCodec" | "transcodeQualityPreset" | "transcodeConcurrency">;
 };
 export type SettingsLayer = { schemaVersion: number; revision: number; settings: SettingsValues; runtime?: RuntimeApplication; updatedAt: string | null };
 

@@ -58,6 +58,27 @@ func TestActivityArraysAreBoundedAndReportTruncation(t *testing.T) {
 	}
 }
 
+func TestActivityDiagnosticsExposeTranscodeCodecInventory(t *testing.T) {
+	diagnostics := MediaDiagnostics{
+		HardwareAcceleration: "nvenc", PreferredVideoCodec: "av1", QualityPreset: "quality", HEVCMain10: true,
+		EncodeCodecs: []string{"h264", "hevc", "av1"}, DecodeCodecs: []string{"h264", "hevc"},
+	}
+	encoded, err := json.Marshal(diagnostics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var properties map[string]any
+	if err := json.Unmarshal(encoded, &properties); err != nil {
+		t.Fatal(err)
+	}
+	encodeCodecs, encodeOK := properties["encodeCodecs"].([]any)
+	decodeCodecs, decodeOK := properties["decodeCodecs"].([]any)
+	if properties["preferredVideoCodec"] != "av1" || properties["qualityPreset"] != "quality" || properties["hevcMain10"] != true ||
+		!encodeOK || len(encodeCodecs) != 3 || !decodeOK || len(decodeCodecs) != 2 {
+		t.Fatalf("activity diagnostics JSON = %s", encoded)
+	}
+}
+
 func TestMediaJobErrorClassIsClosed(t *testing.T) {
 	tests := []struct {
 		err  error

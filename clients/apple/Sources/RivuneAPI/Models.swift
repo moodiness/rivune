@@ -860,11 +860,13 @@ public struct PlaybackMediaProfile: Codable, Sendable, Equatable {
     public let container: String
     public let videoCodec: String
     public let audioCodec: String?
+    public let maximumVideoBitDepth: Int?
 
-    public init(container: String, videoCodec: String, audioCodec: String? = nil) {
+    public init(container: String, videoCodec: String, audioCodec: String? = nil, maximumVideoBitDepth: Int? = nil) {
         self.container = container
         self.videoCodec = videoCodec
         self.audioCodec = audioCodec
+        self.maximumVideoBitDepth = maximumVideoBitDepth
     }
 }
 
@@ -1014,6 +1016,7 @@ public struct PlaybackDecisionTarget: Codable, Sendable, Equatable {
     public let videoCodec: String?
     public let audioCodec: String?
     public let height: Int?
+    public let videoBitDepth: Int?
     public let videoBitrateKbps: Int?
 }
 
@@ -1066,6 +1069,7 @@ public struct PlaybackActivitySummary: Codable, Sendable, Equatable {
 
 public struct PlaybackMediaDiagnostics: Codable, Sendable, Equatable {
     public let videoEncoder: String
+    public let hevcMain10: Bool?
     public let hardwareToneMap: Bool
 }
 

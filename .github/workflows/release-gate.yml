@@ -61,6 +61,33 @@ jobs:
         working-directory: server
         run: go test -race -p 1 ./...
 
+  server-windows:
+    name: Server Windows compile
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build embedded frontend
+        working-directory: web
+        run: npm ci && npm run build
+      - name: Compile server and Windows test binaries
+        working-directory: server
+        run: go test -run '^$' ./...
+      - name: Build Windows server commands
+        working-directory: server
+        run: go build ./cmd/rivune ./cmd/rivune-migrate
+
   frontend:
     name: Frontend build and E2E
     runs-on: ubuntu-latest

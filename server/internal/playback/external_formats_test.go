@@ -147,6 +147,7 @@ func TestExternalMediaHDR10ToneMapProducesPlayableSDR(t *testing.T) {
 	if err := fixture.processor.ProcessHLS(externalMediaTestContext(t), storedAsset{
 		ID: "hdr10", Kind: processingTranscode, URL: source, Container: "mkv", HLSSegmentContainer: "mp4",
 		ToneMap: true, TargetHeight: 64, VideoBitrateKbps: 300, MaximumAudioChannels: 2,
+		TargetVideoCodec: "h264", QualityPreset: "speed",
 		Decision: &PlaybackDecision{
 			Source: &PlaybackDecisionSource{VideoCodec: "h265", Height: 90, HDRFormat: "hdr10"},
 			Target: &PlaybackDecisionTarget{VideoCodec: "h264", Height: 64, VideoBitrateKbps: 300},
@@ -167,5 +168,78 @@ func TestExternalMediaHDR10ToneMapProducesPlayableSDR(t *testing.T) {
 	)
 	if len(frame) != 114*64*3 {
 		t.Fatalf("decoded tone-mapped frame bytes = %d, want %d", len(frame), 114*64*3)
+	}
+}
+
+func TestExternalMediaProducesPlayableHEVCAndAV1FMP4(t *testing.T) {
+	fixture := newExternalMediaFixture(t)
+	for _, codec := range []string{"hevc", "av1"} {
+		t.Run(codec, func(t *testing.T) {
+			if !fixture.processor.softwareEncoder.supportsEncode(codec) {
+				t.Skipf("software %s encoder is unavailable", codec)
+			}
+			directory := t.TempDir()
+			if err := fixture.processor.ProcessHLS(externalMediaTestContext(t), storedAsset{
+				ID: codec, Kind: processingTranscode, URL: fixture.video, Container: "mkv",
+				HLSSegmentContainer: "mp4", TargetVideoCodec: codec, QualityPreset: "speed",
+				VideoBitrateKbps: 500, MaximumAudioChannels: 2,
+				Decision: &PlaybackDecision{
+					Source: &PlaybackDecisionSource{VideoCodec: "h264", Height: 90},
+					Target: &PlaybackDecisionTarget{VideoCodec: codec, AudioCodec: "aac", Height: 90, VideoBitrateKbps: 500},
+				},
+			}, directory); err != nil {
+				t.Fatalf("transcode %s fMP4 HLS: %v", codec, err)
+			}
+			output := probeExternalMedia(t, fixture, filepath.Join(directory, "index.m3u8"))
+			var video, audio *externalProbeStream
+			for index := range output.Streams {
+				switch output.Streams[index].CodecType {
+				case "video":
+					video = &output.Streams[index]
+				case "audio":
+					audio = &output.Streams[index]
+				}
+			}
+			if video == nil || video.CodecName != codec || audio == nil || audio.CodecName != "aac" {
+				t.Fatalf("%s fMP4 output video=%+v audio=%+v probe=%+v", codec, video, audio, output)
+			}
+			wantTag := "av01"
+			if codec == "hevc" {
+				wantTag = "hvc1"
+			}
+			if video.CodecTag != wantTag {
+				t.Fatalf("%s sample entry = %q, want %q", codec, video.CodecTag, wantTag)
+			}
+		})
+	}
+}
+
+func TestExternalMedia4KSourceScalesTo1080HLS(t *testing.T) {
+	fixture := newExternalMediaFixture(t)
+	source := filepath.Join(t.TempDir(), "synthetic-4k.mkv")
+	runExternalMediaCommand(t, fixture.processor.ffmpegPath,
+		"-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc2=size=3840x2160:rate=2:duration=2",
+		"-c:v", "mpeg4", "-q:v", "20", "-threads", "1", source,
+	)
+	sourceProbe := probeExternalMedia(t, fixture, source)
+	if len(sourceProbe.Streams) != 1 || sourceProbe.Streams[0].Width != 3840 || sourceProbe.Streams[0].Height != 2160 {
+		t.Fatalf("synthetic 4K source = %+v", sourceProbe.Streams)
+	}
+	directory := t.TempDir()
+	if err := fixture.processor.ProcessHLS(externalMediaTestContext(t), storedAsset{
+		ID: "4k", Kind: processingTranscode, URL: source, Container: "mkv", HLSSegmentContainer: "mp4",
+		TargetHeight: 1080, VideoBitrateKbps: 3000, MaximumAudioChannels: 2,
+		TargetVideoCodec: "h264", QualityPreset: "speed",
+		Decision: &PlaybackDecision{
+			Source: &PlaybackDecisionSource{VideoCodec: "mpeg4", Height: 2160},
+			Target: &PlaybackDecisionTarget{VideoCodec: "h264", Height: 1080, VideoBitrateKbps: 3000},
+		},
+	}, directory); err != nil {
+		t.Fatalf("transcode synthetic 4K source: %v", err)
+	}
+	output := probeExternalMedia(t, fixture, filepath.Join(directory, "index.m3u8"))
+	if len(output.Streams) != 1 || output.Streams[0].CodecName != "h264" || output.Streams[0].Width != 1920 || output.Streams[0].Height != 1080 {
+		t.Fatalf("scaled 4K output = %+v", output.Streams)
 	}
 }

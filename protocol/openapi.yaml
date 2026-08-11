@@ -1266,7 +1266,7 @@ paths:
         - bearerAuth: []
       responses:
         "200":
-          description: Materialized schema-v2 instance settings and their runtime application state.
+          description: Materialized schema-v3 instance settings and their runtime application state.
           headers:
             Cache-Control:
               required: true
@@ -1279,7 +1279,7 @@ paths:
           $ref: "#/components/responses/Error"
     patch:
       summary: Update instance settings
-      description: Global-administrator-only partial update of instance and runtime settings. Runtime fields are materialized and non-null; `hardwareAcceleration` is applied after restart while the other runtime fields apply live. Profile `transcoding` choices remain on the profile settings route.
+      description: Global-administrator-only partial update of instance and runtime settings. Runtime fields are materialized and non-null; `hardwareAcceleration`, `preferredTranscodeVideoCodec`, `transcodeQualityPreset`, and `transcodeConcurrency` are applied after restart while bitrate and storage limits retain their live behavior. Profile `transcoding` choices remain on the profile settings route.
       operationId: updateInstanceSettings
       security:
         - bearerAuth: []
@@ -6218,6 +6218,16 @@ components:
               type: boolean
             hardwareAcceleration:
               $ref: "#/components/schemas/HardwareAccelerationMode"
+            preferredTranscodeVideoCodec:
+              type: string
+              enum: [auto, h264, hevc, av1]
+            transcodeQualityPreset:
+              type: string
+              enum: [speed, balanced, quality]
+            transcodeConcurrency:
+              type: integer
+              minimum: 1
+              maximum: 32
             transcodeMaxBitrateKbps:
               type: integer
               minimum: 64
@@ -6255,7 +6265,7 @@ components:
       pattern: "^[A-Za-z_+-]+(?:/[A-Za-z0-9._+-]+)*$"
     HardwareAccelerationMode:
       type: string
-      enum: [auto, software, hybrid, vaapi, qsv, nvenc]
+      enum: [auto, software, hybrid, vaapi, qsv, nvenc, amf]
     CommonSettingsValues:
       type: object
       properties:
@@ -6349,7 +6359,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/CommonSettingsValues"
         - type: object
-          required: [timezone, jellyfinEnabled, jellyfinDebug, hardwareAcceleration, transcodeMaxBitrateKbps, mediaMaxStorageMB, artworkMaxStorageMB, allowTranscoding]
+          required: [timezone, jellyfinEnabled, jellyfinDebug, hardwareAcceleration, preferredTranscodeVideoCodec, transcodeQualityPreset, transcodeConcurrency, transcodeMaxBitrateKbps, mediaMaxStorageMB, artworkMaxStorageMB, allowTranscoding]
           properties:
             timezone:
               $ref: "#/components/schemas/IANATimezone"
@@ -6364,6 +6374,19 @@ components:
             hardwareAcceleration:
               $ref: "#/components/schemas/HardwareAccelerationMode"
               default: auto
+            preferredTranscodeVideoCodec:
+              type: string
+              enum: [auto, h264, hevc, av1]
+              default: auto
+            transcodeQualityPreset:
+              type: string
+              enum: [speed, balanced, quality]
+              default: balanced
+            transcodeConcurrency:
+              type: integer
+              minimum: 1
+              maximum: 32
+              default: 4
             transcodeMaxBitrateKbps:
               type: integer
               minimum: 64
@@ -6386,7 +6409,7 @@ components:
     RuntimeSettingsValues:
       type: object
       additionalProperties: false
-      required: [timezone, jellyfinEnabled, jellyfinDebug, hardwareAcceleration, transcodeMaxBitrateKbps, mediaMaxStorageMB, artworkMaxStorageMB, allowTranscoding]
+      required: [timezone, jellyfinEnabled, jellyfinDebug, hardwareAcceleration, preferredTranscodeVideoCodec, transcodeQualityPreset, transcodeConcurrency, transcodeMaxBitrateKbps, mediaMaxStorageMB, artworkMaxStorageMB, allowTranscoding]
       properties:
         timezone:
           $ref: "#/components/schemas/IANATimezone"
@@ -6401,6 +6424,19 @@ components:
         hardwareAcceleration:
           $ref: "#/components/schemas/HardwareAccelerationMode"
           default: auto
+        preferredTranscodeVideoCodec:
+          type: string
+          enum: [auto, h264, hevc, av1]
+          default: auto
+        transcodeQualityPreset:
+          type: string
+          enum: [speed, balanced, quality]
+          default: balanced
+        transcodeConcurrency:
+          type: integer
+          minimum: 1
+          maximum: 32
+          default: 4
         transcodeMaxBitrateKbps:
           type: integer
           minimum: 64
@@ -6422,18 +6458,21 @@ components:
     RuntimeSettingsApplication:
       type: object
       additionalProperties: false
-      required: [active, pendingRestart]
+      required: [active, requested, pendingRestart]
       properties:
         active:
           $ref: "#/components/schemas/RuntimeSettingsValues"
+        requested:
+          description: Persisted values requested for the next process start; live settings equal their active values.
+          $ref: "#/components/schemas/RuntimeSettingsValues"
         pendingRestart:
           type: array
-          description: Sorted runtime fields whose requested values differ from the active process. Only hardwareAcceleration can require restart.
-          maxItems: 1
+          description: Sorted runtime fields whose requested values differ from the active process.
+          maxItems: 4
           uniqueItems: true
           items:
             type: string
-            const: hardwareAcceleration
+            enum: [hardwareAcceleration, preferredTranscodeVideoCodec, transcodeConcurrency, transcodeQualityPreset]
     IntegrationCredentialsPatch:
       type: object
       additionalProperties: false
@@ -6766,13 +6805,13 @@ components:
       properties:
         schemaVersion:
           type: integer
-          const: 2
+          const: 3
         revision:
           type: integer
           format: int64
           minimum: 0
         settings:
-          description: Requested persisted schema-v2 values. Existing instance-setting fields retain their meanings.
+          description: Requested persisted schema-v3 values. Existing instance-setting fields retain their meanings.
           $ref: "#/components/schemas/InstanceSettingsValues"
         runtime:
           $ref: "#/components/schemas/RuntimeSettingsApplication"
@@ -8745,6 +8784,10 @@ components:
           type: integer
           minimum: 1
           maximum: 4320
+        videoBitDepth:
+          type: integer
+          minimum: 8
+          maximum: 16
         videoBitrateKbps:
           type: integer
           minimum: 64
@@ -8766,6 +8809,11 @@ components:
           type: string
           minLength: 1
           maxLength: 64
+        maximumVideoBitDepth:
+          description: Maximum decoded video bit depth supported by this container/video/audio profile. Omission means 8-bit Main compatibility; 10-bit support must be explicit.
+          type: integer
+          minimum: 8
+          maximum: 16
     PlaybackCapabilities:
       type: object
       additionalProperties: false
@@ -8935,7 +8983,7 @@ components:
     PlaybackMediaDiagnostics:
       type: object
       additionalProperties: false
-      required: [ffmpegVersion, ffprobeVersion, hardwareAcceleration, videoEncoder, hardwareToneMap, toneMapBackend, transcodeThreads, maximumReadRate, totals, pools]
+      required: [ffmpegVersion, ffprobeVersion, hardwareAcceleration, videoEncoder, preferredVideoCodec, encodeCodecs, decodeCodecs, qualityPreset, hardwareToneMap, toneMapBackend, transcodeThreads, maximumReadRate, totals, pools]
       properties:
         ffmpegVersion:
           type: string
@@ -8947,11 +8995,34 @@ components:
           maxLength: 64
         hardwareAcceleration:
           type: string
-          enum: [unknown, auto, software, hybrid, vaapi, qsv, nvenc]
+          enum: [unknown, auto, software, hybrid, vaapi, qsv, nvenc, amf]
         videoEncoder:
           type: string
           minLength: 1
           maxLength: 64
+        preferredVideoCodec:
+          type: string
+          enum: [auto, h264, hevc, av1]
+        encodeCodecs:
+          type: array
+          uniqueItems: true
+          maxItems: 3
+          items:
+            type: string
+            enum: [h264, hevc, av1]
+        decodeCodecs:
+          type: array
+          uniqueItems: true
+          maxItems: 3
+          items:
+            type: string
+            enum: [h264, hevc, av1]
+        hevcMain10:
+          description: Functional HEVC Main10 decode-to-encode probes succeeded for the active backend and its software fallback.
+          type: boolean
+        qualityPreset:
+          type: string
+          enum: [speed, balanced, quality]
         hardwareToneMap:
           type: boolean
         toneMapBackend:

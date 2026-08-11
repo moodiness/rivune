@@ -465,7 +465,6 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 	}
 	return session, err
 }
-
 func (service *Service) refreshSourceReference(ctx context.Context, principal auth.Principal, reference sourceReference) (sourceReference, error) {
 	addonID := strings.TrimSpace(reference.Source.AddonID)
 	if addonID == "" {
@@ -900,10 +899,12 @@ func validateCapabilities(capabilities Capabilities) error {
 		}
 		if profile.MaximumVideoLevel < 0 || profile.MaximumVideoLevel > 1000 ||
 			profile.VideoLevelRequired && profile.MaximumVideoLevel == 0 ||
+			profile.MaximumVideoBitDepth != 0 && (profile.MaximumVideoBitDepth < 8 || profile.MaximumVideoBitDepth > 16) ||
 			len(profile.ExcludedVideoRange) > 64 ||
 			profile.VideoRangeRequired && strings.TrimSpace(profile.ExcludedVideoRange) == "" {
 			return ErrInvalidInput
 		}
+
 	}
 	if len(capabilities.ContainerProfiles) > 256 {
 		return ErrInvalidInput
@@ -1098,6 +1099,15 @@ func (service *Service) playbackCapabilities(client Capabilities, maximumHeight,
 	capabilities := cloneCapabilities(client)
 	capabilities.MaximumHeight = maximumHeight
 	capabilities.TranscodeVideoBitrateKbps = bitrateKbps
+	if processor, ok := service.processor.(interface{ TranscodeCapabilities() TranscodeCapabilities }); ok {
+		engine := processor.TranscodeCapabilities()
+		engine.DecodeCodecs = append([]string(nil), engine.DecodeCodecs...)
+		engine.EncodeCodecs = append([]string(nil), engine.EncodeCodecs...)
+		capabilities.transcodeCapabilities = engine
+	}
+	if processor, ok := service.processor.(interface{ ToneMapBackend() string }); ok {
+		capabilities.toneMapBackend = processor.ToneMapBackend()
+	}
 	if processor, ok := service.processor.(interface{ ToneMapMaximumHeight() int }); ok {
 		capabilities.ToneMapMaximumHeight = processor.ToneMapMaximumHeight()
 	} else {

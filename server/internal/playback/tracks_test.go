@@ -88,14 +88,20 @@ func TestApplyPlaybackPreferencesReportsMissingAudioConversionMode(t *testing.T)
 }
 
 func TestApplyPlaybackPreferencesFallsBackToPlayableAudioForAutomaticLanguage(t *testing.T) {
+	inspection := &MediaInspection{Container: "mkv", VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264"}}, AudioTracks: []MediaTrack{
+		{Index: 1, Type: "audio", Codec: "dts", Language: "fr"},
+		{Index: 2, Type: "audio", Codec: "aac", Language: "en"},
+	}}
+	decision := &PlaybackDecision{
+		Reason: decisionRemuxRequired, Reasons: []string{reasonContainerNotSupported, reasonAudioCodecNotSupported}, VideoAction: "copy", AudioAction: "copy",
+		Source: &PlaybackDecisionSource{Container: "mkv", VideoCodec: "h264", AudioCodec: "dts"},
+		Target: &PlaybackDecisionTarget{Protocol: "hls", Container: "hls", VideoCodec: "h264", AudioCodec: "dts"},
+	}
 	sources := []Source{{
 		ID: "stream-1", Mode: processingRemux, Protocol: "hls", Container: "hls", Compatible: true,
-		Media: &MediaInspection{VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264"}}, AudioTracks: []MediaTrack{
-			{Index: 1, Type: "audio", Codec: "dts", Language: "fr"},
-			{Index: 2, Type: "audio", Codec: "aac", Language: "en"},
-		}},
+		Media: inspection, Decision: clonePlaybackDecision(decision),
 	}}
-	assets := []storedAsset{{ID: "stream-1", Kind: processingRemux}}
+	assets := []storedAsset{{ID: "stream-1", Kind: processingRemux, Decision: clonePlaybackDecision(decision)}}
 	err := applyPlaybackPreferences(sources, assets, ResolveInput{
 		PreferredAudioLanguage: "fr-FR",
 		Capabilities: Capabilities{
@@ -108,6 +114,12 @@ func TestApplyPlaybackPreferencesFallsBackToPlayableAudioForAutomaticLanguage(t 
 	})
 	if err != nil || assets[0].AudioTrackIndex == nil || *assets[0].AudioTrackIndex != 2 {
 		t.Fatalf("automatic language preference did not fall back to playable audio: err=%v source=%+v asset=%+v", err, sources[0], assets[0])
+	}
+	for _, refreshed := range []*PlaybackDecision{sources[0].Decision, assets[0].Decision} {
+		if refreshed == nil || refreshed.Source == nil || refreshed.Target == nil || refreshed.Source.AudioCodec != "aac" || refreshed.Target.AudioCodec != "aac" ||
+			supports(refreshed.Reasons, reasonAudioCodecNotSupported) || !supports(refreshed.Reasons, reasonContainerNotSupported) {
+			t.Fatalf("selected audio decision was not refreshed: %+v", refreshed)
+		}
 	}
 }
 
@@ -131,7 +143,7 @@ func TestAudioTrackFullTranscodeUsesVideoHDRProfileEvidence(t *testing.T) {
 		video     MediaTrack
 		wantTone  bool
 	}{
-		{name: "HDR10 profile support", hdr: "hdr10", video: MediaTrack{Index: 0, Type: "video", Codec: "h265", Height: 1080}},
+		{name: "HDR10 profile support still tone maps to Main 8", hdr: "hdr10", video: MediaTrack{Index: 0, Type: "video", Codec: "h265", Height: 1080}, wantTone: true},
 		{name: "Dolby Vision compatible base", hdr: "dolby_vision", video: MediaTrack{Index: 0, Type: "video", Codec: "h265", Height: 1080, DolbyVisionBLPresent: true, DolbyVisionCompatibilityID: 1}, wantTone: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -345,10 +357,117 @@ func TestSubtitleBurnRejectsDolbyVisionWithoutCompatibleBase(t *testing.T) {
 		t.Fatalf("Dolby Vision compatible-base burn failed: err=%v asset=%+v", err, assets[0])
 	}
 	sources, assets, subtitles, subtitleAssets = newState(MediaTrack{Index: 0, Type: "video", Codec: "h265", Height: 1080}, "hdr10")
-	if err := applySubtitleDecision(sources, assets, subtitles, subtitleAssets, capabilities, true); err != nil || assets[0].ToneMap {
-		t.Fatalf("HDR10 profile-supported burn regressed: err=%v asset=%+v", err, assets[0])
+	if err := applySubtitleDecision(sources, assets, subtitles, subtitleAssets, capabilities, true); err != nil || !assets[0].ToneMap ||
+		sources[0].Decision == nil || sources[0].Decision.Target == nil || sources[0].Decision.Target.VideoBitDepth != 8 {
+		t.Fatalf("HDR10 subtitle burn did not select the probed 8-bit tone-map path: err=%v source=%+v asset=%+v", err, sources[0], assets[0])
 	}
 }
+
+func TestSubtitleBurnCopiesCompatibleAudioAndExplainsPipeline(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac", "opus"},
+		ProcessingModes: []string{processingTranscode}, SubtitleModes: []string{"burn"},
+		transcodeCapabilities: TranscodeCapabilities{HardwareAcceleration: "vaapi", DecodeCodecs: []string{"h264"}, EncodeCodecs: []string{"h264"}, QualityPreset: "balanced"},
+	}
+	for _, test := range []struct {
+		name, audioCodec, segmentContainer, wantAction string
+	}{
+		{name: "compatible AAC copies into TS", audioCodec: "aac", segmentContainer: "ts", wantAction: "copy"},
+		{name: "incompatible DTS transcodes", audioCodec: "dts", segmentContainer: "ts", wantAction: "transcode"},
+		{name: "Opus transcodes for TS", audioCodec: "opus", segmentContainer: "ts", wantAction: "transcode"},
+		{name: "Opus copies into fMP4", audioCodec: "opus", segmentContainer: "mp4", wantAction: "copy"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capabilities.HLSSegmentContainer = test.segmentContainer
+			inspection := &MediaInspection{
+				Container: "mkv", VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Height: 1080}},
+				AudioTracks:    []MediaTrack{{Index: 1, Type: "audio", Codec: test.audioCodec, Channels: 2}},
+				SubtitleTracks: []MediaTrack{{Index: 2, Type: "subtitle", Codec: "ass"}},
+			}
+			sources := []Source{{ID: "stream-1", Mode: "direct", Protocol: "http", Container: "mkv", Compatible: true, Media: inspection, Decision: directDecision(*inspection)}}
+			assets := []storedAsset{{ID: "stream-1", URL: "https://media.example/movie.mkv"}}
+			subtitles, subtitleAssets := embeddedSubtitles(sources, assets, capabilities)
+			subtitles[0].Default = true
+			if err := applySubtitleDecision(sources, assets, subtitles, subtitleAssets, capabilities, true); err != nil {
+				t.Fatal(err)
+			}
+			decision := sources[0].Decision
+			if decision == nil || decision.AudioAction != test.wantAction || decision.Pipeline == nil || decision.Pipeline.ZeroCopy ||
+				!supports(decision.Reasons, decisionSubtitleBurnRequired) || assets[0].TargetVideoCodec != "h264" || assets[0].QualityPreset != "balanced" {
+				t.Fatalf("subtitle burn plan is incoherent: decision=%+v asset=%+v", decision, assets[0])
+			}
+		})
+	}
+}
+
+func TestSubtitleBurnSelectsVideoTargetForCopiedAudioProfile(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"hls"}, ProcessingModes: []string{processingTranscode}, SubtitleModes: []string{"burn"},
+		HLSSegmentContainer:   "mp4",
+		MediaProfiles:         []MediaProfile{{Container: "mp4", VideoCodec: "h264", AudioCodec: "opus", Transcoding: true}},
+		transcodeCapabilities: TranscodeCapabilities{EncodeCodecs: []string{"h264"}},
+	}
+	inspection := &MediaInspection{
+		Container: "mkv", VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Height: 1080}},
+		AudioTracks:    []MediaTrack{{Index: 1, Type: "audio", Codec: "opus", Channels: 2}},
+		SubtitleTracks: []MediaTrack{{Index: 2, Type: "subtitle", Codec: "ass"}},
+	}
+	sources := []Source{{ID: "stream-1", Mode: "direct", Protocol: "http", Container: "mkv", Compatible: true, Media: inspection}}
+	assets := []storedAsset{{ID: "stream-1", URL: "https://media.example/movie.mkv"}}
+	subtitles, subtitleAssets := embeddedSubtitles(sources, assets, capabilities)
+	subtitles[0].Default = true
+	if err := applySubtitleDecision(sources, assets, subtitles, subtitleAssets, capabilities, true); err != nil {
+		t.Fatal(err)
+	}
+	decision := sources[0].Decision
+	if decision == nil || decision.AudioAction != "copy" || decision.Target == nil || decision.Target.VideoCodec != "h264" || decision.Target.AudioCodec != "opus" {
+		t.Fatalf("audio-profile burn target = %+v", decision)
+	}
+}
+
+func TestSubtitleBurnReasonsUseSelectedAudioTrack(t *testing.T) {
+	capabilities := Capabilities{
+		StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+		ProcessingModes: []string{processingTranscode}, SubtitleModes: []string{"burn"},
+		transcodeCapabilities: TranscodeCapabilities{EncodeCodecs: []string{"h264"}},
+	}
+	for _, test := range []struct {
+		name, primaryCodec, selectedCodec, wantAction string
+		wantAudioReason                               bool
+	}{
+		{name: "selected AAC removes primary DTS reason", primaryCodec: "dts", selectedCodec: "aac", wantAction: "copy"},
+		{name: "selected DTS adds missing reason", primaryCodec: "aac", selectedCodec: "dts", wantAction: "transcode", wantAudioReason: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			selectedIndex := 2
+			inspection := &MediaInspection{
+				Container: "mkv", VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Height: 1080}},
+				AudioTracks: []MediaTrack{
+					{Index: 1, Type: "audio", Codec: test.primaryCodec, Channels: 2},
+					{Index: selectedIndex, Type: "audio", Codec: test.selectedCodec, Channels: 2},
+				},
+				SubtitleTracks: []MediaTrack{{Index: 3, Type: "subtitle", Codec: "ass"}},
+			}
+			sources := []Source{{
+				ID: "stream-1", Mode: "direct", Protocol: "http", Container: "mkv", Compatible: true, Media: inspection,
+				Decision: &PlaybackDecision{Reasons: []string{reasonContainerNotSupported, reasonAudioCodecNotSupported}},
+			}}
+			assets := []storedAsset{{ID: "stream-1", URL: "https://media.example/movie.mkv", AudioTrackIndex: &selectedIndex}}
+			subtitles, subtitleAssets := embeddedSubtitles(sources, assets, capabilities)
+			subtitles[0].Default = true
+			if err := applySubtitleDecision(sources, assets, subtitles, subtitleAssets, capabilities, true); err != nil {
+				t.Fatal(err)
+			}
+			decision := sources[0].Decision
+			if decision == nil || decision.Source == nil || decision.Target == nil || decision.Source.AudioCodec != normalizedCodec(test.selectedCodec) ||
+				decision.Target.AudioCodec != "aac" || decision.AudioAction != test.wantAction ||
+				supports(decision.Reasons, reasonAudioCodecNotSupported) != test.wantAudioReason || !supports(decision.Reasons, reasonContainerNotSupported) {
+				t.Fatalf("selected-audio burn decision = %+v", decision)
+			}
+		})
+	}
+}
+
 func cloneMediaInspectionPointer(value *MediaInspection) *MediaInspection {
 	cloned := cloneMediaInspection(*value)
 	return &cloned

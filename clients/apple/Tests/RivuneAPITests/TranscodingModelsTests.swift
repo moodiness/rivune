@@ -12,7 +12,7 @@ final class TranscodingModelsTests: XCTestCase {
             maximumVideoBitrateKbps: 12_000,
             maximumAudioChannels: 6,
             subtitleModes: ["external", "burn"],
-            mediaProfiles: [PlaybackMediaProfile(container: "mp4", videoCodec: "h264", audioCodec: "aac")]
+            mediaProfiles: [PlaybackMediaProfile(container: "mp4", videoCodec: "h265", audioCodec: "aac", maximumVideoBitDepth: 10)]
         )
 
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(capabilities)) as? [String: Any])
@@ -21,6 +21,7 @@ final class TranscodingModelsTests: XCTestCase {
         XCTAssertEqual(object["maximumVideoBitrateKbps"] as? Int, 12_000)
         XCTAssertEqual(object["maximumAudioChannels"] as? Int, 6)
         XCTAssertEqual(object["subtitleModes"] as? [String], ["external", "burn"])
+        XCTAssertEqual(((object["mediaProfiles"] as? [[String: Any]])?.first)?["maximumVideoBitDepth"] as? Int, 10)
     }
 
     func testSourceListDecodesOptionalAddonNameAndSourceIdentity() throws {
@@ -55,7 +56,7 @@ final class TranscodingModelsTests: XCTestCase {
           "sources":[{
             "id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test",
             "mode":"transcode","protocol":"hls","compatible":true,
-            "decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitrateKbps":12000},"futureDecisionField":true}
+            "decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}
           }],
           "subtitles":[{"id":"subtitle-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","default":true,"delivery":"burn","futureSubtitleField":"ignored"}],
           "providerErrors":[{"addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","code":"future_provider_code","message":"future"}],
@@ -70,6 +71,7 @@ final class TranscodingModelsTests: XCTestCase {
         XCTAssertEqual(session.sources.first?.decision?.reason, "subtitle_burn_required")
         XCTAssertEqual(session.sources.first?.decision?.source?.hdrFormat, "dolby_vision")
         XCTAssertEqual(session.sources.first?.decision?.target?.videoBitrateKbps, 12_000)
+        XCTAssertEqual(session.sources.first?.decision?.target?.videoBitDepth, 8)
         XCTAssertEqual(session.subtitles.first?.delivery, "burn")
         XCTAssertNil(session.subtitles.first?.url)
         XCTAssertEqual(session.providerErrors.first?.code, "future_provider_code")

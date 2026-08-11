@@ -1453,6 +1453,7 @@
   .activity-admin { --activity-artwork-inline-size: calc(var(--space-8) + var(--space-8) + var(--space-2)); }
   .activity-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); }
   .activity-metric { min-width: 0; display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-subtle); }
+  .activity-metric--wide { grid-column: 1 / -1; }
   .activity-metric--loading { min-height: calc(var(--space-8) + var(--space-5)); padding: 0; border: 0; }
   .activity-metric > span { width: var(--space-7); height: var(--space-7); display: grid; place-items: center; flex: 0 0 auto; border-radius: var(--radius-sm); color: var(--accent); background: var(--surface-accent); }
   .activity-metric > div { min-width: 0; display: grid; gap: var(--space-1); }

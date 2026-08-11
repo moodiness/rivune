@@ -9,11 +9,14 @@ import (
 )
 
 const (
-	DefaultTimezone                = "UTC"
-	DefaultHardwareAcceleration    = "auto"
-	DefaultTranscodeMaxBitrateKbps = 12000
-	DefaultMediaMaxStorageMB       = 20480
-	DefaultArtworkMaxStorageMB     = 20480
+	DefaultTimezone                     = "UTC"
+	DefaultHardwareAcceleration         = "auto"
+	DefaultPreferredTranscodeVideoCodec = "auto"
+	DefaultTranscodeQualityPreset       = "balanced"
+	DefaultTranscodeConcurrency         = 4
+	DefaultTranscodeMaxBitrateKbps      = 12000
+	DefaultMediaMaxStorageMB            = 20480
+	DefaultArtworkMaxStorageMB          = 20480
 )
 
 var ErrInvalidValues = errors.New("invalid runtime settings")
@@ -22,36 +25,48 @@ var ErrInvalidValues = errors.New("invalid runtime settings")
 // Values as one indivisible generation; callers must never patch a loaded
 // Snapshot in place.
 type Values struct {
-	Revision                int64
-	Timezone                string
-	JellyfinEnabled         bool
-	JellyfinDebug           bool
-	HardwareAcceleration    string
-	TranscodeMaxBitrateKbps int
-	MediaMaxStorageMB       int
-	ArtworkMaxStorageMB     int
-	AllowTranscoding        bool
+	Revision                     int64
+	Timezone                     string
+	JellyfinEnabled              bool
+	JellyfinDebug                bool
+	HardwareAcceleration         string
+	PreferredTranscodeVideoCodec string
+	TranscodeQualityPreset       string
+	TranscodeConcurrency         int
+	TranscodeMaxBitrateKbps      int
+	MediaMaxStorageMB            int
+	ArtworkMaxStorageMB          int
+	AllowTranscoding             bool
 }
 
 // Snapshot is an immutable runtime generation. Location is safe to share:
 // time.Location values are immutable after construction.
 type Snapshot struct {
-	Revision                      int64
-	Timezone                      string
-	Location                      *time.Location
-	JellyfinEnabled               bool
-	JellyfinDebug                 bool
-	HardwareAcceleration          string
-	RequestedHardwareAcceleration string
-	TranscodeMaxBitrateKbps       int
-	MediaMaxStorageBytes          int64
-	ArtworkMaxStorageBytes        int64
-	AllowTranscoding              bool
+	Revision                              int64
+	Timezone                              string
+	Location                              *time.Location
+	JellyfinEnabled                       bool
+	JellyfinDebug                         bool
+	HardwareAcceleration                  string
+	RequestedHardwareAcceleration         string
+	PreferredTranscodeVideoCodec          string
+	RequestedPreferredTranscodeVideoCodec string
+	TranscodeQualityPreset                string
+	RequestedTranscodeQualityPreset       string
+	TranscodeConcurrency                  int
+	RequestedTranscodeConcurrency         int
+	TranscodeMaxBitrateKbps               int
+	MediaMaxStorageBytes                  int64
+	ArtworkMaxStorageBytes                int64
+	AllowTranscoding                      bool
 }
 
 type Source struct {
-	current                  atomic.Pointer[Snapshot]
-	bootHardwareAcceleration string
+	current                          atomic.Pointer[Snapshot]
+	bootHardwareAcceleration         string
+	bootPreferredTranscodeVideoCodec string
+	bootTranscodeQualityPreset       string
+	bootTranscodeConcurrency         int
 }
 
 type snapshotContextKey struct{}
@@ -82,15 +97,18 @@ func Load(ctx context.Context, source *Source) Snapshot {
 	return source.Load()
 }
 
-// New validates and publishes the initial generation. Hardware acceleration is
-// captured as boot-active and remains unchanged by later publications.
+// New validates and publishes the initial generation. Restart-bound settings
+// are captured as boot-active and remain unchanged by later publications.
 func New(initial Values) (*Source, error) {
 	source := &Source{}
-	snapshot, err := source.build(initial, "")
+	snapshot, err := source.build(initial, Snapshot{})
 	if err != nil {
 		return nil, err
 	}
 	source.bootHardwareAcceleration = snapshot.HardwareAcceleration
+	source.bootPreferredTranscodeVideoCodec = snapshot.PreferredTranscodeVideoCodec
+	source.bootTranscodeQualityPreset = snapshot.TranscodeQualityPreset
+	source.bootTranscodeConcurrency = snapshot.TranscodeConcurrency
 	source.current.Store(snapshot)
 	return source, nil
 }
@@ -108,14 +126,19 @@ func (source *Source) Load() Snapshot {
 	return *current
 }
 
-// Publish validates and atomically replaces the complete generation. The
-// boot-active hardware acceleration remains fixed; its requested value is
-// retained so composition can report pending restart truthfully.
+// Publish validates and atomically replaces the complete generation. Boot-active
+// settings remain fixed; requested values are retained for restart reporting.
 func (source *Source) Publish(values Values) error {
 	if source == nil {
 		return ErrInvalidValues
 	}
-	snapshot, err := source.build(values, source.bootHardwareAcceleration)
+	boot := Snapshot{
+		HardwareAcceleration:         source.bootHardwareAcceleration,
+		PreferredTranscodeVideoCodec: source.bootPreferredTranscodeVideoCodec,
+		TranscodeQualityPreset:       source.bootTranscodeQualityPreset,
+		TranscodeConcurrency:         source.bootTranscodeConcurrency,
+	}
+	snapshot, err := source.build(values, boot)
 	if err != nil {
 		return err
 	}
@@ -130,7 +153,7 @@ func (source *Source) Publish(values Values) error {
 	}
 }
 
-func (source *Source) build(values Values, bootHardwareAcceleration string) (*Snapshot, error) {
+func (source *Source) build(values Values, boot Snapshot) (*Snapshot, error) {
 	if values.Revision < 0 || strings.TrimSpace(values.Timezone) != values.Timezone || values.Timezone == "" || values.Timezone == "Local" {
 		return nil, ErrInvalidValues
 	}
@@ -139,31 +162,56 @@ func (source *Source) build(values Values, bootHardwareAcceleration string) (*Sn
 		return nil, ErrInvalidValues
 	}
 	if values.TranscodeMaxBitrateKbps < 64 || values.TranscodeMaxBitrateKbps > 200000 ||
+		values.TranscodeConcurrency < 1 || values.TranscodeConcurrency > 32 ||
 		values.MediaMaxStorageMB < 512 || values.MediaMaxStorageMB > 102400 ||
 		values.ArtworkMaxStorageMB < 256 || values.ArtworkMaxStorageMB > 102400 {
 		return nil, ErrInvalidValues
 	}
 	requestedHardwareAcceleration := strings.ToLower(strings.TrimSpace(values.HardwareAcceleration))
 	switch requestedHardwareAcceleration {
-	case "auto", "software", "hybrid", "vaapi", "qsv", "nvenc":
+	case "auto", "software", "hybrid", "vaapi", "qsv", "nvenc", "amf":
+	default:
+		return nil, ErrInvalidValues
+	}
+	requestedPreferredTranscodeVideoCodec := strings.ToLower(strings.TrimSpace(values.PreferredTranscodeVideoCodec))
+	switch requestedPreferredTranscodeVideoCodec {
+	case "auto", "h264", "hevc", "av1":
+	default:
+		return nil, ErrInvalidValues
+	}
+	requestedTranscodeQualityPreset := strings.ToLower(strings.TrimSpace(values.TranscodeQualityPreset))
+	switch requestedTranscodeQualityPreset {
+	case "speed", "balanced", "quality":
 	default:
 		return nil, ErrInvalidValues
 	}
 	activeHardwareAcceleration := requestedHardwareAcceleration
-	if bootHardwareAcceleration != "" {
-		activeHardwareAcceleration = bootHardwareAcceleration
+	activePreferredTranscodeVideoCodec := requestedPreferredTranscodeVideoCodec
+	activeTranscodeQualityPreset := requestedTranscodeQualityPreset
+	activeTranscodeConcurrency := values.TranscodeConcurrency
+	if boot.HardwareAcceleration != "" {
+		activeHardwareAcceleration = boot.HardwareAcceleration
+		activePreferredTranscodeVideoCodec = boot.PreferredTranscodeVideoCodec
+		activeTranscodeQualityPreset = boot.TranscodeQualityPreset
+		activeTranscodeConcurrency = boot.TranscodeConcurrency
 	}
 	return &Snapshot{
-		Revision:                      values.Revision,
-		Timezone:                      values.Timezone,
-		Location:                      location,
-		JellyfinEnabled:               values.JellyfinEnabled,
-		JellyfinDebug:                 values.JellyfinDebug,
-		HardwareAcceleration:          activeHardwareAcceleration,
-		RequestedHardwareAcceleration: requestedHardwareAcceleration,
-		TranscodeMaxBitrateKbps:       values.TranscodeMaxBitrateKbps,
-		MediaMaxStorageBytes:          int64(values.MediaMaxStorageMB) << 20,
-		ArtworkMaxStorageBytes:        int64(values.ArtworkMaxStorageMB) << 20,
-		AllowTranscoding:              values.AllowTranscoding,
+		Revision:                              values.Revision,
+		Timezone:                              values.Timezone,
+		Location:                              location,
+		JellyfinEnabled:                       values.JellyfinEnabled,
+		JellyfinDebug:                         values.JellyfinDebug,
+		HardwareAcceleration:                  activeHardwareAcceleration,
+		RequestedHardwareAcceleration:         requestedHardwareAcceleration,
+		PreferredTranscodeVideoCodec:          activePreferredTranscodeVideoCodec,
+		RequestedPreferredTranscodeVideoCodec: requestedPreferredTranscodeVideoCodec,
+		TranscodeQualityPreset:                activeTranscodeQualityPreset,
+		RequestedTranscodeQualityPreset:       requestedTranscodeQualityPreset,
+		TranscodeConcurrency:                  activeTranscodeConcurrency,
+		RequestedTranscodeConcurrency:         values.TranscodeConcurrency,
+		TranscodeMaxBitrateKbps:               values.TranscodeMaxBitrateKbps,
+		MediaMaxStorageBytes:                  int64(values.MediaMaxStorageMB) << 20,
+		ArtworkMaxStorageBytes:                int64(values.ArtworkMaxStorageMB) << 20,
+		AllowTranscoding:                      values.AllowTranscoding,
 	}, nil
 }

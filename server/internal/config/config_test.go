@@ -383,7 +383,7 @@ func TestLoadLegacyEnvironmentCapturesUnsafeRuntimeValues(t *testing.T) {
 	for environment, setting := range map[string]string{"RIVUNE_TRANSCODE_MAX_BITRATE_KBPS": "transcodeMaxBitrateKbps", "RIVUNE_ARTWORK_MAX_STORAGE_MB": "artworkMaxStorageMB", "RIVUNE_HARDWARE_ACCELERATION": "hardwareAcceleration"} {
 		t.Run(environment, func(t *testing.T) {
 			setRequiredEnvironment(t)
-			value := map[string]string{"RIVUNE_TRANSCODE_MAX_BITRATE_KBPS": "63", "RIVUNE_ARTWORK_MAX_STORAGE_MB": "255", "RIVUNE_HARDWARE_ACCELERATION": "amf"}[environment]
+			value := map[string]string{"RIVUNE_TRANSCODE_MAX_BITRATE_KBPS": "63", "RIVUNE_ARTWORK_MAX_STORAGE_MB": "255", "RIVUNE_HARDWARE_ACCELERATION": "cuda"}[environment]
 			t.Setenv(environment, value)
 			legacy, err := LoadLegacyEnvironment()
 			if err != nil || legacy.ValidationError(setting) == nil {
@@ -393,15 +393,20 @@ func TestLoadLegacyEnvironmentCapturesUnsafeRuntimeValues(t *testing.T) {
 	}
 }
 
-func TestLoadLegacyEnvironmentAcceptsHybridHardwareAcceleration(t *testing.T) {
-	setRequiredEnvironment(t)
-	t.Setenv("RIVUNE_HARDWARE_ACCELERATION", " HYBRID ")
-	legacy, err := LoadLegacyEnvironment()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if legacy.ValidationError("hardwareAcceleration") != nil || legacy.HardwareAcceleration == nil || *legacy.HardwareAcceleration != "hybrid" {
-		t.Fatalf("legacy hybrid hardware acceleration = %+v error=%v", legacy.HardwareAcceleration, legacy.ValidationError("hardwareAcceleration"))
+func TestLoadLegacyEnvironmentAcceptsSupportedHardwareAcceleration(t *testing.T) {
+	for _, configured := range []string{" HYBRID ", " AMF "} {
+		t.Run(strings.TrimSpace(configured), func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv("RIVUNE_HARDWARE_ACCELERATION", configured)
+			legacy, err := LoadLegacyEnvironment()
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := strings.ToLower(strings.TrimSpace(configured))
+			if legacy.ValidationError("hardwareAcceleration") != nil || legacy.HardwareAcceleration == nil || *legacy.HardwareAcceleration != expected {
+				t.Fatalf("legacy hardware acceleration = %+v error=%v", legacy.HardwareAcceleration, legacy.ValidationError("hardwareAcceleration"))
+			}
+		})
 	}
 }
 

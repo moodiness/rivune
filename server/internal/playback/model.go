@@ -27,6 +27,7 @@ type MediaProfile struct {
 	Container                 string `json:"container"`
 	VideoCodec                string `json:"videoCodec"`
 	AudioCodec                string `json:"audioCodec,omitempty"`
+	MaximumVideoBitDepth      int    `json:"maximumVideoBitDepth,omitempty"`
 	ContainersCSV             string `json:"-"`
 	AudioCodecsCSV            string `json:"-"`
 	DirectPlay                bool   `json:"-"`
@@ -70,6 +71,8 @@ type Capabilities struct {
 	TranscodeVideoBitrateKbps int                `json:"-"`
 	ToneMapMaximumHeight      int                `json:"-"`
 	AllowDirectPassthrough    bool               `json:"-"`
+	transcodeCapabilities     TranscodeCapabilities
+	toneMapBackend            string
 }
 
 type SourcesInput struct {
@@ -242,12 +245,14 @@ type Session struct {
 
 type PlaybackDecision struct {
 	Reason         string                  `json:"reason"`
+	Reasons        []string                `json:"reasons,omitempty"`
 	VideoAction    string                  `json:"videoAction"`
 	AudioAction    string                  `json:"audioAction"`
 	SubtitleAction string                  `json:"subtitleAction"`
 	ToneMapping    bool                    `json:"toneMapping"`
 	Source         *PlaybackDecisionSource `json:"source,omitempty"`
 	Target         *PlaybackDecisionTarget `json:"target,omitempty"`
+	Pipeline       *PlaybackPipeline       `json:"pipeline,omitempty"`
 }
 
 type PlaybackDecisionSource struct {
@@ -267,7 +272,16 @@ type PlaybackDecisionTarget struct {
 	VideoCodec       string `json:"videoCodec,omitempty"`
 	AudioCodec       string `json:"audioCodec,omitempty"`
 	Height           int    `json:"height,omitempty"`
+	VideoBitDepth    int    `json:"videoBitDepth,omitempty"`
 	VideoBitrateKbps int    `json:"videoBitrateKbps,omitempty"`
+}
+
+type PlaybackPipeline struct {
+	HardwareAcceleration string `json:"hardwareAcceleration,omitempty"`
+	Decoder              string `json:"decoder,omitempty"`
+	Encoder              string `json:"encoder,omitempty"`
+	ToneMapBackend       string `json:"toneMapBackend,omitempty"`
+	ZeroCopy             bool   `json:"zeroCopy"`
 }
 
 type storedAsset struct {
@@ -291,6 +305,8 @@ type storedAsset struct {
 	VideoBitDepth          int               `json:"videoBitDepth,omitempty"`
 	VideoBitrateKbps       int               `json:"videoBitrateKbps,omitempty"`
 	MaximumAudioChannels   int               `json:"maximumAudioChannels,omitempty"`
+	TargetVideoCodec       string            `json:"targetVideoCodec,omitempty"`
+	QualityPreset          string            `json:"qualityPreset,omitempty"`
 	StartSeconds           float64           `json:"-"`
 	DolbyVisionToneMapSafe bool              `json:"dolbyVisionToneMapSafe,omitempty"`
 	ReadRate               float64           `json:"-"`

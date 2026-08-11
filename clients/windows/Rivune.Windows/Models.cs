@@ -497,6 +497,7 @@ public sealed record PlaybackMediaProfile
     public required string Container { get; init; }
     public required string VideoCodec { get; init; }
     public string? AudioCodec { get; init; }
+    public int? MaximumVideoBitDepth { get; init; }
 }
 
 public sealed record PlaybackCapabilities
@@ -635,6 +636,7 @@ public sealed record PlaybackDecisionTarget
     public string? VideoCodec { get; init; }
     public string? AudioCodec { get; init; }
     public int? Height { get; init; }
+    public int? VideoBitDepth { get; init; }
     public int? VideoBitrateKbps { get; init; }
 }
 
@@ -693,6 +695,7 @@ public sealed record PlaybackActivitySummary
 public sealed record PlaybackMediaDiagnostics
 {
     public required string VideoEncoder { get; init; }
+    public bool? HevcMain10 { get; init; }
     public required bool HardwareToneMap { get; init; }
 }
 

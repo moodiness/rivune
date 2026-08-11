@@ -1900,6 +1900,15 @@ func codecProfileConstraints(profiles []CodecProfile) (map[string]playback.Media
 				property := strings.ToLower(strings.TrimSpace(condition.Property))
 				operator := strings.ToLower(strings.TrimSpace(condition.Condition))
 				switch {
+				case property == "videobitdepth" && operator == "lessthanequal":
+					bitDepth, parseErr := strconv.Atoi(strings.TrimSpace(condition.Value))
+					if parseErr != nil || bitDepth < 8 || bitDepth > 16 {
+						constraint.RequiredConditionUnknown = constraint.RequiredConditionUnknown || condition.IsRequired
+						continue
+					}
+					if constraint.MaximumVideoBitDepth == 0 || bitDepth < constraint.MaximumVideoBitDepth {
+						constraint.MaximumVideoBitDepth = bitDepth
+					}
 				case property == "videolevel" && operator == "lessthanequal":
 					level, parseErr := strconv.Atoi(strings.TrimSpace(condition.Value))
 					if parseErr != nil || level < 1 || level > 1000 {
@@ -1985,12 +1994,14 @@ func playbackCapabilities(input PlaybackInfoRequest) (playback.Capabilities, boo
 		if len(profiles) >= 32 {
 			return ErrInvalidQuery
 		}
+		constraint := codecConstraints[codecConstraintKey(video)]
 		mediaProfile := playback.MediaProfile{}
 		if direct {
-			mediaProfile = codecConstraints[codecConstraintKey(video)]
+			mediaProfile = constraint
 			mediaProfile.DirectPlay = true
 		} else {
 			mediaProfile.Transcoding = true
+			mediaProfile.MaximumVideoBitDepth = constraint.MaximumVideoBitDepth
 		}
 		mediaProfile.Container, mediaProfile.VideoCodec = normalizedContainers[0], video
 		mediaProfile.ContainersCSV = containerList
