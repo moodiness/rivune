@@ -163,6 +163,23 @@ func TestProcessingArgumentsHonorTargetCodecAndQuality(t *testing.T) {
 	}
 }
 
+func TestAudioOnlyTranscodeUsesHighQualityAACLC(t *testing.T) {
+	processor := &FFmpegProcessor{}
+	arguments, err := processor.processingArguments(storedAsset{
+		Kind: processingTranscodeAudio, URL: "https://media.example/movie.mkv", MaximumAudioChannels: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for option, want := range map[string]string{
+		"-c:v": "copy", "-c:a": "aac", "-profile:a": "aac_low", "-ac": "2", "-b:a": "256k",
+	} {
+		if _, got := argumentValue(arguments, option); got != want {
+			t.Errorf("%s=%q want=%q; arguments=%v", option, got, want, arguments)
+		}
+	}
+}
+
 func TestHEVCAndAV1TranscodeRequireFragmentedMP4HLS(t *testing.T) {
 	processor := &FFmpegProcessor{threads: 1, encoder: videoEncoder{kind: videoEncoderSoftware, encodeCodecs: map[string]bool{"hevc": true, "av1": true}}}
 	for _, codec := range []string{"hevc", "av1"} {

@@ -97,10 +97,12 @@ type externalProbeStream struct {
 	Index          int    `json:"index"`
 	CodecType      string `json:"codec_type"`
 	CodecName      string `json:"codec_name"`
+	Profile        string `json:"profile"`
 	CodecTag       string `json:"codec_tag_string"`
 	Width          int    `json:"width"`
 	Height         int    `json:"height"`
 	Channels       int    `json:"channels"`
+	SampleRate     string `json:"sample_rate"`
 	PixelFormat    string `json:"pix_fmt"`
 	ColorTransfer  string `json:"color_transfer"`
 	ColorPrimaries string `json:"color_primaries"`
@@ -117,7 +119,7 @@ type externalProbeResult struct {
 func probeExternalMedia(t *testing.T, fixture externalMediaFixture, input string) externalProbeResult {
 	t.Helper()
 	output := runExternalMediaCommand(t, fixture.processor.ffprobePath,
-		"-v", "error", "-show_entries", "stream=index,codec_type,codec_name,codec_tag_string,width,height,channels,pix_fmt,color_transfer,color_primaries,color_space:format=format_name", "-of", "json", input,
+		"-v", "error", "-show_entries", "stream=index,codec_type,codec_name,profile,codec_tag_string,width,height,channels,sample_rate,pix_fmt,color_transfer,color_primaries,color_space:format=format_name", "-of", "json", input,
 	)
 	var result externalProbeResult
 	if err := json.Unmarshal(output, &result); err != nil {
@@ -362,7 +364,10 @@ func TestExternalMediaMultichannelAACDownmixesToStereo(t *testing.T) {
 			break
 		}
 	}
-	if audio == nil || audio.CodecName != "aac" || audio.Channels != 2 {
+	if audio == nil {
+		t.Fatalf("downmix output has no audio stream: %+v", probe.Streams)
+	}
+	if audio.CodecName != "aac" || audio.Profile != "LC" || audio.Channels != 2 || audio.SampleRate != "48000" {
 		t.Fatalf("downmix output audio = %+v, streams=%+v", audio, probe.Streams)
 	}
 	pcm := runExternalMediaCommand(t, fixture.processor.ffmpegPath,

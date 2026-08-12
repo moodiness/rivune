@@ -894,7 +894,7 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 	case processingRemux:
 		arguments = append(arguments, "-c:v", "copy", "-c:a", "copy")
 	case processingTranscodeAudio:
-		arguments = append(arguments, "-c:v", "copy", "-c:a", "aac", "-ac", strconv.Itoa(outputAudioChannels(asset)), "-b:a", "192k")
+		arguments = append(arguments, "-c:v", "copy", "-c:a", "aac", "-ac", strconv.Itoa(outputAudioChannels(asset)), "-b:a", "256k", "-profile:a", "aac_low")
 	case processingTranscode:
 		targetCodec := transcodeTargetCodec(asset)
 		codecArguments, err := encoder.codecArguments(targetCodec, processor.transcodeQuality(asset), processor.threads, retainsTenBitHEVCFrames(asset, encoder))
@@ -915,7 +915,7 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 		if plannedAudioCopy(asset) {
 			arguments = append(arguments, "-c:a", "copy")
 		} else {
-			arguments = append(arguments, "-c:a", "aac", "-ac", strconv.Itoa(outputAudioChannels(asset)), "-b:a", "256k")
+			arguments = append(arguments, "-c:a", "aac", "-ac", strconv.Itoa(outputAudioChannels(asset)), "-b:a", "256k", "-profile:a", "aac_low")
 		}
 	default:
 		return nil, fmt.Errorf("%w: unsupported mode %q", ErrMediaProcessingFailed, asset.Kind)
