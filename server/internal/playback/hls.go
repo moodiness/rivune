@@ -720,21 +720,28 @@ func (service *Service) hlsJob(ctx context.Context, sessionID string, asset stor
 		}
 		service.hlsMu.Unlock()
 
-		if !service.reclaimHLSStorageTo(storageLimit, true) {
+		// Keep storage admission serialized through writer publication. Otherwise a
+		// departing writer can observe an idle service, then evict this replacement.
+		service.hlsStorageMu.Lock()
+		if !service.reclaimHLSStorageLocked(storageLimit, true) {
+			service.hlsStorageMu.Unlock()
 			return nil, ErrMediaStorageLimit
 		}
 		service.hlsMu.Lock()
 		if existing := service.hlsJobs[key]; existing != nil {
 			service.hlsMu.Unlock()
+			service.hlsStorageMu.Unlock()
 			continue
 		}
 		if shared := service.sharedHLSJobLocked(fingerprint, asset.Kind); shared != nil {
 			service.addHLSJobBindingLocked(key, shared, strings.HasPrefix(sessionID, "prewarm-"))
 			service.hlsMu.Unlock()
+			service.hlsStorageMu.Unlock()
 			return shared, nil
 		}
 		if service.hlsWorkspaceBytes() >= storageLimit {
 			service.hlsMu.Unlock()
+			service.hlsStorageMu.Unlock()
 			return nil, ErrMediaStorageLimit
 		}
 		directory := filepath.Join(
@@ -743,6 +750,7 @@ func (service *Service) hlsJob(ctx context.Context, sessionID string, asset stor
 		)
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			service.hlsMu.Unlock()
+			service.hlsStorageMu.Unlock()
 			return nil, fmt.Errorf("%w: create media workspace: %v", ErrMediaProcessingFailed, err)
 		}
 		jobContext, cancel := context.WithCancel(context.Background())
@@ -756,6 +764,7 @@ func (service *Service) hlsJob(ctx context.Context, sessionID string, asset stor
 		service.addHLSJobBindingLocked(key, job, job.prewarming)
 		service.startHLSStorageMonitorLocked()
 		service.hlsMu.Unlock()
+		service.hlsStorageMu.Unlock()
 		go service.runHLSJob(jobContext, job, asset, processor)
 		return job, nil
 	}
@@ -1065,7 +1074,7 @@ func (service *Service) runHLSJob(ctx context.Context, job *hlsJob, asset stored
 	}
 	service.hlsMu.Unlock()
 	if lastWriter {
-		service.reclaimHLSStorage(false)
+		service.reclaimHLSStorageIfIdle()
 	}
 }
 
@@ -1126,6 +1135,17 @@ func (service *Service) reclaimHLSStorageTo(limit int64, admission bool) bool {
 	service.hlsStorageMu.Lock()
 	defer service.hlsStorageMu.Unlock()
 	return service.reclaimHLSStorageLocked(limit, admission)
+}
+
+func (service *Service) reclaimHLSStorageIfIdle() {
+	service.hlsStorageMu.Lock()
+	defer service.hlsStorageMu.Unlock()
+	service.hlsMu.Lock()
+	idle := service.hlsStorageMonitorWorkers == 0
+	service.hlsMu.Unlock()
+	if idle {
+		service.reclaimHLSStorageLocked(service.mediaStorageLimit(), false)
+	}
 }
 
 func (service *Service) reclaimHLSStorageLocked(limit int64, admission bool) bool {

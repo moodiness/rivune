@@ -213,7 +213,6 @@ jobs:
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=rivune-container
-          cache-to: type=gha,scope=rivune-container,mode=max
 
   release:
     name: Create GitHub release notes
@@ -222,7 +221,6 @@ jobs:
       - authorize
       - publish
     runs-on: ubuntu-latest
-    environment: release
     permissions:
       contents: write
     steps:
