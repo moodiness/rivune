@@ -200,10 +200,13 @@ jobs:
             (.services.rivune.environment | has("RIVUNE_VIDEO_GROUP_ID") | not) and
             (.services.rivune | has("devices") | not) and
             (.services.rivune | has("group_add") | not) and
+            (.services.rivune.cap_add == ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]) and
             (.services.rivune.environment.RIVUNE_MEDIA_TEMP_DIR == "/var/lib/rivune/media") and
             (any(.services.rivune.volumes[]; .type == "volume" and .source == "media_workspace" and .target == "/var/lib/rivune/media")) and
+            (any(.services.rivune.volumes[]; .type == "volume" and .source == "artwork_cache" and .target == "/var/lib/rivune/artwork")) and
             (.services.rivune.tmpfs == ["/tmp:rw,noexec,nosuid,nodev,mode=1777,size=256m"]) and
             (.volumes | has("media_workspace")) and
+            (.volumes | has("artwork_cache")) and
             ((.services.rivune.networks | keys | sort) == ["database", "edge"]) and
             ((.services.postgres.networks | keys) == ["database"]) and
             (.networks.database.internal == true) and
@@ -240,6 +243,13 @@ jobs:
           test "$(docker run --rm -e PUID=10001 -e PGID=10002 -e RIVUNE_VIDEO_GROUP_ID=109 rivune-ci:current id -g)" = 10002
           docker run --rm -e PUID=10001 -e PGID=10002 -e RIVUNE_VIDEO_GROUP_ID=109 rivune-ci:current id -G |
             tr ' ' '\n' | grep -qx 109
+          docker run --rm --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add SETGID --cap-add SETUID \
+            -e PUID=10001 -e PGID=10002 rivune-ci:current --healthcheck sh -ceu '
+              test "$(id -u)" = 10001
+              test "$(id -g)" = 10002
+              test "$(sed -n "s/^CapEff:[[:space:]]*//p" /proc/self/status)" = 0000000000000000
+              test "$(sed -n "s/^CapPrm:[[:space:]]*//p" /proc/self/status)" = 0000000000000000
+            '
       - name: Test Unraid and Pangolin CPU-only startup
         env:
           RIVUNE_IMAGE: rivune-ci:current

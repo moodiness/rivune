@@ -1,13 +1,21 @@
 #!/bin/sh
 set -eu
 
+healthcheck=false
+if [ "${1:-}" = "--healthcheck" ]; then
+  healthcheck=true
+  shift
+  if [ "$#" -eq 0 ]; then
+    set -- /usr/local/bin/rivune healthcheck
+  fi
+fi
+
 if [ "$(id -u)" -ne 0 ]; then
   exec "$@"
 fi
 
 puid="${PUID:-65532}"
 pgid="${PGID:-65532}"
-video_gid="${RIVUNE_VIDEO_GROUP_ID:-}"
 
 case "$puid" in
   ''|*[!0-9]*) echo "PUID must be a positive numeric user ID" >&2; exit 64 ;;
@@ -19,6 +27,12 @@ if [ "$puid" -eq 0 ] || [ "$pgid" -eq 0 ]; then
   echo "PUID and PGID must be greater than zero" >&2
   exit 64
 fi
+
+if [ "$healthcheck" = true ]; then
+  exec setpriv --reuid="$puid" --regid="$pgid" --clear-groups --no-new-privs -- "$@"
+fi
+
+video_gid="${RIVUNE_VIDEO_GROUP_ID:-}"
 if [ -n "$video_gid" ]; then
   case "$video_gid" in
     *[!0-9]*) echo "RIVUNE_VIDEO_GROUP_ID must be a positive numeric group ID" >&2; exit 64 ;;

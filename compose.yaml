@@ -9,6 +9,7 @@ services:
       - ALL
     cap_add:
       - CHOWN
+      - DAC_OVERRIDE
       - SETGID
       - SETUID
     pids_limit: 512
@@ -73,7 +74,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=256m
     healthcheck:
-      test: ["CMD", "/usr/local/bin/rivune", "healthcheck"]
+      test: ["CMD", "/usr/local/bin/docker-entrypoint.sh", "--healthcheck"]
       interval: 10s
       timeout: 3s
       retries: 5

@@ -23,7 +23,7 @@ OPTIONAL: For AMD/Intel hardware transcoding, manually add a Device mapping from
   <Category>MediaApp:Video MediaApp:Other</Category>
   <WebUI/>
   <Icon>https://raw.githubusercontent.com/moodiness/rivune/main/templates/unraid/rivune-icon.svg</Icon>
-  <ExtraParams>--init --restart unless-stopped --security-opt=no-new-privileges --cap-drop=ALL --cap-add=CHOWN --cap-add=SETGID --cap-add=SETUID --pids-limit=512</ExtraParams>
+  <ExtraParams>--init --restart unless-stopped --security-opt=no-new-privileges --cap-drop=ALL --cap-add=CHOWN --cap-add=DAC_OVERRIDE --cap-add=SETGID --cap-add=SETUID --pids-limit=512</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DonateText/>
@@ -44,6 +44,7 @@ OPTIONAL: For AMD/Intel hardware transcoding, manually add a Device mapping from
   <Config Name="Container group ID (PGID)" Target="PGID" Default="100" Mode="" Description="Unraid's standard users group ID." Type="Variable" Display="always" Required="true" Mask="false">100</Config>
   <Config Name="Transcode directory" Target="/transcode" Default="/mnt/cache/appdata/rivune/transcode" Mode="rw" Description="Host resource for temporary playback media. Prefer a cache-pool path with enough space for the quota selected in Administration." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/rivune/transcode</Config>
   <Config Name="Media workspace path" Target="RIVUNE_MEDIA_TEMP_DIR" Default="/transcode" Mode="" Description="Fixed container path matching the Transcode directory mapping. This is host topology, not the media quota setting." Type="Variable" Display="advanced" Required="true" Mask="false">/transcode</Config>
+  <Config Name="Artwork cache directory" Target="/var/lib/rivune/artwork" Default="/mnt/cache/appdata/rivune/artwork" Mode="rw" Description="Persistent host cache for downloaded posters, backdrops, logos, and cast images. Rivune prunes it to the artwork quota configured in Administration." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/rivune/artwork</Config>
   <Config Name="AMD/Intel render group ID" Target="RIVUNE_VIDEO_GROUP_ID" Default="" Mode="" Description="Optional numeric group owning the manually mapped render node. Set only after adding /dev/dri/renderD128; find it with: stat -c '%g' /dev/dri/renderD128" Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
   <Config Name="PostgreSQL SSL mode" Target="RIVUNE_DATABASE_SSLMODE" Default="disable|verify-full" Mode="" Description="Use disable only on the isolated database-only Docker network, or verify-full with both PostgreSQL CA fields configured." Type="Variable" Display="advanced" Required="true" Mask="false">disable</Config>
