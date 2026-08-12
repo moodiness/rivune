@@ -20,11 +20,11 @@ public sealed class TranscodingModelsTests
         {
             StreamingProtocols = ["hls"],
             Containers = ["mp4"],
-            ProcessingModes = ["remux", "transcode_audio", "transcode"],
+            ProcessingModes = [PlaybackProcessingMode.Remux, PlaybackProcessingMode.TranscodeAudio, PlaybackProcessingMode.Transcode],
             MaximumHeight = 2160,
             MaximumVideoBitrateKbps = 12_000,
             MaximumAudioChannels = 6,
-            SubtitleModes = ["external", "burn"],
+            SubtitleModes = [PlaybackSubtitleDelivery.External, PlaybackSubtitleDelivery.Burn],
             MediaProfiles = [new PlaybackMediaProfile { Container = "mp4", VideoCodec = "h265", AudioCodec = "aac", MaximumVideoBitDepth = 10 }],
         };
 
@@ -68,7 +68,7 @@ public sealed class TranscodingModelsTests
         {
           "id":"22222222-2222-4222-8222-222222222222",
           "selectedSourceId":"source-1","selectedAudioTrack":2,"selectedSubtitleId":"subtitle-1",
-          "sources":[{"id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","mode":"transcode","protocol":"hls","compatible":true,"decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}}],
+          "sources":[{"id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","mode":"transcode","protocol":"hls","mediaTimeline":"relative","compatible":true,"decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}}],
           "subtitles":[{"id":"subtitle-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","default":true,"delivery":"burn","futureSubtitleField":"ignored"}],
           "providerErrors":[{"addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","code":"future_provider_code","message":"future"}],
           "expiresAt":"2026-08-03T12:00:00Z","futureSessionField":"ignored"
@@ -78,11 +78,12 @@ public sealed class TranscodingModelsTests
         var session = JsonSerializer.Deserialize<PlaybackSession>(json, JsonOptions)!;
         Assert.Equal(2, session.SelectedAudioTrack);
         Assert.Equal("subtitle-1", session.SelectedSubtitleId);
-        Assert.Equal("subtitle_burn_required", session.Sources[0].Decision?.Reason);
+        Assert.Equal(PlaybackDecisionReason.SubtitleBurnRequired, session.Sources[0].Decision?.Reason);
         Assert.Equal("dolby_vision", session.Sources[0].Decision?.Source?.HdrFormat);
         Assert.Equal(12_000, session.Sources[0].Decision?.Target?.VideoBitrateKbps);
         Assert.Equal(8, session.Sources[0].Decision?.Target?.VideoBitDepth);
-        Assert.Equal("burn", session.Subtitles[0].Delivery);
+        Assert.Equal(PlaybackSubtitleDelivery.Burn, session.Subtitles[0].Delivery);
+        Assert.Equal(PlaybackMediaTimeline.Relative, session.Sources[0].MediaTimeline);
         Assert.Null(session.Subtitles[0].Url);
         Assert.Equal("future_provider_code", session.ProviderErrors[0].Code);
     }
@@ -93,7 +94,7 @@ public sealed class TranscodingModelsTests
         const string json = """
         {
           "summary":{"activeSessions":1,"activeJobs":2,"processingSlots":1,"processingLimit":2,"storageBytes":1024,"storageLimitBytes":1048576},
-          "diagnostics":{"videoEncoder":"libx264","hardwareToneMap":false},
+          "diagnostics":{"ffmpegVersion":"7.1","ffprobeVersion":"7.1","hardwareAcceleration":"nvenc","videoEncoder":"h264_nvenc","preferredVideoCodec":"h264","encodeCodecs":["h264","hevc"],"decodeCodecs":["h264","hevc","av1"],"hevcMain10":true,"qualityPreset":"balanced","hardwareToneMap":false,"toneMapBackend":"software","transcodeThreads":4,"maximumReadRate":2.5,"totals":{"started":12,"succeeded":10,"failed":2,"softwareFallbacks":1},"pools":{"process":{"active":1,"limit":2},"probe":{"active":1,"limit":4},"subtitle":{"active":0,"limit":2},"trickplay":{"active":0,"limit":1}}},
           "sessions":[{
             "id":"22222222-2222-4222-8222-222222222222","title":"Contract Movie","mediaType":"movie","mode":"transcode",
             "decision":{"reason":"video_transcode_required","videoAction":"transcode","audioAction":"transcode","subtitleAction":"none","toneMapping":true,"target":{"videoCodec":"h264","height":1080,"videoBitrateKbps":12000}},
@@ -102,9 +103,11 @@ public sealed class TranscodingModelsTests
             "createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z","expiresAt":"2026-08-03T12:00:00Z"
           }],
           "jobs":[
-            {"sessionId":"22222222-2222-4222-8222-222222222222","assetId":"asset-1","mode":"transcode","state":"running","prewarming":false,"progressPercent":37.5,"speed":1.25,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"},
-            {"assetId":"asset-2","mode":"transcode","state":"running","prewarming":true,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"}
+            {"sessionId":"22222222-2222-4222-8222-222222222222","assetId":"asset-1","mode":"transcode","state":"processing","prewarming":false,"progressPercent":37.5,"speed":1.25,"startupDurationSeconds":4.5,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"},
+            {"assetId":"asset-2","mode":"transcode","state":"failed","errorClass":"capacity","prewarming":true,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"}
           ],
+          "sessionsTruncated":false,
+          "jobsTruncated":true,
           "futureActivityField":"ignored"
         }
         """;
@@ -116,6 +119,13 @@ public sealed class TranscodingModelsTests
         Assert.Equal(1.25, activity.Jobs[0].Speed);
         Assert.Null(activity.Jobs[1].ProgressPercent);
         Assert.Null(activity.Jobs[1].Speed);
+        Assert.Equal(PlaybackHardwareAcceleration.Nvenc, activity.Diagnostics.HardwareAcceleration);
+        Assert.Equal(12, activity.Diagnostics.Totals.Started);
+        Assert.Equal(4, activity.Diagnostics.Pools.Probe.Limit);
+        Assert.Equal(4.5, activity.Jobs[0].StartupDurationSeconds);
+        Assert.Equal(PlaybackMediaJobErrorClass.Capacity, activity.Jobs[1].ErrorClass);
+        Assert.False(activity.SessionsTruncated);
+        Assert.True(activity.JobsTruncated);
     }
 
     [Fact]

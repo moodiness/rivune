@@ -15,6 +15,8 @@ public sealed record Discovery
     public required int ProtocolVersion { get; init; }
     public required string ApiBaseUrl { get; init; }
     public required bool SetupRequired { get; init; }
+    public bool? SetupCompleted { get; init; }
+    public bool? DemoAvailable { get; init; }
     public required string Timezone { get; init; }
     public required string InterfaceLanguage { get; init; }
 }
@@ -161,6 +163,13 @@ public sealed record Account
     public required AccountUser User { get; init; }
     public required AccountSession Session { get; init; }
     public required IReadOnlyList<Profile> Profiles { get; init; }
+    public required MaintenanceSettings Maintenance { get; init; }
+}
+
+public sealed record MaintenanceSettings
+{
+    public required bool Enabled { get; init; }
+    public required string? Message { get; init; }
 }
 
 public sealed record AccountUser
@@ -235,7 +244,7 @@ public sealed record Profile
 {
     public required Guid Id { get; init; }
     public required string Name { get; init; }
-    public string? Description { get; init; }
+    public required string? Description { get; init; }
     public required Guid CategoryId { get; init; }
     public required CategoryRef Category { get; init; }
     public required bool IsChild { get; init; }
@@ -366,6 +375,14 @@ public sealed record Genre
     public required int Id { get; init; }
     public required string Name { get; init; }
 }
+public sealed record CastMember
+{
+    public required string Id { get; init; }
+    public required string Name { get; init; }
+    public string? Character { get; init; }
+    public string? ProfileUrl { get; init; }
+}
+
 
 public sealed record Movie
 {
@@ -382,6 +399,7 @@ public sealed record Movie
     public string? Tagline { get; init; }
     public int? RuntimeMinutes { get; init; }
     public required IReadOnlyList<Genre> Genres { get; init; }
+    public required IReadOnlyList<CastMember> Cast { get; init; }
     public required double VoteAverage { get; init; }
     public required int VoteCount { get; init; }
     public required IReadOnlyDictionary<string, string> ExternalIds { get; init; }
@@ -405,11 +423,13 @@ public sealed record Series
     public int? NumberOfSeasons { get; init; }
     public int? NumberOfEpisodes { get; init; }
     public required IReadOnlyList<Genre> Genres { get; init; }
+    public required IReadOnlyList<CastMember> Cast { get; init; }
     public required double VoteAverage { get; init; }
     public required int VoteCount { get; init; }
     public required IReadOnlyList<SeasonSummary> Seasons { get; init; }
     public required IReadOnlyList<SeriesAlias> Aliases { get; init; }
     public required IReadOnlyList<EpisodeOrder> EpisodeOrders { get; init; }
+    public string? SelectedEpisodeOrderId { get; init; }
     public required SeriesMappingProvider MappingProvider { get; init; }
     public required IReadOnlyDictionary<string, string> ExternalIds { get; init; }
 }
@@ -500,6 +520,21 @@ public sealed record PlaybackMediaProfile
     public int? MaximumVideoBitDepth { get; init; }
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackProcessingMode>))]
+public enum PlaybackProcessingMode
+{
+    [JsonStringEnumMemberName("remux")] Remux,
+    [JsonStringEnumMemberName("transcode_audio")] TranscodeAudio,
+    [JsonStringEnumMemberName("transcode")] Transcode,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackSubtitleDelivery>))]
+public enum PlaybackSubtitleDelivery
+{
+    [JsonStringEnumMemberName("external")] External,
+    [JsonStringEnumMemberName("burn")] Burn,
+}
+
 public sealed record PlaybackCapabilities
 {
     public required IReadOnlyList<string> StreamingProtocols { get; init; }
@@ -508,11 +543,11 @@ public sealed record PlaybackCapabilities
     public IReadOnlyList<string>? AudioCodecs { get; init; }
     public IReadOnlyList<string>? HdrFormats { get; init; }
     public IReadOnlyList<string>? ExternalPlayers { get; init; }
-    public IReadOnlyList<string>? ProcessingModes { get; init; }
+    public IReadOnlyList<PlaybackProcessingMode>? ProcessingModes { get; init; }
     public int? MaximumHeight { get; init; }
     public int? MaximumVideoBitrateKbps { get; init; }
     public int? MaximumAudioChannels { get; init; }
-    public IReadOnlyList<string>? SubtitleModes { get; init; }
+    public IReadOnlyList<PlaybackSubtitleDelivery>? SubtitleModes { get; init; }
     public IReadOnlyList<PlaybackMediaProfile>? MediaProfiles { get; init; }
 }
 
@@ -541,18 +576,63 @@ public sealed record PlaybackSourceOption
 [JsonConverter(typeof(JsonStringEnumConverter<PlaybackMode>))]
 public enum PlaybackMode
 {
-    [JsonStringEnumMemberName("direct")]
-    Direct,
-    [JsonStringEnumMemberName("remux")]
-    Remux,
-    [JsonStringEnumMemberName("transcode_audio")]
-    TranscodeAudio,
-    [JsonStringEnumMemberName("transcode")]
-    Transcode,
-    [JsonStringEnumMemberName("youtube")]
-    Youtube,
-    [JsonStringEnumMemberName("external")]
-    External,
+    [JsonStringEnumMemberName("direct")] Direct,
+    [JsonStringEnumMemberName("remux")] Remux,
+    [JsonStringEnumMemberName("transcode_audio")] TranscodeAudio,
+    [JsonStringEnumMemberName("transcode")] Transcode,
+    [JsonStringEnumMemberName("youtube")] Youtube,
+    [JsonStringEnumMemberName("external")] External,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackActivityMode>))]
+public enum PlaybackActivityMode
+{
+    [JsonStringEnumMemberName("direct")] Direct,
+    [JsonStringEnumMemberName("remux")] Remux,
+    [JsonStringEnumMemberName("transcode_audio")] TranscodeAudio,
+    [JsonStringEnumMemberName("transcode")] Transcode,
+    [JsonStringEnumMemberName("unknown")] Unknown,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackMediaTimeline>))]
+public enum PlaybackMediaTimeline
+{
+    [JsonStringEnumMemberName("absolute")] Absolute,
+    [JsonStringEnumMemberName("relative")] Relative,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackDecisionReason>))]
+public enum PlaybackDecisionReason
+{
+    [JsonStringEnumMemberName("direct_supported")] DirectSupported,
+    [JsonStringEnumMemberName("remux_required")] RemuxRequired,
+    [JsonStringEnumMemberName("audio_transcode_required")] AudioTranscodeRequired,
+    [JsonStringEnumMemberName("video_transcode_required")] VideoTranscodeRequired,
+    [JsonStringEnumMemberName("subtitle_burn_required")] SubtitleBurnRequired,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackTrackAction>))]
+public enum PlaybackTrackAction
+{
+    [JsonStringEnumMemberName("copy")] Copy,
+    [JsonStringEnumMemberName("transcode")] Transcode,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackSubtitleAction>))]
+public enum PlaybackSubtitleAction
+{
+    [JsonStringEnumMemberName("none")] None,
+    [JsonStringEnumMemberName("external")] External,
+    [JsonStringEnumMemberName("copy")] Copy,
+    [JsonStringEnumMemberName("burn")] Burn,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackTrackType>))]
+public enum PlaybackTrackType
+{
+    [JsonStringEnumMemberName("video")] Video,
+    [JsonStringEnumMemberName("audio")] Audio,
+    [JsonStringEnumMemberName("subtitle")] Subtitle,
 }
 
 public sealed record PlaybackPreparation
@@ -593,6 +673,7 @@ public sealed record PlaybackSource
     public int? FileIndex { get; init; }
     public required string Protocol { get; init; }
     public string? Container { get; init; }
+    public PlaybackMediaTimeline? MediaTimeline { get; init; }
     public required bool Compatible { get; init; }
     public PlaybackMediaInspection? Media { get; init; }
     public PlaybackDecision? Decision { get; init; }
@@ -610,10 +691,10 @@ public sealed record PlaybackMediaInspection
 
 public sealed record PlaybackDecision
 {
-    public required string Reason { get; init; }
-    public required string VideoAction { get; init; }
-    public required string AudioAction { get; init; }
-    public required string SubtitleAction { get; init; }
+    public required PlaybackDecisionReason Reason { get; init; }
+    public required PlaybackTrackAction VideoAction { get; init; }
+    public required PlaybackTrackAction AudioAction { get; init; }
+    public required PlaybackSubtitleAction SubtitleAction { get; init; }
     public required bool ToneMapping { get; init; }
     public PlaybackDecisionSource? Source { get; init; }
     public PlaybackDecisionTarget? Target { get; init; }
@@ -643,7 +724,7 @@ public sealed record PlaybackDecisionTarget
 public sealed record PlaybackMediaTrack
 {
     public required int Index { get; init; }
-    public required string Type { get; init; }
+    public required PlaybackTrackType Type { get; init; }
     public required string Codec { get; init; }
     public string? Profile { get; init; }
     public string? Language { get; init; }
@@ -662,7 +743,7 @@ public sealed record PlaybackSubtitle
     public string? Language { get; init; }
     public bool? Forced { get; init; }
     public bool? Default { get; init; }
-    public string? Delivery { get; init; }
+    public PlaybackSubtitleDelivery? Delivery { get; init; }
     public string? Url { get; init; }
 }
 
@@ -674,12 +755,36 @@ public sealed record PlaybackProviderError
     public required string Message { get; init; }
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackMarkerType>))]
+public enum PlaybackMarkerType
+{
+    [JsonStringEnumMemberName("intro")] Intro,
+    [JsonStringEnumMemberName("recap")] Recap,
+    [JsonStringEnumMemberName("outro")] Outro,
+}
+
+public sealed record PlaybackMarkerList
+{
+    public required IReadOnlyList<PlaybackMarker> Markers { get; init; }
+}
+
+public sealed record PlaybackMarker
+{
+    public required PlaybackMarkerType Type { get; init; }
+    public required double StartSeconds { get; init; }
+    public required double EndSeconds { get; init; }
+    public required double Confidence { get; init; }
+    public required int SubmissionCount { get; init; }
+}
+
 public sealed record PlaybackActivity
 {
     public required PlaybackActivitySummary Summary { get; init; }
     public required PlaybackMediaDiagnostics Diagnostics { get; init; }
     public required IReadOnlyList<PlaybackActivitySession> Sessions { get; init; }
     public required IReadOnlyList<PlaybackMediaJob> Jobs { get; init; }
+    public required bool SessionsTruncated { get; init; }
+    public required bool JobsTruncated { get; init; }
 }
 
 public sealed record PlaybackActivitySummary
@@ -692,11 +797,106 @@ public sealed record PlaybackActivitySummary
     public required long StorageLimitBytes { get; init; }
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackHardwareAcceleration>))]
+public enum PlaybackHardwareAcceleration
+{
+    [JsonStringEnumMemberName("unknown")] Unknown,
+    [JsonStringEnumMemberName("auto")] Auto,
+    [JsonStringEnumMemberName("software")] Software,
+    [JsonStringEnumMemberName("hybrid")] Hybrid,
+    [JsonStringEnumMemberName("vaapi")] Vaapi,
+    [JsonStringEnumMemberName("qsv")] Qsv,
+    [JsonStringEnumMemberName("nvenc")] Nvenc,
+    [JsonStringEnumMemberName("amf")] Amf,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackVideoCodec>))]
+public enum PlaybackVideoCodec
+{
+    [JsonStringEnumMemberName("auto")] Auto,
+    [JsonStringEnumMemberName("h264")] H264,
+    [JsonStringEnumMemberName("hevc")] Hevc,
+    [JsonStringEnumMemberName("av1")] Av1,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackEncodeCodec>))]
+public enum PlaybackEncodeCodec
+{
+    [JsonStringEnumMemberName("h264")] H264,
+    [JsonStringEnumMemberName("hevc")] Hevc,
+    [JsonStringEnumMemberName("av1")] Av1,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackQualityPreset>))]
+public enum PlaybackQualityPreset
+{
+    [JsonStringEnumMemberName("speed")] Speed,
+    [JsonStringEnumMemberName("balanced")] Balanced,
+    [JsonStringEnumMemberName("quality")] Quality,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackToneMapBackend>))]
+public enum PlaybackToneMapBackend
+{
+    [JsonStringEnumMemberName("vulkan")] Vulkan,
+    [JsonStringEnumMemberName("vaapi")] Vaapi,
+    [JsonStringEnumMemberName("hybrid")] Hybrid,
+    [JsonStringEnumMemberName("software")] Software,
+}
+
 public sealed record PlaybackMediaDiagnostics
 {
+    public required string FfmpegVersion { get; init; }
+    public required string FfprobeVersion { get; init; }
+    public required PlaybackHardwareAcceleration HardwareAcceleration { get; init; }
     public required string VideoEncoder { get; init; }
+    public required PlaybackVideoCodec PreferredVideoCodec { get; init; }
+    public required IReadOnlyList<PlaybackEncodeCodec> EncodeCodecs { get; init; }
+    public required IReadOnlyList<PlaybackEncodeCodec> DecodeCodecs { get; init; }
     public bool? HevcMain10 { get; init; }
+    public required PlaybackQualityPreset QualityPreset { get; init; }
     public required bool HardwareToneMap { get; init; }
+    public required PlaybackToneMapBackend ToneMapBackend { get; init; }
+    public required int TranscodeThreads { get; init; }
+    public required double MaximumReadRate { get; init; }
+    public required PlaybackMediaProcessTotals Totals { get; init; }
+    public required PlaybackMediaDiagnosticPools Pools { get; init; }
+}
+
+public sealed record PlaybackMediaProcessTotals
+{
+    public required long Started { get; init; }
+    public required long Succeeded { get; init; }
+    public required long Failed { get; init; }
+    public required long SoftwareFallbacks { get; init; }
+}
+
+public sealed record PlaybackMediaDiagnosticPools
+{
+    public required PlaybackMediaDiagnosticPool Process { get; init; }
+    public required PlaybackMediaDiagnosticPool Probe { get; init; }
+    public required PlaybackMediaDiagnosticPool Subtitle { get; init; }
+    public required PlaybackMediaDiagnosticPool Trickplay { get; init; }
+}
+
+public sealed record PlaybackMediaDiagnosticPool
+{
+    public required int Active { get; init; }
+    public required int Limit { get; init; }
+}
+
+public sealed record PlaybackActivityExternalIds
+{
+    public string? Imdb { get; init; }
+    public string? Tmdb { get; init; }
+    public string? Tvdb { get; init; }
+}
+
+public sealed record PlaybackActivityExternalIdMediaTypes
+{
+    public MediaType? Imdb { get; init; }
+    public MediaType? Tmdb { get; init; }
+    public MediaType? Tvdb { get; init; }
 }
 
 public sealed record PlaybackActivitySession
@@ -704,11 +904,11 @@ public sealed record PlaybackActivitySession
     public required Guid Id { get; init; }
     public string? TitleId { get; init; }
     public string? ArtworkUrl { get; init; }
-    public IReadOnlyDictionary<string, string>? ExternalIds { get; init; }
-    public IReadOnlyDictionary<string, string>? ExternalIdMediaTypes { get; init; }
+    public PlaybackActivityExternalIds? ExternalIds { get; init; }
+    public PlaybackActivityExternalIdMediaTypes? ExternalIdMediaTypes { get; init; }
     public required string Title { get; init; }
     public required string MediaType { get; init; }
-    public required string Mode { get; init; }
+    public required PlaybackActivityMode Mode { get; init; }
     public PlaybackDecision? Decision { get; init; }
     public required string Username { get; init; }
     public required Guid ProfileId { get; init; }
@@ -723,17 +923,137 @@ public sealed record PlaybackActivitySession
     public required string ExpiresAt { get; init; }
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackMediaJobState>))]
+public enum PlaybackMediaJobState
+{
+    [JsonStringEnumMemberName("processing")] Processing,
+    [JsonStringEnumMemberName("complete")] Complete,
+    [JsonStringEnumMemberName("failed")] Failed,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackMediaJobErrorClass>))]
+public enum PlaybackMediaJobErrorClass
+{
+    [JsonStringEnumMemberName("capacity")] Capacity,
+    [JsonStringEnumMemberName("source")] Source,
+    [JsonStringEnumMemberName("processing")] Processing,
+    [JsonStringEnumMemberName("storage")] Storage,
+    [JsonStringEnumMemberName("timeout")] Timeout,
+    [JsonStringEnumMemberName("cancelled")] Cancelled,
+    [JsonStringEnumMemberName("unknown")] Unknown,
+}
+
 public sealed record PlaybackMediaJob
 {
     public Guid? SessionId { get; init; }
     public required string AssetId { get; init; }
     public required string Mode { get; init; }
-    public required string State { get; init; }
+    public required PlaybackMediaJobState State { get; init; }
+    public PlaybackMediaJobErrorClass? ErrorClass { get; init; }
     public required bool Prewarming { get; init; }
     public double? ProgressPercent { get; init; }
     public double? Speed { get; init; }
+    public double? StartupDurationSeconds { get; init; }
     public required string CreatedAt { get; init; }
     public required string LastSeenAt { get; init; }
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackProgressMediaType>))]
+public enum PlaybackProgressMediaType
+{
+    [JsonStringEnumMemberName("movie")] Movie,
+    [JsonStringEnumMemberName("episode")] Episode,
+}
+
+public sealed record PlaybackProgress
+{
+    public required Guid TitleId { get; init; }
+    public required PlaybackProgressMediaType MediaType { get; init; }
+    public required int PositionSeconds { get; init; }
+    public required int DurationSeconds { get; init; }
+    public required bool Completed { get; init; }
+    public required long Version { get; init; }
+    public required string LastWatchedAt { get; init; }
+    public required string UpdatedAt { get; init; }
+}
+
+public sealed record PlaybackProgressBatchRequest
+{
+    public required IReadOnlyList<Guid> TitleIds { get; init; }
+}
+
+public sealed record PlaybackProgressBatchItem
+{
+    public required Guid TitleId { get; init; }
+    public required PlaybackProgress? Progress { get; init; }
+}
+
+public sealed record PlaybackProgressBatch
+{
+    public required IReadOnlyList<PlaybackProgressBatchItem> Items { get; init; }
+}
+
+public sealed record UpdatePlaybackProgressRequest
+{
+    public required int PositionSeconds { get; init; }
+    public required int DurationSeconds { get; init; }
+    public required bool Completed { get; init; }
+    public required long ExpectedVersion { get; init; }
+}
+
+public sealed record SetWatchedBatchItem
+{
+    public required Guid TitleId { get; init; }
+    public required bool Completed { get; init; }
+    public required long ExpectedVersion { get; init; }
+}
+
+public sealed record SetWatchedBatchRequest
+{
+    public required IReadOnlyList<SetWatchedBatchItem> Items { get; init; }
+}
+
+public sealed record SetWatchedBatchResultItem
+{
+    public required Guid TitleId { get; init; }
+    public required PlaybackProgress Progress { get; init; }
+}
+
+public sealed record SetWatchedBatchResult
+{
+    public required IReadOnlyList<SetWatchedBatchResultItem> Items { get; init; }
+}
+
+public sealed record CompletionRequest
+{
+    public required long ExpectedVersion { get; init; }
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<ContinueWatchingReason>))]
+public enum ContinueWatchingReason
+{
+    [JsonStringEnumMemberName("resume")] Resume,
+    [JsonStringEnumMemberName("next_episode")] NextEpisode,
+}
+
+public sealed record ContinueWatchingItem
+{
+    public required Guid TitleId { get; init; }
+    public required PlaybackProgressMediaType MediaType { get; init; }
+    public Guid? SeriesId { get; init; }
+    public Guid? SeasonId { get; init; }
+    public int? SeasonNumber { get; init; }
+    public int? EpisodeNumber { get; init; }
+    public required int PositionSeconds { get; init; }
+    public required int DurationSeconds { get; init; }
+    public required long Version { get; init; }
+    public required ContinueWatchingReason Reason { get; init; }
+    public required string LastWatchedAt { get; init; }
+}
+
+public sealed record ContinueWatchingPage
+{
+    public required IReadOnlyList<ContinueWatchingItem> Items { get; init; }
 }
 
 public sealed record ServerError

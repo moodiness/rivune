@@ -27,6 +27,8 @@ data class Discovery(
     val protocolVersion: Int,
     val apiBaseUrl: String,
     val setupRequired: Boolean,
+    val setupCompleted: Boolean? = null,
+    val demoAvailable: Boolean? = null,
     val timezone: String,
     val interfaceLanguage: String,
 )
@@ -156,6 +158,13 @@ data class Account(
     val user: AccountUser,
     val session: AccountSession,
     val profiles: List<Profile>,
+    val maintenance: MaintenanceSettings,
+)
+
+@Serializable
+data class MaintenanceSettings(
+    val enabled: Boolean,
+    val message: String?,
 )
 
 @Serializable
@@ -347,6 +356,14 @@ enum class SeriesMappingProvider {
 data class Genre(val id: Int, val name: String)
 
 @Serializable
+data class CastMember(
+    val id: String,
+    val name: String,
+    val character: String? = null,
+    val profileUrl: String? = null,
+)
+
+@Serializable
 data class Movie(
     @Serializable(with = UUIDSerializer::class) val id: UUID,
     val mediaType: MediaType,
@@ -361,6 +378,7 @@ data class Movie(
     val tagline: String? = null,
     val runtimeMinutes: Int? = null,
     val genres: List<Genre>,
+    val cast: List<CastMember>,
     val voteAverage: Double,
     val voteCount: Int,
     val externalIds: Map<String, String>,
@@ -384,11 +402,13 @@ data class Series(
     val numberOfSeasons: Int? = null,
     val numberOfEpisodes: Int? = null,
     val genres: List<Genre>,
+    val cast: List<CastMember>,
     val voteAverage: Double,
     val voteCount: Int,
     val seasons: List<SeasonSummary>,
     val aliases: List<SeriesAlias>,
     val episodeOrders: List<EpisodeOrder>,
+    val selectedEpisodeOrderId: String? = null,
     val mappingProvider: SeriesMappingProvider,
     val externalIds: Map<String, String>,
 )
@@ -470,6 +490,19 @@ data class PlaybackMediaProfile(
 )
 
 @Serializable
+enum class PlaybackProcessingMode {
+    @SerialName("remux") REMUX,
+    @SerialName("transcode_audio") TRANSCODE_AUDIO,
+    @SerialName("transcode") TRANSCODE,
+}
+
+@Serializable
+enum class PlaybackSubtitleMode {
+    @SerialName("external") EXTERNAL,
+    @SerialName("burn") BURN,
+}
+
+@Serializable
 data class PlaybackCapabilities(
     val streamingProtocols: List<String>,
     val containers: List<String>,
@@ -477,11 +510,11 @@ data class PlaybackCapabilities(
     val audioCodecs: List<String>? = null,
     val hdrFormats: List<String>? = null,
     val externalPlayers: List<String>? = null,
-    val processingModes: List<String>? = null,
+    val processingModes: List<PlaybackProcessingMode>? = null,
     val maximumHeight: Int? = null,
     val maximumVideoBitrateKbps: Int? = null,
     val maximumAudioChannels: Int? = null,
-    val subtitleModes: List<String>? = null,
+    val subtitleModes: List<PlaybackSubtitleMode>? = null,
     val mediaProfiles: List<PlaybackMediaProfile>? = null,
 )
 
@@ -515,6 +548,48 @@ enum class PlaybackMode {
     @SerialName("transcode") TRANSCODE,
     @SerialName("youtube") YOUTUBE,
     @SerialName("external") EXTERNAL,
+}
+
+@Serializable
+enum class PlaybackDecisionReason {
+    @SerialName("direct_supported") DIRECT_SUPPORTED,
+    @SerialName("remux_required") REMUX_REQUIRED,
+    @SerialName("audio_transcode_required") AUDIO_TRANSCODE_REQUIRED,
+    @SerialName("video_transcode_required") VIDEO_TRANSCODE_REQUIRED,
+    @SerialName("subtitle_burn_required") SUBTITLE_BURN_REQUIRED,
+}
+
+@Serializable
+enum class PlaybackTrackAction {
+    @SerialName("copy") COPY,
+    @SerialName("transcode") TRANSCODE,
+}
+
+@Serializable
+enum class PlaybackSubtitleAction {
+    @SerialName("none") NONE,
+    @SerialName("external") EXTERNAL,
+    @SerialName("copy") COPY,
+    @SerialName("burn") BURN,
+}
+
+@Serializable
+enum class PlaybackMediaTimeline {
+    @SerialName("absolute") ABSOLUTE,
+    @SerialName("relative") RELATIVE,
+}
+
+@Serializable
+enum class PlaybackMediaTrackType {
+    @SerialName("video") VIDEO,
+    @SerialName("audio") AUDIO,
+    @SerialName("subtitle") SUBTITLE,
+}
+
+@Serializable
+enum class PlaybackSubtitleDelivery {
+    @SerialName("external") EXTERNAL,
+    @SerialName("burn") BURN,
 }
 
 @Serializable
@@ -555,6 +630,7 @@ data class PlaybackSource(
     val fileIndex: Int? = null,
     val protocol: String,
     val container: String? = null,
+    val mediaTimeline: PlaybackMediaTimeline? = null,
     val compatible: Boolean,
     val media: PlaybackMediaInspection? = null,
     val decision: PlaybackDecision? = null,
@@ -572,10 +648,10 @@ data class PlaybackMediaInspection(
 
 @Serializable
 data class PlaybackDecision(
-    val reason: String,
-    val videoAction: String,
-    val audioAction: String,
-    val subtitleAction: String,
+    val reason: PlaybackDecisionReason,
+    val videoAction: PlaybackTrackAction,
+    val audioAction: PlaybackTrackAction,
+    val subtitleAction: PlaybackSubtitleAction,
     val toneMapping: Boolean,
     val source: PlaybackDecisionSource? = null,
     val target: PlaybackDecisionTarget? = null,
@@ -605,7 +681,7 @@ data class PlaybackDecisionTarget(
 @Serializable
 data class PlaybackMediaTrack(
     val index: Int,
-    val type: String,
+    val type: PlaybackMediaTrackType,
     val codec: String,
     val profile: String? = null,
     val language: String? = null,
@@ -624,7 +700,7 @@ data class PlaybackSubtitle(
     val language: String? = null,
     val forced: Boolean? = null,
     val default: Boolean? = null,
-    val delivery: String? = null,
+    val delivery: PlaybackSubtitleDelivery? = null,
     val url: String? = null,
 )
 
@@ -637,11 +713,32 @@ data class PlaybackProviderError(
 )
 
 @Serializable
+enum class PlaybackMarkerType {
+    @SerialName("intro") INTRO,
+    @SerialName("recap") RECAP,
+    @SerialName("outro") OUTRO,
+}
+
+@Serializable
+data class PlaybackMarker(
+    val type: PlaybackMarkerType,
+    val startSeconds: Double,
+    val endSeconds: Double,
+    val confidence: Double,
+    val submissionCount: Int,
+)
+
+@Serializable
+data class PlaybackMarkerList(val markers: List<PlaybackMarker>)
+
+@Serializable
 data class PlaybackActivity(
     val summary: PlaybackActivitySummary,
     val diagnostics: PlaybackMediaDiagnostics,
     val sessions: List<PlaybackActivitySession>,
     val jobs: List<PlaybackMediaJob>,
+    val sessionsTruncated: Boolean,
+    val jobsTruncated: Boolean,
 )
 
 @Serializable
@@ -655,10 +752,106 @@ data class PlaybackActivitySummary(
 )
 
 @Serializable
+enum class PlaybackHardwareAcceleration {
+    @SerialName("unknown") UNKNOWN,
+    @SerialName("auto") AUTO,
+    @SerialName("software") SOFTWARE,
+    @SerialName("hybrid") HYBRID,
+    @SerialName("vaapi") VAAPI,
+    @SerialName("qsv") QSV,
+    @SerialName("nvenc") NVENC,
+    @SerialName("amf") AMF,
+}
+
+@Serializable
+enum class PlaybackVideoCodec {
+    @SerialName("h264") H264,
+    @SerialName("hevc") HEVC,
+    @SerialName("av1") AV1,
+}
+
+@Serializable
+enum class PlaybackPreferredVideoCodec {
+    @SerialName("auto") AUTO,
+    @SerialName("h264") H264,
+    @SerialName("hevc") HEVC,
+    @SerialName("av1") AV1,
+}
+
+@Serializable
+enum class PlaybackQualityPreset {
+    @SerialName("speed") SPEED,
+    @SerialName("balanced") BALANCED,
+    @SerialName("quality") QUALITY,
+}
+
+@Serializable
+enum class PlaybackToneMapBackend {
+    @SerialName("vulkan") VULKAN,
+    @SerialName("vaapi") VAAPI,
+    @SerialName("hybrid") HYBRID,
+    @SerialName("software") SOFTWARE,
+}
+
+@Serializable
 data class PlaybackMediaDiagnostics(
+    val ffmpegVersion: String,
+    val ffprobeVersion: String,
+    val hardwareAcceleration: PlaybackHardwareAcceleration,
     val videoEncoder: String,
+    val preferredVideoCodec: PlaybackPreferredVideoCodec,
+    val encodeCodecs: List<PlaybackVideoCodec>,
+    val decodeCodecs: List<PlaybackVideoCodec>,
     val hevcMain10: Boolean? = null,
+    val qualityPreset: PlaybackQualityPreset,
     val hardwareToneMap: Boolean,
+    val toneMapBackend: PlaybackToneMapBackend,
+    val transcodeThreads: Int,
+    val maximumReadRate: Double,
+    val totals: PlaybackMediaProcessTotals,
+    val pools: PlaybackMediaDiagnosticPools,
+)
+
+@Serializable
+data class PlaybackMediaProcessTotals(
+    val started: Long,
+    val succeeded: Long,
+    val failed: Long,
+    val softwareFallbacks: Long,
+)
+
+@Serializable
+data class PlaybackMediaDiagnosticPools(
+    val process: PlaybackMediaDiagnosticPool,
+    val probe: PlaybackMediaDiagnosticPool,
+    val subtitle: PlaybackMediaDiagnosticPool,
+    val trickplay: PlaybackMediaDiagnosticPool,
+)
+
+@Serializable
+data class PlaybackMediaDiagnosticPool(val active: Int, val limit: Int)
+
+@Serializable
+enum class PlaybackActivityMode {
+    @SerialName("direct") DIRECT,
+    @SerialName("remux") REMUX,
+    @SerialName("transcode_audio") TRANSCODE_AUDIO,
+    @SerialName("transcode") TRANSCODE,
+    @SerialName("unknown") UNKNOWN,
+}
+
+@Serializable
+data class PlaybackActivityExternalIds(
+    val imdb: String? = null,
+    val tmdb: String? = null,
+    val tvdb: String? = null,
+)
+
+@Serializable
+data class PlaybackActivityExternalIdMediaTypes(
+    val imdb: MediaType? = null,
+    val tmdb: MediaType? = null,
+    val tvdb: MediaType? = null,
 )
 
 @Serializable
@@ -666,11 +859,11 @@ data class PlaybackActivitySession(
     @Serializable(with = UUIDSerializer::class) val id: UUID,
     val titleId: String? = null,
     val artworkUrl: String? = null,
-    val externalIds: Map<String, String>? = null,
-    val externalIdMediaTypes: Map<String, String>? = null,
+    val externalIds: PlaybackActivityExternalIds? = null,
+    val externalIdMediaTypes: PlaybackActivityExternalIdMediaTypes? = null,
     val title: String,
     val mediaType: String,
-    val mode: String,
+    val mode: PlaybackActivityMode,
     val decision: PlaybackDecision? = null,
     val username: String,
     @Serializable(with = UUIDSerializer::class) val profileId: UUID,
@@ -686,14 +879,120 @@ data class PlaybackActivitySession(
 )
 
 @Serializable
+enum class PlaybackMediaJobState {
+    @SerialName("processing") PROCESSING,
+    @SerialName("complete") COMPLETE,
+    @SerialName("failed") FAILED,
+}
+
+@Serializable
+enum class PlaybackMediaJobErrorClass {
+    @SerialName("capacity") CAPACITY,
+    @SerialName("source") SOURCE,
+    @SerialName("processing") PROCESSING,
+    @SerialName("storage") STORAGE,
+    @SerialName("timeout") TIMEOUT,
+    @SerialName("cancelled") CANCELLED,
+    @SerialName("unknown") UNKNOWN,
+}
+
+@Serializable
 data class PlaybackMediaJob(
     @Serializable(with = UUIDSerializer::class) val sessionId: UUID? = null,
     val assetId: String,
     val mode: String,
-    val state: String,
+    val state: PlaybackMediaJobState,
+    val errorClass: PlaybackMediaJobErrorClass? = null,
     val prewarming: Boolean,
     val progressPercent: Double? = null,
     val speed: Double? = null,
+    val startupDurationSeconds: Double? = null,
     val createdAt: String,
     val lastSeenAt: String,
 )
+
+@Serializable
+enum class PlaybackProgressMediaType {
+    @SerialName("movie") MOVIE,
+    @SerialName("episode") EPISODE,
+}
+
+@Serializable
+data class PlaybackProgress(
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val mediaType: PlaybackProgressMediaType,
+    val positionSeconds: Int,
+    val durationSeconds: Int,
+    val completed: Boolean,
+    val version: Long,
+    val lastWatchedAt: String,
+    val updatedAt: String,
+)
+
+@Serializable
+data class PlaybackProgressBatchRequest(
+    val titleIds: List<@Serializable(with = UUIDSerializer::class) UUID>,
+)
+
+@Serializable
+data class PlaybackProgressBatchItem(
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val progress: PlaybackProgress?,
+)
+
+@Serializable
+data class PlaybackProgressBatch(val items: List<PlaybackProgressBatchItem>)
+
+@Serializable
+data class SetWatchedBatchItem(
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val completed: Boolean,
+    val expectedVersion: Long,
+)
+
+@Serializable
+data class SetWatchedBatchRequest(val items: List<SetWatchedBatchItem>)
+
+@Serializable
+data class SetWatchedBatchResultItem(
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val progress: PlaybackProgress,
+)
+
+@Serializable
+data class SetWatchedBatchResult(val items: List<SetWatchedBatchResultItem>)
+
+@Serializable
+data class UpdatePlaybackProgressRequest(
+    val positionSeconds: Int,
+    val durationSeconds: Int,
+    val completed: Boolean,
+    val expectedVersion: Long,
+)
+
+@Serializable
+data class CompletionRequest(val expectedVersion: Long)
+
+@Serializable
+enum class ContinueWatchingReason {
+    @SerialName("resume") RESUME,
+    @SerialName("next_episode") NEXT_EPISODE,
+}
+
+@Serializable
+data class ContinueWatchingItem(
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val mediaType: PlaybackProgressMediaType,
+    @Serializable(with = UUIDSerializer::class) val seriesId: UUID? = null,
+    @Serializable(with = UUIDSerializer::class) val seasonId: UUID? = null,
+    val seasonNumber: Int? = null,
+    val episodeNumber: Int? = null,
+    val positionSeconds: Int,
+    val durationSeconds: Int,
+    val version: Long,
+    val reason: ContinueWatchingReason,
+    val lastWatchedAt: String,
+)
+
+@Serializable
+data class ContinueWatchingPage(val items: List<ContinueWatchingItem>)

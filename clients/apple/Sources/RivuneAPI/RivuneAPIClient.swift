@@ -313,6 +313,8 @@ private struct DiscoveryEnvelope: Decodable {
     let protocolVersion: Int
     let apiBaseUrl: String
     let setupRequired: Bool
+    let setupCompleted: Bool?
+    let demoAvailable: Bool?
     let timezone: String
     let interfaceLanguage: String?
 }
@@ -347,6 +349,7 @@ private struct RefreshRequest: Encodable { let refreshToken: String }
 private struct SelectProfileRequest: Encodable { let pin: String? }
 private struct PlaybackSourcesRequest: Encodable {
     let mediaType: String
+    let addonId: UUID?
     let resourceId: String
     let capabilities: PlaybackCapabilities
 }
@@ -366,6 +369,11 @@ private struct RefreshOperation {
     let generation: UInt64
     let refreshToken: String
     let task: Task<TokenPair, Error>
+}
+
+private struct HTTPResult {
+    let data: Data
+    let response: HTTPURLResponse
 }
 
 public actor RivuneAPIClient {
@@ -411,7 +419,7 @@ public actor RivuneAPIClient {
         guard let interfaceLanguage = response.interfaceLanguage else {
             throw RivuneAPIError.invalidResponse
         }
-        let discovery = Discovery(name: response.name, serverVersion: response.serverVersion, protocolVersion: response.protocolVersion, apiBaseUrl: response.apiBaseUrl, setupRequired: response.setupRequired, timezone: response.timezone, interfaceLanguage: interfaceLanguage)
+        let discovery = Discovery(name: response.name, serverVersion: response.serverVersion, protocolVersion: response.protocolVersion, apiBaseUrl: response.apiBaseUrl, setupRequired: response.setupRequired, setupCompleted: response.setupCompleted, demoAvailable: response.demoAvailable, timezone: response.timezone, interfaceLanguage: interfaceLanguage)
         guard let resolved = URL(string: discovery.apiBaseUrl, relativeTo: serverURL)?.absoluteURL,
               try Self.canonicalServerOrigin(resolved) == serverURL else {
             throw RivuneAPIError.invalidServerURL(discovery.apiBaseUrl)
@@ -635,8 +643,21 @@ public actor RivuneAPIClient {
         try await request("metadata/titles/\(id.uuidString.lowercased())", query: queryItems(("language", language)), authenticated: true)
     }
 
-    public func series(id: UUID, language: String? = nil, mappingProvider: SeriesMappingProvider) async throws -> Series {
-        try await request("metadata/series/\(id.uuidString.lowercased())", query: queryItems(("language", language), ("mappingProvider", mappingProvider.rawValue)), authenticated: true)
+    public func series(
+        id: UUID,
+        language: String? = nil,
+        mappingProvider: SeriesMappingProvider,
+        episodeOrder: String? = nil
+    ) async throws -> Series {
+        try await request(
+            "metadata/series/\(id.uuidString.lowercased())",
+            query: queryItems(
+                ("language", language),
+                ("mappingProvider", mappingProvider.rawValue),
+                ("episodeOrder", episodeOrder)
+            ),
+            authenticated: true
+        )
     }
 
     public func season(id: String, language: String? = nil, mappingProvider: SeriesMappingProvider) async throws -> Season {
@@ -651,8 +672,18 @@ public actor RivuneAPIClient {
         )
     }
 
-    public func playbackSources(mediaType: String, resourceId: String, capabilities: PlaybackCapabilities) async throws -> PlaybackSourceList {
-        try await request("playback/sources", method: "POST", body: PlaybackSourcesRequest(mediaType: mediaType, resourceId: resourceId, capabilities: capabilities), authenticated: true)
+    public func playbackSources(
+        mediaType: String,
+        addonId: UUID? = nil,
+        resourceId: String,
+        capabilities: PlaybackCapabilities
+    ) async throws -> PlaybackSourceList {
+        try await request(
+            "playback/sources",
+            method: "POST",
+            body: PlaybackSourcesRequest(mediaType: mediaType, addonId: addonId, resourceId: resourceId, capabilities: capabilities),
+            authenticated: true
+        )
     }
 
     public func preparePlayback(sourceRef: String, startSeconds: Int? = nil) async throws -> PlaybackPreparation {
@@ -680,6 +711,14 @@ public actor RivuneAPIClient {
         )
     }
 
+    public func playbackMarkers(imdbId: String, season: Int, episode: Int) async throws -> PlaybackMarkerList {
+        try await request(
+            "playback/markers",
+            query: queryItems(("imdbId", imdbId), ("season", String(season)), ("episode", String(episode))),
+            authenticated: true
+        )
+    }
+
     public func stopPlayback(sessionId: UUID) async throws {
         _ = try await requestData("playback/sessions/\(sessionId.uuidString.lowercased())", method: "DELETE", body: Optional<Data>.none, authenticated: true)
     }
@@ -687,6 +726,91 @@ public actor RivuneAPIClient {
     public func playbackActivity() async throws -> PlaybackActivity {
         try await request("playback/activity", authenticated: true)
     }
+
+    public func playbackProgress(titleId: UUID) async throws -> PlaybackProgress? {
+        let result = try await requestResult(
+            "progress/\(titleId.uuidString.lowercased())",
+            method: "GET",
+            body: nil,
+            authenticated: true
+        )
+        if result.response.statusCode == 204 { return nil }
+        do { return try decoder.decode(PlaybackProgress.self, from: result.data) }
+        catch { throw RivuneAPIError.invalidResponse }
+    }
+
+    public func playbackProgressBatch(titleIds: [UUID]) async throws -> PlaybackProgressBatch {
+        try await request(
+            "progress/batch",
+            method: "POST",
+            body: PlaybackProgressBatchRequest(titleIds: titleIds),
+            authenticated: true
+        )
+    }
+
+    public func updatePlaybackProgress(titleId: UUID, input: UpdatePlaybackProgressRequest) async throws -> PlaybackProgress {
+        try await request(
+            "progress/\(titleId.uuidString.lowercased())",
+            method: "PUT",
+            body: input,
+            authenticated: true
+        )
+    }
+
+    public func clearPlaybackProgress(titleId: UUID, expectedVersion: Int64) async throws {
+        _ = try await requestData(
+            "progress/\(titleId.uuidString.lowercased())",
+            method: "DELETE",
+            query: queryItems(("expectedVersion", String(expectedVersion))),
+            body: nil,
+            authenticated: true
+        )
+    }
+
+    public func setTitlesWatchedBatch(_ items: [SetWatchedBatchItem]) async throws -> SetWatchedBatchResult {
+        try await request(
+            "titles/watched/batch",
+            method: "PUT",
+            body: SetWatchedBatchRequest(items: items),
+            authenticated: true
+        )
+    }
+
+    public func markTitleWatched(titleId: UUID, expectedVersion: Int64) async throws -> PlaybackProgress {
+        try await request(
+            "titles/\(titleId.uuidString.lowercased())/watched",
+            method: "POST",
+            body: CompletionRequest(expectedVersion: expectedVersion),
+            authenticated: true
+        )
+    }
+
+    public func markTitleUnwatched(titleId: UUID, expectedVersion: Int64) async throws -> PlaybackProgress {
+        try await request(
+            "titles/\(titleId.uuidString.lowercased())/watched",
+            method: "DELETE",
+            query: queryItems(("expectedVersion", String(expectedVersion))),
+            authenticated: true
+        )
+    }
+
+    public func continueWatching(limit: Int? = nil) async throws -> ContinueWatchingPage {
+        try await request(
+            "continue-watching",
+            query: queryItems(("limit", limit.map(String.init))),
+            authenticated: true
+        )
+    }
+
+    public func dismissContinueWatchingTitle(titleId: UUID) async throws {
+        _ = try await requestData(
+            "continue-watching/\(titleId.uuidString.lowercased())",
+            method: "DELETE",
+            body: nil,
+            authenticated: true
+        )
+    }
+
 
     private func request<Response: Decodable>(_ path: String, method: String = "GET", query: [URLQueryItem] = [], authenticated: Bool) async throws -> Response {
         try await decodedRequest(path, method: method, query: query, body: nil, authenticated: authenticated)
@@ -704,6 +828,10 @@ public actor RivuneAPIClient {
     }
 
     private func requestData(_ path: String, method: String, query: [URLQueryItem] = [], body: Data?, authenticated: Bool) async throws -> Data {
+        try await requestResult(path, method: method, query: query, body: body, authenticated: authenticated).data
+    }
+
+    private func requestResult(_ path: String, method: String, query: [URLQueryItem] = [], body: Data?, authenticated: Bool) async throws -> HTTPResult {
         if apiBaseURL == nil { _ = try await discover() }
         if authenticated { try await loadCredentialsIfNeeded() }
         let authorizationToken: String?
@@ -744,7 +872,7 @@ public actor RivuneAPIClient {
             retryAfterRefresh: retryAfterRefresh,
             expectedAuthenticationGeneration: nil,
             credentialBearing: true
-        )
+        ).data
     }
 
     private func resolvedAPIURL(path: String, query: [URLQueryItem]) throws -> URL {
@@ -770,7 +898,7 @@ public actor RivuneAPIClient {
             authorizationToken = nil
         }
         let requestGeneration = authenticated ? authenticationGeneration : nil
-        let data = try await perform(
+        let result = try await perform(
             url: url,
             method: method,
             body: body,
@@ -779,7 +907,7 @@ public actor RivuneAPIClient {
             expectedAuthenticationGeneration: requestGeneration,
             credentialBearing: authenticated || Self.isCredentialBearingURL(url)
         )
-        do { return try decoder.decode(Response.self, from: data) }
+        do { return try decoder.decode(Response.self, from: result.data) }
         catch { throw RivuneAPIError.invalidResponse }
     }
 
@@ -791,7 +919,7 @@ public actor RivuneAPIClient {
         retryAfterRefresh: Bool,
         expectedAuthenticationGeneration: UInt64?,
         credentialBearing: Bool
-    ) async throws -> Data {
+    ) async throws -> HTTPResult {
         guard try Self.canonicalServerOrigin(url) == serverURL else {
             throw RivuneAPIError.invalidServerURL(url.absoluteString)
         }
@@ -843,7 +971,7 @@ public actor RivuneAPIClient {
         guard (200..<300).contains(response.statusCode) else {
             throw decodeServerError(status: response.statusCode, data: data)
         }
-        return data
+        return HTTPResult(data: data, response: response)
     }
 
     private func ensureAuthenticationGeneration(_ expected: UInt64?) throws {

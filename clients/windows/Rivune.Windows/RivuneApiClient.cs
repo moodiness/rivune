@@ -25,9 +25,12 @@ public sealed class RivuneApiClient : IDisposable
         public required int ProtocolVersion { get; init; }
         public required string ApiBaseUrl { get; init; }
         public required bool SetupRequired { get; init; }
+        public bool? SetupCompleted { get; init; }
+        public bool? DemoAvailable { get; init; }
         public required string Timezone { get; init; }
         public string? InterfaceLanguage { get; init; }
     }
+    private readonly record struct HttpResponsePayload(HttpStatusCode StatusCode, byte[] Body);
 
     private readonly record struct AuthenticationSnapshot(TokenPair Credentials, long Epoch);
 
@@ -277,13 +280,13 @@ public sealed class RivuneApiClient : IDisposable
                     query: null,
                     cancellationToken).ConfigureAwait(false);
                 EnsureCredentialDestination(uri);
-                var responseBody = await SendResponseBytesWithAccessTokenAsync(
+                var response = await SendResponseWithAccessTokenAsync(
                     HttpMethod.Post,
                     uri,
                     body: null,
                     accessToken,
                     cancellationToken).ConfigureAwait(false);
-                CryptographicOperations.ZeroMemory(responseBody);
+                CryptographicOperations.ZeroMemory(response.Body);
             }
             catch (Exception exception)
             {
@@ -523,13 +526,15 @@ public sealed class RivuneApiClient : IDisposable
         Guid id,
         SeriesMappingProvider mappingProvider,
         string? language = null,
+        string? episodeOrder = null,
         CancellationToken cancellationToken = default) =>
         RequestJsonAsync<Series>(
             HttpMethod.Get,
             ["metadata", "series", id.ToString("D")],
             Query(
                 ("language", language),
-                ("mappingProvider", MappingProviderValue(mappingProvider))),
+                ("mappingProvider", MappingProviderValue(mappingProvider)),
+                ("episodeOrder", episodeOrder)),
             null,
             true,
             cancellationToken);
@@ -568,11 +573,31 @@ public sealed class RivuneApiClient : IDisposable
             null,
             true,
             cancellationToken);
+    public Task<PlaybackMarkerList> GetPlaybackMarkersAsync(
+        string imdbId,
+        int season,
+        int episode,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(imdbId);
+        return RequestJsonAsync<PlaybackMarkerList>(
+            HttpMethod.Get,
+            ["playback", "markers"],
+            Query(
+                ("imdbId", imdbId),
+                ("season", season.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                ("episode", episode.ToString(System.Globalization.CultureInfo.InvariantCulture))),
+            null,
+            true,
+            cancellationToken);
+    }
+
 
     public Task<PlaybackSourceList> GetPlaybackSourcesAsync(
         string mediaType,
         string resourceId,
         PlaybackCapabilities capabilities,
+        Guid? addonId = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(resourceId);
@@ -582,7 +607,7 @@ public sealed class RivuneApiClient : IDisposable
             HttpMethod.Post,
             ["playback", "sources"],
             null,
-            new PlaybackSourcesRequest(mediaType, resourceId, capabilities),
+            new PlaybackSourcesRequest(mediaType, addonId, resourceId, capabilities),
             true,
             cancellationToken);
     }
@@ -635,6 +660,106 @@ public sealed class RivuneApiClient : IDisposable
             null,
             true,
             cancellationToken);
+    public Task<PlaybackProgress?> GetPlaybackProgressAsync(
+        Guid titleId,
+        CancellationToken cancellationToken = default) =>
+        RequestOptionalJsonAsync<PlaybackProgress>(
+            HttpMethod.Get,
+            ["progress", titleId.ToString("D")],
+            null,
+            null,
+            true,
+            cancellationToken);
+
+    public Task<PlaybackProgressBatch> GetPlaybackProgressBatchAsync(
+        IReadOnlyList<Guid> titleIds,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackProgressBatch>(
+            HttpMethod.Post,
+            ["progress", "batch"],
+            null,
+            new PlaybackProgressBatchRequest { TitleIds = titleIds },
+            true,
+            cancellationToken);
+
+    public Task<PlaybackProgress> UpdatePlaybackProgressAsync(
+        Guid titleId,
+        UpdatePlaybackProgressRequest input,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackProgress>(
+            HttpMethod.Put,
+            ["progress", titleId.ToString("D")],
+            null,
+            input,
+            true,
+            cancellationToken);
+
+    public Task ClearPlaybackProgressAsync(
+        Guid titleId,
+        long expectedVersion,
+        CancellationToken cancellationToken = default) =>
+        RequestEmptyAsync(
+            HttpMethod.Delete,
+            ["progress", titleId.ToString("D")],
+            Query(("expectedVersion", expectedVersion.ToString(System.Globalization.CultureInfo.InvariantCulture))),
+            true,
+            cancellationToken);
+
+    public Task<SetWatchedBatchResult> SetTitlesWatchedBatchAsync(
+        SetWatchedBatchRequest input,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<SetWatchedBatchResult>(
+            HttpMethod.Put,
+            ["titles", "watched", "batch"],
+            null,
+            input,
+            true,
+            cancellationToken);
+
+    public Task<PlaybackProgress> MarkTitleWatchedAsync(
+        Guid titleId,
+        long expectedVersion,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackProgress>(
+            HttpMethod.Post,
+            ["titles", titleId.ToString("D"), "watched"],
+            null,
+            new CompletionRequest { ExpectedVersion = expectedVersion },
+            true,
+            cancellationToken);
+
+    public Task<PlaybackProgress> MarkTitleUnwatchedAsync(
+        Guid titleId,
+        long expectedVersion,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackProgress>(
+            HttpMethod.Delete,
+            ["titles", titleId.ToString("D"), "watched"],
+            Query(("expectedVersion", expectedVersion.ToString(System.Globalization.CultureInfo.InvariantCulture))),
+            null,
+            true,
+            cancellationToken);
+
+    public Task<ContinueWatchingPage> GetContinueWatchingAsync(
+        int? limit = null,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<ContinueWatchingPage>(
+            HttpMethod.Get,
+            ["continue-watching"],
+            Query(("limit", limit?.ToString(System.Globalization.CultureInfo.InvariantCulture))),
+            null,
+            true,
+            cancellationToken);
+    public Task DismissContinueWatchingTitleAsync(
+        Guid titleId,
+        CancellationToken cancellationToken = default) =>
+        RequestEmptyAsync(
+            HttpMethod.Delete,
+            ["continue-watching", titleId.ToString("D")],
+            true,
+            cancellationToken);
+
+
 
     public void Dispose()
     {
@@ -694,6 +819,8 @@ public sealed class RivuneApiClient : IDisposable
                 ProtocolVersion = response.ProtocolVersion,
                 ApiBaseUrl = response.ApiBaseUrl,
                 SetupRequired = response.SetupRequired,
+                SetupCompleted = response.SetupCompleted,
+                DemoAvailable = response.DemoAvailable,
                 Timezone = response.Timezone,
                 InterfaceLanguage = response.InterfaceLanguage,
             };
@@ -741,37 +868,20 @@ public sealed class RivuneApiClient : IDisposable
             retryAfterRefresh: authenticated,
             cancellationToken).ConfigureAwait(false);
     }
-
-    private async Task RequestEmptyAsync(
+    private async Task<T?> RequestOptionalJsonAsync<T>(
         HttpMethod method,
         IReadOnlyList<string> pathSegments,
+        IReadOnlyList<KeyValuePair<string, string>>? query,
+        object? body,
         bool authenticated,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) where T : class
     {
-        var uri = await BuildEndpointAsync(pathSegments, query: null, cancellationToken).ConfigureAwait(false);
-        var responseBody = await SendResponseBytesAsync(
-            method,
-            uri,
-            body: null,
-            authenticated,
-            retryAfterRefresh: authenticated,
-            cancellationToken).ConfigureAwait(false);
-        CryptographicOperations.ZeroMemory(responseBody);
-    }
-
-    private async Task RequestEmptyWithBodyAsync(
-        HttpMethod method,
-        IReadOnlyList<string> pathSegments,
-        object body,
-        bool authenticated,
-        CancellationToken cancellationToken)
-    {
-        var uri = await BuildEndpointAsync(pathSegments, query: null, cancellationToken).ConfigureAwait(false);
+        var uri = await BuildEndpointAsync(pathSegments, query, cancellationToken).ConfigureAwait(false);
         var serializedBody = SerializeBody(body);
-        byte[] responseBody;
+        HttpResponsePayload response;
         try
         {
-            responseBody = await SendResponseBytesAsync(
+            response = await SendResponseAsync(
                 method,
                 uri,
                 serializedBody,
@@ -786,7 +896,85 @@ public sealed class RivuneApiClient : IDisposable
                 CryptographicOperations.ZeroMemory(serializedBody);
             }
         }
-        CryptographicOperations.ZeroMemory(responseBody);
+
+        try
+        {
+            if (response.StatusCode == HttpStatusCode.NoContent)
+            {
+                return null;
+            }
+
+            return JsonSerializer.Deserialize<T>(response.Body, JsonOptions)
+                ?? throw new InvalidResponseException();
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidResponseException(exception);
+        }
+        catch (NotSupportedException exception)
+        {
+            throw new InvalidResponseException(exception);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(response.Body);
+        }
+    }
+
+
+    private Task RequestEmptyAsync(
+        HttpMethod method,
+        IReadOnlyList<string> pathSegments,
+        bool authenticated,
+        CancellationToken cancellationToken) =>
+        RequestEmptyAsync(method, pathSegments, query: null, authenticated, cancellationToken);
+
+    private async Task RequestEmptyAsync(
+        HttpMethod method,
+        IReadOnlyList<string> pathSegments,
+        IReadOnlyList<KeyValuePair<string, string>>? query,
+        bool authenticated,
+        CancellationToken cancellationToken)
+    {
+        var uri = await BuildEndpointAsync(pathSegments, query, cancellationToken).ConfigureAwait(false);
+        var response = await SendResponseAsync(
+            method,
+            uri,
+            body: null,
+            authenticated,
+            retryAfterRefresh: authenticated,
+            cancellationToken).ConfigureAwait(false);
+        CryptographicOperations.ZeroMemory(response.Body);
+    }
+
+    private async Task RequestEmptyWithBodyAsync(
+        HttpMethod method,
+        IReadOnlyList<string> pathSegments,
+        object body,
+        bool authenticated,
+        CancellationToken cancellationToken)
+    {
+        var uri = await BuildEndpointAsync(pathSegments, query: null, cancellationToken).ConfigureAwait(false);
+        var serializedBody = SerializeBody(body);
+        HttpResponsePayload response;
+        try
+        {
+            response = await SendResponseAsync(
+                method,
+                uri,
+                serializedBody,
+                authenticated,
+                retryAfterRefresh: authenticated,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (serializedBody is not null)
+            {
+                CryptographicOperations.ZeroMemory(serializedBody);
+            }
+        }
+        CryptographicOperations.ZeroMemory(response.Body);
     }
 
     private async Task<T> SendJsonResponseAsync<T>(
@@ -797,10 +985,10 @@ public sealed class RivuneApiClient : IDisposable
         bool retryAfterRefresh,
         CancellationToken cancellationToken)
     {
-        byte[] responseBody;
+        HttpResponsePayload response;
         try
         {
-            responseBody = await SendResponseBytesAsync(
+            response = await SendResponseAsync(
                 method,
                 uri,
                 body,
@@ -818,7 +1006,7 @@ public sealed class RivuneApiClient : IDisposable
 
         try
         {
-            return JsonSerializer.Deserialize<T>(responseBody, JsonOptions)
+            return JsonSerializer.Deserialize<T>(response.Body, JsonOptions)
                 ?? throw new InvalidResponseException();
         }
         catch (JsonException exception)
@@ -831,11 +1019,11 @@ public sealed class RivuneApiClient : IDisposable
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(responseBody);
+            CryptographicOperations.ZeroMemory(response.Body);
         }
     }
 
-    private async Task<byte[]> SendResponseBytesAsync(
+    private async Task<HttpResponsePayload> SendResponseAsync(
         HttpMethod method,
         Uri uri,
         byte[]? body,
@@ -852,7 +1040,7 @@ public sealed class RivuneApiClient : IDisposable
                 ?? throw new NotAuthenticatedException();
         }
 
-        return await SendResponseBytesCoreAsync(
+        return await SendResponseCoreAsync(
             method,
             uri,
             body,
@@ -862,13 +1050,13 @@ public sealed class RivuneApiClient : IDisposable
             cancellationToken).ConfigureAwait(false);
     }
 
-    private Task<byte[]> SendResponseBytesWithAccessTokenAsync(
+    private Task<HttpResponsePayload> SendResponseWithAccessTokenAsync(
         HttpMethod method,
         Uri uri,
         byte[]? body,
         string accessToken,
         CancellationToken cancellationToken) =>
-        SendResponseBytesCoreAsync(
+        SendResponseCoreAsync(
             method,
             uri,
             body,
@@ -877,7 +1065,7 @@ public sealed class RivuneApiClient : IDisposable
             retryAfterRefresh: false,
             cancellationToken);
 
-    private async Task<byte[]> SendResponseBytesCoreAsync(
+    private async Task<HttpResponsePayload> SendResponseCoreAsync(
         HttpMethod method,
         Uri uri,
         byte[]? body,
@@ -927,7 +1115,7 @@ public sealed class RivuneApiClient : IDisposable
                 accessToken ?? throw new NotAuthenticatedException(),
                 authenticationEpoch.Value,
                 cancellationToken).ConfigureAwait(false);
-            return await SendResponseBytesAsync(
+            return await SendResponseAsync(
                 method,
                 uri,
                 body,
@@ -943,7 +1131,7 @@ public sealed class RivuneApiClient : IDisposable
             throw exception;
         }
 
-        return responseBody;
+        return new HttpResponsePayload(response.StatusCode, responseBody);
     }
 
     private static async Task<byte[]> ReadResponseBodyAsync(
@@ -1368,6 +1556,7 @@ public sealed class RivuneApiClient : IDisposable
         [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? Transcoding);
     private sealed record PlaybackSourcesRequest(
         string MediaType,
+        Guid? AddonId,
         string ResourceId,
         PlaybackCapabilities Capabilities);
     private sealed record PlaybackPrepareRequest(string SourceRef, int? StartSeconds);
