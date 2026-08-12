@@ -212,6 +212,8 @@ jobs:
             VERSION=${{ steps.metadata.outputs.version }}
           provenance: mode=max
           sbom: true
+          cache-from: type=gha,scope=rivune-container
+          cache-to: type=gha,scope=rivune-container,mode=max
 
   release:
     name: Create GitHub release notes

@@ -825,7 +825,7 @@ func TestUpdateProfileSettingsRequiresProfileManagement(t *testing.T) {
 		INSERT INTO profile_settings (profile_id, schema_version, settings, updated_at)
 		VALUES ($1::uuid, 1, '{"theme":"dark"}'::jsonb, '2026-01-02T03:04:05Z');
 		INSERT INTO instance_settings (instance_id, schema_version, settings, updated_at)
-		VALUES (1, 2, '{}'::jsonb, '2026-01-02T03:04:05Z');
+		VALUES (1, 3, '{}'::jsonb, '2026-01-02T03:04:05Z');
 	`, pgx.QueryExecModeSimpleProtocol, profileID, categoryID, userID); err != nil {
 		t.Fatalf("seed profile settings authorization boundary: %v", err)
 	}

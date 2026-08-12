@@ -30,14 +30,15 @@ paths:
           $ref: '#/components/responses/Error'
   /health:
     get:
-      summary: Get server health
+      summary: Check server health
+      description: Reports whether Rivune can reach PostgreSQL and is ready to serve application traffic. Retained as the protocol-v20 readiness route.
       operationId: getHealth
       security: []
       servers:
         - url: /
       responses:
         '200':
-          description: The server and database are healthy.
+          description: The server and database are ready.
           content:
             application/json:
               schema:
@@ -45,7 +46,51 @@ paths:
         '400':
           description: The HTTP request was malformed.
         '503':
-          description: A required dependency is unavailable.
+          description: The database is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        default:
+          $ref: '#/components/responses/Error'
+  /live:
+    get:
+      summary: Check server liveness
+      description: Reports whether the Rivune HTTP process is alive without checking external dependencies.
+      operationId: getLiveness
+      security: []
+      servers:
+        - url: /
+      responses:
+        '200':
+          description: The server process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Liveness'
+        '400':
+          description: The HTTP request was malformed.
+        default:
+          $ref: '#/components/responses/Error'
+  /ready:
+    get:
+      summary: Check server readiness
+      description: Reports whether the server can reach PostgreSQL and is ready to serve application traffic.
+      operationId: getReadiness
+      security: []
+      servers:
+        - url: /
+      responses:
+        '200':
+          description: The server and database are ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '400':
+          description: The HTTP request was malformed.
+        '503':
+          description: The database is unavailable.
           content:
             application/json:
               schema:
@@ -4984,6 +5029,17 @@ components:
           description: IANA timezone configured by the server operator.
         interfaceLanguage:
           $ref: '#/components/schemas/InterfaceLanguage'
+    Liveness:
+      type: object
+      required:
+        - status
+        - version
+      properties:
+        status:
+          type: string
+          const: ok
+        version:
+          type: string
     Health:
       type: object
       required:
@@ -6547,10 +6603,17 @@ components:
               $ref: '#/components/schemas/HardwareAccelerationMode'
             preferredTranscodeVideoCodec:
               type: string
-              enum: [auto, h264, hevc, av1]
+              enum:
+                - auto
+                - h264
+                - hevc
+                - av1
             transcodeQualityPreset:
               type: string
-              enum: [speed, balanced, quality]
+              enum:
+                - speed
+                - balanced
+                - quality
             transcodeConcurrency:
               type: integer
               minimum: 1
@@ -6637,7 +6700,14 @@ components:
       pattern: ^[A-Za-z_+-]+(?:/[A-Za-z0-9._+-]+)*$
     HardwareAccelerationMode:
       type: string
-      enum: [auto, software, hybrid, vaapi, qsv, nvenc, amf]
+      enum:
+        - auto
+        - software
+        - hybrid
+        - vaapi
+        - qsv
+        - nvenc
+        - amf
     CommonSettingsValues:
       type: object
       properties:
@@ -6750,7 +6820,18 @@ components:
       allOf:
         - $ref: '#/components/schemas/CommonSettingsValues'
         - type: object
-          required: [timezone, jellyfinEnabled, jellyfinDebug, hardwareAcceleration, preferredTranscodeVideoCodec, transcodeQualityPreset, transcodeConcurrency, transcodeMaxBitrateKbps, mediaMaxStorageMB, artworkMaxStorageMB, allowTranscoding]
+          required:
+            - timezone
+            - jellyfinEnabled
+            - jellyfinDebug
+            - hardwareAcceleration
+            - preferredTranscodeVideoCodec
+            - transcodeQualityPreset
+            - transcodeConcurrency
+            - transcodeMaxBitrateKbps
+            - mediaMaxStorageMB
+            - artworkMaxStorageMB
+            - allowTranscoding
           properties:
             timezone:
               $ref: '#/components/schemas/IANATimezone'
@@ -6767,11 +6848,18 @@ components:
               default: auto
             preferredTranscodeVideoCodec:
               type: string
-              enum: [auto, h264, hevc, av1]
+              enum:
+                - auto
+                - h264
+                - hevc
+                - av1
               default: auto
             transcodeQualityPreset:
               type: string
-              enum: [speed, balanced, quality]
+              enum:
+                - speed
+                - balanced
+                - quality
               default: balanced
             transcodeConcurrency:
               type: integer
@@ -6800,7 +6888,18 @@ components:
     RuntimeSettingsValues:
       type: object
       additionalProperties: false
-      required: [timezone, jellyfinEnabled, jellyfinDebug, hardwareAcceleration, preferredTranscodeVideoCodec, transcodeQualityPreset, transcodeConcurrency, transcodeMaxBitrateKbps, mediaMaxStorageMB, artworkMaxStorageMB, allowTranscoding]
+      required:
+        - timezone
+        - jellyfinEnabled
+        - jellyfinDebug
+        - hardwareAcceleration
+        - preferredTranscodeVideoCodec
+        - transcodeQualityPreset
+        - transcodeConcurrency
+        - transcodeMaxBitrateKbps
+        - mediaMaxStorageMB
+        - artworkMaxStorageMB
+        - allowTranscoding
       properties:
         timezone:
           $ref: '#/components/schemas/IANATimezone'
@@ -6817,11 +6916,18 @@ components:
           default: auto
         preferredTranscodeVideoCodec:
           type: string
-          enum: [auto, h264, hevc, av1]
+          enum:
+            - auto
+            - h264
+            - hevc
+            - av1
           default: auto
         transcodeQualityPreset:
           type: string
-          enum: [speed, balanced, quality]
+          enum:
+            - speed
+            - balanced
+            - quality
           default: balanced
         transcodeConcurrency:
           type: integer
@@ -6849,7 +6955,10 @@ components:
     RuntimeSettingsApplication:
       type: object
       additionalProperties: false
-      required: [active, requested, pendingRestart]
+      required:
+        - active
+        - requested
+        - pendingRestart
       properties:
         active:
           $ref: '#/components/schemas/RuntimeSettingsValues'
@@ -6863,7 +6972,11 @@ components:
           uniqueItems: true
           items:
             type: string
-            enum: [hardwareAcceleration, preferredTranscodeVideoCodec, transcodeConcurrency, transcodeQualityPreset]
+            enum:
+              - hardwareAcceleration
+              - preferredTranscodeVideoCodec
+              - transcodeConcurrency
+              - transcodeQualityPreset
     IntegrationCredentialsPatch:
       type: object
       additionalProperties: false
@@ -6936,7 +7049,9 @@ components:
     IntegrationCredentialStatus:
       type: object
       additionalProperties: false
-      required: [configured, updatedAt]
+      required:
+        - configured
+        - updatedAt
       properties:
         configured:
           type: boolean
@@ -6948,7 +7063,15 @@ components:
     IntegrationCredentialStatuses:
       type: object
       additionalProperties: false
-      required: [tmdbAccessToken, fanartApiKey, mdblistApiKey, tvdbApiKey, tvdbPin, traktClientId, traktClientSecret, simklClientId]
+      required:
+        - tmdbAccessToken
+        - fanartApiKey
+        - mdblistApiKey
+        - tvdbApiKey
+        - tvdbPin
+        - traktClientId
+        - traktClientSecret
+        - simklClientId
       properties:
         tmdbAccessToken:
           $ref: '#/components/schemas/IntegrationCredentialStatus'
@@ -6969,7 +7092,13 @@ components:
     IntegrationProviderStatuses:
       type: object
       additionalProperties: false
-      required: [tmdb, tvdb, fanart, mdblist, trakt, simkl]
+      required:
+        - tmdb
+        - tvdb
+        - fanart
+        - mdblist
+        - trakt
+        - simkl
       properties:
         tmdb:
           type: boolean
@@ -6986,7 +7115,10 @@ components:
     IntegrationSettingsStatus:
       type: object
       additionalProperties: false
-      required: [revision, credentials, providers]
+      required:
+        - revision
+        - credentials
+        - providers
       properties:
         revision:
           type: integer
@@ -6999,7 +7131,15 @@ components:
     IntegrationConfigurationSnapshot:
       type: object
       additionalProperties: false
-      required: [tmdbAccessToken, fanartApiKey, mdblistApiKey, tvdbApiKey, tvdbPin, traktClientId, traktClientSecret, simklClientId]
+      required:
+        - tmdbAccessToken
+        - fanartApiKey
+        - mdblistApiKey
+        - tvdbApiKey
+        - tvdbPin
+        - traktClientId
+        - traktClientSecret
+        - simklClientId
       properties:
         tmdbAccessToken:
           type: boolean
@@ -7020,7 +7160,14 @@ components:
     SettingsConfigurationAuditEvent:
       type: object
       additionalProperties: false
-      required: [id, revision, actorUserId, action, changedKeys, snapshot, createdAt]
+      required:
+        - id
+        - revision
+        - actorUserId
+        - action
+        - changedKeys
+        - snapshot
+        - createdAt
       properties:
         id:
           type: integer
@@ -7039,14 +7186,47 @@ components:
           type: string
           const: settings.updated
         changedKeys:
-          maxItems: 33
           description: Sorted names of persisted settings changed by the mutation.
           type: array
+          maxItems: 33
           minItems: 1
           uniqueItems: true
           items:
             type: string
-            enum: [interfaceLanguage, theme, maximumResolution, maximumCastMembers, maximumDirectTitles, allowTranscoding, preferDirectPlay, hideUnreleased, metadataLanguage, metadataRegion, seriesMappingProvider, audioLanguage, subtitleLanguage, forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, cardDensity, animationsEnabled, subtitleSizePercent, subtitleTextColor, subtitleBackgroundOpacityPercent, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds, timezone, jellyfinEnabled, jellyfinDebug, hardwareAcceleration, transcodeMaxBitrateKbps, mediaMaxStorageMB, artworkMaxStorageMB]
+            enum:
+              - interfaceLanguage
+              - theme
+              - maximumResolution
+              - maximumCastMembers
+              - maximumDirectTitles
+              - allowTranscoding
+              - preferDirectPlay
+              - hideUnreleased
+              - metadataLanguage
+              - metadataRegion
+              - seriesMappingProvider
+              - audioLanguage
+              - subtitleLanguage
+              - forcedSubtitleLanguage
+              - autoplayNextEpisode
+              - skipIntroEnabled
+              - skipRecapEnabled
+              - skipOutroEnabled
+              - cardDensity
+              - animationsEnabled
+              - subtitleSizePercent
+              - subtitleTextColor
+              - subtitleBackgroundOpacityPercent
+              - notificationsEnabled
+              - notificationDurationSeconds
+              - notificationPollIntervalSeconds
+              - timezone
+              - jellyfinEnabled
+              - jellyfinDebug
+              - hardwareAcceleration
+              - transcodeMaxBitrateKbps
+              - mediaMaxStorageMB
+              - artworkMaxStorageMB
         snapshot:
           $ref: '#/components/schemas/InstanceSettingsValues'
         createdAt:
@@ -7055,7 +7235,14 @@ components:
     IntegrationsConfigurationAuditEvent:
       type: object
       additionalProperties: false
-      required: [id, revision, actorUserId, action, changedKeys, snapshot, createdAt]
+      required:
+        - id
+        - revision
+        - actorUserId
+        - action
+        - changedKeys
+        - snapshot
+        - createdAt
       properties:
         id:
           type: integer
@@ -7081,7 +7268,15 @@ components:
           uniqueItems: true
           items:
             type: string
-            enum: [tmdbAccessToken, fanartApiKey, mdblistApiKey, tvdbApiKey, tvdbPin, traktClientId, traktClientSecret, simklClientId]
+            enum:
+              - tmdbAccessToken
+              - fanartApiKey
+              - mdblistApiKey
+              - tvdbApiKey
+              - tvdbPin
+              - traktClientId
+              - traktClientSecret
+              - simklClientId
         snapshot:
           $ref: '#/components/schemas/IntegrationConfigurationSnapshot'
         createdAt:
@@ -7099,7 +7294,9 @@ components:
     ConfigurationAuditPage:
       type: object
       additionalProperties: false
-      required: [events, nextCursor]
+      required:
+        - events
+        - nextCursor
       properties:
         events:
           type: array
@@ -7210,7 +7407,12 @@ components:
     InstanceSettingsLayer:
       type: object
       additionalProperties: false
-      required: [schemaVersion, revision, settings, runtime, updatedAt]
+      required:
+        - schemaVersion
+        - revision
+        - settings
+        - runtime
+        - updatedAt
       properties:
         schemaVersion:
           type: integer
@@ -9940,27 +10142,40 @@ components:
           maxLength: 64
         preferredVideoCodec:
           type: string
-          enum: [auto, h264, hevc, av1]
+          enum:
+            - auto
+            - h264
+            - hevc
+            - av1
         encodeCodecs:
           type: array
           uniqueItems: true
           maxItems: 3
           items:
             type: string
-            enum: [h264, hevc, av1]
+            enum:
+              - h264
+              - hevc
+              - av1
         decodeCodecs:
           type: array
           uniqueItems: true
           maxItems: 3
           items:
             type: string
-            enum: [h264, hevc, av1]
+            enum:
+              - h264
+              - hevc
+              - av1
         hevcMain10:
           description: Functional HEVC Main10 decode-to-encode probes succeeded for the active backend and its software fallback.
           type: boolean
         qualityPreset:
           type: string
-          enum: [speed, balanced, quality]
+          enum:
+            - speed
+            - balanced
+            - quality
         hardwareToneMap:
           type: boolean
         toneMapBackend:

@@ -28,7 +28,7 @@ RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_SETUP_TOKEN=<different output of: openssl rand -hex 32>
 RIVUNE_ENCRYPTION_KEYS=1:<different output of: openssl rand -hex 32>
-RIVUNE_HOST=media.example.com
+RIVUNE_PUBLIC_URL=https://media.example.com
 RIVUNE_VERSION=latest
 ```
 
@@ -41,14 +41,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Open [http://localhost:8080](http://localhost:8080). For a normal HTTPS installation, point `RIVUNE_HOST` at this host and use the supported Caddy deployment:
-
-```sh
-docker compose --env-file .env -f deploy/caddy/compose.yaml pull
-docker compose --env-file .env -f deploy/caddy/compose.yaml up -d
-```
-
-Then open `https://<RIVUNE_HOST>`. Enter `RIVUNE_SETUP_TOKEN` to claim the instance and create the first administrator.
+Open [http://localhost:8080](http://localhost:8080). For a normal HTTPS installation, keep using `compose.yaml`, set `RIVUNE_PUBLIC_URL` to the public HTTPS origin, and put Rivune behind Pangolin/Newt or an operator-managed reverse proxy. The proxy must terminate TLS and target Rivune over HTTP on port `8080`; then open `RIVUNE_PUBLIC_URL`. Enter `RIVUNE_SETUP_TOKEN` to claim the instance and create the first administrator.
 
 ## First-run configuration
 
@@ -62,15 +55,13 @@ Integration responses expose configured status and update time only; Rivune neve
 
 ## Host deployment choices
 
-Both provided Compose manifests are CPU-only by default and need no GPU device. For optional AMD/Intel acceleration, set `RIVUNE_VIDEO_DEVICE` and `RIVUNE_VIDEO_GROUP_ID` in `.env`, then add the single supported overlay:
+The provided Compose manifest is CPU-only by default and needs no GPU device. For optional AMD/Intel acceleration, set `RIVUNE_VIDEO_DEVICE` and `RIVUNE_VIDEO_GROUP_ID` in `.env`, then add the single supported overlay:
 
 ```sh
 docker compose -f compose.yaml -f compose.amd-intel.yaml up -d
-# Or with the supported Caddy deployment:
-docker compose -f deploy/caddy/compose.yaml -f compose.amd-intel.yaml up -d
 ```
 
-The base Compose file is also a complete PostgreSQL 18 stack for Pangolin/Newt. It creates a database-only internal network and the dedicated `rivune-edge` network. Set `RIVUNE_PUBLIC_URL=https://rivune.example.com`, attach Newt only to `rivune-edge`, and configure the Pangolin target as hostname `rivune`, port `8080`, method `http`. The host port remains loopback-only and is not used by Newt.
+The base Compose file is a complete PostgreSQL 18 stack for Pangolin/Newt or another operator-managed proxy. It creates a database-only internal network and the dedicated `rivune-edge` network. Attach the proxy only to `rivune-edge` and target hostname `rivune`, port `8080`, over HTTP. For Pangolin, configure Newt on that network with those target values. The loopback-only host port is for local access and is not used by a container proxy.
 
 For Unraid's XML template with an existing PostgreSQL server, TLS, a host port, and AMD/Intel GPU access are all opt-in. Prefer the same dedicated edge network and `Rivune:8080` target. If Newt cannot share that network, manually add an Unraid TCP Port mapping from container port `8080` to an unused host port such as `18080`; never forward it on the router.
 

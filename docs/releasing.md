@@ -34,9 +34,8 @@ and current `main` HEAD to be identical. The reusable `Release gate` then runs
 these exact jobs: `Backend tests`, `Server Windows compile`, `Frontend build and
 E2E`, `OpenAPI lint and contract resolution`, `Swift API client`, `Kotlin API
 client`, `Windows API client`, and `Container, migrations, and HTTPS proxy`.
-The container job also
-validates the two supported CPU-only manifests, `compose.yaml` and
-`deploy/caddy/compose.yaml`, plus each manifest combined with the supported
+The container job also validates the single supported CPU-only manifest,
+`compose.yaml`, plus that manifest combined with the supported
 `compose.amd-intel.yaml` GPU overlay, using non-secret placeholders.
 
 Only a successful candidate run is authorized to proceed in `Publish release`, whose top-level permission remains `contents: read`. Its `Authorize tested release candidate` job repeats the annotated-tag and same-commit checks without write permission. Immediately before each existing write-capable job acts, the workflow resolves the annotated tag object and target commit again. `Publish multi-architecture image` alone receives `packages: write`; after it succeeds, `Create GitHub release notes` alone receives `contents: write` and publishes the curated file from the tested commit.
@@ -49,24 +48,21 @@ export RIVUNE_POSTGRES_SUPERUSER_PASSWORD=compose-validation-superuser-password
 export RIVUNE_RESTORE_PASSWORD=compose-validation-restore-password
 export RIVUNE_SETUP_TOKEN=compose-validation-setup-token
 export RIVUNE_ENCRYPTION_KEYS=1:1212121212121212121212121212121212121212121212121212121212121212
-export RIVUNE_HOST=rivune.invalid
 export RIVUNE_VIDEO_GROUP_ID=109
 export RIVUNE_VIDEO_DEVICE=/dev/dri/renderD129
-for manifest in compose.yaml deploy/caddy/compose.yaml; do
-  docker compose -f "${manifest}" config --quiet
-  docker compose -f "${manifest}" config --format json | jq -e '
-    (.services.rivune.environment | has("RIVUNE_VIDEO_GROUP_ID") | not) and
-    (.services.rivune | has("devices") | not) and
-    (.services.rivune | has("group_add") | not)
-  ' >/dev/null
+docker compose -f compose.yaml config --quiet
+docker compose -f compose.yaml config --format json | jq -e '
+  (.services.rivune.environment | has("RIVUNE_VIDEO_GROUP_ID") | not) and
+  (.services.rivune | has("devices") | not) and
+  (.services.rivune | has("group_add") | not)
+' >/dev/null
 
-  docker compose -f "${manifest}" -f compose.amd-intel.yaml config --quiet
-  docker compose -f "${manifest}" -f compose.amd-intel.yaml config --format json | jq -e '
-    .services.rivune.environment.RIVUNE_VIDEO_GROUP_ID == "109" and
-    .services.rivune.devices == [{"source":"/dev/dri/renderD129","target":"/dev/dri/renderD128","permissions":"rwm"}] and
-    .services.rivune.group_add == ["109"]
-  ' >/dev/null
-done
+docker compose -f compose.yaml -f compose.amd-intel.yaml config --quiet
+docker compose -f compose.yaml -f compose.amd-intel.yaml config --format json | jq -e '
+  .services.rivune.environment.RIVUNE_VIDEO_GROUP_ID == "109" and
+  .services.rivune.devices == [{"source":"/dev/dri/renderD129","target":"/dev/dri/renderD128","permissions":"rwm"}] and
+  .services.rivune.group_add == ["109"]
+' >/dev/null
 ```
 
 If GitHub does not create the release-candidate run for an otherwise valid tag push, dispatch the same read-only gate without moving the tag:

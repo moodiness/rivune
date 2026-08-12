@@ -60,6 +60,12 @@ func TestShutdownDrainsHTTPRequestBeforeCancelingJellyfinGeneration(t *testing.T
 	}
 }
 
+func TestDefaultHealthCheckTargetsReadiness(t *testing.T) {
+	if defaultHealthCheckURL != "http://127.0.0.1:8080/ready" {
+		t.Fatalf("default healthcheck URL = %q, want readiness endpoint", defaultHealthCheckURL)
+	}
+}
+
 func TestCheckHealthRequiresSuccessfulEndpoint(t *testing.T) {
 	for _, test := range []struct {
 		name       string
