@@ -19,7 +19,7 @@ import (
 
 var version = "dev"
 
-const defaultHealthCheckURL = "http://127.0.0.1:8080/health"
+const defaultHealthCheckURL = "http://127.0.0.1:8080/ready"
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {

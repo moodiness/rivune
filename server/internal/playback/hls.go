@@ -26,7 +26,7 @@ const (
 	defaultMediaIdleTTL              = 2 * time.Minute
 	defaultTranscodeVideoBitrateKbps = 12000
 	hlsReadyTimeout                  = 45 * time.Second
-	hlsInitialBufferSeconds          = 12
+	hlsInitialBufferSeconds          = 6
 	hlsSegmentDurationSeconds        = 3
 	hlsRetainedSegments              = 120
 	hlsDeleteThreshold               = 1
@@ -733,7 +733,7 @@ func (service *Service) hlsJob(ctx context.Context, sessionID string, asset stor
 			service.hlsMu.Unlock()
 			return shared, nil
 		}
-		if directorySize(service.mediaOptions.TempDirectory) >= storageLimit {
+		if service.hlsWorkspaceBytes() >= storageLimit {
 			service.hlsMu.Unlock()
 			return nil, ErrMediaStorageLimit
 		}
@@ -754,9 +754,9 @@ func (service *Service) hlsJob(ctx context.Context, sessionID string, asset stor
 			createdAt: now, lastAccessed: now, cancel: cancel, done: make(chan struct{}),
 		}
 		service.addHLSJobBindingLocked(key, job, job.prewarming)
+		service.startHLSStorageMonitorLocked()
 		service.hlsMu.Unlock()
 		go service.runHLSJob(jobContext, job, asset, processor)
-		go service.monitorHLSStorage(jobContext, job)
 		return job, nil
 	}
 }
@@ -1054,18 +1054,65 @@ func (service *Service) runHLSJob(ctx context.Context, job *hlsJob, asset stored
 	}
 	job.mu.Unlock()
 	close(job.done)
+	service.hlsMu.Lock()
+	service.hlsStorageMonitorWorkers--
+	lastWriter := service.hlsStorageMonitorWorkers == 0
+	if lastWriter && service.hlsStorageMonitorWake != nil {
+		select {
+		case service.hlsStorageMonitorWake <- struct{}{}:
+		default:
+		}
+	}
+	service.hlsMu.Unlock()
+	if lastWriter {
+		service.reclaimHLSStorage(false)
+	}
 }
 
-func (service *Service) monitorHLSStorage(ctx context.Context, job *hlsJob) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+func (service *Service) startHLSStorageMonitorLocked() {
+	service.hlsStorageMonitorWorkers++
+	if service.hlsStorageMonitorRunning {
+		return
+	}
+	service.hlsStorageMonitorRunning = true
+	service.hlsStorageMonitorWake = make(chan struct{}, 1)
+	interval := service.hlsStorageMonitorInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	go service.monitorHLSStorage(interval, service.hlsStorageMonitorWake)
+}
+
+func (service *Service) monitorHLSStorage(interval time.Duration, wake <-chan struct{}) {
+	storageTicker := hlsStorageTicker{}
+	if service.hlsStorageTickerFactory != nil {
+		storageTicker = service.hlsStorageTickerFactory(interval)
+	} else {
+		ticker := time.NewTicker(interval)
+		storageTicker = hlsStorageTicker{ticks: ticker.C, stop: ticker.Stop}
+	}
+	if storageTicker.stop != nil {
+		defer storageTicker.stop()
+	}
 	for {
+		scan := false
 		select {
-		case <-ctx.Done():
+		case _, open := <-storageTicker.ticks:
+			if !open {
+				return
+			}
+			scan = true
+		case <-wake:
+		}
+		service.hlsMu.Lock()
+		if service.hlsStorageMonitorWorkers == 0 {
+			service.hlsStorageMonitorRunning = false
+			service.hlsStorageMonitorWake = nil
+			service.hlsMu.Unlock()
 			return
-		case <-job.done:
-			return
-		case <-ticker.C:
+		}
+		service.hlsMu.Unlock()
+		if scan {
 			service.reclaimHLSStorage(false)
 		}
 	}
@@ -1083,7 +1130,7 @@ func (service *Service) reclaimHLSStorageTo(limit int64, admission bool) bool {
 
 func (service *Service) reclaimHLSStorageLocked(limit int64, admission bool) bool {
 	for {
-		size := directorySize(service.mediaOptions.TempDirectory)
+		size := service.hlsWorkspaceBytes()
 		if size < limit || !admission && size == limit {
 			return true
 		}
@@ -1096,6 +1143,13 @@ func (service *Service) reclaimHLSStorageLocked(limit int64, admission bool) boo
 		job.mu.Unlock()
 		service.stopDetachedHLSJob(job)
 	}
+}
+
+func (service *Service) hlsWorkspaceBytes() int64 {
+	if service.hlsWorkspaceSize != nil {
+		return service.hlsWorkspaceSize(service.mediaOptions.TempDirectory)
+	}
+	return directorySize(service.mediaOptions.TempDirectory)
 }
 
 func (service *Service) hlsStorageVictim() (string, *hlsJob) {

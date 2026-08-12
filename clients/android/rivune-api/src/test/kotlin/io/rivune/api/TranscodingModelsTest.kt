@@ -18,11 +18,11 @@ class TranscodingModelsTest {
         val encoded = json.parseToJsonElement(json.encodeToString(PlaybackCapabilities(
             streamingProtocols = listOf("hls"),
             containers = listOf("mp4"),
-            processingModes = listOf("remux", "transcode_audio", "transcode"),
+            processingModes = listOf(PlaybackProcessingMode.REMUX, PlaybackProcessingMode.TRANSCODE_AUDIO, PlaybackProcessingMode.TRANSCODE),
             maximumHeight = 2160,
             maximumVideoBitrateKbps = 12_000,
             maximumAudioChannels = 6,
-            subtitleModes = listOf("external", "burn"),
+            subtitleModes = listOf(PlaybackSubtitleMode.EXTERNAL, PlaybackSubtitleMode.BURN),
             mediaProfiles = listOf(PlaybackMediaProfile("mp4", "h265", "aac", 10)),
         ))).jsonObject
 
@@ -62,7 +62,7 @@ class TranscodingModelsTest {
             {
               "id":"22222222-2222-4222-8222-222222222222",
               "selectedSourceId":"source-1","selectedAudioTrack":2,"selectedSubtitleId":"subtitle-1",
-              "sources":[{"id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","mode":"transcode","protocol":"hls","compatible":true,"decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}}],
+              "sources":[{"id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","mode":"transcode","protocol":"hls","mediaTimeline":"relative","compatible":true,"decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}}],
               "subtitles":[{"id":"subtitle-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","default":true,"delivery":"burn","futureSubtitleField":"ignored"}],
               "providerErrors":[{"addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","code":"future_provider_code","message":"future"}],
               "expiresAt":"2026-08-03T12:00:00Z","futureSessionField":"ignored"
@@ -71,11 +71,12 @@ class TranscodingModelsTest {
 
         assertEquals(2, session.selectedAudioTrack)
         assertEquals("subtitle-1", session.selectedSubtitleId)
-        assertEquals("subtitle_burn_required", session.sources.first().decision?.reason)
+        assertEquals(PlaybackDecisionReason.SUBTITLE_BURN_REQUIRED, session.sources.first().decision?.reason)
         assertEquals("dolby_vision", session.sources.first().decision?.source?.hdrFormat)
         assertEquals(12_000, session.sources.first().decision?.target?.videoBitrateKbps)
         assertEquals(8, session.sources.first().decision?.target?.videoBitDepth)
-        assertEquals("burn", session.subtitles.first().delivery)
+        assertEquals(PlaybackSubtitleDelivery.BURN, session.subtitles.first().delivery)
+        assertEquals(PlaybackMediaTimeline.RELATIVE, session.sources.first().mediaTimeline)
         assertNull(session.subtitles.first().url)
         assertEquals("future_provider_code", session.providerErrors.first().code)
     }
@@ -85,7 +86,7 @@ class TranscodingModelsTest {
         val activity = json.decodeFromString<PlaybackActivity>("""
             {
               "summary":{"activeSessions":1,"activeJobs":2,"processingSlots":1,"processingLimit":2,"storageBytes":1024,"storageLimitBytes":1048576},
-              "diagnostics":{"videoEncoder":"libx264","hardwareToneMap":false},
+              "diagnostics":{"ffmpegVersion":"7.1","ffprobeVersion":"7.1","hardwareAcceleration":"software","videoEncoder":"libx264","preferredVideoCodec":"h264","encodeCodecs":["h264"],"decodeCodecs":["h264","hevc"],"hevcMain10":true,"qualityPreset":"balanced","hardwareToneMap":false,"toneMapBackend":"software","transcodeThreads":4,"maximumReadRate":2.5,"totals":{"started":8,"succeeded":6,"failed":1,"softwareFallbacks":2},"pools":{"process":{"active":1,"limit":2},"probe":{"active":1,"limit":4},"subtitle":{"active":0,"limit":2},"trickplay":{"active":0,"limit":1}}},
               "sessions":[{
                 "id":"22222222-2222-4222-8222-222222222222","title":"Contract Movie","mediaType":"movie","mode":"transcode",
                 "decision":{"reason":"video_transcode_required","videoAction":"transcode","audioAction":"transcode","subtitleAction":"none","toneMapping":true,"target":{"videoCodec":"h264","height":1080,"videoBitrateKbps":12000}},
@@ -94,16 +95,23 @@ class TranscodingModelsTest {
                 "createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z","expiresAt":"2026-08-03T12:00:00Z"
               }],
               "jobs":[
-                {"sessionId":"22222222-2222-4222-8222-222222222222","assetId":"asset-1","mode":"transcode","state":"running","prewarming":false,"progressPercent":37.5,"speed":1.25,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"},
-                {"assetId":"asset-2","mode":"transcode","state":"running","prewarming":true,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"}
+                {"sessionId":"22222222-2222-4222-8222-222222222222","assetId":"asset-1","mode":"transcode","state":"processing","prewarming":false,"progressPercent":37.5,"speed":1.25,"startupDurationSeconds":2.75,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"},
+                {"assetId":"asset-2","mode":"transcode","state":"failed","errorClass":"capacity","prewarming":true,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"}
               ],
-              "futureActivityField":"ignored"
+              "sessionsTruncated":false,"jobsTruncated":true,"futureActivityField":"ignored"
             }
         """.trimIndent())
 
         assertEquals(1080, activity.sessions.first().decision?.target?.height)
         assertEquals(true, activity.sessions.first().decision?.toneMapping)
         assertEquals(37.5, activity.jobs.first().progressPercent)
+        assertEquals(8L, activity.diagnostics.totals.started)
+        assertEquals(4, activity.diagnostics.pools.probe.limit)
+        assertEquals(PlaybackHardwareAcceleration.SOFTWARE, activity.diagnostics.hardwareAcceleration)
+        assertEquals(PlaybackMediaJobErrorClass.CAPACITY, activity.jobs.last().errorClass)
+        assertEquals(2.75, activity.jobs.first().startupDurationSeconds)
+        assertEquals(false, activity.sessionsTruncated)
+        assertEquals(true, activity.jobsTruncated)
         assertEquals(1.25, activity.jobs.first().speed)
         assertNull(activity.jobs.last().progressPercent)
         assertNull(activity.jobs.last().speed)

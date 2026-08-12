@@ -32,6 +32,9 @@ fi
 media_directory="${RIVUNE_MEDIA_TEMP_DIR:-}"
 if [ -n "$media_directory" ]; then
   mkdir -p "$media_directory"
+  # Processed media is disposable. Remove it while still root so a changed
+  # PUID/PGID cannot leave an inaccessible 0700 workspace after recreation.
+  rm -rf "$media_directory/rivune-media"
   chown "$puid:$pgid" "$media_directory"
 fi
 

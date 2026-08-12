@@ -39,39 +39,50 @@ type playbackProfileTransaction interface {
 	pgx.Tx
 }
 
+type hlsStorageTicker struct {
+	ticks <-chan time.Time
+	stop  func()
+}
+
 type Service struct {
-	pool                    *pgxpool.Pool
-	addons                  ResourceFetcher
-	client                  *http.Client
-	directStreams           directStreamAdmission
-	directStreamGlobalLimit int
-	directStreamOwnerLimit  int
-	directStreamIdleTimeout time.Duration
-	introDBClient           *http.Client
-	introDBBaseURL          string
-	processor               MediaProcessor
-	now                     func() time.Time
-	mediaOptions            MediaOptions
-	runtimeSettings         *runtimesettings.Source
-	mediaStorageBytes       atomic.Int64
-	references              *sourceReferenceStore
-	probes                  *mediaProbeCache
-	preparations            *playbackPreparationCache
-	targetSigningKey        [32]byte
-	hlsResetMu              sync.RWMutex
-	hlsMu                   sync.Mutex
-	hlsStorageMu            sync.Mutex
-	hlsWorkspaceGeneration  atomic.Uint64
-	hlsSeekMu               sync.Mutex
-	hlsSeekGates            map[string]*hlsSeekGate
-	introDBCacheStores      atomic.Uint64
-	deliveryChildrenMu      sync.Mutex
-	deliveryChildren        *deliveryChildBudget
-	profileTxFactory        func(context.Context, auth.Principal) (playbackProfileTransaction, error)
-	sessionCleanupTxFactory func(context.Context) (playbackProfileTransaction, error)
-	hlsJobs                 map[string]*hlsJob
-	trickplayMu             sync.Mutex
-	trickplayImages         *trickplayCache
+	pool                      *pgxpool.Pool
+	addons                    ResourceFetcher
+	client                    *http.Client
+	directStreams             directStreamAdmission
+	directStreamGlobalLimit   int
+	directStreamOwnerLimit    int
+	directStreamIdleTimeout   time.Duration
+	introDBClient             *http.Client
+	introDBBaseURL            string
+	processor                 MediaProcessor
+	now                       func() time.Time
+	mediaOptions              MediaOptions
+	runtimeSettings           *runtimesettings.Source
+	mediaStorageBytes         atomic.Int64
+	references                *sourceReferenceStore
+	probes                    *mediaProbeCache
+	preparations              *playbackPreparationCache
+	targetSigningKey          [32]byte
+	hlsResetMu                sync.RWMutex
+	hlsMu                     sync.Mutex
+	hlsStorageMu              sync.Mutex
+	hlsWorkspaceGeneration    atomic.Uint64
+	hlsStorageMonitorRunning  bool
+	hlsStorageMonitorWorkers  int
+	hlsStorageMonitorInterval time.Duration
+	hlsStorageTickerFactory   func(time.Duration) hlsStorageTicker
+	hlsStorageMonitorWake     chan struct{}
+	hlsWorkspaceSize          func(string) int64
+	hlsSeekMu                 sync.Mutex
+	hlsSeekGates              map[string]*hlsSeekGate
+	introDBCacheStores        atomic.Uint64
+	deliveryChildrenMu        sync.Mutex
+	deliveryChildren          *deliveryChildBudget
+	profileTxFactory          func(context.Context, auth.Principal) (playbackProfileTransaction, error)
+	sessionCleanupTxFactory   func(context.Context) (playbackProfileTransaction, error)
+	hlsJobs                   map[string]*hlsJob
+	trickplayMu               sync.Mutex
+	trickplayImages           *trickplayCache
 }
 
 const (

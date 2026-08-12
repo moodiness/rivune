@@ -249,6 +249,10 @@ type catalogArtworkPresenter interface {
 	LocalizeCatalogDescriptors(context.Context, []addon.CatalogDescriptor)
 }
 
+type databasePinger interface {
+	Ping(context.Context) error
+}
+
 type API struct {
 	config                                  config.Config
 	addons                                  addonService
@@ -258,7 +262,7 @@ type API struct {
 	calendar                                calendarService
 	calendarRefresh                         calendarRefreshWorker
 	categories                              categoryService
-	pool                                    *pgxpool.Pool
+	pool                                    databasePinger
 	instances                               instanceService
 	demo                                    *demo.Service
 	jellyfinCredentials                     jellyfinCredentialService
@@ -507,7 +511,9 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", a.health)
+	mux.HandleFunc("GET /health", a.readiness)
+	mux.HandleFunc("GET /live", a.liveness)
+	mux.HandleFunc("GET /ready", a.readiness)
 	mux.HandleFunc("GET /.well-known/rivune", a.discovery)
 	mux.HandleFunc("GET /api/v1/setup/status", a.setupStatus)
 	mux.HandleFunc("POST /api/v1/setup", a.setup)
@@ -655,12 +661,19 @@ func (a *API) Handler() http.Handler {
 	})
 }
 
-func (a *API) health(w http.ResponseWriter, r *http.Request) {
+func (a *API) liveness(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"version": a.version,
+	})
+}
+
+func (a *API) readiness(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
 	if err := a.pool.Ping(ctx); err != nil {
-		a.logger.Error("database health check failed", "error", err)
+		a.logger.Error("database readiness check failed", "error", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status":   "unavailable",
 			"database": "unavailable",
@@ -800,7 +813,9 @@ func (a *API) middleware(next http.Handler) http.Handler {
 		observed.Header().Set("X-Content-Type-Options", "nosniff")
 
 		defer func() {
+			panicked := false
 			if recovered := recover(); recovered != nil {
+				panicked = true
 				a.logger.Error("panic serving request", "method", r.Method, "route", nativeRequestRoute(r), "committed", observed.Committed())
 				if !observed.Committed() {
 					writeError(observed, http.StatusInternalServerError, "internal_error", "An internal error occurred")
@@ -809,6 +824,9 @@ func (a *API) middleware(next http.Handler) http.Handler {
 			status := observed.status
 			if status == 0 {
 				status = http.StatusOK
+			}
+			if !panicked && successfulHealthProbe(r, status) {
+				return
 			}
 			work := counters.Snapshot()
 			a.logger.LogAttrs(context.Background(), slog.LevelInfo, "request completed",
@@ -826,6 +844,13 @@ func (a *API) middleware(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(observed, r)
 	})
+}
+
+func successfulHealthProbe(r *http.Request, status int) bool {
+	if r == nil || r.Method != http.MethodGet || status < http.StatusOK || status >= http.StatusMultipleChoices {
+		return false
+	}
+	return r.Pattern == "GET /health" || r.Pattern == "GET /live" || r.Pattern == "GET /ready"
 }
 
 func nativeRequestRoute(r *http.Request) string {

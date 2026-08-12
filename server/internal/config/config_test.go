@@ -20,7 +20,7 @@ func TestLoadUsesBootstrapAndCompiledDefaults(t *testing.T) {
 	if cfg.AccessTokenTTL != 15*time.Minute || cfg.RefreshTokenTTL != 30*24*time.Hour || cfg.ProfileGrantTTL != 12*time.Hour {
 		t.Fatalf("unexpected fixed token lifetimes: access=%s refresh=%s profile=%s", cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.ProfileGrantTTL)
 	}
-	if cfg.FFmpegPath != "ffmpeg" || cfg.FFprobePath != "ffprobe" || cfg.RemuxConcurrency != 4 || cfg.TranscodeThreads != 4 || cfg.TranscodeMaxReadRate != 1.5 || cfg.HLSInitialBufferSeconds != 12 {
+	if cfg.FFmpegPath != "ffmpeg" || cfg.FFprobePath != "ffprobe" || cfg.RemuxConcurrency != 4 || cfg.TranscodeThreads != 4 || cfg.TranscodeMaxReadRate != 1.5 || cfg.HLSInitialBufferSeconds != 6 {
 		t.Fatalf("unexpected compiled media defaults: %+v", cfg)
 	}
 	if cfg.EncryptionKeys == nil || cfg.EncryptionKeys.ActiveVersion() != 2 || cfg.EncryptionKeysFromLegacy {
@@ -324,7 +324,7 @@ func TestLoadLegacyEnvironmentCapturesInvalidTimezone(t *testing.T) {
 
 func TestLoadAcceptsHTTPSAndLoopbackHTTPPublicURLs(t *testing.T) {
 	tests := []string{
-		"https://rivune.example.com",
+		"https://rivune.example.com/",
 		"http://localhost:8080",
 		"http://127.0.0.1:8080",
 		"http://[::1]:8080",
@@ -340,8 +340,31 @@ func TestLoadAcceptsHTTPSAndLoopbackHTTPPublicURLs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load config: %v", err)
 			}
-			if cfg.PublicURL != publicURL {
-				t.Fatalf("public URL = %q, want %q", cfg.PublicURL, publicURL)
+			want := strings.TrimSuffix(publicURL, "/")
+			if cfg.PublicURL != want {
+				t.Fatalf("public URL = %q, want %q", cfg.PublicURL, want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsPublicURLsThatAreNotOrigins(t *testing.T) {
+	for _, publicURL := range []string{
+		"https://user:secret@rivune.example.com",
+		"https://rivune.example.com/api",
+		"https://rivune.example.com/%2F",
+		"https://rivune.example.com?token=secret",
+		"https://rivune.example.com?",
+		"https://rivune.example.com#fragment",
+	} {
+		t.Run(publicURL, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv("RIVUNE_PUBLIC_URL", publicURL)
+
+			if _, err := Load(); err == nil {
+				t.Fatal("non-origin public URL was accepted")
+			} else if strings.Contains(err.Error(), "secret") {
+				t.Fatalf("configuration error exposed a public URL secret: %v", err)
 			}
 		})
 	}

@@ -33,20 +33,65 @@ paths:
           $ref: "#/components/responses/Error"
   /health:
     get:
-      summary: Get server health
+      summary: Check server health
+      description: Reports whether Rivune can reach PostgreSQL and is ready to serve application traffic. Retained as the protocol-v20 readiness route.
       operationId: getHealth
       security: []
       servers:
         - url: /
       responses:
         "200":
-          description: The server and database are healthy.
+          description: The server and database are ready.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
         "503":
-          description: A required dependency is unavailable.
+          description: The database is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "400":
+          description: The HTTP request was malformed.
+        default:
+          $ref: "#/components/responses/Error"
+  /live:
+    get:
+      summary: Check server liveness
+      description: Reports whether the Rivune HTTP process is alive without checking external dependencies.
+      operationId: getLiveness
+      security: []
+      servers:
+        - url: /
+      responses:
+        "200":
+          description: The server process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Liveness"
+        "400":
+          description: The HTTP request was malformed.
+        default:
+          $ref: "#/components/responses/Error"
+  /ready:
+    get:
+      summary: Check server readiness
+      description: Reports whether the server can reach PostgreSQL and is ready to serve application traffic.
+      operationId: getReadiness
+      security: []
+      servers:
+        - url: /
+      responses:
+        "200":
+          description: The server and database are ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          description: The database is unavailable.
           content:
             application/json:
               schema:
@@ -4965,6 +5010,15 @@ components:
         interfaceLanguage:
           $ref: "#/components/schemas/InterfaceLanguage"
 
+    Liveness:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          const: ok
+        version:
+          type: string
     Health:
       type: object
       required: [status, database, version]

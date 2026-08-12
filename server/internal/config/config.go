@@ -28,7 +28,7 @@ const (
 	defaultRemuxConcurrency        = 4
 	defaultTranscodeThreads        = 4
 	defaultTranscodeMaxReadRate    = 1.5
-	defaultHLSInitialBufferSeconds = 12
+	defaultHLSInitialBufferSeconds = 6
 	defaultVideoDevice             = "/dev/dri/renderD128"
 )
 
@@ -139,8 +139,8 @@ func Load() (Config, error) {
 
 	if cfg.PublicURL != "" {
 		parsed, parseErr := url.Parse(cfg.PublicURL)
-		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return Config{}, errors.New("RIVUNE_PUBLIC_URL must be an absolute HTTP(S) URL without a query or fragment")
+		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawPath != "" || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return Config{}, errors.New("RIVUNE_PUBLIC_URL must be an absolute HTTP(S) origin without credentials, path, query, or fragment")
 		}
 		if parsed.Scheme != "http" && parsed.Scheme != "https" {
 			return Config{}, errors.New("RIVUNE_PUBLIC_URL must use http or https")
@@ -148,6 +148,8 @@ func Load() (Config, error) {
 		if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
 			return Config{}, errors.New("RIVUNE_PUBLIC_URL must use https unless its host is loopback")
 		}
+		parsed.Path = ""
+		cfg.PublicURL = parsed.String()
 	}
 
 	return cfg, nil

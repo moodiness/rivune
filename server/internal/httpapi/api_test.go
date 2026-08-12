@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,6 +83,116 @@ func (f *fakeInstanceService) ReleaseDemoSession(context.Context, string) (func(
 		return nil, instance.ErrAlreadyConfigured
 	}
 	return func() {}, nil
+}
+
+type databasePingerFunc func(context.Context) error
+
+func (ping databasePingerFunc) Ping(ctx context.Context) error {
+	return ping(ctx)
+}
+
+func TestLivenessRemainsLiveWithoutDatabaseAndSuccessfulProbesAreSilent(t *testing.T) {
+	var logs bytes.Buffer
+	pingCalls := 0
+	api := testAPI(&fakeInstanceService{})
+	api.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	api.pool = databasePingerFunc(func(context.Context) error {
+		pingCalls++
+		return errors.New("database unavailable")
+	})
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/live", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("liveness status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	if pingCalls != 0 {
+		t.Fatalf("liveness ping calls = %d, want 0", pingCalls)
+	}
+	var body map[string]string
+	decodeResponse(t, response, &body)
+	if body["status"] != "ok" || body["version"] != "test" || body["database"] != "" {
+		t.Fatalf("unexpected liveness response: %+v", body)
+	}
+	if strings.Contains(logs.String(), "request completed") {
+		t.Fatalf("successful liveness probe was logged: %s", logs.String())
+	}
+}
+
+func TestHealthAndReadinessCheckDatabaseWithTimeoutAndLogOnlyFailure(t *testing.T) {
+	for _, path := range []string{"/health", "/ready"} {
+		for _, test := range []struct {
+			name       string
+			pingErr    error
+			wantStatus int
+			wantState  string
+		}{
+			{name: "ready", wantStatus: http.StatusOK, wantState: "ok"},
+			{name: "database unavailable", pingErr: errors.New("database offline"), wantStatus: http.StatusServiceUnavailable, wantState: "unavailable"},
+		} {
+			t.Run(path+"/"+test.name, func(t *testing.T) {
+				var logs bytes.Buffer
+				pingCalls := 0
+				api := testAPI(&fakeInstanceService{})
+				api.logger = slog.New(slog.NewTextHandler(&logs, nil))
+				api.pool = databasePingerFunc(func(ctx context.Context) error {
+					pingCalls++
+					deadline, ok := ctx.Deadline()
+					if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 2*time.Second {
+						t.Fatalf("readiness ping deadline = %v, present=%t", deadline, ok)
+					}
+					return test.pingErr
+				})
+				response := httptest.NewRecorder()
+
+				api.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+
+				if response.Code != test.wantStatus {
+					t.Fatalf("readiness status = %d, want %d: %s", response.Code, test.wantStatus, response.Body.String())
+				}
+				if pingCalls != 1 {
+					t.Fatalf("readiness ping calls = %d, want 1", pingCalls)
+				}
+				var body map[string]string
+				decodeResponse(t, response, &body)
+				if body["status"] != test.wantState || body["database"] != test.wantState || body["version"] != "test" {
+					t.Fatalf("unexpected readiness response: %+v", body)
+				}
+				if test.pingErr == nil {
+					if strings.Contains(logs.String(), "request completed") {
+						t.Fatalf("successful readiness probe was logged: %s", logs.String())
+					}
+					return
+				}
+				if !strings.Contains(logs.String(), "database readiness check failed") ||
+					!strings.Contains(logs.String(), "request completed") || !strings.Contains(logs.String(), "status=503") {
+					t.Fatalf("failed readiness logs = %s", logs.String())
+				}
+			})
+		}
+	}
+}
+
+func TestHealthProbePanicRetainsErrorAndCompletionLogs(t *testing.T) {
+	var logs bytes.Buffer
+	api := testAPI(&fakeInstanceService{})
+	api.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	handler := api.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("probe failure")
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/health", nil)
+	request.Pattern = "GET /health"
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("panic status = %d, want 500", response.Code)
+	}
+	if !strings.Contains(logs.String(), "panic serving request") || !strings.Contains(logs.String(), "request completed") {
+		t.Fatalf("panic logs = %s", logs.String())
+	}
 }
 
 func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {

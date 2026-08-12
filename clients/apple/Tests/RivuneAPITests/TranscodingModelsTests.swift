@@ -7,11 +7,11 @@ final class TranscodingModelsTests: XCTestCase {
         let capabilities = PlaybackCapabilities(
             streamingProtocols: ["hls"],
             containers: ["mp4"],
-            processingModes: ["remux", "transcode_audio", "transcode"],
+            processingModes: [.remux, .transcodeAudio, .transcode],
             maximumHeight: 2160,
             maximumVideoBitrateKbps: 12_000,
             maximumAudioChannels: 6,
-            subtitleModes: ["external", "burn"],
+            subtitleModes: [.external, .burn],
             mediaProfiles: [PlaybackMediaProfile(container: "mp4", videoCodec: "h265", audioCodec: "aac", maximumVideoBitDepth: 10)]
         )
 
@@ -55,7 +55,7 @@ final class TranscodingModelsTests: XCTestCase {
           "selectedSubtitleId":"subtitle-1",
           "sources":[{
             "id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test",
-            "mode":"transcode","protocol":"hls","compatible":true,
+            "mode":"transcode","protocol":"hls","mediaTimeline":"relative","compatible":true,
             "decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}
           }],
           "subtitles":[{"id":"subtitle-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","default":true,"delivery":"burn","futureSubtitleField":"ignored"}],
@@ -68,11 +68,13 @@ final class TranscodingModelsTests: XCTestCase {
         let session = try JSONDecoder().decode(PlaybackSession.self, from: json)
         XCTAssertEqual(session.selectedAudioTrack, 2)
         XCTAssertEqual(session.selectedSubtitleId, "subtitle-1")
-        XCTAssertEqual(session.sources.first?.decision?.reason, "subtitle_burn_required")
+        XCTAssertEqual(session.sources.first?.decision?.reason, .subtitleBurnRequired)
+        XCTAssertEqual(session.sources.first?.mediaTimeline, .relative)
+        XCTAssertEqual(session.sources.first?.decision?.videoAction, .transcode)
         XCTAssertEqual(session.sources.first?.decision?.source?.hdrFormat, "dolby_vision")
         XCTAssertEqual(session.sources.first?.decision?.target?.videoBitrateKbps, 12_000)
         XCTAssertEqual(session.sources.first?.decision?.target?.videoBitDepth, 8)
-        XCTAssertEqual(session.subtitles.first?.delivery, "burn")
+        XCTAssertEqual(session.subtitles.first?.delivery, .burn)
         XCTAssertNil(session.subtitles.first?.url)
         XCTAssertEqual(session.providerErrors.first?.code, "future_provider_code")
     }
@@ -81,7 +83,7 @@ final class TranscodingModelsTests: XCTestCase {
         let json = """
         {
           "summary":{"activeSessions":1,"activeJobs":2,"processingSlots":1,"processingLimit":2,"storageBytes":1024,"storageLimitBytes":1048576},
-          "diagnostics":{"videoEncoder":"libx264","hardwareToneMap":false},
+          "diagnostics":{"ffmpegVersion":"7.1","ffprobeVersion":"7.1","hardwareAcceleration":"software","videoEncoder":"libx264","preferredVideoCodec":"h264","encodeCodecs":["h264"],"decodeCodecs":["h264","hevc"],"hevcMain10":true,"qualityPreset":"balanced","hardwareToneMap":false,"toneMapBackend":"software","transcodeThreads":4,"maximumReadRate":2.0,"totals":{"started":5,"succeeded":3,"failed":1,"softwareFallbacks":1},"pools":{"process":{"active":1,"limit":2},"probe":{"active":0,"limit":2},"subtitle":{"active":0,"limit":2},"trickplay":{"active":0,"limit":1}}},
           "sessions":[{
             "id":"22222222-2222-4222-8222-222222222222","title":"Contract Movie","mediaType":"movie","mode":"transcode",
             "decision":{"reason":"video_transcode_required","videoAction":"transcode","audioAction":"transcode","subtitleAction":"none","toneMapping":true,"target":{"videoCodec":"h264","height":1080,"videoBitrateKbps":12000}},
@@ -90,20 +92,33 @@ final class TranscodingModelsTests: XCTestCase {
             "createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z","expiresAt":"2026-08-03T12:00:00Z"
           }],
           "jobs":[
-            {"sessionId":"22222222-2222-4222-8222-222222222222","assetId":"asset-1","mode":"transcode","state":"running","prewarming":false,"progressPercent":37.5,"speed":1.25,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"},
-            {"assetId":"asset-2","mode":"transcode","state":"running","prewarming":true,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"}
+            {"sessionId":"22222222-2222-4222-8222-222222222222","assetId":"asset-1","mode":"transcode","state":"processing","prewarming":false,"progressPercent":37.5,"speed":1.25,"startupDurationSeconds":2.5,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"},
+            {"assetId":"asset-2","mode":"transcode","state":"failed","errorClass":"source","prewarming":true,"createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z"}
           ],
+          "sessionsTruncated":false,
+          "jobsTruncated":true,
           "futureActivityField":"ignored"
         }
         """.data(using: .utf8)!
 
         let activity = try JSONDecoder().decode(PlaybackActivity.self, from: json)
         XCTAssertEqual(activity.sessions.first?.decision?.target?.height, 1080)
+        XCTAssertEqual(activity.sessions.first?.mode, .transcode)
+        XCTAssertEqual(activity.jobs.first?.state, .processing)
+        XCTAssertEqual(activity.diagnostics.hardwareAcceleration, .software)
+        XCTAssertEqual(activity.diagnostics.preferredVideoCodec, .h264)
+        XCTAssertEqual(activity.diagnostics.qualityPreset, .balanced)
+        XCTAssertEqual(activity.diagnostics.toneMapBackend, .software)
         XCTAssertTrue(activity.sessions.first?.decision?.toneMapping == true)
         XCTAssertEqual(activity.jobs.first?.progressPercent, 37.5)
         XCTAssertEqual(activity.jobs.first?.speed, 1.25)
         XCTAssertNil(activity.jobs.last?.progressPercent)
         XCTAssertNil(activity.jobs.last?.speed)
+        XCTAssertEqual(activity.jobs.last?.errorClass, .source)
+        XCTAssertEqual(activity.diagnostics.totals.started, 5)
+        XCTAssertEqual(activity.diagnostics.pools.process.limit, 2)
+        XCTAssertFalse(activity.sessionsTruncated)
+        XCTAssertTrue(activity.jobsTruncated)
     }
 
     func testSettingsDefaultsAndExplicitNullPatchesAreTolerant() throws {

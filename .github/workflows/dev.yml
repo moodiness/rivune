@@ -58,4 +58,6 @@ jobs:
           build-args: |
             VERSION=dev-${{ github.sha }}
           provenance: mode=max
+          cache-from: type=gha,scope=rivune-container
+          cache-to: type=gha,scope=rivune-container,mode=max
           sbom: true

@@ -55,7 +55,8 @@ public sealed class CategoryContractsTests
         {
           "user":{"id":"11111111-1111-4111-8111-111111111111","username":"admin","role":"admin"},
           "session":{"id":"22222222-2222-4222-8222-222222222222","deviceId":"33333333-3333-4333-8333-333333333333","activeProfile":null,"authorizationScope":"category","category":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Studio","color":null,"icon":"briefcase"}},
-          "profiles":[{"id":"44444444-4444-4444-8444-444444444444","name":"Editor","description":"Editing profile","categoryId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","category":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Studio","color":null,"icon":"briefcase"},"isChild":false,"hasPin":false,"canManage":true,"enabled":true,"availableFrom":null,"availableUntil":null,"accessStartTime":null,"accessEndTime":null,"accessTimezone":"UTC","accessible":true,"avatar":{"kind":"preset","presetId":"aurora","url":"/avatar.svg"}}]
+          "profiles":[{"id":"44444444-4444-4444-8444-444444444444","name":"Editor","description":"Editing profile","categoryId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","category":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Studio","color":null,"icon":"briefcase"},"isChild":false,"hasPin":false,"canManage":true,"enabled":true,"availableFrom":null,"availableUntil":null,"accessStartTime":null,"accessEndTime":null,"accessTimezone":"UTC","accessible":true,"avatar":{"kind":"preset","presetId":"aurora","url":"/avatar.svg"}}],
+          "maintenance":{"enabled":true,"message":null}
         }
         """;
         var account = JsonSerializer.Deserialize<Account>(accountJson, JsonOptions)!;
@@ -64,6 +65,8 @@ public sealed class CategoryContractsTests
         Assert.Equal(CategoryId, account.Session.Category?.Id);
         Assert.Equal("Studio", account.Profiles[0].Category.Name);
         Assert.Equal("Editing profile", account.Profiles[0].Description);
+        Assert.True(account.Maintenance.Enabled);
+        Assert.Null(account.Maintenance.Message);
 
         const string tokenJson = """
         {"tokenType":"Bearer","accessToken":"access","accessTokenExpiresAt":"2026-08-03T12:15:00Z","refreshToken":"refresh","refreshTokenExpiresAt":"2026-09-03T12:00:00Z","sessionId":"22222222-2222-4222-8222-222222222222","deviceId":"33333333-3333-4333-8333-333333333333","authorizationScope":"global_admin","category":null}
@@ -239,7 +242,7 @@ public sealed class CategoryContractsTests
             string body;
             if (request.RequestUri!.AbsolutePath == "/.well-known/rivune")
             {
-                body = """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""";
+                body = """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"setupCompleted":true,"demoAvailable":false,"timezone":"UTC","interfaceLanguage":"en"}""";
             }
             else
             {

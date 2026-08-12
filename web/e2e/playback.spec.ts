@@ -68,6 +68,36 @@ async function installDeterministicMedia(page: Page, duration = 1800) {
   }, duration);
 }
 
+test("HDR formats require a high dynamic range output", async ({ page, rivune }) => {
+  await page.addInitScript(() => {
+    const nativeMatchMedia = window.matchMedia.bind(window);
+    window.matchMedia = (query: string) => {
+      if (query !== "(dynamic-range: high)") return nativeMatchMedia(query);
+      return {
+        matches: true,
+        media: query,
+        onchange: null,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        dispatchEvent: () => true,
+      };
+    };
+    const nativeCanPlayType = HTMLMediaElement.prototype.canPlayType;
+    HTMLMediaElement.prototype.canPlayType = function (mediaType: string) {
+      if (mediaType.includes("hvc1.2.4.L153.B0") || mediaType.includes("dvh1.05.06")) return "probably";
+      return nativeCanPlayType.call(this, mediaType);
+    };
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await page.getByRole("radio", { name: /Fixture 1080p/ }).click();
+
+  const sourceRequest = await rivune.waitForRequest("/api/v1/playback/sources", "POST");
+  expect(sourceRequest.body.capabilities.hdrFormats).toEqual(expect.arrayContaining(["sdr", "hdr10", "hlg", "dolby_vision"]));
+});
+
 test("player resumes, selects tracks, and autoplays the next episode", async ({ page, rivune }) => {
   await installDeterministicMedia(page);
   await page.addInitScript(() => {
@@ -78,6 +108,34 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
       return nativeCanPlayType.call(this, mediaType);
     };
   });
+  const progressWrites: Array<{ titleID: string; positionSeconds: number; durationSeconds: number; completed: boolean; expectedVersion: number }> = [];
+  let releaseFirstProgressWrite = () => undefined;
+  const firstProgressWriteBlocked = new Promise<void>((resolve) => { releaseFirstProgressWrite = resolve; });
+  await page.route("**/api/v1/progress/*", async (route) => {
+    const request = route.request();
+    if (request.method() !== "PUT") {
+      await route.fallback();
+      return;
+    }
+    const input = request.postDataJSON() as { positionSeconds: number; durationSeconds: number; completed: boolean; expectedVersion: number };
+    const titleID = decodeURIComponent(new URL(request.url()).pathname.split("/").at(-1) ?? "");
+    progressWrites.push({ titleID, ...input });
+    if (progressWrites.length === 1) {
+      await firstProgressWriteBlocked;
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "progress_conflict", message: "Progress changed" } }),
+      });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ titleId: titleID, ...input, version: input.expectedVersion + 1, lastWatchedAt: "2099-01-01T00:00:00Z", updatedAt: "2099-01-01T00:00:00Z" }),
+    });
+  });
+  await page.route("https://fixtures.rivune.test/subtitles-fr.vtt", (route) => route.fulfill({ status: 200, contentType: "text/vtt", headers: { "Access-Control-Allow-Origin": "*" }, body: "WEBVTT\n\n00:00.000 --> 00:02.000\nFixture caption" }));
+  await page.route("https://fixtures.rivune.test/subtitles-en.vtt", (route) => route.fulfill({ status: 404, headers: { "Access-Control-Allow-Origin": "*" }, body: "missing" }));
   await page.goto("/");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
 
@@ -122,7 +180,7 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   expect(mediaProfiles.some((profile) => profile.videoCodec === "h265" && profile.maximumVideoBitDepth === 10)).toBe(supportsHEVCMain10);
   expect(mediaProfiles.some((profile) => profile.videoCodec === "h265" && profile.audioCodec === "aac" && profile.maximumVideoBitDepth === 10)).toBe(true);
   expect(await page.evaluate(() => window.matchMedia("(dynamic-range: high)").matches)).toBe(false);
-  expect(sourceRequest.body.capabilities.hdrFormats).toEqual(expect.arrayContaining(["hdr10", "hlg"]));
+  expect(sourceRequest.body.capabilities.hdrFormats).toEqual(["sdr"]);
   await expect(page.getByRole("button", { name: "Play episode" })).toBeEnabled();
 
   const preparation = await rivune.waitForRequest("/api/v1/playback/prepare", "POST");
@@ -166,13 +224,17 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges);
 
   await page.getByRole("button", { name: "Subtitles" }).click();
-  await page.getByRole("radio", { name: /ES.*Subtitle track/ }).click();
-  await expect(page.locator("video track")).toHaveCount(0);
-  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges);
-
+  await expect(page.getByRole("radio", { name: /ES.*Subtitle track/ })).toHaveCount(0);
+  await page.getByRole("radio", { name: /EN.*Subtitle track/ }).click();
+  await page.locator("video track[srclang='en']").dispatchEvent("error");
+  const subtitleFailure = page.getByRole("alert").filter({ hasText: "Subtitles" });
+  await expect(subtitleFailure).toContainText("Unavailable");
   await page.getByRole("button", { name: "Subtitles" }).click();
+  await expect(page.getByRole("radio", { name: "Off" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("dialog", { name: "Playing First Light" })).not.toHaveAttribute("data-player-state", "failed");
   await page.getByRole("radio", { name: /FR.*Subtitle track/ }).click();
   await expect(page.locator("video track[srclang='fr']")).toHaveAttribute("src", "https://fixtures.rivune.test/subtitles-fr.vtt");
+  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges);
   await page.locator("video").evaluate((video) => {
     video.currentTime = 345;
   });
@@ -243,11 +305,33 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
     video.dispatchEvent(new Event("timeupdate"));
     video.dispatchEvent(new Event("ended"));
   });
+  await expect.poll(() => progressWrites.length).toBe(1);
+  expect(progressWrites[0]).toMatchObject({ titleID: "episode-1", completed: false });
 
   await expect(page.getByRole("dialog", { name: "Playing Second Orbit" })).toBeVisible();
   await expect.poll(() => rivune.matching("/api/v1/playback/sources", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ mediaType: "episode", resourceId: "tt9000:1:2" }));
   await expect.poll(() => rivune.matching("/api/v1/playback/prepare", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ sourceRef: "source-tt9000:1:2", startSeconds: 0 }));
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").map((request) => request.body)).toContainEqual(expect.objectContaining({ sourceRef: "source-tt9000:1:2", titleId: "episode-2", startSeconds: 0 }));
+  await page.locator("video").evaluate((video) => {
+    video.currentTime = 30;
+    video.dispatchEvent(new Event("timeupdate"));
+  });
+  await expect.poll(() => progressWrites.some((write) => write.titleID === "episode-2" && write.positionSeconds === 30)).toBe(true);
+
+  releaseFirstProgressWrite();
+  await expect.poll(() => progressWrites.find((write) => write.titleID === "episode-1" && write.completed)).toMatchObject({
+    positionSeconds: 1800,
+    durationSeconds: 1800,
+    completed: true,
+    expectedVersion: 4,
+  });
+  await expect.poll(() => progressWrites.find((write) => write.titleID === "episode-2")).toMatchObject({
+    positionSeconds: 30,
+    completed: false,
+    expectedVersion: 0,
+  });
+  expect(progressWrites.filter((write) => write.titleID === "episode-1" && write.completed)).toHaveLength(1);
+  expect(progressWrites.some((write) => write.titleID === "episode-2" && !write.completed)).toBe(true);
 });
 
 test("localized compact player controls do not depend on English accessible labels", async ({ page, rivune }) => {

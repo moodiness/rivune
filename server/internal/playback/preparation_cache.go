@@ -153,21 +153,26 @@ func (cache *playbackPreparationCache) complete(cacheKey string, call *playbackP
 }
 
 func (service *Service) buildPreparedPlayback(ctx context.Context, principal auth.Principal, reference sourceReference, policies ...playbackPolicy) (preparedPlayback, error) {
-	type subtitleResult struct {
-		batch addon.ResourceBatch
-		err   error
-	}
-	subtitlesChannel := make(chan subtitleResult, 1)
-	go func() {
-		batch, err := service.addons.FetchAllPlaybackResources(ctx, principal, addon.ResourcePath{Resource: "subtitles", Type: reference.AddonMediaType, ID: reference.ResourceID})
-		subtitlesChannel <- subtitleResult{batch: batch, err: err}
-	}()
-
 	policy := playbackPolicy{allowTranscoding: true, maximumHeight: reference.Capabilities.MaximumHeight, bitrateKbps: service.mediaOptions.TranscodeVideoBitrateKbps}
 	if len(policies) > 0 {
 		policy = policies[0]
 	}
 	capabilities := service.playbackCapabilities(reference.Capabilities, policy.maximumHeight, policy.bitrateKbps)
+
+	type subtitleResult struct {
+		batch addon.ResourceBatch
+		err   error
+	}
+	var subtitlesChannel <-chan subtitleResult
+	if len(capabilities.SubtitleModes) == 0 || requestedProcessingMode(capabilities.SubtitleModes, "external") {
+		results := make(chan subtitleResult, 1)
+		subtitlesChannel = results
+		go func() {
+			batch, err := service.addons.FetchAllPlaybackResources(ctx, principal, addon.ResourcePath{Resource: "subtitles", Type: reference.AddonMediaType, ID: reference.ResourceID})
+			results <- subtitleResult{batch: batch, err: err}
+		}()
+	}
+
 	sources := []Source{cloneSource(reference.Source)}
 	assets := make([]storedAsset, 0, 1)
 	if reference.Asset != nil {
@@ -188,18 +193,19 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 		return preparedPlayback{}, ErrNoPlayableSource
 	}
 
-	subtitleResources := <-subtitlesChannel
 	subtitles := make([]Subtitle, 0)
 	subtitleAssets := make([]storedAsset, 0)
 	providerErrors := append([]ProviderFailure(nil), reference.ProviderErrors...)
-	if subtitleResources.err == nil &&
-		(len(capabilities.SubtitleModes) == 0 || requestedProcessingMode(capabilities.SubtitleModes, "external")) {
-		normalizedSubtitles, normalizedAssets, normalizationErr := normalizeSubtitles(subtitleResources.batch)
-		if normalizationErr == nil {
-			subtitles = normalizedSubtitles
-			subtitleAssets = normalizedAssets
+	if subtitlesChannel != nil {
+		subtitleResources := <-subtitlesChannel
+		if subtitleResources.err == nil {
+			normalizedSubtitles, normalizedAssets, normalizationErr := normalizeSubtitles(subtitleResources.batch)
+			if normalizationErr == nil {
+				subtitles = normalizedSubtitles
+				subtitleAssets = normalizedAssets
+			}
+			providerErrors = append(providerErrors, providerFailures(subtitleResources.batch.Errors)...)
 		}
-		providerErrors = append(providerErrors, providerFailures(subtitleResources.batch.Errors)...)
 	}
 	embedded, embeddedAssets := embeddedSubtitles(sources, assets, capabilities)
 	subtitles = append(subtitles, embedded...)

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1256,6 +1257,92 @@ func TestHLSJobServesBeforeCompletionAndStopsWithSession(t *testing.T) {
 	}
 	if _, err := os.Stat(job.directory); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("HLS workspace still exists after session stop: %v", err)
+	}
+}
+
+func TestHLSStorageMonitorUsesOneCadenceAcrossJobsAndStops(t *testing.T) {
+	ticks := make(chan time.Time)
+	tickerCreated := make(chan struct{})
+	tickerStopped := make(chan struct{})
+	workspaceScanned := make(chan struct{}, 1)
+	var tickerCalls atomic.Int32
+	var scanCalls atomic.Int32
+	var observeScans atomic.Bool
+	service := &Service{
+		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1024 * 1024, IdleTTL: time.Minute},
+		hlsJobs:      make(map[string]*hlsJob),
+		hlsStorageTickerFactory: func(time.Duration) hlsStorageTicker {
+			if tickerCalls.Add(1) == 1 {
+				close(tickerCreated)
+			}
+			return hlsStorageTicker{ticks: ticks, stop: func() { close(tickerStopped) }}
+		},
+	}
+	service.hlsWorkspaceSize = func(root string) int64 {
+		size := directorySize(root)
+		if observeScans.Load() {
+			scanCalls.Add(1)
+			workspaceScanned <- struct{}{}
+		}
+		return size
+	}
+
+	processors := make([]*blockingHLSProcessor, 3)
+	for index := range processors {
+		processor := &blockingHLSProcessor{ready: make(chan struct{}), stopped: make(chan struct{})}
+		processors[index] = processor
+		if _, err := service.hlsJob(context.Background(), fmt.Sprintf("session-%d", index), storedAsset{ID: fmt.Sprintf("stream-%d", index)}, processor, true); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-processor.ready:
+		case <-time.After(time.Second):
+			t.Fatal("media processor did not start")
+		}
+	}
+	select {
+	case <-tickerCreated:
+	case <-time.After(time.Second):
+		t.Fatal("storage monitor cadence was not created")
+	}
+	if calls := tickerCalls.Load(); calls != 1 {
+		t.Fatalf("storage monitor cadences = %d, want 1 for three jobs", calls)
+	}
+
+	observeScans.Store(true)
+	ticks <- time.Now()
+	select {
+	case <-workspaceScanned:
+	case <-time.After(time.Second):
+		t.Fatal("storage cadence did not scan the workspace")
+	}
+	if calls := scanCalls.Load(); calls != 1 {
+		t.Fatalf("workspace scans for one cadence = %d, want 1", calls)
+	}
+
+	for index, processor := range processors {
+		service.stopHLSSession(fmt.Sprintf("session-%d", index))
+		select {
+		case <-processor.stopped:
+		case <-time.After(time.Second):
+			t.Fatal("media processor did not stop")
+		}
+	}
+	select {
+	case <-tickerStopped:
+	case <-time.After(time.Second):
+		t.Fatal("storage monitor timer leaked after its last writer stopped")
+	}
+	select {
+	case <-workspaceScanned:
+	case <-time.After(time.Second):
+		t.Fatal("last writer release did not perform its exact storage scan")
+	}
+	if calls := scanCalls.Load(); calls != 2 {
+		t.Fatalf("workspace scans = %d, want one cadence scan plus one final release scan", calls)
+	}
+	if calls := tickerCalls.Load(); calls != 1 {
+		t.Fatalf("storage monitor restarted while stopping: %d cadences", calls)
 	}
 }
 

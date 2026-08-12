@@ -1,8 +1,8 @@
 # Production operations
 
-The supported container deployment uses PostgreSQL 18 and puts Rivune behind Caddy. Run the commands in this document from the repository root. The supplied shell scripts explicitly target Linux with Bash, OpenSSL, Docker Engine, Docker Compose v2, and `set -euo pipefail`; CI runs the same scripts on Linux.
+The supported container deployment is the root [`compose.yaml`](../compose.yaml), which runs Rivune with PostgreSQL 18. Put it behind Pangolin/Newt or an operator-managed reverse proxy for public HTTPS. Run the commands in this document from the repository root. The supplied shell scripts explicitly target Linux with Bash, OpenSSL, Docker Engine, Docker Compose v2, and `set -euo pipefail`; CI runs the same scripts on Linux.
 
-## HTTPS with Caddy
+## HTTPS behind a reverse proxy
 
 Create the private `.env` file before entering any secrets:
 
@@ -13,14 +13,14 @@ Create the private `.env` file before entering any secrets:
 The helper refuses to overwrite an existing file or link and creates `.env`
 with mode `0600`. For an existing deployment, run `chmod 600 .env` and stop if
 it fails before continuing. Set three independent database secrets, a separate
-setup token, a versioned encryption key, the public DNS name, and a pinned
+setup token, a versioned encryption key, the public HTTPS origin, and a pinned
 Rivune version. `postgres` is bootstrap-only, `rivune` is the application login,
 `rivune_owner` is a non-login owner, and `rivune_restore` is a non-superuser
 login used only by the restore scripts.
 
 ```dotenv
-RIVUNE_HOST=media.example.com
-RIVUNE_VERSION=1.4.2
+RIVUNE_PUBLIC_URL=https://media.example.com
+RIVUNE_VERSION=1.5.0
 RIVUNE_POSTGRES_SUPERUSER_PASSWORD=<output of: openssl rand -hex 32>
 RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
@@ -41,18 +41,32 @@ only comma-separated exact private-IP origins with explicit ports; never include
 hostnames, paths, queries, fragments, credentials, loopback, or link-local
 addresses.
 
-Point the `A`/`AAAA` records for `RIVUNE_HOST` at the host, allow inbound TCP 80 and TCP/UDP 443, then start the supported configuration:
-
 ```sh
-docker compose --env-file .env -f deploy/caddy/compose.yaml pull
-docker compose --env-file .env -f deploy/caddy/compose.yaml up -d
-docker compose --env-file .env -f deploy/caddy/compose.yaml ps
-curl --fail --show-error https://media.example.com/health
+docker compose --env-file .env -f compose.yaml pull
+docker compose --env-file .env -f compose.yaml up -d
+docker compose --env-file .env -f compose.yaml ps
 ```
 
-Caddy obtains and renews a publicly trusted certificate automatically. [`deploy/caddy/Caddyfile`](../deploy/caddy/Caddyfile) replaces inbound `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`, and `X-Forwarded-Host`; clients therefore cannot inject a trusted chain. The Compose network has the fixed `172.30.0.0/24` edge subnet, and Rivune trusts only that subnet through `RIVUNE_TRUSTED_PROXIES`. Do not change it to `0.0.0.0/0`, a host LAN, or another client-reachable range. If the edge subnet must change, update both the network subnet and `RIVUNE_TRUSTED_PROXIES` to the same dedicated range.
+Terminate TLS in the external proxy and target hostname `rivune`, port `8080`,
+over HTTP from the dedicated `rivune-edge` network. At that trust boundary the
+proxy must replace, not append or preserve, inbound `X-Forwarded-For`,
+`X-Real-IP`, `X-Forwarded-Proto`, and `X-Forwarded-Host` with values derived
+from its own client connection and the public HTTPS request. Otherwise a client
+can inject a trusted forwarding chain. `/health` retains the protocol-v20
+PostgreSQL readiness contract; `/ready` is its explicit traffic-readiness alias.
+Both return `503` while PostgreSQL is unavailable. `/live` checks only the HTTP
+process and is the liveness probe. Rivune must trust only the proxy's exact
+address or dedicated edge CIDR through `RIVUNE_TRUSTED_PROXIES`, never
+`0.0.0.0/0`, a host LAN, the database network, or another client-reachable
+range.
 
-Rivune is not published directly to the host in this configuration. PostgreSQL is isolated on the private database network. Caddy is the only externally reachable service.
+After configuring the proxy, require readiness before directing traffic and
+use liveness independently for process supervision:
+
+```sh
+curl --fail --show-error https://media.example.com/ready
+curl --fail --show-error https://media.example.com/live
+```
 
 ## HTTPS with Pangolin/Newt
 
@@ -64,7 +78,6 @@ origin before starting the stack:
 
 ```dotenv
 RIVUNE_PUBLIC_URL=https://rivune.example.com
-RIVUNE_TRUSTED_PROXIES=
 ```
 
 ```sh
@@ -236,7 +249,7 @@ The initialization script creates the separated roles on a new volume and is saf
   read -r -s -p 'New restore password: ' RIVUNE_RESTORE_PASSWORD
   printf '\n'
   export RIVUNE_POSTGRES_SUPERUSER_PASSWORD RIVUNE_RESTORE_PASSWORD
-  export COMPOSE_FILE=deploy/caddy/compose.yaml
+  export COMPOSE_FILE=compose.yaml
 
   docker compose exec -T \
     -e RIVUNE_POSTGRES_SUPERUSER_PASSWORD \
@@ -294,12 +307,12 @@ The subshell and its `EXIT` trap discard the exported secrets even when migratio
 After exporting the signing and verification key paths, lineage, and trusted state path described below, update to a stable release by changing `RIVUNE_VERSION` to an exact released version, backing up first, recording the printed backup ID outside the repository, and recreating only the application:
 
 ```sh
-COMPOSE_FILE=deploy/caddy/compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.5.0.dump
+COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.5.0.dump
 ./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.5.0.dump
 # edit RIVUNE_VERSION=1.5.0 in .env
-docker compose --env-file .env -f deploy/caddy/compose.yaml pull rivune
-docker compose --env-file .env -f deploy/caddy/compose.yaml up -d rivune
-curl --fail --show-error https://media.example.com/health
+docker compose --env-file .env -f compose.yaml pull rivune
+docker compose --env-file .env -f compose.yaml up -d rivune
+curl --fail --show-error https://media.example.com/ready
 ```
 
 ## Playback processing and hardware
@@ -310,13 +323,12 @@ codec, quality preset, concurrency, media/artwork quotas, and the requested
 encoder mode in Administration. Do not add removed FFmpeg/runtime variables or
 the new database-backed settings to `.env` or a Compose override.
 
-Both provided Compose manifests are CPU-only by default. For AMD/Intel, set
+The provided Compose manifest is CPU-only by default. For AMD/Intel, set
 `RIVUNE_VIDEO_DEVICE` and `RIVUNE_VIDEO_GROUP_ID`, determine the group with
 `stat -c '%g' /dev/dri/renderD128`, and add the supported overlay:
 
 ```sh
 docker compose -f compose.yaml -f compose.amd-intel.yaml up -d
-# Or: docker compose -f deploy/caddy/compose.yaml -f compose.amd-intel.yaml up -d
 ```
 
 On Unraid, manually add a Device mapping from host `/dev/dri/renderD128` to the
@@ -562,18 +574,21 @@ software 2160p has the highest CPU and power cost, so keep it only when Activity
 proves sustained real-time throughput.
 
 Seekable transcoding keeps a duration-aware production margin instead of
-running at exactly real time. The initial HLS buffer defaults to 12 seconds, and
+running at exactly real time. The initial HLS buffer defaults to 6 seconds, and
 requests up to 10 three-second segments (30 seconds) ahead reuse and wait for
 the current generation rather than replacing it. The margin is bounded by the
 retained HLS window, so transient processing or network stalls can recover
 without evicting the next segment required by a continuously playing client.
 
-Both Compose targets use read-only root filesystems, a fixed 4096 MiB
+The Compose stack uses read-only root filesystems, a fixed 256 MiB
 `noexec,nosuid,nodev` `/tmp` tmpfs, fixed CPU/memory limits, minimized
-capabilities, and PID ceilings. The storage filesystem can therefore impose a
-lower practical ceiling than the persisted media quota. Advanced operators who
-replace the workspace or resource declarations should do so in a private
-Compose override and keep host capacity consistent with the requested quota.
+capabilities, and PID ceilings. Transcode, remux, and HLS work is stored on the
+disk-backed `media_workspace` volume at `/var/lib/rivune/media`, selected by
+`RIVUNE_MEDIA_TEMP_DIR`; Rivune cleans that workspace on startup and retains its
+20 GiB application storage ceiling. The underlying filesystem can impose a
+lower practical ceiling. Advanced operators who replace the volume or resource
+declarations should do so in a private Compose override and keep host capacity
+consistent with the requested quota.
 
 Administration Activity reports bounded selected-encoder, target codec, quality,
 encode/decode capability, pool, quota, pipeline, and job diagnostics. It never
@@ -860,7 +875,7 @@ signing_key_id=...
 ```sh
 mkdir -p backups
 BACKUP="backups/rivune-$(date -u +%Y%m%dT%H%M%SZ).dump"
-COMPOSE_FILE=deploy/caddy/compose.yaml ./scripts/postgres-backup.sh "${BACKUP}"
+COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh "${BACKUP}"
 ```
 
 The success line prints the backup ID, sequence, and digest. Record those values
@@ -936,7 +951,7 @@ alone. Select the backup ID from the separate operator-controlled record, never
 from the adjacent manifest:
 
 ```sh
-export COMPOSE_FILE=deploy/caddy/compose.yaml
+export COMPOSE_FILE=compose.yaml
 export RIVUNE_SERVICE=rivune
 export RIVUNE_RESTORE_PASSWORD='<value from protected .env>'
 ./scripts/postgres-backup.sh backups/rivune-before-restore.dump
@@ -1043,11 +1058,11 @@ partial database. Repair the database or restore a known-good authenticated
 archive before starting it again. Inspect both services before accepting traffic:
 
 ```sh
-export COMPOSE_FILE=deploy/caddy/compose.yaml
+export COMPOSE_FILE=compose.yaml
 export RIVUNE_SERVICE=rivune
 docker compose ps
 docker compose logs --tail=100 postgres rivune
-curl --fail --show-error https://media.example.com/health
+curl --fail --show-error https://media.example.com/ready
 docker compose exec -T postgres psql --username rivune --dbname rivune \
   --tuples-only --no-align \
   --command 'SELECT count(*), max(version) FROM schema_migrations;'
@@ -1070,4 +1085,4 @@ RIVUNE_IMAGE=rivune-ci:current ./scripts/ci/migrations.sh
 RIVUNE_IMAGE=rivune-ci:current ./scripts/ci/reverse-proxy-smoke.sh
 ```
 
-The migration check performs a clean install, checks the migration count and current version, restarts to prove idempotency, constructs the immediately previous schema, upgrades it with the current image, and checks idempotency again. The proxy smoke test serves a real Rivune discovery response over Caddy's locally trusted TLS, then verifies that the same supported Caddy configuration overwrites spoofed forwarding headers and forwards HTTPS scheme and host values.
+The migration check performs a clean install, checks the migration count and current version, restarts to prove idempotency, constructs the immediately previous schema, upgrades it with the current image, and checks idempotency again. The proxy smoke test generates a disposable self-signed certificate and Nginx configuration, serves a real Rivune discovery response over HTTPS, then verifies that the proxy overwrites spoofed forwarding headers and forwards the HTTPS scheme and host values.

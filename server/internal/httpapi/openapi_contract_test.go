@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,6 +63,37 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			t.Fatalf("unexpected configured discovery lifecycle state: %+v", state)
 		}
 		validateContractResponse(t, document, "/.well-known/rivune", nil, request, response)
+	})
+
+	t.Run("liveness", func(t *testing.T) {
+		api := testAPI(&fakeInstanceService{})
+		api.pool = databasePingerFunc(func(context.Context) error {
+			return errors.New("database unavailable")
+		})
+		request := httptest.NewRequest(http.MethodGet, "/live", nil)
+		response := serveContractRequest(t, api, request, http.StatusOK)
+		validateContractResponse(t, document, "/live", nil, request, response)
+	})
+
+	t.Run("readiness", func(t *testing.T) {
+		for _, path := range []string{"/health", "/ready"} {
+			for _, test := range []struct {
+				name   string
+				err    error
+				status int
+			}{
+				{name: "ready", status: http.StatusOK},
+				{name: "database unavailable", err: errors.New("database unavailable"), status: http.StatusServiceUnavailable},
+			} {
+				t.Run(path+"/"+test.name, func(t *testing.T) {
+					api := testAPI(&fakeInstanceService{})
+					api.pool = databasePingerFunc(func(context.Context) error { return test.err })
+					request := httptest.NewRequest(http.MethodGet, path, nil)
+					response := serveContractRequest(t, api, request, test.status)
+					validateContractResponse(t, document, path, nil, request, response)
+				})
+			}
+		}
 	})
 
 	t.Run("setup status", func(t *testing.T) {

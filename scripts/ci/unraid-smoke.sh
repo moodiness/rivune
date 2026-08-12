@@ -130,6 +130,16 @@ docker exec -e PGPASSWORD="${PASSWORD}" "${POSTGRES}" \
   --command 'SELECT bool_and(NOT ssl) FROM pg_stat_ssl;' \
   | grep -qx t
 
+docker rm -f "${RIVUNE}" >/dev/null
+docker run --rm --user 0:0 --entrypoint sh -v "${TRANSCODE_VOLUME}:/transcode" "${IMAGE}" -ceu '
+  mkdir -p /transcode/rivune-media/orphaned-session
+  printf stale >/transcode/rivune-media/orphaned-session/segment.m4s
+  chown -R 12345:12346 /transcode/rivune-media
+  chmod 700 /transcode/rivune-media /transcode/rivune-media/orphaned-session
+' >/dev/null
+start_rivune disable ""
+docker exec "${RIVUNE}" test ! -e /transcode/rivune-media/orphaned-session/segment.m4s
+
 docker restart "${RIVUNE}" >/dev/null
 wait_for_rivune
 

@@ -70,6 +70,8 @@ private data class DiscoveryEnvelope(
     val protocolVersion: Int,
     val apiBaseUrl: String,
     val setupRequired: Boolean,
+    val setupCompleted: Boolean? = null,
+    val demoAvailable: Boolean? = null,
     val timezone: String,
     val interfaceLanguage: String? = null,
 )
@@ -86,6 +88,7 @@ private data class SelectProfileRequest(val pin: String? = null)
 @Serializable
 private data class PlaybackSourcesRequest(
     val mediaType: String,
+    @Serializable(with = UUIDSerializer::class) val addonId: UUID? = null,
     val resourceId: String,
     val capabilities: PlaybackCapabilities,
 )
@@ -145,7 +148,17 @@ class RivuneApiClient(
             throw RivuneApiException.IncompatibleProtocol(RivuneProtocol.VERSION, response.protocolVersion)
         }
         val interfaceLanguage = response.interfaceLanguage ?: throw RivuneApiException.InvalidResponse()
-        val discovery = Discovery(response.name, response.serverVersion, response.protocolVersion, response.apiBaseUrl, response.setupRequired, response.timezone, interfaceLanguage)
+        val discovery = Discovery(
+            response.name,
+            response.serverVersion,
+            response.protocolVersion,
+            response.apiBaseUrl,
+            response.setupRequired,
+            response.setupCompleted,
+            response.demoAvailable,
+            response.timezone,
+            interfaceLanguage,
+        )
         val resolved = serverUrl.resolve(discovery.apiBaseUrl)
             ?.takeIf(::isCredentialTransportAllowed)
             ?.takeIf { canonicalOrigin(it) == credentialIssuer }
@@ -353,9 +366,18 @@ class RivuneApiClient(
         authenticated = true,
     )
 
-    suspend fun series(id: UUID, language: String? = null, mappingProvider: SeriesMappingProvider): Series = request(
+    suspend fun series(
+        id: UUID,
+        language: String? = null,
+        mappingProvider: SeriesMappingProvider,
+        episodeOrder: String? = null,
+    ): Series = request(
         path = "metadata/series/$id",
-        query = mapOf("language" to language, "mappingProvider" to mappingProvider.wireValue),
+        query = mapOf(
+            "language" to language,
+            "mappingProvider" to mappingProvider.wireValue,
+            "episodeOrder" to episodeOrder,
+        ),
         authenticated = true,
     )
 
@@ -375,10 +397,25 @@ class RivuneApiClient(
         authenticated = true,
     )
 
-    suspend fun playbackSources(mediaType: String, resourceId: String, capabilities: PlaybackCapabilities): PlaybackSourceList = request(
+    suspend fun playbackSources(
+        mediaType: String,
+        resourceId: String,
+        capabilities: PlaybackCapabilities,
+        addonId: UUID? = null,
+    ): PlaybackSourceList = request(
         path = "playback/sources",
         method = "POST",
-        body = requestJson.encodeToString(PlaybackSourcesRequest(mediaType, resourceId, capabilities)),
+        body = requestJson.encodeToString(PlaybackSourcesRequest(mediaType, addonId, resourceId, capabilities)),
+        authenticated = true,
+    )
+
+    suspend fun playbackMarkers(imdbId: String, season: Int, episode: Int): PlaybackMarkerList = request(
+        path = "playback/markers",
+        query = mapOf(
+            "imdbId" to imdbId,
+            "season" to season.toString(),
+            "episode" to episode.toString(),
+        ),
         authenticated = true,
     )
 
@@ -406,6 +443,65 @@ class RivuneApiClient(
 
     suspend fun playbackActivity(): PlaybackActivity = request("playback/activity", authenticated = true)
 
+    suspend fun playbackProgress(titleId: UUID): PlaybackProgress? = requestNullable(
+        path = "progress/$titleId",
+        authenticated = true,
+    )
+
+    suspend fun playbackProgressBatch(titleIds: List<UUID>): PlaybackProgressBatch = request(
+        path = "progress/batch",
+        method = "POST",
+        body = requestJson.encodeToString(PlaybackProgressBatchRequest(titleIds)),
+        authenticated = true,
+    )
+
+    suspend fun updatePlaybackProgress(titleId: UUID, input: UpdatePlaybackProgressRequest): PlaybackProgress = request(
+        path = "progress/$titleId",
+        method = "PUT",
+        body = requestJson.encodeToString(input),
+        authenticated = true,
+    )
+
+    suspend fun clearPlaybackProgress(titleId: UUID, expectedVersion: Long) = requestUnit(
+        path = "progress/$titleId",
+        method = "DELETE",
+        query = mapOf("expectedVersion" to expectedVersion.toString()),
+        authenticated = true,
+    )
+
+    suspend fun setTitlesWatchedBatch(items: List<SetWatchedBatchItem>): SetWatchedBatchResult = request(
+        path = "titles/watched/batch",
+        method = "PUT",
+        body = requestJson.encodeToString(SetWatchedBatchRequest(items)),
+        authenticated = true,
+    )
+
+    suspend fun markTitleWatched(titleId: UUID, expectedVersion: Long): PlaybackProgress = request(
+        path = "titles/$titleId/watched",
+        method = "POST",
+        body = requestJson.encodeToString(CompletionRequest(expectedVersion)),
+        authenticated = true,
+    )
+
+    suspend fun markTitleUnwatched(titleId: UUID, expectedVersion: Long): PlaybackProgress = request(
+        path = "titles/$titleId/watched",
+        method = "DELETE",
+        query = mapOf("expectedVersion" to expectedVersion.toString()),
+        authenticated = true,
+    )
+
+    suspend fun continueWatching(limit: Int? = null): ContinueWatchingPage = request(
+        path = "continue-watching",
+        query = mapOf("limit" to limit?.toString()),
+        authenticated = true,
+    )
+
+    suspend fun dismissContinueWatchingTitle(titleId: UUID) = requestUnit(
+        path = "continue-watching/$titleId",
+        method = "DELETE",
+        authenticated = true,
+    )
+
     private suspend inline fun <reified Response> request(
         path: String,
         method: String = "GET",
@@ -417,13 +513,27 @@ class RivuneApiClient(
         return execute(url, method, body, authenticated, retryAfterRefresh = authenticated)
     }
 
+    private suspend inline fun <reified Response> requestNullable(
+        path: String,
+        method: String = "GET",
+        query: Map<String, String?> = emptyMap(),
+        body: String? = null,
+        authenticated: Boolean,
+    ): Response? {
+        val url = endpoint(path, query)
+        val data = executeData(url, method, body, authenticated, retryAfterRefresh = authenticated)
+        if (data.status == 204) return null
+        return decodeResponse(data.body)
+    }
+
     private suspend fun requestUnit(
         path: String,
         method: String,
+        query: Map<String, String?> = emptyMap(),
         body: String? = null,
         authenticated: Boolean,
     ) {
-        val url = endpoint(path, emptyMap())
+        val url = endpoint(path, query)
         executeData(url, method, body, authenticated, retryAfterRefresh = authenticated)
     }
 
@@ -448,11 +558,13 @@ class RivuneApiClient(
         retryAfterRefresh: Boolean,
     ): Response {
         val data = executeData(url, method, body, authenticated, retryAfterRefresh)
-        return try {
-            json.decodeFromString<Response>(data)
-        } catch (cause: Exception) {
-            throw RivuneApiException.InvalidResponse(cause)
-        }
+        return decodeResponse(data.body)
+    }
+
+    private inline fun <reified Response> decodeResponse(body: String): Response = try {
+        json.decodeFromString<Response>(body)
+    } catch (cause: Exception) {
+        throw RivuneApiException.InvalidResponse(cause)
     }
 
     private suspend fun executeData(
@@ -462,7 +574,7 @@ class RivuneApiClient(
         authenticated: Boolean,
         retryAfterRefresh: Boolean,
         explicitAccessToken: String? = null,
-    ): String {
+    ): ResponseData {
         requireServerDestination(url)
         val authentication = if (authenticated) {
             loadCredentialsIfNeeded()
@@ -499,8 +611,10 @@ class RivuneApiClient(
             return executeData(url, method, body, authenticated = true, retryAfterRefresh = false)
         }
         if (!responseSuccessful) throw decodeServerError(responseCode, responseBody)
-        return responseBody
+        return ResponseData(responseCode, responseBody)
     }
+
+    private data class ResponseData(val status: Int, val body: String)
 
     private fun readResponseBody(body: ResponseBody?): String {
         if (body == null) return ""

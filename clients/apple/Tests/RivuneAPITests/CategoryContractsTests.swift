@@ -14,7 +14,7 @@ final class CategoryContractsTests: XCTestCase {
           "user":{"id":"11111111-1111-4111-8111-111111111111","username":"admin","role":"admin"},
           "session":{"id":"22222222-2222-4222-8222-222222222222","deviceId":"33333333-3333-4333-8333-333333333333","activeProfile":null,"authorizationScope":"category","category":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Studio","color":null,"icon":"briefcase"}},
           "profiles":[{"id":"44444444-4444-4444-8444-444444444444","name":"Editor","description":"Editing profile","categoryId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","category":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Studio","color":null,"icon":"briefcase"},"isChild":false,"hasPin":false,"canManage":true,"enabled":true,"availableFrom":null,"availableUntil":null,"accessStartTime":null,"accessEndTime":null,"accessTimezone":"UTC","accessible":true,"avatar":{"kind":"preset","presetId":"aurora","url":"/avatar.svg"}}],
-          "maintenance":{"enabled":false}
+          "maintenance":{"enabled":false,"message":null}
         }
         """.utf8))
 
@@ -22,6 +22,8 @@ final class CategoryContractsTests: XCTestCase {
         XCTAssertEqual(account.session.category?.id, categoryId)
         XCTAssertEqual(account.profiles.first?.category.name, "Studio")
         XCTAssertEqual(account.profiles.first?.description, "Editing profile")
+        XCTAssertFalse(account.maintenance.enabled)
+        XCTAssertNil(account.maintenance.message)
 
         let token = try JSONDecoder().decode(TokenPair.self, from: Data("""
         {"tokenType":"Bearer","accessToken":"access","accessTokenExpiresAt":"2026-08-03T12:15:00Z","refreshToken":"refresh","refreshTokenExpiresAt":"2026-09-03T12:00:00Z","sessionId":"22222222-2222-4222-8222-222222222222","deviceId":"33333333-3333-4333-8333-333333333333","authorizationScope":"global_admin","category":null}
@@ -45,6 +47,10 @@ final class CategoryContractsTests: XCTestCase {
         """.utf8)))
         XCTAssertThrowsError(try JSONDecoder().decode(TokenPair.self, from: Data("""
         {"tokenType":"Bearer","accessToken":"access","accessTokenExpiresAt":"2026-08-03T12:15:00Z","refreshToken":"refresh","refreshTokenExpiresAt":"2026-09-03T12:00:00Z","sessionId":"22222222-2222-4222-8222-222222222222","deviceId":"33333333-3333-4333-8333-333333333333","authorizationScope":"category","category":null}
+        """.utf8)))
+        XCTAssertThrowsError(try JSONDecoder().decode(MaintenanceSettings.self, from: Data("{\"enabled\":false}".utf8)))
+        XCTAssertThrowsError(try JSONDecoder().decode(Account.self, from: Data("""
+        {"user":{"id":"11111111-1111-4111-8111-111111111111","username":"admin","role":"admin"},"session":{"id":"22222222-2222-4222-8222-222222222222","deviceId":"33333333-3333-4333-8333-333333333333","activeProfile":null,"authorizationScope":"global_admin","category":null},"profiles":[]}
         """.utf8)))
     }
 
