@@ -2944,9 +2944,9 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     resumePositionRef.current = target;
     setSeekPreview(null);
     setCurrentTime(target);
-    if (stream?.mode === "direct" && video) {
-      video.currentTime = target;
+    if (video && (stream?.mode === "direct" || stream?.mediaTimeline === "absolute")) {
       playbackOffsetRef.current = 0;
+      video.currentTime = target;
     } else {
       playbackOffsetRef.current = target;
       setPlaybackStart(target);

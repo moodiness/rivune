@@ -356,8 +356,9 @@ test("localized compact player controls do not depend on English accessible labe
   await expect(page.locator('[data-player-action="close"]')).toBeVisible();
 });
 
-test("seekable TS resume loads the absolute segment without doubling the displayed position", async ({ page, rivune: _rivune }) => {
+test("seekable TS resumes and seeks in place without rebuilding playback", async ({ page, rivune: _rivune }) => {
   const segmentRequests: string[] = [];
+  const requestCounts = { sources: 0, prepare: 0, resolve: 0, deleteSession: 0, playlist: 0 };
   const playlist = [
     "#EXTM3U",
     "#EXT-X-VERSION:3",
@@ -387,8 +388,10 @@ test("seekable TS resume loads the absolute segment without doubling the display
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (request.method() === "DELETE" && path.includes("/playback/sessions/")) requestCounts.deleteSession += 1;
     if (request.method() === "GET" && path.includes("/playback/sessions/seekable-session/assets/")) {
       if (path.endsWith(".m3u8")) {
+        requestCounts.playlist += 1;
         await route.fulfill({ contentType: "application/vnd.apple.mpegurl", body: playlist });
       } else if (path.endsWith(".ts")) {
         segmentRequests.push(path.slice(path.lastIndexOf("/") + 1));
@@ -399,14 +402,17 @@ test("seekable TS resume loads the absolute segment without doubling the display
       return;
     }
     if (request.method() === "POST" && path.endsWith("/playback/sources")) {
+      requestCounts.sources += 1;
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ sources: [{ id: "seekable-option", sourceRef: "seekable-source", addonId: "fixture-addon", manifestId: "fixture-manifest", streamIndex: 0, name: "Seekable TS", protocol: "http", container: "mkv", expiresAt: "2099-01-01T00:00:00Z" }], providerErrors: [] }) });
       return;
     }
     if (request.method() === "POST" && path.endsWith("/playback/prepare")) {
+      requestCounts.prepare += 1;
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ sourceRef: "seekable-source", mode: "transcode", protocol: "hls", container: "hls", media: { container: "mkv", durationSeconds: 3600, hdrFormat: "sdr", videoTracks: [{ index: 0, type: "video", codec: "h264", width: 1920, height: 1080 }], audioTracks: [{ index: 1, type: "audio", codec: "aac", channels: 2 }], subtitleTracks: [] }, subtitleCount: 0, expiresAt: "2099-01-01T00:00:00Z" }) });
       return;
     }
     if (request.method() === "POST" && path.endsWith("/playback/resolve")) {
+      requestCounts.resolve += 1;
       const input = request.postDataJSON() as { startSeconds?: number };
       expect(input.startSeconds).toBe(3080);
       await route.fulfill({
@@ -439,6 +445,26 @@ test("seekable TS resume loads the absolute segment without doubling the display
   expect(segmentRequests).not.toContain("seek-000000.ts");
   await expect.poll(async () => Number(await page.getByRole("slider", { name: "Playback position" }).inputValue())).toBeGreaterThanOrEqual(3079);
   expect(Number(await page.getByRole("slider", { name: "Playback position" }).inputValue())).toBeLessThanOrEqual(3081);
+  const requestsBeforeSeek = { ...requestCounts };
+  const timeline = page.getByRole("slider", { name: "Playback position" });
+
+  await page.locator("video").evaluate((video) => {
+    const state = window as Window & { seekVideo?: HTMLVideoElement; sawSeekPreparation?: boolean };
+    state.seekVideo = video;
+    state.sawSeekPreparation = false;
+    new MutationObserver(() => {
+      if (document.body.textContent?.includes("Preparing playback")) state.sawSeekPreparation = true;
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  segmentRequests.length = 0;
+  await timeline.fill("1200");
+  await timeline.dispatchEvent("pointerup");
+
+  await expect.poll(() => segmentRequests.includes("seek-000400.ts")).toBe(true);
+  expect(requestCounts).toEqual(requestsBeforeSeek);
+  expect(await page.evaluate(() => (window as Window & { sawSeekPreparation?: boolean }).sawSeekPreparation)).toBe(false);
+  expect(await page.locator("video").evaluate((video) => video === (window as Window & { seekVideo?: HTMLVideoElement }).seekVideo)).toBe(true);
+  await expect(page.getByText("Preparing playback", { exact: true })).toBeHidden();
 });
 
 test("server transcodes remain in the existing web video and HLS source pipeline", async ({ page, rivune: _rivune }) => {

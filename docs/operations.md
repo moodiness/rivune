@@ -20,7 +20,7 @@ login used only by the restore scripts.
 
 ```dotenv
 RIVUNE_PUBLIC_URL=https://media.example.com
-RIVUNE_VERSION=1.5.2
+RIVUNE_VERSION=1.5.3
 RIVUNE_POSTGRES_SUPERUSER_PASSWORD=<output of: openssl rand -hex 32>
 RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
@@ -313,9 +313,9 @@ The subshell and its `EXIT` trap discard the exported secrets even when migratio
 After exporting the signing and verification key paths, lineage, and trusted state path described below, update to a stable release by changing `RIVUNE_VERSION` to an exact released version, backing up first, recording the printed backup ID outside the repository, and recreating only the application:
 
 ```sh
-COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.5.2.dump
-./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.5.2.dump
-# edit RIVUNE_VERSION=1.5.2 in .env
+COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.5.3.dump
+./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.5.3.dump
+# edit RIVUNE_VERSION=1.5.3 in .env
 docker compose --env-file .env -f compose.yaml pull rivune
 docker compose --env-file .env -f compose.yaml up -d rivune
 curl --fail --show-error https://media.example.com/ready
