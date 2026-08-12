@@ -458,10 +458,11 @@ function webPlaybackCapabilities(): PlaybackCapabilities {
   if (audioCodecs.length === 0) audioCodecs.push("none");
   const streamingProtocols = ["http", "youtube"];
   const hdrFormats = ["sdr"];
-  if (mediaProfiles.some((profile) => (profile.maximumVideoBitDepth ?? 0) >= 10)) {
+  const highDynamicRangeOutput = window.matchMedia?.("(dynamic-range: high)").matches ?? false;
+  if (highDynamicRangeOutput && mediaProfiles.some((profile) => (profile.maximumVideoBitDepth ?? 0) >= 10)) {
     hdrFormats.push("hdr10", "hlg");
   }
-  if (video.canPlayType('video/mp4; codecs="dvh1.05.06"') || video.canPlayType('video/mp4; codecs="dvhe.05.06"')) {
+  if (highDynamicRangeOutput && (video.canPlayType('video/mp4; codecs="dvh1.05.06"') || video.canPlayType('video/mp4; codecs="dvhe.05.06"'))) {
     hdrFormats.push("dolby_vision");
   }
   if (video.canPlayType("application/vnd.apple.mpegurl") || "MediaSource" in window) streamingProtocols.push("hls");
@@ -2124,6 +2125,15 @@ type PlayerPhase = "preparing" | "ready" | "playing" | "paused" | "buffering" | 
 type PlayerPanel = "sources" | "audio" | "subtitles" | "speed" | "stats" | null;
 type PlayerPreferences = { volume: number; muted: boolean; rate: number };
 type PlayerStats = { bufferedAhead: number; droppedFrames: number; totalFrames: number; width: number; height: number };
+type ProgressWrite = { titleID: string; positionSeconds: number; durationSeconds: number; completed: boolean; expectedVersion: number };
+
+function coalesceProgressWrite(current: ProgressWrite, next: ProgressWrite): ProgressWrite {
+  return { ...next, completed: current.completed || next.completed };
+}
+
+function playbackSubtitleAvailable(subtitle: PlaybackSubtitle): boolean {
+  return subtitle.delivery !== "external" || Boolean(subtitle.url?.trim());
+}
 type PlayerFullscreenKind = "none" | "standard" | "webkit";
 type WebKitFullscreenVideo = HTMLVideoElement & {
   webkitDisplayingFullscreen?: boolean;
@@ -2247,7 +2257,8 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   const progressVersionRef = useRef(0);
   const resumePositionRef = useRef(startSeconds);
   const lastSavedPositionRef = useRef(0);
-  const progressRequestRef = useRef(false);
+  const progressRequestRef = useRef<ProgressWrite | undefined>(undefined);
+  const pendingProgressRef = useRef<Map<string, ProgressWrite>>(new Map());
   const sessionIDRef = useRef("");
   const playbackDurationRef = useRef(0);
   const streamProtocolRef = useRef("");
@@ -2265,11 +2276,13 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     }
     void (item.titleId ? Promise.resolve(item.titleId) : resolveMediaTitle(item)).then(async (titleID) => {
       if (!active) return;
+      progressVersionRef.current = 0;
       titleIDRef.current = titleID;
+      resumePositionRef.current = startSeconds;
+      lastSavedPositionRef.current = 0;
       const progress = await api.progress(titleID);
       if (!active || !progress) return;
       progressVersionRef.current = progress.version;
-      resumePositionRef.current = startSeconds;
       lastSavedPositionRef.current = progress.positionSeconds;
       const video = videoRef.current;
       if (video && video.readyState >= HTMLMediaElement.HAVE_METADATA) resumePlayback(video);
@@ -2327,10 +2340,12 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       sessionIDRef.current = session.id;
       if (previousSessionID) void api.stopPlayback(previousSessionID).catch(() => undefined);
       const resolvedSources = session.sources ?? [];
+      const resolvedSubtitles = session.subtitles ?? [];
       setStreams(resolvedSources);
-      setSubtitles(session.subtitles ?? []);
+      setSubtitles(resolvedSubtitles);
       setSelectedAudioTrack(session.selectedAudioTrack);
-      const resolvedSubtitleID = session.selectedSubtitleId || "none";
+      const requestedSubtitleID = session.selectedSubtitleId || "none";
+      const resolvedSubtitleID = resolvedSubtitles.some((subtitle) => subtitle.id === requestedSubtitleID && playbackSubtitleAvailable(subtitle)) ? requestedSubtitleID : "none";
       subtitlePreferenceRef.current = resolvedSubtitleID;
       setSelectedSubtitleID(resolvedSubtitleID);
       const compatible = resolvedSources.filter(playerSourceAvailable);
@@ -2372,8 +2387,9 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   playbackDurationRef.current = playbackDuration;
   streamProtocolRef.current = stream?.protocol ?? "";
   const audioTracks = stream?.media?.audioTracks ?? [];
-  const selectedSubtitle = subtitles.find((subtitle) => subtitle.id === selectedSubtitleID);
-  const selectedExternalSubtitleURL = selectedSubtitle?.delivery === "external" ? selectedSubtitle.url?.trim() ?? "" : "";
+  const selectableSubtitles = subtitles.filter(playbackSubtitleAvailable);
+  const selectedSubtitle = selectableSubtitles.find((subtitle) => subtitle.id === selectedSubtitleID);
+  const selectedExternalSubtitleURL = selectedSubtitle?.delivery === "external" ? selectedSubtitle.url!.trim() : "";
   const transportTime = seekPreview ?? currentTime;
   const progressPercent = playbackDuration > 0 ? Math.min(100, Math.max(0, transportTime / playbackDuration * 100)) : 0;
   const remainingSeconds = playbackDuration > 0 ? Math.max(0, playbackDuration - currentTime) : Number.POSITIVE_INFINITY;
@@ -2483,7 +2499,8 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       setError(notifyErrorMessage(message, t("player.error.unavailableTitle")));
       setPhase("failed");
     };
-    const handleMediaError = () => {
+    const handleMediaError = (event: Event) => {
+      if (event.target instanceof HTMLTrackElement) return;
       failPlayback(t("player.error.sourcePlayFailed"));
     };
 
@@ -2735,37 +2752,85 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     stopCurrentSession();
   }, []);
 
-  async function persistProgress(completed = false, positionOverride?: number) {
+  function persistProgress(completed = false, positionOverride?: number) {
     const video = videoRef.current;
     const titleID = titleIDRef.current;
-    if (!video || !titleID || progressRequestRef.current) return;
+    if (!video || !titleID) return;
     const durationSeconds = playbackDurationRef.current > 0 ? playbackDurationRef.current : streamProtocolRef.current !== "hls" ? video.duration : Number.NaN;
     if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return;
     const positionSeconds = completed ? Math.floor(durationSeconds) : Math.floor(positionOverride ?? playbackOffsetRef.current + video.currentTime);
     if (!completed && positionSeconds <= 0) return;
-    progressRequestRef.current = true;
-    try {
-      const progress = await api.updateProgress(titleID, {
-        positionSeconds,
-        durationSeconds: Math.floor(durationSeconds),
-        completed,
-        expectedVersion: progressVersionRef.current,
-      });
-      progressVersionRef.current = progress.version;
-      lastSavedPositionRef.current = positionSeconds;
-    } catch (cause) {
-      if (cause instanceof APIError && cause.status === 409) {
+    const next = { titleID, positionSeconds, durationSeconds: Math.floor(durationSeconds), completed, expectedVersion: progressVersionRef.current };
+    const pending = pendingProgressRef.current.get(titleID);
+    if (pending) {
+      pendingProgressRef.current.set(titleID, coalesceProgressWrite(pending, next));
+    } else if (progressRequestRef.current?.titleID === titleID) {
+      pendingProgressRef.current.set(titleID, coalesceProgressWrite(progressRequestRef.current, next));
+    } else {
+      pendingProgressRef.current.set(titleID, next);
+    }
+    if (!progressRequestRef.current) void drainProgressWrites();
+  }
+
+  async function drainProgressWrites() {
+    while (pendingProgressRef.current.size > 0) {
+      const [pendingTitleID, pending] = pendingProgressRef.current.entries().next().value!;
+      pendingProgressRef.current.delete(pendingTitleID);
+      let next = pending;
+      progressRequestRef.current = next;
+      try {
+        let progress: PlaybackProgress;
         try {
-          const current = await api.progress(titleID);
-          progressVersionRef.current = current?.version ?? 0;
-        } catch (refreshCause) {
-          notifyError(refreshCause, t("player.progress.syncFailed"), t("player.progress.notSavedTitle"));
+          progress = await api.updateProgress(next.titleID, {
+            positionSeconds: next.positionSeconds,
+            durationSeconds: next.durationSeconds,
+            completed: next.completed,
+            expectedVersion: next.expectedVersion,
+          });
+        } catch (cause) {
+          if (!(cause instanceof APIError) || cause.status !== 409) throw cause;
+          let current: PlaybackProgress | undefined;
+          try {
+            current = await api.progress(next.titleID);
+            next.expectedVersion = current?.version ?? 0;
+          } catch (refreshCause) {
+            notifyError(refreshCause, t("player.progress.syncFailed"), t("player.progress.notSavedTitle"));
+            continue;
+          }
+          if (current) {
+            next = coalesceProgressWrite({
+              titleID: next.titleID,
+              positionSeconds: current.positionSeconds,
+              durationSeconds: current.durationSeconds,
+              completed: current.completed,
+              expectedVersion: current.version,
+            }, next);
+          }
+          const pending = pendingProgressRef.current.get(next.titleID);
+          if (pending) {
+            next = coalesceProgressWrite(next, pending);
+            pendingProgressRef.current.delete(next.titleID);
+            next.expectedVersion = current?.version ?? 0;
+          }
+          progressRequestRef.current = next;
+          progress = await api.updateProgress(next.titleID, {
+            positionSeconds: next.positionSeconds,
+            durationSeconds: next.durationSeconds,
+            completed: next.completed,
+            expectedVersion: next.expectedVersion,
+          });
         }
-      } else {
+        if (titleIDRef.current === next.titleID) {
+          progressVersionRef.current = progress.version;
+          lastSavedPositionRef.current = next.positionSeconds;
+        }
+        const pending = pendingProgressRef.current.get(next.titleID);
+        if (pending) pending.expectedVersion = progress.version;
+      } catch (cause) {
         notifyError(cause, t("player.progress.saveFailed"), t("player.progress.notSavedTitle"));
+      } finally {
+        progressRequestRef.current = undefined;
       }
-    } finally {
-      progressRequestRef.current = false;
     }
   }
 
@@ -3062,7 +3127,11 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       closePanel();
       return;
     }
-    const nextSubtitle = subtitles.find((subtitle) => subtitle.id === subtitleID);
+    const nextSubtitle = selectableSubtitles.find((subtitle) => subtitle.id === subtitleID);
+    if (subtitleID !== "none" && !nextSubtitle) {
+      closePanel();
+      return;
+    }
     const changesBurnDelivery = selectedSubtitle?.delivery === "burn" || nextSubtitle?.delivery === "burn";
     subtitlePreferenceRef.current = subtitleID;
     closePanel();
@@ -3086,6 +3155,13 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       setError(notifyError(cause, t("admin.activity.errors.stop"), t("admin.activity.errors.stopTitle")));
       setPhase("failed");
     });
+  }
+
+  function handleExternalSubtitleError(subtitleID: string) {
+    if (subtitlePreferenceRef.current !== subtitleID) return;
+    subtitlePreferenceRef.current = "none";
+    setSelectedSubtitleID("none");
+    notifyErrorMessage(t("common.status.unavailable"), t("player.panel.subtitles"));
   }
 
   function handlePlaybackReady(video: HTMLVideoElement) {
@@ -3252,7 +3328,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
           onWaiting={() => setPhase((current) => current === "paused" ? current : "buffering")}
           onStalled={() => setPhase((current) => current === "paused" ? current : "buffering")}
           onEnded={(event) => handlePlaybackEnded(event.currentTarget)}>
-          {selectedSubtitle && selectedExternalSubtitleURL && <track key={selectedSubtitle.id} src={selectedExternalSubtitleURL} srcLang={selectedSubtitle.language || "und"} label={(selectedSubtitle.language || t("common.fallback.unknown")).toUpperCase()} default />}
+          {selectedSubtitle && selectedExternalSubtitleURL && <track key={selectedSubtitle.id} src={selectedExternalSubtitleURL} srcLang={selectedSubtitle.language || "und"} label={(selectedSubtitle.language || t("common.fallback.unknown")).toUpperCase()} default onError={() => handleExternalSubtitleError(selectedSubtitle.id)} />}
         </video> : null}
     </div>
 
@@ -3303,7 +3379,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         <div className="player__controls-group player__controls-group--right">
           {playable.length > 1 && <button type="button" aria-label={t("player.panel.sources")} aria-controls="player-panel-sources" aria-expanded={panel === "sources"} aria-haspopup="dialog" className={panel === "sources" ? "is-active" : ""} onClick={() => togglePanel("sources")} data-player-action="sources" data-player-control><Settings2 size={19} /></button>}
           {audioTracks.length > 1 && <button type="button" aria-label={t("player.panel.audio")} aria-controls="player-panel-audio" aria-expanded={panel === "audio"} aria-haspopup="dialog" className={panel === "audio" ? "is-active" : ""} onClick={() => togglePanel("audio")} data-player-action="audio" data-player-control><AudioLines size={19} /></button>}
-          {subtitles.length > 0 && <button type="button" aria-label={t("player.panel.subtitles")} aria-controls="player-panel-subtitles" aria-expanded={panel === "subtitles"} aria-haspopup="dialog" className={panel === "subtitles" ? "is-active" : ""} onClick={() => togglePanel("subtitles")} data-player-action="subtitles" data-player-control><Captions size={19} /></button>}
+          {selectableSubtitles.length > 0 && <button type="button" aria-label={t("player.panel.subtitles")} aria-controls="player-panel-subtitles" aria-expanded={panel === "subtitles"} aria-haspopup="dialog" className={panel === "subtitles" ? "is-active" : ""} onClick={() => togglePanel("subtitles")} data-player-action="subtitles" data-player-control><Captions size={19} /></button>}
           <button type="button" aria-label={t("player.speed.currentLabel", { rate: playbackRate })} aria-controls="player-panel-speed" aria-expanded={panel === "speed"} aria-haspopup="dialog" className={panel === "speed" ? "is-active" : ""} onClick={() => togglePanel("speed")} data-player-action="speed" data-player-control><Gauge size={19} /><small>{playbackRate}×</small></button>
           <button type="button" aria-label={t("player.panel.diagnostics")} aria-controls="player-panel-stats" aria-expanded={panel === "stats"} aria-haspopup="dialog" className={panel === "stats" ? "is-active" : ""} onClick={() => togglePanel("stats")} data-player-action="diagnostics" data-player-control><Info size={19} /></button>
           {document.pictureInPictureEnabled && <button type="button" aria-label={t("player.pictureInPicture.label")} onClick={() => void togglePictureInPicture()} data-player-action="picture-in-picture" data-player-control><PictureInPicture size={19} /></button>}
@@ -3329,7 +3405,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       }} data-player-control><span><strong>{track.title || track.language?.toUpperCase() || t("player.audio.fallbackTrack", { number: track.index + 1 })}</strong><small>{playerTrackLabel(track)}</small></span>{selectedAudioTrack === track.index && <Check size={17} />}</button>)}</div>}
       {panel === "subtitles" && <div className="player__option-list" role="radiogroup" aria-label={panelTitle} data-player-layout="vertical">
         <button type="button" role="radio" aria-checked={selectedSubtitleID === "none"} className={selectedSubtitleID === "none" ? "is-active" : ""} onClick={() => selectSubtitle("none")} data-player-control><span><strong>{t("player.subtitles.off")}</strong><small>{t("player.subtitles.none")}</small></span>{selectedSubtitleID === "none" && <Check size={17} />}</button>
-        {subtitles.map((subtitle) => <button key={subtitle.id} type="button" role="radio" aria-checked={selectedSubtitleID === subtitle.id} className={selectedSubtitleID === subtitle.id ? "is-active" : ""} onClick={() => selectSubtitle(subtitle.id)} data-player-control><span><strong>{(subtitle.language || t("common.fallback.unknown")).toUpperCase()}</strong><small>{t(subtitle.default ? "player.subtitles.defaultTrack" : "player.subtitles.track")}</small></span>{selectedSubtitleID === subtitle.id && <Check size={17} />}</button>)}
+        {selectableSubtitles.map((subtitle) => <button key={subtitle.id} type="button" role="radio" aria-checked={selectedSubtitleID === subtitle.id} className={selectedSubtitleID === subtitle.id ? "is-active" : ""} onClick={() => selectSubtitle(subtitle.id)} data-player-control><span><strong>{(subtitle.language || t("common.fallback.unknown")).toUpperCase()}</strong><small>{t(subtitle.default ? "player.subtitles.defaultTrack" : "player.subtitles.track")}</small></span>{selectedSubtitleID === subtitle.id && <Check size={17} />}</button>)}
       </div>}
       {panel === "speed" && <div className="player__speed-grid" role="radiogroup" aria-label={panelTitle} data-player-layout="grid" data-player-columns="3">{playbackRates.map((rate) => <button key={rate} type="button" role="radio" aria-checked={playbackRate === rate} className={playbackRate === rate ? "is-active" : ""} onClick={() => changePlaybackRate(rate)} data-player-control>{rate}×</button>)}</div>}
       {panel === "stats" && <dl className="player__stats">

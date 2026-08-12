@@ -26,6 +26,7 @@ type preparationResourceFetcher struct {
 	validationAddonID string
 	validationBatches [][]string
 	subtitleBatch     addon.ResourceBatch
+	subtitleGate      <-chan struct{}
 	validation        func([]string) error
 	sourceValidation  func(string) error
 	streamResponse    func(int32) (addon.ResourceBatch, error)
@@ -70,7 +71,7 @@ func (fetcher *preparationResourceFetcher) validatePlaybackAccesses(addonIDs []s
 	return fetcher.validationErr
 }
 
-func (fetcher *preparationResourceFetcher) FetchAllPlaybackResources(_ context.Context, _ auth.Principal, resource addon.ResourcePath) (addon.ResourceBatch, error) {
+func (fetcher *preparationResourceFetcher) FetchAllPlaybackResources(ctx context.Context, _ auth.Principal, resource addon.ResourcePath) (addon.ResourceBatch, error) {
 	switch resource.Resource {
 	case "stream":
 		call := fetcher.streamCalls.Add(1)
@@ -86,6 +87,13 @@ func (fetcher *preparationResourceFetcher) FetchAllPlaybackResources(_ context.C
 		}}}, nil
 	case "subtitles":
 		fetcher.subtitleCalls.Add(1)
+		if fetcher.subtitleGate != nil {
+			select {
+			case <-ctx.Done():
+				return addon.ResourceBatch{}, ctx.Err()
+			case <-fetcher.subtitleGate:
+			}
+		}
 		return fetcher.subtitleBatch, nil
 	default:
 		return addon.ResourceBatch{}, nil
@@ -766,6 +774,67 @@ func TestSourceReferenceAccessValidationDistinguishesInfrastructureFailure(t *te
 	}
 	if fetcher.validationCalls.Load() != 1 {
 		t.Fatalf("empty addon identity reached validator: calls=%d", fetcher.validationCalls.Load())
+	}
+}
+
+func TestBuildPreparedPlaybackSkipsExternalSubtitleFetchForBurnOnlyClient(t *testing.T) {
+	blocked := make(chan struct{})
+	fetcher := &preparationResourceFetcher{subtitleGate: blocked}
+	service := &Service{addons: fetcher}
+	reference := sourceReference{
+		AddonMediaType: "movie", ResourceID: "tt1234567",
+		Source: Source{
+			ID: "stream-1", Mode: "direct", URL: "https://media.example/movie.mkv", Compatible: true,
+			Media: &MediaInspection{SubtitleTracks: []MediaTrack{{Index: 2, Type: "subtitle", Codec: "subrip", Language: "fr"}}},
+		},
+		Asset:          &storedAsset{ID: "stream-1", Kind: "stream", URL: "https://media.example/movie.mkv"},
+		Capabilities:   Capabilities{SubtitleModes: []string{"burn"}},
+		ProviderErrors: []ProviderFailure{{AddonID: "stream-addon", Code: "stream_warning", Message: "partial stream failure"}},
+	}
+
+	done := make(chan struct{})
+	var playback preparedPlayback
+	var err error
+	go func() {
+		playback, err = service.buildPreparedPlayback(context.Background(), auth.Principal{}, reference)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		close(blocked)
+		t.Fatal("burn-only playback waited for the blocked external subtitle provider")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := fetcher.subtitleCalls.Load(); calls != 0 {
+		t.Fatalf("external subtitle fetch calls = %d, want 0", calls)
+	}
+	if len(playback.subtitles) != 1 || playback.subtitles[0].Delivery != "burn" || playback.subtitles[0].Language != "fr" {
+		t.Fatalf("embedded burn subtitle was not inspected: %+v", playback.subtitles)
+	}
+	if len(playback.providerErrors) != 1 || playback.providerErrors[0].Code != "stream_warning" {
+		t.Fatalf("relevant provider errors were not preserved: %+v", playback.providerErrors)
+	}
+}
+
+func TestBuildPreparedPlaybackFetchesExternalSubtitlesForNegotiatedAndLegacyClients(t *testing.T) {
+	for _, modes := range [][]string{nil, []string{"external"}, []string{"external", "burn"}} {
+		fetcher := &preparationResourceFetcher{}
+		service := &Service{addons: fetcher}
+		_, err := service.buildPreparedPlayback(context.Background(), auth.Principal{}, sourceReference{
+			AddonMediaType: "movie", ResourceID: "tt1234567",
+			Source:       Source{ID: "stream-1", Mode: "direct", URL: "https://media.example/movie.mkv", Compatible: true},
+			Asset:        &storedAsset{ID: "stream-1", Kind: "stream", URL: "https://media.example/movie.mkv"},
+			Capabilities: Capabilities{SubtitleModes: modes},
+		})
+		if err != nil {
+			t.Fatalf("subtitle modes %v: %v", modes, err)
+		}
+		if calls := fetcher.subtitleCalls.Load(); calls != 1 {
+			t.Fatalf("subtitle modes %v fetch calls = %d, want 1", modes, calls)
+		}
 	}
 }
 
