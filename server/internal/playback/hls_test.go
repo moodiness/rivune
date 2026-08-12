@@ -1080,6 +1080,24 @@ func (*blockingHLSProcessor) Probe(context.Context, storedAsset) (MediaInspectio
 	return MediaInspection{}, nil
 }
 
+func waitForEmptyHLSWorkspace(t *testing.T, service *Service) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		service.hlsMu.Lock()
+		jobCount := len(service.hlsJobs)
+		service.hlsMu.Unlock()
+		bytes := directorySize(service.mediaOptions.TempDirectory)
+		if jobCount == 0 && bytes == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("HLS cleanup left jobs=%d bytes=%d", jobCount, bytes)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 type failingHLSProcessor struct {
 	err error
 }
@@ -1255,9 +1273,7 @@ func TestHLSJobServesBeforeCompletionAndStopsWithSession(t *testing.T) {
 	default:
 		t.Fatal("stopping the playback session did not cancel HLS processing")
 	}
-	if _, err := os.Stat(job.directory); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("HLS workspace still exists after session stop: %v", err)
-	}
+	waitForEmptyHLSWorkspace(t, service)
 }
 
 func TestHLSStorageMonitorUsesOneCadenceAcrossJobsAndStops(t *testing.T) {
@@ -1390,6 +1406,39 @@ func TestPlaybackServiceStartupClearsSaturatedWorkspace(t *testing.T) {
 	}
 	service.stopHLSSession("session-1")
 }
+func TestHLSAdmissionSerializesStorageUntilWriterPublication(t *testing.T) {
+	publicationObserved := false
+	serializationEndedEarly := false
+	var service *Service
+	service = &Service{
+		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1},
+		hlsJobs:      make(map[string]*hlsJob),
+		now: func() time.Time {
+			publicationObserved = true
+			if service.hlsStorageMu.TryLock() {
+				serializationEndedEarly = true
+				service.hlsStorageMu.Unlock()
+			}
+			return time.Date(2026, time.August, 12, 12, 0, 0, 0, time.UTC)
+		},
+	}
+	processor := &blockingHLSProcessor{ready: make(chan struct{}), stopped: make(chan struct{})}
+	if _, err := service.hlsJob(context.Background(), "replacement", storedAsset{ID: "stream"}, processor, true); err != nil {
+		t.Fatalf("admit replacement writer: %v", err)
+	}
+	if !publicationObserved {
+		t.Fatal("replacement writer publication was not observed")
+	}
+	if serializationEndedEarly {
+		t.Fatal("storage serialization ended before replacement writer publication")
+	}
+	select {
+	case <-processor.ready:
+	case <-time.After(time.Second):
+		t.Fatal("replacement writer did not start")
+	}
+	service.stopHLSSession("replacement")
+}
 
 func TestHLSStorageCapacityEvictsInactiveJobAndReadmitsImmediately(t *testing.T) {
 	service := &Service{
@@ -1425,9 +1474,7 @@ func TestHLSStorageCapacityEvictsInactiveJobAndReadmitsImmediately(t *testing.T)
 		t.Fatal("replacement media job did not start")
 	}
 	service.stopHLSSession("session-2")
-	if len(service.hlsJobs) != 0 || directorySize(service.mediaOptions.TempDirectory) != 0 {
-		t.Fatalf("quota replacement cleanup left jobs=%d bytes=%d", len(service.hlsJobs), directorySize(service.mediaOptions.TempDirectory))
-	}
+	waitForEmptyHLSWorkspace(t, service)
 }
 
 func TestFFmpegProcessorRejectsConcurrentWorkAtCapacity(t *testing.T) {
@@ -1790,9 +1837,7 @@ func TestHLSStorageEvictsPrewarmButPreservesActiveRequestAndReadmits(t *testing.
 	}
 	request.release()
 	service.stopHLSJob(activeKey)
-	if len(service.hlsJobs) != 0 || directorySize(root) != 0 {
-		t.Fatalf("HLS cleanup left jobs=%d bytes=%d", len(service.hlsJobs), directorySize(root))
-	}
+	waitForEmptyHLSWorkspace(t, service)
 }
 
 func TestHLSStorageVictimFallsBackToInactiveLRU(t *testing.T) {
@@ -1922,9 +1967,7 @@ func TestStartSessionHLSPrioritizesPlaybackOverNonAdoptablePrewarm(t *testing.T)
 		t.Fatalf("unexpected jobs after priority retry: %+v", service.hlsJobs)
 	}
 	service.stopHLSSession("session")
-	if len(service.hlsJobs) != 0 || directorySize(service.mediaOptions.TempDirectory) != 0 {
-		t.Fatalf("priority retry cleanup left jobs=%d bytes=%d", len(service.hlsJobs), directorySize(service.mediaOptions.TempDirectory))
-	}
+	waitForEmptyHLSWorkspace(t, service)
 }
 
 func TestAdoptHLSJobRequiresExactFingerprint(t *testing.T) {
@@ -2072,9 +2115,7 @@ func TestHLSJobsShareExactFingerprintAcrossSessions(t *testing.T) {
 	if starts, cancels := processor.counts(); starts != 1 || cancels != 1 {
 		t.Fatalf("last alias teardown starts/cancels = %d/%d, want 1/1", starts, cancels)
 	}
-	if _, err := os.Stat(first.directory); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("last alias teardown retained shared workspace: %v", err)
-	}
+	waitForEmptyHLSWorkspace(t, service)
 }
 
 func TestHLSBindingExpiryDetachesOnlyExpiredSession(t *testing.T) {
@@ -2325,9 +2366,7 @@ func TestConcurrentHLSAttachAndStopDoesNotOrphanOrDoubleCancel(t *testing.T) {
 		if starts != cancels || starts < 1 || starts > 2 {
 			t.Fatalf("iteration %d starts/cancels = %d/%d", iteration, starts, cancels)
 		}
-		if len(service.hlsJobs) != 0 || directorySize(service.mediaOptions.TempDirectory) != 0 {
-			t.Fatalf("iteration %d left bindings=%d bytes=%d", iteration, len(service.hlsJobs), directorySize(service.mediaOptions.TempDirectory))
-		}
+		waitForEmptyHLSWorkspace(t, service)
 	}
 }
 
@@ -2351,9 +2390,7 @@ func TestSharedHLSStorageVictimRemovesAliasesOnce(t *testing.T) {
 	if starts, cancels := processor.counts(); starts != 1 || cancels != 1 {
 		t.Fatalf("shared victim starts/cancels = %d/%d, want 1/1", starts, cancels)
 	}
-	if directorySize(service.mediaOptions.TempDirectory) != 0 {
-		t.Fatal("shared victim workspace was not removed")
-	}
+	waitForEmptyHLSWorkspace(t, service)
 }
 
 func TestPrewarmHLSAdoptionIsOneToOneUnderConcurrency(t *testing.T) {
@@ -2489,9 +2526,7 @@ func TestStopAllHLSJobsWaitsForActiveRequestLease(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("global stop did not finish after request release")
 	}
-	if _, err := os.Stat(job.directory); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("released workspace still exists: %v", err)
-	}
+	waitForEmptyHLSWorkspace(t, service)
 }
 
 func TestHLSAdmissionWaitsForResetGate(t *testing.T) {
