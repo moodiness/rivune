@@ -20,7 +20,7 @@ login used only by the restore scripts.
 
 ```dotenv
 RIVUNE_PUBLIC_URL=https://media.example.com
-RIVUNE_VERSION=1.5.0
+RIVUNE_VERSION=1.5.1
 RIVUNE_POSTGRES_SUPERUSER_PASSWORD=<output of: openssl rand -hex 32>
 RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
@@ -133,6 +133,12 @@ For a new installation, generate the masked Unraid keyring field once with
 `printf '1:'; openssl rand -hex 32`. For a legacy upgrade, use `1:` followed by
 the existing `RIVUNE_TRACKING_ENCRYPTION_KEY`; generating a replacement makes
 existing encrypted credentials unrecoverable.
+
+The Unraid template persists downloaded artwork at
+`/mnt/cache/appdata/rivune/artwork`, mounted as `/var/lib/rivune/artwork` in the
+container. Existing v1.5.0 template installations should add that read-write
+Path mapping before recreating Rivune; already cached files that lived only in
+the old container layer are not recoverable after that container was removed.
 
 ### Advanced host topology
 
@@ -307,9 +313,9 @@ The subshell and its `EXIT` trap discard the exported secrets even when migratio
 After exporting the signing and verification key paths, lineage, and trusted state path described below, update to a stable release by changing `RIVUNE_VERSION` to an exact released version, backing up first, recording the printed backup ID outside the repository, and recreating only the application:
 
 ```sh
-COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.5.0.dump
-./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.5.0.dump
-# edit RIVUNE_VERSION=1.5.0 in .env
+COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.5.1.dump
+./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.5.1.dump
+# edit RIVUNE_VERSION=1.5.1 in .env
 docker compose --env-file .env -f compose.yaml pull rivune
 docker compose --env-file .env -f compose.yaml up -d rivune
 curl --fail --show-error https://media.example.com/ready
@@ -585,10 +591,20 @@ The Compose stack uses read-only root filesystems, a fixed 256 MiB
 capabilities, and PID ceilings. Transcode, remux, and HLS work is stored on the
 disk-backed `media_workspace` volume at `/var/lib/rivune/media`, selected by
 `RIVUNE_MEDIA_TEMP_DIR`; Rivune cleans that workspace on startup and retains its
-20 GiB application storage ceiling. The underlying filesystem can impose a
-lower practical ceiling. Advanced operators who replace the volume or resource
-declarations should do so in a private Compose override and keep host capacity
-consistent with the requested quota.
+20 GiB application storage ceiling. Downloaded posters, backdrops, logos, and
+cast images use the persistent `artwork_cache` volume at
+`/var/lib/rivune/artwork`. The Unraid template maps these paths to
+`/mnt/cache/appdata/rivune/transcode` and `/mnt/cache/appdata/rivune/artwork`.
+The underlying filesystem can impose lower practical ceilings. Advanced
+operators who replace these volume declarations should use writable local
+storage, preserve the documented container paths, and keep host capacity
+consistent with the requested quotas.
+
+Startup cleanup requires the documented root entrypoint and a writable local
+volume or bind mount. NFS root-squash, server-side ACL denials, read-only or
+immutable storage, and a forced Docker `--user` cannot be repaired by container
+capabilities; pre-own such storage for the configured PUID/PGID or use the
+supported local-volume topology.
 
 Administration Activity reports bounded selected-encoder, target codec, quality,
 encode/decode capability, pool, quota, pipeline, and job diagnostics. It never

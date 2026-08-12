@@ -216,9 +216,10 @@ func TestUnraidTemplateSupportsCommonAndHardenedDeploymentModes(t *testing.T) {
 		Value       string
 	}
 	var template struct {
-		Overview string `xml:"Overview"`
-		Requires string `xml:"Requires"`
-		Configs  []struct {
+		Overview    string `xml:"Overview"`
+		Requires    string `xml:"Requires"`
+		ExtraParams string `xml:"ExtraParams"`
+		Configs     []struct {
 			Name        string `xml:"Name,attr"`
 			Target      string `xml:"Target,attr"`
 			Description string `xml:"Description,attr"`
@@ -232,6 +233,10 @@ func TestUnraidTemplateSupportsCommonAndHardenedDeploymentModes(t *testing.T) {
 	}
 	if err := xml.Unmarshal(content, &template); err != nil {
 		t.Fatalf("parse Unraid template XML: %v", err)
+	}
+	const expectedExtraParams = "--init --restart unless-stopped --security-opt=no-new-privileges --cap-drop=ALL --cap-add=CHOWN --cap-add=DAC_OVERRIDE --cap-add=SETGID --cap-add=SETUID --pids-limit=512"
+	if strings.TrimSpace(template.ExtraParams) != expectedExtraParams {
+		t.Fatalf("unexpected Unraid container arguments: %q", template.ExtraParams)
 	}
 
 	configs := make(map[string]configSpec, len(template.Configs))
@@ -264,6 +269,10 @@ func TestUnraidTemplateSupportsCommonAndHardenedDeploymentModes(t *testing.T) {
 	caMount := configs[containerCAPath]
 	if caMount.Type != "Path" || caMount.Mode != "ro" || caMount.Required != "false" || caMount.Default != "" || caMount.Value != "" {
 		t.Fatalf("PostgreSQL CA mount is not optional: %+v", caMount)
+	}
+	artworkMount := configs["/var/lib/rivune/artwork"]
+	if artworkMount.Type != "Path" || artworkMount.Mode != "rw" || artworkMount.Required != "true" || artworkMount.Default != "/mnt/cache/appdata/rivune/artwork" || artworkMount.Value != "/mnt/cache/appdata/rivune/artwork" {
+		t.Fatalf("artwork cache is not persisted on the Unraid host: %+v", artworkMount)
 	}
 	rootCertificate := configs["RIVUNE_DATABASE_SSLROOTCERT"]
 	if rootCertificate.Type != "Variable" || rootCertificate.Required != "false" || rootCertificate.Default != "" || rootCertificate.Value != "" || !strings.Contains(rootCertificate.Description, containerCAPath) {

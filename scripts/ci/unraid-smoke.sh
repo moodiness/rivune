@@ -63,7 +63,9 @@ start_rivune() {
   if [[ -n "${root_certificate}" ]]; then
     tls_mount=(-v "${CA_VOLUME}:/run/rivune-postgres-tls:ro")
   fi
-  docker run -d --name "${RIVUNE}" --network "${DATABASE_NETWORK}" \
+  docker run -d --name "${RIVUNE}" --network "${DATABASE_NETWORK}" --init \
+    --security-opt no-new-privileges:true --cap-drop ALL \
+    --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add SETGID --cap-add SETUID \
     -p 127.0.0.1::8080 \
     -e RIVUNE_DATABASE_HOST=postgres \
     -e RIVUNE_DATABASE_PORT= \
@@ -115,6 +117,8 @@ docker run -d --name "${POSTGRES}" --network "${DATABASE_NETWORK}" --network-ali
 wait_for_postgres
 
 start_rivune disable ""
+docker exec --user 99:100 "${RIVUNE}" sh -ceu \
+  'printf "%s\n" persisted > /var/lib/rivune/artwork/unraid-persistence-smoke'
 
 docker run --rm --network "${EDGE_NETWORK}" curlimages/curl:8.12.1 \
   --fail --silent --show-error "http://rivune:8080/.well-known/rivune" \
@@ -139,6 +143,8 @@ docker run --rm --user 0:0 --entrypoint sh -v "${TRANSCODE_VOLUME}:/transcode" "
 ' >/dev/null
 start_rivune disable ""
 docker exec "${RIVUNE}" test ! -e /transcode/rivune-media/orphaned-session/segment.m4s
+docker exec --user 99:100 "${RIVUNE}" \
+  grep -qx persisted /var/lib/rivune/artwork/unraid-persistence-smoke
 
 docker restart "${RIVUNE}" >/dev/null
 wait_for_rivune
