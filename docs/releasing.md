@@ -23,8 +23,8 @@ Create and push one annotated tag:
 ```sh
 git switch main
 git pull --ff-only
-git tag -a v1.5.1 -m "Rivune v1.5.1"
-git push origin v1.5.1
+git tag -a v1.5.2 -m "Rivune v1.5.2"
+git push origin v1.5.2
 ```
 
 The tag push runs `Release candidate CI`. Its read-only `authorize` job resolves
@@ -33,12 +33,14 @@ annotated tag object to target a commit, and requires that commit, the run SHA,
 and current `main` HEAD to be identical. The reusable `Release gate` then runs
 these exact jobs: `Backend tests`, `Server Windows compile`, `Frontend build and
 E2E`, `OpenAPI lint and contract resolution`, `Swift API client`, `Kotlin API
-client`, `Windows API client`, and `Container, migrations, and HTTPS proxy`.
-The container job also validates the single supported CPU-only manifest,
+client`, `Windows API client`, `Container, migrations, and HTTPS proxy (amd64)`,
+and `Container image (arm64)`. The native ARM64 build runs in parallel with the
+AMD64 behavioral smoke tests instead of using QEMU on their critical path. The
+AMD64 container job also validates the single supported CPU-only manifest,
 `compose.yaml`, plus that manifest combined with the supported
 `compose.amd-intel.yaml` GPU overlay, using non-secret placeholders.
 
-Only a successful candidate run is authorized to proceed in `Publish release`, whose top-level permission remains `contents: read`. Its `Authorize tested release candidate` job repeats the annotated-tag and same-commit checks without write permission. Immediately before each existing write-capable job acts, the workflow resolves the annotated tag object and target commit again. `Publish multi-architecture image` alone receives `packages: write`; after it succeeds, `Create GitHub release notes` alone receives `contents: write` and publishes the curated file from the tested commit.
+Only a successful candidate run is authorized to proceed in `Publish release`, whose top-level permission remains `contents: read`. Its `Authorize tested release candidate` job repeats the annotated-tag and same-commit checks without write permission. The externally approved `Publish multi-architecture image` job alone receives `packages: write`, reauthorizes the refs immediately before publishing the OCI image, and emits its provenance and SBOM. Release creation then runs automatically in a separate `contents: write` job only after image publication succeeds; immediately before writing, it reauthorizes the refs again. The release job intentionally has no second `environment: release` declaration, so one deliberate approval protects the ordered publication without adding a redundant post-publication prompt.
 
 To reproduce the Compose policy checks locally with disposable, non-production values, run exactly:
 
@@ -68,7 +70,7 @@ docker compose -f compose.yaml -f compose.amd-intel.yaml config --format json | 
 If GitHub does not create the release-candidate run for an otherwise valid tag push, dispatch the same read-only gate without moving the tag:
 
 ```sh
-gh workflow run release-candidate.yml --ref main -f tag=v1.5.1
+gh workflow run release-candidate.yml --ref main -f tag=v1.5.2
 ```
 
 The manual path enforces the same SemVer, annotated-tag, current-`main`, and tag-target checks. Its successful `workflow_run` is eligible for the same external release-environment gate; it does not weaken artifact authorization or permit a stale or lightweight tag.
@@ -98,10 +100,10 @@ The environment response must show `moodiness` as required reviewer, `can_admins
 
 ## Published artifacts
 
-After all gates succeed, the workflow publishes one OCI manifest to `ghcr.io/moodiness/rivune` for exactly `linux/amd64` and `linux/arm64`, with provenance and an SBOM. A stable `v1.5.1` release receives:
+After all gates succeed, the workflow publishes one OCI manifest to `ghcr.io/moodiness/rivune` for exactly `linux/amd64` and `linux/arm64`, with provenance and an SBOM. A stable `v1.5.2` release receives:
 
 ```text
-1.5.1
+1.5.2
 1.5
 1
 sha-<short-commit>
@@ -113,7 +115,7 @@ A prerelease such as `v2.0.0-rc.1` receives its full SemVer and SHA tags, but do
 Verify the release and its OCI attestations after the workflow completes:
 
 ```sh
-image=ghcr.io/moodiness/rivune:1.5.1
+image=ghcr.io/moodiness/rivune:1.5.2
 docker buildx imagetools inspect "${image}"
 docker buildx imagetools inspect "${image}" --raw > rivune-manifest.json
 jq -e '[.manifests[] | select((.annotations // {})["vnd.docker.reference.type"] != "attestation-manifest") | [.platform.os, .platform.architecture]] | sort == [["linux", "amd64"], ["linux", "arm64"]]' rivune-manifest.json
@@ -122,7 +124,7 @@ docker pull "${image}"
 docker image inspect "${image}" --format '{{json .RepoDigests}}'
 ```
 
-The first policy assertion requires exactly the `linux/amd64` and `linux/arm64` runnable manifests and no others. The second requires one OCI attestation manifest for each runnable platform, as emitted by the workflow's `provenance: mode=max` and `sbom: true` settings. Record the immutable index digest and assertion outputs as the post-release attestation. Confirm in the GitHub UI that the Release points to the same annotated tag and includes generated notes before announcing it.
+The first policy assertion requires exactly the `linux/amd64` and `linux/arm64` runnable manifests and no others. The second requires one OCI attestation manifest for each runnable platform, as emitted by the workflow's `provenance: mode=max` and `sbom: true` settings. Record the immutable index digest and assertion outputs as the post-release attestation. Confirm in the GitHub UI that the Release points to the same annotated tag and includes the curated notes before announcing it.
 
 ## Failure and retry
 

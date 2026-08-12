@@ -1,10 +1,11 @@
-# Rivune v1.5.1
+# Rivune v1.5.2
 
 ## Fixes
 
-- Rivune can again remove a stale `rivune-media` workspace owned by a previous `PUID` or `PGID`. The hardened Compose and Unraid profiles now grant `DAC_OVERRIDE` only to the root entrypoint; the application still starts under the configured non-root identity with no effective capabilities.
-- The Unraid smoke test now runs with the exact minimized capability set and reproduces cleanup of a non-empty `0700` workspace owned by a different user, preventing the v1.5.0 false positive.
-- The Unraid template now persists downloaded posters, backdrops, logos, and cast images at `/mnt/cache/appdata/rivune/artwork` instead of leaving the cache in the disposable container layer.
+- HLS storage cleanup no longer races a replacement transcoder after an inactive over-quota job is evicted. Admission and writer registration now share one storage-serialization boundary, so the stale final scan cannot cancel the new writer.
+- Rivune can again remove a stale `rivune-media` workspace owned by a previous `PUID` or `PGID`. The hardened Compose and Unraid profiles grant `DAC_OVERRIDE` only to the root entrypoint; the application still starts under the configured non-root identity with no effective capabilities.
+- The Unraid smoke test runs with the exact minimized capability set and reproduces cleanup of a non-empty `0700` workspace owned by a different user, preventing the v1.5.0 false positive.
+- The Unraid template persists downloaded posters, backdrops, logos, and cast images at `/mnt/cache/appdata/rivune/artwork` instead of leaving the cache in the disposable container layer.
 
 ## Upgrade notes
 
@@ -14,10 +15,10 @@
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.5.1`
+- `ghcr.io/moodiness/rivune:1.5.2`
 - `ghcr.io/moodiness/rivune:1.5`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.5.0...v1.5.1
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.5.0...v1.5.2
